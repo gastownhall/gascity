@@ -154,6 +154,18 @@ var typedClassCodecCensus = map[string]map[string]int{
 	// against a re-leaked / locally-redefined codec. internal/session's own white-box
 	// tests renamed WITH the codec and are not in any scan dir.
 	"ListAllSessionBeads(": {
+		// cmd_beads_state's buildBeadsStateLiveSets lists open session beads to derive
+		// the live-session and live-rig sets the effective-state classifier needs for
+		// its orphaned / routed-stalled-dispatch verdicts. It reads session_name,
+		// template and state raw rather than through the sessions front door
+		// (session.Store.ListAll) because the two feeds do not agree on membership:
+		// ListAllSessionBeads admits IsSessionBeadOrRepairable beads, while ListAll's
+		// direct union (type+label) does not, and an orphan verdict that silently
+		// dropped repairable beads would misreport. Folding this onto the typed front
+		// door is a real cleanup but changes classifier membership, so it is tracked
+		// here as a sanctioned edge pending the W-sync typing wave rather than done
+		// blind in this PR.
+		"cmd/gc/cmd_beads_state.go": 1,
 		// pool_detached_orphan_sweep's route-index build lists session beads
 		// (IncludeClosed) to read persisted route metadata (gc.session_id /
 		// gc.work_branch) raw when restoring gc.routed_to for fully-detached handoff
