@@ -93,6 +93,15 @@ func readTail(r io.ReadSeeker, n int64) ([]byte, bool, error) {
 	return data, startsMidLine, err
 }
 
+// readTailAt is readTail against a size snapshot the caller already took. A
+// caller that scans two windows of the same file uses it so both windows are
+// derived from one Seek: two independent SeekEnd snapshots of a file being
+// appended to disagree, leaving the bytes written in between in neither window.
+func readTailAt(r io.ReadSeeker, size, n int64) ([]byte, bool, error) {
+	data, startsMidLine, _, err := readTailWindowAt(r, size, n)
+	return data, startsMidLine, err
+}
+
 // readTailWindow also reports whether bytes before the returned window were
 // omitted. A truncated window can begin exactly on a line boundary, so that
 // state cannot be inferred from startsMidLine.
@@ -101,6 +110,12 @@ func readTailWindow(r io.ReadSeeker, n int64) ([]byte, bool, bool, error) {
 	if err != nil {
 		return nil, false, false, err
 	}
+	return readTailWindowAt(r, size, n)
+}
+
+// readTailWindowAt is readTailWindow against a size snapshot the caller already
+// took.
+func readTailWindowAt(r io.ReadSeeker, size, n int64) ([]byte, bool, bool, error) {
 	offset := size - n
 	if offset < 0 {
 		offset = 0
