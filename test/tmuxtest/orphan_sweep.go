@@ -37,6 +37,13 @@ const socketParentAliveSentinelName = ".gc-test-alive.lock"
 // created its dir but not yet acquired the alive sentinel.
 const socketParentSweepMinAge = time.Hour
 
+// socketParentFreeSentinelSweepMinAge is the minimum age before a dir whose
+// alive sentinel is present but unlocked becomes a sweep candidate. A free
+// sentinel already proves the creator is gone, so only a short grace window
+// is needed -- not the full legacy fence, which exists to cover dirs with no
+// sentinel evidence at all.
+const socketParentFreeSentinelSweepMinAge = 2 * time.Minute
+
 // PIDPrefixedTempPattern returns the os.MkdirTemp pattern for this
 // process's own socket parent dir: "<prefix><pid>-*".
 func PIDPrefixedTempPattern(prefix string) string {
@@ -145,24 +152,33 @@ func SweepOrphanPIDPrefixedDirs(root, prefix string, diagnostics io.Writer) {
 			continue
 		}
 		info, err := e.Info()
-		if err != nil || now.Sub(info.ModTime()) < socketParentSweepMinAge {
+		if err != nil {
 			continue
 		}
+		age := now.Sub(info.ModTime())
 		path := filepath.Join(root, e.Name())
 		exists, held := aliveSentinelHeld(path)
 		var reason string
 		switch {
 		case held:
-			// Creator (possibly in another PID namespace) is still alive.
+			// Creator (possibly in another PID namespace) is still alive,
+			// regardless of age.
 			continue
 		case exists:
-			// Sentinel present but unlocked: the creator is gone. Remove.
+			// Sentinel present but unlocked: the creator is gone. Only a
+			// short grace window is needed, not the full legacy fence.
+			if age < socketParentFreeSentinelSweepMinAge {
+				continue
+			}
 			reason = "free sentinel"
 		default:
 			// A "<prefix><PID>-<random>" dir with no sentinel: its creator
-			// crashed between MkdirTemp and HoldAliveSentinel. Fall back to
-			// PID liveness. (Legacy no-"-" names are rejected by
-			// pidFromPrefixedDirName and never reach here.)
+			// crashed between MkdirTemp and HoldAliveSentinel. Keep the full
+			// fence, then fall back to PID liveness. (Legacy no-"-" names
+			// are rejected by pidFromPrefixedDirName and never reach here.)
+			if age < socketParentSweepMinAge {
+				continue
+			}
 			if pidutil.Alive(pid) {
 				continue
 			}
