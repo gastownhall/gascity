@@ -447,9 +447,17 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 				cfg.AgentDefaults.AppendFragments,
 			)
 			packDirs := cfg.PackDirsForRig(ctx.RigName)
-			prompt := renderPrompt(fsys.OSFS{}, cityPath, cityName, a.PromptTemplate, ctx, cfg.Workspace.SessionTemplate, stderr,
+			promptRes := renderPromptWithMeta(fsys.OSFS{}, cityPath, cityName, a.PromptTemplate, ctx, cfg.Workspace.SessionTemplate, stderr,
 				packDirs, fragments, nil)
-			if prompt != "" {
+			if promptRes.Err != nil {
+				if strictMode {
+					fmt.Fprintf(stderr, "gc prime: prompt_template %q for agent %q: %v\n", a.PromptTemplate, agentName, promptRes.Err) //nolint:errcheck
+					return 1, nil
+				}
+				// Non-strict: don't ship the raw unrendered template as a
+				// prompt (renderPromptWithMeta already warned to stderr).
+				// Fall through to the default/builtin fallback below.
+			} else if prompt := promptRes.Text; prompt != "" {
 				var budget *promptBudgetJSON
 				if strictMode {
 					var budgetErr error
@@ -462,8 +470,9 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 				writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, prompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 				return 0, budget
 			}
-			// File is present but rendered empty. Treat as a legitimate
-			// (if unusual) minimal config — emit the default fallback.
+			// File is present but rendered empty (or, in non-strict mode,
+			// failed to render). Treat as a legitimate fallback case and
+			// emit the default/builtin prompt below.
 		}
 		// Agents without a prompt_template: read a builtin prompt shipped by
 		// the core bootstrap pack, resolved from the composed pack dirs.
