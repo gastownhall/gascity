@@ -156,6 +156,11 @@ func ResolveDoltConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string) (DoltCo
 			if strings.TrimSpace(cfg.DoltSocket) != "" || strings.TrimSpace(cfg.DoltHost) != "" || strings.TrimSpace(cfg.DoltPort) != "" {
 				return populateExternalTarget(target, cfg)
 			}
+			if sidecar, ok := readProxiedClientInfo(fs, filepath.Join(scopeRoot, ".beads", "proxied_server_client_info.json")); ok {
+				target.Host, target.Port, target.Socket, target.User = sidecar.Host, sidecar.Port, sidecar.Socket, sidecar.User
+				target.External = true
+				return target, nil
+			}
 			return target, nil
 		}
 		port, err := readManagedRuntimePort(fs, cityRoot)
@@ -172,6 +177,28 @@ func ResolveDoltConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string) (DoltCo
 	default:
 		return DoltConnectionTarget{}, fmt.Errorf("unsupported endpoint origin %q for %s", cfg.EndpointOrigin, cfgPath)
 	}
+}
+
+type proxiedClientInfo struct {
+	Host   string `json:"host"`
+	Port   string `json:"port"`
+	Socket string `json:"socket"`
+	User   string `json:"user"`
+}
+
+func readProxiedClientInfo(fs fsys.FS, path string) (proxiedClientInfo, bool) {
+	b, err := fs.ReadFile(path)
+	if err != nil {
+		return proxiedClientInfo{}, false
+	}
+	var info proxiedClientInfo
+	if json.Unmarshal(b, &info) != nil {
+		return proxiedClientInfo{}, false
+	}
+	if strings.TrimSpace(info.Socket) == "" && strings.TrimSpace(info.Host) == "" && strings.TrimSpace(info.Port) == "" {
+		return proxiedClientInfo{}, false
+	}
+	return info, true
 }
 
 // ValidateCanonicalConfigState validates canonical scope config invariants.
