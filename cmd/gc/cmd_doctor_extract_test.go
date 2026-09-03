@@ -95,6 +95,34 @@ func TestBuildDoctorChecksSkipsNamedAlwaysMinConflictCheckWithoutConfig(t *testi
 	}
 }
 
+// TestBuildDoctorChecksSessionLivenessChecksRegisteredRegardlessOfController_GH5742
+// is the inverted characterization test from ga-o04bfr.1.6: while the
+// controller runs, buildDoctorChecks must still register the read-only
+// session-liveness checks so a dead/zombie named session produces a doctor
+// finding instead of zero findings (gastownhall/gascity#5742).
+func TestBuildDoctorChecks_SessionLivenessChecksRegisteredRegardlessOfController_GH5742(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_DOLT", "skip")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		Agents:    []config.Agent{{Name: "worker", ProcessNames: []string{"claude"}}},
+	}
+	sessionChecks := []string{"agent-sessions", "zombie-sessions", "orphan-sessions"}
+	for _, running := range []bool{true, false} {
+		names := doctorCheckNames(buildDoctorChecks(cityDir, cfg, nil, buildDoctorChecksOpts{
+			ControllerRunning: running, SkipCityDoltCheck: true, SkipManagedDoltCheck: true,
+		}))
+		for _, name := range sessionChecks {
+			if idx := doctorCheckIndex(names, name); idx < 0 {
+				t.Errorf("ControllerRunning=%v: %q expected but missing; names=%v", running, name, names)
+			}
+		}
+	}
+}
+
 func doctorCheckNames(checks []doctor.Check) []string {
 	names := make([]string, 0, len(checks))
 	for _, check := range checks {

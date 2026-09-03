@@ -342,6 +342,12 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		agentEnv["GC_BEADS_SCOPE_ROOT"] = rigRoot
 	}
 
+	// configDir is the directory agent config-relative paths (pre-start
+	// scripts, session setup templates, and {{.ConfigDir}} in prompts)
+	// resolve against. Computed once, ahead of Step 9's prompt render, so
+	// the PromptContext and Step 11's SessionSetupContext agree (#5315).
+	configDir := resolveConfigDir(p.cityPath, cfgAgent.SourceDir)
+
 	// Step 9: Render prompt with beacon.
 	var prompt string
 	// Merge fragment sources: V1 global_fragments + inject_fragments,
@@ -391,6 +397,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		ProviderKey:             providerKey,
 		ProviderDisplayName:     providerDisplayName,
 		InstructionsFile:        instructionsFileForAgent(cfgAgent, p.workspace, p.providers),
+		ConfigDir:               configDir,
 		Env:                     cfgAgent.Env,
 	}, p.sessionTemplate, p.stderr, packDirs, fragments, p.beadStore)
 	hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name, p.providers)
@@ -541,11 +548,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		env[key] = val
 	}
 
-	// Step 11: Expand session setup templates.
-	configDir := p.cityPath
-	if cfgAgent.SourceDir != "" {
-		configDir = cfgAgent.SourceDir
-	}
+	// Step 11: Expand session setup templates. configDir was resolved ahead
+	// of Step 9 so the prompt's {{.ConfigDir}} and this SessionSetupContext
+	// agree (#5315).
 	setupCtx := SessionSetupContext{
 		Session:   sessName,
 		Agent:     qualifiedName,

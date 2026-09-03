@@ -25,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formulatest"
+	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/orders"
 )
@@ -2488,6 +2489,119 @@ title = "Do work"
 	}
 	if !foundControl {
 		t.Fatal("missing workflow-finalize control step")
+	}
+}
+
+// TestOrderRunGraphWorkflowPersistsRuntimeVars is the store-level regression
+// test for the graph.v2 stamping gap found on #4668: a caller var passed to a
+// graph.v2 order must be recoverable from the persisted root bead's
+// gc.graphv2_vars.v1 metadata (the key internal/dispatch/drain.go reads on
+// later fan-out), not just present on the in-memory recipe before
+// materialization.
+func TestOrderRunGraphWorkflowPersistsRuntimeVars(t *testing.T) {
+	cityDir := t.TempDir()
+	formulaDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, "fixture"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cityToml := `[workspace]
+name = "test-city"
+
+[daemon]
+formula_v2 = true
+
+[[rigs]]
+name = "fixture"
+path = "fixture"
+
+[[agent]]
+name = "quinn"
+dir = "fixture"
+min_active_sessions = 0
+max_active_sessions = 2
+
+[[agent]]
+name = "control-dispatcher"
+max_active_sessions = 1
+
+[[agent]]
+name = "control-dispatcher"
+dir = "fixture"
+max_active_sessions = 1
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graphFormula := `
+formula = "graph-var-work"
+version = 2
+contract = "graph.v2"
+
+[vars.subject]
+description = "Work subject"
+
+[[steps]]
+id = "step"
+title = "Do work"
+description = "Handle {{subject}} now."
+`
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-var-work.toml"), []byte(graphFormula), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	aa := []orders.Order{
+		{Name: "var-patrol", Formula: "graph-var-work", Trigger: "cooldown", Interval: "15m", Pool: "fixture/quinn", FormulaLayer: formulaDir},
+	}
+	store := beads.NewMemStore()
+	eventLog := events.NewFake()
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRunWithJSON(aa, "var-patrol", "", cityDir, beads.OrdersStore{Store: store}, eventLog, false, map[string]string{"subject": "widgets"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRunWithJSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	all, err := store.ListOpen()
+	if err != nil {
+		t.Fatalf("store.ListOpen(): %v", err)
+	}
+
+	var root *beads.Bead
+	for i := range all {
+		if all[i].Title == "graph-var-work" {
+			root = &all[i]
+			break
+		}
+	}
+	if root == nil {
+		t.Fatalf("workflow root bead not found; beads=%#v", all)
+	}
+	raw := root.Metadata[graphv2.RuntimeVarsMetadataKey]
+	if raw == "" {
+		t.Fatalf("root bead %s metadata not stamped, want %s to persist caller vars", graphv2.RuntimeVarsMetadataKey, graphv2.RuntimeVarsMetadataKey)
+	}
+	got, err := graphv2.ParseRuntimeVarsMetadata(raw)
+	if err != nil {
+		t.Fatalf("ParseRuntimeVarsMetadata(%q): %v", raw, err)
+	}
+	if got["subject"] != "widgets" {
+		t.Fatalf("persisted runtime vars = %v, want subject=widgets", got)
+	}
+
+	var work *beads.Bead
+	for i := range all {
+		if all[i].Title == "Do work" {
+			work = &all[i]
+			break
+		}
+	}
+	if work == nil {
+		t.Fatalf("worker step bead not found; beads=%#v", all)
+	}
+	if want := "Handle widgets now."; work.Description != want {
+		t.Errorf("worker step description = %q, want %q (caller var must substitute into bead text)", work.Description, want)
 	}
 }
 

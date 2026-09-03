@@ -801,6 +801,16 @@ func doImportUpgrade(cityPath, target string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// Read the pre-upgrade lock so the summary below can report which pins
+	// actually moved, rather than just the size of the resolved closure. A
+	// sha-pinned import always resolves back to itself, so a raw entry count
+	// can't distinguish "moved" from "already at its pinned version".
+	prevLock, err := readImportLockfile(fsys.OSFS{}, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc import upgrade: %v\n", err) //nolint:errcheck
+		return 1
+	}
+
 	allImports, collectErr := collectAllImportsFS(cityPath)
 	if collectErr != nil {
 		fmt.Fprintf(stderr, "gc import upgrade: %v\n", collectErr) //nolint:errcheck
@@ -808,6 +818,7 @@ func doImportUpgrade(cityPath, target string, stdout, stderr io.Writer) int {
 	}
 
 	var lock *packman.Lockfile
+	var targetSource string
 	if target == "" {
 		lock, err = syncImports(cityPath, allImports, packman.InstallUpgrade)
 	} else {
@@ -825,6 +836,7 @@ func doImportUpgrade(cityPath, target string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "gc import upgrade: import %q is a path import and cannot be upgraded\n", target) //nolint:errcheck
 			return 1
 		}
+		targetSource = targetImp.Source
 		lock, err = syncImportsSelective(cityPath, allImports, map[string]struct{}{
 			targetImp.Source: {},
 		})
@@ -844,9 +856,27 @@ func doImportUpgrade(cityPath, target string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if target == "" {
-		fmt.Fprintf(stdout, "Upgraded %d remote import(s)\n", len(lock.Packs)) //nolint:errcheck
+		total := len(lock.Packs)
+		moved := 0
+		for source, pack := range lock.Packs {
+			if prev, ok := prevLock.Packs[source]; !ok || prev.Commit != pack.Commit {
+				moved++
+			}
+		}
+		if moved == 0 {
+			fmt.Fprintf(stdout, "No import moved; %d already up to date\n", total) //nolint:errcheck
+		} else {
+			fmt.Fprintf(stdout, "Upgraded %d of %d remote import(s); %d already up to date\n", moved, total, total-moved) //nolint:errcheck
+		}
 	} else {
-		fmt.Fprintf(stdout, "Upgraded import %q\n", target) //nolint:errcheck
+		pack, ok := lock.Packs[targetSource]
+		if !ok {
+			fmt.Fprintf(stdout, "Upgraded import %q\n", target) //nolint:errcheck
+		} else if prev, hadPrev := prevLock.Packs[targetSource]; hadPrev && prev.Commit == pack.Commit {
+			fmt.Fprintf(stdout, "Import %q already at %s\n", target, pack.Commit) //nolint:errcheck
+		} else {
+			fmt.Fprintf(stdout, "Upgraded import %q (%s)\n", target, pack.Commit) //nolint:errcheck
+		}
 	}
 	return 0
 }

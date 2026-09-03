@@ -808,16 +808,17 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 	// GraphApplyStore and silently fall back to sequential creation. store stays
 	// the typed wrapper for the order-tracking bead operations below.
 	genericStore := store.Store
-	recipe, err := prepareOrderWispRecipe(context.Background(), genericStore, a, searchPaths, vars)
+	recipe, effectiveVars, err := prepareOrderWispRecipe(context.Background(), genericStore, a, searchPaths, vars)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	// Validate against the vars the caller supplied. Passing an empty Options here
+	// Validate against the resolved invocation vars (declared defaults
+	// applied), not the caller's raw --var map. Passing an empty Options here
 	// drops them, and ValidateRecipeRuntimeVars reads opts.Vars — so every
 	// `required = true` var reports as missing however many --var flags were given,
 	// making any formula with a required var unfireable as an order.
-	if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{Vars: vars}); err != nil {
+	if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{Vars: effectiveVars}); err != nil {
 		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -857,7 +858,14 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 		return 1
 	}
 
-	cookResult, err := molecule.Instantiate(context.Background(), moleculeStore, recipe, molecule.Options{})
+	// Thread the same resolved invocation vars used for validation above into
+	// instantiation. An empty Options here falls back to formula defaults
+	// only, so every {{var}} referencing a caller-supplied value renders
+	// empty (or its default) on the created bead text instead of the
+	// caller's value (#4668).
+	stampOrderWispRuntimeVars(recipe, effectiveVars)
+
+	cookResult, err := molecule.Instantiate(context.Background(), moleculeStore, recipe, molecule.Options{Vars: effectiveVars})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
