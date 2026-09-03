@@ -718,6 +718,14 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		// every other assertion here and still be wrong in the one way that
 		// cannot be undone: an id is fixed at create, so no later copy moves the
 		// bead back to the ledger its class routes to.
+		//
+		// The vacuity guard is a hard failure, not a skip, and that is the
+		// intent: a store minting ids with no namespace segment cannot state
+		// which ledger a bead belongs to, so it has no placement claim for this
+		// row to check and no fence for invariant 16 to hold. Every store in the
+		// tree mints "<prefix>-N". A provider that legitimately mints otherwise
+		// needs this row rewritten against whatever it uses to express residency,
+		// not exempted from it.
 		if beadIDNamespace(control.ID) == "" {
 			t.Fatalf("this store mints ids like %q, with no namespace segment; the placement assertion below would compare nothing", control.ID)
 		}
