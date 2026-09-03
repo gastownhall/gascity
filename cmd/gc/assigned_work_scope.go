@@ -271,6 +271,11 @@ func filterAssignedWorkBeadsForSessionWake(
 // assignedWorkStores must be as long as assignedWorkBeads; a slice of any other
 // length is dropped rather than partially applied, and the returned stores are
 // then nil.
+//
+// residency:allow — a caller's own snapshot, projected. It carries the legs it
+// was HANDED through the same keep/drop decision it applies to the beads; it
+// consults no binding, no namespace and no leg order, opens no store, and can
+// only ever return a subsequence of its own input.
 func filterAssignedWorkBeadsForSessionWakeWithStores(
 	cfg *config.City,
 	cityPath string,

@@ -2894,6 +2894,14 @@ func filterReleasedAssignedWorkBeads(assignedWorkBeads []beads.Bead, released []
 	return filtered
 }
 
+// filterReleasedAssignedWorkSnapshot drops the rows this tick's orphan release
+// already reopened, keeping the refs and owner legs index-aligned with the beads
+// that survive.
+//
+// residency:allow — a caller's own snapshot, projected. It carries the legs it
+// was HANDED through the same keep/drop decision it applies to the beads; it
+// consults no binding, no namespace and no leg order, opens no store, and can
+// only ever return a subsequence of its own input.
 func filterReleasedAssignedWorkSnapshot(assignedWorkBeads []beads.Bead, assignedWorkStoreRefs []string, assignedWorkStores []beads.Store, released []releasedPoolAssignment) ([]beads.Bead, []string, []beads.Store) {
 	if len(assignedWorkBeads) == 0 || len(released) == 0 {
 		return assignedWorkBeads, assignedWorkStoreRefs, assignedWorkStores
