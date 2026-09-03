@@ -451,3 +451,48 @@ func TestStorageStatusCountsABindingItCanRead(t *testing.T) {
 		t.Errorf("status withholds a count it could take: an empty readable root holds zero beads, and that zero is an observation: %q", stdout.String())
 	}
 }
+
+// TestStorageStatusLeavesNothingBehindWhenItOpensTheBinding covers the one
+// census path where the read-only claim is not obviously true, and it is the
+// status analog of TestPreflightLeavesNothingBehindWhenItOpensTheDestination.
+//
+// The two tests above only reach the arms that open nothing: an absent root
+// reports a fault and an absent database counts zero from a stat. Here the
+// database is already on disk, so infraBindingCensus opens a bead engine to
+// count what it holds — and opening a SQLite database read-write materializes
+// WAL and SHM sidecars next to it. A deploy gate is allowed to run this on a
+// serving city as often as it likes, so whatever the engine writes while
+// answering has to be gone by the time the command returns.
+func TestStorageStatusLeavesNothingBehindWhenItOpensTheBinding(t *testing.T) {
+	bindingParent := t.TempDir()
+	cfg := infraSplitConfig(filepath.Join(bindingParent, "store"))
+	request := storageTestRequest(t, cfg)
+	source := stubInfraMigrationSource(t)
+	mustCreateInfraBead(t, source, beads.Bead{Title: "a session", Type: "session"})
+
+	// The database has to exist for the census to open anything, and it is
+	// created the only way production creates it.
+	target := mustResolveInfraTarget(t, request.CityPath, cfg)
+	destination, err := openInfraDestination(target)
+	if err != nil {
+		t.Fatalf("opening the binding to populate it: %v", err)
+	}
+	mustCreateInfraBead(t, destination, beads.Bead{Title: "a bead the binding already holds", Type: "session"})
+	if err := closeBeadStoreHandle(destination); err != nil {
+		t.Fatalf("closing the populated binding: %v", err)
+	}
+
+	before := treeFingerprint(t, bindingParent)
+	var stdout, stderr bytes.Buffer
+	doStorageStatus(request, &stdout, &stderr)
+
+	// The exit code is not the assertion — this city is unconverged either way.
+	// What makes the fingerprint mean something is that the census reported a
+	// count, which it can only do by opening the database.
+	if !strings.Contains(stdout.String(), "binding: 1 infrastructure bead(s)") {
+		t.Fatalf("the census did not count the binding, so it never opened it and the fingerprint below proves nothing: %q", stdout.String())
+	}
+	if got := treeFingerprint(t, bindingParent); !equalStrings(before, got) {
+		t.Errorf("status left the binding tree changed after opening the database to count it:\n before %v\n after  %v", before, got)
+	}
+}

@@ -1048,9 +1048,16 @@ func runInfraClassMigration(cityPath string, target infraBindingTarget, logPrefi
 	if err != nil {
 		return fail(err)
 	}
-	// Before the destination is touched, so a refused city can re-run from
-	// empty once the payload can be carried.
-	if err := infraSourceEdgePayloadRefusal(source, rows); err != nil {
+	// Both halves run before the destination is touched, so a refused city can
+	// re-run from empty once the payload can be carried. The destination half
+	// has to be here rather than left to infraCopyDepEdge: by the time the
+	// import writes its first edge, prepareInfraDestination has already deleted
+	// the rows an interrupted earlier attempt stamped.
+	carrying, err := infraSourceEdgePayloadRefusal(source, rows)
+	if err != nil {
+		return fail(err)
+	}
+	if err := infraDestinationEdgePayloadRefusal(writer, carrying); err != nil {
 		return fail(err)
 	}
 	if err := prepareInfraDestination(writer); err != nil {
@@ -1376,9 +1383,15 @@ func readInfraSnapshot(source beads.Store) ([]beads.Bead, error) {
 	return infra, nil
 }
 
-// infraSourceEdgePayloadRefusal returns the refusal for a source whose
-// dependency edge payloads this copy cannot READ, or nil when every
-// within-infra edge can be asked.
+// infraSourceEdgePayloadRefusal walks the source's within-infra edges and
+// returns whether any of them CARRIES a payload, plus the refusal for a source
+// whose payloads this copy cannot READ.
+//
+// It answers both from one walk because the caller needs both and the read is
+// the expensive part: whether any payload exists at all is what decides whether
+// the destination has to be able to carry one, and taking that answer from a
+// second pass would double an O(dependents) read per edge on Dolt for a fact
+// the first pass already saw.
 //
 // It used to refuse a source that carried a payload at all, because the copy
 // had no way to carry one: it re-added edges through beads.Dep, which holds the
@@ -1393,8 +1406,10 @@ func readInfraSnapshot(source beads.Store) ([]beads.Bead, error) {
 // payloads" are different answers, and treating the first as the second is
 // precisely the conflation that let the drop go unnoticed. Every store on the
 // deployed migration path answers: the SQLite and native-Dolt leaves read their
-// own column, MemStore and the file store report honestly that they have no way
-// to hold a payload, and the caching, policy, and strict wrappers forward. What
+// own column, MemStore reports honestly that it has no way to hold a payload
+// and the file store answers through the MemStore it embeds (asserted in
+// internal/beads/filestore.go so a refactor cannot quietly mute it), and the
+// caching, policy, and strict wrappers forward. What
 // remains mute is beads.BdStore and the exec store, whose payloads live behind a
 // bd process that offers no dependency-metadata read today (bd dep add takes no
 // metadata flag; a payload reaches bd only through a create --graph plan, and bd
@@ -1412,28 +1427,63 @@ func readInfraSnapshot(source beads.Store) ([]beads.Bead, error) {
 // stays metadata linkage resolved by the owning-store read on each side — so
 // its payload is not something this copy touches, and refusing on it would
 // block cities over an edge the migration never re-adds.
-func infraSourceEdgePayloadRefusal(source beads.Store, rows []beads.Bead) error {
+func infraSourceEdgePayloadRefusal(source beads.Store, rows []beads.Bead) (bool, error) {
 	reader, ok := source.(beads.DepMetadataReader)
 	if !ok {
-		return fmt.Errorf("work store %T cannot report whether its dependency edges carry payloads, and an unanswerable source is not an empty one: refusing to copy edges whose payloads would be dropped without a trace", source)
+		return false, fmt.Errorf("work store %T cannot report whether its dependency edges carry payloads, and an unanswerable source is not an empty one: refusing to copy edges whose payloads would be dropped without a trace", source)
 	}
 	infraIDs := make(map[string]bool, len(rows))
 	for _, b := range rows {
 		infraIDs[b.ID] = true
 	}
+	carrying := false
 	for _, b := range rows {
 		deps, err := source.DepList(b.ID, "down")
 		if err != nil {
-			return fmt.Errorf("listing deps of %s to check for edge payloads: %w", b.ID, err)
+			return false, fmt.Errorf("listing deps of %s to check for edge payloads: %w", b.ID, err)
 		}
 		for _, dep := range deps {
 			if !infraIDs[dep.DependsOnID] {
 				continue
 			}
-			if _, _, err := reader.DepMetadata(dep.IssueID, dep.DependsOnID); err != nil {
-				return fmt.Errorf("reading the payload on dep %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
+			payload, carried, err := reader.DepMetadata(dep.IssueID, dep.DependsOnID)
+			if err != nil {
+				return false, fmt.Errorf("reading the payload on dep %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
+			}
+			// The same normalization infraReadEdgePayload applies, so an
+			// engine's spelling of "no payload" does not make the copy demand a
+			// writer it has nothing to write with.
+			if carried && beads.DepMetadataCarries(payload) {
+				carrying = true
 			}
 		}
+	}
+	return carrying, nil
+}
+
+// infraDestinationEdgePayloadRefusal returns the refusal for a destination that
+// cannot carry a payload the source holds, or nil when there is nothing to
+// carry or the destination can carry it.
+//
+// infraCopyDepEdge reaches the same conclusion for the same city, one edge at a
+// time — but it runs inside importInfraSnapshot, which is after
+// prepareInfraDestination has DELETED the rows an interrupted earlier attempt
+// stamped. This segment's rule is that a city the copy will not finish is
+// refused before the destination is touched, so the writer is asserted once
+// here, next to the source refusal. infraCopyDepEdge keeps its per-edge check
+// as the backstop for the recovery path, which restores single edges and has no
+// snapshot to walk.
+//
+// The narrowness is the same as infraCopyDepEdge's and matters as much: a store
+// with no writer is a perfectly good destination for a city whose edges hold
+// nothing, and refusing it unconditionally would reject every destination in
+// this tree apart from SQLite.
+func infraDestinationEdgePayloadRefusal(destination beads.Store, carrying bool) error {
+	if !carrying {
+		return nil
+	}
+	if _, ok := destination.(beads.DepMetadataWriter); !ok {
+		return fmt.Errorf("the work store carries at least one within-infra dependency edge payload and binding store %T cannot carry one: refusing before the destination is touched rather than stopping mid-copy with rows already cleared", destination)
 	}
 	return nil
 }
