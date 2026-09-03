@@ -35,8 +35,10 @@ a:convoyStoreCandidates	(^|[^A-Za-z0-9_])convoyStoreCandidates\(
 #     checks and refuses a fan-out for. Three are baselined today: the `gc bd`
 #     by-id front door, the claim-time class route, and the CLI fan-out
 #     federation (convoyStoreViewsWithBinding, which is the one place `gc beads
-#     list`, `gc convoy list`, `gc convoy check` and the workflow-delete sweep
-#     all get the binding from). A fourth is a reviewed baseline change, because
+#     list`, `gc convoy list`, `gc convoy stranded`, `gc convoy check` and the
+#     workflow-delete sweep all get the binding from — the reads through the
+#     tolerant wrapper, the check and the sweep through their own refusals).
+#     A fourth is a reviewed baseline change, because
 #     the review that matters is not whether the accessor was called correctly
 #     but whether that surface should be routing class-reserved ids at all.
 b:graphClassBinding	(^|[^A-Za-z0-9_])graphClassBinding\(

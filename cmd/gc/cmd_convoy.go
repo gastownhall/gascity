@@ -581,6 +581,18 @@ func convoyStoreViewsWithBinding(cityPath string, views []convoyStoreView) ([]co
 		// second leg — it is the one that is there. Adding it would duplicate
 		// every row against itself. This is relocatedGraphLegFrom's identity
 		// gate, applied to a list of views.
+		//
+		// Both operands are pointer-typed HERE, which is what keeps the `==`
+		// away from the non-comparable dynamic type that panics an interface
+		// compare: the scan side is whatever opener openConvoyStores was handed,
+		// and both production openers end in a pointer store — openStoreAtForCity
+		// through wrapStoreWithBeadPolicies, openControlStoreAtForCity through
+		// that or the *beads.BdStore control factory — while the binding side is
+		// constructor-opened and its one value-typed route, refusedClassStore,
+		// already returned above. relocatedGraphLegFrom carries the same
+		// argument, but its own doc says production no longer calls it, so the
+		// operand set is named here rather than only by reference to a function
+		// documented as dead.
 		if view.store == binding {
 			return views, nil
 		}
@@ -616,6 +628,13 @@ func convoyStoreViewsWithBinding(cityPath string, views []convoyStoreView) ([]co
 // refusal stands they are no longer superseded and print as live rows in place
 // of the ones that are missing. A convoy the city closed in the binding lists
 // open again for exactly as long as the binding cannot be read.
+//
+// "Only READ" is the whole precondition, so the caller set is named rather than
+// assumed: `gc beads list`, `gc convoy list`, and `gc convoy stranded`, none of
+// which write. A caller that mutates takes convoyStoreViewsWithBinding directly
+// and refuses — doConvoyCheckFallback does, and federateSweepViews does it for
+// the sweeps — because the frozen rows this tolerates printing are rows a
+// mutation would act on.
 func convoyStoreViewsForRead(cityPath string, views []convoyStoreView, stderr io.Writer, cmdName string) []convoyStoreView {
 	merged, err := convoyStoreViewsWithBinding(cityPath, views)
 	if err != nil {
@@ -849,10 +868,14 @@ func resolveOwningStoreDir(beadID string, cfg *config.City, cityPath string, ope
 // reserved-id resolution — bd's on-close hook among them, and it closes in
 // bursts — to learn nothing.
 //
-// Read faults are refusals, not skips. This runs in front of callers that
-// MUTATE, and a rig that cannot answer has not established the id is uniquely
-// addressable; the error policy is the scan's own, one function down, for the
-// same probe.
+// Read faults are refusals, not skips. This fronts resolveOwningStoreDir, whose
+// callers are the mutations reached through resolveConvoyStore — `gc convoy
+// target`/`add`/`close`/`land` — and autocloseOwningStore, which absorbs the
+// refusal into its own ok=false, but ALSO the pure read `gc convoy status`. It
+// refuses there too: a rig that cannot answer has not established the id is
+// uniquely addressable, and a read served from one of two disagreeing ledgers is
+// the same wrong answer whether or not a write follows it. The error policy is
+// the scan's own, one function down, for the same probe.
 func refuseBindingRigCollision(beadID string, cfg *config.City, cityPath string, openStore func(string) (beads.Store, error)) error {
 	if bdIDIsClassReserved(beadID) {
 		return nil
@@ -876,16 +899,7 @@ func refuseBindingRigCollision(beadID string, cfg *config.City, cityPath string,
 	return nil
 }
 
-func openAllConvoyStores(stderr io.Writer, cmdName string) ([]convoyStoreView, int) {
-	cityPath, err := resolveCity()
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
-		return nil, 1
-	}
-	return openAllConvoyStoresAt(cityPath, stderr, cmdName)
-}
-
-// openAllConvoyStoresAt is openAllConvoyStores with a pre-resolved cityPath,
+// openAllConvoyStoresAt opens every convoy store for a pre-resolved cityPath,
 // used by routed callers that already resolved the city before dispatching
 // to the fallback path.
 func openAllConvoyStoresAt(cityPath string, stderr io.Writer, cmdName string) ([]convoyStoreView, int) {
@@ -1681,12 +1695,25 @@ func routeConvoyCheck(cityPath string, _ *api.Client, nilReason string, jsonOut 
 }
 
 // doConvoyCheckFallback is the direct-bd path for "gc convoy check".
+//
+// It federates through convoyStoreViewsWithBinding rather than through
+// convoyStoreViewsForRead, because this command CLOSES convoys. A refusal hands
+// back the views unchanged, which leaves the city's retained pre-migration
+// copies unsuperseded and walks them as live rows — and their children were
+// frozen at cutover, so a convoy the city is still working reads as complete.
+// Degrading here would auto-close it and report that as success while the
+// binding's open row went untouched, so the check refuses instead: a mutation
+// on a view this build could not prove is worse than no mutation.
 func doConvoyCheckFallback(cityPath string, jsonOut bool, stdout, stderr io.Writer) int {
 	stores, code := openAllConvoyStoresAt(cityPath, stderr, "gc convoy check")
 	if stores == nil {
 		return code
 	}
-	stores = convoyStoreViewsForRead(cityPath, stores, stderr, "gc convoy check")
+	stores, err := convoyStoreViewsWithBinding(cityPath, stores)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc convoy check: the city's relocated class binding is unreadable, so this refuses rather than auto-close convoys from the retained pre-migration copies it cannot supersede: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	rec := openCityRecorderAt(cityPath, stderr)
 	return doConvoyCheckAcrossStoresJSON(stores, rec, jsonOut, stdout, stderr)
 }
@@ -1836,10 +1863,28 @@ func cmdConvoyStranded(stdout, stderr io.Writer) int {
 }
 
 func cmdConvoyStrandedJSON(jsonOut bool, stdout, stderr io.Writer) int {
-	stores, code := openAllConvoyStores(stderr, "gc convoy stranded")
+	cityPath, err := resolveCity()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc convoy stranded: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	return doConvoyStrandedFallback(cityPath, jsonOut, stdout, stderr)
+}
+
+// doConvoyStrandedFallback is the direct-bd path for "gc convoy stranded".
+//
+// This is a pure read, so it takes the tolerant helper its list sibling takes.
+// It needs the helper at all because an unfederated stranded query is wrong in
+// both directions at once on a migrated city: a retained copy still carries the
+// assignees and open children it had at cutover and reports work that is not
+// stranded, while a convoy living in the binding is never walked and genuinely
+// stranded work stays invisible.
+func doConvoyStrandedFallback(cityPath string, jsonOut bool, stdout, stderr io.Writer) int {
+	stores, code := openAllConvoyStoresAt(cityPath, stderr, "gc convoy stranded")
 	if stores == nil {
 		return code
 	}
+	stores = convoyStoreViewsForRead(cityPath, stores, stderr, "gc convoy stranded")
 	return doConvoyStrandedAcrossStoresJSON(stores, jsonOut, stdout, stderr)
 }
 

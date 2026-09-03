@@ -81,7 +81,7 @@ cmd/gc/cmd_convoy.go	convoyStoreCandidates	a:convoyStoreCandidates	1
 cmd/gc/cmd_convoy.go	convoyStoreViewsWithBinding	b:cliSoleClassBinding	1
 cmd/gc/cmd_convoy.go	doConvoyCheckFallback	a:openAllConvoyStoresAt	1
 cmd/gc/cmd_convoy.go	doConvoyListFallback	a:openAllConvoyStoresAt	1
-cmd/gc/cmd_convoy.go	openAllConvoyStores	a:openAllConvoyStoresAt	1
+cmd/gc/cmd_convoy.go	doConvoyStrandedFallback	a:openAllConvoyStoresAt	1
 cmd/gc/cmd_convoy.go	openAllConvoyStoresAt	a:openAllConvoyStoresAt	1
 cmd/gc/cmd_convoy.go	openAllConvoyStoresAt	a:openConvoyStores	1
 cmd/gc/cmd_convoy.go	openConvoyStores	a:convoyStoreCandidates	1

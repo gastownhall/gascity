@@ -2605,6 +2605,115 @@ func TestConvoyListDropsTheFrozenCopyOfAConvoyTheBindingClosed(t *testing.T) {
 	}
 }
 
+// convoyCityWhoseFrozenCopyLooksFinished is relocatedConvoyCity with the two
+// copies' children swapped, which is the arrangement an auto-close can act on.
+//
+// relocatedConvoyCity freezes the retained copy mid-flight, so a check that read
+// the wrong row simply declines to close and the damage is a convoy that never
+// finishes. The opposite pairing is the one that MUTATES: the retained copy was
+// cut over at a moment its children were all closed, and the binding has gone on
+// to open more. A check reading the frozen copy finds a convoy that looks
+// complete and closes it, while the work the binding is still tracking stays
+// open under a convoy the city now calls done.
+func convoyCityWhoseFrozenCopyLooksFinished(t *testing.T) (cityPath, convoyID string, work, binding beads.Store) {
+	t.Helper()
+	cityPath, _ = foreignProviderCity(t)
+	work = workStoreFor(t, cityPath)
+
+	frozen, err := work.Create(beads.Bead{Title: "the retained frozen convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("seeding the retained convoy in the work store: %v", err)
+	}
+	settled, err := work.Create(beads.Bead{Title: "finished in the frozen copy", ParentID: frozen.ID})
+	if err != nil {
+		t.Fatalf("seeding the frozen copy's child: %v", err)
+	}
+	if err := work.Close(settled.ID); err != nil {
+		t.Fatalf("closing the frozen copy's child: %v", err)
+	}
+
+	binding = soleClassBindingStore(t, cityPath)
+	if _, err := migrationSeed(binding, beads.Bead{ID: frozen.ID, Title: "the binding's live convoy", Type: "convoy"}); err != nil {
+		t.Fatalf("carrying %s across to the class binding: %v", frozen.ID, err)
+	}
+	binding = recensusAfterSeedingARelic(t, cityPath)
+
+	if _, err := binding.Create(beads.Bead{Title: "still open in the binding", ParentID: frozen.ID}); err != nil {
+		t.Fatalf("seeding the binding copy's open child: %v", err)
+	}
+	return cityPath, frozen.ID, work, binding
+}
+
+// TestConvoyCheckRefusesRatherThanAutoclosingThroughARefusedBinding is the
+// mutating arm's half of the refusal policy.
+//
+// A refused binding degrades a READ: the listing prints what it reached and says
+// what it could not. `gc convoy check` is not a read — it closes convoys — and
+// on a refusal the federation hands back the views unchanged, so the retained
+// pre-migration copies stop being superseded and are walked as live rows. Their
+// children were frozen at cutover, so a convoy the city is still working looks
+// complete, and the check closes it and reports that as success while the
+// binding's open row is never touched. A mutation on a view this build could not
+// prove is worse than no mutation, so this one refuses.
+func TestConvoyCheckRefusesRatherThanAutoclosingThroughARefusedBinding(t *testing.T) {
+	cityPath, convoyID, work, _ := convoyCityWhoseFrozenCopyLooksFinished(t)
+	failClassBindingReads(t, cityPath, errors.New("the class binding is having a bad day"))
+
+	var stdout, stderr bytes.Buffer
+	if code := doConvoyCheckFallback(cityPath, false, &stdout, &stderr); code == 0 {
+		t.Fatalf("gc convoy check exited 0 with an unreadable binding; it auto-closed from rows it could not prove:\nstdout=%s\nstderr=%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "bad day") {
+		t.Errorf("the refusal does not carry its own cause: %q", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Auto-closed") {
+		t.Errorf("the check reported an auto-close it must not have made:\n%s", stdout.String())
+	}
+
+	retained, err := work.Get(convoyID)
+	if err != nil {
+		t.Fatalf("reading %s back from the work store: %v", convoyID, err)
+	}
+	if convoycore.IsTerminalStatus(retained.Status) {
+		t.Errorf("the check closed the retained pre-migration copy of %s from a view it could not read; the binding's row is the one this decides from", convoyID)
+	}
+}
+
+// TestConvoyStrandedReadsTheBindingRow is the ga-efyq4 regression on the "is my
+// work stuck?" query.
+//
+// `gc convoy stranded` walks open convoys for open, unassigned children, and on
+// a migrated city the directory scan reaches only the copies the migration
+// retained. That is wrong in both directions at once: a frozen copy still
+// carries the assignees and open children it had at cutover, so it reports work
+// that is not stranded, while a convoy the binding minted afterwards is never
+// looked at, so genuinely stranded work is invisible. Both halves are asserted
+// here because federating only the merge would fix the first and leave the
+// second.
+func TestConvoyStrandedReadsTheBindingRow(t *testing.T) {
+	cityPath, _, _, binding := relocatedConvoyCity(t)
+
+	adrift, err := binding.Create(beads.Bead{Title: "the binding's own convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("seeding a convoy the binding minted after the migration: %v", err)
+	}
+	if _, err := binding.Create(beads.Bead{Title: "nobody is on this", ParentID: adrift.ID}); err != nil {
+		t.Fatalf("seeding the stranded child: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doConvoyStrandedFallback(cityPath, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc convoy stranded exited %d: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if strings.Contains(out, "still open in the frozen copy") {
+		t.Errorf("the retained pre-migration copy was reported as stranded work; its children stopped at cutover and the binding's row supersedes it:\n%s", out)
+	}
+	if !strings.Contains(out, "nobody is on this") {
+		t.Errorf("work stranded in the binding is invisible; the fan-out never read it:\n%s", out)
+	}
+}
+
 // rigHoldingID registers a rig on cityPath and plants a bead in it under a
 // pinned id, so a fixture can put a rig row and a binding row in collision.
 //
