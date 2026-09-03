@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -802,6 +804,55 @@ func TestNudgeMailSweepMailTTLForConfig_InvalidFallsBackToDefault(t *testing.T) 
 	}
 }
 
+func TestNudgeMailSweepMailTTLForCity_MissingConfigIsSilent(t *testing.T) {
+	// A city with no city.toml is a legitimate no-config case: fall back to the
+	// caller's value without nagging the operator every 5 minutes.
+	var stderr bytes.Buffer
+	got := nudgeMailSweepMailTTLForCity(t.TempDir(), nudgeMailSweepDefaultMailTTL, &stderr)
+	if got != nudgeMailSweepDefaultMailTTL {
+		t.Errorf("got %s, want fallback %s", got, nudgeMailSweepDefaultMailTTL)
+	}
+	if stderr.String() != "" {
+		t.Errorf("expected no stderr note for a missing city.toml, got: %q", stderr.String())
+	}
+}
+
+func TestNudgeMailSweepMailTTLForCity_UnparseableConfigWarnsAndFallsBack(t *testing.T) {
+	// A config that exists and will not parse is the case that leaves a
+	// configured retention_ttl looking applied when it is not, so it must be
+	// reported -- but it must not stop the sweep.
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("this is not valid toml\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	got := nudgeMailSweepMailTTLForCity(cityPath, nudgeMailSweepDefaultMailTTL, &stderr)
+	if got != nudgeMailSweepDefaultMailTTL {
+		t.Errorf("got %s, want fallback %s", got, nudgeMailSweepDefaultMailTTL)
+	}
+	if !strings.Contains(stderr.String(), "nudge-mail-sweep:") {
+		t.Errorf("expected a stderr note about the unloadable config, got: %q", stderr.String())
+	}
+}
+
+func TestNudgeMailSweepMailTTLForCity_ConfiguredValueUsed(t *testing.T) {
+	cityPath := t.TempDir()
+	cityTOML := "[workspace]\nname = \"test-city\"\n\n[mail]\nretention_ttl = \"15m\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	got := nudgeMailSweepMailTTLForCity(cityPath, nudgeMailSweepDefaultMailTTL, &stderr)
+	if got != 15*time.Minute {
+		t.Errorf("got %s, want 15m from [mail] retention_ttl", got)
+	}
+	if stderr.String() != "" {
+		t.Errorf("expected no stderr note for a valid config, got: %q", stderr.String())
+	}
+}
+
 func TestValidateNudgeMailSweepFlags(t *testing.T) {
 	cases := []struct {
 		name            string
@@ -886,7 +937,12 @@ func TestRunNudgeMailSweepWatchdog_CustomMailRetentionTTLUsed(t *testing.T) {
 
 func TestRunNudgeMailSweepWatchdog_ExplicitZeroDisablesMailSweep(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	// The stale nudge bead is the witness that the watchdog body actually ran:
+	// without it, "mail-old stayed open" would also hold if the sweep no-opped
+	// for an unrelated reason (interval gate, empty routed store, an early
+	// return) and never reached the mailTTL > 0 guard this test names.
 	seed := []beads.Bead{
+		nudgeSeed("nudge-stale", "nudge-1", now.Add(-nudgeMailSweepDefaultNudgeTTL-time.Second)),
 		mailSeed("mail-old", now.Add(-24*time.Hour)),
 	}
 	store := beads.NewMemStoreFrom(100, seed, nil)
@@ -903,6 +959,14 @@ func TestRunNudgeMailSweepWatchdog_ExplicitZeroDisablesMailSweep(t *testing.T) {
 		logPrefix:           "gc test",
 	}
 	cr.runNudgeMailSweepWatchdog(now)
+
+	gotNudge, err := store.Get("nudge-stale")
+	if err != nil {
+		t.Fatalf("Get nudge-stale: %v", err)
+	}
+	if gotNudge.Status != "closed" {
+		t.Fatalf("nudge-stale status = %s, want closed (retention_ttl=0 must not disable the nudge phase; the watchdog body did not run)", gotNudge.Status)
+	}
 
 	got, err := store.Get("mail-old")
 	if err != nil {
