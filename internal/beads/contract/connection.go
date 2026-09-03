@@ -204,10 +204,16 @@ func ResolveDoltConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string) (DoltCo
 
 type proxiedClientInfo struct {
 	External *struct {
-		Host   string `json:"host"`
-		Port   int    `json:"port"`
-		Socket string `json:"socket"`
-		User   string `json:"user"`
+		Host          string `json:"host"`
+		Port          int    `json:"port"`
+		Socket        string `json:"socket"`
+		User          string `json:"user"`
+		TLSRequired   bool   `json:"tls_required"`
+		TLSCACert     string `json:"tls_ca_cert"`
+		TLSCert       string `json:"tls_cert"`
+		TLSKey        string `json:"tls_key"`
+		TLSServerName string `json:"tls_server_name"`
+		TLSSkipVerify bool   `json:"tls_skip_verify"`
 	} `json:"external"`
 }
 
@@ -230,6 +236,9 @@ func readProxiedClientInfo(fs fsys.FS, path string) (proxiedClientInfo, bool, er
 		return proxiedClientInfo{}, false, nil
 	}
 	e := info.External
+	if e.TLSRequired || e.TLSCACert != "" || e.TLSCert != "" || e.TLSKey != "" || e.TLSServerName != "" || e.TLSSkipVerify {
+		return proxiedClientInfo{}, false, fmt.Errorf("unsupported TLS proxied sidecar transport")
+	}
 	if strings.TrimSpace(e.Socket) != "" {
 		if e.Host != "" || e.Port != 0 || !filepath.IsAbs(e.Socket) {
 			return proxiedClientInfo{}, false, fmt.Errorf("invalid proxied client info socket target")
