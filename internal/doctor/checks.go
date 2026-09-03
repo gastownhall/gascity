@@ -546,8 +546,13 @@ func (c *ZombieSessionsCheck) Run(_ *CheckContext) *CheckResult {
 // CanFix returns true — zombie sessions can be killed.
 func (c *ZombieSessionsCheck) CanFix() bool { return true }
 
-// Fix kills all zombie sessions.
-func (c *ZombieSessionsCheck) Fix(_ *CheckContext) error {
+// Fix kills all zombie sessions. It refuses while a controller is running
+// (GH#5742): the controller's own health patrol already reconciles zombie
+// sessions, and an uncoordinated Stop here would race it.
+func (c *ZombieSessionsCheck) Fix(ctx *CheckContext) error {
+	if IsControllerRunning(ctx.CityPath) {
+		return errControllerRunningFixSkipped
+	}
 	for _, a := range c.cfg.Agents {
 		if a.Suspended || len(a.ProcessNames) == 0 {
 			continue
@@ -627,8 +632,13 @@ func (c *OrphanSessionsCheck) Run(_ *CheckContext) *CheckResult {
 // CanFix returns true — orphan sessions can be killed.
 func (c *OrphanSessionsCheck) CanFix() bool { return true }
 
-// Fix kills all orphaned sessions.
-func (c *OrphanSessionsCheck) Fix(_ *CheckContext) error {
+// Fix kills all orphaned sessions. It refuses while a controller is running
+// (GH#5742): the controller's own health patrol already reconciles orphan
+// sessions, and an uncoordinated Stop here would race it.
+func (c *OrphanSessionsCheck) Fix(ctx *CheckContext) error {
+	if IsControllerRunning(ctx.CityPath) {
+		return errControllerRunningFixSkipped
+	}
 	prefix := "" // per-city socket isolation: all sessions belong to this city
 	running, err := c.sp.ListRunning(prefix)
 	if runtime.IsPartialListError(err) {
@@ -2887,6 +2897,13 @@ func (c *DoltVersionCheck) CanFix() bool { return false }
 
 // Fix is a no-op.
 func (c *DoltVersionCheck) Fix(_ *CheckContext) error { return nil }
+
+// errControllerRunningFixSkipped is returned by ZombieSessionsCheck.Fix and
+// OrphanSessionsCheck.Fix when a controller is running (GH#5742). The
+// controller's own health patrol already owns session remediation while it
+// runs; stopping sessions here too would race that reconciliation, so Fix
+// refuses instead of running — a documented no-op, not a silent skip.
+var errControllerRunningFixSkipped = errors.New("controller is running; skipping fix to avoid racing its own session reconciliation")
 
 // IsControllerRunning probes the controller lock file to determine if a
 // controller is currently running. It tries to acquire the flock — if it
