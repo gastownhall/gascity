@@ -1602,7 +1602,12 @@ func (t *Tmux) IsSessionAttached(target string) bool {
 func (t *Tmux) WakePane(target string) {
 	// Resize pane down by 1 row, then up by 1 row
 	// This triggers SIGWINCH without changing the final pane size
-	_, _ = t.run("resize-pane", "-t", target, "-y", "-1")
+	if _, err := t.run("resize-pane", "-t", target, "-y", "-1"); err != nil {
+		// Non-fatal (e.g. "height too small" on a single-pane window) -- the
+		// resize-up below and the rest of the wake still proceed -- but make
+		// it observable instead of silently swallowed.
+		fmt.Printf("warning: WakePane resize-pane failed for %s: %v\n", target, err)
+	}
 	time.Sleep(50 * time.Millisecond)
 	_, _ = t.run("resize-pane", "-t", target, "-y", "+1")
 }
@@ -2062,6 +2067,18 @@ const (
 // All side effects are injected so the decision logic is unit-testable without
 // a live tmux server.
 func submitEnterAndConfirm(sendSubmit func() error, wake func(), busy func() (bool, error), sleep func(time.Duration)) (bool, error) {
+	// Baseline snapshot taken before the first send. Without it, a pane that
+	// was already busy going into this call (e.g. from a stray earlier
+	// submit) would have its pre-existing busy reading wrongly credited to
+	// send 0's poll below -- only a false->true transition relative to this
+	// baseline counts as confirmation of THIS call's submit. If the baseline
+	// read itself fails, treat it as unknown/busy so send 0 cannot confirm
+	// off an unverified idle state either.
+	baselineIdle := false
+	if isBusy, err := busy(); err == nil {
+		baselineIdle = !isBusy
+	}
+
 	var lastErr error
 	for send := 0; send < submitEnterMaxSends; send++ {
 		if send > 0 {
@@ -2079,7 +2096,7 @@ func submitEnterAndConfirm(sendSubmit func() error, wake func(), busy func() (bo
 		lastErr = nil // a later send succeeded; don't surface an earlier transient failure
 		wake()
 		for poll := 0; poll < submitConfirmPollsPerSend; poll++ {
-			if isBusy, err := busy(); err == nil && isBusy {
+			if isBusy, err := busy(); err == nil && isBusy && (send > 0 || baselineIdle) {
 				return true, nil
 			}
 			sleep(submitConfirmPollInterval)
@@ -2207,6 +2224,11 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	if agentPane, err := t.FindAgentPane(session); err == nil && agentPane != "" {
 		target = agentPane
 	}
+
+	// A human may have scrolled this pane into copy-mode (the ga-c4w wheel
+	// binding); exit it first so the keystrokes below reach the program
+	// instead of being swallowed by copy-mode. Mirrors SendKeysDebounced.
+	t.cancelCopyModeIfParked(target)
 
 	// Snapshot genuine activity BEFORE the first keystroke, and stamp the poke
 	// only once delivery is actually confirmed (see delivered below). This
@@ -3824,17 +3846,29 @@ func codexTranscriptTailContainsTurnAborted(tail string) bool {
 // "(main)", "⏱️ Jun 4 02:57:04", or the "✻ Worked for 3m 38s" done marker.
 var claudeBusySpinnerRe = regexp.MustCompile(`\([0-9]+[ms][^)]*[·•]`)
 
+// claudeBareGerundSpinnerRe matches Claude Code's spinner glyph plus gerund
+// before it has gained the elapsed-timer suffix claudeBusySpinnerRe matches --
+// e.g. "· Tinkering…" or "✢ Clauding…" -- which is how Claude Code 2.1.x
+// renders for roughly the first second of a turn, before token streaming
+// appends "(Nm/Ns · ...)" . Requires the leading character to be a symbol
+// (not a letter/digit) and the word to end "ing…" so idle chrome with a
+// leading glyph -- "🚀 Opus 4.8 | ..." -- does not match.
+var claudeBareGerundSpinnerRe = regexp.MustCompile(`[^\sA-Za-z0-9] [A-Z][A-Za-z]*ing…`)
+
 // paneContainsBusyIndicator checks captured pane lines for signs that the agent
 // is actively processing. Agent TUIs surface this differently: older Claude Code
 // and Codex show "esc to interrupt"; current Claude Code shows a live spinner
-// with an elapsed timer + token stream (claudeBusySpinnerRe); Gemini shows its
-// own cancel / shell-tool strings.
+// with an elapsed timer + token stream (claudeBusySpinnerRe) or, for roughly
+// the first second of a turn, the bare glyph+gerund form
+// (claudeBareGerundSpinnerRe); Gemini shows its own cancel / shell-tool
+// strings.
 func paneContainsBusyIndicator(lines []string) bool {
 	for _, line := range lines {
 		if strings.Contains(line, "esc to interrupt") ||
 			strings.Contains(line, "Press Esc or Ctrl+C to cancel") ||
 			strings.Contains(line, "[current working directory ") ||
-			claudeBusySpinnerRe.MatchString(line) {
+			claudeBusySpinnerRe.MatchString(line) ||
+			claudeBareGerundSpinnerRe.MatchString(line) {
 			return true
 		}
 	}

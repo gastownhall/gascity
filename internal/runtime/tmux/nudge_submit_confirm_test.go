@@ -122,6 +122,49 @@ func TestSubmitEnterAndConfirmClearsStaleSendError(t *testing.T) {
 	}
 }
 
+// TestSubmitEnterAndConfirmIgnoresPreexistingBusyOnFirstSend proves the
+// pre-send baseline fix: a pane that is ALREADY busy before this call is ever
+// made (a stray earlier submit still running) must not have that pre-existing
+// busy reading credited to send 0's own poll -- confirmation requires an
+// actual false->true transition relative to the baseline. The scripted busy()
+// sequence below stays busy through the baseline read and all of send 0's
+// polls (the stale state, unrelated to this call's own submit), then
+// genuinely goes idle at send 1's pre-send check (the stray turn finishes),
+// then genuinely goes busy on send 1's own poll -- the real transition this
+// call's submit produces. Before the fix, the very first poll of send 0 would
+// have read the stale busy state and returned confirmed with enters == 1.
+func TestSubmitEnterAndConfirmIgnoresPreexistingBusyOnFirstSend(t *testing.T) {
+	var enters int
+	var calls int
+	busy := func() (bool, error) {
+		calls++
+		switch {
+		case calls <= 1+submitConfirmPollsPerSend:
+			// Baseline read (call 1) plus all of send 0's polls: the stale
+			// busy state from before this call was ever made.
+			return true, nil
+		case calls == 1+submitConfirmPollsPerSend+1:
+			// Send 1's pre-send idle check: the stray turn has finished.
+			return false, nil
+		default:
+			// Send 1's own submit lands and the turn goes genuinely busy.
+			return true, nil
+		}
+	}
+	sendEnter := func() error { enters++; return nil }
+
+	confirmed, err := submitEnterAndConfirm(sendEnter, func() {}, busy, noSleep)
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if !confirmed {
+		t.Fatal("confirmed = false, want true (send 1's genuine transition should confirm)")
+	}
+	if enters != 2 {
+		t.Fatalf("enters = %d, want 2 (send 0's stale-busy reading must not short-circuit before send 1 re-sends)", enters)
+	}
+}
+
 // TestSubmitEnterAndConfirmReturnsSendError proves a genuine tmux-layer send
 // failure (session gone) is surfaced, matching the pre-fix contract.
 func TestSubmitEnterAndConfirmReturnsSendError(t *testing.T) {
