@@ -700,6 +700,14 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		if err != nil {
 			t.Fatal(err)
 		}
+		// The premise the comment above asserts, asserted. A store that mints
+		// into the foreign id's own namespace turns this row into a
+		// same-namespace dangling-parent test, which the contract says a store
+		// is entitled to refuse — the row would then pass or fail for reasons
+		// that have nothing to do with the cross-store shape it exists to pin.
+		if beadIDNamespace(foreign) == beadIDNamespace(control.ID) {
+			t.Fatalf("this store mints %q-shaped ids, the same namespace as the %q used as the foreign parent; the cross-store shape this row exists to pin is not being exercised", control.ID, foreign)
+		}
 
 		child, err := s.Create(beads.Bead{Title: "step", ParentID: foreign})
 		if err != nil {

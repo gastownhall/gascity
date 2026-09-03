@@ -106,8 +106,11 @@ type Bead struct {
 	// namespace is a row that store can see the absence of, and the strong
 	// backends refuse it before writing anything; the weak ones cannot detect
 	// it at all. That divergence is left explicit rather than papered over —
-	// what every backend owes, and what the conformance suite pins, is that a
-	// foreign parent is carried without question.
+	// what every backend owes is that a foreign parent is carried without
+	// question. The conformance suite pins that owing for the providers that
+	// execute it (SQLite, native Dolt, mem, file, exec); it is not yet verified
+	// against the bd provider, whose RunStoreTests row is skipped pending a
+	// version bump (ga-e7z613), so there the contract holds by convention.
 	ParentID    string   `json:"parent,omitempty"`
 	Ref         string   `json:"ref,omitempty"`         // formula step ID or formula name
 	Needs       []string `json:"needs,omitempty"`       // dependency step refs
