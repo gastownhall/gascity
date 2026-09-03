@@ -209,6 +209,10 @@ type RigPatch struct {
 	Prefix *string `toml:"prefix,omitempty"`
 	// DefaultBranch overrides the rig's recorded mainline branch.
 	DefaultBranch *string `toml:"default_branch,omitempty"`
+	// DefaultMergeStrategy overrides the merge strategy `gc sling` stamps on
+	// beads routed into this rig. Set to "" to clear the rig's default and go
+	// back to leaving merge_strategy unstamped.
+	DefaultMergeStrategy *string `toml:"default_merge_strategy,omitempty"`
 	// Suspended is the deprecated, pre-runtime-state suspension override.
 	// Parsed for backwards compatibility; `gc doctor` surfaces it as a
 	// warning and recommends the rename to SuspendedOnStart. No behavioral
@@ -723,6 +727,9 @@ func applyRigPatch(cfg *City, patch *RigPatch) error {
 			}
 			if patch.DefaultBranch != nil {
 				r.DefaultBranch = *patch.DefaultBranch
+			}
+			if patch.DefaultMergeStrategy != nil {
+				r.DefaultMergeStrategy = *patch.DefaultMergeStrategy
 			}
 			if patch.Suspended != nil {
 				r.Suspended = *patch.Suspended

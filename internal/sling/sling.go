@@ -1051,28 +1051,50 @@ func SlingFormulaTargetBranch(beadID string, deps SlingDeps, a config.Agent) str
 	return ""
 }
 
+// SlingMergeStrategy resolves the merge strategy to stamp on a routed bead.
+// Resolution order:
+//  1. the explicit --merge value the caller passed
+//  2. DefaultMergeStrategy recorded on the bead's rig in city.toml
+//  3. DefaultMergeStrategy recorded on the agent's rig in city.toml
+//
+// An empty result means nothing is stamped and consumers keep applying their
+// own implicit default. Rigs that deliver work through a pull request set
+// default_merge_strategy = "mr" so a bare `gc sling` records the shape the rig
+// actually uses instead of the one its consumers assume.
+func SlingMergeStrategy(explicit, beadID string, deps SlingDeps, a config.Agent) string {
+	if explicit := strings.TrimSpace(explicit); explicit != "" {
+		return explicit
+	}
+	return rigStoredValue(deps.Cfg, beadID, a, (*config.Rig).EffectiveDefaultMergeStrategy)
+}
+
 // rigStoredDefaultBranch returns the DefaultBranch recorded on the rig the
 // bead/agent belongs to, or empty string if no match has a stored value.
-// Bead lookup wins over agent lookup so cross-rig sling targets still pick
-// the right rig.
 func rigStoredDefaultBranch(cfg *config.City, beadID string, a config.Agent) string {
+	return rigStoredValue(cfg, beadID, a, (*config.Rig).EffectiveDefaultBranch)
+}
+
+// rigStoredValue returns pick applied to the rig the bead/agent belongs to, or
+// empty string if no match yields a value. Bead lookup wins over agent lookup
+// so cross-rig sling targets still pick the right rig.
+func rigStoredValue(cfg *config.City, beadID string, a config.Agent, pick func(*config.Rig) string) string {
 	if cfg == nil {
 		return ""
 	}
 	if beadID != "" {
 		if bp := BeadPrefixForCity(cfg, beadID); bp != "" && !IsHQPrefix(cfg, bp) {
 			if rig, ok := FindRigByPrefix(cfg, bp); ok {
-				if branch := rig.EffectiveDefaultBranch(); branch != "" {
-					return branch
+				if value := pick(&rig); value != "" {
+					return value
 				}
 			}
 		}
 	}
 	if rigName := rigNameForAgent(cfg, a); rigName != "" {
-		for _, r := range cfg.Rigs {
-			if r.Name == rigName {
-				if branch := r.EffectiveDefaultBranch(); branch != "" {
-					return branch
+		for i := range cfg.Rigs {
+			if cfg.Rigs[i].Name == rigName {
+				if value := pick(&cfg.Rigs[i]); value != "" {
+					return value
 				}
 			}
 		}

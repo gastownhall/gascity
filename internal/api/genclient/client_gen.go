@@ -3265,13 +3265,14 @@ type RigCreateSucceededPayload struct {
 
 // RigPatch defines model for RigPatch.
 type RigPatch struct {
-	DefaultBranch    *string           `json:"DefaultBranch"`
-	FormulaVars      map[string]string `json:"FormulaVars"`
-	Name             string            `json:"Name"`
-	Path             *string           `json:"Path"`
-	Prefix           *string           `json:"Prefix"`
-	Suspended        *bool             `json:"Suspended"`
-	SuspendedOnStart *bool             `json:"SuspendedOnStart"`
+	DefaultBranch        *string           `json:"DefaultBranch"`
+	DefaultMergeStrategy *string           `json:"DefaultMergeStrategy"`
+	FormulaVars          map[string]string `json:"FormulaVars"`
+	Name                 string            `json:"Name"`
+	Path                 *string           `json:"Path"`
+	Prefix               *string           `json:"Prefix"`
+	Suspended            *bool             `json:"Suspended"`
+	SuspendedOnStart     *bool             `json:"SuspendedOnStart"`
 }
 
 // RigPatchSetInputBody defines model for RigPatchSetInputBody.

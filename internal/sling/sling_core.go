@@ -403,7 +403,8 @@ func slingFormula(opts SlingOpts, deps SlingDeps) (SlingResult, error) {
 		return SlingResult{Target: a.QualifiedName()}, fmt.Errorf("instantiating formula %q: %w", opts.BeadOrFormula, err)
 	}
 	if mResult.GraphWorkflow || IsGraphWorkflowAttachment(deps.Store, mResult.RootID) {
-		wfResult, wfErr := doStartGraphWorkflow(mResult.RootID, "", a, method, deps)
+		// A standalone --formula launch has no work bead, so no merge shape.
+		wfResult, wfErr := doStartGraphWorkflow(mResult.RootID, "", "", "", a, method, deps)
 		wfResult.FormulaName = opts.BeadOrFormula
 		wfResult.Deprecations = append(wfResult.Deprecations, inv.Deprecations...)
 		return wfResult, wfErr
@@ -574,7 +575,7 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 			if err != nil {
 				return result, fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
 			}
-			wfResult, wfErr := doStartGraphWorkflow(mResult.RootID, "", a, method, deps)
+			wfResult, wfErr := doStartGraphWorkflow(mResult.RootID, "", beadID, SlingMergeStrategy(opts.Merge, beadID, deps, a), a, method, deps)
 			wfResult.FormulaName = formulaName
 			if wfErr != nil {
 				// Same store the snapshot was taken from and the replacement
@@ -640,7 +641,7 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 		}
 		wispRootID := mResult.RootID
 		if mResult.GraphWorkflow || IsGraphWorkflowAttachment(deps.Store, wispRootID) {
-			wfResult, wfErr := doStartGraphWorkflow(mResult.RootID, beadID, a, method, deps)
+			wfResult, wfErr := doStartGraphWorkflow(mResult.RootID, beadID, beadID, SlingMergeStrategy(opts.Merge, beadID, deps, a), a, method, deps)
 			wfResult.FormulaName = formulaName
 			return wfResult, wfErr
 		}
@@ -671,7 +672,7 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 		if err != nil {
 			return pendingSourceWorkflowLaunch{}, fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
 		}
-		return pendingGraphWorkflowLaunch(mResult.RootID, beadID, a, method, formulaName, deps), nil
+		return pendingGraphWorkflowLaunch(mResult.RootID, beadID, beadID, SlingMergeStrategy(opts.Merge, beadID, deps, a), a, method, formulaName, deps), nil
 	}
 	if !isGraph {
 		return run()
@@ -720,11 +721,16 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 	}
 	telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, nil)
 
-	// Merge strategy metadata.
-	if opts.Merge != "" && deps.Store != nil {
-		if err := deps.Store.SetMetadata(beadID, beadmeta.MergeStrategyMetadataKey, opts.Merge); err != nil {
-			result.MetadataErrors = append(result.MetadataErrors,
-				fmt.Sprintf("setting merge strategy: %v", err))
+	// Merge strategy metadata. With no --merge flag this falls back to the
+	// rig's configured default, so a bare sling on a rig that delivers through
+	// a pull request records "mr" instead of leaving the bead unstamped for the
+	// refinery to read as "direct".
+	if deps.Store != nil {
+		if strategy := SlingMergeStrategy(opts.Merge, beadID, deps, a); strategy != "" {
+			if err := deps.Store.SetMetadata(beadID, beadmeta.MergeStrategyMetadataKey, strategy); err != nil {
+				result.MetadataErrors = append(result.MetadataErrors,
+					fmt.Sprintf("setting merge strategy: %v", err))
+			}
 		}
 	}
 
@@ -837,7 +843,10 @@ func restampWorkBeadRouting(deps SlingDeps, beadID string, a config.Agent, resul
 }
 
 // doStartGraphWorkflow performs post-instantiation graph workflow setup.
-func doStartGraphWorkflow(rootID, sourceBeadID string, a config.Agent, method string, deps SlingDeps) (SlingResult, error) {
+// workBeadID is the bead a merge consumer will act on — empty for a standalone
+// `--formula` launch, which has nothing to merge — and mergeStrategy is the
+// already-resolved shape to record on it (see SlingMergeStrategy).
+func doStartGraphWorkflow(rootID, sourceBeadID, workBeadID, mergeStrategy string, a config.Agent, method string, deps SlingDeps) (SlingResult, error) {
 	var result SlingResult
 	result.Target = a.QualifiedName()
 	result.Method = method
@@ -867,6 +876,20 @@ func doStartGraphWorkflow(rootID, sourceBeadID string, a config.Agent, method st
 			return result, fmt.Errorf("setting workflow_id on %s: %w", sourceBeadID, err)
 		}
 		restampWorkBeadRouting(deps, sourceBeadID, a, &result)
+	}
+	// Record the merge shape on the work bead, not the workflow root: the root
+	// is a control artifact and is never the thing that gets merged. Graph
+	// launches never pass through finalize(), so without this stamp a v2
+	// formula sling silently drops both --merge and the rig's configured
+	// default_merge_strategy, leaving the merge consumer to apply its own
+	// implicit default to work that does not match it. Advisory like
+	// finalize()'s stamp — the routing already happened, so a write failure is
+	// reported rather than fatal.
+	if mergeStrategy != "" && workBeadID != "" && deps.Store != nil {
+		if err := deps.Store.SetMetadata(workBeadID, beadmeta.MergeStrategyMetadataKey, mergeStrategy); err != nil {
+			result.MetadataErrors = append(result.MetadataErrors,
+				fmt.Sprintf("setting merge strategy: %v", err))
+		}
 	}
 	telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, nil)
 	if deps.Notify != nil {
@@ -1069,12 +1092,12 @@ func (c *sourceWorkflowRootCollector) result() ([]sourceWorkflowRoot, error) {
 	return c.roots, nil
 }
 
-func pendingGraphWorkflowLaunch(rootID, sourceBeadID string, a config.Agent, method, formulaName string, deps SlingDeps) pendingSourceWorkflowLaunch {
+func pendingGraphWorkflowLaunch(rootID, sourceBeadID, workBeadID, mergeStrategy string, a config.Agent, method, formulaName string, deps SlingDeps) pendingSourceWorkflowLaunch {
 	return pendingSourceWorkflowLaunch{
 		workflowID: rootID,
 		storeRef:   strings.TrimSpace(deps.StoreRef),
 		finalize: func() (SlingResult, error) {
-			result, err := doStartGraphWorkflow(rootID, sourceBeadID, a, method, deps)
+			result, err := doStartGraphWorkflow(rootID, sourceBeadID, workBeadID, mergeStrategy, a, method, deps)
 			result.FormulaName = formulaName
 			return result, err
 		},
@@ -1411,7 +1434,7 @@ func attachBatchFormula(ctx context.Context, opts SlingOpts, deps SlingDeps, chi
 			return SlingResult{}, fmt.Errorf("instantiating %s %q on %s: %w", formulaLabel, formulaName, child.ID, err)
 		}
 		if mResult.GraphWorkflow || IsGraphWorkflowAttachment(deps.Store, mResult.RootID) {
-			wfResult, wfErr := doStartGraphWorkflow(mResult.RootID, child.ID, a, method, deps)
+			wfResult, wfErr := doStartGraphWorkflow(mResult.RootID, child.ID, child.ID, SlingMergeStrategy(opts.Merge, child.ID, deps, a), a, method, deps)
 			wfResult.FormulaName = formulaName
 			return wfResult, wfErr
 		}
@@ -1437,7 +1460,7 @@ func attachBatchFormula(ctx context.Context, opts SlingOpts, deps SlingDeps, chi
 		if err != nil {
 			return pendingSourceWorkflowLaunch{}, fmt.Errorf("instantiating %s %q on %s: %w", formulaLabel, formulaName, child.ID, err)
 		}
-		return pendingGraphWorkflowLaunch(mResult.RootID, child.ID, a, method, formulaName, deps), nil
+		return pendingGraphWorkflowLaunch(mResult.RootID, child.ID, child.ID, SlingMergeStrategy(opts.Merge, child.ID, deps, a), a, method, formulaName, deps), nil
 	}
 	if !isGraph {
 		return run()

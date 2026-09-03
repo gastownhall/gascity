@@ -377,6 +377,38 @@ const (
 	MergeStrategyMetadataKey = "merge_strategy"
 )
 
+// Accepted MergeStrategyMetadataKey values. They are part of the bead-metadata
+// contract shared by `gc sling`, the HTTP sling endpoint, rig config, and the
+// pack formulas that read merge_strategy back off a work bead, so they must not
+// change without a migration. An absent key is not one of these values —
+// consumers read "unset" as their own implicit default.
+const (
+	// MergeStrategyDirect merges the work branch into its target branch.
+	MergeStrategyDirect = "direct"
+	// MergeStrategyMR delivers the work through a merge/pull request rather
+	// than by pushing to the target branch.
+	MergeStrategyMR = "mr"
+	// MergeStrategyLocal leaves the work on its branch with no merge and no
+	// request; the consumer decides what to do with it.
+	MergeStrategyLocal = "local"
+)
+
+// KnownMergeStrategies lists every accepted MergeStrategyMetadataKey value, in
+// the order validators render them into "valid values are ..." messages.
+var KnownMergeStrategies = []string{MergeStrategyDirect, MergeStrategyMR, MergeStrategyLocal}
+
+// IsKnownMergeStrategy reports whether s is an accepted merge strategy. The
+// comparison is exact: the empty string is "unset" rather than a strategy, and
+// callers are expected to trim before asking.
+func IsKnownMergeStrategy(s string) bool {
+	for _, known := range KnownMergeStrategies {
+		if s == known {
+			return true
+		}
+	}
+	return false
+}
+
 // OptionMetadataPrefix is the dynamic non-"gc."-prefixed key prefix under
 // which provider option choices are stored as opt_<OptionsSchema key> (e.g.
 // opt_model, opt_effort) on session and work beads. The suffix is open-world

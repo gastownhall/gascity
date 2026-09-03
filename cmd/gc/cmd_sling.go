@@ -123,7 +123,7 @@ Examples:
 			if owned && noConvoy {
 				return argError("gc sling: --owned requires a convoy (cannot use with --no-convoy)")
 			}
-			if merge != "" && merge != "direct" && merge != "mr" && merge != "local" {
+			if merge != "" && !beadmeta.IsKnownMergeStrategy(merge) {
 				return argError("gc sling: --merge must be direct, mr, or local")
 			}
 			if (strings.TrimSpace(scopeKind) == "") != (strings.TrimSpace(scopeRef) == "") {
