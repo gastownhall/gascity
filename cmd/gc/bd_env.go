@@ -442,6 +442,8 @@ func applyCanonicalDoltTargetEnv(env map[string]string, target contract.DoltConn
 	if socket := strings.TrimSpace(target.Socket); socket != "" {
 		delete(env, "GC_DOLT_HOST")
 		delete(env, "GC_DOLT_PORT")
+		delete(env, "BEADS_DOLT_SERVER_HOST")
+		delete(env, "BEADS_DOLT_SERVER_PORT")
 		env["BEADS_DOLT_SERVER_SOCKET"] = socket
 		return
 	}
