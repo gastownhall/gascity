@@ -161,7 +161,7 @@ func ResolveDoltConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string) (DoltCo
 	// do not force inherited scopes through the city's managed runtime path.
 	if strings.EqualFold(target.DoltMode, "proxied-server") {
 		backend, _, _ := ReadMetadataBackend(fs, filepath.Join(scopeRoot, ".beads", "metadata.json"))
-		if strings.EqualFold(strings.TrimSpace(backend), "dolt") {
+		if IsDoltBackend(backend) {
 			if sidecar, ok, err := readProxiedClientInfo(fs, filepath.Join(scopeRoot, ".beads", "proxied_server_client_info.json")); err != nil {
 				return DoltConnectionTarget{}, err
 			} else if ok {
