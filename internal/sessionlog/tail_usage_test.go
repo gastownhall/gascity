@@ -301,9 +301,14 @@ func TestExtractTailUsageFromSearchPathsRejectsEscapedPath(t *testing.T) {
 	}
 }
 
+// usageEntryPadBytes pads each entry built by buildUsageEntry so a handful of
+// them exceed the fixed 64KB tail window: ~3 entries fill one window, so a
+// 30-60 entry transcript spans many.
+const usageEntryPadBytes = 20 * 1024
+
 // buildUsageEntry returns one assistant entry whose padding makes the encoded
 // line large enough that a handful of entries exceed the fixed tail window.
-func buildUsageEntry(id string, padBytes int) map[string]any {
+func buildUsageEntry(id string) map[string]any {
 	return map[string]any{
 		"type": "assistant",
 		"uuid": "uuid-" + id,
@@ -317,7 +322,7 @@ func buildUsageEntry(id string, padBytes int) map[string]any {
 				"cache_read_input_tokens":     30,
 				"cache_creation_input_tokens": 40,
 			},
-			"content": strings.Repeat("x", padBytes),
+			"content": strings.Repeat("x", usageEntryPadBytes),
 		},
 	}
 }
@@ -331,11 +336,10 @@ func TestExtractTailUsageSinceReachesBackPastTheFixedWindow(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "session.jsonl")
 
-	const entries = 60
-	const pad = 20 * 1024 // ~20KB per entry: 60 entries ≈ 1.2MB, ~19 windows
+	const entries = 60 // ~20KB per entry: 60 entries ≈ 1.2MB, ~19 windows
 	rows := make([]map[string]any, 0, entries)
 	for i := range entries {
-		rows = append(rows, buildUsageEntry(fmt.Sprintf("msg_%02d", i), pad))
+		rows = append(rows, buildUsageEntry(fmt.Sprintf("msg_%02d", i)))
 	}
 	writeTailJSONL(t, path, rows)
 
@@ -374,7 +378,7 @@ func TestExtractTailUsageSinceEmptyCursorMatchesFixedWindow(t *testing.T) {
 
 	rows := make([]map[string]any, 0, 40)
 	for i := range 40 {
-		rows = append(rows, buildUsageEntry(fmt.Sprintf("msg_%02d", i), 20*1024))
+		rows = append(rows, buildUsageEntry(fmt.Sprintf("msg_%02d", i)))
 	}
 	writeTailJSONL(t, path, rows)
 
@@ -391,15 +395,17 @@ func TestExtractTailUsageSinceEmptyCursorMatchesFixedWindow(t *testing.T) {
 	}
 }
 
-// TestExtractTailUsageSinceUnreachableCursorDegradesToBoundedWindow pins that a
-// stale or absent cursor returns the widest scanned window rather than nothing.
-func TestExtractTailUsageSinceUnreachableCursorDegradesToBoundedWindow(t *testing.T) {
+// TestExtractTailUsageSinceUnreachableCursorReturnsWholeFile pins that a stale
+// or absent cursor on a transcript smaller than the growth cap returns the
+// whole file rather than nothing. This exits through the !truncated branch, not
+// the cap branch — TestExtractTailUsageSinceStopsAtGrowthCap covers that one.
+func TestExtractTailUsageSinceUnreachableCursorReturnsWholeFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "session.jsonl")
 
 	rows := make([]map[string]any, 0, 30)
 	for i := range 30 {
-		rows = append(rows, buildUsageEntry(fmt.Sprintf("msg_%02d", i), 20*1024))
+		rows = append(rows, buildUsageEntry(fmt.Sprintf("msg_%02d", i)))
 	}
 	writeTailJSONL(t, path, rows)
 
@@ -411,5 +417,99 @@ func TestExtractTailUsageSinceUnreachableCursorDegradesToBoundedWindow(t *testin
 	// cover it and returns everything instead of failing.
 	if len(got) != 30 {
 		t.Errorf("got %d entries, want all 30 once the window covers the file", len(got))
+	}
+}
+
+// TestExtractTailUsageSinceStopsAtGrowthCap pins the cap branch: once the
+// window reaches the growth cap with the cursor still out of view, the widest
+// scanned window is returned — not nothing, and not an unbounded scan. The cap
+// is injected so the branch is reachable without a multi-megabyte fixture.
+func TestExtractTailUsageSinceStopsAtGrowthCap(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+
+	const entries = 30
+	rows := make([]map[string]any, 0, entries)
+	for i := range entries {
+		rows = append(rows, buildUsageEntry(fmt.Sprintf("msg_%02d", i)))
+	}
+	writeTailJSONL(t, path, rows)
+
+	// ~600KB of transcript against a 128KB cap: the loop must exit through the
+	// cap with the cursor still unreached.
+	got, err := extractTailUsageSince(path, "msg_does_not_exist", 128*1024)
+	if err != nil {
+		t.Fatalf("extractTailUsageSince: %v", err)
+	}
+	if len(got) == 0 {
+		t.Fatalf("cap branch returned nothing; want the widest scanned window")
+	}
+	if len(got) >= entries {
+		t.Errorf("got %d of %d entries; the cap must bound the scan short of the whole file",
+			len(got), entries)
+	}
+}
+
+// TestExtractTailUsageSinceSpansOversizedTranscriptLine pins that a transcript
+// line larger than the scanner's old 256KB token cap does not truncate the
+// grown window's parse. Growing the window is what first makes such a line
+// reachable, so swallowing bufio.ErrTooLong would drop every invocation after
+// it — including the newest ones, which the fixed 64KB window always saw. That
+// is the same silent, permanent loss ExtractTailUsageSince exists to close,
+// reintroduced in a new shape.
+func TestExtractTailUsageSinceSpansOversizedTranscriptLine(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+
+	const half = 20
+	rows := make([]map[string]any, 0, 2*half+1)
+	for i := range half {
+		rows = append(rows, buildUsageEntry(fmt.Sprintf("msg_old_%02d", i)))
+	}
+	// One non-usage entry far above the old 256KB token cap, sitting between
+	// the cursor and the newest invocations.
+	rows = append(rows, map[string]any{
+		"type": "user",
+		"uuid": "uuid-oversized",
+		"message": map[string]any{
+			"role":    "user",
+			"content": strings.Repeat("y", 400*1024),
+		},
+	})
+	for i := range half {
+		rows = append(rows, buildUsageEntry(fmt.Sprintf("msg_new_%02d", i)))
+	}
+	writeTailJSONL(t, path, rows)
+
+	cursor := "msg_old_00"
+	newest := fmt.Sprintf("msg_new_%02d", half-1)
+
+	// Preconditions, so a failure below is a regression against the fixed
+	// window rather than a gap that predates the growth loop: the fixed window
+	// does see the newest invocation, and it does not reach the cursor.
+	fixed, err := ExtractTailUsage(path)
+	if err != nil {
+		t.Fatalf("ExtractTailUsage: %v", err)
+	}
+	if !containsCursor(fixed, newest) {
+		t.Fatalf("precondition: fixed window did not see newest invocation %q (%d entries)", newest, len(fixed))
+	}
+	if containsCursor(fixed, cursor) {
+		t.Fatalf("precondition: fixed window already reaches the cursor, so the window never grows")
+	}
+
+	got, err := ExtractTailUsageSince(path, cursor)
+	if err != nil {
+		t.Fatalf("ExtractTailUsageSince: %v", err)
+	}
+	if !containsCursor(got, newest) {
+		t.Errorf("newest invocation %q missing from the grown window (%d entries): the oversized line truncated the parse",
+			newest, len(got))
+	}
+	if !containsCursor(got, cursor) {
+		t.Errorf("cursor %q not reached: got %d entries", cursor, len(got))
+	}
+	if len(got) != 2*half {
+		t.Errorf("got %d invocations, want all %d spanning the oversized line", len(got), 2*half)
 	}
 }

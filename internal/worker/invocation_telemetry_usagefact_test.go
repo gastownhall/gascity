@@ -1547,3 +1547,121 @@ func TestFactorySweepRecoversBacklogBeyondFixedTailWindow(t *testing.T) {
 		t.Fatalf("sink holds %d facts, want %d", len(facts), backlog)
 	}
 }
+
+// TestFactorySweepWithoutCursorMatchesFixedTailWindow pins the other half of
+// the per-family coverage ceiling documented on SweepSessionModelUsage: growth
+// is cursor-bounded, so before a cursor exists there is no growth at all.
+// ExtractTailUsageSince short-circuits to one fixed 64KB read, and the sweep
+// therefore emits only what that window holds — the pre-change behavior, with
+// no cap log. The cursor the sweep then persists points at the newest entry,
+// which is the growth loop's stop condition, so no later sweep reaches back
+// across the gap. TestFactorySweepRecoversBacklogBeyondFixedTailWindow
+// pre-seeds a cursor and so cannot cover this branch.
+func TestFactorySweepWithoutCursorMatchesFixedTailWindow(t *testing.T) {
+	searchBase := t.TempDir()
+	workDir := t.TempDir()
+	sinkPath := filepath.Join(t.TempDir(), "usage.jsonl")
+
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	factory, err := NewFactory(FactoryConfig{
+		Store:       store,
+		Provider:    sp,
+		SearchPaths: []string{searchBase},
+		UsageSink:   usage.NewLocalSink(sinkPath),
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+
+	h, err := factory.Session(SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  workDir,
+		Provider: "claude",
+		Metadata: map[string]string{"agent_name": "myrig/polecat-1"},
+	})
+	if err != nil {
+		t.Fatalf("Session: %v", err)
+	}
+	if err := h.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	id := h.sessionID
+
+	info, err := h.manager.Get(id)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", id, err)
+	}
+	slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", slugDir, err)
+	}
+	transcriptPath := filepath.Join(slugDir, info.SessionKey+".jsonl")
+
+	// Same ~800KB backlog as the cursor-seeded test, so the only difference
+	// between the two is whether a cursor exists.
+	const backlog = 40
+	rows := make([]map[string]any, 0, backlog)
+	for i := range backlog {
+		rows = append(rows, paddedUsageEntry(fmt.Sprintf("u%d", i+1), fmt.Sprintf("msg-%02d", i), 20*1024))
+	}
+	writeWorkerTestJSONL(t, transcriptPath, rows)
+
+	// No MetadataKeyInvocationUsageCursor: this is a session's first sweep.
+	if err := store.SetMetadata(id, "molecule_id", "run-Z"); err != nil {
+		t.Fatal(err)
+	}
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(b.Metadata[sessionpkg.MetadataKeyInvocationUsageCursor]); got != "" {
+		t.Fatalf("precondition: cursor = %q, want empty", got)
+	}
+
+	// The fixed window is what the sweep is expected to be limited to, and it
+	// must be genuinely narrower than the backlog or this asserts nothing.
+	fixed, err := sessionlog.ExtractTailUsage(transcriptPath)
+	if err != nil {
+		t.Fatalf("ExtractTailUsage: %v", err)
+	}
+	if len(fixed) == 0 || len(fixed) >= backlog {
+		t.Fatalf("fixed tail window saw %d of %d entries; test no longer isolates the empty-cursor branch", len(fixed), backlog)
+	}
+
+	emitted, settled, err := factory.SweepSessionModelUsage(context.Background(), id, b.Metadata, time.Unix(1, 0).UTC())
+	if err != nil {
+		t.Fatalf("SweepSessionModelUsage: %v", err)
+	}
+	if !settled {
+		t.Fatal("a fully-recorded sweep must report settled")
+	}
+	if emitted != len(fixed) {
+		t.Fatalf("emitted = %d, want %d (the fixed window only, with no cursor to grow toward)", emitted, len(fixed))
+	}
+
+	facts, warnings, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatalf("ReadFacts: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected sink warnings: %v", warnings)
+	}
+	if len(facts) != len(fixed) {
+		t.Fatalf("sink holds %d facts, want %d", len(facts), len(fixed))
+	}
+
+	// The persisted cursor is the newest entry, not the oldest one the sweep
+	// missed: the gap below it is unreachable from every later sweep.
+	after, err := store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantCursor := fmt.Sprintf("msg-%02d", backlog-1)
+	if got := after.Metadata[sessionpkg.MetadataKeyInvocationUsageCursor]; got != wantCursor {
+		t.Fatalf("persisted cursor = %q, want %q (the newest entry)", got, wantCursor)
+	}
+}

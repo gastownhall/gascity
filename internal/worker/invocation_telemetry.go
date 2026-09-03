@@ -43,8 +43,11 @@ func defaultPricingRegistry() *pricing.Registry {
 // keystroke-delivery time, so the transcript tail at that point holds
 // previously COMPLETED invocations — the turn this operation triggers is
 // recorded by the next prompt operation on the session. Entries beyond the
-// extractor's scan window (a 64KB tail for claude and codex) or after the
-// final prompt op of a session go unrecorded.
+// extractor's scan window — which for claude grows from the 64KB tail up to
+// 16MB until the persisted cursor is in view, and for codex stays at that
+// fixed 64KB tail (the per-family coverage ceiling is stated in full on
+// SweepSessionModelUsage) — or after the final prompt op of a session go
+// unrecorded.
 //
 // Coverage is per transcript provider family, driven by the
 // invocationUsageSpecs registry, with per-family discovery bounds:
@@ -89,8 +92,13 @@ func defaultPricingRegistry() *pricing.Registry {
 // same session — whether in separate processes or on separate handles in one
 // process (the API server constructs a fresh handle per request) — can each
 // read the same stale cursor and double-record the pending batch.
-// invTelemetryMu only serializes ops that share a single handle instance.
-// Accepted as best-effort. RuntimeHandle prompt ops are permanently out of
+// invTelemetryMu only serializes ops that share a single handle instance. That
+// pending batch is now bounded by the grown scan window rather than the fixed
+// 64KB tail, so the duplicated OTel counter volume scales with backlog depth;
+// the facts still collapse on usage.ModelIdempotencyKey, the keyless counters
+// do not (see usagesSinceCursor). Accepted as best-effort.
+//
+// RuntimeHandle prompt ops are permanently out of
 // scope (decided in ga-tkvb31, not a pending gap): runtime-only sessions
 // have no transcript adapter, no session bead for the cursor, and no agent
 // identity, and will not gain bead-backed identity just for telemetry.
@@ -416,6 +424,14 @@ func usagesAfterCursor(usages []sessionlog.TailUsage, cursor string) []sessionlo
 // IdempotencyKey dedup (usage.ReadFacts) collapses any overlap with
 // already-recorded facts, so recovering the whole bounded tail cannot
 // double-count.
+//
+// That dedup covers the fact sink ONLY. sweepResolvedTranscript also emits OTel
+// counters (RecordInvocationTokens, RecordInvocationCostEstimate) for every
+// entry it folds, unconditionally and before the sink write; those counters are
+// monotonic and carry no idempotency key, so an out-of-window cursor
+// re-increments them for the whole window. The burst is bounded by the
+// extractor's window and self-corrects on the next pass — the cursor advances
+// to the newest entry — but the overlap it already counted is permanent.
 func usagesSinceCursor(usages []sessionlog.TailUsage, cursor string) []sessionlog.TailUsage {
 	if len(usages) == 0 {
 		return nil
@@ -461,12 +477,43 @@ func usagesSinceCursor(usages []sessionlog.TailUsage, cursor string) []sessionlo
 // skipping it. Every gate is slog.Debug'd so a fleet-wide zero is attributable in
 // the field instead of silently swallowed.
 //
-// Coverage ceiling (known, intentional — do NOT widen): discovery and extraction
-// read only the extractor's bounded transcript tail (a 64KB window per family),
-// so a very long autonomous interval recovers only its final few invocations —
-// earlier model/cost facts of that interval are lost. Widening the tail re-opens
-// the unbounded-scan and misattribution risks that bound exists to prevent;
-// fuller recovery is a separate, deliberate change.
+// Coverage ceiling, per transcript family — the two families differ, and the
+// difference is deliberate:
+//
+//   - claude: cursor-bounded growth, capped at 16MB — once a cursor exists.
+//     SessionLogAdapter.TailUsage routes to sessionlog.ExtractTailUsageSince,
+//     whose window doubles from the 64KB tail until the persisted cursor is
+//     in view, the whole file is in view, or the growth cap is reached — so a
+//     very long autonomous interval recovers its whole backlog rather than
+//     only its final few invocations. Only entries older than that capped
+//     window are lost, and the extractor logs the path, window, and cursor
+//     when it drops them.
+//     Before a cursor exists none of that applies. PersistInvocationUsageCursor
+//     no-ops on an empty value, so the cursor stays unset until some seam
+//     records an invocation; until then ExtractTailUsageSince short-circuits to
+//     one fixed tailChunkSize (64KB) read, never entering the growth loop and
+//     so never emitting the cap log. That first pass is the pre-change
+//     behavior — everything older than 64KB is dropped silently — and the
+//     cursor it then persists becomes the growth loop's stop condition, so no
+//     later pass reaches back across the gap. Both sweep lanes take this path:
+//     SweepSessionModelUsage and SweepSessionModelUsageAtPath share
+//     sweepResolvedTranscript, which reads the cursor from session-bead
+//     metadata.
+//   - codex: still the fixed 64KB tail, and still silently lossy.
+//     SessionLogAdapter.CodexTailUsage accepts the cursor and discards it, so a
+//     very long autonomous interval recovers only its final few invocations and
+//     the earlier model/cost facts of that interval are lost with no log line.
+//     Widening it needs its own correctness argument rather than this one: the
+//     codex extractor collapses on cumulative totals rather than per-message
+//     identity, so the cursor is not a usable stop condition there.
+//
+// Neither risk the old blanket "do not widen" ceiling cited survives
+// cursor-bounded growth, which is why claude was widened. The scan is not
+// unbounded: it terminates at the cursor, at EOF, or at the growth cap. And it
+// cannot misattribute: with the cursor at byte P and EOF at E, a cap-hit window
+// is exactly [E-16MB, E], every byte of which is after P — so every entry
+// returned is genuinely newer than the cursor, and the only loss is
+// [P, E-16MB), which is precisely what the extractor's cap log reports.
 //
 // Overlap with the prompt-op seam is safe: both stamp usage.ModelIdempotencyKey,
 // which usage.ReadFacts collapses, so an invocation recorded by both beats folds
