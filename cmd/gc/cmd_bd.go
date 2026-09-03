@@ -109,7 +109,11 @@ that assignee.
 
 gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. If you need
-auto-export behavior, invoke bd directly.`,
+auto-export behavior, invoke bd directly.
+
+When a work close names a commit, gc warns unless that commit is on a
+remote-tracking ref or all paths it changed have matching blobs on one. The
+blob check recognizes squash merges without comparing unrelated branch work.`,
 		Example: `  gc bd --rig my-project list
   gc bd --rig my-project create "New task"
   gc bd show my-project-abc          # auto-detects rig from bead prefix
@@ -476,10 +480,11 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 
 	// Work-record close gate (ADR-0009): a close routed through the SDK seam
 	// must satisfy the typed work-record contract (gc.work_outcome present;
-	// shipped ⇒ gc.work_commit reachable on gc.work_branch). Warn-only by default;
-	// blocks the close only when GC_WORK_RECORD_ENFORCE is set. Reuses the
-	// store/beads the write-ID guard above already opened and read, and the
-	// config the caller already loaded.
+	// shipped ⇒ gc.work_commit published directly or as squash-equivalent
+	// changed-path blobs on a remote-tracking ref). Warn-only by default; blocks
+	// the close only when GC_WORK_RECORD_ENFORCE is set. Reuses the store/beads
+	// the write-ID guard above already opened and read, and the config the caller
+	// already loaded.
 	if runWorkRecordCloseGate(bdArgs, target.ScopeRoot, cityPath, cfg, guardStore, guardBeads, stderr) {
 		return 1
 	}

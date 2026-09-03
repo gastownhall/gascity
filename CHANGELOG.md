@@ -31,6 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gc bd` work closes now detect unpublished commits named in work metadata
+  or the close reason.** A commit passes when any remote-tracking ref contains
+  it or when all paths changed since its merge base have matching blobs on one,
+  so squash merges pass without unrelated target-branch changes causing false
+  warnings. The gate remains warn-only unless `GC_WORK_RECORD_ENFORCE` is set.
+
 - **Mail archive and delete now expand whitespace-joined message IDs.** Each
   positional argument is split into individual IDs before single-versus-batch
   dispatch, so shell variables containing multiple IDs no longer look like one
