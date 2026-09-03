@@ -254,18 +254,20 @@ scripts directly.
 `gc doctor` reports `native_store_unavailable gate=dolt_mode_safe`.
 
 Gas City's native in-process beads store requires that `bd context` reports
-`dolt_mode=server`. Fresh managed-local Gas City scopes instead default to
-Beads' `proxied-server` mode, where Beads owns the proxy and its child Dolt
-process; those scopes intentionally use the Beads/UOW path rather than Gas
-City's native SQL opener. When `bd` is configured with an embedded Dolt
+`dolt_mode=server`. Fresh managed-local Gas City scopes use direct/server mode
+by default. Set `[dolt] mode = "proxied-server"` before initialization to opt
+into Beads' proxied mode, where Beads owns the proxy and its child Dolt process;
+those scopes intentionally use the Beads/UOW path rather than Gas City's native
+SQL opener. When `bd` is configured with an embedded Dolt
 instance, the `dolt_mode_safe` gate fails and Gas City falls back to invoking
 the `bd` CLI as a subprocess for every store operation. Each subprocess call
 adds tens to hundreds of milliseconds of overhead, which accumulates noticeably
 during `gc status` and `gc session list`.
 
-**Remedy:** For a fresh managed-local scope, leave the default
-`proxied-server` mode enabled. To opt into the direct native SQL path, run `bd`
-against a Dolt SQL server so that `bd context` reports `dolt_mode=server`:
+**Remedy:** For a fresh managed-local scope, leave the direct/server default in
+place. To opt into the proxied path, set `[dolt] mode = "proxied-server"` before
+initialization. Existing scopes retain their persisted mode; use Beads'
+migration commands for conversion rather than rewriting metadata by hand:
 
 ```bash
 # Start a local Dolt SQL server (one-time setup for direct mode)

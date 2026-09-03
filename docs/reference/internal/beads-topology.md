@@ -7,8 +7,10 @@ A Gas City workspace can hold beads in several places at once — at the city
 root and inside every rig. From the outside that looks like several separate
 databases. Existing direct managed-server scopes share one Dolt server, with
 each scope's beads tagged by an `issue_prefix` that the `bd` CLI uses as a hard
-query filter. Fresh managed-local scopes default to Beads' `proxied-server`
-topology, where each scope's Beads UOW owns its proxy and child Dolt lifecycle.
+query filter. Fresh managed-local scopes default to direct/server mode. Set
+`[dolt] mode = "proxied-server"` before initialization to opt into Beads'
+proxied topology, where each scope's Beads UOW owns its proxy and child Dolt
+lifecycle.
 
 This page explains that topology so the on-disk layout, the contents of each
 `.beads/` directory, and the output of `bd list` from different working
@@ -71,8 +73,8 @@ only ever see two of them:
 
 | Value | Meaning |
 |---|---|
-| `managed_city` | This city uses a direct managed Dolt; the port lives in `.beads/dolt-server.port`. Fresh cities use Beads' proxied mode under this origin. |
-| `inherited_city` | This rig has no direct endpoint of its own; resolve through the city, or inherit the city's proxied Beads path. |
+| `managed_city` | This city uses managed Dolt; direct/server is the default and the port lives in `.beads/dolt-server.port`. An explicit `[dolt] mode = "proxied-server"` selects Beads' proxied path under this origin. |
+| `inherited_city` | This rig has no direct endpoint of its own; resolve through the city and inherit its selected direct or proxied mode. |
 
 The two remaining values, `city_canonical` and `explicit`, are for cities and
 rigs that point at an external Dolt server. See the [Beads Dolt Contract
