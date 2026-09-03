@@ -4,9 +4,10 @@ description: Mental model, forbidden edits, sanctioned escape hatches, and recov
 ---
 
 This runbook is for mayors and operators. It covers explicit and legacy
-managed-city endpoint configurations. Fresh managed-local cities use Beads'
-`proxied-server` mode by default; the direct managed-server topology described
-below remains available for existing scopes and explicit direct configuration.
+managed-city endpoint configurations. Fresh managed-local cities use the
+direct/server topology by default. Set `[dolt] mode = "proxied-server"` before
+initialization to opt into Beads' proxied-server mode; existing scopes retain
+their persisted mode and are never changed during startup.
 The endpoint architecture introduced in the
 [beads-and-Dolt contract redesign](https://github.com/gastownhall/gascity/blob/main/engdocs/design/beads-dolt-contract-redesign.md)
 — specifically the case where rigs **inherit** their Dolt endpoint
@@ -23,7 +24,7 @@ External TCP/Unix endpoints remain owner-managed and refuse in-place migration.
 
 ## Migrate an existing Beads scope
 
-Fresh managed-local scopes already use `proxied-server`. An existing direct
+Fresh managed-local scopes use direct/server by default. An existing direct
 scope (`dolt_mode: "server"`) stays direct until an operator opts in; Gas City
 never converts it during startup. Stop writers and the Dolt process before
 running a dry-run, because migration checks live ownership:

@@ -355,8 +355,8 @@ func initDirIfReadyManagedDolt(cityPath, dir, prefix, _ string) error {
 // startup can skip direct-Dolt lifecycle before the first bd init.
 func scopeUsesProxiedDoltMode(cityPath, scopeRoot string) bool {
 	// A complete storage binding is owned by the linked beads backend. It must
-	// never be reclassified as a fresh managed-local scope merely because the
-	// city default is proxied-server; doing so would replace the binding's
+	// never be reclassified as a fresh managed-local scope merely because a
+	// config selector requests proxy mode; doing so would replace the binding's
 	// withheld environment with a local proxy marker.
 	if bound, err := scopeStoreIsExternallyBound(cityPath, scopeRoot); err == nil && bound {
 		return false
@@ -394,17 +394,16 @@ func scopeUsesProxiedDoltMode(cityPath, scopeRoot string) bool {
 	}
 	// A process-local external endpoint remains an explicit direct-server
 	// selection for this invocation. It is deliberately not persisted into the
-	// canonical scope files, but it must take precedence over the fresh-scope
-	// default so the child bd process can connect to the requested server.
+	// canonical scope files, but it must take precedence over config selection
+	// so the child bd process can connect to the requested server.
 	// Persisted proxied markers above remain authoritative and ignore ambient
 	// direct-server variables.
 	if _, ok := externalDoltEnvOverrideTarget(); ok {
 		return false
 	}
 	// A pre-existing Gas City runtime publication is evidence that this
-	// workspace was already using the direct managed-server lifecycle before
-	// the proxied default was introduced. Preserve that compatibility path until
-	// an authoritative mode marker is written.
+	// workspace was already using the direct managed-server lifecycle. Preserve
+	// that compatibility path until an authoritative mode marker is written.
 	for _, runtimePath := range []string{managedDoltStatePath(cityPath), providerManagedDoltStatePath(cityPath)} {
 		if _, err := os.Stat(runtimePath); err == nil {
 			return false

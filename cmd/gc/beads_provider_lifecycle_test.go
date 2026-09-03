@@ -1314,8 +1314,7 @@ prefix = "fr"
 		t.Fatal(err)
 	}
 	// The provider script below models the legacy Gas City-managed SQL server.
-	// Keep that intent explicit now that an uninitialized managed scope defaults
-	// to beads' proxied-server lifecycle.
+	// Keep that intent explicit for the direct-server lifecycle under test.
 	writeScopeMetadata(t, cityPath, map[string]string{
 		"database":      "dolt",
 		"backend":       "dolt",
@@ -1405,8 +1404,7 @@ prefix = "fe"
 	}
 	// The fixture models a file-backed city carrying an inherited rig that
 	// still uses Gas City's direct Dolt server. Persist that mode explicitly so
-	// the fresh-scope proxied default does not suppress the mirror this test is
-	// meant to verify.
+	// the mirror remains tied to the direct lifecycle under test.
 	writeScopeMetadata(t, cityPath, map[string]string{
 		"database":      "dolt",
 		"backend":       "dolt",
@@ -6272,8 +6270,8 @@ esac
 	}
 	// The host/port below are process-local overrides, but this fixture is
 	// specifically exercising the direct-server projection path. Mark the city
-	// endpoint as canonical so the proxied default does not claim the fresh rig
-	// after init and skip the follow-up list probe.
+	// endpoint as canonical so the explicit endpoint remains authoritative and
+	// the follow-up list probe runs against that direct target.
 	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -7154,7 +7152,7 @@ func TestEnforceCanonicalScopeMetadataForInitScrubsDeprecatedMetadataEndpointAut
 	for key, want := range map[string]string{
 		"database":      "dolt",
 		"backend":       "dolt",
-		"dolt_mode":     "proxied-server",
+		"dolt_mode":     "server",
 		"dolt_database": "gascity",
 		"custom":        "keep",
 	} {

@@ -667,9 +667,8 @@ prefix = "repo"
 		t.Fatal(err)
 	}
 	// This test exercises projection of a live Gas City-managed SQL server.
-	// Mark the fixture as an existing direct-server scope explicitly; a fresh
-	// managed scope now defaults to beads' proxied-server mode and has no
-	// Gas City-owned port to project.
+	// Mark the fixture as an existing direct-server scope explicitly so the
+	// projection remains tied to the direct lifecycle under test.
 	writeScopeMetadata(t, cityDir, map[string]string{
 		"database":      "dolt",
 		"backend":       "dolt",

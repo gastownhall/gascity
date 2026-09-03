@@ -689,7 +689,7 @@ func (c *BeadsStoreCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 	if active {
-		if !(strings.EqualFold(target.DoltMode, "proxied-server") && !target.External) {
+		if !strings.EqualFold(target.DoltMode, "proxied-server") || target.External {
 			addr, conn, err := dialDoltTarget(target)
 			if err != nil {
 				r.Status = StatusError
@@ -1127,13 +1127,14 @@ func scopeUsesBDDoltliteStore(cityPath, scopePath string) bool {
 // doctorScopeUsesProxiedDoltMode reports whether the effective beads scope is
 // persisted in Beads' proxied-server mode. A proxied scope is served by the
 // beads UOW/proxy path, so there is no Gas City-managed direct Dolt listener
-// for DoltServerCheck to probe.
+// for DoltServerCheck to probe. Direct/server remains the default when no
+// persisted or explicit proxy selector is present.
 //
 // Metadata is consulted first because it is emitted by the backend initializer
 // and is the strongest persisted statement of the mode. A non-proxied marker
 // is authoritative too: an older direct-server scope must not inherit a newer
-// city's proxied default. For inherited rigs, a missing local marker falls
-// back to the city's persisted mode.
+// a config-selected proxy mode. For inherited rigs, a missing local marker
+// falls back to the city's persisted mode.
 func doctorScopeUsesProxiedDoltMode(cityPath, scopePath string) bool {
 	return doctorScopeUsesProxiedDoltModeForRig(cityPath, scopePath, nil)
 }
@@ -1161,7 +1162,7 @@ func doctorScopeUsesProxiedDoltModeForRig(cityPath, scopePath string, configured
 	// A configured rig can carry a legacy explicit endpoint in city.toml while
 	// its local .beads files are still absent (for example immediately after
 	// registration). That endpoint is direct-scope ownership and must take
-	// precedence over the city's proxied default during classification.
+	// precedence over the city's selected proxy mode during classification.
 	if !sameDoctorScope(cityPath, scopePath) {
 		if configuredRig != nil && doctorRigHasExplicitEndpoint(*configuredRig) {
 			return false
@@ -1721,7 +1722,7 @@ func (c *RigBeadsCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 	if active {
-		if !(strings.EqualFold(target.DoltMode, "proxied-server") && !target.External) {
+		if !strings.EqualFold(target.DoltMode, "proxied-server") || target.External {
 			addr, conn, err := dialDoltTarget(target)
 			if err != nil {
 				r.Status = StatusError
