@@ -118,11 +118,6 @@ prompt_template = "prompts/dog.template.md"
 		t.Fatal(err)
 	}
 
-	orig, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(orig) })
-	if err := os.Chdir(dir); err != nil {
-		t.Fatal(err)
-	}
 	t.Setenv("GC_CITY_PATH", dir)
 
 	var stdout, stderr bytes.Buffer
@@ -164,11 +159,6 @@ prompt_template = "prompts/dog.template.md"
 		t.Fatal(err)
 	}
 
-	orig, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(orig) })
-	if err := os.Chdir(dir); err != nil {
-		t.Fatal(err)
-	}
 	t.Setenv("GC_CITY_PATH", dir)
 
 	var stdout, stderr bytes.Buffer
