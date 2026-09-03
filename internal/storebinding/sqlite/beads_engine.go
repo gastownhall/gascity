@@ -77,6 +77,9 @@ func (c storeCloser) Close() error { return c.store.CloseStore() }
 // The classes are checked against what one Beads ledger can serve rather than
 // trusted: an assignment this provider cannot honor must fail at the open, not
 // at the first read of a class nobody projected.
+//
+// The store comes back fenced to the namespaces those classes hold — the
+// pinned-id contract in engdocs/architecture/beads.md, invariant 16.
 func (p *beadsProvider) OpenEngine(spec storebinding.BindingSpec, classes storebinding.ClassSet) (beads.Store, io.Closer, error) {
 	if err := p.boundTo(spec); err != nil {
 		return nil, nil, err

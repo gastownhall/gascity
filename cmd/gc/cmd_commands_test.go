@@ -2770,13 +2770,13 @@ func TestPackCommandCobraHelpAndUnknownParity(t *testing.T) {
 			name:           "known namespace miss",
 			args:           []string{"backstage", "missing"},
 			wantExit:       1,
-			wantStderrText: []string{`unknown command "missing"`, "Usage:", "gc backstage", "hello", "repo"},
+			wantStderrText: []string{`unknown command "missing"`, `Run "gc backstage --help" for usage.`},
 		},
 		{
 			name:           "known intermediate miss",
 			args:           []string{"backstage", "repo", "missing"},
 			wantExit:       1,
-			wantStderrText: []string{`unknown command "missing"`, "Usage:", "gc backstage repo", "sync"},
+			wantStderrText: []string{`unknown command "missing"`, `Run "gc backstage repo --help" for usage.`},
 		},
 	}
 	for _, test := range tests {
@@ -2816,12 +2816,12 @@ func TestPackCommandGroupMissRejectsUnknownSubcommands(t *testing.T) {
 		{
 			name: "namespace",
 			args: []string{"backstage", "missing"},
-			want: []string{`unknown command "missing"`, "Usage:", "gc backstage", "hello", "repo"},
+			want: []string{`unknown command "missing"`, `Run "gc backstage --help" for usage.`},
 		},
 		{
 			name: "intermediate",
 			args: []string{"backstage", "repo", "missing"},
-			want: []string{`unknown command "missing"`, "Usage:", "gc backstage repo", "sync"},
+			want: []string{`unknown command "missing"`, `Run "gc backstage repo --help" for usage.`},
 		},
 	}
 	for _, test := range tests {
@@ -3031,7 +3031,7 @@ func TestResolveDiscoveredCommandFallbackSelectsNestedUnknown(t *testing.T) {
 	if got := stdout.String(); got != "" {
 		t.Fatalf("stdout = %q, want empty", got)
 	}
-	for _, text := range []string{`gc: unknown command "missing"`, "Usage:", "gc private-binding repo"} {
+	for _, text := range []string{`gc: unknown command "missing"`, `Run "gc private-binding repo --help" for usage.`} {
 		if !strings.Contains(stderr.String(), text) {
 			t.Fatalf("stderr missing %q:\n%s", text, stderr.String())
 		}

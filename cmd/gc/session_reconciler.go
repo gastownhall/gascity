@@ -250,9 +250,14 @@ func resetPendingCommittedAtInfo(info sessionpkg.Info) (string, time.Time, bool)
 }
 
 func recordResetStallIfDue(
+	cityPath string,
+	store beads.Store,
+	sp runtime.Provider,
+	cfg *config.City,
 	info sessionpkg.Info,
 	template string,
 	name string,
+	running bool,
 	alive bool,
 	startupTimeout time.Duration,
 	now time.Time,
@@ -275,12 +280,41 @@ func recordResetStallIfDue(
 	if elapsed <= startupTimeout {
 		return
 	}
-	if dt != nil && !dt.markResetStall(info.ID) {
-		return
-	}
+	// The dedup mark gates the DIAGNOSTIC and the event, not the eviction:
+	// a transient kill failure must not disarm the fix for the rest of the
+	// episode (the mark only clears when continuation_reset_pending clears,
+	// which a wedged session never does).
+	first := dt == nil || dt.markResetStall(info.ID)
+
 	if stderr == nil {
 		stderr = io.Discard
 	}
+
+	// The occupying tmux runtime is stale: continuation reset has been
+	// pending longer than the startup timeout, and the runtime the
+	// reconciler is waiting on for the reset never came back alive. When the
+	// tmux session is still running underneath (the classic wedge in #5355:
+	// the old runtime exited cleanly but its tmux session survived), waiting
+	// forever leaves the session parked in reset-pending under the OLD
+	// config indefinitely. Evict it so the normal spawn path on a later tick
+	// recreates the session under the current config. Attempted on every
+	// overdue tick while a stale runtime is still running — once the kill
+	// lands, `running` goes false and this stops attempting. Gated on
+	// running: if the tmux session is already gone too, there is nothing to
+	// evict, and the reconciler's other paths handle a fully-dead bead.
+	// Best-effort: a session that disappears between the observation above
+	// and this kill (IsSessionGone) is the expected steady state, not a
+	// failure.
+	if running && sp != nil {
+		if err := workerKillSessionTargetWithConfig(cityPath, store, sp, cfg, name); err != nil && !runtime.IsSessionGone(err) {
+			fmt.Fprintf(stderr, "session reconciler: evicting stale reset-pending runtime %s: %v\n", name, err) //nolint:errcheck
+		}
+	}
+
+	if !first {
+		return
+	}
+
 	elapsedSeconds := int(elapsed / time.Second)
 	msg := fmt.Sprintf(
 		"session reconciler: reset stalled for %s: elapsed_s=%d reset_committed_at=%s bead_id=%s",
@@ -2279,7 +2313,18 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			shadowTick.captureRuntime(id, "observeRuntimeProviderLiveness", name, triFromBool(running), triFromBool(alive))
 		}
 		peek := cachedSessionPeek(cityPath, store, sp, cfg, id, tp.Hints.ProcessNames)
-		recordResetStallIfDue(infoByID[id], tp.TemplateName, name, alive, startupTimeout, clk.Now().UTC(), dt, rec, stderr, trace)
+		if running && !alive {
+			// Warm the peek before recordResetStallIfDue may evict the stale
+			// runtime below: cachedSessionPeek is lazy, and a capture-pane
+			// against a killed tmux session errors, which would silently skip
+			// the zombie forensics, the crash event, and both
+			// checkRateLimitStability call sites on the eviction tick.
+			// Successful peeks are cached, so every consumer below (all of
+			// which use rateLimitPeekLines) is served from this one read —
+			// no extra capture in a branch that already peeks.
+			_, _ = peek(rateLimitPeekLines)
+		}
+		recordResetStallIfDue(cityPath, store, sp, cfg, infoByID[id], tp.TemplateName, name, running, alive, startupTimeout, clk.Now().UTC(), dt, rec, stderr, trace)
 
 		// Zombie capture: session exists but process dead — grab scrollback for forensics.
 		// markProviderTerminalError persists + folds its write onto the snapshot in one
@@ -2305,17 +2350,25 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						})
 					}
 				}
-				if !runtime.ContainsProviderRateLimitScreen(output) {
+				// Dedup: mark once per zombie episode (markZombieCrash returns
+				// false on every tick after the first, until clearZombieCrash
+				// below observes the session alive again). Without this, a
+				// wedged zombie fires session.crashed on every ~30s reconciler
+				// tick indefinitely — 299 events over 5.3h in #5355, each
+				// carrying the raw pane dump.
+				if !runtime.ContainsProviderRateLimitScreen(output) && dt.markZombieCrash(id) {
 					rec.Record(events.Event{
 						Type:    events.SessionCrashed,
 						Actor:   "gc",
 						Subject: tp.DisplayName(),
-						Message: output,
+						Message: truncateCrashPaneOutput(output, crashEventPaneOutputMaxLines),
 						Payload: api.SessionLifecyclePayloadJSON(id, tp.TemplateName, "zombie process"),
 					})
 					telemetry.RecordAgentCrash(context.Background(), tp.DisplayName(), output)
 				}
 			}
+		} else {
+			dt.clearZombieCrash(id)
 		}
 		// The snapshot is already current after the zombie-capture block:
 		// markProviderTerminalError advanced infoByID[id] in place via
@@ -5929,6 +5982,29 @@ func truncateHashForLog(h string) string {
 		return h[:12]
 	}
 	return h
+}
+
+// truncateCrashPaneOutput caps a pane capture to at most maxLines lines,
+// keeping the first and last halves and eliding the middle. Output at or
+// under the cap is returned unchanged. Used to bound session.crashed event
+// payloads independent of the larger peek used for classifier heuristics
+// (rateLimitPeekLines) — see crashEventPaneOutputMaxLines (#5355).
+func truncateCrashPaneOutput(output string, maxLines int) string {
+	if maxLines <= 0 {
+		return output
+	}
+	lines := strings.Split(output, "\n")
+	if len(lines) <= maxLines {
+		return output
+	}
+	head := maxLines / 2
+	tail := maxLines - head
+	omitted := len(lines) - head - tail
+	var b strings.Builder
+	b.WriteString(strings.Join(lines[:head], "\n"))
+	fmt.Fprintf(&b, "\n… %d lines omitted …\n", omitted)
+	b.WriteString(strings.Join(lines[len(lines)-tail:], "\n"))
+	return b.String()
 }
 
 // rebaselineLegacyHashOutcome picks the trace outcome that matches a

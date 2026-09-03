@@ -1366,3 +1366,24 @@ func createPrimeHookSession(t *testing.T, cityDir, sessionName, template string)
 	}
 	return created.ID
 }
+
+func TestBuildPrimeContextConfigDir(t *testing.T) {
+	// #5315: the bug was a construction site that never populated
+	// ConfigDir. Pin the site, not just the helper.
+	cityPath := filepath.Join(t.TempDir(), "demo-city")
+
+	ctx := buildPrimeContextFor(cityPath, "", &config.Agent{Name: "worker"},
+		nil, config.QueryTopology{}, nil)
+	if ctx.ConfigDir != cityPath {
+		t.Fatalf("ConfigDir = %q, want %q", ctx.ConfigDir, cityPath)
+	}
+
+	packDir := filepath.Join(cityPath, ".gc", "packs", "example")
+	ctx = buildPrimeContextFor(cityPath, "", &config.Agent{
+		Name:      "worker",
+		SourceDir: packDir,
+	}, nil, config.QueryTopology{}, nil)
+	if ctx.ConfigDir != packDir {
+		t.Fatalf("ConfigDir = %q, want SourceDir override %q", ctx.ConfigDir, packDir)
+	}
+}

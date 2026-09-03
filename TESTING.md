@@ -1210,9 +1210,10 @@ first-attempt reliability.
 
 #### Live worker inference tests (`//go:build acceptance_c`)
 
-`test/acceptance/worker_inference` runs live Claude/Codex/Gemini/OpenCode CLI
-sessions through tmux and requires local or CI-provided provider auth. It is
-not part of PR CI. Run it deliberately when validating provider behavior:
+`test/acceptance/worker_inference` runs live Claude, Codex, Cursor, Gemini,
+Kimi, OpenCode, Mimo Code, Pi, and Antigravity CLI sessions through tmux and
+requires local or CI-provided provider auth. It is not part of PR CI. Run it
+deliberately when validating provider behavior:
 
 ```bash
 make setup-worker-inference PROFILE=claude/tmux-cli
@@ -1220,8 +1221,12 @@ make test-worker-inference PROFILE=claude/tmux-cli
 ```
 
 Supported profiles are `claude/tmux-cli`, `codex/tmux-cli`,
-`gemini/tmux-cli`, and `opencode/tmux-cli`. OpenCode live tests use Gemini via
-`--model google/gemini-2.5-flash` by default; set
+`cursor/tmux-cli`, `gemini/tmux-cli`, `kimi/tmux-cli`,
+`opencode/tmux-cli`, `mimocode/tmux-cli`, `pi/tmux-cli`, and
+`antigravity/tmux-cli`. Cursor requires a preinstalled `cursor-agent` binary;
+stage auth with `GC_WORKER_INFERENCE_CURSOR_API_KEY`,
+`GC_WORKER_INFERENCE_CURSOR_API_KEY_FILE`, or `CURSOR_API_KEY`. OpenCode live
+tests use Gemini via `--model google/gemini-2.5-flash` by default; set
 `GC_WORKER_INFERENCE_OPENCODE_MODEL` to override it and provide
 `GOOGLE_GENERATIVE_AI_API_KEY`, `GEMINI_API_KEY`, or `GOOGLE_API_KEY` for auth.
 The full profile matrix is not wired into nightly CI today. Nightly runs a

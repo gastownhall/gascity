@@ -2986,6 +2986,28 @@ prefix = "fe"
 // bound backend would reject every command. A city with neither a binding
 // nor a pin keeps the ambient lookup.
 func TestGcBdPassthroughResolvesBdBinary(t *testing.T) {
+	t.Run("managed city runs the workspace-pinned bd", func(t *testing.T) {
+		cityDir := newGcBdBinaryProbeCity(t)
+
+		pinDir := t.TempDir()
+		pinnedBD := filepath.Join(pinDir, "bd")
+		writeGcBdProbeScript(t, pinnedBD, "pinned-bd")
+		cityTOML := "[workspace]\nname = \"demo\"\n\n[workspace.env]\nBD_BIN = " +
+			strconv.Quote(pinnedBD) + "\nPATH = " +
+			strconv.Quote(pinDir+string(os.PathListSeparator)+"$PATH") + "\n"
+		if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		var stdout, stderr bytes.Buffer
+		if got := doBd([]string{"show", "gc-1"}, &stdout, &stderr); got != 0 {
+			t.Fatalf("doBd() = %d, want 0; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+		}
+		if got := strings.TrimSpace(stdout.String()); got != "pinned-bd" {
+			t.Fatalf("executed bd = %q, want workspace-pinned %q", got, "pinned-bd")
+		}
+	})
+
 	t.Run("complete binding runs the workspace-pinned bd", func(t *testing.T) {
 		cityDir := newGcBdBinaryProbeCity(t)
 

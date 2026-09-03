@@ -650,11 +650,25 @@ func (s *SQLiteStore) create(b Bead, allowForeign bool) (Bead, error) {
 
 // checkPinnedIDNamespace enforces the fence. An empty id is a mint request and
 // an unfenced store claims no namespace, so both pass untouched.
+//
+// It runs BEFORE any read of the database, which is deliberate and is part of
+// the contract: a store must answer "I do not serve that namespace" without
+// first checking whether it happens to hold the row. Checking existence first
+// would leak the presence of a relic — CreateWithForeignID can carry a foreign
+// id in — through a refusal about a namespace the store disclaims.
+//
+// The id is tested EXACTLY as it will be stored. Trimming it first would let a
+// caller pin "  gcn-1" — or an id that is nothing but spaces — past a check the
+// stored row then fails, which is the one outcome the fence exists to prevent:
+// a resident bead that no id-shaped lookup of this namespace can reach. Only
+// create's own mint test (an id of length zero) is exempt.
+//
+// The refusal wraps ErrPinnedIDOutsideNamespace so a caller can route the id to
+// a sibling binding instead of parsing this message.
 func (s *SQLiteStore) checkPinnedIDNamespace(id string) error {
 	if len(s.reservedPrefixes) == 0 {
 		return nil
 	}
-	id = strings.TrimSpace(id)
 	if id == "" {
 		return nil
 	}
@@ -664,7 +678,7 @@ func (s *SQLiteStore) checkPinnedIDNamespace(id string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("sqlite create: id %q is outside this store's namespaces (%s): a pinned id must carry one of them, or use the foreign-id create the store migration uses", id, strings.Join(s.reservedPrefixes, ", "))
+	return fmt.Errorf("sqlite create: id %q is outside this store's namespaces (%s): a pinned id must carry one of them, or use the foreign-id create the store migration uses: %w", id, strings.Join(s.reservedPrefixes, ", "), ErrPinnedIDOutsideNamespace)
 }
 
 func (s *SQLiteStore) normalizeCreate(b Bead) Bead {

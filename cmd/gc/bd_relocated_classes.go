@@ -41,17 +41,24 @@ func relocatedBeadClasses(cfg *config.City) []beads.RelocatedClass {
 		if binding == "" || binding == config.StorageWorkBinding {
 			continue
 		}
-		prefix, ok := config.ReservedClassPrefix(string(class))
-		if !ok {
+		// Every namespace the class ANSWERS FOR, not just the one it mints. A
+		// subsystem inside the binding that mints its own ids — the nudge
+		// queue's "gcnq-" records inside the nudges store — is exactly as blind
+		// to bd as the class's own rows are, so a guard that knew only the mint
+		// prefix let a read scoped to one run successfully against the ledger
+		// that holds none of them.
+		prefixes := config.ReservedClassPrefixesFor(string(class))
+		if len(prefixes) == 0 {
 			// A class with no reserved id prefix mints ids indistinguishable
 			// from work ids, so a blind read of it is not detectable by id and
 			// claiming otherwise would be worse than saying nothing.
 			continue
 		}
 		relocated = append(relocated, beads.RelocatedClass{
-			Class:    string(class),
-			IDPrefix: prefix,
-			Location: relocatedClassLocation(storage, binding),
+			Class:        string(class),
+			IDPrefix:     prefixes[0],
+			HeldPrefixes: prefixes[1:],
+			Location:     relocatedClassLocation(storage, binding),
 		})
 	}
 	return relocated

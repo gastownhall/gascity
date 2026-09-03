@@ -94,8 +94,8 @@ type ClassBinding struct {
 
 	// Prefixes are the reserved id namespaces those classes HOLD — the prefix
 	// each mints under plus any its store holds without minting, such as the
-	// nudge queue's. The caller supplies them from
-	// config.ReservedClassPrefixesFor; storeref stays free of internal/config.
+	// nudge queue's. ReservedPrefixesFor derives them from the one table in
+	// internal/config that declares them.
 	Prefixes []string
 
 	// Leg is the opened binding store.
