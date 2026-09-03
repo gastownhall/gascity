@@ -4969,6 +4969,7 @@ export type StorageBindingOutcomePayload = {
     database: string;
     invariant: string;
     outcome: string;
+    proven_beads: number;
 };
 
 export type StoreDiskCriticalPayload = {
@@ -5370,6 +5371,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeStorageBindingConverged) | ({
     type: 'storage.binding.genesis';
 } & TypedEventStreamEnvelopeStorageBindingGenesis) | ({
+    type: 'storage.binding.not_configured';
+} & TypedEventStreamEnvelopeStorageBindingNotConfigured) | ({
     type: 'storage.binding.uncheckable';
 } & TypedEventStreamEnvelopeStorageBindingUncheckable) | ({
     type: 'storage.binding.unconverged';
@@ -6922,6 +6925,24 @@ export type TypedEventStreamEnvelopeStorageBindingGenesis = {
 };
 
 /**
+ * TypedEventStreamEnvelope storage.binding.not_configured
+ */
+export type TypedEventStreamEnvelopeStorageBindingNotConfigured = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: StorageBindingOutcomePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'storage.binding.not_configured';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope storage.binding.uncheckable
  */
 export type TypedEventStreamEnvelopeStorageBindingUncheckable = {
@@ -7257,6 +7278,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeStorageBindingConverged) | ({
     type: 'storage.binding.genesis';
 } & TypedTaggedEventStreamEnvelopeStorageBindingGenesis) | ({
+    type: 'storage.binding.not_configured';
+} & TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured) | ({
     type: 'storage.binding.uncheckable';
 } & TypedTaggedEventStreamEnvelopeStorageBindingUncheckable) | ({
     type: 'storage.binding.unconverged';
@@ -8890,6 +8913,25 @@ export type TypedTaggedEventStreamEnvelopeStorageBindingGenesis = {
     subject?: string;
     ts: string;
     type: 'storage.binding.genesis';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope storage.binding.not_configured
+ */
+export type TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: StorageBindingOutcomePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'storage.binding.not_configured';
     workflow?: WorkflowEventProjection;
 };
 
