@@ -2026,6 +2026,24 @@ func TestRigDoltServerCheck_ExplicitRigUnixSocketReachable(t *testing.T) {
 	}
 }
 
+func TestRigDoltServerCheck_ProxiedMalformedSidecarIsError(t *testing.T) {
+	cityDir, rigDir := t.TempDir(), ""
+	rigDir = filepath.Join(cityDir, "demo")
+	_ = os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755)
+	fs := fsys.OSFS{}
+	writeDoctorCanonicalConfig(t, fs, cityDir, contract.ConfigState{EndpointOrigin: contract.EndpointOriginManagedCity, DoltMode: "proxied-server"})
+	writeDoctorCanonicalMetadata(t, fs, cityDir, "hq")
+	writeDoctorCanonicalConfig(t, fs, rigDir, contract.ConfigState{EndpointOrigin: contract.EndpointOriginManagedCity, DoltMode: "proxied-server"})
+	writeDoctorCanonicalMetadata(t, fs, rigDir, "de")
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "proxied_server_client_info.json"), []byte(`{"external":{"host":"db","port":0}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := NewRigDoltServerCheck(cityDir, config.Rig{Name: "demo", Path: rigDir}, false).Run(&CheckContext{})
+	if r.Status != StatusError {
+		t.Fatalf("status=%d msg=%q", r.Status, r.Message)
+	}
+}
+
 func TestRigDoltServerCheck_InheritedRigIsSkipped(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "demo")
