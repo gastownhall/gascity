@@ -48,6 +48,11 @@ import (
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
+// cacheReconcileActor is the event actor the controller stamps on bead events
+// emitted by a CachingStore's reconciliation pass, distinguishing the cache's
+// own snapshots from foreign writes delivered by a bd hook.
+const cacheReconcileActor = "cache-reconcile"
+
 // controllerState implements api.State, api.StateMutator, and
 // api.ConfigWriteSerializer.
 // Protected by an RWMutex for hot-reload: readers take RLock,
@@ -287,7 +292,7 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 		if recorder != nil {
 			recorder.Record(events.Event{
 				Type:             eventType,
-				Actor:            "cache-reconcile",
+				Actor:            cacheReconcileActor,
 				Subject:          beadID,
 				RunID:            runID,
 				SessionID:        sessionID,
@@ -490,11 +495,15 @@ func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 	if ep == nil {
 		return
 	}
-	// A controller can crash after the durable bead.closed journal append but
-	// before its best-effort lifecycle append. The normal watcher intentionally
-	// begins at the boot-time journal head, so reconcile closed graph.v2 steps
-	// before tailing to repair that otherwise permanent gap.
-	cs.reconcileExecutionCompletions()
+	// The crash-window gap this watcher cannot see — a durable bead.closed whose
+	// best-effort execution.step_completed never landed, already below the
+	// boot-time cursor — is repaired by the STARTUP completions sweep
+	// (runCompletionsSweepLoop, due for backstopReasonStartup on its first poll),
+	// not from here. This function starting the watcher is not an ordering edge
+	// for that repair: the tail below consumes bead.created/updated/closed/deleted
+	// and the repair emits only execution.step_completed, so producer and consumer
+	// are disjoint. Reconciling inline instead cost the whole corpus, serially,
+	// once per city on every fleet boot (ga-1e78j).
 	seq := cs.beadEventStartSeq
 	// A captured seq of 0 with OK=true means the log was genuinely empty at
 	// construction — Watch(0) then replays exactly the prime-window events and
@@ -547,14 +556,24 @@ func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 }
 
 // reconcileExecutionCompletions repairs graph.v2 completion facts from the
-// authoritative graph store, over the WHOLE corpus. It is the convergence
-// backstop: safe to call at startup and from the background sweep, because
-// ReconcileCompleted uses the event journal's exact fact as its idempotency
-// record, so repeated passes do not duplicate lifecycle events.
+// authoritative graph store, over the WHOLE corpus, in ONE unbounded pass. It is
+// safe to call at any time, because ReconcileCompleted uses the event journal's
+// exact fact as its idempotency record, so repeated passes do not duplicate
+// lifecycle events.
 //
 // It is deliberately not on the tick. Walking every workflow root ever created,
 // closed ones included, was 72.4s of a ~360s tick (ga-l7jdg); the tick runs
 // reconcileExecutionCompletionsDelta instead.
+//
+// It is deliberately not on the BOOT path either, for the same reason at a
+// larger scale: paying the whole corpus once per city, serially, dominated fleet
+// boot (ga-1e78j). runCompletionsSweepLoop is the production caller-of-record —
+// the chunked, resumable form of this exact pass, with the identical
+// journal-keyed idempotency record, running off-tick and due for
+// backstopReasonStartup on its first poll of every boot. This one-shot form is
+// kept as the unbounded operator primitive: it has no production caller today,
+// and is retained for tests and for a future diagnostic path that wants the
+// whole corpus converged now rather than in chunks.
 func (cs *controllerState) reconcileExecutionCompletions() {
 	ep, graphStores := cs.completionReconcileInputs(reconcilePlane)
 	if ep == nil {
@@ -753,12 +772,23 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	}
 	cs.mu.RUnlock()
 
+	// A cache-reconcile event carries a CachingStore's own post-absorb snapshot,
+	// dependencies included, rather than a bd hook patch. Saying so keeps the
+	// cache from reading its own emission as a coverage-unknown payload and
+	// discarding the dependency and is_blocked state it just installed, which
+	// fences the row out of the next reconcile pass and re-emits forever
+	// (ga-yoix1).
+	snapshot := evt.Actor == cacheReconcileActor
 	for _, store := range stores {
 		if cached, ok := store.(*beads.CachingStore); ok {
-			cached.ApplyEvent(evt.Type, evt.Payload)
+			if snapshot {
+				cached.ApplyEventSnapshot(evt.Type, evt.Payload)
+			} else {
+				cached.ApplyEvent(evt.Type, evt.Payload)
+			}
 		}
 	}
-	if evt.Actor != "cache-reconcile" {
+	if !snapshot {
 		cs.Poke()
 	}
 	if evt.Type == events.BeadClosed && evt.Subject != "" && len(stores) > 0 {
@@ -775,6 +805,8 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 
 // autocloseStoreRefLocked returns the storeRef string for the store that owns
 // beadID. Called under cs.mu read lock.
+// A relocated-class id falls through to "" on purpose: a storeRef names a work
+// scope, and "" is the ID-only mode that a single-minter class prefix makes safe.
 func (cs *controllerState) autocloseStoreRefLocked(beadID string) string {
 	if cs.cfg == nil {
 		return ""
@@ -812,8 +844,8 @@ func (cs *controllerState) runBeadCloseAutoclose(beadID string, store beads.Stor
 	graphStore := cs.GraphBeadStore()
 	beadCloseAutocloseDispatch(func() {
 		doConvoyAutocloseWith(store, rec, beadID, os.Stderr, os.Stderr)
-		doWispAutocloseWith(store, beadID, os.Stderr, graphStore.Store)
-		doMoleculeAutocloseWith(store, storeRef, rec, beadID, os.Stderr, graphStore.Store)
+		doWispAutocloseWith(store, beadID, os.Stderr, graphStore)
+		doMoleculeAutocloseWith(store, storeRef, rec, beadID, os.Stderr, graphStore)
 	})
 }
 
@@ -871,6 +903,18 @@ func (cs *controllerState) beadEventConfiguredStoreLocked(id string) (beads.Stor
 	match(config.EffectiveHQPrefix(cs.cfg), cs.cityBeadStore)
 	for _, rig := range cs.cfg.Rigs {
 		match(rig.EffectivePrefix(), cs.beadStores[rig.Name])
+	}
+	// Relocated classes are candidates under their reserved prefixes; without
+	// this a "gcg-*" close fell through to the broadcast and autoclose read an
+	// arbitrary work store. Gated on `relocated`, so single-store is unchanged.
+	for _, class := range infraMigrationClasses {
+		prefix, ok := config.ReservedClassPrefix(string(class)) // residency:allow — extends this scan's configured-prefix table, not a probe
+		if !ok {
+			continue
+		}
+		if store, relocated := cs.storageRoutes.storeFor(coordclassFor(string(class))); relocated {
+			match(prefix, store)
+		}
 	}
 	return matchedStore, matchedLen >= 0
 }
@@ -1662,6 +1706,18 @@ func (cs *controllerState) OrdersBeadStore() beads.OrdersStore {
 	return beads.OrdersStore{Store: resolveOrderStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
 }
 
+// ClassBindingHasLegacyResidents replays the boot census for one binding store.
+//
+// The store values the class accessors above hand out are the routes' own
+// stores — resolveClassStore returns routes.storeFor unwrapped — so the census
+// map the boot keyed by store answers directly here. A store this city never
+// censused, the work store included, keeps its probe.
+func (cs *controllerState) ClassBindingHasLegacyResidents(store beads.Store) bool {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.storageRoutes.hasLegacyResidents(store)
+}
+
 // CityBeadsDiagnostic returns the city-level bead store selection diagnostic.
 func (cs *controllerState) CityBeadsDiagnostic() *beads.BeadsDiagnostic {
 	cs.mu.RLock()
@@ -1923,20 +1979,44 @@ func (cs *controllerState) DeleteAgent(name string) error {
 // staying byte-identical. The error wraps configedit.ErrValidation so the async
 // failure mapper renders invalid_request and the sync mapper renders a 4xx rather
 // than a 500.
+// The two passes are separate functions so each can be pinned on its own: a
+// test that only ever calls assertRigPathWithinCity cannot tell which pass
+// rejected, so a pass could rot to a no-op without reddening anything (ga-qe7qm).
 func assertRigPathWithinCity(cityPath, resolved string) error {
-	// Lexical check first: rejects "../" escapes and absolute paths that resolve
-	// to a sibling/parent of the city. Normalize both sides so a symlinked city
-	// ancestor (cityPath raw, resolved already resolveStoreScopeRoot-resolved)
-	// doesn't register as a false-positive escape.
-	normalizedCity := pathutil.NormalizePathForCompare(cityPath)
-	normalizedTarget := pathutil.NormalizePathForCompare(resolved)
-	if err := relWithinCity(normalizedCity, normalizedTarget); err != nil {
+	if err := lexicalContainment(cityPath, resolved); err != nil {
 		return err
 	}
-	// Symlink-aware check: a "../"-free lexical path can still escape through a
-	// symlinked ancestor (e.g. <city>/link -> /outside, then a clone into
-	// link/rig). Canonicalize the city root and the nearest EXISTING ancestor of
-	// the (not-yet-created) target and re-check containment on the real paths.
+	return symlinkAwareContainment(cityPath, resolved)
+}
+
+// lexicalContainment is the first containment pass: it rejects "../" escapes and
+// absolute paths that resolve to a sibling/parent of the city. Both sides are
+// normalized so a symlinked city ancestor (cityPath raw, resolved already
+// resolveStoreScopeRoot-resolved) doesn't register as a false-positive escape.
+//
+// pathutil.NormalizePathForCompare resolves symlinks, so this pass already
+// rejects a symlinked-ancestor escape on its own; it is not purely lexical in
+// effect. What it does NOT do is fail closed when a component cannot be
+// canonicalized — NormalizePathForCompare swallows every EvalSymlinks error and
+// falls back to the lexical form. symlinkAwareContainment covers that gap.
+func lexicalContainment(cityPath, resolved string) error {
+	return relWithinCity(
+		pathutil.NormalizePathForCompare(cityPath),
+		pathutil.NormalizePathForCompare(resolved),
+	)
+}
+
+// symlinkAwareContainment is the second containment pass. It canonicalizes the
+// city root and the nearest EXISTING ancestor of the (not-yet-created) target
+// and re-checks containment on the real paths.
+//
+// It is a genuine second opinion, not decoration: unlike lexicalContainment it
+// fails CLOSED when a path component cannot be canonicalized at all (a symlink
+// loop, a non-directory component, an unsearchable ancestor). In those cases
+// NormalizePathForCompare silently synthesizes an in-city-looking path and the
+// first pass accepts; this pass refuses. TestSymlinkAwareContainmentIsLoadBearing
+// pins exactly those inputs.
+func symlinkAwareContainment(cityPath, resolved string) error {
 	realCity, err := filepath.EvalSymlinks(cityPath)
 	if err != nil {
 		realCity = filepath.Clean(cityPath)
@@ -2465,7 +2545,7 @@ func (cs *controllerState) rigProvisionDeps(editCfg *config.City, r config.Rig, 
 		WriteRoutes: func(cp string, c *config.City) error {
 			return writeAllRigRoutes(collectRigRoutes(cp, c))
 		},
-		ProbeBranch:         func(p string) string { return git.New(p).ProbeDefaultBranch() },
+		ProbeBranch:         func(p string) (string, string) { return git.New(p).ProbeDefaultBranchFrom() },
 		ResolveRegistryPack: cachedRegistryPackSource,
 		NormalizeScopes: func(cp string, c *config.City) error {
 			return normalizeCanonicalBdScopeFiles(cp, c, io.Discard)

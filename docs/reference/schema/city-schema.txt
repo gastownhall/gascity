@@ -111,7 +111,7 @@
         },
         "nudge": {
           "type": "string",
-          "description": "Nudge is text typed into the agent's tmux session after startup.\nUsed for CLI agents that don't accept command-line prompts."
+          "description": "Nudge is text typed into the agent's session after startup.\nUsed for CLI agents that don't accept command-line prompts. For a known\npool session whose trigger remains unclaimed after the 90-second recovery\ngrace period, an empty or whitespace-only Nudge does not opt out: it sends\n\"Run gc hook --claim --drain-ack --json now; if it returns work, execute\nit immediately.\" This fallback applies only to the initial stalled-claim\nrecovery; continuation-claim recovery remains configured-only. Unknown\ntemplates receive no fallback."
         },
         "session": {
           "type": "string",
@@ -1473,7 +1473,7 @@
         "read_timeout_millis": {
           "type": "integer",
           "description": "ReadTimeoutMillis overrides the managed Dolt listener read_timeout_millis.\n0 means use the managed default.",
-          "default": 15000
+          "default": 120000
         },
         "write_timeout_millis": {
           "type": "integer",
@@ -1482,7 +1482,7 @@
         },
         "wait_timeout_seconds": {
           "type": "integer",
-          "description": "WaitTimeoutSeconds overrides the managed server's wait_timeout system\nvariable, which is how long Dolt keeps an idle connection before reaping\nit. Cities that raise ReadTimeoutMillis above the reconcile tick gap\ngenerally need this raised with it, or the controller's long-lived\ndispatch-pool connections are still reaped between ticks. Before this\nfield existed the only way to set it was GC_DOLT_WAIT_TIMEOUT in the\nsupervisor's process environment, which no city.toml could express and\nno shell-invoked restart inherited — so a restart from an operator shell\nsilently rewrote the value. 0 (omitted) means use the managed default.",
+          "description": "WaitTimeoutSeconds overrides the managed server's wait_timeout system\nvariable. Despite the name, wait_timeout does not currently reap idle\nconnections -- measured inert on dolt 2.2.3 for #5383 (see\nDefaultDoltWaitTimeoutSeconds); read_timeout is the only reaper. The\nknob is kept and still emitted regardless: it is harmless, and becomes\ncorrect the moment dolt implements it. Before this field existed the\nonly way to set it was GC_DOLT_WAIT_TIMEOUT in the supervisor's process\nenvironment, which no city.toml could express and no shell-invoked\nrestart inherited — so a restart from an operator shell silently\nrewrote the value. 0 (omitted) means use the managed default.",
           "default": 30
         },
         "dolt_lock_release_timeout": {

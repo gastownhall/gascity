@@ -197,6 +197,12 @@ func TestProjectEventExecutionFactsFailClosed(t *testing.T) {
 	if got, ok := ProjectEvent(work, on); !ok || got.Ref != "mc-work" || got.RunID != "gcg-root" || got.SessionID != "" || got.StepID != "" || got.DependsOnStepIDs != nil {
 		t.Fatalf("work association = %#v, %v; want exact envelope-only association", got, ok)
 	}
+	anchor := TaggedEvent{
+		Seq: 2, Type: "execution.run_anchored", Ts: fixedTS, Actor: "graph", Subject: "source-work", RunID: "gcg-root",
+	}
+	if got, ok := ProjectEvent(anchor, on); !ok || got.Ref != "source-work" || got.RunID != "gcg-root" || got.SessionID != "" || got.StepID != "" || got.DependsOnStepIDs != nil {
+		t.Fatalf("run anchor = %#v, %v; want exact envelope-only anchor", got, ok)
+	}
 
 	for _, tc := range []struct {
 		name string
@@ -232,6 +238,7 @@ func TestProjectEventExecutionFactsFailClosed(t *testing.T) {
 		{name: "work includes session", event: TaggedEvent{Seq: 5, Type: "execution.work_associated", Ts: fixedTS, Subject: "mc-work", RunID: "gcg-root", SessionID: "gcs-1"}, opt: on},
 		{name: "work includes step", event: TaggedEvent{Seq: 6, Type: "execution.work_associated", Ts: fixedTS, Subject: "mc-work", RunID: "gcg-root", StepID: "step"}, opt: on},
 		{name: "work includes topology", event: TaggedEvent{Seq: 7, Type: "execution.work_associated", Ts: fixedTS, Subject: "mc-work", RunID: "gcg-root", DependsOnStepIDs: &[]string{}}, opt: on},
+		{name: "anchor includes session", event: TaggedEvent{Seq: 8, Type: "execution.run_anchored", Ts: fixedTS, Subject: "source-work", RunID: "gcg-root", SessionID: "gcs-1"}, opt: on},
 		{name: "step missing subject", event: TaggedEvent{Seq: 8, Type: "execution.step_defined", Ts: fixedTS, RunID: "gcg-root", StepID: "root"}, opt: on},
 		{name: "step missing run", event: TaggedEvent{Seq: 9, Type: "execution.step_defined", Ts: fixedTS, Subject: "gcg-step", StepID: "root"}, opt: on},
 		{name: "step missing semantic id", event: TaggedEvent{Seq: 10, Type: "execution.step_defined", Ts: fixedTS, Subject: "gcg-step", RunID: "gcg-root"}, opt: on},

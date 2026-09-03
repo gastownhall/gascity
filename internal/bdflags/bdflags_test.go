@@ -1,10 +1,90 @@
 package bdflags
 
 import (
+	"errors"
 	"reflect"
 	"sort"
+	"sync"
 	"testing"
 )
+
+func TestParseHelpFlagsToSets(t *testing.T) {
+	helpText := `Flags:
+      -a, --assignee string   Assignee
+      --help                  help for update
+      --if-assignee string    Apply only if assignee matches
+  Global Flags:
+      --json                  Output in JSON format`
+
+	parsed := discoveredFlags{
+		value: map[string]bool{},
+		bool:  map[string]bool{},
+	}
+	parseHelpFlagsToSets(helpText, &parsed)
+	if !parsed.value["--assignee"] {
+		t.Fatalf("--assignee expected as value flag")
+	}
+	if !parsed.bool["--help"] {
+		t.Fatalf("--help expected as bool flag")
+	}
+	if !parsed.value["--if-assignee"] {
+		t.Fatalf("--if-assignee expected as value flag")
+	}
+	if !parsed.bool["--json"] {
+		t.Fatalf("--json expected as bool flag")
+	}
+}
+
+func TestValueFlagsIncorporatesDiscovered(t *testing.T) {
+	orig := runBdHelpForSubcommand
+	runBdHelpForSubcommand = func(sub string) ([]byte, error) {
+		if sub != "update" {
+			return nil, errors.New("unexpected subcommand")
+		}
+		return []byte(`Flags:
+  -h, --help                     help for update
+  -s, --status string            New status
+  --if-assignee string           Apply the update only if assignee matches
+Global Flags:
+  --json                          Output in JSON format`), nil
+	}
+	defer func() {
+		runBdHelpForSubcommand = orig
+		parseDiscoveredOnce = sync.Map{}
+	}()
+
+	flags := ValueFlagsWithDiscovery("update")
+	if !flags["--if-assignee"] {
+		t.Fatalf("ValueFlagsWithDiscovery(update)[--if-assignee] = false, want true")
+	}
+	if !flags["--status"] {
+		t.Fatalf("ValueFlagsWithDiscovery(update)[--status] = false, want true")
+	}
+}
+
+func TestBoolFlagsIncorporatesDiscovered(t *testing.T) {
+	orig := runBdHelpForSubcommand
+	runBdHelpForSubcommand = func(sub string) ([]byte, error) {
+		if sub != "update" {
+			return nil, errors.New("unexpected subcommand")
+		}
+		return []byte(`Flags:
+  --allow-empty-description      Allow empty description
+  --if-assignee string           Apply only if assignee matches`), nil
+	}
+	defer func() {
+		runBdHelpForSubcommand = orig
+		parseDiscoveredOnce = sync.Map{}
+	}()
+
+	flags := BoolFlagsWithDiscovery("update")
+	if !flags["--allow-empty-description"] {
+		t.Fatalf("BoolFlagsWithDiscovery(update)[--allow-empty-description] = false, want true")
+	}
+	if !flags["--no-history"] {
+		t.Fatalf("BoolFlagsWithDiscovery(update)[--no-history] = false, want true")
+	}
+}
 
 func TestSubcommandsListsAllKnownKeys(t *testing.T) {
 	want := []string{
@@ -371,4 +451,22 @@ func TestScanUnknownFlagsMarkdownTableCellIsolatesInvocations(t *testing.T) {
 	if findings := ScanUnknownFlags([]byte(line)); len(findings) != 0 {
 		t.Errorf("ScanUnknownFlags(%q) = %v, want no findings", line, findings)
 	}
+}
+
+// TestUpdateCompareAndSetFlagsArePinned fails on the unfixed build and passes on
+// the fixed one with nothing else changed. It deliberately does NOT rely on help
+// discovery: discovery ignores its own errors, so a build where `bd` cannot be
+// run falls back to the pinned table, and the pinned table is what broke fenced
+// dispatch. gc-sling works around the gap by writing --if-assignee=VALUE, which
+// the argv scanner skips entirely; this is the fix that workaround points at.
+func TestUpdateCompareAndSetFlagsArePinned(t *testing.T) {
+	for _, flag := range []string{"--if-assignee", "--if-status"} {
+		if !updateValueFlags()[flag] {
+			t.Errorf("update value flags missing %s", flag)
+		}
+	}
+}
+
+func updateValueFlags() map[string]bool {
+	return valueFlagsBySub["update"]
 }

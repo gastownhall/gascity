@@ -13,6 +13,7 @@ import (
 	"time"
 
 	workerpkg "github.com/gastownhall/gascity/internal/worker"
+	zcodeadapter "github.com/gastownhall/gascity/internal/worker/adapters/zcode"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 	"github.com/gastownhall/gascity/test/dolttest"
 	"github.com/gastownhall/gascity/test/tmuxtest"
@@ -149,6 +150,8 @@ func resolveProfile(raw string) workerpkg.Profile {
 		return workerpkg.ProfileOpenCodeTmuxCLI
 	case string(workerpkg.ProfileMimoCodeTmuxCLI):
 		return workerpkg.ProfileMimoCodeTmuxCLI
+	case string(workerpkg.ProfileZCodeTmuxCLI):
+		return workerpkg.ProfileZCodeTmuxCLI
 	case string(workerpkg.ProfilePiTmuxCLI):
 		return workerpkg.ProfilePiTmuxCLI
 	case string(workerpkg.ProfileAntigravityTmuxCLI):
@@ -172,6 +175,8 @@ func profileProvider(profile workerpkg.Profile) string {
 		return "opencode"
 	case workerpkg.ProfileMimoCodeTmuxCLI:
 		return "mimocode"
+	case workerpkg.ProfileZCodeTmuxCLI:
+		return "zcode"
 	case workerpkg.ProfilePiTmuxCLI:
 		return "pi"
 	case workerpkg.ProfileAntigravityTmuxCLI:
@@ -187,6 +192,11 @@ func profileExecutable(profile workerpkg.Profile, provider string) string {
 		return "agy"
 	case workerpkg.ProfileMimoCodeTmuxCLI:
 		return "mimo"
+	case workerpkg.ProfileZCodeTmuxCLI:
+		// ZCode has no CLI of its own to launch; the engine's adapter is the
+		// executable (internal/worker/adapters/zcode), installed onto PATH by
+		// scripts/worker_inference_setup.py.
+		return zcodeadapter.ExecutableName
 	default:
 		return provider
 	}
@@ -204,6 +214,8 @@ func profileSearchPaths(gcHome string, profile workerpkg.Profile) []string {
 		return []string{filepath.Join(gcHome, ".local", "share", "gascity", "opencode-transcripts")}
 	case workerpkg.ProfileMimoCodeTmuxCLI:
 		return []string{filepath.Join(gcHome, ".local", "share", "gascity", "mimocode-transcripts")}
+	case workerpkg.ProfileZCodeTmuxCLI:
+		return []string{filepath.Join(gcHome, ".local", "share", "gascity", "zcode-transcripts")}
 	case workerpkg.ProfilePiTmuxCLI:
 		return []string{filepath.Join(gcHome, ".pi", "agent", "sessions")}
 	case workerpkg.ProfileAntigravityTmuxCLI:
@@ -227,6 +239,8 @@ func stageProviderAuth(gcHome string, env *helpers.Env, profile workerpkg.Profil
 		return stageOpenCodeGeminiAuth(gcHome, env)
 	case workerpkg.ProfileMimoCodeTmuxCLI:
 		return stageMimoCodeAuth(gcHome, env)
+	case workerpkg.ProfileZCodeTmuxCLI:
+		return stageZCodeAuth(gcHome, env)
 	case workerpkg.ProfilePiTmuxCLI:
 		return stagePiOllamaCloudAuth(gcHome, env)
 	case workerpkg.ProfileAntigravityTmuxCLI:
@@ -697,6 +711,51 @@ func stageMimoCodeAuth(gcHome string, env *helpers.Env) (string, error) {
 		return "env:XIAOMI_API_KEY", nil
 	}
 	return "", fmt.Errorf("mimocode auth unavailable: set XIAOMI_API_KEY")
+}
+
+// stageZCodeAuth isolates the ZCode adapter's state under the test gc home and
+// forwards the harness configuration the adapter and the CLI bundle read.
+//
+// The credential is passed through as an env var and never written to a file or
+// echoed: ZCODE_API_KEY reaches the pane via the ZCODE_ provider-credential
+// passthrough. ZCODE_CJS must point at a readable ZCode bundle; without it (or
+// without the key) the profile reports an environment error rather than
+// pretending to certify, matching every other credential-gated profile.
+func stageZCodeAuth(gcHome string, env *helpers.Env) (string, error) {
+	xdgData := filepath.Join(gcHome, ".local", "share")
+	xdgConfig := filepath.Join(gcHome, ".config")
+	xdgCache := filepath.Join(gcHome, ".cache")
+	xdgState := filepath.Join(gcHome, ".local", "state")
+	transcriptDir := filepath.Join(xdgData, "gascity", "zcode-transcripts")
+	for _, dir := range []string{xdgData, xdgConfig, xdgCache, xdgState, transcriptDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return "", err
+		}
+	}
+	env.With("XDG_DATA_HOME", xdgData).
+		With("XDG_CONFIG_HOME", xdgConfig).
+		With("XDG_CACHE_HOME", xdgCache).
+		With("XDG_STATE_HOME", xdgState).
+		With("GC_ZCODE_TRANSCRIPT_DIR", transcriptDir)
+
+	bundle := strings.TrimSpace(os.Getenv("ZCODE_CJS"))
+	if bundle == "" {
+		return "", fmt.Errorf("zcode harness unavailable: set ZCODE_CJS to the ZCode CLI bundle")
+	}
+	if _, err := os.Stat(bundle); err != nil {
+		return "", fmt.Errorf("zcode harness unavailable: ZCODE_CJS %q is not readable: %w", bundle, err)
+	}
+	apiKey := strings.TrimSpace(os.Getenv("ZCODE_API_KEY"))
+	if apiKey == "" {
+		return "", fmt.Errorf("zcode auth unavailable: set ZCODE_API_KEY")
+	}
+	env.With("ZCODE_CJS", bundle).With("ZCODE_API_KEY", apiKey)
+	for _, key := range []string{"ZCODE_MODEL", "ZCODE_BASE_URL", "ZCODE_NODE_BIN"} {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			env.With(key, value)
+		}
+	}
+	return "env:ZCODE_API_KEY", nil
 }
 
 func stagePiOllamaCloudAuth(gcHome string, env *helpers.Env) (string, error) {

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
 func TestSessionLogAdapterTailMetaForProviderUsesCodexSchema(t *testing.T) {
@@ -1637,4 +1639,48 @@ func writeLines(t *testing.T, path string, lines ...string) {
 func kimiTestWorkDirHash(workDir string) string {
 	sum := md5.Sum([]byte(workDir))
 	return hex.EncodeToString(sum[:])
+}
+
+// Zero-delta guard. The activity derivation exists because this repo owns the
+// zcode mirror writer and can guarantee turns are opened and closed. OpenCode
+// and MiMo Code share the file shape but not that guarantee, so enabling it for
+// them would silently change their production activity reporting.
+func TestActivityDerivationIsScopedToZCode(t *testing.T) {
+	entries := []HistoryEntry{
+		{Actor: ActorUser},
+		{Actor: ActorAssistant},
+		{Actor: ActorUser}, // a trailing user message: "in turn" only if derived
+	}
+	for _, provider := range []string{"opencode", "mimocode", "opencode/tmux-cli", "mimocode/tmux-cli"} {
+		if sessionlog.DerivesActivityFromHistory(provider) {
+			t.Fatalf("%s must not derive activity from history", provider)
+		}
+		if got := snapshotTailActivity(provider, nil, entries); got != TailActivityUnknown {
+			t.Fatalf("%s activity = %q, want the pre-branch %q", provider, got, TailActivityUnknown)
+		}
+	}
+	for _, provider := range []string{"zcode", "zcode/tmux-cli"} {
+		if got := snapshotTailActivity(provider, nil, entries); got != TailActivityInTurn {
+			t.Fatalf("%s activity = %q, want in-turn", provider, got)
+		}
+	}
+	// The malformed-tail suppression stays shared: it is a heuristic that
+	// full-file diagnostics already override, and these readers set none.
+	for _, provider := range []string{"opencode", "mimocode", "zcode"} {
+		if !sessionlog.WholeFileJSONFamily(provider) {
+			t.Fatalf("%s should still suppress the tail-chunk malformed heuristic", provider)
+		}
+	}
+}
+
+// A turn that failed or was interrupted must read as idle, not as a turn that
+// never ended.
+func TestClosedFailedTurnReadsIdle(t *testing.T) {
+	entries := []HistoryEntry{
+		{Actor: ActorUser},
+		{Actor: ActorAssistant}, // "zcode-repl error rc=1"
+	}
+	if got := snapshotTailActivity("zcode/tmux-cli", nil, entries); got != TailActivityIdle {
+		t.Fatalf("activity after a closed failed turn = %q, want idle", got)
+	}
 }

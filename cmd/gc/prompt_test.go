@@ -904,8 +904,8 @@ func TestFormulaFilesystemSearchGuidanceCoversPromptSources(t *testing.T) {
 	paths := map[string]string{
 		"embedded gastown pack/template-fragments/following-mol.template.md": filepath.Join(
 			gastownDir, "template-fragments", "following-mol.template.md"),
-		"internal/bootstrap/packs/core/assets/prompts/pool-worker.md": filepath.Join(
-			repoRoot, "internal", "bootstrap", "packs", "core", "assets", "prompts", "pool-worker.md"),
+		"internal/bootstrap/packs/core/assets/prompts/pool-worker.template.md": filepath.Join(
+			repoRoot, "internal", "bootstrap", "packs", "core", "assets", "prompts", "pool-worker.template.md"),
 		"internal/bootstrap/packs/core/assets/prompts/graph-worker.md": filepath.Join(
 			repoRoot, "internal", "bootstrap", "packs", "core", "assets", "prompts", "graph-worker.md"),
 	}
@@ -938,39 +938,130 @@ func TestFormulaFilesystemSearchGuidanceCoversPromptSources(t *testing.T) {
 	}
 }
 
+// The hook-claim startup protocol's canonical text lives in one core-pack
+// fragment. pool-worker composes it by name; the bd/dolt dog carries the same
+// text verbatim (its pack cannot import core — see the rationale in
+// examples/bd/dolt/dog_prompt_test.go) with a sync test holding the copies
+// together.
+const (
+	claimProtocolFragmentRel       = "internal/bootstrap/packs/core/template-fragments/claim-protocol.template.md"
+	claimProtocolTemplateReference = `{{ template "claim-protocol" . }}`
+)
+
+// TestPoolWorkerPromptResolvesClaimProtocolFragment renders the shipped
+// pool-worker prompt with the core pack on the pack-dir list, the way a
+// composed city does. It pins that the inline fragment reference actually
+// resolves: if claim-protocol.template.md is renamed or deleted, the
+// reference degrades to a template-not-defined warning and the startup
+// protocol silently vanishes from every pool worker's prompt. This renders
+// from the on-disk source tree; the go:embed inclusion that production
+// cities hydrate from is pinned separately by
+// TestClaimProtocolFragmentIsEmbedded in the core package.
+func TestPoolWorkerPromptResolvesClaimProtocolFragment(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("filepath.Abs(repo root): %v", err)
+	}
+	coreDir := filepath.Join(repoRoot, "internal", "bootstrap", "packs", "core")
+	promptPath := filepath.Join(coreDir, "assets", "prompts", "pool-worker.template.md")
+
+	var stderr strings.Builder
+	got := renderPrompt(fsys.OSFS{}, t.TempDir(), "", promptPath, PromptContext{AgentName: "claude"}, "", &stderr,
+		[]string{coreDir}, nil, nil)
+
+	if stderr.Len() != 0 {
+		t.Fatalf("renderPrompt(pool-worker) wrote to stderr: %s", stderr.String())
+	}
+	for _, want := range []string{
+		"gc hook --claim --drain-ack --json",
+		"There is no shorter query to fall back to",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("rendered pool-worker prompt missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, claimProtocolTemplateReference) {
+		t.Fatalf("rendered pool-worker prompt kept the unexpanded fragment reference:\n%s", got)
+	}
+}
+
 func TestCoreWorkerPromptsUseHookClaimProtocol(t *testing.T) {
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatalf("filepath.Abs(repo root): %v", err)
 	}
 
-	for _, rel := range []string{
-		"internal/bootstrap/packs/core/assets/prompts/pool-worker.md",
-		"internal/bootstrap/packs/core/assets/prompts/graph-worker.md",
-	} {
-		t.Run(rel, func(t *testing.T) {
-			data, err := os.ReadFile(filepath.Join(repoRoot, rel))
-			if err != nil {
-				t.Fatalf("ReadFile(%s): %v", rel, err)
-			}
-			text := string(data)
-			if !strings.Contains(text, "gc hook --claim --drain-ack --json") {
-				t.Fatalf("%s missing drain-aware hook claim startup protocol", rel)
-			}
-			if !strings.Contains(text, "gc hook --claim --json") {
-				t.Fatalf("%s missing hook claim polling protocol", rel)
-			}
-			if strings.Contains(text, "{{ .AssignedReadyQuery }}") {
-				t.Fatalf("%s still uses AssignedReadyQuery instead of hook claim protocol", rel)
-			}
-			if strings.Contains(text, "bd ready") {
-				t.Fatalf("%s hardcodes bd ready instead of hook claim protocol", rel)
-			}
-			if strings.Contains(text, "bd ready --include-ephemeral --assignee") {
-				t.Fatalf("%s hardcodes bd ready --include-ephemeral instead of hook claim protocol", rel)
-			}
-		})
-	}
+	// graph-worker spells the startup protocol out inline: its flag set
+	// (no --drain-ack on the polling re-check) differs from the pool
+	// idiom on purpose, so it does not share the fragment.
+	graphWorkerRel := "internal/bootstrap/packs/core/assets/prompts/graph-worker.md"
+	t.Run(graphWorkerRel, func(t *testing.T) {
+		rel := graphWorkerRel
+		data, err := os.ReadFile(filepath.Join(repoRoot, rel))
+		if err != nil {
+			t.Fatalf("ReadFile(%s): %v", rel, err)
+		}
+		text := string(data)
+		if !strings.Contains(text, "gc hook --claim --drain-ack --json") {
+			t.Fatalf("%s missing drain-aware hook claim startup protocol", rel)
+		}
+		if !strings.Contains(text, "gc hook --claim --json") {
+			t.Fatalf("%s missing hook claim polling protocol", rel)
+		}
+		if strings.Contains(text, "{{ .AssignedReadyQuery }}") {
+			t.Fatalf("%s still uses AssignedReadyQuery instead of hook claim protocol", rel)
+		}
+		if strings.Contains(text, "bd ready") {
+			t.Fatalf("%s hardcodes bd ready instead of hook claim protocol", rel)
+		}
+		if strings.Contains(text, "bd ready --include-ephemeral --assignee") {
+			t.Fatalf("%s hardcodes bd ready --include-ephemeral instead of hook claim protocol", rel)
+		}
+	})
+
+	// pool-worker composes the shared fragment instead of carrying its own
+	// copy of the startup protocol, so the assertions split: the prompt must
+	// reference the fragment, and the fragment must carry the protocol.
+	poolWorkerRel := "internal/bootstrap/packs/core/assets/prompts/pool-worker.template.md"
+	t.Run(poolWorkerRel, func(t *testing.T) {
+		data, err := os.ReadFile(filepath.Join(repoRoot, poolWorkerRel))
+		if err != nil {
+			t.Fatalf("ReadFile(%s): %v", poolWorkerRel, err)
+		}
+		text := string(data)
+		if !strings.Contains(text, claimProtocolTemplateReference) {
+			t.Fatalf("%s missing %s; the startup protocol is single-sourced in the core fragment", poolWorkerRel, claimProtocolTemplateReference)
+		}
+		if !strings.Contains(text, "gc hook --claim --json") {
+			t.Fatalf("%s missing hook claim polling protocol", poolWorkerRel)
+		}
+		if strings.Contains(text, "{{ .AssignedReadyQuery }}") {
+			t.Fatalf("%s still uses AssignedReadyQuery instead of hook claim protocol", poolWorkerRel)
+		}
+		if strings.Contains(text, "bd ready") {
+			t.Fatalf("%s hardcodes bd ready instead of hook claim protocol", poolWorkerRel)
+		}
+	})
+
+	t.Run(claimProtocolFragmentRel, func(t *testing.T) {
+		data, err := os.ReadFile(filepath.Join(repoRoot, claimProtocolFragmentRel))
+		if err != nil {
+			t.Fatalf("ReadFile(%s): %v", claimProtocolFragmentRel, err)
+		}
+		text := string(data)
+		if !strings.Contains(text, `{{ define "claim-protocol" -}}`) {
+			t.Fatalf("%s must define the claim-protocol template", claimProtocolFragmentRel)
+		}
+		if !strings.Contains(text, "gc hook --claim --drain-ack --json") {
+			t.Fatalf("%s missing drain-aware hook claim startup protocol", claimProtocolFragmentRel)
+		}
+		if strings.Contains(text, "{{ .AssignedReadyQuery }}") {
+			t.Fatalf("%s still uses AssignedReadyQuery instead of hook claim protocol", claimProtocolFragmentRel)
+		}
+		if strings.Contains(text, "bd ready --include-ephemeral --assignee") {
+			t.Fatalf("%s hardcodes bd ready --include-ephemeral instead of hook claim protocol", claimProtocolFragmentRel)
+		}
+	})
 
 	gastownDir := materializeEmbeddedGastownPack(t)
 	staticPrompts := map[string]string{

@@ -105,7 +105,9 @@ func TestFileStoreConditionalWriterConformance(t *testing.T) {
 	}
 	beadstest.RunConditionalWriterConformanceWithOptions(t, "FileStore", open,
 		beadstest.ConditionalWriterOptions{
-			SuppliesCurrent: true,
+			RowBackedMutationFlavors: true,
+			RestrictedUpdateFields:   true,
+			SuppliesCurrent:          true,
 			OpenDisabled: func(st *testing.T) beads.Store {
 				s := open(st)
 				s.(*beads.FileStore).DisableConditionalWrites = true
@@ -1983,15 +1985,16 @@ func TestFileStoreRevisionContinuityAcrossDowngradeRewrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	title := "mutated"
+	seen := make(map[int64]struct{})
 	for range 3 {
 		got, err := s.Get(created.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
+		seen[got.Revision] = struct{}{}
 		if err := s.Update(created.ID, beads.UpdateOpts{Title: &title}); err != nil {
 			t.Fatal(err)
 		}
-		_ = got
 	}
 	preToken, err := s.Get(created.ID)
 	if err != nil {
@@ -2026,9 +2029,9 @@ func TestFileStoreRevisionContinuityAcrossDowngradeRewrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reloaded.Revision <= preToken.Revision {
-		t.Fatalf("post-rewrite revision %d <= previously issued %d: token reuse — the monotonic-never-reused contract is broken",
-			reloaded.Revision, preToken.Revision)
+	seen[preToken.Revision] = struct{}{}
+	if _, reused := seen[reloaded.Revision]; reused {
+		t.Fatalf("post-rewrite revision token %d reuses a token observed before the rewrite", reloaded.Revision)
 	}
 	w, _ := beads.ConditionalWriterFor(s2)
 	if err := w.UpdateIfMatch(created.ID, preToken.Revision, beads.UpdateOpts{Title: &title}); !beads.IsPreconditionFailed(err) {

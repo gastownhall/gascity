@@ -437,6 +437,16 @@ func nonNilQueuedNudges(items []queuedNudge) []queuedNudge {
 }
 
 func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdout, stderr io.Writer) int {
+	// --inject writes a <system-reminder> straight into a provider's system
+	// prompt, and gc stages the overlays that call it into the session work
+	// directory — commonly a city or rig root — so a human who opens the same
+	// provider there gets them too. With no gc identity this did not come from
+	// a session gc started, so there is no session to drain for. Naming a
+	// session explicitly is a deliberate request and is still served; the plain
+	// non-inject form is the human-facing one and is untouched (#5304).
+	if inject && len(args) == 0 && !hookHasManagedIdentity() {
+		return 0
+	}
 	// On every prompt, emit a live clock (operator-local + UTC + epoch) and
 	// the agent's active formula step (if any) as UserPromptSubmit hook context.
 	// When a nudge also fires we fold everything into that nudge's single
@@ -2585,14 +2595,18 @@ func pruneDeadQueuedNudgesWithClock(state *nudgeQueueState, front *nudgequeue.St
 					filtered = append(filtered, item)
 					continue
 				}
-				shadow, ok, err = front.FindIncludingTerminal(item.ID)
-				if err != nil || !ok || !nudgequeue.IsTerminalState(shadow.State) {
-					filtered = append(filtered, item)
-					continue
-				}
+				// Terminalize's own error return is sufficient confirmation:
+				// nil means either the bead was really terminalized, or it
+				// tolerated a missing bead as a no-op because the bead was
+				// already reaped by an unrelated retention sweep (wisp
+				// compaction etc.). Re-querying FindIncludingTerminal here
+				// would never find a reaped bead again, so entries whose
+				// bead is gone would be retained forever and pay a store
+				// lookup on every sweep (gastownhall/gascity#5278).
 			}
 			if !item.DeadAt.IsZero() && item.DeadAt.Before(cutoff) {
-				// Terminal bead confirmed in store — safe to prune once past retention.
+				// Terminal (or the backing bead is gone entirely) — safe to
+				// prune once past retention.
 				continue
 			}
 		}

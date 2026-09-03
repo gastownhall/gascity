@@ -177,7 +177,21 @@ validate_modulo_shard() {
 }
 
 list_integration_tests() {
-  run_go_test -tags integration -list '^Test' "$pkg" | grep '^Test'
+  # Discovery is a network-and-compile step: module downloads happen inside
+  # the -list invocation, so a transient failure here must not masquerade as
+  # an empty test set — that is exactly how a runner hiccup turned into
+  # "no tests selected for shard rest-full-N-of-16" on whichever matrix jobs
+  # the hiccup hit. Capture with the status intact and retry once for the
+  # transient class; a second failure aborts the shard with the real reason.
+  local out
+  if ! out="$(run_go_test -tags integration -list '^Test' "$pkg")"; then
+    echo "listing integration tests failed; retrying once" >&2
+    if ! out="$(run_go_test -tags integration -list '^Test' "$pkg")"; then
+      echo "listing integration tests failed twice; refusing to shard an unknown test set" >&2
+      return 1
+    fi
+  fi
+  printf '%s\n' "$out" | grep '^Test' || true
 }
 
 validate_selected_tests() {
@@ -310,9 +324,15 @@ run_rest_full_shard_modulo() {
     excluded+="${excluded_name}"$'\n'
   done
 
+  # Command substitution rather than process substitution: a process
+  # substitution's exit status is invisible to the parent even under
+  # `set -e`, so a failed discovery would silently yield an empty list and
+  # fail the shard with the wrong diagnosis.
+  local listed
+  listed="$(list_integration_tests)"
   while IFS= read -r test_name; do
-    all_tests+=("$test_name")
-  done < <(list_integration_tests)
+    [[ -n "$test_name" ]] && all_tests+=("$test_name")
+  done <<< "$listed"
 
   for test_name in "${all_tests[@]}"; do
     if ! printf '%s' "$excluded" | grep -Fxq -- "$test_name"; then

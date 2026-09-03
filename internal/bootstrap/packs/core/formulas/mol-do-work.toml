@@ -44,10 +44,19 @@ gc bd show "$WORK_BEAD_ID"
 
 Read the bead's title and description carefully. This is your task.
 
-**Signal liveness:** run `gc bd heartbeat "$WORK_BEAD_ID"` now, and again before any
-shell command you expect to run for many minutes (long builds, test sweeps).
-It stamps `gc.last_heartbeat_at` so the dashboard can tell you are alive and
-working rather than wedged.
+**Claim it and signal liveness:** the input-convoy child derived above is not
+claimed by the routing step that assigned you — claim it explicitly before your
+first heartbeat:
+```bash
+gc bd update "$WORK_BEAD_ID" --claim
+```
+`--claim` is idempotent and self-assigns regardless of current state, so this is
+safe even if the bead was already claimed some other way. Then run
+`gc bd heartbeat "$WORK_BEAD_ID"` now, and again before any shell command you
+expect to run for many minutes (long builds, test sweeps). It refreshes your
+claim's lease so the dashboard can tell you are alive and working rather than
+wedged. If a heartbeat ever fails, your claim was reclaimed or closed out from
+under you — stop working this bead immediately.
 
 **2. Implement the solution and verify it:**
 

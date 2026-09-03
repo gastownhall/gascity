@@ -68,17 +68,23 @@ func slingDashboardHealthServer(t *testing.T, status int) *httptest.Server {
 }
 
 func TestSlingDashboardURLWorkflowRunDetail(t *testing.T) {
-	cityPath := registerSlingDashboardCity(t, "bright-lights")
-	srv := slingDashboardHealthServer(t, http.StatusOK)
-	stubSlingDashboardSupervisor(t, 4242, srv.URL, nil)
+	// Every name the supervisor registry accepts is dashboard-reachable, so
+	// a dotted name must mint a link just like a hyphenated one (gascity#5316).
+	for _, cityName := range []string{"bright-lights", "bright.lights"} {
+		t.Run(cityName, func(t *testing.T) {
+			cityPath := registerSlingDashboardCity(t, cityName)
+			srv := slingDashboardHealthServer(t, http.StatusOK)
+			stubSlingDashboardSupervisor(t, 4242, srv.URL, nil)
 
-	got, runsList := slingDashboardURL(cityPath, sling.SlingResult{WorkflowID: "gcg-run-1", BeadID: "gcg-run-1"})
-	want := srv.URL + "/city/bright-lights/runs/gcg-run-1"
-	if got != want {
-		t.Fatalf("slingDashboardURL = %q, want %q", got, want)
-	}
-	if runsList {
-		t.Fatal("slingDashboardURL runsList = true, want false for run detail")
+			got, runsList := slingDashboardURL(cityPath, sling.SlingResult{WorkflowID: "gcg-run-1", BeadID: "gcg-run-1"})
+			want := srv.URL + "/city/" + cityName + "/runs/gcg-run-1"
+			if got != want {
+				t.Fatalf("slingDashboardURL = %q, want %q", got, want)
+			}
+			if runsList {
+				t.Fatal("slingDashboardURL runsList = true, want false for run detail")
+			}
+		})
 	}
 }
 
@@ -154,9 +160,10 @@ func TestSlingDashboardURLSuppressed(t *testing.T) {
 	})
 
 	t.Run("dashboard-invalid city name", func(t *testing.T) {
-		// Valid per the supervisor registry grammar (dots allowed) but
-		// invalid per the stricter BFF grammar — dashboard-unreachable.
-		cityPath := registerSlingDashboardCity(t, "bright.lights")
+		// The registry has no length cap, but dashboardbff.ValidCityName
+		// caps names at 64 chars — a registry-valid name can still exceed
+		// the BFF's own limit and be dashboard-unreachable.
+		cityPath := registerSlingDashboardCity(t, strings.Repeat("a", 65))
 		srv := slingDashboardHealthServer(t, http.StatusOK)
 		stubSlingDashboardSupervisor(t, 4242, srv.URL, nil)
 		if got, _ := slingDashboardURL(cityPath, workflowResult); got != "" {

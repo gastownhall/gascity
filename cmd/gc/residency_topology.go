@@ -23,12 +23,14 @@ package main
 // A constructor takes the opened work and rig stores it is handed and the
 // routes this process already resolved. It does not decide which rigs are
 // serving — a suspended rig is simply absent from the map it is given — and it
-// does not decide whether a binding mints truthfully: nothing in this build
-// verifies a binding's mint prefix, so MintsReserved stays false everywhere
-// here and the residence probe stays in every plan. The corpus already carries
-// the retired row, so the day verification ships this is a bit, not a redesign.
+// does not decide whether a binding mints truthfully: it asks the store, which
+// declares the namespace it mints into. The residence probe nonetheless stays
+// in every plan, because retirement also needs a binding known to hold no
+// relics and nothing here censuses residents. The corpus already carries the
+// retired row, so the day the census ships this is a bit, not a redesign.
 
 import (
+	"fmt"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -77,9 +79,9 @@ func cliResidencyTopology(cityPath string, cfg *config.City, work beads.Store, r
 // (buildSuspendedRigPathsForCity, threaded through the census arms) rather than
 // being re-derived here: the constructor is told, it does not decide.
 //
-// MintsReserved stays false for the same reason it does everywhere else —
-// nothing in this build verifies a binding's mint prefix — so the residence
-// probe stays in every plan.
+// The residence probe stays in every plan for the same reason it does
+// everywhere else: the mint bit is observed, but nothing censuses a binding's
+// relics, so the retirement condition's other half is never satisfied.
 func (cr *CityRuntime) residencyTopology(servingRigs map[string]beads.Store) storeref.Topology {
 	bindings, refused := residencyBindingsFromRoutes(cr.storageRoutes)
 	return assembleResidencyTopology(cr.cfg, cr.cityBeadStore(), servingRigs, bindings, refused)
@@ -266,12 +268,88 @@ func cliResidencyBindings(cityPath string) ([]storeref.ClassBinding, error) {
 	if existing, raced := cliResidencyBindingsByCity[key]; raced {
 		return existing.bindings, existing.refused
 	}
+	// A nil map HERE is not the cold start the first section handles — that
+	// section made it non-nil before this goroutine ever left the lock. It means
+	// resetCLIResidencyBindings ran while this derivation was in flight, which
+	// happens on the shutdown path of a long-lived `gc start`. Storing anyway
+	// would do two wrong things at once: assign into a nil map, which panics the
+	// process during its own teardown, and re-populate a retired memo with
+	// bindings over stores closeCLIStorageRoutes has already closed. The answer
+	// is still correct for THIS caller, so it is returned unmemoized.
+	if cliResidencyBindingsByCity == nil {
+		return bindings, refused
+	}
 	cliResidencyBindingsByCity[key] = &cliResidencyBindingsEntry{bindings: bindings, refused: refused}
 	return bindings, refused
 }
 
-// resetCLIResidencyBindings drops the memo. Wired into closeCLIStorageRoutes's
-// caller-visible lifecycle by the tests that need a second city in one process.
+// cliRelocatedBinding is the one relocated class binding a city is served from.
+//
+// It carries the opened store rather than the storeref.ClassBinding it was
+// derived from, and that is the residency boundary rather than a convenience: a
+// caller handed the ClassBinding would read binding.Leg.Store, which is a
+// consumer picking a store out of a plan leg — the shape the boundary check
+// forbids, because a second consumer will pick a different one. The leg access
+// happens here, in the file that assembles legs, exactly once.
+//
+// Name is the operator-facing name of the configured [storage] binding, which is
+// not derivable from the ClassBinding: storeref carries a class REF
+// ("class:graph+sessions+…"), describing what the binding answers for and not
+// which configured binding it is. Operator text wants the latter.
+type cliRelocatedBinding struct {
+	Store   beads.Store
+	Classes []coordclass.Class
+	Name    string
+}
+
+// cliSoleClassBinding returns the single relocated class binding serving this
+// city, for the callers that answer EVERY reserved prefix from ONE store.
+//
+// # It turns a comment into a check
+//
+// The by-id front door and the claim route both used to ask
+// graphClassBinding — "which store serves the graph class" — and then answer
+// for sessions, convoy and mail ids out of that same store. That is correct
+// only because storageSplitShapeOf admits a split only when all five
+// infrastructure classes name the same binding and refuses a per-class fan-out
+// outright, and until now that argument lived entirely in a comment. Reading
+// the grouped bindings instead makes it a runtime condition: two bindings is a
+// fan-out neither caller can serve, and it says so rather than quietly picking
+// the graph one and letting a sessions-class read come back truthfully absent.
+//
+// # The refusal is carried, not returned
+//
+// A city configured for a binding it has not converged on still produces a
+// binding here — a refusedClassStore whose every operation returns the boot
+// gate's sentence — and cliResidencyBindings reports that refusal alongside it.
+// Both callers want the STORE in that case, exactly as they got it before: the
+// refusal reaches them through the reads they were going to make anyway, where
+// each already classifies it (bdByIDClassDoor.resolve, hookClaimClassRoute.holds).
+// Returning it here instead would collapse "this city cannot be served" into
+// "this city relocates nothing", which sends those reads back to the work
+// ledger the beads were migrated off — the exact stale-answer path the door was
+// built to close.
+func cliSoleClassBinding(cityPath string) (cliRelocatedBinding, bool, error) {
+	bindings, _ := cliResidencyBindings(cityPath)
+	switch len(bindings) {
+	case 0:
+		return cliRelocatedBinding{}, false, nil
+	case 1:
+		return cliRelocatedBinding{
+			Store:   bindings[0].Leg.Store,
+			Classes: bindings[0].Classes,
+			Name:    cliStorageRoutes(cityPath).binding,
+		}, true, nil
+	default:
+		return cliRelocatedBinding{}, false, fmt.Errorf(
+			"this city serves its coordination classes from %d separate bindings; %s",
+			len(bindings), storageSupportedTopologyStatement)
+	}
+}
+
+// resetCLIResidencyBindings drops the memo wholesale. closeCLIStorageRoutes
+// calls it: this grouping is DERIVED from the routes that call closes, so it
+// cannot outlive them.
 func resetCLIResidencyBindings() {
 	cliResidencyBindingsMu.Lock()
 	cliResidencyBindingsByCity = nil
@@ -297,14 +375,25 @@ func dropCLIResidencyBindings(key string) {
 // # Why a map keyed by beads.Store is safe HERE and is not in the resolver
 //
 // storeref.dedupeLegs cannot key a map on a store — beads.Store is an interface,
-// and an implementation whose dynamic type carries a slice is neither hashable
-// nor ==-able, so a caller's store panics it. This map is confined to the
-// CONSTRUCTORS: every value in it comes from routes.storeFor, which returns what
-// storage boot opened — a *SQLiteStore, a *BdStore, a *CachingStore or a
-// refusedClassStore, all pointer-typed and therefore reference-identified. Same
-// confinement for relocatedGraphLegFrom's `binding == cityStore`. A route that
-// ever yields a value-typed store makes both of these the resolver's bug, one
-// file over; reuse storeref's identity-based set at that point.
+// and an implementation whose dynamic type carries a slice, a map or a func is
+// neither hashable nor ==-able, so a caller's store panics it. This map is
+// confined to the CONSTRUCTORS: every value in it comes from routes.storeFor,
+// which returns what storage boot opened — *SQLiteStore, *BdStore and
+// *CachingStore, all pointer-typed and so reference-identified, plus
+// refusedClassStore, which is a value carrying one error field.
+//
+// That last one is comparable rather than reference-identified, and the
+// difference is visible: two refusedClassStore values built from the SAME error
+// compare equal, so a refused city's five classes group into one binding even
+// though storeFor handed back five separate values. That is the answer this
+// build wants — a refused city is refused as a whole, and cliSoleClassBinding
+// reports one binding for it rather than a five-way fan-out — but it is a
+// property of the type being comparable, not of the map being identity-keyed,
+// and a second value-typed route with a differing field would group differently
+// for the same reason. Same confinement for relocatedGraphLegFrom's
+// `binding == cityStore`. A route that ever yields a NON-comparable store makes
+// both of these the resolver's bug, one file over; reuse storeref's
+// identity-based set at that point.
 func residencyBindingsFromRoutes(routes *storageRoutes) ([]storeref.ClassBinding, error) {
 	byStore := map[beads.Store][]coordclass.Class{}
 	var order []beads.Store
@@ -321,23 +410,32 @@ func residencyBindingsFromRoutes(routes *storageRoutes) ([]storeref.ClassBinding
 		}
 		byStore[store] = append(byStore[store], class)
 	}
-	return residencyBindingsFor(order, byStore)
+	return residencyBindingsFor(order, byStore, routes.hasLegacyResidents)
 }
 
 // residencyBindingsFor turns a store->classes grouping into bindings, and
 // reports the standing refusal when any binding is a refusing store.
-func residencyBindingsFor(order []beads.Store, byStore map[beads.Store][]coordclass.Class) ([]storeref.ClassBinding, error) {
+//
+// relics answers the boot census's question for a binding store. A nil one is
+// the pessimistic answer for every store, which is what a caller holding no
+// censused routes is entitled to claim.
+func residencyBindingsFor(order []beads.Store, byStore map[beads.Store][]coordclass.Class, relics func(beads.Store) bool) ([]storeref.ClassBinding, error) {
 	var refused error
 	bindings := make([]storeref.ClassBinding, 0, len(order))
 	for _, store := range order {
 		classes := byStore[store]
+		prefixes := reservedPrefixesFor(classes)
 		bindings = append(bindings, storeref.ClassBinding{
 			Classes:  classes,
-			Prefixes: reservedPrefixesFor(classes),
+			Prefixes: prefixes,
 			Leg:      storeref.Leg{Ref: storeref.ClassRef(classes), Store: store},
-			// MintsReserved and HasLegacyResidents stay false: nothing in this
-			// build verifies a binding's mint prefix or censuses its relics, so
-			// the residence probe stays in every plan.
+			// Both bits are observations now: the mint bit from the store's own
+			// declaration, the relic bit from the boot census. Neither is ever
+			// optimistic by default — a store that declares no namespace does
+			// not mint truthfully, and a binding no census reached still has
+			// relics as far as this build knows.
+			MintsReserved:      storeref.MintsInsideNamespace(store, prefixes),
+			HasLegacyResidents: hasLegacyResidentsOr(relics, store),
 		})
 		if refusing, ok := store.(storeref.RefusingStore); ok && refused == nil {
 			refused = refusing.StorageRefusal()
@@ -348,6 +446,15 @@ func residencyBindingsFor(order []beads.Store, byStore map[beads.Store][]coordcl
 	}
 	sort.SliceStable(bindings, func(i, j int) bool { return bindings[i].Leg.Ref < bindings[j].Leg.Ref })
 	return bindings, refused
+}
+
+// hasLegacyResidentsOr applies the census verdict, or the pessimistic default
+// when there is no census to ask.
+func hasLegacyResidentsOr(relics func(beads.Store) bool, store beads.Store) bool {
+	if relics == nil {
+		return true
+	}
+	return relics(store)
 }
 
 // infrastructureClasses is the class set a whole split relocates: every
@@ -363,13 +470,15 @@ func infrastructureClasses() []coordclass.Class {
 	return classes
 }
 
-// reservedPrefixesFor returns the reserved id prefixes a class set mints.
+// reservedPrefixesFor returns the reserved id namespaces a class set holds —
+// the prefix each class mints under plus any its store holds without minting,
+// such as the nudge queue's. A namespace the binding does not declare is one
+// the resolver gives it no authority over, so an id carrying it falls through
+// to the work ledger that never had it.
 func reservedPrefixesFor(classes []coordclass.Class) []string {
 	prefixes := make([]string, 0, len(classes))
 	for _, class := range classes {
-		if prefix, ok := config.ReservedClassPrefix(class.String()); ok {
-			prefixes = append(prefixes, prefix)
-		}
+		prefixes = append(prefixes, config.ReservedClassPrefixesFor(class.String())...)
 	}
 	return prefixes
 }
