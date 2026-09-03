@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -202,5 +203,95 @@ func TestStartupHealthEpisodeClearsOnFirstSuccessfulStart(t *testing.T) {
 	}
 	if after.ConsecutiveCount != 0 {
 		t.Errorf("ConsecutiveCount after successful start = %d, want 0 (episode must clear on recovery)", after.ConsecutiveCount)
+	}
+}
+
+// failFirstStartupHealthLoadStore forces exactly the first ListByMetadata
+// lookup filtered on the given session name's startup-health episode key to
+// fail, then delegates every later matching call — including the sibling
+// LoadStartupHealthEpisode calls in session_lifecycle_parallel.go's
+// start-result commit paths — to the real store. Scoping the failure to only
+// the first matching call isolates the assertion to the reconciler's own
+// quarantine-gate lookup, which always runs before any commit-path lookup
+// within a tick: a matching log line can then only be attributed to that
+// call site, not to a sibling that already logs correctly today.
+type failFirstStartupHealthLoadStore struct {
+	beads.Store
+	sessionName string
+	err         error
+	calls       int
+	failed      bool
+}
+
+func (s *failFirstStartupHealthLoadStore) ListByMetadata(filters map[string]string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	if filters[sessionpkg.StartupHealthSessionNameMetadataKey] == s.sessionName {
+		s.calls++
+		if !s.failed {
+			s.failed = true
+			return nil, s.err
+		}
+	}
+	return s.Store.ListByMetadata(filters, limit, opts...)
+}
+
+func TestQuarantineGateLogsOnStartupHealthLoadError(t *testing.T) {
+	h := newSessionChaosHarness(t, 20260830004)
+	h.createSessionIntent()
+	h.assertCreatingIntent()
+	sessionName := h.sessionName
+
+	h.env.sp.StartErrors[sessionName] = errors.New("provider start failure")
+	for i := 0; i < defaultMaxWakeAttempts; i++ {
+		if i > 0 {
+			h.createReplacementPendingCreateBead()
+		}
+		if tick := runDesiredPendingCreateTicks(t, h, 30); tick == -1 {
+			t.Fatalf("failure %d: pending-create claim never released within 30 ticks", i+1)
+		}
+	}
+
+	is := sessionpkg.NewStore(beads.SessionStore{Store: h.env.store})
+	episode, err := is.LoadStartupHealthEpisode(sessionName)
+	if err != nil {
+		t.Fatalf("LoadStartupHealthEpisode: %v", err)
+	}
+	if episode.QuarantinedUntil.IsZero() || !h.env.clk.Now().Before(episode.QuarantinedUntil) {
+		t.Fatal("episode not actively quarantined after reaching the failure threshold; cannot test the quarantine-gate load path")
+	}
+
+	// A live candidate bead for the gate to evaluate, exactly as the
+	// expiry test above creates for the same reason.
+	h.createReplacementPendingCreateBead()
+	delete(h.env.sp.StartErrors, sessionName)
+
+	loadErr := errors.New("injected startup-health store fault")
+	failing := &failFirstStartupHealthLoadStore{
+		Store:       h.env.store,
+		sessionName: sessionName,
+		err:         loadErr,
+	}
+	h.env.store = failing
+	h.env.stderr.Reset()
+
+	startsBefore := h.countRuntimeCalls("Start")
+	h.reconcileTickWithoutPostInvariants(false)
+
+	if failing.calls < 1 {
+		t.Fatal("ListByMetadata for the startup-health episode was never called; test does not exercise the quarantine gate")
+	}
+	// LoadStartupHealthEpisode wraps the store error before returning it
+	// (internal/session/startup_health.go), so check the reconciler's own
+	// log prefix and the root-cause error text independently rather than
+	// hardcoding that wrapping's exact format.
+	stderrText := h.env.stderr.String()
+	wantPrefix := fmt.Sprintf("session reconciler: loading startup-health episode for %s:", sessionName)
+	if !strings.Contains(stderrText, wantPrefix) {
+		t.Fatalf("stderr = %q, want a line starting with %q (quarantine gate must log a LoadStartupHealthEpisode error instead of silently failing open)", stderrText, wantPrefix)
+	}
+	if !strings.Contains(stderrText, loadErr.Error()) {
+		t.Fatalf("stderr = %q, want the injected error %q to appear in the logged line", stderrText, loadErr.Error())
+	}
+	if got := h.countRuntimeCalls("Start"); got <= startsBefore {
+		t.Fatalf("Start not attempted after a startup-health load error (calls before=%d after=%d); fail-open must still let the retry through", startsBefore, got)
 	}
 }
