@@ -127,6 +127,65 @@ func TestWorkflowGetPreservesRequestedScopeForUniqueCrossStoreWorkflow(t *testin
 	}
 }
 
+// TestWorkflowGetRejectsCityScopeForRigRootedWorkflow pins the intended answer
+// for the shape the preserve path above no longer covers: the same unique
+// rig-stored workflow, but with a root that names rig:alpha itself. The root
+// ref is the scope the workflow belongs to, so the city-scoped read is a miss
+// (404) and the rig-scoped read is the hit — the deliberate ga-dezas
+// consequence, not a regression to restore. graphroute stamps
+// gc.root_store_ref on every launched step, so this is the shape current
+// graph.v2 workflows actually take.
+func TestWorkflowGetRejectsCityScopeForRigRootedWorkflow(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "gascity"
+	rigStore := beads.NewMemStore()
+	state.cityBeadStore = beads.NewMemStore()
+	state.stores = map[string]beads.Store{"alpha": rigStore}
+
+	root, err := rigStore.Create(beads.Bead{
+		Title: "Rig-rooted workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.workflow_id":      "wf_rig_rooted_scope",
+			"gc.root_store_ref":   "rig:alpha",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/workflow/wf_rig_rooted_scope?scope_kind=city&scope_ref=gascity"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("city-scoped status = %d, want 404: %s", rec.Code, rec.Body.String())
+	}
+
+	// The 404 must be the scope answer, not the workflow being unreachable.
+	req = httptest.NewRequest(http.MethodGet, cityURL(state, "/workflow/wf_rig_rooted_scope?scope_kind=rig&scope_ref=alpha"), nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rig-scoped status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	var snapshot workflowSnapshotResponse
+	if err := json.NewDecoder(rec.Body).Decode(&snapshot); err != nil {
+		t.Fatalf("Decode(snapshot): %v", err)
+	}
+	if snapshot.RootBeadID != root.ID {
+		t.Fatalf("root_bead_id = %q, want %q", snapshot.RootBeadID, root.ID)
+	}
+	if snapshot.ScopeKind != "rig" || snapshot.ScopeRef != "alpha" {
+		t.Fatalf("scope = %s:%s, want rig:alpha", snapshot.ScopeKind, snapshot.ScopeRef)
+	}
+}
+
 func TestWorkflowGetRejectsMismatchedCityScopeForUniqueCrossStoreWorkflow(t *testing.T) {
 	state := newFakeState(t)
 	state.cityName = "gascity"

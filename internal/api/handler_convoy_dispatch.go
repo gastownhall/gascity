@@ -373,6 +373,14 @@ func workflowSnapshotScope(info workflowStoreInfo, root beads.Bead, requestedSco
 	return info.scopeKind, info.scopeRef
 }
 
+// preserveRequestedWorkflowScope reports whether a city-scoped read of a
+// rig-stored workflow may keep the caller's city scope. It covers only roots
+// that name no scope of their own — neither an explicit gc.scope_kind +
+// gc.scope_ref pair nor a scope-bearing gc.root_store_ref. A root that names
+// rig:<name> is rig-scoped, so its city-scoped read is a miss rather than a
+// preserved city-scoped hit (ga-dezas). Because graphroute stamps
+// gc.root_store_ref on every step it launches with a store ref, this legacy
+// path reaches only roots that predate that stamping.
 func preserveRequestedWorkflowScope(info workflowStoreInfo, root beads.Bead, requestedScopeKind, requestedScopeRef, cityScopeRef string) bool {
 	if requestedScopeKind != "city" || requestedScopeRef == "" {
 		return false
