@@ -1346,17 +1346,16 @@ func (c *DoltServerCheck) Run(_ *CheckContext) *CheckResult {
 		r.Message = "not required (bd backend=doltlite)"
 		return r
 	}
-	if doctorScopeUsesProxiedDoltMode(c.cityPath, c.cityPath) {
-		r.Status = StatusOK
-		r.Message = "not required (bd backend=dolt proxied-server)"
-		return r
-	}
-
 	target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, c.cityPath, c.cityPath)
 	if err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("resolve dolt target: %v", err)
 		r.FixHint = resolveDoltServerFixHint(fsys.OSFS{}, c.cityPath)
+		return r
+	}
+	if doctorScopeUsesProxiedDoltMode(c.cityPath, c.cityPath) && target.Socket == "" && target.Host == "" {
+		r.Status = StatusOK
+		r.Message = "not required (bd backend=dolt proxied-server)"
 		return r
 	}
 	network, addr := "tcp", net.JoinHostPort(target.Host, target.Port)
