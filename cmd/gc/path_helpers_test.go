@@ -563,12 +563,14 @@ func processStillAlive(pid int) bool {
 	return err == nil || !errors.Is(err, syscall.ESRCH)
 }
 
-// reapDoltLeakPIDsWithKillerAndWaiter is the injectable-liveness form of
-// reapDoltLeakPIDsWithKiller, used directly by unit tests for the reaper
-// itself; production callers go through the two-arg wrapper above. After
-// signaling, it polls aliveFn for each pid until it reports exited or the
-// shared deadline elapses, so the caller gets a confirmed exit rather than
-// a fire-and-forget signal send.
+// reapDoltLeakPIDsWithKillerAndWaiter is the fully injectable form of the
+// reaper, used directly by unit tests for the reaper itself. Callers go
+// through one of the two pairings above: reapDoltLeakPIDs (real killer +
+// real prober) in production, scriptedDoltLeakReaper (fake killer +
+// processNeverAlive) for fabricated pids. After signaling, it polls aliveFn
+// for each pid until it reports exited or the shared deadline elapses, so
+// the caller gets a confirmed exit rather than a fire-and-forget signal
+// send.
 func reapDoltLeakPIDsWithKillerAndWaiter(pids []int, killFn func(int, syscall.Signal) error, aliveFn func(int) bool, pollInterval, deadline time.Duration) []error {
 	var errs []error
 	for _, pid := range pids {

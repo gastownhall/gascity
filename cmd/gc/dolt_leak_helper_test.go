@@ -214,7 +214,7 @@ func TestRequireNoLeakedDoltAfter_OnlyNewPIDsInDiff(t *testing.T) {
 	if !strings.Contains(msg, strconv.Itoa(leakedPID)) {
 		t.Errorf("error missing leaked PID %d; got %q", leakedPID, msg)
 	}
-	if strings.Contains(msg, "pid=1000") {
+	if strings.Contains(msg, "pid=1000 ") {
 		t.Errorf("error must not include pre-existing PID 1000; got %q", msg)
 	}
 }
