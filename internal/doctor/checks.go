@@ -1422,7 +1422,14 @@ func (c *RigDoltServerCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 	if doctorScopeUsesProxiedDoltModeForRig(c.cityPath, rigPath, &c.rig) {
-		if target, resolveErr := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, c.cityPath, rigPath); resolveErr == nil && target.External {
+		target, resolveErr := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, c.cityPath, rigPath)
+		if resolveErr != nil {
+			r.Status = StatusError
+			r.Message = fmt.Sprintf("resolve dolt target: %v", resolveErr)
+			r.FixHint = "reconcile the proxied Dolt endpoint"
+			return r
+		}
+		if target.External {
 			addr, conn, dialErr := dialDoltTarget(target)
 			if dialErr != nil {
 				r.Status = StatusError

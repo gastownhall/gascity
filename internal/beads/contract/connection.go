@@ -160,18 +160,21 @@ func ResolveDoltConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string) (DoltCo
 	// sidecar. This authority applies to city and inherited rig scopes alike;
 	// do not force inherited scopes through the city's managed runtime path.
 	if strings.EqualFold(target.DoltMode, "proxied-server") {
-		if sidecar, ok, err := readProxiedClientInfo(fs, filepath.Join(scopeRoot, ".beads", "proxied_server_client_info.json")); err != nil {
-			return DoltConnectionTarget{}, err
-		} else if ok {
-			target.Host, target.Port, target.Socket, target.User = sidecar.External.Host, strconv.Itoa(sidecar.External.Port), sidecar.External.Socket, sidecar.External.User
-			target.External = true
-			target.EndpointStatus = EndpointStatusVerified
-			if sameScope(scopeRoot, cityRoot) {
-				target.EndpointOrigin = EndpointOriginCityCanonical
-			} else {
-				target.EndpointOrigin = EndpointOriginExplicit
+		backend, _, _ := ReadMetadataBackend(fs, filepath.Join(scopeRoot, ".beads", "metadata.json"))
+		if strings.EqualFold(strings.TrimSpace(backend), "dolt") {
+			if sidecar, ok, err := readProxiedClientInfo(fs, filepath.Join(scopeRoot, ".beads", "proxied_server_client_info.json")); err != nil {
+				return DoltConnectionTarget{}, err
+			} else if ok {
+				target.Host, target.Port, target.Socket, target.User = sidecar.External.Host, strconv.Itoa(sidecar.External.Port), sidecar.External.Socket, sidecar.External.User
+				target.External = true
+				target.EndpointStatus = EndpointStatusVerified
+				if sameScope(scopeRoot, cityRoot) {
+					target.EndpointOrigin = EndpointOriginCityCanonical
+				} else {
+					target.EndpointOrigin = EndpointOriginExplicit
+				}
+				return target, nil
 			}
-			return target, nil
 		}
 	}
 
