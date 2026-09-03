@@ -103,14 +103,31 @@ func TestGasCityGcBdExternalUnixSocketFrontDoor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if out, err := runCommand(fixture.dir, env, 20*time.Second, gcBinary, "doctor", "--readonly", "--json"); err != nil {
+		t.Fatalf("gc doctor: %v\n%s", err, out)
+	}
 	for _, args := range [][]string{{"bd", "create", "front door", "-t", "task", "--json"}, {"bd", "list", "--json"}} {
 		if out, err := runCommand(fixture.dir, env, 20*time.Second, gcBinary, args...); err != nil {
 			t.Fatalf("gc %s: %v\n%s", strings.Join(args, " "), err, out)
 		}
 	}
+	if out, err := runCommand(fixture.dir, env, 20*time.Second, gcBinary, "doctor", "--readonly", "--json"); err != nil {
+		t.Fatalf("gc doctor: %v\n%s", err, out)
+	} else if !strings.Contains(out, "dolt-server") {
+		t.Fatalf("doctor output missing dolt-server check: %s", out)
+	}
+	beforeTree := snapshotFrontDoorTree(t, filepath.Join(fixture.dir, ".beads"))
 	fixture.socketServer.stop(t)
-	if out, err := runCommand(fixture.dir, env, 3*time.Second, gcBinary, "bd", "list", "--json"); err == nil {
+	if out, err := runCommand(fixture.dir, env, 3*time.Second, gcBinary, "bd", "list", "--json"); err == nil || !strings.Contains(strings.ToLower(out), "socket") {
 		t.Fatalf("gc bd unexpectedly succeeded after socket outage: %s", out)
+	}
+	if got := snapshotFrontDoorTree(t, filepath.Join(fixture.dir, ".beads")); !reflect.DeepEqual(beforeTree, got) {
+		t.Fatalf("beads files mutated during outage")
+	}
+	server := startDoltSocketServer(t, fixture.env, filepath.Join(filepath.Dir(fixture.dir), "dolt"))
+	defer server.stop(t)
+	if out, err := runCommand(fixture.dir, env, 20*time.Second, gcBinary, "bd", "list", "--json"); err != nil {
+		t.Fatalf("gc bd after endpoint restart: %v\n%s", err, out)
 	}
 	got, err := os.ReadFile(filepath.Join(fixture.dir, ".beads", "metadata.json"))
 	if err != nil {
@@ -119,6 +136,27 @@ func TestGasCityGcBdExternalUnixSocketFrontDoor(t *testing.T) {
 	if !reflect.DeepEqual(before, got) {
 		t.Fatalf("metadata mutated during outage")
 	}
+}
+
+func snapshotFrontDoorTree(t *testing.T, root string) map[string][]byte {
+	t.Helper()
+	out := map[string][]byte{}
+	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(root, path)
+		out[rel] = b
+		return nil
+	})
+	return out
 }
 
 type frontDoorFixture struct {
