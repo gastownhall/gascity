@@ -155,7 +155,7 @@ func reapTmuxLeakProcesses(procs []tmuxProcInfo) {
 	for _, p := range procs {
 		pids = append(pids, p.PID)
 	}
-	_ = reapDoltLeakPIDsWithKiller(pids, killProcess)
+	_ = reapDoltLeakPIDs(pids)
 }
 
 // sweepStaleTmuxTestServers reaps tmux servers left behind by prior or

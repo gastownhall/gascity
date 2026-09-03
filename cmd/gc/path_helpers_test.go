@@ -121,14 +121,14 @@ func clearInheritedBeadsEnv(t *testing.T) {
 // does not false-positive the cleanup check.
 func requireNoLeakedDoltAfterForPaths(t *testing.T, paths ...string) {
 	t.Helper()
-	requireNoLeakedDoltAfterWithFilterAndKiller(t, discoverDoltProcesses, func(configPath string) bool {
+	requireNoLeakedDoltAfterWithFilterAndReaper(t, discoverDoltProcesses, func(configPath string) bool {
 		for _, path := range paths {
 			if path != "" && pathutil.PathWithin(path, configPath) {
 				return true
 			}
 		}
 		return false
-	}, killProcess)
+	}, reapDoltLeakPIDs)
 }
 
 type doltLeakGuardedTestingM struct {
@@ -525,19 +525,15 @@ func writeDoltLeakReport(w io.Writer, leaked []DoltProcInfo) {
 }
 
 func reapDoltLeakProcesses(leaked []DoltProcInfo) {
-	_ = reapDoltLeakProcessesWithKiller(leaked, killProcess)
-}
-
-func reapDoltLeakProcessesWithKiller(leaked []DoltProcInfo, killFn func(int, syscall.Signal) error) []error {
 	pids := make([]int, 0, len(leaked))
 	for _, proc := range leaked {
 		pids = append(pids, proc.PID)
 	}
-	return reapDoltLeakPIDsWithKiller(pids, killFn)
+	_ = reapDoltLeakPIDs(pids)
 }
 
 // doltLeakReapPollInterval and doltLeakReapDeadline bound how long
-// reapDoltLeakPIDsWithKiller waits for a signaled pid to actually leave the
+// reapDoltLeakPIDs waits for a signaled pid to actually leave the
 // process table after SIGKILL, instead of returning as soon as the signal
 // call itself succeeds. A signal delivered successfully only means the
 // kernel accepted it, not that the process has exited -- callers racing a
@@ -548,8 +544,14 @@ const (
 	doltLeakReapDeadline     = 5 * time.Second
 )
 
-func reapDoltLeakPIDsWithKiller(pids []int, killFn func(int, syscall.Signal) error) []error {
-	return reapDoltLeakPIDsWithKillerAndWaiter(pids, killFn, processStillAlive, doltLeakReapPollInterval, doltLeakReapDeadline)
+// reapDoltLeakPIDs is the real-process reaper: it signals the real process
+// table and probes the real process table. Signaling and probing are two
+// halves of one reaper and must agree about which process table they act
+// on, so they are paired here rather than injected separately -- a no-op
+// killer wired to the real prober signals nothing yet still polls the real
+// table, which is exactly how ga-ay6x1 went red.
+func reapDoltLeakPIDs(pids []int) []error {
+	return reapDoltLeakPIDsWithKillerAndWaiter(pids, killProcess, processStillAlive, doltLeakReapPollInterval, doltLeakReapDeadline)
 }
 
 // processStillAlive reports whether pid is still present in the process
@@ -618,6 +620,35 @@ func reapDoltLeakPIDsWithKillerAndWaiter(pids []int, killFn func(int, syscall.Si
 
 func ignoreProcessSignal(int, syscall.Signal) error {
 	return nil
+}
+
+// processNeverAlive is the scripted-pid counterpart to processStillAlive: it
+// reports every pid as already exited without consulting the real process
+// table. Any guard driven by a fake killer must probe with this, because a
+// no-op killer never signals anything -- probing the real table for a
+// fabricated pid that happens to name a live process on the host makes the
+// reap spin its whole deadline and emit a spurious cleanup failure
+// (ga-ay6x1).
+func processNeverAlive(int) bool {
+	return false
+}
+
+// scriptedDoltLeakReapPollInterval and scriptedDoltLeakReapDeadline bound
+// reaps over fabricated pids. Nothing real is ever signaled on that path, so
+// the bounds only need to be long enough to prove the poll happened; the
+// production bounds above stay untouched.
+const (
+	scriptedDoltLeakReapPollInterval = 5 * time.Millisecond
+	scriptedDoltLeakReapDeadline     = 200 * time.Millisecond
+)
+
+// scriptedDoltLeakReaper builds a reaper over fabricated pids, pairing the
+// given fake killer with processNeverAlive so the reap never touches the
+// real process table.
+func scriptedDoltLeakReaper(killFn func(int, syscall.Signal) error) func([]int) []error {
+	return func(pids []int) []error {
+		return reapDoltLeakPIDsWithKillerAndWaiter(pids, killFn, processNeverAlive, scriptedDoltLeakReapPollInterval, scriptedDoltLeakReapDeadline)
+	}
 }
 
 // TestReapDoltLeakPIDsWithKillerAndWaiter_WaitsForConfirmedExit proves the
@@ -691,16 +722,23 @@ func requireNoLeakedDoltAfterWith(t testReporter, enumerate func() ([]DoltProcIn
 	t.Helper()
 	homeDir, _ := os.UserHomeDir()
 	tempDir := os.TempDir()
-	requireNoLeakedDoltAfterWithFilterAndKiller(t, enumerate, func(configPath string) bool {
+	requireNoLeakedDoltAfterWithFilterAndReaper(t, enumerate, func(configPath string) bool {
 		return isTestConfigPath(configPath, homeDir, tempDir)
-	}, ignoreProcessSignal)
+	}, scriptedDoltLeakReaper(ignoreProcessSignal))
 }
 
 func requireNoLeakedDoltAfterWithFilter(t testReporter, enumerate func() ([]DoltProcInfo, error), includeConfigPath func(string) bool) {
-	requireNoLeakedDoltAfterWithFilterAndKiller(t, enumerate, includeConfigPath, ignoreProcessSignal)
+	requireNoLeakedDoltAfterWithFilterAndReaper(t, enumerate, includeConfigPath, scriptedDoltLeakReaper(ignoreProcessSignal))
 }
 
-func requireNoLeakedDoltAfterWithFilterAndKiller(t testReporter, enumerate func() ([]DoltProcInfo, error), includeConfigPath func(string) bool, killFn func(int, syscall.Signal) error) {
+// requireNoLeakedDoltAfterWithFilterAndReaper is the injectable form of the
+// leak guard. It takes the whole reaper rather than just its killer: the
+// killer and the liveness prober must agree about which process table they
+// act on, and injecting only the killer let a scripted guard signal nothing
+// while still polling the real table for its fabricated pids (ga-ay6x1).
+// Production passes reapDoltLeakPIDs; scripted-pid tests pass
+// scriptedDoltLeakReaper.
+func requireNoLeakedDoltAfterWithFilterAndReaper(t testReporter, enumerate func() ([]DoltProcInfo, error), includeConfigPath func(string) bool, reap func([]int) []error) {
 	t.Helper()
 	initial := snapshotDoltProcessPIDsWithFilter(t, enumerate, includeConfigPath)
 	t.Cleanup(func() {
@@ -722,7 +760,7 @@ func requireNoLeakedDoltAfterWithFilterAndKiller(t testReporter, enumerate func(
 		}
 		t.Errorf("test leaked %d dolt sql-server process(es); ensure cleanup paths reach shutdownBeadsProvider, or call clearInheritedBeadsEnv to prevent inherited GC_BEADS=bd from triggering gc-beads-bd.sh:\n%s",
 			len(leaked), strings.Join(rep, "\n"))
-		for _, err := range reapDoltLeakPIDsWithKiller(pids, killFn) {
+		for _, err := range reap(pids) {
 			t.Errorf("test leaked dolt cleanup failed: %v", err)
 		}
 	})
