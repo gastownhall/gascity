@@ -10,16 +10,16 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-// alwaysReachable / neverReachable are injected commit-reachability oracles so
+// alwaysReachable / neverReachable are injected commit-publication oracles so
 // the work-record validation is testable without a real git repo.
-func alwaysReachable(string, string) bool { return true }
-func neverReachable(string, string) bool  { return false }
+func alwaysReachable(string) bool { return true }
+func neverReachable(string) bool  { return false }
 
 func TestValidateWorkRecordOnClose(t *testing.T) {
 	tests := []struct {
 		name      string
 		meta      map[string]string
-		reachable func(string, string) bool
+		reachable func(string) bool
 		wantViol  string // substring expected in the (single) violation; "" ⇒ no violations
 	}{
 		{
@@ -43,14 +43,14 @@ func TestValidateWorkRecordOnClose(t *testing.T) {
 			wantViol:  "",
 		},
 		{
-			name: "shipped with commit NOT reachable on branch is rejected",
+			name: "shipped with unpublished commit is rejected",
 			meta: map[string]string{
 				beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped,
 				beadmeta.WorkCommitMetadataKey:  "abc123",
 				beadmeta.WorkBranchMetadataKey:  "bd-x",
 			},
 			reachable: neverReachable,
-			wantViol:  "not reachable",
+			wantViol:  "not published",
 		},
 		{
 			name: "shipped without commit is rejected",
@@ -101,86 +101,6 @@ func TestValidateWorkRecordOnClose(t *testing.T) {
 			joined := strings.Join(got, " | ")
 			if !strings.Contains(joined, tc.wantViol) {
 				t.Fatalf("violation %q does not contain %q", joined, tc.wantViol)
-			}
-		})
-	}
-}
-
-// TestPreferredReachabilityRef exercises the ref-selection decision behind
-// gastownhall/gascity#5037 via an injected resolver rather than a real git
-// repository — this package's tracked test-resource census
-// (internal/testpolicy/resourcecensus, test/test-resources.toml) ratchets the
-// untagged subprocess call/file count down and forbids growing it without a
-// council-reviewed policy change, so a real end-to-end git fixture isn't the
-// right shape for this unit; see docs/reference/specs — the actual
-// git-merge-base call this feeds stays covered by the same trust level it
-// had before this fix (it was already untested and unchanged). Per the
-// issue's own guidance, this asserts the *resolved ref* rather than relying
-// on "no warning" as a proxy — the pre-fix code was fail-closed and silently
-// wrong for some bead types, so absence of a warning was never sufficient
-// evidence.
-func TestPreferredReachabilityRef(t *testing.T) {
-	tests := []struct {
-		name           string
-		branch         string
-		remoteResolves map[string]bool
-		want           string
-	}{
-		{
-			name:           "prefers the remote-tracking ref when it resolves",
-			branch:         "main",
-			remoteResolves: map[string]bool{"refs/remotes/origin/main": true},
-			want:           "refs/remotes/origin/main",
-		},
-		{
-			name:           "falls back to the bare branch name when no remote-tracking ref exists",
-			branch:         "main",
-			remoteResolves: map[string]bool{},
-			want:           "main",
-		},
-		{
-			name:           "does not confuse a different branch's remote-tracking ref for this one",
-			branch:         "main",
-			remoteResolves: map[string]bool{"refs/remotes/origin/release": true},
-			want:           "main",
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := preferredReachabilityRef(tc.branch, func(ref string) bool { return tc.remoteResolves[ref] })
-			if got != tc.want {
-				t.Fatalf("preferredReachabilityRef(%q, ...) = %q, want %q", tc.branch, got, tc.want)
-			}
-		})
-	}
-}
-
-// TestCommitReachableOnEitherRef pins the union: the remote-tracking ref is
-// preferred, but a commit reachable only from the local branch still passes.
-func TestCommitReachableOnEitherRef(t *testing.T) {
-	tests := []struct {
-		name           string
-		remoteResolves map[string]bool
-		reachable      map[string]bool
-		want           bool
-	}{
-		{"remote resolves and contains the commit", map[string]bool{"refs/remotes/origin/main": true}, map[string]bool{"refs/remotes/origin/main": true}, true},
-		{"remote is stale, local branch contains the commit", map[string]bool{"refs/remotes/origin/main": true}, map[string]bool{"main": true}, true},
-		{"neither ref contains the commit", map[string]bool{"refs/remotes/origin/main": true}, map[string]bool{}, false},
-		{"no remote-tracking ref, local branch contains the commit", map[string]bool{}, map[string]bool{"main": true}, true},
-		{"no remote-tracking ref, local branch does not", map[string]bool{}, map[string]bool{}, false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			probes := map[string]int{}
-			got := commitReachableOnEitherRef("main",
-				func(ref string) bool { return tc.remoteResolves[ref] },
-				func(ref string) bool { probes[ref]++; return tc.reachable[ref] })
-			if got != tc.want {
-				t.Fatalf("commitReachableOnEitherRef = %v, want %v", got, tc.want)
-			}
-			if probes["main"] > 1 {
-				t.Fatalf("local ref probed %d times, want at most 1", probes["main"])
 			}
 		})
 	}
@@ -260,6 +180,28 @@ func TestWorkRecordCloseTargets(t *testing.T) {
 			}
 			if strings.Join(ids, ",") != strings.Join(tc.wantIDs, ",") {
 				t.Fatalf("ids = %v, want %v", ids, tc.wantIDs)
+			}
+		})
+	}
+}
+
+func TestCloseReasonCommitCandidates(t *testing.T) {
+	const commit = "abc1234"
+	tests := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{"close reason", []string{"close", "wr-1", "--reason", "Done at " + commit}, []string{commit}},
+		{"update notes", []string{"update", "wr-1", "--notes=Commit " + commit}, []string{commit}},
+		{"other flag consumes reason-looking value", []string{"update", "wr-1", "--description", "--notes", commit}, nil},
+		{"terminator stops flag parsing", []string{"close", "wr-1", "--", "--reason", commit}, nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := closeReasonCommitCandidates(tc.args, "")
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Fatalf("closeReasonCommitCandidates = %v, want %v", got, tc.want)
 			}
 		})
 	}
@@ -424,35 +366,84 @@ func TestEvaluateWorkRecordCloseGateAtomicShippedUpdate(t *testing.T) {
 	runGit(t, repoDir, "init", "--initial-branch=main")
 	runGit(t, repoDir, "config", "user.name", "Gas City Test")
 	runGit(t, repoDir, "config", "user.email", "gc-test@test.local")
-	artifactPath := filepath.Join(repoDir, "artifact.txt")
-	if err := os.WriteFile(artifactPath, []byte("integrated\n"), 0o644); err != nil {
-		t.Fatalf("write artifact: %v", err)
+	writeFile := func(name, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(repoDir, name), []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
 	}
+
+	writeFile("artifact.txt", "base\n")
+	runGit(t, repoDir, "add", "artifact.txt")
+	runGit(t, repoDir, "commit", "-m", "test: add base artifact")
+	base := strings.TrimSpace(runGit(t, repoDir, "rev-parse", "HEAD"))
+	runGit(t, repoDir, "update-ref", "refs/remotes/origin/main", base)
+
+	runGit(t, repoDir, "switch", "-c", "feature")
+	writeFile("artifact.txt", "integrated\n")
 	runGit(t, repoDir, "add", "artifact.txt")
 	runGit(t, repoDir, "commit", "-m", "test: integrate artifact")
 	commit := strings.TrimSpace(runGit(t, repoDir, "rev-parse", "HEAD"))
 
-	store := beads.NewMemStoreFrom(1, []beads.Bead{{
-		ID:     "wr-atomic-shipped",
-		Type:   "task",
-		Status: "in_progress",
-		Metadata: map[string]string{
-			beadmeta.WorkDirMetadataKey: repoDir,
+	store := beads.NewMemStoreFrom(1, []beads.Bead{
+		{
+			ID:     "wr-atomic-shipped",
+			Type:   "task",
+			Status: "in_progress",
+			Metadata: map[string]string{
+				beadmeta.WorkDirMetadataKey: repoDir,
+			},
 		},
-	}}, nil)
+		{
+			ID:     "wr-reason-only",
+			Type:   "task",
+			Status: "in_progress",
+			Metadata: map[string]string{
+				beadmeta.WorkDirMetadataKey:     repoDir,
+				beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeNoOp,
+			},
+		},
+	}, nil)
 	args := []string{
 		"update", "wr-atomic-shipped",
 		"--set-metadata", beadmeta.WorkOutcomeMetadataKey + "=" + beadmeta.WorkOutcomeShipped,
 		"--set-metadata", beadmeta.WorkCommitMetadataKey + "=" + commit,
-		"--set-metadata", beadmeta.WorkBranchMetadataKey + "=main",
+		"--set-metadata", beadmeta.WorkBranchMetadataKey + "=feature",
 		"--status=closed",
+		"--notes", "Done. Commit: " + commit + ".",
 	}
-	var stderr strings.Builder
-	if block := evaluateWorkRecordCloseGate(args, store, nil, repoDir, true, &stderr); block {
-		t.Fatalf("valid atomic shipped close blocked; stderr=%s", stderr.String())
+	reasonArgs := []string{"close", "wr-reason-only", "--reason", "Done. Commit: " + commit + "."}
+
+	for _, closeArgs := range [][]string{args, reasonArgs} {
+		var stderr strings.Builder
+		if block := evaluateWorkRecordCloseGate(closeArgs, store, nil, repoDir, false, &stderr); block {
+			t.Fatalf("warn-only unpublished close blocked; stderr=%s", stderr.String())
+		}
+		if got := stderr.String(); !strings.Contains(got, "not published") {
+			t.Fatalf("unpublished close stderr = %q, want publication warning", got)
+		}
 	}
-	if got := stderr.String(); got != "" {
-		t.Fatalf("valid atomic shipped close warned: %q", got)
+
+	runGit(t, repoDir, "switch", "main")
+	writeFile("unrelated.txt", "newer main work\n")
+	runGit(t, repoDir, "add", "unrelated.txt")
+	runGit(t, repoDir, "commit", "-m", "test: add unrelated main work")
+	runGit(t, repoDir, "cherry-pick", "--no-commit", commit)
+	runGit(t, repoDir, "commit", "-m", "test: squash feature")
+	squash := strings.TrimSpace(runGit(t, repoDir, "rev-parse", "HEAD"))
+	if squash == commit {
+		t.Fatal("squash commit unexpectedly retained the feature commit SHA")
+	}
+	runGit(t, repoDir, "update-ref", "refs/remotes/origin/main", squash)
+
+	for _, closeArgs := range [][]string{args, reasonArgs} {
+		var stderr strings.Builder
+		if block := evaluateWorkRecordCloseGate(closeArgs, store, nil, repoDir, true, &stderr); block {
+			t.Fatalf("published squash-equivalent close blocked; stderr=%s", stderr.String())
+		}
+		if got := stderr.String(); got != "" {
+			t.Fatalf("published squash-equivalent close warned: %q", got)
+		}
 	}
 }
 

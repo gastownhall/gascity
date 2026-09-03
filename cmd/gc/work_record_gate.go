@@ -6,8 +6,11 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/bdflags"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -16,9 +19,10 @@ import (
 // Work-record close gate (ADR-0009). Closing a work bead through the SDK close
 // seam (`gc bd close`) is validated against the typed work-record contract: the
 // bead must carry a typed gc.work_outcome, and a "shipped" outcome must point at
-// a commit that is reachable on the stamped gc.work_branch. This turns the
-// recurring "drain-without-commit" close (a close that leaves no artifact at
-// all) into a machine-checkable violation.
+// a commit published on a remote-tracking ref. Squash merges count as published
+// when every path changed by the work commit has the same blob on a remote ref.
+// This turns the recurring "drain-without-published-work" close into a
+// machine-checkable violation.
 //
 // The gate ships warn-only by default — violations are logged but the close
 // proceeds — so existing open beads migrate without breakage. Set
@@ -103,10 +107,10 @@ func isWorkRecordGatedBead(bead beads.Bead) bool {
 
 // validateWorkRecordOnClose checks bead against the typed work-record contract
 // and returns a human-readable message for each violation (empty slice ⇒ the
-// bead satisfies the contract). commitReachable reports whether a commit SHA is
-// an ancestor of a branch; it is injected so the rule is unit-testable without
-// a real repo. The caller is responsible for scoping (isWorkRecordGatedBead).
-func validateWorkRecordOnClose(bead beads.Bead, commitReachable func(commit, branch string) bool) []string {
+// bead satisfies the contract). commitPublished reports whether a commit is on
+// a remote-tracking ref or has squash-equivalent blobs there. The caller is
+// responsible for scoping (isWorkRecordGatedBead).
+func validateWorkRecordOnClose(bead beads.Bead, commitPublished func(commit string) bool) []string {
 	outcome := strings.TrimSpace(bead.Metadata[beadmeta.WorkOutcomeMetadataKey])
 	if outcome == "" {
 		return []string{fmt.Sprintf("missing %s (want one of shipped|no-op|blocked|abandoned)", beadmeta.WorkOutcomeMetadataKey)}
@@ -128,80 +132,169 @@ func validateWorkRecordOnClose(bead beads.Bead, commitReachable func(commit, bra
 	if branch == "" {
 		violations = append(violations, fmt.Sprintf("%s=shipped requires %s (the branch the commit lives on)", beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkBranchMetadataKey))
 	}
-	if commit != "" && branch != "" && !commitReachable(commit, branch) {
-		violations = append(violations, fmt.Sprintf("%s %s is not reachable on %s %s", beadmeta.WorkCommitMetadataKey, commit, beadmeta.WorkBranchMetadataKey, branch))
+	if commit != "" && branch != "" && !commitPublished(commit) {
+		violations = append(violations, fmt.Sprintf("%s %s is not published on any remote-tracking ref", beadmeta.WorkCommitMetadataKey, commit))
 	}
 	return violations
 }
 
-// preferredReachabilityRef decides which ref gitCommitReachableOnBranch should
-// check commit-reachability against: refs/remotes/origin/<branch> when it
-// resolves, otherwise the bare branch name. gitrevisions precedence puts a
-// local refs/heads/<branch> ahead of any remote-tracking ref, but the
-// worktree named by gc.work_dir is rarely the one whose local branch tip
-// actually moves — a refinery or polecat that merges/pushes from a different
-// worktree advances the remote-tracking ref, never the local one checked out
-// elsewhere. Resolving against the local ref alone reports a landed commit as
-// unreachable until something happens to fast-forward it, which in that
-// topology may be never (gastownhall/gascity#5037).
-//
-// remoteRefResolves is injected so the decision is unit-testable without a
-// real git repository; the only production caller runs
-// `git rev-parse --verify --quiet <ref>`. Kept as a separate probe rather
-// than a fallback on the merge-base exit code so the caller can distinguish
-// "no such ref" from "not reachable"; see commitReachableOnEitherRef.
-func preferredReachabilityRef(branch string, remoteRefResolves func(ref string) bool) string {
-	if remote := "refs/remotes/origin/" + branch; remoteRefResolves(remote) {
-		return remote
+var commitTokenRE = regexp.MustCompile(`(?i)\b[0-9a-f]{7,40}\b`)
+
+const gitBlobPathBatchSize = 256
+
+func closeEvidenceFlag(verb, flag string) (reasonFile, ok bool) {
+	switch verb {
+	case "close":
+		switch flag {
+		case "-r", "--reason":
+			return false, true
+		case "--reason-file":
+			return true, true
+		}
+	case "update":
+		switch flag {
+		case "--notes", "--append-notes":
+			return false, true
+		}
 	}
-	return branch
+	return false, false
 }
 
-// commitReachableOnEitherRef reports whether a commit is reachable from the
-// branch's remote-tracking ref OR from the branch itself. The remote-tracking
-// ref is probed first (see preferredReachabilityRef) because it is the ref
-// that actually advances in a refinery/polecat topology; the bare branch name
-// is then still checked, because ADR-0009's contract is that the commit is
-// reachable on gc.work_branch — not that it has been pushed. Checking only the
-// remote ref would reject a commit that is genuinely on the local branch but
-// sits ahead of (or was never pushed to) origin, a false negative in the exact
-// mirror image of gastownhall/gascity#5037.
-//
-// Both probes are injected so the decision is unit-testable without a real git
-// repository. The local ref is never probed twice.
-func commitReachableOnEitherRef(branch string, remoteRefResolves, reachableOnRef func(ref string) bool) bool {
-	ref := preferredReachabilityRef(branch, remoteRefResolves)
-	if reachableOnRef(ref) {
-		return true
+func closeReasonCommitCandidates(bdArgs []string, scopeRoot string) []string {
+	if len(bdArgs) == 0 {
+		return nil
 	}
-	if ref == branch {
-		return false
+	valueFlags := bdflags.ValueFlags(bdArgs[0])
+	var candidates []string
+	for i := 1; i < len(bdArgs); i++ {
+		arg := bdArgs[i]
+		if arg == "--" {
+			break
+		}
+		flag, value, inline := strings.Cut(arg, "=")
+		reasonFile, ok := closeEvidenceFlag(bdArgs[0], flag)
+		if !ok {
+			if !inline && valueFlags[flag] && i+1 < len(bdArgs) {
+				i++
+			}
+			continue
+		}
+		if !inline {
+			if i+1 >= len(bdArgs) {
+				continue
+			}
+			i++
+			value = bdArgs[i]
+		}
+		if reasonFile {
+			if value == "-" {
+				continue
+			}
+			if !filepath.IsAbs(value) {
+				value = filepath.Join(scopeRoot, value)
+			}
+			data, err := os.ReadFile(value)
+			if err != nil {
+				continue
+			}
+			value = string(data)
+		}
+		candidates = append(candidates, commitTokenRE.FindAllString(value, -1)...)
 	}
-	return reachableOnRef(branch)
+	return candidates
 }
 
-// gitCommitReachableOnBranch reports whether commit is an ancestor of branch in
-// the git repository at repoDir (worktrees share one object store, so any
-// worktree dir resolves refs across the repo). A non-nil error from git — bad
-// repo, unknown ref, unknown commit — reads as "not reachable". A commit/branch
-// that looks like a flag (leading "-") is rejected outright so a malformed
-// metadata value can never be parsed as a git option. See
-// commitReachableOnEitherRef for how branch is resolved to the refs that can
-// prove reachability.
-func gitCommitReachableOnBranch(repoDir, commit, branch string) bool {
-	if strings.TrimSpace(repoDir) == "" || commit == "" || branch == "" {
+func validateCloseReasonCommitsOnPublishedRefs(
+	bead beads.Bead,
+	bdArgs []string,
+	scopeRoot, repoDir string,
+) []string {
+	if strings.TrimSpace(bead.Metadata[beadmeta.WorkCommitMetadataKey]) != "" {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var violations []string
+	for _, commit := range closeReasonCommitCandidates(bdArgs, scopeRoot) {
+		if _, ok := seen[commit]; ok {
+			continue
+		}
+		seen[commit] = struct{}{}
+		published, valid := gitCommitPublication(repoDir, commit)
+		if valid && !published {
+			violations = append(violations, fmt.Sprintf(
+				"commit %s named in close reason is not published on any remote-tracking ref",
+				commit,
+			))
+		}
+	}
+	return violations
+}
+
+// gitCommitPublication reports whether commit resolves locally and whether its
+// work is present on a remote-tracking ref. Direct ancestry covers ordinary
+// pushes. Changed-path blob equality covers squash merges without comparing
+// unrelated paths added to the destination branch after the work branched.
+func gitCommitPublication(repoDir, commit string) (published, valid bool) {
+	commit = strings.TrimSpace(commit)
+	if strings.TrimSpace(repoDir) == "" || commit == "" || strings.HasPrefix(commit, "-") {
+		return false, false
+	}
+	out, err := exec.Command(
+		"git", "-C", repoDir, "rev-parse", "--verify", "--quiet", commit+"^{commit}",
+	).Output()
+	if err != nil {
+		return false, false
+	}
+	commit = strings.TrimSpace(string(out))
+	out, err = exec.Command(
+		"git", "-C", repoDir, "for-each-ref", "--format=%(refname)", "refs/remotes/",
+	).Output()
+	if err != nil {
+		return false, true
+	}
+	for _, ref := range strings.Fields(string(out)) {
+		if exec.Command("git", "-C", repoDir, "merge-base", "--is-ancestor", commit, ref).Run() == nil {
+			return true, true
+		}
+		if gitChangedPathBlobsMatchRef(repoDir, commit, ref) {
+			return true, true
+		}
+	}
+	return false, true
+}
+
+// gitChangedPathBlobsMatchRef compares only paths changed from the work
+// commit's merge base through the commit. git diff --quiet compares their tree
+// entries and blob OIDs; unrelated destination-ref changes are out of scope.
+func gitChangedPathBlobsMatchRef(repoDir, commit, ref string) bool {
+	out, err := exec.Command("git", "-C", repoDir, "merge-base", commit, ref).Output()
+	if err != nil {
 		return false
 	}
-	if strings.HasPrefix(commit, "-") || strings.HasPrefix(branch, "-") {
+	base := strings.TrimSpace(string(out))
+	out, err = exec.Command(
+		"git", "-C", repoDir, "diff", "--name-only", "--no-renames", "-z", base, commit, "--",
+	).Output()
+	if err != nil {
 		return false
 	}
-	return commitReachableOnEitherRef(branch,
-		func(candidate string) bool {
-			return exec.Command("git", "-C", repoDir, "rev-parse", "--verify", "--quiet", candidate).Run() == nil
-		},
-		func(ref string) bool {
-			return exec.Command("git", "-C", repoDir, "merge-base", "--is-ancestor", commit, ref).Run() == nil
-		})
+	encodedPaths := strings.TrimSuffix(string(out), "\x00")
+	if encodedPaths == "" {
+		return false
+	}
+	paths := strings.Split(encodedPaths, "\x00")
+	for len(paths) > 0 {
+		count := min(len(paths), gitBlobPathBatchSize)
+		args := []string{
+			"-C", repoDir, "diff", "--quiet", "--no-ext-diff", "--no-textconv", commit, ref, "--",
+		}
+		args = append(args, paths[:count]...)
+		if exec.Command("git", args...).Run() != nil {
+			return false
+		}
+		paths = paths[count:]
+	}
+	return true
 }
 
 // workRecordCloseTargets returns the bead IDs a bd invocation closes, and
@@ -329,10 +422,15 @@ func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, preFetched 
 		if projectionErr != nil {
 			violations = []string{projectionErr.Error()}
 		} else {
-			violations = validateWorkRecordOnClose(bead, func(commit, branch string) bool {
-				return gitCommitReachableOnBranch(repoDir, commit, branch)
+			violations = validateWorkRecordOnClose(bead, func(commit string) bool {
+				published, _ := gitCommitPublication(repoDir, commit)
+				return published
 			})
 		}
+		violations = append(
+			violations,
+			validateCloseReasonCommitsOnPublishedRefs(bead, bdArgs, scopeRoot, repoDir)...,
+		)
 		for _, v := range violations {
 			fmt.Fprintf(stderr, "gc bd: work-record gate (%s): close of %s: %s\n", mode, id, v) //nolint:errcheck // best-effort stderr
 		}

@@ -303,6 +303,10 @@ gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. If you need
 auto-export behavior, invoke bd directly.
 
+When a work close names a commit, gc warns unless that commit is on a
+remote-tracking ref or all paths it changed have matching blobs on one. The
+blob check recognizes squash merges without comparing unrelated branch work.
+
 ```
 gc bd [bd-args...]
 ```
