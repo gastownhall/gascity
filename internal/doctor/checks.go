@@ -1068,6 +1068,9 @@ func validateBDStoreTarget(cityPath, scopeRoot string) (contract.DoltConnectionT
 	}
 	target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, cityPath, scopeRoot)
 	if err != nil {
+		if resolved.Kind == contract.ScopeConfigAuthoritative && strings.EqualFold(resolved.State.DoltMode, "proxied-server") {
+			return contract.DoltConnectionTarget{DoltMode: resolved.State.DoltMode, EndpointOrigin: resolved.State.EndpointOrigin}, "", true, nil
+		}
 		return contract.DoltConnectionTarget{}, fixHintForBDScopeResolution(cityPath, resolved), true, err
 	}
 	return target, "", true, nil
@@ -1692,6 +1695,9 @@ func (c *RigBeadsCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 	if active {
+		if strings.EqualFold(target.DoltMode, "proxied-server") {
+			return r
+		}
 		addr := net.JoinHostPort(target.Host, target.Port)
 		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 		if err != nil {
