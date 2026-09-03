@@ -864,16 +864,16 @@ func doImportUpgrade(cityPath, target string, stdout, stderr io.Writer) int {
 			}
 		}
 		if moved == 0 {
-			fmt.Fprintf(stdout, "No import moved; %d already at their pinned version\n", total) //nolint:errcheck
+			fmt.Fprintf(stdout, "No import moved; %d already up to date\n", total) //nolint:errcheck
 		} else {
-			fmt.Fprintf(stdout, "Upgraded %d of %d remote import(s); %d already at their pinned version\n", moved, total, total-moved) //nolint:errcheck
+			fmt.Fprintf(stdout, "Upgraded %d of %d remote import(s); %d already up to date\n", moved, total, total-moved) //nolint:errcheck
 		}
 	} else {
 		pack, ok := lock.Packs[targetSource]
 		if !ok {
 			fmt.Fprintf(stdout, "Upgraded import %q\n", target) //nolint:errcheck
 		} else if prev, hadPrev := prevLock.Packs[targetSource]; hadPrev && prev.Commit == pack.Commit {
-			fmt.Fprintf(stdout, "Upgraded import %q (%s, unchanged)\n", target, pack.Commit) //nolint:errcheck
+			fmt.Fprintf(stdout, "Import %q already at %s\n", target, pack.Commit) //nolint:errcheck
 		} else {
 			fmt.Fprintf(stdout, "Upgraded import %q (%s)\n", target, pack.Commit) //nolint:errcheck
 		}
