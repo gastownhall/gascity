@@ -113,10 +113,15 @@ type ClassBinding struct {
 	// probe; a wrong true one retires it over beads it cannot recognize.
 	MintsReserved bool
 
-	// HasLegacyResidents reports whether the binding is known to still hold
-	// OPEN beads minted outside the reserved namespace — the relics `gc storage
-	// migrate` produced by preserving ids. The residence probe retires only
-	// when the binding both mints truthfully AND holds no such relic.
+	// HasLegacyResidents reports whether the binding is known to hold beads
+	// minted outside the reserved namespace — the relics `gc storage migrate`
+	// produced by preserving ids. The residence probe retires only when the
+	// binding both mints truthfully AND holds no such relic.
+	//
+	// Closed relics count. A closed bead is still shown, reopened, claimed and
+	// written by id, and the migration never deleted the work store's copy, so
+	// retiring on the last CLOSE would answer that id from a frozen
+	// pre-migration record forever (ga-qdt5y.19).
 	//
 	// Constructors set this TRUE until a census can say otherwise: "not known
 	// to hold relics" and "known to hold none" are different claims, and only
@@ -219,9 +224,9 @@ func (t Topology) orderedRigs() []Leg {
 func (b ClassBinding) coversID(id string) bool { return idInAnyNamespace(id, b.Prefixes) }
 
 // probeRetired reports whether the residence probe may be dropped for this
-// binding: it mints truthfully AND holds no open legacy resident. Both halves
-// are required — a point-in-time "zero relics" on a binding that still mints
-// work-shaped ids re-strands the very next create.
+// binding: it mints truthfully AND holds no legacy resident, open or closed.
+// Both halves are required — a point-in-time "zero relics" on a binding that
+// still mints work-shaped ids re-strands the very next create.
 func (b ClassBinding) probeRetired() bool { return b.MintsReserved && !b.HasLegacyResidents }
 
 // RefusingStore is the optional interface a store implements to declare that it

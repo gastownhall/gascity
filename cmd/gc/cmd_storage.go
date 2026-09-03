@@ -535,10 +535,18 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 // no reader can route to it from — the rows the cutover carried across under
 // their original work-shaped ids.
 //
-// That count is the residence probe's retirement condition. While it is
-// non-zero every work-shaped by-id read in the city pays one extra store read
-// to find beads that are reachable no other way, and it falls only as those
-// beads close. An operator draining a migrated city has nothing else to watch.
+// This is a DRAIN gauge, not the residence probe's retirement condition — the
+// two parted company in ga-qdt5y.19. Retirement asks whether the binding can
+// hold an id at all, and a closed relic still answers yes: the migration never
+// deleted the work store's frozen pre-migration copy, so retiring on the last
+// CLOSE would serve that id from the frozen copy forever. So the verdict counts
+// closed residents (storeref.LegacyResidents) and this count deliberately does
+// not — an operator draining a migrated city needs a number that reaches zero,
+// and the widened one never can.
+//
+// What reaching zero means, then, is that the carried-across work is finished,
+// not that the per-read cost is gone. A city that migrated any beads keeps its
+// probe for good.
 //
 // It never changes the exit code. A relic is the migration working as designed,
 // so a status command that failed over one would report every city that ever
@@ -557,7 +565,7 @@ func reportBindingRelics(target infraBindingTarget, logPrefix string, stdout, st
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return
 	}
-	fmt.Fprintf(stdout, "open relics: %d (carried across under their original ids; the residence probe retires when the last one closes)\n", len(relics)) //nolint:errcheck // best-effort stdout
+	fmt.Fprintf(stdout, "open relics: %d (carried across under their original ids; closed relics stay readable by id, so a binding that ever held one keeps its residence probe)\n", len(relics)) //nolint:errcheck // best-effort stdout
 }
 
 // cityMigrationGuardDirectory returns the city .gc directory the migration

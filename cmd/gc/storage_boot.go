@@ -95,8 +95,8 @@ type storageRoutes struct {
 	// its CachingStore stays the only emitter on that side — see
 	// class_store_emit.go for why the two must not both emit.
 	emitCityPath string
-	// relics records, per binding store, whether the boot-time census found an
-	// open bead outside the namespaces that binding declares.
+	// relics records, per binding store, whether the boot-time census found a
+	// bead — open or closed — outside the namespaces that binding declares.
 	//
 	// ABSENT MEANS UNKNOWN, and unknown means "assume relics" — see
 	// hasLegacyResidents. A process that never censused, or a binding whose
@@ -147,7 +147,7 @@ func censusBindingRelics(routes *storageRoutes) {
 		if !binding.MintsReserved {
 			continue
 		}
-		relics[binding.Leg.Store] = storeref.HasOpenLegacyResidents(binding) // residency:allow — indexes a census result by the binding it was taken from; resolves nothing
+		relics[binding.Leg.Store] = storeref.HasLegacyResidents(binding) // residency:allow — indexes a census result by the binding it was taken from; resolves nothing
 	}
 	routes.relics = relics
 }

@@ -210,6 +210,92 @@ func TestBootGateKeepsTheProbeForACityThatMigratedWork(t *testing.T) {
 	}
 }
 
+// The ga-qdt5y.19 incident shape, at the boot gate: the last relic CLOSES, and
+// the probe must not retire.
+//
+// Closing a relic drains it from the operator's report and changes nothing
+// about where it lives. `gc storage migrate` never deletes the work store's
+// pre-migration copy, so if this city retired its probe the relic's own id
+// would resolve to that copy — OPEN, with pre-migration fields, forever, with
+// no error anywhere. A `show` would report a bead completed weeks ago as ready
+// work, and an `update --claim` would claim it.
+//
+// This row fails against the open-only census that shipped before .19, which is
+// the point: nothing in the tree closed a relic and then asked about it, so the
+// bug lived in the gap between the fixtures that seed OPEN relics and the ones
+// that hold none at all.
+func TestBootCensusKeepsTheProbeForAClosedRelic(t *testing.T) {
+	cityPath, cfg, source, _ := convergedInfraCity(t)
+	carried := infraStoreFingerprint(t, source)
+	if len(carried) != 1 {
+		t.Fatalf("the converged fixture carried %d beads across, want exactly 1 so closing it empties the OPEN population outright", len(carried))
+	}
+
+	var stderr bytes.Buffer
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, &stderr)
+	if err != nil {
+		t.Fatalf("booting a converged city: %v (stderr: %s)", err, stderr.String())
+	}
+	t.Cleanup(func() { _ = routes.close() })
+
+	binding := soleBinding(t, routes)
+	if err := binding.Leg.Store.Close(carried[0]); err != nil {
+		t.Fatalf("closing the carried-across bead %s in the binding it lives in: %v", carried[0], err)
+	}
+	if open, err := storeref.OpenLegacyResidents(binding.Leg.Store, config.AllReservedClassPrefixes()); err != nil || len(open) != 0 {
+		t.Fatalf("after the close the binding still reports %v open relics (err %v); this row cannot distinguish a widened census from an undrained one", open, err)
+	}
+	censusBindingRelics(routes)
+
+	if !soleBinding(t, routes).HasLegacyResidents {
+		t.Fatal("the boot certified a binding clean because its only relic had CLOSED; the probe retires and every read of that id is answered by the migration's frozen open copy")
+	}
+	if !bindingLegRead(t, routes, carried[0]) {
+		t.Errorf("the plan for %s no longer reads the binding holding its live record", carried[0])
+	}
+}
+
+// The divergence pin: the drain count kept its OPEN semantics when the
+// retirement verdict widened past them.
+//
+// These are now two different questions over one binding — "how much is left to
+// drain" (open) and "can this binding hold this id" (open or closed) — and the
+// silent failure is someone tidying them back into one. Pointing
+// reportBindingRelics at the widened list would print a count that can never
+// fall, turning an operator's drain gauge into a constant; pointing the verdict
+// back at the open list is the .19 bug. This row holds both ends apart on one
+// city at one moment.
+func TestClosingTheLastRelicDrainsTheCountAndKeepsTheProbe(t *testing.T) {
+	cityPath, cfg, source, _ := convergedInfraCity(t)
+	carried := infraStoreFingerprint(t, source)
+	if len(carried) != 1 {
+		t.Fatalf("the converged fixture carried %d beads across, want exactly 1", len(carried))
+	}
+	var bootErr bytes.Buffer
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, &bootErr)
+	if err != nil {
+		t.Fatalf("booting a converged city: %v (stderr: %s)", err, bootErr.String())
+	}
+	t.Cleanup(func() { _ = routes.close() })
+	if err := soleBinding(t, routes).Leg.Store.Close(carried[0]); err != nil {
+		t.Fatalf("closing the carried-across bead %s: %v", carried[0], err)
+	}
+	censusBindingRelics(routes)
+	stubInfraControllerPing(t, 0)
+
+	var stdout, stderr bytes.Buffer
+	if code := doStorageStatus(storageOperatorRequest{CityPath: cityPath, Cfg: cfg}, &stdout, &stderr); code != 0 {
+		t.Fatalf("status exited %d on a drained city (stdout: %s, stderr: %s)", code, stdout.String(), stderr.String())
+	}
+	if got := stdout.String(); !strings.Contains(got, "open relics: 0") {
+		t.Errorf("the drain count did not reach zero after its last relic closed, so an operator watching it never sees the drain land:\n%s", got)
+	}
+
+	if !soleBinding(t, routes).HasLegacyResidents {
+		t.Error("the drained city retired its residence probe; the relic is closed, not gone, and its id still resolves to the binding")
+	}
+}
+
 // The operator's view of the same count.
 //
 // The probe retires on its own, silently, on the day the last relic closes.
