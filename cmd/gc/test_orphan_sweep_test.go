@@ -190,3 +190,30 @@ func sweepOrphanPIDPrefixedDirs(root, prefix string) {
 		_ = os.RemoveAll(path)
 	}
 }
+
+// adoptPerRunTMPDIR sets TMPDIR to newTMPDIR for the rest of the test
+// binary's life and returns the host temp root that was in effect
+// beforehand, so callers can sweep legacy fixture dirs left there by prior
+// runs. os.TempDir() re-reads TMPDIR on every call, so the host root must be
+// captured before this override — capturing it afterward would instead
+// return newTMPDIR's own fresh, empty directory (ga-lygcyb).
+func adoptPerRunTMPDIR(newTMPDIR string) (hostTmpRoot string, err error) {
+	// TODO(ga-lygcyb GREEN): wrong order — must capture os.TempDir() before
+	// the Setenv below, not after. Left as-is for RED: this stub reproduces
+	// main_test.go's actual bug instead of an arbitrary placeholder.
+	if err := os.Setenv("TMPDIR", newTMPDIR); err != nil {
+		return "", err
+	}
+	return os.TempDir(), nil
+}
+
+// sweepLegacyCmdGCFixtureDirs removes stale legacy fixture dirs for the five
+// prefixes cmd/gc test fixtures used before per-run temp roots existed, all
+// created directly under the host temp root rather than inside it.
+func sweepLegacyCmdGCFixtureDirs(hostTmpRoot string) {
+	sweepOrphanPIDPrefixedDirs(hostTmpRoot, testGCHomeDirPrefix)
+	sweepOrphanPIDPrefixedDirs(hostTmpRoot, testRuntimeDirPrefix)
+	sweepOrphanPIDPrefixedDirs(hostTmpRoot, testProviderStubDirPrefix)
+	sweepOrphanPIDPrefixedDirs(hostTmpRoot, testSlingFormulaDirPrefix)
+	sweepOrphanPIDPrefixedDirs(hostTmpRoot, testSlingCityDirPrefix)
+}
