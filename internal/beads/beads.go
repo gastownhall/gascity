@@ -108,6 +108,16 @@ type Bead struct {
 	// after richer statuses normalize to Gas City's three-state model. Cache
 	// notifications restore status="deferred" on the event wire so another
 	// process can reconstruct it; other JSON surfaces remain unchanged.
+	//
+	// No read surface exposes it, so the two projections of the same bead
+	// disagree by design: a direct .gc/events.jsonl reader sees the
+	// status="deferred" EncodeBeadEventPayload wrote, while the HTTP, SSE and
+	// --json surfaces re-project through this struct and report status="open",
+	// defer_until=null, is_blocked=false — three signals that all read as
+	// "ready" for a bead ready deliberately excludes. An operator asking why a
+	// bead is not being picked up has nothing to read; giving the exclusion a
+	// derived read-only representation is a wire-design decision, not a
+	// consequence of this tag.
 	IndefinitelyDeferred bool `json:"-"`
 	// Revision is the store-internal optimistic-concurrency token for
 	// ConditionalWriter. It is deliberately json:"-" so it stays off every HTTP
@@ -582,6 +592,8 @@ func HasReadyExcludedLabel(b Bead) bool {
 
 // IsDeferred reports whether a bead is hidden indefinitely by bd's deferred
 // status or temporarily by a future defer_until.
+// cmd_hook.isFutureDeferredHookCandidate mirrors only the time-bound half; it
+// operates on raw bd JSON before this normalization.
 func IsDeferred(b Bead, now time.Time) bool {
 	return b.IndefinitelyDeferred ||
 		(b.DeferUntil != nil && b.DeferUntil.After(now))

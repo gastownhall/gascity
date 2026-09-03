@@ -20,7 +20,11 @@ func EncodeBeadEventPayload(b Bead) (json.RawMessage, error) {
 //
 // Canonical shape = a raw bead snapshot. EncodeBeadEventPayload restores an
 // internal indefinite deferral as status="deferred" on this wire; every
-// consumer normalizes it again through this decoder. The wrapped
+// consumer that decodes through this package normalizes it again here. A
+// reader that consumes the stored bytes directly does not — see
+// Bead.IndefinitelyDeferred, which documents that a direct .gc/events.jsonl
+// reader sees the status="deferred" this wire carries. Do not widen the
+// encoder's rewrite without auditing those raw readers. The wrapped
 // {"bead":<snapshot>} shape (the registered BeadEventPayload contract) is
 // accepted as a tolerant fallback so a producer that ever emits it does not
 // silently starve consumers. A payload with an empty id, undecodable bytes, or
@@ -59,7 +63,11 @@ func decodeRawBead(data json.RawMessage) (Bead, bool) {
 	if err := json.Unmarshal(data, &b); err != nil || b.ID == "" {
 		return Bead{}, false
 	}
-	b.Status, b.IndefinitelyDeferred = normalizedBdReadState(b.Status, b.DeferUntil)
+	// Only bd's deferred status needs re-derivation here; leaving every other
+	// raw status untouched keeps the ga-3mv5d3 collapse off the event path.
+	if b.Status == "deferred" {
+		b.Status, b.IndefinitelyDeferred = normalizedBdReadState(b.Status, b.DeferUntil)
+	}
 	if b.Type == "" {
 		var compat struct {
 			Type string `json:"type"`

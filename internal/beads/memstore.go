@@ -134,6 +134,9 @@ func (m *MemStore) Create(b Bead) (Bead, error) {
 	} else {
 		b.ID = m.mintIDLocked()
 	}
+	// Set directly rather than through setBeadStatus: create is not a status
+	// transition over an existing bead, so a caller-supplied
+	// IndefinitelyDeferred must survive into the store instead of being cleared.
 	b.Status = "open"
 	if b.Type == "" {
 		b.Type = "task"

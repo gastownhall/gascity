@@ -1267,6 +1267,18 @@ func TestCachingStoreReopenClearsStatusBasedDeferralWhenRefreshFails(t *testing.
 	if err := cache.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime: %v", err)
 	}
+	// The fixture reaches the cache deferred only because MemStore.Create
+	// seeds Status directly instead of taking an explicit transition, which
+	// clears the marker. Pin that here: without it, a Create that started
+	// clearing the marker would leave this test asserting !IsDeferred against
+	// a bead that was never deferred, and it would pass vacuously.
+	primed, err := cache.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get before reopen: %v", err)
+	}
+	if !IsDeferred(primed, time.Now()) {
+		t.Fatalf("fixture is not deferred before the reopen, so the assertion below would be vacuous: %+v", primed)
+	}
 
 	backing.failNextGet = true
 	if err := cache.Reopen(created.ID); err != nil {

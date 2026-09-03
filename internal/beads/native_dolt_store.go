@@ -1412,13 +1412,13 @@ func (s *NativeDoltStore) Ready(queries ...ReadyQuery) ([]Bead, error) {
 			// deferral (defer_until in the past) can resurface. An issue
 			// with no defer_until at all was never time-bound — it's bd
 			// defer's status-based indefinite deferral — and must stay
-			// hidden. mapBdStatus collapses status to "open" and
-			// IsDeferred only inspects DeferUntil, so both would
-			// otherwise look identical to an ordinary open bead once
-			// beadFromNativeIssue erases the raw status. The per-status
-			// loop keyed this on the filter status it was querying for;
-			// with the whole set in one call the row's own raw status is
-			// the equivalent discriminator.
+			// hidden. beadFromNativeIssue now records that case as
+			// Bead.IndefinitelyDeferred and IsDeferred honors it, so the
+			// readiness filter already excludes such a row; this skip keeps
+			// it from being materialized at all. The per-status loop keyed
+			// this on the filter status it was querying for; with the whole
+			// set in one call the row's own raw status is the equivalent
+			// discriminator.
 			if issue.Status == beadslib.StatusDeferred && issue.DeferUntil == nil {
 				continue
 			}

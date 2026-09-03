@@ -154,6 +154,41 @@ func TestDecodeBeadEventPayloadPreservesStatusBasedDeferral(t *testing.T) {
 	}
 }
 
+// TestDecodeBeadEventPayloadLeavesNonDeferredStatusVerbatim pins the decoder's
+// narrow scope: only bd's "deferred" status is re-derived here. Every other raw
+// status decodes verbatim, exactly as it did before the status-based deferral
+// marker existed. Re-widening this to normalize unconditionally would put the
+// ga-3mv5d3 status-erasure collapse (blocked/hooked/pinned → open) on the event
+// path, where no read edge's compensating controls apply.
+func TestDecodeBeadEventPayloadLeavesNonDeferredStatusVerbatim(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		want    string
+	}{
+		{name: "blocked", payload: `{"id":"gcg-blocked","status":"blocked","issue_type":"task"}`, want: "blocked"},
+		{name: "hooked", payload: `{"id":"gcg-hooked","status":"hooked","issue_type":"task"}`, want: "hooked"},
+		{name: "pinned", payload: `{"id":"gcg-pinned","status":"pinned","issue_type":"task"}`, want: "pinned"},
+		{name: "absent status", payload: `{"id":"gcg-absent","issue_type":"task"}`, want: ""},
+		{name: "ordinary open", payload: `{"id":"gcg-open","status":"open","issue_type":"task"}`, want: "open"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := DecodeBeadEventPayload([]byte(tt.payload))
+			if !ok {
+				t.Fatal("decode returned ok=false")
+			}
+			if got.Status != tt.want {
+				t.Fatalf("Status = %q, want %q verbatim", got.Status, tt.want)
+			}
+			if got.IndefinitelyDeferred {
+				t.Fatalf("status %q gained the indefinite-deferral marker", tt.want)
+			}
+		})
+	}
+}
+
 // TestDecodeBeadEventPayloadWrappedFallback proves the tolerant {"bead":<snap>}
 // fallback still decodes (older/registered-contract shape), so a producer that
 // switched to the wrapped shape would not silently starve consumers.
