@@ -1626,6 +1626,20 @@ func TestDoltServerCheck_ManagedCityProxiedModeDoesNotRequireDirectServer(t *tes
 	}
 }
 
+func TestDoltServerCheck_ProxiedMalformedSidecarIsError(t *testing.T) {
+	dir := setupCity(t, "[workspace]\nname=\"test\"\n")
+	fs := fsys.OSFS{}
+	writeDoctorCanonicalConfig(t, fs, dir, contract.ConfigState{IssuePrefix: "gc", EndpointOrigin: contract.EndpointOriginManagedCity, EndpointStatus: contract.EndpointStatusVerified, DoltMode: "proxied-server"})
+	writeDoctorCanonicalMetadata(t, fs, dir, "hq")
+	if err := os.WriteFile(filepath.Join(dir, ".beads", "proxied_server_client_info.json"), []byte(`{"external":{"host":"db","port":0}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := NewDoltServerCheck(dir, false).Run(&CheckContext{})
+	if r.Status != StatusError || !strings.Contains(r.Message, "resolve dolt target") {
+		t.Fatalf("status=%d msg=%q", r.Status, r.Message)
+	}
+}
+
 func TestDoctorScopeUsesProxiedDoltModeRejectsStaleDoltliteMode(t *testing.T) {
 	dir := setupCity(t, "[workspace]\nname = \"test\"\n[beads]\nprovider = \"bd\"\nbackend = \"doltlite\"\n")
 	fs := fsys.OSFS{}
