@@ -1680,6 +1680,16 @@ type sqliteStoreTx struct {
 }
 
 func (t *sqliteStoreTx) Create(b Bead) (Bead, error) {
+	// The fence belongs to the STORE, not to one entry point. This is the second
+	// door into the same table, and it runs the check in the same place create()
+	// does — before normalization, because normalizeCreate lifts the sequence
+	// floor to the pinned id's suffix, so a fence consulted after it renumbers a
+	// binding this store was never allowed to write to, and the rollback does
+	// not put that back. There is no allowForeign exemption here: the migration
+	// copy path is CreateWithForeignID, which does not run inside a Tx.
+	if err := t.store.checkPinnedIDNamespace(b.ID); err != nil {
+		return Bead{}, err
+	}
 	stored := t.store.normalizeCreate(b)
 	if b.ID == "" {
 		id, err := t.store.mintUniqueIDTx(t.ctx, t.tx, stored.ID, nil)
