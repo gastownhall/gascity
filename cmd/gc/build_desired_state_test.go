@@ -13546,7 +13546,8 @@ func rigDispatcherBindingCityConfig(rigPath string) *config.City {
 func registerSplitCityRoutes(t *testing.T, cityPath string, binding beads.Store) {
 	t.Helper()
 	routes := splitRoutes(binding)
-	registerResidencyRoutes(cityPath, routes, func() beads.Store { return beads.NewMemStore() })
+	work := beads.NewMemStore()
+	registerResidencyRoutes(cityPath, routes, func() beads.Store { return work })
 	t.Cleanup(func() { unregisterResidencyRoutes(cityPath, routes) })
 }
 

@@ -1769,6 +1769,10 @@ func convergedRoutedWorkBinding(
 	suspendedRigPaths map[string]bool,
 ) beads.Store {
 	legs, err := routedWorkStoreCandidates(cityPath, cfg, store, rigStores, suspendedRigPaths, censusRefScoped)
+	// An unresolvable topology takes the same conservative nil as a legacy city:
+	// fall back to the legacy target rather than guess a store. The error is not
+	// swallowed — collectOpenUnassignedRoutedWork resolves this same leg set later
+	// in this build and reports it there.
 	if err != nil || len(legs) == 0 {
 		return nil
 	}
