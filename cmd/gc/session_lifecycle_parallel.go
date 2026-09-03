@@ -1717,29 +1717,43 @@ func commitAsyncStartResultWithContext(
 	}()
 
 	refreshBegin := time.Now()
-	refreshed, ok, cleanupRuntime, releaseInFlight := refreshAsyncStartResult(result, store, stderr)
+	refreshed, verdict := refreshAsyncStartResult(result, store, stderr)
 	commitRefreshElapsed := time.Since(refreshBegin)
 	// Carry the per-phase timings forward: refresh's elapsed time is
 	// commit-side, distinct from the start phases captured in
 	// runPreparedStartCandidate. Both flow into the lifecycle log.
 	refreshed.phases.CommitRefresh = commitRefreshElapsed
-	if !ok {
-		// refreshAsyncStartResult returns result unchanged on every !ok
-		// branch (store.Get error, stale prepared command, stale runtime
-		// session), so refreshed.phases already carries the original
+	sessionID := result.prepared.candidate.info.ID
+	if !verdict.commit {
+		// refreshAsyncStartResult returns result unchanged on every
+		// non-commit branch (store.Get error, stale prepared command, stale
+		// runtime session), so refreshed.phases already carries the original
 		// start_call / post_start_observe; only commit_refresh was
 		// stamped above. No restore needed.
-		if cleanupRuntime {
+		if verdict.cleanupRuntime {
 			stopStaleAsyncStartRuntime(result, sp, stderr)
 		}
 		outcome := "stale_async_start"
-		if releaseInFlight {
-			clearPendingStartInFlightLease(result.prepared.candidate.info.ID, sessFront, stderr)
+		switch {
+		case verdict.rollbackPendingCreate:
+			// rollbackPendingCreate clears last_woke_at inside its own Tx, so
+			// this arm does not also release the in-flight lease. The rollback
+			// resolves the run, so the consecutive-failure counter resets.
+			outcome = "async_start_drift_rolled_back"
+			rollbackPendingCreate(verdict.current, sessFront, clk.Now().UTC(), stderr)
+			asyncStartFailures.clear(sessionID)
+			emitAsyncStartDriftRollback(rec, name, verdict, template, outcome)
+		case verdict.releaseInFlight:
 			outcome = "async_start_refresh_failed"
+			clearPendingStartInFlightLease(sessionID, sessFront, stderr)
+			if asyncStartFailures.record(sessionID) {
+				emitAsyncStartRefreshStalled(rec, name, sessionID, template, outcome, asyncStartFailures.count(sessionID), stderr)
+			}
 		}
 		logLifecycleOutcome(stderr, "start", wave, name, template, outcome, result.started, time.Now(), nil, refreshed.phases)
 		return false
 	}
+	asyncStartFailures.clear(sessionID)
 	if refreshed.err != nil && refreshed.rollbackPending && runningSessionMatchesPendingCreateInfo(refreshed.prepared.candidate.info, refreshed.prepared.candidate.name(), sp) {
 		refreshed.err = nil
 		refreshed.outcome = TraceOutcomeSessionExistsConverged
@@ -1782,26 +1796,47 @@ func commitAsyncStartResultWithContext(
 // TestRefreshAsyncStartRejectsNonSessionBead. candidate.info is refreshed to the
 // re-read Info; the prepared side (result.prepared.candidate.info) is the enqueue-time
 // twin the gates compare against.
-func refreshAsyncStartResult(result startResult, store beads.Store, stderr io.Writer) (startResult, bool, bool, bool) {
+func refreshAsyncStartResult(result startResult, store beads.Store, stderr io.Writer) (startResult, asyncStartRefreshVerdict) {
 	preparedInfo := result.prepared.candidate.info
 	if store == nil || strings.TrimSpace(preparedInfo.ID) == "" {
-		return result, true, false, false
+		return result, asyncStartRefreshVerdict{commit: true}
 	}
 	currentInfo, _, err := sessionFrontDoor(store).GetPersistedResponse(preparedInfo.ID)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: refreshing async start %s: %v\n", result.prepared.candidate.name(), err) //nolint:errcheck
-		return result, false, false, true
+		return result, asyncStartRefreshVerdict{releaseInFlight: true}
 	}
 	if asyncStartPreparedCommandStaleInfo(result.prepared, currentInfo) {
+		verdict := asyncStartRefreshVerdict{
+			cleanupRuntime:  true,
+			current:         currentInfo,
+			preparedCommand: result.prepared.candidate.tp.Command,
+			currentCommand:  currentInfo.Command,
+		}
+		// A create that never committed cannot converge on its own: the stale
+		// side of this compare is the persisted command, and only a completed
+		// create rewrites it. Roll the pending create back so the claim and the
+		// alias are released and the next tick recreates the row against the
+		// current template command (ga-6wkhl). A live row keeps the superseded
+		// verdict — see asyncStartDriftRollbackEligibleInfo.
+		if asyncStartDriftRollbackEligibleInfo(currentInfo) {
+			fmt.Fprintf(stderr, "session reconciler: rolling back pending create for %s: desired command changed before its create committed\n", result.prepared.candidate.name()) //nolint:errcheck
+			verdict.rollbackPendingCreate = true
+			return result, verdict
+		}
 		fmt.Fprintf(stderr, "session reconciler: ignoring stale async start result for %s: desired command changed during startup\n", result.prepared.candidate.name()) //nolint:errcheck
-		return result, false, true, true
+		verdict.releaseInFlight = true
+		return result, verdict
 	}
 	if !asyncStartSessionStillCurrentInfo(preparedInfo, currentInfo) {
 		fmt.Fprintf(stderr, "session reconciler: ignoring stale async start result for %s\n", result.prepared.candidate.name()) //nolint:errcheck
-		return result, false, asyncStartStaleRuntimeCleanupAllowedInfo(preparedInfo, currentInfo), false
+		return result, asyncStartRefreshVerdict{
+			cleanupRuntime: asyncStartStaleRuntimeCleanupAllowedInfo(preparedInfo, currentInfo),
+			current:        currentInfo,
+		}
 	}
 	result.prepared.candidate.info = currentInfo
-	return result, true, false, false
+	return result, asyncStartRefreshVerdict{commit: true, current: currentInfo}
 }
 
 // asyncStartPreparedCommandStaleInfo is the async-start command-drift gate: it

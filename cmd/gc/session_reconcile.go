@@ -223,6 +223,18 @@ func sessionStartRequestedInfo(i sessionpkg.Info, clk clock.Clock) bool {
 // not from the bead row's CreatedAt, so configured named-session reopens get a
 // fresh window each time the bead is reopened. Pending creates that never
 // reached preWakeCommit use pendingCreateNeverStartedTimeout instead.
+//
+// Deliberately left at one minute even though ga-6wkhl made the window
+// reachable for the first time (PreWakePatch used to re-stamp
+// pending_create_started_at before every start attempt, so it measured the
+// latest attempt rather than the episode and never elapsed for a session that
+// retried each tick). A start that is genuinely in flight is protected by
+// pendingCreateStartInFlightInfo, which leases against the CONFIGURED
+// session.startup_timeout off last_woke_at and is consulted before every
+// pendingCreateAttemptStaleInfo rollback path — so this window never races a
+// healthy spawn and does not need headroom above the startup budget. Raising it
+// would instead hold aliases longer (see preserveConfiguredNamedSessionBead's
+// race guard), which is the opposite of what ga-6wkhl needs.
 const staleCreatingStateTimeout = time.Minute
 
 // stalePendingCreateTimeout is the longer grace window applied by
