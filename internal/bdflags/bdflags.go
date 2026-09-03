@@ -129,7 +129,8 @@ var boolFlagsBySub = map[string]map[string]bool{
 	},
 	"update": {
 		"--allow-empty-description": true, "--claim": true, "--ephemeral": true,
-		"--history": true, "--no-history": true, "--persistent": true, "--stdin": true,
+		"--force": true, "--history": true, "--no-history": true, "--persistent": true,
+		"--stdin": true,
 	},
 	"close": {
 		"--claim-next": true, "--continue": true, "-f": true, "--force": true,
