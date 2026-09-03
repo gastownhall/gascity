@@ -39,6 +39,7 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 		return nil, apierr.Internal.Msg(err.Error())
 	}
 	sessions, responseByID := filterEnrichReadModel(mgr, listings, input.State, input.Template)
+	episodesByName := startupHealthEpisodesByName(session.NewStore(store))
 
 	// Unified page contract (S4): default 100 like every other keyset list.
 	// The offset-cursor era defaulted sessions to the 1000-row server cap;
@@ -81,7 +82,9 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	keyedTranscriptPaths := session.ResolveKeyedTranscriptPaths(sessionTranscriptLookupCandidates(pageSessions), s.sessionLogPaths(), sessionTranscriptProviderFallback(cfg))
 	page := make([]sessionResponse, len(pageSessions))
 	for j, sess := range pageSessions {
-		page[j] = sessionResponseWithReason(sess, responseByID[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
+		pr := responseByID[sess.ID]
+		pr.Metadata = overlayStartupHealthMetadata(pr.Metadata, episodesByName[sess.SessionName])
+		page[j] = sessionResponseWithReason(sess, pr, cfg, s.state.SessionProvider(), hasDeferredQueue)
 		s.enrichSessionResponseWithKeyedPaths(&page[j], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0, keyedTranscriptPaths)
 	}
 	return &ListOutput[sessionResponse]{

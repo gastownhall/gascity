@@ -113,6 +113,58 @@ func TestSessionGetEnrichedWireByteIdentical(t *testing.T) {
 	}
 }
 
+// TestSessionGetEnrichedRendersStartFailingReason pins the ga-o04bfr.1.5
+// API-route regression: an active startup-health episode joined at Get time
+// (session_get_read.go's overlayStartupHealthMetadata) renders "start-failing
+// (N)" in the wire Reason field, and the join never mutates the session
+// bead's own persisted metadata (it overlays a copy).
+func TestSessionGetEnrichedRendersStartFailingReason(t *testing.T) {
+	cfg := &config.City{}
+	future := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+	sessionBead := beads.Bead{
+		ID:     "s-start-failing",
+		Type:   session.BeadType,
+		Status: "open",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"template":     "polecat",
+			"state":        "asleep",
+			"provider":     "claude",
+			"session_name": "s-start-failing",
+		},
+		CreatedAt: time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC),
+	}
+	episodeBead := beads.Bead{
+		ID:     "episode-1",
+		Type:   session.StartupHealthEpisodeType,
+		Status: "open",
+		Metadata: map[string]string{
+			session.StartupHealthSessionNameMetadataKey:      "s-start-failing",
+			session.StartupHealthConsecutiveMetadataKey:      "4",
+			session.StartupHealthQuarantinedUntilMetadataKey: future,
+		},
+	}
+	store := beads.NewMemStoreFrom(1, []beads.Bead{sessionBead, episodeBead}, nil)
+	mgr := session.NewManagerWithOptions(store, runtime.NewFake())
+
+	info, pr, err := sessionGetEnriched(session.NewStore(beads.SessionStore{Store: store}), mgr, sessionBead.ID)
+	if err != nil {
+		t.Fatalf("sessionGetEnriched: %v", err)
+	}
+	resp := sessionResponseWithReason(info, pr, cfg, nil, true)
+	if resp.Reason != "start-failing (4)" {
+		t.Fatalf("Reason = %q, want %q", resp.Reason, "start-failing (4)")
+	}
+
+	rawBead, err := store.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if _, ok := rawBead.Metadata[session.StartupHealthConsecutiveMetadataKey]; ok {
+		t.Fatalf("session bead metadata was mutated with startup-health keys: %v", rawBead.Metadata)
+	}
+}
+
 // wireSessionBeadFixtures returns representative persisted session beads spanning
 // the states whose response JSON depends on bead status + metadata: creating,
 // active, and closed, with alias/title/agent_name/permission-mode overrides and

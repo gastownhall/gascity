@@ -252,6 +252,7 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sessions, responseByID := filterEnrichReadModel(mgr, listings, stateFilter, templateFilter)
+	episodesByName := startupHealthEpisodesByName(session.NewStore(store))
 
 	// Resolve the legacy offset page before runtime/transcript enrichment so
 	// off-page sessions do not perform filesystem discovery on every list poll.
@@ -283,7 +284,9 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	items := make([]sessionResponse, len(pageSessions))
 	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
 	for i, sess := range pageSessions {
-		items[i] = sessionResponseWithReason(sess, responseByID[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
+		pr := responseByID[sess.ID]
+		pr.Metadata = overlayStartupHealthMetadata(pr.Metadata, episodesByName[sess.SessionName])
+		items[i] = sessionResponseWithReason(sess, pr, cfg, s.state.SessionProvider(), hasDeferredQueue)
 		s.enrichSessionResponseWithKeyedPaths(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0, keyedTranscriptPaths)
 	}
 

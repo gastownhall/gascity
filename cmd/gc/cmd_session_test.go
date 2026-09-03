@@ -1580,6 +1580,86 @@ func TestSessionReason_CircuitOpenNonMatchingMetadataFallsBack(t *testing.T) {
 	assertStringMapEqual(t, bead.Metadata, before)
 }
 
+// TestSessionReason_StartFailing pins the ga-o04bfr.1.5 fallback-route
+// regression: sessionReason renders "start-failing (N)" for a session whose
+// infoIndex entry carries an active startup-health episode (the CLI-side
+// join startupHealthEpisodesByName performs in cmd_session.go), for both a
+// plain named session row and a pool-expanded instance row — the reason
+// projection must be identical regardless of pool identity.
+func TestSessionReason_StartFailing(t *testing.T) {
+	future := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+
+	t.Run("named", func(t *testing.T) {
+		bead := beads.Bead{
+			ID:     "gc-1",
+			Status: "open",
+			Metadata: map[string]string{
+				"template":     "worker",
+				"session_name": "worker-start-failing",
+				"state":        "asleep",
+			},
+		}
+		info := session.Info{
+			ID:          bead.ID,
+			Template:    "worker",
+			State:       session.StateAsleep,
+			SessionName: "worker-start-failing",
+		}
+		indexed := seedSessionInfo(bead)
+		indexed.StartupHealthConsecutive = "6"
+		indexed.StartupHealthQuarantinedUntil = future
+
+		reason := sessionReason(
+			info,
+			map[string]session.Info{bead.ID: indexed},
+			nil,
+			runtime.NewFake(),
+			nil,
+			nil,
+		)
+		if reason != "start-failing (6)" {
+			t.Fatalf("sessionReason = %q, want %q", reason, "start-failing (6)")
+		}
+	})
+
+	t.Run("pool-expanded", func(t *testing.T) {
+		bead := beads.Bead{
+			ID:     "gc-2",
+			Status: "open",
+			Metadata: map[string]string{
+				"template":     "worker",
+				"session_name": "worker-2",
+				"state":        "asleep",
+				"pool_managed": "true",
+				"pool_slot":    "2",
+			},
+		}
+		info := session.Info{
+			ID:          bead.ID,
+			Template:    "worker",
+			State:       session.StateAsleep,
+			SessionName: "worker-2",
+			PoolManaged: true,
+			PoolSlot:    "2",
+		}
+		indexed := seedSessionInfo(bead)
+		indexed.StartupHealthConsecutive = "3"
+		indexed.StartupHealthQuarantinedUntil = future
+
+		reason := sessionReason(
+			info,
+			map[string]session.Info{bead.ID: indexed},
+			nil,
+			runtime.NewFake(),
+			nil,
+			nil,
+		)
+		if reason != "start-failing (3)" {
+			t.Fatalf("sessionReason = %q, want %q", reason, "start-failing (3)")
+		}
+	})
+}
+
 func TestSessionReason_PriorityMatrix(t *testing.T) {
 	const agentName = "worker"
 	cfg := &config.City{

@@ -358,3 +358,111 @@ func TestStoreSavedStartupHealthEpisodeExcludedFromSessionList(t *testing.T) {
 		t.Fatalf("List() = %+v, want exactly the session bead %q (never the startup-health episode)", infos, created.ID)
 	}
 }
+
+// recordingStartupHealthCacheStore records List and CachedList calls, serving
+// CachedList from the embedded store's List (NOT the recorded override) so a
+// cache hit leaves listCalls at zero, mirroring recordingCacheStore's role for
+// the two-leg session union tier tests in list_all_characterization_test.go.
+type recordingStartupHealthCacheStore struct {
+	beads.Store
+	listCalls   []beads.ListQuery
+	cachedCalls []beads.ListQuery
+	cacheHit    bool
+}
+
+func (s *recordingStartupHealthCacheStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	s.listCalls = append(s.listCalls, q)
+	return s.Store.List(q)
+}
+
+func (s *recordingStartupHealthCacheStore) CachedList(q beads.ListQuery) ([]beads.Bead, bool) {
+	s.cachedCalls = append(s.cachedCalls, q)
+	if !s.cacheHit {
+		return nil, false
+	}
+	rows, err := s.Store.List(q)
+	if err != nil {
+		return nil, false
+	}
+	return rows, true
+}
+
+func TestListStartupHealthEpisodesCacheFirstHitSkipsBackingList(t *testing.T) {
+	mem := beads.NewMemStore()
+	seed := NewStore(beads.SessionStore{Store: mem})
+	ep := StartupHealthEpisode{
+		SessionName:      "gc-1",
+		ConsecutiveCount: 3,
+		FirstFailureAt:   time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC),
+		LastFailureAt:    time.Date(2026, 8, 20, 12, 5, 0, 0, time.UTC),
+		QuarantinedUntil: time.Date(2026, 8, 20, 13, 0, 0, 0, time.UTC),
+	}
+	if err := seed.SaveStartupHealthEpisode(ep); err != nil {
+		t.Fatalf("seed SaveStartupHealthEpisode: %v", err)
+	}
+
+	rec := &recordingStartupHealthCacheStore{Store: mem, cacheHit: true}
+	s := NewStore(beads.SessionStore{Store: rec})
+
+	episodes, err := s.ListStartupHealthEpisodesCacheFirst()
+	if err != nil {
+		t.Fatalf("ListStartupHealthEpisodesCacheFirst: %v", err)
+	}
+	if len(rec.listCalls) != 0 {
+		t.Errorf("cache hit must not call backing List, got %d calls", len(rec.listCalls))
+	}
+	if len(rec.cachedCalls) != 1 {
+		t.Fatalf("want 1 CachedList peek, got %d", len(rec.cachedCalls))
+	}
+	if rec.cachedCalls[0].IncludeClosed {
+		t.Errorf("cache peek must not set IncludeClosed (the real CachingStore declines closed-inclusive queries), got true")
+	}
+	if len(episodes) != 1 || episodes[0] != ep {
+		t.Fatalf("episodes = %+v, want [%+v]", episodes, ep)
+	}
+}
+
+func TestListStartupHealthEpisodesCacheFirstMissFallsThroughToBackingList(t *testing.T) {
+	mem := beads.NewMemStore()
+	seed := NewStore(beads.SessionStore{Store: mem})
+	ep := StartupHealthEpisode{SessionName: "gc-1", ConsecutiveCount: 3}
+	if err := seed.SaveStartupHealthEpisode(ep); err != nil {
+		t.Fatalf("seed SaveStartupHealthEpisode: %v", err)
+	}
+
+	rec := &recordingStartupHealthCacheStore{Store: mem, cacheHit: false}
+	s := NewStore(beads.SessionStore{Store: rec})
+
+	episodes, err := s.ListStartupHealthEpisodesCacheFirst()
+	if err != nil {
+		t.Fatalf("ListStartupHealthEpisodesCacheFirst: %v", err)
+	}
+	if len(rec.cachedCalls) != 1 {
+		t.Fatalf("want 1 CachedList peek attempted before falling through, got %d", len(rec.cachedCalls))
+	}
+	if len(rec.listCalls) != 1 {
+		t.Fatalf("cache miss must fall through to backing List, got %d calls", len(rec.listCalls))
+	}
+	if !rec.listCalls[0].IncludeClosed {
+		t.Errorf("fallback must match ListStartupHealthEpisodes and query with IncludeClosed=true")
+	}
+	if len(episodes) != 1 || episodes[0].SessionName != "gc-1" || episodes[0].ConsecutiveCount != 3 {
+		t.Fatalf("episodes = %+v, want one gc-1 episode with count 3", episodes)
+	}
+}
+
+func TestListStartupHealthEpisodesCacheFirstNoCacheCapabilityFallsThrough(t *testing.T) {
+	mem := beads.NewMemStore()
+	s := NewStore(beads.SessionStore{Store: mem})
+	if err := s.SaveStartupHealthEpisode(StartupHealthEpisode{SessionName: "gc-1", ConsecutiveCount: 1}); err != nil {
+		t.Fatalf("seed SaveStartupHealthEpisode: %v", err)
+	}
+
+	episodes, err := s.ListStartupHealthEpisodesCacheFirst()
+	if err != nil {
+		t.Fatalf("ListStartupHealthEpisodesCacheFirst: %v", err)
+	}
+	if len(episodes) != 1 || episodes[0].SessionName != "gc-1" {
+		t.Fatalf("episodes = %+v, want one gc-1 episode (a store without CachedList must fall back cleanly)", episodes)
+	}
+}

@@ -854,6 +854,122 @@ func TestLifecycleDisplayReasonWithLivenessInfoEquivalence(t *testing.T) {
 	}
 }
 
+// TestLifecycleDisplayReasonStartFailing pins the ga-o04bfr.1.5 "start-failing
+// (N)" reason: a startup-health episode joined at render time (never mirrored
+// onto the session bead's own metadata — infoFromPersistedBead does not
+// project these fields, so Info.StartupHealth* is set by hand here exactly as
+// a real caller's episode-join enrichment would) renders once quarantined and
+// disappears on recovery, below threshold, or behind a higher-precedence
+// reason. Sweeps both the raw metadata form and the Info twin to pin their
+// equivalence, matching TestLifecycleDisplayReasonWithLivenessInfoEquivalence.
+func TestLifecycleDisplayReasonStartFailing(t *testing.T) {
+	now := time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)
+	future := now.Add(time.Hour).Format(time.RFC3339)
+	past := now.Add(-time.Hour).Format(time.RFC3339)
+	isRunning := func(string) bool { return false }
+
+	cases := []struct {
+		name   string
+		status string
+		meta   map[string]string
+		want   string
+	}{
+		{
+			name:   "at threshold, quarantine active",
+			status: "open",
+			meta: map[string]string{
+				StartupHealthConsecutiveMetadataKey:      "3",
+				StartupHealthQuarantinedUntilMetadataKey: future,
+			},
+			want: "start-failing (3)",
+		},
+		{
+			name:   "above threshold, quarantine active",
+			status: "open",
+			meta: map[string]string{
+				StartupHealthConsecutiveMetadataKey:      "9",
+				StartupHealthQuarantinedUntilMetadataKey: future,
+			},
+			want: "start-failing (9)",
+		},
+		{
+			name:   "below threshold: no quarantine set, preserves existing empty reason",
+			status: "open",
+			meta: map[string]string{
+				StartupHealthConsecutiveMetadataKey: "1",
+			},
+			want: "",
+		},
+		{
+			name:   "recovered: quarantine cleared back to zero value",
+			status: "open",
+			meta: map[string]string{
+				StartupHealthConsecutiveMetadataKey:      "0",
+				StartupHealthQuarantinedUntilMetadataKey: "",
+			},
+			want: "",
+		},
+		{
+			name:   "expired quarantine window: not visible",
+			status: "open",
+			meta: map[string]string{
+				StartupHealthConsecutiveMetadataKey:      "5",
+				StartupHealthQuarantinedUntilMetadataKey: past,
+			},
+			want: "",
+		},
+		{
+			name:   "malformed count falls back to zero, quarantine still visible",
+			status: "open",
+			meta: map[string]string{
+				StartupHealthConsecutiveMetadataKey:      "not-a-number",
+				StartupHealthQuarantinedUntilMetadataKey: future,
+			},
+			want: "start-failing (0)",
+		},
+		{
+			name:   "terminal precedence: closed status suppresses start-failing",
+			status: "closed",
+			meta: map[string]string{
+				StartupHealthConsecutiveMetadataKey:      "3",
+				StartupHealthQuarantinedUntilMetadataKey: future,
+			},
+			want: "",
+		},
+		{
+			name:   "wait-hold takes precedence over start-failing",
+			status: "open",
+			meta: map[string]string{
+				"wait_hold":                              "true",
+				StartupHealthConsecutiveMetadataKey:      "3",
+				StartupHealthQuarantinedUntilMetadataKey: future,
+			},
+			want: "wait-hold",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bead := livenessInfoBead(tc.status, tc.meta)
+			raw := LifecycleDisplayReasonWithLiveness(bead.Status, bead.Metadata, now, "", isRunning)
+			if raw != tc.want {
+				t.Fatalf("LifecycleDisplayReasonWithLiveness = %q, want %q", raw, tc.want)
+			}
+
+			info := infoFromPersistedBead(bead)
+			info.StartupHealthConsecutive = tc.meta[StartupHealthConsecutiveMetadataKey]
+			info.StartupHealthQuarantinedUntil = tc.meta[StartupHealthQuarantinedUntilMetadataKey]
+			got := LifecycleDisplayReasonWithLivenessInfo(info, now, isRunning)
+			if got != tc.want {
+				t.Fatalf("LifecycleDisplayReasonWithLivenessInfo = %q, want %q", got, tc.want)
+			}
+			if got != raw {
+				t.Fatalf("twin %q diverged from raw %q", got, raw)
+			}
+		})
+	}
+}
+
 func TestLifecycleWakeConflictStateUsesProjectedTerminalStates(t *testing.T) {
 	tests := []struct {
 		name   string

@@ -1,6 +1,8 @@
 package session
 
 import (
+	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -297,6 +299,11 @@ const (
 	// reconciler put asleep because its runtime/process vanished. It is the
 	// durable sleep_reason written by session reconciliation.
 	LifecycleReasonRuntimeMissing = "runtime-missing"
+	// LifecycleReasonStartFailingFormat is the fmt.Sprintf format for the
+	// display reason of a session whose provider start keeps failing and is
+	// currently startup-health quarantined (see StartupHealthEpisode). The
+	// single verb is the episode's consecutive failure count.
+	LifecycleReasonStartFailingFormat = "start-failing (%d)"
 	// SessionCircuitStateMetadataKey is the durable metadata key for session circuit breaker state.
 	SessionCircuitStateMetadataKey = "session_circuit_state"
 	// SessionCircuitStateOpen is the durable metadata value for an open session circuit breaker.
@@ -319,7 +326,7 @@ func LifecycleDisplayReason(status string, metadata map[string]string, now time.
 	input := LifecycleInputFromMetadata(status, metadata)
 	input.Now = now
 	view := ProjectLifecycle(input)
-	return lifecycleDisplayReasonFromView(view, metadata)
+	return lifecycleDisplayReasonFromView(view, metadata, now)
 }
 
 // LifecycleDisplayReasonWithLiveness returns the lifecycle display reason,
@@ -334,7 +341,7 @@ func LifecycleDisplayReasonWithLiveness(status string, metadata map[string]strin
 	if lifecycleResetPendingReasonVisible(view, metadata, sessionName, isRunning) {
 		return LifecycleReasonResetPending
 	}
-	return lifecycleDisplayReasonFromView(view, metadata)
+	return lifecycleDisplayReasonFromView(view, metadata, now)
 }
 
 // LifecycleDisplayReasonWithLivenessInfo is the session.Info twin of
@@ -354,7 +361,7 @@ func LifecycleDisplayReasonWithLivenessInfo(info Info, now time.Time, isRunning 
 	if lifecycleResetPendingReasonVisibleInfo(view, info, isRunning) {
 		return LifecycleReasonResetPending
 	}
-	return lifecycleDisplayReasonFromViewInfo(view, info)
+	return lifecycleDisplayReasonFromViewInfo(view, info, now)
 }
 
 // LifecycleResetPendingReasonVisible reports whether reset-pending should
@@ -369,7 +376,7 @@ func LifecycleResetPendingReasonVisible(status string, metadata map[string]strin
 	return lifecycleResetPendingReasonVisible(view, metadata, sessionName, isRunning)
 }
 
-func lifecycleDisplayReasonFromView(view LifecycleView, metadata map[string]string) string {
+func lifecycleDisplayReasonFromView(view LifecycleView, metadata map[string]string, now time.Time) string {
 	if view.Terminal {
 		return ""
 	}
@@ -400,6 +407,9 @@ func lifecycleDisplayReasonFromView(view LifecycleView, metadata map[string]stri
 	if view.HasBlocker(BlockerHeld) {
 		return string(SleepReasonUserHold)
 	}
+	if reason := startFailingDisplayReason(metadata[StartupHealthConsecutiveMetadataKey], metadata[StartupHealthQuarantinedUntilMetadataKey], now); reason != "" {
+		return reason
+	}
 	return ""
 }
 
@@ -408,7 +418,7 @@ func lifecycleDisplayReasonFromView(view LifecycleView, metadata map[string]stri
 // sleep-reason / quarantine / hold / wait-hold facts off the projected Info
 // (SessionCircuitState, SleepReason, QuarantinedUntil, HeldUntil, WaitHold)
 // instead of the raw metadata map.
-func lifecycleDisplayReasonFromViewInfo(view LifecycleView, info Info) string {
+func lifecycleDisplayReasonFromViewInfo(view LifecycleView, info Info, now time.Time) string {
 	if view.Terminal {
 		return ""
 	}
@@ -439,7 +449,29 @@ func lifecycleDisplayReasonFromViewInfo(view LifecycleView, info Info) string {
 	if view.HasBlocker(BlockerHeld) {
 		return string(SleepReasonUserHold)
 	}
+	if reason := startFailingDisplayReason(info.StartupHealthConsecutive, info.StartupHealthQuarantinedUntil, now); reason != "" {
+		return reason
+	}
 	return ""
+}
+
+// startFailingDisplayReason renders the "start-failing (N)" reason from a
+// startup-health episode's raw consecutive-count and quarantined-until
+// strings, or "" if the episode isn't currently quarantining the session.
+// Mirrors the quarantine-active check in session_reconciler.go's startup-health
+// wake-decision branch (!QuarantinedUntil.IsZero() && now.Before(QuarantinedUntil)):
+// an absent, malformed, or already-past QuarantinedUntil means "not
+// quarantined," even if a stale nonzero consecutive count lingers. A
+// malformed count falls back to 0 rather than suppressing the reason,
+// matching StartupHealthEpisodeFromMetadata's own fallback convention — the
+// gate is the timestamp, not the count.
+func startFailingDisplayReason(consecutiveRaw, quarantinedUntilRaw string, now time.Time) string {
+	quarantinedUntil, err := time.Parse(time.RFC3339, quarantinedUntilRaw)
+	if err != nil || !now.Before(quarantinedUntil) {
+		return ""
+	}
+	count, _ := strconv.Atoi(consecutiveRaw)
+	return fmt.Sprintf(LifecycleReasonStartFailingFormat, count)
 }
 
 func lifecycleResetPendingReasonVisible(view LifecycleView, metadata map[string]string, sessionName string, isRunning func(string) bool) bool {

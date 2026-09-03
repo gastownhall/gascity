@@ -2148,6 +2148,47 @@ func TestHandleSessionListShowsCircuitOpenReason(t *testing.T) {
 	}
 }
 
+func TestHandleSessionListShowsStartFailingReason(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Start Failing")
+	future := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+	if _, err := fs.cityBeadStore.Create(beads.Bead{
+		Type:   session.StartupHealthEpisodeType,
+		Status: "open",
+		Metadata: map[string]string{
+			session.StartupHealthSessionNameMetadataKey:      info.SessionName,
+			session.StartupHealthConsecutiveMetadataKey:      "6",
+			session.StartupHealthQuarantinedUntilMetadataKey: future,
+		},
+	}); err != nil {
+		t.Fatalf("create startup-health episode: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", cityURL(fs, "/sessions"), nil)
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var body struct {
+		Items []sessionResponse `json:"items"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Items) != 1 {
+		t.Fatalf("got %d items, want 1", len(body.Items))
+	}
+	if body.Items[0].Reason != "start-failing (6)" {
+		t.Fatalf("reason = %q, want %q", body.Items[0].Reason, "start-failing (6)")
+	}
+}
+
 func TestHandleSessionRename(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)

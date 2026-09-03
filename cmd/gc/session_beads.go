@@ -2677,6 +2677,25 @@ func sessionFrontDoor(store beads.Store) *session.Store {
 	return session.NewStore(beads.SessionStore{Store: store})
 }
 
+// startupHealthEpisodesByName bulk-loads every persisted startup-health
+// episode keyed by session name, for gc session list's per-row reason
+// enrichment (session.LifecycleDisplayReasonWithLivenessInfo's "start-failing
+// (N)" branch). Best effort, mirroring the API's internal/api.
+// startupHealthEpisodesByName: a lookup failure yields a nil map (no
+// "start-failing" reasons shown, since a nil map read returns the zero
+// episode) rather than failing the whole session list.
+func startupHealthEpisodesByName(sessFront *session.Store) map[string]session.StartupHealthEpisode {
+	episodes, err := sessFront.ListStartupHealthEpisodes()
+	if err != nil {
+		return nil
+	}
+	byName := make(map[string]session.StartupHealthEpisode, len(episodes))
+	for _, ep := range episodes {
+		byName[ep.SessionName] = ep
+	}
+	return byName
+}
+
 func setMetaBatch(sessFront *session.Store, id string, batch map[string]string, stderr io.Writer) error {
 	if len(batch) == 0 {
 		return nil

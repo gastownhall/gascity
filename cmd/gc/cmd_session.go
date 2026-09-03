@@ -1023,8 +1023,13 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 	// Info snapshot (infoIndex, from OpenInfos), so the raw bead index is gone
 	// (Info.SessionCircuitState carries the last field the display reason needed).
 	openInfos := sessionBeads.OpenInfos()
+	startupHealthByName := startupHealthEpisodesByName(sessionFrontDoor(sessStore))
 	infoIndex := make(map[string]session.Info, len(openInfos))
 	for _, in := range openInfos {
+		if ep, ok := startupHealthByName[in.SessionName]; ok && !ep.QuarantinedUntil.IsZero() {
+			in.StartupHealthConsecutive = strconv.Itoa(ep.ConsecutiveCount)
+			in.StartupHealthQuarantinedUntil = ep.QuarantinedUntil.Format(time.RFC3339)
+		}
 		infoIndex[in.ID] = in
 	}
 

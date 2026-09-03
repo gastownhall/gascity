@@ -255,10 +255,22 @@ type Info struct {
 	// value (e.g. "yes") that the PendingCreateClaim bool cannot. Additive,
 	// internal-only mirror; see WakeAttemptsMetadata for the precedent.
 	PendingCreateClaimMetadata string
-	PendingCreateStartedAt     string   // pending_create_started_at (raw RFC3339; stale-create sweep parses it)
-	WakeAttempts               int      // wake_attempts parsed as int (0 on missing/invalid)
-	QuarantinedUntil           string   // quarantined_until (raw RFC3339; quarantine check parses it)
-	AliasHistory               []string // prior aliases (alias_history, normalized via session.AliasHistory)
+	PendingCreateStartedAt     string // pending_create_started_at (raw RFC3339; stale-create sweep parses it)
+	WakeAttempts               int    // wake_attempts parsed as int (0 on missing/invalid)
+	QuarantinedUntil           string // quarantined_until (raw RFC3339; quarantine check parses it)
+	// StartupHealthConsecutive and StartupHealthQuarantinedUntil mirror the
+	// session's startup-health episode (a separate startup-health-episode
+	// bead, see internal/session/startup_health.go), NOT session-bead
+	// metadata. infoFromPersistedBead never projects them — there is no
+	// source data on the session bead itself. A render-time caller that has
+	// joined the episode (e.g. via Store.ListStartupHealthEpisodes or
+	// Store.LoadStartupHealthEpisode) sets them by hand before calling
+	// LifecycleDisplayReasonWithLivenessInfo, exactly as this file's other
+	// caller-enriched fields are populated. Left out of infoKeyIndex on
+	// purpose: ApplyPatch/MarkClosed must not fold or clear them.
+	StartupHealthConsecutive      string   // startup_health_consecutive (raw int; caller-enriched, not bead metadata)
+	StartupHealthQuarantinedUntil string   // startup_health_quarantined_until (raw RFC3339; caller-enriched, not bead metadata)
+	AliasHistory                  []string // prior aliases (alias_history, normalized via session.AliasHistory)
 	// ContinuityEligible is the RAW continuity_eligible metadata, verbatim.
 	// NamedSessionContinuityEligibleInfo compares it (trimmed) against "false"/
 	// "true", so the Info mirror keeps the raw value. Additive, internal-only.

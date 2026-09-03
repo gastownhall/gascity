@@ -156,6 +156,52 @@ func (s *Store) LoadStartupHealthEpisode(sessionName string) (StartupHealthEpiso
 	return StartupHealthEpisodeFromMetadata(matches[0].Metadata), nil
 }
 
+// ListStartupHealthEpisodes returns every persisted startup-health episode,
+// including sessions that have since recovered (zero-valued fields). Callers
+// that only care about active quarantine should filter on QuarantinedUntil.
+// Read-only: like LoadStartupHealthEpisode, it issues a single query and no
+// mutating store call.
+func (s *Store) ListStartupHealthEpisodes() ([]StartupHealthEpisode, error) {
+	matches, err := s.store.List(beads.ListQuery{Type: StartupHealthEpisodeType, IncludeClosed: true})
+	if err != nil {
+		return nil, fmt.Errorf("listing startup-health episodes: %w", err)
+	}
+	episodes := make([]StartupHealthEpisode, 0, len(matches))
+	for _, b := range matches {
+		episodes = append(episodes, StartupHealthEpisodeFromMetadata(b.Metadata))
+	}
+	return episodes, nil
+}
+
+// ListStartupHealthEpisodesCacheFirst is ListStartupHealthEpisodes with the
+// same cache-first peek session.Store.ListAll applies via
+// ListAllOptions.CacheFirst: when the backing store exposes CachedList,
+// episodes are read straight from the in-memory cache and the backing
+// store's List is never called; a store without CachedList, or a cache that
+// declines the peek, falls back to ListStartupHealthEpisodes. It is the seam
+// startupHealthEpisodesByName uses for the per-request session-list overlay
+// (both handleSessionList and humaHandleSessionList), so a warm dashboard
+// poll never adds an uncached List call beside the one the session union
+// itself already avoids (TestHandleSessionListUsesCachedSessionBeadsWhenAvailable).
+//
+// The peek query omits IncludeClosed, unlike ListStartupHealthEpisodes:
+// SaveStartupHealthEpisode never closes an episode bead, so the cache's
+// active-only set is already complete, and leaving IncludeClosed unset (vs.
+// threading it through as cachedListUnion does) is what lets CachedList
+// serve the query instead of unconditionally declining it.
+func (s *Store) ListStartupHealthEpisodesCacheFirst() ([]StartupHealthEpisode, error) {
+	if cached, ok := s.store.Store.(cachedListStore); ok {
+		if rows, hit := cached.CachedList(beads.ListQuery{Type: StartupHealthEpisodeType}); hit {
+			episodes := make([]StartupHealthEpisode, 0, len(rows))
+			for _, b := range rows {
+				episodes = append(episodes, StartupHealthEpisodeFromMetadata(b.Metadata))
+			}
+			return episodes, nil
+		}
+	}
+	return s.ListStartupHealthEpisodes()
+}
+
 // SaveStartupHealthEpisode upserts the startup-health episode for its
 // SessionName: creates a new startup-health-episode bead if none exists yet,
 // otherwise updates the existing one in place. The bead carries no session
