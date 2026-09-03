@@ -104,6 +104,7 @@ go_test(
         "agent_discovery_test.go",
         "agent_layout_test.go",
         "beads_proxied_idle_test.go",
+        "beads_resilience_test.go",
         "builtin_family_test.go",
         "bundled_import_test.go",
         "chain_test.go",
