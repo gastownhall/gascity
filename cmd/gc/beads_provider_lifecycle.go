@@ -1839,10 +1839,10 @@ func isLegacyManagedDoltProbeDatabase(name string) bool {
 func ensureCanonicalScopeMetadata(fs fsys.FS, scopeRoot, doltDatabase string, preserveExisting bool) error {
 	path := filepath.Join(scopeRoot, ".beads", "metadata.json")
 	preserveReservedExisting := false
-	// Managed local Dolt scopes use beads' proxied UOW by default. Existing
-	// authoritative mode markers remain authoritative so startup never silently
-	// migrates a workspace merely because the default changed.
-	doltMode := "proxied-server"
+	// Direct/server is the safe managed-local default. Existing authoritative
+	// mode markers remain authoritative so startup never silently migrates a
+	// workspace when an operator changes the configured mode.
+	doltMode := "server"
 	if preserveExisting {
 		if _, _, err := contract.LoadMetadataState(fs, path); err != nil {
 			if !allowLegacyDoltMetadataRepair(fs, path, err) {
@@ -2227,14 +2227,15 @@ func desiredCityDoltConfigState(cityPath string, cityDolt config.DoltConfig, cit
 	if mode := persistedScopeDoltMode(cityPath); mode != "" {
 		return contract.ConfigState{IssuePrefix: cityPrefix, EndpointOrigin: contract.EndpointOriginManagedCity, EndpointStatus: contract.EndpointStatusVerified, DoltMode: mode}
 	}
+	doltMode := "server"
+	if strings.TrimSpace(cityDolt.Mode) == "proxied-server" {
+		doltMode = "proxied-server"
+	}
 	return contract.ConfigState{
 		IssuePrefix:    cityPrefix,
 		EndpointOrigin: contract.EndpointOriginManagedCity,
 		EndpointStatus: contract.EndpointStatusVerified,
-		// A managed city has no externally pinned endpoint. Let the RC beads
-		// client own the per-scope proxy and child-Dolt lifecycle; the direct
-		// server mode remains reserved for explicit host/port bindings.
-		DoltMode: "proxied-server",
+		DoltMode:       doltMode,
 	}
 }
 

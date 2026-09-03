@@ -10,18 +10,23 @@ import (
 )
 
 // TestConfigStateConstructorsSelectDoltModes verifies that fresh managed
-// scopes use Beads' proxied-server path while explicit external endpoints keep
-// the direct server mode. Existing authoritative scope state is resolved by
+// scopes use the direct server path by default, while an explicit
+// mode=proxied-server opts into Beads' proxied-server path. External endpoints
+// always keep the direct server mode. Existing authoritative scope state is resolved by
 // resolveDesired*EndpointState before these constructors are used, so changing
 // the default does not migrate an already initialized scope implicitly.
 func TestConfigStateConstructorsSelectDoltModes(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "rig")
 
-	// Fresh managed city (Beads owns its proxy and child Dolt lifecycle).
+	// Fresh managed city defaults to the direct/server lifecycle.
 	managedCity := desiredCityDoltConfigState(cityPath, config.DoltConfig{}, "gc")
-	if managedCity.DoltMode != "proxied-server" {
-		t.Errorf("desiredCityDoltConfigState (managed city): DoltMode = %q, want %q", managedCity.DoltMode, "proxied-server")
+	if managedCity.DoltMode != "server" {
+		t.Errorf("desiredCityDoltConfigState (managed city): DoltMode = %q, want %q", managedCity.DoltMode, "server")
+	}
+	proxyCity := desiredCityDoltConfigState(cityPath, config.DoltConfig{Mode: "proxied-server"}, "gc")
+	if proxyCity.DoltMode != "proxied-server" {
+		t.Errorf("desiredCityDoltConfigState (explicit proxy): DoltMode = %q, want %q", proxyCity.DoltMode, "proxied-server")
 	}
 
 	// External city (explicit host/port endpoint).
@@ -38,7 +43,7 @@ func TestConfigStateConstructorsSelectDoltModes(t *testing.T) {
 		t.Errorf("desiredRigDoltConfigState (explicit rig): DoltMode = %q, want %q", explicitRig.DoltMode, "server")
 	}
 
-	// An inherited rig propagates the city's proxied mode.
+	// An inherited rig propagates the city's selected mode.
 	inheritedRig := inheritedRigDoltConfigState(rigPath, "rig", managedCity)
 	if inheritedRig.DoltMode != managedCity.DoltMode {
 		t.Errorf("inheritedRigDoltConfigState: DoltMode = %q, want %q (inherited from city)", inheritedRig.DoltMode, managedCity.DoltMode)
