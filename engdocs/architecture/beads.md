@@ -216,6 +216,24 @@ enforced by the conformance suite in `internal/beads/beadstest/conformance.go`.
     beads-workspace provider does not yet, and until it does its bindings
     hold the claim by convention alone (ga-qdt5y.14).
 
+17. **ParentID is a weak, city-scoped reference -- except on the bd-CLI
+    provider.** A split city routes by class, so a parent and its child are
+    co-resident only when they classify the same way. A store therefore
+    persists and filters `ParentID` verbatim and never resolves, validates,
+    rewrites or places by an id in a namespace it does not serve;
+    `beadstest.RunStoreTests` pins that as
+    `ParentIDNamesARowThisStoreDoesNotHave`. MemStore, FileStore, SQLiteStore
+    and the exec provider carry every parent. NativeDoltStore carries a
+    foreign one and refuses a dangling id inside the namespace it serves,
+    before writing -- the strong reading its library forces.
+
+    `BdStore` does not comply. It passes `--parent` through to bd, which
+    resolves the id unconditionally and derives the child's id from it, so a
+    cross-store parent is refused and, when it does resolve, placement
+    follows the parent instead of the child's class. The divergence is
+    invisible to CI because the only conformance run over a real bd is
+    skipped (ga-e7z613). Tracked in ga-6od57.
+
 ## Metadata vocabulary (gc.*)
 
 `bead.Metadata` is a `map[string]string`, and the `gc.` prefix is the
