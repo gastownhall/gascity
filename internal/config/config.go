@@ -3733,6 +3733,7 @@ func InjectImplicitAgents(cfg *City) {
 		}
 		cfg.Agents = append(cfg.Agents, Agent{
 			Name:                name,
+			Scope:               "city",
 			Provider:            name,
 			PromptTemplate:      promptTemplate,
 			DefaultSlingFormula: &slingFormula,
