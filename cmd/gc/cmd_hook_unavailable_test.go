@@ -167,6 +167,136 @@ func TestClassifyWorkQueryStoreUnavailableCoversBdConnectionErrors(t *testing.T)
 	}
 }
 
+// TestClaimHookStoreUnavailableEmitsToken pins the token on the --claim path.
+//
+// --claim is the form agents run in the dispatch loop, so this is where a
+// transport-class failure most needs to be distinguishable from "no work". The
+// token lived only on the read path (doHook) until this was added, which left
+// the dead-drop open on exactly the path that matters.
+func TestClaimHookStoreUnavailableEmitsToken(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+
+	failing := func(string, string, []string) (string, error) {
+		return "", fmt.Errorf("running work query %q: %w", "bd ready --json",
+			errors.New("exit status 1: Error: dial tcp 127.0.0.1:3307: connection refused"))
+	}
+
+	code := claimHookWorkWithRunner(
+		"bd ready --json", "", nil,
+		[]hookStore{{dir: ""}},
+		hookClaimOptions{Assignee: "worker"},
+		hookClaimOps{},
+		failing,
+		func(string, error) {},
+		&stdout, &stderr,
+	)
+
+	// The code, not just the token: hookStoreUnavailableToken's doc publishes
+	// exit 2, and a consumer gating on the code must be able to tell a dead
+	// store from no-work on the path agents actually run.
+	if code != 2 {
+		t.Fatalf("claim hook returned %d on a transport failure, want 2 (the exit code the token documents); stderr=%q",
+			code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), hookStoreUnavailableToken) {
+		t.Fatalf("claim path did not emit %s on a transport-class failure; a dead store is still "+
+			"indistinguishable from a drained queue on the path agents actually run:\nstderr=%q",
+			hookStoreUnavailableToken, stderr.String())
+	}
+}
+
+// TestClaimHookStoreUnavailableEmitsTokenOnFederatedRevalidation pins the token
+// on the SECOND read of a federated claim. With more than one leg,
+// claimStoreWithFallback re-runs the query on the selected store before the
+// mutation; when that store is the primary and the re-read is a transport-class
+// failure, the claim must exit 2 with the token exactly as the first read does.
+// TestClaimHookStoreUnavailableEmitsToken cannot see this path: with one leg
+// claimStoreWithFallback short-circuits and never re-reads.
+func TestClaimHookStoreUnavailableEmitsTokenOnFederatedRevalidation(t *testing.T) {
+	stores := []hookStore{
+		{dir: "city", env: []string{"GC_STORE=city"}}, // primary (own) store
+		{dir: "riga", env: []string{"GC_STORE=riga"}}, // federated leg, empty
+	}
+	cityCalls := 0
+	run := func(_, dir string, _ []string) (string, error) {
+		switch dir {
+		case "city":
+			cityCalls++
+			if cityCalls == 1 {
+				// Discovery sees ready work, so the claim commits to this store.
+				return `[{"id":"hw-city","status":"open","metadata":{"gc.routed_to":"worker"}}]`, nil
+			}
+			// The store died between discovery and claim-time re-validation.
+			return "", fmt.Errorf("running work query %q: %w", "bd ready --json",
+				errors.New("exit status 1: Error: dial tcp 127.0.0.1:3307: connect: connection refused"))
+		case "riga":
+			return "[]", nil
+		default:
+			t.Fatalf("unexpected store dir %q", dir)
+			return "", nil
+		}
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		JSON:               true,
+	}
+	emitted := false
+	var stdout, stderr bytes.Buffer
+	code := claimHookWorkWithRunner("bd ready --json", "city", stores[0].env, stores, opts, hookClaimOps{}, run, func(string, error) { emitted = true }, &stdout, &stderr)
+
+	if cityCalls < 2 {
+		t.Fatalf("primary store queried %d times, want the claim-time re-validation to run (>= 2); the test never reached the path it pins", cityCalls)
+	}
+	if !emitted {
+		t.Fatal("re-validation failure did not emit the work-query failure event")
+	}
+	if code != 2 {
+		t.Fatalf("claim hook returned %d on a transport failure at claim-time re-validation, want 2; stderr=%q",
+			code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), hookStoreUnavailableToken) {
+		t.Fatalf("federated claim re-validation did not emit %s on a transport-class failure; a dead store "+
+			"is indistinguishable from a drained queue on exactly the path a multi-store city runs:\nstderr=%q",
+			hookStoreUnavailableToken, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("a failed read must not write a drain result; stdout=%q", stdout.String())
+	}
+}
+
+// The non-transport counterpart: an application error on the same re-validation
+// path stays an ordinary exit-1 failure without the token, so the token is a
+// classification and not a blanket reaction to any re-read error.
+func TestClaimHookApplicationErrorOnFederatedRevalidationStaysExitOne(t *testing.T) {
+	stores := []hookStore{
+		{dir: "city", env: []string{"GC_STORE=city"}},
+		{dir: "riga", env: []string{"GC_STORE=riga"}},
+	}
+	cityCalls := 0
+	run := func(_, dir string, _ []string) (string, error) {
+		if dir == "riga" {
+			return "[]", nil
+		}
+		cityCalls++
+		if cityCalls == 1 {
+			return `[{"id":"hw-city","status":"open","metadata":{"gc.routed_to":"worker"}}]`, nil
+		}
+		return "", fmt.Errorf("running work query %q: %w", "bd ready --json", errors.New("exit status 1: unknown flag"))
+	}
+	var stdout, stderr bytes.Buffer
+	code := claimHookWorkWithRunner("bd ready --json", "city", stores[0].env, stores,
+		hookClaimOptions{Assignee: "worker-1", IdentityCandidates: []string{"worker-1"}, RouteTargets: []string{"worker"}, JSON: true},
+		hookClaimOps{}, run, func(string, error) {}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("claim hook returned %d on an application error at re-validation, want 1; stderr=%q", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), hookStoreUnavailableToken) {
+		t.Fatalf("application error was reported as store-unavailable:\nstderr=%q", stderr.String())
+	}
+}
+
 // hookExitCodeCity writes a one-agent city and points GC_CITY at it, so `gc
 // hook worker` runs the agent's work query through the production shell
 // runner. A non-empty workQuery becomes the agent's work_query; an empty one
