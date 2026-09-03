@@ -6,9 +6,20 @@ description: |
   the rig's mainline, and closes the bead. The merge half of the
   lifecycle pipeline.
 
-  The mainline is resolved per run: GC_DEFAULT_BRANCH (the rig's
-  configured default_branch) wins, then a live origin/HEAD probe, then
-  "main". Nothing here hardcodes a branch name.
+  The mainline is resolved per run: GC_DEFAULT_BRANCH wins, then a live
+  origin/HEAD probe, then "main". Nothing here hardcodes a branch name.
+
+  Nothing populates GC_DEFAULT_BRANCH for these actions. They run inside
+  the agent session (start_command -> gc agent-script), so the value
+  would have to arrive through the session environment, and no shipped
+  pack puts it there. A pre_start prefix cannot supply it either: the
+  t3bridge-gastown pack's inline GC_DEFAULT_BRANCH='...' assignment is
+  scoped to the one shell that runs its worktree-setup.sh and never
+  reaches a session. [agent].env cannot carry it as-is either — env
+  values get $VAR expansion, not Go templates, so "{{.DefaultBranch}}"
+  would be exported verbatim. In the shipped configuration this tier is
+  therefore always empty and the effective chain is the origin/HEAD
+  probe, then "main". See ga-8nzzu.
 
   A refinery receives work already routed to it, so — unlike a polecat
   — it never races to claim; it acts on the bead directly. One process

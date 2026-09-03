@@ -11,11 +11,12 @@
 # Called from pre_start in pack configs. Runs before the session is created
 # so the agent starts IN the worktree directory.
 #
-# Base branch: GC_DEFAULT_BRANCH (exported by pre_start from the rig's
-# configured default_branch) wins. It is empty for rigs that record no
-# default_branch, so the script falls back to probing origin/HEAD and finally
-# to the rig's current HEAD. Fresh worktrees are always cut from
-# origin/$BRANCH, never from a possibly-stale local ref.
+# Base branch: GC_DEFAULT_BRANCH (set by the invoking pre_start, when the pack
+# passes the rig's configured default_branch through) wins. It is empty when the
+# pack does not pass it — as in this pack, whose agents declare start_command
+# only — and for rigs that record no default_branch, so the script falls back to
+# probing origin/HEAD and finally to the rig's current HEAD. Fresh worktrees are
+# always cut from origin/$BRANCH, never from a possibly-stale local ref.
 
 set -eu
 

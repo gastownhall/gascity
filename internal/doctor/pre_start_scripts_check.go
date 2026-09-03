@@ -94,14 +94,15 @@ func (c *PreStartScriptsCheck) Run(ctx *CheckContext) *CheckResult {
 // resolvePreStartScript extracts the absolute script path from a
 // pre_start command if it references {{.ConfigDir}} or {{.CityRoot}}
 // cleanly. Returns (path, true) when the first whitespace-separated
-// token resolves to an absolute path with no remaining template
-// placeholders. Otherwise returns ("", false) so the caller can skip
-// the command because it references neither template or depends on
-// runtime context that doctor cannot statically resolve.
+// token that is not a leading shell env assignment resolves to an
+// absolute path with no remaining template placeholders. Otherwise
+// returns ("", false) so the caller can skip the command because it
+// references neither template or depends on runtime context that doctor
+// cannot statically resolve.
 //
 // Both templates may appear in the same command; both are substituted.
-// Only the first token is validated, so trailing runtime-only template
-// arguments are allowed.
+// Only that command-word token is validated, so trailing runtime-only
+// template arguments are allowed.
 func resolvePreStartScript(cmd, sourceDir, cityPath string) (string, bool) {
 	hasConfigDir := strings.Contains(cmd, "{{.ConfigDir}}")
 	hasCityRoot := strings.Contains(cmd, "{{.CityRoot}}")
