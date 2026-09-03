@@ -156,8 +156,10 @@ func ResolveDoltConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string) (DoltCo
 			if strings.TrimSpace(cfg.DoltSocket) != "" || strings.TrimSpace(cfg.DoltHost) != "" || strings.TrimSpace(cfg.DoltPort) != "" {
 				return populateExternalTarget(target, cfg)
 			}
-			if sidecar, ok := readProxiedClientInfo(fs, filepath.Join(scopeRoot, ".beads", "proxied_server_client_info.json")); ok {
-				target.Host, target.Port, target.Socket, target.User = sidecar.Host, sidecar.Port, sidecar.Socket, sidecar.User
+			if sidecar, ok, err := readProxiedClientInfo(fs, filepath.Join(scopeRoot, ".beads", "proxied_server_client_info.json")); err != nil {
+				return DoltConnectionTarget{}, err
+			} else if ok {
+				target.Host, target.Port, target.Socket, target.User = sidecar.External.Host, strconv.Itoa(sidecar.External.Port), sidecar.External.Socket, sidecar.External.User
 				target.External = true
 				return target, nil
 			}
@@ -180,25 +182,38 @@ func ResolveDoltConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string) (DoltCo
 }
 
 type proxiedClientInfo struct {
-	Host   string `json:"host"`
-	Port   string `json:"port"`
-	Socket string `json:"socket"`
-	User   string `json:"user"`
+	External *struct {
+		Host   string `json:"host"`
+		Port   int    `json:"port"`
+		Socket string `json:"socket"`
+		User   string `json:"user"`
+	} `json:"external"`
 }
 
-func readProxiedClientInfo(fs fsys.FS, path string) (proxiedClientInfo, bool) {
+func readProxiedClientInfo(fs fsys.FS, path string) (proxiedClientInfo, bool, error) {
 	b, err := fs.ReadFile(path)
 	if err != nil {
-		return proxiedClientInfo{}, false
+		if errors.Is(err, os.ErrNotExist) {
+			return proxiedClientInfo{}, false, nil
+		}
+		return proxiedClientInfo{}, false, err
 	}
 	var info proxiedClientInfo
-	if json.Unmarshal(b, &info) != nil {
-		return proxiedClientInfo{}, false
+	if err := json.Unmarshal(b, &info); err != nil {
+		return proxiedClientInfo{}, false, fmt.Errorf("read proxied client info: %w", err)
 	}
-	if strings.TrimSpace(info.Socket) == "" && strings.TrimSpace(info.Host) == "" && strings.TrimSpace(info.Port) == "" {
-		return proxiedClientInfo{}, false
+	if info.External == nil {
+		return proxiedClientInfo{}, false, fmt.Errorf("invalid proxied client info: missing external target")
 	}
-	return info, true
+	e := info.External
+	if strings.TrimSpace(e.Socket) != "" {
+		if e.Host != "" || e.Port != 0 || !filepath.IsAbs(e.Socket) {
+			return proxiedClientInfo{}, false, fmt.Errorf("invalid proxied client info socket target")
+		}
+	} else if e.Host == "" || e.Port < 1 || e.Port > 65535 {
+		return proxiedClientInfo{}, false, fmt.Errorf("invalid proxied client info host/port target")
+	}
+	return proxiedClientInfo{External: e}, true, nil
 }
 
 // ValidateCanonicalConfigState validates canonical scope config invariants.
