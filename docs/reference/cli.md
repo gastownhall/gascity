@@ -5111,6 +5111,7 @@ gc worktree ensure [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--agent` | string |  | qualified agent identity to best-effort materialize skills for after creation |
 | `--base` | string |  | exact base ref used for this worktree (required) |
 | `--base-sha` | string |  | recorded base SHA to verify when reusing a worktree |
 | `--bead` | string |  | work bead bound to this worktree (required) |
