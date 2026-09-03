@@ -226,7 +226,8 @@
               "storage-remote-stage-mark",
               "storage-remote-stage-unmark",
               "storage-snapshot",
-              "storage-snapshot-restore"
+              "storage-snapshot-restore",
+              "provider-credentials"
             ]
           },
           "event_id": {
