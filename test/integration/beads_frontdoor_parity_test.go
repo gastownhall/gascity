@@ -301,6 +301,7 @@ func (s *doltSocketServer) stop(t *testing.T) {
 	if err := s.logFile.Close(); err != nil {
 		t.Fatalf("close dolt socket log: %v", err)
 	}
+	_ = os.Remove(s.socketPath)
 }
 
 func startDoltSocketServer(t *testing.T, env []string, dataDir string) *doltSocketServer {
