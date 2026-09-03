@@ -1956,7 +1956,7 @@ type DoltConfig struct {
 	// "proxied-server" to opt into Beads' proxied UOW path. Host/port endpoint
 	// configuration always remains direct and cannot be combined with the
 	// proxied-server mode.
-	Mode string `toml:"mode,omitempty" jsonschema:"enum=server,proxied-server"`
+	Mode string `toml:"mode,omitempty" jsonschema:"enum=server,enum=proxied-server"`
 	// Port is the dolt server port. 0 means use ephemeral port allocation
 	// (hashed from city path). Set explicitly to override.
 	Port int `toml:"port,omitempty" jsonschema:"default=0"`

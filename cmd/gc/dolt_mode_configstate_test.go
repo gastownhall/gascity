@@ -7,6 +7,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // TestConfigStateConstructorsSelectDoltModes verifies that fresh managed
@@ -99,6 +100,36 @@ func TestResolveDesiredCityEndpointStatePreservesAuthoritativeDoltMode(t *testin
 			}
 			if state.DoltMode != mode {
 				t.Fatalf("DoltMode = %q, want persisted %q", state.DoltMode, mode)
+			}
+		})
+	}
+}
+
+func TestCanonicalBdScopeInitPersistsConfiguredDoltMode(t *testing.T) {
+	for _, tc := range []struct {
+		name, doltSection, mode, want string
+	}{
+		{name: "direct default", want: "server"},
+		{name: "explicit proxy", doltSection: "[dolt]\nmode = \"proxied-server\"\n", mode: "proxied-server", want: "proxied-server"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"+tc.doltSection), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			state := desiredCityDoltConfigState(cityPath, config.DoltConfig{Mode: tc.mode}, "gc")
+			if err := ensureCanonicalScopeConfigState(fsys.OSFS{}, cityPath, state); err != nil {
+				t.Fatalf("ensureCanonicalScopeConfigState: %v", err)
+			}
+			if err := ensureCanonicalScopeMetadata(fsys.OSFS{}, cityPath, "hq", false); err != nil {
+				t.Fatalf("ensureCanonicalScopeMetadata: %v", err)
+			}
+			mode, ok, err := contract.ReadDoltMode(fsys.OSFS{}, filepath.Join(cityPath, ".beads", "metadata.json"))
+			if err != nil || !ok {
+				t.Fatalf("ReadDoltMode: mode=%q ok=%v err=%v", mode, ok, err)
+			}
+			if mode != tc.want {
+				t.Fatalf("metadata dolt_mode = %q, want %q", mode, tc.want)
 			}
 		})
 	}

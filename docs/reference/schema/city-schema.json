@@ -1448,7 +1448,8 @@
         "mode": {
           "type": "string",
           "enum": [
-            "server"
+            "server",
+            "proxied-server"
           ],
           "description": "Mode selects the Dolt transport for managed-local Beads scopes. The\nempty value preserves the direct SQL-server default; set to\n\"proxied-server\" to opt into Beads' proxied UOW path. Host/port endpoint\nconfiguration always remains direct and cannot be combined with the\nproxied-server mode."
         },

@@ -1839,6 +1839,7 @@ func isLegacyManagedDoltProbeDatabase(name string) bool {
 func ensureCanonicalScopeMetadata(fs fsys.FS, scopeRoot, doltDatabase string, preserveExisting bool) error {
 	path := filepath.Join(scopeRoot, ".beads", "metadata.json")
 	preserveReservedExisting := false
+	metadataModeAuthoritative := false
 	// Direct/server is the safe managed-local default. Existing authoritative
 	// mode markers remain authoritative so startup never silently migrates a
 	// workspace when an operator changes the configured mode.
@@ -1877,15 +1878,16 @@ func ensureCanonicalScopeMetadata(fs fsys.FS, scopeRoot, doltDatabase string, pr
 		}
 		if preserveMode {
 			doltMode = strings.TrimSpace(existingMode)
+			metadataModeAuthoritative = true
 		}
 	}
 	// An explicit endpoint is a direct server contract. This also covers
 	// legacy scopes whose metadata omitted dolt_mode but whose canonical config
 	// already records an external origin.
 	if cfg, ok, err := contract.ReadConfigState(fs, filepath.Join(scopeRoot, ".beads", "config.yaml")); err == nil && ok {
-		if cfg.EndpointOrigin == contract.EndpointOriginCityCanonical || cfg.EndpointOrigin == contract.EndpointOriginExplicit || strings.TrimSpace(cfg.DoltHost) != "" || strings.TrimSpace(cfg.DoltPort) != "" {
+		if !metadataModeAuthoritative && (cfg.EndpointOrigin == contract.EndpointOriginCityCanonical || cfg.EndpointOrigin == contract.EndpointOriginExplicit || strings.TrimSpace(cfg.DoltHost) != "" || strings.TrimSpace(cfg.DoltPort) != "") {
 			doltMode = "server"
-		} else if strings.TrimSpace(cfg.DoltMode) != "" && preserveExisting {
+		} else if !metadataModeAuthoritative && strings.TrimSpace(cfg.DoltMode) != "" {
 			doltMode = strings.TrimSpace(cfg.DoltMode)
 		}
 	}
