@@ -145,11 +145,11 @@ func TestReleaseConfirmedOrphanSessionWork_LegacyRigStoreUnchanged(t *testing.T)
 	}
 }
 
-// TestReleaseConfirmedOrphanSessionWork_MisalignedStoresReleaseNothing pins the
-// alignment invariant at the function boundary: a short slice is never indexed
-// past its end and never re-used for a bead it does not describe. The bead with
-// no aligned leg is skipped, not guessed at.
-func TestReleaseConfirmedOrphanSessionWork_MisalignedStoresReleaseNothing(t *testing.T) {
+// TestReleaseConfirmedOrphanSessionWork_MisalignedStoresSkipTheUnalignedBead
+// pins the alignment invariant at the function boundary: a short slice is never
+// indexed past its end and never re-used for a bead it does not describe. The
+// bead with no aligned leg is skipped, not guessed at.
+func TestReleaseConfirmedOrphanSessionWork_MisalignedStoresSkipTheUnalignedBead(t *testing.T) {
 	cfg := bindingOrphanConfig(t)
 	first := bindingOrphanClaim()
 	second := bindingOrphanClaim()

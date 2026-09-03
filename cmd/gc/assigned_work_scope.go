@@ -272,10 +272,14 @@ func filterAssignedWorkBeadsForSessionWake(
 // length is dropped rather than partially applied, and the returned stores are
 // then nil.
 //
-// residency:allow — a caller's own snapshot, projected. It carries the legs it
-// was HANDED through the same keep/drop decision it applies to the beads; it
-// consults no binding, no namespace and no leg order, opens no store, and can
-// only ever return a subsequence of its own input.
+// residency:allow — a caller's own snapshot, projected. The []beads.Store this
+// returns is only ever a subsequence of the slice it was HANDED, carried through
+// the same keep/drop decision it applies to the beads; it opens no store and
+// builds no store list of its own. It DOES consult residency to make that
+// keep/drop decision — assignedWorkClaimRefs resolves the topology's claim refs
+// and assignedWorkStoreRefForAgent resolves each agent's rig name — but those are
+// reads of refs, never of legs, and cannot introduce a store the caller did not
+// already hand in.
 func filterAssignedWorkBeadsForSessionWakeWithStores(
 	cfg *config.City,
 	cityPath string,

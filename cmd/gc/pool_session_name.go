@@ -306,9 +306,13 @@ func releaseOrphanedPoolAssignments(
 // assignedWorkBeads through, and it is how a binding-resident row is released at
 // all: gc.routed_to names a WORK ledger, and on a split city a graph-class step
 // no longer lives there, so the routed fallback asks a store that answers "no
-// such bead" and the release is silently skipped (ga-b0o6a). Nil or short keeps
-// the routed fallback for that bead, so callers that supply nothing are
-// unchanged.
+// such bead" and the release is silently skipped (ga-b0o6a). An absent slice
+// (nil or empty) keeps the routed fallback, so callers that supply nothing are
+// unchanged. A non-empty slice of any other length is a DIFFERENT snapshot, not
+// a smaller one: in-range beads are still resolved through it, and out-of-range
+// beads are skipped entirely rather than routed-fallback resolved. Callers must
+// reject a misaligned slice before calling — see reconcileSessionBeads, which
+// nils it and logs the mismatch.
 func releaseConfirmedOrphanSessionWork(
 	cfg *config.City,
 	store beads.Store,

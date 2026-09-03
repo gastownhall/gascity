@@ -2719,11 +2719,13 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		)
 		// The claim-without-execution lane. Both backstops above end at the
 		// claim; this one starts there. It reads the UNFILTERED assigned-work
-		// triple, which is the only index-aligned (bead, store, ref) view in the
-		// tick — the release filter above rewrites beads and refs but not stores
-		// — and re-checks ownership against each session's own identities anyway,
-		// so a released bead (whose assignee resolves to no live session by
-		// construction) cannot match a running one.
+		// triple — the pre-release snapshot — and re-checks ownership against
+		// each session's own identities anyway, so a released bead (whose
+		// assignee resolves to no live session by construction) cannot match a
+		// running one. Alignment is not what distinguishes the two views: since
+		// ga-b0o6a, filterReleasedAssignedWorkSnapshot projects the stores in
+		// lockstep with the beads and refs, so the filtered triple is equally
+		// index-aligned.
 		nudgeStalledPoolExecution(
 			cr.sp,
 			cr.cfg,
