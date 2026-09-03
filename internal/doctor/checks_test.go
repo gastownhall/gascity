@@ -1650,11 +1650,76 @@ func TestDoltServerCheck_ProxiedSidecarUnixReachable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { ln.Close(); os.Remove(sock) })
-	os.WriteFile(filepath.Join(dir, ".beads", "proxied_server_client_info.json"), []byte(fmt.Sprintf(`{"external":{"socket":%q}}`, sock)), 0o644)
+	t.Cleanup(func() { _ = ln.Close(); _ = os.Remove(sock) })
+	if err := os.WriteFile(filepath.Join(dir, ".beads", "proxied_server_client_info.json"), []byte(fmt.Sprintf(`{"external":{"socket":%q}}`, sock)), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	r := NewDoltServerCheck(dir, false).Run(&CheckContext{})
-	if r.Status != StatusOK {
-		t.Fatalf("status=%d msg=%q", r.Status, r.Message)
+	if r.Status != StatusOK || !strings.Contains(r.Message, sock) {
+		t.Fatalf("status=%d msg=%q, want reachable Unix endpoint %s", r.Status, r.Message, sock)
+	}
+}
+
+func TestDoltServerCheck_ProxiedSidecarTCPReachable(t *testing.T) {
+	dir := t.TempDir()
+	fs := fsys.OSFS{}
+	writeDoctorCanonicalConfig(t, fs, dir, contract.ConfigState{EndpointOrigin: contract.EndpointOriginManagedCity, DoltMode: "proxied-server"})
+	writeDoctorProxiedMetadata(t, dir, "hq")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	addr := ln.Addr().(*net.TCPAddr)
+	writeDoctorSidecar(t, dir, fmt.Sprintf(`{"external":{"host":"127.0.0.1","port":%d}}`, addr.Port))
+	r := NewDoltServerCheck(dir, false).Run(&CheckContext{})
+	if r.Status != StatusOK || !strings.Contains(r.Message, addr.String()) {
+		t.Fatalf("status=%d msg=%q, want reachable TCP endpoint %s", r.Status, r.Message, addr)
+	}
+}
+
+func TestRigDoltServerCheck_ProxiedSidecarTCPReachable(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "demo")
+	fs := fsys.OSFS{}
+	writeDoctorCanonicalConfig(t, fs, cityDir, contract.ConfigState{EndpointOrigin: contract.EndpointOriginManagedCity, DoltMode: "proxied-server"})
+	writeDoctorProxiedMetadata(t, cityDir, "hq")
+	writeDoctorCanonicalConfig(t, fs, rigDir, contract.ConfigState{IssuePrefix: "de", EndpointOrigin: contract.EndpointOriginExplicit, DoltMode: "proxied-server", DoltHost: "127.0.0.1", DoltPort: "1"})
+	writeDoctorProxiedMetadata(t, rigDir, "de")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	addr := ln.Addr().(*net.TCPAddr)
+	writeDoctorSidecar(t, rigDir, fmt.Sprintf(`{"external":{"host":"127.0.0.1","port":%d}}`, addr.Port))
+	r := NewRigDoltServerCheck(cityDir, config.Rig{Name: "demo", Path: rigDir}, false).Run(&CheckContext{})
+	if r.Status != StatusOK || !strings.Contains(r.Message, addr.String()) {
+		t.Fatalf("status=%d msg=%q, want reachable rig TCP endpoint %s", r.Status, r.Message, addr)
+	}
+}
+
+func TestRigDoltServerCheck_ProxiedSidecarUnixReachable(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "demo")
+	fs := fsys.OSFS{}
+	writeDoctorCanonicalConfig(t, fs, cityDir, contract.ConfigState{EndpointOrigin: contract.EndpointOriginManagedCity, DoltMode: "proxied-server"})
+	writeDoctorProxiedMetadata(t, cityDir, "hq")
+	writeDoctorCanonicalConfig(t, fs, rigDir, contract.ConfigState{IssuePrefix: "de", EndpointOrigin: contract.EndpointOriginExplicit, DoltMode: "proxied-server", DoltHost: "127.0.0.1", DoltPort: "1"})
+	writeDoctorProxiedMetadata(t, rigDir, "de")
+	socket := filepath.Join(rigDir, "dolt.sock")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close(); _ = os.Remove(socket) })
+	writeDoctorSidecar(t, rigDir, fmt.Sprintf(`{"external":{"socket":%q}}`, socket))
+	r := NewRigDoltServerCheck(cityDir, config.Rig{Name: "demo", Path: rigDir}, false).Run(&CheckContext{})
+	if r.Status != StatusOK || !strings.Contains(r.Message, socket) {
+		t.Fatalf("status=%d msg=%q, want reachable rig Unix endpoint %s", r.Status, r.Message, socket)
 	}
 }
 
@@ -2492,6 +2557,26 @@ func writeDoctorCanonicalMetadata(t *testing.T, fs fsys.FS, dir, db string) {
 		DoltMode:     "server",
 		DoltDatabase: db,
 	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeDoctorProxiedMetadata(t *testing.T, dir, db string) {
+	t.Helper()
+	fs := fsys.OSFS{}
+	if _, err := contract.EnsureCanonicalMetadata(fs, filepath.Join(dir, ".beads", "metadata.json"), contract.MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "proxied-server",
+		DoltDatabase: db,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeDoctorSidecar(t *testing.T, dir, body string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, ".beads", "proxied_server_client_info.json"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
