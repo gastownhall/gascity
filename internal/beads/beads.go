@@ -21,6 +21,16 @@ var ErrNotFound = errors.New("bead not found")
 // absent bead should check errors.Is(err, ErrIDCollision).
 var ErrIDCollision = fmt.Errorf("bd resolved a different bead ID (substring collision): %w", ErrNotFound)
 
+// ErrPinnedIDOutsideNamespace is returned by a namespace-fenced store when a
+// create pins an id in a namespace that store does not serve. It is distinct
+// from a duplicate-id error, which says the store DOES serve the namespace and
+// already holds the row.
+//
+// A fenced store must wrap this rather than rely on its message: a provider
+// contract cannot demand error prose of an out-of-tree store, only a sentinel
+// it can wrap. See beadstest.RunPinnedIDFenceConformance.
+var ErrPinnedIDOutsideNamespace = errors.New("pinned id outside this store's namespaces")
+
 // ErrMetadataParse is returned when a bead exists but its stored metadata
 // cannot be decoded into the Store object model.
 var ErrMetadataParse = errors.New("bead metadata parse")
