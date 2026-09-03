@@ -435,6 +435,41 @@ func TestEvaluateReadyContinuationClaimCandidate_BindingLegTakesOwnerFromRootRef
 			rawStoreRef:    classLeg,
 			stepOwnerRef:   "city:other-city",
 			rootOwnerRef:   "city:other-city",
+			wantResolution: continuationCandidateForeign,
+		},
+		{
+			name:           "city work leg copy of a rig rooted row",
+			rawStoreRef:    "",
+			stepOwnerRef:   "rig:fixture",
+			rootOwnerRef:   "rig:fixture",
+			wantResolution: continuationCandidateForeign,
+		},
+		{
+			name:           "city work leg row with a blank owner",
+			rawStoreRef:    "",
+			stepOwnerRef:   "",
+			rootOwnerRef:   "",
+			wantResolution: continuationCandidateAbsent,
+		},
+		{
+			name:           "city work leg row with a class owner",
+			rawStoreRef:    "",
+			stepOwnerRef:   classLeg,
+			rootOwnerRef:   classLeg,
+			wantResolution: continuationCandidateAbsent,
+		},
+		{
+			name:           "city work leg row with a non canonical owner",
+			rawStoreRef:    "",
+			stepOwnerRef:   "fixture",
+			rootOwnerRef:   "fixture",
+			wantResolution: continuationCandidateAbsent,
+		},
+		{
+			name:           "city work leg row with a malformed rig owner",
+			rawStoreRef:    "",
+			stepOwnerRef:   "rig:",
+			rootOwnerRef:   "rig:",
 			wantResolution: continuationCandidateAbsent,
 		},
 		{
@@ -514,6 +549,98 @@ func TestSelectReadyContinuationClaimCandidates_BindingRigRootedRowIsACandidate(
 		got[0].Assignee != step.Assignee {
 		t.Fatalf("candidate = %#v, want the row's own rig owner and exact provenance", got[0])
 	}
+}
+
+// Co-residence is the documented steady state of a migrated split city: "gc
+// storage migrate" copies rows into the binding and never deletes them back, so
+// one rig-rooted successor is enumerated twice — under the city work leg's
+// empty ref and under the binding's own class ref. Both legs canonicalize to
+// city:<name>, so the copies share a group while only the binding copy resolves
+// an owner. Reading the work-leg copy as "absent" is a same-scope disagreement
+// the group never had: it drops the owning leg's candidate, and because partial
+// is snapshot-wide it also makes nudgeStalledPoolContinuations early-return for
+// every unrelated continuation in the city. A row another scope owns is foreign
+// to this leg, not missing from it.
+func TestSelectReadyContinuationClaimCandidates_CoResidentForeignCopyDoesNotHoldSnapshot(t *testing.T) {
+	const cityName = "split-city"
+	classLeg := string(storeref.ClassRef(wholeSplitClasses()))
+	root := continuationRoot("rig:fixture")
+	step := continuationStep(root.ID, "rig:fixture")
+	workLeg := beads.NewMemStoreFrom(0, []beads.Bead{root, step}, nil)
+	binding := beads.NewMemStoreFrom(0, []beads.Bead{root, step}, nil)
+
+	t.Run("both copies ready", func(t *testing.T) {
+		got, partial := selectReadyContinuationClaimCandidates(
+			cityName,
+			[]beads.Bead{step, step},
+			[]beads.Store{workLeg, binding},
+			[]string{"", classLeg},
+			map[storeScopedBeadKey]bool{
+				{StoreRef: "", ID: step.ID}:       true,
+				{StoreRef: classLeg, ID: step.ID}: true,
+			},
+		)
+		if partial || len(got) != 1 {
+			t.Fatalf("co-resident rig-rooted = {%#v partial:%v}, want one candidate and no partial", got, partial)
+		}
+		if got[0].StoreRef != "rig:fixture" ||
+			got[0].WorkBeadID != step.ID ||
+			got[0].RootBeadID != root.ID ||
+			got[0].Assignee != step.Assignee {
+			t.Fatalf("candidate = %#v, want the row's own rig owner and exact provenance", got[0])
+		}
+		// sameContinuationClaimCandidate deliberately excludes Store, so the
+		// surviving copy must be the leg that owns the row: the backstop
+		// revalidates and delivers through exactly this handle.
+		if got[0].Store != binding {
+			t.Fatalf("candidate store = %#v, want the binding leg the owning copy was read from", got[0].Store)
+		}
+	})
+
+	// The trigger is broader than "both copies ready": any co-resident work-leg
+	// copy is foreign whatever its own eligibility, so the scope question has to
+	// be answered before the candidate-row question.
+	t.Run("work leg copy not ready", func(t *testing.T) {
+		got, partial := selectReadyContinuationClaimCandidates(
+			cityName,
+			[]beads.Bead{step, step},
+			[]beads.Store{workLeg, binding},
+			[]string{"", classLeg},
+			map[storeScopedBeadKey]bool{{StoreRef: classLeg, ID: step.ID}: true},
+		)
+		if partial || len(got) != 1 {
+			t.Fatalf("half-ready co-resident = {%#v partial:%v}, want one candidate and no partial", got, partial)
+		}
+		if got[0].StoreRef != "rig:fixture" || got[0].Store != binding {
+			t.Fatalf("candidate = %#v, want the binding leg's rig-owned row", got[0])
+		}
+	})
+
+	// The blast radius: partial is snapshot-wide, so a mishandled co-resident
+	// row does not merely lose itself — it retires every unrelated continuation
+	// backstop in the city for as long as it sits ready.
+	t.Run("unrelated city rooted row keeps its backstop", func(t *testing.T) {
+		otherRoot := continuationRoot("city:" + cityName)
+		otherRoot.ID = "root-b"
+		otherStep := continuationStep(otherRoot.ID, "city:"+cityName)
+		otherStep.ID = "step-b"
+		cityLeg := beads.NewMemStoreFrom(0, []beads.Bead{otherRoot, otherStep}, nil)
+
+		got, partial := selectReadyContinuationClaimCandidates(
+			cityName,
+			[]beads.Bead{step, step, otherStep},
+			[]beads.Store{workLeg, binding, cityLeg},
+			[]string{"", classLeg, ""},
+			map[storeScopedBeadKey]bool{
+				{StoreRef: "", ID: step.ID}:       true,
+				{StoreRef: classLeg, ID: step.ID}: true,
+				{StoreRef: "", ID: otherStep.ID}:  true,
+			},
+		)
+		if partial || len(got) != 2 {
+			t.Fatalf("mixed snapshot = {%#v partial:%v}, want both candidates and no partial", got, partial)
+		}
+	})
 }
 
 // End to end through the backstop: a rig-rooted successor living in a class

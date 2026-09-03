@@ -5447,28 +5447,14 @@ func selectReadyContinuationClaimCandidates(
 
 	result := make([]ContinuationClaimCandidate, 0, len(order))
 	for _, key := range order {
-		var (
-			valid  []ContinuationClaimCandidate
-			absent bool
-			hold   bool
+		valid, absent, hold := foldReadyContinuationClaimGroup(
+			groups[key],
+			work,
+			workStores,
+			workStoreRefs,
+			key.StoreRef,
+			readyAssigned,
 		)
-		for _, i := range groups[key] {
-			candidate, resolution := evaluateReadyContinuationClaimCandidate(
-				work[i],
-				workStores[i],
-				workStoreRefs[i],
-				key.StoreRef,
-				readyAssigned,
-			)
-			switch resolution {
-			case continuationCandidateAbsent:
-				absent = true
-			case continuationCandidateHold:
-				hold = true
-			case continuationCandidateValid:
-				valid = append(valid, candidate)
-			}
-		}
 		if hold {
 			partial = true
 			continue
@@ -5497,12 +5483,60 @@ func selectReadyContinuationClaimCandidates(
 	return result, partial
 }
 
+// foldReadyContinuationClaimGroup evaluates every leg-local copy of one grouped
+// (StoreRef, ID) pair and reduces the per-row resolutions to the three signals
+// the caller's agreement guard acts on: the candidates whose own owner ref this
+// fold resolved — inside a class binding that owner can be a rig scope rather
+// than the city ref the group is keyed on — whether a same-scope copy disagreed
+// (absent), and whether a copy could not be read at all (hold). A copy another
+// scope owns contributes no signal at all. rows holds that group's indexes into
+// the aligned work/workStores/workStoreRefs slices, and canonicalStoreRef is the
+// group key, not necessarily the owner.
+func foldReadyContinuationClaimGroup(
+	rows []int,
+	work []beads.Bead,
+	workStores []beads.Store,
+	workStoreRefs []string,
+	canonicalStoreRef string,
+	readyAssigned map[storeScopedBeadKey]bool,
+) (valid []ContinuationClaimCandidate, absent bool, hold bool) {
+	for _, i := range rows {
+		candidate, resolution := evaluateReadyContinuationClaimCandidate(
+			work[i],
+			workStores[i],
+			workStoreRefs[i],
+			canonicalStoreRef,
+			readyAssigned,
+		)
+		switch resolution {
+		case continuationCandidateAbsent:
+			absent = true
+		case continuationCandidateHold:
+			hold = true
+		case continuationCandidateValid:
+			valid = append(valid, candidate)
+		case continuationCandidateForeign:
+			// Deliberately no signal. A group keyed on the city ref holds
+			// every leg that serves the city, and on a migrated city that
+			// includes the class bindings, which carry rows other scopes
+			// own. Such a copy says nothing about this group's scope, so
+			// counting it absent would drop the owning leg's candidate and
+			// — partial being snapshot-wide — turn every unrelated
+			// continuation backstop in the city dark.
+		}
+	}
+	return valid, absent, hold
+}
+
 type continuationCandidateResolution int
 
 const (
 	continuationCandidateAbsent continuationCandidateResolution = iota
 	continuationCandidateHold
 	continuationCandidateValid
+	// A row this leg can read but another scope owns. Kept distinct from
+	// "absent" because the fold reads absent as a same-scope disagreement.
+	continuationCandidateForeign
 )
 
 func continuationRowCouldBeCandidate(
@@ -5528,17 +5562,25 @@ func evaluateReadyContinuationClaimCandidate(
 	canonicalStoreRef string,
 	readyAssigned map[storeScopedBeadKey]bool,
 ) (ContinuationClaimCandidate, continuationCandidateResolution) {
+	// Scope is answered before eligibility: a row another scope owns is foreign
+	// to this leg whatever its own state, and a co-resident copy that is merely
+	// stale or not ready would otherwise be reported as an absent row of THIS
+	// scope. Both questions still answer "absent" for a row this leg owns, so
+	// the order is otherwise immaterial.
+	rootStoreRef := bead.Metadata[beadmeta.RootStoreRefMetadataKey]
+	ownerStoreRef, owned := continuationClaimOwnerStoreRef(rawStoreRef, rootStoreRef, canonicalStoreRef)
+	if !owned {
+		if continuationClaimRowIsForeign(rootStoreRef, canonicalStoreRef) {
+			return ContinuationClaimCandidate{}, continuationCandidateForeign
+		}
+		return ContinuationClaimCandidate{}, continuationCandidateAbsent
+	}
 	if !continuationRowCouldBeCandidate(bead, rawStoreRef, readyAssigned) {
 		return ContinuationClaimCandidate{}, continuationCandidateAbsent
 	}
 
 	rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
-	ownerStoreRef, owned := continuationClaimOwnerStoreRef(
-		rawStoreRef,
-		bead.Metadata[beadmeta.RootStoreRefMetadataKey],
-		canonicalStoreRef,
-	)
-	if rootID == "" || !owned {
+	if rootID == "" {
 		return ContinuationClaimCandidate{}, continuationCandidateAbsent
 	}
 	if store == nil {
@@ -5581,10 +5623,12 @@ func evaluateReadyContinuationClaimCandidate(
 // #5918 (ga-oytw9) drew for control-route repair. A rig-scoped workflow's steps
 // are minted into the binding carrying gc.root_store_ref=rig:<name>, so on a
 // split city the row's own root ref is the owner and the leg-derived city ref
-// is only the grouping key. It is accepted only when canonical and local to
-// this city: exactly the city ref, or a well-formed rig ref. A blank, class, or
-// legacy value fails closed. Every other leg is single-scope, so there the
-// leg-derived canonical ref stays the comparator.
+// is only the grouping key. It is accepted only when canonical: exactly the
+// city ref, or a well-formed rig ref. A blank, class, or legacy value fails
+// closed. The rig name is not checked against the configured rigs — the binding
+// that authorizes delivery is the step's assignee resolving to exactly one live
+// session (newPoolContinuationCandidateSnapshot). Every other leg is
+// single-scope, so there the leg-derived canonical ref stays the comparator.
 func continuationClaimOwnerStoreRef(rawStoreRef, rootStoreRef, canonicalStoreRef string) (string, bool) {
 	rootStoreRef = strings.TrimSpace(rootStoreRef)
 	if rootStoreRef == "" {
@@ -5604,6 +5648,31 @@ func continuationClaimOwnerStoreRef(rawStoreRef, rootStoreRef, canonicalStoreRef
 		return "", false
 	}
 	return rootStoreRef, true
+}
+
+// continuationClaimRowIsForeign answers, for a row continuationClaimOwnerStoreRef
+// admitted no owner for, whether it names a DIFFERENT scope rather than merely
+// carrying provenance this leg cannot read. Only an exactly-canonical
+// "city:<name>" or "rig:<name>" naming another scope qualifies. Blank,
+// class-valued, non-canonical and malformed refs stay unreadable, so they keep
+// resolving absent and the owner helper's fail-closed posture is unchanged:
+// this widens no admission, it only separates "someone else's row" from
+// "a broken row of ours".
+func continuationClaimRowIsForeign(rootStoreRef, canonicalStoreRef string) bool {
+	rootStoreRef = strings.TrimSpace(rootStoreRef)
+	if rootStoreRef == "" || rootStoreRef == canonicalStoreRef {
+		return false
+	}
+	switch {
+	case strings.HasPrefix(rootStoreRef, "city:"):
+		name := strings.TrimSpace(strings.TrimPrefix(rootStoreRef, "city:"))
+		return name != "" && rootStoreRef == "city:"+name
+	case strings.HasPrefix(rootStoreRef, "rig:"):
+		name := strings.TrimSpace(strings.TrimPrefix(rootStoreRef, "rig:"))
+		return name != "" && rootStoreRef == "rig:"+name
+	default:
+		return false
+	}
 }
 
 func sameContinuationClaimCandidate(a, b ContinuationClaimCandidate) bool {
