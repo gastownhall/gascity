@@ -103,6 +103,75 @@ func TestResolveDoltConnectionTargetLegacyExternalCity(t *testing.T) {
 	}
 }
 
+func TestResolveDoltConnectionTargetUnixSocketExternal(t *testing.T) {
+	fs := fsys.OSFS{}
+	city := t.TempDir()
+	socket := filepath.Join(city, "dolt.sock")
+	writeCanonicalConfig(t, fs, city, ConfigState{IssuePrefix: "gc", EndpointOrigin: EndpointOriginCityCanonical, EndpointStatus: EndpointStatusVerified, DoltSocket: socket, DoltUser: "sock-user"})
+	writeCanonicalMetadata(t, fs, city, "sockdb")
+	target, err := ResolveDoltConnectionTarget(fs, city, city)
+	if err != nil {
+		t.Fatalf("ResolveDoltConnectionTarget() error = %v", err)
+	}
+	if !target.External || target.Socket != socket || target.Host != "" || target.Port != "" || target.Database != "sockdb" || target.User != "sock-user" {
+		t.Fatalf("target = %+v", target)
+	}
+}
+
+func TestResolveDoltConnectionTargetUnixSocketRejectsTCPConflict(t *testing.T) {
+	fs := fsys.OSFS{}
+	city := t.TempDir()
+	writeCanonicalConfig(t, fs, city, ConfigState{IssuePrefix: "gc", EndpointOrigin: EndpointOriginCityCanonical, DoltSocket: filepath.Join(city, "dolt.sock"), DoltPort: "3306"})
+	if _, err := ResolveDoltConnectionTarget(fs, city, city); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("error = %v, want socket/TCP conflict", err)
+	}
+}
+
+func TestResolveDoltConnectionTargetUnixSocketDoesNotOverrideCanonicalTCP(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SERVER_SOCKET", "/tmp/ambient.sock")
+	fs := fsys.OSFS{}
+	city := t.TempDir()
+	writeCanonicalConfig(t, fs, city, ConfigState{IssuePrefix: "gc", EndpointOrigin: EndpointOriginCityCanonical, DoltHost: "db.example", DoltPort: "3306"})
+	target, err := ResolveDoltConnectionTarget(fs, city, city)
+	if err != nil {
+		t.Fatalf("ResolveDoltConnectionTarget() error = %v", err)
+	}
+	if target.Socket != "" || target.Host != "db.example" || target.Port != "3306" {
+		t.Fatalf("target = %+v", target)
+	}
+}
+
+func TestResolveDoltConnectionTargetAmbientSocketDoesNotOverrideManaged(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SERVER_SOCKET", "/tmp/ambient.sock")
+	fs := fsys.OSFS{}
+	city := t.TempDir()
+	writeCanonicalConfig(t, fs, city, ConfigState{IssuePrefix: "gc", EndpointOrigin: EndpointOriginManagedCity, EndpointStatus: EndpointStatusVerified})
+	port := writeReachableRuntimeState(t, fs, city)
+	target, err := ResolveDoltConnectionTarget(fs, city, city)
+	if err != nil {
+		t.Fatalf("ResolveDoltConnectionTarget() error = %v", err)
+	}
+	if target.Socket != "" || target.Host != "127.0.0.1" || target.Port != port || target.External {
+		t.Fatalf("target = %+v", target)
+	}
+}
+
+func TestResolveDoltConnectionTargetInheritedUnixSocket(t *testing.T) {
+	fs := fsys.OSFS{}
+	city := t.TempDir()
+	rig := filepath.Join(t.TempDir(), "rig")
+	socket := filepath.Join(city, "dolt.sock")
+	writeCanonicalConfig(t, fs, city, ConfigState{IssuePrefix: "gc", EndpointOrigin: EndpointOriginCityCanonical, EndpointStatus: EndpointStatusVerified, DoltSocket: socket, DoltUser: "city-user"})
+	writeCanonicalConfig(t, fs, rig, ConfigState{IssuePrefix: "rig", EndpointOrigin: EndpointOriginInheritedCity, EndpointStatus: EndpointStatusVerified, DoltSocket: socket, DoltUser: "city-user"})
+	target, err := ResolveDoltConnectionTarget(fs, city, rig)
+	if err != nil {
+		t.Fatalf("ResolveDoltConnectionTarget() error = %v", err)
+	}
+	if !target.External || target.EndpointOrigin != EndpointOriginInheritedCity || target.Socket != socket || target.User != "city-user" {
+		t.Fatalf("target = %+v", target)
+	}
+}
+
 func TestResolveDoltConnectionTargetInheritedExternalRig(t *testing.T) {
 	fs := fsys.OSFS{}
 	city := t.TempDir()

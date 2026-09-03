@@ -439,6 +439,13 @@ func applyCanonicalDoltTargetEnv(env map[string]string, target contract.DoltConn
 	if env == nil {
 		return
 	}
+	if socket := strings.TrimSpace(target.Socket); socket != "" {
+		delete(env, "GC_DOLT_HOST")
+		delete(env, "GC_DOLT_PORT")
+		env["BEADS_DOLT_SERVER_SOCKET"] = socket
+		return
+	}
+	delete(env, "BEADS_DOLT_SERVER_SOCKET")
 	// GC-owned projections must use the resolved target, not ambient parent
 	// shell host/port. Stale GC_DOLT_HOST/PORT was causing gc bd and projected
 	// session flows to drift away from the canonical external endpoint.
@@ -820,6 +827,7 @@ func applyCanonicalConfigStateDoltEnv(env map[string]string, cityPath, scopeRoot
 	target := contract.DoltConnectionTarget{
 		Host:           strings.TrimSpace(state.DoltHost),
 		Port:           strings.TrimSpace(state.DoltPort),
+		Socket:         strings.TrimSpace(state.DoltSocket),
 		User:           strings.TrimSpace(state.DoltUser),
 		EndpointOrigin: state.EndpointOrigin,
 		EndpointStatus: state.EndpointStatus,
@@ -866,6 +874,7 @@ var projectedDoltEnvKeys = []string{
 	"BEADS_CREDENTIALS_FILE",
 	"BEADS_DOLT_SERVER_HOST",
 	"BEADS_DOLT_SERVER_PORT",
+	"BEADS_DOLT_SERVER_SOCKET",
 	"BEADS_DOLT_SERVER_USER",
 	"BEADS_DOLT_PASSWORD",
 	// BEADS_DOLT_SERVER_TLS is intentionally NOT a projected key: it is an
@@ -996,7 +1005,7 @@ func clearManagedDoltLifecycleEnv(env map[string]string) {
 		"GC_DOLT_MAX_CONNECTIONS", "GC_DOLT_READ_TIMEOUT_MILLIS",
 		"GC_DOLT_WRITE_TIMEOUT_MILLIS", "GC_DOLT_LOCK_RELEASE_TIMEOUT_MS",
 		"GC_DOLT_WAIT_TIMEOUT", "GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS", "BEADS_DOLT_AUTO_START",
-		"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_SERVER_USER",
+		"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_SERVER_SOCKET", "BEADS_DOLT_SERVER_USER",
 		"BEADS_DOLT_SERVER_DATABASE", "BEADS_DOLT_SERVER_MODE",
 	} {
 		delete(env, key)
@@ -1032,6 +1041,12 @@ func managedLocalDoltHost(host string) bool {
 }
 
 func externalDoltEnvOverrideTarget() (contract.DoltConnectionTarget, bool) {
+	if socket := strings.TrimSpace(os.Getenv("BEADS_DOLT_SERVER_SOCKET")); socket != "" {
+		if !filepath.IsAbs(socket) || strings.ContainsRune(socket, '\x00') || strings.TrimSpace(os.Getenv("GC_DOLT_HOST")) != "" || strings.TrimSpace(os.Getenv("GC_DOLT_PORT")) != "" {
+			return contract.DoltConnectionTarget{}, false
+		}
+		return contract.DoltConnectionTarget{Socket: socket, External: true}, true
+	}
 	hostOverride := strings.TrimSpace(os.Getenv("GC_DOLT_HOST"))
 	if hostOverride == "" || managedLocalDoltHost(hostOverride) {
 		return contract.DoltConnectionTarget{}, false
@@ -1851,17 +1866,23 @@ func mirrorBeadsDoltServerEnv(env map[string]string, carryAmbientTLS bool) {
 	if env == nil {
 		return
 	}
-	if host := strings.TrimSpace(env["GC_DOLT_HOST"]); host != "" {
-		env["BEADS_DOLT_SERVER_HOST"] = host
-	} else {
+	socket := strings.TrimSpace(env["BEADS_DOLT_SERVER_SOCKET"])
+	if socket != "" {
 		delete(env, "BEADS_DOLT_SERVER_HOST")
-	}
-	if port := strings.TrimSpace(env["GC_DOLT_PORT"]); port != "" {
-		env["BEADS_DOLT_SERVER_PORT"] = port
-	} else {
-		// Keep the key present so child bd processes cannot inherit a stale
-		// BEADS_DOLT_SERVER_PORT from an ambient parent environment.
 		env["BEADS_DOLT_SERVER_PORT"] = ""
+		env["BEADS_DOLT_SERVER_SOCKET"] = socket
+	} else {
+		delete(env, "BEADS_DOLT_SERVER_SOCKET")
+		if host := strings.TrimSpace(env["GC_DOLT_HOST"]); host != "" {
+			env["BEADS_DOLT_SERVER_HOST"] = host
+		} else {
+			delete(env, "BEADS_DOLT_SERVER_HOST")
+		}
+		if port := strings.TrimSpace(env["GC_DOLT_PORT"]); port != "" {
+			env["BEADS_DOLT_SERVER_PORT"] = port
+		} else {
+			env["BEADS_DOLT_SERVER_PORT"] = ""
+		}
 	}
 	if user := strings.TrimSpace(env["GC_DOLT_USER"]); user != "" {
 		env["BEADS_DOLT_SERVER_USER"] = user

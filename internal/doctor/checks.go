@@ -1356,10 +1356,11 @@ func (c *DoltServerCheck) Run(_ *CheckContext) *CheckResult {
 		r.FixHint = resolveDoltServerFixHint(fsys.OSFS{}, c.cityPath)
 		return r
 	}
-	addr := net.JoinHostPort(target.Host, target.Port)
-
-	// Check TCP reachability.
-	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	network, addr := "tcp", net.JoinHostPort(target.Host, target.Port)
+	if target.Socket != "" {
+		network, addr = "unix", target.Socket
+	}
+	conn, err := net.DialTimeout(network, addr, 2*time.Second)
 	if err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("dolt server not reachable at %s", addr)
@@ -1454,8 +1455,11 @@ func (c *RigDoltServerCheck) Run(_ *CheckContext) *CheckResult {
 			return r
 		}
 	}
-	addr := net.JoinHostPort(target.Host, target.Port)
-	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	network, addr := "tcp", net.JoinHostPort(target.Host, target.Port)
+	if target.Socket != "" {
+		network, addr = "unix", target.Socket
+	}
+	conn, err := net.DialTimeout(network, addr, 2*time.Second)
 	if err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("dolt server not reachable at %s", addr)

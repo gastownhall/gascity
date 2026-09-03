@@ -63,8 +63,10 @@ func managedCityHostRequiresLocalPID(host string) bool {
 
 // DoltConnectionTarget is the resolved connection info for a beads scope.
 type DoltConnectionTarget struct {
-	Host     string
-	Port     string
+	Host string
+	Port string
+	// Socket is a Unix-domain socket path. It is mutually exclusive with Host/Port.
+	Socket   string
 	Database string
 	User     string
 	// DoltMode records the beads storage mode. proxied-server targets are
@@ -180,6 +182,9 @@ func ValidateCanonicalConfigState(fs fsys.FS, cityRoot, scopeRoot string, cfg Co
 		case "":
 			return nil
 		case EndpointOriginCityCanonical:
+			if strings.TrimSpace(cfg.DoltSocket) != "" {
+				return validateSocketTarget(cfg.DoltSocket, cfg.DoltHost, cfg.DoltPort)
+			}
 			if strings.TrimSpace(cfg.DoltHost) == "" || strings.TrimSpace(cfg.DoltPort) == "" {
 				return fmt.Errorf("canonical %s config requires both dolt.host and dolt.port", cfg.EndpointOrigin)
 			}
@@ -191,6 +196,9 @@ func ValidateCanonicalConfigState(fs fsys.FS, cityRoot, scopeRoot string, cfg Co
 	case "":
 		return nil
 	case EndpointOriginExplicit:
+		if strings.TrimSpace(cfg.DoltSocket) != "" {
+			return validateSocketTarget(cfg.DoltSocket, cfg.DoltHost, cfg.DoltPort)
+		}
 		if strings.TrimSpace(cfg.DoltHost) == "" || strings.TrimSpace(cfg.DoltPort) == "" {
 			return fmt.Errorf("canonical explicit rig config requires both dolt.host and dolt.port")
 		}
@@ -209,6 +217,15 @@ func ValidateCanonicalConfigState(fs fsys.FS, cityRoot, scopeRoot string, cfg Co
 				return fmt.Errorf("inherited rig under managed city must not track dolt.host, dolt.port, or dolt.user")
 			}
 		case EndpointOriginCityCanonical:
+			if strings.TrimSpace(cfg.DoltSocket) != "" || strings.TrimSpace(cityState.DoltSocket) != "" {
+				if err := validateSocketTarget(cfg.DoltSocket, cfg.DoltHost, cfg.DoltPort); err != nil {
+					return err
+				}
+				if strings.TrimSpace(cityState.DoltSocket) != strings.TrimSpace(cfg.DoltSocket) {
+					return fmt.Errorf("canonical inherited rig config must mirror the city endpoint")
+				}
+				return nil
+			}
 			if strings.TrimSpace(cfg.DoltHost) == "" || strings.TrimSpace(cfg.DoltPort) == "" {
 				return fmt.Errorf("canonical inherited rig config requires both dolt.host and dolt.port")
 			}
@@ -366,7 +383,7 @@ func ValidateInheritedCityEndpointMirror(fs fsys.FS, cityRoot, scopeRoot string)
 	if cityTarget.EndpointOrigin != EndpointOriginCityCanonical {
 		return nil
 	}
-	if strings.TrimSpace(rigCfg.DoltHost) != strings.TrimSpace(cityTarget.Host) || strings.TrimSpace(rigCfg.DoltPort) != strings.TrimSpace(cityTarget.Port) || strings.TrimSpace(rigCfg.DoltUser) != strings.TrimSpace(cityTarget.User) {
+	if strings.TrimSpace(rigCfg.DoltHost) != strings.TrimSpace(cityTarget.Host) || strings.TrimSpace(rigCfg.DoltPort) != strings.TrimSpace(cityTarget.Port) || strings.TrimSpace(rigCfg.DoltSocket) != strings.TrimSpace(cityTarget.Socket) || strings.TrimSpace(rigCfg.DoltUser) != strings.TrimSpace(cityTarget.User) || rigCfg.EndpointOrigin != EndpointOriginInheritedCity || rigCfg.EndpointStatus != cityTarget.EndpointStatus {
 		return fmt.Errorf("local inherited endpoint mirror drifts from canonical city endpoint")
 	}
 	return nil
@@ -404,6 +421,7 @@ func inheritedAuthoritativeRigConfigState(prefix string, cityState ConfigState) 
 	if cityState.EndpointOrigin == EndpointOriginCityCanonical {
 		state.DoltHost = cityState.DoltHost
 		state.DoltPort = cityState.DoltPort
+		state.DoltSocket = cityState.DoltSocket
 		state.DoltUser = strings.TrimSpace(cityState.DoltUser)
 		state.EndpointStatus = cityState.EndpointStatus
 		return state
@@ -422,6 +440,9 @@ func ValidateConnectionConfigState(fs fsys.FS, cityRoot, scopeRoot string, cfg C
 				return fmt.Errorf("managed city config must not track dolt.host, dolt.port, or dolt.user")
 			}
 		case EndpointOriginCityCanonical:
+			if strings.TrimSpace(cfg.DoltSocket) != "" {
+				return validateSocketTarget(cfg.DoltSocket, cfg.DoltHost, cfg.DoltPort)
+			}
 			if strings.TrimSpace(cfg.DoltPort) == "" {
 				return fmt.Errorf("city_canonical config requires dolt.port")
 			}
@@ -437,6 +458,9 @@ func ValidateConnectionConfigState(fs fsys.FS, cityRoot, scopeRoot string, cfg C
 	case EndpointOriginManagedCity, EndpointOriginCityCanonical:
 		return fmt.Errorf("%s endpoint origin is invalid for rig scope", cfg.EndpointOrigin)
 	case EndpointOriginExplicit:
+		if strings.TrimSpace(cfg.DoltSocket) != "" {
+			return validateSocketTarget(cfg.DoltSocket, cfg.DoltHost, cfg.DoltPort)
+		}
 		if strings.TrimSpace(cfg.DoltPort) == "" {
 			return fmt.Errorf("explicit rig config requires dolt.port")
 		}
@@ -458,6 +482,9 @@ func ValidateConnectionConfigState(fs fsys.FS, cityRoot, scopeRoot string, cfg C
 				return fmt.Errorf("inherited rig under managed city must not track dolt.host, dolt.port, or dolt.user")
 			}
 		case EndpointOriginCityCanonical:
+			if strings.TrimSpace(cfg.DoltSocket) != "" {
+				return validateSocketTarget(cfg.DoltSocket, cfg.DoltHost, cfg.DoltPort)
+			}
 			if err := validateExternalHostValue(cfg.DoltHost, cfg.DoltPort); err != nil {
 				return err
 			}
@@ -474,7 +501,7 @@ func deriveLegacyConnectionConfig(fs fsys.FS, cityRoot, scopeRoot string, cfg Co
 		return cfg
 	}
 	derived := cfg
-	hasExternalEndpoint := strings.TrimSpace(cfg.DoltHost) != "" || strings.TrimSpace(cfg.DoltPort) != ""
+	hasExternalEndpoint := strings.TrimSpace(cfg.DoltHost) != "" || strings.TrimSpace(cfg.DoltPort) != "" || strings.TrimSpace(cfg.DoltSocket) != ""
 	scopeIsCity := sameScope(scopeRoot, cityRoot)
 
 	if derived.EndpointOrigin == "" {
@@ -574,6 +601,12 @@ func deriveRigLegacyExternalOrigin(fs fsys.FS, cityRoot string, rigCfg ConfigSta
 }
 
 func sameExternalEndpoint(a, b ConfigState) bool {
+	if strings.TrimSpace(a.DoltSocket) != strings.TrimSpace(b.DoltSocket) {
+		return false
+	}
+	if strings.TrimSpace(a.DoltSocket) != "" {
+		return strings.TrimSpace(a.DoltUser) == strings.TrimSpace(b.DoltUser)
+	}
 	if strings.TrimSpace(a.DoltPort) != strings.TrimSpace(b.DoltPort) {
 		return false
 	}
@@ -636,6 +669,7 @@ func configStateFromDoltTarget(target DoltConnectionTarget) ConfigState {
 			EndpointStatus: target.EndpointStatus,
 			DoltHost:       target.Host,
 			DoltPort:       target.Port,
+			DoltSocket:     target.Socket,
 			DoltUser:       target.User,
 		}
 	}
@@ -648,19 +682,27 @@ func configStateFromDoltTarget(target DoltConnectionTarget) ConfigState {
 
 // ConfigHasEndpointAuthority reports whether config carries endpoint authority.
 func ConfigHasEndpointAuthority(cfg ConfigState) bool {
-	return cfg.EndpointOrigin != "" || strings.TrimSpace(cfg.DoltHost) != "" || strings.TrimSpace(cfg.DoltPort) != ""
+	return cfg.EndpointOrigin != "" || strings.TrimSpace(cfg.DoltHost) != "" || strings.TrimSpace(cfg.DoltPort) != "" || strings.TrimSpace(cfg.DoltSocket) != ""
 }
 
 // IsLegacyMinimalEndpointConfig reports whether config only carries legacy minimal endpoint data.
 func IsLegacyMinimalEndpointConfig(cfg ConfigState) bool {
-	return cfg.EndpointOrigin == "" && cfg.EndpointStatus == "" && strings.TrimSpace(cfg.DoltHost) == "" && strings.TrimSpace(cfg.DoltPort) == "" && strings.TrimSpace(cfg.DoltUser) == ""
+	return cfg.EndpointOrigin == "" && cfg.EndpointStatus == "" && strings.TrimSpace(cfg.DoltHost) == "" && strings.TrimSpace(cfg.DoltPort) == "" && strings.TrimSpace(cfg.DoltSocket) == "" && strings.TrimSpace(cfg.DoltUser) == ""
 }
 
 func configTracksEndpoint(cfg ConfigState) bool {
-	return strings.TrimSpace(cfg.DoltHost) != "" || strings.TrimSpace(cfg.DoltPort) != "" || strings.TrimSpace(cfg.DoltUser) != ""
+	return strings.TrimSpace(cfg.DoltHost) != "" || strings.TrimSpace(cfg.DoltPort) != "" || strings.TrimSpace(cfg.DoltSocket) != "" || strings.TrimSpace(cfg.DoltUser) != ""
 }
 
 func populateExternalTarget(target DoltConnectionTarget, cfg ConfigState) (DoltConnectionTarget, error) {
+	if socket := strings.TrimSpace(cfg.DoltSocket); socket != "" {
+		if err := validateSocketTarget(socket, cfg.DoltHost, cfg.DoltPort); err != nil {
+			return DoltConnectionTarget{}, err
+		}
+		target.Socket = socket
+		target.External = true
+		return target, nil
+	}
 	port := strings.TrimSpace(cfg.DoltPort)
 	if port == "" {
 		return DoltConnectionTarget{}, fmt.Errorf("missing dolt.port for external scope")
@@ -679,6 +721,20 @@ func populateExternalTarget(target DoltConnectionTarget, cfg ConfigState) (DoltC
 	target.Port = port
 	target.External = true
 	return target, nil
+}
+
+func validateSocketTarget(socket, host, port string) error {
+	socket = strings.TrimSpace(socket)
+	if socket == "" {
+		return fmt.Errorf("missing dolt socket path")
+	}
+	if strings.TrimSpace(host) != "" || strings.TrimSpace(port) != "" {
+		return fmt.Errorf("dolt socket is mutually exclusive with dolt.host and dolt.port")
+	}
+	if !filepath.IsAbs(socket) || strings.ContainsRune(socket, '\x00') {
+		return fmt.Errorf("invalid dolt socket path %q", socket)
+	}
+	return nil
 }
 
 func readManagedRuntimePort(fs fsys.FS, cityRoot string) (string, error) {
