@@ -310,6 +310,187 @@ interval = "24h"
 	}
 }
 
+// TestOrderFormulaSearchPathsStayScopedToTheOrdersRig pins the scope
+// boundary of the #4378 fix: order dispatch broadens past the order's own
+// FormulaLayer to the order's own layer set
+// (FormulaLayers.SearchPaths(rig), which already embeds the city layers) —
+// not to every rig's layers. A rig-A order must not be able to dispatch a
+// formula only rig B ships, and a city order must not reach into either
+// rig's private layers. Formula resolution is last-wins over the search
+// paths, so an aggregated set would also make a same-named formula in two
+// rigs resolve by map iteration order.
+func TestOrderFormulaSearchPathsStayScopedToTheOrdersRig(t *testing.T) {
+	cityDir := t.TempDir()
+	opsPackDir := filepath.Join(cityDir, "packs", "ops")
+	frontendPackDir := filepath.Join(cityDir, "packs", "fe")
+	backendPackDir := filepath.Join(cityDir, "packs", "be")
+
+	for _, dir := range []string{
+		filepath.Join(cityDir, ".gc"),
+		filepath.Join(cityDir, "orders"),
+		filepath.Join(cityDir, "frontend"),
+		filepath.Join(cityDir, "backend"),
+		filepath.Join(opsPackDir, "formulas"),
+		filepath.Join(frontendPackDir, "formulas"),
+		filepath.Join(frontendPackDir, "orders"),
+		filepath.Join(backendPackDir, "formulas"),
+		filepath.Join(backendPackDir, "orders"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	writeFile(t, filepath.Join(cityDir, "pack.toml"), `
+[pack]
+name = "testcity"
+schema = 2
+
+[imports.ops]
+source = "./packs/ops"
+`)
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `
+[workspace]
+
+[[rigs]]
+name = "frontend"
+
+[rigs.imports.fe]
+source = "./packs/fe"
+
+[[rigs]]
+name = "backend"
+
+[rigs.imports.be]
+source = "./packs/be"
+`)
+	writeFile(t, filepath.Join(cityDir, ".gc", "site.toml"), `
+workspace_name = "testcity"
+
+[[rig]]
+name = "frontend"
+path = "./frontend"
+
+[[rig]]
+name = "backend"
+path = "./backend"
+`)
+	writeFile(t, filepath.Join(opsPackDir, "pack.toml"), `
+[pack]
+name = "ops"
+schema = 2
+`)
+	writeFile(t, filepath.Join(opsPackDir, "formulas", "city-formula.toml"), `
+formula = "city-formula"
+
+[[steps]]
+id = "step"
+title = "Do work"
+`)
+	writeFile(t, filepath.Join(frontendPackDir, "pack.toml"), `
+[pack]
+name = "fe"
+schema = 2
+`)
+	writeFile(t, filepath.Join(frontendPackDir, "formulas", "fe-formula.toml"), `
+formula = "fe-formula"
+
+[[steps]]
+id = "step"
+title = "Do work"
+`)
+	writeFile(t, filepath.Join(frontendPackDir, "orders", "fe-order.toml"), `
+[order]
+formula = "fe-formula"
+trigger = "cooldown"
+interval = "24h"
+`)
+	writeFile(t, filepath.Join(backendPackDir, "pack.toml"), `
+[pack]
+name = "be"
+schema = 2
+`)
+	writeFile(t, filepath.Join(backendPackDir, "formulas", "be-formula.toml"), `
+formula = "be-formula"
+
+[[steps]]
+id = "step"
+title = "Do work"
+`)
+	writeFile(t, filepath.Join(backendPackDir, "orders", "be-order.toml"), `
+[order]
+formula = "be-formula"
+trigger = "cooldown"
+interval = "24h"
+`)
+	// City-authored order, outside every pack.
+	writeFile(t, filepath.Join(cityDir, "orders", "city-order.toml"), `
+[order]
+formula = "city-formula"
+trigger = "cooldown"
+interval = "24h"
+`)
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	opsFormulaDir := filepath.Join(opsPackDir, "formulas")
+	frontendFormulaDir := filepath.Join(frontendPackDir, "formulas")
+	backendFormulaDir := filepath.Join(backendPackDir, "formulas")
+
+	// Fixture guard: each rig must genuinely own a layer the other lacks,
+	// or the isolation assertions below would pass vacuously.
+	assertContainsString(t, cfg.FormulaLayers.SearchPaths("frontend"), frontendFormulaDir)
+	assertNotContainsString(t, cfg.FormulaLayers.SearchPaths("frontend"), backendFormulaDir)
+	assertContainsString(t, cfg.FormulaLayers.SearchPaths("backend"), backendFormulaDir)
+	assertNotContainsString(t, cfg.FormulaLayers.SearchPaths("backend"), frontendFormulaDir)
+
+	var stderr bytes.Buffer
+	discovered, err := scanAllOrders(cityDir, cfg, &stderr, "gc order list")
+	if err != nil {
+		t.Fatalf("scanAllOrders: %v; stderr: %s", err, stderr.String())
+	}
+
+	assertOwnLayerHighestPriority := func(paths []string, order orders.Order) {
+		t.Helper()
+		if len(paths) == 0 || paths[len(paths)-1] != order.FormulaLayer {
+			t.Fatalf("order %q search paths = %#v, want own layer %q last (highest priority)", order.ScopedName(), paths, order.FormulaLayer)
+		}
+	}
+
+	frontendOrder, ok := findOrder(discovered, "fe-order", "frontend")
+	if !ok {
+		t.Fatalf("missing fe-order on rig frontend in %#v", discovered)
+	}
+	frontendPaths := orderFormulaSearchPaths(cfg, frontendOrder)
+	assertContainsString(t, frontendPaths, opsFormulaDir)
+	assertContainsString(t, frontendPaths, frontendFormulaDir)
+	assertNotContainsString(t, frontendPaths, backendFormulaDir)
+	assertOwnLayerHighestPriority(frontendPaths, frontendOrder)
+
+	backendOrder, ok := findOrder(discovered, "be-order", "backend")
+	if !ok {
+		t.Fatalf("missing be-order on rig backend in %#v", discovered)
+	}
+	backendPaths := orderFormulaSearchPaths(cfg, backendOrder)
+	assertContainsString(t, backendPaths, opsFormulaDir)
+	assertContainsString(t, backendPaths, backendFormulaDir)
+	assertNotContainsString(t, backendPaths, frontendFormulaDir)
+	assertOwnLayerHighestPriority(backendPaths, backendOrder)
+
+	cityOrder, ok := findOrder(discovered, "city-order", "")
+	if !ok {
+		t.Fatalf("missing city-order in %#v", discovered)
+	}
+	cityPaths := orderFormulaSearchPaths(cfg, cityOrder)
+	assertContainsString(t, cityPaths, opsFormulaDir)
+	assertNotContainsString(t, cityPaths, frontendFormulaDir)
+	assertNotContainsString(t, cityPaths, backendFormulaDir)
+	assertOwnLayerHighestPriority(cityPaths, cityOrder)
+}
+
 func assertContainsString(t *testing.T, got []string, want string) {
 	t.Helper()
 	for _, item := range got {

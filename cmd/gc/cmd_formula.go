@@ -513,8 +513,9 @@ func formulaSearchPathsForList(cfg *config.City) []string {
 }
 
 // orderFormulaSearchPaths returns the formula search paths for dispatching
-// an order: the same full city+rig layer aggregation formula list/show
-// already search, plus the order's own discovery layer appended last
+// an order: the order's own scope (SearchPaths(a.Rig), which already
+// embeds the city layers beneath any rig-specific ones), plus the order's
+// own discovery layer appended last
 // (highest priority) so a same-named formula co-located with the order
 // still wins on a collision. a.FormulaLayer records where the ORDER FILE
 // was found (for name-collision precedence when the same order name
@@ -525,7 +526,14 @@ func formulaSearchPathsForList(cfg *config.City) []string {
 // layer (e.g. an imported pack) even though gc formula list/show resolved
 // it fine (#4378).
 func orderFormulaSearchPaths(cfg *config.City, a orders.Order) []string {
-	searchPaths := formulaSearchPathsForList(cfg)
+	var searchPaths []string
+	if cfg != nil {
+		// Clone: SearchPaths hands back the stored slice, and
+		// ComputeFormulaLayers grows those slices with append, so
+		// appending in place could write through spare capacity into
+		// cfg.FormulaLayers.
+		searchPaths = slices.Clone(cfg.FormulaLayers.SearchPaths(a.Rig))
+	}
 	if a.FormulaLayer != "" {
 		searchPaths = append(searchPaths, a.FormulaLayer)
 	}
