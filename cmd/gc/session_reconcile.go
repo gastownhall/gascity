@@ -228,13 +228,26 @@ func sessionStartRequestedInfo(i sessionpkg.Info, clk clock.Clock) bool {
 // reachable for the first time (PreWakePatch used to re-stamp
 // pending_create_started_at before every start attempt, so it measured the
 // latest attempt rather than the episode and never elapsed for a session that
-// retried each tick). A start that is genuinely in flight is protected by
-// pendingCreateStartInFlightInfo, which leases against the CONFIGURED
-// session.startup_timeout off last_woke_at and is consulted before every
-// pendingCreateAttemptStaleInfo rollback path — so this window never races a
-// healthy spawn and does not need headroom above the startup budget. Raising it
-// would instead hold aliases longer (see preserveConfiguredNamedSessionBead's
-// race guard), which is the opposite of what ga-6wkhl needs.
+// retried each tick).
+//
+// This constant does NOT by itself decide how long a creating row may hold its
+// alias. Every claimed-pending-create rollback path consults
+// pendingCreateStartInFlightInfo first, which leases against the CONFIGURED
+// session.startup_timeout off last_woke_at, so the effective bound is
+// last_woke_at + startup_timeout + ~7s and this window only starts mattering
+// once that lease lapses. That is why one minute is safe — it cannot race a
+// healthy spawn and needs no headroom above the startup budget — and equally
+// why it is not a ceiling: a row that reaches preWakeCommit and then loses its
+// commit (controller restart mid-start, or the still-current arm of
+// refreshAsyncStartResult, which leaves last_woke_at set) stays protected for
+// the full configured startup_timeout, which a container-provisioning provider
+// may set to many minutes. The ga-6wkhl drift shape self-heals through the
+// rollback arm; the wider "any stuck creating row" class is bounded by the
+// lease, not by this value.
+//
+// Raising it would not help that class and would actively hurt: the constant is
+// overloaded, and preserveConfiguredNamedSessionBead's race guard uses it to
+// hold an alias LONGER — the opposite of what ga-6wkhl needs.
 const staleCreatingStateTimeout = time.Minute
 
 // stalePendingCreateTimeout is the longer grace window applied by
@@ -1018,6 +1031,20 @@ func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, observed b
 		}
 	}
 	if target == string(sessionpkg.StateAsleep) {
+		// Leaving the pending-create episode: surrender its start marker.
+		// clearPendingCreateLeaseInfo above is gated on pending_create_claim, but
+		// an ordinary wake stamps pending_create_started_at via PreWakePatch
+		// WITHOUT ever setting the claim (only bead creation, named-session
+		// reopen and the wake-request patches set it) — so a claimless creating
+		// row healed to asleep kept its marker. Since ga-6wkhl stopped renewing
+		// the marker, inheriting it on the next wake would make the freshly
+		// started row read instantly stale and flap it straight back to asleep,
+		// mid-start, clearing session_key and started_config_hash each time. The
+		// guards keep this a transition-only write: a row already asleep, or with
+		// no marker, produces no extra key and no extra heal.
+		if pendingCreateQueuedOrCreatingState(info.MetadataState) && strings.TrimSpace(info.PendingCreateStartedAt) != "" {
+			batch["pending_create_started_at"] = ""
+		}
 		if strings.TrimSpace(info.SleepReason) == "" && strings.TrimSpace(info.MetadataState) == "failed-create" {
 			batch["sleep_reason"] = string(sessionpkg.SleepReasonFailedCreate)
 		}
