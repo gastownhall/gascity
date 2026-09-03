@@ -2305,6 +2305,13 @@ func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string
 		clearProjectedDoltEnv(envMap)
 		return mergeRuntimeEnv(nil, envMap)
 	}
+	if target, ok := externalDoltEnvOverrideTarget(); ok && target.Socket != "" {
+		env = removeEnvKey(env, "GC_DOLT_HOST")
+		env = removeEnvKey(env, "GC_DOLT_PORT")
+		env = removeEnvKey(env, "BEADS_DOLT_SERVER_HOST")
+		env = removeEnvKey(env, "BEADS_DOLT_SERVER_PORT")
+		env = append(env, "BEADS_DOLT_SERVER_SOCKET="+target.Socket)
+	}
 	for _, key := range []string{
 		"GC_PACK_STATE_DIR",
 		"GC_DOLT_DATA_DIR",
@@ -2319,10 +2326,16 @@ func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string
 		"GC_DOLT_READ_TIMEOUT_MILLIS",
 		"GC_DOLT_WRITE_TIMEOUT_MILLIS",
 		"GC_DOLT_LOCK_RELEASE_TIMEOUT_MS",
+		"BEADS_DOLT_SERVER_SOCKET",
 	} {
 		env = removeEnvKey(env, key)
 	}
 	env = append(env, providerLifecycleDoltPathEnv(cityPath)...)
+	if target, ok, err := canonicalScopeDoltTarget(cityPath, cityPath); err == nil && ok && target.Socket != "" {
+		env = removeEnvKey(env, "GC_DOLT_HOST")
+		env = removeEnvKey(env, "GC_DOLT_PORT")
+		env = append(env, "BEADS_DOLT_SERVER_SOCKET="+target.Socket)
+	}
 	if gcBin := resolveProviderLifecycleGCBinary(); gcBin != "" {
 		env = removeEnvKey(env, "GC_BIN")
 		env = append(env, "GC_BIN="+gcBin)

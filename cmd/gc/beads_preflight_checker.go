@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -67,7 +68,12 @@ func preflightDatabaseProjectIDReader(cityPath string) func(scope string) (strin
 			return "", false, err
 		}
 		// Pooled handle owned by internal/doltpool; do not Close.
-		db, err := managedDoltOpenDatabase(target.Host, target.Port, target.User, target.Database)
+		var db *sql.DB
+		if target.Socket != "" {
+			db, err = managedDoltOpenDatabaseSocket(target.Socket, target.User, target.Database)
+		} else {
+			db, err = managedDoltOpenDatabase(target.Host, target.Port, target.User, target.Database)
+		}
 		if err != nil {
 			return "", false, err
 		}
