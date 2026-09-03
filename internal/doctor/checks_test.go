@@ -1640,6 +1640,24 @@ func TestDoltServerCheck_ProxiedMalformedSidecarIsError(t *testing.T) {
 	}
 }
 
+func TestDoltServerCheck_ProxiedSidecarUnixReachable(t *testing.T) {
+	dir := t.TempDir()
+	fs := fsys.OSFS{}
+	writeDoctorCanonicalConfig(t, fs, dir, contract.ConfigState{EndpointOrigin: contract.EndpointOriginManagedCity, DoltMode: "proxied-server"})
+	writeDoctorCanonicalMetadata(t, fs, dir, "hq")
+	sock := filepath.Join(dir, "dolt.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close(); os.Remove(sock) })
+	os.WriteFile(filepath.Join(dir, ".beads", "proxied_server_client_info.json"), []byte(fmt.Sprintf(`{"external":{"socket":%q}}`, sock)), 0o644)
+	r := NewDoltServerCheck(dir, false).Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status=%d msg=%q", r.Status, r.Message)
+	}
+}
+
 func TestDoctorScopeUsesProxiedDoltModeRejectsStaleDoltliteMode(t *testing.T) {
 	dir := setupCity(t, "[workspace]\nname = \"test\"\n[beads]\nprovider = \"bd\"\nbackend = \"doltlite\"\n")
 	fs := fsys.OSFS{}
