@@ -488,6 +488,79 @@ func TestBdByIDRoutesAWorkShapedIDResidentInTheClassBinding(t *testing.T) {
 	}
 }
 
+// TestBdByIDUnservedReadOfAClassResidentIsRefusedNotAnsweredByTheWorkStore is
+// the split-view report: one bead, two spellings of one read, two different
+// statuses.
+//
+// `gc storage migrate` PRESERVES ids and RETAINS the work store's copy, so a
+// class-resident step keeps its work-shaped id and its pre-migration row stays
+// behind, frozen at migration time. The served read routes to the binding and
+// reports the live row; an unserved spelling of the same read used to fall
+// through to a bd subprocess pointed at the work store and report the frozen
+// one — CLOSED here, OPEN there, no diagnostic on either.
+//
+// Both spellings that produce it are here, because they miss the served parser
+// for unrelated reasons and only the second one looks like a flag problem:
+// a second positional id, and a flag the in-process arm does not implement.
+func TestBdByIDUnservedReadOfAClassResidentIsRefusedNotAnsweredByTheWorkStore(t *testing.T) {
+	cityPath, classStore := foreignProviderCity(t)
+	migrated := beads.Bead{ID: "demo-premigration", Title: "carried across by the migration", Type: "task"}
+	created, err := migrationSeed(classStore, migrated)
+	if err != nil {
+		t.Fatalf("seeding a work-shaped id in the class binding: %v", err)
+	}
+	if bdIDIsClassReserved(created.ID) {
+		t.Fatalf("the fixture id %q carries a reserved class prefix; it cannot exercise the residence probe", created.ID)
+	}
+
+	for name, args := range map[string][]string{
+		"a second positional id":  {"show", created.ID, "demo-otherwork"},
+		"the class id second":     {"show", "demo-otherwork", created.ID},
+		"an unimplemented flag":   {"show", "--long", created.ID},
+		"an unimplemented flag 2": {"show", created.ID, "--include-comments"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			resetCLIStorageRoutes(t)
+			var stdout, stderr bytes.Buffer
+			code, handled := maybeRouteBdByID(cityPath, "", args, &stdout, &stderr)
+			if !handled {
+				t.Fatalf("%v fell through to the bd subprocess, which answers from the retained work-store copy", args)
+			}
+			if code == 0 {
+				t.Fatalf("%v exited 0; an unserved read of a class resident must refuse, not answer", args)
+			}
+			if got := stderr.String(); !strings.Contains(got, created.ID) || !strings.Contains(got, "class binding") {
+				t.Fatalf("the refusal for %v does not name the bead and the binding: %q", args, got)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("%v printed %q to stdout; a refusal answers nothing", args, stdout.String())
+			}
+		})
+	}
+}
+
+// TestBdByIDUnservedReadOfAWorkBeadKeepsThePassthrough is the other half of the
+// widening: entering the funnel is not the same as taking the command. An
+// unserved read whose subjects are all ordinary work beads must still reach bd,
+// byte-identically, or the widening breaks every `show --long` in the city.
+func TestBdByIDUnservedReadOfAWorkBeadKeepsThePassthrough(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+
+	for name, args := range map[string][]string{
+		"an unimplemented flag":  {"show", "--long", "demo-notresident"},
+		"a second positional id": {"show", "demo-notresident", "demo-alsonot"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			resetCLIStorageRoutes(t)
+			var stdout, stderr bytes.Buffer
+			code, handled := maybeRouteBdByID(cityPath, "", args, &stdout, &stderr)
+			if handled {
+				t.Fatalf("%v was taken by the by-ID surface (exit %d, %q); bd is still the truth for work beads", args, code, stderr.String())
+			}
+		})
+	}
+}
+
 // TestBdByIDServesTheStepCompletionWrite is the core-pack write:
 // graph-worker.md closes a worked bead with
 // `gc bd update <id> --set-metadata gc.outcome=pass --status closed`, and on a
@@ -887,6 +960,9 @@ func TestBdByIDEntersTheFunnelOnlyForInvocationsThatCouldConcernAClassBead(t *te
 		"class close":                {[]string{"close", reserved}, true},
 		"class id in an id flag":     {[]string{"list", "--parent", reserved}, true},
 		"unserved dep tree spelling": {[]string{"dep", "tree", "--show-all-paths", "gc-123"}, false},
+		"unserved multi-id show":     {[]string{"show", "gc-123", "gc-124"}, true},
+		"unserved show flag":         {[]string{"show", "--long", "gc-123"}, true},
+		"show with an unknown flag":  {[]string{"show", "--bogus", "v", "gc-123"}, false},
 		"served read on a work id":   {[]string{"show", "gc-123"}, true},
 		"served dep tree":            {[]string{"dep", "tree", "gc-123"}, true},
 		"served write on a work id":  {[]string{"update", "gc-123", "--status", "closed"}, true},
