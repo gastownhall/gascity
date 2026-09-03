@@ -1,6 +1,11 @@
 package beads
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+
+	"github.com/gastownhall/gascity/internal/fsys"
+)
 
 // TestSQLiteStoreCarriesAnEdgePayload pins the write half of the payload
 // contract: an edge added with a payload reads back carrying it, and an edge
@@ -182,5 +187,50 @@ func TestMemStoreSatisfiesDepMetadataReader(t *testing.T) {
 	}
 	if carried || payload != "" {
 		t.Fatalf("DepMetadata = (%q, %v), want (\"\", false); MemStore has no way to store an edge payload", payload, carried)
+	}
+}
+
+// TestFileStoreSatisfiesDepMetadataReader closes the gap between what the
+// infra-class migration's refusal claims about the deployed stores and what the
+// tree actually guarantees.
+//
+// The refusal treats a store it cannot ask as UNABLE TO ANSWER and blocks the
+// city. Its doc names the file store among the stores that answer, and that is
+// true only because FileStore embeds *MemStore and the method is promoted —
+// nothing declared it and nothing checked it. A FileStore-backed work store
+// that lost the promotion would be refused for a capability it still has, and
+// every existing test would pass. The compile-time assertion in filestore.go is
+// the guard; this is the behavioral half, because promotion satisfying an
+// interface is not the same as the promoted method giving the right answer for
+// the outer store.
+func TestFileStoreSatisfiesDepMetadataReader(t *testing.T) {
+	opened, err := OpenFileStore(fsys.OSFS{}, filepath.Join(t.TempDir(), "beads.json"))
+	if err != nil {
+		t.Fatalf("OpenFileStore: %v", err)
+	}
+	var store Store = opened
+	reader, ok := store.(DepMetadataReader)
+	if !ok {
+		t.Fatal("FileStore no longer implements DepMetadataReader, so the infra-class migration would refuse a file-backed work store for a capability it still has")
+	}
+
+	a, err := opened.Create(Bead{Title: "a"})
+	if err != nil {
+		t.Fatalf("Create a: %v", err)
+	}
+	b, err := opened.Create(Bead{Title: "b"})
+	if err != nil {
+		t.Fatalf("Create b: %v", err)
+	}
+	if err := opened.DepAdd(a.ID, b.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+
+	payload, carried, err := reader.DepMetadata(a.ID, b.ID)
+	if err != nil {
+		t.Fatalf("DepMetadata: %v", err)
+	}
+	if carried || payload != "" {
+		t.Fatalf("DepMetadata = (%q, %v), want (\"\", false); FileStore persists MemStore's bead logic and has no way to store an edge payload", payload, carried)
 	}
 }

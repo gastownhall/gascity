@@ -1840,12 +1840,23 @@ func (s *NativeDoltStore) depList(ctx context.Context, storage beadslib.Storage,
 // empty payload and reporting a difference here would name a loss the
 // destination cannot suffer.
 //
-// A pair can hold more than one row (one per dep type) and the first carrying
-// row wins — the same first-row-wins the SQLite reader has, reached the only
-// way the root beadslib surface allows. GetDependencyRecords is the direct
-// source-keyed read, but it lives on the Transaction interface and is not
-// re-exported; DependentQuerier is, so the read is target-keyed and filtered
-// back down to the source here.
+// A pair can hold more than one row (one per dep type) and the first CARRYING
+// row wins here. That is not what the SQLite reader does: its query is an
+// unordered single-row read on (issue_id, depends_on_id), so it reports
+// whichever dep-type row the engine hands back, carrying or not. The two agree
+// on every pair holding one row — which is every pair anything in this tree
+// writes today — and diverge only on a multi-row pair where some rows carry and
+// some do not. Left divergent on purpose and tracked as ga-fvh4q: making them
+// agree means deciding which row's payload IS the pair's, and that belongs to
+// the graph model rather than to either leaf.
+//
+// The read is target-keyed because of what the root surface exposes.
+// GetDependencyRecords is the direct source-keyed read, but it lives on the
+// Transaction interface and is not re-exported; DependentQuerier is, so the
+// read is target-keyed and filtered back down to the source here. Cost is
+// therefore O(dependents of dependsOnID) per call, and the infra-class copy
+// asks up to three times per edge (refusal, copy, verification) — fine at
+// infra-class sizes, and not something to reach for on a work-store sweep.
 func (s *NativeDoltStore) DepMetadata(issueID, dependsOnID string) (string, bool, error) {
 	var (
 		metadata string

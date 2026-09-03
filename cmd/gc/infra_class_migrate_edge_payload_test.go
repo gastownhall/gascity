@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"strings"
 	"testing"
 
@@ -299,20 +302,162 @@ func TestInfraSourceEdgePayloadRefusalPassesAnySourceItCanRead(t *testing.T) {
 		t.Fatalf("readInfraSnapshot: %v", err)
 	}
 
-	for _, payload := range []string{"", "{}", "  ", "null", `{"gate":"waits_for"}`} {
+	for _, tc := range []struct {
+		payload      string
+		wantCarrying bool
+	}{
+		{payload: "", wantCarrying: false},
+		{payload: "{}", wantCarrying: false},
+		{payload: "  ", wantCarrying: false},
+		{payload: "null", wantCarrying: false},
+		{payload: `{"gate":"waits_for"}`, wantCarrying: true},
+	} {
 		source := &payloadCarryingSource{
 			Store:    backing,
-			payloads: map[[2]string]string{{from.ID, to.ID}: payload},
+			payloads: map[[2]string]string{{from.ID, to.ID}: tc.payload},
 		}
-		if err := infraSourceEdgePayloadRefusal(source, rows); err != nil {
-			t.Errorf("an edge whose payload is %q was refused, but the copy carries payloads now: %v", payload, err)
+		carrying, err := infraSourceEdgePayloadRefusal(source, rows)
+		if err != nil {
+			t.Errorf("an edge whose payload is %q was refused, but the copy carries payloads now: %v", tc.payload, err)
+			continue
+		}
+		// The same walk answers whether anything is carried, and that answer
+		// decides whether the destination must be able to carry one. An
+		// engine's spelling of "no payload" reported as carried would demand a
+		// writer of every destination, which is the blanket refusal this
+		// segment removed.
+		if carrying != tc.wantCarrying {
+			t.Errorf("an edge whose payload is %q reports carrying=%v, want %v", tc.payload, carrying, tc.wantCarrying)
 		}
 	}
 
 	// The control. Only an unreadable source stops the migration here, or the
 	// loop above is passing because the check does nothing.
-	if err := infraSourceEdgePayloadRefusal(mutePayloadSource{Store: backing}, rows); err == nil {
+	if _, err := infraSourceEdgePayloadRefusal(mutePayloadSource{Store: backing}, rows); err == nil {
 		t.Error("a source that cannot be asked about edge payloads was cleared")
+	}
+}
+
+// TestInfraMigrationRefusesADestinationThatCannotCarryBeforeItClearsIt is the
+// placement assertion for the destination half of the payload rule (ga-l88kc).
+//
+// infraCopyDepEdge already refuses such a destination, so the outcome alone
+// proves nothing: both placements report infraMigrationUnconverged. The
+// difference is what the city looks like afterwards. prepareInfraDestination
+// DELETES the rows an earlier interrupted attempt stamped, and it runs between
+// the two, so a refusal taken inside the import destroys that partial state on
+// its way to the same refusal — for a city the copy was never going to finish.
+// The stamped row surviving is the evidence, and the control below is what
+// keeps the refusal from being a blanket one.
+func TestInfraMigrationRefusesADestinationThatCannotCarryBeforeItClearsIt(t *testing.T) {
+	backing, from, to, _ := seedInfraEdgeSource(t)
+	rows, err := readInfraSnapshot(backing)
+	if err != nil {
+		t.Fatalf("readInfraSnapshot: %v", err)
+	}
+	carrying := &payloadCarryingSource{
+		Store:    backing,
+		payloads: map[[2]string]string{{from.ID, to.ID}: `{"gate":"waits_for"}`},
+	}
+	payloadCarried, err := infraSourceEdgePayloadRefusal(carrying, rows)
+	if err != nil {
+		t.Fatalf("the source refusal rejected the fixture: %v", err)
+	}
+	if !payloadCarried {
+		t.Fatal("the fixture's edge does not read as carrying a payload, so nothing below is being tested")
+	}
+
+	destination := beads.NewMemStore()
+	if _, ok := beads.Store(destination).(beads.DepMetadataWriter); ok {
+		t.Fatal("MemStore now carries edge payloads, so it is no longer the store this test needs")
+	}
+	stamped, err := destination.Create(beads.Bead{
+		Title:    "a row an interrupted earlier attempt stamped",
+		Type:     "session",
+		Metadata: map[string]string{infraMigrationStampKey: "1"},
+	})
+	if err != nil {
+		t.Fatalf("seeding the interrupted attempt: %v", err)
+	}
+
+	if err := infraDestinationEdgePayloadRefusal(destination, payloadCarried); err == nil {
+		t.Fatal("a destination that cannot carry a payload was cleared while the source holds one")
+	}
+
+	// Nothing above may have run the preparer. If the refusal had been left to
+	// infraCopyDepEdge, this row would be gone by the time the copy reached it.
+	if _, err := destination.Get(stamped.ID); err != nil {
+		t.Errorf("the stamped row from the earlier attempt is gone (%v): the refusal landed after the destination was cleared", err)
+	}
+
+	// The control: the same destination, a source carrying nothing. It must be
+	// accepted, or the refusal is a blanket one that rejects every destination
+	// in this tree apart from SQLite.
+	payloadless, err := infraSourceEdgePayloadRefusal(backing, rows)
+	if err != nil {
+		t.Fatalf("the source refusal rejected the payloadless control: %v", err)
+	}
+	if err := infraDestinationEdgePayloadRefusal(destination, payloadless); err != nil {
+		t.Errorf("a destination with nothing to lose was refused: %v", err)
+	}
+}
+
+// TestTheDestinationPayloadRefusalRunsBeforeTheDestinationIsCleared is the
+// placement half of ga-l88kc, and it is a source-order assertion because the
+// behavior cannot express it.
+//
+// The production destination is whatever openInfraDestination returns, which is
+// always a *beads.SQLiteStore and always a DepMetadataWriter, so no city can be
+// driven through runInfraClassMigration into the refusal — the check is a fence
+// against a future destination engine, not against today's. What CAN regress
+// today is where the fence sits: moved below prepareInfraDestination it still
+// refuses the same city, having first deleted the rows an interrupted earlier
+// attempt stamped. That ordering is the whole of the segment's refuse-before-
+// touch rule, so it is pinned where it lives.
+func TestTheDestinationPayloadRefusalRunsBeforeTheDestinationIsCleared(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "infra_class_migrate.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parsing infra_class_migrate.go: %v", err)
+	}
+	var body *ast.BlockStmt
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if ok && fn.Name.Name == "runInfraClassMigration" && fn.Recv == nil {
+			body = fn.Body
+			break
+		}
+	}
+	if body == nil {
+		t.Fatal("runInfraClassMigration is gone from infra_class_migrate.go, so this guard is watching nothing")
+	}
+
+	positions := map[string]token.Pos{}
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		ident, ok := call.Fun.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		if _, seen := positions[ident.Name]; !seen {
+			positions[ident.Name] = call.Pos()
+		}
+		return true
+	})
+	for _, name := range []string{"infraSourceEdgePayloadRefusal", "infraDestinationEdgePayloadRefusal", "prepareInfraDestination"} {
+		if _, ok := positions[name]; !ok {
+			t.Fatalf("runInfraClassMigration no longer calls %s, so the ordering this guards is not the ordering that runs", name)
+		}
+	}
+	if positions["infraDestinationEdgePayloadRefusal"] > positions["prepareInfraDestination"] {
+		t.Errorf("runInfraClassMigration asserts the destination can carry a payload at %s, after prepareInfraDestination at %s clears the stamped rows of an earlier attempt",
+			fset.Position(positions["infraDestinationEdgePayloadRefusal"]), fset.Position(positions["prepareInfraDestination"]))
+	}
+	if positions["infraSourceEdgePayloadRefusal"] > positions["infraDestinationEdgePayloadRefusal"] {
+		t.Errorf("the source refusal runs after the destination refusal, so the destination is asked to carry a payload nobody has established is readable")
 	}
 }
 

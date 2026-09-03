@@ -196,7 +196,9 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 	rows, listErr := readInfraSnapshot(source)
 	var edgeErr error
 	if listErr == nil {
-		edgeErr = infraSourceEdgePayloadRefusal(source, rows)
+		// The rehearsal opens no destination, so the carry half of the answer
+		// has nowhere to be checked here; only the read half is its business.
+		_, edgeErr = infraSourceEdgePayloadRefusal(source, rows)
 	}
 	if closeErr := closeBeadStoreHandle(source); closeErr != nil {
 		fmt.Fprintf(stderr, "%s: closing the work store: %v\n", storagePreflightLogPrefix, closeErr) //nolint:errcheck // best-effort stderr
