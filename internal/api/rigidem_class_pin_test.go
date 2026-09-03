@@ -72,7 +72,8 @@ func TestRigIdemRecordsStayWorkClass(t *testing.T) {
 	if class := coordclass.Classify(got); class != coordclass.ClassWork {
 		t.Fatalf("coordclass.Classify(idem record) = %s, want %s.\n"+
 			"Remedy: if coordclass grows a %q arm, rigidem's writes must take placement "+
-			"(storeref.ResolvePlacement) in the same change — otherwise createIdemRecord "+
+			"through Server.createStoreForBead (internal/api/residency_create.go), which plans "+
+			"and then resolves, in the same change — otherwise createIdemRecord "+
 			"keeps writing the record into the work ledger that no longer serves its class.",
 			class, coordclass.ClassWork, idemLabel)
 	}
