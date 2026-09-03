@@ -3651,7 +3651,7 @@ esac
 	for _, want := range []string{
 		"pwd=" + realRigDir,
 		"BEADS_DIR=" + filepath.Join(rigDir, ".beads"),
-		"init --proxied-server -p tc --skip-hooks --database tc",
+		"init --server -p tc --skip-hooks --database tc",
 	} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("bd log missing %q:\n%s", want, log)
@@ -4238,6 +4238,7 @@ func TestInitBeadsForDirBuildsCanonicalBdInitProviderOp(t *testing.T) {
 		name       string
 		provider   func(string) string
 		wantScript func(string) string
+		proxied    bool
 	}{
 		{
 			name:       "logical bd uses the stable city wrapper",
@@ -4252,6 +4253,7 @@ func TestInitBeadsForDirBuildsCanonicalBdInitProviderOp(t *testing.T) {
 			wantScript: func(cityDir string) string {
 				return filepath.Join(cityDir, "custom", "gc-beads-bd")
 			},
+			proxied: true,
 		},
 	}
 
@@ -4264,6 +4266,9 @@ name = "demo"
 [beads]
 provider = %q
 `, tt.provider(cityDir))
+			if tt.proxied {
+				cityConfig = "[workspace]\nname = \"demo\"\n\n[dolt]\nmode = \"proxied-server\"\n\n[beads]\nprovider = " + strconv.Quote(tt.provider(cityDir)) + "\n"
+			}
 			if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityConfig), 0o644); err != nil {
 				t.Fatal(err)
 			}
@@ -4296,18 +4301,25 @@ provider = %q
 
 			env := runtimeEnvEntriesToMap(gotEnv)
 			for key, want := range map[string]string{
-				"GC_CITY_PATH":              cityDir,
-				"GC_CITY_RUNTIME_DIR":       filepath.Join(cityDir, ".gc", "runtime"),
-				"BEADS_DIR":                 filepath.Join(cityDir, ".beads"),
-				"BEADS_DOLT_PROXIED_SERVER": "1",
+				"GC_CITY_PATH":        cityDir,
+				"GC_CITY_RUNTIME_DIR": filepath.Join(cityDir, ".gc", "runtime"),
+				"BEADS_DIR":           filepath.Join(cityDir, ".beads"),
 			} {
 				if got := env[key]; got != want {
 					t.Errorf("%s = %q, want %q", key, got, want)
 				}
 			}
-			for _, key := range []string{"GC_PACK_STATE_DIR", "GC_DOLT_DATA_DIR", "GC_DOLT_PID_FILE", "BEADS_DOLT_SERVER_HOST"} {
+			if tt.proxied && env["BEADS_DOLT_PROXIED_SERVER"] != "1" {
+				t.Errorf("BEADS_DOLT_PROXIED_SERVER = %q, want 1", env["BEADS_DOLT_PROXIED_SERVER"])
+			}
+			if !tt.proxied {
+				if _, ok := env["BEADS_DOLT_PROXIED_SERVER"]; ok {
+					t.Errorf("BEADS_DOLT_PROXIED_SERVER should be absent for direct init")
+				}
+			}
+			for _, key := range []string{"BEADS_DOLT_SERVER_HOST"} {
 				if _, ok := env[key]; ok {
-					t.Errorf("%s should be absent for proxied init, got %q", key, env[key])
+					t.Errorf("%s should be absent for init, got %q", key, env[key])
 				}
 			}
 		})
