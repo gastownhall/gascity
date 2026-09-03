@@ -4,11 +4,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 )
@@ -57,6 +60,25 @@ func nudgeMailSweepMailTTLForConfig(cfg *config.City, stderr io.Writer) time.Dur
 		return nudgeMailSweepDefaultMailTTL
 	}
 	return d
+}
+
+// nudgeMailSweepMailTTLForCity resolves the mail-close TTL for the
+// sweep-nudge-mail order command by reading cityPath's city.toml, returning
+// fallback when that config cannot be loaded. A city with no city.toml is a
+// legitimate no-config case and stays silent; a config that exists and will not
+// parse gets a stderr note, because it would otherwise leave a configured
+// retention_ttl looking applied when it is not. It warns and falls back rather
+// than failing: this runs as a 5-minute order, and failing it closed would stop
+// the sweep entirely for a condition the loader only warns about.
+func nudgeMailSweepMailTTLForCity(cityPath string, fallback time.Duration, stderr io.Writer) time.Duration {
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		if stderr != nil && !errors.Is(err, fs.ErrNotExist) {
+			fmt.Fprintf(stderr, "nudge-mail-sweep: %v; using default %s\n", err, fallback) //nolint:errcheck // best-effort stderr
+		}
+		return fallback
+	}
+	return nudgeMailSweepMailTTLForConfig(cfg, stderr)
 }
 
 // sweepStaleNudgeMail closes stale consumed nudge beads and read mail beads.

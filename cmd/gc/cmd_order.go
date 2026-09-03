@@ -20,7 +20,6 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/executionevent"
-	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/orderdiscovery"
@@ -2143,12 +2142,10 @@ func cmdOrderSweepNudgeMail(nudgeTTL, mailTTL time.Duration, mailTTLExplicit, dr
 	statePtr := &nudgeState
 
 	if !mailTTLExplicit {
-		// Lightweight, side-effect-free config read purely for the TTL default --
-		// same LoadWithIncludes call resolveCLIStorageRoutes uses, not the heavier
-		// loadCityConfigWithoutBuiltinPackRefresh path openStoreAtForCity took above.
-		if cfg, _, cfgErr := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); cfgErr == nil {
-			mailTTL = nudgeMailSweepMailTTLForConfig(cfg, stderr)
-		}
+		// Read the TTL default straight from city.toml. openStoreAtForCity above
+		// already loaded the city config through loadCityConfig, but it does not
+		// hand that config back to this caller, so the value is read again here.
+		mailTTL = nudgeMailSweepMailTTLForCity(cityPath, mailTTL, stderr)
 	}
 
 	now := time.Now()
