@@ -1258,17 +1258,6 @@ func bdArgsFlagAddressedIDs(args []string, i int, undecidable bool, valueFlags, 
 	return ids, i, undecidable
 }
 
-// bdArgsNameClassOwnedBead reports the FIRST reserved-prefix id an invocation
-// addresses, and whether it addresses one at all. It is the singular projection
-// of bdArgsAddressedClassIDs, kept for callers that only need the leading id or
-// the boolean — the dep-tree ownership conformance test reads the boolean alone.
-func bdArgsNameClassOwnedBead(bdArgs []string) (string, bool) {
-	if ids := bdArgsAddressedClassIDs(bdArgs); len(ids) > 0 {
-		return ids[0], true
-	}
-	return "", false
-}
-
 // bdByIDSubcommand locates the bd subcommand in an argv and returns the
 // arguments that follow it.
 //

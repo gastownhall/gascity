@@ -2286,7 +2286,7 @@ func assertFederationServesWholeLeg(t *testing.T, surface, legName string, legID
 //
 // The two fates are decided before any store is touched, by two pure functions
 // of (config, argv): bdSQLRelocatedClassRefusal for `list` and
-// bdArgsNameClassOwnedBead for every other verb. So the coherence claim is
+// bdArgsAddressedClassIDs for every other verb. So the coherence claim is
 // checkable exactly where it is decided, and the row runs on both topologies
 // without opening a binding. The end-to-end proofs through the real command —
 // real doBd, a bd stub that answers `[]` and exits 0 — are
@@ -2370,7 +2370,7 @@ func conformanceProjectionCoherence(t *testing.T, e splitEnv) {
 
 	msg, listRefused := bdSQLRelocatedClassRefusal(e.cfg, listArgs)
 	_, readyRefused := bdSQLRelocatedClassRefusal(e.cfg, readyArgs)
-	_, depTreeRouted := bdArgsNameClassOwnedBead(depTreeArgs)
+	depTreeRouted := len(bdArgsAddressedClassIDs(depTreeArgs)) > 0
 
 	if listRefused != depTreeRouted {
 		t.Fatalf("`gc bd list --metadata-field %s` refused = %v but `gc bd dep tree %s` was diverted from the work ledger = %v on the same molecule; two projections over the same data must not disagree about whether that ledger can answer for the class",

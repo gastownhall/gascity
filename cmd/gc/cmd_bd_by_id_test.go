@@ -817,7 +817,7 @@ func TestBdByIDUnservedVerbReservedMissFallsThrough(t *testing.T) {
 // The work-prefixed half of this arm is pinned by
 // TestBdUpdateUnservedWorkResidentFailsLoudOnClassProbeFault, and it reaches the
 // error branch only through mutationIDs. A reserved id reaches it through the
-// OTHER candidate source, bdArgsNameClassOwnedBead's — so without this row the
+// OTHER candidate source, bdArgsAddressedClassIDs' — so without this row the
 // error arm can be made conditional on that flag and every existing pin stays
 // green, which is the shape the pre-change code (a namesClassBead-first branch
 // at this very site) makes a plausible refactor away.

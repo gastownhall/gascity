@@ -802,7 +802,7 @@ func TestGcBdListOnAnIDValuedFlagRefusesByOwnership(t *testing.T) {
 // does not serve. On a split city where a reserved class is relocated, that
 // unserved verb addressed at a class-owned id must NOT fall through to the work
 // store — where the bead does not live and bd answers a misleading substring
-// not-found. Instead the ownership gate (bdArgsNameClassOwnedBead) catches the
+// not-found. Instead the ownership gate (bdArgsAddressedClassIDs) catches the
 // reserved-prefix positional and refuseClassOwnedTarget names the routing cause.
 // This is the regression the scorecard's required change #2 asks for: an explicit
 // unsupported-routing diagnostic in place of bd not-found.

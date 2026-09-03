@@ -46,6 +46,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "rig/agent"}'`) instead. A malformed inline body is likewise refused by name
   rather than forwarded. No in-repo caller uses the `@file.json` spelling.
 
+- **`gc bd` on a split city now decides ownership by RESIDENCE, so a
+  reserved-prefix id the relocated class binding does not hold falls through to
+  the work ledger instead of being refused on its prefix.** The binding is the
+  authority for its reserved namespaces, not their only lawful holder:
+  `config.ValidateRigs` deliberately admits a rig prefix inside a reserved
+  namespace (`ReservedPrefixWarnings` only advises) and `gc storage migrate`
+  preserved ids in the other direction, so such a rig mints work beads carrying
+  ids the binding has never held. Every read and every write addressed at one —
+  including the step-completion write a worked bead ends with — died at this one
+  door, while the HTTP API and `classRoutedStoreForID` already served the same
+  rows. `gc bd create --deps <reserved-id>` and `--parent <reserved-id>` now
+  execute against the work ledger on a clean binding miss, where they were
+  previously refused; a subject the binding actually holds is still refused with
+  the routing diagnostic, and every addressed id is probed, so an unserved
+  `dep add <miss> <resident>` is refused in either argv order. A binding that
+  cannot ANSWER — unopenable, refusing, or faulting — is still a hard error and
+  never read as absence.
+
+  One diagnostic is lost, by design: a truncated `gcg-…` id no longer gets the
+  "class stores resolve ids exactly (no substring match)" hint and instead falls
+  through to `bd`'s own substring not-found. Distinguishing a typo from a
+  shadow-prefixed rig's real bead requires knowing the namespace has one lawful
+  minter, which is the premise this change retires (ga-8w5c7).
+
 ### Fixed
 
 - **A control bead served by a relocated class binding is routed to the
