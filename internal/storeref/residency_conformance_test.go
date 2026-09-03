@@ -213,7 +213,7 @@ var residencyCorpus = map[string]string{
 	"Class(graph) x T6":                   `SingleOwner: class:gmnos[Authority,Fatal]`,
 	"Class(sessions) x T6":                `SingleOwner: class:gmnos[Authority,Fatal]`,
 
-	// ---- T6r: mint-truthful but relics still open. The OTHER half of the
+	// ---- T6r: mint-truthful but holding relics. The OTHER half of the
 	// retirement pair — the probe stays, because a point-in-time "zero open
 	// relics" is the only thing that may retire it.
 	"ByID(gcg-abc) x T6r":                  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,

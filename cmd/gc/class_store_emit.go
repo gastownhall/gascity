@@ -539,6 +539,39 @@ func (s *emittingClassStore) AtomicConditionalCloserHandle() (beads.AtomicCondit
 	return s, true
 }
 
+// HasResidentOutside forwards the relic census to the backing capability. It
+// exists because TestEmittingClassStoreKeepsEveryEngineCapability holds this
+// wrapper to every engine method, and a wrapper that carries the method must
+// still be unable to answer for a backing that cannot: a store with no census
+// gets beads.ErrNamespaceCensusUnsupported, never (false, nil). A false clean
+// here would retire the binding's by-id probe over every relic sitting in it.
+//
+// Discovery does not reach this method — NamespaceCensusHandle below answers
+// first — so this is the spelling for a caller holding the wrapper that asks
+// directly.
+func (s *emittingClassStore) HasResidentOutside(prefixes []string) (bool, error) {
+	census, ok := beads.NamespaceCensusFor(s.Store)
+	if !ok {
+		return false, fmt.Errorf("censusing the id namespaces of the emitting class store over %T: %w", s.Store, beads.ErrNamespaceCensusUnsupported)
+	}
+	return census.HasResidentOutside(prefixes)
+}
+
+// NamespaceCensusHandle keeps beads.NamespaceCensusFor honest over this
+// wrapper, exactly as AtomicConditionalCloserHandle does above and for the same
+// reason: the reflective capability guard forces HasResidentOutside to EXIST
+// for every engine, so a bare type assertion would advertise a census over a
+// backing — a mem store, the native Dolt engine — that has none. The census
+// contract makes that a hard gate rather than a rollout seam, because a store
+// that answers the question inexactly strands every bead it failed to see.
+//
+// It hands back the backing's census rather than the wrapper: the wrapper adds
+// emission, a census reads and mutates nothing, so there is nothing here for
+// the answer to pass back through.
+func (s *emittingClassStore) NamespaceCensusHandle() (beads.NamespaceCensus, bool) {
+	return beads.NamespaceCensusFor(s.Store)
+}
+
 func (s *emittingClassStore) DeleteIfMatch(id string, revision int64) error {
 	writer, ok := beads.ConditionalWriterFor(s.Store)
 	if !ok {
