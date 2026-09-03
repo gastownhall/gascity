@@ -253,7 +253,34 @@ func renderBeadsShowFromAPI(cr api.CachedRead[beads.Bead], format string, stdout
 	return 0
 }
 
+// doBeadsShowFallback serves `gc beads show` from the stores directly when the
+// API is unreachable.
+//
+// The relocated class binding is asked first, through the shared residency
+// contract, because it is not one of the directories the scan below walks: on a
+// converged city an infrastructure bead would otherwise be shown from the copy
+// `gc storage migrate` retained in the city store, frozen at migration time and
+// reported as though it were current.
 func doBeadsShowFallback(cityPath, beadID, format string, stdout, stderr io.Writer) int {
+	owner, ownedByBinding, err := cliByIDBindingOwner(cityPath, beadID)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc beads show: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if ownedByBinding {
+		b, err := beadForOwner(owner, beadID)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc beads show: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if format == "json" {
+			writeBeadJSON(b, stdout)
+		} else {
+			writeBeadDetail(b, stdout)
+		}
+		return 0
+	}
+
 	stores, code := openAllConvoyStoresAt(cityPath, stderr, "gc beads show")
 	if stores == nil {
 		return code

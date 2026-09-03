@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
@@ -985,8 +986,13 @@ func TestDeepCopyAgentSetsPoolName(t *testing.T) {
 }
 
 func TestRunPoolOnBoot(t *testing.T) {
+	// on_boot hooks run concurrently, so this double protects its own state as
+	// the ScaleCheckRunner contract requires.
+	var mu sync.Mutex
 	var ran []string
 	runner := func(cmd, _ string, _ map[string]string) (string, error) {
+		mu.Lock()
+		defer mu.Unlock()
 		ran = append(ran, cmd)
 		return "", nil
 	}

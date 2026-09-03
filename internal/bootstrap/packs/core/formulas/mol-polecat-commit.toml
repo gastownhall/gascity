@@ -136,8 +136,23 @@ done
 **3. Clean up worktree:**
 ```bash
 WORKTREE_PATH=$(pwd)
+# --git-common-dir, not --show-toplevel: inside a linked worktree the latter
+# returns the worktree itself, which stops existing halfway through cleanup
+# and is useless for the prune fallback.
+REPO=$(git rev-parse --path-format=absolute --git-common-dir)
 cd ..
-git worktree remove "$WORKTREE_PATH" --force
+if [ -z "$REPO" ]; then
+    echo "cleanup: could not resolve the owning repo; leaving $WORKTREE_PATH in place" >&2
+elif ! git -C "$REPO" worktree remove --force "$WORKTREE_PATH"; then
+    # A linked worktree's .git is a file; a main checkout's is a directory.
+    # Without this check, a failed remove on a main checkout rm -rf's the repo.
+    if [ -f "$WORKTREE_PATH/.git" ]; then
+        rm -rf "$WORKTREE_PATH"
+        git -C "$REPO" worktree prune
+    else
+        echo "cleanup: refusing to rm -rf $WORKTREE_PATH: not a linked worktree" >&2
+    fi
+fi
 gc bd update "$WORK_BEAD_ID" --unset-metadata work_dir
 ```
 

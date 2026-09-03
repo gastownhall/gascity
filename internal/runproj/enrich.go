@@ -24,6 +24,17 @@ const (
 // run is demoted out of Active. Port of TS STALE_LATCH_AFTER_MS (24h).
 const staleLatchAfterMs = 24 * 60 * 60 * 1000
 
+// staleRunSilenceMs is how long an in-flight run may go without ANY new bead
+// activity before the projection marks it stale rather than rendering its frozen
+// mid-flight step states as live. Runs legitimately run for tens of hours but
+// emit events throughout (measured p90 ~17h, max ~33h); a multi-day silence means
+// the run's terminal events never arrived (e.g. an event-emission gap), so its
+// last-known "active"/"failed" step states are untrustworthy. 72h clears real run
+// durations with wide margin, and — unlike staleLatchAfterMs — the rule does not
+// require the session list, since a run silent for days is stale on its own
+// bead-activity evidence.
+const staleRunSilenceMs = 72 * 60 * 60 * 1000
+
 // LaneProgressMark is the per-lane monotonic progress record the tailer carries
 // across fold generations to detect thrashing. Port of TS LaneProgressMark.
 type LaneProgressMark struct {
@@ -97,20 +108,34 @@ func EnrichRunSummary(s RunSummary, sessions []DashboardSession, sessionsAvailab
 
 	liveActive := make([]RunLane, 0, len(activeEnriched))
 	for _, lane := range activeEnriched {
-		if !isStaleSessionlessLatch(lane, nowMs, sessionsAvailable) {
-			liveActive = append(liveActive, lane)
+		if isStaleSessionlessLatch(lane, nowMs, sessionsAvailable) {
+			continue
+		}
+		if isStaleRun(lane, nowMs) {
+			lane.Stale = true
+			lane.StaleSince = lane.UpdatedAt.At
+		}
+		liveActive = append(liveActive, lane)
+	}
+	// Stale lanes stay visible in Lanes but are not "active": exclude them from
+	// TotalActive, the per-kind counts, and the census so a run gone silent for
+	// days no longer inflates the active picture.
+	activeLanes := make([]RunLane, 0, len(liveActive))
+	for _, lane := range liveActive {
+		if !lane.Stale {
+			activeLanes = append(activeLanes, lane)
 		}
 	}
 
-	censusInput := make([]RunLane, 0, len(liveActive)+len(blockedLanes))
-	censusInput = append(censusInput, liveActive...)
+	censusInput := make([]RunLane, 0, len(activeLanes)+len(blockedLanes))
+	censusInput = append(censusInput, activeLanes...)
 	censusInput = append(censusInput, blockedLanes...)
 
 	out := s
-	out.TotalActive = len(liveActive)
+	out.TotalActive = len(activeLanes)
 	out.Lanes = liveActive
 	out.BlockedLanes = blockedLanes
-	out.RunCounts = runCounts(liveActive, len(liveActive), len(blockedLanes))
+	out.RunCounts = runCounts(activeLanes, len(activeLanes), len(blockedLanes))
 	out.Census = RunCensusState{Status: "available", Data: buildCensus(censusInput)}
 	// HistoricalLanes/RecentChanges are not derived here (BuildRunSummary owns
 	// them); a zero-value input (the warming snapshot, served while the run
@@ -318,6 +343,27 @@ func isStaleSessionlessLatch(lane RunLane, nowMs int64, sessionsAvailable bool) 
 		return false
 	}
 	return nowMs-ms >= staleLatchAfterMs
+}
+
+// isStaleRun reports whether an in-flight lane has gone silent past
+// staleRunSilenceMs and should be marked stale (abandoned) rather than counted
+// active. nowMs is the snapshot generation time, not a live clock. Unlike
+// isStaleSessionlessLatch it does not require the session list — a run silent for
+// days is stale on its own bead-activity evidence alone.
+func isStaleRun(lane RunLane, nowMs int64) bool {
+	if lane.Phase == "complete" || lane.Phase == "blocked" {
+		return false
+	}
+	if lane.UpdatedAt.Status != "available" {
+		return false
+	}
+	// A parse failure means we cannot judge staleness — treat as not stale
+	// (mirrors isStaleSessionlessLatch / the TS Number.isFinite guard).
+	ms, ok := millisFromTimestamp(lane.UpdatedAt.At)
+	if !ok {
+		return false
+	}
+	return nowMs-ms >= staleRunSilenceMs
 }
 
 // laneSessionResolved reports whether a lane's enriched health carries a resolved

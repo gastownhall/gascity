@@ -350,6 +350,14 @@ func marshalBatch(batch []Event, startingSeq uint64, now time.Time) ([]byte, uin
 		event.Seq = startingSeq + uint64(i) + 1
 		if event.Ts.IsZero() {
 			event.Ts = now
+		} else {
+			// Normalize any caller-supplied Ts to the recorder's own zone
+			// (local-with-offset) so the log carries one consistent RFC3339
+			// representation. Preserves the instant -- only the zone
+			// changes -- but a mixed log otherwise silently breaks a
+			// lexical/window filter written against whichever form the
+			// majority of rows use (#5300).
+			event.Ts = event.Ts.Local()
 		}
 		encoded, err := json.Marshal(event)
 		if err != nil {
@@ -384,6 +392,9 @@ func (r *FileRecorder) writeRecordLocked(e *Event) error {
 	e.Seq = r.seq
 	if e.Ts.IsZero() {
 		e.Ts = time.Now()
+	} else {
+		// See marshalBatch's matching normalization for why (#5300).
+		e.Ts = e.Ts.Local()
 	}
 	data, err := json.Marshal(e)
 	if err != nil {

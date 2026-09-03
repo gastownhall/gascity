@@ -9,12 +9,12 @@ func TestBuiltinProviders(t *testing.T) {
 	providers := BuiltinProviders()
 	order := BuiltinProviderOrder()
 
-	// Must have exactly 17 built-in providers.
-	if len(providers) != 17 {
-		t.Fatalf("len(BuiltinProviders()) = %d, want 17", len(providers))
+	// Must have exactly 18 built-in providers.
+	if len(providers) != 18 {
+		t.Fatalf("len(BuiltinProviders()) = %d, want 18", len(providers))
 	}
-	if len(order) != 17 {
-		t.Fatalf("len(BuiltinProviderOrder()) = %d, want 17", len(order))
+	if len(order) != 18 {
+		t.Fatalf("len(BuiltinProviderOrder()) = %d, want 18", len(order))
 	}
 
 	// Every entry in order must exist in providers.
@@ -397,16 +397,24 @@ func TestBuiltinProvidersResumeFlags(t *testing.T) {
 
 // TestBuiltinProvidersSessionIDFlag pins that built-in providers only populate
 // SessionIDFlag when their CLI supports caller-supplied fresh session IDs.
-// Claude and Codex expose session ids through resume paths, not fresh-start
-// creation flags; populating this field makes resolveSessionCommand emit an
-// unsupported first-start command and prevents hook-time provider session IDs
-// from becoming the durable session_key.
+// Populating it for a CLI that has no such flag makes resolveSessionCommand
+// emit an unsupported first-start command and prevents hook-time provider
+// session IDs from becoming the durable session_key.
+//
+// Claude Code is the exception: `claude --session-id <uuid>` starts a fresh
+// conversation under a caller-chosen UUID (verified against claude 2.1.233),
+// and it is the only way gc can hand `--resume <uuid>` back on restart —
+// claude has no gc session hook that could persist a provider-side key, so
+// without this flag every restart silently starts a new conversation.
 func TestBuiltinProvidersSessionIDFlag(t *testing.T) {
 	providers := BuiltinProviders()
-	for _, name := range []string{"claude", "codex", "gemini", "cursor", "copilot", "amp", "opencode", "auggie", "pi", "omp"} {
+	for _, name := range []string{"codex", "gemini", "cursor", "copilot", "amp", "opencode", "auggie", "pi", "omp"} {
 		if got := providers[name].SessionIDFlag; got != "" {
 			t.Errorf("%s SessionIDFlag = %q, want empty (no documented start-with-id flag)", name, got)
 		}
+	}
+	if got := providers["claude"].SessionIDFlag; got != "--session-id" {
+		t.Errorf("claude SessionIDFlag = %q, want --session-id (restart resume depends on it)", got)
 	}
 }
 

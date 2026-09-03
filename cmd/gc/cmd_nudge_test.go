@@ -2387,6 +2387,12 @@ dir = "myrig"
 
 func TestCmdNudgeStatusJSON(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
+	// resolveNudgeTarget MATERIALIZES the named session ("mayor"), which under
+	// the default provider spawns a real `tmux -L test-city` server whose
+	// exit-empty-off lifecycle outlives the suite (dip-73cr05). This test
+	// asserts nudge-queue JSON, not runtime behavior — use the fake provider
+	// like every other named-session test here.
+	t.Setenv("GC_SESSION", "fake")
 	cityDir := t.TempDir()
 	writeNamedSessionCityTOML(t, cityDir)
 	t.Setenv("GC_CITY", cityDir)
@@ -2433,6 +2439,13 @@ func TestCmdNudgeStatusSurfacesDispatchSkips(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	cityDir := t.TempDir()
 	writeNamedSessionCityTOML(t, cityDir)
+	// The status read materializes the named session when it is absent; on
+	// the default (tmux) provider that spawns a real server on the test-city
+	// socket, which outlives the run (exit-empty off). Pin the fake provider
+	// — this test asserts the persisted skip counters, not runtime behavior.
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"fake\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
 	t.Setenv("GC_CITY", cityDir)
 
 	if err := recordNudgeDispatchSkips(cityDir, map[string]int64{"not-running": 3, "observe-error": 1}); err != nil {
@@ -4332,6 +4345,47 @@ func TestPruneDeadQueuedNudges_RetainsItemsWithoutBeadID(t *testing.T) {
 	}
 	if len(dead) != 1 || dead[0].ID != "n-orphan" {
 		t.Fatalf("dead = %v, want [n-orphan] retained (no bead record)", dead)
+	}
+}
+
+func TestPruneDeadQueuedNudges_PrunesItemsWhoseBeadWasReaped(t *testing.T) {
+	// Regression (gastownhall/gascity#5278): a dead-letter item whose BeadID
+	// once pointed at a real bead, but that bead was later reaped by an
+	// unrelated retention sweep (wisp compaction etc.), must still become
+	// prunable by age. The repair path can never re-confirm "found +
+	// terminal" for a bead that no longer exists, so before the fix such
+	// items were retained forever and paid a store lookup on every sweep.
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	now := time.Now().UTC()
+	item := newQueuedNudgeWithOptions("worker", "stale dead letter", "session", now.Add(-3*time.Hour), queuedNudgeOptions{
+		ID:        "n-dead-reaped",
+		SessionID: "gc-worker",
+	})
+	beadID, created, err := ensureQueuedNudgeBead(store, item)
+	if err != nil {
+		t.Fatalf("ensureQueuedNudgeBead: %v", err)
+	}
+	if !created {
+		t.Fatal("expected backing nudge bead to be created")
+	}
+	item.BeadID = beadID
+	item.LastError = "expired"
+	item.DeadAt = now.Add(-2 * time.Hour) // older than defaultQueuedNudgeDeadRetention (1h)
+
+	// Simulate the backing bead being reaped by an unrelated retention sweep,
+	// independent of the nudge queue's own lifecycle.
+	if err := store.Delete(beadID); err != nil {
+		t.Fatalf("Delete(%s): %v", beadID, err)
+	}
+
+	state := &nudgeQueueState{Dead: []queuedNudge{item}}
+	if err := pruneDeadQueuedNudges(state, nudgeFrontDoor(store), now, noMaintenanceDeadline()); err != nil {
+		t.Fatalf("pruneDeadQueuedNudges: %v", err)
+	}
+	if len(state.Dead) != 0 {
+		t.Fatalf("dead = %d, want 0 -- a dead-letter item whose bead was reaped and is past retention must still be prunable", len(state.Dead))
 	}
 }
 

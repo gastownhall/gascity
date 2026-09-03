@@ -277,6 +277,20 @@ func (s *emittingClassStore) emitClosed(id string) {
 	s.emit(classStoreEmission{eventType: events.BeadClosed, bead: bead})
 }
 
+// emitClosedBead records bead.closed from the committed row an atomic fenced
+// close returned. That row IS the post-commit state (status closed, metadata
+// merged), so unlike emitClosed it needs no re-read — mirroring emitCreated's
+// "trust what the store returned" fallback. An empty id is the one thing it
+// cannot emit, and a close that returned one is a store bug worth surfacing.
+func (s *emittingClassStore) emitClosedBead(bead beads.Bead) {
+	if strings.TrimSpace(bead.ID) == "" {
+		warnClassStoreEmit(errors.New("bead.closed skipped: the atomic close returned an empty id"))
+		return
+	}
+	bead.Status = beadStatusClosed
+	s.emit(classStoreEmission{eventType: events.BeadClosed, bead: bead})
+}
+
 // closedBefore reports whether a bead was already closed before a write. A read
 // that fails answers "not closed", which is the safe direction: the write's own
 // post-state then decides, and an event that says closed when the bead is closed
@@ -489,6 +503,40 @@ func (s *emittingClassStore) CloseIfMatch(id string, revision int64) error {
 	}
 	s.emitClosed(id)
 	return nil
+}
+
+// CloseWithMetadataIfMatch forwards the atomic fenced terminal close (merge
+// metadata and close in one transaction, guarded by the revision) to the
+// backing capability, so AtomicConditionalCloserFor discovers it on the CLI's
+// wrapped store instead of stopping at this wrapper. It emits bead.closed from
+// the committed row the close returned.
+func (s *emittingClassStore) CloseWithMetadataIfMatch(id string, revision int64, metadata map[string]string) (beads.Bead, error) {
+	closer, ok := beads.AtomicConditionalCloserFor(s.Store)
+	if !ok {
+		return beads.Bead{}, beads.ErrConditionalWriteUnsupported
+	}
+	closed, err := closer.CloseWithMetadataIfMatch(id, revision, metadata)
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	s.emitClosedBead(closed)
+	return closed, nil
+}
+
+// AtomicConditionalCloserHandle keeps AtomicConditionalCloserFor honest over
+// this wrapper. TestEmittingClassStoreKeepsEveryEngineCapability forces the
+// wrapper to carry CloseWithMetadataIfMatch structurally for every engine, so a
+// bare type assertion would advertise the capability even over a backing (for
+// example the sqlite CLI engine) that cannot honor it — and that discovery is
+// contractually a hard capability gate, not a rollout seam. Consulted first by
+// AtomicConditionalCloserFor, this answers yes only when the resolved backing
+// truly provides the atomic close, and returns the emitting wrapper (not the
+// raw backing) so the discovered closer still emits bead.closed.
+func (s *emittingClassStore) AtomicConditionalCloserHandle() (beads.AtomicConditionalCloser, bool) {
+	if _, ok := beads.AtomicConditionalCloserFor(s.Store); !ok {
+		return nil, false
+	}
+	return s, true
 }
 
 func (s *emittingClassStore) DeleteIfMatch(id string, revision int64) error {

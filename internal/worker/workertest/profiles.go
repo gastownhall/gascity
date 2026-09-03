@@ -12,6 +12,7 @@ const ( //nolint:revive // exported profile IDs are documented by the enclosing 
 	ProfileKimiTmuxCLI        ProfileID = "kimi/tmux-cli"
 	ProfileOpenCodeTmuxCLI    ProfileID = "opencode/tmux-cli"
 	ProfileMimoCodeTmuxCLI    ProfileID = "mimocode/tmux-cli"
+	ProfileZCodeTmuxCLI       ProfileID = "zcode/tmux-cli"
 	ProfilePiTmuxCLI          ProfileID = "pi/tmux-cli"
 	ProfileAntigravityTmuxCLI ProfileID = "antigravity/tmux-cli"
 )
@@ -188,6 +189,26 @@ func Phase1Profiles() []Profile {
 				RecallResponseContains: "MiMo Code phase 1 validates the tmux CLI transcript contract.",
 				ResetResponseContains:  "I cannot repeat the earlier MiMo Code summary because this session started fresh.",
 			},
+		},
+		{
+			ID:       ProfileZCodeTmuxCLI,
+			Provider: "zcode/tmux-cli",
+			WorkDir:  "/tmp/gascity/phase1/zcode",
+			Fixtures: ProfileFixtureSet{
+				FreshRoot:        "testdata/fixtures/zcode/fresh",
+				ContinuationRoot: "testdata/fixtures/zcode/continuation",
+				ResetRoot:        "testdata/fixtures/zcode/reset",
+			},
+			Continuation: ContinuationOracle{
+				AnchorText:             "ZCode phase 1 validates the tmux CLI transcript contract.",
+				RecallPromptContains:   "Repeat the exact ZCode phase-1 summary from earlier before answering.",
+				RecallResponseContains: "ZCode phase 1 validates the tmux CLI transcript contract.",
+				ResetResponseContains:  "I cannot repeat the earlier ZCode summary because this session started fresh.",
+			},
+			// No Usage expectation: the worker registers no invocation-usage
+			// extractor for the zcode family, so WC-TX-USAGE-001 /
+			// WC-USAGE-COST-001 report Unsupported. The export mirror does
+			// carry the CLI's usage block for provenance.
 		},
 		{
 			ID:       ProfilePiTmuxCLI,

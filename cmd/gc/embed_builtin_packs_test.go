@@ -332,7 +332,11 @@ func TestBundledPiHookUsesCurrentExtensionAPI(t *testing.T) {
 		`pi.on("before_agent_start"`,
 		"GC_PI_HOOK_VERSION",
 		"gc hook --inject",
-		`run(["prime", "--hook"], ctx.cwd, providerSessionEnv(ctx))`,
+		`run(["prime", "--hook"], ctx.cwd, hookEnv(ctx, "SessionStart"))`,
+		`run(["prime", "--hook"], ctx.cwd, hookEnv(ctx, "PreCompact"))`,
+		"GC_MANAGED_SESSION_HOOK",
+		"GC_HOOK_EVENT_NAME",
+		"pendingPrimeContext",
 		"GC_PROVIDER_SESSION_ID",
 		"GC_PROVIDER_SESSION_ID_REQUIRED",
 		`stdio: ["ignore", "pipe", "inherit"]`,
@@ -424,7 +428,7 @@ func TestBundledBuiltinPackOrdersScanWithoutWarnings(t *testing.T) {
 }
 
 func TestBundledWorkerPromptsIncludeFilesystemSearchGuidance(t *testing.T) {
-	for _, name := range []string{"pool-worker.md", "graph-worker.md"} {
+	for _, name := range []string{"pool-worker.template.md", "graph-worker.md"} {
 		t.Run(name, func(t *testing.T) {
 			data := readBundledPackFileForTest(t, "core", "assets/prompts/"+name)
 			if !strings.Contains(data, formulaFilesystemSearchGuidance) {

@@ -8371,3 +8371,22 @@ func TestDurationFloorOr(t *testing.T) {
 		})
 	}
 }
+
+// TestDefaultDoltReadTimeoutMillisPreservesOuterDeadlineHeadroom guards the
+// ga-lfcx72 production-safety trade-off: read_timeout was raised from 15000
+// to fix #5383 (the Reaper's own maintenance query was killed mid-row by the
+// old 15s bound), but must stay at less than half of
+// DefaultDoltWriteTimeoutMillis (the prior emergency-workaround value) so
+// #3101's independent outer wall-clock deadline still has meaningful
+// headroom to catch a genuine connection pile-up (#3626) before read_timeout
+// alone would. A future edit that raises the default without weighing this
+// trade-off should fail here, not surface as a production incident.
+func TestDefaultDoltReadTimeoutMillisPreservesOuterDeadlineHeadroom(t *testing.T) {
+	if DefaultDoltReadTimeoutMillis != 120000 {
+		t.Fatalf("DefaultDoltReadTimeoutMillis = %d, want 120000 (see ga-lfcx72: raised from 15000 to fix #5383)", DefaultDoltReadTimeoutMillis)
+	}
+	if DefaultDoltReadTimeoutMillis*2 > DefaultDoltWriteTimeoutMillis {
+		t.Fatalf("DefaultDoltReadTimeoutMillis (%d) leaves less than half of DefaultDoltWriteTimeoutMillis (%d) as headroom for #3101's outer wall-clock deadline to catch a stuck connection pile-up first",
+			DefaultDoltReadTimeoutMillis, DefaultDoltWriteTimeoutMillis)
+	}
+}

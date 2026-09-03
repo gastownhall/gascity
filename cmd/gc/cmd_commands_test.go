@@ -312,7 +312,105 @@ func runPackCommandProcessWithEnv(t *testing.T, cityPath, scenario string, extra
 	if got, err := os.ReadFile(afterRun); err != nil || string(got) != "reached\n" {
 		t.Fatalf("post-run marker = %q, err=%v; run did not return through deferred lifecycle", got, err)
 	}
-	return packCommandProcessResult{exitCode: exitCode, stdout: stdout.String(), stderr: stderr.String()}
+	return packCommandProcessResult{exitCode: exitCode, stdout: stdout.String(), stderr: stripTmuxLeakGuardNoise(stderr.String())}
+}
+
+// stripTmuxLeakGuardNoise removes the tmux leak guard's own diagnostic lines
+// (cmd/gc/tmux_leak_guard_test.go: sweepStaleTmuxTestServers,
+// writeTmuxLeakReport, and tmuxLeakGuardedTestingM.runWith's teardown report)
+// from captured subprocess stderr. TestMain re-runs in every re-exec'd
+// subprocess, so its startup sweep or teardown leak check can emit these
+// lines nondeterministically depending on unrelated concurrent sibling
+// suites' teardown timing — real CLI stderr assertions must not depend on
+// that timing.
+func stripTmuxLeakGuardNoise(s string) string {
+	if s == "" {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	trailingNewline := false
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		trailingNewline = true
+		lines = lines[:len(lines)-1]
+	}
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		switch {
+		case strings.HasPrefix(line, "cmd/gc tmux leak guard: "):
+		case strings.HasPrefix(line, "  pid="):
+		case strings.HasPrefix(line, "  socket="):
+		default:
+			kept = append(kept, line)
+		}
+	}
+	if len(kept) == 0 {
+		return ""
+	}
+	out := strings.Join(kept, "\n")
+	if trailingNewline {
+		out += "\n"
+	}
+	return out
+}
+
+// TestStripTmuxLeakGuardNoise expresses the acceptance criteria for isolating
+// captured subprocess stderr from the tmux leak guard's own harness-level
+// diagnostics (cmd/gc/tmux_leak_guard_test.go): stripTmuxLeakGuardNoise must
+// remove exactly the guard's startup-sweep and teardown-leak lines, in any
+// position, while leaving real CLI stderr output (and its line order)
+// untouched. Without this, TestPackCommandCobraHelpAndUnknownParity's
+// eager/lazy stderr-equality assertion — and the several exact-empty-stderr
+// assertions elsewhere in this file — are vulnerable to a concurrent sibling
+// suite's teardown racing exactly one of the two subprocess launches' startup
+// sweep (ga-5pe5xv gate evidence: "a concurrent tmux leak-guard stderr line
+// captured by one parity side only").
+func TestStripTmuxLeakGuardNoise(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "no guard output left untouched",
+			in:   "Error: unknown command \"missing\" for \"gc backstage\"\n",
+			want: "Error: unknown command \"missing\" for \"gc backstage\"\n",
+		},
+		{
+			name: "empty stays empty",
+			in:   "",
+			want: "",
+		},
+		{
+			name: "strips a leading startup-sweep block, keeps real stderr after it",
+			in: "cmd/gc tmux leak guard: startup sweep reaping 1 stale test tmux server(s) whose socket root is gone\n" +
+				"  pid=12345 argv=\"tmux -u -L test-city new-session -s mayor\"\n" +
+				"Error: unknown command \"missing\" for \"gc backstage\"\n",
+			want: "Error: unknown command \"missing\" for \"gc backstage\"\n",
+		},
+		{
+			name: "strips a trailing teardown-leak block, keeps real stderr before it",
+			in: "Error: unknown command \"missing\" for \"gc backstage\"\n" +
+				"cmd/gc tmux leak guard: 1 tmux server(s) leaked by this run under /tmp/gct-1-a\n" +
+				"  socket=/tmp/gct-1-a/tmux-1000/test-city (killed)\n" +
+				"cmd/gc tmux leak guard: a test created a real tmux session without tearing its server down; city-name sockets (e.g. -L test-city) have exit-empty off and live forever unless killed (dip-73cr05)\n",
+			want: "Error: unknown command \"missing\" for \"gc backstage\"\n",
+		},
+		{
+			name: "strips a guard block sandwiched between two real stderr lines",
+			in: "Usage:\n" +
+				"cmd/gc tmux leak guard: startup sweep reaping 1 stale test tmux server(s) whose socket root is gone\n" +
+				"  pid=999 argv=\"tmux -u -L test-city new-session -s mayor\"\n" +
+				"  gc backstage repo\n",
+			want: "Usage:\n  gc backstage repo\n",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := stripTmuxLeakGuardNoise(test.in); got != test.want {
+				t.Fatalf("stripTmuxLeakGuardNoise(%q) = %q, want %q", test.in, got, test.want)
+			}
+		})
+	}
 }
 
 const testTmuxSocketParentRootEnv = "GC_TEST_TMUX_SOCKET_PARENT_ROOT"
@@ -3795,7 +3893,7 @@ func TestDiscoveredNamespace_UnknownSubcommandErrors(t *testing.T) {
 // silent-config-drift bug: a pack command invoked from an operator shell used to
 // inherit NONE of the city's [dolt] block, so `gc dolt restart` regenerated
 // dolt-config.yaml from the pack script's own defaults (auto-GC on,
-// read_timeout 15000) and silently reverted the city's configured values. The
+// read_timeout 120000) and silently reverted the city's configured values. The
 // provider-lifecycle path has always projected these; the directly-invoked path
 // must agree with it, or a shell restart writes a different server config than
 // the supervisor would.

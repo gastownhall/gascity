@@ -12,7 +12,7 @@ import (
 // transcript identifier that should be preferred over workdir-only discovery.
 func SupportsIDLookup(provider string) bool {
 	switch sessionlog.ProviderFamily(provider) {
-	case "codex", "gemini", "opencode", "mimocode":
+	case "codex", "gemini", "opencode", "mimocode", "zcode":
 		return false
 	default:
 		return true
@@ -62,6 +62,13 @@ func DiscoverKeyedPath(searchPaths []string, provider, workDir, gcSessionID stri
 		return sessionlog.FindPiSessionFileByID(searchPaths, workDir, gcSessionID)
 	case "antigravity":
 		return sessionlog.FindAntigravitySessionFileByID(searchPaths, workDir, gcSessionID)
+	case "zcode":
+		// The zcode mirror filename IS the provider session id, so an identity
+		// lookup is exact. It is not keyed by gc's session id, which is why
+		// SupportsIDLookup stays false: without an identity the family still
+		// discovers by cwd. Preferring the keyed hit removes the newest-wins
+		// ambiguity when several sessions share a work dir.
+		return sessionlog.FindZCodeSessionFileByID(searchPaths, workDir, gcSessionID)
 	}
 	if !SupportsIDLookup(provider) {
 		return ""
@@ -164,4 +171,20 @@ func providerHasKeyedTranscript(provider string) bool {
 	// claude and claude-eco fall through ProviderFamily unchanged; match them
 	// by name since both store keyed JSONL under ~/.claude/projects.
 	return strings.Contains(strings.ToLower(strings.TrimSpace(provider)), "claude")
+}
+
+// DiscoverScopedPath resolves a transcript for families whose on-disk layout is
+// keyed by the session's own name and conversation epoch rather than by any
+// session id gc holds.
+//
+// Only zcode qualifies today: gc never learns its provider session id, so
+// DiscoverKeyedPath cannot hit, but the adapter names its mirror directory
+// from GC_SESSION_NAME and GC_CONTINUATION_EPOCH — both persisted on the
+// session bead. Returns "" for every other family, so callers can try it
+// unconditionally.
+func DiscoverScopedPath(searchPaths []string, provider, workDir, sessionName, continuationEpoch string) string {
+	if sessionlog.ProviderFamily(provider) != "zcode" {
+		return ""
+	}
+	return sessionlog.FindZCodeSessionFileByScope(searchPaths, workDir, sessionName, continuationEpoch)
 }

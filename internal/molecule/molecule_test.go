@@ -790,7 +790,7 @@ func TestBuildRecipeApplyPlan_GraphWorkflowOwnershipUsesTracks(t *testing.T) {
 			{ID: "wf.workflow-finalize", Title: "Finalize", Type: "task", Metadata: map[string]string{"gc.kind": "workflow-finalize"}},
 		},
 		Deps: []formula.RecipeDep{
-			{StepID: "wf", DependsOnID: "wf.workflow-finalize", Type: "blocks"},
+			{StepID: "wf", DependsOnID: "wf.workflow-finalize", Type: "tracks"},
 			{StepID: "wf.workflow-finalize", DependsOnID: "wf.body", Type: "blocks"},
 			{StepID: "wf.workflow-finalize", DependsOnID: "wf.body2", Type: "blocks"},
 		},
@@ -807,15 +807,15 @@ func TestBuildRecipeApplyPlan_GraphWorkflowOwnershipUsesTracks(t *testing.T) {
 		t.Fatalf("rootKey = %q, want wf", rootKey)
 	}
 
-	var rootBlocksFinalize bool
+	var rootTracksFinalize bool
 	var bodyTracksRoot bool
 	var finalizeTracksRoot bool
 	for _, edge := range plan.Edges {
 		if edge.Type == "belongs-to" {
 			t.Fatalf("unexpected belongs-to edge in plan: %+v", edge)
 		}
-		if edge.FromKey == "wf" && edge.ToKey == "wf.workflow-finalize" && edge.Type == "blocks" {
-			rootBlocksFinalize = true
+		if edge.FromKey == "wf" && edge.ToKey == "wf.workflow-finalize" && edge.Type == "tracks" {
+			rootTracksFinalize = true
 		}
 		if edge.FromKey == "wf.body" && edge.ToKey == "wf" && edge.Type == "tracks" {
 			bodyTracksRoot = true
@@ -824,8 +824,8 @@ func TestBuildRecipeApplyPlan_GraphWorkflowOwnershipUsesTracks(t *testing.T) {
 			finalizeTracksRoot = true
 		}
 	}
-	if !rootBlocksFinalize {
-		t.Fatal("missing root -> workflow-finalize blocks edge")
+	if !rootTracksFinalize {
+		t.Fatal("missing root -> workflow-finalize tracks edge")
 	}
 	if !bodyTracksRoot {
 		t.Fatal("missing body -> root tracks ownership edge")
@@ -836,16 +836,13 @@ func TestBuildRecipeApplyPlan_GraphWorkflowOwnershipUsesTracks(t *testing.T) {
 }
 
 // TestBuildRecipeApplyPlan_SingleStepOmitsFinalizeRootTracks regresses the
-// single-step graph-workflow deadlock (su-mla5h). The v2 compiler emits
-// root --blocks--> workflow-finalize for every graph workflow. When the
-// workflow also gains a workflow-finalize --tracks--> root ownership edge, the
-// two controller-managed beads form a mutual finalize <-> root cycle that
-// never resolves: neither the finalizer nor the root can close because each
-// depends on the other, so both strand open until force-closed. A single
-// authored work step is the shape that recurred in production
-// (mol-superlzy-capture). The finalizer must not gain the tracks edge here,
-// while the lone work step still tracks the root and the root still blocks on
-// the finalizer.
+// single-step graph-workflow deadlock (su-mla5h): a workflow-finalize that
+// gains a "tracks" ownership edge back to the root on top of the compiler's
+// own root -> finalize edge, forming a mutual finalize <-> root cycle that
+// never resolves. A single authored work step is the shape that recurred in
+// production (mol-superlzy-capture). The finalizer must not gain the tracks
+// edge here, while the lone work step still tracks the root and the root
+// still reaches the finalizer.
 func TestBuildRecipeApplyPlan_SingleStepOmitsFinalizeRootTracks(t *testing.T) {
 	recipe := &formula.Recipe{
 		Name: "wf",
@@ -855,7 +852,7 @@ func TestBuildRecipeApplyPlan_SingleStepOmitsFinalizeRootTracks(t *testing.T) {
 			{ID: "wf.workflow-finalize", Title: "Finalize", Type: "task", Metadata: map[string]string{"gc.kind": "workflow-finalize"}},
 		},
 		Deps: []formula.RecipeDep{
-			{StepID: "wf", DependsOnID: "wf.workflow-finalize", Type: "blocks"},
+			{StepID: "wf", DependsOnID: "wf.workflow-finalize", Type: "tracks"},
 			{StepID: "wf.workflow-finalize", DependsOnID: "wf.review", Type: "blocks"},
 		},
 	}
@@ -868,12 +865,12 @@ func TestBuildRecipeApplyPlan_SingleStepOmitsFinalizeRootTracks(t *testing.T) {
 		t.Fatalf("graphWorkflow=%v rootKey=%q, want true/wf", graphWorkflow, rootKey)
 	}
 
-	var rootBlocksFinalize bool
+	var rootTracksFinalize bool
 	var reviewTracksRoot bool
 	var finalizeTracksRoot bool
 	for _, edge := range plan.Edges {
-		if edge.FromKey == "wf" && edge.ToKey == "wf.workflow-finalize" && edge.Type == "blocks" {
-			rootBlocksFinalize = true
+		if edge.FromKey == "wf" && edge.ToKey == "wf.workflow-finalize" && edge.Type == "tracks" {
+			rootTracksFinalize = true
 		}
 		if edge.FromKey == "wf.review" && edge.ToKey == "wf" && edge.Type == "tracks" {
 			reviewTracksRoot = true
@@ -882,8 +879,8 @@ func TestBuildRecipeApplyPlan_SingleStepOmitsFinalizeRootTracks(t *testing.T) {
 			finalizeTracksRoot = true
 		}
 	}
-	if !rootBlocksFinalize {
-		t.Fatal("missing root -> workflow-finalize blocks edge (workflow must still block on its finalizer)")
+	if !rootTracksFinalize {
+		t.Fatal("missing root -> workflow-finalize tracks edge (workflow must still reach its finalizer)")
 	}
 	if !reviewTracksRoot {
 		t.Fatal("missing review -> root tracks ownership edge (the lone work step must still track the root)")

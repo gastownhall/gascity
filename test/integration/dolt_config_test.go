@@ -140,7 +140,7 @@ func TestDoltConfigWiringExternalHost(t *testing.T) {
 // with bd v0.60.0 (which lacks --skip-agents).
 func runBDInitCompat(t *testing.T, env []string, dir, prefix, port string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), bdInitTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bdBinary, "init", "--server",
 		"--server-host", "127.0.0.1", "--server-port", port,
@@ -149,7 +149,7 @@ func runBDInitCompat(t *testing.T, env []string, dir, prefix, port string) {
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
-		t.Fatalf("bd init timed out: %s", out)
+		t.Fatalf("bd init timed out after %s: %s", bdInitTimeout, out)
 	}
 	if err != nil {
 		t.Fatalf("bd init: exit status %v: %s", err, out)
@@ -196,7 +196,7 @@ func startDoltServerOnAllInterfaces(t *testing.T, env []string, dataDir string) 
 	go func() { waitCh <- cmd.Wait() }()
 
 	// Wait for server to be ready.
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(doltServerReadyTimeout)
 	addr := net.JoinHostPort("127.0.0.1", port)
 	for {
 		conn, dialErr := net.DialTimeout("tcp", addr, 200*time.Millisecond)
@@ -214,7 +214,7 @@ func startDoltServerOnAllInterfaces(t *testing.T, env []string, dataDir string) 
 			<-waitCh
 			_ = logFile.Close()
 			logBytes, _ := os.ReadFile(logPath)
-			t.Fatalf("dolt sql-server did not become ready on %s within 15s:\n%s", addr, logBytes)
+			t.Fatalf("dolt sql-server did not become ready on %s within %s:\n%s", addr, doltServerReadyTimeout, logBytes)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}

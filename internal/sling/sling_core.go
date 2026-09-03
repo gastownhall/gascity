@@ -431,7 +431,7 @@ func rootOnlyVaporPourHint(formulaName string, recipe *formula.Recipe) string {
 
 // slingOnFormula handles the --on formula attachment path.
 func slingOnFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, beadID string, result SlingResult) (SlingResult, error) {
-	result, err := attachFormulaToBead(opts, deps, querier, beadID, opts.OnFormula, "on-formula", "formula", result)
+	result, err := attachFormulaToBead(opts, deps, querier, beadID, opts.OnFormula, "on-formula", "formula", false, result)
 	if err == nil {
 		if hint := attachedBeadInstructionsDroppedHint(querier, beadID, opts.Vars); hint != "" {
 			result.BeadWarnings = append(result.BeadWarnings, hint)
@@ -442,23 +442,40 @@ func slingOnFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, beadID 
 
 // attachedBeadInstructionsDroppedHint returns a sling-time diagnostic when
 // --on/default-formula attaches a formula to an existing bead whose own
-// description carries real instructions. The formula wisp root's own
+// description carries real instructions and no route into the formula's
+// rendered context is available for it. The formula wisp root's own
 // description is always the FORMULA's own boilerplate
-// (internal/formula/compile.go rootDesc), never the target bead's text, and
-// no formula var exposes the bead's Description either — so a bead's
-// instructions are otherwise silently invisible to the formula's rendered
-// context, unless the caller explicitly carries them in via
-// context_path/requirements_path (#3681). It changes neither routing nor
-// the materialized wisp.
+// (internal/formula/compile.go rootDesc), never the target bead's text.
+// Two routes carry it in instead: the caller-supplied
+// context_path/requirements_path (#3681), and the legacy sling path's
+// auto-stamped `gc.var.issue`, which every route-table step template
+// resolves and re-fetches via `bd show` (Route B, added 2026-08-02). The
+// hint only fires when neither route is live — in practice, only when the
+// caller explicitly voids `issue=`, since BuildSlingFormulaVars stamps it
+// automatically otherwise. It changes neither routing nor the materialized
+// wisp.
 func attachedBeadInstructionsDroppedHint(querier BeadQuerier, beadID string, userVars []string) string {
 	if querier == nil || beadID == "" {
 		return ""
 	}
+	// BuildSlingFormulaVars auto-stamps gc.var.issue = beadID whenever
+	// beadID != "", unless the caller explicitly overrides it — so assume
+	// Route B is live unless userVars says otherwise.
+	issueVarCarriesBead := true
 	for _, v := range userVars {
-		key, _, ok := strings.Cut(v, "=")
-		if ok && (key == "context_path" || key == "requirements_path") {
-			return ""
+		key, value, ok := strings.Cut(v, "=")
+		if !ok {
+			continue
 		}
+		switch key {
+		case "context_path", "requirements_path":
+			return ""
+		case "issue":
+			issueVarCarriesBead = value != ""
+		}
+	}
+	if issueVarCarriesBead {
+		return ""
 	}
 	bead, err := querier.Get(beadID)
 	if err != nil || strings.TrimSpace(bead.Description) == "" {
@@ -469,7 +486,7 @@ func attachedBeadInstructionsDroppedHint(querier BeadQuerier, beadID string, use
 
 // slingDefaultFormula handles the default formula attachment path.
 func slingDefaultFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, beadID string, result SlingResult) (SlingResult, error) {
-	result, err := attachFormulaToBead(opts, deps, querier, beadID, opts.Target.EffectiveDefaultSlingFormula(), "default-on-formula", "default formula", result)
+	result, err := attachFormulaToBead(opts, deps, querier, beadID, opts.Target.EffectiveDefaultSlingFormula(), "default-on-formula", "default formula", true, result)
 	if err == nil {
 		if hint := attachedBeadInstructionsDroppedHint(querier, beadID, opts.Vars); hint != "" {
 			result.BeadWarnings = append(result.BeadWarnings, hint)
@@ -486,7 +503,17 @@ func slingDefaultFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 // caller supplies the formula name, the sling method, and the error-label
 // prefix ("formula" vs "default formula"); graph-vs-legacy behavior is
 // byte-identical across both entry points.
-func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, beadID, formulaName, method, errLabel string, result SlingResult) (SlingResult, error) {
+//
+// fallbackToPlainOnMoleculeConflict governs the legacy branch's reaction to a
+// *MoleculeAttachedError from CheckNoMoleculeChildren: an explicit --on
+// request (slingOnFormula) passes false and always hard-fails on a
+// pre-existing attachment, but an implicit default_sling_formula
+// (slingDefaultFormula) passes true, since the caller never actually asked
+// for a formula attach -- an unrelated live molecule/wisp should not block a
+// bare route, so that one specific error class falls back to plain bead
+// routing instead. Any other error (a live graph.v2 workflow conflict, or a
+// metadata-clear failure) keeps hard-failing regardless of this flag.
+func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, beadID, formulaName, method, errLabel string, fallbackToPlainOnMoleculeConflict bool, result SlingResult) (SlingResult, error) {
 	a := opts.Target
 	formulaVars := BuildSlingFormulaVars(formulaName, beadID, opts.Vars, a, deps)
 	searchPaths := SlingFormulaSearchPaths(deps, a)
@@ -504,8 +531,24 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 			graphv2.CloseSyntheticInputConvoy(deps.Store, graphInv.InputConvoy, beadID)
 			return result, fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
 		}
+		var fellBackToPlainRoute bool
 		lockedResult, lockedErr := withGraphV2SourceWorkflowLock(context.Background(), deps, beadID, func() (SlingResult, error) {
 			if err := CheckNoMoleculeChildrenAllowLiveWorkflow(querier, beadID, deps.Store, &result); err != nil {
+				var molErr *MoleculeAttachedError
+				if fallbackToPlainOnMoleculeConflict && errors.As(err, &molErr) {
+					// Mirrors the legacy branch's fallback below: the caller
+					// never asked for this formula attach -- it was only
+					// implied by the target's default_sling_formula config --
+					// so an unrelated live molecule/wisp is not a reason to
+					// block the sling. Warn and route as a plain bead instead.
+					// fellBackToPlainRoute keeps the synthetic input convoy
+					// cleanup (after this lock releases) firing on this
+					// success path too, since prepareGraphV2FormulaInvocation
+					// already minted that convoy before this check ran.
+					result.BeadWarnings = append(result.BeadWarnings, fmt.Sprintf("skipped attaching %s %q on %s: %v; routed as a plain bead instead", errLabel, formulaName, beadID, molErr))
+					fellBackToPlainRoute = true
+					return finalize(opts, deps, beadID, "bead", result)
+				}
 				return result, fmt.Errorf("%w", err)
 			}
 			if err := checkLegacySourceWorkflowConflict(deps, beadID); err != nil {
@@ -550,12 +593,14 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 			restampWorkBeadRouting(deps, beadID, a, &wfResult)
 			return wfResult, wfErr
 		})
-		if lockedErr != nil {
+		if lockedErr != nil || fellBackToPlainRoute {
 			// The pour failed after minting its synthetic input convoy
 			// (children-conflict, snapshot, instantiate, or start failure —
-			// the started-workflow path returns nil error). Close the pour's
-			// own artifact so repeated failures do not accumulate open
-			// claim-attracting convoys.
+			// the started-workflow path returns nil error), or it fell back
+			// to plain routing on an unrelated molecule/wisp conflict (also
+			// nil error). Either way the convoy was never handed to a live
+			// graph workflow, so close it here — otherwise it leaks as an
+			// open, claim-attracting convoy.
 			graphv2.CloseSyntheticInputConvoy(deps.Store, graphInv.InputConvoy, beadID)
 		}
 		return lockedResult, lockedErr
@@ -571,6 +616,17 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 	// live-workflow allowance could never fire. Attachments are always checked
 	// with CheckNoMoleculeChildren on this path.
 	if err := CheckNoMoleculeChildren(querier, beadID, deps.Store, &result); err != nil {
+		var molErr *MoleculeAttachedError
+		if fallbackToPlainOnMoleculeConflict && errors.As(err, &molErr) {
+			// The caller never asked for this formula attach -- it was only
+			// implied by the target's default_sling_formula config -- so an
+			// unrelated live molecule/wisp is not a reason to block the
+			// sling. Warn and route as a plain bead instead, so gc.routed_to
+			// still gets set. A workflow conflict or metadata-clear error is
+			// not this specific error class and keeps hard-failing above.
+			result.BeadWarnings = append(result.BeadWarnings, fmt.Sprintf("skipped attaching %s %q on %s: %v; routed as a plain bead instead", errLabel, formulaName, beadID, molErr))
+			return finalize(opts, deps, beadID, "bead", result)
+		}
 		return result, fmt.Errorf("%w", err)
 	}
 	run := func() (SlingResult, error) {
