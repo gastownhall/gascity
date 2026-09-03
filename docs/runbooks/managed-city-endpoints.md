@@ -21,6 +21,56 @@ roots use `from-shared-server-to-proxied-server` and
 `from-proxied-server-to-shared-server`. Embedded mode has no in-place flip.
 External TCP/Unix endpoints remain owner-managed and refuse in-place migration.
 
+## Migrate an existing Beads scope
+
+Fresh managed-local scopes already use `proxied-server`. An existing direct
+scope (`dolt_mode: "server"`) stays direct until an operator opts in; Gas City
+never converts it during startup. Stop writers and the Dolt process before
+running a dry-run, because migration checks live ownership:
+
+```sh
+bd dolt stop
+bd migrate from-server-to-proxied-server --dry-run
+bd migrate from-server-to-proxied-server
+```
+
+For a shared root, use the shared topology commands instead:
+
+```sh
+bd dolt stop
+bd migrate from-shared-server-to-proxied-server --dry-run
+bd migrate from-shared-server-to-proxied-server
+```
+
+The forward migration writes `metadata.json` with `dolt_mode:
+"proxied-server"`, writes `.beads/proxied_server_client_info.json` with the
+managed root, and (for a shared root) sets `.beads/config.yaml` key
+`dolt.shared-server: false`. The reverse escape hatch is equally explicit:
+
+```sh
+bd dolt stop
+bd migrate from-proxied-server-to-server --dry-run
+bd migrate from-proxied-server-to-server
+```
+
+For a proxied shared root, use
+`from-proxied-server-to-shared-server`; it restores `dolt_mode: "server"`,
+sets `dolt.shared-server: true`, and removes the sidecar. The migration journal
+`.beads/dolt-mode-migration.json` records `prepared`, `target_configured`,
+`old_controls_retired`, `verified`, and `committed`. If a phase fails, leave
+writers stopped and rerun the same command; the journal repairs the incomplete
+phase. A second successful run is idempotent. Verify a known sentinel bead and
+its dependency with `bd show <id> --json` and `bd dep list <id> <blocker> --json`
+before reopening the city.
+
+Managed-local migrations own proxy and child-Dolt processes and their controls
+and logs. Shared-server mode owns the shared Dolt process. External TCP or Unix
+sidecars identify an owner-managed endpoint and refuse in-place migration; keep
+that endpoint direct or re-provision explicitly. Embedded scopes likewise have
+no in-place mode flip—export/review and re-provision instead. Migration does
+not alter Dolt Git remotes or create backup promises; RC2 readiness is a
+separate release gate.
+
 > **Rules of thumb** — skip to [What NOT to do](#what-not-to-do) if
 > you are mid-incident. Come back for the mental model after.
 

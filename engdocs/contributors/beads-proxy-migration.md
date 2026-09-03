@@ -15,6 +15,17 @@ bd dolt stop
 bd migrate from-proxied-server-to-server
 ```
 
+Stop the Dolt process before the dry-run as well; migration validates live
+ownership and refuses while a server or proxy is running. The forward command
+records `prepared`, `target_configured`, `old_controls_retired`, `verified`,
+and `committed` in `.beads/dolt-mode-migration.json`. It sets
+`metadata.json:dolt_mode` to `proxied-server`, writes
+`.beads/proxied_server_client_info.json`, and for shared roots writes
+`.beads/config.yaml:dolt.shared-server: false`. Reverse commands restore
+`dolt_mode: server`, re-enable shared YAML when selected, and remove the
+sidecar. Retry the same command after a fault; never delete the journal or
+start writers until verification succeeds.
+
 For a shared-server root, use the corresponding pair:
 `from-shared-server-to-proxied-server` and
 `from-proxied-server-to-shared-server`. The direct commands are the escape
@@ -30,8 +41,10 @@ sidecar, or topology state fails closed without mutating the workspace.
 The sidecar identifies the proxied root; `metadata.json` stores the mode and
 workspace YAML stores shared-server topology. Proxy/server controls and logs
 remain inside their owning roots. Verify a pre-existing sentinel bead and its
-dependency after migration. Migration does not promise Git remotes or backups;
-RC2 readiness is a separate gate.
+dependency (`bd show <id> --json`, `bd dep list <id> <blocker> --json`) after
+migration. External TCP/Unix endpoints and embedded scopes are refusal or
+re-provision boundaries, not in-place conversions. Migration does not promise
+Git remotes or backups; RC2 readiness is a separate gate.
 
 Storage selection is explicit. A normal city start or `gc init` must not move
 an existing direct or server-backed Beads workspace, and must preserve its
