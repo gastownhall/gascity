@@ -67,8 +67,11 @@ type PromptContext struct {
 // resolveConfigDir returns the directory an agent's config-relative paths
 // (pre-start scripts, session setup templates) resolve against: sourceDir
 // when the agent overrides it (imported-pack agents), else cityPath.
-// Shared by every PromptContext/SessionSetupContext construction site so
-// the resolution rule can't drift between them (#5315).
+// Shared by every site that populates ConfigDir on a PromptContext or
+// SessionSetupContext, so the resolution rule can't drift between them
+// (#5315). Note that sessionSetupContextForAgent (cmd/gc/cmd_start.go)
+// leaves ConfigDir zero for its rig-only callers; worker_handle.go patches
+// it via this helper.
 func resolveConfigDir(cityPath, sourceDir string) string {
 	if sourceDir != "" {
 		return sourceDir
