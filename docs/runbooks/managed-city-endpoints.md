@@ -14,6 +14,13 @@ from a single city-managed server. If you came here because `gc sling`
 is dropping work, `supervisor.log` shows `rigStores=0`, or your port
 edits keep reverting, you are in the right place.
 
+Existing direct scopes are not auto-migrated. Use Beads' explicit migration
+commands after `bd dolt stop`, with `--dry-run` first: per-scope roots use
+`from-server-to-proxied-server` and `from-proxied-server-to-server`; shared
+roots use `from-shared-server-to-proxied-server` and
+`from-proxied-server-to-shared-server`. Embedded mode has no in-place flip.
+External TCP/Unix endpoints remain owner-managed and refuse in-place migration.
+
 > **Rules of thumb** — skip to [What NOT to do](#what-not-to-do) if
 > you are mid-incident. Come back for the mental model after.
 

@@ -1,5 +1,38 @@
 # Beads storage migration runbook
 
+## Approved migration contract
+
+Fresh managed-local scopes use Beads `proxied-server` by default. Existing
+direct (`server`) scopes are never converted automatically. To migrate one,
+stop all writers and run the explicit command (use `--dry-run` first):
+
+```sh
+bd migrate from-server-to-proxied-server --dry-run
+bd dolt stop
+bd migrate from-server-to-proxied-server
+bd migrate from-proxied-server-to-server --dry-run
+bd dolt stop
+bd migrate from-proxied-server-to-server
+```
+
+For a shared-server root, use the corresponding pair:
+`from-shared-server-to-proxied-server` and
+`from-proxied-server-to-shared-server`. The direct commands are the escape
+hatch for operators who need a managed SQL server. Embedded mode has no
+in-place flip; re-provision it explicitly.
+
+Managed-local mode owns the proxy and child Dolt lifecycle. External TCP or
+Unix endpoints are owner-managed; in-place migration refuses them. A migration
+journal records each checkpoint, retries repair incomplete work, and a second
+successful invocation is idempotent. Missing or malformed journal, metadata,
+sidecar, or topology state fails closed without mutating the workspace.
+
+The sidecar identifies the proxied root; `metadata.json` stores the mode and
+workspace YAML stores shared-server topology. Proxy/server controls and logs
+remain inside their owning roots. Verify a pre-existing sentinel bead and its
+dependency after migration. Migration does not promise Git remotes or backups;
+RC2 readiness is a separate gate.
+
 Storage selection is explicit. A normal city start or `gc init` must not move
 an existing direct or server-backed Beads workspace, and must preserve its
 metadata, sentinel files, ownership, and migration checkpoint.
