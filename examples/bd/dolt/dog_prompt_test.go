@@ -43,10 +43,6 @@ func claimProtocolFragmentBody(t *testing.T) string {
 // ga-2q2r0). The prompt must carry the protocol text, stay byte-identical to
 // the core pack's claim-protocol fragment body (the canonical copy), match
 // the nudge vocabulary in agent.toml, and never reintroduce the
-// are hidden from bd list/bd ready by default — and the stale-database order
-// stalled for 41 hours while its wisp sat open (ga-tmzjx6, recurred as
-// ga-2q2r0). The prompt must name gc hook --claim, must match the nudge
-// vocabulary in agent.toml, and must not reintroduce the
 // claim-without-discovery idiom.
 func TestDogPromptNamesTheHookClaimCommand(t *testing.T) {
 	root := repoRoot(t)

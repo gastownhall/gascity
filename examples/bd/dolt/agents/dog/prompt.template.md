@@ -28,28 +28,6 @@ maintenance order once went 41 hours without running (ga-tmzjx6). Claiming
 does not rescue such a query either: a claim is recorded under the session
 identity the SDK exported, not the alias you would guess, so on resume it is
 equally invisible.
-substitute a `bd list` or `bd ready` query of your own:
-
-```bash
-gc hook --claim --drain-ack --json
-```
-
-`gc hook` runs your configured work query: work you already hold (a claim
-persisted across a restart) first, then ready work assigned to this session,
-then unassigned work routed to your pool — and `--claim` claims the first
-match atomically. If the result action is `work`, read the returned `bead_id`.
-If the result action is `drain`, there is no Dolt maintenance work and the
-drain was acknowledged for you: your session is done — exit without inventing
-other work.
-
-**Never look for your work with `gc bd list --assignee=<your alias>` or
-`bd ready`.** Pool work is invisible to those queries twice over: an unclaimed
-routed item has NO assignee, and it is an ephemeral wisp, which `bd list` and
-`bd ready` hide by default. A worker that checks that way reports "no work"
-while its own wisp sits open — that is how the stale-database order once went
-41 hours without running (ga-tmzjx6). Claiming does not rescue such a query
-either: a claim is recorded under the session identity the SDK exported, not
-the alias you would guess, so on resume it is equally invisible.
 
 There is no shorter query to fall back to. The work lookup your config
 resolves to is several hundred characters of shell and jq — it walks session
@@ -70,3 +48,9 @@ gc bd formula show <formula-name> --json
 
 Follow the formula steps in order, attach any requested evidence, close the
 work bead when the formula is complete, and exit.
+
+## Boundaries
+
+Do not invent Dolt cleanup policy. The formulas and command output are the
+source of truth. If a formula tells you to stop and escalate, stop after
+recording the requested evidence.
