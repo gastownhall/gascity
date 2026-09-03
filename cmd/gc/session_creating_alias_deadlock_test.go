@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
@@ -26,10 +29,17 @@ const (
 	deadlockCurrentCommand = "manifold-claude --model claude-opus-5"
 )
 
+// deadlockStuckFor is how long the specimen sat in creating before it was
+// cleared by hand: 111 retries across 2.5 h. The fixture is aged to match, so a
+// row built here is genuinely abandoned — its in-flight lease long expired —
+// rather than a spawn that is merely young.
+const deadlockStuckFor = 150 * time.Minute
+
 // stuckCreatingBead builds the specimen row: a pending create that still holds
 // its alias, with a persisted command that has drifted from the template.
 func stuckCreatingBead(t *testing.T, store beads.Store, state string) beads.Bead {
 	t.Helper()
+	stuckSince := time.Now().UTC().Add(-deadlockStuckFor)
 	bead, err := store.Create(beads.Bead{
 		Title:  deadlockAlias,
 		Type:   sessionpkg.BeadType,
@@ -44,7 +54,8 @@ func stuckCreatingBead(t *testing.T, store beads.Store, state string) beads.Bead
 			"generation":                "1",
 			"command":                   deadlockStaleCommand,
 			"pending_create_claim":      "true",
-			"pending_create_started_at": pendingCreateStartedAtNow(time.Now().UTC()),
+			"pending_create_started_at": pendingCreateStartedAtNow(stuckSince),
+			"last_woke_at":              stuckSince.Format(time.RFC3339),
 		},
 	})
 	if err != nil {
@@ -351,7 +362,7 @@ func TestSessionResetRescuesStuckCreatingRow(t *testing.T) {
 	store := beads.NewMemStore()
 	bead := stuckCreatingBead(t, store, string(sessionpkg.StateCreating))
 
-	rescued, err := rescuePendingCreateForReset(store, bead.ID, clock.Real{}.Now().UTC(), ioDiscard{})
+	rescued, err := rescuePendingCreateForReset(store, runtime.NewFake(), sessionResetRescueBudget(nil), bead.ID, clock.Real{}, ioDiscard{})
 	if err != nil {
 		t.Fatalf("rescuePendingCreateForReset: %v", err)
 	}
@@ -388,7 +399,7 @@ func TestSessionResetLeavesLiveRowAlone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create live bead: %v", err)
 	}
-	rescued, err := rescuePendingCreateForReset(store, bead.ID, clock.Real{}.Now().UTC(), ioDiscard{})
+	rescued, err := rescuePendingCreateForReset(store, runtime.NewFake(), sessionResetRescueBudget(nil), bead.ID, clock.Real{}, ioDiscard{})
 	if err != nil {
 		t.Fatalf("rescuePendingCreateForReset: %v", err)
 	}
@@ -452,5 +463,310 @@ func TestConsecutiveAsyncStartFailuresEscalate(t *testing.T) {
 	tracker.clear(id)
 	if tracker.record(id) {
 		t.Fatal("escalated on the first failure after a success; the counter must be consecutive-only")
+	}
+}
+
+// --- Review round 2: fences on the destructive rollback arm ---
+
+// liveRuntimeFor starts a fake runtime that identity-matches info, so
+// runningSessionMatchesPendingCreateInfo confirms it belongs to this session.
+func liveRuntimeFor(t *testing.T, name string, info sessionpkg.Info) *runtime.Fake {
+	t.Helper()
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
+		t.Fatalf("start fake runtime: %v", err)
+	}
+	if err := sp.SetMeta(name, "GC_SESSION_ID", info.ID); err != nil {
+		t.Fatalf("set GC_SESSION_ID: %v", err)
+	}
+	if err := sp.SetMeta(name, "GC_INSTANCE_TOKEN", info.InstanceToken); err != nil {
+		t.Fatalf("set GC_INSTANCE_TOKEN: %v", err)
+	}
+	return sp
+}
+
+// stubbornProvider is a provider whose Stop never actually removes the session:
+// the shape stopStaleAsyncStartRuntime silently tolerates today (it swallows any
+// non-IsSessionGone Stop error and never re-probes).
+type stubbornProvider struct {
+	runtime.Provider
+}
+
+func (p *stubbornProvider) Stop(string) error { return errors.New("tmux: server not responding") }
+
+// TestAsyncStartDriftRollbackRequiresIdentityMatch is the CRITICAL fence.
+//
+// The drift gate is evaluated BEFORE the identity/lease fence. That ordering was
+// harmless while the drift arm wrote nothing, but the rollback arm closes the
+// bead and frees the alias. A late attempt A (tok-1) whose in-flight lease has
+// expired must never destroy the identity of the NEWER incarnation B (tok-2)
+// that the reconciler has since spawned: A does not own that row, and
+// stopStaleAsyncStartRuntime correctly refuses to stop B's runtime, so a
+// rollback here would strand a live agent under a freed alias.
+func TestAsyncStartDriftRollbackRequiresIdentityMatch(t *testing.T) {
+	store := beads.NewMemStore()
+	bead := stuckCreatingBead(t, store, string(sessionpkg.StateCreating))
+	// The row has moved on to incarnation B.
+	if err := store.SetMetadata(bead.ID, "instance_token", "tok-2"); err != nil {
+		t.Fatalf("advance instance_token: %v", err)
+	}
+
+	// Attempt A was enqueued against the older incarnation.
+	result := driftedStartResult(t, bead)
+	result.prepared.candidate.info.InstanceToken = "tok-1"
+
+	if commitAsyncStartResultWithContext(
+		context.Background(), result, nil, store,
+		clock.Real{}, events.Discard, 0, ioDiscard{}, ioDiscard{}, nil) {
+		t.Fatal("a drifted start must not commit")
+	}
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("re-reading the bead: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatal("a stale attempt closed the bead of a NEWER incarnation it does not own")
+	}
+	if err := aliasFree(store); err == nil {
+		t.Fatal("a stale attempt released the alias of a newer, live incarnation")
+	}
+	if strings.TrimSpace(got.Metadata["pending_create_claim"]) != "true" {
+		t.Error("a stale attempt cleared the newer incarnation's pending-create claim")
+	}
+}
+
+// TestAsyncStartDriftRollbackKeepsAliasWhenRuntimeSurvives pins MAJOR 3. The
+// rollback frees the alias, so it may only run once the runtime this start
+// spawned is confirmed gone. stopStaleAsyncStartRuntime swallows a failed Stop;
+// releasing the alias anyway strands a live agent holding the chair name with no
+// bead owning it, and every replacement start then hits ErrSessionExists.
+func TestAsyncStartDriftRollbackKeepsAliasWhenRuntimeSurvives(t *testing.T) {
+	store := beads.NewMemStore()
+	bead := stuckCreatingBead(t, store, string(sessionpkg.StateCreating))
+	result := driftedStartResult(t, bead)
+	name := result.prepared.candidate.name()
+	sp := &stubbornProvider{Provider: liveRuntimeFor(t, name, result.prepared.candidate.info)}
+
+	if commitAsyncStartResultWithContext(
+		context.Background(), result, sp, store,
+		clock.Real{}, events.Discard, 0, ioDiscard{}, ioDiscard{}, nil) {
+		t.Fatal("a drifted start must not commit")
+	}
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("re-reading the bead: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatal("the bead was closed while its runtime is still alive: the alias is now free but a live agent still holds the chair name")
+	}
+	if err := aliasFree(store); err == nil {
+		t.Fatal("the alias was released while the spawned runtime survived the stop")
+	}
+}
+
+// TestAsyncStartDriftRollbackNoEventWhenRollbackFails pins MINOR: the typed
+// event must report what actually happened. A rollback whose transaction fails
+// leaves the row holding its claim and alias, so reporting
+// async_start_drift_rolled_back would recreate the silent-failure hole the
+// observability half of this fix exists to close — and clearing the
+// consecutive-failure counter on that path means the escalation can never fire.
+func TestAsyncStartDriftRollbackNoEventWhenRollbackFails(t *testing.T) {
+	store := &txErrorStore{MemStore: beads.NewMemStore()}
+	bead := stuckCreatingBead(t, store, string(sessionpkg.StateCreating))
+	rec := &memRecorder{}
+
+	commitAsyncStartResultWithContext(
+		context.Background(), driftedStartResult(t, bead), nil, store,
+		clock.Real{}, rec, 0, ioDiscard{}, ioDiscard{}, nil)
+
+	if rec.hasType(events.SessionAsyncStartDriftRolledBack) {
+		t.Fatal("emitted a drift-rollback event for a rollback that never landed")
+	}
+	if asyncStartFailures.count(bead.ID) == 0 {
+		t.Fatal("the consecutive-failure counter was cleared by a rollback that failed; the escalation could never fire")
+	}
+	asyncStartFailures.clear(bead.ID)
+}
+
+// txErrorStore fails every Tx so the rollback cannot land.
+type txErrorStore struct {
+	*beads.MemStore
+}
+
+func (s *txErrorStore) Tx(string, func(beads.Tx) error) error {
+	return errors.New("store: transaction failed")
+}
+
+// TestResetRefusesHealthyInFlightCreate pins MAJOR 1+2. Operators reach for
+// `gc session reset` exactly when a session looks stuck in creating — which is
+// also when a perfectly healthy spawn is mid-flight. Rolling that back closes
+// the bead of a live create and frees its alias. The sibling CLI path
+// (sessionWakeCreateAbandonedInfo) already requires the lease to have expired
+// AND the row to be stale; reset must too.
+func TestResetRefusesHealthyInFlightCreate(t *testing.T) {
+	store := beads.NewMemStore()
+	bead := stuckCreatingBead(t, store, string(sessionpkg.StateCreating))
+	now := time.Now().UTC()
+	// A spawn that started three seconds ago: well inside the startup budget.
+	if err := store.SetMetadata(bead.ID, "pending_create_started_at", pendingCreateStartedAtNow(now.Add(-3*time.Second))); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetMetadata(bead.ID, "last_woke_at", now.Add(-3*time.Second).Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+
+	// A fake clock pinned to now makes "three seconds into the spawn" exact
+	// rather than a race against wall time.
+	rescued, err := rescuePendingCreateForReset(store, nil, sessionResetRescueBudget(nil), bead.ID, &clock.Fake{Time: now}, ioDiscard{})
+	if err != nil {
+		t.Fatalf("rescuePendingCreateForReset: %v", err)
+	}
+	if rescued {
+		t.Fatal("reset rolled back a healthy in-flight create; the controller's spawn was still running")
+	}
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status == "closed" {
+		t.Fatal("reset closed the bead of a live create")
+	}
+	if err := aliasFree(store); err == nil {
+		t.Fatal("reset released the alias of a live create")
+	}
+}
+
+// TestResetRefusesWhenRuntimeStillAlive pins the other half of MAJOR 1: the
+// documented post-start ApplyPatch failure leaves a LIVE runtime with the row
+// deliberately parked in creating for warm reuse. Reset must not close a
+// live human-serving agent's bead and orphan its runtime.
+func TestResetRefusesWhenRuntimeStillAlive(t *testing.T) {
+	store := beads.NewMemStore()
+	bead := stuckCreatingBead(t, store, string(sessionpkg.StateCreating))
+	// stuckCreatingBead is already aged past its lease, so only liveness
+	// protects this row.
+	info, _, err := sessionFrontDoor(store).GetPersistedResponse(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp := &stubbornProvider{Provider: liveRuntimeFor(t, "s-"+deadlockAlias, info)}
+
+	rescued, rescueErr := rescuePendingCreateForReset(store, sp, sessionResetRescueBudget(nil), bead.ID, clock.Real{}, ioDiscard{})
+	if rescueErr == nil && rescued {
+		t.Fatal("reset closed the bead of a session whose runtime is still alive and could not be stopped")
+	}
+	got, gErr := store.Get(bead.ID)
+	if gErr != nil {
+		t.Fatal(gErr)
+	}
+	if got.Status == "closed" {
+		t.Fatal("reset closed a live session's bead, orphaning its runtime under the chair name")
+	}
+}
+
+// TestResetReportsFailedRollback pins MAJOR 4. Collapsing "not eligible",
+// "already closed" and "the rollback transaction FAILED" into (false, nil) makes
+// reset print success and exit 0 while the row still holds its claim and alias —
+// the exact silent no-op this defect exists to remove.
+func TestResetReportsFailedRollback(t *testing.T) {
+	store := &txErrorStore{MemStore: beads.NewMemStore()}
+	bead := stuckCreatingBead(t, store, string(sessionpkg.StateCreating))
+	rescued, err := rescuePendingCreateForReset(store, runtime.NewFake(), sessionResetRescueBudget(nil), bead.ID, clock.Real{}, ioDiscard{})
+	if rescued {
+		t.Fatal("reported a rescue that never landed")
+	}
+	if err == nil {
+		t.Fatal("an eligible row whose rollback failed reported (false, nil); reset then prints success and exits 0 while the row still holds its alias")
+	}
+}
+
+// TestHealToAsleepClearsPendingCreateMarker pins MAJOR 5. preWakeCommit stamps
+// pending_create_started_at on EVERY start candidate, but pending_create_claim
+// is set only by bead creation, named-session reopen and the wake-request
+// patches — never by an ordinary wake. clearPendingCreateLeaseInfo is gated on
+// the claim, so a claimless creating row healed to asleep keeps the marker. With
+// the marker no longer renewed, the next wake would inherit an aged marker, read
+// instantly stale, and be flapped back to asleep mid-start.
+func TestHealToAsleepClearsPendingCreateMarker(t *testing.T) {
+	now := time.Now().UTC()
+	info := sessiontest.InfoFromMeta(t, map[string]string{
+		"session_name":              deadlockAlias,
+		"state":                     string(sessionpkg.StateCreating),
+		"pending_create_started_at": pendingCreateStartedAtNow(now.Add(-time.Hour)),
+		// No pending_create_claim: this is an ordinary wake's episode.
+	})
+	batch := healStatePatchWithRollbackInfo(info, false, true, &clock.Fake{Time: now}, time.Minute, true)
+	if batch["state"] != string(sessionpkg.StateAsleep) {
+		t.Fatalf("precondition: heal must park the stale creating row asleep, got state=%q", batch["state"])
+	}
+	got, ok := batch["pending_create_started_at"]
+	if !ok || got != "" {
+		t.Fatalf("pending_create_started_at = %q (present=%v), want cleared: a row leaving the creating episode must surrender its start marker or the next wake reads instantly stale", got, ok)
+	}
+}
+
+// TestWakeAfterHealStartsAFreshEpisode is the end-to-end complement: a row that
+// was healed to asleep must not inherit the old marker on its next wake.
+func TestWakeAfterHealStartsAFreshEpisode(t *testing.T) {
+	now := time.Now().UTC()
+	asleep := sessiontest.InfoFromMeta(t, map[string]string{
+		"session_name": deadlockAlias,
+		"state":        string(sessionpkg.StateAsleep),
+		// A marker left behind by a prior episode.
+		"pending_create_started_at": pendingCreateStartedAtNow(now.Add(-time.Hour)),
+	})
+	patch := sessionpkg.PreWakePatch(sessionpkg.PreWakePatchInput{
+		Generation:                     2,
+		InstanceToken:                  "tok-2",
+		ContinuationEpoch:              1,
+		Now:                            now,
+		ExistingPendingCreateStartedAt: pendingCreateStartedAtForWake(asleep),
+	})
+	if got := patch["pending_create_started_at"]; got != now.Format(time.RFC3339) {
+		t.Fatalf("pending_create_started_at = %q, want a fresh stamp %q: waking an ASLEEP row opens a new episode, it does not continue the old one", got, now.Format(time.RFC3339))
+	}
+}
+
+// TestEscalationEventCarriesFingerprints pins MINOR: the escalation exists to
+// tell "the same drift is repeating" from "the store is flaky", which is exactly
+// what the fingerprints encode. Dropping them makes the two indistinguishable.
+func TestEscalationEventCarriesFingerprints(t *testing.T) {
+	rec := &memRecorder{}
+	emitAsyncStartRefreshStalled(rec, "olivia", "gc-1", "worker", "async_start_refresh_failed",
+		asyncStartFailureEscalationThreshold, deadlockCurrentCommand, deadlockStaleCommand, ioDiscard{})
+	if len(rec.events) != 1 {
+		t.Fatalf("recorded %d events, want 1", len(rec.events))
+	}
+	payload := string(rec.events[0].Payload)
+	wantPrepared := commandFingerprint(deadlockCurrentCommand)
+	wantCurrent := commandFingerprint(deadlockStaleCommand)
+	if wantPrepared == "" || wantCurrent == "" {
+		t.Fatal("fixture produced empty fingerprints")
+	}
+	if !strings.Contains(payload, wantPrepared) || !strings.Contains(payload, wantCurrent) {
+		t.Fatalf("escalation payload %s carries no command fingerprints", payload)
+	}
+	if strings.Contains(payload, "claude-opus") {
+		t.Fatalf("raw command leaked onto the escalation wire: %s", payload)
+	}
+}
+
+// TestAsyncStartFailureTrackerEvictsAndIsBounded pins MINOR: the tracker is
+// process-global in a long-lived controller. Entries for beads closed by any
+// other lane must not accumulate forever.
+func TestAsyncStartFailureTrackerEvictsAndIsBounded(t *testing.T) {
+	tracker := newAsyncStartFailureTracker()
+	tracker.record("gc-1")
+	tracker.forget("gc-1")
+	if tracker.count("gc-1") != 0 {
+		t.Fatal("forget did not evict the entry")
+	}
+	for i := 0; i < asyncStartFailureTrackerMaxEntries*2; i++ {
+		tracker.record(fmt.Sprintf("gc-%d", i))
+	}
+	if n := tracker.size(); n > asyncStartFailureTrackerMaxEntries {
+		t.Fatalf("tracker holds %d entries, want at most %d", n, asyncStartFailureTrackerMaxEntries)
 	}
 }

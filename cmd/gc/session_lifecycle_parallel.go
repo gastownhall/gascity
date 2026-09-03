@@ -1730,24 +1730,36 @@ func commitAsyncStartResultWithContext(
 		// runtime session), so refreshed.phases already carries the original
 		// start_call / post_start_observe; only commit_refresh was
 		// stamped above. No restore needed.
-		if verdict.cleanupRuntime {
+		// The rollback releases the alias, so it may only proceed once the
+		// runtime this start spawned is CONFIRMED gone. Releasing it while a
+		// process still holds the chair name would leave a live agent with no
+		// bead owning it, and every replacement start would then fail with
+		// ErrSessionExists. When the runtime survives, this tick keeps the
+		// superseded disposition instead.
+		rollback := verdict.rollbackPendingCreate
+		if rollback {
+			rollback = pendingCreateRuntimeClearedForRollback(verdict.current, name, sp, stderr)
+		} else if verdict.cleanupRuntime {
 			stopStaleAsyncStartRuntime(result, sp, stderr)
 		}
 		outcome := "stale_async_start"
 		switch {
-		case verdict.rollbackPendingCreate:
+		case rollback && rollbackPendingCreateConfirmed(verdict.current, sessFront, clk.Now().UTC(), stderr):
 			// rollbackPendingCreate clears last_woke_at inside its own Tx, so
 			// this arm does not also release the in-flight lease. The rollback
-			// resolves the run, so the consecutive-failure counter resets.
+			// resolves the run, so the consecutive-failure counter is dropped.
 			outcome = "async_start_drift_rolled_back"
-			rollbackPendingCreate(verdict.current, sessFront, clk.Now().UTC(), stderr)
-			asyncStartFailures.clear(sessionID)
+			asyncStartFailures.forget(sessionID)
 			emitAsyncStartDriftRollback(rec, name, verdict, template, outcome)
-		case verdict.releaseInFlight:
+		case verdict.releaseInFlight || verdict.rollbackPendingCreate:
+			// Either an ordinary refresh failure, or a drift rollback that was
+			// refused (live runtime) or did not land (store failure). All three
+			// leave the row holding its claim, so all three keep counting toward
+			// the escalation rather than reporting a rollback that never happened.
 			outcome = "async_start_refresh_failed"
 			clearPendingStartInFlightLease(sessionID, sessFront, stderr)
 			if asyncStartFailures.record(sessionID) {
-				emitAsyncStartRefreshStalled(rec, name, sessionID, template, outcome, asyncStartFailures.count(sessionID), stderr)
+				emitAsyncStartRefreshStalled(rec, name, sessionID, template, outcome, asyncStartFailures.count(sessionID), verdict.preparedCommand, verdict.currentCommand, stderr)
 			}
 		}
 		logLifecycleOutcome(stderr, "start", wave, name, template, outcome, result.started, time.Now(), nil, refreshed.phases)
@@ -1819,7 +1831,17 @@ func refreshAsyncStartResult(result startResult, store beads.Store, stderr io.Wr
 		// alias are released and the next tick recreates the row against the
 		// current template command (ga-6wkhl). A live row keeps the superseded
 		// verdict — see asyncStartDriftRollbackEligibleInfo.
-		if asyncStartDriftRollbackEligibleInfo(currentInfo) {
+		//
+		// The identity fence is applied HERE, not left to the still-current gate
+		// below. This gate runs first, and while the drift arm only discarded
+		// that ordering was harmless; the rollback arm writes — it closes the
+		// bead and frees the alias. A late attempt whose in-flight lease has
+		// expired can reach this point after the reconciler has already spawned a
+		// NEWER incarnation, and it must never destroy the identity of a row it
+		// does not own (stopStaleAsyncStartRuntime correctly refuses to stop that
+		// newer runtime, so the rollback would strand a live agent under a freed
+		// alias).
+		if asyncStartDriftRollbackEligibleInfo(currentInfo) && asyncStartIdentityMatchesInfo(preparedInfo, currentInfo) {
 			fmt.Fprintf(stderr, "session reconciler: rolling back pending create for %s: desired command changed before its create committed\n", result.prepared.candidate.name()) //nolint:errcheck
 			verdict.rollbackPendingCreate = true
 			return result, verdict
