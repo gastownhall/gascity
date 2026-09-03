@@ -141,7 +141,7 @@ func TestGasCityGcBdExternalUnixSocketFrontDoor(t *testing.T) {
 func snapshotFrontDoorTree(t *testing.T, root string) map[string][]byte {
 	t.Helper()
 	out := map[string][]byte{}
-	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+	if err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -155,7 +155,9 @@ func snapshotFrontDoorTree(t *testing.T, root string) map[string][]byte {
 		rel, _ := filepath.Rel(root, path)
 		out[rel] = b
 		return nil
-	})
+	}); err != nil {
+		t.Fatalf("snapshot %s: %v", root, err)
+	}
 	return out
 }
 
