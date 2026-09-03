@@ -7,11 +7,11 @@ direct (`server`) scopes are never converted automatically. To migrate one,
 stop all writers and run the explicit command (use `--dry-run` first):
 
 ```sh
+bd dolt stop
 bd migrate from-server-to-proxied-server --dry-run
-bd dolt stop
 bd migrate from-server-to-proxied-server
-bd migrate from-proxied-server-to-server --dry-run
 bd dolt stop
+bd migrate from-proxied-server-to-server --dry-run
 bd migrate from-proxied-server-to-server
 ```
 
@@ -31,6 +31,17 @@ For a shared-server root, use the corresponding pair:
 `from-proxied-server-to-shared-server`. The direct commands are the escape
 hatch for operators who need a managed SQL server. Embedded mode has no
 in-place flip; re-provision it explicitly.
+
+Shared-root sequence:
+
+```sh
+bd dolt stop
+bd migrate from-shared-server-to-proxied-server --dry-run
+bd migrate from-shared-server-to-proxied-server
+bd dolt stop
+bd migrate from-proxied-server-to-shared-server --dry-run
+bd migrate from-proxied-server-to-shared-server
+```
 
 Managed-local mode owns the proxy and child Dolt lifecycle. External TCP or
 Unix endpoints are owner-managed; in-place migration refuses them. A migration
