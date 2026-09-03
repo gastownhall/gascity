@@ -13,11 +13,15 @@
 //
 // # Why this is a package and not a CLI detail
 //
-// A bead closes through more than one door: `gc bd close` and
+// A bead closes through more than one per-bead door: `gc bd close` and
 // `gc bd update --status closed` on the CLI plane, POST /v0/bead/{id}/close and
-// a closed-status POST /v0/bead/{id}/update on the HTTP plane. Every door has to
-// ask the same question of the same population, or the ungated door becomes the
-// way closes get done. This package owns the question — which beads the contract
+// a closed-status POST /v0/bead/{id}/update (or its PATCH /v0/bead/{id} alias)
+// on the HTTP plane. Every such door has to ask the same question of the same
+// population, or the ungated door becomes the way closes get done. Bulk
+// teardown — the paths that close a whole workflow root or scope at once
+// through beads.Store.CloseAll — is deliberately not a door in this sense, on
+// either plane; see humaHandleBeadDelete in internal/api for the rationale that
+// covers it. This package owns the question — which beads the contract
 // covers, what a valid record looks like, whether enforcement is on — and each
 // plane owns only its own plumbing: argv projection and stderr in cmd/gc, the
 // resolved owner store and the 409 in internal/api.

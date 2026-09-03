@@ -248,12 +248,38 @@ func TestAPIBeadCloseResolvesTheOwningScopeAsTheCommitRepo(t *testing.T) {
 		t.Fatalf("city-resident bead resolves to %q, want the city directory %q", got, st.cityPath)
 	}
 
+	// A bead the relocated class binding owns answers to the city checkout as
+	// well. The binding is a store rather than a checkout, but the CLI class door
+	// hands its own gate cityPath for exactly this population, and a bead the two
+	// doors ask different repositories about is the divergence this gate exists
+	// to close.
+	binding := beads.NewMemStore()
+	st.graphBeadStore = binding
+	if got := s.workRecordRepoDir(binding, shipped); got != st.cityPath {
+		t.Fatalf("binding-owned bead resolves to %q, want the city directory %q", got, st.cityPath)
+	}
+
 	// A rig path is configured relative to the city, so the scope root — not the
 	// server's working directory — is what a relative path resolves against.
 	st.cfg.Rigs = []config.Rig{{Name: "myrig", Path: "rigs/myrig"}}
 	wantRelative := filepath.Join(st.cityPath, "rigs/myrig")
 	if got := s.workRecordRepoDir(rig, shipped); got != wantRelative {
 		t.Fatalf("relative rig path resolves to %q, want %q", got, wantRelative)
+	}
+
+	// The rig that answered but names no checkout is unknown, not the city. The
+	// city fallback is for a store no configured rig claims; reaching it from a
+	// rig that did claim the bead would ask about a repository that is not the
+	// bead's, which under enforcement is a false refusal rather than a degraded
+	// clause.
+	//
+	// This row is constructed, not observed: buildStores skips a path-less rig, so
+	// the production State registers no store for one and the branch is defensive.
+	// It is pinned because State is an interface — a future implementation that
+	// does register such a store must still resolve to "unknown".
+	st.cfg.Rigs = []config.Rig{{Name: "myrig", Path: "  "}}
+	if got := s.workRecordRepoDir(rig, shipped); got != "" {
+		t.Fatalf("rig with no configured checkout resolves to %q, want %q (unknown)", got, "")
 	}
 
 	// A bead that recorded its own work directory outranks the scope root: the
@@ -280,13 +306,30 @@ func TestAPIBeadCloseResolvesTheOwningScopeAsTheCommitRepo(t *testing.T) {
 }
 
 // TestAPIBeadCloseDegradesReachabilityWhenTheScopeRootIsUnknown covers the bead
-// whose owner is the relocated class binding: the binding is not a checkout, so
-// there is no repository to ask, and the reachability clause degrades to a
-// warning rather than refusing a close it cannot judge. The control is the
-// clause that never degrades — a missing outcome still refuses, because "I could
-// not check the commit" is not a reason to accept a bead with no record at all.
+// no scope can name a checkout for: it is owned by the relocated class binding,
+// which is a store rather than a checkout, in a city that has no path either —
+// so the fallback that answers a binding-owned bead elsewhere has nothing to
+// offer, there is no repository to ask, and the reachability clause degrades to
+// a warning rather than refusing a close it cannot judge.
+//
+// The city path is cleared deliberately. With one configured, this population
+// resolves to the city checkout — the same directory the CLI class door hands
+// its gate — and the clause is evaluated, not degraded; that is the row
+// TestAPIBeadCloseResolvesTheOwningScopeAsTheCommitRepo pins. What is left here
+// is the genuinely unknowable case.
+//
+// The control is the clause that never degrades — a missing outcome still
+// refuses, because "I could not check the commit" is not a reason to accept a
+// bead with no record at all.
+//
+// The state below is constructed rather than observed: the production
+// controllerState takes cityPath at construction from an already-resolved
+// directory and never reassigns it, so an empty one is not a state the city
+// boots into. State is an interface, so the degradation contract is pinned for
+// any implementation that can produce it.
 func TestAPIBeadCloseDegradesReachabilityWhenTheScopeRootIsUnknown(t *testing.T) {
 	st, binding, _, _ := relocatedGraphRouteState(t)
+	st.cityPath = ""
 	prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph)
 	if !ok {
 		t.Fatalf("ReservedClassPrefix(graph) returned ok=false; expected a reserved prefix")

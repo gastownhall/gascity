@@ -909,6 +909,19 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 // record would make an unwanted bead undeletable under enforcement; the CLI
 // plane draws the same line, gating `bd close` and `bd update --status closed`
 // but not `bd delete`.
+//
+// The same exclusion covers bulk teardown: the paths that close a whole
+// workflow root or scope at once through beads.Store.CloseAll rather than
+// through a per-bead route — run cancel and workflow delete/purge here, and the
+// convoy-cleanup and scope-abort paths on the CLI and dispatch side. They select
+// the subtree by gc.root_bead_id with no gc.kind filter, so they do close beads
+// this contract otherwise covers, and they are ungated symmetrically on both
+// planes rather than leaking on one. That is deliberate: they stamp the disjoint
+// control-plane gc.outcome vocabulary (canceled, skipped) precisely because the
+// close does not assert completion — see skipScopeMembers in internal/dispatch —
+// and requiring a work record would make a run uncancellable and a workflow
+// impossible to tear down under enforcement. None is an escape hatch for a
+// refused per-bead close: each tears down an entire subtree rather than one bead.
 func (s *Server) humaHandleBeadDelete(_ context.Context, input *BeadDeleteInput) (*OKResponse, error) {
 	id := input.ID
 	store, _, err := s.resolveBeadOwner(id)

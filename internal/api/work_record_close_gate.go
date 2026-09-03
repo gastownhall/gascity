@@ -42,8 +42,16 @@ var workRecordGateLogf = log.Printf
 // documented atomic close uses to stamp the record and close in one call:
 // beads.UpdateOpts.Metadata is an additive merge, so validating only the stored
 // row would refuse a request that supplies a perfectly good record. Coverage is
-// still decided on the stored row, so a request cannot escape the gate by
-// stamping gc.kind on its way out.
+// decided on the stored row — both Type and gc.kind, read before any submitted
+// field is applied — so a request cannot escape the gate by stamping gc.kind on
+// its way out, nor by retyping a gated task away from task. The same choice
+// means the reverse direction is NOT covered: a closing update that converts a
+// non-gated bead into a task closes ungated, because the type it would be gated
+// on is the one the request is about to write. That is the boundary the CLI door
+// has at isWorkRecordGatedBead in cmd/gc/work_record_gate.go, which decides
+// coverage on the stored row and then projects metadata only; moving it belongs
+// in internal/workrecord so both doors move together rather than asking
+// different questions of different populations.
 func (s *Server) gateWorkRecordClose(id string, store beads.Store, stored beads.Bead, submitted map[string]string) error {
 	if !workrecord.Gated(stored) {
 		return nil
@@ -53,12 +61,14 @@ func (s *Server) gateWorkRecordClose(id string, store beads.Store, stored beads.
 	unverified := false
 	violations := workrecord.ValidateOnClose(prospective, func(commit, branch string) bool {
 		if repoDir == "" {
-			// No repository is known for this store, so there is nothing to ask.
-			// Refusing here would block closes on a question this plane cannot
-			// pose; the clause degrades to a warning and says so. Only this
+			// The scope that owns this bead names no checkout (see
+			// workRecordRepoDir for which shapes produce that, and why the
+			// current State implementations do not), so there is no repository to
+			// ask. Refusing here would block closes on a question this plane
+			// cannot pose; the clause degrades to a warning and says so. Only this
 			// clause degrades — a bead with no outcome at all is still refused,
-			// because "the commit could not be checked" is not a reason to
-			// accept a close that recorded nothing.
+			// because "the commit could not be checked" is not a reason to accept
+			// a close that recorded nothing.
 			unverified = true
 			return true
 		}
@@ -71,7 +81,7 @@ func (s *Server) gateWorkRecordClose(id string, store beads.Store, stored beads.
 		mode = "enforced"
 	}
 	if unverified {
-		workRecordGateLogf("work-record gate (%s): close of %s: reachability unverified: no repository is known for the store that holds this bead", mode, id)
+		workRecordGateLogf("work-record gate (%s): close of %s: reachability unverified: the scope that holds this bead names no checkout", mode, id)
 	}
 	for _, violation := range violations {
 		workRecordGateLogf("work-record gate (%s): close of %s: %s", mode, id, violation)
@@ -110,13 +120,33 @@ func projectSubmittedWorkRecord(stored beads.Bead, submitted map[string]string) 
 // workRecordRepoDir names the repository a shipped bead's commit must be
 // reachable in: the bead's own gc.work_dir if it recorded one, else the checkout
 // of whichever scope holds it — the rig's path for a rig-resident bead, the city
-// directory for a city-resident one.
+// directory for a city-resident one and for one a relocated class binding owns.
 //
-// An empty result means "unknown", which is the honest answer for a bead that
-// lives in a class binding: a binding is a store, not a checkout. It must stay
-// distinguishable from a path, because falling back to a default here would run
-// git in whatever directory the server happens to occupy and answer the
-// reachability question about the wrong repository.
+// A binding is a store rather than a checkout, but that does not make its beads
+// unaskable: the city it lives under is a checkout, and it is the same directory
+// the CLI class door hands its own gate (serveBdByIDResolved passes cityPath as
+// the repoFallback that reaches evaluateWorkRecordCloseGate). Naming it here is
+// what keeps a binding-owned bead answering to one repository through both
+// doors, which is the whole point of gating this plane.
+//
+// An empty result means "unknown" and must stay distinguishable from a path,
+// because falling back to a default would run git in whatever directory the
+// server happens to occupy and answer the reachability question about the wrong
+// repository. Two shapes produce it: a configured rig that names no checkout,
+// and a city that has no path at all. Both are defensive against a State
+// implementation the current ones do not produce. buildStores skips a rig with
+// an empty path outright, so BeadStore answers nil for one and the identity
+// match below — against a store a residency resolution handed back — never
+// selects it; and cityPath is set once at construction from an already-resolved
+// directory and never reassigned, so an empty one is not a state a city boots
+// into. State is an interface and the branches are cheap, so they stay — but
+// they are a contract for a future implementation, not a description of a
+// population this server observes. A refactor that changes either of those two
+// facts is what makes them live, and should update this note rather than find it
+// silently wrong. The path-less rig returns rather than continuing on purpose:
+// letting it fall through to the city checkout would ask about a repository that
+// is not the bead's, and under enforcement that is a false refusal rather than a
+// degraded clause.
 //
 // The store is matched by asking each CONFIGURED rig whether it is the one that
 // answered, rather than by enumerating the loaded stores: an enumeration is a
@@ -129,14 +159,14 @@ func (s *Server) workRecordRepoDir(store beads.Store, bead beads.Bead) string {
 	}
 	if cfg := s.state.Config(); cfg != nil {
 		for _, rig := range cfg.Rigs {
-			if strings.TrimSpace(rig.Path) == "" || s.state.BeadStore(rig.Name) != store {
+			if s.state.BeadStore(rig.Name) != store {
 				continue
+			}
+			if strings.TrimSpace(rig.Path) == "" {
+				return ""
 			}
 			return resolveScopeRoot(s.state.CityPath(), rig.Path)
 		}
 	}
-	if cityStore := s.state.CityBeadStore(); cityStore != nil && cityStore == store {
-		return strings.TrimSpace(s.state.CityPath())
-	}
-	return ""
+	return strings.TrimSpace(s.state.CityPath())
 }
