@@ -27,10 +27,11 @@ func stubDashboardOpen(t *testing.T) *string {
 func TestRunDashboardNoticePrintsSupervisorURL(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	td := t.TempDir()
-	// Prevent /tmp/.gc/ from poisoning city discovery. Set the ceiling to
-	// the raw t.TempDir() path — NOT the EvalSymlinks-resolved path —
-	// because os.Getwd() returns the same unresolved value that t.Chdir
-	// passes to the OS, so both sides of the comparison must match.
+	// Prevent /tmp/.gc/ (an orphaned supervisor runtime) from poisoning city
+	// discovery by capping the upward walk at the temp dir. The raw path is
+	// correct: normalizeDiscoveryPath runs pathutil.NormalizePathForCompare
+	// over both the configured ceilings and the walked directory, so the
+	// comparison is symmetric whichever form is passed here.
 	t.Setenv("GC_CEILING_DIRECTORIES", td)
 	t.Chdir(td)
 	stubDashboardOpen(t)
@@ -171,8 +172,8 @@ func TestRunDashboardNoticeOpenFailureFallsBackToPrint(t *testing.T) {
 func TestRunDashboardNoticeUsesAPIOverride(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	td := t.TempDir()
-	// Prevent /tmp/.gc/ from poisoning city discovery. Set ceiling to the
-	// raw t.TempDir() path (not EvalSymlinks-resolved) to match os.Getwd().
+	// Cap the upward city walk at the temp dir; see the note in
+	// TestRunDashboardNoticePrintsSupervisorURL for why the raw path is right.
 	t.Setenv("GC_CEILING_DIRECTORIES", td)
 	t.Chdir(td)
 

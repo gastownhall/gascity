@@ -610,6 +610,13 @@ the results grouped by state with owner and count.
 Anomaly states (orphaned, ready-unrouted, routed-stalled-dispatch, unknown)
 are prefixed with '!' in table output.
 
+Four states — delivering, waiting-review, waiting-decision, and the delivery
+route into done — key on gc.phase metadata that nothing writes yet, so they
+cannot appear in a report today. A session whose bead still reads active but
+whose process is gone (a zombie) also still counts as live, so
+routed-stalled-dispatch fires only for rigs with no live-stated sessions at
+all. See engdocs/contributors/bead-effective-state.md.
+
 ```
 gc beads state [flags]
 ```

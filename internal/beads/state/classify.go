@@ -65,6 +65,22 @@ func Owner(s EffectiveState) string {
 	return "INVESTIGATE"
 }
 
+// anomalyStates is the set of states that represent actionable problems rather
+// than normal progress. It lives here, next to the state vocabulary it
+// partitions, so a renderer can never drift from the taxonomy: adding a state
+// without deciding whether it is an anomaly is a change in this file.
+var anomalyStates = map[EffectiveState]bool{
+	StateOrphaned:              true,
+	StateReadyUnrouted:         true,
+	StateRoutedStalledDispatch: true,
+	StateUnknown:               true,
+}
+
+// IsAnomaly reports whether s is an actionable problem state (as opposed to
+// normal progress). Renderers use this to flag rows rather than keeping their
+// own copy of the partition.
+func IsAnomaly(s EffectiveState) bool { return anomalyStates[s] }
+
 // DisplayOrder is the recommended report order: anomalies first, then waiting
 // states, then active, then terminal/frozen.
 var DisplayOrder = []EffectiveState{
@@ -144,7 +160,10 @@ var deliveryTerminalPhases = map[string]bool{
 // system context:
 //   - ready: set of bead IDs the store considers ready (unblocked, open)
 //   - blocked: set of bead IDs with unresolved blocking dependencies
-//   - live: set of live (non-closed, non-zombie) session names
+//   - live: set of live session names, as judged by the caller. The callers
+//     in this repo use session.ProjectLifecycle's CountsAgainstCap; zombie
+//     sessions (bead says active, process is gone) are NOT yet excluded — see
+//     engdocs/contributors/bead-effective-state.md
 //   - liveRigs: set of rig names that have at least one live session;
 //     a nil liveRigs disables routed-stalled-dispatch detection
 //

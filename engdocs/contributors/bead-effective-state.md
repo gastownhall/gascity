@@ -19,7 +19,7 @@ bead.
 | `waiting-decision` | human | Delivery phase is `decision-pending`. Awaiting a human-made decision. |
 | `in-progress` | agent | Actively held by a session (`status=in_progress`, `status=hooked`, or `gc.session_name` set to a live session). |
 | `orphaned` | RECLAIM | Was held by a session that is no longer live. The claim should be reclaimed and re-dispatched. |
-| `blocked-deps` | upstream-beads | Has at least one open blocking dependency (`blocks` or `conditional-blocks` type). Waiting for upstream work to close. |
+| `blocked-deps` | upstream-beads | Has at least one open blocking dependency (`blocks`, `waits-for` or `conditional-blocks` — whatever `beads.IsReadyBlockingDependencyType` accepts). Waiting for upstream work to close. |
 | `waiting-human` | human | Open work that requires a human to act: `human` label, `decision` type, or `gc.do_not_auto_route=1`. |
 | `epic-triage` | human/triage | An epic (type=epic or title prefix EPIC) that needs decomposition before it can be dispatched. |
 | `routed-waiting` | agent-pool | Routed to a pool via `gc.routed_to` and the target rig has live sessions. Waiting for a session to claim it. |
@@ -43,7 +43,7 @@ first match wins.
 7. **Delivering** — `gc.phase` is an active agent phase (building, ci-pending,
    rework, merge-pending, conflicted)
 8. **In-progress** — `status=in_progress` OR `status=hooked` OR `gc.session_name`
-   is set to a live (non-zombie) session
+   is set to a live session (see "What live means" below)
 9. **Orphaned** — `gc.session_name` is set but the session is no longer live
 10. **Blocked-deps** — bead has an open blocking dependency
 11. **Waiting-human** — `human` label, `decision` type, or `gc.do_not_auto_route=1`
@@ -54,6 +54,56 @@ first match wins.
 15. **Ready-unrouted** — `status=open`, in the ready set, and a plannable type
     (task/bug/feature/chore)
 16. **Unknown** — nothing matched
+
+## What "live" means
+
+`live` and `liveRigs` are built in `cmd/gc/cmd_beads_state.go` from the open
+session beads, and a session counts as live when the canonical lifecycle
+projection says it still occupies a slot —
+`session.ProjectLifecycle(...).CountsAgainstCap`. That is the same predicate
+capacity accounting uses, so liveness here cannot drift from liveness there.
+It admits `active`, `creating`, `start-pending`, `draining` and `quarantined`,
+and excludes `failed-create`, `orphaned`, `closing`, `stopped`, `archived`,
+`asleep`, `drained` and `suspended`.
+
+A session bead with no `state` stamped at all is treated as live on purpose.
+The projection cannot judge it, and for an anomaly detector a missed orphan is
+far cheaper than a fabricated one that sends an operator to reclaim a healthy
+session.
+
+**Not yet implemented: zombie exclusion.** A session whose bead still reads
+`active` but whose runtime process is gone is a *zombie*, and it currently
+counts as live — so a bead routed at an all-zombie rig classifies
+`routed-waiting` rather than `routed-stalled-dispatch`. Detecting that needs a
+runtime-alive probe (the `last_active == 0001-01-01T00:00:00Z` marker is a
+runtime-enriched field on `session.Info`, not bead metadata), and the runtime
+probe is only reachable through a session Manager, which non-test `cmd/gc`
+files may not construct under the worker-boundary migration. Closing this needs
+a `worker.Handle` route for runtime liveness; until then
+`routed-stalled-dispatch` fires only when a rig has no live-*stated* sessions
+at all.
+
+## Dormant states
+
+Four of the sixteen states cannot fire today, because nothing in gascity writes
+the metadata they key on. They are implemented and tested in the classifier so
+that they light up the moment a producer lands, but a report will never show
+them yet:
+
+| State | Keys on | Blocked because |
+|---|---|---|
+| `delivering` | `gc.phase` (building, ci-pending, rework, merge-pending, conflicted) | No writer for `gc.phase` exists. |
+| `waiting-review` | `gc.phase=review-pending` | Same. |
+| `waiting-decision` | `gc.phase=decision-pending` | Same. |
+| `done` via delivery | `gc.phase` in merged/abandoned | Same; `done` still fires normally via `status=closed`. |
+
+The same applies to one *input* rather than a state: rule 11 also accepts
+`gc.do_not_auto_route`, which has no producer either, so `waiting-human` fires
+only via the `human` label or the `decision` type.
+
+The originating plan asserted these phase constants came from
+`internal/delivery/phase.go` "confirmed present". That package does not exist.
+Treat the phase-dependent rows as forward-compatible wiring, not as coverage.
 
 ## Sync requirements
 
