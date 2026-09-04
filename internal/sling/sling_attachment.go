@@ -131,8 +131,10 @@ func liveConvoyTrackedWorkflowRoots(convoyStore, rootStore beads.Store, beadID, 
 	for _, convoy := range convoys {
 		// These are convoys by construction, so the convoy type's Ready
 		// exclusion (#3591) does not apply here -- only skip convoys excluded
-		// by infrastructure label (session/order-tracking bookkeeping), same
-		// guard hasLiveTrackingConvoy applies above.
+		// by infrastructure label (session/order-tracking bookkeeping). Unlike
+		// hasLiveTrackingConvoy above, this loop does NOT also skip terminal
+		// convoys: liveness is decided per root below (IsTerminalStatus on the
+		// root itself), so a closed convoy holding a live root still counts.
 		if beads.HasReadyExcludedLabel(convoy) {
 			continue
 		}

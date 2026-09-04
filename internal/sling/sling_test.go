@@ -3211,6 +3211,50 @@ func TestSlingAttachGraphFormulaConvoyFirstNoExistingRootProceeds(t *testing.T) 
 	}
 }
 
+// TestSlingAttachGraphFormulaForceRelaunchesDespiteLiveConvoyTrackedRoot
+// pins the --force escape hatch on the convoy-first path. The CLI advertises
+// --force as the override for exactly this ConflictError, so the guard added
+// for #5420 must not become the one conflict class --force cannot clear.
+//
+// Note what --force does here today: it launches a SECOND live root beside
+// the first rather than superseding it. That is unchanged pre-existing
+// behavior on this path -- snapshotGraphV2ReplacementRoot keys the
+// replacement on RootKey(inputConvoyID, ...), and a bare-bead `--on` mints a
+// fresh synthetic input convoy per launch, so the prior root is never the
+// replacement candidate. Making --force supersede instead is filed as
+// follow-up, not attempted here.
+func TestSlingAttachGraphFormulaForceRelaunchesDespiteLiveConvoyTrackedRoot(t *testing.T) {
+	deps := graphV2ConvoyFirstSlingTestConfig(t)
+	source, err := deps.Store.Create(beads.Bead{ID: "BL-42", Title: "work", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	first, err := s.AttachFormula(context.Background(), "graph-work", source.ID, a, FormulaOpts{})
+	if err != nil {
+		t.Fatalf("first AttachFormula: %v", err)
+	}
+	if first.WorkflowID == "" {
+		t.Fatal("first launch: WorkflowID empty, want a live workflow root")
+	}
+
+	second, err := s.AttachFormula(context.Background(), "graph-work", source.ID, a, FormulaOpts{Force: true})
+	if err != nil {
+		t.Fatalf("forced AttachFormula: %v, want nil -- --force must override the convoy-tracked duplicate guard", err)
+	}
+	if second.WorkflowID == "" {
+		t.Fatal("forced launch: WorkflowID empty, want a live workflow root")
+	}
+	if second.WorkflowID == first.WorkflowID {
+		t.Fatalf("forced WorkflowID = %q, want a root distinct from the first launch's", second.WorkflowID)
+	}
+}
+
 // TestCheckNoMoleculeChildrenConvoyLookupDoesNotShadowV1Children guards the
 // v1 (legacy) molecule/wisp-child dedup path: a bead with a direct DB-child
 // molecule attachment (the pre-#5420 detection route) must still be found
@@ -3385,7 +3429,7 @@ func TestLiveConvoyTrackedWorkflowRootsSkipsTerminalRoots(t *testing.T) {
 				t.Fatalf("liveConvoyTrackedWorkflowRoots = %d roots %+v, want %d for a %s root", len(roots), roots, tc.wantRoots, tc.status)
 			}
 
-			err = checkLegacySourceWorkflowConflict(deps, source.ID, "graph-work")
+			err = checkLegacySourceWorkflowConflict(deps, source.ID, "graph-work", false)
 			var conflictErr *sourceworkflow.ConflictError
 			if tc.wantRoots == 0 {
 				if err != nil {
@@ -3519,7 +3563,7 @@ func TestListSourceWorkflowRootsSkipsNonSourceListFailureAndKeepsSingletonGuard(
 		},
 	}
 
-	err = checkLegacySourceWorkflowConflict(deps, "mc-source", "")
+	err = checkLegacySourceWorkflowConflict(deps, "mc-source", "", false)
 	var conflictErr *sourceworkflow.ConflictError
 	if !errors.As(err, &conflictErr) {
 		t.Fatalf("checkLegacySourceWorkflowConflict error = %v, want ConflictError", err)
@@ -3581,7 +3625,7 @@ func TestListSourceWorkflowRootsScansAlreadyOpenSourceStoreWhenListerOmitsIt(t *
 		SourceWorkflowStoreScanWarning: func(string, error) {},
 	}
 
-	err = checkLegacySourceWorkflowConflict(deps, "mc-source", "")
+	err = checkLegacySourceWorkflowConflict(deps, "mc-source", "", false)
 	var conflictErr *sourceworkflow.ConflictError
 	if !errors.As(err, &conflictErr) {
 		t.Fatalf("checkLegacySourceWorkflowConflict error = %v, want ConflictError from already-open source store", err)

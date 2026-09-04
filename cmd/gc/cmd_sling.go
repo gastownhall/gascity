@@ -1783,7 +1783,7 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 			}
 			w("  Would run: " + cookCmd)
 			if preCheck && preCheckConclusive {
-				w("  Pre-check: " + opts.BeadOrFormula + " has no existing molecule/wisp children or live formulas-v2 workflow for " + opts.OnFormula + " ✓")
+				w("  Pre-check: " + opts.BeadOrFormula + preCheckClaim(opts, opts.OnFormula))
 			}
 			w("")
 		} else if !opts.NoFormula && a.EffectiveDefaultSlingFormula() != "" {
@@ -1820,7 +1820,7 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 				if blockingLabel != "" {
 					w(fmt.Sprintf("  Pre-check: %s already has attached %s %s — the default formula will be skipped and the bead routed plainly.", opts.BeadOrFormula, blockingLabel, blockingID))
 				} else if preCheckConclusive {
-					w("  Pre-check: " + opts.BeadOrFormula + " has no existing molecule/wisp children or live formulas-v2 workflow for " + defaultFormula + " ✓")
+					w("  Pre-check: " + opts.BeadOrFormula + preCheckClaim(opts, defaultFormula))
 				}
 			}
 			w("")
@@ -2045,6 +2045,18 @@ func dryRunReportBlockingMolecule(opts slingOpts, deps slingDeps, querier BeadQu
 	return dryRunReportBlockingWorkflow(opts, deps, formulaName, stderr)
 }
 
+// preCheckClaim returns the tail of the dry-run "Pre-check:" line, claiming
+// only what the pre-check actually verified. Under --force the
+// convoy-tracked workflow half is skipped (see dryRunReportBlockingWorkflow),
+// so the line reverts to its pre-#5420 wording rather than asserting an
+// absence that was never checked.
+func preCheckClaim(opts slingOpts, formulaName string) string {
+	if opts.Force {
+		return " has no existing molecule/wisp children ✓"
+	}
+	return " has no existing molecule/wisp children or live formulas-v2 workflow for " + formulaName + " ✓"
+}
+
 // dryRunReportBlockingWorkflow returns 1 (and emits a stderr diagnostic)
 // when the bead already has a live convoy-tracked formulas-v2 workflow for
 // formulaName, otherwise 0. Split out from dryRunReportBlockingMolecule so
@@ -2060,6 +2072,14 @@ func dryRunReportBlockingMolecule(opts slingOpts, deps slingDeps, querier BeadQu
 // exit code stays 0 in that case -- a read error is not the launch-time
 // conflict this predicts, and a preview should not hard-fail on one.
 func dryRunReportBlockingWorkflow(opts slingOpts, deps slingDeps, formulaName string, stderr io.Writer) (int, bool) {
+	// --force skips this guard at launch time
+	// (checkLegacySourceWorkflowConflict), so predicting it here would
+	// forecast a failure the real run will not produce. The pass line the
+	// caller prints reverts to its pre-#5420 wording in that case, since
+	// this half of the pre-check was never performed.
+	if opts.Force {
+		return 0, true
+	}
 	formulaName = strings.TrimSpace(formulaName)
 	if formulaName == "" {
 		return 0, true

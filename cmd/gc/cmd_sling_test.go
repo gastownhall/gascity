@@ -6596,6 +6596,51 @@ func TestDryRunOnFormulaBlockedByLiveConvoyTrackedWorkflow(t *testing.T) {
 	}
 }
 
+// TestDryRunOnFormulaForceSkipsConvoyTrackedWorkflowPreCheck pins the
+// --force preview against the same shape: --force overrides the
+// convoy-tracked duplicate guard at launch time, so the preview must not
+// predict a failure the real run will not produce. The workflow half of the
+// pre-check is skipped, so the pass line reverts to its pre-#5420 wording
+// rather than claiming an absence that was never checked.
+func TestDryRunOnFormulaForceSkipsConvoyTrackedWorkflowPreCheck(t *testing.T) {
+	formulaDir := t.TempDir()
+	writeGraphV2FormulaForDryRunTest(t, formulaDir)
+
+	runner := newFakeRunner()
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Daemon:        config.DaemonConfig{FormulaV2: boolPtr(true)},
+		FormulaLayers: config.FormulaLayers{City: []string{formulaDir}},
+	}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	q := newFakeChildQuerier()
+	q.beadsByID["BL-42"] = beads.Bead{ID: "BL-42", Type: "task", Status: "open"}
+	q.childrenOf["BL-42"] = []beads.Bead{}
+
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.Store = seededStore("BL-42")
+	seedConvoyTrackedWorkflow(t, deps.Store, "BL-42", "graph-work")
+
+	opts := testOpts(a, "BL-42")
+	opts.OnFormula = "graph-work"
+	opts.DryRun = true
+	opts.Force = true
+	code := doSling(opts, deps, q, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("dry-run --force returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "already has attached workflow") {
+		t.Errorf("stderr predicts a blocking workflow --force would override: %s", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Pre-check: BL-42 has no existing molecule/wisp children ✓") {
+		t.Errorf("stdout missing the pre-#5420 pre-check line: %s", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "live formulas-v2 workflow") {
+		t.Errorf("stdout claims a workflow pre-check --force skipped: %s", stdout.String())
+	}
+}
+
 // TestDryRunDefaultFormulaBlockedByLiveConvoyTrackedWorkflow is the
 // default-formula counterpart. An implicit default formula no longer
 // hard-fails on a plain molecule/wisp, but a live convoy-tracked workflow is

@@ -551,7 +551,7 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 				}
 				return result, fmt.Errorf("%w", err)
 			}
-			if err := checkLegacySourceWorkflowConflict(deps, beadID, formulaName); err != nil {
+			if err := checkLegacySourceWorkflowConflict(deps, beadID, formulaName, opts.Force); err != nil {
 				return result, fmt.Errorf("%w", err)
 			}
 			// The replaced root is a graph.v2 workflow root, and every root
@@ -1479,7 +1479,11 @@ func validateSlingFormulaRuntimeVars(ctx context.Context, formulaName string, se
 	return molecule.ValidateRecipeRuntimeVars(recipe, opts)
 }
 
-func checkLegacySourceWorkflowConflict(deps SlingDeps, beadID, formulaName string) error {
+func checkLegacySourceWorkflowConflict(deps SlingDeps, beadID, formulaName string, force bool) error {
+	// The gc.source_bead_id half stays unconditional even under force: it
+	// already fired under --force before the convoy-tracking lookup below
+	// existed, and gating it here would let --force bypass a pre-existing
+	// check -- a behavior change beyond the scope of the #5420 fix.
 	roots, err := listSourceWorkflowRoots(deps, beadID)
 	if err != nil {
 		return fmt.Errorf("list live workflows for %s: %w", beadID, err)
@@ -1495,9 +1499,16 @@ func checkLegacySourceWorkflowConflict(deps SlingDeps, beadID, formulaName strin
 	// being attached -- distinct formulas concurrently targeting one bead
 	// are legitimate, only relaunching the same one while its root is still
 	// live is the duplicate (#5420).
-	convoyRoots, err := liveConvoyTrackedWorkflowRoots(deps.Store, deps.graphStore(), beadID, formulaName)
-	if err != nil {
-		return fmt.Errorf("list convoy-tracked live workflows for %s: %w", beadID, err)
+	//
+	// --force skips this lookup: the CLI advertises --force as the override
+	// for exactly this conflict, and the sibling check in
+	// withSourceWorkflowLaunchLock gates on `if !force` the same way.
+	var convoyRoots []beads.Bead
+	if !force {
+		convoyRoots, err = liveConvoyTrackedWorkflowRoots(deps.Store, deps.graphStore(), beadID, formulaName)
+		if err != nil {
+			return fmt.Errorf("list convoy-tracked live workflows for %s: %w", beadID, err)
+		}
 	}
 	for _, root := range convoyRoots {
 		if !slices.Contains(ids, root.ID) {
