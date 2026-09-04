@@ -187,11 +187,12 @@ upstream = "alt"
 	}
 }
 
-// TestProviderCredentialsSurfacesUnparseableSecretsFile: the supervisor's own
-// reader abandons the whole file when it does not parse, dropping every entry
-// rather than the bad line. Reporting "not set" for such a file would send the
-// operator to add a value that is already there.
-func TestProviderCredentialsSurfacesUnparseableSecretsFile(t *testing.T) {
+// TestProviderCredentialsSurfacesSkippedSecretsLines: the supervisor's reader
+// skips a malformed line and keeps every entry that parsed. The report must
+// agree on both halves: a variable on a good line still reads as set, and the
+// skipped line is surfaced, because a variable written on it reads as "not
+// set" and would send the operator to add a value that is already there.
+func TestProviderCredentialsSurfacesSkippedSecretsLines(t *testing.T) {
 	gcHome := newCredentialsTestEnv(t)
 	if err := os.WriteFile(filepath.Join(gcHome, "secrets.env"), []byte("ACME_KEY=good\nthis-line-has-no-equals\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -205,7 +206,7 @@ provider = "file"
 
 [providers.zai]
 base = "builtin:claude"
-env = {ANTHROPIC_API_KEY = "${ACME_KEY}"}
+env = {ANTHROPIC_API_KEY = "${ACME_KEY}", ANTHROPIC_AUTH_TOKEN = "${ACME_TOKEN}"}
 `)
 
 	var stdout, stderr bytes.Buffer
@@ -213,8 +214,17 @@ env = {ANTHROPIC_API_KEY = "${ACME_KEY}"}
 		t.Fatalf("run() = %d; want 0\nstderr: %s", code, stderr.String())
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "does not parse") || !strings.Contains(out, "drops every entry") {
-		t.Errorf("output does not surface the unparseable secrets file:\n%s", out)
+	if !strings.Contains(out, "line 2") || !strings.Contains(out, "skips that line") {
+		t.Errorf("output does not surface the skipped secrets line:\n%s", out)
+	}
+	if !strings.Contains(out, "set in "+filepath.Join(gcHome, "secrets.env")) {
+		t.Errorf("ACME_KEY parsed on a good line but is not reported as set:\n%s", out)
+	}
+	if !strings.Contains(out, "unless on a skipped line") {
+		t.Errorf("ACME_TOKEN is absent with a skipped line present, but the report does not say it may be on that line:\n%s", out)
+	}
+	if strings.Contains(out, "this-line-has-no-equals") {
+		t.Errorf("report echoed raw secrets-file content:\n%s", out)
 	}
 }
 
@@ -250,5 +260,39 @@ func TestProviderCredentialsOffersNoWritePath(t *testing.T) {
 		if strings.Contains(out, forbidden) {
 			t.Errorf("help advertises %s; the write path is deliberately withheld:\n%s", forbidden, out)
 		}
+	}
+}
+
+// TestProviderCredentialsHonorsSupervisorEnvOptIn guards against warning about
+// a variable the supervisor DOES forward. supervisorServiceExtraEnv gates on
+// the persist allow-list OR an explicit GC_SUPERVISOR_ENV opt-in; a report
+// that checks only the allow-list tells the operator their rotation will come
+// up blank when it will not. A warning that fires when it should not is worn
+// down to noise, which is how the real one gets skipped.
+func TestProviderCredentialsHonorsSupervisorEnvOptIn(t *testing.T) {
+	newCredentialsTestEnv(t)
+	t.Setenv("GC_SUPERVISOR_ENV", "ACME_KEY")
+	cityPath := writeProviderTestCity(t, `
+[workspace]
+name = "test"
+
+[beads]
+provider = "file"
+
+[providers.zai]
+base = "builtin:claude"
+env = {ANTHROPIC_API_KEY = "${ACME_KEY}"}
+`)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"provider", "credentials", "--city", cityPath, "zai"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("run() = %d; want 0\nstderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "ACME_KEY") {
+		t.Fatalf("output does not name the source variable at all:\n%s", out)
+	}
+	if strings.Contains(out, "does NOT forward") {
+		t.Errorf("warned that ACME_KEY is not forwarded, but GC_SUPERVISOR_ENV opts it in and supervisorServiceExtraEnv honors that:\n%s", out)
 	}
 }
