@@ -29,7 +29,7 @@ func TestParsePingCheckNormalizesHealthyAndFailure(t *testing.T) {
 			if !ok || len(checks) != 1 || checks[0].Status != tt.want {
 				t.Fatalf("parsePingCheck() = (%v, %v), want one %s check", checks, ok, tt.want)
 			}
-			if checks[0].Category != "Beads" || checks[0].Name != "Database Connectivity" {
+			if checks[0].Category != "Beads" || checks[0].Name != pingConnectivityCheck {
 				t.Fatalf("check identity = %+v", checks[0])
 			}
 		})
@@ -130,6 +130,79 @@ func TestProbeRigReportsPingFailureAsDown(t *testing.T) {
 	}
 	if !strings.Contains(rep.Problems[0].Message, "proxy unavailable") {
 		t.Fatalf("probeRig problem = %+v, want provider error", rep.Problems[0])
+	}
+	if rep.DoltConnected == nil || *rep.DoltConnected {
+		t.Fatalf("probeRig DoltConnected = %v, want non-nil false", rep.DoltConnected)
+	}
+}
+
+// TestProbeRigReportsPingStderrFailureAsDown covers the failure shape ping
+// actually produces when the store cannot be opened at all: plain text on
+// stderr, empty stdout, non-zero exit. Nothing is parseable, so the probe must
+// synthesize the connectivity check itself rather than reporting an empty
+// "warn" and discarding the provider's error.
+func TestProbeRigReportsPingStderrFailureAsDown(t *testing.T) {
+	rig, bin := newProbeRigFixture(t)
+	writeFakeBd(t, bin, "#!/bin/sh\nprintf '%s' 'failed to open store: connection refused' >&2\nexit 1\n")
+
+	rep := newSamplerManager(Deps{}, newExecRunner()).probeRig(context.Background(), "r1", rig)
+	if rep.Rollup != "down" || !rep.Reachable || len(rep.Problems) != 1 {
+		t.Fatalf("probeRig() = %+v, want reachable/down with one problem", rep)
+	}
+	if rep.Problems[0].Status != "error" || rep.Problems[0].Name != pingConnectivityCheck {
+		t.Fatalf("probeRig problem = %+v, want an error connectivity check", rep.Problems[0])
+	}
+	if !strings.Contains(rep.Problems[0].Message, "connection refused") {
+		t.Fatalf("probeRig problem message = %q, want the stderr provider error", rep.Problems[0].Message)
+	}
+	if rep.DoltConnected == nil || *rep.DoltConnected {
+		t.Fatalf("probeRig DoltConnected = %v, want non-nil false", rep.DoltConnected)
+	}
+}
+
+// TestProbeRigReportsDoltConnectedFromPing pins the proxied case this change
+// exists to serve: a rig with no dolt-server.port file has no endpoint to
+// dial, so connectivity must come from the ping check itself instead of
+// reporting "unknown" for a store whose connectivity was just proven.
+func TestProbeRigReportsDoltConnectedFromPing(t *testing.T) {
+	rig, bin := newProbeRigFixture(t)
+	writeFakeBd(t, bin, "#!/bin/sh\nprintf '%s' '{\"status\":\"ok\"}'\n")
+
+	rep := newSamplerManager(Deps{}, newExecRunner()).probeRig(context.Background(), "r1", rig)
+	if rep.DoltEndpoint != nil {
+		t.Fatalf("probeRig DoltEndpoint = %v, want nil without a dolt-server.port file", *rep.DoltEndpoint)
+	}
+	if rep.DoltConnected == nil || !*rep.DoltConnected {
+		t.Fatalf("probeRig DoltConnected = %v, want non-nil true", rep.DoltConnected)
+	}
+	if rep.Rollup != "ok" || len(rep.Problems) != 0 || rep.Note != "" {
+		t.Fatalf("probeRig() = %+v, want a clean ok report", rep)
+	}
+}
+
+// newProbeRigFixture builds a rig directory with an empty .beads store and a
+// PATH containing only a fake bd, so a probeRig test never reaches a real one.
+func newProbeRigFixture(t *testing.T) (rigPath, binDir string) {
+	t.Helper()
+	root := t.TempDir()
+	rigPath = filepath.Join(root, "rig")
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	binDir = filepath.Join(root, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+	t.Setenv("ADMIN_PATH", binDir)
+	return rigPath, binDir
+}
+
+// writeFakeBd installs script as the bd on the fixture PATH.
+func writeFakeBd(t *testing.T, binDir, script string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
 	}
 }
 

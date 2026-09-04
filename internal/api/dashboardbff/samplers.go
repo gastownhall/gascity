@@ -391,6 +391,17 @@ var benignCheckCategories = map[string]bool{"Git Integration": true, "Integratio
 
 const doltConnectionCheck = "Dolt Connection"
 
+// pingConnectivityCheck is the name of the single connectivity check
+// synthesized from `bd ping`. It is the ping-mode counterpart of
+// doltConnectionCheck, and doltConnectedFromChecks matches both so a
+// server-backed store still reports its connectivity when the probe ran
+// through ping.
+const pingConnectivityCheck = "Database Connectivity"
+
+// maxProbeErrorRunes caps subprocess error text folded into a check message or
+// note, so a chatty provider cannot bloat the snapshot the dashboard polls.
+const maxProbeErrorRunes = 512
+
 func (m *samplerManager) probeRig(ctx context.Context, rigName, rigPath string) rigStoreHealth {
 	beadsPath := filepath.Join(rigPath, ".beads")
 	if !isDir(beadsPath) {
@@ -413,8 +424,27 @@ func (m *samplerManager) probeRig(ctx context.Context, rigName, rigPath string) 
 		note = "bd ping probe failed: " + err.Error()
 	} else if parsed, ok := parsePingCheck(res); ok {
 		checks = parsed
+	} else if res.exitCode != 0 {
+		// ping failed before it could emit JSON — the store could not be
+		// opened or the provider refused the connection, and the only
+		// actionable detail is the plain-text error on stderr. Synthesize the
+		// connectivity check ping would have emitted so the failure rolls up
+		// as "down" with a listed problem instead of an empty "warn".
+		msg := strings.TrimSpace(res.stderr)
+		if msg == "" {
+			msg = "database connectivity failed"
+		}
+		checks = []rigStoreCheck{{
+			Category: "Beads",
+			Name:     pingConnectivityCheck,
+			Status:   "error",
+			Message:  sanitizeTerminalOutput(truncateRunes(msg, maxProbeErrorRunes)),
+		}}
 	} else {
 		note = "bd ping returned no valid JSON (store unreachable or provider refused the probe)"
+		if stderr := strings.TrimSpace(res.stderr); stderr != "" {
+			note += ": " + truncateRunes(stderr, maxProbeErrorRunes)
+		}
 	}
 
 	var doltConnected *bool
@@ -468,7 +498,7 @@ func parsePingCheck(res *execResult) ([]rigStoreCheck, bool) {
 	}
 	return []rigStoreCheck{{
 		Category: "Beads",
-		Name:     "Database Connectivity",
+		Name:     pingConnectivityCheck,
 		Status:   status,
 		Message:  sanitizeTerminalOutput(message),
 	}}, true
@@ -505,7 +535,7 @@ func issueCountFromChecks(checks []rigStoreCheck) *int64 {
 
 func doltConnectedFromChecks(checks []rigStoreCheck) *bool {
 	for _, c := range checks {
-		if c.Name == doltConnectionCheck {
+		if c.Name == doltConnectionCheck || c.Name == pingConnectivityCheck {
 			ok := c.Status == "ok"
 			return &ok
 		}
