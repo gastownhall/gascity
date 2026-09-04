@@ -2902,6 +2902,30 @@ func setupManagedBdWaitTestCity(t *testing.T) (string, string) {
 	if err := os.Chmod(filepath.Join(rigPath, ".beads"), 0o700); err != nil {
 		t.Fatalf("Chmod(rig .beads): %v", err)
 	}
+	// Keep this fixture on the legacy direct-server path even when the copied
+	// template was produced by a proxied-default binary. The rebind assertion
+	// is specifically about direct lifecycle recovery.
+	for _, dir := range []string{cityPath, rigPath} {
+		metadataPath := filepath.Join(dir, ".beads", "metadata.json")
+		data, err := os.ReadFile(metadataPath)
+		if err != nil {
+			t.Fatalf("ReadFile(%s): %v", metadataPath, err)
+		}
+		var metadata map[string]any
+		if err := json.Unmarshal(data, &metadata); err != nil {
+			t.Fatalf("Unmarshal(%s): %v", metadataPath, err)
+		}
+		metadata["backend"] = "dolt"
+		metadata["database"] = "dolt"
+		metadata["dolt_mode"] = "server"
+		updated, err := json.MarshalIndent(metadata, "", "  ")
+		if err != nil {
+			t.Fatalf("Marshal(%s): %v", metadataPath, err)
+		}
+		if err := os.WriteFile(metadataPath, append(updated, '\n'), 0o600); err != nil {
+			t.Fatalf("WriteFile(%s): %v", metadataPath, err)
+		}
+	}
 	t.Setenv("GC_CITY", cityPath)
 	t.Setenv("GC_CITY_PATH", cityPath)
 
