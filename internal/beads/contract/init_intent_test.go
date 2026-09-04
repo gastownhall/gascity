@@ -61,6 +61,28 @@ func TestResolveInitIntentPreservesPersistedDirectExternal(t *testing.T) {
 	}
 }
 
+func TestResolveInitIntentTreatsMissingPersistedDoltModeAsDirectLocal(t *testing.T) {
+	persisted := InitScopeState{Initialized: true, Backend: "dolt", Target: "local"}
+	got, err := ResolveInitIntent(persisted, InitIntent{}, InitIntent{}, InitIntent{}, InitIntent{Transport: "proxied", Target: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Intent != (InitIntent{Transport: "direct", Target: "local"}) || got.Source != "persisted" {
+		t.Fatalf("got %+v, want persisted direct/local", got)
+	}
+}
+
+func TestResolveInitIntentRejectsUnknownPersistedDoltMode(t *testing.T) {
+	for _, mode := range []string{"embedded", "mystery", "DIRECT"} {
+		t.Run(mode, func(t *testing.T) {
+			_, err := ResolveInitIntent(InitScopeState{Initialized: true, Backend: "dolt", DoltMode: mode, Target: "local"}, InitIntent{}, InitIntent{}, InitIntent{}, InitIntent{Transport: "proxied", Target: "local"})
+			if err == nil {
+				t.Fatalf("ResolveInitIntent accepted unknown persisted dolt mode %q", mode)
+			}
+		})
+	}
+}
+
 func TestResolveInitIntentDoesNotReadAmbientEnvironment(t *testing.T) {
 	// The resolver accepts an explicit policy environment value only. An
 	// ambient BEADS_DOLT_* variable is intentionally invisible here, so it

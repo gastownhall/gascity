@@ -154,6 +154,66 @@ func TestScopeUsesProxiedDoltModePersistedMetadataWinsOverConfig(t *testing.T) {
 	}
 }
 
+func TestScopeUsesProxiedDoltModeReadsConfigMarker(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"backend":"dolt"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte("issue_prefix: gc\ndolt.mode: proxied-server\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !scopeUsesProxiedDoltMode(cityPath, cityPath) {
+		t.Fatal("scopeUsesProxiedDoltMode ignored proxied-server config marker")
+	}
+}
+
+func TestEnsureCanonicalScopeMetadataPreservesMissingDoltModeAsDirect(t *testing.T) {
+	scope := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(scope, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	metadataPath := filepath.Join(scope, ".beads", "metadata.json")
+	original := `{"database":"dolt","backend":"dolt","dolt_database":"jc"}` + "\n"
+	if err := os.WriteFile(metadataPath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, scope, "jc"); err != nil {
+		t.Fatalf("ensureCanonicalScopeMetadataForInit: %v", err)
+	}
+	mode, ok, err := contract.ReadDoltMode(fsys.OSFS{}, metadataPath)
+	if err != nil || !ok || mode != "server" {
+		t.Fatalf("ReadDoltMode = (%q, %v, %v), want server", mode, ok, err)
+	}
+}
+
+func TestEnsureCanonicalScopeMetadataRejectsUnknownPersistedDoltMode(t *testing.T) {
+	scope := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(scope, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	metadataPath := filepath.Join(scope, ".beads", "metadata.json")
+	original := `{"database":"dolt","backend":"dolt","dolt_mode":"mystery","dolt_database":"jc"}` + "\n"
+	if err := os.WriteFile(metadataPath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, scope, "jc"); err == nil {
+		t.Fatal("ensureCanonicalScopeMetadataForInit accepted unknown persisted dolt_mode")
+	}
+	got, err := os.ReadFile(metadataPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != original {
+		t.Fatalf("unknown mode metadata mutated: %q", got)
+	}
+}
+
 // A doltlite scope may retain a stale dolt_mode marker from an older
 // canonicalisation.  The marker belongs to the Dolt backend only; it must not
 // route the scope through beads' proxied-Dolt lifecycle.

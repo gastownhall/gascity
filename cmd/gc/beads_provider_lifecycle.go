@@ -1855,7 +1855,7 @@ func ensureCanonicalScopeMetadata(fs fsys.FS, scopeRoot, doltDatabase string, pr
 		}
 	}
 	doltMode := "proxied-server"
-	if metadataExists && metadataBackend == "legacy" {
+	if metadataExists && (metadataBackend == "legacy" || metadataBackend == "dolt") {
 		doltMode = "server"
 	}
 	if preserveExisting {
@@ -1878,6 +1878,13 @@ func ensureCanonicalScopeMetadata(fs fsys.FS, scopeRoot, doltDatabase string, pr
 		}
 	}
 	if existingMode, ok, err := contract.ReadDoltMode(fs, path); err == nil && ok && strings.TrimSpace(existingMode) != "" {
+		if strings.EqualFold(metadataBackend, "dolt") {
+			switch strings.ToLower(strings.TrimSpace(existingMode)) {
+			case "server", "proxied-server", "embedded":
+			default:
+				return fmt.Errorf("unsupported persisted dolt_mode %q in %s", existingMode, path)
+			}
+		}
 		// Unknown legacy metadata is not authoritative; canonicalizing it is a
 		// migration into the current managed default. Registered Dolt metadata,
 		// however, keeps its explicit mode (including embedded/local) intact.
