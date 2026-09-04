@@ -113,7 +113,7 @@ package main
 //
 // # A single-store city takes none of this
 //
-// hookClaimClassRouteForCity gates on graphClassBinding — store identity, the
+// hookClaimClassRouteForCity gates on cliSoleClassBinding — store identity, the
 // same question resolveClassStore asks — and returns nil for a city that
 // relocates nothing. classRoutedHookClaimOps then returns the ops value it was
 // handed, unwrapped, so every claim-time write is the exact call it is today.
@@ -255,12 +255,22 @@ func hookClaimBindingRefusedTheClaim(err error) bool {
 // The funnel is the same one cityQueryTopology already entered to decide whether
 // this invocation's work query federates at all, and it is memoized per city
 // (cli_storage_routes.go), so a hook that reaches here opens no second binding.
+//
+// It resolves the SOLE binding rather than the graph class's, for the reason
+// spelled out on cliSoleClassBinding: a claim escalates to this route for any
+// reserved-prefix id, so a city serving its classes from more than one store
+// would have sessions-class claims routed at the graph binding, which would
+// truthfully report the bead absent. That shape is refused upstream; asking for
+// the sole binding is what makes the refusal load-bearing here too.
 func hookClaimClassRouteForCity(cityPath string) (*hookClaimClassRoute, error) {
-	class, relocated := graphClassBinding(cliStorageRoutes(cityPath))
+	binding, relocated, err := cliSoleClassBinding(cityPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolving the claim-time class route: %w", err)
+	}
 	if !relocated {
 		return nil, nil
 	}
-	return newHookClaimClassRoute(class)
+	return newHookClaimClassRoute(binding.Store)
 }
 
 // knownResident reports whether an earlier probe in THIS invocation already

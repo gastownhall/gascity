@@ -29,11 +29,14 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 	}
 
 	// Active-bead path: serve from cache after a bounded per-ID refresh of any
-	// dirty rows. PrimeActive loads the full active set (open + in_progress),
-	// so active-only queries are complete even before the history prime
-	// finishes. On overlay error the read takes the old full-scan fallback.
+	// dirty rows. PrimeActive loads the open + in_progress subset, so queries
+	// explicitly filtered to either status are complete before the full prime;
+	// broader nonclosed queries require cacheLive. On overlay error the read
+	// takes the old full-scan fallback.
 	var cached []Bead
-	if err := c.readCacheWithOverlay(c.cacheServableLocked, func(suppressed map[string]struct{}) {
+	if err := c.readCacheWithOverlay(func() bool {
+		return c.cacheServableForListQueryLocked(query)
+	}, func(suppressed map[string]struct{}) {
 		cached = make([]Bead, 0, len(c.beads))
 		for _, b := range c.beads {
 			if _, gone := suppressed[b.ID]; gone {
@@ -155,7 +158,7 @@ func (c *CachingStore) cachedCountContext(ctx context.Context, query ListQuery, 
 	}
 	defer c.mu.RUnlock()
 
-	if !c.cacheServableLocked() || len(c.dirty) > 0 {
+	if !c.cacheServableForListQueryLocked(query) || len(c.dirty) > 0 {
 		return 0, false, nil
 	}
 	var n int
@@ -189,10 +192,7 @@ func (c *CachingStore) CachedList(query ListQuery) ([]Bead, bool) {
 	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	if c.state != cacheLive && c.state != cachePartial {
-		return nil, false
-	}
-	if c.primePartialErr != nil || len(c.dirty) > 0 {
+	if !c.cacheServableForListQueryLocked(query) || len(c.dirty) > 0 {
 		return nil, false
 	}
 	return c.collectCachedListLocked(query), true
@@ -260,6 +260,20 @@ func (c *CachingStore) collectCachedListLocked(query ListQuery) []Bead {
 		cached = cached[:query.Limit]
 	}
 	return cached
+}
+
+// cacheServableForListQueryLocked refuses to treat PrimeActive's open and
+// in-progress subset as a complete answer to a broader nonclosed query. A full
+// prime may answer every nonclosed status; a partial prime may answer only the
+// two status filters it actually loaded. Caller must hold c.mu.
+func (c *CachingStore) cacheServableForListQueryLocked(query ListQuery) bool {
+	if !c.cacheServableLocked() {
+		return false
+	}
+	if c.state == cacheLive {
+		return true
+	}
+	return slices.Contains(partialPrimeStatuses, query.Status)
 }
 
 func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, items []Bead) []Bead {
@@ -636,6 +650,9 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 		default:
 			return nil, false
 		}
+		if c.state == cachePartial && !cachedReadyDependencyStatusesKnown(b, statusByID, deps) {
+			return nil, false
+		}
 		if cachedBeadReady(b, statusByID, deps) {
 			result = append(result, cloneBead(b))
 		}
@@ -644,6 +661,28 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 	// the SQL-backed ready readers (#3208).
 	sortBeadsReadyOrder(result)
 	return result, true
+}
+
+func cachedReadyDependencyStatusesKnown(b Bead, statusByID map[string]string, deps []Dep) bool {
+	if b.IsBlocked != nil {
+		return true
+	}
+	missing := false
+	for _, dep := range deps {
+		if !isReadyBlockingDependencyType(dep.Type) {
+			continue
+		}
+		status, ok := statusByID[dep.DependsOnID]
+		if ok && status != "closed" {
+			// One observed live blocker settles the verdict even if another
+			// dependency target is outside the partial status snapshot.
+			return true
+		}
+		if !ok {
+			missing = true
+		}
+	}
+	return !missing
 }
 
 func cachedBeadReady(b Bead, statusByID map[string]string, deps []Dep) bool {

@@ -122,10 +122,38 @@ func TestProcessControlStopsControlWhenWorkflowRootTerminallyClosed(t *testing.T
 	}
 }
 
+// TestProcessControlKeepsTeardownTailRunningUnderCanceledRoot mirrors
+// TestProcessControlKeepsTeardownTailRunningUnderTerminalRoot for the
+// canceled-root arm: cancellation is a terminal state like any other, so the
+// teardown tail's contract (it runs AFTER the root reaches a terminal state,
+// its pass condition may branch on ROOT_OUTCOME) applies just the same. Before
+// this exemption, cancelRun's blanket subtree close force-closed the teardown
+// tail as canceled and it never executed.
+func TestProcessControlKeepsTeardownTailRunningUnderCanceledRoot(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	control := newTerminalRootRetryControl(t, store, "canceled", map[string]string{
+		"gc.scope_ref":  "teardown",
+		"gc.scope_role": "teardown",
+	})
+
+	result, err := ProcessControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl: %v", err)
+	}
+	if result.Action != "retry" || result.Created != 1 {
+		t.Fatalf("result = %+v, want the teardown tail to keep running under a canceled root (retry, created 1)", result)
+	}
+	if after := mustGet(t, store, control.ID); after.Status != "open" {
+		t.Fatalf("teardown control status = %q, want open", after.Status)
+	}
+}
+
 // TestProcessControlKeepsTeardownTailRunningUnderTerminalRoot guards the
 // contract #5271 established: a teardown step's control runs AFTER the root
 // settles by design — its pass condition may branch on ROOT_OUTCOME, which only
-// finalize produces. teardownTailExclusion keeps that tail out of the
+// finalize produces. molecule.TeardownTailExclusion keeps that tail out of the
 // finalizer's own sweep for the same reason, so the terminal-root gate must
 // exempt it too or the adopt-pr settlement deadlock comes straight back.
 //

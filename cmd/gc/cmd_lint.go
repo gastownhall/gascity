@@ -448,6 +448,7 @@ func lintPromptContext(packDir string, agentCfg config.Agent, providers map[stri
 		RigName:                 lintFirstNonEmpty(agentCfg.Dir, "lint-rig"),
 		RigRoot:                 filepath.Join(packDir, "rigs", lintFirstNonEmpty(agentCfg.Dir, "lint-rig")),
 		WorkDir:                 packDir,
+		ConfigDir:               packDir,
 		IssuePrefix:             "lint",
 		Branch:                  "feature/lint",
 		DefaultBranch:           "main",

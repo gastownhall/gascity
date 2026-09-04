@@ -581,7 +581,21 @@ while :; do
     # Enter, so a 1s idle window closes the paste without splitting it. A
     # timed-out read still assigns whatever partial line arrived, so take it
     # before breaking — otherwise the tail of the last line is silently lost.
+    #
+    # Saving partial input on timeout is a bash 4.0 feature; bash 3.2 (still
+    # /bin/bash on stock macOS) returns from a timed-out read without touching
+    # the variable at all, having already consumed and discarded the fragment.
+    # Clearing it before every read is what makes the loop correct on both:
+    # bash >= 4 overwrites it with the fragment, bash 3.2 leaves the empty
+    # value and the branch below simply does not fire. Without this, $more is
+    # *unbound* on the first timed-out drain and `set -u` kills the whole
+    # adapter mid-prompt — on macOS that is every pane, on the first prompt.
+    # The 3.2 fragment itself is unrecoverable at this layer (the shell ate it
+    # before the script ran), so there it is dropped rather than misplaced;
+    # gc's own nudge always terminates its last line, so only a human pausing
+    # mid-line for longer than the drain window can hit it.
     while :; do
+        more=
         IFS= read -r -t "$DRAIN_TIMEOUT" more
         drain_rc=$?
         if (( drain_rc == 0 )); then

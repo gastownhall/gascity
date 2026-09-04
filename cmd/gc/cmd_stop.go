@@ -84,7 +84,19 @@ func cmdStopJSON(args []string, stdout, stderr io.Writer, wallClockTimeout time.
 			return cmdStopJSONSequence(args, stdout, stderr, force, jsonOut, true, unregisterTx)
 		})
 	} else {
-		outcome = cmdStopJSONSequence(args, stdout, stderr, force, jsonOut, false, nil)
+		// The uncapped path holds the same pending-unregister transaction as
+		// the capped one: a stop that fails after removing the registration —
+		// a managed provider that refuses to shut down, an invalid config the
+		// body cannot recover — must hand the entry back rather than leave a
+		// live city unregistered. This mirrors the capped arm's accept/rollback
+		// exactly; the deferred success message is part of the same contract.
+		unregisterTx := newSupervisorUnregisterTransaction()
+		outcome = cmdStopJSONSequence(args, stdout, stderr, force, jsonOut, false, unregisterTx)
+		if outcome.code == 0 {
+			unregisterTx.commit()
+		} else {
+			writeSupervisorUnregisterRollback(stderr, "gc stop", "stop failed after unregistering city", unregisterTx.rollback())
+		}
 	}
 	if outcome.code != 0 {
 		return outcome.code

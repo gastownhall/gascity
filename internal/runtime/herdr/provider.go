@@ -1100,7 +1100,8 @@ func workspaceTabFor(name string) (workspace, tab string) {
 // populates these via RuntimeEnvWithSessionContext).
 //
 // This matters for ephemeral pool wisps: their runtime name is town-qualified
-// (e.g. "gastown__polecat-gc-wisp-3nvj3yx"), so workspaceTabFor alone drops them
+// (e.g. "gastown__polecat-az-wisp-3nvj3yx", where "az" is the pouring scope's
+// beads prefix and varies by city), so workspaceTabFor alone drops them
 // in the town workspace under an opaque wisp-id tab. GC_RIG restores the
 // originating rig workspace (webapp/mobile), and GC_ALIAS swaps the wisp id for
 // the themed instance name, yielding e.g. workspace "webapp", tab
@@ -1117,19 +1118,37 @@ func placementFor(name string, env map[string]string) (workspace, tab string) {
 		workspace = rig
 	}
 	// Replace a wisp id with the themed instance alias so tabs read e.g.
-	// "polecat-furiosa" rather than "polecat-gc-wisp-3nvj3yx". The role prefix
+	// "polecat-furiosa" rather than "polecat-az-wisp-3nvj3yx". The role prefix
 	// (everything before the wisp id) is preserved. Falls through unchanged when
 	// no alias is available yet, or when the alias is itself the wisp identity.
-	if i := strings.Index(tab, "gc-wisp-"); i >= 0 {
+	if i := wispIDStart(tab); i >= 0 {
 		alias := strings.TrimSpace(env["GC_ALIAS"])
 		if alias == "" {
 			alias = strings.TrimSpace(env["GC_AGENT"])
 		}
-		if leaf := lastSegment(alias); leaf != "" && !strings.Contains(leaf, "gc-wisp-") {
+		if leaf := lastSegment(alias); leaf != "" && wispIDStart(leaf) < 0 {
 			tab = tab[:i] + leaf
 		}
 	}
 	return workspace, tab
+}
+
+// wispIDStart reports the index where a wisp id begins inside s, or -1 when s
+// carries none. A wisp id is a bead id minted by PourWisp, so it reads
+// "<prefix>-wisp-<suffix>" where <prefix> is the beads prefix of the scope that
+// poured it — "gc" in a default city, but "az", "py", … anywhere else.
+// Detection therefore keys on the "-wisp-" infix and walks back over the prefix
+// token; keying on a literal "gc-wisp-" silently no-ops on every other city,
+// and keying on "-wisp-" alone would cut mid-id ("polecat-az" + leaf).
+func wispIDStart(s string) int {
+	i := strings.Index(s, "-wisp-")
+	if i < 0 {
+		return -1
+	}
+	// i sits on the "-" closing the beads prefix, so the id starts just after
+	// the preceding "-" — or at 0 when the wisp id has no role prefix, which
+	// LastIndex's -1 gives for free.
+	return strings.LastIndex(s[:i], "-") + 1
 }
 
 // lastSegment returns the trailing identity segment after the final "/" or ".",

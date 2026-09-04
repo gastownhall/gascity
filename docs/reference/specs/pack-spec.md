@@ -473,10 +473,30 @@ protocol = 0
 |---|---|---|
 | `command` | Required. The runtime executable. A bare name (no path separator) is resolved on PATH at session start. A relative path (any other value containing a separator) is anchored at the declaring pack directory during load. An absolute path is used as written. | required |
 | `protocol` | The RPP version the executable speaks. `0` is the only version today; any other value fails composition. | current |
+| `prompt_delivery` | Opts this runtime into a non-default oversized-prompt delivery strategy. Unset (default) or `"nudge-fallback"`; any other value fails composition. | current |
 
 `<name>` must not contain `:`, `/`, or whitespace, since `:` is reserved for
 prefix-form selection names (`exec:...`) and `/` and whitespace keep selection
 names shell- and TOML-friendly.
+
+`prompt_delivery` controls what happens when a rendered startup prompt is too
+large for an OS `exec()` argv (see the argv-safety guard in
+`cmd/gc/prompt_delivery.go`). A runtime `gc` does not already classify as
+argv-safe or nudge-capable hard-fails on an oversized prompt by default —
+unset is that default. Declaring `prompt_delivery = "nudge-fallback"`
+asserts the executable has a working post-start Nudge path (the same RPP
+Nudge operation builtin nudge-fallback runtimes like `tmux` use) that an
+oversized prompt can reroute through instead of argv. Like `command`, this
+is a pack-composition-time assertion: `gc` accepts the declaration as
+written and does not verify it against the runtime executable, at compose
+time or via the `pack-runtimes` doctor check below. Pack authors can
+self-verify ahead of production: `gc runtime check <name>` resolves the
+declaration and smoke-tests it by invoking the runtime's `nudge` operation
+against a throwaway conformance session, failing the run (`required: nudge`)
+when nudge is absent or broken. That smoke-tests the operation, not that an
+oversized prompt reroutes end to end — a pack that never runs it and
+declares `nudge-fallback` falsely still will not fail until an oversized
+prompt actually reaches that runtime at session start.
 
 City composition registers declared runtimes into a city-wide selection
 registry (`City.Runtimes`), including runtimes declared by rig-imported packs.

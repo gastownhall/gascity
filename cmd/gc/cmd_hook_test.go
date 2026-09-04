@@ -1679,7 +1679,7 @@ case "$*" in
   *"list --json --status=open"*"gc.continuation_group=body"*"gc.root_bead_id=root-1"*)
     printf '[{"id":"hw-claim","status":"open","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.continuation_group":"body"}},{"id":"hw-next","status":"open","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.continuation_group":"body"}},{"id":"hw-other","status":"open","metadata":{"gc.routed_to":"other","gc.root_bead_id":"root-1","gc.continuation_group":"body"}}]'
     ;;
-  *"update --json hw-next --assignee worker-1"*)
+  *"update --json hw-next --assignee session-id-1"*)
     printf '[{"id":"hw-next","status":"open","assignee":"worker-1","metadata":{"gc.routed_to":"worker"}}]'
     ;;
   *"query --json ephemeral=true AND status=open --limit 0"*)
@@ -1735,8 +1735,12 @@ esac
 	if !strings.Contains(logText, "actor=worker-1 args=show --json hw-claim") {
 		t.Fatalf("bd canonical read did not use BEADS_ACTOR=worker-1; log:\n%s", logText)
 	}
-	if !strings.Contains(logText, "args=update --json hw-next --assignee worker-1") {
-		t.Fatalf("continuation sibling was not preassigned through bd; log:\n%s", logText)
+	// The claim itself is actored and assigned as worker-1 (the alias read paths
+	// query through GC_AGENT), but the continuation pin is a session binding: the
+	// sibling must name GC_SESSION_ID so wake demand and the continuation
+	// backstop can both resolve it back to this session.
+	if !strings.Contains(logText, "args=update --json hw-next --assignee session-id-1") {
+		t.Fatalf("continuation sibling was not preassigned to the session id; log:\n%s", logText)
 	}
 	if strings.Contains(logText, "args=update hw-other --assignee") {
 		t.Fatalf("continuation preassignment crossed route target; log:\n%s", logText)

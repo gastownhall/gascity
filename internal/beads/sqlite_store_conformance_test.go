@@ -1,6 +1,7 @@
 package beads_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -48,6 +49,56 @@ func TestSQLiteStoreFenceConformance(t *testing.T) {
 	beadstest.RunFenceConformance(t, func() beads.Store {
 		return newSQLiteForConformance(t)
 	})
+}
+
+// TestSQLiteStorePinnedIDFenceConformance runs the shared fenced-Create suite.
+// It is the same contract every store serving a class binding owes, and this
+// store is the one the shipped bindings open, so a divergence here is a
+// divergence in production.
+func TestSQLiteStorePinnedIDFenceConformance(t *testing.T) {
+	beadstest.RunPinnedIDFenceConformance(t, func(t *testing.T, mintPrefix string, namespaces ...string) beads.Store {
+		t.Helper()
+		opened, err := beads.OpenSQLiteStore(t.TempDir(),
+			beads.WithSQLiteStoreIDPrefix(mintPrefix),
+			beads.WithSQLiteStoreReservedIDPrefixes(namespaces...),
+		)
+		if err != nil {
+			t.Fatalf("OpenSQLiteStore: %v", err)
+		}
+		store := opened.(*beads.SQLiteStore)
+		t.Cleanup(func() { _ = store.CloseStore() })
+		return store
+	})
+}
+
+// TestSQLiteStoreFenceRefusalNamesTheIDAndTheNamespaces covers what the shared
+// suite deliberately will not: the prose.
+//
+// A provider contract can only demand a sentinel, so the conformance rows match
+// on beads.ErrPinnedIDOutsideNamespace and say nothing about wording. But the
+// operator reading this refusal in a log has to be able to act on it, and that
+// takes both halves — which id was refused, and which namespaces this binding
+// would have accepted. Neither is inferable from the sentinel.
+func TestSQLiteStoreFenceRefusalNamesTheIDAndTheNamespaces(t *testing.T) {
+	opened, err := beads.OpenSQLiteStore(t.TempDir(),
+		beads.WithSQLiteStoreIDPrefix("gcn"),
+		beads.WithSQLiteStoreReservedIDPrefixes("gcn", "gcnq"),
+	)
+	if err != nil {
+		t.Fatalf("OpenSQLiteStore: %v", err)
+	}
+	store := opened.(*beads.SQLiteStore)
+	t.Cleanup(func() { _ = store.CloseStore() })
+
+	_, err = store.Create(beads.Bead{ID: "ga-42", Title: "a work id pinned into the nudges binding"})
+	if err == nil {
+		t.Fatal("Create accepted a foreign pinned id")
+	}
+	for _, want := range []string{"ga-42", "gcn", "gcnq"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q does not name %q; an operator cannot tell from it what to route where", err, want)
+		}
+	}
 }
 
 // TestSQLiteStoreDeleteBatch pins the BatchDeleter contract the wisp-GC

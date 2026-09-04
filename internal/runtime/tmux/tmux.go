@@ -47,7 +47,7 @@ const pollInterval = 100 * time.Millisecond
 // GC_PROVIDER env var; mimocode's binary names differ from its provider
 // name ("mimo" wrapper, ".mimocode" compiled child), so both are listed
 // alongside the family name.
-var providersSkippingEscapeBeforeEnter = []string{"claude", "codex", "copilot", "gemini", "grok", "kimi", "mimocode", "mimo", ".mimocode", "opencode", "pi", "antigravity"}
+var providersSkippingEscapeBeforeEnter = []string{"claude", "codex", "copilot", "cursor", "gemini", "grok", "kimi", "mimocode", "mimo", ".mimocode", "opencode", "pi", "antigravity"}
 
 // defaultNudgeSubmitKeySequence is the ordered tmux key names sent, in
 // order, to submit a pasted nudge for a provider family with no explicit
@@ -2244,6 +2244,17 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	}
 	time.Sleep(50 * time.Millisecond)
 
+	// 1.5. Dismiss Claude Code's post-turn feedback survey if it is parked on
+	// the pane (ga-zg7fjq). The composer is empty at this point -- the C-u
+	// above guarantees that, and it matters: the survey's onDigit handler
+	// only fires on a single-character input value, so a digit landing on
+	// top of other content silently corrupts the draft instead of
+	// dismissing anything. A parked survey reads idle to WaitForIdle (no
+	// busy indicator, composer prefix still matches), so this cannot be
+	// gated on an idle-wait failure the way DismissModelSwitchModalIfPresent
+	// is in Provider.Nudge -- it must run unconditionally, here.
+	t.DismissFeedbackSurveyModalIfPresent(session)
+
 	// 2. Send text in literal mode with retry on transient errors
 	if err := t.sendKeysLiteralWithRetry(target, message, t.cfg.NudgeReadyTimeout); err != nil {
 		return err
@@ -2514,6 +2525,71 @@ func (t *Tmux) DismissModelSwitchModalIfPresent(session string) {
 		},
 		time.Sleep,
 	)
+}
+
+// feedbackSurveyDismissConfirmDelay lets the "0" keystroke register in the
+// composer before Enter confirms it, so Enter does not race the digit.
+const feedbackSurveyDismissConfirmDelay = 150 * time.Millisecond
+
+// dismissFeedbackSurveyModal dismisses Claude Code's post-turn feedback
+// survey (ga-zg7fjq) by sending "0" (Dismiss) then Enter. Enter resolves to
+// the bundle's chat:submit action, which fires the survey's onDigit handler
+// immediately instead of waiting out its 400ms debounce -- see
+// runtime.ContainsFeedbackSurveyModal for the bundle-verified mechanism this
+// mirrors. It is a no-op unless the matcher fires, so it never sends stray
+// keystrokes into ordinary working panes. Side effects are injected so the
+// decision is unit-testable without a live tmux server. Returns whether the
+// modal was present (i.e. a dismiss was attempted).
+func dismissFeedbackSurveyModal(content string, sendKeys func(keys ...string) error, sleep func(time.Duration)) (bool, error) {
+	if !runtime.ContainsFeedbackSurveyModal(content) {
+		return false, nil
+	}
+	if err := sendKeys("0"); err != nil {
+		return true, err
+	}
+	sleep(feedbackSurveyDismissConfirmDelay)
+	return true, sendKeys("Enter")
+}
+
+// DismissFeedbackSurveyModalIfPresent clears Claude Code's post-turn
+// feedback survey (ga-zg7fjq) on the session's agent pane so a pending nudge
+// is not corrupted by, or silently swallowed into, the survey's
+// single-digit input handler. No-op when the survey is absent. A parked
+// survey reads idle to WaitForIdle, so callers must not gate this on an
+// idle-wait failure branch -- see the unconditional call from NudgeSession.
+// Best-effort: capture/send failures are swallowed (the caller retries on
+// the next wake).
+func (t *Tmux) DismissFeedbackSurveyModalIfPresent(session string) {
+	target := session
+	if agentPane, err := t.FindAgentPane(session); err == nil && agentPane != "" {
+		target = agentPane
+	}
+	sendKeys := func(keys ...string) error {
+		for _, k := range keys {
+			if _, err := t.run("send-keys", "-t", target, k); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	content, err := t.CapturePane(target, promptObservationLines)
+	if err != nil {
+		return
+	}
+	present, _ := dismissFeedbackSurveyModal(content, sendKeys, time.Sleep)
+	if !present {
+		return
+	}
+
+	// The survey can occasionally eat the first digit (e.g. a keystroke lost
+	// to a slow-to-wake detached pane); re-check and retry the dismiss pair
+	// once before giving up for this call.
+	content, err = t.CapturePane(target, promptObservationLines)
+	if err != nil {
+		return
+	}
+	_, _ = dismissFeedbackSurveyModal(content, sendKeys, time.Sleep)
 }
 
 // GetPaneCommand returns the current command running in a pane.

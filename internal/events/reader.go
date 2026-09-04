@@ -336,10 +336,13 @@ func readRotationSources(path string, filter Filter, listedArchives map[eventSeq
 	var result []Event
 	maxSeq := filter.AfterSeq
 	for _, src := range sources {
-		if src.kind == sourceArchive {
-			if _, ok := listedArchives[eventSeqWindow{first: src.firstSeq, last: src.lastSeq}]; ok {
-				continue
-			}
+		// Any source whose exact seq window an already-read archive covers is
+		// redundant: for a stable archive it IS that archive, and for a rotating
+		// file it is the archive's not-yet-removed twin holding the same seqs
+		// (the crash window between archive rename and source removal makes such
+		// twins routine, and mergeEventsBySeq would drop every line anyway).
+		if _, ok := listedArchives[eventSeqWindow{first: src.firstSeq, last: src.lastSeq}]; ok {
+			continue
 		}
 		reader, err := openSegmentReader(src)
 		if err != nil {
@@ -453,6 +456,60 @@ func streamArchive(path string, _ Filter, fn func(Event) bool) error {
 		return fmt.Errorf("scanning archive: %w", err)
 	}
 	return nil
+}
+
+// LatestArchivedMatch returns the newest archived event matching filter, and
+// whether one was found. Archives are scanned newest-first and the scan stops
+// at the first archive holding a match, so the cost is one archive rather than
+// the whole retained history.
+//
+// ReadFiltered cannot answer this question cheaply: it walks archives
+// oldest-first, so a Limit stops on the OLDEST match rather than the newest,
+// and without a Limit it gunzips and decodes every retained archive. That walk
+// grows with every rotation, which is why callers that only need the newest
+// match use this instead.
+//
+// Only archives are searched. Callers that also care about the active log
+// should read its tail first, which is the cheap case, and fall back here only
+// when the active log holds no match.
+func LatestArchivedMatch(path string, filter Filter) (Event, bool, error) {
+	dir := filepath.Dir(path)
+	archives, err := archiveFilesIn(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return Event{}, false, nil
+		}
+		return Event{}, false, fmt.Errorf("listing event archives in %q: %w", dir, err)
+	}
+	// archiveFilesIn sorts ascending by FirstSeq, so descending indexes walk
+	// newest archive first.
+	for i := len(archives) - 1; i >= 0; i-- {
+		info := archives[i]
+		if !archiveOverlapsFilter(info, filter) {
+			continue
+		}
+		var (
+			newest Event
+			found  bool
+		)
+		// Events within one archive are ordered oldest-first, so the scan runs
+		// to the end of this archive and keeps the last match.
+		err := streamArchive(filepath.Join(dir, info.Basename), filter, func(e Event) bool {
+			if !matchesFilter(e, filter) {
+				return true
+			}
+			newest = e
+			found = true
+			return true
+		})
+		if err != nil {
+			return Event{}, false, fmt.Errorf("reading archive %q: %w", info.Basename, err)
+		}
+		if found {
+			return newest, true, nil
+		}
+	}
+	return Event{}, false, nil
 }
 
 // ReadFilteredTail reads the trailing matching events from path. A positive
