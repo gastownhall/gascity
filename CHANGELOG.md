@@ -31,6 +31,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gc workflow delete-source` and `gc workflow reopen-source` write the copy
+  of the source bead the residency contract owns, not the one the selector
+  named.** An explicit `--rig` / `--store-ref` pins the store the sweep works
+  in, and both commands were writing the source bead's metadata through that
+  same store. On a converged city — infrastructure classes relocated into the
+  class binding with ids preserved, the pre-migration copies retained and
+  frozen at cutover — an operator naming the city cleared `workflow_id` on the
+  frozen twin while the binding's live row went on pointing at the workflow
+  that had just been swept. The next resolve answers from the binding, still
+  sees a workflow, and refuses the re-sling as already-running against a tree
+  that no longer exists; `reopen-source` had the same defect one verb over,
+  reopening the twin and leaving the row the city actually reads closed and
+  still bound. Both now resolve the owning copy through the by-id residency
+  walk (binding-first, a binding fault is an error and never absence), then
+  clear any other resident copy's stale `workflow_id` best-effort so the two
+  cannot disagree. A city that relocates nothing, and any `--rig` run, writes
+  exactly the store it wrote before.
+
 - **A control bead served by a relocated class binding is routed to the
   dispatcher its own `gc.root_store_ref` names.** On a split city every rig's
   control beads live in one class binding. The reconciler dropped rig-rooted
