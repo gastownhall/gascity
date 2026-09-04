@@ -8429,6 +8429,44 @@ func TestWorkflowDeleteSourceFailsWhenTheOwningCopyCannotBeCleared(t *testing.T)
 	}
 }
 
+// TestWorkflowDeleteSourceReportsAnUnopenableTwinWithoutFailing pins the twin's
+// OPEN as best-effort, the same as its write.
+//
+// The retained ledger of a converged city going unreadable — read-only, moved
+// aside, dropped once the migration was believed done — is a normal end state,
+// not a fault the operator can act on from here. The copy the residency contract
+// owns is the binding, and it answered; failing the run because the frozen twin
+// could not be opened to clear a value no reader consults would take
+// delete-source away from exactly the city the migration produced.
+//
+// The rig is what makes the sweep survive the same fault: the store scan skips
+// what it cannot open and errors only when NOTHING opened, so a converged city
+// with no second store fails before the resolution is ever reached. With one
+// openable store the run gets as far as the clear, which is the arm this row is
+// about.
+func TestWorkflowDeleteSourceReportsAnUnopenableTwinWithoutFailing(t *testing.T) {
+	cityPath, rootID, _, work, binding := relocatedWorkflowCity(t)
+	sourceID := relocatedSourceBead(t, cityPath, work, binding, rootID)
+	rigHoldingID(t, cityPath, "rig-src-1", "the rig's unrelated bead", "task")
+	if err := os.WriteFile(filepath.Join(cityPath, ".gc", "beads.json"), []byte("the retained ledger is no longer readable"), 0o644); err != nil {
+		t.Fatalf("faulting the retained ledger's open: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWorkflowDeleteSource(sourceID, sourceWorkflowStoreSelector{}, true, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc workflow delete-source exited %d over an unopenable retained twin, want 0: %s%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "metadata_cleared=true") {
+		t.Errorf("delete-source did not clear the owning copy it could reach:\n%s", stdout.String())
+	}
+	if got := sourceWorkflowID(t, binding, sourceID); got != "" {
+		t.Errorf("the binding's live source row still names workflow %q; the twin's open took the owning copy's clear down with it", got)
+	}
+	if !strings.Contains(stderr.String(), "store=city workflow_id_clear_error=") {
+		t.Errorf("the run said nothing about the twin it could not reach: %q", stderr.String())
+	}
+}
+
 // TestWorkflowReopenSourceReopensTheOwningCopyForACitySelector is ga-4kivg on
 // the other writer.
 //

@@ -2076,7 +2076,7 @@ func cmdWorkflowReopenSource(sourceBeadID string, selector sourceWorkflowStoreSe
 		// writes the source bead's metadata, and reopening the frozen twin would
 		// leave the binding's live row closed and still bound to its workflow, so
 		// the bead the city actually reads is neither reopened nor released.
-		write, err := resolveSourceWorkflowWriteTarget(cfg, cityPath, target)
+		write, err := resolveSourceWorkflowWriteTarget(cfg, cityPath, target, stderr)
 		if err != nil {
 			return err
 		}
@@ -2716,7 +2716,14 @@ type sourceWorkflowWriteTarget struct {
 // bead has no binding answer and the owning copy is the store the selector
 // named. That is what keeps every unsplit city, and every --rig run, on exactly
 // the store it wrote before.
-func resolveSourceWorkflowWriteTarget(cfg *config.City, cityPath string, target resolvedSourceWorkflowTarget) (sourceWorkflowWriteTarget, error) {
+//
+// Opening the retained twin is best-effort for the same reason writing it is
+// (see clearSourceWorkflowTwins): a converged city whose retained ledger has
+// gone read-only or been dropped is a normal end state for the migration, and
+// refusing to resolve the owning copy over it would take both commands away
+// from that city. The open failure is reported on stderr and the run continues
+// with no twin.
+func resolveSourceWorkflowWriteTarget(cfg *config.City, cityPath string, target resolvedSourceWorkflowTarget, stderr io.Writer) (sourceWorkflowWriteTarget, error) {
 	selected := target.storeView
 	if selected.store == nil || strings.TrimSpace(selected.path) == "" {
 		if strings.TrimSpace(target.storeRef) == "" {
@@ -2748,9 +2755,10 @@ func resolveSourceWorkflowWriteTarget(cfg *config.City, cityPath string, target 
 	if !slices.ContainsFunc(write.others, func(view convoyStoreView) bool { return samePath(view.path, cityPath) }) {
 		cityView, _, err := openSourceWorkflowStoreRef(cfg, cityPath, "city")
 		if err != nil {
-			return sourceWorkflowWriteTarget{}, err
+			_, _ = fmt.Fprintf(stderr, "store=city workflow_id_clear_error=%v\n", err)
+		} else {
+			write.others = appendSourceWorkflowCopy(write.others, write.owning, cityView)
 		}
-		write.others = appendSourceWorkflowCopy(write.others, write.owning, cityView)
 	}
 	return write, nil
 }
@@ -2793,7 +2801,7 @@ func sameSourceWorkflowCopy(a, b convoyStoreView) bool {
 // is being told about: a run that cleared only a frozen twin has changed nothing
 // any reader will see.
 func clearSourceWorkflowMetadata(cfg *config.City, cityPath string, target resolvedSourceWorkflowTarget, stderr io.Writer) (bool, error) {
-	write, err := resolveSourceWorkflowWriteTarget(cfg, cityPath, target)
+	write, err := resolveSourceWorkflowWriteTarget(cfg, cityPath, target, stderr)
 	if err != nil {
 		return false, err
 	}
