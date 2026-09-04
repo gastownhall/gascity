@@ -898,6 +898,62 @@ func TestBdByIDReservedPrefixSetsAgreeAcrossTheTwoReaders(t *testing.T) {
 	}
 }
 
+// TestBdByIDDoorProvesResidenceOnTheHandleItWritesThrough pins the claim
+// bdByIDClassDoor.CityPath's doc makes, which is the one assumption the collapse
+// onto storeref introduced and no other row covers.
+//
+// The door now has TWO derivations of "this city's class binding" inside one
+// command. Graph and Store come from cliSoleClassBinding at open time; the
+// residence answer comes from cliByIDBindingOwner, which re-plans over the city
+// PATH. The doc says both land on the same handle because both read the
+// cliResidencyBindings memo — and if that ever stops being true the failure is
+// invisible from either side: resolve proves the row is resident in one copy of
+// the binding, the write then goes to Graph over another, and each half is
+// individually correct.
+//
+// Store identity is the whole assertion. Both id shapes are covered because they
+// take different legs — a work-shaped relic reaches the binding on the residence
+// PROBE, a reserved id on the AUTHORITY leg — and a drift that moved only one of
+// them would still lose writes.
+func TestBdByIDDoorProvesResidenceOnTheHandleItWritesThrough(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	relic, classStore := classResidentWorkShapedBead(t, cityPath, "gc-relic1", "an orphaned patrol root")
+
+	door, relocated, err := openBdByIDClassFrontDoor(cityPath)
+	if err != nil {
+		t.Fatalf("opening the by-id class front door: %v", err)
+	}
+	if !relocated {
+		t.Fatal("the fixture city resolved no class binding, so there is no door to test")
+	}
+	if door.Store != classStore {
+		t.Fatalf("the door serves %p and the funnel's binding is %p; the fixture is not exercising one handle and every comparison below is vacuous", door.Store, classStore)
+	}
+
+	reserved := mustCreateClassBead(t, classStore, beads.Bead{Title: "minted inside the binding's own namespace", Type: "task"})
+	for _, tc := range []struct {
+		name string
+		id   string
+		leg  string
+	}{
+		{name: "work-shaped relic", id: relic.ID, leg: "the residence probe"},
+		{name: "reserved id", id: reserved.ID, leg: "the authority leg"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			owner, owned, err := cliByIDBindingOwner(door.CityPath, tc.id)
+			if err != nil {
+				t.Fatalf("planning %s over %s: %v", tc.id, door.CityPath, err)
+			}
+			if !owned {
+				t.Fatalf("the plan left %s to the work axis, so %s never reached the binding and this row proves nothing", tc.id, tc.leg)
+			}
+			if owner.Store != door.Store {
+				t.Errorf("%s resolved %s to %p while the door writes through %p; residence is being proven in one copy of the binding and the write lands in another", tc.leg, tc.id, owner.Store, door.Store)
+			}
+		})
+	}
+}
+
 // TestBdByIDEntersTheFunnelOnlyForInvocationsThatCouldConcernAClassBead pins the
 // cost gate, as a NEGATIVE about work that must not happen.
 //
