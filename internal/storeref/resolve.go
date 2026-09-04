@@ -661,7 +661,15 @@ var ErrProvenRelicRefusal = errors.New("a relic census proved this binding holds
 // axis instead of handing the work leg back unprobed.
 func resolveByID(p ResolvedPlan, id string, bindingOnly bool) (Owner, bool, error) {
 	if p.Mode != ModeFirstOwner {
-		return Owner{}, false, fmt.Errorf("storeref: ResolveOwner needs a %s plan, got %s", ModeFirstOwner, p.Mode)
+		// Named for the executor the caller actually called. This is the one
+		// message in the package a shared body can get wrong that way, and a
+		// caller sent to ResolveOwner's contract when it broke
+		// ResolveBindingOwner's reads a doc about a work leg it does not have.
+		executor := "ResolveOwner"
+		if bindingOnly {
+			executor = "ResolveBindingOwner"
+		}
+		return Owner{}, false, fmt.Errorf("storeref: %s needs a %s plan, got %s", executor, ModeFirstOwner, p.Mode)
 	}
 	id = strings.TrimSpace(id)
 	if p.ID != "" && p.ID != id {

@@ -462,11 +462,23 @@ func TestResolveBindingOwnerSurfacesAReadFault(t *testing.T) {
 	}
 }
 
+// TestResolveBindingOwnerRejectsAUnionPlan also pins WHICH executor the
+// refusal names.
+//
+// The guard is shared by both ModeFirstOwner executors, so it is the one
+// sentence in this package that can name a function the caller did not call.
+// The message is a caller's only pointer back to the contract it broke, and
+// sending someone reading ResolveBindingOwner's fall-through semantics to
+// ResolveOwner's doc is a wrong answer delivered with total confidence.
 func TestResolveBindingOwnerRejectsAUnionPlan(t *testing.T) {
 	f := newT1()
 	plan := mustPlan(t, RoutedWork{}, f.topo)
-	if _, _, err := ResolveBindingOwner(plan, workShapedID); err == nil {
+	_, _, err := ResolveBindingOwner(plan, workShapedID)
+	if err == nil {
 		t.Fatal("ResolveBindingOwner accepted a Union plan; the mode decides the executor")
+	}
+	if !strings.Contains(err.Error(), "ResolveBindingOwner") {
+		t.Errorf("the refusal reads %q and names an executor this caller never called", err)
 	}
 }
 
@@ -481,11 +493,19 @@ func TestResolveOwnerRejectsAMismatchedID(t *testing.T) {
 	}
 }
 
+// TestResolveOwnerRejectsAUnionPlan is the other half of the naming pin: the
+// shared guard must still name THIS executor for the caller that walks the
+// whole plan, or a fix that stopped hard-coding one name has just hard-coded
+// the other.
 func TestResolveOwnerRejectsAUnionPlan(t *testing.T) {
 	f := newT1()
 	plan := mustPlan(t, RoutedWork{}, f.topo)
-	if _, _, err := ResolveOwner(plan, workShapedID); err == nil {
+	_, _, err := ResolveOwner(plan, workShapedID)
+	if err == nil {
 		t.Fatal("ResolveOwner accepted a Union plan; the mode decides the executor")
+	}
+	if !strings.Contains(err.Error(), "ResolveOwner") || strings.Contains(err.Error(), "ResolveBindingOwner") {
+		t.Errorf("the refusal reads %q, want the whole-plan executor named", err)
 	}
 }
 
