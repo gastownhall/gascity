@@ -208,6 +208,13 @@ func TestStartupHealthEpisodesCheckCanFixIsFalse(t *testing.T) {
 	}
 }
 
+func TestStartupHealthEpisodesCheckWarmupEligibleIsFalse(t *testing.T) {
+	check := newStartupHealthEpisodesCheck(&config.City{}, t.TempDir(), nil)
+	if check.WarmupEligible() {
+		t.Fatal("expected WarmupEligible to return false; this check is not part of the gc start warm-up scan")
+	}
+}
+
 func TestStartupHealthEpisodesCheckNeverLeaksLastDetail(t *testing.T) {
 	cityDir := t.TempDir()
 	mem := beads.NewMemStore()
