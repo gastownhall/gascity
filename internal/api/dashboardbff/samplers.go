@@ -441,7 +441,7 @@ func (m *samplerManager) probeRig(ctx context.Context, rigName, rigPath string) 
 
 // parsePingCheck normalizes bd ping's provider-neutral JSON result into the
 // existing dashboard check shape. ping is intentionally a single connectivity
-// check: unlike bd doctor, ping is available for embedded, direct-server, and
+// check: ping is available for embedded, direct-server, and
 // proxied-server stores, so the dashboard does not need transport-specific
 // branches. A non-zero exit is still represented as a check when ping emitted
 // valid JSON, preserving the actionable provider error for the dashboard.
