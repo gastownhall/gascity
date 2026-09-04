@@ -57,7 +57,7 @@ func preflightIdentityDeferredReader(cityPath string) func(scope string) bool {
 		if err != nil || !ok {
 			return false
 		}
-		return target.External
+		return target.External || target.DoltMode == "proxied-server"
 	}
 }
 
