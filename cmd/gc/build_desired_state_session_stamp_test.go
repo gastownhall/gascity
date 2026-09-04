@@ -264,3 +264,36 @@ func TestStampRunSessionIdentityToleratesLengthMismatchAndNilSnapshot(t *testing
 		t.Errorf("expected no writes on degenerate input, got %d", store.writes)
 	}
 }
+
+func TestStampRunSessionIdentityPreservesRealEvidenceAgainstPoolSlotSelfCwd(t *testing.T) {
+	// ga-3c5isi / #5193: a session whose OWN bead never carries
+	// pool_managed=true (a manual/named session, or a pool session mid
+	// classification) can still be physically running from a pool slot's own
+	// worktree root. Before this guard, !sbInfo.PoolManaged alone satisfied
+	// the stamp condition and gc.work_dir was overwritten unconditionally
+	// from that session's cwd -- clobbering real per-bead worktree evidence
+	// already on the work bead with a pool-slot label.
+	const (
+		sessionName  = "gascity--builder-1"
+		poolSlotSelf = "/home/jaword/projects/gc-management/.gc/worktrees/gascity/builder-1"
+		realEvidence = "/home/ds/gascity-worktrees/ga-3c5isi"
+	)
+	run := beads.Bead{
+		ID: "ga-3c5isi", Type: "task", Status: "in_progress", Assignee: sessionName,
+		Metadata: map[string]string{"gc.work_dir": realEvidence},
+	}
+	mem := beads.NewMemStoreFrom(0, []beads.Bead{run}, nil)
+	store := &countingStore{Store: mem}
+	// Not pool_managed: stampTestSession leaves pool_managed unset/false.
+	sessions := newSessionBeadSnapshot([]beads.Bead{stampTestSession(sessionName, poolSlotSelf)})
+
+	stampRunSessionIdentity([]beads.Bead{run}, []beads.Store{store}, sessions, io.Discard)
+
+	got, err := mem.Get(run.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", run.ID, err)
+	}
+	if got.Metadata["gc.work_dir"] != realEvidence {
+		t.Fatalf("gc.work_dir = %q, want %q (real worktree evidence must survive a pool-slot-shaped self cwd)", got.Metadata["gc.work_dir"], realEvidence)
+	}
+}
