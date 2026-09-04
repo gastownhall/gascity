@@ -19,6 +19,9 @@
 #   GC_DOLT_PORT  — dolt server port (default: ephemeral, hashed from city path)
 #   GC_DOLT_USER  — dolt user (default: root)
 #   GC_DOLT_PASSWORD — dolt password (default: empty)
+#   GC_BEADS_PROXY_EXTERNAL_HOST/PORT — adapter-only upstream endpoint for a
+#                   proxied-external bd init; never used by Gas City's direct
+#                   lifecycle manager.
 #   GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS — concurrent-start wait budget in
 #       milliseconds (default: 75000 + 2× the lock-release window = 195000 at
 #       defaults, covering the start-flock winner's worst-case stop — 30s
@@ -2670,6 +2673,8 @@ run_bd_init_proxied() {
     local dir="$1"
     local prefix="$2"
     local dolt_database="$3"
+    local external_host="${GC_BEADS_PROXY_EXTERNAL_HOST:-}"
+    local external_port="${GC_BEADS_PROXY_EXTERNAL_PORT:-}"
     (
         cd "$dir" || exit 1
         export BEADS_DIR="$dir/.beads"
@@ -2677,13 +2682,19 @@ run_bd_init_proxied() {
         unset BEADS_DOLT_AUTO_START
         unset GC_DOLT GC_DOLT_HOST GC_DOLT_PORT GC_DOLT_USER GC_DOLT_PASSWORD
         unset GC_DOLT_DATA_DIR GC_DOLT_LOG_FILE GC_DOLT_STATE_FILE GC_DOLT_PID_FILE GC_DOLT_LOCK_FILE GC_DOLT_CONFIG_FILE
-        unset BEADS_DOLT_SERVER_MODE BEADS_DOLT_SERVER_DATABASE BEADS_DOLT_SERVER_HOST BEADS_DOLT_SERVER_PORT BEADS_DOLT_SERVER_USER BEADS_DOLT_PASSWORD
+        unset BEADS_DOLT_SERVER_MODE BEADS_DOLT_SERVER_DATABASE BEADS_DOLT_SERVER_HOST BEADS_DOLT_SERVER_PORT BEADS_DOLT_SERVER_SOCKET BEADS_DOLT_SERVER_USER BEADS_DOLT_PASSWORD
         bd_bin="${BD_BIN:-bd}"
-        if [ -n "$dolt_database" ]; then
-            "$bd_bin" init --quiet --proxied-server -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents "$dir"
-        else
-            "$bd_bin" init --quiet --proxied-server -p "$prefix" --skip-hooks --skip-agents "$dir"
+        set -- init --quiet --proxied-server
+        if [ -n "$external_host" ] || [ -n "$external_port" ]; then
+            [ -n "$external_host" ] && [ -n "$external_port" ] || die "proxied-external init requires both GC_BEADS_PROXY_EXTERNAL_HOST and GC_BEADS_PROXY_EXTERNAL_PORT"
+            set -- "$@" --proxied-server-external-host "$external_host" --proxied-server-external-port "$external_port"
         fi
+        set -- "$@" -p "$prefix"
+        if [ -n "$dolt_database" ]; then
+            set -- "$@" --database "$dolt_database"
+        fi
+        set -- "$@" --skip-hooks --skip-agents "$dir"
+        "$bd_bin" "$@"
     )
 }
 
@@ -2697,7 +2708,7 @@ run_bd_doltlite() {
         export GC_BEADS_BACKEND="doltlite"
         unset GC_DOLT_HOST GC_DOLT_PORT GC_DOLT_USER GC_DOLT_PASSWORD GC_DOLT
         unset BEADS_DOLT_DATABASE BEADS_DOLT_PORT
-        unset BEADS_DOLT_SERVER_DATABASE BEADS_DOLT_SERVER_HOST BEADS_DOLT_SERVER_MODE BEADS_DOLT_SERVER_PORT BEADS_DOLT_SERVER_USER BEADS_DOLT_PASSWORD
+        unset BEADS_DOLT_SERVER_DATABASE BEADS_DOLT_SERVER_HOST BEADS_DOLT_SERVER_MODE BEADS_DOLT_SERVER_PORT BEADS_DOLT_SERVER_SOCKET BEADS_DOLT_SERVER_USER BEADS_DOLT_PASSWORD
         export BEADS_DOLT_AUTO_START=0
         "${BD_BIN:-bd}" "$@"
     )
@@ -2917,12 +2928,12 @@ op_init() {
     # beads (#1039). Must match doctor.RequiredCustomTypes.
     local custom_types="${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step}"
 
-    # Fresh managed-local scopes default to beads RC's proxied-server mode.
-    # Existing authoritative modes are preserved by the metadata/config
-    # canonicalizer, and explicit external endpoints stay on the direct path.
+    # Fresh managed-local scopes use direct/server mode by default. An explicit
+    # [dolt] mode = "proxied-server" selector is persisted in config before
+    # this helper runs; existing authoritative modes remain unchanged.
     if scope_is_proxied "$dir"; then
         ensure_beads_dir_permissions "$dir"
-        # A fresh proxied scope may already have config.yaml (gc writes the
+        # An explicitly opted-in proxied scope may already have config.yaml (gc writes the
         # canonical mode before invoking this helper) but no metadata.json.
         # `bd context` can succeed from ambient parent state in that shape, so
         # use the RC's metadata marker as the initialization witness. Honor

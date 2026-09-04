@@ -149,10 +149,44 @@ func ResolveDoltConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string) (DoltCo
 	} else if ok && strings.TrimSpace(db) != "" {
 		target.Database = strings.TrimSpace(db)
 	}
+	if strings.TrimSpace(target.DoltMode) == "" {
+		if mode, ok, err := ReadDoltMode(fs, filepath.Join(scopeRoot, ".beads", "metadata.json")); err != nil {
+			return DoltConnectionTarget{}, err
+		} else if ok {
+			target.DoltMode = strings.TrimSpace(mode)
+		}
+	}
+	// Beads persists externally-owned proxied upstreams in its provider
+	// sidecar. This authority applies to city and inherited rig scopes alike;
+	// do not force inherited scopes through the city's managed runtime path.
+	if strings.EqualFold(target.DoltMode, "proxied-server") {
+		backend, _, backendErr := ReadMetadataBackend(fs, filepath.Join(scopeRoot, ".beads", "metadata.json"))
+		if backendErr != nil {
+			return DoltConnectionTarget{}, backendErr
+		}
+		if IsDoltBackend(backend) {
+			if sidecar, ok, err := readProxiedClientInfo(fs, filepath.Join(scopeRoot, ".beads", "proxied_server_client_info.json")); err != nil {
+				return DoltConnectionTarget{}, err
+			} else if ok {
+				target.Host, target.Port, target.Socket, target.User = sidecar.External.Host, strconv.Itoa(sidecar.External.Port), sidecar.External.Socket, sidecar.External.User
+				target.External = true
+				target.EndpointStatus = EndpointStatusVerified
+				if sameScope(scopeRoot, cityRoot) {
+					target.EndpointOrigin = EndpointOriginCityCanonical
+				} else {
+					target.EndpointOrigin = EndpointOriginExplicit
+				}
+				return target, nil
+			}
+		}
+	}
 
 	switch cfg.EndpointOrigin {
 	case EndpointOriginManagedCity:
-		if strings.EqualFold(strings.TrimSpace(cfg.DoltMode), "proxied-server") {
+		if strings.EqualFold(strings.TrimSpace(target.DoltMode), "proxied-server") {
+			if strings.TrimSpace(cfg.DoltSocket) != "" || strings.TrimSpace(cfg.DoltHost) != "" || strings.TrimSpace(cfg.DoltPort) != "" {
+				return populateExternalTarget(target, cfg)
+			}
 			return target, nil
 		}
 		port, err := readManagedRuntimePort(fs, cityRoot)
@@ -169,6 +203,53 @@ func ResolveDoltConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string) (DoltCo
 	default:
 		return DoltConnectionTarget{}, fmt.Errorf("unsupported endpoint origin %q for %s", cfg.EndpointOrigin, cfgPath)
 	}
+}
+
+type proxiedClientInfo struct {
+	External *struct {
+		Host          string `json:"host"`
+		Port          int    `json:"port"`
+		Socket        string `json:"socket"`
+		User          string `json:"user"`
+		TLSRequired   bool   `json:"tls_required"`
+		TLSCACert     string `json:"tls_ca_cert"`
+		TLSCert       string `json:"tls_cert"`
+		TLSKey        string `json:"tls_key"`
+		TLSServerName string `json:"tls_server_name"`
+		TLSSkipVerify bool   `json:"tls_skip_verify"`
+	} `json:"external"`
+}
+
+func readProxiedClientInfo(fs fsys.FS, path string) (proxiedClientInfo, bool, error) {
+	b, err := fs.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return proxiedClientInfo{}, false, nil
+		}
+		return proxiedClientInfo{}, false, err
+	}
+	var info proxiedClientInfo
+	if err := json.Unmarshal(b, &info); err != nil {
+		return proxiedClientInfo{}, false, fmt.Errorf("read proxied client info: %w", err)
+	}
+	if info.External == nil {
+		// Managed-local proxied scopes persist the same sidecar with only
+		// proxy lifecycle fields. The absence of an external block is valid and
+		// means Beads owns the upstream locally.
+		return proxiedClientInfo{}, false, nil
+	}
+	e := info.External
+	if e.TLSRequired || e.TLSCACert != "" || e.TLSCert != "" || e.TLSKey != "" || e.TLSServerName != "" || e.TLSSkipVerify {
+		return proxiedClientInfo{}, false, fmt.Errorf("unsupported TLS proxied sidecar transport")
+	}
+	if strings.TrimSpace(e.Socket) != "" {
+		if e.Host != "" || e.Port != 0 || !filepath.IsAbs(e.Socket) {
+			return proxiedClientInfo{}, false, fmt.Errorf("invalid proxied client info socket target")
+		}
+	} else if e.Host == "" || e.Port < 1 || e.Port > 65535 {
+		return proxiedClientInfo{}, false, fmt.Errorf("invalid proxied client info host/port target")
+	}
+	return proxiedClientInfo{External: e}, true, nil
 }
 
 // ValidateCanonicalConfigState validates canonical scope config invariants.
@@ -224,6 +305,9 @@ func ValidateCanonicalConfigState(fs fsys.FS, cityRoot, scopeRoot string, cfg Co
 				if strings.TrimSpace(cityState.DoltSocket) != strings.TrimSpace(cfg.DoltSocket) {
 					return fmt.Errorf("canonical inherited rig config must mirror the city endpoint")
 				}
+				if strings.TrimSpace(cityState.DoltUser) != strings.TrimSpace(cfg.DoltUser) {
+					return fmt.Errorf("canonical inherited rig config must mirror the city endpoint user")
+				}
 				return nil
 			}
 			if strings.TrimSpace(cfg.DoltHost) == "" || strings.TrimSpace(cfg.DoltPort) == "" {
@@ -251,6 +335,7 @@ func ResolveAuthoritativeConfigState(fs fsys.FS, cityRoot, scopeRoot, issuePrefi
 	}
 
 	port := strings.TrimSpace(existing.DoltPort)
+	socket := strings.TrimSpace(existing.DoltSocket)
 	rawHost := strings.TrimSpace(existing.DoltHost)
 	host := canonicalExternalHost(existing.DoltHost, port)
 	if sameScope(scopeRoot, cityRoot) {
@@ -269,7 +354,7 @@ func ResolveAuthoritativeConfigState(fs fsys.FS, cityRoot, scopeRoot, issuePrefi
 			}
 			return existing, true, nil
 		case "":
-			if host == "" && port == "" {
+			if host == "" && port == "" && socket == "" {
 				return ConfigState{}, false, nil
 			}
 			existing.EndpointOrigin = EndpointOriginCityCanonical
@@ -312,7 +397,7 @@ func ResolveAuthoritativeConfigState(fs fsys.FS, cityRoot, scopeRoot, issuePrefi
 		}
 		return existing, true, nil
 	case "":
-		if rawHost == "" && port == "" {
+		if rawHost == "" && port == "" && socket == "" {
 			return ConfigState{}, false, nil
 		}
 		if rawHost == "" && port != "" {
@@ -436,7 +521,7 @@ func ValidateConnectionConfigState(fs fsys.FS, cityRoot, scopeRoot string, cfg C
 	if sameScope(scopeRoot, cityRoot) {
 		switch cfg.EndpointOrigin {
 		case EndpointOriginManagedCity:
-			if hasTrackedEndpoint {
+			if hasTrackedEndpoint && !strings.EqualFold(strings.TrimSpace(cfg.DoltMode), "proxied-server") {
 				return fmt.Errorf("managed city config must not track dolt.host, dolt.port, or dolt.user")
 			}
 		case EndpointOriginCityCanonical:

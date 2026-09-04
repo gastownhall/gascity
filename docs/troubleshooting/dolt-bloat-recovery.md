@@ -6,8 +6,9 @@ description: Recover a Gas City beads store whose Dolt noms directory has grown 
 ## Overview
 
 This runbook applies to a direct managed Dolt server. Fresh managed-local Gas
-City scopes default to Beads' `proxied-server` mode, whose child Dolt lifecycle
-is owned by Beads rather than Gas City. In direct mode, Dolt records every write as
+City scopes use direct/server mode by default; set `[dolt] mode =
+"proxied-server"` before initialization to opt into Beads' proxied mode, whose
+child Dolt lifecycle is owned by Beads rather than Gas City. In direct mode, Dolt records every write as
 immutable chunks under `.beads/dolt/<database>/.dolt/noms/`. Chunks are
 only reclaimed by garbage collection. Dolt's auto-GC fires when ~125 MB of
 new chunks have accumulated since the last GC, which means a database that

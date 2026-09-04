@@ -689,15 +689,16 @@ func (c *BeadsStoreCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 	if active {
-		addr := net.JoinHostPort(target.Host, target.Port)
-		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
-		if err != nil {
-			r.Status = StatusError
-			r.Message = fmt.Sprintf("dolt server not reachable at %s", addr)
-			r.FixHint = doltServerFixHint(target)
-			return r
+		if !strings.EqualFold(target.DoltMode, "proxied-server") || target.External {
+			addr, conn, err := dialDoltTarget(target)
+			if err != nil {
+				r.Status = StatusError
+				r.Message = fmt.Sprintf("dolt server not reachable at %s", addr)
+				r.FixHint = doltServerFixHint(target)
+				return r
+			}
+			conn.Close() //nolint:errcheck // best-effort close
 		}
-		conn.Close() //nolint:errcheck // best-effort close
 	}
 	result, err := c.newStore(c.cityPath)
 	if err != nil {
@@ -728,6 +729,18 @@ func (c *BeadsStoreCheck) CanFix() bool { return false }
 
 // Fix is a no-op.
 func (c *BeadsStoreCheck) Fix(_ *CheckContext) error { return nil }
+
+// dialDoltTarget probes the transport selected by the canonical connection
+// contract. A Unix socket is authoritative when present; otherwise host/port
+// identifies the TCP endpoint. Callers own the returned connection.
+func dialDoltTarget(target contract.DoltConnectionTarget) (string, net.Conn, error) {
+	network, addr := "tcp", net.JoinHostPort(target.Host, target.Port)
+	if target.Socket != "" {
+		network, addr = "unix", target.Socket
+	}
+	conn, err := net.DialTimeout(network, addr, 2*time.Second)
+	return addr, conn, err
+}
 
 // BDSplitStoreCheck warns when legacy bd embedded/server store directories
 // coexist and the inactive store still contains Dolt data.
@@ -1114,13 +1127,14 @@ func scopeUsesBDDoltliteStore(cityPath, scopePath string) bool {
 // doctorScopeUsesProxiedDoltMode reports whether the effective beads scope is
 // persisted in Beads' proxied-server mode. A proxied scope is served by the
 // beads UOW/proxy path, so there is no Gas City-managed direct Dolt listener
-// for DoltServerCheck to probe.
+// for DoltServerCheck to probe. Direct/server remains the default when no
+// persisted or explicit proxy selector is present.
 //
 // Metadata is consulted first because it is emitted by the backend initializer
 // and is the strongest persisted statement of the mode. A non-proxied marker
 // is authoritative too: an older direct-server scope must not inherit a newer
-// city's proxied default. For inherited rigs, a missing local marker falls
-// back to the city's persisted mode.
+// a config-selected proxy mode. For inherited rigs, a missing local marker
+// falls back to the city's persisted mode.
 func doctorScopeUsesProxiedDoltMode(cityPath, scopePath string) bool {
 	return doctorScopeUsesProxiedDoltModeForRig(cityPath, scopePath, nil)
 }
@@ -1148,7 +1162,7 @@ func doctorScopeUsesProxiedDoltModeForRig(cityPath, scopePath string, configured
 	// A configured rig can carry a legacy explicit endpoint in city.toml while
 	// its local .beads files are still absent (for example immediately after
 	// registration). That endpoint is direct-scope ownership and must take
-	// precedence over the city's proxied default during classification.
+	// precedence over the city's selected proxy mode during classification.
 	if !sameDoctorScope(cityPath, scopePath) {
 		if configuredRig != nil && doctorRigHasExplicitEndpoint(*configuredRig) {
 			return false
@@ -1343,12 +1357,6 @@ func (c *DoltServerCheck) Run(_ *CheckContext) *CheckResult {
 		r.Message = "not required (bd backend=doltlite)"
 		return r
 	}
-	if doctorScopeUsesProxiedDoltMode(c.cityPath, c.cityPath) {
-		r.Status = StatusOK
-		r.Message = "not required (bd backend=dolt proxied-server)"
-		return r
-	}
-
 	target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, c.cityPath, c.cityPath)
 	if err != nil {
 		r.Status = StatusError
@@ -1356,11 +1364,12 @@ func (c *DoltServerCheck) Run(_ *CheckContext) *CheckResult {
 		r.FixHint = resolveDoltServerFixHint(fsys.OSFS{}, c.cityPath)
 		return r
 	}
-	network, addr := "tcp", net.JoinHostPort(target.Host, target.Port)
-	if target.Socket != "" {
-		network, addr = "unix", target.Socket
+	if doctorScopeUsesProxiedDoltMode(c.cityPath, c.cityPath) && target.Socket == "" && target.Host == "" {
+		r.Status = StatusOK
+		r.Message = "not required (bd backend=dolt proxied-server)"
+		return r
 	}
-	conn, err := net.DialTimeout(network, addr, 2*time.Second)
+	addr, conn, err := dialDoltTarget(target)
 	if err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("dolt server not reachable at %s", addr)
@@ -1414,6 +1423,26 @@ func (c *RigDoltServerCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 	if doctorScopeUsesProxiedDoltModeForRig(c.cityPath, rigPath, &c.rig) {
+		target, resolveErr := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, c.cityPath, rigPath)
+		if resolveErr != nil {
+			r.Status = StatusError
+			r.Message = fmt.Sprintf("resolve dolt target: %v", resolveErr)
+			r.FixHint = "reconcile the proxied Dolt endpoint"
+			return r
+		}
+		if target.External {
+			addr, conn, dialErr := dialDoltTarget(target)
+			if dialErr != nil {
+				r.Status = StatusError
+				r.Message = fmt.Sprintf("dolt server not reachable at %s", addr)
+				r.FixHint = doltServerFixHint(target)
+				return r
+			}
+			conn.Close() //nolint:errcheck // best-effort close
+			r.Status = StatusOK
+			r.Message = fmt.Sprintf("reachable on %s (proxied-server external)", addr)
+			return r
+		}
 		r.Status = StatusOK
 		r.Message = "not required (bd backend=dolt proxied-server)"
 		return r
@@ -1455,11 +1484,12 @@ func (c *RigDoltServerCheck) Run(_ *CheckContext) *CheckResult {
 			return r
 		}
 	}
-	network, addr := "tcp", net.JoinHostPort(target.Host, target.Port)
-	if target.Socket != "" {
-		network, addr = "unix", target.Socket
+	if strings.EqualFold(target.DoltMode, "proxied-server") && !target.External {
+		r.Status = StatusOK
+		r.Message = "not required (bd backend=dolt proxied-server)"
+		return r
 	}
-	conn, err := net.DialTimeout(network, addr, 2*time.Second)
+	addr, conn, err := dialDoltTarget(target)
 	if err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("dolt server not reachable at %s", addr)
@@ -1692,15 +1722,16 @@ func (c *RigBeadsCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 	if active {
-		addr := net.JoinHostPort(target.Host, target.Port)
-		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
-		if err != nil {
-			r.Status = StatusError
-			r.Message = fmt.Sprintf("dolt server not reachable at %s", addr)
-			r.FixHint = doltServerFixHint(target)
-			return r
+		if !strings.EqualFold(target.DoltMode, "proxied-server") || target.External {
+			addr, conn, err := dialDoltTarget(target)
+			if err != nil {
+				r.Status = StatusError
+				r.Message = fmt.Sprintf("dolt server not reachable at %s", addr)
+				r.FixHint = doltServerFixHint(target)
+				return r
+			}
+			conn.Close() //nolint:errcheck // best-effort close
 		}
-		conn.Close() //nolint:errcheck // best-effort close
 	}
 	store, err := c.newStore(rigPath)
 	if err != nil {

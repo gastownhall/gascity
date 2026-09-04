@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -665,9 +667,8 @@ prefix = "repo"
 		t.Fatal(err)
 	}
 	// This test exercises projection of a live Gas City-managed SQL server.
-	// Mark the fixture as an existing direct-server scope explicitly; a fresh
-	// managed scope now defaults to beads' proxied-server mode and has no
-	// Gas City-owned port to project.
+	// Mark the fixture as an existing direct-server scope explicitly so the
+	// projection remains tied to the direct lifecycle under test.
 	writeScopeMetadata(t, cityDir, map[string]string{
 		"database":      "dolt",
 		"backend":       "dolt",
@@ -846,6 +847,63 @@ esac
 		if stderr.String() != tc.wantStderr {
 			t.Fatalf("doBd(%v) stderr = %q, want %q", args, stderr.String(), tc.wantStderr)
 		}
+	}
+}
+
+// TestGcBdExternalUnixSocketFrontDoor exercises the production gc bd routing
+// path with a canonical Unix endpoint. The child bd sees only the socket
+// target (ambient TCP values are cleared), while doctor probes that same
+// listener; no Gas City-managed runtime sidecar is created.
+func TestGcBdExternalUnixSocketFrontDoor(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+	cityFlag, rigFlag = "", ""
+	cityDir := t.TempDir()
+	beadsDir := filepath.Join(cityDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	socket := filepath.Join(cityDir, "dolt.socket")
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("listen unix: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close(); _ = os.Remove(socket) })
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname=\"demo\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeScopeMetadata(t, cityDir, map[string]string{"database": "dolt", "backend": "dolt", "dolt_mode": "server", "dolt_database": "hq"})
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue_prefix: gc\ngc.endpoint_origin: city_canonical\ngc.endpoint_status: verified\ndolt.socket: "+socket+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	script := filepath.Join(binDir, "bd")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '{\\\"socket\\\":\\\"%s\\\",\\\"host\\\":\\\"%s\\\",\\\"port\\\":\\\"%s\\\"}\\n' \\\"${BEADS_DOLT_SERVER_SOCKET:-}\\\" \\\"${GC_DOLT_HOST:-}\\\" \\\"${GC_DOLT_PORT:-}\\\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_DOLT_HOST", "stale.example")
+	t.Setenv("GC_DOLT_PORT", "4406")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "stale.example")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "4406")
+	t.Setenv("BEADS_DOLT_SERVER_SOCKET", socket)
+	var stdout, stderr bytes.Buffer
+	if got := doBd([]string{"show", "gc-1", "--json"}, &stdout, &stderr); got != 0 {
+		t.Fatalf("doBd()=%d stderr=%q", got, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), socket) || strings.Contains(stdout.String(), "stale.example") || strings.Contains(stdout.String(), "4406") {
+		t.Fatalf("child env output=%q; want socket only", stdout.String())
+	}
+	r := doctor.NewDoltServerCheck(cityDir, false).Run(&doctor.CheckContext{})
+	if r.Status != doctor.StatusOK {
+		t.Fatalf("doctor status=%d msg=%q", r.Status, r.Message)
+	}
+	if _, err := os.Stat(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt", "dolt-state.json")); !os.IsNotExist(err) {
+		t.Fatalf("managed sidecar state created: %v", err)
+	}
+	_ = ln.Close()
+	if _, err := os.Stat(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt", "dolt-state.json")); !os.IsNotExist(err) {
+		t.Fatalf("sidecar state mutated after outage: %v", err)
 	}
 }
 

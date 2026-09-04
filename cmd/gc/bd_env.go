@@ -442,6 +442,8 @@ func applyCanonicalDoltTargetEnv(env map[string]string, target contract.DoltConn
 	if socket := strings.TrimSpace(target.Socket); socket != "" {
 		delete(env, "GC_DOLT_HOST")
 		delete(env, "GC_DOLT_PORT")
+		delete(env, "BEADS_DOLT_SERVER_HOST")
+		delete(env, "BEADS_DOLT_SERVER_PORT")
 		env["BEADS_DOLT_SERVER_SOCKET"] = socket
 		return
 	}
@@ -1171,6 +1173,9 @@ func resolvedRuntimeCityDoltTargetContext(ctx context.Context, cityPath string, 
 	}
 
 	if target, ok := externalDoltEnvOverrideTarget(); ok {
+		if target.Socket != "" {
+			return target, true, nil
+		}
 		return target, true, nil
 	}
 
@@ -2021,6 +2026,7 @@ func mergeRuntimeEnv(environ []string, overrides map[string]string) []string {
 		"BEADS_DOLT_PROXIED_SERVER",
 		"BEADS_DOLT_SERVER_HOST",
 		"BEADS_DOLT_SERVER_PORT",
+		"BEADS_DOLT_SERVER_SOCKET",
 		"BEADS_DOLT_SERVER_USER",
 		"GC_CITY",
 		"GC_CITY_ROOT", // kept for stripping: no code emits this anymore, but inherited values must be cleaned

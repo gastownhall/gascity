@@ -1,0 +1,153 @@
+{
+  "commit_message": "Create proxied-default execution graph",
+  "nodes": [
+    {
+      "key": "architecture-contract",
+      "title": "Ratify provider-neutral proxied-default contract and RC acceptance matrix",
+      "type": "decision",
+      "description": "Sol architecture gate. Rewrite ga-p9iuv.30 implementation language around provider-neutral transport=direct|proxied and target=local|external, bd-owned lifecycle, persisted-state authority, explicit direct escape hatches, no auto-migration, and Decision 23 retry-safe partial-init behavior. Define exact bd 1.3 capability/error/front-door acceptance matrix.",
+      "assignee": "Sol",
+      "priority": 0,
+      "parent_id": "ga-p9iuv.30",
+      "labels": ["beads", "proxy", "rc", "substrate", "status/needs-review-auto"],
+      "metadata": {"owner": "Sol", "role": "architecture", "review.required": "Sol", "pr.label": "status/needs-review-auto"}
+    },
+    {
+      "key": "init-selector-default",
+      "title": "Implement provider-neutral init intent and proxied-local default",
+      "type": "feature",
+      "description": "Terra implementation slice. Make fresh bd/Dolt init default to proxied-local, translate ephemeral generic transport/target axes to bd 1.3, retain explicit direct-local/direct-external/proxied-external choices, validate selector unions before mutation, and reject unsupported capabilities without fallback.",
+      "assignee": "Terra",
+      "priority": 0,
+      "parent_id": "ga-p9iuv.30",
+      "labels": ["beads", "proxy", "rc", "substrate", "status/needs-review-auto"],
+      "metadata": {"owner": "Terra", "role": "implementation", "review.required": "Sol", "pr.required": "true", "pr.label": "status/needs-review-auto", "worktree": "/data/projects/gascity-beads-proxy-20.4-final"}
+    },
+    {
+      "key": "review-init-selector-default",
+      "title": "Sol review init/default implementation PR",
+      "type": "task",
+      "description": "Run the Sol implementation-review workflow against the pushed Terra PR. Review real front-door selector mapping, default inversion, capability refusal, provider-neutral config, no-mutation guarantees, and direct regression. Approve before lifecycle work starts.",
+      "assignee": "Sol",
+      "priority": 0,
+      "parent_id": "ga-p9iuv.30",
+      "labels": ["beads", "proxy", "rc", "substrate", "status/needs-review-auto"],
+      "metadata": {"owner": "Sol", "role": "review", "review.formula": "review", "review.required": "Sol", "pr.label": "status/needs-review-auto"}
+    },
+    {
+      "key": "lifecycle-delegation",
+      "title": "Delegate provider-owned lifecycle and preserve legacy ownership",
+      "type": "feature",
+      "description": "Terra implementation slice. Route gc init/start/status/stop and rig setup through the selected beads provider; persist only provider-neutral lifecycle ownership; preserve legacy GC-managed direct-local scopes and exclude provider-owned .beads state from init --from.",
+      "assignee": "Terra",
+      "priority": 0,
+      "parent_id": "ga-p9iuv.30",
+      "labels": ["beads", "proxy", "rc", "substrate", "status/needs-review-auto"],
+      "metadata": {"owner": "Terra", "role": "implementation", "review.required": "Sol", "pr.required": "true", "pr.label": "status/needs-review-auto", "worktree": "/data/projects/gascity-beads-proxy-20.4-final"}
+    },
+    {
+      "key": "review-lifecycle-delegation",
+      "title": "Sol review lifecycle delegation implementation PR",
+      "type": "task",
+      "description": "Run Sol review against the lifecycle PR. Verify bd owns all new resources, external health never starts local processes, legacy ownership remains intact, init --from does not copy provider state, and no GC duplicate PID/port/probe/reap logic remains.",
+      "assignee": "Sol",
+      "priority": 0,
+      "parent_id": "ga-p9iuv.30",
+      "labels": ["beads", "proxy", "rc", "substrate", "status/needs-review-auto"],
+      "metadata": {"owner": "Sol", "role": "review", "review.formula": "review", "review.required": "Sol", "pr.label": "status/needs-review-auto"}
+    },
+    {
+      "key": "scope-resolution",
+      "title": "Implement persisted-state precedence inheritance and backend preservation",
+      "type": "feature",
+      "description": "Terra implementation slice. Enforce persisted initialized state authority, CLI/env/config/default precedence for fresh scopes, policy-only inheritance with independent rig identity, ambient endpoint isolation, credentials runtime-only, and explicit DoltLite/embedded preservation.",
+      "assignee": "Terra",
+      "priority": 1,
+      "parent_id": "ga-p9iuv.30",
+      "labels": ["beads", "proxy", "rc", "substrate", "status/needs-review-auto"],
+      "metadata": {"owner": "Terra", "role": "implementation", "review.required": "Sol", "pr.required": "true", "pr.label": "status/needs-review-auto", "worktree": "/data/projects/gascity-beads-proxy-20.4-final"}
+    },
+    {
+      "key": "provider-failure-atomicity",
+      "title": "Enforce provider readiness failure and retry-safe partial-init contract",
+      "type": "task",
+      "description": "Terra implementation slice. Ensure provider readiness failures block init/start with no fallback or agent launch, and provider-owned partial initialization is journaled/idempotent: scope remains uninitialized until final commit, GC never performs destructive rollback, and retries delegate to bd repair.",
+      "assignee": "Terra",
+      "priority": 0,
+      "parent_id": "ga-p9iuv.30",
+      "labels": ["beads", "proxy", "rc", "substrate", "status/needs-review-auto"],
+      "metadata": {"owner": "Terra", "role": "implementation", "review.required": "Sol", "pr.required": "true", "pr.label": "status/needs-review-auto", "worktree": "/data/projects/gascity-beads-proxy-20.4-final"}
+    },
+    {
+      "key": "review-safety-contract",
+      "title": "Sol review precedence ownership and failure-safety implementation PR",
+      "type": "task",
+      "description": "Run Sol review against scope resolution and failure-safety PRs, including fault-injected provider errors, no-mutation snapshots, restart/reconnect, existing direct/embedded/DoltLite preservation, and exact bd 1.3 retry behavior.",
+      "assignee": "Sol",
+      "priority": 0,
+      "parent_id": "ga-p9iuv.30",
+      "labels": ["beads", "proxy", "rc", "substrate", "status/needs-review-auto"],
+      "metadata": {"owner": "Sol", "role": "review", "review.formula": "review", "review.required": "Sol", "pr.label": "status/needs-review-auto"}
+    },
+    {
+      "key": "frontdoor-goldens",
+      "title": "Add real bd/gc proxied-default direct-escape and refusal front-door goldens",
+      "type": "task",
+      "description": "Terra implementation slice. Exercise real gc init/start/rig-add/stop and bd context/CRUD/labels/dependencies/config through proxied-local default, all explicit topology choices, existing direct preservation, restart/reconnect, text/JSON/exit behavior, active pack commands, unsupported typed refusals, and no-mutation snapshots.",
+      "assignee": "Terra",
+      "priority": 0,
+      "parent_id": "ga-p9iuv.30",
+      "labels": ["beads", "proxy", "rc", "substrate", "status/needs-review-auto"],
+      "metadata": {"owner": "Terra", "role": "implementation", "review.required": "Sol", "pr.required": "true", "pr.label": "status/needs-review-auto", "worktree": "/data/projects/gascity-beads-proxy-20.4-final"}
+    },
+    {
+      "key": "review-frontdoor-goldens",
+      "title": "Sol review front-door and direct-versus-proxy parity PR",
+      "type": "task",
+      "description": "Run Sol review workflow on the real front-door/golden PR. Require actual bd 1.3 proxied-local evidence, direct escape-hatch regression, active-pack inventory coverage, strict output/refusal/no-mutation checks, and no proxy-to-direct fallback.",
+      "assignee": "Sol",
+      "priority": 0,
+      "parent_id": "ga-p9iuv.30",
+      "labels": ["beads", "proxy", "rc", "substrate", "status/needs-review-auto"],
+      "metadata": {"owner": "Sol", "role": "review", "review.formula": "review", "review.required": "Sol", "pr.label": "status/needs-review-auto"}
+    },
+    {
+      "key": "active-pack-inventory",
+      "title": "Audit active bundled packs against proxied-local operation coverage",
+      "type": "task",
+      "description": "Sol architecture/audit gate. Inventory commands used by the active Gas City packs, map each to provider support, and ensure unsupported operations are either absent from active workflows or tracked with typed refusal/no-mutation tests. Confirm tracker backends share one provider-neutral persistence path.",
+      "assignee": "Sol",
+      "priority": 1,
+      "parent_id": "ga-p9iuv.30",
+      "labels": ["beads", "proxy", "rc", "substrate", "status/needs-review-auto"],
+      "metadata": {"owner": "Sol", "role": "architecture", "review.required": "Sol", "pr.label": "status/needs-review-auto"}
+    },
+    {
+      "key": "release-final-ac",
+      "title": "Close final proxy-default release acceptance and publish gates",
+      "type": "task",
+      "description": "Terra release slice. Integrate approved implementation heads, complete final direct-versus-proxy goldens, run documented Gas City and Beads RC quality gates, open/push the release PR with status/needs-review-auto, and hand the exact head to Sol for final review. Do not claim completion until all in-scope children and RC2 gate are green.",
+      "assignee": "Terra",
+      "priority": 0,
+      "parent_id": "ga-p9iuv.30",
+      "labels": ["beads", "proxy", "rc", "substrate", "status/needs-review-auto"],
+      "metadata": {"owner": "Terra", "role": "implementation", "review.required": "Sol", "pr.required": "true", "pr.label": "status/needs-review-auto", "worktree": "/data/projects/gascity-beads-proxy-20.4-final"}
+    }
+  ],
+  "edges": [
+    {"from_key": "architecture-contract", "to_key": "init-selector-default", "type": "blocks"},
+    {"from_key": "init-selector-default", "to_key": "review-init-selector-default", "type": "blocks"},
+    {"from_key": "review-init-selector-default", "to_key": "lifecycle-delegation", "type": "blocks"},
+    {"from_key": "review-init-selector-default", "to_key": "scope-resolution", "type": "blocks"},
+    {"from_key": "lifecycle-delegation", "to_key": "review-lifecycle-delegation", "type": "blocks"},
+    {"from_key": "review-lifecycle-delegation", "to_key": "provider-failure-atomicity", "type": "blocks"},
+    {"from_key": "scope-resolution", "to_key": "provider-failure-atomicity", "type": "blocks"},
+    {"from_key": "provider-failure-atomicity", "to_key": "review-safety-contract", "type": "blocks"},
+    {"from_key": "review-safety-contract", "to_key": "frontdoor-goldens", "type": "blocks"},
+    {"from_key": "frontdoor-goldens", "to_key": "review-frontdoor-goldens", "type": "blocks"},
+    {"from_key": "review-frontdoor-goldens", "to_key": "release-final-ac", "type": "blocks"},
+    {"from_key": "active-pack-inventory", "to_key": "release-final-ac", "type": "blocks"},
+    {"from_key": "review-frontdoor-goldens", "to_id": "ga-p9iuv.5", "type": "blocks"},
+    {"from_key": "release-final-ac", "to_id": "ga-p9iuv.23", "type": "blocks"}
+  ]
+}

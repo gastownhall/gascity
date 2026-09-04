@@ -7,21 +7,27 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // TestConfigStateConstructorsSelectDoltModes verifies that fresh managed
-// scopes use Beads' proxied-server path while explicit external endpoints keep
-// the direct server mode. Existing authoritative scope state is resolved by
+// scopes use the direct server path by default, while an explicit
+// mode=proxied-server opts into Beads' proxied-server path. External endpoints
+// remain direct unless paired with an explicit proxied mode. Existing authoritative scope state is resolved by
 // resolveDesired*EndpointState before these constructors are used, so changing
 // the default does not migrate an already initialized scope implicitly.
 func TestConfigStateConstructorsSelectDoltModes(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "rig")
 
-	// Fresh managed city (Beads owns its proxy and child Dolt lifecycle).
+	// Fresh managed city defaults to Beads' proxied-local lifecycle.
 	managedCity := desiredCityDoltConfigState(cityPath, config.DoltConfig{}, "gc")
 	if managedCity.DoltMode != "proxied-server" {
 		t.Errorf("desiredCityDoltConfigState (managed city): DoltMode = %q, want %q", managedCity.DoltMode, "proxied-server")
+	}
+	proxyCity := desiredCityDoltConfigState(cityPath, config.DoltConfig{Mode: "proxied-server"}, "gc")
+	if proxyCity.DoltMode != "proxied-server" {
+		t.Errorf("desiredCityDoltConfigState (explicit proxy): DoltMode = %q, want %q", proxyCity.DoltMode, "proxied-server")
 	}
 
 	// External city (explicit host/port endpoint).
@@ -38,7 +44,7 @@ func TestConfigStateConstructorsSelectDoltModes(t *testing.T) {
 		t.Errorf("desiredRigDoltConfigState (explicit rig): DoltMode = %q, want %q", explicitRig.DoltMode, "server")
 	}
 
-	// An inherited rig propagates the city's proxied mode.
+	// An inherited rig propagates the city's selected mode.
 	inheritedRig := inheritedRigDoltConfigState(rigPath, "rig", managedCity)
 	if inheritedRig.DoltMode != managedCity.DoltMode {
 		t.Errorf("inheritedRigDoltConfigState: DoltMode = %q, want %q (inherited from city)", inheritedRig.DoltMode, managedCity.DoltMode)
@@ -99,6 +105,36 @@ func TestResolveDesiredCityEndpointStatePreservesAuthoritativeDoltMode(t *testin
 	}
 }
 
+func TestCanonicalBdScopeInitPersistsConfiguredDoltMode(t *testing.T) {
+	for _, tc := range []struct {
+		name, doltSection, mode, want string
+	}{
+		{name: "proxied default", want: "proxied-server"},
+		{name: "explicit proxy", doltSection: "[dolt]\nmode = \"proxied-server\"\n", mode: "proxied-server", want: "proxied-server"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"+tc.doltSection), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			state := desiredCityDoltConfigState(cityPath, config.DoltConfig{Mode: tc.mode}, "gc")
+			if err := ensureCanonicalScopeConfigState(fsys.OSFS{}, cityPath, state); err != nil {
+				t.Fatalf("ensureCanonicalScopeConfigState: %v", err)
+			}
+			if err := ensureCanonicalScopeMetadata(fsys.OSFS{}, cityPath, "hq", false); err != nil {
+				t.Fatalf("ensureCanonicalScopeMetadata: %v", err)
+			}
+			mode, ok, err := contract.ReadDoltMode(fsys.OSFS{}, filepath.Join(cityPath, ".beads", "metadata.json"))
+			if err != nil || !ok {
+				t.Fatalf("ReadDoltMode: mode=%q ok=%v err=%v", mode, ok, err)
+			}
+			if mode != tc.want {
+				t.Fatalf("metadata dolt_mode = %q, want %q", mode, tc.want)
+			}
+		})
+	}
+}
+
 func TestScopeUsesProxiedDoltModePersistedMetadataWinsOverConfig(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
@@ -114,7 +150,7 @@ func TestScopeUsesProxiedDoltModePersistedMetadataWinsOverConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := scopeUsesProxiedDoltMode(cityPath, cityPath); got {
-		t.Fatal("persisted direct metadata was overridden by proxied config default")
+		t.Fatal("persisted direct metadata was overridden by proxied config selection")
 	}
 }
 

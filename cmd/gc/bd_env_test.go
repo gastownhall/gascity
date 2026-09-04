@@ -5779,3 +5779,19 @@ func TestApplyCanonicalDoltTargetEnvUnixSocket(t *testing.T) {
 		t.Fatalf("env = %#v", env)
 	}
 }
+
+func TestCanonicalSocketFrontDoorClearsTCPAndOwnership(t *testing.T) {
+	city := t.TempDir()
+	socket := filepath.Join(city, "external.sock")
+	env := map[string]string{"GC_DOLT_HOST": "127.0.0.1", "GC_DOLT_PORT": "3306", "BEADS_DOLT_SERVER_HOST": "127.0.0.1", "BEADS_DOLT_SERVER_PORT": "3306"}
+	target := contract.DoltConnectionTarget{Socket: socket, External: true}
+	applyCanonicalDoltTargetEnv(env, target)
+	if env["GC_DOLT_HOST"] != "" || env["GC_DOLT_PORT"] != "" || env["BEADS_DOLT_SERVER_HOST"] != "" || env["BEADS_DOLT_SERVER_PORT"] != "" {
+		t.Fatalf("stale TCP env leaked: %#v", env)
+	}
+	env["BEADS_DOLT_SERVER_SOCKET"] = socket
+	mirrorBeadsDoltScopeEnv(env, target)
+	if env["BEADS_DOLT_SERVER_SOCKET"] != socket {
+		t.Fatalf("socket env = %#v", env)
+	}
+}

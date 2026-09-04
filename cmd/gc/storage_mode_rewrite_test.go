@@ -47,7 +47,7 @@ func embeddedScopeWithBeads(t *testing.T, database string) string {
 	t.Helper()
 	// These tests exercise the legacy embedded→direct-server reconciliation
 	// warning. Pin an explicit external endpoint so the new fresh-scope
-	// proxied default is not the variable under test.
+	// proxy opt-in is not the variable under test.
 	t.Setenv("GC_DOLT_HOST", "db.example.test")
 	t.Setenv("GC_DOLT_PORT", "3306")
 	scope := t.TempDir()

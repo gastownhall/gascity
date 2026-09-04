@@ -355,8 +355,8 @@ func initDirIfReadyManagedDolt(cityPath, dir, prefix, _ string) error {
 // startup can skip direct-Dolt lifecycle before the first bd init.
 func scopeUsesProxiedDoltMode(cityPath, scopeRoot string) bool {
 	// A complete storage binding is owned by the linked beads backend. It must
-	// never be reclassified as a fresh managed-local scope merely because the
-	// city default is proxied-server; doing so would replace the binding's
+	// never be reclassified as a fresh managed-local scope merely because a
+	// config selector requests proxy mode; doing so would replace the binding's
 	// withheld environment with a local proxy marker.
 	if bound, err := scopeStoreIsExternallyBound(cityPath, scopeRoot); err == nil && bound {
 		return false
@@ -394,17 +394,16 @@ func scopeUsesProxiedDoltMode(cityPath, scopeRoot string) bool {
 	}
 	// A process-local external endpoint remains an explicit direct-server
 	// selection for this invocation. It is deliberately not persisted into the
-	// canonical scope files, but it must take precedence over the fresh-scope
-	// default so the child bd process can connect to the requested server.
+	// canonical scope files, but it must take precedence over config selection
+	// so the child bd process can connect to the requested server.
 	// Persisted proxied markers above remain authoritative and ignore ambient
 	// direct-server variables.
 	if _, ok := externalDoltEnvOverrideTarget(); ok {
 		return false
 	}
 	// A pre-existing Gas City runtime publication is evidence that this
-	// workspace was already using the direct managed-server lifecycle before
-	// the proxied default was introduced. Preserve that compatibility path until
-	// an authoritative mode marker is written.
+	// workspace was already using the direct managed-server lifecycle. Preserve
+	// that compatibility path until an authoritative mode marker is written.
 	for _, runtimePath := range []string{managedDoltStatePath(cityPath), providerManagedDoltStatePath(cityPath)} {
 		if _, err := os.Stat(runtimePath); err == nil {
 			return false
@@ -1839,9 +1838,10 @@ func isLegacyManagedDoltProbeDatabase(name string) bool {
 func ensureCanonicalScopeMetadata(fs fsys.FS, scopeRoot, doltDatabase string, preserveExisting bool) error {
 	path := filepath.Join(scopeRoot, ".beads", "metadata.json")
 	preserveReservedExisting := false
-	// Managed local Dolt scopes use beads' proxied UOW by default. Existing
+	metadataModeAuthoritative := false
+	// Fresh bd/Dolt scopes use Beads' proxied-local UOW path. Existing
 	// authoritative mode markers remain authoritative so startup never silently
-	// migrates a workspace merely because the default changed.
+	// migrates a workspace when an operator changes the configured mode.
 	doltMode := "proxied-server"
 	if preserveExisting {
 		if _, _, err := contract.LoadMetadataState(fs, path); err != nil {
@@ -1877,15 +1877,16 @@ func ensureCanonicalScopeMetadata(fs fsys.FS, scopeRoot, doltDatabase string, pr
 		}
 		if preserveMode {
 			doltMode = strings.TrimSpace(existingMode)
+			metadataModeAuthoritative = true
 		}
 	}
 	// An explicit endpoint is a direct server contract. This also covers
 	// legacy scopes whose metadata omitted dolt_mode but whose canonical config
 	// already records an external origin.
 	if cfg, ok, err := contract.ReadConfigState(fs, filepath.Join(scopeRoot, ".beads", "config.yaml")); err == nil && ok {
-		if cfg.EndpointOrigin == contract.EndpointOriginCityCanonical || cfg.EndpointOrigin == contract.EndpointOriginExplicit || strings.TrimSpace(cfg.DoltHost) != "" || strings.TrimSpace(cfg.DoltPort) != "" {
+		if !metadataModeAuthoritative && (cfg.EndpointOrigin == contract.EndpointOriginCityCanonical || cfg.EndpointOrigin == contract.EndpointOriginExplicit || strings.TrimSpace(cfg.DoltHost) != "" || strings.TrimSpace(cfg.DoltPort) != "") {
 			doltMode = "server"
-		} else if strings.TrimSpace(cfg.DoltMode) != "" && preserveExisting {
+		} else if !metadataModeAuthoritative && strings.TrimSpace(cfg.DoltMode) != "" {
 			doltMode = strings.TrimSpace(cfg.DoltMode)
 		}
 	}
@@ -2213,12 +2214,16 @@ func normalizedRigConfig(cityPath string, rig config.Rig) config.Rig {
 func desiredCityDoltConfigState(cityPath string, cityDolt config.DoltConfig, cityPrefix string) contract.ConfigState {
 	cityHost, cityPort := configuredExternalDoltTargetForCity(cityDolt)
 	if cityHost != "" || cityPort != "" {
+		doltMode := "server"
+		if strings.EqualFold(strings.TrimSpace(cityDolt.Mode), "proxied-server") {
+			doltMode = "proxied-server"
+		}
 		state := contract.ConfigState{
 			IssuePrefix:    cityPrefix,
 			EndpointOrigin: contract.EndpointOriginCityCanonical,
 			DoltHost:       cityHost,
 			DoltPort:       cityPort,
-			DoltMode:       "server",
+			DoltMode:       doltMode,
 		}
 		state.DoltUser = preservedDoltUser(cityPath, state)
 		state.EndpointStatus = preservedEndpointStatus(cityPath, state, contract.EndpointStatusUnverified)
@@ -2227,14 +2232,17 @@ func desiredCityDoltConfigState(cityPath string, cityDolt config.DoltConfig, cit
 	if mode := persistedScopeDoltMode(cityPath); mode != "" {
 		return contract.ConfigState{IssuePrefix: cityPrefix, EndpointOrigin: contract.EndpointOriginManagedCity, EndpointStatus: contract.EndpointStatusVerified, DoltMode: mode}
 	}
+	// Fresh bd/Dolt scopes default to Beads' proxied-local UOW path. Explicit
+	// config mode remains respected, and persisted metadata above wins.
+	doltMode := "proxied-server"
+	if strings.EqualFold(strings.TrimSpace(cityDolt.Mode), "server") {
+		doltMode = "server"
+	}
 	return contract.ConfigState{
 		IssuePrefix:    cityPrefix,
 		EndpointOrigin: contract.EndpointOriginManagedCity,
 		EndpointStatus: contract.EndpointStatusVerified,
-		// A managed city has no externally pinned endpoint. Let the RC beads
-		// client own the per-scope proxy and child-Dolt lifecycle; the direct
-		// server mode remains reserved for explicit host/port bindings.
-		DoltMode: "proxied-server",
+		DoltMode:       doltMode,
 	}
 }
 
@@ -2538,14 +2546,37 @@ func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string
 	if scopeUsesProxiedDoltMode(cityPath, cityPath) {
 		envMap := runtimeEnvEntriesToMap(env)
 		applyProxiedDoltEnv(envMap)
+		// A proxied-external scope still has a provider-owned local proxy, but
+		// bd must know the upstream Dolt endpoint during init. Keep this
+		// endpoint in a dedicated adapter-only variable so it cannot be
+		// mistaken for Gas City's direct server lifecycle target.
+		if cfg, err := loadCityConfig(cityPath, io.Discard); err == nil && cfg != nil && strings.EqualFold(strings.TrimSpace(cfg.Dolt.Mode), "proxied-server") && strings.TrimSpace(cfg.Dolt.Host) != "" {
+			envMap["GC_BEADS_PROXY_EXTERNAL_HOST"] = strings.TrimSpace(cfg.Dolt.Host)
+			if cfg.Dolt.Port > 0 {
+				envMap["GC_BEADS_PROXY_EXTERNAL_PORT"] = strconv.Itoa(cfg.Dolt.Port)
+			}
+		}
 		return mergeRuntimeEnv(nil, envMap)
 	}
 	if target, ok := externalDoltEnvOverrideTarget(); ok {
 		envMap := runtimeEnvEntriesToMap(env)
-		envMap["GC_DOLT_HOST"] = target.Host
-		envMap["GC_DOLT_PORT"] = target.Port
-		envMap["BEADS_DOLT_SERVER_HOST"] = target.Host
-		envMap["BEADS_DOLT_SERVER_PORT"] = target.Port
+		// An explicit external endpoint owns the child bd connection. Clear
+		// every inherited host/port/socket variant before projecting the
+		// canonical target so stale values cannot override a Unix socket.
+		for _, key := range []string{
+			"GC_DOLT_HOST", "GC_DOLT_PORT",
+			"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_SERVER_SOCKET",
+		} {
+			delete(envMap, key)
+		}
+		if target.Socket != "" {
+			envMap["BEADS_DOLT_SERVER_SOCKET"] = target.Socket
+		} else {
+			envMap["GC_DOLT_HOST"] = target.Host
+			envMap["GC_DOLT_PORT"] = target.Port
+			envMap["BEADS_DOLT_SERVER_HOST"] = target.Host
+			envMap["BEADS_DOLT_SERVER_PORT"] = target.Port
+		}
 		return mergeRuntimeEnv(nil, envMap)
 	}
 	if cityUsesDoltliteBeadsBackend(cityPath) {
@@ -2555,13 +2586,6 @@ func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string
 		envMap := runtimeEnvEntriesToMap(env)
 		clearProjectedDoltEnv(envMap)
 		return mergeRuntimeEnv(nil, envMap)
-	}
-	if target, ok := externalDoltEnvOverrideTarget(); ok && target.Socket != "" {
-		env = removeEnvKey(env, "GC_DOLT_HOST")
-		env = removeEnvKey(env, "GC_DOLT_PORT")
-		env = removeEnvKey(env, "BEADS_DOLT_SERVER_HOST")
-		env = removeEnvKey(env, "BEADS_DOLT_SERVER_PORT")
-		env = append(env, "BEADS_DOLT_SERVER_SOCKET="+target.Socket)
 	}
 	for _, key := range []string{
 		"GC_PACK_STATE_DIR",

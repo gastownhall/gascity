@@ -563,6 +563,31 @@ func TestProviderLifecycleProcessEnvPreservesAmbientWaitTimeout(t *testing.T) {
 	}
 }
 
+func TestProviderLifecycleProcessEnvProjectsExternalUnixSocketOverride(t *testing.T) {
+	cityPath := t.TempDir()
+	socket := filepath.Join(cityPath, "dolt.socket")
+	t.Setenv("BEADS_DOLT_SERVER_SOCKET", socket)
+	t.Setenv("GC_DOLT_HOST", "")
+	t.Setenv("GC_DOLT_PORT", "")
+
+	env := providerLifecycleProcessEnvFromBase(cityPath, "exec:"+gcBeadsBdScriptPath(cityPath), []string{
+		"GC_DOLT_HOST=stale-host",
+		"GC_DOLT_PORT=4406",
+		"BEADS_DOLT_SERVER_HOST=stale-host",
+		"BEADS_DOLT_SERVER_PORT=4406",
+		"BEADS_DOLT_SERVER_SOCKET=stale.socket",
+	})
+	got := runtimeEnvEntriesToMap(env)
+	if got["BEADS_DOLT_SERVER_SOCKET"] != socket {
+		t.Fatalf("BEADS_DOLT_SERVER_SOCKET = %q, want %q; env=%v", got["BEADS_DOLT_SERVER_SOCKET"], socket, env)
+	}
+	for _, key := range []string{"GC_DOLT_HOST", "GC_DOLT_PORT", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT"} {
+		if _, ok := got[key]; ok {
+			t.Fatalf("%s should be cleared for socket target, env=%v", key, env)
+		}
+	}
+}
+
 func TestProviderLifecycleProcessEnvPropagatesDoltLockReleaseTimeout(t *testing.T) {
 	cityPath := t.TempDir()
 	normPath := normalizePathForCompare(cityPath)
@@ -1289,8 +1314,7 @@ prefix = "fr"
 		t.Fatal(err)
 	}
 	// The provider script below models the legacy Gas City-managed SQL server.
-	// Keep that intent explicit now that an uninitialized managed scope defaults
-	// to beads' proxied-server lifecycle.
+	// Keep that intent explicit for the direct-server lifecycle under test.
 	writeScopeMetadata(t, cityPath, map[string]string{
 		"database":      "dolt",
 		"backend":       "dolt",
@@ -1380,8 +1404,7 @@ prefix = "fe"
 	}
 	// The fixture models a file-backed city carrying an inherited rig that
 	// still uses Gas City's direct Dolt server. Persist that mode explicitly so
-	// the fresh-scope proxied default does not suppress the mirror this test is
-	// meant to verify.
+	// the mirror remains tied to the direct lifecycle under test.
 	writeScopeMetadata(t, cityPath, map[string]string{
 		"database":      "dolt",
 		"backend":       "dolt",
@@ -4215,11 +4238,13 @@ func TestInitBeadsForDirBuildsCanonicalBdInitProviderOp(t *testing.T) {
 		name       string
 		provider   func(string) string
 		wantScript func(string) string
+		proxied    bool
 	}{
 		{
 			name:       "logical bd uses the stable city wrapper",
 			provider:   func(string) string { return "bd" },
 			wantScript: gcBeadsBdScriptPath,
+			proxied:    true,
 		},
 		{
 			name: "explicit canonical wrapper keeps its configured path",
@@ -4229,6 +4254,7 @@ func TestInitBeadsForDirBuildsCanonicalBdInitProviderOp(t *testing.T) {
 			wantScript: func(cityDir string) string {
 				return filepath.Join(cityDir, "custom", "gc-beads-bd")
 			},
+			proxied: true,
 		},
 	}
 
@@ -4241,6 +4267,9 @@ name = "demo"
 [beads]
 provider = %q
 `, tt.provider(cityDir))
+			if tt.proxied {
+				cityConfig = "[workspace]\nname = \"demo\"\n\n[dolt]\nmode = \"proxied-server\"\n\n[beads]\nprovider = " + strconv.Quote(tt.provider(cityDir)) + "\n"
+			}
 			if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityConfig), 0o644); err != nil {
 				t.Fatal(err)
 			}
@@ -4273,21 +4302,104 @@ provider = %q
 
 			env := runtimeEnvEntriesToMap(gotEnv)
 			for key, want := range map[string]string{
-				"GC_CITY_PATH":              cityDir,
-				"GC_CITY_RUNTIME_DIR":       filepath.Join(cityDir, ".gc", "runtime"),
-				"BEADS_DIR":                 filepath.Join(cityDir, ".beads"),
-				"BEADS_DOLT_PROXIED_SERVER": "1",
+				"GC_CITY_PATH":        cityDir,
+				"GC_CITY_RUNTIME_DIR": filepath.Join(cityDir, ".gc", "runtime"),
+				"BEADS_DIR":           filepath.Join(cityDir, ".beads"),
 			} {
 				if got := env[key]; got != want {
 					t.Errorf("%s = %q, want %q", key, got, want)
 				}
 			}
-			for _, key := range []string{"GC_PACK_STATE_DIR", "GC_DOLT_DATA_DIR", "GC_DOLT_PID_FILE", "BEADS_DOLT_SERVER_HOST"} {
+			if tt.proxied && env["BEADS_DOLT_PROXIED_SERVER"] != "1" {
+				t.Errorf("BEADS_DOLT_PROXIED_SERVER = %q, want 1", env["BEADS_DOLT_PROXIED_SERVER"])
+			}
+			if !tt.proxied {
+				if _, ok := env["BEADS_DOLT_PROXIED_SERVER"]; ok {
+					t.Errorf("BEADS_DOLT_PROXIED_SERVER should be absent for direct init")
+				}
+			}
+			for _, key := range []string{"BEADS_DOLT_SERVER_HOST"} {
 				if _, ok := env[key]; ok {
-					t.Errorf("%s should be absent for proxied init, got %q", key, env[key])
+					t.Errorf("%s should be absent for init, got %q", key, env[key])
 				}
 			}
 		})
+	}
+}
+
+func TestInitBeadsForDirProxiedExternalCarriesUpstreamEndpoint(t *testing.T) {
+	cityDir := t.TempDir()
+	provider := filepath.Join(cityDir, "custom", "gc-beads-bd")
+	if err := os.MkdirAll(filepath.Dir(provider), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityConfig := "[workspace]\nname=\"demo\"\n[dolt]\nmode=\"proxied-server\"\nhost=\"db.example\"\nport=4406\n[beads]\nprovider=" + strconv.Quote("exec:"+provider) + "\n"
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stop := errors.New("stop")
+	var gotEnv []string
+	var gotArgs []string
+	execute := func(_ string, env []string, args ...string) error {
+		gotEnv = append([]string(nil), env...)
+		gotArgs = append([]string(nil), args...)
+		return stop
+	}
+	err := initBeadsForDirWithExecutor(cityDir, cityDir, "gc", "hq", execute)
+	if !errors.Is(err, stop) {
+		t.Fatalf("initBeadsForDirWithExecutor() = %v, want %v", err, stop)
+	}
+	env := runtimeEnvEntriesToMap(gotEnv)
+	if env["BEADS_DOLT_PROXIED_SERVER"] != "1" {
+		t.Fatalf("BEADS_DOLT_PROXIED_SERVER = %q, want 1", env["BEADS_DOLT_PROXIED_SERVER"])
+	}
+	if env["GC_BEADS_PROXY_EXTERNAL_HOST"] != "db.example" || env["GC_BEADS_PROXY_EXTERNAL_PORT"] != "4406" {
+		t.Fatalf("proxied upstream endpoint env = host %q port %q, want db.example:4406", env["GC_BEADS_PROXY_EXTERNAL_HOST"], env["GC_BEADS_PROXY_EXTERNAL_PORT"])
+	}
+	if !reflect.DeepEqual(gotArgs, []string{"init", cityDir, "gc", "hq"}) {
+		t.Fatalf("args = %#v, want canonical init args", gotArgs)
+	}
+}
+
+func TestGcBeadsBdProxiedExternalTranslatesExactRCFlags(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte("issue_prefix: gc\ndolt.mode: proxied-server\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	argsFile := filepath.Join(cityDir, "bd-args")
+	bdPath := filepath.Join(cityDir, "bd-recording")
+	gcPath := filepath.Join(cityDir, "gc-recording")
+	bdScript := "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"" + argsFile + "\"\n"
+	if err := os.WriteFile(bdPath, []byte(bdScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(gcPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	scriptPath := filepath.Join(repoRootForLint(t), "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
+	cmd := exec.Command(scriptPath, "init", cityDir, "gc", "hq")
+	cmd.Env = append(os.Environ(),
+		"GC_CITY_PATH="+cityDir,
+		"GC_BIN="+gcPath,
+		"BD_BIN="+bdPath,
+		"GC_BEADS_PROXY_EXTERNAL_HOST=db.example",
+		"GC_BEADS_PROXY_EXTERNAL_PORT=4406",
+		"GC_DOLT=",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("gc-beads-bd init: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read recorded bd args: %v", err)
+	}
+	got := strings.TrimSpace(string(data))
+	want := "init --quiet --proxied-server --proxied-server-external-host db.example --proxied-server-external-port 4406 -p gc --database hq --skip-hooks --skip-agents " + cityDir
+	if got != want {
+		t.Fatalf("bd args = %q, want %q", got, want)
 	}
 }
 
@@ -4307,7 +4419,7 @@ case "$op" in
 {
   "database": "sqlite",
   "backend": "sqlite",
-  "dolt_mode": "local",
+  "dolt_mode": "proxied-server",
   "dolt_database": "wrong"
 }
 EOF
@@ -6247,8 +6359,8 @@ esac
 	}
 	// The host/port below are process-local overrides, but this fixture is
 	// specifically exercising the direct-server projection path. Mark the city
-	// endpoint as canonical so the proxied default does not claim the fresh rig
-	// after init and skip the follow-up list probe.
+	// endpoint as canonical so the explicit endpoint remains authoritative and
+	// the follow-up list probe runs against that direct target.
 	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
