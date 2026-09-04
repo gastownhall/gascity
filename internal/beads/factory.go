@@ -164,7 +164,13 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 			return opts.openBdFallback(provider, diag)
 		}
 	}
-	if cfg, ok, cfgErr := contract.ReadConfigState(fsys.OSFS{}, filepath.Join(opts.ScopeRoot, ".beads", "config.yaml")); cfgErr == nil && ok && contract.IsProxiedDoltMode("dolt", cfg.DoltMode) {
+	configPath := filepath.Join(opts.ScopeRoot, ".beads", "config.yaml")
+	cfg, cfgOK, cfgErr := contract.ReadConfigState(fsys.OSFS{}, configPath)
+	if cfgErr != nil && !os.IsNotExist(cfgErr) {
+		diag := BeadsDiagnostic{Store: storeNameBdStore, NativeStoreEligible: false, PreflightGate: "config_unreadable", PreflightReason: fmt.Sprintf("read beads config: %v", cfgErr)}
+		return opts.openBdFallback(provider, diag)
+	}
+	if cfgOK && contract.IsProxiedDoltMode("dolt", cfg.DoltMode) {
 		diag := BeadsDiagnostic{Store: storeNameBdStore, NativeStoreEligible: false, PreflightGate: "proxied_provider", PreflightReason: "proxied-server mode is owned by the bd provider"}
 		return opts.openBdFallback(provider, diag)
 	}
