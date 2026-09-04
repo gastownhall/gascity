@@ -913,6 +913,17 @@ func managedBdWaitTestTemplate(t *testing.T, bdPath, doltPath string) string {
 			managedBdWaitTemplateErr = fmt.Errorf("write template scaffold: %w", err)
 			return
 		}
+		// This template is exclusively for direct-server rebind coverage.
+		cityConfigPath := filepath.Join(cityPath, "city.toml")
+		cityConfig, readErr := os.ReadFile(cityConfigPath)
+		if readErr != nil {
+			managedBdWaitTemplateErr = fmt.Errorf("read template city config: %w", readErr)
+			return
+		}
+		if writeErr := os.WriteFile(cityConfigPath, append(cityConfig, []byte("\n[dolt]\nmode = \"server\"\n")...), 0o644); writeErr != nil {
+			managedBdWaitTemplateErr = fmt.Errorf("write direct template mode: %w", writeErr)
+			return
+		}
 		if err := EnsureBuiltinRuntimeAssets(cityPath, io.Discard); err != nil {
 			managedBdWaitTemplateErr = fmt.Errorf("EnsureBuiltinRuntimeAssets(template): %w", err)
 			return
