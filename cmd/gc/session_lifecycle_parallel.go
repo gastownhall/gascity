@@ -316,10 +316,16 @@ type startExecutionOptions struct {
 	// deferred under storeQueryPartial today.
 	deferSessionClosesOnBoot bool
 	readyAssignedFlags       []bool
+	// assignedWorkStores is index-aligned with the assignedWorkBeads passed to
+	// the same reconcile pass: the store each row was read through. The
+	// orphan-close tie-break releases through it instead of re-deriving an owner
+	// from gc.routed_to, which names a work ledger a binding-resident row does
+	// not live in. Nil or misaligned leaves that fallback in place.
+	assignedWorkStores []beads.Store
 	// warmClaimProbe, when set, enables the warm-bind claim nudge: it reports
-	// whether a pool slot's newly-bound trigger bead is still unclaimed, read from
-	// the store named by the session's gc.trigger_bead_store_ref. Built by the
-	// reconciler where the cached rig stores are in scope and consumed in
+	// whether a pool slot's newly-bound trigger bead is still unclaimed, resolved
+	// through the city's residency contract (newWarmClaimTriggerResolver). Built by
+	// the reconciler where the cached rig stores are in scope and consumed in
 	// startPreparedStartCandidate's warm-reuse branch. Nil disables the nudge.
 	warmClaimProbe warmClaimTriggerProbe
 }
@@ -428,6 +434,19 @@ func withDeferSessionClosesOnBoot() startExecutionOption {
 func withReadyAssignedFlags(readyAssignedFlags []bool) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.readyAssignedFlags = readyAssignedFlags
+	}
+}
+
+// withAssignedWorkStores installs the index-aligned snapshot stores for this
+// reconcile pass: the legs the census read each assignedWorkBeads row through.
+// The orphan-close tie-break releases a held claim through the leg that read it,
+// because gc.routed_to names a work ledger that on a split city no longer holds
+// the row (ga-b0o6a). The slice must be exactly as long as the assignedWorkBeads
+// passed to the same pass; anything else is ignored in favor of the routed
+// fallback. Nil (or the option omitted) leaves the fallback in place.
+func withAssignedWorkStores(assignedWorkStores []beads.Store) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.assignedWorkStores = assignedWorkStores
 	}
 }
 

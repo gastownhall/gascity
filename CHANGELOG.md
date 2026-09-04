@@ -31,6 +31,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A control bead served by a relocated class binding is routed to the
+  dispatcher its own `gc.root_store_ref` names.** On a split city every rig's
+  control beads live in one class binding. The reconciler dropped rig-rooted
+  rows from control-dispatcher demand entirely, because a binding's ref reads
+  as city scope and the candidate filter required a rig match; and it
+  suppressed city-rooted rows from that same demand, because the route repair
+  read the binding's ref (`class:gmnos`) as a rig name, found no dispatcher
+  for that pseudo-scope, and logged `no configured control-dispatcher for its
+  store scope` once per tick. The binding is now collected for every row it
+  serves, and the repair keys the dispatcher on the row's root scope, so rig
+  rows keep (or are repaired toward) their rig dispatcher and city rows their
+  city dispatcher. The diagnostic names the binding and the owning scope.
+  Supersedes #5548 and #5588; fixes #5547 and #5587.
+
 - **Mail archive and delete now expand whitespace-joined message IDs.** Each
   positional argument is split into individual IDs before single-versus-batch
   dispatch, so shell variables containing multiple IDs no longer look like one

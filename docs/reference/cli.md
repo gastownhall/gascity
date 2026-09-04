@@ -435,7 +435,7 @@ gc beads list --status open --format=json
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--all` | bool |  | include closed beads (default: open only) |
+| `--all` | bool |  | include closed beads (default: all nonclosed statuses) |
 | `--format` | string | `text` | output format: text or json |
 | `--label` | string |  | filter to beads carrying this label |
 | `--status` | string |  | filter to beads in this status |

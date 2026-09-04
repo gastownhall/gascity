@@ -21,11 +21,22 @@
 # governs that — stated beside the pattern in residency-boundary-patterns.txt —
 # requires a cross-plane router-agreement pin to land with it.
 #
-# The two b:cliSoleClassBinding rows are the same kind of census one layer down:
-# the surfaces that answer every reserved prefix from ONE store, which is a
-# claim about the city's topology and not just a call. The accessor checks that
-# claim and refuses a fan-out, so a third row is not a correctness bug — it is a
+# The three b:cliSoleClassBinding rows are the same kind of census one layer
+# down: the surfaces that answer every reserved prefix from ONE store, which is
+# a claim about the city's topology and not just a call. The accessor checks that
+# claim and refuses a fan-out, so a fourth row is not a correctness bug — it is a
 # new surface routing class-reserved ids, which is the thing worth seeing.
+#
+# cmd/gc/cmd_convoy.go's refuseBindingRigCollision holds two rows and is one
+# site, deliberately. The binding short-circuit in resolveOwningStoreDir returns
+# before the scan runs, and the scan is where "this id exists in more than one
+# store" is refused — correct to skip for the city's own retained copy, wrong to
+# skip for a rig, which is never a migration target. Restoring the refusal for
+# that one case needs the candidate list (a:openConvoyStores) and needs to know
+# which ids no rig can hold (d:bdIDIsClassReserved). Both are the enumeration
+# and the namespace gate this guard exists to count, and both are pinned here
+# rather than annotated because the review that matters is whether the
+# short-circuit should be probing at all, not whether it called correctly.
 cmd/gc/api_state.go	BeadStores	a:BeadStores	1
 cmd/gc/api_state.go	BeadStores	ast:returns-store-list	1
 cmd/gc/api_state.go	beadEventStoresLocked	ast:returns-store-list	1
@@ -68,13 +79,16 @@ cmd/gc/cmd_bd_by_id.go	resolve	d:bdIDIsClassReserved	1
 cmd/gc/cmd_beads.go	doBeadsListFallback	a:openAllConvoyStoresAt	1
 cmd/gc/cmd_beads.go	doBeadsShowFallback	a:openAllConvoyStoresAt	1
 cmd/gc/cmd_convoy.go	convoyStoreCandidates	a:convoyStoreCandidates	1
+cmd/gc/cmd_convoy.go	convoyStoreViewsWithBinding	b:cliSoleClassBinding	1
 cmd/gc/cmd_convoy.go	doConvoyCheckFallback	a:openAllConvoyStoresAt	1
 cmd/gc/cmd_convoy.go	doConvoyListFallback	a:openAllConvoyStoresAt	1
-cmd/gc/cmd_convoy.go	openAllConvoyStores	a:openAllConvoyStoresAt	1
+cmd/gc/cmd_convoy.go	doConvoyStrandedFallback	a:openAllConvoyStoresAt	1
 cmd/gc/cmd_convoy.go	openAllConvoyStoresAt	a:openAllConvoyStoresAt	1
 cmd/gc/cmd_convoy.go	openAllConvoyStoresAt	a:openConvoyStores	1
 cmd/gc/cmd_convoy.go	openConvoyStores	a:convoyStoreCandidates	1
 cmd/gc/cmd_convoy.go	openConvoyStores	a:openConvoyStores	1
+cmd/gc/cmd_convoy.go	refuseBindingRigCollision	a:openConvoyStores	1
+cmd/gc/cmd_convoy.go	refuseBindingRigCollision	d:bdIDIsClassReserved	1
 cmd/gc/cmd_convoy.go	resolveOwningStoreDir	a:openConvoyStores	1
 cmd/gc/cmd_convoy_dispatch.go	cmdWorkflowDelete	a:openConvoyStores	1
 cmd/gc/cmd_convoy_dispatch.go	collectSourceWorkflowMatches	a:openSourceWorkflowStores	1
