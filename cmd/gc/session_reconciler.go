@@ -5822,20 +5822,23 @@ func resolveTaskBeadWorkDir(cityPath string, store beads.Store, bead beads.Bead)
 	if sourceWorkDir := resolveDrainSourceWorkDir(cityPath, store, bead); sourceWorkDir != "" {
 		return sourceWorkDir
 	}
-	// Legacy `work_dir` is the worktree CREATOR's record; `gc.work_dir` is an
+	// Only the legacy `work_dir` key is launch authority: it is the worktree
+	// CREATOR's record. `gc.work_dir` is deliberately NOT read here — it is an
 	// observability stamp reconciliation mirrors (see
-	// workDirStampHasOwnershipEvidence) and, for non-pool sessions, writes
-	// unconditionally from the observed cwd. Read the owned path first so this
-	// stays a strict superset of the pre-existing legacy-only lookup.
-	for _, key := range []string{beadmeta.LegacyWorkDirMetadataKey, beadmeta.WorkDirMetadataKey} {
-		workDir := strings.TrimSpace(bead.Metadata[key])
-		if workDir == "" {
-			continue
-		}
-		resolved := resolveWorkDirAgainstCity(cityPath, workDir)
-		if info, err := os.Stat(resolved); err == nil && info.IsDir() {
-			return resolved
-		}
+	// workDirStampHasOwnershipEvidence) from the observed cwd, and for
+	// non-pool sessions writes unconditionally. Feeding an observed-cwd mirror
+	// back in as the next launch's authority is a feedback loop: any one-time
+	// divergence (including one caused by this very code, via the
+	// role-name/logical-template scope-widener in taskWorkDirAssignees)
+	// becomes self-perpetuating and survives the config changes meant to
+	// correct it.
+	workDir := strings.TrimSpace(bead.Metadata[beadmeta.LegacyWorkDirMetadataKey])
+	if workDir == "" {
+		return ""
+	}
+	resolved := resolveWorkDirAgainstCity(cityPath, workDir)
+	if info, err := os.Stat(resolved); err == nil && info.IsDir() {
+		return resolved
 	}
 	return ""
 }
