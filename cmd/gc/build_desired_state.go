@@ -798,6 +798,12 @@ func buildDesiredStateWithSessionBeadsAt(
 		// correct, and any bead missed by a partial query simply gets stamped
 		// on a later tick.
 		stampRunSessionIdentity(assignedWorkBeads, assignedWorkStores, sessionBeads, stderr)
+		// One-shot repair for beads a prior reconciler tick already clobbered
+		// (ga-3c5isi / #5193): restores gc.work_dir from the still-intact
+		// legacy work_dir when the canonical value was overwritten with a
+		// pool-slot label before workDirStampWouldClobberEvidence existed to
+		// prevent it. Idempotent — see repairPoolSlotWorkDirClobber.
+		repairPoolSlotWorkDirClobber(assignedWorkBeads, assignedWorkStores, stderr)
 		// Re-home work pre-assigned to a legacy template identity onto the
 		// configured canonical identity, so the canonical session the awake/scale
 		// accounting wakes for it can actually surface and claim it (the
@@ -814,6 +820,11 @@ func buildDesiredStateWithSessionBeadsAt(
 		var unassignedRoutedPartial bool
 		unassignedRoutedBeads, unassignedRoutedStores, unassignedRoutedStoreRefs, unassignedRoutedPartial = collectOpenUnassignedRoutedWork(cityPath, cfg, store, rigStores, suspendedRigPaths, stderr)
 		canonicalizeLegacyBoundUnassignedRoutedWork(cfg, unassignedRoutedBeads, unassignedRoutedStores, stderr)
+		// Same repair as above, over the open/unassigned collection: a bead
+		// released back to open by a drain is clobbered the same way an
+		// in_progress one is, and never appears in assignedWorkBeads once
+		// reopened.
+		repairPoolSlotWorkDirClobber(unassignedRoutedBeads, unassignedRoutedStores, stderr)
 		// Same pass, same reason, different legacy form: a route stamped at a
 		// live slot ("<base>-N") is a load-balancing HINT that every raw reader
 		// — the generated query's --metadata-field, the claim's string compare —

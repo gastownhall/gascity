@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -155,5 +156,73 @@ func TestPoolSlotWorkDirRepairFor(t *testing.T) {
 				t.Errorf("RestoreValue = %q, want %q", got.RestoreValue, tc.want.RestoreValue)
 			}
 		})
+	}
+}
+
+// TestRepairPoolSlotWorkDirClobber exercises the one-shot repair sweep (the
+// active driver for poolSlotWorkDirRepairFor) rather than the pure decision
+// function alone: ga-3c5isi's exit_contract requires beads already clobbered
+// -- by a prior reconciler tick, before workDirStampWouldClobberEvidence
+// existed -- to be actively restored, not merely protected from future
+// clobbers. Status-agnostic by design: mayor's manual sweep found latent
+// victims on OPEN beads (released back to open by a drain) as well as
+// in_progress ones, so this sweep must not gate on bead status.
+func TestRepairPoolSlotWorkDirClobber(t *testing.T) {
+	const (
+		poolSlot     = ".gc/worktrees/gascity/builder-1"
+		realEvidence = "/home/ds/gascity-worktrees/ga-3c5isi"
+	)
+	clobbered := beads.Bead{
+		ID: "ga-clobbered", Type: "task", Status: "open",
+		Metadata: map[string]string{
+			beadmeta.WorkDirMetadataKey:       poolSlot,
+			beadmeta.LegacyWorkDirMetadataKey: realEvidence,
+		},
+	}
+	clean := beads.Bead{
+		ID: "ga-clean", Type: "task", Status: "in_progress",
+		Metadata: map[string]string{
+			beadmeta.WorkDirMetadataKey:       realEvidence,
+			beadmeta.LegacyWorkDirMetadataKey: realEvidence,
+		},
+	}
+	excluded := beads.Bead{
+		ID: "ga-45tz5p", Type: "task", Status: "open",
+		Metadata: map[string]string{
+			beadmeta.WorkDirMetadataKey:       ".claude/worktrees/ga-45tz5p",
+			beadmeta.LegacyWorkDirMetadataKey: realEvidence,
+		},
+	}
+	mem := beads.NewMemStoreFrom(0, []beads.Bead{clobbered, clean, excluded}, nil)
+	store := &countingStore{Store: mem}
+	all := []beads.Bead{clobbered, clean, excluded}
+	stores := []beads.Store{store, store, store}
+
+	repairPoolSlotWorkDirClobber(all, stores, io.Discard)
+
+	got, err := mem.Get("ga-clobbered")
+	if err != nil {
+		t.Fatalf("Get(ga-clobbered): %v", err)
+	}
+	if got.Metadata[beadmeta.WorkDirMetadataKey] != realEvidence {
+		t.Errorf("gc.work_dir = %q, want %q (repaired from legacy work_dir)", got.Metadata[beadmeta.WorkDirMetadataKey], realEvidence)
+	}
+
+	gotExcluded, err := mem.Get("ga-45tz5p")
+	if err != nil {
+		t.Fatalf("Get(ga-45tz5p): %v", err)
+	}
+	if gotExcluded.Metadata[beadmeta.WorkDirMetadataKey] != ".claude/worktrees/ga-45tz5p" {
+		t.Errorf("gc.work_dir = %q, want unchanged (non-pool-slot shape must not be blanket-copied)", gotExcluded.Metadata[beadmeta.WorkDirMetadataKey])
+	}
+
+	// Idempotent: a second pass over the now-repaired bead writes nothing --
+	// the "one-shot" contract achieved via steady-state convergence rather
+	// than tracked migration-run state.
+	repaired, _ := mem.Get("ga-clobbered")
+	store.writes = 0
+	repairPoolSlotWorkDirClobber([]beads.Bead{repaired, clean, gotExcluded}, stores, io.Discard)
+	if store.writes != 0 {
+		t.Errorf("second pass wrote %d times, want 0 (repair must be one-shot/idempotent)", store.writes)
 	}
 }
