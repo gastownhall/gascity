@@ -4326,6 +4326,82 @@ provider = %q
 	}
 }
 
+func TestInitBeadsForDirProxiedExternalCarriesUpstreamEndpoint(t *testing.T) {
+	cityDir := t.TempDir()
+	provider := filepath.Join(cityDir, "custom", "gc-beads-bd")
+	if err := os.MkdirAll(filepath.Dir(provider), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityConfig := "[workspace]\nname=\"demo\"\n[dolt]\nmode=\"proxied-server\"\nhost=\"db.example\"\nport=4406\n[beads]\nprovider=" + strconv.Quote("exec:"+provider) + "\n"
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stop := errors.New("stop")
+	var gotEnv []string
+	var gotArgs []string
+	execute := func(_ string, env []string, args ...string) error {
+		gotEnv = append([]string(nil), env...)
+		gotArgs = append([]string(nil), args...)
+		return stop
+	}
+	err := initBeadsForDirWithExecutor(cityDir, cityDir, "gc", "hq", execute)
+	if !errors.Is(err, stop) {
+		t.Fatalf("initBeadsForDirWithExecutor() = %v, want %v", err, stop)
+	}
+	env := runtimeEnvEntriesToMap(gotEnv)
+	if env["BEADS_DOLT_PROXIED_SERVER"] != "1" {
+		t.Fatalf("BEADS_DOLT_PROXIED_SERVER = %q, want 1", env["BEADS_DOLT_PROXIED_SERVER"])
+	}
+	if env["GC_BEADS_PROXY_EXTERNAL_HOST"] != "db.example" || env["GC_BEADS_PROXY_EXTERNAL_PORT"] != "4406" {
+		t.Fatalf("proxied upstream endpoint env = host %q port %q, want db.example:4406", env["GC_BEADS_PROXY_EXTERNAL_HOST"], env["GC_BEADS_PROXY_EXTERNAL_PORT"])
+	}
+	if !reflect.DeepEqual(gotArgs, []string{"init", cityDir, "gc", "hq"}) {
+		t.Fatalf("args = %#v, want canonical init args", gotArgs)
+	}
+}
+
+func TestGcBeadsBdProxiedExternalTranslatesExactRCFlags(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte("issue_prefix: gc\ndolt.mode: proxied-server\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	argsFile := filepath.Join(cityDir, "bd-args")
+	bdPath := filepath.Join(cityDir, "bd-recording")
+	gcPath := filepath.Join(cityDir, "gc-recording")
+	bdScript := "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"" + argsFile + "\"\n"
+	if err := os.WriteFile(bdPath, []byte(bdScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(gcPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	scriptPath := filepath.Join(repoRootForLint(t), "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
+	cmd := exec.Command(scriptPath, "init", cityDir, "gc", "hq")
+	cmd.Env = append(os.Environ(),
+		"GC_CITY_PATH="+cityDir,
+		"GC_BIN="+gcPath,
+		"BD_BIN="+bdPath,
+		"GC_BEADS_PROXY_EXTERNAL_HOST=db.example",
+		"GC_BEADS_PROXY_EXTERNAL_PORT=4406",
+		"GC_DOLT=",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("gc-beads-bd init: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read recorded bd args: %v", err)
+	}
+	got := strings.TrimSpace(string(data))
+	want := "init --quiet --proxied-server --proxied-server-external-host db.example --proxied-server-external-port 4406 -p gc --database hq --skip-hooks --skip-agents " + cityDir
+	if got != want {
+		t.Fatalf("bd args = %q, want %q", got, want)
+	}
+}
+
 func TestInitBeadsForDirExecGcBeadsBdNormalizesCanonicalFilesAfterProviderInit(t *testing.T) {
 	cityDir := t.TempDir()
 	writeMinimalCityToml(t, cityDir)

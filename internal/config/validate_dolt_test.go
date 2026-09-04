@@ -19,8 +19,8 @@ func TestValidateDoltConfigMode(t *testing.T) {
 		{name: "server", cfg: DoltConfig{Mode: "server"}},
 		{name: "proxied server", cfg: DoltConfig{Mode: "proxied-server"}},
 		{name: "unknown mode", cfg: DoltConfig{Mode: "proxy"}, wantErr: "mode must be"},
-		{name: "proxy with host", cfg: DoltConfig{Mode: "proxied-server", Host: "db.example"}, wantErr: "cannot be combined"},
-		{name: "proxy with port", cfg: DoltConfig{Mode: "proxied-server", Port: 3306}, wantErr: "cannot be combined"},
+		{name: "proxied external host", cfg: DoltConfig{Mode: "proxied-server", Host: "db.example"}},
+		{name: "proxied external port", cfg: DoltConfig{Mode: "proxied-server", Port: 3306}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -44,7 +44,7 @@ func TestLoadDoltConfigModeValidation(t *testing.T) {
 		name, body, want string
 	}{
 		{"unknown", "[workspace]\nname=\"x\"\n[dolt]\nmode=\"bogus\"\n", "mode must be"},
-		{"conflict", "[workspace]\nname=\"x\"\n[dolt]\nmode=\"proxied-server\"\nhost=\"db\"\n", "cannot be combined"},
+		{"proxied external", "[workspace]\nname=\"x\"\n[dolt]\nmode=\"proxied-server\"\nhost=\"db\"\n", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -52,7 +52,14 @@ func TestLoadDoltConfigModeValidation(t *testing.T) {
 			if err := os.WriteFile(path, []byte(tc.body), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := Load(fsys.OSFS{}, path); err == nil || !strings.Contains(err.Error(), tc.want) {
+			_, err := Load(fsys.OSFS{}, path)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("Load() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("Load() error = %v, want substring %q", err, tc.want)
 			}
 		})

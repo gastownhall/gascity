@@ -13,17 +13,17 @@ import (
 // TestConfigStateConstructorsSelectDoltModes verifies that fresh managed
 // scopes use the direct server path by default, while an explicit
 // mode=proxied-server opts into Beads' proxied-server path. External endpoints
-// always keep the direct server mode. Existing authoritative scope state is resolved by
+// remain direct unless paired with an explicit proxied mode. Existing authoritative scope state is resolved by
 // resolveDesired*EndpointState before these constructors are used, so changing
 // the default does not migrate an already initialized scope implicitly.
 func TestConfigStateConstructorsSelectDoltModes(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "rig")
 
-	// Fresh managed city defaults to the direct/server lifecycle.
+	// Fresh managed city defaults to Beads' proxied-local lifecycle.
 	managedCity := desiredCityDoltConfigState(cityPath, config.DoltConfig{}, "gc")
-	if managedCity.DoltMode != "server" {
-		t.Errorf("desiredCityDoltConfigState (managed city): DoltMode = %q, want %q", managedCity.DoltMode, "server")
+	if managedCity.DoltMode != "proxied-server" {
+		t.Errorf("desiredCityDoltConfigState (managed city): DoltMode = %q, want %q", managedCity.DoltMode, "proxied-server")
 	}
 	proxyCity := desiredCityDoltConfigState(cityPath, config.DoltConfig{Mode: "proxied-server"}, "gc")
 	if proxyCity.DoltMode != "proxied-server" {
@@ -109,7 +109,7 @@ func TestCanonicalBdScopeInitPersistsConfiguredDoltMode(t *testing.T) {
 	for _, tc := range []struct {
 		name, doltSection, mode, want string
 	}{
-		{name: "direct default", want: "server"},
+		{name: "proxied default", want: "proxied-server"},
 		{name: "explicit proxy", doltSection: "[dolt]\nmode = \"proxied-server\"\n", mode: "proxied-server", want: "proxied-server"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
