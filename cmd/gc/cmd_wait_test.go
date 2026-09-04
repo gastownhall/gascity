@@ -2907,6 +2907,8 @@ func setupManagedBdWaitTestCity(t *testing.T) (string, string) {
 	scriptEnv := sanitizedBaseEnv(
 		"GC_CITY="+cityPath,
 		"GC_CITY_PATH="+cityPath,
+		"GC_BEADS_TRANSPORT=direct",
+		"GC_BEADS_TARGET=local",
 	)
 	runScript := func(args ...string) {
 		t.Helper()
