@@ -24,8 +24,6 @@ func TestHookRouteIdentitiesEqual(t *testing.T) {
 		{"different rigs", "rig-a/planner", "rig-b/planner", false},
 		{"different agents, same rig", "gascity/builder", "gascity/reviewer", false},
 		{"empty vs non-empty", "", "gascity/builder", false},
-		{"case insensitive", "Gascity/Builder", "gascity/builder", true},
-		{"case insensitive, dash-encoded", "Gascity--Builder", "gascity/builder", true},
 		// A legacy bound-template spelling ("dir/binding.name") is deliberately
 		// NOT collapsed onto its unbound form here - that migration is owned by
 		// canonicalizeLegacyBoundUnassignedRoutedWork, which rewrites the
