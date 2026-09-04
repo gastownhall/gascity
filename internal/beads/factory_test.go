@@ -369,6 +369,32 @@ func TestOpenStoreAtForCityUnknownPersistedDoltModeFallsBack(t *testing.T) {
 	}
 }
 
+func TestOpenStoreAtForCityUnreadableConfigFailsClosed(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(filepath.Join(beadsDir, "config.yaml"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fallback := NewMemStore()
+	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+		ScopeRoot:        scope,
+		Provider:         "bd",
+		PreflightChecker: factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
+		OpenBdStore:      func() (Store, error) { return fallback, nil },
+		OpenNativeStore: func() (Store, error) {
+			t.Fatal("OpenNativeStore called with unreadable config")
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("OpenStoreAtForCity() error = %v", err)
+	}
+	if result.Store != fallback || result.Diagnostic.PreflightGate != "config_unreadable" {
+		t.Fatalf("result = (%T, %+v), want fallback with config_unreadable", result.Store, result.Diagnostic)
+	}
+}
+
 func TestOpenStoreAtForCityGCStampedHooksDoNotBlockNativeStore(t *testing.T) {
 	t.Setenv(nativeForceFallbackEnv, "")
 	scope := t.TempDir()
