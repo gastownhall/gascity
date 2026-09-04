@@ -75,7 +75,7 @@ func TestPendingCreateFailuresAccrueStartupHealthEpisodeAcrossReplacementBeads(t
 		if i > 0 {
 			h.createReplacementPendingCreateBead()
 		}
-		if tick := runDesiredPendingCreateTicks(t, h, 30); tick == -1 {
+		if tick := runDesiredPendingCreateTicks(t, h); tick == -1 {
 			t.Fatalf("failure %d: pending-create claim never released within 30 ticks", i+1)
 		}
 	}
@@ -121,7 +121,7 @@ func TestQuarantinedStartupHealthBlocksProviderStartUntilExpiry(t *testing.T) {
 		if i > 0 {
 			h.createReplacementPendingCreateBead()
 		}
-		if tick := runDesiredPendingCreateTicks(t, h, 30); tick == -1 {
+		if tick := runDesiredPendingCreateTicks(t, h); tick == -1 {
 			t.Fatalf("failure %d: pending-create claim never released within 30 ticks", i+1)
 		}
 	}
@@ -169,7 +169,7 @@ func TestQuarantinedStartupHealthMirrorsCountAndKindOntoVisibleSessionRow(t *tes
 		if i > 0 {
 			h.createReplacementPendingCreateBead()
 		}
-		if tick := runDesiredPendingCreateTicks(t, h, 30); tick == -1 {
+		if tick := runDesiredPendingCreateTicks(t, h); tick == -1 {
 			t.Fatalf("failure %d: pending-create claim never released within 30 ticks", i+1)
 		}
 	}
@@ -216,7 +216,7 @@ func TestStartupHealthEpisodeClearsOnFirstSuccessfulStart(t *testing.T) {
 		if i > 0 {
 			h.createReplacementPendingCreateBead()
 		}
-		if tick := runDesiredPendingCreateTicks(t, h, 30); tick == -1 {
+		if tick := runDesiredPendingCreateTicks(t, h); tick == -1 {
 			t.Fatalf("failure %d: pending-create claim never released within 30 ticks", i+1)
 		}
 	}
@@ -264,7 +264,7 @@ func TestQuarantinedStartupHealthMirrorClearsOnSuccessfulRecovery(t *testing.T) 
 		if i > 0 {
 			h.createReplacementPendingCreateBead()
 		}
-		if tick := runDesiredPendingCreateTicks(t, h, 30); tick == -1 {
+		if tick := runDesiredPendingCreateTicks(t, h); tick == -1 {
 			t.Fatalf("failure %d: pending-create claim never released within 30 ticks", i+1)
 		}
 	}
@@ -348,7 +348,7 @@ func TestQuarantineGateLogsOnStartupHealthLoadError(t *testing.T) {
 		if i > 0 {
 			h.createReplacementPendingCreateBead()
 		}
-		if tick := runDesiredPendingCreateTicks(t, h, 30); tick == -1 {
+		if tick := runDesiredPendingCreateTicks(t, h); tick == -1 {
 			t.Fatalf("failure %d: pending-create claim never released within 30 ticks", i+1)
 		}
 	}
