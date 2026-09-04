@@ -16,6 +16,10 @@ func newCredentialsTestEnv(t *testing.T) (gcHome string) {
 	t.Setenv("GC_HOME", gcHome)
 	t.Setenv("GC_SUPERVISOR_SYSTEMD_UNIT", "")
 	t.Setenv("GC_SUPERVISOR_ENV", "")
+	// shouldPersistSupervisorEnv reads this, so leaving it exported in the
+	// ambient environment flips the forwarding warning and fails the
+	// forwarded-name test for a reason that has nothing to do with the code.
+	t.Setenv("GC_SUPERVISOR_OMIT_PROVIDER_CREDS", "")
 	t.Setenv("ACME_KEY", "")
 	t.Setenv("ANTHROPIC_AUTH_TOKEN_ZAI", "")
 	t.Setenv("ZAI_BASE_URL", "")
