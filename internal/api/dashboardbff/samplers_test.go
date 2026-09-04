@@ -2,13 +2,148 @@ package dashboardbff
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestParsePingCheckNormalizesHealthyAndFailure(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		res  execResult
+		want string
+	}{
+		{name: "healthy", res: execResult{stdout: `{"status":"ok"}`}, want: "ok"},
+		{name: "provider failure", res: execResult{exitCode: 1, stdout: `{"status":"error","error":"proxy unavailable"}`}, want: "error"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			checks, ok := parsePingCheck(&tt.res)
+			if !ok || len(checks) != 1 || checks[0].Status != tt.want {
+				t.Fatalf("parsePingCheck() = (%v, %v), want one %s check", checks, ok, tt.want)
+			}
+			if checks[0].Category != "Beads" || checks[0].Name != "Database Connectivity" {
+				t.Fatalf("check identity = %+v", checks[0])
+			}
+		})
+	}
+}
+
+func TestParsePingCheckRejectsMalformedOutput(t *testing.T) {
+	t.Parallel()
+	for _, stdout := range []string{"", "not json", `{"status":""}`, `[]`} {
+		if checks, ok := parsePingCheck(&execResult{stdout: stdout}); ok || checks != nil {
+			t.Errorf("parsePingCheck(%q) = (%v, %v), want nil,false", stdout, checks, ok)
+		}
+	}
+}
+
+func TestExecBdPingUsesReadonlyProviderNeutralArgs(t *testing.T) {
+	root := t.TempDir()
+	beadsPath := filepath.Join(root, ".beads")
+	if err := os.Mkdir(beadsPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	argsFile := filepath.Join(root, "args")
+	bin := filepath.Join(root, "bin")
+	if err := os.Mkdir(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"" + argsFile + "\"\nprintf '%s' '{\"status\":\"ok\"}'\n"
+	if err := os.WriteFile(filepath.Join(bin, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ADMIN_PATH", bin)
+	// exec.Command resolves the executable using the parent PATH before the
+	// runner applies its scrubbed child environment.
+	t.Setenv("PATH", bin)
+	before, err := os.ReadDir(beadsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := newExecRunner().execBdPing(context.Background(), beadsPath)
+	if err != nil {
+		t.Fatalf("execBdPing() error = %v", err)
+	}
+	if res.exitCode != 0 {
+		t.Fatalf("execBdPing() exit = %d stdout=%q stderr=%q", res.exitCode, res.stdout, res.stderr)
+	}
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Split(strings.TrimSpace(string(args)), "\n"); !equalStrings(got, []string{"ping", "--readonly", "--db", beadsPath, "--json"}) {
+		t.Fatalf("bd argv = %v", got)
+	}
+	after, err := os.ReadDir(beadsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before) != len(after) {
+		t.Fatalf("probe mutated .beads directory: before=%d after=%d", len(before), len(after))
+	}
+	var payload map[string]string
+	if err := json.Unmarshal([]byte(res.stdout), &payload); err != nil || payload["status"] != "ok" {
+		t.Fatalf("ping output = %q", res.stdout)
+	}
+}
+
+func TestExecBdPingHonorsCancellation(t *testing.T) {
+	root := t.TempDir()
+	beadsPath := filepath.Join(root, ".beads")
+	if err := os.Mkdir(beadsPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := newExecRunner().execBdPing(ctx, beadsPath); err == nil {
+		t.Fatal("execBdPing() with canceled context returned nil error")
+	}
+}
+
+func TestProbeRigReportsPingFailureAsDown(t *testing.T) {
+	root := t.TempDir()
+	rig := filepath.Join(root, "rig")
+	beadsPath := filepath.Join(rig, ".beads")
+	if err := os.MkdirAll(beadsPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(root, "bin")
+	if err := os.Mkdir(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "bd"), []byte("#!/bin/sh\nprintf '%s' '{\"status\":\"error\",\"error\":\"proxy unavailable\"}'\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	t.Setenv("ADMIN_PATH", bin)
+	rep := newSamplerManager(Deps{}, newExecRunner()).probeRig(context.Background(), "r1", rig)
+	if rep.Rollup != "down" || !rep.Reachable || len(rep.Problems) != 1 || rep.Problems[0].Status != "error" {
+		t.Fatalf("probeRig() = %+v, want reachable/down with one error", rep)
+	}
+	if !strings.Contains(rep.Problems[0].Message, "proxy unavailable") {
+		t.Fatalf("probeRig problem = %+v, want provider error", rep.Problems[0])
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
 
 // recordingRoundTripper is a fake in-process transport standing in for the
 // supervisor's LoopbackTransport: it records the request path and returns a
