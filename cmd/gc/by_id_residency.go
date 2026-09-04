@@ -83,7 +83,7 @@ func byIDOwnerForTopology(topo storeref.Topology, id string, work beads.Store) (
 	if err != nil {
 		return storeref.Owner{}, err
 	}
-	owner, err := storeref.ResolveOwnerRow(plan, id)
+	owner, err := withProvenRelicRemedy(storeref.ResolveOwnerRow(plan, id))
 	switch {
 	case err == nil:
 		return owner, nil
@@ -167,7 +167,31 @@ func byIDBindingOwnerForTopology(topo storeref.Topology, id string) (storeref.Ow
 	if err != nil {
 		return storeref.Owner{}, false, err
 	}
-	return storeref.ResolveBindingOwner(plan, id)
+	owner, ok, err := storeref.ResolveBindingOwner(plan, id)
+	owner, err = withProvenRelicRemedy(owner, err)
+	return owner, ok, err
+}
+
+// withProvenRelicRemedy names the operator's next move on the one denial that
+// is otherwise unactionable.
+//
+// storeref decides that a refused binding proven to hold migration-preserved
+// ids may not be skipped, and says why — but it does not know what clears the
+// condition, because that is a fact about this plane's boot gate rather than
+// about a plan. The refusal's own text is the boot gate's, identical to the one
+// a city sees for an infrastructure-class id it simply cannot serve, so an
+// operator reading it looks for a missing bead. What they need is that
+// converging the split is what makes the id resolve from the binding again.
+//
+// The remedy is a SECOND SENTENCE on one line, not a second line. Every caller
+// prints this value as `gc <cmd>: %v`, so an embedded newline drops the command
+// prefix off everything after it and the operator cannot tell which surface
+// refused.
+func withProvenRelicRemedy(owner storeref.Owner, err error) (storeref.Owner, error) {
+	if err == nil || !errors.Is(err, storeref.ErrProvenRelicRefusal) {
+		return owner, err
+	}
+	return owner, fmt.Errorf("%w. Converge the configured [storage] split and this id resolves from the binding again; `gc doctor` reports what is outstanding", err)
 }
 
 // beadForOwner returns the row the owner names, reading it only when the

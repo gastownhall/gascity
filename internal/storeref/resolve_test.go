@@ -322,6 +322,39 @@ func TestResolveBindingOwnerNeverProbesTheWorkLeg(t *testing.T) {
 	}
 }
 
+// TestProvenRelicRefusalSaysWhyItRefused pins the sentence apart from the
+// verdict.
+//
+// The two refusal outcomes are decided by evidence the operator cannot see and
+// reported in text they cannot tell apart: a tolerated probe and a denied one
+// both end in the boot gate's own sentence, so a denial reads as "your bead is
+// missing on a broken city" rather than "a census proved this binding holds the
+// id and the copy you would have been served is frozen". The sentinel is what
+// lets the plane that OWNS the proof name where it is written down.
+func TestProvenRelicRefusalSaysWhyItRefused(t *testing.T) {
+	proven := mustPlan(t, ByID{ID: workShapedID}, newT3Known().topo)
+	_, _, err := ResolveBindingOwner(proven, workShapedID)
+	if err == nil {
+		t.Fatal("a proven-relic refused city resolved cleanly")
+	}
+	if !errors.Is(err, ErrProvenRelicRefusal) {
+		t.Errorf("the denial reads %v, and carries nothing that distinguishes it from the refusal an in-namespace id takes", err)
+	}
+	if !IsStandingRefusal(err) {
+		t.Errorf("the denial stopped reading as a standing storage refusal (%v); callers classify on that", err)
+	}
+
+	// The control the sentinel needs: a leg that genuinely could not be READ is
+	// a fault, not this denial, and attaching the relic sentence to it would
+	// send an operator at a note that has nothing to do with the failure.
+	f := newT1()
+	f.legStore(ClassRef(infraClasses)).getErr = errors.New("binding unreachable")
+	faulted := mustPlan(t, ByID{ID: workShapedID}, f.topo)
+	if _, _, err := ResolveBindingOwner(faulted, workShapedID); errors.Is(err, ErrProvenRelicRefusal) {
+		t.Errorf("an ordinary read fault came back as a proven-relic denial: %v", err)
+	}
+}
+
 // TestResolveBindingOwnerLeavesEveryLegBelowWorkAlone carries that zero to the
 // legs the work leg stands in front of.
 //

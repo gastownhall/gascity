@@ -373,6 +373,21 @@ func TestBindingOwnerRefusedCityWithKnownRelicsRefuses(t *testing.T) {
 	if !storeref.IsStandingRefusal(err) {
 		t.Errorf("the refusal came back as %v, want the standing storage refusal that names the remedy", err)
 	}
+	// The refusal's own sentence is the boot gate's, and a city takes the
+	// identical one for an infrastructure-class id it simply cannot serve. What
+	// makes this denial actionable is the reason behind it and the move that
+	// clears it, and neither is in that sentence.
+	if !errors.Is(err, storeref.ErrProvenRelicRefusal) {
+		t.Errorf("the denial reads %q and carries nothing that tells it apart from the refusal an in-namespace id takes; the operator goes looking for a missing bead", err)
+	}
+	if !strings.Contains(err.Error(), "gc doctor") {
+		t.Errorf("the denial reads %q with no route back to a served city", err)
+	}
+	// One line, because every caller prints this as `gc <cmd>: %v` and a second
+	// line arrives without the command prefix that says which surface refused.
+	if strings.Contains(err.Error(), "\n") {
+		t.Errorf("the denial is multi-line (%q); callers print it as `gc <cmd>: %%v`, so everything after the newline loses the command that refused", err)
+	}
 }
 
 // TestBindingOwnerRefusedCityWithoutMemoStillDeclines is the control, and it
