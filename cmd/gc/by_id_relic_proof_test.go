@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -157,6 +158,59 @@ func TestServedCityPaysNothingForTheRelicProof(t *testing.T) {
 	if *resolutions != 0 {
 		t.Errorf("a served city resolved %d storage plan(s) on the by-id path; the relic proof is for a REFUSED city, and a served one must not pay an engine open per command", *resolutions)
 	}
+}
+
+// TestTheProofAndTheRefusedFunnelSpellTheBindingRefTheSameWay holds the two
+// ends of the fix together.
+//
+// The rows above each assemble one end. The proof keys its verdict by the ref
+// of the binding IT built — over an opened sqlite engine, from the classes the
+// storage plan assigns it. The refused by-id path looks a ref up in that
+// verdict using the ref of the binding the REFUSED funnel built — over five
+// refusedClassStore values grouped by equality, from the classes
+// refusingStorageRoutes decided to route. Those are two constructions on two
+// different days of a city's life, and nothing states that they spell the ref
+// the same way.
+//
+// They do, because both go through residencyBindingsFromRoutes and so through
+// storeref.ClassRef over the same infrastructure class set. If either side ever
+// narrowed to the classes its own routes happened to name, the lookup would
+// miss and the denial would vanish: no error, ok=false, the caller's scan serves
+// the pre-migration copy the migration left in the work ledger — exactly the
+// ga-q8ick symptom, restored silently. The denial row above would catch that,
+// but only by its absence, and a row that fails for "the denial went missing"
+// says nothing about WHY. This one names the reason.
+func TestTheProofAndTheRefusedFunnelSpellTheBindingRefTheSameWay(t *testing.T) {
+	cityPath, classStore := foreignProviderCity(t)
+	relic := classResidentWorkShapedBead(t, classStore, "gc-relic1", "carried across by the migration")
+
+	refuseTheseCities(t, theRefusalARefusedCityCarries(), cityPath)
+
+	proven := provenRelicRefsForCity(cityPath)
+	if len(proven) != 1 {
+		t.Fatalf("the live census proved %d ref(s) for a city whose binding holds %s; with nothing proved the agreement below would be vacuous", len(proven), relic.ID)
+	}
+
+	refusedBindings, refused := cliResidencyBindings(cityPath)
+	if refused == nil {
+		t.Fatal("the fixture city is not refused; the funnel side of the agreement is the REFUSED one")
+	}
+	if len(refusedBindings) != 1 {
+		t.Fatalf("the refused funnel grouped %d binding(s), want one", len(refusedBindings))
+	}
+	if !proven[refusedBindings[0].Leg.Ref] {
+		t.Errorf("the census proved %v and the refused funnel asks about %q; the two spell the same physical binding differently, so the lookup misses and the denial silently disappears", refsOf(proven), refusedBindings[0].Leg.Ref)
+	}
+}
+
+// refsOf renders a proof verdict for a failure message.
+func refsOf(proven map[storeref.StoreRef]bool) []string {
+	out := make([]string, 0, len(proven))
+	for ref := range proven {
+		out = append(out, string(ref))
+	}
+	sort.Strings(out)
+	return out
 }
 
 // sealTheBindingRoot makes this city's configured binding unopenable, and only
