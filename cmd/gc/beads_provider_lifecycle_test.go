@@ -3651,7 +3651,7 @@ esac
 	for _, want := range []string{
 		"pwd=" + realRigDir,
 		"BEADS_DIR=" + filepath.Join(rigDir, ".beads"),
-		"init --server -p tc --skip-hooks --database tc",
+		"init --proxied-server -p tc --skip-hooks --database tc",
 	} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("bd log missing %q:\n%s", want, log)
@@ -4244,6 +4244,7 @@ func TestInitBeadsForDirBuildsCanonicalBdInitProviderOp(t *testing.T) {
 			name:       "logical bd uses the stable city wrapper",
 			provider:   func(string) string { return "bd" },
 			wantScript: gcBeadsBdScriptPath,
+			proxied:    true,
 		},
 		{
 			name: "explicit canonical wrapper keeps its configured path",
@@ -7240,7 +7241,7 @@ func TestEnforceCanonicalScopeMetadataForInitScrubsDeprecatedMetadataEndpointAut
 	for key, want := range map[string]string{
 		"database":      "dolt",
 		"backend":       "dolt",
-		"dolt_mode":     "server",
+		"dolt_mode":     "proxied-server",
 		"dolt_database": "gascity",
 		"custom":        "keep",
 	} {
