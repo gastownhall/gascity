@@ -267,7 +267,6 @@ func evaluatePendingPools(
 		wg.Add(1)
 		sp := pw.sp
 		probeEnv := pw.env
-		sp.Check = prefixShellEnv(controllerQueryPrefixEnv(probeEnv), sp.Check)
 		template := cfg.Agents[pw.agentIdx].QualifiedName()
 		agentName := cfg.Agents[pw.agentIdx].Name
 		agentIndex := pw.agentIdx
@@ -283,7 +282,10 @@ func evaluatePendingPools(
 				// itself once per probe. Acquiring it again here would nest an
 				// outer whole-item wait around per-probe acquires on the
 				// identical channel, which can deadlock once sem is saturated
-				// (ga-drb140 AC1).
+				// (ga-drb140 AC1). sp.Check stays unprefixed here: a rig can run
+				// its own differently-scoped dolt server than the city's, so
+				// evaluatePoolFanOutSum applies the GC_DOLT_HOST/GC_DOLT_PORT
+				// prefix itself, per probe, from that probe's own env.
 				var errs []error
 				d, errs = evaluatePoolFanOutSum(agentName, sp, probes, shellScaleCheck, sem, newDemand)
 				err = errors.Join(errs...)
@@ -291,6 +293,7 @@ func evaluatePendingPools(
 				sem <- struct{}{}
 				func() {
 					defer func() { <-sem }()
+					sp.Check = prefixShellEnv(controllerQueryPrefixEnv(probeEnv), sp.Check)
 					if newDemand {
 						d, err = evaluatePoolNewDemand(agentName, sp, dir, probeEnv, shellScaleCheck)
 					} else {

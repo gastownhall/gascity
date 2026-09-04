@@ -23,21 +23,32 @@ type poolStoreProbe struct {
 // cityScopedFanOutProbes builds the probe list for a city-scoped agent's
 // custom scale_check fan-out: the agent's own (city) probe plus one probe
 // per non-suspended rig, mirroring activeStores' suspended-rig filter in
-// buildDesiredStateWithSessionBeads. ownEnv is reused unchanged for every
-// probe: controllerQueryRuntimeEnv resolves to the city's bd runtime env for
-// any city-scoped agent regardless of which store's directory a probe
-// happens to run in, so there is no per-rig env to compute here — the probe
-// command's working directory (dir) is what selects the store.
-func cityScopedFanOutProbes(cityPath string, cfg *config.City, _ *config.Agent, ownDir string, ownEnv map[string]string, suspendedRigPaths map[string]bool) []poolStoreProbe {
+// buildDesiredStateWithSessionBeads. env selects the store (mergeRuntimeEnv
+// strips any inherited BEADS_DIR and re-applies the override; cmd.Dir plays
+// no part in store selection), so ownEnv must NOT be reused for the rig
+// legs: each rig probe gets its own env built from that rig's own runtime,
+// exactly as controllerQueryRuntimeEnv would resolve it for an agent scoped
+// to that rig. A rig not on the managed bd store contract, or whose env
+// fails to build, is skipped rather than appended with a substitute env —
+// mirroring appendOneRigHookStore's best-effort contract.
+func cityScopedFanOutProbes(cityPath string, cfg *config.City, agentCfg *config.Agent, ownDir string, ownEnv map[string]string, suspendedRigPaths map[string]bool) []poolStoreProbe {
 	probes := []poolStoreProbe{{ref: "city", dir: ownDir, env: ownEnv}}
-	if cfg == nil {
+	if cfg == nil || agentCfg == nil {
 		return probes
 	}
 	for _, rig := range cfg.Rigs {
 		if suspendedRigPaths[filepath.Clean(rig.Path)] {
 			continue
 		}
-		probes = append(probes, poolStoreProbe{ref: rig.Name, dir: resolveAgentDirPath(cityPath, rig.Path), env: ownEnv})
+		if !rigUsesManagedBdStoreContract(cityPath, rig) {
+			continue
+		}
+		rigRoot := resolveAgentDirPath(cityPath, rig.Path)
+		rigEnv, err := bdRuntimeEnvForRigWithErrorNoRecovery(cityPath, cfg, rigRoot)
+		if err != nil {
+			continue
+		}
+		probes = append(probes, poolStoreProbe{ref: rig.Name, dir: rigRoot, env: rigEnv})
 	}
 	return probes
 }
@@ -47,7 +58,10 @@ func cityScopedFanOutProbes(cityPath string, cfg *config.City, _ *config.Agent, 
 // sums the parsed per-probe counts -- clamping the aggregate once when
 // newDemand is false, mirroring evaluatePool/evaluatePoolNewDemand's
 // single-store clamp semantics applied to the summed total instead of one
-// value. A probe error contributes 0 to the sum (best-effort, matching
+// value. sp.Check is expected unprefixed: the GC_DOLT_HOST/GC_DOLT_PORT
+// shell prefix is applied here per probe, from that probe's own env, since
+// a rig can run its own differently-scoped dolt server than the city's. A
+// probe error contributes 0 to the sum (best-effort, matching
 // bestStoreWithWork's federation contract) and is returned for the caller to
 // log; it never poisons the other probes' counts.
 func evaluatePoolFanOutSum(agentName string, sp scaleParams, probes []poolStoreProbe, runner ScaleCheckRunner, sem chan struct{}, newDemand bool) (int, []error) {
@@ -61,15 +75,16 @@ func evaluatePoolFanOutSum(agentName string, sp scaleParams, probes []poolStoreP
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
+			check := prefixShellEnv(controllerQueryPrefixEnv(probe.env), sp.Check)
 			start := time.Now()
-			out, err := runner(sp.Check, probe.dir, probe.env)
+			out, err := runner(check, probe.dir, probe.env)
 			durationMs := float64(time.Since(start).Milliseconds())
 			if err != nil {
 				telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, 0, err)
 				errs[i] = fmt.Errorf("%s: %w", probe.ref, err)
 				return
 			}
-			n, err := parseScaleCheckCount(agentName, sp.Check, out)
+			n, err := parseScaleCheckCount(agentName, check, out)
 			if err != nil {
 				telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, 0, err)
 				errs[i] = fmt.Errorf("%s: %w", probe.ref, err)
