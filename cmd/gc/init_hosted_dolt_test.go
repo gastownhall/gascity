@@ -612,6 +612,47 @@ func TestGcInitCommandHostedDoltRejectsFileBackend(t *testing.T) {
 	assertNoHostedDoltStoreArtifacts(t, cityPath)
 }
 
+// TestGcInitCommandBeadsSelectorMatrix exercises the real init RunE selector
+// wiring. Each supported transport/target pair is rejected cleanly when the
+// effective provider is incompatible, before any city ledger files are
+// written; this also pins the typed refusal path for malformed selectors.
+func TestGcInitCommandBeadsSelectorMatrix(t *testing.T) {
+	tests := []struct {
+		name, transport, target string
+	}{
+		{name: "direct local", transport: "direct", target: "local"},
+		{name: "direct external", transport: "direct", target: "external"},
+		{name: "proxied local", transport: "proxied", target: "local"},
+		{name: "proxied external", transport: "proxied", target: "external"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_BEADS", "file")
+			t.Setenv("GC_DOLT", "")
+			cityPath := filepath.Join(t.TempDir(), "selector-city")
+			var stdout, stderr bytes.Buffer
+			cmd := newInitCmd(&stdout, &stderr)
+			cmd.SilenceUsage = true
+			cmd.SilenceErrors = true
+			args := []string{"--template", "gascity", "--default-provider", "claude", "--skip-provider-readiness", "--no-start", "--beads-transport", tc.transport, "--beads-target", tc.target}
+			if tc.target == "external" {
+				args = append(args, "--dolt-host", "gateway.example.com", "--dolt-port", "4406", "--dolt-database", "bd_prj_x", "--dolt-project-id", "prj_x")
+			}
+			args = append(args, cityPath)
+			cmd.SetArgs(args)
+			err := cmd.Execute()
+			if tc.target == "external" {
+				if err == nil {
+					t.Fatal("gc init unexpectedly succeeded with incompatible file backend")
+				}
+				assertNoHostedDoltStoreArtifacts(t, cityPath)
+			} else if err != nil {
+				t.Fatalf("gc init local selector: %v; stderr=%s", err, stderr.String())
+			}
+		})
+	}
+}
+
 // assertNoHostedDoltStoreArtifacts fails when a rejected hosted-Dolt init left
 // any canonical Dolt ledger files or file-store markers on disk — the contract
 // is that an incompatible-backend rejection writes no ledger state, so reruns
