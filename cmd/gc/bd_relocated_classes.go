@@ -152,8 +152,10 @@ func bdRelocatedClassOverrideEnabled() bool {
 //   - Spellings of those verbs the in-process arm does not implement — `dep tree
 //     --show-all-paths`, `--status`, `--format`, `--direction=both` — are
 //     REFUSED there (exit 1, naming the bead and the binding) rather than
-//     forwarded, because serving them by dropping the flag would answer a
-//     different question than the one asked.
+//     forwarded WHEN THE BINDING HOLDS THE BEAD, because serving them by
+//     dropping the flag would answer a different question than the one asked.
+//     On a clean binding miss they fall through to this ledger on the same
+//     rule as the bullet below.
 //   - Every other bd subcommand that ADDRESSES a reserved-prefix id — in a
 //     positional or an id-valued flag — is refused there too WHEN THE BINDING
 //     HOLDS IT. A clean binding miss falls through to this ledger, which is
