@@ -987,6 +987,18 @@ func managedBdWaitTestTemplate(t *testing.T, bdPath, doltPath string) string {
 			}
 			return nil
 		}
+		// Persist the direct selector: gc-beads-bd treats on-disk mode as
+		// authoritative and intentionally ignores ambient transport variables.
+		for _, dir := range []string{cityPath, rigPath} {
+			if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+				managedBdWaitTemplateErr = fmt.Errorf("create direct marker dir: %w", err)
+				return
+			}
+			if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte("dolt.mode: server\n"), 0o600); err != nil {
+				managedBdWaitTemplateErr = fmt.Errorf("write direct mode marker: %w", err)
+				return
+			}
+		}
 		if err := runScript("start"); err != nil {
 			managedBdWaitTemplateErr = err
 			return
@@ -3348,9 +3360,6 @@ func setupFreshManagedBdWaitTestCity(t *testing.T) string {
 	})
 	if err := initAndHookDir(cityPath, cityPath, "gc"); err != nil {
 		t.Fatalf("initAndHookDir(city): %v", err)
-	}
-	if err := publishManagedDoltRuntimeState(cityPath); err != nil {
-		t.Fatalf("publishManagedDoltRuntimeState: %v", err)
 	}
 	return cityPath
 }
