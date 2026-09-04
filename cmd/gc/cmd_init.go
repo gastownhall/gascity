@@ -518,6 +518,13 @@ func cmdInitWithPreparedWizard(args []string, prepared wizardConfig, preparedSet
 }
 
 func cmdInitWithPreparedWizardInternal(args []string, prepared wizardConfig, preparedSet bool, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness, preserveExisting bool, forceDefaultWizard bool, noStart bool) int {
+	// Validate selector syntax and provider compatibility before probing or
+	// mutating the destination. Explicit transport selectors are meaningful
+	// only for the bd provider; omitted selectors leave other providers alone.
+	if err := prepared.hostedDolt.validateRequest(""); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	var cityPath string
 	if len(args) > 0 {
 		var err error
@@ -1796,6 +1803,18 @@ func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverri
 		fmt.Fprintf(stderr, "gc init --from: source %q has no city.toml\n", srcDir) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// Parse and apply selectors before copying anything. A rejected selector
+	// must leave the destination untouched so a corrected retry can proceed.
+	if data, err := os.ReadFile(srcToml); err != nil {
+		fmt.Fprintf(stderr, "gc init --from: reading source %q: %v\n", srcToml, err) //nolint:errcheck // best-effort stderr
+		return 1
+	} else if sourceCfg, err := config.Parse(data); err != nil {
+		fmt.Fprintf(stderr, "gc init --from: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	} else if err := hosted.applySelectorToCityConfig(sourceCfg); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if cityAlreadyInitializedFS(fs, cityPath) {
 		return initAlreadyInitialized(stderr)
 	}
@@ -1811,6 +1830,10 @@ func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverri
 	copiedToml := filepath.Join(cityPath, "city.toml")
 	cfg, cityName, cityPrefix, persistSiteIdentity, rigSiteBindings, err := rewriteCopiedInitFromIdentity(fs, cityPath, nameOverride)
 	if err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := hosted.applySelectorToCityConfig(cfg); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}

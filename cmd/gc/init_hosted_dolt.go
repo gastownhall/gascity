@@ -72,6 +72,26 @@ func (o hostedDoltInitOptions) validateSelectors() error {
 	return nil
 }
 
+// validateRequest checks all endpoint/selector combinations that can be
+// rejected without reading or mutating a destination. provider is the
+// effective beads provider when known (empty permits config parsing first).
+func (o hostedDoltInitOptions) validateRequest(provider string) error {
+	if err := o.validate(); err != nil {
+		return err
+	}
+	target := strings.ToLower(strings.TrimSpace(o.Target))
+	if target == "external" && !o.enabled() {
+		return fmt.Errorf("--beads-target external requires --dolt-host (or %s)", envDoltHost)
+	}
+	if target == "local" && o.enabled() {
+		return fmt.Errorf("local beads target cannot be combined with --dolt-host or endpoint flags")
+	}
+	if (strings.TrimSpace(o.Transport) != "" || strings.TrimSpace(o.Target) != "" || o.enabled()) && provider != "" && provider != "bd" {
+		return fmt.Errorf("beads transport/endpoint selectors require the bd beads provider (configured provider %q)", provider)
+	}
+	return nil
+}
+
 // applySelectorToCityConfig resolves the provider-neutral init selectors onto
 // the city config consumed by the beads adapter. Omitted selectors use the
 // proxied-local provider default for a fresh Dolt scope.
@@ -79,8 +99,21 @@ func (o hostedDoltInitOptions) applySelectorToCityConfig(cfg *config.City) error
 	if cfg == nil {
 		return fmt.Errorf("cannot apply beads selector to nil city config")
 	}
-	if err := o.validateSelectors(); err != nil {
+	if err := o.validateRequest(strings.TrimSpace(cfg.Beads.Provider)); err != nil {
 		return err
+	}
+	explicit := strings.TrimSpace(o.Transport) != "" || strings.TrimSpace(o.Target) != "" || o.enabled()
+	provider := strings.ToLower(strings.TrimSpace(cfg.Beads.Provider))
+	backend := strings.ToLower(strings.TrimSpace(cfg.Beads.Backend))
+	if !explicit && (provider != "" && provider != "bd" || backend != "" && backend != "dolt" && backend != "bd") {
+		// Non-Dolt providers/backends own their storage topology. Omitted
+		// selectors must not rewrite their config to the proxied default.
+		return nil
+	}
+	if explicit {
+		if provider != "" && provider != "bd" || backend != "" && backend != "dolt" && backend != "bd" {
+			return fmt.Errorf("beads transport/endpoint selectors require the bd/dolt backend (configured provider %q, backend %q)", provider, cfg.Beads.Backend)
+		}
 	}
 	transport, target := strings.ToLower(strings.TrimSpace(o.Transport)), strings.ToLower(strings.TrimSpace(o.Target))
 	if transport == "" && target == "" && o.enabled() {
