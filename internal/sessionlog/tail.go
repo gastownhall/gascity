@@ -43,12 +43,15 @@ func ExtractTailMeta(path string) (*TailMeta, error) {
 	}
 	defer f.Close() //nolint:errcheck // best-effort close on read-only file
 
-	data, startsMidLine, err := readTail(f, tailChunkSize)
+	data, startsMidLine, err := readTail(f)
 	if err != nil {
 		return nil, err
 	}
 
-	lines := splitLines(data)
+	lines, err := splitLines(data)
+	if err != nil {
+		return nil, err
+	}
 	return extractFromLines(lines, startsMidLine), nil
 }
 
@@ -87,9 +90,9 @@ func validateSearchPathFile(searchPaths []string, path string) (string, error) {
 	return "", fmt.Errorf("session log path is outside configured search paths")
 }
 
-// readTail reads the last n bytes of r (or the whole thing if smaller).
-func readTail(r io.ReadSeeker, n int64) ([]byte, bool, error) {
-	data, startsMidLine, _, err := readTailWindow(r, n)
+// readTail reads the last tailChunkSize bytes of r (or the whole thing if smaller).
+func readTail(r io.ReadSeeker) ([]byte, bool, error) {
+	data, startsMidLine, _, err := readTailWindow(r, tailChunkSize)
 	return data, startsMidLine, err
 }
 
@@ -139,11 +142,30 @@ func readTailWindowAt(r io.ReadSeeker, size, n int64) ([]byte, bool, bool, error
 	return data, startsMidLine, offset > 0, nil
 }
 
+// maxTailTokenBytes bounds a single JSONL line during a tail scan. Claude
+// entries can be large (tool results with full file contents, base64 images),
+// so the tail path uses the same 50MB ceiling the full-file reader adopted for
+// exactly that reason (parseFileDetailed).
+//
+// No current caller can reach this ceiling. The fixed-window paths scan
+// tailChunkSize (64KB), and ExtractTailUsageSince's growth loop stops at
+// maxUsageScanBytes (16MB), so the widest window any caller hands to splitLines
+// is three times below this bound and cannot hold a token that exceeds it. The
+// error return below is defense-in-depth against a future cap change, not a
+// live path — maxUsageScanBytes documents what raising the growth cap past this
+// constant would cost.
+const maxTailTokenBytes = 50 * 1024 * 1024
+
 // splitLines splits data into JSONL lines. Partial lines from a mid-file
 // read are tolerated — they fail json.Unmarshal silently in the caller.
-func splitLines(data []byte) [][]byte {
+//
+// A line longer than maxTailTokenBytes is reported rather than dropped:
+// bufio.Scanner stops permanently on bufio.ErrTooLong, so swallowing that
+// error would silently return a prefix of the window and hide every entry
+// after the oversized line — including the newest ones the caller came for.
+func splitLines(data []byte) ([][]byte, error) {
 	scanner := bufio.NewScanner(bytes.NewReader(data))
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	scanner.Buffer(make([]byte, 0, 256*1024), maxTailTokenBytes)
 	var lines [][]byte
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -154,7 +176,10 @@ func splitLines(data []byte) [][]byte {
 		copy(cp, line)
 		lines = append(lines, cp)
 	}
-	return lines
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("splitting session log tail: %w", err)
+	}
+	return lines, nil
 }
 
 // tailEntry is the minimal structure we decode from each JSONL line.

@@ -55,7 +55,11 @@ func ExtractCodexTailMeta(path string) (*TailMeta, error) {
 	if err != nil {
 		return nil, err
 	}
-	return extractCodexTailMetaFromLines(splitLines(data), startsMidLine, truncated), nil
+	lines, err := splitLines(data)
+	if err != nil {
+		return nil, err
+	}
+	return extractCodexTailMetaFromLines(lines, startsMidLine, truncated), nil
 }
 
 // ExtractCodexTailMetaFromSearchPaths reads Codex tail metadata only after
@@ -289,12 +293,17 @@ func ExtractCodexTailUsage(path string) ([]TailUsage, error) {
 		return nil, err
 	}
 
+	lines, err := splitLines(data)
+	if err != nil {
+		return nil, err
+	}
+
 	var usages []TailUsage
 	// byMessageID maps a cumulative-total identity to its index in usages so
 	// duplicate token_count emissions collapse to a single entry.
 	byMessageID := make(map[string]int)
 	turnModel := seedModel
-	for _, line := range splitLines(data) {
+	for _, line := range lines {
 		var entry codexRawEntry
 		if err := json.Unmarshal(line, &entry); err != nil {
 			continue
