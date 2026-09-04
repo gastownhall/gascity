@@ -11,9 +11,9 @@ import (
 )
 
 // TestConfigStateConstructorsSelectDoltModes verifies that fresh managed
-// scopes use the direct server path by default, while an explicit
-// mode=proxied-server opts into Beads' proxied-server path. External endpoints
-// remain direct unless paired with an explicit proxied mode. Existing authoritative scope state is resolved by
+// scopes use the proxied-server path by default. Explicit mode=server selects
+// the direct path, while host/port endpoints remain direct unless paired with
+// an explicit proxied mode. Existing authoritative scope state is resolved by
 // resolveDesired*EndpointState before these constructors are used, so changing
 // the default does not migrate an already initialized scope implicitly.
 func TestConfigStateConstructorsSelectDoltModes(t *testing.T) {
