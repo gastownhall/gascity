@@ -31,6 +31,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The one-live-workflow-per-source-bead guard reads the graph binding, so a
+  split city stops admitting a second live workflow.** A workflow root is graph
+  class, so on a city that relocates the graph class every live root is in the
+  binding — and neither sling door enumerated it. The API walked the city store
+  plus each rig store; the CLI walked the city and rig *directories*, which a
+  binding is not. Both then answered "no conflict" out of stores that
+  structurally could not hold the answer, and a second launch was admitted for a
+  source bead that already had one (the batch path instead rolled its launch
+  back, because the same blindness hid the root it had just created). Both
+  enumerators now lead with the relocated binding, under the same
+  `graph:<city>` store ref the workflow snapshot scan already mints and parses,
+  and the CLI gets it from the one class-binding front door rather than a second
+  enumerator. A scan fault on that leg refuses the sling instead of degrading to
+  the tolerated non-source-store warning: a binding fault is an error, never
+  absence. A city that relocates nothing enumerates exactly what it did before,
+  and one root reached through two legs is named once.
+
 - **A control bead served by a relocated class binding is routed to the
   dispatcher its own `gc.root_store_ref` names.** On a split city every rig's
   control beads live in one class binding. The reconciler dropped rig-rooted

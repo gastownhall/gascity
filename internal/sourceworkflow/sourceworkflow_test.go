@@ -1043,3 +1043,27 @@ func TestCanonicalScopeRefKeepsStoreSentinelStableAcrossWorkingDirs(t *testing.T
 		}
 	}
 }
+
+// TestGraphStoreRefIsAStoreSentinelNotAScopeKind pins the graph binding's store
+// ref. It has to survive canonicalScopeRef intact for the same reason
+// "rig:alpha" does — a ref that absolutized would derive a different lock key
+// per working directory — and it must never collapse to the bare prefix, which
+// isStoreScopeSentinel reads as a path.
+func TestGraphStoreRefIsAStoreSentinelNotAScopeKind(t *testing.T) {
+	ref := GraphStoreRef("bright-lights")
+	if ref != GraphStoreRefPrefix+":bright-lights" {
+		t.Fatalf("GraphStoreRef(bright-lights) = %q, want %q", ref, GraphStoreRefPrefix+":bright-lights")
+	}
+	if got := GraphStoreRef("  "); got != GraphStoreRefPrefix+":city" {
+		t.Errorf("GraphStoreRef(blank) = %q, want the %q fallback", got, GraphStoreRefPrefix+":city")
+	}
+	if !isStoreScopeSentinel(ref) {
+		t.Errorf("%q does not read as a store sentinel; a lock keyed on it would depend on the caller's cwd", ref)
+	}
+	if got := canonicalScopeRef(ref); got != ref {
+		t.Errorf("canonicalScopeRef(%q) = %q, want it verbatim", ref, got)
+	}
+	if NormalizeSourceStoreRef(ref) == NormalizeSourceStoreRef("city:bright-lights") {
+		t.Error("the graph leg's ref compares equal to the city store's; the two legs would be conflated")
+	}
+}

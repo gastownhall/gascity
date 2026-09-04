@@ -99,6 +99,14 @@ type BeadRouter interface {
 type SourceWorkflowStore struct {
 	Store    beads.Store
 	StoreRef string
+	// Strict marks a store whose live-root scan failure must abort the sling
+	// instead of degrading to a SourceWorkflowStoreScanWarning. The selected
+	// source store is always strict; a caller sets this for any other store that
+	// structurally HOLDS the answer the singleton guard depends on — on a
+	// converged split city that is the relocated graph binding, where every live
+	// workflow root lives. Tolerating a fault there would answer "no conflict"
+	// from the one store that could have said otherwise.
+	Strict bool
 }
 
 // RouteRequest describes a bead routing operation in typed terms.
