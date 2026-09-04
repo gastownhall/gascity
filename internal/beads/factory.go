@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
 
@@ -148,6 +149,10 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 			PreflightReason:     "bd hooks are installed; remove .beads/hooks/on_create,on_update,on_close after confirming controller cache events cover this deployment",
 		}
 		logNativeUnavailable(opts.Logger, opts.ScopeRoot, diag.PreflightGate, diag.PreflightReason)
+		return opts.openBdFallback(provider, diag)
+	}
+	if mode, ok, modeErr := contract.ReadDoltMode(fsys.OSFS{}, filepath.Join(opts.ScopeRoot, ".beads", "metadata.json")); modeErr == nil && ok && strings.EqualFold(mode, "proxied-server") {
+		diag := BeadsDiagnostic{Store: storeNameBdStore, NativeStoreEligible: false, PreflightGate: "proxied_provider", PreflightReason: "proxied-server mode is owned by the bd provider"}
 		return opts.openBdFallback(provider, diag)
 	}
 

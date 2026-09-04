@@ -67,6 +67,11 @@ func preflightDatabaseProjectIDReader(cityPath string) func(scope string) (strin
 		if err != nil || !ok {
 			return "", false, err
 		}
+		if target.DoltMode == "proxied-server" {
+			// Identity is verified by the provider-owned proxied connection;
+			// there is no direct SQL endpoint to probe here.
+			return "", false, nil
+		}
 		// Pooled handle owned by internal/doltpool; do not Close.
 		var db *sql.DB
 		if target.Socket != "" {
