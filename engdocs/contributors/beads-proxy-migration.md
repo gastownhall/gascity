@@ -46,8 +46,12 @@ bd migrate from-proxied-server-to-shared-server
 Managed-local mode owns the proxy and child Dolt lifecycle. External TCP or
 Unix endpoints are owner-managed; in-place migration refuses them. A migration
 journal records each checkpoint, retries repair incomplete work, and a second
-successful invocation is idempotent. Missing or malformed journal, metadata,
-sidecar, or topology state fails closed without mutating the workspace.
+successful invocation is idempotent. The journal is absent before the first
+migration starts, which is the expected initial state; migration creates it
+before making its first change. After migration begins, a malformed or
+unreadable journal, or sidecar/metadata/topology state that contradicts the
+journal (including a sidecar with no journal), fails closed without mutating
+the workspace.
 
 The sidecar identifies the proxied root; `metadata.json` stores the mode and
 workspace YAML stores shared-server topology. Proxy/server controls and logs
@@ -98,8 +102,10 @@ do not fall back to a newly initialized store.
 - Startup with unchanged configuration is a no-op.
 - Configuration changes require an explicit migration intent and durable
   checkpoint; they are never inferred from provider availability.
-- Missing, malformed, or incomplete metadata fails closed rather than creating
-  a new store.
+- Missing metadata after initialization, malformed or unreadable metadata, and
+  an incomplete or contradictory journal fail closed rather than creating a
+  new store. A missing journal is expected only before the first migration;
+  migration creates it as its initial checkpoint.
 - Managed-local topology owns the child server lifecycle. External TCP and
   Unix topologies do not: they reconnect to the configured endpoint and never
   adopt or restart the external server. Both use the same checkpoint and
