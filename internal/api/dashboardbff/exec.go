@@ -260,10 +260,10 @@ func (r *execRunner) execGitLog(ctx context.Context, view string) (*execResult, 
 }
 
 // execBdPing runs Beads' provider-neutral connectivity probe against a rig
-// store. Ping is supported by proxied-server mode and is
-// deliberately read-only (it resolves the store and executes SELECT 1). The
-// path is supervisor-reported and validated here; no mutating flags are ever
-// passed.
+// store. Ping is supported by embedded, direct-server, and proxied-server
+// stores alike, and is deliberately read-only (it resolves the store and
+// executes SELECT 1). The path is supervisor-reported and validated here; no
+// mutating flags are ever passed.
 func (r *execRunner) execBdPing(ctx context.Context, beadsPath string) (*execResult, error) {
 	if !isValidHostPath(beadsPath) || !strings.HasSuffix(beadsPath, "/.beads") {
 		return nil, validationErr("invalid beads store path")
