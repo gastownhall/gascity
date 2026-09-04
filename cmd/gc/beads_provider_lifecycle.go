@@ -200,12 +200,9 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 	} else {
 		clearCityDoltConfig(cityPath)
 	}
-	skipLocalDolt := false
 	// Proxied-server scopes own their Dolt child and proxy through beads' UOW.
 	// Gas City must not start or publish a second direct sql-server for them.
-	if scopeUsesProxiedDoltMode(cityPath, cityPath) {
-		skipLocalDolt = true
-	}
+	skipLocalDolt := scopeUsesProxiedDoltMode(cityPath, cityPath)
 	if cityUsesBdStoreContract(cityPath) {
 		var err error
 		completeBinding, err := scopeHasCompleteStorageBinding(scopeMetadataJSONPath(cityPath))
@@ -413,7 +410,7 @@ func scopeUsesProxiedDoltMode(cityPath, scopeRoot string) bool {
 	// city provider is file/sqlite still gets the default bd-backed rig store,
 	// so recognize that fresh per-rig path without reclassifying the city store.
 	if !providerUsesBdStoreContract(beadsProvider(cityPath)) &&
-		!(samePath(cityPath, scopeRoot) == false && shouldInitDefaultRigBdStore(cityPath, scopeRoot, beadsProvider(cityPath))) {
+		(samePath(cityPath, scopeRoot) || !shouldInitDefaultRigBdStore(cityPath, scopeRoot, beadsProvider(cityPath))) {
 		return false
 	}
 	if strings.TrimSpace(cityPath) == "" {

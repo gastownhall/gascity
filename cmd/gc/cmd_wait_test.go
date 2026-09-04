@@ -928,14 +928,16 @@ func managedBdWaitTestTemplate(t *testing.T, bdPath, doltPath string) string {
 			return
 		}
 		env := waitTestEnv(map[string]string{
-			"GC_BEADS":       "bd",
-			"GC_DOLT":        "",
-			"GC_BIN":         currentGCBinaryForTests(t),
-			"GC_CITY":        cityPath,
-			"GC_CITY_PATH":   cityPath,
-			"HOME":           homeDir,
-			"DOLT_ROOT_PATH": homeDir,
-			"PATH":           strings.Join([]string{filepath.Dir(bdPath), filepath.Dir(doltPath), os.Getenv("PATH")}, string(os.PathListSeparator)),
+			"GC_BEADS":           "bd",
+			"GC_DOLT":            "",
+			"GC_BIN":             currentGCBinaryForTests(t),
+			"GC_CITY":            cityPath,
+			"GC_CITY_PATH":       cityPath,
+			"GC_BEADS_TRANSPORT": "direct",
+			"GC_BEADS_TARGET":    "local",
+			"HOME":               homeDir,
+			"DOLT_ROOT_PATH":     homeDir,
+			"PATH":               strings.Join([]string{filepath.Dir(bdPath), filepath.Dir(doltPath), os.Getenv("PATH")}, string(os.PathListSeparator)),
 		})
 		runScript := func(args ...string) error {
 			cmd := exec.Command(script, args...)
