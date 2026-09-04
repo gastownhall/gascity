@@ -1836,10 +1836,28 @@ func ensureCanonicalScopeMetadata(fs fsys.FS, scopeRoot, doltDatabase string, pr
 	path := filepath.Join(scopeRoot, ".beads", "metadata.json")
 	preserveReservedExisting := false
 	metadataModeAuthoritative := false
-	// Fresh bd/Dolt scopes use Beads' proxied-local UOW path. Existing
-	// authoritative mode markers remain authoritative so startup never silently
-	// migrates a workspace when an operator changes the configured mode.
+	// A scope with no metadata is a fresh initialization and uses Beads'
+	// proxied-local UOW path. Existing metadata is treated as a legacy/direct
+	// contract unless it explicitly identifies a Dolt mode; this avoids
+	// silently converting old workspaces while still making new installs
+	// proxied by default.
+	metadataExists := false
+	metadataBackend := ""
+	if _, err := fs.Stat(path); err == nil {
+		metadataExists = true
+		if data, readErr := fs.ReadFile(path); readErr == nil {
+			var raw struct {
+				Backend string `json:"backend"`
+			}
+			if json.Unmarshal(data, &raw) == nil {
+				metadataBackend = strings.ToLower(strings.TrimSpace(raw.Backend))
+			}
+		}
+	}
 	doltMode := "proxied-server"
+	if metadataExists && metadataBackend == "legacy" {
+		doltMode = "server"
+	}
 	if preserveExisting {
 		if _, _, err := contract.LoadMetadataState(fs, path); err != nil {
 			if !allowLegacyDoltMetadataRepair(fs, path, err) {
@@ -1881,9 +1899,9 @@ func ensureCanonicalScopeMetadata(fs fsys.FS, scopeRoot, doltDatabase string, pr
 	// legacy scopes whose metadata omitted dolt_mode but whose canonical config
 	// already records an external origin.
 	if cfg, ok, err := contract.ReadConfigState(fs, filepath.Join(scopeRoot, ".beads", "config.yaml")); err == nil && ok {
-		if !metadataModeAuthoritative && (cfg.EndpointOrigin == contract.EndpointOriginCityCanonical || cfg.EndpointOrigin == contract.EndpointOriginExplicit || strings.TrimSpace(cfg.DoltHost) != "" || strings.TrimSpace(cfg.DoltPort) != "") {
+		if !metadataModeAuthoritative && (!metadataExists || metadataBackend == "dolt") && (cfg.EndpointOrigin == contract.EndpointOriginCityCanonical || cfg.EndpointOrigin == contract.EndpointOriginExplicit || strings.TrimSpace(cfg.DoltHost) != "" || strings.TrimSpace(cfg.DoltPort) != "") {
 			doltMode = "server"
-		} else if !metadataModeAuthoritative && strings.TrimSpace(cfg.DoltMode) != "" {
+		} else if !metadataModeAuthoritative && strings.TrimSpace(cfg.DoltMode) != "" && (!metadataExists || metadataBackend == "dolt") {
 			doltMode = strings.TrimSpace(cfg.DoltMode)
 		}
 	}
