@@ -4487,8 +4487,8 @@ esac
 	if got := strings.TrimSpace(fmt.Sprint(meta["backend"])); got != "dolt" {
 		t.Fatalf("metadata backend = %q, want dolt", got)
 	}
-	if got := strings.TrimSpace(fmt.Sprint(meta["dolt_mode"])); got != "proxied-server" {
-		t.Fatalf("metadata dolt_mode = %q, want proxied-server", got)
+	if got := strings.TrimSpace(fmt.Sprint(meta["dolt_mode"])); got != "local" {
+		t.Fatalf("metadata dolt_mode = %q, want provider-selected local mode", got)
 	}
 	if got := strings.TrimSpace(fmt.Sprint(meta["dolt_database"])); got != "hq" {
 		t.Fatalf("metadata dolt_database = %q, want hq", got)
