@@ -2563,6 +2563,9 @@
             "$ref": "#/components/schemas/SessionMessageSucceededPayload"
           },
           {
+            "$ref": "#/components/schemas/SessionPoolSlotRetiredAtDrainDeadlinePayload"
+          },
+          {
             "$ref": "#/components/schemas/SessionResetStalledPayload"
           },
           {
@@ -7577,6 +7580,37 @@
         ],
         "type": "object"
       },
+      "SessionPoolSlotRetiredAtDrainDeadlinePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "drain_age_seconds": {
+            "description": "Whole seconds the seat spent in drain before the deadline retired it. Always at least the retire deadline.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "drain_at": {
+            "description": "RFC3339 instant the seat entered drain (the drain_at metadata). Empty only if the marker was unreadable, in which case no retirement occurs.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Canonical session bead ID for the retired pool seat.",
+            "type": "string"
+          },
+          "session_name": {
+            "description": "Runtime session name the seat held. This is the name the pool could not route around until the retirement freed it.",
+            "type": "string"
+          },
+          "template": {
+            "description": "Pool template name when known at the emission site.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "drain_age_seconds"
+        ],
+        "type": "object"
+      },
       "SessionRawMessageFrame": {
         "description": "Provider-native transcript frame. Gas City forwards the exact JSON the provider wrote to its session log, so the shape is provider-specific and can be any JSON value. The producing provider is identified by the Provider field on the enclosing envelope; consumers dispatch per-provider frame parsing keyed by that identifier.",
         "title": "Session raw transcript frame"
@@ -12220,6 +12254,7 @@
             "session.draining": "#/components/schemas/TypedEventStreamEnvelopeSessionDraining",
             "session.idle_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionIdleKilled",
             "session.max_age_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionMaxAgeKilled",
+            "session.pool_slot_retired_at_drain_deadline": "#/components/schemas/TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline",
             "session.quarantined": "#/components/schemas/TypedEventStreamEnvelopeSessionQuarantined",
             "session.reset_stalled": "#/components/schemas/TypedEventStreamEnvelopeSessionResetStalled",
             "session.stopped": "#/components/schemas/TypedEventStreamEnvelopeSessionStopped",
@@ -12461,6 +12496,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionMaxAgeKilled"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionQuarantined"
@@ -13726,6 +13764,7 @@
                 "session.updated",
                 "session.drain_acked_with_assigned_work",
                 "session.stranded",
+                "session.pool_slot_retired_at_drain_deadline",
                 "session.unknown_state",
                 "session.wake_refused",
                 "session.reset_stalled",
@@ -16790,6 +16829,63 @@
         "title": "TypedEventStreamEnvelope session.max_age_killed",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionPoolSlotRetiredAtDrainDeadlinePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.pool_slot_retired_at_drain_deadline",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.pool_slot_retired_at_drain_deadline",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSessionQuarantined": {
         "additionalProperties": false,
         "properties": {
@@ -18120,6 +18216,7 @@
             "session.draining": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDraining",
             "session.idle_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionIdleKilled",
             "session.max_age_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled",
+            "session.pool_slot_retired_at_drain_deadline": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline",
             "session.quarantined": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionQuarantined",
             "session.reset_stalled": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionResetStalled",
             "session.stopped": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionStopped",
@@ -18361,6 +18458,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionQuarantined"
@@ -19709,6 +19809,7 @@
                 "session.updated",
                 "session.drain_acked_with_assigned_work",
                 "session.stranded",
+                "session.pool_slot_retired_at_drain_deadline",
                 "session.unknown_state",
                 "session.wake_refused",
                 "session.reset_stalled",
@@ -22980,6 +23081,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope session.max_age_killed",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionPoolSlotRetiredAtDrainDeadlinePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.pool_slot_retired_at_drain_deadline",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.pool_slot_retired_at_drain_deadline",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSessionQuarantined": {

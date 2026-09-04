@@ -356,6 +356,14 @@ type Info struct {
 	// WakeMode is the RAW wake_mode metadata. The wake and drain-finalize paths
 	// branch on an exact == "fresh" compare.
 	WakeMode string // wake_mode (raw)
+	// DrainAt is the RAW drain_at metadata (RFC3339 or empty): the durable
+	// instant BeginDrainPatch stamped when the session entered drain. It
+	// survives the draining → drained transition (AcknowledgeDrainPatch does
+	// not clear it), so it is the only persistent clock for how long a seat has
+	// been in drain — the in-memory drainTracker resets on every controller
+	// restart. The pool-slot retire deadline parses it; an empty or
+	// unparseable value fails closed (no forced retirement).
+	DrainAt string // drain_at (raw RFC3339)
 	// SleepIntent is the RAW sleep_intent metadata. The sleep-intent branch reads
 	// it as != "" and == "idle-stop-pending".
 	SleepIntent string // sleep_intent (raw)
