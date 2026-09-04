@@ -153,7 +153,7 @@ func (b *cappedBuffer) String() string { return b.buf.String() }
 // environment is inherited; PATH/HOME/LANG are assigned intentionally.
 //
 // GITHUB_TOKEN is deliberately NOT forwarded: none of the dashboard's
-// read-only probes (git log/diff, bd doctor, version probes) need it, and
+// read-only probes (git log/diff, Beads connectivity, version probes) need it, and
 // leaking it into a git invocation whose cwd is request-influenced would be
 // needless credential exposure (least privilege). The GIT_* settings neutralize
 // attacker-authored repo config in a probed cwd — no transport protocols and no
@@ -260,7 +260,7 @@ func (r *execRunner) execGitLog(ctx context.Context, view string) (*execResult, 
 }
 
 // execBdPing runs Beads' provider-neutral connectivity probe against a rig
-// store. Unlike `bd doctor`, ping is supported by proxied-server mode and is
+// store. Ping is supported by proxied-server mode and is
 // deliberately read-only (it resolves the store and executes SELECT 1). The
 // path is supervisor-reported and validated here; no mutating flags are ever
 // passed.
