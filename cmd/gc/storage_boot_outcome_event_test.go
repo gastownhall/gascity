@@ -459,10 +459,11 @@ func TestStorageStatusCountsABindingItCanRead(t *testing.T) {
 // The two tests above only reach the arms that open nothing: an absent root
 // reports a fault and an absent database counts zero from a stat. Here the
 // database is already on disk, so infraBindingCensus opens a bead engine to
-// count what it holds — and opening a SQLite database read-write materializes
-// WAL and SHM sidecars next to it. A deploy gate is allowed to run this on a
-// serving city as often as it likes, so whatever the engine writes while
-// answering has to be gone by the time the command returns.
+// count what it holds. A deploy gate is allowed to run this on a serving city
+// as often as it likes, so nothing the engine does while answering may touch
+// what the binding already holds. assertReadOnlyDiagnosticResidue is that
+// claim, and its doc comment carries why the WAL and SHM sidecars are the one
+// thing a mode=ro connection may leave behind.
 func TestStorageStatusLeavesNothingBehindWhenItOpensTheBinding(t *testing.T) {
 	bindingParent := t.TempDir()
 	cfg := infraSplitConfig(filepath.Join(bindingParent, "store"))
@@ -492,7 +493,5 @@ func TestStorageStatusLeavesNothingBehindWhenItOpensTheBinding(t *testing.T) {
 	if !strings.Contains(stdout.String(), "binding: 1 infrastructure bead(s)") {
 		t.Fatalf("the census did not count the binding, so it never opened it and the fingerprint below proves nothing: %q", stdout.String())
 	}
-	if got := treeFingerprint(t, bindingParent); !equalStrings(before, got) {
-		t.Errorf("status left the binding tree changed after opening the database to count it:\n before %v\n after  %v", before, got)
-	}
+	assertReadOnlyDiagnosticResidue(t, before, treeFingerprint(t, bindingParent), target.Database)
 }

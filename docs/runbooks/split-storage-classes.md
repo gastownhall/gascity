@@ -104,7 +104,7 @@ The checks that most often stop a real cutover, and what each wants from you:
 | --- | --- | --- |
 | `rig scopes` | An infrastructure bead lives in a rig's store, and the copy reads only the city work store. | Move the named beads into the city work store by hand. |
 | `served binding` | This city already served its infrastructure classes from a different binding. | Verify or recover that binding first. Removing the note is your attestation that you have. |
-| `edge payloads` | The work store cannot be asked what its dependency edges carry — `waits_for` gates store a payload there. | Nothing to fix in your data; the store this city serves from has no such read. A store that cannot answer is not one that carries nothing, so the migration stops rather than copying edges and dropping their gates. |
+| `edge payloads` | The work store cannot be asked what its dependency edges carry — `waits_for` gates store a payload there. | Nothing in your data: this city's work store runs on an engine that cannot report edge payloads, so this binary cannot split it. The block is permanent until the work store is on an engine that can (SQLite or native Dolt). |
 | `destination` | The binding already holds beads this migration did not write. | Find out whose they are before letting a copy overwrite them. |
 
 It exits non-zero when the migration would refuse for something you have to go
@@ -296,6 +296,69 @@ emptiness.
 The check to run by hand is the marker: if
 `<binding path>/infra.migrated` exists, the city has cut over, and a config
 revert abandons whatever the binding holds.
+
+## If this city cut over before edge payloads were carried
+
+A city that converged under an earlier build has a binding whose within-infra
+dependency edges arrived **without their payloads**. The copy re-added every
+edge with its endpoints and type intact and dropped the JSON sidecar. The fix
+is in the copy; it does nothing for a city that already ran it.
+
+The payload-carrying edges are the `waits_for` fanout gates between formula
+step beads, and the payload records which gate the formula asked for —
+`{"gate":"any-children"}`. A gate whose payload is gone reads as the default,
+`all-children`. The consequence is one-directional: such a gate waits for
+*every* child where the formula asked it to release on the first. It never
+releases a gate early, and an `all-children` gate — the default, and the common
+case — lands on the value it started with. Both endpoints are infrastructure
+beads, so no cross-class edge is involved.
+
+Nothing detects this state. The convergence re-check compares the beads the
+proven-copy manifest names, and the manifest records ids, not edges.
+`gc storage recover-stranded` writes only the edges the binding is *missing*;
+a present-but-payloadless edge counts as one the binding already holds, so the
+repair skips exactly the edges that are wrong. `gc storage preflight` returns
+at the convergence step on a converged city and never reaches the edge-payload
+check. Detection and a non-destructive repair are tracked as `ga-67pm3`.
+
+**What is not lost.** The migration retained the work store, so the original
+payload of every pre-cutover edge is still readable there. Every edge written
+to the binding after cutover went through the normal writer and carries its
+payload. The damage is bounded to the edge set the old copy carried.
+
+### Re-converging, and what it costs
+
+The only remedy this build offers is running the copy again, and the marker is
+in the way: a marker whose database is present is a converged city, and the
+migration re-proves convergence instead of re-copying. Removing the component
+directory the database lives in — and leaving the marker where it is — is the
+state the code calls stale. The marker's claim about the past still holds and
+its claim about the present does not, so the migration reports `<marker>
+claims convergence but <database> is gone; re-running the copy` and falls
+through to the copy. The manifest is replaced by the same atomic rename that
+writes it, so it needs no deletion.
+
+```
+gc storage status   # read the `database:` line; its parent directory is what
+                    # the next step removes
+gc stop
+rm -rf <binding root>/graph
+gc storage migrate --from-work --fleet-stopped
+gc start
+gc storage status
+```
+
+> **Danger: this destroys every binding write made since cutover.**
+> The re-copy reads the retained work store, which is the state as of the
+> original cutover. Every infrastructure bead created since — and every edge
+> among them — exists only in the directory being removed. Take a filesystem
+> copy of the binding root first, and treat this as worth doing only where the
+> gate kinds matter more than that history.
+
+Leave the marker alone. The procedure does not need it gone — a marker with no
+database is precisely the state that re-runs the copy — and it is the binding's
+own record that this city has been in service, which the post-cutover refusals
+key on.
 
 ## What a later boot keeps checking
 

@@ -523,11 +523,79 @@ var openInfraMigrationSource = func(cityPath string) (beads.Store, error) {
 // exists to prevent, so tests exercise the production opener at a temporary
 // binding root.
 func openInfraDestination(target infraBindingTarget) (beads.Store, error) {
-	prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph)
-	if !ok || prefix == "" {
-		return nil, fmt.Errorf("no reserved id prefix is registered for the %q class", config.BeadClassGraph)
+	prefix, err := infraBindingIDPrefix()
+	if err != nil {
+		return nil, err
 	}
 	return beads.OpenSQLiteStore(target.Dir, beads.WithSQLiteStoreIDPrefix(prefix))
+}
+
+// openInfraBindingReadOnly opens the same binding openInfraDestination writes
+// to, strictly read-only. It is the opener for every reach into the binding
+// that only looks at it — the rule, not a list, because a command is read-only
+// with respect to a store only if ALL of its opens of that store are: `gc
+// storage status` reaches the binding three times in one invocation
+// (infraBindingCensus, reportBindingRelics, and classifyInfraContainmentGap),
+// and one writer among them is enough to checkpoint. `gc storage preflight`
+// reaches it through the census and infraDestinationPreflightRefusal. A new
+// read added to either command belongs here too.
+//
+// These commands are documented read-only and they run against a LIVE city — a
+// deploy gate may run either as often as it likes while a controller is serving
+// the database. Reaching the binding through the migration's writer opener would
+// leave that contract resting on what the writer opener happens to do today
+// rather than on what the connection is able to do: a read-write connection
+// CAN checkpoint the WAL on close, which rewrites the main database and the
+// -wal of a store something else is serving, with zero logical writes. A
+// mode=ro connection cannot take the write lock, so it can neither mutate a row
+// nor checkpoint, and every file the binding already had stays byte-identical
+// across open/read/close (beads.WithSQLiteStoreReadOnly).
+//
+// What it does leave behind, on a binding nothing else has open, is the -wal
+// and -shm pair SQLite materializes to read a WAL-mode database: a connection
+// that cannot take the write lock cannot remove them on close either. On the
+// case that motivates this opener — a city whose controller is serving the
+// binding — both are already on disk and held open, so there is nothing to add
+// and nothing to remove. Removing them is the writer opener's ability, and the
+// way it removes them is the checkpoint above.
+//
+// The id prefix stays on: it is the namespace the sequence floor is recovered
+// under, and a diagnostic that read a different one would be reporting on a
+// store the runtime does not serve.
+//
+// infraBindingHoldsNothing reads the binding too and deliberately keeps the
+// writer opener. It is not a diagnostic run against a live city: its two
+// callers are the migration itself, holding the guard with the fleet stopped,
+// and the boot gate, which is about to open the binding read-write to serve it.
+//
+// Read-only requires the database to already exist and never creates the
+// parent directory. Every caller establishes that before reaching this point,
+// one of two ways: the census and the preflight refusal stat target.Database
+// themselves and return when it is absent, and reportBindingRelics and
+// classifyInfraContainmentGap are reached only past a
+// readInfraConvergenceState gate that returned
+// infraConvergenceMarked, which is precisely "the marker exists AND the
+// database is present". That is the same precondition infraBindingHoldsNothing
+// states for its own reason: opening for write CREATES the database, and a
+// report that created the store it was asked about would leave one behind on a
+// city that never cut over.
+func openInfraBindingReadOnly(target infraBindingTarget) (beads.Store, error) {
+	prefix, err := infraBindingIDPrefix()
+	if err != nil {
+		return nil, err
+	}
+	return beads.OpenSQLiteStore(target.Dir, beads.WithSQLiteStoreReadOnly(), beads.WithSQLiteStoreIDPrefix(prefix))
+}
+
+// infraBindingIDPrefix is the reserved id prefix the deployed binding provider
+// serves the infrastructure classes under, shared by both binding openers so a
+// read cannot resolve a different namespace than the write it is checking.
+func infraBindingIDPrefix() (string, error) {
+	prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph)
+	if !ok || prefix == "" {
+		return "", fmt.Errorf("no reserved id prefix is registered for the %q class", config.BeadClassGraph)
+	}
+	return prefix, nil
 }
 
 // infraMigrationRename is the atomic publish step shared by the copy manifest
@@ -885,10 +953,10 @@ func infraBindingHoldsNothing(target infraBindingTarget) (bool, error) {
 // time to a human deciding whether a cutover landed. The caller renders the
 // fault in place of the number rather than a number nobody could take.
 //
-// Below a readable root, an absent database is zero rather than an error, for
-// the same reason infraBindingHoldsNothing refuses to open one: opening creates
-// it, and a report that creates the database it is asked about would leave a
-// store behind on a city that never cut over.
+// Below a readable root, an absent database is zero rather than an error: a
+// city that never cut over has nothing in a binding that is not there, and the
+// count says so instead of failing. The stat is also what makes the read-only
+// open below legal, since that opener requires the file to already exist.
 func infraBindingCensus(target infraBindingTarget) (int, error) {
 	if err := infraBindingRootEnumerable(target.Root); err != nil {
 		return 0, err
@@ -900,7 +968,7 @@ func infraBindingCensus(target infraBindingTarget) (int, error) {
 	if !present {
 		return 0, nil
 	}
-	store, err := openInfraDestination(target)
+	store, err := openInfraBindingReadOnly(target)
 	if err != nil {
 		return 0, fmt.Errorf("opening the binding %q at %s: %w", target.Binding, target.Database, err)
 	}
@@ -1248,8 +1316,9 @@ type infraContainmentGap struct {
 
 // classifyInfraContainmentGap classifies every source infrastructure bead the binding
 // cannot read against the manifest of what the copy was proven to deliver. It
-// opens both stores read-only and creates nothing: a converged city must not be
-// mutated by its own convergence check.
+// opens the binding read-only and the work store through the city's normal
+// work-store opener, and creates nothing: a converged city must not be mutated
+// by its own convergence check.
 func classifyInfraContainmentGap(cityPath string, target infraBindingTarget, proven map[string]bool) (infraContainmentGap, error) {
 	source, err := openInfraMigrationSource(cityPath)
 	if err != nil {
@@ -1265,7 +1334,7 @@ func classifyInfraContainmentGap(cityPath string, target infraBindingTarget, pro
 		return infraContainmentGap{}, nil
 	}
 
-	destination, err := openInfraDestination(target)
+	destination, err := openInfraBindingReadOnly(target)
 	if err != nil {
 		return infraContainmentGap{}, fmt.Errorf("opening binding %q at %s: %w", target.Binding, target.Database, err)
 	}
@@ -1598,11 +1667,13 @@ func infraDestinationPopulatedRefusal(existing []beads.Bead) error {
 // infraDestinationPreflightRefusal reports what prepareInfraDestination would
 // refuse, without creating anything.
 //
-// The database is opened only when it is already on disk, for the reason
-// infraBindingHoldsNothing gives: openInfraDestination CREATES it, and a
-// rehearsal that created the database it was asked about would leave a store
-// behind on a city that never cut over — and would answer its own question,
-// since the store it just made is empty and clears every time.
+// A database that is not on disk yet is not a refusal and is not opened: what
+// prepareInfraDestination would do with it is create it, and there is nothing
+// in a store that does not exist for the populated-destination check to find.
+// The stat is also the precondition of the read-only opener below, which
+// requires the file to already exist and never creates the directory — which is
+// what keeps a rehearsal from answering its own question by leaving behind an
+// empty store on a city that never cut over.
 func infraDestinationPreflightRefusal(target infraBindingTarget) error {
 	present, err := infraPathExists(target.Database)
 	if err != nil {
@@ -1611,7 +1682,7 @@ func infraDestinationPreflightRefusal(target infraBindingTarget) error {
 	if !present {
 		return nil
 	}
-	store, err := openInfraDestination(target)
+	store, err := openInfraBindingReadOnly(target)
 	if err != nil {
 		return fmt.Errorf("opening the binding %q at %s: %w", target.Binding, target.Database, err)
 	}

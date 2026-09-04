@@ -60,6 +60,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The infra-class cutover now carries dependency-edge payloads.** Every
+  within-infra edge the copy re-added went in through a writer that clears the
+  pair's metadata sidecar, so the binding received those edges with their
+  endpoints and type intact and their payloads gone. In production the
+  payload-carrying edges are the `waits_for` fanout gates between formula step
+  beads, whose payload records the gate kind; an absent payload reads as the
+  default, `all-children`, so a gate the formula asked to release on the first
+  child waited for every one of them instead. The copy and the recovery path
+  now share one edge writer, a destination that cannot carry a payload is
+  refused rather than written to without it, and the equality witness compares
+  the payload rather than only the edge.
+
+  **Upgrading:** this does not repair a city that already cut over. Its binding
+  still holds the payloadless edges, and no command yet detects or repairs
+  them. See "If this city cut over before edge payloads were carried" in
+  `docs/runbooks/split-storage-classes.md` for what is affected, what is not
+  lost, and the destructive re-converge procedure.
+
 - **A control bead served by a relocated class binding is routed to the
   dispatcher its own `gc.root_store_ref` names.** On a split city every rig's
   control beads live in one class binding. The reconciler dropped rig-rooted

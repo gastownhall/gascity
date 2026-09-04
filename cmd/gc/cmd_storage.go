@@ -544,8 +544,15 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 // so a status command that failed over one would report every city that ever
 // migrated as broken. A binding that cannot be read is reported and skipped for
 // the same reason: the layout facts above it stand on their own.
+//
+// It reads through openInfraBindingReadOnly for the reason that opener states:
+// its only caller runs past the convergence gate in doStorageStatus, which is
+// the arm a controller can be serving, and a read-write connection there could
+// checkpoint the WAL of a live binding on close. The gate is also the
+// precondition read-only needs — infraConvergenceMarked means the database is
+// present — so no extra stat is required here.
 func reportBindingRelics(target infraBindingTarget, logPrefix string, stdout, stderr io.Writer) {
-	binding, err := openInfraDestination(target)
+	binding, err := openInfraBindingReadOnly(target)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: counting open relics: opening the binding: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return

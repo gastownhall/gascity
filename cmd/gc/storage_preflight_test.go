@@ -108,13 +108,15 @@ func TestPreflightCreatesNothing(t *testing.T) {
 // path where the read-only claim is not obviously true.
 //
 // Every other check reads files or a store the city already serves. The
-// destination check opens a bead engine, and opening a SQLite database
-// read-write materializes WAL and SHM sidecars next to it. TestPreflightCreatesNothing
-// never reaches that code — its destination does not exist, so the open is
-// skipped — which means "creates nothing" was asserted only on the path that
-// creates nothing trivially. Here the database is already there and the open
-// happens, so the fingerprint is the claim: whatever the engine writes while
-// answering the question has to be gone by the time the command returns.
+// destination check opens a bead engine. TestPreflightCreatesNothing never
+// reaches that code — its destination does not exist, so the open is skipped —
+// which means "creates nothing" was asserted only on the path that creates
+// nothing trivially. Here the database is already there and the open happens,
+// so the fingerprint is the claim: nothing the engine does while answering the
+// question may touch what the destination already holds.
+// assertReadOnlyDiagnosticResidue is that claim, and its doc comment carries
+// why the WAL and SHM sidecars are the one thing a mode=ro connection may leave
+// behind.
 func TestPreflightLeavesNothingBehindWhenItOpensTheDestination(t *testing.T) {
 	request, cfg, bindingParent := preflightReadyCity(t, 1)
 	target := mustResolveInfraTarget(t, request.CityPath, cfg)
@@ -137,9 +139,7 @@ func TestPreflightLeavesNothingBehindWhenItOpensTheDestination(t *testing.T) {
 	if !strings.Contains(stdout.String(), "[BLOCK] destination") {
 		t.Fatalf("something other than the destination check blocked, so the open never happened: %q", stdout.String())
 	}
-	if got := treeFingerprint(t, bindingParent); !equalStrings(before, got) {
-		t.Errorf("preflight left the binding tree changed after opening the destination to read it:\n before %v\n after  %v", before, got)
-	}
+	assertReadOnlyDiagnosticResidue(t, before, treeFingerprint(t, bindingParent), target.Database)
 }
 
 // TestPreflightPublishesNoEvent keeps a diagnostic out of the verdict stream.
@@ -314,10 +314,12 @@ func TestPreflightBlocksOnATopologyThisBuildCannotServe(t *testing.T) {
 // TestPreflightReportsAnAlreadyConvergedCity keeps the verb honest about the
 // one city it has nothing to say about.
 //
-// A converged city's migration is a no-op that exits zero, so preflight clears
-// it — but clearing it silently would read as "your cutover is pending and will
-// go fine", which is the opposite of the truth. It says the cutover already
-// happened and points at the read-only report that describes it.
+// The marker means the migration would not copy, so preflight clears it — but
+// clearing it silently would read as "your cutover is pending and will go
+// fine", which is the opposite of the truth. It says the cutover already
+// happened and points at the read-only report that describes it, which is where
+// the question this step does not ask — whether that converged city has
+// stranded writes — is answered.
 func TestPreflightReportsAnAlreadyConvergedCity(t *testing.T) {
 	request, cfg, _ := preflightReadyCity(t, 2)
 

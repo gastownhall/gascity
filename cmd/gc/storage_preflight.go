@@ -162,16 +162,20 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 	}
 	preflightPass(stdout, "served binding", "no earlier binding holds this city's infrastructure classes")
 
-	// 5. Whether the cutover already happened. A converged city's migration is a
-	// no-op that exits zero, so this clears — but clearing it silently would read
-	// as "your cutover is pending and will go fine", which is the opposite of the
-	// truth.
+	// 5. Whether the cutover already happened. The marker means the migration
+	// would not copy, so this clears — but clearing it silently would read as
+	// "your cutover is pending and will go fine", which is the opposite of the
+	// truth. Clearing here is not a claim that the migration would exit zero:
+	// on a marked city it goes on to confirm convergence, which can still
+	// report stranded or uncheckable. That answer lives on the destination this
+	// rehearsal will not open, which is why the report hands off to
+	// `gc storage status` rather than answering it.
 	state, err := readInfraConvergenceState(target)
 	if err != nil {
 		return preflightBlock(stdout, "binding root", err)
 	}
 	if state == infraConvergenceMarked {
-		preflightPass(stdout, "cutover", "already converged — the migration would find the marker and do nothing")
+		preflightPass(stdout, "cutover", "already converged — the marker is present, so the migration would not copy")
 		fmt.Fprintf(stdout, "\nNothing to migrate: this city is already converged. Run `%s` to see what it holds.\n", storageStatusInstruction()) //nolint:errcheck // best-effort stdout
 		return 0
 	}

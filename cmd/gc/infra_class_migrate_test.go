@@ -154,6 +154,194 @@ func mustCreateInfraBead(t *testing.T, store beads.Store, b beads.Bead) beads.Be
 	return created
 }
 
+// populatedInfraBinding leaves one bead in the binding, written and closed the
+// only way production writes it, and returns the city and the target.
+func populatedInfraBinding(t *testing.T) (storageOperatorRequest, infraBindingTarget) {
+	t.Helper()
+	bindingParent := t.TempDir()
+	cfg := infraSplitConfig(filepath.Join(bindingParent, "store"))
+	request := storageTestRequest(t, cfg)
+	source := stubInfraMigrationSource(t)
+	stubInfraControllerPing(t, 0)
+	mustCreateInfraBead(t, source, beads.Bead{Title: "a session", Type: "session"})
+
+	target := mustResolveInfraTarget(t, request.CityPath, cfg)
+	binding, err := openInfraDestination(target)
+	if err != nil {
+		t.Fatalf("opening the binding to populate it: %v", err)
+	}
+	mustCreateInfraBead(t, binding, beads.Bead{Title: "a bead the binding already holds", Type: "session"})
+	if err := closeBeadStoreHandle(binding); err != nil {
+		t.Fatalf("closing the populated binding: %v", err)
+	}
+	return request, target
+}
+
+// TestTheBindingDiagnosticsOpenerCannotWrite pins the read-only claim of
+// `gc storage status` and `gc storage preflight` at the connection instead of
+// at the caller.
+//
+// Both commands are documented read-only and both run against a LIVE city — a
+// deploy gate may run either while a controller is serving the binding. Held by
+// the writer opener, that contract is a property of what the writer opener
+// happens to do today: a read-write connection CAN checkpoint the WAL on close,
+// rewriting the main database and the -wal of a store something else is
+// serving, and any write-on-open added later for the migration's benefit turns
+// two diagnostics into writers with nothing in either command changing.
+//
+// The residue tests next to the two commands assert the consequence — nothing
+// left behind. This asserts the cause, which is the half those tests cannot
+// see: a mode=ro connection cannot take the write lock at all.
+//
+// Red-before, on the writer opener: the Create succeeds and the binding gains a
+// row a diagnostic put there.
+func TestTheBindingDiagnosticsOpenerCannotWrite(t *testing.T) {
+	_, target := populatedInfraBinding(t)
+
+	store, err := openInfraBindingReadOnly(target)
+	if err != nil {
+		t.Fatalf("opening the binding read-only: %v", err)
+	}
+	defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort close
+
+	// The read has to work, or the refusal below is the refusal of a store
+	// that answers nothing and proves nothing about the one being served.
+	if got := infraStoreFingerprint(t, store); len(got) != 1 {
+		t.Fatalf("the read-only handle does not read the binding it was opened on: %v", got)
+	}
+	if _, err := store.Create(beads.Bead{Title: "a row a diagnostic must not be able to write", Type: "session"}); err == nil {
+		t.Fatal("the opener the read-only diagnostics use accepted a write to a binding a controller may be serving")
+	}
+}
+
+// leaveInfraBindingWALResident puts the binding in the state a stopped writer
+// leaves behind — a populated, un-checkpointed -wal with no connection holding
+// it — and returns the bytes of the main database and the -wal at that moment.
+//
+// It is built the way internal/beads builds the same fixture: copy both files
+// out from under a still-open writer, let the writer close (which checkpoints
+// and deletes the -wal), then put the pre-checkpoint pair back. Nothing here
+// reaches past the production opener.
+func leaveInfraBindingWALResident(t *testing.T, target infraBindingTarget) (mainDB, wal []byte) {
+	t.Helper()
+	walPath := target.Database + "-wal"
+
+	binding, err := openInfraDestination(target)
+	if err != nil {
+		t.Fatalf("opening the binding to leave a live WAL: %v", err)
+	}
+	mustCreateInfraBead(t, binding, beads.Bead{Title: "a bead that is only in the WAL", Type: "session"})
+	mainDB = mustReadFile(t, target.Database)
+	wal = mustReadFile(t, walPath)
+	if len(wal) == 0 {
+		t.Fatalf("the fixture produced an empty -wal, so there is nothing for a close to checkpoint")
+	}
+	if err := closeBeadStoreHandle(binding); err != nil {
+		t.Fatalf("closing the writer that seeded the WAL: %v", err)
+	}
+
+	if err := os.WriteFile(target.Database, mainDB, 0o644); err != nil {
+		t.Fatalf("restoring the pre-checkpoint database: %v", err)
+	}
+	if err := os.WriteFile(walPath, wal, 0o644); err != nil {
+		t.Fatalf("restoring the live -wal: %v", err)
+	}
+	if err := os.Remove(target.Database + "-shm"); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("removing the -shm the closed writer left: %v", err)
+	}
+	return mainDB, wal
+}
+
+// convergedInfraBindingRequest hands back a cut-over city as an operator
+// request, so a diagnostic can be run against the arm past the convergence
+// gate — the only arm a controller can be serving, and therefore the only arm
+// on which "safe to run against a live city" means anything.
+func convergedInfraBindingRequest(t *testing.T) (storageOperatorRequest, infraBindingTarget) {
+	t.Helper()
+	cityPath, cfg, _, target := convergedInfraCity(t)
+	return storageOperatorRequest{CityPath: cityPath, Cfg: cfg, FleetStopped: true}, target
+}
+
+// TestTheReadOnlyDiagnosticsLeaveALiveWALIntact is the wiring half: the two
+// commands actually take the read-only opener, not merely that one exists.
+//
+// The discriminator is the effect the finding names. A binding left by a
+// stopped writer carries an un-checkpointed -wal, and a read-write connection
+// closing as the sole connection checkpoints it — rewriting the main database
+// and deleting the -wal of a store a controller may be about to serve, with
+// zero logical writes. A mode=ro connection cannot take the write lock, so it
+// reads the WAL-resident rows and leaves both files byte-identical.
+//
+// This is the half the two residue tests next to these commands cannot see:
+// their binding was closed cleanly, so there is no -wal to checkpoint and the
+// tree fingerprint is the same either way.
+//
+// The converged row is not a duplicate of the unconverged one, and it is the
+// row that pins the wiring. `gc storage status` returns at the convergence gate
+// on an unconverged city, having reached the binding only through the census —
+// so an unconverged row passes while reportBindingRelics and
+// classifyInfraContainmentGap, the two opens PAST that gate, go unexercised.
+// Those two are also the only opens a live controller can collide with, because
+// a binding being served is converged by construction: the boot gate serves
+// infraConvergenceMarked and refuses infraMigrationUnconverged.
+//
+// Red-before, with any call site on openInfraDestination: that command deletes
+// the -wal and rewrites the database it was only asked to read.
+func TestTheReadOnlyDiagnosticsLeaveALiveWALIntact(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		fixture func(*testing.T) (storageOperatorRequest, infraBindingTarget)
+		run     func(storageOperatorRequest, io.Writer, io.Writer) int
+		want    string
+	}{
+		{
+			name:    "gc storage status counts the binding",
+			fixture: populatedInfraBinding,
+			run:     doStorageStatus,
+			want:    "binding: 2 infrastructure bead(s)",
+		},
+		{
+			name:    "gc storage status classifies a converged binding",
+			fixture: convergedInfraBindingRequest,
+			run:     doStorageStatus,
+			// Past BOTH gates, so both remaining opens ran: `proven copy:`
+			// prints only once classifyInfraContainmentGap has returned.
+			// Neither weaker string proves that — the unconverged row's census
+			// line prints BEFORE the convergence gate, and "converged: yes" is
+			// a strict prefix of the no-manifest arm, which returns ahead of
+			// that same open.
+			want: "proven copy:",
+		},
+		{
+			name:    "gc storage preflight rehearses the destination refusal",
+			fixture: populatedInfraBinding,
+			run:     doStoragePreflight,
+			want:    "[BLOCK] destination",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request, target := tc.fixture(t)
+			mainBefore, walBefore := leaveInfraBindingWALResident(t, target)
+
+			var stdout, stderr bytes.Buffer
+			tc.run(request, &stdout, &stderr)
+
+			// Without this the byte comparison is vacuous: a command that
+			// blocked before it reached the binding would leave the files
+			// alone for a reason that has nothing to do with the opener.
+			if !strings.Contains(stdout.String(), tc.want) {
+				t.Fatalf("the command never read the binding, so the bytes below prove nothing; want %q\nstdout: %s\nstderr: %s", tc.want, stdout.String(), stderr.String())
+			}
+			if !bytes.Equal(mustReadFile(t, target.Database), mainBefore) {
+				t.Errorf("a read-only command rewrote the binding database it was asked to read (checkpoint on close)")
+			}
+			if !bytes.Equal(mustReadFile(t, target.Database+"-wal"), walBefore) {
+				t.Errorf("a read-only command rewrote the binding's -wal; a stopped writer's uncheckpointed rows are not a diagnostic's to move")
+			}
+		})
+	}
+}
+
 // TestEnsureInfraClassMigratedCopiesEveryInfraClass pins the cutover: all five
 // infra classes cross with ids and within-infra deps intact, closed infra beads
 // cross too, work never crosses, the source is retained, and the marker makes
