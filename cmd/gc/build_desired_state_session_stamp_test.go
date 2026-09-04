@@ -124,6 +124,38 @@ func TestStampRunSessionIdentityPropagatesToRunRoot(t *testing.T) {
 	}
 }
 
+func TestStampRunSessionIdentityPreservesRunRootEvidenceAgainstPoolSlotSelfCwd(t *testing.T) {
+	const (
+		sessionName  = "gascity--builder-1"
+		poolSlotSelf = "/home/jaword/projects/gc-management/.gc/worktrees/gascity/builder-1"
+		realEvidence = "/home/ds/gascity-worktrees/ga-q8ol2y"
+	)
+	root := beads.Bead{
+		ID: "gpk-root", Type: "molecule", Status: "in_progress",
+		Metadata: map[string]string{"gc.kind": "workflow", "gc.work_dir": realEvidence},
+	}
+	step := beads.Bead{
+		ID: "gpk-step", Type: "step", Status: "in_progress", Assignee: sessionName,
+		Metadata: map[string]string{"gc.step_ref": "wf.work", "gc.root_bead_id": root.ID},
+	}
+	mem := beads.NewMemStoreFrom(0, []beads.Bead{root, step}, nil)
+	store := &countingStore{Store: mem}
+	sessions := newSessionBeadSnapshot([]beads.Bead{stampTestSession(sessionName, poolSlotSelf)})
+
+	stampRunSessionIdentity([]beads.Bead{step}, []beads.Store{store}, sessions, io.Discard)
+
+	gotRoot, err := mem.Get(root.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", root.ID, err)
+	}
+	if gotRoot.Metadata["gc.session_name"] != sessionName {
+		t.Errorf("root gc.session_name = %q, want %q (session identity must still propagate)", gotRoot.Metadata["gc.session_name"], sessionName)
+	}
+	if gotRoot.Metadata["gc.work_dir"] != realEvidence {
+		t.Errorf("root gc.work_dir = %q, want %q (real worktree evidence must survive a pool-slot-shaped self cwd)", gotRoot.Metadata["gc.work_dir"], realEvidence)
+	}
+}
+
 func TestStampRunSessionIdentityNamedSessionUsesAlias(t *testing.T) {
 	// Named sessions (e.g. mayor) carry an empty session_name; their
 	// resolvable identifier lives in alias / configured_named_identity.
