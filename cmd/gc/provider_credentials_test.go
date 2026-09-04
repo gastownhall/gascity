@@ -34,7 +34,7 @@ func TestProviderCredentialSourcesResolvesOnlyCredentialRoles(t *testing.T) {
 
 	sources := map[string]bool{}
 	for _, b := range got {
-		if b.Refusal == "" {
+		if b.Resolved() {
 			sources[b.SourceVar] = true
 		}
 	}
@@ -65,7 +65,7 @@ func TestProviderCredentialSourcesAcceptsLiteralAroundReference(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("providerCredentialSources = %+v; want one entry", got)
 	}
-	if got[0].Refusal != "" {
+	if !got[0].Resolved() {
 		t.Fatalf("refused (%q); changing GW_KEY rotates this credential correctly", got[0].Refusal)
 	}
 	if got[0].SourceVar != "GW_KEY" {
@@ -77,7 +77,7 @@ func TestProviderCredentialSourcesRefusals(t *testing.T) {
 	tests := []struct {
 		name        string
 		resolved    *config.ResolvedProvider
-		wantRefusal string
+		wantRefusal []string
 	}{
 		{
 			name: "credential written into the config itself",
@@ -86,7 +86,7 @@ func TestProviderCredentialSourcesRefusals(t *testing.T) {
 				UpstreamEnv: config.UpstreamEnvBinding{APIKey: "ANTHROPIC_API_KEY"},
 				Env:         map[string]string{"ANTHROPIC_API_KEY": "sk-ant-inlined"},
 			},
-			wantRefusal: "literal value",
+			wantRefusal: []string{"literal value"},
 		},
 		{
 			name: "two distinct variables feed one credential",
@@ -95,7 +95,10 @@ func TestProviderCredentialSourcesRefusals(t *testing.T) {
 				UpstreamEnv: config.UpstreamEnvBinding{APIKey: "ANTHROPIC_API_KEY"},
 				Env:         map[string]string{"ANTHROPIC_API_KEY": "${ACME_ID}:${ACME_KEY}"},
 			},
-			wantRefusal: "more than one variable",
+			// Naming BOTH variables is the point: a refusal that says only
+			// "more than one" leaves the operator to find them by hand in the
+			// merged provider env, which is where the wrong guess is made.
+			wantRefusal: []string{"interpolates 2 variables", "ACME_ID", "ACME_KEY"},
 		},
 		{
 			name: "explicitly withheld",
@@ -104,7 +107,7 @@ func TestProviderCredentialSourcesRefusals(t *testing.T) {
 				UpstreamEnv: config.UpstreamEnvBinding{APIKey: "ANTHROPIC_API_KEY"},
 				Env:         map[string]string{"ANTHROPIC_API_KEY": ""},
 			},
-			wantRefusal: "withholds the variable",
+			wantRefusal: []string{"withholds the variable"},
 		},
 	}
 
@@ -114,11 +117,13 @@ func TestProviderCredentialSourcesRefusals(t *testing.T) {
 			if len(got) != 1 {
 				t.Fatalf("providerCredentialSources = %+v; want exactly one entry", got)
 			}
-			if got[0].Refusal == "" {
+			if got[0].Resolved() {
 				t.Fatalf("entry accepted with source %q; want a stated reason", got[0].SourceVar)
 			}
-			if !strings.Contains(got[0].Refusal, tt.wantRefusal) {
-				t.Errorf("refusal = %q; want it to name %q", got[0].Refusal, tt.wantRefusal)
+			for _, want := range tt.wantRefusal {
+				if !strings.Contains(got[0].Refusal, want) {
+					t.Errorf("refusal = %q; want it to name %q", got[0].Refusal, want)
+				}
 			}
 			if got[0].SourceVar != "" {
 				t.Errorf("unresolvable entry still names SourceVar %q", got[0].SourceVar)
@@ -137,7 +142,7 @@ func TestProviderCredentialSourcesHonorsBareDollarRef(t *testing.T) {
 		Env:         map[string]string{"ANTHROPIC_API_KEY": "$ACME_KEY"},
 	}
 	got := providerCredentialSources(resolved)
-	if len(got) != 1 || got[0].Refusal != "" {
+	if len(got) != 1 || !got[0].Resolved() {
 		t.Fatalf("providerCredentialSources = %+v; want one resolved entry", got)
 	}
 	if got[0].SourceVar != "ACME_KEY" {
@@ -158,11 +163,11 @@ func TestProviderCredentialSourcesInheritsUndeclaredKey(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("providerCredentialSources = %+v; want one entry", got)
 	}
-	if got[0].Refusal != "" {
+	if !got[0].Resolved() {
 		t.Fatalf("refused (%q); the harness reads this name from the session environment", got[0].Refusal)
 	}
-	if got[0].SourceVar != "KIMI_API_KEY" || !got[0].Inherited {
-		t.Errorf("got SourceVar=%q Inherited=%v; want KIMI_API_KEY / true", got[0].SourceVar, got[0].Inherited)
+	if got[0].SourceVar != "KIMI_API_KEY" || got[0].Kind != credentialInherited {
+		t.Errorf("got SourceVar=%q Kind=%v; want KIMI_API_KEY / credentialInherited", got[0].SourceVar, got[0].Kind)
 	}
 }
 
@@ -191,8 +196,8 @@ func TestProviderCredentialSourcesNoBindingDeclared(t *testing.T) {
 // authenticates with a different variable than the provider names.
 func TestCredentialOverridesFindsAgentScopedLayers(t *testing.T) {
 	bindings := []credentialBinding{
-		{Role: "api_key", EnvKey: "ANTHROPIC_API_KEY", SourceVar: "ACME_KEY"},
-		{Role: "auth_token", EnvKey: "ANTHROPIC_AUTH_TOKEN", SourceVar: "ACME_KEY"},
+		declaredCredential("api_key", "ANTHROPIC_API_KEY", "ACME_KEY"),
+		declaredCredential("auth_token", "ANTHROPIC_AUTH_TOKEN", "ACME_KEY"),
 	}
 	cfg := &config.City{
 		Workspace: config.Workspace{
@@ -238,7 +243,7 @@ func TestCredentialOverridesQuietWhenNothingOverrides(t *testing.T) {
 		Workspace: config.Workspace{Provider: "zai"},
 		Agents:    []config.Agent{{Name: "plain", Provider: "zai"}},
 	}
-	bindings := []credentialBinding{{Role: "api_key", EnvKey: "ANTHROPIC_API_KEY", SourceVar: "ACME_KEY"}}
+	bindings := []credentialBinding{declaredCredential("api_key", "ANTHROPIC_API_KEY", "ACME_KEY")}
 	if got := credentialOverrides(cfg, "zai", bindings); len(got) != 0 {
 		t.Errorf("credentialOverrides = %+v; want none", got)
 	}

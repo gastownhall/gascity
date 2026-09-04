@@ -620,8 +620,31 @@ supervisor's environment, where they take precedence over the per-workspace
 Apply the change by regenerating the service file:
 
 ```bash
-gc supervisor install  # rewrites the service file; restarts on change
+gc supervisor install    # regenerate the service file and re-exec with it
 ```
+
+That is the whole apply step. When the rendered service file differs, install
+rewrites it, unloads the service and loads it again, which re-execs the
+supervisor under the service manager with the merged environment. `gc start`
+reaches the same path.
+
+<Warning>
+Do not reach for `gc supervisor stop` followed by `gc supervisor start`.
+`gc supervisor start` does not regenerate the service file and does not merge
+the secrets file: it launches a supervisor detached from the service manager
+carrying the calling shell's environment, and it refuses outright when one is
+already running. Using it here is how a rotation ends up serving the old value
+or a blank one.
+</Warning>
+
+One case to watch on macOS: when the rendered plist is byte-identical to the
+installed one and a supervisor is already alive, install reports
+`Installed launchd service` and exits 0 **without** re-execing. Nothing
+changed, so nothing was applied.
+
+The other way an install declines is not silent: a service file naming a
+different `gc` binary makes install exit 1 and tell you to pass `--force`, so
+it cannot be mistaken for a change that took.
 
 ## A Custom Environment Variable Doesn't Reach Agent Sessions
 
@@ -695,8 +718,8 @@ It is read-only, and it reports what would stop a change from taking effect:
   Session start merges `[workspace.env]` < provider < agent `env` and injects
   the selected `[upstreams.<name>]` serving env last, so an agent that selects
   an upstream reads a different variable than the provider names;
-- a malformed secrets file, which the supervisor abandons entirely rather than
-  skipping the bad line, dropping every credential in it.
+- a malformed line in the secrets file, which the supervisor skips while
+  loading the rest of the file, so a credential written on it never arrives.
 
 Then change the value at its source and apply it with the procedure in
 [Provider Credentials Dropped When the Supervisor Starts](#provider-credentials-dropped-when-the-supervisor-starts),
@@ -707,7 +730,8 @@ Changing a credential does not apply itself. A credential change moves no
 config fingerprint, so no agent restarts on its own, and the supervisor
 resolves session environment from its own environment, fixed when it exec'd.
 Until the supervisor re-execs, every running session keeps the old credential.
-`gc restart` cycles agents only — it does not re-exec the supervisor.
+`gc restart` cycles agents only — `gc supervisor install` is what re-execs the
+supervisor.
 </Warning>
 
 One hazard the command cannot check for you: a value exported in the shell

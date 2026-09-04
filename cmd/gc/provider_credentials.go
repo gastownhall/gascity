@@ -9,29 +9,58 @@ import (
 	"github.com/gastownhall/gascity/internal/processenv"
 )
 
+// credentialSourceKind is the resolved state of one declared credential role.
+// It replaces a pair of fields whose valid combinations lived only in prose.
+type credentialSourceKind int
+
+const (
+	// credentialUnresolved: no single variable holds this role's credential,
+	// and Refusal says why.
+	credentialUnresolved credentialSourceKind = iota
+	// credentialDeclared: the provider's env names the variable in SourceVar.
+	credentialDeclared
+	// credentialInherited: the provider declares nothing for EnvKey, so the
+	// harness reads that name straight out of the session environment.
+	// SourceVar is EnvKey.
+	credentialInherited
+)
+
 // credentialBinding is one declared credential role of a provider, resolved
 // down to the environment variable that holds the secret.
 //
-// Exactly one of SourceVar and Refusal is set. An unresolvable role is
-// reported, not skipped: on a credential path a silently-omitted entry is the
-// failure that matters, because the operator concludes there was nothing to
-// change.
+// Build these only through the three constructors below, which are what make
+// Kind, SourceVar and Refusal consistent.
 type credentialBinding struct {
 	// Role is the upstream_env role this entry came from: "api_key" or
 	// "auth_token".
 	Role string
 	// EnvKey is the harness env var the role binds to, e.g. ANTHROPIC_API_KEY.
 	EnvKey string
+	// Kind says which of the remaining fields is meaningful.
+	Kind credentialSourceKind
 	// SourceVar is the environment variable that holds the credential — the
-	// one an operator changes. Empty when Refusal is set.
+	// one an operator changes. Empty when Kind is credentialUnresolved.
 	SourceVar string
-	// Inherited reports that the provider's env declares nothing for EnvKey,
-	// so the harness receives it straight from the supervisor environment
-	// under its own name. SourceVar then equals EnvKey.
-	Inherited bool
 	// Refusal explains why no single variable holds this role's credential.
-	// Empty when SourceVar is set.
+	// Empty unless Kind is credentialUnresolved.
 	Refusal string
+}
+
+// Resolved reports whether this role has a variable an operator can change.
+func (b credentialBinding) Resolved() bool { return b.Kind != credentialUnresolved }
+
+func declaredCredential(role, envKey, sourceVar string) credentialBinding {
+	return credentialBinding{Role: role, EnvKey: envKey, Kind: credentialDeclared, SourceVar: sourceVar}
+}
+
+// inheritedCredential records that nothing in provider config names this key,
+// so the harness receives it from the session environment under its own name.
+func inheritedCredential(role, envKey string) credentialBinding {
+	return credentialBinding{Role: role, EnvKey: envKey, Kind: credentialInherited, SourceVar: envKey}
+}
+
+func unresolvedCredential(role, envKey, reason string) credentialBinding {
+	return credentialBinding{Role: role, EnvKey: envKey, Kind: credentialUnresolved, Refusal: reason}
 }
 
 // providerCredentialSources resolves which environment variables back a
@@ -45,12 +74,10 @@ type credentialBinding struct {
 // credential to the variable behind a base URL destroys the provider's
 // routing.
 //
-// Deliberately NOT used: the envArgvSafe allow-list in internal/runtime. It
-// answers "may this value appear in argv?", whose fail-safe is "unknown means
-// assume secret" because the cost of being wrong is a temp file. This asks
-// "which variable is the credential?", where naming the wrong one points the
-// operator at a live endpoint value. ANTHROPIC_BASE_URL is not on that
-// allow-list, so reusing it would classify the endpoint as a credential.
+// The envArgvSafe allow-list in internal/runtime is deliberately not reused:
+// it answers "may this value appear in argv?" with the fail-safe "unknown
+// means assume secret", and ANTHROPIC_BASE_URL is absent from it, so borrowing
+// it here would classify a live endpoint as a credential.
 //
 // A provider declaring neither credential role yields no entries; the caller
 // refuses rather than guessing which of its env keys holds a secret.
@@ -76,29 +103,25 @@ func providerCredentialSources(resolved *config.ResolvedProvider) []credentialBi
 // resolveCredentialBinding resolves one declared role against the provider's
 // merged env map.
 func resolveCredentialBinding(resolved *config.ResolvedProvider, role, envKey string) credentialBinding {
-	b := credentialBinding{Role: role, EnvKey: envKey}
 	value, ok := resolved.Env[envKey]
-	switch {
-	case !ok:
-		// The provider declares nothing for this key, so the harness reads it
-		// from the session env, where the supervisor's own value for that
-		// name arrives. The variable to change is therefore the key itself.
-		b.SourceVar = envKey
-		b.Inherited = true
-	case value == "":
-		b.Refusal = fmt.Sprintf("%s is set empty, which withholds the variable rather than supplying a credential", envKey)
-	default:
-		if source, isRef := processenv.SoleReferencedEnvVar(value); isRef {
-			b.SourceVar = source
-			break
-		}
-		if !processenv.HasEnvRef(value) {
-			b.Refusal = fmt.Sprintf("%s is a literal value, so the credential is written into the config itself; change it where it is written", envKey)
-			break
-		}
-		b.Refusal = fmt.Sprintf("%s interpolates more than one variable, so no single variable holds the credential on its own", envKey)
+	if !ok {
+		return inheritedCredential(role, envKey)
 	}
-	return b
+	if value == "" {
+		return unresolvedCredential(role, envKey,
+			fmt.Sprintf("%s is set empty, which withholds the variable rather than supplying a credential", envKey))
+	}
+	switch refs := processenv.ReferencedEnvVars(value); len(refs) {
+	case 1:
+		return declaredCredential(role, envKey, refs[0])
+	case 0:
+		return unresolvedCredential(role, envKey,
+			fmt.Sprintf("%s is a literal value, so the credential is written into the config itself; change it where it is written", envKey))
+	default:
+		return unresolvedCredential(role, envKey,
+			fmt.Sprintf("%s interpolates %d variables (%s), so no single variable holds the credential on its own",
+				envKey, len(refs), strings.Join(refs, ", ")))
+	}
 }
 
 // credentialOverride records a config layer that sets one of a provider's
@@ -200,29 +223,27 @@ func credentialOverrides(cfg *config.City, providerName string, bindings []crede
 }
 
 // upstreamSetsEnvKey reports whether the upstream's abstract serving fields
-// render onto key, mirroring the per-field name precedence session start uses:
-// the upstream's own *_env override wins, else the harness binding.
+// render onto key.
+//
+// The per-field name precedence comes from [upstreamServingFields], the same
+// helper session start renders through, so this cannot drift into reporting a
+// rotation that lands somewhere else. base_url is skipped here for the reason
+// stated on providerCredentialSources: it names an endpoint, not a credential.
 func upstreamSetsEnvKey(spec config.UpstreamSpec, key string, bindings []credentialBinding) bool {
-	bound := func(role string) string {
-		for _, b := range bindings {
-			if b.Role == role {
-				return b.EnvKey
-			}
+	binding := config.UpstreamEnvBinding{}
+	for _, b := range bindings {
+		switch b.Role {
+		case "api_key":
+			binding.APIKey = b.EnvKey
+		case "auth_token":
+			binding.AuthToken = b.EnvKey
 		}
-		return ""
 	}
-	for _, r := range []struct{ value, override, role string }{
-		{spec.APIKey, spec.APIKeyEnv, "api_key"},
-		{spec.AuthToken, spec.AuthTokenEnv, "auth_token"},
-	} {
-		if r.value == "" {
+	for _, r := range upstreamServingFields(spec, binding) {
+		if r.Field == "base_url" || r.Value == "" {
 			continue
 		}
-		name := r.override
-		if name == "" {
-			name = bound(r.role)
-		}
-		if name == key {
+		if r.EnvName == key {
 			return true
 		}
 	}
