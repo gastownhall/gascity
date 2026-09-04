@@ -14,8 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-sql-driver/mysql"
-
 	gcapi "github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/doltpool"
@@ -526,11 +524,7 @@ func managedDoltOpenDatabaseSocket(socket, user, database string) (*sql.DB, erro
 	if database == "" {
 		return nil, fmt.Errorf("missing database")
 	}
-	cfg := mysql.NewConfig()
-	cfg.User, cfg.Passwd, cfg.Net, cfg.Addr, cfg.DBName = user, managedDoltPassword(), "unix", socket, database
-	cfg.Timeout, cfg.ReadTimeout, cfg.WriteTimeout = 5*time.Second, 5*time.Second, 5*time.Second
-	cfg.AllowNativePasswords = true
-	return sql.Open("mysql", cfg.FormatDSN())
+	return doltpool.OpenSocket(socket, user, managedDoltPassword(), database)
 }
 
 func readManagedMetadataProjectID(metadataPath string) (string, error) {
