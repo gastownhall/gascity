@@ -131,6 +131,47 @@ func TestUnreadableBindingKeepsItsProbe(t *testing.T) {
 	}
 }
 
+// TestProvenLegacyResidentsFallsTheOTHERWay is the whole reason there are two
+// verdict forms over one census.
+//
+// HasOpenLegacyResidents decides whether to KEEP a probe, so an unreadable
+// binding answers TRUE: nothing has been cleared. ProvenLegacyResidents decides
+// whether to DENY a by-id read on a refused city, so the same binding must
+// answer FALSE: a census that could not run has proved nothing, and denying on
+// it takes work-bead reads away from every city whose binding is merely
+// unreachable. Sharing one default would make one of those two wrong, silently,
+// and in the direction that is hardest to notice from the outside.
+func TestProvenLegacyResidentsFallsTheOTHERWay(t *testing.T) {
+	unreadable := newCensusStore()
+	unreadable.listErr = errors.New("binding unreachable")
+	if ProvenLegacyResidents(censusBinding(unreadable)) {
+		t.Error("an unreadable binding came back PROVEN to hold relics; a census that could not run proves nothing, and this bit only ever denies a read")
+	}
+
+	refused := newCensusStore()
+	refused.listErr = newRefusal()
+	if ProvenLegacyResidents(censusBinding(refused)) {
+		t.Error("a refusing binding came back PROVEN to hold relics")
+	}
+
+	if ProvenLegacyResidents(ClassBinding{Classes: infraClasses, Prefixes: infraPrefixes}) {
+		t.Error("a binding with no store came back PROVEN to hold relics")
+	}
+
+	if ProvenLegacyResidents(censusBinding(newCensusStore())) {
+		t.Error("an empty binding came back PROVEN to hold relics; the three rows above would then be unfalsifiable")
+	}
+
+	// And the one true answer: a read that completed and found a resident.
+	// Without it the rows above pass against a predicate that is simply always
+	// false, which denies nothing and fixes nothing.
+	held := newCensusStore()
+	held.seedBead(t, "ga-relic")
+	if !ProvenLegacyResidents(censusBinding(held)) {
+		t.Error("a binding whose census read a work-shaped relic came back unproven; nothing would ever deny the frozen copy")
+	}
+}
+
 // The refused city takes the same branch, and it matters that it does: its
 // binding store answers every read with the standing refusal, which is the
 // least informative answer there is.

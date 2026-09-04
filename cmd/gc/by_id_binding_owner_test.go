@@ -339,10 +339,12 @@ func TestBindingOwnerLeavesTheWorkResidualUnprobed(t *testing.T) {
 
 // refusedRelicTopology is a city whose boot could not serve its configured
 // split: every infrastructure class resolves to a refusing store and the
-// standing refusal rides on the topology. proven says whether a durable census
-// has PROVED that binding holds ids outside its reserved namespaces — the one
-// fact about a refused binding that is readable without reading the binding,
-// because it is a city file rather than a store.
+// standing refusal rides on the topology. proven says whether a census has
+// PROVED that binding holds ids outside its reserved namespaces.
+//
+// It is assembled by hand rather than resolved from a city, so these two rows
+// stay about the RESOLVER's verdict alone. Where the proof comes from is
+// by_id_relic_proof_test.go's subject.
 func refusedRelicTopology(proven bool) storeref.Topology {
 	refusal := standingStorageRefusal{err: errors.New("storage refused: this city has not converged on its configured [storage] binding; run `gc storage migrate`")}
 	classes := infrastructureClasses()
@@ -351,7 +353,7 @@ func refusedRelicTopology(proven bool) storeref.Topology {
 		Prefixes: storeref.ReservedPrefixesFor(classes),
 		Leg:      storeref.Leg{Ref: storeref.ClassRef(classes), Store: refusedClassStore{err: refusal}},
 		// A refused store declares no mint namespace, so the pessimistic bit
-		// stands whatever the memo says.
+		// stands whatever the proof says.
 		HasLegacyResidents:   true,
 		KnownLegacyResidents: proven,
 	}}, refusal)
@@ -390,17 +392,17 @@ func TestBindingOwnerRefusedCityWithKnownRelicsRefuses(t *testing.T) {
 	}
 }
 
-// TestBindingOwnerRefusedCityWithoutMemoStillDeclines is the control, and it
+// TestBindingOwnerRefusedCityWithoutProofStillDeclines is the control, and it
 // must pass on both sides of the fix.
 //
-// The memo is TRUE-only: a ref absent from it means "not known", never "known
-// clean". So absence must not deny anything — a city that was never migrated,
-// or whose note was lost, keeps today's behavior, and work is still served from
-// the ledger work never left.
-func TestBindingOwnerRefusedCityWithoutMemoStillDeclines(t *testing.T) {
+// The proof is TRUE-only: a binding it says nothing about is "not known", never
+// "known clean". So absence must not deny anything — a city that was never
+// migrated, or whose binding could not be read, keeps today's behavior, and
+// work is still served from the ledger work never left.
+func TestBindingOwnerRefusedCityWithoutProofStillDeclines(t *testing.T) {
 	owner, ok, err := byIDBindingOwnerForTopology(refusedRelicTopology(false), "gc-1")
 	if err != nil {
-		t.Fatalf("a refused city with no relic evidence resolved to err=%v; the memo's absence is not evidence, and denying here takes work-bead reads away from every unconverged city", err)
+		t.Fatalf("a refused city with no relic evidence resolved to err=%v; absence of proof is not evidence, and denying here takes work-bead reads away from every unconverged city", err)
 	}
 	if ok {
 		t.Errorf("a refusing binding reported ownership of gc-1 (%p)", owner.Store)

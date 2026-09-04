@@ -67,7 +67,7 @@ import (
 // falls through to — so the refusal is surfaced there too, wrapped by
 // withProvenRelicRemedy with the move that clears it.
 func cliByIDOwner(cityPath, id string, work beads.Store) (storeref.Owner, error) {
-	return byIDOwnerForTopology(residencyTopologyForCity(cityPath, nil, work, nil), id, work)
+	return byIDOwnerForTopology(byIDResidencyTopology(cityPath, nil, work, nil), id, work)
 }
 
 // byIDOwnerForTopology is cliByIDOwner over a topology the caller already holds.
@@ -130,7 +130,7 @@ func byIDOwnerForTopology(topo storeref.Topology, id string, work beads.Store) (
 // byIDPlanForTopology, so the pin cannot drift from the executed path without
 // one of those two changing under both.
 func cliByIDPlan(cityPath, id string, work beads.Store) (storeref.ResolvedPlan, error) {
-	return byIDPlanForTopology(residencyTopologyForCity(cityPath, nil, work, nil), id)
+	return byIDPlanForTopology(byIDResidencyTopology(cityPath, nil, work, nil), id)
 }
 
 // byIDPlanForTopology is the ByID plan itself, the one line both the cityPath
@@ -156,7 +156,7 @@ func byIDPlanForTopology(topo storeref.Topology, id string) (storeref.ResolvedPl
 // owns the id, with the row it already read; ok=false is "no binding answered,
 // run your own scan", and the caller then does exactly what it did before.
 func cliByIDBindingOwner(cityPath, id string) (storeref.Owner, bool, error) {
-	return byIDBindingOwnerForTopology(residencyTopologyForCity(cityPath, nil, newUnprobedWorkResidual(), nil), id)
+	return byIDBindingOwnerForTopology(byIDResidencyTopology(cityPath, nil, newUnprobedWorkResidual(), nil), id)
 }
 
 // byIDBindingOwnerForTopology is cliByIDBindingOwner over a topology the caller

@@ -234,7 +234,7 @@ func TestBindingOwnerSurfacesTheRefusalOnAProvenRelicBinding(t *testing.T) {
 		t.Fatalf("a proven-relic refused city resolved to ok=%v with no error; the caller's own scan then serves the copy the migration left behind", ok)
 	}
 
-	// Control: no proof, no denial. An absent memo is not evidence, and work
+	// Control: no proof, no denial. Absence of evidence is not evidence, and work
 	// never left the work ledger.
 	tolerated := mustPlan(t, ByID{ID: workShapedID}, newT3().topo)
 	owner, ok, err := ResolveBindingOwner(tolerated, workShapedID)

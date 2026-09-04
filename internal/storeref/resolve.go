@@ -691,25 +691,27 @@ func resolveByID(p ResolvedPlan, id string, bindingOnly bool) (Owner, bool, erro
 			return Owner{Store: leg.Leg.Store, Ref: leg.Leg.Ref, Bead: b, Read: true}, true, nil
 		case errors.Is(err, beads.ErrNotFound):
 			continue
+		case leg.Role == RoleResidenceProbe && leg.OnError == PolicyFatal && IsStandingRefusal(err):
+			// A residence probe the planner made Fatal: the carve-out below was
+			// withdrawn because this binding is PROVEN to hold ids outside its
+			// reserved namespaces. Say so, or the operator reads a sentence
+			// identical to an in-namespace refusal and looks for a missing bead
+			// rather than for the evidence that denied it.
+			//
+			// The POLICY is the key here, not the role, and this arm is ordered
+			// first so that stays true. planByID is the only producer of a Fatal
+			// residence probe today, so keying on the role alone selects the
+			// same legs — but the sentence this arm attaches is a claim about
+			// the EVIDENCE, and the evidence is what set the policy. Below the
+			// tolerated arm the role key would have been load-bearing for
+			// nothing and unfalsifiable besides; above it, dropping the policy
+			// clause claims every tolerated residence probe and the no-evidence
+			// controls die (ga-e3dvx).
+			return Owner{Ref: leg.Leg.Ref}, false, fmt.Errorf("reading %q from %s: %w: %w", id, legName(leg.Leg.Ref), err, ErrProvenRelicRefusal)
 		case leg.OnError == PolicyRefusalTolerated && IsStandingRefusal(err):
 			// A refused city still serves WORK, and this leg was only ever a
 			// residence probe for an id no relocated class could own.
 			continue
-		case leg.Role == RoleResidenceProbe && leg.OnError == PolicyFatal && IsStandingRefusal(err):
-			// The same refusal on a probe the planner made Fatal: the carve-out
-			// above was withdrawn because this binding is PROVEN to hold ids
-			// outside its reserved namespaces. Say so, or the operator reads a
-			// sentence identical to an in-namespace refusal and looks for a
-			// missing bead rather than for the evidence that denied it.
-			//
-			// The policy is part of the key, not just the role. planByID is the
-			// only producer of a Fatal residence probe today, so keying on the
-			// role alone happens to select the same legs — but the sentence this
-			// arm attaches is a claim about the EVIDENCE, and the evidence is
-			// what set the policy. A second planner that emitted a tolerated
-			// residence probe reaching here would otherwise be told a census
-			// proved something nobody censused (ga-e3dvx).
-			return Owner{Ref: leg.Leg.Ref}, false, fmt.Errorf("reading %q from %s: %w: %w", id, legName(leg.Leg.Ref), err, ErrProvenRelicRefusal)
 		default:
 			return Owner{Ref: leg.Leg.Ref}, false, fmt.Errorf("reading %q from %s: %w", id, legName(leg.Leg.Ref), err)
 		}
