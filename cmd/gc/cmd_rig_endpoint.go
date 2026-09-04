@@ -387,11 +387,20 @@ func requireCanonicalizedScopeMetadata(fs fsys.FS, scopeRoot string) error {
 		return err
 	}
 	doltDatabase = strings.TrimSpace(doltDatabase)
-	announceStorageModeChange(fs, path, "server", doltDatabase)
+	doltMode := "server"
+	if existingMode, ok, modeErr := contract.ReadDoltMode(fs, path); modeErr == nil && ok && strings.TrimSpace(existingMode) != "" {
+		var raw struct {
+			Backend string `json:"backend"`
+		}
+		if data, readErr := fs.ReadFile(path); readErr == nil && json.Unmarshal(data, &raw) == nil && strings.EqualFold(strings.TrimSpace(raw.Backend), "dolt") {
+			doltMode = strings.TrimSpace(existingMode)
+		}
+	}
+	announceStorageModeChange(fs, path, doltMode, doltDatabase)
 	_, err = contract.EnsureCanonicalMetadata(fs, path, contract.MetadataState{
 		Database:     "dolt",
 		Backend:      "dolt",
-		DoltMode:     "server",
+		DoltMode:     doltMode,
 		DoltDatabase: doltDatabase,
 	})
 	return err
