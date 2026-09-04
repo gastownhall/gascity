@@ -65,6 +65,27 @@ func TestResolveDoltConnectionTargetProxiedSidecarTCPAndUnix(t *testing.T) {
 	}
 }
 
+func TestResolveDoltConnectionTargetIgnoresProxiedSidecarForNonDoltBackend(t *testing.T) {
+	fs := fsys.OSFS{}
+	city := t.TempDir()
+	writeCanonicalConfig(t, fs, city, ConfigState{EndpointOrigin: EndpointOriginManagedCity, DoltMode: "proxied-server"})
+	if _, err := EnsureCanonicalMetadata(fs, filepath.Join(city, ".beads", "metadata.json"), MetadataState{
+		Database: "sqlite", Backend: "sqlite", DoltMode: "proxied-server", DoltDatabase: "hq",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(city, ".beads", "proxied_server_client_info.json"), []byte(`{"external":{"host":"db.example","port":3307}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target, err := ResolveDoltConnectionTarget(fs, city, city)
+	if err != nil {
+		t.Fatalf("ResolveDoltConnectionTarget() error = %v", err)
+	}
+	if target.External || target.Host != "" || target.Port != "" {
+		t.Fatalf("non-Dolt backend selected proxied sidecar: %+v", target)
+	}
+}
+
 func TestResolveDoltConnectionTargetProxiedSidecarRejectsMalformedAndTLS(t *testing.T) {
 	fs := fsys.OSFS{}
 	city := t.TempDir()
