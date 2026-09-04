@@ -199,7 +199,7 @@ func (cs *citySampler) loop(ctx context.Context) {
 
 // refresh recomputes the cached snapshot off the request path. It is the
 // module's hot loop, so it does ALL blocking/expensive work — the status read,
-// the parse, and the per-rig bd-doctor + TCP probe fan-out — on local
+// the parse, and the per-rig bd-ping + TCP probe fan-out — on local
 // variables with NO lock held, then takes cs.mu.Lock() exactly once at the end
 // to publish the computed fields (microseconds). The contract is that a reader
 // (supervisorStatus/doltTrend/rigStoreHealth) never blocks behind a probe, so
@@ -255,7 +255,7 @@ func (cs *citySampler) refresh(ctx context.Context) {
 		}
 	}
 
-	// 4. Probe the rigs (5-min cadence; heavy: one bd doctor + TCP dial per
+	// 4. Probe the rigs (5-min cadence; heavy: one bd ping + TCP dial per
 	// rig) into locals. No lock is held across the fan-out.
 	var (
 		newRigs    []rigStoreHealth
@@ -387,7 +387,7 @@ func parseStatusBody(raw json.RawMessage) statusBodyParsed {
 
 // ── Per-rig store probe (ported from routes/rig-store-health.ts) ───────────
 
-var benignDoctorCategories = map[string]bool{"Git Integration": true, "Integrations": true}
+var benignCheckCategories = map[string]bool{"Git Integration": true, "Integrations": true}
 
 const doltConnectionCheck = "Dolt Connection"
 
@@ -409,12 +409,12 @@ func (m *samplerManager) probeRig(ctx context.Context, rigName, rigPath string) 
 
 	var checks []rigStoreCheck
 	var note string
-	if res, err := m.exec.execBdDoctor(ctx, beadsPath); err != nil {
-		note = "bd doctor probe failed: " + err.Error()
-	} else if parsed, ok := parseDoctorChecks(res.stdout); ok {
+	if res, err := m.exec.execBdPing(ctx, beadsPath); err != nil {
+		note = "bd ping probe failed: " + err.Error()
+	} else if parsed, ok := parsePingCheck(res); ok {
 		checks = parsed
 	} else {
-		note = "bd doctor returned no JSON (embedded mode or dolt server unreachable)"
+		note = "bd ping returned no valid JSON (store unreachable or provider refused the probe)"
 	}
 
 	var doltConnected *bool
@@ -432,72 +432,52 @@ func (m *samplerManager) probeRig(ctx context.Context, rigName, rigPath string) 
 	return rigStoreHealth{
 		Rig: rigName, BeadsPath: beadsPath, Rollup: rollup, Reachable: true,
 		DoltEndpoint: doltEndpoint, DoltConnected: doltConnected,
-		// Note carries subprocess/error text (bd doctor failure reason); sanitize
+		// Note carries subprocess/error text (bd ping failure reason); sanitize
 		// it before it reaches the browser, per the "all subprocess output is
 		// sanitized" contract.
 		IssueCount: issueCount, Problems: problems, Note: sanitizeTerminalOutput(note),
 	}
 }
 
-func parseDoctorChecks(stdout string) ([]rigStoreCheck, bool) {
-	trimmed := strings.TrimSpace(stdout)
-	if trimmed == "" || trimmed[0] != '{' {
+// parsePingCheck normalizes bd ping's provider-neutral JSON result into the
+// existing dashboard check shape. ping is intentionally a single connectivity
+// check: unlike bd doctor, ping is available for embedded, direct-server, and
+// proxied-server stores, so the dashboard does not need transport-specific
+// branches. A non-zero exit is still represented as a check when ping emitted
+// valid JSON, preserving the actionable provider error for the dashboard.
+func parsePingCheck(res *execResult) ([]rigStoreCheck, bool) {
+	var payload struct {
+		Status string `json:"status"`
+		Error  string `json:"error"`
+	}
+	trimmed := strings.TrimSpace(res.stdout)
+	if trimmed == "" || trimmed[0] != '{' || json.Unmarshal([]byte(trimmed), &payload) != nil || payload.Status == "" {
 		return nil, false
 	}
-	var parsed struct {
-		Checks []struct {
-			Category string `json:"category"`
-			Name     string `json:"name"`
-			Status   string `json:"status"`
-			Message  string `json:"message"`
-		} `json:"checks"`
+	status := "error"
+	if strings.EqualFold(payload.Status, "ok") && res.exitCode == 0 {
+		status = "ok"
 	}
-	if err := json.Unmarshal([]byte(trimmed), &parsed); err != nil {
-		return nil, false
-	}
-	if parsed.Checks == nil {
-		return nil, false
-	}
-	out := make([]rigStoreCheck, 0, len(parsed.Checks))
-	for _, c := range parsed.Checks {
-		cat := c.Category
-		if cat == "" {
-			cat = "unknown"
+	message := payload.Error
+	if message == "" {
+		if status == "ok" {
+			message = "database connectivity ok"
+		} else {
+			message = "database connectivity failed"
 		}
-		nm := c.Name
-		if nm == "" {
-			nm = "unknown"
-		}
-		// Category, Name, and Message all come from bd doctor's JSON output;
-		// sanitize each before it reaches the browser, per the "all subprocess
-		// output is sanitized" contract. Status is normalized to a fixed enum.
-		out = append(out, rigStoreCheck{
-			Category: sanitizeTerminalOutput(cat),
-			Name:     sanitizeTerminalOutput(nm),
-			Status:   normalizeDoctorStatus(c.Status),
-			Message:  sanitizeTerminalOutput(c.Message),
-		})
 	}
-	return out, true
-}
-
-func normalizeDoctorStatus(s string) string {
-	switch strings.ToLower(s) {
-	case "ok", "pass", "passed":
-		return "ok"
-	case "warning", "warn":
-		return "warning"
-	case "error", "fail", "failed", "critical":
-		return "error"
-	default:
-		return "warning"
-	}
+	return []rigStoreCheck{{
+		Category: "Beads",
+		Name:     "Database Connectivity",
+		Status:   status,
+		Message:  sanitizeTerminalOutput(message),
+	}}, true
 }
 
 func storeProblems(checks []rigStoreCheck) []rigStoreCheck {
 	out := []rigStoreCheck{}
 	for _, c := range checks {
-		if c.Status != "ok" && !benignDoctorCategories[c.Category] {
+		if c.Status != "ok" && !benignCheckCategories[c.Category] {
 			out = append(out, c)
 		}
 	}

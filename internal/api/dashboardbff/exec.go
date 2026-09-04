@@ -16,9 +16,9 @@ const (
 	maxBytes      = 100 << 10 // default per-call stdout cap (100 KB)
 	maxConcurrent = 4         // simultaneous subprocesses
 
-	gitLogTimeout   = 10 * time.Second
-	bdDoctorTimeout = 15 * time.Second
-	gitLogRecentN   = "200"
+	gitLogTimeout = 10 * time.Second
+	bdPingTimeout = 15 * time.Second
+	gitLogRecentN = "200"
 )
 
 // execErrKind classifies why a sandboxed subprocess failed.
@@ -259,12 +259,14 @@ func (r *execRunner) execGitLog(ctx context.Context, view string) (*execResult, 
 	return r.run(ctx, "git", gitArgs(gitRepoPath(), args...), gitLogTimeout, maxBytes)
 }
 
-// execBdDoctor runs a read-only `bd doctor` health probe of a rig's embedded
-// dolt .beads store. The path is supervisor-reported and validated here; --fix
-// is never passed, so the probe only inspects.
-func (r *execRunner) execBdDoctor(ctx context.Context, beadsPath string) (*execResult, error) {
+// execBdPing runs Beads' provider-neutral connectivity probe against a rig
+// store. Unlike `bd doctor`, ping is supported by proxied-server mode and is
+// deliberately read-only (it resolves the store and executes SELECT 1). The
+// path is supervisor-reported and validated here; no mutating flags are ever
+// passed.
+func (r *execRunner) execBdPing(ctx context.Context, beadsPath string) (*execResult, error) {
 	if !isValidHostPath(beadsPath) || !strings.HasSuffix(beadsPath, "/.beads") {
 		return nil, validationErr("invalid beads store path")
 	}
-	return r.run(ctx, "bd", []string{"doctor", "--readonly", "--db", beadsPath, "--json"}, bdDoctorTimeout, maxBytes)
+	return r.run(ctx, "bd", []string{"ping", "--readonly", "--db", beadsPath, "--json"}, bdPingTimeout, maxBytes)
 }
