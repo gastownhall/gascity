@@ -306,6 +306,7 @@ func (c *CachingStore) runReconciliation() {
 				c.circuitTripped = true
 				c.problemf(fmt.Sprintf("circuit-breaker tripped rig=%s syncFailures=%d", c.idPrefix, c.syncFailures))
 			}
+			c.advanceObservationLocked()
 		}
 		c.recordProblemLocked("reconcile cache", err)
 		c.recordReconcileLatencyLocked(bdLatency)
@@ -629,6 +630,7 @@ func (c *CachingStore) mergeSnapshotLocked(
 	c.syncFailures = 0
 	c.depsComplete = nextDepsComplete
 	c.primePartialErr = nil
+	c.advanceObservationLocked()
 	c.promoteLiveLocked()
 	c.stats.LastReconcileAt = now
 	c.stats.Adds += res.adds

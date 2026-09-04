@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"unicode"
 
 	"github.com/gastownhall/gascity/internal/bdflags"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/spf13/cobra"
@@ -208,6 +210,99 @@ func rewriteBdHeartbeatArgs(bdArgs []string) ([]string, error) {
 	return []string{"heartbeat", rest[0]}, nil
 }
 
+// bdRigQualifiedMetadataRefusal refuses an outgoing lease owner or route target
+// whose rig segment is absent from the loaded city configuration. These values
+// are opaque to bd, so gc bd is the common admission boundary for stale and
+// external writers.
+//
+// Actor names without a slash remain compatible: historic dotted identities
+// are provenance, not rig-qualified routes. Both bd metadata spellings are
+// examined so --metadata cannot bypass the --set-metadata guard. Inputs this
+// preflight cannot interpret exactly are refused before bd can mutate state.
+func bdRigQualifiedMetadataRefusal(cfg *config.City, bdArgs []string) (string, bool) {
+	verb, args := bdflags.SplitGlobalFlags(bdArgs)
+	if verb != "create" && verb != "update" {
+		return "", false
+	}
+	valueFlags := bdflags.ValueFlags(verb)
+	configuredRigs := make(map[string]struct{}, len(cfg.Rigs))
+	for _, rig := range cfg.Rigs {
+		configuredRigs[rig.Name] = struct{}{}
+	}
+
+	validate := func(key, value string) (string, bool) {
+		if key != beadmeta.LeaseOwnerMetadataKey && key != beadmeta.RoutedToMetadataKey {
+			return "", false
+		}
+		rig, _, qualified := strings.Cut(value, "/")
+		if !qualified || rig == "" {
+			return "", false
+		}
+		if _, ok := configuredRigs[rig]; ok {
+			return "", false
+		}
+		return fmt.Sprintf("gc bd: refusing %s=%q: rig %q is not configured in this city\n", key, value, rig), true
+	}
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		value := ""
+		switch {
+		case arg == "--set-metadata" || arg == "--metadata":
+			if i+1 >= len(args) {
+				return fmt.Sprintf("gc bd: refusing %s without a value before write\n", arg), true
+			}
+			i++
+			value = args[i]
+		case strings.HasPrefix(arg, "--set-metadata="):
+			value = strings.TrimPrefix(arg, "--set-metadata=")
+		case strings.HasPrefix(arg, "--metadata="):
+			value = strings.TrimPrefix(arg, "--metadata=")
+		default:
+			if !strings.Contains(arg, "=") && valueFlags[arg] && i+1 < len(args) {
+				i++
+			}
+			continue
+		}
+
+		if strings.HasPrefix(arg, "--set-metadata") {
+			key, metadataValue, ok := strings.Cut(value, "=")
+			if !ok || strings.TrimSpace(key) == "" {
+				return fmt.Sprintf("gc bd: refusing malformed --set-metadata value %q before write\n", value), true
+			}
+			if msg, refused := validate(key, metadataValue); refused {
+				return msg, true
+			}
+			continue
+		}
+
+		metadataJSON := strings.TrimSpace(value)
+		if strings.HasPrefix(metadataJSON, "@") {
+			return fmt.Sprintf("gc bd: refusing --metadata %q: @file input cannot be validated before write\n", value), true
+		}
+		var metadata map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(metadataJSON), &metadata); err != nil {
+			return fmt.Sprintf("gc bd: refusing malformed --metadata value before write: %v\n", err), true
+		}
+		for key, rawValue := range metadata {
+			if key != beadmeta.LeaseOwnerMetadataKey && key != beadmeta.RoutedToMetadataKey {
+				continue
+			}
+			var metadataValue string
+			if err := json.Unmarshal(rawValue, &metadataValue); err != nil {
+				return fmt.Sprintf("gc bd: refusing non-string %s before write\n", key), true
+			}
+			if msg, refused := validate(key, metadataValue); refused {
+				return msg, true
+			}
+		}
+	}
+	return "", false
+}
+
 func doBd(args []string, stdout, stderr io.Writer) int {
 	cityName, rigName, bdArgs := extractBdScopeFlags(args)
 
@@ -238,6 +333,10 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if msg, refused := bdRigQualifiedMetadataRefusal(cfg, bdArgs); refused {
+		fmt.Fprint(stderr, msg) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -289,6 +388,26 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		}
 		return doBdReleaseIfCurrent(cityPath, cfg, target, id, expectedAssignee, stdout, stderr)
 	}
+
+	// Disclose which store answers a read-only passthrough, so a zero-row
+	// result is distinguishable from a true empty (gastownhall/gascity#5170).
+	// resolveBdScopeTarget's priority chain (explicit --rig > explicit --city
+	// > bead-prefix detect > -C/--directory > GC_RIG env > cwd > city)
+	// silently picks a store on every one of those paths but the GC_RIG-
+	// mismatch warning above; the common cwd-auto-detect case reached bd with
+	// no diagnostic at all. Placed after the by-ID and release-if-current
+	// arms above (rather than immediately after resolveBdScopeTarget) so it
+	// names the store that actually serves the request: a class-owned `show`
+	// on a split city is answered in process from the class's own binding by
+	// maybeRouteBdByID, not from target, and disclosing target there would be
+	// wrong for that one read. This is stderr-only and additive — bd's own
+	// stdout (human or --json) is untouched, and it never changes the exit
+	// code, matching the disclosure style #5162/#5167 established for the
+	// sibling relocated-class invariant.
+	if verb, _, ok := bdRelocatedClassVerb(bdArgs); ok && bdScopeDisclosureVerbs[verb] {
+		fmt.Fprintf(stderr, "gc bd: answering from the %s store\n", scopeLabel(target)) //nolint:errcheck // best-effort stderr
+	}
+
 	if provider := rawBeadsProviderForScope(target.ScopeRoot, cityPath); !providerUsesBdStoreContract(provider) {
 		fmt.Fprintf(stderr, "gc bd: only supported for bd-backed beads providers (resolved %q for %s)\n", provider, target.ScopeRoot) //nolint:errcheck // best-effort stderr
 		if hint := bdProviderMismatchHint(target.ScopeRoot, provider); hint != "" {
@@ -369,12 +488,13 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	warnExternalBdOverrideDrift(stderr, cityPath, target)
 
 	// Resolve the same binary every other bd path in the tree resolves for
-	// this scope: a scope bound to a complete storage binding pins the bd
-	// build that speaks that backend, and the passthrough must honor the pin
-	// or it hands the command to an ambient bd that rejects the bound
-	// backend. Keying on the target scope rather than the city keeps a rig
-	// that owns its binding on its pin, and keeps a rig that overrides the
-	// city backend on the ambient bd its runtime env already implies.
+	// this scope: the city scope, any rig that inherits the city backend, and
+	// any scope bound to a complete storage binding all pin the bd build that
+	// speaks that backend, and the passthrough must honor the pin or it hands
+	// the command to an ambient bd that rejects the bound backend. Keying on
+	// the target scope rather than the city keeps a rig that overrides the
+	// city backend, and owns no binding of its own, on the ambient bd its
+	// runtime env already implies.
 	bdPath, err := resolveBdBinaryForScope(cityPath, target.ScopeRoot)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -777,6 +897,19 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 		fmt.Fprintf(stderr, "gc bd: warning: GC_RIG=%q does not name a bound rig in this city; ignoring it and answering from the %s store instead (the same value via --rig would exit 1)\n", gcRigDiscarded, scopeLabel(target)) //nolint:errcheck // best-effort stderr
 	}
 	return target, nil
+}
+
+// bdScopeDisclosureVerbs are the bd read-only passthrough verbs whose
+// resolved store gets announced on stderr (gastownhall/gascity#5170). Scoped
+// to reads: a write verb's effect is directly observable (the record it
+// touched can be re-read), while a read verb's silence is exactly what makes
+// an empty answer indistinguishable from "no matches in the store that was
+// asked."
+var bdScopeDisclosureVerbs = map[string]bool{
+	"list":   true,
+	"ready":  true,
+	"search": true,
+	"show":   true,
 }
 
 // scopeLabel renders a store target for operator-facing diagnostics, e.g.

@@ -3,11 +3,14 @@ package beads
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -63,7 +66,16 @@ func ExecCommandRunner() CommandRunner {
 // applies the provided environment overrides. Explicit keys replace any
 // inherited values from the parent process.
 func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
-	return execCommandRunnerWithEnv(context.Background(), env)
+	return execCommandRunnerWithEnv(context.Background(), env, false)
+}
+
+// ExecCommandRunnerWithEnvWithoutAmbientBeads returns a CommandRunner whose
+// inherited environment excludes the complete BEADS_* namespace before the
+// explicit overrides are applied. Hosted workspace bindings use this so a
+// parent-shell variable added by a newer beads release cannot repoint the
+// selected workspace or replace its credential command.
+func ExecCommandRunnerWithEnvWithoutAmbientBeads(env map[string]string) CommandRunner {
+	return execCommandRunnerWithEnv(context.Background(), env, true)
 }
 
 // ExecCommandRunnerWithEnvContext is like ExecCommandRunnerWithEnv but binds
@@ -72,14 +84,36 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 // budget (for example the claim-time gc.current_run_id decoration) use this so a
 // slow or stuck bd child cannot outlast that budget.
 func ExecCommandRunnerWithEnvContext(ctx context.Context, env map[string]string) CommandRunner {
-	return execCommandRunnerWithEnv(ctx, env)
+	return execCommandRunnerWithEnv(ctx, env, false)
 }
 
-func execCommandRunnerWithEnv(parent context.Context, env map[string]string) CommandRunner {
+// ExecCommandRunnerWithEnvContextWithoutAmbientBeads is the context-bound
+// form of ExecCommandRunnerWithEnvWithoutAmbientBeads.
+func ExecCommandRunnerWithEnvContextWithoutAmbientBeads(ctx context.Context, env map[string]string) CommandRunner {
+	return execCommandRunnerWithEnv(ctx, env, true)
+}
+
+func execCommandRunnerWithEnv(parent context.Context, env map[string]string, withoutAmbientBeads bool) CommandRunner {
+	return execCommandRunner(parent, env, withoutAmbientBeads, processEnvSnapshotExcludingNativeDoltOpen)
+}
+
+// ExecCommandRunnerWithExactEnvContext is like ExecCommandRunnerWithEnvContext,
+// but replaces the child environment instead of layering overrides onto the
+// parent process. Use it when env is a complete, already-scrubbed projection
+// (e.g. the hook-claim query env from mergeRuntimeEnv). This is a stronger
+// invariant than the WithoutAmbientBeads pair, which strips only BEADS_*:
+// here the mutation runs in exactly the environment the query ran in.
+func ExecCommandRunnerWithExactEnvContext(ctx context.Context, env map[string]string) CommandRunner {
+	return execCommandRunner(ctx, env, false, func() []string { return nil })
+}
+
+func execCommandRunner(parent context.Context, env map[string]string, withoutAmbientBeads bool, baseEnvFn func() []string) CommandRunner {
 	return func(dir, name string, args ...string) ([]byte, error) {
+		baseEnv := baseEnvFn()
 		execName := name
 		if name == "bd" {
-			if pinned := strings.TrimSpace(env["BD_BIN"]); filepath.IsAbs(pinned) {
+			pinned, _ := effectiveEnvValue(baseEnv, env, "BD_BIN")
+			if pinned = strings.TrimSpace(pinned); filepath.IsAbs(pinned) {
 				execName = pinned
 			}
 		}
@@ -107,7 +141,17 @@ func execCommandRunnerWithEnv(parent context.Context, env map[string]string) Com
 		cmd.Cancel = func() error {
 			return killCommandTree(cmd)
 		}
-		cmd.Env = execEnvFor(name, processEnvSnapshotExcludingNativeDoltOpen(), env)
+		overrides := env
+		if withoutAmbientBeads {
+			baseEnv = envWithoutPrefix(baseEnv, beadsEnvPrefix)
+			overrides = maps.Clone(env)
+			for key, value := range overrides {
+				if strings.HasPrefix(key, beadsEnvPrefix) && value == "" {
+					delete(overrides, key)
+				}
+			}
+		}
+		cmd.Env = execEnvFor(name, baseEnv, overrides)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		out, err := cmd.Output()
@@ -119,6 +163,23 @@ func execCommandRunnerWithEnv(parent context.Context, env map[string]string) Com
 		trace(status, traceErr)
 		return out, resultErr
 	}
+}
+
+// effectiveEnvValue returns the value a child process receives after explicit
+// runner overrides replace the inherited process environment. Reading BD_BIN
+// through the same merge contract keeps executable selection aligned with the
+// environment passed to bd itself.
+func effectiveEnvValue(baseEnv []string, overrides map[string]string, key string) (string, bool) {
+	if value, ok := overrides[key]; ok {
+		return value, true
+	}
+	prefix := key + "="
+	for i := len(baseEnv) - 1; i >= 0; i-- {
+		if strings.HasPrefix(baseEnv[i], prefix) {
+			return strings.TrimPrefix(baseEnv[i], prefix), true
+		}
+	}
+	return "", false
 }
 
 // newBDExecTrace returns the legacy line-format trace callback for one command
@@ -721,6 +782,21 @@ func envWithout(environ []string, key string) []string {
 	return out
 }
 
+// envWithoutPrefix returns a copy of environ without variables whose names
+// begin with prefix. Matching stops at the first '=' so a value containing the
+// prefix is never mistaken for a variable name.
+func envWithoutPrefix(environ []string, prefix string) []string {
+	out := make([]string, 0, len(environ))
+	for _, entry := range environ {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok && strings.HasPrefix(key, prefix) {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
 func mergeEnv(environ []string, overrides map[string]string) []string {
 	if len(overrides) == 0 {
 		return append([]string(nil), environ...)
@@ -765,6 +841,40 @@ func (m *StringMap) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// bdRevision is bd's signed optimistic-concurrency token at the JSON edge.
+// Current bd emits a decimal string; older supported versions emitted a JSON
+// integer. Both forms parse directly to int64 without passing through float64.
+type bdRevision int64
+
+// UnmarshalJSON accepts current decimal-string and legacy integer revisions.
+func (r *bdRevision) UnmarshalJSON(data []byte) error {
+	token := bytes.TrimSpace(data)
+	if len(token) == 0 {
+		return errors.New("bd revision is empty")
+	}
+	// A JSON null revision means the row has no recorded token yet (legacy rows,
+	// or a backend that has not minted one). Decode it as the zero token — the
+	// same "no revision" sentinel a never-mutated bead carries — rather than
+	// failing the whole issue decode on strconv.ParseInt("null").
+	if string(token) == "null" {
+		*r = 0
+		return nil
+	}
+
+	decimal := string(token)
+	if token[0] == '"' {
+		if err := json.Unmarshal(token, &decimal); err != nil {
+			return fmt.Errorf("decoding bd revision string: %w", err)
+		}
+	}
+	value, err := strconv.ParseInt(decimal, 10, 64)
+	if err != nil {
+		return fmt.Errorf("decoding bd revision %q: %w", decimal, err)
+	}
+	*r = bdRevision(value)
+	return nil
+}
+
 // bdIssue is the JSON shape returned by bd CLI commands. We decode only the
 // fields Gas City cares about; all others are silently ignored.
 type bdIssue struct {
@@ -795,14 +905,9 @@ type bdIssue struct {
 	DeferUntil      *time.Time   `json:"defer_until,omitempty"`
 	IsBlocked       optionalBool `json:"is_blocked,omitempty"`
 	// Revision carries bd's optimistic-concurrency token for ConditionalWriter.
-	// Pre-#4682 bd omits it, so it decodes to 0; toBead stamps it onto the
-	// otherwise json:"-" Bead.Revision field. The "revision" key is provisional:
-	// bd #4682 (which adds the column and --if-revision) is unlanded, so the
-	// exact wire key is unconfirmed. The integration conformance row against a
-	// #4682-capable bd is the guard — an absent key is indistinguishable from
-	// legacy bd here (both decode to 0), so a key-name mismatch would fail there,
-	// not silently.
-	Revision int64 `json:"revision,omitempty"`
+	// Older bd versions omit it, so it decodes to 0; toBead stamps it onto the
+	// otherwise json:"-" Bead.Revision field.
+	Revision bdRevision `json:"revision,omitempty"`
 }
 
 type bdIssueDep struct {
@@ -955,7 +1060,7 @@ func (b *bdIssue) toBead() Bead {
 		NoHistory:    b.NoHistory,
 		DeferUntil:   cloneTimePtr(b.DeferUntil),
 		IsBlocked:    b.IsBlocked.ptr(),
-		Revision:     b.Revision,
+		Revision:     int64(b.Revision),
 	}
 }
 
@@ -1323,10 +1428,11 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 // preconditions server-side and reports a failed one as exit 13 having written
 // nothing (bdstore_conditional_release.go). The raw `bd sql` path below is the
 // fallback for any bd predating the flags (beads#5008) — which today is the LIVE
-// path, not a floor nobody runs: no published beads release carries them, so the
-// installable default (deps.env BD_VERSION) lands here, and that is what every
-// CI job and every operator install obtains. The contract-tested minimum
-// (BD_PREV_VERSION, 1.0.4) lands here too, but it is not what makes the fallback
+// path, not a floor nobody runs: the only release carrying them is a prerelease
+// (v1.2.1), below the published bar this pin holds, so the installable default
+// (deps.env BD_VERSION) lands here, and that is what every CI job and every
+// operator install obtains. The contract-tested minimum (BD_PREV_VERSION, 1.0.4)
+// lands here too, but it is not what makes the fallback
 // load-bearing. On that path the sqlite backend refuses raw DB access, so that
 // rejection — and embedded dolt WITHOUT a configured dolt directory — surface
 // ErrConditionalReleaseUnsupported (the latter via the
@@ -1368,15 +1474,39 @@ func (s *BdStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
 		}
 		s.latchConditionalReleaseUnsupported()
 	}
-	query := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP" +
+	// The raw-SQL fallback writes the row itself, so it also has to mint the
+	// fresh revision bd's verb path mints for us: a release that left the
+	// pre-release token in place would keep a stale fence current.
+	revision, err := newRevisionToken()
+	if err != nil {
+		return false, fmt.Errorf("bd release-if-current: minting revision: %w", err)
+	}
+	legacyQuery := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP" +
 		" WHERE id = " + bdSQLStringLiteral(id) +
 		" AND status = 'in_progress'" +
 		" AND assignee = " + bdSQLStringLiteral(expectedAssignee)
-	out, err := s.runBDTransientWriteOutput("sql", "--json", query)
+	query := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP, revision = " +
+		strconv.FormatInt(revision, 10) +
+		" WHERE id = " + bdSQLStringLiteral(id) +
+		" AND status = 'in_progress'" +
+		" AND assignee = " + bdSQLStringLiteral(expectedAssignee)
+	// Retry ordinary serialization conflicts, but never replay an ambiguous
+	// write: a revision-aware release mints a fresh token and matches on
+	// status+assignee, so replaying one that may already have committed could
+	// stomp a same-assignee reclaim that landed in between — reinstating the
+	// release token over the reclaim's. runBDTransientReleaseOutput draws that
+	// line; a single-attempt raw runner would instead surface every transient
+	// blip as a spurious release failure.
+	out, err := s.runBDTransientReleaseOutput("sql", "--json", query)
 	if err != nil {
 		if isBdSQLUnsupportedInEmbeddedMode(err) {
-			return s.releaseIfCurrentViaEmbeddedDoltSQL(id, expectedAssignee)
+			return s.releaseIfCurrentViaEmbeddedDoltSQL(id, expectedAssignee, revision)
 		}
+		if isMissingRevisionColumn(err) {
+			out, err = s.runBDTransientReleaseOutput("sql", "--json", legacyQuery)
+		}
+	}
+	if err != nil {
 		return false, fmt.Errorf("bd release-if-current: %w", err)
 	}
 	var result struct {
@@ -1388,7 +1518,7 @@ func (s *BdStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
 	return result.RowsAffected > 0, nil
 }
 
-func (s *BdStore) releaseIfCurrentViaEmbeddedDoltSQL(id, expectedAssignee string) (bool, error) {
+func (s *BdStore) releaseIfCurrentViaEmbeddedDoltSQL(id, expectedAssignee string, revision int64) (bool, error) {
 	doltDir, ok, err := s.embeddedDoltDir()
 	if err != nil {
 		return false, fmt.Errorf("bd release-if-current embedded fallback: %w", err)
@@ -1396,20 +1526,60 @@ func (s *BdStore) releaseIfCurrentViaEmbeddedDoltSQL(id, expectedAssignee string
 	if !ok {
 		return false, fmt.Errorf("bd release-if-current embedded fallback: %w", ErrConditionalReleaseUnsupported)
 	}
-	query := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP" +
+	legacyQuery := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP" +
+		" WHERE id = " + bdSQLStringLiteral(id) +
+		" AND status = 'in_progress'" +
+		" AND assignee = " + bdSQLStringLiteral(expectedAssignee) +
+		"; SELECT ROW_COUNT() AS rows_affected"
+	query := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP, revision = " +
+		strconv.FormatInt(revision, 10) +
 		" WHERE id = " + bdSQLStringLiteral(id) +
 		" AND status = 'in_progress'" +
 		" AND assignee = " + bdSQLStringLiteral(expectedAssignee) +
 		"; SELECT ROW_COUNT() AS rows_affected"
 	out, err := s.runner(doltDir, "dolt", "sql", "-r", "json", "-q", query)
 	if err != nil {
-		return false, fmt.Errorf("bd release-if-current embedded fallback: dolt sql: %w", err)
+		if isBdTransientWriteError(err) || !isMissingRevisionColumn(err) {
+			return false, fmt.Errorf("bd release-if-current embedded fallback: dolt sql: %w", err)
+		}
+		out, err = s.runner(doltDir, "dolt", "sql", "-r", "json", "-q", legacyQuery)
+		if err != nil {
+			return false, fmt.Errorf("bd release-if-current embedded fallback: dolt sql: %w", err)
+		}
 	}
 	rowsAffected, err := parseDoltRowsAffected(out)
 	if err != nil {
 		return false, fmt.Errorf("bd release-if-current embedded fallback: parsing SQL result: %w", err)
 	}
 	return rowsAffected > 0, nil
+}
+
+func newRevisionToken() (int64, error) {
+	for {
+		var data [8]byte
+		if _, err := rand.Read(data[:]); err != nil {
+			return 0, err
+		}
+		revision := int64(binary.BigEndian.Uint64(data[:]) & math.MaxInt64)
+		if revision != 0 {
+			return revision, nil
+		}
+	}
+}
+
+func isMissingRevisionColumn(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "unknown column 'revision'") ||
+		strings.Contains(message, "unknown column `revision`") ||
+		strings.Contains(message, `unknown column "revision"`) ||
+		strings.Contains(message, "no such column: revision") ||
+		strings.Contains(message, `column "revision" not found`) ||
+		strings.Contains(message, "column 'revision' not found") ||
+		strings.Contains(message, "column `revision` not found") ||
+		strings.Contains(message, "column not found: revision")
 }
 
 func (s *BdStore) embeddedDoltDir() (string, bool, error) {
@@ -2095,6 +2265,19 @@ func (s *BdStore) runBDTransientCreateOutput(hasStableID bool, args ...string) (
 	}, args...)
 }
 
+// runBDTransientReleaseOutput runs a revision-aware release UPDATE, retrying
+// ordinary serialization conflicts but never replaying an ambiguous write.
+// Unlike a create there is no stable id to make the write idempotent: the
+// release matches on status+assignee and installs a fresh token, so replaying
+// one that may already have committed could stomp a same-assignee reclaim that
+// landed in between. Same ambiguity guard as an id-less create, named for the
+// release path it protects.
+func (s *BdStore) runBDTransientReleaseOutput(args ...string) ([]byte, error) {
+	return s.runBDTransientWriteOutputWhen(func(err error) bool {
+		return isBdTransientWriteError(err) && !isBdAmbiguousWriteError(err)
+	}, args...)
+}
+
 func (s *BdStore) runBDTransientWriteOutputWhen(shouldRetry func(error) bool, args ...string) ([]byte, error) {
 	var err error
 	var out []byte
@@ -2566,7 +2749,12 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 }
 
 func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssignees bool) bool {
-	if query.TierMode == TierIssues || query.TierMode == TierWisps {
+	// TierWisps always merges two independently-fetched legs (this bd-list
+	// leg plus the ephemeral leg in listWispsTier) and needs full candidates
+	// from both to union/dedupe/sort/limit correctly; TierIssues is the only
+	// tier reaching this function that reads a single, self-contained result
+	// set, so only it is eligible for a bd-side limit below.
+	if query.TierMode == TierWisps {
 		return true
 	}
 	if serverQuery.Sort == SortCreatedAsc || clientFilteredAssignees {
@@ -2580,6 +2768,12 @@ func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssig
 	// bd-side limit would cut rows before that filter runs — fetch unbounded
 	// and let applyListQuery filter then limit.
 	if serverQuery.SeekAfter != nil {
+		return true
+	}
+	// IDs is a Go-side-only residual filter (see ListQuery.Matches): bd list
+	// has no --id flag, so a bd-side limit could truncate before the
+	// matching IDs are even fetched.
+	if len(serverQuery.IDs) > 0 {
 		return true
 	}
 	return false

@@ -27,6 +27,7 @@ const (
 var phase2CatalogProfiles = []ProfileID{
 	ProfileClaudeTmuxCLI,
 	ProfileCodexTmuxCLI,
+	ProfileCursorTmuxCLI,
 	ProfileGeminiTmuxCLI,
 	ProfileKimiTmuxCLI,
 	ProfileOpenCodeTmuxCLI,

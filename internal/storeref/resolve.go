@@ -123,6 +123,15 @@ type ByID struct {
 // route byte-identical to the caller reading its own store. Any further legs
 // are read in order, so a multi-leg answer proves absence rather than handing
 // back a residual.
+//
+// DECLARING ONE IS A REVIEWED ACT. An implementation replaces this package's
+// by-id work rule with the plane's own, so a second one is a second answer to
+// the same question — the bug class the residency resolver exists to end,
+// wearing the resolver's API. A plane may declare at most one axis, every
+// declaration is named in scripts/residency-boundary-baseline.txt under the
+// c:WorkAxisRouter pattern, and the day a SECOND plane declares one the two
+// must land with a cross-plane router-agreement pin. The rule is stated in
+// full beside the pattern in scripts/residency-boundary-patterns.txt.
 type WorkAxisRouter interface {
 	// WorkLegsForID returns the work legs for id, or nil to leave the
 	// resolver's own [work, covering-shadows] rule in place.
@@ -614,6 +623,35 @@ func ResolveOwnerRow(p ResolvedPlan, id string) (Owner, error) {
 		}
 	}
 	return Owner{}, beads.ErrNotFound
+}
+
+// ResolvePlacement is the ModeSingleOwner executor: the one store a
+// class-pure operation — above all a CREATE — acts on.
+//
+// It performs no I/O, because placement is not a search. A by-id plan asks
+// "where does this bead live" and probes until something answers; a placement
+// plan asks "where does this class BELONG", and the topology already knows.
+// That difference is why the modes need separate executors rather than one
+// leg-walking loop: running a FirstOwner plan through this function would
+// return the leg that merely LEADS a probe order and place the bead there, and
+// running a placement plan through ResolveOwner would probe the owner and
+// report a not-yet-created bead's absence as a miss.
+//
+// A refused city never reaches here for a relocated class — Plan returns the
+// standing refusal as an error, which is what keeps an infrastructure-class
+// create off the work ledger the class was moved away from.
+func ResolvePlacement(p ResolvedPlan) (Leg, error) {
+	if p.Mode != ModeSingleOwner {
+		return Leg{}, fmt.Errorf("storeref: ResolvePlacement needs a %s plan, got %s", ModeSingleOwner, p.Mode)
+	}
+	if len(p.Legs) != 1 {
+		return Leg{}, fmt.Errorf("storeref: a %s plan names exactly one store, got %d (%s)", ModeSingleOwner, len(p.Legs), p)
+	}
+	owner := p.Legs[0].Leg
+	if owner.Store == nil {
+		return Leg{}, fmt.Errorf("storeref: %s plan leg %s has no store", ModeSingleOwner, legName(owner.Ref))
+	}
+	return owner, nil
 }
 
 // LegError names a leg whose read failed and was tolerated as a partial

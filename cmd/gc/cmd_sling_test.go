@@ -6895,6 +6895,48 @@ func TestDryRunOnExistingMolecule(t *testing.T) {
 	}
 }
 
+// TestDryRunDefaultFormulaExistingMolecule pins the dry-run preview to the
+// live behavior for an implicit default_sling_formula: the real run skips the
+// attach and routes the bead plainly (exit 0), so the preview must report the
+// blocking attachment as a note and exit 0 too, rather than predicting the
+// hard failure that only an explicit --on produces
+// (TestDryRunOnExistingMolecule).
+func TestDryRunDefaultFormulaExistingMolecule(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), DefaultSlingFormula: strPtr("code-review")}
+
+	q := newFakeChildQuerier()
+	q.beadsByID["BL-42"] = beads.Bead{ID: "BL-42", Type: "task", Status: "open"}
+	q.childrenOf["BL-42"] = []beads.Bead{
+		{ID: "MOL-1", Type: "molecule", Status: "open"},
+	}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.Store = seededStore("BL-42")
+	opts := testOpts(a, "BL-42")
+	opts.DryRun = true
+	code := doSling(opts, deps, q, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("dry-run returned %d, want 0 (default formula falls back to plain routing); stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "BL-42 already has attached molecule MOL-1") {
+		t.Errorf("stdout = %q, want the blocking-attachment pre-check note", out)
+	}
+	if !strings.Contains(out, "the default formula will be skipped and the bead routed plainly") {
+		t.Errorf("stdout = %q, want the plain-routing skip note", out)
+	}
+	if strings.Contains(out, "has no existing molecule/wisp children") {
+		t.Errorf("stdout = %q, must not claim the bead has no molecule children", out)
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("got %d runner calls, want 0: %v", len(runner.calls), runner.calls)
+	}
+}
+
 func TestDryRunNilQuerier(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()

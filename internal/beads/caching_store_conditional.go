@@ -35,6 +35,36 @@ var (
 	_ conditionalWriteCapabilityProber = (*CachingStore)(nil)
 )
 
+// cachingAtomicConditionalCloser preserves cache eviction and notification
+// while exposing the capability only for a backing that actually supports it.
+type cachingAtomicConditionalCloser struct{ cache *CachingStore }
+
+func (h *cachingAtomicConditionalCloser) CloseWithMetadataIfMatch(id string, expectedRevision int64, metadata map[string]string) (Bead, error) {
+	closer, ok := AtomicConditionalCloserFor(h.cache.conditionalBacking())
+	if !ok {
+		return Bead{}, ErrConditionalWriteUnsupported
+	}
+	closed, err := closer.CloseWithMetadataIfMatch(id, expectedRevision, metadata)
+	if err != nil {
+		h.cache.applyConditionalWriteFailure(id, err)
+		return Bead{}, err
+	}
+	h.cache.evictForConditionalWrite(id)
+	h.cache.notifyChange("bead.closed", closed)
+	return closed, nil
+}
+
+// AtomicConditionalCloserHandle exposes the cache forwarding surface only when
+// its resolved backing can perform the atomic terminal write. Returning the
+// cache (rather than the backing) preserves eviction and notification semantics
+// for callers that discover the optional capability through this handle.
+func (c *CachingStore) AtomicConditionalCloserHandle() (AtomicConditionalCloser, bool) {
+	if _, ok := AtomicConditionalCloserFor(c.conditionalBacking()); !ok {
+		return nil, false
+	}
+	return &cachingAtomicConditionalCloser{cache: c}, true
+}
+
 // The cache is a wrapper, not a second store, so it carries no
 // conditional-writes stamp of its own (§6.3): the stamp, its read, and the
 // degrade latch all delegate to the backing store. A backing that cannot
@@ -114,6 +144,9 @@ func (c *CachingStore) probeConditionalWriteCapability() (bool, string) {
 // fails or the precondition does. A backing without the capability yields
 // ErrConditionalWriteUnsupported — never an unconditional write.
 func (c *CachingStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
+	if err := validateConditionalUpdateOpts(opts); err != nil {
+		return fmt.Errorf("conditional update %s: %w", id, err)
+	}
 	writer, ok := ConditionalWriterFor(c.conditionalBacking())
 	if !ok {
 		return ErrConditionalWriteUnsupported
