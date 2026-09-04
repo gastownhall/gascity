@@ -199,7 +199,8 @@ func (cs *citySampler) loop(ctx context.Context) {
 
 // refresh recomputes the cached snapshot off the request path. It is the
 // module's hot loop, so it does ALL blocking/expensive work — the status read,
-// the parse, and the per-rig bd-ping + TCP probe fan-out — on local
+// the parse, and the per-rig provider probe (plus direct-mode TCP probe)
+// fan-out — on local
 // variables with NO lock held, then takes cs.mu.Lock() exactly once at the end
 // to publish the computed fields (microseconds). The contract is that a reader
 // (supervisorStatus/doltTrend/rigStoreHealth) never blocks behind a probe, so
@@ -255,8 +256,9 @@ func (cs *citySampler) refresh(ctx context.Context) {
 		}
 	}
 
-	// 4. Probe the rigs (5-min cadence; heavy: one bd ping + TCP dial per
-	// rig) into locals. No lock is held across the fan-out.
+	// 4. Probe the rigs (5-min cadence; heavy: one provider ping per rig and a
+	// TCP dial only for direct/server stores) into locals. No lock is held
+	// across the fan-out.
 	var (
 		newRigs    []rigStoreHealth
 		rigChanged bool
@@ -412,7 +414,14 @@ func (m *samplerManager) probeRig(ctx context.Context, rigName, rigPath string) 
 	}
 
 	var doltEndpoint *string
-	port := readDoltServerPort(beadsPath)
+	// A proxied-server store owns transport selection inside Beads. In
+	// particular, proxied-local may leave a stale dolt-server.port artifact
+	// behind; never infer proxy health by dialing that port. Direct/server
+	// stores retain the legacy endpoint and TCP probe for parity.
+	port := 0
+	if readDoltMode(beadsPath) != "proxied-server" {
+		port = readDoltServerPort(beadsPath)
+	}
 	if port > 0 {
 		ep := "127.0.0.1:" + strconv.Itoa(port)
 		doltEndpoint = &ep
@@ -581,6 +590,23 @@ func readDoltServerPort(beadsPath string) int {
 		return 0
 	}
 	return port
+}
+
+// readDoltMode returns the persisted Beads storage mode for a store. An empty
+// result means metadata was unavailable or malformed; callers should preserve
+// the direct-mode fallback in that case.
+func readDoltMode(beadsPath string) string {
+	raw, err := os.ReadFile(filepath.Join(beadsPath, "metadata.json"))
+	if err != nil {
+		return ""
+	}
+	var metadata struct {
+		DoltMode string `json:"dolt_mode"`
+	}
+	if json.Unmarshal(raw, &metadata) != nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(metadata.DoltMode))
 }
 
 func tcpProbe(port int) bool {
