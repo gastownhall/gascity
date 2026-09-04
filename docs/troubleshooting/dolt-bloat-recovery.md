@@ -574,6 +574,13 @@ full GC in the same cycle. Any probe failure, deleted or modified row, drift
 outside the proved set, or any other reason keeps the marker and blocks GC.
 You do not need to clear these by hand — check the compactor log first.
 
+When flatten verify sees a concurrent writer (HEAD moved across the flatten
+window), those table-hash reasons are not written. Compact defers full GC to
+the next run instead. That includes a busy database that both appends rows
+(row-count gain plus hash drift on one table) and updates rows (same-count
+hash drift on another) during the window. Mixed append-plus-update without a
+proven writer still quarantines.
+
 Quarantine markers also carry structured evidence. New markers include the
 database name, the preflight/flatten/post-verify HEADs, preflight and
 postflight database value hashes when available, `integrity_table_drift` for

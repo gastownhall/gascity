@@ -2724,35 +2724,29 @@ func TestCompactScriptQuarantinesMixedRowGainAndSameCountHashDriftBeforeFullGC(t
 	}
 }
 
-func TestCompactScriptQuarantinesMixedSignalsDespiteWriterRace(t *testing.T) {
+// A busy database's flatten window sees both concurrent INSERTs (row-count
+// gain + hash drift on one table) and concurrent UPDATEs (same-count hash
+// drift on another). That mixed signature is the production false-positive
+// that quarantined hq (ga-mku / bo-89f4d7): events appended and issues rows
+// updated while writers kept committing. HEAD movement past the flatten
+// commit proves the writer; the mixed INSERT+UPDATE is concurrent-writer
+// data, not corruption, so the run must defer rather than hard-quarantine.
+// Mixed signals without a proven writer still quarantine (see
+// TestCompactScriptQuarantinesMixedRowGainAndSameCountHashDriftBeforeFullGC).
+func TestCompactScriptDefersMixedSignalsWhenWriterRace(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "writer_race_with_mixed_same_count_hash_drift", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
-	if err == nil {
-		t.Fatalf("compact succeeded despite proven writer plus same-count hash drift:\n%s", out)
-	}
-	if !strings.Contains(out, "writer race detected") {
-		t.Fatalf("output missing proven writer evidence:\n%s", out)
-	}
 	if !strings.Contains(out, "table=beads gained rows during flatten") ||
 		!strings.Contains(out, "table=notes value hash changed after flatten without row-count increase") {
 		t.Fatalf("output missing mixed integrity signals:\n%s", out)
 	}
-	logData, err := os.ReadFile(fixture.doltLog)
-	if err != nil {
-		t.Fatalf("read dolt log: %v", err)
+	if !strings.Contains(out, "post_verify_HEAD=writercommit") {
+		t.Fatalf("defer message should report HEAD moving past the flatten commit:\n%s", out)
 	}
-	log := string(logData)
-	if strings.Contains(log, "DOLT_GC") {
-		t.Fatalf("mixed hard integrity signals must block full GC despite writer race:\n%s", log)
+	if !strings.Contains(out, "mixed row-count gain+hash drift with same-count hash drift is concurrent-writer INSERT+UPDATE") {
+		t.Fatalf("output missing mixed INSERT+UPDATE defer message:\n%s", out)
 	}
-	quarantine := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
-	if _, err := os.Stat(quarantine); err != nil {
-		t.Fatalf("mixed hard integrity signals should write quarantine marker: %v", err)
-	}
-	pendingGC := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
-	if _, err := os.Stat(pendingGC); !os.IsNotExist(err) {
-		t.Fatalf("mixed hard integrity signals must not write pending-GC marker; stat=%v", err)
-	}
+	assertCompactWriterRaceDeferred(t, fixture, out, err, "deferring, will retry next run")
 }
 
 // assertCompactWriterRaceDeferred encodes the shared expectations for a proven

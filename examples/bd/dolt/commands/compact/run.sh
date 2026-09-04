@@ -36,17 +36,20 @@
 #      otherwise looks identical to the ambiguous gain+drift corruption signal.
 #      Quarantining that false positive blocks all future GC of the db and
 #      starves DOLT_GC until host memory is exhausted. So, mirroring the remote-
-#      push path's HEAD-stability defer, gain+drift, row-count-decrease, and
-#      same-count value-hash-drift cases are downgraded from a blocking
-#      quarantine to a skip-and-retry-next-run ONLY when a concurrent writer is
-#      proven. A writer is proven (and distinguished from the flatten's OWN
-#      commit) when either HEAD captured immediately before the mutating reset
-#      differs from the stable pre-flight HEAD (a writer landed in the
-#      preflight->reset window, before the flatten committed), or HEAD captured
-#      after verify moved past the flatten's own commit (a writer landed
-#      during/after verify). All other failures — and any of those signatures
-#      with a stable HEAD — still quarantine. Probe failure leaves the race
-#      unproven and quarantines.
+#      push path's HEAD-stability defer, gain+drift, row-count-decrease,
+#      same-count value-hash-drift, and the mixed INSERT+UPDATE of gain+drift
+#      on some tables plus same-count hash drift on others are downgraded from
+#      a blocking quarantine to a skip-and-retry-next-run ONLY when a concurrent
+#      writer is proven. Busy databases produce that mixed signature on every
+#      flatten (hq 2026-09-02 / ga-mku): append-only tables gain rows while
+#      update-in-place tables keep their count and drift their hash. A writer
+#      is proven (and distinguished from the flatten's OWN commit) when either
+#      HEAD captured immediately before the mutating reset differs from the
+#      stable pre-flight HEAD (a writer landed in the preflight->reset window,
+#      before the flatten committed), or HEAD captured after verify moved past
+#      the flatten's own commit (a writer landed during/after verify). All
+#      other failures — and any of those signatures with a stable HEAD — still
+#      quarantine. Probe failure leaves the race unproven and quarantines.
 #   4b. Committed-root drift gate. When per-table verification passed but the
 #      whole-database hash still drifted, DOLT_DIFF_STAT names the tables that
 #      differ across the flatten. Drift is benign only when every named table
@@ -3611,22 +3614,27 @@ flatten_database() {
     integrity_guidance="${verify_counts_failure_guidance:-post-flatten integrity check failed; investigate before re-running}"
     # Downgrade quarantine -> defer for specific integrity-failure categories
     # where a concurrent writer is proven, rather than assuming corruption.
-    # Three categories get their own proof-gated defer path below: gain+drift
+    # Four categories get their own proof-gated defer path below: gain+drift
     # (HEAD-proven writer race, or an absorbed-writer race proven
-    # additive-only via diff), row-count decrease (HEAD-proven concurrent
-    # DELETE), and same-count hash drift (HEAD-proven writer race proven
-    # additive-only via diff — a concurrent UPDATE). Table-list drift, probe
-    # failure, or any case whose specific proof fails still quarantine below
-    # unchanged.
+    # additive-only via diff), mixed gain+drift plus same-count hash drift
+    # (HEAD-proven busy-db INSERT+UPDATE; ga-mku), row-count decrease
+    # (HEAD-proven concurrent DELETE), and same-count hash drift alone
+    # (HEAD-proven writer race proven additive-only via diff — a concurrent
+    # UPDATE). Table-list drift, probe failure, or any case whose specific
+    # proof fails still quarantine below unchanged.
     if [ "$writer_race_detected" = "1" ] && \
        [ "${verify_counts_saw_gain:-0}" = "1" ] && \
        [ "${verify_counts_saw_gain_hash_drift:-0}" = "1" ] && \
        [ "${verify_counts_saw_row_decrease:-0}" != "1" ] && \
-       [ "${verify_counts_saw_same_count_hash_drift:-0}" != "1" ] && \
        [ "${verify_counts_saw_table_list_change:-0}" != "1" ] && \
        [ "${verify_counts_saw_probe_failure:-0}" != "1" ]; then
-      printf 'compact: db=%s writer race detected during flatten (snapshot_HEAD=%s pre_reset_HEAD=%s flatten_HEAD=%s post_verify_HEAD=%s) — table value hash drift with row-count increase is concurrent-writer data, not corruption; deferring, will retry next run\n' \
-        "$db" "$head" "${head_before_reset:-<empty>}" "$flatten_head" "${post_verify_head:-<empty>}" >&2
+      if [ "${verify_counts_saw_same_count_hash_drift:-0}" = "1" ]; then
+        printf 'compact: db=%s writer race detected during flatten (snapshot_HEAD=%s pre_reset_HEAD=%s flatten_HEAD=%s post_verify_HEAD=%s) — mixed row-count gain+hash drift with same-count hash drift is concurrent-writer INSERT+UPDATE, not corruption; deferring, will retry next run\n' \
+          "$db" "$head" "${head_before_reset:-<empty>}" "$flatten_head" "${post_verify_head:-<empty>}" >&2
+      else
+        printf 'compact: db=%s writer race detected during flatten (snapshot_HEAD=%s pre_reset_HEAD=%s flatten_HEAD=%s post_verify_HEAD=%s) — table value hash drift with row-count increase is concurrent-writer data, not corruption; deferring, will retry next run\n' \
+          "$db" "$head" "${head_before_reset:-<empty>}" "$flatten_head" "${post_verify_head:-<empty>}" >&2
+      fi
       if ! defer_writer_race_after_flatten "$db" "$flatten_head" \
         "$remote" "$expected_remote_head" "$expected_remote_head_verified" \
         "$compacted_from_head" "$local_branch" "$remote_branch"; then
