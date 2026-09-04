@@ -168,6 +168,7 @@ func TestWorkDirStampWouldClobberEvidence(t *testing.T) {
 func TestPoolSlotWorkDirRepairFor(t *testing.T) {
 	const (
 		poolSlot       = ".gc/worktrees/gascity/builder-1"
+		otherPoolSlot  = ".gc/worktrees/gascity/builder-2"
 		perBeadAtSlot  = ".gc/worktrees/gascity/ga-ui3mbs"
 		compoundAtSlot = ".gc/worktrees/gascity/ga-klo4gz.11-measure"
 		realEvidence   = "/home/ds/gascity-worktrees/ga-3c5isi"
@@ -186,6 +187,18 @@ func TestPoolSlotWorkDirRepairFor(t *testing.T) {
 				beadmeta.LegacyWorkDirMetadataKey: realEvidence,
 			}},
 			want: &poolSlotWorkDirRepair{RestoreValue: realEvidence},
+		},
+		// The repair's premise is that legacy holds real per-bead evidence. A
+		// slot-shaped legacy is not that, so promoting it would only swap one
+		// slot label for another -- and on an open bead nothing follows the
+		// sweep to correct it.
+		"differing pool-slot legacy is left untouched": {
+			cfg: gaConfig(),
+			bead: beads.Bead{Metadata: map[string]string{
+				beadmeta.WorkDirMetadataKey:       poolSlot,
+				beadmeta.LegacyWorkDirMetadataKey: otherPoolSlot,
+			}},
+			want: nil,
 		},
 		// The accurate canonical of a per-bead worktree living at slot depth
 		// must survive: repairing it would relocate a live bead to a stale
@@ -301,6 +314,7 @@ func TestPoolSlotWorkDirRepairFor(t *testing.T) {
 func TestRepairPoolSlotWorkDirClobber(t *testing.T) {
 	const (
 		poolSlot      = ".gc/worktrees/gascity/builder-1"
+		otherPoolSlot = ".gc/worktrees/gascity/builder-2"
 		perBeadAtSlot = ".gc/worktrees/gascity/ga-ui3mbs"
 		compoundSlot  = ".gc/worktrees/gascity/ga-klo4gz.11-measure"
 		realEvidence  = "/home/ds/gascity-worktrees/ga-3c5isi"
@@ -343,10 +357,19 @@ func TestRepairPoolSlotWorkDirClobber(t *testing.T) {
 			beadmeta.LegacyWorkDirMetadataKey: realEvidence,
 		},
 	}
-	all := []beads.Bead{clobbered, clean, perBead, compound, excluded}
+	// Both halves slot-shaped: the sweep has no real evidence to restore, so
+	// it must leave the bead alone rather than promote the other slot label.
+	slotToSlot := beads.Bead{
+		ID: "ga-slotslot", Type: "task", Status: "open",
+		Metadata: map[string]string{
+			beadmeta.WorkDirMetadataKey:       poolSlot,
+			beadmeta.LegacyWorkDirMetadataKey: otherPoolSlot,
+		},
+	}
+	all := []beads.Bead{clobbered, clean, perBead, compound, excluded, slotToSlot}
 	mem := beads.NewMemStoreFrom(0, all, nil)
 	store := &countingStore{Store: mem}
-	stores := []beads.Store{store, store, store, store, store}
+	stores := []beads.Store{store, store, store, store, store, store}
 	cfg := gaConfig()
 
 	repairPoolSlotWorkDirClobber(cfg, all, stores, io.Discard)
@@ -366,6 +389,7 @@ func TestRepairPoolSlotWorkDirClobber(t *testing.T) {
 		{"ga-ui3mbs", perBeadAtSlot},
 		{"ga-klo4gz.11", compoundSlot},
 		{"ga-45tz5p", ".claude/worktrees/ga-45tz5p"},
+		{"ga-slotslot", poolSlot},
 	} {
 		gotUntouched, err := mem.Get(tc.id)
 		if err != nil {

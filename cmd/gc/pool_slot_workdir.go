@@ -65,10 +65,16 @@ func isPoolSlotWorkDirRoot(cfg *config.City, path string) bool {
 //
 // Deliberately asymmetric with poolSlotWorkDirRepairFor on a nil cfg: without
 // config, isPoolSlotWorkDirRoot cannot recognize a per-bead name and errs
-// toward "is a slot". Here that only SUPPRESSES a write, which is harmless.
-// In the repair direction it would overwrite an accurate canonical, so
-// poolSlotWorkDirRepairFor bails out instead. Do not "simplify" the two into
-// a shared nil-cfg policy.
+// toward "is a slot" for every four-segment .gc/worktrees path. That makes
+// this guard nil-inert in the INCOMING direction only: a slot-shaped incoming
+// value is still refused when the canonical is absent, but an EXISTING
+// canonical is misread as a slot too, hits the short-circuit below, and the
+// overwrite is PERMITTED -- so a nil cfg does not make this guard uniformly
+// conservative. The repair direction cannot tolerate even that, because it
+// writes, so poolSlotWorkDirRepairFor additionally refuses to act on a nil
+// cfg. Do not "simplify" the two into a shared nil-cfg policy. Neither branch
+// is reachable in production: every reconciler call site passes a loaded
+// config (city_runtime.go:3409 returns early on a nil filtered config).
 func workDirStampWouldClobberEvidence(cfg *config.City, metadata map[string]string, workDir string) bool {
 	canonical := strings.TrimSpace(metadata[beadmeta.WorkDirMetadataKey])
 	legacy := strings.TrimSpace(metadata[beadmeta.LegacyWorkDirMetadataKey])
@@ -93,13 +99,16 @@ type poolSlotWorkDirRepair struct {
 // none is needed: both gc.work_dir and work_dir must be non-blank and
 // unequal, and gc.work_dir must match a pool-slot root exactly
 // (isPoolSlotWorkDirRoot) -- other shapes (e.g. a legacy work_dir pointing
-// into .claude/worktrees) are left untouched rather than blanket-copied.
+// into .claude/worktrees) are left untouched rather than blanket-copied. The
+// legacy value must not itself be pool-slot shaped -- see the inline note on
+// that check below.
 //
 // A nil cfg skips the repair entirely. This direction WRITES, and without
 // config isPoolSlotWorkDirRoot cannot tell a per-bead worktree from a slot;
 // proceeding on shape alone would overwrite an accurate canonical with a
-// stale legacy path. See the note on workDirStampWouldClobberEvidence, which
-// keeps shape-only behavior because erring there only suppresses a write.
+// stale legacy path. See the note on workDirStampWouldClobberEvidence for the
+// other half of that asymmetry: it stays shape-only, which leaves it nil-inert
+// on an incoming value but NOT on an existing canonical.
 func poolSlotWorkDirRepairFor(cfg *config.City, b beads.Bead) *poolSlotWorkDirRepair {
 	if cfg == nil || b.Metadata == nil {
 		return nil
@@ -110,6 +119,14 @@ func poolSlotWorkDirRepairFor(cfg *config.City, b beads.Bead) *poolSlotWorkDirRe
 		return nil
 	}
 	if !isPoolSlotWorkDirRoot(cfg, canonical) {
+		return nil
+	}
+	// The repair's premise is that legacy still holds real per-bead evidence.
+	// A slot-shaped legacy is not that: promoting it would resolve the
+	// canonical/legacy conflict with another slot label and, on an
+	// open/unassigned bead (no later stamp to correct it), leave the bead
+	// pointed at a slot it does not own. Stay inert instead.
+	if isPoolSlotWorkDirRoot(cfg, legacy) {
 		return nil
 	}
 	return &poolSlotWorkDirRepair{RestoreValue: legacy}
