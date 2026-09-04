@@ -57,7 +57,11 @@ func ResolveInitIntent(persisted InitScopeState, cliIntent, envIntent, configInt
 			}
 			return InitIntentResolution{PreserveBackend: true, Source: "persisted-backend"}, nil
 		}
-		persistedIntent := InitIntent{Transport: persistedTransport(persisted.DoltMode), Target: normalizeTarget(persisted.Target)}
+		transport, err := persistedTransport(persisted.DoltMode)
+		if err != nil {
+			return InitIntentResolution{}, err
+		}
+		persistedIntent := InitIntent{Transport: transport, Target: normalizeTarget(persisted.Target)}
 		if persistedIntent.Transport != "" && persistedIntent.Target == "" {
 			persistedIntent.Target = "local"
 		}
@@ -109,14 +113,19 @@ func isDoltBackend(backend string) bool {
 	return b == "" || b == "dolt" || b == "bd"
 }
 
-func persistedTransport(mode string) string {
-	if strings.EqualFold(strings.TrimSpace(mode), "proxied-server") {
-		return "proxied"
+func persistedTransport(mode string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "":
+		// Older initialized scopes did not persist dolt_mode. Preserve their
+		// historical direct-server behavior rather than selecting a new default.
+		return "direct", nil
+	case "proxied-server":
+		return "proxied", nil
+	case "server":
+		return "direct", nil
+	default:
+		return "", fmt.Errorf("persisted dolt mode %q is unsupported", mode)
 	}
-	if strings.EqualFold(strings.TrimSpace(mode), "server") {
-		return "direct"
-	}
-	return ""
 }
 
 func normalizeTarget(target string) string {
