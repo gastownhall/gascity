@@ -354,6 +354,50 @@ func TestTryControlReadyFromCacheOrFallbackAnswersFromCacheWithZeroSubprocessCal
 	}
 }
 
+// TestTryControlReadyFromCacheOrFallbackDoesNotReloadConfigOnWarmCache pins
+// the fix for the convoy-control-serve steady-state CPU cost (sample-profiled
+// at 52.9% of a core, sustained, all under loadCityConfig): a warm,
+// within-TTL control-ready cache hit must answer without paying for another
+// config load, because a config load re-validates every builtin pack's file
+// manifest from scratch (EnsureBuiltinRuntimeAssets) regardless of whether
+// anything changed. Before the fix, tryControlReadyFromCacheOrFallback loaded
+// the config unconditionally, before ever consulting the cache.
+func TestTryControlReadyFromCacheOrFallbackDoesNotReloadConfigOnWarmCache(t *testing.T) {
+	cityDir, store := setUpControlReadyFileStoreCity(t)
+	noBDOnPathForTest(t)
+	t.Cleanup(func() { resetControlReadyCacheRegistry() })
+
+	target := "gascity/control-dispatcher"
+	if _, err := store.Create(beads.Bead{Assignee: target, Type: "task"}); err != nil {
+		t.Fatalf("create ready bead: %v", err)
+	}
+
+	agentCfg := config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"}
+	query := workflowServeControlReadyQuery(agentCfg)
+
+	var loads int
+	prev := loadCityConfigForControlReady
+	loadCityConfigForControlReady = func(cityPath string) *config.City {
+		loads++
+		return prev(cityPath)
+	}
+	t.Cleanup(func() { loadCityConfigForControlReady = prev })
+
+	if _, handled, err := tryControlReadyFromCacheOrFallback(query, cityDir, nil); err != nil || !handled {
+		t.Fatalf("first call: handled=%v err=%v, want handled=true err=nil", handled, err)
+	}
+	if loads != 1 {
+		t.Fatalf("config loads after first (cold) call = %d, want 1", loads)
+	}
+
+	if _, handled, err := tryControlReadyFromCacheOrFallback(query, cityDir, nil); err != nil || !handled {
+		t.Fatalf("second call: handled=%v err=%v, want handled=true err=nil", handled, err)
+	}
+	if loads != 1 {
+		t.Fatalf("config loads after second (warm-cache) call = %d, want 1 (still just the first)", loads)
+	}
+}
+
 func TestTryControlReadyFromCacheOrFallbackReturnsUnhandledForNonControlQuery(t *testing.T) {
 	cityDir := t.TempDir()
 	_, handled, err := tryControlReadyFromCacheOrFallback("bd ready --json --limit=20", cityDir, nil)
