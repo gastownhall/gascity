@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/storebinding"
 	"github.com/gastownhall/gascity/internal/storeref"
@@ -211,6 +213,123 @@ func refsOf(proven map[storeref.StoreRef]bool) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// controllerDownForBeadsShow answers the `gc beads show` API seam "no
+// controller", which is the only state in which the command reaches the store
+// funnel at all.
+//
+// The seam is stubbed rather than left alone because apiClient() probes for a
+// live controller and loads config: unstubbed, the row would pass or fail on
+// whether something happened to be listening for the fixture's city, and on a
+// machine where one was it would never run the fallback it exists to pin.
+func controllerDownForBeadsShow(t *testing.T) {
+	t.Helper()
+	prev := beadsShowAPIClient
+	beadsShowAPIClient = func(string) (*api.Client, string) { return nil, "no controller for this fixture city" }
+	t.Cleanup(func() { beadsShowAPIClient = prev })
+}
+
+// TestBeadsShowRefusesTheRelicItWouldOtherwiseServeFrozen drives the denial at
+// the surface ga-q8ick was reported on.
+//
+// TestRefusedCityDeniesTheRelicItsLiveCensusProves pins the same fixture one
+// frame below, at cliByIDBindingOwner, and that is not the same claim. The bead
+// exists because `gc beads show` answered with a stale pre-migration row, exit
+// 0, no diagnostic — so what has to be pinned is the COMMAND's exit and the
+// COMMAND's output, not the error value a helper hands it. Between the two sits
+// doBeadsShowFallback's classification, and the failure that reopens ga-q8ick is
+// a change there that reads every error as "no binding answered, run your own
+// scan": the denial disappears, the scan finds the copy the migration retained
+// in the work ledger, and the command reports it as current.
+//
+// The frozen copy is therefore seeded for real. Without it the row could pass
+// against a fall-through that simply found nothing, which is a different exit
+// code for a different reason and says nothing about serving stale rows.
+func TestBeadsShowRefusesTheRelicItWouldOtherwiseServeFrozen(t *testing.T) {
+	const frozenTitle = "the copy the migration left in the work ledger"
+
+	cityPath, classStore := foreignProviderCity(t)
+	frozen, err := workStoreFor(t, cityPath).Create(beads.Bead{Title: frozenTitle, Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the work store's retained copy: %v", err)
+	}
+	relic := classResidentWorkShapedBead(t, classStore, frozen.ID, "the row the binding holds now")
+
+	controllerDownForBeadsShow(t)
+	refuseTheseCities(t, theRefusalARefusedCityCarries(), cityPath)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdBeadsShow(relic.ID, "json", &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("gc beads show %s exited 0 on a refused city whose binding is proven to hold relics; stdout = %s", relic.ID, stdout.String())
+	}
+	if strings.Contains(stdout.String(), frozenTitle) {
+		t.Fatalf("gc beads show served the pre-migration copy from the work ledger: %s — this is the ga-q8ick symptom, a row frozen at migration time reported as current", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "gc beads show:") {
+		t.Errorf("the denial reached stderr as %q without naming the command that refused; an operator reading this cannot tell which surface gave up", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "gc doctor") {
+		t.Errorf("gc beads show printed %q with no route back to a served city", stderr.String())
+	}
+	// One printed line, because the caller's format string is
+	// `gc beads show: %v\n`: a second line in the error value arrives without
+	// that prefix and the operator cannot tell which surface it came from.
+	if got := strings.Count(strings.TrimRight(stderr.String(), "\n"), "\n"); got != 0 {
+		t.Errorf("the denial printed %d extra line(s): %q — everything after the first loses the `gc beads show:` prefix", got, stderr.String())
+	}
+
+	// The control, and the reason this row is about the PROOF rather than about
+	// the refusal: the same city, the same refusal, the same id, with the
+	// evidence taken out of reach. A refused city still serves work, so the
+	// command must fall through to its scan and answer — from the retained copy,
+	// which is the behavior every unconverged city depends on. If this arm ever
+	// fails, the pin above has degenerated into "a refused city refuses
+	// everything" and would hold against code that dropped the census entirely.
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: the proof cannot be taken out of reach, so the control arm below cannot run")
+	}
+	sealTheBindingRoot(t, cityPath)
+	dropCLIResidencyBindings(filepath.Clean(cityPath))
+
+	var unprovenOut, unprovenErr bytes.Buffer
+	if code := cmdBeadsShow(relic.ID, "json", &unprovenOut, &unprovenErr); code != 0 {
+		t.Fatalf("gc beads show %s exited %d on the same refusal with nothing proved: %s — absence of evidence is not evidence, and refusing here takes work-bead reads away from every unconverged city", relic.ID, code, unprovenErr.String())
+	}
+	if !strings.Contains(unprovenOut.String(), frozenTitle) {
+		t.Errorf("the unproven arm served %q, want the work ledger's copy; if the scan cannot reach it then the arm above proved nothing about a stale answer being suppressed", unprovenOut.String())
+	}
+}
+
+// TestBeadsShowServesAConvergedCityThroughTheSameEntryPoint is the healthy
+// control for the row above, taken at the same entry point rather than at the
+// fallback it calls.
+//
+// TestBeadsShowFallbackServesTheBindingCopy already pins this property one frame
+// down. What it cannot pin is that `gc beads show` still REACHES that frame: a
+// guard added to cmdBeadsShow or routeBeadsShow that refused a city whose
+// storage looked unusual would leave that row green and break every converged
+// city's reads. Exit 0 here, from the binding's copy, is what keeps the denial
+// above a statement about proven relics instead of about this funnel.
+func TestBeadsShowServesAConvergedCityThroughTheSameEntryPoint(t *testing.T) {
+	cityPath, classStore := foreignProviderCity(t)
+	shadow, err := workStoreFor(t, cityPath).Create(beads.Bead{Title: "the retained work copy", Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the work store: %v", err)
+	}
+	relocated := classResidentWorkShapedBead(t, classStore, shadow.ID, "the class-binding copy")
+	recensusAfterSeedingARelic(t, cityPath)
+
+	controllerDownForBeadsShow(t)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdBeadsShow(relocated.ID, "json", &stdout, &stderr); code != 0 {
+		t.Fatalf("gc beads show %s exited %d on a served city: %s", relocated.ID, code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "the class-binding copy") {
+		t.Errorf("gc beads show served %s, want the binding's copy — the work store's is frozen at migration time", stdout.String())
+	}
 }
 
 // sealTheBindingRoot makes this city's configured binding unopenable, and only
