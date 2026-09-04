@@ -1240,6 +1240,11 @@ func (c *DoltServerCheck) Run(_ *CheckContext) *CheckResult {
 		r.FixHint = resolveDoltServerFixHint(fsys.OSFS{}, c.cityPath)
 		return r
 	}
+	if target.DoltMode == "proxied-server" && target.Host == "" && target.Port == "" && target.Socket == "" {
+		r.Status = StatusOK
+		r.Message = "managed by beads proxied-server provider"
+		return r
+	}
 	network, addr := "tcp", net.JoinHostPort(target.Host, target.Port)
 	if target.Socket != "" {
 		network, addr = "unix", target.Socket
@@ -1313,6 +1318,11 @@ func (c *RigDoltServerCheck) Run(_ *CheckContext) *CheckResult {
 	if !explicit {
 		r.Status = StatusOK
 		r.Message = "inherits city dolt endpoint"
+		return r
+	}
+	if target, targetErr := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, c.cityPath, rigPath); targetErr == nil && target.DoltMode == "proxied-server" && target.Host == "" && target.Port == "" && target.Socket == "" {
+		r.Status = StatusOK
+		r.Message = "managed by beads proxied-server provider"
 		return r
 	}
 	target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, c.cityPath, rigPath)
