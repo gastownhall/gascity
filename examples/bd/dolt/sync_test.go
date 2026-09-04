@@ -86,8 +86,8 @@ func startReachableTCPListener(t *testing.T) (int, func()) {
 // writeSyncFakeDolt is shared with pull_test.go (writeSyncFakeDolt is called
 // from TestPull* there too) — its remote-lookup arm intentionally matches on
 // the query prefix only ("...FROM dolt_remotes", no trailing clause) so it
-// answers both sync's "ORDER BY name" query and pull's unchanged "LIMIT 1"
-// query identically.
+// answers sync's and pull's remote-lookup queries identically without having
+// to track either one's trailing clause (both are "ORDER BY name" today).
 func writeSyncFakeDolt(t *testing.T, dir string) string {
 	t.Helper()
 	logPath := filepath.Join(dir, "dolt.log")

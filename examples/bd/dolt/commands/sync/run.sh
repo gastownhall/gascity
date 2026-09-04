@@ -24,25 +24,26 @@
 #      by name (same key derivation as GC_DOLT_REFSPEC_<DB_UPPER> above). This
 #      pins the remote regardless of scheme — an explicit override is by
 #      definition intentional, so it is honored even for a non-local remote.
-#   2. Exactly one configured remote: used regardless of scheme. There is no
-#      ambiguity to gate when the database was only ever told about one
-#      remote — being the sole choice is itself an instruction to use it.
-#   3. Multiple configured remotes, no override: the first file:// remote in
-#      name-sorted order wins, deterministically and independent of whatever
-#      order the database itself returns candidates in (gc-fqi7kq: an
-#      unordered SELECT made this pick 1-of-N at random, occasionally
-#      selecting a public network remote for private fleet data). Preferring
-#      file:// keeps local/backup remotes from losing to a network remote by
-#      accident.
-#   4. Multiple configured remotes, no override, none is file://: ambiguous
-#      by policy. Sync skips the database and reports why rather than
-#      guessing among non-local remotes; set the override (case 1) to choose.
+#   2. No override: the first file:// remote in name-sorted order wins,
+#      deterministically and independent of whatever order the database
+#      itself returns candidates in (gc-fqi7kq: an unordered SELECT made
+#      this pick 1-of-N at random, occasionally selecting a public network
+#      remote for private fleet data). Preferring file:// keeps local/backup
+#      remotes from losing to a network remote by accident.
+#   3. No override and no candidate is file://: ambiguous by policy,
+#      REGARDLESS of how many remotes are configured — including exactly
+#      one. Sync skips the database and reports why rather than pushing
+#      private data to a network remote by default; set the override
+#      (case 1) to choose one deliberately.
 #
 # Environment:
 #   GC_CITY_PATH                          (required) — city root
 #   GC_DOLT_PORT                          (required) — managed dolt port
 #   GC_DOLT_USER                          (default: root)
 #   GC_DOLT_PASSWORD                      (optional)
+#   GC_DOLT_REMOTE_<DB>                   (optional) — select which remote to
+#                     push to when a database has several, or to permit
+#                     pushing to a non-file:// remote (see Remote resolution).
 #   GC_DOLT_SYNC_PUSH_TIMEOUT_SECS
 #     (default: 1800) — wall-clock bound for SQL-mode remote push. Increase for
 #                     slow links or large first pushes (a multi-GB first push to
@@ -83,6 +84,8 @@ while [ $# -gt 0 ]; do
       echo "  exclude it from sync (reported as 'skipped (.no-sync)')."
       echo ""
       echo "Environment:"
+      echo "  GC_DOLT_REMOTE_<DB>              Select which remote to push to when a database has several"
+      echo "                                   (also the only way to push to a non-file:// remote)"
       echo "  GC_DOLT_SYNC_FETCH_TIMEOUT_SECS  pre-push fetch bound (default 60)"
       echo "  GC_DOLT_SYNC_PUSH_TIMEOUT_SECS   push bound (default 1800)"
       exit 0
@@ -300,8 +303,9 @@ classify_count() {
 # or the literal token "AMBIGUOUS" when no candidate is local and no override
 # was given — regardless of how many candidates there are, including exactly
 # one: a sole remote is not auto-selected unless it is local. Never depends
-# on the input's row order: candidates are sorted by name before any policy
-# rule is applied. Returns 1 (with its own stderr message) only when
+# on the input's row order: candidates are sorted by name (under LC_ALL=C, so
+# the winner is identical on every host, not merely stable per-locale) before
+# any policy rule is applied. Returns 1 (with its own stderr message) only when
 # GC_DOLT_REMOTE_<DB> is set but names a remote that is not among the
 # candidates.
 select_remote() {
@@ -309,7 +313,7 @@ select_remote() {
   sr_pairs="$2"
   [ -z "$sr_pairs" ] && return 0
 
-  sr_sorted=$(printf '%s\n' "$sr_pairs" | sort -t'|' -k1,1)
+  sr_sorted=$(printf '%s\n' "$sr_pairs" | LC_ALL=C sort -t'|' -k1,1)
 
   sr_override=$(remote_env_value "$sr_db") || return 1
   if [ -n "$sr_override" ]; then
@@ -335,7 +339,9 @@ select_remote() {
 # find_remote_sql <db> — query all configured remotes over SQL and resolve
 # the one to sync against via select_remote. ORDER BY name keeps the raw
 # query itself deterministic; select_remote re-sorts independently so
-# correctness never relies on the server actually honoring it.
+# correctness never relies on the server actually honoring it. Returns 1 when
+# the query itself fails (and reports that), and 2 when select_remote refuses
+# — it has already printed its own, more specific reason.
 find_remote_sql() {
   db="$1"
   remote_csv=$(dolt_sql "USE \`$db\`; SELECT name, url FROM dolt_remotes ORDER BY name") || {
@@ -343,7 +349,8 @@ find_remote_sql() {
     return 1
   }
   pairs=$(printf '%s\n' "$remote_csv" | awk -F, 'NR > 1 && $1 != "" {print $1 "|" $2}')
-  select_remote "$db" "$pairs"
+  # 2 = select_remote already printed a specific policy refusal; 1 = lookup failed.
+  select_remote "$db" "$pairs" || return 2
 }
 
 # resolve_refspec_sql <db> — emit two lines: local-branch and remote-branch.
@@ -440,12 +447,17 @@ sync_database_sql() {
   fi
 
   remote_pair=$(find_remote_sql "$name") || {
-    last_fail_reason="failed to query remotes"
+    find_rc=$?
+    if [ "$find_rc" -eq 2 ]; then
+      last_fail_reason="remote selection refused"
+    else
+      last_fail_reason="failed to query remotes"
+    fi
     return 1
   }
   if [ -z "$remote_pair" ] || [ "$remote_pair" = "AMBIGUOUS" ]; then
     if [ "$remote_pair" = "AMBIGUOUS" ]; then
-      echo "  $name: skipped (multiple remotes, none local; set GC_DOLT_REMOTE_$(db_env_key "$name" 2>/dev/null) to pin one)"
+      echo "  $name: skipped (no local remote; set GC_DOLT_REMOTE_$(db_env_key "$name" 2>/dev/null) to push to a non-local remote)"
     else
       echo "  $name: skipped (no remote)"
     fi
@@ -620,8 +632,9 @@ sync_database_sql() {
 
 # remotes_json_pairs <remotes.json path> — emit newline-separated "name|url"
 # pairs from a Dolt CLI remotes.json. Requires name and url to appear
-# adjacent as "name":"...","url":"..." (the shape Dolt actually writes); an
-# entry that doesn't match this shape is skipped rather than guessed at.
+# adjacent as "name":"...","url":"..." (the compact shape this parser
+# requires; the same pattern `pull/run.sh` uses); an entry that doesn't match
+# this shape is skipped rather than guessed at.
 remotes_json_pairs() {
   [ -f "$1" ] || return 0
   grep -o '"name":"[^"]*","url":"[^"]*"' "$1" 2>/dev/null |
@@ -638,10 +651,13 @@ sync_database_cli() {
 
   # Check for remote.
   pairs=$(remotes_json_pairs "$d/.dolt/remotes.json")
-  remote_pair=$(select_remote "$name" "$pairs") || return 1
+  remote_pair=$(select_remote "$name" "$pairs") || {
+    last_fail_reason="remote selection refused"
+    return 1
+  }
   if [ -z "$remote_pair" ] || [ "$remote_pair" = "AMBIGUOUS" ]; then
     if [ "$remote_pair" = "AMBIGUOUS" ]; then
-      echo "  $name: skipped (multiple remotes, none local; set GC_DOLT_REMOTE_$(db_env_key "$name" 2>/dev/null) to pin one)"
+      echo "  $name: skipped (no local remote; set GC_DOLT_REMOTE_$(db_env_key "$name" 2>/dev/null) to push to a non-local remote)"
     else
       echo "  $name: skipped (no remote)"
     fi
