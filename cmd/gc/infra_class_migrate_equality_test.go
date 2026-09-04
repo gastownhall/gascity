@@ -24,9 +24,14 @@ import (
 // a field added to beads.Bead is either compared by beadCopyDifference or listed
 // here — never silently unwitnessed.
 //
-// The reasons matter as much as the names. An exemption is a promise that a copy
-// which changed this field is still a faithful copy, and three of these five are
-// only true because something else witnesses the same state.
+// The reasons matter as much as the names. An exemption is normally a promise that
+// a copy which changed this field is still a faithful copy, and two of these five
+// are only true because something else witnesses the same state.
+// IndefinitelyDeferred is the one exemption that does not carry that promise: the
+// destination cannot hold it, so the deferral genuinely does not cross. It is
+// exempt because comparing it would refuse every copy of a deferred infra row
+// without preserving anything — not because the copy stays faithful. Do not cite
+// it as precedent for exempting a field the destination could hold.
 var beadCopyExemptFields = map[string]string{
 	"Revision": "store-internal optimistic-concurrency token. Each store mints and bumps its own; the destination's row is a fresh create, so its revision is unrelated to the source's by construction.",
 	"ClaimFence": "store-internal ownership fence, maintained per store like Revision. " +
@@ -35,6 +40,13 @@ var beadCopyExemptFields = map[string]string{
 		"cannot mint dangling cross-boundary edges. The edges it would have produced are witnessed by verifyInfraCopy's DepList comparison.",
 	"Dependencies": "create-time dependency shorthand, stripped by infraMigrationRow for the same reason as Needs, " +
 		"and witnessed the same way — through the source's own materialized dep rows rather than the create-time field.",
+	"IndefinitelyDeferred": "not a property of the copy but of READING the source. It is the read-time normalization of bd's " +
+		"richer status vocabulary (beads.normalizedBdReadState), re-derived on every work-store read; the destination stores " +
+		"Gas City's three-state status verbatim and has no richer status to normalize. Both sides therefore agree on the " +
+		"Status this stage does compare, and the field itself is json:\"-\" while SQLiteStore persists beads through " +
+		"bead_json — so it is structurally absent from the destination and comparing it would refuse EVERY copy of a " +
+		"deferred infra row, identically on each retry. What does not cross is the deferral itself: the binding reads such " +
+		"a row as plainly open.",
 }
 
 // infraEqualityFixture is a source row with every durable field populated to a
@@ -69,6 +81,10 @@ func infraEqualityFixture() beads.Bead {
 		IsBlocked:    &blocked,
 		Revision:     7,
 		ClaimFence:   3,
+		// Set so the exempt mutation below models the loss that actually
+		// happens — a source row carrying the marker against a destination that
+		// cannot hold it — rather than the destination inventing one.
+		IndefinitelyDeferred: true,
 	}
 }
 
@@ -122,6 +138,10 @@ func beadCopyExemptMutations() map[string]func(beads.Bead) beads.Bead {
 		"ClaimFence":   func(b beads.Bead) beads.Bead { b.ClaimFence = 0; return b },
 		"Needs":        func(b beads.Bead) beads.Bead { b.Needs = nil; return b },
 		"Dependencies": func(b beads.Bead) beads.Bead { b.Dependencies = nil; return b },
+		// The fixture carries the marker, so clearing it here is the real loss:
+		// a destination that cannot hold what the source read produced. This is
+		// the mutation that must NOT be refused, or the migration wedges.
+		"IndefinitelyDeferred": func(b beads.Bead) beads.Bead { b.IndefinitelyDeferred = false; return b },
 	}
 }
 
@@ -341,9 +361,28 @@ func TestVerifyInfraCopyRefusesADroppedDurableField(t *testing.T) {
 		NoHistory:   true,
 		DeferUntil:  &deferred,
 		Metadata:    beads.StringMap{"gc.session_name": "worker-1"},
+		// The source row carries the status-based deferral marker the work
+		// store produces for a bd-`deferred` row. The destination cannot hold
+		// it — it is json:"-" and SQLiteStore persists through bead_json — so
+		// the faithful subtest below is what proves the equality stage does not
+		// refuse a copy over a field no destination row can ever carry. The
+		// drop subtests inherit it and must still refuse for their own field.
+		IndefinitelyDeferred: true,
 	})
 	if err != nil {
 		t.Fatalf("seeding the source: %v", err)
+	}
+	// The marker reaches the source store only because MemStore.Create seeds
+	// Status directly rather than going through an explicit transition, which
+	// clears it. Assert it on the equality stage's OWN view of the source
+	// rather than assume it: if that ever changes, these subtests must fail
+	// loudly instead of comparing false against false and proving nothing.
+	seeded, err := readInfraSnapshot(source)
+	if err != nil {
+		t.Fatalf("reading the seeded source: %v", err)
+	}
+	if len(seeded) != 1 || !seeded[0].IndefinitelyDeferred {
+		t.Fatalf("the equality stage's view of the source does not carry the deferral marker: %+v", seeded)
 	}
 
 	for _, tc := range []struct {
