@@ -3151,7 +3151,7 @@ func TestSlingAttachNonGraphFormulaAllowsExistingLiveWorkflow(t *testing.T) {
 // input convoy purely from being given a concrete target bead ID
 // (graphv2.PrepareInvocation's Targeted branch) -- the formula need not
 // reference convoy_id at all for that to happen.
-func graphV2ConvoyFirstSlingTestConfig(t *testing.T) (*config.City, SlingDeps) {
+func graphV2ConvoyFirstSlingTestConfig(t *testing.T) SlingDeps {
 	t.Helper()
 	formulaDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.toml"), []byte(`
@@ -3168,7 +3168,7 @@ title = "Do work"
 	cfg := graphV2SlingTestConfig(t, formulaDir)
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 	deps.CityPath = t.TempDir()
-	return cfg, deps
+	return deps
 }
 
 // TestSlingAttachGraphFormulaConvoyFirstNoExistingRootProceeds is the
@@ -3179,7 +3179,7 @@ title = "Do work"
 // own freshly-minted (still rootless) input convoy, or an unrelated convoy
 // that merely tracks the bead for other reasons, as a conflict.
 func TestSlingAttachGraphFormulaConvoyFirstNoExistingRootProceeds(t *testing.T) {
-	_, deps := graphV2ConvoyFirstSlingTestConfig(t)
+	deps := graphV2ConvoyFirstSlingTestConfig(t)
 	source, err := deps.Store.Create(beads.Bead{ID: "BL-42", Title: "work", Type: "task", Status: "open"})
 	if err != nil {
 		t.Fatal(err)
@@ -3296,7 +3296,7 @@ func trackedGraphV2Root(t *testing.T, store beads.Store, inputConvoyID, formulaN
 // ConflictError to the member bead. Only the launch's own synthetic
 // single-item input convoy counts.
 func TestSlingAttachGraphFormulaMultiItemConvoyRootDoesNotBlockMemberLaunch(t *testing.T) {
-	_, deps := graphV2ConvoyFirstSlingTestConfig(t)
+	deps := graphV2ConvoyFirstSlingTestConfig(t)
 	member, err := deps.Store.Create(beads.Bead{ID: "BL-70", Title: "member", Type: "task", Status: "open"})
 	if err != nil {
 		t.Fatal(err)
@@ -3343,7 +3343,7 @@ func TestSlingAttachGraphFormulaMultiItemConvoyRootDoesNotBlockMemberLaunch(t *t
 }
 
 // TestLiveConvoyTrackedWorkflowRootsSkipsTerminalRoots covers both terminal
-// statuses convoycore.IsTerminalStatus recognises. A tombstoned root is as
+// statuses convoycore.IsTerminalStatus recognizes. A tombstoned root is as
 // dead as a closed one, so neither may block a relaunch of the same formula
 // against the same bead.
 func TestLiveConvoyTrackedWorkflowRootsSkipsTerminalRoots(t *testing.T) {
@@ -3356,7 +3356,7 @@ func TestLiveConvoyTrackedWorkflowRootsSkipsTerminalRoots(t *testing.T) {
 		{status: "tombstone", wantRoots: 0},
 	} {
 		t.Run(tc.status, func(t *testing.T) {
-			_, deps := graphV2ConvoyFirstSlingTestConfig(t)
+			deps := graphV2ConvoyFirstSlingTestConfig(t)
 			source, err := deps.Store.Create(beads.Bead{ID: "BL-80", Title: "work", Type: "task", Status: "open"})
 			if err != nil {
 				t.Fatal(err)

@@ -6456,8 +6456,9 @@ func TestDryRunOnFormula(t *testing.T) {
 // writeGraphV2FormulaForDryRunTest writes a minimal graph.v2-contract
 // formula file, mirroring internal/sling's writeNamedGraphV2ConvoyFormula
 // (unexported there, so duplicated here rather than reused across packages).
-func writeGraphV2FormulaForDryRunTest(t *testing.T, dir, name string) {
+func writeGraphV2FormulaForDryRunTest(t *testing.T, dir string) {
 	t.Helper()
+	const name = "graph-work"
 	content := fmt.Sprintf(`
 formula = %q
 version = 2
@@ -6474,7 +6475,7 @@ title = "Do work"
 
 func TestDryRunOnFormulaGraphV2(t *testing.T) {
 	formulaDir := t.TempDir()
-	writeGraphV2FormulaForDryRunTest(t, formulaDir, "graph-work")
+	writeGraphV2FormulaForDryRunTest(t, formulaDir)
 
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
@@ -6562,7 +6563,7 @@ func (s depListFailingStore) DepList(string, string) ([]beads.Dep, error) {
 // preview must too, instead of printing a passing pre-check.
 func TestDryRunOnFormulaBlockedByLiveConvoyTrackedWorkflow(t *testing.T) {
 	formulaDir := t.TempDir()
-	writeGraphV2FormulaForDryRunTest(t, formulaDir, "graph-work")
+	writeGraphV2FormulaForDryRunTest(t, formulaDir)
 
 	runner := newFakeRunner()
 	cfg := &config.City{
@@ -6602,7 +6603,7 @@ func TestDryRunOnFormulaBlockedByLiveConvoyTrackedWorkflow(t *testing.T) {
 // failure must still be predicted.
 func TestDryRunDefaultFormulaBlockedByLiveConvoyTrackedWorkflow(t *testing.T) {
 	formulaDir := t.TempDir()
-	writeGraphV2FormulaForDryRunTest(t, formulaDir, "graph-work")
+	writeGraphV2FormulaForDryRunTest(t, formulaDir)
 
 	runner := newFakeRunner()
 	cfg := &config.City{
@@ -6641,7 +6642,7 @@ func TestDryRunDefaultFormulaBlockedByLiveConvoyTrackedWorkflow(t *testing.T) {
 // hard-fail on one.
 func TestDryRunOnFormulaPreCheckInconclusiveOnLookupError(t *testing.T) {
 	formulaDir := t.TempDir()
-	writeGraphV2FormulaForDryRunTest(t, formulaDir, "graph-work")
+	writeGraphV2FormulaForDryRunTest(t, formulaDir)
 
 	runner := newFakeRunner()
 	cfg := &config.City{
