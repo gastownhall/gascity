@@ -48,6 +48,19 @@ package main
 // only ever denies, so its unknown must be false: a binding nobody could read
 // has proved nothing, and denying on it would take work-bead reads away from
 // every city whose binding is merely unreachable.
+//
+// # It opens only a binding that ALREADY EXISTS on disk
+//
+// beads.OpenSQLiteStore creates the database when it is absent, so an opener
+// used as a probe answers its own question: it would report "no relics" about a
+// binding it just created. The never-migrated city — a [storage] split
+// configured and never cut over — is the most common refused city there is, and
+// on it an ordinary by-id read would leave an empty binding root behind that a
+// later boot reads as a genesis root. A workspace-backed provider would start a
+// managed engine for the same read. So existence is checked BEFORE the open,
+// through the same two helpers the migration's own no-open probe uses
+// (infraBindingRootEnumerable, infraPathExists), and a binding that is not
+// already there is proof-absent.
 
 import (
 	"path/filepath"
@@ -147,6 +160,9 @@ func censusRefusedCityBinding(cityPath string) map[storeref.StoreRef]bool {
 		// hold a preserved id.
 		return nil
 	}
+	if !refusedBindingIsAlreadyOnDisk(cityPath, cfg) {
+		return nil
+	}
 	plan, err := resolveCityStoragePlan(cityPath, cfg)
 	if err != nil {
 		return nil
@@ -167,6 +183,83 @@ func censusRefusedCityBinding(cityPath string) map[storeref.StoreRef]bool {
 		}
 	}
 	return proven
+}
+
+// refusedBindingIsAlreadyOnDisk reports whether this city's configured binding
+// exists, WITHOUT opening it.
+//
+// It is the precondition on the census above, and it is a correctness gate
+// rather than an optimization. The engine opener creates the database when it is
+// absent, so a census that skipped this would report "no relics" about a
+// binding it had just brought into existence — and would leave that binding
+// behind. infraBindingHoldsNothing already states the rule for the migration's
+// own probe: a probe that creates the database it is asked about is answering
+// its own question. Both checks are the migration's, reused rather than
+// re-spelled, so the two probes cannot disagree about what "the binding is
+// there" means.
+//
+// The root is checked as well as the database, and for this gate that is
+// belt-and-braces rather than a second condition: every way the root check can
+// fail — absent, not a directory, not enumerable by this process — also makes
+// the database stat below answer absent or error, and both decline. It is kept
+// so this precondition reads the same as infraBindingHoldsNothing's, which is
+// the migration's own no-open probe and the place the rule is argued. The
+// DATABASE check is the one carrying the weight here, and it is the one a
+// mutation kills: a binding root that exists and holds no database is a city
+// that has not cut over, and only that check can tell it from one whose binding
+// is clean.
+//
+// A binding served by a provider this build resolves no target for takes the
+// second branch. resolveInfraBindingTarget answers only for the built-in bead
+// engine, and for anything else this file cannot know which file under a root
+// is the database — so the PROVIDER is asked where it serves from, and that
+// location has to exist. Declining is always safe here: the bit only ever
+// denies.
+func refusedBindingIsAlreadyOnDisk(cityPath string, cfg *config.City) bool {
+	target, configured, err := resolveInfraBindingTarget(cityPath, cfg)
+	if err != nil {
+		return false
+	}
+	if !configured {
+		return foreignBindingLocationExists(cityPath, cfg)
+	}
+	if err := infraBindingRootEnumerable(target.Root); err != nil {
+		return false
+	}
+	present, err := infraPathExists(target.Database)
+	return err == nil && present
+}
+
+// foreignBindingLocationExists is the same question for a binding served by a
+// provider whose layout this build does not own: does the location the PROVIDER
+// reports it serves from already exist?
+//
+// It asks the provider rather than guessing, because only the provider knows —
+// the built-in engine reports a database FILE, another may report a directory,
+// and a third may report something that is not a path at all. All three answer
+// this correctly: a location that is not an existing path is not a binding this
+// process may bring into existence, so it is proof-absent, and the read falls
+// through. A remote or opaque location fails the same way, which is the safe
+// direction.
+func foreignBindingLocationExists(cityPath string, cfg *config.City) bool {
+	if cfg == nil {
+		return false
+	}
+	storage := cfg.EffectiveStorage()
+	shape, binding := storageSplitShapeOf(storage)
+	if shape != storageSplitWhole {
+		return false
+	}
+	plan, err := resolveCityStoragePlan(cityPath, cfg)
+	if err != nil {
+		return false
+	}
+	location, err := servedBindingLocation(plan, binding, storage.Bindings[binding])
+	if err != nil || location == "" {
+		return false
+	}
+	present, err := infraPathExists(location)
+	return err == nil && present
 }
 
 var (

@@ -11,6 +11,8 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/storebinding"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
@@ -351,4 +353,69 @@ func sealTheBindingRoot(t *testing.T, cityPath string) {
 		t.Fatalf("sealing %s: %v", root, err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(root, info.Mode().Perm()) })
+}
+
+// TestTheRelicProofNeverCreatesTheBindingItIsAskedAbout is the hazard a probe
+// that OPENS its subject always has.
+//
+// beads.OpenSQLiteStore creates the database when it is absent — that is why
+// infraBindingHoldsNothing checks infraPathExists before it opens, and says so
+// in as many words: "a probe that creates the database it is asked about would
+// be answering its own question". The most common refused city is the
+// NEVER-MIGRATED one, whose binding database does not exist at all, and on that
+// city an ordinary by-id read reaches this proof. Creating a binding root as
+// the side effect of a READ is the one thing this path must not do — on the
+// built-in engine it leaves an empty database that a later boot reads as a
+// genesis root, and on a workspace-backed provider it would start a managed
+// engine.
+func TestTheRelicProofNeverCreatesTheBindingItIsAskedAbout(t *testing.T) {
+	bindingRoot := filepath.Join(t.TempDir(), "never-migrated")
+	cityPath := oneShotCLICity(t, bindingRoot)
+	captureCLIStorageStderr(t)
+
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatalf("loading the fixture city: %v", err)
+	}
+	target, configured, err := resolveInfraBindingTarget(cityPath, cfg)
+	if err != nil || !configured {
+		t.Fatalf("the fixture city resolved no infra binding target (configured=%v): %v — the row cannot be about a binding that was never named", configured, err)
+	}
+	if _, err := os.Stat(target.Database); !os.IsNotExist(err) {
+		t.Fatalf("the fixture's binding database %s already exists (%v); a never-migrated city is the whole subject of this row", target.Database, err)
+	}
+
+	refuseTheseCities(t, theRefusalARefusedCityCarries(), cityPath)
+
+	owner, ok, err := cliByIDBindingOwner(cityPath, "gc-1")
+	if err != nil {
+		t.Fatalf("a refused city whose binding does not exist resolved to err=%v; nothing can be proved about a binding that was never written, and denying here takes work-bead reads away from every city that has not cut over yet", err)
+	}
+	if ok {
+		t.Errorf("a binding that does not exist reported ownership of gc-1 (%p)", owner.Store)
+	}
+
+	if _, err := os.Stat(target.Database); !os.IsNotExist(err) {
+		t.Errorf("the relic proof CREATED the binding database %s as the side effect of a by-id read (stat err = %v); the next boot then finds a genesis root on a city that never cut over", target.Database, err)
+	}
+	if _, err := os.Stat(bindingRoot); !os.IsNotExist(err) {
+		t.Errorf("the relic proof CREATED the binding root %s as the side effect of a by-id read (stat err = %v)", bindingRoot, err)
+	}
+
+	// Second arm: the root is THERE and the database is not. A binding volume
+	// mounted but never written looks exactly like this, and so does a genesis
+	// root that was created and then rolled back. The root check above cannot
+	// see the difference — it passes — so this is the arm that makes the
+	// DATABASE check load-bearing rather than decorative.
+	if err := os.MkdirAll(bindingRoot, 0o755); err != nil {
+		t.Fatalf("creating the empty binding root: %v", err)
+	}
+	dropCLIResidencyBindings(filepath.Clean(cityPath))
+
+	if _, ok, err := cliByIDBindingOwner(cityPath, "gc-1"); err != nil || ok {
+		t.Fatalf("a refused city whose binding root exists but holds no database resolved to ok=%v err=%v, want a clean fall-through", ok, err)
+	}
+	if _, err := os.Stat(target.Database); !os.IsNotExist(err) {
+		t.Errorf("the relic proof CREATED the binding database %s inside an existing but empty root (stat err = %v); an empty root is a city that has not cut over, not one with a clean binding", target.Database, err)
+	}
 }
