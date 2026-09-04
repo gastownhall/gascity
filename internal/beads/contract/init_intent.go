@@ -53,6 +53,9 @@ func ResolveInitIntent(persisted InitScopeState, cliIntent, envIntent, configInt
 			}
 			return InitIntentResolution{PreserveBackend: true, Source: "persisted-backend"}, nil
 		}
+		if mode := strings.TrimSpace(persisted.DoltMode); mode != "" && persistedTransport(mode) == "" {
+			return InitIntentResolution{}, fmt.Errorf("persisted dolt mode %q is unsupported", mode)
+		}
 		persistedIntent := InitIntent{Transport: persistedTransport(persisted.DoltMode), Target: normalizeInitTarget(persisted.Target)}
 		if persistedIntent.Transport != "" && persistedIntent.Target == "" {
 			persistedIntent.Target = "local"

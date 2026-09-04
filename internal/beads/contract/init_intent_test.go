@@ -76,3 +76,13 @@ func TestResolveInitIntentRejectsPartialAndAmbientSelectors(t *testing.T) {
 		t.Fatalf("got %+v, want provider default", got)
 	}
 }
+
+func TestResolveInitIntentRejectsUnknownPersistedMode(t *testing.T) {
+	_, err := ResolveInitIntent(
+		InitScopeState{Initialized: true, Backend: "dolt", DoltMode: "mystery-mode", Target: "local"},
+		InitIntent{}, InitIntent{}, InitIntent{}, InitIntent{Transport: "proxied", Target: "local"},
+	)
+	if err == nil {
+		t.Fatal("unknown persisted dolt mode was accepted")
+	}
+}
