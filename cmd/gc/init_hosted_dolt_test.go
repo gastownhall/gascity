@@ -163,6 +163,42 @@ func TestHostedDoltInitOptionsValidate(t *testing.T) {
 	}
 }
 
+func TestHostedDoltInitOptionsApplySelector(t *testing.T) {
+	tests := []struct {
+		name       string
+		opts       hostedDoltInitOptions
+		wantMode   string
+		wantHost   string
+		wantPort   int
+		wantErrSub string
+	}{
+		{name: "direct local", opts: hostedDoltInitOptions{Transport: "direct", Target: "local"}, wantMode: "server"},
+		{name: "proxied local", opts: hostedDoltInitOptions{Transport: "proxied", Target: "local"}, wantMode: "proxied-server"},
+		{name: "direct external", opts: hostedDoltInitOptions{Transport: "direct", Target: "external", Host: "db.example", Port: "4406", Database: "bd_x", ProjectID: "x"}, wantMode: "server", wantHost: "db.example", wantPort: 4406},
+		{name: "proxied external", opts: hostedDoltInitOptions{Transport: "proxied", Target: "external", Host: "db.example", Port: "4406", Database: "bd_x", ProjectID: "x"}, wantMode: "proxied-server", wantHost: "db.example", wantPort: 4406},
+		{name: "external requires host", opts: hostedDoltInitOptions{Transport: "proxied", Target: "external"}, wantErrSub: "--dolt-host"},
+		{name: "local rejects host", opts: hostedDoltInitOptions{Transport: "direct", Target: "local", Host: "db.example", Port: "4406"}, wantErrSub: "local"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.City{}
+			err := tt.opts.applySelectorToCityConfig(cfg)
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(tt.wantErrSub)) {
+					t.Fatalf("applySelectorToCityConfig() = %v, want error containing %q", err, tt.wantErrSub)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("applySelectorToCityConfig() error = %v", err)
+			}
+			if cfg.Dolt.Mode != tt.wantMode || cfg.Dolt.Host != tt.wantHost || cfg.Dolt.Port != tt.wantPort {
+				t.Fatalf("Dolt config = %+v, want mode=%q host=%q port=%d", cfg.Dolt, tt.wantMode, tt.wantHost, tt.wantPort)
+			}
+		})
+	}
+}
+
 // TestHostedDoltInitAppliesAPIPortDefault pins the control-plane reachability
 // contract for hosted cities. A hosted city's controller runs out-of-session,
 // so the control dispatcher and gc CLI reach it only through the HTTP API, and
