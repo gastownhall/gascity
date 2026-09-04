@@ -2245,12 +2245,21 @@ func hookClaimHasIdentity(assignee string, identities []string) bool {
 
 // hookRouteIdentitiesEqual reports whether two route/identity strings refer
 // to the same qualified agent, tolerating the tmux-safe session-name
-// encoding (/ -> --, . -> __) alongside the canonical slash-qualified form,
-// and case (config-sourced and session-derived spellings of the same agent
-// are not guaranteed identical case - ga-lmy6yj). This is the single
+// encoding (/ -> --, . -> __) alongside the canonical slash-qualified form.
+// gc.routed_to is always written in canonical form, but comparison
+// candidates built from a runtime session name (sessionForQuery) are
+// dash-encoded, so the two spellings must compare equal. This is the single
 // route-spelling matcher shared by the claim path (hookClaimMatchesRoute)
 // and the display path (hookCandidateVisible) per ga-1xaqgo.2 - do not fork
 // a second one.
+//
+// This comparison is deliberately case-SENSITIVE: config accepts
+// case-differing spellings (e.g. "builder" and "Builder") as two distinct
+// agents (ValidateAgents keys on a case-sensitive {dir, binding, name}), so
+// folding case here would let one agent match a different agent's route
+// (ga-lmy6yj). If a real case-divergent writer is ever proven to exist, fix
+// it by normalizing at the write seam where the route is minted, not by
+// re-widening this comparator.
 //
 // This deliberately does NOT collapse the legacy bound-template spelling
 // ("dir/binding.name") onto its unbound form ("dir/name"): that migration is
@@ -2263,10 +2272,7 @@ func hookRouteIdentitiesEqual(a, b string) bool {
 	if a == b {
 		return true
 	}
-	return strings.EqualFold(
-		agent.UnsanitizeQualifiedNameFromSession(a),
-		agent.UnsanitizeQualifiedNameFromSession(b),
-	)
+	return agent.UnsanitizeQualifiedNameFromSession(a) == agent.UnsanitizeQualifiedNameFromSession(b)
 }
 
 func hookClaimMatchesRoute(candidate beads.Bead, routeTargets []string) bool {
