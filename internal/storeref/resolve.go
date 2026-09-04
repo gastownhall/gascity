@@ -25,7 +25,11 @@ package storeref
 //     [binding as a residence probe, work, shadows]. `gc storage migrate`
 //     preserves ids, so a relocated bead keeps its work-era prefix; nil from
 //     the namespace gate means "cannot decide", never "work owns it"
-//     (ga-axin6/#5245, #5132). Retired per ClassBinding.MintsReserved.
+//     (ga-axin6/#5245, #5132). Retired per ClassBinding.MintsReserved. The
+//     probe tolerates a standing refusal, because a refused city still serves
+//     work — unless the binding is PROVEN to hold such relics, where skipping
+//     it falls back to the migration's frozen copy rather than to nothing
+//     (ga-q8ick).
 //
 //   ByID, single-store city
 //     [work], returned unprobed. The identity fast-path: a city that relocates
@@ -271,7 +275,7 @@ func planByID(in ByID, t Topology) (ResolvedPlan, error) {
 			if b.probeRetired() {
 				continue
 			}
-			plan.Legs = append(plan.Legs, PlanLeg{Leg: b.Leg, Role: RoleResidenceProbe, OnError: PolicyRefusalTolerated})
+			plan.Legs = append(plan.Legs, PlanLeg{Leg: b.Leg, Role: RoleResidenceProbe, OnError: b.probeRefusalPolicy()})
 		}
 		// Outside every reserved namespace a plane with its own by-id router
 		// owns the work axis, and its answer REPLACES the probed tail below

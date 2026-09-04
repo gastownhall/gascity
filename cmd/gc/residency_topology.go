@@ -410,7 +410,7 @@ func residencyBindingsFromRoutes(routes *storageRoutes) ([]storeref.ClassBinding
 		}
 		byStore[store] = append(byStore[store], class)
 	}
-	return residencyBindingsFor(order, byStore, routes.hasLegacyResidents)
+	return residencyBindingsFor(order, byStore, routes.hasLegacyResidents, nil)
 }
 
 // residencyBindingsFor turns a store->classes grouping into bindings, and
@@ -424,8 +424,12 @@ func residencyBindingsFromRoutes(routes *storageRoutes) ([]storeref.ClassBinding
 // relics answers the boot census's question for a binding store. A nil one is
 // the pessimistic answer for every store, which is what a caller holding no
 // censused routes is entitled to claim.
-func residencyBindingsFor(order []beads.Store, byStore map[beads.Store][]coordclass.Class, relics func(beads.Store) bool) ([]storeref.ClassBinding, error) {
-	return storeref.BuildBindings(order, byStore, storeref.BindingOptions{Relics: relics})
+//
+// known answers the proof question for a binding ref, and its nil is the
+// OPPOSITE default: no proof is no evidence, and this bit only ever denies.
+// Nothing supplies it yet; the by-id door's live proof is what will.
+func residencyBindingsFor(order []beads.Store, byStore map[beads.Store][]coordclass.Class, relics func(beads.Store) bool, known func(storeref.StoreRef) bool) ([]storeref.ClassBinding, error) {
+	return storeref.BuildBindings(order, byStore, storeref.BindingOptions{Relics: relics, KnownRelics: known})
 }
 
 // infrastructureClasses is the class set a whole split relocates: every

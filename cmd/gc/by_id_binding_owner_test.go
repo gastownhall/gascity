@@ -337,6 +337,61 @@ func TestBindingOwnerLeavesTheWorkResidualUnprobed(t *testing.T) {
 	}
 }
 
+// refusedRelicTopology is a city whose boot could not serve its configured
+// split: every infrastructure class resolves to a refusing store and the
+// standing refusal rides on the topology. proven says whether a durable census
+// has PROVED that binding holds ids outside its reserved namespaces — the one
+// fact about a refused binding that is readable without reading the binding,
+// because it is a city file rather than a store.
+func refusedRelicTopology(proven bool) storeref.Topology {
+	refusal := standingStorageRefusal{err: errors.New("storage refused: this city has not converged on its configured [storage] binding; run `gc storage migrate`")}
+	classes := infrastructureClasses()
+	return assembleResidencyTopology(nil, newUnprobedWorkResidual(), nil, []storeref.ClassBinding{{
+		Classes:  classes,
+		Prefixes: storeref.ReservedPrefixesFor(classes),
+		Leg:      storeref.Leg{Ref: storeref.ClassRef(classes), Store: refusedClassStore{err: refusal}},
+		// A refused store declares no mint namespace, so the pessimistic bit
+		// stands whatever the memo says.
+		HasLegacyResidents:   true,
+		KnownLegacyResidents: proven,
+	}}, refusal)
+}
+
+// TestBindingOwnerRefusedCityWithKnownRelicsRefuses is the ga-q8ick bug.
+//
+// A refused city still serves WORK, so the resolver tolerates the refusal on a
+// residence probe and the surface falls through to its own scan. That is right
+// until the binding is PROVEN to hold work-prefixed relics: `gc storage migrate`
+// preserved those ids and deleted nothing, so the scan finds the retained
+// pre-migration copy in the city work store, serves it, and the close that
+// follows writes it. Exit 0, no diagnostic.
+func TestBindingOwnerRefusedCityWithKnownRelicsRefuses(t *testing.T) {
+	_, ok, err := byIDBindingOwnerForTopology(refusedRelicTopology(true), "gc-1")
+	if err == nil {
+		t.Fatalf("a refused city proven to hold work-prefixed relics resolved to ok=%v with no error; the caller's scan then serves the copy the migration left in the work store", ok)
+	}
+	if !storeref.IsStandingRefusal(err) {
+		t.Errorf("the refusal came back as %v, want the standing storage refusal that names the remedy", err)
+	}
+}
+
+// TestBindingOwnerRefusedCityWithoutMemoStillDeclines is the control, and it
+// must pass on both sides of the fix.
+//
+// The memo is TRUE-only: a ref absent from it means "not known", never "known
+// clean". So absence must not deny anything — a city that was never migrated,
+// or whose note was lost, keeps today's behavior, and work is still served from
+// the ledger work never left.
+func TestBindingOwnerRefusedCityWithoutMemoStillDeclines(t *testing.T) {
+	owner, ok, err := byIDBindingOwnerForTopology(refusedRelicTopology(false), "gc-1")
+	if err != nil {
+		t.Fatalf("a refused city with no relic evidence resolved to err=%v; the memo's absence is not evidence, and denying here takes work-bead reads away from every unconverged city", err)
+	}
+	if ok {
+		t.Errorf("a refusing binding reported ownership of gc-1 (%p)", owner.Store)
+	}
+}
+
 // TestConvoyResolutionStillRefusesAnIdTwoLedgersBothHold covers the rule the
 // binding short-circuit steps around, which until now nothing asserted anywhere
 // in the tree.

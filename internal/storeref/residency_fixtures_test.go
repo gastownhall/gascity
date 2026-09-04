@@ -18,6 +18,7 @@ import (
 //	T1  whole split: one binding carrying all five infrastructure classes
 //	T2  T1 plus two rigs
 //	T3  standing refusal (the deleted-[storage] trap)
+//	T3k T3 whose binding is PROVEN to have held work-prefixed relics
 //	T4  T2 with one rig suspended — the constructor excluded it
 //	T5  per-class split: graph and sessions on two DIFFERENT bindings
 //	T6  T1 with a mint-truthful binding (the section-5 retirement shape)
@@ -159,6 +160,7 @@ type bindingSpec struct {
 	prefixes []string
 	mints    bool
 	relics   bool
+	known    bool
 	refusing bool
 }
 
@@ -193,11 +195,12 @@ func buildTopology(name string, rigs map[string]string, specs []bindingSpec, ref
 		}
 		f.bindings[ref] = s
 		f.topo.Bindings = append(f.topo.Bindings, ClassBinding{
-			Classes:            append([]coordclass.Class(nil), spec.classes...),
-			Prefixes:           append([]string(nil), spec.prefixes...),
-			Leg:                Leg{Ref: ref, Store: s},
-			MintsReserved:      spec.mints,
-			HasLegacyResidents: spec.relics,
+			Classes:              append([]coordclass.Class(nil), spec.classes...),
+			Prefixes:             append([]string(nil), spec.prefixes...),
+			Leg:                  Leg{Ref: ref, Store: s},
+			MintsReserved:        spec.mints,
+			HasLegacyResidents:   spec.relics,
+			KnownLegacyResidents: spec.known,
 		})
 	}
 	return f
@@ -219,6 +222,19 @@ func newT3() topoFixture {
 	spec := wholeSplit()
 	spec.refusing = true
 	return buildTopology("T3", nil, []bindingSpec{spec}, refusal)
+}
+
+// newT3Known is T3 whose binding a durable census PROVED holds ids outside its
+// reserved namespaces. The refusal is the same; what changes is that the
+// tolerated-refusal rationale — "this leg was only ever a residence probe for an
+// id no relocated class could own" — is known to be false here.
+func newT3Known() topoFixture {
+	refusal := newRefusal()
+	spec := wholeSplit()
+	spec.refusing = true
+	spec.relics = true
+	spec.known = true
+	return buildTopology("T3k", nil, []bindingSpec{spec}, refusal)
 }
 
 // newT4 is T2 with the bravo rig suspended. The constructor is TOLD which rigs
@@ -252,7 +268,7 @@ func newT6Relics() topoFixture {
 }
 
 func allTopologies() []topoFixture {
-	return []topoFixture{newT0(), newT1(), newT2(), newT3(), newT4(), newT5(), newT6(), newT6Relics()}
+	return []topoFixture{newT0(), newT1(), newT2(), newT3(), newT3Known(), newT4(), newT5(), newT6(), newT6Relics()}
 }
 
 // planString renders a row: the plan, or "error: <msg>" when the intent cannot

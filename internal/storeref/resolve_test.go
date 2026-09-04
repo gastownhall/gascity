@@ -195,6 +195,57 @@ func TestStandingRefusalIsToleratedOnlyOutsideTheReservedNamespace(t *testing.T)
 	}
 }
 
+// TestStandingRefusalSurfacesOnAProvenRelicBinding is the other side of that
+// carve-out, and it is a bug fix rather than a symmetry.
+//
+// Tolerating the refusal is justified by one sentence — "this leg was only ever
+// a residence probe for an id no relocated class could own" — and a durable
+// census that PROVED this binding holds ids outside its reserved namespaces has
+// falsified it. `gc storage migrate` preserved those ids and deleted nothing, so
+// the work store still holds a copy of every one of them. Skipping the refusing
+// binding here does not fall back to "no answer": it falls back to the frozen
+// pre-migration copy, successfully, and the write that follows lands on it.
+//
+// So the probe becomes Fatal and the refusal reaches the caller, naming the
+// remedy. This deliberately denies work-shaped by-id reads on a refused city
+// that is proven to hold relics: that city is already in an incident state its
+// boot gate reported, and a loud denial during an incident beats a confident
+// wrong-copy write.
+func TestStandingRefusalSurfacesOnAProvenRelicBinding(t *testing.T) {
+	f := newT3Known()
+	plan := mustPlan(t, ByID{ID: workShapedID}, f.topo)
+
+	_, ref, err := ResolveOwner(plan, workShapedID)
+	if err == nil {
+		t.Fatalf("a refused city whose binding is proven to hold relics answered %q for a work-shaped id; the retained pre-migration copy lives there", ref)
+	}
+	if !errors.Is(err, f.topo.Refused) {
+		t.Fatalf("the surfaced error is not the refusal that names the remedy: %v", err)
+	}
+}
+
+// TestBindingOwnerSurfacesTheRefusalOnAProvenRelicBinding carries the same
+// verdict to the executor the scan-backed surfaces use. This is the one that
+// matters in production: ok=false there is not a miss, it is permission to run a
+// directory scan that CAN reach the frozen copy.
+func TestBindingOwnerSurfacesTheRefusalOnAProvenRelicBinding(t *testing.T) {
+	proven := mustPlan(t, ByID{ID: workShapedID}, newT3Known().topo)
+	if _, ok, err := ResolveBindingOwner(proven, workShapedID); err == nil {
+		t.Fatalf("a proven-relic refused city resolved to ok=%v with no error; the caller's own scan then serves the copy the migration left behind", ok)
+	}
+
+	// Control: no proof, no denial. An absent memo is not evidence, and work
+	// never left the work ledger.
+	tolerated := mustPlan(t, ByID{ID: workShapedID}, newT3().topo)
+	owner, ok, err := ResolveBindingOwner(tolerated, workShapedID)
+	if err != nil {
+		t.Fatalf("a refused city with no relic evidence resolved to err=%v, want a clean decline: %s", err, storeNameOf(owner.Store))
+	}
+	if ok {
+		t.Errorf("a refusing binding reported ownership of %s (%s)", workShapedID, storeNameOf(owner.Store))
+	}
+}
+
 // ---------------------------------------------------------------------------
 // §6 T5 — the identity fast-path. A single-store city pays nothing for a seam
 // it cannot use (the ga-4qdfn short-circuit, as a resolver property).
