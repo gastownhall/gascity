@@ -889,8 +889,10 @@ func bdByIDMutationSubjects(bdArgs []string) []string {
 
 // bdIDIsClassReserved reports whether id carries a reserved class id prefix.
 // Those namespaces belong to the relocated class stores — whether the store's
-// own sequence minted the id or a subsystem inside it did — so such an id
-// existing anywhere else is not a thing bd can answer for.
+// own sequence minted the id or a subsystem inside it did — so a binding that
+// cannot answer for one is a failure to decide rather than an absence. The
+// prefix decides which ids get ASKED about; residence, never the prefix,
+// decides the answer.
 func bdIDIsClassReserved(id string) bool {
 	for _, prefix := range config.AllReservedClassPrefixes() {
 		if prefix != "" && strings.HasPrefix(id, prefix+"-") {
@@ -993,11 +995,12 @@ func refuseUnservedClassMutation(door bdByIDClassDoor, bdArgs, classIDs, mutatio
 }
 
 // serveBdByIDResolved answers a served by-ID op from the class front door. It
-// resolves the id against the class binding, refuses the cases this surface
-// must not serve (a work-store id it does not own, a reserved-prefix id with no
-// row, an explicit --rig work scope), runs the ADR-0009 work-record close gate,
-// and dispatches the verb against the class graph. repoDirs is the checkout
-// table the close gate resolves a closing bead's repository from.
+// resolves the id against the class binding, falls through to the passthrough
+// on any binding miss whatever the id's prefix, refuses the one case this
+// surface must not serve (an explicit --rig work scope on a bead the binding
+// holds), runs the ADR-0009 work-record close gate, and dispatches the verb
+// against the class graph. repoDirs is the checkout table the close gate
+// resolves a closing bead's repository from.
 func serveBdByIDResolved(door bdByIDClassDoor, op bdByIDOp, bdArgs []string, rigName string, repoDirs workRecordRepoDirs, stdout, stderr io.Writer) (int, bool) {
 	resolution, err := door.resolve(op.ID)
 	if err != nil {
