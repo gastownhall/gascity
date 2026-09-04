@@ -136,6 +136,9 @@ func TestGasCityGcBdExternalUnixSocketFrontDoor(t *testing.T) {
 	if !reflect.DeepEqual(before, got) {
 		t.Fatalf("metadata mutated during outage")
 	}
+	if _, err := os.Stat(filepath.Join(fixture.dir, ".gc", "runtime", "packs", "dolt")); !os.IsNotExist(err) {
+		t.Fatalf("external socket fixture created managed Dolt runtime: err=%v", err)
+	}
 }
 
 func snapshotFrontDoorTree(t *testing.T, root string) map[string][]byte {
