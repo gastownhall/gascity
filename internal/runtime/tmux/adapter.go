@@ -28,6 +28,9 @@ type Provider struct {
 	cache    *StateCache
 	mu       sync.Mutex
 	workDirs map[string]string // session name → workDir (for CopyTo)
+
+	tickMu    sync.Mutex
+	tickCache *tickMetaCache // GetMeta memo for the in-flight reconcile tick, if any
 }
 
 var instanceTokenReader = rand.Reader
@@ -595,14 +598,25 @@ func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
 
 // SetMeta stores a key-value pair in the named session's tmux environment.
 func (p *Provider) SetMeta(name, key, value string) error {
-	return p.tm.SetEnvironment(name, key, value)
+	err := p.tm.SetEnvironment(name, key, value)
+	if c := p.activeTickCache(); c != nil {
+		c.invalidate(name)
+	}
+	return err
 }
 
 // GetMeta retrieves a value from the named session's tmux environment.
 // Returns ("", nil) if the key is not set. Propagates session-not-found
 // and no-server errors so callers can distinguish "key absent" from
 // "session gone."
+//
+// When a reconcile tick's memo window is active (see [Provider.ResetTickCache]),
+// this is served from that tick's cached copy of the session's whole
+// environment instead of forking a new `tmux show-environment` per call.
 func (p *Provider) GetMeta(name, key string) (string, error) {
+	if c := p.activeTickCache(); c != nil {
+		return c.get(name, key)
+	}
 	val, err := p.tm.GetEnvironment(name, key)
 	if err != nil {
 		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
@@ -615,7 +629,30 @@ func (p *Provider) GetMeta(name, key string) (string, error) {
 
 // RemoveMeta removes a key from the named session's tmux environment.
 func (p *Provider) RemoveMeta(name, key string) error {
-	return p.tm.RemoveEnvironment(name, key)
+	err := p.tm.RemoveEnvironment(name, key)
+	if c := p.activeTickCache(); c != nil {
+		c.invalidate(name)
+	}
+	return err
+}
+
+// ResetTickCache starts a new GetMeta memo window, discarding any previous
+// window's cached environments. The supervisor calls this once at the start
+// of each beadReconcileTick pass so that pass's repeated per-session GetMeta
+// reads share one tmux fork instead of one per call site
+// (gastownhall/gascity#<bead>). Callers that never call this (tests, one-off
+// CLI invocations) see unchanged, uncached GetMeta behavior.
+func (p *Provider) ResetTickCache() {
+	p.tickMu.Lock()
+	p.tickCache = newTickMetaCache(p.tm)
+	p.tickMu.Unlock()
+}
+
+func (p *Provider) activeTickCache() *tickMetaCache {
+	p.tickMu.Lock()
+	c := p.tickCache
+	p.tickMu.Unlock()
+	return c
 }
 
 // Peek captures the last N lines of output from the named session.

@@ -2137,6 +2137,15 @@ func (cr *CityRuntime) stopConfigWatcher() {
 	}
 }
 
+// tickCacheResetter is an optional runtime.Provider capability: providers that
+// can memoize GetMeta within one reconcile tick (tmux's [tmux.Provider], via
+// its embedding seam wrapper) implement it; providers that can't are left
+// alone. Declared as a local interface rather than added to runtime.Provider
+// itself so providers that don't need it need not implement a no-op.
+type tickCacheResetter interface {
+	ResetTickCache()
+}
+
 // beadReconcileTick runs one bead-driven reconciliation pass. bootReconcile is
 // true only for the synchronous pass on the startup path: that pass must flip
 // readiness quickly, so it skips the undesired-pool-session sweep (a heavy
@@ -2148,6 +2157,16 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	store := cr.cityBeadStore()
 	if store == nil {
 		return
+	}
+	// Reset any per-provider GetMeta memo for this tick (sys-yre7dj): several
+	// independent call sites below (worker-handle resolution, drain-ack /
+	// restart-request checks, pending-create-info matching, drain-ack-queue
+	// dedup, stale-drain-ack detection) each query the same session's tmux
+	// metadata, forking a subprocess per call with no memoization. Providers
+	// that don't support memoization (or aren't reached from a tick at all)
+	// are unaffected — this is an optional capability, not a Provider change.
+	if tc, ok := cr.sp.(tickCacheResetter); ok {
+		tc.ResetTickCache()
 	}
 	// Session-class ops (pool-session sweep, wait-wake state, reconcile) route
 	// through the typed session store (gastownhall/gascity#3773); it wraps the
