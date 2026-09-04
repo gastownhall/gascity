@@ -3251,6 +3251,196 @@ func TestCheckNoMoleculeChildrenConvoyLookupDoesNotShadowV1Children(t *testing.T
 	}
 }
 
+// trackedGraphV2Root creates a live graph.v2 workflow root stamped as if it
+// had been launched from inputConvoyID by formulaName -- the exact durable
+// shape stampGraphV2RootMetadata leaves behind for a convoy-first launch
+// (no gc.source_bead_id, only gc.input_convoy_id).
+func trackedGraphV2Root(t *testing.T, store beads.Store, inputConvoyID, formulaName, status string) beads.Bead {
+	t.Helper()
+	root, err := store.Create(beads.Bead{
+		Title: "workflow root for " + inputConvoyID,
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+			beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+			beadmeta.FormulaNameMetadataKey:     formulaName,
+			beadmeta.InputConvoyIDMetadataKey:   inputConvoyID,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Create fills in Status itself, so a terminal fixture has to be set
+	// afterwards.
+	if status != root.Status {
+		if err := store.Update(root.ID, beads.UpdateOpts{Status: &status}); err != nil {
+			t.Fatal(err)
+		}
+		if root, err = store.Get(root.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if root.Status != status {
+		t.Fatalf("fixture root status = %q, want %q", root.Status, status)
+	}
+	return root
+}
+
+// TestSlingAttachGraphFormulaMultiItemConvoyRootDoesNotBlockMemberLaunch
+// pins the scope of the #5420 guard to "(formula, THIS bead)". A workflow
+// launched against a real multi-item convoy stamps gc.input_convoy_id with
+// that convoy itself (graphv2.NormalizeInputConvoy returns a convoy target
+// unchanged), and that convoy tracks each of its members -- so a lookup
+// keyed on "any convoy tracking this bead" would let a convoy-level launch
+// block a later per-member `--on` of the same formula, misattributing the
+// ConflictError to the member bead. Only the launch's own synthetic
+// single-item input convoy counts.
+func TestSlingAttachGraphFormulaMultiItemConvoyRootDoesNotBlockMemberLaunch(t *testing.T) {
+	_, deps := graphV2ConvoyFirstSlingTestConfig(t)
+	member, err := deps.Store.Create(beads.Bead{ID: "BL-70", Title: "member", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sibling, err := deps.Store.Create(beads.Bead{ID: "BL-71", Title: "sibling", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A real (non-synthetic) multi-item convoy, as a convoy-level launch
+	// would use it: it tracks both members and carries no gc.synthetic stamp.
+	convoy, err := deps.Store.Create(beads.Bead{Title: "release convoy", Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []string{member.ID, sibling.ID} {
+		if err := convoycore.TrackItem(deps.Store, convoy.ID, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	blocking := trackedGraphV2Root(t, deps.Store, convoy.ID, "graph-work", "open")
+
+	roots, err := liveConvoyTrackedWorkflowRoots(deps.Store, deps.Store, member.ID, "graph-work")
+	if err != nil {
+		t.Fatalf("liveConvoyTrackedWorkflowRoots: %v", err)
+	}
+	if len(roots) != 0 {
+		t.Fatalf("liveConvoyTrackedWorkflowRoots = %+v, want none -- %s belongs to a multi-item convoy launch, not to %s", roots, blocking.ID, member.ID)
+	}
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.AttachFormula(context.Background(), "graph-work", member.ID, config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}, FormulaOpts{})
+	if err != nil {
+		t.Fatalf("AttachFormula on convoy member: %v", err)
+	}
+	if result.WorkflowID == "" {
+		t.Fatal("WorkflowID = empty, want a live workflow root for the member launch")
+	}
+	if result.WorkflowID == blocking.ID {
+		t.Fatalf("WorkflowID = %q, want a root distinct from the convoy-level launch's", result.WorkflowID)
+	}
+}
+
+// TestLiveConvoyTrackedWorkflowRootsSkipsTerminalRoots covers both terminal
+// statuses convoycore.IsTerminalStatus recognises. A tombstoned root is as
+// dead as a closed one, so neither may block a relaunch of the same formula
+// against the same bead.
+func TestLiveConvoyTrackedWorkflowRootsSkipsTerminalRoots(t *testing.T) {
+	for _, tc := range []struct {
+		status    string
+		wantRoots int
+	}{
+		{status: "open", wantRoots: 1},
+		{status: "closed", wantRoots: 0},
+		{status: "tombstone", wantRoots: 0},
+	} {
+		t.Run(tc.status, func(t *testing.T) {
+			_, deps := graphV2ConvoyFirstSlingTestConfig(t)
+			source, err := deps.Store.Create(beads.Bead{ID: "BL-80", Title: "work", Type: "task", Status: "open"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The synthetic single-item input convoy a prior bare-bead `--on`
+			// launch of graph-work would have minted for this bead.
+			convoy, err := deps.Store.Create(beads.Bead{
+				Title:    "input convoy for " + source.ID,
+				Type:     "convoy",
+				Status:   "open",
+				Metadata: map[string]string{beadmeta.SyntheticMetadataKey: "true"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := convoycore.TrackItem(deps.Store, convoy.ID, source.ID); err != nil {
+				t.Fatal(err)
+			}
+			trackedGraphV2Root(t, deps.Store, convoy.ID, "graph-work", tc.status)
+
+			roots, err := liveConvoyTrackedWorkflowRoots(deps.Store, deps.Store, source.ID, "graph-work")
+			if err != nil {
+				t.Fatalf("liveConvoyTrackedWorkflowRoots: %v", err)
+			}
+			if len(roots) != tc.wantRoots {
+				t.Fatalf("liveConvoyTrackedWorkflowRoots = %d roots %+v, want %d for a %s root", len(roots), roots, tc.wantRoots, tc.status)
+			}
+
+			err = checkLegacySourceWorkflowConflict(deps, source.ID, "graph-work")
+			var conflictErr *sourceworkflow.ConflictError
+			if tc.wantRoots == 0 {
+				if err != nil {
+					t.Fatalf("checkLegacySourceWorkflowConflict error = %v, want nil -- a %s root must not block relaunch", err, tc.status)
+				}
+				return
+			}
+			if !errors.As(err, &conflictErr) {
+				t.Fatalf("checkLegacySourceWorkflowConflict error = %v, want ConflictError for a live root", err)
+			}
+		})
+	}
+}
+
+// TestSlingAttachGraphFormulaDistinctFormulasBothLaunch pins the other half
+// of the "(formula, target bead)" contract: two DIFFERENT formulas against
+// one bead are legitimate concurrent work (a review workflow and a build
+// workflow on one source bead), not a duplicate, so the second must launch.
+func TestSlingAttachGraphFormulaDistinctFormulasBothLaunch(t *testing.T) {
+	formulaDir := t.TempDir()
+	writeNamedGraphV2ConvoyFormula(t, formulaDir, "graph-work")
+	writeNamedGraphV2ConvoyFormula(t, formulaDir, "graph-review")
+	cfg := graphV2SlingTestConfig(t, formulaDir)
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps.CityPath = t.TempDir()
+
+	source, err := deps.Store.Create(beads.Bead{ID: "BL-90", Title: "work", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	first, err := s.AttachFormula(context.Background(), "graph-work", source.ID, a, FormulaOpts{})
+	if err != nil {
+		t.Fatalf("first AttachFormula(graph-work): %v", err)
+	}
+	second, err := s.AttachFormula(context.Background(), "graph-review", source.ID, a, FormulaOpts{})
+	if err != nil {
+		t.Fatalf("second AttachFormula(graph-review): %v", err)
+	}
+	if first.WorkflowID == "" || second.WorkflowID == "" {
+		t.Fatalf("WorkflowIDs = (%q, %q), want both non-empty", first.WorkflowID, second.WorkflowID)
+	}
+	if first.WorkflowID == second.WorkflowID {
+		t.Fatalf("WorkflowID = %q for both formulas, want a distinct root per formula", first.WorkflowID)
+	}
+	if live := liveGraphV2Roots(t, deps.Store); len(live) != 2 {
+		t.Fatalf("live graph roots = %d, want 2 (one per formula); roots=%+v", len(live), live)
+	}
+}
+
 func TestSourceWorkflowLockScopeUsesStorePath(t *testing.T) {
 	cfg := &config.City{
 		Rigs: []config.Rig{

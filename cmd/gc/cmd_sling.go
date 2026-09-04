@@ -1763,10 +1763,13 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 			previewBeadID = "<new-bead-id>"
 		}
 		if opts.OnFormula != "" {
+			preCheckConclusive := true
 			if preCheck {
-				if rc := dryRunReportBlockingMolecule(opts, deps, querier, opts.OnFormula, stderr); rc != 0 {
+				rc, conclusive := dryRunReportBlockingMolecule(opts, deps, querier, opts.OnFormula, stderr)
+				if rc != 0 {
 					return rc
 				}
+				preCheckConclusive = conclusive
 			}
 			w("Attach formula:")
 			w("  Formula: " + opts.OnFormula)
@@ -1779,7 +1782,7 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 				cookCmd += fmt.Sprintf(" --title=%s", opts.Title)
 			}
 			w("  Would run: " + cookCmd)
-			if preCheck {
+			if preCheck && preCheckConclusive {
 				w("  Pre-check: " + opts.BeadOrFormula + " has no existing molecule/wisp children or live formulas-v2 workflow for " + opts.OnFormula + " ✓")
 			}
 			w("")
@@ -1794,10 +1797,13 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 			// attachFormulaToBead still hard-fails on regardless of that
 			// fallback, so the preview keeps predicting that one failure.
 			var blockingLabel, blockingID string
+			preCheckConclusive := true
 			if preCheck {
-				if rc := dryRunReportBlockingWorkflow(opts, deps, defaultFormula, stderr); rc != 0 {
+				rc, conclusive := dryRunReportBlockingWorkflow(opts, deps, defaultFormula, stderr)
+				if rc != 0 {
 					return rc
 				}
+				preCheckConclusive = conclusive
 				blockingLabel, blockingID = sling.FindBlockingMolecule(querier, opts.BeadOrFormula, deps.Store)
 			}
 			w("Default formula:")
@@ -1813,7 +1819,7 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 			if preCheck {
 				if blockingLabel != "" {
 					w(fmt.Sprintf("  Pre-check: %s already has attached %s %s — the default formula will be skipped and the bead routed plainly.", opts.BeadOrFormula, blockingLabel, blockingID))
-				} else {
+				} else if preCheckConclusive {
 					w("  Pre-check: " + opts.BeadOrFormula + " has no existing molecule/wisp children or live formulas-v2 workflow for " + defaultFormula + " ✓")
 				}
 			}
@@ -2019,7 +2025,9 @@ func printBeadInfo(w func(string), q BeadQuerier, beadID string) {
 
 // dryRunReportBlockingMolecule returns 1 (and emits a stderr diagnostic)
 // when the bead already has an attached molecule/workflow that would block
-// formula attachment, otherwise 0.
+// formula attachment, otherwise 0. The second return reports whether the
+// pre-check actually reached a conclusion; a false value means the caller
+// must not print a passing "✓" line (see dryRunReportBlockingWorkflow).
 //
 // Beyond FindBlockingMolecule's three routes (molecule_id, workflow_id, a
 // direct DB child), it also checks the convoy-tracking route a convoy-first
@@ -2029,10 +2037,10 @@ func printBeadInfo(w func(string), q BeadQuerier, beadID string) {
 // three routes, so it printed a misleading "no existing molecule/wisp
 // children" pass even when a live convoy-first workflow from the same
 // formula would have blocked the real launch.
-func dryRunReportBlockingMolecule(opts slingOpts, deps slingDeps, querier BeadQuerier, formulaName string, stderr io.Writer) int {
+func dryRunReportBlockingMolecule(opts slingOpts, deps slingDeps, querier BeadQuerier, formulaName string, stderr io.Writer) (int, bool) {
 	if label, id := sling.FindBlockingMolecule(querier, opts.BeadOrFormula, deps.Store); label != "" {
 		fmt.Fprintf(stderr, "gc sling: bead %s already has attached %s %s\n", opts.BeadOrFormula, label, id) //nolint:errcheck // best-effort stderr
-		return 1
+		return 1, true
 	}
 	return dryRunReportBlockingWorkflow(opts, deps, formulaName, stderr)
 }
@@ -2044,20 +2052,32 @@ func dryRunReportBlockingMolecule(opts slingOpts, deps slingDeps, querier BeadQu
 // also predicting a plain molecule/wisp conflict, which
 // attachFormulaToBead's fallbackToPlainOnMoleculeConflict now routes
 // around instead of failing on (see sling_core.go).
-func dryRunReportBlockingWorkflow(opts slingOpts, deps slingDeps, formulaName string, stderr io.Writer) int {
+//
+// The second return reports whether the lookup reached a conclusion. A
+// failed lookup is not a pass: it emits a "pre-check inconclusive"
+// diagnostic and returns false so the caller suppresses its "✓" line,
+// rather than advertising a clean pre-check that was never obtained. The
+// exit code stays 0 in that case -- a read error is not the launch-time
+// conflict this predicts, and a preview should not hard-fail on one.
+func dryRunReportBlockingWorkflow(opts slingOpts, deps slingDeps, formulaName string, stderr io.Writer) (int, bool) {
 	formulaName = strings.TrimSpace(formulaName)
 	if formulaName == "" {
-		return 0
+		return 0, true
 	}
 	graphStore := deps.GraphStore
 	if graphStore == nil {
 		graphStore = deps.Store
 	}
-	if roots, err := sling.LiveConvoyTrackedWorkflowRoots(deps.Store, graphStore, opts.BeadOrFormula, formulaName); err == nil && len(roots) > 0 {
-		fmt.Fprintf(stderr, "gc sling: bead %s already has attached workflow %s\n", opts.BeadOrFormula, roots[0].ID) //nolint:errcheck // best-effort stderr
-		return 1
+	roots, err := sling.LiveConvoyTrackedWorkflowRoots(deps.Store, graphStore, opts.BeadOrFormula, formulaName)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc sling: pre-check inconclusive: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 0, false
 	}
-	return 0
+	if len(roots) > 0 {
+		fmt.Fprintf(stderr, "gc sling: bead %s already has attached workflow %s\n", opts.BeadOrFormula, roots[0].ID) //nolint:errcheck // best-effort stderr
+		return 1, true
+	}
+	return 0, true
 }
 
 // printNudgePreview prints the Nudge section for dry-run output.

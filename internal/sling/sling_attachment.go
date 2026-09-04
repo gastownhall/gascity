@@ -86,9 +86,10 @@ func CollectAttachedBeads(parent beads.Bead, store beads.Store, childQuerier Bea
 	return attachments, firstErr
 }
 
-// liveConvoyTrackedWorkflowRoots returns the live (non-closed) graph.v2
-// workflow roots launched by formulaName that are reachable from beadID
-// through a convoy-tracking edge: every convoy that tracks beadID
+// liveConvoyTrackedWorkflowRoots returns the live (non-terminal, per
+// convoycore.IsTerminalStatus) graph.v2 workflow roots launched by
+// formulaName that are reachable from beadID through the launch's own
+// synthetic input convoy: every synthetic convoy that tracks beadID
 // (convoycore.TrackingConvoysForItem), filtered to the workflow roots that
 // were launched from that convoy -- identified by gc.input_convoy_id, which
 // stampGraphV2RootMetadata (sling.go) stamps on every graph.v2 root at
@@ -135,6 +136,27 @@ func liveConvoyTrackedWorkflowRoots(convoyStore, rootStore beads.Store, beadID, 
 		if beads.HasReadyExcludedLabel(convoy) {
 			continue
 		}
+		// Scope to the launch's OWN synthetic input convoy, which is exactly
+		// the "(formula, this bead)" edge this guard is for:
+		// CreateSingleItemInputConvoy (graphv2/invocation.go) stamps
+		// gc.synthetic=true and tracks exactly one item, so a synthetic
+		// tracking convoy means a launch was made against this bead alone.
+		//
+		// A real multi-item convoy that merely happens to track beadID
+		// belongs to a DIFFERENT launch: a convoy-level `--on` stamps
+		// gc.input_convoy_id with that convoy itself (NormalizeInputConvoy
+		// returns a convoy target unchanged), so counting its root here would
+		// block a later per-member-bead `--on` of the same formula and
+		// misattribute the ConflictError to the member bead. Note that the
+		// convoy-target route was never covered by this lookup in the first
+		// place -- nothing tracks a convoy target -- so skipping it here
+		// removes a false positive rather than dropping real coverage.
+		//
+		// This does not weaken the #5420 fix: a bare-bead `--on` always mints
+		// a synthetic input convoy, so the duplicate relaunch still blocks.
+		if strings.TrimSpace(convoy.Metadata[beadmeta.SyntheticMetadataKey]) != "true" {
+			continue
+		}
 		matches, err := rootStore.ListByMetadata(map[string]string{
 			beadmeta.InputConvoyIDMetadataKey: convoy.ID,
 		}, 0, beads.WithBothTiers)
@@ -142,7 +164,7 @@ func liveConvoyTrackedWorkflowRoots(convoyStore, rootStore beads.Store, beadID, 
 			return nil, fmt.Errorf("listing workflow roots for input convoy %s: %w", convoy.ID, err)
 		}
 		for _, root := range matches {
-			if root.Status == "closed" || !IsWorkflowAttachment(root) {
+			if convoycore.IsTerminalStatus(root.Status) || !IsWorkflowAttachment(root) {
 				continue
 			}
 			if strings.TrimSpace(root.Metadata[beadmeta.FormulaNameMetadataKey]) != formulaName {

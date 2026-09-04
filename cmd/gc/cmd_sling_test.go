@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
@@ -6428,7 +6429,10 @@ func TestDryRunOnFormula(t *testing.T) {
 	if !strings.Contains(out, "Would run: gc formula cook code-review --attach BL-42") {
 		t.Errorf("stdout missing cook command: %s", out)
 	}
-	if !strings.Contains(out, "Pre-check: BL-42 has no existing molecule/wisp children") {
+	// Full line, not a prefix: the pre-check now also asserts the absence of
+	// a live formulas-v2 workflow for this formula, and a prefix match would
+	// silently accept the old, weaker claim.
+	if !strings.Contains(out, "Pre-check: BL-42 has no existing molecule/wisp children or live formulas-v2 workflow for code-review ✓") {
 		t.Errorf("stdout missing pre-check: %s", out)
 	}
 	if !strings.Contains(out, "bd update 'BL-42' --set-metadata gc.routed_to=mayor") {
@@ -6503,6 +6507,169 @@ func TestDryRunOnFormulaGraphV2(t *testing.T) {
 	}
 	if len(runner.calls) != 0 {
 		t.Errorf("got %d runner calls, want 0: %v", len(runner.calls), runner.calls)
+	}
+}
+
+// seedConvoyTrackedWorkflow puts a live convoy-first formulas-v2 workflow in
+// store: the synthetic single-item input convoy a bare-bead `--on` launch
+// mints for beadID, plus the workflow root stamped with that convoy and
+// formulaName. This is the shape that is invisible to FindBlockingMolecule's
+// three routes but still blocks the real launch (#5420), so the dry-run
+// pre-check must predict it.
+func seedConvoyTrackedWorkflow(t *testing.T, store beads.Store, beadID, formulaName string) beads.Bead {
+	t.Helper()
+	convoy, err := store.Create(beads.Bead{
+		Title:    "input convoy for " + beadID,
+		Type:     "convoy",
+		Metadata: map[string]string{beadmeta.SyntheticMetadataKey: "true"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := convoycore.TrackItem(store, convoy.ID, beadID); err != nil {
+		t.Fatal(err)
+	}
+	root, err := store.Create(beads.Bead{
+		Title: "workflow root for " + beadID,
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+			beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+			beadmeta.FormulaNameMetadataKey:     formulaName,
+			beadmeta.InputConvoyIDMetadataKey:   convoy.ID,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// depListFailingStore fails the first hop of the convoy-tracking lookup
+// (convoycore.TrackingConvoysForItem calls DepList), so the dry-run
+// pre-check cannot reach a conclusion.
+type depListFailingStore struct {
+	beads.Store
+}
+
+func (s depListFailingStore) DepList(string, string) ([]beads.Dep, error) {
+	return nil, errors.New("boom")
+}
+
+// TestDryRunOnFormulaBlockedByLiveConvoyTrackedWorkflow covers the explicit
+// --on preview against a bead that already has a live convoy-tracked
+// workflow for the same formula: the real launch fails closed, so the
+// preview must too, instead of printing a passing pre-check.
+func TestDryRunOnFormulaBlockedByLiveConvoyTrackedWorkflow(t *testing.T) {
+	formulaDir := t.TempDir()
+	writeGraphV2FormulaForDryRunTest(t, formulaDir, "graph-work")
+
+	runner := newFakeRunner()
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Daemon:        config.DaemonConfig{FormulaV2: boolPtr(true)},
+		FormulaLayers: config.FormulaLayers{City: []string{formulaDir}},
+	}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	q := newFakeChildQuerier()
+	q.beadsByID["BL-42"] = beads.Bead{ID: "BL-42", Type: "task", Status: "open"}
+	q.childrenOf["BL-42"] = []beads.Bead{}
+
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.Store = seededStore("BL-42")
+	root := seedConvoyTrackedWorkflow(t, deps.Store, "BL-42", "graph-work")
+
+	opts := testOpts(a, "BL-42")
+	opts.OnFormula = "graph-work"
+	opts.DryRun = true
+	code := doSling(opts, deps, q, stdout, stderr)
+
+	if code != 1 {
+		t.Fatalf("dry-run returned %d, want 1; stderr: %s", code, stderr.String())
+	}
+	if want := "gc sling: bead BL-42 already has attached workflow " + root.ID; !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
+	}
+	if strings.Contains(stdout.String(), "✓") {
+		t.Errorf("stdout claims a passing pre-check for a blocked launch: %s", stdout.String())
+	}
+}
+
+// TestDryRunDefaultFormulaBlockedByLiveConvoyTrackedWorkflow is the
+// default-formula counterpart. An implicit default formula no longer
+// hard-fails on a plain molecule/wisp, but a live convoy-tracked workflow is
+// a distinct error class attachFormulaToBead still fails on, so this one
+// failure must still be predicted.
+func TestDryRunDefaultFormulaBlockedByLiveConvoyTrackedWorkflow(t *testing.T) {
+	formulaDir := t.TempDir()
+	writeGraphV2FormulaForDryRunTest(t, formulaDir, "graph-work")
+
+	runner := newFakeRunner()
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Daemon:        config.DaemonConfig{FormulaV2: boolPtr(true)},
+		FormulaLayers: config.FormulaLayers{City: []string{formulaDir}},
+	}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), DefaultSlingFormula: strPtr("graph-work")}
+	q := newFakeChildQuerier()
+	q.beadsByID["BL-42"] = beads.Bead{ID: "BL-42", Type: "task", Status: "open"}
+	q.childrenOf["BL-42"] = []beads.Bead{}
+
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.Store = seededStore("BL-42")
+	root := seedConvoyTrackedWorkflow(t, deps.Store, "BL-42", "graph-work")
+
+	opts := testOpts(a, "BL-42")
+	opts.DryRun = true
+	code := doSling(opts, deps, q, stdout, stderr)
+
+	if code != 1 {
+		t.Fatalf("dry-run returned %d, want 1; stderr: %s", code, stderr.String())
+	}
+	if want := "gc sling: bead BL-42 already has attached workflow " + root.ID; !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
+	}
+	if strings.Contains(stdout.String(), "✓") {
+		t.Errorf("stdout claims a passing pre-check for a blocked launch: %s", stdout.String())
+	}
+}
+
+// TestDryRunOnFormulaPreCheckInconclusiveOnLookupError pins the error path: a
+// failed lookup is not a pass. The preview reports the pre-check as
+// inconclusive and withholds the "✓" line, but still exits 0 -- a read error
+// is not the launch-time conflict this predicts, and a preview should not
+// hard-fail on one.
+func TestDryRunOnFormulaPreCheckInconclusiveOnLookupError(t *testing.T) {
+	formulaDir := t.TempDir()
+	writeGraphV2FormulaForDryRunTest(t, formulaDir, "graph-work")
+
+	runner := newFakeRunner()
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Daemon:        config.DaemonConfig{FormulaV2: boolPtr(true)},
+		FormulaLayers: config.FormulaLayers{City: []string{formulaDir}},
+	}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	q := newFakeChildQuerier()
+	q.beadsByID["BL-42"] = beads.Bead{ID: "BL-42", Type: "task", Status: "open"}
+	q.childrenOf["BL-42"] = []beads.Bead{}
+
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.Store = depListFailingStore{Store: seededStore("BL-42")}
+
+	opts := testOpts(a, "BL-42")
+	opts.OnFormula = "graph-work"
+	opts.DryRun = true
+	code := doSling(opts, deps, q, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("dry-run returned %d, want 0 (a read error must not hard-fail a preview); stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "gc sling: pre-check inconclusive:") {
+		t.Errorf("stderr = %q, want an inconclusive pre-check diagnostic", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "✓") {
+		t.Errorf("stdout claims a passing pre-check after a failed lookup: %s", stdout.String())
 	}
 }
 
