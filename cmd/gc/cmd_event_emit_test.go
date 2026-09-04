@@ -193,17 +193,15 @@ func TestEventPayloadForEmitFallsBackToStoreBead(t *testing.T) {
 	if !json.Valid([]byte(payload)) {
 		t.Fatalf("payload is not valid JSON: %q", payload)
 	}
-	var decoded struct {
-		Bead beads.Bead `json:"bead"`
+	decoded, ok := beads.DecodeBeadEventPayload(json.RawMessage(payload))
+	if !ok {
+		t.Fatalf("payload is not a raw canonical bead snapshot: %s", payload)
 	}
-	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
-		t.Fatalf("Unmarshal(payload): %v", err)
+	if decoded.ID != created.ID {
+		t.Fatalf("payload bead ID = %q, want %q", decoded.ID, created.ID)
 	}
-	if decoded.Bead.ID != created.ID {
-		t.Fatalf("payload bead ID = %q, want %q", decoded.Bead.ID, created.ID)
-	}
-	if decoded.Bead.Title != "hook-created task" {
-		t.Fatalf("payload bead title = %q, want hook-created task", decoded.Bead.Title)
+	if decoded.Title != "hook-created task" {
+		t.Fatalf("payload bead title = %q, want hook-created task", decoded.Title)
 	}
 }
 
@@ -258,17 +256,15 @@ prefix = "fe"
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr = %q, want none", stderr.String())
 	}
-	var decoded struct {
-		Bead beads.Bead `json:"bead"`
+	decoded, ok := beads.DecodeBeadEventPayload(json.RawMessage(payload))
+	if !ok {
+		t.Fatalf("payload is not a raw canonical bead snapshot: %s", payload)
 	}
-	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
-		t.Fatalf("Unmarshal(payload): %v", err)
+	if decoded.ID != created.ID {
+		t.Fatalf("payload bead ID = %q, want %q", decoded.ID, created.ID)
 	}
-	if decoded.Bead.ID != created.ID {
-		t.Fatalf("payload bead ID = %q, want %q", decoded.Bead.ID, created.ID)
-	}
-	if decoded.Bead.Title != "rig hook-created task" {
-		t.Fatalf("payload bead title = %q, want rig hook-created task", decoded.Bead.Title)
+	if decoded.Title != "rig hook-created task" {
+		t.Fatalf("payload bead title = %q, want rig hook-created task", decoded.Title)
 	}
 }
 

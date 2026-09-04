@@ -575,7 +575,7 @@ func (c *CachingStore) mergeSnapshotLocked(
 		res.removes++
 		if d.notification == "bead.closed" {
 			closed := cloneBead(cached)
-			closed.Status = "closed"
+			setBeadStatus(&closed, "closed")
 			if freshClosed, ok := confirmedClosed[id]; ok {
 				closed = cloneBead(freshClosed)
 			}

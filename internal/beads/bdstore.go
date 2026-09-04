@@ -772,28 +772,30 @@ func (b *bdIssue) toBead() Bead {
 			}
 		}
 	}
+	status, indefinitelyDeferred := normalizedBdReadState(b.Status, b.DeferUntil)
 	return Bead{
-		ID:           b.ID,
-		Title:        b.Title,
-		Status:       mapBdStatus(b.Status),
-		Type:         b.IssueType,
-		Priority:     cloneIntPtr(b.Priority),
-		CreatedAt:    b.CreatedAt.Truncate(time.Second),
-		UpdatedAt:    b.UpdatedAt.Truncate(time.Second),
-		Assignee:     b.Assignee,
-		From:         from,
-		ParentID:     parentID,
-		Ref:          b.Ref,
-		Needs:        b.Needs,
-		Description:  b.Description,
-		Labels:       b.Labels,
-		Metadata:     b.Metadata,
-		Dependencies: deps,
-		Ephemeral:    b.Ephemeral,
-		NoHistory:    b.NoHistory,
-		DeferUntil:   cloneTimePtr(b.DeferUntil),
-		IsBlocked:    b.IsBlocked.ptr(),
-		Revision:     b.Revision,
+		ID:                   b.ID,
+		Title:                b.Title,
+		Status:               status,
+		Type:                 b.IssueType,
+		Priority:             cloneIntPtr(b.Priority),
+		CreatedAt:            b.CreatedAt.Truncate(time.Second),
+		UpdatedAt:            b.UpdatedAt.Truncate(time.Second),
+		Assignee:             b.Assignee,
+		From:                 from,
+		ParentID:             parentID,
+		Ref:                  b.Ref,
+		Needs:                b.Needs,
+		Description:          b.Description,
+		Labels:               b.Labels,
+		Metadata:             b.Metadata,
+		Dependencies:         deps,
+		Ephemeral:            b.Ephemeral,
+		NoHistory:            b.NoHistory,
+		DeferUntil:           cloneTimePtr(b.DeferUntil),
+		IsBlocked:            b.IsBlocked.ptr(),
+		IndefinitelyDeferred: indefinitelyDeferred,
+		Revision:             b.Revision,
 	}
 }
 
@@ -867,6 +869,13 @@ func mapBdStatus(s string) string {
 	default:
 		return "open"
 	}
+}
+
+// normalizedBdReadState preserves bd's status-based indefinite deferral after
+// richer bd statuses collapse to Gas City's three-state model. A time-bound
+// deferral remains governed by DeferUntil so it can become ready after expiry.
+func normalizedBdReadState(status string, deferUntil *time.Time) (string, bool) {
+	return mapBdStatus(status), status == "deferred" && deferUntil == nil
 }
 
 type optionalBool struct {
@@ -1648,7 +1657,7 @@ func (tx *bdStoreTx) Close(id string) error {
 	if err != nil {
 		return err
 	}
-	item.current.Status = "closed"
+	setBeadStatus(&item.current, "closed")
 	item.closed = true
 	return nil
 }

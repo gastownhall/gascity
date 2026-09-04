@@ -163,7 +163,7 @@ func (c *CachingStore) CloseIfMatch(id string, expectedRevision int64) error {
 	}
 	// The close is proven committed; forcing the status onto the event
 	// payload states that fact without installing anything in the cache.
-	fresh.Status = "closed"
+	setBeadStatus(&fresh, "closed")
 	c.notifyChange("bead.closed", fresh)
 	return nil
 }

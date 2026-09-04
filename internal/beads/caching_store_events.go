@@ -420,6 +420,7 @@ func mergeCacheEventPatch(base, patch Bead, fields map[string]json.RawMessage) B
 	}
 	if hasCacheEventField(fields, "status") {
 		merged.Status = patch.Status
+		merged.IndefinitelyDeferred = patch.IndefinitelyDeferred
 	}
 	if hasCacheEventField(fields, "issue_type") || hasCacheEventField(fields, "type") {
 		merged.Type = patch.Type
@@ -473,7 +474,9 @@ func cacheEventConflictsCurrent(current, patch Bead, fields map[string]json.RawM
 	if hasCacheEventField(fields, "title") && current.Title != patch.Title {
 		return true
 	}
-	if hasCacheEventField(fields, "status") && current.Status != patch.Status {
+	if hasCacheEventField(fields, "status") &&
+		(current.Status != patch.Status ||
+			current.IndefinitelyDeferred != patch.IndefinitelyDeferred) {
 		return true
 	}
 	if (hasCacheEventField(fields, "issue_type") || hasCacheEventField(fields, "type")) && current.Type != patch.Type {
@@ -652,7 +655,7 @@ func (c *CachingStore) notifyChange(eventType string, b Bead) {
 	if c.onChange == nil {
 		return
 	}
-	payload, err := json.Marshal(b)
+	payload, err := EncodeBeadEventPayload(b)
 	if err != nil {
 		c.recordProblem(fmt.Sprintf("marshal %s notification", eventType), err)
 		return
@@ -696,6 +699,7 @@ func beadChanged(old, fresh Bead, skipLabels bool) bool {
 		old.Ref != fresh.Ref ||
 		old.Description != fresh.Description ||
 		old.Ephemeral != fresh.Ephemeral ||
+		old.IndefinitelyDeferred != fresh.IndefinitelyDeferred ||
 		!timePtrEqual(old.DeferUntil, fresh.DeferUntil) ||
 		!boolPtrEqual(old.IsBlocked, fresh.IsBlocked) {
 		return true

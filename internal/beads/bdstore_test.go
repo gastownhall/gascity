@@ -2586,15 +2586,17 @@ func TestBdStoreReadyReturnsParseErrorOnMalformedJSON(t *testing.T) {
 
 func TestBdStoreStatusMapping(t *testing.T) {
 	tests := []struct {
-		bdStatus   string
-		wantStatus string
+		bdStatus           string
+		wantStatus         string
+		wantIndefiniteHold bool
 	}{
-		{"open", "open"},
-		{"in_progress", "in_progress"},
-		{"blocked", "open"},
-		{"review", "open"},
-		{"testing", "open"},
-		{"closed", "closed"},
+		{"open", "open", false},
+		{"in_progress", "in_progress", false},
+		{"blocked", "open", false},
+		{"deferred", "open", true},
+		{"review", "open", false},
+		{"testing", "open", false},
+		{"closed", "closed", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.bdStatus, func(t *testing.T) {
@@ -2613,6 +2615,9 @@ func TestBdStoreStatusMapping(t *testing.T) {
 			}
 			if b.Status != tt.wantStatus {
 				t.Errorf("status %q → %q, want %q", tt.bdStatus, b.Status, tt.wantStatus)
+			}
+			if b.IndefinitelyDeferred != tt.wantIndefiniteHold {
+				t.Errorf("IndefinitelyDeferred = %v, want %v", b.IndefinitelyDeferred, tt.wantIndefiniteHold)
 			}
 		})
 	}

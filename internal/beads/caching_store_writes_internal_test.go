@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 )
 
 // countingBackingStore wraps a Store and counts SetMetadata /
@@ -1154,6 +1155,48 @@ func TestCachingStoreReopenAdoptsFreshBackingRead(t *testing.T) {
 	if got.Revision != fresh.Revision {
 		t.Fatalf("cached revision after Reopen = %d, backing = %d; the successful refresh read must be adopted",
 			got.Revision, fresh.Revision)
+	}
+}
+
+func TestCachingStoreReopenClearsStatusBasedDeferralWhenRefreshFails(t *testing.T) {
+	t.Parallel()
+
+	backing := &releaseRefreshFailOnceStore{Store: NewMemStore()}
+	created, err := backing.Create(Bead{
+		Title:                "deferred",
+		Status:               "open",
+		IndefinitelyDeferred: true,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	// The fixture reaches the cache deferred only because MemStore.Create
+	// seeds Status directly instead of taking an explicit transition, which
+	// clears the marker. Pin that here: without it, a Create that started
+	// clearing the marker would leave this test asserting !IsDeferred against
+	// a bead that was never deferred, and it would pass vacuously.
+	primed, err := cache.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get before reopen: %v", err)
+	}
+	if !IsDeferred(primed, time.Now()) {
+		t.Fatalf("fixture is not deferred before the reopen, so the assertion below would be vacuous: %+v", primed)
+	}
+
+	backing.failNextGet = true
+	if err := cache.Reopen(created.ID); err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	reopened, err := cache.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if IsDeferred(reopened, time.Now()) {
+		t.Fatalf("failed refresh fallback retained status-based deferral: %+v", reopened)
 	}
 }
 

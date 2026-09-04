@@ -1264,6 +1264,17 @@ func (s *NativeDoltStore) Ready(queries ...ReadyQuery) ([]Bead, error) {
 				return err
 			}
 			for _, issue := range issues {
+				// The StatusDeferred branch exists so an expired time-bound
+				// deferral (defer_until in the past) can resurface. An issue
+				// with no defer_until at all was never time-bound — it's bd
+				// defer's status-based indefinite deferral — and must stay
+				// hidden. beadFromNativeIssue records that case as
+				// Bead.IndefinitelyDeferred and IsDeferred honors it, so the
+				// readiness filter already excludes such a row; this skip keeps
+				// it from being materialized at all.
+				if issue.Status == beadslib.StatusDeferred && issue.DeferUntil == nil {
+					continue
+				}
 				bead, err := beadFromNativeIssue(issue)
 				if err != nil {
 					return err
@@ -1981,21 +1992,23 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 	if err != nil {
 		return Bead{}, fmt.Errorf("parsing metadata for bead %q: %w: %w", issue.ID, errNativeIssueMetadataParse, err)
 	}
+	status, indefinitelyDeferred := normalizedBdReadState(string(issue.Status), issue.DeferUntil)
 	b := Bead{
-		ID:          issue.ID,
-		Title:       issue.Title,
-		Status:      mapBdStatus(string(issue.Status)),
-		Type:        string(issue.IssueType),
-		Priority:    nativePriorityFromIssue(issue),
-		CreatedAt:   issue.CreatedAt,
-		Assignee:    issue.Assignee,
-		From:        issue.Sender,
-		Description: issue.Description,
-		Labels:      append([]string(nil), issue.Labels...),
-		Metadata:    metadata,
-		Ephemeral:   issue.Ephemeral,
-		NoHistory:   issue.NoHistory,
-		DeferUntil:  cloneTimePtr(issue.DeferUntil),
+		ID:                   issue.ID,
+		Title:                issue.Title,
+		Status:               status,
+		Type:                 string(issue.IssueType),
+		Priority:             nativePriorityFromIssue(issue),
+		CreatedAt:            issue.CreatedAt,
+		Assignee:             issue.Assignee,
+		From:                 issue.Sender,
+		Description:          issue.Description,
+		Labels:               append([]string(nil), issue.Labels...),
+		Metadata:             metadata,
+		Ephemeral:            issue.Ephemeral,
+		NoHistory:            issue.NoHistory,
+		DeferUntil:           cloneTimePtr(issue.DeferUntil),
+		IndefinitelyDeferred: indefinitelyDeferred,
 	}
 	for _, dep := range issue.Dependencies {
 		if dep == nil {
