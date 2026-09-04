@@ -5,7 +5,7 @@ import "strings"
 // IsDoltBackend reports whether backend uses Gas City's Dolt contract.
 func IsDoltBackend(backend string) bool {
 	backend = strings.ToLower(strings.TrimSpace(backend))
-	return backend == "" || backend == "dolt"
+	return backend == "" || backend == "dolt" || backend == "bd"
 }
 
 // IsProxiedDoltMode reports whether mode selects Beads' proxied-server path
