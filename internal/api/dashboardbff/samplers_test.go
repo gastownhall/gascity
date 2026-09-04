@@ -45,7 +45,7 @@ func TestParsePingCheckRejectsMalformedOutput(t *testing.T) {
 	}
 }
 
-func TestExecBdPingUsesReadonlyProviderNeutralArgs(t *testing.T) {
+func TestExecBdPingUsesProviderNeutralArgsAndIsolatesSocket(t *testing.T) {
 	root := t.TempDir()
 	beadsPath := filepath.Join(root, ".beads")
 	if err := os.Mkdir(beadsPath, 0o755); err != nil {
@@ -56,11 +56,14 @@ func TestExecBdPingUsesReadonlyProviderNeutralArgs(t *testing.T) {
 	if err := os.Mkdir(bin, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"" + argsFile + "\"\nprintf '%s' '{\"status\":\"ok\"}'\n"
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"" + argsFile + "\"\nprintf 'socket=%s\\n' \"${BEADS_DOLT_SERVER_SOCKET-unset}\" >> \"" + argsFile + "\"\nprintf '%s' '{\"status\":\"ok\"}'\n"
 	if err := os.WriteFile(filepath.Join(bin, "bd"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("ADMIN_PATH", bin)
+	// Ambient transport must never leak into dashboard probes. The target
+	// store's metadata (not the caller environment) owns transport selection.
+	t.Setenv("BEADS_DOLT_SERVER_SOCKET", "/tmp/ambient-dolt.sock")
 	// exec.Command resolves the executable using the parent PATH before the
 	// runner applies its scrubbed child environment.
 	t.Setenv("PATH", bin)
@@ -79,8 +82,9 @@ func TestExecBdPingUsesReadonlyProviderNeutralArgs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Split(strings.TrimSpace(string(args)), "\n"); !equalStrings(got, []string{"ping", "--readonly", "--db", beadsPath, "--json"}) {
-		t.Fatalf("bd argv = %v", got)
+	lines := strings.Split(strings.TrimSpace(string(args)), "\n")
+	if len(lines) != 5 || !equalStrings(lines[:4], []string{"ping", "--db", beadsPath, "--json"}) || lines[4] != "socket=unset" {
+		t.Fatalf("bd argv/environment = %v", lines)
 	}
 	after, err := os.ReadDir(beadsPath)
 	if err != nil {
@@ -177,6 +181,25 @@ func TestProbeRigReportsDoltConnectedFromPing(t *testing.T) {
 	}
 	if rep.Rollup != "ok" || len(rep.Problems) != 0 || rep.Note != "" {
 		t.Fatalf("probeRig() = %+v, want a clean ok report", rep)
+	}
+}
+
+func TestProbeRigProxiedModeIgnoresStalePortArtifact(t *testing.T) {
+	rig, bin := newProbeRigFixture(t)
+	if err := os.WriteFile(filepath.Join(rig, ".beads", "metadata.json"), []byte(`{"dolt_mode":"proxied-server"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rig, ".beads", "dolt-server.port"), []byte("1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeFakeBd(t, bin, "#!/bin/sh\nprintf '%s' '{\"status\":\"ok\"}'\n")
+
+	rep := newSamplerManager(Deps{}, newExecRunner()).probeRig(context.Background(), "r1", rig)
+	if rep.DoltEndpoint != nil {
+		t.Fatalf("proxied stale endpoint = %v, want nil", *rep.DoltEndpoint)
+	}
+	if rep.DoltConnected == nil || !*rep.DoltConnected || rep.Rollup != "ok" {
+		t.Fatalf("proxied stale-port report = %+v, want ping-backed healthy status", rep)
 	}
 }
 
