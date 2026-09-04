@@ -190,14 +190,20 @@ func TestProviderCredentialSourcesNoBindingDeclared(t *testing.T) {
 }
 
 // TestCredentialOverridesFindsAgentScopedLayers guards the divergence that
-// makes a provider-scoped answer incomplete: session start merges workspace <
-// provider < agent env and injects the selected upstream's serving env LAST,
-// so any of those wins over the provider's own entry. An agent affected by one
+// makes a provider-scoped answer incomplete: session start merges env as
+// passthrough < workspace < provider < agent and injects the selected
+// upstream's serving env LAST, so the layers AFTER the provider — agent.env
+// and upstreams — win over the provider's own entry. An agent affected by one
 // authenticates with a different variable than the provider names.
+//
+// The auth_token binding here is INHERITED, which is the only shape where
+// [workspace.env] is an override: with no provider entry for the key, the
+// workspace entry survives the merge. TestCredentialOverridesIgnoresWorkspace-
+// EnvForDeclaredBinding pins the other half.
 func TestCredentialOverridesFindsAgentScopedLayers(t *testing.T) {
 	bindings := []credentialBinding{
 		declaredCredential("api_key", "ANTHROPIC_API_KEY", "ACME_KEY"),
-		declaredCredential("auth_token", "ANTHROPIC_AUTH_TOKEN", "ACME_KEY"),
+		inheritedCredential("auth_token", "ANTHROPIC_AUTH_TOKEN"),
 	}
 	cfg := &config.City{
 		Workspace: config.Workspace{
@@ -232,6 +238,54 @@ func TestCredentialOverridesFindsAgentScopedLayers(t *testing.T) {
 		if strings.Contains(o.Detail, "other-provider") {
 			t.Errorf("reported an override for an agent on a different provider: %+v", o)
 		}
+	}
+}
+
+// TestCredentialOverridesIgnoresWorkspaceEnvForDeclaredBinding is the guard
+// for the inversion this command must never ship: reporting a layer that
+// LOSES the merge as one that wins.
+//
+// [workspace.env] merges BEFORE the provider (template_resolve.go:469), so
+// when the provider declares the credential key itself the provider's entry
+// overwrites the workspace one and the workspace entry changes nothing.
+// Reporting it would tell the operator the variable this command just resolved
+// is "NOT the one in use" and send them to rotate a dead entry — the precise
+// failure the command exists to prevent.
+func TestCredentialOverridesIgnoresWorkspaceEnvForDeclaredBinding(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{
+			Provider: "zai",
+			Env:      map[string]string{"ANTHROPIC_API_KEY": "${WS_KEY}"},
+		},
+		Agents: []config.Agent{{Name: "plain", Provider: "zai"}},
+	}
+	bindings := []credentialBinding{declaredCredential("api_key", "ANTHROPIC_API_KEY", "ACME_KEY")}
+
+	for _, o := range credentialOverrides(cfg, "zai", bindings) {
+		if o.Layer == "workspace.env" {
+			t.Errorf("reported [workspace.env] as overriding a credential the provider DECLARES (%+v). "+
+				"The provider layer merges after workspace and wins, so the workspace entry is dead; "+
+				"naming it points the operator at a variable whose value never reaches the harness.", o)
+		}
+	}
+}
+
+// TestCredentialOverridesIgnoresWorkspaceEnvWithNoAgentOnTheProvider: the
+// section names the agents for which the resolved credential is not the one in
+// use. With no agent on this provider there are none, and a bare
+// "[workspace.env]" row implies a divergence that no session can experience.
+func TestCredentialOverridesIgnoresWorkspaceEnvWithNoAgentOnTheProvider(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{
+			Provider: "claude",
+			Env:      map[string]string{"ANTHROPIC_API_KEY": "${WS_KEY}"},
+		},
+		Agents: []config.Agent{{Name: "elsewhere", Provider: "claude"}},
+	}
+	bindings := []credentialBinding{inheritedCredential("api_key", "ANTHROPIC_API_KEY")}
+
+	if got := credentialOverrides(cfg, "zai", bindings); len(got) != 0 {
+		t.Errorf("credentialOverrides = %+v; want none — no agent resolves to \"zai\", so no session reads this provider's credential at all", got)
 	}
 }
 

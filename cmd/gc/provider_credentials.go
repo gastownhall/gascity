@@ -124,15 +124,24 @@ func resolveCredentialBinding(resolved *config.ResolvedProvider, role, envKey st
 	}
 }
 
-// credentialOverride records a config layer that sets one of a provider's
-// credential env keys AFTER the provider layer, so the variable the running
-// agent actually reads is not the one the provider names.
+// credentialOverride records a config layer whose entry for a credential env
+// key WINS over the provider's, so the variable the running agent actually
+// reads is not the one the provider names.
 //
 // Session start merges env as passthrough < workspace < provider < agent
-// (template_resolve.go), then injects the selected [upstreams.<name>] serving
-// env LAST, so any of these wins over the provider entry this command
-// resolves. Reporting them is not a nicety: a rotation aimed at the provider's
-// variable would leave such an agent authenticating with the old credential.
+// (template_resolve.go:469), then injects the selected [upstreams.<name>]
+// serving env LAST. Only the layers AFTER the provider can override it:
+// agent.env and upstreams. Reporting them is not a nicety — a rotation aimed
+// at the provider's variable would leave such an agent authenticating with the
+// old credential.
+//
+// [workspace.env] sits BEFORE the provider, so it is not an override of a
+// credential the provider declares — the provider's entry wins and the
+// workspace entry is dead. It matters only for an INHERITED binding, where the
+// provider declares nothing for the key: there the workspace entry is what
+// lands in the session env, in place of the value the supervisor would have
+// passed through. Reporting it in the declared case would name the wrong
+// variable to change, which is the failure this command exists to prevent.
 type credentialOverride struct {
 	// Layer names the config layer: "upstreams", "workspace.env" or "agent.env".
 	Layer string
@@ -154,9 +163,16 @@ func credentialOverrides(cfg *config.City, providerName string, bindings []crede
 		return nil
 	}
 	keys := make(map[string]bool, len(bindings))
+	// Keys the provider does NOT declare, so an earlier layer's entry survives
+	// the merge instead of being overwritten by the provider's.
+	inherited := make(map[string]bool, len(bindings))
 	for _, b := range bindings {
-		if b.EnvKey != "" {
-			keys[b.EnvKey] = true
+		if b.EnvKey == "" {
+			continue
+		}
+		keys[b.EnvKey] = true
+		if b.Kind == credentialInherited {
+			inherited[b.EnvKey] = true
 		}
 	}
 	if len(keys) == 0 {
@@ -164,9 +180,14 @@ func credentialOverrides(cfg *config.City, providerName string, bindings []crede
 	}
 
 	var out []credentialOverride
-	for key := range keys {
-		if _, ok := cfg.Workspace.Env[key]; ok {
-			out = append(out, credentialOverride{Layer: "workspace.env", Detail: "[workspace.env]", EnvKey: key})
+	// Scoped to the agents on this provider: [workspace.env] applies to every
+	// session, but it can only displace THIS provider's credential for an
+	// agent that uses it, and with no such agent there is nothing to report.
+	if anyAgentUsesProvider(cfg, providerName) {
+		for key := range inherited {
+			if _, ok := cfg.Workspace.Env[key]; ok {
+				out = append(out, credentialOverride{Layer: "workspace.env", Detail: "[workspace.env]", EnvKey: key})
+			}
 		}
 	}
 
@@ -244,6 +265,17 @@ func upstreamSetsEnvKey(spec config.UpstreamSpec, key string, bindings []credent
 			continue
 		}
 		if r.EnvName == key {
+			return true
+		}
+	}
+	return false
+}
+
+// anyAgentUsesProvider reports whether any configured agent resolves to
+// providerName.
+func anyAgentUsesProvider(cfg *config.City, providerName string) bool {
+	for _, agent := range cfg.Agents {
+		if agentUsesProvider(cfg, agent, providerName) {
 			return true
 		}
 	}
