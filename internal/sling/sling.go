@@ -210,8 +210,9 @@ type SlingResult struct {
 	ContainerType string // "convoy", "epic", etc. (batch only)
 	Routed        int
 	Failed        int
-	Skipped       int // total skipped (idempotent + non-open)
+	Skipped       int // total skipped (idempotent + terminal + non-open)
 	IdempotentCt  int // how many were skipped due to idempotency
+	TerminalCt    int // how many were skipped because a fresh read found them already closed/tombstoned
 	Total         int
 	NudgeAgent    *config.Agent // non-nil if caller should nudge
 
@@ -1657,7 +1658,12 @@ func PromoteWorkflowLaunchBead(store beads.Store, beadID string) error {
 // BeadCheckResult holds the result of pre-flight bead state checks.
 type BeadCheckResult struct {
 	Idempotent bool
-	Warnings   []string
+	// AlreadyTerminal is true when the fresh read found the bead already
+	// closed/tombstoned. Distinct from Idempotent (already routed to this
+	// same target): a terminal bead may never have been routed at all, but
+	// dispatching it is still wrong, so callers must skip on this signal too.
+	AlreadyTerminal bool
+	Warnings        []string
 }
 
 // BeadCheckOptions configures pre-flight bead state checks for a route.

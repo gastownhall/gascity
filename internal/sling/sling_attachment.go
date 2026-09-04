@@ -465,6 +465,16 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 		return BeadCheckResult{}
 	}
 
+	// A fresh read may find the bead already closed/tombstoned even though it
+	// was "open" at the batch's initial listing snapshot (#5927): another
+	// actor can close it during the window between that snapshot and this
+	// child's turn in the dispatch loop. None of the routing/idempotency
+	// checks below are meaningful for a bead that's already terminal, so
+	// short-circuit before them.
+	if convoycore.IsTerminalStatus(b.Status) {
+		return BeadCheckResult{AlreadyTerminal: true}
+	}
+
 	if IsCustomSlingQuery(a) {
 		return BeadCheckResult{Warnings: routedStateWarnings(b, beadID)}
 	}

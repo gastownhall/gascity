@@ -721,6 +721,66 @@ func TestCheckBeadStatePoolLabelWithoutConvoyIsNotIdempotent(t *testing.T) {
 	}
 }
 
+// TestCheckBeadStateClosedIsTerminalNotIdempotent guards the TOCTOU fix for
+// #5927: a fresh read that finds the bead already closed must short-circuit
+// with AlreadyTerminal=true before any of the assignee/routing checks run,
+// even when the bead's metadata would otherwise look idempotent (routed to
+// this exact target). Terminal wins first.
+func TestCheckBeadStateClosedIsTerminalNotIdempotent(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:    "already done",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "mayor"},
+		Assignee: "mayor",
+	})
+	if err != nil {
+		t.Fatalf("store.Create(): %v", err)
+	}
+	if err := store.Close(bead.ID); err != nil {
+		t.Fatalf("store.Close(): %v", err)
+	}
+
+	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor"}, SlingDeps{Store: store})
+
+	if !result.AlreadyTerminal {
+		t.Fatalf("expected AlreadyTerminal=true for closed bead, got %+v", result)
+	}
+	if result.Idempotent {
+		t.Fatalf("expected Idempotent=false when terminal short-circuits, got %+v", result)
+	}
+	if len(result.Warnings) != 0 {
+		t.Fatalf("expected no warnings when terminal short-circuits, got %v", result.Warnings)
+	}
+}
+
+// TestCheckBeadStateTombstoneIsTerminal covers the other terminal status
+// recognized by convoycore.IsTerminalStatus.
+func TestCheckBeadStateTombstoneIsTerminal(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title: "tombstoned",
+		Type:  "task",
+	})
+	if err != nil {
+		t.Fatalf("store.Create(): %v", err)
+	}
+	tombstone := "tombstone"
+	if err := store.Update(bead.ID, beads.UpdateOpts{Status: &tombstone}); err != nil {
+		t.Fatalf("store.Update(): %v", err)
+	}
+
+	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor"}, SlingDeps{Store: store})
+
+	if !result.AlreadyTerminal {
+		t.Fatalf("expected AlreadyTerminal=true for tombstoned bead, got %+v", result)
+	}
+	if result.Idempotent {
+		t.Fatalf("expected Idempotent=false when terminal short-circuits, got %+v", result)
+	}
+}
+
 func TestBeadPrefixSling(t *testing.T) {
 	tests := []struct {
 		id   string
@@ -3939,6 +3999,99 @@ func TestDoSlingBatchSkipsClosedChildren(t *testing.T) {
 	}
 	if result.Skipped != 1 {
 		t.Errorf("Skipped = %d, want 1 (closed child)", result.Skipped)
+	}
+}
+
+// raceCloseOnGetStore simulates the TOCTOU race from #5927 without real
+// concurrency: it embeds a real store, and the first time raceID is read via
+// Get it closes that bead first, then returns the now-closed bead. This
+// stands in for a concurrent actor closing the bead between the batch
+// dispatch loop's initial listing snapshot and this child's turn in the
+// loop -- the same "flip status on a later read" style used by
+// internal/dispatch/retry_test.go's stateful fake stores (e.g. failGetStore)
+// to simulate races without goroutines.
+type raceCloseOnGetStore struct {
+	beads.Store
+	raceID string
+	raced  bool
+}
+
+func (s *raceCloseOnGetStore) Get(id string) (beads.Bead, error) {
+	if id == s.raceID && !s.raced {
+		s.raced = true
+		if err := s.Close(id); err != nil {
+			return beads.Bead{}, err
+		}
+	}
+	return s.Store.Get(id)
+}
+
+// TestDoSlingBatchRacesCloseAgainstDispatch is the regression test for
+// #5927: the batch dispatch loop lists open children once, then does real
+// work (formula compilation, molecule checks, etc.) for each prior sibling
+// before a given child's turn. If that child transitions to closed during
+// the window, the pre-fix code never re-checked status before dispatching --
+// CheckBeadStateWithOptions's fresh q.Get(beadID) read the up-to-date status
+// but nothing looked at it. This races a close against the second child's
+// dispatch and asserts it is skipped (via the new AlreadyTerminal signal),
+// not dispatched or reported as a failure.
+func TestDoSlingBatchRacesCloseAgainstDispatch(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	base := deps.Store
+
+	convoy, err := base.Create(beads.Bead{Title: "convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := base.Create(beads.Bead{Title: "first", Type: "task", ParentID: convoy.ID, Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raced, err := base.Create(beads.Bead{Title: "raced", Type: "task", ParentID: convoy.ID, Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	querier := &raceCloseOnGetStore{Store: base, raceID: raced.ID}
+
+	result, err := DoSlingBatch(SlingOpts{
+		Target: a, BeadOrFormula: convoy.ID,
+	}, deps, querier)
+	if err != nil {
+		t.Fatalf("DoSlingBatch: %v", err)
+	}
+
+	if result.Routed != 1 {
+		t.Errorf("Routed = %d, want 1 (only %s, the non-raced child)", result.Routed, first.ID)
+	}
+	if result.Failed != 0 {
+		t.Errorf("Failed = %d, want 0 -- a raced close is a skip, not a failure", result.Failed)
+	}
+	if result.TerminalCt != 1 {
+		t.Errorf("TerminalCt = %d, want 1 (raced child skipped as already-terminal)", result.TerminalCt)
+	}
+
+	for _, cmd := range runner.calls {
+		if strings.Contains(cmd, raced.ID) {
+			t.Fatalf("dispatched raced child %s after it closed mid-loop: calls=%v", raced.ID, runner.calls)
+		}
+	}
+
+	var sawRacedChild bool
+	for _, c := range result.Children {
+		if c.BeadID != raced.ID {
+			continue
+		}
+		sawRacedChild = true
+		if !c.Skipped || c.Routed || c.Failed {
+			t.Errorf("raced child result = %+v, want Skipped=true and Routed=false, Failed=false", c)
+		}
+	}
+	if !sawRacedChild {
+		t.Fatalf("raced child %s missing from batch result children: %+v", raced.ID, result.Children)
 	}
 }
 

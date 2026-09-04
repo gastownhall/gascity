@@ -1679,6 +1679,7 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 	routed := 0
 	failed := 0
 	idempotent := 0
+	terminalSkipped := 0
 	// childErrors preserves typed child errors so errors.As at the top-level
 	// (cmdSling) can recover a *sourceworkflow.ConflictError emitted by any
 	// child and map it to exit code 3 + the cleanup hint. Stringifying into
@@ -1695,6 +1696,18 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 				childResult.Skipped = true
 				batchResult.Children = append(batchResult.Children, childResult)
 				idempotent++
+				continue
+			}
+			// TOCTOU guard (#5927): the batch's initial listing snapshot saw
+			// this child as "open", but the fresh read CheckBeadStateWithOptions
+			// just did may find it already closed/tombstoned -- another actor
+			// closed it during this loop's real work for prior siblings. Skip
+			// it like an idempotent hit, but count it separately so downstream
+			// reporting doesn't misattribute the reason.
+			if check.AlreadyTerminal {
+				childResult.Skipped = true
+				batchResult.Children = append(batchResult.Children, childResult)
+				terminalSkipped++
 				continue
 			}
 			batchResult.BeadWarnings = append(batchResult.BeadWarnings, check.Warnings...)
@@ -1800,8 +1813,9 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 
 	batchResult.Routed = routed
 	batchResult.Failed = failed
-	batchResult.Skipped = idempotent + len(skipped)
+	batchResult.Skipped = idempotent + terminalSkipped + len(skipped)
 	batchResult.IdempotentCt = idempotent
+	batchResult.TerminalCt = terminalSkipped
 
 	if opts.Nudge && routed > 0 {
 		batchResult.NudgeAgent = &a
