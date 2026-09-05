@@ -27,7 +27,7 @@ var bdExecAllowedDirs = []string{
 	// work ledger — a box-side capability probe, not a gc-side bd subprocess.
 	filepath.Join("internal", "runtime", "runtimecapability") + string(filepath.Separator),
 	filepath.Join("test", "integration") + string(filepath.Separator),
-	// dashboard BFF runs read-only `bd doctor` health probes against
+	// dashboard BFF runs read-only `bd ping` connectivity probes against
 	// arbitrary per-rig .beads stores (supervisor-reported paths). This is
 	// the same direct-bd usage the retired cmd/gc/dashboard server had.
 	filepath.Join("internal", "api", "dashboardbff") + string(filepath.Separator),
