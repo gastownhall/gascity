@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // The three Health-view samplers (supervisor-status, dolt-noms trend, per-rig
@@ -594,8 +596,9 @@ func readDoltServerPort(beadsPath string) int {
 }
 
 // readDoltMode returns the persisted Beads storage mode and whether it is safe
-// to trust a direct-mode port artifact. Missing markers are safe for legacy
-// direct stores; malformed or unreadable markers fail closed.
+// to trust a direct-mode port artifact. Only the explicit server/direct modes,
+// or absent markers for legacy direct stores, permit a TCP probe. Malformed,
+// unreadable, embedded, and unknown markers fail closed.
 func readDoltMode(beadsPath string) (string, bool) {
 	raw, err := os.ReadFile(filepath.Join(beadsPath, "metadata.json"))
 	metadataPresent := err == nil
@@ -605,7 +608,7 @@ func readDoltMode(beadsPath string) (string, bool) {
 		}
 		if json.Unmarshal(raw, &metadata) == nil {
 			if mode := strings.ToLower(strings.TrimSpace(metadata.DoltMode)); mode != "" {
-				return mode, true
+				return recognizedDoltMode(mode)
 			}
 		} else {
 			metadataPresent = true // malformed metadata is fail-closed
@@ -613,20 +616,19 @@ func readDoltMode(beadsPath string) (string, bool) {
 	} else if !os.IsNotExist(err) {
 		return "", false
 	}
-	// config.yaml is the canonical marker emitted by Gas City. Keep this tiny
-	// parser deliberately strict: an unreadable/malformed marker must not cause
-	// a stale TCP port to be treated as authoritative.
+	// config.yaml is the canonical marker emitted by Gas City. Parse it rather
+	// than scanning lines so malformed YAML without dolt.mode cannot be mistaken
+	// for an unmarked legacy direct store.
 	configRaw, configErr := os.ReadFile(filepath.Join(beadsPath, "config.yaml"))
 	if configErr == nil {
-		for _, line := range strings.Split(string(configRaw), "\n") {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(line, "dolt.mode:") {
-				mode := strings.ToLower(strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "dolt.mode:")), "\"'"))
-				if mode == "proxied-server" || mode == "server" {
-					return mode, true
-				}
-				return "", false
-			}
+		var config struct {
+			DoltMode string `yaml:"dolt.mode"`
+		}
+		if err := yaml.Unmarshal(configRaw, &config); err != nil {
+			return "", false
+		}
+		if mode := strings.ToLower(strings.TrimSpace(config.DoltMode)); mode != "" {
+			return recognizedDoltMode(mode)
 		}
 	} else if !os.IsNotExist(configErr) {
 		return "", false
@@ -637,6 +639,15 @@ func readDoltMode(beadsPath string) (string, bool) {
 		return "", false
 	}
 	return "", true
+}
+
+func recognizedDoltMode(mode string) (string, bool) {
+	switch mode {
+	case "proxied-server", "server", "direct":
+		return mode, true
+	default:
+		return "", false
+	}
 }
 
 func tcpProbe(port int) bool {
