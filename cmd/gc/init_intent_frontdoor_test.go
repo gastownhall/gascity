@@ -44,7 +44,11 @@ func TestInitSelectorProxiedExternal(t *testing.T) {
 func TestInitSelectorAcceptsExecBDProvider(t *testing.T) {
 	cfg := config.DefaultCity("fresh")
 	cfg.Beads.Provider = "exec:/opt/gc-beads-bd.sh"
-	if err := (hostedDoltInitOptions{Transport: "proxied", Target: "local"}).applySelectorToCityConfig(&cfg); err != nil {
+	opts := hostedDoltInitOptions{Transport: "proxied", Target: "local"}
+	if err := opts.validateRequest(cfg.Beads.Provider); err != nil {
+		t.Fatalf("exec gc-beads-bd provider rejected during preflight: %v", err)
+	}
+	if err := opts.applySelectorToCityConfig(&cfg); err != nil {
 		t.Fatalf("exec gc-beads-bd provider rejected: %v", err)
 	}
 	if cfg.Dolt.Mode != "proxied-server" {

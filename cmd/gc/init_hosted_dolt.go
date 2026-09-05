@@ -141,7 +141,7 @@ func (o hostedDoltInitOptions) applySelectorToCityConfig(cfg *config.City) error
 		return err
 	}
 	explicit := strings.TrimSpace(o.Transport) != "" || strings.TrimSpace(o.Target) != "" || o.enabled()
-	provider := strings.ToLower(strings.TrimSpace(cfg.Beads.Provider))
+	provider := strings.TrimSpace(cfg.Beads.Provider)
 	backend := strings.ToLower(strings.TrimSpace(cfg.Beads.Backend))
 	providerUsesBD := contract.ProviderUsesBDContract(provider)
 	if !explicit && (!providerUsesBD || backend != "" && backend != "dolt" && backend != "bd") {
