@@ -91,6 +91,12 @@ type reapReport struct {
 // is announced once rather than on every tick; a nil tracker reports every
 // skip. It never changes what is reaped or what the returned report contains —
 // see reapSkipTracker.
+//
+// rigStores is spelled that way on purpose: the obvious `rigBeadStores` is
+// residency-boundary vocabulary (a:rigBeadStores), and ast:vocabulary-alias
+// guards that NAME without type resolution, so an unrelated parameter carrying
+// it counts as a store-enumeration site. See the alias-rule block in
+// scripts/residency-boundary-patterns.txt.
 func reapClosedBeadWorktrees(
 	cityPath string,
 	cfg *config.City,

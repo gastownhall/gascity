@@ -26,18 +26,47 @@
 # NudgeQueueIDPrefix constant) are deliberately not alias-guarded: a constant
 # taken by value is a copy, not a second derivation.
 #
+# THAT RULE GUARDS A NAME, NOT A BINDING. It has no type resolution, so it
+# cannot tell an alias of a guarded accessor from an unrelated local or
+# parameter that merely SHARES its name: after a:rigBeadStores was added below,
+# every read of a variable spelled `rigBeadStores` counts as a store-enumeration
+# site, whatever it holds. Two parameters in cmd/gc were renamed
+# `rigBeadStores` -> `rigStores` (agent_home_worktree_cleanup.go,
+# bead_worktree_reaper.go) for exactly this reason — those renames are
+# compliance changes, not cosmetics. Firing on a same-named local is the
+# deliberate direction to err in for a boundary guard, because it fails LOUD
+# rather than open; the resolutions are to rename the local or to write
+# `// residency:allow <reason>` on the line.
+#
 # THE SAME ROWS ALSO FEED ast:uncounted-call-spelling, which watches the calls
 # these regexes cannot see. Every method or qualified row here needs a dot, a
-# name and an open parenthesis on ONE LINE. Two legal spellings break that up and
-# gofmt preserves both: `routes.` at the end of a line with `storeFor(c)` at the
-# start of the next, and a renamed import so the qualifier a row names never
-# appears (`sr.EachLeg(...)` for storeref.EachLeg). Neither is exotic — gofmt
-# writes the first itself on a long chain — so the Go half counts them under
-# their own name rather than letting a line break launder a call. The
-# consequence worth knowing: a method named EachLeg or ClassCandidates on some
-# unrelated receiver will be counted too, because the selector half of a
-# qualified row is guarded on its own. That is the deliberate direction to err
-# in, and `// residency:allow <reason>` is the answer for a real collision.
+# name and an open parenthesis ADJACENT ON ONE LINE. Three legal spellings break
+# that up and gofmt preserves all of them: `routes.` at the end of a line with
+# `storeFor(c)` at the start of the next; a renamed import so the qualifier a row
+# names never appears (`sr.EachLeg(...)` for storeref.EachLeg); and a
+# parenthesized receiver, which keeps every token on one line and still puts a
+# `)` between the qualifier and the dot (`(routes).storeFor(c)` for
+# routes.storeFor). None is exotic — gofmt writes the first itself on a long
+# chain — so the Go half counts them under their own name rather than letting a
+# line break or a pair of parentheses launder a call. The consequence worth
+# knowing: a method named EachLeg or ClassCandidates on some unrelated receiver
+# will be counted too, because the selector half of a qualified row is guarded
+# on its own. That is the deliberate direction to err in, and
+# `// residency:allow <reason>` is the answer for a real collision.
+#
+# THE RESIDUAL, NAMED HERE SO IT IS NOT REDISCOVERED: the Go half models that
+# ADJACENT requirement by LINE, not by contiguity. residencyGrepCouldNotCount
+# compares the receiver's end line against the selector's line, so a comment
+# between the receiver and the dot, or between the name and the open
+# parenthesis, keeps every token on one line and reads to the Go half as a call
+# grep could have counted — while the regex, which needs the dot, the name and
+# the `(` with nothing between them, cannot see it. So
+# `routes. /* c */ storeFor(c)` and `routes.storeFor /* c */ (c)` are uncounted
+# by BOTH halves; gofmt preserves both, and rewrites
+# `routes /* c */ .storeFor(c)` into the first of them. They escaped before this
+# rule existed too, so this is surface the rule has not closed yet, not surface
+# it opened. Closing the class means comparing byte offsets on both sides of the
+# selector, which needs the *ast.CallExpr that owns the `(`.
 #
 # (a) base-enumerator consumption. None of these ever contains a class binding,
 #     so every list built from one is binding-blind by construction.

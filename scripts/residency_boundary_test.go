@@ -1143,28 +1143,40 @@ func residencyIsLegStoreChain(sel *ast.SelectorExpr) bool {
 // residencyGrepCouldNotCount reports whether sel is a CALL to guarded
 // vocabulary written in a spelling the text census provably cannot match.
 //
-// Calls are normally grep's business and this rule stands down for them. Two
-// spellings take that away, and both survive gofmt exactly as written:
+// Calls are normally grep's business and this rule stands down for them. Three
+// spellings take that away, and every one of them survives gofmt exactly as
+// written:
 //
 //	routes.          storeref.          import sr ".../storeref"
 //		storeFor(c)      EachLeg(p, fn)     sr.EachLeg(p, fn)
 //
+//	(routes).storeFor(c)
+//
 // The first two split the chain at the dot, so no single line holds the dot,
 // the name and the parenthesis that every b/c row requires together. The third
 // keeps them on one line but spells the package half something the row does not
-// know — `storeref\.EachLeg\(` cannot match `sr.EachLeg(`. In all three the
-// call happens, the resolver is bypassed, and both halves stay silent.
+// know — `storeref\.EachLeg\(` cannot match `sr.EachLeg(`. The fourth writes
+// every token on one line under the name the row does know, and still cannot be
+// matched: `routes\.storeFor\(` needs the qualifier and the dot ADJACENT, and
+// the `)` of `(routes)` sits between them. In all four the call happens, the
+// resolver is bypassed, and both halves stay silent.
+//
+// The receiver is therefore classified WITHOUT being unparenthesised first.
+// This function models what grep sees, and grep does not unparen anything —
+// normalising here would credit the text census with a match it cannot make and
+// stand the rule down on the one spelling that needs it. residencyUnparen
+// belongs to the rules that match structure, not to this one.
 //
 // This is the line-split evasion the bead names, applied to the call families
-// rather than to `.Leg.Store`, plus the import-rename twin it shares a fix
-// with. It needs no type resolution: the question is not what the receiver IS,
-// it is whether the text census had the three tokens on one line under the
-// spelling it was given.
+// rather than to `.Leg.Store`, plus the import-rename and parenthesised-receiver
+// twins it shares a fix with. It needs no type resolution: the question is not
+// what the receiver IS, it is whether the text census had the three tokens on
+// one line under the spelling it was given.
 func residencyGrepCouldNotCount(fset *token.FileSet, sel *ast.SelectorExpr, names residencyGuardedNames) bool {
 	if sel.Sel == nil {
 		return false
 	}
-	x, qualifiedByIdent := residencyUnparen(sel.X).(*ast.Ident)
+	x, qualifiedByIdent := sel.X.(*ast.Ident)
 	switch {
 	case qualifiedByIdent && names.qualified[x.Name+"."+sel.Sel.Name]:
 		// Spelled the way the row expects — grep counts it if it is on one line.
@@ -1395,12 +1407,14 @@ func TestResidencyGuardedNameDerivation(t *testing.T) {
 // the rule for calls the grep census cannot see.
 //
 // Every grep row for a method or qualified call keys on a dot, a name and an
-// open parenthesis appearing TOGETHER ON ONE LINE. Two legal spellings break
-// that up, and gofmt preserves both: writing the dot at the end of one line and
-// the name at the start of the next, and renaming the import so the qualifier
-// in the row never appears. Neither is exotic — gofmt produces the first
-// itself on a long chain — and the alias rule deliberately stands down on a
-// call's Fun, so before this rule both walked past both halves of the guard.
+// open parenthesis appearing TOGETHER ON ONE LINE. Three legal spellings break
+// that up, and gofmt preserves all of them: writing the dot at the end of one
+// line and the name at the start of the next, renaming the import so the
+// qualifier in the row never appears, and parenthesising the receiver so the
+// qualifier and the dot stop being adjacent. None is exotic — gofmt produces
+// the first itself on a long chain — and the alias rule deliberately stands
+// down on a call's Fun, so before this rule all three walked past both halves
+// of the guard.
 func TestResidencyUncountedCallControls(t *testing.T) {
 	names := residencyDeriveGuardedNames(loadResidencyPatterns(t, residencyScriptsDir(t)))
 	count := func(t *testing.T, body string) int {
@@ -1426,6 +1440,10 @@ func TestResidencyUncountedCallControls(t *testing.T) {
 		{
 			"a renamed import spelling a qualified call",
 			"package main\n\nfunc use(p storeref.ResolvedPlan, fn func()) {\n\tsr.EachLeg(p, fn)\n}\n",
+		},
+		{
+			"a parenthesized receiver",
+			"package main\n\nfunc use(routes cliStorageRoutes, c coordclass.Class) {\n\t_, _ = (routes).storeFor(c)\n}\n",
 		},
 	}
 	for _, tc := range fires {

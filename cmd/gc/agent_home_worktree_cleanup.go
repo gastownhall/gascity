@@ -43,6 +43,12 @@ var newAgentWorktreeGitProbe = func(workDir string) agentWorktreeGitProbe {
 // Per-bead worktrees (directories whose names do not match a session home)
 // are skipped — the bead_worktree_reaper handles those.
 // Returns the number of worktrees cleaned.
+//
+// rigStores is spelled that way on purpose: the obvious `rigBeadStores` is
+// residency-boundary vocabulary (a:rigBeadStores), and ast:vocabulary-alias
+// guards that NAME without type resolution, so an unrelated parameter carrying
+// it counts as a store-enumeration site. See the alias-rule block in
+// scripts/residency-boundary-patterns.txt.
 func cleanupClosedBeadAgentHomeWorktrees(
 	cityPath string,
 	cfg *config.City,

@@ -128,18 +128,17 @@ scan_dirs=(cmd/gc internal/api internal/sling internal/dispatch)
 # residency_topology.go, internal/api/residency_topology.go, infra_class_migrate.go
 # and cmd_storage.go genuinely do have to enumerate — they are the constructors
 # that BUILD topology and the tools that migrate it — so the hits they turn out
-# to hold between them are pinned in the shrink-only baseline instead: seven,
-# spread over six rows (internal/api/residency_topology.go holds none, and now
-# has to keep holding none). That exempts the calls that exist rather than the
-# files around them, and an eighth is a reviewed baseline change like anywhere
-# else.
+# to hold between them are pinned in the shrink-only baseline instead: six, one
+# per row (internal/api/residency_topology.go holds none, and now has to keep
+# holding none). That exempts the calls that exist rather than the files around
+# them, and a seventh is a reviewed baseline change like anywhere else.
 #
-# Three of those seven are the guarded accessors' OWN `func` lines. The census
-# sets the enclosing function from a line and then tests that same line, so a
+# One of those six is the guarded accessor's OWN `func` line. The census sets
+# the enclosing function from a line and then tests that same line, so a
 # declaration of vocabulary counts as a mention of it. That is not a defect to
 # net out: the row still moves if the declaration is deleted or renamed, which
 # is the movement worth seeing. It does mean "hits" here is mentions, not call
-# sites — the four real call sites are the smaller number.
+# sites — the five real call sites are the smaller number.
 #
 # The alias evasion this leaves — taking the accessor as a VALUE rather than
 # calling it, which no value-position grep row can catch without also firing on
