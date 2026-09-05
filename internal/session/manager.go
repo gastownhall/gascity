@@ -203,7 +203,7 @@ type Info struct {
 
 	// --- trigger / brain-parent cluster (controller read surface) ---
 	//
-	// poolInFlightNewRequests stamps these onto the new-tier SessionRequest it
+	// poolNewDemandRequests stamps these onto the new-tier SessionRequest it
 	// emits for a pool-managed creating session. Raw mirrors of the gc.* keys.
 	// Additive, internal-only (absent from the HTTP wire).
 	TriggerBeadID       string // gc.trigger_bead_id (raw)
@@ -449,6 +449,13 @@ type Info struct {
 	// the raw string (!= "" && != "0"), which the int form cannot reproduce (it collapses
 	// missing/"0"/malformed all to 0); the mirror preserves that distinction for Step 6b.
 	WakeAttemptsMetadata string // wake_attempts (raw)
+	// WakeRefusedEventAt is the RAW wake_refused_event_at metadata — the
+	// idempotency marker emitSessionWakeRefused checks (trimmed != "") before
+	// firing session.wake_refused, so repeated reconciler ticks on the same
+	// unserved explicit wake request emit only once. Mirrors
+	// StrandedEventEmittedAt's guard pattern. Cleared by ClearWakeBlockersPatch
+	// alongside wake_attempts so a fresh explicit wake gets its own emission.
+	WakeRefusedEventAt string // wake_refused_event_at (raw)
 	// ProviderKind is the RAW provider_kind metadata, verbatim — the provider
 	// FAMILY marker (claude/codex/gemini) stamped from ResolvedProvider, distinct
 	// from Provider (the concrete provider name). The session-logs / mcp-integration

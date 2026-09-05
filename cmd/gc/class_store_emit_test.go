@@ -223,6 +223,65 @@ func closeThroughClassResolver(resolve func(*storageRoutes, beads.Store, *config
 	}
 }
 
+// AtomicConditionalCloserFor is a hard capability gate, not a rollout seam. The
+// emitting class-store wrapper carries CloseWithMetadataIfMatch structurally for
+// every engine — TestEmittingClassStoreKeepsEveryEngineCapability forces that,
+// because *NativeDoltStore has it — so a bare type assertion would advertise
+// atomic close even over a backing (the sqlite CLI engine) that cannot honor it.
+// The wrapper's AtomicConditionalCloserHandle keeps discovery honest: yes only
+// when the resolved backing truly provides atomic close, and the closer it hands
+// back is the emitting wrapper itself, so a DISCOVERED atomic close still appends
+// bead.closed rather than silently going dark on the binding.
+func TestEmittingClassStoreAtomicCloseHonorsBackingCapability(t *testing.T) {
+	t.Run("an atomic backing yields an emitting closer that appends bead.closed", func(t *testing.T) {
+		cityPath := t.TempDir()
+		leaf := beads.NewAtomicCloseMemStore()
+		wrapped := splitClassRoutes(leaf).withCLIEmission(cityPath).stores[coordclass.ClassGraph]
+
+		closer, ok := beads.AtomicConditionalCloserFor(wrapped)
+		if !ok {
+			t.Fatal("AtomicConditionalCloserFor(wrapper over an atomic backing) = unavailable, want the emitting wrapper's closer")
+		}
+
+		bead := seedClassBead(t, leaf, "atomic-close")
+		if got := beadEvents(readCityJournal(t, cityPath)); len(got) != 0 {
+			t.Fatalf("seeding the leaf emitted %d bead event(s); the fixture must be silent", len(got))
+		}
+
+		closed, err := closer.CloseWithMetadataIfMatch(bead.ID, bead.Revision, map[string]string{"state": "drained"})
+		if err != nil {
+			t.Fatalf("CloseWithMetadataIfMatch: %v", err)
+		}
+		if !strings.EqualFold(closed.Status, "closed") || closed.Metadata["state"] != "drained" {
+			t.Fatalf("returned bead = %#v, want a closed row carrying the merged metadata", closed)
+		}
+
+		got := beadEvents(readCityJournal(t, cityPath))
+		if len(got) != 1 {
+			t.Fatalf("a discovered atomic close appended %d bead event(s), want exactly 1: %s", len(got), eventSummary(got))
+		}
+		if got[0].Type != events.BeadClosed || got[0].Subject != bead.ID {
+			t.Errorf("event = %q on %q, want %q on %q", got[0].Type, got[0].Subject, events.BeadClosed, bead.ID)
+		}
+		snapshot, ok := beads.DecodeBeadEventPayload(got[0].Payload)
+		if !ok || !strings.EqualFold(snapshot.Status, "closed") {
+			t.Errorf("payload = %s, want a decodable closed snapshot", got[0].Payload)
+		}
+	})
+
+	t.Run("a non-atomic backing refuses discovery even though the wrapper carries the method", func(t *testing.T) {
+		cityPath := t.TempDir()
+		wrapped := splitClassRoutes(beads.NewMemStore()).withCLIEmission(cityPath).stores[coordclass.ClassGraph]
+
+		if _, ok := any(wrapped).(beads.AtomicConditionalCloser); !ok {
+			t.Fatal("the emitting wrapper must carry CloseWithMetadataIfMatch structurally; the engine-parity gate requires it")
+		}
+		if closer, ok := beads.AtomicConditionalCloserFor(wrapped); ok || closer != nil {
+			t.Fatalf("AtomicConditionalCloserFor(wrapper over a non-atomic backing) = (%v, %v), want (nil, false): the seam is a hard capability gate, and a bare type assertion would answer yes here", closer, ok)
+		}
+	})
+}
+
 // GATE 2 (the control). The CONTROLLER's routes — the ones openStorageRoutes
 // builds, which never carry an emit target — stay silent under a
 // reconcile-shaped absorption, even when the resolver is handed a live
@@ -536,6 +595,98 @@ func TestEmittingClassStoreKeepsEveryEngineCapability(t *testing.T) {
 	}
 }
 
+// TestEmittingClassStoreCarriesAnEdgePayloadAndEmitsForIt covers the wrapper's
+// edge-payload write, which TestEmittingClassStoreKeepsEveryEngineCapability
+// forces to EXIST but says nothing about the behavior of.
+//
+// Two mutants survive that reflective guard, and both are what this pins. The
+// first is falling back to the inner DepAdd when the inner store cannot carry a
+// payload: on a store keeping the payload in a sidecar, a plain DepAdd over an
+// edge that had one CLEARS it, so the fallback is destructive rather than
+// degraded. The second is dropping the emitUpdated, which would leave a
+// subscriber holding a stale view of exactly the edges formula gating reads.
+func TestEmittingClassStoreCarriesAnEdgePayloadAndEmitsForIt(t *testing.T) {
+	cityPath := t.TempDir()
+	leaf, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("gcg"))
+	if err != nil {
+		t.Fatalf("opening the leaf store: %v", err)
+	}
+	t.Cleanup(func() { _ = closeBeadStoreHandle(leaf) })
+
+	from := seedClassBead(t, leaf, "gated")
+	to := seedClassBead(t, leaf, "gates-it")
+
+	store := splitClassRoutes(leaf).withCLIEmission(cityPath).stores[coordclass.ClassGraph]
+	writer, ok := store.(beads.DepMetadataWriter)
+	if !ok {
+		t.Fatalf("the emitting class store %T cannot carry an edge payload, so the migration would refuse it", store)
+	}
+
+	const payload = `{"gate":"waits_for"}`
+	if err := writer.DepAddWithMetadata(from.ID, to.ID, "blocks", payload); err != nil {
+		t.Fatalf("carrying an edge payload through the emitting store: %v", err)
+	}
+
+	reader, ok := store.(beads.DepMetadataReader)
+	if !ok {
+		t.Fatalf("the emitting class store %T cannot report an edge payload", store)
+	}
+	got, carried, err := reader.DepMetadata(from.ID, to.ID)
+	if err != nil {
+		t.Fatalf("reading the payload back: %v", err)
+	}
+	if !carried || got != payload {
+		t.Fatalf("the edge carries (%q, %v), want (%q, true): the wrapper wrote the edge without its payload", got, carried, payload)
+	}
+
+	appended := beadEvents(readCityJournal(t, cityPath))
+	if len(appended) != 1 {
+		t.Fatalf("the payload-carrying edge write appended %d bead.* events, want exactly 1: %+v", len(appended), appended)
+	}
+	if appended[0].Subject != from.ID {
+		t.Errorf("event subject = %q, want the issue side %q whose DepList changed", appended[0].Subject, from.ID)
+	}
+}
+
+// TestEmittingClassStoreRefusesAnEdgePayloadItsBackingCannotHold is the other
+// half: a leaf with no writer must produce an ERROR, never a silent plain
+// DepAdd. A wrapper that fell back would report success on a write that dropped
+// the gate, which is the one shape the whole edge-payload carry exists to stop.
+func TestEmittingClassStoreRefusesAnEdgePayloadItsBackingCannotHold(t *testing.T) {
+	cityPath := t.TempDir()
+	leaf := beads.NewMemStore()
+	if _, ok := beads.Store(leaf).(beads.DepMetadataWriter); ok {
+		t.Fatal("MemStore now carries edge payloads, so it is no longer the backing this test needs")
+	}
+	from := seedClassBead(t, leaf, "gated")
+	to := seedClassBead(t, leaf, "gates-it")
+
+	store := splitClassRoutes(leaf).withCLIEmission(cityPath).stores[coordclass.ClassGraph]
+	writer, ok := store.(beads.DepMetadataWriter)
+	if !ok {
+		t.Fatalf("the emitting class store %T does not expose the edge-payload write at all", store)
+	}
+
+	err := writer.DepAddWithMetadata(from.ID, to.ID, "blocks", `{"gate":"waits_for"}`)
+	if err == nil {
+		t.Fatal("a backing that cannot hold an edge payload accepted one, which means the wrapper fell back to a plain DepAdd and dropped it")
+	}
+	if !strings.Contains(err.Error(), from.ID) || !strings.Contains(err.Error(), "payload") {
+		t.Errorf("the refusal names neither the edge nor what could not be held: %v", err)
+	}
+
+	// The refusal must also be complete: a fallback that errored AFTER writing
+	// the edge would leave the binding holding a payloadless edge it reports as
+	// having refused.
+	deps, err := leaf.DepList(from.ID, "down")
+	if err != nil {
+		t.Fatalf("DepList: %v", err)
+	}
+	if len(deps) != 0 {
+		t.Fatalf("the refused edge was written anyway: %+v", deps)
+	}
+}
+
 // Emission is best-effort by contract: the mutation has already committed when
 // the event is written, so a journal that cannot be opened must not turn a
 // landed close into a failed command.
@@ -591,6 +742,48 @@ func TestClassStoreEmissionHydratesDependencyEdges(t *testing.T) {
 	}
 	if len(snapshot.Dependencies) != 1 || snapshot.Dependencies[0].DependsOnID != blocker.ID {
 		t.Errorf("payload dependencies = %+v, want the edge just added to %s", snapshot.Dependencies, blocker.ID)
+	}
+}
+
+func TestClassStoreEmissionPreservesStatusBasedDeferralUntilClose(t *testing.T) {
+	cityPath := t.TempDir()
+	leaf := beads.NewMemStore()
+	store := resolveGraphStore(splitClassRoutes(leaf).withCLIEmission(cityPath), beads.NewMemStore(), nil, cityPath, nil)
+
+	deferred, ok := beads.DecodeBeadEventPayload(
+		json.RawMessage(`{"id":"source-deferred","title":"deferred","status":"deferred","issue_type":"task"}`),
+	)
+	if !ok {
+		t.Fatal("deferred fixture did not decode")
+	}
+	created, err := leaf.Create(deferred)
+	if err != nil {
+		t.Fatalf("seeding deferred bead: %v", err)
+	}
+
+	if err := store.SetMetadata(created.ID, "gc.note", "still deferred"); err != nil {
+		t.Fatalf("metadata write: %v", err)
+	}
+	if err := store.Close(created.ID); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	got := beadEvents(readCityJournal(t, cityPath))
+	if len(got) != 2 {
+		t.Fatalf("got %s, want one update and one close", eventSummary(got))
+	}
+	var updateWire struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(got[0].Payload, &updateWire); err != nil {
+		t.Fatalf("decode update payload: %v", err)
+	}
+	if got[0].Type != events.BeadUpdated || updateWire.Status != "deferred" {
+		t.Errorf("first event = %s status=%q, want bead.updated status=deferred", got[0].Type, updateWire.Status)
+	}
+	closed, ok := beads.DecodeBeadEventPayload(got[1].Payload)
+	if !ok || got[1].Type != events.BeadClosed || closed.Status != "closed" {
+		t.Errorf("second event = %s payload=%s, want bead.closed with closed snapshot", got[1].Type, got[1].Payload)
 	}
 }
 
@@ -682,6 +875,73 @@ func TestClassStoreEmissionCoversConditionalRelease(t *testing.T) {
 	}
 	if got := beadEvents(readCityJournal(t, cityPath)); len(got) != 1 {
 		t.Fatalf("a release that did not fire appended a row: %s", eventSummary(got))
+	}
+}
+
+// A landed atomic fenced close — merge metadata and close in one revision-guarded
+// transaction — is a terminal transition a fold has to see. The capability is
+// discovered through AtomicConditionalCloserFor, and it must resolve to the
+// EMITTING wrapper: a bare backing would close silently and leave the run view
+// rendering the step running forever, the exact silence this seam ends.
+func TestClassStoreEmissionCoversAtomicMetadataClose(t *testing.T) {
+	cityPath := t.TempDir()
+	leaf := beads.NewAtomicCloseMemStore()
+	store := resolveGraphStore(splitClassRoutes(leaf).withCLIEmission(cityPath), beads.NewMemStore(), nil, cityPath, nil)
+
+	bead := seedClassBead(t, leaf, "finalize")
+	seeded, err := leaf.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("reading the seeded revision: %v", err)
+	}
+
+	closer, ok := beads.AtomicConditionalCloserFor(store)
+	if !ok {
+		t.Fatalf("AtomicConditionalCloserFor did not discover the capability on the emitting wrapper (%T)", store)
+	}
+	closed, err := closer.CloseWithMetadataIfMatch(bead.ID, seeded.Revision, map[string]string{"gc.outcome": "pass"})
+	if err != nil {
+		t.Fatalf("atomic fenced close: %v", err)
+	}
+	if !beadStatusIsClosed(closed.Status) {
+		t.Errorf("returned bead status = %q, want closed", closed.Status)
+	}
+	if closed.Metadata["gc.outcome"] != "pass" {
+		t.Errorf("returned bead metadata = %v, want the merged gc.outcome=pass", closed.Metadata)
+	}
+
+	got := beadEvents(readCityJournal(t, cityPath))
+	if len(got) != 1 || got[0].Type != events.BeadClosed || got[0].Subject != bead.ID {
+		t.Fatalf("got %s, want one bead.closed for %s", eventSummary(got), bead.ID)
+	}
+	// The committed row IS the payload, emitted without a re-read, so it carries
+	// the merged metadata and the closed status the transaction established.
+	snapshot, ok := beads.DecodeBeadEventPayload(got[0].Payload)
+	if !ok || snapshot.Metadata["gc.outcome"] != "pass" || !beadStatusIsClosed(snapshot.Status) {
+		t.Errorf("bead.closed payload = %s, want the committed closed row with gc.outcome=pass", got[0].Payload)
+	}
+
+	// A fence that no longer matches commits nothing, and must say nothing: the
+	// first close bumped the revision, so replaying the stale one is refused.
+	if _, err := closer.CloseWithMetadataIfMatch(bead.ID, seeded.Revision, map[string]string{"gc.outcome": "fail"}); err == nil {
+		t.Fatal("a stale-revision fenced close reported success")
+	}
+	if got := beadEvents(readCityJournal(t, cityPath)); len(got) != 1 {
+		t.Fatalf("a fenced close that did not fire appended a row: %s", eventSummary(got))
+	}
+}
+
+// Atomic close is a hard capability gate, not a rollout seam. The wrapper is
+// forced to carry CloseWithMetadataIfMatch structurally for every engine
+// (TestEmittingClassStoreKeepsEveryEngineCapability), so a bare type assertion
+// would advertise the capability even over a backing that cannot honor the
+// all-or-nothing close. AtomicConditionalCloserFor must consult the resolved
+// backing and answer no when it lacks the atomic terminal write.
+func TestEmittingClassStoreRefusesAtomicCloseOverANonAtomicBacking(t *testing.T) {
+	cityPath := t.TempDir()
+	// Plain MemStore deliberately does not expose the atomic terminal close.
+	store := resolveGraphStore(splitClassRoutes(beads.NewMemStore()).withCLIEmission(cityPath), beads.NewMemStore(), nil, cityPath, nil)
+	if _, ok := beads.AtomicConditionalCloserFor(store); ok {
+		t.Fatal("the emitting wrapper advertised atomic close over a backing that cannot honor it")
 	}
 }
 

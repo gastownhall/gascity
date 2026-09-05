@@ -3,6 +3,7 @@ package beads
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -69,6 +70,7 @@ func TestIsReadyExcludedType(t *testing.T) {
 		{"agent", true},
 		{"role", true},
 		{"rig", true},
+		{"startup-health-episode", true}, // bookkeeping record; never actionable Ready work (ga-o04bfr.1.1)
 		{"task", false},
 		{"wisp", false},
 		{"", false},
@@ -419,16 +421,31 @@ func TestBeadRevisionWireInvisible(t *testing.T) {
 	}
 }
 
-// TestBdIssueDecodesRevision proves the store-internal revision is carried by the
-// bd decode envelope (bdIssue) and stamped onto Bead by toBead — the population
-// path that survives Bead's json:"-" wire tag. Pre-#4682 bd omits the key → 0.
+// TestBdIssueDecodesRevision proves the store-internal revision is carried
+// losslessly by the bd decode envelope (bdIssue) and stamped onto Bead by
+// toBead — the population path that survives Bead's json:"-" wire tag.
 func TestBdIssueDecodesRevision(t *testing.T) {
-	var present bdIssue
-	if err := json.Unmarshal([]byte(`{"id":"gc-1","revision":7}`), &present); err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name string
+		raw  string
+		want int64
+	}{
+		{name: "decimal string beyond JS safe integer", raw: `"9007199254740993"`, want: 9007199254740993},
+		{name: "maximum signed decimal string", raw: `"9223372036854775807"`, want: math.MaxInt64},
+		{name: "minimum signed decimal string", raw: `"-9223372036854775808"`, want: math.MinInt64},
+		{name: "legacy integer", raw: `7`, want: 7},
+		{name: "json null is the no-revision sentinel", raw: `null`, want: 0},
 	}
-	if got := present.toBead().Revision; got != 7 {
-		t.Fatalf("toBead().Revision (present) = %d, want 7", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var issue bdIssue
+			if err := json.Unmarshal([]byte(`{"id":"gc-1","revision":`+tt.raw+`}`), &issue); err != nil {
+				t.Fatalf("json.Unmarshal: %v", err)
+			}
+			if got := issue.toBead().Revision; got != tt.want {
+				t.Fatalf("toBead().Revision = %d, want %d", got, tt.want)
+			}
+		})
 	}
 
 	var absent bdIssue
@@ -437,5 +454,22 @@ func TestBdIssueDecodesRevision(t *testing.T) {
 	}
 	if got := absent.toBead().Revision; got != 0 {
 		t.Fatalf("toBead().Revision (absent) = %d, want 0", got)
+	}
+}
+
+func TestBdIssueRejectsInvalidRevision(t *testing.T) {
+	for _, raw := range []string{
+		`"not-a-revision"`,
+		`"1.5"`,
+		`1.5`,
+		`"9223372036854775808"`,
+		`"-9223372036854775809"`,
+	} {
+		t.Run(raw, func(t *testing.T) {
+			var issue bdIssue
+			if err := json.Unmarshal([]byte(`{"id":"gc-1","revision":`+raw+`}`), &issue); err == nil {
+				t.Fatalf("json.Unmarshal revision %s succeeded, want error", raw)
+			}
+		})
 	}
 }

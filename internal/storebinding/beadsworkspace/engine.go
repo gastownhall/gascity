@@ -16,13 +16,18 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/storebinding"
 )
 
 var _ storebinding.EngineOpener = (*workspaceProvider)(nil)
+
+var workspaceExecutable = os.Executable
 
 // workspaceEngine is what an opened workspace has to be for a binding to serve
 // from it: a bead store that reports the prefix it mints under and owns a
@@ -65,18 +70,40 @@ func (p *workspaceProvider) OpenEngine(spec storebinding.BindingSpec, classes st
 		return nil, nil, err
 	}
 
-	// Opened with every ambient BEADS_-prefixed variable withheld, because the
-	// workspace's own configuration is this provider's whole premise. An
-	// inherited variable naming another database, another directory or a
-	// credential command would decide how the workspace is served, and the
-	// city that inherited it never chose that. Withholding the namespace
-	// rather than a key list is deliberate: the list of variables the linked
-	// library reads is the library's to grow.
-	store, err := beads.OpenNativeDoltStoreAtWithoutAmbientEnv(context.Background(), p.root)
+	store, err := p.openWorkspace(spec)
 	if err != nil {
 		return nil, nil, fmt.Errorf("opening the workspace of binding %q at %s through the linked beads library: %w", p.spec.Name, p.root, err)
 	}
 	return p.admit(store, prefix)
+}
+
+// openWorkspace withholds the ambient BEADS_ namespace from every open. The
+// exact remote credential-provider selector adds only a command that calls
+// back into this running gc binary; local workspaces and other auth forms stay
+// fully hermetic.
+func (p *workspaceProvider) openWorkspace(spec storebinding.BindingSpec) (workspaceEngine, error) {
+	if spec.Provider != ProviderID || strings.TrimSpace(spec.URL) == "" || spec.Auth != storebinding.AuthCredentialProvider {
+		return beads.OpenNativeDoltStoreAtWithoutAmbientEnv(context.Background(), p.root)
+	}
+	executable, err := workspaceExecutable()
+	if err != nil {
+		return nil, fmt.Errorf("resolving the running gc executable for the credential provider: %w", err)
+	}
+	if strings.TrimSpace(executable) == "" {
+		return nil, errors.New("resolving the running gc executable for the credential provider: empty path")
+	}
+	if !filepath.IsAbs(executable) {
+		executable, err = filepath.Abs(executable)
+		if err != nil {
+			return nil, fmt.Errorf("resolving the running gc executable to an absolute path: %w", err)
+		}
+	}
+	command := shellquote.Quote(executable) + " internal beads-credential"
+	reopen := func(ctx context.Context) (beads.NativeStorage, error) {
+		return beads.OpenNativeStorageAtWithoutAmbientEnvWithCredentialCommand(ctx, p.root, command)
+	}
+	return beads.OpenNativeDoltStoreAtWithoutAmbientEnvWithCredentialCommand(
+		context.Background(), p.root, command, beads.WithNativeReopen(reopen))
 }
 
 // admit hands back an opened workspace this binding may serve from, and closes

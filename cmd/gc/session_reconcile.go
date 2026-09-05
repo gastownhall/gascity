@@ -356,10 +356,11 @@ func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir
 // findAgentByTemplate looks up a config agent by template name. Exact
 // identity matches (canonical qualified name or V1 dir+name form, via
 // config.AgentMatchesIdentity) win over all fallbacks; when nothing matches
-// exactly, a legacy bound form ("dir/binding.name") resolves to the unbound
-// agent "dir/name" so sessions and work persisted before a bound→unbound
-// migration stay attributed. Callers that need strict exact-match lookup
-// (e.g. uniqueness validation) must not use this resolver.
+// exactly, migration fallbacks resolve legacy bound forms ("dir/binding.name")
+// to the current unbound agent "dir/name", and legacy unbound forms ("dir/name")
+// to the current imported binding agent "dir/binding.name". This keeps sessions
+// and work persisted across binding changes attributed. Callers that need strict
+// exact-match lookup (e.g. uniqueness validation) must not use this resolver.
 // Returns nil if not found.
 func findAgentByTemplate(cfg *config.City, template string) *config.Agent {
 	template = strings.TrimSpace(template)
@@ -376,7 +377,16 @@ func findAgentByTemplate(cfg *config.City, template string) *config.Agent {
 			return &cfg.Agents[i]
 		}
 	}
-	return nil
+	var legacyUnboundMatch *config.Agent
+	for i := range cfg.Agents {
+		if legacyUnboundTemplateMatchesBoundAgent(&cfg.Agents[i], template) {
+			if legacyUnboundMatch != nil {
+				return nil
+			}
+			legacyUnboundMatch = &cfg.Agents[i]
+		}
+	}
+	return legacyUnboundMatch
 }
 
 func legacyBoundTemplateMatchesUnboundAgent(agent *config.Agent, template string) bool {
@@ -394,10 +404,21 @@ func legacyBoundTemplateMatchesUnboundAgent(agent *config.Agent, template string
 	return strings.TrimSpace(unbound) == strings.TrimSpace(agent.Name)
 }
 
+func legacyUnboundTemplateMatchesBoundAgent(agent *config.Agent, template string) bool {
+	if agent == nil || strings.TrimSpace(agent.BindingName) == "" {
+		return false
+	}
+	dir, local := config.ParseQualifiedName(strings.TrimSpace(template))
+	if strings.TrimSpace(dir) != strings.TrimSpace(agent.Dir) {
+		return false
+	}
+	return strings.TrimSpace(local) == strings.TrimSpace(agent.Name)
+}
+
 // normalizeAgentTemplateIdentity maps a persisted template identity to the
 // matching agent's current canonical qualified name. It resolves through
-// findAgentByTemplate, so a legacy bound form ("dir/binding.name") left by a
-// bound→unbound migration normalizes to the unbound agent's canonical name.
+// findAgentByTemplate, so migration-era bound/unbound identity forms normalize
+// to the matching agent's current canonical name.
 // Identities that resolve to no configured agent pass through unchanged.
 func normalizeAgentTemplateIdentity(cfg *config.City, template string) string {
 	template = strings.TrimSpace(template)

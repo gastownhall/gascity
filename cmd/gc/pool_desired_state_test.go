@@ -1,12 +1,19 @@
 package main
 
 import (
+	"errors"
+	"io"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worktree"
 )
 
 func intPtr(n int) *int { return &n }
@@ -122,6 +129,14 @@ func poolSessionBeadWithState(id, state, pendingCreateClaim string) beads.Bead {
 			poolManagedMetadataKey: boolMetadata(true),
 		},
 	}
+}
+
+func protectedPoolSessionBeadAt(id string, createdAt time.Time) beads.Bead {
+	session := poolSessionBeadWithState(id, "awake", "")
+	session.CreatedAt = createdAt
+	session.Metadata["state_reason"] = "creation_complete"
+	session.Metadata["creation_complete_at"] = createdAt.UTC().Format(time.RFC3339)
+	return session
 }
 
 func poolTraceDecision(t *testing.T, trace *sessionReconcilerTraceCycle, site TraceSiteCode) SessionReconcilerTraceRecord {
@@ -837,6 +852,35 @@ func TestComputePoolDesiredStates_ScaleCheckMerge(t *testing.T) {
 	}
 }
 
+func TestComputePoolDesiredStatesCarriesWorktreeOwnerEvidence(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "rig", intPtr(1), 0)},
+	}
+	spec := &worktree.Spec{BeadID: "gc-test", Owner: "gc-sling"}
+	result := computePoolDesiredStates(
+		cfg,
+		nil,
+		nil,
+		map[string]int{"rig/claude": 1},
+		map[string]scaleCheckDemand{
+			"rig/claude": {
+				WorkBeadIDs:    []string{"gc-test"},
+				StoreRefs:      map[string]string{"gc-test": "rig:gascity"},
+				WorktreeSpecs:  map[string]*worktree.Spec{"gc-test": spec},
+				WorktreeErrors: map[string]string{"other": "ignored"},
+			},
+		},
+		nil,
+	)
+	if len(result) != 1 || len(result[0].Requests) != 1 {
+		t.Fatalf("result = %+v, want one new request", result)
+	}
+	request := result[0].Requests[0]
+	if request.WorktreeSpec != spec || request.WorktreeError != "" {
+		t.Fatalf("request owner evidence = spec %+v error %q, want exact spec and no error", request.WorktreeSpec, request.WorktreeError)
+	}
+}
+
 func TestComputePoolDesiredStates_ManualSessionDoesNotConsumeSingletonNewDemand(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{poolAgent("claude", "", intPtr(1), 0)},
@@ -1255,6 +1299,1121 @@ func TestComputePoolDesiredStates_InFlightNewSessionsDoNotCreateZeroDemand(t *te
 	counts := PoolDesiredCounts(result)
 	if counts["claude"] != 0 {
 		t.Fatalf("poolDesired[claude] = %d, want 0 when scale_check reports no new demand", counts["claude"])
+	}
+}
+
+func TestComputePoolDesiredStates_PostCreateProtectionRetainsFreshSessionsAboveScaleDemand(t *testing.T) {
+	now := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	sessions := []beads.Bead{
+		protectedPoolSessionBeadAt("sess-1", now.Add(-30*time.Second)),
+		protectedPoolSessionBeadAt("sess-2", now.Add(-20*time.Second)),
+	}
+
+	result := ComputePoolDesiredStatesAt(cfg, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 1}, now)
+
+	if len(result) != 1 || len(result[0].Requests) != 2 {
+		t.Fatalf("result = %#v, want both fresh sessions retained while scale_check reports one", result)
+	}
+	for i, want := range []string{"sess-1", "sess-2"} {
+		if got := result[0].Requests[i].SessionBeadID; got != want {
+			t.Fatalf("request[%d].SessionBeadID = %q, want %q", i, got, want)
+		}
+	}
+}
+
+func TestComputePoolDesiredStates_PostCreateProtectionRetainsFreshSessionsAtZeroScale(t *testing.T) {
+	now := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	sessions := []beads.Bead{
+		protectedPoolSessionBeadAt("sess-1", now.Add(-30*time.Second)),
+		protectedPoolSessionBeadAt("sess-2", now.Add(-20*time.Second)),
+	}
+
+	result := ComputePoolDesiredStatesAt(cfg, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 0}, now)
+
+	if len(result) != 1 || len(result[0].Requests) != 2 {
+		t.Fatalf("result = %#v, want both fresh sessions retained at zero scale", result)
+	}
+}
+
+func TestComputePoolDesiredStates_PostCreateProtectionDoesNotRequireScaleEntry(t *testing.T) {
+	now := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	tests := []struct {
+		name   string
+		counts map[string]int
+	}{
+		{name: "nil", counts: nil},
+		{name: "empty", counts: map[string]int{}},
+		{name: "missing template", counts: map[string]int{"other": 1}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fresh := protectedPoolSessionBeadAt("sess-fresh", now.Add(-30*time.Second))
+			result := ComputePoolDesiredStatesAt(
+				cfg,
+				nil,
+				sessionInfosFromBeads([]beads.Bead{fresh}),
+				tt.counts,
+				now,
+			)
+			if len(result) != 1 || len(result[0].Requests) != 1 ||
+				result[0].Requests[0].SessionBeadID != fresh.ID {
+				t.Fatalf("result = %#v, want fresh session retained without a scale entry", result)
+			}
+
+			pending := pendingPoolSessionBead("sess-pending")
+			pendingResult := ComputePoolDesiredStatesAt(
+				cfg,
+				nil,
+				sessionInfosFromBeads([]beads.Bead{pending}),
+				tt.counts,
+				now,
+			)
+			if got := PoolDesiredCounts(pendingResult)["claude"]; got != 0 {
+				t.Fatalf("pending poolDesired[claude] = %d, want 0 without authoritative scale demand", got)
+			}
+		})
+	}
+}
+
+func TestComputePoolDesiredStates_PostCreateProtectionUsesFreshRecomputeTime(t *testing.T) {
+	createTime := time.Date(2026, 7, 28, 20, 59, 0, 0, time.UTC)
+	completeTime := createTime.Add(30 * time.Second)
+	recomputeTime := completeTime.Add(15 * time.Second)
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	session := pendingPoolSessionBeadAt("sess-1", createTime)
+	initial := ComputePoolDesiredStatesAt(
+		cfg,
+		nil,
+		sessionInfosFromBeads([]beads.Bead{session}),
+		map[string]int{"claude": 1},
+		createTime,
+	)
+	if len(initial) != 1 || len(initial[0].Requests) != 1 {
+		t.Fatalf("initial result = %#v, want pending create to cover demand", initial)
+	}
+
+	session.Metadata["pending_create_claim"] = ""
+	session.Metadata["state"] = "awake"
+	session.Metadata["state_reason"] = "creation_complete"
+	session.Metadata["creation_complete_at"] = completeTime.Format(time.RFC3339)
+	recomputed := ComputePoolDesiredStatesAt(
+		cfg,
+		nil,
+		sessionInfosFromBeads([]beads.Bead{session}),
+		nil,
+		recomputeTime,
+	)
+	if len(recomputed) != 1 || len(recomputed[0].Requests) != 1 ||
+		recomputed[0].Requests[0].SessionBeadID != session.ID {
+		t.Fatalf("recomputed result = %#v, want completion at T2 retained by fresh T3 decision", recomputed)
+	}
+}
+
+func TestComputePoolDesiredStates_PostCreateProtectionExpires(t *testing.T) {
+	now := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	expired := protectedPoolSessionBeadAt("sess-expired", now.Add(-postCreateProtectionTimeout))
+
+	result := ComputePoolDesiredStatesAt(cfg, nil, sessionInfosFromBeads([]beads.Bead{expired}), map[string]int{"claude": 0}, now)
+
+	if got := PoolDesiredCounts(result)["claude"]; got != 0 {
+		t.Fatalf("poolDesired[claude] = %d, want 0 at the protection boundary", got)
+	}
+}
+
+func TestComputePoolDesiredStates_PostCreateProtectionCoexistsWithResume(t *testing.T) {
+	now := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(2), 0)},
+	}
+	resume := poolSessionBeadWithState("sess-resume", "awake", "")
+	fresh := protectedPoolSessionBeadAt("sess-fresh", now.Add(-30*time.Second))
+	work := []beads.Bead{
+		workBead("work-1", "claude", resume.ID, "in_progress", 5),
+	}
+
+	result := ComputePoolDesiredStatesAt(cfg, work, sessionInfosFromBeads([]beads.Bead{resume, fresh}), map[string]int{"claude": 0}, now)
+
+	if len(result) != 1 || len(result[0].Requests) != 2 {
+		t.Fatalf("result = %#v, want one resume plus one protected fresh session", result)
+	}
+	if got := result[0].Requests[0]; got.Tier != "resume" || got.SessionBeadID != resume.ID {
+		t.Fatalf("first request = %+v, want resume for %s", got, resume.ID)
+	}
+	if got := result[0].Requests[1]; got.Tier != "new" || got.SessionBeadID != fresh.ID {
+		t.Fatalf("second request = %+v, want protected new request for %s", got, fresh.ID)
+	}
+}
+
+func TestComputePoolDesiredStates_PostCreateProtectionBindsWakeKnownCapacity(t *testing.T) {
+	now := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	tests := []struct {
+		name           string
+		workCount      int
+		protectedCount int
+		scaleCount     int
+		wantCount      int
+		wantBound      int
+	}{
+		{name: "one wake known one protected", workCount: 1, protectedCount: 1, wantCount: 1, wantBound: 1},
+		{name: "one wake known two protected", workCount: 1, protectedCount: 2, wantCount: 2, wantBound: 1},
+		{name: "one wake known one protected plus scale demand", workCount: 1, protectedCount: 1, scaleCount: 1, wantCount: 2, wantBound: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var work []beads.Bead
+			for i := 0; i < tt.workCount; i++ {
+				work = append(work, workBead(
+					"work-"+strconv.Itoa(i+1),
+					"claude",
+					"claude",
+					"in_progress",
+					tt.workCount-i,
+				))
+			}
+			var sessions []beads.Bead
+			protectedIDs := make(map[string]bool)
+			for i := 0; i < tt.protectedCount; i++ {
+				id := "sess-" + strconv.Itoa(i+1)
+				sessions = append(sessions, protectedPoolSessionBeadAt(id, now.Add(time.Duration(-30-i)*time.Second)))
+				protectedIDs[id] = true
+			}
+
+			result := ComputePoolDesiredStatesAt(
+				cfg,
+				work,
+				sessionInfosFromBeads(sessions),
+				map[string]int{"claude": tt.scaleCount},
+				now,
+			)
+
+			if len(result) != 1 || len(result[0].Requests) != tt.wantCount {
+				t.Fatalf("result = %#v, want %d total requests", result, tt.wantCount)
+			}
+			bound := 0
+			wakeKnown := 0
+			for _, request := range result[0].Requests {
+				if request.Tier == "wake-known-identity" {
+					wakeKnown++
+					if protectedIDs[request.SessionBeadID] {
+						bound++
+					}
+				}
+			}
+			if wakeKnown != 1 {
+				t.Fatalf("wake-known requests = %d, want 1; result=%#v", wakeKnown, result)
+			}
+			if bound != tt.wantBound {
+				t.Fatalf("protected-bound requests = %d, want %d; result=%#v", bound, tt.wantBound, result)
+			}
+		})
+	}
+}
+
+func TestComputePoolDesiredStates_PostCreateProtectionRespectsCapShrink(t *testing.T) {
+	now := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(1), 0)},
+	}
+	sessions := []beads.Bead{
+		protectedPoolSessionBeadAt("sess-oldest", now.Add(-30*time.Second)),
+		protectedPoolSessionBeadAt("sess-newest", now.Add(-20*time.Second)),
+	}
+
+	result := ComputePoolDesiredStatesAt(cfg, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 0}, now)
+
+	if len(result) != 1 || len(result[0].Requests) != 1 {
+		t.Fatalf("result = %#v, want cap shrink to retain only one session", result)
+	}
+	if got := result[0].Requests[0].SessionBeadID; got != "sess-oldest" {
+		t.Fatalf("SessionBeadID = %q, want stable oldest session", got)
+	}
+}
+
+func TestComputePoolDesiredStates_PostCreateProtectionDoesNotOvercreate(t *testing.T) {
+	now := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	sessions := []beads.Bead{
+		protectedPoolSessionBeadAt("sess-1", now.Add(-30*time.Second)),
+		protectedPoolSessionBeadAt("sess-2", now.Add(-20*time.Second)),
+	}
+
+	result := ComputePoolDesiredStatesAt(cfg, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 2}, now)
+
+	if len(result) != 1 || len(result[0].Requests) != 2 {
+		t.Fatalf("result = %#v, want protected sessions to cover demand without anonymous creates", result)
+	}
+	for _, request := range result[0].Requests {
+		if request.SessionBeadID == "" {
+			t.Fatalf("anonymous request overcreated despite protected sessions covering demand: %#v", result)
+		}
+	}
+}
+
+func TestComputePoolDesiredStates_PostCreateProtectionExcludesNonReusableSessions(t *testing.T) {
+	now := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	tests := []struct {
+		name   string
+		mutate func(*beads.Bead)
+	}{
+		{
+			name: "non-creation reason",
+			mutate: func(session *beads.Bead) {
+				session.Metadata["state_reason"] = "reconciler_heal"
+			},
+		},
+		{
+			name: "malformed marker",
+			mutate: func(session *beads.Bead) {
+				session.Metadata["creation_complete_at"] = "not-a-timestamp"
+			},
+		},
+		{
+			name: "future marker",
+			mutate: func(session *beads.Bead) {
+				session.Metadata["creation_complete_at"] = now.Add(time.Minute).Format(time.RFC3339)
+			},
+		},
+		{
+			name: "draining",
+			mutate: func(session *beads.Bead) {
+				session.Metadata["state"] = "draining"
+			},
+		},
+		{
+			name: "drained",
+			mutate: func(session *beads.Bead) {
+				session.Metadata["state"] = "drained"
+			},
+		},
+		{
+			name: "asleep",
+			mutate: func(session *beads.Bead) {
+				session.Metadata["state"] = "asleep"
+			},
+		},
+		{
+			name: "failed create",
+			mutate: func(session *beads.Bead) {
+				session.Metadata["state"] = "failed-create"
+			},
+		},
+		{
+			name: "provider terminal error",
+			mutate: func(session *beads.Bead) {
+				session.Metadata[sessionProviderTerminalErrorMetadataKey] = "model_not_found"
+			},
+		},
+		{
+			name: "dependency only",
+			mutate: func(session *beads.Bead) {
+				session.Metadata["dependency_only"] = "true"
+			},
+		},
+		{
+			name: "wait hold",
+			mutate: func(session *beads.Bead) {
+				session.Metadata["wait_hold"] = "true"
+			},
+		},
+		{
+			name: "active user hold",
+			mutate: func(session *beads.Bead) {
+				session.Metadata["held_until"] = now.Add(time.Minute).Format(time.RFC3339)
+			},
+		},
+		{
+			name: "active quarantine",
+			mutate: func(session *beads.Bead) {
+				session.Metadata["quarantined_until"] = now.Add(time.Minute).Format(time.RFC3339)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			session := protectedPoolSessionBeadAt("sess-1", now.Add(-30*time.Second))
+			tt.mutate(&session)
+
+			result := ComputePoolDesiredStatesAt(
+				cfg,
+				nil,
+				sessionInfosFromBeads([]beads.Bead{session}),
+				map[string]int{"claude": 0},
+				now,
+			)
+
+			if got := PoolDesiredCounts(result)["claude"]; got != 0 {
+				t.Fatalf("poolDesired[claude] = %d, want 0 for non-reusable session", got)
+			}
+		})
+	}
+}
+
+func TestComputePoolDesiredStates_PostCreateProtectionDependencyOnlyNeverCreatesDemandFloor(t *testing.T) {
+	now := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	session := protectedPoolSessionBeadAt("sess-dependency", now.Add(-30*time.Second))
+	session.Metadata["dependency_only"] = "true"
+
+	for _, scaleCounts := range []map[string]int{
+		nil,
+		{},
+		{"claude": 0},
+	} {
+		result := ComputePoolDesiredStatesAt(
+			cfg,
+			nil,
+			sessionInfosFromBeads([]beads.Bead{session}),
+			scaleCounts,
+			now,
+		)
+		if got := PoolDesiredCounts(result)["claude"]; got != 0 {
+			t.Fatalf("scale=%v poolDesired[claude] = %d, want 0 for dependency-only session", scaleCounts, got)
+		}
+	}
+}
+
+func TestComputePoolDesiredStates_PostCreateProtectionDoesNotBindBlockedCapacity(t *testing.T) {
+	now := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	tests := []struct {
+		name   string
+		mutate func(*beads.Bead)
+	}{
+		{
+			name: "wait hold",
+			mutate: func(session *beads.Bead) {
+				session.Metadata["wait_hold"] = "true"
+			},
+		},
+		{
+			name: "active user hold",
+			mutate: func(session *beads.Bead) {
+				session.Metadata["held_until"] = now.Add(time.Minute).Format(time.RFC3339)
+			},
+		},
+		{
+			name: "active quarantine",
+			mutate: func(session *beads.Bead) {
+				session.Metadata["quarantined_until"] = now.Add(time.Minute).Format(time.RFC3339)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			session := protectedPoolSessionBeadAt("sess-blocked", now.Add(-30*time.Second))
+			tt.mutate(&session)
+			work := []beads.Bead{
+				workBead("work-1", "claude", "claude", "in_progress", 5),
+			}
+
+			result := ComputePoolDesiredStatesAt(
+				cfg,
+				work,
+				sessionInfosFromBeads([]beads.Bead{session}),
+				map[string]int{"claude": 0},
+				now,
+			)
+
+			if len(result) != 1 || len(result[0].Requests) != 1 {
+				t.Fatalf("result = %#v, want one wake-known request", result)
+			}
+			request := result[0].Requests[0]
+			if request.Tier != "wake-known-identity" || request.SessionBeadID != "" {
+				t.Fatalf("request = %+v, want unbound wake-known request", request)
+			}
+		})
+	}
+}
+
+func TestPoolSessionPostCreateProtectionSeparatesSweepRetentionFromDemandEligibility(t *testing.T) {
+	now := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name   string
+		mutate func(*beads.Bead)
+	}{
+		{
+			name: "dependency only",
+			mutate: func(session *beads.Bead) {
+				session.Metadata["dependency_only"] = "true"
+			},
+		},
+		{
+			name: "wait hold",
+			mutate: func(session *beads.Bead) {
+				session.Metadata["wait_hold"] = "true"
+			},
+		},
+		{
+			name: "active user hold",
+			mutate: func(session *beads.Bead) {
+				session.Metadata["held_until"] = now.Add(time.Minute).Format(time.RFC3339)
+			},
+		},
+		{
+			name: "active quarantine",
+			mutate: func(session *beads.Bead) {
+				session.Metadata["quarantined_until"] = now.Add(time.Minute).Format(time.RFC3339)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			session := protectedPoolSessionBeadAt("sess-fresh", now.Add(-30*time.Second))
+			tt.mutate(&session)
+			info := sessionInfosFromBeads([]beads.Bead{session})[0]
+
+			if !poolSessionWithinPostCreateProtection(info, now) {
+				t.Fatal("fresh session lost sweep retention protection")
+			}
+			if poolSessionEligibleForProtectedDemand(info, now) {
+				t.Fatal("blocked/dependency-only session became generic protected demand")
+			}
+		})
+	}
+}
+
+func TestReusablePoolSessionInfosForRequestPreservesPromotionAndPendingCreate(t *testing.T) {
+	now := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	dependency := protectedPoolSessionBeadAt("sess-dependency", now.Add(-30*time.Second))
+	dependency.Metadata["dependency_only"] = "true"
+	held := protectedPoolSessionBeadAt("sess-held", now.Add(-30*time.Second))
+	held.Metadata["held_until"] = now.Add(time.Minute).Format(time.RFC3339)
+	pendingHeld := pendingPoolSessionBeadAt("sess-pending-held", now.Add(-30*time.Second))
+	pendingHeld.Metadata["wait_hold"] = "true"
+	snapshot := newSessionBeadSnapshot([]beads.Bead{dependency, held, pendingHeld})
+	bp := &agentBuildParams{
+		city:         cfg,
+		agents:       cfg.Agents,
+		sessionBeads: snapshot,
+	}
+
+	candidates := reusablePoolSessionInfosForRequest(
+		bp,
+		&cfg.Agents[0],
+		"claude",
+		SessionRequest{Tier: "new"},
+		now,
+		nil,
+	)
+	got := make(map[string]bool, len(candidates))
+	for _, info := range candidates {
+		got[info.ID] = true
+	}
+	if !got[dependency.ID] {
+		t.Fatal("dependency-only slot was not reusable for real generic demand promotion")
+	}
+	if !got[pendingHeld.ID] {
+		t.Fatal("pending-create slot lost its in-flight completion semantics")
+	}
+	if got[held.ID] {
+		t.Fatal("held active slot remained eligible for anonymous generic reuse")
+	}
+}
+
+func TestComputePoolDesiredStates_PostCreateProtectionReusesProtectedBeforePending(t *testing.T) {
+	now := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	pending := pendingPoolSessionBeadAt("sess-pending", now.Add(-time.Minute))
+	protected := protectedPoolSessionBeadAt("sess-protected", now.Add(-30*time.Second))
+
+	result := ComputePoolDesiredStatesAt(
+		cfg,
+		nil,
+		sessionInfosFromBeads([]beads.Bead{pending, protected}),
+		map[string]int{"claude": 2},
+		now,
+	)
+
+	if len(result) != 1 || len(result[0].Requests) != 2 {
+		t.Fatalf("result = %#v, want protected and pending requests", result)
+	}
+	if got := result[0].Requests[0].SessionBeadID; got != protected.ID {
+		t.Fatalf("first SessionBeadID = %q, want protected session %q", got, protected.ID)
+	}
+	if got := result[0].Requests[1].SessionBeadID; got != pending.ID {
+		t.Fatalf("second SessionBeadID = %q, want pending session %q", got, pending.ID)
+	}
+}
+
+func TestComputePoolDesiredStates_PostCreateProtectionBindingPreservesScaleDemandIndex(t *testing.T) {
+	now := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	protected := protectedPoolSessionBeadAt("sess-protected", now.Add(-30*time.Second))
+	work := []beads.Bead{
+		workBead("work-assigned", "claude", "claude", "in_progress", 5),
+	}
+	demand := map[string]scaleCheckDemand{
+		"claude": {
+			Count:       1,
+			WorkBeadIDs: []string{"work-scale"},
+		},
+	}
+
+	result := computePoolDesiredStatesAt(
+		cfg,
+		work,
+		sessionInfosFromBeads([]beads.Bead{protected}),
+		map[string]int{"claude": 1},
+		demand,
+		now,
+		nil,
+	)
+
+	if len(result) != 1 || len(result[0].Requests) != 2 {
+		t.Fatalf("result = %#v, want bound wake-known plus anonymous scale request", result)
+	}
+	if got := result[0].Requests[0]; got.Tier != "wake-known-identity" || got.SessionBeadID != protected.ID {
+		t.Fatalf("first request = %+v, want wake-known bound to %q", got, protected.ID)
+	}
+	anonymous := result[0].Requests[1]
+	if anonymous.Tier != "new" || anonymous.SessionBeadID != "" || anonymous.WorkBeadID != "work-scale" {
+		t.Fatalf("second request = %+v, want anonymous new request indexed to work-scale", anonymous)
+	}
+}
+
+func TestComputePoolDesiredStates_PostCreateProtectionAdvancesDemandIndex(t *testing.T) {
+	now := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	protected := protectedPoolSessionBeadAt("sess-protected", now.Add(-30*time.Second))
+	demand := map[string]scaleCheckDemand{
+		"claude": {
+			Count:       2,
+			WorkBeadIDs: []string{"work-covered", "work-anonymous"},
+		},
+	}
+
+	result := computePoolDesiredStatesAt(
+		cfg,
+		nil,
+		sessionInfosFromBeads([]beads.Bead{protected}),
+		map[string]int{"claude": 2},
+		demand,
+		now,
+		nil,
+	)
+
+	if len(result) != 1 || len(result[0].Requests) != 2 {
+		t.Fatalf("result = %#v, want one protected and one anonymous request", result)
+	}
+	if got := result[0].Requests[0].SessionBeadID; got != protected.ID {
+		t.Fatalf("first SessionBeadID = %q, want %q", got, protected.ID)
+	}
+	if got := result[0].Requests[0].WorkBeadID; got != "work-covered" {
+		t.Fatalf("protected WorkBeadID = %q, want deterministic binding to work-covered", got)
+	}
+	anonymous := result[0].Requests[1]
+	if anonymous.SessionBeadID != "" {
+		t.Fatalf("second request SessionBeadID = %q, want anonymous", anonymous.SessionBeadID)
+	}
+	if anonymous.WorkBeadID != "work-anonymous" {
+		t.Fatalf("anonymous WorkBeadID = %q, want demand index after protected coverage", anonymous.WorkBeadID)
+	}
+}
+
+func TestComputePoolDesiredStates_PostCreateProtectionAllocatesDemandByTriggerIdentity(t *testing.T) {
+	now := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	protected := protectedPoolSessionBeadAt("sess-protected", now.Add(-30*time.Second))
+	protected.Metadata[beadmeta.TriggerBeadIDMetadataKey] = "work-b"
+	demand := map[string]scaleCheckDemand{
+		"claude": {
+			Count:       2,
+			WorkBeadIDs: []string{"work-a", "work-b"},
+			Titles:      map[string]string{"work-a": "A title", "work-b": "B title"},
+			Packs:       map[string]string{"work-a": "pack-a", "work-b": "pack-b"},
+			Workspaces:  map[string]string{"work-a": "workspace-a", "work-b": "workspace-b"},
+			StoreRefs:   map[string]string{"work-a": "rig-a", "work-b": "rig-b"},
+			ParentSIDs:  map[string]string{"work-a": "parent-a", "work-b": "parent-b"},
+		},
+	}
+
+	result := computePoolDesiredStatesAt(
+		cfg,
+		nil,
+		sessionInfosFromBeads([]beads.Bead{protected}),
+		map[string]int{"claude": 2},
+		demand,
+		now,
+		nil,
+	)
+
+	if len(result) != 1 || len(result[0].Requests) != 2 {
+		t.Fatalf("result = %#v, want one protected and one anonymous request", result)
+	}
+	concrete := result[0].Requests[0]
+	if concrete.SessionBeadID != protected.ID ||
+		concrete.WorkBeadID != "work-b" ||
+		concrete.WorkBeadTitle != "B title" ||
+		concrete.WorkPack != "pack-b" ||
+		concrete.WorkWorkspace != "workspace-b" ||
+		concrete.WorkStoreRef != "rig-b" ||
+		concrete.BrainParentSID != "parent-b" {
+		t.Fatalf("concrete request = %+v, want protected session with full work-b provenance", concrete)
+	}
+	anonymous := result[0].Requests[1]
+	if anonymous.SessionBeadID != "" || anonymous.WorkBeadID != "work-a" {
+		t.Fatalf("anonymous request = %+v, want residual work-a", anonymous)
+	}
+}
+
+func TestComputePoolDesiredStates_PostCreateProtectionRebindsUnmatchedConcreteDemand(t *testing.T) {
+	now := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	tests := []struct {
+		name      string
+		triggerID string
+	}{
+		{name: "stale trigger", triggerID: "work-x"},
+		{name: "blank trigger"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			protected := protectedPoolSessionBeadAt("sess-protected", now.Add(-30*time.Second))
+			protected.Metadata[beadmeta.TriggerBeadIDMetadataKey] = tt.triggerID
+			demand := map[string]scaleCheckDemand{
+				"claude": {
+					Count:       2,
+					WorkBeadIDs: []string{"work-a", "work-b"},
+					Titles:      map[string]string{"work-a": "A title", "work-b": "B title"},
+					Packs:       map[string]string{"work-a": "pack-a", "work-b": "pack-b"},
+					Workspaces:  map[string]string{"work-a": "workspace-a", "work-b": "workspace-b"},
+					StoreRefs:   map[string]string{"work-a": "rig-a", "work-b": "rig-b"},
+					ParentSIDs:  map[string]string{"work-a": "parent-a", "work-b": "parent-b"},
+				},
+			}
+
+			result := computePoolDesiredStatesAt(
+				cfg,
+				nil,
+				sessionInfosFromBeads([]beads.Bead{protected}),
+				map[string]int{"claude": 2},
+				demand,
+				now,
+				nil,
+			)
+
+			if len(result) != 1 || len(result[0].Requests) != 2 {
+				t.Fatalf("result = %#v, want one rebound concrete and one anonymous request", result)
+			}
+			concrete := result[0].Requests[0]
+			if concrete.SessionBeadID != protected.ID ||
+				concrete.WorkBeadID != "work-a" ||
+				concrete.WorkBeadTitle != "A title" ||
+				concrete.WorkPack != "pack-a" ||
+				concrete.WorkWorkspace != "workspace-a" ||
+				concrete.WorkStoreRef != "rig-a" ||
+				concrete.BrainParentSID != "parent-a" {
+				t.Fatalf("rebound concrete request = %+v, want full work-a provenance", concrete)
+			}
+			anonymous := result[0].Requests[1]
+			if anonymous.SessionBeadID != "" || anonymous.WorkBeadID != "work-b" {
+				t.Fatalf("anonymous request = %+v, want residual work-b", anonymous)
+			}
+		})
+	}
+}
+
+func TestPoolSessionWithinPostCreateProtectionBoundaries(t *testing.T) {
+	now := time.Date(2026, 7, 28, 21, 0, 0, 123456789, time.UTC)
+	tests := []struct {
+		name       string
+		completed  time.Time
+		wantWithin bool
+	}{
+		{name: "age zero", completed: now, wantWithin: true},
+		{name: "one nanosecond future", completed: now.Add(time.Nanosecond), wantWithin: false},
+		{name: "exact timeout", completed: now.Add(-postCreateProtectionTimeout), wantWithin: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info := sessionInfosFromBeads([]beads.Bead{
+				protectedPoolSessionBeadAt("sess-boundary", now),
+			})[0]
+			info.CreationCompleteAt = tt.completed.Format(time.RFC3339Nano)
+
+			if got := poolSessionWithinPostCreateProtection(info, now); got != tt.wantWithin {
+				t.Fatalf("poolSessionWithinPostCreateProtection = %v, want %v (completed=%s now=%s)",
+					got, tt.wantWithin, tt.completed, now)
+			}
+		})
+	}
+}
+
+func TestBuildDesiredState_PostCreateProtectionUsesInjectedDecisionTime(t *testing.T) {
+	beaconTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	decisionTime := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              "claude",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(2),
+		}},
+	}
+	work := workBead("work-1", "claude", "", "open", 0)
+	sessions := []beads.Bead{
+		protectedPoolSessionBeadAt("sess-1", decisionTime.Add(-30*time.Second)),
+		protectedPoolSessionBeadAt("sess-2", decisionTime.Add(-20*time.Second)),
+	}
+	seed := append([]beads.Bead{work}, sessions...)
+	store := beads.NewMemStoreFrom(1, seed, nil)
+	snapshot := newSessionBeadSnapshot(sessions)
+
+	result := buildDesiredStateWithSessionBeadsAt(
+		"test-city",
+		t.TempDir(),
+		beaconTime,
+		decisionTime,
+		cfg,
+		runtime.NewFake(),
+		store,
+		nil,
+		snapshot,
+		nil,
+		io.Discard,
+	)
+
+	if got := result.ScaleCheckCounts["claude"]; got != 1 {
+		t.Fatalf("ScaleCheckCounts[claude] = %d, want 1", got)
+	}
+	if !result.BeaconTime.Equal(beaconTime) {
+		t.Fatalf("BeaconTime = %s, want %s", result.BeaconTime, beaconTime)
+	}
+	for _, session := range sessions {
+		name := session.Metadata["session_name"]
+		if _, ok := result.BaseState[name]; !ok {
+			t.Fatalf("fresh session %q absent from base desired state: keys=%v", name, mapKeys(result.BaseState))
+		}
+	}
+}
+
+func TestBuildDesiredState_PostCreateProtectionExpiresAgainstDecisionTimeNotBeacon(t *testing.T) {
+	beaconTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	decisionTime := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	creationTime := decisionTime.Add(-postCreateProtectionTimeout)
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              "claude",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(2),
+		}},
+	}
+	work := workBead("work-1", "claude", "", "open", 0)
+	sessions := []beads.Bead{
+		protectedPoolSessionBeadAt("sess-1", creationTime),
+		protectedPoolSessionBeadAt("sess-2", creationTime.Add(-time.Second)),
+	}
+	seed := append([]beads.Bead{work}, sessions...)
+	store := beads.NewMemStoreFrom(1, seed, nil)
+
+	result := buildDesiredStateWithSessionBeadsAt(
+		"test-city",
+		t.TempDir(),
+		beaconTime,
+		decisionTime,
+		cfg,
+		runtime.NewFake(),
+		store,
+		nil,
+		newSessionBeadSnapshot(sessions),
+		nil,
+		io.Discard,
+	)
+
+	workerCount := 0
+	for _, params := range result.BaseState {
+		if params.TemplateName == "claude" {
+			workerCount++
+		}
+	}
+	if workerCount != 1 {
+		t.Fatalf("worker desired count = %d, want 1 after grace expiry; scale=%v beacon=%s creation=%s decision=%s keys=%v",
+			workerCount, result.ScaleCheckCounts, beaconTime, creationTime, decisionTime, mapKeys(result.BaseState))
+	}
+}
+
+func TestBuildDesiredState_PostCreateProtectionPreservesPersistedProvenance(t *testing.T) {
+	beaconTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	decisionTime := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              "claude",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(2),
+		}},
+	}
+	protected := protectedPoolSessionBeadAt("sess-protected", decisionTime.Add(-30*time.Second))
+	protected.Metadata["agent_name"] = "claude-1"
+	protected.Metadata["alias"] = "claude-1"
+	protected.Metadata["pool_slot"] = "1"
+	protected.Metadata[beadmeta.TriggerBeadIDMetadataKey] = "work-x"
+	protected.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey] = "rig-x"
+	protected.Metadata[beadmeta.BrainParentSIDMetadataKey] = "parent-x"
+	protected.Metadata[beadmeta.PackMetadataKey] = "pack-x"
+	protected.Metadata[beadmeta.PackWorkspaceMetadataKey] = "workspace-x"
+	protected.Metadata[beadmeta.WorkDirMetadataKey] = "/tmp/work-x"
+	protected.Metadata[beadmeta.LegacyWorkDirMetadataKey] = "/tmp/work-x"
+	protected.Labels = append(protected.Labels, "agent:claude-1")
+	snapshot := newSessionBeadSnapshot([]beads.Bead{protected})
+	store := beads.NewMemStoreFrom(1, []beads.Bead{protected}, nil)
+
+	result := buildDesiredStateWithSessionBeadsAt(
+		"test-city",
+		t.TempDir(),
+		beaconTime,
+		decisionTime,
+		cfg,
+		runtime.NewFake(),
+		store,
+		nil,
+		snapshot,
+		nil,
+		io.Discard,
+	)
+
+	if _, ok := result.BaseState[protected.Metadata["session_name"]]; !ok {
+		t.Fatalf("protected session absent from base desired state: keys=%v", mapKeys(result.BaseState))
+	}
+	stored, err := store.Get(protected.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", protected.ID, err)
+	}
+	wantMetadata := map[string]string{
+		beadmeta.TriggerBeadIDMetadataKey:       "work-x",
+		beadmeta.TriggerBeadStoreRefMetadataKey: "rig-x",
+		beadmeta.BrainParentSIDMetadataKey:      "parent-x",
+		beadmeta.PackMetadataKey:                "pack-x",
+		beadmeta.PackWorkspaceMetadataKey:       "workspace-x",
+		beadmeta.WorkDirMetadataKey:             "/tmp/work-x",
+		beadmeta.LegacyWorkDirMetadataKey:       "/tmp/work-x",
+	}
+	for key, want := range wantMetadata {
+		if got := stored.Metadata[key]; got != want {
+			t.Fatalf("persisted metadata[%s] = %q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestBuildDesiredState_BlockedFreshSessionMaterializesRunnableReplacement(t *testing.T) {
+	beaconTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	decisionTime := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name string
+		work beads.Bead
+	}{
+		{
+			name: "scale demand",
+			work: workBead("work-scale", "claude", "", "open", 5),
+		},
+		{
+			name: "wake known demand",
+			work: workBead("work-wake-known", "claude", "claude", "in_progress", 5),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.City{
+				Agents: []config.Agent{{
+					Name:              "claude",
+					StartCommand:      "true",
+					MinActiveSessions: intPtr(0),
+					MaxActiveSessions: intPtr(2),
+				}},
+			}
+			blocked := protectedPoolSessionBeadAt("sess-blocked", decisionTime.Add(-30*time.Second))
+			blocked.Metadata["agent_name"] = "claude-1"
+			blocked.Metadata["alias"] = "claude-1"
+			blocked.Metadata["pool_slot"] = "1"
+			blocked.Metadata["held_until"] = decisionTime.Add(time.Minute).Format(time.RFC3339)
+			blocked.Labels = append(blocked.Labels, "agent:claude-1")
+			snapshot := newSessionBeadSnapshot([]beads.Bead{blocked})
+			store := beads.NewMemStoreFrom(1, []beads.Bead{tt.work, blocked}, nil)
+			cityPath := t.TempDir()
+
+			result := buildDesiredStateWithSessionBeadsAt(
+				"test-city",
+				cityPath,
+				beaconTime,
+				decisionTime,
+				cfg,
+				runtime.NewFake(),
+				store,
+				nil,
+				snapshot,
+				nil,
+				io.Discard,
+			)
+
+			var replacement *sessionpkg.Info
+			for _, info := range snapshot.OpenInfos() {
+				if info.ID != blocked.ID {
+					infoCopy := info
+					replacement = &infoCopy
+					break
+				}
+			}
+			if replacement == nil {
+				t.Fatalf("no replacement materialized; snapshot=%#v", snapshot.OpenInfos())
+			}
+			if replacement.SessionNameMetadata == blocked.Metadata["session_name"] {
+				t.Fatalf("replacement reused blocked runtime name %q", replacement.SessionNameMetadata)
+			}
+			if !replacement.PendingCreateClaim {
+				t.Fatalf("replacement %s is not pending create: %+v", replacement.ID, *replacement)
+			}
+			if replacement.PoolSlot != "2" {
+				t.Fatalf("replacement pool_slot = %q, want next free slot 2 while live holder retains slot 1", replacement.PoolSlot)
+			}
+			if _, ok := result.BaseState[blocked.Metadata["session_name"]]; ok {
+				t.Fatalf("blocked session %q leaked into base desired state", blocked.Metadata["session_name"])
+			}
+			if _, ok := result.BaseState[replacement.SessionNameMetadata]; !ok {
+				t.Fatalf("replacement %q absent from base desired state: keys=%v",
+					replacement.SessionNameMetadata, mapKeys(result.BaseState))
+			}
+
+			readyFlags := make([]bool, len(result.AssignedWorkBeads))
+			for i, work := range result.AssignedWorkBeads {
+				storeRef := ""
+				if i < len(result.AssignedWorkStoreRefs) {
+					storeRef = result.AssignedWorkStoreRefs[i]
+				}
+				readyFlags[i] = result.ReadyAssigned[storeScopedBeadKey{StoreRef: storeRef, ID: work.ID}]
+			}
+			openInfos := snapshot.OpenInfos()
+			poolWork := filterAssignedWorkBeadsForPoolDemand(
+				cfg,
+				cityPath,
+				store,
+				openInfos,
+				result.AssignedWorkBeads,
+				result.AssignedWorkStoreRefs,
+			)
+			poolDesired := PoolDesiredCounts(ComputePoolDesiredStatesAt(
+				cfg,
+				poolWork,
+				openInfos,
+				result.ScaleCheckCounts,
+				decisionTime,
+			))
+			if got := poolDesired["claude"]; got != 1 {
+				t.Fatalf("recomputed poolDesired[claude] = %d, want 1", got)
+			}
+			awakeInput := buildAwakeInputFromReconciler(
+				cfg,
+				cityPath,
+				snapshot.OpenInfos(),
+				poolDesired,
+				nil,
+				nil,
+				nil,
+				nil,
+				result.AssignedWorkBeads,
+				readyFlags,
+				nil,
+				runtime.NewFake(),
+				decisionTime,
+			)
+			awake := ComputeAwakeSet(awakeInput)
+			if got := awake[blocked.Metadata["session_name"]]; got.ShouldWake {
+				t.Fatalf("blocked session unexpectedly wakes: %+v", got)
+			}
+			if got := awake[replacement.SessionNameMetadata]; !got.ShouldWake {
+				t.Fatalf("replacement is not runnable: %+v", got)
+			}
+		})
+	}
+}
+
+func TestBuildDesiredState_RealDemandPromotesDependencyOnlySession(t *testing.T) {
+	beaconTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	decisionTime := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              "claude",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(2),
+		}},
+	}
+	dependency := protectedPoolSessionBeadAt("sess-dependency", decisionTime.Add(-30*time.Second))
+	dependency.Metadata["agent_name"] = "claude-1"
+	dependency.Metadata["alias"] = "claude-1"
+	dependency.Metadata["pool_slot"] = "1"
+	dependency.Metadata["dependency_only"] = "true"
+	dependency.Labels = append(dependency.Labels, "agent:claude-1")
+	work := workBead("work-scale", "claude", "", "open", 5)
+	snapshot := newSessionBeadSnapshot([]beads.Bead{dependency})
+	store := beads.NewMemStoreFrom(1, []beads.Bead{work, dependency}, nil)
+
+	result := buildDesiredStateWithSessionBeadsAt(
+		"test-city",
+		t.TempDir(),
+		beaconTime,
+		decisionTime,
+		cfg,
+		runtime.NewFake(),
+		store,
+		nil,
+		snapshot,
+		nil,
+		io.Discard,
+	)
+
+	if got := result.ScaleCheckCounts["claude"]; got != 1 {
+		t.Fatalf("ScaleCheckCounts[claude] = %d, want 1", got)
+	}
+	if infos := snapshot.OpenInfos(); len(infos) != 1 || infos[0].ID != dependency.ID {
+		t.Fatalf("snapshot = %#v, want dependency-only bead reused without a second bead", infos)
+	}
+	tp, ok := result.BaseState[dependency.Metadata["session_name"]]
+	if !ok {
+		t.Fatalf("dependency-only session %q absent from base desired state: keys=%v",
+			dependency.Metadata["session_name"], mapKeys(result.BaseState))
+	}
+	if tp.DependencyOnly {
+		t.Fatal("real scale demand did not promote the reused dependency-only session")
 	}
 }
 
@@ -1750,5 +2909,110 @@ func TestCanonicalSingletonAliasHeldTemplates_ExcludesFailedCreateHolder(t *test
 	// A drained holder released its alias.
 	if _, ok := canonicalSingletonAliasHeldTemplates(cfg, sessionInfosFromBeads([]beads.Bead{holder("drained")}))["mayor"]; ok {
 		t.Fatalf("drained holder released its alias and must NOT mark mayor held; got held")
+	}
+}
+
+// Rebinding reused capacity to a different bead must rebind its worktree
+// evidence too. Carrying the previous bead's spec forward would hand the
+// session a workspace verified for other work.
+func TestRequestWithScaleDemandProvenanceRebindsWorktreeEvidence(t *testing.T) {
+	stale := &worktree.Spec{BeadID: "gc-old", Path: "/tmp/old"}
+	fresh := &worktree.Spec{BeadID: "gc-new", Path: "/tmp/new"}
+	demand := scaleCheckDemand{
+		WorktreeSpecs:  map[string]*worktree.Spec{"gc-new": fresh},
+		WorktreeErrors: map[string]string{},
+	}
+	got := requestWithScaleDemandProvenance(SessionRequest{WorkBeadID: "gc-old", WorktreeSpec: stale}, demand, "gc-new")
+	if got.WorktreeSpec != fresh {
+		t.Errorf("WorktreeSpec = %+v, want the spec for gc-new", got.WorktreeSpec)
+	}
+
+	got = requestWithScaleDemandProvenance(SessionRequest{WorkBeadID: "gc-old", WorktreeSpec: stale}, demand, "gc-unknown")
+	if got.WorktreeSpec != nil {
+		t.Errorf("WorktreeSpec = %+v for a bead with no evidence, want nil", got.WorktreeSpec)
+	}
+
+	demand.WorktreeErrors["gc-bad"] = " conflicting evidence "
+	got = requestWithScaleDemandProvenance(SessionRequest{WorkBeadID: "gc-old", WorktreeError: "stale"}, demand, "gc-bad")
+	if got.WorktreeError != "conflicting evidence" {
+		t.Errorf("WorktreeError = %q, want the trimmed error for gc-bad", got.WorktreeError)
+	}
+}
+
+// Unusable worktree ownership evidence must be distinguishable from an
+// ordinary bind failure: buildDesiredState skips the item on this error
+// rather than continuing without trigger env.
+func TestVerifiedPoolTriggerWorkDirMarksEvidenceFailures(t *testing.T) {
+	req := SessionRequest{WorkBeadID: "gc-a", WorktreeError: "conflicting work dir metadata"}
+	if _, err := verifiedPoolTriggerWorkDir(nil, nil, "rig/pool", req); !errors.Is(err, errPoolTriggerWorktreeEvidence) {
+		t.Errorf("WorktreeError path err = %v, want errPoolTriggerWorktreeEvidence", err)
+	}
+
+	req = SessionRequest{WorkBeadID: "gc-a", WorktreeSpec: &worktree.Spec{BeadID: "gc-b"}}
+	if _, err := verifiedPoolTriggerWorkDir(nil, nil, "rig/pool", req); !errors.Is(err, errPoolTriggerWorktreeEvidence) {
+		t.Errorf("bead mismatch err = %v, want errPoolTriggerWorktreeEvidence", err)
+	}
+}
+
+// A failed binding write on a managed-worktree request leaves the session
+// bead stamped with the previous bead's work dir, so it is marked as an
+// evidence failure and skipped rather than reused. An unmanaged request
+// keeps the ordinary continue-without-trigger-env path.
+func TestBindWriteFailureMarksManagedRequests(t *testing.T) {
+	cause := errors.New("store write failed")
+
+	managed := bindWriteFailure(SessionRequest{WorktreeSpec: &worktree.Spec{BeadID: "gc-a"}}, cause)
+	if !errors.Is(managed, errPoolTriggerWorktreeEvidence) {
+		t.Errorf("managed bind write failure = %v, want the evidence sentinel", managed)
+	}
+	if !errors.Is(managed, cause) {
+		t.Errorf("managed bind write failure lost its cause: %v", managed)
+	}
+
+	unmanaged := bindWriteFailure(SessionRequest{}, cause)
+	if errors.Is(unmanaged, errPoolTriggerWorktreeEvidence) {
+		t.Errorf("unmanaged bind write failure = %v, want no evidence sentinel", unmanaged)
+	}
+	if !errors.Is(unmanaged, cause) {
+		t.Errorf("unmanaged bind write failure lost its cause: %v", unmanaged)
+	}
+}
+
+// Demand records the probe shorthand ("city") while the workspace provenance
+// on the bead carries the canonical spelling ("city:<name>"). Those are one
+// store, so the cross-store guard must not reject the pair; two different rigs
+// still must not match.
+func TestVerifiedPoolTriggerWorkDirAcceptsCanonicalStoreRefSpelling(t *testing.T) {
+	const mismatch = "does not match request store"
+
+	req := SessionRequest{
+		WorkBeadID:   "gc-a",
+		WorkStoreRef: "city",
+		WorktreeSpec: &worktree.Spec{BeadID: "gc-a", StoreRef: "city:test-city"},
+	}
+	_, err := verifiedPoolTriggerWorkDir(nil, nil, "rig/pool", req)
+	if err != nil && strings.Contains(err.Error(), mismatch) {
+		t.Errorf("canonical city spelling rejected as a store mismatch: %v", err)
+	}
+
+	req.WorkStoreRef = "alpha"
+	req.WorktreeSpec = &worktree.Spec{BeadID: "gc-a", StoreRef: "rig:alpha"}
+	_, err = verifiedPoolTriggerWorkDir(nil, nil, "rig/pool", req)
+	if err != nil && strings.Contains(err.Error(), mismatch) {
+		t.Errorf("bare rig shorthand rejected as a store mismatch: %v", err)
+	}
+
+	req.WorkStoreRef = "alpha"
+	req.WorktreeSpec = &worktree.Spec{BeadID: "gc-a", StoreRef: "rig:beta"}
+	_, err = verifiedPoolTriggerWorkDir(nil, nil, "rig/pool", req)
+	if err == nil || !strings.Contains(err.Error(), mismatch) {
+		t.Errorf("alpha vs rig:beta err = %v, want a store mismatch", err)
+	}
+
+	req.WorkStoreRef = "rig:a"
+	req.WorktreeSpec = &worktree.Spec{BeadID: "gc-a", StoreRef: "rig:b"}
+	_, err = verifiedPoolTriggerWorkDir(nil, nil, "rig/pool", req)
+	if err == nil || !strings.Contains(err.Error(), mismatch) {
+		t.Errorf("rig:a vs rig:b err = %v, want a store mismatch", err)
 	}
 }

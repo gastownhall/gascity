@@ -34,10 +34,12 @@
 //     write immediately and by name, and a city has no business editing a
 //     workspace's type policy.
 //
-// The workspace's own configuration is the SOLE source of how it is served:
-// every ambient BEADS_-prefixed variable is withheld for the duration of the
-// open, so nothing a city process inherited — a database override, a directory
-// override, a credential command — can re-point a binding.
+// The workspace's own configuration is the source of how a local binding is
+// served: every ambient BEADS_-prefixed variable is withheld for the duration
+// of the open, so nothing a city process inherited can re-point it. A binding
+// that explicitly names the hosted credential provider is the one exception:
+// the opener projects a command back into this running gc binary while still
+// withholding every other ambient BEADS_ variable.
 //
 // One thing this provider does not exercise: a controller and a one-shot
 // command opening the same workspace at the same moment. Whether that is
@@ -218,7 +220,8 @@ func (p *workspaceProvider) boundTo(spec storebinding.BindingSpec) error {
 	if err != nil {
 		return err
 	}
-	if spec.Name != p.spec.Name || spec.ConfigRef != p.spec.ConfigRef || root != p.root {
+	if spec.Name != p.spec.Name || spec.ConfigRef != p.spec.ConfigRef ||
+		spec.URL != p.spec.URL || spec.Auth != p.spec.Auth || root != p.root {
 		return fmt.Errorf("%w: specification does not match the bound binding %q", ErrInvalidWorkspaceBinding, p.spec.Name)
 	}
 	return nil

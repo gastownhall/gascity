@@ -24,6 +24,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/gastownhall/gascity/internal/testpolicy/waiverclock"
 )
 
 // Resource is a syntax-observable test resource.
@@ -123,8 +125,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   624,
-			BaselineFiles:   179,
+			BaselineCalls:   657,
+			BaselineFiles:   188,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-80po0c.2",
@@ -136,8 +138,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   453,
-			BaselineFiles:   164,
+			BaselineCalls:   477,
+			BaselineFiles:   172,
 			ReportedCalls:   447,
 			ReportedFiles:   157,
 			OwnerBead:       "ga-80po0c.2",
@@ -164,8 +166,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   418,
-			BaselineFiles:   120,
+			BaselineCalls:   444,
+			BaselineFiles:   126,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
 			OwnerBead:       "ga-80po0c.2",
@@ -177,8 +179,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   302,
-			BaselineFiles:   116,
+			BaselineCalls:   321,
+			BaselineFiles:   121,
 			ReportedCalls:   295,
 			ReportedFiles:   114,
 			OwnerBead:       "ga-80po0c.2",
@@ -203,8 +205,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceCWD,
-			BaselineCalls:   174,
-			BaselineFiles:   16,
+			BaselineCalls:   176,
+			BaselineFiles:   17,
 			ReportedCalls:   98,
 			ReportedFiles:   13,
 			OwnerBead:       "ga-80po0c.2.3",
@@ -229,7 +231,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceHTTPTestServer,
-			BaselineCalls:   317,
+			BaselineCalls:   318,
 			BaselineFiles:   66,
 			ReportedCalls:   255,
 			ReportedFiles:   56,
@@ -255,8 +257,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceNetListen,
-			BaselineCalls:   95,
-			BaselineFiles:   36,
+			BaselineCalls:   96,
+			BaselineFiles:   37,
 			ReportedCalls:   92,
 			ReportedFiles:   34,
 			OwnerBead:       "ga-80po0c.2.2.2",
@@ -307,10 +309,10 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceTmux,
-			BaselineCalls:   6,
-			BaselineFiles:   2,
-			ReportedCalls:   6,
-			ReportedFiles:   2,
+			BaselineCalls:   7,
+			BaselineFiles:   3,
+			ReportedCalls:   7,
+			ReportedFiles:   3,
 			OwnerBead:       "ga-80po0c.2.2.1",
 			Invariant:       "untagged tmux dependency call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "each owning test confines tmux processes and sockets to its isolated namespace and cleanup",
@@ -464,8 +466,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   411,
-			BaselineFiles:   116,
+			BaselineCalls:   437,
+			BaselineFiles:   122,
 			ReportedCalls:   394,
 			ReportedFiles:   105,
 			OwnerBead:       "ga-80po0c.2.1",
@@ -477,8 +479,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   302,
-			BaselineFiles:   116,
+			BaselineCalls:   321,
+			BaselineFiles:   121,
 			ReportedCalls:   287,
 			ReportedFiles:   113,
 			OwnerBead:       "ga-80po0c.2.1",
@@ -503,8 +505,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceCWD,
-			BaselineCalls:   174,
-			BaselineFiles:   16,
+			BaselineCalls:   176,
+			BaselineFiles:   17,
 			ReportedCalls:   284,
 			ReportedFiles:   43,
 			OwnerBead:       "ga-80po0c.2.1",
@@ -529,7 +531,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceHTTPTestServer,
-			BaselineCalls:   317,
+			BaselineCalls:   318,
 			BaselineFiles:   66,
 			ReportedCalls:   300,
 			ReportedFiles:   66,
@@ -555,8 +557,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceNetListen,
-			BaselineCalls:   93,
-			BaselineFiles:   35,
+			BaselineCalls:   94,
+			BaselineFiles:   36,
 			ReportedCalls:   92,
 			ReportedFiles:   34,
 			OwnerBead:       "ga-80po0c.2.2.2",
@@ -607,10 +609,10 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceTmux,
-			BaselineCalls:   0,
-			BaselineFiles:   0,
-			ReportedCalls:   0,
-			ReportedFiles:   0,
+			BaselineCalls:   1,
+			BaselineFiles:   1,
+			ReportedCalls:   1,
+			ReportedFiles:   1,
 			OwnerBead:       "ga-80po0c.2.2.1",
 			Invariant:       "untagged Small tmux dependency call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "non-Medium lexical owners replace tmux with a fake executor or declare exact isolated ownership",
@@ -672,13 +674,16 @@ func scopeContains(scope Scope, occurrence Occurrence) bool {
 	}
 }
 
-// ScanRepository scans the repository's tracked Go test files. Tracked sibling
-// Go source supplies package-level declaration context but is never counted.
-func ScanRepository(root string) (Census, error) {
+// TrackedGoFiles lists every git-tracked *.go file under root, repository-
+// relative with forward slashes. Listing tracked files rather than walking the
+// filesystem means an untracked nested git worktree checked out under root —
+// the common gitignored worktrees/<bead> pool-slot pattern — contributes
+// nothing: its files live in that worktree's own index, never this one's.
+func TrackedGoFiles(root string) ([]string, error) {
 	cmd := exec.Command("git", "-C", root, "ls-files", "-z", "--", "*.go")
 	out, err := cmd.Output()
 	if err != nil {
-		return Census{}, fmt.Errorf("listing tracked Go source: %w", err)
+		return nil, fmt.Errorf("listing tracked Go source: %w", err)
 	}
 	parts := strings.Split(string(out), "\x00")
 	files := make([]string, 0, len(parts))
@@ -686,6 +691,16 @@ func ScanRepository(root string) (Census, error) {
 		if name != "" {
 			files = append(files, filepath.ToSlash(name))
 		}
+	}
+	return files, nil
+}
+
+// ScanRepository scans the repository's tracked Go test files. Tracked sibling
+// Go source supplies package-level declaration context but is never counted.
+func ScanRepository(root string) (Census, error) {
+	files, err := TrackedGoFiles(root)
+	if err != nil {
+		return Census{}, err
 	}
 	return scanFiles(os.DirFS(root), files, reviewedHermeticPackages(bootstrapPolicy.ReviewedHermeticBody))
 }
@@ -1780,20 +1795,33 @@ func LoadLedger(name string) (Ledger, error) {
 }
 
 // Validate checks schema ownership, expiration, and exact census baselines.
-func Validate(ledger Ledger, census Census, now time.Time) error {
-	return validateAgainstPolicy(bootstrapPolicy, ledger, census, now)
+func Validate(ledger Ledger, census Census, now time.Time, mode waiverclock.Mode) (warnings []string, err error) {
+	return validateAgainstPolicy(bootstrapPolicy, ledger, census, now, mode)
 }
 
-func validateAgainstPolicy(policy, ledger Ledger, census Census, now time.Time) error {
-	if problems := validateManifestAgainstPolicy(policy, ledger, now); len(problems) > 0 {
+func validateAgainstPolicy(policy, ledger Ledger, census Census, now time.Time, mode waiverclock.Mode) (warnings []string, err error) {
+	// The clock runs separately from everything below, because a passing date is
+	// the only failure here that needs nobody to change any code. Its findings
+	// join the rest rather than short-circuiting them: neither a tolerated lapse
+	// nor a fatal one should be able to hide a real regression.
+	clock := waiverclock.Check(collectExpiries(ledger), now, mode)
+	fail := func(problems ...string) ([]string, error) {
+		problems = append(problems, clock.Fatal...)
+		if len(problems) == 0 {
+			return clock.Warnings, nil
+		}
 		sort.Strings(problems)
-		return errors.New(strings.Join(problems, "\n"))
+		return clock.Warnings, errors.New(strings.Join(problems, "\n"))
 	}
-	if err := validateMediumOwners(ledger.Medium, census, now); err != nil {
-		return err
+
+	if problems := validateManifestAgainstPolicy(policy, ledger); len(problems) > 0 {
+		return fail(problems...)
+	}
+	if err := validateMediumOwners(ledger.Medium, census); err != nil {
+		return fail(err.Error())
 	}
 	if err := validateReviewedHermeticBodies(ledger.ReviewedHermeticBody, census); err != nil {
-		return err
+		return fail(err.Error())
 	}
 
 	var problems []string
@@ -1808,14 +1836,10 @@ func validateAgainstPolicy(policy, ledger Ledger, census Census, now time.Time) 
 	for _, debt := range ledger.SmallDebt {
 		problems = append(problems, validateSmallBaseline(debt, census, ledger.Medium)...)
 	}
-	if len(problems) == 0 {
-		return nil
-	}
-	sort.Strings(problems)
-	return errors.New(strings.Join(problems, "\n"))
+	return fail(problems...)
 }
 
-func validateManifestAgainstPolicy(policy, ledger Ledger, now time.Time) []string {
+func validateManifestAgainstPolicy(policy, ledger Ledger) []string {
 	var problems []string
 	if policy.Version != 2 {
 		problems = append(problems, fmt.Sprintf("bootstrap policy version = %d, want 2", policy.Version))
@@ -1823,15 +1847,15 @@ func validateManifestAgainstPolicy(policy, ledger Ledger, now time.Time) []strin
 	if ledger.Version != policy.Version {
 		problems = append(problems, fmt.Sprintf("ledger version = %d, bootstrap policy requires %d", ledger.Version, policy.Version))
 	}
-	problems = append(problems, validateRowsAgainstPolicy("audit", policy.AuditBaseline, ledger.AuditBaseline, now)...)
-	problems = append(problems, validateRowsAgainstPolicy("debt", policy.Debt, ledger.Debt, now)...)
-	problems = append(problems, validateMediumRowsAgainstPolicy(policy.Medium, ledger.Medium, now)...)
+	problems = append(problems, validateRowsAgainstPolicy("audit", policy.AuditBaseline, ledger.AuditBaseline)...)
+	problems = append(problems, validateRowsAgainstPolicy("debt", policy.Debt, ledger.Debt)...)
+	problems = append(problems, validateMediumRowsAgainstPolicy(policy.Medium, ledger.Medium)...)
 	problems = append(problems, validateReviewedHermeticRowsAgainstPolicy(policy.ReviewedHermeticBody, ledger.ReviewedHermeticBody)...)
-	problems = append(problems, validateRowsAgainstPolicy("small debt", policy.SmallDebt, ledger.SmallDebt, now)...)
+	problems = append(problems, validateRowsAgainstPolicy("small debt", policy.SmallDebt, ledger.SmallDebt)...)
 	return problems
 }
 
-func validateRowsAgainstPolicy(kind string, policyRows, ledgerRows []Baseline, now time.Time) []string {
+func validateRowsAgainstPolicy(kind string, policyRows, ledgerRows []Baseline) []string {
 	var problems []string
 	policyByKey := map[baselineKey]Baseline{}
 	for _, row := range policyRows {
@@ -1841,7 +1865,7 @@ func validateRowsAgainstPolicy(kind string, policyRows, ledgerRows []Baseline, n
 			problems = append(problems, fmt.Sprintf("duplicate bootstrap %s baseline: scope=%s resource=%s", kind, row.Scope, row.Resource))
 		}
 		policyByKey[key] = row
-		problems = append(problems, validateBaselineDefinition(prefix, row, now)...)
+		problems = append(problems, validateBaselineDefinition(prefix, row)...)
 	}
 
 	seen := map[baselineKey]bool{}
@@ -1852,7 +1876,7 @@ func validateRowsAgainstPolicy(kind string, policyRows, ledgerRows []Baseline, n
 			problems = append(problems, fmt.Sprintf("duplicate %s baseline: scope=%s resource=%s", kind, row.Scope, row.Resource))
 		}
 		seen[key] = true
-		problems = append(problems, validateBaselineDefinition(prefix, row, now)...)
+		problems = append(problems, validateBaselineDefinition(prefix, row)...)
 		want, exists := policyByKey[key]
 		if !exists {
 			problems = append(problems, fmt.Sprintf("unexpected %s baseline: scope=%s resource=%s", kind, row.Scope, row.Resource))
@@ -1900,7 +1924,7 @@ func comparePolicyFields(prefix string, got, want Baseline) []string {
 	return problems
 }
 
-func validateBaselineDefinition(prefix string, row Baseline, now time.Time) []string {
+func validateBaselineDefinition(prefix string, row Baseline) []string {
 	var problems []string
 	if !knownScope(row.Scope) {
 		problems = append(problems, fmt.Sprintf("%s: unknown scope %q", prefix, row.Scope))
@@ -1914,7 +1938,7 @@ func validateBaselineDefinition(prefix string, row Baseline, now time.Time) []st
 	if row.ReportedCalls < 0 || row.ReportedFiles < 0 {
 		problems = append(problems, prefix+": historical census must be non-negative")
 	}
-	problems = append(problems, validateOwnership(prefix, row, now)...)
+	problems = append(problems, validateOwnership(prefix, row)...)
 	return problems
 }
 
@@ -1937,11 +1961,17 @@ func knownScope(scope Scope) bool {
 	return scope == ScopeAll || scope == ScopeUntagged || scope == ScopeCmdGCUntagged
 }
 
-func validateOwnership(prefix string, row Baseline, now time.Time) []string {
-	return validateOwnershipFields(prefix, row.OwnerBead, row.Invariant, row.ResourceOwner, row.MigrationTarget, row.Expires, now)
+func validateOwnership(prefix string, row Baseline) []string {
+	return validateOwnershipFields(prefix, row.OwnerBead, row.Invariant, row.ResourceOwner, row.MigrationTarget, row.Expires)
 }
 
-func validateOwnershipFields(prefix, owner, invariant, resourceOwner, migration, expiryText string, now time.Time) []string {
+// validateOwnershipFields checks that a row declares who owns it and when it is
+// meant to be gone. It checks that the date is well formed but deliberately does
+// not check whether it has passed: that verdict depends on an enforcement mode
+// only the top-level caller knows, and it is collected once per ledger row by
+// collectExpiries rather than at each of the two or three sites that reach a row
+// during validation. See internal/testpolicy/waiverclock.
+func validateOwnershipFields(prefix, owner, invariant, resourceOwner, migration, expiryText string) []string {
 	var problems []string
 	for name, value := range map[string]string{
 		"owner_bead":       owner,
@@ -1953,18 +1983,37 @@ func validateOwnershipFields(prefix, owner, invariant, resourceOwner, migration,
 			problems = append(problems, fmt.Sprintf("%s: %s is required", prefix, name))
 		}
 	}
-	expiry, err := time.Parse("2006-01-02", expiryText)
-	if err != nil {
+	if _, err := time.Parse("2006-01-02", expiryText); err != nil {
 		problems = append(problems, fmt.Sprintf("%s: expiry %q must use YYYY-MM-DD", prefix, expiryText))
-	} else if expiry.Before(day(now)) {
-		problems = append(problems, fmt.Sprintf("%s: expired %s", prefix, expiryText))
 	}
 	return problems
 }
 
-func day(value time.Time) time.Time {
-	value = value.UTC()
-	return time.Date(value.Year(), value.Month(), value.Day(), 0, 0, 0, 0, time.UTC)
+// collectExpiries gathers every dated row in the ledger exactly once, so a
+// passing date produces one finding per row rather than one per place the row is
+// reached. A malformed date is skipped: validateOwnershipFields already reports
+// it, and faulting it twice turns one authoring mistake into two findings.
+func collectExpiries(ledger Ledger) []waiverclock.Expiry {
+	var expiries []waiverclock.Expiry
+	add := func(prefix, owner, expiryText string) {
+		expires, err := time.Parse("2006-01-02", expiryText)
+		if err != nil || strings.TrimSpace(owner) == "" {
+			return
+		}
+		expiries = append(expiries, waiverclock.Expiry{Label: prefix, Owner: owner, Expires: expires})
+	}
+	addBaselines := func(kind string, rows []Baseline) {
+		for _, row := range rows {
+			add(fmt.Sprintf("%s baseline scope=%s resource=%s", kind, row.Scope, row.Resource), row.OwnerBead, row.Expires)
+		}
+	}
+	addBaselines("audit", ledger.AuditBaseline)
+	addBaselines("debt", ledger.Debt)
+	addBaselines("small debt", ledger.SmallDebt)
+	for _, row := range ledger.Medium {
+		add(fmt.Sprintf("medium owner package_dir=%s package_name=%s owner=%s", row.PackageDir, row.PackageName, row.Owner), row.OwnerBead, row.Expires)
+	}
+	return expiries
 }
 
 // RenderMarkdown renders the exact checked TESTING.md inventory block.
