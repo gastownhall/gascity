@@ -976,6 +976,10 @@ source = ".gc/system/packs/gastown"
 
 [imports.legacy-maintenance]
 source = ".gc/system/packs/maintenance"
+
+[[patches.agent]]
+name = "core.control-dispatcher"
+suspended = true
 `)
 	writePackToml(t, dir, `[pack]
 name = "demo"

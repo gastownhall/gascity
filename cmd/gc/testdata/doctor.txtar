@@ -15,6 +15,11 @@ cd $WORK/health-city
 # Create events.jsonl so that check passes.
 cp $WORK/empty $WORK/health-city/.gc/events.jsonl
 
+# This city never runs `gc start`, so its default agents (mayor,
+# core.control-dispatcher) have no session to observe. Suspend them so
+# agent-sessions reports cleanly instead of "confirmed missing".
+exec sh -c 'printf "\n[[patches.agent]]\nname = \"mayor\"\nsuspended = true\n\n[[patches.agent]]\nname = \"core.control-dispatcher\"\nsuspended = true\n" >> city.toml'
+
 # Doctor on a healthy city passes.
 exec gc doctor
 stdout 'city-structure'
