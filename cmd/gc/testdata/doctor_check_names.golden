@@ -82,7 +82,6 @@ route-recovery-quarantine
 cross-store-gates
 storage-rigs
 dangling-blocking-edges
-hold-label-routed-to
 pool-idle-routed-work
 v2-demand-migrations
 v2-session-migration

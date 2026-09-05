@@ -1,5 +1,10 @@
 # Release Gate: hold-label-routed-to doctor check
 
+Superseded 2026-09-05: issue #6069 identified that the check conflated
+orthogonal hold state with config routing and that its fix overwrote valid
+`gc.routed_to` values. This file remains the historical gate for the retired
+check, not current operating guidance.
+
 Bead: ga-ac03mi
 Branch: builder/ga-fm2vgd.1-hold-label-routing-doctor-check
 Head: 0e8641d5908d6746269df5906ecd7b1afe1d9967
