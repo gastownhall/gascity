@@ -60,6 +60,15 @@
 # declaring vocabulary counts as mentioning it, and the row still moves if the
 # declaration is renamed. "Hits" here means mentions, not call sites.
 #
+# infra_class_migrate.go's row is keyed to infraBindingIDPrefix, not to
+# openInfraDestination, since #5597 extracted the prefix derivation into that
+# helper (openInfraDestination and openInfraBindingReadOnly both consume it).
+# It is the same single ReservedClassPrefix site re-keyed to the function that
+# now opens it — a census move, not growth: the file still has one hit. Whether
+# the helper should consume internal/storeref instead of deriving the prefix is
+# #5597's author's call; this row only stops the ratchet reading a moved site
+# as a new one (ga-zohuic).
+#
 # The two internal/dispatch/drain.go rows arrived when the signature rule
 # widened from cmd/gc+internal/api to every directory grep already scanned. The
 # comment that justified the narrower set claimed sling and dispatch held no
@@ -185,7 +194,7 @@ cmd/gc/dispatch_control_ready.go	controlReadyCacheSources	ast:returns-store-list
 cmd/gc/dispatch_control_ready.go	controlReadyCacheSources	c:beads.Store-literal	3
 cmd/gc/doctor_order_tracking_retention.go	Run	c:beads.Store-literal	1
 cmd/gc/formula_cook_attach_class.go	attachGraftClassRefusal	b:graphClassBinding	1
-cmd/gc/infra_class_migrate.go	openInfraDestination	d:ReservedClassPrefix	1
+cmd/gc/infra_class_migrate.go	infraBindingIDPrefix	d:ReservedClassPrefix	1
 cmd/gc/order_dispatch.go	gateStoresFor	ast:returns-store-list	1
 cmd/gc/order_dispatch.go	gateStoresFor	c:beads.Store-literal	1
 cmd/gc/order_store.go	appendOrdersSweepStore	ast:returns-store-list	1
