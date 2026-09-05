@@ -692,6 +692,7 @@ func namedSessionPostKillTraceConfig() *config.City {
 	return &config.City{
 		Workspace: config.Workspace{Name: "trace-town"},
 		Session:   config.SessionConfig{Provider: "fake"},
+		Daemon:    config.DaemonConfig{ShutdownTimeout: "30s"},
 		Agents: []config.Agent{{
 			Name:              "dispatcher",
 			StartCommand:      "true",
