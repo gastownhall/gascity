@@ -50,7 +50,7 @@ func (c *startupHealthEpisodesCheck) Run(_ *doctor.CheckContext) *doctor.CheckRe
 			"fix bead store access, then rerun gc doctor",
 			nil)
 	}
-	episodes, err := session.NewStore(beads.SessionStore{Store: store}).ListStartupHealthEpisodes()
+	episodes, err := cliSessionFrontDoor(store, c.cfg, c.cityPath).ListStartupHealthEpisodes()
 	if err != nil {
 		return warnCheck(c.Name(),
 			fmt.Sprintf("skipping startup-health episode scan: listing episodes: %v", err),

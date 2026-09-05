@@ -32,21 +32,21 @@
 All tests below were selected by the full-suite command and passed; none skipped or failed:
 
 - `TestBuildDoctorChecks_StartupHealthEpisodesRegisteredRegardlessOfController_GH5742`
-- `TestStartupHealthEpisodesCheck_NoEpisodesIsOK`
-- `TestStartupHealthEpisodesCheck_BelowThresholdIsOK`
-- `TestStartupHealthEpisodesCheck_AtThresholdIsError`
-- `TestStartupHealthEpisodesCheck_StalledResetKindIsDistinguished`
-- `TestStartupHealthEpisodesCheck_MixedKindsBothDistinguished`
-- `TestStartupHealthEpisodesCheck_ActiveQuarantineBelowThresholdIsError`
-- `TestStartupHealthEpisodesCheck_RendersRequiredFields`
-- `TestStartupHealthEpisodesCheck_RecoveredEpisodeIsOK`
-- `TestStartupHealthEpisodesCheck_MalformedEpisodeIsError`
-- `TestStartupHealthEpisodesCheck_DuplicateSessionNamesBothReported`
-- `TestStartupHealthEpisodesCheck_StoreErrorIsGraceful`
-- `TestStartupHealthEpisodesCheck_DeterministicOrdering`
-- `TestStartupHealthEpisodesCheck_CanFixIsFalse`
-- `TestStartupHealthEpisodesCheck_WarmupEligibleIsFalse`
-- `TestStartupHealthEpisodesCheck_NeverLeaksLastDetail`
+- `TestStartupHealthEpisodesCheckNoEpisodesIsOK`
+- `TestStartupHealthEpisodesCheckBelowThresholdIsOK`
+- `TestStartupHealthEpisodesCheckAtThresholdIsError`
+- `TestStartupHealthEpisodesCheckStalledResetKindIsDistinguished`
+- `TestStartupHealthEpisodesCheckMixedKindsBothDistinguished`
+- `TestStartupHealthEpisodesCheckActiveQuarantineBelowThresholdIsError`
+- `TestStartupHealthEpisodesCheckRendersRequiredFields`
+- `TestStartupHealthEpisodesCheckRecoveredEpisodeIsOK`
+- `TestStartupHealthEpisodesCheckMalformedEpisodeIsError`
+- `TestStartupHealthEpisodesCheckDuplicateSessionNamesBothReported`
+- `TestStartupHealthEpisodesCheckStoreErrorIsGraceful`
+- `TestStartupHealthEpisodesCheckDeterministicOrdering`
+- `TestStartupHealthEpisodesCheckCanFixIsFalse`
+- `TestStartupHealthEpisodesCheckWarmupEligibleIsFalse`
+- `TestStartupHealthEpisodesCheckNeverLeaksLastDetail`
 - `TestStoreListStartupHealthEpisodesEmptyStoreReturnsEmpty`
 - `TestStoreListStartupHealthEpisodesReturnsAllSaved`
 - `TestStoreListStartupHealthEpisodesIncludesClosedBeads`
