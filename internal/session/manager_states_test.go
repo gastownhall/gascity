@@ -198,35 +198,139 @@ func TestConformance_ArchivedReactivation(t *testing.T) {
 	}
 }
 
-func TestConformance_IllegalTransitionDraining(t *testing.T) {
-	// Fix 3j: manager mutations now validate against the state machine.
-	// Drain puts a session in Draining; Suspend from Draining is illegal.
+func TestConformance_SuspendDrainingTearsDownRuntimeWithoutRewritingState(t *testing.T) {
+	// ga-rxhu2: `gc stop` and `gc restart` issue suspend on every session bead
+	// with no state pre-filter. Suspend from draining used to return
+	// ErrIllegalTransition, so every restart SKIPPED the draining seats and they
+	// survived as live panes still holding their pool slot names. Handle draining
+	// the way failed-create is already handled (#2597, same function): tear the
+	// runtime down best-effort and report success.
+	//
+	// Deliberately NOT a new state-machine edge. Adding
+	// StateDraining -> StateSuspended to CmdSuspend would release nothing (an OPEN
+	// bead owns its session_name whatever its state) and would let an operator
+	// "suspend" a seat mid-drain, losing the drain reason. So the early return
+	// must leave `state` alone for the drain machinery to finish or the reconciler
+	// to reap.
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	m := NewManagerWithOptions(store, sp)
 
 	id := createTestSession(t, m, "worker")
-
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("get bead: %v", err)
+	}
+	sessName := b.Metadata["session_name"]
+	if err := sp.Start(context.Background(), sessName, runtime.Config{}); err != nil {
+		t.Fatalf("seeding runtime: %v", err)
+	}
 	if err := m.BeginDrain(id, "shutdown"); err != nil {
 		t.Fatalf("BeginDrain: %v", err)
 	}
 
-	err := m.Suspend(id)
-	if err == nil {
-		t.Fatal("Suspend from Draining should return ErrIllegalTransition")
+	if err := m.Suspend(id); err != nil {
+		t.Fatalf("Suspend(draining) = %v, want nil (must not block gc stop and leave a live pane holding a pool name)", err)
 	}
-	if !errors.Is(err, ErrIllegalTransition) {
-		t.Errorf("err = %v, want wrapping ErrIllegalTransition", err)
+	if sp.CountCalls("Stop", sessName) == 0 {
+		t.Errorf("Suspend(draining) did not tear down the runtime session %q", sessName)
 	}
-	var ite *IllegalTransitionError
-	if !errors.As(err, &ite) {
-		t.Fatalf("err should unwrap to *IllegalTransitionError; got %T", err)
+	if sp.IsRunning(sessName) {
+		t.Errorf("runtime session %q still running after Suspend(draining)", sessName)
 	}
-	if ite.From != StateDraining {
-		t.Errorf("ite.From = %q, want %q", ite.From, StateDraining)
+	if got := getState(t, m, id); got != StateDraining {
+		t.Errorf("state = %q, want %q — the early return must not rewrite state and lose the drain", got, StateDraining)
 	}
-	if ite.Command != CmdSuspend {
-		t.Errorf("ite.Command = %q, want %q", ite.Command, CmdSuspend)
+	after, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("get bead: %v", err)
+	}
+	if after.Metadata["suspended_at"] != "" {
+		t.Errorf("suspended_at = %q, want empty: this path performs no suspension", after.Metadata["suspended_at"])
+	}
+	if after.Metadata["drain_at"] == "" {
+		t.Error("drain_at was cleared; the drain reason must survive a city stop")
+	}
+}
+
+// The scope control for the pin above. The draining escape hatch must be
+// draining-ONLY, never a blanket "any state suspends" that would hide a real
+// illegal-transition bug elsewhere.
+func TestConformance_SuspendStillRejectsOtherIllegalStates(t *testing.T) {
+	for _, from := range []State{StateStartPending, StateCreating, StateDrained} {
+		t.Run(string(from), func(t *testing.T) {
+			store := beads.NewMemStore()
+			sp := runtime.NewFake()
+			m := NewManagerWithOptions(store, sp)
+
+			id := createTestSession(t, m, "worker")
+			if err := store.SetMetadata(id, "state", string(from)); err != nil {
+				t.Fatalf("set state %q: %v", from, err)
+			}
+
+			err := m.Suspend(id)
+			if err == nil {
+				t.Fatalf("Suspend from %q should return ErrIllegalTransition", from)
+			}
+			if !errors.Is(err, ErrIllegalTransition) {
+				t.Errorf("err = %v, want wrapping ErrIllegalTransition", err)
+			}
+			var ite *IllegalTransitionError
+			if !errors.As(err, &ite) {
+				t.Fatalf("err should unwrap to *IllegalTransitionError; got %T", err)
+			}
+			if ite.From != from {
+				t.Errorf("ite.From = %q, want %q", ite.From, from)
+			}
+			if ite.Command != CmdSuspend {
+				t.Errorf("ite.Command = %q, want %q", ite.Command, CmdSuspend)
+			}
+		})
+	}
+}
+
+// The other scope control: an ACTIVE seat's suspend is completely unchanged —
+// runtime stopped, state rewritten to suspended, suspended_at stamped.
+func TestConformance_SuspendActiveSessionUnchanged(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	m := NewManagerWithOptions(store, sp)
+
+	id := createTestSession(t, m, "worker")
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("get bead: %v", err)
+	}
+	sessName := b.Metadata["session_name"]
+	if err := sp.Start(context.Background(), sessName, runtime.Config{}); err != nil {
+		t.Fatalf("seeding runtime: %v", err)
+	}
+
+	if err := m.Suspend(id); err != nil {
+		t.Fatalf("Suspend(active) = %v, want nil", err)
+	}
+	if got := getState(t, m, id); got != StateSuspended {
+		t.Errorf("state = %q, want %q", got, StateSuspended)
+	}
+	if sp.IsRunning(sessName) {
+		t.Errorf("runtime session %q still running after Suspend(active)", sessName)
+	}
+	after, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("get bead: %v", err)
+	}
+	if after.Metadata["suspended_at"] == "" {
+		t.Error("suspended_at not stamped on an ordinary active suspend")
+	}
+}
+
+// The state machine itself must NOT gain a draining edge: the fix lives in
+// Manager.Suspend's pre-checks, and a table edge would release no pool name
+// while silently converting a drain into a suspension.
+func TestConformance_SuspendTableStillRejectsDraining(t *testing.T) {
+	if _, err := Transition(StateDraining, CmdSuspend); !errors.Is(err, ErrIllegalTransition) {
+		t.Errorf("Transition(draining, suspend) err = %v, want ErrIllegalTransition — "+
+			"the escape hatch belongs in Manager.Suspend, not the transition table", err)
 	}
 }
 
