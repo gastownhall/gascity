@@ -282,6 +282,16 @@ func verifyHandoffStopComplete(request handoffProtocolRequest, layout managedDol
 }
 
 func validateHandoffProtocolRequest(request handoffProtocolRequest) error {
+	// Managed GC currently owns TCP listeners only.  Keep this refusal at the
+	// request boundary: accepting a Unix-socket endpoint here would let the
+	// protocol acquire the lifecycle lock before inspect/stop discover that the
+	// rest of the implementation is port-based (request.Endpoint.Port == 0).
+	// The socket field remains part of the provider-neutral request shape so a
+	// caller can receive a stable unsupported_scope result rather than mistaking
+	// the endpoint for a supported handoff.
+	if strings.TrimSpace(request.Endpoint.Socket) != "" {
+		return handoffErr("unsupported_scope", errors.New("unix socket handoff is not supported by managed GC runtime"))
+	}
 	if strings.TrimSpace(request.CityRoot) == "" || strings.TrimSpace(request.ScopeRoot) == "" ||
 		strings.TrimSpace(request.Database) == "" || strings.TrimSpace(request.Workspace) == "" {
 		return handoffErr("invalid_request", errors.New("city, scope-root, database, and workspace are required"))
@@ -304,12 +314,6 @@ func validateHandoffProtocolRequest(request handoffProtocolRequest) error {
 		return handoffErr("unsupported_scope", errors.New("scope root is outside city root"))
 	}
 	e := request.Endpoint
-	if e.Socket != "" {
-		if e.Host != "" || e.Port != 0 || !filepath.IsAbs(e.Socket) {
-			return handoffErr("invalid_request", errors.New("socket endpoint must be absolute and exclusive"))
-		}
-		return nil
-	}
 	if e.Port <= 0 || e.Port > 65535 || (strings.TrimSpace(e.Host) != "127.0.0.1" && strings.TrimSpace(e.Host) != "localhost" && strings.TrimSpace(e.Host) != "::1") {
 		return handoffErr("invalid_request", errors.New("endpoint must be loopback host and valid port"))
 	}

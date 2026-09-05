@@ -73,6 +73,79 @@ func TestDoltStateHandoffInspectDoesNotCreateLifecycleFiles(t *testing.T) {
 	}
 }
 
+func TestDoltStateHandoffRejectsSocketBeforeLifecycleMutation(t *testing.T) {
+	city := t.TempDir()
+	layout, err := resolveManagedDoltRuntimeLayout(city)
+	if err != nil {
+		t.Fatalf("resolve layout: %v", err)
+	}
+	socket := filepath.Join(city, "dolt.sock")
+	args := []string{
+		"dolt-state", "handoff-inspect", "--json", "--city", city, "--scope-root", city,
+		"--database", "beads", "--workspace", "test", "--socket", socket,
+	}
+	var stdout, stderr bytes.Buffer
+	code := run(args, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("run() = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	response := decodeHandoffResponse(t, stdout.Bytes())
+	if response.Result != "refused" || response.ErrorCode != "unsupported_scope" || response.Mutates {
+		t.Fatalf("response = %+v, want unsupported_scope refusal with mutates=false", response)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("handoff protocol wrote stderr: %q", stderr.String())
+	}
+	for name, path := range map[string]string{
+		"pack state dir": layout.PackStateDir,
+		"data dir":       layout.DataDir,
+		"state file":     layout.StateFile,
+		"pid file":       layout.PIDFile,
+		"lock file":      layout.LockFile,
+		"config file":    layout.ConfigFile,
+	} {
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("socket refusal created or changed %s %q (stat err=%v)", name, path, statErr)
+		}
+	}
+}
+
+func TestDoltStateHandoffStopRejectsSocketBeforeLifecycleMutation(t *testing.T) {
+	city := t.TempDir()
+	layout, err := resolveManagedDoltRuntimeLayout(city)
+	if err != nil {
+		t.Fatalf("resolve layout: %v", err)
+	}
+	args := []string{
+		"dolt-state", "handoff-stop", "--json", "--city", city, "--scope-root", city,
+		"--database", "beads", "--workspace", "test", "--socket", filepath.Join(city, "dolt.sock"),
+	}
+	var stdout, stderr bytes.Buffer
+	code := run(args, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("run() = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	response := decodeHandoffResponse(t, stdout.Bytes())
+	if response.Result != "refused" || response.ErrorCode != "unsupported_scope" || response.Mutates {
+		t.Fatalf("response = %+v, want unsupported_scope refusal with mutates=false", response)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("handoff protocol wrote stderr: %q", stderr.String())
+	}
+	for name, path := range map[string]string{
+		"pack state dir": layout.PackStateDir,
+		"data dir":       layout.DataDir,
+		"state file":     layout.StateFile,
+		"pid file":       layout.PIDFile,
+		"lock file":      layout.LockFile,
+		"config file":    layout.ConfigFile,
+	} {
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("socket refusal created or changed %s %q (stat err=%v)", name, path, statErr)
+		}
+	}
+}
+
 func TestDoltStateHandoffRejectsMalformedPersistedState(t *testing.T) {
 	city := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(city)
