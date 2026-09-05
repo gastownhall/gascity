@@ -130,6 +130,69 @@ func TestBdCommandRunnerForCityCompleteStorageBindingSkipsManagedRetry(t *testin
 	}
 }
 
+func TestBdContextCommandRunnerForCityPinsCanonicalGCBinary(t *testing.T) {
+	t.Setenv("GC_BIN", "/tmp/stale-gc")
+	cityPath := t.TempDir()
+	bdPath := filepath.Join(t.TempDir(), "bd")
+	if err := os.WriteFile(bdPath, []byte("#!/bin/sh\nprintf '%s\\n' \"$GC_BIN\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(fmt.Sprintf("[workspace]\nname = \"bound\"\n[workspace.env]\nBD_BIN = %q\n", bdPath)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeBoundCityFixture(t, cityPath)
+	gcBin := filepath.Join(t.TempDir(), "gc")
+	if err := os.WriteFile(gcBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldResolve := resolveProviderLifecycleGCBinary
+	resolveProviderLifecycleGCBinary = func() string { return gcBin }
+	t.Cleanup(func() { resolveProviderLifecycleGCBinary = oldResolve })
+	want, err := filepath.EvalSymlinks(gcBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := bdCommandRunnerForCity(cityPath)(cityPath, "bd", "status")
+	if err != nil {
+		t.Fatalf("bd context runner: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != want {
+		t.Fatalf("child GC_BIN = %q, want canonical %q", got, want)
+	}
+}
+
+func TestBeadsCommandRunnerWithContextPinsCanonicalGCBinary(t *testing.T) {
+	t.Setenv("GC_BIN", "/tmp/stale-gc")
+	cityPath := t.TempDir()
+	bdPath := filepath.Join(t.TempDir(), "bd")
+	if err := os.WriteFile(bdPath, []byte("#!/bin/sh\nprintf '%s\\n' \"$GC_BIN\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gcBin := filepath.Join(t.TempDir(), "gc")
+	if err := os.WriteFile(gcBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldResolve := resolveProviderLifecycleGCBinary
+	resolveProviderLifecycleGCBinary = func() string { return gcBin }
+	t.Cleanup(func() { resolveProviderLifecycleGCBinary = oldResolve })
+	env := map[string]string{"BD_BIN": bdPath}
+	runner, err := beadsCommandRunnerWithContextForHostedCity(context.Background(), cityPath, env)
+	if err != nil {
+		t.Fatalf("context runner: %v", err)
+	}
+	out, err := runner(cityPath, "bd", "status")
+	if err != nil {
+		t.Fatalf("context runner invocation: %v", err)
+	}
+	want, err := filepath.EvalSymlinks(gcBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(out)); got != want {
+		t.Fatalf("child GC_BIN = %q, want canonical %q", got, want)
+	}
+}
+
 func countBdShimInvocations(t *testing.T, path string) int {
 	t.Helper()
 	data, err := os.ReadFile(path)

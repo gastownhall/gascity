@@ -1222,6 +1222,9 @@ func initDefaultRigBdStore(cityPath, dir, prefix, doltDatabase string) error {
 	env := map[string]string{
 		"BEADS_DIR": filepath.Join(dir, ".beads"),
 	}
+	if err := pinBdGCEnvironment(env); err != nil {
+		return err
+	}
 	applyExportSuppressionEnv(env)
 	args := []string{"init", "-p", prefix, "--skip-hooks"}
 	if scopeUsesProxiedDoltMode(cityPath, dir) || (!scopeOverridesCityBackend(cityPath, dir) && scopeUsesProxiedDoltMode(cityPath, cityPath)) {
