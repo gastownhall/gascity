@@ -505,7 +505,7 @@ func validateHandoffPersistedScope(request handoffProtocolRequest) error {
 		return handoffErr("state_missing", fmt.Errorf("read metadata project identity: %w", err))
 	}
 	if l1OK && l2ID != "" && l1ID != l2ID {
-		return handoffErr("identity_changed", errors.New("project identity differs between identity.toml and metadata.json"))
+		return handoffErr("identity_changed", errors.New("project identity differs between the canonical file and metadata.json"))
 	}
 	trustedID := l1ID
 	if !l1OK {
