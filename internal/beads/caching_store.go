@@ -43,6 +43,22 @@ type CachingStore struct {
 	observationRevision uint64
 	primePartialErr     error
 
+	// availabilityGate, when set, reports backing-store transport
+	// availability (the per-scope circuit breaker). See
+	// SetAvailabilityGate.
+	// Atomic, NOT mu-guarded: it is read on the hot read paths, so putting
+	// it under c.mu would make a canceled caller block on a contended cache
+	// lock just to learn whether the transport is believed down. This also
+	// matches the rule stated on Degraded(): foreign breaker code must
+	// never execute under this lock.
+	availabilityGate atomic.Pointer[AvailabilityGate]
+	// unavailableSkipLogged dedupes the reconcile-skip problem log to one
+	// entry per unavailable episode. Guarded by mu.
+	unavailableSkipLogged bool
+	// degradedReads counts reads served from last-good cache while the
+	// availability gate reported the store unavailable.
+	degradedReads atomic.Int64
+
 	// readyProjectionDegraded latches when the backing store reported it cannot
 	// serve the ready projection at all. It is deliberately NOT primePartialErr:
 	// see readyReadsMustGoLive for what each flag costs which reads. Atomic
@@ -141,11 +157,14 @@ type CacheStats struct {
 	Updates                 int64
 	ReconcileRecoveries     int64
 	ReconcileCloseDeferrals int64
-	SyncFailures            int
-	ProblemCount            int64
-	LastProblemAt           time.Time
-	LastProblem             string
-	State                   string
+	// DegradedReads counts reads served from last-good cache while the
+	// backing store was unavailable.
+	DegradedReads int64
+	SyncFailures  int
+	ProblemCount  int64
+	LastProblemAt time.Time
+	LastProblem   string
+	State         string
 	// StaggerOffsetMs is the one-shot startup delay applied between Prime
 	// and the first reconciler tick, in milliseconds. Set once when
 	// StartReconciler runs; zero if stagger is disabled.
@@ -1346,6 +1365,7 @@ func (c *CachingStore) Stats() CacheStats {
 	defer c.mu.RUnlock()
 
 	s := c.stats
+	s.DegradedReads = c.degradedReads.Load()
 	switch c.state {
 	case cachePartial:
 		s.State = "partial"

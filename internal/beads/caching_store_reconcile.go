@@ -253,6 +253,12 @@ func cadenceTransitionDriver(prevDriver, nextDriver string) string {
 }
 
 func (c *CachingStore) nextReconcileDelay(now time.Time) time.Duration {
+	// Breaker open with no recovery probe due: stay idle for a poll interval
+	// instead of burning a full bd scan against a store known unreachable.
+	// Probe-due cycles still run — the reconcile scan IS the recovery probe.
+	if g := c.availabilityGateRef(); g != nil && !g.Available() && !g.ProbeDue() {
+		return cacheReconcilePollInterval
+	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -288,6 +294,12 @@ func (c *CachingStore) nextReconcileDelay(now time.Time) time.Duration {
 }
 
 func (c *CachingStore) runReconciliation() {
+	// Breaker open: skip the cycle cheaply (one problem entry per episode)
+	// unless a recovery probe is due, in which case the scan below doubles
+	// as the probe.
+	if c.reconcileUnavailableSkip() {
+		return
+	}
 	start := time.Now()
 
 	c.mu.RLock()

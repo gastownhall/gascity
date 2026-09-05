@@ -1307,6 +1307,9 @@
           "beads_store": {
             "type": "string"
           },
+          "degraded": {
+            "type": "boolean"
+          },
           "native_store_eligible": {
             "type": "boolean"
           },

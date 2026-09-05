@@ -17,6 +17,15 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
+	// Breaker open: do not dial a store proven down by real command outcomes.
+	// listLastGood answers what the snapshot can answer honestly — active and
+	// ParentID shapes serve rows (nil error, preserving this path's contract
+	// for error-intolerant consumers), a partially-primed snapshot is tagged
+	// partial, and Live, closed-only and unprimed shapes refuse with
+	// ErrStoreUnavailable.
+	if c.servingDegraded() {
+		return c.listLastGood(query)
+	}
 	if query.Live || query.ParentID != "" {
 		c.mu.RLock()
 		startSeq := c.mutationSeq
@@ -112,6 +121,30 @@ func (c *CachingStore) Count(ctx context.Context, query ListQuery, excludeTypes 
 	}
 	if query.Limit > 0 {
 		return 0, fmt.Errorf("counting beads: %w", ErrCountUnsupported)
+	}
+	// Context BEFORE any lock acquisition: the degraded path takes c.mu, so
+	// checking the gate first would make a canceled caller wait on the cache
+	// lock — the exact contract
+	// TestCachingStoreCountContextCancelsWhileWaitingForLock pins.
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+	}
+	// Breaker open: the store is proven down, so dialing it for a count defeats
+	// the gate. Serve the snapshot count for shapes it can answer honestly;
+	// refuse the rest rather than reporting a number nobody can stand behind.
+	if c.servingDegraded() {
+		// A backing store with no Counter cannot count regardless of the gate;
+		// callers fall back to List, so the contract must stay
+		// ErrCountUnsupported rather than becoming ErrStoreUnavailable.
+		if _, hasCounter := c.backing.(Counter); !hasCounter {
+			return 0, fmt.Errorf("counting beads: backing store: %w", ErrCountUnsupported)
+		}
+		if n, ok := c.lastGoodCount(ctx, query, excludeTypes); ok {
+			return n, nil
+		}
+		return 0, fmt.Errorf("counting beads: %w", ErrStoreUnavailable)
 	}
 	if !query.Live && query.ParentID == "" && !query.IncludesClosed() {
 		n, ok, err := c.cachedCountContext(ctx, query, excludeTypes)
@@ -464,6 +497,11 @@ func (c *CachingStore) ListOpen(status ...string) ([]Bead, error) {
 
 // Get returns a single bead by ID from the cache or backing store.
 func (c *CachingStore) Get(id string) (Bead, error) {
+	// Breaker open: serve the last-good cached bead; an uncached ID is
+	// ErrStoreUnavailable because the cache cannot prove absence.
+	if c.servingDegraded() {
+		return c.getLastGood(id)
+	}
 	c.mu.RLock()
 	if _, deleted := c.deletedSeq[id]; deleted {
 		c.mu.RUnlock()
