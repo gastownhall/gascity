@@ -694,10 +694,22 @@ func readFilteredTailFromFile(f *os.File, size int64, filter Filter, limit int) 
 		return nil, nil
 	}
 	const chunkSize int64 = 64 * 1024
+	// A Since filter is a horizon as well as a predicate. Without this the
+	// walk keeps going after it has left the window, looking for a `limit`
+	// it can never reach — matchesFilter rejects everything older — and a
+	// selective Type filter turns that into a full backward parse of the
+	// file at the same cost as the forward scan. That is this walk's half
+	// of the same defect, and it is the half the supervisor's event API
+	// hits: ListTail is what serves `gc events`.
+	horizon := time.Time{}
+	if !filter.Since.IsZero() {
+		horizon = filter.Since.Add(-sinceScanSkew)
+	}
+	pastHorizon := false
 	var reversed []Event
 	var pending []byte
 	end := size
-	for end > 0 && len(reversed) < limit && (filter.MaxScanBytes <= 0 || size-end < filter.MaxScanBytes) {
+	for end > 0 && len(reversed) < limit && !pastHorizon && (filter.MaxScanBytes <= 0 || size-end < filter.MaxScanBytes) {
 		n := chunkSize
 		if end < n {
 			n = end
@@ -729,7 +741,7 @@ func readFilteredTailFromFile(f *os.File, size int64, filter Filter, limit int) 
 		} else {
 			pending = nil
 		}
-		for i := len(parts) - 1; i >= firstComplete && len(reversed) < limit; i-- {
+		for i := len(parts) - 1; i >= firstComplete && len(reversed) < limit && !pastHorizon; i-- {
 			line := bytes.TrimSuffix(parts[i], []byte{'\r'})
 			if len(bytes.TrimSpace(line)) == 0 {
 				continue
@@ -740,6 +752,12 @@ func readFilteredTailFromFile(f *os.File, size int64, filter Filter, limit int) 
 			}
 			if matchesFilter(e, filter) {
 				reversed = append(reversed, e)
+			}
+			// Checked after matching, so an event at the very edge of the
+			// margin is still a legitimate match. See sinceScanSkew for why
+			// the stop is a margin past Since rather than at it.
+			if !horizon.IsZero() && !e.Ts.IsZero() && e.Ts.Before(horizon) {
+				pastHorizon = true
 			}
 		}
 		end = start
