@@ -185,7 +185,7 @@ cmd/gc/dispatch_control_ready.go	controlReadyCacheSources	ast:returns-store-list
 cmd/gc/dispatch_control_ready.go	controlReadyCacheSources	c:beads.Store-literal	3
 cmd/gc/doctor_order_tracking_retention.go	Run	c:beads.Store-literal	1
 cmd/gc/formula_cook_attach_class.go	attachGraftClassRefusal	b:graphClassBinding	1
-cmd/gc/infra_class_migrate.go	openInfraDestination	d:ReservedClassPrefix	1
+cmd/gc/infra_class_migrate.go	infraBindingIDPrefix	d:ReservedClassPrefix	1
 cmd/gc/order_dispatch.go	gateStoresFor	ast:returns-store-list	1
 cmd/gc/order_dispatch.go	gateStoresFor	c:beads.Store-literal	1
 cmd/gc/order_store.go	appendOrdersSweepStore	ast:returns-store-list	1
