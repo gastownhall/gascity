@@ -48,6 +48,9 @@ func bdCommandRunnerForCity(cityPath string) beads.CommandRunner {
 func bdContextCommandRunnerForCity(cityPath string) beads.CommandRunner {
 	return func(dir, name string, args ...string) ([]byte, error) {
 		env := cityRuntimeEnvMapForCity(cityPath)
+		if err := pinBdGCEnvironment(env); err != nil {
+			return nil, err
+		}
 		bdBin, err := workspacePinnedBdBinary(cityPath)
 		if err != nil {
 			return nil, err
