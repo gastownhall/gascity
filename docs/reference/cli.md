@@ -65,6 +65,7 @@ gc [flags]
 | [gc pack](#gc-pack) | Manage remote pack sources |
 | [gc prime](#gc-prime) | Output the behavioral prompt for an agent |
 | [gc prompt](#gc-prompt) | Author and inspect agent prompt templates |
+| [gc provider](#gc-provider) | Provider management utilities |
 | [gc ready](#gc-ready) | List ready (claimable) work across every store in the city |
 | [gc register](#gc-register) | Register a city with the machine-wide supervisor |
 | [gc reload](#gc-reload) | Reload the current city's config without restarting the city/controller |
@@ -3358,6 +3359,46 @@ gc prompt synth [flags]
 | `--wait-timeout` | duration | `10m0s` | in slingued mode with --wait, abort after this duration |
 | `--write` | bool |  | write to &lt;city&gt;/agents/&lt;role&gt;/prompt.template.md instead of stdout (direct mode only; slingued mode always writes) |
 | `--writer-agent` | string |  | Gas City agent to delegate the synth to via mol-prompt-synth (default: empty = direct mode, no agent) |
+
+## gc provider
+
+Provider management utilities for the configured [providers.&lt;name&gt;] blocks in city.toml.
+
+```
+gc provider
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc provider credentials](#gc-provider-credentials) | Show which environment variable holds a provider's credentials |
+
+## gc provider credentials
+
+Report which environment variable holds each of a provider's credentials, and
+what stands between changing it and the fleet using it.
+
+Which variable that is, is not obvious. A provider declares its credential
+env-var names through its upstream_env binding (api_key and auth_token; never
+base_url), those names resolve through the provider's inheritance chain, and
+each one's value may interpolate a different variable again. This command
+performs that resolution and reports, naming the reason, wherever no single
+variable holds the credential.
+
+It also reports what would stop a change from taking effect: a variable the
+supervisor does not forward into its service environment, a later config layer
+that overrides the credential for particular agents, and whether this city's
+supervisor reads the machine-local secrets file at all.
+
+Changing a credential does not apply itself. A credential change moves no
+config fingerprint, so no agent restarts on its own, and the supervisor
+resolves session environment from its own environment, fixed when it exec'd.
+Applying a new value means: write it where the supervisor reads it, regenerate
+the service file so the supervisor re-execs with it, then cycle the agents.
+Until the supervisor re-execs, every running session keeps the old credential.
+
+```
+gc provider credentials <provider>
+```
 
 ## gc ready
 

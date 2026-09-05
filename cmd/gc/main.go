@@ -345,6 +345,7 @@ func newRootCmdWithOptions(stdout, stderr io.Writer, options rootCommandOptions)
 		newEventCmd(stdout, stderr),
 		newEventsCmd(stdout, stderr),
 		newExtMsgCmd(stdout, stderr),
+		newProviderCmd(stdout, stderr),
 		newTraceCmd(stdout, stderr),
 		newOrderCmd(stdout, stderr),
 		newImportCmd(stdout, stderr),

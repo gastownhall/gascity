@@ -296,6 +296,10 @@ const supervisorPreserveSessionsOnSignalEnv = "GC_SUPERVISOR_PRESERVE_SESSIONS_O
 // around `gc supervisor run` that sources a credentials file).
 const supervisorOmitProviderCredsEnv = "GC_SUPERVISOR_OMIT_PROVIDER_CREDS"
 
+// supervisorEnvOptInVar names the variable whose value opts additional env
+// keys into the generated service file.
+const supervisorEnvOptInVar = "GC_SUPERVISOR_ENV"
+
 // 32768 is the Linux kernel default for net.ipv4.ip_local_port_range lower bound.
 const supervisorEphemeralPortWarningThreshold = 32768
 
