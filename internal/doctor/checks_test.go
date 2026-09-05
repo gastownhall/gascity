@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 type partialListDoctorProvider struct {
@@ -814,6 +815,27 @@ func TestBinaryCheck_VersionNotFoundStillError(t *testing.T) {
 
 // --- AgentSessionsCheck ---
 
+// fakeBoundedLivenessProvider wraps runtime.Fake and implements
+// runtime.BoundedLivenessObserver so tests can force ObservationIncomplete —
+// via a provider error wrapping runtime.ErrRuntimeUnavailable, or via a
+// controllable delay that outlasts a short per-target timeout — without
+// depending on any real runtime backend.
+type fakeBoundedLivenessProvider struct {
+	*runtime.Fake
+	err   error
+	delay <-chan struct{}
+}
+
+func (p *fakeBoundedLivenessProvider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	if p.delay != nil {
+		<-p.delay
+	}
+	if p.err != nil {
+		return runtime.Liveness{}, p.err
+	}
+	return runtime.ObserveLiveness(p.Fake, name, processNames), nil
+}
+
 func TestAgentSessionsCheck_AllRunning(t *testing.T) {
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "mayor", runtime.Config{}); err != nil {
@@ -839,8 +861,20 @@ func TestAgentSessionsCheck_Missing(t *testing.T) {
 	}
 	c := NewAgentSessionsCheck(cfg, "test", "", sp)
 	r := c.Run(&CheckContext{})
-	if r.Status != StatusWarning {
-		t.Errorf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	if r.Status != StatusError {
+		t.Errorf("status = %d, want Error (confirmed missing); msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.FixHint, "mayor") {
+		t.Errorf("FixHint = %q, want it to name the confirmed-missing agent %q", r.FixHint, "mayor")
+	}
+	found := false
+	for _, d := range r.Details {
+		if strings.Contains(d, "mayor") && strings.Contains(d, "confirmed missing") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Details = %v, want a line naming %q as confirmed missing", r.Details, "mayor")
 	}
 }
 
@@ -855,6 +889,136 @@ func TestAgentSessionsCheck_SkipsSuspended(t *testing.T) {
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Errorf("status = %d, want OK (suspended skipped); msg = %s", r.Status, r.Message)
+	}
+}
+
+// TestAgentSessionsCheck_ProbeIncompleteIsWarningWithoutFixHint covers the
+// tri-state contract from ga-8u05ya/ga-xiukll: a provider error wrapping
+// runtime.ErrRuntimeUnavailable means the probe could not observe the
+// target, not that the session is confirmed gone. That must resolve to
+// StatusWarning (advisory: something is unknown) rather than StatusError
+// (which is reserved for confirmed-missing), and FixHint must stay empty —
+// naming a specific agent for restart when we don't know it's actually down
+// would be a false recovery instruction.
+func TestAgentSessionsCheck_ProbeIncompleteIsWarningWithoutFixHint(t *testing.T) {
+	sp := &fakeBoundedLivenessProvider{
+		Fake: runtime.NewFake(),
+		err:  fmt.Errorf("probe failed: %w", runtime.ErrRuntimeUnavailable),
+	}
+
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "mayor"}},
+	}
+	c := NewAgentSessionsCheck(cfg, "test", "", sp)
+	r := c.Run(&CheckContext{})
+
+	if r.Status != StatusWarning {
+		t.Errorf("status = %d, want Warning (probe-incomplete, not confirmed-missing); msg = %s", r.Status, r.Message)
+	}
+	if r.FixHint != "" {
+		t.Errorf("FixHint = %q, want empty — nothing was confirmed missing, only incomplete", r.FixHint)
+	}
+	found := false
+	for _, d := range r.Details {
+		if strings.Contains(d, "observation incomplete") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Details = %v, want a line noting observation incomplete", r.Details)
+	}
+}
+
+// TestAgentSessionsCheck_TimeoutYieldsProbeIncomplete proves the per-target
+// bound (FR5/NFR4 in ga-xiukll's architecture): a single stuck probe must
+// resolve to probe-incomplete once livenessTimeout elapses, not hang the
+// whole check. Mirrors the release-channel + short-timeout pattern in
+// checks_order_firing_bounded_test.go (TestOrderFiringCurrent_TimeoutHintNamesQueryCost).
+func TestAgentSessionsCheck_TimeoutYieldsProbeIncomplete(t *testing.T) {
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+
+	sp := &fakeBoundedLivenessProvider{Fake: runtime.NewFake(), delay: release}
+
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "mayor"}},
+	}
+	c := NewAgentSessionsCheck(cfg, "test", "", sp)
+	c.livenessTimeout = 20 * time.Millisecond
+
+	r := c.Run(&CheckContext{})
+
+	if r.Status != StatusWarning {
+		t.Errorf("status = %d, want Warning (probe-incomplete, not confirmed-missing); msg = %s", r.Status, r.Message)
+	}
+	if r.FixHint != "" {
+		t.Errorf("FixHint = %q, want empty — nothing was confirmed missing, only incomplete", r.FixHint)
+	}
+	found := false
+	for _, d := range r.Details {
+		if strings.Contains(d, "observation incomplete") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Details = %v, want a line noting observation incomplete", r.Details)
+	}
+}
+
+// TestAgentSessionsCheck_SkipsRigSuspendedViaState covers AF2 in
+// ga-xiukll's architecture: a rig suspended via the runtime
+// suspension-state overlay (.gc/runtime/suspension-state.json, written by
+// `gc rig suspend`) must be filtered out at Run()-time even though the
+// agent's own config.Agent.Suspended is false and the rig has no authored
+// suspended_on_start default.
+func TestAgentSessionsCheck_SkipsRigSuspendedViaState(t *testing.T) {
+	cityDir := t.TempDir()
+	st := suspensionstate.State{
+		Rigs: map[string]suspensionstate.Override{
+			"alpha": {Suspended: boolPtr(true)},
+		},
+	}
+	if err := suspensionstate.Save(fsys.OSFS{}, cityDir, st); err != nil {
+		t.Fatal(err)
+	}
+
+	sp := runtime.NewFake()
+	// Don't start any sessions — would be confirmed-missing if not skipped.
+
+	cfg := &config.City{
+		Rigs:   []config.Rig{{Name: "alpha"}},
+		Agents: []config.Agent{{Name: "worker", Dir: "alpha"}},
+	}
+	c := NewAgentSessionsCheck(cfg, "test", "", sp)
+	r := c.Run(&CheckContext{CityPath: cityDir})
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK (rig suspended via runtime state); msg = %s", r.Status, r.Message)
+	}
+}
+
+// TestAgentSessionsCheck_SkipsCitySuspendedViaState covers the city-level
+// half of AF2: a whole-city suspension recorded via the runtime
+// suspension-state overlay must skip every agent, including city-scoped
+// agents (empty Dir) that have no owning rig to check.
+func TestAgentSessionsCheck_SkipsCitySuspendedViaState(t *testing.T) {
+	cityDir := t.TempDir()
+	st := suspensionstate.State{
+		City: suspensionstate.Override{Suspended: boolPtr(true)},
+	}
+	if err := suspensionstate.Save(fsys.OSFS{}, cityDir, st); err != nil {
+		t.Fatal(err)
+	}
+
+	sp := runtime.NewFake()
+	// Don't start any sessions — would be confirmed-missing if not skipped.
+
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "mayor"}}, // city-scoped: empty Dir
+	}
+	c := NewAgentSessionsCheck(cfg, "test", "", sp)
+	r := c.Run(&CheckContext{CityPath: cityDir})
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK (city suspended via runtime state); msg = %s", r.Status, r.Message)
 	}
 }
 
@@ -888,8 +1052,20 @@ func TestZombieSessionsCheck_Found(t *testing.T) {
 	}
 	c := NewZombieSessionsCheck(cfg, "test", "", sp)
 	r := c.Run(&CheckContext{})
-	if r.Status != StatusWarning {
-		t.Errorf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	if r.Status != StatusError {
+		t.Errorf("status = %d, want Error (confirmed zombie); msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.FixHint, "mayor") {
+		t.Errorf("FixHint = %q, want it to name the confirmed zombie session %q", r.FixHint, "mayor")
+	}
+	found := false
+	for _, d := range r.Details {
+		if strings.Contains(d, "mayor") && strings.Contains(d, "confirmed zombie") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Details = %v, want a line naming %q as confirmed zombie", r.Details, "mayor")
 	}
 }
 
@@ -1031,6 +1207,42 @@ func TestZombieSessionsCheck_SkipsNoProcessNames(t *testing.T) {
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Errorf("status = %d, want OK (no process_names = skip zombie check); msg = %s", r.Status, r.Message)
+	}
+}
+
+// TestZombieSessionsCheck_ProbeIncompleteIsWarningWithoutFixHint mirrors
+// TestAgentSessionsCheck_ProbeIncompleteIsWarningWithoutFixHint for the
+// zombie-specific tri-state question ("is the process dead while the
+// session still exists"): a provider error wrapping
+// runtime.ErrRuntimeUnavailable must resolve to StatusWarning, not
+// StatusError, and must not produce a targeted kill hint for a session that
+// was never confirmed to be a zombie.
+func TestZombieSessionsCheck_ProbeIncompleteIsWarningWithoutFixHint(t *testing.T) {
+	sp := &fakeBoundedLivenessProvider{
+		Fake: runtime.NewFake(),
+		err:  fmt.Errorf("probe failed: %w", runtime.ErrRuntimeUnavailable),
+	}
+
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "mayor", ProcessNames: []string{"claude"}}},
+	}
+	c := NewZombieSessionsCheck(cfg, "test", "", sp)
+	r := c.Run(&CheckContext{})
+
+	if r.Status != StatusWarning {
+		t.Errorf("status = %d, want Warning (probe-incomplete, not confirmed zombie); msg = %s", r.Status, r.Message)
+	}
+	if r.FixHint != "" {
+		t.Errorf("FixHint = %q, want empty — nothing was confirmed a zombie, only incomplete", r.FixHint)
+	}
+	found := false
+	for _, d := range r.Details {
+		if strings.Contains(d, "observation incomplete") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Details = %v, want a line noting observation incomplete", r.Details)
 	}
 }
 

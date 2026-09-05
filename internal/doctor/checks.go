@@ -462,6 +462,10 @@ type AgentSessionsCheck struct {
 	cityName        string
 	sessionTemplate string
 	sp              runtime.Provider
+	// livenessTimeout bounds each per-agent liveness probe. Zero means use
+	// the package default; tests may override it for deterministic timeout
+	// behavior, mirroring OrderFiringCurrentCheck.historyTimeout.
+	livenessTimeout time.Duration
 }
 
 // NewAgentSessionsCheck creates a check for agent session liveness.
