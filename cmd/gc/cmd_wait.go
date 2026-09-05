@@ -61,35 +61,71 @@ func (f waitDependencyReaderFunc) Get(id string) (beads.Bead, error) {
 	return f(id)
 }
 
-type waitDependencyStoreSet []beads.Store
+// errWaitDependencyUnproven marks a dependency lookup that found nothing over a
+// frame narrower than the city. It is deliberately NOT beads.ErrNotFound:
+// prepareWaitWakeStateWithSnapshot FAILS a wait on a proved absence, which is
+// terminal and destructive, so "no leg could answer" must never arrive wearing
+// the same error as "this bead does not exist".
+var errWaitDependencyUnproven = errors.New("wait dependency absence not proved: no leg could answer")
 
-func (s waitDependencyStoreSet) Get(id string) (beads.Bead, error) {
-	return storeref.Resolve(id, []beads.Store(s))
+// waitDependencyPlanReader resolves a wait's dependency beads through the
+// residency resolver's BY-ID door, over a topology the caller captured once,
+// instead of over a store list assembled here.
+//
+// # Why ByID and not the work federation
+//
+// A wait dependency is read BY ID, and the binding leads for an id inside a
+// relocated class's reserved namespace: that is what makes a graph-class step a
+// wait can watch visible at all (#5488), and it is what stops the read landing
+// on the frozen pre-migration twin `gc storage migrate` left in the work ledger
+// when the id was minted before the cutover and preserved across it (ga-cu12x).
+// The list this replaced went through storeref.Resolve, whose PrefixOwner fast
+// path routes on the id's own prefix and therefore answered every such id from
+// the retained copy no matter which store the caller put first.
+//
+// Outside every reserved namespace the plan is the house by-id order — the
+// unretired binding residence probes, then the city work ledger, then the rig
+// legs whose configured prefix covers the id — so a co-resident id still answers
+// from the copy `gc ready` serves and the claim lands on.
+//
+// # The topology is captured, not re-derived
+//
+// Re-planning per dependency from a city path could open a second engine on a
+// binding root and answer from a different handle than the one the tick's other
+// reads used. The plan itself is per-id (a ByID plan is id-specific), but every
+// plan is cut from the one captured frame.
+type waitDependencyPlanReader struct {
+	topo storeref.Topology
+	// narrowed records that the serving frame excluded a rig the config still
+	// declares. A bead in a suspended rig is out of FRAME, not out of the city,
+	// so absence over the narrowed frame is not proof and must not fail a wait
+	// that the rig would satisfy once it is unsuspended.
+	narrowed bool
 }
 
-// newWaitDependencyStoreSet assembles the legs a wait's dependency ids resolve
-// against. Without the graph leg a binding-resident dependency misses on every
-// leg, and prepareWaitWakeState reads that ErrNotFound as proof the dependency
-// is gone: a silent FailWait. It leads because the binding is authoritative.
-func newWaitDependencyStoreSet(cityStore beads.Store, rigStores map[string]beads.Store, graphStore beads.GraphStore) waitDependencyStoreSet {
-	stores := make(waitDependencyStoreSet, 0, 2+len(rigStores))
-	if graphStore.Store != nil && graphStore.Store != cityStore {
-		stores = append(stores, graphStore.Store)
+// newWaitDependencyPlanReader captures the frame the dependency reads plan over.
+func newWaitDependencyPlanReader(topo storeref.Topology, narrowedBySuspension bool) waitDependencyPlanReader {
+	return waitDependencyPlanReader{topo: topo, narrowed: narrowedBySuspension}
+}
+
+// Get answers three ways, and keeping them distinct is the point of the type: a
+// hit, a PROVED absence (beads.ErrNotFound, which fails the wait), and an
+// unproved one (errWaitDependencyUnproven, which retains it).
+//
+// A read that FAILED is neither: it surfaces as itself. The resolver's by-id
+// plan makes every leg fatal, and a fault is never flattened into absence here
+// — the pass reports it and retries on the next tick rather than reaping a
+// waiter over a store it could not read.
+func (r waitDependencyPlanReader) Get(id string) (beads.Bead, error) {
+	bead, err := byIDBeadForTopology(r.topo, id)
+	switch {
+	case err == nil:
+		return bead, nil
+	case errors.Is(err, beads.ErrNotFound) && r.narrowed:
+		return beads.Bead{}, fmt.Errorf("%w: a suspended rig is out of frame", errWaitDependencyUnproven)
+	default:
+		return beads.Bead{}, err
 	}
-	if cityStore != nil {
-		stores = append(stores, cityStore)
-	}
-	rigNames := make([]string, 0, len(rigStores))
-	for name := range rigStores {
-		rigNames = append(rigNames, name)
-	}
-	sort.Strings(rigNames)
-	for _, name := range rigNames {
-		if store := rigStores[name]; store != nil {
-			stores = append(stores, store)
-		}
-	}
-	return stores
 }
 
 func newWaitCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -919,9 +955,18 @@ func depsWaitReadyDetailedFrom(dependencies waitDependencyReader, wait sessionpk
 	closedCount := 0
 	foundAny := false
 	var missingErr error
+	// An unproved absence can neither ready a wait nor fail one, so it is carried
+	// to the end: a later dependency may still answer the question outright.
+	var unprovenErr error
 	for _, depID := range depIDs {
 		dep, err := dependencies.Get(depID)
 		if err != nil {
+			if errors.Is(err, errWaitDependencyUnproven) {
+				if unprovenErr == nil {
+					unprovenErr = fmt.Errorf("dependency %s: %w", depID, err)
+				}
+				continue
+			}
 			if errors.Is(err, beads.ErrNotFound) {
 				if mode != "any" {
 					return false, fmt.Errorf("dependency %s: %w", depID, err)
@@ -940,6 +985,12 @@ func depsWaitReadyDetailedFrom(dependencies waitDependencyReader, wait sessionpk
 				return true, nil
 			}
 		}
+	}
+	if unprovenErr != nil {
+		// Reported ahead of missingErr on purpose: if one dependency could not be
+		// read, "every dependency is missing" is not proved either, so the wait
+		// must pend rather than fail.
+		return false, unprovenErr
 	}
 	if mode == "any" {
 		if !foundAny && missingErr != nil {
@@ -1105,6 +1156,13 @@ func prepareWaitWakeStateWithSnapshot(sessFront *sessionpkg.Store, dependencies 
 		// scope, so resolution is the caller's, through the legs it assembled.
 		ready, depErr := depsWaitReadyDetailedFrom(dependencies, wait)
 		if depErr != nil {
+			if errors.Is(depErr, errWaitDependencyUnproven) {
+				// Retain THIS wait and keep going. The frame is narrower than the
+				// city — a suspended rig is out of it — so absence over that frame
+				// is not the proof this pass reaps a waiter on.
+				log.Printf("gc wait: wait %s: %v; retaining the wait for the next pass", wait.ID, depErr)
+				continue
+			}
 			if errors.Is(depErr, beads.ErrNotFound) {
 				if err := sessFront.FailWait(wait.ID, now, depErr.Error()); err != nil {
 					return nil, err

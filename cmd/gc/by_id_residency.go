@@ -132,6 +132,32 @@ func byIDPlanForTopology(topo storeref.Topology, id string) (storeref.ResolvedPl
 	return storeref.Plan(storeref.ByID{ID: id}, topo)
 }
 
+// byIDBeadForTopology reads the row id names over a topology the caller already
+// holds: plan ByID, resolve the owner, and read only if the winning probe did
+// not already.
+//
+// It is the ONE controller-side spelling of the by-id read. The warm-bind claim
+// probe (newWarmClaimTriggerResolver) and the wait-dependency reader
+// (waitDependencyPlanReader) both go through it, so a third controller surface
+// cannot grow a fourth answer to "which store holds this bead" — the drift this
+// lane exists to close.
+//
+// Unlike byIDOwnerForTopology there is no work-store fallback argument: a
+// controller-side caller holds no separate work axis to fall back TO. Its work
+// store is already a leg of the topology, so a clean miss on every leg is
+// beads.ErrNotFound and the caller decides what that means.
+func byIDBeadForTopology(topo storeref.Topology, id string) (beads.Bead, error) {
+	plan, err := byIDPlanForTopology(topo, id)
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	owner, err := storeref.ResolveOwnerRow(plan, id)
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	return beadForOwner(owner, id)
+}
+
 // cliByIDBindingOwner answers the binding half of the by-id question for a
 // surface whose work axis is not a beads.Store.
 //

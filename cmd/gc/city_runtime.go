@@ -2476,15 +2476,7 @@ func (cr *CityRuntime) stopConfigWatcher() {
 func (cr *CityRuntime) newWarmClaimTriggerResolver(servingRigs map[string]beads.Store) warmClaimTriggerResolver {
 	topo := cr.residencyTopology(servingRigs)
 	return func(triggerID string) (beads.Bead, error) {
-		plan, err := storeref.Plan(storeref.ByID{ID: triggerID}, topo)
-		if err != nil {
-			return beads.Bead{}, err
-		}
-		owner, err := storeref.ResolveOwnerRow(plan, triggerID)
-		if err != nil {
-			return beads.Bead{}, err
-		}
-		return beadForOwner(owner, triggerID)
+		return byIDBeadForTopology(topo, triggerID)
 	}
 }
 
@@ -2654,7 +2646,15 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	phaseStart = time.Now()
 	cfgNames := configuredSessionNamesWithSnapshot(cr.cfg, cityName, sessionBeads)
 
-	readyWaitSet, err := prepareWaitWakeStateWithSnapshot(sessionpkg.NewStore(sessStore), newWaitDependencyStoreSet(store, rigStores, cr.graphBeadStore()), cr.nudgesBeadStore(), time.Now(), sessionBeads)
+	// The dependency reader plans over the frame this tick is TOLD is serving,
+	// not over every rig store the runtime holds open: a suspended rig is dark,
+	// and reading it made every dependency lookup in the city fail.
+	suspendedRigPaths := buildSuspendedRigPathsForCity(cr.cfg, cr.cityPath)
+	waitDeps := newWaitDependencyPlanReader(
+		cr.residencyTopology(servingRigStores(cr.cfg, rigStores, suspendedRigPaths)),
+		len(suspendedRigPaths) > 0,
+	)
+	readyWaitSet, err := prepareWaitWakeStateWithSnapshot(sessionpkg.NewStore(sessStore), waitDeps, cr.nudgesBeadStore(), time.Now(), sessionBeads)
 	if err != nil {
 		fmt.Fprintf(cr.stderr, "%s: preparing waits: %v\n", cr.logPrefix, err) //nolint:errcheck
 		readyWaitSet = nil

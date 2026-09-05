@@ -22,9 +22,11 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/overlay"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"golang.org/x/mod/semver"
 )
 
@@ -47,6 +49,43 @@ type waitPrefixedStore struct {
 }
 
 func (s waitPrefixedStore) IDPrefix() string { return s.prefix }
+
+// waitDependencyReaderOver is the unsuspended, binding-free frame most wait
+// tests want: the city work store leading and the named rigs behind it, which is
+// the leg set these tests read before the reader planned through storeref.
+//
+// The config is synthesized from the prefixes the stores themselves declare
+// because the by-id plan's shadow rule is CONFIGURED-prefix gated: a rig leg
+// whose Prefix is empty covers no id and is out of every plan, so a topology
+// assembled with a nil config would drop the rig these rows are about. A real
+// city always supplies them (config.Rig.EffectivePrefix derives one from the rig
+// name when none is set), and cr.residencyTopology reads them off cr.cfg.
+func waitDependencyReaderOver(cityStore beads.Store, rigStores map[string]beads.Store) waitDependencyReader {
+	cfg := &config.City{}
+	cfg.Workspace.Prefix = declaredStoreIDPrefix(cityStore)
+	for _, name := range sortedStoreNames(rigStores) {
+		cfg.Rigs = append(cfg.Rigs, config.Rig{Name: name, Prefix: declaredStoreIDPrefix(rigStores[name])})
+	}
+	return newWaitDependencyPlanReader(assembleResidencyTopology(cfg, cityStore, rigStores, nil, nil), false)
+}
+
+// declaredStoreIDPrefix reads the prefix a test store declares, which is what
+// the city's config would have declared for it.
+func declaredStoreIDPrefix(store beads.Store) string {
+	if p, ok := store.(storeref.HasIDPrefix); ok {
+		return p.IDPrefix()
+	}
+	return ""
+}
+
+func sortedStoreNames(stores map[string]beads.Store) []string {
+	names := make([]string, 0, len(stores))
+	for name := range stores {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
 
 type waitDependencyGetErrorStore struct {
 	beads.Store
@@ -2528,7 +2567,7 @@ func TestDoSessionWait_RegistersReadyWaitForRigDependency(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := doSessionWait(sessionID, []string{depID}, false, "block", false, &stdout, &stderr, sessionWaitDeps{
 		sessions:         sessionFrontDoor(cityStore),
-		dependencies:     newWaitDependencyStoreSet(cityStore, map[string]beads.Store{"frontend": rigStore}, beads.GraphStore{}),
+		dependencies:     waitDependencyReaderOver(cityStore, map[string]beads.Store{"frontend": rigStore}),
 		now:              func() time.Time { return now },
 		createdBySession: originID,
 	})
@@ -2665,6 +2704,368 @@ prefix = "fe"
 	}
 }
 
+// The session and the wait are the same in every row below; only the dependency
+// and the store frame vary, which is what those rows are about.
+const (
+	waitWakeSessionID = "gcg-session-1"
+	waitWakeWaitID    = "gcg-wait-1"
+)
+
+// waitWakeCityStore builds the city work store every wake-state test starts
+// from: one open session and one pending deps-wait on depID.
+func waitWakeCityStore(now time.Time, depID string, extra ...beads.Bead) waitPrefixedStore {
+	seed := []beads.Bead{
+		{
+			ID:        waitWakeSessionID,
+			Title:     "worker session",
+			Type:      sessionBeadType,
+			Status:    "open",
+			Labels:    []string{sessionBeadLabel},
+			CreatedAt: now.Add(-time.Minute),
+			UpdatedAt: now.Add(-time.Minute),
+			Revision:  1,
+			Metadata: map[string]string{
+				"session_name":       "worker",
+				"agent_name":         "worker",
+				"continuation_epoch": "1",
+			},
+		},
+		{
+			ID:        waitWakeWaitID,
+			Title:     "wait:worker session",
+			Type:      waitBeadType,
+			Status:    "open",
+			Labels:    []string{waitBeadLabel, "session:" + waitWakeSessionID},
+			CreatedAt: now.Add(-time.Minute),
+			UpdatedAt: now.Add(-time.Minute),
+			Revision:  1,
+			Metadata: map[string]string{
+				"session_id":       waitWakeSessionID,
+				"session_name":     "worker",
+				"kind":             "deps",
+				"state":            waitStatePending,
+				"dep_ids":          depID,
+				"dep_mode":         "all",
+				"registered_epoch": "1",
+				"delivery_attempt": "1",
+			},
+		},
+	}
+	seed = append(seed, extra...)
+	return waitPrefixedStore{Store: beads.NewMemStoreFrom(len(seed), seed, nil), prefix: "gcg"}
+}
+
+func waitDepBead(now time.Time, depID, status string) beads.Bead {
+	return beads.Bead{
+		ID:        depID,
+		Title:     "dependency",
+		Type:      "task",
+		Status:    status,
+		CreatedAt: now.Add(-time.Minute),
+		UpdatedAt: now.Add(-time.Minute),
+		Revision:  1,
+	}
+}
+
+// assertWaitStillOpen reads the wait back and checks the pair that decides
+// whether a waiter survived the pass. The status is asserted open in every row
+// because that is the outcome under test: a wait the pass failed is closed, so
+// no row here may pass while the waiter was reaped.
+func assertWaitStillOpen(t *testing.T, store beads.Store, wantState string) {
+	t.Helper()
+	wait, err := store.Get(waitWakeWaitID)
+	if err != nil {
+		t.Fatalf("store.Get(wait): %v", err)
+	}
+	if got := wait.Metadata["state"]; got != wantState {
+		t.Fatalf("wait state = %q, want %q", got, wantState)
+	}
+	if wait.Status != "open" {
+		t.Fatalf("wait status = %q, want open", wait.Status)
+	}
+}
+
+// TestPrepareWaitWakeState_DarkCityWorkLegStillAbortsThePass is the CONTROL for
+// the dark-rig row above. A rig leg degrades and the pass goes on; the city work
+// leg is the authority and its going dark is a pass-level fault, so this row
+// asserts the error IS returned. Without it, a reader that simply stopped
+// reporting every leg failure would satisfy the dark-rig row.
+func TestPrepareWaitWakeState_DarkCityWorkLegStillAbortsThePass(t *testing.T) {
+	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
+	const depID = "ga-dep-1"
+	hardErr := errors.New("city work store unavailable")
+	cityStore := waitWakeCityStore(now, depID)
+	darkWork := waitDependencyGetErrorStore{Store: cityStore, prefix: "gcg", err: hardErr}
+
+	_, err := prepareWaitWakeStateWithSnapshot(
+		sessionFrontDoor(cityStore),
+		waitDependencyReaderOver(darkWork, nil),
+		beads.NudgesStore{Store: cityStore},
+		now,
+		nil,
+	)
+	if !errors.Is(err, hardErr) {
+		t.Fatalf("prepareWaitWakeStateWithSnapshot error = %v, want %v", err, hardErr)
+	}
+	assertWaitStillOpen(t, cityStore, waitStatePending)
+}
+
+// TestPrepareWaitWakeState_SuspendedFrameRetainsAnUnprovedWait pins the edge
+// that dropping suspended rigs opens: the frame is narrower than the city, so a
+// dependency found nowhere in it is out of FRAME, not proved absent, and the
+// waiter must survive to be re-read once the rig serves again.
+func TestPrepareWaitWakeState_SuspendedFrameRetainsAnUnprovedWait(t *testing.T) {
+	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
+	const depID = "ga-dep-1"
+	cityStore := waitWakeCityStore(now, depID)
+
+	readyWaitSet, err := prepareWaitWakeStateWithSnapshot(
+		sessionFrontDoor(cityStore),
+		newWaitDependencyPlanReader(assembleResidencyTopology(nil, cityStore, nil, nil, nil), true),
+		beads.NudgesStore{Store: cityStore},
+		now,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("prepareWaitWakeStateWithSnapshot: %v", err)
+	}
+	if readyWaitSet[waitWakeSessionID] {
+		t.Fatalf("readyWaitSet[%s] = true, want false", waitWakeSessionID)
+	}
+	assertWaitStillOpen(t, cityStore, waitStatePending)
+}
+
+// TestPrepareWaitWakeState_ResolvesBindingResidentDependency covers the leg the
+// hand-rolled list did not have at all. Before the plan, a dependency relocated
+// into a class binding resolved not-found on a split city and the wait was
+// actively FAILED — worse than blindness.
+func TestPrepareWaitWakeState_ResolvesBindingResidentDependency(t *testing.T) {
+	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
+	const depID = "gcb-dep-1"
+	cityStore := waitWakeCityStore(now, depID)
+	bindingStore := waitPrefixedStore{
+		Store:  beads.NewMemStoreFrom(1, []beads.Bead{waitDepBead(now, depID, "closed")}, nil),
+		prefix: "gcb",
+	}
+	bindings, refused := soleBindingResidency(bindingStore)
+	if refused != nil {
+		t.Fatalf("soleBindingResidency: %v", refused)
+	}
+
+	readyWaitSet, err := prepareWaitWakeStateWithSnapshot(
+		sessionFrontDoor(cityStore),
+		newWaitDependencyPlanReader(assembleResidencyTopology(nil, cityStore, nil, bindings, nil), false),
+		beads.NudgesStore{Store: cityStore},
+		now,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("prepareWaitWakeStateWithSnapshot: %v", err)
+	}
+	if !readyWaitSet[waitWakeSessionID] {
+		t.Fatalf("readyWaitSet[%s] = false, want true", waitWakeSessionID)
+	}
+	assertWaitStillOpen(t, cityStore, waitStateReady)
+}
+
+// waitWakeMigratedCityStore is waitWakeCityStore under the WORK-ERA id prefix a
+// city carried before its infrastructure classes were relocated. The prefix is
+// what the retained-copy rows below turn on: storeref.Resolve consults the store
+// whose self-declared IDPrefix owns the id first, so an id minted under this
+// prefix and preserved across the cutover resolved to this store and not to the
+// binding it was migrated into.
+func waitWakeMigratedCityStore(now time.Time, depID string, extra ...beads.Bead) waitPrefixedStore {
+	return waitPrefixedStore{Store: waitWakeCityStore(now, depID, extra...).Store, prefix: "hq"}
+}
+
+// TestPrepareWaitWakeState_MigrationPreservedDependencyAnswersFromTheBinding is
+// the row ga-cu12x names: `gc storage migrate` COPIES AND RETAINS and it
+// PRESERVES ids, so an infrastructure bead minted before the cutover keeps its
+// work-era prefix and exists twice — a frozen row in the work ledger and the
+// live row in the binding.
+//
+// The reader this replaced went through storeref.Resolve, whose PrefixOwner fast
+// path consults the store whose declared IDPrefix owns the id FIRST. For
+// "hq-dep-1" that is the city work store, so the wait read the frozen
+// pre-migration copy — successfully, with no error to notice — no matter which
+// leg the caller put first, which is why #5488's binding-first list did not
+// close this one. The by-id plan has no such fast path: an id inside NO
+// binding's reserved namespace is a migrate-preserved relic candidate, and every
+// binding that has not retired its residence probe is asked BEFORE the work
+// ledger.
+func TestPrepareWaitWakeState_MigrationPreservedDependencyAnswersFromTheBinding(t *testing.T) {
+	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
+	// A work-era prefix, not a reserved one: no binding namespace claims it.
+	const depID = "hq-dep-1"
+	// The frozen twin the migration left behind, still OPEN as of the cutover.
+	cityStore := waitWakeMigratedCityStore(now, depID, waitDepBead(now, depID, "open"))
+	// The live row, closed after the cutover.
+	binding := waitPrefixedStore{
+		Store:  beads.NewMemStoreFrom(1, []beads.Bead{waitDepBead(now, depID, "closed")}, nil),
+		prefix: "gcb",
+	}
+	bindings, refused := soleBindingResidency(binding)
+	if refused != nil {
+		t.Fatalf("soleBindingResidency: %v", refused)
+	}
+
+	readyWaitSet, err := prepareWaitWakeStateWithSnapshot(
+		sessionFrontDoor(cityStore),
+		newWaitDependencyPlanReader(assembleResidencyTopology(nil, cityStore, nil, bindings, nil), false),
+		beads.NudgesStore{Store: cityStore},
+		now,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("prepareWaitWakeStateWithSnapshot: %v", err)
+	}
+	if !readyWaitSet[waitWakeSessionID] {
+		t.Fatalf("readyWaitSet[%s] = false, want true; the wait read the work ledger's frozen pre-migration copy instead of the binding's live row", waitWakeSessionID)
+	}
+	assertWaitStillOpen(t, cityStore, waitStateReady)
+}
+
+// TestWaitDependencyPlanReaderBindingFaultIsAnErrorNeverAbsence is the fault
+// control for the row above. A binding that cannot be read has said NOTHING
+// about the dependency, and the wake pass reaps a waiter on a proved absence —
+// so the one thing this reader may never do is spell a fault as beads.ErrNotFound.
+func TestWaitDependencyPlanReaderBindingFaultIsAnErrorNeverAbsence(t *testing.T) {
+	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
+	const depID = "hq-dep-1"
+	hardErr := errors.New("binding store unavailable")
+	cityStore := waitWakeMigratedCityStore(now, depID, waitDepBead(now, depID, "open"))
+	binding := waitDependencyGetErrorStore{
+		Store:  beads.NewMemStore(),
+		prefix: "gcb",
+		err:    hardErr,
+	}
+	bindings, refused := soleBindingResidency(binding)
+	if refused != nil {
+		t.Fatalf("soleBindingResidency: %v", refused)
+	}
+	reader := newWaitDependencyPlanReader(assembleResidencyTopology(nil, cityStore, nil, bindings, nil), false)
+
+	_, err := reader.Get(depID)
+	if !errors.Is(err, hardErr) {
+		t.Fatalf("Get(%s) error = %v, want %v; the work ledger's frozen copy must not answer for a binding that could not be read", depID, err, hardErr)
+	}
+	if errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get(%s) error = %v, must not wear beads.ErrNotFound: the wake pass fails a wait on a proved absence", depID, err)
+	}
+	if errors.Is(err, errWaitDependencyUnproven) {
+		t.Fatalf("Get(%s) error = %v, must not be downgraded to an unproven absence: a fault the operator has to see would then only be logged", depID, err)
+	}
+}
+
+// TestWaitDependencyPlanReaderSingleStoreCityIsByteIdentical is the control that
+// a city with nothing relocated pays nothing and answers exactly as its own
+// store does — the same value on a hit, and a proved absence on a miss.
+func TestWaitDependencyPlanReaderSingleStoreCityIsByteIdentical(t *testing.T) {
+	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
+	const depID = "hq-dep-1"
+	cityStore := waitWakeMigratedCityStore(now, depID, waitDepBead(now, depID, "closed"))
+	reader := newWaitDependencyPlanReader(assembleResidencyTopology(nil, cityStore, nil, nil, nil), false)
+
+	got, err := reader.Get(depID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", depID, err)
+	}
+	want, err := cityStore.Get(depID)
+	if err != nil {
+		t.Fatalf("cityStore.Get(%s): %v", depID, err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Get(%s) = %+v, want the store's own row %+v", depID, got, want)
+	}
+
+	_, missErr := reader.Get("hq-absent")
+	if !errors.Is(missErr, beads.ErrNotFound) {
+		t.Fatalf("Get(hq-absent) error = %v, want beads.ErrNotFound", missErr)
+	}
+	if errors.Is(missErr, errWaitDependencyUnproven) {
+		t.Fatalf("Get(hq-absent) error = %v; a complete frame proves absence, and a wait whose dependency is gone must still fail", missErr)
+	}
+}
+
+// TestPrepareWaitWakeState_CoResidentDependencyAnswersFromTheWorkStore pins the
+// deliberate flip in delta (d): storeref.Resolve consulted the store whose
+// self-declared IDPrefix owned the id FIRST, so a rig copy shadowed the work
+// ledger's. The plan reads work first (#5148), which is the copy `gc ready`
+// serves and the claim lands on, so the wait now agrees with them.
+func TestPrepareWaitWakeState_CoResidentDependencyAnswersFromTheWorkStore(t *testing.T) {
+	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
+	const depID = "ga-dep-1"
+	cityStore := waitWakeCityStore(now, depID, waitDepBead(now, depID, "closed"))
+	rigStore := waitPrefixedStore{
+		Store:  beads.NewMemStoreFrom(1, []beads.Bead{waitDepBead(now, depID, "open")}, nil),
+		prefix: "ga",
+	}
+
+	readyWaitSet, err := prepareWaitWakeStateWithSnapshot(
+		sessionFrontDoor(cityStore),
+		waitDependencyReaderOver(cityStore, map[string]beads.Store{"frontend": rigStore}),
+		beads.NudgesStore{Store: cityStore},
+		now,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("prepareWaitWakeStateWithSnapshot: %v", err)
+	}
+	if !readyWaitSet[waitWakeSessionID] {
+		t.Fatalf("readyWaitSet[%s] = false, want true; the rig's open copy shadowed the work store's closed one", waitWakeSessionID)
+	}
+	assertWaitStillOpen(t, cityStore, waitStateReady)
+}
+
+// TestDepsWaitReadyUnprovenDependencyNeitherFailsNorReadies pins the three-valued
+// contract at the layer that consumes it: an unproved absence is not a not-found
+// (which would fail the wait) and not a hit (which could ready it).
+func TestDepsWaitReadyUnprovenDependencyNeitherFailsNorReadies(t *testing.T) {
+	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
+	unproven := fmt.Errorf("%w: rig frontend went dark", errWaitDependencyUnproven)
+
+	t.Run("all mode reports unproven without failing", func(t *testing.T) {
+		reader := waitDependencyReaderFunc(func(string) (beads.Bead, error) { return beads.Bead{}, unproven })
+		ready, err := depsWaitReadyDetailedFrom(reader, sessionpkg.WaitInfo{DepIDs: []string{"ga-1"}, DepMode: "all"})
+		if ready {
+			t.Fatal("ready = true, want false")
+		}
+		if !errors.Is(err, errWaitDependencyUnproven) {
+			t.Fatalf("err = %v, want an unproven error", err)
+		}
+		if errors.Is(err, beads.ErrNotFound) {
+			t.Fatalf("err = %v, must not wear beads.ErrNotFound: that would fail the wait", err)
+		}
+	})
+
+	t.Run("any mode still readies on a closed sibling", func(t *testing.T) {
+		reader := waitDependencyReaderFunc(func(id string) (beads.Bead, error) {
+			if id == "ga-2" {
+				return waitDepBead(now, id, "closed"), nil
+			}
+			return beads.Bead{}, unproven
+		})
+		ready, err := depsWaitReadyDetailedFrom(reader, sessionpkg.WaitInfo{DepIDs: []string{"ga-1", "ga-2"}, DepMode: "any"})
+		if err != nil {
+			t.Fatalf("depsWaitReadyDetailedFrom: %v", err)
+		}
+		if !ready {
+			t.Fatal("ready = false, want true")
+		}
+	})
+
+	t.Run("any mode does not fail when every dependency is unproven", func(t *testing.T) {
+		reader := waitDependencyReaderFunc(func(string) (beads.Bead, error) { return beads.Bead{}, unproven })
+		ready, err := depsWaitReadyDetailedFrom(reader, sessionpkg.WaitInfo{DepIDs: []string{"ga-1", "ga-2"}, DepMode: "any"})
+		if ready {
+			t.Fatal("ready = true, want false")
+		}
+		if !errors.Is(err, errWaitDependencyUnproven) {
+			t.Fatalf("err = %v, want an unproven error", err)
+		}
+	})
+}
+
 func TestPrepareWaitWakeState_ResolvesRigDependencyBeads(t *testing.T) {
 	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
 	hardErr := errors.New("rig store unavailable")
@@ -2681,7 +3082,15 @@ func TestPrepareWaitWakeState_ResolvesRigDependencyBeads(t *testing.T) {
 		{name: "closed rig dependency becomes ready", depStatus: "closed", wantReady: true, wantState: waitStateReady, wantStatus: "open"},
 		{name: "open rig dependency remains pending", depStatus: "open", wantState: waitStatePending, wantStatus: "open"},
 		{name: "missing rig dependency fails the wait", missing: true, wantState: waitStateFailed, wantStatus: "closed"},
-		{name: "hard rig read error is preserved", readErr: hardErr, wantState: waitStatePending, wantStatus: "open"},
+		// A dark SERVING rig leg is still a pass-level fault, and the wait is
+		// retained pending rather than failed: the by-id plan makes every leg
+		// fatal, so the fault surfaces as itself and is never flattened into the
+		// proved absence that would reap the waiter. The suspended-rig freeze
+		// this segment fixes is closed one level up, by narrowing the FRAME
+		// (servingRigStores) so a suspended rig is out of the plan rather than
+		// dark inside it — see
+		// TestPrepareWaitWakeState_SuspendedFrameRetainsAnUnprovedWait.
+		{name: "dark serving rig is a preserved fault, not a proved absence", readErr: hardErr, wantState: waitStatePending, wantStatus: "open"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			const (
@@ -2752,14 +3161,14 @@ func TestPrepareWaitWakeState_ResolvesRigDependencyBeads(t *testing.T) {
 
 			readyWaitSet, err := prepareWaitWakeStateWithSnapshot(
 				sessionFrontDoor(cityStore),
-				newWaitDependencyStoreSet(cityStore, map[string]beads.Store{"frontend": rigStore}, beads.GraphStore{}),
+				waitDependencyReaderOver(cityStore, map[string]beads.Store{"frontend": rigStore}),
 				beads.NudgesStore{Store: cityStore},
 				now,
 				nil,
 			)
 			if tc.readErr != nil {
 				if !errors.Is(err, tc.readErr) {
-					t.Fatalf("prepareWaitWakeStateWithSnapshot error = %v, want %v", err, tc.readErr)
+					t.Fatalf("prepareWaitWakeStateWithSnapshot error = %v, want %v; a leg that could not be read must never reach the pass as absence", err, tc.readErr)
 				}
 			} else if err != nil {
 				t.Fatalf("prepareWaitWakeStateWithSnapshot: %v", err)
@@ -3410,8 +3819,14 @@ func TestRouteWaitList_ThreeRungByteIdentical(t *testing.T) {
 
 // TestPrepareWaitWakeState_ResolvesGraphBindingDependencyBeads pins that a
 // dependency living in the relocated infrastructure binding resolves. Without
-// the graph leg it misses on every leg, and a clean miss is consumed as proof
+// the binding leg it misses on every leg, and a clean miss is consumed as proof
 // the dependency was deleted — a silent FailWait, with no event and no wake.
+//
+// Ported from #5488, which pinned the same property against the hand-rolled
+// store list this reader replaced. The list put the binding FIRST and that leg
+// order is preserved here by the resolver rather than by hand: `gcg-dep-1` is
+// inside the graph class's reserved namespace, so the by-id plan makes the
+// binding the AUTHORITY leg and nothing behind it is consulted.
 func TestPrepareWaitWakeState_ResolvesGraphBindingDependencyBeads(t *testing.T) {
 	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
 
@@ -3487,9 +3902,16 @@ func TestPrepareWaitWakeState_ResolvesGraphBindingDependencyBeads(t *testing.T) 
 			}
 			rigStore := waitPrefixedStore{Store: beads.NewMemStore(), prefix: "ga"}
 
+			bindings, refused := soleBindingResidency(binding)
+			if refused != nil {
+				t.Fatalf("soleBindingResidency: %v", refused)
+			}
 			readyWaitSet, err := prepareWaitWakeStateWithSnapshot(
 				sessionFrontDoor(cityStore),
-				newWaitDependencyStoreSet(cityStore, map[string]beads.Store{"frontend": rigStore}, beads.GraphStore{Store: binding}),
+				newWaitDependencyPlanReader(
+					assembleResidencyTopology(nil, cityStore, map[string]beads.Store{"frontend": rigStore}, bindings, nil),
+					false,
+				),
 				beads.NudgesStore{Store: cityStore},
 				now,
 				nil,

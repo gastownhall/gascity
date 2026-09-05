@@ -81,14 +81,27 @@
 # so these rows are a MIGRATION pinned open, not a sanctioned shape: ga-qdt5y.16
 # retires both.
 #
-# cmd/gc/cmd_wait.go's newWaitDependencyStoreSet is the third of that family, and
-# it surfaced only when the signature rule learned to see through a local type
-# name: `type waitDependencyStoreSet []beads.Store` made the constructor's result
-# an *ast.Ident, and the rule had been reading spellings. The set's Get does hand
-# its list to storeref.Resolve — the executor applies the per-leg policy — but the
-# LIST is assembled here, city store first and rig stores in sorted-name order,
-# which is the leg-order decision the resolver owns. Same shape as the drain.go
-# pair and pinned for the same reason; ga-qdt5y.16 covers it.
+# cmd/gc/cmd_wait.go's newWaitDependencyStoreSet was the third of that family and
+# is the second retired. It had surfaced only when the signature rule learned to
+# see through a local type name: `type waitDependencyStoreSet []beads.Store` made
+# the constructor's result an *ast.Ident, and the rule had been reading spellings.
+# ga-qdt5y.16 collapsed it onto storeref's ByID plan over the topology the
+# controller already registered at boot, with the suspension frame threaded in
+# the way the census arms thread it. Three things were wrong with the list and
+# each was live. It read every rig the runtime held open, suspended ones
+# included, whose stores are dark — one suspended rig made every dependency read
+# in the city error, and the wake pass aborts on a dependency error, so no wait
+# anywhere could be readied. Its executor was storeref.Resolve, whose PrefixOwner
+# fast path consults the store whose declared prefix owns the id FIRST, so an
+# infrastructure id the migration preserved answered from the work ledger's
+# frozen twin no matter which leg the list put first (ga-cu12x) — the reason
+# #5488's binding-first ordering did not close it. And absence over the narrowed
+# serving frame was reported as a clean not-found, which FAILS a waiter; the
+# reader now answers "absence not proved" there instead.
+#
+# cmd_wait.go still appears below on the loadWaitDependencyBead row, which is the
+# one-shot registration/wake path (a:convoyStoreCandidates, reached only from
+# prepareWaitWakeStateForCity) and a different slice.
 #
 # cmd/gc/claim_class_route.go's holds was the fourth of that family and is the
 # first retired: ga-qdt5y.16 collapsed it onto storeref's ByID plan over a frame
@@ -191,7 +204,6 @@ cmd/gc/cmd_graph.go	doGraph	ast:uncounted-call-spelling	1
 cmd/gc/cmd_graph.go	resolveGraphInput	ast:uncounted-call-spelling	1
 cmd/gc/cmd_storage.go	reportBindingRelics	d:AllReservedClassPrefixes	1
 cmd/gc/cmd_wait.go	loadWaitDependencyBead	a:convoyStoreCandidates	1
-cmd/gc/cmd_wait.go	newWaitDependencyStoreSet	ast:returns-store-list	1
 cmd/gc/convergence_tick.go	buildConvergenceScopes	a:rigBeadStores	1
 cmd/gc/convergence_tick.go	buildConvergenceScopes	b:graphClassBinding	1
 cmd/gc/dispatch_control_ready.go	controlReadyCacheSources	ast:returns-store-list	1
