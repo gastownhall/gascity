@@ -66,10 +66,10 @@ WORKFLOW_ROOT_CLOSE_STATUSES="'open', 'hooked', 'in_progress'"
 WORKFLOW_ROOT_LIVE_STATUSES="'open', 'hooked', 'in_progress', 'blocked', 'deferred', 'pinned', 'review', 'testing'"
 WORKFLOW_ROOT_DESCENDANT_DEP_TYPES="'parent-child', 'tracks', 'blocks'"
 WORKFLOW_ROOT_CLOSE_REASON="stale inactive workflow root auto-closed by reaper"
-WORKFLOW_ROOT_BATCH_SIZE="${GC_REAPER_WORKFLOW_ROOT_BATCH_SIZE:-25}"
+WORKFLOW_ROOT_BATCH_SIZE="${GC_REAPER_WORKFLOW_ROOT_BATCH_SIZE:-1}"
 
 if ! [[ "$WORKFLOW_ROOT_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]]; then
-    WORKFLOW_ROOT_BATCH_SIZE=25
+    WORKFLOW_ROOT_BATCH_SIZE=1
 fi
 
 # Convert Go durations to SQL INTERVAL hours for Dolt.
