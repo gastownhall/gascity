@@ -596,7 +596,7 @@ func readDoltServerPort(beadsPath string) int {
 }
 
 // readDoltMode returns the persisted Beads storage mode and whether it is safe
-// to trust a direct-mode port artifact. Only the explicit server/direct modes,
+// to trust a direct-mode port artifact. Only the explicit server mode,
 // or absent markers for legacy direct stores, permit a TCP probe. Malformed,
 // unreadable, embedded, and unknown markers fail closed.
 func readDoltMode(beadsPath string) (string, bool) {
@@ -643,7 +643,7 @@ func readDoltMode(beadsPath string) (string, bool) {
 
 func recognizedDoltMode(mode string) (string, bool) {
 	switch mode {
-	case "proxied-server", "server", "direct":
+	case "proxied-server", "server":
 		return mode, true
 	default:
 		return "", false
