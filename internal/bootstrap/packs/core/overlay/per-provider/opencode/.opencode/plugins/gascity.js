@@ -27,7 +27,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const GC_OPENCODE_HOOK_VERSION = 7;
+const GC_OPENCODE_HOOK_VERSION = 8;
 const GC_BIN = process.env.GC_BIN || "gc";
 // GC_BIN is the explicit override. The fallback order matches Pi hooks so
 // sibling providers resolve the same installed gc before developer-local bins.
@@ -175,11 +175,6 @@ async function mirrorTranscript(directory, client, sessionID) {
 
 export default async function gascityPlugin({ directory, client }) {
   if (!managedSessionIdentityPresent()) {
-    // One line so an operator can tell "plugin inactive" from "plugin
-    // missing", then stay silent: this OpenCode instance is not gc-managed.
-    console.warn(
-      "gascity opencode plugin: no Gas City session identity in the environment; hooks disabled for this OpenCode instance",
-    );
     return {};
   }
   let cachedPrime = null;
