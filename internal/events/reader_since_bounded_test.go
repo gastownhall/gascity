@@ -173,3 +173,51 @@ func TestReadFilteredSinceMatchesForwardScan(t *testing.T) {
 		}
 	}
 }
+
+// TestReadFilteredWithInFlightSinceMatchesFullRead covers the path the
+// supervisor's provider actually takes. ReadFiltered is not the hot caller —
+// `gc events` reaches the supervisor over its API, and the supervisor answers
+// from the recorder, which is ReadFilteredWithInFlight. Bounding one and not
+// the other would have left the cost exactly where it was.
+func TestReadFilteredWithInFlightSinceMatchesFullRead(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	now := time.Now().UTC()
+
+	var evts []Event
+	padding := string(bytes.Repeat([]byte("x"), 4*1024))
+	for i := 0; i < 40; i++ {
+		evts = append(evts, Event{
+			Seq: uint64(i + 1), Type: "old.type", Actor: "api",
+			Ts: now.Add(-48 * time.Hour), Message: padding,
+		})
+	}
+	evts = append(evts,
+		Event{Seq: 90, Type: "bead.closed", Actor: "api", Ts: now.Add(-3 * time.Minute)},
+		Event{Seq: 91, Type: "other.type", Actor: "api", Ts: now.Add(-2 * time.Minute)},
+		Event{Seq: 92, Type: "bead.closed", Actor: "api", Ts: now.Add(-1 * time.Minute)},
+	)
+	writeLog(t, path, evts)
+
+	filter := Filter{Type: "bead.closed", Since: now.Add(-10 * time.Minute)}
+
+	want, _, err := readFilteredTracked(path, filter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadFilteredWithInFlight(path, filter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d events, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].Seq != want[i].Seq {
+			t.Fatalf("got[%d].Seq = %d, want %d", i, got[i].Seq, want[i].Seq)
+		}
+	}
+	if len(got) != 2 || got[0].Seq != 90 || got[1].Seq != 92 {
+		t.Fatalf("got %+v, want seq 90 then 92", got)
+	}
+}
