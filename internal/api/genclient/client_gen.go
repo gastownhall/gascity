@@ -1495,6 +1495,15 @@ type ConfigValidateOutputBody struct {
 	Warnings *[]string `json:"warnings"`
 }
 
+// ControlDispatcherScopeGapPayload defines model for ControlDispatcherScopeGapPayload.
+type ControlDispatcherScopeGapPayload struct {
+	RigContext      *string `json:"rig_context,omitempty"`
+	SampleBeadId    *string `json:"sample_bead_id,omitempty"`
+	ScopeLabel      string  `json:"scope_label"`
+	StoreRef        *string `json:"store_ref,omitempty"`
+	SuppressedCount int64   `json:"suppressed_count"`
+}
+
 // ControlStalledPayload defines model for ControlStalledPayload.
 type ControlStalledPayload struct {
 	Attempts   int64   `json:"attempts"`
@@ -5540,6 +5549,22 @@ type TypedEventStreamEnvelopeCityUnregisterRequested struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeControlDispatcherScopeGap defines model for TypedEventStreamEnvelopeControlDispatcherScopeGap.
+type TypedEventStreamEnvelopeControlDispatcherScopeGap struct {
+	Actor            string                           `json:"actor"`
+	DependsOnStepIds *[]string                        `json:"depends_on_step_ids,omitempty"`
+	Message          *string                          `json:"message,omitempty"`
+	Payload          ControlDispatcherScopeGapPayload `json:"payload"`
+	RunId            *string                          `json:"run_id,omitempty"`
+	Seq              int64                            `json:"seq"`
+	SessionId        *string                          `json:"session_id,omitempty"`
+	StepId           *string                          `json:"step_id,omitempty"`
+	Subject          *string                          `json:"subject,omitempty"`
+	Ts               time.Time                        `json:"ts"`
+	Type             string                           `json:"type"`
+	Workflow         *WorkflowEventProjection         `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeControlStalled defines model for TypedEventStreamEnvelopeControlStalled.
 type TypedEventStreamEnvelopeControlStalled struct {
 	Actor            string                   `json:"actor"`
@@ -7078,6 +7103,23 @@ type TypedTaggedEventStreamEnvelopeCityUnregisterRequested struct {
 	Ts               time.Time                `json:"ts"`
 	Type             string                   `json:"type"`
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap defines model for TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap.
+type TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap struct {
+	Actor            string                           `json:"actor"`
+	City             string                           `json:"city"`
+	DependsOnStepIds *[]string                        `json:"depends_on_step_ids,omitempty"`
+	Message          *string                          `json:"message,omitempty"`
+	Payload          ControlDispatcherScopeGapPayload `json:"payload"`
+	RunId            *string                          `json:"run_id,omitempty"`
+	Seq              int64                            `json:"seq"`
+	SessionId        *string                          `json:"session_id,omitempty"`
+	StepId           *string                          `json:"step_id,omitempty"`
+	Subject          *string                          `json:"subject,omitempty"`
+	Ts               time.Time                        `json:"ts"`
+	Type             string                           `json:"type"`
+	Workflow         *WorkflowEventProjection         `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeControlStalled defines model for TypedTaggedEventStreamEnvelopeControlStalled.
@@ -10356,6 +10398,32 @@ func (t *EventPayload) MergeConditionalWritesDegradedPayload(v ConditionalWrites
 	return err
 }
 
+// AsControlDispatcherScopeGapPayload returns the union data inside the EventPayload as a ControlDispatcherScopeGapPayload
+func (t EventPayload) AsControlDispatcherScopeGapPayload() (ControlDispatcherScopeGapPayload, error) {
+	var body ControlDispatcherScopeGapPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromControlDispatcherScopeGapPayload overwrites any union data inside the EventPayload as the provided ControlDispatcherScopeGapPayload
+func (t *EventPayload) FromControlDispatcherScopeGapPayload(v ControlDispatcherScopeGapPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeControlDispatcherScopeGapPayload performs a merge with any union data inside the EventPayload, using the provided ControlDispatcherScopeGapPayload
+func (t *EventPayload) MergeControlDispatcherScopeGapPayload(v ControlDispatcherScopeGapPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsControlStalledPayload returns the union data inside the EventPayload as a ControlStalledPayload
 func (t EventPayload) AsControlStalledPayload() (ControlStalledPayload, error) {
 	var body ControlStalledPayload
@@ -13491,6 +13559,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeCityUnregisterRe
 	return err
 }
 
+// AsTypedEventStreamEnvelopeControlDispatcherScopeGap returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeControlDispatcherScopeGap
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeControlDispatcherScopeGap() (TypedEventStreamEnvelopeControlDispatcherScopeGap, error) {
+	var body TypedEventStreamEnvelopeControlDispatcherScopeGap
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeControlDispatcherScopeGap overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeControlDispatcherScopeGap
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeControlDispatcherScopeGap(v TypedEventStreamEnvelopeControlDispatcherScopeGap) error {
+	v.Type = "control.dispatcher_scope_gap"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeControlDispatcherScopeGap performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeControlDispatcherScopeGap
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeControlDispatcherScopeGap(v TypedEventStreamEnvelopeControlDispatcherScopeGap) error {
+	v.Type = "control.dispatcher_scope_gap"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeControlStalled returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeControlStalled
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeControlStalled() (TypedEventStreamEnvelopeControlStalled, error) {
 	var body TypedEventStreamEnvelopeControlStalled
@@ -15777,6 +15873,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeCitySuspended()
 	case "city.unregister_requested":
 		return t.AsTypedEventStreamEnvelopeCityUnregisterRequested()
+	case "control.dispatcher_scope_gap":
+		return t.AsTypedEventStreamEnvelopeControlDispatcherScopeGap()
 	case "control.stalled":
 		return t.AsTypedEventStreamEnvelopeControlStalled()
 	case "controller.started":
@@ -16360,6 +16458,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeCityU
 // MergeTypedTaggedEventStreamEnvelopeCityUnregisterRequested performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeCityUnregisterRequested
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeCityUnregisterRequested(v TypedTaggedEventStreamEnvelopeCityUnregisterRequested) error {
 	v.Type = "city.unregister_requested"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeControlDispatcherScopeGap returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeControlDispatcherScopeGap() (TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap, error) {
+	var body TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeControlDispatcherScopeGap overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeControlDispatcherScopeGap(v TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap) error {
+	v.Type = "control.dispatcher_scope_gap"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeControlDispatcherScopeGap performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeControlDispatcherScopeGap(v TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap) error {
+	v.Type = "control.dispatcher_scope_gap"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -18656,6 +18782,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeCitySuspended()
 	case "city.unregister_requested":
 		return t.AsTypedTaggedEventStreamEnvelopeCityUnregisterRequested()
+	case "control.dispatcher_scope_gap":
+		return t.AsTypedTaggedEventStreamEnvelopeControlDispatcherScopeGap()
 	case "control.stalled":
 		return t.AsTypedTaggedEventStreamEnvelopeControlStalled()
 	case "controller.started":

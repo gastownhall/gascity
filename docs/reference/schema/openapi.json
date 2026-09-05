@@ -1797,6 +1797,32 @@
         ],
         "type": "object"
       },
+      "ControlDispatcherScopeGapPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "rig_context": {
+            "type": "string"
+          },
+          "sample_bead_id": {
+            "type": "string"
+          },
+          "scope_label": {
+            "type": "string"
+          },
+          "store_ref": {
+            "type": "string"
+          },
+          "suppressed_count": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "scope_label",
+          "suppressed_count"
+        ],
+        "type": "object"
+      },
       "ControlStalledPayload": {
         "additionalProperties": false,
         "properties": {
@@ -2495,6 +2521,9 @@
           },
           {
             "$ref": "#/components/schemas/ConditionalWritesDegradedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/ControlDispatcherScopeGapPayload"
           },
           {
             "$ref": "#/components/schemas/ControlStalledPayload"
@@ -12163,6 +12192,7 @@
             "city.resumed": "#/components/schemas/TypedEventStreamEnvelopeCityResumed",
             "city.suspended": "#/components/schemas/TypedEventStreamEnvelopeCitySuspended",
             "city.unregister_requested": "#/components/schemas/TypedEventStreamEnvelopeCityUnregisterRequested",
+            "control.dispatcher_scope_gap": "#/components/schemas/TypedEventStreamEnvelopeControlDispatcherScopeGap",
             "control.stalled": "#/components/schemas/TypedEventStreamEnvelopeControlStalled",
             "controller.started": "#/components/schemas/TypedEventStreamEnvelopeControllerStarted",
             "controller.stopped": "#/components/schemas/TypedEventStreamEnvelopeControllerStopped",
@@ -12290,6 +12320,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeCityUnregisterRequested"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeControlDispatcherScopeGap"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeControlStalled"
@@ -13389,6 +13422,63 @@
         "title": "TypedEventStreamEnvelope city.unregister_requested",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeControlDispatcherScopeGap": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ControlDispatcherScopeGapPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "control.dispatcher_scope_gap",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope control.dispatcher_scope_gap",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeControlStalled": {
         "additionalProperties": false,
         "properties": {
@@ -13761,6 +13851,7 @@
                 "controller.started",
                 "controller.stopped",
                 "control.stalled",
+                "control.dispatcher_scope_gap",
                 "city.suspended",
                 "city.resumed",
                 "request.result.city.create",
@@ -18063,6 +18154,7 @@
             "city.resumed": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityResumed",
             "city.suspended": "#/components/schemas/TypedTaggedEventStreamEnvelopeCitySuspended",
             "city.unregister_requested": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityUnregisterRequested",
+            "control.dispatcher_scope_gap": "#/components/schemas/TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap",
             "control.stalled": "#/components/schemas/TypedTaggedEventStreamEnvelopeControlStalled",
             "controller.started": "#/components/schemas/TypedTaggedEventStreamEnvelopeControllerStarted",
             "controller.stopped": "#/components/schemas/TypedTaggedEventStreamEnvelopeControllerStopped",
@@ -18190,6 +18282,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityUnregisterRequested"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeControlStalled"
@@ -19349,6 +19444,67 @@
         "title": "TypedTaggedEventStreamEnvelope city.unregister_requested",
         "type": "object"
       },
+      "TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ControlDispatcherScopeGapPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "control.dispatcher_scope_gap",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope control.dispatcher_scope_gap",
+        "type": "object"
+      },
       "TypedTaggedEventStreamEnvelopeControlStalled": {
         "additionalProperties": false,
         "properties": {
@@ -19744,6 +19900,7 @@
                 "controller.started",
                 "controller.stopped",
                 "control.stalled",
+                "control.dispatcher_scope_gap",
                 "city.suspended",
                 "city.resumed",
                 "request.result.city.create",

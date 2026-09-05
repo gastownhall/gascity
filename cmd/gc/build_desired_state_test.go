@@ -12450,17 +12450,7 @@ func TestBuildDesiredState_ClassBoundRigRootedControlWorkWithoutRigDispatcherIsN
 		t.Fatalf("create control: %v", err)
 	}
 
-	maxActive := 1
-	cfg := &config.City{
-		Workspace: config.Workspace{Name: "test-city"},
-		Rigs:      []config.Rig{{Name: "fixture", Path: t.TempDir()}},
-		Agents: []config.Agent{{
-			Name:              config.ControlDispatcherAgentName,
-			BindingName:       "core",
-			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
-			MaxActiveSessions: &maxActive,
-		}},
-	}
+	cfg := cityOnlyDispatcherFixtureConfig(t)
 	var stderr bytes.Buffer
 	result := buildDesiredStateWithSessionBeads(
 		"test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), binding,
@@ -12489,6 +12479,159 @@ func TestBuildDesiredState_ClassBoundRigRootedControlWorkWithoutRigDispatcherIsN
 	bindingRef := string(storeref.ClassRef(wholeSplitClasses()))
 	if !strings.Contains(diag, bindingRef) || !strings.Contains(diag, `rig "fixture"`) {
 		t.Fatalf("stderr = %q, want the diagnostic to name the class binding %s and the owning rig", diag, bindingRef)
+	}
+}
+
+// TestBuildDesiredState_ReportsControlDispatcherScopeGapForRigRootedWork is the
+// counted-signal half of the missing-dispatcher arm above: the same rig-rooted
+// row the binding serves, in a city that configures only a city dispatcher,
+// must also leave a machine-readable summary on the result so the reconciler
+// can turn it into ONE event per scope instead of one stderr line per scope per
+// tick that nobody reads (ga-oytw9 took 26h and 600+ identical lines to find by
+// hand). SuppressedCount is what the stderr line cannot say: it names one bead,
+// so a single stuck row and a hundred read identically.
+func TestBuildDesiredState_ReportsControlDispatcherScopeGapForRigRootedWork(t *testing.T) {
+	cityPath := t.TempDir()
+	work := beads.NewMemStore()
+	binding := beads.NewMemStore()
+	routes := splitRoutes(binding)
+	registerResidencyRoutes(cityPath, routes, func() beads.Store { return work })
+	t.Cleanup(func() { unregisterResidencyRoutes(cityPath, routes) })
+
+	control, err := binding.Create(beads.Bead{
+		Title:  "Finalize rig workflow",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+			beadmeta.RoutedToMetadataKey:     "fixture/core.control-dispatcher",
+			beadmeta.RootStoreRefMetadataKey: "rig:fixture",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now().UTC(), cityOnlyDispatcherFixtureConfig(t), runtime.NewFake(), binding,
+		map[string]beads.Store{"fixture": beads.NewMemStore()}, newSessionBeadSnapshot(nil), nil, io.Discard,
+	)
+
+	if len(result.ControlDispatcherScopeGaps) != 1 {
+		t.Fatalf("scope gaps = %+v, want exactly one for the rig with no dispatcher", result.ControlDispatcherScopeGaps)
+	}
+	gap := result.ControlDispatcherScopeGaps[0]
+	if gap.RigContext != "fixture" {
+		t.Fatalf("gap rig context = %q, want fixture (the scope that owns the row, not the leg it was read through)", gap.RigContext)
+	}
+	if gap.SuppressedCount != 1 {
+		t.Fatalf("gap suppressed count = %d, want 1", gap.SuppressedCount)
+	}
+	if gap.SampleBeadID != control.ID {
+		t.Fatalf("gap sample bead = %q, want %q", gap.SampleBeadID, control.ID)
+	}
+	bindingRef := string(storeref.ClassRef(wholeSplitClasses()))
+	if gap.StoreRef != bindingRef {
+		t.Fatalf("gap store ref = %q, want the binding leg %q", gap.StoreRef, bindingRef)
+	}
+	if !strings.Contains(gap.ScopeLabel, bindingRef) || !strings.Contains(gap.ScopeLabel, `rig "fixture"`) {
+		t.Fatalf("gap scope label = %q, want it to name the class binding %s and the owning rig", gap.ScopeLabel, bindingRef)
+	}
+}
+
+// One scope with many suppressed rows is ONE gap carrying the count — the
+// per-row emission this replaces is exactly what made the condition invisible.
+func TestRepairControlDispatcherRoutesCountsSuppressedRowsPerScope(t *testing.T) {
+	maxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "fixture", Path: t.TempDir()}},
+		Agents: []config.Agent{{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxActive,
+		}},
+	}
+	newControl := func(id string) beads.Bead {
+		return beads.Bead{
+			ID: id, Type: "task", Status: "open", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+				beadmeta.RoutedToMetadataKey:     "fixture/core.control-dispatcher",
+				beadmeta.RootStoreRefMetadataKey: "rig:fixture",
+			},
+		}
+	}
+	work := []beads.Bead{newControl("control-1"), newControl("control-2")}
+	store := beads.NewMemStore()
+
+	gaps := repairControlDispatcherRoutesForStoreScope(
+		t.Name(),
+		cfg,
+		work,
+		[]beads.Store{store, store},
+		[]string{"rig:fixture", "rig:fixture"},
+		io.Discard,
+	)
+
+	if len(gaps) != 1 {
+		t.Fatalf("scope gaps = %+v, want one entry for the one scope with no dispatcher", gaps)
+	}
+	if gaps[0].SuppressedCount != 2 {
+		t.Fatalf("suppressed count = %d, want 2 (both rows of the same scope)", gaps[0].SuppressedCount)
+	}
+	if gaps[0].ScopeLabel != `rig store "fixture"` {
+		t.Fatalf("scope label = %q, want the same text the stderr diagnostic prints", gaps[0].ScopeLabel)
+	}
+}
+
+// A scope whose dispatcher IS configured is not a gap: nothing was suppressed,
+// so an alert on this event stays quiet on a healthy city.
+func TestRepairControlDispatcherRoutesReportsNoScopeGapWhenDispatcherIsConfigured(t *testing.T) {
+	maxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "fixture", Path: t.TempDir()}},
+		Agents: []config.Agent{{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			Dir:               "fixture",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxActive,
+		}},
+	}
+	work := []beads.Bead{{
+		ID: "control-1", Type: "task", Status: "open", Metadata: map[string]string{
+			beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+			beadmeta.RoutedToMetadataKey:     "core.control-dispatcher",
+			beadmeta.RootStoreRefMetadataKey: "rig:fixture",
+		},
+	}}
+
+	gaps := repairControlDispatcherRoutesForStoreScope(
+		t.Name(), cfg, work, []beads.Store{beads.NewMemStore()}, []string{"rig:fixture"}, io.Discard,
+	)
+
+	if len(gaps) != 0 {
+		t.Fatalf("scope gaps = %+v, want none when the owning scope has a dispatcher", gaps)
+	}
+}
+
+// cityOnlyDispatcherFixtureConfig is the one-dispatcher city the
+// missing-dispatcher class-binding tests share: a city dispatcher and a rig
+// "fixture" that configures none.
+func cityOnlyDispatcherFixtureConfig(t *testing.T) *config.City {
+	t.Helper()
+	maxActive := 1
+	return &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "fixture", Path: t.TempDir()}},
+		Agents: []config.Agent{{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxActive,
+		}},
 	}
 }
 
