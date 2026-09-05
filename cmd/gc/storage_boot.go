@@ -137,6 +137,23 @@ func (r *storageRoutes) hasLegacyResidents(store beads.Store) bool {
 // is the busiest one-shot route in the CLI: the door no longer keeps a probe of
 // its own, so a binding certified clean here is a binding that path will not
 // read. A false clean is a lost bead, which is why every unknown answers true.
+//
+// # The cost, and why it is paid rather than written down
+//
+// The scan lists the binding with AllowScan and IncludeClosed, so it costs the
+// binding's WHOLE history and not its working set: 7.2ms at 1k rows, 82ms at
+// 10k, linear at ~8.2us/row (internal/storeref/relic_census_bench_test.go).
+// "Once per process" is what bounds it — the one-shot funnel takes it inside a
+// sync.Once per city (cliStorageRoutes) and the controller takes it once at boot
+// — and the verdict lives in the routes value those callers already hold.
+//
+// It is deliberately NOT remembered on disk. A note saying "this binding holds
+// relics" is a status file: it survives an operator rebuilding or re-pointing
+// the binding, nothing clears it, and a later `gc` then keeps or retires a probe
+// on a verdict no store agrees with. Querying live state is the house rule
+// (AGENTS.md) and the residual is a cheaper scan, not a cache — bounding it
+// needs a store-level id-namespace predicate beads.ListQuery does not have
+// (ga-dx4ho). TestBootCensusIsLiveAndLeavesNothingOnDisk pins both halves.
 func censusBindingRelics(routes *storageRoutes) {
 	if routes == nil {
 		return

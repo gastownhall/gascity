@@ -14,6 +14,7 @@ package main
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -120,6 +121,76 @@ func TestBootCensusKeepsTheProbeForAMigratedBead(t *testing.T) {
 	}
 	if !bindingLegRead(t, routes, "ga-relic") {
 		t.Error("the plan for the relic's own id never reads the binding it lives in; the bead is unreachable")
+	}
+}
+
+// TestBootCensusIsLiveAndLeavesNothingOnDisk pins the shape of the census
+// itself: it is computed from the binding, per process, and remembered only in
+// the routes value the process already holds.
+//
+// The scan is expensive — the binding's whole history, 82ms at 10k rows and
+// linear (internal/storeref/relic_census_bench_test.go) — and the obvious way to
+// stop paying it per process is a note on disk. That note would be a status
+// file: it goes stale the instant an operator rebuilds or re-points a binding,
+// nothing clears it, and a `gc` that trusts it retires or keeps a probe on a
+// verdict no store agrees with. AGENTS.md forbids exactly that, so the answer is
+// re-derived, and this row is what a future memo has to argue with.
+//
+// A second, independent open of the SAME city must reach the same verdict from
+// the store alone, and the city directory must gain no census artifact.
+func TestBootCensusIsLiveAndLeavesNothingOnDisk(t *testing.T) {
+	root := t.TempDir()
+	cfg := infraSplitConfig(filepath.Join(root, "store"))
+	plan, err := resolveCityStoragePlan(root, cfg)
+	if err != nil {
+		t.Fatalf("resolving the storage plan for a converged split city: %v", err)
+	}
+	target := mustResolveInfraTarget(t, root, cfg)
+
+	openAndCensus := func() bool {
+		routes, err := openStorageRoutes(plan, target)
+		if err != nil {
+			t.Fatalf("openStorageRoutes: %v", err)
+		}
+		defer func() { _ = routes.close() }()
+		censusBindingRelics(routes)
+		return soleBinding(t, routes).HasLegacyResidents
+	}
+
+	if first := openAndCensus(); first {
+		t.Fatalf("a binding with nothing carried across reported relics = %v", first)
+	}
+
+	store, err := openStorageRoutes(plan, target)
+	if err != nil {
+		t.Fatalf("openStorageRoutes: %v", err)
+	}
+	graph, ok := store.storeFor(coordclass.ClassGraph)
+	if !ok {
+		t.Fatal("the split city relocated no graph store")
+	}
+	creator, ok := graph.(beads.ForeignIDCreator)
+	if !ok {
+		t.Fatalf("%T cannot create with a foreign id, so it cannot hold a bead the migration carried across", graph)
+	}
+	if _, err := creator.CreateWithForeignID(beads.Bead{ID: "ga-relic", Title: "carried across", Type: "task"}); err != nil {
+		t.Fatalf("seeding the relic the way `gc storage migrate` does: %v", err)
+	}
+	if err := store.close(); err != nil {
+		t.Fatalf("closing the seeding handle: %v", err)
+	}
+
+	if second := openAndCensus(); !second {
+		t.Fatal("a fresh open censused the binding clean after a relic was carried into it; the verdict is not being read from the store")
+	}
+
+	for _, name := range []string{
+		"storage-relic-census.json",
+		"relic-census.json",
+	} {
+		if _, err := os.Stat(filepath.Join(root, ".gc", name)); err == nil {
+			t.Errorf("the census wrote %s; a remembered verdict is a status file and goes stale the moment a binding is rebuilt", name)
+		}
 	}
 }
 
