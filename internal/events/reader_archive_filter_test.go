@@ -2,6 +2,8 @@ package events
 
 import (
 	"bytes"
+	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -42,7 +44,7 @@ func TestStreamArchiveHonorsAfterSeq(t *testing.T) {
 	}
 }
 
-func TestStreamArchiveStopsAtBeforeSeq(t *testing.T) {
+func TestStreamArchiveSkipsAtBeforeSeq(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "source.jsonl")
 	writeJSONLEvents(t, src, 1, 2, 3, 4, 5)
@@ -60,8 +62,9 @@ func TestStreamArchiveStopsAtBeforeSeq(t *testing.T) {
 		t.Fatalf("streamArchive: %v", err)
 	}
 
-	// Archives are seq-ordered, so BeforeSeq is an early exit: the tail of the
-	// archive is never decoded.
+	// The archive is not exited early: records at or above BeforeSeq are
+	// skipped before json.Unmarshal, which saves the same decode without
+	// depending on the archive being seq-ordered.
 	if len(seen) != 2 || seen[0] != 1 || seen[1] != 2 {
 		t.Fatalf("BeforeSeq=3 delivered %v, want [1 2]", seen)
 	}
@@ -88,5 +91,34 @@ func TestStreamArchiveZeroFilterDeliversAll(t *testing.T) {
 	}
 	if len(seen) != 3 {
 		t.Fatalf("zero filter delivered %v, want all 3", seen)
+	}
+}
+
+// A writer that does not put seq first fails the prefix scan, so archiveSeq
+// reports false and the record falls through to a full decode. The window is
+// then applied by the caller's matchesFilter, not here — so streamArchive
+// must still deliver it.
+func TestStreamArchiveFallsBackWhenSeqNotFirst(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "source.jsonl")
+	line := fmt.Sprintf("{\"type\":%q,\"seq\":4,\"subject\":\"s4\"}\n", string(BeadCreated))
+	if err := os.WriteFile(src, []byte(line), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	archive := filepath.Join(dir, formatArchiveBasename(time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC), 4, 4))
+	var stderr bytes.Buffer
+	if err := gzipAndArchive(src, archive, &stderr); err != nil {
+		t.Fatalf("gzipAndArchive: %v", err)
+	}
+
+	var seen []uint64
+	if err := streamArchive(archive, Filter{AfterSeq: 3}, func(e Event) bool {
+		seen = append(seen, e.Seq)
+		return true
+	}); err != nil {
+		t.Fatalf("streamArchive: %v", err)
+	}
+	if len(seen) != 1 || seen[0] != 4 {
+		t.Fatalf("non-canonical layout delivered %v, want [4]", seen)
 	}
 }
