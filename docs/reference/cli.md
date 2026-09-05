@@ -223,7 +223,46 @@ gc analyze
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc analyze latency](#gc-analyze-latency) | Chain/convoy latency: claim wait, gate queue wait, gate bounce rate |
 | [gc analyze reliability](#gc-analyze-reliability) | Correlate session-lifecycle events with model/version/rig |
+
+## gc analyze latency
+
+Latency reports three chain/convoy timing questions over the same
+events.jsonl stream:
+
+  1. Claim wait per pool — the time between a bead becoming pool-routed
+     (gc.routed_to set, unassigned) and being claimed (assignee set),
+     grouped by pool. Diagnoses P0-pool starvation.
+  2. Gate queue wait per formula/step — the gap between
+     execution.step_defined and execution.step_started for the same
+     physical step, grouped by formula and step id.
+  3. Gate bounce rate per formula — how many times a formula's steps were
+     redefined (a fresh execution.step_defined for the same run+step)
+     before finally running, as a share of all definitions.
+
+Pool is read from the bead's gc.routed_to metadata (set when a step is
+routed to a pool rather than a direct session), not a dedicated claim
+event — Gas City has none. Formula is read from the workflow root bead's
+gc.formula/gc.formula_name metadata, resolved via each execution event's
+run id; a run whose root metadata was not observed in the window groups
+under "unknown".
+
+Read-only: this command never writes events or beads.
+
+```
+gc analyze latency [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--city` | string |  | city directory (default: discover from cwd) |
+| `--events` | string |  | explicit events.jsonl path (overrides city discovery) |
+| `--formula` | string |  | filter gate queue-wait/bounce to a specific formula |
+| `--json` | bool |  | emit JSON instead of a table |
+| `--pool` | string |  | filter claim-wait to a specific pool (gc.routed_to value) |
+| `--since` | string | `24h` | start of the analysis window — duration (1h, 7d) or RFC3339 timestamp |
+| `--until` | string |  | end of the analysis window — duration (0s = now, 30m = 30 minutes ago) or RFC3339 timestamp |
 
 ## gc analyze reliability
 

@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "ok",
+    "claim_wait",
+    "gate_queue_wait",
+    "gate_bounce",
+    "skipped"
+  ],
+  "properties": {
+    "ok": {
+      "const": true
+    },
+    "claim_wait": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "pool",
+          "stats"
+        ],
+        "properties": {
+          "pool": {
+            "type": "string"
+          },
+          "stats": {
+            "$ref": "#/$defs/duration_stats"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "gate_queue_wait": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "formula",
+          "step_id",
+          "stats"
+        ],
+        "properties": {
+          "formula": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "stats": {
+            "$ref": "#/$defs/duration_stats"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "gate_bounce": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "formula",
+          "definitions",
+          "bounces",
+          "bounce_rate"
+        ],
+        "properties": {
+          "formula": {
+            "type": "string"
+          },
+          "definitions": {
+            "type": "integer"
+          },
+          "bounces": {
+            "type": "integer"
+          },
+          "bounce_rate": {
+            "type": "number"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "skipped": {
+      "type": "integer"
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "duration_stats": {
+      "type": "object",
+      "required": [
+        "count",
+        "min_ms",
+        "max_ms",
+        "avg_ms",
+        "p50_ms",
+        "p95_ms"
+      ],
+      "properties": {
+        "count": {
+          "type": "integer"
+        },
+        "min_ms": {
+          "type": "integer"
+        },
+        "max_ms": {
+          "type": "integer"
+        },
+        "avg_ms": {
+          "type": "integer"
+        },
+        "p50_ms": {
+          "type": "integer"
+        },
+        "p95_ms": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}
