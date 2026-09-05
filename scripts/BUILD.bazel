@@ -8,6 +8,18 @@ exports_files([
     "gc-session-docker",
 ])
 
+# An explicit host-Docker boundary check, never a remote or cached test.
+sh_test(
+    name = "docker_city_smoke_test",
+    srcs = ["test-docker-city"],
+    data = ["//contrib:docker/compose.yaml"],
+    tags = [
+        "external",
+        "local",
+        "manual",
+    ],
+)
+
 # The repo's shell guards (formerly preflight-static steps), each with
 # exactly the inputs it reads.
 

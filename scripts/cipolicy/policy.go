@@ -311,7 +311,11 @@ const (
 	// gets `token: ''`, so pull requests diff with git instead of calling the
 	// pulls/files API on the shared github.token budget. Reviewed delta: one
 	// `with` input; no new job, step command or permission.
-	expectedCIExecutionHash     = "094fa149515765ad86669145929368481d2c8112e58396b4083a6947b6ec2564"
+	// Bumped for the single-container city smoke: docker_city paths and shared
+	// routing, a Docker-daemon job with credential-free checkout and local
+	// Bazel setup, and its need/allowed skip in both required fan-ins. No new
+	// trigger, permission or secret; existing Bazel-covered jobs stay removed.
+	expectedCIExecutionHash     = "1b37199a9d2d43b6682457c0b7d0833c28df047c478c5d6d7c8f6f0710218fcb"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -355,6 +359,27 @@ const (
 
 var requiredFilterPaths = map[string][]string{
 	"mail": {"internal/mail/**", "contrib/mail-scripts/**"},
+	"docker_city": {
+		"contrib/docker/**",
+		"contrib/k8s/Dockerfile.base",
+		"deps.env",
+		"*.go",
+		"cmd/gc/**",
+		"internal/**",
+		"pkg/**",
+		"examples/**",
+		"schemas/**",
+		"scripts/test-docker-city",
+		"scripts/BUILD.bazel",
+		".bazelrc",
+		".bazelversion",
+		"MODULE.bazel",
+		"MODULE.bazel.lock",
+		".github/actions/setup-bazel/**",
+		".github/scripts/install-claude-native.sh",
+		".github/scripts/install-codex-archive.sh",
+		".dockerignore",
+	},
 	"beads": {
 		"go.mod",
 		"internal/beads/**",

@@ -66,6 +66,7 @@ jobs:
       # asymmetry where a subtle change in shared code skips the jobs it could
       # break. Downstream consumers read these outputs unchanged.
       mail: ${{ steps.filter.outputs.mail == 'true' || steps.filter.outputs.shared == 'true' }}
+      docker_city: ${{ steps.filter.outputs.docker_city == 'true' || steps.filter.outputs.shared == 'true' }}
       beads: ${{ steps.filter.outputs.beads == 'true' || steps.filter.outputs.shared == 'true' }}
       packs: ${{ steps.filter.outputs.packs == 'true' || steps.filter.outputs.shared == 'true' }}
       credential_provider: ${{ steps.filter.outputs.credential_provider == 'true' || steps.filter.outputs.shared == 'true' }}
@@ -94,6 +95,26 @@ jobs:
             mail:
               - 'internal/mail/**'
               - 'contrib/mail-scripts/**'
+            docker_city:
+              - 'contrib/docker/**'
+              - 'contrib/k8s/Dockerfile.base'
+              - 'deps.env'
+              - '*.go'
+              - 'cmd/gc/**'
+              - 'internal/**'
+              - 'pkg/**'
+              - 'examples/**'
+              - 'schemas/**'
+              - 'scripts/test-docker-city'
+              - 'scripts/BUILD.bazel'
+              - '.bazelrc'
+              - '.bazelversion'
+              - 'MODULE.bazel'
+              - 'MODULE.bazel.lock'
+              - '.github/actions/setup-bazel/**'
+              - '.github/scripts/install-claude-native.sh'
+              - '.github/scripts/install-codex-archive.sh'
+              - '.dockerignore'
             beads:
               - 'go.mod'
               - 'internal/beads/**'
@@ -142,14 +163,16 @@ jobs:
           SHARED_FILTER_RESULT: ${{ steps.filter.outputs.shared }}
         run: python3 .github/workflows/scripts/ci_suite_coverage.py classify "$SHARED_FILTER_RESULT"
 
-  # Every build and test of this tree runs under Bazel on rbe-west, gated by
+  # Repository suites run under Bazel on rbe-west, gated by
   # bazel.yml's required checks "bazel test (side-by-side)" and "BUILD files
   # in sync" (unit lane: //..., nogo lint/vet, gofmt, generated-artifact
   # drift incl. the OpenAPI breaking-change gate, policy guards, dashboard,
   # //:goreleaser_check_test; acceptance lane: Tier A incl. the beads
   # topology rows; integration-packages and integration-smoke lanes;
   # bazel-nightly.yml: the full //test/integration suite and `bazel
-  # coverage` to Codecov). This workflow keeps only what Bazel cannot run:
+  # coverage` to Codecov). This workflow keeps only what rbe-west cannot run:
+  #   - docker-city: real image builds and container lifecycle need a Docker
+  #     daemon on the runner, not the emulated container host;
   #   - credential-provider-windows: rbe-west has no Windows workers, so the
   #     Windows process-tree tests run on a Blacksmith Windows runner;
   #   - pack-gate, mcp-mail, contract-radar-bd-head: live probes of upstream
@@ -285,6 +308,26 @@ jobs:
       - name: MCP mail conformance test
         run: make test-mcp-mail
 
+  docker-city:
+    name: Docker city
+    needs:
+      - runner-policy
+      - changes
+    if: needs.changes.outputs.docker_city == 'true'
+    runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-bazel
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Single-container city smoke test
+        run: make test-docker-city
+
   # The main ruleset's required "Check". It fans in the same gating jobs as
   # CI / required (the Bazel lanes gate through bazel.yml's own required
   # checks).
@@ -297,6 +340,7 @@ jobs:
       - changes
       - credential-provider-windows
       - pack-gate
+      - docker-city
     if: ${{ always() }}
     runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
     env:
@@ -309,9 +353,9 @@ jobs:
           import os
           import sys
 
-          # credential-provider-windows and pack-gate are path-gated: a
-          # skipped result means the change does not touch their paths.
-          allow_skipped = {"credential-provider-windows", "pack-gate"}
+          # These jobs are path-gated; a skipped result means the change
+          # does not touch their paths.
+          allow_skipped = {"credential-provider-windows", "pack-gate", "docker-city"}
           needs = json.loads(os.environ["NEEDS_JSON"])
           failed = {}
           for job, meta in sorted(needs.items()):
@@ -345,6 +389,7 @@ jobs:
       - check
       - credential-provider-windows
       - pack-gate
+      - docker-city
     if: ${{ always() }}
     runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
     env:
@@ -357,9 +402,9 @@ jobs:
           import os
           import sys
 
-          # credential-provider-windows and pack-gate are path-gated: a
-          # skipped result means the change does not touch their paths.
-          allow_skipped = {"credential-provider-windows", "pack-gate"}
+          # These jobs are path-gated; a skipped result means the change
+          # does not touch their paths.
+          allow_skipped = {"credential-provider-windows", "pack-gate", "docker-city"}
           needs = json.loads(os.environ["NEEDS_JSON"])
           failed = {}
           for job, meta in sorted(needs.items()):

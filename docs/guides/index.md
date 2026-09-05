@@ -23,6 +23,7 @@ the rest are task-oriented.
 - [Use JSON from the gc CLI](/guides/using-json-from-gc) — drive `gc --json` and `gc --json-schema` from scripts, agents, tests, and other software.
 - [Connect an External Client](/guides/connected-clients) — bring a chat, voice, or bot front end into a city conversation: send turns to an agent over HTTP and receive its replies on a callback.
 - [Set Up a Multi-Agent Engineering Environment](/guides/multi-agent-engineering-environment) — give a by-hand multi-human, multi-agent workflow a better home by writing the method down once.
+- [Run a City in a Container](/guides/running-in-a-container) — one Docker container with `gc`, `bd`, Dolt, Claude Code, and Codex around a bind-mounted workspace; nothing installed on the host.
 
 See also the [Troubleshooting runbooks](/troubleshooting/dolt-bloat-recovery)
 for operational recovery procedures, and the [Reference](/reference/index)
