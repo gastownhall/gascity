@@ -245,6 +245,7 @@ func TestProbeRigUnsafeModeMarkersIgnoreStalePortArtifact(t *testing.T) {
 		{name: "unknown metadata mode", filename: "metadata.json", contents: `{"dolt_mode":"mystery"}`},
 		{name: "embedded metadata mode", filename: "metadata.json", contents: `{"dolt_mode":"embedded"}`},
 		{name: "malformed config without mode", filename: "config.yaml", contents: "dolt: [\n"},
+		{name: "missing mode", filename: "config.yaml", contents: "issue_prefix: tc\n"},
 	}
 
 	for _, tt := range tests {
