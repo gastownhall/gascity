@@ -991,7 +991,7 @@ func (c *sourceWorkflowRootCollector) scanStore(index int, info SourceWorkflowSt
 	rootStoreRef := strings.TrimSpace(info.StoreRef)
 	matches, err := sourceworkflow.ListLiveRoots(info.Store, c.sourceBeadID, c.sourceStoreRef, rootStoreRef)
 	if err != nil {
-		return c.recordScanFailure(index, rootStoreRef, err)
+		return c.recordScanFailure(index, info, err)
 	}
 	c.scanned++
 	c.appendRoots(index, info.Store, rootStoreRef, matches)
@@ -1002,7 +1002,8 @@ func (c *sourceWorkflowRootCollector) scanStore(index int, info SourceWorkflowSt
 // failure may be tolerated. A tolerable failure is warned through the deps sink
 // and returns nil so the store is skipped; every other failure returns the
 // wrapped error so the caller aborts.
-func (c *sourceWorkflowRootCollector) recordScanFailure(index int, rootStoreRef string, scanErr error) error {
+func (c *sourceWorkflowRootCollector) recordScanFailure(index int, info SourceWorkflowStore, scanErr error) error {
+	rootStoreRef := strings.TrimSpace(info.StoreRef)
 	storeLabel := rootStoreRef
 	if storeLabel == "" {
 		storeLabel = fmt.Sprintf("store#%d", index)
@@ -1011,7 +1012,7 @@ func (c *sourceWorkflowRootCollector) recordScanFailure(index int, rootStoreRef 
 	if c.firstScanErr == nil {
 		c.firstScanErr = wrapped
 	}
-	if !c.toleratesScanFailure(rootStoreRef) {
+	if !c.toleratesScanFailure(info) {
 		return wrapped
 	}
 	c.deps.SourceWorkflowStoreScanWarning(rootStoreRef, scanErr)
@@ -1020,9 +1021,15 @@ func (c *sourceWorkflowRootCollector) recordScanFailure(index int, rootStoreRef 
 
 // toleratesScanFailure reports whether a scan failure on the given store may be
 // skipped instead of aborting the walk. Tolerance requires a configured warning
-// sink, resolved source and store refs, and a store that is not the strict
-// selected source store — so a degraded scan is never silently swallowed.
-func (c *sourceWorkflowRootCollector) toleratesScanFailure(rootStoreRef string) bool {
+// sink, resolved source and store refs, and a store that is neither the selected
+// source store nor one the caller marked Strict — so a degraded scan is never
+// silently swallowed, and a fault on a store that structurally holds the answer
+// (the relocated graph binding) refuses the sling rather than admitting it.
+func (c *sourceWorkflowRootCollector) toleratesScanFailure(info SourceWorkflowStore) bool {
+	if info.Strict {
+		return false
+	}
+	rootStoreRef := strings.TrimSpace(info.StoreRef)
 	if c.deps.SourceWorkflowStoreScanWarning == nil || c.sourceStoreRef == "" || rootStoreRef == "" {
 		return false
 	}
@@ -1095,6 +1102,12 @@ func sameWorkflowRoot(root sourceWorkflowRoot, workflowID, storeRef string) bool
 		sourceworkflow.NormalizeSourceStoreRef(root.storeRef) == sourceworkflow.NormalizeSourceStoreRef(storeRef)
 }
 
+// blockingWorkflowIDs renders the sorted, distinct root ids a conflict names.
+//
+// Distinct because one physical root can reach the collector through two legs:
+// the relocated graph binding holds the live row, and a converged city's work
+// ledger still holds the frozen copy the storage migration retained under the
+// same id. That is one blocked workflow, and naming it twice would read as two.
 func blockingWorkflowIDs(roots []sourceWorkflowRoot) []string {
 	ids := make([]string, 0, len(roots))
 	for _, root := range roots {
@@ -1104,7 +1117,7 @@ func blockingWorkflowIDs(roots []sourceWorkflowRoot) []string {
 		ids = append(ids, root.root.ID)
 	}
 	slices.Sort(ids)
-	return ids
+	return slices.Compact(ids)
 }
 
 func snapshotBlockingWorkflowState(roots []sourceWorkflowRoot, replacement pendingSourceWorkflowLaunch) ([]workflowRestoreState, error) {
@@ -1335,10 +1348,9 @@ func sourceWorkflowRootByID(deps SlingDeps, sourceBeadID, workflowID, sourceStor
 		// subject is a workflow ROOT, which lives in the graph store; deps.Store
 		// holds the SOURCE bead. Identity wherever graph is not relocated.
 		//
-		// NOT fixed here: the federated arm below enumerates work scopes only
-		// (cmd/gc's openSourceWorkflowStores walks the city and rig dirs), so a
-		// city that relocates graph AND wires the federation still misses the
-		// binding. That is a query-federation gap, not a by-id one.
+		// The federated arm below no longer needs this fallback to cover a split
+		// city: both enumerators lead their list with the relocated graph binding
+		// (ga-nqdff), so the arm reaches the store the root actually lives in.
 		return sourceWorkflowRootByIDInStore(deps.graphStore(), sourceBeadID, workflowID, sourceStoreRef, sourceStoreRef)
 	}
 	stores, err := deps.SourceWorkflowStores()

@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/runproj"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
 var errWorkflowNotFound = errors.New("workflow not found")
@@ -37,7 +38,11 @@ func logWorkflowSQLFallback(workflowID string, err error) {
 // ref so the store-scan dedup keeps it distinct from the city store when graph is
 // relocated. It is not a scope kind (graph roots carry city/rig scope metadata of
 // their own) — only a store-identity tag for the snapshot scan and ref round-trip.
-const workflowGraphStoreRefPrefix = "graph"
+//
+// It is an alias for the sourceworkflow spelling rather than a second literal:
+// the source-workflow singleton scan mints the same ref for the same store on
+// both doors, and workflowStoreByRef below is what parses it back.
+const workflowGraphStoreRefPrefix = sourceworkflow.GraphStoreRefPrefix
 
 type workflowStoreInfo struct {
 	ref       string
