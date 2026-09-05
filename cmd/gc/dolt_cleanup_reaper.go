@@ -41,14 +41,15 @@ const (
 // config protects (with a confirm-manually reason) unless the deleted-cwd
 // signal corroborates that the scope is truly gone.
 type DoltProcInfo struct {
-	PID             int
-	Argv            []string
-	Ports           []int
-	RSSBytes        int64
-	StartTimeTicks  uint64
-	StartIdentity   string
-	CWDState        string
-	ConfigPathState string
+	PID              int
+	Argv             []string
+	Ports            []int
+	RSSBytes         int64
+	StartTimeTicks   uint64
+	StartIdentity    string
+	CWDState         string
+	ConfigPathState  string
+	ContainerRuntime string
 }
 
 // reapClassification is the per-process decision produced by classifyDoltProcess.

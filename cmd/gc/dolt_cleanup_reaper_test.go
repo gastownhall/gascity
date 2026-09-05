@@ -611,3 +611,34 @@ func TestPlanReap_CarriesDataDirForBareServerWithAllowlistedDataDir(t *testing.T
 		t.Errorf("ReapTarget.DataDir = %q, want %q", plan.Reap[0].DataDir, dataDir)
 	}
 }
+
+// TestContainerDoltServerIsClassified covers ga-sm1cvj: a bare dolt server
+// (no --config) running inside a container is currently misclassified with
+// the generic "no --config path detected" protect reason, which is
+// misleading — killing the PID on the host does nothing to a
+// container-managed process, and the reason gives the operator no hint that
+// the runtime CLI (not SIGKILL) is the correct remediation.
+func TestContainerDoltServerIsClassified(t *testing.T) {
+	p := DoltProcInfo{
+		PID:              6020,
+		Argv:             []string{"dolt", "sql-server", "-H", "127.0.0.1"},
+		ContainerRuntime: "podman",
+	}
+	got := classifyDoltProcess(p, nil, "/home/u", "", nil)
+	if got.Action != "protect" || !strings.Contains(got.Reason, "container") {
+		t.Errorf("got {Action: %q, Reason: %q}, want protect with a container-aware reason", got.Action, got.Reason)
+	}
+}
+
+// TestGotmpdirTestConfigIsOnAllowlist covers ga-sm1cvj: the fleet's go shim
+// pins GOTMPDIR=/var/tmp/gotmp (see AGENTS.md Build Cache Conventions), so
+// `go test` scratch dirs used by dolt integration tests live there — not
+// under os.TempDir() (tempDir here is "/tmp", not "/var/tmp/gotmp"). Before
+// this fix, isTestConfigPath had no rule for that root, so a live test's own
+// dolt server was misclassified as an orphan and reaped mid-test.
+func TestGotmpdirTestConfigIsOnAllowlist(t *testing.T) {
+	cfg := "/var/tmp/gotmp/TestAdoptPRFormulaCompileAndRun1071459171/001/review-formula-test/.gc/runtime/packs/dolt/dolt-config.yaml"
+	if !isTestConfigPath(cfg, "/home/jaword", "/tmp") {
+		t.Fatalf("isTestConfigPath(%q) = false, want true", cfg)
+	}
+}
