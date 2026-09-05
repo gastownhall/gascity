@@ -3,6 +3,7 @@
 package proctable
 
 import (
+	"os"
 	"os/exec"
 	"slices"
 	"strings"
@@ -147,5 +148,40 @@ func TestWaitUntilRespectsZeroTimeout(t *testing.T) {
 	}
 	if waitUntil(func() bool { return false }, 0) {
 		t.Fatal("waitUntil should report false when the condition never holds at zero timeout")
+	}
+}
+
+// TestKillLivenessFuncsAreIdentityBound pins the recycled-PID protection at the
+// wiring, not just at the helper.
+//
+// The SIGTERM-grace probe used to be a bare kill(0) existence check, and it is
+// what gates the SIGKILL wave: a target that answered SIGTERM and was reaped,
+// whose PID was recycled before the grace expired, still read as "alive", so
+// SIGKILL was sent to the new owner. signalPIDWith tries kill(-pid) first, so if
+// that owner leads a process group — every tmux pane command and every Setpgid'd
+// daemon does — the whole unrelated group dies and the call reports success.
+//
+// Both probes must therefore be bound to the ORIGINAL target's start-time
+// identity: asked about a different live PID they must answer false. Restoring
+// either to a bare existence check fails this.
+func TestKillLivenessFuncsAreIdentityBound(t *testing.T) {
+	self := os.Getpid()
+	termLive, runLive := killLivenessFuncsForPID(self)
+
+	if !termLive(self) {
+		t.Error("termLive(self) = false; the probe must recognize its own target")
+	}
+	if !runLive(self) {
+		t.Error("runLive(self) = false; the probe must recognize its own target")
+	}
+
+	// PID 1 is always live and is never us, so it stands in for a recycled PID
+	// now owned by an unrelated process.
+	const recycled = 1
+	if termLive(recycled) {
+		t.Error("termLive reported a DIFFERENT live pid as our target: a recycled PID would receive a process-group SIGKILL")
+	}
+	if runLive(recycled) {
+		t.Error("runLive reported a DIFFERENT live pid as our target")
 	}
 }

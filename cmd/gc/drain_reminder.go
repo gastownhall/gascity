@@ -378,24 +378,29 @@ func drainReminderState(bead beads.Bead, drainID string) (attempts, failed int, 
 }
 
 // drainRemindersSpent reports whether the budget for THIS drain is exhausted and
-// nothing more is worth waiting for. It is the durable question the enterprise
+// nothing more is worth waiting for. It is the durable question the terminal
 // escalation asks of the markers this file writes.
 //
-// A delivered reminder earns a full interval to be answered. A budget in which
-// every attempt was UNDELIVERABLE earns none: waiting out an answer window for
-// messages that never arrived is waiting for nothing, and the pane that cannot
-// take input is precisely the one no further attempt will reach.
+// Every budget earns a full answer window after its last attempt, including one
+// whose attempts were all UNDELIVERABLE. An earlier revision short-circuited the
+// undeliverable case on the reasoning that waiting out an answer window for
+// messages that never arrived is waiting for nothing. That reasoning is right
+// about REMINDERS and wrong about what this authorizes: `failed` counts any
+// sp.Nudge transport error — an ssh or k8s exec failure, a tmux send-keys
+// failure — which is not evidence of an input-dead pane, and this function gates
+// a kill. Short-circuiting treated an undelivered reminder MORE harshly than a
+// refused one, and the quiet-hold guard that would otherwise protect a busy
+// agent is documented non-functional on exactly the providers whose Nudge rides
+// a fallible transport (see this file's header). So the window is unconditional;
+// only the journal phrasing distinguishes the two cases.
 func drainRemindersSpent(bead beads.Bead, now time.Time) bool {
 	drainID := drainReminderIdentity(bead)
 	if drainID == "" {
 		return false
 	}
-	attempts, failed, last := drainReminderState(bead, drainID)
+	attempts, _, last := drainReminderState(bead, drainID)
 	if attempts < drainReminderMaxAttempts || last.IsZero() {
 		return false
-	}
-	if failed >= drainReminderMaxAttempts {
-		return true
 	}
 	return now.Sub(last) >= drainReminderInterval
 }

@@ -1205,8 +1205,39 @@ func (m *Manager) Attach(ctx context.Context, id string, resumeCommand string, h
 	})
 }
 
-// Suspend saves session state and kills the runtime session.
+// suspendIntent distinguishes an operator's explicit, targeted suspend from the
+// city-shutdown sweep. `gc stop` / `gc restart` issue suspend across every
+// session bead with no state pre-filter, so the sweep needs latitude on states
+// that have no live turn to suspend. An operator naming ONE session does not:
+// for them a state that cannot be suspended must still say so rather than
+// quietly killing a runtime under a different name.
+type suspendIntent int
+
+const (
+	// suspendIntentOperator is a targeted, operator-initiated suspend.
+	suspendIntentOperator suspendIntent = iota
+	// suspendIntentShutdown is the city stop/restart sweep.
+	suspendIntentShutdown
+)
+
+// Suspend saves session state and kills the runtime session. This is the
+// targeted, operator-facing form: a state the machine cannot suspend returns
+// ErrIllegalTransition rather than tearing a runtime down anyway.
 func (m *Manager) Suspend(id string) error {
+	return m.suspend(id, suspendIntentOperator)
+}
+
+// SuspendForShutdown is Suspend for the city stop/restart sweep, which issues
+// suspend across every session bead with no state pre-filter. It additionally
+// tolerates a draining seat: rejecting those with an illegal transition made
+// every restart SKIP them, so they survived as live panes still holding their
+// pool slot names (ga-rxhu2). The runtime is torn down and the bead is left in
+// draining for the drain machinery or the reconciler to finish.
+func (m *Manager) SuspendForShutdown(id string) error {
+	return m.suspend(id, suspendIntentShutdown)
+}
+
+func (m *Manager) suspend(id string, intent suspendIntent) error {
 	return withSessionMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
@@ -1248,6 +1279,31 @@ func (m *Manager) Suspend(id string) error {
 			}
 			return nil
 		}
+		// draining is the same shape of problem as failed-create above, but only
+		// for the SHUTDOWN sweep: `gc stop` and `gc restart` issue suspend on every
+		// session bead with no state pre-filter, so rejecting draining with an
+		// illegal-transition error made every restart SKIP the draining seats. They
+		// survived as live panes still holding their pool slot names, which is
+		// precisely what starves the pool (ga-rxhu2).
+		//
+		// Scoped to the sweep on purpose. A targeted operator suspend of a draining
+		// seat still returns the illegal transition: the arm below has none of the
+		// gates the reconciler's terminal escalation insists on for the same class
+		// of kill (no assigned-work probe, no token fence, no confirm-dead), so
+		// letting an operator reach it would turn POST /suspend into an ungated
+		// mid-drain kill that reports success while the row stays draining and
+		// CmdWake cannot bring it back.
+		//
+		// The early return deliberately writes NO state. A drain is not a
+		// suspension: `state` stays draining so the drain machinery can finish it
+		// or the reconciler can reap it, and the drain reason survives the stop.
+		// For the same reason this is NOT a StateDraining -> StateSuspended edge in
+		// the transition table — suspended is still an OPEN row, so the edge would
+		// release no pool name while silently losing the drain. Only a close frees
+		// the name, and CmdClose is already legal from draining.
+		if current == StateDraining && intent == suspendIntentShutdown {
+			return m.tearDownRuntimeForSuspend(sessName)
+		}
 		// Normalize legacy/aliased states (empty and awake both mean active)
 		// after the failed-create pre-check above, preserving closed-guard-
 		// first ordering.
@@ -1256,21 +1312,8 @@ func (m *Manager) Suspend(id string) error {
 			return err
 		}
 
-		// Kill the runtime session. Stop is provider-idempotent, so call it
-		// even when liveness already reports false; tmux remain-on-exit panes
-		// can be non-running but still need their session artifact removed.
-		if strings.TrimSpace(sessName) != "" {
-			running := m.sp.IsRunning(sessName)
-			err := m.sp.Stop(sessName)
-			if err != nil && !running {
-				// Preserve historical Suspend semantics for already-dead
-				// sessions: cleanup is best-effort when the runtime did not
-				// report a live process before Stop.
-				err = nil
-			}
-			if err != nil {
-				return fmt.Errorf("stopping runtime session: %w", err)
-			}
+		if err := m.tearDownRuntimeForSuspend(sessName); err != nil {
+			return err
 		}
 
 		// Update state and suspension timestamp together so stores with a
@@ -1284,6 +1327,34 @@ func (m *Manager) Suspend(id string) error {
 
 		return nil
 	})
+}
+
+// tearDownRuntimeForSuspend kills the runtime session for a suspend. Stop is
+// provider-idempotent, so it is called even when liveness already reports false;
+// tmux remain-on-exit panes can be non-running but still need their session
+// artifact removed.
+//
+// A Stop failure is suppressed ONLY when the runtime did not report a live
+// process beforehand (historical Suspend semantics: cleanup of an already-dead
+// session is best-effort). A failure to tear down a runtime that WAS live is
+// reported: callers treat a nil return as "the seat stopped" — stopTargetsBounded
+// prints "Stopped agent", counts it, and records SessionStopped — so swallowing
+// it would make `gc stop` claim success over a pane that is still alive holding
+// its pool slot name, which is the exact condition this whole change exists to
+// surface.
+func (m *Manager) tearDownRuntimeForSuspend(sessName string) error {
+	if strings.TrimSpace(sessName) == "" {
+		return nil
+	}
+	running := m.sp.IsRunning(sessName)
+	err := m.sp.Stop(sessName)
+	if err != nil && !running {
+		err = nil
+	}
+	if err != nil {
+		return fmt.Errorf("stopping runtime session: %w", err)
+	}
+	return nil
 }
 
 // RequestFreshRestart marks a session for a controller-owned fresh restart

@@ -527,10 +527,16 @@ func TestDrainReminderRecordsUndeliverableAttemptsSeparately(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read session bead: %v", err)
 	}
-	// A budget nobody could receive earns no answer window: waiting one out for
-	// messages that never arrived is waiting for nothing.
-	if !drainRemindersSpent(bead, e.clk.Time) {
-		t.Error("an all-undeliverable budget is not reported spent")
+	// The spend is recorded, but it does NOT skip the answer window. `failed`
+	// counts any Nudge TRANSPORT error (ssh/k8s exec, tmux send-keys), which is
+	// not proof of an input-dead pane, and drainRemindersSpent gates a kill — so
+	// an undelivered reminder must not be treated more harshly than a refused
+	// one. Only the journal phrasing distinguishes them.
+	if drainRemindersSpent(bead, e.clk.Time) {
+		t.Error("an all-undeliverable budget authorized escalation with no answer window")
+	}
+	if !drainRemindersSpent(bead, e.clk.Time.Add(drainReminderInterval)) {
+		t.Error("an all-undeliverable budget never becomes spent even after its answer window")
 	}
 	want := fmt.Sprintf("%d undeliverable reminder attempts (input-dead pane)", drainReminderMaxAttempts)
 	if got := drainReminderSpendPhraseFor(bead); got != want {

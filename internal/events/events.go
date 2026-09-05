@@ -122,6 +122,19 @@ const (
 	// policy (commit-and-push, clear-assignee-and-respawn, or escalate).
 	// See gastownhall/gascity#2293.
 	SessionDrainAckedWithAssignedWork = "session.drain_acked_with_assigned_work"
+	// SessionDrainStopEscalated fires when the reconciler gives up waiting for a
+	// drain-ack stop-pending session to exit on its own and terminates it: the
+	// reminder budget was spent, its answer window elapsed, the session held no
+	// assigned work, and the instance-token fence agreed the runtime was still
+	// the one we meant to stop. The runtime is then killed, confirmed dead, and
+	// the bead closed so the pool slot name is released.
+	//
+	// This is the loud half of a deliberately destructive backstop. Its whole
+	// purpose is that a terminal escalation can never silently mask a genuine
+	// drain-ack tail: every kill this pass performs is counted and queryable, so
+	// a rising rate reads as "agents are not exiting on drain-ack" rather than
+	// as quiet success. See ga-rxhu2.
+	SessionDrainStopEscalated = "session.drain_stop_escalated"
 	// SessionStranded fires when a pool slot retains an in-progress work
 	// bead after its runtime has exited — i.e., the worker process is
 	// gone but the bead's assignee/state still references it. Surfaces
@@ -366,6 +379,7 @@ var KnownEventTypes = []string{
 	SessionDraining, SessionUndrained, SessionQuarantined,
 	SessionIdleKilled, SessionMaxAgeKilled, SessionSuspended, SessionUpdated,
 	SessionDrainAckedWithAssignedWork,
+	SessionDrainStopEscalated,
 	SessionStranded,
 	SessionUnknownState,
 	SessionWakeRefused,

@@ -113,6 +113,12 @@ func (h *SessionHandle) Reset(ctx context.Context) (err error) {
 }
 
 // Stop suspends the worker runtime while preserving conversation state.
+//
+// This carries OPERATOR intent: it has targeted, single-session callers (the
+// `gc session suspend` controller-down fallback, idle auto-suspend, the legacy
+// API mux), so a state the machine cannot suspend still returns the illegal
+// transition rather than tearing a runtime down anyway. The city stop/restart
+// sweep uses StopForShutdown instead.
 func (h *SessionHandle) Stop(ctx context.Context) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationStop)
 	defer func() { event.finish(err) }()
@@ -122,6 +128,28 @@ func (h *SessionHandle) Stop(ctx context.Context) (err error) {
 		return nil
 	}
 	err = h.manager.Suspend(id)
+	return err
+}
+
+// StopForShutdown is Stop for the city stop/restart sweep, which issues a stop
+// across every session bead with no state pre-filter. Only that sweep may use
+// it: it additionally tears down a DRAINING seat instead of rejecting it with an
+// illegal transition, because rejecting those made every restart skip them and
+// leave them alive holding their pool slot names (ga-rxhu2).
+//
+// Kept as a separate method rather than a flag on Stop so the latitude cannot
+// reach a targeted operator path by accident — that is exactly how it leaked
+// before: keying the intent on the METHOD Stop handed the same ungated mid-drain
+// teardown to `gc session suspend` whenever the controller was down.
+func (h *SessionHandle) StopForShutdown(ctx context.Context) (err error) {
+	event := h.beginOperationEvent(ctx, workerOperationStop)
+	defer func() { event.finish(err) }()
+
+	id := h.currentSessionID()
+	if id == "" {
+		return nil
+	}
+	err = h.manager.SuspendForShutdown(id)
 	return err
 }
 
