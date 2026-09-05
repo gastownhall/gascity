@@ -825,6 +825,7 @@ type startOps interface {
 	capturePane(name string, lines int) (string, error)
 	recordStartCrash(name, paneContent string) string
 	sendKeys(name, text string) error
+	paneBusy(name string) (bool, error)
 	setRemainOnExit(name string) error
 	disableMouseAndActivity(name string) error
 	runSetupCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration) error
@@ -993,6 +994,18 @@ func (o *tmuxStartOps) recordStartCrash(name, paneContent string) string {
 
 func (o *tmuxStartOps) sendKeys(name, text string) error {
 	return o.tm.NudgeSession(name, text)
+}
+
+// paneBusy reports whether the target agent pane is showing a busy/
+// processing indicator right now — used between startup-nudge retries to
+// avoid blindly re-running the full C-u/paste/submit cycle against a pane
+// that already went busy (see sendStartupNudgeWithRetry).
+func (o *tmuxStartOps) paneBusy(name string) (bool, error) {
+	target := name
+	if agentPane, err := o.tm.FindAgentPane(name); err == nil && agentPane != "" {
+		target = agentPane
+	}
+	return o.tm.paneBusy(target)
 }
 
 func (o *tmuxStartOps) setRemainOnExit(name string) error {
@@ -1398,7 +1411,7 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 		return err
 	}
 	if cfg.Nudge != "" {
-		if err := sendStartupNudgeWithRetry(ctx, func() error { return ops.sendKeys(name, cfg.Nudge) }, time.Sleep); err != nil {
+		if err := sendStartupNudgeWithRetry(ctx, func() error { return ops.sendKeys(name, cfg.Nudge) }, time.Sleep, func() (bool, error) { return ops.paneBusy(name) }); err != nil {
 			// A resume-mode (or cold-start) session's startup nudge races the
 			// TUI's own boot: readiness detection and the TUI actually being
 			// able to accept input are not the same moment, so a submit
@@ -1457,6 +1470,21 @@ const startupNudgeRetryBudgetFraction = 0.5
 // redrew. Any other error, or exhausting the backoffs, returns immediately so
 // a healthy fast boot never pays this cost.
 //
+// busy is checked once the backoff sleep has elapsed, right before the next
+// resend: send's own busy-indicator poll (submitEnterAndConfirm) only runs
+// for a couple of seconds per attempt and can still miss a pane that goes
+// busy a little later — an agent whose first turn started from a large argv
+// prompt can take several more seconds to render its busy indicator. If busy
+// now reports true, the earlier submit (or a turn that started some other
+// way) has landed, so this returns nil instead of blindly re-running
+// send's C-u/paste/submit cycle: Claude Code queues input typed mid-turn
+// rather than rejecting it, so a resend against an already-busy pane risks
+// enqueueing a second copy of the nudge behind the one that just landed
+// (gastownhall/gascity#5019 review discussion). busy may be nil, in which
+// case this check is skipped and the ladder behaves as before. A busy
+// check's own error is treated the same as "not busy" — best-effort, never
+// a reason to fail the retry loop itself.
+//
 // ctx is checked before each backoff sleep: if the start is already being
 // canceled elsewhere (e.g. the supervising startup_timeout deadline), this
 // stops immediately rather than sleeping through the remainder of the ladder
@@ -1486,7 +1514,7 @@ const startupNudgeRetryBudgetFraction = 0.5
 // rather than scheduler-dependent.
 var startupNudgeNow = time.Now
 
-func sendStartupNudgeWithRetry(ctx context.Context, send func() error, sleep func(time.Duration)) error {
+func sendStartupNudgeWithRetry(ctx context.Context, send func() error, sleep func(time.Duration), busy func() (bool, error)) error {
 	start := startupNudgeNow()
 	budget := time.Duration(-1)
 	if deadline, ok := ctx.Deadline(); ok {
@@ -1514,6 +1542,11 @@ func sendStartupNudgeWithRetry(ctx context.Context, send func() error, sleep fun
 			return err
 		}
 		sleep(next)
+		if busy != nil {
+			if isBusy, _ := busy(); isBusy {
+				return nil
+			}
+		}
 	}
 }
 

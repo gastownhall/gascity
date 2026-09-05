@@ -73,6 +73,9 @@ type fakeStartOps struct {
 	capturePaneText      string
 	capturePaneErr       error
 	recordStartCrashPath string
+
+	paneBusyResult bool
+	paneBusyErr    error
 }
 
 type errReader struct{}
@@ -185,6 +188,11 @@ func (f *fakeStartOps) sendKeys(name, text string) error {
 		return err
 	}
 	return f.sendKeysErr
+}
+
+func (f *fakeStartOps) paneBusy(name string) (bool, error) {
+	f.calls = append(f.calls, startCall{method: "paneBusy", name: name})
+	return f.paneBusyResult, f.paneBusyErr
 }
 
 func (f *fakeStartOps) setRemainOnExit(name string) error {
@@ -994,7 +1002,7 @@ func TestSendStartupNudgeWithRetry_ConfirmsOnLaterAttempt(t *testing.T) {
 		}
 		return nil
 	}
-	err := sendStartupNudgeWithRetry(context.Background(), send, func(d time.Duration) { sleeps = append(sleeps, d) })
+	err := sendStartupNudgeWithRetry(context.Background(), send, func(d time.Duration) { sleeps = append(sleeps, d) }, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1006,6 +1014,56 @@ func TestSendStartupNudgeWithRetry_ConfirmsOnLaterAttempt(t *testing.T) {
 	}
 	if sleeps[0] != startupNudgeRetryBackoffs[0] || sleeps[1] != startupNudgeRetryBackoffs[1] {
 		t.Fatalf("sleeps = %v, want %v", sleeps, startupNudgeRetryBackoffs[:2])
+	}
+}
+
+// TestSendStartupNudgeWithRetry_StopsRetryingOncePaneGoesBusy proves the
+// gastownhall/gascity#5019 review-discussion fix: if busy reports true once
+// a backoff has elapsed, the ladder stops instead of re-running send's
+// C-u/paste/submit cycle against a pane that has since gone busy — a Claude
+// Code pane already mid-turn queues input rather than rejecting it, so a
+// blind resend would enqueue a second copy of the nudge behind whichever
+// submit actually landed.
+func TestSendStartupNudgeWithRetry_StopsRetryingOncePaneGoesBusy(t *testing.T) {
+	calls := 0
+	send := func() error {
+		calls++
+		return ErrNudgeSubmitUnconfirmed
+	}
+	busyCalls := 0
+	busy := func() (bool, error) {
+		busyCalls++
+		return true, nil
+	}
+	err := sendStartupNudgeWithRetry(context.Background(), send, func(time.Duration) {}, busy)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("send calls = %d, want 1 (busy after the first backoff should stop the ladder)", calls)
+	}
+	if busyCalls != 1 {
+		t.Fatalf("busy calls = %d, want 1", busyCalls)
+	}
+}
+
+// TestSendStartupNudgeWithRetry_KeepsRetryingWhilePaneStaysIdle proves busy
+// alone does not change behavior when it keeps reporting false (or errors):
+// the ladder still exhausts exactly as it did before this check existed.
+func TestSendStartupNudgeWithRetry_KeepsRetryingWhilePaneStaysIdle(t *testing.T) {
+	calls := 0
+	send := func() error {
+		calls++
+		return ErrNudgeSubmitUnconfirmed
+	}
+	busy := func() (bool, error) { return false, nil }
+	err := sendStartupNudgeWithRetry(context.Background(), send, func(time.Duration) {}, busy)
+	if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+		t.Fatalf("err = %v, want ErrNudgeSubmitUnconfirmed", err)
+	}
+	wantCalls := len(startupNudgeRetryBackoffs) + 1
+	if calls != wantCalls {
+		t.Fatalf("send calls = %d, want %d", calls, wantCalls)
 	}
 }
 
@@ -1021,7 +1079,7 @@ func TestSendStartupNudgeWithRetry_FailsAfterExhaustingBackoffs(t *testing.T) {
 		calls++
 		return ErrNudgeSubmitUnconfirmed
 	}
-	err := sendStartupNudgeWithRetry(context.Background(), send, func(time.Duration) {})
+	err := sendStartupNudgeWithRetry(context.Background(), send, func(time.Duration) {}, nil)
 	if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
 		t.Fatalf("err = %v, want ErrNudgeSubmitUnconfirmed", err)
 	}
@@ -1042,7 +1100,7 @@ func TestSendStartupNudgeWithRetry_NonRetryableErrorFailsFast(t *testing.T) {
 		calls++
 		return wantErr
 	}
-	err := sendStartupNudgeWithRetry(context.Background(), send, func(time.Duration) { slept = true })
+	err := sendStartupNudgeWithRetry(context.Background(), send, func(time.Duration) { slept = true }, nil)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("err = %v, want %v", err, wantErr)
 	}
@@ -1063,7 +1121,7 @@ func TestSendStartupNudgeWithRetry_SucceedsImmediatelyNeverSleeps(t *testing.T) 
 		calls++
 		return nil
 	}
-	if err := sendStartupNudgeWithRetry(context.Background(), send, func(time.Duration) { slept = true }); err != nil {
+	if err := sendStartupNudgeWithRetry(context.Background(), send, func(time.Duration) { slept = true }, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if calls != 1 {
@@ -1091,7 +1149,7 @@ func TestSendStartupNudgeWithRetry_CanceledContextStopsWithoutSleeping(t *testin
 		}
 		return ErrNudgeSubmitUnconfirmed
 	}
-	err := sendStartupNudgeWithRetry(ctx, send, func(d time.Duration) { sleeps = append(sleeps, d) })
+	err := sendStartupNudgeWithRetry(ctx, send, func(d time.Duration) { sleeps = append(sleeps, d) }, nil)
 	if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
 		t.Fatalf("err = %v, want ErrNudgeSubmitUnconfirmed", err)
 	}
@@ -1153,7 +1211,7 @@ func TestSendStartupNudgeWithRetry_BoundedByRemainingContextDeadline(t *testing.
 	err := sendStartupNudgeWithRetry(ctx, send, func(d time.Duration) {
 		sleeps = append(sleeps, d)
 		now = now.Add(d)
-	})
+	}, nil)
 	elapsed := now.Sub(start)
 	if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
 		t.Fatalf("err = %v, want ErrNudgeSubmitUnconfirmed", err)
