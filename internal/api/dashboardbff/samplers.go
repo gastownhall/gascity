@@ -596,9 +596,9 @@ func readDoltServerPort(beadsPath string) int {
 }
 
 // readDoltMode returns the persisted Beads storage mode and whether it is safe
-// to trust a direct-mode port artifact. Only the explicit server mode,
-// or absent markers for legacy direct stores, permit a TCP probe. Malformed,
-// unreadable, embedded, and unknown markers fail closed.
+// to trust a direct-mode port artifact. Only an explicit persisted server mode
+// permits a TCP probe. Missing, malformed, unreadable, embedded, and unknown
+// markers fail closed.
 func readDoltMode(beadsPath string) (string, bool) {
 	raw, err := os.ReadFile(filepath.Join(beadsPath, "metadata.json"))
 	metadataPresent := err == nil
@@ -638,7 +638,7 @@ func readDoltMode(beadsPath string) (string, bool) {
 		// direct endpoint from a potentially stale port artifact.
 		return "", false
 	}
-	return "", true
+	return "", false
 }
 
 func recognizedDoltMode(mode string) (string, bool) {
