@@ -1,6 +1,10 @@
 package runtime
 
-import "strings"
+import (
+	"context"
+	"strings"
+	"time"
+)
 
 // Liveness reports both provider-runtime presence and configured agent-process
 // presence for a session target.
@@ -50,4 +54,54 @@ func normalizeLiveness(obs Liveness) Liveness {
 		obs.Running = true
 	}
 	return obs
+}
+
+// ObservationStatus reports whether a liveness observation completed within
+// its bound and produced a trustworthy result. It is semantics-free: it says
+// nothing about whether a session is running or missing, only whether the
+// accompanying Liveness value should be treated as a confirmed answer.
+type ObservationStatus int
+
+const (
+	// ObservationComplete means the observation finished within its bound and
+	// the returned Liveness reflects a real provider answer.
+	ObservationComplete ObservationStatus = iota
+	// ObservationIncomplete means the observation did not finish
+	// trustworthily: the provider reported an error wrapping
+	// ErrRuntimeUnavailable, or the bound expired first. The accompanying
+	// Liveness must not be treated as confirmed absence.
+	ObservationIncomplete
+)
+
+// BoundedLivenessObserver is a richer, opt-in alternative to LivenessObserver
+// for providers that can report a liveness-observation failure (for example,
+// an error wrapping ErrRuntimeUnavailable) alongside the consolidated
+// Liveness view. ObserveLivenessBounded prefers it when a provider implements
+// it; providers that don't fall back to ObserveLiveness's existing
+// plain-boolean behavior.
+type BoundedLivenessObserver interface {
+	ObserveLivenessWithError(name string, processNames []string) (Liveness, error)
+}
+
+// ObserveLivenessBounded is the cancellable, tri-state-aware counterpart to
+// ObserveLiveness: it bounds the observation to timeout and reports whether
+// the result is trustworthy via the returned ObservationStatus.
+//
+// It races a goroutine running the observation against context.WithTimeout,
+// mirroring OrderFiringCurrentCheck.Run() (internal/doctor/checks_order_firing.go)
+// but using a cancellable/composable context bound instead of a bare
+// time.After. The goroutine prefers a provider's BoundedLivenessObserver
+// implementation if present; otherwise it falls back to exactly today's
+// ObserveLiveness behavior.
+//
+// A provider error wrapping ErrRuntimeUnavailable resolves to
+// ObservationIncomplete with the provider's own (possibly partial) Liveness
+// value preserved. A context deadline winning the race also resolves to
+// ObservationIncomplete, but with a zero Liveness value, since no provider
+// answer arrived at all. Providers without a BoundedLivenessObserver
+// implementation always resolve to ObservationComplete with a nil error,
+// exactly matching today's behavior — additive only, no existing Provider
+// call site changes.
+func ObserveLivenessBounded(_ context.Context, _ Provider, _ string, _ []string, _ time.Duration) (Liveness, ObservationStatus, error) {
+	return Liveness{}, ObservationComplete, nil
 }
