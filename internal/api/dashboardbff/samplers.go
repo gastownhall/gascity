@@ -419,7 +419,8 @@ func (m *samplerManager) probeRig(ctx context.Context, rigName, rigPath string) 
 	// behind; never infer proxy health by dialing that port. Direct/server
 	// stores retain the legacy endpoint and TCP probe for parity.
 	port := 0
-	if readDoltMode(beadsPath) != "proxied-server" {
+	mode, modeSafe := readDoltMode(beadsPath)
+	if modeSafe && mode != "proxied-server" {
 		port = readDoltServerPort(beadsPath)
 	}
 	if port > 0 {
@@ -595,18 +596,47 @@ func readDoltServerPort(beadsPath string) int {
 // readDoltMode returns the persisted Beads storage mode for a store. An empty
 // result means metadata was unavailable or malformed; callers should preserve
 // the direct-mode fallback in that case.
-func readDoltMode(beadsPath string) string {
+func readDoltMode(beadsPath string) (string, bool) {
 	raw, err := os.ReadFile(filepath.Join(beadsPath, "metadata.json"))
-	if err != nil {
-		return ""
+	metadataPresent := err == nil
+	if err == nil {
+		var metadata struct {
+			DoltMode string `json:"dolt_mode"`
+		}
+		if json.Unmarshal(raw, &metadata) == nil {
+			if mode := strings.ToLower(strings.TrimSpace(metadata.DoltMode)); mode != "" {
+				return mode, true
+			}
+		} else {
+			metadataPresent = true // malformed metadata is fail-closed
+		}
+	} else if !os.IsNotExist(err) {
+		return "", false
 	}
-	var metadata struct {
-		DoltMode string `json:"dolt_mode"`
+	// config.yaml is the canonical marker emitted by Gas City. Keep this tiny
+	// parser deliberately strict: an unreadable/malformed marker must not cause
+	// a stale TCP port to be treated as authoritative.
+	configRaw, configErr := os.ReadFile(filepath.Join(beadsPath, "config.yaml"))
+	if configErr == nil {
+		for _, line := range strings.Split(string(configRaw), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "dolt.mode:") {
+				mode := strings.ToLower(strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "dolt.mode:")), "\"'"))
+				if mode == "proxied-server" || mode == "server" {
+					return mode, true
+				}
+				return "", false
+			}
+		}
+	} else if !os.IsNotExist(configErr) {
+		return "", false
 	}
-	if json.Unmarshal(raw, &metadata) != nil {
-		return ""
+	if metadataPresent {
+		// Metadata existed but omitted/failed to decode its mode. Do not infer a
+		// direct endpoint from a potentially stale port artifact.
+		return "", false
 	}
-	return strings.ToLower(strings.TrimSpace(metadata.DoltMode))
+	return "", true
 }
 
 func tcpProbe(port int) bool {
