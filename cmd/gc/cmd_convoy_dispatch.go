@@ -1915,7 +1915,7 @@ func cmdWorkflowDeleteSource(sourceBeadID string, selector sourceWorkflowStoreSe
 			cleared := false
 			if apply {
 				var clearErr error
-				cleared, clearErr = clearSourceWorkflowMetadata(cfg, cityPath, target)
+				cleared, clearErr = clearSourceWorkflowMetadata(cfg, cityPath, target, stderr)
 				if clearErr != nil {
 					return clearErr
 				}
@@ -1973,7 +1973,7 @@ func cmdWorkflowDeleteSource(sourceBeadID string, selector sourceWorkflowStoreSe
 		cleared := false
 		if !incomplete {
 			var clearErr error
-			cleared, clearErr = clearSourceWorkflowMetadata(cfg, cityPath, target)
+			cleared, clearErr = clearSourceWorkflowMetadata(cfg, cityPath, target, stderr)
 			if clearErr != nil {
 				return clearErr
 			}
@@ -2071,13 +2071,25 @@ func cmdWorkflowReopenSource(sourceBeadID string, selector sourceWorkflowStoreSe
 			resultCode = 3
 			return nil
 		}
-		currentSource, err := target.storeView.store.Get(target.sourceBead.ID)
+		// The copy the residency contract owns, not the one the selector named —
+		// see sourceWorkflowWriteTarget. reopen-source is the other command that
+		// writes the source bead's metadata, and reopening the frozen twin would
+		// leave the binding's live row closed and still bound to its workflow, so
+		// the bead the city actually reads is neither reopened nor released.
+		write, err := resolveSourceWorkflowWriteTarget(cfg, cityPath, target, stderr)
+		if err != nil {
+			return err
+		}
+		if write.owning.store == nil {
+			return fmt.Errorf("getting bead %q: %w", sourceBeadID, beads.ErrNotFound)
+		}
+		currentSource, err := write.owning.store.Get(target.sourceBead.ID)
 		if err != nil {
 			return err
 		}
 		open := "open"
 		unassigned := ""
-		if err := target.storeView.store.SetMetadata(currentSource.ID, "workflow_id", ""); err != nil {
+		if err := write.owning.store.SetMetadata(currentSource.ID, "workflow_id", ""); err != nil {
 			return err
 		}
 		// Pre-route so the bead is never left unrouted between the reopen and
@@ -2107,18 +2119,24 @@ func cmdWorkflowReopenSource(sourceBeadID string, selector sourceWorkflowStoreSe
 		if nextRoute == "" {
 			nextRoute = strings.TrimSpace(currentSource.Metadata[beadmeta.RoutedToMetadataKey])
 		}
-		if err := target.storeView.store.SetMetadata(currentSource.ID, beadmeta.RoutedToMetadataKey, nextRoute); err != nil {
+		if err := write.owning.store.SetMetadata(currentSource.ID, beadmeta.RoutedToMetadataKey, nextRoute); err != nil {
 			return err
 		}
-		if err := clearSessionAffinityMetadataOnBead(target.storeView.store, currentSource.ID); err != nil {
+		if err := clearSessionAffinityMetadataOnBead(write.owning.store, currentSource.ID); err != nil {
 			return err
 		}
-		if err := target.storeView.store.Update(currentSource.ID, beads.UpdateOpts{
+		if err := write.owning.store.Update(currentSource.ID, beads.UpdateOpts{
 			Status:   &open,
 			Assignee: &unassigned,
 		}); err != nil {
 			return err
 		}
+		// Only workflow_id travels to the other copies. The reopen itself is the
+		// owning copy's — a frozen twin restored to open would be a row the
+		// migration retired walking back into the ready frontier — but a twin
+		// still naming the released workflow is the disagreement this command
+		// exists to end.
+		clearSourceWorkflowTwins(cfg, cityPath, write, target.sourceBeadID, stderr)
 		_, _ = fmt.Fprintf(stdout, "result=reopened source_bead_id=%s\n", sourceBeadID)
 		return nil
 	})
@@ -2661,33 +2679,180 @@ func openSourceWorkflowStoresWithProvider(cfg *config.City, cityPath, beadID str
 	return nil, skips, fmt.Errorf("no source workflow stores available")
 }
 
-func clearSourceWorkflowMetadata(cfg *config.City, cityPath string, target resolvedSourceWorkflowTarget) (bool, error) {
-	bead := target.sourceBead
-	storeView := target.storeView
-	if storeView.store == nil || strings.TrimSpace(storeView.path) == "" {
-		if target.storeRef == "" {
-			return false, nil
+// sourceWorkflowWriteTarget names the copy of a source bead that delete-source
+// and reopen-source write, and the other copies of it that must not be left
+// naming a workflow the owning copy has released.
+//
+// The selector (--rig / --store-ref) says which store's workflow is being SWEPT.
+// It does not say which copy of the source bead the next reader consults: that
+// is the residency contract's answer, and on a converged city — infrastructure
+// classes relocated into the class binding with ids preserved, the pre-migration
+// copies retained and frozen at cutover — the two are different stores. Writing
+// the selector's copy clears workflow_id on the frozen twin while the binding's
+// live row goes on pointing at the workflow that was just swept, so the next
+// resolve answers from the binding, still sees a workflow, and refuses the
+// re-sling as already-running against a tree that no longer exists (ga-4kivg).
+type sourceWorkflowWriteTarget struct {
+	// owning is the copy every later reader consults. Its write is the one that
+	// decides whether the command succeeded.
+	owning convoyStoreView
+	// others are the remaining resident copies of the same id. Their stale
+	// workflow_id is cleared best-effort: it is invisible to a binding-first
+	// read, but leaving the two copies disagreeing is how a later reader that
+	// reaches for the twin — an operator naming the city, a store-scoped
+	// report — is told the workflow is still running.
+	others []convoyStoreView
+}
+
+// resolveSourceWorkflowWriteTarget answers which copy of the source bead owns
+// the id, by running the by-id residency walk the rest of the CLI already runs.
+//
+// A binding that could not answer comes back as an ERROR, never as "no binding
+// owns this". Reading a fault as absence would send the write to the frozen twin
+// with nothing said about it, which is the same wrong copy this resolution
+// exists to stop — arrived at silently instead of by the selector.
+//
+// The walk carries no rig legs (see cliByIDBindingOwner), so a rig-owned source
+// bead has no binding answer and the owning copy is the store the selector
+// named. That is what keeps every unsplit city, and every --rig run, on exactly
+// the store it wrote before.
+//
+// Opening the retained twin is best-effort for the same reason writing it is
+// (see clearSourceWorkflowTwins): a converged city whose retained ledger has
+// gone read-only or been dropped is a normal end state for the migration, and
+// refusing to resolve the owning copy over it would take both commands away
+// from that city. The open failure is reported on stderr and the run continues
+// with no twin.
+func resolveSourceWorkflowWriteTarget(cfg *config.City, cityPath string, target resolvedSourceWorkflowTarget, stderr io.Writer) (sourceWorkflowWriteTarget, error) {
+	selected := target.storeView
+	if selected.store == nil || strings.TrimSpace(selected.path) == "" {
+		if strings.TrimSpace(target.storeRef) == "" {
+			return sourceWorkflowWriteTarget{}, nil
 		}
-		var err error
-		storeView, _, err = openSourceWorkflowStoreRef(cfg, cityPath, target.storeRef)
+		view, _, err := openSourceWorkflowStoreRef(cfg, cityPath, target.storeRef)
 		if err != nil {
-			return false, err
+			return sourceWorkflowWriteTarget{}, err
+		}
+		selected = view
+	}
+	owner, ownedByBinding, err := cliByIDBindingOwner(cityPath, target.sourceBeadID)
+	if err != nil {
+		return sourceWorkflowWriteTarget{}, err
+	}
+	if !ownedByBinding {
+		return sourceWorkflowWriteTarget{owning: selected}, nil
+	}
+	write := sourceWorkflowWriteTarget{owning: convoyStoreView{
+		path:  convoyBindingViewPath,
+		store: owner.Store,
+		role:  convoyViewClassBinding,
+	}}
+	write.others = appendSourceWorkflowCopy(write.others, write.owning, selected)
+	// The migration copied OUT of the city work ledger and deleted nothing, so
+	// the frozen twin of a binding-owned id is there whether or not the operator
+	// named it. Reaching it here is what makes the unscoped run and the
+	// --store-ref city run end in the same state.
+	if !slices.ContainsFunc(write.others, func(view convoyStoreView) bool { return samePath(view.path, cityPath) }) {
+		cityView, _, err := openSourceWorkflowStoreRef(cfg, cityPath, "city")
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "store=city workflow_id_clear_error=%v\n", err)
+		} else {
+			write.others = appendSourceWorkflowCopy(write.others, write.owning, cityView)
 		}
 	}
-	if strings.TrimSpace(bead.ID) == "" {
-		current, err := storeView.store.Get(target.sourceBeadID)
-		if err != nil {
-			if errors.Is(err, beads.ErrNotFound) {
-				return false, nil
-			}
-			return false, err
+	return write, nil
+}
+
+// appendSourceWorkflowCopy adds candidate to copies unless it is the owning copy
+// or one already listed.
+func appendSourceWorkflowCopy(copies []convoyStoreView, owning, candidate convoyStoreView) []convoyStoreView {
+	if candidate.store == nil {
+		return copies
+	}
+	if sameSourceWorkflowCopy(owning, candidate) {
+		return copies
+	}
+	if slices.ContainsFunc(copies, func(existing convoyStoreView) bool { return sameSourceWorkflowCopy(existing, candidate) }) {
+		return copies
+	}
+	return append(copies, candidate)
+}
+
+// sameSourceWorkflowCopy reports whether two views hold the same copy of a bead.
+//
+// It compares PATHS, not scopes. A relocated binding's rows belong to the city
+// scope — that is what scopePath says, and what the lock and the multi-store
+// guard need — but the binding and the city work ledger are still two stores
+// holding two copies of the same id, which is the entire situation here. The
+// binding's path is a label no directory can equal, so the comparison separates
+// them, and a city serving its classes from more than one binding is a topology
+// this build already refuses.
+func sameSourceWorkflowCopy(a, b convoyStoreView) bool {
+	if a.isClassBinding() || b.isClassBinding() {
+		return a.isClassBinding() && b.isClassBinding()
+	}
+	return samePath(a.path, b.path)
+}
+
+// clearSourceWorkflowMetadata releases the source bead from its workflow on the
+// copy the residency contract owns, then on every other resident copy.
+//
+// The reported bool is the OWNING copy's, because that is the copy the operator
+// is being told about: a run that cleared only a frozen twin has changed nothing
+// any reader will see.
+func clearSourceWorkflowMetadata(cfg *config.City, cityPath string, target resolvedSourceWorkflowTarget, stderr io.Writer) (bool, error) {
+	write, err := resolveSourceWorkflowWriteTarget(cfg, cityPath, target, stderr)
+	if err != nil {
+		return false, err
+	}
+	if write.owning.store == nil {
+		return false, nil
+	}
+	cleared, err := clearWorkflowIDOnCopy(write.owning.store, target.sourceBeadID)
+	if err != nil {
+		return false, err
+	}
+	clearSourceWorkflowTwins(cfg, cityPath, write, target.sourceBeadID, stderr)
+	return cleared, nil
+}
+
+// clearSourceWorkflowTwins clears workflow_id on every copy but the owning one,
+// reporting failures without failing the command.
+//
+// Best-effort is the right policy for exactly these copies and no others. The
+// owning copy is what every reader consults, so its write is the command's
+// verdict; a frozen twin that keeps a stale workflow_id is invisible to a
+// binding-first read and costs nothing until something reaches past the contract
+// for it. Failing the command over one would take delete-source away from a
+// converged city whose retained ledger has gone read-only — which is a normal
+// end state for a migration, not a fault the operator can act on here.
+func clearSourceWorkflowTwins(cfg *config.City, cityPath string, write sourceWorkflowWriteTarget, sourceBeadID string, stderr io.Writer) {
+	for _, view := range write.others {
+		if _, err := clearWorkflowIDOnCopy(view.store, sourceBeadID); err != nil {
+			_, _ = fmt.Fprintf(stderr, "store=%s workflow_id_clear_error=%v\n", workflowDeleteStoreLabelForView(cfg, cityPath, view), err)
 		}
-		bead = current
+	}
+}
+
+// clearWorkflowIDOnCopy clears one copy's workflow_id and reports whether it was
+// carrying one.
+//
+// The row is read here rather than reused from the resolution that found it: the
+// sweep runs in between, and a clear planned off a pre-sweep read would decide
+// from metadata that is one command old. A copy this store does not hold is not
+// an error — the migration only left a twin where there was a row to retain.
+func clearWorkflowIDOnCopy(store beads.Store, sourceBeadID string) (bool, error) {
+	bead, err := store.Get(sourceBeadID)
+	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return false, nil
+		}
+		return false, err
 	}
 	if strings.TrimSpace(bead.Metadata["workflow_id"]) == "" {
 		return false, nil
 	}
-	if err := storeView.store.SetMetadata(bead.ID, "workflow_id", ""); err != nil {
+	if err := store.SetMetadata(bead.ID, "workflow_id", ""); err != nil {
 		return false, err
 	}
 	return true, nil
