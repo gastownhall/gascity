@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
@@ -2120,6 +2121,7 @@ func cmdWorkflowReopenSource(sourceBeadID string, selector sourceWorkflowStoreSe
 			return err
 		}
 		_, _ = fmt.Fprintf(stdout, "result=reopened source_bead_id=%s\n", sourceBeadID)
+		reopenTrackingConvoysForReopenedSource(target.storeView.store, currentSource.ID, stdout, stderr)
 		return nil
 	})
 	if runErr != nil {
@@ -2127,6 +2129,43 @@ func cmdWorkflowReopenSource(sourceBeadID string, selector sourceWorkflowStoreSe
 		return 1
 	}
 	return resultCode
+}
+
+// reopenTrackingConvoysForReopenedSource is the mirror image of
+// autocloseConvoyIfComplete on the reopen side of ga-6045: closing a convoy
+// via autoclose only fires once every tracked child has reached a terminal
+// status, but nothing previously reversed that when a caller later reopened
+// one of those children through `gc workflow reopen-source`. A closed convoy
+// could then sit invisible to `gc convoy check` (its listing query excludes
+// closed convoys) for an entire second work cycle on a child it no longer
+// accurately describes as done.
+//
+// This covers only the reopen-source path. It intentionally does not touch
+// `bd update --status open` or the REST `/bead/{id}/reopen` route, which can
+// reopen a tracked child the same way and remain exposed to the same staleness
+// (see gascity#6045 for the fuller discussion and the other two candidate
+// fixes this deliberately leaves out of scope).
+//
+// Best-effort by design: sourceID's own reopen has already succeeded and been
+// reported by the time this runs, so a lookup or convoy-update failure here is
+// surfaced as a warning rather than failing the overall command.
+func reopenTrackingConvoysForReopenedSource(store beads.Store, sourceID string, stdout, stderr io.Writer) {
+	convoys, err := convoycore.TrackingConvoysForItem(store, sourceID)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "warning: gc workflow reopen-source: listing tracking convoys for %s: %v\n", sourceID, err)
+		return
+	}
+	open := "open"
+	for _, convoy := range convoys {
+		if convoy.Type != "convoy" || !convoycore.IsTerminalStatus(convoy.Status) || hasLabel(convoy.Labels, "owned") {
+			continue
+		}
+		if err := store.Update(convoy.ID, beads.UpdateOpts{Status: &open}); err != nil {
+			_, _ = fmt.Fprintf(stderr, "warning: gc workflow reopen-source: reopening tracking convoy %s: %v\n", convoy.ID, err)
+			continue
+		}
+		_, _ = fmt.Fprintf(stdout, "result=reopened_tracking_convoy convoy_id=%s source_bead_id=%s\n", convoy.ID, sourceID)
+	}
 }
 
 // findWorkflowBeads returns all beads belonging to a workflow resolved by
