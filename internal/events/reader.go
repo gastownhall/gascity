@@ -434,6 +434,22 @@ func readFilteredTracked(path string, filter Filter) ([]Event, map[eventSeqWindo
 // catch-up path; a positive Filter.Limit bounds only ReadFiltered's own scan,
 // not newly discovered rotation sources merged by the recovery pass.
 func ReadFilteredWithInFlight(path string, filter Filter) ([]Event, error) {
+	if !filter.Since.IsZero() {
+		// Same bounded walk as ReadFiltered, and safe here for the same
+		// reason plus one more. A bounded result proves the ACTIVE log
+		// spans the window; an in-flight rotating file is the previous
+		// active log on its way to becoming an archive, so it is older
+		// still and holds no match. The moment that stops being true is
+		// the moment rotation has just installed a fresh, nearly-empty
+		// active file — and then the walk reaches byte 0, reports
+		// unbounded, and this falls through to the full read that does
+		// consult the rotating sources.
+		if result, bounded, err := readFilteredSince(path, filter); err != nil {
+			return result, err
+		} else if bounded {
+			return result, nil
+		}
+	}
 	base, listedArchives, baseErr := readFilteredTracked(path, filter)
 	rotated, rotationErr := readRotationSources(path, filter, listedArchives)
 	if len(rotated) == 0 {
