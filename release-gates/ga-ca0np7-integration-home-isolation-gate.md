@@ -33,7 +33,7 @@ release may proceed; none of these failures is rewritten green.
 | 4 | No high-severity review findings open | **PASS** | `ga-20x17h` reports no style or security findings. One pre-existing low-severity fail-open branch coverage gap is explicitly non-blocking. Unresolved HIGH count: `0`. |
 | 5 | Final branch is clean | **PASS** | Before adding this record, the branch was clean and tracked `origin/deploy/ga-20x17h-gate`. `git diff --check`, affected formatting, `go build ./...`, `go vet ./...`, and integration-tagged vet all passed. Repository hooks resolve to `.githooks`. |
 | 6 | Branch diverges cleanly from main | **PASS** | Reviewed source `254dbabb5b` rebased without conflict onto `origin/main@7c817e0640`, producing `c0358b4fad`. An initial zsh source of the bash helper failed to load its push guard only after completing the clean local rebase and therefore did not push; the correct bash invocation then returned the documented no-op result because current main was already an ancestor. The exact candidate was subsequently pushed under the recorded non-diff fast-failure attribution. |
-| 7 | Single feature theme | **PASS** | The sole changed file, `test/integration/integration_test.go`, contains one integration-harness HOME-isolation theme and its tests. No independent feature is bundled. |
+| 7 | Single feature theme | **PASS** | Three files, one theme: `test/integration/integration_test.go` carries the harness HOME-isolation change and its tests, `scripts/test-integration-shard` wires those two tests into the per-PR `rest-smoke` manifest, and this gate record documents the evaluation. No independent feature is bundled. |
 
 ## Test evidence
 
@@ -58,6 +58,11 @@ Commands and results:
 
 - `TestIntegrationEnvForPinsRealHome`: PASS.
 - `TestStandaloneBDEnvForDirIsolatesHome`: PASS.
+
+Both diff-owned tests are registered in `rest_smoke_tests`
+(`scripts/test-integration-shard`) and therefore execute on every PR via
+`Integration / rest-smoke-{1,2}-of-2`, not only in the local focused run
+above.
 
 Related unchanged tests executed in the same focused command:
 
