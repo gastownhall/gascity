@@ -313,6 +313,34 @@ verify_defer_until_index_definition() {
     verify_single_column_index "$1" "$DEFER_UNTIL_INDEX_NAME" "$DEFER_UNTIL_INDEX_COLUMNS"
 }
 
+count_wisps_rows() {
+    dolt_sql_csv "USE \`$DOLT_DB\`; SELECT COUNT(*) FROM wisps;" \
+        | tail -n +2 | tr -d '\r'
+}
+
+# ensure_pre_rows captures the pre-migration row count, once, on first call.
+# Call it immediately before each mutating statement: a run that changes
+# nothing then never issues the COUNT, while a run that does still compares
+# against the count taken before its *first* mutation.
+#
+# Capturing later would be silently wrong. Both callers run every DDL statement
+# above their `changed == false` early exit, so a capture moved below that exit
+# would read the table after every mutation and leave
+# assert_rows_not_decreased comparing a post-mutation count against itself —
+# an assertion that passes on every run, including one that dropped rows.
+ensure_pre_rows() {
+    [ -n "${PRE_ROWS:-}" ] || PRE_ROWS=$(count_wisps_rows)
+}
+
+assert_rows_not_decreased() {
+    local pre_rows="$1"
+    local post_rows
+    post_rows=$(count_wisps_rows)
+    [ "$post_rows" -ge "$pre_rows" ] \
+        || die "migration dropped rows: had $pre_rows before, $post_rows after"
+    info "row count preserved: $pre_rows → $post_rows"
+}
+
 commit_schema_change() {
     local message="$1"
     local output

@@ -390,6 +390,8 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			register(doctor.NewRigBDSplitStoreCheck(cityPath, rig))
 			if storeOK {
 				register(doctor.NewRigBeadsCheck(cityPath, rig, storeFactory))
+				register(doctor.NewRigDataPresenceCheck(cityPath, rig, storeFactory).
+					WithArchiveExportRows(archiveExportRowsFor(cityPath)))
 			}
 			register(newDoctorRigDoltServerCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || opts.SkipRigDoltChecks))
 			if storeOK {

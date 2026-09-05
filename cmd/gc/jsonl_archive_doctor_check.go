@@ -93,32 +93,17 @@ func (c *jsonlArchiveDoctorCheck) resolveStateFile() string {
 
 // resolveArchiveRepo mirrors the precedence rules embedded in jsonl-export.sh
 // for locating the archive repository. The script falls back from the
-// primary location to legacy locations when the primary has no `.git`.
+// primary location to legacy locations when the primary has no `.git`; when
+// none of them is a repository the primary is still returned, so the check
+// reports against the path the script would create.
 func (c *jsonlArchiveDoctorCheck) resolveArchiveRepo() string {
-	if v := strings.TrimSpace(c.env("GC_JSONL_ARCHIVE_REPO")); v != "" {
-		return v
+	candidates := jsonlArchiveRepoCandidates(c.env, c.cityPath)
+	for _, dir := range candidates {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return dir
+		}
 	}
-	base := c.env("GC_PACK_STATE_DIR")
-	runtime := c.env("GC_CITY_RUNTIME_DIR")
-	if runtime == "" {
-		runtime = filepath.Join(c.cityPath, ".gc", "runtime")
-	}
-	if base == "" {
-		base = filepath.Join(runtime, "packs", "core")
-	}
-	primary := filepath.Join(base, "jsonl-archive")
-	if _, err := os.Stat(filepath.Join(primary, ".git")); err == nil {
-		return primary
-	}
-	legacyPack := filepath.Join(runtime, "packs", "maintenance", "jsonl-archive")
-	if _, err := os.Stat(filepath.Join(legacyPack, ".git")); err == nil {
-		return legacyPack
-	}
-	legacy := filepath.Join(c.cityPath, ".gc", "jsonl-archive")
-	if _, err := os.Stat(filepath.Join(legacy, ".git")); err == nil {
-		return legacy
-	}
-	return primary
+	return candidates[0]
 }
 
 func (c *jsonlArchiveDoctorCheck) readState(path string) (jsonlArchiveState, bool, error) {

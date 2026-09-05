@@ -107,9 +107,9 @@ func TestBuildDoctorChecks_SkipsStoreChecksWhenStoreUnreachable(t *testing.T) {
 	if !strings.Contains(res.Message, "doltlite") {
 		t.Fatalf("preflight message = %q, want doltlite residual note", res.Message)
 	}
-	// Thirteen city checks plus three per active rig, two rigs active.
-	if !strings.Contains(res.Message, "skipped 19 store checks") {
-		t.Fatalf("preflight message = %q, want skip count 19", res.Message)
+	// Thirteen city checks plus four per active rig, two rigs active.
+	if !strings.Contains(res.Message, "skipped 21 store checks") {
+		t.Fatalf("preflight message = %q, want skip count 21", res.Message)
 	}
 	if !strings.Contains(res.Message, "2 rigs") {
 		t.Fatalf("preflight message = %q, want rig count 2", res.Message)

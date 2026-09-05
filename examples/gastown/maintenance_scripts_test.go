@@ -11472,3 +11472,176 @@ exit 0
 		t.Fatalf("cross-rig-deps summary missing or wrong (subshell counter regression?)\nwant substring: %q\ngot output:\n%s\nbd log:\n%s", want, out, logData)
 	}
 }
+
+// TestMigrationCommonAssertRowsNotDecreased_OKWhenPreserved verifies that
+// assert_rows_not_decreased exits 0 when the post-migration row count equals
+// or exceeds the pre-migration count.
+func TestMigrationCommonAssertRowsNotDecreased_OKWhenPreserved(t *testing.T) {
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	commonSh := filepath.Join(exampleDir(), "..", "..", "schemas", "wisps-composite-index", "common.sh")
+	if _, err := os.Stat(commonSh); err != nil {
+		t.Fatalf("common.sh not found at %s: %v", commonSh, err)
+	}
+	for _, tc := range []struct {
+		name string
+		pre  int
+		post int
+	}{
+		{"equal", 10, 10},
+		{"increased", 10, 15},
+		{"zero_to_zero", 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			script := fmt.Sprintf(`set -euo pipefail
+. %s
+count_wisps_rows() { printf '%%d\n' %d; }
+assert_rows_not_decreased %d
+`, commonSh, tc.post, tc.pre)
+			cmd := exec.Command(bashPath, "-c", script)
+			out, execErr := cmd.CombinedOutput()
+			if execErr != nil {
+				t.Fatalf("assert_rows_not_decreased should pass (pre=%d, post=%d); got non-zero exit\noutput: %s",
+					tc.pre, tc.post, out)
+			}
+		})
+	}
+}
+
+// TestMigrationCommonAssertRowsNotDecreased_DiesWhenDropped verifies that
+// assert_rows_not_decreased exits non-zero when the post-migration row count
+// is less than the pre-migration count. This is the primary data-loss guard
+// in the wisps-composite-index migration scripts.
+func TestMigrationCommonAssertRowsNotDecreased_DiesWhenDropped(t *testing.T) {
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	commonSh := filepath.Join(exampleDir(), "..", "..", "schemas", "wisps-composite-index", "common.sh")
+	if _, err := os.Stat(commonSh); err != nil {
+		t.Fatalf("common.sh not found at %s: %v", commonSh, err)
+	}
+	// Source common.sh, override count_wisps_rows to return 5, then call
+	// assert_rows_not_decreased 10 (pre=10, post=5 → drop → non-zero exit).
+	script := `set -euo pipefail
+. ` + commonSh + `
+count_wisps_rows() { printf '5\n'; }
+assert_rows_not_decreased 10
+`
+	cmd := exec.Command(bashPath, "-c", script)
+	out, execErr := cmd.CombinedOutput()
+	if execErr == nil {
+		t.Fatalf("assert_rows_not_decreased should fail when rows dropped (pre=10, post=5); got exit 0\noutput: %s", out)
+	}
+	// Should print a message about dropped rows.
+	if !strings.Contains(string(out), "migration dropped rows") {
+		t.Fatalf("output missing 'migration dropped rows' message; got:\n%s", out)
+	}
+}
+
+// wispsMigrationDir locates the wisps-composite-index migration scripts.
+func wispsMigrationDir() string {
+	return filepath.Join(exampleDir(), "..", "..", "schemas", "wisps-composite-index")
+}
+
+// TestMigrationCommonEnsurePreRowsCapturesOnce verifies that ensure_pre_rows
+// captures the pre-migration row count exactly once. Both scripts call it
+// before each index statement, and every comparison must be against the count
+// taken before the first mutation, not a later one.
+func TestMigrationCommonEnsurePreRowsCapturesOnce(t *testing.T) {
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	commonSh := filepath.Join(wispsMigrationDir(), "common.sh")
+	if _, err := os.Stat(commonSh); err != nil {
+		t.Fatalf("common.sh not found at %s: %v", commonSh, err)
+	}
+	// The call tally lives in a file, not a shell variable: ensure_pre_rows
+	// reads count_wisps_rows through a command substitution, which runs in a
+	// subshell, so an in-process counter would always read back 0 and the
+	// assertion would hold no matter how many counts were issued.
+	tally := filepath.Join(t.TempDir(), "calls")
+	if err := os.WriteFile(tally, nil, 0o600); err != nil {
+		t.Fatalf("seed tally file: %v", err)
+	}
+	script := "set -euo pipefail\n" +
+		". " + commonSh + "\n" +
+		"count_wisps_rows() { printf 'x' >> " + tally + "; printf '%d\\n' \"$((100 + $(wc -c < " + tally + ")))\"; }\n" +
+		"ensure_pre_rows\n" +
+		"ensure_pre_rows\n" +
+		"ensure_pre_rows\n" +
+		"printf 'PRE_ROWS=%s calls=%s\\n' \"$PRE_ROWS\" \"$(wc -c < " + tally + " | tr -d ' ')\"\n"
+
+	out, execErr := exec.Command(bashPath, "-c", script).CombinedOutput()
+	if execErr != nil {
+		t.Fatalf("ensure_pre_rows script failed: %v\noutput: %s", execErr, out)
+	}
+	// One count issued, and the value kept is the one from that first call.
+	if !strings.Contains(string(out), "PRE_ROWS=101 calls=1") {
+		t.Fatalf("ensure_pre_rows must capture once and keep the first value; got:\n%s", out)
+	}
+}
+
+// TestMigrationScriptsCapturePreRowsBeforeFirstMutation pins the invariant
+// that makes assert_rows_not_decreased meaningful: the "before" count must be
+// taken before the first statement that can change the table.
+//
+// This guards one specific, inviting refactor. Both scripts run every index
+// statement above their `changed == false` early exit, so moving the capture
+// below that exit — tempting, because a no-op run would otherwise pay for an
+// unused COUNT — would take "before" after every mutation and reduce the guard
+// to comparing a post-mutation count against itself. It would still exit 0 on
+// every run, so no behavioral test would notice.
+func TestMigrationScriptsCapturePreRowsBeforeFirstMutation(t *testing.T) {
+	for _, tc := range []struct {
+		script   string
+		mutation string
+	}{
+		{"migrate.sh", "CREATE INDEX"},
+		{"rollback.sh", "DROP INDEX"},
+	} {
+		t.Run(tc.script, func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join(wispsMigrationDir(), tc.script))
+			if err != nil {
+				t.Fatalf("read %s: %v", tc.script, err)
+			}
+			capture, mutation, consumer := -1, -1, -1
+			for i, line := range strings.Split(string(data), "\n") {
+				trimmed := strings.TrimSpace(line)
+				if strings.HasPrefix(trimmed, "#") {
+					continue
+				}
+				if capture < 0 && (strings.Contains(trimmed, "ensure_pre_rows") || strings.Contains(trimmed, "PRE_ROWS=")) {
+					capture = i
+				}
+				if mutation < 0 && strings.Contains(trimmed, tc.mutation) {
+					mutation = i
+				}
+				if consumer < 0 && strings.Contains(trimmed, "assert_rows_not_decreased") {
+					consumer = i
+				}
+			}
+			if capture < 0 {
+				t.Fatalf("%s: no pre-row capture found; the row-count guard has no baseline", tc.script)
+			}
+			if mutation < 0 {
+				t.Fatalf("%s: no %q statement found; this test is stale", tc.script, tc.mutation)
+			}
+			if consumer < 0 {
+				t.Fatalf("%s: assert_rows_not_decreased is never called; the data-loss guard is gone", tc.script)
+			}
+			if capture > mutation {
+				t.Fatalf("%s: pre-row capture at line %d comes after the first %s at line %d — "+
+					"assert_rows_not_decreased would compare a post-mutation count against itself",
+					tc.script, capture+1, tc.mutation, mutation+1)
+			}
+			if consumer < mutation {
+				t.Fatalf("%s: assert_rows_not_decreased at line %d runs before the first %s at line %d",
+					tc.script, consumer+1, tc.mutation, mutation+1)
+			}
+		})
+	}
+}

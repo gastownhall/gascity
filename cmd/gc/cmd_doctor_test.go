@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1068,4 +1069,60 @@ func TestWriteDoctorJSONProjectsTimedOut(t *testing.T) {
 	if n := strings.Count(buf.String(), "timed_out"); n != 1 {
 		t.Fatalf("timed_out appears %d times, want exactly 1 (only the abandoned check); out=%s", n, buf.String())
 	}
+}
+
+// TestDoDoctorRegistersRigDataPresenceCheck verifies that doDoctor registers
+// a "rig:<name>:data-presence" check for every non-suspended rig. It runs gc
+// doctor --json against a minimal city+rig and asserts the check name appears
+// in the structured results.
+func TestDoDoctorRegistersRigDataPresenceCheck(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "myrig")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "myrig"
+prefix = "mr"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Rig path goes in site.toml (not city.toml) — schema≥2 rejects path in [[rigs]].
+	siteToml := fmt.Sprintf("[[rig]]\nname = \"myrig\"\npath = %q\n", rigDir)
+	if err := os.WriteFile(filepath.Join(cityDir, ".gc", "site.toml"), []byte(siteToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeBuiltinImportsFixture(t, cityDir, "core")
+	t.Setenv("GC_BEADS", "file")
+	prependDoctorJSONStubBinaries(t, "tmux", "git", "jq", "pgrep", "lsof")
+
+	var stdout, stderr bytes.Buffer
+	// Exit code may be non-zero when data-presence check reports an error; we
+	// only care whether the check was registered (its name appears in results).
+	_ = run([]string{"--city", cityDir, "doctor", "--json"}, &stdout, &stderr)
+
+	var payload struct {
+		Results []struct {
+			Name string `json:"name"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v\n%s", err, stdout.String())
+	}
+	wantName := "rig:myrig:data-presence"
+	for _, r := range payload.Results {
+		if r.Name == wantName {
+			return // check is registered
+		}
+	}
+	t.Errorf("check %q not found in doctor results; got: %v", wantName, payload.Results)
 }
