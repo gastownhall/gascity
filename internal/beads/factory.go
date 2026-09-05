@@ -170,9 +170,17 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 		diag := BeadsDiagnostic{Store: storeNameBdStore, NativeStoreEligible: false, PreflightGate: "config_unreadable", PreflightReason: fmt.Sprintf("read beads config: %v", cfgErr)}
 		return opts.openBdFallback(provider, diag)
 	}
-	if cfgOK && contract.IsProxiedDoltMode("dolt", cfg.DoltMode) {
-		diag := BeadsDiagnostic{Store: storeNameBdStore, NativeStoreEligible: false, PreflightGate: "proxied_provider", PreflightReason: "proxied-server mode is owned by the bd provider"}
-		return opts.openBdFallback(provider, diag)
+	if cfgOK {
+		switch strings.ToLower(strings.TrimSpace(cfg.DoltMode)) {
+		case "":
+		case "proxied-server":
+			diag := BeadsDiagnostic{Store: storeNameBdStore, NativeStoreEligible: false, PreflightGate: "proxied_provider", PreflightReason: "proxied-server mode is owned by the bd provider"}
+			return opts.openBdFallback(provider, diag)
+		case "server", "embedded":
+		default:
+			diag := BeadsDiagnostic{Store: storeNameBdStore, NativeStoreEligible: false, PreflightGate: "unsupported_dolt_mode", PreflightReason: fmt.Sprintf("unsupported persisted dolt_mode %q", cfg.DoltMode)}
+			return opts.openBdFallback(provider, diag)
+		}
 	}
 
 	native, err := opts.openNativeStore(ctx)
