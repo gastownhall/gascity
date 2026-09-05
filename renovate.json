@@ -63,6 +63,7 @@
       "customType": "regex",
       "fileMatch": [
         "/^\\.github/actions/setup-gascity-(ubuntu|macos)/action\\.yml$/",
+        "/^contrib/docker/Dockerfile$/",
         "/^contrib/k8s/Dockerfile\\.base$/",
         "/^scripts/worker_inference_setup\\.py$/"
       ],
@@ -73,6 +74,18 @@
       ],
       "datasourceTemplate": "npm",
       "depNameTemplate": "@anthropic-ai/claude-code"
+    },
+    {
+      "customType": "regex",
+      "fileMatch": [
+        "/^contrib/docker/Dockerfile$/"
+      ],
+      "matchStrings": [
+        "CODEX_VERSION=(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "openai/codex",
+      "extractVersionTemplate": "^rust-v(?<version>.*)$"
     },
     {
       "customType": "regex",

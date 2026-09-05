@@ -27,6 +27,53 @@ func readMakefile(t *testing.T) string {
 	return string(makefile)
 }
 
+// TestDockerCityVersionIsData rejects evaluating tag text as recipe shell code.
+func TestDockerCityVersionIsData(t *testing.T) {
+	for _, tag := range []string{"", "v1.2.3", "v1.2.3;#literal", "v1.2.3${GC_TEST_UNUSED}"} {
+		t.Run(tag, func(t *testing.T) {
+			tmp := t.TempDir()
+			writeExecutable(t, filepath.Join(tmp, "git"), `#!/bin/sh
+case "$1" in
+  describe) [ -n "$GC_TEST_TAG" ] || exit 1; printf '%s' "$GC_TEST_TAG" ;;
+  rev-parse) printf 'abcdef123' ;;
+  show) printf '2026-09-05T00:00:00Z' ;;
+  status) exit 0 ;;
+  *) exit 1 ;;
+esac
+`)
+			writeExecutable(t, filepath.Join(tmp, "docker"), `#!/bin/sh
+printf '%s\n' "$@" > "$GC_TEST_ARGS"
+printf '%s' "$GC_VERSION" > "$GC_TEST_VERSION"
+`)
+			argsPath := filepath.Join(tmp, "args")
+			versionPath := filepath.Join(tmp, "version")
+			cmd := makeCommand("--no-print-directory", "-f", filepath.Join(repoRoot(t), "Makefile"), "-o", "docker-base", "docker-city")
+			cmd.Dir = tmp
+			cmd.Env = []string{
+				"PATH=" + tmp + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"HOME=" + tmp, "GC_TEST_TAG=" + tag,
+				"GC_TEST_ARGS=" + argsPath, "GC_TEST_VERSION=" + versionPath,
+			}
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("make docker-city: %v\n%s", err, out)
+			}
+			want := strings.TrimPrefix(tag, "v")
+			if tag == "" {
+				want = "dev"
+			}
+			version, err := os.ReadFile(versionPath)
+			if err != nil || string(version) != want {
+				t.Fatalf("exported version = %q, want %q; err=%v", version, want, err)
+			}
+			args, err := os.ReadFile(argsPath)
+			if err != nil || !strings.Contains(string(args), "--build-arg\nGC_VERSION\n") {
+				t.Fatalf("Docker must take GC_VERSION from the environment: %s; err=%v", args, err)
+			}
+		})
+	}
+}
+
 // TestBuildTargetDisablesToolchainVCSStamping asserts that `make build` keeps
 // the Go toolchain out of the provenance business.
 //

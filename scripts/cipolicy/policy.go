@@ -20,7 +20,7 @@ const (
 	// policy review, while workflow, job, step, and input descriptions remain
 	// free to change. A failure prints the projection and candidate digest.
 	expectedCITriggersHash       = "d1a8bcd089019589658d8f154af9c26a70877285d84a384c2dcea299efc9554a"
-	expectedCIExecutionHash      = "40c61d69abee24e0e025829045bbf699c7c9dcac44b1fb9911d94c9295ae4865"
+	expectedCIExecutionHash      = "848816197b789cd6b25beeb832a2917c63fdeaa3f641fce66d597eb8db781b30"
 	expectedNightlyTriggersHash  = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	expectedNightlyExecutionHash = "a2c68532e85598b527a2cff2d2057c99ed5c65208fa34ea143869d8375f99a84"
 	expectedSetupActionHash      = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
@@ -33,6 +33,21 @@ var requiredFilterPaths = map[string][]string{
 		"scripts/gc-session-docker",
 		"scripts/test-docker-session",
 		"contrib/session-scripts/**",
+	},
+	"docker_city": {
+		"contrib/docker/**",
+		"contrib/k8s/Dockerfile.base",
+		"deps.env",
+		"*.go",
+		"cmd/gc/**",
+		"internal/**",
+		"pkg/**",
+		"examples/**",
+		"schemas/**",
+		"scripts/test-docker-city",
+		".github/scripts/install-claude-native.sh",
+		".github/scripts/install-codex-archive.sh",
+		".dockerignore",
 	},
 	"k8s": {
 		"internal/session/**",

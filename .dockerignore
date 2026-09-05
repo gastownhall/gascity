@@ -2,6 +2,7 @@
 .github/*
 !.github/scripts/
 !.github/scripts/install-claude-native.sh
+!.github/scripts/install-codex-archive.sh
 !.github/scripts/install-dolt-archive.sh
 !.github/requirements/
 !.github/requirements/mcp-agent-mail.txt

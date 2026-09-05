@@ -22,6 +22,7 @@ the rest are task-oriented.
 - [Configure the Gastown Pack](/guides/gastown-config-recipes) — task-oriented config overrides for the Gastown pack: register rigs, scale pools, swap providers, patch agents, and tweak prompts.
 - [Use JSON from the gc CLI](/guides/using-json-from-gc) — drive `gc --json` and `gc --json-schema` from scripts, agents, tests, and other software.
 - [Set Up a Multi-Agent Engineering Environment](/guides/multi-agent-engineering-environment) — give a by-hand multi-human, multi-agent workflow a better home by writing the method down once.
+- [Run a City in a Container](/guides/running-in-a-container) — one Docker container with `gc`, `bd`, Dolt, Claude Code, and Codex around a bind-mounted workspace; nothing installed on the host.
 
 See also the [Troubleshooting runbooks](/troubleshooting/dolt-bloat-recovery)
 for operational recovery procedures, and the [Reference](/reference/index)
