@@ -242,7 +242,8 @@ func ApplyGraphRouteBinding(step *formula.RecipeStep, binding GraphRouteBinding)
 		// only when a slot claims the step — out of scope for route-time.
 		step.Metadata[beadmeta.SessionNameMetadataKey] = binding.SessionName
 	}
-	step.Assignee = binding.SessionName
+	// Config-agent work is routed by alias; a concrete session binds on claim.
+	step.Assignee = ""
 	return nil
 }
 
