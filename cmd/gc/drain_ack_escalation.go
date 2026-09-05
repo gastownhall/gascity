@@ -51,7 +51,7 @@ package main
 // above says WHICH process to signal. GC_SESSION_ID and GC_CITY_PATH are
 // ordinary environment variables inherited by every child the agent ever
 // spawned, and the scan promotes any of them to an "agent root" once it
-// reparents to init — so matching on those two fields proves lineage, not
+// reparents to a subreaper — so matching on those two fields proves lineage, not
 // ownership, and sweeps in every daemon an agent ever backgrounded. See
 // drainAckForceTerminationTargets, which is where that fence lives.
 //
@@ -96,12 +96,25 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/telemetry"
 
 	"github.com/gastownhall/gascity/internal/api"
 )
+
+// drainAckDetectSubreaperPID resolves the `systemd --user` child-subreaper pid
+// for this session, or 0 on a plain-init host. It is a package var so tests can
+// model a subreaper topology without a real user manager.
+//
+// It must be read on the RECONCILE goroutine and the value threaded down, never
+// re-read from the detached termination goroutine: that goroutine outlives its
+// tick, so reading a mutable package global from it races a test swapping it
+// (the same hazard the confirm-dead bounds and the poke seam already bind at
+// queue time). It also walks the parent chain, so once per escalation is the
+// right cost, not once per scan hit.
+var drainAckDetectSubreaperPID = func() int { return pidutil.DetectUserSubreaperPID(os.Getpid()) }
 
 // drainAckEscalationLabel prefixes this pass's journal lines so a terminal kill
 // is greppable next to the reminder lines that preceded it.
@@ -401,7 +414,7 @@ func escalateWedgedDrainAckStopPending(
 	// — see recordDrainAckEscalation. If the termination could not even be
 	// queued, report false so the caller still issues its ordinary stop rather
 	// than losing this row's stop entirely.
-	return queueDrainAckForcedTermination(cityPath, store, sp, cfg, info, name, reason, attempt, processNames, tracker, rec, stderr)
+	return queueDrainAckForcedTermination(cityPath, store, sp, cfg, info, name, reason, attempt, processNames, drainAckDetectSubreaperPID(), tracker, rec, stderr)
 }
 
 // queueDrainAckForcedTermination runs the forceful termination on a DETACHED
@@ -423,6 +436,7 @@ func queueDrainAckForcedTermination(
 	name, reason string,
 	attempt int,
 	processNames []string,
+	subreaperPID int,
 	tracker *asyncStartTracker,
 	rec events.Recorder,
 	stderr io.Writer,
@@ -450,7 +464,7 @@ func queueDrainAckForcedTermination(
 		}
 		// The pane outlived the ordinary stop. This is the population the whole
 		// pass exists for, so apply the force the ordinary path does not have.
-		outcome := terminateDrainAckRuntimeByProcessTable(cityPath, sp, sessionID, name, expectedToken, stderr)
+		outcome := terminateDrainAckRuntimeByProcessTable(cityPath, sp, sessionID, name, expectedToken, subreaperPID, stderr)
 		recordDrainAckEscalation(cfg, info, name, reason, outcome, attempt, rec)
 	}()
 	return true
@@ -473,6 +487,7 @@ func terminateDrainAckRuntimeByProcessTable(
 	cityPath string,
 	sp runtime.Provider,
 	sessionID, name, expectedToken string,
+	subreaperPID int,
 	stderr io.Writer,
 ) string {
 	scanner, ok := sp.(runtime.ProcessTableScanner)
@@ -494,7 +509,7 @@ func terminateDrainAckRuntimeByProcessTable(
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: scanning process table for %s: %v\n", drainAckEscalationLabel, name, err) //nolint:errcheck
 	}
-	targets, skipped := drainAckForceTerminationTargets(found, sessionID, cityPath, name, stderr)
+	targets, skipped := drainAckForceTerminationTargets(found, sessionID, cityPath, name, subreaperPID, stderr)
 	if len(targets) == 0 {
 		fmt.Fprintf(stderr, //nolint:errcheck
 			"%s: %s survived its stop but no process was attributable to this seat (%d scan hit(s) refused); slot stays occupied\n",
@@ -543,9 +558,16 @@ func terminateDrainAckRuntimeByProcessTable(
 // five session-level fences re-authorize the SESSION; only this one re-supplies
 // the PER-PROCESS attribution.
 //
-// The discriminator is reparenting. A pane the provider still owns has the
-// provider's server as its parent, so PPID > 1; a backgrounded daemon leads its
-// own group and reparents to init. Process-NAME matching is deliberately not
+// The discriminator is REPARENTING, in the subreaper-inclusive sense. A pane the
+// provider still owns has the provider's server as its parent; a backgrounded
+// daemon leads its own group and, once its spawner exits, is adopted by a
+// subreaper. Crucially that subreaper is NOT always pid 1: under a
+// user@UID.service, `systemd --user` sets PR_SET_CHILD_SUBREAPER, so orphans
+// reparent to the USER MANAGER and carry a large LIVE ppid. A plain `ppid <= 1`
+// test therefore reads the orphaned watchdog as a live, owned child of the
+// session and lets it through — on the topology this fleet actually runs. The
+// test is pidutil.IsReparentedOrphan, which the workspacesvc orphan sweep
+// already used for the same reason. Process-NAME matching is deliberately not
 // used as the test: the agent process is frequently a DESCENDANT of the runtime
 // root rather than the root itself (a pane's foreground can be a wrapper), so
 // requiring the root's name to match the agent's process hints would refuse the
@@ -553,6 +575,7 @@ func terminateDrainAckRuntimeByProcessTable(
 func drainAckForceTerminationTargets(
 	found []runtime.LiveRuntime,
 	sessionID, cityPath, name string,
+	subreaperPID int,
 	stderr io.Writer,
 ) ([]runtime.LiveRuntime, int) {
 	normalizedCity := normalizePathForCompare(strings.TrimSpace(cityPath))
@@ -588,12 +611,13 @@ func drainAckForceTerminationTargets(
 			skipped++
 			fmt.Fprintf(stderr, "%s: %s skipping pid=%d: not bound to this runtime name (provider=%q tracked=%v)\n", //nolint:errcheck
 				drainAckEscalationLabel, name, live.PID, strings.TrimSpace(live.ProviderName), live.IsTracked)
-		case live.PPID <= 1:
+		case pidutil.IsReparentedOrphan(live.PPID, subreaperPID):
 			skipped++
 			fmt.Fprintf(stderr, //nolint:errcheck
-				"%s: %s skipping pid=%d (%s): reparented to init, so it only INHERITED this session's environment "+
-					"— it is not the seat's runtime, and killing it would signal its whole process group\n",
-				drainAckEscalationLabel, name, live.PID, live.Name)
+				"%s: %s skipping pid=%d (%s): reparented to a subreaper (ppid=%d), so it only INHERITED this "+
+					"session's environment — it is not the seat's runtime, and killing it would signal its whole "+
+					"process group\n",
+				drainAckEscalationLabel, name, live.PID, live.Name, live.PPID)
 		default:
 			targets = append(targets, live)
 		}
