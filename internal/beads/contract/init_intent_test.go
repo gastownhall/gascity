@@ -83,6 +83,22 @@ func TestResolveInitIntentRejectsUnknownPersistedDoltMode(t *testing.T) {
 	}
 }
 
+func TestResolveInitIntentRejectsUnknownPersistedDoltTarget(t *testing.T) {
+	for _, target := range []string{"remote", "bogus", "localhost"} {
+		t.Run(target, func(t *testing.T) {
+			_, err := ResolveInitIntent(InitScopeState{
+				Initialized: true,
+				Backend:     "dolt",
+				DoltMode:    "server",
+				Target:      target,
+			}, InitIntent{}, InitIntent{}, InitIntent{}, InitIntent{Transport: "proxied", Target: "local"})
+			if err == nil {
+				t.Fatalf("ResolveInitIntent accepted unknown persisted dolt target %q", target)
+			}
+		})
+	}
+}
+
 func TestResolveInitIntentDoesNotReadAmbientEnvironment(t *testing.T) {
 	// The resolver accepts an explicit policy environment value only. An
 	// ambient BEADS_DOLT_* variable is intentionally invisible here, so it

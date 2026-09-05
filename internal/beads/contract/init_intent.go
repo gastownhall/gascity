@@ -61,7 +61,11 @@ func ResolveInitIntent(persisted InitScopeState, cliIntent, envIntent, configInt
 		if err != nil {
 			return InitIntentResolution{}, err
 		}
-		persistedIntent := InitIntent{Transport: transport, Target: normalizeTarget(persisted.Target)}
+		persistedTarget, err := normalizePersistedTarget(persisted.Target)
+		if err != nil {
+			return InitIntentResolution{}, err
+		}
+		persistedIntent := InitIntent{Transport: transport, Target: persistedTarget}
 		if persistedIntent.Transport != "" && persistedIntent.Target == "" {
 			persistedIntent.Target = "local"
 		}
@@ -128,12 +132,15 @@ func persistedTransport(mode string) (string, error) {
 	}
 }
 
-func normalizeTarget(target string) string {
+func normalizePersistedTarget(target string) (string, error) {
 	t := strings.ToLower(strings.TrimSpace(target))
-	if t == "local" || t == "external" {
-		return t
+	if t == "" {
+		return "", nil
 	}
-	return ""
+	if t == "local" || t == "external" {
+		return t, nil
+	}
+	return "", fmt.Errorf("persisted Dolt target %q is unsupported", target)
 }
 
 func formatIntent(intent InitIntent) string {
