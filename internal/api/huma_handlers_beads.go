@@ -709,25 +709,28 @@ func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInpu
 	// released on any error, so every fallible step lives in the closure.
 	b, err := withIdempotency(s.idem, "/v0/beads", input.IdempotencyKey, input.Body,
 		func() (beads.Bead, error) {
-			store := s.findStore(input.Body.Rig)
-			if store == nil {
-				return beads.Bead{}, apierr.InvalidRequest.Msg("rig is required when multiple rigs are configured")
-			}
-			assignee, err := s.normalizeRawBeadAssignee(ctx, input.Body.Assignee)
-			if err != nil {
-				return beads.Bead{}, apierr.InvalidRequest.Msg(err.Error())
-			}
-			created, err := store.Create(beads.Bead{
+			candidate := beads.Bead{
 				Title:       input.Body.Title,
 				Type:        input.Body.Type,
 				Priority:    input.Body.Priority,
-				Assignee:    assignee,
 				Description: input.Body.Description,
 				Labels:      input.Body.Labels,
 				ParentID:    input.Body.Parent,
 				Metadata:    input.Body.Metadata,
 				DeferUntil:  input.Body.DeferUntil,
-			})
+			}
+			// The store follows from the bead, not from the request: an
+			// infrastructure-class body belongs in this city's class binding
+			// wherever the caller posted it from.
+			store, err := s.createStoreForBead(candidate, input.Body.Rig)
+			if err != nil {
+				return beads.Bead{}, err
+			}
+			candidate.Assignee, err = s.normalizeRawBeadAssignee(ctx, input.Body.Assignee)
+			if err != nil {
+				return beads.Bead{}, apierr.InvalidRequest.Msg(err.Error())
+			}
+			created, err := store.Create(candidate)
 			if err != nil {
 				return beads.Bead{}, apierr.Internal.Msg(err.Error())
 			}

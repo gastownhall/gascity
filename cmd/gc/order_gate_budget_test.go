@@ -187,18 +187,55 @@ func drainOrderDispatch(t *testing.T, m *memoryOrderDispatcher) {
 	}
 }
 
+// barrierCheckScript returns a condition-check shell script for the
+// concurrent-overlap fixtures below. Every check registers itself in liveDir
+// (a mktemp'd file, removed on exit via trap) and then holds that
+// registration for the full ~1s window (50 * 20ms polls), regardless of when
+// it personally observes a sibling: a seen flag latches on any poll that
+// finds >= 2 registrations, and only that flag — checked once the window is
+// over — decides exit 0 vs exit 1. It always exits normally so the trap
+// unregisters. Holding to the end of the window (rather than exiting the
+// instant a sibling is seen) makes overlap detection independent of which
+// pair happens to notice each other first, so a straggler that starts late
+// but still within the window is guaranteed to be seen by, and see, whoever
+// is still holding. A nonzero startDelay simulates a check whose own
+// subprocess spawn was delayed — host contention, a straggler — before it
+// ever gets to register.
+func barrierCheckScript(liveDir, ranMarker string, startDelay time.Duration) string {
+	var delay string
+	if startDelay > 0 {
+		delay = fmt.Sprintf("sleep %.3f; ", startDelay.Seconds())
+	}
+	return fmt.Sprintf(
+		`%[3]smkdir -p %[1]s; echo . >> %[2]s; f=$(mktemp %[1]s/w.XXXXXX); trap 'rm -f "$f"' EXIT; `+
+			`seen=0; i=0; while [ $i -lt 50 ]; do if [ "$(ls %[1]s | wc -l)" -ge 2 ]; then seen=1; fi; sleep 0.02; i=$((i+1)); done; `+
+			`if [ "$seen" -eq 1 ]; then exit 0; else exit 1; fi`,
+		liveDir, ranMarker, delay)
+}
+
 // TestConditionChecksRunConcurrentlyWithinTheirCap is the parallel half of the
 // leg, and it proves real overlap rather than measuring wall clock.
 //
-// Every check registers itself in a shared directory and then waits, bounded, to
-// SEE a sibling registered. Overlap is therefore the pass condition: with a cap
-// that admits more than one, the checks see each other and every order fires;
-// with a cap of one, no check ever sees a sibling and nothing fires. Each check
-// exits normally either way and removes its own registration on the way out, so
-// the two arms differ only in whether the pass ran them at the same time.
+// Every check registers itself in a shared directory and polls, bounded, for
+// the FULL wave to be registered before exiting 0; a check that never sees
+// the whole cohort exits 1. Cleanup is conditional on that outcome
+// (ga-e7cxrg): only a check that timed out removes its registration, so a
+// later non-overlapping cap-1 run never inherits a stale marker. A check that
+// DID see the full wave leaves its marker behind, because polling isn't
+// synchronized across checks — the moment the cohort completes, whichever
+// check notices first would otherwise tear down the evidence (unconditional
+// cleanup-on-exit) before a sibling one poll tick behind ever looked, and
+// that race — not a slow fork/exec — is what actually produced the flake:
+// every check always ran and registered, but the completed-cohort state
+// could vanish in under one 20ms poll interval. Leaving success markers in
+// place means that state can only grow, never shrink, until every check
+// still polling has had a turn to see it.
 //
-// The same fixture is its own control, and neither outcome is reachable by a
-// pass that simply stopped running checks: that one fires nothing AND leaves the
+// With a cap that admits the whole wave, every check eventually sees all of
+// them and every order fires; with a cap of one, checks run strictly
+// sequentially and none ever sees more than itself, so nothing fires. The
+// same fixture is its own control, and neither outcome is reachable by a pass
+// that simply stopped running checks: that one fires nothing AND leaves the
 // registration directory empty, which the first arm asserts against.
 func TestConditionChecksRunConcurrentlyWithinTheirCap(t *testing.T) {
 	const wave = 4
@@ -218,11 +255,15 @@ func TestConditionChecksRunConcurrentlyWithinTheirCap(t *testing.T) {
 			cityPath, cfg, _ := newExecOrderFixture(t)
 			liveDir := filepath.Join(t.TempDir(), "live")
 			ranMarker := filepath.Join(t.TempDir(), "ran")
-			// Register, then wait up to ~1s to see a sibling registration. Exit
-			// 0 only on overlap; always exit normally so the trap unregisters.
+			// Register, then wait up to ~1s to see the FULL wave registered.
+			// Exit 0 only once every sibling has checked in. The trap only
+			// unregisters on a timeout ($ok stays 0): a check that DID see the
+			// full cohort leaves its marker behind so a sibling polling on a
+			// different tick still finds the completed wave rather than racing
+			// the first-to-notice check's own cleanup.
 			check := fmt.Sprintf(
-				`mkdir -p %[1]s; echo . >> %[3]s; f=$(mktemp %[1]s/w.XXXXXX); trap 'rm -f "$f"' EXIT; `+
-					`i=0; while [ $i -lt 50 ]; do if [ "$(ls %[1]s | wc -l)" -ge 2 ]; then exit 0; fi; sleep 0.02; i=$((i+1)); done; exit 1`,
+				`mkdir -p %[1]s; echo . >> %[3]s; f=$(mktemp %[1]s/w.XXXXXX); ok=0; trap '[ "$ok" = 1 ] || rm -f "$f"' EXIT; `+
+					`i=0; while [ $i -lt 50 ]; do if [ "$(ls %[1]s | wc -l)" -ge %[2]d ]; then ok=1; exit 0; fi; sleep 0.02; i=$((i+1)); done; exit 1`,
 				liveDir, wave, ranMarker)
 
 			aa := make([]orders.Order, 0, wave)
@@ -259,6 +300,76 @@ func TestConditionChecksRunConcurrentlyWithinTheirCap(t *testing.T) {
 				t.Fatalf("%d of %d checks ran; the fire count above is not measuring overlap", got, wave)
 			}
 		})
+	}
+}
+
+// TestConditionCheckOverlapSurvivesAStragglerStart is the deterministic
+// regression for ga-v9gt79: under real sharded process load,
+// TestConditionChecksRunConcurrentlyWithinTheirCap's cap-admits-the-wave arm
+// flaked 3-of-4 instead of 4-of-4. The cause is not a Go-level dispatch bug —
+// order_dispatch.go's goroutine fan-out and triggers.go's subprocess
+// execution both fire all four checks concurrently, unconditionally — it is
+// that the OLD check script unregisters itself the instant it personally
+// sees a sibling, so the real overlap tolerance was bounded by however fast
+// the fastest pair happened to notice each other, not by the ~1s poll
+// budget. Under host contention a straggler's subprocess spawn can be
+// delayed past that effective window, so by the time it registers, its
+// siblings have already succeeded and vanished.
+//
+// This reproduces that shape on demand, without depending on real,
+// non-deterministic host contention: three checks start immediately and one
+// starts after an artificial delay comfortably inside the ~1s window. A
+// check that holds its registration for the full window — rather than
+// exiting the instant it personally detects a sibling — must still be seen
+// by a late-starting sibling, so all four fire regardless of which pair
+// notices which first.
+func TestConditionCheckOverlapSurvivesAStragglerStart(t *testing.T) {
+	const wave = 4
+	prev := orderConditionCheckConcurrency
+	orderConditionCheckConcurrency = wave
+	t.Cleanup(func() { orderConditionCheckConcurrency = prev })
+
+	cityPath, cfg, _ := newExecOrderFixture(t)
+	liveDir := filepath.Join(t.TempDir(), "live")
+	ranMarker := filepath.Join(t.TempDir(), "ran")
+
+	const stragglerDelay = 300 * time.Millisecond
+	aa := make([]orders.Order, 0, wave)
+	for i := range wave {
+		var delay time.Duration
+		if i == wave-1 {
+			delay = stragglerDelay
+		}
+		aa = append(aa, orders.Order{
+			Name:         fmt.Sprintf("straggler-order-%d", i),
+			Exec:         "true",
+			Trigger:      "condition",
+			Check:        barrierCheckScript(liveDir, ranMarker, delay),
+			CheckTimeout: "10s",
+		})
+	}
+	store := beads.NewMemStore()
+	var rec memRecorder
+	m := newSplitOrderDispatcher(t, cityPath, cfg, aa, store, beads.NewMemStore(), &rec)
+	m.maxDispatchesPerTick = 0
+	m.execRun = func(context.Context, string, string, []string) ([]byte, error) { return nil, nil }
+
+	m.dispatch(context.Background(), cityPath, time.Now())
+	drainOrderDispatch(t, m)
+
+	if got := len(trackingBeads(t, m.ordersStoreFor(store), labelOrderTracking)); got != wave {
+		t.Fatalf("%d of %d orders fired with a %s straggler start: a check must hold its registration for the "+
+			"full overlap window so a late-starting sibling still sees it, not just whichever pair happened to "+
+			"notice each other first", got, wave, stragglerDelay)
+	}
+	// Control: every check DID run, so a shortfall above is "no overlap" and
+	// not "the straggler's order never got checked".
+	data, err := os.ReadFile(ranMarker)
+	if err != nil {
+		t.Fatalf("no check ran at all: %v", err)
+	}
+	if got := strings.Count(string(data), "."); got != wave {
+		t.Fatalf("%d of %d checks ran; the fire count above is not measuring overlap", got, wave)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -113,6 +114,42 @@ func TestClassifyAcceptsCityRootedBindings(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestClassifyResolvesRelativePathsAgainstTheCityRoot covers the shape city.toml
+// actually allows: a rig path written relative to the city, which the rest of the
+// codebase joins onto the city root (see internal/rig/topology.go). Judged against
+// the process working directory instead, such a path yields a confident verdict
+// about an unrelated directory — and because probeDevice's ancestor walk
+// terminates at "." rather than running out of ancestors, it falls back to
+// Unknown only if stat(".") itself fails, so in practice the fail-open escape
+// hatch does not save it.
+func TestClassifyResolvesRelativePathsAgainstTheCityRoot(t *testing.T) {
+	mounts := hostedPodMounts()
+	mounts.install(t)
+
+	t.Run("relative path under the city is durable", func(t *testing.T) {
+		got := Classify("/city", "rigs/backend")
+		if got.Class != CityDevice {
+			t.Fatalf("Classify(/city, rigs/backend).Class = %q, want %q", got.Class, CityDevice)
+		}
+		if got.Probed != "/city/rigs/backend" {
+			t.Fatalf("Probed = %q, want /city/rigs/backend", got.Probed)
+		}
+	})
+
+	// Control: relative paths must not be blanket-accepted. One that escapes the
+	// city onto tmpfs still has to be caught, which a fix that simply trusted any
+	// non-absolute path would miss.
+	t.Run("relative path escaping onto tmpfs is still caught", func(t *testing.T) {
+		got := Classify("/city", "../tmp/adopt")
+		if got.Class != Ephemeral {
+			t.Fatalf("Classify(/city, ../tmp/adopt).Class = %q, want %q", got.Class, Ephemeral)
+		}
+		if got.Filesystem != "tmpfs" {
+			t.Fatalf("Filesystem = %q, want tmpfs", got.Filesystem)
+		}
+	})
 }
 
 // TestClassifyRejectsNonPersistentPaths is the guard direction. /var/tmp is the
@@ -236,7 +273,17 @@ func TestClassifyFailsOpen(t *testing.T) {
 
 // TestClassifyOnRealFilesystem exercises the real syscall probes rather than the
 // fake mount table, so a bug in the platform file cannot hide behind the double.
+//
+// Only Linux has those probes: probe_linux.go is `//go:build linux` and
+// probe_other.go covers `!linux` by answering errUnsupported, which is what
+// makes Classify fail open to Unknown on every other platform. The GOOS check
+// below mirrors exactly that build constraint. It deliberately does not skip on
+// a probe *error*, which on Linux is a real regression this test must still
+// catch — the platform coverage is the only thing being waived here.
 func TestClassifyOnRealFilesystem(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skipf("no real durability probe on %s; Classify is contractually Unknown there", runtime.GOOS)
+	}
 	cityRoot := t.TempDir()
 
 	t.Run("same device as the city root", func(t *testing.T) {

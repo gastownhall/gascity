@@ -71,7 +71,18 @@ if [[ -z "$NODE_BIN" ]]; then
 fi
 # The bundle imports node:sqlite, so the real floor is 22.5, not 20. A distro
 # node 18 on PATH dies with a bare "No such built-in module: node:sqlite".
-node_version="$("$NODE_BIN" --version 2>/dev/null || true)"
+# A saturated box can fail the fork itself; that is transient, not a version
+# verdict, so retry once and keep the probe's own stderr (ga-xx7x9).
+node_probe_status=0
+for attempt in 1 2; do
+    node_probe="$("$NODE_BIN" --version 2>&1)" && { node_probe_status=0; break; }
+    node_probe_status=$?
+    [[ $attempt -eq 1 ]] && sleep 0.2
+done
+if (( node_probe_status != 0 )); then
+    die_config "$NODE_BIN --version could not run (exit $node_probe_status): ${node_probe:-no output} — a spawn failure, not a version problem"
+fi
+node_version="$node_probe"
 if ! printf '%s\n' "${node_version#v}" | awk -F. '{exit !($1 > 22 || ($1 == 22 && $2 >= 5))}'; then
     die_config "$NODE_BIN is ${node_version:-an unknown version}; the ZCode bundle needs node >= 22.5 (it imports node:sqlite) — set ZCODE_NODE_BIN"
 fi
@@ -335,7 +346,6 @@ def last_user_text(export):
     for message in reversed(export["messages"]):
         if message["info"].get("role") == "user":
             return message["parts"][0].get("text", "")
-        return None
     return None
 
 
@@ -571,7 +581,21 @@ while :; do
     # Enter, so a 1s idle window closes the paste without splitting it. A
     # timed-out read still assigns whatever partial line arrived, so take it
     # before breaking — otherwise the tail of the last line is silently lost.
+    #
+    # Saving partial input on timeout is a bash 4.0 feature; bash 3.2 (still
+    # /bin/bash on stock macOS) returns from a timed-out read without touching
+    # the variable at all, having already consumed and discarded the fragment.
+    # Clearing it before every read is what makes the loop correct on both:
+    # bash >= 4 overwrites it with the fragment, bash 3.2 leaves the empty
+    # value and the branch below simply does not fire. Without this, $more is
+    # *unbound* on the first timed-out drain and `set -u` kills the whole
+    # adapter mid-prompt — on macOS that is every pane, on the first prompt.
+    # The 3.2 fragment itself is unrecoverable at this layer (the shell ate it
+    # before the script ran), so there it is dropped rather than misplaced;
+    # gc's own nudge always terminates its last line, so only a human pausing
+    # mid-line for longer than the drain window can hit it.
     while :; do
+        more=
         IFS= read -r -t "$DRAIN_TIMEOUT" more
         drain_rc=$?
         if (( drain_rc == 0 )); then
@@ -678,6 +702,12 @@ while :; do
         # rc was 0, so report_failure never ran: surface the CLI's stderr here
         # or an empty/!JSON stdout is an unattributable dead end.
         printf 'zcode-repl error rc=0 (unparsable response)\n'
+        # The user turn was published when it started (2nd turn on), and an
+        # unparsable reply is still a finished turn: close it out just like the
+        # rc!=0 branch above, or the trailing user message reads as "in flight"
+        # forever while the pane sits idle at its marker.
+        python3 "$helper" cancelled "$transcript_dir" "$PWD" "$published_sid" "$prompt_file" \
+            "zcode-repl error rc=0 (unparsable response)" || true
         report_stderr
         note_failure_and_maybe_bail
     fi

@@ -15,7 +15,9 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // --- gc convoy create ---
@@ -2478,5 +2480,573 @@ func TestRouteConvoyStatus_RemoteWorkflowConvoyNoLocalFallback(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "route=api reason=error") {
 		t.Errorf("expected route=api reason=error for a remote workflow-convoy:\n%s", stderr.String())
+	}
+}
+
+// relocatedConvoyCity builds the shape `gc storage migrate` leaves behind for a
+// convoy: one id, two rows, and a binding that is the live one.
+//
+// The work ledger keeps the copy the migration RETAINED — frozen at cutover,
+// still carrying the open child it had then — and the binding holds the row the
+// city has gone on mutating, whose children are finished. Every read surface has
+// to prefer the second, and the two differ in exactly the way that makes a wrong
+// choice visible: the frozen copy still gates, the live one is ready to close.
+func relocatedConvoyCity(t *testing.T) (cityPath, convoyID string, work, binding beads.Store) {
+	t.Helper()
+	cityPath, _ = foreignProviderCity(t)
+	work = workStoreFor(t, cityPath)
+
+	frozen, err := work.Create(beads.Bead{Title: "the retained frozen convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("seeding the retained convoy in the work store: %v", err)
+	}
+	if _, err := work.Create(beads.Bead{Title: "still open in the frozen copy", ParentID: frozen.ID}); err != nil {
+		t.Fatalf("seeding the frozen copy's open child: %v", err)
+	}
+
+	binding = soleClassBindingStore(t, cityPath)
+	if _, err := migrationSeed(binding, beads.Bead{ID: frozen.ID, Title: "the binding's live convoy", Type: "convoy"}); err != nil {
+		t.Fatalf("carrying %s across to the class binding: %v", frozen.ID, err)
+	}
+	binding = recensusAfterSeedingARelic(t, cityPath)
+
+	done, err := binding.Create(beads.Bead{Title: "finished in the binding", ParentID: frozen.ID})
+	if err != nil {
+		t.Fatalf("seeding the binding copy's child: %v", err)
+	}
+	if err := binding.Close(done.ID); err != nil {
+		t.Fatalf("closing the binding copy's child: %v", err)
+	}
+	return cityPath, frozen.ID, work, binding
+}
+
+// TestConvoyCheckReadsTheBindingRow is the ga-efyq4 regression on the arm that
+// MUTATES.
+//
+// `gc convoy check` closes convoys whose children are all done, and it decides
+// that from whichever row its directory scan happened to find. On a migrated
+// city that is the retained copy, whose children were frozen mid-flight at
+// cutover — so the convoy the city actually finished never auto-closes, and the
+// gate it feeds never opens.
+func TestConvoyCheckReadsTheBindingRow(t *testing.T) {
+	cityPath, convoyID, work, binding := relocatedConvoyCity(t)
+
+	var stdout, stderr bytes.Buffer
+	if code := doConvoyCheckFallback(cityPath, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc convoy check exited %d: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Auto-closed convoy "+convoyID) {
+		t.Errorf("the finished convoy did not auto-close; check read the frozen copy's open child:\n%s", stdout.String())
+	}
+
+	closed, err := binding.Get(convoyID)
+	if err != nil {
+		t.Fatalf("reading %s back from the binding: %v", convoyID, err)
+	}
+	if !convoycore.IsTerminalStatus(closed.Status) {
+		t.Errorf("the binding's convoy is %q after the check, want a terminal status", closed.Status)
+	}
+	retained, err := work.Get(convoyID)
+	if err != nil {
+		t.Fatalf("reading %s back from the work store: %v", convoyID, err)
+	}
+	if convoycore.IsTerminalStatus(retained.Status) {
+		t.Errorf("the check closed the retained work copy too; the frozen copy still has an open child and is not the row this decides from")
+	}
+}
+
+// TestConvoyListReadsTheBindingRow is the ga-efyq4 regression on the plain list.
+//
+// One convoy must print once, as the binding has it. Printing the frozen copy
+// instead reports progress that stopped at cutover; printing both reports two
+// convoys where the city has one.
+func TestConvoyListReadsTheBindingRow(t *testing.T) {
+	cityPath, _, _, _ := relocatedConvoyCity(t)
+
+	var stdout, stderr bytes.Buffer
+	if code := doConvoyListFallback(cityPath, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc convoy list exited %d: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if got := strings.Count(out, "the binding's live convoy"); got != 1 {
+		t.Errorf("the binding's convoy appears %d times, want exactly 1:\n%s", got, out)
+	}
+	if strings.Contains(out, "the retained frozen convoy") {
+		t.Errorf("the list printed the frozen work copy; the binding is the truth for reads:\n%s", out)
+	}
+}
+
+// TestConvoyListDropsTheFrozenCopyOfAConvoyTheBindingClosed is the ga-efyq4
+// regression on the state a migrated city ENDS in.
+//
+// Every relocated workflow eventually finishes, and finishing it closes the
+// binding's row. From that moment the binding's open-only query returns nothing
+// for the id, so a supersede set derived from the query's ROWS forgets the
+// binding owns it — and the retained copy, frozen open at cutover and never
+// touched since, is served as the live convoy. The convoy reports open forever,
+// which is the incident this bead exists to close, arrived at through the normal
+// end of the workflow rather than through any edge case.
+func TestConvoyListDropsTheFrozenCopyOfAConvoyTheBindingClosed(t *testing.T) {
+	cityPath, convoyID, _, binding := relocatedConvoyCity(t)
+	if err := binding.Close(convoyID); err != nil {
+		t.Fatalf("closing the binding's convoy: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doConvoyListFallback(cityPath, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc convoy list exited %d: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if strings.Contains(out, "the retained frozen convoy") {
+		t.Errorf("a convoy the city CLOSED in the binding is listed open from its frozen twin:\n%s", out)
+	}
+	if strings.Contains(out, convoyID) {
+		t.Errorf("%s is still listed after the binding closed it:\n%s", convoyID, out)
+	}
+}
+
+// convoyCityWhoseFrozenCopyLooksFinished is relocatedConvoyCity with the two
+// copies' children swapped, which is the arrangement an auto-close can act on.
+//
+// relocatedConvoyCity freezes the retained copy mid-flight, so a check that read
+// the wrong row simply declines to close and the damage is a convoy that never
+// finishes. The opposite pairing is the one that MUTATES: the retained copy was
+// cut over at a moment its children were all closed, and the binding has gone on
+// to open more. A check reading the frozen copy finds a convoy that looks
+// complete and closes it, while the work the binding is still tracking stays
+// open under a convoy the city now calls done.
+func convoyCityWhoseFrozenCopyLooksFinished(t *testing.T) (cityPath, convoyID string, work, binding beads.Store) {
+	t.Helper()
+	cityPath, _ = foreignProviderCity(t)
+	work = workStoreFor(t, cityPath)
+
+	frozen, err := work.Create(beads.Bead{Title: "the retained frozen convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("seeding the retained convoy in the work store: %v", err)
+	}
+	settled, err := work.Create(beads.Bead{Title: "finished in the frozen copy", ParentID: frozen.ID})
+	if err != nil {
+		t.Fatalf("seeding the frozen copy's child: %v", err)
+	}
+	if err := work.Close(settled.ID); err != nil {
+		t.Fatalf("closing the frozen copy's child: %v", err)
+	}
+
+	binding = soleClassBindingStore(t, cityPath)
+	if _, err := migrationSeed(binding, beads.Bead{ID: frozen.ID, Title: "the binding's live convoy", Type: "convoy"}); err != nil {
+		t.Fatalf("carrying %s across to the class binding: %v", frozen.ID, err)
+	}
+	binding = recensusAfterSeedingARelic(t, cityPath)
+
+	if _, err := binding.Create(beads.Bead{Title: "still open in the binding", ParentID: frozen.ID}); err != nil {
+		t.Fatalf("seeding the binding copy's open child: %v", err)
+	}
+	return cityPath, frozen.ID, work, binding
+}
+
+// TestConvoyCheckRefusesRatherThanAutoclosingThroughARefusedBinding is the
+// mutating arm's half of the refusal policy.
+//
+// A refused binding degrades a READ: the listing prints what it reached and says
+// what it could not. `gc convoy check` is not a read — it closes convoys — and
+// on a refusal the federation hands back the views unchanged, so the retained
+// pre-migration copies stop being superseded and are walked as live rows. Their
+// children were frozen at cutover, so a convoy the city is still working looks
+// complete, and the check closes it and reports that as success while the
+// binding's open row is never touched. A mutation on a view this build could not
+// prove is worse than no mutation, so this one refuses.
+func TestConvoyCheckRefusesRatherThanAutoclosingThroughARefusedBinding(t *testing.T) {
+	cityPath, convoyID, work, _ := convoyCityWhoseFrozenCopyLooksFinished(t)
+	failClassBindingReads(t, cityPath, errors.New("the class binding is having a bad day"))
+
+	var stdout, stderr bytes.Buffer
+	if code := doConvoyCheckFallback(cityPath, false, &stdout, &stderr); code == 0 {
+		t.Fatalf("gc convoy check exited 0 with an unreadable binding; it auto-closed from rows it could not prove:\nstdout=%s\nstderr=%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "bad day") {
+		t.Errorf("the refusal does not carry its own cause: %q", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Auto-closed") {
+		t.Errorf("the check reported an auto-close it must not have made:\n%s", stdout.String())
+	}
+
+	retained, err := work.Get(convoyID)
+	if err != nil {
+		t.Fatalf("reading %s back from the work store: %v", convoyID, err)
+	}
+	if convoycore.IsTerminalStatus(retained.Status) {
+		t.Errorf("the check closed the retained pre-migration copy of %s from a view it could not read; the binding's row is the one this decides from", convoyID)
+	}
+}
+
+// TestConvoyStrandedReadsTheBindingRow is the ga-efyq4 regression on the "is my
+// work stuck?" query.
+//
+// `gc convoy stranded` walks open convoys for open, unassigned children, and on
+// a migrated city the directory scan reaches only the copies the migration
+// retained. That is wrong in both directions at once: a frozen copy still
+// carries the assignees and open children it had at cutover, so it reports work
+// that is not stranded, while a convoy the binding minted afterwards is never
+// looked at, so genuinely stranded work is invisible. Both halves are asserted
+// here because federating only the merge would fix the first and leave the
+// second.
+func TestConvoyStrandedReadsTheBindingRow(t *testing.T) {
+	cityPath, _, _, binding := relocatedConvoyCity(t)
+
+	adrift, err := binding.Create(beads.Bead{Title: "the binding's own convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("seeding a convoy the binding minted after the migration: %v", err)
+	}
+	if _, err := binding.Create(beads.Bead{Title: "nobody is on this", ParentID: adrift.ID}); err != nil {
+		t.Fatalf("seeding the stranded child: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doConvoyStrandedFallback(cityPath, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc convoy stranded exited %d: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if strings.Contains(out, "still open in the frozen copy") {
+		t.Errorf("the retained pre-migration copy was reported as stranded work; its children stopped at cutover and the binding's row supersedes it:\n%s", out)
+	}
+	if !strings.Contains(out, "nobody is on this") {
+		t.Errorf("work stranded in the binding is invisible; the fan-out never read it:\n%s", out)
+	}
+}
+
+// rigHoldingID registers a rig on cityPath and plants a bead in it under a
+// pinned id, so a fixture can put a rig row and a binding row in collision.
+//
+// Ids are unique only within a store. A rig mints from its own sequence and
+// nothing keeps that sequence disjoint from the ids a relocated binding holds,
+// so "gc-1" in a rig and "gc-1" in the binding are two different beads that both
+// belong in a fan-out's output. Without a rig in the fixtures, every relocated
+// city under test has exactly one non-binding store and a merge that collapsed
+// on id alone would look correct.
+//
+// The pinned id goes in through the file store's explicit-id mode, which is off
+// by default so that ordinary creates cannot mint a collision by accident. The
+// returned handle is the fixture's own; the CLI opens the same JSON afresh.
+func rigHoldingID(t *testing.T, cityPath, id, title, beadType string) beads.Store {
+	t.Helper()
+	const rigName = "frontend"
+	rigDir := filepath.Join(cityPath, "rigs", rigName)
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("creating the directory of rig %s: %v", rigName, err)
+	}
+	cityTOML := filepath.Join(cityPath, "city.toml")
+	body, err := os.ReadFile(cityTOML)
+	if err != nil {
+		t.Fatalf("reading city.toml to register rig %s: %v", rigName, err)
+	}
+	body = append(body, []byte(fmt.Sprintf("\n[[rigs]]\nname = %q\npath = %q\n", rigName, rigDir))...)
+	if err := os.WriteFile(cityTOML, body, 0o644); err != nil {
+		t.Fatalf("registering rig %s in city.toml: %v", rigName, err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(rigDir); err != nil {
+		t.Fatalf("giving rig %s its own file store: %v", rigName, err)
+	}
+	store, err := openScopeLocalFileStore(rigDir)
+	if err != nil {
+		t.Fatalf("opening the store of rig %s: %v", rigName, err)
+	}
+	store.HonorExplicitIDs = true
+	if _, err := store.Create(beads.Bead{ID: id, Title: title, Type: beadType}); err != nil {
+		t.Fatalf("planting %s in rig %s: %v", id, rigName, err)
+	}
+	return store
+}
+
+// TestConvoyListKeepsARigConvoyThatCollidesWithABindingID pins the SCOPE of the
+// supersede rule: it collapses the migration's duplicate and nothing else.
+//
+// The migration is the one place an id means the same bead twice, because it
+// copies with ids preserved and deletes nothing. Two stores the directory scan
+// enumerated are not that: a rig's "gc-1" and the binding's "gc-1" are separate
+// beads, and a merge that dropped either because the binding "owns" the id would
+// delete a live rig convoy from the listing.
+//
+// This is also the row that makes the supersede pin bite. Without a colliding
+// rig, dropping every id the binding owns and dropping only the migration
+// source's produce identical output, so the role scoping is unfalsifiable.
+func TestConvoyListKeepsARigConvoyThatCollidesWithABindingID(t *testing.T) {
+	cityPath, convoyID, _, _ := relocatedConvoyCity(t)
+	rigHoldingID(t, cityPath, convoyID, "the rig's own convoy", "convoy")
+
+	var stdout, stderr bytes.Buffer
+	if code := doConvoyListFallback(cityPath, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc convoy list exited %d: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "the rig's own convoy") {
+		t.Errorf("the rig's convoy was dropped as if the binding superseded it; it is a different bead that merely shares an id:\n%s", out)
+	}
+	if !strings.Contains(out, "the binding's live convoy") {
+		t.Errorf("the binding's convoy is missing from the listing:\n%s", out)
+	}
+	if strings.Contains(out, "the retained frozen convoy") {
+		t.Errorf("the frozen work copy is still listed; the binding supersedes it:\n%s", out)
+	}
+}
+
+// TestBeadsListKeepsARigBeadThatCollidesWithABindingID is the same scope pin on
+// the arm the caller filters, where the ownership probe runs against ids drawn
+// from a query result rather than a whole-store listing.
+func TestBeadsListKeepsARigBeadThatCollidesWithABindingID(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	work := workStoreFor(t, cityPath)
+	frozen, err := work.Create(beads.Bead{Title: "the retained frozen copy", Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the retained copy in the work store: %v", err)
+	}
+	classResidentWorkShapedBead(t, soleClassBindingStore(t, cityPath), frozen.ID, "the binding's live row")
+	recensusAfterSeedingARelic(t, cityPath)
+	rigHoldingID(t, cityPath, frozen.ID, "the rig's own row", "task")
+
+	var stdout, stderr bytes.Buffer
+	if code := doBeadsListFallback(cityPath, "", beadFilters{}, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc beads list exited %d: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "the rig's own row") {
+		t.Errorf("the rig's bead was dropped as if the binding superseded it:\n%s", out)
+	}
+	if !strings.Contains(out, "the binding's live row") {
+		t.Errorf("the binding's bead is missing from the listing:\n%s", out)
+	}
+	if strings.Contains(out, "the retained frozen copy") {
+		t.Errorf("the frozen work copy is still listed; the binding supersedes it:\n%s", out)
+	}
+}
+
+// TestBeadsListFilteredByStatusDropsTheFrozenCopy is the same regression on the
+// arm that lets the CALLER choose the filter.
+//
+// `gc beads list --status open` asks every store for its open rows. The binding
+// answers with the ones that are open THERE; the frozen twin of a row the
+// binding has since closed is open in the work ledger, and a supersede set built
+// from the binding's answer to the caller's filter cannot see that it is a twin.
+// Whether the binding owns an id and whether the binding has a row matching this
+// filter are two different questions, and only the first one decides a merge.
+func TestBeadsListFilteredByStatusDropsTheFrozenCopy(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	work := workStoreFor(t, cityPath)
+	frozen, err := work.Create(beads.Bead{Title: "the retained frozen copy", Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the retained copy in the work store: %v", err)
+	}
+	classResidentWorkShapedBead(t, soleClassBindingStore(t, cityPath), frozen.ID, "the binding's live row")
+	classStore := recensusAfterSeedingARelic(t, cityPath)
+	if err := classStore.Close(frozen.ID); err != nil {
+		t.Fatalf("closing the binding's row: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doBeadsListFallback(cityPath, "", beadFilters{status: "open"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc beads list --status open exited %d: %s", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "the retained frozen copy") {
+		t.Errorf("a bead the city CLOSED in the binding is listed open from its frozen twin:\n%s", stdout.String())
+	}
+}
+
+// idsFaultingClassStore answers an ordinary listing and faults on the OWNERSHIP
+// probe, which is the one thing a healthy-binding fixture cannot reach.
+//
+// The probe is the only read that carries ListQuery.IDs, so keying the fault on
+// a non-empty IDs list separates it from the caller's own query without a flag
+// the production path could never set. A binding that fails BOTH — the shape
+// installFaultingClassBinding produces — never reaches the merge at all, because
+// its empty row set makes the probe moot; this one contributes rows and then
+// cannot say which of them it owns.
+//
+// IDPrefix is delegated explicitly for countingClassStore's reason: beads.Store
+// does not carry it, so embedding the interface alone would hide the wrapped
+// store's declaration.
+type idsFaultingClassStore struct {
+	beads.Store
+	err    error
+	probes int
+}
+
+func (s *idsFaultingClassStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if len(q.IDs) > 0 {
+		s.probes++
+		return nil, s.err
+	}
+	return s.Store.List(q)
+}
+
+func (s *idsFaultingClassStore) IDPrefix() string {
+	declaring, ok := s.Store.(storeref.HasIDPrefix)
+	if !ok {
+		return ""
+	}
+	return declaring.IDPrefix()
+}
+
+// TestBeadsListRefusesWhenTheOwnershipProbeFaults pins the FAULT arm of the
+// ownership probe, which no healthy-binding row can reach.
+//
+// Every other relocated-city read fixture serves a binding that answers both
+// questions, so the probe's error path is never taken and a merge that read a
+// probe fault as "the binding holds none of these" would produce byte-identical
+// output. That misreading is the whole hazard: an empty owned set supersedes
+// nothing, so every frozen copy the migration retained is served as a live row —
+// silently, with the command exiting 0 and the fault named nowhere.
+//
+// The binding here resolves, answers the caller's query, and fails only when
+// asked which ids it holds. The listing must stop and say why rather than print
+// the frozen twin.
+func TestBeadsListRefusesWhenTheOwnershipProbeFaults(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	work := workStoreFor(t, cityPath)
+	frozen, err := work.Create(beads.Bead{Title: "the retained frozen copy", Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the retained copy in the work store: %v", err)
+	}
+	classResidentWorkShapedBead(t, soleClassBindingStore(t, cityPath), frozen.ID, "the binding's live row")
+	recensusAfterSeedingARelic(t, cityPath)
+	var probe *idsFaultingClassStore
+	installWrappedClassBinding(t, cityPath, func(previous beads.Store) beads.Store {
+		probe = &idsFaultingClassStore{Store: previous, err: errors.New("the id index is corrupt")}
+		return probe
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := doBeadsListFallback(cityPath, "", beadFilters{}, &stdout, &stderr)
+	if probe.probes == 0 {
+		t.Fatal("the ownership probe never ran, so this row asserts on a path it did not take")
+	}
+	if code != 1 {
+		t.Fatalf("gc beads list exited %d after the ownership probe faulted, want 1:\n%s%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "the id index is corrupt") {
+		t.Errorf("the refusal does not name the fault that caused it: %q", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "the retained frozen copy") {
+		t.Errorf("the frozen copy was served as a live row after the probe that supersedes it faulted:\n%s", stdout.String())
+	}
+}
+
+// sqliteMaxBoundVariables is the ceiling modernc sqlite enforces on one
+// statement's bound variables, which is what an unchunked ownership probe hits.
+const sqliteMaxBoundVariables = 32766
+
+// varCappedIDStore answers an ownership probe the way a sqlite binding does,
+// including the bound-variable ceiling, and records the batch sizes it was asked
+// for.
+//
+// The recording is what makes the chunking observable: a batched probe and an
+// unbatched one over a small population return the same answer, so a row taking
+// only the answer would pass identically against either. The cap is what makes
+// the fault reachable at all — sqliteListSQL emits one placeholder per id, so
+// the ceiling is a property of the query the probe builds, not of the data.
+type varCappedIDStore struct {
+	beads.Store
+	held    map[string]bool
+	batches []int
+}
+
+func (s *varCappedIDStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	s.batches = append(s.batches, len(q.IDs))
+	if len(q.IDs) > sqliteMaxBoundVariables {
+		return nil, fmt.Errorf("SQL logic error: too many SQL variables (%d)", len(q.IDs))
+	}
+	held := make([]beads.Bead, 0, len(q.IDs))
+	for _, id := range q.IDs {
+		if s.held[id] {
+			held = append(held, beads.Bead{ID: id})
+		}
+	}
+	return held, nil
+}
+
+// TestConvoyBindingOwnedIDsBatchesPastTheSQLVariableCap pins the scale arm of
+// the ownership probe.
+//
+// The probe puts one SQL placeholder per candidate id on the wire, and the
+// candidates are every migration-source row matching the caller's query — with
+// `gc beads list` running unbounded, that is the whole work ledger's history on
+// a converged city. Past the driver's ceiling the statement does not run at all,
+// so the probe fails, the merge fails and the listing exits 1: the large
+// migrated cities the federation exists for are exactly the ones that lose the
+// read.
+//
+// Two things are asserted, because either alone is passable by wrong code. The
+// batched answer must equal the answer one query would have given if the driver
+// allowed one, and no batch may reach the ceiling — and the control below proves
+// the ceiling IS reachable from this population, so a probe that stopped
+// chunking fails here rather than passing quietly.
+func TestConvoyBindingOwnedIDsBatchesPastTheSQLVariableCap(t *testing.T) {
+	const population = 100000
+	ids := make([]string, population)
+	held := make(map[string]bool, population/7+1)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("gc-%d", i)
+		if i%7 == 0 {
+			held[ids[i]] = true
+		}
+	}
+	binding := &varCappedIDStore{held: held}
+
+	// Control: the population really does exceed what one statement can carry,
+	// so a probe that sent it whole would fail rather than merely run slowly.
+	if _, err := binding.List(beads.ListQuery{IDs: ids, IncludeClosed: true}); err == nil {
+		t.Fatal("the fixture answered every id in one query; this row cannot tell a chunked probe from an unchunked one")
+	}
+	binding.batches = nil
+
+	owned, err := convoyBindingOwnedIDs(binding, ids)
+	if err != nil {
+		t.Fatalf("convoyBindingOwnedIDs over %d candidates: %v", population, err)
+	}
+	if len(owned) != len(held) {
+		t.Fatalf("the probe reported %d owned ids, want %d; the batches do not union to the whole answer", len(owned), len(held))
+	}
+	for id := range held {
+		if !owned[id] {
+			t.Fatalf("%s is held by the binding but missing from the batched answer", id)
+		}
+	}
+	if len(binding.batches) < 2 {
+		t.Fatalf("the probe issued %d queries for %d candidates; it did not batch", len(binding.batches), population)
+	}
+	carried := 0
+	for _, size := range binding.batches {
+		if size > sqliteMaxBoundVariables {
+			t.Fatalf("a batch carried %d ids, past the %d the driver allows", size, sqliteMaxBoundVariables)
+		}
+		carried += size
+	}
+	if carried != population {
+		t.Errorf("the batches carried %d ids in total, want %d; the probe skipped candidates", carried, population)
+	}
+}
+
+// TestConvoyBindingOwnedIDsKeepsOneQueryUnderTheCap is the other side of the
+// same boundary: batching must not turn the ordinary case into a fan of queries.
+//
+// The probe is an IN-list rather than one Get per row precisely because a
+// per-row fan-out is what a converged city cannot afford on every listing, so a
+// population that fits stays a single round trip.
+func TestConvoyBindingOwnedIDsKeepsOneQueryUnderTheCap(t *testing.T) {
+	ids := make([]string, 500)
+	held := make(map[string]bool, len(ids))
+	for i := range ids {
+		ids[i] = fmt.Sprintf("gc-%d", i)
+		held[ids[i]] = true
+	}
+	binding := &varCappedIDStore{held: held}
+
+	owned, err := convoyBindingOwnedIDs(binding, ids)
+	if err != nil {
+		t.Fatalf("convoyBindingOwnedIDs: %v", err)
+	}
+	if len(owned) != len(ids) {
+		t.Errorf("the probe reported %d owned ids, want %d", len(owned), len(ids))
+	}
+	if len(binding.batches) != 1 {
+		t.Errorf("the probe issued %d queries for %d candidates, want 1", len(binding.batches), len(ids))
 	}
 }

@@ -43,7 +43,7 @@ func TestCommandOutputTail(t *testing.T) {
 					t.Fatalf("Write(%q) = %d, want %d", w, n, len(w))
 				}
 			}
-			if got := tail.Detail(tc.label); got != tc.want {
+			if got := tail.Detail(tc.label, nil); got != tc.want {
 				t.Fatalf("Detail(%q) = %q, want %q", tc.label, got, tc.want)
 			}
 		})

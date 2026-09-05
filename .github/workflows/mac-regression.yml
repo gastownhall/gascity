@@ -137,6 +137,7 @@ jobs:
               - 'cmd/gc/**'
               - 'internal/pathutil/**'
               - 'internal/fsys/**'
+              - '.github/actions/setup-gascity-macos/**'
       - name: Decide which tiers should run
         id: gate
         env:
@@ -178,6 +179,9 @@ jobs:
             elif [[ "$NEEDS_LABEL" == "true" ]]; then
               run_smoke=true; run_full=true
               reason="pull request carries needs-mac label"
+            elif [[ "$PATH_HIT" == "true" ]]; then
+              run_smoke=true
+              reason="pull request touches mac-sensitive paths without needs-mac label, running smoke tier"
             else
               reason="pull request without needs-mac label (path hit: ${PATH_HIT})"
             fi
@@ -254,7 +258,7 @@ jobs:
       - gate
     if: needs.gate.outputs.run_smoke == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:

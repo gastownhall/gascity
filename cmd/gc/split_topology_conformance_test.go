@@ -2258,17 +2258,25 @@ func assertFederationServesWholeLeg(t *testing.T, surface, legName string, legID
 // The bug is win-mc-forge's measurement row #2, and it survived the by-id lane
 // because it does not look like a by-id read. On a converged split city:
 //
-//	gc bd dep tree <gcg root>                          → exit 1, refused
+//	gc bd dep tree <gcg root>                          → diverted from the blind ledger
 //	gc bd list --metadata-field gc.root_bead_id=<root> → 0 rows, exit 0
 //
-// Two projections, the same molecule, the same command, opposite failure
-// semantics. `dep tree` names the bead in an id POSITION so the by-id door
-// decides ownership and refuses; --metadata-field is not id-valued, so that door
+// Two projections, the same molecule, the same command, opposite semantics.
+// `dep tree` names the bead in an id POSITION so the by-id door decides
+// ownership and takes it; --metadata-field is not id-valued, so that door
 // correctly declines (a QUOTED id decides nothing about ownership — see
 // cmd_bd_by_id.go) and the passthrough asks the one ledger that holds no gcg-
 // row, which answers `[]` and exits 0. The value named an id; the VERB is a
 // projection. Invariant 0 of ga-iaj7k: a projection that cannot see a class must
 // fail LOUDLY, and `[]` is forbidden.
+//
+// What the by-id door DOES with `dep tree` changed under ga-pxppl — it used to
+// refuse, and now it walks the molecule from the binding the class is served
+// from — and that does not weaken this invariant, it strengthens it. The claim
+// was never "both refuse". It is that neither answers `[]` from a ledger that
+// cannot hold the bead: on a split city all three argvs divert away from that
+// ledger, `dep tree` to an ANSWER and `list`/`ready` to a REFUSAL that names the
+// federated reader.
 //
 // The asymmetry is what makes it urgent rather than merely wrong. An operator
 // who has learned that this CLI refuses what it cannot see reads the empty array
@@ -2280,9 +2288,10 @@ func assertFederationServesWholeLeg(t *testing.T, surface, legName string, legID
 // of (config, argv): bdSQLRelocatedClassRefusal for `list` and
 // bdArgsNameClassOwnedBead for every other verb. So the coherence claim is
 // checkable exactly where it is decided, and the row runs on both topologies
-// without opening a binding. The end-to-end proof through the real command —
-// real doBd, real refusals, a bd stub that answers `[]` and exits 0 — is
-// TestGcBdProjectionsAgreeOnAClassTheyCannotSee.
+// without opening a binding. The end-to-end proofs through the real command —
+// real doBd, a bd stub that answers `[]` and exits 0 — are
+// TestGcBdProjectionsAgreeOnAClassTheyCannotSee for the refusing verbs and
+// TestGcBdDepTreeSplitsOnOwnershipNotOnServability for the answering one.
 //
 // # The single-store row is the byte-identity claim
 //
@@ -2352,19 +2361,20 @@ func conformanceProjectionCoherence(t *testing.T, e splitEnv) {
 	readyArgs := []string{"ready", "--metadata-field", selector, "--json"}
 	depTreeArgs := []string{"dep", "tree", root.ID}
 
-	// `dep tree` must stay UNSERVED in process, or the arm being compared here is
-	// not the refusal arm and the coherence claim is about something else.
-	if _, served := parseBdByIDOp(depTreeArgs); served {
-		t.Fatalf("`gc bd dep tree` is now served in process; I14 compares the REFUSAL arms, so re-point this row at the served answer")
+	// The by-id door must still be able to ANSWER this argv, or the row below is
+	// asserting that dep tree is diverted somewhere that cannot serve it — which
+	// is the refusal this invariant used to compare, not the answer it now does.
+	if _, served := parseBdByIDOp(depTreeArgs); !served {
+		t.Fatalf("`gc bd dep tree %s` is no longer served in process; I14 pins that it is diverted from the blind ledger TO AN ANSWER, so a diversion into a refusal has moved the dead end rather than removed it (ga-pxppl)", root.ID)
 	}
 
 	msg, listRefused := bdSQLRelocatedClassRefusal(e.cfg, listArgs)
 	_, readyRefused := bdSQLRelocatedClassRefusal(e.cfg, readyArgs)
-	_, depTreeRefused := bdArgsNameClassOwnedBead(depTreeArgs)
+	_, depTreeRouted := bdArgsNameClassOwnedBead(depTreeArgs)
 
-	if listRefused != depTreeRefused {
-		t.Fatalf("`gc bd list --metadata-field %s` refused = %v but `gc bd dep tree %s` refused = %v on the same molecule; two projections over the same data must not disagree about what happens when a class cannot be seen",
-			selector, listRefused, root.ID, depTreeRefused)
+	if listRefused != depTreeRouted {
+		t.Fatalf("`gc bd list --metadata-field %s` refused = %v but `gc bd dep tree %s` was diverted from the work ledger = %v on the same molecule; two projections over the same data must not disagree about whether that ledger can answer for the class",
+			selector, listRefused, root.ID, depTreeRouted)
 	}
 	if readyRefused != listRefused {
 		t.Fatalf("`gc bd ready --metadata-field %s` refused = %v but `gc bd list` with the same selector refused = %v; the two verbs take the same predicate and answer no-match the same way, so guarding one moves the silent empty rather than removing it",

@@ -13,6 +13,14 @@ import (
 // with parent PID 1 (init). environ is written as NUL-delimited key=value pairs.
 func buildFakeProc(t *testing.T, root string, pid int, env map[string]string) {
 	t.Helper()
+	buildFakeProcUnder(t, root, pid, 1, "cmd", env)
+}
+
+// buildFakeProcUnder is buildFakeProc for a process with a chosen parent and
+// name: stat carries ppid, and comm is written newline-terminated, as /proc
+// does. A parent of 1 (init) makes the process a root outright.
+func buildFakeProcUnder(t *testing.T, root string, pid, ppid int, comm string, env map[string]string) {
+	t.Helper()
 	dir := filepath.Join(root, strconv.Itoa(pid))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir %s: %v", dir, err)
@@ -24,10 +32,12 @@ func buildFakeProc(t *testing.T, root string, pid int, env map[string]string) {
 	if err := os.WriteFile(filepath.Join(dir, "environ"), buf, 0o644); err != nil {
 		t.Fatalf("write environ: %v", err)
 	}
-	// stat: ppid=1 (init) so this process is classified as a root.
-	stat := strconv.Itoa(pid) + " (cmd) S 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"
+	stat := strconv.Itoa(pid) + " (" + comm + ") S " + strconv.Itoa(ppid) + " 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"
 	if err := os.WriteFile(filepath.Join(dir, "stat"), []byte(stat), 0o644); err != nil {
 		t.Fatalf("write stat: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "comm"), []byte(comm+"\n"), 0o644); err != nil {
+		t.Fatalf("write comm: %v", err)
 	}
 }
 
@@ -169,5 +179,59 @@ func TestScanWithRootMissingEnvironSkipped(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("got %d entries, want 0", len(got))
+	}
+}
+
+// A tmux server founded by a session's first new-session call inherits that
+// session's GC_SESSION_ID and reparents to init, so the parent test alone
+// reports it as an agent root — and the orphan sweep then kills the one server
+// every agent in the city shares (gastownhall/gascity#5392). The agent running
+// beneath that server must still be reported: it is the root the sweep is for.
+func TestScanWithRootNeverReportsInfrastructureAsRoot(t *testing.T) {
+	root := t.TempDir()
+	env := map[string]string{"GC_SESSION_ID": "hq-session"}
+	buildFakeProcUnder(t, root, 100, 1, "tmux: server", env)
+	buildFakeProcUnder(t, root, 101, 100, "claude", env)
+
+	got, err := scanWithRoot(root, "hq-session")
+	if err != nil {
+		t.Fatalf("scanWithRoot: %v", err)
+	}
+	if len(got) != 1 || got[0].PID != 101 {
+		t.Fatalf("scanWithRoot = %+v, want only the agent pid 101", got)
+	}
+}
+
+// IsScanRoot is the single-pid form of the same decision; it must answer as
+// the scan does: no for the tmux server, yes for the agent beneath it.
+func TestIsScanRootNeverReportsInfrastructureAsRoot(t *testing.T) {
+	root := t.TempDir()
+	restore := SetScanRootForTesting(root)
+	defer restore()
+	env := map[string]string{"GC_SESSION_ID": "hq-session"}
+	buildFakeProcUnder(t, root, 100, 1, "tmux: server", env)
+	buildFakeProcUnder(t, root, 101, 100, "claude", env)
+
+	if IsScanRoot(100) {
+		t.Fatal("IsScanRoot classified the tmux server as an agent root")
+	}
+	if !IsScanRoot(101) {
+		t.Fatal("IsScanRoot must keep the agent under an infrastructure parent as a root")
+	}
+}
+
+// Infrastructure is matched by exact name. A substring test on "tmux" would
+// also hide a tmux-* wrapper running as an agent root, and a root the scan
+// hides is a runtime the orphan sweep can never reap.
+func TestScanWithRootReportsTmuxWrapperAsRoot(t *testing.T) {
+	root := t.TempDir()
+	buildFakeProcUnder(t, root, 200, 1, "tmux-wrapper", map[string]string{"GC_SESSION_ID": "hq-session"})
+
+	got, err := scanWithRoot(root, "hq-session")
+	if err != nil {
+		t.Fatalf("scanWithRoot: %v", err)
+	}
+	if len(got) != 1 || got[0].PID != 200 {
+		t.Fatalf("scanWithRoot = %+v, want the tmux-wrapper agent pid 200 reported as a root", got)
 	}
 }

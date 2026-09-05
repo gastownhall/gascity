@@ -256,12 +256,18 @@ func TestCompletedFactIndexGrowthBoundDoesNotRebuildEveryPass(t *testing.T) {
 	// And the bound still fires on real GROWTH past the loaded baseline.
 	index.mu.Lock()
 	for i := range completedFactIndexGrowthCap + 1 {
-		index.facts[completedFactKey{subject: "grown-" + itoa(i)}] = struct{}{}
+		index.facts[completedFactKey{subject: "grown-" + itoa(i)}] = true
 	}
 	index.mu.Unlock()
 	index.ReconcileRoots(journal, stores, rootIDs, "execution-reconcile")
 	if journal.reads != 2 {
 		t.Fatalf("a set grown a full cap past its baseline cost %d read(s) in total, want 2 — the bound never fires and the index is a leak", journal.reads)
+	}
+	// The over-cap pass must REBUILD, not merely re-floor the baseline: the
+	// injected keys the journal never held are dropped, so the set shrinks back
+	// toward what retention holds instead of leaking one key per fact ever seen.
+	if len(index.facts) >= 2*completedFactIndexGrowthCap {
+		t.Fatalf("after the over-cap pass the set still holds %d fact(s); a real rebuild drops the injected keys the journal never backed, a bare baseline re-floor does not", len(index.facts))
 	}
 }
 
