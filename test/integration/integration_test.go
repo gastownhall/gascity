@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -900,6 +901,10 @@ func standaloneBDEnvForDir(dir string) []string {
 			env = append(env, key+"="+value)
 		}
 	}
+	// integrationEnv pins HOME to the real passwd-db home for gc start/supervisor
+	// start subprocesses. This helper only execs the bd binary, so re-isolate HOME
+	// back to the caller-owned dir instead of leaking the real home through.
+	env = replaceEnv(env, "HOME", dir)
 	// Keep DOLT_ROOT_PATH from integrationEnv so standalone bd commands use
 	// the suite's seeded Dolt identity instead of an unseeded per-workspace root.
 	// BEADS_DIR and XDG_RUNTIME_DIR are temp-scoped by caller-owned test dirs;
@@ -1303,7 +1308,28 @@ func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 	// (resolveAutoStart priority bug), so the env var is the only
 	// reliable kill-switch. Mirrors bdRuntimeEnv in cmd/gc/bd_env.go.
 	env = append(env, "BEADS_DOLT_AUTO_START=0")
+	env = pinRealHomeEnv(env)
 	return env
+}
+
+// pinRealHomeEnv pins HOME to the real passwd-db home for the current uid.
+// Test runners (sandboxes, CI containers) commonly run with HOME pointed at
+// something other than the invoking user's real home; left unchanged, that
+// ambient HOME propagates into the gc subprocess these tests exec and trips
+// platformSupervisorHomeOverrideError (cmd/gc/cmd_supervisor_lifecycle.go),
+// which blocks non-delegated `gc start`/`gc supervisor start` when HOME
+// differs from the real home. GC_HOME (set separately, above) remains the
+// isolated per-test root; only the OS-level HOME is pinned. Mirrors
+// cmd/gc/cmd_supervisor_test.go's pinRealHome, reimplemented here because
+// that helper is test-only in a different package. Fails open (leaves env
+// untouched) if the lookup errors or returns an empty home dir, matching
+// platformSupervisorHomeOverrideError's own tolerance.
+func pinRealHomeEnv(env []string) []string {
+	lu, err := user.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil || strings.TrimSpace(lu.HomeDir) == "" {
+		return env
+	}
+	return replaceEnv(env, "HOME", lu.HomeDir)
 }
 
 func prependPath(paths ...string) string {
@@ -1816,7 +1842,7 @@ func reserveLoopbackPort() (int, error) {
 	return addr.Port, nil
 }
 
-func TestIntegrationEnvForUsesIsolatedHome(t *testing.T) {
+func TestIntegrationEnvForPinsRealHome(t *testing.T) {
 	oldGCHome, oldRuntimeDir := testGCHome, testRuntimeDir
 	oldGCBinary, oldBDBinary, oldRealBDBinary := gcBinary, bdBinary, realBDBinary
 	oldToolBinDir, oldDoltBinary := integrationToolBinDir, doltBinary
@@ -1876,8 +1902,12 @@ func TestIntegrationEnvForUsesIsolatedHome(t *testing.T) {
 	env := integrationEnv()
 	got := parseEnvList(env)
 
-	if got["HOME"] != "/host/home" {
-		t.Fatalf("HOME = %q, want %q", got["HOME"], "/host/home")
+	lu, err := user.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil || strings.TrimSpace(lu.HomeDir) == "" {
+		t.Skip("no passwd entry for uid; pinRealHomeEnv fails open")
+	}
+	if got["HOME"] != lu.HomeDir {
+		t.Fatalf("HOME = %q, want real passwd-db home %q (ambient HOME=/host/home must not leak through)", got["HOME"], lu.HomeDir)
 	}
 	if got["GC_HOME"] != testGCHome {
 		t.Fatalf("GC_HOME = %q, want %q", got["GC_HOME"], testGCHome)
@@ -2038,6 +2068,42 @@ func TestStandaloneBDEnvAllowsBDAutoStart(t *testing.T) {
 		if _, ok := got[key]; ok {
 			t.Fatalf("%s leaked into standalone bd env: %v", key, got[key])
 		}
+	}
+}
+
+func TestStandaloneBDEnvForDirIsolatesHome(t *testing.T) {
+	oldGCHome := testGCHome
+	oldRuntimeDir := testRuntimeDir
+	oldRealBDBinary := realBDBinary
+	oldToolBinDir := integrationToolBinDir
+	t.Cleanup(func() {
+		testGCHome = oldGCHome
+		testRuntimeDir = oldRuntimeDir
+		realBDBinary = oldRealBDBinary
+		integrationToolBinDir = oldToolBinDir
+	})
+
+	testGCHome = filepath.Join(t.TempDir(), "gc-home")
+	testRuntimeDir = filepath.Join(t.TempDir(), "runtime")
+	realBDBinary = "/usr/bin/bd"
+	integrationToolBinDir = filepath.Join(t.TempDir(), "bin")
+
+	t.Setenv("HOME", "/host/home")
+
+	dir := t.TempDir()
+	env := standaloneBDEnvForDir(dir)
+	got := parseEnvList(env)
+
+	// pinRealHomeEnv fails open when the uid has no passwd entry, so the
+	// real-home comparison is only meaningful when the lookup succeeds. The
+	// dir-scoped assertion below holds either way.
+	if lu, err := user.LookupId(strconv.Itoa(os.Getuid())); err == nil && strings.TrimSpace(lu.HomeDir) != "" {
+		if got["HOME"] == lu.HomeDir {
+			t.Fatalf("HOME = %q, leaked the real passwd-db home; standalone bd only execs the bd binary (never gc start/supervisor start), so it must not inherit the real-HOME pin meant for gc-start consumers", got["HOME"])
+		}
+	}
+	if got["HOME"] != dir {
+		t.Fatalf("HOME = %q, want dir-scoped %q, matching this helper's own XDG_RUNTIME_DIR/BEADS_DIR isolation root", got["HOME"], dir)
 	}
 }
 
