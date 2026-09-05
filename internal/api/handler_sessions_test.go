@@ -1318,17 +1318,8 @@ func TestHandleSessionSuspend(t *testing.T) {
 
 // TestHandleSessionSuspend_IllegalTransition covers Fix 3j: illegal state
 // transitions from the manager surface as 409 Problem Details to the API.
-// The state machine only allows Suspend from Active/Asleep/Quarantined, so a
-// drained session is an illegal source.
-//
-// This used to drive the case from `draining`. Draining is no longer an illegal
-// suspend source: `gc stop` issues suspend on every session bead with no state
-// pre-filter, and rejecting draining made every restart skip those seats, which
-// survived as live panes holding their pool slot names (ga-rxhu2).
-// Manager.Suspend now tears a draining runtime down best-effort and returns nil,
-// exactly as it already did for failed-create (#2597). Drained is the neighboring
-// state that is still genuinely illegal, so the 409 mapping this test exists for
-// keeps its coverage.
+// Drain puts the session in Draining; a subsequent Suspend is illegal
+// (the state machine only allows Suspend from Active/Asleep/Quarantined).
 func TestHandleSessionSuspend_IllegalTransition(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
@@ -1337,8 +1328,11 @@ func TestHandleSessionSuspend_IllegalTransition(t *testing.T) {
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "To Drain")
 
-	if err := fs.cityBeadStore.SetMetadata(info.ID, "state", string(session.StateDrained)); err != nil {
-		t.Fatalf("set drained state: %v", err)
+	// Drain the session directly via the manager (the API surface for drain
+	// lives elsewhere; this test isolates the transition check).
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	if err := mgr.BeginDrain(info.ID, "shutdown"); err != nil {
+		t.Fatalf("BeginDrain: %v", err)
 	}
 
 	w := httptest.NewRecorder()

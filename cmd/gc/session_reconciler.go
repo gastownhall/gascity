@@ -837,19 +837,17 @@ func finalizeDrainAckStopPendingSessions(
 			// killing the pane. Ask the agent to acknowledge and leave.
 			// See drain_reminder.go.
 			remindStopPendingDrain(sp, store, info, clk, stderr)
-			// The reminder is informational and cannot end the loop by itself. Once
-			// its budget is spent and the answer window has elapsed, the row has
-			// earned a terminal exit: escalate to a certified kill so the close
-			// below can release the pool slot name. Every gate in there fails
-			// closed, so a false return leaves the historical behavior untouched.
-			// See drain_ack_escalation.go.
-			if !escalateWedgedDrainAckStopPending(cityPath, cfg, sp, store, rigStores, info, name, processNames, clk, rec, stderr) {
+			// The reminder is informational and cannot end the loop by itself.
+			// Once the row's bound has elapsed, escalate: record the attempt, raise
+			// a counted event, and queue a FORCEFUL termination off-tick — the
+			// ordinary stop is what has already failed on this row every tick.
+			// Nothing is closed here; a later tick's own liveness observation owns
+			// that. Every gate fails closed, so a false return leaves the historical
+			// behavior untouched. See drain_ack_escalation.go.
+			if !escalateWedgedDrainAckStopPending(cityPath, cfg, sp, store, rigStores, info, name, processNames, asyncStopTracker, clk, rec, stderr) {
 				queueDrainAckAsyncStop(cityPath, store, sp, cfg, info.ID, name, info.InstanceToken, processNames, asyncStopTracker, stderr)
-				continue
 			}
-			// Runtime confirmed dead. Fall through to the shared finalize terminus
-			// below, which is the same close this row would have taken had its stop
-			// worked the first time.
+			continue
 		}
 		// Pool-managed stop-pending beads close here instead of staying open as
 		// state=drained: open pool session beads occupy slots in the next demand
@@ -4298,6 +4296,22 @@ func assignedWorkExistsForSession(
 // own drain step — only the drain-ack close decision should. Use this function
 // (and closeSessionBeadIfReachableStoreUnassigned's excludeOwnDrainStep=true form)
 // ONLY from the drain-ack finalize path.
+// The identifier set here stays NARROW ({ID, session_name,
+// configured_named_identity}) deliberately. Widening it to every alias looks
+// attractive — an alias-form claim landing between a drain-ack kill and this
+// close would be stranded in_progress under a dead owner — but it collides with
+// a stronger invariant: a transient pool SLOT alias
+// ("gascity/gc.run-operator-1") is a REBINDING name, not an owner, and
+// TestAssignmentGuardsIgnoreTransientPoolSlotAliases pins that no guard may
+// honor one. Honoring slot-form ownership would let a rebind shield or inherit a
+// dead session's claim (#4981/#5241), which is the worse ambiguity. The upstream
+// fix unaliases transient slots so real claims arrive in session-name form,
+// which this set already sees.
+//
+// The escalation's KILL gate uses the wide set instead
+// (drainAckAssigneeIdentities): over-refusing a kill merely leaves a row wedged,
+// which is the safe direction, whereas under-refusing one ends a live agent's
+// turn.
 func sessionHasOpenAssignedWorkForReachableStoreForCloseGate(
 	cityPath string,
 	cfg *config.City,

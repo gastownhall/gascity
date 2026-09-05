@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -229,14 +230,14 @@ func TestConformance_SuspendDrainingTearsDownRuntimeWithoutRewritingState(t *tes
 		t.Fatalf("BeginDrain: %v", err)
 	}
 
-	if err := m.Suspend(id); err != nil {
-		t.Fatalf("Suspend(draining) = %v, want nil (must not block gc stop and leave a live pane holding a pool name)", err)
+	if err := m.SuspendForShutdown(id); err != nil {
+		t.Fatalf("SuspendForShutdown(draining) = %v, want nil (must not block gc stop and leave a live pane holding a pool name)", err)
 	}
 	if sp.CountCalls("Stop", sessName) == 0 {
-		t.Errorf("Suspend(draining) did not tear down the runtime session %q", sessName)
+		t.Errorf("SuspendForShutdown(draining) did not tear down the runtime session %q", sessName)
 	}
 	if sp.IsRunning(sessName) {
-		t.Errorf("runtime session %q still running after Suspend(draining)", sessName)
+		t.Errorf("runtime session %q still running after SuspendForShutdown(draining)", sessName)
 	}
 	if got := getState(t, m, id); got != StateDraining {
 		t.Errorf("state = %q, want %q — the early return must not rewrite state and lose the drain", got, StateDraining)
@@ -250,6 +251,73 @@ func TestConformance_SuspendDrainingTearsDownRuntimeWithoutRewritingState(t *tes
 	}
 	if after.Metadata["drain_at"] == "" {
 		t.Error("drain_at was cleared; the drain reason must survive a city stop")
+	}
+}
+
+// The draining latitude belongs to the city-stop SWEEP, not to an operator
+// naming one session. A targeted Suspend of a draining seat has none of the
+// gates the reconciler's terminal escalation insists on for the same class of
+// kill, so it must keep returning the illegal transition instead of quietly
+// killing a live agent mid-drain and reporting 200.
+func TestConformance_OperatorSuspendStillRejectsDraining(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	m := NewManagerWithOptions(store, sp)
+
+	id := createTestSession(t, m, "worker")
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("get bead: %v", err)
+	}
+	sessName := b.Metadata["session_name"]
+	if err := sp.Start(context.Background(), sessName, runtime.Config{}); err != nil {
+		t.Fatalf("seeding runtime: %v", err)
+	}
+	if err := m.BeginDrain(id, "shutdown"); err != nil {
+		t.Fatalf("BeginDrain: %v", err)
+	}
+
+	err = m.Suspend(id)
+	if !errors.Is(err, ErrIllegalTransition) {
+		t.Fatalf("Suspend(draining) = %v, want ErrIllegalTransition — an operator suspend must not become an ungated mid-drain kill", err)
+	}
+	if sp.CountCalls("Stop", sessName) != 0 {
+		t.Errorf("operator Suspend(draining) tore down runtime %q anyway", sessName)
+	}
+	if !sp.IsRunning(sessName) {
+		t.Errorf("runtime session %q was killed by a rejected operator suspend", sessName)
+	}
+}
+
+// A teardown that FAILED must not be reported as success. Callers read nil as
+// "the seat stopped" — gc stop prints "Stopped agent", counts it and records
+// session.stopped — so swallowing the error makes the sweep claim success over a
+// pane still alive holding its pool slot name: the exact wedge class here.
+func TestConformance_SuspendForShutdownPropagatesDrainingTeardownFailure(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	m := NewManagerWithOptions(store, sp)
+
+	id := createTestSession(t, m, "worker")
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("get bead: %v", err)
+	}
+	sessName := b.Metadata["session_name"]
+	if err := sp.Start(context.Background(), sessName, runtime.Config{}); err != nil {
+		t.Fatalf("seeding runtime: %v", err)
+	}
+	sp.StopErrors = map[string]error{sessName: errors.New("provider refused the stop")}
+	if err := m.BeginDrain(id, "shutdown"); err != nil {
+		t.Fatalf("BeginDrain: %v", err)
+	}
+
+	err = m.SuspendForShutdown(id)
+	if err == nil {
+		t.Fatal("SuspendForShutdown(draining) = nil despite a failed teardown; gc stop would report a live pane as stopped")
+	}
+	if !strings.Contains(err.Error(), "stopping runtime session") {
+		t.Errorf("err = %v, want it to name the runtime teardown failure", err)
 	}
 }
 

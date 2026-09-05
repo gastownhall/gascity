@@ -113,6 +113,12 @@ func (h *SessionHandle) Reset(ctx context.Context) (err error) {
 }
 
 // Stop suspends the worker runtime while preserving conversation state.
+//
+// This is the city stop/restart sweep's entry point (gracefulStopAll ->
+// stopTargetsBounded -> SessionHandle.Stop), which issues a stop across every
+// session bead with no state pre-filter, so it takes the shutdown-intent form of
+// suspend: a draining seat is torn down rather than rejected with an illegal
+// transition that would leave it alive holding its pool slot name (ga-rxhu2).
 func (h *SessionHandle) Stop(ctx context.Context) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationStop)
 	defer func() { event.finish(err) }()
@@ -121,7 +127,7 @@ func (h *SessionHandle) Stop(ctx context.Context) (err error) {
 	if id == "" {
 		return nil
 	}
-	err = h.manager.Suspend(id)
+	err = h.manager.SuspendForShutdown(id)
 	return err
 }
 
