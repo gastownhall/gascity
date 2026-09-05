@@ -12,6 +12,7 @@ package storeref
 
 import (
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -230,6 +231,206 @@ func TestBindingClaimingNoNamespaceCountsEveryResident(t *testing.T) {
 	}
 }
 
+// censusCapabilityStore is a binding store that can answer the verdict itself,
+// instrumented so a test can tell WHICH path produced an answer rather than
+// inferring it from the answer's value.
+type censusCapabilityStore struct {
+	*beads.MemStore
+	outside      bool
+	censusErr    error
+	censusCalls  int
+	listCalls    int
+	prefixesSeen []string
+}
+
+func newCensusCapabilityStore() *censusCapabilityStore {
+	mem := beads.NewMemStore()
+	mem.HonorExplicitIDs = true
+	return &censusCapabilityStore{MemStore: mem}
+}
+
+func (s *censusCapabilityStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	s.listCalls++
+	return s.MemStore.List(q)
+}
+
+func (s *censusCapabilityStore) HasResidentOutside(prefixes []string) (bool, error) {
+	s.censusCalls++
+	s.prefixesSeen = append([]string(nil), prefixes...)
+	if s.censusErr != nil {
+		return false, s.censusErr
+	}
+	return s.outside, nil
+}
+
+func (s *censusCapabilityStore) seedBead(t *testing.T, id string) {
+	t.Helper()
+	if _, err := s.Create(beads.Bead{ID: id, Title: id, Type: "task"}); err != nil {
+		t.Fatalf("seeding %q: %v", id, err)
+	}
+}
+
+// The verdict takes the store's own answer when the store has one, and it must
+// be the store's answer rather than a scan that happens to agree.
+//
+// The fixture is deliberately contradictory — an EMPTY store that reports a
+// resident outside — because that is the only way to prove which path spoke.
+// The zero List calls are the other half: the whole point of the capability is
+// that a clean born-split city stops hydrating its entire binding history on
+// every one-shot process, and only the TRUE verdict is memoized, so that city
+// pays this on every invocation forever.
+func TestLegacyResidentsVerdictUsesTheCensusCapability(t *testing.T) {
+	store := newCensusCapabilityStore()
+	store.outside = true
+
+	if !HasLegacyResidents(censusBinding(store)) {
+		t.Fatal("the verdict ignored the store's own census; an empty store scanned clean and the capability's answer was discarded")
+	}
+	if store.censusCalls != 1 {
+		t.Errorf("the store's census was asked %d times, want exactly 1", store.censusCalls)
+	}
+	if store.listCalls != 0 {
+		t.Errorf("the verdict issued %d List calls on a store that answers the question directly; the scan is what this replaces", store.listCalls)
+	}
+	if !slices.Equal(store.prefixesSeen, infraPrefixes) {
+		t.Fatalf("the store was handed %v, want the binding's declared namespaces %v", store.prefixesSeen, infraPrefixes)
+	}
+}
+
+// The clean answer has to come from the capability too, or the fallback would
+// mask a predicate that never answers false.
+func TestLegacyResidentsVerdictTakesTheCensusCapabilitysCleanAnswer(t *testing.T) {
+	store := newCensusCapabilityStore()
+	store.seedBead(t, "ga-relic")
+
+	if HasLegacyResidents(censusBinding(store)) {
+		t.Fatal("the verdict scanned past the store's own clean answer; the capability is the verdict, not a hint")
+	}
+	if store.listCalls != 0 {
+		t.Errorf("the verdict issued %d List calls; a store that answered must not be scanned as well", store.listCalls)
+	}
+}
+
+// Most stores cannot answer the question — a class binding served by the native
+// Dolt engine reaches its rows through beadslib.Storage and has no SQL of its
+// own — so the scan is not a legacy path, it is the general one.
+func TestLegacyResidentsVerdictFallsBackToTheScan(t *testing.T) {
+	store := newCensusStore()
+	if _, ok := beads.Store(store).(beads.NamespaceCensus); ok {
+		t.Fatal("the fallback fixture answers the census itself; this row proves nothing")
+	}
+	store.seedBead(t, "ga-relic")
+
+	if !HasLegacyResidents(censusBinding(store)) {
+		t.Error("a store with no census capability was reported clean while holding a relic; the scan must still run for it")
+	}
+}
+
+// A capability that failed is an unread binding, and the fail-safe direction is
+// the same one a failed scan takes: keep the probe. Falling back to the scan
+// here would be worse than useless — it would double the cost of a store that
+// is already failing, and a store whose SQL cannot run will not serve a List
+// either.
+func TestACensusCapabilityErrorKeepsItsProbe(t *testing.T) {
+	store := newCensusCapabilityStore()
+	store.censusErr = errors.New("binding unreachable")
+
+	if !HasLegacyResidents(censusBinding(store)) {
+		t.Error("a binding whose census failed was reported clean; a census that cannot read must not retire a probe")
+	}
+}
+
+// The drain report is a LIST of ids, not a verdict, so it cannot be served by a
+// predicate that only answers yes or no. This row keeps a natural-looking tidy-up
+// — routing both census entry points through the fast path — from silently
+// emptying `gc storage status`'s count.
+func TestTheDrainReportIgnoresTheCensusCapability(t *testing.T) {
+	store := newCensusCapabilityStore()
+	store.seedBead(t, "ga-relic")
+
+	relics, err := OpenLegacyResidents(store, infraPrefixes)
+	if err != nil {
+		t.Fatalf("census: %v", err)
+	}
+	if len(relics) != 1 || relics[0] != "ga-relic" {
+		t.Fatalf("the drain report returned %v, want the ids themselves; an operator watches these fall", relics)
+	}
+	if store.censusCalls != 0 {
+		t.Errorf("the drain report asked the store for a verdict %d times; a verdict cannot name the ids", store.censusCalls)
+	}
+}
+
+// The equivalence row: the predicate and the scan are two implementations of one
+// question, and a disagreement silently narrows the census on exactly the cities
+// that have relics.
+//
+// Both run against the SAME seeded store, so this is not two fixtures that
+// happen to agree — it is one population read two ways. The predicate is asked
+// directly rather than through HasLegacyResidents, because a verdict that had
+// quietly stopped routing through the capability would otherwise compare the
+// scan with itself and agree forever; the verdict is then checked against the
+// same answer, which is what pins the routing.
+func TestTheCensusPredicateAndTheScanAgree(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		seed     []beads.Bead
+		close    []string
+		prefixes []string
+	}{
+		{name: "clean binding", seed: []beads.Bead{{ID: "gcg-1"}, {ID: "gcnq-2"}}, prefixes: infraPrefixes},
+		{name: "open relic", seed: []beads.Bead{{ID: "gcg-1"}, {ID: "ga-relic"}}, prefixes: infraPrefixes},
+		{name: "closed relic only", seed: []beads.Bead{{ID: "gcg-1"}, {ID: "ga-done"}}, close: []string{"ga-done"}, prefixes: infraPrefixes},
+		{name: "closed in-namespace only", seed: []beads.Bead{{ID: "gcg-1"}}, close: []string{"gcg-1"}, prefixes: infraPrefixes},
+		{name: "wisp relic", seed: []beads.Bead{{ID: "gcg-1"}, {ID: "ga-wisp", Ephemeral: true}}, prefixes: infraPrefixes},
+		{name: "lookalike prefix", seed: []beads.Bead{{ID: "gcgx-1"}}, prefixes: infraPrefixes},
+		{name: "bare prefix id", seed: []beads.Bead{{ID: "gcg"}}, prefixes: infraPrefixes},
+		{name: "empty binding", prefixes: infraPrefixes},
+		{name: "binding claiming no namespace", seed: []beads.Bead{{ID: "gcg-1"}}, prefixes: nil},
+		{name: "blank namespace", seed: []beads.Bead{{ID: "gcg-1"}}, prefixes: []string{" "}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("gcg"))
+			if err != nil {
+				t.Fatalf("OpenSQLiteStore: %v", err)
+			}
+			census, ok := store.(beads.NamespaceCensus)
+			if !ok {
+				t.Fatalf("%T cannot answer the census itself; this row would compare the scan with itself", store)
+			}
+			for _, b := range tc.seed {
+				b.Title = b.ID
+				b.Type = "task"
+				if _, err := store.Create(b); err != nil {
+					t.Fatalf("seeding %q: %v", b.ID, err)
+				}
+			}
+			for _, id := range tc.close {
+				if err := store.Close(id); err != nil {
+					t.Fatalf("closing %q: %v", id, err)
+				}
+			}
+
+			relics, err := LegacyResidents(store, tc.prefixes)
+			if err != nil {
+				t.Fatalf("scan: %v", err)
+			}
+			scanned := len(relics) > 0
+			predicate, err := census.HasResidentOutside(tc.prefixes)
+			if err != nil {
+				t.Fatalf("predicate: %v", err)
+			}
+			if predicate != scanned {
+				t.Fatalf("the predicate answered %v and the scan answered %v (relics %v); one of the two is narrowing the census", predicate, scanned, relics)
+			}
+
+			binding := ClassBinding{Classes: infraClasses, Prefixes: tc.prefixes, Leg: Leg{Ref: ClassRef(infraClasses), Store: store}}
+			if got := HasLegacyResidents(binding); got != scanned {
+				t.Fatalf("the boot verdict answered %v while both the predicate and the scan answered %v", got, scanned)
+			}
+		})
+	}
+}
+
 // The census reads the binding and nothing else. A topology's work ledger is
 // full of work-shaped ids by definition, and reading it would report every
 // city on earth as relic-bound.
@@ -245,5 +446,107 @@ func TestCensusReadsOnlyTheBinding(t *testing.T) {
 		Leg:      Leg{Ref: ClassRef([]coordclass.Class{coordclass.ClassGraph}), Store: binding},
 	}) {
 		t.Error("the census reported relics for a clean binding; it must read the binding leg alone")
+	}
+}
+
+// censusWrapperStore is the shape of a production decorator over a binding —
+// cmd/gc's emitting class store — reproduced here so the verdict's DISCOVERY is
+// testable in this package.
+//
+// It carries HasResidentOutside structurally because a reflective guard over
+// there forces it to, and it declares beads.NamespaceCensusHandleProvider
+// because carrying the method is not the same as being able to answer. The two
+// counters are what let a row say WHICH of the three paths ran: the backing's
+// census, the wrapper's own method, or the scan.
+type censusWrapperStore struct {
+	beads.Store
+	directCalls int
+	handleCalls int
+}
+
+func (s *censusWrapperStore) HasResidentOutside(prefixes []string) (bool, error) {
+	s.directCalls++
+	census, ok := beads.NamespaceCensusFor(s.Store)
+	if !ok {
+		return false, beads.ErrNamespaceCensusUnsupported
+	}
+	return census.HasResidentOutside(prefixes)
+}
+
+func (s *censusWrapperStore) NamespaceCensusHandle() (beads.NamespaceCensus, bool) {
+	s.handleCalls++
+	return beads.NamespaceCensusFor(s.Store)
+}
+
+// A wrapped binding whose backing CAN answer still reaches the predicate. The
+// wrapper is not a wall: losing the capability here would put every one-shot
+// command on a converged city back on the full scan, which is the cost this
+// whole capability exists to remove.
+func TestTheVerdictReachesThePredicateThroughAWrapper(t *testing.T) {
+	backing := newCensusCapabilityStore()
+	backing.outside = true
+	wrapper := &censusWrapperStore{Store: backing}
+
+	if !HasLegacyResidents(censusBinding(wrapper)) {
+		t.Fatal("the verdict discarded the wrapped backing's census; an empty store scanned clean and the capability's answer was thrown away")
+	}
+	if backing.censusCalls != 1 {
+		t.Errorf("the backing's census was asked %d times, want exactly 1", backing.censusCalls)
+	}
+	if backing.listCalls != 0 {
+		t.Errorf("the verdict issued %d List calls through a wrapper whose backing answers directly", backing.listCalls)
+	}
+	if wrapper.handleCalls != 1 {
+		t.Errorf("the wrapper's census handle was consulted %d times, want exactly 1; discovery went somewhere else", wrapper.handleCalls)
+	}
+}
+
+// The row that makes the seam worth having: a wrapped binding whose backing
+// CANNOT answer must fall back to the scan and reach the same verdict the scan
+// reaches unwrapped.
+//
+// This is the native-Dolt-served binding. Its wrapper carries
+// HasResidentOutside all the same, so a bare `store.(beads.NamespaceCensus)`
+// would match, the scan would never run, and the binding's whole population
+// would be answered for by a method with nothing behind it. Both directions run
+// against one fixture read three ways — wrapped verdict, unwrapped verdict,
+// scan — because a fallback that answered TRUE unconditionally would pass the
+// relic row and strand nothing only by luck.
+func TestTheVerdictScansThroughAWrapperWhoseBackingCannotAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		seed []string
+		want bool
+	}{
+		{name: "binding holding a relic", seed: []string{"gcg-1", "ga-relic"}, want: true},
+		{name: "clean binding", seed: []string{"gcg-1", "gcnq-2"}, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backing := newCensusStore()
+			for _, id := range tc.seed {
+				backing.seedBead(t, id)
+			}
+			if _, ok := beads.Store(backing).(beads.NamespaceCensus); ok {
+				t.Fatal("the fixture backing answers the census itself; this row proves nothing")
+			}
+			wrapper := &censusWrapperStore{Store: backing}
+			if _, ok := beads.Store(wrapper).(beads.NamespaceCensus); !ok {
+				t.Fatal("the wrapper fixture does not carry HasResidentOutside, so it does not model the wrapper the guard forces; this row proves nothing")
+			}
+
+			relics, err := LegacyResidents(backing, infraPrefixes)
+			if err != nil {
+				t.Fatalf("scan: %v", err)
+			}
+			if scanned := len(relics) > 0; scanned != tc.want {
+				t.Fatalf("the unwrapped scan answered %v, want %v (relics %v)", scanned, tc.want, relics)
+			}
+			if got := HasLegacyResidents(censusBinding(wrapper)); got != tc.want {
+				t.Fatalf("the verdict over the wrapped binding answered %v, want the scan's %v", got, tc.want)
+			}
+			if wrapper.directCalls != 0 {
+				t.Errorf("the wrapper's own HasResidentOutside answered for a backing that has no census (%d call(s)); the scan is the only thing that can speak for this binding", wrapper.directCalls)
+			}
+		})
 	}
 }
