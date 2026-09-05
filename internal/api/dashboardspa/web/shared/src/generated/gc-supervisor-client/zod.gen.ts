@@ -162,6 +162,7 @@ export const zBeadWorktreeReapedPayload = z.object({
 
 export const zBeadsDiagnostic = z.object({
     beads_store: z.string(),
+    degraded: z.boolean().optional(),
     native_store_eligible: z.boolean(),
     preflight_gate: z.string().optional(),
     preflight_reason: z.string().optional()

@@ -109,6 +109,11 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		// depend on it. Its own behavior is pinned by
 		// TestDegradedProjectionSendsReadyToTheLiveBdVerdict.
 		"readyProjectionDegraded": true,
+		// availabilityGate is about BACKING-STORE REACHABILITY, not durable
+		// cache content: it is an injected collaborator, never written by
+		// mergeSnapshotLocked, and the merge end state does not depend on it.
+		// Its own behavior is pinned by the caching_store_availability suite.
+		"availabilityGate": true,
 	}
 	assertFieldsClassified(t, reflect.TypeOf(CachingStore{}), comparedStore, excludedStore)
 

@@ -48,6 +48,11 @@ type BeadsDiagnostic struct {
 	NativeStoreEligible bool   `json:"native_store_eligible"`
 	PreflightGate       string `json:"preflight_gate,omitempty"`
 	PreflightReason     string `json:"preflight_reason,omitempty"`
+	// Degraded reports the scope's CachingStore is serving last-good
+	// cached data because the backing store is unreachable (transport
+	// circuit breaker open) or the cache itself has degraded. Computed
+	// at read time, not at store-open time.
+	Degraded bool `json:"degraded,omitempty"`
 }
 
 // StoreOpenOptions holds dependencies for opening a beads Store.

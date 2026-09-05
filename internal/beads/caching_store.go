@@ -43,6 +43,16 @@ type CachingStore struct {
 	observationRevision uint64
 	primePartialErr     error
 
+	// availabilityGate, when set, reports backing-store transport
+	// availability (the per-scope circuit breaker). See
+	// SetAvailabilityGate.
+	// Atomic, NOT mu-guarded: it is read on the hot read paths, so putting
+	// it under c.mu would make a canceled caller block on a contended cache
+	// lock just to learn whether the transport is believed down. This also
+	// matches the rule stated on Degraded(): foreign breaker code must
+	// never execute under this lock.
+	availabilityGate atomic.Pointer[AvailabilityGate]
+
 	// readyProjectionDegraded latches when the backing store reported it cannot
 	// serve the ready projection at all. It is deliberately NOT primePartialErr:
 	// see readyReadsMustGoLive for what each flag costs which reads. Atomic
