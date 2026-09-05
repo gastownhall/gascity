@@ -478,6 +478,10 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 	_ = preflightClean.MarkFlagRequired("city")
 	cmd.AddCommand(preflightClean)
 
+	for _, handoff := range newDoltHandoffCommands(stdout, stderr) {
+		cmd.AddCommand(handoff)
+	}
+
 	return cmd
 }
 

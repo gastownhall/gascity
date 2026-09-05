@@ -10,10 +10,10 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 657
-baseline_files = 188
-reported_calls = 495
-reported_files = 135
+baseline_calls = 658
+baseline_files = 189
+reported_calls = 496
+reported_files = 136
 owner_bead = "ga-80po0c.2"
 invariant = "tracked test source totals remain visible as audit evidence"
 resource_owner = "ga-80po0c.2 owns this point-in-time source census"
@@ -23,10 +23,10 @@ expires = "2026-10-01"
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 477
-baseline_files = 172
-reported_calls = 447
-reported_files = 157
+baseline_calls = 478
+baseline_files = 173
+reported_calls = 448
+reported_files = 158
 owner_bead = "ga-80po0c.2"
 invariant = "tracked test source totals remain visible as audit evidence"
 resource_owner = "ga-80po0c.2 owns this point-in-time source census"
@@ -51,10 +51,10 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 444
-baseline_files = 126
-reported_calls = 380
-reported_files = 98
+baseline_calls = 445
+baseline_files = 127
+reported_calls = 381
+reported_files = 99
 owner_bead = "ga-80po0c.2"
 invariant = "untagged subprocess call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "each process-owning test removes or replaces its source call site"
@@ -64,10 +64,10 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 321
-baseline_files = 121
-reported_calls = 295
-reported_files = 114
+baseline_calls = 322
+baseline_files = 122
+reported_calls = 296
+reported_files = 115
 owner_bead = "ga-80po0c.2"
 invariant = "untagged fixed-sleep call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "each owning test replaces elapsed wall time with its lifecycle signal"
@@ -315,6 +315,17 @@ resources = ["subprocess"]
 owner_bead = "ga-8pkpor"
 invariant = "doctor custom-types test-owned-HOME dolt-isolation regression proof is a checked Medium owner"
 resource_owner = "the bd subprocess is confined to TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext, which proves bd routes to an embedded, test-owned dolt store rather than a machine-level shared server"
+migration_target = "P0.4b"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "cmd/gc"
+package_name = "main"
+owner = "TestDoltStateHandoffInspectAndStopOwnedProcess"
+resources = ["subprocess", "fixed_sleep"]
+owner_bead = "ga-p9iuv.30.1.1.5"
+invariant = "managed Dolt ownership handoff subprocess and lifecycle timing proof is a checked Medium owner"
+resource_owner = "the fixture subprocess and bounded lifecycle sleeps are confined to TestDoltStateHandoffInspectAndStopOwnedProcess"
 migration_target = "P0.4b"
 expires = "2026-10-01"
 

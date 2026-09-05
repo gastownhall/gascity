@@ -1445,6 +1445,14 @@
     },
     "DoltConfig": {
       "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "server",
+            "proxied-server"
+          ],
+          "description": "Mode selects the Dolt transport for Beads scopes. The empty value uses\nthe managed local proxied-server default. Set \"server\" to opt into the\ndirect SQL-server path, or \"proxied-server\" to select the proxy path\nexplicitly. Host/port may identify a remote Dolt upstream for either\nserver mode or proxied-server mode."
+        },
         "port": {
           "type": "integer",
           "description": "Port is the dolt server port. 0 means use ephemeral port allocation\n(hashed from city path). Set explicitly to override.",

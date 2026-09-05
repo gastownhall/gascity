@@ -15,9 +15,14 @@ import (
 
 const (
 	jsonSchemaDirAnnotation = "gc.json.schema_dir"
-	jsonSchemaManifestRole  = "manifest"
-	jsonSchemaResultRole    = "result"
-	jsonSchemaFailureRole   = "failure"
+	// jsonRawProtocolAnnotation marks an internal command whose --json output
+	// is a versioned subprocess protocol rather than a normal gc result
+	// envelope. Such commands are still buffered by run(), but do not need a
+	// public result schema or the top-level ok:true discriminator.
+	jsonRawProtocolAnnotation = "gc.json.raw_protocol"
+	jsonSchemaManifestRole    = "manifest"
+	jsonSchemaResultRole      = "result"
+	jsonSchemaFailureRole     = "failure"
 )
 
 type jsonSchemaManifest struct {
@@ -265,6 +270,9 @@ func resolveJSONContractDisposition(root *cobra.Command, args []string) (jsonReq
 	}
 	commandPath := commandPathWords(cmd)
 	if isBDCommandPath(commandPath) {
+		return request, jsonContractPassthrough
+	}
+	if strings.TrimSpace(cmd.Annotations[jsonRawProtocolAnnotation]) != "" {
 		return request, jsonContractPassthrough
 	}
 	if _, err := readCommandSchema(cmd, commandPath, jsonSchemaResultRole); err != nil {
