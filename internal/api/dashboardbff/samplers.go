@@ -433,7 +433,12 @@ func (m *samplerManager) probeRig(ctx context.Context, rigName, rigPath string) 
 	var checks []rigStoreCheck
 	var note string
 	if res, err := m.exec.execBdPing(ctx, beadsPath); err != nil {
-		note = "bd ping probe failed: " + err.Error()
+		// An execution-level failure means the connectivity check did not run
+		// (for example timeout, cancellation, or executable spawn failure). It
+		// is therefore a database probe failure, not an incomplete warning:
+		// synthesize the same typed check used for a provider-level ping error so
+		// the rollup fails closed and the dashboard has actionable diagnostics.
+		checks = []rigStoreCheck{pingExecutionFailureCheck(err)}
 	} else if parsed, ok := parsePingCheck(res); ok {
 		checks = parsed
 	} else if res.exitCode != 0 {
@@ -478,6 +483,19 @@ func (m *samplerManager) probeRig(ctx context.Context, rigName, rigPath string) 
 		// it before it reaches the browser, per the "all subprocess output is
 		// sanitized" contract.
 		IssueCount: issueCount, Problems: problems, Note: sanitizeTerminalOutput(note),
+	}
+}
+
+func pingExecutionFailureCheck(err error) rigStoreCheck {
+	msg := "bd ping execution failed"
+	if err != nil && strings.TrimSpace(err.Error()) != "" {
+		msg += ": " + err.Error()
+	}
+	return rigStoreCheck{
+		Category: "Beads",
+		Name:     pingConnectivityCheck,
+		Status:   "error",
+		Message:  sanitizeTerminalOutput(truncateRunes(msg, maxProbeErrorRunes)),
 	}
 }
 

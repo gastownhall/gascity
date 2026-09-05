@@ -51,11 +51,12 @@ type execResult struct {
 // execRunner bounds subprocess concurrency with a semaphore (MAX_CONCURRENT in
 // the BFF) and runs every command shell-free under a clean environment.
 type execRunner struct {
-	sem chan struct{}
+	sem           chan struct{}
+	bdPingTimeout time.Duration
 }
 
 func newExecRunner() *execRunner {
-	return &execRunner{sem: make(chan struct{}, maxConcurrent)}
+	return &execRunner{sem: make(chan struct{}, maxConcurrent), bdPingTimeout: bdPingTimeout}
 }
 
 // run executes cmd with positional args (never a shell string), under a clean
@@ -90,6 +91,9 @@ func (r *execRunner) run(ctx context.Context, cmd string, args []string, timeout
 
 	if cctx.Err() == context.DeadlineExceeded && !stdout.truncated {
 		return nil, &execError{msg: "exec timed out", kind: execErrTimeout}
+	}
+	if cctx.Err() == context.Canceled && !stdout.truncated {
+		return nil, &execError{msg: "exec canceled", kind: execErrSpawn}
 	}
 
 	exitCode := 0
@@ -268,5 +272,9 @@ func (r *execRunner) execBdPing(ctx context.Context, beadsPath string) (*execRes
 	if !isValidHostPath(beadsPath) || !strings.HasSuffix(beadsPath, "/.beads") {
 		return nil, validationErr("invalid beads store path")
 	}
-	return r.run(ctx, "bd", []string{"ping", "--db", beadsPath, "--json"}, bdPingTimeout, maxBytes)
+	timeout := r.bdPingTimeout
+	if timeout <= 0 {
+		timeout = bdPingTimeout
+	}
+	return r.run(ctx, "bd", []string{"ping", "--db", beadsPath, "--json"}, timeout, maxBytes)
 }

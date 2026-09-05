@@ -112,6 +112,91 @@ func TestExecBdPingHonorsCancellation(t *testing.T) {
 	}
 }
 
+func TestProbeRigExecutionFailuresFailClosedAndDoNotMutateStore(t *testing.T) {
+	tests := []struct {
+		name       string
+		setup      func(t *testing.T, binDir string)
+		runContext func() context.Context
+		want       string
+	}{
+		{
+			name: "timeout",
+			setup: func(t *testing.T, binDir string) {
+				writeFakeBd(t, binDir, "#!/bin/sh\n/bin/sleep 1\n")
+			},
+			runContext: context.Background,
+			want:       "exec timed out",
+		},
+		{
+			name:       "spawn failure",
+			setup:      func(*testing.T, string) {},
+			runContext: context.Background,
+			want:       "spawn failed",
+		},
+		{
+			name: "cancellation",
+			setup: func(t *testing.T, binDir string) {
+				writeFakeBd(t, binDir, "#!/bin/sh\n/bin/sleep 1\n")
+			},
+			runContext: func() context.Context {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx
+			},
+			want: "exec canceled",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rig, bin := newProbeRigFixture(t)
+			tt.setup(t, bin)
+			before := directoryEntries(t, filepath.Join(rig, ".beads"))
+			runner := newExecRunner()
+			if tt.name == "timeout" {
+				runner.bdPingTimeout = 20 * time.Millisecond
+			}
+			rep := newSamplerManager(Deps{}, runner).probeRig(tt.runContext(), "r1", rig)
+			if rep.Rollup != "down" || !rep.Reachable {
+				t.Fatalf("probeRig() = %+v, want reachable/down", rep)
+			}
+			if len(rep.Problems) != 1 {
+				t.Fatalf("probeRig problems = %+v, want one typed problem", rep.Problems)
+			}
+			problem := rep.Problems[0]
+			if problem.Category != "Beads" || problem.Name != pingConnectivityCheck || problem.Status != "error" {
+				t.Fatalf("probeRig problem = %+v, want typed connectivity error", problem)
+			}
+			if !strings.Contains(problem.Message, tt.want) {
+				t.Fatalf("probeRig problem message = %q, want %q", problem.Message, tt.want)
+			}
+			if strings.ContainsAny(problem.Message, "\x00\x1b") {
+				t.Fatalf("probeRig problem message contains unsanitized control bytes: %q", problem.Message)
+			}
+			if rep.DoltConnected == nil || *rep.DoltConnected {
+				t.Fatalf("probeRig DoltConnected = %v, want false", rep.DoltConnected)
+			}
+			after := directoryEntries(t, filepath.Join(rig, ".beads"))
+			if !equalStrings(before, after) {
+				t.Fatalf("probe mutated .beads directory: before=%v after=%v", before, after)
+			}
+		})
+	}
+}
+
+func directoryEntries(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, len(entries))
+	for i := range entries {
+		names[i] = entries[i].Name()
+	}
+	return names
+}
+
 func TestProbeRigReportsPingFailureAsDown(t *testing.T) {
 	root := t.TempDir()
 	rig := filepath.Join(root, "rig")
