@@ -215,7 +215,8 @@
               "beads-metadata-cas",
               "worktree-cleanup",
               "worktree-ensure",
-              "worktree-verify"
+              "worktree-verify",
+              "analyze-stalls"
             ]
           },
           "event_id": {
