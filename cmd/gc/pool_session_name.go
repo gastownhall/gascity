@@ -210,12 +210,12 @@ func exitedDrainAckHolderIdentities(cityPath string, cfg *config.City, leading b
 // ambiguity must mean "not stranded" and leave the claim alone. Only an exact
 // store-ref hit — this seat demonstrably reaches the store the claim lives in —
 // bypasses the liveness gate.
-func exitedDrainAckHolderOwnsWork(scoped map[string]map[string]struct{}, legacy map[string]struct{}, assignee, workStoreRef string, storeRefAware bool) bool {
+func exitedDrainAckHolderOwnsWork(scoped map[string]map[string]struct{}, legacy map[string]struct{}, identity, workStoreRef string, storeRefAware bool) bool {
 	if !storeRefAware {
-		_, ok := legacy[assignee]
+		_, ok := legacy[identity]
 		return ok
 	}
-	refs := scoped[assignee]
+	refs := scoped[identity]
 	if refs == nil {
 		return false
 	}
@@ -345,7 +345,7 @@ func releaseOrphanedPoolAssignments(
 			if wb.Status != "in_progress" {
 				continue
 			}
-		case exitedDrainAckHolderOwnsWork(exitedHolders, legacyExitedHolders, assignee, workStoreRef, storeRefAware):
+		case exitedDrainAckHolderOwnsWork(exitedHolders, legacyExitedHolders, livenessIdentity, workStoreRef, storeRefAware):
 			// The assignee is a fungible seat that acknowledged its own drain
 			// while still holding this claim. Its session bead is open and
 			// asleep, so all three liveness gates below would read it as a live
