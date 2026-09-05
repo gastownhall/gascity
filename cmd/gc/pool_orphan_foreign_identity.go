@@ -157,13 +157,19 @@ func newForeignClaimGate(cfg *config.City, sessionStore beads.SessionStore) *for
 // claimMayStillBeHeld reports whether the sweep must keep assignee's claim on
 // workID: either this city cannot observe the identity, and the claim is
 // recorded as protected, or a live open session answers to it.
-// liveAssignee is the sweep's per-assignee memo for that live probe.
-func (g *foreignClaimGate) claimMayStillBeHeld(assignee, workID string, liveAssignee map[string]bool) bool {
+// livenessIdentity is the exact claimer — the claim-time gc.session_id when
+// the claim carries one, else the assignee (cr-h3evor): pool aliases are
+// reusable, so the live probe must not let a successor seat that reused a dead
+// claimer's name hold the claim alive. Provenance (the roster test, the
+// session-record test, the protected summary) stays assignee-scoped — that is
+// the shape this city's config and records answer to.
+// liveAssignee is the sweep's per-identity memo for the live probe.
+func (g *foreignClaimGate) claimMayStillBeHeld(assignee, livenessIdentity, workID string, liveAssignee map[string]bool) bool {
 	if !g.observable(assignee) {
 		g.protected.add(assignee, workID)
 		return true
 	}
-	return memoizedLiveOpenSessionAssignmentExists(liveAssignee, assignee, g.sessionStore.Store, assignee)
+	return memoizedLiveOpenSessionAssignmentExists(liveAssignee, livenessIdentity, g.sessionStore.Store, livenessIdentity)
 }
 
 func (g *foreignClaimGate) observable(assignee string) bool {
