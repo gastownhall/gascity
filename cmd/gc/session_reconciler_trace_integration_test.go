@@ -478,19 +478,7 @@ func TestSessionReconcilerTraceGH1654WorkRequestedStartCandidates(t *testing.T) 
 			wantStartCandidates: 1,
 			setup: func(t *testing.T, cityDir string, store beads.Store, sp runtime.Provider) (*config.City, DesiredStateResult, *sessionBeadSnapshot) {
 				t.Helper()
-				cfg := &config.City{
-					Workspace: config.Workspace{Name: "trace-town"},
-					Session:   config.SessionConfig{Provider: "fake"},
-					Agents: []config.Agent{{
-						Name:              "dispatcher",
-						StartCommand:      "true",
-						MaxActiveSessions: intPtr(1),
-					}},
-					NamedSessions: []config.NamedSession{{
-						Template: "dispatcher",
-						Mode:     "on_demand",
-					}},
-				}
+				cfg := namedSessionPostKillTraceConfig()
 				if _, err := store.Create(beads.Bead{
 					Title:  "queued dispatcher work",
 					Type:   "task",
@@ -693,6 +681,47 @@ func TestSessionReconcilerTraceGH1654WorkRequestedStartCandidates(t *testing.T) 
 				t.Fatalf("start_candidate decisions = %d, want %d", startCandidates, tc.wantStartCandidates)
 			}
 		})
+	}
+}
+
+// namedSessionPostKillTraceConfig returns the *config.City used by the
+// "named session post-kill" GH-1654 trace regression case above. Extracted
+// so TestNamedSessionPostKillTraceConfigToleratesShardParallelLoad can
+// assert on the exact same fixture without duplicating it.
+func namedSessionPostKillTraceConfig() *config.City {
+	return &config.City{
+		Workspace: config.Workspace{Name: "trace-town"},
+		Session:   config.SessionConfig{Provider: "fake"},
+		Agents: []config.Agent{{
+			Name:              "dispatcher",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "dispatcher",
+			Mode:     "on_demand",
+		}},
+	}
+}
+
+// TestNamedSessionPostKillTraceConfigToleratesShardParallelLoad guards
+// against ga-hgjlhi: the "named session post-kill" case above calls
+// cr.waitForAsyncStarts(), which waits up to cr.cfg.Daemon.ShutdownTimeoutDuration().
+// An unconfigured Daemon.ShutdownTimeout falls back to a fixed production
+// default of 5s (internal/config DaemonConfig.ShutdownTimeoutDuration).
+// Under shard-parallel host load, 5s of real wall-clock time is not always
+// enough for the fake provider's async start goroutines to be scheduled and
+// finish, which fails the test with "async starts did not finish" even
+// though nothing is actually broken -- a false negative caused by the
+// fixture, not the reconciler. The fixture must set an explicit, generous
+// Daemon.ShutdownTimeout instead of inheriting the production default.
+func TestNamedSessionPostKillTraceConfigToleratesShardParallelLoad(t *testing.T) {
+	cfg := namedSessionPostKillTraceConfig()
+	const floor = 30 * time.Second
+	if got := cfg.Daemon.ShutdownTimeoutDuration(); got < floor {
+		t.Fatalf("namedSessionPostKillTraceConfig().Daemon.ShutdownTimeoutDuration() = %v, want >= %v "+
+			"(see ga-hgjlhi: the fixture must set an explicit, generous Daemon.ShutdownTimeout so "+
+			"cr.waitForAsyncStarts() doesn't false-negative under shard-parallel host load)", got, floor)
 	}
 }
 
