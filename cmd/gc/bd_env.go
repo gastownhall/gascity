@@ -47,6 +47,20 @@ func bdCommandRunnerForCity(cityPath string) beads.CommandRunner {
 // workspace-pinned bd without projecting or recovering a managed backend.
 func bdContextCommandRunnerForCity(cityPath string) beads.CommandRunner {
 	return func(dir, name string, args ...string) ([]byte, error) {
+		// Subprocess admission semaphore (city-scale plan item 1.9): bound
+		// concurrent bd subprocesses per scope and city-wide so the
+		// amplifier cannot pile up unbounded processes. Gated first so a
+		// refused call spawns nothing and pays for no config load. A
+		// saturated admission fails fast with the typed ErrStoreUnavailable
+		// rather than blocking the controller tick on a wedged backend.
+		if name == "bd" {
+			release, admitted := bdAdmissionForCity(cityPath).acquire(bdAdmissionScope(cityPath, dir))
+			if !admitted {
+				return nil, fmt.Errorf("bd %s: scope %s: admission saturated, failing fast to protect the controller tick: %w",
+					strings.Join(args, " "), dir, beads.ErrStoreUnavailable)
+			}
+			defer release()
+		}
 		env := cityRuntimeEnvMapForCity(cityPath)
 		bdBin, err := workspacePinnedBdBinary(cityPath)
 		if err != nil {
@@ -1403,6 +1417,22 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 			env = map[string]string{}
 		}
 		ensureProjectedDoltEnvExplicit(env)
+		// Subprocess admission semaphore (city-scale plan item 1.9): bound
+		// concurrent bd subprocesses per scope and city-wide so the
+		// amplifier cannot pile up unbounded processes. The slot is held
+		// for the whole invocation, including any managed retry below.
+		// Admission is bounded: when the caps are saturated by bd calls
+		// wedged on a transport timeout, acquire fails fast with the typed
+		// ErrStoreUnavailable and ZERO subprocesses rather than blocking
+		// the controller tick. That is backpressure, not a transport fault.
+		if name == "bd" {
+			release, admitted := bdAdmissionForCity(cityPath).acquire(bdAdmissionScope(cityPath, dir))
+			if !admitted {
+				return nil, fmt.Errorf("bd %s: scope %s: admission saturated, failing fast to protect the controller tick: %w",
+					strings.Join(args, " "), dir, beads.ErrStoreUnavailable)
+			}
+			defer release()
+		}
 		runner, runnerErr := beadsCommandRunnerForHostedCity(cityPath, env)
 		if runnerErr != nil {
 			return nil, runnerErr

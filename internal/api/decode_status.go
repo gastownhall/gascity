@@ -160,6 +160,9 @@ func statusBeadsDiagnosticFromGen(g *genclient.BeadsDiagnostic) *beads.BeadsDiag
 	if g.PreflightReason != nil {
 		out.PreflightReason = *g.PreflightReason
 	}
+	if g.GcBdInflight != nil {
+		out.BdInflight = int(*g.GcBdInflight)
+	}
 	return out
 }
 

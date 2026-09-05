@@ -1307,6 +1307,10 @@
           "beads_store": {
             "type": "string"
           },
+          "gc_bd_inflight": {
+            "format": "int64",
+            "type": "integer"
+          },
           "native_store_eligible": {
             "type": "boolean"
           },

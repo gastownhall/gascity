@@ -162,6 +162,7 @@ export const zBeadWorktreeReapedPayload = z.object({
 
 export const zBeadsDiagnostic = z.object({
     beads_store: z.string(),
+    gc_bd_inflight: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
     native_store_eligible: z.boolean(),
     preflight_gate: z.string().optional(),
     preflight_reason: z.string().optional()

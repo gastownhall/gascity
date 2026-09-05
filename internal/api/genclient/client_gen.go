@@ -1319,6 +1319,7 @@ type BeadWorktreeReapedPayload struct {
 // BeadsDiagnostic defines model for BeadsDiagnostic.
 type BeadsDiagnostic struct {
 	BeadsStore          string  `json:"beads_store"`
+	GcBdInflight        *int64  `json:"gc_bd_inflight,omitempty"`
 	NativeStoreEligible bool    `json:"native_store_eligible"`
 	PreflightGate       *string `json:"preflight_gate,omitempty"`
 	PreflightReason     *string `json:"preflight_reason,omitempty"`

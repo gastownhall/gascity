@@ -460,6 +460,7 @@ export type BeadWorktreeReapedPayload = {
 
 export type BeadsDiagnostic = {
     beads_store: string;
+    gc_bd_inflight?: number;
     native_store_eligible: boolean;
     preflight_gate?: string;
     preflight_reason?: string;

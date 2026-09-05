@@ -47,6 +47,14 @@ var ErrReadyContextUnsupported = errors.New("context-aware ready unsupported")
 // handle has been closed.
 var ErrStoreClosed = errors.New("bead store closed")
 
+// ErrStoreUnavailable is returned when the backing bead store cannot be
+// reached: the transport circuit breaker is open, or a fresh attempt failed
+// with a transport-class error. Consumers must treat it as "unknown", never
+// as "empty": gc hook exits 2 (distinct from exit-1 no-work), the controller
+// freezes the affected scope's prior desired state, and CachingStore serves
+// last-good data tagged degraded. Check with errors.Is.
+var ErrStoreUnavailable = errors.New("bead store unavailable")
+
 // ErrParentProjectionSuperseded reports that a parent update was overtaken by a
 // concurrent reparent before the caller's projection wait could converge.
 var ErrParentProjectionSuperseded = errors.New("parent projection superseded by concurrent update")
