@@ -1,82 +1,124 @@
 package main
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
-// The seven-seat specimen. Seven live seats sat in
-// state=draining/state_reason=drain-ack-stop-pending for two days with
-// drain_at from 2026-09-03. Their agents acked correctly (pane env
-// GC_DRAIN_ACK=1, source=agent, requester token == GC_INSTANCE_TOKEN ==
-// GC_DRAIN_TOKEN) and `gc hook --claim` correctly returned drain, so each agent
-// printed NO_ROUTED_WORK, acked, and ended its TURN — but not its RUNTIME.
-// finalizeDrainAckStopPendingSessions only closes a row whose runtime observes
-// DEAD; while obs.Running || obs.Alive it reminds and re-queues forever, and its
-// own comment concedes "the only thing that has ever cleared such a row is an
-// operator killing the pane". Each stuck row holds its pool slot name, so
-// buildDesiredState reports "pool session name unavailable" and the pool cannot
-// mint a replacement.
+// The seven-seat specimen, built to the PRODUCTION shape.
 //
-// These tests pin the terminal exit: once the reminder budget is spent and its
-// answer window has elapsed, the row escalates to a certified kill and CLOSES,
-// because only status=closed releases the name (an OPEN bead owns its
-// session_name whatever its state).
-
-// escalationEnv is the wedged seat plus the config/city-path the finalizer needs
-// to resolve a worker handle for the certified kill.
+// Seven live seats sat in state=draining / state_reason=drain-ack-stop-pending
+// for two days. Their agents behaved correctly: `gc runtime drain-ack` wrote
+// GC_DRAIN_ACK=1 and GC_DRAIN_ACK_SOURCE=agent on the pane, and each agent
+// printed NO_ROUTED_WORK, acked, and ended its TURN — but not its RUNTIME.
+//
+// GC_DRAIN_ACK_SOURCE=agent is the load-bearing detail and the one an earlier
+// revision of these tests got wrong. The reminder pass refuses to remind a pane
+// that already carries an agent-authored ack (drainReminderAckPin), and
+// correctly so, so drain_reminder_count can NEVER be written for this
+// population. Any escalation gated solely on the reminder budget is therefore
+// unreachable for exactly the seats it was written for. The fixture below
+// carries source=agent for that reason; the reminder-budget arm is exercised as
+// a control, not as the headline.
 type escalationEnv struct {
-	*drainReminderEnv
+	t        *testing.T
+	sp       *runtime.Fake
+	store    beads.Store
+	clk      *clock.Fake
+	bead     beads.Bead
+	out      *synchronizedBuffer
+	rec      *capturingRecorder
 	cfg      *config.City
 	cityPath string
-	rec      *capturingRecorder
+	name     string
+	now      time.Time
 }
 
 func newEscalationEnv(t *testing.T) *escalationEnv {
 	t.Helper()
-	e := newDrainReminderEnv(t)
-	e.setMeta(map[string]string{"work_dir": t.TempDir(), "provider": "claude"})
+	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	sp := runtime.NewFake()
+	store := beads.NewMemStore()
+	name := "gc-city-worker-1"
+	cityPath := t.TempDir()
+	// Two days wedged, matching the incident.
+	drainAt := now.Add(-48 * time.Hour).UTC().Format(time.RFC3339)
+
+	bead, err := store.Create(beads.Bead{
+		Title: "session",
+		Type:  sessionBeadType,
+		Metadata: map[string]string{
+			"session_name":   name,
+			"template":       "worker",
+			"generation":     "3",
+			"state":          string(sessionpkg.StateDraining),
+			"state_reason":   sessionpkg.DrainAckStopPendingReason,
+			"drain_at":       drainAt,
+			"instance_token": "tok-a",
+			"pool_managed":   "true",
+			"work_dir":       t.TempDir(),
+			"provider":       "claude",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	// The live pane. GC_SESSION_ID/GC_CITY_PATH are what the process-table
+	// scanner discovers by, and the city attribution is what keeps a forced
+	// termination from reaching a sibling city.
+	if err := sp.Start(context.Background(), name, runtime.Config{Env: map[string]string{
+		"GC_SESSION_ID": bead.ID,
+		"GC_CITY_PATH":  cityPath,
+	}}); err != nil {
+		t.Fatalf("start fake session: %v", err)
+	}
+	mustSetMeta(t, sp, name, reconcilerDrainAckSourceKey, drainAckSourceAgentValue)
+	mustSetMeta(t, sp, name, "GC_DRAIN_ACK", "1")
+	sp.SetActivity(name, now.Add(-30*time.Minute))
+	// The defining property of the wedge: the ordinary provider stop does NOT
+	// terminate this pane. That is why the pre-existing loop — which re-issues
+	// exactly that stop every tick — never clears these rows, and it is why the
+	// escalation has to reach for a different mechanism rather than the same one.
+	sp.StopLeavesRunning = map[string]bool{name: true}
+
+	// Keep the confirm-dead loop short; production bounds would add 6s per test.
+	prevTimeout, prevPoll := drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll
+	drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll = 20*time.Millisecond, 5*time.Millisecond
+	t.Cleanup(func() {
+		drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll = prevTimeout, prevPoll
+	})
+
 	return &escalationEnv{
-		drainReminderEnv: e,
-		cfg:              &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}},
-		cityPath:         t.TempDir(),
-		rec:              &capturingRecorder{},
+		t: t, sp: sp, store: store, clk: &clock.Fake{Time: now},
+		bead: bead, out: &synchronizedBuffer{}, rec: &capturingRecorder{},
+		cfg:      &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}},
+		cityPath: cityPath, name: name, now: now,
 	}
 }
 
-// spendBudget delivers the full reminder budget and then advances the clock past
-// the answer window the last delivered reminder earns, which is exactly the
-// durable precondition drainRemindersSpent reports.
-func (e *escalationEnv) spendBudget() {
+func (e *escalationEnv) info() sessionpkg.Info {
 	e.t.Helper()
-	for i := 0; i < drainReminderMaxAttempts; i++ {
-		e.clk.Time = e.now.Add(time.Duration(i) * drainReminderInterval)
-		if got := e.remind(); got != drainReminderDelivered {
-			e.t.Fatalf("attempt %d outcome = %v, want delivered", i+1, got)
-		}
-	}
-	e.clk.Time = e.now.Add(drainReminderMaxAttempts * drainReminderInterval)
-	bead, err := e.store.Get(e.bead.ID)
+	got, err := e.store.Get(e.bead.ID)
 	if err != nil {
 		e.t.Fatalf("read session bead: %v", err)
 	}
-	if !drainRemindersSpent(bead, e.clk.Time) {
-		e.t.Fatalf("budget not spent after %d delivered reminders and a full interval; the escalation precondition is not set up", drainReminderMaxAttempts)
-	}
+	return seedSessionInfo(got)
 }
 
-func (e *escalationEnv) finalize() int {
+func (e *escalationEnv) setMeta(kvs map[string]string) {
 	e.t.Helper()
-	return finalizeDrainAckStopPendingSessions(
-		e.cityPath, e.cfg, e.sp, beads.SessionStore{Store: e.store}, nil,
-		[]sessionpkg.Info{e.info()}, nil, newDrainTracker(), &asyncStartTracker{},
-		e.clk, e.rec, e.out,
-	)
+	if err := e.store.SetMetadataBatch(e.bead.ID, kvs); err != nil {
+		e.t.Fatalf("set session metadata: %v", err)
+	}
 }
 
 func (e *escalationEnv) status() string {
@@ -88,7 +130,36 @@ func (e *escalationEnv) status() string {
 	return got.Status
 }
 
-func (e *escalationEnv) escalationEvents() []events.Event {
+// finalize runs one reconcile tick's stop-pending pass and waits for any
+// detached termination it queued, so assertions see a settled world.
+func (e *escalationEnv) finalize() {
+	e.t.Helper()
+	tracker := &asyncStartTracker{}
+	finalizeDrainAckStopPendingSessions(
+		e.cityPath, e.cfg, e.sp, beads.SessionStore{Store: e.store}, nil,
+		[]sessionpkg.Info{e.info()}, nil, newDrainTracker(), tracker,
+		e.clk, e.rec, e.out,
+	)
+	tracker.wait(10 * time.Second)
+}
+
+// finalizeOnTick runs the pass WITHOUT waiting, returning how long the
+// synchronous tick itself took.
+func (e *escalationEnv) finalizeOnTick() time.Duration {
+	e.t.Helper()
+	tracker := &asyncStartTracker{}
+	start := time.Now()
+	finalizeDrainAckStopPendingSessions(
+		e.cityPath, e.cfg, e.sp, beads.SessionStore{Store: e.store}, nil,
+		[]sessionpkg.Info{e.info()}, nil, newDrainTracker(), tracker,
+		e.clk, e.rec, e.out,
+	)
+	elapsed := time.Since(start)
+	tracker.wait(10 * time.Second)
+	return elapsed
+}
+
+func (e *escalationEnv) escalations() []events.Event {
 	var out []events.Event
 	for _, ev := range e.rec.events {
 		if ev.Type == events.SessionDrainStopEscalated {
@@ -98,48 +169,51 @@ func (e *escalationEnv) escalationEvents() []events.Event {
 	return out
 }
 
-// THE PIN THAT FAILS TODAY. A drain-ack stop-pending seat whose agent acked but
-// whose runtime stays alive must reach a terminal CLOSED state with its name
-// released. Today the finalizer loops forever on this row.
-func TestFinalizeDrainAckStopPendingEscalatesWedgedSeatToClosed(t *testing.T) {
-	e := newEscalationEnv(t)
-	e.spendBudget()
-
-	if !e.sp.IsRunning(e.name) {
-		t.Fatal("specimen is not a live wedge; the runtime must be alive for this pin to mean anything")
+func (e *escalationEnv) terminateCalls() int {
+	n := 0
+	for _, c := range e.sp.SnapshotCalls() {
+		if c.Method == "TerminateRuntime" {
+			n++
+		}
 	}
-
-	if got := e.finalize(); got != 1 {
-		t.Errorf("finalized = %d, want 1", got)
-	}
-
-	// Only status=closed frees the pool slot name: an OPEN bead owns its
-	// session_name whatever its state, so state=drained/suspended/archived would
-	// all keep the pool blocked.
-	if got := e.status(); got != "closed" {
-		t.Errorf("session bead status = %q, want %q — the pool slot name stays held until the bead closes", got, "closed")
-	}
-	if e.sp.IsRunning(e.name) {
-		t.Errorf("runtime session %q still running; the escalation must certify the kill before closing", e.name)
-	}
-	// The name is released precisely because the bead is no longer an open
-	// occupancy holder.
-	if !e.info().Closed {
-		t.Errorf("session Info still reads open; buildDesiredState would keep reporting %q", errPoolSessionNameUnavailable)
-	}
+	return n
 }
 
-// Observability: a terminal escalation is a kill the operator did not ask for,
-// so it must never be silent — otherwise it masks a genuine drain-ack tail.
-func TestDrainAckEscalationEmitsCountedTypedEvent(t *testing.T) {
+// spendReminderBudget drives the reminder arm to exhaustion. Only reachable
+// when the pane is NOT agent-acked, which is exactly the point.
+func (e *escalationEnv) spendReminderBudget() {
+	e.t.Helper()
+	mustSetMeta(e.t, e.sp, e.name, reconcilerDrainAckSourceKey, reconcilerDrainAckSourceValue)
+	for i := 0; i < drainReminderMaxAttempts; i++ {
+		e.clk.Time = e.now.Add(time.Duration(i) * drainReminderInterval)
+		if got := remindStopPendingDrain(e.sp, e.store, e.info(), e.clk, e.out); got != drainReminderDelivered {
+			e.t.Fatalf("attempt %d outcome = %v, want delivered", i+1, got)
+		}
+	}
+	e.clk.Time = e.now.Add(drainReminderMaxAttempts * drainReminderInterval)
+}
+
+// THE PIN. An AGENT-ACKED seat past its bound must escalate. This is the
+// population the fix exists for, and the arm that serves it cannot be the
+// reminder budget: with source=agent, drain_reminder_count is never written, so
+// a budget-only gate refuses forever and the row loops exactly as it did before.
+func TestEscalationFiresForTheAgentAckedWedgedSeat(t *testing.T) {
 	e := newEscalationEnv(t)
-	e.spendBudget()
+
+	// Precondition: the reminder budget is, and stays, unspendable here.
+	bead, err := e.store.Get(e.bead.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if drainRemindersSpent(bead, e.clk.Time) {
+		t.Fatal("fixture is not the agent-acked population: its reminder budget reads as spent")
+	}
 
 	e.finalize()
 
-	evs := e.escalationEvents()
+	evs := e.escalations()
 	if len(evs) != 1 {
-		t.Fatalf("escalation events = %d, want 1", len(evs))
+		t.Fatalf("escalation events = %d, want 1 — an agent-acked seat past its bound never escalates", len(evs))
 	}
 	if evs[0].SessionID != e.bead.ID {
 		t.Errorf("event SessionID = %q, want %q", evs[0].SessionID, e.bead.ID)
@@ -147,183 +221,266 @@ func TestDrainAckEscalationEmitsCountedTypedEvent(t *testing.T) {
 	if evs[0].Payload == nil {
 		t.Error("escalation event carries no typed payload")
 	}
+	// The ordinary provider stop is what has already failed on this row every
+	// tick, so the escalation must apply the force the ordinary path lacks.
+	if e.terminateCalls() == 0 {
+		t.Error("no process-table termination attempted; the escalation re-sent the same stop that has been failing")
+	}
+	got, err := e.store.Get(e.bead.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Metadata[drainAckEscalationAtKey] == "" {
+		t.Error("no durable escalation attempt recorded; the attempt would be re-paid every tick")
+	}
 }
 
-// NEGATIVE CONTROL (the class that bit the 7g review). A seat that still holds
-// work claimed under its ALIAS must never be killed or closed. The narrow
-// identifier set ({ID, session_name, configured_named_identity}) cannot see an
-// alias claim; the probe must use session.AssigneeIdentities, which carries
-// alias + alias_history.
-func TestDrainAckEscalationNeverKillsSeatHoldingAliasClaimedWork(t *testing.T) {
+// Control for the pin above: the reminder-budget arm still serves the
+// non-agent-acked population.
+func TestEscalationFiresForTheReminderExhaustedSeat(t *testing.T) {
+	e := newEscalationEnv(t)
+	e.spendReminderBudget()
+
+	e.finalize()
+
+	if n := len(e.escalations()); n != 1 {
+		t.Fatalf("escalation events = %d, want 1", n)
+	}
+	if e.terminateCalls() == 0 {
+		t.Error("no process-table termination attempted")
+	}
+}
+
+// The escalation must NOT close the bead. Closing is the finalizer's own
+// fresh-observation arm on a later tick: confirmDrainAckRuntimeDead reports true
+// on a definite token MISMATCH (meaning "another runtime owns this name now"),
+// and closing on that would free the bead while a live pane still holds the
+// runtime name — the pool's next create fails the same way, and the event would
+// claim a kill that never happened.
+func TestEscalationNeverClosesTheBeadItself(t *testing.T) {
+	e := newEscalationEnv(t)
+
+	e.finalize()
+
+	if got := e.status(); got == "closed" {
+		t.Error("the escalation closed the bead while its runtime was still alive; the name is not released and the pool cannot reuse it")
+	}
+}
+
+// MAJOR: the kill must not run on the reconcile tick. The confirm-dead loop plus
+// the process-table walk are seconds each; paid inline for N wedged rows they
+// would stall every controller tick and starve the pool respawn, order dispatch
+// and health patrol that the wedge is already starving.
+func TestEscalationDoesNotBlockTheReconcileTick(t *testing.T) {
+	e := newEscalationEnv(t)
+	drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll = 3*time.Second, 50*time.Millisecond
+
+	elapsed := e.finalizeOnTick()
+
+	if elapsed > time.Second {
+		t.Errorf("synchronous tick took %v; the kill and its confirm-dead loop must run off-tick", elapsed)
+	}
+}
+
+// MAJOR: the attempt is durably recorded and paced, so a row that will never die
+// costs a bounded number of escalations rather than one per tick forever.
+func TestEscalationIsPacedAndNotRepaidEveryTick(t *testing.T) {
+	e := newEscalationEnv(t)
+
+	e.finalize()
+	if n := len(e.escalations()); n != 1 {
+		t.Fatalf("first tick escalations = %d, want 1", n)
+	}
+	// Same tick-adjacent time: the retry interval has not elapsed.
+	e.finalize()
+	if n := len(e.escalations()); n != 1 {
+		t.Errorf("escalations after a second immediate tick = %d, want 1 — the attempt is being re-paid every tick", n)
+	}
+
+	// Past the retry interval it may try again.
+	e.clk.Time = e.now.Add(drainAckEscalationRetryInterval + time.Minute)
+	e.finalize()
+	if n := len(e.escalations()); n != 2 {
+		t.Errorf("escalations after the retry interval = %d, want 2", n)
+	}
+}
+
+// NEGATIVE CONTROL (the class that bit the 7g review). A seat still holding work
+// claimed under its ALIAS must never be terminated. The narrow identifier set
+// cannot see an alias claim; the probe must use session.AssigneeIdentities.
+func TestEscalationNeverTerminatesSeatHoldingAliasClaimedWork(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		metadata map[string]string
 		assignee string
 	}{
-		{
-			name:     "work claimed under the current alias",
-			metadata: map[string]string{"alias": "nux"},
-			assignee: "nux",
-		},
-		{
-			name:     "work claimed under a prior alias in alias_history",
-			metadata: map[string]string{"alias": "nux", "alias_history": "slit,morsov"},
-			assignee: "morsov",
-		},
+		{"current alias", map[string]string{"alias": "nux"}, "nux"},
+		{"prior alias in alias_history", map[string]string{"alias": "nux", "alias_history": "slit,morsov"}, "morsov"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newEscalationEnv(t)
 			e.setMeta(tc.metadata)
-			e.spendBudget()
-
-			// The live agent's claim: in_progress work owned under the alias.
 			if _, err := e.store.Create(beads.Bead{
-				Title:    "alias-claimed work",
-				Status:   "in_progress",
-				Assignee: tc.assignee,
+				Title: "alias-claimed work", Status: "in_progress", Assignee: tc.assignee,
 			}); err != nil {
 				t.Fatalf("create work bead: %v", err)
 			}
 
 			e.finalize()
 
-			if !e.sp.IsRunning(e.name) {
-				t.Errorf("runtime %q was killed while the agent still held work claimed as %q — "+
-					"the assigned-work probe is blind to the alias identity class", e.name, tc.assignee)
+			if n := len(e.escalations()); n != 0 {
+				t.Errorf("escalations = %d, want 0 — escalated over a live agent holding work claimed as %q", n, tc.assignee)
+			}
+			if e.terminateCalls() != 0 {
+				t.Errorf("force-terminated a live agent that still held work claimed as %q (7g §3.5)", tc.assignee)
 			}
 			if got := e.status(); got == "closed" {
-				t.Errorf("session bead closed over a live agent that still owns work claimed as %q (7g §3.5)", tc.assignee)
-			}
-			if n := len(e.escalationEvents()); n != 0 {
-				t.Errorf("escalation events = %d, want 0", n)
+				t.Errorf("closed over work claimed as %q", tc.assignee)
 			}
 		})
 	}
 }
 
-// NEGATIVE CONTROL. A seat inside the bound is untouched: the budget is not yet
-// spent, so the row keeps its existing remind-and-requeue behavior.
-func TestDrainAckEscalationLeavesInsideBoundSeatUntouched(t *testing.T) {
-	for _, tc := range []struct {
-		name  string
-		setup func(*escalationEnv)
-	}{
-		{
-			name:  "no reminders delivered yet",
-			setup: func(*escalationEnv) {},
-		},
-		{
-			name: "budget spent but the answer window has not elapsed",
-			setup: func(e *escalationEnv) {
-				for i := 0; i < drainReminderMaxAttempts; i++ {
-					e.clk.Time = e.now.Add(time.Duration(i) * drainReminderInterval)
-					if got := e.remind(); got != drainReminderDelivered {
-						e.t.Fatalf("attempt %d outcome = %v, want delivered", i+1, got)
-					}
-				}
-				e.clk.Time = e.now.Add(drainReminderMaxAttempts*drainReminderInterval - time.Second)
-			},
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			e := newEscalationEnv(t)
-			tc.setup(e)
-
-			e.finalize()
-
-			if !e.sp.IsRunning(e.name) {
-				t.Errorf("runtime %q killed before the bound elapsed", e.name)
-			}
-			if got := e.status(); got == "closed" {
-				t.Error("session bead closed before the bound elapsed")
-			}
-			if n := len(e.escalationEvents()); n != 0 {
-				t.Errorf("escalation events = %d, want 0", n)
-			}
-		})
-	}
-}
-
-// NEGATIVE CONTROL. The token fence: if the runtime name has been taken over by
-// a re-woken replacement carrying a different GC_INSTANCE_TOKEN, the escalation
-// must not kill it. The row we meant to stop is already gone.
-func TestDrainAckEscalationHonorsTheTokenFence(t *testing.T) {
+// The escalation's KILL gate is the wide one. The close gate deliberately stays
+// narrow (transient pool slot aliases rebind and must never register as
+// ownership — TestAssignmentGuardsIgnoreTransientPoolSlotAliases), so the wide
+// set lives here, in front of the destructive act, where over-refusing is safe
+// and under-refusing ends a live agent's turn.
+func TestEscalationKillGateSeesAliasClaimedWork(t *testing.T) {
 	e := newEscalationEnv(t)
-	e.spendBudget()
+	e.setMeta(map[string]string{"alias": "nux", "alias_history": "morsov"})
+	if _, err := e.store.Create(beads.Bead{
+		Title: "alias-claimed work", Status: "in_progress", Assignee: "nux",
+	}); err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+
+	has, err := sessionHasOpenAssignedWorkForEscalation(e.cityPath, e.cfg, e.store, nil, e.info())
+	if err != nil {
+		t.Fatalf("escalation work probe: %v", err)
+	}
+	if !has {
+		t.Error("the escalation kill gate cannot see work claimed under the session's alias; it would authorize killing a live agent mid-turn")
+	}
+}
+
+// NEGATIVE CONTROL. Inside the bound, nothing happens.
+func TestEscalationLeavesInsideBoundSeatUntouched(t *testing.T) {
+	e := newEscalationEnv(t)
+	// Freshly stop-pending rather than two days wedged.
+	e.setMeta(map[string]string{"drain_at": e.now.Add(-time.Minute).UTC().Format(time.RFC3339)})
+
+	e.finalize()
+
+	if n := len(e.escalations()); n != 0 {
+		t.Errorf("escalations = %d, want 0 — escalated before the grace elapsed", n)
+	}
+	if e.terminateCalls() != 0 {
+		t.Error("force-terminated a seat inside its bound")
+	}
+}
+
+// NEGATIVE CONTROL. A definite instance-token mismatch means the name belongs to
+// a re-woken replacement; the seat we meant to stop is already gone.
+func TestEscalationHonorsTheTokenFence(t *testing.T) {
+	e := newEscalationEnv(t)
 	mustSetMeta(t, e.sp, e.name, "GC_INSTANCE_TOKEN", "tok-replacement")
 
 	e.finalize()
 
-	if !e.sp.IsRunning(e.name) {
-		t.Errorf("runtime %q killed despite a definite instance-token mismatch — that is a live replacement", e.name)
+	if n := len(e.escalations()); n != 0 {
+		t.Errorf("escalations = %d, want 0 — escalated onto a live replacement", n)
 	}
-	if got := e.status(); got == "closed" {
-		t.Error("session bead closed over a name now owned by a live replacement")
-	}
-	if n := len(e.escalationEvents()); n != 0 {
-		t.Errorf("escalation events = %d, want 0", n)
+	if e.terminateCalls() != 0 {
+		t.Error("force-terminated a live replacement holding the same name")
 	}
 }
 
-// NEGATIVE CONTROL. A non-pool row is outside this pass entirely: closing it
-// releases no pool name, and the reminder budget it would need is never spent on
-// one (drainReminderEligible requires a pool seat).
-func TestDrainAckEscalationSkipsNonPoolSeats(t *testing.T) {
+// NEGATIVE CONTROL. The /proc scan is supervisor-wide, so a runtime that is not
+// positively attributed to THIS city must never be terminated — doing so would
+// SIGKILL a sibling city's healthy session.
+func TestEscalationNeverTerminatesAnotherCitysRuntime(t *testing.T) {
 	e := newEscalationEnv(t)
-	e.spendBudget()
+	// Re-home the pane onto a DIFFERENT city: the /proc scan is supervisor-wide,
+	// so city attribution is the only thing standing between this pass and a
+	// sibling city's healthy session.
+	e.sp.StopLeavesRunning = nil
+	if err := e.sp.Stop(e.name); err != nil {
+		t.Fatalf("reset session: %v", err)
+	}
+	if err := e.sp.Start(context.Background(), e.name, runtime.Config{Env: map[string]string{
+		"GC_SESSION_ID": e.bead.ID,
+		"GC_CITY_PATH":  t.TempDir(),
+	}}); err != nil {
+		t.Fatalf("restart fake session: %v", err)
+	}
+	mustSetMeta(t, e.sp, e.name, reconcilerDrainAckSourceKey, drainAckSourceAgentValue)
+	e.sp.StopLeavesRunning = map[string]bool{e.name: true}
+
+	e.finalize()
+
+	if e.terminateCalls() != 0 {
+		t.Error("force-terminated a runtime attributed to a different city")
+	}
+}
+
+// NEGATIVE CONTROL. A non-pool row is outside this pass: closing it releases no
+// pool name.
+func TestEscalationSkipsNonPoolSeats(t *testing.T) {
+	e := newEscalationEnv(t)
 	e.setMeta(map[string]string{"pool_managed": "false"})
 
 	e.finalize()
 
-	if !e.sp.IsRunning(e.name) {
-		t.Errorf("runtime %q killed on a non-pool row", e.name)
+	if n := len(e.escalations()); n != 0 {
+		t.Errorf("escalations = %d, want 0", n)
 	}
-	if n := len(e.escalationEvents()); n != 0 {
-		t.Errorf("escalation events = %d, want 0", n)
-	}
-}
-
-// NEGATIVE CONTROL. A survivor that outlives the kill is not certified dead, so
-// the bead must stay open — closing it would free the name while the agent
-// still runs, which is the exact failure the confirm-dead contract exists to
-// prevent.
-func TestDrainAckEscalationDoesNotCloseAnUncertifiedKill(t *testing.T) {
-	e := newEscalationEnv(t)
-	e.spendBudget()
-	e.sp.StopLeavesRunning = map[string]bool{e.name: true}
-
-	prevTimeout, prevPoll := drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll
-	drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll = 20*time.Millisecond, 5*time.Millisecond
-	t.Cleanup(func() {
-		drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll = prevTimeout, prevPoll
-	})
-
-	e.finalize()
-
-	if got := e.status(); got == "closed" {
-		t.Error("session bead closed while its runtime survived the kill — the slot would be freed under a live agent")
-	}
-	if n := len(e.escalationEvents()); n != 0 {
-		t.Errorf("escalation events = %d, want 0; nothing was escalated to a terminal state", n)
+	if e.terminateCalls() != 0 {
+		t.Error("force-terminated a non-pool row")
 	}
 }
 
-// Control for the whole pass: a row whose runtime is already gone still takes
-// the ordinary finalize arm, with no kill and no escalation event.
-func TestDrainAckStopPendingDeadRuntimeStillFinalizesWithoutEscalation(t *testing.T) {
+// Control for the whole pass: a row whose runtime is already gone takes the
+// ordinary finalize arm — closed, with nothing escalated.
+func TestDeadRuntimeStillFinalizesWithoutEscalation(t *testing.T) {
 	e := newEscalationEnv(t)
-	e.spendBudget()
+	e.sp.StopLeavesRunning = nil
 	if err := e.sp.Stop(e.name); err != nil {
 		t.Fatalf("stop fake session: %v", err)
 	}
 
-	if got := e.finalize(); got != 1 {
-		t.Errorf("finalized = %d, want 1", got)
-	}
+	e.finalize()
+
 	if got := e.status(); got != "closed" {
 		t.Errorf("session bead status = %q, want closed", got)
 	}
-	if n := len(e.escalationEvents()); n != 0 {
-		t.Errorf("escalation events = %d, want 0; this row needed no escalation", n)
+	if n := len(e.escalations()); n != 0 {
+		t.Errorf("escalations = %d, want 0; this row needed no escalation", n)
+	}
+}
+
+// MAJOR: an all-undeliverable budget must still earn its answer window. `failed`
+// counts any sp.Nudge transport error (ssh/k8s exec, tmux send-keys), which is
+// not evidence of an input-dead pane, and this gates a kill — so an undelivered
+// reminder must not be treated more harshly than a refused one.
+func TestUndeliverableReminderBudgetStillEarnsItsAnswerWindow(t *testing.T) {
+	e := newEscalationEnv(t)
+	mustSetMeta(t, e.sp, e.name, reconcilerDrainAckSourceKey, reconcilerDrainAckSourceValue)
+	deaf := &nudgeFailingProvider{Fake: e.sp}
+
+	for i := 0; i < drainReminderMaxAttempts; i++ {
+		e.clk.Time = e.now.Add(time.Duration(i) * drainReminderInterval)
+		maybeRemindDrainingSession(deaf, e.store, e.info(), e.clk, e.out)
+	}
+	bead, err := e.store.Get(e.bead.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	last := e.now.Add((drainReminderMaxAttempts - 1) * drainReminderInterval)
+	if drainRemindersSpent(bead, last.Add(drainReminderInterval-time.Second)) {
+		t.Error("an all-undeliverable budget authorized a kill with no answer window; a transport failure is not an input-dead pane")
+	}
+	if !drainRemindersSpent(bead, last.Add(drainReminderInterval)) {
+		t.Error("an all-undeliverable budget never becomes spent even after its answer window")
 	}
 }
