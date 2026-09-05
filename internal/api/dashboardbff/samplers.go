@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -72,7 +71,6 @@ type rigStoreHealth struct {
 	Reachable     bool            `json:"reachable"`
 	DoltEndpoint  *string         `json:"doltEndpoint"`
 	DoltConnected *bool           `json:"doltConnected"`
-	IssueCount    *int64          `json:"issueCount"`
 	Problems      []rigStoreCheck `json:"problems"`
 	Note          string          `json:"note,omitempty"`
 }
@@ -393,13 +391,8 @@ func parseStatusBody(raw json.RawMessage) statusBodyParsed {
 
 var benignCheckCategories = map[string]bool{"Git Integration": true, "Integrations": true}
 
-const doltConnectionCheck = "Dolt Connection"
-
 // pingConnectivityCheck is the name of the single connectivity check
-// synthesized from `bd ping`. It is the ping-mode counterpart of
-// doltConnectionCheck, and doltConnectedFromChecks matches both so a
-// server-backed store still reports its connectivity when the probe ran
-// through ping.
+// synthesized from `bd ping`.
 const pingConnectivityCheck = "Database Connectivity"
 
 // maxProbeErrorRunes caps subprocess error text folded into a check message or
@@ -468,7 +461,6 @@ func (m *samplerManager) probeRig(ctx context.Context, rigName, rigPath string) 
 	}
 
 	problems := storeProblems(checks)
-	issueCount := issueCountFromChecks(checks)
 	rollup := rollupFor(true, doltConnected, problems, note != "")
 
 	return rigStoreHealth{
@@ -477,7 +469,7 @@ func (m *samplerManager) probeRig(ctx context.Context, rigName, rigPath string) 
 		// Note carries subprocess/error text (bd ping failure reason); sanitize
 		// it before it reaches the browser, per the "all subprocess output is
 		// sanitized" contract.
-		IssueCount: issueCount, Problems: problems, Note: sanitizeTerminalOutput(note),
+		Problems: problems, Note: sanitizeTerminalOutput(note),
 	}
 }
 
@@ -493,14 +485,14 @@ func parsePingCheck(res *execResult) ([]rigStoreCheck, bool) {
 		Error  string `json:"error"`
 	}
 	trimmed := strings.TrimSpace(res.stdout)
-	if trimmed == "" || trimmed[0] != '{' || json.Unmarshal([]byte(trimmed), &payload) != nil || payload.Status == "" {
+	if trimmed == "" || trimmed[0] != '{' || json.Unmarshal([]byte(trimmed), &payload) != nil || (payload.Status == "" && payload.Error == "") {
 		return nil, false
 	}
 	status := "error"
 	if strings.EqualFold(payload.Status, "ok") && res.exitCode == 0 {
 		status = "ok"
 	}
-	message := payload.Error
+	message := strings.TrimSpace(payload.Error)
 	if message == "" {
 		if status == "ok" {
 			message = "database connectivity ok"
@@ -526,28 +518,9 @@ func storeProblems(checks []rigStoreCheck) []rigStoreCheck {
 	return out
 }
 
-var issueCountRE = regexp.MustCompile(`(\d[\d,]*)`)
-
-func issueCountFromChecks(checks []rigStoreCheck) *int64 {
-	for _, c := range checks {
-		if strings.Contains(c.Name, "Issue Count") {
-			m := issueCountRE.FindStringSubmatch(c.Message)
-			if m == nil {
-				return nil
-			}
-			n, err := strconv.ParseInt(strings.ReplaceAll(m[1], ",", ""), 10, 64)
-			if err != nil {
-				return nil
-			}
-			return &n
-		}
-	}
-	return nil
-}
-
 func doltConnectedFromChecks(checks []rigStoreCheck) *bool {
 	for _, c := range checks {
-		if c.Name == doltConnectionCheck || c.Name == pingConnectivityCheck {
+		if c.Name == pingConnectivityCheck {
 			ok := c.Status == "ok"
 			return &ok
 		}

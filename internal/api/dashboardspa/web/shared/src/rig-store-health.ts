@@ -38,9 +38,6 @@ export interface RigStoreHealth {
   /** Dolt sql-server reachable at its endpoint. `null` when there is no
    *  endpoint to probe (no outage to report for an embedded store). */
   doltConnected: boolean | null;
-  /** Live bead row count when the probe reported it. Always `null` under
-   *  `bd ping`, which reports connectivity only and emits no count. */
-  issueCount: number | null;
   /** Store/dolt checks that are not `ok`. Benign hygiene categories
    *  (git hooks, editor integrations) are excluded — they are not store
    *  health and the dashboard operator cannot act on them here. */

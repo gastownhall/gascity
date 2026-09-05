@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +23,7 @@ func TestParsePingCheckNormalizesHealthyAndFailure(t *testing.T) {
 	}{
 		{name: "healthy", res: execResult{stdout: `{"status":"ok"}`}, want: "ok"},
 		{name: "provider failure", res: execResult{exitCode: 1, stdout: `{"status":"error","error":"proxy unavailable"}`}, want: "error"},
+		{name: "error envelope without status", res: execResult{exitCode: 1, stdout: `{"error":"proxy unavailable","schema_version":1}`}, want: "error"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -67,7 +69,7 @@ func TestExecBdPingUsesProviderNeutralArgsAndIsolatesSocket(t *testing.T) {
 	// exec.Command resolves the executable using the parent PATH before the
 	// runner applies its scrubbed child environment.
 	t.Setenv("PATH", bin)
-	before, err := os.ReadDir(beadsPath)
+	before, err := snapshotProbeDir(beadsPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,17 +88,48 @@ func TestExecBdPingUsesProviderNeutralArgsAndIsolatesSocket(t *testing.T) {
 	if len(lines) != 5 || !equalStrings(lines[:4], []string{"ping", "--db", beadsPath, "--json"}) || lines[4] != "socket=unset" {
 		t.Fatalf("bd argv/environment = %v", lines)
 	}
-	after, err := os.ReadDir(beadsPath)
+	after, err := snapshotProbeDir(beadsPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(before) != len(after) {
-		t.Fatalf("probe mutated .beads directory: before=%d after=%d", len(before), len(after))
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("probe mutated .beads directory: before=%v after=%v", before, after)
 	}
 	var payload map[string]string
 	if err := json.Unmarshal([]byte(res.stdout), &payload); err != nil || payload["status"] != "ok" {
 		t.Fatalf("ping output = %q", res.stdout)
 	}
+}
+
+type probeFileSnapshot struct {
+	Mode os.FileMode
+	Data []byte
+}
+
+func snapshotProbeDir(root string) (map[string]probeFileSnapshot, error) {
+	out := make(map[string]probeFileSnapshot)
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			rel = ""
+		}
+		snapshot := probeFileSnapshot{Mode: info.Mode()}
+		if info.Mode().IsRegular() {
+			snapshot.Data, err = os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+		}
+		out[rel] = snapshot
+		return nil
+	})
+	return out, err
 }
 
 func TestExecBdPingHonorsCancellation(t *testing.T) {
@@ -134,6 +167,25 @@ func TestProbeRigReportsPingFailureAsDown(t *testing.T) {
 	}
 	if !strings.Contains(rep.Problems[0].Message, "proxy unavailable") {
 		t.Fatalf("probeRig problem = %+v, want provider error", rep.Problems[0])
+	}
+	if rep.DoltConnected == nil || *rep.DoltConnected {
+		t.Fatalf("probeRig DoltConnected = %v, want non-nil false", rep.DoltConnected)
+	}
+}
+
+func TestProbeRigReportsPingErrorEnvelopeAsDown(t *testing.T) {
+	rig, bin := newProbeRigFixture(t)
+	writeFakeBd(t, bin, "#!/bin/sh\nprintf '%s' '{\"error\":\"proxy unavailable\",\"schema_version\":1}'\nexit 1\n")
+
+	rep := newSamplerManager(Deps{}, newExecRunner()).probeRig(context.Background(), "r1", rig)
+	if rep.Rollup != "down" || !rep.Reachable || len(rep.Problems) != 1 {
+		t.Fatalf("probeRig() = %+v, want reachable/down with one problem", rep)
+	}
+	if rep.Problems[0].Status != "error" || rep.Problems[0].Name != pingConnectivityCheck {
+		t.Fatalf("probeRig problem = %+v, want an error connectivity check", rep.Problems[0])
+	}
+	if !strings.Contains(rep.Problems[0].Message, "proxy unavailable") {
+		t.Fatalf("probeRig problem message = %q, want stdout provider error", rep.Problems[0].Message)
 	}
 	if rep.DoltConnected == nil || *rep.DoltConnected {
 		t.Fatalf("probeRig DoltConnected = %v, want non-nil false", rep.DoltConnected)
@@ -181,6 +233,20 @@ func TestProbeRigReportsDoltConnectedFromPing(t *testing.T) {
 	}
 	if rep.Rollup != "ok" || len(rep.Problems) != 0 || rep.Note != "" {
 		t.Fatalf("probeRig() = %+v, want a clean ok report", rep)
+	}
+}
+
+func TestProbeRigPingHealthOmitsLegacyIssueCount(t *testing.T) {
+	rig, bin := newProbeRigFixture(t)
+	writeFakeBd(t, bin, "#!/bin/sh\nprintf '%s' '{\"status\":\"ok\"}'\n")
+
+	rep := newSamplerManager(Deps{}, newExecRunner()).probeRig(context.Background(), "r1", rig)
+	wire, err := json.Marshal(rep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(wire), `"issueCount"`) {
+		t.Fatalf("probeRig wire payload = %s, contains removed issueCount field", wire)
 	}
 }
 
