@@ -68,6 +68,7 @@ func TestStartupHealthEpisodesCheckAtThresholdIsError(t *testing.T) {
 	seedStartupHealthEpisode(t, mem, session.StartupHealthEpisode{
 		SessionName:      "chaos-worker-2",
 		ConsecutiveCount: 5,
+		Kind:             session.FailureKind("startup_death"),
 		FirstFailureAt:   now.Add(-20 * time.Minute),
 		LastFailureAt:    now,
 		QuarantinedUntil: now.Add(5 * time.Minute),
@@ -89,6 +90,124 @@ func TestStartupHealthEpisodesCheckAtThresholdIsError(t *testing.T) {
 	}
 	if !strings.Contains(details, "startup_death") {
 		t.Errorf("Details missing episode kind:\n%s", details)
+	}
+}
+
+func TestStartupHealthEpisodesCheckStalledResetKindIsDistinguished(t *testing.T) {
+	cityDir := t.TempDir()
+	mem := beads.NewMemStore()
+	seedStartupHealthEpisode(t, mem, session.StartupHealthEpisode{
+		SessionName:      "chaos-worker-stalled",
+		ConsecutiveCount: 5,
+		Kind:             session.FailureKind("stalled_reset"),
+	})
+
+	result := newStartupHealthEpisodesCheck(&config.City{}, cityDir, func(_ string) (beads.Store, error) {
+		return mem, nil
+	}).Run(&doctor.CheckContext{})
+
+	if result.Status != doctor.StatusError {
+		t.Fatalf("status = %v, want error: %#v", result.Status, result)
+	}
+	details := strings.Join(result.Details, "\n")
+	if !strings.Contains(details, "stalled_reset") {
+		t.Errorf("Details missing actual stored kind stalled_reset:\n%s", details)
+	}
+	if strings.Contains(details, "startup_death") {
+		t.Errorf("Details wrongly hardcodes startup_death for a stalled_reset episode:\n%s", details)
+	}
+}
+
+func TestStartupHealthEpisodesCheckMixedKindsBothDistinguished(t *testing.T) {
+	cityDir := t.TempDir()
+	mem := beads.NewMemStore()
+	seedStartupHealthEpisode(t, mem, session.StartupHealthEpisode{
+		SessionName:      "chaos-worker-a",
+		ConsecutiveCount: 5,
+		Kind:             session.FailureKind("stalled_reset"),
+	})
+	seedStartupHealthEpisode(t, mem, session.StartupHealthEpisode{
+		SessionName:      "chaos-worker-b",
+		ConsecutiveCount: 5,
+		Kind:             session.FailureKind("startup_death"),
+	})
+
+	result := newStartupHealthEpisodesCheck(&config.City{}, cityDir, func(_ string) (beads.Store, error) {
+		return mem, nil
+	}).Run(&doctor.CheckContext{})
+
+	if result.Status != doctor.StatusError {
+		t.Fatalf("status = %v, want error: %#v", result.Status, result)
+	}
+	if len(result.Details) != 2 {
+		t.Fatalf("Details = %v, want 2 entries (one per episode)", result.Details)
+	}
+	details := strings.Join(result.Details, "\n")
+	if !strings.Contains(details, "stalled_reset") {
+		t.Errorf("Details missing stalled_reset kind:\n%s", details)
+	}
+	if !strings.Contains(details, "startup_death") {
+		t.Errorf("Details missing startup_death kind:\n%s", details)
+	}
+}
+
+func TestStartupHealthEpisodesCheckActiveQuarantineBelowThresholdIsError(t *testing.T) {
+	cityDir := t.TempDir()
+	mem := beads.NewMemStore()
+	seedStartupHealthEpisode(t, mem, session.StartupHealthEpisode{
+		SessionName:      "chaos-worker-quarantined",
+		ConsecutiveCount: 2,
+		QuarantinedUntil: time.Now().Add(1 * time.Hour),
+	})
+
+	result := newStartupHealthEpisodesCheck(&config.City{}, cityDir, func(_ string) (beads.Store, error) {
+		return mem, nil
+	}).Run(&doctor.CheckContext{})
+
+	if result.Status != doctor.StatusError {
+		t.Fatalf("status = %v, want error (active quarantine below count threshold must still surface): %#v", result.Status, result)
+	}
+	details := strings.Join(result.Details, "\n")
+	if !strings.Contains(details, "chaos-worker-quarantined") {
+		t.Errorf("Details missing quarantined session below threshold:\n%s", details)
+	}
+}
+
+func TestStartupHealthEpisodesCheckRendersRequiredFields(t *testing.T) {
+	cityDir := t.TempDir()
+	mem := beads.NewMemStore()
+	now := time.Date(2026, 9, 5, 8, 0, 0, 0, time.UTC)
+	first := now.Add(-30 * time.Minute)
+	last := now
+	quarantinedUntil := now.Add(10 * time.Minute)
+	seedStartupHealthEpisode(t, mem, session.StartupHealthEpisode{
+		SessionName:      "chaos-worker-fields",
+		ConsecutiveCount: 5,
+		Kind:             session.FailureKindTimeout,
+		FirstFailureAt:   first,
+		LastFailureAt:    last,
+		QuarantinedUntil: quarantinedUntil,
+		AlertDisposition: session.AlertDispositionPending,
+	})
+
+	result := newStartupHealthEpisodesCheck(&config.City{}, cityDir, func(_ string) (beads.Store, error) {
+		return mem, nil
+	}).Run(&doctor.CheckContext{})
+
+	if result.Status != doctor.StatusError {
+		t.Fatalf("status = %v, want error: %#v", result.Status, result)
+	}
+	details := strings.Join(result.Details, "\n")
+	for _, want := range []string{
+		string(session.FailureKindTimeout),
+		first.Format(time.RFC3339),
+		last.Format(time.RFC3339),
+		quarantinedUntil.Format(time.RFC3339),
+		string(session.AlertDispositionPending),
+	} {
+		if !strings.Contains(details, want) {
+			t.Errorf("Details missing required field %q:\n%s", want, details)
+		}
 	}
 }
 
