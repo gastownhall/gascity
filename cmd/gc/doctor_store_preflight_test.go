@@ -226,8 +226,8 @@ func TestBuildDoctorChecks_NonUnreachableProbeKeepsStoreChecks(t *testing.T) {
 	if doctorCheckIndex(names, "beads-store") < 0 {
 		t.Fatalf("city beads-store missing after non-outage probe error; names=%v", names)
 	}
-	if doctorCheckIndex(names, "hold-label-routed-to") < 0 {
-		t.Fatalf("hold-label-routed-to missing after non-outage probe error; names=%v", names)
+	if doctorCheckIndex(names, "hold-label-routed-to") >= 0 {
+		t.Fatalf("hold-label-routed-to registered despite hold state being orthogonal to routing; names=%v", names)
 	}
 }
 
