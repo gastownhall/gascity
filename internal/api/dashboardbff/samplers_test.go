@@ -236,6 +236,39 @@ func TestProbeRigMalformedMetadataFailsClosedOnStalePort(t *testing.T) {
 	}
 }
 
+func TestProbeRigUnsafeModeMarkersIgnoreStalePortArtifact(t *testing.T) {
+	tests := []struct {
+		name     string
+		filename string
+		contents string
+	}{
+		{name: "unknown metadata mode", filename: "metadata.json", contents: `{"dolt_mode":"mystery"}`},
+		{name: "embedded metadata mode", filename: "metadata.json", contents: `{"dolt_mode":"embedded"}`},
+		{name: "malformed config without mode", filename: "config.yaml", contents: "dolt: [\n"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rig, bin := newProbeRigFixture(t)
+			if err := os.WriteFile(filepath.Join(rig, ".beads", tt.filename), []byte(tt.contents), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(rig, ".beads", "dolt-server.port"), []byte("1"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			writeFakeBd(t, bin, "#!/bin/sh\nprintf '%s' '{\"status\":\"ok\"}'\n")
+
+			rep := newSamplerManager(Deps{}, newExecRunner()).probeRig(context.Background(), "r1", rig)
+			if rep.DoltEndpoint != nil {
+				t.Fatalf("unsafe marker endpoint = %v, want nil", *rep.DoltEndpoint)
+			}
+			if rep.DoltConnected == nil || !*rep.DoltConnected || rep.Rollup != "ok" {
+				t.Fatalf("unsafe marker report = %+v, want ping-backed healthy status without endpoint", rep)
+			}
+		})
+	}
+}
+
 // newProbeRigFixture builds a rig directory with an empty .beads store and a
 // PATH containing only a fake bd, so a probeRig test never reaches a real one.
 func newProbeRigFixture(t *testing.T) (rigPath, binDir string) {
