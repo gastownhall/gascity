@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -114,7 +115,17 @@ type LoadOptions struct {
 	// load time. That only matters to a caller holding a Provenance across a
 	// window in which the config may change, which is exactly the long-running
 	// case that should leave this false.
-	SkipRevisionSnapshot    bool
+	SkipRevisionSnapshot bool
+	// RepoCacheNonBlocking makes every repo-cache lock this load takes fail
+	// fast with ErrRepoCacheBusy instead of waiting for the holder.
+	//
+	// The repo-cache lock is machine-wide and a writer holds it for as long as
+	// its git clone takes, so a blocking load can stall for minutes on work
+	// that has nothing to do with the caller. Advisory loads — command
+	// discovery, shell completion — set this and degrade to "no pack state
+	// right now"; a load whose result the caller acts on must leave it false
+	// and wait, because a busy cache would otherwise read as an empty one.
+	RepoCacheNonBlocking    bool
 	deferRigPatches         bool
 	deferredRigPatches      *[]deferredRigPatches
 	allowLegacyOrderLayouts bool
@@ -397,7 +408,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	for _, inc := range includes {
 		var fragPath string
 		if isRemoteInclude(inc) || isGitHubTreeURL(inc) {
-			resolved, err := resolvePackRef(inc, cityRoot, cityRoot)
+			resolved, err := resolvePackRef(inc, cityRoot, cityRoot, opts.RepoCacheNonBlocking)
 			if err != nil {
 				return nil, nil, fmt.Errorf("resolving include %q: %w", inc, err)
 			}
@@ -462,7 +473,10 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	resolveNamedPacks(root, cityRoot)
 	rootIncludes = root.Workspace.LegacyIncludes()
 
-	existingPacks := resolvedConfigPackNames(root, fs, cityRoot)
+	existingPacks, err := resolvedConfigPackNames(root, fs, cityRoot, opts.RepoCacheNonBlocking)
+	if err != nil {
+		return nil, nil, err
+	}
 	for _, inc := range packIncludes {
 		name := readPackNameFromDir(inc)
 		if name != "" && existingPacks[name] {
@@ -543,9 +557,13 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	if len(root.LoadWarnings) > 0 {
 		prov.Warnings = appendUnique(prov.Warnings, root.LoadWarnings...)
 	}
-	// Track city pack agents in provenance.
+	// Track city pack agents in provenance. The resolve error is discarded
+	// deliberately: this only builds an attribution string for a diagnostic,
+	// and an unresolvable ref yields a useless path rather than a wrong config.
+	// Anything that would change what composes has already been resolved and
+	// hard-failed upstream by then.
 	for _, ref := range root.Workspace.LegacyIncludes() {
-		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
+		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot, opts.RepoCacheNonBlocking)
 		topoPath := filepath.Join(topoDir, packFile)
 		for _, a := range root.Agents {
 			if a.Dir == "" {
@@ -1715,7 +1733,7 @@ func LoadPackGraphDirsForDoctor(fs fsys.FS, cityTomlPath string) ([]string, erro
 }
 
 func loadImportPackGraphDirsForDoctor(fs fsys.FS, imp Import, declDir, cityRoot string, cache *packLoadCache) ([]string, error) {
-	impDir, err := resolveImportPackRef(imp.Source, imp.Version, declDir, cityRoot)
+	impDir, err := resolveImportPackRef(imp.Source, imp.Version, declDir, cityRoot, false)
 	if err != nil {
 		return nil, err
 	}
@@ -1831,10 +1849,17 @@ func trackWorkspace(prov *Provenance, meta toml.MetaData, source string) {
 // [imports] according to each import's transitive setting so builtin system-pack
 // injection can be skipped when a user pack already brings the same pack into
 // the city closure.
-func resolvedPackNames(includes []string, imports map[string]Import, sysFS fsys.FS, cityRoot string) map[string]bool {
+// A ref that fails to resolve is skipped, since an unresolvable pack brings
+// nothing into the closure. ErrRepoCacheBusy is the exception: there the pack
+// may well be in the closure and the walk simply could not look. Returning a
+// short set would inject a builtin the city already has, so it is reported
+// instead — this set decides what gets injected, and a busy cache must never
+// quietly change that.
+func resolvedPackNames(includes []string, imports map[string]Import, sysFS fsys.FS, cityRoot string, nonBlocking bool) (map[string]bool, error) {
 	names := make(map[string]bool, len(includes)+len(imports))
 	seenShallowDirs := make(map[string]bool)
 	expandedDirs := make(map[string]bool)
+	var busyErr error
 
 	var visitDir func(dir string, transitive bool)
 	var visitInclude func(ref, declDir string, transitive bool)
@@ -1886,17 +1911,25 @@ func resolvedPackNames(includes []string, imports map[string]Import, sysFS fsys.
 		}
 	}
 
+	noteResolveErr := func(err error) {
+		if busyErr == nil && errors.Is(err, ErrRepoCacheBusy) {
+			busyErr = err
+		}
+	}
+
 	visitInclude = func(ref, declDir string, transitive bool) {
-		dir, err := resolvePackRef(ref, declDir, cityRoot)
+		dir, err := resolvePackRef(ref, declDir, cityRoot, nonBlocking)
 		if err != nil {
+			noteResolveErr(err)
 			return
 		}
 		visitDir(dir, transitive)
 	}
 
 	visitImport = func(ref, declDir string, transitive bool) {
-		dir, err := resolveImportPackRef(ref, "", declDir, cityRoot)
+		dir, err := resolveImportPackRef(ref, "", declDir, cityRoot, nonBlocking)
 		if err != nil {
+			noteResolveErr(err)
 			return
 		}
 		visitDir(dir, transitive)
@@ -1908,7 +1941,10 @@ func resolvedPackNames(includes []string, imports map[string]Import, sysFS fsys.
 	for _, imp := range imports {
 		visitImport(imp.Source, cityRoot, imp.ImportIsTransitive())
 	}
-	return names
+	if busyErr != nil {
+		return nil, busyErr
+	}
+	return names, nil
 }
 
 // PackDirByName returns the composed pack directory whose pack.toml
@@ -1926,28 +1962,46 @@ func (c *City) PackDirByName(name string) string {
 // explicit includes, imports, rig pack graphs, and default-rig pack graphs.
 // The gc binary uses it after composition to verify that required builtin
 // packs (core, and bd for bd-provider cities) are explicitly included.
+// A blocking walk waits out any contention, so the error can only be a busy
+// cache and only a non-blocking caller can see one.
 func ReachablePackNames(cfg *City, sysFS fsys.FS, cityRoot string) map[string]bool {
-	return resolvedConfigPackNames(cfg, sysFS, cityRoot)
+	names, _ := resolvedConfigPackNames(cfg, sysFS, cityRoot, false)
+	return names
 }
 
 // resolvedConfigPackNames collects all pack names reachable from the city,
 // rig, and default-rig pack graphs before builtin extra includes are injected.
-func resolvedConfigPackNames(cfg *City, sysFS fsys.FS, cityRoot string) map[string]bool {
-	names := resolvedPackNames(cfg.Workspace.LegacyIncludes(), cfg.Imports, sysFS, cityRoot)
-	add := func(more map[string]bool) {
+// It returns ErrRepoCacheBusy if any graph could not be walked because another
+// process held the repo-cache lock.
+func resolvedConfigPackNames(cfg *City, sysFS fsys.FS, cityRoot string, nonBlocking bool) (map[string]bool, error) {
+	names, err := resolvedPackNames(cfg.Workspace.LegacyIncludes(), cfg.Imports, sysFS, cityRoot, nonBlocking)
+	if err != nil {
+		return nil, err
+	}
+	add := func(more map[string]bool, err error) error {
+		if err != nil {
+			return err
+		}
 		for name := range more {
 			names[name] = true
 		}
+		return nil
 	}
 
 	for _, rig := range cfg.Rigs {
-		add(resolvedPackNames(rig.Includes, rig.Imports, sysFS, cityRoot))
+		if err := add(resolvedPackNames(rig.Includes, rig.Imports, sysFS, cityRoot, nonBlocking)); err != nil {
+			return nil, err
+		}
 	}
 
-	add(resolvedPackNames(cfg.Workspace.LegacyDefaultRigIncludes(), nil, sysFS, cityRoot))
-	add(resolvedPackNames(nil, cfg.DefaultRigImports, sysFS, cityRoot))
+	if err := add(resolvedPackNames(cfg.Workspace.LegacyDefaultRigIncludes(), nil, sysFS, cityRoot, nonBlocking)); err != nil {
+		return nil, err
+	}
+	if err := add(resolvedPackNames(nil, cfg.DefaultRigImports, sysFS, cityRoot, nonBlocking)); err != nil {
+		return nil, err
+	}
 
-	return names
+	return names, nil
 }
 
 // readPackNameFromDir reads [pack].name from pack.toml in the given directory.

@@ -137,6 +137,15 @@ const (
 	// threshold), never as a recovery action — pack-level subscribers or
 	// operators own recovery. See gastownhall/gascity#1497, #2085, #2389.
 	SessionUnknownState = "session.unknown_state"
+	// SessionWakeRefused fires when a durable explicit wake request
+	// (wake_request=explicit) is refused before the session ever reaches a
+	// live runtime — held, quarantined, or asleep past its idle-sleep
+	// window. Distinguishes a policy-suppressed wake from
+	// recordWakeFailure's post-start failure accrual; wake_attempts still
+	// increments (via a direct marker write, not the accrual path) so a
+	// persistent refusal remains visible without risking self-quarantine.
+	// See gastownhall/gascity#5739, ga-fxvdit.
+	SessionWakeRefused = "session.wake_refused"
 	// SessionResetStalled fires when a session reset was committed but
 	// the follow-up wake remains pending past the configured startup
 	// timeout. Operators use the typed payload to correlate the stuck
@@ -149,6 +158,19 @@ const (
 	// remains correlated; the companion reconciler handler is tracked in
 	// #1497.
 	SessionWorkQueryFailed = "session.work_query_failed"
+	// SessionDrainFenceUnavailable fires when a seat's drain-pending probe could
+	// not read its own session row, so the claim fence that stops a draining
+	// seat taking new work failed OPEN for that poll.
+	//
+	// It exists because failing open is silent by design. The same agent-side
+	// store fault also fails open the runtime-identity fence, so a persistent
+	// one — an agent/controller credential-env asymmetry, a permission split in
+	// a hosted pod, a sessions-class binding only the controller can reach —
+	// switches BOTH drain fences off fleet-wide while the reconciler keeps
+	// marking rows draining. Without this event the only trace is stderr inside
+	// agent panes, and nothing off-pane distinguishes "fence acting" from
+	// "fence inert".
+	SessionDrainFenceUnavailable = "session.drain_fence_unavailable"
 	// SessionDemandClaimDivergence fires when a seat the controller spawned on
 	// DEMAND evidence drains with no work. It is a diagnostics counter for the
 	// agreement invariant between the two readers — the controller's demand read
@@ -216,11 +238,18 @@ const (
 
 	// Non-terminal city lifecycle events recorded in the per-city
 	// event log during init/unregister for diagnostics.
-	CityCreated                     = "city.created"
-	CityUnregisterRequested         = "city.unregister_requested"
-	OrderFired                      = "order.fired"
-	OrderCompleted                  = "order.completed"
-	OrderFailed                     = "order.failed"
+	CityCreated             = "city.created"
+	CityUnregisterRequested = "city.unregister_requested"
+	OrderFired              = "order.fired"
+	OrderCompleted          = "order.completed"
+	OrderFailed             = "order.failed"
+	// OrderSuppressed reports that an order's open-work gate has held it shut
+	// for a long unbroken run of dispatch checks. The gate is single-flight
+	// machinery, not a failure, so a short streak is normal; a streak that keeps
+	// growing is an order that has stopped running with nothing else to say so.
+	// Rate-bounded at the emit site (see cmd/gc/order_dispatch.go) — a
+	// permanently wedged order cannot turn this into a per-tick stream.
+	OrderSuppressed                 = "order.suppressed"
 	ProviderSwapped                 = "provider.swapped"
 	WorkerOperation                 = "worker.operation"
 	ProjectIdentityStamped          = "project.identity.stamped"
@@ -339,8 +368,10 @@ var KnownEventTypes = []string{
 	SessionDrainAckedWithAssignedWork,
 	SessionStranded,
 	SessionUnknownState,
+	SessionWakeRefused,
 	SessionResetStalled,
 	SessionWorkQueryFailed,
+	SessionDrainFenceUnavailable,
 	SessionDemandClaimDivergence,
 	SessionColdStartTimeout,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
@@ -361,7 +392,7 @@ var KnownEventTypes = []string{
 	RequestResultSessionSubmit, RequestResultRigCreate, RequestFailed,
 	RigProvisionProgress,
 	CityCreated, CityUnregisterRequested,
-	OrderFired, OrderCompleted, OrderFailed,
+	OrderFired, OrderCompleted, OrderFailed, OrderSuppressed,
 	ProviderSwapped, WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
 	MoleculeResolved,
 	SupervisorStarted, SupervisorShutdownRequested, SupervisorRequest,

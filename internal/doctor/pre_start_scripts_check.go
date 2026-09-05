@@ -94,14 +94,15 @@ func (c *PreStartScriptsCheck) Run(ctx *CheckContext) *CheckResult {
 // resolvePreStartScript extracts the absolute script path from a
 // pre_start command if it references {{.ConfigDir}} or {{.CityRoot}}
 // cleanly. Returns (path, true) when the first whitespace-separated
-// token resolves to an absolute path with no remaining template
-// placeholders. Otherwise returns ("", false) so the caller can skip
-// the command because it references neither template or depends on
-// runtime context that doctor cannot statically resolve.
+// token that is not a leading shell env assignment resolves to an
+// absolute path with no remaining template placeholders. Otherwise
+// returns ("", false) so the caller can skip the command because it
+// references neither template or depends on runtime context that doctor
+// cannot statically resolve.
 //
 // Both templates may appear in the same command; both are substituted.
-// Only the first token is validated, so trailing runtime-only template
-// arguments are allowed.
+// Only that command-word token is validated, so trailing runtime-only
+// template arguments are allowed.
 func resolvePreStartScript(cmd, sourceDir, cityPath string) (string, bool) {
 	hasConfigDir := strings.Contains(cmd, "{{.ConfigDir}}")
 	hasCityRoot := strings.Contains(cmd, "{{.CityRoot}}")
@@ -115,11 +116,21 @@ func resolvePreStartScript(cmd, sourceDir, cityPath string) (string, bool) {
 	if hasCityRoot {
 		expanded = strings.ReplaceAll(expanded, "{{.CityRoot}}", cityPath)
 	}
-	fields := strings.Fields(expanded)
-	if len(fields) == 0 {
+	first := ""
+	for _, field := range strings.Fields(expanded) {
+		// Skip leading shell env assignments (NAME=value ...), so a command
+		// that hands the script context — e.g.
+		// GC_DEFAULT_BRANCH='{{.DefaultBranch}}' /path/setup.sh — still gets
+		// its script path validated instead of being silently skipped.
+		if isShellEnvAssignment(field) {
+			continue
+		}
+		first = field
+		break
+	}
+	if first == "" {
 		return "", false
 	}
-	first := fields[0]
 	if strings.Contains(first, "{{") {
 		return "", false
 	}
@@ -127,4 +138,24 @@ func resolvePreStartScript(cmd, sourceDir, cityPath string) (string, bool) {
 		return "", false
 	}
 	return filepath.Clean(first), true
+}
+
+// isShellEnvAssignment reports whether field is a leading NAME=value
+// environment assignment rather than the command word.
+func isShellEnvAssignment(field string) bool {
+	eq := strings.Index(field, "=")
+	if eq <= 0 {
+		return false
+	}
+	for i, r := range field[:eq] {
+		switch {
+		case r == '_':
+		case r >= 'A' && r <= 'Z':
+		case r >= 'a' && r <= 'z':
+		case i > 0 && r >= '0' && r <= '9':
+		default:
+			return false
+		}
+	}
+	return true
 }

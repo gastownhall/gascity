@@ -465,7 +465,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		// Cursor: CURSOR_API_KEY for headless (login is the default). Serving is
 		// Cursor's own backend — no base-URL override env.
 		UpstreamAPIKeyEnv: "CURSOR_API_KEY",
-		Args:              []string{"-f"},
+		Args:              []string{"-f", "--trust"},
 		PromptMode:        "arg",
 		ReadyPromptPrefix: "\u2192 ",
 		ReadyDelayMs:      10000,
@@ -868,6 +868,8 @@ func CanonicalProfileIdentity(profile string) (ProfileIdentity, bool) {
 		return newProfileIdentity(profile, "claude"), true
 	case "codex/tmux-cli":
 		return newProfileIdentity(profile, "codex"), true
+	case "cursor/tmux-cli":
+		return newProfileIdentity(profile, "cursor"), true
 	case "gemini/tmux-cli":
 		return newProfileIdentity(profile, "gemini"), true
 	case "kimi/tmux-cli":

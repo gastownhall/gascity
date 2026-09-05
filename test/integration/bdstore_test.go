@@ -23,6 +23,13 @@ import (
 const (
 	bdInitTimeout          = 60 * time.Second
 	doltServerStartupLimit = 10 * time.Second
+	// doltServerReadyTimeout budgets startDoltServerOnAllInterfaces's
+	// TCP-dial readiness wait (dolt_config_test.go). Kept separate from
+	// doltServerStartupLimit — same shape of wait, but a distinct call
+	// site — so a future tuning of one doesn't silently retune the other;
+	// that kind of implicit coupling is what let runBDInitCompat's timeout
+	// drift out of sync with bdInitTimeout in the first place (ga-gajll3).
+	doltServerReadyTimeout = 60 * time.Second
 )
 
 // TestBdStoreConformance runs the beads conformance suite against BdStore

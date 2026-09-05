@@ -370,10 +370,9 @@ func TestBdStoreBridgeListCommandForwardsFilters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(args): %v", err)
 	}
-	// BdStore may need to merge and filter policy tiers client-side, so it
-	// requests all server-side candidates and applies the requested limit after
-	// parsing.
-	for _, want := range []string{"list", "--json", "--status=open", "--assignee=mayor", "--type=message", "--include-infra", "--include-gates", "--limit", "0"} {
+	// TierIssues + a single assignee has no Go-side-only residual filter, so
+	// BdStore pushes the caller's real limit straight to bd list (gc-i4j3y).
+	for _, want := range []string{"list", "--json", "--status=open", "--assignee=mayor", "--type=message", "--include-infra", "--include-gates", "--limit", "7"} {
 		if !strings.Contains(string(argsText), want) {
 			t.Fatalf("list args missing %q: %s", want, string(argsText))
 		}
