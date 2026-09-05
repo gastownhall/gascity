@@ -164,7 +164,67 @@ func bdCommandEnv(cityPath string, cfg *config.City, target execStoreTarget) ([]
 	overrides["GC_STORE_SCOPE"] = target.ScopeKind
 	overrides["GC_BEADS_PREFIX"] = target.Prefix
 	applyExportSuppressionEnv(overrides)
-	return mergeRuntimeEnv(os.Environ(), overrides), nil
+	environ := mergeRuntimeEnv(os.Environ(), overrides)
+	// gc bd can trigger provider hooks that recursively invoke gc. Pin those
+	// calls to this exact executable so an ambient or PATH-resolved GC_BIN
+	// cannot cross the city boundary and operate on a different binary.
+	// In production, failure to resolve the invoking executable is fatal; test
+	// binaries intentionally leave GC_BIN absent because they are not runnable
+	// gc front doors. In either case an inherited value is removed first.
+	gcBin, err := canonicalBdGCExecutable()
+	if err != nil {
+		return nil, err
+	}
+	environ = pinInvokingGCBinary(environ, gcBin)
+	return environ, nil
+}
+
+// canonicalBdGCExecutable returns the absolute, symlink-resolved executable
+// that gc bd child processes must use. An empty result is reserved for tests,
+// where the test binary is not a valid gc command; production callers fail
+// closed rather than allowing a PATH fallback.
+func canonicalBdGCExecutable() (string, error) {
+	candidate := strings.TrimSpace(resolveProviderLifecycleGCBinary())
+	if candidate == "" {
+		if isTestBinary() {
+			return "", nil
+		}
+		return "", errors.New("resolving invoking gc executable: executable unavailable")
+	}
+	if !filepath.IsAbs(candidate) || filepath.Clean(candidate) != candidate {
+		return "", fmt.Errorf("resolving invoking gc executable: path %q is not absolute and canonical", candidate)
+	}
+	canonical, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolving invoking gc executable %q: %w", candidate, err)
+	}
+	if !filepath.IsAbs(canonical) || filepath.Clean(canonical) != canonical {
+		return "", fmt.Errorf("resolving invoking gc executable: resolved path %q is not absolute and canonical", canonical)
+	}
+	info, err := os.Stat(canonical)
+	if err != nil {
+		return "", fmt.Errorf("resolving invoking gc executable %q: %w", canonical, err)
+	}
+	if !info.Mode().IsRegular() || info.Mode()&0o111 == 0 {
+		return "", fmt.Errorf("resolving invoking gc executable %q: not an executable regular file", canonical)
+	}
+	return canonical, nil
+}
+
+// pinBdGCEnvironment removes any inherited GC_BIN and replaces it with the
+// trusted executable (or an explicit empty value in test binaries). The map
+// form is used by internal BdStore runners, whose child environment is merged
+// by the beads package after this boundary returns.
+func pinBdGCEnvironment(env map[string]string) error {
+	if env == nil {
+		return nil
+	}
+	gcBin, err := canonicalBdGCExecutable()
+	if err != nil {
+		return err
+	}
+	env["GC_BIN"] = gcBin
+	return nil
 }
 
 func warnExternalBdOverrideDrift(stderr io.Writer, cityPath string, target execStoreTarget) {

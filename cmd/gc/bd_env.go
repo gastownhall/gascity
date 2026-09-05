@@ -1440,6 +1440,9 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 		if env == nil {
 			env = map[string]string{}
 		}
+		if err := pinBdGCEnvironment(env); err != nil {
+			return nil, err
+		}
 		ensureProjectedDoltEnvExplicit(env)
 		runner, runnerErr := beadsCommandRunnerForHostedCity(cityPath, env)
 		if runnerErr != nil {
@@ -1461,6 +1464,12 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 		retryEnv, retryEnvErr := envFn(dir)
 		if retryEnvErr != nil {
 			return nil, retryEnvErr
+		}
+		if retryEnv == nil {
+			retryEnv = map[string]string{}
+		}
+		if err := pinBdGCEnvironment(retryEnv); err != nil {
+			return nil, err
 		}
 		ensureProjectedDoltEnvExplicit(retryEnv)
 		retryRunner, runnerErr := beadsCommandRunnerForHostedCity(cityPath, retryEnv)

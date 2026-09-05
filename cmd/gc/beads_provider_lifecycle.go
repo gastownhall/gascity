@@ -134,9 +134,8 @@ var resolveProviderLifecycleGCBinary = func() string {
 	if exe, err := os.Executable(); err == nil && exe != "" {
 		return exe
 	}
-	if path, err := exec.LookPath("gc"); err == nil && path != "" {
-		return path
-	}
+	// Never fall back to PATH here: an ambient `gc` can belong to a different
+	// installation and would let provider callbacks escape the current city.
 	return ""
 }
 

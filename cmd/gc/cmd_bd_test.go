@@ -569,6 +569,66 @@ dolt.auto-start: false
 	}
 }
 
+func TestBdCommandEnvPinsCanonicalGCBinary(t *testing.T) {
+	t.Setenv("GC_BIN", "/tmp/stale-gc")
+	cityDir := t.TempDir()
+	writeReachableManagedDoltState(t, cityDir)
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte("issue_prefix: gc\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gcBin := filepath.Join(t.TempDir(), "gc")
+	if err := os.WriteFile(gcBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldResolve := resolveProviderLifecycleGCBinary
+	resolveProviderLifecycleGCBinary = func() string { return gcBin }
+	t.Cleanup(func() { resolveProviderLifecycleGCBinary = oldResolve })
+
+	envList, err := bdCommandEnv(cityDir, &config.City{}, execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "gc"})
+	if err != nil {
+		t.Fatalf("bdCommandEnv: %v", err)
+	}
+	env := listToMap(envList)
+	if got := env["GC_BIN"]; got != gcBin {
+		t.Fatalf("GC_BIN = %q, want canonical executable %q", got, gcBin)
+	}
+}
+
+func TestBdCommandEnvRemovesAmbientGCBinaryWhenResolverUnavailable(t *testing.T) {
+	t.Setenv("GC_BIN", "/tmp/stale-gc")
+	oldResolve := resolveProviderLifecycleGCBinary
+	resolveProviderLifecycleGCBinary = func() string { return "" }
+	t.Cleanup(func() { resolveProviderLifecycleGCBinary = oldResolve })
+
+	cityDir := t.TempDir()
+	writeReachableManagedDoltState(t, cityDir)
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte("issue_prefix: gc\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	envList, err := bdCommandEnv(cityDir, &config.City{}, execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "gc"})
+	if err != nil {
+		t.Fatalf("bdCommandEnv: %v", err)
+	}
+	if _, ok := listToMap(envList)["GC_BIN"]; ok {
+		t.Fatalf("ambient GC_BIN survived unavailable resolver: %v", listToMap(envList)["GC_BIN"])
+	}
+}
+
+func TestBdCommandEnvRejectsRelativeGCBinary(t *testing.T) {
+	oldResolve := resolveProviderLifecycleGCBinary
+	resolveProviderLifecycleGCBinary = func() string { return "gc" }
+	t.Cleanup(func() { resolveProviderLifecycleGCBinary = oldResolve })
+
+	cityDir := t.TempDir()
+	writeReachableManagedDoltState(t, cityDir)
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte("issue_prefix: gc\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bdCommandEnv(cityDir, &config.City{}, execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "gc"}); err == nil || !strings.Contains(err.Error(), "not absolute") {
+		t.Fatalf("bdCommandEnv error = %v, want relative GC_BIN refusal", err)
+	}
+}
+
 func TestBdCommandEnvRefusesAnUnregisteredBackend(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 
