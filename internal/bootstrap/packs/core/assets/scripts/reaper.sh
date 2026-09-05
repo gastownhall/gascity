@@ -79,6 +79,11 @@ WORKFLOW_ROOT_CLOSE_STATUSES="'open', 'hooked', 'in_progress'"
 WORKFLOW_ROOT_LIVE_STATUSES="'open', 'hooked', 'in_progress', 'blocked', 'deferred', 'pinned', 'review', 'testing'"
 WORKFLOW_ROOT_DESCENDANT_DEP_TYPES="'parent-child', 'tracks', 'blocks'"
 WORKFLOW_ROOT_CLOSE_REASON="stale inactive workflow root auto-closed by reaper"
+# Candidate workflow roots one Step 2 census query walks for descendants.
+WORKFLOW_ROOT_BATCH_SIZE="${GC_REAPER_WORKFLOW_ROOT_BATCH_SIZE:-25}"
+if ! [[ "$WORKFLOW_ROOT_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]]; then
+    WORKFLOW_ROOT_BATCH_SIZE=25
+fi
 STALE_WISP_CLOSE_REASON="stale wisp whose owning parent or root is closed, auto-closed by reaper"
 # Step 3 purges the whole wisps plane (including --no-history rows, which is
 # where gc keeps order-tracking beads) and relies on gc bd purge to keep a closed
@@ -317,7 +322,10 @@ close_ids_by_mode() {
     CLOSE_IDS_FAILED="${failed}${failed:+ }${SCOPE_CHUNK_FAILED_IDS}"
 }
 
-workflow_root_candidates_cte() {
+# workflow_root_candidate_ctes prints the non-recursive CTEs that select the
+# candidate workflow roots: ${candidate_cte}_base (old, unassigned, open
+# topology roots) and $candidate_cte (those whose store ref is local).
+workflow_root_candidate_ctes() {
     local db="$1"
     local candidate_cte="$2"
     local table="$3"
@@ -325,7 +333,7 @@ workflow_root_candidates_cte() {
     local issue_type_exclusions="$5"
 
     cat <<SQL
-        WITH RECURSIVE ${candidate_cte}_base(id) AS (
+${candidate_cte}_base(id) AS (
             SELECT $alias.id FROM \`$db\`.$table $alias
             WHERE $alias.status IN ($WORKFLOW_ROOT_CLOSE_STATUSES)
             AND $alias.issue_type NOT IN ($issue_type_exclusions)
@@ -345,29 +353,52 @@ workflow_root_candidates_cte() {
             WHERE (
 $(workflow_root_store_ref_local_condition "$db" "$alias")
             )
+        )
+SQL
+}
+
+# workflow_root_candidates_cte prints the WITH RECURSIVE clause for one census
+# page: page_limit candidate roots from page_offset in id order, and the live
+# and recent descendants of those roots only.
+workflow_root_candidates_cte() {
+    local db="$1"
+    local candidate_cte="$2"
+    local table="$3"
+    local alias="$4"
+    local issue_type_exclusions="$5"
+    local page_limit="$6"
+    local page_offset="$7"
+
+    cat <<SQL
+        WITH RECURSIVE $(workflow_root_candidate_ctes "$db" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions"),
+        ${candidate_cte}_page(id) AS (
+            SELECT id
+            FROM $candidate_cte
+            ORDER BY id
+            LIMIT $page_limit OFFSET $page_offset
         ),
         workflow_descendants(root_id, id) AS (
             SELECT root.id, child_wisp.id
-            FROM $candidate_cte root
+            FROM ${candidate_cte}_page root
             INNER JOIN \`$db\`.wisps child_wisp
                 ON child_wisp.id != root.id
                 AND JSON_UNQUOTE(JSON_EXTRACT(child_wisp.metadata, '$."gc.root_bead_id"')) = root.id
             UNION
             SELECT root.id, child_issue.id
-            FROM $candidate_cte root
+            FROM ${candidate_cte}_page root
             INNER JOIN \`$db\`.issues child_issue
                 ON child_issue.id != root.id
                 AND JSON_UNQUOTE(JSON_EXTRACT(child_issue.metadata, '$."gc.root_bead_id"')) = root.id
             UNION
             SELECT root.id, child_dep.issue_id
-            FROM $candidate_cte root
+            FROM ${candidate_cte}_page root
             INNER JOIN \`$db\`.wisp_dependencies child_dep
                 ON child_dep.type IN ($WORKFLOW_ROOT_DESCENDANT_DEP_TYPES)
                 AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = root.id
                 AND child_dep.issue_id != root.id
             UNION
             SELECT root.id, child_dep.issue_id
-            FROM $candidate_cte root
+            FROM ${candidate_cte}_page root
             INNER JOIN \`$db\`.dependencies child_dep
                 ON child_dep.type IN ($WORKFLOW_ROOT_DESCENDANT_DEP_TYPES)
                 AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = root.id
@@ -417,7 +448,7 @@ workflow_root_store_ref_skipped_count_query() {
     local issue_type_exclusions="$5"
 
     cat <<SQL
-$(workflow_root_candidates_cte "$db" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions")
+        WITH $(workflow_root_candidate_ctes "$db" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions")
         SELECT COUNT(*) FROM ${candidate_cte}_base base
         LEFT JOIN $candidate_cte candidate ON candidate.id = base.id
         WHERE candidate.id IS NULL
@@ -429,7 +460,7 @@ workflow_root_closeable_select() {
 
     cat <<SQL
         SELECT DISTINCT root.id
-        FROM $candidate_cte root
+        FROM ${candidate_cte}_page root
         LEFT JOIN roots_with_live_descendants live ON live.root_id = root.id
         LEFT JOIN roots_with_recent_descendants recent ON recent.root_id = root.id
         WHERE live.root_id IS NULL
@@ -437,7 +468,7 @@ workflow_root_closeable_select() {
 SQL
 }
 
-workflow_root_count_query() {
+workflow_root_candidate_count_query() {
     local db="$1"
     local candidate_cte="$2"
     local table="$3"
@@ -445,10 +476,8 @@ workflow_root_count_query() {
     local issue_type_exclusions="$5"
 
     cat <<SQL
-$(workflow_root_candidates_cte "$db" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions")
-        SELECT COUNT(*) FROM (
-$(workflow_root_closeable_select "$candidate_cte")
-        ) closeable_workflow_roots
+        WITH $(workflow_root_candidate_ctes "$db" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions")
+        SELECT COUNT(*) FROM $candidate_cte
 SQL
 }
 
@@ -458,11 +487,53 @@ workflow_root_ids_query() {
     local table="$3"
     local alias="$4"
     local issue_type_exclusions="$5"
+    local page_limit="$6"
+    local page_offset="$7"
 
     cat <<SQL
-$(workflow_root_candidates_cte "$db" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions")
+$(workflow_root_candidates_cte "$db" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions" "$page_limit" "$page_offset")
 $(workflow_root_closeable_select "$candidate_cte")
 SQL
+}
+
+# collect_workflow_root_ids <db> <label> <candidate_cte> <table> <alias>
+# <issue_type_exclusions> sets WORKFLOW_ROOT_IDS_RESULT to the closeable
+# workflow roots of one kind. It counts the candidates first, then checks them
+# for descendants WORKFLOW_ROOT_BATCH_SIZE at a time, so no single query walks
+# the subtrees of every candidate. It returns 1, with an anomaly, when the
+# count or any page fails: roots are closed only from a complete census.
+WORKFLOW_ROOT_IDS_RESULT=""
+collect_workflow_root_ids() {
+    local db="$1"
+    local label="$2"
+    local candidate_cte="$3"
+    local table="$4"
+    local alias="$5"
+    local issue_type_exclusions="$6"
+    local candidate_count
+    local page_offset=0
+    local ids=""
+
+    WORKFLOW_ROOT_IDS_RESULT=""
+    if ! get_sql_count "$label candidate" "$(workflow_root_candidate_count_query "$db" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions")"; then
+        scope_anomaly "$label census incomplete: candidate count failed"
+        return 1
+    fi
+    candidate_count=$SQL_COUNT_RESULT
+
+    while [ "$page_offset" -lt "$candidate_count" ]; do
+        if ! get_sql_rows "$label page at offset $page_offset" "$(workflow_root_ids_query "$db" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions" "$WORKFLOW_ROOT_BATCH_SIZE" "$page_offset")"; then
+            scope_anomaly "$label census incomplete: page at offset $page_offset failed"
+            return 1
+        fi
+        if [ -n "$SQL_ROWS_RESULT" ]; then
+            ids="${ids:+$ids
+}$SQL_ROWS_RESULT"
+        fi
+        page_offset=$((page_offset + WORKFLOW_ROOT_BATCH_SIZE))
+    done
+
+    WORKFLOW_ROOT_IDS_RESULT="$ids"
 }
 
 # stale_wisp_subtree_query selects, for Step 1, every stale open wisp whose
@@ -676,8 +747,8 @@ reap_scope() {
         TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED=$((TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED + SQL_COUNT_RESULT))
     fi
 
-    if get_sql_rows "stale inactive workflow wisp root" "$(workflow_root_ids_query "$DB" "workflow_wisp_root_candidates" "wisps" "w" "'message'")"; then
-        ids=$SQL_ROWS_RESULT
+    if collect_workflow_root_ids "$DB" "workflow wisp root" "workflow_wisp_root_candidates" "wisps" "w" "'message'"; then
+        ids=$WORKFLOW_ROOT_IDS_RESULT
         count=$(count_lines "$ids")
         if [ "$count" -gt 0 ]; then
             if [ -n "$DRY_RUN" ]; then
@@ -707,8 +778,8 @@ reap_scope() {
         TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED=$((TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED + SQL_COUNT_RESULT))
     fi
 
-    if get_sql_rows "stale inactive workflow issue root" "$(workflow_root_ids_query "$DB" "workflow_issue_root_candidates" "issues" "i" "'message', 'epic'")"; then
-        ids=$SQL_ROWS_RESULT
+    if collect_workflow_root_ids "$DB" "workflow issue root" "workflow_issue_root_candidates" "issues" "i" "'message', 'epic'"; then
+        ids=$WORKFLOW_ROOT_IDS_RESULT
         count=$(count_lines "$ids")
         if [ "$count" -gt 0 ]; then
             if [ "$SCOPE_KIND" != "city" ]; then

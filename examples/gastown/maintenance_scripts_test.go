@@ -3245,8 +3245,11 @@ exit 0
 		"GC_DOLT_USER":     "root",
 		"GC_DOLT_PASSWORD": "",
 		"DOLT_PURGE_COUNT": "1",
-		"BD_CALL_LOG":      bdLog,
-		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		// One candidate root of each kind, so the census sends the
+		// descendant walk this test inspects.
+		"DOLT_WORKFLOW_ROOT_CANDIDATES": "1",
+		"BD_CALL_LOG":                   bdLog,
+		"PATH":                          binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 		// No GC_REAPER_DRY_RUN — the purge runs for real.
 	}
 
@@ -3320,7 +3323,10 @@ exit 0
 		"GC_DOLT_USER":                "root",
 		"GC_DOLT_PASSWORD":            "",
 		"DOLT_PURGE_COUNT":            "1",
-		"PATH":                        binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		// One candidate root of each kind, so the census sends the
+		// descendant walk this test inspects.
+		"DOLT_WORKFLOW_ROOT_CANDIDATES": "1",
+		"PATH":                          binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
 	runScript(t, coreScriptPath("reaper.sh"), env)
@@ -4143,6 +4149,15 @@ case "$*" in
     printf 'depends_on_external,varchar,YES,,,\n'
     printf 'type,varchar,NO,,,\n'
     ;;
+  *"workflow_wisp_root_candidates_base"*"LEFT JOIN workflow_wisp_root_candidates"*|*"workflow_issue_root_candidates_base"*"LEFT JOIN workflow_issue_root_candidates"*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"WITH workflow_wisp_root_candidates_base"*"SELECT COUNT(*) FROM workflow_wisp_root_candidates"*)
+    printf 'COUNT(*)\n1\n'
+    ;;
+  *"WITH workflow_issue_root_candidates_base"*"SELECT COUNT(*) FROM workflow_issue_root_candidates"*)
+    printf 'COUNT(*)\n1\n'
+    ;;
   *"WITH RECURSIVE workflow_wisp_root_candidates"*"SELECT DISTINCT root.id"*)
     printf 'id\nwisp-root-close\n'
     ;;
@@ -4199,6 +4214,8 @@ exit 0
 	for _, want := range []string{
 		"WITH RECURSIVE workflow_wisp_root_candidates",
 		"WITH RECURSIVE workflow_issue_root_candidates",
+		"WITH workflow_wisp_root_candidates_base",
+		"WITH workflow_issue_root_candidates_base",
 		"workflow_descendants(root_id, id)",
 		"roots_with_live_descendants",
 		"JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$.\"gc.kind\"')) = 'workflow'",
@@ -4260,6 +4277,118 @@ exit 0
 	}
 }
 
+func TestReaperChunksWorkflowRootIssueCensusBeforeClosing(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		failSecondPage bool
+	}{
+		{name: "complete census"},
+		{name: "failed page is fail closed", failSecondPage: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			binDir := t.TempDir()
+			doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+			bdLog := filepath.Join(t.TempDir(), "bd.log")
+			gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+			writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"workflow_wisp_root_candidates_base"*"LEFT JOIN workflow_wisp_root_candidates"*|*"workflow_issue_root_candidates_base"*"LEFT JOIN workflow_issue_root_candidates"*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"workflow_wisp_root_candidates_base"*"SELECT COUNT(*) FROM workflow_wisp_root_candidates"*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"workflow_issue_root_candidates_base"*"SELECT COUNT(*) FROM workflow_issue_root_candidates"*)
+    printf 'COUNT(*)\n3\n'
+    ;;
+  *"workflow_issue_root_candidates_base"*"LIMIT 2 OFFSET 0"*"SELECT DISTINCT root.id"*)
+    printf 'id\nroot-a\nroot-b\n'
+    ;;
+  *"workflow_issue_root_candidates_base"*"LIMIT 2 OFFSET 2"*"SELECT DISTINCT root.id"*)
+    if [ "$DOLT_FAIL_SECOND_PAGE" = "1" ]; then
+      printf 'injected page timeout\n' >&2
+      exit 42
+    fi
+    printf 'id\nroot-c\n'
+    ;;
+  *"workflow_issue_root_candidates_base"*"SELECT DISTINCT root.id"*)
+    printf 'unbounded workflow-root query\n' >&2
+    exit 43
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"SELECT id"*)
+    printf 'id\n'
+    ;;
+esac
+exit 0
+`)
+			writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+printf '%s\n' "$*" >> "$BD_CALL_LOG"
+`+maintenanceBdPurgeAndBackupVerbs+`exit 0
+`)
+			writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+			writeCityBeadsMetadata(t, cityDir, "beads")
+
+			failSecondPage := "0"
+			if tc.failSecondPage {
+				failSecondPage = "1"
+			}
+			env := map[string]string{
+				"BD_CALL_LOG":                        bdLog,
+				"DOLT_ARGS_LOG":                      doltLog,
+				"DOLT_FAIL_SECOND_PAGE":              failSecondPage,
+				"GC_CALL_LOG":                        gcLog,
+				"GC_CITY":                            cityDir,
+				"GC_CITY_PATH":                       cityDir,
+				"GC_DOLT_HOST":                       "127.0.0.1",
+				"GC_DOLT_PORT":                       "3307",
+				"GC_DOLT_USER":                       "root",
+				"GC_DOLT_PASSWORD":                   "",
+				"GC_REAPER_WORKFLOW_ROOT_BATCH_SIZE": "2",
+				"PATH":                               binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			}
+
+			runScript(t, coreScriptPath("reaper.sh"), env)
+
+			bdData, err := os.ReadFile(bdLog)
+			if err != nil && !os.IsNotExist(err) {
+				t.Fatalf("ReadFile(bd log): %v", err)
+			}
+			bdText := string(bdData)
+			gcData, err := os.ReadFile(gcLog)
+			if err != nil {
+				t.Fatalf("ReadFile(gc log): %v", err)
+			}
+			gcText := string(gcData)
+			if tc.failSecondPage {
+				if strings.Contains(bdText, "close root-") {
+					t.Fatalf("reaper closed roots from a partial census:\n%s", bdText)
+				}
+				if !strings.Contains(gcText, "workflow issue root census incomplete: page at offset 2 failed") {
+					t.Fatalf("reaper did not report the incomplete root census:\n%s", gcText)
+				}
+				return
+			}
+
+			// The census pages are joined into one close, in id order.
+			if !strings.Contains(bdText, "close root-a root-b root-c --reason stale inactive workflow root auto-closed by reaper") {
+				t.Fatalf("reaper did not close every root of the complete paged census:\n%s", bdText)
+			}
+			if !strings.Contains(gcText, "workflow_roots:3") || strings.Contains(gcText, "census incomplete") {
+				t.Fatalf("reaper summary did not report the complete paged census:\n%s", gcText)
+			}
+		})
+	}
+}
+
 func TestReaperWorkflowRootPredicateIsGeneratedFromOneHelper(t *testing.T) {
 	data, err := os.ReadFile(coreScriptPath("reaper.sh"))
 	if err != nil {
@@ -4296,6 +4425,15 @@ case "$*" in
     printf 'depends_on_wisp_id,varchar,YES,,,\n'
     printf 'depends_on_external,varchar,YES,,,\n'
     printf 'type,varchar,NO,,,\n'
+    ;;
+  *"workflow_wisp_root_candidates_base"*"LEFT JOIN workflow_wisp_root_candidates"*|*"workflow_issue_root_candidates_base"*"LEFT JOIN workflow_issue_root_candidates"*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"WITH workflow_wisp_root_candidates_base"*"SELECT COUNT(*) FROM workflow_wisp_root_candidates"*)
+    printf 'COUNT(*)\n1\n'
+    ;;
+  *"WITH workflow_issue_root_candidates_base"*"SELECT COUNT(*) FROM workflow_issue_root_candidates"*)
+    printf 'COUNT(*)\n1\n'
     ;;
   *"WITH RECURSIVE workflow_wisp_root_candidates"*"SELECT DISTINCT root.id"*)
     printf 'id\n'
@@ -4385,6 +4523,15 @@ case "$*" in
     printf 'depends_on_wisp_id,varchar,YES,,,\n'
     printf 'depends_on_external,varchar,YES,,,\n'
     printf 'type,varchar,NO,,,\n'
+    ;;
+  *"workflow_wisp_root_candidates_base"*"LEFT JOIN workflow_wisp_root_candidates"*|*"workflow_issue_root_candidates_base"*"LEFT JOIN workflow_issue_root_candidates"*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"WITH workflow_wisp_root_candidates_base"*"SELECT COUNT(*) FROM workflow_wisp_root_candidates"*)
+    printf 'COUNT(*)\n1\n'
+    ;;
+  *"WITH workflow_issue_root_candidates_base"*"SELECT COUNT(*) FROM workflow_issue_root_candidates"*)
+    printf 'COUNT(*)\n1\n'
     ;;
   *"WITH RECURSIVE workflow_wisp_root_candidates"*"SELECT DISTINCT root.id"*)
     printf 'id\nwisp-root-close\n'
@@ -6281,6 +6428,11 @@ case "$*" in
   else
     printf 'COUNT(*)\n0\n'
   fi
+  ;;
+*"SELECT COUNT(*) FROM workflow_wisp_root_candidates"[!_]*|*"SELECT COUNT(*) FROM workflow_issue_root_candidates"[!_]*)
+  # Candidate workflow roots of each kind. The reaper walks descendants only
+  # when there is a candidate, so tests that inspect that SQL set this.
+  printf 'COUNT(*)\n%s\n' "${DOLT_WORKFLOW_ROOT_CANDIDATES:-0}"
   ;;
 *"COUNT("*)
   printf 'COUNT(*)\n0\n'
