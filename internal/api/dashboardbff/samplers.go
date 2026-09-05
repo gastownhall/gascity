@@ -601,18 +601,23 @@ func readDoltServerPort(beadsPath string) int {
 // markers fail closed.
 func readDoltMode(beadsPath string) (string, bool) {
 	raw, err := os.ReadFile(filepath.Join(beadsPath, "metadata.json"))
-	metadataPresent := err == nil
 	if err == nil {
 		var metadata struct {
 			DoltMode string `json:"dolt_mode"`
 		}
-		if json.Unmarshal(raw, &metadata) == nil {
-			if mode := strings.ToLower(strings.TrimSpace(metadata.DoltMode)); mode != "" {
-				return recognizedDoltMode(mode)
-			}
-		} else {
-			metadataPresent = true // malformed metadata is fail-closed
+		if json.Unmarshal(raw, &metadata) != nil {
+			// metadata.json is the persisted provider state. A malformed file
+			// must not be repaired or overridden by a second marker: a stale
+			// port artifact is never authoritative when this state is unreadable.
+			return "", false
 		}
+		mode := strings.ToLower(strings.TrimSpace(metadata.DoltMode))
+		if mode == "" {
+			// A present metadata file with no mode is an unknown provider state.
+			// Do not fall through to config.yaml, whose value may be stale.
+			return "", false
+		}
+		return recognizedDoltMode(mode)
 	} else if !os.IsNotExist(err) {
 		return "", false
 	}
@@ -633,11 +638,8 @@ func readDoltMode(beadsPath string) (string, bool) {
 	} else if !os.IsNotExist(configErr) {
 		return "", false
 	}
-	if metadataPresent {
-		// Metadata existed but omitted/failed to decode its mode. Do not infer a
-		// direct endpoint from a potentially stale port artifact.
-		return "", false
-	}
+	// Missing metadata and a config without an explicit recognized mode are
+	// both fail-closed. A legacy port file alone cannot authorize a TCP probe.
 	return "", false
 }
 
