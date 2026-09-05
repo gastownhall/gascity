@@ -536,6 +536,41 @@ func SessionStrandedPayloadJSON(sessionID, sessionName, template string, workBea
 	return b
 }
 
+// SessionPoolSlotRetiredAtDrainDeadlinePayload carries the machine-readable
+// context for a session.pool_slot_retired_at_drain_deadline event: a
+// pool-managed seat that entered drain, never finalized its drain-ack, and was
+// force-retired once the drain outlived the retire deadline.
+//
+// DrainAt and DrainAgeSeconds are the load-bearing fields. The bound retires
+// the symptom, not the cause, so the age distribution across emissions is how
+// operators tell "a handful of seats occasionally miss an ack" from "the
+// drain-ack path is failing wholesale and this bound is absorbing it".
+type SessionPoolSlotRetiredAtDrainDeadlinePayload struct {
+	SessionID       string `json:"session_id" doc:"Canonical session bead ID for the retired pool seat."`
+	SessionName     string `json:"session_name,omitempty" doc:"Runtime session name the seat held. This is the name the pool could not route around until the retirement freed it."`
+	Template        string `json:"template,omitempty" doc:"Pool template name when known at the emission site."`
+	DrainAt         string `json:"drain_at,omitempty" doc:"RFC3339 instant the seat entered drain (the drain_at metadata). Empty only if the marker was unreadable, in which case no retirement occurs."`
+	DrainAgeSeconds int64  `json:"drain_age_seconds" doc:"Whole seconds the seat spent in drain before the deadline retired it. Always at least the retire deadline."`
+}
+
+// IsEventPayload marks SessionPoolSlotRetiredAtDrainDeadlinePayload as an
+// events.Payload variant.
+func (SessionPoolSlotRetiredAtDrainDeadlinePayload) IsEventPayload() {}
+
+// SessionPoolSlotRetiredAtDrainDeadlinePayloadJSON builds the JSON wire form
+// for attachment to an events.Event.Payload field. SessionName, Template, and
+// DrainAt are emitted only when non-empty.
+func SessionPoolSlotRetiredAtDrainDeadlinePayloadJSON(sessionID, sessionName, template, drainAt string, drainAge time.Duration) json.RawMessage {
+	b, _ := json.Marshal(SessionPoolSlotRetiredAtDrainDeadlinePayload{
+		SessionID:       sessionID,
+		SessionName:     sessionName,
+		Template:        template,
+		DrainAt:         drainAt,
+		DrainAgeSeconds: int64(drainAge / time.Second),
+	})
+	return b
+}
+
 // BeadDeadAssigneeReopenedPayload is the typed payload for
 // bead.dead_assignee_reopened events. Emitted when the reconciler reopens a
 // routed work bead whose assignee no longer maps to any open session bead —
@@ -662,6 +697,7 @@ func init() {
 	events.RegisterPayload(events.SessionUpdated, events.NoPayload{})
 	events.RegisterPayload(events.SessionDrainAckedWithAssignedWork, SessionDrainAckedWithAssignedWorkPayload{})
 	events.RegisterPayload(events.SessionStranded, SessionStrandedPayload{})
+	events.RegisterPayload(events.SessionPoolSlotRetiredAtDrainDeadline, SessionPoolSlotRetiredAtDrainDeadlinePayload{})
 	events.RegisterPayload(events.SessionUnknownState, SessionUnknownStatePayload{})
 	events.RegisterPayload(events.SessionWakeRefused, SessionWakeRefusedPayload{})
 	events.RegisterPayload(events.SessionResetStalled, events.SessionResetStalledPayload{})

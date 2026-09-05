@@ -167,6 +167,7 @@ var infoKeyCodec = []infoKeySpec{
 	{"wait_hold", func(i *Info, v string) { i.WaitHold = v }},
 	{"churn_count", func(i *Info, v string) { i.ChurnCount = v }},
 	{"wake_mode", func(i *Info, v string) { i.WakeMode = v }},
+	{"drain_at", func(i *Info, v string) { i.DrainAt = v }},
 	{"sleep_intent", func(i *Info, v string) { i.SleepIntent = v }},
 	{"instance_token", func(i *Info, v string) { i.InstanceToken = v }},
 	{"detached_at", func(i *Info, v string) { i.DetachedAt = v }},

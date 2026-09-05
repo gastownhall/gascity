@@ -3674,6 +3674,24 @@ type SessionPermissionModeBody struct {
 	PermissionMode string `json:"permission_mode"`
 }
 
+// SessionPoolSlotRetiredAtDrainDeadlinePayload defines model for SessionPoolSlotRetiredAtDrainDeadlinePayload.
+type SessionPoolSlotRetiredAtDrainDeadlinePayload struct {
+	// DrainAgeSeconds Whole seconds the seat spent in drain before the deadline retired it. Always at least the retire deadline.
+	DrainAgeSeconds int64 `json:"drain_age_seconds"`
+
+	// DrainAt RFC3339 instant the seat entered drain (the drain_at metadata). Empty only if the marker was unreadable, in which case no retirement occurs.
+	DrainAt *string `json:"drain_at,omitempty"`
+
+	// SessionId Canonical session bead ID for the retired pool seat.
+	SessionId string `json:"session_id"`
+
+	// SessionName Runtime session name the seat held. This is the name the pool could not route around until the retirement freed it.
+	SessionName *string `json:"session_name,omitempty"`
+
+	// Template Pool template name when known at the emission site.
+	Template *string `json:"template,omitempty"`
+}
+
 // SessionRawMessageFrame Provider-native transcript frame. Gas City forwards the exact JSON the provider wrote to its session log, so the shape is provider-specific and can be any JSON value. The producing provider is identified by the Provider field on the enclosing envelope; consumers dispatch per-provider frame parsing keyed by that identifier.
 type SessionRawMessageFrame = interface{}
 
@@ -6468,6 +6486,22 @@ type TypedEventStreamEnvelopeSessionMaxAgeKilled struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline defines model for TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline.
+type TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline struct {
+	Actor            string                                       `json:"actor"`
+	DependsOnStepIds *[]string                                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                                      `json:"message,omitempty"`
+	Payload          SessionPoolSlotRetiredAtDrainDeadlinePayload `json:"payload"`
+	RunId            *string                                      `json:"run_id,omitempty"`
+	Seq              int64                                        `json:"seq"`
+	SessionId        *string                                      `json:"session_id,omitempty"`
+	StepId           *string                                      `json:"step_id,omitempty"`
+	Subject          *string                                      `json:"subject,omitempty"`
+	Ts               time.Time                                    `json:"ts"`
+	Type             string                                       `json:"type"`
+	Workflow         *WorkflowEventProjection                     `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeSessionQuarantined defines model for TypedEventStreamEnvelopeSessionQuarantined.
 type TypedEventStreamEnvelopeSessionQuarantined struct {
 	Actor            string                   `json:"actor"`
@@ -8064,6 +8098,23 @@ type TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled struct {
 	Ts               time.Time                `json:"ts"`
 	Type             string                   `json:"type"`
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline defines model for TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline.
+type TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline struct {
+	Actor            string                                       `json:"actor"`
+	City             string                                       `json:"city"`
+	DependsOnStepIds *[]string                                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                                      `json:"message,omitempty"`
+	Payload          SessionPoolSlotRetiredAtDrainDeadlinePayload `json:"payload"`
+	RunId            *string                                      `json:"run_id,omitempty"`
+	Seq              int64                                        `json:"seq"`
+	SessionId        *string                                      `json:"session_id,omitempty"`
+	StepId           *string                                      `json:"step_id,omitempty"`
+	Subject          *string                                      `json:"subject,omitempty"`
+	Ts               time.Time                                    `json:"ts"`
+	Type             string                                       `json:"type"`
+	Workflow         *WorkflowEventProjection                     `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionQuarantined defines model for TypedTaggedEventStreamEnvelopeSessionQuarantined.
@@ -10918,6 +10969,32 @@ func (t *EventPayload) FromSessionMessageSucceededPayload(v SessionMessageSuccee
 
 // MergeSessionMessageSucceededPayload performs a merge with any union data inside the EventPayload, using the provided SessionMessageSucceededPayload
 func (t *EventPayload) MergeSessionMessageSucceededPayload(v SessionMessageSucceededPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionPoolSlotRetiredAtDrainDeadlinePayload returns the union data inside the EventPayload as a SessionPoolSlotRetiredAtDrainDeadlinePayload
+func (t EventPayload) AsSessionPoolSlotRetiredAtDrainDeadlinePayload() (SessionPoolSlotRetiredAtDrainDeadlinePayload, error) {
+	var body SessionPoolSlotRetiredAtDrainDeadlinePayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionPoolSlotRetiredAtDrainDeadlinePayload overwrites any union data inside the EventPayload as the provided SessionPoolSlotRetiredAtDrainDeadlinePayload
+func (t *EventPayload) FromSessionPoolSlotRetiredAtDrainDeadlinePayload(v SessionPoolSlotRetiredAtDrainDeadlinePayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionPoolSlotRetiredAtDrainDeadlinePayload performs a merge with any union data inside the EventPayload, using the provided SessionPoolSlotRetiredAtDrainDeadlinePayload
+func (t *EventPayload) MergeSessionPoolSlotRetiredAtDrainDeadlinePayload(v SessionPoolSlotRetiredAtDrainDeadlinePayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -15087,6 +15164,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionMaxAgeKil
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline() (TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline, error) {
+	var body TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline(v TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline) error {
+	v.Type = "session.pool_slot_retired_at_drain_deadline"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline(v TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline) error {
+	v.Type = "session.pool_slot_retired_at_drain_deadline"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSessionQuarantined returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionQuarantined
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionQuarantined() (TypedEventStreamEnvelopeSessionQuarantined, error) {
 	var body TypedEventStreamEnvelopeSessionQuarantined
@@ -15891,6 +15996,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeSessionIdleKilled()
 	case "session.max_age_killed":
 		return t.AsTypedEventStreamEnvelopeSessionMaxAgeKilled()
+	case "session.pool_slot_retired_at_drain_deadline":
+		return t.AsTypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline()
 	case "session.quarantined":
 		return t.AsTypedEventStreamEnvelopeSessionQuarantined()
 	case "session.reset_stalled":
@@ -17966,6 +18073,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSess
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline() (TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline(v TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline) error {
+	v.Type = "session.pool_slot_retired_at_drain_deadline"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline(v TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline) error {
+	v.Type = "session.pool_slot_retired_at_drain_deadline"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSessionQuarantined returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionQuarantined
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionQuarantined() (TypedTaggedEventStreamEnvelopeSessionQuarantined, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionQuarantined
@@ -18770,6 +18905,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeSessionIdleKilled()
 	case "session.max_age_killed":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionMaxAgeKilled()
+	case "session.pool_slot_retired_at_drain_deadline":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline()
 	case "session.quarantined":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionQuarantined()
 	case "session.reset_stalled":

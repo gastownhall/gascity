@@ -121,6 +121,7 @@ func infoFromPersistedBeadFrozen(b beads.Bead) Info {
 		WaitHold:                       b.Metadata["wait_hold"],
 		ChurnCount:                     b.Metadata["churn_count"],
 		WakeMode:                       b.Metadata["wake_mode"],
+		DrainAt:                        b.Metadata["drain_at"],
 		SleepIntent:                    b.Metadata["sleep_intent"],
 		InstanceToken:                  b.Metadata["instance_token"],
 		DetachedAt:                     b.Metadata["detached_at"],

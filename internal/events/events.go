@@ -128,6 +128,18 @@ const (
 	// the reconciler-detected leak so pack-level subscribers can decide
 	// whether to clear-assignee-and-respawn or escalate.
 	SessionStranded = "session.stranded"
+	// SessionPoolSlotRetiredAtDrainDeadline fires when the reconciler force-
+	// retires a pool-managed session bead that entered drain and never
+	// finalized its drain-ack, once the drain has outlived the retire
+	// deadline, the seat holds no assigned work, and its runtime is
+	// confirmed stopped. The bead close frees the runtime name the pool slot
+	// is pinned to, so the pool can mint the seat again.
+	//
+	// It is a symptom bound, not a cure: every emission is a drain-ack that
+	// never resolved. Count it — a rising rate means the underlying
+	// drain-ack defect is spreading while this bound quietly absorbs it.
+	// See ga-rxhu2.
+	SessionPoolSlotRetiredAtDrainDeadline = "session.pool_slot_retired_at_drain_deadline"
 	// SessionUnknownState fires when the reconciler observes a session bead
 	// whose metadata state it does not recognize. The reconciler skips such
 	// beads (forward-compatible rollback: an older reconciler ignores a newer
@@ -367,6 +379,7 @@ var KnownEventTypes = []string{
 	SessionIdleKilled, SessionMaxAgeKilled, SessionSuspended, SessionUpdated,
 	SessionDrainAckedWithAssignedWork,
 	SessionStranded,
+	SessionPoolSlotRetiredAtDrainDeadline,
 	SessionUnknownState,
 	SessionWakeRefused,
 	SessionResetStalled,
