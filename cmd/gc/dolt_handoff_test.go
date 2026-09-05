@@ -213,6 +213,21 @@ func TestHandoffIdentityTokenChangesWithProcessIdentity(t *testing.T) {
 
 func TestDoltStateHandoffInspectAndStopOwnedProcess(t *testing.T) {
 	city := t.TempDir()
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
+		t.Fatalf("write city config: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(city, ".beads"), 0o755); err != nil {
+		t.Fatalf("create beads dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(city, ".beads", "config.yaml"), []byte("gc.endpoint_origin: managed_city\ngc.endpoint_status: verified\n"), 0o644); err != nil {
+		t.Fatalf("write beads config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(city, ".beads", "metadata.json"), []byte(`{"database":"beads","backend":"dolt","dolt_mode":"server","dolt_database":"beads","project_id":"test"}`), 0o644); err != nil {
+		t.Fatalf("write beads metadata: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(city, ".beads", "identity.toml"), []byte("[project]\nid = \"test\"\n"), 0o644); err != nil {
+		t.Fatalf("write project identity: %v", err)
+	}
 	layout, err := resolveManagedDoltRuntimeLayout(city)
 	if err != nil {
 		t.Fatalf("resolve layout: %v", err)
@@ -300,5 +315,159 @@ while True:
 	stopped := decodeHandoffResponse(t, stopOut.Bytes())
 	if stopped.Result != "stopped" || !stopped.Mutates || stopped.IdentityToken != inspect.IdentityToken {
 		t.Fatalf("stop response = %+v, want stopped with matching token", stopped)
+	}
+}
+
+func writeHandoffPersistedFixture(t *testing.T, city, backend, mode, database, projectID string) managedDoltRuntimeLayout {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
+		t.Fatalf("write city config: %v", err)
+	}
+	beadsDir := filepath.Join(city, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("create beads dir: %v", err)
+	}
+	configBody := "gc.endpoint_origin: managed_city\ngc.endpoint_status: verified\n"
+	if mode != "" {
+		configBody += "dolt.mode: " + mode + "\n"
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(configBody), 0o644); err != nil {
+		t.Fatalf("write beads config: %v", err)
+	}
+	metadata := `{"database":"` + database + `","backend":"` + backend + `","dolt_database":"` + database + `","project_id":"` + projectID + `"}`
+	if mode != "" {
+		metadata = `{"database":"` + database + `","backend":"` + backend + `","dolt_mode":"` + mode + `","dolt_database":"` + database + `","project_id":"` + projectID + `"}`
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0o644); err != nil {
+		t.Fatalf("write beads metadata: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "identity.toml"), []byte("[project]\nid = \""+projectID+"\"\n"), 0o644); err != nil {
+		t.Fatalf("write project identity: %v", err)
+	}
+	layout, err := resolveCanonicalManagedDoltRuntimeLayout(city)
+	if err != nil {
+		t.Fatalf("resolve canonical layout: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(layout.StateFile), 0o755); err != nil {
+		t.Fatalf("create runtime dir: %v", err)
+	}
+	if err := os.WriteFile(layout.StateFile, []byte(`{"running":false,"pid":0,"port":3307,"data_dir":"`+layout.DataDir+`"}`), 0o644); err != nil {
+		t.Fatalf("write runtime state: %v", err)
+	}
+	lock, err := os.OpenFile(layout.LockFile, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatalf("create lifecycle lock: %v", err)
+	}
+	_ = lock.Close()
+	return layout
+}
+
+func TestDoltStateHandoffRejectsPersistedIdentityMismatch(t *testing.T) {
+	tests := []struct {
+		name      string
+		backend   string
+		mode      string
+		database  string
+		projectID string
+		mutate    func([]string) []string
+		wantCode  string
+	}{
+		{name: "database", backend: "dolt", database: "beads", projectID: "test", mutate: func(args []string) []string {
+			out := append([]string(nil), args...)
+			for i := range out {
+				if out[i] == "beads" && i > 0 && out[i-1] == "--database" {
+					out[i] = "other"
+				}
+			}
+			return out
+		}, wantCode: "identity_changed"},
+		{name: "workspace", backend: "dolt", database: "beads", projectID: "test", mutate: func(args []string) []string {
+			out := append([]string(nil), args...)
+			for i := range out {
+				if out[i] == "test" && i > 0 && out[i-1] == "--workspace" {
+					out[i] = "other"
+				}
+			}
+			return out
+		}, wantCode: "identity_changed"},
+		{name: "doltlite", backend: "doltlite", database: "beads", projectID: "test", wantCode: "unsupported_scope"},
+		{name: "embedded", backend: "dolt", mode: "embedded", database: "beads", projectID: "test", wantCode: "unsupported_scope"},
+		{name: "proxied", backend: "dolt", mode: "proxied-server", database: "beads", projectID: "test", wantCode: "unsupported_scope"},
+		{name: "legacy metadata", backend: "legacy", database: "beads", projectID: "test", wantCode: "process_missing"},
+		{name: "foreign backend", backend: "postgres", database: "beads", projectID: "test", wantCode: "unsupported_scope"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			city := t.TempDir()
+			layout := writeHandoffPersistedFixture(t, city, tc.backend, tc.mode, tc.database, tc.projectID)
+			args := handoffTestArgs("handoff-inspect", city)
+			if tc.mutate != nil {
+				args = tc.mutate(args)
+			}
+			var stdout, stderr bytes.Buffer
+			code := run(args, &stdout, &stderr)
+			if code != 1 {
+				t.Fatalf("run() = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+			}
+			response := decodeHandoffResponse(t, stdout.Bytes())
+			if response.Result != "refused" || response.ErrorCode != tc.wantCode || response.Mutates {
+				t.Fatalf("response = %+v, want %s refusal with mutates=false", response, tc.wantCode)
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("handoff protocol wrote stderr: %q", stderr.String())
+			}
+			if data, err := os.ReadFile(layout.StateFile); err != nil || !bytes.Contains(data, []byte(`"running":false`)) {
+				t.Fatalf("runtime state changed after refusal: %q (err=%v)", data, err)
+			}
+		})
+	}
+}
+
+func TestDoltStateHandoffRejectsUndeclaredScopeAndIgnoresAmbientLayout(t *testing.T) {
+	city := t.TempDir()
+	layout := writeHandoffPersistedFixture(t, city, "dolt", "", "beads", "test")
+	foreign := t.TempDir()
+	foreignLayout := writeHandoffPersistedFixture(t, foreign, "dolt", "", "beads", "test")
+	if err := writeDoltRuntimeStateFile(foreignLayout.StateFile, doltRuntimeState{Running: true, PID: os.Getpid(), Port: 3307, DataDir: foreignLayout.DataDir}); err != nil {
+		t.Fatalf("write foreign runtime state: %v", err)
+	}
+	t.Setenv("GC_PACK_STATE_DIR", foreignLayout.PackStateDir)
+	t.Setenv("GC_DOLT_DATA_DIR", foreignLayout.DataDir)
+	t.Setenv("GC_DOLT_STATE_FILE", foreignLayout.StateFile)
+	t.Setenv("GC_DOLT_PID_FILE", foreignLayout.PIDFile)
+	t.Setenv("GC_DOLT_LOCK_FILE", foreignLayout.LockFile)
+	t.Setenv("GC_DOLT_CONFIG_FILE", foreignLayout.ConfigFile)
+	t.Setenv("GC_DOLT_LOG_FILE", foreignLayout.LogFile)
+	args := handoffTestArgs("handoff-inspect", city)
+	var stdout, stderr bytes.Buffer
+	if code := run(args, &stdout, &stderr); code != 1 {
+		t.Fatalf("run() = %d, want refusal", code)
+	}
+	response := decodeHandoffResponse(t, stdout.Bytes())
+	if response.ErrorCode != "process_missing" || response.Mutates {
+		t.Fatalf("response = %+v, want canonical process_missing refusal", response)
+	}
+	if _, err := os.Stat(layout.StateFile); err != nil {
+		t.Fatalf("canonical runtime state missing after refusal: %v", err)
+	}
+
+	undeclared := filepath.Join(city, "invented")
+	if err := os.MkdirAll(undeclared, 0o755); err != nil {
+		t.Fatalf("create undeclared scope: %v", err)
+	}
+	args = handoffTestArgs("handoff-inspect", city)
+	for i := range args {
+		if args[i] == city && i > 0 && args[i-1] == "--scope-root" {
+			args[i] = undeclared
+		}
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run(args, &stdout, &stderr); code != 1 {
+		t.Fatalf("undeclared scope run() = %d, want refusal", code)
+	}
+	response = decodeHandoffResponse(t, stdout.Bytes())
+	if response.ErrorCode != "unsupported_scope" || response.Mutates {
+		t.Fatalf("undeclared scope response = %+v, want unsupported_scope refusal", response)
 	}
 }

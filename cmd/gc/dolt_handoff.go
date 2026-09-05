@@ -21,6 +21,10 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 const handoffProtocolSchemaVersion = 1
@@ -207,7 +211,13 @@ func runHandoffProtocol(operation string, mutates bool, request handoffProtocolR
 		response.ErrorCode = handoffErrorCode(err)
 		return response, err
 	}
-	if _, err := stopManagedDoltProcessWithExpectedIdentity(request.CityRoot, strconv.Itoa(request.Endpoint.Port), true, &identity); err != nil {
+	stopReport, err := stopManagedDoltProcessWithExpectedIdentity(request.CityRoot, strconv.Itoa(request.Endpoint.Port), true, &identity)
+	// Stop may have signaled the process (or committed runtime cleanup) before
+	// a later safety gate failed. Preserve that phase in the response so the
+	// caller never mistakes a failed, partially-applied stop for a read-only
+	// refusal and can reconcile the endpoint before retrying.
+	response.Mutates = stopReport.Mutated
+	if err != nil {
 		code := "stop_failed"
 		if strings.Contains(strings.ToLower(err.Error()), "data dir") || strings.Contains(strings.ToLower(err.Error()), "lock") {
 			code = "data_lock_held"
@@ -232,7 +242,7 @@ func runHandoffProtocol(operation string, mutates bool, request handoffProtocolR
 // be called against a fresh or incomplete city; a refusal must not turn that
 // probe into an implicit managed-runtime initialization.
 func openHandoffLifecycleLock(cityRoot string) (*os.File, managedDoltRuntimeLayout, error) {
-	layout, err := resolveManagedDoltRuntimeLayout(cityRoot)
+	layout, err := resolveCanonicalManagedDoltRuntimeLayout(cityRoot)
 	if err != nil {
 		return nil, managedDoltRuntimeLayout{}, handoffErr("invalid_request", err)
 	}
@@ -321,6 +331,9 @@ func validateHandoffProtocolRequest(request handoffProtocolRequest) error {
 }
 
 func inspectHandoffIdentity(request handoffProtocolRequest, layout managedDoltRuntimeLayout) (handoffProtocolIdentity, error) {
+	if err := validateHandoffPersistedScope(request); err != nil {
+		return handoffProtocolIdentity{}, err
+	}
 	state, err := readDoltRuntimeStateFile(layout.StateFile)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -382,6 +395,146 @@ func inspectHandoffIdentity(request handoffProtocolRequest, layout managedDoltRu
 		return handoffProtocolIdentity{}, handoffErr("protocol_version", errors.New("managed dolt identity paths are unavailable"))
 	}
 	return identity, nil
+}
+
+// validateHandoffPersistedScope proves that the request names a scope and
+// database owned by this city. Request fields are untrusted input: they must
+// be matched against canonical config/metadata/identity files before any
+// process is considered eligible for transfer.
+func validateHandoffPersistedScope(request handoffProtocolRequest) error {
+	fs := fsys.OSFS{}
+	cityRoot := normalizePathForCompare(request.CityRoot)
+	scopeRoot := normalizePathForCompare(request.ScopeRoot)
+	cityConfig := filepath.Join(cityRoot, "city.toml")
+	if _, err := fs.Stat(cityConfig); err != nil {
+		if os.IsNotExist(err) {
+			return handoffErr("state_missing", fmt.Errorf("city config %s is missing", cityConfig))
+		}
+		return handoffErr("state_missing", fmt.Errorf("stat city config %s: %w", cityConfig, err))
+	}
+	cfg, err := config.Load(fs, cityConfig)
+	if err != nil {
+		return handoffErr("state_missing", fmt.Errorf("load city config: %w", err))
+	}
+	resolveRigPaths(cityRoot, cfg.Rigs)
+	cityScope := samePath(scopeRoot, cityRoot)
+	rigScope := false
+	for _, rig := range cfg.Rigs {
+		if strings.TrimSpace(rig.Path) != "" && samePath(scopeRoot, normalizePathForCompare(rig.Path)) {
+			rigScope = true
+			break
+		}
+	}
+	if !cityScope && !rigScope {
+		return handoffErr("unsupported_scope", errors.New("scope root is not the city root or a declared rig"))
+	}
+	resolved, err := contract.ResolveScopeConfigState(fs, cityRoot, scopeRoot, "")
+	if err != nil {
+		return handoffErr("unsupported_scope", fmt.Errorf("resolve scope config: %w", err))
+	}
+	if resolved.Kind != contract.ScopeConfigAuthoritative {
+		return handoffErr("state_missing", errors.New("scope config is not authoritative"))
+	}
+	state := resolved.State
+	if cityScope {
+		if state.EndpointOrigin != contract.EndpointOriginManagedCity {
+			return handoffErr("unsupported_scope", fmt.Errorf("city endpoint origin %q is not managed_city", state.EndpointOrigin))
+		}
+	} else {
+		if state.EndpointOrigin != contract.EndpointOriginInheritedCity {
+			return handoffErr("unsupported_scope", fmt.Errorf("rig endpoint origin %q is not inherited_city", state.EndpointOrigin))
+		}
+		cityResolved, cityErr := contract.ResolveScopeConfigState(fs, cityRoot, cityRoot, "")
+		if cityErr != nil || cityResolved.Kind != contract.ScopeConfigAuthoritative || cityResolved.State.EndpointOrigin != contract.EndpointOriginManagedCity {
+			return handoffErr("unsupported_scope", errors.New("inherited rig does not resolve to a managed city endpoint"))
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(state.DoltMode), "embedded") || strings.EqualFold(strings.TrimSpace(state.DoltMode), "proxied-server") {
+		return handoffErr("unsupported_scope", fmt.Errorf("dolt mode %q is not transferable", state.DoltMode))
+	}
+	metadataPath := filepath.Join(scopeRoot, ".beads", "metadata.json")
+	metadata, ok, err := contract.LoadMetadataState(fs, metadataPath)
+	if err != nil {
+		if backend, backendOK, backendErr := contract.ReadMetadataBackend(fs, metadataPath); backendErr == nil && backendOK {
+			backend = strings.ToLower(strings.TrimSpace(backend))
+			if backend == "legacy" {
+				database, databaseOK, databaseErr := contract.ReadDoltDatabase(fs, metadataPath)
+				if databaseErr != nil {
+					return handoffErr("state_missing", fmt.Errorf("read legacy metadata database: %w", databaseErr))
+				}
+				mode, _, _ := contract.ReadDoltMode(fs, metadataPath)
+				metadata = contract.MetadataState{Backend: backend, DoltDatabase: database, DoltMode: mode}
+				ok = databaseOK
+				err = nil
+			}
+			if err != nil && backend != "" && backend != "dolt" && backend != "bd" {
+				return handoffErr("unsupported_scope", fmt.Errorf("backend %q is not direct Dolt", backend))
+			}
+		}
+		if err != nil {
+			return handoffErr("state_missing", fmt.Errorf("load metadata: %w", err))
+		}
+	}
+	if !ok {
+		return handoffErr("state_missing", errors.New("scope metadata is missing"))
+	}
+	backend := strings.ToLower(strings.TrimSpace(metadata.Backend))
+	if backend == "doltlite" {
+		return handoffErr("unsupported_scope", errors.New("doltlite backend cannot be handed off"))
+	}
+	if backend != "" && backend != "legacy" && backend != "dolt" && backend != "bd" {
+		return handoffErr("unsupported_scope", fmt.Errorf("backend %q is not direct Dolt", metadata.Backend))
+	}
+	if mode := strings.TrimSpace(metadata.DoltMode); strings.EqualFold(mode, "embedded") || strings.EqualFold(mode, "proxied-server") {
+		return handoffErr("unsupported_scope", fmt.Errorf("metadata dolt mode %q is not transferable", metadata.DoltMode))
+	}
+	database := strings.TrimSpace(metadata.DoltDatabase)
+	if database == "" {
+		return handoffErr("state_missing", errors.New("metadata dolt_database is missing"))
+	}
+	if database != strings.TrimSpace(request.Database) {
+		return handoffErr("identity_changed", errors.New("requested database differs from persisted Dolt database"))
+	}
+
+	l1ID, l1OK, err := contract.ReadProjectIdentity(fs, scopeRoot)
+	if err != nil {
+		return handoffErr("state_missing", fmt.Errorf("read project identity: %w", err))
+	}
+	l2ID, err := readHandoffMetadataProjectID(metadataPath)
+	if err != nil {
+		return handoffErr("state_missing", fmt.Errorf("read metadata project identity: %w", err))
+	}
+	if l1OK && l2ID != "" && l1ID != l2ID {
+		return handoffErr("identity_changed", errors.New("project identity differs between identity.toml and metadata.json"))
+	}
+	trustedID := l1ID
+	if !l1OK {
+		trustedID = l2ID
+	}
+	if strings.TrimSpace(trustedID) == "" {
+		return handoffErr("state_missing", errors.New("project identity is missing"))
+	}
+	if trustedID != strings.TrimSpace(request.Workspace) {
+		return handoffErr("identity_changed", errors.New("requested workspace differs from persisted project identity"))
+	}
+	return nil
+}
+
+func readHandoffMetadataProjectID(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	var metadata struct {
+		ProjectID string `json:"project_id"`
+	}
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(metadata.ProjectID), nil
 }
 
 func handoffDoltEndpointReachable(endpoint handoffProtocolEndpoint) bool {

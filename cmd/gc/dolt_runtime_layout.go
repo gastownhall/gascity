@@ -52,6 +52,35 @@ func resolveManagedDoltRuntimeLayout(cityPath string) (managedDoltRuntimeLayout,
 	}, nil
 }
 
+// resolveCanonicalManagedDoltRuntimeLayout returns the on-disk layout owned by
+// a city, ignoring ambient GC_* path overrides.  The ownership handoff
+// protocol is destructive and must never allow a caller's environment to
+// redirect it at state belonging to another city.
+func resolveCanonicalManagedDoltRuntimeLayout(cityPath string) (managedDoltRuntimeLayout, error) {
+	cityPath = filepath.Clean(strings.TrimSpace(cityPath))
+	if cityPath == "" || cityPath == "." {
+		return managedDoltRuntimeLayout{}, fmt.Errorf("missing --city")
+	}
+	cityPath = normalizePathForCompare(cityPath)
+	packStateDir := normalizePathForCompare(citylayout.PackStateDir(cityPath, "dolt"))
+	layout := managedDoltRuntimeLayout{
+		PackStateDir: packStateDir,
+		DataDir:      normalizePathForCompare(filepath.Join(cityPath, ".beads", "dolt")),
+		LogFile:      normalizePathForCompare(filepath.Join(packStateDir, "dolt.log")),
+		StateFile:    normalizePathForCompare(filepath.Join(packStateDir, "dolt-provider-state.json")),
+		PIDFile:      normalizePathForCompare(filepath.Join(packStateDir, "dolt.pid")),
+		LockFile:     normalizePathForCompare(filepath.Join(packStateDir, "dolt.lock")),
+		ConfigFile:   normalizePathForCompare(filepath.Join(packStateDir, "dolt-config.yaml")),
+	}
+	for _, path := range []string{layout.PackStateDir, layout.DataDir, layout.LogFile, layout.StateFile, layout.PIDFile, layout.LockFile, layout.ConfigFile} {
+		rel, err := filepath.Rel(cityPath, path)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return managedDoltRuntimeLayout{}, fmt.Errorf("managed dolt runtime path %q escapes city root", path)
+		}
+	}
+	return layout, nil
+}
+
 func defaultEnvPath(key, fallback string) string {
 	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
 		return normalizePathForCompare(value)

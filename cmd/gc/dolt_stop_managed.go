@@ -17,6 +17,10 @@ type managedDoltStopReport struct {
 	HadPID bool
 	PID    int
 	Forced bool
+	// Mutated reports whether stop signaled the managed process or committed
+	// runtime cleanup before returning. Handoff callers expose this separately
+	// from the operation result so a failed stop cannot claim it was read-only.
+	Mutated bool
 }
 
 func stopManagedDoltProcess(cityPath, port string) (managedDoltStopReport, error) {
@@ -91,11 +95,24 @@ func stopManagedDoltProcessWithOptions(cityPath, port string, clearPublishedStat
 // signal gate must still match that exact PID/config/start identity; a foreign
 // port holder or reused PID is refused rather than treated as cleanup success.
 func stopManagedDoltProcessWithExpectedIdentity(cityPath, port string, clearPublishedState bool, expected *handoffProtocolIdentity) (managedDoltStopReport, error) {
-	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	var layout managedDoltRuntimeLayout
+	var err error
+	if expected != nil {
+		layout, err = resolveCanonicalManagedDoltRuntimeLayout(cityPath)
+	} else {
+		layout, err = resolveManagedDoltRuntimeLayout(cityPath)
+	}
 	if err != nil {
 		return managedDoltStopReport{}, err
 	}
-	info, err := inspectManagedDoltProcess(cityPath, port)
+	var info managedDoltProcessInspection
+	if expected == nil {
+		info, err = inspectManagedDoltProcess(cityPath, port)
+	} else {
+		// Strict handoff refusal must not inherit ordinary cleanup discovery's
+		// stale-PID-file removal side effect.
+		info, err = inspectManagedDoltProcessNoMutation(cityPath, port)
+	}
 	if err != nil {
 		return managedDoltStopReport{}, err
 	}
@@ -143,7 +160,9 @@ func stopManagedDoltProcessWithExpectedIdentity(cityPath, port string, clearPubl
 		if err := waitForManagedDoltDataDirLockFree(layout.DataDir, lockWindow); err != nil {
 			return report, fmt.Errorf("no controllable dolt process, but the data dir is not yet released: %w", err)
 		}
-		if err := clearManagedDoltRuntime(layout, port); err != nil {
+		mutated, err := clearManagedDoltRuntimeWithMutation(layout, port)
+		report.Mutated = report.Mutated || mutated
+		if err != nil {
 			return report, err
 		}
 		if clearPublishedState {
@@ -156,8 +175,12 @@ func stopManagedDoltProcessWithExpectedIdentity(cityPath, port string, clearPubl
 	report.HadPID = true
 	report.PID = targetPID
 	if managedStopPIDAlive(targetPID) {
-		if err := syscall.Kill(targetPID, syscall.SIGTERM); err != nil && err != syscall.ESRCH {
-			return report, fmt.Errorf("signal %d with SIGTERM: %w", targetPID, err)
+		killErr := syscall.Kill(targetPID, syscall.SIGTERM)
+		if killErr != nil && killErr != syscall.ESRCH {
+			return report, fmt.Errorf("signal %d with SIGTERM: %w", targetPID, killErr)
+		}
+		if killErr == nil {
+			report.Mutated = true
 		}
 	}
 	gracePeriod := resolveManagedDoltStopTimeout(cityPath)
@@ -181,8 +204,12 @@ func stopManagedDoltProcessWithExpectedIdentity(cityPath, port string, clearPubl
 		// (cmdline/data-dir/cwd), which a reused unrelated PID fails.
 		if strictTarget(targetPID) {
 			report.Forced = true
-			if err := syscall.Kill(targetPID, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
-				return report, fmt.Errorf("signal %d with SIGKILL: %w", targetPID, err)
+			killErr := syscall.Kill(targetPID, syscall.SIGKILL)
+			if killErr != nil && killErr != syscall.ESRCH {
+				return report, fmt.Errorf("signal %d with SIGKILL: %w", targetPID, killErr)
+			}
+			if killErr == nil {
+				report.Mutated = true
 			}
 			waitForManagedDoltProcessExit(targetPID, time.Second, managedStopPIDAlive)
 		} else {
@@ -202,7 +229,9 @@ func stopManagedDoltProcessWithExpectedIdentity(cityPath, port string, clearPubl
 	if err := waitForManagedDoltDataDirLockFree(layout.DataDir, lockWindow); err != nil {
 		return report, fmt.Errorf("dolt process %d exited but the data dir is not yet released: %w", targetPID, err)
 	}
-	if err := clearManagedDoltRuntime(layout, port); err != nil {
+	mutated, err := clearManagedDoltRuntimeWithMutation(layout, port)
+	report.Mutated = report.Mutated || mutated
+	if err != nil {
 		return report, err
 	}
 	if clearPublishedState {
@@ -214,6 +243,14 @@ func stopManagedDoltProcessWithExpectedIdentity(cityPath, port string, clearPubl
 }
 
 func clearManagedDoltRuntime(layout managedDoltRuntimeLayout, portText string) error {
+	_, err := clearManagedDoltRuntimeWithMutation(layout, portText)
+	return err
+}
+
+// clearManagedDoltRuntimeWithMutation reports a committed state rewrite even
+// when a later PID-file cleanup fails, so callers can truthfully expose a
+// partially-applied stop.
+func clearManagedDoltRuntimeWithMutation(layout managedDoltRuntimeLayout, portText string) (bool, error) {
 	port := 0
 	if state, err := readDoltRuntimeStateFile(layout.StateFile); err == nil {
 		port = state.Port
@@ -231,12 +268,12 @@ func clearManagedDoltRuntime(layout managedDoltRuntimeLayout, portText string) e
 		DataDir:   layout.DataDir,
 		StartedAt: time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
-		return err
+		return false, err
 	}
 	if err := os.Remove(layout.PIDFile); err != nil && !os.IsNotExist(err) {
-		return err
+		return true, err
 	}
-	return nil
+	return true, nil
 }
 
 func managedDoltStopFields(report managedDoltStopReport) []string {
