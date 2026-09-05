@@ -77,13 +77,14 @@ func discoverDoltProcesses() ([]DoltProcInfo, error) {
 			continue
 		}
 		out = append(out, DoltProcInfo{
-			PID:             pid,
-			Argv:            argv,
-			Ports:           pidPorts[pid],
-			RSSBytes:        readProcRSSBytes(pid),
-			StartTimeTicks:  readProcStartTimeTicks(pid),
-			CWDState:        doltProcCWDState(pid),
-			ConfigPathState: doltConfigPathState(argv),
+			PID:              pid,
+			Argv:             argv,
+			Ports:            pidPorts[pid],
+			RSSBytes:         readProcRSSBytes(pid),
+			StartTimeTicks:   readProcStartTimeTicks(pid),
+			CWDState:         doltProcCWDState(pid),
+			ConfigPathState:  doltConfigPathState(argv),
+			ContainerRuntime: doltProcContainerRuntime(pid),
 		})
 	}
 	return out, nil
@@ -196,6 +197,31 @@ func doltProcCWDState(pid int) string {
 		return procPathStateUnknown
 	}
 	return cwdStateFromLink(link, cwdLink)
+}
+
+// doltProcContainerRuntime reports the container runtime managing pid, by
+// checking only the first line of /proc/<pid>/cgroup for that runtime's
+// cgroup path marker. Returns "" for a normal host process, a process whose
+// cgroup can't be read (host with no /proc, timeout, permission), or a host
+// cgroup line that carries neither marker — classifyDoltProcess treats "" as
+// no signal (ga-sm1cvj).
+func doltProcContainerRuntime(pid int) string {
+	if pid <= 0 {
+		return ""
+	}
+	data, err := readWithTimeout(filepath.Join("/proc", strconv.Itoa(pid), "cgroup"))
+	if err != nil || len(data) == 0 {
+		return ""
+	}
+	line, _, _ := strings.Cut(string(data), "\n")
+	switch {
+	case strings.Contains(line, "libpod-"):
+		return "podman"
+	case strings.Contains(line, "docker-"):
+		return "docker"
+	default:
+		return ""
+	}
 }
 
 // doltConfigPathState classifies the --config path from a dolt sql-server
