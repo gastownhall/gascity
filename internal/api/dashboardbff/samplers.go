@@ -593,9 +593,9 @@ func readDoltServerPort(beadsPath string) int {
 	return port
 }
 
-// readDoltMode returns the persisted Beads storage mode for a store. An empty
-// result means metadata was unavailable or malformed; callers should preserve
-// the direct-mode fallback in that case.
+// readDoltMode returns the persisted Beads storage mode and whether it is safe
+// to trust a direct-mode port artifact. Missing markers are safe for legacy
+// direct stores; malformed or unreadable markers fail closed.
 func readDoltMode(beadsPath string) (string, bool) {
 	raw, err := os.ReadFile(filepath.Join(beadsPath, "metadata.json"))
 	metadataPresent := err == nil
