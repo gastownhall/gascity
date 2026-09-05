@@ -25,9 +25,11 @@ TEST_IMAGE_NOTMUX="gc-test-agent-notmux"
 # The flag is buildx-only: the legacy builder (DOCKER_BUILDKIT=0) rejects it. Add
 # it only when a buildx builder is reachable AND reports a driver other than
 # `docker`, which already stores its results in the engine. An unreachable builder
-# yields an empty driver and therefore the un-flagged, pre-existing behavior.
-BUILDX_DRIVER="$(docker buildx inspect 2>/dev/null | sed -n 's/^Driver:[[:space:]]*//p')"
-if [ -n "$BUILDX_DRIVER" ] && [ "$BUILDX_DRIVER" != "docker" ]; then
+# yields an empty driver (the `|| true` keeps `errexit` from aborting here) and
+# therefore the un-flagged, pre-existing behavior. `DOCKER_BUILDKIT=0` forces the
+# legacy builder regardless of what buildx reports, so it is excluded explicitly.
+BUILDX_DRIVER="$(docker buildx inspect 2>/dev/null | sed -n 's/^Driver:[[:space:]]*//p' | head -n1 || true)"
+if [ -n "$BUILDX_DRIVER" ] && [ "$BUILDX_DRIVER" != "docker" ] && [ "${DOCKER_BUILDKIT:-1}" != "0" ]; then
     BUILD_LOAD_FLAG="--load"
 else
     BUILD_LOAD_FLAG=""
