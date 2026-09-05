@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -86,10 +87,47 @@ func (o hostedDoltInitOptions) validateRequest(provider string) error {
 	if target == "local" && o.enabled() {
 		return fmt.Errorf("local beads target cannot be combined with --dolt-host or endpoint flags")
 	}
-	if (strings.TrimSpace(o.Transport) != "" || strings.TrimSpace(o.Target) != "" || o.enabled()) && provider != "" && provider != "bd" {
-		return fmt.Errorf("beads transport/endpoint selectors require the bd beads provider (configured provider %q)", provider)
+	if (strings.TrimSpace(o.Transport) != "" || strings.TrimSpace(o.Target) != "" || o.enabled()) && !contract.ProviderUsesBDContract(provider) {
+		return fmt.Errorf("beads transport/endpoint selectors require a bd-backed beads provider (configured provider %q)", provider)
 	}
 	return nil
+}
+
+// effectiveInitBeadsProvider resolves the provider that will own a newly
+// initialized city's beads store. GC_BEADS is the runtime override used by
+// the rest of the CLI; when it is absent, an empty city setting has the
+// canonical bd default. Init uses this value during its read-only preflight
+// so an incompatible selector cannot leave a partial scaffold behind.
+func effectiveInitBeadsProvider(configured string) string {
+	if provider := strings.TrimSpace(os.Getenv("GC_BEADS")); provider != "" {
+		return provider
+	}
+	if provider := strings.TrimSpace(configured); provider != "" {
+		return provider
+	}
+	return "bd"
+}
+
+// validateInitBeadsBackend applies the same runtime backend override used by
+// the beads provider to init's read-only preflight. A selector or external
+// endpoint must never be accepted for an embedded/non-Dolt backend, because
+// doing so would create a scaffold that cannot honor the requested topology.
+func (o hostedDoltInitOptions) validateInitBeadsBackend(configured string) error {
+	explicit := o.enabled() || strings.TrimSpace(o.Transport) != "" || strings.TrimSpace(o.Target) != ""
+	if !explicit {
+		return nil
+	}
+	backend := strings.ToLower(strings.TrimSpace(configured))
+	if envBackend := strings.TrimSpace(os.Getenv("GC_BEADS_BACKEND")); envBackend != "" {
+		backend = strings.ToLower(envBackend)
+	}
+	if backend == "" || backend == "dolt" || backend == "bd" {
+		return nil
+	}
+	if backend == "doltlite" && o.enabled() {
+		return fmt.Errorf("--dolt-host configures an external Dolt server and is incompatible with the doltlite beads backend; unset the doltlite backend (GC_BEADS_BACKEND or [beads] backend) to use the dolt (server) backend")
+	}
+	return fmt.Errorf("beads transport/endpoint selectors require the dolt backend (configured backend %q)", configured)
 }
 
 // applySelectorToCityConfig resolves the provider-neutral init selectors onto
@@ -105,13 +143,14 @@ func (o hostedDoltInitOptions) applySelectorToCityConfig(cfg *config.City) error
 	explicit := strings.TrimSpace(o.Transport) != "" || strings.TrimSpace(o.Target) != "" || o.enabled()
 	provider := strings.ToLower(strings.TrimSpace(cfg.Beads.Provider))
 	backend := strings.ToLower(strings.TrimSpace(cfg.Beads.Backend))
-	if !explicit && (provider != "" && provider != "bd" || backend != "" && backend != "dolt" && backend != "bd") {
+	providerUsesBD := contract.ProviderUsesBDContract(provider)
+	if !explicit && (!providerUsesBD || backend != "" && backend != "dolt" && backend != "bd") {
 		// Non-Dolt providers/backends own their storage topology. Omitted
 		// selectors must not rewrite their config to the proxied default.
 		return nil
 	}
 	if explicit {
-		if provider != "" && provider != "bd" || backend != "" && backend != "dolt" && backend != "bd" {
+		if !providerUsesBD || backend != "" && backend != "dolt" && backend != "bd" {
 			return fmt.Errorf("beads transport/endpoint selectors require the bd/dolt backend (configured provider %q, backend %q)", provider, cfg.Beads.Backend)
 		}
 	}

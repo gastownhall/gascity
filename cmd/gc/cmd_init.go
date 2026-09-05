@@ -521,7 +521,11 @@ func cmdInitWithPreparedWizardInternal(args []string, prepared wizardConfig, pre
 	// Validate selector syntax and provider compatibility before probing or
 	// mutating the destination. Explicit transport selectors are meaningful
 	// only for the bd provider; omitted selectors leave other providers alone.
-	if err := prepared.hostedDolt.validateRequest(""); err != nil {
+	if err := prepared.hostedDolt.validateRequest(effectiveInitBeadsProvider("")); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := prepared.hostedDolt.validateInitBeadsBackend(""); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1161,6 +1165,14 @@ func cmdInitFromTOMLFileWithOptionsInternal(fs fsys.FS, tomlSrc, cityPath, nameO
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if err := hosted.validateRequest(effectiveInitBeadsProvider(cfg.Beads.Provider)); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := hosted.validateInitBeadsBackend(cfg.Beads.Backend); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if err := hosted.applySelectorToCityConfig(cfg); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1340,6 +1352,14 @@ func warnEmptyTemplateMissingBootstrapProfile(wiz wizardConfig, stderr io.Writer
 }
 
 func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, stdout, stderr io.Writer, preserveExisting bool) int {
+	if err := wiz.hostedDolt.validateRequest(effectiveInitBeadsProvider("")); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := wiz.hostedDolt.validateInitBeadsBackend(""); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	warnEmptyTemplateMissingBootstrapProfile(wiz, stderr)
 	tomlPath := filepath.Join(cityPath, citylayout.CityConfigFile)
 	if cityHasScaffoldFS(fs, cityPath) {
@@ -1810,6 +1830,12 @@ func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverri
 		return 1
 	} else if sourceCfg, err := config.Parse(data); err != nil {
 		fmt.Fprintf(stderr, "gc init --from: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	} else if err := hosted.validateRequest(effectiveInitBeadsProvider(sourceCfg.Beads.Provider)); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	} else if err := hosted.validateInitBeadsBackend(sourceCfg.Beads.Backend); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	} else if err := hosted.applySelectorToCityConfig(sourceCfg); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
