@@ -403,6 +403,16 @@ func releaseOrphanedPoolAssignments(
 		// probe below reads the same store; the missing-store report stays where
 		// it was, so a bead skipped by a liveness gate never reaches it.
 		ownerStore := assignedWorkOwnerStore(cfg, store, rigStores, assignedWorkStores, i, wb)
+		// Pool session names and aliases are reusable identities: a successor
+		// seat can legitimately expose the same assignee string as the session
+		// that originally claimed this work. Claim-time gc.session_id is the
+		// exact, unique owner when present, so use it for session liveness while
+		// retaining assignee for route preservation and the release CAS. Claims
+		// from older clients carry no session ID and keep the legacy lookup.
+		livenessIdentity := assignee
+		if sessionID := strings.TrimSpace(wb.Metadata[beadmeta.SessionIDMetadataKey]); sessionID != "" {
+			livenessIdentity = sessionID
+		}
 		switch {
 		case assignee == "":
 			if wb.Status != "in_progress" {
@@ -430,7 +440,7 @@ func releaseOrphanedPoolAssignments(
 				continue
 			}
 		default:
-			if openSessionOwnsWork(legacyOpenIdentifiers, openIdentifiers, assignee, workStoreRef, storeRefAware) {
+			if openSessionOwnsWork(legacyOpenIdentifiers, openIdentifiers, livenessIdentity, workStoreRef, storeRefAware) {
 				continue
 			}
 			if assigneePreservesNamedSessionRoute(cfg, cityPath, template, assignee, workStoreRef, storeRefAware) {
@@ -441,10 +451,15 @@ func releaseOrphanedPoolAssignments(
 			// identical either way, but this one answers from the in-memory
 			// openSessionInfos snapshot while the next one issues a live
 			// per-assignee store listing.
+			//
+			// This gate keeps `assignee`, not livenessIdentity: it answers on the
+			// assignee-vs-template route shape (a bare-template claim), not on
+			// session identity, so substituting the claim-time session ID would
+			// make it never fire and release live ephemeral holders.
 			if liveEphemeralSessionForTemplate(openSessionInfos, cfg, cityPath, agentCfg, assignee, template, workStoreRef, storeRefAware) {
 				continue
 			}
-			if memoizedLiveOpenSessionAssignmentExists(sessionStoreLiveAssignee, assignee, sessionStore.Store, assignee) {
+			if memoizedLiveOpenSessionAssignmentExists(sessionStoreLiveAssignee, livenessIdentity, sessionStore.Store, livenessIdentity) {
 				continue
 			}
 			// The sessions binding is not the only ledger that can hold a session
@@ -470,10 +485,10 @@ func releaseOrphanedPoolAssignments(
 				probeCallStart := time.Now()
 				if storeAware && storeRefAware {
 					memoizedProbeCount++
-					live = memoizedLiveOpenSessionAssignmentExists(ownerStoreLiveAssignee, workStoreRef+"\x00"+assignee, ownerStore, assignee)
+					live = memoizedLiveOpenSessionAssignmentExists(ownerStoreLiveAssignee, workStoreRef+"\x00"+livenessIdentity, ownerStore, livenessIdentity)
 				} else {
 					fallbackProbeCount++
-					live = liveOpenSessionAssignmentExists(ownerStore, assignee)
+					live = liveOpenSessionAssignmentExists(ownerStore, livenessIdentity)
 				}
 				probeElapsed += time.Since(probeCallStart)
 				if live {
