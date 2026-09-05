@@ -2689,6 +2689,64 @@ func TestReleaseOrphanedPoolAssignments_ReopensClosedClaimerDespiteLiveSuccessor
 	}
 }
 
+func TestReleaseOrphanedPoolAssignments_KeepsOpenExactClaimerDespiteStaleAssigneeAlias(t *testing.T) {
+	store := beads.NewMemStore()
+	claimer, err := store.Create(beads.Bead{
+		Title:  "live worker",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         "worker-current-name",
+			"template":             "worker",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create claimer session bead: %v", err)
+	}
+
+	work, err := store.Create(beads.Bead{
+		Title:    "work held by live exact claimer",
+		Assignee: "worker-prior-name",
+		Metadata: map[string]string{
+			"gc.routed_to":                "worker",
+			beadmeta.SessionIDMetadataKey: claimer.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set work status: %v", err)
+	}
+	if work, err = store.Get(work.ID); err != nil {
+		t.Fatalf("Reload work bead: %v", err)
+	}
+
+	released := releaseOrphanedPoolAssignmentsFromBeads(
+		store,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		"",
+		[]beads.Bead{claimer},
+		[]beads.Bead{work},
+		[]beads.Store{store},
+		nil,
+		nil,
+	)
+	if len(released) != 0 {
+		t.Fatalf("released = %v, want none while exact claimer remains open", released)
+	}
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "worker-prior-name" {
+		t.Fatalf("work = status %q assignee %q, want claim preserved", got.Status, got.Assignee)
+	}
+}
+
 func TestDirectSessionBeadIDCandidates_SkipsFlagLikeCandidates(t *testing.T) {
 	// agent.SessionNameFor encodes "/" as "--" for qualified identities, so a
 	// named-session assignee can carry a "--" pair. The suffix starting at the
