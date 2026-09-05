@@ -474,7 +474,10 @@ func TestClaudePermissionModeMapsToAcceptedCLIValues(t *testing.T) {
 // #5415: codex CLI >= 0.128 deprecated --full-auto, and >= 0.147.0 removes it
 // entirely (codex exec --full-auto now errors instead of running). auto-edit
 // must use the modern replacement: --sandbox workspace-write plus
-// --ask-for-approval never, matching the no-prompt semantics of the old flag.
+// --ask-for-approval never. (--full-auto was an alias for
+// `-a on-failure --sandbox workspace-write`; gc pins `never` rather than
+// `on-failure` because an escalation prompt in an unattended slung pane
+// blocks forever.)
 func TestCodexAutoEditMapsToUnremovedCLIFlags(t *testing.T) {
 	providers := BuiltinProviders()
 	codex, ok := providers["codex"]

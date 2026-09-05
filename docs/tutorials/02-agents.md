@@ -120,11 +120,13 @@ option_defaults = { model = "o4-mini", permission_mode = "suggest" }
 ```
 
 <Note>
-`suggest` requires interactive approval for each action, so an agent set to it
-can't complete unattended work like the `gc sling` walkthrough below. Reach for
-`suggest` on an agent you'll attach to and approve step-by-step; for
-fire-and-forget slung work, use a mode that doesn't block on approval, such as
-`auto-edit` or `unrestricted`.
+`suggest` maps to `--ask-for-approval untrusted --sandbox read-only`: trusted
+read-only commands run without prompting, but anything outside that boundary —
+including writing a file — blocks on interactive approval. So an agent set to
+`suggest` can't finish unattended work like the `gc sling` walkthrough below,
+which has to write `review.md`. Reach for `suggest` on an agent you'll attach
+to and approve step-by-step; for fire-and-forget slung work, use a mode that
+doesn't block on approval, such as `auto-edit` or `unrestricted`.
 </Note>
 
 That file would live at `agents/reviewer/agent.toml`. Valid values come from
