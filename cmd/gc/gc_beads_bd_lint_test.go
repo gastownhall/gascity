@@ -274,6 +274,80 @@ func TestDoltliteMaintenanceGatesStampOnReindex(t *testing.T) {
 	}
 }
 
+// ambientSocketUnsetPattern requires BEADS_DOLT_SERVER_SOCKET to appear in an
+// `unset` statement rather than merely somewhere in the helper body. Anchoring
+// on the statement form is what makes this a scrub assertion instead of a
+// spelling assertion: a bare substring match is equally satisfied by a line
+// that *sets* the socket, which is the exact regression being guarded.
+var ambientSocketUnsetPattern = regexp.MustCompile(`(?m)^\s*unset\b[^\n]*\bBEADS_DOLT_SERVER_SOCKET\b`)
+
+// ambientSocketAssignPattern is the inverse guard: assigning the socket inside
+// these helpers re-establishes the ambient topology the unset exists to drop.
+var ambientSocketAssignPattern = regexp.MustCompile(`(?m)^\s*(export\b[^\n]*\s)?BEADS_DOLT_SERVER_SOCKET=`)
+
+// ambientSocketBdInvocations lists the call-site spellings the ordering check
+// recognizes. Each carries the argument expansion so an anchor cannot land on
+// `bd_bin="${BD_BIN:-bd}"`, which only computes the binary name and can be
+// hoisted without moving either the scrub or the invocation.
+var ambientSocketBdInvocations = []string{`"$bd_bin" "$@"`, `"${BD_BIN:-bd}" "$@"`}
+
+// TestBeadsHelpersClearAmbientSocket proves the proxied and DoltLite helpers
+// scrub BEADS_DOLT_SERVER_SOCKET before invoking bd. An inherited socket must
+// not override the explicit proxied or DoltLite selection: gc's own env
+// projection (cmd/gc/bd_env.go) drops host/port whenever a socket is present,
+// so a leaked socket silently redirects an explicitly selected topology.
+//
+// run_bd_pinned is deliberately not asserted: it does not scrub the socket
+// today, and whether it should depends on beads' own connection-resolution
+// order, which is tracked separately (ga-kbcwc).
+func TestBeadsHelpersClearAmbientSocket(t *testing.T) {
+	root := repoRootForLint(t)
+	scriptPath := filepath.Join(root, "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
+	data, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("read script: %v", err)
+	}
+	script := string(data)
+
+	for _, name := range []string{"run_bd_init_proxied", "run_bd_doltlite"} {
+		// Shell binds the last definition of a name, while extractShellFunction
+		// grades the first. A duplicate definition appended without the scrub
+		// would leave this guard green while the executed copy leaks the socket.
+		if got := countShellFunctionDefinitions(script, name); got != 1 {
+			t.Errorf("%s definitions = %d, want 1; the guard grades the first definition "+
+				"but shell executes the last", name, got)
+			continue
+		}
+		fn := extractShellFunction(t, script, name)
+
+		if ambientSocketAssignPattern.MatchString(fn) {
+			t.Errorf("%s assigns BEADS_DOLT_SERVER_SOCKET; the helper must drop the ambient socket, "+
+				"not establish one:\n%s", name, fn)
+		}
+		unsetLoc := ambientSocketUnsetPattern.FindStringIndex(fn)
+		if unsetLoc == nil {
+			t.Errorf("%s does not unset BEADS_DOLT_SERVER_SOCKET:\n%s", name, fn)
+			continue
+		}
+
+		invokeAt := -1
+		for _, anchor := range ambientSocketBdInvocations {
+			if at := strings.Index(fn, anchor); at >= 0 && (invokeAt < 0 || at < invokeAt) {
+				invokeAt = at
+			}
+		}
+		if invokeAt < 0 {
+			t.Errorf("%s: no recognized bd invocation to order against. Add the new call-site "+
+				"spelling to ambientSocketBdInvocations rather than leaving the ordering check "+
+				"silently unenforced:\n%s", name, fn)
+			continue
+		}
+		if unsetLoc[0] > invokeAt {
+			t.Errorf("%s clears ambient socket after invoking bd:\n%s", name, fn)
+		}
+	}
+}
+
 func countShellFunctionDefinitions(script, name string) int {
 	pattern := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(name) + `\(\) \{`)
 	return len(pattern.FindAllStringIndex(script, -1))
