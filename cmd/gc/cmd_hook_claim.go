@@ -1216,7 +1216,13 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 			sibling.ID == bead.ID ||
 			strings.TrimSpace(sibling.Assignee) != "" ||
 			!strings.EqualFold(strings.TrimSpace(sibling.Status), "open") ||
-			!hookClaimMatchesRoute(sibling, opts.RouteTargets) {
+			!hookClaimMatchesRoute(sibling, opts.RouteTargets) ||
+			// Pre-assignment is a decision about what to DO with a bead, and a
+			// canonical dispatch hold (beadmeta.DispatchHoldLabels) means the
+			// sibling's required next actor is, by construction, not this
+			// claimant — mirrors isHeldHookCandidate in cmd_hook.go, the same
+			// check on the JSON-decoded work-query shape (gas-kg6, #6026).
+			beadCarriesDispatchHoldLabel(sibling.Labels) {
 			continue
 		}
 		if err := ops.AssignContinuation(ctx, dir, opts.Env, sibling.ID, pinAssignee); err != nil {
@@ -1225,6 +1231,23 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 		assigned = append(assigned, sibling.ID)
 	}
 	return assigned, nil
+}
+
+// beadCarriesDispatchHoldLabel reports whether labels contains a canonical
+// dispatch hold value (beadmeta.DispatchHoldLabels), compared case-insensitively.
+// Mirrors isHeldHookCandidate's comparison logic (cmd_hook.go) but operates
+// directly on beads.Bead's Labels []string instead of that function's
+// JSON-decoded map[string]any/[]any shape.
+func beadCarriesDispatchHoldLabel(labels []string) bool {
+	for _, label := range labels {
+		label = strings.TrimSpace(label)
+		for _, hold := range beadmeta.DispatchHoldLabels {
+			if strings.EqualFold(label, hold) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func hookClaimWithBdStore(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
