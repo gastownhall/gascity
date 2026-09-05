@@ -221,3 +221,66 @@ func TestReadFilteredWithInFlightSinceMatchesFullRead(t *testing.T) {
 		t.Fatalf("got %+v, want seq 90 then 92", got)
 	}
 }
+
+// TestReadFilteredTailSinceStopsAtHorizon covers the walk the supervisor's
+// event API actually runs: humaHandleEventList -> fetchEventPageAscending ->
+// FileRecorder.ListTail -> ReadFilteredTail. A selective Type filter combined
+// with Since used to walk to byte 0 chasing a limit it could never reach,
+// because everything past the window fails matchesFilter — the same full parse
+// the forward scan did, from the other end.
+func TestReadFilteredTailSinceStopsAtHorizon(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	now := time.Now().UTC()
+
+	var evts []Event
+	padding := string(bytes.Repeat([]byte("x"), 4*1024))
+	// Ancient history the walk must not reach, holding events that WOULD
+	// match the Type filter if Since were not enforced as a horizon.
+	for i := 0; i < 50; i++ {
+		evts = append(evts, Event{
+			Seq: uint64(i + 1), Type: "bead.closed", Actor: "api",
+			Ts: now.Add(-72 * time.Hour), Message: padding,
+		})
+	}
+	evts = append(evts, Event{Seq: 100, Type: "bead.closed", Actor: "api", Ts: now.Add(-1 * time.Minute)})
+	writeLog(t, path, evts)
+
+	// limit 50 is far more than the window holds, so only the horizon can
+	// stop the walk.
+	got, err := ReadFilteredTail(path, Filter{Type: "bead.closed", Since: now.Add(-5 * time.Minute)}, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Seq != 100 {
+		t.Fatalf("got %d events %+v, want only seq 100 — the older matches are outside the window", len(got), got)
+	}
+}
+
+// TestReadFilteredTailWithoutSinceIsUnchanged pins that the horizon is opt-in.
+// A tail read with no Since must still walk as far as it needs to fill its
+// limit, which is what every existing caller depends on.
+func TestReadFilteredTailWithoutSinceIsUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	base := time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC)
+
+	var evts []Event
+	padding := string(bytes.Repeat([]byte("x"), 4*1024))
+	evts = append(evts, Event{Seq: 1, Type: "target.type", Actor: "api", Ts: base})
+	for i := 0; i < 40; i++ {
+		evts = append(evts, Event{
+			Seq: uint64(i + 2), Type: "other.type", Actor: "api",
+			Ts: base.Add(time.Duration(i) * time.Second), Message: padding,
+		})
+	}
+	writeLog(t, path, evts)
+
+	got, err := ReadFilteredTail(path, Filter{Type: "target.type"}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Seq != 1 {
+		t.Fatalf("got %+v, want the seq-1 match ~160KB back", got)
+	}
+}
