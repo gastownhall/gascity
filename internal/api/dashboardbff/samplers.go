@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // The three Health-view samplers (supervisor-status, dolt-noms trend, per-rig
@@ -199,7 +201,8 @@ func (cs *citySampler) loop(ctx context.Context) {
 
 // refresh recomputes the cached snapshot off the request path. It is the
 // module's hot loop, so it does ALL blocking/expensive work — the status read,
-// the parse, and the per-rig bd-doctor + TCP probe fan-out — on local
+// the parse, and the per-rig provider probe (plus direct-mode TCP probe)
+// fan-out — on local
 // variables with NO lock held, then takes cs.mu.Lock() exactly once at the end
 // to publish the computed fields (microseconds). The contract is that a reader
 // (supervisorStatus/doltTrend/rigStoreHealth) never blocks behind a probe, so
@@ -255,8 +258,9 @@ func (cs *citySampler) refresh(ctx context.Context) {
 		}
 	}
 
-	// 4. Probe the rigs (5-min cadence; heavy: one bd doctor + TCP dial per
-	// rig) into locals. No lock is held across the fan-out.
+	// 4. Probe the rigs (5-min cadence; heavy: one provider ping per rig and a
+	// TCP dial only for direct/server stores) into locals. No lock is held
+	// across the fan-out.
 	var (
 		newRigs    []rigStoreHealth
 		rigChanged bool
@@ -387,9 +391,20 @@ func parseStatusBody(raw json.RawMessage) statusBodyParsed {
 
 // ── Per-rig store probe (ported from routes/rig-store-health.ts) ───────────
 
-var benignDoctorCategories = map[string]bool{"Git Integration": true, "Integrations": true}
+var benignCheckCategories = map[string]bool{"Git Integration": true, "Integrations": true}
 
 const doltConnectionCheck = "Dolt Connection"
+
+// pingConnectivityCheck is the name of the single connectivity check
+// synthesized from `bd ping`. It is the ping-mode counterpart of
+// doltConnectionCheck, and doltConnectedFromChecks matches both so a
+// server-backed store still reports its connectivity when the probe ran
+// through ping.
+const pingConnectivityCheck = "Database Connectivity"
+
+// maxProbeErrorRunes caps subprocess error text folded into a check message or
+// note, so a chatty provider cannot bloat the snapshot the dashboard polls.
+const maxProbeErrorRunes = 512
 
 func (m *samplerManager) probeRig(ctx context.Context, rigName, rigPath string) rigStoreHealth {
 	beadsPath := filepath.Join(rigPath, ".beads")
@@ -401,7 +416,15 @@ func (m *samplerManager) probeRig(ctx context.Context, rigName, rigPath string) 
 	}
 
 	var doltEndpoint *string
-	port := readDoltServerPort(beadsPath)
+	// A proxied-server store owns transport selection inside Beads. In
+	// particular, proxied-local may leave a stale dolt-server.port artifact
+	// behind; never infer proxy health by dialing that port. Direct/server
+	// stores retain the legacy endpoint and TCP probe for parity.
+	port := 0
+	mode, modeSafe := readDoltMode(beadsPath)
+	if modeSafe && mode != "proxied-server" {
+		port = readDoltServerPort(beadsPath)
+	}
 	if port > 0 {
 		ep := "127.0.0.1:" + strconv.Itoa(port)
 		doltEndpoint = &ep
@@ -409,12 +432,36 @@ func (m *samplerManager) probeRig(ctx context.Context, rigName, rigPath string) 
 
 	var checks []rigStoreCheck
 	var note string
-	if res, err := m.exec.execBdDoctor(ctx, beadsPath); err != nil {
-		note = "bd doctor probe failed: " + err.Error()
-	} else if parsed, ok := parseDoctorChecks(res.stdout); ok {
+	if res, err := m.exec.execBdPing(ctx, beadsPath); err != nil {
+		// An execution-level failure means the connectivity check did not run
+		// (for example timeout, cancellation, or executable spawn failure). It
+		// is therefore a database probe failure, not an incomplete warning:
+		// synthesize the same typed check used for a provider-level ping error so
+		// the rollup fails closed and the dashboard has actionable diagnostics.
+		checks = []rigStoreCheck{pingExecutionFailureCheck(err)}
+	} else if parsed, ok := parsePingCheck(res); ok {
 		checks = parsed
+	} else if res.exitCode != 0 {
+		// ping failed before it could emit JSON — the store could not be
+		// opened or the provider refused the connection, and the only
+		// actionable detail is the plain-text error on stderr. Synthesize the
+		// connectivity check ping would have emitted so the failure rolls up
+		// as "down" with a listed problem instead of an empty "warn".
+		msg := strings.TrimSpace(res.stderr)
+		if msg == "" {
+			msg = "database connectivity failed"
+		}
+		checks = []rigStoreCheck{{
+			Category: "Beads",
+			Name:     pingConnectivityCheck,
+			Status:   "error",
+			Message:  sanitizeTerminalOutput(truncateRunes(msg, maxProbeErrorRunes)),
+		}}
 	} else {
-		note = "bd doctor returned no JSON (embedded mode or dolt server unreachable)"
+		note = "bd ping returned no valid JSON (store unreachable or provider refused the probe)"
+		if stderr := strings.TrimSpace(res.stderr); stderr != "" {
+			note += ": " + truncateRunes(stderr, maxProbeErrorRunes)
+		}
 	}
 
 	var doltConnected *bool
@@ -432,72 +479,65 @@ func (m *samplerManager) probeRig(ctx context.Context, rigName, rigPath string) 
 	return rigStoreHealth{
 		Rig: rigName, BeadsPath: beadsPath, Rollup: rollup, Reachable: true,
 		DoltEndpoint: doltEndpoint, DoltConnected: doltConnected,
-		// Note carries subprocess/error text (bd doctor failure reason); sanitize
+		// Note carries subprocess/error text (bd ping failure reason); sanitize
 		// it before it reaches the browser, per the "all subprocess output is
 		// sanitized" contract.
 		IssueCount: issueCount, Problems: problems, Note: sanitizeTerminalOutput(note),
 	}
 }
 
-func parseDoctorChecks(stdout string) ([]rigStoreCheck, bool) {
-	trimmed := strings.TrimSpace(stdout)
-	if trimmed == "" || trimmed[0] != '{' {
-		return nil, false
+func pingExecutionFailureCheck(err error) rigStoreCheck {
+	msg := "bd ping execution failed"
+	if err != nil && strings.TrimSpace(err.Error()) != "" {
+		msg += ": " + err.Error()
 	}
-	var parsed struct {
-		Checks []struct {
-			Category string `json:"category"`
-			Name     string `json:"name"`
-			Status   string `json:"status"`
-			Message  string `json:"message"`
-		} `json:"checks"`
+	return rigStoreCheck{
+		Category: "Beads",
+		Name:     pingConnectivityCheck,
+		Status:   "error",
+		Message:  sanitizeTerminalOutput(truncateRunes(msg, maxProbeErrorRunes)),
 	}
-	if err := json.Unmarshal([]byte(trimmed), &parsed); err != nil {
-		return nil, false
-	}
-	if parsed.Checks == nil {
-		return nil, false
-	}
-	out := make([]rigStoreCheck, 0, len(parsed.Checks))
-	for _, c := range parsed.Checks {
-		cat := c.Category
-		if cat == "" {
-			cat = "unknown"
-		}
-		nm := c.Name
-		if nm == "" {
-			nm = "unknown"
-		}
-		// Category, Name, and Message all come from bd doctor's JSON output;
-		// sanitize each before it reaches the browser, per the "all subprocess
-		// output is sanitized" contract. Status is normalized to a fixed enum.
-		out = append(out, rigStoreCheck{
-			Category: sanitizeTerminalOutput(cat),
-			Name:     sanitizeTerminalOutput(nm),
-			Status:   normalizeDoctorStatus(c.Status),
-			Message:  sanitizeTerminalOutput(c.Message),
-		})
-	}
-	return out, true
 }
 
-func normalizeDoctorStatus(s string) string {
-	switch strings.ToLower(s) {
-	case "ok", "pass", "passed":
-		return "ok"
-	case "warning", "warn":
-		return "warning"
-	case "error", "fail", "failed", "critical":
-		return "error"
-	default:
-		return "warning"
+// parsePingCheck normalizes bd ping's provider-neutral JSON result into the
+// existing dashboard check shape. ping is intentionally a single connectivity
+// check: ping is available for embedded, direct-server, and
+// proxied-server stores, so the dashboard does not need transport-specific
+// branches. A non-zero exit is still represented as a check when ping emitted
+// valid JSON, preserving the actionable provider error for the dashboard.
+func parsePingCheck(res *execResult) ([]rigStoreCheck, bool) {
+	var payload struct {
+		Status string `json:"status"`
+		Error  string `json:"error"`
 	}
+	trimmed := strings.TrimSpace(res.stdout)
+	if trimmed == "" || trimmed[0] != '{' || json.Unmarshal([]byte(trimmed), &payload) != nil || payload.Status == "" {
+		return nil, false
+	}
+	status := "error"
+	if strings.EqualFold(payload.Status, "ok") && res.exitCode == 0 {
+		status = "ok"
+	}
+	message := payload.Error
+	if message == "" {
+		if status == "ok" {
+			message = "database connectivity ok"
+		} else {
+			message = "database connectivity failed"
+		}
+	}
+	return []rigStoreCheck{{
+		Category: "Beads",
+		Name:     pingConnectivityCheck,
+		Status:   status,
+		Message:  sanitizeTerminalOutput(message),
+	}}, true
 }
 
 func storeProblems(checks []rigStoreCheck) []rigStoreCheck {
 	out := []rigStoreCheck{}
 	for _, c := range checks {
-		if c.Status != "ok" && !benignDoctorCategories[c.Category] {
+		if c.Status != "ok" && !benignCheckCategories[c.Category] {
 			out = append(out, c)
 		}
 	}
@@ -525,7 +565,7 @@ func issueCountFromChecks(checks []rigStoreCheck) *int64 {
 
 func doltConnectedFromChecks(checks []rigStoreCheck) *bool {
 	for _, c := range checks {
-		if c.Name == doltConnectionCheck {
+		if c.Name == doltConnectionCheck || c.Name == pingConnectivityCheck {
 			ok := c.Status == "ok"
 			return &ok
 		}
@@ -571,6 +611,63 @@ func readDoltServerPort(beadsPath string) int {
 		return 0
 	}
 	return port
+}
+
+// readDoltMode returns the persisted Beads storage mode and whether it is safe
+// to trust a direct-mode port artifact. Only an explicit persisted server mode
+// permits a TCP probe. Missing, malformed, unreadable, embedded, and unknown
+// markers fail closed.
+func readDoltMode(beadsPath string) (string, bool) {
+	raw, err := os.ReadFile(filepath.Join(beadsPath, "metadata.json"))
+	if err == nil {
+		var metadata struct {
+			DoltMode string `json:"dolt_mode"`
+		}
+		if json.Unmarshal(raw, &metadata) != nil {
+			// metadata.json is the persisted provider state. A malformed file
+			// must not be repaired or overridden by a second marker: a stale
+			// port artifact is never authoritative when this state is unreadable.
+			return "", false
+		}
+		mode := strings.ToLower(strings.TrimSpace(metadata.DoltMode))
+		if mode == "" {
+			// A present metadata file with no mode is an unknown provider state.
+			// Do not fall through to config.yaml, whose value may be stale.
+			return "", false
+		}
+		return recognizedDoltMode(mode)
+	} else if !os.IsNotExist(err) {
+		return "", false
+	}
+	// config.yaml is the canonical marker emitted by Gas City. Parse it rather
+	// than scanning lines so malformed YAML without dolt.mode cannot be mistaken
+	// for an unmarked legacy direct store.
+	configRaw, configErr := os.ReadFile(filepath.Join(beadsPath, "config.yaml"))
+	if configErr == nil {
+		var config struct {
+			DoltMode string `yaml:"dolt.mode"`
+		}
+		if err := yaml.Unmarshal(configRaw, &config); err != nil {
+			return "", false
+		}
+		if mode := strings.ToLower(strings.TrimSpace(config.DoltMode)); mode != "" {
+			return recognizedDoltMode(mode)
+		}
+	} else if !os.IsNotExist(configErr) {
+		return "", false
+	}
+	// Missing metadata and a config without an explicit recognized mode are
+	// both fail-closed. A legacy port file alone cannot authorize a TCP probe.
+	return "", false
+}
+
+func recognizedDoltMode(mode string) (string, bool) {
+	switch mode {
+	case "proxied-server", "server":
+		return mode, true
+	default:
+		return "", false
+	}
 }
 
 func tcpProbe(port int) bool {
