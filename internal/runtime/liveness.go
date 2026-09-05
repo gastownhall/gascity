@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 )
@@ -102,6 +103,31 @@ type BoundedLivenessObserver interface {
 // implementation always resolve to ObservationComplete with a nil error,
 // exactly matching today's behavior — additive only, no existing Provider
 // call site changes.
-func ObserveLivenessBounded(_ context.Context, _ Provider, _ string, _ []string, _ time.Duration) (Liveness, ObservationStatus, error) {
-	return Liveness{}, ObservationComplete, nil
+func ObserveLivenessBounded(ctx context.Context, sp Provider, name string, processNames []string, timeout time.Duration) (Liveness, ObservationStatus, error) {
+	boundedCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	type observation struct {
+		liveness Liveness
+		err      error
+	}
+	results := make(chan observation, 1)
+	go func() {
+		if observer, ok := sp.(BoundedLivenessObserver); ok {
+			liveness, err := observer.ObserveLivenessWithError(name, processNames)
+			results <- observation{liveness: liveness, err: err}
+			return
+		}
+		results <- observation{liveness: ObserveLiveness(sp, name, processNames)}
+	}()
+
+	select {
+	case obs := <-results:
+		if obs.err != nil && errors.Is(obs.err, ErrRuntimeUnavailable) {
+			return obs.liveness, ObservationIncomplete, obs.err
+		}
+		return obs.liveness, ObservationComplete, obs.err
+	case <-boundedCtx.Done():
+		return Liveness{}, ObservationIncomplete, boundedCtx.Err()
+	}
 }
