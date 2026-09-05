@@ -110,8 +110,11 @@ func (a SessionLogAdapter) TailMetaForProvider(provider, path string) (*sessionl
 
 // TailUsage reads per-invocation token usage entries from the tail of a
 // discovered transcript path, validating it against the search-path roots.
-func (a SessionLogAdapter) TailUsage(path string) ([]sessionlog.TailUsage, error) {
-	return sessionlog.ExtractTailUsageFromSearchPaths(a.SearchPaths, path)
+// The scan window grows until cursorID is inside it, so invocations appended
+// since the last extraction are not lost to the fixed tail window. An empty
+// cursorID keeps the single fixed window.
+func (a SessionLogAdapter) TailUsage(path, cursorID string) ([]sessionlog.TailUsage, error) {
+	return sessionlog.ExtractTailUsageSinceFromSearchPaths(a.SearchPaths, path, cursorID)
 }
 
 // CodexTailUsage reads per-invocation token usage from the tail of a codex
@@ -119,7 +122,12 @@ func (a SessionLogAdapter) TailUsage(path string) ([]sessionlog.TailUsage, error
 // (~/.codex/sessions) on top of the configured search paths, because
 // a.SearchPaths alone holds claude-style roots that would reject real codex
 // rollout locations.
-func (a SessionLogAdapter) CodexTailUsage(path string) ([]sessionlog.TailUsage, error) {
+// cursorID is accepted for signature symmetry with TailUsage but not yet
+// honored: the codex extractor collapses on cumulative totals rather than
+// per-message identity, so window growth needs its own correctness argument.
+// The codex family therefore keeps the fixed tail window for now.
+func (a SessionLogAdapter) CodexTailUsage(path, cursorID string) ([]sessionlog.TailUsage, error) {
+	_ = cursorID
 	return sessionlog.ExtractCodexTailUsageFromSearchPaths(a.SearchPaths, path)
 }
 
@@ -128,12 +136,12 @@ func (a SessionLogAdapter) CodexTailUsage(path string) ([]sessionlog.TailUsage, 
 // the provider's invocation-usage family (invocationUsageSpecs). It returns
 // (nil, nil) for families without invocation-telemetry support, so callers can
 // treat "no extractor" and "no usage" uniformly.
-func (a SessionLogAdapter) InvocationUsage(provider, path string) ([]sessionlog.TailUsage, error) {
+func (a SessionLogAdapter) InvocationUsage(provider, path, cursorID string) ([]sessionlog.TailUsage, error) {
 	family, ok := InvocationUsageFamily(provider)
 	if !ok {
 		return nil, nil
 	}
-	return invocationUsageSpecs[family].extract(a, path)
+	return invocationUsageSpecs[family].extract(a, path, cursorID)
 }
 
 // TailActivityForProvider reads tail activity for a provider whose transcript

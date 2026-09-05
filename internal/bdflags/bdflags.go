@@ -15,16 +15,28 @@ import (
 
 // globalValueFlags are accepted by every bd subcommand and consume the next
 // argument as their value.
+//
+// Completeness is load-bearing, not cosmetic. A caller locating the verb reads
+// the VALUE of an omitted flag as the subcommand — `--profile default create`
+// resolves to "default" — and every guard keyed off the verb then stops firing
+// on an ordinary invocation, with no test failing. Which side of the split a
+// flag lands on matters as much as its presence: a value flag filed as a bool
+// is exactly that bypass. The two are pinned separately by
+// TestGlobalValueFlagsIsComplete and TestGlobalBoolFlagsIsComplete so a
+// misfiled flag fails the build rather than silently disarming a guard.
 var globalValueFlags = map[string]bool{
-	"--actor": true, "--db": true, "-C": true, "--directory": true,
-	"--dolt-auto-commit": true,
+	"--actor": true, "--database": true, "--db": true, "-C": true,
+	"--directory": true, "--dolt-auto-commit": true, "--mem-profile": true,
+	"--profile": true, "--server-url": true,
 }
 
 // globalBoolFlags are accepted by every bd subcommand and take no value.
+// See globalValueFlags for why the split between the two is load-bearing.
 var globalBoolFlags = map[string]bool{
-	"--global": true, "--ignore-schema-skew": true, "--json": true,
-	"--profile": true, "-q": true, "--quiet": true, "--readonly": true,
-	"--sandbox": true, "-v": true, "--verbose": true, "-h": true, "--help": true,
+	"--cpu-profile": true, "--global": true, "--ignore-schema-skew": true,
+	"--json": true, "--no-color": true, "-q": true, "--quiet": true,
+	"--readonly": true, "--sandbox": true, "-v": true, "--verbose": true,
+	"-h": true, "--help": true, "-V": true, "--version": true,
 }
 
 // valueFlagsBySub holds each subcommand's value-consuming flags (beyond the

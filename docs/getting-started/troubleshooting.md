@@ -328,9 +328,10 @@ the flock requirement entirely.
 
 ## Cursor MCP Tools Still Prompt or Appear Unavailable
 
-The built-in `cursor` provider starts `cursor-agent` with `-f` and leaves
-Cursor's MCP approval prompt enabled by default. This avoids silently approving
-user or global MCP servers that Cursor can also see through `~/.cursor/mcp.json`.
+The built-in `cursor` provider starts `cursor-agent` with `-f --trust` so an
+unattended worker does not stop at Cursor's workspace-trust dialog. Use it only
+for workspaces whose contents you trust. The flag does not approve MCP servers;
+Cursor's MCP approval prompt remains enabled by default.
 
 For unattended Cursor pool workers, opt in only after confirming that every
 workspace and user/global MCP server visible to Cursor is trusted. The
@@ -344,8 +345,8 @@ mcp_approval = "approve"
 ```
 
 If you override Cursor `args` directly, the override replaces the built-in
-args. Include `-f` yourself and add `--approve-mcps` only for the same explicit
-trust decision. Agent-level `args` overrides behave the same way.
+args. Include `-f --trust` yourself and add `--approve-mcps` only for the same
+explicit MCP trust decision. Agent-level `args` overrides behave the same way.
 
 Existing Cursor sessions keep the command fingerprint they were created with.
 The supervisor reconciler restarts sessions automatically after the fingerprint

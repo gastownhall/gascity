@@ -51,8 +51,10 @@ var (
 func (s *beadPolicyStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
 
 var (
-	_ beads.BatchDeleter = (*beadPolicyStore)(nil)
-	_ beads.BatchDeleter = (*beadPolicyGraphStore)(nil)
+	_ beads.BatchDeleter      = (*beadPolicyStore)(nil)
+	_ beads.BatchDeleter      = (*beadPolicyGraphStore)(nil)
+	_ beads.DepMetadataReader = (*beadPolicyStore)(nil)
+	_ beads.DepMetadataReader = (*beadPolicyGraphStore)(nil)
 )
 
 func wrapStoreWithBeadPolicies(store beads.Store, cfg *config.City) beads.Store {
@@ -106,6 +108,26 @@ func (s *beadPolicyStore) ReadyContext(ctx context.Context, query ...beads.Ready
 		return nil, fmt.Errorf("reading ready beads through policy store: %w", beads.ErrReadyContextUnsupported)
 	}
 	return reader.ReadyContext(ctx, expandPolicyReadyQuery(query...))
+}
+
+// DepMetadata forwards the inner store's edge-payload read. The policy layer
+// shapes creation and reads by tier; it has nothing to say about what an edge
+// carries, so the answer passes through untouched.
+//
+// Forwarded explicitly for the same reason as Count and ReadyContext — the
+// embedded Store interface strips optional capabilities — but the stakes here
+// are higher than a fallback: a caller that refuses on uncertainty, as the
+// infra-class migration does, would read the wrapper as UNABLE TO ANSWER and
+// refuse a city whose leaf store answers fine. An inner store without the read
+// gets an error rather than ("", false, nil), because "cannot be asked" and
+// "carries nothing" are different answers and collapsing them is what let the
+// migration drop edge payloads silently.
+func (s *beadPolicyStore) DepMetadata(issueID, dependsOnID string) (string, bool, error) {
+	reader, ok := s.Store.(beads.DepMetadataReader)
+	if !ok {
+		return "", false, fmt.Errorf("reading dependency metadata %s -> %s: policy-wrapped store %T exposes no edge-payload read", issueID, dependsOnID, s.Store)
+	}
+	return reader.DepMetadata(issueID, dependsOnID)
 }
 
 // Count implements beads.Counter with the same read-tier expansion as List.

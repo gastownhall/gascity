@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
@@ -376,6 +378,24 @@ func moleculeClassStore(recipe *formula.Recipe, workStore, graphStore beads.Stor
 	return workStore
 }
 
+// cookOnClassRouted compiles a formula and instantiates it in the store the
+// compiled recipe's class demands; molecule.Cook picks its store before compiling.
+//
+// The compile/validate/instantiate sequence itself belongs to
+// molecule.CookChoosingStore — this is that entry point with the class routing
+// as its chooser, so the only thing written out here is the routing decision.
+// A hand-copied Cook body would be a second implementation of the library's
+// contract, drifting silently the moment Cook grows an invariant.
+func cookOnClassRouted(ctx context.Context, workStore, graphStore beads.Store, formulaName string, searchPaths []string, opts molecule.Options) (*molecule.Result, error) {
+	if opts.ParentID == "" {
+		return nil, fmt.Errorf("cookOnClassRouted requires Options.ParentID")
+	}
+	result, _, err := molecule.CookChoosingStore(ctx, formulaName, searchPaths, opts, func(recipe *formula.Recipe) beads.Store {
+		return moleculeClassStore(recipe, workStore, graphStore)
+	})
+	return result, err
+}
+
 // recipeCoordClass returns the coordination class of the beads that
 // instantiating recipe produces.
 //
@@ -504,20 +524,38 @@ func newCityMailProvider(routes *storageRoutes, workStore beads.Store, cfg *conf
 // single-store bd backend, so this is byte-identical to the prior
 // extmsg.NewServices(workStore) and diverges only once a class relocates.
 //
-// A nil session directory is the one thing extmsg refuses, and it cannot happen
-// here: resolveSessionStore returns the work store when sessions are not
-// relocated. On the impossible path the error is reported and the unrouted
-// services are returned rather than dropping external messaging entirely.
+// A nil session directory is the one and only thing extmsg refuses, and it
+// cannot happen here: session.NewStore always returns a non-nil *session.Store,
+// whatever store it was handed, so the directory this passes is never nil.
+// TestCityExtMsgServicesCannotReachTheRefusalPath pins that, with a control
+// that a genuinely nil directory IS refused so the pin cannot pass vacuously.
+//
+// The unreachable path therefore refuses rather than falling back to the work
+// store. Falling back was the residency bug in miniature: on a city that
+// relocated the messaging class it would persist bindings, groups and
+// transcripts in the work ledger, where the class's own readers never look —
+// external messaging would appear to work and deliver nothing, which is worse
+// than not having it. Refusing surfaces the cause on every operation instead.
 func newCityExtMsgServices(routes *storageRoutes, workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) *extmsg.Services {
 	msgStore := resolveMailMessagesStore(routes, workStore, cfg, cityPath, rec)
 	sessStore := resolveSessionStore(routes, workStore, cfg, cityPath, rec)
 	svc, err := extmsg.NewServicesWithSessionDirectory(msgStore, session.NewStore(beads.SessionStore{Store: sessStore}))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "api: external messaging services: %v\n", err) //nolint:errcheck // best-effort stderr
-		unrouted := extmsg.NewServices(workStore)
-		return &unrouted
+		return refusedExtMsgServices(err)
 	}
 	return &svc
+}
+
+// refusedExtMsgServices builds external-messaging services whose every store
+// operation reports why messaging could not be wired, so a caller that reaches
+// them fails where it stands instead of reading and writing a store that does
+// not serve the messaging class.
+func refusedExtMsgServices(cause error) *extmsg.Services {
+	refused := extmsg.NewServices(refusedClassStore{
+		err: fmt.Errorf("external messaging is not available on this city: %w", cause),
+	})
+	return &refused
 }
 
 // warnFederationBlindOverrides tells an operator that this agent's own

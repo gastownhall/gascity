@@ -5,12 +5,14 @@ package beads
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -314,5 +316,105 @@ func TestNativeDoltStoreRealBackendRoundTrip(t *testing.T) {
 	}
 	if _, err := store.Get("gc-missing"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Get missing error = %v, want ErrNotFound", err)
+	}
+}
+
+// TestNativeDoltStoreDepMetadata pins the payload read a Dolt-backed source
+// needs to satisfy beadsGraphEdgeMetadataReader.
+//
+// The dependencies table has carried a metadata column all along; nothing in
+// Gas City could ask for it, which is what let the infra-class migration copy
+// edges and drop their payloads without noticing. The contract mirrors
+// SQLiteStore.DepMetadata exactly, including the two cases that are NOT errors:
+// an edge that does not exist and an edge whose payload is empty both answer
+// carried=false, because SQLite declines to persist an empty payload at all and
+// a reader that distinguished them here would report a difference the
+// destination cannot have.
+func TestNativeDoltStoreDepMetadata(t *testing.T) {
+	ctx := context.Background()
+	storage, err := beadslib.OpenBestAvailable(ctx, filepath.Join(t.TempDir(), ".beads"))
+	if err != nil {
+		t.Skipf("upstream native beads storage unavailable: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := storage.Close(); err != nil {
+			t.Fatalf("close upstream storage: %v", err)
+		}
+	})
+	if err := storage.SetConfig(ctx, "issue_prefix", "gc"); err != nil {
+		t.Fatalf("set issue prefix: %v", err)
+	}
+	store := newNativeDoltStoreWithStorageAndPrefix(storage, "dep-metadata", "gc")
+
+	source, err := store.Create(Bead{Title: "edge payload source"})
+	if err != nil {
+		t.Fatalf("Create source: %v", err)
+	}
+	target, err := store.Create(Bead{Title: "edge payload target"})
+	if err != nil {
+		t.Fatalf("Create target: %v", err)
+	}
+	bare, err := store.Create(Bead{Title: "bare edge source"})
+	if err != nil {
+		t.Fatalf("Create bare: %v", err)
+	}
+
+	const payload = `{"gate":"waits_for","threshold":3}`
+	if err := storage.AddDependency(ctx, &beadslib.Dependency{
+		IssueID:     source.ID,
+		DependsOnID: target.ID,
+		Type:        beadslib.DependencyType("blocks"),
+		Metadata:    payload,
+	}, "dep-metadata-test"); err != nil {
+		t.Fatalf("AddDependency with payload: %v", err)
+	}
+	if err := store.DepAdd(bare.ID, target.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd without payload: %v", err)
+	}
+
+	got, carried, err := store.DepMetadata(source.ID, target.ID)
+	if err != nil {
+		t.Fatalf("DepMetadata on a carrying edge: %v", err)
+	}
+	if !carried {
+		t.Fatalf("DepMetadata(%s, %s) carried = false, want true", source.ID, target.ID)
+	}
+	// Dolt types the metadata column as JSON and hands back its OWN rendering —
+	// today the payload above comes back re-spaced. The comparison is therefore
+	// by JSON value, not by bytes, and that is a standing constraint on any
+	// future carriage slice: it cannot verify a copy by diffing payload bytes
+	// across the two engines, because SQLite stores the string verbatim.
+	assertSameJSON(t, got, payload)
+
+	got, carried, err = store.DepMetadata(bare.ID, target.ID)
+	if err != nil {
+		t.Fatalf("DepMetadata on a bare edge: %v", err)
+	}
+	if carried || got != "" {
+		t.Fatalf("DepMetadata on a bare edge = (%q, %v), want (\"\", false)", got, carried)
+	}
+
+	got, carried, err = store.DepMetadata(target.ID, source.ID)
+	if err != nil {
+		t.Fatalf("DepMetadata on a nonexistent edge: %v", err)
+	}
+	if carried || got != "" {
+		t.Fatalf("DepMetadata on a nonexistent edge = (%q, %v), want (\"\", false)", got, carried)
+	}
+}
+
+// assertSameJSON fails unless got and want are the same JSON value, whatever
+// whitespace the engine that returned them chose.
+func assertSameJSON(t *testing.T, got, want string) {
+	t.Helper()
+	var gotValue, wantValue any
+	if err := json.Unmarshal([]byte(got), &gotValue); err != nil {
+		t.Fatalf("payload %q is not JSON: %v", got, err)
+	}
+	if err := json.Unmarshal([]byte(want), &wantValue); err != nil {
+		t.Fatalf("expected payload %q is not JSON: %v", want, err)
+	}
+	if !reflect.DeepEqual(gotValue, wantValue) {
+		t.Fatalf("payload = %q, want the JSON value of %q", got, want)
 	}
 }

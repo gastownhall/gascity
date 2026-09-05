@@ -403,10 +403,20 @@ func readDoltSQLServerArgv(pid int) ([]string, bool) {
 	return argv, true
 }
 
+// psOutputFormat is the -o field spec passed to `ps` for process discovery.
+// Deliberately excludes rss=: some macOS hosts require an entitlement to
+// report resource-usage fields (%mem/vsz/rss/time) for processes outside the
+// caller's own session, and ps exits non-zero for the *entire* invocation
+// when it can't — turning a clean, zero-orphan scan into a reported
+// dolt-cleanup reap-stage error (gastownhall/gascity#5201). RSSBytes is
+// cosmetic-only downstream (planOrphanReap classifies purely on
+// ConfigPath/DataDir/CWDState, never on RSS), so it is not worth requesting.
+const psOutputFormat = "pid=,lstart=,command="
+
 func psLStartCommandLines() ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), psEnumerationTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "ps", "-ax", "-o", "pid=,rss=,lstart=,command=")
+	cmd := exec.CommandContext(ctx, "ps", "-ax", "-o", psOutputFormat)
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, err
@@ -421,17 +431,13 @@ func psLStartCommandLines() ([]string, error) {
 }
 
 func parseDoltPSLine(line string, pidPorts map[int][]int) (DoltProcInfo, bool) {
-	fields, command := consumeLeadingFields(line, 7)
-	if len(fields) != 7 || command == "" {
+	fields, command := consumeLeadingFields(line, 6)
+	if len(fields) != 6 || command == "" {
 		return DoltProcInfo{}, false
 	}
 	pid, err := strconv.Atoi(fields[0])
 	if err != nil || pid <= 0 {
 		return DoltProcInfo{}, false
-	}
-	rssKB, err := strconv.ParseInt(fields[1], 10, 64)
-	if err != nil || rssKB < 0 {
-		rssKB = 0
 	}
 	argv := parseDoltPSCommandLine(command)
 	if !looksLikeDoltSQLServer(argv) {
@@ -441,13 +447,12 @@ func parseDoltPSLine(line string, pidPorts map[int][]int) (DoltProcInfo, bool) {
 		PID:           pid,
 		Argv:          argv,
 		Ports:         pidPorts[pid],
-		RSSBytes:      rssKB * 1024,
-		StartIdentity: strings.Join(fields[2:7], " "),
+		StartIdentity: strings.Join(fields[1:6], " "),
 	}, true
 }
 
 func argvFromPSLine(line string) ([]string, bool) {
-	_, command := consumeLeadingFields(line, 7)
+	_, command := consumeLeadingFields(line, 6)
 	if command == "" {
 		return nil, false
 	}
