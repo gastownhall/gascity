@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -57,14 +58,16 @@ func (c *startupHealthEpisodesCheck) Run(_ *doctor.CheckContext) *doctor.CheckRe
 			nil)
 	}
 
+	now := time.Now()
 	var details []string
 	for _, ep := range episodes {
 		if ep.SessionName == "" {
 			details = append(details, fmt.Sprintf("malformed startup-health episode: missing session name (consecutive=%d)", ep.ConsecutiveCount))
 			continue
 		}
-		if ep.ConsecutiveCount >= defaultMaxWakeAttempts {
-			details = append(details, fmt.Sprintf("%s: %d consecutive startup_death failures", ep.SessionName, ep.ConsecutiveCount))
+		activelyQuarantined := !ep.QuarantinedUntil.IsZero() && ep.QuarantinedUntil.After(now)
+		if ep.ConsecutiveCount >= defaultMaxWakeAttempts || activelyQuarantined {
+			details = append(details, formatStartupHealthEpisodeDetail(ep))
 		}
 	}
 	if len(details) == 0 {
@@ -75,4 +78,34 @@ func (c *startupHealthEpisodesCheck) Run(_ *doctor.CheckContext) *doctor.CheckRe
 		fmt.Sprintf("%d startup-health episode issue(s) found", len(details)),
 		"investigate the affected session's provider start failures; a malformed episode's bead metadata needs manual repair. The episode clears automatically on the session's next successful start.",
 		details)
+}
+
+// formatStartupHealthEpisodeDetail renders one episode's diagnostic fields.
+// Kind and AlertDisposition render their actual stored value rather than an
+// assumed constant, since a stalled-reset episode must read differently from
+// a startup-death one; empty/zero fields render an explicit fallback label
+// instead of an empty field an operator could mistake for a rendering bug.
+// LastDetail is deliberately excluded — see the Run doc comment.
+func formatStartupHealthEpisodeDetail(ep session.StartupHealthEpisode) string {
+	kind := string(ep.Kind)
+	if kind == "" {
+		kind = "unspecified"
+	}
+	alert := string(ep.AlertDisposition)
+	if alert == "" {
+		alert = "none"
+	}
+	return fmt.Sprintf("%s: %d consecutive %s failures (first=%s, last=%s, quarantined_until=%s, alert=%s)",
+		ep.SessionName, ep.ConsecutiveCount, kind,
+		formatStartupHealthDetailTime(ep.FirstFailureAt),
+		formatStartupHealthDetailTime(ep.LastFailureAt),
+		formatStartupHealthDetailTime(ep.QuarantinedUntil),
+		alert)
+}
+
+func formatStartupHealthDetailTime(t time.Time) string {
+	if t.IsZero() {
+		return "unknown"
+	}
+	return t.Format(time.RFC3339)
 }
