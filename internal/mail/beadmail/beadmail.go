@@ -162,19 +162,24 @@ func (p *Provider) Send(from, to, subject, body string) (mail.Message, error) {
 	threadID := generateThreadID()
 	labels := []string{"thread:" + threadID}
 
-	title := subject
-	if title == "" && body != "" {
-		title = strings.SplitN(body, "\n", 2)[0]
-		if len(title) > 80 {
-			title = title[:77] + "..."
-		}
-	}
+	title := deriveSendTitle(subject, body)
 
 	b, err := p.createMessageBead(title, body, from, to, labels, metadata)
 	if err != nil {
 		return mail.Message{}, fmt.Errorf("beadmail send: %w", err)
 	}
 	return beadToMessage(b), nil
+}
+
+func deriveSendTitle(subject, body string) string {
+	if subject != "" || body == "" {
+		return subject
+	}
+	title := strings.SplitN(body, "\n", 2)[0]
+	if len(title) > 80 {
+		title = title[:77] + "..."
+	}
+	return title
 }
 
 // SendHandoff creates a handoff message from a [mail.HandoffIntent]. It speaks

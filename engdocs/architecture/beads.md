@@ -263,6 +263,32 @@ than spelled raw: the jq/bd shell builders in `internal/config/config.go`
 (via the local `jqMeta` helper and direct constant concatenation) and the
 SQL JSON paths in `internal/api/convoy_sql.go` (via `beadmeta.JSONPath`).
 
+### Keyed mail writes
+
+`internal/mail/beadmail.Provider.SendIdempotent` is the canonical storage edge
+for `gc mail send --idempotency-key`. It routes through the already-selected
+messaging-class store; neither the CLI nor a clone-local journal participates in
+deduplication.
+
+One atomic `Store.Tx` creates two rows in that same store: a closed durable
+no-history `message` record under a deterministic in-namespace ID, and the
+ephemeral open `message` row it owns. A metadata marker distinguishes the
+record; using the built-in type avoids a custom-type rollout. The record carries
+the exact key, a length-framed SHA-256 fingerprint of the immutable request
+fields, and the original message/thread IDs. A unique record-ID conflict is
+therefore the single-winner gate for concurrent callers. An exact retry returns
+the mapped message ID; a different fingerprint fails closed. The durable record
+remains after the ephemeral message is archived or purged, so an old key never
+silently creates a replacement.
+
+This path requires `StoreSupportsAtomicTx`: SQLite and native Dolt provide real
+rollback, while legacy sequential `BdStore.Tx`, FileStore, MemStore, and exec
+stores do not. Unsupported stores are rejected before any write. Store wrappers
+used by the CLI must forward both `AtomicTx` and `IDPrefix`. The relocated-class
+wrapper emits `bead.created` only after the transaction commits, and the
+separate `mail.sent` event is recorded only by the winning command invocation;
+an exact replay claims neither event again.
+
 ## Interactions
 
 | Depends on | How |

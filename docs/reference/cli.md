@@ -2545,6 +2545,9 @@ a non-running recipient. Unread mail alone does not request a wake.
 Use --from to override the sender identity.
 Use --to as an alternative to the positional &lt;to&gt; argument.
 Use -s/--subject for the summary line and -m/--message for the body text.
+Use --idempotency-key for retry-safe single-recipient delivery. Exact retries
+return the original message ID; reusing a key with different sender, recipient,
+subject, or body fails. Keys are limited to 128 bytes and are not secrets.
 Use --all to broadcast to all live sessions (excluding sender and "human").
 
 ```
@@ -2559,6 +2562,7 @@ gc mail send mayor -s "Build is green"
 gc mail send myrig/witness -s "Need investigation" -m "Attach logs from the last failed run"
 gc mail send --to mayor "Build is green"
 gc mail send human "Review needed for PR #42"
+gc mail send mayor "Build is green" --idempotency-key build-42-green
 gc mail send polecat "Priority task" --notify
 gc mail send --all "Status update: tests passing"
 ```
@@ -2567,6 +2571,7 @@ gc mail send --all "Status update: tests passing"
 |------|------|---------|-------------|
 | `--all` | bool |  | broadcast to all live sessions (excludes sender and human) |
 | `--from` | string |  | sender identity (default: $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human") |
+| `--idempotency-key` | string |  | retry-safe key for a single-recipient send (1-128 bytes; do not use secrets) |
 | `--json` | bool |  | emit JSONL result |
 | `-m`, `--message` | string |  | message body text |
 | `--notify` | bool |  | request a recipient turn (including a managed wake if not running), even with earlier unread mail |

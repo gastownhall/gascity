@@ -59,11 +59,12 @@ package main
 // the export boundary drops bead.updated and a metadata write to a closed bead
 // that rode bead.closed would re-close it in every replay.
 //
-// Tx is NOT shadowed. A transaction's effect is whatever its body did, and this
-// layer cannot know which beads changed without re-reading the store around
-// every call — so a Tx-shaped write on a relocated class stays event-dark, as it
-// was before this file. That is a known gap rather than an oversight; closing it
-// needs a touched-id set from the Tx itself.
+// Tx is shadowed narrowly enough to retain committed creates. The Tx interface
+// exposes Create directly, so this layer can capture each returned full bead
+// and emit it only after the backing transaction commits. Updates and closes
+// inside a Tx stay event-dark: Tx has no read method, so this layer cannot prove
+// a lifecycle edge or authoritative post-write snapshot without weakening the
+// event contract.
 //
 // Emission is best-effort, per the one-shot recorder precedent: the mutation has
 // already committed when the row is written, so a journal that cannot be opened
@@ -430,6 +431,40 @@ func (s *emittingClassStore) SetMetadataBatch(id string, values map[string]strin
 	}
 	s.emitUpdated(id)
 	return nil
+}
+
+// Tx preserves the backing transaction and emits successful creates only after
+// commit. A failed callback or commit emits nothing, so contenders that lose an
+// atomic unique-ID race cannot leave a false bead.created row.
+func (s *emittingClassStore) Tx(commitMsg string, fn func(beads.Tx) error) error {
+	if fn == nil {
+		return s.Store.Tx(commitMsg, nil)
+	}
+	var created []beads.Bead
+	err := s.Store.Tx(commitMsg, func(tx beads.Tx) error {
+		created = created[:0]
+		return fn(&emittingCreateTx{Tx: tx, created: &created})
+	})
+	if err != nil {
+		return err
+	}
+	for _, bead := range created {
+		s.emitCreated(bead, nil)
+	}
+	return nil
+}
+
+type emittingCreateTx struct {
+	beads.Tx
+	created *[]beads.Bead
+}
+
+func (tx *emittingCreateTx) Create(bead beads.Bead) (beads.Bead, error) {
+	created, err := tx.Tx.Create(bead)
+	if err == nil {
+		*tx.created = append(*tx.created, created)
+	}
+	return created, err
 }
 
 // DepAdd emits for the bead whose edges changed. The snapshot hydrates edges

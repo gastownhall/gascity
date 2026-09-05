@@ -1463,6 +1463,7 @@ func newMailSendCmd(stdout, stderr io.Writer) *cobra.Command {
 	var to string
 	var subject string
 	var message string
+	var idempotencyKey string
 	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "send [<to>] [<body>]",
@@ -1476,20 +1477,33 @@ a non-running recipient. Unread mail alone does not request a wake.
 Use --from to override the sender identity.
 Use --to as an alternative to the positional <to> argument.
 Use -s/--subject for the summary line and -m/--message for the body text.
+Use --idempotency-key for retry-safe single-recipient delivery. Exact retries
+return the original message ID; reusing a key with different sender, recipient,
+subject, or body fails. Keys are limited to 128 bytes and are not secrets.
 Use --all to broadcast to all live sessions (excluding sender and "human").`,
 		Example: `  gc mail send mayor "Build is green"
   gc mail send mayor -s "Build is green"
   gc mail send myrig/witness -s "Need investigation" -m "Attach logs from the last failed run"
   gc mail send --to mayor "Build is green"
   gc mail send human "Review needed for PR #42"
+  gc mail send mayor "Build is green" --idempotency-key build-42-green
   gc mail send polecat "Priority task" --notify
   gc mail send --all "Status update: tests passing"`,
 		Args: cobra.ArbitraryArgs,
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(command *cobra.Command, args []string) error {
+			if command.Flags().Changed("idempotency-key") {
+				if err := mail.ValidateIdempotencyKey(idempotencyKey); err != nil {
+					fmt.Fprintf(stderr, "gc mail send: %v\n", err) //nolint:errcheck // best-effort stderr
+					return errExit
+				}
+			}
 			code := 0
-			if jsonOut {
+			switch {
+			case idempotencyKey != "":
+				code = cmdMailSendWithIdempotencyJSON(args, notify, all, from, to, subject, message, idempotencyKey, jsonOut, stdout, stderr)
+			case jsonOut:
 				code = cmdMailSendJSON(args, notify, all, from, to, subject, message, true, stdout, stderr)
-			} else {
+			default:
 				code = cmdMailSend(args, notify, all, from, to, subject, message, stdout, stderr)
 			}
 			if code != 0 {
@@ -1506,8 +1520,10 @@ Use --all to broadcast to all live sessions (excluding sender and "human").`,
 	cmd.Flags().StringVar(&to, "to", "", "recipient address (alternative to positional argument)")
 	cmd.Flags().StringVarP(&subject, "subject", "s", "", "message subject line")
 	cmd.Flags().StringVarP(&message, "message", "m", "", "message body text")
+	cmd.Flags().StringVar(&idempotencyKey, "idempotency-key", "", "retry-safe key for a single-recipient send (1-128 bytes; do not use secrets)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL result")
 	cmd.MarkFlagsMutuallyExclusive("to", "all")
+	cmd.MarkFlagsMutuallyExclusive("idempotency-key", "all")
 	return cmd
 }
 
@@ -1731,6 +1747,10 @@ func cmdMailSend(args []string, notify bool, all bool, from string, to string, s
 }
 
 func cmdMailSendJSON(args []string, notify bool, all bool, from string, to string, subject string, message string, jsonOut bool, stdout, stderr io.Writer) int {
+	return cmdMailSendWithIdempotencyJSON(args, notify, all, from, to, subject, message, "", jsonOut, stdout, stderr)
+}
+
+func cmdMailSendWithIdempotencyJSON(args []string, notify bool, all bool, from string, to string, subject string, message string, idempotencyKey string, jsonOut bool, stdout, stderr io.Writer) int {
 	mp, code := openCityMailProvider(stderr, "gc mail send")
 	if mp == nil {
 		return code
@@ -1839,7 +1859,7 @@ func cmdMailSendJSON(args []string, notify bool, all bool, from string, to strin
 	}
 
 	rec := openCityRecorder(stderr)
-	return doMailSendJSON(mp, rec, validRecipients, sender, args, nf, jsonOut, stdout, stderr)
+	return doMailSendWithIdempotencyJSON(mp, rec, validRecipients, sender, args, nf, idempotencyKey, jsonOut, stdout, stderr)
 }
 
 // doMailSend creates a message addressed to a recipient. args is [to, subject, body]
@@ -1850,6 +1870,10 @@ func doMailSend(mp mail.Provider, rec events.Recorder, validRecipients map[strin
 }
 
 func doMailSendJSON(mp mail.Provider, rec events.Recorder, validRecipients map[string]bool, sender string, args []string, nudgeFn nudgeFunc, jsonOut bool, stdout, stderr io.Writer) int {
+	return doMailSendWithIdempotencyJSON(mp, rec, validRecipients, sender, args, nudgeFn, "", jsonOut, stdout, stderr)
+}
+
+func doMailSendWithIdempotencyJSON(mp mail.Provider, rec events.Recorder, validRecipients map[string]bool, sender string, args []string, nudgeFn nudgeFunc, idempotencyKey string, jsonOut bool, stdout, stderr io.Writer) int {
 	if len(args) < 2 {
 		fmt.Fprintln(stderr, "gc mail send: usage: gc mail send <to> <body>  OR  gc mail send <to> -s <subject> [-m <body>]") //nolint:errcheck // best-effort stderr
 		return 1
@@ -1871,19 +1895,41 @@ func doMailSendJSON(mp mail.Provider, rec events.Recorder, validRecipients map[s
 		return 1
 	}
 
-	m, err := mp.Send(sender, to, subject, body)
+	var (
+		m       mail.Message
+		created = true
+		err     error
+	)
+	if idempotencyKey == "" {
+		m, err = mp.Send(sender, to, subject, body)
+	} else if keyed, ok := mp.(mail.IdempotentSender); ok {
+		var result mail.IdempotentSendResult
+		result, err = keyed.SendIdempotent(mail.IdempotentSendRequest{
+			From:           sender,
+			To:             to,
+			Subject:        subject,
+			Body:           body,
+			IdempotencyKey: idempotencyKey,
+		})
+		m = result.Message
+		created = result.Created
+	} else {
+		err = fmt.Errorf("%w: provider %T has no atomic keyed-send capability", mail.ErrIdempotencyUnsupported, mp)
+	}
 	telemetry.RecordMailOp(context.Background(), "send", err)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc mail send: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	rec.Record(events.Event{
-		Type:    events.MailSent,
-		Actor:   m.From,
-		Subject: m.ID,
-		Message: to,
-		Payload: mailEventPayload(&m),
-	})
+	if created {
+		rec.Record(events.Event{
+			Type:    events.MailSent,
+			Actor:   m.From,
+			Subject: m.ID,
+			Message: to,
+			Payload: mailEventPayload(&m),
+		})
+	}
 	if !jsonOut {
 		fmt.Fprintf(stdout, "Sent message %s to %s\n", m.ID, to) //nolint:errcheck // best-effort stdout
 	}

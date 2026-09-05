@@ -37,3 +37,34 @@ func TestBeadPolicyStoreResolvesConditionalWritesThroughWrapper(t *testing.T) {
 		t.Fatal("resolve through policy wrapper returned no writer: the require stamp was hidden by interface embedding")
 	}
 }
+
+func TestBeadPolicyStorePreservesAtomicTransactionAndIDNamespace(t *testing.T) {
+	opened, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("mail"))
+	if err != nil {
+		t.Fatalf("OpenSQLiteStore: %v", err)
+	}
+	closer := opened.(interface{ CloseStore() error })
+	t.Cleanup(func() {
+		if err := closer.CloseStore(); err != nil {
+			t.Errorf("CloseStore: %v", err)
+		}
+	})
+
+	wrapped := wrapStoreWithBeadPolicies(opened, nil)
+	if !beads.StoreSupportsAtomicTx(wrapped) {
+		t.Fatalf("StoreSupportsAtomicTx(%T) = false, want the SQLite backing's true guarantee", wrapped)
+	}
+	prefixer, ok := wrapped.(interface{ IDPrefix() string })
+	if !ok || prefixer.IDPrefix() != "mail" {
+		t.Fatalf("policy-wrapped IDPrefix = (%T, %q), want mail", wrapped, func() string {
+			if !ok {
+				return ""
+			}
+			return prefixer.IDPrefix()
+		}())
+	}
+
+	if beads.StoreSupportsAtomicTx(wrapStoreWithBeadPolicies(beads.NewMemStore(), nil)) {
+		t.Fatal("policy wrapper invented atomic rollback over MemStore")
+	}
+}

@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/mail"
 )
 
 // resetCLIStorageRoutes gives a test the process-scoped funnel in its start
@@ -195,6 +196,73 @@ func TestCLIMailWritesAndReadsTheBindingOnAMigratedCity(t *testing.T) {
 		t.Errorf("the one-shot mail write also landed in the work store as %s; a relocated class must be served from its binding only", sent.ID)
 	} else if !errors.Is(err, beads.ErrNotFound) {
 		t.Errorf("reading the work store for %s: %v", sent.ID, err)
+	}
+}
+
+func TestCLIKeyedMailTransactionLivesEntirelyInMessagingBinding(t *testing.T) {
+	cityPath, cfg := migratedOneShotCLICity(t)
+	captureCLIStorageStderr(t)
+
+	provider, code := openCityMailProvider(io.Discard, "gc mail send")
+	if provider == nil {
+		t.Fatalf("openCityMailProvider returned no provider (code=%d)", code)
+	}
+	keyed, ok := provider.(mail.IdempotentSender)
+	if !ok {
+		t.Fatalf("migrated provider %T has no IdempotentSender capability", provider)
+	}
+	request := mail.IdempotentSendRequest{From: "worker", To: "mayor", Subject: "PR ready", Body: "please review", IdempotencyKey: "migrated-pr-ready"}
+	first, err := keyed.SendIdempotent(request)
+	if err != nil {
+		t.Fatalf("first SendIdempotent: %v", err)
+	}
+	retry, err := keyed.SendIdempotent(request)
+	if err != nil {
+		t.Fatalf("retry SendIdempotent: %v", err)
+	}
+	if !first.Created || retry.Created || retry.Message.ID != first.Message.ID {
+		t.Fatalf("keyed results = first %+v retry %+v, want one creation and the same ID", first, retry)
+	}
+
+	if err := closeCLIStorageRoutes(); err != nil {
+		t.Fatalf("closing one-shot routes: %v", err)
+	}
+	binding := openMigratedDestination(t, mustResolveInfraTarget(t, cityPath, cfg))
+	if _, err := binding.Get(first.Message.ID); err != nil {
+		t.Fatalf("message %s not in messaging binding: %v", first.Message.ID, err)
+	}
+	rows, err := binding.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+	if err != nil {
+		t.Fatalf("list keyed mail rows in binding: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("binding keyed mail rows = %#v, want one message and one durable key record", rows)
+	}
+	recordID := ""
+	for _, row := range rows {
+		if row.ID == first.Message.ID {
+			continue
+		}
+		recordID = row.ID
+		if row.Status != "closed" || row.Ephemeral || !row.NoHistory {
+			t.Fatalf("binding durable key row = %#v, want closed non-ephemeral no-history", row)
+		}
+	}
+	if recordID == "" {
+		t.Fatalf("binding rows = %#v, want a durable row distinct from message %s", rows, first.Message.ID)
+	}
+
+	work, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("opening retained work store: %v", err)
+	}
+	t.Cleanup(func() { _ = closeBeadStoreHandle(work) })
+	for _, id := range []string{first.Message.ID, recordID} {
+		if _, err := work.Get(id); err == nil {
+			t.Errorf("keyed messaging row %s also landed in retained work", id)
+		} else if !errors.Is(err, beads.ErrNotFound) {
+			t.Errorf("reading retained work for %s: %v", id, err)
+		}
 	}
 }
 

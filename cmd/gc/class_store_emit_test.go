@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -592,6 +593,45 @@ func TestEmittingClassStoreKeepsEveryEngineCapability(t *testing.T) {
 		if len(missing) > 0 {
 			t.Errorf("the emitting class store drops %v from %s; every one is a capability assertion that stops matching", missing, engine)
 		}
+	}
+}
+
+func TestEmittingClassStoreTransactionEmitsOnlyCommittedCreates(t *testing.T) {
+	cityPath := t.TempDir()
+	opened, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("gcm"))
+	if err != nil {
+		t.Fatalf("OpenSQLiteStore: %v", err)
+	}
+	t.Cleanup(func() { _ = opened.(interface{ CloseStore() error }).CloseStore() })
+	wrapped := splitClassRoutes(opened).withCLIEmission(cityPath).stores[coordclass.ClassMessaging]
+
+	if err := wrapped.Tx("committed pair", func(tx beads.Tx) error {
+		if _, err := tx.Create(beads.Bead{ID: "gcm-idem-one", Title: "record", Type: "message", Status: "closed"}); err != nil {
+			return err
+		}
+		_, err := tx.Create(beads.Bead{ID: "gcm-msg-one", Title: "message", Type: "message", Ephemeral: true})
+		return err
+	}); err != nil {
+		t.Fatalf("committed Tx: %v", err)
+	}
+	if got := beadEvents(readCityJournal(t, cityPath)); len(got) != 2 || got[0].Type != events.BeadCreated || got[1].Type != events.BeadCreated {
+		t.Fatalf("committed Tx events = %#v, want two bead.created rows", got)
+	}
+
+	wantRollback := errors.New("rollback")
+	if err := wrapped.Tx("rolled back pair", func(tx beads.Tx) error {
+		if _, err := tx.Create(beads.Bead{ID: "gcm-idem-two", Title: "record", Type: "message-idempotency"}); err != nil {
+			return err
+		}
+		return wantRollback
+	}); !errors.Is(err, wantRollback) {
+		t.Fatalf("rolled-back Tx = %v, want %v", err, wantRollback)
+	}
+	if got := beadEvents(readCityJournal(t, cityPath)); len(got) != 2 {
+		t.Fatalf("events after rollback = %#v, want no additional rows", got)
+	}
+	if _, err := wrapped.Get("gcm-idem-two"); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get rolled-back create = %v, want ErrNotFound", err)
 	}
 }
 

@@ -43,6 +43,14 @@ type threadOnlyMailProvider struct {
 	messages []mail.Message
 }
 
+type mailSendRecordingRecorder struct {
+	events []events.Event
+}
+
+func (r *mailSendRecordingRecorder) Record(event events.Event) {
+	r.events = append(r.events, event)
+}
+
 func (countOnlyMailProvider) Send(string, string, string, string) (mail.Message, error) {
 	panic("unexpected Send")
 }
@@ -128,6 +136,88 @@ func TestMailSendSuccess(t *testing.T) {
 	if b.Status != "open" {
 		t.Errorf("bead Status = %q, want %q", b.Status, "open")
 	}
+}
+
+func TestMailSendIdempotencyExecutionReturnsOriginalIDAndEmitsOnce(t *testing.T) {
+	opened, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("gc"))
+	if err != nil {
+		t.Fatalf("OpenSQLiteStore: %v", err)
+	}
+	t.Cleanup(func() { _ = opened.(interface{ CloseStore() error }).CloseStore() })
+	mp := beadmail.New(opened)
+	recipients := map[string]bool{"human": true, "mayor": true}
+	recorder := &mailSendRecordingRecorder{}
+
+	var firstOut, secondOut, stderr bytes.Buffer
+	args := []string{"mayor", "Review", "Please review PR 42"}
+	if code := doMailSendWithIdempotencyJSON(mp, recorder, recipients, "human", args, nil, "pr-42", true, &firstOut, &stderr); code != 0 {
+		t.Fatalf("first keyed send = %d; stderr=%s", code, stderr.String())
+	}
+	if code := doMailSendWithIdempotencyJSON(mp, recorder, recipients, "human", args, nil, "pr-42", true, &secondOut, &stderr); code != 0 {
+		t.Fatalf("retry keyed send = %d; stderr=%s", code, stderr.String())
+	}
+	var first, second mailActionResult
+	if err := json.Unmarshal(bytes.TrimSpace(firstOut.Bytes()), &first); err != nil {
+		t.Fatalf("decode first JSON: %v; output=%s", err, firstOut.String())
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(secondOut.Bytes()), &second); err != nil {
+		t.Fatalf("decode retry JSON: %v; output=%s", err, secondOut.String())
+	}
+	if first.ID == "" || second.ID != first.ID {
+		t.Fatalf("JSON message IDs = first %q, retry %q; want the same non-empty ID", first.ID, second.ID)
+	}
+	if len(recorder.events) != 1 || recorder.events[0].Type != events.MailSent || recorder.events[0].Subject != first.ID {
+		t.Fatalf("mail events = %#v, want one mail.sent for %s", recorder.events, first.ID)
+	}
+}
+
+func TestMailSendIdempotencyConflictFailsWithoutSecondEvent(t *testing.T) {
+	opened, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("gc"))
+	if err != nil {
+		t.Fatalf("OpenSQLiteStore: %v", err)
+	}
+	t.Cleanup(func() { _ = opened.(interface{ CloseStore() error }).CloseStore() })
+	mp := beadmail.New(opened)
+	recipients := map[string]bool{"human": true, "mayor": true}
+	recorder := &mailSendRecordingRecorder{}
+
+	if code := doMailSendWithIdempotencyJSON(mp, recorder, recipients, "human", []string{"mayor", "Review", "one"}, nil, "same-key", false, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("first keyed send = %d", code)
+	}
+	var stderr bytes.Buffer
+	if code := doMailSendWithIdempotencyJSON(mp, recorder, recipients, "human", []string{"mayor", "Review", "two"}, nil, "same-key", false, io.Discard, &stderr); code != 1 {
+		t.Fatalf("conflicting keyed send = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), mail.ErrIdempotencyConflict.Error()) {
+		t.Fatalf("conflict stderr = %q, want %q", stderr.String(), mail.ErrIdempotencyConflict)
+	}
+	if len(recorder.events) != 1 {
+		t.Fatalf("mail events after conflict = %#v, want only the original", recorder.events)
+	}
+}
+
+func TestMailSendIdempotencyFlagValidationAndBroadcastExclusion(t *testing.T) {
+	t.Run("explicit empty key is rejected before opening a provider", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		cmd := newMailSendCmd(&stdout, &stderr)
+		cmd.SetArgs([]string{"mayor", "hello", "--idempotency-key="})
+		if err := cmd.Execute(); !errors.Is(err, errExit) {
+			t.Fatalf("Execute = %v, want errExit", err)
+		}
+		if !strings.Contains(stderr.String(), mail.ErrInvalidIdempotencyKey.Error()) {
+			t.Fatalf("stderr = %q, want invalid-key refusal", stderr.String())
+		}
+	})
+
+	t.Run("broadcast cannot share one key", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		cmd := newMailSendCmd(&stdout, &stderr)
+		cmd.SetArgs([]string{"--all", "status", "--idempotency-key", "broadcast-key"})
+		err := cmd.Execute()
+		if err == nil || !strings.Contains(err.Error(), "idempotency-key all") {
+			t.Fatalf("Execute = %v, want mutually-exclusive flag error", err)
+		}
+	})
 }
 
 func TestMailSendJSON(t *testing.T) {

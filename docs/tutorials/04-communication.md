@@ -50,6 +50,26 @@ Sent message mc-msg-8t8 to mayor
 `gc mail send` takes the recipient as a positional argument and the subject/body
 via `-s`/`-m` flags. (You can also pass just `<to> <body>` with no subject.)
 
+For a send that an automation may retry after a timeout or crash, provide one
+stable key:
+
+```shell
+gc mail send mayor -s "Review needed" -m "Please review PR 42" \
+  --idempotency-key pr-42-review
+```
+
+Repeating the exact command returns the original message ID and does not create
+a second message. Reusing the key with a different sender, recipient, subject,
+or body is rejected. Keys are 1-128 bytes, cannot contain whitespace or control
+characters, and are stored as operational metadata, so do not put secrets in
+them. `--idempotency-key` is single-recipient only and cannot be combined with
+`--all`. A selected mail backend that cannot provide atomic transactions is
+rejected before either the key record or message is written.
+
+The key deduplicates message persistence and its `mail.sent` event. A
+`--notify` nudge is a separate, per-invocation action and is not part of the
+messaging-store transaction.
+
 Mail does not create wake demand by itself. Add `--notify` to request a turn for
 the recipient even when earlier mail is still unread. In a managed city, that
 request can wake a non-running recipient; an unmanaged city queues the nudge for

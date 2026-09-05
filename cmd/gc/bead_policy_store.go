@@ -38,6 +38,7 @@ type beadPolicyGraphStore struct {
 var (
 	_ beads.ConditionalAssignmentReleaser    = (*beadPolicyStore)(nil)
 	_ beads.ConditionalWritesResolveTargeter = (*beadPolicyStore)(nil)
+	_ beads.AtomicTxStore                    = (*beadPolicyStore)(nil)
 )
 
 // ConditionalWritesResolveTarget declares the wrapped store as the
@@ -49,6 +50,21 @@ var (
 // wrapper. beadPolicyGraphStore inherits this via its embedded
 // *beadPolicyStore.
 func (s *beadPolicyStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
+
+// AtomicTx preserves the wrapped store's transaction guarantee. The policy
+// layer does not replace Store.Tx; hiding this capability would make a native
+// or SQLite messaging store look non-atomic to domain services.
+func (s *beadPolicyStore) AtomicTx() bool { return beads.StoreSupportsAtomicTx(s.Store) }
+
+// IDPrefix preserves the wrapped store's declared ID namespace. Keyed mail
+// uses it to derive deterministic, in-namespace record and message IDs.
+func (s *beadPolicyStore) IDPrefix() string {
+	prefixer, ok := s.Store.(interface{ IDPrefix() string })
+	if !ok {
+		return ""
+	}
+	return prefixer.IDPrefix()
+}
 
 var (
 	_ beads.BatchDeleter = (*beadPolicyStore)(nil)

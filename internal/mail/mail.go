@@ -6,7 +6,11 @@ package mail //nolint:revive // internal package, always imported qualified
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // ErrAlreadyArchived is returned by [Provider.Archive] when the message has
@@ -16,6 +20,26 @@ var ErrAlreadyArchived = errors.New("already archived")
 
 // ErrNotFound is returned when a message ID does not exist.
 var ErrNotFound = errors.New("message not found")
+
+// ErrInvalidIdempotencyKey is returned when a keyed send uses an empty,
+// oversized, non-UTF-8, or whitespace/control-bearing key.
+var ErrInvalidIdempotencyKey = errors.New("invalid mail idempotency key")
+
+// ErrIdempotencyUnsupported is returned before writing when the selected mail
+// backend cannot atomically create the durable key record and message together.
+var ErrIdempotencyUnsupported = errors.New("mail idempotency unsupported")
+
+// ErrIdempotencyConflict is returned when a durable key record already exists
+// for different immutable request fields.
+var ErrIdempotencyConflict = errors.New("mail idempotency key conflicts with an existing request")
+
+// ErrIdempotencyRecordCorrupt is returned when a durable key record exists but
+// cannot prove which original message it owns. The send fails closed.
+var ErrIdempotencyRecordCorrupt = errors.New("mail idempotency record is corrupt")
+
+// MaxIdempotencyKeyBytes bounds the durable key copied into message-store
+// metadata. The limit is bytes, not runes, so it is stable across encodings.
+const MaxIdempotencyKeyBytes = 128
 
 const (
 	// AutoHandoffLabel marks mail created by gc handoff --auto for provider
@@ -42,6 +66,29 @@ const (
 	ReadMetadataKey = "mail.read"
 )
 
+// ValidateIdempotencyKey validates the opaque key accepted by keyed mail send.
+// Keys are compared byte-for-byte: callers must reuse the exact same value.
+func ValidateIdempotencyKey(key string) error {
+	if key == "" {
+		return fmt.Errorf("%w: key is empty", ErrInvalidIdempotencyKey)
+	}
+	if len(key) > MaxIdempotencyKeyBytes {
+		return fmt.Errorf("%w: key is %d bytes (maximum %d)", ErrInvalidIdempotencyKey, len(key), MaxIdempotencyKeyBytes)
+	}
+	if !utf8.ValidString(key) {
+		return fmt.Errorf("%w: key is not valid UTF-8", ErrInvalidIdempotencyKey)
+	}
+	if strings.TrimSpace(key) != key {
+		return fmt.Errorf("%w: key has leading or trailing whitespace", ErrInvalidIdempotencyKey)
+	}
+	for _, r := range key {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return fmt.Errorf("%w: key contains whitespace or control characters", ErrInvalidIdempotencyKey)
+		}
+	}
+	return nil
+}
+
 // Message represents a mail message between agents or humans.
 type Message struct {
 	ID        string    `json:"id"`
@@ -56,6 +103,31 @@ type Message struct {
 	Priority  int       `json:"priority,omitempty"`
 	CC        []string  `json:"cc,omitempty"`
 	Rig       string    `json:"rig,omitempty"`
+}
+
+// IdempotentSendRequest is the immutable request protected by an idempotency
+// key. A retry must repeat all five fields exactly; changing From, To, Subject,
+// or Body while reusing the key is a conflict.
+type IdempotentSendRequest struct {
+	From           string
+	To             string
+	Subject        string
+	Body           string
+	IdempotencyKey string
+}
+
+// IdempotentSendResult reports the original message and whether this call
+// created it. Created is false for an exact retry.
+type IdempotentSendResult struct {
+	Message Message
+	Created bool
+}
+
+// IdempotentSender is the optional mail capability used by gc mail send
+// --idempotency-key. Implementations must atomically bind one key to one
+// immutable request and message in their authoritative message store.
+type IdempotentSender interface {
+	SendIdempotent(IdempotentSendRequest) (IdempotentSendResult, error)
 }
 
 // HandoffIntent is the domain-shaped request for handoff mail. It lets the
