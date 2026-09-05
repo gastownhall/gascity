@@ -259,7 +259,16 @@ cleanup_failed_start() {
     local status=$?
     local container_id="$FAILED_START_CONTAINER_ID"
     local container_name="$FAILED_START_CONTAINER_NAME" cleanup_output
-    trap - EXIT INT TERM HUP
+    trap - EXIT
+    # Ignore (not just disarm) INT/TERM/HUP for the rest of this rollback: a
+    # signal handler set to SIG_IGN is inherited across exec(2), so the
+    # "docker rm -f" child below starts immune to a retried process-group
+    # SIGINT that lands after this trap has already begun running. Without
+    # this, interruptProcessGroup's bounded resend (internal/execgrace) can
+    # kill this rollback mid-flight — it cannot tell "still racing the
+    # original fork" apart from "already delivered, rollback in progress" and
+    # keeps resending until its budget or the whole group exits.
+    trap '' INT TERM HUP
     # Roll back with a single force-remove instead of a graceful "stop -t 10"
     # followed by "rm -f". A failed start has no live session worth draining,
     # and cooperative cancellation gives this cleanup only a short grace window:
