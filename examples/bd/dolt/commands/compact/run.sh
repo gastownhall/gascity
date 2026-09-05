@@ -1173,6 +1173,7 @@ verify_counts() {
   verify_counts_saw_row_decrease=0
   verify_counts_saw_decrease_hash_drift=0
   verify_counts_saw_same_count_hash_drift=0
+  verify_counts_same_count_drift_tables=""
   verify_counts_saw_table_list_change=0
   verify_counts_saw_probe_failure=0
   verify_counts_failure_reason=""
@@ -1271,6 +1272,7 @@ verify_counts() {
         printf 'compact: db=%s table=%s value hash changed after flatten without row-count increase before=%s after=%s — quarantine and investigate before GC\n' \
           "$db" "$t" "$expected_hash" "$actual_hash" >&2
         verify_counts_saw_same_count_hash_drift=1
+        verify_counts_same_count_drift_tables="$verify_counts_same_count_drift_tables $t"
         if [ "$fail" -ne 1 ]; then
           fail=1
           verify_counts_failure_reason="post-flatten table value hash changed without row-count increase"
@@ -2288,6 +2290,7 @@ flatten_database() {
   verify_counts_saw_row_decrease=0
   verify_counts_saw_decrease_hash_drift=0
   verify_counts_saw_same_count_hash_drift=0
+  verify_counts_same_count_drift_tables=""
   verify_counts_saw_table_list_change=0
   verify_counts_saw_probe_failure=0
   verify_counts_failure_reason=""
@@ -2765,12 +2768,15 @@ flatten_database() {
   if [ "$verify_counts_rc" -ne 0 ]; then
     integrity_reason="${verify_counts_failure_reason:-post-flatten integrity check failed}"
     integrity_guidance="${verify_counts_failure_guidance:-post-flatten integrity check failed; investigate before re-running}"
-    # The blocks below each downgrade a quarantine to a skip-and-retry defer for
-    # one benign concurrent-writer signature — gain+drift, row-count decrease, or
-    # same-count value-hash drift — but only when a concurrent writer is
-    # HEAD-proven (or, for gain+drift, proven additive-only via DOLT_DIFF). A
-    # signature mixed with any other failure category, table-list drift, a probe
-    # failure, or a stable HEAD still quarantines below unchanged.
+    # Downgrade quarantine -> defer for specific integrity-failure categories
+    # where a concurrent writer is proven, rather than assuming corruption.
+    # Three categories get their own proof-gated defer path below: gain+drift
+    # (HEAD-proven writer race, or an absorbed-writer race proven
+    # additive-only via diff), row-count decrease (HEAD-proven concurrent
+    # DELETE), and same-count hash drift (HEAD-proven writer race proven
+    # additive-only via diff — a concurrent UPDATE). Table-list drift, probe
+    # failure, or any case whose specific proof fails still quarantine below
+    # unchanged.
     if [ "$writer_race_detected" = "1" ] && \
        [ "${verify_counts_saw_gain:-0}" = "1" ] && \
        [ "${verify_counts_saw_gain_hash_drift:-0}" = "1" ] && \
@@ -2839,23 +2845,25 @@ flatten_database() {
       return 0
     fi
     # Downgrade quarantine -> defer for concurrent-writer UPDATE. A concurrent
-    # UPDATE during the flatten window changes a committed table's value hash
-    # while leaving its row count unchanged — the net-zero-row-count churn that
-    # dominates the busiest db's workload (ephemeral wisp pour/burn and bead/mail
-    # row updates). The whole-database value-hash drift downgrade below already
-    # defers a same-content change when a concurrent writer is HEAD-proven, so the
-    # per-table check must not be stricter than the database-level check for the
-    # same phenomenon. Safe to defer when a writer is proven and no other anomaly
-    # (row gain+drift, row decrease, table-list change, or probe failure)
-    # prevents safe deferral.
+    # UPDATE during the flatten window changes row values without changing row
+    # counts, which verify_counts cannot distinguish from corruption by count
+    # alone. Prove it directly the same way the absorbed-writer gain+drift case
+    # does: diff the pre-flight snapshot HEAD against the flatten commit for
+    # each drifted table. Purely additive (no removed/modified rows) proves
+    # the flatten itself never touched the table, so the drift is the
+    # concurrent writer's; defer exactly as the other proven-writer-race paths
+    # above do. Any removed/modified row, a diff-probe failure, or an
+    # unproven HEAD movement fails closed and falls through to quarantine.
     if [ "$writer_race_detected" = "1" ] && \
        [ "${verify_counts_saw_same_count_hash_drift:-0}" = "1" ] && \
+       [ "${verify_counts_saw_gain:-0}" != "1" ] && \
        [ "${verify_counts_saw_gain_hash_drift:-0}" != "1" ] && \
        [ "${verify_counts_saw_row_decrease:-0}" != "1" ] && \
        [ "${verify_counts_saw_table_list_change:-0}" != "1" ] && \
-       [ "${verify_counts_saw_probe_failure:-0}" != "1" ]; then
-      printf 'compact: db=%s writer race detected during flatten (snapshot_HEAD=%s pre_reset_HEAD=%s flatten_HEAD=%s post_verify_HEAD=%s) — same-count table value hash drift is concurrent-writer UPDATE data, not corruption; deferring, will retry next run\n' \
-        "$db" "$head" "${head_before_reset:-<empty>}" "$flatten_head" "${post_verify_head:-<empty>}" >&2
+       [ "${verify_counts_saw_probe_failure:-0}" != "1" ] && \
+       gain_drift_is_additive_only "$db" "$head" "$flatten_head" "$verify_counts_same_count_drift_tables"; then
+      printf 'compact: db=%s writer race detected during flatten (snapshot_HEAD=%s pre_reset_HEAD=%s flatten_HEAD=%s post_verify_HEAD=%s) — same-count table value hash drift proven additive-only via DOLT_DIFF(%s..%s) for tables [%s] is concurrent-writer UPDATE, not corruption; deferring, will retry next run\n' \
+        "$db" "$head" "${head_before_reset:-<empty>}" "$flatten_head" "${post_verify_head:-<empty>}" "$head" "$flatten_head" "${verify_counts_same_count_drift_tables# }" >&2
       if ! defer_writer_race_after_flatten "$db" "$flatten_head" \
         "$remote" "$expected_remote_head" "$expected_remote_head_verified" \
         "$compacted_from_head" "$local_branch" "$remote_branch"; then

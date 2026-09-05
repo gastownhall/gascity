@@ -495,11 +495,15 @@ func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 	if ep == nil {
 		return
 	}
-	// A controller can crash after the durable bead.closed journal append but
-	// before its best-effort lifecycle append. The normal watcher intentionally
-	// begins at the boot-time journal head, so reconcile closed graph.v2 steps
-	// before tailing to repair that otherwise permanent gap.
-	cs.reconcileExecutionCompletions()
+	// The crash-window gap this watcher cannot see — a durable bead.closed whose
+	// best-effort execution.step_completed never landed, already below the
+	// boot-time cursor — is repaired by the STARTUP completions sweep
+	// (runCompletionsSweepLoop, due for backstopReasonStartup on its first poll),
+	// not from here. This function starting the watcher is not an ordering edge
+	// for that repair: the tail below consumes bead.created/updated/closed/deleted
+	// and the repair emits only execution.step_completed, so producer and consumer
+	// are disjoint. Reconciling inline instead cost the whole corpus, serially,
+	// once per city on every fleet boot (ga-1e78j).
 	seq := cs.beadEventStartSeq
 	// A captured seq of 0 with OK=true means the log was genuinely empty at
 	// construction — Watch(0) then replays exactly the prime-window events and
@@ -552,14 +556,24 @@ func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 }
 
 // reconcileExecutionCompletions repairs graph.v2 completion facts from the
-// authoritative graph store, over the WHOLE corpus. It is the convergence
-// backstop: safe to call at startup and from the background sweep, because
-// ReconcileCompleted uses the event journal's exact fact as its idempotency
-// record, so repeated passes do not duplicate lifecycle events.
+// authoritative graph store, over the WHOLE corpus, in ONE unbounded pass. It is
+// safe to call at any time, because ReconcileCompleted uses the event journal's
+// exact fact as its idempotency record, so repeated passes do not duplicate
+// lifecycle events.
 //
 // It is deliberately not on the tick. Walking every workflow root ever created,
 // closed ones included, was 72.4s of a ~360s tick (ga-l7jdg); the tick runs
 // reconcileExecutionCompletionsDelta instead.
+//
+// It is deliberately not on the BOOT path either, for the same reason at a
+// larger scale: paying the whole corpus once per city, serially, dominated fleet
+// boot (ga-1e78j). runCompletionsSweepLoop is the production caller-of-record —
+// the chunked, resumable form of this exact pass, with the identical
+// journal-keyed idempotency record, running off-tick and due for
+// backstopReasonStartup on its first poll of every boot. This one-shot form is
+// kept as the unbounded operator primitive: it has no production caller today,
+// and is retained for tests and for a future diagnostic path that wants the
+// whole corpus converged now rather than in chunks.
 func (cs *controllerState) reconcileExecutionCompletions() {
 	ep, graphStores := cs.completionReconcileInputs(reconcilePlane)
 	if ep == nil {
@@ -1690,6 +1704,18 @@ func (cs *controllerState) OrdersBeadStore() beads.OrdersStore {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	return beads.OrdersStore{Store: resolveOrderStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
+}
+
+// ClassBindingHasLegacyResidents replays the boot census for one binding store.
+//
+// The store values the class accessors above hand out are the routes' own
+// stores — resolveClassStore returns routes.storeFor unwrapped — so the census
+// map the boot keyed by store answers directly here. A store this city never
+// censused, the work store included, keeps its probe.
+func (cs *controllerState) ClassBindingHasLegacyResidents(store beads.Store) bool {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.storageRoutes.hasLegacyResidents(store)
 }
 
 // CityBeadsDiagnostic returns the city-level bead store selection diagnostic.

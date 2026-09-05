@@ -9,12 +9,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/pathutil"
 	zcodeadapter "github.com/gastownhall/gascity/internal/worker/adapters/zcode"
 )
 
@@ -298,7 +300,11 @@ func (s *session) sendRaw(text string) {
 func (s *session) signal(sig syscall.Signal) {
 	s.t.Helper()
 	if err := syscall.Kill(-s.cmd.Process.Pid, sig); err != nil {
-		s.t.Fatalf("signal %v: %v", sig, err)
+		// An adapter that already died leaves a zombie process group, and
+		// signaling one reports EPERM on macOS rather than ESRCH — which reads
+		// as a permissions problem and hides the real story. Print what the
+		// adapter said before it went, which is where the cause actually is.
+		s.t.Fatalf("signal %v: %v\nadapter output so far:\n%s", sig, err, s.output())
 	}
 }
 
@@ -645,10 +651,23 @@ func TestDrainKeepsPartialTrailingLine(t *testing.T) {
 	time.Sleep(2500 * time.Millisecond)
 	s.sendRaw("\n")
 	time.Sleep(2500 * time.Millisecond)
+	// Surviving the drain is the assertion that must hold on every platform: an
+	// unbound $more here killed the adapter under `set -u` on bash 3.2, which
+	// is exactly the regression this test's own shape provokes.
 	if _, code := s.closeAndWait(); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
 
+	// *Keeping* the fragment, by contrast, is a bash 4.0 behavior: only there
+	// does a timed-out `read -t` save the partial line into the variable. bash
+	// 3.2 — what `#!/usr/bin/env bash` resolves to on stock macOS — consumes
+	// the fragment off the fd and discards it before the script regains
+	// control, so no adapter change can recover it. Gated by GOOS rather than
+	// by probing the shell because probing costs a subprocess, and the source
+	// resource ledger (test/test-resources.toml) ratchets those down, not up.
+	if runtime.GOOS == "darwin" {
+		return
+	}
 	joined := strings.Join(h.prompts(), "|")
 	if !strings.Contains(joined, "trailing line without a newline") {
 		t.Fatalf("partial trailing line was dropped; prompts = %q", h.prompts())
@@ -1017,7 +1036,12 @@ func TestExportMirrorAccumulatesTurns(t *testing.T) {
 	if export.Info.ID != "sess_mirror" {
 		t.Fatalf("info.id = %q, want sess_mirror", export.Info.ID)
 	}
-	if export.Info.Directory != h.workDir {
+	// The adapter reports the shell's $PWD, which bash derives from getcwd()
+	// because the harness hands it an env with no PWD to inherit — so it is the
+	// physical path. h.workDir is whatever t.TempDir() handed out, which on
+	// macOS is the /var symlink to the same directory. Same directory, two
+	// spellings: compare by path identity, not by string.
+	if !pathutil.SamePath(export.Info.Directory, h.workDir) {
 		t.Fatalf("info.directory = %q, want %q", export.Info.Directory, h.workDir)
 	}
 	if len(export.Messages) != 2 {

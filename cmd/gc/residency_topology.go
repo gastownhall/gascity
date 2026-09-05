@@ -23,10 +23,11 @@ package main
 // A constructor takes the opened work and rig stores it is handed and the
 // routes this process already resolved. It does not decide which rigs are
 // serving — a suspended rig is simply absent from the map it is given — and it
-// does not decide whether a binding mints truthfully: nothing in this build
-// verifies a binding's mint prefix, so MintsReserved stays false everywhere
-// here and the residence probe stays in every plan. The corpus already carries
-// the retired row, so the day verification ships this is a bit, not a redesign.
+// does not decide whether a binding mints truthfully: it asks the store, which
+// declares the namespace it mints into. The residence probe nonetheless stays
+// in every plan, because retirement also needs a binding known to hold no
+// relics and nothing here censuses residents. The corpus already carries the
+// retired row, so the day the census ships this is a bit, not a redesign.
 
 import (
 	"fmt"
@@ -78,9 +79,9 @@ func cliResidencyTopology(cityPath string, cfg *config.City, work beads.Store, r
 // (buildSuspendedRigPathsForCity, threaded through the census arms) rather than
 // being re-derived here: the constructor is told, it does not decide.
 //
-// MintsReserved stays false for the same reason it does everywhere else —
-// nothing in this build verifies a binding's mint prefix — so the residence
-// probe stays in every plan.
+// The residence probe stays in every plan for the same reason it does
+// everywhere else: the mint bit is observed, but nothing censuses a binding's
+// relics, so the retirement condition's other half is never satisfied.
 func (cr *CityRuntime) residencyTopology(servingRigs map[string]beads.Store) storeref.Topology {
 	bindings, refused := residencyBindingsFromRoutes(cr.storageRoutes)
 	return assembleResidencyTopology(cr.cfg, cr.cityBeadStore(), servingRigs, bindings, refused)
@@ -409,33 +410,22 @@ func residencyBindingsFromRoutes(routes *storageRoutes) ([]storeref.ClassBinding
 		}
 		byStore[store] = append(byStore[store], class)
 	}
-	return residencyBindingsFor(order, byStore)
+	return residencyBindingsFor(order, byStore, routes.hasLegacyResidents)
 }
 
 // residencyBindingsFor turns a store->classes grouping into bindings, and
 // reports the standing refusal when any binding is a refusing store.
-func residencyBindingsFor(order []beads.Store, byStore map[beads.Store][]coordclass.Class) ([]storeref.ClassBinding, error) {
-	var refused error
-	bindings := make([]storeref.ClassBinding, 0, len(order))
-	for _, store := range order {
-		classes := byStore[store]
-		bindings = append(bindings, storeref.ClassBinding{
-			Classes:  classes,
-			Prefixes: reservedPrefixesFor(classes),
-			Leg:      storeref.Leg{Ref: storeref.ClassRef(classes), Store: store},
-			// MintsReserved and HasLegacyResidents stay false: nothing in this
-			// build verifies a binding's mint prefix or censuses its relics, so
-			// the residence probe stays in every plan.
-		})
-		if refusing, ok := store.(storeref.RefusingStore); ok && refused == nil {
-			refused = refusing.StorageRefusal()
-		}
-	}
-	if len(bindings) == 0 {
-		return nil, nil
-	}
-	sort.SliceStable(bindings, func(i, j int) bool { return bindings[i].Leg.Ref < bindings[j].Leg.Ref })
-	return bindings, refused
+//
+// The body is storeref.BuildBindings, shared with the API plane. What survives
+// here is the only thing that is this plane's own: which options it passes.
+// storageRoutes resolves every coordination class directly, so there is no
+// blind spot to correct for and the observed class set stands as observed.
+//
+// relics answers the boot census's question for a binding store. A nil one is
+// the pessimistic answer for every store, which is what a caller holding no
+// censused routes is entitled to claim.
+func residencyBindingsFor(order []beads.Store, byStore map[beads.Store][]coordclass.Class, relics func(beads.Store) bool) ([]storeref.ClassBinding, error) {
+	return storeref.BuildBindings(order, byStore, storeref.BindingOptions{Relics: relics})
 }
 
 // infrastructureClasses is the class set a whole split relocates: every
@@ -449,17 +439,6 @@ func infrastructureClasses() []coordclass.Class {
 		}
 	}
 	return classes
-}
-
-// reservedPrefixesFor returns the reserved id prefixes a class set mints.
-func reservedPrefixesFor(classes []coordclass.Class) []string {
-	prefixes := make([]string, 0, len(classes))
-	for _, class := range classes {
-		if prefix, ok := config.ReservedClassPrefix(class.String()); ok {
-			prefixes = append(prefixes, prefix)
-		}
-	}
-	return prefixes
 }
 
 // assembleResidencyTopology puts the work leg, the rig legs and the bindings

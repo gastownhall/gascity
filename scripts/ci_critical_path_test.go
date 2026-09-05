@@ -87,7 +87,7 @@ func TestWorkerCorePhase2SharesBuildsWithoutChangingCoverage(t *testing.T) {
 
 	wf := readCriticalPathWorkflow(t, "ci.yml")
 	const aggregateCommand = `GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2-all PROFILE="$PROFILE"`
-	for _, jobName := range []string{"worker-core-phase2-claude", "worker-core-phase2-codex", "worker-core-phase2-gemini"} {
+	for _, jobName := range []string{"worker-core-phase2-claude", "worker-core-phase2-codex", "worker-core-phase2-cursor", "worker-core-phase2-gemini"} {
 		job, ok := wf.Jobs[jobName]
 		if !ok {
 			t.Errorf("CI workflow has no %s job", jobName)
@@ -661,7 +661,7 @@ func TestMacRegressionGateCentralizesTierRouting(t *testing.T) {
 	if !strings.Contains(filterStep.Uses, "dorny/paths-filter") {
 		t.Errorf("gate filter step uses = %q, want dorny/paths-filter (same tool review-formulas.yml uses)", filterStep.Uses)
 	}
-	wantFilterEntries := []string{"cmd/gc/**", "internal/pathutil/**", "internal/fsys/**"}
+	wantFilterEntries := []string{"cmd/gc/**", "internal/pathutil/**", "internal/fsys/**", ".github/actions/setup-gascity-macos/**"}
 	filterValue := filterStep.With["filters"]
 	for _, entry := range wantFilterEntries {
 		if !strings.Contains(filterValue, "'"+entry+"'") {
@@ -669,7 +669,7 @@ func TestMacRegressionGateCentralizesTierRouting(t *testing.T) {
 		}
 	}
 	if gotEntries := regexp.MustCompile(`(?m)^\s*-\s*'[^']*'\s*$`).FindAllString(filterValue, -1); len(gotEntries) != len(wantFilterEntries) {
-		t.Errorf("gate filter mac_sensitive has %d path entries, want exactly %d (%v) — no broader glob than the paths that actually touch gc/cmd or fsys/pathutil behavior", len(gotEntries), len(wantFilterEntries), wantFilterEntries)
+		t.Errorf("gate filter mac_sensitive has %d path entries, want exactly %d (%v) — no broader glob than the paths that actually touch gc/cmd or fsys/pathutil behavior, or the macOS setup action every mac job runs", len(gotEntries), len(wantFilterEntries), wantFilterEntries)
 	}
 	if !hasDecide {
 		t.Fatal("gate job has no routing-decision step (id: gate)")

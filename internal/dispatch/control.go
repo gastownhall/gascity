@@ -520,6 +520,13 @@ var transientNeedles = []transientNeedle{
 	{needle: "dolt circuit breaker is open", tier: TierAvailability},
 	{needle: "server appears down, failing fast", tier: TierAvailability},
 	{needle: "dolt server unreachable", tier: TierAvailability},
+	// A store read that times out never answered, so it is Tier A wherever it
+	// is raised. isTransientWorkQueryFailure already said so for the drain
+	// work-query path (6d74360fc5); scoping it to that one message prefix left
+	// every other caller quarantining on the first refusal — most visibly
+	// processWorkflowFinalize's outcome read, whose wrapper is "resolving
+	// workflow outcome" (gastownhall/gascity#5729).
+	{needle: "timed out after", tier: TierAvailability},
 }
 
 // ClassifyControllerError is the dispatch/store transient classifier for
@@ -1037,6 +1044,15 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 			// Validation forbids combining drain with retry/ralph, so this
 			// never overwrites the nested-control kinds above.
 			formula.ApplyDrainControlMetadata(childMeta, child.Drain)
+			// A plain child (none of Retry/Ralph/Drain) reaches here with no
+			// gc.kind at all, unlike the root above which always gets one.
+			// Default it to task, mirroring rootMeta's unconditional stamp,
+			// so isWorkRecordGatedBead's (Type=="task" && gc.kind=="") test
+			// does not wrongly sweep it into the ADR-0009 work-record close
+			// gate. See gastownhall/gascity#5246.
+			if childMeta[beadmeta.KindMetadataKey] == "" {
+				childMeta[beadmeta.KindMetadataKey] = beadmeta.KindTask
+			}
 			childStep := formula.RecipeStep{
 				ID:          childID,
 				Title:       child.Title,

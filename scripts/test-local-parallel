@@ -131,39 +131,9 @@ add_fsys_compile_job() {
 # so it is a real run rather than a cached-result stall, and shares the shards'
 # timeout budget. Package parallelism is bounded separately for every job by the
 # GOFLAGS -p export below (ga-04m84s), so it is not pinned on this command.
-# internal/runtime/herdr is excluded alongside cmd/gc because it fails
-# DETERMINISTICALLY on bare origin/main -- no branch changes involved. Since this
-# job runs in .githooks/pre-push whenever go_changed=1, that failure blocked
-# EVERY push touching a .go file, fleet-wide (ga-at7jv0, P0).
-#
-# WHICH tests fail is NOT settled. The quoted stderr line comes from
-# provider.go's best-effort recordStartupDeliveryUnconfirmed diagnostic -- a path
-# the FAKE-backed tests exercise deliberately (startup_delivery_confirm_test.go,
-# panebinding_provider_test.go:85 injects agent_prompt_stalled outright), while
-# the *_live_test.go / conformance set skips whenever the herdr binary is absent.
-# Do not assume this exclusion only drops live tests; it may be hiding unit-level
-# signal on the gas-90h stranded-startup path. Measured on a clean origin/main
-# worktree 2026-08-27:
-# FAIL in 29.4s ("startup delivery ... agent_prompt_stalled"). Observed as slow
-# as 222s in another tree, so this also removes minutes from every pre-push run.
-#
-# NOTE the signature is unstable -- three different errors across three trees on
-# one day. Re-measure on a CLEAN main worktree before treating any single one as
-# the upstream defect. Root cause is tracked at gascity#5653 (from PR #4966).
-#
-# SCOPE: add_unit_core_job feeds `fast` AND `full`, so `make
-# test-local-full-parallel` -- the local merge baseline -- loses this package
-# too, not just the pre-push lane.
-#
-# REMOVE THIS once #5653 lands. It is a gate hole while it stands.
-# The package still runs in the push-triggered `Preflight / unit cover
-# (noncmdgc)` job (.github/workflows/ci.yml:268, `if: github.event_name ==
-# 'push'`) and in the manual RC gate (.github/workflows/rc-gate.yml:47, which
-# still carries the cmd/gc-only exclusion). Neither runs on pull_request, so
-# diff the #5653 removal against rc-gate.yml:47, not against this line.
 add_unit_core_job() {
   add_job "unit-core" \
-    "GC_FAST_UNIT=1 go test -count=1 -timeout ${go_test_timeout} \$(go list ./... | grep -vE '^github.com/gastownhall/gascity/(cmd/gc|internal/runtime/herdr)\$')"
+    "GC_FAST_UNIT=1 go test -count=1 -timeout ${go_test_timeout} \$(go list ./... | grep -v '^github.com/gastownhall/gascity/cmd/gc$')"
 }
 
 # Runs as a direct shell job rather than through a `go test` wrapper because a

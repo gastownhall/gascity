@@ -29,12 +29,18 @@ const (
 )
 
 // infraClasses is the class set a whole-split binding carries, and
-// infraPrefixes the reserved id prefixes those classes mint. They are stated
-// here rather than read from internal/config because storeref is a leaf: a
-// caller supplies the prefixes, so the corpus supplies them too.
+// infraPrefixes the reserved id namespaces it holds beads under. They are
+// stated here rather than read from internal/config because storeref is a leaf:
+// a caller supplies the prefixes, so the corpus supplies them too.
+//
+// "gcnq" is in the list and is not a fifth-class mint prefix: it is the nudge
+// queue's own namespace inside the nudges binding, minted by a subsystem rather
+// than by the store's sequence. The resolver draws no distinction — a namespace
+// a binding holds is a namespace it has authority over — and that is the
+// property these rows pin.
 var (
 	infraClasses  = []coordclass.Class{coordclass.ClassGraph, coordclass.ClassMessaging, coordclass.ClassSessions, coordclass.ClassOrders, coordclass.ClassNudges}
-	infraPrefixes = []string{"gcg", "gcm", "gcs", "gco", "gcn"}
+	infraPrefixes = []string{"gcg", "gcm", "gcs", "gco", "gcn", "gcnq"}
 )
 
 // errRefused stands in for the standing storage refusal a refused city's boot

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"unicode"
 
 	"github.com/gastownhall/gascity/internal/bdflags"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/spf13/cobra"
@@ -208,6 +210,110 @@ func rewriteBdHeartbeatArgs(bdArgs []string) ([]string, error) {
 	return []string{"heartbeat", rest[0]}, nil
 }
 
+// bdRigQualifiedMetadataRefusal refuses an outgoing lease owner or route target
+// whose rig segment is absent from the loaded city configuration. These values
+// are opaque to bd, so gc bd is the common admission boundary for stale and
+// external writers.
+//
+// Actor names without a slash remain compatible: historic dotted identities
+// are provenance, not rig-qualified routes. Both bd metadata spellings are
+// examined so --metadata cannot bypass the --set-metadata guard. Inputs this
+// preflight cannot interpret exactly are refused before bd can mutate state.
+func bdRigQualifiedMetadataRefusal(cfg *config.City, bdArgs []string) (string, bool) {
+	verb, args := bdflags.SplitGlobalFlags(bdArgs)
+	// bd registers `new` as an alias for `create` (bd create --help: "Aliases:
+	// create, new"), so the alias has to reach the same admission check AND the
+	// same flag manifest. Normalizing here covers both, because those are the
+	// only two things verb is read for. The gate alone would not: bdflags keys
+	// its manifests under the canonical verb only and performs no alias
+	// normalization, so ValueFlags("new") is nil, and an empty manifest steps
+	// over no value — the failure mode globalValueFlags' doc comment calls
+	// load-bearing.
+	if verb == "new" {
+		verb = "create"
+	}
+	if verb != "create" && verb != "update" {
+		return "", false
+	}
+	valueFlags := bdflags.ValueFlags(verb)
+	configuredRigs := make(map[string]struct{}, len(cfg.Rigs))
+	for _, rig := range cfg.Rigs {
+		configuredRigs[rig.Name] = struct{}{}
+	}
+
+	validate := func(key, value string) (string, bool) {
+		if key != beadmeta.LeaseOwnerMetadataKey && key != beadmeta.RoutedToMetadataKey {
+			return "", false
+		}
+		rig, _, qualified := strings.Cut(value, "/")
+		if !qualified || rig == "" {
+			return "", false
+		}
+		if _, ok := configuredRigs[rig]; ok {
+			return "", false
+		}
+		return fmt.Sprintf("gc bd: refusing %s=%q: rig %q is not configured in this city\n", key, value, rig), true
+	}
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		value := ""
+		switch {
+		case arg == "--set-metadata" || arg == "--metadata":
+			if i+1 >= len(args) {
+				return fmt.Sprintf("gc bd: refusing %s without a value before write\n", arg), true
+			}
+			i++
+			value = args[i]
+		case strings.HasPrefix(arg, "--set-metadata="):
+			value = strings.TrimPrefix(arg, "--set-metadata=")
+		case strings.HasPrefix(arg, "--metadata="):
+			value = strings.TrimPrefix(arg, "--metadata=")
+		default:
+			if !strings.Contains(arg, "=") && valueFlags[arg] && i+1 < len(args) {
+				i++
+			}
+			continue
+		}
+
+		if strings.HasPrefix(arg, "--set-metadata") {
+			key, metadataValue, ok := strings.Cut(value, "=")
+			if !ok || strings.TrimSpace(key) == "" {
+				return fmt.Sprintf("gc bd: refusing malformed --set-metadata value %q before write\n", value), true
+			}
+			if msg, refused := validate(key, metadataValue); refused {
+				return msg, true
+			}
+			continue
+		}
+
+		metadataJSON := strings.TrimSpace(value)
+		if strings.HasPrefix(metadataJSON, "@") {
+			return fmt.Sprintf("gc bd: refusing --metadata %q: @file input cannot be validated before write\n", value), true
+		}
+		var metadata map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(metadataJSON), &metadata); err != nil {
+			return fmt.Sprintf("gc bd: refusing malformed --metadata value before write: %v\n", err), true
+		}
+		for key, rawValue := range metadata {
+			if key != beadmeta.LeaseOwnerMetadataKey && key != beadmeta.RoutedToMetadataKey {
+				continue
+			}
+			var metadataValue string
+			if err := json.Unmarshal(rawValue, &metadataValue); err != nil {
+				return fmt.Sprintf("gc bd: refusing non-string %s before write\n", key), true
+			}
+			if msg, refused := validate(key, metadataValue); refused {
+				return msg, true
+			}
+		}
+	}
+	return "", false
+}
+
 func doBd(args []string, stdout, stderr io.Writer) int {
 	cityName, rigName, bdArgs := extractBdScopeFlags(args)
 
@@ -240,6 +346,10 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc bd: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if msg, refused := bdRigQualifiedMetadataRefusal(cfg, bdArgs); refused {
+		fmt.Fprint(stderr, msg) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	target, err := resolveBdScopeTarget(cfg, cityPath, rigName, bdArgs, cityName != "", stderr)
 	if err != nil {
@@ -265,6 +375,28 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		// ledger cannot answer by class, so the reason it would have been
 		// refused travels with the result they are about to trust.
 		fmt.Fprintf(stderr, "gc bd: %s is set; running anyway: %s\n", bdRelocatedClassOverrideEnvVar, msg) //nolint:errcheck // best-effort stderr
+	}
+	// The same split, on the write side. `gc bd create` is a passthrough too, and
+	// bd writes the work ledger only, so a create whose SHAPE belongs to a
+	// relocated class strands the bead in a ledger that class is never read from
+	// — silently, because bd did what it was asked and exited 0. Placement is
+	// impossible here (only argv crosses to the subprocess), so the create is
+	// refused before anything is written and the refusal names the gc-native
+	// command that mints it correctly.
+	//
+	// The read override above deliberately does not reach this arm: it exists
+	// because the read scan classifies ambiguous TEXT and a refused read can be
+	// re-run, while a stranded mint leaves a row under the wrong prefix that no
+	// later read finds and no migration moves.
+	//
+	// It runs before the by-id door rather than after because the two answer
+	// different questions and cannot shadow each other: this arm reads the
+	// prospective bead's CLASS and never an addressed id, so a create that names
+	// a relocated bead in --parent still reaches the ownership refusal, which
+	// names that bead. When both are true the mint is what has to be stopped.
+	if msg, stranded := bdRelocatedClassCreateRefusal(cfg, target.ScopeRoot, bdArgs); stranded {
+		fmt.Fprintf(stderr, "gc bd: %s\n", msg) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 	// A by-ID operation whose subject a relocated class owns is answered in
 	// process, from the binding that class is served from, and never handed to
@@ -389,12 +521,13 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	warnExternalBdOverrideDrift(stderr, cityPath, target)
 
 	// Resolve the same binary every other bd path in the tree resolves for
-	// this scope: a scope bound to a complete storage binding pins the bd
-	// build that speaks that backend, and the passthrough must honor the pin
-	// or it hands the command to an ambient bd that rejects the bound
-	// backend. Keying on the target scope rather than the city keeps a rig
-	// that owns its binding on its pin, and keeps a rig that overrides the
-	// city backend on the ambient bd its runtime env already implies.
+	// this scope: the city scope, any rig that inherits the city backend, and
+	// any scope bound to a complete storage binding all pin the bd build that
+	// speaks that backend, and the passthrough must honor the pin or it hands
+	// the command to an ambient bd that rejects the bound backend. Keying on
+	// the target scope rather than the city keeps a rig that overrides the
+	// city backend, and owns no binding of its own, on the ambient bd its
+	// runtime env already implies.
 	bdPath, err := resolveBdBinaryForScope(cityPath, target.ScopeRoot)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr

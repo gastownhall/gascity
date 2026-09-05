@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`gc storage preflight` reports everything the infra-class cutover would
+  refuse, from outside the window.** `gc storage migrate --from-work` runs its
+  refusals with the fleet stopped, so an operator learned that a rig scope
+  holds an infrastructure bead this binary carries no importer for only after
+  spending the window on it. The new verb runs the same checks — every one of
+  them the migration's own function, not a copy — against a LIVE city, while
+  copying nothing, creating nothing, taking no migration guard, and publishing
+  no event. A live controller is reported by PID rather than refused, because
+  it names the window itself rather than something to go and fix.
+
+- **`storage.binding.not_configured` makes "this city has no split" a verdict
+  a subscriber can see.** A city that relocates nothing used to leave the boot
+  gate having published nothing at all, and nothing reads the same as a gate
+  that crashed before deciding or a build too old to have one. The fifth
+  `storage.binding.*` type carries the same `StorageBindingOutcomePayload` as
+  the other four, so a deploy gated on these events can tell an absent split
+  apart from an absent answer.
+
+- **`storage.binding.*` events now carry `proven_beads`, the size of the
+  proven-copy manifest a serving verdict rests on.** "Converged" alone did not
+  distinguish a city serving its whole infrastructure slice from the binding
+  from one whose copy carried nothing, and those are the two situations an
+  operator watching a cutover most needs to tell apart. Every path that
+  reaches a serving verdict has already read the manifest, so the number costs
+  nothing. Every other outcome leaves it zero, and zero there means the copy's
+  size is not something the verdict established — not that the copy is empty.
+
 ### Changed
 
 - **`gc pack registry publish` now refuses an unscoped pack name unless you
@@ -29,7 +58,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   publish time: the registry byte-compares it with `[pack].name`, so it can
   only restate the name `pack.toml` already declares.
 
+- **`gc bd` now refuses a `--metadata` body it cannot validate before the
+  write, on `new` as well as `create` and `update`.** `gc bd` validates
+  rig-qualified metadata (`lease_owner`, `routed_to`) ahead of the write so a
+  create naming a rig this city does not configure is stopped before it mints a
+  stranded bead. That guard admitted `create` and `update` but not `new` — the
+  alias `bd` itself registers for `create` — so the same command spelled `gc bd
+  new` skipped validation entirely. It now normalizes the alias and applies the
+  identical check.
+
+  Upgrading: `gc bd new --metadata @file.json` now exits 1, on every city,
+  split or not. The `@file.json` spelling states its object in a file rather
+  than in argv, so `gc bd` cannot read the rig qualification before `bd`
+  resolves the file and mints from it — the one spelling where a refusal is the
+  only fail-closed answer. Pass the JSON inline (`--metadata '{"routed_to":
+  "rig/agent"}'`) instead. A malformed inline body is likewise refused by name
+  rather than forwarded. No in-repo caller uses the `@file.json` spelling.
+
 ### Fixed
+
+- **The infra-class cutover now carries dependency-edge payloads.** Every
+  within-infra edge the copy re-added went in through a writer that clears the
+  pair's metadata sidecar, so the binding received those edges with their
+  endpoints and type intact and their payloads gone. In production the
+  payload-carrying edges are the `waits_for` fanout gates between formula step
+  beads, whose payload records the gate kind; an absent payload reads as the
+  default, `all-children`, so a gate the formula asked to release on the first
+  child waited for every one of them instead. The copy and the recovery path
+  now share one edge writer, a destination that cannot carry a payload is
+  refused rather than written to without it, and the equality witness compares
+  the payload rather than only the edge.
+
+  **Upgrading:** this does not repair a city that already cut over. Its binding
+  still holds the payloadless edges, and no command yet detects or repairs
+  them. See "If this city cut over before edge payloads were carried" in
+  `docs/runbooks/split-storage-classes.md` for what is affected, what is not
+  lost, and the destructive re-converge procedure.
+
+- **A control bead served by a relocated class binding is routed to the
+  dispatcher its own `gc.root_store_ref` names.** On a split city every rig's
+  control beads live in one class binding. The reconciler dropped rig-rooted
+  rows from control-dispatcher demand entirely, because a binding's ref reads
+  as city scope and the candidate filter required a rig match; and it
+  suppressed city-rooted rows from that same demand, because the route repair
+  read the binding's ref (`class:gmnos`) as a rig name, found no dispatcher
+  for that pseudo-scope, and logged `no configured control-dispatcher for its
+  store scope` once per tick. The binding is now collected for every row it
+  serves, and the repair keys the dispatcher on the row's root scope, so rig
+  rows keep (or are repaired toward) their rig dispatcher and city rows their
+  city dispatcher. The diagnostic names the binding and the owning scope.
+  Supersedes #5548 and #5588; fixes #5547 and #5587.
+
+- **Mail archive and delete now expand whitespace-joined message IDs.** Each
+  positional argument is split into individual IDs before single-versus-batch
+  dispatch, so shell variables containing multiple IDs no longer look like one
+  already-handled message.
 
 - **`gc import add` of a local in-git pack now locks to HEAD, not the repo's
   latest tag.** Per `gc import add --help`, a local path inside a git

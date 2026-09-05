@@ -908,3 +908,17 @@ func TestUntrustedRemoteGitConfigArgs(t *testing.T) {
 		}
 	}
 }
+
+// git quotes paths containing non-ASCII or control characters in porcelain
+// output. Consuming the quoted text verbatim makes a live registration
+// unmatchable, which the worktree safety scans read as "absent".
+func TestParseWorktreeListUnquotesCQuotedPaths(t *testing.T) {
+	out := "worktree \"/tmp/caf\\303\\251\"\nHEAD abc123\nbranch refs/heads/main\n\n"
+	got := parseWorktreeList(out)
+	if len(got) != 1 {
+		t.Fatalf("parseWorktreeList returned %d entries, want 1", len(got))
+	}
+	if got[0].Path != "/tmp/café" {
+		t.Errorf("Path = %q, want %q", got[0].Path, "/tmp/café")
+	}
+}

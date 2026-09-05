@@ -2,10 +2,12 @@ package main
 
 import (
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -99,6 +101,75 @@ func assignedWorkIDs(work []beads.Bead) []string {
 		ids = append(ids, wb.ID)
 	}
 	return ids
+}
+
+// TestFilterAssignedWorkBeadsForSessionWakeWithStoresProjectsSurvivingStores
+// pins the store projection where alignment is CONSTRUCTED. Every other test of
+// this contract exercises a consumer that is handed an already-aligned slice;
+// this one drops a bead in the MIDDLE and asserts the legs move with it.
+//
+// The assertion is store IDENTITY, not length. A projection that dropped the
+// bead but not its store yields a same-length pair that every downstream length
+// check accepts, and the orphan release then writes the surviving bead through
+// the leg that belonged to the dropped one — the exact cross-leg write ga-b0o6a
+// exists to prevent. Distinct MemStore handles per index are what make that
+// detectable.
+func TestFilterAssignedWorkBeadsForSessionWakeWithStoresProjectsSurvivingStores(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "riga", Path: filepath.Join(cityPath, "riga")},
+			{Name: "rigb", Path: filepath.Join(cityPath, "rigb")},
+		},
+		Agents: []config.Agent{{
+			Name: "worker",
+			Dir:  "riga",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "worker",
+			Dir:      "riga",
+			Mode:     "on_demand",
+		}},
+	}
+	sessions := []beads.Bead{{
+		ID:     "session-1",
+		Status: "open",
+		Type:   sessionBeadType,
+		Metadata: map[string]string{
+			"template":                  "riga/worker",
+			"session_name":              "worker-session",
+			"configured_named_identity": "riga/worker",
+		},
+	}}
+	work := []beads.Bead{
+		{ID: "leading-keep", Status: "in_progress", Assignee: "session-1"},
+		{ID: "other-rig-drop", Status: "in_progress", Assignee: "session-1"},
+		{ID: "own-rig-keep", Status: "in_progress", Assignee: "session-1"},
+	}
+	storeRefs := []string{"", "rigb", "riga"}
+	stores := []beads.Store{beads.NewMemStore(), beads.NewMemStore(), beads.NewMemStore()}
+
+	got, gotRefs, gotStores := filterAssignedWorkBeadsForSessionWakeWithStores(
+		cfg, cityPath, nil, sessionInfosFromBeads(sessions), work, storeRefs, stores,
+	)
+
+	wantIDs := []string{"leading-keep", "own-rig-keep"}
+	if gotIDs := assignedWorkIDs(got); !slices.Equal(gotIDs, wantIDs) {
+		t.Fatalf("filtered work IDs = %v, want %v — the middle bead must drop", gotIDs, wantIDs)
+	}
+	wantRefs := []string{"", "riga"}
+	if !slices.Equal(gotRefs, wantRefs) {
+		t.Fatalf("filtered store refs = %#v, want %#v aligned with beads", gotRefs, wantRefs)
+	}
+	if len(gotStores) != len(wantIDs) {
+		t.Fatalf("filtered stores length = %d, want %d — a store must drop with its bead", len(gotStores), len(wantIDs))
+	}
+	wantStores := []beads.Store{stores[0], stores[2]}
+	for i, want := range wantStores {
+		if gotStores[i] != want {
+			t.Fatalf("filtered store at index %d is not the input store for %q; the projection is misordered, so a release would write through another bead's leg", i, wantIDs[i])
+		}
+	}
 }
 
 func TestFilterAssignedWorkBeadsForSessionWakeCityScopedAgentIsCrossStoreEligible(t *testing.T) {
@@ -776,5 +847,83 @@ func TestResolveTaskWorkDirIncludesAssignedWisp(t *testing.T) {
 
 	if got := resolveTaskWorkDir("", store, "worker-session"); got != workDir {
 		t.Fatalf("resolveTaskWorkDir = %q, want assigned wisp work_dir %q", got, workDir)
+	}
+}
+
+func TestResolveTaskWorkDirPrefersPreparedDrainSourceAnchor(t *testing.T) {
+	sourceWorkDir := t.TempDir()
+	launcherWorkDir := t.TempDir()
+	store := beads.NewMemStore()
+	source, err := store.Create(beads.Bead{
+		Title: "implementation source anchor",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.LegacyWorkDirMetadataKey: sourceWorkDir,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create source anchor: %v", err)
+	}
+	root, err := store.Create(beads.Bead{
+		Title: "drain item workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.DrainMemberIDMetadataKey: source.ID,
+			beadmeta.LegacyWorkDirMetadataKey: launcherWorkDir,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create item root: %v", err)
+	}
+	step, err := store.Create(beads.Bead{
+		Title:    "implementation step",
+		Type:     "task",
+		Assignee: "worker-session",
+		Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey:    root.ID,
+			beadmeta.WorkDirMetadataKey:       launcherWorkDir,
+			beadmeta.LegacyWorkDirMetadataKey: launcherWorkDir,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create implementation step: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := store.Update(step.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("mark implementation step in progress: %v", err)
+	}
+
+	if got := resolveTaskWorkDir("", store, "worker-session"); got != sourceWorkDir {
+		t.Fatalf("resolveTaskWorkDir = %q, want prepared source work dir %q", got, sourceWorkDir)
+	}
+}
+
+// TestResolveTaskWorkDirPrefersCreatorWorkDirOverStampedCanonical pins the
+// key precedence for non-drain beads: legacy `work_dir` is written by the
+// worktree creator, while `gc.work_dir` is an observability stamp
+// reconciliation mirrors from an observed cwd. The creator's record wins.
+func TestResolveTaskWorkDirPrefersCreatorWorkDirOverStampedCanonical(t *testing.T) {
+	creatorDir := t.TempDir()
+	observedDir := t.TempDir()
+	store := beads.NewMemStore()
+	task, err := store.Create(beads.Bead{
+		Title:    "assigned task",
+		Type:     "task",
+		Assignee: "worker-session",
+		Metadata: map[string]string{
+			beadmeta.LegacyWorkDirMetadataKey: creatorDir,
+			beadmeta.WorkDirMetadataKey:       observedDir,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create assigned task: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := store.Update(task.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("mark assigned task in progress: %v", err)
+	}
+
+	if got := resolveTaskWorkDir("", store, "worker-session"); got != creatorDir {
+		t.Fatalf("resolveTaskWorkDir = %q, want creator work_dir %q (not stamped %q)", got, creatorDir, observedDir)
 	}
 }

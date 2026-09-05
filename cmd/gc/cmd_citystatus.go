@@ -86,8 +86,16 @@ type StatusRigJSON struct {
 
 // StatusSummaryJSON is the agent count summary in JSON output.
 type StatusSummaryJSON struct {
-	TotalAgents       int          `json:"total_agents"`
-	RunningAgents     int          `json:"running_agents"`
+	TotalAgents   int `json:"total_agents"`
+	RunningAgents int `json:"running_agents"`
+	// UnknownAgents is how many of TotalAgents the runtime probe never
+	// answered for. It is zero unless the status is partial. RunningAgents
+	// stays a count of agents observed running, so during partial status
+	// TotalAgents-RunningAgents is not a count of stopped agents and
+	// UnknownAgents is the part of that difference nothing was learned
+	// about. Without it a consumer reads running_agents=0 out of a probe
+	// that reached nobody and cannot tell it from a genuinely idle city.
+	UnknownAgents     int          `json:"unknown_agents,omitempty"`
 	ActiveSessions    int          `json:"active_sessions,omitempty"`
 	SuspendedSessions int          `json:"suspended_sessions,omitempty"`
 	StoreHealth       *StoreHealth `json:"store_health,omitempty"`

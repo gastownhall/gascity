@@ -152,6 +152,66 @@ func foreignProviderCity(t *testing.T) (cityPath string, classStore beads.Store)
 	return cityPath, store
 }
 
+// soleClassBindingStore resolves the city's sole relocated class binding as a
+// STORE, for the fixtures that seed both sides of a migration.
+//
+// A fan-out — the only error cliSoleClassBinding returns — is a topology this
+// build refuses to serve, so a fixture that met one has not built the city it
+// meant to build and says so here rather than seeding half of it.
+func soleClassBindingStore(t *testing.T, cityPath string) beads.Store {
+	t.Helper()
+	binding, relocated, err := cliSoleClassBinding(cityPath)
+	if err != nil {
+		t.Fatalf("resolving the city's class binding: %v", err)
+	}
+	if !relocated {
+		t.Fatal("the fixture city resolved no class binding; it is not split")
+	}
+	return binding.Store
+}
+
+// recensusAfterSeedingARelic reopens the funnel so the binding's relic census
+// runs again, and returns the class store on the far side of it.
+//
+// The census runs when the funnel OPENS a binding, and a fixture that plants a
+// work-shaped id afterwards has produced a verdict that was true when it was
+// taken and is false by the time the row asserts on it. The residence probe
+// retires on that stale verdict — MintsReserved && !HasLegacyResidents — and the
+// row then reads the retained work copy while claiming to test that the binding
+// wins.
+//
+// Reopening is not a workaround for the ordering: it IS what production does.
+// Relics are what `gc storage migrate` leaves behind, so every process that
+// meets them starts after they exist, censuses once at boot, and sees them. A
+// one-shot `gc` invocation against a migrated city is exactly this.
+//
+// The returned store is a NEW handle — the engine is a real sqlite database
+// under .gc/, so the seeded relic is still there, but the pointer the fixture
+// handed back before the reopen is closed and no longer the one the door
+// resolves. Rows that compare store identity must use this one.
+func recensusAfterSeedingARelic(t *testing.T, cityPath string) beads.Store {
+	t.Helper()
+	if err := closeCLIStorageRoutes(); err != nil {
+		t.Fatalf("closing the funnel so the binding is censused again: %v", err)
+	}
+	return soleClassBindingStore(t, cityPath)
+}
+
+// dropDerivedResidencyMemo invalidates the grouping derived from these routes.
+//
+// Swapping routes.stores in place is invisible to cliResidencyBindings, which
+// caches the class-to-store grouping it read out of those routes: anything that
+// already resolved the grouping keeps handing out the stores that were there
+// BEFORE the swap. A test that routed one command before installing its failing
+// store would then exercise a healthy store while asserting on a fault path,
+// and pass for the wrong reason. Dropping the memo here makes that ordering bug
+// unwritable rather than merely currently absent.
+func dropDerivedResidencyMemo(t *testing.T, cityPath string) {
+	t.Helper()
+	dropCLIResidencyBindings(filepath.Clean(cityPath))
+	t.Cleanup(func() { dropCLIResidencyBindings(filepath.Clean(cityPath)) })
+}
+
 // mustCreateClassBead creates a bead in the class binding and proves it carries
 // a reserved class prefix, which is what makes it unanswerable by any other
 // store.
@@ -403,7 +463,7 @@ func TestBdByIDReservedPrefixAbsenceIsNotAFallThrough(t *testing.T) {
 func TestBdByIDRoutesAWorkShapedIDResidentInTheClassBinding(t *testing.T) {
 	cityPath, classStore := foreignProviderCity(t)
 	migrated := beads.Bead{ID: "demo-premigration", Title: "carried across by the migration", Type: "task", Description: "work-shaped id, class-resident row"}
-	created, err := classStore.Create(migrated)
+	created, err := migrationSeed(classStore, migrated)
 	if err != nil {
 		t.Fatalf("seeding a work-shaped id in the class binding: %v", err)
 	}
@@ -677,6 +737,7 @@ func failClassBindingReads(t *testing.T, cityPath string, cause error) {
 		restore[class] = previous
 		routes.stores[class] = store
 	}
+	dropDerivedResidencyMemo(t, cityPath)
 	t.Cleanup(func() {
 		for class, previous := range restore {
 			routes.stores[class] = previous
@@ -1058,19 +1119,24 @@ func reservedClassID(t *testing.T, suffix string) string {
 // The tests below cover the write-orphaned class resident: a bead whose id
 // carries a WORK prefix but whose only row lives in the class binding.
 //
-// It is the population the class store MINTS rather than the one the migration
-// carried across — a class-store Create with no id mints from the binding
-// workspace's own prefix, which on a converged city is a work prefix — and it
-// is write-unreachable without a residence lane: reads reach it (the door
-// probes the class leg for every id) while writes route by prefix at a ledger
-// that never held the row.
+// A converged city holds this population two ways — the migration carried the
+// pre-split rows across with their ids PRESERVED, and a class-store Create with
+// no id mints from the binding workspace's own prefix, which on such a city is
+// still a work prefix. Either way it is write-unreachable without a residence
+// lane: reads reach it (the door probes the class leg for every id) while writes
+// route by prefix at a ledger that never held the row.
 
 // classResidentWorkShapedBead seeds a bead with an explicit WORK-shaped id into
 // the class binding only, and proves the id carries no reserved prefix so the
 // test exercises the residence probe rather than the prefix rule.
+//
+// It seeds through the foreign-id create because that is the only way a pinned
+// foreign id enters a binding — the ordinary create fences them out, which is
+// what stops a live subsystem from writing one there by accident. Pinning the id
+// rather than taking a minted one is what lets the tests name it.
 func classResidentWorkShapedBead(t *testing.T, classStore beads.Store, id, title string) beads.Bead {
 	t.Helper()
-	created, err := classStore.Create(beads.Bead{ID: id, Title: title, Type: "task"})
+	created, err := migrationSeed(classStore, beads.Bead{ID: id, Title: title, Type: "task"})
 	if err != nil {
 		t.Fatalf("seeding %s in the class binding: %v", id, err)
 	}
@@ -1078,6 +1144,17 @@ func classResidentWorkShapedBead(t *testing.T, classStore beads.Store, id, title
 		t.Fatalf("the fixture id %q carries a reserved class prefix; it cannot exercise the residence probe", created.ID)
 	}
 	return created
+}
+
+// migrationSeed writes a bead into a binding the way `gc storage migrate` does:
+// through the store's foreign-id create, which keeps a preserved id that the
+// ordinary create fences out.
+func migrationSeed(store beads.Store, b beads.Bead) (beads.Bead, error) {
+	creator, ok := store.(beads.ForeignIDCreator)
+	if !ok {
+		return beads.Bead{}, fmt.Errorf("%T cannot create with a foreign id, so it cannot hold a bead the migration carried across", store)
+	}
+	return creator.CreateWithForeignID(b)
 }
 
 // workStoreFor opens the city's own work ledger — the store the bd subprocess
@@ -1806,6 +1883,7 @@ func stubClassBindingStore(t *testing.T, cityPath string, store beads.Store) {
 		restore[class] = previous
 		routes.stores[class] = store
 	}
+	dropDerivedResidencyMemo(t, cityPath)
 	t.Cleanup(func() {
 		for class, previous := range restore {
 			routes.stores[class] = previous

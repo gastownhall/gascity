@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 
@@ -249,9 +250,14 @@ func resetPendingCommittedAtInfo(info sessionpkg.Info) (string, time.Time, bool)
 }
 
 func recordResetStallIfDue(
+	cityPath string,
+	store beads.Store,
+	sp runtime.Provider,
+	cfg *config.City,
 	info sessionpkg.Info,
 	template string,
 	name string,
+	running bool,
 	alive bool,
 	startupTimeout time.Duration,
 	now time.Time,
@@ -274,12 +280,41 @@ func recordResetStallIfDue(
 	if elapsed <= startupTimeout {
 		return
 	}
-	if dt != nil && !dt.markResetStall(info.ID) {
-		return
-	}
+	// The dedup mark gates the DIAGNOSTIC and the event, not the eviction:
+	// a transient kill failure must not disarm the fix for the rest of the
+	// episode (the mark only clears when continuation_reset_pending clears,
+	// which a wedged session never does).
+	first := dt == nil || dt.markResetStall(info.ID)
+
 	if stderr == nil {
 		stderr = io.Discard
 	}
+
+	// The occupying tmux runtime is stale: continuation reset has been
+	// pending longer than the startup timeout, and the runtime the
+	// reconciler is waiting on for the reset never came back alive. When the
+	// tmux session is still running underneath (the classic wedge in #5355:
+	// the old runtime exited cleanly but its tmux session survived), waiting
+	// forever leaves the session parked in reset-pending under the OLD
+	// config indefinitely. Evict it so the normal spawn path on a later tick
+	// recreates the session under the current config. Attempted on every
+	// overdue tick while a stale runtime is still running — once the kill
+	// lands, `running` goes false and this stops attempting. Gated on
+	// running: if the tmux session is already gone too, there is nothing to
+	// evict, and the reconciler's other paths handle a fully-dead bead.
+	// Best-effort: a session that disappears between the observation above
+	// and this kill (IsSessionGone) is the expected steady state, not a
+	// failure.
+	if running && sp != nil {
+		if err := workerKillSessionTargetWithConfig(cityPath, store, sp, cfg, name); err != nil && !runtime.IsSessionGone(err) {
+			fmt.Fprintf(stderr, "session reconciler: evicting stale reset-pending runtime %s: %v\n", name, err) //nolint:errcheck
+		}
+	}
+
+	if !first {
+		return
+	}
+
 	elapsedSeconds := int(elapsed / time.Second)
 	msg := fmt.Sprintf(
 		"session reconciler: reset stalled for %s: elapsed_s=%d reset_committed_at=%s bead_id=%s",
@@ -794,7 +829,21 @@ func finalizeDrainAckStopPendingSessions(
 		// pool slot while the agent still runs.
 		processNames := drainAckStopPendingProcessNames(cfg, info)
 		obs, err := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, info.ID, processNames)
-		if err != nil || obs.Running || obs.Alive {
+		if err != nil {
+			// Observation unavailable, not "still alive". Re-queue the stop and
+			// say nothing to the agent: a reminder is a claim about the row's
+			// state, and this tick has none.
+			queueDrainAckAsyncStop(cityPath, store, sp, cfg, info.ID, name, info.InstanceToken, processNames, asyncStopTracker, stderr)
+			continue
+		}
+		if obs.Running || obs.Alive {
+			// The stop was already queued and the runtime is still here. This is
+			// the one drain state with no exit of its own: the loop re-queues the
+			// same stop every tick, nothing in it ever tells the AGENT anything,
+			// and the only thing that has ever cleared such a row is an operator
+			// killing the pane. Ask the agent to acknowledge and leave.
+			// See drain_reminder.go.
+			remindStopPendingDrain(sp, store, info, clk, stderr)
 			queueDrainAckAsyncStop(cityPath, store, sp, cfg, info.ID, name, info.InstanceToken, processNames, asyncStopTracker, stderr)
 			continue
 		}
@@ -1428,6 +1477,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	}
 	if startupTimeout <= 0 && cfg != nil {
 		startupTimeout = cfg.Session.StartupTimeoutDuration()
+	}
+	// The orphan-close tie-break releases a held claim through the leg the census
+	// read it through. Alignment is the whole contract: a slice that does not
+	// describe this tick's snapshot is a different truth, not a smaller one, so a
+	// mismatch drops to the routed fallback rather than indexing it (ga-b0o6a).
+	orphanReleaseStores := reconcileOpts.assignedWorkStores
+	assignedWorkStoresMisaligned := len(orphanReleaseStores) > 0 && len(orphanReleaseStores) != len(assignedWorkBeads)
+	if assignedWorkStoresMisaligned {
+		log.Printf("reconcileSessionBeads: assigned work/store length mismatch: work=%d stores=%d", len(assignedWorkBeads), len(orphanReleaseStores))
+		orphanReleaseStores = nil
 	}
 	maxAgeTr := reconcileOpts.maxSessionAgeTr
 	assignedWorkDeferTr := reconcileOpts.assignedWorkDeferTr
@@ -2236,7 +2295,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						//
 						// Restricted to "orphaned": a "suspended" seat is configured and
 						// merely scaled down, so its work stays put for its return.
-						if released := releaseConfirmedOrphanSessionWork(cfg, store, rigStores, assignedWorkBeads, infoByID[id]); len(released) > 0 {
+						if released := releaseConfirmedOrphanSessionWork(cfg, store, rigStores, assignedWorkBeads, orphanReleaseStores, infoByID[id]); len(released) > 0 {
 							emitDeadAssigneeReopenedEvents(rec, assignedWorkBeads, released, clk.Now().UTC())
 							closed = closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, infoByID[id], reason, clk.Now().UTC(), stderr, false)
 						}
@@ -2262,7 +2321,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							// for as long as the seat stays wedged (ga-jrnou).
 							outcome = TraceOutcomeNoChange
 						}
-						trace.RecordDecision(TraceSiteReconcilerCloseOrphan, TraceReasonCode(reason), outcome, template, name, nil)
+						var payload traceRecordPayload
+						if assignedWorkStoresMisaligned {
+							payload = traceRecordPayload{
+								"assigned_work_stores_misaligned": true,
+								"assigned_work_bead_cnt":          len(assignedWorkBeads),
+								"assigned_work_store_cnt":         len(reconcileOpts.assignedWorkStores),
+							}
+						}
+						trace.RecordDecision(TraceSiteReconcilerCloseOrphan, TraceReasonCode(reason), outcome, template, name, payload)
 					}
 				}
 				continue
@@ -2280,7 +2347,18 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			shadowTick.captureRuntime(id, "observeRuntimeProviderLiveness", name, triFromBool(running), triFromBool(alive))
 		}
 		peek := cachedSessionPeek(cityPath, store, sp, cfg, id, tp.Hints.ProcessNames)
-		recordResetStallIfDue(infoByID[id], tp.TemplateName, name, alive, startupTimeout, clk.Now().UTC(), dt, rec, stderr, trace)
+		if running && !alive {
+			// Warm the peek before recordResetStallIfDue may evict the stale
+			// runtime below: cachedSessionPeek is lazy, and a capture-pane
+			// against a killed tmux session errors, which would silently skip
+			// the zombie forensics, the crash event, and both
+			// checkRateLimitStability call sites on the eviction tick.
+			// Successful peeks are cached, so every consumer below (all of
+			// which use rateLimitPeekLines) is served from this one read —
+			// no extra capture in a branch that already peeks.
+			_, _ = peek(rateLimitPeekLines)
+		}
+		recordResetStallIfDue(cityPath, store, sp, cfg, infoByID[id], tp.TemplateName, name, running, alive, startupTimeout, clk.Now().UTC(), dt, rec, stderr, trace)
 
 		// Zombie capture: session exists but process dead — grab scrollback for forensics.
 		// markProviderTerminalError persists + folds its write onto the snapshot in one
@@ -2306,17 +2384,25 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						})
 					}
 				}
-				if !runtime.ContainsProviderRateLimitScreen(output) {
+				// Dedup: mark once per zombie episode (markZombieCrash returns
+				// false on every tick after the first, until clearZombieCrash
+				// below observes the session alive again). Without this, a
+				// wedged zombie fires session.crashed on every ~30s reconciler
+				// tick indefinitely — 299 events over 5.3h in #5355, each
+				// carrying the raw pane dump.
+				if !runtime.ContainsProviderRateLimitScreen(output) && dt.markZombieCrash(id) {
 					rec.Record(events.Event{
 						Type:    events.SessionCrashed,
 						Actor:   "gc",
 						Subject: tp.DisplayName(),
-						Message: output,
+						Message: truncateCrashPaneOutput(output, crashEventPaneOutputMaxLines),
 						Payload: api.SessionLifecyclePayloadJSON(id, tp.TemplateName, "zombie process"),
 					})
 					telemetry.RecordAgentCrash(context.Background(), tp.DisplayName(), output)
 				}
 			}
+		} else {
+			dt.clearZombieCrash(id)
 		}
 		// The snapshot is already current after the zombie-capture block:
 		// markProviderTerminalError advanced infoByID[id] in place via
@@ -3639,6 +3725,23 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 		}
 
+		// A durable explicit wake request refused before the session reached a
+		// live runtime -- held, quarantined, or asleep past its idle-sleep
+		// window -- is a distinct, visible outcome from a post-start wake
+		// failure. Gated on the RAW decision.ShouldWake/decision.Reason (not
+		// the loop-local shouldWake, which the ConfigSuppressed and
+		// heartbeat-crash-recovery overrides above can diverge from) so a
+		// policy override never masks or fabricates a refusal. See
+		// emitSessionWakeRefused, gastownhall/gascity#5739, ga-fxvdit.
+		if info.WakeRequest == string(sessionpkg.WakeCauseExplicit) && hasDec && !decision.ShouldWake && !target.alive {
+			switch decision.Reason {
+			case "held", "quarantined", "idle-sleep":
+				if fold := emitSessionWakeRefused(store, infoByID[target.info.ID], snapshot, target.tp.TemplateName, decision.Reason, rec, clk, stderr); fold != nil {
+					tick.apply(target.info.ID, fold)
+				}
+			}
+		}
+
 		if shouldWake && !target.alive {
 			// Session should be awake but isn't — wake it.
 			if isFailedCreateSessionInfo(info) {
@@ -3651,6 +3754,29 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 			if sessionIsQuarantinedInfo(info, clk) {
 				continue // crash-loop protection
+			}
+			if episode, err := sessFront.LoadStartupHealthEpisode(name); err != nil {
+				// Fail open: proceed as if no quarantine episode exists rather
+				// than block every session start on a transient store-read
+				// error. Logged (matching the two LoadStartupHealthEpisode
+				// call sites in session_lifecycle_parallel.go) so the miss is
+				// observable instead of silent.
+				fmt.Fprintf(stderr, "session reconciler: loading startup-health episode for %s: %v\n", name, err) //nolint:errcheck
+			} else if !episode.QuarantinedUntil.IsZero() {
+				// Mirror the active episode onto the visible session row
+				// (ga-em8g4o) so a caller can see why a start is being held
+				// back through the typed front door alone, without a separate
+				// startup-health-episode bead lookup. Written whenever the
+				// episode has reached quarantine threshold, independent of
+				// whether "now" is still before QuarantinedUntil, so the
+				// mirrored state stays visible through the tick that lets the
+				// quarantine expire.
+				if mirrorErr := mirrorStartupHealthEpisodeMetadata(sessFront, target.info.ID, episode); mirrorErr != nil {
+					fmt.Fprintf(stderr, "session reconciler: mirroring startup-health episode for %s: %v\n", name, mirrorErr) //nolint:errcheck
+				}
+				if clk.Now().Before(episode.QuarantinedUntil) {
+					continue // startup-health crash-loop protection (pending-create failures)
+				}
 			}
 			if pendingCreateStartInFlightInfo(info, clk, startupTimeout) {
 				if trace != nil {
@@ -4680,6 +4806,101 @@ func clearStrandedEventMarker(store beads.Store, info sessionpkg.Info, snapshot 
 	return fold
 }
 
+// wakeRefusedEventAtKey is the once-per-wake-request emission-guard marker
+// for session.wake_refused, mirroring strandedEventEmittedKey. Set on first
+// emission; cleared by ClearWakeBlockersPatch alongside wake_attempts=0 so a
+// fresh explicit wake request gets its own emission.
+const wakeRefusedEventAtKey = "wake_refused_event_at"
+
+// formatWakeRefusedMessage builds the human-readable session.wake_refused
+// message body. Mirrors formatStrandedMessage's empty-template placeholder.
+func formatWakeRefusedMessage(template, sessionName, reason string) string {
+	if template == "" {
+		template = "<unknown-template>"
+	}
+	name := sessionName
+	if name == "" {
+		name = "(unnamed)"
+	}
+	return fmt.Sprintf("wake refused for %s (template %s): %s", name, template, reason)
+}
+
+// emitSessionWakeRefused records a session.wake_refused event when a durable
+// explicit wake request (wake_request=explicit) is refused before the
+// session ever reaches a live runtime -- held, quarantined, or asleep past
+// its idle-sleep window. wake_attempts is bumped via a direct marker write
+// (never WakeFailureAccrualPatch) so a persistent refusal remains visible
+// without risking self-quarantine at defaultMaxWakeAttempts -- see
+// TestEmitSessionWakeRefused_HeldSessionNotQuarantinedAtThreshold. Throttled
+// per session bead via wakeRefusedEventAtKey so repeated reconciler ticks on
+// the same unserved wake request emit only once, mirroring
+// emitSessionStrandedDiagnostic's StrandedEventEmittedAt guard.
+func emitSessionWakeRefused(
+	store beads.Store,
+	info sessionpkg.Info,
+	snapshot *sessionBeadSnapshot,
+	template string,
+	reason string,
+	rec events.Recorder,
+	clk clock.Clock,
+	stderr io.Writer,
+) sessionpkg.MetadataPatch {
+	if rec == nil {
+		return nil
+	}
+	if strings.TrimSpace(info.WakeRefusedEventAt) != "" {
+		return nil
+	}
+	now := clk.Now().UTC()
+	newAttempts := info.WakeAttempts + 1
+	rec.Record(events.Event{
+		Type:      events.SessionWakeRefused,
+		Ts:        now,
+		Actor:     "gc",
+		Subject:   info.ID,
+		Message:   formatWakeRefusedMessage(template, info.SessionNameMetadata, reason),
+		SessionID: info.ID,
+		Payload:   api.SessionWakeRefusedPayloadJSON(info.ID, info.SessionNameMetadata, template, reason, info.WakeRequest, newAttempts),
+	})
+	fold := sessionpkg.MetadataPatch{
+		"wake_attempts":       strconv.Itoa(newAttempts),
+		wakeRefusedEventAtKey: now.Format(time.RFC3339),
+	}
+	snapshot.ApplyOpenInfoPatch(info.ID, fold)
+	if _, err := sessionFrontDoor(store).ApplyPatchInfo(info, fold); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: recording wake refusal for %s: %v\n", info.ID, err) //nolint:errcheck
+	}
+	return fold
+}
+
+// startupHealthActiveCountMetadataKey and startupHealthActiveKindMetadataKey
+// mirror a startup-health episode's ConsecutiveCount and Kind onto the
+// visible session row (ga-em8g4o) once the episode reaches quarantine
+// threshold, so a caller can see why a start is being held back through the
+// typed session front door alone. Cleared back to their zero-value
+// representations ("0" and "") alongside the episode itself on a successful,
+// durably-committed start (session_lifecycle_parallel.go).
+const (
+	startupHealthActiveCountMetadataKey = "startup_health_active_count"
+	startupHealthActiveKindMetadataKey  = "startup_health_active_kind"
+)
+
+// mirrorStartupHealthEpisodeMetadata writes episode's ConsecutiveCount and
+// Kind onto the session bead id through the typed front door. Callers decide
+// WHEN to mirror (the quarantine gate above only calls this once the episode
+// has reached threshold; the success-path clear in
+// session_lifecycle_parallel.go calls it with the zero-value cleared
+// episode); this helper only knows how to encode one episode as a patch.
+func mirrorStartupHealthEpisodeMetadata(sessFront *sessionpkg.Store, id string, episode sessionpkg.StartupHealthEpisode) error {
+	if sessFront == nil || strings.TrimSpace(id) == "" {
+		return nil
+	}
+	return sessFront.ApplyPatch(id, sessionpkg.MetadataPatch{
+		startupHealthActiveCountMetadataKey: strconv.Itoa(episode.ConsecutiveCount),
+		startupHealthActiveKindMetadataKey:  string(episode.Kind),
+	})
+}
+
 type strandedAssignedWork struct {
 	bead  beads.Bead
 	store beads.Store
@@ -5656,14 +5877,65 @@ func resolveTaskWorkDir(cityPath string, store beads.Store, assignees ...string)
 			continue
 		}
 		for _, b := range assigned {
-			wd := strings.TrimSpace(b.Metadata["work_dir"])
-			if wd == "" {
-				continue
+			if workDir := resolveTaskBeadWorkDir(cityPath, store, b); workDir != "" {
+				return workDir
 			}
-			resolved := resolveWorkDirAgainstCity(cityPath, wd)
-			if info, err := os.Stat(resolved); err == nil && info.IsDir() {
-				return resolved
-			}
+		}
+	}
+	return ""
+}
+
+func resolveTaskBeadWorkDir(cityPath string, store beads.Store, bead beads.Bead) string {
+	if sourceWorkDir := resolveDrainSourceWorkDir(cityPath, store, bead); sourceWorkDir != "" {
+		return sourceWorkDir
+	}
+	// Legacy `work_dir` is the worktree CREATOR's record; `gc.work_dir` is an
+	// observability stamp reconciliation mirrors (see
+	// workDirStampHasOwnershipEvidence) and, for non-pool sessions, writes
+	// unconditionally from the observed cwd. Read the owned path first so this
+	// stays a strict superset of the pre-existing legacy-only lookup.
+	for _, key := range []string{beadmeta.LegacyWorkDirMetadataKey, beadmeta.WorkDirMetadataKey} {
+		workDir := strings.TrimSpace(bead.Metadata[key])
+		if workDir == "" {
+			continue
+		}
+		resolved := resolveWorkDirAgainstCity(cityPath, workDir)
+		if info, err := os.Stat(resolved); err == nil && info.IsDir() {
+			return resolved
+		}
+	}
+	return ""
+}
+
+// resolveDrainSourceWorkDir returns the prepared source anchor's worktree for
+// a drain item step. The drain recipe is materialized before prepare-worktree
+// creates that directory, so copied step metadata can still name the launcher
+// checkout. The source anchor is the durable post-prepare authority.
+func resolveDrainSourceWorkDir(cityPath string, store beads.Store, bead beads.Bead) string {
+	root := bead
+	if rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey]); rootID != "" && rootID != bead.ID {
+		resolvedRoot, err := store.Get(rootID)
+		if err != nil {
+			return ""
+		}
+		root = resolvedRoot
+	}
+	memberID := strings.TrimSpace(root.Metadata[beadmeta.DrainMemberIDMetadataKey])
+	if memberID == "" {
+		return ""
+	}
+	source, err := store.Get(memberID)
+	if err != nil {
+		return ""
+	}
+	for _, key := range []string{beadmeta.LegacyWorkDirMetadataKey, beadmeta.WorkDirMetadataKey} {
+		workDir := strings.TrimSpace(source.Metadata[key])
+		if workDir == "" {
+			continue
+		}
+		resolved := resolveWorkDirAgainstCity(cityPath, workDir)
+		if info, err := os.Stat(resolved); err == nil && info.IsDir() {
+			return resolved
 		}
 	}
 	return ""
@@ -5795,6 +6067,29 @@ func truncateHashForLog(h string) string {
 		return h[:12]
 	}
 	return h
+}
+
+// truncateCrashPaneOutput caps a pane capture to at most maxLines lines,
+// keeping the first and last halves and eliding the middle. Output at or
+// under the cap is returned unchanged. Used to bound session.crashed event
+// payloads independent of the larger peek used for classifier heuristics
+// (rateLimitPeekLines) — see crashEventPaneOutputMaxLines (#5355).
+func truncateCrashPaneOutput(output string, maxLines int) string {
+	if maxLines <= 0 {
+		return output
+	}
+	lines := strings.Split(output, "\n")
+	if len(lines) <= maxLines {
+		return output
+	}
+	head := maxLines / 2
+	tail := maxLines - head
+	omitted := len(lines) - head - tail
+	var b strings.Builder
+	b.WriteString(strings.Join(lines[:head], "\n"))
+	fmt.Fprintf(&b, "\n… %d lines omitted …\n", omitted)
+	b.WriteString(strings.Join(lines[len(lines)-tail:], "\n"))
+	return b.String()
 }
 
 // rebaselineLegacyHashOutcome picks the trace outcome that matches a

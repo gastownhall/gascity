@@ -379,6 +379,7 @@ func newRootCmdWithOptions(stdout, stderr io.Writer, options rootCommandOptions)
 		newSessionCmd(stdout, stderr),
 		newConvergeCmd(stdout, stderr),
 		newWorkflowCmd(stdout, stderr),
+		newWorktreeCmd(stdout, stderr),
 		newRuntimeCmd(stdout, stderr),
 		newFormulaCmd(stdout, stderr),
 		newBdCmd(stdout, stderr),
@@ -471,11 +472,7 @@ func printCommandUsage(stderr io.Writer, cmd *cobra.Command) {
 	if cmd == nil {
 		return
 	}
-	usage := strings.TrimRight(cmd.UsageString(), "\n")
-	if usage == "" {
-		return
-	}
-	fmt.Fprintln(stderr, usage) //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(stderr, "Run %q for usage.\n", cmd.CommandPath()+" --help") //nolint:errcheck // best-effort stderr
 }
 
 // sessionName returns the session name for a city agent.

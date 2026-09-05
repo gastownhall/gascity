@@ -1121,6 +1121,16 @@ type PackRuntimeEntry struct {
 	// the only version today; the declaration exists so future protocol
 	// bumps fail at composition instead of at session start.
 	Protocol int `toml:"protocol,omitempty"`
+	// PromptDelivery opts this runtime into a non-default oversized-prompt
+	// delivery strategy (cmd/gc promptDeliverySupportFor). Unset (the zero
+	// value) keeps today's behavior: an oversized prompt hard-fails for any
+	// runtime this package cannot positively classify. The only other
+	// accepted value is "nudge-fallback", asserting the runtime has a
+	// working post-start Nudge path an oversized prompt can reroute
+	// through. This is a pack-composition-time assertion, not something gc
+	// verifies against the runtime executable — see
+	// docs/reference/specs/pack-spec.md sec 1.2.8.
+	PromptDelivery string `toml:"prompt_delivery,omitempty" jsonschema:"enum=nudge-fallback"`
 }
 
 // PackCommandEntry declares a CLI subcommand provided by a pack.
@@ -1909,21 +1919,31 @@ const (
 	// DefaultDoltMaxConnections is the managed Dolt listener connection cap.
 	DefaultDoltMaxConnections = 256
 	// DefaultDoltReadTimeoutMillis is the managed Dolt listener read timeout.
-	// Managed multi-agent cities open a short-lived bd/dolt-sql client
-	// connection per operation and frequently SIGKILL it on a client-side
-	// deadline (e.g. agents wrap `gc hook` in `timeout 10`), so the server
-	// orphans the socket in Sleep until read_timeout fires. Lowering this from
-	// the former 30s reaps those dead per-call connections sooner, before they
-	// accumulate into a store-wide read collapse under load. read_timeout is the
-	// listener socket idle/produce timeout: it reaps idle (Sleep) connections
-	// and bounds the inter-row produce gap (go-mysql-server ErrRowTimeout
-	// re-arms per row), not total query wall-clock — so it does not cut a long
-	// but steadily-producing query. Do NOT drop it to/below the client kill
-	// budget (`timeout 10`) on the assumption it is purely idle-reaping. Cities
-	// with slower live operations raise it via city.toml [dolt]
-	// read_timeout_millis. See #3022 (5m->30s) and the scale_check storm RCA
-	// (30s->15s).
-	DefaultDoltReadTimeoutMillis = 15000
+	// read_timeout is go-mysql-server's ONLY idle-connection reaper:
+	// wait_timeout (DefaultDoltWaitTimeoutSeconds) is accepted, stored, and
+	// reported by the server, but reaps nothing on dolt 2.2.3 (measured for
+	// #5383). In code ErrRowTimeout re-arms per row, but plan shapes that
+	// produce no rows until they finish — recursive CTEs, aggregates, large
+	// UPDATEs — never re-arm it, so in practice read_timeout behaves as a
+	// wall-clock cap on the whole result-production phase, not merely an
+	// inter-row gap bound. It is fixed at handler construction: neither SET
+	// SESSION nor SET GLOBAL changes the effective value at runtime, only the
+	// server config file plus a restart.
+	//
+	// Raised from 15000 to 120000 after #5383 (the Reaper's own maintenance
+	// query was killed mid-production by the old 15s bound). #5053 introduced
+	// the wait_timeout config knob believing it would take over
+	// idle-connection reaping so read_timeout could be freed for long
+	// queries; #5383's measurements found that belief false, so this value
+	// instead stays at less than half of DefaultDoltWriteTimeoutMillis
+	// (300000, the prior emergency-workaround value) to preserve headroom
+	// for #3101's independent outer wall-clock deadline to catch a genuine
+	// connection pile-up (#3626) first. Cities with slower live operations
+	// can raise it further via city.toml [dolt] read_timeout_millis. See
+	// #3022 (5m->30s), the scale_check storm RCA (30s->15s), #5053
+	// (wait_timeout knob added), #5383 (Reaper false positive; wait_timeout
+	// measured inert), #3626 (read collapse incident).
+	DefaultDoltReadTimeoutMillis = 120000
 	// DefaultDoltWriteTimeoutMillis is the managed Dolt listener write timeout.
 	DefaultDoltWriteTimeoutMillis = 300000
 )
@@ -1951,19 +1971,20 @@ type DoltConfig struct {
 	MaxConnections int `toml:"max_connections,omitempty" jsonschema:"default=256"`
 	// ReadTimeoutMillis overrides the managed Dolt listener read_timeout_millis.
 	// 0 means use the managed default.
-	ReadTimeoutMillis int `toml:"read_timeout_millis,omitempty" jsonschema:"default=15000"`
+	ReadTimeoutMillis int `toml:"read_timeout_millis,omitempty" jsonschema:"default=120000"`
 	// WriteTimeoutMillis overrides the managed Dolt listener write_timeout_millis.
 	// 0 means use the managed default.
 	WriteTimeoutMillis int `toml:"write_timeout_millis,omitempty" jsonschema:"default=300000"`
 	// WaitTimeoutSeconds overrides the managed server's wait_timeout system
-	// variable, which is how long Dolt keeps an idle connection before reaping
-	// it. Cities that raise ReadTimeoutMillis above the reconcile tick gap
-	// generally need this raised with it, or the controller's long-lived
-	// dispatch-pool connections are still reaped between ticks. Before this
-	// field existed the only way to set it was GC_DOLT_WAIT_TIMEOUT in the
-	// supervisor's process environment, which no city.toml could express and
-	// no shell-invoked restart inherited — so a restart from an operator shell
-	// silently rewrote the value. 0 (omitted) means use the managed default.
+	// variable. Despite the name, wait_timeout does not currently reap idle
+	// connections -- measured inert on dolt 2.2.3 for #5383 (see
+	// DefaultDoltWaitTimeoutSeconds); read_timeout is the only reaper. The
+	// knob is kept and still emitted regardless: it is harmless, and becomes
+	// correct the moment dolt implements it. Before this field existed the
+	// only way to set it was GC_DOLT_WAIT_TIMEOUT in the supervisor's process
+	// environment, which no city.toml could express and no shell-invoked
+	// restart inherited — so a restart from an operator shell silently
+	// rewrote the value. 0 (omitted) means use the managed default.
 	WaitTimeoutSeconds int `toml:"wait_timeout_seconds,omitempty" jsonschema:"default=30"`
 	// DoltLockReleaseTimeout is how long managed-dolt lifecycle operations
 	// wait for dolt's on-disk exclusive store locks (the root-level
@@ -2037,8 +2058,14 @@ func (d DoltConfig) EffectiveWriteTimeoutMillis() int {
 	return DefaultDoltWriteTimeoutMillis
 }
 
-// DefaultDoltWaitTimeoutSeconds is the managed server's idle-connection reap
-// window when neither city.toml nor the environment configures one.
+// DefaultDoltWaitTimeoutSeconds is the managed default for the server's
+// wait_timeout system variable when neither city.toml nor the environment
+// configures one. Despite the name this is not an idle-connection reap
+// window: measured inert on dolt 2.2.3 for #5383 (accepted, stored, and
+// reported by the server, but nothing reads it in go-mysql-server's
+// server/ package -- see DefaultDoltReadTimeoutMillis, the actual reaper).
+// Kept and still emitted because it is harmless and becomes correct if a
+// future dolt version implements it.
 //
 // Deliberately not paired with an Effective* accessor like the other [dolt]
 // fields: wait_timeout resolves three ways, not two. An unset field must fall
@@ -3155,8 +3182,8 @@ type Agent struct {
 	// universal derivation ("s-<beadID>" for ad-hoc sessions,
 	// "<basename>-<beadID>" for pool sessions). When set, it is expanded as a
 	// Go text/template using the same PathContext fields as work_dir /
-	// session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName),
-	// sanitized for tmux, and validated as an explicit session name. For pool
+	// session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName,
+	// DefaultBranch), sanitized for tmux, and validated as an explicit session name. For pool
 	// sessions, a live-name collision appends the bead ID as a deterministic
 	// suffix. For manual `gc session new` sessions, tmux_alias becomes the
 	// explicit session_name and takes precedence over --alias, which remains the
@@ -3182,8 +3209,14 @@ type Agent struct {
 	// PromptTemplate is the path to this agent's prompt template file.
 	// Relative paths resolve against the city directory.
 	PromptTemplate string `toml:"prompt_template,omitempty"`
-	// Nudge is text typed into the agent's tmux session after startup.
-	// Used for CLI agents that don't accept command-line prompts.
+	// Nudge is text typed into the agent's session after startup.
+	// Used for CLI agents that don't accept command-line prompts. For a known
+	// pool session whose trigger remains unclaimed after the 90-second recovery
+	// grace period, an empty or whitespace-only Nudge does not opt out: it sends
+	// "Run gc hook --claim --drain-ack --json now; if it returns work, execute
+	// it immediately." This fallback applies only to the initial stalled-claim
+	// recovery; continuation-claim recovery remains configured-only. Unknown
+	// templates receive no fallback.
 	Nudge string `toml:"nudge,omitempty"`
 	// Session overrides the session transport for this agent.
 	// "" (default) uses the city-level session provider (typically tmux).
@@ -3244,8 +3277,8 @@ type Agent struct {
 	// levels. Legacy no-store evaluation continues to treat the output as
 	// the desired session count. If it contains Go template placeholders, gc
 	// expands them using the same PathContext fields as work_dir and
-	// session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName)
-	// before running the command.
+	// session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName,
+	// DefaultBranch) before running the command.
 	ScaleCheck string `toml:"scale_check,omitempty"`
 	// DrainTimeout is the maximum time to wait for a session to finish its
 	// current work before force-killing it during scale-down. Duration string
@@ -3254,13 +3287,14 @@ type Agent struct {
 	// OnBoot is a shell command template run once at controller startup for
 	// this agent. If it contains Go template placeholders, gc expands them
 	// using the same PathContext fields as work_dir and session_setup
-	// (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName) before running
-	// the command.
+	// (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName, DefaultBranch)
+	// before running the command.
 	OnBoot string `toml:"on_boot,omitempty"`
 	// OnDeath is a shell command template run when a session dies unexpectedly.
 	// If it contains Go template placeholders, gc expands them using the same
 	// PathContext fields as work_dir and session_setup (Agent, AgentBase,
-	// Rig, RigRoot, CityRoot, CityName) before running the command.
+	// Rig, RigRoot, CityRoot, CityName, DefaultBranch) before running the
+	// command.
 	OnDeath string `toml:"on_death,omitempty"`
 	// Namepool is the path to a plain text file with one name per line.
 	// When set, sessions use names from the file as display aliases.
@@ -3271,8 +3305,8 @@ type Agent struct {
 	// WorkQuery is the shell command template to find available work for this
 	// agent. If it contains Go template placeholders, gc expands them using
 	// the same PathContext fields as work_dir and session_setup (Agent,
-	// AgentBase, Rig, RigRoot, CityRoot, CityName) before probe, hook, and
-	// prompt-context execution. Used by gc hook and available in prompt
+	// AgentBase, Rig, RigRoot, CityRoot, CityName, DefaultBranch) before
+	// probe, hook, and prompt-context execution. Used by gc hook and available in prompt
 	// templates as {{.WorkQuery}}.
 	// If unset, Gas City uses a three-tier default query:
 	//   1. in_progress work assigned to this session/alias (crash recovery)
@@ -3284,8 +3318,8 @@ type Agent struct {
 	// SlingQuery is the command template to route a bead to this session config.
 	// If it contains Go template placeholders, gc expands them using the same
 	// PathContext fields as work_dir and session_setup (Agent, AgentBase,
-	// Rig, RigRoot, CityRoot, CityName) before replacing {} with the bead
-	// ID. Used by gc sling to make a bead visible to the target's work_query.
+	// Rig, RigRoot, CityRoot, CityName, DefaultBranch) before replacing {}
+	// with the bead ID. Used by gc sling to make a bead visible to the target's work_query.
 	// The placeholder {} is replaced with the bead ID at runtime.
 	// Default for all agents:
 	// "bd update {} --set-metadata gc.routed_to=<qualified-name>".
@@ -3353,7 +3387,10 @@ type Agent struct {
 	// SessionSetup is a list of shell commands run after session creation.
 	// Each command is a template string supporting placeholders:
 	// {{.Session}}, {{.Agent}}, {{.AgentBase}}, {{.Rig}}, {{.RigRoot}},
-	// {{.CityRoot}}, {{.CityName}}, {{.WorkDir}}.
+	// {{.CityRoot}}, {{.CityName}}, {{.WorkDir}}, {{.DefaultBranch}}.
+	// {{.DefaultBranch}} is the rig's configured default_branch (empty for
+	// city-scoped agents and rigs that record none); it is never probed from
+	// git, so scripts should keep their own origin/HEAD fallback.
 	// Commands run in gc's process (not inside the agent session) via sh -c.
 	// On failure, the last 4 KiB of the command's stdout/stderr is included
 	// in the error and may appear in controller and reconciler logs; avoid
@@ -4343,9 +4380,21 @@ func ValidateRigs(rigs []Rig, hqPrefix string) error {
 			return fmt.Errorf("rig %q: prefix %q collides with %s", r.Name, prefix, other)
 		}
 		seenPrefixes[prefix] = r.Name
+
+		if branch := r.EffectiveDefaultBranch(); branch != "" && !defaultBranchCharset.MatchString(branch) {
+			return fmt.Errorf("rig %q: default_branch %q contains characters outside [A-Za-z0-9._/@+=-]; the value is interpolated into prompts, formula variables, and pre_start shell commands, so shell-active characters are refused", r.Name, branch)
+		}
 	}
 	return nil
 }
+
+// defaultBranchCharset is the conservative branch-name alphabet ValidateRigs
+// accepts for default_branch. Git itself allows more (a single quote is a
+// legal ref character), but the value flows into template interpolation on
+// shell surfaces — {{base_branch}} in formula steps and
+// GC_DEFAULT_BRANCH='{{.DefaultBranch}}' in pre_start lines — where quotes and
+// metacharacters silently break or rewrite the command line.
+var defaultBranchCharset = regexp.MustCompile(`^[A-Za-z0-9._/@+=-]+$`)
 
 // ReservedPrefixWarnings returns advisory warnings for any effective HQ or rig
 // work-store prefix that shadows a reserved coordination-class id-prefix

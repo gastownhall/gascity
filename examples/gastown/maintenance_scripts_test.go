@@ -260,7 +260,7 @@ EOF
 	    ;;
 	  session)
 	    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
-	      printf '{"sessions":[],"summary":{},"filters":{},"schema_version":"1"}\n'
+	      printf '{"sessions":[{"id":"orphan-sweep-test-keepalive","session_name":"orphan-sweep-test-keepalive","closed":false}],"summary":{},"filters":{},"schema_version":"1"}\n'
 	      exit 0
 	    fi
 	    ;;
@@ -341,7 +341,7 @@ exit 1
 // resolved through the qualified-agent-is-live path under test.
 func orphanSweepBareShortFormGCStub(t *testing.T, binDir string, sessionLive bool) {
 	t.Helper()
-	sessionList := `{"sessions":[],"summary":{},"filters":{},"schema_version":"1"}`
+	sessionList := `{"sessions":[{"id":"orphan-sweep-test-keepalive","session_name":"orphan-sweep-test-keepalive","closed":false}],"summary":{},"filters":{},"schema_version":"1"}`
 	if sessionLive {
 		sessionList = `{"sessions":[` +
 			`{"id":"mc-bare-live","session_name":"thriva__devpipeline-backend-dev",` +
@@ -510,7 +510,7 @@ EOF
     ;;
   session)
     if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
-      printf '%s\n' '{"sessions":[],"summary":{},"filters":{},"schema_version":"1"}'
+      printf '%s\n' '{"sessions":[{"id":"orphan-sweep-test-keepalive","session_name":"orphan-sweep-test-keepalive","closed":false}],"summary":{},"filters":{},"schema_version":"1"}'
       exit 0
     fi
     ;;
@@ -652,7 +652,7 @@ EOF
 	    ;;
 	  session)
 	    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
-	      printf '{"sessions":[],"summary":{},"filters":{},"schema_version":"1"}\n'
+	      printf '{"sessions":[{"id":"orphan-sweep-test-keepalive","session_name":"orphan-sweep-test-keepalive","closed":false}],"summary":{},"filters":{},"schema_version":"1"}\n'
 	      exit 0
 	    fi
 	    ;;
@@ -758,7 +758,7 @@ EOF
       count=$((count + 1))
       printf '%s' "$count" > "$GC_SESSION_COUNT_FILE"
       if [ "$count" -eq 1 ]; then
-        printf '{"sessions":[],"summary":{},"filters":{},"schema_version":"1"}\n'
+        printf '{"sessions":[{"id":"orphan-sweep-test-keepalive","session_name":"orphan-sweep-test-keepalive","closed":false}],"summary":{},"filters":{},"schema_version":"1"}\n'
       else
         cat <<'EOF'
 {"sessions":[
@@ -856,7 +856,7 @@ EOF
         count=$((count + 1))
         printf '%s' "$count" > "$GC_RIG_SESSION_COUNT_FILE"
         if [ "$count" -eq 1 ]; then
-          printf '{"sessions":[],"summary":{},"filters":{},"schema_version":"1"}\n'
+          printf '{"sessions":[{"id":"orphan-sweep-test-keepalive","session_name":"orphan-sweep-test-keepalive","closed":false}],"summary":{},"filters":{},"schema_version":"1"}\n'
         else
           cat <<'EOF'
 {"sessions":[
@@ -866,7 +866,7 @@ EOF
         fi
         exit 0
       fi
-      printf '{"sessions":[],"summary":{},"filters":{},"schema_version":"1"}\n'
+      printf '{"sessions":[{"id":"orphan-sweep-test-keepalive","session_name":"orphan-sweep-test-keepalive","closed":false}],"summary":{},"filters":{},"schema_version":"1"}\n'
       exit 0
     fi
     ;;
@@ -948,7 +948,7 @@ EOF
     ;;
   session)
     if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
-      printf '{"sessions":[],"summary":{},"filters":{},"schema_version":"1"}\n'
+      printf '{"sessions":[{"id":"orphan-sweep-test-keepalive","session_name":"orphan-sweep-test-keepalive","closed":false}],"summary":{},"filters":{},"schema_version":"1"}\n'
       exit 0
     fi
     ;;
@@ -1033,7 +1033,7 @@ EOF
     ;;
   session)
     if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
-      printf '{"sessions":[],"summary":{},"filters":{},"schema_version":"1"}\n'
+      printf '{"sessions":[{"id":"orphan-sweep-test-keepalive","session_name":"orphan-sweep-test-keepalive","closed":false}],"summary":{},"filters":{},"schema_version":"1"}\n'
       exit 0
     fi
     ;;
@@ -1133,7 +1133,7 @@ EOF
     ;;
   session)
     if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
-      printf '{"sessions":[],"summary":{},"filters":{},"schema_version":"1"}\n'
+      printf '{"sessions":[{"id":"orphan-sweep-test-keepalive","session_name":"orphan-sweep-test-keepalive","closed":false}],"summary":{},"filters":{},"schema_version":"1"}\n'
       exit 0
     fi
     ;;
@@ -1231,7 +1231,7 @@ EOF
     ;;
   session)
     if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
-      printf '{"sessions":[],"summary":{},"filters":{},"schema_version":"1"}\n'
+      printf '{"sessions":[{"id":"orphan-sweep-test-keepalive","session_name":"orphan-sweep-test-keepalive","closed":false}],"summary":{},"filters":{},"schema_version":"1"}\n'
       exit 0
     fi
     ;;
@@ -1343,7 +1343,7 @@ EOF
     ;;
   session)
     if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
-      printf '{"sessions":[],"summary":{},"filters":{},"schema_version":"1"}\n'
+      printf '{"sessions":[{"id":"orphan-sweep-test-keepalive","session_name":"orphan-sweep-test-keepalive","closed":false}],"summary":{},"filters":{},"schema_version":"1"}\n'
       exit 0
     fi
     ;;
@@ -1458,7 +1458,7 @@ EOF
 EOF
         exit 0
       fi
-      printf '{"sessions":[],"summary":{},"filters":{},"schema_version":"1"}\n'
+      printf '{"sessions":[{"id":"orphan-sweep-test-keepalive","session_name":"orphan-sweep-test-keepalive","closed":false}],"summary":{},"filters":{},"schema_version":"1"}\n'
       exit 0
     fi
     ;;
@@ -1582,7 +1582,7 @@ EOF
 EOF
         exit 0
       fi
-      printf '{"sessions":[],"summary":{},"filters":{},"schema_version":"1"}\n'
+      printf '{"sessions":[{"id":"orphan-sweep-test-keepalive","session_name":"orphan-sweep-test-keepalive","closed":false}],"summary":{},"filters":{},"schema_version":"1"}\n'
       exit 0
     fi
     ;;
@@ -1699,7 +1699,7 @@ EOF
       if [ "$rig" = "broken" ]; then
         exit 1
       fi
-      printf '{"sessions":[],"summary":{},"filters":{},"schema_version":"1"}\n'
+      printf '{"sessions":[{"id":"orphan-sweep-test-keepalive","session_name":"orphan-sweep-test-keepalive","closed":false}],"summary":{},"filters":{},"schema_version":"1"}\n'
       exit 0
     fi
     ;;
@@ -2007,6 +2007,12 @@ fi
 if [ "$*" = "bd show $ORPHAN_SWEEP_ORPHAN_ASSIGNEE --json" ]; then
   exit 1
 fi
+if [ "$*" = "bd update $ORPHAN_SWEEP_ORPHAN_ID --append-notes orphan-sweep: reset from assignee $ORPHAN_SWEEP_ORPHAN_ASSIGNEE -- no live session matched" ]; then
+  exit 0
+fi
+case "$*" in
+  "mail send mayor/ "*) exit 0 ;;
+esac
 printf 'UNEXPECTED: %s\n' "$*" >> "$GC_CALL_LOG"
 printf 'UNEXPECTED: %s\n' "$*" >&2
 exit 2
@@ -2180,6 +2186,426 @@ func countExactLine(lines []string, want string) int {
 		}
 	}
 	return count
+}
+
+// TestOrphanSweepSkipsRigWhenSessionListSucceedsButReportsZeroSessions covers
+// ga-7p4aab fix 1: an exit-0 session list that parses to zero rows must be
+// treated as a liveness-evidence failure, not success. Before the fix,
+// append_session_list only gated on exit status, so a rig whose session list
+// legitimately (or transiently) reports no rows had every in-progress bead in
+// that rig staged with no liveness evidence at all -- indistinguishable from a
+// rig with no live agents. HQ and other rigs must be unaffected.
+func TestOrphanSweepSkipsRigWhenSessionListSucceedsButReportsZeroSessions(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+if [ "$1" = "--rig" ]; then
+  rig="$2"
+  shift 2
+else
+  rig=""
+fi
+case "$1" in
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: project/worker
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true},{"name":"empty","hq":false},{"name":"healthy","hq":false}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      if [ "$rig" = "empty" ]; then
+        printf '{"sessions":[],"summary":{},"filters":{},"schema_version":"1"}\n'
+        exit 0
+      fi
+      printf '{"sessions":[{"id":"orphan-sweep-test-keepalive","session_name":"orphan-sweep-test-keepalive","closed":false}],"summary":{},"filters":{},"schema_version":"1"}\n'
+      exit 0
+    fi
+    ;;
+  bd)
+	    if [ "$2" = "list" ]; then
+	      if [ "$3" = "--rig" ] && [ "$4" = "empty" ]; then
+	        printf '[]\n'
+      elif [ "$3" = "--rig" ] && [ "$4" = "healthy" ]; then
+        cat <<'EOF'
+[
+  {"id":"ga-healthy-orphan","status":"in_progress","assignee":"missing-healthy-session"}
+]
+EOF
+      else
+        cat <<'EOF'
+[
+  {"id":"ga-hq-orphan","status":"in_progress","assignee":"missing-hq-session"}
+]
+EOF
+	      fi
+	      exit 0
+	    fi
+	    if [ "$2" = "show" ] && [ "$3" = "ga-hq-orphan" ] && [ "$4" = "--json" ]; then
+	      cat <<'EOF'
+[
+  {"id":"ga-hq-orphan","status":"in_progress","assignee":"missing-hq-session"}
+]
+EOF
+	      exit 0
+	    fi
+	    if [ "$2" = "show" ] && [ "$3" = "ga-healthy-orphan" ] && [ "$4" = "--json" ]; then
+	      cat <<'EOF'
+[
+  {"id":"ga-healthy-orphan","status":"in_progress","assignee":"missing-healthy-session"}
+]
+EOF
+	      exit 0
+	    fi
+	    if [ "$2" = "release-if-current" ]; then
+	      printf 'released\n'
+	      exit 0
+	    fi
+    ;;
+esac
+exit 1
+`)
+
+	env := map[string]string{
+		"GC_CITY":      cityDir,
+		"GC_CITY_PATH": cityDir,
+		"GC_CALL_LOG":  gcLog,
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := coreScriptPath("orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+	if !strings.Contains(string(out), "orphan-sweep: reset 2 orphaned beads") {
+		t.Fatalf("unexpected orphan-sweep output:\n%s", out)
+	}
+
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	log := string(logData)
+	for reset, assignee := range map[string]string{
+		"ga-hq-orphan":      "missing-hq-session",
+		"ga-healthy-orphan": "missing-healthy-session",
+	} {
+		if !strings.Contains(log, "bd release-if-current "+reset+" "+assignee) {
+			t.Fatalf("expected %s to be reset after unrelated rig reported zero sessions:\n%s", reset, log)
+		}
+	}
+	if strings.Contains(log, "bd list --rig empty --status=in_progress") {
+		t.Fatalf("rig whose session list succeeded but reported zero sessions was queried for beads instead of being skipped like a hard session-list failure:\n%s", log)
+	}
+}
+
+// TestOrphanSweepPreservesPoolSeatWithOnlySessionNameMetadataWhenLive covers
+// ga-7p4aab fix 2 (the incident's actual shape): a pool seat claims work with
+// its session NAME as the assignee (e.g. "beads--deployer-pool"), which never
+// matches is_known_agent's agent/pool/dot-strip branches. When the session
+// list evidence for that identity is unavailable, the only remaining source
+// of truth is the work bead's own gc.session_name metadata resolving directly
+// via `gc bd show`. Before the fix, session_bead_candidates never read that
+// key, so the seat had no path to prove liveness once list-based evidence
+// missed it.
+func TestOrphanSweepPreservesPoolSeatWithOnlySessionNameMetadataWhenLive(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+case "$1" in
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: deployer
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"sessions":[{"id":"orphan-sweep-test-keepalive","session_name":"orphan-sweep-test-keepalive","closed":false}],"summary":{},"filters":{},"schema_version":"1"}\n'
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-pool-seat-orphan","status":"in_progress","assignee":"deployer-pool-3"}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = "ga-pool-seat-orphan" ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-pool-seat-orphan","status":"in_progress","assignee":"deployer-pool-3","metadata":{"gc.session_name":"beads--deployer-pool"}}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = "beads--deployer-pool" ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":"beads--deployer-pool","status":"open","issue_type":"session","metadata":{"state":"active","session_name":"beads--deployer-pool"}}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "release-if-current" ]; then
+      printf 'released\n'
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`)
+
+	env := map[string]string{
+		"GC_CITY":      cityDir,
+		"GC_CITY_PATH": cityDir,
+		"GC_CALL_LOG":  gcLog,
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := coreScriptPath("orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+	if strings.Contains(string(out), "orphan-sweep: reset") {
+		t.Fatalf("pool seat with live session reachable only via gc.session_name metadata was reset:\n%s", out)
+	}
+
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	log := string(logData)
+	if !strings.Contains(log, "bd show beads--deployer-pool --json") {
+		t.Fatalf("gc.session_name metadata candidate was never probed:\n%s", log)
+	}
+	if strings.Contains(log, "bd release-if-current ga-pool-seat-orphan ") {
+		t.Fatalf("pool seat bead was reset despite a live session found via gc.session_name:\n%s", log)
+	}
+}
+
+// TestOrphanSweepTreatsUnresolvableDoubleDashAssigneeAsUnverifiable covers
+// ga-7p4aab fix 3: when a work bead's only session-bead candidate is the
+// assignee itself and that assignee is a session-name shape (not a
+// resolvable bead id), a failed probe must be classified UNVERIFIABLE, not
+// VERIFIABLE-DEAD. Before the fix, session_probe_failure_is_unverifiable
+// returned "dead" for any self-probe failure that wasn't mc-*-prefixed, so a
+// probe that had nothing resolvable to ask about was read as proof of death.
+func TestOrphanSweepTreatsUnresolvableDoubleDashAssigneeAsUnverifiable(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+case "$1" in
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: polecat
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"sessions":[{"id":"orphan-sweep-test-keepalive","session_name":"orphan-sweep-test-keepalive","closed":false}],"summary":{},"filters":{},"schema_version":"1"}\n'
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-unresolvable-orphan","status":"in_progress","assignee":"rig--polecat"}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = "ga-unresolvable-orphan" ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-unresolvable-orphan","status":"in_progress","assignee":"rig--polecat"}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "release-if-current" ]; then
+      printf 'released\n'
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`)
+
+	env := map[string]string{
+		"GC_CITY":      cityDir,
+		"GC_CITY_PATH": cityDir,
+		"GC_CALL_LOG":  gcLog,
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := coreScriptPath("orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+	if !strings.Contains(string(out), "skipped 1 unverifiable") {
+		t.Fatalf("unresolvable double-dash assignee was not counted as unverifiable:\n%s", out)
+	}
+	if strings.Contains(string(out), "orphan-sweep: reset 1") {
+		t.Fatalf("unresolvable double-dash assignee was reset instead of treated as unverifiable:\n%s", out)
+	}
+
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	log := string(logData)
+	if strings.Contains(log, "bd release-if-current ga-unresolvable-orphan ") {
+		t.Fatalf("unresolvable double-dash assignee was reset:\n%s", log)
+	}
+}
+
+// TestOrphanSweepRecordsCauseNoteOnEveryReset covers ga-7p4aab fix 4 (the
+// bead's ask 1): every reset must leave a durable, one-line trace on the work
+// bead naming orphan-sweep as the actor and the assignee it was taken from.
+// Before the fix, reset_orphan_if_current called only gc bd
+// release-if-current, which writes no note, no mail, and no gc metadata --
+// bd's events.actor was the only trace anywhere.
+func TestOrphanSweepRecordsCauseNoteOnEveryReset(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+case "$1" in
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: deacon
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"sessions":[{"id":"orphan-sweep-test-keepalive","session_name":"orphan-sweep-test-keepalive","closed":false}],"summary":{},"filters":{},"schema_version":"1"}\n'
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-genuinely-dead","status":"in_progress","assignee":"gastown.longgone"}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = "ga-genuinely-dead" ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-genuinely-dead","status":"in_progress","assignee":"gastown.longgone"}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "release-if-current" ]; then
+      printf 'released\n'
+      exit 0
+    fi
+    if [ "$2" = "update" ]; then
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`)
+
+	env := map[string]string{
+		"GC_CITY":      cityDir,
+		"GC_CITY_PATH": cityDir,
+		"GC_CALL_LOG":  gcLog,
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := coreScriptPath("orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+	if !strings.Contains(string(out), "orphan-sweep: reset 1 orphaned beads") {
+		t.Fatalf("unexpected orphan-sweep output:\n%s", out)
+	}
+
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	log := string(logData)
+	if !strings.Contains(log, "bd release-if-current ga-genuinely-dead gastown.longgone") {
+		t.Fatalf("dead-assigned bead was not reset:\n%s", log)
+	}
+	if !strings.Contains(log, "bd update ga-genuinely-dead --append-notes") {
+		t.Fatalf("reset did not append a cause note to the bead via bd update --append-notes:\n%s", log)
+	}
+	if !strings.Contains(log, "orphan-sweep") {
+		t.Fatalf("cause note did not name orphan-sweep as the actor:\n%s", log)
+	}
 }
 
 func TestMaintenanceDoltScriptsUseManagedRuntimePorts(t *testing.T) {
@@ -3306,7 +3732,7 @@ func TestReaperParentIDIsParentChildDependencyProjection(t *testing.T) {
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		call := name + " " + strings.Join(args, " ")
 		switch call {
-		case "bd list --json --label=parent-projection --include-infra --include-gates --limit 0":
+		case "bd list --json --label=parent-projection --include-infra --include-gates --limit 50":
 			return []byte(`[
 				{
 					"id":"ga-child",

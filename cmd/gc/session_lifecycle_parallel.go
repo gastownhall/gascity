@@ -217,8 +217,11 @@ type preparedStart struct {
 	liveHash      string
 	provisionHash string
 	launchHash    string
-	// promptDelivered reports whether THIS incarnation actually delivers the
-	// rendered startup prompt (S19 confirmation signal 1). It is the pure
+	// promptDelivered reports whether a delivery mechanism was selected for
+	// THIS incarnation's rendered startup prompt (S19 confirmation signal 1)
+	// — a pure routing decision, not I/O: it means delivery was
+	// selected/attempted, not that the runtime received or the agent
+	// consumed the prompt (gastownhall/gascity#5236). It is the pure
 	// promptDelivery decision AND-ed with the fresh-launch condition, i.e. the
 	// exact complement of the resume override below — so a resume that swaps in
 	// restartPromptNudge and re-sets GC_STARTUP_PROMPT_DELIVERED for hooks stamps
@@ -313,10 +316,16 @@ type startExecutionOptions struct {
 	// deferred under storeQueryPartial today.
 	deferSessionClosesOnBoot bool
 	readyAssignedFlags       []bool
+	// assignedWorkStores is index-aligned with the assignedWorkBeads passed to
+	// the same reconcile pass: the store each row was read through. The
+	// orphan-close tie-break releases through it instead of re-deriving an owner
+	// from gc.routed_to, which names a work ledger a binding-resident row does
+	// not live in. Nil or misaligned leaves that fallback in place.
+	assignedWorkStores []beads.Store
 	// warmClaimProbe, when set, enables the warm-bind claim nudge: it reports
-	// whether a pool slot's newly-bound trigger bead is still unclaimed, read from
-	// the store named by the session's gc.trigger_bead_store_ref. Built by the
-	// reconciler where the cached rig stores are in scope and consumed in
+	// whether a pool slot's newly-bound trigger bead is still unclaimed, resolved
+	// through the city's residency contract (newWarmClaimTriggerResolver). Built by
+	// the reconciler where the cached rig stores are in scope and consumed in
 	// startPreparedStartCandidate's warm-reuse branch. Nil disables the nudge.
 	warmClaimProbe warmClaimTriggerProbe
 }
@@ -425,6 +434,19 @@ func withDeferSessionClosesOnBoot() startExecutionOption {
 func withReadyAssignedFlags(readyAssignedFlags []bool) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.readyAssignedFlags = readyAssignedFlags
+	}
+}
+
+// withAssignedWorkStores installs the index-aligned snapshot stores for this
+// reconcile pass: the legs the census read each assignedWorkBeads row through.
+// The orphan-close tie-break releases a held claim through the leg that read it,
+// because gc.routed_to names a work ledger that on a split city no longer holds
+// the row (ga-b0o6a). The slice must be exactly as long as the assignedWorkBeads
+// passed to the same pass; anything else is ignored in favor of the routed
+// fallback. Nil (or the option omitted) leaves the fallback in place.
+func withAssignedWorkStores(assignedWorkStores []beads.Store) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.assignedWorkStores = assignedWorkStores
 	}
 }
 
@@ -964,7 +986,10 @@ func buildPreparedStartWithWorkDirResolver(
 	workDirResolver taskWorkDirResolver,
 ) (*preparedStart, sessionpkg.Info, error) {
 	tp := candidate.tp
-	agentCfg, delivery := templateParamsToConfigWithDelivery(tp)
+	agentCfg, delivery, err := templateParamsToConfigWithDelivery(tp)
+	if err != nil {
+		return nil, candidate.info, err
+	}
 
 	// Apply template_overrides from bead metadata. These are per-session
 	// schema option overrides (e.g., {"model":"opus","effort":"high"}) that
@@ -1288,6 +1313,17 @@ func resolvePreparedTaskWorkDir(
 	store beads.Store,
 	workDirResolver taskWorkDirResolver,
 ) string {
+	// Prepared drain items only: the item step's copied metadata can still name
+	// the launcher checkout before prepare-worktree runs. Deliberately NOT the
+	// full resolveTaskBeadWorkDir chain — that would put the trigger bead ahead
+	// of the snapshot resolver for every pool session.
+	if triggerID := strings.TrimSpace(candidate.info.TriggerBeadID); triggerID != "" && store != nil {
+		if trigger, err := store.Get(triggerID); err == nil {
+			if workDir := resolveDrainSourceWorkDir(cityPath, store, trigger); workDir != "" {
+				return workDir
+			}
+		}
+	}
 	if workDirResolver != nil {
 		if workDir := workDirResolver(candidate, cfg); workDir != "" {
 			return workDir
@@ -2215,6 +2251,24 @@ func commitStartResultTraced(
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "metadata_batch_failed", result.started, result.finished, err, result.phases)
 		return false
 	}
+	// A successful, durably-committed start clears any accrued startup-health
+	// episode for this session name (ga-o04bfr.1.1). Skipped when there is
+	// nothing to clear so a healthy session's first-ever start does not mint
+	// a startup-health-episode bead it will never need.
+	if prior, loadErr := sessFront.LoadStartupHealthEpisode(name); loadErr != nil {
+		fmt.Fprintf(stderr, "session reconciler: loading startup-health episode for %s: %v\n", name, loadErr) //nolint:errcheck
+	} else if prior.ConsecutiveCount != 0 || !prior.QuarantinedUntil.IsZero() {
+		cleared := sessionpkg.ClearStartupHealthEpisode(name)
+		if saveErr := sessFront.SaveStartupHealthEpisode(cleared); saveErr != nil {
+			fmt.Fprintf(stderr, "session reconciler: clearing startup-health episode for %s: %v\n", name, saveErr) //nolint:errcheck
+		}
+		// Clear the mirrored count/kind alongside the episode itself so a
+		// recovered session does not keep showing stale "quarantined"
+		// metadata on its visible row (ga-em8g4o).
+		if mirrorErr := mirrorStartupHealthEpisodeMetadata(sessFront, info.ID, cleared); mirrorErr != nil {
+			fmt.Fprintf(stderr, "session reconciler: clearing mirrored startup-health metadata for %s: %v\n", name, mirrorErr) //nolint:errcheck
+		}
+	}
 	// Announce the wake only after the metadata batch has durably landed.
 	// Emitting earlier lets a subscriber observe a session.woke for a start
 	// whose commit then fails — a fact the store never recorded, since the
@@ -2305,11 +2359,29 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 		// next tick, so it deliberately does not record a wake failure (see
 		// TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError).
 		// Genuine wake-failure accounting happens on the non-rollback path
-		// below via recordWakeFailure.
+		// below via recordWakeFailure. It does, however, accrue a
+		// session-name-keyed startup-health episode: unlike wake-failure
+		// accounting (keyed to this bead's own metadata, reset when the
+		// bead closes and is recreated), the episode survives the
+		// pending-create bead's replacement so a session name that never
+		// gets past pending-create still quarantines (ga-o04bfr.1.1).
 		if trace != nil {
 			trace.RecordOperation(TraceSiteLifecycleStartRollback, TraceReasonStart, result.outcome, "", tp.TemplateName, name, 0, traceRecordPayload{
 				"error": formatLifecycleError(result.err),
 			})
+		}
+		if prior, loadErr := sessFront.LoadStartupHealthEpisode(name); loadErr != nil {
+			fmt.Fprintf(stderr, "session reconciler: loading startup-health episode for %s: %v\n", name, loadErr) //nolint:errcheck
+		} else {
+			prior.SessionName = name
+			kind := sessionpkg.FailureKindOther
+			if errors.Is(result.err, context.DeadlineExceeded) {
+				kind = sessionpkg.FailureKindTimeout
+			}
+			episode := sessionpkg.RecordStartupFailure(prior, kind, result.err.Error(), clk.Now(), defaultMaxWakeAttempts, defaultQuarantineDuration)
+			if saveErr := sessFront.SaveStartupHealthEpisode(episode); saveErr != nil {
+				fmt.Fprintf(stderr, "session reconciler: saving startup-health episode for %s: %v\n", name, saveErr) //nolint:errcheck
+			}
 		}
 		rollbackPendingCreate(info, sessFront, clk.Now().UTC(), stderr)
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.err, result.phases)

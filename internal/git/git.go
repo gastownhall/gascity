@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -523,7 +524,7 @@ func parseWorktreeList(output string) []Worktree {
 		}
 		switch {
 		case strings.HasPrefix(line, "worktree "):
-			current.Path = canonicalWorktreePath(strings.TrimPrefix(line, "worktree "))
+			current.Path = canonicalWorktreePath(unquoteGitPath(strings.TrimPrefix(line, "worktree ")))
 		case strings.HasPrefix(line, "HEAD "):
 			current.Head = strings.TrimPrefix(line, "HEAD ")
 		case strings.HasPrefix(line, "branch "):
@@ -537,6 +538,22 @@ func parseWorktreeList(output string) []Worktree {
 		worktrees = append(worktrees, current)
 	}
 	return worktrees
+}
+
+// unquoteGitPath decodes git's C-style quoting, which porcelain output
+// applies to any path containing non-ASCII or control characters. Consuming
+// the quoted text verbatim would canonicalize a registered worktree to a
+// path that matches nothing, and the safety scans built on it would report a
+// live registration as absent.
+func unquoteGitPath(path string) string {
+	if !strings.HasPrefix(path, `"`) {
+		return path
+	}
+	unquoted, err := strconv.Unquote(path)
+	if err != nil {
+		return path
+	}
+	return unquoted
 }
 
 func canonicalWorktreePath(path string) string {

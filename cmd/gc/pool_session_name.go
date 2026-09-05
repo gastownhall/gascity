@@ -431,11 +431,24 @@ func releaseOrphanedPoolAssignments(
 // Every per-bead gate from releaseOrphanedPoolAssignments applies unchanged,
 // including the live re-read in liveWorkAssignmentStillReleasable — the tick
 // snapshot names candidates but never by itself justifies a release.
+//
+// assignedWorkStores is the index-aligned snapshot of the legs the census read
+// assignedWorkBeads through, and it is how a binding-resident row is released at
+// all: gc.routed_to names a WORK ledger, and on a split city a graph-class step
+// no longer lives there, so the routed fallback asks a store that answers "no
+// such bead" and the release is silently skipped (ga-b0o6a). An absent slice
+// (nil or empty) keeps the routed fallback, so callers that supply nothing are
+// unchanged. A non-empty slice of any other length is a DIFFERENT snapshot, not
+// a smaller one: in-range beads are still resolved through it, and out-of-range
+// beads are skipped entirely rather than routed-fallback resolved. Callers must
+// reject a misaligned slice before calling — see reconcileSessionBeads, which
+// nils it and logs the mismatch.
 func releaseConfirmedOrphanSessionWork(
 	cfg *config.City,
 	store beads.Store,
 	rigStores map[string]beads.Store,
 	assignedWorkBeads []beads.Bead,
+	assignedWorkStores []beads.Store,
 	info session.Info,
 ) []releasedPoolAssignment {
 	if cfg == nil || store == nil || len(assignedWorkBeads) == 0 {
@@ -471,8 +484,11 @@ func releaseConfirmedOrphanSessionWork(
 		if agentCfg == nil || !agentCfg.SupportsGenericEphemeralSessions() {
 			continue
 		}
-		ownerStore := storeForPoolAssignment(cfg, store, rigStores, wb)
+		ownerStore := assignedWorkOwnerStore(cfg, store, rigStores, assignedWorkStores, i, wb)
 		if ownerStore == nil {
+			if len(assignedWorkStores) > 0 {
+				log.Printf("releaseConfirmedOrphanSessionWork: missing owner store for assigned work %q at index %d", wb.ID, i)
+			}
 			continue
 		}
 		if !liveWorkAssignmentStillReleasable(ownerStore, wb.ID, wb.Status, assignee) {
