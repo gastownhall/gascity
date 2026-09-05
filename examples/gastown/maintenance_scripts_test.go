@@ -4986,10 +4986,19 @@ case "$*" in
     printf 'depends_on_external,varchar,YES,,,\n'
     printf 'type,varchar,NO,,,\n'
     ;;
-  *"WITH RECURSIVE workflow_wisp_root_candidates"*"UPDATE "*"wisps SET status='closed'"*"JSON_SET(COALESCE(metadata, JSON_OBJECT())"*)
+  *"workflow_wisp_root_candidates_base"*"LEFT JOIN workflow_wisp_root_candidates"*|*"workflow_issue_root_candidates_base"*"LEFT JOIN workflow_issue_root_candidates"*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"UPDATE "*"wisps SET status='closed'"*"JSON_SET(COALESCE(metadata, JSON_OBJECT())"*)
     printf 'ROW_COUNT()\n1\n'
     ;;
-  *"WITH RECURSIVE workflow_wisp_root_candidates"*"SELECT COUNT(*) FROM ("*)
+  *"WITH workflow_wisp_root_candidates_base"*"SELECT COUNT(*) FROM workflow_wisp_root_candidates"*)
+    printf 'COUNT(*)\n1\n'
+    ;;
+  *"WITH RECURSIVE workflow_wisp_root_candidates"*"SELECT DISTINCT root.id"*)
+    printf 'id\nwisp-close\n'
+    ;;
+  *"WITH workflow_issue_root_candidates_base"*"SELECT COUNT(*) FROM workflow_issue_root_candidates"*)
     printf 'COUNT(*)\n1\n'
     ;;
   *"WITH RECURSIVE workflow_issue_root_candidates"*"SELECT DISTINCT root.id"*)
@@ -5041,7 +5050,7 @@ exit 0
 	}
 	log := string(logData)
 	for _, want := range []string{
-		"WITH RECURSIVE workflow_wisp_root_candidates",
+		"WITH workflow_wisp_root_candidates_base",
 		"WITH RECURSIVE workflow_issue_root_candidates",
 		"workflow_descendants(root_id, id)",
 		"roots_with_live_descendants",
@@ -5101,6 +5110,132 @@ exit 0
 	}
 }
 
+func TestReaperChunksWorkflowRootIssueCensusBeforeClosing(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		failSecondPage bool
+	}{
+		{name: "complete census"},
+		{name: "failed page is fail closed", failSecondPage: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			binDir := t.TempDir()
+			doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+			bdLog := filepath.Join(t.TempDir(), "bd.log")
+			gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+			writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\n'
+    ;;
+  *"SHOW COLUMNS FROM"*"dependencies"*)
+    printf 'Field,Type,Null,Key,Default,Extra\n'
+    printf 'issue_id,varchar,NO,,,\n'
+    printf 'depends_on_issue_id,varchar,YES,,,\n'
+    printf 'depends_on_wisp_id,varchar,YES,,,\n'
+    printf 'depends_on_external,varchar,YES,,,\n'
+    printf 'type,varchar,NO,,,\n'
+    ;;
+  *"workflow_wisp_root_candidates_base"*"LEFT JOIN workflow_wisp_root_candidates"*|*"workflow_issue_root_candidates_base"*"LEFT JOIN workflow_issue_root_candidates"*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"workflow_wisp_root_candidates_base"*"SELECT COUNT(*) FROM workflow_wisp_root_candidates"*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"workflow_issue_root_candidates_base"*"SELECT COUNT(*) FROM workflow_issue_root_candidates"*)
+    printf 'COUNT(*)\n3\n'
+    ;;
+  *"workflow_issue_root_candidates_base"*"LIMIT 2 OFFSET 0"*"SELECT DISTINCT root.id"*)
+    printf 'id\nroot-a\nroot-b\n'
+    ;;
+  *"workflow_issue_root_candidates_base"*"LIMIT 2 OFFSET 2"*"SELECT DISTINCT root.id"*)
+    if [ "$DOLT_FAIL_SECOND_PAGE" = "1" ]; then
+      printf 'injected page timeout\n' >&2
+      exit 42
+    fi
+    printf 'id\nroot-c\n'
+    ;;
+  *"workflow_issue_root_candidates_base"*"SELECT DISTINCT root.id"*)
+    printf 'unbounded workflow-root query\n' >&2
+    exit 43
+    ;;
+  *"SELECT COUNT(*) FROM"*"wisps"*"status IN ('open', 'hooked', 'in_progress')"*"created_at <"*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"SELECT id"*)
+    printf 'id\n'
+    ;;
+esac
+exit 0
+`)
+			writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+printf '%s\n' "$*" >> "$BD_CALL_LOG"
+exit 0
+`)
+			writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+			writeCityBeadsMetadata(t, cityDir, "beads")
+
+			failSecondPage := "0"
+			if tc.failSecondPage {
+				failSecondPage = "1"
+			}
+			env := map[string]string{
+				"BD_CALL_LOG":                        bdLog,
+				"DOLT_ARGS_LOG":                      doltLog,
+				"DOLT_FAIL_SECOND_PAGE":              failSecondPage,
+				"GC_CALL_LOG":                        gcLog,
+				"GC_CITY":                            cityDir,
+				"GC_CITY_PATH":                       cityDir,
+				"GC_DOLT_HOST":                       "127.0.0.1",
+				"GC_DOLT_PORT":                       "3307",
+				"GC_DOLT_USER":                       "root",
+				"GC_DOLT_PASSWORD":                   "",
+				"GC_REAPER_WORKFLOW_ROOT_BATCH_SIZE": "2",
+				"PATH":                               binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			}
+
+			runScript(t, coreScriptPath("reaper.sh"), env)
+
+			bdData, err := os.ReadFile(bdLog)
+			if err != nil && !os.IsNotExist(err) {
+				t.Fatalf("ReadFile(bd log): %v", err)
+			}
+			bdText := string(bdData)
+			if tc.failSecondPage {
+				if strings.Contains(bdText, "close root-") {
+					t.Fatalf("reaper closed roots from a partial census:\n%s", bdText)
+				}
+				gcData, err := os.ReadFile(gcLog)
+				if err != nil {
+					t.Fatalf("ReadFile(gc log): %v", err)
+				}
+				if !strings.Contains(string(gcData), "workflow issue root census incomplete") {
+					t.Fatalf("reaper did not report the incomplete root census:\n%s", gcData)
+				}
+				return
+			}
+
+			for _, id := range []string{"root-a", "root-b", "root-c"} {
+				if !strings.Contains(bdText, "close "+id+" --reason stale inactive workflow root auto-closed by reaper") {
+					t.Fatalf("reaper omitted %s from the complete paged census:\n%s", id, bdText)
+				}
+			}
+		})
+	}
+}
+
 func TestReaperWorkflowRootPredicateIsGeneratedFromOneHelper(t *testing.T) {
 	data, err := os.ReadFile(coreScriptPath("reaper.sh"))
 	if err != nil {
@@ -5138,15 +5273,20 @@ case "$*" in
     printf 'depends_on_external,varchar,YES,,,\n'
     printf 'type,varchar,NO,,,\n'
     ;;
-  *"WITH RECURSIVE workflow_wisp_root_candidates"*"SELECT COUNT(*) FROM ("*)
+  *"workflow_wisp_root_candidates_base"*"LEFT JOIN workflow_wisp_root_candidates"*|*"workflow_issue_root_candidates_base"*"LEFT JOIN workflow_issue_root_candidates"*)
     printf 'COUNT(*)\n0\n'
+    ;;
+  *"WITH workflow_wisp_root_candidates_base"*"SELECT COUNT(*) FROM workflow_wisp_root_candidates"*)
+    printf 'COUNT(*)\n1\n'
+    ;;
+  *"WITH workflow_issue_root_candidates_base"*"SELECT COUNT(*) FROM workflow_issue_root_candidates"*)
+    printf 'COUNT(*)\n1\n'
+    ;;
+  *"WITH RECURSIVE workflow_wisp_root_candidates"*"SELECT DISTINCT root.id"*)
+    printf 'id\n'
     ;;
   *"WITH RECURSIVE workflow_issue_root_candidates"*"SELECT DISTINCT root.id"*)
     printf 'id\n'
-    ;;
-  *"WITH RECURSIVE workflow_wisp_root_candidates"*"UPDATE "*"wisps SET status='closed'"*)
-    printf 'workflow roots with live descendants must be preserved\n' >&2
-    exit 42
     ;;
   *"SELECT COUNT(*) FROM "*"wisps"*"status IN ('open', 'hooked', 'in_progress')"*"created_at <"*)
     printf 'COUNT(*)\n0\n'
@@ -5233,13 +5373,22 @@ case "$*" in
     printf 'depends_on_external,varchar,YES,,,\n'
     printf 'type,varchar,NO,,,\n'
     ;;
-  *"WITH RECURSIVE workflow_wisp_root_candidates"*"SELECT COUNT(*) FROM ("*)
+  *"workflow_wisp_root_candidates_base"*"LEFT JOIN workflow_wisp_root_candidates"*|*"workflow_issue_root_candidates_base"*"LEFT JOIN workflow_issue_root_candidates"*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"WITH workflow_wisp_root_candidates_base"*"SELECT COUNT(*) FROM workflow_wisp_root_candidates"*)
     printf 'COUNT(*)\n1\n'
+    ;;
+  *"WITH workflow_issue_root_candidates_base"*"SELECT COUNT(*) FROM workflow_issue_root_candidates"*)
+    printf 'COUNT(*)\n1\n'
+    ;;
+  *"WITH RECURSIVE workflow_wisp_root_candidates"*"SELECT DISTINCT root.id"*)
+    printf 'id\nwisp-close\n'
     ;;
   *"WITH RECURSIVE workflow_issue_root_candidates"*"SELECT DISTINCT root.id"*)
     printf 'id\nissue-close\n'
     ;;
-  *"WITH RECURSIVE workflow_wisp_root_candidates"*"UPDATE "*"wisps SET status='closed'"*)
+  *"UPDATE "*"wisps SET status='closed'"*)
     printf 'dry-run should not update workflow wisp roots\n' >&2
     exit 42
     ;;
