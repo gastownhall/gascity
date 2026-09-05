@@ -66,20 +66,18 @@
 # single config.ReservedClassPrefix call is pinned, under the function that now
 # opens it. Still six rows, six hits.
 #
-# The two internal/dispatch/drain.go rows arrived when the signature rule
-# widened from cmd/gc+internal/api to every directory grep already scanned. The
-# comment that justified the narrower set claimed sling and dispatch held no
-# store-list constructor and that one added there would surface as a grep hit;
-# both halves of that were wrong — these two predate the claim, and a
-# constructor whose body names none of the vocabulary produces no grep hit at
-# all. Probe sets are the shape most worth watching here: a drain that assembles
-# its own candidate stores is deciding residency in its own order — and both of
-# these do. drainMemberProbeSet's list is walked with hand-rolled per-leg failure
-# policy; drainUnitConvoyProbeSet's is built in the REVERSE leg order of its own
-# sibling and handed straight to storeref.Resolve. Two probe sets in one file
-# disagreeing about leg order is the restatement this boundary exists to catch,
-# so these rows are a MIGRATION pinned open, not a sanctioned shape: ga-qdt5y.16
-# retires both.
+# Two internal/dispatch/drain.go rows arrived when the signature rule widened
+# from cmd/gc+internal/api to every directory grep already scanned, and both are
+# now retired by ga-qdt5y.16. Their opposite leg orders turned out NOT to be the
+# defect the row text originally claimed: a drain member is foreign and of
+# statically unknown class, so it resolves ByID and leads with the binding, while
+# a drain unit convoy is self-minted and statically ClassWork, so it resolves
+# RoutedWork and leads with work. Two orders, two intents — correct. The real
+# defect the pin caught was that drainMemberProbeSet's ONE list was consumed two
+# ways: hand-walked by drainMemberOwningStore and handed to storeref.Resolve by
+# loadDrainManifestMembers, whose id-prefix fast path made them disagree about
+# which co-resident copy of a member id was authoritative. The manifest served
+# one copy while the exclusive reservation was stamped on the other.
 #
 # cmd/gc/cmd_wait.go's newWaitDependencyStoreSet was the third of that family and
 # is the second retired. It had surfaced only when the signature rule learned to
@@ -249,5 +247,3 @@ internal/api/residency_by_id.go	resolveLegByConfiguredIDPrefix	d:IDInNamespace	1
 internal/api/residency_by_id.go	unroutedWorkLegs	a:BeadStores	1
 internal/api/residency_by_id.go	unroutedWorkLegs	ast:returns-store-list	1
 internal/api/state.go	(file-scope)	a:BeadStores	1
-internal/dispatch/drain.go	drainMemberProbeSet	ast:returns-store-list	1
-internal/dispatch/drain.go	drainUnitConvoyProbeSet	ast:returns-store-list	1

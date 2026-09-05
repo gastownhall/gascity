@@ -1308,10 +1308,13 @@ func conformanceStrictCrossStoreDeps(t *testing.T, e splitEnv) {
 // answering from the work ledger for relocated graph ids and reported every live
 // molecule root as missing (#5125). Two things must hold on a split city:
 //
-//   - storeref.Resolve, the federating point read every future by-id router is
-//     built on, finds a class-resident bead across [work, class] legs — for the
-//     durable shape AND for the -wisp- suffix shape, whose prefix heuristic
-//     answer differs from an ordinary class id's.
+//   - the by-id plan every by-id router is now built on finds a class-resident
+//     bead over the city's own bindings — for the durable shape AND for the
+//     -wisp- suffix shape, whose prefix heuristic answer differs from an
+//     ordinary class id's. It reads through the same derivation the controller
+//     uses (residencyBindingsFromRoutes -> byIDBeadForTopology) rather than
+//     through storeref.Resolve, whose PrefixOwner fast path answers a
+//     migration-preserved id from the work ledger's frozen copy (ga-cu12x).
 //   - the shipped protection holds: a `bd sql` / `bd query` naming a relocated
 //     id is REFUSED rather than answered from the work ledger, and the refusal
 //     names the class-routed verb.
@@ -1321,15 +1324,16 @@ func conformanceStrictCrossStoreDeps(t *testing.T, e splitEnv) {
 func conformanceByIDReadFederation(t *testing.T, e splitEnv) {
 	durable := mintDurableGraphBead(t, e, "federated durable graph bead", "")
 	wisp := e.mintWisp(t, "federated read wisp")
-	legs := []beads.Store{e.work, e.class} // class is nil on single-store; Resolve skips nil legs
+	bindings, refused := residencyBindingsFromRoutes(e.routes)
+	topo := assembleResidencyTopology(e.cfg, e.work, nil, bindings, refused)
 
 	for _, tt := range []struct{ name, id string }{
 		{"durable", durable.ID},
 		{"wisp", wisp.ID},
 	} {
-		got, err := storeref.Resolve(tt.id, legs)
+		got, err := byIDBeadForTopology(topo, tt.id)
 		if err != nil || got.ID != tt.id {
-			t.Errorf("%s: storeref.Resolve(%q) = (%q, %v), want the bead — a federating by-id read that misses is the \"root does not exist\" report of #5125", tt.name, tt.id, got.ID, err)
+			t.Errorf("%s: byIDBeadForTopology(%q) = (%q, %v), want the bead — a federating by-id read that misses is the \"root does not exist\" report of #5125", tt.name, tt.id, got.ID, err)
 		}
 		msg, refused := bdSQLRelocatedClassRefusal(e.cfg, []string{"sql", "select id, status from issues where id = '" + tt.id + "'"})
 		if refused != e.split {
