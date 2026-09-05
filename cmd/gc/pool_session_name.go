@@ -330,6 +330,16 @@ func releaseOrphanedPoolAssignments(
 		if storeRefAware {
 			workStoreRef = assignedWorkStoreRefs[i]
 		}
+		// Pool session names and aliases are reusable identities: a successor
+		// seat can legitimately expose the same assignee string as the session
+		// that originally claimed this work. Claim-time gc.session_id is the
+		// exact, unique owner when present, so use it for session liveness while
+		// retaining assignee for route preservation and the release CAS. Claims
+		// from older clients carry no session ID and keep the legacy lookup.
+		livenessIdentity := assignee
+		if sessionID := strings.TrimSpace(wb.Metadata[beadmeta.SessionIDMetadataKey]); sessionID != "" {
+			livenessIdentity = sessionID
+		}
 		switch {
 		case assignee == "":
 			if wb.Status != "in_progress" {
@@ -357,13 +367,13 @@ func releaseOrphanedPoolAssignments(
 				continue
 			}
 		default:
-			if openSessionOwnsWork(legacyOpenIdentifiers, openIdentifiers, assignee, workStoreRef, storeRefAware) {
+			if openSessionOwnsWork(legacyOpenIdentifiers, openIdentifiers, livenessIdentity, workStoreRef, storeRefAware) {
 				continue
 			}
 			if assigneePreservesNamedSessionRoute(cfg, cityPath, template, assignee, workStoreRef, storeRefAware) {
 				continue
 			}
-			if liveOpenSessionAssignmentExists(sessionStore.Store, assignee) {
+			if liveOpenSessionAssignmentExists(sessionStore.Store, livenessIdentity) {
 				continue
 			}
 			// The sessions binding is not the only ledger that can hold a session
@@ -374,7 +384,7 @@ func releaseOrphanedPoolAssignments(
 			// claims. A session bead of that shape lives in the work bead's own
 			// owner store, so probing that one store after the sessions store
 			// misses closes the gap without enumerating every attached store.
-			if ownerStore != nil && liveOpenSessionAssignmentExists(ownerStore, assignee) {
+			if ownerStore != nil && liveOpenSessionAssignmentExists(ownerStore, livenessIdentity) {
 				continue
 			}
 		}
