@@ -68,29 +68,11 @@ func cityGraphClassBinding(cityPath string) beads.Store {
 	return store
 }
 
-// classBindingForID is the class leg of classRoutedStoreForID, for callers whose
-// work answer is a leg list rather than one store. A nil work leg makes the
-// residual answer nil, so ok=false means "no named leg answered".
-func classBindingForID(cityPath, id string) (beads.Store, bool, error) {
-	class := cityGraphClassBinding(cityPath)
-	if class == nil {
-		return nil, false, nil
-	}
-	store, err := classRoutedStoreForIDIn(class, id, nil)
-	if err != nil {
-		return nil, false, err
-	}
-	if store == nil {
-		return nil, false, nil
-	}
-	return class, true, nil
-}
-
 // classRoutedStoreForIDIn is classRoutedStoreForID with the binding already in
 // hand, for the callers that resolve it once per request and hold no cityPath to
 // hand cliByIDOwner: gc graph's per-id resolver (graphStores.storeFor), which
-// also needs the raw binding for convoycore.MemberClasses, and classBindingForID
-// itself. Nil class means no relocation.
+// also needs the raw binding for convoycore.MemberClasses. Nil class means no
+// relocation.
 //
 // It applies the resolver's rule directly against the opened binding. The class
 // store leads because it MINTS the reserved namespace, but minting is not

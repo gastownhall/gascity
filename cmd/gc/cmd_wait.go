@@ -1001,6 +1001,26 @@ func depsWaitReadyDetailedFrom(dependencies waitDependencyReader, wait sessionpk
 	return closedCount == len(depIDs), nil
 }
 
+// loadWaitDependencyBead reads a wait's dependency on the ONE-SHOT plane.
+//
+// The binding is resolved FIRST, and the scan below is only what answers for an
+// id no binding holds. The scan's work axis is the city's store DIRECTORIES, and
+// a relocated class binding is not one of them — so before this leg went in
+// front, a dependency `gc storage migrate` had moved was not merely unrouted. The
+// scan answered, successfully, with the permanently-open copy the migration
+// retained in the city store, and a waiter on that dependency slept forever.
+//
+// Same defect the controller arm carried (waitDependencyPlanReader's
+// predecessor, ga-qdt5y.16), reached by a different code path; both arms now end
+// on the resolver.
+//
+// #5488 put a classBindingForID probe here first, which closed the blindness but
+// restated the judgement: its own class-leads rule, its own refusal arm, and a
+// second Get of a row the probe had already read. cliByIDBindingOwner is the
+// same question asked of storeref — the binding leads for an id inside its
+// reserved namespace, every unretired binding is a residence probe for an id
+// inside none, a refusal is classified by the leg's role, and beadForOwner
+// consumes the row the winning probe already paid for.
 func loadWaitDependencyBead(cityPath string, cityStore beads.Store, depID string) (beads.Bead, error) {
 	if strings.TrimSpace(cityPath) == "" {
 		if cityStore == nil {
@@ -1008,12 +1028,12 @@ func loadWaitDependencyBead(cityPath string, cityStore beads.Store, depID string
 		}
 		return cityStore.Get(depID)
 	}
-	// The binding is not a work scope, so no candidate below covers it. Probed
-	// first for the same retained-copy reason as newWaitDependencyStoreSet.
-	if binding, ok, err := classBindingForID(cityPath, depID); err != nil {
+	owner, ownedByBinding, err := cliByIDBindingOwner(cityPath, depID)
+	if err != nil {
 		return beads.Bead{}, err
-	} else if ok {
-		return binding.Get(depID)
+	}
+	if ownedByBinding {
+		return beadForOwner(owner, depID)
 	}
 	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {

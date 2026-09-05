@@ -3968,3 +3968,85 @@ func TestLoadWaitDependencyBeadReadsTheBindingOnAMigratedCity(t *testing.T) {
 		t.Errorf("resolved %q, want the binding-resident dependency %q", got.ID, dep.ID)
 	}
 }
+
+// seedRelocatedWaitDependency builds the shape a finished `gc storage migrate`
+// leaves behind: one dependency id resident in BOTH the class binding and the
+// city work store, where the binding copy is the live one and the work copy is
+// the frozen row the migration retained.
+//
+// The two copies are given OPPOSITE statuses on purpose. A test that only
+// checked which title came back would pass on a reader that resolved correctly
+// by accident; asserting on status makes the fixture answer the operational
+// question instead — does the wait fire — and the two answers cannot coincide.
+func seedRelocatedWaitDependency(t *testing.T) (cityPath string, work beads.Store, depID string) {
+	t.Helper()
+	cityPath, _ = foreignProviderCity(t)
+	work = workStoreFor(t, cityPath)
+
+	frozen, err := work.Create(beads.Bead{Title: "the retained work copy", Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the retained work copy: %v", err)
+	}
+	resident, classStore := classResidentWorkShapedBead(t, cityPath, frozen.ID, "the class-binding copy")
+
+	// The binding's copy is the one that moved on. The work copy stays open
+	// forever — nothing writes to it again after the migration.
+	if err := classStore.Close(resident.ID); err != nil {
+		t.Fatalf("closing the class-binding copy of %s: %v", resident.ID, err)
+	}
+	if reread, err := work.Get(frozen.ID); err != nil {
+		t.Fatalf("re-reading the retained work copy: %v", err)
+	} else if reread.Status == "closed" {
+		t.Fatalf("fixture premise broken: closing the binding copy also closed the work copy, so no reader can tell the two apart")
+	}
+	return cityPath, work, resident.ID
+}
+
+// TestWaitDependencyReadServesTheBindingCopy is the one-shot twin of the
+// controller-arm fix in ga-qdt5y.16 slice B, reached by a different code path.
+//
+// loadWaitDependencyBead resolved a dependency by scanning the city's store
+// DIRECTORIES, and a relocated class binding is not one of them. So a dependency
+// the migration moved was not merely unrouted: the scan answered, successfully,
+// with the permanently-open copy retained in the work store. The wait's
+// dependency then never reads closed and the waiter sleeps forever.
+func TestWaitDependencyReadServesTheBindingCopy(t *testing.T) {
+	cityPath, work, depID := seedRelocatedWaitDependency(t)
+
+	dep, err := loadWaitDependencyBead(cityPath, work, depID)
+	if err != nil {
+		t.Fatalf("reading wait dependency %s: %v", depID, err)
+	}
+	if dep.Title != "the class-binding copy" {
+		t.Errorf("wait dependency read served %q, want the class-binding copy — the scan answered from the frozen work copy", dep.Title)
+	}
+	if dep.Status != "closed" {
+		t.Errorf("wait dependency %s read status %q, want closed; a waiter on this dependency never wakes", depID, dep.Status)
+	}
+}
+
+// TestWaitReadiesOnADependencyTheMigrationRelocated asserts the consequence
+// rather than the lookup: the wait itself must fire.
+//
+// The read above and this one fail together today, but they are not the same
+// assertion — a reader could serve the right row and still be consumed by a
+// readiness rule that ignores it. Pinning both means neither half can regress
+// while the other keeps the suite green.
+func TestWaitReadiesOnADependencyTheMigrationRelocated(t *testing.T) {
+	cityPath, work, depID := seedRelocatedWaitDependency(t)
+
+	dependencies := waitDependencyReaderFunc(func(id string) (beads.Bead, error) {
+		return loadWaitDependencyBead(cityPath, work, id)
+	})
+	ready, err := depsWaitReadyDetailedFrom(dependencies, sessionpkg.WaitInfo{
+		ID:      waitWakeWaitID,
+		DepIDs:  []string{depID},
+		DepMode: "all",
+	})
+	if err != nil {
+		t.Fatalf("evaluating readiness against relocated dependency %s: %v", depID, err)
+	}
+	if !ready {
+		t.Errorf("wait on relocated dependency %s is not ready; its only dependency is closed in the binding that owns it", depID)
+	}
+}
