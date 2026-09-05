@@ -2,13 +2,452 @@ package dashboardbff
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestParsePingCheckNormalizesHealthyAndFailure(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		res  execResult
+		want string
+	}{
+		{name: "healthy", res: execResult{stdout: `{"status":"ok"}`}, want: "ok"},
+		{name: "provider failure", res: execResult{exitCode: 1, stdout: `{"status":"error","error":"proxy unavailable"}`}, want: "error"},
+		{name: "error envelope without status", res: execResult{exitCode: 1, stdout: `{"error":"proxy unavailable","schema_version":1}`}, want: "error"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			checks, ok := parsePingCheck(&tt.res)
+			if !ok || len(checks) != 1 || checks[0].Status != tt.want {
+				t.Fatalf("parsePingCheck() = (%v, %v), want one %s check", checks, ok, tt.want)
+			}
+			if checks[0].Category != "Beads" || checks[0].Name != pingConnectivityCheck {
+				t.Fatalf("check identity = %+v", checks[0])
+			}
+		})
+	}
+}
+
+func TestParsePingCheckRejectsMalformedOutput(t *testing.T) {
+	t.Parallel()
+	for _, stdout := range []string{"", "not json", `{"status":""}`, `[]`} {
+		if checks, ok := parsePingCheck(&execResult{stdout: stdout}); ok || checks != nil {
+			t.Errorf("parsePingCheck(%q) = (%v, %v), want nil,false", stdout, checks, ok)
+		}
+	}
+}
+
+func TestExecBdPingUsesProviderNeutralArgsAndIsolatesSocket(t *testing.T) {
+	root := t.TempDir()
+	beadsPath := filepath.Join(root, ".beads")
+	if err := os.Mkdir(beadsPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	argsFile := filepath.Join(root, "args")
+	bin := filepath.Join(root, "bin")
+	if err := os.Mkdir(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"" + argsFile + "\"\nprintf 'socket=%s\\n' \"${BEADS_DOLT_SERVER_SOCKET-unset}\" >> \"" + argsFile + "\"\nprintf '%s' '{\"status\":\"ok\"}'\n"
+	if err := os.WriteFile(filepath.Join(bin, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ADMIN_PATH", bin)
+	// Ambient transport must never leak into dashboard probes. The target
+	// store's metadata (not the caller environment) owns transport selection.
+	t.Setenv("BEADS_DOLT_SERVER_SOCKET", "/tmp/ambient-dolt.sock")
+	// exec.Command resolves the executable using the parent PATH before the
+	// runner applies its scrubbed child environment.
+	t.Setenv("PATH", bin)
+	before, err := snapshotProbeDir(beadsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := newExecRunner().execBdPing(context.Background(), beadsPath)
+	if err != nil {
+		t.Fatalf("execBdPing() error = %v", err)
+	}
+	if res.exitCode != 0 {
+		t.Fatalf("execBdPing() exit = %d stdout=%q stderr=%q", res.exitCode, res.stdout, res.stderr)
+	}
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(args)), "\n")
+	if len(lines) != 5 || !equalStrings(lines[:4], []string{"ping", "--db", beadsPath, "--json"}) || lines[4] != "socket=unset" {
+		t.Fatalf("bd argv/environment = %v", lines)
+	}
+	after, err := snapshotProbeDir(beadsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("probe mutated .beads directory: before=%v after=%v", before, after)
+	}
+	var payload map[string]string
+	if err := json.Unmarshal([]byte(res.stdout), &payload); err != nil || payload["status"] != "ok" {
+		t.Fatalf("ping output = %q", res.stdout)
+	}
+}
+
+type probeFileSnapshot struct {
+	Mode os.FileMode
+	Data []byte
+}
+
+func snapshotProbeDir(root string) (map[string]probeFileSnapshot, error) {
+	out := make(map[string]probeFileSnapshot)
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			rel = ""
+		}
+		snapshot := probeFileSnapshot{Mode: info.Mode()}
+		if info.Mode().IsRegular() {
+			snapshot.Data, err = os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+		}
+		out[rel] = snapshot
+		return nil
+	})
+	return out, err
+}
+
+func TestExecBdPingHonorsCancellation(t *testing.T) {
+	root := t.TempDir()
+	beadsPath := filepath.Join(root, ".beads")
+	if err := os.Mkdir(beadsPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := newExecRunner().execBdPing(ctx, beadsPath); err == nil {
+		t.Fatal("execBdPing() with canceled context returned nil error")
+	}
+}
+
+func TestProbeRigReportsPingFailureAsDown(t *testing.T) {
+	root := t.TempDir()
+	rig := filepath.Join(root, "rig")
+	beadsPath := filepath.Join(rig, ".beads")
+	if err := os.MkdirAll(beadsPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(root, "bin")
+	if err := os.Mkdir(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "bd"), []byte("#!/bin/sh\nprintf '%s' '{\"status\":\"error\",\"error\":\"proxy unavailable\"}'\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	t.Setenv("ADMIN_PATH", bin)
+	rep := newSamplerManager(Deps{}, newExecRunner()).probeRig(context.Background(), "r1", rig)
+	if rep.Rollup != "down" || !rep.Reachable || len(rep.Problems) != 1 || rep.Problems[0].Status != "error" {
+		t.Fatalf("probeRig() = %+v, want reachable/down with one error", rep)
+	}
+	if !strings.Contains(rep.Problems[0].Message, "proxy unavailable") {
+		t.Fatalf("probeRig problem = %+v, want provider error", rep.Problems[0])
+	}
+	if rep.DoltConnected == nil || *rep.DoltConnected {
+		t.Fatalf("probeRig DoltConnected = %v, want non-nil false", rep.DoltConnected)
+	}
+}
+
+func TestProbeRigReportsPingErrorEnvelopeAsDown(t *testing.T) {
+	rig, bin := newProbeRigFixture(t)
+	writeFakeBd(t, bin, "#!/bin/sh\nprintf '%s' '{\"error\":\"proxy unavailable\",\"schema_version\":1}'\nexit 1\n")
+
+	rep := newSamplerManager(Deps{}, newExecRunner()).probeRig(context.Background(), "r1", rig)
+	if rep.Rollup != "down" || !rep.Reachable || len(rep.Problems) != 1 {
+		t.Fatalf("probeRig() = %+v, want reachable/down with one problem", rep)
+	}
+	if rep.Problems[0].Status != "error" || rep.Problems[0].Name != pingConnectivityCheck {
+		t.Fatalf("probeRig problem = %+v, want an error connectivity check", rep.Problems[0])
+	}
+	if !strings.Contains(rep.Problems[0].Message, "proxy unavailable") {
+		t.Fatalf("probeRig problem message = %q, want stdout provider error", rep.Problems[0].Message)
+	}
+	if rep.DoltConnected == nil || *rep.DoltConnected {
+		t.Fatalf("probeRig DoltConnected = %v, want non-nil false", rep.DoltConnected)
+	}
+}
+
+// TestProbeRigReportsPingStderrFailureAsDown covers the failure shape ping
+// actually produces when the store cannot be opened at all: plain text on
+// stderr, empty stdout, non-zero exit. Nothing is parseable, so the probe must
+// synthesize the connectivity check itself rather than reporting an empty
+// "warn" and discarding the provider's error.
+func TestProbeRigReportsPingStderrFailureAsDown(t *testing.T) {
+	rig, bin := newProbeRigFixture(t)
+	writeFakeBd(t, bin, "#!/bin/sh\nprintf '%s' 'failed to open store: connection refused' >&2\nexit 1\n")
+
+	rep := newSamplerManager(Deps{}, newExecRunner()).probeRig(context.Background(), "r1", rig)
+	if rep.Rollup != "down" || !rep.Reachable || len(rep.Problems) != 1 {
+		t.Fatalf("probeRig() = %+v, want reachable/down with one problem", rep)
+	}
+	if rep.Problems[0].Status != "error" || rep.Problems[0].Name != pingConnectivityCheck {
+		t.Fatalf("probeRig problem = %+v, want an error connectivity check", rep.Problems[0])
+	}
+	if !strings.Contains(rep.Problems[0].Message, "connection refused") {
+		t.Fatalf("probeRig problem message = %q, want the stderr provider error", rep.Problems[0].Message)
+	}
+	if rep.DoltConnected == nil || *rep.DoltConnected {
+		t.Fatalf("probeRig DoltConnected = %v, want non-nil false", rep.DoltConnected)
+	}
+}
+
+// TestProbeRigReportsDoltConnectedFromPing pins the proxied case this change
+// exists to serve: a rig with no dolt-server.port file has no endpoint to
+// dial, so connectivity must come from the ping check itself instead of
+// reporting "unknown" for a store whose connectivity was just proven.
+func TestProbeRigReportsDoltConnectedFromPing(t *testing.T) {
+	rig, bin := newProbeRigFixture(t)
+	writeFakeBd(t, bin, "#!/bin/sh\nprintf '%s' '{\"status\":\"ok\"}'\n")
+
+	rep := newSamplerManager(Deps{}, newExecRunner()).probeRig(context.Background(), "r1", rig)
+	if rep.DoltEndpoint != nil {
+		t.Fatalf("probeRig DoltEndpoint = %v, want nil without a dolt-server.port file", *rep.DoltEndpoint)
+	}
+	if rep.DoltConnected == nil || !*rep.DoltConnected {
+		t.Fatalf("probeRig DoltConnected = %v, want non-nil true", rep.DoltConnected)
+	}
+	if rep.Rollup != "ok" || len(rep.Problems) != 0 || rep.Note != "" {
+		t.Fatalf("probeRig() = %+v, want a clean ok report", rep)
+	}
+}
+
+func TestProbeRigPingHealthOmitsLegacyIssueCount(t *testing.T) {
+	rig, bin := newProbeRigFixture(t)
+	writeFakeBd(t, bin, "#!/bin/sh\nprintf '%s' '{\"status\":\"ok\"}'\n")
+
+	rep := newSamplerManager(Deps{}, newExecRunner()).probeRig(context.Background(), "r1", rig)
+	wire, err := json.Marshal(rep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(wire), `"issueCount"`) {
+		t.Fatalf("probeRig wire payload = %s, contains removed issueCount field", wire)
+	}
+}
+
+func TestProbeRigProxiedModeIgnoresStalePortArtifact(t *testing.T) {
+	rig, bin := newProbeRigFixture(t)
+	if err := os.WriteFile(filepath.Join(rig, ".beads", "metadata.json"), []byte(`{"dolt_mode":"proxied-server"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rig, ".beads", "dolt-server.port"), []byte("1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeFakeBd(t, bin, "#!/bin/sh\nprintf '%s' '{\"status\":\"ok\"}'\n")
+
+	rep := newSamplerManager(Deps{}, newExecRunner()).probeRig(context.Background(), "r1", rig)
+	if rep.DoltEndpoint != nil {
+		t.Fatalf("proxied stale endpoint = %v, want nil", *rep.DoltEndpoint)
+	}
+	if rep.DoltConnected == nil || !*rep.DoltConnected || rep.Rollup != "ok" {
+		t.Fatalf("proxied stale-port report = %+v, want ping-backed healthy status", rep)
+	}
+}
+
+func TestProbeRigConfigMarkerIgnoresStalePortArtifact(t *testing.T) {
+	rig, bin := newProbeRigFixture(t)
+	if err := os.WriteFile(filepath.Join(rig, ".beads", "config.yaml"), []byte("dolt.mode: proxied-server\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rig, ".beads", "dolt-server.port"), []byte("1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeFakeBd(t, bin, "#!/bin/sh\nprintf '%s' '{\"status\":\"ok\"}'\n")
+	rep := newSamplerManager(Deps{}, newExecRunner()).probeRig(context.Background(), "r1", rig)
+	if rep.DoltEndpoint != nil || rep.DoltConnected == nil || !*rep.DoltConnected || rep.Rollup != "ok" {
+		t.Fatalf("config-marker report = %+v, want ping-backed healthy status without endpoint", rep)
+	}
+}
+
+func TestProbeRigMalformedMetadataFailsClosedOnStalePort(t *testing.T) {
+	rig, bin := newProbeRigFixture(t)
+	if err := os.WriteFile(filepath.Join(rig, ".beads", "metadata.json"), []byte("{not-json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rig, ".beads", "dolt-server.port"), []byte("1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeFakeBd(t, bin, "#!/bin/sh\nprintf '%s' '{\"status\":\"ok\"}'\n")
+	rep := newSamplerManager(Deps{}, newExecRunner()).probeRig(context.Background(), "r1", rig)
+	if rep.DoltEndpoint != nil {
+		t.Fatalf("malformed metadata endpoint = %v, want nil", *rep.DoltEndpoint)
+	}
+	if rep.DoltConnected == nil || !*rep.DoltConnected || rep.Rollup != "ok" {
+		t.Fatalf("malformed metadata report = %+v, want ping-backed healthy status", rep)
+	}
+}
+
+func TestProbeRigUnsafeModeMarkersIgnoreStalePortArtifact(t *testing.T) {
+	tests := []struct {
+		name     string
+		filename string
+		contents string
+	}{
+		{name: "unknown metadata mode", filename: "metadata.json", contents: `{"dolt_mode":"mystery"}`},
+		{name: "embedded metadata mode", filename: "metadata.json", contents: `{"dolt_mode":"embedded"}`},
+		{name: "malformed config without mode", filename: "config.yaml", contents: "dolt: [\n"},
+		{name: "missing mode", filename: "config.yaml", contents: "issue_prefix: tc\n"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rig, bin := newProbeRigFixture(t)
+			if err := os.WriteFile(filepath.Join(rig, ".beads", tt.filename), []byte(tt.contents), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(rig, ".beads", "dolt-server.port"), []byte("1"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			writeFakeBd(t, bin, "#!/bin/sh\nprintf '%s' '{\"status\":\"ok\"}'\n")
+
+			rep := newSamplerManager(Deps{}, newExecRunner()).probeRig(context.Background(), "r1", rig)
+			if rep.DoltEndpoint != nil {
+				t.Fatalf("unsafe marker endpoint = %v, want nil", *rep.DoltEndpoint)
+			}
+			if rep.DoltConnected == nil || !*rep.DoltConnected || rep.Rollup != "ok" {
+				t.Fatalf("unsafe marker report = %+v, want ping-backed healthy status without endpoint", rep)
+			}
+		})
+	}
+}
+
+func TestProbeRigOnlyPersistedServerModeAuthorizesTCPProbe(t *testing.T) {
+	tests := []struct {
+		name         string
+		metadata     string
+		metadataDir  bool
+		config       string
+		configDir    bool
+		wantEndpoint bool
+	}{
+		{
+			name:         "server metadata",
+			metadata:     `{"dolt_mode":"server"}`,
+			wantEndpoint: true,
+		},
+		{
+			name:         "server config without metadata",
+			config:       "dolt.mode: server\n",
+			wantEndpoint: true,
+		},
+		{
+			name:     "malformed metadata overrides server config",
+			metadata: "{not-json",
+			config:   "dolt.mode: server\n",
+		},
+		{
+			name:     "missing metadata mode overrides server config",
+			metadata: `{"backend":"dolt"}`,
+			config:   "dolt.mode: server\n",
+		},
+		{
+			name:        "unreadable metadata overrides server config",
+			metadataDir: true,
+			config:      "dolt.mode: server\n",
+		},
+		{
+			name:      "unreadable config",
+			configDir: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rig, bin := newProbeRigFixture(t)
+			beadsPath := filepath.Join(rig, ".beads")
+			if tt.metadataDir {
+				if err := os.Mkdir(filepath.Join(beadsPath, "metadata.json"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			} else if tt.metadata != "" {
+				if err := os.WriteFile(filepath.Join(beadsPath, "metadata.json"), []byte(tt.metadata), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.configDir {
+				if err := os.Mkdir(filepath.Join(beadsPath, "config.yaml"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			} else if tt.config != "" {
+				if err := os.WriteFile(filepath.Join(beadsPath, "config.yaml"), []byte(tt.config), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(beadsPath, "dolt-server.port"), []byte("1"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			writeFakeBd(t, bin, "#!/bin/sh\nprintf '%s' '{\"status\":\"ok\"}'\n")
+
+			rep := newSamplerManager(Deps{}, newExecRunner()).probeRig(context.Background(), "r1", rig)
+			if (rep.DoltEndpoint != nil) != tt.wantEndpoint {
+				t.Fatalf("DoltEndpoint = %v, want present=%t (report=%+v)", rep.DoltEndpoint, tt.wantEndpoint, rep)
+			}
+		})
+	}
+}
+
+// newProbeRigFixture builds a rig directory with an empty .beads store and a
+// PATH containing only a fake bd, so a probeRig test never reaches a real one.
+func newProbeRigFixture(t *testing.T) (rigPath, binDir string) {
+	t.Helper()
+	root := t.TempDir()
+	rigPath = filepath.Join(root, "rig")
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	binDir = filepath.Join(root, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+	t.Setenv("ADMIN_PATH", binDir)
+	return rigPath, binDir
+}
+
+// writeFakeBd installs script as the bd on the fixture PATH.
+func writeFakeBd(t *testing.T, binDir, script string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
 
 // recordingRoundTripper is a fake in-process transport standing in for the
 // supervisor's LoopbackTransport: it records the request path and returns a
