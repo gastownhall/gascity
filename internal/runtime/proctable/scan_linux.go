@@ -114,11 +114,15 @@ func scanWithRoot(root, id string) ([]runtime.LiveRuntime, error) {
 		if city == "" {
 			city = env["GC_CITY"]
 		}
+		ppid, _, _ := readParentPID(filepath.Join(root, entry.Name(), "stat"))
+		comm, _ := os.ReadFile(filepath.Join(root, entry.Name(), "comm"))
 		out = append(out, runtime.LiveRuntime{
 			SessionID: sessionID,
 			City:      city,
 			Epoch:     epoch,
 			PID:       pid,
+			PPID:      ppid,
+			Name:      strings.TrimSpace(string(comm)),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {

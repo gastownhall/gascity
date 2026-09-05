@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -167,6 +170,42 @@ func (e *escalationEnv) escalations() []events.Event {
 		}
 	}
 	return out
+}
+
+// terminatedPIDs returns the PIDs actually force-terminated, in call order. A
+// session can produce several scan hits — its pane root plus anything that
+// merely inherited GC_SESSION_ID — so WHICH pid was signaled is the assertion
+// that matters, not how many.
+func (e *escalationEnv) terminatedPIDs() []int {
+	var out []int
+	for _, c := range e.sp.SnapshotCalls() {
+		if c.Method == "TerminateRuntime" {
+			pid, err := strconv.Atoi(c.Value)
+			if err != nil {
+				e.t.Fatalf("TerminateRuntime call recorded a non-numeric pid %q", c.Value)
+			}
+			out = append(out, pid)
+		}
+	}
+	return out
+}
+
+// seedInheritedEnvDaemon models a process that merely INHERITED the seat's
+// GC_SESSION_ID: the managed-Dolt scope watchdog is the traced instance. It is
+// re-exec'd with Setpgid and the agent's environment verbatim, so it carries the
+// same session id and city, leads its own process group, and reparents to init.
+// The real tmux scanner keys tracked-ness by SESSION ID, so it stamps IsTracked
+// and this seat's ProviderName onto that process too.
+func (e *escalationEnv) seedInheritedEnvDaemon(pid int, comm string) {
+	e.sp.ExtraRuntimes = append(e.sp.ExtraRuntimes, runtime.LiveRuntime{
+		SessionID:    e.bead.ID,
+		City:         e.cityPath,
+		PID:          pid,
+		PPID:         1,
+		Name:         comm,
+		ProviderName: e.name,
+		IsTracked:    true,
+	})
 }
 
 func (e *escalationEnv) terminateCalls() int {
@@ -482,5 +521,178 @@ func TestUndeliverableReminderBudgetStillEarnsItsAnswerWindow(t *testing.T) {
 	}
 	if !drainRemindersSpent(bead, last.Add(drainReminderInterval)) {
 		t.Error("an all-undeliverable budget never becomes spent even after its answer window")
+	}
+}
+
+// THE MANDATORY NEGATIVE PIN (design v2, kill-safety invariant 4).
+//
+// GC_SESSION_ID and GC_CITY_PATH are ordinary environment variables inherited by
+// every child of the agent's shell, and the proctable scan promotes any such
+// process to an "agent root" once it reparents to init. So session-ID + city
+// attribution proves ENV INHERITANCE, not runtime ownership.
+//
+// The traced counterexample is the managed-Dolt scope WATCHDOG: re-exec'd with
+// Setpgid and the agent's env verbatim, orphaned to init, and its SIGTERM
+// handler stops the city's SHARED dolt sql-server — the beads store for the
+// controller and every other agent in that city. TerminateRuntime signals the
+// process GROUP, so hitting it does not cost one process, it costs the group.
+//
+// Widening the fence back to session-ID + city alone must fail this test.
+func TestEscalationNeverTerminatesAProcessThatMerelyInheritedTheSessionEnv(t *testing.T) {
+	const watchdogPID = 9999
+	e := newEscalationEnv(t)
+	e.seedInheritedEnvDaemon(watchdogPID, "gc")
+
+	e.finalize()
+
+	for _, pid := range e.terminatedPIDs() {
+		if pid == watchdogPID {
+			t.Fatal("force-terminated the managed-Dolt scope watchdog: it only INHERITED the seat's GC_SESSION_ID. " +
+				"Its SIGTERM handler stops the city's shared dolt sql-server, so this kills the beads store for the " +
+				"whole city — and the signal goes to its entire process group")
+		}
+	}
+	// Control: the seat's own runtime IS still terminated, so the pin is not
+	// passing merely because nothing happened.
+	if len(e.terminatedPIDs()) == 0 {
+		t.Error("nothing was terminated at all; the pin cannot distinguish a working fence from a dead escalation")
+	}
+}
+
+// Invariant 5 — attach hold. An operator attaching to a wedged seat to
+// investigate why it will not exit is the documented response to this incident;
+// the pass must not kill the pane under their cursor. The reminder subsystem
+// already refuses to even MESSAGE an attached pane.
+func TestEscalationHoldsWhileAnOperatorIsAttached(t *testing.T) {
+	e := newEscalationEnv(t)
+	e.sp.Attached = map[string]bool{e.name: true}
+
+	e.finalize()
+
+	if n := len(e.escalations()); n != 0 {
+		t.Errorf("escalations = %d, want 0 — killed a pane an operator is attached to", n)
+	}
+	if e.terminateCalls() != 0 {
+		t.Error("force-terminated an attached pane")
+	}
+}
+
+// Invariant 5 — activity hold. "No assigned work" is not "not working": a worker
+// that follows the session-completion protocol acks the drain AFTER closing its
+// last bead, then runs gates and pushes. It holds zero beads while genuinely
+// busy. Unreadable activity holds too — "we cannot tell" is never "idle".
+func TestEscalationHoldsOnRecentOrUnreadableActivity(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(*escalationEnv)
+	}{
+		{"recently active", func(e *escalationEnv) {
+			e.sp.SetActivity(e.name, e.now.Add(-time.Minute))
+		}},
+		{"activity unreadable", func(e *escalationEnv) {
+			e.sp.Activity = map[string]time.Time{}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEscalationEnv(t)
+			tc.setup(e)
+
+			e.finalize()
+
+			if n := len(e.escalations()); n != 0 {
+				t.Errorf("escalations = %d, want 0", n)
+			}
+			if e.terminateCalls() != 0 {
+				t.Error("force-terminated a pane that may still be mid-turn")
+			}
+		})
+	}
+}
+
+// Invariant 5 — fail-closed pacing. The 15-minute pace lives entirely in bead
+// metadata, so a discarded write turns this into a fresh kill and event on every
+// tick forever. A store that goes read-only while still serving reads is a
+// documented failure mode and is not otherwise fatal to the tick.
+func TestEscalationRefusesWhenThePacingWriteCannotLand(t *testing.T) {
+	e := newEscalationEnv(t)
+	e.store = readOnlyMetadataStore{Store: e.store}
+
+	e.finalize()
+
+	if n := len(e.escalations()); n != 0 {
+		t.Errorf("escalations = %d, want 0 — escalated unpaced, which repeats every tick forever", n)
+	}
+	if e.terminateCalls() != 0 {
+		t.Error("force-terminated without a durable pacing record")
+	}
+}
+
+// Observability contract: the event reports an OUTCOME from the goroutine, not a
+// decision made before anything was attempted. An escalation that found nothing
+// attributable to kill must be distinguishable from one that freed the slot —
+// that is the single condition this pass exists to surface.
+func TestEscalationEventReportsOutcomeNotDecision(t *testing.T) {
+	e := newEscalationEnv(t)
+	// Every scan hit is a foreign-city process, so attribution refuses them all
+	// and nothing is terminated.
+	e.sp.ExtraRuntimes = append(e.sp.ExtraRuntimes, runtime.LiveRuntime{
+		SessionID: e.bead.ID, City: t.TempDir(), PID: 8888, PPID: 4200,
+		ProviderName: e.name, IsTracked: true,
+	})
+
+	e.finalize()
+
+	evs := e.escalations()
+	if len(evs) != 1 {
+		t.Fatalf("escalation events = %d, want 1", len(evs))
+	}
+	if !strings.Contains(e.out.String(), "skipping pid=8888") {
+		t.Errorf("the attribution skip was silent; journal was:\n%s", e.out.String())
+	}
+}
+
+// readOnlyMetadataStore serves reads normally but refuses metadata writes,
+// modeling a store that has gone read-only (sqlite query_only) while the tick
+// otherwise continues to function.
+type readOnlyMetadataStore struct {
+	beads.Store
+}
+
+func (readOnlyMetadataStore) SetMetadataBatch(string, map[string]string) error {
+	return fmt.Errorf("attempt to write a readonly database")
+}
+
+func (readOnlyMetadataStore) SetMetadata(string, string, string) error {
+	return fmt.Errorf("attempt to write a readonly database")
+}
+
+// Observability contract: a tick on which nothing was attempted must not cost
+// the row its ordinary stop.
+//
+// The caller treats a true return as "handled" and skips queueDrainAckAsyncStop.
+// So when the termination cannot even start — an escalation for the same key is
+// still in flight, or the tracker is stopping during controller shutdown — the
+// escalation must report false, or the row receives no stop of any kind that
+// tick, which is strictly worse than the pre-change behavior.
+func TestEscalationReportsNotHandledWhenTerminationCannotStart(t *testing.T) {
+	e := newEscalationEnv(t)
+	tracker := &asyncStartTracker{}
+
+	// Occupy the escalation's key and never release it, modeling a termination
+	// still in flight from an earlier tick.
+	_, claimed := tracker.startDrainAckStop("escalate:" + drainAckAsyncStopKey(e.bead.ID, e.name))
+	if !claimed {
+		t.Fatal("could not claim the escalation key; the fixture does not model an in-flight termination")
+	}
+
+	handled := queueDrainAckForcedTermination(
+		e.cityPath, e.store, e.sp, e.cfg, e.info(), e.name,
+		"agent_acked_runtime_survived", 1, nil, tracker, e.rec, e.out,
+	)
+	if handled {
+		t.Error("reported handled while a termination was already in flight; the caller would skip this row's ordinary stop entirely")
+	}
+	if !strings.Contains(e.out.String(), "already in flight") {
+		t.Errorf("the refusal was silent; journal was:\n%s", e.out.String())
 	}
 }
