@@ -449,7 +449,7 @@ func validateHandoffPersistedScope(request handoffProtocolRequest) error {
 			return handoffErr("unsupported_scope", errors.New("inherited rig does not resolve to a managed city endpoint"))
 		}
 	}
-	if strings.EqualFold(strings.TrimSpace(state.DoltMode), "embedded") || strings.EqualFold(strings.TrimSpace(state.DoltMode), "proxied-server") {
+	if !handoffDoltModeTransferable(state.DoltMode) {
 		return handoffErr("unsupported_scope", fmt.Errorf("dolt mode %q is not transferable", state.DoltMode))
 	}
 	metadataPath := filepath.Join(scopeRoot, ".beads", "metadata.json")
@@ -485,7 +485,7 @@ func validateHandoffPersistedScope(request handoffProtocolRequest) error {
 	if backend != "" && backend != "legacy" && backend != "dolt" && backend != "bd" {
 		return handoffErr("unsupported_scope", fmt.Errorf("backend %q is not direct Dolt", metadata.Backend))
 	}
-	if mode := strings.TrimSpace(metadata.DoltMode); strings.EqualFold(mode, "embedded") || strings.EqualFold(mode, "proxied-server") {
+	if !handoffDoltModeTransferable(metadata.DoltMode) {
 		return handoffErr("unsupported_scope", fmt.Errorf("metadata dolt mode %q is not transferable", metadata.DoltMode))
 	}
 	database := strings.TrimSpace(metadata.DoltDatabase)
@@ -518,6 +518,15 @@ func validateHandoffPersistedScope(request handoffProtocolRequest) error {
 		return handoffErr("identity_changed", errors.New("requested workspace differs from persisted project identity"))
 	}
 	return nil
+}
+
+func handoffDoltModeTransferable(mode string) bool {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "server":
+		return true
+	default:
+		return false
+	}
 }
 
 func readHandoffMetadataProjectID(path string) (string, error) {

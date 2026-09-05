@@ -393,6 +393,7 @@ func TestDoltStateHandoffRejectsPersistedIdentityMismatch(t *testing.T) {
 		{name: "doltlite", backend: "doltlite", database: "beads", projectID: "test", wantCode: "unsupported_scope"},
 		{name: "embedded", backend: "dolt", mode: "embedded", database: "beads", projectID: "test", wantCode: "unsupported_scope"},
 		{name: "proxied", backend: "dolt", mode: "proxied-server", database: "beads", projectID: "test", wantCode: "unsupported_scope"},
+		{name: "unknown mode", backend: "dolt", mode: "mystery", database: "beads", projectID: "test", wantCode: "unsupported_scope"},
 		{name: "legacy metadata", backend: "legacy", database: "beads", projectID: "test", wantCode: "process_missing"},
 		{name: "foreign backend", backend: "postgres", database: "beads", projectID: "test", wantCode: "unsupported_scope"},
 	}
@@ -420,6 +421,30 @@ func TestDoltStateHandoffRejectsPersistedIdentityMismatch(t *testing.T) {
 				t.Fatalf("runtime state changed after refusal: %q (err=%v)", data, err)
 			}
 		})
+	}
+}
+
+func TestDoltStateHandoffRejectsUnknownDoltModeWithoutMutation(t *testing.T) {
+	city := t.TempDir()
+	layout := writeHandoffPersistedFixture(t, city, "dolt", "mystery", "beads", "test")
+	var stdout, stderr bytes.Buffer
+	code := run(handoffTestArgs("handoff-inspect", city), &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("run() = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	response := decodeHandoffResponse(t, stdout.Bytes())
+	if response.Result != "refused" || response.ErrorCode != "unsupported_scope" || response.Mutates {
+		t.Fatalf("response = %+v, want unsupported_scope refusal with mutates=false", response)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("handoff protocol wrote stderr: %q", stderr.String())
+	}
+	data, err := os.ReadFile(layout.StateFile)
+	if err != nil {
+		t.Fatalf("read runtime state after refusal: %v", err)
+	}
+	if !bytes.Contains(data, []byte(`"running":false`)) {
+		t.Fatalf("runtime state changed after refusal: %q", data)
 	}
 }
 
