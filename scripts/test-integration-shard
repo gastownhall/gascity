@@ -102,6 +102,8 @@ rest_smoke_tests=(
   TestGastown_ControllerStartStop
   TestGastown_PipelineHumanToWorker
   TestGraphWorkflowSuccessPath
+  TestIntegrationEnvForPinsRealHome
+  TestStandaloneBDEnvForDirIsolatesHome
 )
 
 # These are the top-level tests contributed only when cmd/gc is built with the

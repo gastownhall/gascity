@@ -1903,8 +1903,8 @@ func TestIntegrationEnvForPinsRealHome(t *testing.T) {
 	got := parseEnvList(env)
 
 	lu, err := user.LookupId(strconv.Itoa(os.Getuid()))
-	if err != nil {
-		t.Fatalf("looking up real home for assertion: %v", err)
+	if err != nil || strings.TrimSpace(lu.HomeDir) == "" {
+		t.Skip("no passwd entry for uid; pinRealHomeEnv fails open")
 	}
 	if got["HOME"] != lu.HomeDir {
 		t.Fatalf("HOME = %q, want real passwd-db home %q (ambient HOME=/host/home must not leak through)", got["HOME"], lu.HomeDir)
@@ -2094,12 +2094,13 @@ func TestStandaloneBDEnvForDirIsolatesHome(t *testing.T) {
 	env := standaloneBDEnvForDir(dir)
 	got := parseEnvList(env)
 
-	lu, err := user.LookupId(strconv.Itoa(os.Getuid()))
-	if err != nil {
-		t.Fatalf("looking up real home for assertion: %v", err)
-	}
-	if got["HOME"] == lu.HomeDir {
-		t.Fatalf("HOME = %q, leaked the real passwd-db home; standalone bd only execs the bd binary (never gc start/supervisor start), so it must not inherit the real-HOME pin meant for gc-start consumers", got["HOME"])
+	// pinRealHomeEnv fails open when the uid has no passwd entry, so the
+	// real-home comparison is only meaningful when the lookup succeeds. The
+	// dir-scoped assertion below holds either way.
+	if lu, err := user.LookupId(strconv.Itoa(os.Getuid())); err == nil && strings.TrimSpace(lu.HomeDir) != "" {
+		if got["HOME"] == lu.HomeDir {
+			t.Fatalf("HOME = %q, leaked the real passwd-db home; standalone bd only execs the bd binary (never gc start/supervisor start), so it must not inherit the real-HOME pin meant for gc-start consumers", got["HOME"])
+		}
 	}
 	if got["HOME"] != dir {
 		t.Fatalf("HOME = %q, want dir-scoped %q, matching this helper's own XDG_RUNTIME_DIR/BEADS_DIR isolation root", got["HOME"], dir)
