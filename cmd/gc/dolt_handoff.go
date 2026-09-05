@@ -29,6 +29,8 @@ import (
 
 const handoffProtocolSchemaVersion = 1
 
+const handoffMaxStartTimeTicks = uint64(1<<63 - 1)
+
 type handoffProtocolEndpoint struct {
 	Host   string `json:"host"`
 	Port   int    `json:"port"`
@@ -89,6 +91,13 @@ func handoffErrorCode(err error) string {
 		return coded.Code
 	}
 	return "provider_unavailable"
+}
+
+func handoffStartTimeTicks(ticks uint64) (int64, error) {
+	if ticks > handoffMaxStartTimeTicks {
+		return 0, handoffErr("process_unowned", errors.New("managed dolt process start identity exceeds supported range"))
+	}
+	return int64(ticks), nil
 }
 
 func newDoltHandoffCommands(stdout, _ io.Writer) []*cobra.Command {
@@ -386,10 +395,14 @@ func inspectHandoffIdentity(request handoffProtocolRequest, layout managedDoltRu
 	if ticks == 0 && startIdentity == "" {
 		return handoffProtocolIdentity{}, handoffErr("process_unowned", errors.New("managed dolt process start identity is unavailable"))
 	}
+	startTimeTicks, err := handoffStartTimeTicks(ticks)
+	if err != nil {
+		return handoffProtocolIdentity{}, err
+	}
 	identity := handoffProtocolIdentity{
 		CityRoot: request.CityRoot, ScopeRoot: request.ScopeRoot, Database: request.Database, Workspace: request.Workspace,
 		Endpoint: request.Endpoint, DataDir: normalizePathForCompare(layout.DataDir), ConfigFile: normalizePathForCompare(layout.ConfigFile), PID: state.PID,
-		StartIdentity: startIdentity, StartTimeTicks: int64(ticks), PortHolderPID: holder,
+		StartIdentity: startIdentity, StartTimeTicks: startTimeTicks, PortHolderPID: holder,
 	}
 	if identity.ConfigFile == "" || identity.DataDir == "" {
 		return handoffProtocolIdentity{}, handoffErr("protocol_version", errors.New("managed dolt identity paths are unavailable"))

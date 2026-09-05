@@ -28,6 +28,18 @@ func decodeHandoffResponse(t *testing.T, raw []byte) handoffProtocolResponse {
 	return response
 }
 
+func TestHandoffStartTimeTicksRejectsSignedOverflow(t *testing.T) {
+	const maxSigned = uint64(1<<63 - 1)
+	if got, err := handoffStartTimeTicks(maxSigned); err != nil || got != int64(maxSigned) {
+		t.Fatalf("handoffStartTimeTicks(max signed) = (%d, %v), want (%d, nil)", got, err, maxSigned)
+	}
+	for _, ticks := range []uint64{maxSigned + 1, ^uint64(0)} {
+		if got, err := handoffStartTimeTicks(ticks); err == nil {
+			t.Errorf("handoffStartTimeTicks(%d) = %d, nil; want overflow refusal", ticks, got)
+		}
+	}
+}
+
 func handoffTestArgs(operation, city string) []string {
 	return []string{
 		"dolt-state", operation, "--json", "--city", city, "--scope-root", city,
