@@ -235,3 +235,59 @@ func TestScanWithRootReportsTmuxWrapperAsRoot(t *testing.T) {
 		t.Fatalf("scanWithRoot = %+v, want the tmux-wrapper agent pid 200 reported as a root", got)
 	}
 }
+
+// TestScanWithRootExcludesLiveParentSessionDescendant pins the SCAN-LAYER half
+// of the two-layer protection around processes that merely inherited an agent's
+// GC_SESSION_ID.
+//
+// A daemon spawned from an agent pane (the managed-Dolt scope watchdog is the
+// in-tree instance) carries the seat's GC_SESSION_ID verbatim. While its
+// spawning `gc` is still alive, the ONLY thing keeping it out of the escalation's
+// kill set is this envelope rule: its parent carries the same session id and is
+// not infrastructure, so it is not a root and never reaches the fence. Nothing
+// downstream would save it — the tmux adapter stamps IsTracked/ProviderName by
+// session id alone, and the fence's reparent arm does not fire because its
+// parent is alive.
+//
+// Widening the envelope rule (e.g. to `return true, nil`, a plausible future
+// change to catch Setpgid'd escapees whose spawner still lives) makes that
+// watchdog a passing kill target, and KillByPID signals its whole process
+// GROUP — whose SIGTERM handler stops the city's shared dolt sql-server. That
+// change must fail here rather than silently in production.
+func TestScanWithRootExcludesLiveParentSessionDescendant(t *testing.T) {
+	const (
+		sessionID    = "ga-seat"
+		tmuxServer   = 400
+		paneRoot     = 500
+		liveGC       = 600
+		watchdog     = 700
+		otherSession = "ga-other"
+	)
+	root := t.TempDir()
+	sessionEnv := map[string]string{"GC_SESSION_ID": sessionID, "GC_CITY_PATH": "/city"}
+
+	// The tmux server: infrastructure, and carries no session id of its own.
+	buildFakeProcUnder(t, root, tmuxServer, 1, "tmux", map[string]string{"GC_SESSION_ID": otherSession})
+	// The pane's root process — the ONLY legitimate runtime for this seat.
+	buildFakeProcUnder(t, root, paneRoot, tmuxServer, "claude", sessionEnv)
+	// A live `gc` the agent invoked, still running, same session id.
+	buildFakeProcUnder(t, root, liveGC, paneRoot, "gc", sessionEnv)
+	// The scope watchdog it spawned, still parented to that live `gc`.
+	buildFakeProcUnder(t, root, watchdog, liveGC, "gc", sessionEnv)
+
+	found, err := scanWithRoot(root, sessionID)
+	if err != nil {
+		t.Fatalf("scanWithRoot: %v", err)
+	}
+
+	var pids []int
+	for _, r := range found {
+		pids = append(pids, r.PID)
+	}
+	if len(pids) != 1 || pids[0] != paneRoot {
+		t.Fatalf("scanWithRoot roots = %v, want exactly [%d] (the pane root). "+
+			"A session-descendant with a LIVE parent must not be reported as an agent root: nothing downstream "+
+			"discriminates it, so the drain-ack escalation would force-terminate its process group and stop the "+
+			"city's shared dolt sql-server", pids, paneRoot)
+	}
+}

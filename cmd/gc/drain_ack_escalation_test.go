@@ -43,6 +43,9 @@ type escalationEnv struct {
 	cityPath string
 	name     string
 	now      time.Time
+	// subreaperPID models the `systemd --user` child-subreaper pid this session
+	// runs under; 0 means a plain-init host.
+	subreaperPID int
 }
 
 func newEscalationEnv(t *testing.T) *escalationEnv {
@@ -93,6 +96,11 @@ func newEscalationEnv(t *testing.T) *escalationEnv {
 	// escalation has to reach for a different mechanism rather than the same one.
 	sp.StopLeavesRunning = map[string]bool{name: true}
 
+	env := &escalationEnv{}
+	prevSubreaper := drainAckDetectSubreaperPID
+	drainAckDetectSubreaperPID = func() int { return env.subreaperPID }
+	t.Cleanup(func() { drainAckDetectSubreaperPID = prevSubreaper })
+
 	// Keep the confirm-dead loop short; production bounds would add 6s per test.
 	prevTimeout, prevPoll := drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll
 	drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll = 20*time.Millisecond, 5*time.Millisecond
@@ -100,12 +108,13 @@ func newEscalationEnv(t *testing.T) *escalationEnv {
 		drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll = prevTimeout, prevPoll
 	})
 
-	return &escalationEnv{
+	*env = escalationEnv{
 		t: t, sp: sp, store: store, clk: &clock.Fake{Time: now},
 		bead: bead, out: &synchronizedBuffer{}, rec: &capturingRecorder{},
 		cfg:      &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}},
 		cityPath: cityPath, name: name, now: now,
 	}
+	return env
 }
 
 func (e *escalationEnv) info() sessionpkg.Info {
@@ -197,11 +206,18 @@ func (e *escalationEnv) terminatedPIDs() []int {
 // The real tmux scanner keys tracked-ness by SESSION ID, so it stamps IsTracked
 // and this seat's ProviderName onto that process too.
 func (e *escalationEnv) seedInheritedEnvDaemon(pid int, comm string) {
+	e.seedInheritedEnvDaemonWithParent(pid, 1, comm)
+}
+
+// seedInheritedEnvDaemonWithParent is seedInheritedEnvDaemon with an explicit
+// parent, so a test can model BOTH orphan topologies: reparent-to-init (ppid 1)
+// and reparent-to-`systemd --user` (ppid = the user manager, a large live pid).
+func (e *escalationEnv) seedInheritedEnvDaemonWithParent(pid, ppid int, comm string) {
 	e.sp.ExtraRuntimes = append(e.sp.ExtraRuntimes, runtime.LiveRuntime{
 		SessionID:    e.bead.ID,
 		City:         e.cityPath,
 		PID:          pid,
-		PPID:         1,
+		PPID:         ppid,
 		Name:         comm,
 		ProviderName: e.name,
 		IsTracked:    true,
@@ -687,12 +703,52 @@ func TestEscalationReportsNotHandledWhenTerminationCannotStart(t *testing.T) {
 
 	handled := queueDrainAckForcedTermination(
 		e.cityPath, e.store, e.sp, e.cfg, e.info(), e.name,
-		"agent_acked_runtime_survived", 1, nil, tracker, e.rec, e.out,
+		"agent_acked_runtime_survived", 1, nil, 0, tracker, e.rec, e.out,
 	)
 	if handled {
 		t.Error("reported handled while a termination was already in flight; the caller would skip this row's ordinary stop entirely")
 	}
 	if !strings.Contains(e.out.String(), "already in flight") {
 		t.Errorf("the refusal was silent; journal was:\n%s", e.out.String())
+	}
+}
+
+// fakeUserSubreaperPID stands in for the `systemd --user` manager's pid: a
+// large, live pid that is emphatically not 1.
+const fakeUserSubreaperPID = 3117
+
+// The subreaper topology of the mandatory watchdog pin.
+//
+// The plain pin above models reparent-to-INIT, which a `ppid <= 1` test catches.
+// This fleet does not run that topology: under a user@UID.service,
+// `systemd --user` sets PR_SET_CHILD_SUBREAPER, so an orphan reparents to the
+// USER MANAGER and its ppid is a large LIVE pid. The repo already knows this —
+// internal/workspacesvc's orphan sweep matches `ppid == 1 || ppid == subreaperPID`
+// for exactly this reason.
+//
+// So the watchdog's real production shape is: spawning `gc` exits, watchdog
+// reparents to systemd --user (PPID > 1), the scan reports it as a root because
+// its new parent carries no GC_SESSION_ID, and the tmux adapter stamps
+// IsTracked/ProviderName onto it by session id. Every fence arm passes and a
+// `<= 1` reparent test is FALSE — so it becomes a kill target, and its SIGTERM
+// handler stops the city's shared dolt sql-server.
+func TestEscalationNeverTerminatesASubreaperReparentedInheritedEnvDaemon(t *testing.T) {
+	const watchdogPID = 9998
+	e := newEscalationEnv(t)
+	e.subreaperPID = fakeUserSubreaperPID
+	e.seedInheritedEnvDaemonWithParent(watchdogPID, fakeUserSubreaperPID, "gc")
+
+	e.finalize()
+
+	for _, pid := range e.terminatedPIDs() {
+		if pid == watchdogPID {
+			t.Fatal("force-terminated a watchdog that reparented to `systemd --user` rather than to init. " +
+				"Its ppid is a large LIVE pid, so a `ppid <= 1` reparent test does not see it as an orphan — " +
+				"and this is the topology the fleet actually runs. Killing it signals its process group, whose " +
+				"SIGTERM handler stops the city's shared dolt sql-server")
+		}
+	}
+	if len(e.terminatedPIDs()) == 0 {
+		t.Error("nothing was terminated at all; the pin cannot distinguish a working fence from a dead escalation")
 	}
 }
