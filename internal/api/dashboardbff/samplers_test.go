@@ -203,6 +203,39 @@ func TestProbeRigProxiedModeIgnoresStalePortArtifact(t *testing.T) {
 	}
 }
 
+func TestProbeRigConfigMarkerIgnoresStalePortArtifact(t *testing.T) {
+	rig, bin := newProbeRigFixture(t)
+	if err := os.WriteFile(filepath.Join(rig, ".beads", "config.yaml"), []byte("dolt.mode: proxied-server\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rig, ".beads", "dolt-server.port"), []byte("1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeFakeBd(t, bin, "#!/bin/sh\nprintf '%s' '{\"status\":\"ok\"}'\n")
+	rep := newSamplerManager(Deps{}, newExecRunner()).probeRig(context.Background(), "r1", rig)
+	if rep.DoltEndpoint != nil || rep.DoltConnected == nil || !*rep.DoltConnected || rep.Rollup != "ok" {
+		t.Fatalf("config-marker report = %+v, want ping-backed healthy status without endpoint", rep)
+	}
+}
+
+func TestProbeRigMalformedMetadataFailsClosedOnStalePort(t *testing.T) {
+	rig, bin := newProbeRigFixture(t)
+	if err := os.WriteFile(filepath.Join(rig, ".beads", "metadata.json"), []byte("{not-json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rig, ".beads", "dolt-server.port"), []byte("1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeFakeBd(t, bin, "#!/bin/sh\nprintf '%s' '{\"status\":\"ok\"}'\n")
+	rep := newSamplerManager(Deps{}, newExecRunner()).probeRig(context.Background(), "r1", rig)
+	if rep.DoltEndpoint != nil {
+		t.Fatalf("malformed metadata endpoint = %v, want nil", *rep.DoltEndpoint)
+	}
+	if rep.DoltConnected == nil || !*rep.DoltConnected || rep.Rollup != "ok" {
+		t.Fatalf("malformed metadata report = %+v, want ping-backed healthy status", rep)
+	}
+}
+
 // newProbeRigFixture builds a rig directory with an empty .beads store and a
 // PATH containing only a fake bd, so a probeRig test never reaches a real one.
 func newProbeRigFixture(t *testing.T) (rigPath, binDir string) {
