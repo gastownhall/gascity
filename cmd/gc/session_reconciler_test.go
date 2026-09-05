@@ -1708,7 +1708,7 @@ func TestConfirmDrainAckRuntimeDeadTokenFenceStopsOnReplacement(t *testing.T) {
 	}
 
 	var stderr synchronizedBuffer
-	dead := confirmDrainAckRuntimeDead("", store, sp, &config.City{}, "worker", "original-token", []string{"claude"}, &stderr)
+	dead := confirmDrainAckRuntimeDead("", store, sp, &config.City{}, "worker", "original-token", []string{"claude"}, &stderr, drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll)
 	if !dead {
 		t.Fatal("confirm-dead must report the original target dead once a replacement owns the name")
 	}

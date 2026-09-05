@@ -387,6 +387,11 @@ func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provi
 	// one test poke a later test's swapped-in counter. Capturing the value here
 	// confines each goroutine to the seam that was live when its stop was queued.
 	poke := drainAckAsyncStopPokeController
+	// Same treatment, same reason, for the confirm-dead bounds: they are mutable
+	// package-global test seams read inside the detached goroutine, so a test that
+	// restores them while a queued stop is still looping is a data race, and a
+	// goroutine outliving its test would otherwise adopt the next test's bounds.
+	confirmTimeout, confirmPoll := drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -419,7 +424,7 @@ func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provi
 		// (the reassigned next step stays runtime-missing). The expected token is
 		// threaded through so each re-kill stays fenced against a re-woken
 		// same-name replacement. Mirrors #4089's confirm-dead contract.
-		confirmDrainAckRuntimeDead(cityPath, store, sp, cfg, name, expectedToken, processNames, stderr)
+		confirmDrainAckRuntimeDead(cityPath, store, sp, cfg, name, expectedToken, processNames, stderr, confirmTimeout, confirmPoll)
 		// The runtime session is now confirmed dead (or the confirm-dead
 		// deadline passed and we proceed best-effort), but its pool session
 		// bead stays open (occupying the pool slot) until
@@ -447,8 +452,12 @@ func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provi
 // when a definite token mismatch shows the name now belongs to a replacement —
 // and false if it outlived the deadline (caller proceeds best-effort). Mirrors
 // #4089's confirm-dead contract.
-func confirmDrainAckRuntimeDead(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, name, expectedToken string, processNames []string, stderr io.Writer) bool {
-	deadline := time.Now().Add(drainAckStopConfirmDeadTimeout)
+//
+// timeout/poll are passed in rather than read from the package globals so a
+// detached caller can bind them on its own goroutine at queue time; see
+// queueDrainAckAsyncStop. Synchronous callers pass the globals directly.
+func confirmDrainAckRuntimeDead(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, name, expectedToken string, processNames []string, stderr io.Writer, timeout, poll time.Duration) bool {
+	deadline := time.Now().Add(timeout)
 	for {
 		running, alive := observeRuntimeProviderLiveness(sp, name, processNames)
 		if !running && !alive {
@@ -476,7 +485,7 @@ func confirmDrainAckRuntimeDead(cityPath string, store beads.Store, sp runtime.P
 		if err := workerKillSessionTargetWithConfig(cityPath, store, sp, cfg, name); err != nil && !runtime.IsSessionGone(err) {
 			fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s re-kill: %v\n", name, err) //nolint:errcheck
 		}
-		time.Sleep(drainAckStopConfirmDeadPoll)
+		time.Sleep(poll)
 	}
 }
 
@@ -828,8 +837,19 @@ func finalizeDrainAckStopPendingSessions(
 			// killing the pane. Ask the agent to acknowledge and leave.
 			// See drain_reminder.go.
 			remindStopPendingDrain(sp, store, info, clk, stderr)
-			queueDrainAckAsyncStop(cityPath, store, sp, cfg, info.ID, name, info.InstanceToken, processNames, asyncStopTracker, stderr)
-			continue
+			// The reminder is informational and cannot end the loop by itself. Once
+			// its budget is spent and the answer window has elapsed, the row has
+			// earned a terminal exit: escalate to a certified kill so the close
+			// below can release the pool slot name. Every gate in there fails
+			// closed, so a false return leaves the historical behavior untouched.
+			// See drain_ack_escalation.go.
+			if !escalateWedgedDrainAckStopPending(cityPath, cfg, sp, store, rigStores, info, name, processNames, clk, rec, stderr) {
+				queueDrainAckAsyncStop(cityPath, store, sp, cfg, info.ID, name, info.InstanceToken, processNames, asyncStopTracker, stderr)
+				continue
+			}
+			// Runtime confirmed dead. Fall through to the shared finalize terminus
+			// below, which is the same close this row would have taken had its stop
+			// worked the first time.
 		}
 		// Pool-managed stop-pending beads close here instead of staying open as
 		// state=drained: open pool session beads occupy slots in the next demand

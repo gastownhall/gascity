@@ -6420,6 +6420,22 @@ type TypedEventStreamEnvelopeSessionDrainFenceUnavailable struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeSessionDrainStopEscalated defines model for TypedEventStreamEnvelopeSessionDrainStopEscalated.
+type TypedEventStreamEnvelopeSessionDrainStopEscalated struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          SessionLifecyclePayload  `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeSessionDraining defines model for TypedEventStreamEnvelopeSessionDraining.
 type TypedEventStreamEnvelopeSessionDraining struct {
 	Actor            string                   `json:"actor"`
@@ -8000,6 +8016,23 @@ type TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork struct {
 
 // TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable defines model for TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable.
 type TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          SessionLifecyclePayload  `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionDrainStopEscalated defines model for TypedTaggedEventStreamEnvelopeSessionDrainStopEscalated.
+type TypedTaggedEventStreamEnvelopeSessionDrainStopEscalated struct {
 	Actor            string                   `json:"actor"`
 	City             string                   `json:"city"`
 	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
@@ -15003,6 +15036,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionDrainFenc
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSessionDrainStopEscalated returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionDrainStopEscalated
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionDrainStopEscalated() (TypedEventStreamEnvelopeSessionDrainStopEscalated, error) {
+	var body TypedEventStreamEnvelopeSessionDrainStopEscalated
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionDrainStopEscalated overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionDrainStopEscalated
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionDrainStopEscalated(v TypedEventStreamEnvelopeSessionDrainStopEscalated) error {
+	v.Type = "session.drain_stop_escalated"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionDrainStopEscalated performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionDrainStopEscalated
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionDrainStopEscalated(v TypedEventStreamEnvelopeSessionDrainStopEscalated) error {
+	v.Type = "session.drain_stop_escalated"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSessionDraining returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionDraining
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionDraining() (TypedEventStreamEnvelopeSessionDraining, error) {
 	var body TypedEventStreamEnvelopeSessionDraining
@@ -15885,6 +15946,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork()
 	case "session.drain_fence_unavailable":
 		return t.AsTypedEventStreamEnvelopeSessionDrainFenceUnavailable()
+	case "session.drain_stop_escalated":
+		return t.AsTypedEventStreamEnvelopeSessionDrainStopEscalated()
 	case "session.draining":
 		return t.AsTypedEventStreamEnvelopeSessionDraining()
 	case "session.idle_killed":
@@ -17882,6 +17945,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSess
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSessionDrainStopEscalated returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionDrainStopEscalated
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionDrainStopEscalated() (TypedTaggedEventStreamEnvelopeSessionDrainStopEscalated, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionDrainStopEscalated
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionDrainStopEscalated overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionDrainStopEscalated
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionDrainStopEscalated(v TypedTaggedEventStreamEnvelopeSessionDrainStopEscalated) error {
+	v.Type = "session.drain_stop_escalated"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionDrainStopEscalated performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionDrainStopEscalated
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionDrainStopEscalated(v TypedTaggedEventStreamEnvelopeSessionDrainStopEscalated) error {
+	v.Type = "session.drain_stop_escalated"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSessionDraining returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionDraining
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionDraining() (TypedTaggedEventStreamEnvelopeSessionDraining, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionDraining
@@ -18764,6 +18855,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork()
 	case "session.drain_fence_unavailable":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable()
+	case "session.drain_stop_escalated":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionDrainStopEscalated()
 	case "session.draining":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionDraining()
 	case "session.idle_killed":

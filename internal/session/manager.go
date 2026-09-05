@@ -1248,6 +1248,26 @@ func (m *Manager) Suspend(id string) error {
 			}
 			return nil
 		}
+		// draining is the same shape of problem as failed-create above: `gc stop`
+		// and `gc restart` issue suspend on every session bead with no state
+		// pre-filter, so rejecting draining with an illegal-transition error made
+		// every restart SKIP the draining seats. They survived as live panes still
+		// holding their pool slot names, which is precisely what starves the pool
+		// (ga-rxhu2). Tear the runtime down best-effort and report success.
+		//
+		// The early return deliberately writes NO state. A drain is not a
+		// suspension: `state` stays draining so the drain machinery can finish it
+		// or the reconciler can reap it, and the drain reason survives the stop.
+		// For the same reason this is NOT a StateDraining -> StateSuspended edge in
+		// the transition table — suspended is still an OPEN row, so the edge would
+		// release no pool name while silently losing the drain. Only a close frees
+		// the name, and CmdClose is already legal from draining.
+		if current == StateDraining {
+			if strings.TrimSpace(sessName) != "" {
+				_ = m.sp.Stop(sessName) // best-effort: tear down the draining runtime
+			}
+			return nil
+		}
 		// Normalize legacy/aliased states (empty and awake both mean active)
 		// after the failed-create pre-check above, preserving closed-guard-
 		// first ordering.

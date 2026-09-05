@@ -5340,6 +5340,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork) | ({
     type: 'session.drain_fence_unavailable';
 } & TypedEventStreamEnvelopeSessionDrainFenceUnavailable) | ({
+    type: 'session.drain_stop_escalated';
+} & TypedEventStreamEnvelopeSessionDrainStopEscalated) | ({
     type: 'session.draining';
 } & TypedEventStreamEnvelopeSessionDraining) | ({
     type: 'session.idle_killed';
@@ -6654,6 +6656,24 @@ export type TypedEventStreamEnvelopeSessionDrainFenceUnavailable = {
 };
 
 /**
+ * TypedEventStreamEnvelope session.drain_stop_escalated
+ */
+export type TypedEventStreamEnvelopeSessionDrainStopEscalated = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionLifecyclePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.drain_stop_escalated';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.draining
  */
 export type TypedEventStreamEnvelopeSessionDraining = {
@@ -7247,6 +7267,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork) | ({
     type: 'session.drain_fence_unavailable';
 } & TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable) | ({
+    type: 'session.drain_stop_escalated';
+} & TypedTaggedEventStreamEnvelopeSessionDrainStopEscalated) | ({
     type: 'session.draining';
 } & TypedTaggedEventStreamEnvelopeSessionDraining) | ({
     type: 'session.idle_killed';
@@ -8627,6 +8649,25 @@ export type TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable = {
     subject?: string;
     ts: string;
     type: 'session.drain_fence_unavailable';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.drain_stop_escalated
+ */
+export type TypedTaggedEventStreamEnvelopeSessionDrainStopEscalated = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionLifecyclePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.drain_stop_escalated';
     workflow?: WorkflowEventProjection;
 };
 

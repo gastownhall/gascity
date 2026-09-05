@@ -4675,6 +4675,24 @@ export const zTypedEventStreamEnvelopeSessionDrainFenceUnavailable = z.object({
 });
 
 /**
+ * TypedEventStreamEnvelope session.drain_stop_escalated
+ */
+export const zTypedEventStreamEnvelopeSessionDrainStopEscalated = z.object({
+    actor: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zSessionLifecyclePayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('session.drain_stop_escalated'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedEventStreamEnvelope session.draining
  */
 export const zTypedEventStreamEnvelopeSessionDraining = z.object({
@@ -5199,6 +5217,7 @@ export const zTypedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedEventStreamEnvelopeSessionDemandClaimDivergence.extend({ type: z.literal('session.demand_claim_divergence') }),
     zTypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork.extend({ type: z.literal('session.drain_acked_with_assigned_work') }),
     zTypedEventStreamEnvelopeSessionDrainFenceUnavailable.extend({ type: z.literal('session.drain_fence_unavailable') }),
+    zTypedEventStreamEnvelopeSessionDrainStopEscalated.extend({ type: z.literal('session.drain_stop_escalated') }),
     zTypedEventStreamEnvelopeSessionDraining.extend({ type: z.literal('session.draining') }),
     zTypedEventStreamEnvelopeSessionIdleKilled.extend({ type: z.literal('session.idle_killed') }),
     zTypedEventStreamEnvelopeSessionMaxAgeKilled.extend({ type: z.literal('session.max_age_killed') }),
@@ -6566,6 +6585,25 @@ export const zTypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable = z.obj
 });
 
 /**
+ * TypedTaggedEventStreamEnvelope session.drain_stop_escalated
+ */
+export const zTypedTaggedEventStreamEnvelopeSessionDrainStopEscalated = z.object({
+    actor: z.string(),
+    city: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zSessionLifecyclePayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('session.drain_stop_escalated'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedTaggedEventStreamEnvelope session.draining
  */
 export const zTypedTaggedEventStreamEnvelopeSessionDraining = z.object({
@@ -7115,6 +7153,7 @@ export const zTypedTaggedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence.extend({ type: z.literal('session.demand_claim_divergence') }),
     zTypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork.extend({ type: z.literal('session.drain_acked_with_assigned_work') }),
     zTypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable.extend({ type: z.literal('session.drain_fence_unavailable') }),
+    zTypedTaggedEventStreamEnvelopeSessionDrainStopEscalated.extend({ type: z.literal('session.drain_stop_escalated') }),
     zTypedTaggedEventStreamEnvelopeSessionDraining.extend({ type: z.literal('session.draining') }),
     zTypedTaggedEventStreamEnvelopeSessionIdleKilled.extend({ type: z.literal('session.idle_killed') }),
     zTypedTaggedEventStreamEnvelopeSessionMaxAgeKilled.extend({ type: z.literal('session.max_age_killed') }),
