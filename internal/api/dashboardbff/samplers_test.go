@@ -270,6 +270,81 @@ func TestProbeRigUnsafeModeMarkersIgnoreStalePortArtifact(t *testing.T) {
 	}
 }
 
+func TestProbeRigOnlyPersistedServerModeAuthorizesTCPProbe(t *testing.T) {
+	tests := []struct {
+		name         string
+		metadata     string
+		metadataDir  bool
+		config       string
+		configDir    bool
+		wantEndpoint bool
+	}{
+		{
+			name:         "server metadata",
+			metadata:     `{"dolt_mode":"server"}`,
+			wantEndpoint: true,
+		},
+		{
+			name:         "server config without metadata",
+			config:       "dolt.mode: server\n",
+			wantEndpoint: true,
+		},
+		{
+			name:     "malformed metadata overrides server config",
+			metadata: "{not-json",
+			config:   "dolt.mode: server\n",
+		},
+		{
+			name:     "missing metadata mode overrides server config",
+			metadata: `{"backend":"dolt"}`,
+			config:   "dolt.mode: server\n",
+		},
+		{
+			name:        "unreadable metadata overrides server config",
+			metadataDir: true,
+			config:      "dolt.mode: server\n",
+		},
+		{
+			name:      "unreadable config",
+			configDir: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rig, bin := newProbeRigFixture(t)
+			beadsPath := filepath.Join(rig, ".beads")
+			if tt.metadataDir {
+				if err := os.Mkdir(filepath.Join(beadsPath, "metadata.json"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			} else if tt.metadata != "" {
+				if err := os.WriteFile(filepath.Join(beadsPath, "metadata.json"), []byte(tt.metadata), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.configDir {
+				if err := os.Mkdir(filepath.Join(beadsPath, "config.yaml"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			} else if tt.config != "" {
+				if err := os.WriteFile(filepath.Join(beadsPath, "config.yaml"), []byte(tt.config), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(beadsPath, "dolt-server.port"), []byte("1"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			writeFakeBd(t, bin, "#!/bin/sh\nprintf '%s' '{\"status\":\"ok\"}'\n")
+
+			rep := newSamplerManager(Deps{}, newExecRunner()).probeRig(context.Background(), "r1", rig)
+			if (rep.DoltEndpoint != nil) != tt.wantEndpoint {
+				t.Fatalf("DoltEndpoint = %v, want present=%t (report=%+v)", rep.DoltEndpoint, tt.wantEndpoint, rep)
+			}
+		})
+	}
+}
+
 // newProbeRigFixture builds a rig directory with an empty .beads store and a
 // PATH containing only a fake bd, so a probeRig test never reaches a real one.
 func newProbeRigFixture(t *testing.T) (rigPath, binDir string) {
