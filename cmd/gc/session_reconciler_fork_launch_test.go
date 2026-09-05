@@ -141,6 +141,7 @@ func TestForkLaunch_RealBuiltinClaudeSpecPinsContract(t *testing.T) {
 func TestResolveSessionCommand_ForkLaunch(t *testing.T) {
 	tests := []struct {
 		name       string
+		command    string
 		parentSID  string
 		rp         *config.ResolvedProvider
 		firstStart bool
@@ -177,7 +178,8 @@ func TestResolveSessionCommand_ForkLaunch(t *testing.T) {
 			want:       "claude --session-id gc-key",
 		},
 		{
-			name: "first start without session id flag keeps launch command",
+			name:    "first start without session id flag keeps launch command",
+			command: "gc-runtime-nomad start",
 			rp: &config.ResolvedProvider{
 				Name:          "nomad-worker",
 				ResumeCommand: "gc-runtime-nomad provision",
@@ -186,7 +188,8 @@ func TestResolveSessionCommand_ForkLaunch(t *testing.T) {
 			want:       "gc-runtime-nomad start",
 		},
 		{
-			name: "fresh wake without session id flag keeps launch command",
+			name:    "fresh wake without session id flag keeps launch command",
+			command: "gc-runtime-nomad start",
 			rp: &config.ResolvedProvider{
 				Name:       "nomad-worker",
 				ResumeFlag: "--resume",
@@ -209,7 +212,11 @@ func TestResolveSessionCommand_ForkLaunch(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := resolveSessionCommand("claude", "gc-key", tc.parentSID, tc.rp, tc.firstStart, tc.forceFresh)
+			command := tc.command
+			if command == "" {
+				command = "claude"
+			}
+			got := resolveSessionCommand(command, "gc-key", tc.parentSID, tc.rp, tc.firstStart, tc.forceFresh)
 			if got != tc.want {
 				t.Errorf("resolveSessionCommand = %q, want %q", got, tc.want)
 			}
