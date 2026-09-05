@@ -401,6 +401,23 @@ type LiveRuntime struct {
 	// PID is the OS process ID for local providers, or a provider-specific
 	// process identifier for remote infrastructure.
 	PID int
+	// PPID is the parent process ID, or 0 when the provider cannot report one.
+	//
+	// A value <= 1 means the process has been REPARENTED to init. That is the
+	// difference between a runtime a provider still owns and a detached process
+	// that merely inherited GC_SESSION_ID from the agent's environment: a live
+	// pane's root process still has the provider's server as its parent, while a
+	// backgrounded daemon (the managed-Dolt scope watchdog, a detached
+	// supervisor) leads its own process group and reparents to init. Both carry
+	// the same GC_SESSION_ID and City, so a consumer that terminates on those two
+	// fields alone will signal the daemon's whole process group. Callers that
+	// KILL must discriminate on this.
+	PPID int
+	// Name is the process's command basename ("" when unreadable). Advisory: the
+	// agent process is often a DESCENDANT of the runtime root rather than the
+	// root itself (a pane's foreground can be a wrapper), so an empty or
+	// non-matching Name is not evidence that a root is unrelated.
+	Name string
 	// ProviderName is the session name as known to the provider. Empty means
 	// the runtime is not visible in the provider's artifact registry.
 	ProviderName string

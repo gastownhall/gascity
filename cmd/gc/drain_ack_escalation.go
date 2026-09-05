@@ -39,12 +39,21 @@ package main
 //
 // # Bypassing the IsTracked guard safely
 //
-// That guard is load-bearing, so this route replaces it with a narrower fence:
-// the bead must be in the drain-ack stop-pending wedge state, its drain bound
-// must have elapsed, it must hold no assigned work, the runtime's
-// GC_INSTANCE_TOKEN must still match the incarnation we parked, and the process
-// must be positively attributed to THIS city (the /proc scan is supervisor-wide;
-// terminating on anything less would SIGKILL a sibling city's healthy session).
+// That guard is load-bearing, and it was doing TWO jobs. Replacing it needs both.
+//
+// Session-level authorization: the bead must be in the drain-ack stop-pending
+// wedge state, its drain bound must have elapsed, it must hold no assigned work,
+// nobody may be attached and the pane must have been quiet, the runtime's
+// GC_INSTANCE_TOKEN must still match the incarnation we parked, and the attempt
+// must be durably paced.
+//
+// PER-PROCESS attribution, which is the half that is easy to miss: none of the
+// above says WHICH process to signal. GC_SESSION_ID and GC_CITY_PATH are
+// ordinary environment variables inherited by every child the agent ever
+// spawned, and the scan promotes any of them to an "agent root" once it
+// reparents to init — so matching on those two fields proves lineage, not
+// ownership, and sweeps in every daemon an agent ever backgrounded. See
+// drainAckForceTerminationTargets, which is where that fence lives.
 //
 // # What this pass does NOT do
 //
@@ -78,6 +87,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -114,6 +124,10 @@ const (
 	// drainAckEscalationRetryInterval paces repeat attempts. Without it the
 	// escalation is re-paid on every tick for every wedged row forever.
 	drainAckEscalationRetryInterval = 15 * time.Minute
+	// drainAckEscalationQuietGrace is how quiet the pane must have been before
+	// force is applied. Deliberately longer than drainReminderGrace: that one
+	// gates an informational nudge, this one gates SIGKILL of a process group.
+	drainAckEscalationQuietGrace = 10 * time.Minute
 )
 
 // Session-bead metadata keys recording escalation attempts. Persisted for the
@@ -220,20 +234,63 @@ func drainAckEscalationPaced(bead beads.Bead, now time.Time) bool {
 }
 
 // recordDrainAckEscalationAttempt persists the attempt marker ahead of the kill
-// and returns the new attempt count.
-func recordDrainAckEscalationAttempt(store beads.Store, bead beads.Bead, now time.Time) int {
+// and returns the new attempt count and whether the write LANDED.
+//
+// The caller must refuse to escalate when it did not. The pacing that makes this
+// kill path defensible lives entirely in that metadata: drainAckEscalationPaced
+// reads it back out of the bead, so a discarded write turns the 15-minute pace
+// into a fresh SIGTERM/SIGKILL wave plus a counted event on every tick, forever,
+// each one reporting "attempt 1" because the count is re-derived from metadata
+// that never landed. A store that goes read-only while still serving reads
+// (sqlite query_only) is a documented failure mode on this fleet and is not
+// otherwise fatal to the tick, so this is reachable without anything else
+// breaking. No durable pacing, no escalation.
+func recordDrainAckEscalationAttempt(store beads.Store, bead beads.Bead, now time.Time) (int, bool) {
 	drainID := drainReminderIdentity(bead)
 	count := 0
 	if strings.TrimSpace(bead.Metadata[drainAckEscalationDrainKey]) == drainID {
 		count = atoiOr0(bead.Metadata[drainAckEscalationCountKey])
 	}
 	count++
-	_ = store.SetMetadataBatch(bead.ID, map[string]string{
+	if err := store.SetMetadataBatch(bead.ID, map[string]string{
 		drainAckEscalationAtKey:    now.UTC().Format(time.RFC3339),
 		drainAckEscalationDrainKey: drainID,
 		drainAckEscalationCountKey: strconv.Itoa(count),
-	})
-	return count
+	}); err != nil {
+		return 0, false
+	}
+	return count, true
+}
+
+// drainAckEscalationQuietHold refuses a kill under the same conditions the
+// reminder pass refuses to send a MESSAGE: someone is attached, the pane has
+// been active recently, or the activity signal cannot be read at all.
+//
+// Without this the pass will SIGKILL a pane it would not even nudge. Two shapes
+// make that concrete. An operator attaches to a wedged seat to investigate why
+// it will not exit — the documented response to this incident — and is killed out
+// from under the cursor. And "no assigned work" is not "not working": a worker
+// that follows the session-completion protocol acks the drain AFTER closing its
+// last bead, then runs quality gates and pushes, so it holds zero beads while
+// genuinely busy; if that wrap-up outruns the grace, the kill lands mid-push and
+// leaves a lock file and a half-written handoff with no bead evidence anything
+// was in flight.
+//
+// Unreadable activity HOLDS, matching drainReminderQuietHold's #312 rule that
+// "we cannot tell" is never "idle" — the more so here, where the action is
+// destructive rather than informational.
+func drainAckEscalationQuietHold(sp runtime.Provider, name string, now time.Time) (string, bool) {
+	if sp.IsAttached(name) {
+		return "attached", true
+	}
+	activity, err := sp.GetLastActivity(name)
+	if err != nil || activity.IsZero() {
+		return "activity_unreadable", true
+	}
+	if now.Sub(activity) < drainAckEscalationQuietGrace {
+		return "recently_active", true
+	}
+	return "", false
 }
 
 // escalateWedgedDrainAckStopPending decides whether a stop-pending row whose
@@ -322,14 +379,29 @@ func escalateWedgedDrainAckStopPending(
 		return false
 	}
 
-	attempt := recordDrainAckEscalationAttempt(store, bead, now)
-	recordDrainAckEscalation(cfg, info, name, reason, attempt, rec)
+	// Gate 5 — the quiet hold. Cheap provider reads, but they belong after the
+	// correctness gates so an ineligible row never pays them.
+	if hold, held := drainAckEscalationQuietHold(sp, name, now); held {
+		fmt.Fprintf(stderr, "%s: %s held (%s); not escalating\n", drainAckEscalationLabel, name, hold) //nolint:errcheck
+		return false
+	}
+
+	// Pacing is written BEFORE any force is applied, and a write that does not
+	// land refuses the escalation outright.
+	attempt, paced := recordDrainAckEscalationAttempt(store, bead, now)
+	if !paced {
+		fmt.Fprintf(stderr, "%s: %s: could not persist the escalation attempt; refusing to escalate unpaced\n", drainAckEscalationLabel, name) //nolint:errcheck
+		return false
+	}
 	fmt.Fprintf(stderr, //nolint:errcheck
-		"%s: escalating %s (attempt %d, %s): forcing runtime termination\n",
+		"%s: escalating %s (attempt %d, %s)\n",
 		drainAckEscalationLabel, name, attempt, reason)
 
-	queueDrainAckForcedTermination(cityPath, store, sp, cfg, info.ID, name, info.InstanceToken, processNames, tracker, stderr)
-	return true
+	// The event is emitted from the goroutine, at the point an outcome is known
+	// — see recordDrainAckEscalation. If the termination could not even be
+	// queued, report false so the caller still issues its ordinary stop rather
+	// than losing this row's stop entirely.
+	return queueDrainAckForcedTermination(cityPath, store, sp, cfg, info, name, reason, attempt, processNames, tracker, rec, stderr)
 }
 
 // queueDrainAckForcedTermination runs the forceful termination on a DETACHED
@@ -339,21 +411,30 @@ func escalateWedgedDrainAckStopPending(
 // every controller tick by N times that — starving the pool respawn, order
 // dispatch and health patrol that the wedge is already starving. The pre-existing
 // handler for these same rows is detached for exactly this reason.
+// It reports whether the termination was actually queued. A false return means
+// nothing was started — the caller must fall back to its ordinary stop rather
+// than leaving the row with no stop at all on this tick.
 func queueDrainAckForcedTermination(
 	cityPath string,
 	store beads.Store,
 	sp runtime.Provider,
 	cfg *config.City,
-	sessionID, name, expectedToken string,
+	info sessionpkg.Info,
+	name, reason string,
+	attempt int,
 	processNames []string,
 	tracker *asyncStartTracker,
+	rec events.Recorder,
 	stderr io.Writer,
-) {
+) bool {
+	sessionID := strings.TrimSpace(info.ID)
+	expectedToken := info.InstanceToken
 	// Distinct key space from queueDrainAckAsyncStop so an in-flight ordinary
 	// stop does not dedup the escalation away (and vice versa).
 	done, tracking := tracker.startDrainAckStop("escalate:" + drainAckAsyncStopKey(sessionID, name))
 	if !tracking {
-		return
+		fmt.Fprintf(stderr, "%s: %s: a termination is already in flight; leaving this tick to the ordinary stop\n", drainAckEscalationLabel, name) //nolint:errcheck
+		return false
 	}
 	confirmTimeout, confirmPoll := drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll
 	go func() {
@@ -364,12 +445,15 @@ func queueDrainAckForcedTermination(
 			fmt.Fprintf(stderr, "%s: stopping %s: %v\n", drainAckEscalationLabel, name, err) //nolint:errcheck
 		}
 		if confirmDrainAckRuntimeDead(cityPath, store, sp, cfg, name, expectedToken, processNames, stderr, confirmTimeout, confirmPoll) {
+			recordDrainAckEscalation(cfg, info, name, reason, "stopped_without_force", attempt, rec)
 			return
 		}
 		// The pane outlived the ordinary stop. This is the population the whole
 		// pass exists for, so apply the force the ordinary path does not have.
-		terminateDrainAckRuntimeByProcessTable(cityPath, sp, sessionID, name, expectedToken, stderr)
+		outcome := terminateDrainAckRuntimeByProcessTable(cityPath, sp, sessionID, name, expectedToken, stderr)
+		recordDrainAckEscalation(cfg, info, name, reason, outcome, attempt, rec)
 	}()
+	return true
 }
 
 // terminateDrainAckRuntimeByProcessTable is the escalation's actual added force:
@@ -390,12 +474,12 @@ func terminateDrainAckRuntimeByProcessTable(
 	sp runtime.Provider,
 	sessionID, name, expectedToken string,
 	stderr io.Writer,
-) {
+) string {
 	scanner, ok := sp.(runtime.ProcessTableScanner)
 	if !ok {
 		fmt.Fprintf(stderr, "%s: %s survived its stop and the provider cannot scan the process table; slot stays occupied\n", //nolint:errcheck
 			drainAckEscalationLabel, name)
-		return
+		return "no_process_table"
 	}
 	// Re-check the fence immediately before the destructive act: the ordinary
 	// stop and its confirm loop have just spent seconds, and a replacement may
@@ -403,29 +487,118 @@ func terminateDrainAckRuntimeByProcessTable(
 	if expected := strings.TrimSpace(expectedToken); expected != "" {
 		if actual, _ := sp.GetMeta(name, "GC_INSTANCE_TOKEN"); actual != "" && strings.TrimSpace(actual) != expected {
 			fmt.Fprintf(stderr, "%s: %s force-terminate skipped: instance token mismatch (session was replaced)\n", drainAckEscalationLabel, name) //nolint:errcheck
-			return
+			return "token_mismatch"
 		}
 	}
 	found, err := scanner.FindRuntimesBySessionID(sessionID)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: scanning process table for %s: %v\n", drainAckEscalationLabel, name, err) //nolint:errcheck
 	}
-	normalizedCity := normalizePathForCompare(strings.TrimSpace(cityPath))
-	for _, live := range found {
-		if strings.TrimSpace(live.SessionID) != strings.TrimSpace(sessionID) {
-			continue
-		}
-		// City attribution. When our own city path is unknown we cannot attribute
-		// safely, so we refuse rather than guess.
-		if normalizedCity == "" || normalizePathForCompare(strings.TrimSpace(live.City)) != normalizedCity {
-			continue
-		}
+	targets, skipped := drainAckForceTerminationTargets(found, sessionID, cityPath, name, stderr)
+	if len(targets) == 0 {
+		fmt.Fprintf(stderr, //nolint:errcheck
+			"%s: %s survived its stop but no process was attributable to this seat (%d scan hit(s) refused); slot stays occupied\n",
+			drainAckEscalationLabel, name, skipped)
+		return "nothing_attributable"
+	}
+	killed := 0
+	for _, live := range targets {
 		if err := scanner.TerminateRuntime(live); err != nil {
 			fmt.Fprintf(stderr, "%s: force-terminating pid=%d session=%s: %v\n", drainAckEscalationLabel, live.PID, sessionID, err) //nolint:errcheck
 			continue
 		}
+		killed++
 		fmt.Fprintf(stderr, "%s: force-terminated pid=%d session=%s (survived the provider stop)\n", drainAckEscalationLabel, live.PID, sessionID) //nolint:errcheck
 	}
+	if killed == 0 {
+		return "termination_failed"
+	}
+	return "force_terminated"
+}
+
+// drainAckForceTerminationTargets selects, from the scan hits for a session, the
+// processes that are actually THAT SEAT'S RUNTIME — and reports how many hits it
+// refused.
+//
+// This is the load-bearing fence, and it exists because matching on
+// GC_SESSION_ID + GC_CITY_PATH proves ENV INHERITANCE, not runtime ownership.
+// Both are ordinary environment variables inherited by every child of the
+// agent's shell, and proctable promotes any such process to an "agent root" as
+// soon as its parent is gone (ppid <= 1), excluding only tmux. So the naive
+// match sweeps in every long-lived process an agent ever backgrounded:
+//
+//   - the managed-Dolt SCOPE WATCHDOG, which is re-exec'd with Setpgid and the
+//     agent's environment verbatim; its SIGTERM handler kills the city's SHARED
+//     dolt sql-server, i.e. the beads store for the controller and every other
+//     agent in that city;
+//   - a detached supervisor from `gc start` / `gc supervisor start`, likewise
+//     Setpgid and env-inheriting, whose process group spans every city on the box.
+//
+// And TerminateRuntime signals the process GROUP (kill(-pid, ...)), so hitting
+// one of those does not cost one process, it costs the group.
+//
+// The removed IsTracked guard was doing this job by accident: the tmux scanner
+// keys tracked-ness by SESSION ID, so it marks every root carrying a live
+// session's ID as tracked, and the pre-existing callers skip all of them. The
+// five session-level fences re-authorize the SESSION; only this one re-supplies
+// the PER-PROCESS attribution.
+//
+// The discriminator is reparenting. A pane the provider still owns has the
+// provider's server as its parent, so PPID > 1; a backgrounded daemon leads its
+// own group and reparents to init. Process-NAME matching is deliberately not
+// used as the test: the agent process is frequently a DESCENDANT of the runtime
+// root rather than the root itself (a pane's foreground can be a wrapper), so
+// requiring the root's name to match the agent's process hints would refuse the
+// legitimate target.
+func drainAckForceTerminationTargets(
+	found []runtime.LiveRuntime,
+	sessionID, cityPath, name string,
+	stderr io.Writer,
+) ([]runtime.LiveRuntime, int) {
+	normalizedCity := normalizePathForCompare(strings.TrimSpace(cityPath))
+	self := os.Getpid()
+	var targets []runtime.LiveRuntime
+	skipped := 0
+	for _, live := range found {
+		switch {
+		case strings.TrimSpace(live.SessionID) != strings.TrimSpace(sessionID):
+			skipped++
+			fmt.Fprintf(stderr, "%s: %s skipping pid=%d: session id %q is not this seat\n", //nolint:errcheck
+				drainAckEscalationLabel, name, live.PID, strings.TrimSpace(live.SessionID))
+		case normalizedCity == "" || normalizePathForCompare(strings.TrimSpace(live.City)) != normalizedCity:
+			// The /proc scan is supervisor-wide. When our own city path is unknown
+			// we cannot attribute safely, so we refuse rather than guess.
+			skipped++
+			fmt.Fprintf(stderr, "%s: %s skipping pid=%d: city %q is not this city\n", //nolint:errcheck
+				drainAckEscalationLabel, name, live.PID, strings.TrimSpace(live.City))
+		case live.PID <= 0 || live.PID == self:
+			// proctable merges the caller's own environment into its scan record
+			// for pid == os.Getpid(), so a controller that was itself daemonized
+			// from an agent pane is otherwise a legal target of its own escalation.
+			skipped++
+			fmt.Fprintf(stderr, "%s: %s skipping pid=%d: that is this process\n", //nolint:errcheck
+				drainAckEscalationLabel, name, live.PID)
+		case !live.IsTracked || strings.TrimSpace(live.ProviderName) != strings.TrimSpace(name):
+			// Positive binding to the runtime this pool name actually names. Not
+			// sufficient on its own — the tmux scanner keys tracked-ness by SESSION
+			// ID, so it stamps this same ProviderName onto every root carrying the
+			// id, the watchdog included — which is exactly why the reparenting test
+			// below exists. It is still required: a hit the provider does not bind
+			// at all is not a runtime we own.
+			skipped++
+			fmt.Fprintf(stderr, "%s: %s skipping pid=%d: not bound to this runtime name (provider=%q tracked=%v)\n", //nolint:errcheck
+				drainAckEscalationLabel, name, live.PID, strings.TrimSpace(live.ProviderName), live.IsTracked)
+		case live.PPID <= 1:
+			skipped++
+			fmt.Fprintf(stderr, //nolint:errcheck
+				"%s: %s skipping pid=%d (%s): reparented to init, so it only INHERITED this session's environment "+
+					"— it is not the seat's runtime, and killing it would signal its whole process group\n",
+				drainAckEscalationLabel, name, live.PID, live.Name)
+		default:
+			targets = append(targets, live)
+		}
+	}
+	return targets, skipped
 }
 
 // recordDrainAckEscalation emits the counted typed event for a terminal
@@ -433,12 +606,18 @@ func terminateDrainAckRuntimeByProcessTable(
 // it must never be silent: a rising rate of these is the signal that agents are
 // not exiting on drain-ack, and a silent backstop would mask exactly the
 // drain-ack tail it exists to survive.
-func recordDrainAckEscalation(cfg *config.City, info sessionpkg.Info, name, reason string, attempt int, rec events.Recorder) {
+// It is recorded from the termination goroutine, at the point an OUTCOME is
+// known, never at decision time. A counter that increments on decisions cannot
+// answer the question this event exists for: an escalation that found nothing
+// attributable to kill is indistinguishable from one that freed the slot, and
+// "nothing was reachable to kill" is precisely the state the fleet needs to see.
+// outcome therefore rides in both the payload reason and the message.
+func recordDrainAckEscalation(cfg *config.City, info sessionpkg.Info, name, reason, outcome string, attempt int, rec events.Recorder) {
 	template := normalizedSessionTemplateInfo(info, cfg)
 	if template == "" {
 		template = info.Template
 	}
-	telemetry.RecordDrainTransition(context.Background(), name, reason, "escalate")
+	telemetry.RecordDrainTransition(context.Background(), name, reason+"/"+outcome, "escalate")
 	if rec == nil {
 		return
 	}
@@ -446,8 +625,8 @@ func recordDrainAckEscalation(cfg *config.City, info sessionpkg.Info, name, reas
 		Type:      events.SessionDrainStopEscalated,
 		Actor:     "gc",
 		Subject:   template,
-		Message:   fmt.Sprintf("drain-ack stop-pending runtime did not exit (%s); forcing termination, attempt %d", reason, attempt),
+		Message:   fmt.Sprintf("drain-ack stop-pending escalation (%s), attempt %d: %s", reason, attempt, outcome),
 		SessionID: info.ID,
-		Payload:   api.SessionLifecyclePayloadJSON(info.ID, template, reason),
+		Payload:   api.SessionLifecyclePayloadJSON(info.ID, template, reason+"/"+outcome),
 	})
 }

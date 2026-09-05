@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -64,6 +65,8 @@ func scanRecordsBySessionID(records map[int]psRecord, id string) []runtime.LiveR
 			City:      city,
 			Epoch:     epoch,
 			PID:       record.pid,
+			PPID:      record.ppid,
+			Name:      filepath.Base(strings.TrimSpace(record.command)),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {

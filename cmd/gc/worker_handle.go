@@ -499,12 +499,15 @@ func workerKillSessionTargetWithConfig(cityPath string, store beads.Store, sp ru
 	return handle.Kill(context.Background())
 }
 
-func workerStopSessionTargetWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) error {
+// workerStopSessionTargetForShutdownWithConfig is the city stop/restart sweep's
+// stop. It is separate from workerStopSessionTargetWithConfig so the draining
+// latitude reaches only the sweep and never a targeted operator command.
+func workerStopSessionTargetForShutdownWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) error {
 	handle, err := workerHandleForSessionTargetWithConfig(cityPath, store, sp, cfg, target)
 	if err != nil {
 		return err
 	}
-	return handle.Stop(context.Background())
+	return handle.StopForShutdown(context.Background())
 }
 
 func workerInterruptSessionTargetWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) error {
