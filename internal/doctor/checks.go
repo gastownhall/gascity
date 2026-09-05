@@ -30,6 +30,7 @@ import (
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
@@ -456,6 +457,58 @@ func (c *BinaryCheck) Fix(_ *CheckContext) error { return nil }
 
 // --- Session checks (skipped when controller is running) ---
 
+// sessionLivenessProbeTimeout bounds a single per-agent liveness probe when
+// a check's own livenessTimeout field is unset (zero value).
+const sessionLivenessProbeTimeout = 3 * time.Second
+
+// resolveLivenessTimeout returns d if positive, else the package default.
+func resolveLivenessTimeout(d time.Duration) time.Duration {
+	if d > 0 {
+		return d
+	}
+	return sessionLivenessProbeTimeout
+}
+
+// loadSuspensionStateForCheck best-effort loads the runtime suspension-state
+// overlay for cityPath. An empty cityPath (as in most unit tests) or a load
+// error yields the zero State, under which every EffectiveXSuspended call
+// defers to the authored suspended_on_start default — never blocks a check.
+func loadSuspensionStateForCheck(cityPath string) suspensionstate.State {
+	var st suspensionstate.State
+	if cityPath != "" {
+		st, _ = suspensionstate.Load(fsys.OSFS{}, cityPath)
+	}
+	return st
+}
+
+// resolveAgentRig finds the rig owning dir (an agent's Dir), or nil for a
+// city-scoped agent (empty Dir) or an unrecognized rig name.
+func resolveAgentRig(cfg *config.City, dir string) *config.Rig {
+	if cfg == nil || dir == "" {
+		return nil
+	}
+	for i := range cfg.Rigs {
+		if cfg.Rigs[i].Name == dir {
+			return &cfg.Rigs[i]
+		}
+	}
+	return nil
+}
+
+// agentSuspendedByRuntimeState reports whether a is suspended via the
+// runtime suspension-state overlay (city- or rig-level; agent-level state is
+// a reserved, unwired schema slot — see internal/suspensionstate). This is
+// additional to, not a replacement for, the authored config.Agent.Suspended
+// flag.
+func agentSuspendedByRuntimeState(cfg *config.City, st suspensionstate.State, a config.Agent) bool {
+	if rig := resolveAgentRig(cfg, a.Dir); rig != nil {
+		if suspensionstate.EffectiveRigSuspended(st, rig.Name, rig.EffectiveSuspendedOnStart()) {
+			return true
+		}
+	}
+	return suspensionstate.EffectiveCitySuspended(st, cfg.Workspace.EffectiveSuspendedOnStart())
+}
+
 // AgentSessionsCheck verifies non-suspended agents have running sessions.
 type AgentSessionsCheck struct {
 	cfg             *config.City
@@ -476,28 +529,49 @@ func NewAgentSessionsCheck(cfg *config.City, cityName, sessionTemplate string, s
 // Name returns the check identifier.
 func (c *AgentSessionsCheck) Name() string { return "agent-sessions" }
 
-// Run checks that each non-suspended agent has a running session.
-func (c *AgentSessionsCheck) Run(_ *CheckContext) *CheckResult {
+// Run checks that each non-suspended agent has a running session. Liveness
+// is observed via runtime.ObserveLivenessBounded so a stuck or unavailable
+// probe resolves to probe-incomplete (StatusWarning) rather than being
+// conflated with a confirmed-missing session (StatusError).
+func (c *AgentSessionsCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
-	var missing []string
+	st := loadSuspensionStateForCheck(ctx.CityPath)
+	timeout := resolveLivenessTimeout(c.livenessTimeout)
+	var missing, incomplete []string
 	for _, a := range c.cfg.Agents {
-		if a.Suspended {
+		if a.Suspended || agentSuspendedByRuntimeState(c.cfg, st, a) {
 			continue
 		}
 		sn := agent.SessionNameFor(c.cityName, a.QualifiedName(), c.sessionTemplate)
-		if !c.sp.IsRunning(sn) {
+		liveness, obs, _ := runtime.ObserveLivenessBounded(context.Background(), c.sp, sn, a.ProcessNames, timeout)
+		switch {
+		case obs == runtime.ObservationIncomplete:
+			incomplete = append(incomplete, a.QualifiedName())
+		case !liveness.Running:
 			missing = append(missing, a.QualifiedName())
 		}
 	}
-	if len(missing) == 0 {
+	switch {
+	case len(missing) > 0:
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("%d agent(s) confirmed missing", len(missing))
+	case len(incomplete) > 0:
+		r.Status = StatusWarning
+		r.Message = fmt.Sprintf("%d agent(s) with incomplete liveness observation", len(incomplete))
+	default:
 		r.Status = StatusOK
 		r.Message = "all agent sessions running"
 		return r
 	}
-	r.Status = StatusWarning
-	r.Message = fmt.Sprintf("%d agent(s) without sessions", len(missing))
-	r.Details = missing
-	r.FixHint = "run gc start to reconcile sessions"
+	for _, name := range missing {
+		r.Details = append(r.Details, fmt.Sprintf("%s: confirmed missing", name))
+	}
+	for _, name := range incomplete {
+		r.Details = append(r.Details, fmt.Sprintf("%s: observation incomplete, outcome unknown", name))
+	}
+	if len(missing) > 0 {
+		r.FixHint = fmt.Sprintf("run gc start to reconcile sessions for: %s", strings.Join(missing, ", "))
+	}
 	return r
 }
 
@@ -513,6 +587,9 @@ type ZombieSessionsCheck struct {
 	cityName        string
 	sessionTemplate string
 	sp              runtime.Provider
+	// livenessTimeout bounds each per-agent liveness probe. Zero means use
+	// the package default. See AgentSessionsCheck.livenessTimeout.
+	livenessTimeout time.Duration
 }
 
 // NewZombieSessionsCheck creates a check for zombie sessions.
@@ -523,27 +600,49 @@ func NewZombieSessionsCheck(cfg *config.City, cityName, sessionTemplate string, 
 // Name returns the check identifier.
 func (c *ZombieSessionsCheck) Name() string { return "zombie-sessions" }
 
-// Run checks for sessions where the session exists but the agent process is dead.
-func (c *ZombieSessionsCheck) Run(_ *CheckContext) *CheckResult {
+// Run checks for sessions where the session exists but the agent process is
+// dead. Liveness is observed via runtime.ObserveLivenessBounded so a stuck
+// or unavailable probe resolves to probe-incomplete (StatusWarning) rather
+// than being conflated with a confirmed zombie (StatusError).
+func (c *ZombieSessionsCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
-	var zombies []string
+	st := loadSuspensionStateForCheck(ctx.CityPath)
+	timeout := resolveLivenessTimeout(c.livenessTimeout)
+	var zombies, incomplete []string
 	for _, a := range c.cfg.Agents {
-		if a.Suspended || len(a.ProcessNames) == 0 {
+		if a.Suspended || len(a.ProcessNames) == 0 || agentSuspendedByRuntimeState(c.cfg, st, a) {
 			continue
 		}
 		sn := agent.SessionNameFor(c.cityName, a.QualifiedName(), c.sessionTemplate)
-		if c.sp.IsRunning(sn) && !c.sp.ProcessAlive(sn, a.ProcessNames) {
+		liveness, obs, _ := runtime.ObserveLivenessBounded(context.Background(), c.sp, sn, a.ProcessNames, timeout)
+		switch {
+		case obs == runtime.ObservationIncomplete:
+			incomplete = append(incomplete, sn)
+		case liveness.Running && !liveness.Alive:
 			zombies = append(zombies, sn)
 		}
 	}
-	if len(zombies) == 0 {
+	switch {
+	case len(zombies) > 0:
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("%d zombie session(s) confirmed", len(zombies))
+	case len(incomplete) > 0:
+		r.Status = StatusWarning
+		r.Message = fmt.Sprintf("%d session(s) with incomplete liveness observation", len(incomplete))
+	default:
 		r.Status = StatusOK
 		r.Message = "no zombie sessions"
 		return r
 	}
-	r.Status = StatusWarning
-	r.Message = fmt.Sprintf("%d zombie session(s)", len(zombies))
-	r.Details = zombies
+	for _, name := range zombies {
+		r.Details = append(r.Details, fmt.Sprintf("%s: confirmed zombie", name))
+	}
+	for _, name := range incomplete {
+		r.Details = append(r.Details, fmt.Sprintf("%s: observation incomplete, outcome unknown", name))
+	}
+	if len(zombies) > 0 {
+		r.FixHint = fmt.Sprintf("run gc doctor --fix to kill zombie session(s): %s", strings.Join(zombies, ", "))
+	}
 	return r
 }
 
