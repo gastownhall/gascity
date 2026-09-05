@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 206,
+  "next_id": 207,
   "permanent_ids": [
     {
       "name": "help",
@@ -334,6 +334,21 @@
       "classification": "beads-show",
       "owner": "immediate",
       "id": 16
+    },
+    {
+      "path": "gc beads state",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "beads-state",
+      "owner": "immediate",
+      "id": 206
     },
     {
       "path": "gc build-image",

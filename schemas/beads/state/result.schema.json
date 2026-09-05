@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gc://schemas/beads/state/result.schema.json",
+  "title": "gc beads state result",
+  "description": "Effective-state classification of every bead in the city store, grouped by state.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "ok",
+    "states"
+  ],
+  "properties": {
+    "schema_version": {
+      "description": "Schema version for this result.",
+      "const": "1"
+    },
+    "ok": {
+      "description": "True when the classification completed over a complete bead set.",
+      "const": true
+    },
+    "states": {
+      "description": "Classified beads keyed by effective state. States with no members are omitted.",
+      "type": "object",
+      "additionalProperties": false,
+      "propertyNames": {
+        "enum": [
+          "done",
+          "deferred",
+          "pinned",
+          "orchestration",
+          "delivering",
+          "waiting-review",
+          "waiting-decision",
+          "in-progress",
+          "orphaned",
+          "blocked-deps",
+          "waiting-human",
+          "epic-triage",
+          "routed-waiting",
+          "routed-stalled-dispatch",
+          "ready-unrouted",
+          "unknown"
+        ]
+      },
+      "patternProperties": {
+        "^[a-z-]+$": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "owner",
+            "count",
+            "ids"
+          ],
+          "properties": {
+            "owner": {
+              "description": "Role-agnostic owner label responsible for advancing beads in this state.",
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "count": {
+              "description": "Number of beads classified into this state.",
+              "type": "integer",
+              "minimum": 0
+            },
+            "ids": {
+              "description": "Sorted bead identifiers classified into this state.",
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

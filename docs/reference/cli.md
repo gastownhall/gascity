@@ -338,6 +338,7 @@ gc beads
 | [gc beads list](#gc-beads-list) | List beads (API-routed with bd fallback) |
 | [gc beads metadata-cas](#gc-beads-metadata-cas) | Atomically compare and set one metadata key in an exact local store |
 | [gc beads show](#gc-beads-show) | Show a single bead (API-routed with bd fallback) |
+| [gc beads state](#gc-beads-state) | Classify beads by effective state |
 
 ## gc beads city
 
@@ -507,6 +508,41 @@ gc beads show ga-abc --format=json
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--format` | string | `text` | output format: text or json |
+
+## gc beads state
+
+Classify every bead into one of 16 effective states and display
+the results grouped by state with owner and count.
+
+Anomaly states (orphaned, ready-unrouted, routed-stalled-dispatch, unknown)
+are prefixed with '!' in table output.
+
+Four states — delivering, waiting-review, waiting-decision, and the delivery
+route into done — key on gc.phase metadata that nothing writes yet, so they
+cannot appear in a report today. A session whose bead still reads active but
+whose process is gone (a zombie) also still counts as live, so
+routed-stalled-dispatch fires only for rigs with no live-stated sessions at
+all. See engdocs/contributors/bead-effective-state.md.
+
+```
+gc beads state [flags]
+```
+
+**Example:**
+
+```
+gc beads state
+gc beads state --json
+gc beads state --state routed-waiting
+gc beads state --ids
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--ids` | bool |  | include bead IDs in table output |
+| `--json` | bool |  | emit JSON result |
+| `--rig` | string |  | limit to beads routed to this rig |
+| `--state` | string |  | show only beads in this effective state |
 
 ## gc build-image
 

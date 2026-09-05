@@ -2976,6 +2976,13 @@ func TestHasRepositoryRefInSource(t *testing.T) {
 func TestResolveImportRootFallsBackToStandalonePackDir(t *testing.T) {
 	clearGCEnv(t)
 	dir := t.TempDir()
+	// Prevent /tmp/.gc/ (an orphaned supervisor runtime) from poisoning city
+	// discovery by capping the upward walk at the temp dir. Set unconditionally
+	// with the raw path: normalizeDiscoveryPath normalizes both the configured
+	// ceilings and the walked directory, so the comparison is symmetric, and an
+	// EvalSymlinks guard here would silently skip the cap on error and restore
+	// the original flakiness.
+	t.Setenv("GC_CEILING_DIRECTORIES", dir)
 	writePackToml(t, dir, `[pack]
 name = "demo-pack"
 schema = 1
@@ -3161,6 +3168,13 @@ func TestResolveImportRootGCCityEnvWinsOverNearestPack(t *testing.T) {
 func TestImportAddCommandWorksInStandalonePackDir(t *testing.T) {
 	clearGCEnv(t)
 	dir := t.TempDir()
+	// Prevent /tmp/.gc/ (an orphaned supervisor runtime) from poisoning city
+	// discovery by capping the upward walk at the temp dir. Set unconditionally
+	// with the raw path: normalizeDiscoveryPath normalizes both the configured
+	// ceilings and the walked directory, so the comparison is symmetric, and an
+	// EvalSymlinks guard here would silently skip the cap on error and restore
+	// the original flakiness.
+	t.Setenv("GC_CEILING_DIRECTORIES", dir)
 	writePackToml(t, dir, `[pack]
 name = "demo-pack"
 schema = 1
