@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -799,9 +800,11 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		// previous value on exit so nested ticks don't lose context.
 		prev := beads.SetReconcilerTickTrigger(trigger)
 		defer beads.RestoreReconcilerTickTrigger(prev)
+		tickStart := time.Now()
 		cr.safeTick(func() {
 			cr.tick(ctx, dirty, &lastProviderName, cityRoot, &prevPoolRunning, trigger)
 		}, trigger)
+		cr.recordTickHeartbeat(trigger, time.Since(tickStart))
 	}
 	if dirty.Load() {
 		runTick("startup-poke")
@@ -942,6 +945,67 @@ func (cr *CityRuntime) safeTick(fn func(), trigger string) (panicked bool) {
 	}()
 	fn()
 	return false
+}
+
+// Controller heartbeat. Every completed tick emits a
+// controller.tick_completed event: the stream is both the supervisor
+// doctor's tick-age/slow-tick signal and the fleet's tick-duration
+// series, and an unsampled stream is the only shape consumers can do
+// period/median arithmetic on without de-biasing (vp-qvqk — the earlier
+// breach-or-every-10th sampling silently omitted fast ticks, so the
+// series was complete only while every tick breached). One event per
+// tick is patrol-cadence volume (~2/min at the 30s default), not a hot
+// path.
+const (
+	// tickSlowIntervalMultiple flags a tick as slow when its duration
+	// reaches this many patrol intervals. Scaling with the configured
+	// cadence keeps the canary calibrated to the regime it watches — the
+	// old absolute 5s threshold was ON for 100% of ticks in a 30-55s
+	// regime, a constant carrying zero bits. At 2× the loop has lost
+	// cadence for a full interval, the leading indicator of the doctor's
+	// 3×-patrol tick-age alert.
+	tickSlowIntervalMultiple = 2
+	// tickSlowFallbackThreshold is the slow-tick threshold when the
+	// patrol interval is unknown or non-positive, so the breach flag can
+	// never degenerate to always-true.
+	tickSlowFallbackThreshold = 5 * time.Second
+)
+
+// slowTickThreshold returns the duration at or above which a completed
+// tick is flagged (threshold_breach) in its heartbeat event.
+func (cr *CityRuntime) slowTickThreshold() time.Duration {
+	if cr.cfg == nil {
+		return tickSlowFallbackThreshold
+	}
+	if interval := cr.cfg.Daemon.PatrolIntervalDuration(); interval > 0 {
+		return time.Duration(tickSlowIntervalMultiple) * interval
+	}
+	return tickSlowFallbackThreshold
+}
+
+// recordTickHeartbeat emits a controller.tick_completed event for every
+// completed tick. It is the controller heartbeat the supervisor-cadence
+// doctor reads to compute tick age and surface slow ticks (plan item
+// 1.9); ThresholdBreach marks ticks at or past slowTickThreshold.
+// Best-effort: a nil recorder is a no-op.
+func (cr *CityRuntime) recordTickHeartbeat(trigger string, dur time.Duration) {
+	if cr.rec == nil {
+		return
+	}
+	payload, err := json.Marshal(events.ControllerTickCompletedPayload{
+		DurationMs:      dur.Milliseconds(),
+		Phase:           trigger,
+		ThresholdBreach: dur >= cr.slowTickThreshold(),
+	})
+	if err != nil {
+		return
+	}
+	cr.rec.Record(events.Event{
+		Type:    events.ControllerTickCompleted,
+		Actor:   eventActor(),
+		Subject: cr.cityName,
+		Payload: payload,
+	})
 }
 
 // startupReadinessWatchdog emits a warning + goroutine dump to stderr
