@@ -59,6 +59,7 @@ jobs:
       # break. Downstream consumers read these outputs unchanged.
       mail: ${{ steps.filter.outputs.mail == 'true' || steps.filter.outputs.shared == 'true' }}
       docker: ${{ steps.filter.outputs.docker == 'true' || steps.filter.outputs.shared == 'true' }}
+      docker_city: ${{ steps.filter.outputs.docker_city == 'true' || steps.filter.outputs.shared == 'true' }}
       k8s: ${{ steps.filter.outputs.k8s == 'true' || steps.filter.outputs.shared == 'true' }}
       beads: ${{ steps.filter.outputs.beads == 'true' || steps.filter.outputs.shared == 'true' }}
       packs: ${{ steps.filter.outputs.packs == 'true' || steps.filter.outputs.shared == 'true' }}
@@ -85,6 +86,20 @@ jobs:
               - 'scripts/gc-session-docker'
               - 'scripts/test-docker-session'
               - 'contrib/session-scripts/**'
+            docker_city:
+              - 'contrib/docker/**'
+              - 'contrib/k8s/Dockerfile.base'
+              - 'deps.env'
+              - '*.go'
+              - 'cmd/gc/**'
+              - 'internal/**'
+              - 'pkg/**'
+              - 'examples/**'
+              - 'schemas/**'
+              - 'scripts/test-docker-city'
+              - '.github/scripts/install-claude-native.sh'
+              - '.github/scripts/install-codex-archive.sh'
+              - '.dockerignore'
             k8s:
               - 'internal/session/**'
               - 'contrib/session-scripts/gc-session-k8s*'
@@ -505,6 +520,7 @@ jobs:
       - preflight-generated
       - contract-acceptance-previous
       - contract-acceptance-current
+      - docker-city
     if: ${{ always() }}
     runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
     env:
@@ -517,10 +533,8 @@ jobs:
           import os
           import sys
 
-          # contract-acceptance-current is path-gated on the beads filter: it
-          # skips on PRs that touch no beads/contract path, which is the
-          # expected pass case. Every other dependency runs unconditionally.
-          allow_skipped = {"contract-acceptance-current"}
+          # These jobs are path-gated; other dependencies must run.
+          allow_skipped = {"contract-acceptance-current", "docker-city"}
           needs = json.loads(os.environ["NEEDS_JSON"])
           failures = {}
           for job, meta in sorted(needs.items()):
@@ -1506,6 +1520,24 @@ jobs:
       - name: Docker session tests
         run: make test-docker
 
+  docker-city:
+    name: Docker city
+    needs:
+      - runner-policy
+      - changes
+    if: needs.changes.outputs.docker_city == 'true'
+    runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Single-container city smoke test
+        run: make test-docker-city
+
   # Runs when session/K8s-related source paths change.
   # Requires K8s CI infrastructure — no-op until secrets are configured.
   k8s-session:
@@ -1622,6 +1654,7 @@ jobs:
       - worker-core-phase2-summary
       - pack-gate
       - docker-session
+      - docker-city
       - k8s-session
       - openclaw-bridge
     if: ${{ always() }}
@@ -1643,6 +1676,7 @@ jobs:
               "credential-provider-windows",
               "pack-gate",
               "docker-session",
+              "docker-city",
               "k8s-session",
               "openclaw-bridge",
           }

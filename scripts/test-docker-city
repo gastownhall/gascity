@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Credential-free Compose smoke. Run `make test-docker-city` to build first.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+TMP="$(mktemp -d)"
+export GASCITY_WORKSPACE="$TMP/workspace"
+export GASCITY_CLAUDE_DIR="$TMP/claude"
+export GASCITY_CLAUDE_JSON="$TMP/claude.json"
+export GASCITY_CODEX_DIR="$TMP/codex"
+export GASCITY_AUTHOR_NAME='Gas City "Smoke"'
+export GASCITY_AUTHOR_EMAIL=smoke@example.invalid
+export GASCITY_PORT=0
+compose=(docker compose --project-name "gc-city-test-$$" --env-file /dev/null -f contrib/docker/compose.yaml)
+cleanup() {
+    "${compose[@]}" down --volumes --remove-orphans
+    rm -rf "$TMP"
+}
+trap cleanup EXIT
+mkdir -p "$GASCITY_WORKSPACE" "$GASCITY_CLAUDE_DIR" "$GASCITY_CODEX_DIR"
+printf '{}\n' > "$GASCITY_CLAUDE_JSON"
+
+# Same native setup as the guide; exercise quoting in both configuration formats.
+"${compose[@]}" run --rm -T gascity sh -ec '
+    git config --global user.name "$GASCITY_AUTHOR_NAME"
+    git config --global user.email "$GASCITY_AUTHOR_EMAIL"
+    git config --global beads.role maintainer
+    dolt config --global --add user.name "$GASCITY_AUTHOR_NAME"
+    dolt config --global --add user.email "$GASCITY_AUTHOR_EMAIL"
+    dolt config --global --add metrics.disabled true
+    dolt config --global --add versioncheck.disabled true
+'
+"${compose[@]}" up -d --wait --wait-timeout 90
+container="$("${compose[@]}" ps -q gascity)"
+[[ "$("${compose[@]}" exec -T gascity id -u)" == "$(id -u)" ]]
+[[ "$("${compose[@]}" exec -T gascity cat /proc/1/comm)" == tini ]]
+[[ "$("${compose[@]}" exec -T gascity ps -o comm= --ppid 1 | tr -d ' ')" == gc ]]
+[[ "$("${compose[@]}" exec -T gascity git config --global user.name)" == "$GASCITY_AUTHOR_NAME" ]]
+[[ "$("${compose[@]}" exec -T gascity dolt config --global --get user.name)" == "$GASCITY_AUTHOR_NAME" ]]
+
+"${compose[@]}" exec -T gascity gc init smoke --template empty
+# pipefail must reject failed commands even if their diagnostic contains the path.
+"${compose[@]}" exec -T gascity gc cities | grep -F "$GASCITY_WORKSPACE/smoke"
+"${compose[@]}" exec -T -w "$GASCITY_WORKSPACE/smoke" gascity gc doctor
+[[ "$(stat -c %u "$GASCITY_WORKSPACE/smoke/city.toml")" == "$(id -u)" ]]
+"${compose[@]}" stop
+[[ "$(docker inspect --format '{{.State.ExitCode}}' "$container")" == 0 ]]
+
+# Keep the same volume: restarting must retain the registered city and identity.
+"${compose[@]}" up -d --wait --wait-timeout 90
+"${compose[@]}" exec -T gascity gc cities | grep -F "$GASCITY_WORKSPACE/smoke"
+"${compose[@]}" exec -T -w "$GASCITY_WORKSPACE/smoke" gascity gc doctor
+[[ "$("${compose[@]}" exec -T gascity git config --global user.name)" == "$GASCITY_AUTHOR_NAME" ]]
+"${compose[@]}" stop
+[[ "$(docker inspect --format '{{.State.ExitCode}}' "$container")" == 0 ]]
+printf 'PASS: Compose setup, identity, init, doctor, ownership, stop and restart\n'
