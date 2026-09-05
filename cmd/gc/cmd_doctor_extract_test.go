@@ -123,6 +123,36 @@ func TestBuildDoctorChecks_SessionLivenessChecksRegisteredRegardlessOfController
 	}
 }
 
+// TestBuildDoctorChecks_StartupHealthEpisodesRegisteredRegardlessOfController_GH5742
+// is the ga-o04bfr.1.4 counterpart to the session-liveness invariance test
+// above: startup-health-episodes is a read-only reporting check (GH#5742)
+// registered outside any controller-state gate, and must appear in the check
+// list whether or not the controller is running. Unlike the session-liveness
+// checks, this one is store-dependent (gated by the bead-store preflight), so
+// the preflight is forced healthy to keep ambient bd/dolt state from masking
+// the registration.
+func TestBuildDoctorChecks_StartupHealthEpisodesRegisteredRegardlessOfController_GH5742(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_DOLT", "skip")
+	cfg := &config.City{Workspace: config.Workspace{Name: "demo"}}
+
+	old := doctorBeadStorePreflight
+	doctorBeadStorePreflight = func(string, func(string) (beads.Store, error)) error { return nil }
+	t.Cleanup(func() { doctorBeadStorePreflight = old })
+
+	for _, running := range []bool{true, false} {
+		names := doctorCheckNames(buildDoctorChecks(cityDir, cfg, nil, buildDoctorChecksOpts{
+			ControllerRunning: running, SkipCityDoltCheck: true, SkipManagedDoltCheck: true,
+		}))
+		if idx := doctorCheckIndex(names, "startup-health-episodes"); idx < 0 {
+			t.Errorf("ControllerRunning=%v: startup-health-episodes expected but missing; names=%v", running, names)
+		}
+	}
+}
+
 func doctorCheckNames(checks []doctor.Check) []string {
 	names := make([]string, 0, len(checks))
 	for _, check := range checks {
