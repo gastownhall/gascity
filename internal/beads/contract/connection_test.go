@@ -1168,13 +1168,16 @@ func TestResolveDoltConnectionTargetManagedCity_EnvOverride(t *testing.T) {
 }
 
 // TestResolveDoltConnectionTargetManagedCity_EnvOverrideAppliesToTarget sets
-// the env to an invalid host and asserts the liveness check fails — proving
+// the env to a loopback address with no listener and asserts the liveness check fails — proving
 // the override reaches the reachability probe, not just the returned target.
 // If the probe were still hardcoded to 127.0.0.1, it would succeed (the
 // listener is on loopback) and this test would fail.
 func TestResolveDoltConnectionTargetManagedCity_EnvOverrideAppliesToReachability(t *testing.T) {
-	// Use a non-routable TEST-NET-1 address so DialTimeout fails fast.
-	t.Setenv(ManagedCityHostEnv, "192.0.2.1")
+	// Keep the probe entirely on loopback. TEST-NET addresses are not reliable
+	// here: a host VPN can route them through a tunnel and synthesize a successful
+	// connection. The runtime listener below binds only 127.0.0.1, so its exact
+	// port has no listener on 127.0.0.2 on either Linux or Darwin.
+	t.Setenv(ManagedCityHostEnv, "127.0.0.2")
 	fs := fsys.OSFS{}
 	city := t.TempDir()
 	writeCanonicalConfig(t, fs, city, ConfigState{
