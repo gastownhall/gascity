@@ -25,6 +25,7 @@ import (
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/telemetry"
+	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/worker"
 	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 )
@@ -1033,10 +1034,16 @@ func buildPreparedStartWithWorkDirResolver(
 	}
 
 	preOverrideWorkDir := agentCfg.WorkDir
+	if _, err := repairConcretePoolTemplateWorkDirOverride(&candidate, cityPath, cfg, store); err != nil {
+		return nil, candidate.info, err
+	}
 	if wd := resolvePreparedTaskWorkDir(candidate, cityPath, cfg, store, workDirResolver); wd != "" {
 		agentCfg.WorkDir = wd
-	} else if wd := candidate.info.WorkDir; wd != "" {
+	} else if wd := preparedStartSessionWorkDir(candidate.info); wd != "" {
 		agentCfg.WorkDir = resolveWorkDirAgainstCity(cityPath, wd)
+	}
+	if err := validateConcretePoolPreparedWorkDir(candidate, cityPath, cfg, agentCfg.WorkDir); err != nil {
+		return nil, candidate.info, err
 	}
 	// The task work_dir override above can replace agentCfg.WorkDir after
 	// template resolution already rendered PreStart commands (materialize-
@@ -1240,6 +1247,123 @@ func buildPreparedStartWithWorkDirResolver(
 		promptDelivered: promptDelivered,
 		promptHash:      promptHash,
 	}, candidate.info, nil
+}
+
+func preparedStartSessionWorkDir(info sessionpkg.Info) string {
+	if wd := strings.TrimSpace(info.WorkDirCanonical); wd != "" {
+		return wd
+	}
+	return strings.TrimSpace(info.WorkDir)
+}
+
+func repairConcretePoolTemplateWorkDirOverride(candidate *startCandidate, cityPath string, cfg *config.City, store beads.Store) (bool, error) {
+	templateDir, concreteDir, ok := concretePoolTemplateWorkDirs(*candidate, cityPath, cfg)
+	if !ok {
+		return false, nil
+	}
+	patch := sessionpkg.MetadataPatch{}
+	canonical := resolveWorkDirAgainstCity(cityPath, candidate.info.WorkDirCanonical)
+	legacy := resolveWorkDirAgainstCity(cityPath, candidate.info.WorkDir)
+	if samePreparedWorkDirPath(canonical, templateDir) || (strings.TrimSpace(canonical) == "" && samePreparedWorkDirPath(legacy, templateDir)) {
+		patch[beadmeta.WorkDirMetadataKey] = concreteDir
+	}
+	if samePreparedWorkDirPath(legacy, templateDir) {
+		patch[beadmeta.LegacyWorkDirMetadataKey] = concreteDir
+	}
+	if len(patch) == 0 {
+		return false, nil
+	}
+	if store == nil || strings.TrimSpace(candidate.info.ID) == "" {
+		candidate.info = candidate.info.ApplyPatch(patch)
+		return true, nil
+	}
+	info, err := sessionFrontDoor(store).UpdateMetadataInfo(candidate.info, patch)
+	if err != nil {
+		return false, fmt.Errorf("repairing concrete pool work_dir for %s: %w", candidate.name(), err)
+	}
+	candidate.info = info
+	return true, nil
+}
+
+func validateConcretePoolPreparedWorkDir(candidate startCandidate, cityPath string, cfg *config.City, workDir string) error {
+	templateDir, concreteDir, ok := concretePoolTemplateWorkDirs(candidate, cityPath, cfg)
+	if !ok || strings.TrimSpace(workDir) == "" {
+		return nil
+	}
+	resolved := resolveWorkDirAgainstCity(cityPath, workDir)
+	if !samePreparedWorkDirPath(resolved, templateDir) {
+		return nil
+	}
+	return fmt.Errorf("pool session %s for concrete alias %s resolved template work_dir %q; want concrete work_dir %q",
+		candidate.name(), concretePoolPreparedIdentity(candidate, cfg), templateDir, concreteDir)
+}
+
+func concretePoolTemplateWorkDirs(candidate startCandidate, cityPath string, cfg *config.City) (templateDir, concreteDir string, ok bool) {
+	if cfg == nil || candidate.info.ManualSession || candidate.tp.ManualSession || !isPoolManagedSessionInfo(candidate.info) {
+		return "", "", false
+	}
+	template := strings.TrimSpace(candidate.logicalTemplate(cfg))
+	if template == "" {
+		return "", "", false
+	}
+	cfgAgent := findAgentByTemplate(cfg, template)
+	if cfgAgent == nil || !cfgAgent.SupportsMultipleSessions() || cfgAgent.UsesCanonicalSingletonPoolIdentity() {
+		return "", "", false
+	}
+	concreteIdentity := concretePoolPreparedIdentity(candidate, cfg)
+	if concreteIdentity == "" || concreteIdentity == template {
+		return "", "", false
+	}
+	concreteDir = resolveWorkDirAgainstCity(cityPath, candidate.tp.WorkDir)
+	if concreteDir == "" {
+		if resolved, err := workdirutil.ResolveWorkDirPathStrict(cityPath, preparedStartCityName(cityPath, cfg), concreteIdentity, *cfgAgent, cfg.Rigs); err == nil {
+			concreteDir = resolved
+		}
+	}
+	if concreteDir == "" {
+		return "", "", false
+	}
+	templateDir, err := workdirutil.ResolveWorkDirPathStrict(cityPath, preparedStartCityName(cityPath, cfg), template, *cfgAgent, cfg.Rigs)
+	if err != nil || templateDir == "" || samePreparedWorkDirPath(templateDir, concreteDir) {
+		return "", "", false
+	}
+	return templateDir, concreteDir, true
+}
+
+func concretePoolPreparedIdentity(candidate startCandidate, cfg *config.City) string {
+	if identity := strings.TrimSpace(candidate.tp.InstanceName); identity != "" {
+		return identity
+	}
+	if identity := strings.TrimSpace(candidate.info.CanonicalInstanceNameMetadata); identity != "" {
+		return identity
+	}
+	template := strings.TrimSpace(candidate.logicalTemplate(cfg))
+	cfgAgent := findAgentByTemplate(cfg, template)
+	if cfgAgent == nil {
+		return ""
+	}
+	_, identity := canonicalSessionIdentityWithConfigInfo(cfg, cfgAgent, candidate.info)
+	if identity != "" && identity != template {
+		return identity
+	}
+	return normalizeSessionBeadQualifiedName(cfgAgent, sessionBeadAgentNameInfo(candidate.info))
+}
+
+func preparedStartCityName(cityPath string, cfg *config.City) string {
+	fallback := ""
+	if strings.TrimSpace(cityPath) != "" {
+		fallback = filepath.Base(filepath.Clean(cityPath))
+	}
+	return config.EffectiveCityName(cfg, fallback)
+}
+
+func samePreparedWorkDirPath(a, b string) bool {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == "" || b == "" {
+		return false
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
 }
 
 // sessionTriggerBeadEnv reads the trigger-bead identity off the typed twin
