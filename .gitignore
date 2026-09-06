@@ -46,6 +46,9 @@ internal/api/dashboardspa/web/frontend/.playwright/
 .agents/migration/
 .gc/
 
+# Seat home (IDENTITY, diary, laurels) — agent-local runtime memory, never committed.
+/seat/
+
 # Dolt database files (added by bd init)
 .dolt/
 *.db

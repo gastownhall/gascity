@@ -39,7 +39,7 @@ var docTreeDirs = []string{"contrib", "docs", "engdocs", "release-gates", "specs
 // docTreeIgnored lists directories that contain markdown but are not
 // documentation trees (e.g., embedded prompt templates, test fixtures,
 // gitignored scratch space for local work).
-var docTreeIgnored = []string{"cmd", "examples", "internal", "plans", "scripts", "test", "tmp", "worktrees"}
+var docTreeIgnored = []string{"cmd", "examples", "internal", "plans", "scripts", "seat", "test", "tmp", "worktrees"}
 
 // beadScratchPrefixes are the bead-id prefixes agents name their top-level
 // scratch directories after. An explicit list, not a shape match: a doc tree
