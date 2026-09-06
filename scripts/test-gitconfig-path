@@ -1,0 +1,30 @@
+#!/bin/sh
+# test-gitconfig-path — print the path of a seeded, writable global gitconfig
+# for the test environment. Shared by the Makefile TEST_ENV and every nested
+# env -i test runner so the four call sites cannot drift.
+#
+# The path is stable per user and per repo so concurrent shards converge on
+# one file, and creation is atomic (temp + mv) so racing shards never observe
+# a partial seed. The seed is load-bearing twice: ensure_beads_role's read
+# short-circuits so the code under test never needs the global write path,
+# and the identity fields keep ensure_dolt_identity on its no-fallback path.
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+repo_hash=$(printf '%s' "$repo_root" | cksum | awk '{print $1}')
+path="${TMPDIR:-/var/tmp}/gc-test-gitconfig-$(id -u)-${repo_hash}"
+
+if [ ! -f "$path" ]; then
+  tmp=$(mktemp "${path}.XXXXXX")
+  cat > "$tmp" <<'EOF'
+[user]
+	name = gc-test
+	email = gc-test@test.local
+[beads]
+	role = maintainer
+[safe]
+	directory = *
+EOF
+  mv -f "$tmp" "$path"
+fi
+printf '%s\n' "$path"

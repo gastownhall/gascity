@@ -43,7 +43,6 @@ print-test-env-git:
 		t.Fatalf("make print-test-env-git failed: %v\n%s", err, out)
 	}
 	for _, want := range []string{
-		"global=/dev/null",
 		"nosystem=1",
 		"gitdir=unset",
 		"gpgsign=unset",
@@ -51,6 +50,29 @@ print-test-env-git:
 		if !strings.Contains(string(out), want+"\n") {
 			t.Errorf("TEST_ENV output missing %q:\n%s", want, out)
 		}
+	}
+
+	// The global config is a real, writable, seeded file outside the user's
+	// HOME — not the user's own config and not an unwritable sentinel (a
+	// /dev/null sentinel breaks ensure_beads_role's global write path).
+	var globalPath string
+	for _, line := range strings.Split(string(out), "\n") {
+		if v, ok := strings.CutPrefix(line, "global="); ok {
+			globalPath = v
+		}
+	}
+	if globalPath == "" {
+		t.Fatalf("TEST_ENV output missing global= line:\n%s", out)
+	}
+	if strings.HasPrefix(globalPath, home+string(os.PathSeparator)) {
+		t.Errorf("GIT_CONFIG_GLOBAL %q resolves under the poisoned HOME %q", globalPath, home)
+	}
+	info, err := os.Stat(globalPath)
+	if err != nil {
+		t.Fatalf("GIT_CONFIG_GLOBAL %q does not exist: %v", globalPath, err)
+	}
+	if info.Mode().Perm()&0o200 == 0 {
+		t.Errorf("GIT_CONFIG_GLOBAL %q is not writable (mode %v)", globalPath, info.Mode())
 	}
 }
 
@@ -69,7 +91,8 @@ func TestShardTestEnvsIgnoreUserGitConfiguration(t *testing.T) {
 			content := string(data)
 			for _, pin := range []string{
 				"GIT_CONFIG_NOSYSTEM=1",
-				"GIT_CONFIG_GLOBAL=/dev/null",
+				`GIT_CONFIG_GLOBAL="$gc_test_gitconfig"`,
+				`gc_test_gitconfig="$("$repo_root/scripts/test-gitconfig-path")"`,
 			} {
 				if got := strings.Count(content, pin); got != 1 {
 					t.Errorf("%s has %d occurrences of %q, want 1", path, got, pin)
