@@ -1,6 +1,9 @@
 package resilience
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 // OpClassBd is the operation class for bd CLI transport operations
 // (subprocess invocations against the managed Dolt backend). All bd
@@ -22,6 +25,7 @@ type Registry struct {
 	mu       sync.Mutex
 	settings Settings
 	onChange func(Transition)
+	jitter   func(capacity time.Duration) time.Duration
 	breakers map[Key]*Breaker
 }
 
@@ -60,8 +64,25 @@ func (r *Registry) Breaker(scope, opClass string) *Breaker {
 		return b
 	}
 	b := newBreaker(scope, opClass, r.settings, r.onChange)
+	if r.jitter != nil {
+		b.jitter = r.jitter
+	}
 	r.breakers[key] = b
 	return b
+}
+
+// SetJitterForTest pins the open-state jitter function on the registry
+// and every existing breaker so backoff deadlines are deterministic in
+// tests. Test-only.
+func (r *Registry) SetJitterForTest(fn func(capacity time.Duration) time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.jitter = fn
+	for _, b := range r.breakers {
+		b.mu.Lock()
+		b.jitter = fn
+		b.mu.Unlock()
+	}
 }
 
 // States returns a snapshot of every breaker's current state, for
