@@ -99,9 +99,12 @@ func worktreeSpecForBead(bead beads.Bead, storeRef string) (*worktree.Spec, erro
 		{beadmeta.WorktreeLifecycleMetadataKey, bead.Metadata[beadmeta.WorktreeLifecycleMetadataKey]},
 	}
 	missing := make([]string, 0, len(values))
+	present := make([]string, 0, len(values))
 	for _, item := range values {
 		if strings.TrimSpace(item.value) == "" {
 			missing = append(missing, item.key)
+		} else {
+			present = append(present, item.key)
 		}
 	}
 	if len(missing) == len(values) {
@@ -115,6 +118,20 @@ func worktreeSpecForBead(bead beads.Bead, storeRef string) (*worktree.Spec, erro
 		if _, dup := legacyWorkDirNoticeSeen.LoadOrStore(bead.ID, struct{}{}); !dup {
 			log.Printf("worktreeSpecForBead: work bead %s has %s=%q with no worktree ownership metadata; treating as unmanaged",
 				bead.ID, pathKey, path)
+		}
+		return nil, nil
+	}
+	if len(present) == 1 && present[0] == beadmeta.WorkBranchMetadataKey {
+		// gc.work_branch alone is not incomplete evidence either -- it is the
+		// shape a hook claim's ambient branch stamp produces on an otherwise
+		// unmanaged bead (hookClaimIdentityPatch stamps gc.work_branch onto
+		// any bead with a resolvable branch, independent of whether the bead
+		// ever published worktree ownership evidence). Treat it the same as
+		// the zero-key case above instead of hard-erroring the seat into
+		// permanent starvation the first time a hook claim touches it.
+		if _, dup := legacyWorkDirNoticeSeen.LoadOrStore(bead.ID, struct{}{}); !dup {
+			log.Printf("worktreeSpecForBead: work bead %s has %s=%q with only %s published; treating as unmanaged",
+				bead.ID, pathKey, path, beadmeta.WorkBranchMetadataKey)
 		}
 		return nil, nil
 	}
