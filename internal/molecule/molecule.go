@@ -8,6 +8,7 @@ package molecule
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -1385,7 +1386,7 @@ func stepToBead(step formula.RecipeStep, vars map[string]string, priorityOverrid
 
 	b := beads.Bead{
 		Title:       formula.Substitute(step.Title, vars),
-		Description: formula.Substitute(step.Description, vars),
+		Description: substituteStepDescription(step, vars),
 		Type:        stepType,
 		Priority:    resolveStepPriority(step, priorityOverride),
 		Labels:      substituteLabels(step.Labels, vars),
@@ -1404,6 +1405,48 @@ func stepToBead(step formula.RecipeStep, vars map[string]string, priorityOverrid
 	}
 
 	return b
+}
+
+// substituteStepDescription preserves source-spec JSON as structured data while
+// rendering variables in its string values. Plain text substitution can inject
+// quotes from a shell-valued variable directly into the serialized JSON and
+// leave retry/Ralph controls unable to deserialize their frozen source step.
+func substituteStepDescription(step formula.RecipeStep, vars map[string]string) string {
+	if step.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindSpec || step.Description == "" {
+		return formula.Substitute(step.Description, vars)
+	}
+
+	var frozen any
+	if err := json.Unmarshal([]byte(step.Description), &frozen); err != nil {
+		// Preserve an already-invalid snapshot byte-for-byte. The control will
+		// report the original deserialization error instead of a second mutation.
+		return step.Description
+	}
+	frozen = substituteJSONStrings(frozen, vars)
+	rendered, err := json.Marshal(frozen)
+	if err != nil {
+		return step.Description
+	}
+	return string(rendered)
+}
+
+func substituteJSONStrings(value any, vars map[string]string) any {
+	switch value := value.(type) {
+	case string:
+		return formula.Substitute(value, vars)
+	case []any:
+		for i := range value {
+			value[i] = substituteJSONStrings(value[i], vars)
+		}
+		return value
+	case map[string]any:
+		for key, item := range value {
+			value[key] = substituteJSONStrings(item, vars)
+		}
+		return value
+	default:
+		return value
+	}
 }
 
 func preserveExecutableRootType(step formula.RecipeStep) bool {

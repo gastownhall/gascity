@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -164,6 +165,93 @@ func TestSpawnNextAttemptPreservesTopLevelStepContract(t *testing.T) {
 						t.Fatalf("gc.requirements_path = %q, want %q", got.Metadata["gc.requirements_path"], resultPath)
 					}
 				})
+			}
+		})
+	}
+}
+
+func TestFrozenSpecShellValuedVarsSurviveCookAndRetryAttach(t *testing.T) {
+	t.Parallel()
+
+	const (
+		reportCommand = `publish --source "$DELIVERY_REPORT_DIR" --index reports.json`
+		setupCommand  = `export RUN_ID=${GC_SESSION_ID:-manual}`
+	)
+	wantDescription := "Run `" + reportCommand + "` after `" + setupCommand + "`."
+
+	formulaDir := t.TempDir()
+	formulaText := `
+formula = "shell-vars-retry"
+version = 2
+contract = "graph.v2"
+
+[vars.report_publish_command]
+required = true
+
+[vars.setup_command]
+required = true
+
+[[steps]]
+id = "requirements"
+title = "Write requirements"
+description = "Run ` + "`" + `{{report_publish_command}}` + "`" + ` after ` + "`" + `{{setup_command}}` + "`" + `."
+metadata = { report_publish_command = "{{report_publish_command}}", setup_command = "{{setup_command}}" }
+
+[steps.retry]
+max_attempts = 3
+on_exhausted = "hard_fail"
+`
+	if err := os.WriteFile(filepath.Join(formulaDir, "shell-vars-retry.toml"), []byte(formulaText), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+
+	for _, attempt := range []int{2, 3} {
+		t.Run("attempt_"+strconv.Itoa(attempt), func(t *testing.T) {
+			t.Parallel()
+			store := beads.NewMemStore()
+			result, err := molecule.Cook(t.Context(), store, "shell-vars-retry", []string{formulaDir}, molecule.Options{
+				Vars: map[string]string{
+					"report_publish_command": reportCommand,
+					"setup_command":          setupCommand,
+				},
+			})
+			if err != nil {
+				t.Fatalf("Cook: %v", err)
+			}
+
+			control := mustGet(t, store, result.IDMapping["shell-vars-retry.requirements"])
+			if control.Metadata[beadmeta.SourceStepSpecMetadataKey] != "" {
+				t.Fatal("control unexpectedly contains an inline source spec")
+			}
+			spec, err := findSpecBead(store, control)
+			if err != nil {
+				t.Fatalf("findSpecBead: %v", err)
+			}
+			var frozen formula.Step
+			if err := json.Unmarshal([]byte(spec.Description), &frozen); err != nil {
+				t.Fatalf("frozen spec is invalid JSON: %v\n%s", err, spec.Description)
+			}
+			if frozen.Description != wantDescription {
+				t.Fatalf("frozen description = %q, want %q", frozen.Description, wantDescription)
+			}
+			if frozen.Metadata["report_publish_command"] != reportCommand || frozen.Metadata["setup_command"] != setupCommand {
+				t.Fatalf("frozen metadata = %#v, want exact shell-valued variables", frozen.Metadata)
+			}
+
+			if err := spawnNextAttempt(t.Context(), store, control, attempt, ProcessOptions{}); err != nil {
+				t.Fatalf("spawnNextAttempt: %v", err)
+			}
+			got := findAttemptByRef(t, store, result.RootID, "shell-vars-retry.requirements.attempt."+strconv.Itoa(attempt))
+			status, assignee := "in_progress", "test-worker"
+			if err := store.Update(got.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+				t.Fatalf("claim spawned attempt: %v", err)
+			}
+			got = mustGet(t, store, got.ID)
+			if got.Description != wantDescription {
+				t.Fatalf("claimed attempt description = %q, want %q", got.Description, wantDescription)
+			}
+			if got.Metadata["report_publish_command"] != reportCommand || got.Metadata["setup_command"] != setupCommand {
+				t.Fatalf("claimed attempt metadata = %#v, want exact shell-valued variables", got.Metadata)
 			}
 		})
 	}
