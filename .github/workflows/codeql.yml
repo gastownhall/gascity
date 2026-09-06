@@ -17,7 +17,6 @@ on:
 permissions:
   actions: read
   contents: read
-  security-events: write
 
 jobs:
   runner-policy:
@@ -46,6 +45,10 @@ jobs:
     needs: runner-policy
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
     strategy:
       fail-fast: false
       matrix:
