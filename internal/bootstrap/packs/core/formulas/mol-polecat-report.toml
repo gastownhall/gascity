@@ -168,7 +168,7 @@ gc bd update "$WORK_BEAD_ID" --notes "$REPORT"
 
 **2. Close the bead:**
 ```bash
-gc bd close "$WORK_BEAD_ID"
+gc bd close "$WORK_BEAD_ID" --reason "Investigation report recorded."
 ```
 
 **3. Signal reconciler and exit.**

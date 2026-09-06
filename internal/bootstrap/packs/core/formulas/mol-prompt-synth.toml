@@ -135,7 +135,7 @@ completion signal:
 CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
 WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
 gc bd update "$WORK_BEAD_ID" --notes "Synthesized: {{dest_path}}"
-gc bd close "$WORK_BEAD_ID"
+gc bd close "$WORK_BEAD_ID" --reason "Prompt synthesized at {{dest_path}}."
 ```
 
 **4. Drain and exit:**
