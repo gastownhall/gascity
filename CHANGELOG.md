@@ -302,6 +302,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bound or explicitly configured endpoints keep bd's own output unchanged
   (gastownhall/gascity#1374).
 
+- **`gc mail send --from` can no longer forge another live session's
+  identity.** A session could previously claim `--from <name>` for any
+  other live, named session in the city with zero authentication — mail
+  would display as coming from a privileged coordinator role even though
+  it was actually sent by an unrelated worker. `--from` is now checked
+  against the calling session's own identity; a caller sending as itself,
+  as the reserved `human`/`controller` buckets (the documented pattern for
+  scripted automation), or as an interactive human with no live-session
+  identity of its own still works unchanged.
 - **ACP activity is now available across process boundaries.** ACP
   `session/update` timestamps are published through an atomic, coalesced
   sidecar, allowing a process other than the session owner to report

@@ -1351,6 +1351,55 @@ func resolveDefaultMailSenderForCommandCached(cityPath string, cfg *config.City,
 	return "", false
 }
 
+// callerOwnMailIdentityCached resolves the calling session's own identity
+// the same way the default (--from-less) sender path does
+// (resolveDefaultMailSenderForCommandCached), but silently -- for callers
+// that only need the identity for an authorization comparison, not to
+// report a user-facing "no sender identity resolved" error.
+func callerOwnMailIdentityCached(cityPath string, cfg *config.City, store beads.Store, cache *mailIdentitySessionCache) (string, bool) {
+	for _, c := range defaultMailIdentityCandidates() {
+		sender, err := resolveMailIdentityWithConfigCached(cityPath, cfg, store, c, cache)
+		if err == nil {
+			return sender, true
+		}
+		if !errors.Is(err, session.ErrSessionNotFound) {
+			return "", false
+		}
+	}
+	return "", false
+}
+
+// mailSenderAuthorizedCached reports whether the calling session may claim
+// resolvedSender as its --from identity (#4070). Reserved identities
+// (human, controller) are exempt: they're generic buckets, not another live
+// session's specific mailbox, and "--from controller" is the documented
+// pattern for scripted automation (e.g.
+// examples/bd/dolt/commands/compact/run.sh's quarantine alert). A caller
+// with no live-session env vars set at all (own identity resolves to
+// "human", an interactive terminal user) is exempt too -- shell access to
+// the city is already a stronger trust boundary than mail-sender identity,
+// and this is the documented default sender for a plain human operator. A
+// caller whose own env vars are set but don't resolve to any live session
+// fails closed rather than let an unresolvable identity dodge the check.
+// Everything else -- a live agent session claiming a DIFFERENT live
+// agent's mailbox, e.g. a compromised worker forging mail as a fleet's
+// coordinator role -- is the actual gap this closes: without this check,
+// resolveMailIdentityWithConfigCached resolves any live, named session's
+// identity for any caller with zero authentication.
+func mailSenderAuthorizedCached(cityPath string, cfg *config.City, store beads.Store, resolvedSender string, cache *mailIdentitySessionCache) bool {
+	if _, reserved := reservedMailSenderIdentity(resolvedSender); reserved {
+		return true
+	}
+	own, ok := callerOwnMailIdentityCached(cityPath, cfg, store, cache)
+	if !ok {
+		return false
+	}
+	if own == "human" {
+		return true
+	}
+	return resolvedSender == own
+}
+
 func resolveMailTargetFromArgs(args []string, stderr io.Writer, cmdName string) (resolvedMailTarget, bool) {
 	if len(args) > 0 {
 		return resolveMailTargetsForCommand(args[0], stderr, cmdName)
@@ -1784,11 +1833,17 @@ func cmdMailSendJSON(args []string, notify bool, all bool, from string, to strin
 			sender = defaultMailIdentity()
 		}
 	} else if sender != "human" && store != nil {
-		sender, err = resolveMailIdentityWithConfigCached(cityPath, cfg, sessStore, sender, idCache)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc mail send: invalid sender %q: %v\n", sender, err) //nolint:errcheck // best-effort stderr
+		requested := sender
+		resolved, resolveErr := resolveMailIdentityWithConfigCached(cityPath, cfg, sessStore, requested, idCache)
+		if resolveErr != nil {
+			fmt.Fprintf(stderr, "gc mail send: invalid sender %q: %v\n", requested, resolveErr) //nolint:errcheck // best-effort stderr
 			return 1
 		}
+		if !mailSenderAuthorizedCached(cityPath, cfg, sessStore, resolved, idCache) {
+			fmt.Fprintf(stderr, "gc mail send: --from %q does not match this session's own identity\n", requested) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		sender = resolved
 	}
 
 	var nf nudgeFunc

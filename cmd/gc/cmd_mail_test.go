@@ -683,6 +683,167 @@ func TestCmdMailSendFromControllerCreatesMessage(t *testing.T) {
 	}
 }
 
+// createMailIdentitySession creates a live session bead for identity/alias,
+// the shared fixture shape used by the #4070 --from authorization tests
+// below (mirrors TestCmdMailSendFromControllerCreatesMessage's recipient
+// setup, extracted since these tests need two: an impersonation target and
+// a caller's own identity).
+func createMailIdentitySession(t *testing.T, store beads.Store, identity, alias, sessionName string) {
+	t.Helper()
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			namedSessionIdentityMetadata: identity,
+			"alias":                      alias,
+			"session_name":               sessionName,
+		},
+	}); err != nil {
+		t.Fatalf("create session %q: %v", identity, err)
+	}
+}
+
+// TestCmdMailSendFromRejectsImpersonatingOtherLiveSession is the regression
+// for #4070: a live session (GC_ALIAS=worker) must not be able to send mail
+// --from a DIFFERENT live session's identity (mayor) just because mayor
+// happens to be live and resolvable -- the actual vulnerability, since mail
+// signed by a privileged coordinator role can carry trust decisions
+// downstream.
+func TestCmdMailSendFromRejectsImpersonatingOtherLiveSession(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_MAIL", "")
+	t.Setenv("GC_ALIAS", "worker")
+	t.Setenv("GC_SESSION_ID", "")
+	t.Setenv("GC_AGENT", "")
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", cityPath)
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	createMailIdentitySession(t, store, "test-city/mayor", "mayor", "mayor-session")
+	createMailIdentitySession(t, store, "test-city/worker", "worker", "worker-session")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailSend([]string{"human/"}, false, false, "mayor", "", "forged advisory", "not really from mayor", &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("cmdMailSend(--from mayor, caller=worker) = 0, want non-zero (impersonation must be rejected); stdout=%s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "mayor") {
+		t.Errorf("stderr = %q, want it to name the rejected identity", stderr.String())
+	}
+
+	storeAfter, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt after send: %v", err)
+	}
+	all, err := storeAfter.List(beads.ListQuery{Type: "message", Status: "open", TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatalf("List messages: %v", err)
+	}
+	for _, b := range all {
+		if b.From == "mayor" {
+			t.Fatalf("a message with forged From=mayor was created: %#v", b)
+		}
+	}
+}
+
+// TestCmdMailSendFromAllowsSelfIdentity guards the fix's scope: a live
+// session sending --from its OWN identity (not impersonating anyone) must
+// still work -- the same-session self-send is the common, legitimate case.
+func TestCmdMailSendFromAllowsSelfIdentity(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_MAIL", "")
+	t.Setenv("GC_ALIAS", "mayor")
+	t.Setenv("GC_SESSION_ID", "")
+	t.Setenv("GC_AGENT", "")
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", cityPath)
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	createMailIdentitySession(t, store, "test-city/mayor", "mayor", "mayor-session")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailSend([]string{"human/"}, false, false, "mayor", "", "self-sent status", "all clear", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdMailSend(--from mayor, caller=mayor) = %d, want 0 (self-send must be allowed); stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+}
+
+// TestCmdMailSendFromControllerAllowedEvenWithLiveCallerIdentity guards the
+// reserved-identity exemption: the "controller" bucket (the documented
+// pattern for scripted automation, e.g. examples/bd/dolt/commands/compact/
+// run.sh's quarantine alert) must stay usable by a live agent session, not
+// only by an env-empty interactive human -- the #4070 fix must not narrow
+// this existing, intentional escape hatch.
+func TestCmdMailSendFromControllerAllowedEvenWithLiveCallerIdentity(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_MAIL", "")
+	t.Setenv("GC_ALIAS", "worker")
+	t.Setenv("GC_SESSION_ID", "")
+	t.Setenv("GC_AGENT", "")
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", cityPath)
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	createMailIdentitySession(t, store, "test-city/worker", "worker", "worker-session")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailSend([]string{"human/"}, false, false, "controller", "", "quarantine alert", "dolt compact quarantine", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdMailSend(--from controller, caller=worker) = %d, want 0 (reserved identity must stay exempt); stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+}
+
+// TestCmdMailSendFromRejectsUnresolvableCallerIdentity guards the fail-closed
+// direction: a caller whose own live-session env vars are set but don't
+// resolve to any actual live session must not be able to use that as a
+// loophole to claim any --from identity.
+func TestCmdMailSendFromRejectsUnresolvableCallerIdentity(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_MAIL", "")
+	t.Setenv("GC_ALIAS", "ghost-session-that-does-not-exist")
+	t.Setenv("GC_SESSION_ID", "")
+	t.Setenv("GC_AGENT", "")
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", cityPath)
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	createMailIdentitySession(t, store, "test-city/mayor", "mayor", "mayor-session")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailSend([]string{"human/"}, false, false, "mayor", "", "forged advisory", "not really from mayor", &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("cmdMailSend(--from mayor, caller=unresolvable) = 0, want non-zero (fail closed); stdout=%s", stdout.String())
+	}
+}
+
 func TestCmdMailSendToControllerRecipientIsRejected(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_MAIL", "")
