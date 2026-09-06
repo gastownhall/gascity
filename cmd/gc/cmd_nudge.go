@@ -1683,6 +1683,21 @@ func nudgeDispatcherIsSupervisor(cfg *config.City) bool {
 	return cfg.Daemon.NudgeDispatcherMode() == "supervisor"
 }
 
+// splitQueuedNudgesForTarget partitions claimed nudges into deliverable items
+// and rejects. Items whose fence (SessionID / ContinuationEpoch) does not match
+// the current target's fence are re-fenced in memory to the target's fence and
+// returned as deliverable when the target itself is resolved to a live session
+// bead — the caller already validated that this seat owns the item at claim
+// time (matchesQueueAgent), so a stale fence just marks the item as queued for
+// a prior incarnation of the same seat. Delivering it there is what the seat's
+// nudges were queued for; dead-lettering the whole queue every time a session
+// respawns (fresh wake after a failed spawn bumps ContinuationEpoch; a re-
+// materialization can mint a new SessionID) is the bug this coalesces around
+// (ga-bow, thunderfartcity:gp-u63s).
+//
+// A target with no resolved session identity (sessionID == "") cannot be
+// re-fenced against and still rejects, matching the pre-existing invariant
+// that fenced items are not delivered to an unresolved target.
 func splitQueuedNudgesForTarget(target nudgeTarget, items []queuedNudge) ([]queuedNudge, []queuedNudge) {
 	if len(items) == 0 {
 		return nil, nil
@@ -1690,10 +1705,16 @@ func splitQueuedNudgesForTarget(target nudgeTarget, items []queuedNudge) ([]queu
 	var deliverable []queuedNudge
 	var rejected []queuedNudge
 	for _, item := range items {
-		if !queuedNudgeMatchesTargetFence(target, item) {
+		if queuedNudgeMatchesTargetFence(target, item) {
+			deliverable = append(deliverable, item)
+			continue
+		}
+		if target.sessionID == "" {
 			rejected = append(rejected, item)
 			continue
 		}
+		item.SessionID = target.sessionID
+		item.ContinuationEpoch = target.continuationEpoch
 		deliverable = append(deliverable, item)
 	}
 	return deliverable, rejected
