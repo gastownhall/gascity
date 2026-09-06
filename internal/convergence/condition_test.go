@@ -13,6 +13,15 @@ import (
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
+func requireConditionEnviron(t *testing.T, env ConditionEnv) []string {
+	t.Helper()
+	vars, err := env.Environ()
+	if err != nil {
+		t.Fatalf("Environ(): %v", err)
+	}
+	return vars
+}
+
 func TestConditionEnvEnviron(t *testing.T) {
 	t.Setenv("GC_HOME", "/operator/gc-home")
 
@@ -32,7 +41,7 @@ func TestConditionEnvEnviron(t *testing.T) {
 		AgentModel:           "claude-3",
 	}
 
-	vars := env.Environ()
+	vars := requireConditionEnviron(t, env)
 	lookup := make(map[string]string)
 	for _, v := range vars {
 		parts := strings.SplitN(v, "=", 2)
@@ -83,10 +92,54 @@ func TestConditionEnvEnviron(t *testing.T) {
 	}
 }
 
+func TestConditionEnvEnvironAbsolutizesRelativeGCHome(t *testing.T) {
+	controllerDir := t.TempDir()
+	t.Chdir(controllerDir)
+	t.Setenv("GC_HOME", filepath.Join("relative", "gc-home"))
+
+	env := ConditionEnv{CityPath: t.TempDir()}
+	vars := requireConditionEnviron(t, env)
+	lookup := make(map[string]string)
+	for _, v := range vars {
+		parts := strings.SplitN(v, "=", 2)
+		if len(parts) == 2 {
+			lookup[parts[0]] = parts[1]
+		}
+	}
+
+	want := filepath.Join(controllerDir, "relative", "gc-home")
+	if got := lookup["GC_HOME"]; got != want {
+		t.Fatalf("GC_HOME = %q, want controller-relative absolute path %q", got, want)
+	}
+}
+
+func TestConditionEnvEnvironReportsRelativeGCHomeResolutionError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("cannot remove the process working directory on Windows")
+	}
+	controllerDir := t.TempDir()
+	t.Chdir(controllerDir)
+	t.Setenv("GC_HOME", filepath.Join("relative", "gc-home"))
+	if err := os.Remove(controllerDir); err != nil {
+		t.Fatalf("remove controller directory: %v", err)
+	}
+
+	result := RunCondition(context.Background(), "/script-must-not-run", ConditionEnv{}, time.Second, 0)
+	if result.Outcome != GateError {
+		t.Fatalf("RunCondition() outcome = %q, want %q", result.Outcome, GateError)
+	}
+	if !strings.Contains(result.Stderr, "resolve GC_HOME") {
+		t.Fatalf("RunCondition() stderr = %q, want GC_HOME resolution context", result.Stderr)
+	}
+}
+
 func TestConditionGCHomeFallbackIsNotSharedTempDir(t *testing.T) {
 	t.Setenv("GC_HOME", "")
 
-	got := conditionGCHome()
+	got, err := conditionGCHome()
+	if err != nil {
+		t.Fatalf("conditionGCHome(): %v", err)
+	}
 	if got == filepath.Join(os.TempDir(), ".gc") {
 		t.Fatalf("conditionGCHome() = %q, must not be the shared world-writable temp home (gastownhall/gascity#3506)", got)
 	}
@@ -104,7 +157,7 @@ func TestConditionEnvEnvironOptionalEmpty(t *testing.T) {
 		// ArtifactDir, DocPath, AgentVerdict, AgentProvider, AgentModel all empty.
 	}
 
-	vars := env.Environ()
+	vars := requireConditionEnviron(t, env)
 	lookup := make(map[string]string)
 	for _, v := range vars {
 		parts := strings.SplitN(v, "=", 2)
@@ -142,7 +195,7 @@ func TestConditionEnvEnvironPreservesIntegrationRealBD(t *testing.T) {
 		ArtifactDir: "/tmp/art",
 	}
 
-	vars := env.Environ()
+	vars := requireConditionEnviron(t, env)
 	lookup := make(map[string]string)
 	for _, v := range vars {
 		parts := strings.SplitN(v, "=", 2)
@@ -164,7 +217,7 @@ func TestConditionEnvEnvironUsesStorePathForBeadsDir(t *testing.T) {
 		StorePath: "/rig",
 	}
 
-	vars := env.Environ()
+	vars := requireConditionEnviron(t, env)
 	lookup := make(map[string]string)
 	for _, v := range vars {
 		parts := strings.SplitN(v, "=", 2)
@@ -195,7 +248,7 @@ func TestConditionEnvEnvironPreservesDoltConnection(t *testing.T) {
 		CityPath:  "/city",
 	}
 
-	vars := env.Environ()
+	vars := requireConditionEnviron(t, env)
 	lookup := make(map[string]string)
 	for _, v := range vars {
 		parts := strings.SplitN(v, "=", 2)
