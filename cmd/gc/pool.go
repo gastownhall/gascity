@@ -461,6 +461,10 @@ type poolOnBootHook struct {
 	env     map[string]string
 }
 
+// poolOnBootProgress reports on_boot completion as it happens, so a caller
+// tracking city startup can tell a long boot from a wedged one.
+type poolOnBootProgress func(current, total int, agent string)
+
 // runPoolOnBoot runs on_boot commands for all pool agents at controller startup.
 // Errors are logged but not fatal — the controller continues regardless.
 //
@@ -472,7 +476,16 @@ type poolOnBootHook struct {
 // reports malformed commands to the shared stderr. So the impure half stays on
 // one goroutine, and only the subprocesses fan out.
 func runPoolOnBoot(cfg *config.City, cityPath string, runner ScaleCheckRunner, stderr io.Writer) {
-	runPoolOnBootHooks(planPoolOnBootHooks(cfg, cityPath, stderr), runner, stderr)
+	runPoolOnBootWithProgress(cfg, cityPath, runner, stderr, nil)
+}
+
+// runPoolOnBootWithProgress is runPoolOnBoot with a completion callback. It is
+// reported as each hook finishes rather than as each one starts: the callers
+// that watch it use a changing status as the signal that the phase is still
+// alive, and a start-only counter reaches its total the moment the last hook is
+// dispatched, going silent again for the whole tail of that hook's timeout.
+func runPoolOnBootWithProgress(cfg *config.City, cityPath string, runner ScaleCheckRunner, stderr io.Writer, progress poolOnBootProgress) {
+	runPoolOnBootHooks(planPoolOnBootHooks(cfg, cityPath, stderr), runner, stderr, progress)
 }
 
 // planPoolOnBootHooks resolves every eligible pool agent's on_boot command,
@@ -511,10 +524,22 @@ func planPoolOnBootHooks(cfg *config.City, cityPath string, stderr io.Writer) []
 //
 // Each hook's log lines are buffered and written in a single call, so an
 // agent's failure and its recovery diagnostic stay together instead of
-// interleaving with another agent's.
-func runPoolOnBootHooks(hooks []poolOnBootHook, runner ScaleCheckRunner, stderr io.Writer) {
+// interleaving with another agent's. A non-nil progress callback is invoked
+// once per finished hook, serialized so the running count never goes backwards.
+func runPoolOnBootHooks(hooks []poolOnBootHook, runner ScaleCheckRunner, stderr io.Writer, progress poolOnBootProgress) {
 	if len(hooks) == 0 {
 		return
+	}
+	var progressMu sync.Mutex
+	completed := 0
+	reportDone := func(agent string) {
+		if progress == nil {
+			return
+		}
+		progressMu.Lock()
+		defer progressMu.Unlock()
+		completed++
+		progress(completed, len(hooks), agent)
 	}
 	var logMu sync.Mutex
 	emit := func(block []byte) {
@@ -550,6 +575,7 @@ func runPoolOnBootHooks(hooks []poolOnBootHook, runner ScaleCheckRunner, stderr 
 					fmt.Fprintf(&block, "on_boot %s: hook panicked: %v\n", hook.agent, r) //nolint:errcheck // bytes.Buffer
 				}
 				emit(block.Bytes())
+				reportDone(hook.agent)
 			}()
 
 			out, err := runner(hook.command, hook.dir, hook.env)
