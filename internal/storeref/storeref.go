@@ -82,6 +82,33 @@ type HasIDPrefix interface {
 	IDPrefix() string
 }
 
+// MintsInsideNamespace reports whether store declares a mint prefix that is one
+// of prefixes — the boot-time check a topology constructor sets
+// ClassBinding.MintsReserved from.
+//
+// It is a comparison of declarations, not a read: the store names the namespace
+// it mints into and the binding names the namespaces it claims, and when they
+// agree a bead this binding creates from now on is recognizable from its id
+// alone. A store that declares nothing has verified nothing and reports false,
+// which is the conservative answer — a false mint bit only keeps the residence
+// probe, while a wrong true one retires it over beads it cannot recognize.
+func MintsInsideNamespace(store beads.Store, prefixes []string) bool {
+	declaring, ok := store.(HasIDPrefix)
+	if !ok {
+		return false
+	}
+	minted := strings.TrimSpace(declaring.IDPrefix())
+	if minted == "" {
+		return false
+	}
+	for _, prefix := range prefixes {
+		if strings.TrimSpace(prefix) == minted {
+			return true
+		}
+	}
+	return false
+}
+
 // PrefixOwner returns the store whose IDPrefix() owns id's namespace
 // (strings.HasPrefix(id, prefix+"-")), or nil when none claims it. It routes
 // purely on the static id prefix and never reads a store. Mirrors

@@ -512,7 +512,7 @@ func appendRalphRetryLegacy(store beads.Store, logicalID string, prevSubject, pr
 	// Create the subject first so scope_ref remapping is stable for nested attempts.
 	subjectMeta := cloneMetadata(prevSubject.Metadata)
 	clearRetryEphemera(subjectMeta)
-	subjectMeta[beadmeta.AttemptMetadataKey] = strconv.Itoa(nextAttempt)
+	stampRalphRetryIteration(subjectMeta, prevSubject, nextAttempt)
 	subjectMeta[beadmeta.RetryFromMetadataKey] = prevSubject.ID
 	subjectMeta[beadmeta.LogicalBeadIDMetadataKey] = logicalID
 	subjectMeta[beadmeta.StepRefMetadataKey] = rewriteRetryStepRef(prevSubject.Metadata, prevSubject.Ref, oldScopeRef, newScopeRef, oldAttempt, nextAttempt)
@@ -547,7 +547,7 @@ func appendRalphRetryLegacy(store beads.Store, logicalID string, prevSubject, pr
 		}
 		meta := cloneMetadata(old.Metadata)
 		clearRetryEphemera(meta)
-		meta[beadmeta.AttemptMetadataKey] = strconv.Itoa(nextAttempt)
+		stampRalphRetryIteration(meta, old, nextAttempt)
 		meta[beadmeta.RetryFromMetadataKey] = old.ID
 		if currentScopeRef := strings.TrimSpace(meta[beadmeta.ScopeRefMetadataKey]); currentScopeRef != "" {
 			meta[beadmeta.ScopeRefMetadataKey] = rewriteRetryScopeRef(currentScopeRef, oldScopeRef, newScopeRef, prevSubject.ID)
@@ -581,7 +581,7 @@ func appendRalphRetryLegacy(store beads.Store, logicalID string, prevSubject, pr
 
 	checkMeta := cloneMetadata(prevCheck.Metadata)
 	clearRetryEphemera(checkMeta)
-	checkMeta[beadmeta.AttemptMetadataKey] = strconv.Itoa(nextAttempt)
+	stampRalphRetryIteration(checkMeta, prevCheck, nextAttempt)
 	checkMeta[beadmeta.RetryFromMetadataKey] = prevCheck.ID
 	checkMeta[beadmeta.TerminalMetadataKey] = ""
 	checkMeta[beadmeta.LogicalBeadIDMetadataKey] = logicalID
@@ -730,7 +730,7 @@ func appendRalphRetryViaGraphApply(store beads.Store, applier beads.GraphApplySt
 func buildRalphRetryGraphNode(old beads.Bead, logicalID, oldScopeRef, newScopeRef string, oldAttempt, nextAttempt int, attemptIDs map[string]bool, cfg *config.City) beads.GraphApplyNode {
 	meta := cloneMetadata(old.Metadata)
 	clearRetryEphemera(meta)
-	meta[beadmeta.AttemptMetadataKey] = strconv.Itoa(nextAttempt)
+	stampRalphRetryIteration(meta, old, nextAttempt)
 	meta[beadmeta.RetryFromMetadataKey] = old.ID
 	if currentScopeRef := strings.TrimSpace(meta[beadmeta.ScopeRefMetadataKey]); currentScopeRef != "" {
 		meta[beadmeta.ScopeRefMetadataKey] = rewriteRetryScopeRef(currentScopeRef, oldScopeRef, newScopeRef, old.ID)
@@ -786,6 +786,76 @@ func buildRalphRetryGraphNode(old beads.Bead, logicalID, oldScopeRef, newScopeRe
 		MetadataRefs:      metadataRefs,
 		ParentKey:         parentKey,
 		ParentID:          parentID,
+	}
+}
+
+// stampRalphRetryIteration advances the iteration/attempt counters on a bead
+// cloned to form the next Ralph outer iteration, reproducing the contract the
+// mint paths establish (internal/formula/ralph.go and
+// dispatch.buildAttemptRecipe). gc.iteration is the outer loop counter and
+// always advances to nextAttempt. gc.attempt advances too on a loop-level bead
+// (the scope/subject or the check — the beads that ARE the loop), but a nested
+// body member instead resets to its own local step counter (see
+// ralphRetryMemberAttempt) so a retry nested in the body is not born exhausted.
+//
+// Loop-level vs member is read from the bead: a body member lives inside the
+// scope and carries gc.scope_ref, while the scope subject, the simple-ralph
+// iteration bead, and the check do not. Callers pass the ORIGINAL bead so the
+// classification is not affected by rewrites already applied to the clone's meta.
+func stampRalphRetryIteration(meta map[string]string, old beads.Bead, nextAttempt int) {
+	meta[beadmeta.IterationMetadataKey] = strconv.Itoa(nextAttempt)
+	if strings.TrimSpace(old.Metadata[beadmeta.ScopeRefMetadataKey]) == "" {
+		meta[beadmeta.AttemptMetadataKey] = strconv.Itoa(nextAttempt)
+		return
+	}
+	meta[beadmeta.AttemptMetadataKey] = ralphRetryMemberAttempt(old, nextAttempt)
+}
+
+// ralphRetryMemberAttempt derives the gc.attempt a cloned Ralph body member
+// carries in the next outer iteration, matching the runtime mint
+// (dispatch.buildAttemptRecipe -> formula.RalphBodyChildAttempt): a retry or
+// nested-ralph control resets its own counter to 1; an already-materialized
+// attempt.N run keeps the attempt its ref names; every other (plain) member
+// inherits the outer iteration index. Classification is structural because at
+// iteration 1 every member's gc.attempt reads "1" and cannot be told apart by
+// value alone. (A nested ralph SCOPE member is not produced by any current
+// formula and is treated as a plain child here; if one is ever introduced it
+// would want the "1" reset like its control, tracked with the retry/ralph case.)
+func ralphRetryMemberAttempt(old beads.Bead, nextAttempt int) string {
+	switch strings.TrimSpace(old.Metadata[beadmeta.KindMetadataKey]) {
+	case beadmeta.KindRetry, beadmeta.KindRalph:
+		return "1"
+	}
+	if own := strings.TrimSpace(old.Metadata[beadmeta.AttemptMetadataKey]); own != "" && ralphRetryMemberIsFrozenAttempt(old) {
+		return own
+	}
+	return strconv.Itoa(nextAttempt)
+}
+
+// ralphRetryMemberIsFrozenAttempt reports whether a Ralph body member is an
+// already-materialized retry attempt run — its ref carries a ".attempt.<n>"
+// segment — as opposed to a retry control or a plain member. Such a bead owns
+// its attempt number and must keep it across an outer iteration rather than
+// inherit the iteration index.
+func ralphRetryMemberIsFrozenAttempt(old beads.Bead) bool {
+	return refHasAttemptSegment(old.Metadata[beadmeta.StepRefMetadataKey]) || refHasAttemptSegment(old.Ref)
+}
+
+// refHasAttemptSegment reports whether ref contains a ".attempt.<digits>"
+// segment. The trailing digit requirement rejects a step literally named
+// "attempt" (whose ref would end at ".attempt" with no counter).
+func refHasAttemptSegment(ref string) bool {
+	const marker = ".attempt."
+	for {
+		idx := strings.Index(ref, marker)
+		if idx < 0 {
+			return false
+		}
+		rest := ref[idx+len(marker):]
+		if len(rest) > 0 && rest[0] >= '0' && rest[0] <= '9' {
+			return true
+		}
+		ref = rest
 	}
 }
 

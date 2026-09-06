@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math"
 
 	"github.com/Masterminds/semver/v3"
 )
@@ -163,10 +164,28 @@ func canonicalPauseMessage(unsigned pauseUnsigned) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("productmetrics: canonicalize signed pause: %w", err)
 	}
-	message := make([]byte, 0, len(pauseDomainPrefix)+len(encoded))
+	capacity, err := canonicalPauseMessageCapacity(len(pauseDomainPrefix), len(encoded))
+	if err != nil {
+		return nil, err
+	}
+	message := make([]byte, 0, capacity)
 	message = append(message, pauseDomainPrefix...)
 	message = append(message, encoded...)
 	return message, nil
+}
+
+// canonicalPauseMessageCapacity proves prefixLen+encodedLen fits in an int
+// before it is used as a make() capacity, instead of letting the addition
+// wrap silently (CodeQL go/allocation-size-overflow, alert #262).
+func canonicalPauseMessageCapacity(prefixLen, encodedLen int) (int, error) {
+	if prefixLen < 0 || encodedLen < 0 {
+		return 0, fmt.Errorf("productmetrics: canonical pause message length is negative")
+	}
+	capacity, ok := checkedAddUint64(uint64(prefixLen), uint64(encodedLen))
+	if !ok || capacity > uint64(math.MaxInt) {
+		return 0, fmt.Errorf("productmetrics: canonical pause message capacity overflow")
+	}
+	return int(capacity), nil
 }
 
 func validatePauseUnsigned(unsigned pauseUnsigned) error {

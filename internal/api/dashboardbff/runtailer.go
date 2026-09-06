@@ -87,6 +87,28 @@ func (m *runTailerManager) enable(ctx context.Context, wg *sync.WaitGroup) {
 	m.ctx = ctx
 	m.wg = wg
 	m.enabled = true
+	for _, t := range m.cities {
+		m.startLocked(t)
+	}
+}
+
+// startLocked launches a tailer exactly once. The caller must hold m.mu; the
+// context and waitgroup are captured before the goroutine starts so a
+// pre-Start demand and a first post-Start demand share the same lifecycle.
+func (m *runTailerManager) startLocked(t *cityRunTailer) {
+	if !m.enabled || m.ctx == nil || m.wg == nil || t.started {
+		return
+	}
+	t.started = true
+	ctx, cancel := context.WithCancel(m.ctx)
+	t.cancel = cancel
+	wg := m.wg
+	wg.Add(1)
+	go func(tailer *cityRunTailer) {
+		defer wg.Done()
+		defer close(tailer.doneCh)
+		tailer.loop(ctx, wg)
+	}(t)
 }
 
 // ensure returns the tailer for a city, starting its background fold loop on
@@ -113,17 +135,7 @@ func (m *runTailerManager) ensure(name, eventsPath string) *cityRunTailer {
 		t = &cityRunTailer{name: name, eventsPath: eventsPath, mgr: m, readyCh: make(chan struct{}), doneCh: make(chan struct{}), snapshotCache: newRunSnapshotCache(), detailMemo: newRunDetailMemo(), unknownRuns: newUnknownRunGrace()}
 		m.cities[name] = t
 	}
-	if m.enabled && m.ctx != nil && !t.started {
-		ctx, cancel := context.WithCancel(m.ctx)
-		t.started = true
-		t.cancel = cancel
-		m.wg.Add(1)
-		go func(tailer *cityRunTailer) {
-			defer m.wg.Done()
-			defer close(tailer.doneCh)
-			tailer.loop(ctx, m.wg)
-		}(t)
-	}
+	m.startLocked(t)
 	return t
 }
 
@@ -1075,8 +1087,8 @@ func (t *cityRunTailer) writeRunDetailReadError(w http.ResponseWriter, runID str
 // cityRunTailer resolves the exact registered city name to its run tailer,
 // returning false for an unknown city. The resolver is authoritative and
 // returns the path directly, so registry-valid dots and underscores are safe
-// here even though the narrower dashboard deep-link grammar rejects them.
-// Starting the fold loop is lazy.
+// here; the deep-link grammar (ValidCityName) now mirrors the registry, so
+// both paths agree. Starting the fold loop is lazy.
 func (p *Plane) cityRunTailer(name string) (*cityRunTailer, bool) {
 	if name == "" || p.deps.Resolver == nil {
 		return nil, false
@@ -1089,37 +1101,7 @@ func (p *Plane) cityRunTailer(name string) (*cityRunTailer, bool) {
 }
 
 // cityEventsPath is the single source of truth for a city's append-only event
-// log path, so the lazy per-request start and the eager Start-time warm-up
-// (eagerWarmTailers) fold the exact same file.
+// log path.
 func cityEventsPath(cityRoot string) string {
 	return filepath.Join(cityRoot, ".gc", "events.jsonl")
-}
-
-// eagerWarmTailers starts the run-view fold for every currently-registered city
-// so the cold replay of .gc/events.jsonl happens at startup — in each tailer's
-// own background goroutine — instead of on the operator's first click. It is
-// non-blocking: ensure spawns the fold goroutine and returns immediately, so
-// Start never waits on any city's cold load. A nil resolver or an empty city
-// set is a no-op, and cities registered after Start keep the lazy start on
-// their first request.
-//
-// Cost scales with TOTAL registered cities, not active ones: warm-up starts one
-// cold-replay goroutine per city at Start and keeps every city's folded bead
-// slice resident for the plane's lifetime, so boot CPU/disk (JSON decode + .gz
-// archive walks) and baseline memory grow with the registry. Because ColdLoad is
-// context-blind (internal/runproj/projector.go), a Stop landing in the boot
-// window also waits on the slowest in-flight replay. This is deliberate for the
-// current few-city deployments; scaling to a large fleet would want a bounded
-// warm-up pool and/or a ctx-aware ColdLoad so Start-time work and shutdown stay
-// bounded.
-func (p *Plane) eagerWarmTailers() {
-	if p.deps.Resolver == nil {
-		return
-	}
-	for _, c := range p.deps.Resolver.Cities() {
-		if c.Name == "" || c.Path == "" {
-			continue
-		}
-		p.runTailers.ensure(c.Name, cityEventsPath(c.Path))
-	}
 }

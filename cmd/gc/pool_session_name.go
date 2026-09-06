@@ -280,6 +280,102 @@ func releaseOrphanedPoolAssignments(
 	return released
 }
 
+// releaseConfirmedOrphanSessionWork releases the pool-routed work still held by
+// a session the reconciler has confirmed orphaned, so the close guard that
+// refuses to close a seat holding work stops being a permanent block.
+//
+// This is the tie-break for the deadlock in ga-jrnou. An orphaned seat holding
+// work is unreachable by every other lane: the close guard refuses while the
+// work is assigned, the wake path is blocked because an orphaned base state
+// raises BlockerMissingConfig, and releaseOrphanedPoolAssignments skips the work
+// because the seat's session bead is still open — liveOpenSessionAssignmentExists
+// tests bead status, not runtime liveness. Each lane defers to the others and
+// the seat wedges indefinitely.
+//
+// The caller MUST have confirmed the runtime is observably dead. This function
+// deliberately takes no liveness argument and performs no liveness probe: the
+// orphan-close site is the only caller precisely because it has already failed
+// closed on an unreadable liveness observation. Releasing work from a seat that
+// is actually alive is data loss, not recovery (ga-g3pf0).
+//
+// Every per-bead gate from releaseOrphanedPoolAssignments applies unchanged,
+// including the live re-read in liveWorkAssignmentStillReleasable — the tick
+// snapshot names candidates but never by itself justifies a release.
+//
+// assignedWorkStores is the index-aligned snapshot of the legs the census read
+// assignedWorkBeads through, and it is how a binding-resident row is released at
+// all: gc.routed_to names a WORK ledger, and on a split city a graph-class step
+// no longer lives there, so the routed fallback asks a store that answers "no
+// such bead" and the release is silently skipped (ga-b0o6a). An absent slice
+// (nil or empty) keeps the routed fallback, so callers that supply nothing are
+// unchanged. A non-empty slice of any other length is a DIFFERENT snapshot, not
+// a smaller one: in-range beads are still resolved through it, and out-of-range
+// beads are skipped entirely rather than routed-fallback resolved. Callers must
+// reject a misaligned slice before calling — see reconcileSessionBeads, which
+// nils it and logs the mismatch.
+func releaseConfirmedOrphanSessionWork(
+	cfg *config.City,
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	assignedWorkBeads []beads.Bead,
+	assignedWorkStores []beads.Store,
+	info session.Info,
+) []releasedPoolAssignment {
+	if cfg == nil || store == nil || len(assignedWorkBeads) == 0 {
+		return nil
+	}
+	identifiers := make(map[string]struct{}, 5)
+	for _, id := range sessionAssignmentIdentifiersForConfigInfo(info, cfg) {
+		if id = strings.TrimSpace(id); id != "" {
+			identifiers[id] = struct{}{}
+		}
+	}
+	if len(identifiers) == 0 {
+		return nil
+	}
+
+	var released []releasedPoolAssignment
+	for i, wb := range assignedWorkBeads {
+		if wb.Status != "open" && wb.Status != "in_progress" {
+			continue
+		}
+		assignee := strings.TrimSpace(wb.Assignee)
+		if assignee == "" {
+			continue
+		}
+		if _, ok := identifiers[assignee]; !ok {
+			continue
+		}
+		template := routedToOrLegacyWorkflowTarget(wb)
+		if template == "" {
+			continue
+		}
+		agentCfg := findAgentByTemplate(cfg, template)
+		if agentCfg == nil || !agentCfg.SupportsGenericEphemeralSessions() {
+			continue
+		}
+		ownerStore := assignedWorkOwnerStore(cfg, store, rigStores, assignedWorkStores, i, wb)
+		if ownerStore == nil {
+			if len(assignedWorkStores) > 0 {
+				log.Printf("releaseConfirmedOrphanSessionWork: missing owner store for assigned work %q at index %d", wb.ID, i)
+			}
+			continue
+		}
+		if !liveWorkAssignmentStillReleasable(ownerStore, wb.ID, wb.Status, assignee) {
+			continue
+		}
+		allowsRelease, clearDetached := detachedProbeAllowsOrphanRelease(wb)
+		if !allowsRelease {
+			continue
+		}
+		if !releaseOrphanedPoolAssignment(ownerStore, wb, clearDetached) {
+			continue
+		}
+		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
+	}
+	return released
+}
+
 // assignedWorkOwnerStore resolves the store that owns the assigned work bead at
 // index i: the index-aligned snapshot store when the caller supplied one (the
 // store-aware form), otherwise the routed/prefix fallback. A nil result means

@@ -2578,8 +2578,8 @@ provider = "kiro"
 	if rp.ResumeFlag != "--resume" {
 		t.Errorf("ResumeFlag = %q, want --resume (inherited from claude)", rp.ResumeFlag)
 	}
-	if rp.SessionIDFlag != "" {
-		t.Errorf("SessionIDFlag = %q, want empty (inherited from modern claude)", rp.SessionIDFlag)
+	if rp.SessionIDFlag != "--session-id" {
+		t.Errorf("SessionIDFlag = %q, want --session-id (inherited from claude)", rp.SessionIDFlag)
 	}
 	if !rp.SupportsHooks {
 		t.Error("SupportsHooks = false, want true (inherited from claude)")

@@ -321,8 +321,10 @@ func TestLifecycleRefineryMergeIsBaseSynchronizedBeforeClose(t *testing.T) {
 		if strings.Contains(shell, "git merge --no-edit") {
 			mergeShellIndex = i
 			for _, want := range []string{
-				"git fetch origin main",
-				"git checkout -B main origin/main",
+				"git fetch origin \"$BASE\"",
+				"git checkout -B \"$BASE\" \"origin/$BASE\"",
+				"BASE=\"${GC_DEFAULT_BRANCH:-}\"",
+				"BASE=\"${BASE:-main}\"",
 				"git update-ref \"refs/heads/$BRANCH\" FETCH_HEAD",
 				"git check-ref-format --branch",
 			} {
@@ -342,7 +344,7 @@ func TestLifecycleRefineryMergeIsBaseSynchronizedBeforeClose(t *testing.T) {
 				}
 			}
 		}
-		if strings.Contains(shell, "git push origin HEAD:main") {
+		if strings.Contains(shell, "git push origin \"HEAD:$BASE\"") {
 			pushShellIndex = i
 		}
 	}
@@ -377,7 +379,7 @@ func TestLifecycleRefineryMergeUsesFreshFetchedHandoffBranch(t *testing.T) {
 		"git fetch origin \"$BRANCH\"",
 		"git update-ref \"refs/heads/$BRANCH\" FETCH_HEAD",
 		"git merge --no-edit \"$BRANCH\"",
-		"git push origin HEAD:main",
+		"git push origin \"HEAD:$BASE\"",
 	} {
 		if !strings.Contains(mergeShell, want) && !strings.Contains(allShells, want) {
 			t.Fatalf("refinery script missing %q", want)
@@ -388,11 +390,11 @@ func TestLifecycleRefineryMergeUsesFreshFetchedHandoffBranch(t *testing.T) {
 	}
 }
 
-func TestLifecycleRefineryNoOriginPathRequiresMain(t *testing.T) {
+func TestLifecycleRefineryNoOriginPathRequiresBaseBranch(t *testing.T) {
 	script := loadAgentScript(t, filepath.Join(examplesRoot(t),
 		"lifecycle/packs/lifecycle/assets/scripts/lifecycle-refinery-merge.yaml"))
-	mergeShell := shellActionContaining(t, hookTurn(t, script), "main branch is required")
-	if !strings.Contains(mergeShell, "git checkout main ||") {
+	mergeShell := shellActionContaining(t, hookTurn(t, script), "is required when no origin remote")
+	if !strings.Contains(mergeShell, "git checkout \"$BASE\" ||") {
 		t.Fatalf("refinery no-origin path does not fail loudly when main is unavailable: %q", mergeShell)
 	}
 }
@@ -458,6 +460,136 @@ func TestLifecycleRefineryDoesNotReferenceMissingRejectScript(t *testing.T) {
 	}
 	if strings.Contains(string(data), "refinery-reject.yaml") {
 		t.Fatal("refinery script references missing refinery-reject.yaml")
+	}
+}
+
+// exampleWorktreeSetupScripts lists the shipped worktree-setup.sh copies that
+// demonstrate the agent-worktree provisioning pattern. They are separately
+// tracked files that happen to share a name; both must teach the same rule.
+func exampleWorktreeSetupScripts(t *testing.T) map[string]string {
+	t.Helper()
+	root := examplesRoot(t)
+	paths := []string{
+		"lifecycle/packs/lifecycle/assets/scripts/worktree-setup.sh",
+		"t3bridge-gastown/packs/gastown/assets/scripts/worktree-setup.sh",
+	}
+	out := make(map[string]string, len(paths))
+	for _, rel := range paths {
+		data, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			t.Fatalf("reading %s: %v", rel, err)
+		}
+		out[rel] = string(data)
+	}
+	return out
+}
+
+// TestExampleWorktreeSetupScriptsAnchorOnConfiguredDefaultBranch pins the
+// pattern the examples exist to demonstrate: a fresh agent worktree is cut
+// from origin/<default branch>, never from a possibly-stale local HEAD, and
+// the base branch comes from GC_DEFAULT_BRANCH (the rig's configured
+// default_branch, handed over by pre_start) before any origin/HEAD probe.
+func TestExampleWorktreeSetupScriptsAnchorOnConfiguredDefaultBranch(t *testing.T) {
+	// The exact fresh-create line per script: without pinning it, the
+	// generic substrings below are all satisfied by the resolve/re-anchor
+	// helpers alone, and creation could silently regress to local HEAD.
+	creationLine := map[string]string{
+		"lifecycle/packs/lifecycle/assets/scripts/worktree-setup.sh":      `create_worktree "$WT" -b "$AGENT_BRANCH" "origin/$BRANCH"`,
+		"t3bridge-gastown/packs/gastown/assets/scripts/worktree-setup.sh": `worktree add -b "$agent_branch" "$work_dir" "origin/$BRANCH"`,
+	}
+	for rel, body := range exampleWorktreeSetupScripts(t) {
+		t.Run(rel, func(t *testing.T) {
+			for _, want := range []string{
+				`GC_DEFAULT_BRANCH`,
+				`refs/remotes/origin/HEAD`,
+				`fetch origin "$BRANCH"`,
+				`"origin/$BRANCH"`,
+			} {
+				if !strings.Contains(body, want) {
+					t.Errorf("script does not resolve/anchor on the configured base branch: missing %q", want)
+				}
+			}
+			want, ok := creationLine[rel]
+			if !ok {
+				t.Fatalf("no pinned fresh-create line for %s; add one to creationLine", rel)
+			}
+			if !strings.Contains(body, want) {
+				t.Errorf("script's fresh-create no longer cuts from origin/$BRANCH: missing %q", want)
+			}
+		})
+	}
+}
+
+// TestExampleWorktreeSetupScriptsReanchorOnlyWhenLossless pins the reuse rule:
+// an existing worktree is re-anchored only on pure git facts (clean tree AND
+// HEAD already reachable from the base), never on a heuristic, and the script
+// says which path it took. The retired swallowed `git pull --rebase` — which
+// silently left agents ~100 commits behind — must stay gone.
+func TestExampleWorktreeSetupScriptsReanchorOnlyWhenLossless(t *testing.T) {
+	for rel, body := range exampleWorktreeSetupScripts(t) {
+		t.Run(rel, func(t *testing.T) {
+			for _, want := range []string{
+				`status --porcelain`,
+				`merge-base --is-ancestor HEAD "origin/$BRANCH"`,
+				// The clean+ancestor proofs are about HEAD; checkout -B moves
+				// the agent BRANCH ref, so the re-anchor must also refuse when
+				// HEAD is detached or on another branch — otherwise unpushed
+				// commits on the agent branch are silently orphaned.
+				`symbolic-ref --quiet --short HEAD`,
+				`left as-is: not on `,
+				`checkout -B "$`,
+				`left as-is: dirty`,
+				`left as-is: unmerged commits`,
+				`re-anchored`,
+			} {
+				if !strings.Contains(body, want) {
+					t.Errorf("reuse path is not a provably-lossless re-anchor: missing %q", want)
+				}
+			}
+			for _, retired := range []string{
+				`pull --rebase`,
+				`"$work_dir" HEAD`,
+			} {
+				if strings.Contains(body, retired) {
+					t.Errorf("script still contains retired stale-anchor pattern %q", retired)
+				}
+			}
+		})
+	}
+}
+
+// TestT3BridgeGastownPreStartPassesDefaultBranch verifies the packs that
+// invoke worktree-setup.sh actually hand it the configured branch. Without
+// this the plumbing exists but the script always falls back to probing.
+func TestT3BridgeGastownPreStartPassesDefaultBranch(t *testing.T) {
+	root := filepath.Join(examplesRoot(t), "t3bridge-gastown/packs/gastown/agents")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("reading agents dir: %v", err)
+	}
+	checked := 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		path := filepath.Join(root, entry.Name(), "agent.toml")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", path, err)
+		}
+		body := string(data)
+		if !strings.Contains(body, "worktree-setup.sh") {
+			continue
+		}
+		checked++
+		// Single-quoted so an unset default_branch expands to an empty
+		// assignment instead of mangling the command line.
+		if !strings.Contains(body, `GC_DEFAULT_BRANCH='{{.DefaultBranch}}'`) {
+			t.Errorf("%s invokes worktree-setup.sh without passing GC_DEFAULT_BRANCH='{{.DefaultBranch}}'", entry.Name())
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no t3bridge-gastown agent invokes worktree-setup.sh; assertion is vacuous")
 	}
 }
 

@@ -109,6 +109,36 @@ func TestSplitStrictConfigWarnings_IdleSleepMaskingWarningIsNonFatal(t *testing.
 	}
 }
 
+// TestSplitStrictConfigWarnings_NonPersistentRigPathIsNonFatal is the funnel
+// half of the boot audit's warn-only contract: a warning the config package
+// classifies non-fatal must actually land in the non-fatal bucket here, because
+// this is the split `gc start` turns into exit 1.
+//
+// The other half — that the audit's real message satisfies that classifier —
+// is pinned in the config package by
+// TestNonPersistentRigPathWarningIsExemptFromStrictMode, which derives the text
+// from the producer. Together they cover production text -> non-fatal.
+func TestSplitStrictConfigWarnings_NonPersistentRigPathIsNonFatal(t *testing.T) {
+	durability := `rig "adopt" is bound to /tmp/adopt, which is on tmpfs and does not survive a restart of ` +
+		"this machine or container: the rig content is lost on the next restart. Move it under the city " +
+		"directory (/city) and re-register it with `gc rig add`"
+	if !config.IsNonFatalSiteBindingWarning(durability) {
+		t.Fatalf("sample durability warning is not recognized by its own classifier: %q", durability)
+	}
+
+	fatal, nonFatal := splitStrictConfigWarnings([]string{
+		durability,
+		`city agent "mayor" shadows agent of the same name from import "gs"`,
+	})
+
+	if len(fatal) != 1 || fatal[0] != `city agent "mayor" shadows agent of the same name from import "gs"` {
+		t.Fatalf("fatal = %v, want only the shadow warning", fatal)
+	}
+	if len(nonFatal) != 1 {
+		t.Fatalf("nonFatal = %v, want the durability advisory to stay a warning", nonFatal)
+	}
+}
+
 func TestSplitStrictConfigWarnings_MissingSiteBindingRemainsFatal(t *testing.T) {
 	fatal, nonFatal := splitStrictConfigWarnings([]string{
 		`rig "repo" is declared in city.toml but has no path binding in .gc/site.toml; run ` + "`gc rig add <dir> --name repo`" + ` to bind it`,
