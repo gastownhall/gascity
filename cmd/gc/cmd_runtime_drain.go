@@ -739,18 +739,30 @@ func releaseUnexecutedClaimsForSession(cityPath, sessionName string, stderr io.W
 		return
 	}
 	cfg, _ := loadCityConfig(cityPath, io.Discard)
-	var rigStores map[string]beads.Store
-	if cfg != nil {
-		rigStores = buildStandaloneRigStores(cfg, cityPath, io.Discard)
+	rigStores := func() map[string]beads.Store {
+		if cfg == nil {
+			return nil
+		}
+		return buildStandaloneRigStores(cfg, cityPath, io.Discard)
 	}
 	releaseUnexecutedClaimsForSessionStore(cityPath, cfg, store, rigStores, sessionName, drainAckReleaseBudget, stderr)
 }
 
+// releaseUnexecutedClaimsForSessionStore resolves a runtime session name to the
+// durable session bead behind it and releases the claims that bead's identities
+// still hold. Resolution is the reason this step exists separately: a pool
+// worker's runtime name lives in `session_name` metadata on a bead whose ID is
+// something else entirely, so a direct Get on the runtime name would miss it.
+//
+// rigStores is a thunk, not a map, because opening the rig stores is real store
+// I/O on the pre-ack path. It is called only once resolution and the session
+// Get have both succeeded — a drain-ack that cannot find its session pays
+// nothing for stores it would immediately discard.
 func releaseUnexecutedClaimsForSessionStore(
 	cityPath string,
 	cfg *config.City,
 	store beads.Store,
-	rigStores map[string]beads.Store,
+	rigStores func() map[string]beads.Store,
 	sessionName string,
 	budget time.Duration,
 	stderr io.Writer,
@@ -769,7 +781,11 @@ func releaseUnexecutedClaimsForSessionStore(
 	if err != nil {
 		return
 	}
-	releaseUnexecutedClaimsOnDrainAck(cityPath, cfg, store, rigStores, sessionBead, budget, stderr)
+	var rigs map[string]beads.Store
+	if rigStores != nil {
+		rigs = rigStores()
+	}
+	releaseUnexecutedClaimsOnDrainAck(cityPath, cfg, store, rigs, sessionBead, budget, stderr)
 }
 
 // drainAckReleaseBudget bounds the whole held-claim release pass.
