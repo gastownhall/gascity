@@ -22,6 +22,8 @@ internal/api/dashboardspa/web/frontend/.playwright/
 /genschema
 /bd
 /br
+/result
+/result-*
 /tmp/
 .runtime/
 *.test
