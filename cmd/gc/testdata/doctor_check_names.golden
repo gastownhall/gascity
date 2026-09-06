@@ -74,6 +74,7 @@ dolt-server
 fork-rate
 dolt-noms-size
 dolt-journal-size
+dolt-log-size
 dolt-config
 dolt-version
 events-log

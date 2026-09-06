@@ -66,8 +66,8 @@ func (c *DoltJournalSizeCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 
-	warnBytes := doltJournalThreshold("GC_DOLT_JOURNAL_WARN_BYTES", doltJournalWarnBytesDefault)
-	errorBytes := doltJournalThreshold("GC_DOLT_JOURNAL_ERROR_BYTES", doltJournalErrorBytesDefault)
+	warnBytes := doltEnvByteThreshold("GC_DOLT_JOURNAL_WARN_BYTES", doltJournalWarnBytesDefault)
+	errorBytes := doltEnvByteThreshold("GC_DOLT_JOURNAL_ERROR_BYTES", doltJournalErrorBytesDefault)
 
 	targets, unresolved := managedLocalDoltScanTargets(c.cityPath)
 	if c.applicableKnown {
@@ -161,9 +161,9 @@ func (c *DoltJournalSizeCheck) CanFix() bool { return false }
 // Fix is a no-op.
 func (c *DoltJournalSizeCheck) Fix(_ *CheckContext) error { return nil }
 
-// doltJournalThreshold reads an int64 byte threshold from env, falling back
+// doltEnvByteThreshold reads an int64 byte threshold from env, falling back
 // to defaultVal on empty or invalid input.
-func doltJournalThreshold(envVar string, defaultVal int64) int64 {
+func doltEnvByteThreshold(envVar string, defaultVal int64) int64 {
 	v := strings.TrimSpace(os.Getenv(envVar))
 	if v == "" {
 		return defaultVal
