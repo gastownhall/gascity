@@ -19,16 +19,16 @@ ARG BASE_IMAGE=gc-agent-base:latest
 
 FROM golang:1.26.6-bookworm@sha256:433f9dc4f8ea3a1ce4e28f9f15d0f7c056b10475307f886d6f1ac1ccc4abd976 AS bd-builder
 
-ARG BD_VERSION=v1.1.0
-ARG BD_SOURCE_REF=bf97b73749ac3ef2fca2365b54537ac041ad4293
-ARG BD_SOURCE_SHA256=a8b1d8dd85b2c008093615cb85937067a9597e760e8d39f93fe55f5c1cbb4d37
-ARG BD_BUILD=bf97b73749
+ARG BD_VERSION=v1.2.2
+ARG BD_SOURCE_REF=c0d8da42de5fd15c95adac85e342ba4a121da0fb
+ARG BD_SOURCE_SHA256=0bdedd1bdf98d1cbcb6f498b534512d1719643a28f1e30f2c2b9b94b60ce62ec
+ARG BD_BUILD=c0d8da42de
 ARG BD_BRANCH=HEAD
-ARG GRPC_VERSION=1.82.1
+ARG GRPC_VERSION=1.83.0
 
-# The published bd 1.1.0 binary embeds vulnerable grpc-go 1.80.0. Rebuild the
-# exact released source with its production CGO/pure-Go-regex configuration and
-# release identity, changing only the patched dependency version.
+# Build the exact source-pinned current compatibility cell with its production
+# CGO/pure-Go-regex configuration. The source, archive digest, displayed version,
+# build identity, and grpc dependency are all locked in deps.env and its tests.
 RUN mkdir -p /src/bd /out \
     && curl -fsSL --retry 3 \
        "https://github.com/gastownhall/beads/archive/${BD_SOURCE_REF}.tar.gz" \
