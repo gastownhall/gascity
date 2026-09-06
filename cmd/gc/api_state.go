@@ -2275,6 +2275,14 @@ func (cs *controllerState) assertDroppableManagedDoltDatabase(rigName, dbName st
 	return nil
 }
 
+// controllerLiveDoltPortResolve is the live-resolution seam for the
+// controller's DROP path. It is nil in production, which makes
+// ResolveDoltPort wire newLiveDoltPortResolverForExplicitCity — the strict,
+// cityPath-derived resolver that ambient GC_DOLT_* cannot redirect. Tests
+// inject a fake process table so the most destructive consumer of the chain
+// can be exercised without a live Dolt server.
+var controllerLiveDoltPortResolve func(cityPath string) (liveDoltPortResolution, error)
+
 // controllerDropManagedDoltDatabase drops a managed Dolt database for the city.
 // It is a package var so the G14 rollback tests can inject a recorder without a
 // live Dolt server; production resolves the city's Dolt endpoint and issues the
@@ -2291,12 +2299,18 @@ var controllerDropManagedDoltDatabase = func(cs *controllerState, ctx context.Co
 		host = "127.0.0.1"
 	}
 	resolution := ResolveDoltPort(PortResolverInput{
-		CityPort: cityPort,
-		Rigs:     loadResolverRigs(cs.cityPath, cfg),
-		FS:       fsys.OSFS{},
+		CityPort:    cityPort,
+		CityPath:    cs.cityPath,
+		LiveResolve: controllerLiveDoltPortResolve,
 	})
 	if err := fatalPortResolutionError(resolution); err != nil {
 		return fmt.Errorf("resolving dolt port: %w", err)
+	}
+	// This is a DROP DATABASE. With the port file out of the chain, a stopped
+	// managed dolt is a clean miss that lands on the legacy default — refuse
+	// rather than drop against whatever happens to be listening on 3307.
+	if resolution.Fallback {
+		return fmt.Errorf("refusing to drop dolt database %q: no live managed dolt endpoint for %s (resolution fell back to legacy port %d)", dbName, cs.cityPath, resolution.Port)
 	}
 	client, err := newSQLCleanupDoltClient(cs.cityPath, host, strconv.Itoa(resolution.Port))
 	if err != nil {

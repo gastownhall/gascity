@@ -108,17 +108,18 @@ type ReapPlan struct {
 
 // extractConfigPath pulls the --config <path> argument from a dolt sql-server
 // argv. Supports both `--config foo` and `--config=foo` forms; returns empty
-// when the flag is absent or has no value.
+// when the flag is absent or has no value. Values are space-trimmed, matching
+// argvFlagValue, so a padded argv entry still compares equal under samePath.
 func extractConfigPath(argv []string) string {
 	for i, arg := range argv {
 		if arg == "--config" {
 			if i+1 < len(argv) {
-				return argv[i+1]
+				return strings.TrimSpace(argv[i+1])
 			}
 			return ""
 		}
 		if strings.HasPrefix(arg, "--config=") {
-			return strings.TrimPrefix(arg, "--config=")
+			return strings.TrimSpace(strings.TrimPrefix(arg, "--config="))
 		}
 	}
 	return ""
