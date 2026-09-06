@@ -143,3 +143,68 @@ func TestIdleTracker_SetTimeoutForTemplateIgnoresEmptyTemplate(t *testing.T) {
 		t.Fatalf("templateTimeouts = %v, want empty after empty-template config", it.templateTimeouts)
 	}
 }
+
+// TestIdleTracker_NoAssignedWorkClockFiresAfterTimeout is the regression for
+// pool sessions whose runtime activity clock never ages (a pi TUI repaints
+// its pane once a second while idle): a session that holds no open assigned
+// work continuously longer than its timeout is idle, regardless of pane
+// activity.
+func TestIdleTracker_NoAssignedWorkClockFiresAfterTimeout(t *testing.T) {
+	it := newIdleTracker()
+	it.setTimeoutForTemplate("hudson", 15*time.Minute)
+	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+
+	if it.checkNoAssignedWorkIdle("hudson-gc-1", "hudson", false, now) {
+		t.Fatal("first no-work observation must anchor, not fire")
+	}
+	if it.checkNoAssignedWorkIdle("hudson-gc-1", "hudson", false, now.Add(14*time.Minute)) {
+		t.Fatal("must not fire before the timeout elapses")
+	}
+	if !it.checkNoAssignedWorkIdle("hudson-gc-1", "hudson", false, now.Add(16*time.Minute)) {
+		t.Fatal("must fire once no-work has been continuous for longer than the timeout")
+	}
+	// Firing clears the anchor so a replacement session re-measures from scratch.
+	if it.checkNoAssignedWorkIdle("hudson-gc-1", "hudson", false, now.Add(17*time.Minute)) {
+		t.Fatal("anchor must be cleared after firing")
+	}
+}
+
+// TestIdleTracker_NoAssignedWorkClockResetsWhenWorkAppears verifies that a
+// claim mid-run resets the no-work anchor: the clock measures CONTINUOUS
+// absence of assigned work.
+func TestIdleTracker_NoAssignedWorkClockResetsWhenWorkAppears(t *testing.T) {
+	it := newIdleTracker()
+	it.setTimeoutForTemplate("hudson", 15*time.Minute)
+	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+
+	it.checkNoAssignedWorkIdle("hudson-gc-1", "hudson", false, now)
+	if it.checkNoAssignedWorkIdle("hudson-gc-1", "hudson", true, now.Add(10*time.Minute)) {
+		t.Fatal("holding work must never fire")
+	}
+	if it.checkNoAssignedWorkIdle("hudson-gc-1", "hudson", false, now.Add(20*time.Minute)) {
+		t.Fatal("work observation must have reset the anchor; 20m since first anchor is not 15m since reset")
+	}
+	if !it.checkNoAssignedWorkIdle("hudson-gc-1", "hudson", false, now.Add(36*time.Minute)) {
+		t.Fatal("must fire 16m after the post-work re-anchor")
+	}
+}
+
+// TestIdleTracker_NoAssignedWorkClockRequiresTimeout pins that the clock is
+// inert for sessions with no registered timeout (per-name or template) and
+// honors the always-named template-fallback exemption exactly as checkIdle does.
+func TestIdleTracker_NoAssignedWorkClockRequiresTimeout(t *testing.T) {
+	it := newIdleTracker()
+	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+	for _, ts := range []time.Duration{0, time.Hour, 48 * time.Hour} {
+		if it.checkNoAssignedWorkIdle("worker-1", "", false, now.Add(ts)) {
+			t.Fatalf("no timeout configured: must never fire (at +%s)", ts)
+		}
+	}
+	it.setTimeoutForTemplate("worker", time.Minute)
+	it.exemptTemplateFallbackForSession("worker-named")
+	for _, ts := range []time.Duration{0, time.Hour} {
+		if it.checkNoAssignedWorkIdle("worker-named", "worker", false, now.Add(ts)) {
+			t.Fatalf("exempt session must not inherit the template timeout (at +%s)", ts)
+		}
+	}
+}

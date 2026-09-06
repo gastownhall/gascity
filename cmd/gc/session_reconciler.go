@@ -3169,6 +3169,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			facts := sessionpkg.TimerFacts{
 				Triggered: it.checkIdle(name, tp.TemplateName, sp, clk.Now()),
 			}
+			if !facts.Triggered {
+				facts.Triggered = poolSessionNoAssignedWorkIdle(it, cityPath, cfg, store, rigStores, infoByID[id], name, tp.TemplateName, storeQueryPartial, clk.Now(), stderr)
+			}
 			if facts.Triggered {
 				facts.Blocker = lifecycleTimerBlockerInfo(infoByID[id], clk.Now())
 			}
@@ -3865,17 +3868,85 @@ func sessionHasOpenAssignedWorkForReachableStore(
 	rigStores map[string]beads.Store,
 	info sessionpkg.Info,
 ) (bool, error) {
+	return sessionHasOpenAssignedWorkForReachableStoreLive(cityPath, cfg, store, rigStores, info, true)
+}
+
+// sessionHasOpenAssignedWorkForReachableStoreLive is
+// sessionHasOpenAssignedWorkForReachableStore with an explicit issues-tier
+// read mode; see sessionHasAssignedWorkInStoreByIdentifiersForStatusesLive.
+func sessionHasOpenAssignedWorkForReachableStoreLive(
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	info sessionpkg.Info,
+	live bool,
+) (bool, error) {
 	identifiers := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
 	stores, err := reachableStoresForSessionInfo(cityPath, cfg, store, rigStores, info)
 	if err != nil {
 		return false, err
 	}
+	statuses := []string{"open", "in_progress"}
 	for _, s := range stores {
-		if has, err := sessionHasOpenAssignedWorkInStoreByIdentifiers(s, identifiers); err != nil || has {
+		if has, err := sessionHasAssignedWorkInStoreByIdentifiersForStatusesLive(s, identifiers, statuses, live); err != nil || has {
 			return has, err
 		}
 	}
 	return false, nil
+}
+
+// poolSessionNoAssignedWorkIdle drives the pool no-assigned-work idle clock
+// for one live pool session and reports whether it fired this tick.
+//
+// The runtime activity clock behind idleTracker.checkIdle measures pane
+// writes. Some agent TUIs (pi) repaint once a second while idle, so for
+// those sessions the clock never ages and a configured idle_timeout is
+// structurally unenforceable — a pool worker that finished its bead and is
+// "standing by" lives forever. Assigned work is the pool's own ground truth
+// of busy, so pool sessions get a second clock: continuous time holding no
+// open/in_progress assigned work. Named sessions hold no beads by design and
+// keep the activity clock; activity-clock kills are unchanged for everyone.
+//
+// Per-tick bookkeeping reads the cached issues tier so it costs no store
+// round-trip per session. When the clock would fire it is confirmed against
+// the live store, because the cache can lag a claim landed since the last
+// refresh. Fail closed throughout: a partial store snapshot this tick or a
+// probe error counts as "has work" (mirrors the max_session_age ladder).
+func poolSessionNoAssignedWorkIdle(
+	it idleTracker,
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	info sessionpkg.Info,
+	name, template string,
+	storeQueryPartial bool,
+	now time.Time,
+	stderr io.Writer,
+) bool {
+	if it == nil || !info.PoolManaged || storeQueryPartial {
+		return false
+	}
+	hasWork, err := sessionHasOpenAssignedWorkForReachableStoreLive(cityPath, cfg, store, rigStores, info, false)
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: checking assigned work for no-work idle %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
+		hasWork = true
+	}
+	if !it.checkNoAssignedWorkIdle(name, template, hasWork, now) {
+		return false
+	}
+	liveHasWork, err := sessionHasOpenAssignedWorkForReachableStoreLive(cityPath, cfg, store, rigStores, info, true)
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: confirming assigned work for no-work idle %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
+		liveHasWork = true
+	}
+	if liveHasWork {
+		// The cache lagged a fresh claim: re-anchor from the live truth.
+		it.checkNoAssignedWorkIdle(name, template, true, now)
+		return false
+	}
+	return true
 }
 
 // sessionHasAwakeAssignedWorkForReachableStore reports whether assigned work
@@ -4497,6 +4568,15 @@ func sessionHasOpenAssignedWorkInStoreByIdentifiers(store beads.Store, identifie
 }
 
 func sessionHasAssignedWorkInStoreByIdentifiersForStatuses(store beads.Store, identifiers []string, statuses []string) (bool, error) {
+	return sessionHasAssignedWorkInStoreByIdentifiersForStatusesLive(store, identifiers, statuses, true)
+}
+
+// sessionHasAssignedWorkInStoreByIdentifiersForStatusesLive is the probe with
+// an explicit issues-tier read mode. live=true bypasses the caching store
+// (lifecycle gates that must see an external claim immediately); live=false
+// answers from this tick's cache and is for per-tick bookkeeping that must
+// not cost a store round-trip per session (the pool no-work idle clock).
+func sessionHasAssignedWorkInStoreByIdentifiersForStatusesLive(store beads.Store, identifiers []string, statuses []string, live bool) (bool, error) {
 	if store == nil {
 		return false, nil
 	}
@@ -4511,7 +4591,7 @@ func sessionHasAssignedWorkInStoreByIdentifiersForStatuses(store beads.Store, id
 				continue
 			}
 			seen[key] = struct{}{}
-			if has, err := sessionHasOpenAssignedWorkForTier(store, assignee, status, beads.TierIssues, true); err != nil || has {
+			if has, err := sessionHasOpenAssignedWorkForTier(store, assignee, status, beads.TierIssues, live); err != nil || has {
 				return has, err
 			}
 			if has, err := sessionHasOpenAssignedWispWork(store, assignee, status); err != nil || has {

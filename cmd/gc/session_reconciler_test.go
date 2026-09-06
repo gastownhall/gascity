@@ -50,6 +50,10 @@ func (f *fakeIdleTracker) checkIdle(sessionName, template string, _ runtime.Prov
 	return f.templates[template]
 }
 
+func (f *fakeIdleTracker) checkNoAssignedWorkIdle(string, string, bool, time.Time) bool {
+	return false
+}
+
 func (f *fakeIdleTracker) setTimeout(sessionName string, _ time.Duration) {
 	f.idle[sessionName] = true
 }
@@ -11284,3 +11288,156 @@ func TestReconcileSessionBeads_ClosesOrphanedFailedCreateAndFreesSlot(t *testing
 // Regression: poolDesired derived from desiredState counts ALL session beads
 // (including discovered ones), inflating the desired count. This test verifies
 // that derivePoolDesired only counts pool sessions, not all discovered beads.
+
+// poolNoWorkIdleEnv builds a pool-managed session whose runtime activity
+// clock is always fresh (the pi TUI case: the pane repaints once a second
+// while idle, so tmux #{window_activity} never ages). Returns the env, the
+// session bead, and a REAL memoryIdleTracker with a 15m template timeout.
+func poolNoWorkIdleEnv(t *testing.T) (*reconcilerTestEnv, beads.Bead, *memoryIdleTracker) {
+	t.Helper()
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "hudson", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}
+	template := env.cfg.Agents[0].QualifiedName()
+	name := sessionNameFromBeadID("gc-3fsj0k")
+	env.addDesired(name, template, true)
+	session := env.createSessionBead(name, template)
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{"pool_managed": "true"})
+	if err := env.sp.SetMeta(name, "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	it := newIdleTracker()
+	it.setTimeoutForTemplate(template, 15*time.Minute)
+	return env, session, it
+}
+
+// poolNoWorkIdleTick runs one reconcile tick with the session's activity
+// clock refreshed to "now" first, so only the no-assigned-work clock can
+// ever trigger the idle stop.
+func poolNoWorkIdleTick(env *reconcilerTestEnv, session beads.Bead, it idleTracker, store beads.Store, storeQueryPartial bool) {
+	name := session.Metadata["session_name"]
+	env.sp.SetActivity(name, env.clk.Now())
+	template := env.cfg.Agents[0].QualifiedName()
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{session}, env.desiredState, configuredSessionNames(env.cfg, "", store),
+		env.cfg, env.sp, store, nil, nil, nil, env.dt, map[string]int{template: 1}, storeQueryPartial, nil, "",
+		it, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+	)
+}
+
+func recordedEventTypes(rec *events.Fake) map[string]int {
+	counts := map[string]int{}
+	for _, e := range rec.Events {
+		counts[e.Type]++
+	}
+	return counts
+}
+
+// TestReconcileSessionBeads_PoolSessionWithNoAssignedWorkIdlesDespiteFreshActivity
+// is the regression for sys-at11i1: a pool session whose pane never goes quiet
+// (pi repaints every second) but holds no open/in_progress assigned bead is
+// idle-killed once that state has persisted longer than idle_timeout, and
+// emits session.idle_killed exactly as an activity-clock idle kill does.
+func TestReconcileSessionBeads_PoolSessionWithNoAssignedWorkIdlesDespiteFreshActivity(t *testing.T) {
+	env, session, it := poolNoWorkIdleEnv(t)
+	rec := events.NewFake()
+	env.rec = rec
+	name := session.Metadata["session_name"]
+
+	poolNoWorkIdleTick(env, session, it, env.store, false)
+	if !env.sp.IsRunning(name) {
+		t.Fatal("first tick anchors the no-work clock; it must not kill")
+	}
+	env.clk.Time = env.clk.Now().Add(16 * time.Minute)
+	poolNoWorkIdleTick(env, session, it, env.store, false)
+
+	if env.sp.IsRunning(name) {
+		t.Fatal("pool session with no assigned work for 16m > 15m timeout must be idle-killed despite fresh pane activity")
+	}
+	if got := recordedEventTypes(rec)[events.SessionIdleKilled]; got != 1 {
+		t.Fatalf("session.idle_killed events = %d, want 1", got)
+	}
+	b, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Metadata["sleep_reason"] != "idle-timeout" {
+		t.Fatalf("sleep_reason = %q, want idle-timeout", b.Metadata["sleep_reason"])
+	}
+}
+
+// TestReconcileSessionBeads_PoolSessionHoldingClaimedBeadIsNotNoWorkIdle pins
+// the other half of the definition: a pool session whose session_name is the
+// assignee of an in_progress bead (a live gc hook --claim) is never idle on the
+// no-work clock, however long it runs.
+func TestReconcileSessionBeads_PoolSessionHoldingClaimedBeadIsNotNoWorkIdle(t *testing.T) {
+	env, session, it := poolNoWorkIdleEnv(t)
+	rec := events.NewFake()
+	env.rec = rec
+	name := session.Metadata["session_name"]
+	if _, err := env.store.Create(beads.Bead{
+		Title:    "claimed work",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: name,
+	}); err != nil {
+		t.Fatalf("Create(claimed work): %v", err)
+	}
+
+	for i := 0; i < 4; i++ {
+		poolNoWorkIdleTick(env, session, it, env.store, false)
+		env.clk.Time = env.clk.Now().Add(20 * time.Minute)
+	}
+	if !env.sp.IsRunning(name) {
+		t.Fatal("pool session holding an in_progress assigned bead must not be idle-killed by the no-work clock")
+	}
+	if got := recordedEventTypes(rec)[events.SessionIdleKilled]; got != 0 {
+		t.Fatalf("session.idle_killed events = %d, want 0", got)
+	}
+}
+
+// TestReconcileSessionBeads_NoWorkIdleClockSkipsNamedSessions pins the gate:
+// a configured/non-pool session (mayor, dallas) holds no beads by design and
+// keeps the activity-clock definition of idle.
+func TestReconcileSessionBeads_NoWorkIdleClockSkipsNamedSessions(t *testing.T) {
+	env, session, it := poolNoWorkIdleEnv(t)
+	name := session.Metadata["session_name"]
+	env.setSessionMetadata(&session, map[string]string{"pool_managed": ""})
+
+	for i := 0; i < 4; i++ {
+		poolNoWorkIdleTick(env, session, it, env.store, false)
+		env.clk.Time = env.clk.Now().Add(20 * time.Minute)
+	}
+	if !env.sp.IsRunning(name) {
+		t.Fatal("non-pool session with fresh activity must not be idle-killed by the no-work clock")
+	}
+}
+
+// TestReconcileSessionBeads_NoWorkIdleClockFailsClosed pins the two
+// fail-closed paths: a partial store snapshot this tick, and a store error on
+// the assigned-work probe, both count as "has work" (mirrors max_session_age).
+func TestReconcileSessionBeads_NoWorkIdleClockFailsClosed(t *testing.T) {
+	t.Run("storeQueryPartial", func(t *testing.T) {
+		env, session, it := poolNoWorkIdleEnv(t)
+		name := session.Metadata["session_name"]
+		for i := 0; i < 4; i++ {
+			poolNoWorkIdleTick(env, session, it, env.store, true)
+			env.clk.Time = env.clk.Now().Add(20 * time.Minute)
+		}
+		if !env.sp.IsRunning(name) {
+			t.Fatal("partial store visibility must not idle-kill")
+		}
+	})
+	t.Run("storeError", func(t *testing.T) {
+		env, session, it := poolNoWorkIdleEnv(t)
+		name := session.Metadata["session_name"]
+		failing := &listErrStore{Store: env.store, err: fmt.Errorf("simulated transient store failure")}
+		for i := 0; i < 4; i++ {
+			poolNoWorkIdleTick(env, session, it, failing, false)
+			env.clk.Time = env.clk.Now().Add(20 * time.Minute)
+		}
+		if !env.sp.IsRunning(name) {
+			t.Fatal("assigned-work probe error must fail closed (treated as has-work)")
+		}
+	})
+}
