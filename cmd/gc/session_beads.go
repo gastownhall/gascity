@@ -2172,6 +2172,20 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			if b.Metadata[namedSessionModeMetadata] != tp.ConfiguredNamedMode {
 				queueMeta(namedSessionModeMetadata, tp.ConfiguredNamedMode)
 			}
+		} else if configuredOwner, ok := configuredNamedSessionSpecForRuntimeName(cfg, cityName, sn); ok && session.NamedSessionBeadMatchesSpec(b, configuredOwner) {
+			// A transient pool/ephemeral desired-state classification must not
+			// erase durable named-session ownership when this exact runtime name
+			// is still configured. Rebinds and mode changes arrive through the
+			// configured-named path above; absence here is verified removal.
+			if b.Metadata[namedSessionMetadataKey] != boolMetadata(true) {
+				queueMeta(namedSessionMetadataKey, boolMetadata(true))
+			}
+			if b.Metadata[namedSessionIdentityMetadata] != configuredOwner.Identity {
+				queueMeta(namedSessionIdentityMetadata, configuredOwner.Identity)
+			}
+			if b.Metadata[namedSessionModeMetadata] != configuredOwner.Mode {
+				queueMeta(namedSessionModeMetadata, configuredOwner.Mode)
+			}
 		} else {
 			if b.Metadata[namedSessionMetadataKey] != "" {
 				queueMeta(namedSessionMetadataKey, "")
