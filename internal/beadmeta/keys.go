@@ -264,6 +264,14 @@ const (
 	WorktreeRepoMetadataKey        = "gc.worktree_repo"
 	WorktreeRootMetadataKey        = "gc.worktree_root"
 	WorkflowIDMetadataKey          = "gc.workflow_id"
+	// WorkflowExpandedMetadataKey marks a graph.v2 workflow root that was
+	// compiled with real child steps beyond the root itself. Its absence
+	// distinguishes a genuinely root-only (#2763-shape) molecule, whose root
+	// IS the unit of work and must remain claimable via the
+	// RunTargetMetadataKey fallback, from a fully-expanded root whose real
+	// children have all closed and is only waiting on workflow-finalize —
+	// see hookClaimMatchesRoute/hookClaimRoute (#5900).
+	WorkflowExpandedMetadataKey = "gc.workflow_expanded"
 )
 
 // Work-record metadata keys (ADR-0009). These bind a work bead to its claim
@@ -553,6 +561,7 @@ var KnownMetadataKeys = []string{
 	WorktreeRepoMetadataKey,
 	WorktreeRootMetadataKey,
 	WorkflowIDMetadataKey,
+	WorkflowExpandedMetadataKey,
 }
 
 // KnownMetadataPrefixes lists declared open-world key prefixes. A literal that

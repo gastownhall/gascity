@@ -2275,13 +2275,32 @@ func hookRouteIdentitiesEqual(a, b string) bool {
 	return agent.UnsanitizeQualifiedNameFromSession(a) == agent.UnsanitizeQualifiedNameFromSession(b)
 }
 
+// workflowRunTargetFallbackEligible reports whether candidate is a
+// KindWorkflow root the gc.run_target fallback may apply to. The fallback
+// exists so a genuinely root-only (#2763-shape) molecule - whose root IS the
+// unit of work, with no compiled children - is claimable via its
+// gc.run_target authoring hint. It must not also resurrect a fully-expanded
+// root: once compile.go gives a graph.v2 root real child steps, it stamps
+// gc.workflow_expanded=true, and that root's only remaining path to
+// dependency-readiness is every real child closing while workflow-finalize
+// has not yet run and closed it (#5900) - a state the fallback must not
+// treat as claimable (WorkflowTopologyKinds document workflow roots as never
+// claimable). A candidate without the stamp predates this fix or was never
+// expanded, so it keeps the original permissive behavior.
+func workflowRunTargetFallbackEligible(candidate beads.Bead) bool {
+	kind := strings.TrimSpace(candidate.Metadata[beadmeta.KindMetadataKey])
+	if kind != beadmeta.KindWorkflow {
+		return false
+	}
+	return strings.TrimSpace(candidate.Metadata[beadmeta.WorkflowExpandedMetadataKey]) != "true"
+}
+
 func hookClaimMatchesRoute(candidate beads.Bead, routeTargets []string) bool {
 	if len(routeTargets) == 0 {
 		return false
 	}
 	routedTo := strings.TrimSpace(candidate.Metadata[beadmeta.RoutedToMetadataKey])
 	runTarget := strings.TrimSpace(candidate.Metadata[beadmeta.RunTargetMetadataKey])
-	kind := strings.TrimSpace(candidate.Metadata[beadmeta.KindMetadataKey])
 	for _, target := range routeTargets {
 		target = strings.TrimSpace(target)
 		if target == "" {
@@ -2290,7 +2309,7 @@ func hookClaimMatchesRoute(candidate beads.Bead, routeTargets []string) bool {
 		if hookRouteIdentitiesEqual(routedTo, target) {
 			return true
 		}
-		if routedTo == "" && kind == beadmeta.KindWorkflow && hookRouteIdentitiesEqual(runTarget, target) {
+		if routedTo == "" && workflowRunTargetFallbackEligible(candidate) && hookRouteIdentitiesEqual(runTarget, target) {
 			return true
 		}
 	}
@@ -2321,7 +2340,7 @@ func hookClaimRoute(candidate beads.Bead) string {
 	if routedTo := strings.TrimSpace(candidate.Metadata[beadmeta.RoutedToMetadataKey]); routedTo != "" {
 		return routedTo
 	}
-	if strings.TrimSpace(candidate.Metadata[beadmeta.KindMetadataKey]) == beadmeta.KindWorkflow {
+	if workflowRunTargetFallbackEligible(candidate) {
 		return strings.TrimSpace(candidate.Metadata[beadmeta.RunTargetMetadataKey])
 	}
 	return ""

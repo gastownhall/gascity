@@ -929,6 +929,9 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 			if opts.IdempotencyKey != "" {
 				b.Metadata["idempotency_key"] = opts.IdempotencyKey
 			}
+			if graphWorkflow && !recipe.RootOnly {
+				b.Metadata[beadmeta.WorkflowExpandedMetadataKey] = "true"
+			}
 			stampFormulaVars(vars, &b)
 		} else {
 			// graph.v2 workflows and their retry/Ralph attempt sub-recipes
