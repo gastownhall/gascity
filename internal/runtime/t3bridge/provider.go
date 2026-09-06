@@ -29,10 +29,12 @@ import (
 )
 
 var (
-	authMu                       sync.Mutex
-	cachedBridgeWSToken          string
-	cachedBridgeWSTokenBaseURL   string
-	cachedBridgeWSTokenExpiresAt time.Time
+	authMu                        sync.Mutex
+	cachedBridgeWSToken           string
+	cachedBridgeWSTokenBaseURL    string
+	cachedBridgeWSTokenExpiresAt  time.Time
+	errWebSocketTicketUnsupported = errors.New("T3 websocket-ticket endpoint unsupported")
+	errHTTPSnapshotUnsupported    = errors.New("T3 HTTP snapshot endpoint unsupported")
 )
 
 var _ runtime.Provider = (*Provider)(nil)
@@ -182,9 +184,11 @@ func resolveRuntimeStatePaths() []string {
 		paths = append(paths, path)
 	}
 
+	add(filepath.Join(baseDir, "userdata", "server-runtime.json"))
 	add(filepath.Join(baseDir, "server-runtime.json"))
 	add(filepath.Join(baseDir, "dev", "server-runtime.json"))
 	if !explicitT3Home && strings.TrimSpace(home) != "" {
+		add(filepath.Join(home, ".t3", "userdata", "server-runtime.json"))
 		add(filepath.Join(home, ".t3", "server-runtime.json"))
 		add(filepath.Join(home, ".t3", "dev", "server-runtime.json"))
 	}
@@ -320,6 +324,57 @@ func issueT3WebSocketToken(wsURL string) (string, error) {
 	return payload.Token, nil
 }
 
+func issueT3WebSocketTicket(wsURL, bearerToken string) (string, error) {
+	parsed, err := url.Parse(wsURL)
+	if err != nil {
+		return "", fmt.Errorf("parse ws url: %w", err)
+	}
+	switch parsed.Scheme {
+	case "ws":
+		parsed.Scheme = "http"
+	case "wss":
+		parsed.Scheme = "https"
+	default:
+		return "", fmt.Errorf("unsupported websocket scheme: %s", parsed.Scheme)
+	}
+	parsed.Path = "/api/auth/websocket-ticket"
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+
+	req, err := http.NewRequest(http.MethodPost, parsed.String(), nil)
+	if err != nil {
+		return "", fmt.Errorf("build websocket-ticket request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+bearerToken)
+
+	client := &http.Client{Timeout: bridgeHTTPTimeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("request websocket ticket: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		detail := runtime.RedactSecrets(strings.TrimSpace(string(body)), []string{bearerToken})
+		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
+			return "", fmt.Errorf("%w: status %d: %s", errWebSocketTicketUnsupported, resp.StatusCode, detail)
+		}
+		return "", fmt.Errorf("request websocket ticket: status %d: %s", resp.StatusCode, detail)
+	}
+
+	var payload struct {
+		Ticket string `json:"ticket"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return "", fmt.Errorf("decode websocket ticket: %w", err)
+	}
+	payload.Ticket = strings.TrimSpace(payload.Ticket)
+	if payload.Ticket == "" {
+		return "", fmt.Errorf("decode websocket ticket: empty ticket")
+	}
+	return payload.Ticket, nil
+}
+
 func isTransientBridgeError(err error) bool {
 	if err == nil {
 		return false
@@ -398,15 +453,31 @@ func isLoopbackWsURL(wsURL string) bool {
 }
 
 func authenticatedWsURL(wsURL string) (string, http.Header, error) {
+	bearerToken, err := resolveBearerSessionToken()
+	if err != nil {
+		return "", nil, err
+	}
+	if bearerToken != "" {
+		ticket, err := issueT3WebSocketTicket(wsURL, bearerToken)
+		if err != nil {
+			if errors.Is(err, errWebSocketTicketUnsupported) {
+				headers := http.Header{}
+				headers.Set("Authorization", "Bearer "+bearerToken)
+				return wsURL, headers, nil
+			}
+			return "", nil, err
+		}
+		parsed, err := url.Parse(wsURL)
+		if err != nil {
+			return "", nil, fmt.Errorf("parse authenticated ws url: %w", err)
+		}
+		query := parsed.Query()
+		query.Set("wsTicket", ticket)
+		parsed.RawQuery = query.Encode()
+		return parsed.String(), nil, nil
+	}
 	if isLoopbackWsURL(wsURL) {
 		return wsURL, nil, nil
-	}
-	if bearerToken, err := resolveBearerSessionToken(); err != nil {
-		return "", nil, err
-	} else if bearerToken != "" {
-		headers := http.Header{}
-		headers.Set("Authorization", "Bearer "+bearerToken)
-		return wsURL, headers, nil
 	}
 	wsToken, err := issueT3WebSocketToken(wsURL)
 	if err != nil {
@@ -1044,6 +1115,79 @@ func (p *Provider) rpcDispatchCommand(command map[string]interface{}) error {
 	return err
 }
 
+func (p *Provider) rpcHTTPSnapshot(bearerToken string) (map[string]interface{}, error) {
+	var lastErr error
+	var unsupportedErr error
+	var failures []string
+	for _, candidate := range resolveWsURLCandidates() {
+		parsed, err := url.Parse(candidate)
+		if err != nil {
+			lastErr = fmt.Errorf("%s: parse websocket url: %w", candidate, err)
+			failures = append(failures, lastErr.Error())
+			continue
+		}
+		switch parsed.Scheme {
+		case "ws":
+			parsed.Scheme = "http"
+		case "wss":
+			parsed.Scheme = "https"
+		default:
+			lastErr = fmt.Errorf("%s: unsupported websocket scheme: %s", candidate, parsed.Scheme)
+			failures = append(failures, lastErr.Error())
+			continue
+		}
+		parsed.Path = "/api/orchestration/snapshot"
+		parsed.RawQuery = ""
+		parsed.Fragment = ""
+
+		req, err := http.NewRequest(http.MethodGet, parsed.String(), nil)
+		if err != nil {
+			lastErr = fmt.Errorf("%s: build snapshot request: %w", candidate, err)
+			failures = append(failures, lastErr.Error())
+			continue
+		}
+		req.Header.Set("Authorization", "Bearer "+bearerToken)
+		resp, err := (&http.Client{Timeout: bridgeHTTPTimeout}).Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("%s: request orchestration snapshot: %w", candidate, err)
+			failures = append(failures, lastErr.Error())
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+			_ = resp.Body.Close()
+			detail := runtime.RedactSecrets(strings.TrimSpace(string(body)), []string{bearerToken})
+			if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
+				unsupportedErr = fmt.Errorf("%w: status %d: %s", errHTTPSnapshotUnsupported, resp.StatusCode, detail)
+				failures = append(failures, unsupportedErr.Error())
+				continue
+			}
+			lastErr = fmt.Errorf("%s: request orchestration snapshot: status %d: %s", candidate, resp.StatusCode, detail)
+			failures = append(failures, lastErr.Error())
+			continue
+		}
+		var snapshot map[string]interface{}
+		err = json.NewDecoder(resp.Body).Decode(&snapshot)
+		_ = resp.Body.Close()
+		if err != nil {
+			lastErr = fmt.Errorf("%s: decode orchestration snapshot: %w", candidate, err)
+			failures = append(failures, lastErr.Error())
+			continue
+		}
+		return snapshot, nil
+	}
+	if unsupportedErr != nil {
+		return nil, unsupportedErr
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no T3 WebSocket URL candidates")
+	}
+	if len(failures) > 1 {
+		return nil, fmt.Errorf("all T3 snapshot candidates failed: %s", strings.Join(failures, "; "))
+	}
+	return nil, lastErr
+}
+
 func (p *Provider) rpcSnapshot() (map[string]interface{}, error) {
 	p.mu.Lock()
 	if time.Since(p.snapshotCacheAt) < snapshotCacheTTL && p.snapshotSnapshot != nil {
@@ -1053,7 +1197,19 @@ func (p *Provider) rpcSnapshot() (map[string]interface{}, error) {
 	}
 	p.mu.Unlock()
 
-	snapshot, err := p.rpcCall("orchestration.getSnapshot", map[string]interface{}{})
+	bearerToken, err := resolveBearerSessionToken()
+	if err != nil {
+		return nil, err
+	}
+	var snapshot map[string]interface{}
+	if bearerToken != "" {
+		snapshot, err = p.rpcHTTPSnapshot(bearerToken)
+		if errors.Is(err, errHTTPSnapshotUnsupported) {
+			snapshot, err = p.rpcCall("orchestration.getSnapshot", map[string]interface{}{})
+		}
+	} else {
+		snapshot, err = p.rpcCall("orchestration.getSnapshot", map[string]interface{}{})
+	}
 	if err != nil {
 		return nil, err
 	}
