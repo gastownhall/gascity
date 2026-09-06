@@ -29,28 +29,32 @@ const (
 // error so operators can see why a setup command failed without hunting for
 // logs.
 //
-// Extracted from the tmux adapter as the shared core that host-side providers
-// (tmux, herdr) will delegate to, so lifecycle commands run with one set of
-// semantics: same GC_DIR cwd contract, same daemonizing-child tolerance, same
-// failure detail. As of this commit it has no callers — tmux
-// (internal/runtime/tmux/adapter.go) and herdr (internal/runtime/herdr/provider.go)
-// still run their own copies.
-//
-// PARITY REQUIRED BEFORE WIRING (tracked as gastownhall/gascity#5637): both current callers
-// have since grown an execgrace layer this snapshot predates. Before either
-// delegates here, this runner must regain: execgrace.NewMonitor budgets under
-// [session] setup_max_timeout (this version has a single fixed deadline),
-// execgrace.Apply cooperative process-group interrupt so shell rollback traps
-// run before SIGKILL (see adapter.go's note on stranded staged state), and
-// context.Cause in the failure wrap so the reported error names which budget
-// fired. Provider-specific behavior is also not covered here: tmux's
-// GC_TMUX_SOCKET injection and herdr's GC_DIR-exists-else-cityRoot fallback.
+// Extracted from the tmux adapter as the shared core that local providers can
+// delegate to, so lifecycle commands keep one GC_DIR cwd contract, bounded
+// output detail, daemonizing-child tolerance, and cooperative cancellation.
+// Provider-specific runners (tmux and herdr) retain their optional
+// activity-aware setup_max_timeout and transport-specific environment. This
+// shared path uses its explicit per-command timeout as the ceiling.
 func RunSetupCommand(ctx context.Context, command string, env map[string]string, timeout time.Duration) error {
+	return runSetupCommand(ctx, command, env, timeout, false)
+}
+
+// RunPreStart executes one pre_start command with the same bounded output and
+// cancellation semantics as the other lifecycle commands. A pre_start is
+// allowed to create cfg.WorkDir, so a missing GC_DIR is preserved in the
+// environment but is not used as the child cwd until it exists.
+func RunPreStart(ctx context.Context, command string, env map[string]string, timeout time.Duration) error {
+	return runSetupCommand(ctx, command, env, timeout, true)
+}
+
+func runSetupCommand(ctx context.Context, command string, env map[string]string, timeout time.Duration, allowMissingWorkDir bool) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	c := exec.CommandContext(ctx, "sh", "-c", command)
 	if workDir := strings.TrimSpace(env["GC_DIR"]); workDir != "" {
-		c.Dir = workDir
+		if _, err := os.Stat(workDir); err == nil || !allowMissingWorkDir || !os.IsNotExist(err) {
+			c.Dir = workDir
+		}
 	}
 	c.Env = os.Environ()
 	for k, v := range env {
@@ -64,14 +68,30 @@ func RunSetupCommand(ctx context.Context, command string, env map[string]string,
 	// command exits or the timeout fires, even if background descendants
 	// spawned by the command still hold them open.
 	c.WaitDelay = setupCommandWaitDelay
-	if err := c.Run(); err != nil {
+	// A context cancellation must interrupt the command group before the
+	// forced kill so setup scripts can run rollback traps and descendants cannot
+	// continue mutating a workdir after Start has returned.
+	finishSetupCommandCancellation := applySetupCommandCancellation(c, setupCommandWaitDelay)
+	runErr := c.Run()
+	// If cancellation made the command return early, synchronously terminate
+	// the whole process group before returning to the provider. A shell may run
+	// its rollback trap and exit while a redirected descendant ignores SIGINT;
+	// merely stopping the escalation timer here would leave that descendant
+	// mutating the workdir after Start reports failure.
+	if ctx.Err() != nil {
+		finishSetupCommandCancellation(true)
+	} else {
+		finishSetupCommandCancellation(false)
+	}
+	if runErr != nil {
 		// ErrWaitDelay means the command itself exited successfully and
 		// only the force-closed pipes ended the wait: a setup command that
 		// daemonizes a child holding inherited stdio and exits 0 succeeded.
-		if errors.Is(err, exec.ErrWaitDelay) {
+		if errors.Is(runErr, exec.ErrWaitDelay) && ctx.Err() == nil {
 			return nil
 		}
-		if ctxErr := ctx.Err(); ctxErr != nil {
+		err := runErr
+		if ctxErr := context.Cause(ctx); ctxErr != nil && ctx.Err() != nil {
 			err = fmt.Errorf("%w: %w", ctxErr, err)
 		}
 		return setupCommandFailure(err, stdout, stderr, SetupCommandSecrets(env))

@@ -113,10 +113,13 @@ func (pl *k8sPlace) Exec(ctx context.Context, req runtime.ExecRequest) (runtime.
 	return runtime.ExecResult{Output: out, Code: code}, nil
 }
 
-// Stage copies entries into the pod workspace via CopyTo/tar (←CopyTo). CopyTo is
-// best-effort when the pod is absent; a real copy failure returns an error and
-// aborts the batch at that entry.
+// Stage validates the complete batch before copying entries into the pod
+// workspace via CopyTo/tar (←CopyTo). CopyTo is best-effort when the pod is
+// absent; a real copy failure returns an error.
 func (pl *k8sPlace) Stage(_ context.Context, files []runtime.CopyEntry) error {
+	if err := runtime.ValidateCopyEntries(files); err != nil {
+		return err
+	}
 	for _, f := range files {
 		if err := pl.p.CopyTo(pl.name, f.Src, f.RelDst); err != nil {
 			return err

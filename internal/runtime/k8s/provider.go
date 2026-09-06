@@ -166,6 +166,9 @@ func newProviderWithOps(ops k8sOps) *Provider {
 
 // Start creates a new K8s pod running a tmux session with the agent command.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := runtime.ValidateCopyEntries(cfg.CopyFiles); err != nil {
+		return fmt.Errorf("starting session %q: %w", name, err)
+	}
 	if p.image == "" {
 		return fmt.Errorf("starting session %q: GC_K8S_IMAGE is required", name)
 	}
@@ -367,6 +370,9 @@ func (p *Provider) runPodPostLaunchSetup(ctx context.Context, podName string, cf
 func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if err := runtime.ValidateCopyEntries(cfg.CopyFiles); err != nil {
+		return fmt.Errorf("k8s relaunch %q: staging preflight: %w", name, err)
 	}
 	podName, err := p.findRunningPod(ctx, name)
 	if err != nil {
@@ -685,6 +691,9 @@ func (p *Provider) SleepCapability(string) runtime.SessionSleepCapability {
 
 // CopyTo copies a local file/directory into the pod via tar.
 func (p *Provider) CopyTo(name, src, relDst string) error {
+	if err := runtime.ValidateCopyRelDst(relDst); err != nil {
+		return err
+	}
 	ctx := context.Background()
 	podName, err := p.findRunningPod(ctx, name)
 	if err != nil {

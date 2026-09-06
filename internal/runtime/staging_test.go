@@ -63,7 +63,543 @@ func TestStageWorkDirSkipsCopyWhenSourceAlreadyMatchesResolvedDestination(t *tes
 	}
 }
 
-func TestStageWorkDirFailsWhenOverlayCopyWarns(t *testing.T) {
+func TestValidateLocalWorkDirRejectsUnsafePath(t *testing.T) {
+	root := t.TempDir()
+	notDirectory := filepath.Join(root, "not-a-directory")
+	if err := os.WriteFile(notDirectory, []byte("file"), 0o644); err != nil {
+		t.Fatalf("write non-directory fixture: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		workDir string
+		want    string
+	}{
+		{name: "relative", workDir: filepath.Join("relative", "workdir"), want: "absolute"},
+		{name: "missing", workDir: filepath.Join(root, "missing"), want: "does not exist"},
+		{name: "not directory", workDir: notDirectory, want: "not a directory"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateLocalWorkDir(tt.workDir)
+			if err == nil {
+				t.Fatal("ValidateLocalWorkDir() succeeded, want validation error")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("ValidateLocalWorkDir() error = %q, want substring %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestStageSessionWorkDirAllowsDirectoryPreparedByPreStart(t *testing.T) {
+	workDir := filepath.Join(t.TempDir(), "not-created-yet")
+	if err := StageSessionWorkDir(Config{WorkDir: workDir, PreStart: []string{"prepare-workdir"}}); !errors.Is(err, ErrWorkDirPendingPreStart) {
+		t.Fatalf("StageSessionWorkDir() error = %v, want ErrWorkDirPendingPreStart", err)
+	}
+}
+
+func TestStageSessionWorkDirDefersFilesUntilPreStartCreatesDirectory(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(root, "not-created-yet")
+	src := filepath.Join(root, "seed.txt")
+	if err := os.WriteFile(src, []byte("seed"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	err := StageSessionWorkDir(Config{
+		WorkDir:   workDir,
+		PreStart:  []string{"prepare-workdir"},
+		CopyFiles: []CopyEntry{{Src: src, RelDst: "seed.txt"}},
+	})
+	if !errors.Is(err, ErrWorkDirPendingPreStart) {
+		t.Fatalf("StageSessionWorkDir() error = %v, want ErrWorkDirPendingPreStart", err)
+	}
+	if _, statErr := os.Stat(workDir); !os.IsNotExist(statErr) {
+		t.Fatalf("workdir stat error = %v, want not exist", statErr)
+	}
+}
+
+func TestStageSessionWorkDirRejectsEscapingCopyDestination(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(root, "workdir")
+	if err := os.Mkdir(workDir, 0o755); err != nil {
+		t.Fatalf("mkdir workdir: %v", err)
+	}
+	src := filepath.Join(root, "seed.txt")
+	if err := os.WriteFile(src, []byte("seed"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		relDst string
+		path   string
+	}{
+		{name: "parent", relDst: filepath.Join("..", "outside-parent.txt"), path: filepath.Join(root, "outside-parent.txt")},
+		{name: "absolute", relDst: filepath.Join(root, "outside-absolute.txt"), path: filepath.Join(root, "outside-absolute.txt")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := StageSessionWorkDir(Config{
+				WorkDir:   workDir,
+				CopyFiles: []CopyEntry{{Src: src, RelDst: tt.relDst}},
+			})
+			if err == nil {
+				t.Fatal("StageSessionWorkDir() succeeded, want copy destination error")
+			}
+			if _, statErr := os.Stat(tt.path); !os.IsNotExist(statErr) {
+				t.Fatalf("outside destination stat error = %v, want not exist", statErr)
+			}
+		})
+	}
+}
+
+func TestStageSessionWorkDirPreflightsAllCopiesBeforeMutation(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(root, "workdir")
+	overlayDir := filepath.Join(root, "overlay")
+	for _, dir := range []string{workDir, overlayDir} {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %q: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(overlayDir, "overlay.txt"), []byte("overlay"), 0o644); err != nil {
+		t.Fatalf("write overlay: %v", err)
+	}
+	validSrc := filepath.Join(root, "valid.txt")
+	invalidSrc := filepath.Join(root, "invalid.txt")
+	for _, path := range []string{validSrc, invalidSrc} {
+		if err := os.WriteFile(path, []byte("payload"), 0o644); err != nil {
+			t.Fatalf("write source %q: %v", path, err)
+		}
+	}
+
+	err := StageSessionWorkDir(Config{
+		WorkDir:    workDir,
+		OverlayDir: overlayDir,
+		CopyFiles: []CopyEntry{
+			{Src: validSrc, RelDst: "valid.txt"},
+			{Src: invalidSrc, RelDst: filepath.Join("..", "outside.txt")},
+		},
+	})
+	if err == nil {
+		t.Fatal("StageSessionWorkDir() succeeded, want malformed copy destination error")
+	}
+	for _, path := range []string{
+		filepath.Join(workDir, "overlay.txt"),
+		filepath.Join(workDir, "valid.txt"),
+		filepath.Join(root, "outside.txt"),
+	} {
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("destination %q stat error = %v, want not exist", path, statErr)
+		}
+	}
+}
+
+func TestStageSessionWorkDirRejectsSymlinkCopyDestinationEscape(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(root, "workdir")
+	outsideDir := filepath.Join(root, "outside")
+	for _, dir := range []string{workDir, outsideDir} {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %q: %v", dir, err)
+		}
+	}
+	link := filepath.Join(workDir, "linked")
+	if err := os.Symlink(outsideDir, link); err != nil {
+		t.Skipf("symlink fixture unavailable: %v", err)
+	}
+	src := filepath.Join(root, "seed.txt")
+	if err := os.WriteFile(src, []byte("seed"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	err := StageSessionWorkDir(Config{
+		WorkDir:   workDir,
+		CopyFiles: []CopyEntry{{Src: src, RelDst: filepath.Join("linked", "copied.txt")}},
+	})
+	if err == nil {
+		t.Fatal("StageSessionWorkDir() succeeded, want symlink escape error")
+	}
+	if _, statErr := os.Stat(filepath.Join(outsideDir, "copied.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("outside destination stat error = %v, want not exist", statErr)
+	}
+}
+
+func TestStageSessionWorkDirRejectsNestedSymlinkDestinationEscape(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(root, "workdir")
+	outsideDir := filepath.Join(root, "outside")
+	srcDir := filepath.Join(root, "source")
+	for _, dir := range []string{
+		filepath.Join(workDir, "dest"),
+		outsideDir,
+		filepath.Join(srcDir, "nested"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %q: %v", dir, err)
+		}
+	}
+	if err := os.Symlink(outsideDir, filepath.Join(workDir, "dest", "nested")); err != nil {
+		t.Skipf("symlink fixture unavailable: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "nested", "pwn"), []byte("escaped"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	err := StageSessionWorkDir(Config{
+		WorkDir:   workDir,
+		CopyFiles: []CopyEntry{{Src: srcDir, RelDst: "dest"}},
+	})
+	if err == nil {
+		t.Fatal("StageSessionWorkDir() succeeded, want nested symlink escape error")
+	}
+	if _, statErr := os.Stat(filepath.Join(outsideDir, "pwn")); !os.IsNotExist(statErr) {
+		t.Fatalf("outside destination stat error = %v, want not exist", statErr)
+	}
+}
+
+func TestStageSessionWorkDirRejectsNestedSymlinkDestinationForSymlinkedSourceRoot(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(root, "workdir")
+	outsideDir := filepath.Join(root, "outside")
+	realSrcDir := filepath.Join(root, "real-source")
+	linkedSrcDir := filepath.Join(root, "linked-source")
+	for _, dir := range []string{
+		filepath.Join(workDir, "dest"),
+		outsideDir,
+		filepath.Join(realSrcDir, "nested"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %q: %v", dir, err)
+		}
+	}
+	if err := os.Symlink(realSrcDir, linkedSrcDir); err != nil {
+		t.Skipf("source symlink fixture unavailable: %v", err)
+	}
+	if err := os.Symlink(outsideDir, filepath.Join(workDir, "dest", "nested")); err != nil {
+		t.Skipf("destination symlink fixture unavailable: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(realSrcDir, "nested", "pwn"), []byte("escaped"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	err := StageSessionWorkDir(Config{
+		WorkDir:   workDir,
+		CopyFiles: []CopyEntry{{Src: linkedSrcDir, RelDst: "dest"}},
+	})
+	if err == nil {
+		t.Fatal("StageSessionWorkDir() succeeded, want nested symlink escape error")
+	}
+	if _, statErr := os.Stat(filepath.Join(outsideDir, "pwn")); !os.IsNotExist(statErr) {
+		t.Fatalf("outside destination stat error = %v, want not exist", statErr)
+	}
+}
+
+func TestStageSessionWorkDirPreflightsNestedDestinationsBeforeMutation(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(root, "workdir")
+	outsideDir := filepath.Join(root, "outside")
+	treeSrc := filepath.Join(root, "tree-source")
+	overlayDir := filepath.Join(root, "overlay")
+	for _, dir := range []string{
+		filepath.Join(workDir, "dest"),
+		outsideDir,
+		filepath.Join(treeSrc, "nested"),
+		overlayDir,
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %q: %v", dir, err)
+		}
+	}
+	if err := os.Symlink(outsideDir, filepath.Join(workDir, "dest", "nested")); err != nil {
+		t.Skipf("symlink fixture unavailable: %v", err)
+	}
+	validSrc := filepath.Join(root, "valid.txt")
+	if err := os.WriteFile(validSrc, []byte("valid"), 0o644); err != nil {
+		t.Fatalf("write valid source: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(treeSrc, "nested", "pwn"), []byte("escaped"), 0o644); err != nil {
+		t.Fatalf("write tree source: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(overlayDir, "overlay.txt"), []byte("overlay"), 0o644); err != nil {
+		t.Fatalf("write overlay source: %v", err)
+	}
+
+	err := StageSessionWorkDir(Config{
+		WorkDir:    workDir,
+		OverlayDir: overlayDir,
+		CopyFiles: []CopyEntry{
+			{Src: validSrc, RelDst: "valid.txt"},
+			{Src: treeSrc, RelDst: "dest"},
+		},
+	})
+	if err == nil {
+		t.Fatal("StageSessionWorkDir() succeeded, want nested symlink escape error")
+	}
+	for _, path := range []string{
+		filepath.Join(workDir, "overlay.txt"),
+		filepath.Join(workDir, "valid.txt"),
+		filepath.Join(outsideDir, "pwn"),
+	} {
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("destination %q stat error = %v, want not exist", path, statErr)
+		}
+	}
+}
+
+func TestStageSessionWorkDirPreflightsCrossLayerFileDirectoryConflict(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(root, "workdir")
+	overlayDir := filepath.Join(root, "overlay")
+	src := filepath.Join(root, "seed.txt")
+	for _, dir := range []string{workDir, overlayDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q): %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(overlayDir, "blocked"), []byte("overlay"), 0o644); err != nil {
+		t.Fatalf("write overlay file: %v", err)
+	}
+	if err := os.WriteFile(src, []byte("copy"), 0o644); err != nil {
+		t.Fatalf("write copy source: %v", err)
+	}
+
+	err := StageSessionWorkDir(Config{
+		WorkDir:    workDir,
+		OverlayDir: overlayDir,
+		CopyFiles:  []CopyEntry{{Src: src, RelDst: filepath.Join("blocked", "seed.txt")}},
+	})
+	if err == nil {
+		t.Fatal("StageSessionWorkDir() succeeded, want cross-layer type conflict")
+	}
+	if _, statErr := os.Stat(filepath.Join(workDir, "blocked")); !os.IsNotExist(statErr) {
+		t.Fatalf("overlay was partially staged: stat error = %v", statErr)
+	}
+}
+
+func TestStageSessionWorkDirPreflightsContainedSymlinkAliasesAcrossLayers(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(root, "workdir")
+	overlayDir := filepath.Join(root, "overlay")
+	realDir := filepath.Join(workDir, "real")
+	alias := filepath.Join(workDir, "alias")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatalf("mkdir real destination: %v", err)
+	}
+	if err := os.Symlink(realDir, alias); err != nil {
+		t.Skipf("symlink fixture unavailable: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(overlayDir, "alias"), 0o755); err != nil {
+		t.Fatalf("mkdir overlay alias: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(overlayDir, "alias", "blocked"), []byte("overlay"), 0o644); err != nil {
+		t.Fatalf("write overlay file: %v", err)
+	}
+	src := filepath.Join(root, "copy.txt")
+	if err := os.WriteFile(src, []byte("copy"), 0o644); err != nil {
+		t.Fatalf("write copy source: %v", err)
+	}
+
+	err := StageSessionWorkDir(Config{
+		WorkDir:    workDir,
+		OverlayDir: overlayDir,
+		CopyFiles:  []CopyEntry{{Src: src, RelDst: filepath.Join("real", "blocked", "nested.txt")}},
+	})
+	if err == nil {
+		t.Fatal("StageSessionWorkDir() succeeded, want contained symlink alias conflict")
+	}
+	if _, statErr := os.Stat(filepath.Join(realDir, "blocked")); !os.IsNotExist(statErr) {
+		t.Fatalf("overlay was partially staged through alias: stat error = %v, want not exist", statErr)
+	}
+}
+
+func TestStageSessionWorkDirPreflightsOverlayLayerTypeConflict(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(root, "workdir")
+	first := filepath.Join(root, "first")
+	second := filepath.Join(root, "second")
+	for _, dir := range []string{workDir, first, second} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q): %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(first, "blocked"), []byte("first"), 0o644); err != nil {
+		t.Fatalf("write first overlay: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(second, "blocked"), 0o755); err != nil {
+		t.Fatalf("MkdirAll second nested: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(second, "blocked", "seed.txt"), []byte("second"), 0o644); err != nil {
+		t.Fatalf("write second overlay: %v", err)
+	}
+
+	err := StageSessionWorkDir(Config{WorkDir: workDir, PackOverlayDirs: []string{first, second}})
+	if err == nil {
+		t.Fatal("StageSessionWorkDir() succeeded, want overlay layer type conflict")
+	}
+	if _, statErr := os.Stat(filepath.Join(workDir, "blocked")); !os.IsNotExist(statErr) {
+		t.Fatalf("overlay was partially staged: stat error = %v", statErr)
+	}
+}
+
+func TestStageSessionWorkDirPreflightsCopyLayerTypeConflict(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(root, "workdir")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll workdir: %v", err)
+	}
+	first := filepath.Join(root, "first.txt")
+	second := filepath.Join(root, "second.txt")
+	for _, path := range []string{first, second} {
+		if err := os.WriteFile(path, []byte(path), 0o644); err != nil {
+			t.Fatalf("write source %q: %v", path, err)
+		}
+	}
+
+	err := StageSessionWorkDir(Config{
+		WorkDir: workDir,
+		CopyFiles: []CopyEntry{
+			{Src: first, RelDst: "blocked"},
+			{Src: second, RelDst: filepath.Join("blocked", "nested.txt")},
+		},
+	})
+	if err == nil {
+		t.Fatal("StageSessionWorkDir() succeeded, want copy layer type conflict")
+	}
+	if _, statErr := os.Stat(filepath.Join(workDir, "blocked")); !os.IsNotExist(statErr) {
+		t.Fatalf("copy was partially staged: stat error = %v", statErr)
+	}
+}
+
+func TestStageSessionWorkDirRejectsNestedSymlinkOverlayDestinationEscape(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(root, "workdir")
+	outsideDir := filepath.Join(root, "outside")
+	overlayDir := filepath.Join(root, "overlay")
+	for _, dir := range []string{
+		workDir,
+		outsideDir,
+		filepath.Join(overlayDir, "nested"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %q: %v", dir, err)
+		}
+	}
+	if err := os.Symlink(outsideDir, filepath.Join(workDir, "nested")); err != nil {
+		t.Skipf("symlink fixture unavailable: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(overlayDir, "nested", "pwn"), []byte("escaped"), 0o644); err != nil {
+		t.Fatalf("write overlay source: %v", err)
+	}
+
+	err := StageSessionWorkDir(Config{WorkDir: workDir, OverlayDir: overlayDir})
+	if err == nil {
+		t.Fatal("StageSessionWorkDir() succeeded, want nested overlay symlink escape error")
+	}
+	if _, statErr := os.Stat(filepath.Join(outsideDir, "pwn")); !os.IsNotExist(statErr) {
+		t.Fatalf("outside destination stat error = %v, want not exist", statErr)
+	}
+}
+
+func TestStageSessionWorkDirPreflightsAllOverlaysBeforeMutation(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(root, "workdir")
+	outsideDir := filepath.Join(root, "outside")
+	firstOverlay := filepath.Join(root, "first-overlay")
+	secondOverlay := filepath.Join(root, "second-overlay")
+	for _, dir := range []string{
+		workDir,
+		outsideDir,
+		firstOverlay,
+		filepath.Join(secondOverlay, "nested"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %q: %v", dir, err)
+		}
+	}
+	if err := os.Symlink(outsideDir, filepath.Join(workDir, "nested")); err != nil {
+		t.Skipf("symlink fixture unavailable: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(firstOverlay, "first.txt"), []byte("first"), 0o644); err != nil {
+		t.Fatalf("write first overlay: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(secondOverlay, "nested", "pwn"), []byte("escaped"), 0o644); err != nil {
+		t.Fatalf("write second overlay: %v", err)
+	}
+
+	err := StageSessionWorkDir(Config{
+		WorkDir:         workDir,
+		PackOverlayDirs: []string{firstOverlay, secondOverlay},
+	})
+	if err == nil {
+		t.Fatal("StageSessionWorkDir() succeeded, want nested overlay symlink escape error")
+	}
+	for _, path := range []string{
+		filepath.Join(workDir, "first.txt"),
+		filepath.Join(outsideDir, "pwn"),
+	} {
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("destination %q stat error = %v, want not exist", path, statErr)
+		}
+	}
+}
+
+func TestStageSessionWorkDirAllowsContainedSymlinkCopyDestination(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(root, "workdir")
+	targetDir := filepath.Join(workDir, "target")
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		t.Fatalf("mkdir target: %v", err)
+	}
+	if err := os.Symlink(targetDir, filepath.Join(workDir, "linked")); err != nil {
+		t.Skipf("symlink fixture unavailable: %v", err)
+	}
+	src := filepath.Join(root, "seed.txt")
+	if err := os.WriteFile(src, []byte("seed"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	if err := StageSessionWorkDir(Config{
+		WorkDir:   workDir,
+		CopyFiles: []CopyEntry{{Src: src, RelDst: filepath.Join("linked", "copied.txt")}},
+	}); err != nil {
+		t.Fatalf("StageSessionWorkDir() error = %v, want contained symlink allowed", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(targetDir, "copied.txt")); err != nil {
+		t.Fatalf("read copied file: %v", err)
+	} else if string(data) != "seed" {
+		t.Fatalf("copied data = %q, want seed", data)
+	}
+}
+
+func TestStageSessionWorkDirDoesNotRestageProbedFileAlreadyInWorkDir(t *testing.T) {
+	workDir := t.TempDir()
+	hookPath := filepath.Join(workDir, ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
+		t.Fatalf("mkdir hook directory: %v", err)
+	}
+	if err := os.WriteFile(hookPath, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write hook: %v", err)
+	}
+
+	if err := StageSessionWorkDir(Config{
+		WorkDir: workDir,
+		CopyFiles: []CopyEntry{{
+			Src: hookPath, RelDst: filepath.Join("worker", ".codex", "hooks.json"), Probed: true,
+		}},
+	}); err != nil {
+		t.Fatalf("StageSessionWorkDir() error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, "worker")); !os.IsNotExist(err) {
+		t.Fatalf("nested restaging path stat error = %v, want not exist", err)
+	}
+}
+
+func TestStageWorkDirRejectsOverlayWarningBeforePartialCopy(t *testing.T) {
 	t.Parallel()
 
 	srcDir := t.TempDir()
@@ -86,10 +622,30 @@ func TestStageWorkDirFailsWhenOverlayCopyWarns(t *testing.T) {
 	if err == nil {
 		t.Fatal("StageWorkDir() succeeded, want overlay staging error")
 	}
-	if data, readErr := os.ReadFile(filepath.Join(workDir, "ok.txt")); readErr != nil {
-		t.Fatalf("read copied overlay file: %v", readErr)
-	} else if string(data) != "copied" {
-		t.Fatalf("copied overlay file = %q, want %q", string(data), "copied")
+	if _, statErr := os.Stat(filepath.Join(workDir, "ok.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("copied overlay stat error = %v, want not exist", statErr)
+	}
+}
+
+func TestStageWorkDirPreflightsCopiesBeforeOverlayMutation(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(root, "workdir")
+	overlayDir := filepath.Join(root, "overlay")
+	for _, dir := range []string{workDir, overlayDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %q: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(overlayDir, "overlay.txt"), []byte("overlay"), 0o644); err != nil {
+		t.Fatalf("write overlay source: %v", err)
+	}
+
+	err := StageWorkDir(workDir, overlayDir, []CopyEntry{{RelDst: filepath.Join("..", "outside")}})
+	if err == nil {
+		t.Fatal("StageWorkDir() succeeded, want malformed copy destination error")
+	}
+	if _, statErr := os.Stat(filepath.Join(workDir, "overlay.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("overlay destination stat error = %v, want not exist", statErr)
 	}
 }
 

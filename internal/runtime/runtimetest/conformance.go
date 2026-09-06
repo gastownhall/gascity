@@ -15,6 +15,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -561,6 +563,16 @@ func RunSessionTests(t *testing.T, sp runtime.Provider, cfg runtime.Config, name
 		// missing (best-effort contract).
 		if err := sp.CopyTo(name, "/nonexistent-path-for-conformance", ""); err != nil {
 			t.Errorf("CopyTo: %v", err)
+		}
+	})
+
+	t.Run("CopyTo_RejectsEscapingRelDst", func(t *testing.T) {
+		src := filepath.Join(t.TempDir(), "seed.txt")
+		if err := os.WriteFile(src, []byte("seed"), 0o644); err != nil {
+			t.Fatalf("write CopyTo source: %v", err)
+		}
+		if err := sp.CopyTo(name, src, filepath.Join("..", "outside.txt")); err == nil {
+			t.Error("CopyTo with escaping relDst succeeded, want validation error")
 		}
 	})
 

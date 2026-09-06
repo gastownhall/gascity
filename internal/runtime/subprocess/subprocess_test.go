@@ -790,6 +790,34 @@ func TestStartStagesSingleFileCopyIntoWorkDirRoot(t *testing.T) {
 	}
 }
 
+func TestStartRunsPreStartBeforeStagingMissingWorkDir(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(root, "work")
+	src := filepath.Join(root, "seed.txt")
+	if err := os.WriteFile(src, []byte("seed data"), 0o644); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+
+	p := newTestProvider(t)
+	err := p.Start(context.Background(), "prestart-copy", runtime.Config{
+		Command:   "sleep 3600",
+		WorkDir:   workDir,
+		PreStart:  []string{"mkdir -p \"$GC_DIR\""},
+		CopyFiles: []runtime.CopyEntry{{Src: src, RelDst: "copied.txt"}},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer p.Stop("prestart-copy") //nolint:errcheck
+	data, err := os.ReadFile(filepath.Join(workDir, "copied.txt"))
+	if err != nil {
+		t.Fatalf("read staged file: %v", err)
+	}
+	if string(data) != "seed data" {
+		t.Fatalf("staged file = %q, want seed data", data)
+	}
+}
+
 func TestStartStagesKiroPackOverlayBeforeLaunch(t *testing.T) {
 	workDir := t.TempDir()
 	packOverlay := t.TempDir()
@@ -856,6 +884,21 @@ func TestStartFailsWhenCopyFileCannotBeStaged(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("Start should fail when staging a copy file fails")
+	}
+}
+
+func TestStartRejectsMalformedCopyBeforeSessionLifecycle(t *testing.T) {
+	p := newTestProvider(t)
+	p.procs["existing"] = &sessionConn{done: make(chan struct{})}
+
+	err := p.Start(context.Background(), "existing", runtime.Config{
+		CopyFiles: []runtime.CopyEntry{{RelDst: "../outside"}},
+	})
+	if err == nil {
+		t.Fatal("Start should reject a malformed copy destination")
+	}
+	if errors.Is(err, runtime.ErrSessionExists) {
+		t.Fatalf("Start checked session lifecycle before copy validation: %v", err)
 	}
 }
 

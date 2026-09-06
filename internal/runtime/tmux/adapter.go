@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/execgrace"
-	"github.com/gastownhall/gascity/internal/overlay"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -77,63 +76,51 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	}
 	cfg.Env = injectSessionRuntimeHintsEnv(cfg.Env, cfg)
 
-	// Store workDir for CopyTo.
+	startCfg := cfg
+	ops := newTmuxStartOps(p.tm, p.cfg.RuntimeDir, p.cfg.SetupMaxTimeout, cfg)
+	if err := stageStartFiles(cfg, os.Stderr); err != nil {
+		if !errors.Is(err, runtime.ErrWorkDirPendingPreStart) {
+			return err
+		}
+		if err := runPreStart(ctx, ops, name, cfg, p.cfg.SetupTimeout); err != nil {
+			return fmt.Errorf("running pre_start: %w", err)
+		}
+		if err := stageStartFiles(cfg, os.Stderr); err != nil {
+			return fmt.Errorf("staging workdir after pre_start: %w", err)
+		}
+		startCfg.PreStart = nil
+	}
+
+	// Store only a validated, successfully staged workDir for CopyTo.
 	if cfg.WorkDir != "" {
 		p.mu.Lock()
 		p.workDirs[name] = cfg.WorkDir
 		p.mu.Unlock()
 	}
 
-	if err := stageStartFiles(cfg, os.Stderr); err != nil {
-		return err
-	}
-
-	err = doStartSession(ctx, newTmuxStartOps(p.tm, p.cfg.RuntimeDir, p.cfg.SetupMaxTimeout, cfg), name, cfg, p.cfg.SetupTimeout)
+	err = doStartSession(ctx, ops, name, startCfg, p.cfg.SetupTimeout)
 	if err == nil {
 		p.cache.Invalidate()
 		return nil
 	}
 	if errors.Is(err, ErrServerDegraded) {
+		p.mu.Lock()
+		delete(p.workDirs, name)
+		p.mu.Unlock()
 		return err
 	}
 	p.cleanupFailedStart(name, cfg)
+	p.mu.Lock()
+	delete(p.workDirs, name)
+	p.mu.Unlock()
 	return err
 }
 
 func stageStartFiles(cfg runtime.Config, warnings io.Writer) error {
-	// Copy overlays and CopyFiles before creating the tmux session.
-	// Local provider: files are on the same filesystem.
-	// V2 per-provider overlay support: StageProviderOverlayDir copies universal
-	// files then flattened per-provider/<provider>/ slots for ProviderOverlayName
-	// with ProviderName fallback, plus any InstallAgentHooks entries.
-	overlayProviders := runtime.EffectiveOverlayProviderNames(cfg)
-	if cfg.WorkDir != "" {
-		for _, od := range cfg.PackOverlayDirs {
-			if err := runtime.StageProviderOverlayDir(od, cfg.WorkDir, overlayProviders, warnings); err != nil {
-				return fmt.Errorf("copying pack overlay %s: %w", od, err)
-			}
-		}
-	}
-	// Agent-level overlay (highest priority; merges known settings files, overwrites others).
-	if cfg.OverlayDir != "" && cfg.WorkDir != "" {
-		if err := runtime.StageProviderOverlayDir(cfg.OverlayDir, cfg.WorkDir, overlayProviders, warnings); err != nil {
-			return fmt.Errorf("copying overlay %s: %w", cfg.OverlayDir, err)
-		}
-	}
-	for _, cf := range cfg.CopyFiles {
-		dst := cfg.WorkDir
-		if cf.RelDst != "" {
-			dst = filepath.Join(cfg.WorkDir, cf.RelDst)
-		}
-		// Skip if src and dst are the same path.
-		if absSrc, err := filepath.Abs(cf.Src); err == nil {
-			if absDst, err := filepath.Abs(dst); err == nil && absSrc == absDst {
-				continue
-			}
-		}
-		_ = overlay.CopyFileOrDir(cf.Src, dst, io.Discard)
-	}
-	return nil
+	// Keep tmux on the same strict local staging boundary as subprocess, ACP,
+	// and herdr. The former duplicate silently ignored CopyFiles failures and
+	// joined unchecked destinations before session creation.
+	return runtime.StageSessionWorkDirWithWarnings(cfg, warnings)
 }
 
 func ensureInstanceToken(env map[string]string) (map[string]string, error) {
@@ -237,10 +224,36 @@ func (p *Provider) RunLive(name string, cfg runtime.Config) error {
 // re-stage files (those are provision-half and unchanged on a launch-only change),
 // and on failure it leaves the warm box in place rather than tearing it down.
 func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := runtime.ValidateCopyEntries(cfg.CopyFiles); err != nil {
+		return fmt.Errorf("relaunching session %q: %w", name, err)
+	}
+	// Relaunch does not restage the warm box, but it must still prove that the
+	// destination tree is safe before respawning the model. A missing workdir
+	// may be created by pre_start; all other local path and symlink failures are
+	// rejected before touching the session.
+	if err := validateRelaunchWorkDir(cfg); err != nil {
+		return fmt.Errorf("relaunching session %q: %w", name, err)
+	}
 	if err := doRelaunchSession(ctx, newTmuxStartOps(p.tm, "", p.cfg.SetupMaxTimeout, cfg), name, cfg, p.cfg.SetupTimeout); err != nil {
 		return err
 	}
 	p.cache.Invalidate()
+	return nil
+}
+
+func validateRelaunchWorkDir(cfg runtime.Config) error {
+	if err := runtime.ValidateStageSessionWorkDir(cfg); err != nil && !errors.Is(err, runtime.ErrWorkDirPendingPreStart) {
+		return err
+	}
+	if cfg.WorkDir == "" {
+		return nil
+	}
+	if err := runtime.ValidateLocalWorkDir(cfg.WorkDir); err != nil {
+		if errors.Is(err, os.ErrNotExist) && len(cfg.PreStart) > 0 {
+			return nil
+		}
+		return err
+	}
 	return nil
 }
 
@@ -746,20 +759,30 @@ func (p *Provider) SendKeys(name string, keys ...string) error {
 // CopyTo copies src into the named session's working directory at relDst.
 // Best-effort: returns nil if session unknown or src missing.
 func (p *Provider) CopyTo(name, src, relDst string) error {
+	return p.CopyBatchTo(name, []runtime.CopyEntry{{Src: src, RelDst: relDst}})
+}
+
+// CopyBatchTo copies a complete batch into the named session's working
+// directory. The runtime stages all entries through one preflight before the
+// first write, so a later malformed or symlink-escaping entry cannot leave an
+// earlier entry partially copied.
+func (p *Provider) CopyBatchTo(name string, files []runtime.CopyEntry) error {
+	if len(files) == 0 {
+		return nil
+	}
+	if err := runtime.ValidateCopyEntries(files); err != nil {
+		return err
+	}
 	p.mu.Lock()
 	wd := p.workDirs[name]
 	p.mu.Unlock()
 	if wd == "" {
 		return nil // unknown session
 	}
-	if _, err := os.Stat(src); err != nil {
-		return nil // src missing
+	if err := runtime.StageWorkDir(wd, "", files); err != nil {
+		return fmt.Errorf("copying into session %q: %w", name, err)
 	}
-	dst := wd
-	if relDst != "" {
-		dst = filepath.Join(wd, relDst)
-	}
-	return overlay.CopyFileOrDir(src, dst, io.Discard)
+	return nil
 }
 
 // Attach connects the user's terminal to the named tmux session.
@@ -880,6 +903,11 @@ const (
 )
 
 func (o *tmuxStartOps) createSession(name, workDir, command string, env map[string]string) error {
+	if workDir != "" {
+		if err := runtime.ValidateLocalWorkDir(workDir); err != nil {
+			return fmt.Errorf("refusing to create tmux session %q with invalid workdir: %w", name, err)
+		}
+	}
 	if command != "" || len(env) > 0 {
 		return o.tm.NewSessionWithCommandAndEnv(name, workDir, command, env)
 	}
@@ -900,6 +928,11 @@ func (o *tmuxStartOps) createSession(name, workDir, command string, env map[stri
 // already marked is a no-op, and only controller-scope keys are marked, so a
 // relaunch that withholds no credential costs no extra tmux call at all.
 func (o *tmuxStartOps) respawnAgent(name, workDir, command string, env map[string]string) error {
+	if workDir != "" {
+		if err := runtime.ValidateLocalWorkDir(workDir); err != nil {
+			return fmt.Errorf("refusing to respawn tmux session %q with invalid workdir: %w", name, err)
+		}
+	}
 	if err := o.tm.markSessionEnvRemoved(name, durableWithholdKeys(env)); err != nil {
 		return err
 	}
@@ -1303,6 +1336,14 @@ func doRelaunchSession(ctx context.Context, ops startOps, name string, cfg runti
 	// rationale that makes pre_start failures fatal in doStartSession.
 	if err := runPreStart(ctx, ops, name, cfg, setupTimeout); err != nil {
 		return fmt.Errorf("relaunch: running pre_start: %w", err)
+	}
+	if err := runtime.ValidateStageSessionWorkDir(cfg); err != nil {
+		return fmt.Errorf("relaunch: staging preflight after pre_start: %w", err)
+	}
+	if cfg.WorkDir != "" {
+		if err := runtime.ValidateLocalWorkDir(cfg.WorkDir); err != nil {
+			return fmt.Errorf("relaunch: invalid workdir after pre_start: %w", err)
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return err

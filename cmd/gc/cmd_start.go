@@ -1269,11 +1269,17 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string, hoo
 	// Compute the relative path from cityPath to workDir so that
 	// container-side RelDst places files under the agent's WorkingDir
 	// (/workspace/<relWorkDir>/), not always at /workspace/.
-	// When workDir == cityPath, relWorkDir is "." and path.Join collapses it.
+	// When workDir is outside cityPath, the remote provider projects that rig
+	// directly at its workspace root, so the destination is workdir-relative.
+	// Never propagate filepath.Rel's leading ".." into CopyEntry.RelDst: local
+	// providers resolve RelDst against workDir and would otherwise write outside
+	// the session checkout before the model starts.
 	relWorkDir := "."
 	if workDir != cityPath {
 		if r, err := filepath.Rel(cityPath, workDir); err == nil {
-			relWorkDir = r
+			if runtime.ValidateCopyRelDst(r) == nil {
+				relWorkDir = r
+			}
 		}
 	}
 

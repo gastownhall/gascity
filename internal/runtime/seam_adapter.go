@@ -60,6 +60,9 @@ func NewProviderFromSeams(rt Runtime, tp Transport) Provider {
 // For an exec pack that declares proc.provision (B3b), Provision creates the box
 // WITHOUT the agent (SeparableLaunch true), so Start must Provision THEN Launch.
 func (s *seamProvider) Start(ctx context.Context, name string, cfg Config) error {
+	if err := ValidateCopyEntries(cfg.CopyFiles); err != nil {
+		return fmt.Errorf("seam start %q: staging preflight: %w", name, err)
+	}
 	place, err := s.rt.Provision(ctx, name, ProvisionRequest{Config: cfg})
 	if err != nil {
 		return err
@@ -217,6 +220,9 @@ func (s *seamProvider) ClearScrollback(name string) error {
 }
 
 func (s *seamProvider) CopyTo(name, src, relDst string) error {
+	if err := ValidateCopyRelDst(relDst); err != nil {
+		return err
+	}
 	ctx := context.Background()
 	place, ok, err := s.rt.Open(ctx, name)
 	if err != nil || !ok {

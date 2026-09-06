@@ -197,6 +197,22 @@ func TestProvider_StartFailsClosedWhenStagingFails(t *testing.T) {
 // TestProvider_RelaunchKeepsSecretEnvOutOfArgv covers the warm-box path: no -e
 // is re-applied, but the setup prelude still has to export the credentials, and
 // it must do it from the staged file rather than inline in `sh -c`.
+func TestProvider_RelaunchRejectsMalformedCopyBeforeRemoteCalls(t *testing.T) {
+	f := &fakeRunner{}
+	p := providerWith(f)
+
+	err := p.Relaunch(context.Background(), "s", runtime.Config{
+		Command:   "agent --resumed",
+		CopyFiles: []runtime.CopyEntry{{Src: "/seed", RelDst: "../outside"}},
+	})
+	if err == nil {
+		t.Fatal("Relaunch() succeeded, want malformed copy destination error")
+	}
+	if len(f.calls) != 0 {
+		t.Fatalf("remote calls before staging preflight = %v, want none", f.calls)
+	}
+}
+
 func TestProvider_RelaunchKeepsSecretEnvOutOfArgv(t *testing.T) {
 	const secret = "sk-test-not-a-real-credential"
 	f := &fakeRunner{respond: answerStaging(nil)}

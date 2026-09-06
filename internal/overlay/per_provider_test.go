@@ -222,6 +222,54 @@ func TestCopyDirForProviders_KiroWarnsWhenPreservingExistingInstructions(t *test
 	}
 }
 
+func TestCopyDirForProvidersRejectsNestedDestinationSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	src := filepath.Join(root, "source")
+	dst := filepath.Join(root, "workdir")
+	outside := filepath.Join(root, "outside")
+	for _, dir := range []string{filepath.Join(src, "nested"), dst, outside} {
+		mustMkdirAll(t, dir)
+	}
+	if err := os.Symlink(outside, filepath.Join(dst, "nested")); err != nil {
+		t.Skipf("symlink fixture unavailable: %v", err)
+	}
+	mustWriteFile(t, filepath.Join(src, "nested", "pwn"), []byte("escaped"), 0o644)
+
+	err := CopyDirForProviders(src, dst, nil, io.Discard)
+	if err == nil {
+		t.Fatal("CopyDirForProviders() succeeded, want nested symlink escape error")
+	}
+	if _, statErr := os.Stat(filepath.Join(outside, "pwn")); !os.IsNotExist(statErr) {
+		t.Fatalf("outside destination stat error = %v, want not exist", statErr)
+	}
+}
+
+func TestCopyDirForProvidersRejectsNestedDestinationSymlinkEscapeFromSymlinkedSourceRoot(t *testing.T) {
+	root := t.TempDir()
+	realSrc := filepath.Join(root, "real-source")
+	linkedSrc := filepath.Join(root, "linked-source")
+	dst := filepath.Join(root, "workdir")
+	outside := filepath.Join(root, "outside")
+	for _, dir := range []string{filepath.Join(realSrc, "nested"), dst, outside} {
+		mustMkdirAll(t, dir)
+	}
+	if err := os.Symlink(realSrc, linkedSrc); err != nil {
+		t.Skipf("source symlink fixture unavailable: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dst, "nested")); err != nil {
+		t.Skipf("destination symlink fixture unavailable: %v", err)
+	}
+	mustWriteFile(t, filepath.Join(realSrc, "nested", "pwn"), []byte("escaped"), 0o644)
+
+	err := CopyDirForProviders(linkedSrc, dst, nil, io.Discard)
+	if err == nil {
+		t.Fatal("CopyDirForProviders() succeeded, want nested symlink escape error")
+	}
+	if _, statErr := os.Stat(filepath.Join(outside, "pwn")); !os.IsNotExist(statErr) {
+		t.Fatalf("outside destination stat error = %v, want not exist", statErr)
+	}
+}
+
 func mustMkdirAll(t *testing.T, path string) {
 	t.Helper()
 	if err := os.MkdirAll(path, 0o755); err != nil {

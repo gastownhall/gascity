@@ -115,10 +115,13 @@ func (pl *execPlace) Exec(ctx context.Context, req runtime.ExecRequest) (runtime
 	return runtime.ExecResult{Output: out, Code: code}, nil
 }
 
-// Stage copies entries into the session workdir via the pack's copy-to op
-// (←CopyTo). An unknown copy-to op (exit 2) is a no-op, but a real copy failure
-// returns an error and aborts the batch at that entry.
+// Stage validates the complete batch before copying entries into the session
+// workdir via the pack's copy-to op (←CopyTo). An unknown copy-to op (exit 2)
+// is a no-op, but a real copy failure returns an error.
 func (pl *execPlace) Stage(_ context.Context, files []runtime.CopyEntry) error {
+	if err := runtime.ValidateCopyEntries(files); err != nil {
+		return err
+	}
 	for _, f := range files {
 		if err := pl.p.CopyTo(pl.name, f.Src, f.RelDst); err != nil {
 			return err

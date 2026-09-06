@@ -102,14 +102,10 @@ func (pl *tmuxPlace) Exec(context.Context, runtime.ExecRequest) (runtime.ExecRes
 	return runtime.ExecResult{}, runtime.ErrExecUnsupported
 }
 
-// Stage copies entries into the session workdir via CopyTo (←CopyTo).
+// Stage copies the complete batch into the session workdir via one CopyTo
+// preflight (←CopyTo).
 func (pl *tmuxPlace) Stage(_ context.Context, files []runtime.CopyEntry) error {
-	for _, f := range files {
-		if err := pl.p.CopyTo(pl.name, f.Src, f.RelDst); err != nil {
-			return err
-		}
-	}
-	return nil
+	return pl.p.CopyBatchTo(pl.name, files)
 }
 
 func (pl *tmuxPlace) IsRunning(_ context.Context) (bool, error) {

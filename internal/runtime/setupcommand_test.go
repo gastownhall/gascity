@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 	"time"
@@ -81,6 +82,22 @@ func TestRunSetupCommandUsesGCDIRAsWorkingDirectory(t *testing.T) {
 	}
 }
 
+func TestRunPreStartCanCreateMissingGCDIR(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(root, "work")
+	env := map[string]string{"GC_DIR": workDir}
+	if err := RunPreStart(context.Background(), "mkdir -p \"$GC_DIR\" && printf ready > \"$GC_DIR/marker\"", env, 5*time.Second); err != nil {
+		t.Fatalf("RunPreStart: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(workDir, "marker"))
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+	if string(data) != "ready" {
+		t.Fatalf("marker = %q, want ready", data)
+	}
+}
+
 // TestRunSetupCommandAppendsEnvOverlay pins that env entries reach the
 // command on top of the inherited process environment.
 func TestRunSetupCommandAppendsEnvOverlay(t *testing.T) {
@@ -120,6 +137,72 @@ func TestRunSetupCommandTimeoutMatchesDeadlineExceeded(t *testing.T) {
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("error = %q, want errors.Is DeadlineExceeded", err)
+	}
+}
+
+func TestRunPreStartCancellationInterruptsProcessGroup(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("POSIX process-group cancellation")
+	}
+	marker := filepath.Join(t.TempDir(), "restored")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	err := RunPreStart(ctx, "trap 'printf restored > \"$MARKER\"; exit 130' INT TERM; sleep 30", map[string]string{
+		"MARKER": marker,
+	}, 5*time.Second)
+	if err == nil {
+		t.Fatal("RunPreStart succeeded after cancellation")
+	}
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Fatalf("rollback trap did not run before cancellation returned: %v", statErr)
+	}
+}
+
+func TestRunPreStartCancellationKillsUncooperativeDescendant(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("POSIX process-group cancellation")
+	}
+	root := t.TempDir()
+	marker := filepath.Join(root, "trap-ran")
+	writes := filepath.Join(root, "writes")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	// The child redirects its output and ignores INT/TERM, so the parent shell
+	// can run its trap and exit while the child would otherwise keep mutating
+	// the workdir after RunPreStart returned.
+	command := "trap 'printf trapped > \"$MARKER\"; exit 130' INT TERM; (trap '' INT TERM; while :; do printf x >> \"$WRITES\"; sleep 0.01; done) >/dev/null 2>&1 & sleep 30"
+	err := RunPreStart(ctx, command, map[string]string{
+		"MARKER": marker,
+		"WRITES": writes,
+	}, 5*time.Second)
+	if err == nil {
+		t.Fatal("RunPreStart succeeded after cancellation")
+	}
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Fatalf("rollback trap did not run before cancellation returned: %v", statErr)
+	}
+	data, err := os.ReadFile(writes)
+	if err != nil {
+		t.Fatalf("read descendant writes: %v", err)
+	}
+	initial := len(data)
+	time.Sleep(150 * time.Millisecond)
+	data, err = os.ReadFile(writes)
+	if err != nil {
+		t.Fatalf("re-read descendant writes: %v", err)
+	}
+	if len(data) != initial {
+		t.Fatalf("uncooperative descendant kept mutating after cancellation: %d -> %d bytes", initial, len(data))
 	}
 }
 

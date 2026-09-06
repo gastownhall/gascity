@@ -189,6 +189,9 @@ func (p *Provider) runWithTTY(args ...string) error {
 // trust, bypass permissions) in Go using Peek + SendKeys, sharing the
 // same logic as the tmux provider via [runtime.AcceptStartupDialogs].
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := runtime.ValidateCopyEntries(cfg.CopyFiles); err != nil {
+		return fmt.Errorf("exec provider: starting session %q: %w", name, err)
+	}
 	// Was this name already occupied before we touched it? Asked structurally,
 	// before the attempt, because it is the only question whose answer cannot
 	// be garbled by how the adapter happens to word a refusal — and it is the
@@ -266,6 +269,9 @@ func (p *Provider) provisionBox(ctx context.Context, name string, cfg runtime.Co
 	if !p.supportsSeparableLaunch() {
 		return p.Start(ctx, name, cfg)
 	}
+	if err := runtime.ValidateCopyEntries(cfg.CopyFiles); err != nil {
+		return fmt.Errorf("exec provider: provisioning session %q: %w", name, err)
+	}
 	data, err := marshalStartConfig(cfg)
 	if err != nil {
 		return fmt.Errorf("exec provider: marshaling provision config: %w", err)
@@ -283,6 +289,9 @@ func (p *Provider) provisionBox(ctx context.Context, name string, cfg runtime.Co
 // working directory and the box env is set at provision time, so neither an
 // explicit -c nor -e is needed (workdir + env are provision-half). (Un-weld B3b.)
 func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := runtime.ValidateCopyEntries(cfg.CopyFiles); err != nil {
+		return fmt.Errorf("exec provider: launching agent in %q: %w", name, err)
+	}
 	if !p.supportsSeparableLaunch() {
 		return nil
 	}
@@ -310,6 +319,9 @@ func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Con
 // welded pack has no in-place relaunch (the agent is welded into `start`), so it
 // degrades to a full reprovision (Stop+Start), which is still correct.
 func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := runtime.ValidateCopyEntries(cfg.CopyFiles); err != nil {
+		return fmt.Errorf("exec provider: relaunching session %q: %w", name, err)
+	}
 	if p.supportsSeparableLaunch() {
 		return p.launchAgent(ctx, name, cfg)
 	}
@@ -772,6 +784,9 @@ func (p *Provider) CheckImage(image string) error {
 // CopyTo copies src into the named session at relDst: script copy-to <name> <src> <relDst>
 // Best-effort: returns nil on error.
 func (p *Provider) CopyTo(name, src, relDst string) error {
+	if err := runtime.ValidateCopyRelDst(relDst); err != nil {
+		return err
+	}
 	_, err := p.run(nil, "copy-to", name, src, relDst)
 	return err
 }

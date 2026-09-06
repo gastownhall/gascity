@@ -13,11 +13,13 @@ import (
 
 type fakeSeamRuntime struct {
 	openOK      bool     // does Open report the box as running?
+	provisions  int      // count of Provision calls
 	teardowns   []string // names passed to Teardown, in order
 	teardownErr error    // when non-nil, Teardown fails with this
 }
 
 func (r *fakeSeamRuntime) Provision(context.Context, string, ProvisionRequest) (Place, error) {
+	r.provisions++
 	return &fakeSeamPlace{}, nil
 }
 
@@ -141,6 +143,25 @@ func TestSeamProviderStartTearsDownBoxWhenLaunchFails(t *testing.T) {
 	}
 	if len(rt.teardowns) != 1 || rt.teardowns[0] != "leaky-box" {
 		t.Fatalf("a failed separable launch must tear down the provisioned box; got %v", rt.teardowns)
+	}
+}
+
+func TestSeamProviderStartRejectsMalformedCopyBeforeProvision(t *testing.T) {
+	rt := &fakeSeamRuntime{}
+	tp := &fakeSeamTransport{separableLaunch: true}
+	p := NewProviderFromSeams(rt, tp)
+
+	err := p.Start(context.Background(), "unsafe-box", Config{
+		CopyFiles: []CopyEntry{{Src: "/seed", RelDst: "../outside"}},
+	})
+	if err == nil {
+		t.Fatal("Start() succeeded, want malformed copy destination error")
+	}
+	if rt.provisions != 0 {
+		t.Fatalf("Provision calls = %d, want none before staging preflight", rt.provisions)
+	}
+	if tp.launches != 0 {
+		t.Fatalf("Launch calls = %d, want none before staging preflight", tp.launches)
 	}
 }
 

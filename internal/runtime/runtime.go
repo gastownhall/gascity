@@ -73,6 +73,10 @@ var ErrRuntimeUnavailable = errors.New("runtime unavailable: liveness observatio
 // support relaunch; the reconciler treats it as "fall back to full Stop+Start".
 var ErrRelaunchUnsupported = errors.New("runtime does not support warm-box relaunch")
 
+// ErrWorkDirPendingPreStart reports that staging is valid but must wait for
+// pre_start to create the configured local work directory.
+var ErrWorkDirPendingPreStart = errors.New("workdir pending pre_start")
+
 // IsSessionGone reports whether err represents a "the session is not
 // there" condition — either ErrSessionNotFound or the legacy provider
 // phrasings that predate the sentinel (tmux/subprocess providers may
@@ -208,7 +212,8 @@ type Provider interface {
 	// CopyTo copies src (local file/directory) into the named session's
 	// filesystem at relDst (relative to session workDir). Used for ad-hoc
 	// post-Start copies (e.g., controller city-dir deployment).
-	// Best-effort: returns nil if session unknown or src missing.
+	// Best-effort: returns nil if session unknown or src missing. An absolute or
+	// escaping relDst is invalid and must return an error before any copy.
 	CopyTo(name, src, relDst string) error
 
 	// SendKeys sends bare keystrokes (e.g., "Enter", "Down", "C-c") to
@@ -452,7 +457,8 @@ type CopyEntry struct {
 	// Src is the host-side source path (file or directory).
 	Src string
 	// RelDst is the destination relative to session workDir.
-	// Empty means the workDir root.
+	// Empty means the workDir root. Absolute paths and paths that escape with
+	// ".." are invalid.
 	RelDst string
 	// Probed indicates this entry was discovered via filesystem probing
 	// (os.Stat) rather than derived from config. Probed entries use

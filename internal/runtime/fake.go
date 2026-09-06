@@ -166,6 +166,9 @@ func NewFailFake() *Fake {
 // Start creates a fake session. Returns an error if the name is taken.
 // When broken, always returns an error.
 func (f *Fake) Start(_ context.Context, name string, cfg Config) error {
+	if err := ValidateCopyEntries(cfg.CopyFiles); err != nil {
+		return fmt.Errorf("starting session %q: %w", name, err)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Calls = append(f.Calls, Call{Method: "Start", Name: name, Config: cfg})
@@ -207,6 +210,9 @@ func (f *Fake) Stop(name string) error {
 // configured RelaunchErrors entry, or — when broken — a generic error. Tests
 // assert a Relaunch call (vs Stop+Start) to verify launch-only drift handling.
 func (f *Fake) Relaunch(_ context.Context, name string, cfg Config) error {
+	if err := ValidateCopyEntries(cfg.CopyFiles); err != nil {
+		return fmt.Errorf("relaunching session %q: %w", name, err)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Calls = append(f.Calls, Call{Method: "Relaunch", Name: name, Config: cfg})
@@ -686,6 +692,9 @@ func (f *Fake) WaitForIdle(ctx context.Context, name string, _ time.Duration) er
 
 // CopyTo records the call and returns nil (or error if broken).
 func (f *Fake) CopyTo(name, src, relDst string) error {
+	if err := ValidateCopyRelDst(relDst); err != nil {
+		return err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Calls = append(f.Calls, Call{Method: "CopyTo", Name: name, Src: src, Dst: relDst})

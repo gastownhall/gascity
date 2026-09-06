@@ -100,16 +100,11 @@ func (pl *subprocessPlace) Exec(context.Context, runtime.ExecRequest) (runtime.E
 	return runtime.ExecResult{}, runtime.ErrExecUnsupported
 }
 
-// Stage copies entries into the session workdir via the legacy CopyTo (←CopyTo).
-// CopyTo no-ops an unknown session / missing src; a real copy failure aborts the
-// batch at that entry.
+// Stage copies the complete batch into the session workdir via the legacy
+// CopyTo path (←CopyTo). Unknown sessions and missing sources remain no-ops;
+// a real copy failure aborts before any batch entry is written.
 func (pl *subprocessPlace) Stage(_ context.Context, files []runtime.CopyEntry) error {
-	for _, f := range files {
-		if err := pl.p.CopyTo(pl.name, f.Src, f.RelDst); err != nil {
-			return err
-		}
-	}
-	return nil
+	return pl.p.CopyBatchTo(pl.name, files)
 }
 
 func (pl *subprocessPlace) IsRunning(context.Context) (bool, error) {

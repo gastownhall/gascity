@@ -2128,6 +2128,24 @@ func TestProvider_RelaunchRespawnsAgentInWarmPod(t *testing.T) {
 	}
 }
 
+func TestProvider_RelaunchRejectsMalformedCopyBeforeRuntimeCalls(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	addRunningPod(fake, "s", "s")
+	hasSessionAlive(fake, "s")
+
+	err := p.Relaunch(context.Background(), "s", runtime.Config{
+		Command:   "agent --resume",
+		CopyFiles: []runtime.CopyEntry{{Src: "/seed", RelDst: "../outside"}},
+	})
+	if err == nil {
+		t.Fatal("Relaunch() succeeded, want malformed copy destination error")
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("runtime calls before staging preflight = %+v, want none", fake.calls)
+	}
+}
+
 func TestProvider_RelaunchMissingPodIsErrSessionNotFound(t *testing.T) {
 	fake := newFakeK8sOps() // no pods
 	p := newProviderWithOps(fake)

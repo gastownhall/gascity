@@ -219,6 +219,89 @@ func TestStartStagesWorkDirBeforePreStart(t *testing.T) {
 	}
 }
 
+func TestStartStagesFilesAfterPreStartCreatesWorkDir(t *testing.T) {
+	root := t.TempDir()
+	work := filepath.Join(root, "per-bead-worktree")
+	src := filepath.Join(root, "notes.txt")
+	if err := os.WriteFile(src, []byte("payload"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	staged := filepath.Join(work, "notes.txt")
+	f := newFakeHerdr(t, staged)
+	p := newFakeStartProvider(t, f)
+
+	cfg := runtime.Config{
+		WorkDir:   work,
+		Command:   "claude",
+		CopyFiles: []runtime.CopyEntry{{Src: src, RelDst: "notes.txt"}},
+		PreStart:  []string{"mkdir -p " + sq(work)},
+	}
+	if err := p.start(context.Background(), "gastown__worker", cfg); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if data, err := os.ReadFile(staged); err != nil {
+		t.Fatalf("read staged file: %v", err)
+	} else if string(data) != "payload" {
+		t.Fatalf("staged file = %q, want payload", data)
+	}
+}
+
+func TestStartRejectsMalformedCopyBeforeConfiguringServer(t *testing.T) {
+	work := t.TempDir()
+	f := newFakeHerdr(t, filepath.Join(work, "unused-probe"))
+	p := newFakeStartProvider(t, f)
+
+	err := p.Start(context.Background(), "gastown__worker", runtime.Config{
+		WorkDir:   work,
+		CopyFiles: []runtime.CopyEntry{{Src: filepath.Join(work, "seed"), RelDst: filepath.Join("..", "outside")}},
+	})
+	if err == nil {
+		t.Fatal("Start() succeeded, want malformed copy destination error")
+	}
+	if !strings.Contains(err.Error(), "copy_files") {
+		t.Fatalf("Start() error = %q, want staging preflight error before server configuration", err)
+	}
+	if lines := f.logLines(t); len(lines) != 0 {
+		t.Fatalf("herdr calls before staging preflight = %v, want none", lines)
+	}
+}
+
+func TestStartRejectsNestedSymlinkCopyBeforeConfiguringServer(t *testing.T) {
+	root := t.TempDir()
+	work := filepath.Join(root, "work")
+	outside := filepath.Join(root, "outside")
+	src := filepath.Join(root, "seed.txt")
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", work, err)
+	}
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", outside, err)
+	}
+	if err := os.WriteFile(src, []byte("payload"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", src, err)
+	}
+	if err := os.Symlink(outside, filepath.Join(work, "nested")); err != nil {
+		t.Fatalf("Symlink nested destination: %v", err)
+	}
+
+	f := newFakeHerdr(t, filepath.Join(root, "unused-probe"))
+	p := newFakeStartProvider(t, f)
+	p.c.cityRoot = root
+	err := p.Start(context.Background(), "gastown__worker", runtime.Config{
+		WorkDir:   work,
+		CopyFiles: []runtime.CopyEntry{{Src: src, RelDst: filepath.Join("nested", "copied.txt")}},
+	})
+	if err == nil {
+		t.Fatal("Start() succeeded, want nested symlink destination error")
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("Start() error = %q, want symlink containment detail", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(outside, "copied.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("outside destination exists after rejected Start: %v", statErr)
+	}
+}
+
 // TestStartFailsOnAbsentWorkDir pins effectiveWorkDir's fail-loudly path at
 // the Start level: a configured WorkDir that still doesn't exist after
 // staging/pre_start is an error, not a silent city-root launch.

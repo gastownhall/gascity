@@ -1048,6 +1048,32 @@ func TestStageHookFilesIncludesCanonicalClaudeHook(t *testing.T) {
 	t.Fatal("stageHookFiles() did not stage .gc/settings.json")
 }
 
+func TestStageHookFilesExternalWorkDirDoesNotEmitEscapingDestination(t *testing.T) {
+	root := t.TempDir()
+	cityDir := filepath.Join(root, "city")
+	workDir := filepath.Join(root, "external-rig")
+	hookPath := filepath.Join(workDir, ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", filepath.Dir(hookPath), err)
+	}
+	if err := os.WriteFile(hookPath, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", hookPath, err)
+	}
+
+	got := stageHookFiles(nil, cityDir, workDir, []string{"codex"})
+	for _, entry := range got {
+		if entry.Src != hookPath {
+			continue
+		}
+		want := path.Join(".codex", "hooks.json")
+		if entry.RelDst != want {
+			t.Fatalf("stageHookFiles() RelDst = %q, want workdir-relative %q", entry.RelDst, want)
+		}
+		return
+	}
+	t.Fatal("stageHookFiles() did not stage external workdir Codex hook")
+}
+
 func TestStageHookFilesFallsBackToLegacyClaudeHook(t *testing.T) {
 	cityDir := filepath.Join(t.TempDir(), "city")
 	workDir := filepath.Join(cityDir, "worker")

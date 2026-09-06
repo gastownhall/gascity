@@ -255,11 +255,12 @@ func TestAuthenticatedWsURL_UsesBearerTokenForNonLoopback(t *testing.T) {
 }
 
 func TestStart_ReusedThreadDoesNotInjectStartupTurns(t *testing.T) {
+	workDir := t.TempDir()
 	server := newT3BridgeTestServer(t, map[string]interface{}{
 		"projects": []interface{}{
 			map[string]interface{}{
 				"id":            "project-1",
-				"workspaceRoot": "/tmp/mayor",
+				"workspaceRoot": workDir,
 			},
 		},
 		"threads": []interface{}{
@@ -281,7 +282,7 @@ func TestStart_ReusedThreadDoesNotInjectStartupTurns(t *testing.T) {
 		recentStarts: make(map[string]time.Time),
 	}
 	cfg := runtime.Config{
-		WorkDir:      "/tmp/mayor",
+		WorkDir:      workDir,
 		Command:      "codex",
 		PromptSuffix: "gc prime --hook",
 		Nudge:        "Check mail and hook status, then act accordingly.",
@@ -321,6 +322,97 @@ func TestStart_ReusedThreadDoesNotInjectStartupTurns(t *testing.T) {
 		if typ == "thread.turn.start" {
 			t.Fatalf("reused thread received startup turn: commands=%v", server.commandTypes())
 		}
+	}
+}
+
+func TestStartRejectsMalformedCopyBeforeBridgeMutation(t *testing.T) {
+	server := newT3BridgeTestServer(t, map[string]interface{}{
+		"projects": []interface{}{},
+		"threads":  []interface{}{},
+	})
+	defer server.Close()
+
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("T3_WS_URL", server.wsURL())
+	p := &Provider{
+		watchers:     make(map[string]context.CancelFunc),
+		recentStarts: make(map[string]time.Time),
+	}
+
+	err := p.Start(context.Background(), "worker", runtime.Config{
+		WorkDir:   "/tmp/worker",
+		Command:   "codex",
+		CopyFiles: []runtime.CopyEntry{{Src: "/seed", RelDst: "../outside"}},
+		Env: map[string]string{
+			"GC_CITY_PATH": "/tmp/gc",
+			"GC_TEMPLATE":  "worker",
+			"GC_PROVIDER":  "codex",
+			"GC_MODEL":     "gpt-5.4",
+		},
+	})
+	if err == nil {
+		t.Fatal("Start() succeeded, want malformed copy destination error")
+	}
+	if !strings.Contains(err.Error(), "copy_files") {
+		t.Fatalf("Start() error = %q, want staging preflight error", err)
+	}
+	if calls := server.wsCalls(); calls != 0 {
+		t.Fatalf("bridge websocket calls = %d, want none before staging preflight", calls)
+	}
+}
+
+func TestStartStagesCopyFilesBeforeBridgeMutation(t *testing.T) {
+	root := t.TempDir()
+	work := filepath.Join(root, "work")
+	src := filepath.Join(root, "seed.txt")
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", work, err)
+	}
+	if err := os.WriteFile(src, []byte("payload"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", src, err)
+	}
+
+	oldDefaults := defaultWSURLCandidates
+	defaultWSURLCandidates = nil
+	t.Cleanup(func() { defaultWSURLCandidates = oldDefaults })
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("T3_WS_URL", "ws://127.0.0.1:1/ws")
+	p := &Provider{
+		watchers:     make(map[string]context.CancelFunc),
+		recentStarts: make(map[string]time.Time),
+	}
+	err := p.Start(context.Background(), "worker", runtime.Config{
+		WorkDir:   work,
+		Command:   "codex",
+		CopyFiles: []runtime.CopyEntry{{Src: src, RelDst: "copied.txt"}},
+	})
+	if err == nil {
+		t.Fatal("Start() succeeded against unavailable bridge, want bridge error")
+	}
+	if data, readErr := os.ReadFile(filepath.Join(work, "copied.txt")); readErr != nil {
+		t.Fatalf("staged copy missing after bridge failure: %v", readErr)
+	} else if string(data) != "payload" {
+		t.Fatalf("staged copy = %q, want payload", data)
+	}
+}
+
+func TestStartRejectsMissingWorkDirBeforeBridgeMutation(t *testing.T) {
+	oldDefaults := defaultWSURLCandidates
+	defaultWSURLCandidates = nil
+	t.Cleanup(func() { defaultWSURLCandidates = oldDefaults })
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("T3_WS_URL", "ws://127.0.0.1:1/ws")
+	p := &Provider{
+		watchers:     make(map[string]context.CancelFunc),
+		recentStarts: make(map[string]time.Time),
+	}
+	work := filepath.Join(t.TempDir(), "missing-workdir")
+	err := p.Start(context.Background(), "worker", runtime.Config{WorkDir: work, Command: "codex"})
+	if err == nil {
+		t.Fatal("Start() succeeded, want missing workdir error")
+	}
+	if !strings.Contains(err.Error(), "workdir") {
+		t.Fatalf("Start() error = %q, want workdir detail", err)
 	}
 }
 
@@ -665,11 +757,58 @@ func TestCopyTo_RejectsRelDstEscapingWorkDir(t *testing.T) {
 		recentStarts: make(map[string]time.Time),
 	}
 
-	if err := p.CopyTo("t3code--crew", srcFile, "../outside.txt"); err != nil {
-		t.Fatalf("CopyTo: %v", err)
+	if err := p.CopyTo("t3code--crew", srcFile, "../outside.txt"); err == nil {
+		t.Fatal("CopyTo succeeded, want escaping destination error")
 	}
 	if _, err := os.Stat(filepath.Join(parent, "outside.txt")); !os.IsNotExist(err) {
 		t.Fatalf("outside file stat err = %v, want not exist", err)
+	}
+}
+
+func TestCopyTo_ReportsSymlinkDestinationEscape(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(root, "work")
+	outsideDir := filepath.Join(root, "outside")
+	for _, dir := range []string{workDir, outsideDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %q: %v", dir, err)
+		}
+	}
+	if err := os.Symlink(outsideDir, filepath.Join(workDir, "linked")); err != nil {
+		t.Skipf("symlink fixture unavailable: %v", err)
+	}
+	srcFile := filepath.Join(root, "note.txt")
+	if err := os.WriteFile(srcFile, []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write src file: %v", err)
+	}
+
+	server := newT3BridgeTestServer(t, map[string]interface{}{
+		"threads": []interface{}{
+			map[string]interface{}{
+				"id":        "thread-1",
+				"projectId": "project-1",
+				"customMetadata": map[string]interface{}{
+					"gc.agent":          "t3code/crew",
+					"gc.sessionName":    "t3code--crew",
+					"gc.startupWorkDir": workDir,
+				},
+			},
+		},
+	})
+	defer server.Close()
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("T3_WS_URL", server.wsURL())
+	p := &Provider{
+		watchers:     make(map[string]context.CancelFunc),
+		recentStarts: make(map[string]time.Time),
+	}
+
+	err := p.CopyTo("t3code--crew", srcFile, filepath.Join("linked", "copied.txt"))
+	if err == nil {
+		t.Fatal("CopyTo() succeeded, want symlink containment error")
+	}
+	if _, statErr := os.Stat(filepath.Join(outsideDir, "copied.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("outside destination stat error = %v, want not exist", statErr)
 	}
 }
 
@@ -938,7 +1077,7 @@ func TestStart_TransientBridgeFailureReturnsInitializing(t *testing.T) {
 	}
 
 	err := p.Start(context.Background(), "deacon", runtime.Config{
-		WorkDir: "/tmp/deacon",
+		WorkDir: t.TempDir(),
 		Command: "codex",
 		Env: map[string]string{
 			"GC_CITY_PATH": "/tmp/gc",

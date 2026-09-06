@@ -514,12 +514,13 @@ func TestRespawnAgentMarksControllerTokenRemovedFromSessionEnv(t *testing.T) {
 	tm := NewTmux()
 	tm.exec = exec
 	ops := &tmuxStartOps{tm: tm}
+	workDir := t.TempDir()
 
 	env := map[string]string{
 		"GC_CITY":             "/tmp/city",
 		"GC_CONTROLLER_TOKEN": "",
 	}
-	if err := ops.respawnAgent("gc-test-token-pin", "/proj", "claude", env); err != nil {
+	if err := ops.respawnAgent("gc-test-token-pin", workDir, "claude", env); err != nil {
 		t.Fatalf("respawnAgent: %v", err)
 	}
 	if len(exec.calls) != 2 {
@@ -547,6 +548,7 @@ func TestRespawnAgentMarksControllerTokenRemovedFromSessionEnv(t *testing.T) {
 		tm := NewTmux()
 		tm.exec = exec
 		ops := &tmuxStartOps{tm: tm}
+		workDir := t.TempDir()
 
 		env := map[string]string{
 			"BEADS_DB":               "",
@@ -554,7 +556,7 @@ func TestRespawnAgentMarksControllerTokenRemovedFromSessionEnv(t *testing.T) {
 			"BEADS_FUTURE_AUTHORITY": "",
 			"GC_CITY":                "/tmp/city",
 		}
-		if err := ops.respawnAgent("gc-test-beads-pin", "/proj", "claude", env); err != nil {
+		if err := ops.respawnAgent("gc-test-beads-pin", workDir, "claude", env); err != nil {
 			t.Fatalf("respawnAgent: %v", err)
 		}
 		if len(exec.calls) != 3 {
@@ -583,6 +585,7 @@ func TestRespawnAgentSkipsSessionEnvMarkingWhenNoCredentialWithheld(t *testing.T
 	tm := NewTmux()
 	tm.exec = exec
 	ops := &tmuxStartOps{tm: tm}
+	workDir := t.TempDir()
 
 	env := map[string]string{
 		"GC_CITY":                "/tmp/city",
@@ -591,7 +594,7 @@ func TestRespawnAgentSkipsSessionEnvMarkingWhenNoCredentialWithheld(t *testing.T
 		"CODEX_THREAD_ID":        "",
 		"CODEX_CI":               "",
 	}
-	if err := ops.respawnAgent("gc-test-no-pins", "/proj", "claude", env); err != nil {
+	if err := ops.respawnAgent("gc-test-no-pins", workDir, "claude", env); err != nil {
 		t.Fatalf("respawnAgent: %v", err)
 	}
 	if len(exec.calls) != 1 {
