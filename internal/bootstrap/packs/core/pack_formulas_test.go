@@ -54,6 +54,64 @@ func formulaStep(t *testing.T, f formulaFile, id string) string {
 	return ""
 }
 
+// TestMolDoWorkDrainClaimsCurrentContinuation pins the distinction between a
+// process's immutable startup bead and the continuation that became ready
+// while that process was running.
+func TestMolDoWorkDrainClaimsCurrentContinuation(t *testing.T) {
+	step := formulaStep(t, readFormula(t, "mol-do-work.toml"), "drain")
+
+	if !strings.Contains(step, "gc ready --json --limit=2") {
+		t.Fatal("drain must resolve the current continuation from ready work")
+	}
+	if !strings.Contains(step, "--include-ephemeral") {
+		t.Fatal("drain must include ephemeral rows; a wisp-tier continuation is invisible to bd ready without it")
+	}
+	if !strings.Contains(step, `--metadata-field "gc.root_bead_id=$ROOT_BEAD_ID"`) || !strings.Contains(step, `--metadata-field "gc.step_ref=mol-do-work.drain"`) {
+		t.Fatal("drain must select the ready drain step from the current workflow root")
+	}
+	if strings.Contains(step, `DRAIN_BEAD_ID="${GC_BEAD_ID`) {
+		t.Fatal("drain must not treat the immutable startup bead as the continuation bead")
+	}
+	if !strings.Contains(step, "if [ -z \"$ROOT_BEAD_ID\" ]") {
+		t.Fatal("drain must fail closed when the startup bead has no workflow root")
+	}
+	if !strings.Contains(step, "if length == 1") || !strings.Contains(step, "could not resolve one ready continuation bead") {
+		t.Fatal("drain must fail closed unless exactly one matching continuation is ready")
+	}
+	// The current-claim branch must stay gated on gc.step_ref. An unguarded
+	// `gc hook current` re-introduces gh-5141 on the deferred path, where the
+	// claim stamp still names the do-work step rather than the drain step.
+	currentAt := strings.Index(step, "gc hook current --id-only")
+	if currentAt < 0 {
+		t.Fatal("drain must consult the current claim before falling back to a ready query")
+	}
+	readyAt := strings.Index(step, "gc ready --json --limit=2")
+	if readyAt < currentAt {
+		t.Fatal("drain must consult the current claim before the ready query, not after it")
+	}
+	if !strings.Contains(step[currentAt:readyAt], `.metadata["gc.step_ref"] == "mol-do-work.drain"`) {
+		t.Fatal("drain must gate the current-claim branch on gc.step_ref; an unguarded claim restores the stale-identity bug")
+	}
+	// The startup-bead id is only needed by the ready-query fallback. Requiring
+	// it up front aborts drain on any seat that is not demand-spawned:
+	// GC_BEAD_ID exists only in the dispatch condition environment, never in a
+	// session shell, and GC_TRIGGER_BEAD_ID is pool-seat-only (see
+	// cmd/gc/cmd_hook_current.go). Same shape as ga-2q2r0.
+	startupAt := strings.Index(step, `STARTUP_BEAD_ID="${GC_BEAD_ID`)
+	if startupAt < 0 || startupAt < currentAt {
+		t.Fatal("drain must not require a startup bead id before consulting the current claim")
+	}
+
+	updateAt := strings.Index(step, "gc bd update")
+	drainAckAt := strings.Index(step, "gc runtime drain-ack")
+	if drainAckAt < 0 {
+		t.Fatal("drain must still acknowledge runtime drain after closing its continuation bead")
+	}
+	if updateAt < 0 || !strings.Contains(step[updateAt:drainAckAt], "|| exit 1") {
+		t.Fatal("drain must not acknowledge runtime drain after a failed bead close")
+	}
+}
+
 // TestPolecatPreflightSearchesLedgerBeforeFiling pins the search-before-file
 // contract in the polecat preflight step.
 //
