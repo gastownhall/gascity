@@ -21,7 +21,6 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
-	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // isolateProviderDiscovery points provider transcript discovery at an empty,
@@ -1209,7 +1208,7 @@ func TestSessionStreamStructuredPromotesFallbackToHistoryWithoutReconnect(t *tes
 			)
 			select {
 			case structuredPeekPoll <- time.Now():
-			case <-time.After(testutil.GoroutineRaceTimeout):
+			case <-time.After(hangBudget):
 				t.Fatal("structured peek stream did not consume the injected poll tick")
 			}
 
@@ -1425,7 +1424,7 @@ func TestHandleSessionStreamStructuredResumesFromPaginatedRESTSnapshot(t *testin
 		t.Fatalf("REST history cursor = %+v, want resume token", snapshot.History)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*testutil.GoroutineRaceTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), hangBudget)
 	defer cancel()
 	rec := newSyncResponseRecorder()
 	path := cityURL(fs, "/session/") + info.ID + "/stream?format=structured&after_cursor=" + url.QueryEscape(snapshot.History.Cursor.ResumeToken)
@@ -1436,7 +1435,7 @@ func TestHandleSessionStreamStructuredResumesFromPaginatedRESTSnapshot(t *testin
 		close(done)
 	}()
 
-	initialBody := waitForRecorderSubstring(t, rec, "event: activity", testutil.GoroutineRaceTimeout)
+	initialBody := waitForRecorderSubstring(t, rec, "event: activity", hangBudget)
 	if strings.Contains(initialBody, "event: structured") {
 		cancel()
 		<-done
@@ -1463,7 +1462,7 @@ func TestHandleSessionStreamStructuredResumesFromPaginatedRESTSnapshot(t *testin
 		t.Fatalf("close transcript: %v", closeErr)
 	}
 
-	body := waitForRecorderSubstring(t, rec, "event: structured", testutil.GoroutineRaceTimeout)
+	body := waitForRecorderSubstring(t, rec, "event: structured", hangBudget)
 	cancel()
 	<-done
 	frame := firstSSETestFrame(t, body, "structured")
@@ -1530,7 +1529,7 @@ func TestHandleSessionStreamStructuredResumesFromEmptyPaginatedRESTSnapshot(t *t
 		t.Fatalf("REST history cursor = %+v, want resume token", snapshot.History)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*testutil.GoroutineRaceTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), hangBudget)
 	defer cancel()
 	rec := newSyncResponseRecorder()
 	path := cityURL(fs, "/session/") + info.ID + "/stream?format=structured&after_cursor=" + url.QueryEscape(snapshot.History.Cursor.ResumeToken)
@@ -1541,7 +1540,7 @@ func TestHandleSessionStreamStructuredResumesFromEmptyPaginatedRESTSnapshot(t *t
 		close(done)
 	}()
 
-	initialBody := waitForRecorderSubstring(t, rec, "event: structured", testutil.GoroutineRaceTimeout)
+	initialBody := waitForRecorderSubstring(t, rec, "event: structured", hangBudget)
 	initialFrame := firstSSETestFrame(t, initialBody, "structured")
 	var initialUpdate SessionStreamStructuredMessageEvent
 	if err := json.Unmarshal([]byte(initialFrame.Data), &initialUpdate); err != nil {
@@ -1580,7 +1579,7 @@ func TestHandleSessionStreamStructuredResumesFromEmptyPaginatedRESTSnapshot(t *t
 		t.Fatalf("close transcript: %v", closeErr)
 	}
 
-	body := waitForRecorderSubstring(t, rec, `"id":"m5"`, testutil.GoroutineRaceTimeout)
+	body := waitForRecorderSubstring(t, rec, `"id":"m5"`, hangBudget)
 	cancel()
 	<-done
 	var frame sseTestFrame
