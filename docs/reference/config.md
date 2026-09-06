@@ -292,6 +292,22 @@ BeadsConfig holds bead store settings.
 | `conditional_writes` | string |  |  | ConditionalWrites selects the bead-write discipline: "off" (legacy, byte-identical), "auto" (compare-and-swap where the store is capable, loud degrade otherwise), or "require" (CAS or a typed refusal). Empty defaults to "off". Any other value fails config load. Enum: `off`, `auto`, `require` |
 | `guarded_release` | string |  |  | GuardedRelease selects the ownership-release discipline for work beads: "off" (legacy, owner-blind bd update/unclaim), "auto" (fence-guarded release verbs where the bd binary is capable, loud degrade otherwise), or "require" (guarded release or a typed refusal). Empty defaults to "off". Any other value fails config load. Enum: `off`, `auto`, `require` |
 | `policies` | map[string]BeadPolicyConfig |  |  | Policies defines per-bead-use storage and garbage-collection defaults. Policy names are interpreted by higher-level systems; unknown names are preserved so packs can stage future policy classes without breaking load. |
+| `resilience` | BeadsResilienceConfig |  |  | Resilience configures the transport circuit breaker that guards bd subprocess and store operations ([beads.resilience]). |
+
+## BeadsResilienceConfig
+
+BeadsResilienceConfig holds circuit breaker settings for transport-class bead store failures.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `enabled` | boolean |  | `true` | Enabled toggles the breaker. Defaults to true. |
+| `consecutive_failures` | integer |  | `3` | ConsecutiveFailures is how many consecutive transport-class failures trip the breaker. Defaults to 3. |
+| `open_base` | string |  | `1s` | OpenBase is the initial open-state backoff cap as a duration string. Defaults to "1s". |
+| `open_max` | string |  | `60s` | OpenMax caps the open-state backoff as a duration string. Defaults to "60s". |
+| `half_open_interval` | string |  | `15s` | HalfOpenInterval is the minimum spacing between recovery probes while half-open, as a duration string. Defaults to "15s". |
+| `max_inflight_per_scope` | integer |  | `4` | MaxInflightPerScope bounds concurrent bd subprocesses per scope. The admission semaphore blocks the (n+1)th bd call for a scope until one in flight returns, capping the subprocess amplifier (plan item 1.9). Defaults to 4. Non-positive disables the per-scope cap. |
+| `max_inflight_global` | integer |  | `16` | MaxInflightGlobal bounds concurrent bd subprocesses across all scopes in the city. Defaults to 16. Non-positive disables the global cap. |
+| `max_admission_wait` | string |  | `30s` | MaxAdmissionWait bounds how long the admission semaphore waits for a free slot before failing fast, as a duration string. When the caps are saturated by bd subprocesses wedged on a backend transport timeout, a bounded wait prevents reconcile fan-out from blocking the controller tick indefinitely: an admission that cannot be granted within this window fails like an open breaker (typed ErrStoreUnavailable, zero subprocesses). Defaults to "30s". A non-positive value (e.g. "0s") restores the pre-bound behavior of blocking forever. |
 
 ## ChatSessionsConfig
 

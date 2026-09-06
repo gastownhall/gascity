@@ -1420,6 +1420,137 @@ type BeadsConfig struct {
 	// Policy names are interpreted by higher-level systems; unknown names are
 	// preserved so packs can stage future policy classes without breaking load.
 	Policies map[string]BeadPolicyConfig `toml:"policies,omitempty"`
+	// Resilience configures the transport circuit breaker that guards bd
+	// subprocess and store operations ([beads.resilience]).
+	Resilience BeadsResilienceConfig `toml:"resilience,omitempty"`
+}
+
+// BeadsResilienceConfig holds circuit breaker settings for transport-class
+// bead store failures. The breaker trips a (scope, opClass) circuit after
+// ConsecutiveFailures consecutive transport failures, backs off with full
+// jitter between OpenBase and OpenMax, and admits one recovery probe per
+// HalfOpenInterval. Disabling it restores pre-breaker behavior (every
+// operation dials the store).
+type BeadsResilienceConfig struct {
+	// Enabled toggles the breaker. Defaults to true.
+	Enabled *bool `toml:"enabled,omitempty" jsonschema:"default=true"`
+	// ConsecutiveFailures is how many consecutive transport-class failures
+	// trip the breaker. Defaults to 3.
+	ConsecutiveFailures int `toml:"consecutive_failures,omitempty" jsonschema:"default=3"`
+	// OpenBase is the initial open-state backoff cap as a duration string.
+	// Defaults to "1s".
+	OpenBase string `toml:"open_base,omitempty" jsonschema:"default=1s"`
+	// OpenMax caps the open-state backoff as a duration string. Defaults
+	// to "60s".
+	OpenMax string `toml:"open_max,omitempty" jsonschema:"default=60s"`
+	// HalfOpenInterval is the minimum spacing between recovery probes
+	// while half-open, as a duration string. Defaults to "15s".
+	HalfOpenInterval string `toml:"half_open_interval,omitempty" jsonschema:"default=15s"`
+	// MaxInflightPerScope bounds concurrent bd subprocesses per scope. The
+	// admission semaphore blocks the (n+1)th bd call for a scope until one
+	// in flight returns, capping the subprocess amplifier (plan item 1.9).
+	// Defaults to 4. Non-positive disables the per-scope cap.
+	MaxInflightPerScope int `toml:"max_inflight_per_scope,omitempty" jsonschema:"default=4"`
+	// MaxInflightGlobal bounds concurrent bd subprocesses across all scopes
+	// in the city. Defaults to 16. Non-positive disables the global cap.
+	MaxInflightGlobal int `toml:"max_inflight_global,omitempty" jsonschema:"default=16"`
+	// MaxAdmissionWait bounds how long the admission semaphore waits for a
+	// free slot before failing fast, as a duration string. When the caps are
+	// saturated by bd subprocesses wedged on a backend transport timeout, a
+	// bounded wait prevents reconcile fan-out from blocking the controller
+	// tick indefinitely: an admission that cannot be granted within this
+	// window fails like an open breaker (typed ErrStoreUnavailable, zero
+	// subprocesses). Defaults to "30s". A non-positive value (e.g. "0s")
+	// restores the pre-bound behavior of blocking forever.
+	MaxAdmissionWait string `toml:"max_admission_wait,omitempty" jsonschema:"default=30s"`
+}
+
+// EnabledOrDefault reports whether the breaker is enabled (default true).
+func (r BeadsResilienceConfig) EnabledOrDefault() bool {
+	return r.Enabled == nil || *r.Enabled
+}
+
+// ConsecutiveFailuresOrDefault returns the trip threshold, falling back to
+// 3 when unset or non-positive.
+func (r BeadsResilienceConfig) ConsecutiveFailuresOrDefault() int {
+	if r.ConsecutiveFailures > 0 {
+		return r.ConsecutiveFailures
+	}
+	return 3
+}
+
+// OpenBaseOrDefault returns the parsed OpenBase, falling back to 1s when
+// unset, unparseable, or non-positive. Invalid values surface as warnings
+// from ValidateDurations at load time.
+func (r BeadsResilienceConfig) OpenBaseOrDefault() time.Duration {
+	return positiveDurationOrDefault(r.OpenBase, time.Second)
+}
+
+// OpenMaxOrDefault returns the parsed OpenMax, falling back to 60s when
+// unset, unparseable, or non-positive.
+func (r BeadsResilienceConfig) OpenMaxOrDefault() time.Duration {
+	return positiveDurationOrDefault(r.OpenMax, 60*time.Second)
+}
+
+// HalfOpenIntervalOrDefault returns the parsed HalfOpenInterval, falling
+// back to 15s when unset, unparseable, or non-positive.
+func (r BeadsResilienceConfig) HalfOpenIntervalOrDefault() time.Duration {
+	return positiveDurationOrDefault(r.HalfOpenInterval, 15*time.Second)
+}
+
+// MaxInflightPerScopeOrDefault returns the per-scope bd admission limit,
+// falling back to 4 when unset. A negative value disables the cap (returns
+// 0); an explicit 0 also disables it.
+func (r BeadsResilienceConfig) MaxInflightPerScopeOrDefault() int {
+	if r.MaxInflightPerScope < 0 {
+		return 0
+	}
+	if r.MaxInflightPerScope == 0 {
+		return 4
+	}
+	return r.MaxInflightPerScope
+}
+
+// MaxInflightGlobalOrDefault returns the global bd admission limit, falling
+// back to 16 when unset. A negative value disables the cap (returns 0); an
+// explicit 0 also disables it.
+func (r BeadsResilienceConfig) MaxInflightGlobalOrDefault() int {
+	if r.MaxInflightGlobal < 0 {
+		return 0
+	}
+	if r.MaxInflightGlobal == 0 {
+		return 16
+	}
+	return r.MaxInflightGlobal
+}
+
+// MaxAdmissionWaitOrDefault returns the parsed MaxAdmissionWait, falling
+// back to 30s when unset or unparseable. A non-positive value (e.g. "0s" or
+// a negative duration) is preserved verbatim to mean "block forever",
+// disabling the bounded-wait fail-fast. Unparseable values surface as
+// warnings from ValidateDurations at load time.
+func (r BeadsResilienceConfig) MaxAdmissionWaitOrDefault() time.Duration {
+	if r.MaxAdmissionWait == "" {
+		return 30 * time.Second
+	}
+	v, err := time.ParseDuration(r.MaxAdmissionWait)
+	if err != nil {
+		return 30 * time.Second
+	}
+	return v
+}
+
+// positiveDurationOrDefault parses value as a Go duration, returning def
+// when value is empty, unparseable, or non-positive.
+func positiveDurationOrDefault(value string, def time.Duration) time.Duration {
+	if value == "" {
+		return def
+	}
+	v, err := time.ParseDuration(value)
+	if err != nil || v <= 0 {
+		return def
+	}
+	return v
 }
 
 // EventHooksEnabled reports whether bead event hooks should be installed.
