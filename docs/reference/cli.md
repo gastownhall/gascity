@@ -4146,12 +4146,17 @@ equivalent to typing the message into the session's terminal.
 Accepts a session ID or session alias. Multi-word messages are
 joined automatically.
 
+Pass --about &lt;bead-id&gt; when the nudge is about a specific bead. A nudge
+that has to be queued (the session is busy or asleep) is retired instead
+of delivered if that bead closes before the next safe boundary.
+
 ```
 gc session nudge <id-or-alias> <message...> [flags]
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--about` | string |  | bead this nudge is about; a queued nudge retires if the bead closes first |
 | `--delivery` | string | `wait-idle` | delivery mode: immediate, wait-idle, or queue |
 | `--json` | bool |  | JSON output |
 

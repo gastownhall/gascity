@@ -1640,6 +1640,9 @@ func TestRuntimeHandleNudgeWaitIdleHonorsCallerContext(t *testing.T) {
 	if result.Delivered {
 		t.Fatal("Nudge(wait_idle) Delivered = true, want false after context cancellation")
 	}
+	if result.Undelivered != "" {
+		t.Fatalf("Nudge(wait_idle) Undelivered = %q, want empty after context cancellation (no downgrade note for a caller-canceled wait)", result.Undelivered)
+	}
 	for _, call := range sp.Calls {
 		if call.Method == "Nudge" || call.Method == "NudgeNow" {
 			t.Fatalf("calls = %#v, want no delivery after context cancellation", sp.Calls)
@@ -1674,6 +1677,9 @@ func TestRuntimeHandleNudgeWaitIdleInternalTimeoutReturnsUndeliveredWithoutError
 	if result.Delivered {
 		t.Fatal("Nudge(wait_idle) Delivered = true, want false after internal timeout")
 	}
+	if result.Undelivered != NudgeUndeliveredNoIdleBoundary {
+		t.Fatalf("Nudge(wait_idle) Undelivered = %q, want %q: a live session that stays busy past the idle window is a named downgrade, not a delivery failure", result.Undelivered, NudgeUndeliveredNoIdleBoundary)
+	}
 	for _, call := range sp.Calls {
 		if call.Method == "Nudge" || call.Method == "NudgeNow" {
 			t.Fatalf("calls = %#v, want no delivery after internal timeout", sp.Calls)
@@ -1705,6 +1711,9 @@ func TestRuntimeHandleNudgeWaitIdleUnsupportedProviderReturnsUndelivered(t *test
 	}
 	if result.Delivered {
 		t.Fatal("Nudge(wait_idle) Delivered = true, want false for unsupported provider")
+	}
+	if result.Undelivered != NudgeUndeliveredProviderUnsupported {
+		t.Fatalf("Nudge(wait_idle) Undelivered = %q, want %q for unsupported provider", result.Undelivered, NudgeUndeliveredProviderUnsupported)
 	}
 	for _, call := range sp.Calls {
 		if call.Method == "WaitForIdle" || call.Method == "Nudge" || call.Method == "NudgeNow" {

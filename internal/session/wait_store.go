@@ -612,3 +612,95 @@ func (s *Store) wakeSessionFromBead(sessionBead beads.Bead, now time.Time) ([]st
 	}
 	return nudgeIDs, nil
 }
+
+// ManagedWakeWouldStrand reports, via a read-only lifecycle projection (it never
+// mutates the session, unlike WakeSession), whether enqueuing a managed nudge-wake
+// for session id would SILENTLY STRAND it: WakeSession would accept the wake with
+// no error, yet the reconciler never brings the session back to running to consume
+// the queued nudge, so the item lingers until its retired fence stops matching and
+// `gc nudge status` reads 0/0/0 while the sender was handed a false "queued"
+// success (the measured sc-875uie bug).
+//
+// This is deliberately NARROW — the completed/stopped states drained and stopped:
+//   - drained: the session finished its drain; the reconciler spawns a FRESH
+//     worker rather than resuming it, so a queued wake is never consumed. This is
+//     exactly the measured case (a nudge queued to a worker as it drained).
+//   - stopped: stopped outside normal sleep semantics — same "won't be resumed to
+//     consume" property.
+//
+// It intentionally does NOT cover the terminal (closed / closing /
+// archived-without-continuity) or gone (missing bead) cases: WakeSession already
+// rejects those with a WakeConflictError / ErrNotFound, so the existing
+// enqueue→wake→rollback path dead-letters them loudly (code 1 + a DEAD trace).
+// Scoping the send-time guard to only the states WakeSession misses keeps this fix
+// off the core session-wake semantics and preserves that established behavior.
+//
+// state is a short diagnostic label ("drained"/"stopped") the caller surfaces as
+// its failure signal. A store lookup error other than not-found is returned bare
+// so the caller can fall back to the existing path rather than misclassify.
+func (s *Store) ManagedWakeWouldStrand(id string, now time.Time) (state string, wouldStrand bool, err error) {
+	b, err := s.store.Get(id)
+	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return "", false, nil // gone → WakeSession errors → existing rollback path handles it
+		}
+		return "", false, err
+	}
+	if !IsSessionBeadOrRepairable(b) {
+		return "", false, nil
+	}
+	RepairEmptyType(s.store.Store, &b)
+	lcInput := LifecycleInputFromMetadata(b.Status, b.Metadata)
+	lcInput.Now = now
+	switch base := ProjectLifecycle(lcInput).BaseState; base {
+	case BaseStateDrained, BaseStateStopped:
+		return string(base), true, nil
+	}
+	return "", false, nil
+}
+
+// ManagedWakeUnreachable reports, via a read-only lifecycle projection (it never
+// mutates the session), whether a nudge ALREADY QUEUED for session id can no longer
+// be consumed because the target session has reached a terminal or stranding
+// lifecycle state. It is the maintenance-time superset of ManagedWakeWouldStrand:
+// the send-time strand probe deliberately covers only the drained/stopped states
+// WakeSession would silently accept, leaving the terminal states to WakeSession's
+// own enqueue-time rejection. The drain-time dead-letter sweep, by contrast, runs
+// AFTER the raced session has often progressed all the way to closed (the
+// reconciler closes a drained pool worker), so it must treat BOTH the terminal
+// wake-conflict states (closed / closing / archived-without-continuity) AND the
+// stranding states (drained / stopped) as unreachable. Archived-WITH-continuity and
+// every live/resumable state (asleep, suspended, active, start-pending) return
+// unreachable=false — those genuinely still consume a queued nudge, so sweeping
+// them would drop a live delivery.
+//
+// A missing session bead (ErrNotFound) returns unreachable=false: at sweep time a
+// freshly-queued nudge can momentarily race ahead of a slow session read, so
+// treating a transient not-found as terminal would drop a legitimate nudge; a
+// genuinely retention-swept bead is caught by the fence-mismatch dead-letter path
+// on the next delivery attempt instead. Any other store error is returned bare so
+// the caller keeps the item rather than misclassify a live target as unreachable.
+func (s *Store) ManagedWakeUnreachable(id string, now time.Time) (state string, unreachable bool, err error) {
+	b, err := s.store.Get(id)
+	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	if !IsSessionBeadOrRepairable(b) {
+		return "", false, nil
+	}
+	RepairEmptyType(s.store.Store, &b)
+	lcInput := LifecycleInputFromMetadata(b.Status, b.Metadata)
+	lcInput.Now = now
+	view := ProjectLifecycle(lcInput)
+	if st, conflict := lifecycleWakeConflictState(view); conflict {
+		return st, true, nil
+	}
+	switch view.BaseState {
+	case BaseStateDrained, BaseStateStopped:
+		return string(view.BaseState), true, nil
+	}
+	return "", false, nil
+}

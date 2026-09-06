@@ -3838,6 +3838,26 @@ func paneContainsBusyIndicator(lines []string) bool {
 			return true
 		}
 	}
+	// Narrow panes defeat the per-line match two ways (observed live on a
+	// 45-col pane, dip rig 2026-08-09): the spinner's parenthetical wraps
+	// across a line break — "(4m 28s" / "· ↓ 11.5k tokens)" — so no single
+	// line matches claudeBusySpinnerRe; and the status footer ellipsizes
+	// "esc to interrupt" down to "esc …". A busy session then reads idle,
+	// every confirmed-submit reports ErrNudgeSubmitUnconfirmed, and the
+	// queued nudge re-delivers forever. Re-run the spinner match over the
+	// joined capture so a wrapped parenthetical is seen whole, and accept
+	// the ellipsized footer fragment ("· esc …"/"• esc …") that only the
+	// busy footer produces.
+	joined := strings.Join(lines, " ")
+	if claudeBusySpinnerRe.MatchString(joined) ||
+		strings.Contains(joined, "esc to interrupt") {
+		return true
+	}
+	for _, sep := range []string{"· esc …", "· esc…", "• esc …", "• esc…"} {
+		if strings.Contains(joined, sep) {
+			return true
+		}
+	}
 	return false
 }
 

@@ -138,6 +138,28 @@ func TestNudgeOnRouteResolvesPoolMembers(t *testing.T) {
 	}
 }
 
+// TestNudgeScriptsNameTheSubjectBead guards the purpose-extinct retirement
+// path (sc-lx6q5t): both nudge orders talk to a possibly-busy worker, so their
+// nudges are routinely QUEUED until the next safe boundary. Without --about the
+// queued item carries no bead reference, and the delivery pass cannot tell that
+// the reminder's subject has closed — so it interrupts the worker to look for
+// work that is already done. The route script must name the routed bead, and
+// the cascade script the DEPENDENT bead (its subject), not the blocker.
+func TestNudgeScriptsNameTheSubjectBead(t *testing.T) {
+	for _, tc := range []struct{ script, want string }{
+		{"assets/scripts/nudge-on-route.sh", `--about "$_bead"`},
+		{"assets/scripts/cascade-nudge-on-blocker-close.sh", `--about "$dep_id"`},
+	} {
+		data, err := fs.ReadFile(PackFS, tc.script)
+		if err != nil {
+			t.Fatalf("reading %s: %v", tc.script, err)
+		}
+		if !strings.Contains(string(data), tc.want) {
+			t.Errorf("%s must name the nudge's subject bead; missing %q", tc.script, tc.want)
+		}
+	}
+}
+
 // TestNotifyOnHumanGateCreationOrder pins the notify-on-human-gate-creation
 // order's event contract: it wakes on bead.created — the event synthesized for
 // any newly-appeared bead — and runs the notify-on-human-gate-creation script.
