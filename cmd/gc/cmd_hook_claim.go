@@ -37,11 +37,12 @@ const (
 // refused stale session, a refused non-turn invocation, or a seat whose session
 // row is already draining.
 const (
-	hookClaimReasonNoWork         = "no_work"
-	hookClaimReasonClaimsErrored  = "claims_errored"
-	hookClaimReasonStaleSession   = "stale_session"
-	hookClaimReasonNonTurnContext = "non_turn_context"
-	hookClaimReasonDrainPending   = "drain_pending"
+	hookClaimReasonNoWork                     = "no_work"
+	hookClaimReasonClaimsErrored              = "claims_errored"
+	hookClaimReasonStaleSession               = "stale_session"
+	hookClaimReasonNonTurnContext             = "non_turn_context"
+	hookClaimReasonDrainPending               = "drain_pending"
+	hookClaimReasonMissingSessionRegistration = "missing_session_registration"
 )
 
 // Reasons carried on a bead.claim_released event: which unwind gave the claim
@@ -1147,6 +1148,17 @@ func writeHookClaimDrainPending(label, sessionID string, opts hookClaimOptions, 
 // retrying the refusal forever.
 func writeHookClaimStaleSessionDrain(opts hookCommandOptions, stdout, stderr io.Writer) int {
 	return writeHookClaimDrain(hookClaimLabel, hookClaimReasonStaleSession, opts.JSON, opts.DrainAck, hookRuntimeDrainAck, stdout, stderr)
+}
+
+// writeHookClaimMissingSessionRegistrationDrain emits the terminal result for a
+// runtime that carries pool-membership identity (GC_TEMPLATE) but no durable
+// session bead to verify (GC_SESSION_ID empty) — a managed pool session that
+// never registered, or lost registration, before reaching the claim path. It
+// preserves the same result contract as the stale-session drain but with a
+// distinct reason so a wrapper or dashboard can tell "never registered" apart
+// from "registered, then went stale."
+func writeHookClaimMissingSessionRegistrationDrain(opts hookCommandOptions, stdout, stderr io.Writer) int {
+	return writeHookClaimDrain(hookClaimLabel, hookClaimReasonMissingSessionRegistration, opts.JSON, opts.DrainAck, hookRuntimeDrainAck, stdout, stderr)
 }
 
 // writeHookClaimDrain writes the single structured drain result shared by every
