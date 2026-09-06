@@ -115,6 +115,7 @@ Formula:     pancakes
 Trigger:     cooldown
 Interval:    5m
 Target:      worker
+Idempotent:  false
 Source:      /Users/you/my-city/orders/pancakes-check.toml
 ```
 

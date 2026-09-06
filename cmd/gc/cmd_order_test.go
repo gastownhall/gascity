@@ -126,6 +126,44 @@ func TestOrderListJSON(t *testing.T) {
 	}
 }
 
+// TestOrderListJSONExposesIdempotent guards that the `idempotent` order flag is
+// visible in the JSON projection. Without it, an operator debugging a starved
+// single-flight order (vp-gprv: code-review-gate never dispatched because the
+// open-work gate timed out) cannot tell from `gc order list/show --json`
+// whether the order is idempotent — i.e. whether it is eligible to fail OPEN on
+// a gate timeout. The flag is the single most load-bearing field for that
+// diagnosis, so it must be serialized.
+func TestOrderListJSONExposesIdempotent(t *testing.T) {
+	aa := []orders.Order{
+		{Name: "sweep", Trigger: "cooldown", Interval: "2m", Exec: "true", Idempotent: true},
+		{Name: "review", Trigger: "cooldown", Interval: "2m", Exec: "true", Idempotent: false},
+	}
+
+	var stdout bytes.Buffer
+	if code := doOrderListJSON("/city", &config.City{}, aa, &stdout); code != 0 {
+		t.Fatalf("doOrderListJSON = %d, want 0", code)
+	}
+
+	var got struct {
+		Orders []struct {
+			Name       string `json:"name"`
+			Idempotent bool   `json:"idempotent"`
+		} `json:"orders"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("order list JSON invalid: %v\n%s", err, stdout.String())
+	}
+	if len(got.Orders) != 2 {
+		t.Fatalf("orders = %+v, want 2", got.Orders)
+	}
+	if got.Orders[0].Name != "sweep" || !got.Orders[0].Idempotent {
+		t.Errorf("idempotent order should serialize idempotent=true; got %+v", got.Orders[0])
+	}
+	if got.Orders[1].Name != "review" || got.Orders[1].Idempotent {
+		t.Errorf("non-idempotent order should serialize idempotent=false; got %+v", got.Orders[1])
+	}
+}
+
 func TestOrderListExecType(t *testing.T) {
 	aa := []orders.Order{
 		{Name: "poll", Trigger: "cooldown", Interval: "2m", Exec: "scripts/poll.sh"},
@@ -154,6 +192,7 @@ func TestOrderShowJSON(t *testing.T) {
 		Trigger:      "cron",
 		Schedule:     "0 3 * * *",
 		Pool:         "dog",
+		Idempotent:   true,
 		Source:       "/city/orders/digest.toml",
 		FormulaLayer: "/city/formulas",
 	}}
@@ -173,11 +212,20 @@ func TestOrderShowJSON(t *testing.T) {
 			Trigger      string `json:"trigger"`
 			Schedule     string `json:"schedule"`
 			Target       string `json:"target"`
+			Idempotent   bool   `json:"idempotent"`
 			FormulaLayer string `json:"formula_layer"`
 		} `json:"order"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
 		t.Fatalf("order show JSON invalid: %v\n%s", err, stdout.String())
+	}
+	// The list projection asserts idempotent directly
+	// (TestOrderListJSONExposesIdempotent); without the same assertion here half
+	// the diagnostic contract could regress silently. idempotent is what decides
+	// whether an order fails open on a gate timeout, so operators reading
+	// `gc order show --json` need it to be accurate.
+	if !got.Order.Idempotent {
+		t.Error("order show JSON: idempotent = false, want true (the show projection must expose the flag the list projection does)")
 	}
 	if got.SchemaVersion != "1" || got.Order.Name != "digest" || got.Order.Target != "dog" || got.Order.FormulaLayer != "/city/formulas" {
 		t.Fatalf("payload = %+v", got)
