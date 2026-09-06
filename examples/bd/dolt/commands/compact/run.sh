@@ -71,6 +71,11 @@
 #   GC_DOLT_HOST                          (default: 127.0.0.1)
 #   GC_DOLT_USER                          (default: root)
 #   GC_DOLT_PASSWORD                      (optional)
+#   GC_DOLT_COMPACT_FORCE=1               bypass maintenance.dolt.enabled for
+#                                         a manual announced run.
+#   GC_DOLT_COMPACT_ALLOW_FEDERATED=1     allow history flattening / deferred
+#                                         push on databases with any remote
+#                                         during an announced window.
 #   GC_DOLT_COMPACT_THRESHOLD_COMMITS
 #     (default: 2000) — skip databases with fewer commits than this.
 #   GC_DOLT_COMPACT_CALL_TIMEOUT_SECS
@@ -210,6 +215,27 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+# Resolve the city's current flag, including config fragments and overrides.
+# This covers every mode before runtime probes, locks, or Dolt operations.
+# FORCE only bypasses this flag; federation requires its separate opt-in.
+if [ "${GC_DOLT_COMPACT_FORCE:-}" != "1" ]; then
+  if ! maintenance_config=$(gc --city "$GC_CITY_PATH" config show --json); then
+    printf 'compact: cannot read maintenance.dolt config — refusing maintenance\n' >&2
+    exit 1
+  fi
+  if ! maintenance_enabled=$(printf '%s\n' "$maintenance_config" | jq -er '
+    .config.Maintenance.Dolt.Enabled
+    | if type == "boolean" then tostring else error("expected boolean maintenance flag") end
+  '); then
+    printf 'compact: cannot read maintenance.dolt enabled flag — refusing maintenance\n' >&2
+    exit 1
+  fi
+  if [ "$maintenance_enabled" = "false" ]; then
+    printf 'compact: maintenance.dolt enabled=false, skipping\n'
+    exit 0
+  fi
+fi
 
 : "${GC_DOLT_PORT:=}"
 gc_dolt_port_input="$GC_DOLT_PORT"
@@ -2316,6 +2342,31 @@ flatten_database() {
   if has_compact_marker "$quarantine_dir" "$db"; then
     report_existing_quarantine "$db"
     return 1
+  fi
+
+  # Any configured remote means history may be shared with another city.
+  # Check independently of remote selection, .no-sync, and --skip-fetch, before
+  # even a dirty dolt_ignore commit or a deferred push from an earlier flatten.
+  # Reclaim-only modes do not enter this function and do not rewrite history.
+  if [ "${GC_DOLT_COMPACT_ALLOW_FEDERATED:-}" != "1" ]; then
+    federation_remote_count=$(remote_count "$db") || return 1
+    case "$federation_remote_count" in
+      ''|*[!0-9]*)
+        printf 'compact: db=%s remote count probe returned invalid value=%s\n' \
+          "$db" "$federation_remote_count" >&2
+        return 1
+        ;;
+    esac
+    if [ "$federation_remote_count" -gt 0 ]; then
+      federation_remote=$(single_remote_name "$db") || return 1
+      if [ -z "$federation_remote" ]; then
+        printf 'compact: db=%s remote probe returned empty name — refusing flatten\n' "$db" >&2
+        return 1
+      fi
+      printf 'compact: db=%s remote=%s — skipping flatten (set GC_DOLT_COMPACT_ALLOW_FEDERATED=1 during an announced window)\n' \
+        "$db" "$federation_remote"
+      return 0
+    fi
   fi
 
   if has_compact_marker "$pending_gc_dir" "$db"; then
