@@ -47,10 +47,11 @@ With --claim: runs the standard startup claim protocol for one work item.
 				DrainAck:   drainAck,
 				JSON:       jsonOut,
 			}
-			if cmdHookWithOptions(args, opts, stdout, stderr) != 0 {
-				return errExit
-			}
-			return nil
+			// exitForCode, not `!= 0 → errExit`: the store-unavailable
+			// contract is exit 2 (reportWorkQueryFailure), and folding it
+			// into errExit renders it as the no-work exit 1 at the process
+			// boundary — the idle-agents-with-work-waiting dead-drop.
+			return exitForCode(cmdHookWithOptions(args, opts, stdout, stderr))
 		},
 	}
 	cmd.Flags().BoolVar(&inject, "inject", false, "silent legacy Stop-hook compatibility; skip work query and exit 0")
@@ -683,23 +684,19 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		discovered, selected, err := selectStoreWithWorkRetrying(workQuery, remaining, primary, run)
 		if err != nil {
 			emitFailure(workQuery, err)
-			fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck // best-effort stderr
-			// Deliberately NO drain result and NO drain-ack. A failed read is not
-			// an idle store: the controller counted demand for this seat, so
-			// draining here would convert a transport failure into a false idle,
-			// reap the seat, and leave the work for the next tick to rediscover.
-			// Exit non-zero, keep the seat, and let the event above carry the
-			// cause; the idle-claim backstop re-drives the hook.
-			return 1
+			return reportClaimWorkQueryFailure(err, stderr)
 		}
 		if isZeroHookStore(selected) {
 			break // no remaining store has ready work
 		}
+		// On a multi-leg city this re-reads the selected store before the
+		// mutation, and a primary-leg failure there is surfaced exactly like a
+		// discovery failure: it is the same read of the same store, moments
+		// later, so it gets the same classification.
 		claimOutput, claimStore, err := claimStoreWithFallback(workQuery, remaining, selected, primary, discovered, run)
 		if err != nil {
 			emitFailure(workQuery, err)
-			fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
+			return reportClaimWorkQueryFailure(err, stderr)
 		}
 		if isZeroHookStore(claimStore) {
 			break // selected store emptied and no later store has ready work
@@ -731,6 +728,53 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		remaining = removeHookStore(remaining, claimStore)
 	}
 	return writeHookClaimNoWork(claimOpts, ops, claimsErrored, workDir, stdout, stderr)
+}
+
+// reportClaimWorkQueryFailure reports a failed claim-path work query on stderr
+// and returns the exit code for it. Every read the claim performs — discovery
+// and the claim-time re-validation on a multi-leg city — funnels through here,
+// so a transport-class failure on either carries the token and exit 2.
+//
+// This is the same store-unavailable classification the read path applies.
+// --claim is the form agents actually run in the dispatch loop, so without the
+// token here a transport-class failure is still indistinguishable from "no
+// work" to every consumer that matches on it — the dead-drop the token exists
+// to close. The error is classified ONCE and reused for both the stderr token
+// and the exit code, so the published contract (token <=> exit 2) cannot be
+// split by an edit reaching one and not the other.
+//
+// Deliberately NO drain result and NO drain-ack. A failed read is not an idle
+// store: the controller counted demand for this seat, so draining here would
+// convert a transport failure into a false idle, reap the seat, and leave the
+// work for the next tick to rediscover. Keep the seat and let the event the
+// caller emitted carry the cause; the idle-claim backstop re-drives the hook.
+// That behavior is orthogonal to the exit CODE, which follows the token's
+// published contract: hookStoreUnavailableToken documents exit 2, and a
+// consumer gating on the code must be able to tell a dead store from no-work on
+// this path too.
+func reportClaimWorkQueryFailure(err error, stderr io.Writer) int {
+	return reportWorkQueryFailure("gc hook --claim", err, stderr)
+}
+
+// workQueryStoreUnavailable reports whether err is a transport-class failure
+// (an unreachable store, not an empty queue) after classification.
+func workQueryStoreUnavailable(err error) bool {
+	return errors.Is(classifyWorkQueryStoreUnavailable(err), beads.ErrStoreUnavailable)
+}
+
+// reportWorkQueryFailure is the ONE place the token <=> exit-2 contract is
+// rendered: a transport-class failure prints "<prefix>: <token>: <err>" and
+// exits 2; anything else prints "<prefix>: <err>" and exits 1. Every path
+// that reports a failed work query shares it so the published contract
+// cannot drift between them.
+func reportWorkQueryFailure(prefix string, err error, stderr io.Writer) int {
+	classified := classifyWorkQueryStoreUnavailable(err)
+	if errors.Is(classified, beads.ErrStoreUnavailable) {
+		fmt.Fprintf(stderr, "%s: %s: %v\n", prefix, hookStoreUnavailableToken, classified) //nolint:errcheck // best-effort stderr
+		return 2
+	}
+	fmt.Fprintf(stderr, "%s: %v\n", prefix, err) //nolint:errcheck // best-effort stderr
+	return 1
 }
 
 // Claim-read retry pacing. A work-query ERROR is a failed read, and the failures
@@ -971,6 +1015,50 @@ type hookVisibility struct {
 	RouteTargets []string
 }
 
+// hookStoreUnavailableToken is the distinct stderr token gc hook emits
+// (with exit code 2) when the bead store is unreachable. Runtime hook
+// consumers match on it to distinguish "store down" from exit-1 no-work —
+// rendering an unreachable store as no-work is the chronic
+// idle-agents-with-work-waiting dead-drop.
+const hookStoreUnavailableToken = "GC_HOOK_STORE_UNAVAILABLE"
+
+// isTransportClassMessage reports whether a lowercased error message matches
+// the pinned transport-failure marker table (bdTransportRetryableMarkers).
+func isTransportClassMessage(lowerMsg string) bool {
+	for _, marker := range bdTransportRetryableMarkers {
+		if strings.Contains(lowerMsg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// classifyWorkQueryStoreUnavailable wraps transport-class work-query failures
+// as beads.ErrStoreUnavailable so doHook can report them as exit 2 rather than
+// letting a dead store masquerade as a drained queue. Errors that already carry
+// the sentinel pass through unchanged; anything that is not transport-class is
+// returned as-is and stays an ordinary exit-1 error.
+func classifyWorkQueryStoreUnavailable(err error) error {
+	if err == nil || errors.Is(err, beads.ErrStoreUnavailable) {
+		return err
+	}
+	// Typed signals first. shellWorkQueryWithEnv wraps its deadline as
+	// context.DeadlineExceeded precisely so callers classify the timeout as a
+	// transient store error: a wedged-but-listening backend (hung connections,
+	// context-deadline floods — the dominant outage shape, not "connection
+	// refused") surfaces here, and reading it as no-work is the dead-drop the
+	// token exists to close.
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("%w: %w", beads.ErrStoreUnavailable, err)
+	}
+	// isTransportClassMessage is the single pinned marker table shared with
+	// the bd managed-retry path; a marker added there must classify here too.
+	if isTransportClassMessage(strings.ToLower(err.Error())) {
+		return fmt.Errorf("%w: %w", beads.ErrStoreUnavailable, err)
+	}
+	return err
+}
+
 // doHook is the pure logic for gc hook. Runs the work query and outputs
 // results based on mode. Without inject: prints normalized ready-only output,
 // returns 0 if work exists, 1 if empty. With inject: skips the work query and
@@ -1021,11 +1109,16 @@ func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, 
 
 	output, err := runner(workQuery, dir)
 	if err != nil {
-		if normalized := normalizeWorkQueryOutput(strings.TrimSpace(output)); normalized != "" {
-			fmt.Fprint(stdout, normalized) //nolint:errcheck // best-effort stdout
+		// A transport-class failure is an unreachable store, not an empty
+		// queue: no partial stdout, token + exit 2 (reportWorkQueryFailure).
+		// Any other failure first surfaces whatever partial output the query
+		// produced, then reports exit 1.
+		if !workQueryStoreUnavailable(err) {
+			if normalized := normalizeWorkQueryOutput(strings.TrimSpace(output)); normalized != "" {
+				fmt.Fprint(stdout, normalized) //nolint:errcheck // best-effort stdout
+			}
 		}
-		fmt.Fprintf(stderr, "gc hook: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		return reportWorkQueryFailure("gc hook", err, stderr)
 	}
 
 	trimmed := strings.TrimSpace(output)
