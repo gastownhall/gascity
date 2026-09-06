@@ -105,7 +105,12 @@ func lintTarget(target string) lintReport {
 		return report
 	}
 	for _, dir := range packDirs {
-		packReport := lintPack(dir)
+		// The full walked set rides along so prompt fragments defined by a
+		// SIBLING pack resolve the way runtime rendering resolves them — a
+		// city's packs compose one fragment namespace, and linting each pack
+		// against only its own imports false-errors every cross-pack
+		// {{template "..."}} reference.
+		packReport := lintPack(dir, packDirs)
 		report.Packs = append(report.Packs, packReport)
 		report.ErrorCount += lintErrorCount(packReport.Diagnostics)
 	}
@@ -174,7 +179,7 @@ func lintSkipDir(name string) bool {
 	}
 }
 
-func lintPack(packDir string) lintPackReport {
+func lintPack(packDir string, siblingPackDirs []string) lintPackReport {
 	out := lintPackReport{Path: packDir, OK: true}
 	loaded, err := config.LoadPackForLint(fsys.OSFS{}, packDir)
 	if err != nil {
@@ -192,10 +197,25 @@ func lintPack(packDir string) lintPackReport {
 	targets, diagnostics := collectLintPromptTargets(packDir, loaded)
 	out.Diagnostics = append(out.Diagnostics, diagnostics...)
 	for _, target := range targets {
-		out.Diagnostics = append(out.Diagnostics, lintPrompt(packDir, loaded.PackDirs, loaded.Providers, target)...)
+		out.Diagnostics = append(out.Diagnostics, lintPrompt(packDir, mergePackDirs(loaded.PackDirs, siblingPackDirs), loaded.Providers, target)...)
 	}
 	out.Diagnostics = append(out.Diagnostics, lintClaudeOverlayHookShape(packDir)...)
 	out.OK = lintErrorCount(out.Diagnostics) == 0
+	return out
+}
+
+// mergePackDirs unions a pack's own import-derived dirs with the walked
+// sibling set, preserving order and dropping duplicates.
+func mergePackDirs(own, siblings []string) []string {
+	seen := make(map[string]struct{}, len(own)+len(siblings))
+	out := make([]string, 0, len(own)+len(siblings))
+	for _, d := range append(append([]string{}, own...), siblings...) {
+		if _, ok := seen[d]; ok {
+			continue
+		}
+		seen[d] = struct{}{}
+		out = append(out, d)
+	}
 	return out
 }
 

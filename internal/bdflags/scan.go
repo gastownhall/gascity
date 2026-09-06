@@ -70,7 +70,37 @@ func splitShellSegments(line string) []string {
 	var segments []string
 	var current strings.Builder
 	var quote rune
-	for _, r := range line {
+	subDepth := 0 // inside $(...) command substitution
+	runes := []rune(line)
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		// A command substitution starts a NEW command whose flags belong to
+		// it, not to the invocation that embeds it: `--metadata "$(jq -cn
+		// ...)"` must not attribute -cn to bd. Substitution is live inside
+		// double quotes but not single quotes, matching the shell. The body
+		// is dropped entirely — its command is outside this package's
+		// manifest anyway, and dropping keeps tokens AFTER the closing paren
+		// attributed to the outer invocation. A line ending mid-substitution
+		// (backslash continuation) drops the remainder, the same accepted
+		// line-oriented scope boundary documented on ScanUnknownFlags.
+		if subDepth > 0 {
+			switch r {
+			case '(':
+				subDepth++
+			case ')':
+				subDepth--
+			}
+			continue
+		}
+		if quote != '\'' && r == '$' && i+1 < len(runes) && runes[i+1] == '(' {
+			subDepth = 1
+			i++
+			// A placeholder keeps the token slot occupied: the substitution
+			// is usually the VALUE of the preceding flag, and vanishing it
+			// would make the scanner consume the NEXT flag as that value.
+			current.WriteString("SUBSTITUTION")
+			continue
+		}
 		switch {
 		case quote != 0:
 			if r == quote {
