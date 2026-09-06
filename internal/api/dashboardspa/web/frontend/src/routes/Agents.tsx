@@ -667,13 +667,26 @@ export { stateTone } from '../components/StatusBadge';
 // Buckets a raw state into the synopsis category. Distinct from
 // stateTone because 'detached' and 'idle' share a tone (neutral) but the
 // header text breaks them out.
+//
+// 'stopped' and 'quarantined' are explicit (not folded into 'idle') because
+// computeAgentState (internal/api/handler_agents.go) returns them for
+// agents that were never started — e.g. a scaled pool's min=0 members — a
+// state distinct from an agent that ran and is now caught up. 'unknown' is
+// likewise explicit rather than a silent default: it is the bucket a
+// genuinely wedged agent reporting an unrecognized state would land in, so
+// it must never read the same as a normal idle agent (gastownhall/gascity
+// runtime-status-probe liveness misreporting).
 export type SynopsisBucket =
   | 'active'
+  | 'working'
   | 'idle'
+  | 'stopped'
+  | 'quarantined'
   | 'detached'
   | 'rate-limited'
   | 'stuck'
-  | 'suspended';
+  | 'suspended'
+  | 'unknown';
 
 function stateBucket(agent: SupervisorAgent): SynopsisBucket {
   if (agent.suspended) return 'suspended';
@@ -681,6 +694,16 @@ function stateBucket(agent: SupervisorAgent): SynopsisBucket {
     case 'active':
     case 'running':
       return 'active';
+    case 'working':
+      return 'working';
+    case 'idle':
+    case 'asleep':
+    case 'creating':
+      return 'idle';
+    case 'stopped':
+      return 'stopped';
+    case 'quarantined':
+      return 'quarantined';
     case 'detached':
       return 'detached';
     case 'rate-limited':
@@ -693,7 +716,7 @@ function stateBucket(agent: SupervisorAgent): SynopsisBucket {
     case 'stuck':
       return 'stuck';
     default:
-      return 'idle';
+      return 'unknown';
   }
 }
 
@@ -706,16 +729,24 @@ export function buildAgentSynopsis(rows: ReadonlyArray<SupervisorAgent>): string
   }
   const parts: string[] = [];
   const active = counts.get('active') ?? 0;
+  const working = counts.get('working') ?? 0;
   const idle = counts.get('idle') ?? 0;
+  const stopped = counts.get('stopped') ?? 0;
+  const quarantined = counts.get('quarantined') ?? 0;
   const detached = counts.get('detached') ?? 0;
   const rateLimited = counts.get('rate-limited') ?? 0;
   const stuck = counts.get('stuck') ?? 0;
   const suspended = counts.get('suspended') ?? 0;
+  const unknown = counts.get('unknown') ?? 0;
   if (active > 0) parts.push(`${active} active`);
+  if (working > 0) parts.push(`${working} working`);
   if (idle > 0) parts.push(`${idle} idle`);
+  if (stopped > 0) parts.push(`${stopped} stopped`);
+  if (quarantined > 0) parts.push(`${quarantined} quarantined`);
   if (detached > 0) parts.push(`${detached} detached`);
   if (rateLimited > 0) parts.push(`${rateLimited} rate-limited`);
   if (stuck > 0) parts.push(`${stuck} stuck`);
   if (suspended > 0) parts.push(`${suspended} suspended`);
+  if (unknown > 0) parts.push(`${unknown} unknown`);
   return parts.join(', ') + '.';
 }
