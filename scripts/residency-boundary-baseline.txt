@@ -2,31 +2,128 @@
 # SHRINK ONLY. Regenerate when a migration slice RETIRES sites; growth is a
 # new blind reader and the check refuses it. See scripts/check-residency-boundary.sh.
 #
-# Regenerate with BOTH emitters, or the halves disagree and one silently wins:
-#   scripts/check-residency-boundary.sh --emit-baseline          # the grep rows
-#   RESIDENCY_BASELINE_EMIT=1 go test ./scripts -v \
-#     -run TestResidencyResolverBoundary                         # the ast: rows
+# REGENERATION. Three emitters feed this one file, and NONE of them emits the
+# whole thing. Redirecting any single one over this file drops the other two's
+# rows AND this hand-written header — and because the ratchet is shrink-only,
+# dropped rows read as a successful migration. So regenerate by SPLICING, never
+# by redirecting:
+#
+#   1. Collect all three, into scratch files:
+#        scripts/check-residency-boundary.sh --emit-baseline   # the grep rows;
+#          # its own first four lines are a PARTIAL warning — drop them
+#        RESIDENCY_BASELINE_EMIT=1 go test ./scripts -v \
+#          -run TestResidencyResolverBoundary             # ast:returns-store-list
+#        RESIDENCY_BASELINE_EMIT=1 go test ./scripts -v \
+#          -run TestResidencyASTExpressionRatchet   # ast:vocabulary-alias and
+#                                                   # ast:plan-leg-store-chain
+#      The two go test emitters print through the test harness, so filter their
+#      output to lines with exactly three tabs — `=== RUN`, `--- SKIP` and the
+#      trailing `ok` line are chatter, and a chatter line spliced in here is a
+#      row the ratchet will never match and never report.
+#   2. Concatenate the three row sets and sort the whole thing once
+#      (LC_ALL=C sort), so the file stays in one global order rather than three
+#      concatenated runs. Both halves read it as an unordered map, but a
+#      consistent order is what makes the diff of a migration slice readable.
+#   3. Keep this header. Then update the prose in it: every block below explains
+#      why some specific row is pinned, and a row that changed with stale prose
+#      beside it is worse than no prose.
+#   4. Re-run both halves clean before committing.
+#
+# Step 1's first command walks every scanned directory; it is fast (well under a
+# second) because the awk census tests one union alternation before the 25-way
+# pattern loop. If it ever takes minutes again, that prefilter has been broken —
+# see the census() comment in the script.
 #
 # A row here is a CENSUS entry, not a verdict. Some are genuine blind readers
 # awaiting a migration slice; others are sanctioned shapes whose growth is still
 # worth reviewing — internal/api/residency_by_id.go's three []storeref.Leg
 # returners are the WorkAxisRouter the resolver itself declares, and
 # c:storeref.EachLeg's two entries are the enumeration seam's only consumers.
+#
+# The single c:WorkAxisRouter row is the census of storeref.ByID.WorkAxis
+# implementations. It is deliberately HERE and not in the shell guard's
+# allowlist: the allowlist filters a file before counting, which would blind the
+# ratchet to exactly the growth worth seeing. A second row means a second plane
+# answers "which work store holds this id" in its own order, and the rule that
+# governs that — stated beside the pattern in residency-boundary-patterns.txt —
+# requires a cross-plane router-agreement pin to land with it.
+#
+# The residency_topology.go, infra_class_migrate.go and cmd_storage.go rows are
+# here BECAUSE those files stopped being allowlisted. An allowlist filters a file
+# before counting, so a helper written inside one could re-export the derivation
+# to callers anywhere in the tree with neither half of the guard seeing it. Six
+# rows, six hits: those files do have to enumerate — they are the constructors
+# that BUILD topology and the tools that migrate it — so they are pinned here
+# instead: exemption scoped to the call, not to the file around it, and a seventh
+# is a reviewed baseline change like any other. One of the six is the accessor's
+# own `func` line; the census attributes a line to the function it opens, so
+# declaring vocabulary counts as mentioning it, and the row still moves if the
+# declaration is renamed. "Hits" here means mentions, not call sites.
+#
+# The two internal/dispatch/drain.go rows arrived when the signature rule
+# widened from cmd/gc+internal/api to every directory grep already scanned. The
+# comment that justified the narrower set claimed sling and dispatch held no
+# store-list constructor and that one added there would surface as a grep hit;
+# both halves of that were wrong — these two predate the claim, and a
+# constructor whose body names none of the vocabulary produces no grep hit at
+# all. Probe sets are the shape most worth watching here: a drain that assembles
+# its own candidate stores is deciding residency in its own order — and both of
+# these do. drainMemberProbeSet's list is walked with hand-rolled per-leg failure
+# policy; drainUnitConvoyProbeSet's is built in the REVERSE leg order of its own
+# sibling and handed straight to storeref.Resolve. Two probe sets in one file
+# disagreeing about leg order is the restatement this boundary exists to catch,
+# so these rows are a MIGRATION pinned open, not a sanctioned shape: ga-qdt5y.16
+# retires both.
+#
+# cmd/gc/cmd_wait.go's newWaitDependencyStoreSet is the third of that family, and
+# it surfaced only when the signature rule learned to see through a local type
+# name: `type waitDependencyStoreSet []beads.Store` made the constructor's result
+# an *ast.Ident, and the rule had been reading spellings. The set's Get does hand
+# its list to storeref.Resolve — the executor applies the per-leg policy — but the
+# LIST is assembled here, city store first and rig stores in sorted-name order,
+# which is the leg-order decision the resolver owns. Same shape as the drain.go
+# pair and pinned for the same reason; ga-qdt5y.16 covers it.
+#
+# The four ast:uncounted-call-spelling rows are storeFor calls reached through a
+# receiver no grep row names: cs.storageRoutes.storeFor in api_state.go,
+# cliStorageRoutes(cityPath).storeFor in cli_class_stores.go (the receiver is a
+# CALL, so there is no identifier to match at all), and graphStores.storeFor in
+# cmd_graph.go's two by-id readers. b:routes.storeFor spells one qualifier, and
+# no layout of these lines can ever match it — which is the hole this rule
+# exists to report rather than to silence. They are a census, not a verdict: the
+# api_state.go and cli_class_stores.go sites read the routes table the residency
+# resolver owns, and cmd_graph.go's is that file's own id-to-store answer. A
+# fifth row is a fifth surface deciding residency through a spelling the grep
+# half cannot see.
+#
+# The b:cliSoleClassBinding rows are the same kind of census one layer down:
+# the surfaces that answer every reserved prefix from ONE store, which is a
+# claim about the city's topology and not just a call. The accessor checks that
+# claim and refuses a fan-out, so another row is not a correctness bug — it is a
+# new surface routing class-reserved ids, which is the thing worth seeing.
+#
+# cmd/gc/cmd_convoy.go's refuseBindingRigCollision holds two rows and is one
+# site, deliberately. The binding short-circuit in resolveOwningStoreDir returns
+# before the scan runs, and the scan is where "this id exists in more than one
+# store" is refused — correct to skip for the city's own retained copy, wrong to
+# skip for a rig, which is never a migration target. Restoring the refusal for
+# that one case needs the candidate list (a:openConvoyStores) and needs to know
+# which ids no rig can hold (d:bdIDIsClassReserved). Both are the enumeration
+# and the namespace gate this guard exists to count, and both are pinned here
+# rather than annotated because the review that matters is whether the
+# short-circuit should be probing at all, not whether it called correctly.
 cmd/gc/api_state.go	BeadStores	a:BeadStores	1
 cmd/gc/api_state.go	BeadStores	ast:returns-store-list	1
+cmd/gc/api_state.go	beadEventConfiguredStoreLocked	ast:uncounted-call-spelling	1
 cmd/gc/api_state.go	beadEventStoresLocked	ast:returns-store-list	1
 cmd/gc/api_state.go	beadEventStoresLocked	c:beads.Store-literal	1
 cmd/gc/api_state.go	buildStores	ast:returns-store-list	1
 cmd/gc/api_state.go	completionReconcileInputs	c:beads.Store-literal	1
-cmd/gc/bd_relocated_classes.go	relocatedBeadClasses	d:ReservedClassPrefix	1
+cmd/gc/bd_relocated_classes.go	relocatedBeadClasses	d:ReservedClassPrefixesFor	1
 cmd/gc/build_desired_state.go	collectAssignedWorkBeadsWithStores	ast:returns-store-list	1
 cmd/gc/build_desired_state.go	collectOpenUnassignedRoutedWork	ast:returns-store-list	1
-cmd/gc/by_id_store_route.go	classRouteCandidates	ast:returns-store-list	1
-cmd/gc/by_id_store_route.go	classRouteCandidates	b:storeref.ClassCandidates	1
-cmd/gc/by_id_store_route.go	classRouteCandidates	c:beads.Store-literal	1
-cmd/gc/by_id_store_route.go	classRouteCandidates	d:ReservedClassPrefix	1
-cmd/gc/by_id_store_route.go	classRoutedStoreForID	b:graphClassBinding	1
-cmd/gc/by_id_store_route.go	classRoutedStoreForID	d:bdIDIsClassReserved	1
+cmd/gc/by_id_store_route.go	cityGraphClassBinding	b:graphClassBinding	1
+cmd/gc/by_id_store_route.go	classRoutedStoreForIDIn	d:bdIDIsClassReserved	1
 cmd/gc/census_residency.go	censusLegCandidates	c:storeref.EachLeg	1
 cmd/gc/city_runtime.go	beadReconcileTick	a:rigBeadStores	1
 cmd/gc/city_runtime.go	buildStandaloneRigStores	ast:returns-store-list	1
@@ -42,28 +139,33 @@ cmd/gc/city_runtime.go	sweepOrphanedOrderTrackingAtBoot	c:beads.Store-literal	1
 cmd/gc/city_runtime.go	syncBeadsAndUpdateIndex	a:rigBeadStores	1
 cmd/gc/city_runtime.go	tick	a:rigBeadStores	4
 cmd/gc/claim_class_route.go	holds	d:bdIDIsClassReserved	1
-cmd/gc/claim_class_route.go	hookClaimClassRouteForCity	b:graphClassBinding	1
+cmd/gc/claim_class_route.go	hookClaimClassRouteForCity	b:cliSoleClassBinding	1
 cmd/gc/class_store.go	graphClassBinding	b:graphClassBinding	1
 cmd/gc/class_store.go	graphClassBinding	b:routes.storeFor	1
 cmd/gc/class_store.go	resolveClassStore	b:routes.storeFor	1
 cmd/gc/class_store.go	unwrapWorkStores	ast:returns-store-list	1
 cmd/gc/class_store.go	workBeadStores	a:BeadStores	1
 cmd/gc/class_store.go	workBeadStores	a:rigBeadStores	1
+cmd/gc/cli_class_stores.go	cliSessionsRelocated	ast:uncounted-call-spelling	1
 cmd/gc/cmd_bd_by_id.go	bdByIDRefusedVerb	d:bdIDIsClassReserved	1
 cmd/gc/cmd_bd_by_id.go	bdFirstReservedClassID	d:bdIDIsClassReserved	1
+cmd/gc/cmd_bd_by_id.go	bdIDIsClassReserved	d:AllReservedClassPrefixes	1
 cmd/gc/cmd_bd_by_id.go	bdIDIsClassReserved	d:bdIDIsClassReserved	1
-cmd/gc/cmd_bd_by_id.go	openBdByIDClassFrontDoor	b:graphClassBinding	1
+cmd/gc/cmd_bd_by_id.go	openBdByIDClassFrontDoor	b:cliSoleClassBinding	1
 cmd/gc/cmd_bd_by_id.go	resolve	d:bdIDIsClassReserved	1
 cmd/gc/cmd_beads.go	doBeadsListFallback	a:openAllConvoyStoresAt	1
 cmd/gc/cmd_beads.go	doBeadsShowFallback	a:openAllConvoyStoresAt	1
 cmd/gc/cmd_convoy.go	convoyStoreCandidates	a:convoyStoreCandidates	1
+cmd/gc/cmd_convoy.go	convoyStoreViewsWithBinding	b:cliSoleClassBinding	1
 cmd/gc/cmd_convoy.go	doConvoyCheckFallback	a:openAllConvoyStoresAt	1
 cmd/gc/cmd_convoy.go	doConvoyListFallback	a:openAllConvoyStoresAt	1
-cmd/gc/cmd_convoy.go	openAllConvoyStores	a:openAllConvoyStoresAt	1
+cmd/gc/cmd_convoy.go	doConvoyStrandedFallback	a:openAllConvoyStoresAt	1
 cmd/gc/cmd_convoy.go	openAllConvoyStoresAt	a:openAllConvoyStoresAt	1
 cmd/gc/cmd_convoy.go	openAllConvoyStoresAt	a:openConvoyStores	1
 cmd/gc/cmd_convoy.go	openConvoyStores	a:convoyStoreCandidates	1
 cmd/gc/cmd_convoy.go	openConvoyStores	a:openConvoyStores	1
+cmd/gc/cmd_convoy.go	refuseBindingRigCollision	a:openConvoyStores	1
+cmd/gc/cmd_convoy.go	refuseBindingRigCollision	d:bdIDIsClassReserved	1
 cmd/gc/cmd_convoy.go	resolveOwningStoreDir	a:openConvoyStores	1
 cmd/gc/cmd_convoy_dispatch.go	cmdWorkflowDelete	a:openConvoyStores	1
 cmd/gc/cmd_convoy_dispatch.go	collectSourceWorkflowMatches	a:openSourceWorkflowStores	1
@@ -72,21 +174,31 @@ cmd/gc/cmd_convoy_dispatch.go	controlGraphExtraLeg	b:graphClassBinding	1
 cmd/gc/cmd_convoy_dispatch.go	findUniqueBeadAcrossStoresView	a:openSourceWorkflowStores	1
 cmd/gc/cmd_convoy_dispatch.go	openSourceWorkflowStores	a:openSourceWorkflowStores	1
 cmd/gc/cmd_convoy_dispatch.go	runControlDispatcherWithStoreAndConfig	c:beads.Store-literal	1
+cmd/gc/cmd_graph.go	doGraph	ast:uncounted-call-spelling	1
+cmd/gc/cmd_graph.go	resolveGraphInput	ast:uncounted-call-spelling	1
+cmd/gc/cmd_storage.go	reportBindingRelics	d:AllReservedClassPrefixes	1
 cmd/gc/cmd_wait.go	loadWaitDependencyBead	a:convoyStoreCandidates	1
+cmd/gc/cmd_wait.go	newWaitDependencyStoreSet	ast:returns-store-list	1
 cmd/gc/convergence_tick.go	buildConvergenceScopes	a:rigBeadStores	1
 cmd/gc/convergence_tick.go	buildConvergenceScopes	b:graphClassBinding	1
 cmd/gc/dispatch_control_ready.go	controlReadyCacheSources	ast:returns-store-list	1
 cmd/gc/dispatch_control_ready.go	controlReadyCacheSources	c:beads.Store-literal	3
 cmd/gc/doctor_order_tracking_retention.go	Run	c:beads.Store-literal	1
 cmd/gc/formula_cook_attach_class.go	attachGraftClassRefusal	b:graphClassBinding	1
+cmd/gc/infra_class_migrate.go	infraBindingIDPrefix	d:ReservedClassPrefix	1
 cmd/gc/order_dispatch.go	gateStoresFor	ast:returns-store-list	1
 cmd/gc/order_dispatch.go	gateStoresFor	c:beads.Store-literal	1
 cmd/gc/order_store.go	appendOrdersSweepStore	ast:returns-store-list	1
 cmd/gc/order_store.go	orderTrackingSweepStoresForConfigTargets	ast:returns-store-list	1
 cmd/gc/order_store.go	orderTrackingSweepStoresFromTargets	ast:returns-store-list	1
 cmd/gc/order_store.go	rawOrderStores	ast:returns-store-list	1
+cmd/gc/ready_federation.go	readyFederationLegsOverBinding	d:ReservedPrefixesFor	1
 cmd/gc/ready_federation.go	readyLegsForTopology	c:storeref.EachLeg	1
 cmd/gc/ready_federation.go	readyRigLegStores	ast:returns-store-list	1
+cmd/gc/residency_topology.go	cliSoleClassBinding	ast:plan-leg-store-chain	1
+cmd/gc/residency_topology.go	cliSoleClassBinding	b:cliSoleClassBinding	1
+cmd/gc/residency_topology.go	cliSoleClassBinding	c:plan-leg-store-access	1
+cmd/gc/residency_topology.go	residencyBindingsFromRoutes	b:routes.storeFor	1
 internal/api/dashport_support.go	BeadStores	a:BeadStores	1
 internal/api/dashport_support.go	BeadStores	ast:returns-store-list	1
 internal/api/handler_agents.go	findActiveBeadForAssigneesWithFreshness	a:BeadStores	1
@@ -106,8 +218,11 @@ internal/api/huma_handlers_convoys.go	humaHandleConvoyGet	a:BeadStores	1
 internal/api/huma_handlers_convoys.go	humaHandleConvoyList	a:BeadStores	1
 internal/api/huma_handlers_convoys.go	humaHandleConvoyRemove	a:BeadStores	1
 internal/api/residency_by_id.go	WorkLegsForID	ast:returns-store-list	1
+internal/api/residency_by_id.go	WorkLegsForID	c:WorkAxisRouter	1
 internal/api/residency_by_id.go	configuredPrefixLegs	ast:returns-store-list	1
 internal/api/residency_by_id.go	resolveLegByConfiguredIDPrefix	d:IDInNamespace	1
 internal/api/residency_by_id.go	unroutedWorkLegs	a:BeadStores	1
 internal/api/residency_by_id.go	unroutedWorkLegs	ast:returns-store-list	1
 internal/api/state.go	(file-scope)	a:BeadStores	1
+internal/dispatch/drain.go	drainMemberProbeSet	ast:returns-store-list	1
+internal/dispatch/drain.go	drainUnitConvoyProbeSet	ast:returns-store-list	1

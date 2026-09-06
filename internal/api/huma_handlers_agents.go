@@ -12,6 +12,7 @@ import (
 	"github.com/danielgtaylor/huma/v2/sse"
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // humaHandleAgentList is the Huma-typed handler for GET /v0/agents.
@@ -54,6 +55,21 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 	// so a cached response never pays for the graph-store list.
 	graphWork := s.graphActiveWorkBySession()
 
+	// Optional batch extensions: providers whose per-session attribute reads
+	// are otherwise expensive (e.g. one subprocess fork per call, per agent)
+	// can implement these to collapse the hot loop below to O(1) execs
+	// instead of O(agents). SessionRoster is read once, up front, since it
+	// covers every session in a single call; EnvironmentBatchProvider is
+	// read per running agent (still one call instead of the two GetMeta
+	// calls it replaces).
+	var rosterMap map[string]runtime.SessionRosterEntry
+	if rp, ok := sp.(runtime.SessionRosterProvider); ok {
+		if m, err := rp.SessionRoster(); err == nil {
+			rosterMap = m
+		}
+	}
+	envBatch, _ := sp.(runtime.EnvironmentBatchProvider)
+
 	var agents []agentResponse
 	for _, a := range cfg.Agents {
 		// Provenance is a property of the declared agent, shared by every
@@ -69,7 +85,17 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 			}
 
 			sessionName := agentSessionName(cityName, ea.qualifiedName, sessTmpl)
+			// Liveness stays on IsRunning: it is already a cached,
+			// fleet-wide read that excludes pane_dead corpses, whereas
+			// roster membership comes from list-sessions, which still
+			// lists a session whose pane exited under remain-on-exit.
+			// The roster is an attributes source only.
 			running := sp.IsRunning(sessionName)
+			var rosterEntry runtime.SessionRosterEntry
+			var haveRosterEntry bool
+			if rosterMap != nil {
+				rosterEntry, haveRosterEntry = rosterMap[sessionName]
+			}
 			// Fold active graph-resident (wisp) work into the running signal so
 			// an agent whose work executes under an agent-agnostic wisp session
 			// is reported running even when its named provider session is down.
@@ -84,9 +110,24 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 				continue
 			}
 
+			// Live per-session env (suspended flag + GC_SESSION_ID) only
+			// exists for a running session — a non-running session has no
+			// tmux environment to query, so both reads below are gated
+			// behind running rather than issued unconditionally.
+			var env map[string]string
+			if running && envBatch != nil {
+				env, _ = envBatch.GetAllEnvironment(sessionName)
+			}
+
 			suspended := ea.suspended
-			if v, err := sp.GetMeta(sessionName, "suspended"); err == nil && v == "true" {
-				suspended = true
+			if running {
+				if env != nil {
+					if env["suspended"] == "true" {
+						suspended = true
+					}
+				} else if v, err := sp.GetMeta(sessionName, "suspended"); err == nil && v == "true" {
+					suspended = true
+				}
 			}
 
 			provider, displayName := resolveProviderInfo(ea.provider, cfg)
@@ -122,13 +163,24 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 			sessionID := ""
 			if running {
 				si := &sessionInfo{Name: sessionName}
-				if t, err := sp.GetLastActivity(sessionName); err == nil && !t.IsZero() {
-					si.LastActivity = &t
-					lastActivity = &t
+				if haveRosterEntry {
+					if !rosterEntry.LastActivity.IsZero() {
+						t := rosterEntry.LastActivity
+						si.LastActivity = &t
+						lastActivity = &t
+					}
+					si.Attached = rosterEntry.Attached
+				} else {
+					if t, err := sp.GetLastActivity(sessionName); err == nil && !t.IsZero() {
+						si.LastActivity = &t
+						lastActivity = &t
+					}
+					si.Attached = sp.IsAttached(sessionName)
 				}
-				si.Attached = sp.IsAttached(sessionName)
 				resp.Session = si
-				if id, err := sp.GetMeta(sessionName, "GC_SESSION_ID"); err == nil {
+				if env != nil {
+					sessionID = strings.TrimSpace(env["GC_SESSION_ID"])
+				} else if id, err := sp.GetMeta(sessionName, "GC_SESSION_ID"); err == nil {
 					sessionID = strings.TrimSpace(id)
 				}
 			}

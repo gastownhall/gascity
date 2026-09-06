@@ -383,7 +383,7 @@ func TestListTrackingDecodesTrackingBeadsNewestFirst(t *testing.T) {
 	mem := beads.NewMemStoreFrom(3, []beads.Bead{older, newer, unlabeled}, nil)
 	front := NewStore(beads.OrdersStore{Store: mem})
 
-	runs, err := front.ListTracking()
+	runs, err := front.ListTracking(0)
 	if err != nil {
 		t.Fatalf("ListTracking: %v", err)
 	}
@@ -394,9 +394,43 @@ func TestListTrackingDecodesTrackingBeadsNewestFirst(t *testing.T) {
 		t.Fatalf("order = [%s %s], want [rig/b rig/a] (newest first)", runs[0].Scoped, runs[1].Scoped)
 	}
 
-	got, err := NewStore(beads.OrdersStore{}).ListTracking()
+	got, err := NewStore(beads.OrdersStore{}).ListTracking(0)
 	if err != nil || got != nil {
 		t.Fatalf("nil-store ListTracking = (%v, %v), want (nil, nil)", got, err)
+	}
+}
+
+// TestListTrackingIncludesClosedRuns proves the IncludeClosed omission is a
+// bug, not a deliberate narrowing like LatestOpenRun's (pinned above by
+// TestLatestOpenRunIgnoresClosedRuns): the /v0/orders/feed lists completed
+// runs alongside in-flight ones, so a closed tracking bead must still decode
+// and return, newest first alongside open ones.
+func TestListTrackingIncludesClosedRuns(t *testing.T) {
+	now := time.Now()
+	open := beads.Bead{
+		ID:        "gc-1",
+		Status:    "open",
+		CreatedAt: now.Add(-time.Hour),
+		Labels:    []string{"order-tracking", "order-run:rig/a"},
+	}
+	closed := beads.Bead{
+		ID:        "gc-2",
+		Status:    "closed",
+		CreatedAt: now,
+		Labels:    []string{"order-tracking", "order-run:rig/b"},
+	}
+	mem := beads.NewMemStoreFrom(2, []beads.Bead{open, closed}, nil)
+	front := NewStore(beads.OrdersStore{Store: mem})
+
+	runs, err := front.ListTracking(0)
+	if err != nil {
+		t.Fatalf("ListTracking: %v", err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("runs = %d, want 2 (closed tracking beads must still surface)", len(runs))
+	}
+	if runs[0].Scoped != "rig/b" || runs[1].Scoped != "rig/a" {
+		t.Fatalf("order = [%s %s], want [rig/b rig/a] (newest first)", runs[0].Scoped, runs[1].Scoped)
 	}
 }
 

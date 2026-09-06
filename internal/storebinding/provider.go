@@ -131,10 +131,10 @@ type BindingSpec struct {
 	CityRoot string
 	// URL is the http or https endpoint a binding's backing store answers on
 	// when it does not live on this disk. Empty — the default — means the
-	// binding's configuration resolves locally. No provider in this build
-	// reads it; it is carried so a plan does not silently drop what the city
-	// authored, and validated so a provider that does read it never sees a
-	// value that smuggles a credential.
+	// binding's configuration resolves locally. The beads-workspace provider
+	// reads it only to select the explicitly configured credential bridge; the
+	// workspace's own configuration still owns the connection endpoint. It is
+	// validated so no provider sees a value that smuggles a credential.
 	URL string
 	// Auth is a reference to the credential for URL, never the credential
 	// itself. AuthCredentialProvider and the "env:NAME" form are the whole

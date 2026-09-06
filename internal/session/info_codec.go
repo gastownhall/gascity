@@ -192,6 +192,7 @@ var infoKeyCodec = []infoKeySpec{
 	{"template_overrides", func(i *Info, v string) { i.TemplateOverrides = v }},
 	{"provider_kind", func(i *Info, v string) { i.ProviderKind = v }},
 	{"builtin_ancestor", func(i *Info, v string) { i.BuiltinAncestor = v }},
+	{"wake_refused_event_at", func(i *Info, v string) { i.WakeRefusedEventAt = v }},
 
 	// sleep-policy cluster (raw mirrors). Single-field string setters; the
 	// cmd/gc sleep helpers read these projected fields (W6). Byte-identical to
