@@ -81,6 +81,7 @@ func workerFactoryWithStaleKeyDetectionWaiter(
 		Provider:                sp,
 		CityPath:                cityPath,
 		SearchPaths:             searchPaths,
+		Recorder:                cliFactoryEventsRecorder(cityPath, cfg),
 		UsageSink:               usageSinkForCity(cfg, cityPath),
 		ResolveTransport:        resolveTransport,
 		ResolveSessionRuntime:   workerSessionRuntimeResolverWithConfig(cityPath, cfg),
