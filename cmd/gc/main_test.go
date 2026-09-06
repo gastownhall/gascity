@@ -6127,8 +6127,9 @@ prompt_template = "prompts/mayor.md"
 	if code != 0 {
 		t.Fatalf("doPrime = %d, want 0; stderr: %s", code, stderr.String())
 	}
-	if stdout.String() != promptContent {
-		t.Errorf("stdout = %q, want %q", stdout.String(), promptContent)
+	want := appendFilesystemSearchGuidance(promptContent)
+	if stdout.String() != want {
+		t.Errorf("stdout = %q, want %q", stdout.String(), want)
 	}
 }
 
@@ -6170,8 +6171,9 @@ prompt_template = "prompts/mayor.md"
 	if code != 0 {
 		t.Fatalf("doPrime = %d, want 0; stderr: %s", code, stderr.String())
 	}
-	if stdout.String() != promptContent {
-		t.Errorf("stdout = %q, want %q", stdout.String(), promptContent)
+	want := appendFilesystemSearchGuidance(promptContent)
+	if stdout.String() != want {
+		t.Errorf("stdout = %q, want %q", stdout.String(), want)
 	}
 }
 
@@ -6209,8 +6211,9 @@ name = "test-city"
 	if code != 0 {
 		t.Fatalf("doPrime = %d, want 0; stderr: %s", code, stderr.String())
 	}
-	if stdout.String() != promptContent {
-		t.Errorf("stdout = %q, want %q", stdout.String(), promptContent)
+	want := appendFilesystemSearchGuidance(promptContent)
+	if stdout.String() != want {
+		t.Errorf("stdout = %q, want %q", stdout.String(), want)
 	}
 }
 
@@ -6244,7 +6247,7 @@ prompt_template = "prompts/mayor.md"
 	if code != 0 {
 		t.Fatalf("doPrime = %d, want 0", code)
 	}
-	if stdout.String() != defaultPrimePrompt {
+	if stdout.String() != appendFilesystemSearchGuidance(defaultPrimePrompt) {
 		t.Errorf("stdout = %q, want default prompt", stdout.String())
 	}
 }
@@ -6437,7 +6440,7 @@ max_active_sessions = 1
 	if code != 0 {
 		t.Fatalf("doPrimeWithMode(strict=true, agent without prompt_template) = %d, want 0 (supported config); stderr: %s", code, stderr.String())
 	}
-	if stdout.String() != defaultPrimePrompt {
+	if stdout.String() != appendFilesystemSearchGuidance(defaultPrimePrompt) {
 		t.Errorf("stdout = %q, want defaultPrimePrompt (agent without prompt_template should fall through)", stdout.String())
 	}
 }
@@ -6524,7 +6527,7 @@ prompt_template = %q
 	if code != 0 {
 		t.Fatalf("doPrimeWithMode(strict=true, absolute template path) = %d, want 0; stderr: %s", code, stderr.String())
 	}
-	if stdout.String() != "absolute mayor prompt" {
+	if stdout.String() != appendFilesystemSearchGuidance("absolute mayor prompt") {
 		t.Errorf("stdout = %q, want absolute template content", stdout.String())
 	}
 }
@@ -6876,7 +6879,7 @@ func TestDoPrimeNoArgs(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("doPrime = %d, want 0", code)
 	}
-	if stdout.String() != defaultPrimePrompt {
+	if stdout.String() != appendFilesystemSearchGuidance(defaultPrimePrompt) {
 		t.Errorf("stdout = %q, want default prompt", stdout.String())
 	}
 }
@@ -6927,8 +6930,9 @@ max = 3
 	if code != 0 {
 		t.Fatalf("doPrime = %d, want 0; stderr: %s", code, stderr.String())
 	}
-	if stdout.String() != promptContent {
-		t.Errorf("stdout = %q, want pool worker prompt %q", stdout.String(), promptContent)
+	want := appendFilesystemSearchGuidance(promptContent)
+	if stdout.String() != want {
+		t.Errorf("stdout = %q, want pool worker prompt %q", stdout.String(), want)
 	}
 }
 
@@ -7644,8 +7648,9 @@ prompt_template = "prompts/mayor.md"
 	if code != 0 {
 		t.Fatalf("doPrime = %d, want 0; stderr: %s", code, stderr.String())
 	}
-	if stdout.String() != promptContent {
-		t.Errorf("stdout = %q, want %q (got default prompt instead of mayor template)", stdout.String(), promptContent)
+	want := appendFilesystemSearchGuidance(promptContent)
+	if stdout.String() != want {
+		t.Errorf("stdout = %q, want %q (got default prompt instead of mayor template)", stdout.String(), want)
 	}
 }
 

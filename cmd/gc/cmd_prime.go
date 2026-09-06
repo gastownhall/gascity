@@ -706,6 +706,7 @@ func primeHookHasLiveManagedSession(cityPath string) bool {
 }
 
 func writePrimePromptWithFormat(stdout io.Writer, cityName, agentName, prompt string, hookMode bool, hookFormat string, suppressPrompt bool, hookContextSuffix string, afterDelivery func()) {
+	prompt = appendFilesystemSearchGuidance(prompt)
 	if hookMode && suppressPrompt {
 		// Managed sessions receive the rendered startup prompt through the
 		// launch payload or nudge path. SessionStart hooks add context only.
