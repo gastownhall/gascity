@@ -1211,6 +1211,10 @@
           "$ref": "#/$defs/DoctorConfig",
           "description": "Doctor configures gc doctor thresholds and policy toggles\n(worktree size warnings, nested-worktree auto-prune)."
         },
+        "storehealth": {
+          "$ref": "#/$defs/StoreHealthConfig",
+          "description": "StoreHealth configures the controller-internal store health patrol\n(probe matrix, reap rate-limit, write-path conformance probe)."
+        },
         "maintenance": {
           "$ref": "#/$defs/MaintenanceConfig",
           "description": "Maintenance configures periodic store-maintenance loops."
@@ -2945,6 +2949,38 @@
         "classes"
       ],
       "description": "StorageConfig assigns each semantic storage class to a named binding and defines every nonreserved binding used by those assignments; omitting `[storage]` keeps every class on the reserved `work` binding."
+    },
+    "StoreHealthConfig": {
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enabled toggles the patrol. Defaults to true. Disabling restores the\npre-patrol behavior (no two-probe matrix, no auto-reap).",
+          "default": true
+        },
+        "interval": {
+          "type": "string",
+          "description": "Interval is the per-scope probe cadence as a duration string.\nDefaults to \"30s\".",
+          "default": "30s"
+        },
+        "consecutive_fails": {
+          "type": "integer",
+          "description": "ConsecutiveFails is how many consecutive A-fail∧B-ok cycles confirm a\nproxy poison before forensics + reap. Defaults to 3.",
+          "default": 3
+        },
+        "reap_cooldown": {
+          "type": "string",
+          "description": "ReapCooldown is the minimum spacing between reaps for one scope as a\nduration string. A second poison inside the window is alert-only with\nforensics kept. Defaults to \"10m\".",
+          "default": "10m"
+        },
+        "write_probe_interval": {
+          "type": "string",
+          "description": "WriteProbeInterval is the cadence of the write-path conformance probe\n(create+close one ephemeral bead of each RequiredCustomType) as a\nduration string. Defaults to \"10m\".",
+          "default": "10m"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "StoreHealthConfig configures the controller-internal store health patrol (city-scale architecture plan item 1.5)."
     },
     "Tier": {
       "properties": {

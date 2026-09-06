@@ -287,6 +287,9 @@ type City struct {
 	// Doctor configures gc doctor thresholds and policy toggles
 	// (worktree size warnings, nested-worktree auto-prune).
 	Doctor DoctorConfig `toml:"doctor,omitempty"`
+	// StoreHealth configures the controller-internal store health patrol
+	// (probe matrix, reap rate-limit, write-path conformance probe).
+	StoreHealth StoreHealthConfig `toml:"storehealth,omitempty"`
 	// Maintenance configures periodic store-maintenance loops.
 	Maintenance MaintenanceConfig `toml:"maintenance,omitempty"`
 	// Services declares workspace-owned HTTP services mounted on the
@@ -2405,6 +2408,74 @@ func (c DoctorConfig) WorktreeRigErrorBytes() int64 {
 		return warn
 	}
 	return n
+}
+
+// StoreHealthConfig configures the controller-internal store health patrol
+// (city-scale architecture plan item 1.5). Every threshold is mechanical
+// (durations and counts) so the patrol holds no judgment calls in Go.
+type StoreHealthConfig struct {
+	// Enabled toggles the patrol. Defaults to true. Disabling restores the
+	// pre-patrol behavior (no two-probe matrix, no auto-reap).
+	Enabled *bool `toml:"enabled,omitempty" jsonschema:"default=true"`
+	// Interval is the per-scope probe cadence as a duration string.
+	// Defaults to "30s".
+	Interval string `toml:"interval,omitempty" jsonschema:"default=30s"`
+	// ConsecutiveFails is how many consecutive A-fail∧B-ok cycles confirm a
+	// proxy poison before forensics + reap. Defaults to 3.
+	ConsecutiveFails int `toml:"consecutive_fails,omitempty" jsonschema:"default=3"`
+	// ReapCooldown is the minimum spacing between reaps for one scope as a
+	// duration string. A second poison inside the window is alert-only with
+	// forensics kept. Defaults to "10m".
+	ReapCooldown string `toml:"reap_cooldown,omitempty" jsonschema:"default=10m"`
+	// WriteProbeInterval is the cadence of the write-path conformance probe
+	// (create+close one ephemeral bead of each RequiredCustomType) as a
+	// duration string. Defaults to "10m".
+	WriteProbeInterval string `toml:"write_probe_interval,omitempty" jsonschema:"default=10m"`
+}
+
+// StoreHealthEnabledOrDefault reports whether the patrol is enabled
+// (default true).
+func (c StoreHealthConfig) StoreHealthEnabledOrDefault() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
+// IntervalOrDefault returns the parsed probe interval, falling back to 30s.
+func (c StoreHealthConfig) IntervalOrDefault() time.Duration {
+	return positiveDurationOrDefault(c.Interval, 30*time.Second)
+}
+
+// ConsecutiveFailsOrDefault returns the confirm threshold, falling back to
+// 3 when unset or non-positive.
+func (c StoreHealthConfig) ConsecutiveFailsOrDefault() int {
+	if c.ConsecutiveFails > 0 {
+		return c.ConsecutiveFails
+	}
+	return 3
+}
+
+// ReapCooldownOrDefault returns the parsed reap cooldown, falling back to
+// 10m.
+func (c StoreHealthConfig) ReapCooldownOrDefault() time.Duration {
+	return positiveDurationOrDefault(c.ReapCooldown, 10*time.Minute)
+}
+
+// WriteProbeIntervalOrDefault returns the parsed write-probe interval,
+// falling back to 10m.
+func (c StoreHealthConfig) WriteProbeIntervalOrDefault() time.Duration {
+	return positiveDurationOrDefault(c.WriteProbeInterval, 10*time.Minute)
+}
+
+// positiveDurationOrDefault parses value as a Go duration, returning def
+// when value is empty, unparseable, or non-positive.
+func positiveDurationOrDefault(value string, def time.Duration) time.Duration {
+	if value == "" {
+		return def
+	}
+	v, err := time.ParseDuration(value)
+	if err != nil || v <= 0 {
+		return def
+	}
+	return v
 }
 
 // parseHumanSize parses sizes like "10GB", "500 MB", "1024" (bytes
