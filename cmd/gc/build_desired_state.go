@@ -3174,6 +3174,7 @@ func realizePoolDesiredSessionsAt(
 	// reserve an (alias, slot) for a fresh create. Mutates used/usedSlots
 	// under serial control so dedup and slot allocation remain deterministic.
 	items := make([]poolRealizeWorkItem, 0, len(poolState.Requests))
+	boundByWork, reserved := poolSessionsBoundToDemandedWork(bp, cfgAgent, qualifiedName, poolState.Requests)
 	for _, request := range poolState.Requests {
 		// planItem runs the per-request selection and returns the work item;
 		// any early-out (skip path) sets item.skip and returns. The single
@@ -3181,6 +3182,22 @@ func realizePoolDesiredSessionsAt(
 		planItem := func() poolRealizeWorkItem {
 			item := poolRealizeWorkItem{request: request}
 			var prefer *session.Info
+			selectUsed := used
+			if request.SessionBeadID == "" {
+				if bound, ok := boundByWork[strings.TrimSpace(request.WorkBeadID)]; ok && !used[bound.ID] {
+					prefer = &bound
+				} else if len(reserved) > 0 {
+					// Leave sessions bound to other still-demanded work for
+					// those requests; positional reuse would re-point them.
+					selectUsed = make(map[string]bool, len(used)+len(reserved))
+					for id := range used {
+						selectUsed[id] = true
+					}
+					for id := range reserved {
+						selectUsed[id] = true
+					}
+				}
+			}
 			if request.SessionBeadID != "" {
 				if candidate, ok := bp.sessionBeads.FindInfoByID(request.SessionBeadID); ok {
 					// Defense in depth: ComputePoolDesiredStates filters out
@@ -3195,7 +3212,7 @@ func realizePoolDesiredSessionsAt(
 					prefer = &candidate
 				}
 			}
-			sessionInfo, slot, plan, err := selectOrPlanPoolSessionBead(bp, cfgAgent, qualifiedName, prefer, request, poolDecisionTime, used, usedSlots)
+			sessionInfo, slot, plan, err := selectOrPlanPoolSessionBead(bp, cfgAgent, qualifiedName, prefer, request, poolDecisionTime, selectUsed, usedSlots)
 			if err != nil {
 				switch {
 				case errors.Is(err, errPoolSessionCreateBudgetExhausted):
@@ -3369,6 +3386,45 @@ func realizePoolDesiredSessionsAt(
 		installAgentSideEffects(bp, resolveAgent, tp, stderr)
 		desired[tp.SessionName] = tp
 	}
+}
+
+// poolSessionsBoundToDemandedWork maps each new-tier request's work bead to the
+// reusable session already carrying it as gc.trigger_bead_id, and returns the
+// IDs of those sessions so other requests skip them. Reuse in
+// selectOrPlanPoolSessionBead is otherwise positional (j-th request, j-th
+// reusable session), so any shift in request order or in the session set
+// between passes re-points every idle session's trigger — one store write and
+// one bead.updated event per session per reconcile tick (sys-rgwg4x).
+func poolSessionsBoundToDemandedWork(bp *agentBuildParams, cfgAgent *config.Agent, template string, requests []SessionRequest) (map[string]session.Info, map[string]bool) {
+	demanded := make(map[string]bool, len(requests))
+	for _, request := range requests {
+		if request.SessionBeadID != "" {
+			continue
+		}
+		if id := strings.TrimSpace(request.WorkBeadID); id != "" {
+			demanded[id] = true
+		}
+	}
+	if len(demanded) == 0 {
+		return nil, nil
+	}
+	boundByWork := make(map[string]session.Info)
+	reserved := make(map[string]bool)
+	for _, info := range reusablePoolSessionInfos(bp, cfgAgent, template, nil) {
+		if strings.TrimSpace(info.SessionNameMetadata) == "" {
+			continue
+		}
+		trigger := strings.TrimSpace(info.TriggerBeadID)
+		if !demanded[trigger] {
+			continue
+		}
+		if _, dup := boundByWork[trigger]; dup {
+			continue
+		}
+		boundByWork[trigger] = info
+		reserved[info.ID] = true
+	}
+	return boundByWork, reserved
 }
 
 // computePoolTriggerBindingPatch is the pure key-diff at the heart of
