@@ -2539,7 +2539,12 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	assignedWorkStoreRefs := result.AssignedWorkStoreRefs
 	assignedWorkStores := result.AssignedWorkStores
 	phaseStart := time.Now()
-	released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(store, sessStore, cr.cfg, cr.cityPath, sessionBeads.OpenInfos(), result, rigStores)
+	// Compute the wake-candidate set BEFORE the orphan release, from the same
+	// snapshot the release reads: the release arm must not reopen work the wake
+	// arm of this very tick is about to act on (the release-first ordering plus
+	// snapshot staleness otherwise produces the wake/release/retire treadmill).
+	preWakeCandidates, _ := filterAssignedWorkBeadsForSessionWake(cr.cfg, cr.cityPath, store, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs)
+	released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(store, sessStore, cr.cfg, cr.cityPath, sessionBeads.OpenInfos(), result, rigStores, protectedWakeWorkIDs(preWakeCandidates))
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.release_orphaned_pool_assignments", phaseStart, map[string]any{
 		"released_count": len(released),
 	})

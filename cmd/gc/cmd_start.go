@@ -1026,7 +1026,10 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		cityPath, beads.SessionStore{Store: sessStore}, rigStores, ds, sp, cfgNames, cfg, clock.Real{}, stderr, true, sessionBeads,
 	)
 
-	if released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(oneShotStore, beads.SessionStore{Store: sessStore}, cfg, cityPath, sessionBeads.OpenInfos(), dsResult, rigStores); len(released) > 0 {
+	// Same protection as the daemon tick: wake candidates computed before the
+	// release, so the one-shot path cannot reopen work this run is about to wake.
+	preWakeCandidates, _ := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, oneShotStore, sessionBeads.OpenInfos(), dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
+	if released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(oneShotStore, beads.SessionStore{Store: sessStore}, cfg, cityPath, sessionBeads.OpenInfos(), dsResult, rigStores, protectedWakeWorkIDs(preWakeCandidates)); len(released) > 0 {
 		for _, r := range released {
 			fmt.Fprintf(stderr, "released orphaned pool work: %s\n", r.ID) //nolint:errcheck
 		}
