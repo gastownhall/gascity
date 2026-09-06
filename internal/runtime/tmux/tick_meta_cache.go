@@ -3,33 +3,50 @@ package tmux
 import (
 	"errors"
 	"sync"
+	"time"
 
 	"golang.org/x/sync/singleflight"
 )
 
+// metaCacheTTL bounds how stale a memoized session environment may be when
+// GetMeta is served outside a reconcile tick. Inside a tick the window is
+// reset by ResetTickCache, so a tick still sees at most one fork per session;
+// between ticks the supervisor's API handlers (/rigs, /sessions) query GetMeta
+// for every configured session slot on every request, and this TTL is what
+// keeps those from forking `tmux show-environment` per slot per request
+// (sys-4za3nm) while never serving metadata older than a few seconds.
+const metaCacheTTL = 5 * time.Second
+
 // tickMetaCache memoizes each session's full tmux environment for the
-// lifetime of one reconcile tick. The supervisor's beadReconcileTick queries
-// GetMeta for the same session from several independent call sites within a
-// single pass (worker-handle resolution, drain-ack check, restart-request
-// check, pending-create-info matching, drain-ack-queue dedup, stale-drain-ack
-// detection) — each an otherwise-uncached `tmux show-environment -t <session>
-// <key>` fork (gastownhall/gascity#<bead>). Fetching the whole environment
-// once per session per tick and serving every key from it collapses that
+// lifetime of one reconcile tick, or metaCacheTTL, whichever ends first. The
+// supervisor's beadReconcileTick queries GetMeta for the same session from
+// several independent call sites within a single pass (worker-handle
+// resolution, drain-ack check, restart-request check, pending-create-info
+// matching, drain-ack-queue dedup, stale-drain-ack detection) — each an
+// otherwise-uncached `tmux show-environment -t <session> <key>` fork
+// (gastownhall/gascity#<bead>). Fetching the whole environment once per
+// session per tick and serving every key from it collapses that
 // N-forks-per-session-per-tick cost to one.
 type tickMetaCache struct {
-	tm *Tmux
-	sf singleflight.Group
+	tm  *Tmux
+	sf  singleflight.Group
+	now func() time.Time
 
-	mu   sync.Mutex
-	envs map[string]map[string]string
-	errs map[string]error
+	mu      sync.Mutex
+	entries map[string]metaCacheEntry
+}
+
+type metaCacheEntry struct {
+	env       map[string]string
+	err       error
+	fetchedAt time.Time
 }
 
 func newTickMetaCache(tm *Tmux) *tickMetaCache {
 	return &tickMetaCache{
-		tm:   tm,
-		envs: make(map[string]map[string]string),
-		errs: make(map[string]error),
+		tm:      tm,
+		now:     time.Now,
+		entries: make(map[string]metaCacheEntry),
 	}
 }
 
@@ -39,44 +56,42 @@ func newTickMetaCache(tm *Tmux) *tickMetaCache {
 // [ErrNoServer].
 func (c *tickMetaCache) get(name, key string) (string, error) {
 	c.mu.Lock()
-	env, haveEnv := c.envs[name]
-	fetchErr, haveErr := c.errs[name]
+	entry, have := c.entries[name]
+	if have && c.now().Sub(entry.fetchedAt) > metaCacheTTL {
+		delete(c.entries, name)
+		have = false
+	}
 	c.mu.Unlock()
 
-	if !haveEnv && !haveErr {
+	if !have {
 		v, sfErr, _ := c.sf.Do(name, func() (any, error) {
 			e, ferr := c.tm.GetAllEnvironment(name)
 			c.mu.Lock()
-			if ferr != nil {
-				c.errs[name] = ferr
-			} else {
-				c.envs[name] = e
-			}
+			c.entries[name] = metaCacheEntry{env: e, err: ferr, fetchedAt: c.now()}
 			c.mu.Unlock()
 			return e, ferr
 		})
 		if sfErr != nil {
-			fetchErr, haveErr = sfErr, true
+			entry = metaCacheEntry{err: sfErr}
 		} else {
-			env, haveEnv = v.(map[string]string), true
+			entry = metaCacheEntry{env: v.(map[string]string)}
 		}
 	}
 
-	if haveErr {
-		if errors.Is(fetchErr, ErrSessionNotFound) || errors.Is(fetchErr, ErrNoServer) {
-			return "", fetchErr
+	if entry.err != nil {
+		if errors.Is(entry.err, ErrSessionNotFound) || errors.Is(entry.err, ErrNoServer) {
+			return "", entry.err
 		}
 		return "", nil
 	}
-	return env[key], nil
+	return entry.env[key], nil
 }
 
 // invalidate discards any cached environment for name, so the next get
-// re-fetches. Called after a same-tick SetMeta/RemoveMeta so a write is never
-// masked by a stale cached read.
+// re-fetches. Called after a SetMeta/RemoveMeta so a write is never masked by
+// a stale cached read.
 func (c *tickMetaCache) invalidate(name string) {
 	c.mu.Lock()
-	delete(c.envs, name)
-	delete(c.errs, name)
+	delete(c.entries, name)
 	c.mu.Unlock()
 }

@@ -177,25 +177,6 @@ func TestRemoveMetaInvalidatesTickCache(t *testing.T) {
 	}
 }
 
-// TestGetMetaUncachedWithoutResetTickCache verifies callers that never call
-// ResetTickCache (tests, one-off CLI invocations) see unchanged, uncached
-// GetMeta behavior: one fork per call.
-func TestGetMetaUncachedWithoutResetTickCache(t *testing.T) {
-	fe := &fakeExecutor{out: "GC_DRAIN_ACK=1"}
-	tm := &Tmux{cfg: DefaultConfig(), exec: fe}
-	p := &Provider{tm: tm}
-
-	if _, err := p.GetMeta("mayor", "GC_DRAIN_ACK"); err != nil {
-		t.Fatalf("GetMeta: %v", err)
-	}
-	if _, err := p.GetMeta("mayor", "GC_DRAIN_ACK"); err != nil {
-		t.Fatalf("GetMeta: %v", err)
-	}
-	if len(fe.calls) != 2 {
-		t.Fatalf("tmux forks = %d, want 2 (no tick cache active)", len(fe.calls))
-	}
-}
-
 // TestGetMetaTickCachePropagatesSessionGoneError verifies the cached path
 // preserves GetMeta's existing error-classification contract: a
 // session-not-found/no-server error propagates, everything else collapses to

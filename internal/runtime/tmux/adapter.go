@@ -599,9 +599,7 @@ func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
 // SetMeta stores a key-value pair in the named session's tmux environment.
 func (p *Provider) SetMeta(name, key, value string) error {
 	err := p.tm.SetEnvironment(name, key, value)
-	if c := p.activeTickCache(); c != nil {
-		c.invalidate(name)
-	}
+	p.activeTickCache().invalidate(name)
 	return err
 }
 
@@ -610,29 +608,20 @@ func (p *Provider) SetMeta(name, key, value string) error {
 // and no-server errors so callers can distinguish "key absent" from
 // "session gone."
 //
-// When a reconcile tick's memo window is active (see [Provider.ResetTickCache]),
-// this is served from that tick's cached copy of the session's whole
-// environment instead of forking a new `tmux show-environment` per call.
+// Served from a memo of the session's whole environment (see
+// [Provider.ResetTickCache] and metaCacheTTL) instead of forking a new
+// `tmux show-environment` per call: a reconcile tick shares one fork per
+// session across its call sites, and readers outside a tick — the supervisor
+// API's per-slot observation on every /rigs and /sessions request — share it
+// for up to metaCacheTTL (sys-4za3nm).
 func (p *Provider) GetMeta(name, key string) (string, error) {
-	if c := p.activeTickCache(); c != nil {
-		return c.get(name, key)
-	}
-	val, err := p.tm.GetEnvironment(name, key)
-	if err != nil {
-		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
-			return "", err
-		}
-		return "", nil // key not set
-	}
-	return val, nil
+	return p.activeTickCache().get(name, key)
 }
 
 // RemoveMeta removes a key from the named session's tmux environment.
 func (p *Provider) RemoveMeta(name, key string) error {
 	err := p.tm.RemoveEnvironment(name, key)
-	if c := p.activeTickCache(); c != nil {
-		c.invalidate(name)
-	}
+	p.activeTickCache().invalidate(name)
 	return err
 }
 
@@ -640,16 +629,21 @@ func (p *Provider) RemoveMeta(name, key string) error {
 // window's cached environments. The supervisor calls this once at the start
 // of each beadReconcileTick pass so that pass's repeated per-session GetMeta
 // reads share one tmux fork instead of one per call site
-// (gastownhall/gascity#<bead>). Callers that never call this (tests, one-off
-// CLI invocations) see unchanged, uncached GetMeta behavior.
+// (gastownhall/gascity#<bead>). Callers that never call this still get a
+// memo bounded by metaCacheTTL (see activeTickCache).
 func (p *Provider) ResetTickCache() {
 	p.tickMu.Lock()
 	p.tickCache = newTickMetaCache(p.tm)
 	p.tickMu.Unlock()
 }
 
+// activeTickCache returns the current memo window, creating one on first use
+// so GetMeta is memoized (TTL-bounded) even when no tick ever resets it.
 func (p *Provider) activeTickCache() *tickMetaCache {
 	p.tickMu.Lock()
+	if p.tickCache == nil {
+		p.tickCache = newTickMetaCache(p.tm)
+	}
 	c := p.tickCache
 	p.tickMu.Unlock()
 	return c

@@ -36,9 +36,16 @@ type gitStatus struct {
 }
 
 // buildRigResponse creates a rigResponse with agent counts and last activity.
+//
+// Every configured session slot is observed exactly once per response: the
+// running count, the last-activity high-water mark and the all-agents-
+// suspended input to rigSuspended all come from that single pass. On the
+// tmux provider each observation is several subprocesses, and the supervisor
+// serves /rigs to every hook and order script in the city, so a second pass
+// per field doubled the per-request fork count (sys-4za3nm).
 func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.Provider, cityName, cityPath string) rigResponse {
 	tmpl := cfg.Workspace.SessionTemplate
-	var agentCount, runningCount int
+	var agentCount, runningCount, suspendedCount int
 	var maxActivity time.Time
 
 	for _, a := range cfg.Agents {
@@ -54,6 +61,9 @@ func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.P
 			if obs.Running {
 				runningCount++
 			}
+			if obs.Suspended {
+				suspendedCount++
+			}
 			if obs.LastActivity != nil && obs.LastActivity.After(maxActivity) {
 				maxActivity = *obs.LastActivity
 			}
@@ -63,7 +73,7 @@ func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.P
 	resp := rigResponse{
 		Name:          rig.Name,
 		Path:          rig.Path,
-		Suspended:     s.rigSuspended(cfg, rig, sp, cityName, cityPath),
+		Suspended:     rigSuspended(rig, cityPath, agentCount, suspendedCount),
 		Prefix:        rig.Prefix,
 		DefaultBranch: rig.DefaultBranch,
 		AgentCount:    agentCount,
@@ -79,30 +89,13 @@ func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.P
 // is suspended if the runtime state file records an explicit "suspended"
 // preference, if the rig's SuspendedOnStart applies with no overriding
 // runtime entry, or if all its agents are runtime-suspended via session
-// metadata. The deprecated `[[rig]] suspended` field in city.toml is
-// intentionally NOT consulted — `gc doctor` surfaces it as a migration
-// target.
-func (s *Server) rigSuspended(cfg *config.City, rig config.Rig, sp runtime.Provider, cityName, cityPath string) bool {
+// metadata (agentCount/suspendedCount, observed by the caller). The
+// deprecated `[[rig]] suspended` field in city.toml is intentionally NOT
+// consulted — `gc doctor` surfaces it as a migration target.
+func rigSuspended(rig config.Rig, cityPath string, agentCount, suspendedCount int) bool {
 	if rs, err := suspensionstate.Load(fsys.OSFS{}, cityPath); err == nil &&
 		suspensionstate.EffectiveRigSuspended(rs, rig.Name, rig.EffectiveSuspendedOnStart()) {
 		return true
-	}
-	tmpl := cfg.Workspace.SessionTemplate
-	var agentCount, suspendedCount int
-	for _, a := range cfg.Agents {
-		if workdirutil.ConfiguredRigName(cityPath, a, cfg.Rigs) != rig.Name {
-			continue
-		}
-		processNames := config.AgentProcessNames(cfg, a, exec.LookPath)
-		expanded := expandAgent(a, cityName, tmpl, sp)
-		for _, ea := range expanded {
-			agentCount++
-			sessionName := agent.SessionNameFor(cityName, ea.qualifiedName, tmpl)
-			obs := observeProviderSession(sp, sessionName, processNames)
-			if obs.Suspended {
-				suspendedCount++
-			}
-		}
 	}
 	return agentCount > 0 && suspendedCount == agentCount
 }
