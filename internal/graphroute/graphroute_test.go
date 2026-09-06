@@ -1247,6 +1247,116 @@ func TestDecorateGraphWorkflowRecipe_PoolContinuationGroupOptIn(t *testing.T) {
 	}
 }
 
+func TestApplyGraphRouting_OneShotPoolLeavesExecutableStepsIndependent(t *testing.T) {
+	zero := 0
+	two := 2
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{
+				Name:              "worker",
+				Lifecycle:         config.AgentLifecycleOneShot,
+				MinActiveSessions: &zero,
+				MaxActiveSessions: &two,
+			},
+			{Name: "control-dispatcher"},
+		},
+	}
+	recipe := &formula.Recipe{
+		Name: "demo",
+		Steps: []formula.RecipeStep{
+			{
+				ID:     "demo.root",
+				IsRoot: true,
+				Metadata: map[string]string{
+					beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+					beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+				},
+			},
+			{
+				ID:    "demo.work",
+				Title: "Work independently",
+				Metadata: map[string]string{
+					beadmeta.ContinuationGroupMetadataKey: "stale-group",
+					beadmeta.SessionAffinityMetadataKey:   "require",
+				},
+			},
+		},
+	}
+
+	if err := ApplyGraphRouting(recipe, &cfg.Agents[0], "worker", nil, "", "", "", "", beads.NewMemStore(), cfg.Workspace.Name, cfg, Deps{Resolver: testAgentResolver{}}); err != nil {
+		t.Fatalf("ApplyGraphRouting: %v", err)
+	}
+
+	work := recipe.Steps[1]
+	if got := work.Metadata[beadmeta.RoutedToMetadataKey]; got != "worker" {
+		t.Fatalf("gc.routed_to = %q, want worker", got)
+	}
+	if got := work.Metadata[beadmeta.ContinuationGroupMetadataKey]; got != "" {
+		t.Errorf("gc.continuation_group = %q, want unset for independent one-shot step", got)
+	}
+	if got := work.Metadata[beadmeta.SessionAffinityMetadataKey]; got != "" {
+		t.Errorf("gc.session_affinity = %q, want unset for independent one-shot step", got)
+	}
+	if work.Assignee != "" {
+		t.Errorf("Assignee = %q, want empty so any fresh pool slot can claim the step", work.Assignee)
+	}
+}
+
+func TestDecorateGraphWorkflowRecipe_PerStepOneShotPoolTargetLeavesStepIndependent(t *testing.T) {
+	zero := 0
+	two := 2
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{
+				Name:              "worker",
+				Lifecycle:         config.AgentLifecycleOneShot,
+				MinActiveSessions: &zero,
+				MaxActiveSessions: &two,
+			},
+			{Name: "control-dispatcher"},
+		},
+	}
+	recipe := &formula.Recipe{
+		Name: "demo",
+		Steps: []formula.RecipeStep{
+			{
+				ID:     "demo.root",
+				IsRoot: true,
+				Metadata: map[string]string{
+					beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+					beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+				},
+			},
+			{
+				ID:    "demo.work",
+				Title: "Work independently",
+				Metadata: map[string]string{
+					beadmeta.RunTargetMetadataKey:         "worker",
+					beadmeta.ContinuationGroupMetadataKey: "stale-group",
+					beadmeta.SessionAffinityMetadataKey:   "require",
+				},
+			},
+		},
+	}
+
+	if err := DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, nil, "", "", "", "", GraphRouteBinding{}, beads.NewMemStore(), cfg.Workspace.Name, cfg, Deps{Resolver: testAgentResolver{}}); err != nil {
+		t.Fatalf("DecorateGraphWorkflowRecipeWithDefaultBinding: %v", err)
+	}
+
+	work := recipe.Steps[1]
+	if got := work.Metadata[beadmeta.RoutedToMetadataKey]; got != "worker" {
+		t.Fatalf("gc.routed_to = %q, want worker", got)
+	}
+	if got := work.Metadata[beadmeta.ContinuationGroupMetadataKey]; got != "" {
+		t.Errorf("gc.continuation_group = %q, want unset for per-step one-shot route", got)
+	}
+	if got := work.Metadata[beadmeta.SessionAffinityMetadataKey]; got != "" {
+		t.Errorf("gc.session_affinity = %q, want unset for per-step one-shot route", got)
+	}
+}
+
 func TestApplyGraphRouteBinding_SingleSession_NoAffinityKeys(t *testing.T) {
 	step := &formula.RecipeStep{
 		Metadata: map[string]string{},
