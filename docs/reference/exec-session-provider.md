@@ -102,6 +102,13 @@ care about.
 | `is-attached` | `script is-attached <name>` | — | `true` or `false` |
 | `exec` | `script exec <name>` | command | combined output (op exit == command exit) |
 | `provision` | `script provision <name>` | JSON config | — |
+| `remote-create` | `script remote-create <name>` | `RemoteCreateRequest` JSON | remote envelope with `RemoteSessionSnapshot` |
+| `remote-adopt` | `script remote-adopt <name>` | `RemoteAdoptRequest` JSON | remote envelope with `RemoteSessionSnapshot` |
+| `remote-status` | `script remote-status <name>` | `{"ref": RemoteSessionRef}` JSON | remote envelope with `RemoteSessionSnapshot` |
+| `remote-follow-up` | `script remote-follow-up <name>` | `RemoteFollowUpRequest` JSON | remote envelope with `RemoteReceipt` |
+| `remote-transcript` | `script remote-transcript <name>` | `RemoteTranscriptQuery` JSON | remote envelope with `RemoteTranscriptPage` |
+| `remote-cancel` | `script remote-cancel <name>` | `RemoteMutationRequest` JSON | remote envelope with `RemoteSessionSnapshot` |
+| `remote-close` | `script remote-close <name>` | `RemoteMutationRequest` JSON | remote envelope with `RemoteSessionSnapshot` |
 
 **Box without agent (the un-weld).** `provision` is `start` MINUS the agent
 launch: it creates/prepares the box (PreStart, SessionSetup, SessionSetupScript,
@@ -157,8 +164,60 @@ Capabilities:
 | `proc.provision` | The script implements the box-without-agent `provision` op (see Operations), so the controller provisions the box, then launches the agent over `exec` (the un-weld). Without it, `start` provisions and launches in one op. |
 | `proc.stream` | Reserved (connection-plane family, parallel to `env.*`): declares the persistent bidirectional `stream` connection op (ACP over a stream, tmux pipe-pane). Sets `CanStream`. The `stream` op and its capability-gated conformance entry land with the connection rewrite. |
 | `tty.attach` | Reserved: declares an interactive PTY `attach` connection op. Sets `CanAttachTTY`. |
+| `remote.create` | Implements `remote-create`; creates one provider-native session for an idempotency key or adopts `existing`. |
+| `remote.adopt` | Implements `remote-adopt`; rebinds a persisted opaque provider identity without creating work. |
+| `remote.status` | Implements `remote-status`; returns a normalized provider snapshot. |
+| `remote.followup` | Implements `remote-follow-up`; appends an idempotent, ownership-fenced provider turn. |
+| `remote.transcript` | Implements `remote-transcript`; returns one bounded read-through page after an opaque cursor. |
+| `remote.cancel` | Implements `remote-cancel`; idempotently stops active provider work under an ownership fence. |
+| `remote.close` | Implements `remote-close`; idempotently closes and reads back the provider lifecycle under an ownership fence. |
 
 The handshake runs once per provider instance and is cached.
+
+### Provider-native remote sessions
+
+The `remote.*` family lets a pack adapt a native coding cloud without adding
+that provider to Gas City core. Every operation is independently declared and
+capability-gated. Calling an undeclared operation fails closed; it never falls
+back to another provider or a local process.
+
+Remote operations receive typed JSON on stdin and return exactly one JSON
+envelope on stdout:
+
+```json
+{"ok":true,"result":{"ref":{"session_id":"opaque"},"phase":"queued","updated_at":"2026-09-06T07:00:00Z"}}
+```
+
+```json
+{"ok":false,"error":{"kind":"quota","message":"provider-safe detail","retryable":false}}
+```
+
+Stable error kinds are `auth`, `quota`, `network`, `policy`, `ownership`,
+`not_found`, `cursor`, `provider`, and `unknown`. Adapter-specific errors are
+placed in the redacted message; they do not become control-flow values.
+
+All mutations carry a controller-authored idempotency `request_id` and an
+opaque ownership `fence`. Replaying a request must return the same remote
+identity or receipt. A fence that no longer owns the session must return an
+`ownership` error. `remote-create` may carry `existing` after controller
+restart; `remote-adopt` rebinds that identity without starting a second task.
+
+Provider session IDs, run IDs, receipt IDs, and transcript cursors are opaque.
+They are persisted only as content-free session checkpoint metadata and must
+never be parsed or treated as credentials. Prompts and transcript events pass
+through the adapter, are redacted at the process boundary, and are not stored
+in session metadata. Transcript pages are limited to 1,000 events. Repository
+and pull-request URLs may not contain URI userinfo.
+
+Beads remains authoritative for tasks, claims, dependencies, acceptance, and
+lifecycle. The remote checkpoint contains only provider identity, normalized
+phase/failure, cursors, Git handoff metadata, and timestamp. Account, plan,
+billing, quota amounts, credentials, provider prose, prompts, and transcripts
+are excluded.
+
+`gc runtime conformance` gates each declared operation independently through
+`RPP-REMOTE-001` through `RPP-REMOTE-007`. A provider with no `remote.*`
+capabilities skips this optional group and remains a valid RPP v0 runtime.
 
 ### Start Config (JSON on stdin)
 

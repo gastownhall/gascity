@@ -203,6 +203,17 @@ func (r *runner) execOp(ctx context.Context, name, command string) outcome {
 	return r.opTimeout(ctx, r.opts.OpTimeout, []byte(command), "exec", name)
 }
 
+// remoteOp invokes one provider-native remote-session operation with its
+// typed JSON request on stdin. Remote operations use an explicit success/error
+// envelope on stdout; exit 2 still means an undeclared implementation.
+func (r *runner) remoteOp(ctx context.Context, name, operation string, request any) outcome {
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return outcome{err: fmt.Errorf("encoding %s request: %w", operation, err)}
+	}
+	return r.opTimeout(ctx, r.opts.OpTimeout, payload, operation, name)
+}
+
 // handshake runs the protocol op and parses the result. Absent (exit 2) is
 // the documented v0/no-capability floor.
 func (r *runner) handshake(ctx context.Context) runtime.ProtocolInfo {
