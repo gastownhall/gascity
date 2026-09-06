@@ -115,8 +115,11 @@ func emitComputeFactForBead(ctx context.Context, sink usage.Sink, store beads.St
 		return false
 	}
 	// Prefer the recorded sleep time as the interval end, but only when it falls
-	// after this interval's start — slept_at can be stale for non-sleep terminal
-	// states (drained/archived) that don't refresh it. Otherwise use now.
+	// after this interval's start. slept_at is refreshed by both SleepPatch and
+	// AcknowledgeDrainPatch, so for a drained session the end is the drain-ack
+	// time rather than the reconcile tick's now — more accurate, and the After
+	// guard still rejects a slept_at carried over from a PRIOR awake interval
+	// (archive and quarantine exits still don't refresh it). Otherwise use now.
 	end := now
 	if sleptRaw := strings.TrimSpace(meta["slept_at"]); sleptRaw != "" {
 		if t, perr := time.Parse(time.RFC3339, sleptRaw); perr == nil && t.After(startedAt) {

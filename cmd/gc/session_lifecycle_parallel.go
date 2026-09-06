@@ -175,15 +175,20 @@ func (c startCandidate) name() string {
 }
 
 // wakeFairnessTime is the ordering key for the per-tick wake budget: the time the
-// session was last woken (last_woke_at), falling back to its creation time so a
-// brand-new session does not jump ahead of one that has been waiting for a slot.
-// Oldest sorts first so the longest-waiting candidates spend the budget first.
-// It reads the typed twin (Info.LastWokeAt / Info.CreatedAt); the #2574-class
-// same-tick sleep->re-wake fairness (a SleepPatch clears last_woke_at before the
-// append, so the fallback to CreatedAt kicks in) is pinned by
-// TestWakeFairnessInfoTwinCharacterization.
+// session was last woken (last_woke_at), falling back to when it last slept
+// (slept_at), and finally to its creation time so a brand-new session does not
+// jump ahead of one that has been waiting for a slot. Oldest sorts first so the
+// longest-waiting candidates spend the budget first. It reads the typed twin
+// (Info.LastWokeAt / Info.SleptAt / Info.CreatedAt); the #2574-class same-tick
+// sleep->re-wake fairness (a SleepPatch clears last_woke_at before the append,
+// so the fallback kicks in) is pinned by TestWakeFairnessInfoTwinCharacterization
+// — the slept_at middle tier keeps a session that slept recently from jumping
+// the queue ahead of one that has been waiting since creation.
 func wakeFairnessTime(c startCandidate) time.Time {
 	if t, err := time.Parse(time.RFC3339, c.info.LastWokeAt); err == nil {
+		return t
+	}
+	if t, err := time.Parse(time.RFC3339, c.info.SleptAt); err == nil {
 		return t
 	}
 	if !c.info.CreatedAt.IsZero() {

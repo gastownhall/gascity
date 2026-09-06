@@ -276,6 +276,11 @@ type Info struct {
 	// start-in-flight) and parse it for the in-flight deadline, so the Info
 	// mirror keeps the raw value.
 	LastWokeAt string // last_woke_at (raw)
+	// SleptAt is the RAW slept_at metadata (RFC3339 or empty): the fallback
+	// wake-fairness key stamped by SleepPatch/AcknowledgeDrainPatch alongside
+	// clearing last_woke_at, so a same-tick sleep/drain-ack falls back to this
+	// instead of collapsing straight to CreatedAt (#2574).
+	SleptAt string // slept_at (raw)
 	// AwakeStartedAt is the RAW awake_started_at metadata (RFC3339 or empty):
 	// the immutable start-of-awake-interval epoch that survives sleep/drain
 	// teardowns (unlike last_woke_at / pending_create_started_at, which are
