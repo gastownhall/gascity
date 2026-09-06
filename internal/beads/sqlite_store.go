@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	_ "modernc.org/sqlite" // pure-Go SQLite driver, CGO_ENABLED=0 safe
 )
 
@@ -1526,13 +1527,21 @@ func sqliteReadySQL(q ReadyQuery, projection string) (string, []any) {
 	where := []string{
 		"b.status='open'",
 		`b.issue_type NOT IN ('merge-request','gate','molecule','step','message','session','agent','role','rig')`,
-		`NOT EXISTS (
+		fmt.Sprintf(`NOT EXISTS (
 			SELECT 1 FROM deps d
 			LEFT JOIN beads blocker ON blocker.id=d.depends_on_id
 			WHERE d.issue_id=b.id
 			  AND d.dep_type IN ('blocks','waits-for','conditional-blocks')
-			  AND COALESCE(blocker.status, '') <> 'closed'
-		  )`,
+			  AND (
+			    COALESCE(blocker.status, '') <> 'closed'
+			    OR EXISTS (
+			         SELECT 1 FROM metadata m
+			         WHERE m.bead_id = blocker.id
+			           AND m.meta_key = '%s'
+			           AND m.meta_value = '%s'
+			       )
+			  )
+		  )`, beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkOutcomeBlocked),
 	}
 	switch q.TierMode {
 	case TierWisps:
