@@ -325,6 +325,44 @@ func TestReloadSupervisorFallsBackToDefaultHomeSocket(t *testing.T) {
 	}
 }
 
+func TestSupervisorSocketPathForDirShortDirUnchanged(t *testing.T) {
+	dir := shortTempDir(t, "gc-supervisor-")
+
+	want := filepath.Join(dir, "supervisor.sock")
+	if got := supervisorSocketPathForDir(dir); got != want {
+		t.Fatalf("supervisorSocketPathForDir(%q) = %q, want %q", dir, got, want)
+	}
+}
+
+func TestSupervisorSocketPathForDirLongDirFallsBackToHashedTempPath(t *testing.T) {
+	base := shortTempDir(t, "gc-supervisor-long-")
+
+	longDir := filepath.Join(base, "segment")
+	for len(filepath.Join(longDir, "supervisor.sock")) <= supervisorSocketPathLimit {
+		longDir = filepath.Join(longDir, "segment")
+	}
+	otherLongDir := filepath.Join(base, "other-segment")
+	for len(filepath.Join(otherLongDir, "supervisor.sock")) <= supervisorSocketPathLimit {
+		otherLongDir = filepath.Join(otherLongDir, "segment")
+	}
+
+	got := supervisorSocketPathForDir(longDir)
+	if dir := filepath.Dir(got); dir != filepath.Join("/tmp", "gascity-supervisor") {
+		t.Fatalf("supervisorSocketPathForDir(%q) = %q, want under /tmp/gascity-supervisor", longDir, got)
+	}
+	if len(got) > supervisorSocketPathLimit {
+		t.Fatalf("fallback socket path length = %d, want <= %d: %s", len(got), supervisorSocketPathLimit, got)
+	}
+
+	if again := supervisorSocketPathForDir(longDir); again != got {
+		t.Fatalf("supervisorSocketPathForDir(%q) is not deterministic: %q != %q", longDir, again, got)
+	}
+
+	if other := supervisorSocketPathForDir(otherLongDir); other == got {
+		t.Fatalf("supervisorSocketPathForDir(%q) and supervisorSocketPathForDir(%q) collided on %q", longDir, otherLongDir, got)
+	}
+}
+
 func TestRenderSupervisorLaunchdTemplate(t *testing.T) {
 	data := &supervisorServiceData{
 		GCPath:        "/usr/local/bin/gc",
@@ -6727,7 +6765,7 @@ func TestRunSupervisorWarnsOnEphemeralAPIPort(t *testing.T) {
 	if err := os.WriteFile(supervisor.ConfigPath(), []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	sockPath := filepath.Join(supervisor.RuntimeDir(), "supervisor.sock")
+	sockPath := supervisorSocketPath()
 	if err := os.MkdirAll(sockPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -6755,7 +6793,7 @@ func TestRunSupervisorNoWarningForLowAPIPort(t *testing.T) {
 	if err := os.WriteFile(supervisor.ConfigPath(), []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	sockPath := filepath.Join(supervisor.RuntimeDir(), "supervisor.sock")
+	sockPath := supervisorSocketPath()
 	if err := os.MkdirAll(sockPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
