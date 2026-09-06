@@ -2302,6 +2302,50 @@ depends_on = ["implement"]
 	}
 }
 
+func TestCookHumanStepGateDefersResolverWithoutAssignee(t *testing.T) {
+	dir := t.TempDir()
+	toml := `
+formula = "human-gate"
+version = 1
+
+[[steps]]
+id = "approve"
+title = "Approve release"
+
+[steps.gate]
+type = "human"
+id = "release-resolver"
+`
+	if err := os.WriteFile(filepath.Join(dir, "human-gate.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatalf("writing formula: %v", err)
+	}
+
+	for _, graphApply := range []bool{false, true} {
+		t.Run(fmt.Sprintf("graph_apply=%t", graphApply), func(t *testing.T) {
+			previous := IsGraphApplyEnabled()
+			SetGraphApplyEnabled(graphApply)
+			t.Cleanup(func() { SetGraphApplyEnabled(previous) })
+
+			store := beads.NewMemStore()
+			result, err := Cook(context.Background(), store, "human-gate", []string{dir}, Options{})
+			if err != nil {
+				t.Fatalf("Cook: %v", err)
+			}
+
+			gate, err := store.Get(result.IDMapping["human-gate.gate-approve"])
+			if err != nil {
+				t.Fatalf("Get gate: %v", err)
+			}
+			if gate.Assignee != "" {
+				t.Errorf("gate.Assignee = %q, want empty", gate.Assignee)
+			}
+			if got := gate.Metadata[DeferredAssigneeMetadataKey]; got != "release-resolver" {
+				t.Errorf("gate.Metadata[%q] = %q, want %q", DeferredAssigneeMetadataKey, got, "release-resolver")
+			}
+		})
+	}
+}
+
 func TestCookEndToEndCheckSyntax(t *testing.T) {
 	formulatest.EnableV2ForTest(t)
 	dir := t.TempDir()
