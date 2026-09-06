@@ -3027,6 +3027,28 @@ flatten_database() {
     printf 'compact: db=%s row-count increase passed value-hash verification — full GC allowed\n' \
       "$db"
   fi
+
+  # The post-db-hash HEAD probe closes the hash query itself, but a writer can
+  # still commit in the small gap before DOLT_GC starts. Full GC rewrites the
+  # store and must not start against a state that changed after every
+  # flatten/verification proof passed. Take one final HEAD fence immediately
+  # before GC: a move past the flatten commit is an ordinary writer, so retain
+  # the compacted data and defer the reclamation for a quiet retry instead of
+  # racing the writer or manufacturing a later quarantine signal.
+  final_verify_head=$(head_commit "$db" || true)
+  if [ -n "$flatten_head" ] && [ -n "$final_verify_head" ] && [ "$final_verify_head" != "$flatten_head" ]; then
+    printf 'compact: db=%s writer race detected during flatten verification (snapshot_HEAD=%s flatten_HEAD=%s final_verify_HEAD=%s) — deferring full GC until the next quiet run\n' \
+      "$db" "$head" "$flatten_head" "$final_verify_head" >&2
+    if ! defer_writer_race_after_flatten "$db" "$flatten_head" \
+      "$remote" "$expected_remote_head" "$expected_remote_head_verified" \
+      "$compacted_from_head" "$local_branch" "$remote_branch"; then
+      rm -f "$preflight_tmp"
+      return 1
+    fi
+    rm -f "$preflight_tmp"
+    return 0
+  fi
+
   rm -f "$preflight_tmp"
 
   after_count=$(commit_count "$db" || true)
