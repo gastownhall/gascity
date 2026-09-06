@@ -582,6 +582,7 @@ func finalizeDrainAckStoppedSession(
 	template string,
 	closeIfUnassigned bool,
 	dops drainOps,
+	sp runtime.Provider,
 	dt *drainTracker,
 	clk clock.Clock,
 	rec events.Recorder,
@@ -684,6 +685,13 @@ func finalizeDrainAckStoppedSession(
 	if hasAssignedWork {
 		batch = sessionpkg.CompleteDrainPatch(clk.Now().UTC(), string(sessionpkg.SleepReasonIdle), info.WakeMode == "fresh")
 	}
+	if isAgentSourcedDrainAck(sp, name) &&
+		!hasAssignedWork &&
+		sessionpkg.IsNamedSessionInfo(info) &&
+		sessionpkg.NamedSessionModeInfo(info) == "always" &&
+		!isPoolManagedSessionInfo(info) {
+		batch["held_until"] = clk.Now().UTC().Add(agentDrainAckCooldown).Format(time.RFC3339)
+	}
 	// A drain-ack that completes a restart-request cycle (gc session reset →
 	// agent drain-ack) must also consume restart_requested. The drain-ack
 	// branch handles the stop and continues before the restart-requested
@@ -754,7 +762,7 @@ func reconcileDrainAckStopPending(
 	return true, finalizeDrainAckStoppedSession(
 		cityPath, cfg, store, rigStores, info, tp.TemplateName,
 		!desired || isPoolManagedSessionInfo(info),
-		dops, dt, clk, rec, stderr,
+		dops, sp, dt, clk, rec, stderr,
 	)
 }
 
@@ -838,7 +846,7 @@ func finalizeDrainAckStopPendingSessions(
 			cityPath, cfg, store, rigStores, info,
 			normalizedSessionTemplateInfo(info, cfg),
 			isPoolManagedSessionInfo(info),
-			dops, dt, clk, rec, stderr,
+			dops, sp, dt, clk, rec, stderr,
 		)
 		finalized++
 	}
@@ -2142,7 +2150,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						}
 						result := finalizeDrainAckStoppedSession(
 							cityPath, cfg, store, rigStores, infoByID[id], template,
-							true, dops, dt, clk, rec, stderr,
+							true, dops, sp, dt, clk, rec, stderr,
 						)
 						// finalizeDrainAckStoppedSession may close the bead in memory; fold
 						// that close onto the snapshot so the cross-session min-floor scan
@@ -2569,7 +2577,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					result := finalizeDrainAckStoppedSession(
 						cityPath, cfg, store, rigStores, infoByID[id], tp.TemplateName,
 						isPoolManagedSessionInfo(infoByID[id]),
-						dops, finalizeDT,
+						dops, sp, finalizeDT,
 						clk, rec, stderr,
 					)
 					// finalizeDrainAckStoppedSession may close the bead in memory; fold

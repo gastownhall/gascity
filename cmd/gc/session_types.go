@@ -308,6 +308,10 @@ const (
 	// before force-stopping a session.
 	defaultDrainTimeout = 5 * time.Minute
 
+	// agentDrainAckCooldown bounds respawn churn when an always-on configured
+	// named session acknowledges its own drain without assigned work.
+	agentDrainAckCooldown = 2 * time.Minute
+
 	// defaultQuarantineDuration is how long a session is quarantined
 	// after exceeding max wake failures.
 	defaultQuarantineDuration = 5 * time.Minute
