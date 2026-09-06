@@ -90,7 +90,7 @@ func TestFileRecorderAppendBatchSurfacesClosedAndLockErrors(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = recorder.Close() })
-		sibling := mustOpenSiblingLock(t, path)
+		sibling := mustOpenSiblingLock(t, recorderLockPath(path))
 		t.Cleanup(func() { _ = sibling.Close() })
 
 		err = recorder.AppendBatch([]Event{{Type: ExecutionStepDefined}})
