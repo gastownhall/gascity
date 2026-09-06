@@ -4,25 +4,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
-	"os/exec"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/workrecord"
 )
 
-// Work-record close gate (ADR-0009). Closing a work bead through the SDK close
-// seam (`gc bd close`) is validated against the typed work-record contract: the
-// bead must carry a typed gc.work_outcome, and a "shipped" outcome must point at
-// a commit that is reachable on the stamped gc.work_branch. This turns the
-// recurring "drain-without-commit" close (a close that leaves no artifact at
-// all) into a machine-checkable violation.
-//
-// The gate ships warn-only by default — violations are logged but the close
-// proceeds — so existing open beads migrate without breakage. Set
-// GC_WORK_RECORD_ENFORCE to a truthy value to make violations block the close.
+// The CLI plane's half of the ADR-0009 work-record close gate: the bd-argv
+// plumbing around internal/workrecord, which owns the contract itself (which
+// beads it covers, what a valid record is, whether enforcement is on). The HTTP
+// plane runs the same package against the owner store its residency resolver
+// pins, so a close cannot dodge the contract by changing doors.
 //
 // # Two entry points run this gate: the bd fall-through and the class door
 //
@@ -59,47 +53,19 @@ import (
 
 // workRecordEnforceEnvVar gates whether work-record violations block the close
 // (enforce) or are logged only (warn-only, the default).
-const workRecordEnforceEnvVar = "GC_WORK_RECORD_ENFORCE"
+const workRecordEnforceEnvVar = workrecord.EnforceEnvVar
 
 // workRecordEnforceEnabled reports whether the close gate should block closes
 // that violate the work-record contract, rather than only warning.
-func workRecordEnforceEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(workRecordEnforceEnvVar))) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
-		return false
-	}
-}
+func workRecordEnforceEnabled() bool { return workrecord.EnforceEnabled() }
 
 // validWorkOutcome reports whether v is one of the four typed work-record close
-// dispositions. The vocabulary is owned here (the consumer), not in beadmeta,
-// per that package's data-only convention.
-func validWorkOutcome(v string) bool {
-	switch v {
-	case beadmeta.WorkOutcomeShipped, beadmeta.WorkOutcomeNoOp,
-		beadmeta.WorkOutcomeBlocked, beadmeta.WorkOutcomeAbandoned:
-		return true
-	default:
-		return false
-	}
-}
+// dispositions.
+func validWorkOutcome(v string) bool { return workrecord.ValidOutcome(v) }
 
 // isWorkRecordGatedBead reports whether the work-record close contract applies
-// to bead. It applies to worker-claimable work units — plain task beads — and
-// deliberately NOT to control/structural beads (anything carrying gc.kind:
-// workflow roots, scope/run/check/drain steps, etc.) or non-task beads (convoy,
-// message). Those use the disjoint control-plane gc.outcome vocabulary and are
-// closed by the dispatch engine, not by a worker reporting a work outcome.
-func isWorkRecordGatedBead(bead beads.Bead) bool {
-	if t := strings.TrimSpace(bead.Type); t != "" && t != "task" {
-		return false
-	}
-	if strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]) != "" {
-		return false
-	}
-	return true
-}
+// to bead — the population every plane's gate shares.
+func isWorkRecordGatedBead(bead beads.Bead) bool { return workrecord.Gated(bead) }
 
 // validateWorkRecordOnClose checks bead against the typed work-record contract
 // and returns a human-readable message for each violation (empty slice ⇒ the
@@ -107,101 +73,15 @@ func isWorkRecordGatedBead(bead beads.Bead) bool {
 // an ancestor of a branch; it is injected so the rule is unit-testable without
 // a real repo. The caller is responsible for scoping (isWorkRecordGatedBead).
 func validateWorkRecordOnClose(bead beads.Bead, commitReachable func(commit, branch string) bool) []string {
-	outcome := strings.TrimSpace(bead.Metadata[beadmeta.WorkOutcomeMetadataKey])
-	if outcome == "" {
-		return []string{fmt.Sprintf("missing %s (want one of shipped|no-op|blocked|abandoned)", beadmeta.WorkOutcomeMetadataKey)}
-	}
-	if !validWorkOutcome(outcome) {
-		return []string{fmt.Sprintf("invalid %s=%q (want one of shipped|no-op|blocked|abandoned)", beadmeta.WorkOutcomeMetadataKey, outcome)}
-	}
-	if outcome != beadmeta.WorkOutcomeShipped {
-		// no-op / blocked / abandoned carry their reason in the close-reason; no
-		// commit artifact is required.
-		return nil
-	}
-	commit := strings.TrimSpace(bead.Metadata[beadmeta.WorkCommitMetadataKey])
-	branch := strings.TrimSpace(bead.Metadata[beadmeta.WorkBranchMetadataKey])
-	var violations []string
-	if commit == "" {
-		violations = append(violations, fmt.Sprintf("%s=shipped requires %s (the commit that satisfied the bead)", beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkCommitMetadataKey))
-	}
-	if branch == "" {
-		violations = append(violations, fmt.Sprintf("%s=shipped requires %s (the branch the commit lives on)", beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkBranchMetadataKey))
-	}
-	if commit != "" && branch != "" && !commitReachable(commit, branch) {
-		violations = append(violations, fmt.Sprintf("%s %s is not reachable on %s %s", beadmeta.WorkCommitMetadataKey, commit, beadmeta.WorkBranchMetadataKey, branch))
-	}
-	return violations
-}
-
-// preferredReachabilityRef decides which ref gitCommitReachableOnBranch should
-// check commit-reachability against: refs/remotes/origin/<branch> when it
-// resolves, otherwise the bare branch name. gitrevisions precedence puts a
-// local refs/heads/<branch> ahead of any remote-tracking ref, but the
-// worktree named by gc.work_dir is rarely the one whose local branch tip
-// actually moves — a refinery or polecat that merges/pushes from a different
-// worktree advances the remote-tracking ref, never the local one checked out
-// elsewhere. Resolving against the local ref alone reports a landed commit as
-// unreachable until something happens to fast-forward it, which in that
-// topology may be never (gastownhall/gascity#5037).
-//
-// remoteRefResolves is injected so the decision is unit-testable without a
-// real git repository; the only production caller runs
-// `git rev-parse --verify --quiet <ref>`. Kept as a separate probe rather
-// than a fallback on the merge-base exit code so the caller can distinguish
-// "no such ref" from "not reachable"; see commitReachableOnEitherRef.
-func preferredReachabilityRef(branch string, remoteRefResolves func(ref string) bool) string {
-	if remote := "refs/remotes/origin/" + branch; remoteRefResolves(remote) {
-		return remote
-	}
-	return branch
-}
-
-// commitReachableOnEitherRef reports whether a commit is reachable from the
-// branch's remote-tracking ref OR from the branch itself. The remote-tracking
-// ref is probed first (see preferredReachabilityRef) because it is the ref
-// that actually advances in a refinery/polecat topology; the bare branch name
-// is then still checked, because ADR-0009's contract is that the commit is
-// reachable on gc.work_branch — not that it has been pushed. Checking only the
-// remote ref would reject a commit that is genuinely on the local branch but
-// sits ahead of (or was never pushed to) origin, a false negative in the exact
-// mirror image of gastownhall/gascity#5037.
-//
-// Both probes are injected so the decision is unit-testable without a real git
-// repository. The local ref is never probed twice.
-func commitReachableOnEitherRef(branch string, remoteRefResolves, reachableOnRef func(ref string) bool) bool {
-	ref := preferredReachabilityRef(branch, remoteRefResolves)
-	if reachableOnRef(ref) {
-		return true
-	}
-	if ref == branch {
-		return false
-	}
-	return reachableOnRef(branch)
+	return workrecord.ValidateOnClose(bead, commitReachable)
 }
 
 // gitCommitReachableOnBranch reports whether commit is an ancestor of branch in
-// the git repository at repoDir (worktrees share one object store, so any
-// worktree dir resolves refs across the repo). A non-nil error from git — bad
-// repo, unknown ref, unknown commit — reads as "not reachable". A commit/branch
-// that looks like a flag (leading "-") is rejected outright so a malformed
-// metadata value can never be parsed as a git option. See
-// commitReachableOnEitherRef for how branch is resolved to the refs that can
-// prove reachability.
+// the git repository at repoDir. The rule — including which refs can prove
+// reachability — lives in internal/workrecord so both close doors ask git the
+// same question.
 func gitCommitReachableOnBranch(repoDir, commit, branch string) bool {
-	if strings.TrimSpace(repoDir) == "" || commit == "" || branch == "" {
-		return false
-	}
-	if strings.HasPrefix(commit, "-") || strings.HasPrefix(branch, "-") {
-		return false
-	}
-	return commitReachableOnEitherRef(branch,
-		func(candidate string) bool {
-			return exec.Command("git", "-C", repoDir, "rev-parse", "--verify", "--quiet", candidate).Run() == nil
-		},
-		func(ref string) bool {
-			return exec.Command("git", "-C", repoDir, "merge-base", "--is-ancestor", commit, ref).Run() == nil
-		})
+	return workrecord.CommitReachableOnBranch(repoDir, commit, branch)
 }
 
 // workRecordCloseTargets returns the bead IDs a bd invocation closes, and
