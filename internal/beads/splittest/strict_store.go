@@ -28,14 +28,30 @@
 // beads.OpenSQLiteStore with the class's reserved prefix), which accepts
 // silently and corrupts instead. Semantics selects which one a leaf models —
 // [BdSemantics] for [NewWorkStore], [SQLiteSemantics] for [NewClassStore] —
-// and every rule below names the backend it is modeling:
+// and every rule below names the backend it is modeling.
+//
+// One rule names none, and that is the point of it: the pinned-id FENCE is a
+// property of the class binding, so both backends enforce it identically and
+// both semantics do too. A leaf is fenced when it is given namespaces; see
+// pinned_id_fence.go.
 //
 //	rule                               bd/Dolt          SQLite            kit
 //	---------------------------------- ---------------- ----------------- -------------------------
 //	Create, explicit id outside the    rejects:         accepts verbatim: BdSemantics: reject with
-//	store's own prefix                 prefix mismatch, no prefix check   bd's message.
+//	store's own prefix, UNFENCED       prefix mismatch, no prefix check   bd's message.
 //	                                   --force to       in                SQLiteSemantics: accept,
 //	                                   override         normalizeCreate   record a violation.
+//
+//	Create, explicit id outside the    rejects with     rejects with      Reject under BOTH
+//	namespaces the binding claims,     the sentinel     the sentinel      semantics, with the
+//	FENCED                                                                sentinel.
+//
+// The FENCED row is the only one whose three cells agree, and a refusal records
+// nothing under either semantics — production refuses before the backend sees
+// the write, so there is nothing to record. That is a real loss of reach: a
+// caller that swallows the error used to be caught by the unclaimed-violation
+// cleanup and now is not. Modeling it would mean recording something production
+// does not.
 //
 //	DepAdd, endpoint missing from      rejects: no      accepts: deps has BdSemantics: reject with
 //	this store, SAME prefix            issue found      no foreign key    bd's message.
@@ -97,6 +113,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
@@ -111,8 +128,10 @@ import (
 //     always fails loudly when the leaf hands back an id other than the one
 //     that was asked for.
 //
-// A BdSemantics store rejects; a SQLiteSemantics store accepts and records (see
-// the package doc's rule table, and ResidenceViolation).
+// A FENCED leaf refuses a pinned id outside the namespaces it claims, under
+// both semantics. Otherwise a BdSemantics store rejects and a SQLiteSemantics
+// store accepts and records (see the package doc's rule table, and
+// ResidenceViolation).
 //
 // Reads are untouched. Optional leaf capabilities that production code
 // discovers by type-assertion are forwarded (see the method set and the
@@ -126,6 +145,11 @@ type StrictStore struct {
 	prefix string
 	// semantics is the production backend this leaf models.
 	semantics Semantics
+	// namespaces are the id namespaces a FENCED leaf claims — a class
+	// binding's reserved prefixes, normalized. Empty means unfenced, which is
+	// the shipped default for every store that is not a class binding, and the
+	// control that tells a fence from a blanket refusal. See fencedPinnedID.
+	namespaces []string
 	// residence collects what a SQLiteSemantics leaf accepted. Nil under
 	// BdSemantics, which rejects at the call site and has nothing to collect.
 	residence *residenceLog
@@ -188,13 +212,20 @@ var (
 // some fixture paths, and bd's --deps validation behavior is not pinned by a
 // contract test, so enforcing here would reject valid fixtures rather than
 // catch real cross-store bugs.
-func Strict(t *testing.T, s beads.Store, semantics Semantics) beads.Store {
+//
+// namespaces, when non-empty, FENCES the leaf to them: a pinned id outside the
+// set is refused with beads.ErrPinnedIDOutsideNamespace, exactly as a store
+// serving a class binding refuses it. Pass the same prefixes production passes
+// (storebinding.EngineReservedPrefixes for the classes the binding serves);
+// passing none models an unfenced store, which is every store that is not a
+// class binding. See pinned_id_fence.go.
+func Strict(t *testing.T, s beads.Store, semantics Semantics, namespaces ...string) beads.Store {
 	t.Helper()
 	prefix, err := inferredPrefix(s)
 	if err != nil {
 		t.Fatalf("splittest.Strict: %v", err)
 	}
-	return StrictWithPrefix(t, s, prefix, semantics)
+	return StrictWithPrefix(t, s, prefix, semantics, namespaces...)
 }
 
 // inferredPrefix reads a leaf's declared id prefix, rejecting a leaf that has
@@ -218,9 +249,11 @@ func inferredPrefix(s beads.Store) (string, error) {
 // about and what IDPrefix reports for storeref prefix routing, so an empty one
 // fails the test: a store whose namespace is undeclared cannot tell a foreign id
 // from its own.
-func StrictWithPrefix(t *testing.T, s beads.Store, prefix string, semantics Semantics) beads.Store {
+//
+// namespaces fences the leaf exactly as in Strict.
+func StrictWithPrefix(t *testing.T, s beads.Store, prefix string, semantics Semantics, namespaces ...string) beads.Store {
 	t.Helper()
-	strict, err := newStrict(s, prefix, semantics)
+	strict, err := newStrict(s, prefix, semantics, namespaces)
 	if err != nil {
 		t.Fatalf("splittest.StrictWithPrefix: %v", err)
 	}
@@ -232,7 +265,7 @@ func StrictWithPrefix(t *testing.T, s beads.Store, prefix string, semantics Sema
 // variant when (and only when) the leaf implements CreateWithStorage. Split out
 // of the constructors so the rejection rules are testable without a failing
 // *testing.T.
-func newStrict(s beads.Store, prefix string, semantics Semantics) (beads.Store, error) {
+func newStrict(s beads.Store, prefix string, semantics Semantics, namespaces []string) (beads.Store, error) {
 	if s == nil {
 		return nil, errors.New("leaf store is nil")
 	}
@@ -243,7 +276,17 @@ func newStrict(s beads.Store, prefix string, semantics Semantics) (beads.Store, 
 	if normalized == "" {
 		return nil, fmt.Errorf("empty id prefix %q; the residence checks need a declared namespace to be about", prefix)
 	}
-	strict := &StrictStore{Store: s, prefix: normalized, semantics: semantics}
+	fence := normalizeNamespaces(namespaces)
+	// The fence is variadic, so forgetting it is silent and yields the store
+	// the kit shipped before there was one. That is right for every leaf except
+	// this shape: a SQLiteSemantics leaf minting under a RESERVED class prefix
+	// is standing in for a class binding, and storebinding.EngineReservedPrefixes
+	// fences every non-work class set, so production has no such store to model.
+	// The mirror of workPrefix's refusal of a reserved prefix, on the other side.
+	if semantics == SQLiteSemantics && len(fence) == 0 && config.IsReservedClassPrefix(normalized) {
+		return nil, fmt.Errorf("prefix %q is a reserved class prefix but no namespaces were given; a store minting a class namespace serves a class binding, and every class binding production opens is fenced — pass the namespaces it claims (config.ReservedClassPrefixesFor), or use a work-shaped prefix if an UNFENCED SQLite store is what you mean to model", normalized)
+	}
+	strict := &StrictStore{Store: s, prefix: normalized, semantics: semantics, namespaces: fence}
 	if semantics == SQLiteSemantics {
 		strict.residence = &residenceLog{}
 	}
@@ -295,7 +338,9 @@ func (s *StrictStore) Create(b beads.Bead) (beads.Bead, error) {
 }
 
 // CreateWithForeignID creates a bead KEEPING an id from another store's
-// namespace. It DELIBERATELY bypasses the foreign-prefix guard: this capability
+// namespace. It DELIBERATELY bypasses the fence and the foreign-prefix guard
+// alike — the conformance suite pins that it stays open on a fenced store
+// (TheForeignIDCreateStaysOpenForTheMigrationCopy): this capability
 // IS the forced path (beads.BdStore passes --force), used by the class-store
 // migration to keep a legacy id when copying a bead into a relocated-class
 // store. Leaves with their own forced create serve it; the rest get a guard-free
@@ -593,18 +638,27 @@ func (s *StrictStore) WaitForParentProjection(ctx context.Context, id, oldParent
 	return nil
 }
 
-// guardExplicitID answers a caller-supplied id outside the store's declared
-// namespace the way the backend this leaf models answers it. An empty id
-// (store-minted) or an in-prefix one always passes: bd accepts an in-prefix
-// --id, so the guard is about the NAMESPACE, not about pinning.
+// guardExplicitID answers a caller-supplied id the store would not have minted
+// itself. An empty id is a MINT request, not a pin, so it always passes.
 //
-// bd rejects the mismatch in validation.ValidateIDPrefixAllowed, called from
-// cmd/bd/create.go with the command's --force flag; the message below is bd's,
-// plus the pointer at the forced path. SQLite accepts it verbatim —
+// A FENCED leaf answers with the fence and nothing else, because that is all a
+// real class binding does: the namespace set is the whole rule, and the store's
+// own mint prefix carries no separate authority — a binding legitimately holds
+// namespaces it never mints (the nudges store holds the nudge queue's records
+// that way). See fencedPinnedID.
+//
+// An UNFENCED leaf falls through to what the backend it models does with an id
+// outside its own mint prefix. bd rejects the mismatch in
+// validation.ValidateIDPrefixAllowed, called from cmd/bd/create.go with the
+// command's --force flag; the message below is bd's, plus the pointer at the
+// forced path. An unfenced SQLite store accepts it verbatim —
 // SQLiteStore.normalizeCreate has no prefix check at all, as its own
 // CreateWithForeignID doc says — so a SQLiteSemantics store lands the row and
 // records the violation.
 func (s *StrictStore) guardExplicitID(id string) error {
+	if len(s.namespaces) > 0 {
+		return fencedPinnedID(id, s.namespaces)
+	}
 	id = strings.TrimSpace(id)
 	if id == "" || s.ownsID(id) {
 		return nil
@@ -626,10 +680,12 @@ func (s *StrictStore) guardExplicitID(id string) error {
 // double's fidelity — no backend does either — so they hold under both
 // semantics.
 //
-// The namespace half deliberately covers minted ids only. A pinned id has
-// already been answered by guardExplicitID, which under SQLiteSemantics accepts
-// a foreign-prefix pin exactly as SQLite does; re-rejecting it here would undo
-// that on the way back out.
+// The namespace half deliberately covers minted ids only, and it is about the
+// MINT prefix rather than the fence's namespace set: a store mints under one
+// namespace even when it holds several. A pinned id has already been answered
+// by guardExplicitID — accepted inside a fenced leaf's namespaces, or accepted
+// and recorded by an unfenced SQLiteSemantics leaf exactly as SQLite accepts it
+// — and re-rejecting it here would undo that on the way back out.
 func (s *StrictStore) checkCreatedID(requestedID string, created beads.Bead) error {
 	if requested := strings.TrimSpace(requestedID); requested != "" {
 		if created.ID != requested {

@@ -1202,10 +1202,28 @@ func TestHandoffRootsRouteMailThroughTheMessagingClassStore(t *testing.T) {
 			t.Errorf("cmd_handoff.go contains unrouted messaging-class write %q — the handoff roots must derive their message store through cliMailStore(store, cfg, cityPath) so a [beads.classes.messaging] relocation reaches them", needle)
 		}
 	}
-	if got := strings.Count(content, "cliMailStore("); got != 2 {
-		t.Errorf("cmd_handoff.go calls cliMailStore( %d time(s), want 2 — one per command root (cmdHandoff, cmdHandoffRemote); a third root needs its own store-identity row beside the two above, not just this scan", got)
+	calls := strings.Count(content, "cliMailStore(")
+	if calls != 2 {
+		t.Errorf("cmd_handoff.go calls cliMailStore( %d time(s), want 2 — one per command root (cmdHandoff, cmdHandoffRemote); a third root needs its own store-identity row beside the two above, not just this scan", calls)
+	}
+	// Every one of those calls must unwrap. beads.MailStore embeds beads.Store,
+	// so handing the wrapper to doHandoff* compiles and delivers mail correctly
+	// — and moves every optional-capability assertion downstream onto the
+	// wrapper, which answers no to all of them. Nothing else in the tree fails
+	// on that, so the shape is pinned here.
+	if unwrapped := len(mailStoreUnwrapCall.FindAllString(content, -1)); unwrapped != calls {
+		t.Errorf("cmd_handoff.go unwraps %d of its %d cliMailStore( call(s); the messaging leg of beadmail.NewWithStores is a beads.Store and must be the embedded store, not the typed wrapper around it", unwrapped, calls)
 	}
 }
+
+// mailStoreUnwrapCall matches a cliMailStore call that reads its embedded store.
+// The argument list is matched without nested parens because both roots pass
+// three plain identifiers; a call that grew a nested expression would stop
+// matching and fail the count above, which is the direction that wants a human.
+//
+// It is scoped to cmd_handoff.go on purpose. `gc order` holds the wrapper
+// deliberately (cmd_order.go), and a tree-wide scan would call that a defect.
+var mailStoreUnwrapCall = regexp.MustCompile(`cliMailStore\([^()]*\)\.Store`)
 
 // TestHandoffMessagingScanDetectsTheDefectItGuards is the control the scan above
 // cannot supply for itself. A source scan over a clean file passes identically

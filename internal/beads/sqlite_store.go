@@ -104,11 +104,7 @@ func WithSQLiteStoreIDPrefix(prefix string) SQLiteStoreOption {
 // foreign id across is the store-migration copy path's entire job.
 func WithSQLiteStoreReservedIDPrefixes(prefixes ...string) SQLiteStoreOption {
 	return func(o *SQLiteStoreOptions) {
-		for _, p := range prefixes {
-			if p = normalizeIDPrefix(p); p != "" {
-				o.reservedPrefixes = append(o.reservedPrefixes, p)
-			}
-		}
+		o.reservedPrefixes = collectReservedIDPrefixes(o.reservedPrefixes, prefixes)
 	}
 }
 
@@ -648,37 +644,18 @@ func (s *SQLiteStore) create(b Bead, allowForeign bool) (Bead, error) {
 	return cloneBead(stored), nil
 }
 
-// checkPinnedIDNamespace enforces the fence. An empty id is a mint request and
-// an unfenced store claims no namespace, so both pass untouched.
+// checkPinnedIDNamespace enforces the fence, which is the shared rule in
+// pinned_id_fence.go rather than this store's own — two providers serve class
+// bindings and a namespace claim that meant different things in each would rule
+// nothing out.
 //
 // It runs BEFORE any read of the database, which is deliberate and is part of
 // the contract: a store must answer "I do not serve that namespace" without
 // first checking whether it happens to hold the row. Checking existence first
 // would leak the presence of a relic — CreateWithForeignID can carry a foreign
 // id in — through a refusal about a namespace the store disclaims.
-//
-// The id is tested EXACTLY as it will be stored. Trimming it first would let a
-// caller pin "  gcn-1" — or an id that is nothing but spaces — past a check the
-// stored row then fails, which is the one outcome the fence exists to prevent:
-// a resident bead that no id-shaped lookup of this namespace can reach. Only
-// create's own mint test (an id of length zero) is exempt.
-//
-// The refusal wraps ErrPinnedIDOutsideNamespace so a caller can route the id to
-// a sibling binding instead of parsing this message.
 func (s *SQLiteStore) checkPinnedIDNamespace(id string) error {
-	if len(s.reservedPrefixes) == 0 {
-		return nil
-	}
-	if id == "" {
-		return nil
-	}
-	lowered := strings.ToLower(id)
-	for _, prefix := range s.reservedPrefixes {
-		if strings.HasPrefix(lowered, prefix+"-") {
-			return nil
-		}
-	}
-	return fmt.Errorf("sqlite create: id %q is outside this store's namespaces (%s): a pinned id must carry one of them, or use the foreign-id create the store migration uses: %w", id, strings.Join(s.reservedPrefixes, ", "), ErrPinnedIDOutsideNamespace)
+	return checkPinnedIDNamespace("sqlite create", id, s.reservedPrefixes)
 }
 
 func (s *SQLiteStore) normalizeCreate(b Bead) Bead {
@@ -1679,7 +1656,20 @@ type sqliteStoreTx struct {
 	tx    *sql.Tx
 }
 
+// Create fences the same way the standalone Create does. A transaction is not
+// an exemption: the bead it writes is as resident, and as unreachable by an
+// id-shaped lookup of the namespace it lands in, as one written outside a
+// transaction. The check runs before normalization and before
+// ensureCreateDoesNotExist, so a refusal about a disclaimed namespace still
+// reveals nothing about what this store holds.
+//
+// There is no foreign-id variant here on purpose. The migration copy that needs
+// the exemption runs through CreateWithForeignID on the store, not inside a
+// caller's transaction, so adding one would open a bypass nothing asks for.
 func (t *sqliteStoreTx) Create(b Bead) (Bead, error) {
+	if err := t.store.checkPinnedIDNamespace(b.ID); err != nil {
+		return Bead{}, err
+	}
 	stored := t.store.normalizeCreate(b)
 	if b.ID == "" {
 		id, err := t.store.mintUniqueIDTx(t.ctx, t.tx, stored.ID, nil)

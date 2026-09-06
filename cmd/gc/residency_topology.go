@@ -323,8 +323,11 @@ type cliRelocatedBinding struct {
 // binding here — a refusedClassStore whose every operation returns the boot
 // gate's sentence — and cliResidencyBindings reports that refusal alongside it.
 // Both callers want the STORE in that case, exactly as they got it before: the
-// refusal reaches them through the reads they were going to make anyway, where
-// each already classifies it (bdByIDClassDoor.resolve, hookClaimClassRoute.holds).
+// refusal reaches them through the reads they were going to make anyway, and is
+// classified there. bdByIDClassDoor.resolve no longer classifies it itself —
+// since ga-qdt5y.18 it runs storeref's plan, which tolerates the refusal on a
+// residence probe and surfaces it on the authority leg. hookClaimClassRoute.holds
+// still carries its own hand-rolled version of that judgement (ga-qdt5y.16).
 // Returning it here instead would collapse "this city cannot be served" into
 // "this city relocates nothing", which sends those reads back to the work
 // ledger the beads were migrated off — the exact stale-answer path the door was

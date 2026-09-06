@@ -60,6 +60,12 @@
 # declaring vocabulary counts as mentioning it, and the row still moves if the
 # declaration is renamed. "Hits" here means mentions, not call sites.
 #
+# The infra_class_migrate.go row is attributed to infraBindingIDPrefix and not
+# to openInfraDestination because #5597 lifted the destination prefix read out
+# into a named helper. The hit did not move file, pattern or count — the same
+# single config.ReservedClassPrefix call is pinned, under the function that now
+# opens it. Still six rows, six hits.
+#
 # The two internal/dispatch/drain.go rows arrived when the signature rule
 # widened from cmd/gc+internal/api to every directory grep already scanned. The
 # comment that justified the narrower set claimed sling and dispatch held no

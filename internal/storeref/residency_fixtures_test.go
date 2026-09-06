@@ -21,7 +21,7 @@ import (
 //	T4  T2 with one rig suspended — the constructor excluded it
 //	T5  per-class split: graph and sessions on two DIFFERENT bindings
 //	T6  T1 with a mint-truthful binding (the section-5 retirement shape)
-//	T6r T6 with legacy residents still open — the retirement's other half
+//	T6r T6 with legacy residents present — the retirement's other half
 const (
 	cityPrefix  = "ga"
 	alphaPrefix = "ra"

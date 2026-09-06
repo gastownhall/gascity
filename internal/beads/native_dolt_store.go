@@ -305,6 +305,13 @@ type NativeDoltStore struct {
 	actor      string
 	idPrefix   string
 
+	// reservedPrefixes is the pinned-id fence: the id namespaces this store's
+	// binding claims. Empty leaves the store unfenced, which is the shipped
+	// default everywhere it is not opened as a class binding — including a
+	// binding serving the work class, whose beads carry whatever prefix an
+	// operator configured. See WithNativeDoltStoreReservedIDPrefixes.
+	reservedPrefixes []string
+
 	// reopen re-establishes the managed Dolt connection after a transient
 	// connection failure (a :3307 hard-kill/rebind). It MUST re-resolve the
 	// CURRENT managed Dolt port and return a fresh storage handle bound to the
@@ -356,6 +363,28 @@ func WithNativeReopen(reopen NativeReopenFunc) NativeDoltStoreOption {
 	return func(s *NativeDoltStore) { s.reopen = reopen }
 }
 
+// WithNativeDoltStoreReservedIDPrefixes fences Create to the id namespaces the
+// binding this store serves claims, mirroring
+// WithSQLiteStoreReservedIDPrefixes. It is what makes a workspace binding's
+// namespace claim hold rather than be a convention.
+//
+// More than one prefix, because a binding holds more than it mints — the nudge
+// queue's records live in the nudges store under their own namespace. An empty
+// set leaves the store unfenced, which is the shipped default everywhere the
+// store is not a class binding.
+//
+// The pinned upstream library does not fence for us: its single-issue create
+// path sets SkipPrefixValidation for an explicit id on purpose, so this is the
+// only place the claim can be enforced.
+//
+// CreateWithForeignID deliberately bypasses the fence: carrying a preserved
+// foreign id across is the store-migration copy path's entire job.
+func WithNativeDoltStoreReservedIDPrefixes(prefixes ...string) NativeDoltStoreOption {
+	return func(s *NativeDoltStore) {
+		s.reservedPrefixes = collectReservedIDPrefixes(s.reservedPrefixes, prefixes)
+	}
+}
+
 var (
 	_ Store                         = (*NativeDoltStore)(nil)
 	_ ConditionalAssignmentReleaser = (*NativeDoltStore)(nil)
@@ -364,6 +393,7 @@ var (
 	_ StorageGraphApplyStore        = (*NativeDoltStore)(nil)
 	_ EphemeralGraphApplyStore      = (*NativeDoltStore)(nil)
 	_ conditionalWritesModeCarrier  = (*NativeDoltStore)(nil)
+	_ ForeignIDCreator              = (*NativeDoltStore)(nil)
 )
 
 func newNativeDoltStoreWithStorage(storage beadslib.Storage, actor string) *NativeDoltStore {
@@ -472,8 +502,12 @@ func openNativeStorageWithCredentialCommand(ctx context.Context, scopeRoot strin
 	return storage, prefix, nil
 }
 
-func newNativeDoltStoreForTest(storage beadslib.Storage) *NativeDoltStore {
-	return newNativeDoltStoreWithStorage(storage, "native-test")
+func newNativeDoltStoreForTest(storage beadslib.Storage, opts ...NativeDoltStoreOption) *NativeDoltStore {
+	store := newNativeDoltStoreWithStorage(storage, "native-test")
+	for _, opt := range opts {
+		opt(store)
+	}
+	return store
 }
 
 // IDPrefix returns the bead ID prefix owned by this store, without trailing "-".
@@ -968,8 +1002,38 @@ func (s *NativeDoltStore) SupportsEphemeralGraphApply() bool {
 	return true
 }
 
-// Create persists a new bead through the upstream beads storage layer.
+// Create persists a new bead through the upstream beads storage layer. An
+// explicit id is honored verbatim, provided it carries one of the store's
+// reserved namespaces when the store is fenced
+// (WithNativeDoltStoreReservedIDPrefixes).
 func (s *NativeDoltStore) Create(b Bead) (Bead, error) {
+	return s.create(b, false)
+}
+
+// CreateWithForeignID persists a new bead KEEPING its explicit id whatever
+// prefix it carries, for the store-migration copy path. Refusing a preserved id
+// there would leave the beads it carries nowhere at all. It satisfies
+// ForeignIDCreator.
+func (s *NativeDoltStore) CreateWithForeignID(b Bead) (Bead, error) {
+	if strings.TrimSpace(b.ID) == "" {
+		return Bead{}, fmt.Errorf("creating bead with foreign id: empty id")
+	}
+	return s.create(b, true)
+}
+
+// create is the shared body. allowForeign is the CreateWithForeignID exemption.
+//
+// The fence runs FIRST — before the bead is converted, before the storage
+// handle is acquired, before any read. That ordering is the contract: a refused
+// id must reach nothing, so it cannot write a row, cannot move the mint
+// sequence, and cannot reveal through its refusal whether the store already
+// holds a relic under that id.
+func (s *NativeDoltStore) create(b Bead, allowForeign bool) (Bead, error) {
+	if !allowForeign {
+		if err := checkPinnedIDNamespace("native dolt create", b.ID, s.reservedPrefixes); err != nil {
+			return Bead{}, err
+		}
+	}
 	issue, err := nativeIssueFromBead(b)
 	if err != nil {
 		return Bead{}, err
@@ -1140,7 +1204,17 @@ func (s *NativeDoltStore) applyCloseInTx(ctx context.Context, tx beadslib.Transa
 // applyCreateInTx creates a bead and its dependencies within an open
 // transaction. Unlike the standalone Create, no compensation is needed: a
 // mid-create failure rolls the whole transaction back.
+//
+// It fences the same way the standalone Create does. A transaction is not an
+// exemption: the bead it writes is as resident, and as unreachable by an
+// id-shaped lookup of the namespace it lands in, as one written outside a
+// transaction. There is no foreign-id variant here on purpose — the migration
+// copy that needs the exemption runs through CreateWithForeignID on the store,
+// not inside a caller's transaction.
 func (s *NativeDoltStore) applyCreateInTx(ctx context.Context, tx beadslib.Transaction, b Bead) (Bead, error) {
+	if err := checkPinnedIDNamespace("native dolt tx create", b.ID, s.reservedPrefixes); err != nil {
+		return Bead{}, err
+	}
 	issue, err := nativeIssueFromBead(b)
 	if err != nil {
 		return Bead{}, err

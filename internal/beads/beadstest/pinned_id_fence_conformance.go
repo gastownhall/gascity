@@ -210,6 +210,31 @@ func RunPinnedIDFenceConformance(t *testing.T, openFenced func(t *testing.T, min
 			}
 		})
 
+		// The CONFIGURED set is normalized too, and by the same rule the id is
+		// tested under. Without this row a store's namespace normalization is
+		// unpinned: every other row hands it prefixes that are already clean, so
+		// a provider that stopped lowercasing (or stopped trimming, or stopped
+		// dropping empties) what it was configured with keeps passing while it
+		// fences a different set than production's registry asked for.
+		t.Run("TheCONFIGUREDNamespacesAreNormalizedToo", func(t *testing.T) {
+			s := openFenced(t, mint, strings.ToUpper(mint)+"-", "  "+aux+"  ", "")
+			for _, id := range []string{mint + "-11", aux + "-11"} {
+				created, err := s.Create(beads.Bead{ID: id, Title: "held, however the namespace was spelled"})
+				if err != nil {
+					t.Errorf("Create(%q): %v — the namespace was configured shouting and padded, and normalizing it is what makes the registry's spelling not matter", id, err)
+					continue
+				}
+				if created.ID != id {
+					t.Errorf("Create(%q) returned %q; normalizing the namespace must not rewrite the id", id, created.ID)
+				}
+			}
+			// And the empty entry must not have unfenced the store: dropping it
+			// is normalization, not a reason to stop fencing.
+			if _, err := s.Create(beads.Bead{ID: foreign + "-11", Title: "foreign"}); !errors.Is(err, beads.ErrPinnedIDOutsideNamespace) {
+				t.Errorf("Create(%q) = %v, want ErrPinnedIDOutsideNamespace; an empty entry in the configured set is dropped, and a store that treated it as no configuration at all would serve a whole binding unfenced", foreign+"-11", err)
+			}
+		})
+
 		t.Run("AMintIsNeverFenced", func(t *testing.T) {
 			s := fenced(t)
 			created, err := s.Create(beads.Bead{Title: "minted"})
@@ -282,6 +307,55 @@ func RunPinnedIDFenceConformance(t *testing.T, openFenced func(t *testing.T, min
 				t.Errorf("got id %q, want %q", created.ID, id)
 			}
 		})
+	})
+
+	// The fence covers the transactional write surface too.
+	//
+	// Store.Tx is a Create in every sense the invariant cares about: the bead it
+	// writes is as resident, and as unreachable by an id-shaped lookup of the
+	// namespace it lands in, as one written outside a transaction. A store that
+	// fences only the standalone Create passes every row above and still lets a
+	// caller write a foreign bead into a binding that claims not to hold one —
+	// which is how this row came to exist (ga-qdt5y.14 review, both shipped
+	// providers had the hole).
+	//
+	// Tx is on Store, so this row can neither skip nor be satisfied by omission.
+	t.Run("TheFenceCoversTheTransactionalCreate", func(t *testing.T) {
+		s := fenced(t)
+		id := foreign + "-42"
+		err := s.Tx("a foreign pinned id inside a transaction", func(tx beads.Tx) error {
+			_, createErr := tx.Create(beads.Bead{ID: id, Title: "pinned inside a transaction"})
+			return createErr
+		})
+		if err == nil {
+			t.Fatal("Tx accepted a foreign pinned id; a transaction is not an exemption from the namespace claim")
+		}
+		if !errors.Is(err, beads.ErrPinnedIDOutsideNamespace) {
+			t.Errorf("refusal is %v, which does not wrap ErrPinnedIDOutsideNamespace", err)
+		}
+		if _, err := s.Get(id); !errors.Is(err, beads.ErrNotFound) {
+			t.Errorf("after the refusal Get(%q) = %v, want ErrNotFound", id, err)
+		}
+
+		// The must-be-silent counterpart: an in-namespace pin inside a
+		// transaction still goes through, honored verbatim. Without it a store
+		// conforms by making Tx.Create refuse everything.
+		held := aux + "-inside-a-tx"
+		if err := s.Tx("an in-namespace pinned id inside a transaction", func(tx beads.Tx) error {
+			created, createErr := tx.Create(beads.Bead{ID: held, Title: "held by this binding"})
+			if createErr != nil {
+				return createErr
+			}
+			if created.ID != held {
+				t.Errorf("Tx Create(%q) returned %q; a pinned id inside the namespace must be honored verbatim", held, created.ID)
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("Tx refused an in-namespace pinned id: %v", err)
+		}
+		if _, err := s.Get(held); err != nil {
+			t.Errorf("Get(%q) after committing it in a transaction: %v", held, err)
+		}
 	})
 
 	// Fence before existence. A relic under a foreign id can already be

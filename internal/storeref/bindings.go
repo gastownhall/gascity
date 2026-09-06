@@ -34,7 +34,7 @@ import (
 // to correct for.
 type BindingOptions struct {
 	// Relics answers the boot census's question for a binding store: does it
-	// still hold OPEN beads minted outside the reserved namespace?
+	// hold any bead, open or closed, minted outside the reserved namespace?
 	//
 	// Nil means there is no census to ask, and the answer is true for every
 	// store. A caller that censused nothing has cleared nothing, and only
