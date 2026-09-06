@@ -9158,6 +9158,34 @@ func TestCleanupDeadRuntimeSessionCorpsesReapsPreBootBeadsWhenServerAbsent(t *te
 			CreatedAt: boot.Add(time.Minute), // started after boot => unproven
 			Metadata:  map[string]string{"session_name": "qwen38-2", "template": "worker", "state": "active"},
 		},
+		// A bead outlives its runtime: the reboot put these to sleep and the
+		// reconciler woke them again under the SAME bead, so their pre-boot
+		// CreatedAt names a session that is alive right now. Each carries a
+		// different post-boot start marker; all three must survive.
+		{
+			ID: "s-rewoken", Status: "open", Type: sessionBeadType,
+			CreatedAt: boot.Add(-time.Hour),
+			Metadata: map[string]string{
+				"session_name": "qwen38-3", "template": "worker", "state": "active",
+				"last_woke_at": boot.Add(time.Minute).UTC().Format(time.RFC3339),
+			},
+		},
+		{
+			ID: "s-recreated", Status: "open", Type: sessionBeadType,
+			CreatedAt: boot.Add(-time.Hour),
+			Metadata: map[string]string{
+				"session_name": "qwen38-4", "template": "worker", "state": "active",
+				"creation_complete_at": boot.Add(time.Minute).UTC().Format(time.RFC3339),
+			},
+		},
+		{
+			ID: "s-reawake", Status: "open", Type: sessionBeadType,
+			CreatedAt: boot.Add(-time.Hour),
+			Metadata: map[string]string{
+				"session_name": "qwen38-5", "template": "worker", "state": "awake",
+				"awake_started_at": boot.Add(time.Minute).UTC().Format(time.RFC3339),
+			},
+		},
 	})
 
 	var stderr bytes.Buffer
@@ -9176,6 +9204,11 @@ func TestCleanupDeadRuntimeSessionCorpsesReapsPreBootBeadsWhenServerAbsent(t *te
 	}
 	if b, err := store.Get("s-postboot"); err != nil || b.Status != "open" {
 		t.Fatalf("post-boot bead should stay open: status=%q err=%v", b.Status, err)
+	}
+	for _, id := range []string{"s-rewoken", "s-recreated", "s-reawake"} {
+		if b, err := store.Get(id); err != nil || b.Status != "open" {
+			t.Fatalf("%s was restarted after boot and should stay open: status=%q err=%v", id, b.Status, err)
+		}
 	}
 }
 
