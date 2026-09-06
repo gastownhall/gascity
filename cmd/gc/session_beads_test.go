@@ -4929,6 +4929,83 @@ func TestSyncSessionBeads_RefreshesResolvedProviderMetadataOnProviderSwitch(t *t
 	}
 }
 
+// TestSyncSessionBeads_ProjectsSessionIDFlag closes Finding 2 of the PR #5396
+// post-merge review. syncSessionBeads backfills session_key for pre-fix keyless
+// claude beads but historically did not persist session_id_flag, while the
+// reactive startup-death strip (stripSessionIDFlag via
+// retryFreshStartAfterStaleKey) reads the flag from persisted bead metadata. An
+// upgraded bead carrying a backfilled session_key but no session_id_flag would
+// replay a rejected first-start `--session-id <key>` command and crash-loop until
+// quarantine. The flag must project from the resolved provider exactly like
+// resume_flag — both at create and, diff-gated, on the observe/backfill path —
+// without churning an unchanged sync (#1205).
+func TestSyncSessionBeads_ProjectsSessionIDFlag(t *testing.T) {
+	store := beads.NewMemStore()
+	// countingStore lets the churn tick assert that an unchanged sync writes
+	// nothing (diff-gated), the load-bearing property for #1205.
+	cs := &countingStore{Store: store}
+	clk := &clock.Fake{Time: time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	_ = sp.Start(context.TODO(), "worker", runtime.Config{Command: "claude --dangerously-skip-permissions"})
+
+	claudeCmd := "claude --dangerously-skip-permissions"
+	ds := map[string]TemplateParams{
+		"worker": {
+			TemplateName: "worker",
+			Command:      claudeCmd,
+			ResolvedProvider: &config.ResolvedProvider{
+				Name: "claude", BuiltinAncestor: "claude",
+				ResumeFlag: "--resume", ResumeStyle: "flag", ResumeCommand: "claude --resume",
+				SessionIDFlag: "--session-id",
+			},
+		},
+	}
+	var stderr bytes.Buffer
+
+	// Tick 1 (create path): a keyed provider stamps session_id_flag at creation,
+	// alongside the generated session_key.
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	beads1 := allSessionBeads(t, cs)
+	if len(beads1) != 1 {
+		t.Fatalf("expected 1 bead after tick 1, got %d", len(beads1))
+	}
+	id := beads1[0].ID
+	if got := beads1[0].Metadata["session_id_flag"]; got != "--session-id" {
+		t.Fatalf("tick 1 (create): session_id_flag = %q, want --session-id", got)
+	}
+	if got := beads1[0].Metadata["session_key"]; got == "" {
+		t.Fatalf("tick 1 (create): session_key was not generated for a keyed provider")
+	}
+
+	// Simulate a legacy pre-fix bead: session_key present, session_id_flag absent.
+	// This is the exact Finding 2 state the pre-fix backfill produced.
+	if err := cs.SetMetadata(id, "session_id_flag", ""); err != nil {
+		t.Fatalf("SetMetadata(clear session_id_flag): %v", err)
+	}
+
+	// Tick 2 (observe/backfill path): the projection re-stamps session_id_flag from
+	// the resolved provider so the upgraded bead can no longer replay a rejected
+	// first-start --session-id command during startup-death recovery.
+	clk.Advance(time.Minute)
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	if got := allSessionBeads(t, cs)[0].Metadata["session_id_flag"]; got != "--session-id" {
+		t.Fatalf("tick 2 (backfill): session_id_flag = %q, want --session-id re-projected", got)
+	}
+
+	// Tick 3 (churn guard): an unchanged sync must queue nothing — the projection
+	// is diff-gated, like the other resolved-provider fields (#1205).
+	writesBefore := cs.writes
+	clk.Advance(time.Minute)
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	if cs.writes != writesBefore {
+		t.Errorf("tick 3: unchanged sync wrote metadata (%d -> %d writes); the projection must be diff-gated (#1205)", writesBefore, cs.writes)
+	}
+
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+}
+
 func TestSyncSessionBeadsWithSnapshot_RefreshesMissingNamedSessionFromStore(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

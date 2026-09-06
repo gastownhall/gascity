@@ -6,7 +6,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -14,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/testpolicy/resourcecensus"
 )
 
 // No consumer may obtain a StoreSet before activation publishes one. Three layers
@@ -903,41 +904,52 @@ func censusModuleRoot(t *testing.T) string {
 // every census into a pass.
 func censusSources(t *testing.T) []censusSource {
 	t.Helper()
-	root := censusModuleRoot(t)
-	var sources []censusSource
-	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() {
-			switch entry.Name() {
-			case ".git", ".claude", "node_modules", "vendor", "testdata":
-				return fs.SkipDir
-			}
-			return nil
-		}
-		name := entry.Name()
-		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			return nil
-		}
-		source, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		relative, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		sources = append(sources, censusSource{rel: filepath.ToSlash(relative), src: source})
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("walking %s: %v", root, err)
-	}
+	sources := censusSourcesFrom(t, censusModuleRoot(t))
 	if len(sources) < censusMinimumFiles {
 		t.Fatalf("census scanned %d non-test Go files, want at least %d; the module walk is broken", len(sources), censusMinimumFiles)
 	}
 	return sources
+}
+
+// censusSourcesFrom reads every non-test Go file under root. censusSources
+// runs it against the module root; a synthetic root (a fixture git
+// repository, say) lets a test exercise the walk itself directly. Only
+// git-tracked files are read, so an untracked nested git worktree checked out
+// under root — the common gitignored worktrees/<bead> pool-slot pattern —
+// never contributes duplicate source: its files live in that worktree's own
+// index, never this one's. testdata is excluded, matching the walk this
+// replaced.
+func censusSourcesFrom(t *testing.T, root string) []censusSource {
+	t.Helper()
+	tracked, err := resourcecensus.TrackedGoFiles(root)
+	if err != nil {
+		t.Fatalf("listing tracked Go files under %s: %v", root, err)
+	}
+	var sources []censusSource
+	for _, rel := range tracked {
+		if strings.HasSuffix(rel, "_test.go") || censusUnderTestdata(rel) {
+			continue
+		}
+		source, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatalf("reading %s: %v", rel, err)
+		}
+		sources = append(sources, censusSource{rel: rel, src: source})
+	}
+	return sources
+}
+
+// censusUnderTestdata reports whether rel is under a testdata directory. git
+// tracks testdata by convention, unlike node_modules, vendor, .claude, and
+// .git, which this module never tracks — so testdata is the one directory the
+// prior filesystem walk excluded that a tracked-files listing does not.
+func censusUnderTestdata(rel string) bool {
+	for _, segment := range strings.Split(rel, "/") {
+		if segment == "testdata" {
+			return true
+		}
+	}
+	return false
 }
 
 func censusParse(t *testing.T, source censusSource) *ast.File {

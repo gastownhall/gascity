@@ -35,6 +35,30 @@ func (p *beadsProvider) BindingLocation(spec storebinding.BindingSpec) (string, 
 	return p.path, nil
 }
 
+// engineReservedPrefixes returns the id namespaces a binding serving classes
+// may hold, for the pinned-id fence. Nil leaves the store unfenced.
+//
+// A class with no reserved namespace makes the whole binding unfenceable: work
+// beads carry whatever prefix an operator configured for the rig or HQ, which
+// is not knowable here, so a binding that serves work claims nothing and every
+// pinned id has to be let through. Fencing it to the infrastructure prefixes
+// would refuse the work beads it exists to hold.
+func engineReservedPrefixes(classes storebinding.ClassSet) []string {
+	served := classes.Classes()
+	if len(served) == 0 {
+		return nil
+	}
+	prefixes := make([]string, 0, len(served))
+	for _, class := range served {
+		held := config.ReservedClassPrefixesFor(class.String())
+		if len(held) == 0 {
+			return nil
+		}
+		prefixes = append(prefixes, held...)
+	}
+	return prefixes
+}
+
 // storeCloser adapts a bead store's own close to io.Closer.
 //
 // beads.Store already has a Close method with a different meaning — closing one
@@ -53,6 +77,9 @@ func (c storeCloser) Close() error { return c.store.CloseStore() }
 // The classes are checked against what one Beads ledger can serve rather than
 // trusted: an assignment this provider cannot honor must fail at the open, not
 // at the first read of a class nobody projected.
+//
+// The store comes back fenced to the namespaces those classes hold — the
+// pinned-id contract in engdocs/architecture/beads.md, invariant 16.
 func (p *beadsProvider) OpenEngine(spec storebinding.BindingSpec, classes storebinding.ClassSet) (beads.Store, io.Closer, error) {
 	if err := p.boundTo(spec); err != nil {
 		return nil, nil, err
@@ -71,7 +98,10 @@ func (p *beadsProvider) OpenEngine(spec storebinding.BindingSpec, classes storeb
 	if !ok || prefix == "" {
 		return nil, nil, fmt.Errorf("%w: no reserved id prefix is registered for the %q class", ErrInvalidBeadsBinding, config.BeadClassGraph)
 	}
-	store, err := beads.OpenSQLiteStore(filepath.Dir(p.path), beads.WithSQLiteStoreIDPrefix(prefix))
+	store, err := beads.OpenSQLiteStore(filepath.Dir(p.path),
+		beads.WithSQLiteStoreIDPrefix(prefix),
+		beads.WithSQLiteStoreReservedIDPrefixes(engineReservedPrefixes(classes)...),
+	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("opening the SQLite Beads engine of binding %q at %s: %w", p.spec.Name, p.path, err)
 	}

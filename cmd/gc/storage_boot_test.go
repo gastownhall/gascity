@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -387,6 +388,40 @@ func TestStorageGateRefusesAnArrangementItCannotServe(t *testing.T) {
 	routes, err := storageBootGate(root, cfg, "gc start", nil, &stderr)
 	if err == nil {
 		t.Fatal("a partial split started the city")
+	}
+	if routes != nil {
+		t.Errorf("a refused gate still returned routes %+v", routes)
+	}
+	if !strings.Contains(err.Error(), "whole infrastructure split or none of it") {
+		t.Errorf("the refusal does not say what this build serves: %v", err)
+	}
+}
+
+// TestStorageGateRefusesARelocatedWorkBinding is the same gate applied to the
+// one class whose relocation this build has no way to carry out.
+//
+// infraMigrationClasses excludes work by construction, so nothing in cmd/gc
+// would move the ledger; the saga that could — internal/storebinding's work
+// participants, prepare receipts and provider proofs — has no caller in the
+// binary yet. A city that pointed [storage.classes].work at another binding and
+// STARTED would therefore serve an empty ledger while every bead it owns sat in
+// the work store, unread and unreferenced. Refusing is the only safe answer
+// this build has, and it is the epic's fail-closed rule reaching its hardest
+// case.
+//
+// The shape table above pins storageSplitShapeOf's verdict on this config. That
+// is one function; this is the gate, which is what a starting city actually
+// meets. Nothing between them was tested, so the classification could have been
+// correct and unconsulted.
+func TestStorageGateRefusesARelocatedWorkBinding(t *testing.T) {
+	root := t.TempDir()
+	cfg := infraSplitConfig(filepath.Join(root, "store"))
+	cfg.Storage.Classes.Work = "infra"
+
+	var stderr bytes.Buffer
+	routes, err := storageBootGate(root, cfg, "gc start", nil, &stderr)
+	if err == nil {
+		t.Fatal("a city that moved its work ledger off the reserved binding started; it is now serving a binding that holds none of its work")
 	}
 	if routes != nil {
 		t.Errorf("a refused gate still returned routes %+v", routes)
@@ -1117,8 +1152,19 @@ func TestStorageStatusCreatesNothing(t *testing.T) {
 	}
 }
 
-// treeFingerprint returns every path under root with its size, so a test can
-// prove a read-only path created and grew nothing.
+// treeFingerprint returns every path under root against a digest of its
+// contents, so a test can prove a read-only path created, removed, and rewrote
+// nothing.
+//
+// Contents rather than size: the rewrite these tests exist to catch is a SQLite
+// checkpoint applying WAL frames into an already-sized main database, which
+// routinely lands on the same byte count. A size comparison reports that as
+// unchanged, so a helper built on one could only ever prove path stability
+// while its failure message claimed byte identity.
+//
+// Directories carry no digest. A directory's reported size tracks its entry
+// count on some filesystems, which is a real addition being counted twice; the
+// path set itself already carries every addition and removal.
 func treeFingerprint(t *testing.T, root string) []string {
 	t.Helper()
 	var out []string
@@ -1126,17 +1172,88 @@ func treeFingerprint(t *testing.T, root string) []string {
 		if err != nil {
 			return err
 		}
-		info, statErr := entry.Info()
-		if statErr != nil {
-			return statErr
+		if entry.IsDir() {
+			out = append(out, path+":dir")
+			return nil
 		}
-		out = append(out, fmt.Sprintf("%s:%d", path, info.Size()))
+		contents, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		out = append(out, fmt.Sprintf("%s:%x", path, sha256.Sum256(contents)))
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("fingerprinting %s: %v", root, err)
 	}
 	sort.Strings(out)
+	return out
+}
+
+// assertReadOnlyDiagnosticResidue is the claim the two read-only diagnostics can
+// make about a binding directory they opened a bead engine in.
+//
+// They open through openInfraBindingReadOnly, whose mode=ro connection cannot
+// take the write lock — so it can neither mutate a row nor checkpoint the WAL on
+// close. That is exactly what makes it safe to point at a binding a controller
+// is serving, and it is also why the tree is not identical afterwards: SQLite
+// materializes the -wal and -shm sidecars it needs to read a WAL-mode database,
+// and a connection that cannot take the write lock cannot remove them on close
+// either. Removing them is the writer opener's ability, and it removes them by
+// checkpointing — which rewrites the main database and the -wal of a store
+// something else may be serving. That is the harm, not the guarantee.
+//
+// The residue is confined to the case a deploy gate does not care about. On a
+// serving city both sidecars are already on disk, held open by the process
+// serving the binding, so a read-only diagnostic adds nothing at all and
+// changes nothing — TestTheReadOnlyDiagnosticsLeaveALiveWALIntact pins that
+// directly, on the bytes. Only on a quiescent binding, where a clean close
+// already checkpointed and removed them, do the two files come back.
+//
+// So the claim is split in two and both halves are asserted: every path that
+// was there before is still there byte-for-byte, and the only additions are
+// those two sidecars, named exactly rather than tolerated as "some new files".
+// The first half is a content digest rather than a size, because the rewrite it
+// exists to catch — a checkpoint applying WAL frames into an already-sized
+// database — routinely preserves the byte count; treeFingerprint carries the
+// reasoning.
+func assertReadOnlyDiagnosticResidue(t *testing.T, before, after []string, database string) {
+	t.Helper()
+	beforeByPath := fingerprintByPath(t, before)
+	afterByPath := fingerprintByPath(t, after)
+	for path, entry := range beforeByPath {
+		got, ok := afterByPath[path]
+		if !ok {
+			t.Errorf("a read-only diagnostic removed %s", path)
+			continue
+		}
+		if got != entry {
+			t.Errorf("a read-only diagnostic rewrote a file it was asked to read: %s before, %s after", entry, got)
+		}
+	}
+	allowed := map[string]bool{database + "-wal": true, database + "-shm": true}
+	for path, entry := range afterByPath {
+		if _, ok := beforeByPath[path]; ok {
+			continue
+		}
+		if !allowed[path] {
+			t.Errorf("a read-only diagnostic left %s behind, which is neither the -wal nor the -shm sidecar SQLite needs to read %s", entry, database)
+		}
+	}
+}
+
+// fingerprintByPath indexes a treeFingerprint by path, so a comparison can tell
+// a changed entry apart from an added one.
+func fingerprintByPath(t *testing.T, fingerprint []string) map[string]string {
+	t.Helper()
+	out := make(map[string]string, len(fingerprint))
+	for _, entry := range fingerprint {
+		cut := strings.LastIndex(entry, ":")
+		if cut < 0 {
+			t.Fatalf("fingerprint entry %q carries no digest", entry)
+		}
+		out[entry[:cut]] = entry
+	}
 	return out
 }
 

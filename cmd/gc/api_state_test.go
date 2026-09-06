@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
@@ -2092,7 +2093,40 @@ func TestControllerStateEmitsCompletedFromAuthoritativeGraphStepClose(t *testing
 	}
 }
 
-func TestControllerStateBeadEventWatcherReconcilesCompletedCloseAfterRestart(t *testing.T) {
+// listCountingEventProvider counts the full-history reads a boot path performs.
+//
+// [events.Provider.List] is the expensive call in a completions reconcile: it
+// gunzips and scans every retained archive, and no seq filter avoids that. So
+// "did the boot path run a completions reconcile" is answerable by counting
+// List, and the answer does not depend on whether the corpus happened to hold a
+// repairable gap.
+type listCountingEventProvider struct {
+	*events.Fake
+	lists atomic.Int64
+}
+
+func (p *listCountingEventProvider) List(filter events.Filter) ([]events.Event, error) {
+	p.lists.Add(1)
+	return p.Fake.List(filter)
+}
+
+// TestControllerStateBeadEventWatcherLeavesCompletionRepairToStartupSweep pins
+// the boot-path contract: starting the watcher subscribes, and does nothing
+// else.
+//
+// The watcher used to run a WHOLE-CORPUS completions reconcile inline before
+// tailing, on the theory that the repair had to land before the tail began. It
+// did not: the tail's type switch consumes only bead.created/updated/closed/
+// deleted and the reconcile emits only execution.step_completed, so producer
+// and consumer are disjoint and no ordering edge exists between them. On
+// maintainer-city that inline pass was the dominant term in an ~18 min
+// uninstrumented boot gap, paid once per city, serially (ga-1e78j).
+//
+// The crash-window gap it repaired — a durable bead.closed whose best-effort
+// execution.step_completed never landed — is owned by the startup completions
+// sweep instead; see TestCompletionsStartupSweepRepairsCrashWindowGap for the
+// other half of this pair.
+func TestControllerStateBeadEventWatcherLeavesCompletionRepairToStartupSweep(t *testing.T) {
 	backing := beads.NewMemStore()
 	root, err := backing.Create(beads.Bead{ID: "gcg-run", Metadata: map[string]string{
 		"gc.kind": "workflow", "gc.formula_contract": "graph.v2",
@@ -2121,7 +2155,7 @@ func TestControllerStateBeadEventWatcherReconcilesCompletedCloseAfterRestart(t *
 	// The close is already in the authoritative journal when this controller
 	// starts. Its watcher cursor begins at that journal head, reproducing a
 	// process crash after bead.closed but before step_completed was recorded.
-	ep := events.NewFake()
+	ep := &listCountingEventProvider{Fake: events.NewFake()}
 	ep.Record(events.Event{Type: events.BeadClosed, Actor: "bd-close", Subject: step.ID, Payload: payload})
 	prevCityStore := newControllerStateOpenCityStore
 	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
@@ -2131,17 +2165,18 @@ func TestControllerStateBeadEventWatcherReconcilesCompletedCloseAfterRestart(t *
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	cs := newControllerState(ctx, &config.City{Workspace: config.Workspace{Name: "test-city"}}, runtime.NewFake(), ep, "test-city", t.TempDir())
+	baseline := ep.lists.Load()
 	cs.startBeadEventWatcher(ctx)
 
+	if reads := ep.lists.Load() - baseline; reads != 0 {
+		t.Fatalf("startBeadEventWatcher performed %d full-history journal read(s), want 0: the boot path must not run a whole-corpus completions reconcile", reads)
+	}
 	got, listErr := ep.List(events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
 	if listErr != nil {
 		t.Fatal(listErr)
 	}
-	if len(got) != 1 {
-		t.Fatalf("reconciled completed events = %#v, want one", got)
-	}
-	if got[0].RunID != root.ID || got[0].SessionID != "gcs-session" || got[0].StepID != "build" {
-		t.Fatalf("reconciled completed event = %#v", got[0])
+	if len(got) != 0 {
+		t.Fatalf("completed events emitted at watcher start = %#v, want none: the startup sweep owns this repair", got)
 	}
 }
 
@@ -4574,5 +4609,82 @@ func TestApplyBeadEventToStoresTriggersConvoyAutoclose(t *testing.T) {
 	}
 	if got.Status != "closed" {
 		t.Errorf("convoy status = %q after all children closed, want %q", got.Status, "closed")
+	}
+}
+
+// TestBeadEventStoresResolveRelocatedClassPrefixes pins that a bead.closed for a
+// bead in the binding reaches the binding. The assertion is the molecule root's
+// status rather than the resolved store: pinning the reap is what says the hook
+// still does its job on a migrated city.
+func TestBeadEventStoresResolveRelocatedClassPrefixes(t *testing.T) {
+	prev := beadCloseAutocloseDispatch
+	beadCloseAutocloseDispatch = func(fn func()) { fn() } // synchronous in tests
+	t.Cleanup(func() { beadCloseAutocloseDispatch = prev })
+
+	// Distinct prefixes are the point: they make the owning store resolvable by
+	// id, and keep a wrong-store read a miss rather than a collision.
+	binding := &beads.MemStore{IDPrefix: "gcg"}
+	work := beads.NewMemStore()
+
+	root, err := binding.Create(beads.Bead{Title: "Formula: mol-relocated", Type: "molecule"})
+	if err != nil {
+		t.Fatalf("Create molecule root in the binding: %v", err)
+	}
+	step, err := binding.Create(beads.Bead{
+		Title:    "Step 1: implement",
+		Type:     "step",
+		ParentID: root.ID,
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
+	})
+	if err != nil {
+		t.Fatalf("Create step in the binding: %v", err)
+	}
+	if err := binding.Close(step.ID); err != nil {
+		t.Fatalf("Close step: %v", err)
+	}
+
+	payload, err := json.Marshal(beads.Bead{ID: step.ID, Title: step.Title, Type: "step", Status: "closed"})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	cs := &controllerState{
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Rigs:      []config.Rig{{Name: "alpha", Path: "/tmp/alpha", Prefix: "ra"}},
+		},
+		cityBeadStore: work,
+		beadStores:    map[string]beads.Store{"alpha": beads.NewMemStore()},
+		storageRoutes: splitRoutes(binding),
+		pokeCh:        make(chan struct{}, 1),
+	}
+
+	cs.applyBeadEventToStores(events.Event{
+		Type:    events.BeadClosed,
+		Actor:   "agent",
+		Subject: step.ID,
+		Payload: payload,
+	})
+
+	got, err := binding.Get(root.ID)
+	if err != nil {
+		t.Fatalf("Get molecule root: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Errorf("molecule root %s status = %q after its only step closed, want %q; the close event never resolved to the binding, so autoclose read the bead out of a work store that does not hold it and returned", root.ID, got.Status, "closed")
+	}
+}
+
+// TestBeadEventStoresIgnoreReservedPrefixesWithoutARelocation is the control:
+// on a city that relocates nothing, a reserved-prefix id must not be claimed.
+func TestBeadEventStoresIgnoreReservedPrefixesWithoutARelocation(t *testing.T) {
+	cs := &controllerState{
+		cfg:           &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		cityBeadStore: beads.NewMemStore(),
+		beadStores:    map[string]beads.Store{},
+		storageRoutes: nil, // no [storage] section
+	}
+	if store, known := cs.beadEventConfiguredStoreLocked("gcg-1"); known {
+		t.Errorf("a city that relocates nothing claimed to own %q (store=%v); the reserved-prefix arm must be gated on an actual relocation", "gcg-1", store)
 	}
 }

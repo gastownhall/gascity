@@ -74,15 +74,28 @@ var (
 // NewProvider returns a subprocess [Provider] that stores socket files in
 // a default temporary directory. Suitable for production use.
 func NewProvider() *Provider {
-	dir := filepath.Join(os.TempDir(), "gc-subprocess")
-	_ = os.MkdirAll(dir, 0o755)
+	dir := defaultProviderDir()
+	_ = runtime.EnsurePrivateDir(dir)
 	return newProvider(dir)
+}
+
+// defaultProviderDir is the city-less state directory: one per user, because
+// the path is otherwise identical for everyone on the host and [os.MkdirAll]
+// succeeds on a directory someone else created first. The euid does not make
+// the directory private by itself — [Provider.SetMeta] verifies ownership
+// before writing — but it keeps two legitimate users off one path so that
+// verification means "someone squatted" rather than "you logged in second".
+func defaultProviderDir() string {
+	return filepath.Join(os.TempDir(), fmt.Sprintf("gc-subprocess-%d", os.Geteuid()))
 }
 
 // NewProviderWithDir returns a subprocess [Provider] that stores socket files
 // in the given directory. Useful for tests that need isolated state.
 func NewProviderWithDir(dir string) *Provider {
-	_ = os.MkdirAll(dir, 0o755)
+	// Best-effort here and verified at the write path: a constructor cannot
+	// report a squatted directory, and failing silently at construction would
+	// hand back a Provider that writes anyway.
+	_ = runtime.EnsurePrivateDir(dir)
 	return newProvider(dir)
 }
 
@@ -155,7 +168,9 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 	cmd.Stdout = nullFile
 	cmd.Stderr = nullFile
 
-	// Build environment: inherit parent env + apply overrides.
+	// Build environment: inherit parent env + apply overrides. An empty override
+	// spells withholding, matching the tmux adapter: remove the inherited entry
+	// instead of passing KEY=, so namespace isolation remains real to children.
 	env := os.Environ()
 	if len(cfg.Env) > 0 {
 		keys := make([]string, 0, len(cfg.Env))
@@ -164,6 +179,10 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
+			env = envWithoutKey(env, k)
+			if cfg.Env[k] == "" {
+				continue
+			}
 			env = append(env, k+"="+cfg.Env[k])
 		}
 	}
@@ -215,6 +234,17 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 
 	p.procs[name] = &sessionConn{cmd: cmd, done: done, listener: lis}
 	return nil
+}
+
+func envWithoutKey(env []string, key string) []string {
+	prefix := key + "="
+	out := make([]string, 0, len(env))
+	for _, entry := range env {
+		if !strings.HasPrefix(entry, prefix) {
+			out = append(out, entry)
+		}
+	}
+	return out
 }
 
 // Stop terminates the named session. Returns nil if it doesn't exist
@@ -366,8 +396,20 @@ func (p *Provider) Peek(_ string, _ int) (string, error) {
 }
 
 // SetMeta stores a key-value pair for the named session in a sidecar file.
+//
+// The sidecar is owner-only. Even after [Provider.persistStartMetadata] filters
+// the session environment it still holds the incarnation fence token, and a
+// fence that can be read or forged is how a stale process talks its way past
+// drain. Ownership is verified on every write rather than trusted from
+// construction, and the mode is set explicitly rather than left to
+// [os.WriteFile]'s perm argument, which is consulted only at create — a host
+// upgrading from an older binary keeps its 0644 files otherwise, which is
+// exactly the host that already has credentials on disk.
 func (p *Provider) SetMeta(name, key, value string) error {
-	return os.WriteFile(p.metaPath(name, key), []byte(value), 0o644)
+	if err := runtime.EnsurePrivateDir(p.dir); err != nil {
+		return err
+	}
+	return runtime.WritePrivateFile(p.metaPath(name, key), []byte(value))
 }
 
 // GetMeta retrieves a metadata value from a sidecar file.
@@ -392,9 +434,18 @@ func (p *Provider) RemoveMeta(name, key string) error {
 	return err
 }
 
+// persistStartMetadata seeds the session's sidecar from its environment so that
+// GetMeta answers the identity and fence reads the reconciler makes while the
+// session is still starting.
+//
+// It seeds the classified half of the environment, not all of it: the sidecar
+// is a durable file store that outlives the session, so writing every variable
+// leaves the agent's API keys on disk with no reader that ever wants them back.
+// [runtime.SplitEnvForMetaSeed] keeps the keys a GetMeta consumer reads.
 func (p *Provider) persistStartMetadata(name string, env map[string]string) error {
+	seed, _ := runtime.SplitEnvForMetaSeed(env)
 	p.clearSessionMeta(name)
-	for key, value := range env {
+	for key, value := range seed {
 		if err := p.SetMeta(name, key, value); err != nil {
 			p.clearSessionMeta(name)
 			return err

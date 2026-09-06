@@ -267,6 +267,58 @@ processes, listeners, environment mutation, and CWD mutation. Reductions lower
 the checked baseline; new debt requires the same explicit, expiring policy
 change as any other waiver.
 
+## Waiver expiry clocks
+
+Two checked ledgers carry dated waivers: the runtime provider ledger
+(`internal/testutil/providerledger`) and the resource census
+(`internal/testpolicy/resourcecensus`). Both are untagged, both land in the
+unit-core job, and that job runs in `.githooks/pre-push`. A date passing is
+therefore enough on its own to turn every Go-touching push in the fleet red with
+no code change involved. That happened on 2026-08-12 and again on 2026-08-26,
+and both times it was cleared by whoever happened to be blocked rather than by
+the waiver's owner.
+
+**One clock.** Every dated ledger asks `internal/testpolicy/waiverclock` and
+never reads `time.Now()` itself. A ledger that computes its own answer is a
+second policy, and a shared expiry date drifting between two ledgers is what two
+policies look like from the outside.
+
+**Structural defects are not on the clock.** A missing owner, a malformed or
+absent date, an expiry parked past the horizon ceiling — none of these can
+appear without a code change, so they are fatal in every mode and belong to
+whoever wrote them. The clock governs one thing: a date that passed while the
+code sat still.
+
+**Mode ownership.** `GC_WAIVER_CLOCK` selects `grace` or `strict`. Grace is the
+fleet mode: it is what pre-commit, pre-push, and PR CI run, and it is what an
+unset environment gets, so a lane that scrubs its environment fails safe instead
+of silently strict. Strict belongs only to scheduled lanes the owner is
+answerable for — `scripts/waiver-clock-audit`, reached by the nightly
+`waiver-clock` job and by the maintainer city's audit order. Do not wire strict
+into pre-commit, pre-push, or any PR-blocking check. That is precisely the shape
+of the two incidents above.
+
+**The timeline.** A waiver warns from 14 days before its expiry, so its owner
+hears about it while there is still time to land the proof. Past the expiry it
+warns for another 14 days, naming its owner in every message. Past that it is
+fatal in every mode, grace included. Twenty-eight days of runway, and then the
+ratchet has its teeth back — grace bounds what a bystander pays for someone
+else's missed date, it does not repeal the ratchet.
+
+**Waivers do not become permanent through inaction.** A lapse has exactly two
+resolutions: land the replacement proof and delete the row, or re-date it as an
+explicit policy change citing the owner bead, reviewed like any other ledger
+edit. Doing neither is bounded, not stable — it ends on the fleet-fatal day the
+failure message prints.
+
+**If the clock blocks you and you are not the owner.** The message names the
+owner, the fleet-fatal day, and the `bd show` that gives you context; reproduce
+it with `GC_WAIVER_CLOCK=strict`. Once a lapse is fleet-fatal, anyone may land
+the re-date — as its own commit, citing the owner bead, updating the open
+`source:waiver-clock-audit` alert. What is forbidden is folding the new date
+silently into an unrelated change. That is how an expiry moves with no reviewer
+seeing it, and it is how the last two rollovers got "fixed".
+
 ## Checked source-level resource ratchets
 
 `test/test-resources.toml` is the checked P0.4 resource ledger. It scans tracked
@@ -451,9 +503,9 @@ all-source audit while staying outside untagged and Small debt.
 <!-- BEGIN CHECKED TEST RESOURCE LEDGER -->
 | Ledger kind | Source scope | Resource baseline | Tracking owner | Invariant / resource owner | Migration | Expiry |
 | --- | --- | --- | --- | --- | --- | --- |
-| Audit baseline | all tracked test source | fixed_sleep: 453 calls / 164 files (historical regex census: 447 / 157) | ga-80po0c.2 | tracked test source totals remain visible as audit evidence; ga-80po0c.2 owns this point-in-time source census | P0.4a | 2026-10-01 |
+| Audit baseline | all tracked test source | fixed_sleep: 478 calls / 172 files (historical regex census: 447 / 157) | ga-80po0c.2 | tracked test source totals remain visible as audit evidence; ga-80po0c.2 owns this point-in-time source census | P0.4a | 2026-10-01 |
 | Audit baseline | all tracked test source | listener_helper: 58 calls / 23 files | ga-80po0c.2.2.3 | all-source listener-helper call/file totals cannot drift without an explicit checked policy update; ga-80po0c.2.2.3 owns this all-source audit; tagged calls stay Large and receive no Medium exemption | P0.4c-listener-helper | 2026-10-01 |
-| Audit baseline | all tracked test source | subprocess: 625 calls / 180 files (historical regex census: 495 / 135) | ga-80po0c.2 | tracked test source totals remain visible as audit evidence; ga-80po0c.2 owns this point-in-time source census | P0.4a | 2026-10-01 |
+| Audit baseline | all tracked test source | subprocess: 657 calls / 188 files (historical regex census: 495 / 135) | ga-80po0c.2 | tracked test source totals remain visible as audit evidence; ga-80po0c.2 owns this point-in-time source census | P0.4a | 2026-10-01 |
 | Medium owner | `cmd/gc` package `main` | TestMain: environment, tmux | ga-80po0c.2.1 | cmd/gc TestMain is the checked package-level Medium owner for process environment and tmux namespace setup; only declared environment and tmux calls lexically inside TestMain leave Small debt | P0.4b/P0.4c-tmux | 2026-10-01 |
 | Medium owner | `cmd/gc` package `main` | TestPassthroughEnvWithholdsControllerTokenFromChildProcess: subprocess | ga-80po0c.2.1 | the controller-token withholding proof is a checked Medium subprocess owner; the one /bin/sh subprocess is confined to TestPassthroughEnvWithholdsControllerTokenFromChildProcess, which exists to read a credential back out of a real child process: the session env is an overlay, so only a real child can prove GC_CONTROLLER_TOKEN is absent rather than merely missing from a map | P0.4b | 2026-10-01 |
 | Medium owner | `internal/api` package `api` | TestEveryEmittedErrorCodeIsRegistered: subprocess | ga-80po0c.2.1 | internal/api tracked-source error URN guard is a checked Medium owner; only the git ls-files call lexically inside TestEveryEmittedErrorCodeIsRegistered leaves Small debt | P0.4b | 2026-10-01 |
@@ -464,30 +516,30 @@ all-source audit while staying outside untagged and Small debt.
 | Medium owner | `internal/runtime/tmux` package `tmux` | TestMain: environment, tmux | ga-80po0c.2.2.1 | runtime tmux TestMain is the checked Medium owner for isolated tmux process and socket cleanup; only declared environment and tmux calls lexically inside TestMain leave Small debt | P0.4c-tmux | 2026-10-01 |
 | Medium owner | `scripts` package `scripts_test` | TestDockerSessionProtocol: subprocess | ga-80po0c.23.1 | Docker session adapter protocol proof is a checked Medium owner; the one adapter subprocess is confined to TestDockerSessionProtocol and Docker itself is a strict PATH-injected fake | W6 | 2026-10-01 |
 | Medium owner | `scripts` package `scripts_test` | TestProviderOverridesAndSuiteContractsCrossMakeIsolation: subprocess | ga-80po0c.2.1 | Make/provider and suite-contract proof is a checked Medium owner; the six isolated Make invocations are confined to TestProviderOverridesAndSuiteContractsCrossMakeIsolation | P0.1 | 2026-10-01 |
-| Small debt ratchet | `cmd/gc` untagged test source | cwd: 174 calls / 16 files (historical regex census: 284 / 43) | ga-80po0c.2.1 | untagged Small cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners restore or eliminate every cwd mutation | D5/D6 | 2026-10-01 |
+| Small debt ratchet | `cmd/gc` untagged test source | cwd: 176 calls / 17 files (historical regex census: 284 / 43) | ga-80po0c.2.1 | untagged Small cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners restore or eliminate every cwd mutation | D5/D6 | 2026-10-01 |
 | Small debt ratchet | `cmd/gc` untagged test source | environment: 116 calls / 13 files (historical regex census: 4348 / 200) | ga-80po0c.2.1 | untagged Small cmd/gc environment call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners restore or eliminate every process-environment mutation | D5/D6/E6 | 2026-10-01 |
 | Small debt ratchet | `cmd/gc` untagged test source | slow_process_gate: 58 calls / 24 files (historical regex census: 75 / 25) | ga-80po0c.2.1 | untagged Small cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline; each non-Medium marked caller retains an explicit process-suite migration owner | D5/D6/E6 | 2026-10-01 |
-| Small debt ratchet | all untagged test source | fixed_sleep: 302 calls / 116 files (historical regex census: 287 / 113) | ga-80po0c.2.1 | untagged Small fixed-sleep call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace elapsed wall time with lifecycle signals | W1-W5 | 2026-10-01 |
-| Small debt ratchet | all untagged test source | http_test_server: 317 calls / 66 files (historical regex census: 300 / 66) | ga-80po0c.2.2 | untagged Small HTTP test server call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move server-backed tests to exact Medium ownership or replace the listener | P0.4c | 2026-10-01 |
+| Small debt ratchet | all untagged test source | fixed_sleep: 321 calls / 121 files (historical regex census: 287 / 113) | ga-80po0c.2.1 | untagged Small fixed-sleep call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace elapsed wall time with lifecycle signals | W1-W5 | 2026-10-01 |
+| Small debt ratchet | all untagged test source | http_test_server: 318 calls / 66 files (historical regex census: 300 / 66) | ga-80po0c.2.2 | untagged Small HTTP test server call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move server-backed tests to exact Medium ownership or replace the listener | P0.4c | 2026-10-01 |
 | Small debt ratchet | all untagged test source | listener_helper: 38 calls / 13 files | ga-80po0c.2.2.3 | untagged Small listener-helper call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace helper-backed listeners or declare exact isolated ownership | P0.4c-listener-helper | 2026-10-01 |
-| Small debt ratchet | all untagged test source | net_listen: 93 calls / 35 files (historical regex census: 92 / 34) | ga-80po0c.2.2.2 | untagged Small stream-listener call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move stream-listener tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-01 |
+| Small debt ratchet | all untagged test source | net_listen: 94 calls / 36 files (historical regex census: 92 / 34) | ga-80po0c.2.2.2 | untagged Small stream-listener call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move stream-listener tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-01 |
 | Small debt ratchet | all untagged test source | net_listen_config: 1 calls / 1 files | ga-80po0c.2.2.2 | untagged Small net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move ListenConfig-backed tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-01 |
 | Small debt ratchet | all untagged test source | net_listen_packet: 3 calls / 2 files | ga-80po0c.2.2.2 | untagged Small packet-listener call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move packet-listener tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-01 |
-| Small debt ratchet | all untagged test source | subprocess: 412 calls / 117 files (historical regex census: 394 / 105) | ga-80po0c.2.1 | untagged Small subprocess call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners remove or replace each process call site | D1/D2/D5/D6/E6 | 2026-10-01 |
+| Small debt ratchet | all untagged test source | subprocess: 437 calls / 122 files (historical regex census: 394 / 105) | ga-80po0c.2.1 | untagged Small subprocess call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners remove or replace each process call site | D1/D2/D5/D6/E6 | 2026-10-01 |
 | Small debt ratchet | all untagged test source | syscall_listen: 1 calls / 1 files | ga-80po0c.2.2 | untagged Small syscall.Listen call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move syscall-backed listener tests to exact Medium ownership or replace the listener | P0.4c | 2026-10-01 |
-| Small debt ratchet | all untagged test source | tmux: 0 calls / 0 files | ga-80po0c.2.2.1 | untagged Small tmux dependency call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace tmux with a fake executor or declare exact isolated ownership | P0.4c-tmux | 2026-10-01 |
-| Source debt ratchet | `cmd/gc` untagged test source | cwd: 174 calls / 16 files (historical regex census: 98 / 13) | ga-80po0c.2.3 | untagged cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline; cmd/gc callers restore or eliminate every recognized cwd mutation | D5/D6 | 2026-10-01 |
+| Small debt ratchet | all untagged test source | tmux: 1 calls / 1 files | ga-80po0c.2.2.1 | untagged Small tmux dependency call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace tmux with a fake executor or declare exact isolated ownership | P0.4c-tmux | 2026-10-01 |
+| Source debt ratchet | `cmd/gc` untagged test source | cwd: 176 calls / 17 files (historical regex census: 98 / 13) | ga-80po0c.2.3 | untagged cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline; cmd/gc callers restore or eliminate every recognized cwd mutation | D5/D6 | 2026-10-01 |
 | Source debt ratchet | `cmd/gc` untagged test source | environment: 122 calls / 13 files (historical regex census: 3960 / 184) | ga-80po0c.2.3 | untagged cmd/gc environment call/file totals cannot grow; reductions must lower this baseline; cmd/gc callers restore or eliminate every recognized process-environment mutation | D5/D6/E6 | 2026-10-01 |
 | Source debt ratchet | `cmd/gc` untagged test source | slow_process_gate: 58 calls / 24 files (historical regex census: 78 / 27) | ga-80po0c.2.3 | untagged cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline; the helper definition and every marked caller retain an explicit process-suite migration owner | D5/D6/E6 | 2026-10-01 |
-| Source debt ratchet | all untagged test source | fixed_sleep: 302 calls / 116 files (historical regex census: 295 / 114) | ga-80po0c.2 | untagged fixed-sleep call/file totals cannot grow; reductions must lower this baseline; each owning test replaces elapsed wall time with its lifecycle signal | W1-W5 | 2026-10-01 |
-| Source debt ratchet | all untagged test source | http_test_server: 317 calls / 66 files (historical regex census: 255 / 56) | ga-80po0c.2.2 | untagged HTTP test server call/file totals cannot grow; reductions must lower this baseline; each owning test closes its loopback server and removes duplicate server-backed coverage | P0.4c | 2026-10-01 |
+| Source debt ratchet | all untagged test source | fixed_sleep: 321 calls / 121 files (historical regex census: 295 / 114) | ga-80po0c.2 | untagged fixed-sleep call/file totals cannot grow; reductions must lower this baseline; each owning test replaces elapsed wall time with its lifecycle signal | W1-W5 | 2026-10-01 |
+| Source debt ratchet | all untagged test source | http_test_server: 318 calls / 66 files (historical regex census: 255 / 56) | ga-80po0c.2.2 | untagged HTTP test server call/file totals cannot grow; reductions must lower this baseline; each owning test closes its loopback server and removes duplicate server-backed coverage | P0.4c | 2026-10-01 |
 | Source debt ratchet | all untagged test source | listener_helper: 38 calls / 13 files | ga-80po0c.2.2.3 | untagged listener-helper call/file totals cannot grow; reductions must lower this baseline; each owning test replaces helper-backed listeners or moves the retained boundary to exact Medium ownership | P0.4c-listener-helper | 2026-10-01 |
-| Source debt ratchet | all untagged test source | net_listen: 95 calls / 36 files (historical regex census: 92 / 34) | ga-80po0c.2.2.2 | untagged stream-listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its stream listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-01 |
+| Source debt ratchet | all untagged test source | net_listen: 96 calls / 37 files (historical regex census: 92 / 34) | ga-80po0c.2.2.2 | untagged stream-listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its stream listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-01 |
 | Source debt ratchet | all untagged test source | net_listen_config: 1 calls / 1 files | ga-80po0c.2.2.2 | untagged net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its configured listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-01 |
 | Source debt ratchet | all untagged test source | net_listen_packet: 3 calls / 2 files | ga-80po0c.2.2.2 | untagged packet-listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its packet listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-01 |
-| Source debt ratchet | all untagged test source | subprocess: 419 calls / 121 files (historical regex census: 380 / 98) | ga-80po0c.2 | untagged subprocess call/file totals cannot grow; reductions must lower this baseline; each process-owning test removes or replaces its source call site | D1/D2/D5/D6/E6 | 2026-10-01 |
+| Source debt ratchet | all untagged test source | subprocess: 444 calls / 126 files (historical regex census: 380 / 98) | ga-80po0c.2 | untagged subprocess call/file totals cannot grow; reductions must lower this baseline; each process-owning test removes or replaces its source call site | D1/D2/D5/D6/E6 | 2026-10-01 |
 | Source debt ratchet | all untagged test source | syscall_listen: 1 calls / 1 files | ga-80po0c.2.2 | untagged syscall.Listen call/file totals cannot grow; reductions must lower this baseline; each owning test closes its listening file descriptor and removes duplicate listener-backed coverage | P0.4c | 2026-10-01 |
-| Source debt ratchet | all untagged test source | tmux: 6 calls / 2 files | ga-80po0c.2.2.1 | untagged tmux dependency call/file totals cannot grow; reductions must lower this baseline; each owning test confines tmux processes and sockets to its isolated namespace and cleanup | P0.4c-tmux | 2026-10-01 |
+| Source debt ratchet | all untagged test source | tmux: 7 calls / 3 files | ga-80po0c.2.2.1 | untagged tmux dependency call/file totals cannot grow; reductions must lower this baseline; each owning test confines tmux processes and sockets to its isolated namespace and cleanup | P0.4c-tmux | 2026-10-01 |
 
 | Reviewed hermetic body | Effective runnable size | Medium reason | Retained real composition owner |
 | --- | --- | --- | --- |
@@ -941,8 +993,11 @@ that stays locked past its gate means a leaked descendant is still holding
 the descriptor (`lsof` on the slot file names it), not a stale file to
 delete. The gate needs `flock(1)`, which `docs/getting-started/installation.md`
 already lists as required; if it is absent the run proceeds uncapped with a
-warning rather than blocking. `GC_PUSH_GATE_NO_CAP=1` bypasses the cap
-entirely for one invocation.
+warning rather than blocking. The run likewise proceeds uncapped, with a
+diagnostic, if no descriptor in `[PUSH_GATE_FD_BASE, PUSH_GATE_FD_BASE +
+PUSH_GATE_FD_SPAN)` is free — an environment defect is never misreported as
+contention. `GC_PUSH_GATE_NO_CAP=1` bypasses the cap entirely for one
+invocation.
 
 The slot mechanics are covered by `scripts/test-push-gate-lock.sh`, run
 directly as the `push-gate-lock-selftest` job inside `test-local-parallel`
@@ -1155,9 +1210,10 @@ first-attempt reliability.
 
 #### Live worker inference tests (`//go:build acceptance_c`)
 
-`test/acceptance/worker_inference` runs live Claude/Codex/Gemini/OpenCode CLI
-sessions through tmux and requires local or CI-provided provider auth. It is
-not part of PR CI. Run it deliberately when validating provider behavior:
+`test/acceptance/worker_inference` runs live Claude, Codex, Cursor, Gemini,
+Kimi, OpenCode, Mimo Code, Pi, and Antigravity CLI sessions through tmux and
+requires local or CI-provided provider auth. It is not part of PR CI. Run it
+deliberately when validating provider behavior:
 
 ```bash
 make setup-worker-inference PROFILE=claude/tmux-cli
@@ -1165,8 +1221,12 @@ make test-worker-inference PROFILE=claude/tmux-cli
 ```
 
 Supported profiles are `claude/tmux-cli`, `codex/tmux-cli`,
-`gemini/tmux-cli`, and `opencode/tmux-cli`. OpenCode live tests use Gemini via
-`--model google/gemini-2.5-flash` by default; set
+`cursor/tmux-cli`, `gemini/tmux-cli`, `kimi/tmux-cli`,
+`opencode/tmux-cli`, `mimocode/tmux-cli`, `pi/tmux-cli`, and
+`antigravity/tmux-cli`. Cursor requires a preinstalled `cursor-agent` binary;
+stage auth with `GC_WORKER_INFERENCE_CURSOR_API_KEY`,
+`GC_WORKER_INFERENCE_CURSOR_API_KEY_FILE`, or `CURSOR_API_KEY`. OpenCode live
+tests use Gemini via `--model google/gemini-2.5-flash` by default; set
 `GC_WORKER_INFERENCE_OPENCODE_MODEL` to override it and provide
 `GOOGLE_GENERATIVE_AI_API_KEY`, `GEMINI_API_KEY`, or `GOOGLE_API_KEY` for auth.
 The full profile matrix is not wired into nightly CI today. Nightly runs a
@@ -1366,7 +1426,7 @@ for these packages, including legacy overlap that later consolidation may
 remove case by case. The default subprocess constructor remains a separate
 H5-owned gap because its reachable empty-city-path branch uses shared temporary
 state. The default ACP constructor is also an H5-owned gap because it always
-uses shared `os.TempDir()/gc-acp` state. E1 (`ga-80po0c.6`) owns the Large
+uses shared `os.TempDir()/gc-acp-<euid>` state. E1 (`ga-80po0c.6`) owns the Large
 provider/E2E manifest and required lane/cadence execution; it does not own
 constructor-to-contract source binding.
 
@@ -1375,22 +1435,26 @@ This table is rendered from `internal/testutil/providerledger` and checked by `g
 
 | Provider path | Roles | Reusable type | Port | Constructor | Discovery | Contract | Status |
 |---|---|---|---|---|---|---|---|
-| `runtime.builtin.acp` | production_provider | — | `runtime.Provider` | `internal/runtime/acp.NewSeamBacked` | runtime.builtin/exact:acp | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-26: NewSeamBacked always uses shared os.TempDir()/gc-acp state; the WithDir proof does not exercise that composition |
+| `runtime.builtin.acp` | production_provider | — | `runtime.Provider` | `internal/runtime/acp.NewSeamBacked` | runtime.builtin/exact:acp | `runtime.Provider` | waived by ga-80po0c.3 through 2026-10-08: NewSeamBacked always uses shared os.TempDir()/gc-acp-<euid> state; the WithDir proof does not exercise that composition |
 | `runtime.builtin.acp` | production_provider | — | `runtime.Provider` | `internal/runtime/acp.NewSeamBackedWithDir` | runtime.builtin/exact:acp | `runtime.Provider` | proved by internal/runtime/acp/conformance_test.go#TestACPConformance |
 | `runtime.builtin.exec` | production_provider | — | `runtime.Provider` | `internal/runtime/exec.NewSeamBacked` | runtime.builtin/prefix:exec: | `runtime.Provider` | proved by internal/runtime/exec/exec_test.go#TestExecConformance |
-| `runtime.builtin.exec` | production_provider | — | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/prefix:exec: | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-26: the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract |
+| `runtime.builtin.exec` | production_provider | — | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/prefix:exec: | `runtime.Provider` | waived by ga-80po0c.3 through 2026-11-05: the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract |
 | `runtime.builtin.fail` | production_provider, reusable_double | `internal/runtime.Fake` | `runtime.Provider` | `internal/runtime.NewFailFake` | runtime.builtin/exact:fail; reusable: internal/runtime/fake.go | `runtime.Provider` | not applicable: intentional faulting double: a successful lifecycle cannot be exercised, so the successful-provider contract is not applicable |
 | `runtime.builtin.fake` | production_provider, reusable_double | `internal/runtime.Fake` | `runtime.Provider` | `internal/runtime.NewFake` | runtime.builtin/exact:fake; reusable: internal/runtime/fake.go | `runtime.Provider` | proved by internal/runtime/fake_conformance_test.go#TestFakeConformance |
-| `runtime.builtin.herdr` | production_provider | — | `runtime.Provider` | `internal/runtime/herdr.New` | runtime.builtin/exact:herdr | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-26: the existing full conformance run skips in short mode or when the herdr executable is absent |
-| `runtime.builtin.hybrid` | production_provider | — | `runtime.Provider` | `cmd/gc.newHybridProvider` | runtime.builtin/exact:hybrid | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-26: cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract |
-| `runtime.builtin.k8s` | production_provider | — | `runtime.Provider` | `internal/runtime/k8s.NewSeamBacked` | runtime.builtin/exact:k8s | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-26: the actual K8s production composition has no full shared runtime contract |
-| `runtime.builtin.ssh` | production_provider | — | `runtime.Provider` | `internal/runtime/ssh.NewSeamBacked` | runtime.builtin/prefix:ssh: | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-26: the production SSH composition has no full shared runtime contract |
+| `runtime.builtin.herdr` | production_provider | — | `runtime.Provider` | `internal/runtime/herdr.New` | runtime.builtin/exact:herdr | `runtime.Provider` | waived by ga-80po0c.3 through 2026-09-24: the full conformance run is an opt-in live journey (make test-herdr-live, or GC_FAST_UNIT=0) and skips in the unit lane, in short mode, and when the herdr executable is absent |
+| `runtime.builtin.hybrid` | production_provider | — | `runtime.Provider` | `cmd/gc.newHybridProvider` | runtime.builtin/exact:hybrid | `runtime.Provider` | waived by ga-80po0c.3 through 2026-10-22: cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract |
+| `runtime.builtin.k8s` | production_provider | — | `runtime.Provider` | `internal/runtime/k8s.NewSeamBacked` | runtime.builtin/exact:k8s | `runtime.Provider` | waived by ga-80po0c.3 through 2026-11-12: the actual K8s production composition has no full shared runtime contract |
+| `runtime.builtin.ssh` | production_provider | — | `runtime.Provider` | `internal/runtime/ssh.NewSeamBacked` | runtime.builtin/prefix:ssh: | `runtime.Provider` | waived by ga-80po0c.3 through 2026-11-19: the production SSH composition has no full shared runtime contract |
 | `runtime.builtin.subprocess` | production_provider | — | `runtime.Provider` | `internal/runtime/subprocess.NewSeamBacked` | runtime.builtin/exact:subprocess | `runtime.Provider` | proved by internal/runtime/subprocess/seam_conformance_test.go#TestSubprocessDefaultDirSeamConformance |
 | `runtime.builtin.subprocess` | production_provider | — | `runtime.Provider` | `internal/runtime/subprocess.NewSeamBackedWithDir` | runtime.builtin/exact:subprocess | `runtime.Provider` | proved by internal/runtime/subprocess/seam_conformance_test.go#TestSubprocessSeamConformance |
-| `runtime.builtin.t3bridge` | production_provider | — | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/exact:t3bridge | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-26: the production T3 bridge composition has focused tests but no full shared runtime contract |
-| `runtime.builtin.tmux` | production_provider | — | `runtime.Provider` | `internal/runtime/tmux.NewSeamBackedWithConfig` | runtime.builtin/exact:tmux | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-26: the existing full conformance run skips when the tmux executable is absent |
+| `runtime.builtin.t3bridge` | production_provider | — | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/exact:t3bridge | `runtime.Provider` | waived by ga-80po0c.3 through 2026-11-05: the production T3 bridge composition has focused tests but no full shared runtime contract |
+| `runtime.builtin.tmux` | production_provider | — | `runtime.Provider` | `internal/runtime/tmux.NewSeamBackedWithConfig` | runtime.builtin/exact:tmux | `runtime.Provider` | waived by ga-80po0c.3 through 2026-09-17: the existing full conformance run skips when the tmux executable is absent |
 | `runtime.composition.auto` | production_provider | — | `runtime.Provider` | `internal/runtime/auto.New` | source: cmd/gc/providers.go#resolveSessionTransportProvider — conditional transport composition is outside the runtime registry | `runtime.Provider` | proved by internal/runtime/auto/conformance_test.go#TestAutoConformance (default-route conformance; ACP route covered by focused auto routing tests) |
 <!-- END CHECKED RUNTIME PROVIDER LEDGER -->
+
+Rows reading `waived by <bead> through <date>` are governed by "Waiver expiry
+clocks" above: the date is enforced through `internal/testpolicy/waiverclock`,
+it warns for 14 days on either side, and past that it is fatal in every mode.
 
 Conformance tests verify the behavioral contract (create/read/update/delete,
 error handling, concurrency). They deliberately don't test lifecycle ordering

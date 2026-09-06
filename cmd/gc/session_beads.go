@@ -1947,6 +1947,9 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				if tp.ResolvedProvider.ResumeCommand != "" {
 					meta["resume_command"] = tp.ResolvedProvider.ResumeCommand
 				}
+				if tp.ResolvedProvider.SessionIDFlag != "" {
+					meta["session_id_flag"] = tp.ResolvedProvider.SessionIDFlag
+				}
 			}
 			createBead := func() (beads.Bead, error) {
 				beadID, err := sessionFrontDoor(store).CreateSession(session.CreateSpec{
@@ -2217,6 +2220,16 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			}
 			if tp.ResolvedProvider.ResumeCommand != "" && b.Metadata["resume_command"] != tp.ResolvedProvider.ResumeCommand {
 				queueMeta("resume_command", tp.ResolvedProvider.ResumeCommand)
+			}
+			// session_id_flag is a peer projection field of resume_flag: the
+			// reactive startup-death strip (stripSessionIDFlag via
+			// retryFreshStartAfterStaleKey) reads it from persisted bead
+			// metadata, so a legacy bead backfilled with session_key (above)
+			// but no session_id_flag would replay a rejected first-start
+			// `--session-id <key>` command. Project it diff-gated so upgraded
+			// beads gain the flag in the same tick the key is backfilled.
+			if tp.ResolvedProvider.SessionIDFlag != "" && b.Metadata["session_id_flag"] != tp.ResolvedProvider.SessionIDFlag {
+				queueMeta("session_id_flag", tp.ResolvedProvider.SessionIDFlag)
 			}
 		}
 

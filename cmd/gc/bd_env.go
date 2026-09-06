@@ -58,46 +58,143 @@ func bdContextCommandRunnerForCity(cityPath string) beads.CommandRunner {
 		env["GC_RIG_ROOT"] = ""
 		env["BEADS_DOLT_AUTO_START"] = "0"
 		env["BD_EXPORT_AUTO"] = "false"
+		hosted, err := citySelectsHostedBeadsCredentialProvider(cityPath)
+		if err != nil {
+			return nil, err
+		}
 		credentialsFile := strings.TrimSpace(env["BEADS_CREDENTIALS_FILE"])
-		if credentialsFile == "" {
+		if credentialsFile == "" && !hosted {
 			credentialsFile = strings.TrimSpace(ambientNativeDoltOpenEnv("BEADS_CREDENTIALS_FILE"))
 		}
 		setExecProjectedBackendEnvEmpty(env)
 		if credentialsFile != "" {
 			env["BEADS_CREDENTIALS_FILE"] = credentialsFile
 		}
-		return beadsExecCommandRunnerWithEnv(env)(dir, name, args...)
+		if err := applyHostedBeadsCredentialEnv(env, cityPath); err != nil {
+			return nil, err
+		}
+		runner, err := beadsCommandRunnerForHostedCity(cityPath, env)
+		if err != nil {
+			return nil, err
+		}
+		return runner(dir, name, args...)
 	}
 }
 
-// workspacePinnedBdBinary resolves bd only from an explicitly configured
-// workspace PATH. An unconfigured workspace retains the ambient executable
-// lookup performed by the caller.
+// workspacePinnedBdBinary resolves the pinned bd executable in the order
+// workspace.env BD_BIN, then workspace.env PATH, then an ambient BD_BIN. It
+// adds one strictness to workspacePinnedBdBinaryOptional: a workspace PATH
+// that resolves no bd is a configuration error rather than an empty pin.
+// Returning "" means no pin was configured anywhere, and the caller keeps its
+// own ambient executable lookup.
 func workspacePinnedBdBinary(cityPath string) (string, error) {
+	pinned, err := workspacePinnedBdBinaryOptional(cityPath)
+	if err != nil {
+		return "", err
+	}
+	if pinned != "" {
+		return pinned, nil
+	}
+	// This re-stats and re-parses the city.toml that
+	// workspacePinnedBdBinaryOptional already read, solely to re-answer whether
+	// workspace.env configured a PATH at all. The duplicate is deliberate: it
+	// keeps the optional resolver's contract to a single answer ("which bd is
+	// pinned") rather than returning an intermediate signal that exists only
+	// for this one strict caller. Both loads use the no-refresh loader, which
+	// omits the managed-provider-shim rewrite the full loader performs, so what
+	// repeats here is a parse and not a side effect.
 	if _, err := os.Stat(filepath.Join(cityPath, "city.toml")); errors.Is(err, os.ErrNotExist) {
 		return "", nil
 	} else if err != nil {
 		return "", err
 	}
-	cfg, err := loadCityConfig(cityPath, io.Discard)
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	if err != nil {
 		return "", err
 	}
-	_, configured := cfg.Workspace.Env["PATH"]
-	if !configured {
+	if _, configured := cfg.Workspace.Env["PATH"]; configured {
+		return "", fmt.Errorf("workspace.env PATH is configured but contains no executable bd at an absolute path")
+	}
+	return "", nil
+}
+
+// workspacePinnedBdBinaryOptional resolves an explicitly configured bd
+// executable without requiring every workspace PATH customization to contain
+// bd. The strict workspacePinnedBdBinary wrapper uses the same resolution for
+// externally bound stores, while managed-city process environments use this
+// optional form to carry a valid pin when one exists.
+//
+// A BD_BIN that is set but not an absolute executable is an error here, in
+// both the workspace.env and the ambient branch. This layer answers "which bd
+// did the operator pin", so a value that cannot be a pin is a configuration
+// fault to report, not a value to quietly drop — reporting it names the stale
+// pin instead of running a different bd against a Dolt store. That is a
+// deliberately narrower contract than execCommandRunner in
+// internal/beads/bdstore.go, which reads BD_BIN off an already-resolved child
+// environment as a last-mile executable override and treats a non-absolute
+// value as "no override" so it falls back to PATH. Keep both sides in mind
+// when changing either: this function decides whether a pin exists, that one
+// only applies a pin already decided here.
+func workspacePinnedBdBinaryOptional(cityPath string) (string, error) {
+	if _, err := os.Stat(filepath.Join(cityPath, "city.toml")); errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	} else if err != nil {
+		return "", err
+	}
+	// Resolving an executable is an environment-only operation. Use the
+	// no-refresh loader here: the full loader rewrites the generated managed
+	// provider shim as a config-load side effect, which can race an in-flight
+	// lifecycle operation and replace a caller's already-selected provider
+	// entrypoint.
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	if err != nil {
+		return "", err
+	}
+	env := expandEnvMap(cfg.Workspace.Env)
+	if raw := strings.TrimSpace(env["BD_BIN"]); raw != "" {
+		if !filepath.IsAbs(raw) {
+			return "", fmt.Errorf("workspace.env BD_BIN must be an absolute executable path")
+		}
+		candidate, err := exec.LookPath(raw)
+		if err != nil {
+			return "", fmt.Errorf("workspace.env BD_BIN %q is not executable: %w", raw, err)
+		}
+		return candidate, nil
+	}
+	pathValue, configured := env["PATH"]
+	if configured {
+		for _, dir := range filepath.SplitList(pathValue) {
+			dir = strings.TrimSpace(dir)
+			if !filepath.IsAbs(dir) {
+				continue
+			}
+			candidate, err := exec.LookPath(filepath.Join(dir, "bd"))
+			if err == nil && filepath.IsAbs(candidate) {
+				return candidate, nil
+			}
+		}
+		// An explicit workspace PATH is authoritative. Do not silently
+		// substitute the controller's ambient BD_BIN when that PATH does not
+		// contain bd; the strict caller reports the configuration error.
 		return "", nil
 	}
-	for _, dir := range filepath.SplitList(expandEnvMap(cfg.Workspace.Env)["PATH"]) {
-		dir = strings.TrimSpace(dir)
-		if !filepath.IsAbs(dir) {
-			continue
+	// Fresh `gc init` runs before the generated city.toml can carry a
+	// workspace.env pin. An explicitly inherited BD_BIN is still an operator
+	// choice, so carry it through managed lifecycle subprocesses for that
+	// first initialization (and for callers that intentionally keep the pin
+	// process-scoped). Once workspace.env has a PATH or BD_BIN, the branches
+	// above remain authoritative.
+	if raw := strings.TrimSpace(os.Getenv("BD_BIN")); raw != "" {
+		if !filepath.IsAbs(raw) {
+			return "", fmt.Errorf("ambient BD_BIN %q must be an absolute executable path", raw)
 		}
-		candidate, err := exec.LookPath(filepath.Join(dir, "bd"))
-		if err == nil && filepath.IsAbs(candidate) {
-			return candidate, nil
+		candidate, err := exec.LookPath(raw)
+		if err != nil {
+			return "", fmt.Errorf("ambient BD_BIN %q is not executable: %w", raw, err)
 		}
+		return candidate, nil
 	}
-	return "", fmt.Errorf("workspace.env PATH is configured but contains no executable bd at an absolute path")
+	return "", nil
 }
 
 // errBdNotOnPath reports that neither the workspace pin nor the ambient
@@ -105,18 +202,20 @@ func workspacePinnedBdBinary(cityPath string) (string, error) {
 var errBdNotOnPath = errors.New("bd not found in PATH")
 
 // resolveBdBinaryForScope resolves the bd executable a scope's commands run.
-// A scope bound to a complete storage binding runs the binary its workspace
-// PATH pins, because only that build speaks the bound backend; every other
-// scope keeps the ambient lookup. An ambient miss is errBdNotOnPath so
-// callers can phrase their own remediation; a pin that is configured but
-// unresolvable for a scope that needs it is returned verbatim rather than
-// masked as a missing binary.
+// The city scope and rigs that inherit its backend use the workspace pin so
+// every command speaks the same schema as the managed runtime. A rig that
+// explicitly overrides the city backend keeps the ambient lookup unless it
+// carries a complete storage binding of its own. An ambient miss is
+// errBdNotOnPath so callers can phrase their own remediation; a configured
+// but unresolvable pin is returned verbatim rather than masked as a missing
+// binary.
 func resolveBdBinaryForScope(cityPath, scopeRoot string) (string, error) {
 	bound, err := scopeStoreIsExternallyBound(cityPath, scopeRoot)
 	if err != nil {
 		return "", err
 	}
-	if bound {
+	usesCityBackend := samePath(cityPath, scopeRoot) || !scopeOverridesCityBackend(cityPath, scopeRoot)
+	if bound || usesCityBackend {
 		pinned, err := workspacePinnedBdBinary(cityPath)
 		if err != nil {
 			return "", err
@@ -139,11 +238,11 @@ func resolveBdBinaryForScope(cityPath, scopeRoot string) (string, error) {
 // so a fault in it is not that scope's fault and answers false rather than
 // taking the scope offline. Only the scope's own binding surfaces an error.
 //
-// This is the single predicate for "gc does not own this store": which bd
-// binary to run, whether to project a Dolt environment, whether to manage or
-// recover a Dolt runtime, and whether the scope needs a local Dolt identity are
-// all the same question asked from different places. A site that answers it
-// some other way is how the store gc does not serve acquires a Dolt server.
+// This is the single predicate for "gc does not own this store": whether to
+// project a Dolt environment, whether to manage or recover a Dolt runtime, and
+// whether the scope needs a local Dolt identity are all the same question asked
+// from different places. A site that answers it some other way is how the store
+// gc does not serve acquires a Dolt server.
 func scopeStoreIsExternallyBound(cityPath, scopeRoot string) (bool, error) {
 	completeBinding, err := scopeHasCompleteStorageBinding(scopeMetadataJSONPath(scopeRoot))
 	if err != nil || completeBinding {
@@ -481,13 +580,20 @@ func applyCompleteNonDoltStorageBindingEnv(env map[string]string, cityPath, scop
 	if err != nil || !completeBinding {
 		return completeBinding, err
 	}
+	hosted, err := citySelectsHostedBeadsCredentialProvider(cityPath)
+	if err != nil {
+		return true, err
+	}
 	credentialsFile := strings.TrimSpace(env["BEADS_CREDENTIALS_FILE"])
-	if credentialsFile == "" {
+	if credentialsFile == "" && !hosted {
 		credentialsFile = strings.TrimSpace(ambientNativeDoltOpenEnv("BEADS_CREDENTIALS_FILE"))
 	}
 	setExecProjectedBackendEnvEmpty(env)
 	if credentialsFile != "" {
 		env["BEADS_CREDENTIALS_FILE"] = credentialsFile
+	}
+	if err := applyHostedBeadsCredentialEnv(env, cityPath); err != nil {
+		return true, err
 	}
 	bdBin, err := workspacePinnedBdBinary(cityPath)
 	if err != nil {
@@ -495,6 +601,134 @@ func applyCompleteNonDoltStorageBindingEnv(env map[string]string, cityPath, scop
 	}
 	env["BD_BIN"] = bdBin
 	return true, nil
+}
+
+// applyHostedBeadsCredentialEnv selects the credential command for bd
+// subprocesses. Existing legacy helpers always win. Otherwise, and only for
+// the exact hosted beads-workspace storage selector, gc installs its fixed
+// bridge to the credential-provider protocol.
+func applyHostedBeadsCredentialEnv(env map[string]string, cityPath string) error {
+	if env == nil {
+		return nil
+	}
+	selected, err := citySelectsHostedBeadsCredentialProvider(cityPath)
+	if err != nil {
+		return err
+	}
+	if selected {
+		// Exact hosted bindings must not inherit any part of the BEADS_*
+		// namespace. Explicit compatibility values below are projected into the
+		// map before the command runner applies it; ambient BEADS_* values are
+		// never treated as authorization for this binding.
+		withholdAmbientHostedBeadsEnv(env)
+	}
+	if command := strings.TrimSpace(env["GC_DOLT_CRED_CMD"]); command != "" {
+		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = command
+		return nil
+	}
+	if strings.TrimSpace(env["BEADS_DOLT_CREDENTIAL_COMMAND"]) != "" {
+		return nil
+	}
+	if command := strings.TrimSpace(os.Getenv("GC_DOLT_CRED_CMD")); command != "" {
+		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = command
+		return nil
+	}
+	// The ambient BEADS_* namespace is untrusted for the exact hosted
+	// workspace selector. In particular, an inherited credential command must
+	// not replace the bridge selected below. Non-hosted/legacy paths retain the
+	// historical ambient fallback for compatibility.
+	if !selected {
+		if command := strings.TrimSpace(os.Getenv("BEADS_DOLT_CREDENTIAL_COMMAND")); command != "" {
+			env["BEADS_DOLT_CREDENTIAL_COMMAND"] = command
+			return nil
+		}
+		return nil
+	}
+	command, err := hostedBeadsCredentialCommand()
+	if err != nil {
+		return err
+	}
+	projectCredentialProviderEnv(env)
+	env["BEADS_DOLT_CREDENTIAL_COMMAND"] = command
+	return nil
+}
+
+// beadsCommandRunnerForHostedCity chooses the hermetic runner only for the
+// exact hosted Beads workspace binding. Explicit values in env remain valid
+// overrides; only the inherited BEADS_* namespace is withheld by the variant.
+func beadsCommandRunnerForHostedCity(cityPath string, env map[string]string) (beads.CommandRunner, error) {
+	selected, err := citySelectsHostedBeadsCredentialProvider(cityPath)
+	if err != nil {
+		return nil, err
+	}
+	if selected {
+		return beadsExecCommandRunnerWithEnvWithoutAmbientBeads(env), nil
+	}
+	return beadsExecCommandRunnerWithEnv(env), nil
+}
+
+// withholdAmbientHostedBeadsEnv pins every ambient BEADS_* key absent from an
+// explicit projection to an empty value. Runtime adapters interpret empty
+// values as removal, so unknown variables cannot flow into an agent session.
+func withholdAmbientHostedBeadsEnv(env map[string]string) {
+	if env == nil {
+		return
+	}
+	for _, entry := range processEnvSnapshotExcludingNativeDoltOpen() {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok || !strings.HasPrefix(key, "BEADS_") {
+			continue
+		}
+		if _, explicit := env[key]; !explicit {
+			env[key] = ""
+		}
+	}
+}
+
+// projectCredentialProviderEnv carries the provider argv configuration into
+// subprocess and session maps. LookupEnv is intentional: an explicitly empty
+// override is invalid configuration and must reach the bridge so invocation
+// fails closed instead of silently using the default provider.
+func projectCredentialProviderEnv(env map[string]string) {
+	if env == nil {
+		return
+	}
+	if _, exists := env[registryCredentialProviderEnv]; exists {
+		return
+	}
+	if raw, configured := os.LookupEnv(registryCredentialProviderEnv); configured {
+		env[registryCredentialProviderEnv] = raw
+	}
+}
+
+func citySelectsHostedBeadsCredentialProvider(cityPath string) (bool, error) {
+	cityConfigPath := filepath.Join(cityPath, "city.toml")
+	if _, err := os.Stat(cityConfigPath); errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	} else if err != nil {
+		return false, fmt.Errorf("read hosted Beads credential configuration: %w", err)
+	}
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, cityConfigPath)
+	if err != nil {
+		return false, fmt.Errorf("load hosted Beads credential configuration: %w", err)
+	}
+	return configSelectsHostedBeadsCredentialProvider(cfg), nil
+}
+
+func configSelectsHostedBeadsCredentialProvider(cfg *config.City) bool {
+	if cfg == nil {
+		return false
+	}
+	storage := cfg.EffectiveStorage()
+	shape, bindingName := storageSplitShapeOf(storage)
+	if shape != storageSplitWhole {
+		return false
+	}
+	binding, ok := storage.Bindings[bindingName]
+	return ok &&
+		binding.Provider == config.StorageProviderBeadsWorkspace &&
+		strings.TrimSpace(binding.URL) != "" &&
+		binding.Auth == config.StorageAuthCredentialProvider
 }
 
 // applyCanonicalScopeBackendEnv dispatches to the appropriate backend
@@ -777,14 +1011,18 @@ func appendBdContributorRoutingOptOutEnvKeys(keys []string) []string {
 }
 
 var (
-	beadsExecCommandRunnerWithEnv             = beads.ExecCommandRunnerWithEnv
-	processEnvSnapshotExcludingNativeDoltOpen = beads.ProcessEnvSnapshotExcludingNativeDoltOpen
-	ambientNativeDoltOpenEnv                  = beads.AmbientNativeDoltOpenEnv
+	beadsExecCommandRunnerWithEnv                    = beads.ExecCommandRunnerWithEnv
+	beadsExecCommandRunnerWithEnvWithoutAmbientBeads = beads.ExecCommandRunnerWithEnvWithoutAmbientBeads
+	processEnvSnapshotExcludingNativeDoltOpen        = beads.ProcessEnvSnapshotExcludingNativeDoltOpen
+	ambientNativeDoltOpenEnv                         = beads.AmbientNativeDoltOpenEnv
 )
 
 var recoverManagedBDCommand = func(cityPath string) error {
 	script := gcBeadsBdScriptPath(cityPath)
 	overrides := cityRuntimeEnvMapForCity(cityPath)
+	if err := applyWorkspacePinnedBdBinary(overrides, cityPath); err != nil {
+		return err
+	}
 	setProjectedDoltEnvEmpty(overrides)
 	applyBdCLIRemoteSyncOptOut(overrides)
 	applyBdAutoBackupOptOut(overrides)
@@ -1165,7 +1403,10 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 			env = map[string]string{}
 		}
 		ensureProjectedDoltEnvExplicit(env)
-		runner := beadsExecCommandRunnerWithEnv(env)
+		runner, runnerErr := beadsCommandRunnerForHostedCity(cityPath, env)
+		if runnerErr != nil {
+			return nil, runnerErr
+		}
 		out, err := runner(dir, name, args...)
 		if name != "bd" {
 			return out, err
@@ -1184,7 +1425,10 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 			return nil, retryEnvErr
 		}
 		ensureProjectedDoltEnvExplicit(retryEnv)
-		retryRunner := beadsExecCommandRunnerWithEnv(retryEnv)
+		retryRunner, runnerErr := beadsCommandRunnerForHostedCity(cityPath, retryEnv)
+		if runnerErr != nil {
+			return nil, runnerErr
+		}
 		return retryRunner(dir, name, args...)
 	}
 }
@@ -1411,6 +1655,9 @@ func bdRuntimeEnvWithErrorRecovery(cityPath string, allowRecovery bool) (map[str
 
 func bdRuntimeEnvWithErrorRecoveryContext(ctx context.Context, cityPath string, allowRecovery bool) (map[string]string, error) {
 	env := cityRuntimeEnvMapForCity(cityPath)
+	if err := applyWorkspacePinnedBdBinary(env, cityPath); err != nil {
+		return env, err
+	}
 	env["BEADS_DIR"] = filepath.Join(cityPath, ".beads")
 	env["GC_RIG"] = ""
 	env["GC_RIG_ROOT"] = ""
@@ -1445,6 +1692,9 @@ func bdRuntimeEnvWithErrorRecoveryContext(ctx context.Context, cityPath string, 
 	applyBdAutoBackupOptOut(env)
 	if !cityUsesBdStoreContract(cityPath) {
 		return env, nil
+	}
+	if err := applyHostedBeadsCredentialEnv(env, cityPath); err != nil {
+		return env, err
 	}
 	if scopeBackendIsDoltlite(cityPath, cityPath) {
 		clearProjectedDoltEnv(env)
@@ -1493,12 +1743,24 @@ func cityIdentityAnchorsForCity(cityPath string) map[string]string {
 func cityRuntimeProcessEnvWithError(cityPath string) ([]string, error) {
 	cityPath = normalizePathForCompare(cityPath)
 	overrides := cityRuntimeEnvMapForCity(cityPath)
+	if err := applyWorkspacePinnedBdBinary(overrides, cityPath); err != nil {
+		return nil, err
+	}
 	var projectionErr error
+	var hostedBeads bool
 	if cityUsesBdStoreContract(cityPath) {
+		var err error
+		hostedBeads, err = citySelectsHostedBeadsCredentialProvider(cityPath)
+		if err != nil {
+			projectionErr = err
+		}
 		source := map[string]string{"BEADS_DOLT_AUTO_START": "0"}
 		applyBdContributorRoutingOptOut(source)
 		applyBdCLIRemoteSyncOptOut(source)
 		applyBdAutoBackupOptOut(source)
+		if err := applyHostedBeadsCredentialEnv(source, cityPath); err != nil {
+			projectionErr = err
+		}
 		if bound, err := applyCityStorageBindingEnv(source, cityPath); err != nil {
 			clearProjectedDoltEnv(source)
 			mirrorBeadsDoltEnv(source)
@@ -1533,7 +1795,30 @@ func cityRuntimeProcessEnvWithError(cityPath string) ([]string, error) {
 			}
 		}
 	}
-	return mergeRuntimeEnv(processEnvSnapshotExcludingNativeDoltOpen(), overrides), projectionErr
+	environ := processEnvSnapshotExcludingNativeDoltOpen()
+	if hostedBeads {
+		environ = removeEnvKeyPrefix(environ, "BEADS_")
+	}
+	return mergeRuntimeEnv(environ, overrides), projectionErr
+}
+
+// applyWorkspacePinnedBdBinary carries a valid workspace bd pin into
+// controller and provider subprocess environments. Workspace.env is otherwise
+// session-scoped configuration; BD_BIN is special because managed lifecycle
+// scripts must use the same schema-compatible executable before any worker
+// session exists.
+func applyWorkspacePinnedBdBinary(env map[string]string, cityPath string) error {
+	if env == nil {
+		return nil
+	}
+	pinned, err := workspacePinnedBdBinaryOptional(cityPath)
+	if err != nil {
+		return err
+	}
+	if pinned != "" {
+		env["BD_BIN"] = pinned
+	}
+	return nil
 }
 
 func applyBdCLIRemoteSyncOptOut(env map[string]string) {
@@ -1826,6 +2111,7 @@ func mergeRuntimeEnv(environ []string, overrides map[string]string) []string {
 var hostedBeadsCredentialPassthroughKeys = []string{
 	"BEADS_DOLT_CREDENTIAL_COMMAND",
 	"BEADS_DOLT_SERVER_TLS",
+	registryCredentialProviderEnv,
 	"ORCHESTRATOR_KEY_FILE",
 	"EIA_AUDIENCE",
 	"EIA_SCOPES",
