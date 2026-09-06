@@ -33,7 +33,12 @@ var envArgvSafe = map[string]bool{
 	"TERM":        true,
 	"TZ":          true,
 
-	// City, rig, and agent identity.
+	// City, rig, and agent identity. BEADS_ACTOR carries the same identity
+	// string as GC_AGENT (session.RuntimeEnvWithSessionContext sets both from
+	// AssigneeIdentifier), so listing one and not the other would route an
+	// already-public value through the private-file path and blank it out of
+	// diagnostics for nothing.
+	"BEADS_ACTOR":      true,
 	"GC_AGENT":         true,
 	"GC_ALIAS":         true,
 	"GC_CITY":          true,
@@ -68,9 +73,64 @@ var envArgvSafe = map[string]bool{
 	"GC_SKILLS_DIR":      true,
 }
 
+// metaCapabilityEnv names the values a provider's private meta sidecar must
+// persist even though argv refuses them.
+//
+// GC_INSTANCE_TOKEN is the only member, and it is here for the same reason it
+// is absent from envArgvSafe: it fences drain/stop and async delivery against a
+// stale incarnation, so it is a capability rather than an identifier. What makes
+// it different from every other capability is that the fence's ground truth
+// lives in the store — [Provider.GetMeta] is how a caller learns which
+// incarnation it is talking to, and every consumer compares it that way.
+//
+// So refusing to persist it would not break fencing loudly; it would disable it
+// silently. The consumers guard with `actual != "" && actual != expected`, which
+// treats an absent token as permission to proceed. A credential that reaches
+// disk is a bounded, mitigable exposure; a fence that reports success while
+// enforcing nothing is not.
+//
+// Nothing else belongs here. A key earns membership only by having a real
+// GetMeta consumer that cannot be served by an argv-safe value.
+var metaCapabilityEnv = map[string]bool{
+	"GC_INSTANCE_TOKEN": true,
+}
+
 // ArgvSafeEnvKey reports whether the value of the named environment variable
 // may appear in a process argument vector. See [envArgvSafe].
 func ArgvSafeEnvKey(key string) bool { return envArgvSafe[key] }
+
+// MetaSeedableEnvKey reports whether the named variable may be seeded into a
+// provider's meta sidecar, which is a private on-disk store rather than argv.
+//
+// It tracks [envArgvSafe] plus [metaCapabilityEnv] rather than carrying a list
+// of its own: the store's threat model is strictly weaker than argv's (0600
+// files under 0700 dirs, not a world-readable /proc entry), so anything argv
+// tolerates the sidecar tolerates. Deriving it keeps one maintained
+// classification and one conservative default — an unrecognized name is assumed
+// to carry credential material and is withheld.
+func MetaSeedableEnvKey(key string) bool {
+	return ArgvSafeEnvKey(key) || metaCapabilityEnv[key]
+}
+
+// SplitEnvForMetaSeed partitions env into the entries a provider may persist in
+// its meta sidecar and the entries it must not. Both maps are non-nil so callers
+// can range over them without a nil check.
+//
+// An empty value carries no secret, so it seeds like any inert entry — the same
+// rule [SplitEnvByArgvSafety] applies, and for the same reason: providers spell
+// "withhold this variable" as an empty value.
+func SplitEnvForMetaSeed(env map[string]string) (seed, withheld map[string]string) {
+	seed = make(map[string]string, len(env))
+	withheld = make(map[string]string)
+	for k, v := range env {
+		if v != "" && !MetaSeedableEnvKey(k) {
+			withheld[k] = v
+			continue
+		}
+		seed[k] = v
+	}
+	return seed, withheld
+}
 
 // ArgvSecretEnvValue reports whether this key/value pair must be kept out of
 // argv. An empty value carries no secret — providers spell "withhold this

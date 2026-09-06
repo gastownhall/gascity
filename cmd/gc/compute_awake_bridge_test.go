@@ -79,6 +79,60 @@ func TestBuildAwakeInputFromReconcilerReadsInfoSnapshot(t *testing.T) {
 	}
 }
 
+func TestBuildAwakeInputFromReconcilerPrefersFreshCompletedPoolSession(t *testing.T) {
+	decisionTime := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	const template = "hello-world/polecat"
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "polecat", Dir: "hello-world"}},
+	}
+	sessionInfo := func(id, name string, createdAt time.Time) session.Info {
+		return sessiontest.SeedBead(t, beads.Bead{
+			ID:        id,
+			Status:    "open",
+			Type:      sessionBeadType,
+			CreatedAt: createdAt,
+			Labels:    []string{sessionBeadLabel, "template:" + template},
+			Metadata: map[string]string{
+				"state":                "awake",
+				"state_reason":         "creation_complete",
+				"creation_complete_at": createdAt.Format(time.RFC3339),
+				"session_name":         name,
+				"template":             template,
+				"session_origin":       "ephemeral",
+				poolManagedMetadataKey: boolMetadata(true),
+			},
+		})
+	}
+	oldInfo := sessionInfo("mc-old", "polecat-old", decisionTime.Add(-time.Hour))
+	freshInfo := sessionInfo("mc-fresh", "polecat-fresh", decisionTime.Add(-time.Minute))
+
+	input := buildAwakeInputFromReconciler(
+		cfg,
+		"",
+		[]session.Info{oldInfo, freshInfo},
+		map[string]int{template: 1},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		runtime.NewFake(),
+		decisionTime,
+	)
+	if input.SessionBeads[0].PostCreateProtected {
+		t.Fatal("old session unexpectedly marked post-create protected")
+	}
+	if !input.SessionBeads[1].PostCreateProtected {
+		t.Fatal("fresh session was not marked post-create protected")
+	}
+
+	decisions := ComputeAwakeSet(input)
+	assertAsleep(t, decisions, "polecat-old")
+	assertAwake(t, decisions, "polecat-fresh")
+}
+
 // TestBuildAwakeInputFromReconcilerCanonicalizesLegacyBoundTemplate pins the
 // bridge-side identity normalization for adopted legacy-bound session beads.
 // A bead persisted under a removed binding ("gascity-packs/gc.implementation-worker")

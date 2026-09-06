@@ -171,6 +171,21 @@ type State interface {
 	// call site; its embedded .Store is nil when no store is available.
 	OrdersBeadStore() beads.OrdersStore
 
+	// ClassBindingHasLegacyResidents reports whether store — one of the
+	// per-class stores above — still holds an open bead under an id outside the
+	// namespaces its classes declare: a row `gc storage migrate` carried across
+	// under its original work-shaped id, reachable only by probing the binding.
+	//
+	// The API never opens a binding and cannot take that census itself, so the
+	// verdict crosses this surface from the boot that did. It exists because
+	// both planes plan by-id reads against the same bindings, and a plane that
+	// kept probing after the other retired would resolve one id to two stores.
+	//
+	// TRUE is the answer for every store this State cannot speak for —
+	// unknown included. An unread binding has said nothing about its residents,
+	// and "nothing" is not the claim that retires a probe.
+	ClassBindingHasLegacyResidents(store beads.Store) bool
+
 	// Orders returns the current active set of scanned orders.
 	// Returns nil if orders are not configured.
 	Orders() []orders.Order
