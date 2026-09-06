@@ -587,6 +587,67 @@ func TestRetentionSweptReadMailStaysAddressableUntilPurge(t *testing.T) {
 	}
 }
 
+// TestRetentionSweptUnreadMailStaysAddressable is the unread twin of
+// TestRetentionSweptReadMailStaysAddressableUntilPurge. It guards the same
+// isRemovedMessageBead drift on the unread arm: SweepUnreadMessagesBefore
+// closes never-read mail past its (much longer) TTL stamping
+// UnreadRetentionSweepCloseReason, and during that closed state the message
+// must stay addressable by direct ID exactly as read-swept mail does. Unlike
+// the read path there is no purge arm behind it, so "stays addressable" here
+// has no "until purge" bound.
+func TestRetentionSweptUnreadMailStaysAddressable(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("alice", "bob", "aged", "never read by anyone")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	// Deliberately no p.Read: this bead never carries the "read" label, which
+	// is why the read-mail sweep can never be its collector.
+
+	closed, closeErrs, listErr := SweepUnreadMessagesBefore(
+		beads.MailStore{Store: store}, time.Now().Add(time.Hour), 0, UnreadRetentionSweepCloseReason)
+	if listErr != nil {
+		t.Fatalf("sweep list error: %v", listErr)
+	}
+	if len(closeErrs) != 0 {
+		t.Fatalf("sweep per-bead errors: %v", closeErrs)
+	}
+	if closed != 1 {
+		t.Fatalf("swept %d beads, want 1", closed)
+	}
+
+	raw, err := store.Get(sent.ID)
+	if err != nil {
+		t.Fatalf("store.Get after sweep: %v", err)
+	}
+	if raw.Status != "closed" || raw.Metadata["close_reason"] != UnreadRetentionSweepCloseReason {
+		t.Fatalf("swept bead status=%q close_reason=%q, want closed / %q",
+			raw.Status, raw.Metadata["close_reason"], UnreadRetentionSweepCloseReason)
+	}
+
+	// Unread-retention-swept mail stays addressable by direct ID.
+	if _, err := p.Get(sent.ID); err != nil {
+		t.Errorf("Get(unread-retention-swept) = %v, want addressable", err)
+	}
+	if _, err := p.Read(sent.ID); err != nil {
+		t.Errorf("Read(unread-retention-swept) = %v, want addressable", err)
+	}
+
+	// But it is retired from the active list views, which gate on open status
+	// — the whole point of the sweep.
+	inbox, err := p.Inbox("bob")
+	if err != nil {
+		t.Fatalf("Inbox after sweep: %v", err)
+	}
+	for _, m := range inbox {
+		if m.ID == sent.ID {
+			t.Errorf("Inbox surfaced unread-retention-swept message %q", sent.ID)
+		}
+	}
+}
+
 func contains(ss []string, want string) bool {
 	for _, s := range ss {
 		if s == want {
