@@ -1991,23 +1991,31 @@ func normalizedRigConfig(cityPath string, rig config.Rig) config.Rig {
 func desiredCityDoltConfigState(cityPath string, cityDolt config.DoltConfig, cityPrefix string) contract.ConfigState {
 	cityHost, cityPort := configuredExternalDoltTargetForCity(cityDolt)
 	if cityHost != "" || cityPort != "" {
+		mode := "server"
+		if strings.EqualFold(strings.TrimSpace(cityDolt.Mode), "proxied-server") {
+			mode = "proxied-server"
+		}
 		state := contract.ConfigState{
 			IssuePrefix:    cityPrefix,
 			EndpointOrigin: contract.EndpointOriginCityCanonical,
 			DoltHost:       cityHost,
 			DoltPort:       cityPort,
-			DoltMode:       "server",
+			DoltMode:       mode,
 		}
 		state.DoltUser = preservedDoltUser(cityPath, state)
 		state.EndpointStatus = preservedEndpointStatus(cityPath, state, contract.EndpointStatusUnverified)
 		return state
 	}
 
+	mode := "proxied-server"
+	if strings.EqualFold(strings.TrimSpace(cityDolt.Mode), "server") {
+		mode = "server"
+	}
 	return contract.ConfigState{
 		IssuePrefix:    cityPrefix,
 		EndpointOrigin: contract.EndpointOriginManagedCity,
 		EndpointStatus: contract.EndpointStatusVerified,
-		DoltMode:       "server",
+		DoltMode:       mode,
 	}
 }
 

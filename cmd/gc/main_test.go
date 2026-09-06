@@ -2833,6 +2833,14 @@ func TestDoInitWritesExpectedTOML(t *testing.T) {
 source = "` + config.PublicGascityRolesPackSource + `"
 version = "` + config.PublicGascityPackVersion + `"
 
+[dolt]
+mode = "proxied-server"
+port = 0
+max_connections = 0
+read_timeout_millis = 0
+write_timeout_millis = 0
+wait_timeout_seconds = 0
+
 # [mail]
 # retention_ttl controls how long read messages are retained before purge.
 # 0 disables retention; use "168h" for 7 days.

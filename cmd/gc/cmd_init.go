@@ -326,6 +326,8 @@ func newInitCmd(stdout, stderr io.Writer) *cobra.Command {
 	var doltUserFlag string
 	var doltDatabaseFlag string
 	var doltProjectIDFlag string
+	var beadsTransportFlag string
+	var beadsTargetFlag string
 	var skipProviderReadiness bool
 	var preserveExisting bool
 	var jsonOut bool
@@ -373,6 +375,8 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 				User:      doltUserFlag,
 				Database:  doltDatabaseFlag,
 				ProjectID: doltProjectIDFlag,
+				Transport: beadsTransportFlag,
+				Target:    beadsTargetFlag,
 			}, os.Getenv)
 			if fromFlag != "" {
 				mode = "from"
@@ -381,7 +385,7 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 			}
 			if fileFlag != "" {
 				mode = "file"
-				code := cmdInitFromFileWithOptionsInternal(fileFlag, args, nameFlag, out, stderr, skipProviderReadiness, preserveExisting, noStart)
+				code := cmdInitFromFileWithOptionsInternal(fileFlag, args, nameFlag, out, stderr, skipProviderReadiness, preserveExisting, noStart, hostedEndpoint)
 				return writeInitJSONOrExit(code, jsonOut, args, nameFlag, "", "", nil, bootstrapProfileFlag, mode, stdout)
 			}
 			wiz, flagMode, err := initWizardConfigFromFlags(runCmd, providerFlag, defaultProviderFlag, providersFlag, templateFlag, bootstrapProfileFlag, hostedEndpoint, skipProviderReadiness)
@@ -409,6 +413,8 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 	cmd.Flags().StringVar(&doltUserFlag, "dolt-user", "", "external/hosted Dolt user (or "+envDoltUser+"); optional")
 	cmd.Flags().StringVar(&doltDatabaseFlag, "dolt-database", "", "hosted beads project database, e.g. bd_prj_… (or "+envDoltDatabase+"); required with --dolt-host")
 	cmd.Flags().StringVar(&doltProjectIDFlag, "dolt-project-id", "", "authoritative beads project_id for the identity handshake (or "+envBeadsProjectID+"); derived from a bd_<id> --dolt-database when omitted")
+	cmd.Flags().StringVar(&beadsTransportFlag, "beads-transport", "", "beads transport selector: direct or proxied")
+	cmd.Flags().StringVar(&beadsTargetFlag, "beads-target", "", "beads target selector: local or external")
 	cmd.Flags().BoolVar(&skipProviderReadiness, "skip-provider-readiness", false, "skip provider login/readiness checks during init and continue startup")
 	cmd.Flags().BoolVar(&noStart, "no-start", false, "initialize files and imports without registering or starting the city")
 	cmd.Flags().BoolVar(&preserveExisting, "preserve-existing", false, "keep any pre-authored pack.toml, city.toml, or agent prompt files instead of overwriting them")
@@ -512,6 +518,17 @@ func cmdInitWithPreparedWizard(args []string, prepared wizardConfig, preparedSet
 }
 
 func cmdInitWithPreparedWizardInternal(args []string, prepared wizardConfig, preparedSet bool, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness, preserveExisting bool, forceDefaultWizard bool, noStart bool) int {
+	// Validate selector syntax and provider compatibility before probing or
+	// mutating the destination. Explicit transport selectors are meaningful
+	// only for the bd provider; omitted selectors leave other providers alone.
+	if err := prepared.hostedDolt.validateRequest(effectiveInitBeadsProvider("")); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := prepared.hostedDolt.validateInitBeadsBackend(""); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	var cityPath string
 	if len(args) > 0 {
 		var err error
@@ -606,7 +623,7 @@ func initWizardConfigFromFlags(cmd *cobra.Command, providerFlag, defaultProvider
 	templateChanged := cmd.Flags().Changed("template")
 	bootstrapChanged := strings.TrimSpace(bootstrapProfileFlag) != ""
 
-	if !legacyChanged && !defaultChanged && !providersChanged && !templateChanged && !bootstrapChanged && !hosted.enabled() {
+	if !legacyChanged && !defaultChanged && !providersChanged && !templateChanged && !bootstrapChanged && !hosted.enabled() && strings.TrimSpace(hosted.Transport) == "" && strings.TrimSpace(hosted.Target) == "" {
 		return wizardConfig{}, "", nil
 	}
 	if err := hosted.validate(); err != nil {
@@ -1097,7 +1114,11 @@ func cmdInitFromFileWithOptions(fileArg string, args []string, nameOverride stri
 	return cmdInitFromFileWithOptionsInternal(fileArg, args, nameOverride, stdout, stderr, skipProviderReadiness, preserveExisting, false)
 }
 
-func cmdInitFromFileWithOptionsInternal(fileArg string, args []string, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness, preserveExisting bool, noStart bool) int {
+func cmdInitFromFileWithOptionsInternal(fileArg string, args []string, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness, preserveExisting bool, noStart bool, hostedOpts ...hostedDoltInitOptions) int {
+	var hosted hostedDoltInitOptions
+	if len(hostedOpts) > 0 {
+		hosted = hostedOpts[0]
+	}
 	var cityPath string
 	if len(args) > 0 {
 		var err error
@@ -1115,7 +1136,7 @@ func cmdInitFromFileWithOptionsInternal(fileArg string, args []string, nameOverr
 		}
 	}
 
-	return cmdInitFromTOMLFileWithOptionsInternal(fsys.OSFS{}, fileArg, cityPath, nameOverride, stdout, stderr, skipProviderReadiness, preserveExisting, noStart)
+	return cmdInitFromTOMLFileWithOptionsInternal(fsys.OSFS{}, fileArg, cityPath, nameOverride, stdout, stderr, skipProviderReadiness, preserveExisting, noStart, hosted)
 }
 
 // cmdInitFromTOMLFile initializes a city by copying a user-provided TOML
@@ -1128,7 +1149,11 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 	return cmdInitFromTOMLFileWithOptionsInternal(fs, tomlSrc, cityPath, nameOverride, stdout, stderr, skipProviderReadiness, preserveExisting, false)
 }
 
-func cmdInitFromTOMLFileWithOptionsInternal(fs fsys.FS, tomlSrc, cityPath, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness, preserveExisting bool, noStart bool) int {
+func cmdInitFromTOMLFileWithOptionsInternal(fs fsys.FS, tomlSrc, cityPath, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness, preserveExisting bool, noStart bool, hostedOpts ...hostedDoltInitOptions) int {
+	var hosted hostedDoltInitOptions
+	if len(hostedOpts) > 0 {
+		hosted = hostedOpts[0]
+	}
 	// Validate the source file parses as a valid city config.
 	data, err := os.ReadFile(tomlSrc)
 	if err != nil {
@@ -1137,6 +1162,18 @@ func cmdInitFromTOMLFileWithOptionsInternal(fs fsys.FS, tomlSrc, cityPath, nameO
 	}
 	cfg, err := config.Parse(data)
 	if err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := hosted.validateRequest(effectiveInitBeadsProvider(cfg.Beads.Provider)); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := hosted.validateInitBeadsBackend(cfg.Beads.Backend); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := hosted.applySelectorToCityConfig(cfg); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1315,6 +1352,14 @@ func warnEmptyTemplateMissingBootstrapProfile(wiz wizardConfig, stderr io.Writer
 }
 
 func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, stdout, stderr io.Writer, preserveExisting bool) int {
+	if err := wiz.hostedDolt.validateRequest(effectiveInitBeadsProvider("")); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := wiz.hostedDolt.validateInitBeadsBackend(""); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	warnEmptyTemplateMissingBootstrapProfile(wiz, stderr)
 	tomlPath := filepath.Join(cityPath, citylayout.CityConfigFile)
 	if cityHasScaffoldFS(fs, cityPath) {
@@ -1385,11 +1430,9 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 		cfg = config.DefaultCity(cityName)
 	}
 	applyBootstrapProfile(&cfg, wiz.bootstrapProfile)
-	if wiz.hostedDolt.enabled() {
-		if err := wiz.hostedDolt.applyToCityConfig(&cfg); err != nil {
-			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
+	if err := wiz.hostedDolt.applySelectorToCityConfig(&cfg); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 	cityPrefix := strings.TrimSpace(cfg.Workspace.Prefix)
 
@@ -1780,6 +1823,24 @@ func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverri
 		fmt.Fprintf(stderr, "gc init --from: source %q has no city.toml\n", srcDir) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// Parse and apply selectors before copying anything. A rejected selector
+	// must leave the destination untouched so a corrected retry can proceed.
+	if data, err := os.ReadFile(srcToml); err != nil {
+		fmt.Fprintf(stderr, "gc init --from: reading source %q: %v\n", srcToml, err) //nolint:errcheck // best-effort stderr
+		return 1
+	} else if sourceCfg, err := config.Parse(data); err != nil {
+		fmt.Fprintf(stderr, "gc init --from: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	} else if err := hosted.validateRequest(effectiveInitBeadsProvider(sourceCfg.Beads.Provider)); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	} else if err := hosted.validateInitBeadsBackend(sourceCfg.Beads.Backend); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	} else if err := hosted.applySelectorToCityConfig(sourceCfg); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if cityAlreadyInitializedFS(fs, cityPath) {
 		return initAlreadyInitialized(stderr)
 	}
@@ -1795,6 +1856,10 @@ func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverri
 	copiedToml := filepath.Join(cityPath, "city.toml")
 	cfg, cityName, cityPrefix, persistSiteIdentity, rigSiteBindings, err := rewriteCopiedInitFromIdentity(fs, cityPath, nameOverride)
 	if err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := hosted.applySelectorToCityConfig(cfg); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}

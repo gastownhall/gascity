@@ -1,12 +1,19 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // ValidateDoltConfig rejects Dolt config values that would otherwise be
 // silently ignored or normalized at runtime.
 func ValidateDoltConfig(cfg *City, source string) error {
 	if cfg == nil {
 		return nil
+	}
+	mode := strings.TrimSpace(cfg.Dolt.Mode)
+	if mode != "" && mode != "server" && mode != "proxied-server" {
+		return fmt.Errorf("%s: [dolt] mode must be \"server\" or \"proxied-server\": got %q", source, cfg.Dolt.Mode)
 	}
 	checkNonNegative := func(field string, value int) error {
 		if value < 0 {
