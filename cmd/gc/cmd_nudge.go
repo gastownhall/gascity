@@ -92,11 +92,14 @@ var errNudgeSessionFenceMismatch = errors.New("queued nudge session fence mismat
 var (
 	// Test seams for cmd_nudge_test.go. Tests that replace these package
 	// variables must stay serial; do not use t.Parallel in those tests.
-	nudgeCityUsesManagedReconciler           = cityUsesManagedReconciler
-	nudgePokeController                      = pokeController
-	nudgeObserveTarget                       = workerObserveNudgeTarget
-	nudgeWithdrawQueuedWaitNudges            = withdrawQueuedWaitNudges
-	nudgeWarningWriter             io.Writer = os.Stderr
+	nudgeCityUsesManagedReconciler = cityUsesManagedReconciler
+	nudgePokeController            = pokeController
+	nudgeObserveTarget             = workerObserveNudgeTarget
+	// workerObserveNudgeTargetOnce seams the single-attempt observation that
+	// workerObserveNudgeTarget wraps in its bounded transient retry.
+	workerObserveNudgeTargetOnce            = workerObserveNudgeTargetImpl
+	nudgeWithdrawQueuedWaitNudges           = withdrawQueuedWaitNudges
+	nudgeWarningWriter            io.Writer = os.Stderr
 )
 
 type nudgeDeliveryMode string
@@ -1113,7 +1116,36 @@ func workerHandleForNudgeTarget(target nudgeTarget, store beads.Store, sp runtim
 	)
 }
 
+const (
+	// nudgeObserveTransientAttempts/nudgeObserveTransientBackoff mirror
+	// beads.BdStore.runBDTransientRead: the notify observe/read is
+	// idempotent, so a bounded retry on a transient Dolt connection drop
+	// (see beads.IsTransientConnError) is safe and prevents the nudge from
+	// being silently lost to a blip.
+	nudgeObserveTransientAttempts = 3
+	nudgeObserveTransientBackoff  = 50 * time.Millisecond
+)
+
+// workerObserveNudgeTarget observes a nudge target, retrying a bounded
+// number of times on a transient Dolt/bd connection error. On persistent
+// failure the error is returned to the caller rather than swallowed, so it
+// can be logged instead of silently dropping the notice.
 func workerObserveNudgeTarget(target nudgeTarget, store beads.Store, sp runtime.Provider) (worker.LiveObservation, error) {
+	var (
+		obs worker.LiveObservation
+		err error
+	)
+	for attempt := 1; attempt <= nudgeObserveTransientAttempts; attempt++ {
+		obs, err = workerObserveNudgeTargetOnce(target, store, sp)
+		if err == nil || !beads.IsTransientConnError(err) || attempt == nudgeObserveTransientAttempts {
+			return obs, err
+		}
+		time.Sleep(time.Duration(attempt) * nudgeObserveTransientBackoff)
+	}
+	return obs, err
+}
+
+func workerObserveNudgeTargetImpl(target nudgeTarget, store beads.Store, sp runtime.Provider) (worker.LiveObservation, error) {
 	if target.sessionName != "" {
 		obs, err := workerObserveSessionTargetWithConfig(target.cityPath, store, sp, target.cfg, target.sessionName)
 		if err != nil {
