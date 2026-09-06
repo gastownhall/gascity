@@ -704,7 +704,8 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 		if target == "" {
 			target = executionRoute
 		} else {
-			target = qualifyAttemptTargetWithSourceRoute(target, executionRoute, routeCfg)
+			stepRigContext := strings.TrimSpace(recipe.Steps[i].Metadata[beadmeta.ExecutionRigContextMetadataKey])
+			target = qualifyAttemptTargetWithSourceRoute(target, executionRoute, stepRigContext, routeCfg)
 		}
 		if isAttemptControlKind(recipe.Steps[i].Metadata[beadmeta.KindMetadataKey]) {
 			if err := applyAttemptControlStepRoute(&recipe.Steps[i], target, routeCfg, store); err != nil {
@@ -800,18 +801,24 @@ func failedAttemptAttachRootID(store beads.Store, control beads.Bead, attemptNum
 	return matches[0].ID, nil
 }
 
-func qualifyAttemptTargetWithSourceRoute(target, sourceRoute string, cfg *config.City) string {
+func qualifyAttemptTargetWithSourceRoute(target, sourceRoute, rigContext string, cfg *config.City) string {
 	target = strings.TrimSpace(target)
 	if target == "" || strings.Contains(target, "/") || cfg == nil {
 		return target
 	}
 	sourceRoute = strings.TrimSpace(sourceRoute)
-	slash := strings.IndexByte(sourceRoute, '/')
-	if slash <= 0 {
-		return target
+	if slash := strings.IndexByte(sourceRoute, '/'); slash > 0 {
+		if candidate := qualifyBareTargetWithRigPrefix(target, sourceRoute[:slash], cfg); candidate != "" {
+			return candidate
+		}
 	}
-	candidate := sourceRoute[:slash] + "/" + target
-	if config.FindAgent(cfg, candidate) != nil || config.FindNamedSession(cfg, candidate) != nil {
+	// The source route carried no rig qualifier of its own (for example a
+	// nested/runtime-minted retry control, which never gets
+	// gc.execution_routed_to stamped — only compile-time graphroute
+	// decoration does). Fall back to the step's own execution rig context,
+	// which is always backfilled onto attempt-spawned steps, so a
+	// rig-scoped bare target does not lose its rig qualifier on retry.
+	if candidate := qualifyBareTargetWithRigPrefix(target, rigContext, cfg); candidate != "" {
 		return candidate
 	}
 	return target
@@ -871,6 +878,21 @@ func applyRalphBodyChildControls(childMeta map[string]string, step, child *formu
 	if cf := strings.TrimSpace(child.Metadata[beadmeta.ControlForMetadataKey]); cf != "" {
 		childMeta[beadmeta.ControlForMetadataKey] = attemptPrefix + "." + cf
 	}
+}
+
+// qualifyBareTargetWithRigPrefix returns rigPrefix+"/"+target when that
+// qualified identity resolves to a configured agent or named session, or ""
+// when rigPrefix is empty or the candidate does not resolve.
+func qualifyBareTargetWithRigPrefix(target, rigPrefix string, cfg *config.City) string {
+	rigPrefix = strings.TrimSpace(rigPrefix)
+	if rigPrefix == "" {
+		return ""
+	}
+	candidate := rigPrefix + "/" + target
+	if config.FindAgent(cfg, candidate) != nil || config.FindNamedSession(cfg, candidate) != nil {
+		return candidate
+	}
+	return ""
 }
 
 // buildAttemptRecipe constructs a minimal formula.Recipe for one attempt
@@ -1296,6 +1318,14 @@ func applyAttemptStepRoute(step *formula.RecipeStep, target string, cfg *config.
 		}
 		step.Labels = removeAttemptPoolLabels(step.Labels)
 		if binding.metadataOnly {
+			if binding.independentSteps {
+				// A one-shot runtime exits after one bounded invocation. Clear
+				// any session-pinning metadata the frozen step spec carried
+				// forward — it names a session that already exited and no
+				// pool slot will ever claim.
+				delete(step.Metadata, beadmeta.ContinuationGroupMetadataKey)
+				delete(step.Metadata, beadmeta.SessionAffinityMetadataKey)
+			}
 			step.Assignee = ""
 			return
 		}
@@ -1390,10 +1420,11 @@ func latestAttemptCandidateIsControlInfrastructure(kind string) bool {
 }
 
 type attemptRouteBinding struct {
-	qualifiedName   string
-	metadataOnly    bool
-	sessionName     string
-	directSessionID string
+	qualifiedName    string
+	metadataOnly     bool
+	independentSteps bool
+	sessionName      string
+	directSessionID  string
 }
 
 func resolveAttemptRouteBinding(target string, cfg *config.City, store beads.Store) (attemptRouteBinding, bool) {
@@ -1421,6 +1452,10 @@ func resolveAttemptRouteBinding(target string, cfg *config.City, store beads.Sto
 			binding := attemptRouteBinding{qualifiedName: agentCfg.QualifiedName()}
 			if isAttemptMultiSessionTarget(agentCfg.QualifiedName(), cfg) {
 				binding.metadataOnly = true
+				// A one-shot runtime exits after a single bounded invocation, so
+				// no session survives between attempts to carry continuation.
+				// Mirrors graphroute.GraphRouteBindingForAgent's IndependentSteps.
+				binding.independentSteps = agentCfg.Lifecycle == config.AgentLifecycleOneShot
 				return binding, true
 			}
 			binding.sessionName = config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, agentCfg.QualifiedName())

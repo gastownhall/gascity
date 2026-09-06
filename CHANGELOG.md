@@ -113,6 +113,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   positional argument is split into individual IDs before single-versus-batch
   dispatch, so shell variables containing multiple IDs no longer look like one
   already-handled message.
+- **graphv2 retry re-attempts for rig-scoped `lifecycle=one_shot` steps now
+  keep their rig qualifier and drop stale session pinning.** A retry
+  control that is nested/runtime-minted (as opposed to one decorated at
+  compile time by graphroute) never gets `gc.execution_routed_to` stamped,
+  only `gc.execution_rig_context` backfilled. `spawnNextAttempt`'s
+  `qualifyAttemptTargetWithSourceRoute` derived a rig prefix only from
+  `gc.execution_routed_to`, so a re-attempt for a step whose
+  `gc.run_target` was a bare rig-template agent name lost its rig
+  qualifier — `gc.routed_to` landed unscoped and no pool ever claimed the
+  re-attempt. Separately, `applyAttemptStepRoute`'s metadata-only pool
+  branch never cleared `gc.session_affinity`/`gc.continuation_group` the
+  way `graphroute.ApplyGraphRouteBinding`'s `IndependentSteps` handling
+  does, so a re-attempt for a one_shot lifecycle agent stayed pinned to
+  session affinity for a runtime that had already exited after its
+  bounded invocation. Both are fixed: the target qualifier now falls back
+  to the step's own execution rig context, and metadata-only pool
+  attempts for one_shot agents now clear the stale continuation/affinity
+  keys, mirroring `graphroute.GraphRouteBindingForAgent`.
 
 - **`gc import add` of a local in-git pack now locks to HEAD, not the repo's
   latest tag.** Per `gc import add --help`, a local path inside a git
