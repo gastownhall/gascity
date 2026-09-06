@@ -280,6 +280,14 @@ func (p *forceLifecycleProvider) ListRunning(prefix string) ([]string, error) {
 	return running, err
 }
 
+// Stop is recorded so the trace says whether the late sweep even ATTEMPTED a
+// stop — an empty lateRunning and a stop that did not take look identical
+// otherwise (ga-0q686).
+func (p *forceLifecycleProvider) Stop(name string) error {
+	p.record("Stop:" + name)
+	return p.Fake.Stop(name)
+}
+
 func (p *forceLifecycleProvider) ConfigureServer() error { return nil }
 
 func (p *forceLifecycleProvider) TeardownServer() error {
@@ -391,6 +399,8 @@ func TestCityRuntimeForceShutdownTearsDownAfterLateAsyncSweep(t *testing.T) {
 		t.Fatalf("TeardownServer landed before the last (late-async) ListRunning (events: %v); a session created between the sweeps would be killed ungracefully", ev)
 	}
 	if sp.IsRunning("worker") {
-		t.Fatal("force shutdown missed the late async-started runtime")
+		// The four assertions above all print ev; this one did not, so the only
+		// assertion that ever fires was the only undiagnosable one (ga-0q686).
+		t.Fatalf("force shutdown missed the late async-started runtime (events: %v)", ev)
 	}
 }

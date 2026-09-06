@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -190,5 +192,73 @@ func TestApplySiteBindingsSkipsDurabilityAuditOnSyntheticFS(t *testing.T) {
 	}
 	if len(warnings) != 0 {
 		t.Fatalf("synthetic FS was probed against the host: %q", warnings)
+	}
+}
+
+// TestApplySiteBindingsJudgesRelativeRigPathsAgainstTheCity runs the audit
+// against the real probe, because this is the one caller that reaches it with a
+// relative path and every other test in this file stubs the probe with a
+// function that ignores cityRoot entirely.
+//
+// city.toml may write a rig path relative to the city, and the rest of the
+// codebase joins it onto the city root (internal/rig/topology.go). This audit
+// reads rig.Path verbatim, so before the resolution moved into Classify the
+// verdict came from wherever the process happened to be running — a controller
+// started from a tmpfs working directory warned that a rig safely under the city
+// was about to be lost, and told the operator to move it under the city
+// directory it was already in.
+//
+// The registration guard cannot exercise this: validateRequest refuses a
+// non-absolute ProvisionRequest.Path before the check runs. The boot audit is
+// where the bug was reachable, so it is where the real probe belongs.
+func TestApplySiteBindingsJudgesRelativeRigPathsAgainstTheCity(t *testing.T) {
+	cityRoot := t.TempDir()
+
+	// tmpfs is what makes the working directory discriminating. Without it the
+	// pre-fix and post-fix verdicts agree and a pass would mean nothing, so skip
+	// loudly instead.
+	ephemeralDir, err := os.MkdirTemp("/dev/shm", "gc-site-binding-cwd-*")
+	if err != nil {
+		t.Skipf("no usable tmpfs to run from: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(ephemeralDir); err != nil {
+			t.Logf("removing %s: %v", ephemeralDir, err)
+		}
+	})
+	if got := pathdurability.Classify(cityRoot, ephemeralDir).Class; got != pathdurability.Ephemeral {
+		t.Skipf("working directory classifies as %q, not %q; the relative-path bug is invisible here", got, pathdurability.Ephemeral)
+	}
+
+	// doomed is the control. It is an absolute path on the same tmpfs, so it must
+	// warn in this very run — otherwise silence for the relative binding would
+	// prove only that the audit had stopped warning about anything.
+	doomed := filepath.Join(ephemeralDir, "doomed")
+	cfg := bindRigs(t, cityRoot, map[string]string{
+		"backend": "rigs/backend",
+		"doomed":  doomed,
+	})
+
+	t.Chdir(ephemeralDir)
+
+	warnings, err := ApplySiteBindings(fsys.OSFS{}, cityRoot, cfg)
+	if err != nil {
+		t.Fatalf("ApplySiteBindings: %v", err)
+	}
+	var control, relative []string
+	for _, w := range warnings {
+		switch {
+		case strings.Contains(w, doomed):
+			control = append(control, w)
+		case strings.Contains(w, "rigs/backend"):
+			relative = append(relative, w)
+		}
+	}
+	if len(control) != 1 {
+		t.Fatalf("the control binding on tmpfs did not warn exactly once (got %d), so this test cannot "+
+			"tell a fixed audit from a silent one: %q", len(control), warnings)
+	}
+	if len(relative) != 0 {
+		t.Fatalf("a rig path relative to the city was judged against the working directory: %q", relative)
 	}
 }

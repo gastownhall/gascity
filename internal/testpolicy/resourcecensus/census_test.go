@@ -14,6 +14,8 @@ import (
 	"testing"
 	"testing/fstest"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/testpolicy/waiverclock"
 )
 
 // updateLedgerDoc regenerates the TESTING.md checked resource ledger block
@@ -1758,7 +1760,7 @@ func TestValidateAcceptsExactSourceRatchets(t *testing.T) {
 	policy := validLedger(census)
 	ledger := cloneLedger(policy)
 
-	if err := validateAgainstPolicy(policy, ledger, census, fixedNow()); err != nil {
+	if _, err := validateAgainstPolicy(policy, ledger, census, fixedNow(), waiverclock.ModeStrict); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
 }
@@ -1777,7 +1779,7 @@ func TestValidateRejectsDebtGrowthAndStaleHighBaselines(t *testing.T) {
 		row.BaselineCalls = 1
 		row.BaselineFiles = 1
 		ledger := cloneLedger(policy)
-		err := validateAgainstPolicy(policy, ledger, census, fixedNow())
+		_, err := validateAgainstPolicy(policy, ledger, census, fixedNow(), waiverclock.ModeStrict)
 		requireErrorContains(t, err,
 			"source resource census grew: scope=untagged resource=subprocess calls=2 (baseline 1), files=2 (baseline 1)")
 	})
@@ -1788,7 +1790,7 @@ func TestValidateRejectsDebtGrowthAndStaleHighBaselines(t *testing.T) {
 		row.BaselineCalls = 3
 		row.BaselineFiles = 3
 		ledger := cloneLedger(policy)
-		err := validateAgainstPolicy(policy, ledger, census, fixedNow())
+		_, err := validateAgainstPolicy(policy, ledger, census, fixedNow(), waiverclock.ModeStrict)
 		requireErrorContains(t, err,
 			"source resource census baseline is stale: scope=untagged resource=subprocess calls=2 (baseline 3), files=2 (baseline 3); lower the checked baseline to bank the improvement")
 	})
@@ -1807,7 +1809,7 @@ func TestValidateAllowsHistoricalNeedleToDifferFromASTCensus(t *testing.T) {
 	row.ReportedFiles = 1
 	ledger := cloneLedger(policy)
 
-	if err := validateAgainstPolicy(policy, ledger, census, fixedNow()); err != nil {
+	if _, err := validateAgainstPolicy(policy, ledger, census, fixedNow(), waiverclock.ModeStrict); err != nil {
 		t.Fatalf("Validate rejected historical source needle: %v", err)
 	}
 }
@@ -1825,7 +1827,7 @@ func TestValidateAllowsNarrowerHistoricalCmdGCNeedle(t *testing.T) {
 	row.ReportedFiles = 1
 	ledger := cloneLedger(policy)
 
-	if err := validateAgainstPolicy(policy, ledger, census, fixedNow()); err != nil {
+	if _, err := validateAgainstPolicy(policy, ledger, census, fixedNow(), waiverclock.ModeStrict); err != nil {
 		t.Fatalf("Validate rejected narrower historical cmd/gc source needle: %v", err)
 	}
 }
@@ -1843,7 +1845,7 @@ func TestValidateRejectsCoordinatedCmdGCCensusAndManifestGrowth(t *testing.T) {
 		Resource: ResourceEnvironment,
 	}}}
 
-	err := validateAgainstPolicy(policy, ledger, census, fixedNow())
+	_, err := validateAgainstPolicy(policy, ledger, census, fixedNow(), waiverclock.ModeStrict)
 	requireErrorContains(t, err, "baseline_calls = 1, bootstrap policy requires 0")
 	if strings.Contains(err.Error(), "source resource census") {
 		t.Fatalf("live census was compared before cmd/gc policy drift was rejected: %v", err)
@@ -1931,7 +1933,7 @@ func TestValidateRejectsBootstrapPolicyDriftBeforeLiveCensus(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ledger := cloneLedger(policy)
 			tt.mutate(&ledger)
-			err := validateAgainstPolicy(policy, ledger, grownCensus, fixedNow())
+			_, err := validateAgainstPolicy(policy, ledger, grownCensus, fixedNow(), waiverclock.ModeStrict)
 			requireErrorContains(t, err, tt.want)
 			if strings.Contains(err.Error(), "source resource census") {
 				t.Fatalf("live census was compared before bootstrap policy drift was rejected: %v", err)
@@ -1945,7 +1947,7 @@ func TestValidateUsesCodeOwnedBootstrapPolicy(t *testing.T) {
 
 	ledger := cloneLedger(bootstrapPolicy)
 	ledger.Debt[0].OwnerBead = "ga-rewritten"
-	err := Validate(ledger, Census{}, fixedNow())
+	_, err := Validate(ledger, Census{}, fixedNow(), waiverclock.ModeStrict)
 	requireErrorContains(t, err, `owner_bead = "ga-rewritten", bootstrap policy requires "ga-80po0c.2"`)
 	if strings.Contains(err.Error(), "source resource census") {
 		t.Fatalf("live census was compared before code-owned policy drift was rejected: %v", err)
@@ -1989,12 +1991,12 @@ func TestBootstrapPolicyOwnsNetListenDebtAndExactMediumOwners(t *testing.T) {
 	t.Parallel()
 
 	debt := findRow(t, bootstrapPolicy.Debt, ScopeUntagged, ResourceNetListen)
-	if debt.BaselineCalls != 95 || debt.BaselineFiles != 36 || debt.ReportedCalls != 92 || debt.ReportedFiles != 34 {
-		t.Fatalf("stream-listener source baseline/reported = %d/%d, %d/%d; want 95/36, 92/34", debt.BaselineCalls, debt.BaselineFiles, debt.ReportedCalls, debt.ReportedFiles)
+	if debt.BaselineCalls != 96 || debt.BaselineFiles != 37 || debt.ReportedCalls != 92 || debt.ReportedFiles != 34 {
+		t.Fatalf("stream-listener source baseline/reported = %d/%d, %d/%d; want 96/37, 92/34", debt.BaselineCalls, debt.BaselineFiles, debt.ReportedCalls, debt.ReportedFiles)
 	}
 	smallDebt := findRow(t, bootstrapPolicy.SmallDebt, ScopeUntagged, ResourceNetListen)
-	if smallDebt.BaselineCalls != 93 || smallDebt.BaselineFiles != 35 {
-		t.Fatalf("stream-listener Small baseline = %d/%d, want 93/35", smallDebt.BaselineCalls, smallDebt.BaselineFiles)
+	if smallDebt.BaselineCalls != 94 || smallDebt.BaselineFiles != 36 {
+		t.Fatalf("stream-listener Small baseline = %d/%d, want 94/36", smallDebt.BaselineCalls, smallDebt.BaselineFiles)
 	}
 	for _, row := range []*Baseline{debt, smallDebt} {
 		if row.OwnerBead != "ga-80po0c.2.2.2" || row.MigrationTarget != "P0.4c-listener" {
@@ -2069,12 +2071,12 @@ func TestBootstrapPolicyOwnsTmuxDebtAndExactMediumSetup(t *testing.T) {
 	t.Parallel()
 
 	debt := findRow(t, bootstrapPolicy.Debt, ScopeUntagged, ResourceTmux)
-	if debt.BaselineCalls != 6 || debt.BaselineFiles != 2 {
-		t.Fatalf("tmux source baseline = %d/%d, want 6/2", debt.BaselineCalls, debt.BaselineFiles)
+	if debt.BaselineCalls != 7 || debt.BaselineFiles != 3 {
+		t.Fatalf("tmux source baseline = %d/%d, want 7/3", debt.BaselineCalls, debt.BaselineFiles)
 	}
 	smallDebt := findRow(t, bootstrapPolicy.SmallDebt, ScopeUntagged, ResourceTmux)
-	if smallDebt.BaselineCalls != 0 || smallDebt.BaselineFiles != 0 {
-		t.Fatalf("tmux Small baseline = %d/%d, want 0/0", smallDebt.BaselineCalls, smallDebt.BaselineFiles)
+	if smallDebt.BaselineCalls != 1 || smallDebt.BaselineFiles != 1 {
+		t.Fatalf("tmux Small baseline = %d/%d, want 1/1", smallDebt.BaselineCalls, smallDebt.BaselineFiles)
 	}
 	for _, row := range []*Baseline{debt, smallDebt} {
 		if row.OwnerBead != "ga-80po0c.2.2.1" || row.MigrationTarget != "P0.4c-tmux" {
@@ -2180,7 +2182,7 @@ func TestValidateRequiresTheExactBootstrapRowSet(t *testing.T) {
 			mutate: func(ledger *Ledger) {
 				ledger.Debt[0].Expires = "2026-07-12"
 			},
-			want: `debt baseline scope=untagged resource=subprocess: expired 2026-07-12`,
+			want: `debt baseline scope=untagged resource=subprocess: waiver owned by P0.4 expired 2026-07-12`,
 		},
 		{
 			name: "unknown resource",
@@ -2203,7 +2205,7 @@ func TestValidateRequiresTheExactBootstrapRowSet(t *testing.T) {
 			policy := validLedger(Census{})
 			ledger := cloneLedger(policy)
 			tt.mutate(&ledger)
-			err := validateAgainstPolicy(policy, ledger, Census{}, fixedNow())
+			_, err := validateAgainstPolicy(policy, ledger, Census{}, fixedNow(), waiverclock.ModeStrict)
 			requireErrorContains(t, err, tt.want)
 		})
 	}
@@ -2363,7 +2365,18 @@ func TestRepositoryLedgerMatchesCensusAndDocumentation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ScanRepository: %v", err)
 	}
-	if err := Validate(ledger, census, time.Now().UTC()); err != nil {
+	// The one call in this package that reads the wall clock, and so the one a
+	// calendar rollover can turn red with no code change. The mode decides who
+	// pays for that: everyone, or the row's owner.
+	mode, err := waiverclock.FromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	warnings, err := Validate(ledger, census, time.Now().UTC(), mode)
+	for _, warning := range warnings {
+		t.Logf("waiver clock: %s", warning)
+	}
+	if err != nil {
 		t.Fatalf("resource ledger drift:\n%v", err)
 	}
 

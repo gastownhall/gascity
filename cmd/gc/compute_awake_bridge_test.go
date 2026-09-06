@@ -79,6 +79,60 @@ func TestBuildAwakeInputFromReconcilerReadsInfoSnapshot(t *testing.T) {
 	}
 }
 
+func TestBuildAwakeInputFromReconcilerPrefersFreshCompletedPoolSession(t *testing.T) {
+	decisionTime := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	const template = "hello-world/polecat"
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "polecat", Dir: "hello-world"}},
+	}
+	sessionInfo := func(id, name string, createdAt time.Time) session.Info {
+		return sessiontest.SeedBead(t, beads.Bead{
+			ID:        id,
+			Status:    "open",
+			Type:      sessionBeadType,
+			CreatedAt: createdAt,
+			Labels:    []string{sessionBeadLabel, "template:" + template},
+			Metadata: map[string]string{
+				"state":                "awake",
+				"state_reason":         "creation_complete",
+				"creation_complete_at": createdAt.Format(time.RFC3339),
+				"session_name":         name,
+				"template":             template,
+				"session_origin":       "ephemeral",
+				poolManagedMetadataKey: boolMetadata(true),
+			},
+		})
+	}
+	oldInfo := sessionInfo("mc-old", "polecat-old", decisionTime.Add(-time.Hour))
+	freshInfo := sessionInfo("mc-fresh", "polecat-fresh", decisionTime.Add(-time.Minute))
+
+	input := buildAwakeInputFromReconciler(
+		cfg,
+		"",
+		[]session.Info{oldInfo, freshInfo},
+		map[string]int{template: 1},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		runtime.NewFake(),
+		decisionTime,
+	)
+	if input.SessionBeads[0].PostCreateProtected {
+		t.Fatal("old session unexpectedly marked post-create protected")
+	}
+	if !input.SessionBeads[1].PostCreateProtected {
+		t.Fatal("fresh session was not marked post-create protected")
+	}
+
+	decisions := ComputeAwakeSet(input)
+	assertAsleep(t, decisions, "polecat-old")
+	assertAwake(t, decisions, "polecat-fresh")
+}
+
 // TestBuildAwakeInputFromReconcilerCanonicalizesLegacyBoundTemplate pins the
 // bridge-side identity normalization for adopted legacy-bound session beads.
 // A bead persisted under a removed binding ("gascity-packs/gc.implementation-worker")
@@ -213,6 +267,91 @@ func TestBuildAwakeInputFromReconcilerCarriesResetPendingMetadata(t *testing.T) 
 	}
 	if !got.ContinuationResetPending {
 		t.Fatalf("ContinuationResetPending = false, want true")
+	}
+}
+
+func TestBuildAwakeInputFromReconcilerCarriesDrainedResetPendingCombination(t *testing.T) {
+	now := time.Now().UTC()
+	metadata := func(withMarker bool) map[string]string {
+		m := map[string]string{
+			"state":                      "drained",
+			"session_name":               "s-drained-reset",
+			"template":                   "build-agent",
+			"continuation_reset_pending": "true",
+		}
+		if withMarker {
+			m[session.ResetCommittedAtKey] = now.Format(time.RFC3339)
+		}
+		return m
+	}
+
+	// A stalled reset (marker committed, start never happened) followed by a
+	// drain-ack leaves drained + pending + marker. The bridge must surface
+	// that combination, or the Drained guard on the reset-pending awake arm
+	// can never observe the state it exists for.
+	input := buildAwakeInputFromReconciler(
+		&config.City{},
+		"", // cityPath: empty exercises zero suspension state
+		[]session.Info{sessiontest.SeedBead(t, beads.Bead{
+			ID:       "mc-session-1",
+			Status:   "open",
+			Type:     "session",
+			Metadata: metadata(true),
+		})},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		now,
+	)
+	if len(input.SessionBeads) != 1 {
+		t.Fatalf("SessionBeads length = %d, want 1", len(input.SessionBeads))
+	}
+	got := input.SessionBeads[0]
+	if !got.Drained {
+		t.Fatalf("Drained = false, want true")
+	}
+	if !got.ContinuationResetPending {
+		t.Fatalf("ContinuationResetPending = false, want true")
+	}
+
+	// A drain-ack alone stamps continuation_reset_pending without
+	// reset_committed_at; the bridge deliberately does not surface that
+	// shape as reset-pending.
+	input = buildAwakeInputFromReconciler(
+		&config.City{},
+		"", // cityPath: empty exercises zero suspension state
+		[]session.Info{sessiontest.SeedBead(t, beads.Bead{
+			ID:       "mc-session-2",
+			Status:   "open",
+			Type:     "session",
+			Metadata: metadata(false),
+		})},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		now,
+	)
+	if len(input.SessionBeads) != 1 {
+		t.Fatalf("SessionBeads length = %d, want 1", len(input.SessionBeads))
+	}
+	got = input.SessionBeads[0]
+	if !got.Drained {
+		t.Fatalf("Drained = false, want true")
+	}
+	if got.ContinuationResetPending {
+		t.Fatalf("ContinuationResetPending = true for drain-ack-only metadata, want false")
 	}
 }
 

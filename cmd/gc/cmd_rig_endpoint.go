@@ -127,7 +127,7 @@ func doRigSetEndpoint(fs fsys.FS, cityPath, rigName string, opts rigEndpointOpti
 	}
 	if strings.TrimSpace(rig.Path) == "" {
 		// Unbound rig: the downstream helpers join paths against rig.Path
-		// (snapshotRigEndpointFiles, ensureCanonicalScopeMetadataIfPresent,
+		// (snapshotRigEndpointFiles, requireCanonicalizedScopeMetadata,
 		// syncRigManagedPortArtifact, etc.). Empty rig.Path would produce
 		// relative `.beads/...` writes under the current working directory
 		// instead of erroring cleanly.
@@ -187,7 +187,7 @@ func doRigSetEndpoint(fs fsys.FS, cityPath, rigName string, opts rigEndpointOpti
 		fmt.Fprintf(stderr, "gc rig set-endpoint: snapshot canonical files: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if err := ensureCanonicalScopeMetadataIfPresent(fs, rig.Path); err != nil {
+	if err := requireCanonicalizedScopeMetadata(fs, rig.Path); err != nil {
 		writeRigEndpointRollbackError(fs, stderr, snapshots, "canonicalizing metadata", err)
 		return 1
 	}
@@ -363,29 +363,30 @@ func requireCanonicalScopeMetadata(fs fsys.FS, scopeRoot string) error {
 	return nil
 }
 
-// ensureCanonicalScopeMetadataIfPresent canonicalizes an existing scope's
-// metadata to server mode, for the endpoint commands (`gc rig set-endpoint`,
-// `gc beads city use-managed`/`use-external`).
+// requireCanonicalizedScopeMetadata canonicalizes to server mode the metadata of
+// the scope an endpoint command is reconfiguring: the rig named by
+// `gc rig set-endpoint <rig>`, and the city's own scope in
+// `gc beads city use-managed`/`use-external`.
+//
+// That scope must already carry a usable .beads/metadata.json. It is the store
+// whose topology the operator asked to rewrite, so an absent or unpinned file
+// means there is nothing to rewrite, and the command fails rather than invent a
+// store the operator never initialized.
 //
 // It announces the mode change for the same reason ensureCanonicalScopeMetadata
 // does: this is the identical rewrite through a different door, and a warning
 // that depends on which command performed the flip is a warning an operator
 // cannot rely on.
-func ensureCanonicalScopeMetadataIfPresent(fs fsys.FS, scopeRoot string) error {
-	path := filepath.Join(scopeRoot, ".beads", "metadata.json")
-	doltDatabase, err := func() (string, error) {
-		if err := requireCanonicalScopeMetadata(fs, scopeRoot); err != nil {
-			return "", err
-		}
-		doltDatabase, _, err := contract.ReadDoltDatabase(fs, path)
-		if err != nil {
-			return "", err
-		}
-		return strings.TrimSpace(doltDatabase), nil
-	}()
+func requireCanonicalizedScopeMetadata(fs fsys.FS, scopeRoot string) error {
+	if err := requireCanonicalScopeMetadata(fs, scopeRoot); err != nil {
+		return err
+	}
+	path := scopeMetadataPath(scopeRoot)
+	doltDatabase, _, err := contract.ReadDoltDatabase(fs, path)
 	if err != nil {
 		return err
 	}
+	doltDatabase = strings.TrimSpace(doltDatabase)
 	announceStorageModeChange(fs, path, "server", doltDatabase)
 	_, err = contract.EnsureCanonicalMetadata(fs, path, contract.MetadataState{
 		Database:     "dolt",
@@ -394,6 +395,30 @@ func ensureCanonicalScopeMetadataIfPresent(fs fsys.FS, scopeRoot string) error {
 		DoltDatabase: doltDatabase,
 	})
 	return err
+}
+
+// canonicalizeScopeMetadataIfPresent is requireCanonicalizedScopeMetadata for a
+// scope the operator did not name: the inherited rigs a city endpoint change
+// sweeps along. A rig registered with the city but never initialized has no
+// .beads/metadata.json, and that is not a reason to refuse to reconfigure the
+// city — hard-failing there took down every start of a city carrying such a rig,
+// with no recovery path (ga-5k989).
+//
+// Absent means absent, and nothing else. A metadata.json that exists but pins no
+// dolt_database is a misconfigured store rather than an uninitialized one, and
+// still fails: the skip must not become a way to lose a real topology error.
+func canonicalizeScopeMetadataIfPresent(fs fsys.FS, scopeRoot string) error {
+	if _, err := fs.Stat(scopeMetadataPath(scopeRoot)); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	return requireCanonicalizedScopeMetadata(fs, scopeRoot)
+}
+
+func scopeMetadataPath(scopeRoot string) string {
+	return filepath.Join(scopeRoot, ".beads", "metadata.json")
 }
 
 func syncRigManagedPortArtifact(cityPath, rigPath string, cityState, rigState contract.ConfigState) error {

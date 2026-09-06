@@ -26,11 +26,6 @@ const (
 	GraphExecutionRigContextMetaKey = beadmeta.ExecutionRigContextMetadataKey
 )
 
-// poolWorkflowContinuationGroup is the continuation group value stamped on
-// pool-routed graph.v2 steps so preassignHookContinuationGroup keeps all steps
-// of a molecule on the same pool slot (fixes #2978).
-const poolWorkflowContinuationGroup = "pool-workflow"
-
 // AgentResolver resolves an agent name to a config.Agent.
 type AgentResolver interface {
 	ResolveAgent(cfg *config.City, name, rigContext string) (config.Agent, bool)
@@ -57,6 +52,14 @@ type GraphRouteBinding struct {
 	DirectSessionID string
 	RigContext      string
 	MetadataOnly    bool
+	// ContinuationGroup is the formula-declared continuation group for a
+	// pool-routed (MetadataOnly) step, captured from the authored recipe
+	// metadata at decoration time. It is the immutable source of the pool
+	// opt-in: ApplyGraphRouteBinding pins the step to a slot only when this is
+	// non-empty, and never consults the step's own (mutable, re-decoratable)
+	// metadata for the decision. Empty means the formula did not opt in, and a
+	// re-decorated step's stale group is cleared rather than preserved.
+	ContinuationGroup string
 }
 
 type graphStepTarget struct {
@@ -189,11 +192,30 @@ func ApplyGraphRouteBinding(step *formula.RecipeStep, binding GraphRouteBinding)
 	}
 	step.Metadata[beadmeta.RoutedToMetadataKey] = binding.QualifiedName
 	if binding.MetadataOnly {
-		// Pool-routed step: stamp continuation group so preassignHookContinuationGroup
-		// pre-assigns all molecule steps to the claiming slot, preventing scatter
-		// across pool slots (fixes #2978).
-		step.Metadata[beadmeta.ContinuationGroupMetadataKey] = poolWorkflowContinuationGroup
-		step.Metadata[beadmeta.SessionAffinityMetadataKey] = "require"
+		// Pool-routed step: the pool decides which slot runs it. Whether the
+		// molecule's steps must share one slot is the formula's call, declared as
+		// a continuation group and captured into the binding from the authored
+		// recipe at decoration time; preassignHookContinuationGroup then pins the
+		// siblings to whichever slot claims first (#2978). Stamping a group Go
+		// manufactured would apply that judgment to every pool-routed molecule
+		// whether its formula asked for it or not — a routing decision Go is not
+		// entitled to make.
+		//
+		// The opt-in reads binding.ContinuationGroup (the immutable source),
+		// never the step's own mutable metadata, so a re-decorated step can never
+		// re-affirm a stale group its current binding no longer declares. When the
+		// formula opted in, stamp the group + affinity; otherwise clear the group
+		// and affinity together (the pinned pair, per
+		// beadmeta.SessionAffinityMetadataKeys) so no stale group survives to
+		// mis-vacuum later pool claims.
+		if group := strings.TrimSpace(binding.ContinuationGroup); group != "" {
+			step.Metadata[beadmeta.ContinuationGroupMetadataKey] = group
+			step.Metadata[beadmeta.SessionAffinityMetadataKey] = "require"
+		} else {
+			for _, key := range beadmeta.SessionAffinityMetadataKeys {
+				delete(step.Metadata, key)
+			}
+		}
 		step.Assignee = ""
 		return
 	}
@@ -594,6 +616,12 @@ func DecorateGraphWorkflowRecipeWithDefaultBinding(recipe *formula.Recipe, route
 		if err != nil {
 			return err
 		}
+		// Capture the formula-declared continuation group from the authored
+		// (freshly-cloned) step metadata so the pool opt-in is sourced immutably
+		// through the binding rather than re-read from metadata a later
+		// decoration may have mutated (the finding [1] re-decoration concern).
+		// binding is a per-step value copy, so this never pollutes the route cache.
+		binding.ContinuationGroup = strings.TrimSpace(step.Metadata[beadmeta.ContinuationGroupMetadataKey])
 		if IsControlDispatcherKind(step.Metadata[beadmeta.KindMetadataKey]) {
 			AssignGraphStepRoute(step, binding, &controlRoute)
 			continue

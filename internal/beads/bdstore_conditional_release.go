@@ -36,8 +36,9 @@ import (
 // the contract-tested minimum (deps.env BD_PREV_VERSION, 1.0.4) and — the
 // load-bearing one — the installable default CI and operators actually install
 // (deps.env BD_VERSION, 1.1.0). The flags landed on beads main after that
-// release, in beads#5008, and no published release carries them yet, so on a
-// stock install the FALLBACK is still the live path. The verb is exercised
+// release, in beads#5008, and the only release carrying them so far is a
+// prerelease (v1.2.1), below the published bar BD_VERSION holds, so on a stock
+// install the FALLBACK is still the live path. The verb is exercised
 // against the source-built deps.env BD_CURRENT_REF bd
 // (make test-bd-conditional-release-contract).
 
