@@ -141,6 +141,15 @@ func TestWakeFairnessInfoTwinCharacterization(t *testing.T) {
 			})),
 			want: base,
 		},
+		{
+			// A malformed slept_at must fall through the middle tier to CreatedAt
+			// rather than being treated as present-but-zero.
+			name: "malformed-slept-at-falls-through-to-created",
+			bead: beadWithMeta("ga-badslept", base.Add(-70*time.Minute), map[string]string{
+				"template": "worker", "slept_at": "not-a-timestamp",
+			}),
+			want: base.Add(-70 * time.Minute),
+		},
 	}
 
 	for _, sc := range scenarios {
