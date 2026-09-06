@@ -1377,7 +1377,8 @@ func hookClaimLifecycleCandidate(bead beads.Bead, opts hookClaimOptions) bool {
 func hookClaimIdentityPatch(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string) map[string]string {
 	patch := map[string]string{}
 	if branch := strings.TrimSpace(ops.ResolveWorkBranch(dir)); branch != "" &&
-		strings.TrimSpace(bead.Metadata[beadmeta.WorkBranchMetadataKey]) != branch {
+		strings.TrimSpace(bead.Metadata[beadmeta.WorkBranchMetadataKey]) != branch &&
+		hookClaimWorktreeEvidenceIsWholeOrAbsent(bead) {
 		patch[beadmeta.WorkBranchMetadataKey] = branch
 	}
 	if sessionID := hookClaimSessionID(opts.Env); sessionID != "" &&
@@ -1394,6 +1395,39 @@ func hookClaimIdentityPatch(bead beads.Bead, opts hookClaimOptions, ops hookClai
 		patch[beadmeta.ClaimedAtMetadataKey] = time.Now().UTC().Format(time.RFC3339)
 	}
 	return patch
+}
+
+// worktreeOwnershipEvidenceKeys are the eight worktree-ownership metadata
+// keys worktreeSpecForBead (pool_desired_state.go) requires alongside
+// gc.work_branch before it will treat a bead as a fully managed workspace.
+var worktreeOwnershipEvidenceKeys = []string{
+	beadmeta.WorktreeRepoMetadataKey,
+	beadmeta.WorktreeRootMetadataKey,
+	beadmeta.WorktreeBaseRefMetadataKey,
+	beadmeta.WorktreeBaseSHAMetadataKey,
+	beadmeta.WorktreeCreatorMetadataKey,
+	beadmeta.WorktreeOwnerMetadataKey,
+	beadmeta.WorktreeGenerationMetadataKey,
+	beadmeta.WorktreeLifecycleMetadataKey,
+}
+
+// hookClaimWorktreeEvidenceIsWholeOrAbsent reports whether a bead's other
+// eight worktree-ownership keys are either all present or all absent. A claim
+// must not be the thing that first introduces a partial (1-7 of 8) ownership
+// shape by ambiently stamping gc.work_branch onto a bead that already carries
+// some-but-not-all of the other eight keys -- that half-published shape is
+// exactly what worktreeSpecForBead hard-errors on (ga-ryeij1.1 Decision b).
+// Stamping stays safe at both boundaries: zero of the eight (a legacy or
+// not-yet-published bead) or all eight (evidence already complete; this is
+// just keeping the branch in sync).
+func hookClaimWorktreeEvidenceIsWholeOrAbsent(bead beads.Bead) bool {
+	present := 0
+	for _, key := range worktreeOwnershipEvidenceKeys {
+		if strings.TrimSpace(bead.Metadata[key]) != "" {
+			present++
+		}
+	}
+	return present == 0 || present == len(worktreeOwnershipEvidenceKeys)
 }
 
 func hookStampWorkMetaWithBdStore(_ context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error {

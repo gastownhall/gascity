@@ -71,6 +71,72 @@ func drainAckBeadStatus(t *testing.T, store beads.Store, id string) (status, ass
 	return got.Status, got.Assignee
 }
 
+// TestDrainAckResolvesRuntimeNameToSessionBeadID covers pool sessions whose
+// tmux name is metadata on a ci-wisp-* session bead rather than the bead ID.
+// The runtime command receives the tmux name, so the release path must resolve
+// that name before it can discover the identities holding work.
+func TestDrainAckResolvesRuntimeNameToSessionBeadID(t *testing.T) {
+	store := beads.NewMemStore()
+	const runtimeName = "city--worker-3-pool"
+
+	sessionBead := mustCreateDrainAckBead(t, store, beads.Bead{
+		ID:    "ci-wisp-session-3",
+		Title: "city/worker-3",
+		Type:  session.BeadType,
+		Metadata: map[string]string{
+			"session_name": runtimeName,
+			"template":     "worker",
+		},
+	}, "", "")
+	held := mustCreateDrainAckBead(t, store, beads.Bead{
+		Title: "claimed after the session's last executable turn",
+		Type:  "task",
+	}, "in_progress", runtimeName)
+
+	var stderr bytes.Buffer
+	releaseUnexecutedClaimsForSessionStore("", nil, store, nil, runtimeName, drainAckReleaseBudget, &stderr)
+
+	if sessionBead.ID == runtimeName {
+		t.Fatalf("fixture session ID %q unexpectedly equals runtime name", sessionBead.ID)
+	}
+	status, assignee := drainAckBeadStatus(t, store, held.ID)
+	if status != "open" || assignee != "" {
+		t.Fatalf("held work is status=%q assignee=%q after drain-ack release, want open and unassigned; stderr=%s", status, assignee, stderr.String())
+	}
+}
+
+// TestDrainAckReleasesWhenSessionBeadIDIsTheRuntimeName is the control for the
+// case above: the non-pool shape, where the bead ID and the runtime name are the
+// same string, must still release. The wrapper is now the only entry to both
+// shapes, and resolution applies an IsSessionBeadOrRepairable acceptance check
+// the old direct Get did not.
+func TestDrainAckReleasesWhenSessionBeadIDIsTheRuntimeName(t *testing.T) {
+	store := beads.NewMemStore()
+	const runtimeName = "worker-1"
+
+	mustCreateDrainAckBead(t, store, beads.Bead{
+		ID:    runtimeName,
+		Title: "city/worker-1",
+		Type:  session.BeadType,
+		Metadata: map[string]string{
+			"session_name": runtimeName,
+			"template":     "worker",
+		},
+	}, "", "")
+	held := mustCreateDrainAckBead(t, store, beads.Bead{
+		Title: "claimed after the session's last executable turn",
+		Type:  "task",
+	}, "in_progress", runtimeName)
+
+	var stderr bytes.Buffer
+	releaseUnexecutedClaimsForSessionStore("", nil, store, nil, runtimeName, drainAckReleaseBudget, &stderr)
+
+	status, assignee := drainAckBeadStatus(t, store, held.ID)
+	if status != "open" || assignee != "" {
+		t.Fatalf("held work is status=%q assignee=%q after drain-ack release, want open and unassigned; stderr=%s", status, assignee, stderr.String())
+	}
+}
+
 // TestDrainAckReleasesUnexecutedClaims pins F-D: drain-ack means "I am done and
 // I hold nothing." A session that reaches it still holding an in_progress claim
 // never executed that claim, so the claim is given back — across the

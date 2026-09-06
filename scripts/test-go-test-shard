@@ -22,6 +22,10 @@ fi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+
+# One shared seeded gitconfig for every nested test env; resolved once so the
+# env -i block below cannot drift from the Makefile (scripts/test-gitconfig-path).
+gc_test_gitconfig="$("$repo_root/scripts/test-gitconfig-path")"
 source "$repo_root/scripts/lib/common.sh"
 # shellcheck source=lib/test-slice.sh
 source "$repo_root/scripts/lib/test-slice.sh"
@@ -77,6 +81,8 @@ run_in_test_env() {
     USER="${USER:-}" \
     LOGNAME="${LOGNAME:-}" \
     SHELL="${SHELL:-/bin/sh}" \
+    GIT_CONFIG_NOSYSTEM=1 \
+    GIT_CONFIG_GLOBAL="$gc_test_gitconfig" \
     LANG="${LANG:-C.UTF-8}" \
     TMPDIR="${TMPDIR:-/var/tmp}" \
     XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
