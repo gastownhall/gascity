@@ -388,9 +388,9 @@ func checkEvent(a Order, ep events.Provider, cursorFn CursorFunc) TriggerResult 
 	}
 	var count int
 	for _, e := range matched {
-		// Exclude the dispatcher's own order-tracking bookkeeping beads so an event
-		// order never self-fires on lifecycle events emitted by those beads (#3720).
-		if !payloadHasLabel(e.Payload, labelOrderTracking) {
+		// Exclude order-generated beads so event orders never self-fire on their
+		// tracking lifecycle or spawned wisp roots (#3720).
+		if !payloadHasOrderMarker(e.Payload) {
 			count++
 		}
 	}
@@ -400,20 +400,27 @@ func checkEvent(a Order, ep events.Provider, cursorFn CursorFunc) TriggerResult 
 	return TriggerResult{Due: true, Reason: fmt.Sprintf("event: %d %s event(s)", count, a.On)}
 }
 
-// payloadHasLabel reports whether a JSON bead payload contains the given label.
-func payloadHasLabel(payload json.RawMessage, label string) bool {
+// payloadHasOrderMarker reports whether a JSON bead payload contains an
+// order-tracking label or an order-run label. Older event logs wrap the bead
+// snapshot under payload.bead, while current events put labels at the top level.
+func payloadHasOrderMarker(payload json.RawMessage) bool {
 	if len(payload) == 0 {
 		return false
 	}
 	var p struct {
 		Labels []string `json:"labels"`
+		Bead   struct {
+			Labels []string `json:"labels"`
+		} `json:"bead"`
 	}
 	if err := json.Unmarshal(payload, &p); err != nil {
 		return false
 	}
-	for _, l := range p.Labels {
-		if l == label {
-			return true
+	for _, labels := range [][]string{p.Labels, p.Bead.Labels} {
+		for _, label := range labels {
+			if label == labelOrderTracking || strings.HasPrefix(label, labelOrderRunPrefix) {
+				return true
+			}
 		}
 	}
 	return false
