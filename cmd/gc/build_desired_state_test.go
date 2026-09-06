@@ -14055,6 +14055,9 @@ func TestBuildDesiredState_RigDispatcherOnLegacyCityStillProbesRigStore(t *testi
 	}
 	if ref := session.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey]; ref != "rig:fixture" {
 		t.Fatalf("gc.trigger_bead_store_ref = %q, want %q: a city that relocates nothing keeps the rig probe", ref, "rig:fixture")
+	}
+}
+
 // SESSION-RECON-015: an API-created agent session bead carries
 // session_origin=ephemeral with agent_name set and no pool markers
 // (pool_managed / pool_slot). On a multi-session template that bead is
