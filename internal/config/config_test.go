@@ -6051,6 +6051,85 @@ func TestSessionStartupTimeoutInvalid(t *testing.T) {
 	}
 }
 
+func TestSessionStatusProbeTimeoutDefault(t *testing.T) {
+	s := SessionConfig{}
+	got := s.StatusProbeTimeoutDuration()
+	if got != DefaultStatusProbeTimeout {
+		t.Errorf("StatusProbeTimeoutDuration() = %v, want %v", got, DefaultStatusProbeTimeout)
+	}
+}
+
+func TestSessionStatusProbeTimeoutCustom(t *testing.T) {
+	s := SessionConfig{StatusProbeTimeout: "400ms"}
+	got := s.StatusProbeTimeoutDuration()
+	if got != 400*time.Millisecond {
+		t.Errorf("StatusProbeTimeoutDuration() = %v, want 400ms", got)
+	}
+}
+
+func TestSessionStatusProbeTimeoutInvalid(t *testing.T) {
+	s := SessionConfig{StatusProbeTimeout: "bad"}
+	got := s.StatusProbeTimeoutDuration()
+	if got != DefaultStatusProbeTimeout {
+		t.Errorf("StatusProbeTimeoutDuration() = %v, want %v (default for invalid)", got, DefaultStatusProbeTimeout)
+	}
+}
+
+// A city that deliberately writes a non-positive budget is opting out of the
+// bound, so the zero must survive to the call site rather than snapping back to
+// the default the way an unset or unparseable value does.
+func TestSessionStatusProbeTimeoutZeroDisablesBound(t *testing.T) {
+	for _, raw := range []string{"0s", "-1s"} {
+		s := SessionConfig{StatusProbeTimeout: raw}
+		if got := s.StatusProbeTimeoutDuration(); got > 0 {
+			t.Errorf("StatusProbeTimeoutDuration() = %v for %q, want a non-positive value", got, raw)
+		}
+	}
+}
+
+func TestSessionStatusObservationTimeoutDefault(t *testing.T) {
+	s := SessionConfig{}
+	got := s.StatusObservationTimeoutDuration()
+	if got != DefaultStatusObservationTimeout {
+		t.Errorf("StatusObservationTimeoutDuration() = %v, want %v", got, DefaultStatusObservationTimeout)
+	}
+}
+
+func TestSessionStatusObservationTimeoutCustom(t *testing.T) {
+	s := SessionConfig{StatusObservationTimeout: "5s"}
+	got := s.StatusObservationTimeoutDuration()
+	if got != 5*time.Second {
+		t.Errorf("StatusObservationTimeoutDuration() = %v, want 5s", got)
+	}
+}
+
+func TestSessionStatusObservationTimeoutInvalid(t *testing.T) {
+	s := SessionConfig{StatusObservationTimeout: "bad"}
+	got := s.StatusObservationTimeoutDuration()
+	if got != DefaultStatusObservationTimeout {
+		t.Errorf("StatusObservationTimeoutDuration() = %v, want %v (default for invalid)", got, DefaultStatusObservationTimeout)
+	}
+}
+
+func TestSessionStatusObservationTimeoutZeroDisablesBound(t *testing.T) {
+	for _, raw := range []string{"0s", "-1s"} {
+		s := SessionConfig{StatusObservationTimeout: raw}
+		if got := s.StatusObservationTimeoutDuration(); got > 0 {
+			t.Errorf("StatusObservationTimeoutDuration() = %v for %q, want a non-positive value", got, raw)
+		}
+	}
+}
+
+// The per-agent observation budget is the ceiling the chained per-probe budgets
+// must fit inside, so the default pair must leave room for several probes.
+// If these defaults ever cross, raising status_probe_timeout stops working.
+func TestStatusBudgetDefaultsAreOrdered(t *testing.T) {
+	if DefaultStatusProbeTimeout >= DefaultStatusObservationTimeout {
+		t.Fatalf("DefaultStatusProbeTimeout (%v) >= DefaultStatusObservationTimeout (%v), want the probe budget well inside the observation budget",
+			DefaultStatusProbeTimeout, DefaultStatusObservationTimeout)
+	}
+}
+
 func TestSessionDebounceMsDefault(t *testing.T) {
 	s := SessionConfig{}
 	got := s.DebounceMsOrDefault()

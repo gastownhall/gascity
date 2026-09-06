@@ -2815,6 +2815,16 @@
           "description": "StartupTimeout is how long to wait for each agent's Start() call before\ntreating it as failed. Duration string (e.g., \"60s\", \"2m\"). Defaults to \"60s\".",
           "default": "60s"
         },
+        "status_probe_timeout": {
+          "type": "string",
+          "description": "StatusProbeTimeout is the per-call budget for a single runtime status\nprobe issued by `gc status` and `gc rig status`. Each probe is one\ntmux/ps subprocess pair and a single agent observation chains several of\nthem, so this bounds a sub-probe, not a whole agent. When a probe blows\nthe budget the agent's runtime state is unobserved for that run and the\ncommand reports partial status rather than a stopped agent. On a loaded\nhost — many sessions, a busy tmux server, or CPU contention from\nunrelated processes — the default is too tight and a healthy city renders\nas rows of `unknown (partial status)`; raise it there. Values that are\ntoo large cost wall time on a genuinely wedged runtime, because every\nunresponsive probe waits the full budget. Duration string (e.g., \"400ms\",\n\"2s\"). Defaults to \"50ms\". A non-positive value disables the bound and\nlets each probe run to completion.",
+          "default": "50ms"
+        },
+        "status_observation_timeout": {
+          "type": "string",
+          "description": "StatusObservationTimeout is the budget for observing one agent in\n`gc status` and `gc rig status`. One observation chains several\nindividually-bounded probes, so this is the ceiling the whole chain must\nfit inside: raising status_probe_timeout past this value cannot help,\nbecause the outer budget fires first and the agent still renders as\n`unknown (partial status)`. Raise both together when widening the probe\nbudget on a loaded host. Duration string (e.g., \"2s\", \"5s\"). Defaults to\n\"750ms\". A non-positive value disables the bound and lets the\nobservation run to completion.",
+          "default": "750ms"
+        },
         "progress_stall_timeout": {
           "type": "string",
           "description": "ProgressStallTimeout, when set, enables progress-aware session recycling:\na desired, alive, claim-less session on a healthy provider whose last\nprovider-reported activity is older than this duration is restarted fresh.\nSuch a session has likely parked (e.g. its turn ended on a provider auth\nerror) and will not self-recover. Set this above the longest legitimate\nalive-idle period for the city; values below 5m are clamped to 5m.\nDuration string (e.g. \"30m\"). Unset/zero disables it."

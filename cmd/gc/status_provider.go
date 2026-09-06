@@ -11,17 +11,18 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
-var (
-	statusProviderCallTimeout    = 50 * time.Millisecond
-	statusProviderTimeoutWarning = func() {
-		fmt.Fprintln(os.Stderr, "gc status: runtime status probe timed out; using partial status")
-	}
-)
+var statusProviderTimeoutWarning = func() {
+	fmt.Fprintln(os.Stderr, "gc status: runtime status probe timed out; using partial status")
+}
 
 type statusProvider struct {
-	base     runtime.Provider
-	warnOnce sync.Once
-	partial  atomic.Bool
+	base runtime.Provider
+	// callTimeout is the per-call probe budget for this provider. A
+	// non-positive value disables the bound and lets each probe run to
+	// completion.
+	callTimeout time.Duration
+	warnOnce    sync.Once
+	partial     atomic.Bool
 }
 
 var _ runtime.RelaunchProvider = (*statusProvider)(nil)
@@ -41,15 +42,19 @@ func (p *statusProvider) StatusPartial() bool {
 	return p.partial.Load()
 }
 
-func newBoundedStatusProvider(base runtime.Provider) runtime.Provider {
+// newBoundedStatusProvider binds base with an explicit per-call probe budget,
+// so a city can widen the budget on a loaded host without patching the binary.
+// A non-positive timeout disables the bound. An already-bounded provider keeps
+// the budget it was bound with.
+func newBoundedStatusProvider(base runtime.Provider, timeout time.Duration) runtime.Provider {
 	if sp, ok := base.(*statusProvider); ok {
 		return sp
 	}
-	return &statusProvider{base: base}
+	return &statusProvider{base: base, callTimeout: timeout}
 }
 
 func boundedStatusCall[T any](p *statusProvider, fallback T, fn func() T) T {
-	if statusProviderCallTimeout <= 0 {
+	if p.callTimeout <= 0 {
 		return fn()
 	}
 	resultCh := make(chan T, 1)
@@ -59,7 +64,7 @@ func boundedStatusCall[T any](p *statusProvider, fallback T, fn func() T) T {
 	select {
 	case result := <-resultCh:
 		return result
-	case <-time.After(statusProviderCallTimeout):
+	case <-time.After(p.callTimeout):
 		p.partial.Store(true)
 		p.warnOnce.Do(statusProviderTimeoutWarning)
 		return fallback
