@@ -2444,7 +2444,18 @@ func isTransientNotificationBead(b beads.Bead) bool {
 }
 
 // storeHasOpenDescendants reports whether the wisp rooted at rootID still has
-// any open descendant bead. It first consults the molecule membership index:
+// any open descendant bead. It is storeOpenDescendantIDs reduced to a bool: the
+// dispatch gate and the stale-wisp sweeper need only the answer, while the
+// workflow delete guard also needs the ids so its refusal can name the steps.
+func storeHasOpenDescendants(store beads.Store, rootID string, skip func(beads.Bead) bool) (bool, error) {
+	open, err := storeOpenDescendantIDs(store, rootID, skip)
+	return len(open) > 0, err
+}
+
+// storeOpenDescendantIDs returns the ids of the open descendant beads of the
+// wisp rooted at rootID: every open member the molecule membership index
+// reports, or, when the index reports none, the first open descendant the tree
+// walk reaches. It first consults the molecule membership index:
 // every descendant created by any growth path (initial pour, convoy Attach,
 // fanout fragments, retry attempts) carries gc.root_bead_id == rootID, an
 // invariant enforced in internal/molecule. A single metadata-filtered List
@@ -2467,7 +2478,7 @@ func isTransientNotificationBead(b beads.Bead) bool {
 // on some steps while sibling ParentID-only steps are un-stamped), it falls
 // back to the authoritative tree walk before reporting the root idle, so
 // single-flight is never weakened for un-stamped or partial-stamp data.
-func storeHasOpenDescendants(store beads.Store, rootID string, skip func(beads.Bead) bool) (bool, error) {
+func storeOpenDescendantIDs(store beads.Store, rootID string, skip func(beads.Bead) bool) ([]string, error) {
 	reader := beads.HandlesFor(store).Live
 	members, err := reader.List(beads.ListQuery{
 		Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
@@ -2475,8 +2486,9 @@ func storeHasOpenDescendants(store beads.Store, rootID string, skip func(beads.B
 		TierMode:      beads.TierBoth,
 	})
 	if err != nil {
-		return false, fmt.Errorf("listing wisp members of %s: %w", rootID, err)
+		return nil, fmt.Errorf("listing wisp members of %s: %w", rootID, err)
 	}
+	var open []string
 	for _, b := range members {
 		if b.ID == rootID || b.Status == "closed" {
 			continue
@@ -2484,29 +2496,38 @@ func storeHasOpenDescendants(store beads.Store, rootID string, skip func(beads.B
 		if skip != nil && skip(b) {
 			continue
 		}
-		return true, nil
+		open = append(open, b.ID)
+	}
+	if len(open) > 0 {
+		return open, nil
 	}
 	// No OPEN stamped member found. An empty or all-closed membership set does
 	// NOT prove the root is idle, because the index may be incomplete for a
 	// partial-stamp molecule (some steps carry gc.root_bead_id, sibling
 	// ParentID-only steps do not). Confirm with the authoritative walk before
 	// reporting no open work, keeping single-flight safe. The fast path still
-	// short-circuits the common in-flight case (any open stamped member) in one
+	// answers the common in-flight case (any open stamped member) in one
 	// query; the walk runs only when no open member is found — i.e. for
 	// orphan/just-completed roots.
-	return storeHasOpenDescendantsByWalk(store, rootID, skip)
+	id, err := storeFirstOpenDescendantByWalk(store, rootID, skip)
+	if err != nil || id == "" {
+		return nil, err
+	}
+	return []string{id}, nil
 }
 
-// storeHasOpenDescendantsByWalk is the authoritative O(tree) traversal used as
+// storeFirstOpenDescendantByWalk is the authoritative O(tree) traversal used as
 // the fallback for roots whose descendants lack the gc.root_bead_id membership
-// metadata. It is the historical storeHasOpenDescendants implementation. It
+// metadata. It returns the id of the first open descendant it reaches, or ""
+// when there is none — it stops at the first hit because every level costs a
+// store read. It is the historical storeHasOpenDescendants implementation. It
 // includes closed intermediate nodes so nested molecule work remains visible
 // after a direct child step has completed. Graph-v2 workflows can link children
 // with dependency edges instead of ParentID, so descendants include
 // parent-child/tracks/blocks dependents too. When skip is non-nil, an open
 // child for which skip returns true is not treated as blocking open work (its
 // subtree is still traversed).
-func storeHasOpenDescendantsByWalk(store beads.Store, rootID string, skip func(beads.Bead) bool) (bool, error) {
+func storeFirstOpenDescendantByWalk(store beads.Store, rootID string, skip func(beads.Bead) bool) (string, error) {
 	seen := map[string]struct{}{rootID: {}}
 	queue := []string{rootID}
 	// ParentID queries and closed intermediate traversal require live reads:
@@ -2518,7 +2539,7 @@ func storeHasOpenDescendantsByWalk(store beads.Store, rootID string, skip func(b
 
 		children, err := orderWispParentChildren(reader, parentID)
 		if err != nil {
-			return false, err
+			return "", err
 		}
 		for _, c := range children {
 			if c.ID == "" || c.ID == rootID {
@@ -2529,14 +2550,14 @@ func storeHasOpenDescendantsByWalk(store beads.Store, rootID string, skip func(b
 			}
 			seen[c.ID] = struct{}{}
 			if c.Status != "closed" && (skip == nil || !skip(c)) {
-				return true, nil
+				return c.ID, nil
 			}
 			queue = append(queue, c.ID)
 		}
 
 		children, err = orderWispGraphDependentChildren(reader, rootID, parentID)
 		if err != nil {
-			return false, err
+			return "", err
 		}
 		for _, c := range children {
 			if c.ID == "" || c.ID == rootID {
@@ -2547,12 +2568,12 @@ func storeHasOpenDescendantsByWalk(store beads.Store, rootID string, skip func(b
 			}
 			seen[c.ID] = struct{}{}
 			if c.Status != "closed" && (skip == nil || !skip(c)) {
-				return true, nil
+				return c.ID, nil
 			}
 			queue = append(queue, c.ID)
 		}
 	}
-	return false, nil
+	return "", nil
 }
 
 func orderWispMetadataDescendants(reader beads.LiveReader, rootID string, includeClosed bool) ([]beads.Bead, error) {
@@ -3130,6 +3151,7 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 
 	cutoff := now.Add(-policy.deleteAfterClose)
 	deleted := 0
+	var retained []string
 	var deleteErr error
 	for _, runs := range byOrder {
 		sort.Slice(runs, func(i, j int) bool {
@@ -3148,15 +3170,34 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 				continue
 			}
 			// deleteWorkflowBead is the graph-aware delete (dep unwind) the
-			// retention prune uses; it stays raw graph residual.
+			// retention prune uses; it stays raw graph residual. A closed
+			// tracking root can still own OPEN steps — the delete refuses
+			// those rather than stranding them (ga-ejwo1q).
 			if err := deleteWorkflowBead(store, run.ID); err != nil {
+				if errors.Is(err, errWorkflowDeleteLiveDescendants) {
+					retained = append(retained, run.ID)
+					continue
+				}
 				deleteErr = errors.Join(deleteErr, fmt.Errorf("deleting closed order-tracking bead %q: %w", run.ID, err))
 				continue
 			}
 			deleted++
 		}
 	}
+	logRetainedForLiveDescendants(retained)
 	return deleted, deleteErr
+}
+
+// logRetainedForLiveDescendants reports the candidates the retention prune
+// declined to delete because they still own live work. Retention is a
+// background sweep, so a silent skip reads exactly like "nothing was eligible";
+// naming the roots is what makes a persistently-wedged root visible, and
+// findable, instead of a slow leak nobody attributes.
+func logRetainedForLiveDescendants(ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	log.Printf("order-tracking retention: retained %d expired closed root(s) that still own open steps (deleting them would strand the steps): %s", len(ids), strings.Join(ids, ","))
 }
 
 // sweepClosedOrderTrackingRetentionBounded is the per-store bounded variant of
@@ -3182,6 +3223,7 @@ func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, 
 
 	cutoff := now.Add(-policy.deleteAfterClose)
 	deleted := 0
+	var retained []string
 	var deleteErr error
 	for _, runs := range byOrder {
 		if deleted >= limit {
@@ -3206,12 +3248,17 @@ func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, 
 				continue
 			}
 			if err := deleteWorkflowBead(store, run.ID); err != nil {
+				if errors.Is(err, errWorkflowDeleteLiveDescendants) {
+					retained = append(retained, run.ID)
+					continue
+				}
 				deleteErr = errors.Join(deleteErr, fmt.Errorf("deleting closed order-tracking bead %q: %w", run.ID, err))
 				continue
 			}
 			deleted++
 		}
 	}
+	logRetainedForLiveDescendants(retained)
 	return deleted, deleteErr
 }
 

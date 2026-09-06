@@ -482,8 +482,19 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 			continue
 		}
 
+		err := deleteWorkflowBead(store, c.ID)
+		if errors.Is(err, errWorkflowDeleteLiveDescendants) {
+			// A closed orphan can itself be an intermediate step that still
+			// owns open sub-steps; the delete refuses those. That is a skip,
+			// not a sweep failure — it becomes eligible once they finish —
+			// and it is not charged to the batch cap: no delete was
+			// attempted, and an orphan refused on every sweep would otherwise
+			// hold a cap slot on every sweep, starving the reapable orphans
+			// listed behind it.
+			continue
+		}
 		attempted++
-		if err := deleteWorkflowBead(store, c.ID); err != nil {
+		if err != nil {
 			deleteErr = errors.Join(deleteErr, fmt.Errorf("reaping orphaned closed wisp %q: %w", c.ID, err))
 			continue
 		}
@@ -701,7 +712,9 @@ var errBeadNoLongerEligible = errors.New("bead skipped: no longer eligible for d
 // of DELETE ATTEMPTS per call — counting failures, not just successes — so a
 // large backlog or a failing delete backend cannot make one sweep attempt an
 // unbounded amount of deletion work; the remainder drains on later ticks.
-// batchCap <= 0 disables the bound. Entries skipped for age never consume the cap.
+// batchCap <= 0 disables the bound. Entries skipped for age never consume the
+// cap, nor do entries whose delete the strand guard refused
+// (errWorkflowDeleteLiveDescendants): no delete was attempted for those.
 func purgeExpiredBeads(store beads.Store, entries []beads.Bead, cutoff time.Time, batchCap int, deleteFn func(beads.Store, string) error) (int, error) {
 	purged := 0
 	attempted := 0
@@ -713,8 +726,19 @@ func purgeExpiredBeads(store beads.Store, entries []beads.Bead, cutoff time.Time
 		if entry.CreatedAt.IsZero() || !entry.CreatedAt.Before(cutoff) {
 			continue
 		}
+		err := deleteFn(store, entry.ID)
+		if errors.Is(err, errWorkflowDeleteLiveDescendants) {
+			// The strand guard refused the closure delete: an open descendant
+			// the closure collector did not see still holds the root. That is
+			// a skip, not a sweep failure — the root becomes eligible once the
+			// descendant finishes — and it is not charged to the cap: no
+			// delete was attempted, and a root refused on every sweep would
+			// otherwise hold a cap slot on every sweep, starving the
+			// collectible roots listed behind it.
+			continue
+		}
 		attempted++
-		if err := deleteFn(store, entry.ID); err != nil {
+		if err != nil {
 			if errors.Is(err, errBeadNoLongerEligible) {
 				continue
 			}
