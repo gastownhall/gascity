@@ -115,8 +115,9 @@ whole city.
 
 If a city's remote is not (yet) credentialed, opt out of the fetch so
 compaction runs entirely from the local source of truth. The post-compaction
-remote push is deferred via a pending-push marker and resumes automatically on a
-later run once the fetch path is healthy:
+remote push is deferred via a pending-push marker and retried on later runs
+once the fetch path is healthy (see the next section for what happens when it
+never does):
 
 ```bash
 # Skip the fetch for every database this run.
@@ -136,6 +137,46 @@ remote sync for every database, including ones whose push would otherwise
 succeed. Do **not** set the global opt-out in the shared `mol-dog-compactor`
 order for the same reason; set the per-database env on the affected city
 instead.
+
+## When a deferred remote push does not resume
+
+A compaction push counts as done only after the compactor re-probes the
+remote-tracking ref (`remotes/<remote>/<branch>`) and finds it on the local tip.
+Dolt advances that ref only once the remote has accepted the push, so a
+`DOLT_PUSH` that exits 0 without moving it — for example when the managed
+sql-server's read timeout kills the proxied client mid-push — keeps the
+pending-push marker, logs both hashes, and fails the run instead of reporting
+`pushed`. `gc dolt sync` applies the same check to its own pushes.
+
+A pending-push marker is retried on every compaction run until it is older than
+`GC_DOLT_COMPACT_PENDING_PUSH_MAX_AGE_SECS` (default 48h). Past that age the
+compactor grants exactly one more automatic retry, so a push that died once to
+a transient failure still self-heals. If the marker survives that retry, every
+later run fails with `manual review required` and the operator is alerted
+(mail to `GC_DOLT_COMPACT_ALERT_TO`, default `mayor`, plus a
+`dolt.compact.quarantine` event). The mail follows the shared marker
+notification cadence: once on detection, then again only after
+`GC_DOLT_COMPACT_RENOTIFY_BACKSTOP_SECS` (default 24h) elapses, recorded in the
+marker's own `notify_count` / `last_notified_ts` fields. Whether the one
+automatic retry has already been spent lives in a `<db>.retry-state` sidecar
+next to the marker, because a failed retry rewrites the marker itself:
+
+```text
+<city>/.gc/runtime/packs/dolt/compact-pending-push/<db>              # the deferred push
+<city>/.gc/runtime/packs/dolt/compact-pending-push/<db>.retry-state  # one-automatic-retry bookkeeping
+```
+
+To recover, first fix the remote (credentials, reachability, or the server
+read timeout), then either:
+
+- delete the `<db>.retry-state` sidecar — the next compaction run gets another
+  automatic retry (and alerts again if that one fails too), or
+- push by hand with `gc dolt sync --force --db <db>` (compaction rewrites
+  history, so the push must be forced), verify the remote tip, and delete the
+  marker together with its sidecar.
+
+A pending-GC marker (`compact-pending-gc/<db>`) that also carries a remote push
+follows the same gate and the same `.retry-state` sidecar convention.
 
 ## Compacting a database that must never reach a remote
 

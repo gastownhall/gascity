@@ -56,6 +56,12 @@
 # Remote push failures are recorded in compact-pending-push markers and do not
 # fail local compaction. Later runs retry those markers before threshold skips,
 # and unverified remote heads must become ancestry-verifiable before push.
+# A push is reported as pushed (and its marker cleared) only after the remote-
+# tracking ref is re-probed and matches the local tip; a zero exit whose tip did
+# not move keeps the marker and fails the run. A marker older than
+# GC_DOLT_COMPACT_PENDING_PUSH_MAX_AGE_SECS gets one final automatic retry and,
+# if that does not clear it, a single operator alert (see
+# ensure_remote_push_retry_fresh).
 # A database marked .no-sync (same marker the sync and pull commands honor) has
 # no remote phase at all: it is never fetched or pushed, never gets a
 # pending-push marker, and an existing one is cleared so it cannot block flatten.
@@ -84,8 +90,12 @@
 #                     discovery. Shared with the health command; the
 #                     default lives in runtime.sh.
 #   GC_DOLT_COMPACT_PENDING_PUSH_MAX_AGE_SECS
-#     (default: 172800) — maximum age for automatic pending remote-push retry.
-#                       Older markers require manual review before push.
+#     (default: 172800) — age past which a pending remote-push marker gets one
+#                       final automatic retry. If that retry does not clear
+#                       the marker the run fails and alerts the operator
+#                       (subject to GC_DOLT_COMPACT_RENOTIFY_BACKSTOP_SECS);
+#                       removing the marker or its .retry-state sidecar
+#                       grants another automatic retry.
 #   GC_DOLT_COMPACT_RENOTIFY_BACKSTOP_SECS
 #     (default: 86400) — once a quarantine, pending-push, or pending-gc
 #                       marker has mailed an alert for an unchanged reason,
@@ -1019,6 +1029,17 @@ remote_branch_head() {
     "SELECT hash FROM dolt_remote_branches WHERE name = 'remotes/$remote/$branch'"
 }
 
+# local_branch_head — tip of the local branch a push sends. Probed immediately
+# before the push so push_remote_after_compaction can verify afterwards that
+# the remote-tracking ref landed on exactly that commit.
+local_branch_head() {
+  db="$1"
+  branch="$2"
+  valid_branch_name "$branch" || return 1
+  query_single_cell "$db" "local branch HEAD probe failed" \
+    "SELECT hash FROM dolt_branches WHERE name = '$branch'"
+}
+
 commit_exists_in_local_log() {
   db="$1"
   hash="$2"
@@ -1855,13 +1876,90 @@ compact_marker_created_at_epoch() {
   parse_compact_timestamp "$created_at"
 }
 
+# Stale pending-push bookkeeping. A marker older than pending_push_max_age_secs
+# used to be refused forever ("manual review required"), so a push that died
+# once to a transient failure (e.g. the managed sql-server's read_timeout)
+# stayed stranded until a human noticed. The gate now grants ONE automatic
+# retry before it fails closed. That retry bookkeeping lives in a sidecar next
+# to the marker (<marker>.retry-state) rather than in the marker itself,
+# because a failed retry rewrites the marker (write_compact_marker preserves
+# only created_at) and would erase any in-marker field. The sidecar is bound
+# to the marker it describes through marker_created_at, so a marker that is
+# removed and later re-created starts over with a fresh retry;
+# clear_compact_marker drops the sidecar with the marker, and removing just
+# the sidecar grants another automatic retry. Alerting stays with the shared
+# marker_should_notify / record_marker_notify_state bookkeeping — this gate
+# only decides whether a retry is still owed.
+pending_push_retry_state_path() {
+  printf '%s/%s.retry-state\n' "$1" "$2"
+}
+
+pending_push_retry_state_value() {
+  _rs_state=$(pending_push_retry_state_path "$1" "$2")
+  [ -f "$_rs_state" ] && [ -r "$_rs_state" ] || return 1
+  awk -v prefix="$3=" 'index($0, prefix) == 1 { print substr($0, length(prefix) + 1); exit }' "$_rs_state"
+}
+
+# pending_push_retry_state_current DIR DB
+#   True when the sidecar describes the marker currently on disk (same
+#   created_at). Anything else counts as no state at all.
+pending_push_retry_state_current() {
+  _rs_marker_created=$(compact_marker_value "$1" "$2" created_at || true)
+  _rs_state_created=$(pending_push_retry_state_value "$1" "$2" marker_created_at || true)
+  [ -n "$_rs_marker_created" ] && [ "$_rs_marker_created" = "$_rs_state_created" ]
+}
+
+pending_push_stale_retry_attempted() {
+  pending_push_retry_state_current "$1" "$2" || return 1
+  [ "$(pending_push_retry_state_value "$1" "$2" stale_retry_attempted || true)" = "1" ]
+}
+
+# record_pending_push_retry_state DIR DB
+#   Stamps the single automatic retry for the marker currently on disk. A
+#   write failure is a silent no-op — bookkeeping must never block compaction
+#   (worst case one extra retry, never a stranded push).
+record_pending_push_retry_state() {
+  dir="$1"
+  db="$2"
+
+  _rs_marker_created=$(compact_marker_value "$dir" "$db" created_at || true)
+  [ -n "$_rs_marker_created" ] || return 0
+
+  _rs_attempted_at=""
+  if pending_push_retry_state_current "$dir" "$db"; then
+    _rs_attempted_at=$(pending_push_retry_state_value "$dir" "$db" stale_retry_at || true)
+  fi
+  [ -n "$_rs_attempted_at" ] || _rs_attempted_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+  _rs_old_umask=$(umask)
+  umask 077
+  _rs_tmp=$(mktemp "$dir/$db.retry-state.tmp.XXXXXX") || {
+    umask "$_rs_old_umask"
+    return 0
+  }
+  umask "$_rs_old_umask"
+  if ! {
+    printf 'db=%s\n' "$db"
+    printf 'marker_created_at=%s\n' "$_rs_marker_created"
+    printf 'stale_retry_attempted=%s\n' 1
+    printf 'stale_retry_at=%s\n' "$_rs_attempted_at"
+  } > "$_rs_tmp" 2>/dev/null; then
+    rm -f "$_rs_tmp"
+    return 0
+  fi
+  mv -f "$_rs_tmp" "$(pending_push_retry_state_path "$dir" "$db")" || rm -f "$_rs_tmp"
+  return 0
+}
+
 # ensure_remote_push_retry_fresh DIR DB MARKER_LABEL
-#   Gates an automatic remote-push retry on marker age: markers older than
-#   pending_push_max_age_secs fail the retry and alert. The alert event
-#   fires every cycle; the alert mail is gated by marker_should_notify so
-#   an unresolved stale marker pages on first detection and then again only
-#   after the renotify backstop elapses, instead of on every single cycle
-#   (previously: unconditional mail on every invocation past max-age).
+#   Age gate for a deferred remote push. Fresh markers retry every run. A
+#   marker past pending_push_max_age_secs gets exactly one automatic retry
+#   (return 0 once); when it is still present on the next run the gate fails
+#   closed with the manual-review message and alerts. The alert event fires
+#   every cycle; the alert mail is gated by marker_should_notify so a stranded
+#   marker pages on first detection and then again only after the renotify
+#   backstop elapses, instead of on every single cycle. Dry runs report the
+#   decision without consuming the retry, recording state, or alerting.
 ensure_remote_push_retry_fresh() {
   dir="$1"
   db="$2"
@@ -1878,28 +1976,48 @@ ensure_remote_push_retry_fresh() {
   if [ "$age_secs" -lt 0 ]; then
     age_secs=0
   fi
-  if [ "$age_secs" -gt "$pending_push_max_age_secs" ]; then
-    printf 'compact: db=%s %s marker is stale age=%ss max_age=%ss — manual review required before remote push retry\n' \
-      "$db" "$marker_label" "$age_secs" "$pending_push_max_age_secs" >&2
-    stale_reason="$marker_label marker is stale"
-    stale_marker_path=$(compact_marker_path "$dir" "$db")
-    stale_marker_type=$(basename "$dir")
-    stale_created_at=$(compact_marker_value "$dir" "$db" created_at || true)
-    emit_compact_quarantine_event "$db" "$stale_marker_type" "$stale_marker_path" "$stale_reason" "$stale_created_at"
-    if marker_should_notify "$dir" "$db" "$stale_reason" "$compact_renotify_backstop_secs"; then
-      stale_seen_count=$(compact_marker_value "$dir" "$db" seen_count || true)
-      case "$stale_seen_count" in ''|*[!0-9]*) stale_seen_count=0 ;; esac
-      if mail_compact_quarantine_alert "$db" "$stale_marker_type" "$stale_marker_path" "$stale_reason age=${age_secs}s seen=$((stale_seen_count + 1))" "$stale_created_at"; then
-        record_marker_notify_state "$dir" "$db" "$stale_reason" 1
-      else
-        record_marker_notify_state "$dir" "$db" "$stale_reason" 0
-      fi
-    else
-      record_marker_notify_state "$dir" "$db" "$stale_reason" 0
+  if [ "$age_secs" -le "$pending_push_max_age_secs" ]; then
+    return 0
+  fi
+
+  if ! pending_push_stale_retry_attempted "$dir" "$db"; then
+    if [ -n "$dry_run" ]; then
+      printf 'compact: db=%s %s marker is stale age=%ss max_age=%ss — dry-run (would attempt one automatic remote push retry before manual review)\n' \
+        "$db" "$marker_label" "$age_secs" "$pending_push_max_age_secs" >&2
+      return 0
     fi
+    printf 'compact: db=%s %s marker is stale age=%ss max_age=%ss — attempting one automatic remote push retry before manual review\n' \
+      "$db" "$marker_label" "$age_secs" "$pending_push_max_age_secs" >&2
+    record_pending_push_retry_state "$dir" "$db"
+    return 0
+  fi
+
+  stale_reason="$marker_label marker is stale"
+  stale_marker_path=$(compact_marker_path "$dir" "$db")
+  stale_marker_type=$(basename "$dir")
+  stale_created_at=$(compact_marker_value "$dir" "$db" created_at || true)
+  stale_state_path=$(pending_push_retry_state_path "$dir" "$db")
+  stale_retry_at=$(pending_push_retry_state_value "$dir" "$db" stale_retry_at || true)
+  printf 'compact: db=%s %s marker is stale age=%ss max_age=%ss and the automatic retry at %s did not clear it — manual review required before remote push retry (remove %s to grant another automatic retry)\n' \
+    "$db" "$marker_label" "$age_secs" "$pending_push_max_age_secs" "${stale_retry_at:-<unknown>}" "$stale_state_path" >&2
+  if [ -n "$dry_run" ]; then
     return 1
   fi
-  return 0
+  emit_compact_quarantine_event "$db" "$stale_marker_type" "$stale_marker_path" "$stale_reason" "$stale_created_at"
+  if marker_should_notify "$dir" "$db" "$stale_reason" "$compact_renotify_backstop_secs"; then
+    stale_seen_count=$(compact_marker_value "$dir" "$db" seen_count || true)
+    case "$stale_seen_count" in ''|*[!0-9]*) stale_seen_count=0 ;; esac
+    if mail_compact_quarantine_alert "$db" "$stale_marker_type" "$stale_marker_path" "$stale_reason age=${age_secs}s seen=$((stale_seen_count + 1))" "$stale_created_at"; then
+      record_marker_notify_state "$dir" "$db" "$stale_reason" 1
+    else
+      record_marker_notify_state "$dir" "$db" "$stale_reason" 0 "$quarantine_notify_error"
+    fi
+  else
+    printf 'compact: db=%s %s stale-marker alert already sent at %s — not re-alerting until the renotify backstop elapses\n' \
+      "$db" "$marker_label" "$(compact_marker_value "$dir" "$db" last_notified_ts || true)" >&2
+    record_marker_notify_state "$dir" "$db" "$stale_reason" 0
+  fi
+  return 1
 }
 
 recover_legacy_pending_push_contract() {
@@ -1971,7 +2089,7 @@ recover_legacy_pending_push_contract() {
 clear_compact_marker() {
   dir="$1"
   db="$2"
-  rm -f "$(compact_marker_path "$dir" "$db")"
+  rm -f "$(compact_marker_path "$dir" "$db")" "$(pending_push_retry_state_path "$dir" "$db")"
 }
 
 run_full_gc() {
@@ -2135,6 +2253,26 @@ push_remote_after_compaction() {
     fi
   fi
 
+  # Capture the tip about to be pushed so the post-push verification below
+  # compares against exactly that commit. With no local tip there is nothing
+  # to verify a push against, so defer rather than push blind.
+  if ! local_push_head=$(local_branch_head "$db" "$local_branch"); then
+    printf 'compact: db=%s remote=%s local branch=%s HEAD probe failed before push after local compaction\n' \
+      "$db" "$remote" "$local_branch" >&2
+    write_pending_push_marker "$db" "$remote" "$expected_remote_head" "$expected_remote_head_verified" "$compacted_from_head" \
+      "flatten and full GC succeeded but local HEAD probe before push failed" "$local_branch" "$remote_branch" || return 1
+    return 0
+  fi
+  case "$local_push_head" in
+    ''|*[!A-Za-z0-9]*)
+      printf 'compact: db=%s remote=%s local branch=%s returned invalid HEAD=%s before push — fail\n' \
+        "$db" "$remote" "$local_branch" "${local_push_head:-<empty>}" >&2
+      write_pending_push_marker "$db" "$remote" "$expected_remote_head" "$expected_remote_head_verified" "$compacted_from_head" \
+        "flatten and full GC succeeded but local HEAD before push was invalid" "$local_branch" "$remote_branch" || return 1
+      return 0
+      ;;
+  esac
+
   push_rc=0
   push_err_tmp=$(mktemp)
   push_remote_refspec "$db" "$remote" "$local_branch" "$remote_branch" >/dev/null 2>"$push_err_tmp" || push_rc=$?
@@ -2148,8 +2286,44 @@ push_remote_after_compaction() {
     return 0
   fi
   rm -f "$push_err_tmp"
+
+  # A zero exit is not proof the push landed. DOLT_PUSH advances the
+  # remotes/<remote>/<branch> tracking ref only once the remote has accepted
+  # the push, so re-probing it (no second fetch: the tracking ref is local
+  # state, and DOLT_FETCH carries the #2361 crash risk) separates a push that
+  # completed from one the proxied client abandoned with rc=0 — e.g. when the
+  # managed sql-server's read_timeout killed the connection mid-push. Such a
+  # push used to be reported as "pushed" with its marker cleared, leaving the
+  # remote silently diverged. Mismatch and probe failure both keep the push
+  # pending and fail the run so the caller's failure path surfaces it.
+  if ! pushed_remote_head=$(remote_branch_head "$db" "$remote" "$remote_branch"); then
+    printf 'compact: db=%s remote=%s HEAD probe failed after push rc=0 — push unverified, remote push stays pending\n' \
+      "$db" "$remote" >&2
+    write_pending_push_marker "$db" "$remote" "$expected_remote_head" "$expected_remote_head_verified" "$compacted_from_head" \
+      "remote push reported success but remote HEAD probe after push failed" "$local_branch" "$remote_branch" || return 1
+    return 1
+  fi
+  if [ "$pushed_remote_head" != "$local_push_head" ]; then
+    printf 'compact: db=%s remote=%s push reported success rc=0 but remote HEAD=%s does not match local HEAD=%s — push did not land, remote push stays pending\n' \
+      "$db" "$remote" "${pushed_remote_head:-<empty>}" "$local_push_head" >&2
+    unmoved_remote_head="$pushed_remote_head"
+    unmoved_remote_head_verified=0
+    case "$unmoved_remote_head" in
+      *[!A-Za-z0-9]*)
+        unmoved_remote_head=""
+        ;;
+      *)
+        if [ "$unmoved_remote_head" = "$expected_remote_head" ]; then
+          unmoved_remote_head_verified="$expected_remote_head_verified"
+        fi
+        ;;
+    esac
+    write_pending_push_marker "$db" "$remote" "$unmoved_remote_head" "$unmoved_remote_head_verified" "$compacted_from_head" \
+      "remote push reported success but remote HEAD did not move" "$local_branch" "$remote_branch" || return 1
+    return 1
+  fi
   clear_compact_marker "${push_marker_dir:-$pending_push_dir}" "${push_marker_key:-$db}"
-  printf 'compact: db=%s remote=%s pushed compacted %s\n' "$db" "$remote" "$remote_branch"
+  printf 'compact: db=%s remote=%s pushed compacted %s remote_head=%s\n' "$db" "$remote" "$remote_branch" "$pushed_remote_head"
   return 0
 }
 
