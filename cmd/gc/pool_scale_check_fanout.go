@@ -23,23 +23,34 @@ type poolStoreProbe struct {
 // cityScopedFanOutProbes builds the probe list for a city-scoped agent's
 // custom scale_check fan-out: the agent's own (city) probe plus one probe
 // per non-suspended rig, mirroring activeStores' suspended-rig filter in
-// buildDesiredStateWithSessionBeads. ownEnv is reused unchanged for every
-// probe: controllerQueryRuntimeEnv resolves to the city's bd runtime env for
-// any city-scoped agent regardless of which store's directory a probe
-// happens to run in, so there is no per-rig env to compute here — the probe
-// command's working directory (dir) is what selects the store.
-func cityScopedFanOutProbes(cityPath string, cfg *config.City, _ *config.Agent, ownDir string, ownEnv map[string]string, suspendedRigPaths map[string]bool) []poolStoreProbe {
+// buildDesiredStateWithSessionBeads. BEADS_DIR is what selects which store a
+// probe's bd subprocess talks to -- dir is only that subprocess's working
+// directory. ownEnv (already carrying the caller's own BEADS_DIR) is reused
+// unchanged for the city probe; each rig probe gets its own env, pinned to
+// that rig's own store via bdRuntimeEnvForRigWithErrorNoRecovery, so a probe
+// never inherits a sibling probe's BEADS_DIR. A rig whose env cannot be
+// resolved is skipped -- its error is appended to the returned slice instead
+// of poisoning the other probes (best-effort, matching bestStoreWithWork's
+// federation contract).
+func cityScopedFanOutProbes(cityPath string, cfg *config.City, _ *config.Agent, ownDir string, ownEnv map[string]string, suspendedRigPaths map[string]bool) ([]poolStoreProbe, []error) {
 	probes := []poolStoreProbe{{ref: "city", dir: ownDir, env: ownEnv}}
 	if cfg == nil {
-		return probes
+		return probes, nil
 	}
+	var errs []error
 	for _, rig := range cfg.Rigs {
 		if suspendedRigPaths[filepath.Clean(rig.Path)] {
 			continue
 		}
-		probes = append(probes, poolStoreProbe{ref: rig.Name, dir: resolveAgentDirPath(cityPath, rig.Path), env: ownEnv})
+		rigDir := resolveAgentDirPath(cityPath, rig.Path)
+		rigEnv, err := bdRuntimeEnvForRigWithErrorNoRecovery(cityPath, cfg, rigDir)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", rig.Name, err))
+			continue
+		}
+		probes = append(probes, poolStoreProbe{ref: rig.Name, dir: rigDir, env: rigEnv})
 	}
-	return probes
+	return probes, errs
 }
 
 // evaluatePoolFanOutSum runs sp.Check via runner against every probe
@@ -62,7 +73,8 @@ func evaluatePoolFanOutSum(agentName string, sp scaleParams, probes []poolStoreP
 			defer func() { <-sem }()
 
 			start := time.Now()
-			out, err := runner(sp.Check, probe.dir, probe.env)
+			check := prefixShellEnv(controllerQueryPrefixEnv(probe.env), sp.Check)
+			out, err := runner(check, probe.dir, probe.env)
 			durationMs := float64(time.Since(start).Milliseconds())
 			if err != nil {
 				telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, 0, err)

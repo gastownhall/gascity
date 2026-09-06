@@ -23,7 +23,10 @@ func TestEachProbePinsItsOwnBeadsDir(t *testing.T) {
 	agentCfg := &config.Agent{Name: "worker"}
 	ownEnv := map[string]string{"BEADS_DIR": filepath.Join(cityPath, ".beads")}
 
-	probes := cityScopedFanOutProbes(cityPath, cfg, agentCfg, cityPath, ownEnv, nil)
+	probes, errs := cityScopedFanOutProbes(cityPath, cfg, agentCfg, cityPath, ownEnv, nil)
+	if len(errs) != 0 {
+		t.Fatalf("cityScopedFanOutProbes returned errors: %v", errs)
+	}
 
 	wantFor := map[string]string{
 		"city": filepath.Join(cityPath, ".beads"),
@@ -52,7 +55,10 @@ func TestProbesDoNotShareOneEnvMap(t *testing.T) {
 	}}
 	ownEnv := map[string]string{"BEADS_DIR": filepath.Join(cityPath, ".beads")}
 
-	probes := cityScopedFanOutProbes(cityPath, cfg, &config.Agent{Name: "worker"}, cityPath, ownEnv, nil)
+	probes, errs := cityScopedFanOutProbes(cityPath, cfg, &config.Agent{Name: "worker"}, cityPath, ownEnv, nil)
+	if len(errs) != 0 {
+		t.Fatalf("cityScopedFanOutProbes returned errors: %v", errs)
+	}
 	if len(probes) != 2 {
 		t.Fatalf("len(probes) = %d, want 2", len(probes))
 	}
@@ -77,7 +83,10 @@ func TestProbeSubprocessResolvesItsOwnStore(t *testing.T) {
 	cfg := &config.City{Rigs: []config.Rig{{Name: "riga", Path: rigAPath}}}
 	ownEnv := map[string]string{"BEADS_DIR": filepath.Join(cityPath, ".beads")}
 
-	probes := cityScopedFanOutProbes(cityPath, cfg, &config.Agent{Name: "worker"}, cityPath, ownEnv, nil)
+	probes, errs := cityScopedFanOutProbes(cityPath, cfg, &config.Agent{Name: "worker"}, cityPath, ownEnv, nil)
+	if len(errs) != 0 {
+		t.Fatalf("cityScopedFanOutProbes returned errors: %v", errs)
+	}
 
 	seen := map[string]string{}
 	for _, p := range probes {

@@ -267,7 +267,13 @@ func evaluatePendingPools(
 		wg.Add(1)
 		sp := pw.sp
 		probeEnv := pw.env
-		sp.Check = prefixShellEnv(controllerQueryPrefixEnv(probeEnv), sp.Check)
+		if len(pw.probes) == 0 {
+			// Fan-out probes each carry their own rig-pinned env and are
+			// prefixed individually in evaluatePoolFanOutSum; prefixing here
+			// with the caller's own probeEnv would apply the wrong (city)
+			// connection coordinates to every rig probe's command string.
+			sp.Check = prefixShellEnv(controllerQueryPrefixEnv(probeEnv), sp.Check)
+		}
 		template := cfg.Agents[pw.agentIdx].QualifiedName()
 		agentName := cfg.Agents[pw.agentIdx].Name
 		agentIndex := pw.agentIdx
@@ -676,7 +682,11 @@ func buildDesiredStateWithSessionBeadsAt(
 			}
 			var probes []poolStoreProbe
 			if rigName == "" && hasCustomScaleCheck {
-				probes = cityScopedFanOutProbes(cityPath, cfg, &cfg.Agents[i], poolDir, nil, suspendedRigPaths)
+				var probeErrs []error
+				probes, probeErrs = cityScopedFanOutProbes(cityPath, cfg, &cfg.Agents[i], poolDir, nil, suspendedRigPaths)
+				for _, perr := range probeErrs {
+					fmt.Fprintf(stderr, "scaleCheck: fan-out probe env for %s: %v\n", template, perr) //nolint:errcheck
+				}
 			}
 			pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir, newDemand: store != nil, probes: probes})
 			continue
@@ -769,7 +779,11 @@ func buildDesiredStateWithSessionBeadsAt(
 		}
 		var probes []poolStoreProbe
 		if rigName == "" && hasCustomScaleCheck {
-			probes = cityScopedFanOutProbes(cityPath, cfg, &cfg.Agents[i], poolDir, env, suspendedRigPaths)
+			var probeErrs []error
+			probes, probeErrs = cityScopedFanOutProbes(cityPath, cfg, &cfg.Agents[i], poolDir, env, suspendedRigPaths)
+			for _, perr := range probeErrs {
+				fmt.Fprintf(stderr, "scaleCheck: fan-out probe env for %s: %v\n", template, perr) //nolint:errcheck
+			}
 		}
 		pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir, env: env, newDemand: store != nil, probes: probes})
 	}

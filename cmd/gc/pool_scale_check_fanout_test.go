@@ -269,7 +269,10 @@ func TestCityScopedFanOutProbesIncludesCityAndNonSuspendedRigsOnly(t *testing.T)
 	ownEnv := map[string]string{"OWN": "1"}
 	suspended := map[string]bool{rigBPath: true}
 
-	probes := cityScopedFanOutProbes(cityPath, cfg, agentCfg, cityPath, ownEnv, suspended)
+	probes, errs := cityScopedFanOutProbes(cityPath, cfg, agentCfg, cityPath, ownEnv, suspended)
+	if len(errs) != 0 {
+		t.Fatalf("cityScopedFanOutProbes returned errors: %v", errs)
+	}
 
 	if len(probes) != 2 {
 		t.Fatalf("len(probes) = %d, want 2 (city + riga only; rigb is suspended): %+v", len(probes), probes)
