@@ -30,6 +30,10 @@ const descriptionFileInlineMaxBytes = 4 * 1024
 // ErrVarValidation reports invalid formula variable input.
 var ErrVarValidation = errors.New("variable validation failed")
 
+// ErrNotFound reports that a formula name could not be resolved in any of
+// the parser's configured search paths.
+var ErrNotFound = errors.New("not found in search paths")
+
 // Parser handles loading and resolving formulas.
 //
 // NOTE: Parser is NOT thread-safe. Create a new Parser per goroutine or
@@ -395,7 +399,7 @@ func (p *Parser) loadFormula(name string) (*Formula, error) {
 
 	path, ok := ResolveWithSource(p.source, p.searchPaths, name)
 	if !ok {
-		return nil, fmt.Errorf("formula %q not found in search paths", name)
+		return nil, fmt.Errorf("formula %q %w", name, ErrNotFound)
 	}
 	return p.ParseFile(path)
 }

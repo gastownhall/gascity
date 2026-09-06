@@ -948,7 +948,7 @@ func BeadMetadataTarget(store beads.Store, beadID string) string {
 // fl.Rigs[<name>]) are reachable when an agent is configured with a path
 // instead of a name. Without this resolution the lookup silently falls
 // back to fl.City and pack-imported formulas appear "not found in search
-// paths" — `gc formula list` would still find them by scanning every
+// paths" — `gc formula list --all` would still find them by scanning every
 // configured search path (city + every rig), so the lookup-versus-list
 // asymmetry is the surface symptom. See gastownhall/gascity#1801.
 func SlingFormulaSearchPaths(deps SlingDeps, a config.Agent) []string {

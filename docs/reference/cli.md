@@ -1745,12 +1745,17 @@ gc formula cook <formula-name> [flags]
 
 ## gc formula list
 
-List all formulas available in the city's formula search paths.
+List formulas available in the resolved formula scope.
 
-Formulas are discovered from the well-known formulas/ directories of
-city and rig pack layers, the city's own formulas/ directory, and the
-rig-local formulas_dir directory. Later layers win for same-named
-formulas.
+By default, list resolves the exact same scope as show/cook/catalog/
+version-check (--rig, else the enclosing rig from cwd, else the city
+layers) — every name it prints is guaranteed loadable by those commands.
+
+Use --all for the cross-city discovery/audit view: every formula across
+every rig and the city, each row tagged with the rig ("city" for
+city-layer entries) that defines it. A name defined in more than one
+group is listed once per defining group — --all never picks a winner
+across rigs. --all and --rig are mutually exclusive.
 
 ```
 gc formula list [flags]
@@ -1758,6 +1763,7 @@ gc formula list [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--all` | bool |  | cross-city discovery view: every formula in every rig and the city, tagged by defining group |
 | `--json` | bool |  | emit JSON |
 
 ## gc formula show

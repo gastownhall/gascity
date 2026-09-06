@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -1504,6 +1505,438 @@ title = "Do work for {{convoy_id}}"
 	}
 	if !reflect.DeepEqual(conflictErr.WorkflowIDs, []string{legacyRoot.ID}) {
 		t.Fatalf("WorkflowIDs = %+v, want [%s]", conflictErr.WorkflowIDs, legacyRoot.ID)
+	}
+}
+
+// formulaScopeAgreementCity builds a fixture city with one rig that has a
+// rig-only formula layer in addition to the shared city layer, so a caller
+// at city scope (outside the rig) can distinguish "sees everything" from
+// "sees only what it can load."
+func formulaScopeAgreementCity(t *testing.T) (cityPath string, cfg *config.City) {
+	t.Helper()
+
+	cityPath = t.TempDir()
+	rigPath := filepath.Join(cityPath, "my-project")
+	cityFormulas := filepath.Join(cityPath, "formulas")
+	rigFormulas := filepath.Join(cityPath, "packs", "builder", "formulas")
+
+	writeFormulaFile(t, cityFormulas, "city-wide.formula.toml", "name = \"city-wide\"\n")
+	writeFormulaFile(t, rigFormulas, "rig-layer-only.formula.toml", "name = \"rig-layer-only\"\n")
+	writeFormulaFile(t, rigPath, ".keep", "")
+
+	cfg = &config.City{
+		Rigs: []config.Rig{{Name: "my-project", Path: rigPath}},
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityFormulas},
+			Rigs: map[string][]string{
+				"my-project": {cityFormulas, rigFormulas},
+			},
+		},
+	}
+	return cityPath, cfg
+}
+
+// TestFormulaListAndShowScopeAgree asserts that gc formula list's default
+// search paths are IDENTICAL to resolveFormulaScope's — the same resolver
+// show/cook/catalog/version-check already use — not merely "mutually
+// loadable." Structural agreement (one resolver, not two) is what keeps the
+// two commands from drifting apart again.
+func TestFormulaListAndShowScopeAgree(t *testing.T) {
+	cityPath, cfg := formulaScopeAgreementCity(t)
+
+	// cwd = city root: outside every declared rig, exactly the shell the bug
+	// was reported from.
+	t.Chdir(cityPath)
+	prev := rigFlag
+	t.Cleanup(func() { rigFlag = prev })
+	rigFlag = ""
+
+	listPaths, err := listFormulaSearchPaths(cfg, cityPath, io.Discard)
+	if err != nil {
+		t.Fatalf("listFormulaSearchPaths: %v", err)
+	}
+
+	scope, err := resolveFormulaScope(cfg, cityPath, io.Discard)
+	if err != nil {
+		t.Fatalf("resolveFormulaScope: %v", err)
+	}
+
+	if !slices.Equal(listPaths, scope.searchPaths) {
+		t.Fatalf("gc formula list's default search paths diverge from resolveFormulaScope:\n  list:  %v\n  scope: %v", listPaths, scope.searchPaths)
+	}
+
+	// Redundant-but-cheap insurance: every listed name must actually be
+	// loadable in the resolved scope.
+	loadable := make(map[string]bool)
+	for _, row := range formulaRowsForSearchPaths(scope.searchPaths) {
+		loadable[row.Name] = true
+	}
+	for _, row := range formulaRowsForSearchPaths(listPaths) {
+		if !loadable[row.Name] {
+			t.Errorf("formula %q listed but not loadable in resolved scope", row.Name)
+		}
+	}
+}
+
+// formulaAllCity builds a two-rig city for --all tests: "citywide" is
+// defined only at the city layer and inherited unchanged by both rigs;
+// "alpha-only" is defined solely in rig alpha's own layer; "beta-only" is
+// defined solely in rig beta's own layer; and rig beta additionally ships
+// its own "citywide.formula.toml" in a directory that is NOT part of the
+// city layer, i.e. a genuine per-rig redefinition of a city-layer name.
+func formulaAllCity(t *testing.T) (cityPath string, cfg *config.City) {
+	t.Helper()
+
+	cityPath = t.TempDir()
+	cityFormulas := filepath.Join(cityPath, "formulas")
+	alphaOwn := filepath.Join(cityPath, "packs", "alpha", "formulas")
+	betaOwn := filepath.Join(cityPath, "packs", "beta", "formulas")
+	betaOverride := filepath.Join(cityPath, "packs", "beta-override", "formulas")
+	alphaPath := filepath.Join(cityPath, "alpha")
+	betaPath := filepath.Join(cityPath, "beta")
+
+	writeFormulaFile(t, cityFormulas, "citywide.formula.toml", "name = \"citywide\"\n")
+	writeFormulaFile(t, alphaOwn, "alpha-only.formula.toml", "name = \"alpha-only\"\n")
+	writeFormulaFile(t, betaOwn, "beta-only.formula.toml", "name = \"beta-only\"\n")
+	writeFormulaFile(t, betaOverride, "citywide.formula.toml", "name = \"citywide\"\n")
+	writeFormulaFile(t, alphaPath, ".keep", "")
+	writeFormulaFile(t, betaPath, ".keep", "")
+
+	cfg = &config.City{
+		Rigs: []config.Rig{
+			{Name: "alpha", Path: alphaPath},
+			{Name: "beta", Path: betaPath},
+		},
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityFormulas},
+			Rigs: map[string][]string{
+				"alpha": {cityFormulas, alphaOwn},
+				"beta":  {cityFormulas, betaOwn, betaOverride},
+			},
+		},
+	}
+	return cityPath, cfg
+}
+
+// TestFormulaListAllRowsCityFirstThenRigsSortedWithPerGroupDuplicates pins
+// the exact --all row shape and ordering: city group first, then rig
+// groups sorted by rig name ascending, with "citywide" appearing once for
+// the city group and again for beta's own redefinition — never collapsed
+// to a single cross-rig winner, and never duplicated under alpha (which
+// only inherits it unchanged).
+func TestFormulaListAllRowsCityFirstThenRigsSortedWithPerGroupDuplicates(t *testing.T) {
+	_, cfg := formulaAllCity(t)
+
+	rows := formulaAllRows(cfg)
+
+	type pair struct{ name, rig string }
+	got := make([]pair, len(rows))
+	for i, row := range rows {
+		got[i] = pair{row.Name, row.Rig}
+	}
+
+	want := []pair{
+		{"citywide", "city"},
+		{"alpha-only", "alpha"},
+		{"beta-only", "beta"},
+		{"citywide", "beta"},
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("formulaAllRows() = %+v, want %+v", got, want)
+	}
+}
+
+// TestFormulaListAllIsSupersetOfDefaultScope asserts every name the
+// default (scope-true) list prints from inside rig alpha is also present
+// somewhere in --all's output — --all must never omit what the default
+// view already promises is loadable.
+func TestFormulaListAllIsSupersetOfDefaultScope(t *testing.T) {
+	cityPath, cfg := formulaAllCity(t)
+
+	var alphaPath string
+	for _, r := range cfg.Rigs {
+		if r.Name == "alpha" {
+			alphaPath = r.Path
+		}
+	}
+	t.Chdir(alphaPath)
+	prev := rigFlag
+	t.Cleanup(func() { rigFlag = prev })
+	rigFlag = ""
+
+	listPaths, err := listFormulaSearchPaths(cfg, cityPath)
+	if err != nil {
+		t.Fatalf("listFormulaSearchPaths: %v", err)
+	}
+	defaultRows := formulaRowsForSearchPaths(listPaths)
+
+	allNames := make(map[string]bool)
+	for _, row := range formulaAllRows(cfg) {
+		allNames[row.Name] = true
+	}
+	for _, row := range defaultRows {
+		if !allNames[row.Name] {
+			t.Errorf("default list name %q missing from --all", row.Name)
+		}
+	}
+}
+
+// TestFormulaListAllStableAcrossRepeatedCalls guards against reintroducing
+// map-ranging over cfg.FormulaLayers.Rigs: 200 iterations is enough to
+// surface Go's randomized map order if sortedRigLayerNames regresses to a
+// bare `for range map`.
+func TestFormulaListAllStableAcrossRepeatedCalls(t *testing.T) {
+	_, cfg := formulaAllCity(t)
+
+	first := formulaAllRows(cfg)
+	for i := 0; i < 200; i++ {
+		got := formulaAllRows(cfg)
+		if !slices.Equal(
+			func() []string {
+				names := make([]string, len(got))
+				for i, r := range got {
+					names[i] = r.Name + "/" + r.Rig
+				}
+				return names
+			}(),
+			func() []string {
+				names := make([]string, len(first))
+				for i, r := range first {
+					names[i] = r.Name + "/" + r.Rig
+				}
+				return names
+			}(),
+		) {
+			t.Fatalf("iteration %d: formulaAllRows() order changed:\n  first: %+v\n  got:   %+v", i, first, got)
+		}
+	}
+}
+
+// TestFormulaListAllAndRigRejected asserts --all combined with --rig fails
+// fast with a clear diagnostic, before any city/rig resolution is
+// attempted.
+func TestFormulaListAllAndRigRejected(t *testing.T) {
+	prev := rigFlag
+	t.Cleanup(func() { rigFlag = prev })
+	rigFlag = "some-rig"
+
+	var stdout, stderr bytes.Buffer
+	cmd := newFormulaListCmd(&stdout, &stderr)
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetArgs([]string{"--all"})
+	err := cmd.Execute()
+	if !errors.Is(err, errExit) {
+		t.Fatalf("error = %v, want errExit", err)
+	}
+	if got := stderr.String(); !strings.Contains(got, "gc formula list:") || !strings.Contains(got, "--all and --rig are mutually exclusive") {
+		t.Fatalf("stderr = %q, want mutual-exclusion diagnostic", got)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty on text-mode error", stdout.String())
+	}
+}
+
+// TestFormulaListAllAndRigRejectedJSON is the --json counterpart: the
+// mutual-exclusion error must still surface even when JSON output is
+// requested, and via stdout (raw err, not errExit) per jsonOutput's
+// convention in formulaCommandError.
+func TestFormulaListAllAndRigRejectedJSON(t *testing.T) {
+	prev := rigFlag
+	t.Cleanup(func() { rigFlag = prev })
+	rigFlag = "some-rig"
+
+	var stdout, stderr bytes.Buffer
+	cmd := newFormulaListCmd(&stdout, &stderr)
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetArgs([]string{"--all", "--json"})
+	err := cmd.Execute()
+	if err == nil || errors.Is(err, errExit) {
+		t.Fatalf("error = %v, want raw mutual-exclusion error (json mode bypasses errExit)", err)
+	}
+	if !strings.Contains(err.Error(), "--all and --rig are mutually exclusive") {
+		t.Fatalf("error = %v, want mutual-exclusion diagnostic", err)
+	}
+	if stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("stdout/stderr should stay empty when RunE returns the raw error: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+// formulaRowNames turns formulaRowsForSearchPaths into a name-presence set
+// for membership assertions.
+func formulaRowNames(paths []string) map[string]bool {
+	names := make(map[string]bool)
+	for _, row := range formulaRowsForSearchPaths(paths) {
+		names[row.Name] = true
+	}
+	return names
+}
+
+// TestFormulaListHonorsRigFlag proves gc formula list --rig actually changes
+// the resolved search paths (and therefore the printed rows), fixing the
+// defect ga-ocgy3a diagnosed: list used to compute its own union of every
+// layer regardless of --rig, so the flag was a silent no-op.
+func TestFormulaListHonorsRigFlag(t *testing.T) {
+	cityPath, cfg := formulaScopeAgreementCity(t)
+
+	// cwd = city root: outside every declared rig, so without --rig the
+	// resolver falls back to city-only scope.
+	t.Chdir(cityPath)
+	prev := rigFlag
+	t.Cleanup(func() { rigFlag = prev })
+
+	rigFlag = ""
+	cityOnlyPaths, err := listFormulaSearchPaths(cfg, cityPath)
+	if err != nil {
+		t.Fatalf("listFormulaSearchPaths (city scope): %v", err)
+	}
+	cityOnlyNames := formulaRowNames(cityOnlyPaths)
+	if cityOnlyNames["rig-layer-only"] {
+		t.Fatalf("city-scope list unexpectedly includes rig-only formula: %v", cityOnlyNames)
+	}
+	if !cityOnlyNames["city-wide"] {
+		t.Fatalf("city-scope list is missing city-wide formula: %v", cityOnlyNames)
+	}
+
+	rigFlag = "my-project"
+	rigPaths, err := listFormulaSearchPaths(cfg, cityPath)
+	if err != nil {
+		t.Fatalf("listFormulaSearchPaths (--rig my-project): %v", err)
+	}
+	rigNames := formulaRowNames(rigPaths)
+	if !rigNames["rig-layer-only"] {
+		t.Fatalf("--rig my-project list is missing rig-layer-only formula: %v", rigNames)
+	}
+	if !rigNames["city-wide"] {
+		t.Fatalf("--rig my-project list should still include inherited city-wide formula: %v", rigNames)
+	}
+
+	if slices.Equal(cityOnlyPaths, rigPaths) {
+		t.Fatalf("--rig my-project produced identical search paths to city scope — --rig was ignored: %v", rigPaths)
+	}
+}
+
+// TestEnrichFormulaNotFoundErrorNamesOwningRig proves that when show/cook/
+// version-check fail to find a formula in the resolved scope, the error
+// names every rig that actually defines it (per the same inventory --all
+// uses) and suggests --rig <name>, instead of leaving the operator to guess
+// where the formula lives.
+func TestEnrichFormulaNotFoundErrorNamesOwningRig(t *testing.T) {
+	_, cfg := formulaAllCity(t)
+
+	baseErr := fmt.Errorf("formula %q %w", "alpha-only", formula.ErrNotFound)
+
+	got := enrichFormulaNotFoundError(baseErr, cfg, "alpha-only")
+	if got == nil {
+		t.Fatal("enrichFormulaNotFoundError returned nil")
+	}
+	if !errors.Is(got, formula.ErrNotFound) {
+		t.Fatalf("enriched error lost formula.ErrNotFound wrapping: %v", got)
+	}
+	if !strings.Contains(got.Error(), `"alpha"`) {
+		t.Fatalf("enriched error does not name owning rig %q: %v", "alpha", got)
+	}
+	if !strings.Contains(got.Error(), "--rig") {
+		t.Fatalf("enriched error does not suggest --rig: %v", got)
+	}
+	if strings.Contains(got.Error(), `"beta"`) {
+		t.Fatalf("enriched error should not name beta, which does not define alpha-only: %v", got)
+	}
+}
+
+// TestEnrichFormulaNotFoundErrorNoOpWhenNowhereFound preserves today's
+// message unchanged when a name isn't found in any rig's inventory either —
+// enrichment must never invent guidance it can't back up.
+func TestEnrichFormulaNotFoundErrorNoOpWhenNowhereFound(t *testing.T) {
+	_, cfg := formulaAllCity(t)
+
+	baseErr := fmt.Errorf("formula %q %w", "does-not-exist-anywhere", formula.ErrNotFound)
+
+	got := enrichFormulaNotFoundError(baseErr, cfg, "does-not-exist-anywhere")
+	if got == nil || got.Error() != baseErr.Error() {
+		t.Fatalf("enrichFormulaNotFoundError = %v, want unchanged %v", got, baseErr)
+	}
+}
+
+// TestFormulaCookStandaloneNotFoundNamesOwningRig drives newFormulaCookCmd
+// end-to-end — no --attach — for a formula that exists only in another
+// rig's own layer, and asserts the not-found diagnostic names the owning
+// rig and suggests --rig. The standalone cook branch is the most common
+// invocation and the one that most needs the hint now that list/cook share
+// the narrower resolved scope; enrichment was previously wired only into
+// the --attach branch.
+func TestFormulaCookStandaloneNotFoundNamesOwningRig(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("GC_SESSION", "fake")
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+
+	// Reuse the --all fixture's on-disk layout: "alpha-only" lives solely in
+	// rig alpha's own formula dir, never in the city layer.
+	cityPath, _ := formulaAllCity(t)
+
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(withBuiltinProviderAliasesTOMLForTest(`
+[workspace]
+name = "my-city"
+provider = "claude"
+
+[[rigs]]
+name = "alpha"
+formulas_dir = "packs/alpha/formulas"
+
+[[rigs]]
+name = "beta"
+formulas_dir = "packs/beta/formulas"
+`, "claude")+testControlDispatcherAgentTOML("")), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	// Rig paths belong in .gc/site.toml, not city.toml.
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatalf("mkdir .gc: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".gc", "site.toml"), []byte(fmt.Sprintf(`
+workspace_name = "my-city"
+
+[[rig]]
+name = "alpha"
+path = %q
+
+[[rig]]
+name = "beta"
+path = %q
+`, filepath.Join(cityPath, "alpha"), filepath.Join(cityPath, "beta"))), 0o644); err != nil {
+		t.Fatalf("write site.toml: %v", err)
+	}
+
+	// cwd = city root: outside every declared rig, so cook resolves the
+	// city-only scope and cannot see alpha's layer.
+	t.Chdir(cityPath)
+	t.Setenv("GC_CITY_PATH", cityPath)
+	prev := rigFlag
+	t.Cleanup(func() { rigFlag = prev })
+	rigFlag = ""
+
+	var stdout, stderr bytes.Buffer
+	cmd := newFormulaCookCmd(&stdout, &stderr)
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetArgs([]string{"alpha-only"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatalf("formula cook alpha-only succeeded, want not-found error\nstdout=%s\nstderr=%s", stdout.String(), stderr.String())
+	}
+
+	got := stderr.String()
+	if !strings.Contains(got, `"alpha"`) {
+		t.Errorf("cook error does not name owning rig %q: %s", "alpha", got)
+	}
+	if !strings.Contains(got, "--rig") {
+		t.Errorf("cook error does not suggest --rig: %s", got)
+	}
+	if strings.Contains(got, `"beta"`) {
+		t.Errorf("cook error should not name beta, which does not define alpha-only: %s", got)
 	}
 }
 

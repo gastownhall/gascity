@@ -44,17 +44,62 @@ formula_compiler opt-in.`,
 
 func newFormulaListCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonOutput bool
+	var allFlag bool
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List available formulas",
-		Long: `List all formulas available in the city's formula search paths.
+		Long: `List formulas available in the resolved formula scope.
 
-Formulas are discovered from the well-known formulas/ directories of
-city and rig pack layers, the city's own formulas/ directory, and the
-rig-local formulas_dir directory. Later layers win for same-named
-formulas.`,
+By default, list resolves the exact same scope as show/cook/catalog/
+version-check (--rig, else the enclosing rig from cwd, else the city
+layers) — every name it prints is guaranteed loadable by those commands.
+
+Use --all for the cross-city discovery/audit view: every formula across
+every rig and the city, each row tagged with the rig ("city" for
+city-layer entries) that defines it. A name defined in more than one
+group is listed once per defining group — --all never picks a winner
+across rigs. --all and --rig are mutually exclusive.`,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			cityPath, paths, rows := listFormulaRows(stderr)
+			if allFlag && strings.TrimSpace(rigFlag) != "" {
+				err := fmt.Errorf("--all and --rig are mutually exclusive")
+				return formulaCommandError(stderr, "gc formula list", jsonOutput, err)
+			}
+
+			if allFlag {
+				cityPath, err := resolveCity()
+				if err != nil {
+					return formulaCommandError(stderr, "gc formula list", jsonOutput, err)
+				}
+				cfg, err := loadCityConfig(cityPath, stderr)
+				if err != nil {
+					return formulaCommandError(stderr, "gc formula list", jsonOutput, err)
+				}
+				paths := formulaAllSearchPaths(cfg)
+				rows := formulaAllRows(cfg)
+				if jsonOutput {
+					return writeCLIJSONLine(stdout, formulaListJSON{
+						SchemaVersion: "1",
+						OK:            true,
+						CityPath:      cityPath,
+						SearchPaths:   paths,
+						Formulas:      rows,
+						Summary:       formulaListSummaryJSON{Count: len(rows)},
+					})
+				}
+				if len(rows) == 0 {
+					_, _ = fmt.Fprintln(stdout, "No formulas found.")
+					return nil
+				}
+				for _, row := range rows {
+					_, _ = fmt.Fprintf(stdout, "%s\t%s\n", row.Name, row.Rig)
+				}
+				return nil
+			}
+
+			cityPath, paths, rows, err := listFormulaRows(stderr)
+			if err != nil {
+				return formulaCommandError(stderr, "gc formula list", jsonOutput, err)
+			}
 			if jsonOutput {
 				return writeCLIJSONLine(stdout, formulaListJSON{
 					SchemaVersion: "1",
@@ -81,6 +126,7 @@ formulas.`,
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSON")
+	cmd.Flags().BoolVar(&allFlag, "all", false, "cross-city discovery view: every formula in every rig and the city, tagged by defining group")
 	return cmd
 }
 
@@ -133,7 +179,7 @@ Examples:
 			rigVars := rigFormulaVarsForScope(cfg, cityPath)
 			recipe, err := formula.CompileWithoutRuntimeVarValidation(cmd.Context(), name, searchPaths, compileVars)
 			if err != nil {
-				return formulaCommandError(stderr, "gc formula show", jsonOutput, err)
+				return formulaCommandError(stderr, "gc formula show", jsonOutput, enrichFormulaNotFoundError(err, cfg, name))
 			}
 			if len(vars) > 0 {
 				if err := formula.ValidateProvidedVarDefs(recipe.Vars, vars); err != nil {
@@ -323,6 +369,9 @@ type formulaListJSON struct {
 type formulaListRowJSON struct {
 	Name   string `json:"name"`
 	Source string `json:"source,omitempty"`
+	// Rig is only populated by --all: "city" for city-layer entries, else
+	// the rig name that defines this formula.
+	Rig string `json:"rig,omitempty"`
 }
 
 type formulaListSummaryJSON struct {
@@ -396,19 +445,36 @@ type jsonContractWarning struct {
 	Message string `json:"message"`
 }
 
-func listFormulaRows(warningWriter ...io.Writer) (string, []string, []formulaListRowJSON) {
+func listFormulaRows(warningWriter ...io.Writer) (string, []string, []formulaListRowJSON, error) {
 	cityPath, err := resolveCity()
 	if err != nil {
-		return "", nil, nil
+		return "", nil, nil, err
 	}
 	cfg, err := loadCityConfig(cityPath, warningWriter...)
 	if err != nil {
-		return cityPath, nil, nil
+		return cityPath, nil, nil, err
 	}
-	paths := formulaSearchPathsForList(cfg)
+	paths, err := listFormulaSearchPaths(cfg, cityPath, warningWriter...)
+	if err != nil {
+		return cityPath, nil, nil, err
+	}
 
 	rows := formulaRowsForSearchPaths(paths)
-	return cityPath, paths, rows
+	return cityPath, paths, rows, nil
+}
+
+// listFormulaSearchPaths computes gc formula list's default search paths —
+// via the exact same resolveFormulaScope that show/cook/catalog/
+// version-check already use, so list can never advertise a name those
+// commands can't load. Sharing that resolver also means list emits the same
+// scope-selection warnings (discarded GC_RIG, --city pin) as its siblings,
+// so warningWriter is threaded through to it.
+func listFormulaSearchPaths(cfg *config.City, cityPath string, warningWriter ...io.Writer) ([]string, error) {
+	scope, err := resolveFormulaScope(cfg, cityPath, resolveLoadCityConfigWarningWriter(warningWriter...))
+	if err != nil {
+		return nil, err
+	}
+	return scope.searchPaths, nil
 }
 
 func formulaRowsForSearchPaths(paths []string) []formulaListRowJSON {
@@ -490,7 +556,26 @@ func formulaCatalogJSONFromEntries(entries []formulaCatalogEntryJSON, warnings [
 	}
 }
 
-func formulaSearchPathsForList(cfg *config.City) []string {
+// sortedRigLayerNames returns the names of rigs that have formula layers,
+// sorted ascending. Deterministic replacement for ranging
+// cfg.FormulaLayers.Rigs (a Go map) directly.
+func sortedRigLayerNames(cfg *config.City) []string {
+	if cfg == nil {
+		return nil
+	}
+	names := make([]string, 0, len(cfg.FormulaLayers.Rigs))
+	for name := range cfg.FormulaLayers.Rigs {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names
+}
+
+// formulaAllSearchPaths returns the deduplicated union of every search path
+// across the city layer and every rig layer, for --all's JSON
+// search_paths field. Iterates rigs via sortedRigLayerNames, so the result
+// is deterministic.
+func formulaAllSearchPaths(cfg *config.City) []string {
 	if cfg == nil {
 		return nil
 	}
@@ -505,10 +590,89 @@ func formulaSearchPathsForList(cfg *config.City) []string {
 		}
 	}
 	add(cfg.FormulaLayers.City)
-	for _, layers := range cfg.FormulaLayers.Rigs {
-		add(layers)
+	for _, rig := range sortedRigLayerNames(cfg) {
+		add(cfg.FormulaLayers.Rigs[rig])
 	}
 	return all
+}
+
+// taggedFormulaRows resolves paths into rows and stamps each with rig.
+func taggedFormulaRows(paths []string, rig string) []formulaListRowJSON {
+	rows := formulaRowsForSearchPaths(paths)
+	for i := range rows {
+		rows[i].Rig = rig
+	}
+	return rows
+}
+
+// formulaAllRows is gc formula list --all's row set: the city group first,
+// then rig groups sorted by rig name ascending. A rig only contributes a
+// row for a name it actually (re)defines in a layer of its own — a name a
+// rig merely inherits unchanged from the city layer is not repeated under
+// that rig. This is what keeps "no collapsed cross-rig winner" from
+// degenerating into "every name times every rig": a name genuinely
+// redefined by more than one group still appears once per defining group.
+func formulaAllRows(cfg *config.City) []formulaListRowJSON {
+	if cfg == nil {
+		return nil
+	}
+	rows := taggedFormulaRows(cfg.FormulaLayers.City, "city")
+
+	cityPaths := make(map[string]struct{}, len(cfg.FormulaLayers.City))
+	for _, p := range cfg.FormulaLayers.City {
+		cityPaths[p] = struct{}{}
+	}
+
+	for _, rig := range sortedRigLayerNames(cfg) {
+		var own []string
+		for _, p := range cfg.FormulaLayers.Rigs[rig] {
+			if _, inherited := cityPaths[p]; !inherited {
+				own = append(own, p)
+			}
+		}
+		if len(own) == 0 {
+			continue
+		}
+		rows = append(rows, taggedFormulaRows(own, rig)...)
+	}
+	return rows
+}
+
+// formulaRigsContaining returns the sorted, deduplicated rig names (city
+// excluded — see enrichFormulaNotFoundError) that define the given formula
+// name, per the same inventory --all uses.
+func formulaRigsContaining(cfg *config.City, name string) []string {
+	var rigs []string
+	for _, row := range formulaAllRows(cfg) {
+		if row.Name == name && row.Rig != "city" {
+			rigs = append(rigs, row.Rig)
+		}
+	}
+	slices.Sort(rigs)
+	return slices.Compact(rigs)
+}
+
+// enrichFormulaNotFoundError adds "found in rig(s) ... — retry with --rig
+// <name>" guidance to a formula.ErrNotFound error, checked against the
+// same per-rig inventory --all uses. No-op for any other error, and
+// preserves today's message unchanged when the name isn't found anywhere.
+func enrichFormulaNotFoundError(err error, cfg *config.City, name string) error {
+	if err == nil || !errors.Is(err, formula.ErrNotFound) {
+		return err
+	}
+	normalized, ok := formula.TrimTOMLFilename(name)
+	if !ok {
+		normalized = strings.TrimSuffix(name, formula.FormulaExtJSON)
+	}
+	rigs := formulaRigsContaining(cfg, normalized)
+	if len(rigs) == 0 {
+		return err
+	}
+	quoted := make([]string, len(rigs))
+	for i, r := range rigs {
+		quoted[i] = strconv.Quote(r)
+	}
+	return fmt.Errorf("%w (found in rig(s) %s — retry with --rig <name>)", err, strings.Join(quoted, ", "))
 }
 
 // printGraphV2Deprecations surfaces deprecated graph.v2 constructs (the legacy
@@ -705,7 +869,7 @@ store, copy them into the binding with
 			if attach != "" {
 				isGraphFormula, _, err := graphv2.IsGraphV2Formula(args[0], scope.searchPaths)
 				if err != nil {
-					return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("load formula %q: %w", args[0], err))
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("load formula %q: %w", args[0], enrichFormulaNotFoundError(err, cfg, args[0])))
 				}
 				// A graft is a TWO-ENDED edge, so the arm that can serve it runs
 				// WHOLE against the store that holds the ATTACH BEAD, resolved
@@ -968,7 +1132,7 @@ store, copy them into the binding with
 
 			isGraphFormula, _, err := graphv2.IsGraphV2Formula(args[0], scope.searchPaths)
 			if err != nil {
-				return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("load formula %q: %w", args[0], err))
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("load formula %q: %w", args[0], enrichFormulaNotFoundError(err, cfg, args[0])))
 			}
 			inv, err := graphv2.PrepareInvocation(cmd.Context(), store, args[0], scope.searchPaths, "", cookVars)
 			if err != nil {
@@ -1490,7 +1654,7 @@ since it was spawned.`,
 
 			recipe, err := formula.Compile(cmd.Context(), formulaName, scope.searchPaths, nil)
 			if err != nil {
-				return fmt.Errorf("compiling formula %q from disk: %w", formulaName, err)
+				return fmt.Errorf("compiling formula %q from disk: %w", formulaName, enrichFormulaNotFoundError(err, cfg, formulaName))
 			}
 
 			diskHash := recipe.ContentHash
