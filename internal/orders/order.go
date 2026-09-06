@@ -318,6 +318,12 @@ func Validate(a Order) error {
 		if a.Schedule == "" {
 			return fmt.Errorf("order %q: cron trigger requires schedule", a.Name)
 		}
+		// A schedule the evaluator cannot parse does not error at run time —
+		// it simply never matches, and the order sits registered and enabled
+		// without ever firing. Reject it here, where someone will see it.
+		if err := ValidateCronSchedule(a.Schedule); err != nil {
+			return fmt.Errorf("order %q: %w", a.Name, err)
+		}
 	case "condition":
 		if a.Check == "" {
 			return fmt.Errorf("order %q: condition trigger requires check command", a.Name)

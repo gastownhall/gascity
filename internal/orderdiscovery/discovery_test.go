@@ -371,6 +371,50 @@ CUSTOM_ORDER_FLAG = "enabled"
 	}
 }
 
+// TestScanAllValidationHandlerSkipsUnmatchableCronOrder pins the load-time
+// half of cron schedule validation: an order whose schedule the matcher can
+// never match is dropped with a diagnostic, and the rest of the scan still
+// succeeds. Before validation it loaded cleanly and then never fired.
+func TestScanAllValidationHandlerSkipsUnmatchableCronOrder(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "backup", `[order]
+exec = "scripts/backup.sh"
+trigger = "cooldown"
+interval = "1h"
+`)
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "nightly", `[order]
+formula = "mol-nightly"
+trigger = "cron"
+schedule = "0 25 * * *"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+		},
+	}
+
+	var handled string
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{
+		OnValidateError: func(orderName string, err error) error {
+			handled = orderName + ": " + err.Error()
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	if !strings.Contains(handled, "nightly") || !strings.Contains(handled, "outside the valid range 0-23") {
+		t.Fatalf("handled validation error = %q, want nightly out-of-range-hour diagnostic", handled)
+	}
+	if len(aa) != 1 {
+		t.Fatalf("got %d orders, want only the valid order", len(aa))
+	}
+	if aa[0].Name != "backup" {
+		t.Fatalf("remaining order = %q, want backup", aa[0].Name)
+	}
+}
+
 func TestScanAllRejectsSchema1PackLegacyOrderDirectory(t *testing.T) {
 	cityPath, cityLayer := orderDiscoveryCity(t)
 	if err := os.WriteFile(filepath.Join(cityPath, "pack.toml"), []byte("[pack]\nname = \"legacy-city\"\nschema = 1\n"), 0o644); err != nil {

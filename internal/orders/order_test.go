@@ -191,6 +191,16 @@ func TestValidateCron(t *testing.T) {
 	}
 }
 
+// TestValidateCronRejectsUnmatchableSchedule covers Validate's call into
+// ValidateCronSchedule directly: a schedule the matcher can never match is a
+// load-time error, not an order that registers and silently never fires.
+func TestValidateCronRejectsUnmatchableSchedule(t *testing.T) {
+	a := Order{Name: "x", Formula: "f", Trigger: "cron", Schedule: "0 25 * * *"}
+	if err := Validate(a); err == nil {
+		t.Error("Validate() = nil, want error for hour 25")
+	}
+}
+
 func TestValidateCronMissingSchedule(t *testing.T) {
 	a := Order{Name: "cleanup", Formula: "mol-cleanup", Trigger: "cron"}
 	if err := Validate(a); err == nil {

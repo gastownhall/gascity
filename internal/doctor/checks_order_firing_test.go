@@ -588,6 +588,32 @@ func TestComputeExpectedIntervalForCronSchedule_NoMatchInAYear(t *testing.T) {
 	}
 }
 
+// TestComputeExpectedIntervalForCronScheduleSundayAlias pins this file's
+// matcher to the one in internal/orders. Day-of-week 7 is the ordinary cron
+// spelling of Sunday and internal/orders both accepts and fires it; before the
+// alias probe here, the same schedule made this check a blocking doctor error.
+func TestComputeExpectedIntervalForCronScheduleSundayAlias(t *testing.T) {
+	for _, tc := range []struct {
+		schedule string
+		want     time.Duration
+	}{
+		{"0 9 * * 7", 168 * time.Hour},
+		{"0 9 * * 0,7", 168 * time.Hour},
+		{"0 9 * * 0", 168 * time.Hour},
+		{"*/30 6-18 * * *", 30 * time.Minute},
+		{"0 8-20/2 * * *", 2 * time.Hour},
+	} {
+		got, err := computeExpectedIntervalForCronSchedule(tc.schedule)
+		if err != nil {
+			t.Errorf("computeExpectedIntervalForCronSchedule(%q) = %v, want nil", tc.schedule, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("computeExpectedIntervalForCronSchedule(%q) = %v, want %v", tc.schedule, got, tc.want)
+		}
+	}
+}
+
 func orderFiringTestCity(t *testing.T) (string, *config.City) {
 	t.Helper()
 	cityPath := t.TempDir()
