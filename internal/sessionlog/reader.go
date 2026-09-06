@@ -839,16 +839,13 @@ func FindCodexSessionFileNearScan(searchPaths []string, workDir string, anchor t
 // appendCodexRolloutMatch appends path to matches unless its physical
 // identity was already seen. One rollout is commonly reachable through two
 // lexical paths (a configured root holding the aimux symlink AND the
-// symlink's target listed directly); without physical dedup that single file
-// would trip the ambiguity refusal. EvalSymlinks is used for identity
-// comparison only — the FIRST lexical path is kept so the paired extractor's
-// lexical containment validation still passes. On resolve error the lexical
-// path itself is the identity.
+// symlink's target listed directly, or a relative alias of either); without
+// physical dedup that single file would trip the ambiguity refusal.
+// NormalizePathForCompare is used for identity comparison only — the FIRST
+// lexical path is kept so the paired extractor's lexical containment
+// validation still passes.
 func appendCodexRolloutMatch(path string, seen map[string]bool, matches *[]string) {
-	key := path
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		key = resolved
-	}
+	key := pathutil.NormalizePathForCompare(path)
 	if seen[key] {
 		return
 	}
@@ -1077,6 +1074,10 @@ func findCodexRolloutBySuffixIn(sessDir, workDir, suffix string, seen map[string
 		}
 	}
 	for _, root := range extraRoots {
+		// canonical-path-exception: existence/resolvability only, not
+		// comparison preparation. Resolves the extraRoot symlink to actually
+		// recurse into the real directory it points at; a dangling/broken
+		// symlink must be skipped, not treated as a comparison failure.
 		resolved, err := filepath.EvalSymlinks(filepath.Join(cleaned, root))
 		if err != nil {
 			continue
@@ -1173,6 +1174,10 @@ func collectCodexCandidatesInDays(root, workDir string, firstDay, lastDay time.T
 	}
 	_, extraRoots := splitCodexSessionRoots(root)
 	for _, name := range extraRoots {
+		// canonical-path-exception: existence/resolvability only, not
+		// comparison preparation. Resolves the extraRoot symlink to actually
+		// recurse into the real directory it points at; a dangling/broken
+		// symlink must be skipped, not treated as a comparison failure.
 		resolved, err := filepath.EvalSymlinks(filepath.Join(root, name))
 		if err != nil {
 			continue
@@ -1194,10 +1199,7 @@ func appendCodexCandidatesFromDir(dir, workDir string, seen map[string]bool, out
 			continue
 		}
 		path := filepath.Join(dir, e.Name())
-		key := path
-		if resolved, err := filepath.EvalSymlinks(path); err == nil {
-			key = resolved
-		}
+		key := pathutil.NormalizePathForCompare(path)
 		if seen[key] {
 			continue
 		}
@@ -1255,6 +1257,10 @@ func findCodexSessionFileIn(sessDir, workDir string) string {
 
 	// Scan symlinked session roots (aimux-managed accounts).
 	for _, root := range extraRoots {
+		// canonical-path-exception: existence/resolvability only, not
+		// comparison preparation. Resolves the extraRoot symlink to actually
+		// recurse into the real directory it points at; a dangling/broken
+		// symlink must be skipped, not treated as a comparison failure.
 		resolved, err := filepath.EvalSymlinks(filepath.Join(sessDir, root))
 		if err != nil {
 			continue

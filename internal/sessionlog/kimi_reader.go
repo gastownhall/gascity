@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // ReadKimiFile reads a Kimi Code context JSONL transcript and converts it to
@@ -179,11 +181,11 @@ func findKimiSessionFilesIn(root, workHash string) []kimiContextCandidate {
 }
 
 func findKimiSessionFileInVisited(root, workHash string, visited map[string]bool) string {
-	root = canonicalKimiSessionRoot(root)
-	if root == "" || visited[root] {
+	key := canonicalKimiSessionRoot(root)
+	if key == "" || visited[key] {
 		return ""
 	}
-	visited[root] = true
+	visited[key] = true
 
 	workRoot := filepath.Join(root, workHash)
 	workRootExists := kimiDirectoryExists(workRoot)
@@ -199,6 +201,10 @@ func findKimiSessionFileInVisited(root, workHash string, visited map[string]bool
 		if entry.Type()&os.ModeSymlink == 0 {
 			continue
 		}
+		// canonical-path-exception: existence/resolvability only, not
+		// comparison preparation. Resolves the symlinked entry to actually
+		// recurse into the real directory it points at; a dangling/broken
+		// symlink must be skipped, not treated as a comparison failure.
 		resolved, err := filepath.EvalSymlinks(filepath.Join(root, entry.Name()))
 		if err != nil {
 			continue
@@ -214,11 +220,11 @@ func findKimiSessionFileInVisited(root, workHash string, visited map[string]bool
 }
 
 func findKimiSessionFilesInVisited(root, workHash string, visited map[string]bool) []kimiContextCandidate {
-	root = canonicalKimiSessionRoot(root)
-	if root == "" || visited[root] {
+	key := canonicalKimiSessionRoot(root)
+	if key == "" || visited[key] {
 		return nil
 	}
-	visited[root] = true
+	visited[key] = true
 
 	workRoot := filepath.Join(root, workHash)
 	workRootExists := kimiDirectoryExists(workRoot)
@@ -232,6 +238,10 @@ func findKimiSessionFilesInVisited(root, workHash string, visited map[string]boo
 		if entry.Type()&os.ModeSymlink == 0 {
 			continue
 		}
+		// canonical-path-exception: existence/resolvability only, not
+		// comparison preparation. Resolves the symlinked entry to actually
+		// recurse into the real directory it points at; a dangling/broken
+		// symlink must be skipped, not treated as a comparison failure.
 		resolved, err := filepath.EvalSymlinks(filepath.Join(root, entry.Name()))
 		if err != nil {
 			continue
@@ -249,11 +259,11 @@ func findKimiSessionFileByIDIn(root, workHash, sessionID string) string {
 }
 
 func findKimiSessionFileByIDInVisited(root, workHash, sessionID string, visited map[string]bool) string {
-	root = canonicalKimiSessionRoot(root)
-	if root == "" || visited[root] {
+	key := canonicalKimiSessionRoot(root)
+	if key == "" || visited[key] {
 		return ""
 	}
-	visited[root] = true
+	visited[key] = true
 
 	path := filepath.Join(root, workHash, sessionID, "context.jsonl")
 	workRootExists := kimiDirectoryExists(filepath.Join(root, workHash))
@@ -270,6 +280,10 @@ func findKimiSessionFileByIDInVisited(root, workHash, sessionID string, visited 
 		if entry.Type()&os.ModeSymlink == 0 {
 			continue
 		}
+		// canonical-path-exception: existence/resolvability only, not
+		// comparison preparation. Resolves the symlinked entry to actually
+		// recurse into the real directory it points at; a dangling/broken
+		// symlink must be skipped, not treated as a comparison failure.
 		resolved, err := filepath.EvalSymlinks(filepath.Join(root, entry.Name()))
 		if err != nil {
 			continue
@@ -331,10 +345,7 @@ func canonicalKimiSessionRoot(root string) string {
 	if root == "" {
 		return ""
 	}
-	if resolved, err := filepath.EvalSymlinks(root); err == nil {
-		return filepath.Clean(resolved)
-	}
-	return filepath.Clean(root)
+	return pathutil.NormalizePathForCompare(root)
 }
 
 func hasKimiSessionRootEntries(entries []os.DirEntry) bool {

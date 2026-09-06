@@ -845,6 +845,36 @@ func TestFindCodexSessionFilesByIDFailsClosedOnReadDirError(t *testing.T) {
 	})
 }
 
+// canonical-path migration coverage (refs ga-iawy13.5): markCodexBatchRoot
+// computes its dedup identity via a bare filepath.EvalSymlinks that only
+// takes effect when the leaf itself already exists. A not-yet-existing batch
+// root reached through a symlinked account alias therefore keeps its
+// unresolved lexical form, which differs from the same physical root reached
+// directly — so the two are wrongly treated as distinct sightings.
+func TestMarkCodexBatchRootDedupsSymlinkedAncestorForNotYetExistingLeaf(t *testing.T) {
+	base := t.TempDir()
+	realAcct := filepath.Join(base, "acct-real")
+	if err := os.MkdirAll(realAcct, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("acct-real", filepath.Join(base, "acct-alias")); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+
+	// batch-42 is never created: markCodexBatchRoot must dedup by the
+	// resolved *ancestor* identity even though the leaf itself doesn't exist.
+	direct := filepath.Join(realAcct, "batch-42")
+	viaAlias := filepath.Join(base, "acct-alias", "batch-42")
+
+	seen := make(map[string]bool)
+	if first := markCodexBatchRoot(direct, seen); !first {
+		t.Fatalf("markCodexBatchRoot(direct) = false, want true (first sighting)")
+	}
+	if second := markCodexBatchRoot(viaAlias, seen); second {
+		t.Fatalf("markCodexBatchRoot(viaAlias) = true, want false (same physical batch root as direct, already seen)")
+	}
+}
+
 func codexBatchUUIDv7At(ts time.Time) string {
 	millis := fmt.Sprintf("%012x", ts.UTC().UnixMilli())
 	return millis[:8] + "-" + millis[8:] + "-7000-8000-000000000001"

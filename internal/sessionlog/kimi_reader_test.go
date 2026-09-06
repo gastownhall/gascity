@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestReadKimiFilePreservesNativeToolRows(t *testing.T) {
@@ -308,6 +310,53 @@ func TestFindKimiSessionFileFollowsSymlinkedRoots(t *testing.T) {
 	}
 	if got := FindKimiSessionFileByID([]string{base}, workDir, "session-key"); !samePath(got, want) {
 		t.Fatalf("FindKimiSessionFileByID() = %q, want symlinked root transcript %q", got, want)
+	}
+}
+
+// canonical-path migration coverage (refs ga-iawy13.5): canonicalKimiSessionRoot
+// resolves symlinks but never absolutizes first, so a relative root reached
+// through a relative-target symlink resolves to a relative identity instead
+// of the shared absolute physical path every other root uses.
+func TestCanonicalKimiSessionRootResolvesRelativeSymlinkToAbsolutePath(t *testing.T) {
+	dir := t.TempDir()
+	realDir := filepath.Join(dir, "real")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("real", filepath.Join(dir, "alias")); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+	t.Chdir(dir)
+
+	got := canonicalKimiSessionRoot("alias")
+	if !filepath.IsAbs(got) {
+		t.Fatalf("canonicalKimiSessionRoot(%q) = %q, want an absolute path", "alias", got)
+	}
+	testutil.AssertSamePath(t, got, realDir)
+}
+
+// Companion to TestFindKimiSessionFileFollowsSymlinkedRoots: a dangling
+// symlinked account root is a deliberate existence check (bare EvalSymlinks
+// site), not comparison prep, so it must be skipped without error and must
+// not block discovery through a later, valid sibling root.
+func TestFindKimiSessionFileSkipsBrokenSymlinkedRoot(t *testing.T) {
+	base := t.TempDir()
+	accountRoot := t.TempDir()
+	workDir := "/tmp/gascity/phase1/kimi-broken"
+	workHash := kimiWorkDirHash(workDir)
+	want := writeKimiContext(t, filepath.Join(accountRoot, workHash, "session-key", "context.jsonl"), []string{
+		`{"role":"user","content":"via valid root"}`,
+	})
+
+	if err := os.Symlink(filepath.Join(base, "does-not-exist"), filepath.Join(base, "account-a-broken")); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+	if err := os.Symlink(accountRoot, filepath.Join(base, "account-b-valid")); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := FindKimiSessionFile([]string{base}, workDir); !samePath(got, want) {
+		t.Fatalf("FindKimiSessionFile() = %q, want %q (broken sibling root must be skipped, not fatal)", got, want)
 	}
 }
 

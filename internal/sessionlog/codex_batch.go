@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // CodexSessionTarget describes one exact Codex rollout lookup in a batch.
@@ -490,13 +492,7 @@ func codexUUIDv7CreationTime(sessionID string) (time.Time, bool) {
 // markCodexBatchRoot records a root by resolved physical identity while
 // retaining the first lexical path for scanning and returned-path safety.
 func markCodexBatchRoot(root string, seen map[string]bool) bool {
-	identity := filepath.Clean(root)
-	if absolute, err := filepath.Abs(identity); err == nil {
-		identity = absolute
-	}
-	if resolved, err := filepath.EvalSymlinks(identity); err == nil {
-		identity = resolved
-	}
+	identity := pathutil.NormalizePathForCompare(root)
 	if seen[identity] {
 		return false
 	}
