@@ -67,6 +67,7 @@ type AwakeSessionBead struct {
 	DependencyOnly            bool      // only wakeable via dependency gate
 	NamedIdentity             string    // non-empty for named session beads
 	ConfiguredNamedSession    bool      // configured_named_session metadata is true
+	PoolManaged               bool      // pool_managed metadata is true — configured pool-template membership
 	Pinned                    bool      // pin_awake durable wake reason
 	Drained                   bool      // state=="drained" or sleep_reason=="drained"
 	WaitHold                  bool      // user-issued gc wait in progress
@@ -323,7 +324,7 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 			if assignee == "" || !workBeadHasAwakeDemand(wb) {
 				continue
 			}
-			if !sessionAssigneeMatches(input.NamedSessions, bead, assignee) {
+			if !sessionAssigneeMatches(input.NamedSessions, bead, wb) {
 				continue
 			}
 			matchedAny = true
@@ -730,7 +731,7 @@ func sessionHasAssignedWork(workBeads []AwakeWorkBead, named []AwakeNamedSession
 		if assignee == "" || !workBeadHasAwakeDemand(wb) {
 			continue
 		}
-		if sessionAssigneeMatches(named, bead, assignee) {
+		if sessionAssigneeMatches(named, bead, wb) {
 			return true
 		}
 	}
@@ -739,7 +740,7 @@ func sessionHasAssignedWork(workBeads []AwakeWorkBead, named []AwakeNamedSession
 
 func sessionHasClaimedInProgressWork(workBeads []AwakeWorkBead, named []AwakeNamedSession, bead AwakeSessionBead) bool {
 	for _, wb := range workBeads {
-		if wb.Status == "in_progress" && sessionAssigneeMatches(named, bead, strings.TrimSpace(wb.Assignee)) {
+		if wb.Status == "in_progress" && sessionAssigneeMatches(named, bead, wb) {
 			return true
 		}
 	}
@@ -757,7 +758,8 @@ func workBeadHasAwakeDemand(bead AwakeWorkBead) bool {
 	}
 }
 
-func sessionAssigneeMatches(named []AwakeNamedSession, bead AwakeSessionBead, assignee string) bool {
+func sessionAssigneeMatches(named []AwakeNamedSession, bead AwakeSessionBead, wb AwakeWorkBead) bool {
+	assignee := strings.TrimSpace(wb.Assignee)
 	if assignee == "" {
 		return false
 	}
@@ -767,23 +769,42 @@ func sessionAssigneeMatches(named []AwakeNamedSession, bead AwakeSessionBead, as
 	if bead.NamedIdentity != "" {
 		return assignee == bead.NamedIdentity
 	}
-	if !bead.ConfiguredNamedSession {
+	if bead.ConfiguredNamedSession {
+		// This configured-named fallback mirrors sessionAssignmentIdentifiersForConfig
+		// so awake decisions and cleanup guards recognize the same identities.
+		for _, ns := range named {
+			if ns.RuntimeName == "" || ns.RuntimeName != bead.SessionName {
+				continue
+			}
+			if ns.Template != "" && ns.Template != bead.Template {
+				continue
+			}
+			if assignee == ns.Identity {
+				return true
+			}
+		}
 		return false
 	}
-	// This configured-named fallback mirrors sessionAssignmentIdentifiersForConfig
-	// so awake decisions and cleanup guards recognize the same identities.
-	for _, ns := range named {
-		if ns.RuntimeName == "" || ns.RuntimeName != bead.SessionName {
-			continue
-		}
-		if ns.Template != "" && ns.Template != bead.Template {
-			continue
-		}
-		if assignee == ns.Identity {
-			return true
-		}
-	}
-	return false
+	return sessionAssigneePoolTemplateMatches(bead, wb, assignee)
+}
+
+// sessionAssigneePoolTemplateMatches decides pool-template serviceability:
+// ready open work assigned to a configured pool template may be claimed by
+// any eligible pool member (ga-8vz95k decision 4 — pool instances claim
+// pool-routed work). In-progress work keeps exact holder-identity ownership,
+// so a bare template assignment never matches once work is already claimed.
+//
+// Drained and dependency-only members are excluded: a bare template
+// assignment is generic template demand, and generic demand must not revive
+// a drained slot or bypass the dependency gate on a dependency-floor slot.
+// Every sibling generic-demand path (collectActiveBeads, collectCreatingBeads,
+// isMinActivePoolBead) makes the same exclusion. Concrete bead-ID or
+// session-name assignments still reach a drained bead through the caller,
+// which is the existing intended behavior (see the step-1 comment above).
+func sessionAssigneePoolTemplateMatches(bead AwakeSessionBead, wb AwakeWorkBead, assignee string) bool {
+	return wb.Status == "open" && bead.PoolManaged &&
+		!bead.Drained && !bead.DependencyOnly &&
+		bead.Template != "" && bead.Template == assignee
 }
 
 func isOnDemandSession(named []AwakeNamedSession, bead AwakeSessionBead) bool {

@@ -136,6 +136,7 @@ func buildAwakeInputFromReconciler(
 			DependencyOnly:         info.DependencyOnly,
 			NamedIdentity:          lifecycle.NamedIdentity,
 			ConfiguredNamedSession: isNamedSessionInfo(info),
+			PoolManaged:            info.PoolManaged,
 			Pinned:                 lifecycle.HasWakeCause(session.WakeCausePinned),
 			Drained:                lifecycle.BaseState == session.BaseStateDrained,
 			WaitHold:               info.WaitHold == "true",

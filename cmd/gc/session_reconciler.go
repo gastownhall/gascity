@@ -4169,7 +4169,11 @@ func resolvePreservedConfiguredNamedSessionTemplate(
 }
 
 // sessionHasOpenAssignedWorkForConfig uses the same configured-named-session
-// fallback identity strategy as sessionAssigneeMatches, but queries every store
+// fallback identity strategy as sessionAssigneeMatches. The pool-template
+// serviceability branch added alongside it is awake-side only —
+// sessionAssignmentIdentifiersForConfig never emits a bare template, so a
+// member woken purely by a pool-template assignment holds no identifier this
+// gate recognizes. This gate queries every store
 // the city serves instead of a single configured reachable store. Use this
 // cross-store query for cleanup-of-record paths that must not orphan work in any
 // attached store; callers preserve fail-closed behavior by refusing close

@@ -875,8 +875,13 @@ func sessionAssignmentIdentifiers(sessionBead beads.Bead) []string {
 
 // sessionAssignmentIdentifiersForConfig extends the persisted session-bead
 // identifiers with the configured named-session identity when a recovered bead
-// is missing identity metadata. Keep this fallback aligned with
-// sessionAssigneeMatches and compute_awake_bridge's AwakeNamedSession fields.
+// is missing identity metadata. Keep this fallback aligned with the
+// configured-named fallback in sessionAssigneeMatches and with
+// compute_awake_bridge's AwakeNamedSession fields. That alignment claim is
+// scoped to the configured-named branch: sessionAssigneeMatches' pool-template
+// serviceability branch is intentionally not mirrored here, because a bare
+// template is serviceability rather than an assignment identity this function
+// may emit.
 func sessionAssignmentIdentifiersForConfig(sessionBead beads.Bead, cfg *config.City) []string {
 	raw := sessionAssignmentIdentifierRaw(sessionBead)
 	if cfg == nil ||
