@@ -69,7 +69,12 @@ If the directory is missing, fall through to create a new one.
 
 **If no worktree** — create one:
 ```bash
-WORKTREE_PATH=$(pwd)/worktrees/"$WORK_BEAD_ID"
+AGENT_HOME="${GC_DIR:-}"
+if [ -z "$AGENT_HOME" ]; then
+    echo "GC_DIR is unset -- falling back to \\$(pwd)=$(pwd)" >&2
+    AGENT_HOME=$(pwd)
+fi
+WORKTREE_PATH="$AGENT_HOME/worktrees/$WORK_BEAD_ID"
 git worktree add "$WORKTREE_PATH" --detach origin/{{base_branch}}
 cd "$WORKTREE_PATH"
 ```
