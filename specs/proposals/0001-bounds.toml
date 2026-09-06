@@ -1,0 +1,87 @@
+# Registered bounds for the CI-throughput program
+# (specs/proposals/0001-increasing-ci-throughput.md).
+#
+# A bound is "registered" for a phase run only when the commit recording it
+# predates that run's SHA; this file's git history is the audit trail.
+# Guarded by TestThroughputBoundsLedger in test/docsync. Rationale for the
+# measured/modeled split and this ledger: specs/adr/0001-measured-vs-modeled-resources.md.
+#
+# The 10,000/day figure is directional: bounds below are ratchets anchored to
+# measured baselines, not fixed horizon values. "phase0" / "phase3-pilot"
+# means the baseline is registered by that phase's measurement and the ratchet
+# holds from there.
+
+[meta]
+owner = "csells"
+registered = 2026-08-23
+proposal = "0001-increasing-ci-throughput.md"
+rederive = "re-derive every ratchet at each sustained doubling of accepted-change volume"
+
+[workload]
+burst_basis = "measured arrival distribution 2026-07-21..2026-08-21: peak hour 24x the trailing-month hourly average (19 vs 0.8 changes/hr), peak day 2.9x the daily average; re-registered from measurement at each volume doubling"
+
+[workload.shape_mix]
+hot_repo = 0.55
+fleet = 0.20
+shared_core = 0.15
+cross_repo = 0.10
+
+[publication]
+compression_min_changes_per_pr = 10
+forge_headroom = 0.30
+basis = "GitHub recommendation of 1 merged PR/min and 6 pushes/min per repository (docs: repository-limits); 6.94/(1-0.30) = 9.9, rounded up"
+batch_merge_structure = "single-change publications may squash; a multi-change batch publishes as a merge commit carrying one rebased commit per logical change in dependency order; batches are never squashed"
+batch_overlap = "changes touching the same hunks share a batch only when dependency-related; a dependency-closed subgraph reverts as a unit or not at all"
+
+[admission]
+coverage_min_at_500_per_day = 0.5
+coverage_min_at_2000_per_day = 0.9
+coverage_min_at_10000_per_day = 0.99
+exception_rate_max = 0.005
+human_touch_budget = "daily budget of routine reviews + exceptions + interventions, registered from Phase 0 measured team capacity; sustained volume growth is gated on staying inside it"
+
+[compute]
+fse_pin_sha = "4460d7de282063dd861a8d17fa9559858a538046"
+floor_fse_per_change = 0.2
+ratchet = "Phase 0 registers the measured baseline; never regress above it; target -25% per quarter until the floor"
+current_estimate_fse = 0.57
+estimate_basis = "84 of 300 recent main commits (28%) touch shared paths and force full-union runs; filtered runs estimated at ~0.4 FSE; replaced by the Phase 0 measurement"
+
+[human]
+unit = "interventions per accepted change (rerun, dequeue, manual rebase, forced merge; counted from forge audit records)"
+bound = "Phase 0 registers the measured baseline; the per-change rate must not rise as volume grows; alert at 2x baseline"
+minutes_conversion = "quarterly sampled time study with stated error; minutes are never self-reported continuously"
+current_observation = "0 rerun-clicks in the last 100 completed workflow runs, sampled 2026-08-23"
+
+[queue]
+admission_slo = "ready-to-canonical p95/p99 over the merge-group and batch build population"
+bound = "Phase 3's merge-queue pilot registers the measured baseline; never regress above it"
+drain_max = "2x burst duration after any registered burst"
+creation_to_ready = "hard p95 ratchet (from Phase 0 baseline) for dependency-free changes only; reported distribution with drift alerting for changes with dependencies"
+amplification_max_phase3 = 2.0
+amplification_max_stress = 1.5
+
+[safety]
+miss_rate_reviewed_max = 0.001
+miss_rate_auto_admitted_max = 0.0001
+audit_fraction_min = 0.05
+confidence = 0.95
+min_audited_runs = 3000
+observation_window_days = 14
+exposure_restatement = "expected escapes per day = bound x accepted volume; recomputed and re-accepted at each sustained volume doubling"
+
+[flakes]
+per_job_flake_assumed_max = 0.003
+classification = "a failure is a flake when the identical patch-id and base pass on one rerun; a rerun of an identical patch-id on a new base is a base-advance rerun"
+quarantine = "any test flaking 3 times in 7 days is quarantined with an owner and expiry"
+replaced_by = "Phase 0 measurement of the real per-job flake rate"
+
+[model]
+extrapolation_cap = 20
+forge_canary = "1 merged PR/min sustained for 60 minutes, run at Phase 4 entry; the capacity model may claim at most extrapolation_cap x its largest validating canary"
+
+[value_anchor]
+metrics = [
+  "user-facing GitHub issues closed per week",
+  "shipped release-notes entries per week",
+]

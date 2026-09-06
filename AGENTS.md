@@ -317,6 +317,10 @@ These decisions are final. Do not revisit them.
 - **`engdocs/contributors/release-gate-criteria-conventions.md`** — What the
   "Tests pass" criterion in a `release-gates/*.md` file must cite. Apply this
   before signing off that criterion on any deploy gate.
+- **`specs/adr/`** — Short-form architectural decision records. Add one only
+  when a decision is hard to reverse, surprising without context, and a real
+  trade-off. `CONTEXT.md` at the repo root is the shared glossary for terms
+  outside the six-primitive model; challenge new vocabulary against it.
 
 ## Key design principles
 
