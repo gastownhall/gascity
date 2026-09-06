@@ -2609,6 +2609,219 @@ func TestReleaseOrphanedPoolAssignments_SkipsLiveModernPoolSessionWhenLiveListMi
 	}
 }
 
+// A pool slot identity is reused by successor sessions. The work bead's
+// gc.session_id names the unique session that actually claimed it, so a live
+// successor sharing the assignee string must not shield the closed claimer's
+// stale work from orphan release.
+func TestReleaseOrphanedPoolAssignments_ReopensClosedClaimerDespiteLiveSuccessorAlias(t *testing.T) {
+	store := beads.NewMemStore()
+	original, err := store.Create(beads.Bead{
+		Title:  "original worker",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         "worker-1-pool",
+			"template":             "worker",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create original session bead: %v", err)
+	}
+	if err := store.Close(original.ID); err != nil {
+		t.Fatalf("Close original session bead: %v", err)
+	}
+
+	successor, err := store.Create(beads.Bead{
+		Title:  "successor worker",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         "worker-1-pool",
+			"template":             "worker",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create successor session bead: %v", err)
+	}
+
+	work, err := store.Create(beads.Bead{
+		Title:    "stale work from original worker",
+		Assignee: "worker-1-pool",
+		Metadata: map[string]string{
+			"gc.routed_to":                "worker",
+			beadmeta.SessionIDMetadataKey: original.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set work status: %v", err)
+	}
+	if work, err = store.Get(work.ID); err != nil {
+		t.Fatalf("Reload work bead: %v", err)
+	}
+
+	released := releaseOrphanedPoolAssignmentsFromBeads(
+		store,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		"",
+		[]beads.Bead{successor},
+		[]beads.Bead{work},
+		[]beads.Store{store},
+		nil,
+		nil,
+	)
+	if len(released) != 1 || released[0].ID != work.ID {
+		t.Fatalf("released = %v, want stale work %s reopened", released, work.ID)
+	}
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "open" || strings.TrimSpace(got.Assignee) != "" {
+		t.Fatalf("work = status %q assignee %q, want open/unassigned", got.Status, got.Assignee)
+	}
+}
+
+func TestReleaseOrphanedPoolAssignments_KeepsOpenExactClaimerDespiteStaleAssigneeAlias(t *testing.T) {
+	store := beads.NewMemStore()
+	claimer, err := store.Create(beads.Bead{
+		Title:  "live worker",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         "worker-current-name",
+			"template":             "worker",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create claimer session bead: %v", err)
+	}
+
+	work, err := store.Create(beads.Bead{
+		Title:    "work held by live exact claimer",
+		Assignee: "worker-prior-name",
+		Metadata: map[string]string{
+			"gc.routed_to":                "worker",
+			beadmeta.SessionIDMetadataKey: claimer.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set work status: %v", err)
+	}
+	if work, err = store.Get(work.ID); err != nil {
+		t.Fatalf("Reload work bead: %v", err)
+	}
+
+	released := releaseOrphanedPoolAssignmentsFromBeads(
+		store,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		"",
+		[]beads.Bead{claimer},
+		[]beads.Bead{work},
+		[]beads.Store{store},
+		nil,
+		nil,
+	)
+	if len(released) != 0 {
+		t.Fatalf("released = %v, want none while exact claimer remains open", released)
+	}
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "worker-prior-name" {
+		t.Fatalf("work = status %q assignee %q, want claim preserved", got.Status, got.Assignee)
+	}
+}
+
+func TestReleaseOrphanedPoolAssignments_KeepsLiveExactClaimerDespiteStrandedAliasPredecessor(t *testing.T) {
+	store := beads.NewMemStore()
+	stranded, err := store.Create(beads.Bead{
+		Title:  "stranded predecessor",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":                "worker-1-pool",
+			"template":                    "worker",
+			"state":                       "asleep",
+			session.DrainAckStrandedAtKey: "2026-09-05T12:00:00Z",
+			poolManagedMetadataKey:        boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create stranded predecessor: %v", err)
+	}
+
+	claimer, err := store.Create(beads.Bead{
+		Title:  "live successor",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         "worker-1-pool",
+			"template":             "worker",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create live successor: %v", err)
+	}
+
+	work, err := store.Create(beads.Bead{
+		Title:    "work held by live successor",
+		Assignee: "worker-1-pool",
+		Metadata: map[string]string{
+			"gc.routed_to":                "worker",
+			beadmeta.SessionIDMetadataKey: claimer.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set work status: %v", err)
+	}
+	if work, err = store.Get(work.ID); err != nil {
+		t.Fatalf("Reload work bead: %v", err)
+	}
+
+	released := releaseOrphanedPoolAssignmentsFromBeads(
+		store,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		"",
+		[]beads.Bead{stranded, claimer},
+		[]beads.Bead{work},
+		[]beads.Store{store},
+		nil,
+		nil,
+	)
+	if len(released) != 0 {
+		t.Fatalf("released = %v, want none while the exact successor claimer remains open", released)
+	}
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "worker-1-pool" {
+		t.Fatalf("work = status %q assignee %q, want live successor claim preserved", got.Status, got.Assignee)
+	}
+}
+
 func TestDirectSessionBeadIDCandidates_SkipsFlagLikeCandidates(t *testing.T) {
 	// agent.SessionNameFor encodes "/" as "--" for qualified identities, so a
 	// named-session assignee can carry a "--" pair. The suffix starting at the
@@ -2627,5 +2840,412 @@ func TestDirectSessionBeadIDCandidates_SkipsFlagLikeCandidates(t *testing.T) {
 		if strings.HasPrefix(c, "-") {
 			t.Fatalf("candidate %q starts with %q; stores that shell out would read it as a flag (all: %v)", c, "-", candidates)
 		}
+	}
+}
+
+// TestReleaseOrphanedPoolAssignments_ReopensDrainAckStrandedHolderWork is the
+// regression for the drain-orphan wedge (#5731, observed in the field on two
+// independent pool lanes): a pool seat ran
+// `gc hook --claim --drain-ack`, the claim hook answered no_work, and the
+// reconciler finalized the drain-ack while the seat still held an in_progress
+// step. The session bead went asleep but stayed OPEN, so all three liveness
+// gates in releaseOrphanedPoolAssignments read the holder as a live claimant and
+// the step sat in_progress on a seat that would never run again — no
+// bead.dead_assignee_reopened for 40+ minutes, and none was possible: the awake
+// set skips assigned-work holders when choosing wake targets while
+// countAssignedScaleSlots counts them as filled demand (so no replacement seat
+// is desired either), and reusablePoolSessionInfo refuses to wake-reuse a
+// one_shot identity that still holds assigned work.
+//
+// drain_ack_stranded_at is the durable marker that distinguishes such a seat
+// from one that merely went idle; this test pins that the reopen lane acts on it.
+func TestReleaseOrphanedPoolAssignments_ReopensDrainAckStrandedHolderWork(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "worker-1",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":                "worker-1-pool",
+			"template":                    "worker",
+			"state":                       "asleep",
+			"sleep_reason":                "idle",
+			session.DrainAckStrandedAtKey: "2026-08-28T17:03:37Z",
+			poolManagedMetadataKey:        boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+	work, err := store.Create(beads.Bead{
+		Title:    "execute-operation",
+		Assignee: "worker-1-pool",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set work status: %v", err)
+	}
+	if work, err = store.Get(work.ID); err != nil {
+		t.Fatalf("Reload work bead: %v", err)
+	}
+
+	released := releaseOrphanedPoolAssignmentsFromBeads(
+		store,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		"",
+		[]beads.Bead{sessionBead},
+		[]beads.Bead{work},
+		[]beads.Store{store},
+		nil,
+		nil,
+	)
+	if len(released) != 1 || released[0].ID != work.ID {
+		t.Fatalf("released = %v, want the stranded step %s reopened", released, work.ID)
+	}
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("status = %q, want open after reopen", got.Status)
+	}
+	if strings.TrimSpace(got.Assignee) != "" {
+		t.Fatalf("assignee = %q, want cleared after reopen", got.Assignee)
+	}
+}
+
+// TestReleaseOrphanedPoolAssignments_SkipsIdleAsleepHolderWithoutStrandedMarker
+// is the other half of the contract: an asleep pool seat that did NOT drain-ack
+// with work (no drain_ack_stranded_at) is still a live claimant — the controller
+// can wake it — so its claim must not be reopened. Without this the marker gate
+// would degrade into "asleep means dead" and reset live work every tick.
+func TestReleaseOrphanedPoolAssignments_SkipsIdleAsleepHolderWithoutStrandedMarker(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "worker-1",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         "worker-1-pool",
+			"template":             "worker",
+			"state":                "asleep",
+			"sleep_reason":         "idle",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+	work, err := store.Create(beads.Bead{
+		Title:    "execute-operation",
+		Assignee: "worker-1-pool",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set work status: %v", err)
+	}
+	if work, err = store.Get(work.ID); err != nil {
+		t.Fatalf("Reload work bead: %v", err)
+	}
+
+	released := releaseOrphanedPoolAssignmentsFromBeads(
+		store,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		"",
+		[]beads.Bead{sessionBead},
+		[]beads.Bead{work},
+		[]beads.Store{store},
+		nil,
+		nil,
+	)
+	if len(released) != 0 {
+		t.Fatalf("released = %v, want none — an idle-asleep holder is still wakeable", released)
+	}
+}
+
+// TestReleaseOrphanedPoolAssignments_SkipsStrandedMarkerOnNonAsleepHolder pins
+// the state gate that pairs with PreWakePatch's clear of the marker. Only an
+// ASLEEP seat is stranded: the marker is written alongside CompleteDrainPatch
+// (state=asleep) and cleared again on the next start. A marker that survived a
+// path that does not route through PreWakePatch — or an out-of-band metadata
+// write — must never make a live/creating seat read as dead and get its claim
+// reopened underneath it.
+func TestReleaseOrphanedPoolAssignments_SkipsStrandedMarkerOnNonAsleepHolder(t *testing.T) {
+	for _, state := range []string{"active", "creating", "start_pending"} {
+		t.Run(state, func(t *testing.T) {
+			store := beads.NewMemStore()
+			sessionBead, err := store.Create(beads.Bead{
+				Title:  "worker-1",
+				Type:   sessionBeadType,
+				Status: "open",
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"session_name":                "worker-1-pool",
+					"template":                    "worker",
+					"state":                       state,
+					session.DrainAckStrandedAtKey: "2026-08-28T17:03:37Z",
+					poolManagedMetadataKey:        boolMetadata(true),
+				},
+			})
+			if err != nil {
+				t.Fatalf("Create session bead: %v", err)
+			}
+			work, err := store.Create(beads.Bead{
+				Title:    "execute-operation",
+				Assignee: "worker-1-pool",
+				Metadata: map[string]string{"gc.routed_to": "worker"},
+			})
+			if err != nil {
+				t.Fatalf("Create work bead: %v", err)
+			}
+			if err := store.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+				t.Fatalf("Set work status: %v", err)
+			}
+			if work, err = store.Get(work.ID); err != nil {
+				t.Fatalf("Reload work bead: %v", err)
+			}
+
+			released := releaseOrphanedPoolAssignmentsFromBeads(
+				store,
+				&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+				"",
+				[]beads.Bead{sessionBead},
+				[]beads.Bead{work},
+				[]beads.Store{store},
+				nil,
+				nil,
+			)
+			if len(released) != 0 {
+				t.Fatalf("released = %v, want none — a %s seat is live, not stranded", released, state)
+			}
+		})
+	}
+}
+
+// TestReleaseOrphanedPoolAssignments_StrandedHolderDoesNotReleaseOtherStoreClaim
+// is the store-ref half of the drain-orphan contract: pool seat identities recur
+// across rig stores (#3453), so a stranded seat must only ever disqualify claims
+// in the stores IT can reach. Both subtests use the SAME assignee string
+// ("worker-live") for a stranded city seat and a live rig seat; only the store
+// the claim lives in differs.
+//
+// An unqualified stranded-identity set releases in both cases — the live rig
+// seat's in_progress claim is reopened underneath it and a backup worker is
+// minted on the same bead, which is exactly the #3453 failure the surrounding
+// gates were qualified to prevent.
+func TestReleaseOrphanedPoolAssignments_StrandedHolderDoesNotReleaseOtherStoreClaim(t *testing.T) {
+	// strandedSessionBead is the asleep, drain-ack-stranded seat; liveSessionBead
+	// is a same-named seat that is simply open. Both are pool-managed.
+	newSeat := func(t *testing.T, store beads.Store, template string, stranded bool) beads.Bead {
+		t.Helper()
+		metadata := map[string]string{
+			"session_name":         "worker-live",
+			"template":             template,
+			"agent_name":           template,
+			poolManagedMetadataKey: boolMetadata(true),
+		}
+		if stranded {
+			metadata["state"] = "asleep"
+			metadata["sleep_reason"] = "idle"
+			metadata[session.DrainAckStrandedAtKey] = "2026-08-28T17:03:37Z"
+		}
+		b, err := store.Create(beads.Bead{
+			Title:    "worker seat",
+			Type:     sessionBeadType,
+			Status:   "open",
+			Labels:   []string{sessionBeadLabel},
+			Metadata: metadata,
+		})
+		if err != nil {
+			t.Fatalf("Create session bead (%s): %v", template, err)
+		}
+		return b
+	}
+	newRigWork := func(t *testing.T, store beads.Store) beads.Bead {
+		t.Helper()
+		work, err := store.Create(beads.Bead{
+			Title:    "execute-operation",
+			Assignee: "worker-live",
+			Metadata: map[string]string{"gc.routed_to": "repo/worker"},
+		})
+		if err != nil {
+			t.Fatalf("Create rig work bead: %v", err)
+		}
+		if err := store.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+			t.Fatalf("Set rig work status: %v", err)
+		}
+		work, err = store.Get(work.ID)
+		if err != nil {
+			t.Fatalf("Reload rig work bead: %v", err)
+		}
+		return work
+	}
+	// Two same-named agents, one city-scoped and one rig-scoped: the city seat
+	// resolves to a store-ref the rig work does not live in, the rig seat to the
+	// rig's own ref. This is the config shape the existing cross-store release
+	// tests use (ReleasesRigWorkAssignedToUnreachableOpenSession).
+	newCfg := func(t *testing.T) *config.City {
+		t.Helper()
+		return &config.City{
+			Rigs: []config.Rig{{Name: "repo", Path: t.TempDir()}},
+			Agents: []config.Agent{
+				{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)},
+				{Name: "worker", Dir: "repo", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)},
+			},
+		}
+	}
+
+	t.Run("stranded seat in another store keeps the live rig claim", func(t *testing.T) {
+		cityPath := t.TempDir()
+		cityStore := beads.NewMemStore()
+		rigStore := beads.NewMemStore()
+
+		stranded := newSeat(t, cityStore, "worker", true)
+		live := newSeat(t, rigStore, "repo/worker", false)
+		work := newRigWork(t, rigStore)
+
+		released := releaseOrphanedPoolAssignmentsFromBeads(
+			cityStore,
+			newCfg(t),
+			cityPath,
+			[]beads.Bead{stranded, live},
+			[]beads.Bead{work},
+			[]beads.Store{rigStore},
+			[]string{"repo"},
+			map[string]beads.Store{"repo": rigStore},
+		)
+		if len(released) != 0 {
+			t.Fatalf("released = %v, want none — the stranded seat cannot reach the rig store, and the same-named rig seat is live", released)
+		}
+		got, err := rigStore.Get(work.ID)
+		if err != nil {
+			t.Fatalf("Get rig work bead: %v", err)
+		}
+		if got.Status != "in_progress" || got.Assignee != "worker-live" {
+			t.Fatalf("rig work = status %q assignee %q, want the live claim untouched", got.Status, got.Assignee)
+		}
+	})
+
+	t.Run("stranded seat in the claim's own store still reopens", func(t *testing.T) {
+		cityPath := t.TempDir()
+		cityStore := beads.NewMemStore()
+		rigStore := beads.NewMemStore()
+
+		stranded := newSeat(t, rigStore, "repo/worker", true)
+		work := newRigWork(t, rigStore)
+
+		released := releaseOrphanedPoolAssignmentsFromBeads(
+			cityStore,
+			newCfg(t),
+			cityPath,
+			[]beads.Bead{stranded},
+			[]beads.Bead{work},
+			[]beads.Store{rigStore},
+			[]string{"repo"},
+			map[string]beads.Store{"repo": rigStore},
+		)
+		if len(released) != 1 || released[0].ID != work.ID {
+			t.Fatalf("released = %v, want the stranded rig claim %s reopened — store-ref qualification must not disarm the fix", released, work.ID)
+		}
+		got, err := rigStore.Get(work.ID)
+		if err != nil {
+			t.Fatalf("Get rig work bead: %v", err)
+		}
+		if got.Status != "open" || strings.TrimSpace(got.Assignee) != "" {
+			t.Fatalf("rig work = status %q assignee %q, want open/unassigned", got.Status, got.Assignee)
+		}
+	})
+}
+
+// TestExitedDrainAckHolderOwnsWork_FailsClosed pins the direction of the
+// ambiguity in the stranded-holder lookup, which is the opposite of
+// openSessionOwnsWork's. There, an unresolved or cross-store reachability answer
+// means "the session owns the work" (retain) because releasing a live claim is
+// the destructive outcome. Here the same answer drives a RELEASE, so both
+// wildcards must read as "not stranded" and only an exact store-ref hit may
+// bypass the liveness gates.
+func TestExitedDrainAckHolderOwnsWork_FailsClosed(t *testing.T) {
+	const assignee = "worker-live"
+	scoped := func(refs ...string) map[string]map[string]struct{} {
+		index := map[string]map[string]struct{}{}
+		for _, ref := range refs {
+			addOpenSessionStoreRef(index, assignee, ref)
+		}
+		return index
+	}
+
+	tests := []struct {
+		name          string
+		scoped        map[string]map[string]struct{}
+		legacy        map[string]struct{}
+		workStoreRef  string
+		storeRefAware bool
+		want          bool
+	}{
+		{
+			name:          "exact store-ref hit is stranded",
+			scoped:        scoped("repo"),
+			workStoreRef:  "repo",
+			storeRefAware: true,
+			want:          true,
+		},
+		{
+			name:          "different store-ref is not stranded",
+			scoped:        scoped("other"),
+			workStoreRef:  "repo",
+			storeRefAware: true,
+		},
+		{
+			name:          "unknown identity is not stranded",
+			scoped:        map[string]map[string]struct{}{},
+			workStoreRef:  "repo",
+			storeRefAware: true,
+		},
+		{
+			name:          "unresolved reachability fails closed",
+			scoped:        scoped(unresolvedOpenSessionStoreRef),
+			workStoreRef:  "repo",
+			storeRefAware: true,
+		},
+		{
+			name:          "cross-store reachability fails closed",
+			scoped:        scoped(crossStoreOpenSessionStoreRef),
+			workStoreRef:  "repo",
+			storeRefAware: true,
+		},
+		{
+			name:          "a wildcard alongside an exact hit still fails closed",
+			scoped:        scoped(unresolvedOpenSessionStoreRef, "repo"),
+			workStoreRef:  "repo",
+			storeRefAware: true,
+		},
+		{
+			// Pre-store-ref callers keep the bare-identity answer: there is no
+			// store-ref to qualify against, so the legacy set is the whole truth.
+			name:   "legacy identity match when store-refs are unavailable",
+			legacy: map[string]struct{}{assignee: {}},
+			want:   true,
+		},
+		{
+			name:   "legacy miss when store-refs are unavailable",
+			legacy: map[string]struct{}{},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := exitedDrainAckHolderOwnsWork(tc.scoped, tc.legacy, assignee, tc.workStoreRef, tc.storeRefAware)
+			if got != tc.want {
+				t.Fatalf("exitedDrainAckHolderOwnsWork = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

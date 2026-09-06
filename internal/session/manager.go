@@ -506,6 +506,19 @@ type Info struct {
 	// verbatim (a "true"/"false" string). Kept as a raw string mirror like
 	// ManualSessionMetadata so the persisted value round-trips exactly.
 	ConfigWakeSuppressedMetadata string // config_wake_suppressed (raw)
+	// DrainAckStrandedAt is the RAW drain_ack_stranded_at metadata: the RFC3339
+	// instant at which this session acknowledged its own drain WHILE still
+	// holding an open/in-progress assigned work bead.
+	//
+	// The reconciler already emits session.drain_acked_with_assigned_work for
+	// that moment, but an event is not queryable state: the drain-ack finalize
+	// writes an ordinary idle SleepPatch, so a stranded holder is byte-identical
+	// on the bead to a seat that simply went idle. The orphan-release lane
+	// (releaseOrphanedPoolAssignments) therefore cannot tell the two apart and
+	// treats the stranded holder as a live claimant forever. This durable marker
+	// is the one bit that distinguishes them; the drain-ack path clears it on a
+	// clean (unassigned) drain so it never goes stale.
+	DrainAckStrandedAt string // drain_ack_stranded_at (raw)
 }
 
 // RuntimeObservation reports the provider-backed live runtime state for a

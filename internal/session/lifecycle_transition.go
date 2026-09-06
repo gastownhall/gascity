@@ -98,6 +98,10 @@ var freshWakeConversationResetKeys = []string{
 // ResetCommittedAtKey records when a restart handoff durably committed.
 const ResetCommittedAtKey = "reset_committed_at"
 
+// DrainAckStrandedAtKey records when a session acknowledged its own drain while
+// still holding an open/in-progress assigned work bead. See Info.DrainAckStrandedAt.
+const DrainAckStrandedAtKey = "drain_ack_stranded_at"
+
 // MetadataPatch is an atomic set of metadata key updates for one lifecycle
 // transition. Empty values intentionally clear metadata keys in existing store
 // implementations.
@@ -214,6 +218,12 @@ func PreWakePatch(input PreWakePatchInput) MetadataPatch {
 		"generation":                 fmt.Sprintf("%d", input.Generation),
 		"wake_request":               "",
 		"wake_requested_at":          "",
+		// The seat is going live again, so it is no longer a stranded holder:
+		// clear the drain-ack marker on the same atomic pre-start commit that
+		// clears detached_at and sleep_intent. Leaving it set would let the
+		// orphan-release lane reopen a claim the freshly started seat is about
+		// to resume. See Info.DrainAckStrandedAt.
+		DrainAckStrandedAtKey: "",
 	}
 	if input.FreshWake {
 		patch["session_key"] = ""

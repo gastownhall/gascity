@@ -1893,6 +1893,126 @@ func TestReconcileSessionBeads_DrainAckMidPhaseEmitsAssignedWorkEvent(t *testing
 	}
 }
 
+// TestReconcileSessionBeads_DrainAckStrandedMarkerLifecycle pins the full
+// lifecycle of the drain_ack_stranded_at marker, the one durable bit that lets
+// releaseOrphanedPoolAssignments tell a seat that acknowledged its own drain
+// while holding a claim from a seat that merely went idle (they are otherwise
+// byte-identical on the bead, because the drain-ack finalize writes an ordinary
+// CompleteDrainPatch idle sleep).
+//
+// The marker must be:
+//   - SET when the drain-ack finalize found assigned work;
+//   - CLEARED (never left set) on a clean drain-ack with no assigned work, so a
+//     seat that strands once and later drains cleanly is not reopened forever;
+//   - CLEARED again when the seat starts, so a marker can never outlive the
+//     stranded state it describes (PreWakePatch owns that clear).
+//
+// Without the third pin, a resumed seat would keep a stale marker and the
+// orphan-release lane would reopen a claim the live seat is working.
+func TestReconcileSessionBeads_DrainAckStrandedMarkerLifecycle(t *testing.T) {
+	t.Run("assigned work sets the marker", func(t *testing.T) {
+		env := newReconcilerTestEnv()
+		env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+		env.addDesired("worker", "worker", true)
+
+		session := env.createSessionBead("worker", "worker")
+		env.markSessionActive(&session)
+
+		if _, err := env.store.Create(beads.Bead{
+			Title:    "implement phase work",
+			Type:     "task",
+			Status:   "in_progress",
+			Assignee: session.ID,
+		}); err != nil {
+			t.Fatalf("Create(stranded bead): %v", err)
+		}
+
+		dops := newFakeDrainOps()
+		if err := dops.setDrainAck("worker"); err != nil {
+			t.Fatalf("setDrainAck: %v", err)
+		}
+		env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{session}, nil, dops)
+		got := env.reconcileStopPendingToTerminal(t, env.sp, session, dops, map[string]bool{"worker": true})
+
+		if got.Status == "closed" {
+			t.Fatalf("session bead closed unexpectedly: metadata=%v", got.Metadata)
+		}
+		if got.Metadata["state"] != "asleep" {
+			t.Fatalf("state = %q, want asleep", got.Metadata["state"])
+		}
+		marker := got.Metadata[sessionpkg.DrainAckStrandedAtKey]
+		if marker == "" {
+			t.Fatalf("%s not set after drain-ack with assigned work: metadata=%v",
+				sessionpkg.DrainAckStrandedAtKey, got.Metadata)
+		}
+		if _, err := time.Parse(time.RFC3339, marker); err != nil {
+			t.Fatalf("%s = %q, want RFC3339: %v", sessionpkg.DrainAckStrandedAtKey, marker, err)
+		}
+		// The marker and slept_at describe the same instant (one clock read).
+		if slept := got.Metadata["slept_at"]; slept != marker {
+			t.Errorf("%s = %q, slept_at = %q, want the same instant", sessionpkg.DrainAckStrandedAtKey, marker, slept)
+		}
+	})
+
+	t.Run("no assigned work leaves the marker clear", func(t *testing.T) {
+		env := newReconcilerTestEnv()
+		env.cfg = &config.City{
+			Agents: []config.Agent{{Name: "worker", SleepAfterIdle: config.SessionSleepOff}},
+		}
+		env.addDesired("worker", "worker", true)
+		session := env.createSessionBead("worker", "worker")
+		env.markSessionActive(&session)
+		// Pre-set the marker from a hypothetical earlier strand: a clean
+		// drain-ack must clear it, not leave it to go stale.
+		env.setSessionMetadata(&session, map[string]string{
+			sessionpkg.DrainAckStrandedAtKey: "2026-08-28T17:03:37Z",
+		})
+		if err := env.sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
+			t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+		}
+
+		dops := newFakeDrainOps()
+		if err := dops.setDrainAck("worker"); err != nil {
+			t.Fatalf("setDrainAck: %v", err)
+		}
+		env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{session}, nil, dops)
+		got := env.reconcileStopPendingToTerminal(t, env.sp, session, dops, map[string]bool{"worker": true})
+
+		if got.Status == "closed" {
+			t.Fatalf("session bead closed unexpectedly: metadata=%v", got.Metadata)
+		}
+		if marker := got.Metadata[sessionpkg.DrainAckStrandedAtKey]; marker != "" {
+			t.Fatalf("%s = %q after a drain-ack with no assigned work, want cleared",
+				sessionpkg.DrainAckStrandedAtKey, marker)
+		}
+	})
+
+	t.Run("wake clears the marker", func(t *testing.T) {
+		env := newReconcilerTestEnv()
+		env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+		env.addDesired("worker", "worker", false)
+		session := env.createSessionBead("worker", "worker")
+		env.markSessionCreating(&session)
+		env.setSessionMetadata(&session, map[string]string{
+			sessionpkg.DrainAckStrandedAtKey: "2026-08-28T17:03:37Z",
+		})
+
+		env.reconcile([]beads.Bead{session})
+
+		got, err := env.store.Get(session.ID)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", session.ID, err)
+		}
+		if got.Metadata["last_woke_at"] == "" {
+			t.Fatalf("last_woke_at should be set by preWakeCommit: metadata=%v", got.Metadata)
+		}
+		if marker := got.Metadata[sessionpkg.DrainAckStrandedAtKey]; marker != "" {
+			t.Fatalf("%s = %q after the seat started, want cleared by PreWakePatch",
+				sessionpkg.DrainAckStrandedAtKey, marker)
+		}
+	})
+}
+
 // TestReconcileSessionBeads_DrainAckOwnDrainStepClosesWithoutEvent pins that
 // a session whose ONLY assigned work is its own mol-do-work "drain" step
 // must actually close on drain-ack (no pool respawn) and must NOT emit
