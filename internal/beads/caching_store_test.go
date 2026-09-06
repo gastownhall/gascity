@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -1246,18 +1247,6 @@ func (s *dirtyGetRaceStore) Get(id string) (beads.Bead, error) {
 	return s.Store.Get(id)
 }
 
-type updateRefreshStore struct {
-	beads.Store
-	fresh map[string]beads.Bead
-}
-
-func (s *updateRefreshStore) Get(id string) (beads.Bead, error) {
-	if b, ok := s.fresh[id]; ok {
-		return b, nil
-	}
-	return s.Store.Get(id)
-}
-
 func TestCachingStoreGetFallsBackForClosedBeadsAfterPrime(t *testing.T) {
 	t.Parallel()
 	mem := beads.NewMemStore()
@@ -1865,48 +1854,11 @@ func TestCachingStoreCachedReadyClearsExplicitEventNeeds(t *testing.T) {
 	}
 }
 
-func TestCachingStoreUpdateClearsCachedDependenciesFromFreshBead(t *testing.T) {
-	t.Parallel()
-	mem := beads.NewMemStore()
-	blocker, err := mem.Create(beads.Bead{Title: "Blocker"})
-	if err != nil {
-		t.Fatalf("Create(blocker): %v", err)
-	}
-	blocked, err := mem.Create(beads.Bead{Title: "Blocked", Needs: []string{blocker.ID}})
-	if err != nil {
-		t.Fatalf("Create(blocked): %v", err)
-	}
-	backing := &updateRefreshStore{
-		Store: beads.NewMemStoreFrom(2, []beads.Bead{blocker, blocked}, nil),
-		fresh: make(map[string]beads.Bead),
-	}
-	cache := beads.NewCachingStoreForTest(backing, nil)
-	if err := cache.PrimeActive(); err != nil {
-		t.Fatalf("PrimeActive: %v", err)
-	}
-
-	fresh := blocked
-	fresh.Title = "Cleared"
-	fresh.Needs = nil
-	fresh.Dependencies = nil
-	backing.fresh[blocked.ID] = fresh
-	title := "Cleared"
-	if err := cache.Update(blocked.ID, beads.UpdateOpts{Title: &title}); err != nil {
-		t.Fatalf("Update(blocked): %v", err)
-	}
-
-	ready, ok := cache.CachedReady()
-	if !ok {
-		t.Fatal("CachedReady reported cache unavailable")
-	}
-	ids := map[string]bool{}
-	for _, b := range ready {
-		ids[b.ID] = true
-	}
-	if !ids[blocked.ID] {
-		t.Fatalf("CachedReady ids = %v, want update refresh to clear stale deps", ids)
-	}
-}
+// Removed TestCachingStoreUpdateClearsCachedDependenciesFromFreshBead.
+// It asserted that a backing-side dependency change surprises its way into the
+// cache via Update's refresh read. A cache-hit Update now derives deps from the
+// locally-applied bead (depsFromFields), so backing-side dep edits that are not
+// in opts propagate via the periodic reconciler instead.
 
 func TestCachingStoreListPartialAllowScanReturnsCompleteActiveSnapshot(t *testing.T) {
 	t.Parallel()
@@ -3182,5 +3134,109 @@ func TestCachingStoreAppliesRoutedMetadataEventAfterPriorEventMutation(t *testin
 	if got.Metadata["gc.routed_to"] != "pool/polecat" {
 		t.Fatalf("gc.routed_to after sling-stamp event = %q, want %q (event dropped; pool demand stranded — #2210)",
 			got.Metadata["gc.routed_to"], "pool/polecat")
+	}
+}
+
+// The three tests below pin the cache-hit no-fetch contract: after Prime, an
+// Update/Close/Reopen against a cached bead must not issue a backing.Get.
+func TestCachingStoreUpdateOnCacheHitDoesNotCallBackingGet(t *testing.T) {
+	t.Parallel()
+	mem := beads.NewMemStore()
+	created, err := mem.Create(beads.Bead{Title: "before", Status: "open"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	backing := &countingGetStore{Store: mem}
+	cs := beads.NewCachingStoreForTest(backing, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	backing.resetGets()
+
+	status := "in_progress"
+	for i := 0; i < 5; i++ {
+		if err := cs.Update(created.ID, beads.UpdateOpts{
+			Status: &status,
+			Metadata: map[string]string{
+				"fastpath.iteration": fmt.Sprintf("%d", i),
+			},
+		}); err != nil {
+			t.Fatalf("Update[%d]: %v", i, err)
+		}
+	}
+
+	if gets := backing.getCount(); gets != 0 {
+		t.Fatalf("backing.Get called %d times on cache-hit Update, want 0", gets)
+	}
+	got, err := cs.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != "in_progress" {
+		t.Fatalf("status = %q, want in_progress", got.Status)
+	}
+	if got.Metadata["fastpath.iteration"] != "4" {
+		t.Fatalf("metadata = %#v, want last iteration applied", got.Metadata)
+	}
+}
+
+func TestCachingStoreCloseOnCacheHitDoesNotCallBackingGet(t *testing.T) {
+	t.Parallel()
+	mem := beads.NewMemStore()
+	created, err := mem.Create(beads.Bead{Title: "doomed", Status: "open"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	backing := &countingGetStore{Store: mem}
+	cs := beads.NewCachingStoreForTest(backing, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	backing.resetGets()
+
+	if err := cs.Close(created.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if gets := backing.getCount(); gets != 0 {
+		t.Fatalf("backing.Get called %d times on cache-hit Close, want 0", gets)
+	}
+	got, err := cs.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed", got.Status)
+	}
+}
+
+func TestCachingStoreReopenOnCacheHitDoesNotCallBackingGet(t *testing.T) {
+	t.Parallel()
+	mem := beads.NewMemStore()
+	created, err := mem.Create(beads.Bead{Title: "reopened"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	backing := &countingGetStore{Store: mem}
+	cs := beads.NewCachingStoreForTest(backing, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if err := cs.Close(created.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	backing.resetGets()
+
+	if err := cs.Reopen(created.ID); err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	if gets := backing.getCount(); gets != 0 {
+		t.Fatalf("backing.Get called %d times on cache-hit Reopen, want 0", gets)
+	}
+	got, err := cs.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("status = %q, want open", got.Status)
 	}
 }

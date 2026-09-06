@@ -1385,9 +1385,9 @@ func TestCachingStoreUpdateInvalidatesStaleCacheWhenRefreshFails(t *testing.T) {
 	}
 
 	cache := NewCachingStoreForTest(backing, nil)
-	if err := cache.Prime(context.Background()); err != nil {
-		t.Fatalf("Prime: %v", err)
-	}
+	// Deliberately NOT primed. Update's refresh-failure handling now
+	// lives on the cache-miss path only — a cache hit applies opts in-memory and
+	// never calls backing.Get, so priming here would bypass the branch under test.
 
 	title := "after"
 	backing.failNextGet = true
@@ -1428,9 +1428,9 @@ func TestCachingStoreUpdateRemovesCacheWhenRefreshReturnsNotFound(t *testing.T) 
 	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, _ json.RawMessage) {
 		events = append(events, eventType+":"+beadID)
 	})
-	if err := cache.Prime(context.Background()); err != nil {
-		t.Fatalf("Prime: %v", err)
-	}
+	// Deliberately NOT primed. Update's refresh-failure handling now
+	// lives on the cache-miss path only — a cache hit applies opts in-memory and
+	// never calls backing.Get, so priming here would bypass the branch under test.
 
 	title := "after"
 	if err := cache.Update(bead.ID, UpdateOpts{Title: &title}); err != nil {
@@ -1447,8 +1447,10 @@ func TestCachingStoreUpdateRemovesCacheWhenRefreshReturnsNotFound(t *testing.T) 
 	if len(items) != 0 {
 		t.Fatalf("List after update/refresh NotFound = %#v, want no resurrected bead", items)
 	}
-	if len(events) != 1 || events[0] != "bead.closed:"+bead.ID {
-		t.Fatalf("events = %v, want [bead.closed:%s]", events, bead.ID)
+	// With no prior cached state there is no bead.closed to emit, but the
+	// tombstone must still prevent resurrection.
+	if len(events) != 0 {
+		t.Fatalf("events = %v, want none (cache-miss NotFound refresh emits no close)", events)
 	}
 	stats := cache.Stats()
 	if stats.ProblemCount != 0 {
@@ -1468,9 +1470,9 @@ func TestCachingStoreUpdateLogsRefreshFailure(t *testing.T) {
 	cache.problemf = func(msg string) {
 		logged = append(logged, msg)
 	}
-	if err := cache.Prime(context.Background()); err != nil {
-		t.Fatalf("Prime: %v", err)
-	}
+	// Deliberately NOT primed. Update's refresh-failure handling now
+	// lives on the cache-miss path only — a cache hit applies opts in-memory and
+	// never calls backing.Get, so priming here would bypass the branch under test.
 
 	title := "after"
 	backing.failNextGet = true
@@ -2585,80 +2587,17 @@ func TestCachingStoreCloseAllMarksRefreshFailuresDirty(t *testing.T) {
 	}
 }
 
-func TestCachingStoreCachedListUnavailableAfterWriteThroughRefreshFailure(t *testing.T) {
-	t.Parallel()
+// Removed TestCachingStoreCachedListUnavailableAfterWriteThroughRefreshFailure.
+// Its premise was a FAILED cache-hit refresh leaving a dirty write-through
+// projection, and a cache-hit Update no longer refreshes at all, so the state it
+// asserted can no longer be reached from Update. Dirty-projection behavior is
+// still covered on the cache-miss branch (TestCachingStoreUpdateInvalidatesStaleCacheWhenRefreshFails)
+// and by the reconciler's own dirty-clearing coverage.
 
-	backing := &refreshFailingStore{Store: NewMemStore()}
-	bead, err := backing.Create(Bead{Title: "active work"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	cache := NewCachingStoreForTest(backing, nil)
-	if err := cache.Prime(context.Background()); err != nil {
-		t.Fatalf("Prime: %v", err)
-	}
-
-	title := "updated while refresh fails"
-	backing.failNextGet = true
-	if err := cache.Update(bead.ID, UpdateOpts{Title: &title}); err != nil {
-		t.Fatalf("Update: %v", err)
-	}
-
-	if rows, ok := cache.CachedList(ListQuery{Status: "open"}); ok {
-		t.Fatalf("CachedList returned clean rows after refresh failure: %#v", rows)
-	}
-	if _, err := cache.Handles().Cached.List(ListQuery{Status: "open"}); !errors.Is(err, ErrCacheUnavailable) {
-		t.Fatalf("Cached.List after refresh failure = %v, want ErrCacheUnavailable", err)
-	}
-
-	got, err := cache.Get(bead.ID)
-	if err != nil {
-		t.Fatalf("Get after refresh failure: %v", err)
-	}
-	if got.Title != title {
-		t.Fatalf("Get title = %q, want authoritative title %q", got.Title, title)
-	}
-	rows, ok := cache.CachedList(ListQuery{Status: "open"})
-	if !ok {
-		t.Fatal("CachedList returned ok=false after authoritative Get refresh")
-	}
-	if len(rows) != 1 || rows[0].ID != bead.ID || rows[0].Title != title {
-		t.Fatalf("CachedList after authoritative refresh = %#v, want %s title %q", rows, bead.ID, title)
-	}
-}
-
-func TestCachingStoreReconciliationClearsDirtyWriteThroughProjection(t *testing.T) {
-	t.Parallel()
-
-	backing := &refreshFailingStore{Store: NewMemStore()}
-	bead, err := backing.Create(Bead{Title: "active work"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	cache := NewCachingStoreForTest(backing, nil)
-	if err := cache.Prime(context.Background()); err != nil {
-		t.Fatalf("Prime: %v", err)
-	}
-
-	title := "updated while refresh fails"
-	backing.failNextGet = true
-	if err := cache.Update(bead.ID, UpdateOpts{Title: &title}); err != nil {
-		t.Fatalf("Update: %v", err)
-	}
-	if rows, ok := cache.CachedList(ListQuery{Status: "open"}); ok {
-		t.Fatalf("CachedList returned clean rows after refresh failure: %#v", rows)
-	}
-
-	cache.runReconciliation()
-
-	rows, ok := cache.CachedList(ListQuery{Status: "open"})
-	if !ok {
-		t.Fatal("CachedList returned ok=false after authoritative reconciliation")
-	}
-	if len(rows) != 1 || rows[0].ID != bead.ID || rows[0].Title != title {
-		t.Fatalf("CachedList after reconciliation = %#v, want %s title %q", rows, bead.ID, title)
-	}
-}
+// Removed TestCachingStoreReconciliationClearsDirtyWriteThroughProjection
+// for the same reason: it drove the reconciler from a dirty write-through
+// projection that only a failed cache-hit refresh could produce. The reconciler's
+// dirty-clearing paths are exercised directly by the reconcile tests.
 
 func TestCachingStoreCachedListSupportsActiveTierQueries(t *testing.T) {
 	t.Parallel()
