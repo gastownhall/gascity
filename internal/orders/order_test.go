@@ -198,6 +198,56 @@ func TestValidateCronMissingSchedule(t *testing.T) {
 	}
 }
 
+// TestValidateCronScheduleSyntax pins the full grammar the runtime matcher
+// accepts, so a schedule that validates is one that can actually fire.
+func TestValidateCronScheduleSyntax(t *testing.T) {
+	valid := []string{
+		"* * * * *",
+		"0 3 * * *",
+		"*/15 16-23 * * 1-5",
+		"5-59/10 * * * *",
+		"0 9-17 * * *",
+		"0 0 1,15 * *",
+		"0 0 * */3 *",
+		"59 23 31 12 6",
+	}
+	for _, schedule := range valid {
+		a := Order{Name: "cleanup", Formula: "mol-cleanup", Trigger: "cron", Schedule: schedule}
+		if err := Validate(a); err != nil {
+			t.Errorf("Validate(schedule %q): %v", schedule, err)
+		}
+	}
+}
+
+// TestValidateCronBadSchedule covers the #5709 failure mode: an unparseable
+// field used to yield an order that silently never fired. It must now be a
+// hard error at discovery, the way a bad tz already is.
+func TestValidateCronBadSchedule(t *testing.T) {
+	invalid := []string{
+		"0 3 * *",            // too few fields
+		"0 3 * * * *",        // too many fields
+		"60 3 * * *",         // minute above bound
+		"0 24 * * *",         // hour above bound
+		"0 0 0 * *",          // day-of-month below bound
+		"0 0 * 13 *",         // month above bound
+		"0 0 * * 7",          // day-of-week above bound
+		"0 16-24 * * *",      // range end above bound
+		"0 17-9 * * *",       // inverted range
+		"0 abc * * *",        // non-numeric
+		"*/0 * * * *",        // zero step
+		"*/ * * * *",         // missing step
+		"0 3 * * 1,",         // empty trailing part
+		"0-oops * * * *",     // malformed range
+		"0 3,notanumber * *", // wrong field count and garbage
+	}
+	for _, schedule := range invalid {
+		a := Order{Name: "cleanup", Formula: "mol-cleanup", Trigger: "cron", Schedule: schedule}
+		if err := Validate(a); err == nil {
+			t.Errorf("Validate(schedule %q) = nil, want an error", schedule)
+		}
+	}
+}
+
 func TestValidateCondition(t *testing.T) {
 	a := Order{Name: "check", Formula: "mol-check", Trigger: "condition", Check: "test -f /tmp/flag"}
 	if err := Validate(a); err != nil {

@@ -173,9 +173,12 @@ Notes per trigger:
   waits `interval` since the last run. Drifts: a 3:02 run means the next is at
   3:07.
 - **`cron`** — a 5-field expression (minute, hour, day-of-month, month,
-  day-of-week) supporting `*`, integers, comma lists (`1,15`), and `*/N` steps.
-  Unlike cooldown it hits the same wall-clock times every day. Fires at most
-  once per minute.
+  day-of-week) supporting `*`, integers, comma lists (`1,15`), ranges (`9-17`),
+  and steps on either (`*/15`, `5-59/10`). A step counts from the start of its
+  range, so `*/2` on day-of-month means the 1st, 3rd, 5th. Every field is
+  bounds-checked at order discovery: an out-of-range or unparseable schedule is
+  a load error, not an order that quietly never fires. Unlike cooldown it hits
+  the same wall-clock times every day. Fires at most once per minute.
 - **`condition`** — the orchestrator runs `sh -c "<check>"` each tick, bounded by
   the order's `check_timeout` (a positive Go duration, default `10s`). This is
   separate from `timeout`, which bounds the dispatched formula/exec rather than

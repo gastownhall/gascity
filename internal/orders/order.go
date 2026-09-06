@@ -318,6 +318,12 @@ func Validate(a Order) error {
 		if a.Schedule == "" {
 			return fmt.Errorf("order %q: cron trigger requires schedule", a.Name)
 		}
+		// An unparseable schedule must fail loudly at discovery, the same way
+		// a bad tz does. The runtime matcher can only report such a field as
+		// "not matched", which yields an order that silently never fires.
+		if err := ValidateCronSchedule(a.Schedule); err != nil {
+			return fmt.Errorf("order %q: invalid schedule %q: %w", a.Name, a.Schedule, err)
+		}
 	case "condition":
 		if a.Check == "" {
 			return fmt.Errorf("order %q: condition trigger requires check command", a.Name)
