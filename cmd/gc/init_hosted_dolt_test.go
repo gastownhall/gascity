@@ -163,6 +163,42 @@ func TestHostedDoltInitOptionsValidate(t *testing.T) {
 	}
 }
 
+func TestHostedDoltInitOptionsApplySelector(t *testing.T) {
+	tests := []struct {
+		name       string
+		opts       hostedDoltInitOptions
+		wantMode   string
+		wantHost   string
+		wantPort   int
+		wantErrSub string
+	}{
+		{name: "direct local", opts: hostedDoltInitOptions{Transport: "direct", Target: "local"}, wantMode: "server"},
+		{name: "proxied local", opts: hostedDoltInitOptions{Transport: "proxied", Target: "local"}, wantMode: "proxied-server"},
+		{name: "direct external", opts: hostedDoltInitOptions{Transport: "direct", Target: "external", Host: "db.example", Port: "4406", Database: "bd_x", ProjectID: "x"}, wantMode: "server", wantHost: "db.example", wantPort: 4406},
+		{name: "proxied external", opts: hostedDoltInitOptions{Transport: "proxied", Target: "external", Host: "db.example", Port: "4406", Database: "bd_x", ProjectID: "x"}, wantMode: "proxied-server", wantHost: "db.example", wantPort: 4406},
+		{name: "external requires host", opts: hostedDoltInitOptions{Transport: "proxied", Target: "external"}, wantErrSub: "--dolt-host"},
+		{name: "local rejects host", opts: hostedDoltInitOptions{Transport: "direct", Target: "local", Host: "db.example", Port: "4406"}, wantErrSub: "local"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.City{}
+			err := tt.opts.applySelectorToCityConfig(cfg)
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(tt.wantErrSub)) {
+					t.Fatalf("applySelectorToCityConfig() = %v, want error containing %q", err, tt.wantErrSub)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("applySelectorToCityConfig() error = %v", err)
+			}
+			if cfg.Dolt.Mode != tt.wantMode || cfg.Dolt.Host != tt.wantHost || cfg.Dolt.Port != tt.wantPort {
+				t.Fatalf("Dolt config = %+v, want mode=%q host=%q port=%d", cfg.Dolt, tt.wantMode, tt.wantHost, tt.wantPort)
+			}
+		})
+	}
+}
+
 // TestHostedDoltInitAppliesAPIPortDefault pins the control-plane reachability
 // contract for hosted cities. A hosted city's controller runs out-of-session,
 // so the control dispatcher and gc CLI reach it only through the HTTP API, and
@@ -574,6 +610,47 @@ func TestGcInitCommandHostedDoltRejectsFileBackend(t *testing.T) {
 		t.Fatalf("stderr = %q, want a bd-backed-provider error", stderr.String())
 	}
 	assertNoHostedDoltStoreArtifacts(t, cityPath)
+}
+
+// TestGcInitCommandBeadsSelectorMatrix exercises the real init RunE selector
+// wiring. Each supported transport/target pair is rejected cleanly when the
+// effective provider is incompatible, before any city ledger files are
+// written; this also pins the typed refusal path for malformed selectors.
+func TestGcInitCommandBeadsSelectorMatrix(t *testing.T) {
+	tests := []struct {
+		name, transport, target string
+	}{
+		{name: "direct local", transport: "direct", target: "local"},
+		{name: "direct external", transport: "direct", target: "external"},
+		{name: "proxied local", transport: "proxied", target: "local"},
+		{name: "proxied external", transport: "proxied", target: "external"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_BEADS", "file")
+			t.Setenv("GC_DOLT", "")
+			cityPath := filepath.Join(t.TempDir(), "selector-city")
+			var stdout, stderr bytes.Buffer
+			cmd := newInitCmd(&stdout, &stderr)
+			cmd.SilenceUsage = true
+			cmd.SilenceErrors = true
+			args := []string{"--template", "gascity", "--default-provider", "claude", "--skip-provider-readiness", "--no-start", "--beads-transport", tc.transport, "--beads-target", tc.target}
+			if tc.target == "external" {
+				args = append(args, "--dolt-host", "gateway.example.com", "--dolt-port", "4406", "--dolt-database", "bd_prj_x", "--dolt-project-id", "prj_x")
+			}
+			args = append(args, cityPath)
+			cmd.SetArgs(args)
+			err := cmd.Execute()
+			if tc.target == "external" {
+				if err == nil {
+					t.Fatal("gc init unexpectedly succeeded with incompatible file backend")
+				}
+				assertNoHostedDoltStoreArtifacts(t, cityPath)
+			} else if err != nil {
+				t.Fatalf("gc init local selector: %v; stderr=%s", err, stderr.String())
+			}
+		})
+	}
 }
 
 // assertNoHostedDoltStoreArtifacts fails when a rejected hosted-Dolt init left
