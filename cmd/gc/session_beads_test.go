@@ -9120,3 +9120,227 @@ func TestDeferredSingletonAliasRetryBackoff(t *testing.T) {
 		}
 	})
 }
+
+// withHostBootTime pins the host boot instant for a test.
+func withHostBootTime(t *testing.T, boot time.Time, err error) {
+	t.Helper()
+	prev := hostBootTime
+	hostBootTime = func() (time.Time, error) { return boot, err }
+	t.Cleanup(func() { hostBootTime = prev })
+}
+
+// serverAbsentListErr mimics the tmux adapter's ListRunning failure when no
+// tmux server is running at all.
+func serverAbsentListErr() error {
+	return &runtime.PartialListError{Err: errors.New("tmux server unreachable: no server running"), ServerAbsent: true}
+}
+
+// preBootReapFixture seeds a store and snapshot sharing one bead set.
+func preBootReapFixture(bs []beads.Bead) (*beads.MemStore, *sessionBeadSnapshot) {
+	return beads.NewMemStoreFrom(len(bs), bs, nil), newSessionBeadSnapshot(bs)
+}
+
+func TestCleanupDeadRuntimeSessionCorpsesReapsPreBootBeadsWhenServerAbsent(t *testing.T) {
+	boot := time.Now().Add(-10 * time.Minute)
+	withHostBootTime(t, boot, nil)
+
+	sp := newDeadRuntimeArtifactProvider()
+	sp.listErr = serverAbsentListErr() // nothing visible: the server is gone
+
+	store, snapshot := preBootReapFixture([]beads.Bead{
+		{
+			ID: "s-preboot", Status: "open", Type: sessionBeadType,
+			CreatedAt: boot.Add(-time.Hour), // predates the reboot => provably dead
+			Metadata:  map[string]string{"session_name": "qwen38-1", "template": "worker", "state": "active"},
+		},
+		{
+			ID: "s-postboot", Status: "open", Type: sessionBeadType,
+			CreatedAt: boot.Add(time.Minute), // started after boot => unproven
+			Metadata:  map[string]string{"session_name": "qwen38-2", "template": "worker", "state": "active"},
+		},
+		// A bead outlives its runtime: the reboot put these to sleep and the
+		// reconciler woke them again under the SAME bead, so their pre-boot
+		// CreatedAt names a session that is alive right now. Each carries a
+		// different post-boot start marker; all three must survive.
+		{
+			ID: "s-rewoken", Status: "open", Type: sessionBeadType,
+			CreatedAt: boot.Add(-time.Hour),
+			Metadata: map[string]string{
+				"session_name": "qwen38-3", "template": "worker", "state": "active",
+				"last_woke_at": boot.Add(time.Minute).UTC().Format(time.RFC3339),
+			},
+		},
+		{
+			ID: "s-recreated", Status: "open", Type: sessionBeadType,
+			CreatedAt: boot.Add(-time.Hour),
+			Metadata: map[string]string{
+				"session_name": "qwen38-4", "template": "worker", "state": "active",
+				"creation_complete_at": boot.Add(time.Minute).UTC().Format(time.RFC3339),
+			},
+		},
+		{
+			ID: "s-reawake", Status: "open", Type: sessionBeadType,
+			CreatedAt: boot.Add(-time.Hour),
+			Metadata: map[string]string{
+				"session_name": "qwen38-5", "template": "worker", "state": "awake",
+				"awake_started_at": boot.Add(time.Minute).UTC().Format(time.RFC3339),
+			},
+		},
+	})
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, &stderr)
+	if got != 1 {
+		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "reaped pre-boot session bead s-preboot") {
+		t.Fatalf("missing pre-boot reap diagnostic; stderr=%q", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "s-postboot") {
+		t.Fatalf("reaped a post-boot bead; stderr=%q", stderr.String())
+	}
+	if b, err := store.Get("s-preboot"); err != nil || b.Status != "closed" {
+		t.Fatalf("pre-boot bead not closed: status=%q err=%v", b.Status, err)
+	}
+	if b, err := store.Get("s-postboot"); err != nil || b.Status != "open" {
+		t.Fatalf("post-boot bead should stay open: status=%q err=%v", b.Status, err)
+	}
+	for _, id := range []string{"s-rewoken", "s-recreated", "s-reawake"} {
+		if b, err := store.Get(id); err != nil || b.Status != "open" {
+			t.Fatalf("%s was restarted after boot and should stay open: status=%q err=%v", id, b.Status, err)
+		}
+	}
+}
+
+func TestCleanupDeadRuntimeSessionCorpsesFailSafesOnPartialListingWithLiveServer(t *testing.T) {
+	boot := time.Now().Add(-10 * time.Minute)
+	withHostBootTime(t, boot, nil)
+
+	sp := newDeadRuntimeArtifactProvider()
+	// Server is up but answered incompletely: no absence sentinel.
+	sp.listErr = &runtime.PartialListError{Err: errors.New("one backend failed")}
+
+	store, snapshot := preBootReapFixture([]beads.Bead{{
+		ID: "s-preboot", Status: "open", Type: sessionBeadType,
+		CreatedAt: boot.Add(-time.Hour),
+		Metadata:  map[string]string{"session_name": "qwen38-1", "template": "worker", "state": "active"},
+	}})
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, &stderr)
+	if got != 0 {
+		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 0 (fail-safe); stderr=%q", got, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "reaped pre-boot session bead") {
+		t.Fatalf("reaped on a partial listing from a live server; stderr=%q", stderr.String())
+	}
+	if b, err := store.Get("s-preboot"); err != nil || b.Status != "open" {
+		t.Fatalf("bead should stay open under fail-safe: status=%q err=%v", b.Status, err)
+	}
+}
+
+func TestCleanupDeadRuntimeSessionCorpsesFailSafesWhenBootTimeUnavailable(t *testing.T) {
+	withHostBootTime(t, time.Time{}, errors.New("unsupported platform"))
+
+	sp := newDeadRuntimeArtifactProvider()
+	sp.listErr = serverAbsentListErr()
+
+	store, snapshot := preBootReapFixture([]beads.Bead{{
+		ID: "s-preboot", Status: "open", Type: sessionBeadType,
+		CreatedAt: time.Now().Add(-time.Hour),
+		Metadata:  map[string]string{"session_name": "qwen38-1", "template": "worker", "state": "active"},
+	}})
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, &stderr)
+	if got != 0 {
+		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 0 when boot time is unknown", got)
+	}
+	if !strings.Contains(stderr.String(), "host boot time unavailable") {
+		t.Fatalf("missing boot-time-unavailable diagnostic; stderr=%q", stderr.String())
+	}
+}
+
+// A merged multi-backend failure must never claim absence: one absent backend
+// says nothing about a healthy sibling that may still hold live sessions.
+func TestMergedBackendListErrorNeverReportsServerAbsent(t *testing.T) {
+	absent := &runtime.PartialListError{Err: errors.New("tmux server unreachable"), ServerAbsent: true}
+	if !runtime.IsRuntimeServerAbsent(absent) {
+		t.Fatalf("single-backend absence should report absent")
+	}
+	merged, err := runtime.MergeBackendListResults(
+		runtime.BackendListResult{Label: "local", Names: nil, Err: absent},
+		runtime.BackendListResult{Label: "remote", Names: []string{"live-remote-session"}, Err: nil},
+	)
+	if len(merged) != 1 {
+		t.Fatalf("merged names = %v, want the healthy backend's session", merged)
+	}
+	if !runtime.IsPartialListError(err) {
+		t.Fatalf("merged error should still be a partial listing: %v", err)
+	}
+	if runtime.IsRuntimeServerAbsent(err) {
+		t.Fatalf("merged error must NOT report absence; a healthy backend has live sessions: %v", err)
+	}
+}
+
+func TestCleanupDeadRuntimeSessionCorpsesSkipsUnreapableStatesAndTransports(t *testing.T) {
+	boot := time.Now().Add(-10 * time.Minute)
+	withHostBootTime(t, boot, nil)
+	created := boot.Add(-time.Hour)
+
+	sp := newDeadRuntimeArtifactProvider()
+	sp.listErr = serverAbsentListErr()
+
+	store, snapshot := preBootReapFixture([]beads.Bead{
+		{
+			ID: "s-draining", Status: "open", Type: sessionBeadType, CreatedAt: created,
+			Metadata: map[string]string{"session_name": "w-draining", "template": "worker", "state": "draining"},
+		},
+		{
+			ID: "s-manual", Status: "open", Type: sessionBeadType, CreatedAt: created,
+			Metadata: map[string]string{"session_name": "w-manual", "template": "worker", "state": "active", "manual_session": "true"},
+		},
+		{
+			ID: "s-acp", Status: "open", Type: sessionBeadType, CreatedAt: created,
+			Metadata: map[string]string{"session_name": "w-acp", "template": "worker", "state": "active", "transport": "acp"},
+		},
+		{
+			// Raw "drained" normalizes to StateAsleep, so the predicate must
+			// read the raw metadata state or it would reap a drained session.
+			ID: "s-drained", Status: "open", Type: sessionBeadType, CreatedAt: created,
+			Metadata: map[string]string{"session_name": "w-drained", "template": "worker", "state": "drained"},
+		},
+		{
+			ID: "s-nostate", Status: "open", Type: sessionBeadType, CreatedAt: created,
+			Metadata: map[string]string{"session_name": "w-nostate", "template": "worker"},
+		},
+	})
+
+	var stderr bytes.Buffer
+	if got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, &stderr); got != 0 {
+		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 0; stderr=%q", got, stderr.String())
+	}
+	for _, id := range []string{"s-draining", "s-manual", "s-acp", "s-drained", "s-nostate"} {
+		b, err := store.Get(id)
+		if err != nil || b.Status != "open" {
+			t.Fatalf("%s should stay open: status=%q err=%v", id, b.Status, err)
+		}
+	}
+}
+
+// A bare errors.Join from a total multi-backend failure must not assert
+// absence either: one backend being absent says nothing about a sibling that
+// failed for an unrelated reason and may still hold live sessions.
+func TestTotalBackendFailureNeverReportsServerAbsent(t *testing.T) {
+	absent := &runtime.PartialListError{Err: errors.New("tmux server unreachable"), ServerAbsent: true}
+	_, err := runtime.MergeBackendListResults(
+		runtime.BackendListResult{Label: "local", Names: nil, Err: absent},
+		runtime.BackendListResult{Label: "remote", Names: nil, Err: errors.New("ssh dial timeout")},
+	)
+	if err == nil {
+		t.Fatalf("expected an error when every backend fails")
+	}
+	if runtime.IsRuntimeServerAbsent(err) {
+		t.Fatalf("a total-failure join must not assert absence: %v", err)
+	}
+}

@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/extmsg"
+	"github.com/gastownhall/gascity/internal/hostboot"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
@@ -2851,6 +2852,127 @@ func reapStaleSessionBeads(
 	return reaped
 }
 
+// reapableStateForPreBoot reports whether a session is in a state the pre-boot
+// sweep may close. Only states that mean "was running" qualify: transitional
+// and terminal states (creating, start-pending, failed-create, draining,
+// drained, archived, suspended, quarantined) each have their own reconciler
+// path, and closing them here would race it.
+//
+// It keys off the RAW metadata state, not Info.State: normalizeInfoState folds
+// "drained" into StateAsleep, so the normalized value cannot tell a sleeping
+// session apart from one the drain path already finished with. An absent or
+// unrecognized raw state is not reapable — proof of death does not extend to
+// beads whose lifecycle we cannot read.
+func reapableStateForPreBoot(info session.Info) bool {
+	switch session.State(strings.TrimSpace(info.MetadataState)) {
+	case session.StateActive, session.StateAsleep, session.StateAwake:
+		return true
+	default:
+		return false
+	}
+}
+
+// preBootStartBoundary returns the latest evidence that this session's runtime
+// was started: max(CreatedAt, last_woke_at, creation_complete_at,
+// awake_started_at). A session bead outlives its runtime — a vanished runtime
+// puts the bead asleep and preWakeCommit restarts it under the SAME bead — so
+// CreatedAt alone does not mean "not started since boot". ok is false when
+// CreatedAt is zero (unknown age; never reapable).
+func preBootStartBoundary(i session.Info) (time.Time, bool) {
+	if i.CreatedAt.IsZero() {
+		return time.Time{}, false
+	}
+	started := i.CreatedAt
+	for _, raw := range []string{i.LastWokeAt, i.CreationCompleteAt, i.AwakeStartedAt} {
+		if raw = strings.TrimSpace(raw); raw == "" {
+			continue
+		}
+		if t, err := time.Parse(time.RFC3339, raw); err == nil && t.After(started) {
+			started = t
+		}
+	}
+	return started, true
+}
+
+// hostBootTime is overridable in tests.
+var hostBootTime = hostboot.BootTime
+
+// reapPreBootSessionBeads closes open session beads whose runtime provably
+// cannot exist: they were created before the current host boot, so whatever
+// runtime artifact they name died with the reboot.
+//
+// It runs only when the runtime server is entirely absent, which is the one
+// case where observation can prove nothing and the normal dead-artifact sweep
+// is a no-op. Without it a single orphaned pool session bead holds its alias
+// forever after a reboot: the death check fail-safes on the unreachable
+// server, nothing reaps the bead, and the pool never spawns a successor
+// because EnsureAliasAvailable keeps failing with ErrSessionAliasExists.
+//
+// Beads last started after boot are left alone: a server that is merely down
+// cannot distinguish a live session from a dead one, so those keep the
+// existing fail-safe. If the boot instant is unavailable, nothing is reaped.
+//
+// The proof is independent of the absence classification: a session whose last
+// start predates the boot is dead whatever the runtime backend reported, so a
+// misclassified absence cannot cost a live session its bead.
+func reapPreBootSessionBeads(
+	store beads.Store,
+	sessionBeads *sessionBeadSnapshot,
+	dt *drainTracker,
+	clk clock.Clock,
+	stderr io.Writer,
+) int {
+	if sessionBeads == nil {
+		return 0
+	}
+	if clk == nil {
+		clk = clock.Real{}
+	}
+	boot, err := hostBootTime()
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: cannot prove pre-boot session death (host boot time unavailable): %v\n", err) //nolint:errcheck
+		return 0
+	}
+
+	reaped := 0
+	for _, info := range sessionBeads.OpenInfos() {
+		if info.PendingCreateClaim || (dt != nil && dt.get(info.ID) != nil) || isNamedSessionInfo(info) {
+			continue
+		}
+		// Manual sessions are operator-owned; drain/archive states have their
+		// own lifecycle paths that must not be short-circuited here.
+		if info.ManualSession || !reapableStateForPreBoot(info) {
+			continue
+		}
+		// Local boot time only speaks for a local runtime. A remote or ACP
+		// transport is proved dead by nothing we know here.
+		if t := strings.TrimSpace(info.Transport); t != "" && t != config.SessionTransportTmux {
+			continue
+		}
+		if strings.TrimSpace(info.SessionNameMetadata) == "" {
+			continue
+		}
+		// A zero or post-boot START stamp is not proof of death. The boundary
+		// folds the wake/confirm markers because a long-lived bead may have
+		// been restarted after the reboot under the same identity.
+		startedAt, ok := preBootStartBoundary(info)
+		if !ok || !startedAt.Before(boot) {
+			continue
+		}
+		// A nil store has no bead to close; the sibling dead-artifact sweep
+		// tolerates one for its runtime side effect, but this path has none.
+		if store == nil {
+			continue
+		}
+		if closeBead(store, info.ID, "stale-session", clk.Now().UTC(), stderr) {
+			fmt.Fprintf(stderr, "session reconciler: reaped pre-boot session bead %s (session %q last started %s, host booted %s) — runtime server absent\n", //nolint:errcheck
+				info.ID, strings.TrimSpace(info.SessionNameMetadata), startedAt.UTC().Format(time.RFC3339), boot.UTC().Format(time.RFC3339))
+			reaped++
+		}
+	}
+	return reaped
+}
+
 func cleanupDeadRuntimeSessionCorpses(
 	store beads.Store,
 	_ map[string]beads.Store,
@@ -2878,6 +3000,16 @@ func cleanupDeadRuntimeSessionCorpses(
 		return 0
 	}
 	if partialList {
+		// An absent runtime server observes nothing, so the visible-artifact
+		// path below cannot run at all. Session beads created before the host
+		// booted are still provably dead — a tmux server never survives a
+		// reboot — so reap those rather than fail-safing forever and leaving
+		// the pool identity claimed by a corpse.
+		if runtime.IsRuntimeServerAbsent(err) {
+			if reaped := reapPreBootSessionBeads(store, sessionBeads, dt, clk, stderr); reaped > 0 {
+				return reaped
+			}
+		}
 		fmt.Fprintf(stderr, "session reconciler: listing runtime sessions partially failed for dead cleanup; checking %d visible session(s): %v\n", len(visible), err) //nolint:errcheck
 	}
 	if len(visible) == 0 {
