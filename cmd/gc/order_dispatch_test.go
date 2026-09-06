@@ -350,7 +350,7 @@ func TestOrderDispatchResolvesPackBindingForPool(t *testing.T) {
 
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "dog", BindingName: "maintenance"},
+			{Name: "dog", BindingName: "maintenance", MinActiveSessions: intPtr(1)},
 		},
 	}
 
@@ -428,13 +428,179 @@ description = "Do the cleanup."
 	}
 }
 
+func TestOrderDispatchPoolLegacyFormulaFailsFastWhenScaleFromZeroRootIsNotReadyVisible(t *testing.T) {
+	formulaDir := t.TempDir()
+	writeFile(t, filepath.Join(formulaDir, "mol-legacy-cleanup.toml"), `
+formula = "mol-legacy-cleanup"
+version = 1
+
+[[steps]]
+id = "work"
+title = "Do legacy cleanup"
+description = "Do the cleanup."
+`)
+	store := beads.NewMemStore()
+	var rec memRecorder
+	var stderr bytes.Buffer
+	minZero := 0
+	maxOne := 1
+
+	m := &memoryOrderDispatcher{
+		aa: []orders.Order{{
+			Name:         "legacy-cleanup",
+			Trigger:      "cooldown",
+			Interval:     "5m",
+			Formula:      "mol-legacy-cleanup",
+			Pool:         "dog",
+			FormulaLayer: formulaDir,
+		}},
+		storeFn: func(_ execStoreTarget) (beads.Store, error) {
+			return store, nil
+		},
+		execRun: shellExecRunner,
+		rec:     &rec,
+		stderr:  &stderr,
+		cfg: &config.City{Agents: []config.Agent{{
+			Name:              "dog",
+			MinActiveSessions: &minZero,
+			MaxActiveSessions: &maxOne,
+		}}},
+	}
+
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+	m.drain(context.Background())
+
+	if !rec.hasType(events.OrderFailed) {
+		t.Fatal("missing order.failed event for scale-from-zero pool route visibility failure")
+	}
+	all := trackingBeads(t, store, "order-run:legacy-cleanup")
+	if len(all) != 1 {
+		t.Fatalf("tracking beads with order-run label = %d, want 1", len(all))
+	}
+	if !strings.HasPrefix(all[0].Title, "order:") {
+		t.Fatalf("created bead title = %q, want only the tracking bead", all[0].Title)
+	}
+	if !containsString(all[0].Labels, "wisp-failed") {
+		t.Fatalf("tracking bead labels = %v, want wisp-failed marker", all[0].Labels)
+	}
+}
+
+func TestOrderDispatchPoolLegacyFormulaStillWarnsWhenFloorPoolRootIsNotReadyVisible(t *testing.T) {
+	formulaDir := t.TempDir()
+	writeFile(t, filepath.Join(formulaDir, "mol-legacy-cleanup.toml"), `
+formula = "mol-legacy-cleanup"
+version = 1
+
+[[steps]]
+id = "work"
+title = "Do legacy cleanup"
+description = "Do the cleanup."
+`)
+	store := beads.NewMemStore()
+	var rec memRecorder
+	var stderr bytes.Buffer
+	minOne := 1
+	maxOne := 1
+
+	m := &memoryOrderDispatcher{
+		aa: []orders.Order{{
+			Name:         "legacy-cleanup",
+			Trigger:      "cooldown",
+			Interval:     "5m",
+			Formula:      "mol-legacy-cleanup",
+			Pool:         "dog",
+			FormulaLayer: formulaDir,
+		}},
+		storeFn: func(_ execStoreTarget) (beads.Store, error) {
+			return store, nil
+		},
+		execRun: shellExecRunner,
+		rec:     &rec,
+		stderr:  &stderr,
+		cfg: &config.City{Agents: []config.Agent{{
+			Name:              "dog",
+			MinActiveSessions: &minOne,
+			MaxActiveSessions: &maxOne,
+		}}},
+	}
+
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+	m.drain(context.Background())
+
+	if rec.hasType(events.OrderFailed) {
+		t.Fatal("unexpected order.failed event for floor pool route visibility warning")
+	}
+	if !strings.Contains(stderr.String(), "scale-from-zero pools will not wake") {
+		t.Fatalf("stderr = %q, want pool visibility warning", stderr.String())
+	}
+	work := workBeadByOrderLabel(t, store, "order-run:legacy-cleanup")
+	if work.Type != "molecule" {
+		t.Fatalf("legacy root Type = %q, want molecule", work.Type)
+	}
+}
+
+func TestOrderDispatchPoolRootOnlyFormulaDoesNotWarnOrFailForScaleFromZeroPool(t *testing.T) {
+	formulaDir := t.TempDir()
+	writeFile(t, filepath.Join(formulaDir, "root-only-cleanup.toml"), `
+formula = "root-only-cleanup"
+version = 1
+phase = "vapor"
+
+[[steps]]
+id = "work"
+title = "Do root-only cleanup"
+description = "Do the cleanup."
+`)
+	store := beads.NewMemStore()
+	var rec memRecorder
+	var stderr bytes.Buffer
+	minZero := 0
+	maxOne := 1
+
+	m := &memoryOrderDispatcher{
+		aa: []orders.Order{{
+			Name:         "root-only-cleanup",
+			Trigger:      "cooldown",
+			Interval:     "5m",
+			Formula:      "root-only-cleanup",
+			Pool:         "dog",
+			FormulaLayer: formulaDir,
+		}},
+		storeFn: func(_ execStoreTarget) (beads.Store, error) {
+			return store, nil
+		},
+		execRun: shellExecRunner,
+		rec:     &rec,
+		stderr:  &stderr,
+		cfg: &config.City{Agents: []config.Agent{{
+			Name:              "dog",
+			MinActiveSessions: &minZero,
+			MaxActiveSessions: &maxOne,
+		}}},
+	}
+
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+	m.drain(context.Background())
+
+	if rec.hasType(events.OrderFailed) {
+		t.Fatal("unexpected order.failed event for Ready-visible formula")
+	}
+	if strings.Contains(stderr.String(), "scale-from-zero pools will not wake") {
+		t.Fatalf("stderr = %q, want no pool visibility warning", stderr.String())
+	}
+	work := workBeadByOrderLabel(t, store, "order-run:root-only-cleanup")
+	if work.Type != "task" {
+		t.Fatalf("root-only wisp Type = %q, want task", work.Type)
+	}
+}
+
 func TestOrderDispatchPrefersCityShadowForPool(t *testing.T) {
 	store := beads.NewMemStore()
 
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "dog"},
-			{Name: "dog", BindingName: "maintenance", SourceDir: "/city/packs/maintenance"},
+			{Name: "dog", MinActiveSessions: intPtr(1)},
+			{Name: "dog", BindingName: "maintenance", SourceDir: "/city/packs/maintenance", MinActiveSessions: intPtr(1)},
 		},
 	}
 
@@ -7018,8 +7184,9 @@ pool = "dog"
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "demo", Prefix: "ct"},
 		Agents: []config.Agent{{
-			Name:        "dog",
-			BindingName: "maintenance",
+			Name:              "dog",
+			BindingName:       "maintenance",
+			MinActiveSessions: intPtr(1),
 		}},
 		FormulaLayers: config.FormulaLayers{
 			City: []string{cityLayer},
@@ -7720,6 +7887,7 @@ name = "test-city"
 [[agent]]
 name = "dog"
 scope = "city"
+min_active_sessions = 1
 `
 	}
 	writeFile(t, filepath.Join(cityDir, "city.toml"), cityToml)
@@ -7753,6 +7921,7 @@ schema = 1
 [[agent]]
 name = "dog"
 scope = "city"
+min_active_sessions = 1
 `)
 		if binding == orderBinding {
 			writeFile(t, filepath.Join(packDir, "orders", "digest.toml"), `

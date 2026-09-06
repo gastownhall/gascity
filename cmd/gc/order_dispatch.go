@@ -1898,6 +1898,22 @@ func poolOrderRouteVisibilityWarning(a orders.Order, recipe *formula.Recipe) str
 	return fmt.Sprintf("warning: pool order %q uses formula %q whose root is a molecule container, not Ready-visible work; scale-from-zero pools will not wake for this wisp. Convert the formula to phase=\"vapor\"/root-only or formulas v2 before routing it to a pool.", a.ScopedName(), a.Formula)
 }
 
+func poolOrderRouteVisibilityFailFast(a orders.Order, recipe *formula.Recipe, cfg *config.City) bool {
+	if poolOrderRouteVisibilityWarning(a, recipe) == "" || cfg == nil {
+		return false
+	}
+	qualified, err := qualifyOrderPool(a, cfg)
+	if err != nil {
+		return false
+	}
+	for i := range cfg.Agents {
+		if cfg.Agents[i].QualifiedName() == qualified {
+			return cfg.Agents[i].EffectiveMinActiveSessions() == 0
+		}
+	}
+	return false
+}
+
 // applyOrderRecipeRouting decorates an order recipe before it is instantiated.
 // The resolved store target is authoritative: order pool/step targets describe
 // execution, while target.ScopeRoot describes the store that will own every
@@ -2198,6 +2214,17 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		return
 	}
 	if warning := poolOrderRouteVisibilityWarning(a, recipe); warning != "" {
+		if poolOrderRouteVisibilityFailFast(a, recipe, m.cfg) {
+			logDispatchError(m.stderr, "gc: order %s: %s", scoped, warning)
+			m.rec.Record(events.Event{
+				Type:    events.OrderFailed,
+				Actor:   "controller",
+				Subject: scoped,
+				Message: warning,
+			})
+			m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
+			return
+		}
 		logDispatchError(m.stderr, "gc: order %s: %s", scoped, warning)
 	}
 
