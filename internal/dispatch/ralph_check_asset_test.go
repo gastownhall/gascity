@@ -174,23 +174,47 @@ func TestRalphCheckHistoricalFormulaRootsRejectsUnboundEvidence(t *testing.T) {
 		}
 	}
 	formulaBytes := []byte("formula = \"review\"\n")
-	if err := os.WriteFile(formulaSource, formulaBytes, 0o644); err != nil {
-		t.Fatalf("write formula: %v", err)
+	validHash := formula.ContentHash(formulaBytes)
+	writeFormula := func(path string) string {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+		}
+		if err := os.WriteFile(path, formulaBytes, 0o644); err != nil {
+			t.Fatalf("write formula %s: %v", path, err)
+		}
+		return path
 	}
+	writeFormula(formulaSource)
+
+	// Each guard below runs before os.ReadFile, so every fixture is written to
+	// disk with the real formula bytes: the only thing left that can reject the
+	// case is the guard it is named for.
+	outsideSource := writeFormula(filepath.Join(tmp, "elsewhere", "formulas", "review.toml"))
+	outsideCheck := filepath.Join(tmp, "elsewhere", "assets", "scripts", "check.sh")
+	upperEntry := filepath.Join(cacheRoot, strings.Repeat("A", 64))
+	upperSource := writeFormula(filepath.Join(upperEntry, "formulas", "review.toml"))
+	upperCheck := filepath.Join(upperEntry, "assets", "scripts", "check.sh")
+	shortEntry := filepath.Join(cacheRoot, strings.Repeat("a", 63))
+	shortSource := writeFormula(filepath.Join(shortEntry, "formulas", "review.toml"))
+	shortCheck := filepath.Join(shortEntry, "assets", "scripts", "check.sh")
 
 	tests := []struct {
-		name      string
-		hash      string
-		checkPath string
+		name          string
+		formulaSource string
+		hash          string
+		checkPath     string
 	}{
-		{name: "formula hash mismatch", hash: strings.Repeat("0", 64), checkPath: checkA},
-		{name: "check from different cache entry", hash: formula.ContentHash(formulaBytes), checkPath: checkB},
-		{name: "missing formula hash", checkPath: checkA},
+		{name: "formula hash mismatch", formulaSource: formulaSource, hash: strings.Repeat("0", 64), checkPath: checkA},
+		{name: "check from different cache entry", formulaSource: formulaSource, hash: validHash, checkPath: checkB},
+		{name: "missing formula hash", formulaSource: formulaSource, checkPath: checkA},
+		{name: "formula source outside repo cache", formulaSource: outsideSource, hash: validHash, checkPath: outsideCheck},
+		{name: "non-canonical entry name (uppercase hex)", formulaSource: upperSource, hash: validHash, checkPath: upperCheck},
+		{name: "non-canonical entry name (63 hex chars)", formulaSource: shortSource, hash: validHash, checkPath: shortCheck},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			bead := beads.Bead{Metadata: map[string]string{
-				beadmeta.FormulaSourceMetadataKey: formulaSource,
+				beadmeta.FormulaSourceMetadataKey: tt.formulaSource,
 				beadmeta.FormulaHashMetadataKey:   tt.hash,
 			}}
 			if roots := ralphCheckHistoricalFormulaRoots(beads.NewMemStore(), bead, tt.checkPath); len(roots) != 0 {

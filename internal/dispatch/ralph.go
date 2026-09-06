@@ -348,6 +348,14 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 // the old entry only when that provenance still matches and the check lives in
 // the same canonical cache entry.
 //
+// Trust granted here is the whole canonical cache entry, not just the formula
+// layer: for the standard <entry>/formulas/x.toml layout,
+// ralphCheckTrustedAbsoluteRoots adds the layer's parent (the entry itself),
+// and the PathWithin(sourceEntry, root) filter below keeps it. That matches
+// what the current-pin path already trusts for a "formulas"-named layer, and
+// the entry is content-addressed — but it is wider than "the layer plus its
+// sibling assets/", so say it out loud.
+//
 // This is deliberately a fallback for paths outside the current roots. It does
 // one small file read and no Git or network work.
 func ralphCheckHistoricalFormulaRoots(store beads.Store, bead beads.Bead, checkPath string) []string {
