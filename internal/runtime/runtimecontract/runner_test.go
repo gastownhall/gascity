@@ -16,7 +16,7 @@ import (
 // requirement; mutants override one body to violate exactly one behavior.
 func goldenBodies() map[string]string {
 	return map[string]string{
-		"protocol":   `echo '{"version":0,"capabilities":[]}'`,
+		"protocol":   `echo '{"version":0,"capabilities":["remote.create","remote.adopt","remote.status","remote.followup","remote.transcript","remote.cancel","remote.close"]}'`,
 		"start":      `cat >/dev/null; if [ -e "$S/$name" ]; then exit 1; fi; : > "$S/$name"`,
 		"stop":       `rm -f "$S/$name"`,
 		"is-running": `if [ -e "$S/$name" ]; then echo true; else echo false; fi`,
@@ -24,7 +24,14 @@ func goldenBodies() map[string]string {
 		// provision = the box half: consume the config and succeed WITHOUT
 		// creating the agent marker ($S/$name), so is-running stays false; the box
 		// is exec-able (exec runs regardless of the agent marker).
-		"provision": `cat >/dev/null`,
+		"provision":         `cat >/dev/null`,
+		"remote-create":     `cat >/dev/null; printf '%s' '{"ok":true,"result":{"ref":{"session_id":"opaque-session","run_id":"opaque-run"},"phase":"queued","updated_at":"2026-09-06T07:00:00Z"}}'`,
+		"remote-adopt":      `cat >/dev/null; printf '%s' '{"ok":true,"result":{"ref":{"session_id":"opaque-session","run_id":"opaque-run"},"phase":"running","updated_at":"2026-09-06T07:00:00Z"}}'`,
+		"remote-status":     `payload=$(cat); case "$payload" in *simulate-auth*) kind=auth ;; *simulate-quota*) kind=quota ;; *simulate-network*) kind=network ;; *) kind= ;; esac; if [ -n "$kind" ]; then printf '{"ok":false,"error":{"kind":"%s","message":"classified"}}' "$kind"; else printf '%s' '{"ok":true,"result":{"ref":{"session_id":"opaque-session","run_id":"opaque-run"},"phase":"running","updated_at":"2026-09-06T07:00:00Z"}}'; fi`,
+		"remote-follow-up":  `payload=$(cat); case "$payload" in *stale-owner*) printf '%s' '{"ok":false,"error":{"kind":"ownership","message":"stale fence"}}' ;; *) printf '%s' '{"ok":true,"result":{"request_id":"conformance-follow-up","receipt_id":"opaque-receipt","run_id":"opaque-follow-up-run","acknowledged_at":"2026-09-06T07:00:00Z"}}' ;; esac`,
+		"remote-transcript": `cat >/dev/null; printf '%s' '{"ok":true,"result":{"events":[{"id":"opaque-event-1","kind":"text","text":"bounded"}],"next_cursor":"opaque-cursor-1"}}'`,
+		"remote-cancel":     `payload=$(cat); case "$payload" in *stale-owner*) printf '%s' '{"ok":false,"error":{"kind":"ownership","message":"stale fence"}}' ;; *) printf '%s' '{"ok":true,"result":{"ref":{"session_id":"opaque-session"},"phase":"canceled","updated_at":"2026-09-06T07:00:00Z"}}' ;; esac`,
+		"remote-close":      `payload=$(cat); case "$payload" in *stale-owner*) printf '%s' '{"ok":false,"error":{"kind":"ownership","message":"stale fence"}}' ;; *) printf '%s' '{"ok":true,"result":{"ref":{"session_id":"opaque-session"},"phase":"succeeded","updated_at":"2026-09-06T07:00:00Z"}}' ;; esac`,
 	}
 }
 
@@ -142,6 +149,13 @@ func TestEveryRequirementIsGated(t *testing.T) {
 		{ReqLifecycleUnknownNotRunning, "is-running", `echo true`, "unknown session reports running"},
 		{ReqConnectionExec, "exec", `cat >/dev/null; echo wrong`, "exec ignores the command and emits fixed output"},
 		{ReqProvisionBoxWithoutAgent, "provision", `cat >/dev/null; : > "$S/$name"`, "provision launches the agent (is-running true) instead of just the box"},
+		{ReqRemoteCreateIdempotent, "remote-create", `cat >/dev/null; if [ -e "$S/remote-create-seen" ]; then id=second-session; else : > "$S/remote-create-seen"; id=opaque-session; fi; printf '{"ok":true,"result":{"ref":{"session_id":"%s"},"phase":"queued","updated_at":"2026-09-06T07:00:00Z"}}' "$id"`, "a replayed request creates a second identity"},
+		{ReqRemoteAdoptIdentity, "remote-adopt", `cat >/dev/null; printf '%s' '{"ok":true,"result":{"ref":{"session_id":"different-session"},"phase":"running","updated_at":"2026-09-06T07:00:00Z"}}'`, "adopt changes the persisted identity"},
+		{ReqRemoteStatusErrors, "remote-status", `payload=$(cat); case "$payload" in *simulate-*) printf '%s' '{"ok":false,"error":{"kind":"provider","message":"unclassified"}}' ;; *) printf '%s' '{"ok":true,"result":{"ref":{"session_id":"opaque-session","run_id":"opaque-run"},"phase":"running","updated_at":"2026-09-06T07:00:00Z"}}' ;; esac`, "status collapses stable error classes into provider prose"},
+		{ReqRemoteFollowUpFenced, "remote-follow-up", `cat >/dev/null; if [ -e "$S/remote-follow-up-seen" ]; then receipt=second-receipt; else : > "$S/remote-follow-up-seen"; receipt=opaque-receipt; fi; printf '{"ok":true,"result":{"request_id":"conformance-follow-up","receipt_id":"%s","acknowledged_at":"2026-09-06T07:00:00Z"}}' "$receipt"`, "follow-up replay returns a second receipt and ignores the fence"},
+		{ReqRemoteTranscriptBound, "remote-transcript", `cat >/dev/null; printf '%s' '{"ok":true,"result":{"events":[{"id":"1","kind":"text"},{"id":"2","kind":"text"}],"next_cursor":"opaque-cursor-1"}}'`, "transcript exceeds the requested event bound"},
+		{ReqRemoteCancelFenced, "remote-cancel", `cat >/dev/null; printf '%s' '{"ok":true,"result":{"ref":{"session_id":"opaque-session"},"phase":"running","updated_at":"2026-09-06T07:00:00Z"}}'`, "cancel is nonterminal and ignores the fence"},
+		{ReqRemoteCloseFenced, "remote-close", `cat >/dev/null; printf '%s' '{"ok":true,"result":{"ref":{"session_id":"opaque-session"},"phase":"running","updated_at":"2026-09-06T07:00:00Z"}}'`, "close is nonterminal and ignores the fence"},
 	}
 	// Every catalog requirement must have a mutant — otherwise a new
 	// requirement could ship ungated.

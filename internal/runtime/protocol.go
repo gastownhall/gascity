@@ -53,6 +53,17 @@ const (
 	// requires proc.exec); without it, the controller uses the welded `start` op
 	// (compat). It gates TransportCapabilities.SeparableLaunch.
 	ProtocolCapabilityProvision = "proc.provision"
+	// The remote.* capability family declares provider-native SaaS session
+	// lifecycle operations. Each operation is independent so an adapter exposes
+	// only the lifecycle surface its provider can prove. Callers fail closed on
+	// an undeclared operation; no local/provider fallback is implied.
+	ProtocolCapabilityRemoteCreate     = string(RemoteSessionCreate)
+	ProtocolCapabilityRemoteAdopt      = string(RemoteSessionAdopt)
+	ProtocolCapabilityRemoteStatus     = string(RemoteSessionStatus)
+	ProtocolCapabilityRemoteFollowUp   = string(RemoteSessionFollowUp)
+	ProtocolCapabilityRemoteTranscript = string(RemoteSessionTranscript)
+	ProtocolCapabilityRemoteCancel     = string(RemoteSessionCancel)
+	ProtocolCapabilityRemoteClose      = string(RemoteSessionClose)
 )
 
 // ProtocolInfo is the parsed `protocol` handshake response. The zero

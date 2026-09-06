@@ -198,6 +198,7 @@ const (
 	PerDispatchModelMetadataKey         = "gc.per_dispatch_model"
 	RalphStepIDMetadataKey              = "gc.ralph_step_id"
 	ReasoningMetadataKey                = "gc.reasoning"
+	RemoteSessionCheckpointMetadataKey  = "gc.remote_session.v1"
 	RequiredArtifactMetadataKey         = "gc.required_artifact"
 	RequiredArtifactsMetadataKey        = "gc.required_artifacts"
 	ReviewGateMetadataKey               = "gc.review_gate"
@@ -496,6 +497,7 @@ var KnownMetadataKeys = []string{
 	PerDispatchModelMetadataKey,
 	RalphStepIDMetadataKey,
 	ReasoningMetadataKey,
+	RemoteSessionCheckpointMetadataKey,
 	RequiredArtifactMetadataKey,
 	RequiredArtifactsMetadataKey,
 	ReviewGateMetadataKey,
