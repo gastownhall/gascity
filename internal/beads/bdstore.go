@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
@@ -1114,6 +1115,19 @@ func isBdNotFound(err error) bool {
 	return strings.Contains(msg, "not found") ||
 		strings.Contains(msg, "no issue found") ||
 		strings.Contains(msg, "no issues found")
+}
+
+// isBdOperationUnsupported reports whether err is bd telling us a backend
+// does not implement the attempted operation at all (e.g. the Postgres
+// backend's "IssueRelations" gap behind `bd dep list`, ga-7i7ts) as opposed
+// to a transient or data-shaped failure. Callers with a same-information
+// fallback, or for whom "no answer" safely means "no evidence", should
+// degrade instead of failing outright.
+func isBdOperationUnsupported(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "not supported")
 }
 
 func isBdClaimConflictMessage(msg string) bool {
@@ -3096,20 +3110,32 @@ func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	// filters below can empty a frontier bd answered with rows, and that says
 	// nothing about which database answered.
 	s.noteServerRows(len(issues))
-	result := make([]Bead, 0, len(issues))
-	now := time.Now().UTC()
+	allBeads := make([]Bead, len(issues))
 	for i := range issues {
-		bead := issues[i].toBead()
+		allBeads[i] = issues[i].toBead()
+	}
+	// Witness dependency-inlining from this store's own unfiltered rows too,
+	// not just List()'s — filterReadyByWorkOutcome relies on the same latch
+	// to decide whether candidates' own Dependencies field is trustworthy.
+	s.noteInlineDependencyProjection(issues, allBeads)
+	candidates := make([]Bead, 0, len(issues))
+	now := time.Now().UTC()
+	for _, bead := range allBeads {
 		if !IsReadyCandidateForTier(bead, now, q.TierMode) {
 			continue
 		}
 		if q.Assignee != "" && bead.Assignee != q.Assignee {
 			continue
 		}
-		result = append(result, bead)
-		if q.Limit > 0 && len(result) >= q.Limit {
-			break
-		}
+		candidates = append(candidates, bead)
+	}
+	filtered, filterErr := s.filterReadyByWorkOutcome(candidates)
+	if filterErr != nil {
+		return nil, fmt.Errorf("bd ready: %w", filterErr)
+	}
+	result := filtered
+	if q.Limit > 0 && len(result) > q.Limit {
+		result = result[:q.Limit]
 	}
 	if parseErr != nil {
 		if len(result) == 0 {
@@ -3119,6 +3145,98 @@ func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	}
 	if len(result) == 0 && readyReadIsWholeFrontier(q) {
 		s.noticeIfStoreCannotSeeItsLedger("bd ready")
+	}
+	return result, nil
+}
+
+// filterReadyByWorkOutcome removes candidates whose blocking dependencies are
+// closed but recorded gc.work_outcome=blocked. bd's own "bd ready" answer only
+// checks status==closed, so it does not know that a blocked-outcome close
+// should not satisfy a blocking dependency.
+//
+// This is a NARROW override on top of an already-authoritative verdict, not
+// a from-scratch recompute of blocking status: candidates arrived here
+// because bd's own "bd ready" already decided they are not blocked, and bd's
+// gating can be more nuanced than a flat "target must be closed" check (e.g.
+// a waits-for gate that opens through bd-native state independent of the
+// target's status — see bdReadyDisagreementLedger's bd-gate-open). So this
+// only vetoes a candidate when a blocking dependency IS closed (satisfying
+// bd's own check) yet recorded gc.work_outcome=blocked, a signal bd's binary
+// cannot see. It never re-blocks on a dependency bd already looked at and
+// offered the candidate despite — that would silently override bd's answer
+// instead of narrowly extending it. DependencySatisfied (the canonical rule)
+// is for stores with no prior bd verdict to layer onto; it is deliberately
+// NOT reused here for that reason.
+//
+// Dependency edges come from whichever source is trustworthy. When this
+// store has witnessed bd projecting complete dependency data inline onto
+// list/ready rows (listIncludesCompleteDependencies), each candidate's own
+// Dependencies field — already fetched by the very "bd ready" call that
+// produced candidates — is used directly, at zero extra subprocess cost.
+// Otherwise this check is skipped entirely: candidates pass through
+// unfiltered rather than paying for an extra "bd dep list" subprocess call
+// just to find out. listIncludesCompleteDependencies exists specifically so
+// this narrow override never has to fetch its own dependency data — a
+// ledger with no dependencies at all (a common case) can never become
+// witnessed, and forcing a live fetch in that case would defeat the whole
+// point of the witnessing mechanism (see bdstore_inline_deps.go's "adds
+// ZERO subprocesses" design note and TestCachingStoreBdPrimeAndReconcileSkipFullDepScan,
+// which pins the zero-dep-scan invariant this fallback used to violate).
+// This mirrors the "unsupported backend degrades to no evidence of
+// blocking" reasoning already used for DepListBatch callers elsewhere
+// (e.g. the Postgres backend's IssueRelations gap, ga-7i7ts), just applied
+// before spending the subprocess call instead of after.
+func (s *BdStore) filterReadyByWorkOutcome(candidates []Bead) ([]Bead, error) {
+	if len(candidates) == 0 {
+		return candidates, nil
+	}
+	if !s.listIncludesCompleteDependencies() {
+		return candidates, nil
+	}
+	depsByID := make(map[string][]Dep, len(candidates))
+	for _, c := range candidates {
+		depsByID[c.ID] = c.Dependencies
+	}
+	blockerIDSet := make(map[string]bool)
+	for _, deps := range depsByID {
+		for _, d := range deps {
+			if IsReadyBlockingDependencyType(d.Type) {
+				blockerIDSet[d.DependsOnID] = true
+			}
+		}
+	}
+	if len(blockerIDSet) == 0 {
+		return candidates, nil
+	}
+	blockerIDs := make([]string, 0, len(blockerIDSet))
+	for id := range blockerIDSet {
+		blockerIDs = append(blockerIDs, id)
+	}
+	blockers, err := s.List(ListQuery{IDs: blockerIDs, TierMode: TierBoth})
+	if err != nil {
+		return nil, fmt.Errorf("checking blocking dependency outcomes: fetching blockers: %w", err)
+	}
+	statusByID := make(map[string]string, len(blockers))
+	workOutcomeByID := make(map[string]string, len(blockers))
+	for _, b := range blockers {
+		statusByID[b.ID] = b.Status
+		workOutcomeByID[b.ID] = b.Metadata[beadmeta.WorkOutcomeMetadataKey]
+	}
+	result := make([]Bead, 0, len(candidates))
+	for _, c := range candidates {
+		blocked := false
+		for _, d := range depsByID[c.ID] {
+			if !IsReadyBlockingDependencyType(d.Type) {
+				continue
+			}
+			if statusByID[d.DependsOnID] == "closed" && workOutcomeByID[d.DependsOnID] == beadmeta.WorkOutcomeBlocked {
+				blocked = true
+				break
+			}
+		}
+		if !blocked {
+			result = append(result, c)
+		}
 	}
 	return result, nil
 }
@@ -3217,6 +3335,16 @@ func (s *BdStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 	out, err := s.runBDTransientRead(args...)
 	if err != nil {
 		if isBdNotFound(err) {
+			return make(map[string][]Dep), nil
+		}
+		if isBdOperationUnsupported(err) {
+			// Some backends don't implement this at all — e.g. the Postgres
+			// backend answers `operation "IssueRelations" not supported by
+			// the postgres backend` (measured on maintainer-city, ga-7i7ts).
+			// Callers use this as a post-filter over an already-correct bd
+			// answer, so "no evidence of blocking" is the safe degrade:
+			// today's (pre-gc.work_outcome-filter) behavior, not a hard
+			// failure of the read that got them here.
 			return make(map[string][]Dep), nil
 		}
 		return nil, fmt.Errorf("batch dep list: %w", err)

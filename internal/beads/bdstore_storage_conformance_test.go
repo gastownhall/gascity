@@ -475,6 +475,13 @@ func TestBdStoreReadyStorageTierConformance(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var gotCmd string
 			runner := func(_, name string, args ...string) ([]byte, error) {
+				// Only the "bd ready" call is under test here; a
+				// dependency-outcome post-filter call (unwitnessed, since
+				// these fixtures set no dependency_count) must not
+				// overwrite gotCmd or trigger a further blocker List call.
+				if len(args) > 0 && args[0] == "dep" {
+					return []byte(`[]`), nil
+				}
 				gotCmd = name + " " + strings.Join(args, " ")
 				if strings.Contains(gotCmd, "--include-ephemeral") {
 					return []byte(includeEphemeralRows), nil

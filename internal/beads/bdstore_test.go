@@ -2225,6 +2225,7 @@ func TestBdStoreReadyReturnsPartialResultErrorOnCorruptEntries(t *testing.T) {
 				{"id":"bd-bad","title":"bad","status":"open","issue_type":"task","created_at":"not-a-time"}
 			]`),
 		},
+		`bd dep list bd-good --json`: {out: []byte(`[]`)},
 	})
 
 	s := beads.NewBdStore("/city", runner)
@@ -2334,6 +2335,7 @@ func TestBdStoreReady(t *testing.T) {
 		`bd ready --json --limit 0`: {
 			out: []byte(`[{"id":"bd-aaa","title":"ready one","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`),
 		},
+		`bd dep list bd-aaa --json`: {out: []byte(`[]`)},
 	})
 	s := beads.NewBdStore("/city", runner)
 	got, err := s.Ready()
@@ -2359,6 +2361,7 @@ func TestBdStoreReadyWithAssigneeAndLimit(t *testing.T) {
 				{"id":"bd-other","title":"wrong assignee","status":"open","issue_type":"task","assignee":"worker-2","created_at":"2025-01-15T10:31:00Z"}
 			]`),
 		},
+		`bd dep list bd-worker --json`: {out: []byte(`[]`)},
 	})
 	s := beads.NewBdStore("/city", runner)
 	got, err := s.Ready(beads.ReadyQuery{Assignee: "worker-1", Limit: 3})
@@ -2385,6 +2388,7 @@ func TestBdStoreReadyWithTierBothAssigneeAppliesLimitAfterClientFilter(t *testin
 				{"id":"bd-wisp","title":"ready wisp","status":"open","issue_type":"task","assignee":"worker-1","created_at":"2025-01-15T10:31:00Z","ephemeral":true}
 			]`),
 		},
+		`bd dep list bd-worker bd-wisp --json`: {out: []byte(`[]`)},
 	})
 	s := beads.NewBdStore("/city", runner)
 	got, err := s.Ready(beads.ReadyQuery{Assignee: "worker-1", Limit: 2, TierMode: beads.TierBoth})
@@ -2402,6 +2406,12 @@ func TestBdStoreReadyWithTierBothAssigneeAppliesLimitAfterClientFilter(t *testin
 func TestBdStoreReadyWispsAppliesLimitAfterTierFilter(t *testing.T) {
 	var gotCmd string
 	runner := func(_, name string, args ...string) ([]byte, error) {
+		// Only the "bd ready" call is under test here; a dependency-outcome
+		// post-filter call (unwitnessed, since none of these fixtures set
+		// dependency_count) must not overwrite gotCmd or these fixture rows.
+		if len(args) > 0 && args[0] == "dep" {
+			return []byte(`[]`), nil
+		}
 		gotCmd = name + " " + strings.Join(args, " ")
 		return []byte(`[
 			{"id":"bd-issue","title":"normal ready work","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"},
@@ -2440,6 +2450,7 @@ func TestBdStoreReadyDoesNotSpecialCaseSyntheticMetadata(t *testing.T) {
 				{"id":"bd-extra","title":"ready two","status":"open","issue_type":"task","created_at":"2025-01-15T10:31:00Z"}
 			]`),
 		},
+		`bd dep list bd-synthetic bd-task bd-extra --json`: {out: []byte(`[]`)},
 	})
 	s := beads.NewBdStore("/city", runner)
 	got, err := s.Ready(beads.ReadyQuery{Limit: 1})
@@ -2466,6 +2477,7 @@ func TestBdStoreReadyFiltersExcludedLabelsBeforeLimit(t *testing.T) {
 				{"id":"bd-extra","title":"ready two","status":"open","issue_type":"task","created_at":"2025-01-15T10:31:00Z"}
 			]`),
 		},
+		`bd dep list bd-task bd-extra --json`: {out: []byte(`[]`)},
 	})
 	s := beads.NewBdStore("/city", runner)
 	got, err := s.Ready(beads.ReadyQuery{Limit: 1})
@@ -2492,6 +2504,7 @@ func TestBdStoreReadyFiltersInfraTypes(t *testing.T) {
 				{"id":"bd-convoy","title":"sling convoy","status":"open","issue_type":"convoy","created_at":"2025-01-15T10:32:00Z"}
 			]`),
 		},
+		`bd dep list bd-task --json`: {out: []byte(`[]`)},
 	})
 	s := beads.NewBdStore("/city", runner)
 	got, err := s.Ready()
@@ -2518,6 +2531,7 @@ func TestBdStoreReadyFiltersFutureDeferredRows(t *testing.T) {
 				{"id":"bd-deferred","title":"not yet","status":"open","issue_type":"task","created_at":"2025-01-15T10:31:00Z","defer_until":"` + future + `"}
 			]`),
 		},
+		`bd dep list bd-task --json`: {out: []byte(`[]`)},
 	})
 	s := beads.NewBdStore("/city", runner)
 	got, err := s.Ready()
@@ -5071,7 +5085,13 @@ func TestBdStoreListWispsFallsBackToClientFilteringForUnsafeQueryValues(t *testi
 func TestBdStoreReadyRetriesOnInvalidConnection(t *testing.T) {
 	calls := 0
 	goodJSON := []byte(`[{"id":"bd-x","title":"t","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`)
-	runner := func(_, _ string, _ ...string) ([]byte, error) {
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		// bd-x sets no dependency_count, so the dependency-outcome post-filter
+		// is unwitnessed and issues its own "bd dep list" call — keep that off
+		// the transient-retry call count this test is asserting on.
+		if len(args) > 0 && args[0] == "dep" {
+			return []byte(`[]`), nil
+		}
 		calls++
 		if calls == 1 {
 			return nil, fmt.Errorf("begin read tx: invalid connection")

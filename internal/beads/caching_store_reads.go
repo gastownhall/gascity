@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"slices"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // List returns beads matching the query. Active-bead queries are served from
@@ -533,10 +535,11 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		return c.backing.Ready(query...)
 	}
 	var (
-		statusByID   map[string]string
-		depsByID     map[string][]Dep
-		openBeads    []Bead
-		unanswerable bool
+		statusByID      map[string]string
+		workOutcomeByID map[string]string
+		depsByID        map[string][]Dep
+		openBeads       []Bead
+		unanswerable    bool
 	)
 	// Ready requires a fully live cache with complete dependency coverage and a
 	// ready projection the backing store can actually serve; the overlay
@@ -549,6 +552,7 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		},
 		func(suppressed map[string]struct{}) {
 			statusByID = make(map[string]string, len(c.beads))
+			workOutcomeByID = make(map[string]string, len(c.beads))
 			openBeads = make([]Bead, 0, len(c.beads))
 			now := time.Now().UTC()
 			for _, b := range c.beads {
@@ -556,6 +560,7 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 					continue
 				}
 				statusByID[b.ID] = b.Status
+				workOutcomeByID[b.ID] = b.Metadata[beadmeta.WorkOutcomeMetadataKey]
 				if IsReadyCandidate(b, now) {
 					if c.readyProjectionUnknownLocked(b.ID) {
 						unanswerable = true
@@ -580,7 +585,7 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 
 	var result []Bead
 	for _, b := range openBeads {
-		if cachedBeadReady(b, statusByID, depsByID[b.ID]) {
+		if cachedBeadReady(b, statusByID, workOutcomeByID, depsByID[b.ID]) {
 			result = append(result, cloneBead(b))
 		}
 	}
@@ -628,10 +633,12 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 	}
 
 	statusByID := make(map[string]string, len(c.beads))
+	workOutcomeByID := make(map[string]string, len(c.beads))
 	openBeads := make([]Bead, 0, len(c.beads))
 	now := time.Now().UTC()
 	for _, b := range c.beads {
 		statusByID[b.ID] = b.Status
+		workOutcomeByID[b.ID] = b.Metadata[beadmeta.WorkOutcomeMetadataKey]
 		if IsReadyCandidate(b, now) {
 			if c.readyProjectionUnknownLocked(b.ID) {
 				return nil, false
@@ -653,7 +660,7 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 		if c.state == cachePartial && !cachedReadyDependencyStatusesKnown(b, statusByID, deps) {
 			return nil, false
 		}
-		if cachedBeadReady(b, statusByID, deps) {
+		if cachedBeadReady(b, statusByID, workOutcomeByID, deps) {
 			result = append(result, cloneBead(b))
 		}
 	}
@@ -665,6 +672,13 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 
 func cachedReadyDependencyStatusesKnown(b Bead, statusByID map[string]string, deps []Dep) bool {
 	if b.IsBlocked != nil {
+		// bd's own projection (true or false) is trusted outright and needs
+		// no per-dependency status data to back it up — see cachedBeadReady.
+		// The narrow gc.work_outcome override layered on a false verdict
+		// there degrades safely when a dependency is absent from a partial
+		// cache snapshot (it simply can't add an override for that one), the
+		// same eventual-consistency gap already accepted by trusting a true
+		// verdict without re-checking dependency completeness.
 		return true
 	}
 	missing := false
@@ -685,15 +699,44 @@ func cachedReadyDependencyStatusesKnown(b Bead, statusByID map[string]string, de
 	return !missing
 }
 
-func cachedBeadReady(b Bead, statusByID map[string]string, deps []Dep) bool {
+func cachedBeadReady(b Bead, statusByID, workOutcomeByID map[string]string, deps []Dep) bool {
 	if b.IsBlocked != nil {
-		return !*b.IsBlocked
+		if *b.IsBlocked {
+			return false
+		}
+		// bd's own false verdict already reflects its richer native gating
+		// semantics (e.g. a waits-for gate opened through bd-native state,
+		// not just a closed target) and is trusted outright — falling
+		// through to the naive per-dependency scan below would second-guess
+		// a verdict this cache cannot reproduce (see the bdReadyDisagreementLedger
+		// fixture). The one gap a false verdict can still hide is
+		// gc.work_outcome, which predates bd entirely: a blocking dependency
+		// that closed with an unsatisfying outcome. Layer just that one
+		// narrow check on top of the trusted false rather than reopening the
+		// whole scan.
+		for _, dep := range deps {
+			if !isReadyBlockingDependencyType(dep.Type) {
+				continue
+			}
+			status, ok := statusByID[dep.DependsOnID]
+			if !ok {
+				continue
+			}
+			if status == "closed" && workOutcomeByID[dep.DependsOnID] == beadmeta.WorkOutcomeBlocked {
+				return false
+			}
+		}
+		return true
 	}
 	for _, dep := range deps {
 		if !isReadyBlockingDependencyType(dep.Type) {
 			continue
 		}
-		if status, ok := statusByID[dep.DependsOnID]; ok && status != "closed" {
+		status, ok := statusByID[dep.DependsOnID]
+		if !ok {
+			continue
+		}
+		if !DependencySatisfied(status, workOutcomeByID[dep.DependsOnID]) {
 			return false
 		}
 	}
