@@ -39,7 +39,7 @@ version = "sha:33d3a430a67d1782ad364556cb566bdb01d0afe3"
 # regresses (ga-07mi8 / gascity PR #5468 fixed the reconciler idle path;
 # ga-13yy0 tracks this backstop). max_session_age fires on wall-clock age,
 # independent of the activity clock, and the controller gates it on idle — a
-# mid-turn agent is left alone until it settles. 6h staggers these under the
+# mid-turn agent is left alone until it settles. 6h staggers these off the
 # witness's 5h and stays below the ~8h Claude Code (Bedrock) cred-cache
 # lifetime, so a preemptive cycle also refreshes creds. Cycling the mayor is
 # self-affecting but intended resilience.
