@@ -3072,6 +3072,12 @@ type AgentDefaults struct {
 	// WakeMode is the parsed/composed default wake mode ("resume" or
 	// "fresh"), but it is not yet auto-applied at runtime.
 	WakeMode string `toml:"wake_mode,omitempty" jsonschema:"enum=resume,enum=fresh"`
+	// MouseMode is the default tmux mouse_mode ("on" or "off") for agents that
+	// do not set their own. Applied to agents with an empty MouseMode by
+	// ApplyAgentDefaults. "on" keeps the session's mouse setting (so a human
+	// who attaches gets wheel scrollback); empty/"off" preserves the headless
+	// mouse-off startup. The control-dispatcher poll agent is always excluded.
+	MouseMode string `toml:"mouse_mode,omitempty" jsonschema:"enum=on,enum=off"`
 	// DefaultSlingFormula is the default formula used for agents that inherit
 	// [agent_defaults]. Explicit agents only receive this value when
 	// agent_defaults.default_sling_formula is set; implicit multi-session
@@ -3114,6 +3120,9 @@ func mergeAgentDefaultsAliasPreferCanonical(dst *AgentDefaults, src AgentDefault
 	}
 	if !meta.IsDefined("agent_defaults", "wake_mode") {
 		dst.WakeMode = src.WakeMode
+	}
+	if !meta.IsDefined("agent_defaults", "mouse_mode") {
+		dst.MouseMode = src.MouseMode
 	}
 	if !meta.IsDefined("agent_defaults", "default_sling_formula") {
 		dst.DefaultSlingFormula = src.DefaultSlingFormula
@@ -3848,6 +3857,22 @@ func ApplyAgentDefaults(cfg *City) {
 			}
 		}
 	}
+
+	// MouseMode: agents with no explicit mouse_mode inherit the city-level
+	// default so tmux wheel-scrollback can be enabled once city-wide for every
+	// human-attached agent (without a per-rig override per agent). The
+	// control-dispatcher poll agent is excluded — it stays mouse-off so
+	// controller-poll escape sequences never reach its stdin.
+	if mouseMode := cfg.AgentDefaults.MouseMode; mouseMode != "" {
+		for i := range cfg.Agents {
+			if cfg.Agents[i].Name == ControlDispatcherAgentName {
+				continue
+			}
+			if cfg.Agents[i].MouseMode == "" {
+				cfg.Agents[i].MouseMode = mouseMode
+			}
+		}
+	}
 }
 
 // DefaultOrderTrackingDeleteAfterClose is the canonical default closed-bead
@@ -3973,6 +3998,12 @@ func mergeAgentDefaults(dst *AgentDefaults, src AgentDefaults, label string, pro
 			prov.Warnings = append(prov.Warnings, fmt.Sprintf("agent_defaults.wake_mode redefined by %q", label))
 		}
 		dst.WakeMode = src.WakeMode
+	}
+	if src.MouseMode != "" {
+		if prov != nil && dst.MouseMode != "" && dst.MouseMode != src.MouseMode {
+			prov.Warnings = append(prov.Warnings, fmt.Sprintf("agent_defaults.mouse_mode redefined by %q", label))
+		}
+		dst.MouseMode = src.MouseMode
 	}
 	if src.DefaultSlingFormula != "" {
 		if prov != nil && dst.DefaultSlingFormula != "" && dst.DefaultSlingFormula != src.DefaultSlingFormula {
