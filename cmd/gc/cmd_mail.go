@@ -1561,7 +1561,12 @@ func newMailPeekCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Display a message without marking it as read.
 
 Same output as "gc mail read" but does not change the message's read status.
-The message will continue to appear in inbox results.`,
+An unarchived message will continue to appear in inbox results.
+
+peek also reads THROUGH the archive: a message closed by "gc mail archive"
+or "gc mail delete" is still displayable here, even though read, inbox, and
+check report it as not found. Mail removed before this behavior existed
+(closed with no archive reason) stays not-found for peek as well.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdMailPeekWithJSON(args, jsonOut, stdout, stderr) != 0 {
@@ -2128,6 +2133,16 @@ func routeMailPeek(_ string, args []string, c *api.Client, nilReason string, jso
 		func() error {
 			var err error
 			cr, err = c.GetMail(id, "")
+			// The API mail read hides archived messages (it serves the
+			// Get view). Peek's contract is to read through the archive,
+			// which only the local provider path can do — so a not-found
+			// from the API is a cue to fall back, not a final answer.
+			// routeRead's remote-city gate (G1) still hard-errors this
+			// sentinel for remote clients, which is correct: a remote
+			// operator has no local store to read through.
+			if err != nil && strings.Contains(err.Error(), "not_found") {
+				return fallbackAfterFetch{Reason: "peek-archived-readthrough"}
+			}
 			return err
 		},
 		func() int {
@@ -2172,7 +2187,17 @@ func doMailPeekWithJSON(mp mail.Provider, args []string, jsonOut bool, stdout, s
 	}
 	id := args[0]
 
-	m, err := mp.Get(id)
+	// Peek reads through the archive when the provider supports it —
+	// Archive's contract retains the body for exactly this verb, while
+	// Get keeps archived mail hidden per the removes-from-every-view
+	// conformance contract.
+	var m mail.Message
+	var err error
+	if peeker, ok := mp.(mail.ArchivePeeker); ok {
+		m, err = peeker.Peek(id)
+	} else {
+		m, err = mp.Get(id)
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "gc mail peek: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

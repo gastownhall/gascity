@@ -1042,6 +1042,45 @@ func TestArchive(t *testing.T) {
 	if b.Description != "dismiss me" {
 		t.Errorf("bead body = %q, want \"dismiss me\"", b.Description)
 	}
+
+	// The archive stamp is what lets Peek distinguish "archived, body
+	// retained" from "removed/legacy-closed" — without it, archived
+	// never-read mail was irrecoverable through the mail layer while the
+	// body sat intact in the store.
+	if got := b.Metadata["close_reason"]; got != ArchiveCloseReason {
+		t.Errorf("close_reason = %q, want %q (peek discriminator)", got, ArchiveCloseReason)
+	}
+	// Conformance contract holds: archived mail is hidden from Get.
+	if _, err := p.Get(sent.ID); !errors.Is(err, mail.ErrNotFound) {
+		t.Errorf("Get after Archive err = %v, want ErrNotFound (hidden from mail views)", err)
+	}
+	// Archive's advertised contract holds: Peek reads through the archive.
+	got, err := p.Peek(sent.ID)
+	if err != nil {
+		t.Fatalf("Peek after Archive: %v (contract: archived mail stays peek-retrievable)", err)
+	}
+	if got.Body != "dismiss me" {
+		t.Errorf("Peek body after Archive = %q, want \"dismiss me\"", got.Body)
+	}
+}
+
+// TestPeekHidesLegacyAndRemovedMail pins Peek's boundary: reading through
+// the archive must not resurrect truly removed mail — a legacy
+// closed-without-reason bead (old-release archive, treated as removed for
+// the upgrade path) stays ErrNotFound even for Peek.
+func TestPeekHidesLegacyAndRemovedMail(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+	legacy, err := p.Send("alice", "bob", "legacy", "closed by an old release")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(legacy.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Peek(legacy.ID); !errors.Is(err, mail.ErrNotFound) {
+		t.Errorf("Peek(legacy closed-no-reason) err = %v, want ErrNotFound", err)
+	}
 }
 
 // TestLegacyClosedMessageBeadTreatedAsRemoved covers the upgrade path for a
@@ -1514,6 +1553,47 @@ func TestDelete(t *testing.T) {
 	}
 	if b.Status != "closed" {
 		t.Errorf("bead status = %q, want \"closed\"", b.Status)
+	}
+}
+
+// TestDeletePeekRecoverable pins the Delete-alias consequence: Delete is an
+// alias for Archive (#4422 forbids store.Delete on any archive path), so a
+// deleted message is stamped ArchiveCloseReason and stays recoverable through
+// Peek — the same body bd show has always exposed. This is intended, not a
+// leak: Delete's own help says "same effect as archive", and every
+// mail.Provider view still reports it not-found per the removes-from-every-view
+// contract (mailtest.runRemovalVisibilityContract).
+func TestDeletePeekRecoverable(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("alice", "bob", "subject", "delete me")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Delete(sent.ID); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := p.Get(sent.ID); !errors.Is(err, mail.ErrNotFound) {
+		t.Errorf("Get after Delete err = %v, want ErrNotFound", err)
+	}
+	got, err := p.Peek(sent.ID)
+	if err != nil {
+		t.Fatalf("Peek after Delete: %v (#4422: the row is retained)", err)
+	}
+	if got.Body != "delete me" {
+		t.Errorf("Peek body after Delete = %q, want %q", got.Body, "delete me")
+	}
+
+	batch, err := p.Send("alice", "bob", "subject", "delete many")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.DeleteMany([]string{batch.ID}); err != nil {
+		t.Fatalf("DeleteMany: %v", err)
+	}
+	if got, err := p.Peek(batch.ID); err != nil || got.Body != "delete many" {
+		t.Errorf("Peek after DeleteMany = (%q, %v), want (%q, nil)", got.Body, err, "delete many")
 	}
 }
 
@@ -2924,4 +3004,42 @@ func mustCreateSessionBead(t *testing.T, store beads.Store, metadata map[string]
 		t.Fatalf("Create session bead: %v", err)
 	}
 	return b
+}
+
+// TestArchiveMatchingStampsCloseReason pins the bulk selection path to the
+// same retained-body contract as [Provider.Archive]: `gc mail archive` with
+// filters closes candidates directly, and without the stamp every one of them
+// classified as user-removed — so a never-read message selected by a bulk
+// cleanup became irrecoverable through the mail layer.
+func TestArchiveMatchingStampsCloseReason(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("alice", "bob", "GO: ship the release", "the handoff body")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Never read.
+	if _, _, err := p.ArchiveMatching(ArchiveFilter{Recipients: []string{"bob"}}); err != nil {
+		t.Fatalf("ArchiveMatching: %v", err)
+	}
+	raw, err := store.Get(sent.ID)
+	if err != nil {
+		t.Fatalf("store.Get after bulk archive: %v", err)
+	}
+	if got := raw.Metadata["close_reason"]; got != ArchiveCloseReason {
+		t.Errorf("close_reason after ArchiveMatching = %q, want %q", got, ArchiveCloseReason)
+	}
+	// Hidden from the mail views, per the removes-from-every-view contract.
+	if _, err := p.Get(sent.ID); !errors.Is(err, mail.ErrNotFound) {
+		t.Errorf("Get after ArchiveMatching err = %v, want ErrNotFound", err)
+	}
+	// Still recoverable through the archeology verb.
+	got, err := p.Peek(sent.ID)
+	if err != nil {
+		t.Fatalf("Peek after ArchiveMatching: %v (contract: body stays readable)", err)
+	}
+	if got.Body != "the handoff body" {
+		t.Errorf("Peek body = %q, want %q", got.Body, "the handoff body")
+	}
 }
