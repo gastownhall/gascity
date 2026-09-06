@@ -1,10 +1,21 @@
 package main
 
 import (
+	"errors"
+
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
+
+// errSuspensionStateNoOp signals from a [suspensionstate.Update] mutate
+// closure that the rig is already in the desired suspend/resume state.
+// cmd_rig.go's suspend/resume call sites check for it with errors.Is
+// to print the existing "already suspended" / "not suspended" message
+// and return success without writing — preserving the pre-lock
+// behavior where the no-op case skipped Save entirely (so mtime and
+// UpdatedAt are left untouched).
+var errSuspensionStateNoOp = errors.New("suspension state: already in desired state")
 
 // loadSuspensionState reads .gc/runtime/suspension-state.json. A
 // missing file returns a zero-value State, mirroring the convention

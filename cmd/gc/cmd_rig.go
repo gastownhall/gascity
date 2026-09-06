@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/rig"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/spf13/cobra"
 )
 
@@ -994,18 +996,17 @@ func doRigSuspend(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer
 		return 1
 	}
 
-	st, err := loadSuspensionState(fs, cityPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc rig suspend: reading state: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-
-	if !suspendRigInState(&st, rigName) {
+	err = suspensionstate.Update(fs, cityPath, func(st *suspensionstate.State) error {
+		if !suspendRigInState(st, rigName) {
+			return errSuspensionStateNoOp
+		}
+		return nil
+	})
+	if errors.Is(err, errSuspensionStateNoOp) {
 		fmt.Fprintf(stdout, "Rig '%s' is already suspended\n", rigName) //nolint:errcheck // best-effort stdout
 		return 0
 	}
-
-	if err := saveSuspensionState(fs, cityPath, st); err != nil {
+	if err != nil {
 		fmt.Fprintf(stderr, "gc rig suspend: writing state: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1112,18 +1113,17 @@ func doRigResume(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer)
 		return 1
 	}
 
-	st, err := loadSuspensionState(fs, cityPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc rig resume: reading state: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-
-	if !resumeRigInState(&st, rigName) {
+	err = suspensionstate.Update(fs, cityPath, func(st *suspensionstate.State) error {
+		if !resumeRigInState(st, rigName) {
+			return errSuspensionStateNoOp
+		}
+		return nil
+	})
+	if errors.Is(err, errSuspensionStateNoOp) {
 		fmt.Fprintf(stdout, "Rig '%s' is not suspended\n", rigName) //nolint:errcheck // best-effort stdout
 		return 0
 	}
-
-	if err := saveSuspensionState(fs, cityPath, st); err != nil {
+	if err != nil {
 		fmt.Fprintf(stderr, "gc rig resume: writing state: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
