@@ -654,15 +654,46 @@ func readLocalCityEvents(scope eventsAPIScope, apiErr error, typeFilter, sinceFl
 	} else if !cutoff.IsZero() {
 		filter.Since = cutoff
 	}
-	all, err := events.ReadFiltered(filepath.Join(scope.cityPath, ".gc", "events.jsonl"), filter)
+
+	path := filepath.Join(scope.cityPath, ".gc", "events.jsonl")
+
+	// Mirror fetchCityEvents' bound. A --since read is a time window and is
+	// returned whole; an unfiltered read means "recent activity" and is capped
+	// at the newest page. Without the cap this scanned the entire history and
+	// returned it oldest-first, which on a long-lived city both contradicted
+	// the answer a running city gives and paid a full-file scan to do it.
+	//
+	// The tail read covers the active log only, so a city that rotated moments
+	// ago can hold fewer than a page there and report fewer events than a
+	// running city would (ga-gm2o). That undercount is bounded by the same
+	// "older events were omitted" notice below, and never invents events that
+	// are not in the window.
+	if filter.Since.IsZero() {
+		all, err := events.ReadFilteredTail(path, filter, int(cityEventsPageLimit))
+		if err != nil {
+			return nil, true, fmt.Errorf("reading local city events: %w", err)
+		}
+		if int64(len(all)) >= cityEventsPageLimit {
+			fmt.Fprintf(warningWriter, "gc events: showing the newest %d events; older matching events were omitted. Use --since <duration> to fetch a full time window.\n", len(all)) //nolint:errcheck
+		}
+		return localWireEvents(all, warningWriter), true, nil
+	}
+
+	all, err := events.ReadFiltered(path, filter)
 	if err != nil {
 		return nil, true, fmt.Errorf("reading local city events: %w", err)
 	}
+	return localWireEvents(all, warningWriter), true, nil
+}
+
+// localWireEvents converts a read slice into the CLI wire shape, preserving
+// the chronological order both read paths return.
+func localWireEvents(all []events.Event, warningWriter io.Writer) []cliWireEvent {
 	items := make([]cliWireEvent, 0, len(all))
 	for _, item := range all {
 		items = append(items, localWireEvent(item, warningWriter))
 	}
-	return items, true, nil
+	return items
 }
 
 func readLocalCityHeadIndex(scope eventsAPIScope, apiErr error) (string, bool, error) {

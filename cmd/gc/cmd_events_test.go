@@ -1487,6 +1487,90 @@ func notFoundStatusPtr() *int64 {
 	return &x
 }
 
+// TestReadLocalCityEventsBoundsUnfilteredReadToNewestPage pins the stopped-city
+// fallback to the same contract fetchCityEvents applies against a running city:
+// with no --since, `gc events` means "recent activity" and returns the newest
+// page, not the entire history. The fallback previously scanned the whole log
+// and returned every event ever recorded oldest-first, so on a long-lived city
+// it both diverged from the API's answer and paid a full-file scan to do it
+// (ga-b2s). The result must be the NEWEST cityEventsPageLimit events, in
+// ascending seq order, with the same truncation notice on stderr.
+func TestReadLocalCityEventsBoundsUnfilteredReadToNewestPage(t *testing.T) {
+	cityDir := t.TempDir()
+	rec := newTestProvider(t, filepath.Join(cityDir, ".gc"))
+
+	const total = int(cityEventsPageLimit) + 25
+	for i := 0; i < total; i++ {
+		rec.Record(events.Event{
+			Type:    events.SessionStopped,
+			Actor:   "gc",
+			Subject: "worker",
+		})
+	}
+
+	scope := eventsAPIScope{cityName: "mc-city", cityPath: cityDir}
+	var warn bytes.Buffer
+	got, ok, err := readLocalCityEvents(scope, stoppedCityLocalFallbackError(scope), "", "", &warn)
+	if err != nil {
+		t.Fatalf("readLocalCityEvents: %v", err)
+	}
+	if !ok {
+		t.Fatal("readLocalCityEvents did not take the local fallback path")
+	}
+	if len(got) != int(cityEventsPageLimit) {
+		t.Fatalf("returned %d events, want %d (the newest page)", len(got), cityEventsPageLimit)
+	}
+	// Newest page: seqs run to the head, not from the beginning of the log.
+	if want := int64(total); got[len(got)-1].Seq != want {
+		t.Errorf("last seq = %d, want %d (head of the log)", got[len(got)-1].Seq, want)
+	}
+	if want := int64(total) - cityEventsPageLimit + 1; got[0].Seq != want {
+		t.Errorf("first seq = %d, want %d (newest page, not the oldest events)", got[0].Seq, want)
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i].Seq <= got[i-1].Seq {
+			t.Fatalf("seqs not ascending at %d: %d <= %d", i, got[i].Seq, got[i-1].Seq)
+		}
+	}
+	if !strings.Contains(warn.String(), "newest") {
+		t.Errorf("stderr = %q, want a truncation notice naming the newest page", warn.String())
+	}
+}
+
+// TestReadLocalCityEventsKeepsFullWindowWithSince is the other half of the
+// contract: --since asks for a time window, and the API paginates the whole
+// window rather than one page. The fallback must not cap a --since read down to
+// a page, or a window holding more than a page would silently under-report.
+func TestReadLocalCityEventsKeepsFullWindowWithSince(t *testing.T) {
+	cityDir := t.TempDir()
+	rec := newTestProvider(t, filepath.Join(cityDir, ".gc"))
+
+	const total = int(cityEventsPageLimit) + 25
+	for i := 0; i < total; i++ {
+		rec.Record(events.Event{
+			Type:    events.SessionStopped,
+			Actor:   "gc",
+			Subject: "worker",
+		})
+	}
+
+	scope := eventsAPIScope{cityName: "mc-city", cityPath: cityDir}
+	var warn bytes.Buffer
+	got, ok, err := readLocalCityEvents(scope, stoppedCityLocalFallbackError(scope), "", "1h", &warn)
+	if err != nil {
+		t.Fatalf("readLocalCityEvents: %v", err)
+	}
+	if !ok {
+		t.Fatal("readLocalCityEvents did not take the local fallback path")
+	}
+	if len(got) != total {
+		t.Fatalf("returned %d events, want %d (the full --since window, uncapped)", len(got), total)
+	}
+	if warn.Len() != 0 {
+		t.Errorf("stderr = %q, want no truncation notice for a full window", warn.String())
+	}
+}
+
 func newTestProvider(t *testing.T, dir string) *events.FileRecorder {
 	t.Helper()
 	path := filepath.Join(dir, "events.jsonl")
