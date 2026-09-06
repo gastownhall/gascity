@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
 )
@@ -199,6 +200,13 @@ type hookClaimOps struct {
 	// provider meta: reconciler-tracked drains never set GC_DRAIN, so provider
 	// meta does not cover the population this fence exists for.
 	DrainPending hookDrainPendingFunc
+	// InputDone reports whether the workflow a candidate belongs to has an
+	// input convoy whose tracked work is already terminal (closed/tombstone),
+	// returning the workflow root id so SkipDoneWorkflow can retire it.
+	InputDone hookInputDoneFunc
+	// SkipDoneWorkflow closes a workflow root and its open steps with
+	// gc.outcome=skipped after InputDone reported the input terminal.
+	SkipDoneWorkflow hookSkipDoneWorkflowFunc
 	// EmitClaimRejected publishes a bead.claim_rejected event when a claim is
 	// lost to a different live claimant (ADR-0009). Best-effort.
 	EmitClaimRejected hookEmitClaimRejectedFunc
@@ -256,6 +264,8 @@ type (
 	hookAssignContinuationFunc func(context.Context, string, []string, string, string) error
 	hookDrainAckFunc           func(io.Writer) error
 	hookDrainPendingFunc       func(sessionID string) (bool, error)
+	hookInputDoneFunc          func(ctx context.Context, dir string, env []string, candidate beads.Bead) (string, bool, error)
+	hookSkipDoneWorkflowFunc   func(ctx context.Context, dir string, env []string, rootID string) error
 	hookEmitClaimRejectedFunc  func(beadID, existingClaimant, attemptedClaimant string)
 	hookResolveWorkBranchFunc  func(dir string) string
 	hookStampWorkMetaFunc      func(ctx context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error
@@ -420,6 +430,13 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		return hookClaimResult{}
 	}
 
+	// Retire, before any tier looks at them, the candidates whose workflow has
+	// nothing left to do because its input convoy work is already terminal.
+	candidates = retireDoneWorkflowCandidates(candidates, *opts, *ops, dir, stderr)
+	if len(candidates) == 0 {
+		return hookClaimResult{}
+	}
+
 	if result, bead, ok := hookClaimExistingAssignment(candidates, *opts); ok {
 		// Adoption mints no CAS, so until now it minted its receipt on the word
 		// of the work query alone — and a stale caching-store row survives long
@@ -467,6 +484,12 @@ func (ops *hookClaimOps) applyDefaults() {
 	}
 	if ops.DrainPending == nil {
 		ops.DrainPending = hookSessionDrainPending
+	}
+	if ops.InputDone == nil {
+		ops.InputDone = hookInputDoneWithBdStore
+	}
+	if ops.SkipDoneWorkflow == nil {
+		ops.SkipDoneWorkflow = hookSkipDoneWorkflowWithBdStore
 	}
 	if ops.EmitClaimRejected == nil {
 		ops.EmitClaimRejected = hookEmitClaimRejected
@@ -1225,6 +1248,136 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 		assigned = append(assigned, sibling.ID)
 	}
 	return assigned, nil
+}
+
+// retireDoneWorkflowCandidates drops every candidate this session would serve
+// (an adoptable/ready assignment of its own, or a claimable routed row) whose
+// workflow's input convoy work is already terminal, closing that workflow so
+// the pool stops re-dispatching it. A workflow poured for a bead that is
+// already closed — merged and closed by a refinery after the pour, or slung
+// twice — otherwise loops forever: the worker finds nothing to do, drain-acks
+// while still holding its step, the reconciler wakes the same seat (holding
+// in_progress work is a wake anchor) and the hook hands the same molecule out
+// again as existing_assignment; once the seat bead closes, dead-assignee
+// release reopens the step for the next seat. Neither the worker (roots are
+// never-closable by contract) nor the reconciler (drain-ack leaves work
+// untouched, #2293) has a path to end it, so the claim path is where the
+// done-check belongs.
+func retireDoneWorkflowCandidates(candidates []beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) []beads.Bead {
+	if ops.InputDone == nil || ops.SkipDoneWorkflow == nil {
+		return candidates
+	}
+	kept := candidates[:0:0]
+	for _, candidate := range candidates {
+		if hookClaimCandidateIsMessage(candidate) {
+			kept = append(kept, candidate)
+			continue
+		}
+		served := hookClaimHasIdentity(candidate.Assignee, opts.IdentityCandidates) ||
+			hookCandidateClaimable(candidate, opts.RouteTargets)
+		if served && hookSkipIfInputDone(candidate, opts, ops, dir, stderr) {
+			continue
+		}
+		kept = append(kept, candidate)
+	}
+	return kept
+}
+
+// hookSkipIfInputDone reports whether candidate belongs to a workflow whose
+// input convoy work is already terminal and, if so, retires that workflow
+// (root + open steps closed with gc.outcome=skipped). Lookup and close
+// failures are logged and treated as not-done so a store hiccup can never
+// suppress real work.
+func hookSkipIfInputDone(candidate beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
+	defer cancel()
+	rootID, done, err := ops.InputDone(ctx, dir, opts.Env, candidate)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: checking input convoy for %s: %v\n", candidate.ID, err) //nolint:errcheck
+		return false
+	}
+	if !done {
+		return false
+	}
+	if err := ops.SkipDoneWorkflow(ctx, dir, opts.Env, rootID); err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: retiring workflow %s whose input work is already terminal: %v\n", rootID, err) //nolint:errcheck
+		return false
+	}
+	fmt.Fprintf(stderr, "gc hook --claim: skipped %s: workflow %s input convoy work is already terminal; root and open steps closed as skipped\n", candidate.ID, rootID) //nolint:errcheck
+	return true
+}
+
+// workflowInputDone resolves candidate to its workflow root (itself when it
+// carries gc.input_convoy_id, else via gc.root_bead_id) and reports whether
+// every member the root's input convoy tracks is terminal. A root with no
+// input convoy, or a convoy with no resolvable members, is never "done".
+func workflowInputDone(store beads.Store, candidate beads.Bead) (string, bool, error) {
+	root := candidate
+	if strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey]) == "" {
+		rootID := strings.TrimSpace(candidate.Metadata[beadmeta.RootBeadIDMetadataKey])
+		if rootID == "" || rootID == candidate.ID {
+			return "", false, nil
+		}
+		var err error
+		root, err = store.Get(rootID)
+		if err != nil {
+			return "", false, fmt.Errorf("loading workflow root %s: %w", rootID, err)
+		}
+	}
+	convoyID := strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey])
+	if convoyID == "" {
+		return root.ID, false, nil
+	}
+	members, err := convoy.Members(store, convoyID, true)
+	if err != nil {
+		return root.ID, false, fmt.Errorf("listing input convoy %s members: %w", convoyID, err)
+	}
+	if len(members) == 0 {
+		return root.ID, false, nil
+	}
+	for _, m := range members {
+		if !convoy.IsTerminalStatus(m.Status) {
+			return root.ID, false, nil
+		}
+	}
+	return root.ID, true, nil
+}
+
+// skipDoneWorkflow closes rootID and every open/in_progress step under it
+// with gc.outcome=skipped so pool demand and continuation claims drop.
+func skipDoneWorkflow(store beads.Store, rootID string) error {
+	steps, err := store.List(beads.ListQuery{
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
+		TierMode: beads.TierBoth,
+	})
+	if err != nil {
+		return fmt.Errorf("listing steps of %s: %w", rootID, err)
+	}
+	ids := make([]string, 0, len(steps)+1)
+	seen := map[string]bool{}
+	for _, step := range steps {
+		if step.ID == "" || step.ID == rootID || seen[step.ID] || convoy.IsTerminalStatus(step.Status) {
+			continue
+		}
+		seen[step.ID] = true
+		ids = append(ids, step.ID)
+	}
+	ids = append(ids, rootID)
+	_, err = store.CloseAll(ids, map[string]string{
+		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
+		"close_reason":              hookSkipDoneWorkflowCloseReason,
+	})
+	return err
+}
+
+const hookSkipDoneWorkflowCloseReason = "hook --claim: input convoy work already terminal; nothing to do"
+
+func hookInputDoneWithBdStore(_ context.Context, dir string, env []string, candidate beads.Bead) (string, bool, error) {
+	return workflowInputDone(hookClaimBdStore(dir, env, ""), candidate)
+}
+
+func hookSkipDoneWorkflowWithBdStore(_ context.Context, dir string, env []string, rootID string) error {
+	return skipDoneWorkflow(hookClaimBdStore(dir, env, ""), rootID)
 }
 
 func hookClaimWithBdStore(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
