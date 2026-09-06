@@ -37,12 +37,20 @@ var (
 	ensureSupervisorRunningHook              = ensureSupervisorRunning
 	reloadSupervisorHook                     = reloadSupervisor
 	supervisorAliveHook                      = supervisorAlive
+	unloadSupervisorServiceHook              = unloadSupervisorService
 	supervisorReadyTimeout                   = 15 * time.Second
 	supervisorReadyPollInterval              = 100 * time.Millisecond
 	supervisorSystemdWarmRefreshStopTimeout  = 5 * time.Second
 	supervisorSystemdWarmRefreshPollInterval = 100 * time.Millisecond
+	supervisorLaunchdStopTimeout             = 45 * time.Second
+	supervisorLaunchdStopPollInterval        = 250 * time.Millisecond
 	supervisorLaunchctlRun                   = func(args ...string) error {
 		return exec.Command("launchctl", args...).Run()
+	}
+	supervisorLaunchdLoaded = func(label string) (bool, string) {
+		out, err := exec.Command("launchctl", "print", supervisorLaunchdServiceTarget(label)).CombinedOutput()
+		detail := strings.TrimSpace(string(out))
+		return err == nil, detail
 	}
 	supervisorLaunchdActive = func(label string) bool {
 		out, err := exec.Command("launchctl", "print", supervisorLaunchdServiceTarget(label)).Output()
@@ -758,20 +766,69 @@ func waitForSupervisorReady(stderr io.Writer) int {
 // the platform unit/plist is not installed — this keeps unit tests that
 // invoke the stop helper hermetic on machines where the service has
 // never been registered.
-func unloadSupervisorService() {
+func unloadSupervisorService() error {
+	var errs []error
 	switch goruntime.GOOS {
 	case "darwin":
 		path := supervisorLaunchdPlistPath()
-		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
-			_ = supervisorLaunchctlRun("unload", path)
+		if _, err := os.Stat(path); err == nil {
+			errs = append(errs, durablyStopSupervisorLaunchd(supervisorLaunchdLabel(), path)...)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("stat launchd plist %s: %w", path, err))
 		}
 		_ = unloadLegacySupervisorLaunchd(false)
 	case "linux":
 		service := supervisorSystemdServiceName()
-		if _, err := os.Stat(supervisorSystemdServicePath()); !errors.Is(err, os.ErrNotExist) {
-			_ = supervisorSystemctlRun("--user", "stop", service)
+		path := supervisorSystemdServicePath()
+		if _, err := os.Stat(path); err == nil {
+			if err := supervisorSystemctlRun("--user", "stop", service); err != nil {
+				errs = append(errs, fmt.Errorf("systemctl --user stop %s: %w", service, err))
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("stat systemd unit %s: %w", path, err))
 		}
 		_ = unloadLegacySupervisorSystemd(false)
+	}
+	return errors.Join(errs...)
+}
+
+func durablyStopSupervisorLaunchd(label, plistPath string) []error {
+	target := supervisorLaunchdServiceTarget(label)
+	var errs []error
+	if err := supervisorLaunchctlRun("disable", target); err != nil {
+		errs = append(errs, fmt.Errorf("launchctl disable %s: %w", target, err))
+	}
+	if err := supervisorLaunchctlRun("bootout", target); err != nil {
+		if unloadErr := supervisorLaunchctlRun("unload", plistPath); unloadErr != nil {
+			errs = append(errs, fmt.Errorf("launchctl bootout %s: %w", target, err))
+			errs = append(errs, fmt.Errorf("launchctl unload %s: %w", plistPath, unloadErr))
+		}
+	}
+	if err := waitForSupervisorLaunchdAbsent(label, target); err != nil {
+		errs = append(errs, err)
+	}
+	return errs
+}
+
+func waitForSupervisorLaunchdAbsent(label, target string) error {
+	deadline := time.Now().Add(supervisorLaunchdStopTimeout)
+	var lastDetail string
+	for {
+		loaded, detail := supervisorLaunchdLoaded(label)
+		if !loaded {
+			return nil
+		}
+		if detail != "" {
+			lastDetail = detail
+		}
+		if !time.Now().Before(deadline) {
+			err := fmt.Errorf("launchd target %s is still loaded after stop", target)
+			if lastDetail != "" {
+				err = fmt.Errorf("%w: %s", err, lastDetail)
+			}
+			return err
+		}
+		time.Sleep(supervisorLaunchdStopPollInterval)
 	}
 }
 
@@ -1467,12 +1524,12 @@ func supervisorLaunchdServiceTarget(label string) string {
 }
 
 func loadAndStartSupervisorLaunchd(path, label string) error {
-	if err := supervisorLaunchctlRun("load", path); err != nil {
-		return fmt.Errorf("load %s: %w", path, err)
-	}
 	target := supervisorLaunchdServiceTarget(label)
 	if err := supervisorLaunchctlRun("enable", target); err != nil {
 		return fmt.Errorf("enable %s: %w", target, err)
+	}
+	if err := supervisorLaunchctlRun("load", path); err != nil {
+		return fmt.Errorf("load %s: %w", path, err)
 	}
 	if err := supervisorLaunchctlRun("kickstart", "-p", target); err != nil {
 		return fmt.Errorf("kickstart -p %s: %w", target, err)
@@ -1481,12 +1538,12 @@ func loadAndStartSupervisorLaunchd(path, label string) error {
 }
 
 func loadAndStartSupervisorLaunchdForRollback(path, label string, stderr io.Writer) error {
-	if err := supervisorLaunchctlRun("load", path); err != nil {
-		return fmt.Errorf("load %s: %w", path, err)
-	}
 	target := supervisorLaunchdServiceTarget(label)
 	if err := supervisorLaunchctlRun("enable", target); err != nil {
 		warnSupervisorLaunchdRollback(stderr, "enable %s: %v", target, err)
+	}
+	if err := supervisorLaunchctlRun("load", path); err != nil {
+		return fmt.Errorf("load %s: %w", path, err)
 	}
 	if err := supervisorLaunchctlRun("kickstart", "-p", target); err != nil {
 		warnSupervisorLaunchdRollback(stderr, "kickstart -p %s: %v", target, err)
