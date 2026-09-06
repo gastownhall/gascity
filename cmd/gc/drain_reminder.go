@@ -113,6 +113,7 @@ const (
 	drainReminderHoldAttached   = "attached"
 	drainReminderHoldUnreadable = "activity_unreadable"
 	drainReminderHoldExhausted  = "attempts_exhausted"
+	drainReminderHoldAckUnknown = "ack_unreadable"
 )
 
 // drainReminderLabel prefixes this pass's journal lines so they are greppable
@@ -173,7 +174,7 @@ func maybeRemindDrainingSession(
 	// From here something will be written, so the acknowledgement pin runs
 	// first: a reminder that clobbers a landed agent ack converts the success
 	// this pass exists to produce into the refusal that wedges the row.
-	if outcome, proceed := drainReminderAckPin(sp, name); !proceed {
+	if outcome, proceed := drainReminderAckPin(sp, store, info, name, due.token); !proceed {
 		return outcome
 	}
 
@@ -203,7 +204,11 @@ func remindStopPendingDrain(sp runtime.Provider, store beads.Store, info session
 // cheap eligibility gates and is due for evaluation. now is sampled once so
 // every downstream gate reasons from the same instant.
 type drainReminderDue struct {
-	drainID   string
+	drainID string
+	// token is the incarnation the budget is scoped to. The ack pin binds
+	// against the SAME token, so the binding and the budget cannot disagree.
+	// Non-empty by construction: drainID is only non-empty when this is.
+	token     string
 	attempts  int
 	failed    int
 	last      time.Time
@@ -248,6 +253,7 @@ func loadDrainReminderDue(store beads.Store, info sessions.Info, clk clock.Clock
 	}
 	return drainReminderDue{
 		drainID:   drainID,
+		token:     strings.TrimSpace(bead.Metadata["instance_token"]),
 		attempts:  attempts,
 		failed:    failed,
 		last:      last,
@@ -262,15 +268,81 @@ func loadDrainReminderDue(store beads.Store, info sessions.Info, clk clock.Clock
 // one is itself a write over a row whose state could not be read), and when a
 // landed agent ack — the outcome this whole pass exists to produce — must not be
 // clobbered.
-func drainReminderAckPin(sp runtime.Provider, name string) (drainReminderOutcome, bool) {
+//
+// An agent ack counts only for the incarnation that WROTE it. Pane environment
+// is per-chair state and pool chairs are recycled under the same name, so a
+// previous occupant's acknowledgement sits there for whoever sits down next.
+// Read unbound, that residue says "the agent already answered" about an agent
+// that no longer exists — and because a skip writes nothing, it says it in
+// total silence, which is how a chair stays wedged for hours with no reminder
+// line and no marker anywhere (ga-o6uw0).
+func drainReminderAckPin(sp runtime.Provider, store beads.Store, info sessions.Info, name, rowToken string) (drainReminderOutcome, bool) {
 	source, err := sp.GetMeta(name, reconcilerDrainAckSourceKey)
 	if err != nil {
 		return drainReminderHeld, false // no breadcrumb: writing one is itself a write
 	}
-	if strings.TrimSpace(source) == drainAckSourceAgentValue {
+	if strings.TrimSpace(source) != drainAckSourceAgentValue {
+		return drainReminderSkipped, true
+	}
+	binding, bindErr := classifyAgentDrainAckBinding(sp, name, rowToken)
+	if bindErr != nil {
+		// Source says an agent answered but the binding is unreadable. Hold: an
+		// unreadable binding is not evidence the ack is stale, and nudging over a
+		// genuine acknowledgement is what this pin exists to prevent. Unlike the
+		// source read above, this arm leaves a breadcrumb — the silent decline is
+		// what hid the wedge.
+		noteDrainReminderHold(store, info, drainReminderHoldAckUnknown)
+		return drainReminderHeld, false
+	}
+	if binding == agentAckBindingCurrent {
 		return drainReminderSkipped, false
 	}
+	// Stale or unprovable: keep asking. This arm is informational, so the worst
+	// case is a redundant nudge to an agent that already answered, against a
+	// suppressed one costing a chair for hours.
 	return drainReminderSkipped, true
+}
+
+// agentAckBinding is what an agent-sourced acknowledgement on the pane proves
+// about the incarnation the row currently describes. Three answers, not two:
+// the difference between "provably somebody else's" and "cannot tell" is what
+// lets each reader fail in its own direction.
+type agentAckBinding int
+
+const (
+	// agentAckBindingUnprovable: the acknowledgement carries no requester token
+	// to bind. Acks written before the stamp existed land here, and so does an
+	// ack from a degraded pane whose GC_INSTANCE_TOKEN did not survive adoption
+	// — the population the reminder text's explicit-argument form exists for.
+	agentAckBindingUnprovable agentAckBinding = iota
+	// agentAckBindingCurrent: the requester token is this row's token.
+	agentAckBindingCurrent
+	// agentAckBindingStale: the requester token names a DIFFERENT incarnation.
+	// Positive proof of residue on a recycled chair.
+	agentAckBindingStale
+)
+
+// classifyAgentDrainAckBinding binds an agent-sourced acknowledgement to the
+// incarnation the row describes. `gc runtime drain-ack` stamps the requester's
+// own instance token beside the source (setDrainAck), so the comparison is
+// against evidence the acknowledging agent wrote about itself.
+//
+// A read ERROR is distinct from an absent value and is returned as such, so a
+// caller can tell "no stamp" from "could not look".
+func classifyAgentDrainAckBinding(sp runtime.Provider, name, rowToken string) (agentAckBinding, error) {
+	requester, err := sp.GetMeta(name, drainAckRequesterInstanceTokenKey)
+	if err != nil {
+		return agentAckBindingUnprovable, err
+	}
+	requester = strings.TrimSpace(requester)
+	rowToken = strings.TrimSpace(rowToken)
+	if requester == "" || rowToken == "" {
+		return agentAckBindingUnprovable, nil
+	}
+	if requester == rowToken {
+		return agentAckBindingCurrent, nil
+	}
+	return agentAckBindingStale, nil
 }
 
 // announceDrainReminderExhausted records the spent-budget transition once — the

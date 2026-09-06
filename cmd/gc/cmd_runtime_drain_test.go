@@ -950,6 +950,7 @@ func TestProviderDrainOpsClearDrainAttemptsAllMetadataRemovals(t *testing.T) {
 	want := []string{
 		"GC_DRAIN_ACK",
 		reconcilerDrainAckSourceKey,
+		drainAckRequesterInstanceTokenKey,
 		reconcilerDrainAckReasonKey,
 		reconcilerDrainAckGenerationKey,
 		"GC_DRAIN",
@@ -976,8 +977,12 @@ func TestProviderDrainOpsSetDrainAckAttemptsAckAfterCleanupErrors(t *testing.T) 
 	if !slices.Equal(sp.removeKeys, wantRemove) {
 		t.Fatalf("removed keys = %v, want %v", sp.removeKeys, wantRemove)
 	}
+	// GC_DRAIN_ACK lands LAST: the effect boundary refuses until that key is
+	// "1", so no reader can observe an admissible acknowledgement whose
+	// incarnation stamp has not landed yet.
 	wantSet := []string{
 		reconcilerDrainAckSourceKey,
+		drainAckRequesterInstanceTokenKey,
 		"GC_DRAIN_ACK",
 	}
 	if !slices.Equal(sp.setKeys, wantSet) {

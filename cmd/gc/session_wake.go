@@ -232,11 +232,16 @@ func pendingDrainReasonCancelable(reason string) bool {
 }
 
 const (
-	reconcilerDrainAckSourceKey     = "GC_DRAIN_ACK_SOURCE"
-	reconcilerDrainAckSourceValue   = "reconciler"
-	drainAckSourceAgentValue        = "agent"
-	reconcilerDrainAckReasonKey     = "GC_DRAIN_REASON"
-	reconcilerDrainAckGenerationKey = "GC_DRAIN_GENERATION"
+	reconcilerDrainAckSourceKey   = "GC_DRAIN_ACK_SOURCE"
+	reconcilerDrainAckSourceValue = "reconciler"
+	drainAckSourceAgentValue      = "agent"
+	// drainAckRequesterInstanceTokenKey binds an agent acknowledgement to the
+	// incarnation that wrote it. Pane environment is per-CHAIR state and pool
+	// chairs are recycled under the same name, so without this an ack outlives
+	// its author and the next occupant inherits it.
+	drainAckRequesterInstanceTokenKey = "GC_DRAIN_ACK_REQUESTER_INSTANCE_TOKEN"
+	reconcilerDrainAckReasonKey       = "GC_DRAIN_REASON"
+	reconcilerDrainAckGenerationKey   = "GC_DRAIN_GENERATION"
 )
 
 func setReconcilerDrainAckMetadata(sp runtime.Provider, name string, ds *drainState) error {
@@ -266,7 +271,16 @@ func clearReconcilerDrainAckMetadata(sp runtime.Provider, name string) error {
 		return fmt.Errorf("session provider is nil")
 	}
 	var errs []error
-	for _, key := range []string{"GC_DRAIN_ACK", reconcilerDrainAckSourceKey, reconcilerDrainAckReasonKey, reconcilerDrainAckGenerationKey} {
+	for _, key := range []string{
+		"GC_DRAIN_ACK",
+		reconcilerDrainAckSourceKey,
+		// Cleared with the source it belongs to: a requester stamp that outlives
+		// its acknowledgement is residue waiting for a later source to make it
+		// look like evidence.
+		drainAckRequesterInstanceTokenKey,
+		reconcilerDrainAckReasonKey,
+		reconcilerDrainAckGenerationKey,
+	} {
 		if err := sp.RemoveMeta(name, key); err != nil {
 			log.Printf("session wake: clearing reconciler drain ack metadata %s for %s: %v", key, name, err)
 			errs = append(errs, fmt.Errorf("removing %s: %w", key, err))
