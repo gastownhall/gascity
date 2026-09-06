@@ -1263,6 +1263,113 @@ func TestParseFile_AndResolve(t *testing.T) {
 	}
 }
 
+// TestResolve_ExtendsOverrideDropsRequiredWarns covers dip-5hkepo change D:
+// the whole-VarDef extends override lets a child re-declaring a var with
+// default="" silently erase a parent's required=true. The merge keeps
+// child-wins semantics (a child with a default is legitimately optional —
+// required and default are mutually exclusive, and preserving required would
+// break the build-from-plan flow whose plan_path is produced mid-flight), but
+// the drop must no longer be SILENT: Resolve surfaces a cook-time warning.
+func TestResolve_ExtendsOverrideDropsRequiredWarns(t *testing.T) {
+	writePair := func(t *testing.T, childVars string) (*Parser, *Formula) {
+		t.Helper()
+		dir := t.TempDir()
+		formulaDir := filepath.Join(dir, ".beads", "formulas")
+		if err := os.MkdirAll(formulaDir, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		parent := `{
+  "formula": "from-decompose-base",
+  "version": 1,
+  "type": "workflow",
+  "vars": {
+    "plan_path": {"description": "Approved plan path", "required": true}
+  },
+  "steps": [{"id": "decompose", "title": "Decompose"}]
+}`
+		if err := os.WriteFile(filepath.Join(formulaDir, "from-decompose-base.formula.json"), []byte(parent), 0o644); err != nil {
+			t.Fatalf("write parent: %v", err)
+		}
+		child := fmt.Sprintf(`{
+  "formula": "from-plan-base",
+  "version": 1,
+  "type": "workflow",
+  "extends": ["from-decompose-base"],
+  "vars": %s,
+  "steps": [{"id": "plan", "title": "Plan"}]
+}`, childVars)
+		childPath := filepath.Join(formulaDir, "from-plan-base.formula.json")
+		if err := os.WriteFile(childPath, []byte(child), 0o644); err != nil {
+			t.Fatalf("write child: %v", err)
+		}
+		p := NewParser(formulaDir)
+		f, err := p.ParseFile(childPath)
+		if err != nil {
+			t.Fatalf("ParseFile: %v", err)
+		}
+		return p, f
+	}
+
+	t.Run("default_empty_drop_warns_and_child_wins", func(t *testing.T) {
+		// Child re-declares plan_path with default="" and no required — the
+		// exact dip-5hkepo footgun.
+		p, f := writePair(t, `{"plan_path": {"description": "Plan path to produce", "default": ""}}`)
+		resolved, err := p.Resolve(f)
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		// Behavior unchanged: child wins, var is optional with an empty default.
+		got := resolved.Vars["plan_path"]
+		if got == nil {
+			t.Fatal("plan_path var missing after resolve")
+		}
+		if got.Required {
+			t.Error("plan_path.Required = true, want false (child override wins — preserving it would break build-from-plan)")
+		}
+		if got.Default == nil || *got.Default != "" {
+			t.Errorf("plan_path.Default = %v, want non-nil empty string", got.Default)
+		}
+		// The drop is no longer silent: a cook-time warning names the var.
+		if !hasWarningMentioning(p.Warnings(), "plan_path") {
+			t.Errorf("Warnings() = %v, want one mentioning plan_path required-drop", p.Warnings())
+		}
+	})
+
+	t.Run("child_keeps_required_no_warning", func(t *testing.T) {
+		p, f := writePair(t, `{"plan_path": {"description": "Plan path", "required": true}}`)
+		if _, err := p.Resolve(f); err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if len(p.Warnings()) != 0 {
+			t.Errorf("Warnings() = %v, want none when the child keeps required=true", p.Warnings())
+		}
+	})
+
+	t.Run("no_override_no_warning", func(t *testing.T) {
+		// Child overrides an unrelated var; plan_path inherited untouched.
+		p, f := writePair(t, `{"env": {"default": "dev"}}`)
+		resolved, err := p.Resolve(f)
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if got := resolved.Vars["plan_path"]; got == nil || !got.Required {
+			t.Errorf("inherited plan_path.Required = %v, want required=true preserved", got)
+		}
+		if len(p.Warnings()) != 0 {
+			t.Errorf("Warnings() = %v, want none when plan_path is not overridden", p.Warnings())
+		}
+	})
+}
+
+func hasWarningMentioning(warnings []string, substr string) bool {
+	for _, w := range warnings {
+		if strings.Contains(w, substr) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestResolve_InheritsGraphContractFromParent(t *testing.T) {
 	dir := t.TempDir()
 	formulaDir := filepath.Join(dir, ".beads", "formulas")

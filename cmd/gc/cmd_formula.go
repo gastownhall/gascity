@@ -519,6 +519,16 @@ func printGraphV2Deprecations(stderr io.Writer, deprecations []string) {
 	}
 }
 
+// printRecipeWarnings surfaces non-fatal cook-time advisories raised while
+// resolving a formula (e.g. an extends override dropping a parent's required
+// flag, dip-5hkepo). They never gate cook; they make an otherwise-silent drop
+// observable to the operator.
+func printRecipeWarnings(stderr io.Writer, warnings []string) {
+	for _, w := range warnings {
+		fmt.Fprintf(stderr, "warning: %s\n", w) //nolint:errcheck
+	}
+}
+
 func formulaCommandError(stderr io.Writer, command string, jsonOutput bool, err error) error {
 	if err == nil || jsonOutput {
 		return err
@@ -811,6 +821,7 @@ store, copy them into the binding with
 						if err != nil {
 							return fmt.Errorf("compile: %w", err)
 						}
+						printRecipeWarnings(stderr, recipe.Warnings)
 						if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{Title: title, Vars: cookVars}); err != nil {
 							return fmt.Errorf("validate runtime vars: %w", err)
 						}
@@ -914,6 +925,7 @@ store, copy them into the binding with
 				if err != nil {
 					return formulaCommandError(stderr, "gc formula cook: compile", jsonOutput, err)
 				}
+				printRecipeWarnings(stderr, recipe.Warnings)
 				graphRootKey := ""
 				if inv.InputConvoy != "" {
 					graphRootKey = stampFormulaCookGraphV2Root(recipe, args[0], inv.InputConvoy, cookVars)
@@ -1002,6 +1014,7 @@ store, copy them into the binding with
 				if err != nil {
 					return formulaCommandError(stderr, "gc formula cook: compile", jsonOutput, err)
 				}
+				printRecipeWarnings(stderr, recipe.Warnings)
 				if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{Title: title, Vars: cookVars}); err != nil {
 					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 				}

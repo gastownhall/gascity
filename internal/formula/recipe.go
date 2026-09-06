@@ -52,6 +52,12 @@ type Recipe struct {
 
 	// FormulaSource is the file path from which the formula was loaded.
 	FormulaSource string
+
+	// Warnings holds non-fatal cook-time advisories raised while resolving the
+	// formula (e.g. an extends override that drops a parent's required flag,
+	// dip-5hkepo). Callers surface these to the operator; they never gate
+	// compilation.
+	Warnings []string
 }
 
 // RecipeStep represents a single step in a compiled recipe.
