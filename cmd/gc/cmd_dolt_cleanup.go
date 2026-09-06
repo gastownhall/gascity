@@ -921,7 +921,8 @@ always protected, and any process whose state cannot be determined degrades to
 protected. A dolt sql-server is reaped only when its scope is provably gone —
 its working directory is an unlinked inode (the kernel "(deleted)" cwd marker),
 or its --config path is on the test-config-path allowlist (/tmp/Test*,
-os.TempDir()/Test*, known Gas City test prefixes, ~/.gotmp/Test*). A server
+os.TempDir()/Test*, known Gas City test prefixes, ~/.gotmp/Test*,
+/var/tmp/gotmp/Test*, $GOTMPDIR/Test*). A server
 whose --config has merely vanished while its working directory is still live is
 protected, not reaped, until an operator confirms; a lone missing-config
 observation is not proof of scope deletion. See the PROTECTED section of the

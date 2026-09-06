@@ -200,28 +200,39 @@ func doltProcCWDState(pid int) string {
 }
 
 // doltProcContainerRuntime reports the container runtime managing pid, by
-// checking only the first line of /proc/<pid>/cgroup for that runtime's
-// cgroup path marker. Returns "" for a normal host process, a process whose
-// cgroup can't be read (host with no /proc, timeout, permission), or a host
-// cgroup line that carries neither marker — classifyDoltProcess treats "" as
-// no signal (ga-sm1cvj).
+// scanning every line of /proc/<pid>/cgroup for that runtime's cgroup path
+// markers. Both the systemd-driver shapes (`libpod-<id>.scope`,
+// `docker-<id>.scope`, used by cgroup v2 and v1-with-systemd) and the
+// cgroupfs-driver shape `/docker/<id>` (emitted by cgroup v1, which carries no
+// `docker-` marker at all) are matched, and every line is checked because
+// cgroup v1 emits one line per controller in no guaranteed order. Returns ""
+// for a normal host process, a process whose cgroup can't be read (host with
+// no /proc, timeout, permission), or cgroup lines that carry no marker —
+// classifyDoltProcess treats "" as no signal (ga-sm1cvj).
 func doltProcContainerRuntime(pid int) string {
 	if pid <= 0 {
 		return ""
 	}
 	data, err := readWithTimeout(filepath.Join("/proc", strconv.Itoa(pid), "cgroup"))
-	if err != nil || len(data) == 0 {
+	if err != nil {
 		return ""
 	}
-	line, _, _ := strings.Cut(string(data), "\n")
-	switch {
-	case strings.Contains(line, "libpod-"):
-		return "podman"
-	case strings.Contains(line, "docker-"):
-		return "docker"
-	default:
-		return ""
+	return containerRuntimeFromCgroup(data)
+}
+
+// containerRuntimeFromCgroup is doltProcContainerRuntime's pure parser over
+// raw /proc/<pid>/cgroup content, split out so the marker matching is
+// testable without a live container.
+func containerRuntimeFromCgroup(data []byte) string {
+	for _, line := range strings.Split(string(data), "\n") {
+		switch {
+		case strings.Contains(line, "libpod-"):
+			return "podman"
+		case strings.Contains(line, "docker-"), strings.Contains(line, "/docker/"):
+			return "docker"
+		}
 	}
+	return ""
 }
 
 // doltConfigPathState classifies the --config path from a dolt sql-server
@@ -321,6 +332,13 @@ func activeTestRootFromPath(path, homeDir, tempDir string) (string, bool) {
 	clean := filepath.Clean(path)
 	for _, root := range []string{"/tmp", tempDir} {
 		if testRoot, ok := activeTestRootUnder(clean, root, testConfigPathPrefixes()); ok {
+			return testRoot, true
+		}
+	}
+	// Mirror isTestConfigPath's fleet GOTMPDIR roots: a root that is
+	// reapable when orphaned must also be protectable while its test runs.
+	for _, root := range []string{"/var/tmp/gotmp", os.Getenv("GOTMPDIR")} {
+		if testRoot, ok := activeTestRootUnder(clean, root, []string{"Test"}); ok {
 			return testRoot, true
 		}
 	}

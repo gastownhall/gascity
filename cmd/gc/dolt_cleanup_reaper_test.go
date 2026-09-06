@@ -633,12 +633,112 @@ func TestContainerDoltServerIsClassified(t *testing.T) {
 // TestGotmpdirTestConfigIsOnAllowlist covers ga-sm1cvj: the fleet's go shim
 // pins GOTMPDIR=/var/tmp/gotmp (see AGENTS.md Build Cache Conventions), so
 // `go test` scratch dirs used by dolt integration tests live there — not
-// under os.TempDir() (tempDir here is "/tmp", not "/var/tmp/gotmp"). Before
-// this fix, isTestConfigPath had no rule for that root, so a live test's own
-// dolt server was misclassified as an orphan and reaped mid-test.
+// under os.TempDir() (tempDir here is "/tmp", not "/var/tmp/gotmp").
+//
+// An allowlist hit is an *ownership* signal: it is what lets classify step 6
+// reap an already-orphaned test server whose scope is gone. It is not what
+// keeps a running test alive — a live test is protected earlier, by
+// classify's active-test-root check (step 2), which is fed by
+// activeTestRootFromPath. Both halves must know the same roots; see
+// TestClassifyDoltProcess_ProtectsLiveTestUnderFleetGotmpRoot.
 func TestGotmpdirTestConfigIsOnAllowlist(t *testing.T) {
 	cfg := "/var/tmp/gotmp/TestAdoptPRFormulaCompileAndRun1071459171/001/review-formula-test/.gc/runtime/packs/dolt/dolt-config.yaml"
 	if !isTestConfigPath(cfg, "/home/jaword", "/tmp") {
 		t.Fatalf("isTestConfigPath(%q) = false, want true", cfg)
+	}
+}
+
+// TestClassifyDoltProcess_ProtectsLiveTestUnderFleetGotmpRoot is the paired
+// guard for the allowlist above (ga-sm1cvj): widening isTestConfigPath to the
+// fleet GOTMPDIR root widens what gets reaped, so activeTestRootFromPath must
+// recognize the same root or a *running* test's own dolt server — cwd live,
+// config live — flips from protect to reap, taking its --data-dir with it.
+func TestClassifyDoltProcess_ProtectsLiveTestUnderFleetGotmpRoot(t *testing.T) {
+	const testRoot = "/var/tmp/gotmp/TestAdoptPRFormulaCompileAndRun1071459171"
+	cfg := testRoot + "/001/review-formula-test/.gc/runtime/packs/dolt/dolt-config.yaml"
+
+	// The live test process itself is what advertises the root, exactly as
+	// discoverActiveTestRootsFromPS would observe it in another process's argv.
+	root, ok := activeTestRootFromPath(cfg, "/home/u", "/tmp")
+	if !ok {
+		t.Fatalf("activeTestRootFromPath(%q) = _, false; want the enclosing test root", cfg)
+	}
+	if root != testRoot {
+		t.Fatalf("activeTestRootFromPath(%q) = %q, want %q", cfg, root, testRoot)
+	}
+
+	p := DoltProcInfo{
+		PID:             6070,
+		Argv:            []string{"dolt", "sql-server", "--config", cfg, "--data-dir", testRoot + "/001/review-formula-test/dolt"},
+		CWDState:        procPathStateLive,
+		ConfigPathState: procPathStateLive,
+	}
+	got := classifyDoltProcess(p, nil, "/home/u", "/tmp", []string{root})
+	if got.Action != "protect" {
+		t.Fatalf("classifyDoltProcess = {Action: %q, Reason: %q, DataDir: %q}, want protect", got.Action, got.Reason, got.DataDir)
+	}
+	if got.DataDir != "" {
+		t.Errorf("protect classification carries DataDir %q; a protect must never hand the reaper a RemoveAll target", got.DataDir)
+	}
+}
+
+// TestActiveTestRootFromPath_GotmpdirEnvRoot covers the $GOTMPDIR half of the
+// pairing: a host whose Go temp root differs from the AGENTS.md-pinned
+// /var/tmp/gotmp is still protectable, and a sibling that does not start with
+// "Test" is still not mistaken for a test root.
+func TestActiveTestRootFromPath_GotmpdirEnvRoot(t *testing.T) {
+	gotmp := "/var/tmp/host-gotmp"
+	t.Setenv("GOTMPDIR", gotmp)
+
+	root, ok := activeTestRootFromPath(gotmp+"/TestDoltThing12345/001/x/dolt-config.yaml", "/home/u", "/tmp")
+	if !ok || root != gotmp+"/TestDoltThing12345" {
+		t.Errorf("activeTestRootFromPath(direct Test* child) = (%q, %v), want (%q, true)", root, ok, gotmp+"/TestDoltThing12345")
+	}
+
+	if root, ok := activeTestRootFromPath(gotmp+"/buildcache/001/x/dolt-config.yaml", "/home/u", "/tmp"); ok {
+		t.Errorf("activeTestRootFromPath(non-Test sibling) = (%q, true), want ok=false", root)
+	}
+}
+
+func TestContainerRuntimeFromCgroup(t *testing.T) {
+	tests := []struct {
+		name   string
+		cgroup string
+		want   string
+	}{
+		{
+			name:   "cgroup v2 docker scope",
+			cgroup: "0::/system.slice/docker-3f1a2b4c5d6e.scope\n",
+			want:   "docker",
+		},
+		{
+			name:   "cgroup v2 rootless podman scope",
+			cgroup: "0::/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-9a8b7c6d5e4f.scope\n",
+			want:   "podman",
+		},
+		{
+			name: "cgroup v1 cgroupfs driver on a later controller line",
+			cgroup: "12:pids:/\n" +
+				"11:memory:/docker/3f1a2b4c5d6e\n" +
+				"1:name=systemd:/docker/3f1a2b4c5d6e\n",
+			want: "docker",
+		},
+		{
+			name:   "plain host process",
+			cgroup: "0::/user.slice/user-1000.slice/session-3.scope\n",
+			want:   "",
+		},
+		{
+			name:   "empty cgroup file",
+			cgroup: "",
+			want:   "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := containerRuntimeFromCgroup([]byte(tt.cgroup)); got != tt.want {
+				t.Errorf("containerRuntimeFromCgroup(%q) = %q, want %q", tt.cgroup, got, tt.want)
+			}
+		})
 	}
 }
