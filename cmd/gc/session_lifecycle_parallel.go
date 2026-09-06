@@ -1569,8 +1569,12 @@ func enqueuePreparedStartWaveForCity(
 				defer release()
 			}
 			result := runPreparedStartCandidate(ctx, item, cityPath, sp, store, cfg, startupTimeout, stabilityWaiter, sessionStaleKeyDetectionWaiter)
-			commitAsyncStartResultWithContext(ctx, result, sp, store, clk, rec, wave, stdout, stderr, trace)
-			if asyncFollowUp != nil {
+			committed := commitAsyncStartResultWithContext(ctx, result, sp, store, clk, rec, wave, stdout, stderr, trace)
+			// Poke the follow-up tick only for committed starts: an immediate
+			// re-reconcile after a FAILED start re-admits the same candidate at
+			// full rate and is the amplifier of the start storm (sys-w2c5g2).
+			// Failures wait for the patrol tick.
+			if committed && asyncFollowUp != nil {
 				asyncFollowUp()
 			}
 		}(item, release, done)

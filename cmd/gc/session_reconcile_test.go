@@ -1455,6 +1455,65 @@ func TestRecordWakeFailure_BelowThreshold(t *testing.T) {
 	}
 }
 
+func TestRecordWakeFailure_StampsExponentialStartBackoff(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		prior string
+		want  time.Duration
+	}{
+		{"", 30 * time.Second},
+		{"1", time.Minute},
+		{"2", 2 * time.Minute},
+		{"3", 4 * time.Minute},
+	}
+	for _, tt := range tests {
+		clk := &clock.Fake{Time: now}
+		store := newTestStore()
+		meta := map[string]string{}
+		if tt.prior != "" {
+			meta["wake_attempts"] = tt.prior
+		}
+		session := makeBead("b1", meta)
+
+		recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+		syncBeadFromStore(&session, store)
+
+		want := now.Add(tt.want).Format(time.RFC3339)
+		if got := session.Metadata["start_backoff_until"]; got != want {
+			t.Errorf("prior=%q start_backoff_until = %q, want %q", tt.prior, got, want)
+		}
+	}
+}
+
+func TestStartBackoffDuration(t *testing.T) {
+	if got := startBackoffDuration(1); got != defaultStartBackoffBase {
+		t.Errorf("startBackoffDuration(1) = %v, want %v", got, defaultStartBackoffBase)
+	}
+	if got := startBackoffDuration(10); got != defaultStartBackoffCap {
+		t.Errorf("startBackoffDuration(10) = %v, want cap %v", got, defaultStartBackoffCap)
+	}
+}
+
+func TestSessionStartBackoffActiveInfo(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	tests := []struct {
+		value string
+		want  bool
+	}{
+		{"", false},
+		{"garbage", false},
+		{now.Add(time.Minute).Format(time.RFC3339), true},
+		{now.Add(-time.Minute).Format(time.RFC3339), false},
+	}
+	for _, tt := range tests {
+		session := makeBead("b1", map[string]string{"start_backoff_until": tt.value})
+		if got := sessionStartBackoffActiveInfo(seedSessionInfo(session), clk); got != tt.want {
+			t.Errorf("start_backoff_until=%q active = %v, want %v", tt.value, got, tt.want)
+		}
+	}
+}
+
 func TestRecordWakeFailure_ClearsStartedConfigHash(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
@@ -1500,8 +1559,9 @@ func TestClearWakeFailures(t *testing.T) {
 	store := newTestStore()
 
 	session := makeBead("b1", map[string]string{
-		"wake_attempts":     "5",
-		"quarantined_until": "2026-03-08T12:00:00Z",
+		"wake_attempts":       "5",
+		"quarantined_until":   "2026-03-08T12:00:00Z",
+		"start_backoff_until": "2026-03-08T12:00:00Z",
 	})
 
 	clearWakeFailures(seedSessionInfo(session), sessionFrontDoor(store))
@@ -1512,6 +1572,9 @@ func TestClearWakeFailures(t *testing.T) {
 	}
 	if session.Metadata["quarantined_until"] != "" {
 		t.Error("quarantined_until should be cleared")
+	}
+	if session.Metadata["start_backoff_until"] != "" {
+		t.Error("start_backoff_until should be cleared")
 	}
 }
 

@@ -2504,6 +2504,79 @@ func TestExecutePlannedStartsTraced_AsyncRequestsFollowUpAfterCommit(t *testing.
 	}
 }
 
+func TestExecutePlannedStartsTraced_AsyncSkipsFollowUpOnFailedStart(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 30, 0, time.UTC)}
+	session, err := store.Create(beads.Bead{
+		ID:     "gc-worker",
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: creatingMeta(map[string]string{
+			"session_name":         "worker",
+			"template":             "worker",
+			"generation":           "1",
+			"continuation_epoch":   "1",
+			"instance_token":       "tok-worker",
+			"pending_create_claim": "true",
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp := runtime.NewFake()
+	sp.StartErrors["worker"] = errors.New("boom")
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	tp := TemplateParams{Command: "worker", SessionName: "worker", TemplateName: "worker"}
+	followUp := make(chan struct{}, 1)
+
+	woken := executePlannedStartsTraced(
+		context.Background(),
+		[]startCandidate{{info: sessiontest.SeedBead(t, session), tp: tp}},
+		cfg,
+		map[string]TemplateParams{"worker": tp},
+		sp,
+		store,
+		"test-city",
+		"",
+		clk,
+		events.Discard,
+		time.Minute,
+		ioDiscard{},
+		ioDiscard{},
+		nil,
+		withAsyncStartExecution(),
+		withAsyncStartFollowUp(func() {
+			select {
+			case followUp <- struct{}{}:
+			default:
+			}
+		}),
+	)
+	if woken != 1 {
+		t.Fatalf("woken = %d, want 1", woken)
+	}
+	// The failed pending create is rolled back (closed) by the async commit;
+	// wait for that, then assert no follow-up poke was requested.
+	deadline := time.After(2 * time.Second)
+	for {
+		b, err := store.Get("gc-worker")
+		if err != nil || b.Status == "closed" {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for failed start rollback")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	select {
+	case <-followUp:
+		t.Fatal("follow-up requested after failed start")
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
 func TestAllDependenciesAliveForTemplate_TreatsPendingCreateDependencyAsNotAlive(t *testing.T) {
 	store := beads.NewMemStore()
 	now := time.Now().UTC()

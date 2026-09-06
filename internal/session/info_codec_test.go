@@ -102,6 +102,7 @@ func infoFromPersistedBeadFrozen(b beads.Bead) Info {
 		PendingCreateClaimMetadata: b.Metadata["pending_create_claim"],
 		PendingCreateStartedAt:     b.Metadata["pending_create_started_at"],
 		QuarantinedUntil:           b.Metadata["quarantined_until"],
+		StartBackoffUntil:          b.Metadata["start_backoff_until"],
 		AliasHistory:               AliasHistory(b.Metadata),
 		ContinuityEligible:         b.Metadata["continuity_eligible"],
 		TransportMetadata:          b.Metadata["transport"],

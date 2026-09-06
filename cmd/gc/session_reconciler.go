@@ -3437,6 +3437,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if sessionIsQuarantinedInfo(info, clk) {
 				continue // crash-loop protection
 			}
+			if sessionStartBackoffActiveInfo(info, clk) {
+				continue // exponential start-retry backoff (sys-w2c5g2)
+			}
 			if pendingCreateStartInFlightInfo(info, clk, startupTimeout) {
 				if trace != nil {
 					trace.RecordDecision(TraceSiteReconcilerWakeDecision, TraceReasonWake, TraceOutcomeStartInFlight, target.tp.TemplateName, name, traceRecordPayload{

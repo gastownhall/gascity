@@ -146,6 +146,7 @@ var infoKeyCodec = []infoKeySpec{
 	}},
 	{"pending_create_started_at", func(i *Info, v string) { i.PendingCreateStartedAt = v }},
 	{"quarantined_until", func(i *Info, v string) { i.QuarantinedUntil = v }},
+	{"start_backoff_until", func(i *Info, v string) { i.StartBackoffUntil = v }},
 	{aliasHistoryMetadataKey, func(i *Info, v string) {
 		i.AliasHistory = normalizeAliasList(strings.Split(v, ","), "")
 	}},

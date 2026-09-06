@@ -287,6 +287,15 @@ const (
 	// quarantine.
 	defaultMaxWakeAttempts = 5
 
+	// defaultStartBackoffBase / defaultStartBackoffCap shape the exponential
+	// retry backoff stamped by recordWakeFailure on each below-threshold wake
+	// failure: base<<(attempts-1), capped. On a loaded host retrying a failed
+	// start every tick is a positive feedback loop (sys-w2c5g2); the cap keeps
+	// the delay at quarantine scale, and the 5th failure still escalates to a
+	// full quarantine.
+	defaultStartBackoffBase = 30 * time.Second
+	defaultStartBackoffCap  = 5 * time.Minute
+
 	// rateLimitPeekLines is the amount of pane scrollback inspected before a
 	// rapid dead process is classified as a crash. Known provider rate-limit
 	// screens are short, so 120 lines favors robust detection over shaving a

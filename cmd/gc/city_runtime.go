@@ -2661,8 +2661,10 @@ func (cr *CityRuntime) requestAsyncStartFollowUpTick() {
 	if cr == nil {
 		return
 	}
-	// Async completion can commit, rollback, or reject stale work; each case
-	// should prompt one cheap reconciliation pass to observe the new reality.
+	// A committed async start should prompt one cheap reconciliation pass to
+	// observe the new reality. Failed/rolled-back/stale completions wait for
+	// the patrol tick instead — an immediate re-reconcile after a failure
+	// re-admits the same candidate at full rate (sys-w2c5g2).
 	select {
 	case cr.pokeCh <- struct{}{}:
 	default:

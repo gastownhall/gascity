@@ -7056,12 +7056,22 @@ func TestReconcileSessionBeads_StartFailureNoDoubleCounting(t *testing.T) {
 		t.Fatalf("after first tick: wake_attempts = %q, want 1", b.Metadata["wake_attempts"])
 	}
 
-	// Second tick: reload bead from store to get updated metadata.
+	// Second tick inside the backoff window: the start is deferred
+	// (start_backoff_until, sys-w2c5g2), so the counter must not move.
+	b, _ = env.store.Get(session.ID)
+	env.reconcile([]beads.Bead{b})
+	b, _ = env.store.Get(session.ID)
+	if b.Metadata["wake_attempts"] != "1" {
+		t.Errorf("after backed-off tick: wake_attempts = %q, want 1", b.Metadata["wake_attempts"])
+	}
+
+	// Once the backoff expires the retry proceeds and counts exactly once.
+	env.clk.Time = env.clk.Time.Add(defaultStartBackoffBase + time.Second)
 	b, _ = env.store.Get(session.ID)
 	env.reconcile([]beads.Bead{b})
 	b, _ = env.store.Get(session.ID)
 	if b.Metadata["wake_attempts"] != "2" {
-		t.Errorf("after second tick: wake_attempts = %q, want 2", b.Metadata["wake_attempts"])
+		t.Errorf("after backoff expiry tick: wake_attempts = %q, want 2", b.Metadata["wake_attempts"])
 	}
 }
 

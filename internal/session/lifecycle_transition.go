@@ -165,6 +165,7 @@ func RequestWakePatch(reason string, now time.Time) MetadataPatch {
 		"pending_create_started_at": pendingCreateStartedAt(now),
 		"held_until":                "",
 		"quarantined_until":         "",
+		"start_backoff_until":       "",
 		"sleep_reason":              "",
 		"wait_hold":                 "",
 		"sleep_intent":              "",
@@ -227,12 +228,13 @@ func ContinuationResetWakePatch(now time.Time) MetadataPatch {
 // selected by the normal wake path.
 func ClearWakeBlockersPatch(state State, sleepReason string) MetadataPatch {
 	patch := MetadataPatch{
-		"held_until":        "",
-		"quarantined_until": "",
-		"wait_hold":         "",
-		"sleep_intent":      "",
-		"wake_attempts":     "0",
-		"churn_count":       "0",
+		"held_until":          "",
+		"quarantined_until":   "",
+		"start_backoff_until": "",
+		"wait_hold":           "",
+		"sleep_intent":        "",
+		"wake_attempts":       "0",
+		"churn_count":         "0",
 	}
 	switch state {
 	case StateSuspended, StateDrained:
@@ -262,9 +264,10 @@ func ClearExpiredHoldPatch(sleepReason string) MetadataPatch {
 // resets retry counters associated with that blocker.
 func ClearExpiredQuarantinePatch(sleepReason string) MetadataPatch {
 	patch := MetadataPatch{
-		"quarantined_until": "",
-		"wake_attempts":     "0",
-		"churn_count":       "0",
+		"quarantined_until":   "",
+		"start_backoff_until": "",
+		"wake_attempts":       "0",
+		"churn_count":         "0",
 	}
 	switch SleepReason(sleepReason) {
 	case SleepReasonQuarantine, SleepReasonContextChurn, SleepReasonRateLimit:

@@ -668,11 +668,27 @@ func recordWakeFailure(info sessionpkg.Info, sessFront *sessionpkg.Store, clk cl
 			info = next
 		}
 	} else {
-		next := accrual.Patch["wake_attempts"]
-		_ = sessFront.SetMarker(info.ID, "wake_attempts", next)
-		info = info.ApplyPatch(map[string]string{"wake_attempts": next})
+		batch := map[string]string{
+			"wake_attempts":       accrual.Patch["wake_attempts"],
+			"start_backoff_until": clk.Now().Add(startBackoffDuration(attempts + 1)).UTC().Format(time.RFC3339),
+		}
+		_ = sessFront.ApplyPatch(info.ID, batch)
+		info = info.ApplyPatch(batch)
 	}
 	return info
+}
+
+// startBackoffDuration returns the retry delay after the nth consecutive wake
+// failure (n>=1): base, 2×base, 4×base… capped at defaultStartBackoffCap.
+func startBackoffDuration(attempts int) time.Duration {
+	d := defaultStartBackoffBase
+	for i := 1; i < attempts && d < defaultStartBackoffCap; i++ {
+		d *= 2
+	}
+	if d > defaultStartBackoffCap {
+		d = defaultStartBackoffCap
+	}
+	return d
 }
 
 // clearWakeFailures resets crash counter and quarantine for a stable session. It
@@ -680,7 +696,7 @@ func recordWakeFailure(info sessionpkg.Info, sessFront *sessionpkg.Store, clk cl
 // migration Step 6d), or the input Info unchanged when there is nothing to clear
 // (both fields already absent/zero) or the persist failed.
 func clearWakeFailures(info sessionpkg.Info, sessFront *sessionpkg.Store) sessionpkg.Info {
-	batch := make(map[string]string, 2)
+	batch := make(map[string]string, 3)
 	// WakeAttemptsMetadata (the raw string mirror), not the parsed WakeAttempts int:
 	// the != "0" distinction distinguishes an absent counter from a persisted "0".
 	if info.WakeAttemptsMetadata != "" && info.WakeAttemptsMetadata != "0" {
@@ -688,6 +704,9 @@ func clearWakeFailures(info sessionpkg.Info, sessFront *sessionpkg.Store) sessio
 	}
 	if info.QuarantinedUntil != "" {
 		batch["quarantined_until"] = ""
+	}
+	if info.StartBackoffUntil != "" {
+		batch["start_backoff_until"] = ""
 	}
 	if len(batch) == 0 {
 		return info
@@ -831,6 +850,21 @@ func sessionIsQuarantinedInfo(i sessionpkg.Info, clk clock.Clock) bool {
 		return false
 	}
 	t, err := time.Parse(time.RFC3339, q)
+	if err != nil {
+		return false
+	}
+	return clk.Now().Before(t)
+}
+
+// sessionStartBackoffActiveInfo returns true while the exponential retry
+// backoff stamped by recordWakeFailure is still in the future, reading
+// info.StartBackoffUntil (sys-w2c5g2).
+func sessionStartBackoffActiveInfo(i sessionpkg.Info, clk clock.Clock) bool {
+	b := i.StartBackoffUntil
+	if b == "" {
+		return false
+	}
+	t, err := time.Parse(time.RFC3339, b)
 	if err != nil {
 		return false
 	}
