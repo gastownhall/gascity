@@ -346,12 +346,22 @@ func poolDemandFirstRowFunctionScript(topo QueryTopology) string {
 
 func routedReadyTierCommand(topo QueryTopology) string {
 	// The shared predicate stays order-free so the count-form does no wasted
-	// sorting; the worker first-row path asks the reader for the oldest
-	// candidates. The tier is widened past a single row (limit=20, not limit=1)
-	// so a self-blocked head (is_blocked / status==blocked) has Ready routed work
-	// behind it to fall through to instead of idle-exiting; the hook layer
-	// (filterUnreadyHookCandidates) strips the blocked head from the result.
-	return bdReadyPoolDemandShell("--sort oldest --limit=20", topo) + readyReaderStderrSink(topo.FederatedReady)
+	// sorting; the worker first-row path rides the reader's canonical
+	// (priority, created_at, id) default order — both readers default to it
+	// (bd ready's default --sort priority; the federated reader's merged
+	// beads.SortBeadsReadyOrder). An explicit --sort oldest here makes the
+	// claim window priority-blind: a routed P0 behind more than --limit older
+	// lower-priority rows is never served at all, so pool workers
+	// deterministically starve the highest-priority routed work (measured on a
+	// live 14-seat city, 2026-08-25: 13 P0 rows parked behind 34 older wave
+	// rows — the bounded window contained zero P0s until the older rows
+	// drained). FIFO fairness survives within a priority band via the
+	// created_at term. The tier stays widened past a single row (limit=20, not
+	// limit=1) so a self-blocked head (is_blocked / status==blocked) has Ready
+	// routed work behind it to fall through to instead of idle-exiting; the
+	// hook layer (filterUnreadyHookCandidates) strips the blocked head from
+	// the result.
+	return bdReadyPoolDemandShell("--limit=20", topo) + readyReaderStderrSink(topo.FederatedReady)
 }
 
 // poolDemandCountShell emits the reconciler count-form for target: it counts
