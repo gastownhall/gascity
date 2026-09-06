@@ -23,7 +23,6 @@ import (
 	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
-	"github.com/gastownhall/gascity/internal/pgauth"
 	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
 )
 
@@ -270,7 +269,7 @@ func (s strictCloseReasonStore) CloseAll(ids []string, metadata map[string]strin
 }
 
 func TestOrderDispatcherNil(t *testing.T) {
-	ad := buildOrderDispatcher(t.TempDir(), &config.City{}, events.Discard, &bytes.Buffer{})
+	ad := buildOrderDispatcher(nil, t.TempDir(), &config.City{}, events.Discard, &bytes.Buffer{})
 	if ad != nil {
 		t.Error("expected nil dispatcher for empty orders")
 	}
@@ -280,7 +279,7 @@ func TestBuildOrderDispatcherNoOrders(t *testing.T) {
 	// City with formula layers that exist but contain no orders.
 	dir := t.TempDir()
 	cfg := &config.City{}
-	ad := buildOrderDispatcher(dir, cfg, events.Discard, &bytes.Buffer{})
+	ad := buildOrderDispatcher(nil, dir, cfg, events.Discard, &bytes.Buffer{})
 	if ad != nil {
 		t.Error("expected nil dispatcher when no orders exist")
 	}
@@ -1882,6 +1881,53 @@ func TestOrderDispatchCachesAutoTrackingBeadCreatedAt(t *testing.T) {
 	}
 }
 
+// TestOrderDispatchDoesNotReparseConfigPerTick is the ga-237xpr regression
+// test: dispatch()'s per-tick store-open must reuse the dispatcher's own
+// cached *config.City instead of re-parsing city.toml (and all pack
+// includes) on every tick for every scope target. Unlike the other dispatch
+// tests in this file, this one drives the REAL storeFn built by
+// newMemoryOrderDispatcher rather than buildOrderDispatcherFromListExec's
+// fixed-store stub, so the dispatcher's cached cfg actually reaches a store
+// open instead of stopping at a stub.
+//
+// Scope, stated exactly, because a test that overstates its coverage stops
+// the next reader from looking: this city declares provider = "file", so it
+// covers the dispatcher -> openStoreAtForCityWithConfig -> OpenFileStore
+// path and nothing else. It does NOT exercise the exec: or native bd store
+// paths. Per-provider coverage of the same config-reuse invariant lives in
+// store_rollout_test.go — TestOpenStoreResultWithConfigSkipsLoad for the
+// file path and TestOpenStoreResultWithConfigSkipsLoad_ExecProvider for the
+// exec: path, which is where the reparse hole actually was.
+func TestOrderDispatchDoesNotReparseConfigPerTick(t *testing.T) {
+	cityDir := t.TempDir()
+	toml := "[workspace]\nname = \"t\"\n\n[beads]\nprovider = \"file\"\n"
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadCityConfig(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	aa := []orders.Order{{
+		Name:     "perf-test-order",
+		Trigger:  "cooldown",
+		Interval: "1h",
+		Exec:     "true",
+	}}
+	ad := newMemoryOrderDispatcher(nil, aa, cityDir, cfg, events.Discard, io.Discard)
+
+	before := loadCityConfigCalls.Load()
+	now := time.Now()
+	for i := 0; i < 10; i++ {
+		ad.dispatch(context.Background(), cityDir, now.Add(time.Duration(i)*time.Millisecond))
+	}
+	ad.drain(context.Background())
+	if grew := loadCityConfigCalls.Load() - before; grew != 0 {
+		t.Fatalf("dispatch() re-parsed city config %d times across 10 ticks; want 0 — every tick's store open must reuse the dispatcher's cached config instead of reloading city.toml from disk", grew)
+	}
+}
+
 // --- exec order dispatch tests ---
 
 func TestOrderDispatchExecDue(t *testing.T) {
@@ -1997,7 +2043,6 @@ func TestOrderDispatchExecFailure(t *testing.T) {
 }
 
 func TestOrderDispatchExecEnvFailureUsesEnvFailureLabel(t *testing.T) {
-	clearAmbientPostgresEnv(t)
 	t.Setenv("GC_BEADS", "bd")
 
 	store := beads.NewMemStore()
@@ -2012,7 +2057,7 @@ func TestOrderDispatchExecEnvFailureUsesEnvFailureLabel(t *testing.T) {
 	}
 
 	cityDir := t.TempDir()
-	writePGScopeFixture(t, cityDir, "")
+	writeUnregisteredBackendMetadata(t, cityDir)
 	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: city
 gc.endpoint_origin: managed_city
 gc.endpoint_status: verified
@@ -2277,11 +2322,10 @@ description = "Target: {{target_id}}, workspace: {{workspace}}"
 }
 
 func TestOrderDispatchConditionTriggerEnvFailureRecordsOrderFailure(t *testing.T) {
-	clearAmbientPostgresEnv(t)
 	t.Setenv("GC_BEADS", "bd")
 
 	cityDir := t.TempDir()
-	writePGScopeFixture(t, cityDir, "")
+	writeUnregisteredBackendMetadata(t, cityDir)
 	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: city
 gc.endpoint_origin: managed_city
 gc.endpoint_status: verified
@@ -2349,11 +2393,10 @@ dolt.auto-start: false
 }
 
 func TestOrderDispatchTriggerEnvFailuresRespectMaxDispatchesPerTick(t *testing.T) {
-	clearAmbientPostgresEnv(t)
 	t.Setenv("GC_BEADS", "bd")
 
 	cityDir := t.TempDir()
-	writePGScopeFixture(t, cityDir, "")
+	writeUnregisteredBackendMetadata(t, cityDir)
 	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: city
 gc.endpoint_origin: managed_city
 gc.endpoint_status: verified
@@ -4374,6 +4417,7 @@ func TestSweepStaleOrderTrackingAcrossStoresClosesRigStoreAndUnblocksDispatch(t 
 
 	result, err := sweepStaleOrderTrackingAcrossStores(
 		[]beads.Store{rigStore, legacyStore},
+		nil,
 		stale.CreatedAt.Add(time.Hour),
 		time.Minute,
 		orderFilterForTest("rig-digest:rig:frontend"),
@@ -4438,6 +4482,7 @@ func TestSweepStaleOrderTrackingAcrossStoresContinuesAfterStoreError(t *testing.
 
 	result, err := sweepStaleOrderTrackingAcrossStores(
 		[]beads.Store{failingStore, cityStore, rigStore},
+		nil,
 		cityStale.CreatedAt.Add(time.Hour),
 		time.Minute,
 		nil,
@@ -6429,6 +6474,26 @@ func (s labelFailListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	return s.Store.List(query)
 }
 
+// openWorkFailListStore is a store that cannot answer the OPEN-WORK question,
+// whichever read the gate uses to ask it.
+//
+// The gate used to ask with one `order-run:<scoped>` list per order and now asks
+// once per store, unlabeled, through the per-tick index (ga-l7jdg). A fixture
+// pinned to only one of those two spellings stops simulating the outage the
+// moment the other one is the live path, and the order under test quietly
+// dispatches instead of failing closed — which is what this store exists to
+// prevent.
+type openWorkFailListStore struct {
+	beads.Store
+}
+
+func (s openWorkFailListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if strings.HasPrefix(query.Label, "order-run:") || isOrderGateIndexQuery(query) {
+		return nil, fmt.Errorf("list failed for open work")
+	}
+	return s.Store.List(query)
+}
+
 // --- helpers ---
 
 func successfulExec(context.Context, string, string, []string) ([]byte, error) {
@@ -6538,7 +6603,7 @@ pool = "polecat"
 	}
 
 	var stderr bytes.Buffer
-	ad := buildOrderDispatcher(t.TempDir(), cfg, events.Discard, &stderr)
+	ad := buildOrderDispatcher(nil, t.TempDir(), cfg, events.Discard, &stderr)
 	if ad == nil {
 		t.Fatalf("expected non-nil dispatcher; stderr: %s", stderr.String())
 	}
@@ -6819,7 +6884,7 @@ pool = "worker"
 	}
 
 	var stderr bytes.Buffer
-	ad := buildOrderDispatcher(cityDir, cfg, events.Discard, &stderr)
+	ad := buildOrderDispatcher(nil, cityDir, cfg, events.Discard, &stderr)
 	if ad == nil {
 		t.Fatalf("expected non-nil dispatcher; stderr: %s", stderr.String())
 	}
@@ -6888,7 +6953,7 @@ pool = "worker"
 	}
 
 	var stderr bytes.Buffer
-	ad := buildOrderDispatcher(cityDir, cfg, events.Discard, &stderr)
+	ad := buildOrderDispatcher(nil, cityDir, cfg, events.Discard, &stderr)
 	if ad == nil {
 		t.Fatalf("expected non-nil dispatcher; stderr: %s", stderr.String())
 	}
@@ -6970,7 +7035,7 @@ pool = "dog"
 	}
 
 	var stderr bytes.Buffer
-	ad := buildOrderDispatcher(cityDir, cfg, events.Discard, &stderr)
+	ad := buildOrderDispatcher(nil, cityDir, cfg, events.Discard, &stderr)
 	if ad == nil {
 		t.Fatalf("expected non-nil dispatcher; stderr: %s", stderr.String())
 	}
@@ -7059,7 +7124,7 @@ pool = "worker"
 	}
 
 	var stderr bytes.Buffer
-	ad := buildOrderDispatcher(cityDir, cfg, events.Discard, &stderr)
+	ad := buildOrderDispatcher(nil, cityDir, cfg, events.Discard, &stderr)
 	if ad == nil {
 		t.Fatalf("expected non-nil dispatcher; stderr: %s", stderr.String())
 	}
@@ -7177,10 +7242,7 @@ func TestOrderDispatchSkipsRigConditionWhenLegacyOpenWorkReadFails(t *testing.T)
 		t.Fatal(err)
 	}
 	rigStore := beads.NewMemStore()
-	legacyStore := labelFailListStore{
-		Store:     beads.NewMemStore(),
-		failLabel: "order-run:rig-digest:rig:frontend",
-	}
+	legacyStore := openWorkFailListStore{Store: beads.NewMemStore()}
 
 	stderr := &bytes.Buffer{}
 	m := &memoryOrderDispatcher{
@@ -7258,6 +7320,10 @@ func TestOrderDispatchConditionUsesScopedEnv(t *testing.T) {
 
 func TestOrderDispatchSkipsRigCooldownWhenLegacyOpenWorkReadFails(t *testing.T) {
 	rigStore := beads.NewMemStore()
+	// The LAST-RUN read is what fails here, so the fixture fails only the
+	// `order-run:` label query LastRunAcross issues. The gate's own index read
+	// succeeds — that is the point: this test pins the last-run path, and its
+	// sibling above pins the gate path.
 	legacyStore := labelFailListStore{
 		Store:     beads.NewMemStore(),
 		failLabel: "order-run:rig-digest:rig:frontend",
@@ -7334,7 +7400,7 @@ pool = "worker"
 		},
 	}
 
-	ad := buildOrderDispatcher(cityDir, cfg, events.Discard, &bytes.Buffer{})
+	ad := buildOrderDispatcher(nil, cityDir, cfg, events.Discard, &bytes.Buffer{})
 	if ad == nil {
 		t.Fatal("expected non-nil dispatcher")
 	}
@@ -7406,7 +7472,7 @@ interval = "2m"
 	}
 
 	var stderr bytes.Buffer
-	ad := buildOrderDispatcher(t.TempDir(), cfg, events.Discard, &stderr)
+	ad := buildOrderDispatcher(nil, t.TempDir(), cfg, events.Discard, &stderr)
 	if ad == nil {
 		t.Fatalf("expected non-nil dispatcher; stderr: %s", stderr.String())
 	}
@@ -7473,7 +7539,7 @@ interval = "2m"
 	}
 
 	var stderr bytes.Buffer
-	ad := buildOrderDispatcher(t.TempDir(), cfg, events.Discard, &stderr)
+	ad := buildOrderDispatcher(nil, t.TempDir(), cfg, events.Discard, &stderr)
 	if ad == nil {
 		t.Fatalf("expected non-nil dispatcher; stderr: %s", stderr.String())
 	}
@@ -7549,7 +7615,7 @@ interval = "2m"
 	}
 
 	var stderr bytes.Buffer
-	ad := buildOrderDispatcher(t.TempDir(), cfg, events.Discard, &stderr)
+	ad := buildOrderDispatcher(nil, t.TempDir(), cfg, events.Discard, &stderr)
 	if ad == nil {
 		t.Fatalf("expected non-nil dispatcher; stderr: %s", stderr.String())
 	}
@@ -7603,7 +7669,7 @@ interval = "30s"
 	}
 
 	var stderr bytes.Buffer
-	ad := buildOrderDispatcher(t.TempDir(), cfg, events.Discard, &stderr)
+	ad := buildOrderDispatcher(nil, t.TempDir(), cfg, events.Discard, &stderr)
 	if ad == nil {
 		t.Fatalf("expected non-nil dispatcher (beads-health should still be found); stderr: %s", stderr.String())
 	}
@@ -9334,9 +9400,29 @@ func TestOrderExecEnvRejectsReservedOrderEnvKeys(t *testing.T) {
 	}
 }
 
+// TestOrderExecEnvReservedKeysCoverProjectedEnv catches a key that the exec-env
+// projection emits but nobody added to the reserved guard. Such a key is
+// controller-owned in practice while `[order.env]` can still silently shadow it.
+//
+// The invariant is "reserved, or deliberately overridable" rather than plain
+// "reserved". projectGitHubTokenExecEnv projects the controller's ambient `gh`
+// credentials, and those keys are deliberately kept out of the reserved guard so
+// an order can scope its own token; TestOrderExecEnvGitHubTokenOrderEnvOverrideWins
+// asserts that capability. Reading the exception straight from the production
+// githubTokenExecEnvKeys list keeps the two halves from drifting apart, which is
+// how this guard went stale in the first place: it was written when every
+// projected key really was reserved, and the token projection later added the
+// first projected-but-overridable keys without updating it.
+//
+// Both tokens are pinned with t.Setenv so the projected key set never depends on
+// the ambient environment. Without that pin this test passed in CI, which
+// carries no `gh` token, and failed for every developer and agent authenticated
+// with gh.
 func TestOrderExecEnvReservedKeysCoverProjectedEnv(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GH_TOKEN", "ghs_controller_token")
+	t.Setenv("GITHUB_TOKEN", "github_pat_controller")
 
 	cityDir := t.TempDir()
 	packDir := filepath.Join(cityDir, "packs", "maintenance")
@@ -9355,10 +9441,20 @@ func TestOrderExecEnvReservedKeysCoverProjectedEnv(t *testing.T) {
 		t.Fatalf("orderExecEnvWithError() error = %v", err)
 	}
 
+	overridable := make(map[string]bool, len(githubTokenExecEnvKeys))
+	for _, key := range githubTokenExecEnvKeys {
+		overridable[key] = true
+	}
+
 	var unreserved []string
+	projectedOverridable := 0
 	for _, entry := range envSlice {
 		key, _, ok := strings.Cut(entry, "=")
 		if !ok {
+			continue
+		}
+		if overridable[key] {
+			projectedOverridable++
 			continue
 		}
 		if !isReservedOrderExecEnvKey(key) {
@@ -9367,6 +9463,18 @@ func TestOrderExecEnvReservedKeysCoverProjectedEnv(t *testing.T) {
 	}
 	if len(unreserved) > 0 {
 		t.Fatalf("projected order exec env keys missing from reserved guard: %v", unreserved)
+	}
+	// The exception above is only sound while those keys really are projected.
+	// Assert they were, so that dropping the projection surfaces as a failure
+	// here instead of being absorbed by the allowlist as an empty set.
+	//
+	// Two different mistakes land here. Either the projection stopped emitting a
+	// key it used to emit, or a key joined githubTokenExecEnvKeys without a
+	// matching t.Setenv at the top of this test, so it was never in the ambient
+	// environment to project. The env dump below tells them apart.
+	if projectedOverridable != len(githubTokenExecEnvKeys) {
+		t.Fatalf("projected %d of %d deliberately-overridable keys %v; either the projection dropped one, which the allowlist would otherwise mask, or a key was added to that list without a t.Setenv in this test. env=%v",
+			projectedOverridable, len(githubTokenExecEnvKeys), githubTokenExecEnvKeys, envSlice)
 	}
 }
 
@@ -9395,12 +9503,11 @@ func TestOrderExecEnvSkipsBeadsActorForUnnamedOrder(t *testing.T) {
 	}
 }
 
-func TestOrderExecEnvWithError_SurfacesPostgresProjectionError(t *testing.T) {
-	clearAmbientPostgresEnv(t)
+func TestOrderExecEnvWithError_RefusesAnUnregisteredBackend(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 
 	cityDir := t.TempDir()
-	writePGScopeFixture(t, cityDir, "")
+	writeUnregisteredBackendMetadata(t, cityDir)
 	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: city
 gc.endpoint_origin: managed_city
 gc.endpoint_status: verified
@@ -9412,21 +9519,18 @@ dolt.auto-start: false
 	a := orders.Order{Name: "pg-order", Trigger: "cooldown", Interval: "1m", Exec: "true"}
 
 	_, err := orderExecEnvWithError(cityDir, nil, target, a, nil)
-	if err == nil {
-		t.Fatal("orderExecEnvWithError() error = nil, want postgres projection error")
-	}
-	if !errors.Is(err, pgauth.ErrNoPasswordResolvable) {
-		t.Fatalf("errors.Is(err, ErrNoPasswordResolvable) = false, want true; err=%v", err)
-	}
+	assertRefusesUnregisteredBackend(t, err)
 }
 
-func TestOrderExecEnvWithError_PostgresCityClearsDoltOverlay(t *testing.T) {
-	clearAmbientPostgresEnv(t)
+// TestOrderExecEnvWithError_BoundCityClearsDoltOverlay proves an exec order in
+// a city gc does not serve inherits no managed-Dolt overlay, even when a
+// reachable managed Dolt runtime is published beside it.
+func TestOrderExecEnvWithError_BoundCityClearsDoltOverlay(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
 
 	cityDir := t.TempDir()
-	writePGScopeFixture(t, cityDir, "citypw")
+	writeOpaqueBindingScopeFixture(t, cityDir)
 	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: city
 gc.endpoint_origin: managed_city
 gc.endpoint_status: verified
@@ -9445,12 +9549,12 @@ dolt.auto-start: false
 	}
 	got := listToMap(env)
 
-	assertPostgresOrderEnv(t, got, "citypw")
 	assertNoDoltOrderEnv(t, got)
 }
 
-func TestOrderTriggerOptionsForTarget_PostgresRigClearsDoltOverlay(t *testing.T) {
-	clearAmbientPostgresEnv(t)
+// TestOrderTriggerOptionsForTarget_BoundRigClearsDoltOverlay is the condition-
+// trigger half of the same guarantee, for a rig bound under a managed city.
+func TestOrderTriggerOptionsForTarget_BoundRigClearsDoltOverlay(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
 
@@ -9468,7 +9572,7 @@ dolt.auto-start: false
 	_ = writeReachableManagedDoltState(t, cityDir)
 
 	rigDir := filepath.Join(cityDir, "rigs", "pg")
-	writePGScopeFixture(t, rigDir, "rigpw")
+	writeOpaqueBindingScopeFixture(t, rigDir)
 	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: pg
 gc.endpoint_origin: inherited_city
 gc.endpoint_status: verified
@@ -9490,7 +9594,6 @@ dolt.auto-start: false
 	if opts.ConditionDir != rigDir {
 		t.Fatalf("ConditionDir = %q, want %q", opts.ConditionDir, rigDir)
 	}
-	assertPostgresOrderEnv(t, got, "rigpw")
 	assertNoDoltOrderEnv(t, got)
 }
 
@@ -9662,28 +9765,11 @@ func TestOrderDispatchConditionFalseStaysQuiet(t *testing.T) {
 	}
 }
 
-func assertPostgresOrderEnv(t *testing.T, env map[string]string, wantPassword string) {
-	t.Helper()
-	want := map[string]string{
-		"GC_POSTGRES_PASSWORD":    wantPassword,
-		"BEADS_POSTGRES_PASSWORD": wantPassword,
-		"BEADS_POSTGRES_HOST":     "db.example.test",
-		"BEADS_POSTGRES_PORT":     "5432",
-		"BEADS_POSTGRES_USER":     "bd",
-		"BEADS_POSTGRES_DATABASE": "beads",
-	}
-	for key, value := range want {
-		if got := env[key]; got != value {
-			t.Errorf("env[%q] = %q, want %q", key, got, value)
-		}
-	}
-}
-
 func assertNoDoltOrderEnv(t *testing.T, env map[string]string) {
 	t.Helper()
 	for _, key := range projectedDoltEnvKeys {
 		if value, ok := env[key]; ok && value != "" {
-			t.Errorf("env[%q] = %q, want empty/absent for PG-backed order", key, value)
+			t.Errorf("env[%q] = %q, want empty/absent for an order gc does not serve", key, value)
 		}
 	}
 	for _, key := range []string{
@@ -9696,7 +9782,7 @@ func assertNoDoltOrderEnv(t *testing.T, env map[string]string) {
 		"GC_DOLT_CONFIG_FILE",
 	} {
 		if value, ok := env[key]; ok && value != "" {
-			t.Errorf("env[%q] = %q, want empty/absent for PG-backed order", key, value)
+			t.Errorf("env[%q] = %q, want empty/absent for an order gc does not serve", key, value)
 		}
 	}
 }
@@ -10154,7 +10240,7 @@ func TestSweepClosedOrderTrackingRetentionAcrossStoresBounded_ZeroLimitDeletesNo
 func TestLastRunFuncGatesFallbackOnIndexMiss(t *testing.T) {
 	store := beads.NewMemStore()
 	const storeKey = "city"
-	idx := newOrderDispatchTrackingIndex()
+	idx := newOrderDispatchTrackingIndex(io.Discard)
 	indexed := time.Now().Add(-time.Hour)
 	// Pre-seed the history index so lastRunForStore reads it without listing
 	// the store. The "\x00history" suffix matches historyEntriesForStore's key.
@@ -10246,5 +10332,289 @@ func TestRunDispatchGuardedRecoversPanic(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "panic") {
 		t.Errorf("expected the recovered panic to be logged, got %q", logs.String())
+	}
+}
+
+func TestCountClosedOrderTrackingRetentionEligible(t *testing.T) {
+	now := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+
+	t.Run("returns correct eligible count without deleting", func(t *testing.T) {
+		seed := make([]beads.Bead, 0, minClosedOrderTrackingRetained+3)
+		for i := range minClosedOrderTrackingRetained + 3 {
+			seed = append(seed, beads.Bead{
+				ID:        fmt.Sprintf("count-%02d", i),
+				Title:     "order:count",
+				Status:    "closed",
+				Type:      "task",
+				CreatedAt: now.Add(-8*24*time.Hour + time.Duration(i)*time.Minute),
+				Labels:    []string{"order-run:count", labelOrderTracking},
+				Ephemeral: true,
+			})
+		}
+		store := beads.NewMemStoreFrom(100, seed, nil)
+		policy := orderTrackingRetentionPolicyForConfig(nil)
+
+		count, err := countClosedOrderTrackingRetentionEligible([]beads.Store{store}, now, policy, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// 3 beads exceed the retain-10 floor and are past the 7d TTL.
+		if count != 3 {
+			t.Fatalf("count = %d, want 3", count)
+		}
+		// Store must be unchanged — count does not delete.
+		for i := range minClosedOrderTrackingRetained + 3 {
+			id := fmt.Sprintf("count-%02d", i)
+			if _, err := store.Get(id); err != nil {
+				t.Fatalf("%s should still exist after count: %v", id, err)
+			}
+		}
+	})
+
+	t.Run("returns 0 when nothing is eligible", func(t *testing.T) {
+		store := beads.NewMemStore()
+		policy := orderTrackingRetentionPolicyForConfig(nil)
+		count, err := countClosedOrderTrackingRetentionEligible([]beads.Store{store}, now, policy, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if count != 0 {
+			t.Fatalf("count = %d, want 0 for empty store", count)
+		}
+	})
+}
+
+func TestOrderDispatchMaxDispatchesPerTickConfig(t *testing.T) {
+	aa := []orders.Order{{
+		Name:         "cap-order",
+		Trigger:      "cooldown",
+		Interval:     "1m",
+		Formula:      "test-formula",
+		Pool:         "worker",
+		FormulaLayer: sharedTestFormulaDir,
+	}}
+
+	// Unset (zero) preserves the historical default of 4.
+	cfgDefault := &config.City{}
+	adDefault := buildOrderDispatcherFromOrderSet(nil, t.TempDir(), cfgDefault, aa, events.Discard, &bytes.Buffer{})
+	mDefault, ok := adDefault.(*memoryOrderDispatcher)
+	if !ok {
+		t.Fatalf("expected *memoryOrderDispatcher, got %T", adDefault)
+	}
+	if mDefault.maxDispatchesPerTick != defaultMaxOrderDispatchesPerTick {
+		t.Errorf("default maxDispatchesPerTick = %d, want %d", mDefault.maxDispatchesPerTick, defaultMaxOrderDispatchesPerTick)
+	}
+
+	// Configured value of 1 overrides the default.
+	one := 1
+	cfgOne := &config.City{}
+	cfgOne.Orders.MaxDispatchesPerTick = &one
+	adOne := buildOrderDispatcherFromOrderSet(nil, t.TempDir(), cfgOne, aa, events.Discard, &bytes.Buffer{})
+	mOne, ok := adOne.(*memoryOrderDispatcher)
+	if !ok {
+		t.Fatalf("expected *memoryOrderDispatcher, got %T", adOne)
+	}
+	if mOne.maxDispatchesPerTick != 1 {
+		t.Errorf("configured maxDispatchesPerTick = %d, want 1", mOne.maxDispatchesPerTick)
+	}
+
+	// Zero or negative values fall back to the default rather than passing
+	// through: inside the dispatch loop a cap <= 0 means UNCAPPED, so honoring
+	// them would silently disable the cap entirely.
+	for _, bad := range []int{0, -3} {
+		v := bad
+		cfgBad := &config.City{}
+		cfgBad.Orders.MaxDispatchesPerTick = &v
+		adBad := buildOrderDispatcherFromOrderSet(nil, t.TempDir(), cfgBad, aa, events.Discard, &bytes.Buffer{})
+		mBad, ok := adBad.(*memoryOrderDispatcher)
+		if !ok {
+			t.Fatalf("expected *memoryOrderDispatcher, got %T", adBad)
+		}
+		if mBad.maxDispatchesPerTick != defaultMaxOrderDispatchesPerTick {
+			t.Errorf("maxDispatchesPerTick with configured %d = %d, want default %d", bad, mBad.maxDispatchesPerTick, defaultMaxOrderDispatchesPerTick)
+		}
+	}
+}
+
+// A failing exec order recorded only the Go error string — "exit status 1" —
+// while the command's own diagnostic went to the controller log and no further.
+// Live proof: pr-intake-sweep failed 94/94 across three cities for two days and
+// every order.failed event said "exit status 1".
+func TestOrderDispatchExecFailureEventCarriesTheCommandsOutput(t *testing.T) {
+	store := beads.NewMemStore()
+	var rec memRecorder
+	var stderr bytes.Buffer
+
+	const diagnostic = "actor evidence is stale: regenerate the canary"
+	aa := []orders.Order{{
+		Name:     "sweep",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     `printf '%s\n' "` + diagnostic + `" >&2; exit 1`,
+	}}
+
+	m := &memoryOrderDispatcher{
+		aa:      aa,
+		storeFn: func(_ execStoreTarget) (beads.Store, error) { return store, nil },
+		execRun: shellExecRunner,
+		rec:     &rec,
+		stderr:  &stderr,
+		cfg:     &config.City{},
+	}
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+	m.drain(context.Background())
+
+	var msg string
+	for _, e := range rec.events {
+		if e.Type == events.OrderFailed && e.Subject == "sweep" {
+			msg = e.Message
+		}
+	}
+	if msg == "" {
+		t.Fatalf("no order.failed event for sweep; stderr = %q", stderr.String())
+	}
+	if !strings.Contains(msg, diagnostic) {
+		t.Fatalf("order.failed dropped the command's own reason; message = %q", msg)
+	}
+	// The exit status still has to survive alongside it.
+	if !strings.Contains(msg, "exit status 1") {
+		t.Fatalf("order.failed lost the exit status; message = %q", msg)
+	}
+}
+
+// The output now rides the event bus into events.jsonl and SSE, so a secret the
+// command echoes must be scrubbed on the way in, exactly as the log path does.
+func TestOrderDispatchExecFailureEventRedactsSecretsInOutput(t *testing.T) {
+	const secret = "ghp_projectedControllerToken0123456789"
+	t.Setenv("GITHUB_TOKEN", secret)
+	t.Setenv("GH_TOKEN", secret)
+
+	store := beads.NewMemStore()
+	var rec memRecorder
+	var stderr bytes.Buffer
+
+	aa := []orders.Order{{
+		Name:     "leaky",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     `printf '%s\n' "$GITHUB_TOKEN" >&2; exit 1`,
+	}}
+
+	m := &memoryOrderDispatcher{
+		aa:      aa,
+		storeFn: func(_ execStoreTarget) (beads.Store, error) { return store, nil },
+		execRun: shellExecRunner,
+		rec:     &rec,
+		stderr:  &stderr,
+		cfg:     &config.City{},
+	}
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+	m.drain(context.Background())
+
+	for _, e := range rec.events {
+		if e.Type == events.OrderFailed && strings.Contains(e.Message, secret) {
+			t.Fatalf("order.failed leaked a projected token onto the event bus: %q", e.Message)
+		}
+	}
+}
+
+// Output is unbounded — a chatty failing order must not push a megabyte of log
+// into every subscriber's event stream.
+func TestOrderDispatchExecFailureEventBoundsTheOutputItCarries(t *testing.T) {
+	store := beads.NewMemStore()
+	var rec memRecorder
+	var stderr bytes.Buffer
+
+	aa := []orders.Order{{
+		Name:     "chatty",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     `awk 'BEGIN{for(i=0;i<20000;i++) print "noise line " i}' >&2; exit 1`,
+	}}
+
+	m := &memoryOrderDispatcher{
+		aa:      aa,
+		storeFn: func(_ execStoreTarget) (beads.Store, error) { return store, nil },
+		execRun: shellExecRunner,
+		rec:     &rec,
+		stderr:  &stderr,
+		cfg:     &config.City{},
+	}
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+	m.drain(context.Background())
+
+	for _, e := range rec.events {
+		if e.Type == events.OrderFailed && len(e.Message) > maxOrderFailureOutputBytes*2 {
+			t.Fatalf("order.failed message = %d bytes, want bounded near %d", len(e.Message), maxOrderFailureOutputBytes)
+		}
+	}
+}
+
+// TestDispatchWispSubstitutesCallerVarsIntoBeadText is the regression guard for
+// #4668: dispatchWisp must thread the caller's runtime vars into
+// molecule.Instantiate so a caller `--var` renders into the instantiated bead
+// TEXT (Title/Description), not just into compile-time control flow. The var
+// carries a non-empty default ("DEFAULT"), so the pre-fix path — which passed
+// an empty molecule.Options and fell back to defaults — rendered "DEFAULT"
+// instead of the caller value. This test fails on exactly that bug.
+func TestDispatchWispSubstitutesCallerVarsIntoBeadText(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "e-var-text.toml"), `
+formula = "e-var-text"
+version = 1
+
+[vars.subject]
+description = "subject to work on"
+default = "DEFAULT"
+
+[[steps]]
+id = "work"
+title = "Work on {{subject}}"
+description = "Handle {{subject}} now."
+`)
+
+	store := beads.NewMemStore()
+	a := orders.Order{Name: "text-order", Trigger: "manual", Formula: "e-var-text", FormulaLayer: dir}
+
+	m := &memoryOrderDispatcher{
+		rec:      events.Discard,
+		stderr:   lockedStderr(&bytes.Buffer{}),
+		cfg:      &config.City{},
+		cityName: "test-city",
+	}
+	m.dispatchWisp(context.Background(), store, execStoreTarget{}, a, t.TempDir(), "gc-tracking", map[string]string{"subject": "widgets"})
+
+	// The wisp root is a legacy molecule container; the substituted text lives
+	// on the "work" step bead. Find it by its rendered title prefix.
+	all, err := store.List(beads.ListQuery{IncludeClosed: true, AllowScan: true})
+	if err != nil {
+		t.Fatalf("store.List: %v", err)
+	}
+	var work *beads.Bead
+	for i := range all {
+		if strings.HasPrefix(all[i].Title, "Work on") {
+			work = &all[i]
+			break
+		}
+	}
+	if work == nil {
+		var titles []string
+		for _, b := range all {
+			titles = append(titles, b.Title)
+		}
+		t.Fatalf("no step bead with title prefix %q created; titles=%v", "Work on", titles)
+	}
+
+	if !strings.Contains(work.Description, "widgets") {
+		t.Fatalf("step description = %q, want it to contain caller var value \"widgets\"", work.Description)
+	}
+	if !strings.Contains(work.Title, "widgets") {
+		t.Fatalf("step title = %q, want it to contain caller var value \"widgets\"", work.Title)
+	}
+	if strings.Contains(work.Description, "DEFAULT") {
+		t.Fatalf("step description = %q still shows the var default; caller --var did not reach molecule.Instantiate (the #4668 bug)", work.Description)
+	}
+	if strings.Contains(work.Description, "{{subject}}") {
+		t.Fatalf("step description = %q left the placeholder unresolved", work.Description)
 	}
 }

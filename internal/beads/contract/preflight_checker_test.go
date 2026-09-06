@@ -5,13 +5,21 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
-func TestPreflightBlocksNativeOnMetadataPostgres(t *testing.T) {
+// TestPreflightBlocksNativeOnABackendGCDoesNotImplement pins the native-store
+// gate for the shape that replaced postgres: the metadata names a backend gc
+// has no vocabulary for, and every check that can decide says so by name.
+//
+// The connection keys in the fixture are deliberate. They are the shape a
+// linked beads library reads and gc does not, and their presence must change
+// nothing here — the verdict comes from the backend name alone.
+func TestPreflightBlocksNativeOnABackendGCDoesNotImplement(t *testing.T) {
 	scope := "/city"
 	checker := testPreflightChecker(preflightMetadataJSON(`{
 		"backend": "postgres",
@@ -31,36 +39,35 @@ func TestPreflightBlocksNativeOnMetadataPostgres(t *testing.T) {
 	assertCheckOrder(t, result)
 	assertCheckState(t, result, PreflightCheckMetadataBackend, PreflightCheckFail)
 	assertCheckState(t, result, PreflightCheckBDContextAgreement, PreflightCheckPass)
-	assertCheckState(t, result, PreflightCheckContractShape, PreflightCheckPass)
+	assertCheckState(t, result, PreflightCheckContractShape, PreflightCheckFail)
+	for _, id := range []PreflightCheckID{PreflightCheckMetadataBackend, PreflightCheckContractShape} {
+		if summary := findPreflightCheck(t, result, id).Summary; !strings.Contains(summary, `"postgres"`) {
+			t.Errorf("%s summary = %q, want it to name the backend", id, summary)
+		}
+	}
 	assertPreflightReadOnly(t, checker.FS.(*fsys.Fake))
 }
 
-func TestPreflightRedactsPostgresDSN(t *testing.T) {
-	scope := "/city"
-	checker := testPreflightChecker(preflightMetadataJSON(`{
-		"backend": "postgres",
-		"postgres_dsn": "postgres://operator:swordfish@db.example.com/gascity",
-		"project_id": "gc-local"
-	}`), PreflightBDContext{Backend: "postgres"}, "gc-local")
-
-	result, err := checker.Check(scope)
-	if err != nil {
-		t.Fatalf("Check() error = %v", err)
+// TestPreflightRedactsADSNDiagnostic keeps the redaction rule keyed on the
+// shape of the value rather than on any one backend's name: a *_dsn diagnostic
+// is a connection string with a userinfo section whoever wrote it.
+func TestPreflightRedactsADSNDiagnostic(t *testing.T) {
+	details := PreflightDetails{
+		MetadataBackend: "postgres",
+		AdditionalDiagnostics: []PreflightDetailField{
+			{Key: "storage_dsn", Value: "postgres://operator:swordfish@db.example.com/gascity"},
+		},
 	}
-
-	assertPreflightVerdict(t, result, PreflightVerdictDegraded, false)
-	assertCheckState(t, result, PreflightCheckMetadataBackend, PreflightCheckWarn)
-	assertCheckState(t, result, PreflightCheckContractShape, PreflightCheckWarn)
-	check := findPreflightCheck(t, result, PreflightCheckMetadataBackend)
-	if check.Details.PostgresDSNRedacted != "postgres://[REDACTED]" {
-		t.Fatalf("PostgresDSNRedacted = %q, want redacted DSN", check.Details.PostgresDSNRedacted)
+	check := NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckFail, "shape refused", details)
+	if got := check.Details.AdditionalDiagnostics[0].Value; got != "postgres://[REDACTED]" {
+		t.Fatalf("dsn diagnostic = %q, want %q", got, "postgres://[REDACTED]")
 	}
-	data, err := json.Marshal(result)
+	data, err := json.Marshal(check)
 	if err != nil {
 		t.Fatalf("MarshalJSON: %v", err)
 	}
-	if strings.Contains(string(data), "swordfish") || strings.Contains(string(data), "operator:swordfish") {
-		t.Fatalf("serialized result leaked DSN secret: %s", data)
+	if strings.Contains(string(data), "swordfish") {
+		t.Fatalf("serialized check leaked the DSN secret: %s", data)
 	}
 }
 
@@ -480,23 +487,305 @@ func TestCheckVersionCompatSourceBuild(t *testing.T) {
 	tests := []struct {
 		name       string
 		libVersion string
+		replaced   bool
 		ctx        PreflightBDContext
 		want       PreflightCheckState
 	}{
-		{"source build reports (devel) — schema is the signal, pass", "(devel)", validCtx("1.0.5"), PreflightCheckPass},
-		{"confirmed version mismatch still fails", "1.0.5", validCtx("1.0.4"), PreflightCheckFail},
-		{"matching versions pass", "1.0.5", validCtx("1.0.5"), PreflightCheckPass},
-		{"missing bd version is unconfirmable — warn", "1.0.5", validCtx(""), PreflightCheckWarn},
+		{"source build reports (devel) — schema is the signal, pass", "(devel)", false, validCtx("1.0.5"), PreflightCheckPass},
+		{"confirmed version mismatch still fails", "1.0.5", false, validCtx("1.0.4"), PreflightCheckFail},
+		{"matching versions pass", "1.0.5", false, validCtx("1.0.5"), PreflightCheckPass},
+		{"missing bd version is unconfirmable — warn", "1.0.5", false, validCtx(""), PreflightCheckWarn},
+
+		// The live defect (ga-40qh1). This fork replaces the beads module with
+		// the enterprise build, so the linked module reports the replacement's
+		// pseudo-version while bd reports its release. Those two strings can
+		// never be equal, so the compare answered "mismatch" for a question it
+		// was never able to ask.
+		{"enterprise replacement pseudo-version vs bd release — unknown, pass", "0.0.0-20260810084121-1aa7bf160786", true, validCtx("1.1.0"), PreflightCheckPass},
+		// Same shape without a replace: origin/main pins beads at an untagged
+		// commit, so even the unreplaced OSS build reports a pseudo-version.
+		{"pseudo-version without a replace — unknown, pass", "1.1.1-0.20260805093327-bf97b73749ac", false, validCtx("1.1.0"), PreflightCheckPass},
+		// A replacement module may carry a real tag. Its numbering belongs to a
+		// different module, so it is still not comparable to bd's release.
+		{"tagged replacement module — unknown, pass", "2.4.0", true, validCtx("1.1.0"), PreflightCheckPass},
+		// A local-path replace records no version at all.
+		{"replaced with no recorded version — unknown, pass", "", true, validCtx("1.1.0"), PreflightCheckPass},
+
+		// The other direction: an unreplaced release pair that genuinely
+		// disagrees must still fail, including against the live bd version.
+		{"unreplaced release skew still fails", "1.1.1", false, validCtx("1.1.0"), PreflightCheckFail},
+		{"unreplaced exact match still passes", "1.1.0", false, validCtx("1.1.0"), PreflightCheckPass},
+		{"v-prefixed unreplaced release skew still fails", "v1.2.0", false, validCtx("v1.1.0"), PreflightCheckFail},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := PreflightChecker{BeadsLibraryVersion: tt.libVersion}
+			c := PreflightChecker{BeadsLibraryVersion: tt.libVersion, BeadsLibraryReplaced: tt.replaced}
 			got := c.checkVersionCompat(tt.ctx, nil)
 			if got.ID != PreflightCheckVersionCompat {
 				t.Fatalf("ID = %q, want %q", got.ID, PreflightCheckVersionCompat)
 			}
 			if got.State != tt.want {
 				t.Fatalf("state = %q, want %q (summary: %q)", got.State, tt.want, got.Summary)
+			}
+		})
+	}
+}
+
+// TestCheckVersionCompatSummariesAreStableWhereItAlreadyPassed pins the exact
+// wording of every outcome that existed before ga-40qh1. Widening the "unknown"
+// set must be invisible to the scopes the check already answered — a summary
+// drift here would change `gc doctor` output and the recorded fallback reason
+// for scopes that were never broken.
+func TestCheckVersionCompatSummariesAreStableWhereItAlreadyPassed(t *testing.T) {
+	validCtx := func(bdVersion string) PreflightBDContext {
+		return PreflightBDContext{Backend: "dolt", DoltMode: "server", BDVersion: bdVersion, SchemaVersion: 50}
+	}
+	tests := []struct {
+		name       string
+		libVersion string
+		ctx        PreflightBDContext
+		err        error
+		want       string
+	}{
+		{"unreachable bd context", "1.0.5", PreflightBDContext{}, errors.New("not a git repository"), "bd context is unreachable; cannot confirm bd/beads version compatibility"},
+		{"no schema version", "1.0.5", PreflightBDContext{BDVersion: "1.0.5"}, nil, "bd context did not report a schema version"},
+		{"missing bd version", "1.0.5", validCtx(""), nil, "bd/beads version compatibility could not be confirmed"},
+		{"source build", "(devel)", validCtx("1.0.5"), nil, "bd/beads schema compatible; linked library version unconfirmed (source build)"},
+		{"matching releases", "1.0.5", validCtx("1.0.5"), nil, "bd and linked beads library versions match"},
+		{"confirmed mismatch", "1.0.5", validCtx("1.0.4"), nil, "bd version differs from linked beads library version"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := PreflightChecker{BeadsLibraryVersion: tt.libVersion}
+			if got := c.checkVersionCompat(tt.ctx, tt.err); got.Summary != tt.want {
+				t.Fatalf("summary = %q, want %q", got.Summary, tt.want)
+			}
+		})
+	}
+}
+
+// TestPreflightEligibleOnReplacedBeadsModuleWithReadableBDContext is the live
+// shape from ga-40qh1: a rig scope IS a git repo, so `bd context` succeeds and
+// every check can actually run. Before the fix the version compare was the only
+// FAIL, and it fired for a question it could not ask — dropping a healthy scope
+// to BdStore, which at the time answered listIncludesCompleteDependencies() with
+// a hardcoded false, so its complete-ready cache reads were permanently declined
+// (ga-tgpfm).
+func TestPreflightEligibleOnReplacedBeadsModuleWithReadableBDContext(t *testing.T) {
+	scope := "/city/rigs/gascity"
+	fs := fsys.NewFake()
+	fs.Dirs[filepath.Join(scope, ".beads")] = true
+	fs.Files[filepath.Join(scope, ".beads", "metadata.json")] = []byte(`{
+		"backend": "dolt",
+		"dolt_mode": "server",
+		"dolt_database": "gascity",
+		"project_id": "gc-local"
+	}`)
+	checker := PreflightChecker{
+		FS:                   fs,
+		Provider:             "bd",
+		BeadsLibraryVersion:  "0.0.0-20260810084121-1aa7bf160786",
+		BeadsLibraryReplaced: true,
+		BDContext: func(string) (PreflightBDContext, error) {
+			return PreflightBDContext{Backend: "dolt", DoltMode: "server", BDVersion: "1.1.0", SchemaVersion: 1}, nil
+		},
+		DatabaseProjectID: func(string) (string, bool, error) {
+			return "gc-local", true, nil
+		},
+	}
+
+	result, err := checker.Check(scope)
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+
+	assertPreflightVerdict(t, result, PreflightVerdictEligible, true)
+	assertCheckState(t, result, PreflightCheckVersionCompat, PreflightCheckPass)
+	// Eligibility here is earned by every check passing, not by the
+	// unreachable-bd-context upgrade — bd context was readable.
+	if result.NativeEligibleViaIdentityFallback {
+		t.Errorf("NativeEligibleViaIdentityFallback = true, want false when bd context is readable")
+	}
+	if result.Fallback != "" {
+		t.Errorf("Fallback = %q, want empty for an eligible scope", result.Fallback)
+	}
+}
+
+// TestPreflightBlocksOnRealVersionSkew is the other direction: with no replace
+// and two comparable releases that disagree, the check must still block the
+// native store. Widening "unknown" must not widen "compatible".
+func TestPreflightBlocksOnRealVersionSkew(t *testing.T) {
+	scope := "/city/rigs/gascity"
+	fs := fsys.NewFake()
+	fs.Dirs[filepath.Join(scope, ".beads")] = true
+	fs.Files[filepath.Join(scope, ".beads", "metadata.json")] = []byte(`{
+		"backend": "dolt",
+		"dolt_mode": "server",
+		"dolt_database": "gascity",
+		"project_id": "gc-local"
+	}`)
+	checker := PreflightChecker{
+		FS:                  fs,
+		Provider:            "bd",
+		BeadsLibraryVersion: "1.2.0",
+		BDContext: func(string) (PreflightBDContext, error) {
+			return PreflightBDContext{Backend: "dolt", DoltMode: "server", BDVersion: "1.1.0", SchemaVersion: 1}, nil
+		},
+		DatabaseProjectID: func(string) (string, bool, error) {
+			return "gc-local", true, nil
+		},
+	}
+
+	result, err := checker.Check(scope)
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+
+	assertPreflightVerdict(t, result, PreflightVerdictBlocked, false)
+	assertCheckState(t, result, PreflightCheckVersionCompat, PreflightCheckFail)
+	if result.Fallback != PreflightFallbackBdStore {
+		t.Errorf("Fallback = %q, want %q", result.Fallback, PreflightFallbackBdStore)
+	}
+}
+
+// TestCheckVersionCompatSemverCompatibleNewerBD verifies that a bd release
+// newer than the linked beads library — but semver-compatible with it (same
+// major version, not older) — passes instead of failing an exact-string
+// compare. This is the common Homebrew case: gascity's go.mod pins one beads
+// release, but the `gascity` formula's unversioned `depends_on "beads"`
+// installs whatever is current, which drifts ahead over time
+// (gastownhall/gascity#5164). A differing major version, or an older bd, is
+// still not assumed compatible.
+func TestCheckVersionCompatSemverCompatibleNewerBD(t *testing.T) {
+	validCtx := func(bdVersion string) PreflightBDContext {
+		return PreflightBDContext{Backend: "dolt", DoltMode: "server", BDVersion: bdVersion, SchemaVersion: 50}
+	}
+	tests := []struct {
+		name       string
+		libVersion string
+		ctx        PreflightBDContext
+		want       PreflightCheckState
+	}{
+		{"newer patch, same major.minor — pass", "1.1.0", validCtx("1.1.2"), PreflightCheckPass},
+		{"newer minor, same major — pass", "1.1.0", validCtx("1.2.0"), PreflightCheckPass},
+		{"newer major — still fails, majors are not semver-compatible", "1.1.0", validCtx("2.0.0"), PreflightCheckFail},
+		{"older patch — still fails", "1.1.2", validCtx("1.1.0"), PreflightCheckFail},
+		{"older major — still fails", "2.0.0", validCtx("1.9.9"), PreflightCheckFail},
+		{"v-prefixed newer patch — pass", "v1.1.0", validCtx("v1.1.2"), PreflightCheckPass},
+		{"non-semver bd version — falls back to exact match, fails", "1.1.0", validCtx("not-a-version"), PreflightCheckFail},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := PreflightChecker{BeadsLibraryVersion: tt.libVersion}
+			got := c.checkVersionCompat(tt.ctx, nil)
+			if got.State != tt.want {
+				t.Fatalf("state = %q, want %q (summary: %q)", got.State, tt.want, got.Summary)
+			}
+		})
+	}
+}
+
+// TestPreflightEligibleOnSemverCompatibleNewerBD is the live shape from
+// gastownhall/gascity#5164: Homebrew's unversioned beads dependency installs
+// a newer bd release than gc's pinned go.mod version. Before this fix the
+// version compare was the only FAIL, dropping a healthy scope to the slow
+// per-op BdStore fallback (fork-per-op, degrading order-firing-current and
+// fork-rate) for a difference that was never actually incompatible.
+func TestPreflightEligibleOnSemverCompatibleNewerBD(t *testing.T) {
+	scope := "/city/rigs/gascity"
+	fs := fsys.NewFake()
+	fs.Dirs[filepath.Join(scope, ".beads")] = true
+	fs.Files[filepath.Join(scope, ".beads", "metadata.json")] = []byte(`{
+		"backend": "dolt",
+		"dolt_mode": "server",
+		"dolt_database": "gascity",
+		"project_id": "gc-local"
+	}`)
+	checker := PreflightChecker{
+		FS:                  fs,
+		Provider:            "bd",
+		BeadsLibraryVersion: "1.1.0",
+		BDContext: func(string) (PreflightBDContext, error) {
+			return PreflightBDContext{Backend: "dolt", DoltMode: "server", BDVersion: "1.1.2", SchemaVersion: 1}, nil
+		},
+		DatabaseProjectID: func(string) (string, bool, error) {
+			return "gc-local", true, nil
+		},
+	}
+
+	result, err := checker.Check(scope)
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+
+	assertPreflightVerdict(t, result, PreflightVerdictEligible, true)
+	assertCheckState(t, result, PreflightCheckVersionCompat, PreflightCheckPass)
+	if result.Fallback != "" {
+		t.Errorf("Fallback = %q, want empty for an eligible scope", result.Fallback)
+	}
+}
+
+// TestLinkedBeadsLibraryFromBuildInfo covers the build-info reader that feeds
+// checkVersionCompat in production. A replace directive — of either form — means
+// the recorded version does not describe the code that is actually linked.
+func TestLinkedBeadsLibraryFromBuildInfo(t *testing.T) {
+	dep := func(version string, replace *debug.Module) *debug.BuildInfo {
+		return &debug.BuildInfo{Deps: []*debug.Module{
+			{Path: "github.com/spf13/cobra", Version: "v1.10.2"},
+			{Path: beadsModulePath, Version: version, Replace: replace},
+		}}
+	}
+	tests := []struct {
+		name string
+		info *debug.BuildInfo
+		want beadsLibrary
+	}{
+		{"nil build info", nil, beadsLibrary{}},
+		{"beads is not linked", &debug.BuildInfo{Deps: []*debug.Module{{Path: "github.com/spf13/cobra", Version: "v1.10.2"}}}, beadsLibrary{}},
+		{"plain require", dep("v1.1.0", nil), beadsLibrary{Version: "v1.1.0"}},
+		{
+			"module replace records the replacement's version",
+			dep("v1.1.1-0.20260805093327-bf97b73749ac", &debug.Module{Path: "github.com/gascity/bd-enterprise", Version: "v0.0.0-20260810084121-1aa7bf160786"}),
+			beadsLibrary{Version: "v0.0.0-20260810084121-1aa7bf160786", Replaced: true},
+		},
+		{
+			"local-path replace records no version",
+			dep("v1.1.0", &debug.Module{Path: "../beads"}),
+			beadsLibrary{Replaced: true},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := linkedBeadsLibraryFrom(tt.info); got != tt.want {
+				t.Fatalf("linkedBeadsLibraryFrom() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestComparableReleaseVersion pins the classifier that decides whether the two
+// reported versions name the same kind of thing. Only a released semver tag can
+// be compared to bd's self-reported release.
+func TestComparableReleaseVersion(t *testing.T) {
+	tests := []struct {
+		version string
+		want    bool
+	}{
+		{"", false},
+		{"(devel)", false},
+		{"devel", false},
+		{"unknown", false},
+		{"1.1.0", true},
+		{"v1.1.0", true},
+		{"1.1.0-rc.1", true},
+		{"0.0.0-20260810084121-1aa7bf160786", false},
+		{"1.1.1-0.20260805093327-bf97b73749ac", false},
+		{"1.2.0-pre.0.20260805093327-bf97b73749ac", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.version, func(t *testing.T) {
+			if got := comparableReleaseVersion(tt.version); got != tt.want {
+				t.Fatalf("comparableReleaseVersion(%q) = %v, want %v", tt.version, got, tt.want)
 			}
 		})
 	}

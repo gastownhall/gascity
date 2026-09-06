@@ -21,15 +21,17 @@ import (
 // launches a supported kind into an existing shell pane and registers the
 // name; the name exists only while the agent runs (state file "registered");
 // raw commands are typed into the pane and never register anything. State
-// files drive the scenario (registered / pane_gone / busy), and calls.log
-// records every verb so tests can assert what was — and crucially was NOT —
-// issued (the spawn storm was one placement per reconcile tick).
+// files drive the scenario (registered / pane_gone / busy / name_taken /
+// agent_blocked, plus the startup-delivery verdicts prompt_stalled /
+// prompt_times_out / prompt_blocked and wait_times_out), and calls.log records every verb so
+// tests can assert what was — and crucially was NOT — issued (the spawn storm
+// was one placement per reconcile tick).
 
 var paneBindSession int64
 
 // newFakeHerdrProvider builds a Provider whose client shells out to a fake
-// herdr script. Returns the provider, its session name, and the state dir.
-func newFakeHerdrProvider(t *testing.T) (*Provider, string, string) {
+// herdr script. Returns the provider and the state dir.
+func newFakeHerdrProvider(t *testing.T) (*Provider, string) {
 	t.Helper()
 	session := fmt.Sprintf("gctest-pb-%d-%d", os.Getpid(), atomic.AddInt64(&paneBindSession, 1))
 	state := t.TempDir()
@@ -42,27 +44,64 @@ shift 2
 printf '%s\n' "$*" >> "$STATE/calls.log"
 case "$1_$2" in
 agent_get)
-  if [ -e "$STATE/registered" ]; then
-    printf '%s' '{"result":{"agent":{"name":"'"$3"'","pane_id":"%5","tab_id":"t1","workspace_id":"w1","agent_status":"idle"}}}'
-  else
+  if [ ! -e "$STATE/registered" ]; then
     printf '%s' '{"error":{"code":"agent_not_found","message":"agent target not found"}}'
+  elif [ -e "$STATE/agent_blocked" ]; then
+    printf '%s' '{"result":{"agent":{"name":"'"$3"'","pane_id":"%5","tab_id":"t1","workspace_id":"w1","agent_status":"blocked"}}}'
+  else
+    printf '%s' '{"result":{"agent":{"name":"'"$3"'","pane_id":"%5","tab_id":"t1","workspace_id":"w1","agent_status":"idle"}}}'
   fi ;;
 agent_list)
   printf '%s' '{"result":{"agents":[]}}' ;;
 agent_start)
-  : > "$STATE/agent_started"
-  : > "$STATE/registered"
-  if [ -e "$METADIR/$3/GC_SESSION_ID" ]; then : > "$STATE/meta_seeded_before_launch"; fi
-  if [ -e "$METADIR/$3/GC_HERDR_PANE_ID" ]; then : > "$STATE/bound_before_launch"; fi
-  printf '%s' '{"result":{"agent":{"name":"'"$3"'","pane_id":"%5","tab_id":"t1","workspace_id":"w1","agent_status":"idle"}}}' ;;
+  if [ -e "$STATE/name_taken" ]; then
+    # A concurrent Start won the name and its agent is live: herdr rejects the
+    # launch, agent get then resolves the live holder and its pane probes
+    # busy, so resolveAgentNameTaken adopts instead of reaping.
+    : > "$STATE/registered"
+    : > "$STATE/busy"
+    printf '%s' '{"error":{"code":"agent_name_taken","message":"agent name already registered"}}'
+  else
+    : > "$STATE/agent_started"
+    : > "$STATE/registered"
+    if [ -e "$METADIR/$3/GC_SESSION_ID" ]; then : > "$STATE/meta_seeded_before_launch"; fi
+    if [ -e "$METADIR/$3/GC_HERDR_PANE_ID" ]; then : > "$STATE/bound_before_launch"; fi
+    printf '%s' '{"result":{"agent":{"name":"'"$3"'","pane_id":"%5","tab_id":"t1","workspace_id":"w1","agent_status":"idle"}}}'
+  fi ;;
 agent_wait)
-  printf '%s' '{"result":{"agent":{"name":"'"$3"'","agent_status":"idle"}}}' ;;
+  if [ ! -e "$STATE/registered" ]; then
+    printf '%s' '{"error":{"code":"agent_not_found","message":"agent target not found"}}'
+  elif [ -e "$STATE/wait_times_out" ]; then
+    printf '%s' '{"error":{"code":"timeout","message":"timed out waiting for agent status"}}'
+  else
+    printf '%s' '{"result":{"agent":{"name":"'"$3"'","agent_status":"idle"}}}'
+  fi ;;
 agent_prompt)
-  if [ -e "$STATE/registered" ]; then
+  if [ ! -e "$STATE/registered" ]; then
+    printf '%s' '{"error":{"code":"agent_not_found","message":"agent target not found"}}'
+  elif [ -e "$STATE/prompt_stalled" ]; then
+    # No state change inside herdr's fixed 5000ms window: the submit CR never
+    # reached the TUI and the text sits unsubmitted in an idle input box.
+    printf '%s' '{"error":{"code":"agent_prompt_stalled","message":"no state change observed after submission"}}'
+  elif [ -e "$STATE/prompt_times_out" ]; then
+    # The state-change gate passed (the CR landed) but no --until state was
+    # observed before --timeout. herdr only reports this when --timeout
+    # exceeds its 5000ms window; a shorter one masks the stall as a timeout.
+    printf '%s' '{"error":{"code":"timeout","message":"timed out waiting for agent status"}}'
+  elif [ -e "$STATE/prompt_blocked" ]; then
+    # The first turn opened a confirmation dialog. herdr matches only the
+    # requested --until states, so this settles iff the caller asked for
+    # blocked; otherwise the caller waits out its bound.
+    case "$*" in
+      *"--until blocked"*)
+        : > "$STATE/prompted"
+        printf '%s' '{"result":{"agent":{"name":"'"$3"'","agent_status":"blocked"}}}' ;;
+      *)
+        printf '%s' '{"error":{"code":"timeout","message":"timed out waiting for agent status"}}' ;;
+    esac
+  else
     : > "$STATE/prompted"
     printf '%s' '{"result":{"type":"agent_prompted"}}'
-  else
-    printf '%s' '{"error":{"code":"agent_not_found","message":"agent target not found"}}'
   fi ;;
 pane_run)
   : > "$STATE/busy"
@@ -100,7 +139,12 @@ esac
 	}
 	p := New(session, metaDir, t.TempDir(), time.Second, time.Second)
 	p.c.bin = script
-	return p, session, state
+	// The paste fallback's settle delay guards a real paste racing a real
+	// submit; against a shell script there is no race, and the production 1s
+	// would be per-test wall-clock the resource census cannot see (it counts
+	// only time.Sleep written directly in a _test.go).
+	p.c.settleDelay = time.Millisecond
+	return p, state
 }
 
 // fakeCalls returns the verbs the fake herdr recorded.
@@ -122,23 +166,22 @@ func setState(t *testing.T, state, flag string) {
 
 // listenHerdrSocket plants a live unix listener at the session's socket path so
 // ConfigureServer's serverAlive dial succeeds without launching a real server.
-func listenHerdrSocket(t *testing.T, session string) {
+// Must resolve the path through p.c.socketPath() itself, not a hand-rolled
+// reconstruction — a second copy of that logic silently drifts from the real
+// one (ga-nqlb8q: it did, once socketPath() started honoring XDG_CONFIG_HOME).
+func listenHerdrSocket(t *testing.T, p *Provider) {
 	t.Helper()
-	home, err := os.UserHomeDir()
-	if err != nil {
+	sock := p.c.socketPath()
+	if err := os.MkdirAll(filepath.Dir(sock), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	dir := filepath.Join(home, ".config", "herdr", "sessions", session)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	l, err := net.Listen("unix", filepath.Join(dir, "herdr.sock"))
+	l, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
 		_ = l.Close()
-		_ = os.RemoveAll(dir)
+		_ = os.RemoveAll(filepath.Dir(sock))
 	})
 }
 
@@ -157,7 +200,7 @@ func bindTestPane(t *testing.T, p *Provider, name, mode string) {
 // The storm-killer: with no registry name but the bound pane busy running the
 // agent, IsRunning must stay true so the reconciler never re-issues Start.
 func TestIsRunningSurvivesNameClearViaPaneBinding(t *testing.T) {
-	p, _, state := newFakeHerdrProvider(t)
+	p, state := newFakeHerdrProvider(t)
 	setState(t, state, "busy")
 	bindTestPane(t, p, "gastown__witness", bindModeAgent)
 	if !p.IsRunning("gastown__witness") {
@@ -167,7 +210,7 @@ func TestIsRunningSurvivesNameClearViaPaneBinding(t *testing.T) {
 
 // Without a binding, an unregistered name is a genuinely absent session.
 func TestIsRunningFalseWhenNameClearedAndNoBinding(t *testing.T) {
-	p, _, _ := newFakeHerdrProvider(t)
+	p, _ := newFakeHerdrProvider(t)
 	if p.IsRunning("gastown__witness") {
 		t.Fatal("IsRunning = true with no live name and no pane binding")
 	}
@@ -177,7 +220,7 @@ func TestIsRunningFalseWhenNameClearedAndNoBinding(t *testing.T) {
 // the reconciler can restart it; a bare-shell session in the same pane state
 // IS running (the shell is the session).
 func TestIsRunningModeAwareAtShellPrompt(t *testing.T) {
-	p, _, _ := newFakeHerdrProvider(t)
+	p, _ := newFakeHerdrProvider(t)
 	bindTestPane(t, p, "gastown__witness", bindModeAgent)
 	if p.IsRunning("gastown__witness") {
 		t.Fatal("IsRunning = true for an exited agent (pane at shell prompt); restarts would never happen")
@@ -192,8 +235,8 @@ func TestIsRunningModeAwareAtShellPrompt(t *testing.T) {
 // WITHOUT touching placement: each wrongful placement leaked a pane, which is
 // the unbounded shell storm.
 func TestStartReturnsSessionExistsWithoutPlacementWhenNameCleared(t *testing.T) {
-	p, session, state := newFakeHerdrProvider(t)
-	listenHerdrSocket(t, session)
+	p, state := newFakeHerdrProvider(t)
+	listenHerdrSocket(t, p)
 	setState(t, state, "busy")
 	bindTestPane(t, p, "gastown__witness", bindModeAgent)
 
@@ -211,8 +254,8 @@ func TestStartReturnsSessionExistsWithoutPlacementWhenNameCleared(t *testing.T) 
 // the shell pane (with cwd baked in), `agent start --kind claude --pane`
 // launches into it, and the binding + agent mode are persisted.
 func TestStartKindPathRegistersAndPersistsBinding(t *testing.T) {
-	p, session, state := newFakeHerdrProvider(t)
-	listenHerdrSocket(t, session)
+	p, state := newFakeHerdrProvider(t)
+	listenHerdrSocket(t, p)
 
 	cfg := runtime.Config{
 		Command: "claude --dangerously-skip-permissions",
@@ -247,8 +290,8 @@ func TestStartKindPathRegistersAndPersistsBinding(t *testing.T) {
 // A non-kind command is exec'd through the pane shell (raw path): no herdr
 // agent registration, shell mode persisted, pane still the session handle.
 func TestStartRawPathExecsThroughPaneShell(t *testing.T) {
-	p, session, state := newFakeHerdrProvider(t)
-	listenHerdrSocket(t, session)
+	p, state := newFakeHerdrProvider(t)
+	listenHerdrSocket(t, p)
 
 	cfg := runtime.Config{Command: "python3 worker.py --queue main"}
 	if err := p.Start(context.Background(), "gastown__worker", cfg); err != nil {
@@ -271,8 +314,8 @@ func TestStartRawPathExecsThroughPaneShell(t *testing.T) {
 // invalid_agent_name — a hot retry loop found live), while the sidecar keeps
 // the exact gc name for enumeration.
 func TestStartMapsSessionNameToValidHerdrName(t *testing.T) {
-	p, session, state := newFakeHerdrProvider(t)
-	listenHerdrSocket(t, session)
+	p, state := newFakeHerdrProvider(t)
+	listenHerdrSocket(t, p)
 
 	if err := p.Start(context.Background(), "Indigo--anthony", runtime.Config{Command: "claude"}); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -300,8 +343,8 @@ func TestStartMapsSessionNameToValidHerdrName(t *testing.T) {
 // just the first: reconciler churn can leave several behind, and a survivor
 // lingers forever (its shell pane with it).
 func TestStartRecyclesAllStaleTabs(t *testing.T) {
-	p, session, state := newFakeHerdrProvider(t)
-	listenHerdrSocket(t, session)
+	p, state := newFakeHerdrProvider(t)
+	listenHerdrSocket(t, p)
 	setState(t, state, "stale_tabs")
 	// An existing workspace forces the findTab path (workspace list must hit).
 	oldWorkspaceList := "workspace_list)\n  : > \"$STATE/placement_attempted\"\n  printf '%s' '{\"result\":{\"workspaces\":[]}}' ;;"
@@ -343,7 +386,7 @@ func rewriteFake(t *testing.T, p *Provider, old, replacement string) {
 // closePane never issued ⇒ panes piled up), even for an exited agent whose
 // pane idles at a prompt — and clear the sidecar.
 func TestStopClosesPaneViaBindingWhenNameCleared(t *testing.T) {
-	p, _, state := newFakeHerdrProvider(t)
+	p, state := newFakeHerdrProvider(t)
 	bindTestPane(t, p, "gastown__witness", bindModeAgent)
 
 	if err := p.Stop("gastown__witness"); err != nil {
@@ -361,7 +404,7 @@ func TestStopClosesPaneViaBindingWhenNameCleared(t *testing.T) {
 // must fall back to the bound pane too, or the reconciler still sees
 // Running=false each tick and drives Start.
 func TestObserveLivenessFallsBackToBoundPane(t *testing.T) {
-	p, _, state := newFakeHerdrProvider(t)
+	p, state := newFakeHerdrProvider(t)
 	setState(t, state, "busy")
 	bindTestPane(t, p, "gastown__witness", bindModeAgent)
 
@@ -383,7 +426,7 @@ func TestObserveLivenessFallsBackToBoundPane(t *testing.T) {
 // An exited agent (pane at bare prompt, agent mode) reads as not running so
 // the reconciler restarts it.
 func TestObserveLivenessExitedAgentReadsDead(t *testing.T) {
-	p, _, _ := newFakeHerdrProvider(t)
+	p, _ := newFakeHerdrProvider(t)
 	bindTestPane(t, p, "gastown__witness", bindModeAgent)
 	if got := p.ObserveLiveness("gastown__witness", nil); got.Running || got.Alive {
 		t.Fatalf("ObserveLiveness = %+v for an exited agent; want zero", got)
@@ -394,7 +437,7 @@ func TestObserveLivenessExitedAgentReadsDead(t *testing.T) {
 // sessions never register an agent, so listing by registry alone hides them
 // from every session-enumeration consumer (orphan detection, gc ls).
 func TestListRunningIncludesUnregisteredBoundSessions(t *testing.T) {
-	p, _, state := newFakeHerdrProvider(t)
+	p, state := newFakeHerdrProvider(t)
 	setState(t, state, "busy")
 	for _, name := range []string{"gastown__worker-1", "gastown__worker-2", "other__worker"} {
 		bindTestPane(t, p, name, bindModeShell)
@@ -419,7 +462,7 @@ func TestListRunningIncludesUnregisteredBoundSessions(t *testing.T) {
 
 // A bound session whose pane is gone must not be listed (and is pruned).
 func TestListRunningSkipsGonePanes(t *testing.T) {
-	p, _, state := newFakeHerdrProvider(t)
+	p, state := newFakeHerdrProvider(t)
 	setState(t, state, "pane_gone")
 	bindTestPane(t, p, "gastown__worker-1", bindModeShell)
 	if err := p.SetMeta("gastown__worker-1", metaBoundName, "gastown__worker-1"); err != nil {

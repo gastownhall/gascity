@@ -32,15 +32,15 @@ func TestLintUsesReadonlyModuleDownloads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read Makefile: %v", err)
 	}
-	const readonlyGOFlags = "LINT_READONLY_GOFLAGS = $$(go env GOFLAGS | sed -E 's/(^|[[:space:]])-mod=[^[:space:]]+//g') -mod=readonly"
+	const readonlyGOFlags = "QUALITY_GATE_GOFLAGS = $$(go env GOFLAGS | sed -E 's/(^|[[:space:]])-mod=[^[:space:]]+//g') -mod=readonly"
 	if !strings.Contains(string(makefile), readonlyGOFlags) {
-		t.Fatalf("Makefile must derive LINT_READONLY_GOFLAGS from effective GOFLAGS")
+		t.Fatalf("Makefile must derive QUALITY_GATE_GOFLAGS from effective GOFLAGS")
 	}
 	for target, wantGOFLAGS := range map[string]string{
-		"lint-full":     `GOFLAGS="$(LINT_READONLY_GOFLAGS)"`,
-		"lint-new":      `GOFLAGS="$(LINT_READONLY_GOFLAGS)"`,
-		"lint-changed":  `export GOFLAGS="$(LINT_READONLY_GOFLAGS)"`,
-		"lint-affected": `GOFLAGS="$(LINT_READONLY_GOFLAGS)"`,
+		"lint-full":     `GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
+		"lint-new":      `GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
+		"lint-changed":  `export GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
+		"lint-affected": `GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
 	} {
 		t.Run(target, func(t *testing.T) {
 			body := makeTargetBody(t, string(makefile), target)
@@ -53,9 +53,86 @@ func TestLintUsesReadonlyModuleDownloads(t *testing.T) {
 				t.Fatalf("%s must not rely on a lint CLI module-mode override", target)
 			}
 			if !strings.Contains(body, wantGOFLAGS) {
-				t.Fatalf("%s must scope LINT_READONLY_GOFLAGS to its subprocess tree", target)
+				t.Fatalf("%s must scope QUALITY_GATE_GOFLAGS to its subprocess tree", target)
 			}
 		})
+	}
+}
+
+func TestQualityGateTargetsUseReadonlyModuleDownloads(t *testing.T) {
+	makefile, err := os.ReadFile(filepath.Join(repoRoot(t), "Makefile"))
+	if err != nil {
+		t.Fatalf("read Makefile: %v", err)
+	}
+	const readonlyGOFlags = "QUALITY_GATE_GOFLAGS = $$(go env GOFLAGS | sed -E 's/(^|[[:space:]])-mod=[^[:space:]]+//g') -mod=readonly"
+	if !strings.Contains(string(makefile), readonlyGOFlags) {
+		t.Fatalf("Makefile must normalize QUALITY_GATE_GOFLAGS from effective GOFLAGS")
+	}
+
+	for target, wantGOFLAGS := range map[string]string{
+		"fmt-check":                `GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
+		"fmt-check-changed":        `GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
+		"vet":                      `GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
+		"test":                     `$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
+		"test-fsys-darwin-compile": `$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
+	} {
+		t.Run(target, func(t *testing.T) {
+			if body := makeTargetBody(t, string(makefile), target); !strings.Contains(body, wantGOFLAGS) {
+				t.Fatalf("%s must scope QUALITY_GATE_GOFLAGS to its subprocess tree", target)
+			}
+		})
+	}
+}
+
+func TestFmtCheckDoesNotModifyGoSumWithAmbientWritableModuleMode(t *testing.T) {
+	fixture := newPRStaticScopeFixture(t, map[string]string{
+		"example.go": "package example\n\nfunc Value() int { return 1 }\n",
+	})
+	goSumPath := filepath.Join(fixture.repoRoot, "go.sum")
+	writeTestFile(t, goSumPath, "example.com/dependency v1.0.0 h1:before\n")
+
+	mutatingLint := filepath.Join(t.TempDir(), "golangci-lint")
+	writeExecutable(t, mutatingLint, `#!/bin/sh
+set -eu
+case "${GOFLAGS-}" in
+  *-tags=quality*) ;;
+  *)
+    echo "formatter lost non-module GOFLAGS" >&2
+    exit 1
+    ;;
+esac
+case "${GOFLAGS-}" in
+  *-mod=readonly*) exit 0 ;;
+esac
+printf '%s\n' 'unexpected writable formatter resolution' >> go.sum
+`)
+
+	cmd := makeCommand(
+		"--no-print-directory",
+		"-f", fixture.productionMakefile,
+		"GOLANGCI_LINT="+mutatingLint,
+		"fmt-check",
+	)
+	cmd.Dir = fixture.repoRoot
+	env := fixture.commandEnv()
+	for index, entry := range env {
+		if strings.HasPrefix(entry, "GOFLAGS=") {
+			env[index] = "GOFLAGS=-tags=quality -mod=mod"
+		}
+	}
+	cmd.Env = env
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("fmt-check failed: %v\n%s", err, output)
+	}
+
+	got, err := os.ReadFile(goSumPath)
+	if err != nil {
+		t.Fatalf("read go.sum after fmt-check: %v", err)
+	}
+	const want = "example.com/dependency v1.0.0 h1:before\n"
+	if string(got) != want {
+		t.Fatalf("fmt-check modified go.sum under ambient -mod=mod:\nwant: %q\n got: %q", want, got)
 	}
 }
 
@@ -134,7 +211,12 @@ exit 1
 func makeTargetBody(t *testing.T, makefile, target string) string {
 	t.Helper()
 	prefix := target + ":"
-	start := strings.Index(makefile, prefix)
+	start := strings.Index(makefile, "\n"+prefix)
+	if start >= 0 {
+		start++
+	} else if strings.HasPrefix(makefile, prefix) {
+		start = 0
+	}
 	if start < 0 {
 		t.Fatalf("Makefile has no %s target", target)
 	}

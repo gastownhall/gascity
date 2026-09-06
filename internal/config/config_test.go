@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -236,6 +237,33 @@ read_timeout_millis = -1
 	}
 	if got := err.Error(); !strings.Contains(got, "[dolt] read_timeout_millis must not be negative") {
 		t.Fatalf("Load() error = %q, want read_timeout_millis rejection", got)
+	}
+}
+
+// TestLoadRejectsNegativeDoltWaitTimeoutSeconds pins wait_timeout_seconds to the
+// same non-negative rule as its sibling listener overrides. A negative value in
+// city.toml would load clean and then be discarded by the > 0 resolution guard,
+// so the operator would see the managed default with no diagnostic. The negative
+// escape hatch that suppresses the system variable entirely stays env-only, via
+// GC_DOLT_WAIT_TIMEOUT.
+func TestLoadRejectsNegativeDoltWaitTimeoutSeconds(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "city.toml")
+	if err := os.WriteFile(path, []byte(`
+[workspace]
+name = "bright-lights"
+
+[dolt]
+wait_timeout_seconds = -1
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(fsys.OSFS{}, path)
+	if err == nil {
+		t.Fatal("Load() error = nil, want negative wait_timeout_seconds rejection")
+	}
+	if got := err.Error(); !strings.Contains(got, "[dolt] wait_timeout_seconds must not be negative") {
+		t.Fatalf("Load() error = %q, want wait_timeout_seconds rejection", got)
 	}
 }
 
@@ -1852,7 +1880,7 @@ func TestEffectiveWorkQueryDefault(t *testing.T) {
 
 func TestEffectiveWorkQueryBD105CompatibilityOptIn(t *testing.T) {
 	a := Agent{Name: "mayor"}
-	got := a.EffectiveWorkQueryForBeads(BeadsConfig{BDCompatibility: BeadsBDCompatibility105})
+	got := a.EffectiveWorkQueryFor(QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}})
 	if !strings.Contains(got, `bd ready --include-ephemeral --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --sort oldest --limit=20`) {
 		t.Errorf("EffectiveWorkQueryForBeads(bd-1.0.5) missing include-ephemeral routed probe: %q", got)
 	}
@@ -1970,7 +1998,7 @@ esac
 
 func TestEffectiveAssignedReadyQueryForBeadsBD105Compatibility(t *testing.T) {
 	a := Agent{Name: "worker", Dir: "hello-world"}
-	got := a.EffectiveAssignedReadyQueryForBeads(BeadsConfig{BDCompatibility: BeadsBDCompatibility105})
+	got := a.EffectiveAssignedReadyQueryFor(QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}})
 	if !strings.Contains(got, `bd ready --include-ephemeral --assignee="$id" --json --limit=1`) {
 		t.Fatalf("EffectiveAssignedReadyQueryForBeads(bd-1.0.5) missing include-ephemeral assigned-ready tier: %q", got)
 	}
@@ -2752,11 +2780,11 @@ func TestPoolDemandPredicateSharedWithWorkQuery(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			wq := tt.agent.EffectiveWorkQuery()
 			demand := tt.agent.EffectivePoolDemandQuery()
-			workPredicate := bdReadyPoolDemandShell("--sort oldest --limit=20", false)
+			workPredicate := bdReadyPoolDemandShell("--sort oldest --limit=20", QueryTopology{})
 			if !strings.Contains(wq, workPredicate) {
 				t.Errorf("EffectiveWorkQuery() missing shared predicate %q in %q", workPredicate, wq)
 			}
-			migrationWorkPredicate := bdReadyPoolDemandMigrationShell("--limit=20", false)
+			migrationWorkPredicate := bdReadyPoolDemandMigrationShell("--limit=20", QueryTopology{})
 			if !strings.Contains(wq, migrationWorkPredicate) {
 				t.Errorf("EffectiveWorkQuery() missing shared migration predicate %q in %q", migrationWorkPredicate, wq)
 			}
@@ -2765,11 +2793,11 @@ func TestPoolDemandPredicateSharedWithWorkQuery(t *testing.T) {
 					t.Errorf("EffectiveWorkQuery() missing migration filter fragment %q in %q", want, wq)
 				}
 			}
-			countPredicate := bdReadyPoolDemandShell("--limit 0", false)
+			countPredicate := bdReadyPoolDemandShell("--limit 0", QueryTopology{})
 			if !strings.Contains(demand, countPredicate) {
 				t.Errorf("EffectivePoolDemandQuery() missing shared predicate %q in %q", countPredicate, demand)
 			}
-			migrationCountPredicate := bdReadyPoolDemandMigrationShell("--limit 0", false)
+			migrationCountPredicate := bdReadyPoolDemandMigrationShell("--limit 0", QueryTopology{})
 			if !strings.Contains(demand, migrationCountPredicate) {
 				t.Errorf("EffectivePoolDemandQuery() missing shared migration predicate %q in %q", migrationCountPredicate, demand)
 			}
@@ -4741,6 +4769,30 @@ func TestValidateRigs_Empty(t *testing.T) {
 	}
 }
 
+// TestValidateRigs_DefaultBranchCharset pins the conservative alphabet for
+// default_branch: the value is interpolated into formula variables and
+// pre_start shell lines (GC_DEFAULT_BRANCH='{{.DefaultBranch}}'), so quotes
+// and shell metacharacters — legal in git ref names — are refused at config
+// validation instead of silently breaking every pre_start of the rig's agents.
+func TestValidateRigs_DefaultBranchCharset(t *testing.T) {
+	for _, branch := range []string{"main", "release/v2.1", "user@feature", "wip+x", "a=b"} {
+		rigs := []Rig{{Name: "frontend", Path: "/home/user/frontend", DefaultBranch: branch}}
+		if err := ValidateRigs(rigs, "mc"); err != nil {
+			t.Errorf("ValidateRigs(default_branch=%q): unexpected error: %v", branch, err)
+		}
+	}
+	for _, branch := range []string{"release'2026", `say"hi`, "a b", "x;rm", "$(cmd)", "back`tick"} {
+		rigs := []Rig{{Name: "frontend", Path: "/home/user/frontend", DefaultBranch: branch}}
+		err := ValidateRigs(rigs, "mc")
+		if err == nil {
+			t.Fatalf("ValidateRigs(default_branch=%q): expected shell-unsafe error", branch)
+		}
+		if !strings.Contains(err.Error(), "default_branch") {
+			t.Errorf("error = %q, want mention of default_branch", err)
+		}
+	}
+}
+
 func TestValidateRigs_MissingName(t *testing.T) {
 	rigs := []Rig{{Path: "/path"}}
 	err := ValidateRigs(rigs, "ci")
@@ -5716,7 +5768,7 @@ func runEffectiveWorkQuery(t *testing.T, a Agent, env map[string]string, bdScrip
 
 func runEffectiveWorkQueryForBeads(t *testing.T, a Agent, beads BeadsConfig, env map[string]string, bdScript string) string {
 	t.Helper()
-	return runShellWithFakeBd(t, a.EffectiveWorkQueryForBeads(beads), env, bdScript)
+	return runShellWithFakeBd(t, a.EffectiveWorkQueryFor(QueryTopology{Beads: beads}), env, bdScript)
 }
 
 // runShellWithFakeBd executes shellCmd with a fake `bd` script on PATH so
@@ -5731,16 +5783,43 @@ func runShellWithFakeBd(t *testing.T, shellCmd string, env map[string]string, bd
 		t.Fatalf("write fake bd: %v", err)
 	}
 
-	cmd := exec.Command("sh", "-c", shellCmd)
-	cmd.Env = []string{"PATH=" + tmp + ":" + os.Getenv("PATH")}
+	commandEnv := []string{"PATH=" + tmp + ":" + os.Getenv("PATH")}
 	for k, v := range env {
-		cmd.Env = append(cmd.Env, k+"="+v)
+		commandEnv = append(commandEnv, k+"="+v)
 	}
-	out, err := cmd.Output()
+	stdout, stderr, exit := runShellCommandCapture(t, shellCmd, commandEnv)
+	if exit != 0 {
+		t.Fatalf("run shell with fake bd: exit %d: %s", exit, stderr)
+	}
+	return stdout
+}
+
+// runShellCommandCapture is this package's single test seam for EXECUTING a
+// generated command: it runs command through `sh -c` with exactly env and
+// reports stdout, stderr and exit status separately, failing the test only when
+// the process could not be run at all.
+//
+// Every helper in the package that has to execute a generated command routes
+// through here rather than constructing its own process, which is what keeps
+// the package at one subprocess call site per concern instead of one per helper
+// (test/test-resources.toml: "each process-owning test removes or replaces its
+// source call site").
+func runShellCommandCapture(t *testing.T, command string, env []string) (stdout, stderr string, exit int) {
+	t.Helper()
+	cmd := exec.Command("sh", "-c", command)
+	cmd.Env = env
+	var outBuf, errBuf strings.Builder
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	err := cmd.Run()
 	if err != nil {
-		t.Fatalf("run shell with fake bd: %v", err)
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("run shell command: %v", err)
+		}
+		exit = exitErr.ExitCode()
 	}
-	return string(out)
+	return outBuf.String(), errBuf.String(), exit
 }
 
 func runLifecycleHookCommand(t *testing.T, command string, bdScript string) string {
@@ -6332,7 +6411,7 @@ func TestEffectiveOnDeathForBeadsBD105ReopensEphemeralInProgressWork(t *testing.
 		PoolName: "hello-world/dog",
 	}
 
-	log := runLifecycleHookCommand(t, a.EffectiveOnDeathForBeads(BeadsConfig{BDCompatibility: BeadsBDCompatibility105}), `#!/bin/sh
+	log := runLifecycleHookCommand(t, a.EffectiveOnDeathFor(QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}}), `#!/bin/sh
 set -eu
 case "$1" in
   list)
@@ -6507,7 +6586,7 @@ func TestEffectiveOnBootForBeadsBD105ReopensOwnerlessEphemeralRoutedWork(t *test
 		PoolName: "hello-world/dog",
 	}
 
-	log := runLifecycleHookCommand(t, a.EffectiveOnBootForBeads(BeadsConfig{BDCompatibility: BeadsBDCompatibility105}), `#!/bin/sh
+	log := runLifecycleHookCommand(t, a.EffectiveOnBootFor(QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}}), `#!/bin/sh
 set -eu
 case "$1" in
   list)
@@ -8314,5 +8393,24 @@ func TestDurationFloorOr(t *testing.T) {
 				t.Errorf("durationFloorOr(%q, %v, %v) = %v, want %v", tc.raw, tc.def, floor, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestDefaultDoltReadTimeoutMillisPreservesOuterDeadlineHeadroom guards the
+// ga-lfcx72 production-safety trade-off: read_timeout was raised from 15000
+// to fix #5383 (the Reaper's own maintenance query was killed mid-row by the
+// old 15s bound), but must stay at less than half of
+// DefaultDoltWriteTimeoutMillis (the prior emergency-workaround value) so
+// #3101's independent outer wall-clock deadline still has meaningful
+// headroom to catch a genuine connection pile-up (#3626) before read_timeout
+// alone would. A future edit that raises the default without weighing this
+// trade-off should fail here, not surface as a production incident.
+func TestDefaultDoltReadTimeoutMillisPreservesOuterDeadlineHeadroom(t *testing.T) {
+	if DefaultDoltReadTimeoutMillis != 120000 {
+		t.Fatalf("DefaultDoltReadTimeoutMillis = %d, want 120000 (see ga-lfcx72: raised from 15000 to fix #5383)", DefaultDoltReadTimeoutMillis)
+	}
+	if DefaultDoltReadTimeoutMillis*2 > DefaultDoltWriteTimeoutMillis {
+		t.Fatalf("DefaultDoltReadTimeoutMillis (%d) leaves less than half of DefaultDoltWriteTimeoutMillis (%d) as headroom for #3101's outer wall-clock deadline to catch a stuck connection pile-up first",
+			DefaultDoltReadTimeoutMillis, DefaultDoltWriteTimeoutMillis)
 	}
 }

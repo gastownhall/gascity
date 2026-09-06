@@ -79,6 +79,60 @@ func TestBuildAwakeInputFromReconcilerReadsInfoSnapshot(t *testing.T) {
 	}
 }
 
+func TestBuildAwakeInputFromReconcilerPrefersFreshCompletedPoolSession(t *testing.T) {
+	decisionTime := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	const template = "hello-world/polecat"
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "polecat", Dir: "hello-world"}},
+	}
+	sessionInfo := func(id, name string, createdAt time.Time) session.Info {
+		return sessiontest.SeedBead(t, beads.Bead{
+			ID:        id,
+			Status:    "open",
+			Type:      sessionBeadType,
+			CreatedAt: createdAt,
+			Labels:    []string{sessionBeadLabel, "template:" + template},
+			Metadata: map[string]string{
+				"state":                "awake",
+				"state_reason":         "creation_complete",
+				"creation_complete_at": createdAt.Format(time.RFC3339),
+				"session_name":         name,
+				"template":             template,
+				"session_origin":       "ephemeral",
+				poolManagedMetadataKey: boolMetadata(true),
+			},
+		})
+	}
+	oldInfo := sessionInfo("mc-old", "polecat-old", decisionTime.Add(-time.Hour))
+	freshInfo := sessionInfo("mc-fresh", "polecat-fresh", decisionTime.Add(-time.Minute))
+
+	input := buildAwakeInputFromReconciler(
+		cfg,
+		"",
+		[]session.Info{oldInfo, freshInfo},
+		map[string]int{template: 1},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		runtime.NewFake(),
+		decisionTime,
+	)
+	if input.SessionBeads[0].PostCreateProtected {
+		t.Fatal("old session unexpectedly marked post-create protected")
+	}
+	if !input.SessionBeads[1].PostCreateProtected {
+		t.Fatal("fresh session was not marked post-create protected")
+	}
+
+	decisions := ComputeAwakeSet(input)
+	assertAsleep(t, decisions, "polecat-old")
+	assertAwake(t, decisions, "polecat-fresh")
+}
+
 // TestBuildAwakeInputFromReconcilerCanonicalizesLegacyBoundTemplate pins the
 // bridge-side identity normalization for adopted legacy-bound session beads.
 // A bead persisted under a removed binding ("gascity-packs/gc.implementation-worker")
@@ -410,6 +464,105 @@ func TestBuildAwakeInputFromReconciler_InProgressAssignedBeadStillWakes(t *testi
 	got := decisions["gc__run-operator-mc-1"]
 	if !got.ShouldWake || got.Reason != "assigned-work" {
 		t.Fatalf("in-progress assigned bead should wake session; got decision = %+v", got)
+	}
+}
+
+// TestBuildAwakeInputFromReconciler_BlockedInProgressBeadDoesNotWake pins the
+// AwakeWorkBead.Blocked population expression, including its nil guard. Blocked
+// is derived only for in_progress work — open work's blocker state is already
+// folded into Ready — and a nil IsBlocked (what minimum-supported bd v1.0.4
+// produces, and what any store that omits the projection produces) must fail
+// open to not-blocked. That fail-open default is what makes the wake-side
+// narrowing unable to over-suppress: absent an explicit blocked verdict, the
+// session keeps waking exactly as it did before.
+func TestBuildAwakeInputFromReconciler_BlockedInProgressBeadDoesNotWake(t *testing.T) {
+	tests := []struct {
+		name        string
+		status      string
+		isBlocked   *bool
+		wantBlocked bool
+		wantWake    bool
+	}{
+		{
+			name:        "in_progress with is_blocked=true is blocked and does not wake",
+			status:      "in_progress",
+			isBlocked:   boolPtr(true),
+			wantBlocked: true,
+			wantWake:    false,
+		},
+		{
+			name:        "in_progress with nil is_blocked fails open and still wakes",
+			status:      "in_progress",
+			isBlocked:   nil,
+			wantBlocked: false,
+			wantWake:    true,
+		},
+		{
+			// Open work routes through Ready, so its blocker state must not be
+			// double-counted into Blocked. With readyAssignedFlags omitted the
+			// bead is not ready, so it does not wake — via Ready, not Blocked.
+			name:        "open with is_blocked=true is not marked blocked",
+			status:      "open",
+			isBlocked:   boolPtr(true),
+			wantBlocked: false,
+			wantWake:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			now := time.Now().UTC()
+			cfg := &config.City{Agents: []config.Agent{{Name: "gc.run-operator"}}}
+			sessionBead := beads.Bead{
+				ID:     "mc-session-1",
+				Status: "open",
+				Type:   "session",
+				Metadata: map[string]string{
+					"state":        "active",
+					"session_name": "gc__run-operator-mc-1",
+					"template":     "gc.run-operator",
+				},
+			}
+			work := beads.Bead{
+				ID:        "ga-active",
+				Status:    tt.status,
+				Assignee:  "gc__run-operator-mc-1",
+				IsBlocked: tt.isBlocked,
+			}
+
+			input := buildAwakeInputFromReconciler(
+				cfg,
+				"",
+				[]session.Info{sessiontest.SeedBead(t, sessionBead)},
+				nil,
+				nil,
+				nil,
+				nil,
+				nil,
+				[]beads.Bead{work},
+				nil, // readyAssignedFlags omitted entirely
+				nil,
+				runtime.NewFake(),
+				now,
+			)
+
+			if len(input.WorkBeads) != 1 {
+				t.Fatalf("WorkBeads = %+v, want exactly one bead", input.WorkBeads)
+			}
+			if got := input.WorkBeads[0].Blocked; got != tt.wantBlocked {
+				t.Errorf("WorkBeads[0].Blocked = %v, want %v", got, tt.wantBlocked)
+			}
+
+			decisions := ComputeAwakeSet(input)
+			got := decisions["gc__run-operator-mc-1"]
+			if tt.wantWake {
+				if !got.ShouldWake || got.Reason != "assigned-work" {
+					t.Fatalf("session should wake on assigned-work; got decision = %+v", got)
+				}
+			} else if got.ShouldWake {
+				t.Fatalf("session should stay asleep; got decision = %+v", got)
+			}
+		})
 	}
 }
 

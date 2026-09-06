@@ -26,6 +26,24 @@ source "$repo_root/scripts/lib/common.sh"
 # shellcheck source=lib/test-slice.sh
 source "$repo_root/scripts/lib/test-slice.sh"
 gc_test_slice_reexec "$repo_root/scripts/test-go-test-shard" "$@"
+# shellcheck source=lib/harness-reap.sh
+source "$repo_root/scripts/lib/harness-reap.sh"
+
+# This shard owns its product run's process tree. Without these traps a
+# terminated runner leaves the test binary running under init, which is how
+# kit-k72d ended up paying ~1 core for 5h34m (gas-px0). The signal traps tear
+# the group down and then re-raise, so the runner's own exit status still
+# reports the signal to its caller.
+gc_shard_on_signal() {
+  local sig="$1"
+  gc_harness_terminate_group "${gc_harness_supervised_pgid:-}"
+  trap - "$sig"
+  kill -"$sig" $$
+}
+trap 'gc_harness_terminate_group "${gc_harness_supervised_pgid:-}"' EXIT
+trap 'gc_shard_on_signal INT' INT
+trap 'gc_shard_on_signal TERM' TERM
+trap 'gc_shard_on_signal HUP' HUP
 
 timeout="${GO_TEST_TIMEOUT:-20m}"
 
@@ -212,8 +230,30 @@ join_regex() {
 regex="^($(join_regex "${selected[@]}"))$"
 echo "Running ${test_pkg} shard ${shard_index} of ${shard_total} (${#selected[@]} tests)"
 printf '  %s\n' "${selected[@]}"
+# External watchdog budget. `-timeout` bounds only the test binary, and only
+# while go's own timeout goroutine can still be scheduled — the failure this
+# guards against is precisely one that defeats it. The budget therefore adds a
+# grace on top of the go timeout, wide enough to cover the build that precedes
+# the run under a full parallel fan-out. GO_TEST_WATCHDOG_GRACE=off disables
+# the watchdog; an unparseable timeout leaves it disarmed rather than firing at
+# a guessed budget.
+watchdog_deadline=""
+watchdog_quit_grace=30
+watchdog_grace="${GO_TEST_WATCHDOG_GRACE:-10m}"
+if [[ "$watchdog_grace" != "off" ]]; then
+  if timeout_seconds="$(gc_harness_duration_seconds "$timeout")" &&
+    grace_seconds="$(gc_harness_duration_seconds "$watchdog_grace")"; then
+    watchdog_deadline=$(( timeout_seconds + grace_seconds ))
+  else
+    echo "harness watchdog disarmed: GO_TEST_TIMEOUT=${timeout} GO_TEST_WATCHDOG_GRACE=${watchdog_grace} is not a <n>[s|m|h] duration" >&2
+  fi
+fi
+
+shard_label="${test_pkg#./} shard ${shard_index} of ${shard_total}"
 if [[ -n "${GO_TEST_TIMING_FILE:-}" ]]; then
-  run_observable_go_test "${go_test_args[@]}" "$test_pkg" -run "$regex"
+  gc_harness_run_supervised "$shard_label" "$watchdog_deadline" "$watchdog_quit_grace" -- \
+    run_observable_go_test "${go_test_args[@]}" "$test_pkg" -run "$regex"
 else
-  run_go_test "${go_test_args[@]}" "$test_pkg" -run "$regex"
+  gc_harness_run_supervised "$shard_label" "$watchdog_deadline" "$watchdog_quit_grace" -- \
+    run_go_test "${go_test_args[@]}" "$test_pkg" -run "$regex"
 fi

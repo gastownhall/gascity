@@ -16,7 +16,7 @@ import "testing"
 func TestDecodeHookClaimBeadsToleratesNonStringMetadata(t *testing.T) {
 	output := `[{"id":"gcw-1","metadata":{"refinery_reviewed":true,"count":42,"note":"ok"}}]`
 
-	got, err := decodeHookClaimBeads(output)
+	got, _, err := decodeHookClaimBeads(output)
 	if err != nil {
 		t.Fatalf("decodeHookClaimBeads returned error on non-string metadata: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestDecodeHookClaimBeadsToleratesNonStringMetadata(t *testing.T) {
 func TestDecodeHookClaimBeadsOneBadBeadDoesNotPoisonBatch(t *testing.T) {
 	output := `[{"id":"a","metadata":{"note":"fine"}},{"id":"b","metadata":{"gc.parked":true}},{"id":"c"}]`
 
-	got, err := decodeHookClaimBeads(output)
+	got, _, err := decodeHookClaimBeads(output)
 	if err != nil {
 		t.Fatalf("decodeHookClaimBeads returned error: %v", err)
 	}

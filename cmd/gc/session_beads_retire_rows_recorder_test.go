@@ -67,7 +67,7 @@ func TestRetireDuplicateRows_RecordsTypedRetirementForShadow(t *testing.T) {
 		{Info: sessiontest.SeedBead(t, mustGet(t, store, loser))},
 	}
 
-	retireDuplicateConfiguredNamedSessionRows(store, nil, runtime.NewFake(), cfg, cityName, rows, now, nil)
+	retireDuplicateConfiguredNamedSessionRows("", store, nil, runtime.NewFake(), cfg, cityName, rows, now, nil)
 
 	// The loser's typed retirement must have recorded the compared canonical-identity
 	// clears; the winner must not have been retired.

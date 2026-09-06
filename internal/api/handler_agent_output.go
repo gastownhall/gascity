@@ -75,7 +75,7 @@ func (s *Server) resolveAgentTranscript(name string, agentCfg config.Agent) (*ag
 		}
 	}
 	if state.sessionID != "" {
-		if store := s.state.CityBeadStore(); store != nil {
+		if store := s.state.SessionsBeadStore().Store; store != nil {
 			if catalog, err := s.workerSessionCatalog(store); err == nil {
 				if info, err := catalog.Get(state.sessionID); err == nil {
 					state.sessionKey = strings.TrimSpace(info.SessionKey)
@@ -84,7 +84,7 @@ func (s *Server) resolveAgentTranscript(name string, agentCfg config.Agent) (*ag
 		}
 	}
 
-	factory, err := s.workerFactory(s.state.CityBeadStore())
+	factory, err := s.workerFactory(s.state.SessionsBeadStore().Store)
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +103,7 @@ func (s *Server) trySessionLogOutputHuma(name string, agentCfg config.Agent, tai
 	if transcriptState.path == "" {
 		return nil, nil
 	}
-	factory, err := s.workerFactory(s.state.CityBeadStore())
+	factory, err := s.workerFactory(s.state.SessionsBeadStore().Store)
 	if err != nil {
 		return nil, err
 	}
@@ -223,7 +223,7 @@ func (s *Server) agentWorkerHandle(name string, cfg *config.City) agentPeekHandl
 		return nil
 	}
 	sessionName := agentSessionName(s.state.CityName(), name, cfg.Workspace.SessionTemplate)
-	handle, _ := s.workerHandleForSessionTarget(s.state.CityBeadStore(), sessionName)
+	handle, _ := s.workerHandleForSessionTarget(s.state.SessionsBeadStore().Store, sessionName)
 	return handle
 }
 

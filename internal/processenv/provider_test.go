@@ -110,6 +110,50 @@ func TestProviderProcessPassthroughEnvKeepsExplicitLocaleAndXDG(t *testing.T) {
 	}
 }
 
+// The controller token is controller scope. Every session-env builder starts
+// from this map, and the map is an OVERLAY on an environment the child already
+// inherits — the tmux server's global env, or os.Environ() on the
+// subprocess/ACP paths — so an omitted key is an inherited key.
+// Present-and-empty is the only value that withholds it.
+func TestProviderProcessPassthroughEnvPinsControllerOnlyKeysEmpty(t *testing.T) {
+	for _, key := range ControllerOnlyEnvKeys {
+		t.Setenv(key, "controller-scope-value")
+	}
+
+	got := ProviderProcessPassthroughEnv()
+
+	for _, key := range ControllerOnlyEnvKeys {
+		val, ok := got[key]
+		if !ok {
+			t.Errorf("ProviderProcessPassthroughEnv() omits %s; want present and empty so it overrides the inherited value", key)
+			continue
+		}
+		if val != "" {
+			t.Errorf("ProviderProcessPassthroughEnv()[%s] = %q, want empty", key, val)
+		}
+	}
+}
+
+// Pinning the keys is not enough on its own: config-authored values are expanded
+// against the controller process, so "$GC_CONTROLLER_TOKEN" would copy the token
+// into a session variable no key-level guard is watching.
+func TestExpandSessionEnvValueMasksControllerOnlyKeys(t *testing.T) {
+	t.Setenv("GC_CONTROLLER_TOKEN", "super-secret-controller-token")
+	t.Setenv("GC_CONTROLLER_TRACE", "on")
+
+	for _, tc := range []struct{ in, want string }{
+		{"$GC_CONTROLLER_TOKEN", ""},
+		{"${GC_CONTROLLER_TOKEN}", ""},
+		{"Bearer $GC_CONTROLLER_TOKEN", "Bearer "},
+		{"$GC_CONTROLLER_TRACE", "on"},
+		{"trace=${GC_CONTROLLER_TRACE}", "trace=on"},
+	} {
+		if got := ExpandSessionEnvValue(tc.in); got != tc.want {
+			t.Errorf("ExpandSessionEnvValue(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 // TZ passes through to spawned provider sessions so in-session time
 // reasoning (e.g. `gc order check`) agrees with the supervisor's wall clock
 // instead of defaulting to UTC in the constructed env.

@@ -3,9 +3,12 @@ description: Install the shared Ubuntu dependencies for Gas City CI jobs
 
 inputs:
   go-version:
-    description: Go version to install
+    description: >-
+      Go version to install. Empty (the default) reads the version from go.mod,
+      so the toolchain can never skew from the module directive. Pass an
+      explicit version only to test against a different toolchain.
     required: false
-    default: "1.26.5"
+    default: ""
   node-version:
     description: Node.js version to install
     required: false
@@ -34,6 +37,7 @@ runs:
     - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
       with:
         go-version: ${{ inputs.go-version }}
+        go-version-file: ${{ inputs.go-version == '' && 'go.mod' || '' }}
 
     - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
       with:

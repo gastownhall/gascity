@@ -203,7 +203,7 @@ type Info struct {
 
 	// --- trigger / brain-parent cluster (controller read surface) ---
 	//
-	// poolInFlightNewRequests stamps these onto the new-tier SessionRequest it
+	// poolNewDemandRequests stamps these onto the new-tier SessionRequest it
 	// emits for a pool-managed creating session. Raw mirrors of the gc.* keys.
 	// Additive, internal-only (absent from the HTTP wire).
 	TriggerBeadID       string // gc.trigger_bead_id (raw)
@@ -449,6 +449,13 @@ type Info struct {
 	// the raw string (!= "" && != "0"), which the int form cannot reproduce (it collapses
 	// missing/"0"/malformed all to 0); the mirror preserves that distinction for Step 6b.
 	WakeAttemptsMetadata string // wake_attempts (raw)
+	// WakeRefusedEventAt is the RAW wake_refused_event_at metadata — the
+	// idempotency marker emitSessionWakeRefused checks (trimmed != "") before
+	// firing session.wake_refused, so repeated reconciler ticks on the same
+	// unserved explicit wake request emit only once. Mirrors
+	// StrandedEventEmittedAt's guard pattern. Cleared by ClearWakeBlockersPatch
+	// alongside wake_attempts so a fresh explicit wake gets its own emission.
+	WakeRefusedEventAt string // wake_refused_event_at (raw)
 	// ProviderKind is the RAW provider_kind metadata, verbatim — the provider
 	// FAMILY marker (claude/codex/gemini) stamped from ResolvedProvider, distinct
 	// from Provider (the concrete provider name). The session-logs / mcp-integration
@@ -882,6 +889,7 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			"resume_flag":        resume.ResumeFlag,
 			"resume_style":       resume.ResumeStyle,
 			"resume_command":     resume.ResumeCommand,
+			"session_id_flag":    resume.SessionIDFlag,
 			"generation":         fmt.Sprintf("%d", DefaultGeneration),
 			"continuation_epoch": fmt.Sprintf("%d", DefaultContinuationEpoch),
 			"instance_token":     NewInstanceToken(),
@@ -972,16 +980,9 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 		cfg := hints
 		cfg.Command = startCommand
 		cfg.WorkDir = workDir
-		runtimeAlias := alias
-		if runtimeAlias == "" {
-			runtimeAlias = strings.TrimSpace(extraMeta["agent_name"])
-		}
+		runtimeInfo := m.infoFromBead(b)
 		cfg.Env = mergeEnv(mergeEnv(cfg.Env, env), RuntimeEnvWithSessionContext(
-			b.ID,
-			sessName,
-			runtimeAlias,
-			template,
-			meta["session_origin"],
+			runtimeInfo,
 			DefaultGeneration,
 			DefaultContinuationEpoch,
 			meta["instance_token"],
@@ -1125,6 +1126,7 @@ func (m *Manager) createBeadOnly(spec CreateOptions) (Info, error) {
 			"resume_flag":        resume.ResumeFlag,
 			"resume_style":       resume.ResumeStyle,
 			"resume_command":     resume.ResumeCommand,
+			"session_id_flag":    resume.SessionIDFlag,
 			"generation":         fmt.Sprintf("%d", DefaultGeneration),
 			"continuation_epoch": fmt.Sprintf("%d", DefaultContinuationEpoch),
 			"instance_token":     NewInstanceToken(),
@@ -1286,6 +1288,17 @@ func (m *Manager) Suspend(id string) error {
 
 // RequestFreshRestart marks a session for a controller-owned fresh restart
 // without closing its bead or clearing resume metadata immediately.
+// RequestFreshRestart asks the controller to restart a session with fresh
+// provider conversation state.
+//
+// It records the intent only. Rotation belongs to whichever start path picks
+// the session up, because this is NOT the only way a reset is requested: the
+// reconciler writes the same continuation_reset_pending marker directly when it
+// processes restart_requested, never routing through here. Rotating at request
+// time would therefore rotate on this path and not on that one. Every start
+// path consumes the marker exactly once instead (preWakeCommit for the
+// controller, commitPendingContinuationReset for Submit/Send/Attach/Start), so
+// the epoch advances once per reset however the reset was asked for.
 func (m *Manager) RequestFreshRestart(id string) error {
 	return withSessionMutationLock(id, func() error {
 		if _, _, err := m.sessionBead(id); err != nil {
@@ -1576,15 +1589,19 @@ func (m *Manager) UpdatePresentation(id string, title *string, alias *string) er
 					}
 				}
 				update.Metadata = UpdatedAliasMetadata(b.Metadata, nextAlias)
+				runtimeInfo := m.infoFromBead(b)
+				runtimeInfo.SessionName = sessName
+				nextRuntimeInfo := runtimeInfo
+				nextRuntimeInfo.Alias = nextAlias
 				runtimeRunning := sessName != "" && m.sp != nil && m.sp.IsRunning(sessName)
 				if runtimeRunning {
-					if err := SyncRuntimeAlias(m.sp, sessName, nextAlias); err != nil {
+					if err := SyncRuntimeAlias(m.sp, nextRuntimeInfo); err != nil {
 						return fmt.Errorf("updating runtime alias: %w", err)
 					}
 				}
 				if err := m.store.Update(id, update); err != nil {
 					if runtimeRunning {
-						if rollbackErr := SyncRuntimeAlias(m.sp, sessName, currentAlias); rollbackErr != nil {
+						if rollbackErr := SyncRuntimeAlias(m.sp, runtimeInfo); rollbackErr != nil {
 							log.Printf("session %s: restoring runtime alias %q on %s failed: %v", id, currentAlias, sessName, rollbackErr)
 						}
 					}
@@ -2033,6 +2050,13 @@ func BuildResumeCommand(info Info) string {
 
 	if info.ResumeFlag == "" || info.SessionKey == "" {
 		// Provider doesn't support resume or no key — use stored command.
+		if info.ResumeFlag != "" {
+			// The provider CAN resume but we never captured a session key, so
+			// this "resume" silently starts a fresh conversation. Usually means
+			// the provider spec has no session_id_flag and nothing persisted a
+			// key from the provider side.
+			log.Printf("session %s: resume requested but no session key; starting fresh session (provider=%s resume_flag=%s)", info.ID, info.Provider, info.ResumeFlag)
+		}
 		cmd := info.Command
 		if cmd == "" {
 			cmd = info.Provider

@@ -402,12 +402,17 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 		}
 		return NudgeResult{Delivered: true}, nil
 	}
+	// Not a silent false: a caller that downgrades to the queue has to be able
+	// to say WHY, and "this provider cannot take live delivery" is a permanent
+	// property of the runtime rather than a transient miss. Reporting it as a
+	// bare Delivered:false is how `gc session nudge` came to print an
+	// unqualified success line for a delivery path that is a no-op end to end.
 	if h.providerName != "claude" {
-		return NudgeResult{Delivered: false}, nil
+		return NudgeResult{Delivered: false, Undelivered: NudgeUndeliveredProviderUnsupported}, nil
 	}
 	waiter, ok := h.provider.(runtime.IdleWaitProvider)
 	if !ok {
-		return NudgeResult{Delivered: false}, nil
+		return NudgeResult{Delivered: false, Undelivered: NudgeUndeliveredProviderUnsupported}, nil
 	}
 	if err := waiter.WaitForIdle(ctx, h.sessionName, runtimeHandleWaitIdleTimeout); err != nil {
 		if errors.Is(err, context.Canceled) {
@@ -417,9 +422,9 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return NudgeResult{Delivered: false}, ctxErr
 			}
-			return NudgeResult{Delivered: false}, nil
+			return NudgeResult{Delivered: false, Undelivered: NudgeUndeliveredNoIdleBoundary}, nil
 		}
-		return NudgeResult{Delivered: false}, nil
+		return NudgeResult{Delivered: false, Undelivered: NudgeUndeliveredNoIdleBoundary}, nil
 	}
 	if err := h.nudgeNow(formatRuntimeWaitIdleReminder(req.Source, req.Text)); err != nil {
 		return NudgeResult{}, err

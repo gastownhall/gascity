@@ -2,12 +2,9 @@ package config
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
 )
-
-var validGitHubWebhookSecretEnv = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 const defaultGitHubMergeQueuePolicy = "observe"
 
@@ -155,7 +152,7 @@ func ValidateGitHubPRMonitors(cfg *City) error {
 				return fmt.Errorf("%s %q: notify contains an empty recipient", ctx, name)
 			}
 		}
-		if envName := strings.TrimSpace(monitor.WebhookSecretEnv); envName != "" && !validGitHubWebhookSecretEnv.MatchString(envName) {
+		if envName := strings.TrimSpace(monitor.WebhookSecretEnv); envName != "" && !envVarName.MatchString(envName) {
 			return fmt.Errorf("%s %q: webhook_secret_env must be an environment variable name, got %q", ctx, name, monitor.WebhookSecretEnv)
 		}
 		if monitor.WebhookSecretKey != "" && strings.TrimSpace(monitor.WebhookSecretKey) == "" {

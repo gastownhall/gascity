@@ -236,6 +236,42 @@ func (s *Store) mixedLegStores() []beads.Store {
 // trackingTitle returns the canonical tracking-bead title for a scoped order.
 func trackingTitle(scoped string) string { return labelOrderTitlePrefix + scoped }
 
+// RunLabel returns the canonical label shared by order tracking records and
+// graph roots for scoped.
+func RunLabel(scoped string) string { return labelOrderRunPrefix + scoped }
+
+// ScopedFromRunLabel returns the scoped order name a run label names, and
+// reports whether label is a run label at all.
+//
+// It is RunLabel read backwards, and it exists so a caller that indexes a whole
+// store's order-run evidence in one read — rather than one label-filtered query
+// per order — parses the label with the function that wrote it. The prefix is
+// otherwise spelled as a literal at a dozen call sites, and an index that
+// disagreed with the writer about where the name starts would gate on nothing.
+func ScopedFromRunLabel(label string) (string, bool) {
+	if !strings.HasPrefix(label, labelOrderRunPrefix) {
+		return "", false
+	}
+	scoped := strings.TrimPrefix(label, labelOrderRunPrefix)
+	if scoped == "" {
+		return "", false
+	}
+	return scoped, true
+}
+
+// IsTrackingBead reports whether b is an order tracking record.
+func IsTrackingBead(b beads.Bead) bool { return beadLabelsContain(b.Labels, labelOrderTracking) }
+
+// MaxEventCursor returns the largest event cursor encoded by the supplied
+// order-run bead labels.
+func MaxEventCursor(items []beads.Bead) EventCursor {
+	labels := make([][]string, 0, len(items))
+	for _, item := range items {
+		labels = append(labels, item.Labels)
+	}
+	return EventCursor(MaxSeqFromLabels(labels))
+}
+
 // baseLabels returns the order-run + order-tracking labels every tracking bead
 // carries, plus any outcome labels.
 func baseLabels(scoped string, outcome RunOutcome) []string {
@@ -305,6 +341,10 @@ func (s *Store) CloseRun(runID, reason string) error {
 	return nil
 }
 
+// DeleteRun removes one tracking record. Retention owns the selection policy;
+// this method only confines the persistence operation to the orders front door.
+func (s *Store) DeleteRun(runID string) error { return s.store.Delete(runID) }
+
 // CreateRunClosed creates a tracking bead, optionally stamps an event cursor and
 // outcome, then closes it — the cooldown-advance-only path used by manual
 // `gc order run`. The bead's CreatedAt advances the cooldown clock, and it is
@@ -345,17 +385,30 @@ func (s *Store) CreateRunClosed(scoped string, outcome RunOutcome, cursor *Event
 // `gc order history` read (cmd_order.go): it confines the order-run-label List
 // and the bead->OrderRun decode. It reads through the raw store with TierMode
 // TierBoth (unioning wisp + issue tiers), byte-identical to the `gc order
-// history` loop.
+// history` loop. A non-positive limit reads every retained run.
+//
+// The limit is pushed to the backing (AllowBackingCreatedLimit): this read
+// projects a newest-first listing, so the bound is over created_at — the very
+// column the sort key uses — and a bounded backing read returns the same prefix
+// the client-side cut would, up to which of two runs sharing a `created_at`
+// lands on the last row. Fetching the full retained corpus and trimming
+// afterwards is what made `gc order history` cost 22s on a city with 11k+
+// order-run rows (ga-klv). At the limit boundary the backing breaks created_at
+// ties by id ASC rather than the canonical id DESC, so which of two runs sharing
+// a timestamp lands on the last row can differ; for a history listing that is
+// cosmetic, unlike the Cursor read (store_reads.go), whose max-seq reduction is
+// over a different column and therefore must NOT opt in.
 func (s *Store) RecentRuns(scoped string, limit int) ([]OrderRun, error) {
 	if s.store.Store == nil {
 		return nil, nil
 	}
 	beadsList, err := s.store.List(beads.ListQuery{
-		Label:         labelOrderRunPrefix + scoped,
-		Limit:         limit,
-		IncludeClosed: true,
-		Sort:          beads.SortCreatedDesc,
-		TierMode:      beads.TierBoth,
+		Label:                    labelOrderRunPrefix + scoped,
+		Limit:                    limit,
+		IncludeClosed:            true,
+		Sort:                     beads.SortCreatedDesc,
+		TierMode:                 beads.TierBoth,
+		AllowBackingCreatedLimit: true,
 	})
 	if err != nil {
 		return decodeRuns(scoped, beadsList), err
@@ -367,19 +420,27 @@ func (s *Store) RecentRuns(scoped string, limit int) ([]OrderRun, error) {
 // decoded into OrderRun values. It is the typed face of the /v0/orders/feed read
 // it replaces: it confines the order-tracking List and the tracking-bead decode
 // the feed previously performed inline. Beads with no order-run label (which
-// RunFromTrackingBead rejects) are skipped. The query is byte-identical to the
-// feed's prior raw scan — order-tracking label, created-desc, both tiers, and no
-// IncludeClosed so only in-flight/open tracking beads surface. Decoded rows and
-// any list error are returned together (the RecentRuns pattern) so callers keep
-// the feed's err-branch semantics.
-func (s *Store) ListTracking() ([]OrderRun, error) {
+// RunFromTrackingBead rejects) are skipped. Decoded rows and any list error are
+// returned together (the RecentRuns pattern) so callers keep the feed's
+// err-branch semantics.
+//
+// limit is pushed to the backing (AllowBackingCreatedLimit) rather than
+// applied client-side, matching RecentRuns's ga-klv fix: slicing after an
+// unbounded fetch still pays the full scan cost on a city with a large
+// retained tracking-bead corpus. IncludeClosed is always true -- unlike
+// LatestOpenRun's deliberate open-only narrowing, the feed lists completed
+// runs alongside in-flight ones. A non-positive limit means unlimited.
+func (s *Store) ListTracking(limit int) ([]OrderRun, error) {
 	if s.store.Store == nil {
 		return nil, nil
 	}
 	list, err := s.store.List(beads.ListQuery{
-		Label:    labelOrderTracking,
-		Sort:     beads.SortCreatedDesc,
-		TierMode: beads.TierBoth,
+		Label:                    labelOrderTracking,
+		Limit:                    limit,
+		IncludeClosed:            true,
+		Sort:                     beads.SortCreatedDesc,
+		TierMode:                 beads.TierBoth,
+		AllowBackingCreatedLimit: true,
 	})
 	runs := make([]OrderRun, 0, len(list))
 	for _, b := range list {

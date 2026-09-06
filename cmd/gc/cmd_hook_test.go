@@ -314,7 +314,7 @@ work_query = "printf '[{\"id\":\"ga-pool1\",\"status\":\"open\",\"title\":\"work
 func TestHookNoWork(t *testing.T) {
 	runner := func(string, string) (string, error) { return "", nil }
 	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", "", false, runner, &stdout, &stderr)
+	code := doHook("bd ready", "", false, runner, &stdout, &stderr, hookVisibility{})
 	if code != 1 {
 		t.Errorf("doHook(no work) = %d, want 1", code)
 	}
@@ -326,7 +326,7 @@ func TestHookNoWork(t *testing.T) {
 func TestHookHasWork(t *testing.T) {
 	runner := func(string, string) (string, error) { return "hw-1  open  Fix the bug\n", nil }
 	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", "", false, runner, &stdout, &stderr)
+	code := doHook("bd ready", "", false, runner, &stdout, &stderr, hookVisibility{})
 	if code != 0 {
 		t.Errorf("doHook(has work) = %d, want 0", code)
 	}
@@ -787,16 +787,19 @@ func TestDoHookClaimStampsWorkBranch(t *testing.T) {
 }
 
 // TestDoHookClaimSkipsStampWhenBranchUnchanged guards the idempotent path: a
-// claim whose bead already carries the resolved branch performs no stamp write.
+// claim whose bead already carries the resolved branch AND a prior
+// gc.claimed_at performs no stamp write. gc.claimed_at must be preset here too
+// (write-once): without it, this bead's "first claim" would always add the
+// key to the patch and falsely fail the "no write" assertion.
 func TestDoHookClaimSkipsStampWhenBranchUnchanged(t *testing.T) {
 	var stampCalls int
 	runner := func(string, string) (string, error) {
-		return `[{"id":"hw-idem","status":"open","metadata":{"gc.routed_to":"worker","gc.work_branch":"bd-hw-idem"}}]`, nil
+		return `[{"id":"hw-idem","status":"open","metadata":{"gc.routed_to":"worker","gc.work_branch":"bd-hw-idem","gc.claimed_at":"2026-01-01T00:00:00Z"}}]`, nil
 	}
 	ops := hookClaimOps{
 		Runner: runner,
 		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
-			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker", "gc.work_branch": "bd-hw-idem"}}, true, nil
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker", "gc.work_branch": "bd-hw-idem", "gc.claimed_at": "2026-01-01T00:00:00Z"}}, true, nil
 		},
 		ResolveWorkBranch: func(string) string { return "bd-hw-idem" },
 		StampWorkMeta: func(_ context.Context, _ string, _ []string, _, _ string, _ map[string]string) error {
@@ -881,6 +884,103 @@ func TestDoHookClaimRejectsNonJSONWorkQueryOutput(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "requires JSON work_query output") {
 		t.Fatalf("stderr = %q, want JSON requirement diagnostic", stderr.String())
+	}
+}
+
+func TestDoHookClaimToleratesMalformedMetadataBead(t *testing.T) {
+	var claimedID string
+	runner := func(string, string) (string, error) {
+		// First element is undecodable — "status" is a number where beads.Bead
+		// declares a string — so it is skipped; second is plain, claimable pool
+		// work and must still be claimed.
+		//
+		// Deliberately NOT a nested-object metadata value: beads.Bead.Metadata
+		// is a StringMap that coerces those to strings during decode, so such a
+		// bead decodes fine and is claimed normally rather than skipped (the
+		// stronger outcome). The skip path this test guards is for type errors
+		// outside metadata, which that coercion does not repair.
+		return `[
+			{"id":"poison-1","status":5,"metadata":{"gc.routed_to":"worker"}},
+			{"id":"good-1","status":"open","metadata":{"gc.routed_to":"worker"}}
+		]`, nil
+	}
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			claimedID = beadID
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim(malformed+good) = %d, want 0 (poison skipped, good claimed); stderr=%s", code, stderr.String())
+	}
+	if claimedID != "good-1" {
+		t.Fatalf("claimed ID = %q, want good-1 (the well-formed bead)", claimedID)
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "work" || result.Reason != "claimed" || result.BeadID != "good-1" {
+		t.Fatalf("unexpected claim result: %+v", result)
+	}
+	// The skip must be observable (logged) and name the offending bead — a
+	// silently-dropped bead would mask the upstream filer bug.
+	if !strings.Contains(stderr.String(), "poison-1") {
+		t.Fatalf("stderr = %q, want it to log the skipped malformed bead id poison-1", stderr.String())
+	}
+}
+
+func TestDecodeHookClaimBeadsSkipsUndecodableBead(t *testing.T) {
+	// Middle element is undecodable: "status" is a number where beads.Bead
+	// declares a string. The well-formed beads on either side must still
+	// decode, so one bad bead cannot halt dispatch city-wide.
+	//
+	// Deliberately NOT a non-string *metadata* value: beads.Bead.Metadata is a
+	// StringMap that coerces those to strings during decode, so such a bead
+	// decodes successfully and is never skipped — pinned by
+	// TestDecodeHookClaimBeadsToleratesNonStringMetadata and
+	// TestDecodeHookClaimBeadsOneBadBeadDoesNotPoisonBatch. The per-element
+	// split this test covers is what protects the batch from type errors
+	// OUTSIDE metadata, which that coercion does not repair.
+	output := `[
+		{"id":"ok-1","status":"open","metadata":{"gc.routed_to":"worker"}},
+		{"id":"bad-1","status":5},
+		{"id":"ok-2","status":"open"}
+	]`
+	candidates, skipped, err := decodeHookClaimBeads(output)
+	if err != nil {
+		t.Fatalf("decodeHookClaimBeads returned error %v, want nil (one malformed bead must be skipped, not fatal)", err)
+	}
+	gotIDs := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		gotIDs = append(gotIDs, c.ID)
+	}
+	if got, want := strings.Join(gotIDs, ","), "ok-1,ok-2"; got != want {
+		t.Fatalf("decoded candidate ids = %q, want %q", got, want)
+	}
+	if len(skipped) != 1 || skipped[0].ID != "bad-1" {
+		t.Fatalf("skipped = %+v, want exactly one skip naming bad-1", skipped)
+	}
+	if skipped[0].Err == nil {
+		t.Fatal("skipped[0].Err = nil, want the underlying decode error for diagnostics")
+	}
+}
+
+func TestDecodeHookClaimBeadsNonJSONStillErrors(t *testing.T) {
+	// Plain command text (not JSON at all) must remain a hard error — the
+	// per-element tolerance only relaxes decoding within a valid JSON array.
+	if _, _, err := decodeHookClaimBeads("hw-1  open  Fix the bug"); err == nil {
+		t.Fatal("decodeHookClaimBeads(text) = nil error, want a non-JSON error")
 	}
 }
 
@@ -1194,7 +1294,7 @@ func TestDoHookClaimPreassignsContinuationGroupSiblings(t *testing.T) {
 func TestHookCommandError(t *testing.T) {
 	runner := func(string, string) (string, error) { return "", fmt.Errorf("command failed") }
 	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", "", false, runner, &stdout, &stderr)
+	code := doHook("bd ready", "", false, runner, &stdout, &stderr, hookVisibility{})
 	if code != 1 {
 		t.Errorf("doHook(error) = %d, want 1", code)
 	}
@@ -1208,7 +1308,7 @@ func TestHookCommandErrorPrintsPartialOutput(t *testing.T) {
 		return "[]\n", fmt.Errorf("timed out after 15s with partial stdout")
 	}
 	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", "", false, runner, &stdout, &stderr)
+	code := doHook("bd ready", "", false, runner, &stdout, &stderr, hookVisibility{})
 	if code != 1 {
 		t.Errorf("doHook(error with output) = %d, want 1", code)
 	}
@@ -1240,7 +1340,7 @@ func TestShellWorkQueryWithEnvTimeoutReportsPartialOutput(t *testing.T) {
 func TestHookInjectNoWork(t *testing.T) {
 	runner := func(string, string) (string, error) { return "", nil }
 	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", "", true, runner, &stdout, &stderr)
+	code := doHook("bd ready", "", true, runner, &stdout, &stderr, hookVisibility{})
 	if code != 0 {
 		t.Errorf("doHook(inject, no work) = %d, want 0", code)
 	}
@@ -1254,7 +1354,7 @@ func TestHookNoReadyMessagePrintsButExitsOne(t *testing.T) {
 		return "✨ No ready work found (all issues have blocking dependencies)\n", nil
 	}
 	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", "", false, runner, &stdout, &stderr)
+	code := doHook("bd ready", "", false, runner, &stdout, &stderr, hookVisibility{})
 	if code != 1 {
 		t.Errorf("doHook(no-ready-message) = %d, want 1", code)
 	}
@@ -1268,7 +1368,7 @@ func TestHookInjectSuppressesNoReadyMessage(t *testing.T) {
 		return "✨ No ready work found (all issues have blocking dependencies)\n", nil
 	}
 	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", "", true, runner, &stdout, &stderr)
+	code := doHook("bd ready", "", true, runner, &stdout, &stderr, hookVisibility{})
 	if code != 0 {
 		t.Errorf("doHook(inject, no-ready-message) = %d, want 0", code)
 	}
@@ -1280,7 +1380,7 @@ func TestHookInjectSuppressesNoReadyMessage(t *testing.T) {
 func TestHookInjectIsNonIntrusiveWithWork(t *testing.T) {
 	runner := func(string, string) (string, error) { return "hw-1  open  Fix the bug\n", nil }
 	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", "", true, runner, &stdout, &stderr)
+	code := doHook("bd ready", "", true, runner, &stdout, &stderr, hookVisibility{})
 	if code != 0 {
 		t.Errorf("doHook(inject, work) = %d, want 0", code)
 	}
@@ -1296,7 +1396,7 @@ func TestHookInjectDoesNotRunWorkQuery(t *testing.T) {
 		return "hw-1  open  Fix the bug\n", nil
 	}
 	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", "", true, runner, &stdout, &stderr)
+	code := doHook("bd ready", "", true, runner, &stdout, &stderr, hookVisibility{})
 	if code != 0 {
 		t.Errorf("doHook(inject, work) = %d, want 0", code)
 	}
@@ -1548,7 +1648,7 @@ work_query = "printf '[{\"id\":\"hw-1\",\"title\":\"Fix the bug\"}]'"
 	}
 }
 
-func TestHookCommandClaimUsesSessionActorAndPreassignsContinuation(t *testing.T) {
+func TestHookCommandClaimUsesCanonicalActorAndPreassignsContinuation(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 	cityDir := t.TempDir()
@@ -1579,7 +1679,7 @@ case "$*" in
   *"list --json --status=open"*"gc.continuation_group=body"*"gc.root_bead_id=root-1"*)
     printf '[{"id":"hw-claim","status":"open","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.continuation_group":"body"}},{"id":"hw-next","status":"open","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.continuation_group":"body"}},{"id":"hw-other","status":"open","metadata":{"gc.routed_to":"other","gc.root_bead_id":"root-1","gc.continuation_group":"body"}}]'
     ;;
-  *"update --json hw-next --assignee worker-1"*)
+  *"update --json hw-next --assignee session-id-1"*)
     printf '[{"id":"hw-next","status":"open","assignee":"worker-1","metadata":{"gc.routed_to":"worker"}}]'
     ;;
   *"query --json ephemeral=true AND status=open --limit 0"*)
@@ -1602,7 +1702,7 @@ esac
 	t.Setenv("GC_TEMPLATE", "worker")
 	t.Setenv("GC_ALIAS", "worker-1")
 	t.Setenv("GC_SESSION_ID", "session-id-1")
-	t.Setenv("GC_SESSION_NAME", "worker-1")
+	t.Setenv("GC_SESSION_NAME", "test-city--worker-1")
 	t.Setenv("GC_SESSION_ORIGIN", "ephemeral")
 
 	var stdout, stderr bytes.Buffer
@@ -1630,16 +1730,47 @@ esac
 	}
 	logText := string(logData)
 	if !strings.Contains(logText, "actor=worker-1 args=update hw-claim --claim --json") {
-		t.Fatalf("bd claim did not use session BEADS_ACTOR=worker-1; log:\n%s", logText)
+		t.Fatalf("bd claim did not use canonical BEADS_ACTOR=worker-1; log:\n%s", logText)
 	}
 	if !strings.Contains(logText, "actor=worker-1 args=show --json hw-claim") {
-		t.Fatalf("bd canonical read did not use session BEADS_ACTOR=worker-1; log:\n%s", logText)
+		t.Fatalf("bd canonical read did not use BEADS_ACTOR=worker-1; log:\n%s", logText)
 	}
-	if !strings.Contains(logText, "args=update --json hw-next --assignee worker-1") {
-		t.Fatalf("continuation sibling was not preassigned through bd; log:\n%s", logText)
+	// The claim itself is actored and assigned as worker-1 (the alias read paths
+	// query through GC_AGENT), but the continuation pin is a session binding: the
+	// sibling must name GC_SESSION_ID so wake demand and the continuation
+	// backstop can both resolve it back to this session.
+	if !strings.Contains(logText, "args=update --json hw-next --assignee session-id-1") {
+		t.Fatalf("continuation sibling was not preassigned to the session id; log:\n%s", logText)
 	}
 	if strings.Contains(logText, "args=update hw-other --assignee") {
 		t.Fatalf("continuation preassignment crossed route target; log:\n%s", logText)
+	}
+}
+
+func TestHookSessionAgentForQueryPrefersOwnershipIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		alias       string
+		actor       string
+		agent       string
+		sessionName string
+		want        string
+	}{
+		{name: "alias", alias: "rig/worker", actor: "session-id", agent: "stale", sessionName: "rig--worker", want: "rig/worker"},
+		{name: "durable actor fallback", actor: "session-id", agent: "stale", sessionName: "s-session-id", want: "session-id"},
+		{name: "compatibility fallback", agent: "session-id", sessionName: "s-session-id", want: "session-id"},
+		{name: "runtime fallback", sessionName: "rig--worker", want: "rig--worker"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearGCEnv(t)
+			t.Setenv("GC_ALIAS", tc.alias)
+			t.Setenv("BEADS_ACTOR", tc.actor)
+			t.Setenv("GC_AGENT", tc.agent)
+			t.Setenv("GC_SESSION_NAME", tc.sessionName)
+			if got := hookSessionAgentForQuery(); got != tc.want {
+				t.Fatalf("hookSessionAgentForQuery() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -2064,7 +2195,7 @@ func TestHookInjectAlwaysExitsZero(t *testing.T) {
 	// Even on command failure, inject mode exits 0.
 	runner := func(string, string) (string, error) { return "", fmt.Errorf("command failed") }
 	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", "", true, runner, &stdout, &stderr)
+	code := doHook("bd ready", "", true, runner, &stdout, &stderr, hookVisibility{})
 	if code != 0 {
 		t.Errorf("doHook(inject, error) = %d, want 0", code)
 	}
@@ -2079,7 +2210,7 @@ func TestHookPassesWorkQuery(t *testing.T) {
 		return "item-1\n", nil
 	}
 	var stdout, stderr bytes.Buffer
-	doHook("bd ready --assignee=mayor", "/tmp/work", false, runner, &stdout, &stderr)
+	doHook("bd ready --assignee=mayor", "/tmp/work", false, runner, &stdout, &stderr, hookVisibility{})
 	if receivedCmd != "bd ready --assignee=mayor" {
 		t.Errorf("runner command = %q, want %q", receivedCmd, "bd ready --assignee=mayor")
 	}
@@ -2729,7 +2860,7 @@ func TestDoHookNormalizesSingleObjectOutputToArray(t *testing.T) {
 		return `{"id":"bd-1","title":"Work"}`, nil
 	}
 
-	code := doHook("bd ready", ".", false, runner, &stdout, &stderr)
+	code := doHook("bd ready", ".", false, runner, &stdout, &stderr, hookVisibility{})
 	if code != 0 {
 		t.Fatalf("doHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}

@@ -50,7 +50,7 @@ func runInProgressTier(t *testing.T, bdScript string) []map[string]any {
 	}
 	// `printf "[]"` is the terminal fallback the real query uses when no tier
 	// produces a candidate.
-	script := standardAssignedInProgressWorkQueryScript(false) + `printf "[]"`
+	script := standardAssignedInProgressWorkQueryScript(QueryTopology{}) + `printf "[]"`
 	out := runShellWithFakeBd(t, script, map[string]string{"GC_SESSION_ID": "sess-1"}, bdScript)
 
 	var rows []map[string]any
@@ -140,7 +140,7 @@ func TestInProgressTierServesUnparseableCandidateUnchanged(t *testing.T) {
 	const blob = "warning: store not initialized\nargs=list --status in_progress"
 	bdScript := "#!/bin/sh\nprintf '%s' " + shellquote.Quote(blob) + "\n"
 
-	script := standardAssignedInProgressWorkQueryScript(false) + `printf "[]"`
+	script := standardAssignedInProgressWorkQueryScript(QueryTopology{}) + `printf "[]"`
 	out := runShellWithFakeBd(t, script, map[string]string{"GC_SESSION_ID": "sess-1"}, bdScript)
 
 	if out != blob {
@@ -157,7 +157,7 @@ func TestLegacyControlInProgressTierServesUnparseableCandidateUnchanged(t *testi
 	const blob = "warning: store not initialized\nargs=list --status in_progress"
 	bdScript := "#!/bin/sh\nprintf '%s' " + shellquote.Quote(blob) + "\n"
 
-	script := legacyControlAssignedInProgressWorkQueryScript(false) + `printf "[]"`
+	script := legacyControlAssignedInProgressWorkQueryScript(QueryTopology{}) + `printf "[]"`
 	out := runShellWithFakeBd(t, script, map[string]string{"GC_SESSION_ID": "sess-1"}, bdScript)
 
 	if out != blob {
@@ -182,7 +182,7 @@ case "$1" in
   *) printf '[]' ;;
 esac
 `
-	script := standardAssignedWorkQueryScript(false) + `printf "[]"`
+	script := standardAssignedWorkQueryScript(QueryTopology{}) + `printf "[]"`
 	out := runShellWithFakeBd(t, script, map[string]string{"GC_SESSION_ID": "sess-1"}, bdScript)
 
 	var rows []map[string]any
@@ -204,7 +204,7 @@ func TestLegacyControlInProgressTierSkipsBlockedCandidate(t *testing.T) {
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq not available; the work-query shell requires it")
 	}
-	script := legacyControlAssignedInProgressWorkQueryScript(false) + `printf "[]"`
+	script := legacyControlAssignedInProgressWorkQueryScript(QueryTopology{}) + `printf "[]"`
 	out := runShellWithFakeBd(t, script, map[string]string{"GC_SESSION_ID": "sess-1"},
 		fakeBdWithDeps(`[{"id":"gate-1","status":"open","dependency_type":"blocks","await_type":"human"}]`))
 
@@ -223,7 +223,7 @@ func TestLegacyControlInProgressTierServesUnblockedCandidate(t *testing.T) {
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq not available; the work-query shell requires it")
 	}
-	script := legacyControlAssignedInProgressWorkQueryScript(false) + `printf "[]"`
+	script := legacyControlAssignedInProgressWorkQueryScript(QueryTopology{}) + `printf "[]"`
 	out := runShellWithFakeBd(t, script, map[string]string{"GC_SESSION_ID": "sess-1"},
 		fakeBdWithDeps(`[]`))
 

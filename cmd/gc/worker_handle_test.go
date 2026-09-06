@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -429,6 +430,51 @@ func TestResolvedWorkerRuntimeWithConfigSkipsCityAnchorsWhenCityPathEmpty(t *tes
 	}
 	if _, ok := resolved.SessionEnv["GC_CITY_RUNTIME_DIR"]; ok {
 		t.Fatalf("SessionEnv[GC_CITY_RUNTIME_DIR] = %q, want absent when city path is empty", resolved.SessionEnv["GC_CITY_RUNTIME_DIR"])
+	}
+}
+
+func TestResolvedWorkerRuntimeWithConfigMergesWorkspaceEnv(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Env: map[string]string{
+			"WORKSPACE_ONLY": "workspace",
+			"SHARED_ENV":     "workspace",
+			"BD_BIN":         "/tmp/pinned-bd",
+		}},
+		Agents: []config.Agent{{Name: "worker", Provider: "stub"}},
+		Providers: map[string]config.ProviderSpec{
+			"stub": {
+				Command: "/bin/echo",
+				Env: map[string]string{
+					"PROVIDER_ONLY": "provider",
+					"SHARED_ENV":    "provider",
+				},
+			},
+		},
+	}
+
+	resolved, err := resolvedWorkerRuntimeWithConfigAndMetadata(cityDir, cfg, session.Info{
+		Template: "worker",
+		WorkDir:  cityDir,
+	}, "", nil)
+	if err != nil {
+		t.Fatalf("resolvedWorkerRuntimeWithConfigAndMetadata: %v", err)
+	}
+	if resolved == nil {
+		t.Fatal("resolvedWorkerRuntimeWithConfigAndMetadata() = nil")
+	}
+	for key, want := range map[string]string{
+		"WORKSPACE_ONLY": "workspace",
+		"BD_BIN":         "/tmp/pinned-bd",
+		"PROVIDER_ONLY":  "provider",
+		"SHARED_ENV":     "provider",
+	} {
+		if got := resolved.SessionEnv[key]; got != want {
+			t.Errorf("SessionEnv[%s] = %q, want %q", key, got, want)
+		}
+		if got := resolved.Hints.Env[key]; got != want {
+			t.Errorf("Hints.Env[%s] = %q, want %q", key, got, want)
+		}
 	}
 }
 
@@ -2500,5 +2546,99 @@ func TestResolvedWorkerSessionConfigStagesProviderOverlayForRigBasePiProvider(t 
 	}
 	if slots := runtime.OverlayProviderNames(sessionCfg.Runtime.Hints); len(slots) == 0 {
 		t.Fatal("runtime.OverlayProviderNames(create Hints) is empty; per-provider overlay would never stage")
+	}
+}
+
+// The CLI create and resume resolvers build session env from
+// providerProcessPassthroughEnv() directly — neither routes through
+// passthroughEnv() or convergence.ScrubTokenEnv, so cmd_start.go's GC_-sweep
+// guard and template_resolve.go's re-pin do not cover them. The controller
+// token must still arrive present-and-empty: the session inherits an
+// environment that already carries it, so an absent key is an inherited key.
+// resolved.Env carries a literal because it is config-authored and merges after
+// the baseline.
+func TestResolvedWorkerSessionConfigWithConfigWithholdsControllerToken(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(convergence.TokenEnvVar, "super-secret-controller-token")
+
+	cfg, err := resolvedWorkerSessionConfigWithConfig(
+		cityDir,
+		"",
+		"",
+		cityDir,
+		"worker",
+		"",
+		"worker",
+		"Worker",
+		"",
+		&config.ResolvedProvider{
+			Name: "claude",
+			Env:  map[string]string{convergence.TokenEnvVar: "provider-literal"},
+		},
+		map[string]string{"session_origin": "test"},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("resolvedWorkerSessionConfigWithConfig: %v", err)
+	}
+	for name, env := range map[string]map[string]string{
+		"Runtime.SessionEnv": cfg.Runtime.SessionEnv,
+		"Runtime.Hints.Env":  cfg.Runtime.Hints.Env,
+	} {
+		assertControllerTokenWithheld(t, name, env)
+	}
+}
+
+func TestResolvedWorkerRuntimeWithConfigWithholdsControllerToken(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(convergence.TokenEnvVar, "super-secret-controller-token")
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:     "worker",
+			Provider: "stub",
+		}},
+		Providers: map[string]config.ProviderSpec{
+			"stub": {
+				Command: "/bin/echo",
+				Env:     map[string]string{convergence.TokenEnvVar: "provider-literal"},
+			},
+		},
+	}
+
+	resolved, err := resolvedWorkerRuntimeWithConfigAndMetadata(cityDir, cfg, session.Info{
+		Template: "worker",
+		WorkDir:  cityDir,
+	}, "", nil)
+	if err != nil {
+		t.Fatalf("resolvedWorkerRuntimeWithConfigAndMetadata: %v", err)
+	}
+	if resolved == nil {
+		t.Fatal("resolvedWorkerRuntimeWithConfigAndMetadata() = nil")
+	}
+	for name, env := range map[string]map[string]string{
+		"SessionEnv": resolved.SessionEnv,
+		"Hints.Env":  resolved.Hints.Env,
+	} {
+		assertControllerTokenWithheld(t, name, env)
+	}
+}
+
+func assertControllerTokenWithheld(t *testing.T, name string, env map[string]string) {
+	t.Helper()
+	val, ok := env[convergence.TokenEnvVar]
+	if !ok {
+		t.Errorf("%s omits %s; want present and empty so the session cannot inherit the controller's value", name, convergence.TokenEnvVar)
+		return
+	}
+	if val != "" {
+		t.Errorf("%s[%s] = %q, want empty", name, convergence.TokenEnvVar, val)
 	}
 }

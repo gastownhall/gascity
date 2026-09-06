@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
@@ -13,7 +14,9 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/bootstrap"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/materialize"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -70,6 +73,33 @@ func TestPassthroughEnvOmitsUnset(t *testing.T) {
 	got := passthroughEnv()
 	if _, ok := got["GC_DOLT"]; ok {
 		t.Error("passthroughEnv() should omit empty GC_DOLT")
+	}
+}
+
+// The controller token is GC_-prefixed, so the sweep above would otherwise read
+// the controller's real token out of os.Environ() and write it straight back
+// over the empty value providerProcessPassthroughEnv() pinned.
+//
+// Withholding means PRESENT AND EMPTY, not absent: this map is an overlay on an
+// environment the session already inherits, so an absent key leaves the
+// controller's value showing through from the tmux server env or from
+// os.Environ() on the subprocess/ACP paths. The neighboring GC_ key proves the
+// exclusion is by exact name — a prefix match would strand the identity anchors
+// and the Dolt vars agents need.
+func TestPassthroughEnvPinsControllerTokenEmpty(t *testing.T) {
+	t.Setenv(convergence.TokenEnvVar, "super-secret-controller-token")
+	t.Setenv("GC_BEADS", "file")
+
+	got := passthroughEnv()
+
+	val, ok := got[convergence.TokenEnvVar]
+	if !ok {
+		t.Errorf("passthroughEnv() omits %s; want present and empty so the session cannot inherit the controller's value", convergence.TokenEnvVar)
+	} else if val != "" {
+		t.Errorf("passthroughEnv()[%s] = %q, want empty", convergence.TokenEnvVar, val)
+	}
+	if got["GC_BEADS"] != "file" {
+		t.Errorf("passthroughEnv()[GC_BEADS] = %q, want %q (the exclusion must be by exact name)", got["GC_BEADS"], "file")
 	}
 }
 
@@ -626,6 +656,7 @@ func TestReleaseOrphanedPoolAssignmentsWhenSnapshotsComplete_PartialSkipsComplet
 
 	released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 		store,
+		beads.SessionStore{Store: store},
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}}},
 		"",
 		nil,
@@ -649,6 +680,7 @@ func TestReleaseOrphanedPoolAssignmentsWhenSnapshotsComplete_PartialSkipsComplet
 
 	released = releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 		store,
+		beads.SessionStore{Store: store},
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}}},
 		"",
 		nil,
@@ -672,6 +704,7 @@ func TestReleaseOrphanedPoolAssignmentsWhenSnapshotsComplete_PartialSkipsComplet
 
 	released = releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 		store,
+		beads.SessionStore{Store: store},
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}}},
 		"",
 		nil,
@@ -1295,6 +1328,44 @@ func TestResolveTemplateAddsKimiHookConfigArgWhenHooksInstalled(t *testing.T) {
 				t.Fatalf("Command = %q, want %q", tp.Command, tt.wantCommand)
 			}
 		})
+	}
+}
+
+// TestResolveTemplateExpandsDefaultBranchInPreStart pins the pre_start
+// carrier end to end through resolveTemplate: the setupCtx literal in
+// template_resolve.go must copy DefaultBranch from the path context, or the
+// GC_DEFAULT_BRANCH='{{.DefaultBranch}}' handoff the example packs rely on
+// silently renders empty. The unit tests on expandSessionSetup and
+// sessionSetupContextForAgent cannot catch a dropped field at THIS call site.
+func TestResolveTemplateExpandsDefaultBranchInPreStart(t *testing.T) {
+	cityDir := t.TempDir()
+	rigRoot := filepath.Join(cityDir, "repos", "demo")
+	cfgAgent := &config.Agent{
+		Name:     "worker",
+		Provider: "kimi",
+		Dir:      "demo",
+		PreStart: []string{`GC_DEFAULT_BRANCH='{{.DefaultBranch}}' setup.sh`},
+	}
+	bp := &agentBuildParams{
+		cityName:   "city",
+		cityPath:   cityDir,
+		workspace:  &config.Workspace{Provider: "kimi"},
+		providers:  config.BuiltinProviders(),
+		lookPath:   func(name string) (string, error) { return "/bin/" + name, nil },
+		fs:         fsys.OSFS{},
+		rigs:       []config.Rig{{Name: "demo", Path: rigRoot, DefaultBranch: "release/v2"}},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+
+	tp, err := resolveTemplate(bp, cfgAgent, "demo/worker", nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	want := `GC_DEFAULT_BRANCH='release/v2' setup.sh`
+	if len(tp.Hints.PreStart) == 0 || tp.Hints.PreStart[0] != want {
+		t.Fatalf("Hints.PreStart = %#v, want first entry %q", tp.Hints.PreStart, want)
 	}
 }
 
@@ -2000,5 +2071,108 @@ func TestDoStart_FlagValidationRunsBeforeDriftCheck(t *testing.T) {
 	}
 	if strings.Contains(stdout.String(), "Restarting supervisor") {
 		t.Errorf("supervisor restart attempted despite flag rejection:\n%s", stdout.String())
+	}
+}
+
+// The map-level guards above are necessary but were never sufficient: the
+// session env is an OVERLAY, and every runtime lays it over an environment the
+// child already has. internal/runtime/subprocess and internal/runtime/acp build
+// exactly this — os.Environ() with the overlay appended — so this test spawns a
+// real child that way and asks it what it actually sees. Deleting the key
+// instead of pinning it empty passes every assertion on the map and fails here,
+// which is how the leak shipped.
+func TestPassthroughEnvWithholdsControllerTokenFromChildProcess(t *testing.T) {
+	const token = "super-secret-controller-token"
+	t.Setenv(convergence.TokenEnvVar, token)
+
+	overlay := passthroughEnv()
+	env := os.Environ()
+	for k, v := range overlay {
+		env = append(env, k+"="+v)
+	}
+
+	cmd := exec.Command("/bin/sh", "-c", `printf %s "[${`+convergence.TokenEnvVar+`-ABSENT}]"`)
+	cmd.Env = env
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("running child: %v", err)
+	}
+
+	if got := string(out); got != "[]" {
+		t.Errorf("child process saw %s = %s, want [] (present and empty); it inherited the controller's value", convergence.TokenEnvVar, got)
+	}
+	if strings.Contains(string(out), token) {
+		t.Errorf("child process received the controller token: %s", out)
+	}
+}
+
+// TestStartStandaloneBuildsSessionProviderFromResolvedCityConfig pins the
+// wiring at cmd_start.go's provider-construction site: the provider must be
+// built from the config and path gc start already resolved, not from a second,
+// independent city rediscovery.
+//
+// The regression it guards is silent. The rediscovery path
+// (newSessionProvider → loadSessionProviderContext) swallows both
+// resolveCity() and loadCityConfig() errors and returns a cfg-less context, so
+// tmuxConfigFromSession falls back through sc.Socket → cityName → "" and lands
+// on the default tmux socket. Every socket-scoped operation then targets the
+// wrong server while start still reports success.
+//
+// cwd is pointed at an empty directory so rediscovery cannot accidentally
+// resolve this city: with the fix the captured socket is the configured label,
+// and without it the capture is empty.
+func TestStartStandaloneBuildsSessionProviderFromResolvedCityConfig(t *testing.T) {
+	const (
+		socketLabel = "bright-lights"
+		cityName    = "socket-wiring-city"
+	)
+
+	cityPath := t.TempDir()
+	clearInheritedBeadsEnv(t)
+	requireNoLeakedDoltAfterForPaths(t, cityPath)
+	t.Chdir(t.TempDir())
+
+	if err := os.MkdirAll(filepath.Join(cityPath, citylayout.RuntimeRoot), 0o755); err != nil {
+		t.Fatalf("scaffold runtime root: %v", err)
+	}
+	cityTOML := "[workspace]\nname = \"" + cityName + "\"\n\n" +
+		"[beads]\nprovider = \"file\"\n\n" +
+		"[session]\nsocket = \"" + socketLabel + "\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	var (
+		calls       int
+		gotSocket   string
+		gotCityName string
+		gotCityPath string
+	)
+	oldBuild := buildSessionProviderByName
+	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+	buildSessionProviderByName = func(_ *config.City, _ string, sc config.SessionConfig, resolvedName, resolvedPath string) (runtime.Provider, error) {
+		calls++
+		gotSocket, gotCityName, gotCityPath = sc.Socket, resolvedName, resolvedPath
+		return runtime.NewFake(), nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doStartStandalone([]string{cityPath}, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("doStartStandalone exit = %d, want 0\nstdout:\n%s\nstderr:\n%s",
+			code, stdout.String(), stderr.String())
+	}
+
+	if calls == 0 {
+		t.Fatal("buildSessionProviderByName never called; the seam no longer covers gc start's provider construction")
+	}
+	if gotSocket != socketLabel {
+		t.Errorf("session socket = %q, want %q; gc start built its provider from a rediscovered city instead of the resolved config",
+			gotSocket, socketLabel)
+	}
+	if gotCityName != cityName {
+		t.Errorf("city name = %q, want %q", gotCityName, cityName)
+	}
+	if gotCityPath != cityPath {
+		t.Errorf("city path = %q, want %q", gotCityPath, cityPath)
 	}
 }

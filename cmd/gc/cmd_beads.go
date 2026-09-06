@@ -17,13 +17,13 @@ func newBeadsCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Manage the beads provider",
 		Long: `Manage the beads provider (backing store for issue tracking).
 
-Subcommands for topology operations, health checking, diagnostics, and
-read-only list/show routed through the supervisor API with transparent
-fallback to direct bd reads.`,
+Subcommands for topology operations, health checking, diagnostics, exact-store
+metadata compare-and-set, and read-only list/show routed through the supervisor
+API with transparent fallback to direct bd reads.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				fmt.Fprintln(stderr, "gc beads: missing subcommand (city, health, list, show)") //nolint:errcheck // best-effort stderr
+				fmt.Fprintln(stderr, "gc beads: missing subcommand (city, health, list, metadata-cas, show)") //nolint:errcheck // best-effort stderr
 			} else {
 				fmt.Fprintf(stderr, "gc beads: unknown subcommand %q\n", args[0]) //nolint:errcheck // best-effort stderr
 			}
@@ -34,6 +34,7 @@ fallback to direct bd reads.`,
 		newBeadsCityCmd(stdout, stderr),
 		newBeadsHealthCmd(stdout, stderr),
 		newBeadsListCmd(stdout, stderr),
+		newBeadsMetadataCASCmd(stdout, stderr),
 		newBeadsShowCmd(stdout, stderr),
 	)
 	return cmd
@@ -68,7 +69,7 @@ and is not wired for this command; use --format=json.`,
 	}
 	cmd.Flags().StringVar(&label, "label", "", "filter to beads carrying this label")
 	cmd.Flags().StringVar(&status, "status", "", "filter to beads in this status")
-	cmd.Flags().BoolVar(&all, "all", false, "include closed beads (default: open only)")
+	cmd.Flags().BoolVar(&all, "all", false, "include closed beads (default: all nonclosed statuses)")
 	cmd.Flags().StringVar(&format, "format", "text", "output format: text or json")
 	return cmd
 }
@@ -180,6 +181,7 @@ func doBeadsListFallback(cityPath, format string, filters beadFilters, stdout, s
 	if stores == nil {
 		return code
 	}
+	stores = convoyStoreViewsForRead(cityPath, stores, stderr, "gc beads list")
 	all, err := collectBeadsAcrossStores(stores, filters)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc beads list: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -252,7 +254,34 @@ func renderBeadsShowFromAPI(cr api.CachedRead[beads.Bead], format string, stdout
 	return 0
 }
 
+// doBeadsShowFallback serves `gc beads show` from the stores directly when the
+// API is unreachable.
+//
+// The relocated class binding is asked first, through the shared residency
+// contract, because it is not one of the directories the scan below walks: on a
+// converged city an infrastructure bead would otherwise be shown from the copy
+// `gc storage migrate` retained in the city store, frozen at migration time and
+// reported as though it were current.
 func doBeadsShowFallback(cityPath, beadID, format string, stdout, stderr io.Writer) int {
+	owner, ownedByBinding, err := cliByIDBindingOwner(cityPath, beadID)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc beads show: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if ownedByBinding {
+		b, err := beadForOwner(owner, beadID)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc beads show: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if format == "json" {
+			writeBeadJSON(b, stdout)
+		} else {
+			writeBeadDetail(b, stdout)
+		}
+		return 0
+	}
+
 	stores, code := openAllConvoyStoresAt(cityPath, stderr, "gc beads show")
 	if stores == nil {
 		return code
@@ -282,6 +311,13 @@ func doBeadsShowFallback(cityPath, beadID, format string, stdout, stderr io.Writ
 // for sorting. --all maps to IncludeClosed (matching `bd list --all`); the
 // CLI always opts into AllowScan because an unfiltered list is a valid
 // default UX.
+//
+// The merge is mergeConvoyViewRows, so a relocated class binding's rows
+// supersede the frozen copies the migration retained in the city store — asked
+// of the binding by id rather than read off these filtered results, because a
+// filter the caller chose must not decide which store owns a bead. Rows from two
+// scanned stores that happen to share an id are two different beads and both
+// survive.
 func collectBeadsAcrossStores(stores []convoyStoreView, filters beadFilters) ([]beads.Bead, error) {
 	q := beads.ListQuery{
 		Label:         filters.label,
@@ -289,15 +325,15 @@ func collectBeadsAcrossStores(stores []convoyStoreView, filters beadFilters) ([]
 		IncludeClosed: filters.all,
 		AllowScan:     true,
 	}
-	all := make([]beads.Bead, 0)
-	for _, candidate := range stores {
+	rows := make([][]beads.Bead, len(stores))
+	for i, candidate := range stores {
 		list, err := candidate.store.List(q)
 		if err != nil {
 			return nil, err
 		}
-		all = append(all, list...)
+		rows[i] = list
 	}
-	return all, nil
+	return mergeConvoyViewRows(stores, rows, func(b beads.Bead) string { return b.ID })
 }
 
 // sortBeadsForList orders beads by ID so output is stable across store

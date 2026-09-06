@@ -356,10 +356,11 @@ func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir
 // findAgentByTemplate looks up a config agent by template name. Exact
 // identity matches (canonical qualified name or V1 dir+name form, via
 // config.AgentMatchesIdentity) win over all fallbacks; when nothing matches
-// exactly, a legacy bound form ("dir/binding.name") resolves to the unbound
-// agent "dir/name" so sessions and work persisted before a bound→unbound
-// migration stay attributed. Callers that need strict exact-match lookup
-// (e.g. uniqueness validation) must not use this resolver.
+// exactly, migration fallbacks resolve legacy bound forms ("dir/binding.name")
+// to the current unbound agent "dir/name", and legacy unbound forms ("dir/name")
+// to the current imported binding agent "dir/binding.name". This keeps sessions
+// and work persisted across binding changes attributed. Callers that need strict
+// exact-match lookup (e.g. uniqueness validation) must not use this resolver.
 // Returns nil if not found.
 func findAgentByTemplate(cfg *config.City, template string) *config.Agent {
 	template = strings.TrimSpace(template)
@@ -376,7 +377,16 @@ func findAgentByTemplate(cfg *config.City, template string) *config.Agent {
 			return &cfg.Agents[i]
 		}
 	}
-	return nil
+	var legacyUnboundMatch *config.Agent
+	for i := range cfg.Agents {
+		if legacyUnboundTemplateMatchesBoundAgent(&cfg.Agents[i], template) {
+			if legacyUnboundMatch != nil {
+				return nil
+			}
+			legacyUnboundMatch = &cfg.Agents[i]
+		}
+	}
+	return legacyUnboundMatch
 }
 
 func legacyBoundTemplateMatchesUnboundAgent(agent *config.Agent, template string) bool {
@@ -394,10 +404,21 @@ func legacyBoundTemplateMatchesUnboundAgent(agent *config.Agent, template string
 	return strings.TrimSpace(unbound) == strings.TrimSpace(agent.Name)
 }
 
+func legacyUnboundTemplateMatchesBoundAgent(agent *config.Agent, template string) bool {
+	if agent == nil || strings.TrimSpace(agent.BindingName) == "" {
+		return false
+	}
+	dir, local := config.ParseQualifiedName(strings.TrimSpace(template))
+	if strings.TrimSpace(dir) != strings.TrimSpace(agent.Dir) {
+		return false
+	}
+	return strings.TrimSpace(local) == strings.TrimSpace(agent.Name)
+}
+
 // normalizeAgentTemplateIdentity maps a persisted template identity to the
 // matching agent's current canonical qualified name. It resolves through
-// findAgentByTemplate, so a legacy bound form ("dir/binding.name") left by a
-// bound→unbound migration normalizes to the unbound agent's canonical name.
+// findAgentByTemplate, so migration-era bound/unbound identity forms normalize
+// to the matching agent's current canonical name.
 // Identities that resolve to no configured agent pass through unchanged.
 func normalizeAgentTemplateIdentity(cfg *config.City, template string) string {
 	template = strings.TrimSpace(template)
@@ -639,6 +660,22 @@ func sessionHasProviderTerminalErrorInfo(info sessionpkg.Info) bool {
 // that write (ApplyPatchInfo folds only on success), so the returned Info matches
 // what the raw bead carries. agentIdentity is the start-path-joinable agent label
 // for gc.agent.quarantines.total.
+// wakeFailureKeepsConversation reports whether a wake failure should leave
+// session_key / started_config_hash alone because the conversation the key
+// points at is provably still on disk. Only a probeable provider with a present
+// keyed transcript qualifies; everything else (no key, no work dir, provider we
+// cannot probe, transcript gone) returns false and keeps the unconditional
+// reset that recovery depends on.
+func wakeFailureKeepsConversation(info sessionpkg.Info) bool {
+	sessionKey := strings.TrimSpace(info.SessionKey)
+	workDir := strings.TrimSpace(info.WorkDir)
+	if sessionKey == "" || workDir == "" {
+		return false
+	}
+	present, probeable := staleResumeKeyProbe(sessionTranscriptProvider(nil, info), workDir, sessionKey)
+	return probeable && present
+}
+
 func recordWakeFailure(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock, agentIdentity string) sessionpkg.Info {
 	// Parse the raw wake_attempts mirror (not the pre-parsed info.WakeAttempts,
 	// which zeroes on strconv.ErrRange) so an out-of-range counter yields the
@@ -658,10 +695,21 @@ func recordWakeFailure(info sessionpkg.Info, sessFront *sessionpkg.Store, clk cl
 	// recovery remains correct in that call order and for any skewed state
 	// left behind by older builds. The store write is best-effort (its error is
 	// intentionally ignored, as before) while the Info fold is unconditional.
+	//
+	// Exception: keep a conversation that provably still exists on disk. The
+	// reset is recovery for an unresumable key, but any single wake failure
+	// lands here — a transient tmux/spawn flake included — and for providers
+	// that persist a keyed transcript the reset would permanently orphan a
+	// perfectly resumable conversation. Probe first and skip the clear when the
+	// transcript is there; unprobeable providers and absent transcripts keep the
+	// existing unconditional behavior. Attempt accrual and quarantine below are
+	// untouched either way, so a genuinely broken session still escalates.
 	if info.SessionKey != "" || info.StartedConfigHash != "" {
-		reset := sessionpkg.ConversationResetPatch(true)
-		_ = sessFront.ApplyPatch(info.ID, reset)
-		info = info.ApplyPatch(reset)
+		if !wakeFailureKeepsConversation(info) {
+			reset := sessionpkg.ConversationResetPatch(true)
+			_ = sessFront.ApplyPatch(info.ID, reset)
+			info = info.ApplyPatch(reset)
+		}
 	}
 	accrual := sessionpkg.WakeFailureAccrualPatch(attempts, defaultMaxWakeAttempts, clk.Now().Add(defaultQuarantineDuration))
 	if accrual.Quarantined {
@@ -878,7 +926,7 @@ func mergeMetadataPatch(dst, src map[string]string) map[string]string {
 // pendingCreateLeaseExpiredForRollbackInfo, isNamedSessionInfo,
 // namedSessionModeInfo). Byte-identical to the bead form; the reconciler forward
 // pass folds the returned batch onto its coherent infoByID snapshot.
-func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, clk clock.Clock, startupTimeout time.Duration, rollbackAvailable bool) map[string]string {
+func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, observed bool, clk clock.Clock, startupTimeout time.Duration, rollbackAvailable bool) map[string]string {
 	var now time.Time
 	var staleCreatingAfter time.Duration
 	if clk != nil {
@@ -886,7 +934,7 @@ func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, clk clock.
 		staleCreatingAfter = staleCreatingStateTimeout
 	}
 	lcInput := sessionpkg.LifecycleInputFromInfo(info)
-	lcInput.Runtime = sessionpkg.RuntimeFacts{Observed: true, Alive: alive}
+	lcInput.Runtime = sessionpkg.RuntimeFacts{Observed: observed, Alive: alive}
 	lcInput.CreatedAt = info.CreatedAt
 	lcInput.StaleCreatingAfter = staleCreatingAfter
 	lcInput.Now = now
@@ -920,8 +968,29 @@ func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, clk clock.
 		target = string(sessionpkg.StateAsleep)
 		clearPendingCreateLeaseInfo(info.PendingCreateClaim, batch)
 	}
-	if rollbackAvailable && !alive && strings.TrimSpace(info.MetadataState) == "creating" {
-		if pendingCreateLeaseExpiredForRollbackInfo(info, clk, startupTimeout) {
+	// gcf-ru0: this gate originally checked MetadataState == "creating" only,
+	// from before #2583 split "start-pending" out as its own state ahead of
+	// "creating". projectRuntimeProjection's BaseStateStartPending branch has
+	// no staleness check of its own (unlike its BaseStateCreating sibling), so
+	// a bead stuck in start-pending with no rollback gate here just keeps
+	// re-projecting start-pending forever — pendingCreateLeaseExpiredForRollbackInfo
+	// already understands start-pending via pendingCreateRollbackState, so widen
+	// the gate to match instead of restricting it to "creating".
+	if !alive && pendingCreateQueuedOrCreatingState(info.MetadataState) && info.PendingCreateClaim {
+		leaseExpired := pendingCreateLeaseExpiredForRollbackInfo(info, clk, startupTimeout)
+		switch {
+		case !leaseExpired || !rollbackAvailable:
+			// ProjectLifecycle uses the generic one-minute creating timeout.
+			// An active configured provider Start lease is authoritative here:
+			// preserve both state and claim until the one rollback decision says
+			// they may move together. rollbackAvailable=false likewise defers
+			// the complete transition rather than applying half of it. Preserve
+			// a legitimate start-pending projection for a never-started queued
+			// create; only suppress the premature terminal asleep projection.
+			if target == string(sessionpkg.StateAsleep) {
+				target = info.MetadataState
+			}
+		default:
 			target = string(sessionpkg.StateAsleep)
 			stalePendingCreateRollback = true
 			clearPendingCreateLeaseInfo(info.PendingCreateClaim, batch)
@@ -959,14 +1028,14 @@ func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, clk clock.
 // healStateWithRollbackInfo computes and persists an advisory-state heal.
 // Callers may fold the returned patch only when err is nil; an error leaves
 // their current projection authoritative for the rest of the pass.
-func healStateWithRollbackInfo(info sessionpkg.Info, alive bool, sessFront *sessionpkg.Store, clk clock.Clock, startupTimeout time.Duration, rollbackAvailable bool) (map[string]string, error) {
+func healStateWithRollbackInfo(info sessionpkg.Info, alive bool, observed bool, sessFront *sessionpkg.Store, clk clock.Clock, startupTimeout time.Duration, rollbackAvailable bool) (map[string]string, error) {
 	// Closed beads are terminal; their advisory state metadata should not move
 	// (matches healStateWithRollback's session.Status == "closed" guard —
 	// Info.Closed is the projected mirror).
 	if info.Closed {
 		return nil, nil
 	}
-	batch := healStatePatchWithRollbackInfo(info, alive, clk, startupTimeout, rollbackAvailable)
+	batch := healStatePatchWithRollbackInfo(info, alive, observed, clk, startupTimeout, rollbackAvailable)
 	if len(batch) == 0 {
 		return nil, nil
 	}

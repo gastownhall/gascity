@@ -455,6 +455,9 @@ func TestManagedDoltExistingStatePortReturnsPublishedPortBeforeListenerReady(t *
 	}
 }
 
+// TestAssessExistingManagedDoltIgnoresStateWhenLifecycleNotOwned pins that a
+// city whose store gc does not serve reports no managed Dolt to reuse, even
+// with a live-looking runtime state file beside it.
 func TestAssessExistingManagedDoltIgnoresStateWhenLifecycleNotOwned(t *testing.T) {
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
@@ -467,9 +470,7 @@ func TestAssessExistingManagedDoltIgnoresStateWhenLifecycleNotOwned(t *testing.T
 	if err := os.MkdirAll(filepath.Dir(layout.PIDFile), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"backend":"postgres","postgres_host":"db.example.test","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads_pg"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeOpaqueBindingScopeFixture(t, cityPath)
 	if err := os.WriteFile(layout.PIDFile, []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
 		t.Fatalf("write pid file: %v", err)
 	}
@@ -488,10 +489,10 @@ func TestAssessExistingManagedDoltIgnoresStateWhenLifecycleNotOwned(t *testing.T
 		t.Fatalf("assessExistingManagedDolt: %v", err)
 	}
 	if report.StatePort != 0 {
-		t.Fatalf("StatePort = %d, want 0 for postgres-backed city", report.StatePort)
+		t.Fatalf("StatePort = %d, want 0 for a city gc does not serve", report.StatePort)
 	}
 	if report.Reusable {
-		t.Fatal("Reusable = true, want false for postgres-backed city")
+		t.Fatal("Reusable = true, want false for a city gc does not serve")
 	}
 }
 

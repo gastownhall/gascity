@@ -9,10 +9,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/gchome"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestConditionEnvEnviron(t *testing.T) {
+	t.Setenv("GC_HOME", "/operator/gc-home")
+
 	env := ConditionEnv{
 		BeadID:               "bead-123",
 		Iteration:            3,
@@ -41,6 +44,7 @@ func TestConditionEnvEnviron(t *testing.T) {
 	// Required vars.
 	checks := map[string]string{
 		"PATH":                      conditionPATH(),
+		"GC_HOME":                   "/operator/gc-home",
 		"BEADS_DIR":                 "/home/test/city/.beads",
 		"GC_BEAD_ID":                "bead-123",
 		"GC_ITERATION":              "3",
@@ -76,6 +80,18 @@ func TestConditionEnvEnviron(t *testing.T) {
 	}
 	if _, ok := lookup["TMPDIR"]; !ok {
 		t.Error("missing TMPDIR env var")
+	}
+}
+
+func TestConditionGCHomeFallbackIsNotSharedTempDir(t *testing.T) {
+	t.Setenv("GC_HOME", "")
+
+	got := conditionGCHome()
+	if got == filepath.Join(os.TempDir(), ".gc") {
+		t.Fatalf("conditionGCHome() = %q, must not be the shared world-writable temp home (gastownhall/gascity#3506)", got)
+	}
+	if want := gchome.ResolveReadOnly().Path(); got != want {
+		t.Fatalf("conditionGCHome() = %q, want canonical gchome resolution %q", got, want)
 	}
 }
 

@@ -52,7 +52,7 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 	if rootID == "" {
 		return ControlResult{}, fmt.Errorf("%s: missing gc.root_bead_id", bead.ID)
 	}
-	workflowBeads, err := listByWorkflowRoot(store, rootID)
+	workflowBeads, err := beads.DirectMembers(store, rootID)
 	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: listing workflow beads: %w", bead.ID, err)
 	}

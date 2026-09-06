@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
-	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/bootstrap"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -26,6 +25,27 @@ func disableBootstrapForTests(t *testing.T) {
 	old := bootstrap.BootstrapPacks
 	bootstrap.BootstrapPacks = nil
 	t.Cleanup(func() { bootstrap.BootstrapPacks = old })
+}
+
+// stubInitRemoteImports makes finalizeInit's remote-import install hermetic.
+//
+// A full init clones gascity-packs over the network: the nested bundled source
+// gascity/roles is not recognized as bundled, so it misses the synthetic cache
+// and takes the real clone path (ga-73eoo). That single clone is most of the
+// runtime of every test that runs a real init, and packman performs it while
+// holding the machine-wide repo-cache write lock — so one wedged remote stalls
+// the whole suite and the pre-push hook with it (ga-r0epd).
+//
+// Use this only in tests whose subject is something other than import
+// installation. Tests that assert on the install itself must stub
+// ensureInitRemoteImportsInstalled directly with the behavior they mean to
+// exercise, the way TestFinalizeInitReportsRemoteImportInstallFailure does;
+// routing those through this helper would assert against a no-op.
+func stubInitRemoteImports(t *testing.T) {
+	t.Helper()
+	prev := ensureInitRemoteImportsInstalled
+	t.Cleanup(func() { ensureInitRemoteImportsInstalled = prev })
+	ensureInitRemoteImportsInstalled = func(string) error { return nil }
 }
 
 func stubInitDependencyChecks(t *testing.T) {
@@ -804,38 +824,54 @@ func TestCmdInitSkipProviderReadinessBypassesBlockedProvider(t *testing.T) {
 
 // TestCmdInitSkipProviderReadinessAllowsBuiltinWithoutProbe verifies that
 // --skip-provider-readiness lets --default-provider select any builtin
-// provider, not just the subset with a readiness probe. "pi" is a real
-// builtin (internal/worker/builtin/profiles.go) with no readiness probe
-// registered, so normalizeInitProvider's readiness-only allowlist rejects
-// it even when the caller explicitly asked to skip readiness checks (#4392).
+// provider, not just the subset with a readiness probe. "omp" (Oh My Pi) is
+// a real builtin (internal/worker/builtin/profiles.go) with no readiness
+// probe registered, so normalizeInitProvider's readiness-only allowlist
+// rejects it even when the caller explicitly asked to skip readiness checks
+// (#4392). ("pi" was the original exemplar but now has a probe of its own;
+// swap in another probe-less builtin if omp ever gains one too.)
 func TestCmdInitSkipProviderReadinessAllowsBuiltinWithoutProbe(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
 	disableBootstrapForTests(t)
 
-	if api.SupportsProviderReadiness("pi") {
-		t.Fatal("test assumption broken: \"pi\" now has a readiness probe, pick a different probe-less builtin")
+	if api.SupportsProviderReadiness("omp") {
+		t.Fatal("test assumption broken: \"omp\" now has a readiness probe, pick a different probe-less builtin")
 	}
 	found := false
 	for _, name := range config.BuiltinProviderOrder() {
-		if name == "pi" {
+		if name == "omp" {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatal("test assumption broken: \"pi\" is no longer a builtin provider")
+		t.Fatal("test assumption broken: \"omp\" is no longer a builtin provider")
 	}
 
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"init", "--default-provider", "pi", "--skip-provider-readiness", "--no-start", cityPath}, &stdout, &stderr)
+	code := run([]string{"init", "--default-provider", "omp", "--skip-provider-readiness", "--no-start", cityPath}, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("gc init --default-provider pi --skip-provider-readiness = %d, want 0; stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+		t.Fatalf("gc init --default-provider omp --skip-provider-readiness = %d, want 0; stderr=%s stdout=%s", code, stderr.String(), stdout.String())
 	}
 	if strings.Contains(stderr.String(), "unknown provider") {
 		t.Fatalf("stderr = %q, want no unknown-provider rejection for a skipped-readiness builtin", stderr.String())
+	}
+}
+
+// TestNormalizeInitProviderAcceptsPiWithoutSkip locks in the payoff of
+// probePi: now that pi has a readiness probe, --default-provider pi is
+// accepted by the readiness-aware allowlist on its own, so `gc init
+// --default-provider pi` stops needing --skip-provider-readiness.
+func TestNormalizeInitProviderAcceptsPiWithoutSkip(t *testing.T) {
+	got, err := normalizeInitProvider("pi", false)
+	if err != nil {
+		t.Fatalf("normalizeInitProvider(pi, false) = %q, %v; want %q, nil", got, err, "pi")
+	}
+	if got != "pi" {
+		t.Fatalf("normalizeInitProvider(pi, false) = %q, want %q", got, "pi")
 	}
 }
 
@@ -1609,7 +1645,7 @@ port = 3307
 	}
 }
 
-func TestCheckDoltAuthorIdentitySkipsPostgresCityWithManagedDoltConfig(t *testing.T) {
+func TestCheckDoltAuthorIdentitySkipsABoundCityWithManagedDoltConfig(t *testing.T) {
 	clearInheritedBeadsEnv(t)
 	stubInitDependencyChecks(t)
 
@@ -1632,26 +1668,17 @@ dolt.auto-start: false
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := contract.EnsureCanonicalMetadata(fsys.OSFS{}, filepath.Join(cityDir, ".beads", "metadata.json"), contract.MetadataState{
-		Database:         "beads",
-		Backend:          "postgres",
-		PostgresHost:     "db.example.test",
-		PostgresPort:     "5432",
-		PostgresUser:     "bd",
-		PostgresDatabase: "beads_pg",
-	}); err != nil {
-		t.Fatal(err)
-	}
+	writeOpaqueBindingScopeFixture(t, cityDir)
 
 	old := initRunDoltConfigGet
 	initRunDoltConfigGet = func(string) (string, error) {
-		t.Fatal("postgres-backed city should not require local Dolt identity")
+		t.Fatal("a city gc does not serve must not require a local Dolt identity")
 		return "", nil
 	}
 	t.Cleanup(func() { initRunDoltConfigGet = old })
 
 	if status := checkDoltAuthorIdentity(cityDir); status.blocked() {
-		t.Fatalf("checkDoltAuthorIdentity blocked for postgres city: %#v", status)
+		t.Fatalf("checkDoltAuthorIdentity blocked for a city gc does not serve: %#v", status)
 	}
 }
 

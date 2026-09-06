@@ -36,9 +36,9 @@ const (
 // (internal/runtime/tmux/adapter.go) and herdr (internal/runtime/herdr/provider.go)
 // still run their own copies.
 //
-// PARITY REQUIRED BEFORE WIRING: both current callers have since grown an
-// execgrace layer this snapshot predates. Before either delegates here, this
-// runner must regain: execgrace.NewMonitor idle/ceiling budgets under
+// PARITY REQUIRED BEFORE WIRING (tracked as gastownhall/gascity#5637): both current callers
+// have since grown an execgrace layer this snapshot predates. Before either
+// delegates here, this runner must regain: execgrace.NewMonitor budgets under
 // [session] setup_max_timeout (this version has a single fixed deadline),
 // execgrace.Apply cooperative process-group interrupt so shell rollback traps
 // run before SIGKILL (see adapter.go's note on stranded staged state), and
@@ -74,54 +74,66 @@ func RunSetupCommand(ctx context.Context, command string, env map[string]string,
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			err = fmt.Errorf("%w: %w", ctxErr, err)
 		}
-		return setupCommandFailure(err, stdout, stderr)
+		return setupCommandFailure(err, stdout, stderr, SetupCommandSecrets(env))
 	}
 	return nil
 }
 
-// commandOutputTail is a bounded io.Writer that keeps only the last limit
-// bytes written, for folding command output into failure messages.
+// commandOutputTail is a bounded io.Writer that reports only the last limit
+// bytes written, for folding command output into failure messages. It retains
+// [OutputTailRetention] bytes rather than limit so redaction runs on a whole
+// value before the reported window is cut out of it.
 type commandOutputTail struct {
 	limit   int
+	retain  int
 	written int
 	buf     []byte
 }
 
 func newCommandOutputTail(limit int) *commandOutputTail {
-	return &commandOutputTail{limit: limit}
+	return &commandOutputTail{limit: limit, retain: OutputTailRetention(limit)}
 }
 
 func (b *commandOutputTail) Write(p []byte) (int, error) {
 	b.written += len(p)
-	if b.limit <= 0 {
+	if b.retain <= 0 {
 		return len(p), nil
 	}
-	if len(p) >= b.limit {
-		b.buf = append(b.buf[:0], p[len(p)-b.limit:]...)
+	if len(p) >= b.retain {
+		b.buf = append(b.buf[:0], p[len(p)-b.retain:]...)
 		return len(p), nil
 	}
 	b.buf = append(b.buf, p...)
-	if len(b.buf) > b.limit {
-		copy(b.buf, b.buf[len(b.buf)-b.limit:])
-		b.buf = b.buf[:b.limit]
+	if len(b.buf) > b.retain {
+		copy(b.buf, b.buf[len(b.buf)-b.retain:])
+		b.buf = b.buf[:b.retain]
 	}
 	return len(p), nil
 }
 
-func (b *commandOutputTail) Detail(label string) string {
-	text := strings.TrimSpace(string(b.buf))
+// Detail renders the tail with secrets scrubbed. Redaction is this type's job
+// rather than the caller's because only it knows the retained buffer is wider
+// than the window it reports, and [RedactSecretsTail] has to see the wider one.
+func (b *commandOutputTail) Detail(label string, secrets []string) string {
+	text, trimmed := RedactSecretsTail(string(b.buf), b.limit, secrets)
+	text = strings.TrimSpace(text)
 	if text == "" {
 		return ""
 	}
-	if b.written > len(b.buf) {
+	if trimmed || b.written > len(b.buf) {
 		text = "... " + text
 	}
 	return label + ": " + text
 }
 
-func setupCommandFailure(err error, stdout, stderr *commandOutputTail) error {
-	stderrDetail := stderr.Detail("stderr")
-	stdoutDetail := stdout.Detail("stdout")
+// setupCommandFailure folds a bounded tail of both streams into the failure.
+// The tails are scrubbed because this error is durable — it reaches logs, the
+// event bus and bead notes — and a setup command echoing a credential it was
+// handed (a `set -x` trace, a failing curl printing its header) would otherwise
+// park that credential there permanently.
+func setupCommandFailure(err error, stdout, stderr *commandOutputTail, secrets []string) error {
+	stderrDetail := stderr.Detail("stderr", secrets)
+	stdoutDetail := stdout.Detail("stdout", secrets)
 	switch {
 	case stderrDetail != "" && stdoutDetail != "":
 		return fmt.Errorf("%w; %s; %s", err, stderrDetail, stdoutDetail)

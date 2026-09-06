@@ -1036,7 +1036,7 @@ schema = 2
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := doDoctor(true, false, false, false, 0, &stdout, &stderr); code != 0 {
+	if code := doDoctor(true, false, false, 0, &stdout, &stderr); code != 0 {
 		t.Fatalf("gc doctor --fix = %d, want 0; stdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
 	}
 	output := stdout.String() + stderr.String()
@@ -1317,6 +1317,7 @@ provider = "file"
 func TestBuiltinImportDoctorCheck_OKAfterInit(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
+	stubInitRemoteImports(t)
 	dir := t.TempDir()
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"init", "--skip-provider-readiness", "--provider", "claude", dir}, &stdout, &stderr); code != 0 {
@@ -1467,6 +1468,7 @@ func TestMigrateLegacySystemPacksManifestPreservesImportOptions(t *testing.T) {
 func TestBuiltinImportDoctorCheck_FixSkipsResyncWhenNoOwnedMutation(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
+	stubInitRemoteImports(t)
 	dir := t.TempDir()
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"init", "--skip-provider-readiness", "--provider", "claude", dir}, &stdout, &stderr); code != 0 {

@@ -61,7 +61,7 @@ func loadEffectiveMCPForAgent(
 	agent *config.Agent,
 	qualifiedName, workDir string,
 ) (materialize.MCPCatalog, error) {
-	catalog, err := materialize.EffectiveMCPForSession(cfg, cityPath, agent, qualifiedName, workDir)
+	catalog, err := materialize.EffectiveMCPForSession(cfg, cityPath, agent, qualifiedName, workDir, config.QueryTopology{})
 	if err != nil {
 		return materialize.MCPCatalog{}, fmt.Errorf("loading effective MCP: %w", err)
 	}

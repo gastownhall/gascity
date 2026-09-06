@@ -208,6 +208,32 @@ func syntheticPackLayouts() []syntheticPackLayout {
 	return layouts
 }
 
+// KnownRepository reports whether repository is one of the two repositories
+// whose layouts this binary can materialize.
+func KnownRepository(repository string) bool {
+	return repository == Repository || repository == PublicRepository
+}
+
+// layoutsForRepository returns only the layouts addressable from repository's
+// cache directory.
+//
+// A cache directory is keyed on the normalized clone URL with the subpath
+// stripped (config.RepoCacheKey), and every import resolves to
+// <cache>/<subpath> — never the cache root. So a gascity.git cache directory
+// can only ever serve gascity.git subpaths, and the public-repository layouts
+// materialized alongside them were unreachable: dead weight that was written to
+// disk and then byte-compared on every readiness pass.
+func layoutsForRepository(repository string) []syntheticPackLayout {
+	all := syntheticPackLayouts()
+	scoped := make([]syntheticPackLayout, 0, len(all))
+	for _, layout := range all {
+		if layout.Repository == repository {
+			scoped = append(scoped, layout)
+		}
+	}
+	return scoped
+}
+
 func legacySubpathsForPack(name string) []string {
 	switch name {
 	case "dolt":
@@ -241,9 +267,12 @@ func IsSource(source string) bool {
 // imports between bundled pack subpaths resolve like a real checkout. Callers
 // must hold any repo-cache write lock for dst and pass only a disposable cache
 // directory; existing contents are removed unconditionally before writing.
-func MaterializeSyntheticRepo(dst, commit string) error {
+func MaterializeSyntheticRepo(dst, repository, commit string) error {
 	if strings.TrimSpace(commit) == "" {
 		return fmt.Errorf("commit is required")
+	}
+	if !KnownRepository(repository) {
+		return fmt.Errorf("unknown bundled pack repository %q", repository)
 	}
 	if err := validateSyntheticDestination(dst); err != nil {
 		return err
@@ -251,7 +280,7 @@ func MaterializeSyntheticRepo(dst, commit string) error {
 	if err := os.RemoveAll(dst); err != nil {
 		return fmt.Errorf("removing stale bundled pack cache %q: %w", dst, err)
 	}
-	for _, layout := range syntheticPackLayouts() {
+	for _, layout := range layoutsForRepository(repository) {
 		target := filepath.Join(dst, filepath.FromSlash(layout.Subpath))
 		if err := materializeFS(layout.Pack.FS, target); err != nil {
 			return fmt.Errorf("materializing bundled pack %q at %s: %w", layout.Pack.Name, layout.Subpath, err)
@@ -262,8 +291,8 @@ func MaterializeSyntheticRepo(dst, commit string) error {
 		return err
 	}
 	marker := syntheticMarker{
-		Schema:      1,
-		Repository:  Repository,
+		Schema:      syntheticMarkerSchema,
+		Repository:  repository,
 		Commit:      commit,
 		ContentHash: hash,
 	}
@@ -282,7 +311,7 @@ func MaterializeSyntheticRepo(dst, commit string) error {
 // walking the materialized file set. It is the resolution-path variant: callers
 // on the hot pack-resolution path use it to gate cache hits cheaply. Full
 // file-set and file-content integrity is verified only by ValidateSyntheticRepo.
-func ValidateSyntheticRepoFast(dir, commit string) error {
+func ValidateSyntheticRepoFast(dir, repository, commit string) error {
 	info, err := os.Lstat(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -307,11 +336,22 @@ func ValidateSyntheticRepoFast(dir, commit string) error {
 	if _, err := toml.Decode(string(data), &marker); err != nil {
 		return fmt.Errorf("parsing bundled pack cache marker: %w", err)
 	}
-	if marker.Schema != 1 {
+	if !KnownRepository(repository) {
+		// This variant never consults the layout set at all, so an unknown
+		// repository would be accepted on the marker fields alone. Rejecting it
+		// keeps the fast path a strict prefilter: it must never admit a cache
+		// that ValidateSyntheticRepo would reject.
+		return fmt.Errorf("unknown bundled pack repository %q", repository)
+	}
+	if marker.Schema != syntheticMarkerSchema {
 		return fmt.Errorf("unsupported bundled pack cache marker schema %d", marker.Schema)
 	}
-	if marker.Repository != Repository {
-		return fmt.Errorf("bundled pack cache repository %q does not match %q", marker.Repository, Repository)
+	// The caller supplies the repository it resolved this cache directory for,
+	// exactly as it supplies the commit. Trusting the marker's own value instead
+	// would leave a cache materialized for the wrong repository validating
+	// cleanly and then failing later at import resolution.
+	if marker.Repository != repository {
+		return fmt.Errorf("bundled pack cache repository %q does not match %q", marker.Repository, repository)
 	}
 	if !gitutil.SameCommit(marker.Commit, commit) {
 		return fmt.Errorf("bundled pack cache commit %q does not match %q", marker.Commit, commit)
@@ -329,7 +369,7 @@ func ValidateSyntheticRepoFast(dir, commit string) error {
 // ValidateSyntheticRepo verifies that dir is a synthetic bundled-pack cache
 // created for the current binary content and the source's canonical pin
 // commit (the only commit production callers materialize).
-func ValidateSyntheticRepo(dir, commit string) error {
+func ValidateSyntheticRepo(dir, repository, commit string) error {
 	info, err := os.Lstat(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -355,11 +395,23 @@ func ValidateSyntheticRepo(dir, commit string) error {
 	if _, err := toml.Decode(string(data), &marker); err != nil {
 		return fmt.Errorf("parsing bundled pack cache marker: %w", err)
 	}
-	if marker.Schema != 1 {
+	if !KnownRepository(repository) {
+		// Without this an unknown repository collapses the layout set to empty,
+		// so the allowed-path set is just the marker and the per-pack compare
+		// loop never runs — a directory holding nothing but a well-formed marker
+		// would validate. MaterializeSyntheticRepo has always rejected this on
+		// the write side; the read side must match.
+		return fmt.Errorf("unknown bundled pack repository %q", repository)
+	}
+	if marker.Schema != syntheticMarkerSchema {
 		return fmt.Errorf("unsupported bundled pack cache marker schema %d", marker.Schema)
 	}
-	if marker.Repository != Repository {
-		return fmt.Errorf("bundled pack cache repository %q does not match %q", marker.Repository, Repository)
+	// The caller supplies the repository it resolved this cache directory for,
+	// exactly as it supplies the commit. Trusting the marker's own value instead
+	// would leave a cache materialized for the wrong repository validating
+	// cleanly and then failing later at import resolution.
+	if marker.Repository != repository {
+		return fmt.Errorf("bundled pack cache repository %q does not match %q", marker.Repository, repository)
 	}
 	if !gitutil.SameCommit(marker.Commit, commit) {
 		return fmt.Errorf("bundled pack cache commit %q does not match %q", marker.Commit, commit)
@@ -371,10 +423,10 @@ func ValidateSyntheticRepo(dir, commit string) error {
 	if marker.ContentHash != wantHash {
 		return fmt.Errorf("bundled pack cache content hash %q does not match current binary %q", marker.ContentHash, wantHash)
 	}
-	if err := validateSyntheticRepoFileSet(dir); err != nil {
+	if err := validateSyntheticRepoFileSet(dir, repository); err != nil {
 		return err
 	}
-	for _, layout := range syntheticPackLayouts() {
+	for _, layout := range layoutsForRepository(repository) {
 		if err := validatePackFiles(layout.Pack, filepath.Join(dir, filepath.FromSlash(layout.Subpath))); err != nil {
 			return err
 		}
@@ -432,6 +484,14 @@ var syntheticContentHashOnce = sync.OnceValues(SyntheticContentHash)
 // "bundled pack cache content hash does not match current binary" wedge that
 // recurs whenever a deploy leaves two binary versions running side by side.
 //
+// The marker SCHEMA is folded in for the same reason. A schema change alters
+// the on-disk layout a binary expects without altering the embedded content that
+// produced it, so two generations would otherwise share one directory and each
+// reject the other's marker — re-materializing the whole tree on every
+// invocation, in both directions, for as long as the rollout lasted. Binding the
+// key to the schema costs one materialization per generation instead, which is
+// what this mechanism already does for a content change.
+//
 // It returns "" only when the embedded pack set cannot be hashed, which is a
 // build-integrity failure that MaterializeSyntheticRepo and ValidateSyntheticRepo
 // surface with full context on the next cache operation. Callers fold the
@@ -444,8 +504,14 @@ func SyntheticCacheKeyComponent() string {
 	if err != nil {
 		return ""
 	}
-	return hash
+	return fmt.Sprintf("%s+schema%d", hash, syntheticMarkerSchema)
 }
+
+// syntheticMarkerSchema is the marker format version. Schema 1 markers recorded
+// a hardcoded repository and a cache holding every repository's layouts; they
+// are rejected so the cache re-materializes scoped to its own repository. That
+// is the ordinary self-heal path, not a migration.
+const syntheticMarkerSchema = 2
 
 type syntheticMarker struct {
 	Schema      int    `toml:"schema"`
@@ -480,10 +546,11 @@ func materializeFS(src fs.FS, dst string) error {
 // every expected file present, with the expected mode and content.
 //
 // It does not walk dst looking for unexpected files. validateSyntheticRepoFileSet
-// already walks the whole cache once against the union of every layout's
-// manifest, and that union check strictly subsumes a per-pack one: a file
-// unexpected for its own pack is absent from the union too. Keeping both meant
-// about nine traversals of the same tree per call.
+// already walks the whole cache once against the union of that repository's
+// layout manifests, and that union check strictly subsumes a per-pack one:
+// ValidateSyntheticRepo calls validatePackFiles for exactly the layouts the
+// union is built from, so a file unexpected for its own pack is absent from the
+// union too. Keeping both meant about nine traversals of the same tree per call.
 func validatePackFiles(pack Pack, dst string) error {
 	manifest, err := manifestForPack(pack)
 	if err != nil {
@@ -509,8 +576,8 @@ func validatePackFiles(pack Pack, dst string) error {
 	return nil
 }
 
-func validateSyntheticRepoFileSet(dir string) error {
-	allowedFiles, allowedDirs, err := syntheticRepoAllowedPaths()
+func validateSyntheticRepoFileSet(dir, repository string) error {
+	allowedFiles, allowedDirs, err := syntheticRepoAllowedPaths(repository)
 	if err != nil {
 		return err
 	}
@@ -553,17 +620,40 @@ func validateSyntheticRepoFileSet(dir string) error {
 }
 
 // syntheticRepoAllowedPaths returns the file and directory sets a materialized
-// synthetic repo may contain.
+// synthetic repo for repository may contain.
 //
-// The result derives entirely from content embedded in the running binary, so it
-// is memoized for the process lifetime the same way syntheticContentHashOnce
-// memoizes the content hash. Rebuilding it per call re-walked every bundled
-// pack's embed.FS on every config load. Callers must treat the returned maps as
-// read-only.
-func syntheticRepoAllowedPaths() (map[string]struct{}, map[string]struct{}, error) {
-	cached := syntheticRepoAllowedPathsOnce()
-	return cached.files, cached.dirs, cached.err
+// The set is scoped to one repository. A cache directory is keyed on the
+// normalized clone URL with the subpath stripped, and imports resolve to
+// <cache>/<subpath> rather than the cache root, so a cache for one repository
+// can only ever serve that repository's subpaths. Admitting another
+// repository's layouts here would widen the allowed set to paths this cache can
+// never legitimately contain.
+//
+// A repository's set derives entirely from content embedded in the running
+// binary, so it is memoized for the process lifetime the same way manifestCache
+// memoizes the per-pack manifests it is built from. Rebuilding it per call
+// re-walked every bundled pack's embed.FS on every config load. Callers must
+// treat the returned maps as read-only.
+func syntheticRepoAllowedPaths(repository string) (map[string]struct{}, map[string]struct{}, error) {
+	if !KnownRepository(repository) {
+		// Not memoized, so the memo's key set stays bounded by the repositories
+		// this binary embeds layouts for. An unknown repository yields the
+		// marker-only set, which is why ValidateSyntheticRepo rejects it before
+		// reaching here rather than relying on this set to be non-empty.
+		return computeSyntheticRepoAllowedPaths(repository)
+	}
+	if cached, ok := syntheticRepoAllowedPathsCache.Load(repository); ok {
+		sets := cached.(syntheticRepoPathSets)
+		return sets.files, sets.dirs, sets.err
+	}
+	files, dirs, err := computeSyntheticRepoAllowedPaths(repository)
+	syntheticRepoAllowedPathsCache.Store(repository, syntheticRepoPathSets{files: files, dirs: dirs, err: err})
+	return files, dirs, err
 }
+
+// syntheticRepoAllowedPathsCache memoizes the allowed-path sets by repository.
+// Entries are read-only once stored.
+var syntheticRepoAllowedPathsCache sync.Map
 
 type syntheticRepoPathSets struct {
 	files map[string]struct{}
@@ -571,15 +661,10 @@ type syntheticRepoPathSets struct {
 	err   error
 }
 
-var syntheticRepoAllowedPathsOnce = sync.OnceValue(func() syntheticRepoPathSets {
-	files, dirs, err := computeSyntheticRepoAllowedPaths()
-	return syntheticRepoPathSets{files: files, dirs: dirs, err: err}
-})
-
-func computeSyntheticRepoAllowedPaths() (map[string]struct{}, map[string]struct{}, error) {
+func computeSyntheticRepoAllowedPaths(repository string) (map[string]struct{}, map[string]struct{}, error) {
 	files := map[string]struct{}{syntheticMarkerFile: {}}
 	dirs := make(map[string]struct{})
-	for _, layout := range syntheticPackLayouts() {
+	for _, layout := range layoutsForRepository(repository) {
 		subpath := filepath.ToSlash(layout.Subpath)
 		manifest, err := manifestForPack(layout.Pack)
 		if err != nil {
@@ -646,6 +731,26 @@ func manifestForFS(src fs.FS) (map[string]fileEntry, error) {
 		return nil, fmt.Errorf("bundled pack manifest is missing pack.toml")
 	}
 	return manifest, nil
+}
+
+// RepositoryForSource reports the bundled-pack repository that source's clone
+// URL normalizes to, and whether it is one this binary can materialize.
+//
+// It answers only "which cache directory does this belong to". The subpath is
+// deliberately ignored, so ok is true for any subpath under a known repository,
+// including one that addresses no bundled pack. Whether source actually names a
+// bundled pack layout is a separate question, answered by IsSource /
+// SourceLayout; callers that need both gate on both.
+//
+// Callers pair it with a cache directory: the directory is keyed on the same
+// normalized clone URL, so the repository is what scopes which layouts that
+// directory may hold.
+func RepositoryForSource(source string) (string, bool) {
+	repository, _ := splitSource(source)
+	if !KnownRepository(repository) {
+		return "", false
+	}
+	return repository, true
 }
 
 func splitSource(source string) (repository, subpath string) {

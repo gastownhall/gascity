@@ -24,7 +24,7 @@ func TestRuntimeEnvVariantsPropagateHolderToken(t *testing.T) {
 	if alias["BEADS_HOLDER_TOKEN"] != "tok-a" {
 		t.Errorf("WithAlias BEADS_HOLDER_TOKEN = %q, want tok-a", alias["BEADS_HOLDER_TOKEN"])
 	}
-	ctx := RuntimeEnvWithSessionContext("sid", "sname", "al", "tmpl", "cli", DefaultGeneration, DefaultContinuationEpoch, "tok-c")
+	ctx := RuntimeEnvWithSessionContext(Info{ID: "sid", SessionName: "sname", SessionNameMetadata: "sname", Alias: "al", ConfiguredNamedIdentity: "named", Template: "tmpl", SessionOrigin: "cli"}, DefaultGeneration, DefaultContinuationEpoch, "tok-c")
 	if ctx["BEADS_HOLDER_TOKEN"] != "tok-c" {
 		t.Errorf("WithSessionContext BEADS_HOLDER_TOKEN = %q, want tok-c", ctx["BEADS_HOLDER_TOKEN"])
 	}

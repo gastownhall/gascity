@@ -312,7 +312,105 @@ func runPackCommandProcessWithEnv(t *testing.T, cityPath, scenario string, extra
 	if got, err := os.ReadFile(afterRun); err != nil || string(got) != "reached\n" {
 		t.Fatalf("post-run marker = %q, err=%v; run did not return through deferred lifecycle", got, err)
 	}
-	return packCommandProcessResult{exitCode: exitCode, stdout: stdout.String(), stderr: stderr.String()}
+	return packCommandProcessResult{exitCode: exitCode, stdout: stdout.String(), stderr: stripTmuxLeakGuardNoise(stderr.String())}
+}
+
+// stripTmuxLeakGuardNoise removes the tmux leak guard's own diagnostic lines
+// (cmd/gc/tmux_leak_guard_test.go: sweepStaleTmuxTestServers,
+// writeTmuxLeakReport, and tmuxLeakGuardedTestingM.runWith's teardown report)
+// from captured subprocess stderr. TestMain re-runs in every re-exec'd
+// subprocess, so its startup sweep or teardown leak check can emit these
+// lines nondeterministically depending on unrelated concurrent sibling
+// suites' teardown timing — real CLI stderr assertions must not depend on
+// that timing.
+func stripTmuxLeakGuardNoise(s string) string {
+	if s == "" {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	trailingNewline := false
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		trailingNewline = true
+		lines = lines[:len(lines)-1]
+	}
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		switch {
+		case strings.HasPrefix(line, "cmd/gc tmux leak guard: "):
+		case strings.HasPrefix(line, "  pid="):
+		case strings.HasPrefix(line, "  socket="):
+		default:
+			kept = append(kept, line)
+		}
+	}
+	if len(kept) == 0 {
+		return ""
+	}
+	out := strings.Join(kept, "\n")
+	if trailingNewline {
+		out += "\n"
+	}
+	return out
+}
+
+// TestStripTmuxLeakGuardNoise expresses the acceptance criteria for isolating
+// captured subprocess stderr from the tmux leak guard's own harness-level
+// diagnostics (cmd/gc/tmux_leak_guard_test.go): stripTmuxLeakGuardNoise must
+// remove exactly the guard's startup-sweep and teardown-leak lines, in any
+// position, while leaving real CLI stderr output (and its line order)
+// untouched. Without this, TestPackCommandCobraHelpAndUnknownParity's
+// eager/lazy stderr-equality assertion — and the several exact-empty-stderr
+// assertions elsewhere in this file — are vulnerable to a concurrent sibling
+// suite's teardown racing exactly one of the two subprocess launches' startup
+// sweep (ga-5pe5xv gate evidence: "a concurrent tmux leak-guard stderr line
+// captured by one parity side only").
+func TestStripTmuxLeakGuardNoise(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "no guard output left untouched",
+			in:   "Error: unknown command \"missing\" for \"gc backstage\"\n",
+			want: "Error: unknown command \"missing\" for \"gc backstage\"\n",
+		},
+		{
+			name: "empty stays empty",
+			in:   "",
+			want: "",
+		},
+		{
+			name: "strips a leading startup-sweep block, keeps real stderr after it",
+			in: "cmd/gc tmux leak guard: startup sweep reaping 1 stale test tmux server(s) whose socket root is gone\n" +
+				"  pid=12345 argv=\"tmux -u -L test-city new-session -s mayor\"\n" +
+				"Error: unknown command \"missing\" for \"gc backstage\"\n",
+			want: "Error: unknown command \"missing\" for \"gc backstage\"\n",
+		},
+		{
+			name: "strips a trailing teardown-leak block, keeps real stderr before it",
+			in: "Error: unknown command \"missing\" for \"gc backstage\"\n" +
+				"cmd/gc tmux leak guard: 1 tmux server(s) leaked by this run under /tmp/gct-1-a\n" +
+				"  socket=/tmp/gct-1-a/tmux-1000/test-city (killed)\n" +
+				"cmd/gc tmux leak guard: a test created a real tmux session without tearing its server down; city-name sockets (e.g. -L test-city) have exit-empty off and live forever unless killed (dip-73cr05)\n",
+			want: "Error: unknown command \"missing\" for \"gc backstage\"\n",
+		},
+		{
+			name: "strips a guard block sandwiched between two real stderr lines",
+			in: "Usage:\n" +
+				"cmd/gc tmux leak guard: startup sweep reaping 1 stale test tmux server(s) whose socket root is gone\n" +
+				"  pid=999 argv=\"tmux -u -L test-city new-session -s mayor\"\n" +
+				"  gc backstage repo\n",
+			want: "Usage:\n  gc backstage repo\n",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := stripTmuxLeakGuardNoise(test.in); got != test.want {
+				t.Fatalf("stripTmuxLeakGuardNoise(%q) = %q, want %q", test.in, got, test.want)
+			}
+		})
+	}
 }
 
 const testTmuxSocketParentRootEnv = "GC_TEST_TMUX_SOCKET_PARENT_ROOT"
@@ -2672,13 +2770,13 @@ func TestPackCommandCobraHelpAndUnknownParity(t *testing.T) {
 			name:           "known namespace miss",
 			args:           []string{"backstage", "missing"},
 			wantExit:       1,
-			wantStderrText: []string{`unknown command "missing"`, "Usage:", "gc backstage", "hello", "repo"},
+			wantStderrText: []string{`unknown command "missing"`, `Run "gc backstage --help" for usage.`},
 		},
 		{
 			name:           "known intermediate miss",
 			args:           []string{"backstage", "repo", "missing"},
 			wantExit:       1,
-			wantStderrText: []string{`unknown command "missing"`, "Usage:", "gc backstage repo", "sync"},
+			wantStderrText: []string{`unknown command "missing"`, `Run "gc backstage repo --help" for usage.`},
 		},
 	}
 	for _, test := range tests {
@@ -2718,12 +2816,12 @@ func TestPackCommandGroupMissRejectsUnknownSubcommands(t *testing.T) {
 		{
 			name: "namespace",
 			args: []string{"backstage", "missing"},
-			want: []string{`unknown command "missing"`, "Usage:", "gc backstage", "hello", "repo"},
+			want: []string{`unknown command "missing"`, `Run "gc backstage --help" for usage.`},
 		},
 		{
 			name: "intermediate",
 			args: []string{"backstage", "repo", "missing"},
-			want: []string{`unknown command "missing"`, "Usage:", "gc backstage repo", "sync"},
+			want: []string{`unknown command "missing"`, `Run "gc backstage repo --help" for usage.`},
 		},
 	}
 	for _, test := range tests {
@@ -2933,7 +3031,7 @@ func TestResolveDiscoveredCommandFallbackSelectsNestedUnknown(t *testing.T) {
 	if got := stdout.String(); got != "" {
 		t.Fatalf("stdout = %q, want empty", got)
 	}
-	for _, text := range []string{`gc: unknown command "missing"`, "Usage:", "gc private-binding repo"} {
+	for _, text := range []string{`gc: unknown command "missing"`, `Run "gc private-binding repo --help" for usage.`} {
 		if !strings.Contains(stderr.String(), text) {
 			t.Fatalf("stderr missing %q:\n%s", text, stderr.String())
 		}
@@ -3789,4 +3887,154 @@ func TestDiscoveredNamespace_UnknownSubcommandErrors(t *testing.T) {
 			t.Fatalf("bare nested namespace should succeed with help, got error: %v", err)
 		}
 	})
+}
+
+// TestRunDiscoveredCommand_ProjectsCityDoltSettings pins the fix for the
+// silent-config-drift bug: a pack command invoked from an operator shell used to
+// inherit NONE of the city's [dolt] block, so `gc dolt restart` regenerated
+// dolt-config.yaml from the pack script's own defaults (auto-GC on,
+// read_timeout 120000) and silently reverted the city's configured values. The
+// provider-lifecycle path has always projected these; the directly-invoked path
+// must agree with it, or a shell restart writes a different server config than
+// the supervisor would.
+func TestRunDiscoveredCommand_ProjectsCityDoltSettings(t *testing.T) {
+	dir := t.TempDir()
+	packDir := filepath.Join(dir, "pack")
+	sourceDir := filepath.Join(packDir, "commands", "restart")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	scriptPath := filepath.Join(sourceDir, "run.sh")
+	script := `#!/bin/sh
+echo "autogc=$GC_DOLT_AUTO_GC_ENABLED"
+echo "readtimeout=$GC_DOLT_READ_TIMEOUT_MILLIS"
+echo "writetimeout=$GC_DOLT_WRITE_TIMEOUT_MILLIS"
+echo "maxconns=$GC_DOLT_MAX_CONNECTIONS"
+echo "archive=$GC_DOLT_ARCHIVE_LEVEL"
+echo "waittimeout=$GC_DOLT_WAIT_TIMEOUT"
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	clearInheritedBeadsEnv(t)
+	tomlPath := filepath.Join(dir, "city.toml")
+	cityTOML := `[workspace]
+name = "doltcity"
+
+[beads]
+provider = "file"
+
+[dolt]
+auto_gc_enabled = false
+read_timeout_millis = 120000
+write_timeout_millis = 250000
+max_connections = 128
+archive_level = 1
+wait_timeout_seconds = 120
+`
+	if err := os.WriteFile(tomlPath, []byte(cityTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	entry := config.DiscoveredCommand{
+		BindingName: "dolt",
+		PackName:    "dolt",
+		Command:     []string{"restart"},
+		RunScript:   scriptPath,
+		PackDir:     packDir,
+		SourceDir:   sourceDir,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runDiscoveredCommand(entry, dir, "doltcity", nil, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	out := stdout.String()
+	for _, want := range []string{
+		"autogc=false",
+		"readtimeout=120000",
+		"writetimeout=250000",
+		"maxconns=128",
+		"archive=1",
+		"waittimeout=120",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("pack command env missing %q; got:\n%s", want, out)
+		}
+	}
+}
+
+// TestApplyCityDoltSettingsEnv_CityConfigBeatsAmbient covers the precedence half
+// directly on the projection, without mutating the process environment: the
+// cmd/gc environment debt ratchet forbids growing t.Setenv usage (TESTING.md),
+// and applyCityDoltSettingsEnv already takes the environment as a value.
+//
+// city.toml must win where it speaks, because the point of the projection is
+// that a shell-invoked restart reproduces the config the supervisor writes, and
+// the supervisor resolves through resolveManagedDoltConfigForStart, which
+// consults GC_DOLT_* only for fields the city leaves unset.
+func TestApplyCityDoltSettingsEnv_CityConfigBeatsAmbient(t *testing.T) {
+	dir := t.TempDir()
+	clearInheritedBeadsEnv(t)
+	cityTOML := `[workspace]
+name = "doltcity"
+
+[beads]
+provider = "file"
+
+[dolt]
+auto_gc_enabled = false
+read_timeout_millis = 120000
+wait_timeout_seconds = 120
+`
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ambient := []string{
+		"GC_DOLT_AUTO_GC_ENABLED=true",
+		"GC_DOLT_READ_TIMEOUT_MILLIS=15000",
+		"GC_DOLT_WAIT_TIMEOUT=30",
+		"UNRELATED=keep-me",
+	}
+	got := applyCityDoltSettingsEnv(ambient, dir)
+
+	resolved := map[string]string{}
+	for _, entry := range got {
+		if key, value, ok := strings.Cut(entry, "="); ok {
+			resolved[key] = value
+		}
+	}
+	for key, want := range map[string]string{
+		"GC_DOLT_AUTO_GC_ENABLED":     "false",
+		"GC_DOLT_READ_TIMEOUT_MILLIS": "120000",
+		"GC_DOLT_WAIT_TIMEOUT":        "120",
+		"UNRELATED":                   "keep-me",
+	} {
+		if resolved[key] != want {
+			t.Errorf("%s = %q, want %q", key, resolved[key], want)
+		}
+	}
+	// A field the city leaves unset must not be invented, so the ambient value
+	// (or the start path's own default) still applies.
+	if _, ok := resolved["GC_DOLT_MAX_CONNECTIONS"]; ok {
+		t.Errorf("GC_DOLT_MAX_CONNECTIONS was projected despite the city not setting it: %q", resolved["GC_DOLT_MAX_CONNECTIONS"])
+	}
+	// Each key must appear exactly once: a duplicate would leave the shell
+	// script reading whichever copy os.Environ ordering happened to surface.
+	counts := map[string]int{}
+	for _, entry := range got {
+		if key, _, ok := strings.Cut(entry, "="); ok {
+			counts[key]++
+		}
+	}
+	for key, n := range counts {
+		if n != 1 {
+			t.Errorf("env key %s appears %d times, want 1", key, n)
+		}
+	}
 }

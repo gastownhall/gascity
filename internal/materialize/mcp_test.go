@@ -223,7 +223,7 @@ func TestMCPTemplateDataUsesBackingTemplateName(t *testing.T) {
 		Dir:  "rig-a",
 		Env:  map[string]string{"TOKEN": "abc"},
 	}
-	got := MCPTemplateData(&config.City{}, "/tmp/city", agent, "rig-a/worker-7", "/tmp/work")
+	got := MCPTemplateData(&config.City{}, "/tmp/city", agent, "rig-a/worker-7", "/tmp/work", config.QueryTopology{})
 	if got["AgentName"] != "rig-a/worker-7" {
 		t.Fatalf("AgentName = %q, want %q", got["AgentName"], "rig-a/worker-7")
 	}
@@ -253,7 +253,7 @@ func TestMCPTemplateDataUsesPoolNameForPoolInstances(t *testing.T) {
 		Name:     "worker-3",
 		PoolName: "worker",
 	}
-	got := MCPTemplateData(&config.City{}, "/tmp/city", agent, "worker-3", "/tmp/work")
+	got := MCPTemplateData(&config.City{}, "/tmp/city", agent, "worker-3", "/tmp/work", config.QueryTopology{})
 	if got["TemplateName"] != "worker" {
 		t.Fatalf("TemplateName = %q, want %q", got["TemplateName"], "worker")
 	}
@@ -267,7 +267,7 @@ func TestMCPTemplateDataUsesBD105WorkQuery(t *testing.T) {
 	}
 	agent := &config.Agent{Name: "worker"}
 
-	got := MCPTemplateData(cfg, "/tmp/city", agent, "worker", "/tmp/work")
+	got := MCPTemplateData(cfg, "/tmp/city", agent, "worker", "/tmp/work", config.QueryTopology{})
 	if !strings.Contains(got["WorkQuery"], "bd ready --include-ephemeral") {
 		t.Fatalf("WorkQuery = %q, want bd-1.0.5 ephemeral-ready probe", got["WorkQuery"])
 	}
@@ -277,7 +277,7 @@ func TestMCPTemplateDataPreservesBranchAlias(t *testing.T) {
 	t.Parallel()
 
 	agent := &config.Agent{Name: "worker"}
-	got := MCPTemplateData(&config.City{}, "/tmp/city", agent, "worker-1", "")
+	got := MCPTemplateData(&config.City{}, "/tmp/city", agent, "worker-1", "", config.QueryTopology{})
 	if got["Branch"] == "" {
 		t.Fatal("Branch = empty, want default branch alias")
 	}

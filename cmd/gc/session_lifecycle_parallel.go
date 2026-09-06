@@ -217,8 +217,11 @@ type preparedStart struct {
 	liveHash      string
 	provisionHash string
 	launchHash    string
-	// promptDelivered reports whether THIS incarnation actually delivers the
-	// rendered startup prompt (S19 confirmation signal 1). It is the pure
+	// promptDelivered reports whether a delivery mechanism was selected for
+	// THIS incarnation's rendered startup prompt (S19 confirmation signal 1)
+	// — a pure routing decision, not I/O: it means delivery was
+	// selected/attempted, not that the runtime received or the agent
+	// consumed the prompt (gastownhall/gascity#5236). It is the pure
 	// promptDelivery decision AND-ed with the fresh-launch condition, i.e. the
 	// exact complement of the resume override below — so a resume that swaps in
 	// restartPromptNudge and re-sets GC_STARTUP_PROMPT_DELIVERED for hooks stamps
@@ -313,6 +316,18 @@ type startExecutionOptions struct {
 	// deferred under storeQueryPartial today.
 	deferSessionClosesOnBoot bool
 	readyAssignedFlags       []bool
+	// assignedWorkStores is index-aligned with the assignedWorkBeads passed to
+	// the same reconcile pass: the store each row was read through. The
+	// orphan-close tie-break releases through it instead of re-deriving an owner
+	// from gc.routed_to, which names a work ledger a binding-resident row does
+	// not live in. Nil or misaligned leaves that fallback in place.
+	assignedWorkStores []beads.Store
+	// warmClaimProbe, when set, enables the warm-bind claim nudge: it reports
+	// whether a pool slot's newly-bound trigger bead is still unclaimed, resolved
+	// through the city's residency contract (newWarmClaimTriggerResolver). Built by
+	// the reconciler where the cached rig stores are in scope and consumed in
+	// startPreparedStartCandidate's warm-reuse branch. Nil disables the nudge.
+	warmClaimProbe warmClaimTriggerProbe
 }
 
 type startExecutionOption func(*startExecutionOptions)
@@ -392,6 +407,14 @@ func resolveStartStabilityWaiter(waiter startStabilityWaiter) startStabilityWait
 	return waiter
 }
 
+// withWarmClaimProbe installs the warm-bind claim-nudge probe for this reconcile
+// pass. Nil (or the option omitted) leaves the warm-bind claim nudge disabled.
+func withWarmClaimProbe(probe warmClaimTriggerProbe) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.warmClaimProbe = probe
+	}
+}
+
 // withDeferSessionClosesOnBoot defers the per-session orphan/failed-create
 // session-bead closes for this reconcile pass (gastownhall/gascity#3288). Used
 // only on the synchronous boot reconcile so readiness does not wait on the
@@ -411,6 +434,19 @@ func withDeferSessionClosesOnBoot() startExecutionOption {
 func withReadyAssignedFlags(readyAssignedFlags []bool) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.readyAssignedFlags = readyAssignedFlags
+	}
+}
+
+// withAssignedWorkStores installs the index-aligned snapshot stores for this
+// reconcile pass: the legs the census read each assignedWorkBeads row through.
+// The orphan-close tie-break releases a held claim through the leg that read it,
+// because gc.routed_to names a work ledger that on a split city no longer holds
+// the row (ga-b0o6a). The slice must be exactly as long as the assignedWorkBeads
+// passed to the same pass; anything else is ignored in favor of the routed
+// fallback. Nil (or the option omitted) leaves the fallback in place.
+func withAssignedWorkStores(assignedWorkStores []beads.Store) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.assignedWorkStores = assignedWorkStores
 	}
 }
 
@@ -904,14 +940,22 @@ func refreshConfiguredNamedStartCandidate(
 		}
 		return candidate
 	}
-	refreshed, err := resolvePreservedConfiguredNamedSessionTemplate(cityPath, cityName, cfg, sp, store, snapshot.OpenInfos(), candidate.info, clk, stderr)
+	refreshed, refreshedInfo, err := resolvePreservedConfiguredNamedSessionTemplate(cityPath, cityName, cfg, sp, store, snapshot.OpenInfos(), candidate.info, clk, stderr)
 	if err != nil {
 		if stderr != nil {
 			fmt.Fprintf(stderr, "session reconciler: refreshing named session start %s: %v\n", candidate.name(), err) //nolint:errcheck
 		}
+		candidate.info = refreshedInfo // the bind may have cleared the stamp durably before the resolve failed
 		return candidate
 	}
 	candidate.tp = refreshed
+	// Fold the resolver's Info too, not just the params: the resolve may have
+	// durably cleared a stale trigger stamp (bindNamedSessionTriggerBead,
+	// gascity#4373), and buildPreparedStartWithWorkDirResolver re-derives the
+	// launch env from candidate.info via sessionTriggerBeadEnv. Keeping the
+	// pre-call Info here would hand the seat starting on the clearing tick the
+	// stale GC_TRIGGER_BEAD_ID the clear just removed.
+	candidate.info = refreshedInfo
 	return candidate
 }
 
@@ -942,7 +986,10 @@ func buildPreparedStartWithWorkDirResolver(
 	workDirResolver taskWorkDirResolver,
 ) (*preparedStart, sessionpkg.Info, error) {
 	tp := candidate.tp
-	agentCfg, delivery := templateParamsToConfigWithDelivery(tp)
+	agentCfg, delivery, err := templateParamsToConfigWithDelivery(tp)
+	if err != nil {
+		return nil, candidate.info, err
+	}
 
 	// Apply template_overrides from bead metadata. These are per-session
 	// schema option overrides (e.g., {"model":"opus","effort":"high"}) that
@@ -1006,9 +1053,20 @@ func buildPreparedStartWithWorkDirResolver(
 	// transcript layer so each provider keeps its own resumability rules; for
 	// providers whose resume state we cannot probe on disk (codex/gemini/...)
 	// the probe reports !probeable and we leave their metadata untouched.
+	// transcriptState carries the same probe result forward to the firstStart
+	// classification below, so the disk is read once per launch.
+	transcriptState := sessTranscriptUnknown
 	if sk := strings.TrimSpace(candidate.info.SessionKey); sk != "" && agentCfg.WorkDir != "" {
 		provider := sessionTranscriptProvider(tp.ResolvedProvider, candidate.info)
-		if present, probeable := staleResumeKeyProbe(provider, agentCfg.WorkDir, sk); probeable && !present {
+		present, probeable := staleResumeKeyProbe(provider, agentCfg.WorkDir, sk)
+		if probeable {
+			if present {
+				transcriptState = sessTranscriptPresent
+			} else {
+				transcriptState = sessTranscriptAbsent
+			}
+		}
+		if probeable && !present {
 			var sessFront *sessionpkg.Store
 			if store != nil {
 				sessFront = sessionFrontDoor(store)
@@ -1034,13 +1092,17 @@ func buildPreparedStartWithWorkDirResolver(
 		// Fold the mint onto the typed twin so the stale-key death detection at
 		// runPreparedStartCandidate (info.SessionKey != "") sees the minted key.
 		candidate.info = candidate.info.ApplyPatch(sessionpkg.MetadataPatch{"session_key": sessionKey})
+		// A key minted right here has no conversation behind it yet, whichever
+		// way the probe above went for the key it replaced.
+		transcriptState = sessTranscriptAbsent
 	}
 	// firstStart classification routes through the level-triggered converge core
-	// (deriveFirstStart). This call passes sessTranscriptUnknown, which reproduces
-	// the legacy durable-only signal (started_config_hash == "") byte-for-byte;
-	// probing the transcript here to activate the #3849 crash-loop fix is the
-	// remaining wiring (see session_level_converge.go).
-	firstStart := deriveFirstStart(candidate.info.StartedConfigHash, sessTranscriptUnknown)
+	// (deriveFirstStart), fed the transcript probe taken above. Passing a real
+	// state (rather than sessTranscriptUnknown) activates both crash-loop
+	// branches: hash-present + transcript-absent starts fresh (#3849), and
+	// hash-absent + transcript-present resumes instead of replaying a
+	// --session-id the provider will reject as already in use.
+	firstStart := deriveFirstStart(candidate.info.StartedConfigHash, transcriptState)
 	forceFresh := candidate.info.WakeMode == "fresh"
 	// Fork-launch validation (fail loud, never silent fresh). A session carrying
 	// gc.brain_parent_sid is a warm arm that must fork off a pre-built brain;
@@ -1146,13 +1208,10 @@ func buildPreparedStartWithWorkDirResolver(
 		// recoverRunningPendingCreate / direct-call paths where it was empty.
 		candidate.info = candidate.info.ApplyPatch(sessionpkg.MetadataPatch{"instance_token": instanceToken})
 	}
-	beadAlias := strings.TrimSpace(candidate.info.Alias)
+	runtimeInfo := candidate.info
+	runtimeInfo.SessionName = candidate.name()
 	runtimeEnv := sessionpkg.RuntimeEnvWithSessionContext(
-		candidate.info.ID,
-		candidate.name(),
-		beadAlias,
-		strings.TrimSpace(candidate.info.Template),
-		strings.TrimSpace(candidate.info.SessionOrigin),
+		runtimeInfo,
 		generation,
 		continuationEpoch,
 		instanceToken,
@@ -1180,8 +1239,11 @@ func buildPreparedStartWithWorkDirResolver(
 
 // sessionTriggerBeadEnv reads the trigger-bead identity off the typed twin
 // (Info.TriggerBeadID / Info.TriggerBeadStoreRef, verbatim raw mirrors) instead of
-// the raw bead metadata. Neither key is mutated on the start-prep path, so the
-// append-captured Info is coherent.
+// the raw bead metadata. The trigger key IS mutated on the start-prep path —
+// refreshConfiguredNamedStartCandidate runs bindNamedSessionTriggerBead, which
+// clears a stamp whose target is no longer workable (gascity#4373) — so
+// coherence here depends on that refresh folding its returned Info onto
+// candidate.info, not on the key being immutable.
 func sessionTriggerBeadEnv(info sessionpkg.Info) map[string]string {
 	triggerBeadID := strings.TrimSpace(info.TriggerBeadID)
 	if triggerBeadID == "" {
@@ -1251,6 +1313,17 @@ func resolvePreparedTaskWorkDir(
 	store beads.Store,
 	workDirResolver taskWorkDirResolver,
 ) string {
+	// Prepared drain items only: the item step's copied metadata can still name
+	// the launcher checkout before prepare-worktree runs. Deliberately NOT the
+	// full resolveTaskBeadWorkDir chain — that would put the trigger bead ahead
+	// of the snapshot resolver for every pool session.
+	if triggerID := strings.TrimSpace(candidate.info.TriggerBeadID); triggerID != "" && store != nil {
+		if trigger, err := store.Get(triggerID); err == nil {
+			if workDir := resolveDrainSourceWorkDir(cityPath, store, trigger); workDir != "" {
+				return workDir
+			}
+		}
+	}
 	if workDirResolver != nil {
 		if workDir := workDirResolver(candidate, cfg); workDir != "" {
 			return workDir
@@ -1371,7 +1444,7 @@ func executePreparedStartWaveForCity(
 				<-sem
 				done <- i
 			}()
-			results[i] = runPreparedStartCandidate(ctx, item, cityPath, sp, store, cfg, startupTimeout, stabilityWaiter, startOpts.sessionStaleKeyDetectionWaiter)
+			results[i] = runPreparedStartCandidate(ctx, item, cityPath, sp, store, cfg, startupTimeout, stabilityWaiter, startOpts.sessionStaleKeyDetectionWaiter, startOpts.warmClaimProbe)
 		}()
 	}
 	for range prepared {
@@ -1390,6 +1463,7 @@ func runPreparedStartCandidate(
 	startupTimeout time.Duration,
 	stabilityWaiter startStabilityWaiter,
 	sessionStaleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter,
+	warmClaim warmClaimTriggerProbe,
 ) (result startResult) {
 	started := time.Now()
 	result = startResult{
@@ -1418,7 +1492,7 @@ func runPreparedStartCandidate(
 	defer cancel()
 	var phases startPhaseTimings
 	startCallBegin := time.Now()
-	startedFresh, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg, &phases, sessionStaleKeyDetectionWaiter)
+	startedFresh, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg, &phases, sessionStaleKeyDetectionWaiter, warmClaim)
 	startCtxErr := startCtx.Err()
 	// Split start_call into provider.Start and the ErrStateSync recovery
 	// branch (gc-9ha). The recovery branch hits the worker observation
@@ -1585,6 +1659,7 @@ func enqueuePreparedStartWaveForCity(
 	asyncFollowUp func(),
 	stabilityWaiter startStabilityWaiter,
 	sessionStaleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter,
+	warmClaim warmClaimTriggerProbe,
 ) []startResult {
 	if len(prepared) == 0 {
 		return nil
@@ -1609,7 +1684,7 @@ func enqueuePreparedStartWaveForCity(
 			if release != nil {
 				defer release()
 			}
-			result := runPreparedStartCandidate(ctx, item, cityPath, sp, store, cfg, startupTimeout, stabilityWaiter, sessionStaleKeyDetectionWaiter)
+			result := runPreparedStartCandidate(ctx, item, cityPath, sp, store, cfg, startupTimeout, stabilityWaiter, sessionStaleKeyDetectionWaiter, warmClaim)
 			commitAsyncStartResultWithContext(ctx, result, sp, store, clk, rec, wave, stdout, stderr, trace)
 			if asyncFollowUp != nil {
 				asyncFollowUp()
@@ -1831,6 +1906,7 @@ func startPreparedStartCandidate(
 	cfg *config.City,
 	phases *startPhaseTimings,
 	staleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter,
+	warmClaim warmClaimTriggerProbe,
 ) (bool, error) {
 	name := item.candidate.name()
 	if sp != nil {
@@ -1839,6 +1915,16 @@ func startPreparedStartCandidate(
 			if alive {
 				if shouldRollbackPendingCreateInfo(item.candidate.info) && !runningSessionMatchesPendingCreateInfo(item.candidate.info, name, sp) {
 					return false, fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
+				}
+				// Warm reuse: the slot is already up, so cold Start's startup nudge
+				// never fires. If on-demand work was bound to it since it last Started
+				// (bindPoolSessionTriggerBead) and is still unclaimed, deliver the
+				// claim nudge once — the event-based symmetric counterpart to that
+				// cold-Start nudge. Best-effort; never fails the (successful) warm start.
+				if store != nil {
+					if raw, err := store.Get(item.candidate.info.ID); err == nil {
+						deliverWarmBindClaimNudge(ctx, sp, store, &raw, item.cfg.Nudge, warmClaim)
+					}
 				}
 				return false, nil
 			}
@@ -2165,6 +2251,24 @@ func commitStartResultTraced(
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "metadata_batch_failed", result.started, result.finished, err, result.phases)
 		return false
 	}
+	// A successful, durably-committed start clears any accrued startup-health
+	// episode for this session name (ga-o04bfr.1.1). Skipped when there is
+	// nothing to clear so a healthy session's first-ever start does not mint
+	// a startup-health-episode bead it will never need.
+	if prior, loadErr := sessFront.LoadStartupHealthEpisode(name); loadErr != nil {
+		fmt.Fprintf(stderr, "session reconciler: loading startup-health episode for %s: %v\n", name, loadErr) //nolint:errcheck
+	} else if prior.ConsecutiveCount != 0 || !prior.QuarantinedUntil.IsZero() {
+		cleared := sessionpkg.ClearStartupHealthEpisode(name)
+		if saveErr := sessFront.SaveStartupHealthEpisode(cleared); saveErr != nil {
+			fmt.Fprintf(stderr, "session reconciler: clearing startup-health episode for %s: %v\n", name, saveErr) //nolint:errcheck
+		}
+		// Clear the mirrored count/kind alongside the episode itself so a
+		// recovered session does not keep showing stale "quarantined"
+		// metadata on its visible row (ga-em8g4o).
+		if mirrorErr := mirrorStartupHealthEpisodeMetadata(sessFront, info.ID, cleared); mirrorErr != nil {
+			fmt.Fprintf(stderr, "session reconciler: clearing mirrored startup-health metadata for %s: %v\n", name, mirrorErr) //nolint:errcheck
+		}
+	}
 	// Announce the wake only after the metadata batch has durably landed.
 	// Emitting earlier lets a subscriber observe a session.woke for a start
 	// whose commit then fails — a fact the store never recorded, since the
@@ -2255,11 +2359,29 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 		// next tick, so it deliberately does not record a wake failure (see
 		// TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError).
 		// Genuine wake-failure accounting happens on the non-rollback path
-		// below via recordWakeFailure.
+		// below via recordWakeFailure. It does, however, accrue a
+		// session-name-keyed startup-health episode: unlike wake-failure
+		// accounting (keyed to this bead's own metadata, reset when the
+		// bead closes and is recreated), the episode survives the
+		// pending-create bead's replacement so a session name that never
+		// gets past pending-create still quarantines (ga-o04bfr.1.1).
 		if trace != nil {
 			trace.RecordOperation(TraceSiteLifecycleStartRollback, TraceReasonStart, result.outcome, "", tp.TemplateName, name, 0, traceRecordPayload{
 				"error": formatLifecycleError(result.err),
 			})
+		}
+		if prior, loadErr := sessFront.LoadStartupHealthEpisode(name); loadErr != nil {
+			fmt.Fprintf(stderr, "session reconciler: loading startup-health episode for %s: %v\n", name, loadErr) //nolint:errcheck
+		} else {
+			prior.SessionName = name
+			kind := sessionpkg.FailureKindOther
+			if errors.Is(result.err, context.DeadlineExceeded) {
+				kind = sessionpkg.FailureKindTimeout
+			}
+			episode := sessionpkg.RecordStartupFailure(prior, kind, result.err.Error(), clk.Now(), defaultMaxWakeAttempts, defaultQuarantineDuration)
+			if saveErr := sessFront.SaveStartupHealthEpisode(episode); saveErr != nil {
+				fmt.Fprintf(stderr, "session reconciler: saving startup-health episode for %s: %v\n", name, saveErr) //nolint:errcheck
+			}
 		}
 		rollbackPendingCreate(info, sessFront, clk.Now().UTC(), stderr)
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.err, result.phases)
@@ -2841,7 +2963,7 @@ func executePlannedStartsTraced(
 				return wakeCount
 			}
 			if startOpts.async {
-				results = enqueuePreparedStartWaveForCity(ctx, asyncPrepared, cityPath, sp, store, cfg, clk, rec, startupTimeout, wave, stdout, stderr, trace, startOpts.asyncFollowUp, stabilityWaiter, sessionStaleKeyDetectionWaiter)
+				results = enqueuePreparedStartWaveForCity(ctx, asyncPrepared, cityPath, sp, store, cfg, clk, rec, startupTimeout, wave, stdout, stderr, trace, startOpts.asyncFollowUp, stabilityWaiter, sessionStaleKeyDetectionWaiter, startOpts.warmClaimProbe)
 				if len(results) > 0 && asyncStartBatchNeedsFollowUp(batchCandidates, cfg) {
 					asyncFollowUpRequired = true
 				}
@@ -2857,6 +2979,7 @@ func executePlannedStartsTraced(
 					batchSize,
 					withStartStabilityWaiter(stabilityWaiter),
 					withSessionStaleKeyDetectionWaiter(sessionStaleKeyDetectionWaiter),
+					withWarmClaimProbe(startOpts.warmClaimProbe),
 				)
 			}
 			for _, result := range results {

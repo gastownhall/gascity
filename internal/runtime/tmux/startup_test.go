@@ -92,12 +92,13 @@ func (f *fakeStartOps) createSession(name, workDir, command string, env map[stri
 	return nil
 }
 
-func (f *fakeStartOps) respawnAgent(name, workDir, command string) error {
+func (f *fakeStartOps) respawnAgent(name, workDir, command string, env map[string]string) error {
 	f.calls = append(f.calls, startCall{
 		method:  "respawnAgent",
 		name:    name,
 		workDir: workDir,
 		command: command,
+		env:     env,
 	})
 	return f.respawnErr
 }
@@ -906,34 +907,59 @@ func TestDoStartSession_KimiSkipsStartupDialogAcceptance(t *testing.T) {
 }
 
 func TestDoStartSessionReturnsNudgeDeliveryError(t *testing.T) {
-	ops := &fakeStartOps{
-		hasSessionResult: true,
-		sendKeysErr:      errors.New("command too long"),
-	}
-
-	cfg := runtime.Config{
-		Command: "kimi",
-		Nudge:   strings.Repeat("startup prompt\n", 100),
-	}
-
-	err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout)
-	if err == nil {
-		t.Fatal("expected startup nudge delivery error, got nil")
-	}
-	if !strings.Contains(err.Error(), "sending startup nudge") {
-		t.Fatalf("error = %v, want startup nudge context", err)
-	}
-	if !strings.Contains(err.Error(), "command too long") {
-		t.Fatalf("error = %v, want original nudge error", err)
-	}
-
-	assertCallSequence(t, ops, []string{
+	wantCalls := []string{
 		"createSession",
 		"setRemainOnExit",
 		"disableMouseAndActivity",
 		"hasSession",
 		"isSessionRunning",
 		"sendKeys",
+	}
+
+	t.Run("generic delivery error is fatal", func(t *testing.T) {
+		ops := &fakeStartOps{
+			hasSessionResult: true,
+			sendKeysErr:      errors.New("command too long"),
+		}
+
+		cfg := runtime.Config{
+			Command: "kimi",
+			Nudge:   strings.Repeat("startup prompt\n", 100),
+		}
+
+		err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout)
+		if err == nil {
+			t.Fatal("expected startup nudge delivery error, got nil")
+		}
+		if !strings.Contains(err.Error(), "sending startup nudge") {
+			t.Fatalf("error = %v, want startup nudge context", err)
+		}
+		if !strings.Contains(err.Error(), "command too long") {
+			t.Fatalf("error = %v, want original nudge error", err)
+		}
+
+		assertCallSequence(t, ops, wantCalls)
+	})
+
+	// The startup nudge has no retry-capable caller, so an unconfirmed submit
+	// must not fail the start: the keystrokes reached tmux and the session is
+	// already verified alive. Only genuine delivery errors are fatal (above).
+	t.Run("unconfirmed submit is not fatal", func(t *testing.T) {
+		ops := &fakeStartOps{
+			hasSessionResult: true,
+			sendKeysErr:      fmt.Errorf("%w: session %q", ErrNudgeSubmitUnconfirmed, "test"),
+		}
+
+		cfg := runtime.Config{
+			Command: "claude",
+			Nudge:   "startup prompt",
+		}
+
+		if err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout); err != nil {
+			t.Fatalf("doStartSession = %v, want nil for an unconfirmed startup nudge", err)
+		}
+
+		assertCallSequence(t, ops, wantCalls)
 	})
 }
 
@@ -1848,10 +1874,49 @@ func TestCommandOutputTail(t *testing.T) {
 					t.Fatalf("Write(%q) = %d, want %d", w, n, len(w))
 				}
 			}
-			if got := tail.Detail(tc.label); got != tc.want {
+			if got := tail.Detail(tc.label, nil); got != tc.want {
 				t.Fatalf("Detail(%q) = %q, want %q", tc.label, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestCommandOutputTailRetainsEnoughToRedact is the drift guard on this
+// package's copy of commandOutputTail.
+//
+// It is a near-duplicate of internal/runtime's, deliberately. The two writers
+// are byte-identical today, but they are separate code, and the retain > limit
+// relationship they share is a security invariant rather than a tuning choice:
+// the writer drops bytes as they stream, long before anyone knows what the
+// secrets are, so retaining exactly the reported limit puts the head of a
+// straddling credential beyond recovery and leaves its tail rendered verbatim.
+// A test in only one copy would let this one regress silently. (Folding them
+// into one implementation is ga-cvvks.)
+func TestCommandOutputTailRetainsEnoughToRedact(t *testing.T) {
+	const sentinel = "sk-test-NOT-A-REAL-CREDENTIAL-8f3a21"
+	const limit = 4096
+	// Place the cut inside the sentinel: the last limit bytes begin partway
+	// through it, so only retention beyond limit keeps it whole.
+	filler := strings.Repeat("f", limit+20-len(sentinel))
+	tail := newCommandOutputTail(limit)
+	if _, err := tail.Write([]byte(strings.Repeat("s", 10) + sentinel + filler)); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	got := tail.Detail("stderr", []string{sentinel})
+	if strings.Contains(got, "CREDENTIAL") {
+		t.Errorf("a credential straddling the truncation boundary leaked: %q", got)
+	}
+	if !strings.Contains(got, runtime.RedactedValue) {
+		t.Fatalf("the secret was not in the retained buffer at all: %q", got)
+	}
+	// The controls. The detail must still be bounded and still be marked as a
+	// partial tail, or this passes on a writer that simply kept everything.
+	if len(got) > limit+len("stderr: ... ") {
+		t.Errorf("Detail returned %d bytes, so the limit is not being applied", len(got))
+	}
+	if !strings.HasPrefix(got, "stderr: ... ") {
+		t.Errorf("Detail did not mark the output as truncated: %q", got[:min(40, len(got))])
 	}
 }
 
@@ -2829,5 +2894,49 @@ func TestRunSetupCommandCancellationRunsRollbackTrap(t *testing.T) {
 	}
 	if _, statErr := os.Stat(marker); statErr != nil {
 		t.Fatalf("rollback trap never ran — staged state would have been lost: %v", statErr)
+	}
+}
+
+// TestRunSetupCommandFailureOmitsCredentials pins the redaction on this
+// adapter's own copy of the runner. A session_setup command is handed the
+// session env and inherits the controller's, and both halves come back out of
+// any command that traces itself (`set -x`) or prints a request it failed to
+// make. The failure it lands in is durable — logs, event bus, bead notes — so
+// unlike argv, a credential rendered here outlives the process.
+//
+// The session env value and the inherited one are separate assertions because
+// they arrive by different routes: the caller assembled one and os.Environ()
+// supplied the other, and a fix covering only the first is the shape this
+// package shipped with.
+func TestRunSetupCommandFailureOmitsCredentials(t *testing.T) {
+	const inherited = "inherited-NOT-A-REAL-CREDENTIAL"
+	const sentinel = "sk-test-NOT-A-REAL-CREDENTIAL-8f3a21"
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", inherited)
+	ops := &tmuxStartOps{tm: &Tmux{}}
+
+	err := ops.runSetupCommand(
+		context.Background(),
+		`echo "session=$GH_TOKEN" >&2; echo "inherited=$ANTHROPIC_AUTH_TOKEN"; exit 3`,
+		map[string]string{"GH_TOKEN": sentinel},
+		10*time.Second,
+	)
+	if err == nil {
+		t.Fatal("a setup command exiting 3 must fail")
+	}
+	if strings.Contains(err.Error(), sentinel) {
+		t.Errorf("the session env credential reached the failure: %v", err)
+	}
+	if strings.Contains(err.Error(), inherited) {
+		t.Errorf("the inherited credential reached the failure: %v", err)
+	}
+	// The controls. Without them the assertions above pass on any error that
+	// never captured the command's output at all.
+	if !strings.Contains(err.Error(), "exit status 3") {
+		t.Fatalf("the command did not run as expected: %v", err)
+	}
+	for _, want := range []string{"stderr: session=" + runtime.RedactedValue, "stdout: inherited=" + runtime.RedactedValue} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("failure detail missing %q, so nothing here was scrubbed: %v", want, err)
+		}
 	}
 }

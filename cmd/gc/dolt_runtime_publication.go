@@ -71,12 +71,18 @@ func managedDoltLifecycleOwned(cityPath string) (bool, error) {
 		if cityUsesDoltliteBeadsBackend(cityPath) {
 			return false, nil
 		}
-		_, usesPostgres, err := postgresMetadataForScope(cityPath, cityPath)
+		completeBinding, err := scopeHasCompleteStorageBinding(scopeMetadataJSONPath(cityPath))
 		if err != nil {
 			return false, err
 		}
-		if usesPostgres {
+		if completeBinding {
 			return false, nil
+		}
+		// A city whose metadata gc cannot read is not a city gc owns a Dolt
+		// runtime for, and the refusal has to reach the operator rather than
+		// being answered as "not owned".
+		if _, _, err := contract.LoadMetadataState(fsys.OSFS{}, scopeMetadataJSONPath(cityPath)); err != nil {
+			return false, err
 		}
 		_, _, ok, invalid := resolveConfiguredCityDoltTarget(cityPath)
 		if invalid {
@@ -205,13 +211,17 @@ func clearManagedDoltRuntimeState(cityPath string) error {
 	return nil
 }
 
-func clearManagedDoltRuntimeStateUnlessPostgres(cityPath string) error {
+// clearManagedDoltRuntimeStateUnlessBound clears the published managed-Dolt
+// runtime state, except for a city bound to a storage binding gc does not
+// serve: that city has no managed Dolt runtime to describe, and the published
+// state is not gc's to clear.
+func clearManagedDoltRuntimeStateUnlessBound(cityPath string) error {
 	if cityUsesBdStoreContract(cityPath) {
-		_, usesPostgres, err := postgresMetadataForScope(cityPath, cityPath)
+		completeBinding, err := scopeHasCompleteStorageBinding(scopeMetadataJSONPath(cityPath))
 		if err != nil {
 			return err
 		}
-		if usesPostgres {
+		if completeBinding {
 			return nil
 		}
 	}

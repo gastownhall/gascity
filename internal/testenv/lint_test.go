@@ -41,7 +41,7 @@ func TestRequiresDedicatedTestenvImportFile(t *testing.T) {
 			return err
 		}
 		if d.IsDir() {
-			if skipRepoLintDir(d.Name()) || (path != root && isNestedWorktreeRoot(path)) {
+			if skipRepoLintDir(path, root, d.Name()) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -80,6 +80,13 @@ func TestRequiresDedicatedTestenvImportFile(t *testing.T) {
 	})
 	if walkErr != nil {
 		t.Fatalf("walk: %v", walkErr)
+	}
+	// A guard that reports clean when it examined nothing is worse than no
+	// guard: it manufactures confidence. Every finding below is a count of
+	// offenders, so an empty walk is indistinguishable from a clean tree
+	// without this floor.
+	if len(dirInfos) == 0 {
+		t.Fatalf("testenv-import guard found zero test directories under %s; it evaluated nothing", root)
 	}
 
 	var missing []string
@@ -170,12 +177,13 @@ func TestNoLeakVectorReadsAtPackageInit(t *testing.T) {
 		leakVars[name] = true
 	}
 	var offenders []string
+	scanned := 0
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
-			if skipRepoLintDir(d.Name()) || (path != root && isNestedWorktreeRoot(path)) {
+			if skipRepoLintDir(path, root, d.Name()) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -188,6 +196,7 @@ func TestNoLeakVectorReadsAtPackageInit(t *testing.T) {
 		if err != nil {
 			return err
 		}
+		scanned++
 		rel, _ := filepath.Rel(root, path)
 		for _, decl := range file.Decls {
 			switch d := decl.(type) {
@@ -216,13 +225,29 @@ func TestNoLeakVectorReadsAtPackageInit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("scan init-time GC_* reads: %v", err)
 	}
+	if scanned == 0 {
+		t.Fatalf("init-time leak-vector guard parsed zero production Go files under %s; it evaluated nothing", root)
+	}
 	sort.Strings(offenders)
 	if len(offenders) > 0 {
 		t.Fatalf("production code must not read leak-vector GC_* vars during init or top-level var init:\n  %s", strings.Join(offenders, "\n  "))
 	}
 }
 
-func skipRepoLintDir(name string) bool {
+// skipRepoLintDir reports whether a walk rooted at root must prune path.
+//
+// The root escape comes first and is load-bearing. filepath.WalkDir invokes the
+// callback on the root itself, so any name-based rule below would otherwise be
+// applied to the root's own basename: a checkout in a directory named
+// `.wt-something` or `_wt-something` returns SkipDir on the first callback and
+// the entire walk is skipped, leaving every guard built on it passing while
+// evaluating nothing. That is a silent hole, not a loud one — the guards cannot
+// tell "clean tree" from "never looked". Whatever the root is named, the walk
+// was started deliberately, so the root is always in scope.
+func skipRepoLintDir(path, root, name string) bool {
+	if path == root {
+		return false
+	}
 	if name == "vendor" || name == "node_modules" {
 		return true
 	}
@@ -235,7 +260,10 @@ func skipRepoLintDir(name string) bool {
 	if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
 		return true
 	}
-	return name == "worktrees" || strings.HasPrefix(name, "worktree-")
+	if name == "worktrees" || strings.HasPrefix(name, "worktree-") {
+		return true
+	}
+	return isNestedWorktreeRoot(path)
 }
 
 // isNestedWorktreeRoot reports whether path is the root of a linked git
@@ -380,8 +408,45 @@ func (e errMalformed) Error() string {
 // root. See ga-5vzfgb.
 func TestScaffoldNoiseIsSkipped(t *testing.T) {
 	t.Run("dot-prefixed worktree-stage dir is skipped by name", func(t *testing.T) {
-		if !skipRepoLintDir(".gascity-worktree-stage.abc123") {
+		root := "/repo"
+		stage := filepath.Join(root, ".gascity-worktree-stage.abc123")
+		if !skipRepoLintDir(stage, root, filepath.Base(stage)) {
 			t.Fatal("skipRepoLintDir must skip .gascity-worktree-stage.* scaffold dirs")
+		}
+	})
+
+	// ga-xoioq: the name rules must never be applied to the walk's own root.
+	// filepath.WalkDir calls back on the root first, so a checkout in a
+	// dot- or underscore-prefixed directory used to return SkipDir on that
+	// first callback and silently skip the entire repo — every guard built on
+	// this helper passed while examining zero files. Three live worktrees on
+	// one developer box were unguarded this way before anyone noticed.
+	t.Run("walk root is never pruned by its own name", func(t *testing.T) {
+		for _, root := range []string{
+			"/data/projects/.wt-classroute",
+			"/data/projects/_wt-govuln-public",
+			"/data/projects/vendor",
+			"/data/projects/pkg",
+			"/data/projects/worktrees",
+			"/data/projects/worktree-scratch",
+		} {
+			if skipRepoLintDir(root, root, filepath.Base(root)) {
+				t.Errorf("skipRepoLintDir pruned the walk root %q; the whole scan would be skipped and every guard using it would pass having read nothing", root)
+			}
+		}
+	})
+
+	t.Run("a linked worktree below the root is still pruned", func(t *testing.T) {
+		root := t.TempDir()
+		nested := filepath.Join(root, "embedded-checkout")
+		if err := os.MkdirAll(nested, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(nested, ".git"), []byte("gitdir: /elsewhere/.git/worktrees/embedded-checkout\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if !skipRepoLintDir(nested, root, filepath.Base(nested)) {
+			t.Fatal("skipRepoLintDir must still prune a linked worktree checked out below the root, whatever it is named")
 		}
 	})
 

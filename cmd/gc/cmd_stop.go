@@ -31,6 +31,12 @@ shutdown timeout, then force-kills any remaining sessions. Also stops
 the Dolt server and cleans up orphan sessions. If a controller is
 running, delegates shutdown to it.
 
+If the city is registered with the machine-wide supervisor, stop also
+unregisters it (equivalent to a following "gc unregister") — the city
+will not be found by name or auto-started again until it is re-registered
+with "gc register". Use "gc unregister" directly to remove a registration
+without stopping sessions.
+
 Use --timeout=DURATION to cap the wall-clock time gc stop will spend
 before giving up; the default budgets configured session interrupt and
 stop waves, the configured shutdown grace wait, and a second orphan
@@ -65,30 +71,44 @@ func cmdStop(args []string, stdout, stderr io.Writer, wallClockTimeout time.Dura
 }
 
 type stopCommandOutcome struct {
-	code     int
-	cityPath string
+	code         int
+	cityPath     string
+	unregistered bool
 }
 
 func cmdStopJSON(args []string, stdout, stderr io.Writer, wallClockTimeout time.Duration, force bool, jsonOut bool) int {
 	var outcome stopCommandOutcome
 	if wallClockTimeout > 0 {
-		outcome = runStopWithWallClockCap(wallClockTimeout, stderr, func() stopCommandOutcome {
-			return cmdStopJSONSequence(args, stdout, stderr, force, jsonOut, true)
+		unregisterTx := newSupervisorUnregisterTransaction()
+		outcome = runStopWithWallClockCap(wallClockTimeout, stderr, unregisterTx, func() stopCommandOutcome {
+			return cmdStopJSONSequence(args, stdout, stderr, force, jsonOut, true, unregisterTx)
 		})
 	} else {
-		outcome = cmdStopJSONSequence(args, stdout, stderr, force, jsonOut, false)
+		// The uncapped path holds the same pending-unregister transaction as
+		// the capped one: a stop that fails after removing the registration —
+		// a managed provider that refuses to shut down, an invalid config the
+		// body cannot recover — must hand the entry back rather than leave a
+		// live city unregistered. This mirrors the capped arm's accept/rollback
+		// exactly; the deferred success message is part of the same contract.
+		unregisterTx := newSupervisorUnregisterTransaction()
+		outcome = cmdStopJSONSequence(args, stdout, stderr, force, jsonOut, false, unregisterTx)
+		if outcome.code == 0 {
+			unregisterTx.commit()
+		} else {
+			writeSupervisorUnregisterRollback(stderr, "gc stop", "stop failed after unregistering city", unregisterTx.rollback())
+		}
 	}
 	if outcome.code != 0 {
 		return outcome.code
 	}
 	if jsonOut {
-		return writeCityStopSuccess(stdout, stderr, outcome.cityPath, force)
+		return writeCityStopSuccess(stdout, stderr, outcome.cityPath, force, outcome.unregistered)
 	}
 	fmt.Fprintln(stdout, "City stopped.") //nolint:errcheck // best-effort stdout
 	return 0
 }
 
-func cmdStopJSONSequence(args []string, stdout, stderr io.Writer, force bool, jsonOut bool, wallClockCapApplied bool) stopCommandOutcome {
+func cmdStopJSONSequence(args []string, stdout, stderr io.Writer, force bool, jsonOut bool, wallClockCapApplied bool, unregisterTx *supervisorUnregisterTransaction) stopCommandOutcome {
 	cityPath, err := resolveStopCityPath(args)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -100,23 +120,25 @@ func cmdStopJSONSequence(args []string, stdout, stderr io.Writer, force bool, js
 		stopStdout = io.Discard
 	}
 
-	if handled, code := unregisterCityFromSupervisorWithForce(cityPath, stopStdout, stderr, "gc stop", force); handled {
+	unregisteredFromSupervisor := false
+	if handled, code := unregisterCityFromSupervisorWithForce(cityPath, stopStdout, stderr, "gc stop", force, unregisterTx); handled {
 		if code != 0 {
 			return stopCommandOutcome{code: code, cityPath: cityPath}
 		}
+		unregisteredFromSupervisor = true
 		if supervisorAliveHook() != 0 {
 			if !stopCityManagedBeadsProviderAfterSuccessfulStop(cityPath, stderr) {
 				return stopCommandOutcome{code: 1, cityPath: cityPath}
 			}
 			warnInvalidConfigAfterSuccessfulStop(cityPath, stderr)
-			return stopCommandOutcome{cityPath: cityPath}
+			return stopCommandOutcome{cityPath: cityPath, unregistered: unregisteredFromSupervisor}
 		}
 	}
 
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		if handled, code := stopManagedRuntimeWithoutConfig(cityPath, err, stopStdout, stderr, force); handled {
-			return stopCommandOutcome{code: code, cityPath: cityPath}
+			return stopCommandOutcome{code: code, cityPath: cityPath, unregistered: unregisteredFromSupervisor}
 		}
 		fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
 		return stopCommandOutcome{code: 1, cityPath: cityPath}
@@ -124,17 +146,18 @@ func cmdStopJSONSequence(args []string, stdout, stderr io.Writer, force bool, js
 
 	stopLoadedCity := func() stopCommandOutcome {
 		return stopCommandOutcome{
-			code:     cmdStopBodyWithoutSuccess(cityPath, cfg, force, stopStdout, stderr),
-			cityPath: cityPath,
+			code:         cmdStopBodyWithoutSuccess(cityPath, cfg, force, stopStdout, stderr),
+			cityPath:     cityPath,
+			unregistered: unregisteredFromSupervisor,
 		}
 	}
 	if wallClockCapApplied {
 		return stopLoadedCity()
 	}
-	return runStopWithWallClockCap(defaultStopWallClockTimeout(cfg), stderr, stopLoadedCity)
+	return runStopWithWallClockCap(defaultStopWallClockTimeout(cfg), stderr, nil, stopLoadedCity)
 }
 
-func runStopWithWallClockCap(wallClockCap time.Duration, stderr io.Writer, stop func() stopCommandOutcome) stopCommandOutcome {
+func runStopWithWallClockCap(wallClockCap time.Duration, stderr io.Writer, unregisterTx *supervisorUnregisterTransaction, stop func() stopCommandOutcome) stopCommandOutcome {
 	doneCh := make(chan stopCommandOutcome, 1)
 	bodyDone := make(chan struct{})
 	go func() {
@@ -149,9 +172,21 @@ func runStopWithWallClockCap(wallClockCap time.Duration, stderr io.Writer, stop 
 
 	select {
 	case out := <-doneCh:
+		if unregisterTx != nil {
+			if out.code == 0 {
+				unregisterTx.commit()
+			} else {
+				writeSupervisorUnregisterRollback(stderr, "gc stop", "stop failed after unregistering city", unregisterTx.rollback())
+			}
+		}
 		return out
 	case <-timer.C:
+		var rollback supervisorUnregisterRollback
+		if unregisterTx != nil {
+			rollback = unregisterTx.rollback()
+		}
 		fmt.Fprintf(stderr, "gc stop: timed out after %s; some sessions may not have stopped — retry with --force if stop is wedged, or raise --timeout for large stop sets\n", wallClockCap) //nolint:errcheck // best-effort stderr
+		writeSupervisorUnregisterRollback(stderr, "gc stop", "wall-clock timeout", rollback)
 		return stopCommandOutcome{code: 1}
 	}
 }
@@ -163,13 +198,14 @@ func runStopWithWallClockCap(wallClockCap time.Duration, stderr io.Writer, stop 
 // against a later test.
 var stopBodyLifecycleHook func(<-chan struct{})
 
-func writeCityStopSuccess(stdout, stderr io.Writer, cityPath string, force bool) int {
+func writeCityStopSuccess(stdout, stderr io.Writer, cityPath string, force, unregistered bool) int {
 	return writeLifecycleActionJSONOrExit(stdout, stderr, "gc stop", lifecycleActionJSON{
-		Command:  "stop",
-		Action:   "stop",
-		Message:  "City stopped.",
-		CityPath: cityPath,
-		Force:    lifecycleBoolPtr(force),
+		Command:      "stop",
+		Action:       "stop",
+		Message:      "City stopped.",
+		CityPath:     cityPath,
+		Force:        lifecycleBoolPtr(force),
+		Unregistered: lifecycleBoolPtr(unregistered),
 	})
 }
 
@@ -370,7 +406,7 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 	// not in the current config).
 	stopOrphans(sp, desired, cfg, sessionFrontDoor(sessStore), graceTimeout, recorder, stdout, stderr)
 
-	teardownServerForStop(sp, stderr)
+	teardownServerForStop(sp, stderr, "gc stop")
 
 	// Stop bead store's backing service after agents.
 	if err := shutdownBeadsProviderForStop(cityPath); err != nil {
@@ -381,13 +417,18 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 	return code
 }
 
-func teardownServerForStop(sp runtime.Provider, stderr io.Writer) {
+// teardownServerForStop terminates a provider's shared server after every
+// session has been stopped. logPrefix identifies the caller in the error
+// line: the standalone path passes "gc stop", the supervisor-managed path
+// passes its own "<logPrefix>: city '<name>'" so a teardown warning reads
+// like every other managed-shutdown error.
+func teardownServerForStop(sp runtime.Provider, stderr io.Writer, logPrefix string) {
 	lifecycle, ok := sp.(runtime.ServerLifecycleProvider)
 	if !ok {
 		return
 	}
 	if err := lifecycle.TeardownServer(); err != nil {
-		fmt.Fprintf(stderr, "gc stop: teardown server: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: teardown server: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 	}
 }
 

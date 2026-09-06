@@ -308,10 +308,9 @@ func TestMetadataInfoOnlyFilesStayOnInfoSnapshot(t *testing.T) {
 // sessionFrontDoor(sessStore).ApplyPatch), restart persist (sessionRestartPersister),
 // the remote kill/observe/identity trio, resolveSessionID, sender-identity resolution
 // (resolveDefaultMailSenderForCommand), and beadmail's session addressing via
-// beadmail.NewWithStores(store, sessStore) — through cliSessionStore, while
-// createHandoffMail's message-bead persistence deliberately stays on the plain store
-// (messaging class, its own slice, mirroring newCityMailProvider's msgStore/sessStore
-// split and cmd_sling.go's deferred nudge enqueue). cmd_runtime_drain.go routes only
+// beadmail.NewWithStores(msgStore, sessStore) — through cliSessionStore. Its messaging
+// arm is routed too: both roots derive msgStore via cliMailStore, mirroring
+// newCityMailProvider's split. cmd_runtime_drain.go routes only
 // cmdRuntimeRequestRestart's session-bead access; every other command in the file is
 // drainOps runtime metadata (no bead store) plus nil-store worker observation, so the
 // guard is a regression canary for that one root.
@@ -358,6 +357,18 @@ func TestMetadataInfoOnlyFilesStayOnInfoSnapshot(t *testing.T) {
 // so it is intentionally absent from the routed-files list. The positive cliSessionStore(
 // tripwire protects the routed delivery arm; as a non-front-door router this guard is
 // a regression canary for the file, not a completeness proof.
+//
+// cmd_mail.go routes at its store-opening ROOTS rather than per-read, because every
+// store access in its identity/target resolver family is session-class: session-ID
+// resolution, the gc:session enumeration behind named-target matching, and mailbox
+// identity. The five roots — resolveMailTargetsForCommand,
+// resolveDefaultMailTargetsForCommand, resolveRawMailTargetForStorelessProvider,
+// cmdMailSendJSON, cmdMailReplyJSON — derive cliSessionStore(store, cfg, cityPath) and
+// hand it down; the whole resolver family therefore names its parameter sessStore and
+// does NO routing of its own, so a relocation is applied exactly once per command.
+// Mail MESSAGES are a different coordination class and never travel through these
+// resolvers — they go through mail.Provider. The two out-of-file callers
+// (cmd_handoff.go, prime_auto_handoff_inject.go) already hold a routed sessStore.
 var sessionRelocationRoutedFiles = []string{
 	"cmd_session_wake.go",
 	"cmd_session_pin.go",
@@ -381,6 +392,23 @@ var sessionRelocationRoutedFiles = []string{
 	"cmd_runtime_heartbeat.go",
 	"cmd_wait.go",
 	"cmd_nudge.go",
+	"cmd_mail.go",
+	// The claim back-channel's shared root: `gc hook --claim` stamps the claimed
+	// bead id onto the calling session's bead through it and `gc hook current`
+	// reads it back, so an unrouted front door here would write the stamp to the
+	// work store while the session bead lives in the relocated sessions store —
+	// and every `gc hook current` would then report "nothing claimed".
+	"hook_session_claim.go",
+	// The pool-idle-routed-work doctor check enumerates session beads per pool
+	// template. Unrouted, it would find zero sessions under a relocated sessions
+	// class and degrade to a silent no-op — a green result that reads as "no
+	// stranded work" when the check simply looked in the wrong store.
+	"doctor_pool_idle_routed_work_check.go",
+	// The startup-health-episodes doctor check enumerates session-class episode
+	// beads. Unrouted, it reports "no active startup-health episodes" under a
+	// relocated sessions class — a green result that reads as "no stuck
+	// sessions" when the check simply looked in the wrong store.
+	"doctor_startup_health.go",
 }
 
 // sessionRelocationForbidden are the UNROUTED session-front-door constructions a
@@ -426,6 +454,38 @@ func TestSessionRelocationRootsRouteThroughSessionClassStore(t *testing.T) {
 		}
 		if !strings.Contains(content, "cliSessionStore(") && !strings.Contains(content, "cliSessionFrontDoor(") {
 			t.Errorf("%s is listed as session-relocation-routed but never calls cliSessionStore( / cliSessionFrontDoor( — did the routing get dropped?", name)
+		}
+	}
+}
+
+// graphRelocationRoutedFiles are the CLI one-shot roots that reach the graph
+// coordination class and must derive their graph leg through cliGraphStore. The
+// callee's typed parameter is compile-enforced; whether the CALLER handed it a
+// routed store is what this substring canary covers.
+var graphRelocationRoutedFiles = []string{
+	"wisp_autoclose.go",     // bd on_close hook: attached molecule/workflow reaping
+	"molecule_autoclose.go", // bd on_close hook: molecule completion
+	"wisp_step_inject.go",   // hook injection: the agent's current step bead
+	"cmd_github.go",         // PR-monitor repair: the workflow cooked onto the repair bead
+}
+
+// TestGraphRelocationRootsRouteThroughGraphClassStore pins that the CLI roots
+// reaching graph-class beads still derive the leg through cliGraphStore rather
+// than handing along the work store they happened to open.
+func TestGraphRelocationRootsRouteThroughGraphClassStore(t *testing.T) {
+	_, currentFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	dir := filepath.Dir(currentFile)
+	for _, name := range graphRelocationRoutedFiles {
+		path := filepath.Join(dir, name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile(%q): %v", path, err)
+		}
+		if !strings.Contains(string(data), "cliGraphStore(") {
+			t.Errorf("%s is listed as graph-relocation-routed but never calls cliGraphStore( — did the routing get dropped? A graph read left on the work store returns empty on a migrated city and reports success", name)
 		}
 	}
 }

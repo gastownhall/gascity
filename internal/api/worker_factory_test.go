@@ -142,8 +142,12 @@ func TestResolveWorkerSessionRuntimePreservesStoredResolvedCommandAndBackfillsCu
 		if len(parts) == 0 || parts[0] != wantPATHPrefix {
 			t.Errorf("%s[PATH] = %q, want first entry %q (dir of GC_BIN)", name, env["PATH"], wantPATHPrefix)
 		}
-		if got, present := env[convergence.TokenEnvVar]; present {
-			t.Errorf("%s[%s] = %q present, want scrubbed", name, convergence.TokenEnvVar, got)
+		// Scrubbed means present-and-empty: the resumed session inherits the
+		// controller's environment, so an absent key is an inherited key.
+		if got, present := env[convergence.TokenEnvVar]; !present {
+			t.Errorf("%s omits %s; want present and empty", name, convergence.TokenEnvVar)
+		} else if got != "" {
+			t.Errorf("%s[%s] = %q, want empty", name, convergence.TokenEnvVar, got)
 		}
 	}
 	// Identity-only contract (per Copilot review): no dispatcher trace

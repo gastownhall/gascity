@@ -1220,6 +1220,50 @@ func TestPrivateUploaderLosingUploaderLockPerformsZeroNetworkWork(t *testing.T) 
 	}
 }
 
+func TestPrivateUploaderAttemptsFreeLockBeforeStartingContentionWait(t *testing.T) {
+	home := newMetricsTestHome(t)
+	writeStateFixture(t, home, activeEnabledStateForSpawnTest())
+	root := mustOpenMutableRoot(t, home)
+	event := testSpoolEvent(testEventIDOne, "1.0.0", testRecordHour, CommandHelp)
+	data := writeSpoolEventFixture(t, root, queueDirectoryName, testSpoolGeneration, event)
+	if err := persistSpoolQuota(root, spoolQuota{Events: 1, Bytes: uint64(len(data))}); err != nil {
+		t.Fatal(err)
+	}
+	writeSpawnThrottleToRoot(t, root, spawnThrottleRecord{attemptToken: testSpawnTokenOne, attemptedAt: testRecordHour})
+	if err := root.Close(); err != nil {
+		t.Fatal(err)
+	}
+	deps := spawnTestDependencies(home, func() time.Time { return testRecordHour }, func() (string, error) {
+		return testSpawnTokenTwo, nil
+	})
+	deps.getenv = func(name string) string {
+		if name == privateUploaderMarkerEnvironment {
+			return privateUploaderMarkerValue
+		}
+		return ""
+	}
+	service := mustOpenTestService(t, deps)
+
+	contentionContexts := 0
+	sends := 0
+	err := service.runPrivateUploader(context.Background(), PrivateUploaderInvocation{attemptToken: testSpawnTokenOne}, privateUploaderRunDependencies{
+		uploaderLockWait: 20 * time.Millisecond,
+		newUploaderLockContext: func(context.Context, time.Duration) (context.Context, context.CancelFunc) {
+			contentionContexts++
+			expired, cancel := context.WithCancel(context.Background())
+			cancel()
+			return expired, func() {}
+		},
+		start: immediateUploadStart(func(context.Context, preparedUploadBatch, uint64) (uploadResponse, error) {
+			sends++
+			return uploadResponse{kind: uploadResponseAccepted, statusCode: http.StatusOK}, nil
+		}),
+	})
+	if err != nil || sends != 1 || contentionContexts != 0 {
+		t.Fatalf("free-lock child = err:%v sends:%d contention-contexts:%d, want one send before contention timing", err, sends, contentionContexts)
+	}
+}
+
 func TestPurgeAndCleanProofRequireSpawnThrottleAbsent(t *testing.T) {
 	home := newMetricsTestHome(t)
 	writeStateFixture(t, home, disabledState(7, 2, cleanupDisable))

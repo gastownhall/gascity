@@ -6,26 +6,58 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orderdiscovery"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 const (
 	orderFiringCurrentName    = "order-firing-current"
 	orderFiringInspectHintFmt = "Inspect with: gc order check && gc order history %s"
 	orderFiringHistoryTimeout = 15 * time.Second
+	// orderFiringTimeoutHint names the actual cause of a timeout here. It
+	// deliberately does NOT mention beads/Dolt connectivity: this check times
+	// out on read cost, not on reachability, and the old connectivity wording
+	// sent triage at a healthy data plane for a full cycle (ga-klv).
+	orderFiringTimeoutHint = "the city event log or order history is large; re-run the inspect commands bounded (gc order history <name> --limit 20) and consider gc events compact"
+	// orderFiringEventTailLimit bounds the newest-first event-log read. The
+	// check needs only each order's most recent firing, so it reads the tail
+	// of the log rather than scanning it whole: on a busy city the active log
+	// reaches hundreds of megabytes and a full scan costs tens of seconds per
+	// read (measured: 36s against a 161MB/253k-line log), which alone blows
+	// the check budget above. Any order whose newest firing falls outside this
+	// window is not lost — latestOrderFiredAt falls through to the bounded
+	// order-run history lookup, which is authoritative.
+	orderFiringEventTailLimit = 2000
+	// orderFiringLastRunConcurrency caps the parallel order-run lookups. Each
+	// is an independent read against a store that may be remote, so the cap
+	// exists to be a good citizen against the data plane rather than to
+	// protect the check — the wall time it saves is the whole point.
+	orderFiringLastRunConcurrency = 8
 )
 
-// OrderFiringCurrentLastRunFunc reports the newest persisted run time for an order.
+// OrderFiringCurrentLastRunFunc reports the newest persisted run time for an
+// order. Implementations MUST be safe for concurrent use: the check resolves
+// the orders it cannot answer from the event log in parallel, because these
+// lookups are store round-trips and running them serially is what pushes a
+// busy city past the check budget (ga-klv).
 type OrderFiringCurrentLastRunFunc func(order orders.Order) (time.Time, error)
 
 // OrderFiringCurrentOption configures the scheduled-order freshness check.
 type OrderFiringCurrentOption func(*OrderFiringCurrentCheck)
+
+// orderFiringEventReadFunc reads at most limit trailing events matching filter
+// from the city event log, newest events last. A non-positive limit reads the
+// whole log (including archives) — the shape events.ReadFilteredTail already
+// implements, and the reason the limit is load-bearing here.
+type orderFiringEventReadFunc func(path string, filter events.Filter, limit int) ([]events.Event, error)
 
 // WithOrderFiringCurrentLastRunFunc lets callers provide the same order-run
 // history source used by `gc order history` so doctor can classify manual runs.
@@ -42,6 +74,7 @@ type OrderFiringCurrentCheck struct {
 	clock          func() time.Time
 	lastRun        OrderFiringCurrentLastRunFunc
 	historyTimeout time.Duration
+	readEvents     orderFiringEventReadFunc
 }
 
 // NewOrderFiringCurrentCheck creates a check for cron and cooldown order freshness.
@@ -51,6 +84,7 @@ func NewOrderFiringCurrentCheck(cfg *config.City, cityPath string, opts ...Order
 		cityPath:       cityPath,
 		clock:          time.Now,
 		historyTimeout: orderFiringHistoryTimeout,
+		readEvents:     events.ReadFilteredTail,
 	}
 	for _, opt := range opts {
 		opt(check)
@@ -86,11 +120,20 @@ func (c *OrderFiringCurrentCheck) Run(ctx *CheckContext) *CheckResult {
 	case result := <-results:
 		return result
 	case <-time.After(timeout):
+		// A timed-out lookup is inconclusive, not proof of a stale/never-fired
+		// order (#4895): the query being slow says nothing about whether orders
+		// are actually firing. SeverityBlocking is CheckSeverity's zero value, so
+		// leaving Severity unset here would silently gate `gc doctor` (and its
+		// exit code) red on a busy-but-healthy city. Mark it advisory and
+		// TimedOut, matching how Doctor.boundedRun reports its own per-check
+		// timeout, so callers can tell "confirmed stale" from "couldn't tell".
 		return &CheckResult{
-			Name:    c.Name(),
-			Status:  StatusError,
-			Message: fmt.Sprintf("order history lookup timed out after %s", timeout),
-			FixHint: "check beads/Dolt connectivity, then rerun gc doctor",
+			Name:     c.Name(),
+			Status:   StatusError,
+			Severity: SeverityAdvisory,
+			TimedOut: true,
+			Message:  fmt.Sprintf("order history lookup timed out after %s", timeout),
+			FixHint:  orderFiringTimeoutHint,
 		}
 	}
 }
@@ -121,13 +164,13 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 	}
 
 	eventPath := filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl")
-	firedEvents, err := events.ReadFiltered(eventPath, events.Filter{Type: events.OrderFired})
+	firedEvents, err := c.readEventTail(eventPath, events.Filter{Type: events.OrderFired}, orderFiringEventTailLimit)
 	if err != nil {
 		result.Status = StatusError
 		result.Message = fmt.Sprintf("read order firing events: %v", err)
 		return result
 	}
-	startedAt, err := latestControllerStartedAt(eventPath)
+	startedAt, err := c.latestControllerStartedAt(eventPath)
 	if err != nil {
 		result.Status = StatusError
 		result.Message = fmt.Sprintf("read controller start events: %v", err)
@@ -145,7 +188,13 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 	// Track severity contributions across error-level entries. Warnings should
 	// stay visible without converting an advisory error into a blocking gate.
 	var blockingErrors, advisoryErrors int
-	suspendedRigs := orderFiringCurrentSuspendedRigs(c.cfg)
+	suspendedRigs := orderFiringCurrentSuspendedRigs(c.cfg, cityPath)
+
+	// Resolve every order-run lookup the loop below will need up front and in
+	// parallel. The pre-pass shares the cron-interval cache with the loop, so
+	// the expected intervals — and therefore which orders need a lookup — are
+	// identical to what the loop derives for itself.
+	lastRunFor := c.prefetchedLastRunFunc(c.pendingLastRunOrders(allOrders, firedEvents, suspendedRigs, cronIntervals, now))
 
 	for _, order := range allOrders {
 		if order.Trigger != "cron" && order.Trigger != "cooldown" {
@@ -165,7 +214,7 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 			blockingErrors++
 			continue
 		}
-		lastFired, err := c.latestOrderFiredAt(firedEvents, order, expected, now)
+		lastFired, err := c.latestOrderFiredAtUsing(lastRunFor, firedEvents, order, expected, now)
 		if err != nil {
 			worst = worseStatus(worst, StatusError)
 			result.Details = append(result.Details, fmt.Sprintf("%s: cannot read order history: %v", orderDisplayName(order), err))
@@ -217,7 +266,7 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 }
 
 func scanOrderFiringCurrentOrders(cityPath string, cfg *config.City) ([]orders.Order, error) {
-	scanCfg := orderFiringCurrentScanConfig(cfg)
+	scanCfg := orderFiringCurrentScanConfig(cfg, cityPath)
 	scanCfg = orderFiringCurrentPruneSuspendedOnlyWildcardOverrides(cityPath, cfg, scanCfg)
 	allOrders, err := orderdiscovery.ScanAll(cityPath, scanCfg, orderFiringCurrentScanOptions(cityPath))
 	if err != nil {
@@ -236,11 +285,11 @@ func orderFiringCurrentScanOptions(cityPath string) orderdiscovery.ScanOptions {
 	}
 }
 
-func orderFiringCurrentScanConfig(cfg *config.City) *config.City {
+func orderFiringCurrentScanConfig(cfg *config.City, cityPath string) *config.City {
 	if cfg == nil {
 		return nil
 	}
-	suspended := orderFiringCurrentSuspendedRigs(cfg)
+	suspended := orderFiringCurrentSuspendedRigs(cfg, cityPath)
 	if len(suspended) == 0 {
 		return cfg
 	}
@@ -279,7 +328,7 @@ func orderFiringCurrentPruneSuspendedOnlyWildcardOverrides(cityPath string, orig
 	if originalCfg == nil || scanCfg == nil || len(scanCfg.Orders.Overrides) == 0 {
 		return scanCfg
 	}
-	suspended := orderFiringCurrentSuspendedRigs(originalCfg)
+	suspended := orderFiringCurrentSuspendedRigs(originalCfg, cityPath)
 	if len(suspended) == 0 {
 		return scanCfg
 	}
@@ -325,14 +374,31 @@ func orderFiringCurrentScanWithoutOverrides(cityPath string, cfg *config.City) (
 	return orderdiscovery.ScanAll(cityPath, &clone, orderFiringCurrentScanOptions(cityPath))
 }
 
-func orderFiringCurrentSuspendedRigs(cfg *config.City) map[string]bool {
+// orderFiringCurrentSuspendedRigs resolves the effective suspension state
+// for every rig, merging the runtime override in
+// .gc/runtime/suspension-state.json (written by `gc rig suspend`/`resume`
+// and canonical whenever it holds an explicit preference) with each rig's
+// authored city.toml default. A missing or unreadable state file is treated
+// as "no runtime override," matching the best-effort convention used
+// elsewhere in this codebase (loadSuspensionStateBestEffort in cmd/gc) —
+// this check is advisory, so misclassifying as "not suspended" is no worse
+// than the pre-existing behavior.
+func orderFiringCurrentSuspendedRigs(cfg *config.City, cityPath string) map[string]bool {
 	out := make(map[string]bool)
 	if cfg == nil {
 		return out
 	}
+	var st suspensionstate.State
+	if cityPath != "" {
+		st, _ = suspensionstate.Load(fsys.OSFS{}, cityPath)
+	}
 	for _, rig := range cfg.Rigs {
-		if rig.Suspended && strings.TrimSpace(rig.Name) != "" {
-			out[rig.Name] = true
+		name := strings.TrimSpace(rig.Name)
+		if name == "" {
+			continue
+		}
+		if suspensionstate.EffectiveRigSuspended(st, name, rig.EffectiveSuspendedOnStart()) {
+			out[name] = true
 		}
 	}
 	return out
@@ -549,8 +615,32 @@ func cronRangeForDoctor(rangePart string, lowerBound, upperBound int) (int, int,
 	}
 }
 
-func latestControllerStartedAt(eventPath string) (time.Time, error) {
-	startEvents, err := events.ReadFiltered(eventPath, events.Filter{Type: events.ControllerStarted})
+// readEventTail reads the tail of the city event log through the check's
+// reader, defaulting to the real bounded reader when none was injected.
+func (c *OrderFiringCurrentCheck) readEventTail(path string, filter events.Filter, limit int) ([]events.Event, error) {
+	read := c.readEvents
+	if read == nil {
+		read = events.ReadFilteredTail
+	}
+	return read(path, filter, limit)
+}
+
+// latestControllerStartedAt reports the newest controller start. The tail read
+// finds it within a few lines on any city whose controller has started since
+// the log last rotated. Only when the active log holds no controller start at
+// all does it look in the archives, and then it stops at the newest archive
+// holding one.
+//
+// The archive leg deliberately does not use an unbounded read. That walk
+// gunzips and decodes every retained archive, and its cost grows with every
+// rotation: on a city with 70 archives it measured over 110 seconds of CPU,
+// inside `gc doctor` and inside the supervisor's order-dispatch pass. The
+// condition that reaches this leg — an active log with no controller start —
+// persists for as long as the controller stays up across rotations, so the
+// walk was paid on every invocation rather than rarely.
+func (c *OrderFiringCurrentCheck) latestControllerStartedAt(eventPath string) (time.Time, error) {
+	filter := events.Filter{Type: events.ControllerStarted}
+	startEvents, err := c.readEventTail(eventPath, filter, 1)
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -560,25 +650,138 @@ func latestControllerStartedAt(eventPath string) (time.Time, error) {
 			latest = event.Ts
 		}
 	}
-	return latest, nil
-}
-
-func (c *OrderFiringCurrentCheck) latestOrderFiredAt(evts []events.Event, order orders.Order, expected time.Duration, now time.Time) (time.Time, error) {
-	latest := latestOrderFiredAt(evts, order.ScopedName())
-	if c.lastRun == nil {
+	if !latest.IsZero() {
 		return latest, nil
 	}
-	if !latest.IsZero() && now.Sub(latest) < expected+expected/2 {
-		return latest, nil
-	}
-	runAt, err := c.lastRun(order)
+	archived, found, err := events.LatestArchivedMatch(eventPath, filter)
 	if err != nil {
 		return time.Time{}, err
 	}
-	if runAt.After(latest) {
-		return runAt, nil
+	if !found {
+		return time.Time{}, nil
+	}
+	return archived.Ts, nil
+}
+
+func (c *OrderFiringCurrentCheck) latestOrderFiredAt(evts []events.Event, order orders.Order, expected time.Duration, now time.Time) (time.Time, error) {
+	return c.latestOrderFiredAtUsing(c.lastRun, evts, order, expected, now)
+}
+
+// latestOrderFiredAtUsing is latestOrderFiredAt against a caller-supplied
+// order-run resolver, so the classification loop can read prefetched results
+// instead of issuing each store round-trip inline.
+func (c *OrderFiringCurrentCheck) latestOrderFiredAtUsing(lastRun OrderFiringCurrentLastRunFunc, evts []events.Event, order orders.Order, expected time.Duration, now time.Time) (time.Time, error) {
+	latest := latestOrderFiredAt(evts, order.ScopedName())
+	if lastRun == nil {
+		return latest, nil
+	}
+	if !eventEvidenceSuffices(latest, expected, now) {
+		runAt, err := lastRun(order)
+		if err != nil {
+			return time.Time{}, err
+		}
+		if runAt.After(latest) {
+			return runAt, nil
+		}
 	}
 	return latest, nil
+}
+
+// eventEvidenceSuffices reports whether the event log alone answers "is this
+// order current". Anything else needs the authoritative order-run lookup: the
+// event log can lag, and a stale event must not be reported as a real outage
+// without confirmation.
+func eventEvidenceSuffices(latest time.Time, expected time.Duration, now time.Time) bool {
+	return !latest.IsZero() && now.Sub(latest) < expected+expected/2
+}
+
+// pendingLastRunOrders returns the monitored orders the event log cannot
+// answer on its own, in discovery order. It mirrors the classification loop's
+// filters exactly and shares its cron-interval cache, so the two agree on which
+// orders need an authoritative lookup. Orders whose expected interval cannot be
+// computed are skipped: the loop reports that as its own error without ever
+// reaching the lookup.
+func (c *OrderFiringCurrentCheck) pendingLastRunOrders(allOrders []orders.Order, firedEvents []events.Event, suspendedRigs map[string]bool, cronIntervals map[string]time.Duration, now time.Time) []orders.Order {
+	if c.lastRun == nil {
+		return nil
+	}
+	var pending []orders.Order
+	for _, order := range allOrders {
+		if order.Trigger != "cron" && order.Trigger != "cooldown" {
+			continue
+		}
+		if orderFiringCurrentOrderSuspended(suspendedRigs, order) {
+			continue
+		}
+		expected, err := expectedIntervalForOrder(order, cronIntervals)
+		if err != nil {
+			continue
+		}
+		if eventEvidenceSuffices(latestOrderFiredAt(firedEvents, order.ScopedName()), expected, now) {
+			continue
+		}
+		pending = append(pending, order)
+	}
+	return pending
+}
+
+// prefetchedLastRunFunc resolves pending in parallel and returns a resolver
+// serving those results. A lookup the pre-pass did not anticipate still falls
+// through to the live resolver, so the classification loop can never silently
+// lose an answer.
+func (c *OrderFiringCurrentCheck) prefetchedLastRunFunc(pending []orders.Order) OrderFiringCurrentLastRunFunc {
+	if c.lastRun == nil {
+		return nil
+	}
+	prefetched := c.prefetchLastRuns(pending)
+	return func(order orders.Order) (time.Time, error) {
+		if result, ok := prefetched[order.ScopedName()]; ok {
+			return result.at, result.err
+		}
+		return c.lastRun(order)
+	}
+}
+
+// prefetchLastRuns resolves, in parallel, the order-run lookups the
+// classification loop is about to need. Each lookup is a store round-trip
+// costing ~1s on a busy city; issued serially across the monitored orders they
+// alone exceed the check budget, while the check's own timeout means a slow
+// fan-out reports a blocking failure that says nothing about order firing
+// (ga-klv). Results (values AND errors) are handed back verbatim so the
+// classification loop behaves exactly as it did when it called inline.
+func (c *OrderFiringCurrentCheck) prefetchLastRuns(pending []orders.Order) map[string]orderFiringLastRunResult {
+	out := make(map[string]orderFiringLastRunResult, len(pending))
+	if c.lastRun == nil || len(pending) == 0 {
+		return out
+	}
+
+	limit := orderFiringLastRunConcurrency
+	if len(pending) < limit {
+		limit = len(pending)
+	}
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, limit)
+	for _, order := range pending {
+		wg.Add(1)
+		go func(order orders.Order) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			at, err := c.lastRun(order)
+			mu.Lock()
+			out[order.ScopedName()] = orderFiringLastRunResult{at: at, err: err}
+			mu.Unlock()
+		}(order)
+	}
+	wg.Wait()
+	return out
+}
+
+// orderFiringLastRunResult is one prefetched order-run lookup outcome.
+type orderFiringLastRunResult struct {
+	at  time.Time
+	err error
 }
 
 func latestOrderFiredAt(evts []events.Event, subject string) time.Time {

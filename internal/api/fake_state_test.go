@@ -45,6 +45,11 @@ type fakeState struct {
 	nudgesBeadStore   beads.Store // relocated nudges store; nil falls back to cityBeadStore (default backend)
 	sessionsBeadStore beads.Store // relocated sessions store; nil falls back to cityBeadStore (default backend)
 	graphBeadStore    beads.Store // relocated graph store; nil falls back to cityBeadStore (default backend)
+	ordersBeadStore   beads.Store // relocated orders store; nil falls back to cityBeadStore (default backend)
+	// bindingRelics is the boot census a test wants replayed. Absent means
+	// uncensused, which means "assume relics" — see
+	// ClassBindingHasLegacyResidents.
+	bindingRelics     map[beads.Store]bool
 	cityBeadsDiag     *beads.BeadsDiagnostic
 	cityMailProv      mail.Provider // city-level mail provider (all mail is city-scoped)
 	eventProv         events.Provider
@@ -154,6 +159,24 @@ func (f *fakeState) GraphBeadStore() beads.GraphStore {
 		return beads.GraphStore{Store: f.graphBeadStore}
 	}
 	return beads.GraphStore{Store: f.cityBeadStore}
+}
+
+func (f *fakeState) OrdersBeadStore() beads.OrdersStore {
+	if f.ordersBeadStore != nil {
+		return beads.OrdersStore{Store: f.ordersBeadStore}
+	}
+	return beads.OrdersStore{Store: f.cityBeadStore}
+}
+
+// ClassBindingHasLegacyResidents replays whatever census a test recorded in
+// bindingRelics. A store with no entry — the default for every test that never
+// thought about relics — keeps its probe, matching an uncensused controller.
+func (f *fakeState) ClassBindingHasLegacyResidents(store beads.Store) bool {
+	verdict, censused := f.bindingRelics[store]
+	if !censused {
+		return true
+	}
+	return verdict
 }
 
 func (f *fakeState) CityBeadsDiagnostic() *beads.BeadsDiagnostic {
@@ -570,8 +593,9 @@ func (f *fakeMutatorState) DeleteProvider(name string) error {
 }
 
 func (f *fakeMutatorState) SetAgentPatch(patch config.AgentPatch) error {
+	target := patch.TargetQualifiedName()
 	for i := range f.cfg.Patches.Agents {
-		if f.cfg.Patches.Agents[i].Dir == patch.Dir && f.cfg.Patches.Agents[i].Name == patch.Name {
+		if f.cfg.Patches.Agents[i].TargetQualifiedName() == target {
 			f.cfg.Patches.Agents[i] = patch
 			return nil
 		}
@@ -581,9 +605,8 @@ func (f *fakeMutatorState) SetAgentPatch(patch config.AgentPatch) error {
 }
 
 func (f *fakeMutatorState) DeleteAgentPatch(name string) error {
-	dir, base := config.ParseQualifiedName(name)
 	for i := range f.cfg.Patches.Agents {
-		if f.cfg.Patches.Agents[i].Dir == dir && f.cfg.Patches.Agents[i].Name == base {
+		if f.cfg.Patches.Agents[i].TargetQualifiedName() == name {
 			f.cfg.Patches.Agents = append(f.cfg.Patches.Agents[:i], f.cfg.Patches.Agents[i+1:]...)
 			return nil
 		}

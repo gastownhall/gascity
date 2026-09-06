@@ -1,0 +1,186 @@
+name: Go Vulnerability Scan
+
+# govulncheck is the only check here that reads the Go module graph. Container Scan
+# looks at built images, CodeQL looks at first-party source, and Scorecard looks at
+# repository posture -- none of them maps go.mod/go.sum to the Go vulnerability
+# database.
+#
+# govulncheck sorts every finding into three tiers by reachability:
+#   1. a vulnerable symbol the build actually calls  -> exit code 3, this job fails
+#   2. a vulnerable package imported but not called  -> reported, does not fail
+#   3. a vulnerable module required but not imported -> reported, does not fail
+#
+# The tiers are govulncheck's own semantics, not a wrapper on top of them: the text
+# pass below simply lets its exit code stand. That is the whole point of choosing a
+# reachability-aware scanner. Tier 1 is a real defect somebody can act on. Tiers 2
+# and 3 are dominated by transitive pins a pull request author did not choose and
+# often cannot fix -- one of the two findings on this tree today has no fixed version
+# at all -- so gating on them would only teach people to ignore a red check.
+#
+# There is deliberately no paths filter. Tiers move when first-party code changes,
+# not just when go.mod does: adding one call to an already-present vulnerable package
+# promotes a tier-2 finding to tier 1 with no dependency change at all. Filtering on
+# go.mod/go.sum would blind the scan to exactly the transition it is best at catching.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+  schedule:
+    # Daily, because the most common way a finding appears is a newly published
+    # advisory against code that already shipped -- no repository change involved.
+    - cron: "19 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: govulncheck-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Pinned so a scanner release cannot change the verdict without a reviewed commit.
+  # The vulnerability database is still fetched fresh on every run, so pinning the
+  # binary does not stale the data.
+  GOVULNCHECK_VERSION: "v1.7.0"
+
+jobs:
+  runner-policy:
+    name: Runner policy
+    runs-on: ${{ github.event_name == 'pull_request' && contains(fromJSON('["julianknutsen","csells","sjarmak","quad341"]'), github.event.pull_request.user.login) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    outputs:
+      use_blacksmith: ${{ steps.policy.outputs.use_blacksmith }}
+      reason: ${{ steps.policy.outputs.reason }}
+      runner_2vcpu: ${{ steps.policy.outputs.runner_2vcpu }}
+      runner_8vcpu: ${{ steps.policy.outputs.runner_8vcpu }}
+      runner_16vcpu: ${{ steps.policy.outputs.runner_16vcpu }}
+      runner_32vcpu: ${{ steps.policy.outputs.runner_32vcpu }}
+      runner_macos: ${{ steps.policy.outputs.runner_macos }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Select runner backend
+        id: policy
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          python3 .github/workflows/scripts/runner_policy.py
+
+  govulncheck:
+    name: Go module vulnerabilities
+    needs: runner-policy
+    runs-on: ${{ needs.runner-policy.outputs.runner_8vcpu }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+
+      - name: Install govulncheck
+        run: |
+          set -euo pipefail
+          # `go install pkg@version` ignores the go.mod in the working directory, so
+          # this cannot add golang.org/x/vuln to the module graph. That matters:
+          # check-native-dependency-surface.sh caps the graph at the exact number of
+          # modules it has today, and a tools.go entry would push it over.
+          #
+          # It does build govulncheck with whatever toolchain setup-go just installed.
+          # That has to be at least the go directive in go.mod, or the resulting binary
+          # reports "package requires newer Go version" for every package and analyses
+          # nothing while still exiting 0. Reading the version from go.mod above keeps
+          # the two in lockstep.
+          bin_dir="${RUNNER_TEMP}/govulncheck-bin"
+          mkdir -p "$bin_dir"
+          GOBIN="$bin_dir" go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
+          echo "$bin_dir" >> "$GITHUB_PATH"
+
+      - name: Report scanner and database versions
+        run: govulncheck -version
+
+      - name: Generate module vulnerability SARIF
+        run: |
+          set -euo pipefail
+          mkdir -p govulncheck-results
+          # SARIF mode always exits 0, so this pass reports and never gates. The
+          # reachability tiers survive the conversion as SARIF levels: called is
+          # "error", imported-not-called is "warning", required-not-imported is
+          # "note". Code Scanning ranks them accordingly instead of flattening
+          # everything into one undifferentiated pile of alerts.
+          govulncheck -format sarif ./... > govulncheck-results/govulncheck.sarif
+
+      - name: Upload SARIF results
+        # Forks do not get security-events: write, so skip rather than fail there.
+        if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: github/codeql-action/upload-sarif@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4
+        with:
+          sarif_file: govulncheck-results/govulncheck.sarif
+          category: govulncheck
+
+      - name: Upload SARIF artifact
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: govulncheck-sarif
+          path: govulncheck-results/govulncheck.sarif
+          retention-days: 5
+
+      - name: Summarize findings and enforce reachable vulnerability policy
+        run: |
+          set -uo pipefail
+          # Deliberately one command doing both jobs. govulncheck already exits 3 only
+          # when a vulnerable symbol is genuinely called, and 0 when the findings are
+          # merely imported or merely required, so the policy this repo wants is the
+          # tool's own exit code. Re-deriving it from parsed output would be a second
+          # implementation of the same rule, free to drift from the first.
+          govulncheck -show verbose ./... > govulncheck-results/govulncheck.txt 2>&1
+          status=$?
+
+          {
+            echo "## govulncheck"
+            echo
+            if [ "$status" -eq 0 ]; then
+              echo "No vulnerable symbol is reachable from this tree."
+              echo
+              echo "Any findings below are imported-but-not-called or required-but-not-imported."
+              echo "They are informational and do not fail this job."
+            elif [ "$status" -eq 3 ]; then
+              echo "A reachable vulnerability was found: the build calls a vulnerable symbol."
+              echo "The trace under \`Symbol Results\` shows the call path."
+            else
+              echo "govulncheck did not complete: exit status $status."
+              echo
+              echo "Only exit status 3 means a vulnerable symbol is reachable. Other nonzero"
+              echo "statuses are scanner or analysis failures -- the scan did not produce a"
+              echo "verdict, so treat this as an infrastructure failure, not a security finding."
+            fi
+            echo
+            echo '```'
+            cat govulncheck-results/govulncheck.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          cat govulncheck-results/govulncheck.txt
+          exit "$status"
+
+      - name: Upload scan report artifact
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: govulncheck-report
+          path: govulncheck-results/govulncheck.txt
+          retention-days: 5

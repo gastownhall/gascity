@@ -104,6 +104,9 @@ Three verbs create formula instances:
   formula, writes its beads into the current scope's store, and stops.
   Nothing wakes up. Cook to inspect the beads first, route the work
   yourself, or graft a sub-DAG onto existing work with `--attach <bead-id>`.
+  `--attach` is limited on a **split city** — one that serves the graph
+  class from its own `[storage]` binding. See
+  [Grafting on a split city](#grafting-on-a-split-city).
 - **Sling creates and routes.** `gc sling <target> <name> --formula` cooks
   and routes in one motion: a v2 formula starts a workflow, a v1 formula
   starts a single-bead run (a *wisp*), both routed to the target. The
@@ -780,13 +783,50 @@ The two frameworks above compose. Find your situation, read across:
 | Ordered steps worked by one agent | v1 or v2 | `gc sling --formula` | v1 run (a *molecule*) or v2 workflow |
 | Steps spread across agents or pools | v2 | `gc sling --formula` | workflow |
 | Inspect or route the beads yourself | either | `gc formula cook` | unrouted run (v1) or workflow (v2) |
-| A sub-DAG grafted onto existing work | either | `gc formula cook --attach` | steps blocking the given bead |
+| A sub-DAG grafted onto existing work | either | `gc formula cook --attach` | steps blocking the given bead (see [Grafting on a split city](#grafting-on-a-split-city)) |
 | One run per convoy member | v2 | `gc sling --on` (targeted) | workflow with drain units |
 | Verified or hardened steps | v2 | any | workflow with check or retry controls |
 | Recurring work on a trigger | either; v2 for pools | order | one instance per firing |
 | Bounded iterative refinement | v2 | `[steps.check]` loop (or v1 `gc converge create`) | orchestrator re-runs until the check passes |
 | Reuse a base, change one detail | either | `extends` + same-id override | child graph with the overridden step spliced in |
 | Iterating multi-lane review | v2 | expansion with `[template.check]` | lanes → synthesize → fix subtree, re-run until the verdict passes |
+
+### Grafting On A Split City
+
+A **split city** serves the graph coordination class from its own `[storage]`
+binding: workflow roots, step beads and control beads live in a second
+database, and ordinary work stays in the work ledger. Most of
+`gc formula cook --attach` **in city scope** is **not supported yet** there
+and refuses rather than serving.
+
+The reason is that a graft is graph class whatever the formula's version.
+Every bead an attach materializes carries `gc.root_bead_id`, which is what
+classifies a bead as graph — so the sub-DAG belongs in the binding while the
+blocking dependency belongs beside the attach bead, and a split city cannot
+have both ends in one store.
+
+| Scope | Attach bead lives in | Formula | Outcome |
+|---|---|---|---|
+| city | the city's work ledger | v1 or v2 | **refused** — writing the sub-DAG beside the attach bead strands graph-class beads in the work store; writing it into the binding leaves an unresolvable `blocks` row that never clears |
+| city | the binding | v2 (graph.v2) | **refused** — a v2 invocation mints a work-class input convoy, which can live in neither store |
+| city | the binding | v1 | served — the sub-DAG and its blocking dependency are both written to the binding |
+| rig | that rig's own store | v1 or v2 | served, unaffected — a rig scope is never relocated |
+
+A **rig scope** — `--rig`, the `GC_RIG` the controller sets on every rig
+agent, or a cwd inside a rig — is unaffected. `gc storage migrate` copies
+only the city work store, and the class routes hold one city-level store per
+class with no per-rig binding to route to, so a rig's ledger keeps both ends
+of the graft. Nothing it writes can be stranded, and the recovery verb below
+would not read that store anyway.
+
+Single-store cities — every city that authors no `[storage]` section — are
+unaffected: `--attach` behaves exactly as it always has, on both contracts.
+
+Lifting the refusals needs a cross-class membership edge, tracked as
+`ga-2orlf`. If an earlier cook already stranded beads in a split city's work
+store, `gc storage status` names them and
+`gc storage recover-stranded --from-work --fleet-stopped` copies them into
+the binding.
 
 ### Convergence Loops
 

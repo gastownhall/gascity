@@ -73,6 +73,18 @@ type Order struct {
 	// (gastownhall/gascity#2893). Non-idempotent orders (the
 	// default, false) keep failing CLOSED on gate timeout.
 	Idempotent bool `toml:"idempotent,omitempty"`
+	// NoWorkGate opts an order out of the dispatcher's open-work gates
+	// entirely. It is for pure probes/sweeps that track NO bead work —
+	// e.g. provider-health-probe, a cooldown probe that only refreshes a
+	// cache. The open-work gates issue bd list/query reads against the
+	// store, bounded by orderGateTimeout; on store slowness they time out
+	// and the order is skipped every cycle (gastownhall/gascity#2893
+	// dispatch starvation), so the probe never runs and its cache goes
+	// stale. Setting NoWorkGate skips both gates so the order dispatches
+	// on its trigger schedule regardless of store health. Single-flight
+	// is the author's responsibility: the order must be self-idempotent
+	// or interval-bounded, since no gate prevents an overlapping re-run.
+	NoWorkGate bool `toml:"no_work_gate,omitempty"`
 	// Env is a map of environment variables exported into an exec
 	// order's child process. Use the `[order.env]` TOML table to
 	// override thresholds (e.g. GC_DOCTOR_LATENCY_WARN_S) without
@@ -129,6 +141,7 @@ type orderDecode struct {
 	CheckTimeout string                `toml:"check_timeout,omitempty"`
 	Enabled      *bool                 `toml:"enabled,omitempty"`
 	Idempotent   bool                  `toml:"idempotent,omitempty"`
+	NoWorkGate   bool                  `toml:"no_work_gate,omitempty"`
 	Env          map[string]string     `toml:"env,omitempty"`
 	Params       map[string]OrderParam `toml:"params,omitempty"`
 	SkipAliases  []string              `toml:"skip_aliases,omitempty"`
@@ -155,6 +168,7 @@ func (d orderDecode) normalized() Order {
 		CheckTimeout: d.CheckTimeout,
 		Enabled:      d.Enabled,
 		Idempotent:   d.Idempotent,
+		NoWorkGate:   d.NoWorkGate,
 		Env:          d.Env,
 		Params:       d.Params,
 		skipAliases:  d.SkipAliases,

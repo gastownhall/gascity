@@ -204,12 +204,31 @@ func beginSessionDrainInfo(
 	return true
 }
 
+// executionStalledDrainReason drains a pool seat that claimed work and then
+// never executed it, after the execution backstop spent its bounded nudges
+// (execution_backstop.go).
+//
+// It is NOT cancelable, by any of the three cancel lenses, and that is the whole
+// point of having its own reason. The session it drains is — by construction —
+// alive, awake, and holding an in_progress claim, which is exactly the shape
+// every keep-alive guard is built to protect: the assigned-work cancel would
+// cancel it on the same claim that justified it, and the plain cancel would
+// cancel it the moment any wake reason reappeared. A cancelable drain here is
+// not a drain at all; the session stays wedged holding work no one else can
+// take, which is the failure this whole lane exists to end.
+//
+// Convergence chain once it fires: tracked drain -> deferred interrupt -> stop ->
+// session bead closed -> the claim released by the dead-assignee reopen lane ->
+// the row is demand again -> a fresh seat claims it.
+const executionStalledDrainReason = "execution-stalled"
+
 func drainReasonCancelable(reason string) bool {
-	return reason != "config-drift" && reason != "orphaned" && reason != "suspended"
+	return reason != "config-drift" && reason != "orphaned" && reason != "suspended" &&
+		reason != executionStalledDrainReason
 }
 
 func pendingDrainReasonCancelable(reason string) bool {
-	return reason != "orphaned" && reason != "suspended"
+	return reason != "orphaned" && reason != "suspended" && reason != executionStalledDrainReason
 }
 
 const (

@@ -466,7 +466,7 @@ func TestControlReadyFallbackReadyLogsWhenResultHitsLimit(t *testing.T) {
 	defer restore()
 
 	dir := t.TempDir()
-	result, err := controlReadyFallbackReady(dir, nil, false)
+	result, err := controlReadyFallbackReady(dir, dir, nil, false)
 	if err != nil {
 		t.Fatalf("controlReadyFallbackReady: %v", err)
 	}
@@ -498,7 +498,8 @@ func TestControlReadyFallbackReadyNoWarningBelowLimit(t *testing.T) {
 	restore := captureLogOutput(&logBuf)
 	defer restore()
 
-	result, err := controlReadyFallbackReady(t.TempDir(), nil, false)
+	dir := t.TempDir()
+	result, err := controlReadyFallbackReady(dir, dir, nil, false)
 	if err != nil {
 		t.Fatalf("controlReadyFallbackReady: %v", err)
 	}

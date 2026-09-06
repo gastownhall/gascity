@@ -224,11 +224,30 @@ func agentHasPoolControls(agentCfg config.Agent) bool {
 	if agentPoolExplicitlyDisabled(agentCfg) {
 		return false
 	}
+	if agentIsNamedSessionSingleton(agentCfg) {
+		return false
+	}
 	return agentCfg.MinActiveSessions != nil ||
 		agentCfg.MaxActiveSessions != nil ||
 		strings.TrimSpace(agentCfg.ScaleCheck) != "" ||
 		strings.TrimSpace(agentCfg.Namepool) != "" ||
 		len(agentCfg.NamepoolNames) > 0
+}
+
+// agentIsNamedSessionSingleton reports whether agentCfg is the named-session
+// flavor of max_active_sessions=1 documented by
+// (*config.Agent).SupportsInstanceExpansion: max=1 with no
+// min_active_sessions, no scale_check, and no namepool is a singleton with a
+// stable canonical identity, not a pool — a [[named_session]] targeting it is
+// the supported configuration, not a conflict. Pool flavors of max=1 (an
+// explicit MinActiveSessions or a ScaleCheck) keep pool semantics and stay
+// flagged.
+func agentIsNamedSessionSingleton(agentCfg config.Agent) bool {
+	return agentCfg.MaxActiveSessions != nil && *agentCfg.MaxActiveSessions == 1 &&
+		agentCfg.MinActiveSessions == nil &&
+		strings.TrimSpace(agentCfg.ScaleCheck) == "" &&
+		strings.TrimSpace(agentCfg.Namepool) == "" &&
+		len(agentCfg.NamepoolNames) == 0
 }
 
 // agentPoolExplicitlyDisabled reports whether agentCfg uses the documented
@@ -417,6 +436,9 @@ func lintPromptContext(packDir string, agentCfg config.Agent, providers map[stri
 		qualifiedName = "lint-agent"
 	}
 	providerKey := agentCfg.Provider
+	// The zero query topology is right and not a shortcut: `gc lint` renders a
+	// PACK, which is not deployed to any city, so there is no storage
+	// arrangement to read. It lints the command's SHAPE.
 	return PromptContext{
 		CityRoot:                packDir,
 		AgentName:               qualifiedName,
@@ -426,13 +448,14 @@ func lintPromptContext(packDir string, agentCfg config.Agent, providers map[stri
 		RigName:                 lintFirstNonEmpty(agentCfg.Dir, "lint-rig"),
 		RigRoot:                 filepath.Join(packDir, "rigs", lintFirstNonEmpty(agentCfg.Dir, "lint-rig")),
 		WorkDir:                 packDir,
+		ConfigDir:               packDir,
 		IssuePrefix:             "lint",
 		Branch:                  "feature/lint",
 		DefaultBranch:           "main",
-		AssignedInProgressQuery: agentCfg.EffectiveAssignedInProgressQueryForBeads(config.BeadsConfig{}),
-		AssignedReadyQuery:      agentCfg.EffectiveAssignedReadyQueryForBeads(config.BeadsConfig{}),
-		RoutedPoolQuery:         agentCfg.EffectiveRoutedPoolQueryForBeads(config.BeadsConfig{}),
-		WorkQuery:               agentCfg.EffectiveWorkQueryForBeads(config.BeadsConfig{}),
+		AssignedInProgressQuery: agentCfg.EffectiveAssignedInProgressQueryFor(config.QueryTopology{}),
+		AssignedReadyQuery:      agentCfg.EffectiveAssignedReadyQueryFor(config.QueryTopology{}),
+		RoutedPoolQuery:         agentCfg.EffectiveRoutedPoolQueryFor(config.QueryTopology{}),
+		WorkQuery:               agentCfg.EffectiveWorkQueryFor(config.QueryTopology{}),
 		SlingQuery:              agentCfg.EffectiveSlingQuery(),
 		ProviderKey:             providerKey,
 		ProviderDisplayName:     providerDisplayNameFor(providerKey, providers),

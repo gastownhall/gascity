@@ -15,18 +15,56 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
-// gateTimeoutStore makes the strict open-work gate scan (the
-// `order-run:`-labeled, !IncludeClosed, Limit==0 List that hasOpenWorkStrict
-// issues) block past the per-order gate timeout, reproducing the #2893 hang
-// where storeHasOpenDescendants exceeds its budget under Dolt contention. Only
-// that exact query shape is delayed; every other read stays fast.
+// countAndDelayGateQuery records one gate query against counter and then blocks
+// for delay. The call-counting stores share it so this file keeps a single
+// direct sleep call site; see internal/testpolicy/resourcecensus, whose
+// untagged fixed_sleep ledger is pinned and trips on a net-new direct sleep.
+func countAndDelayGateQuery(mu *sync.Mutex, counter *int, delay time.Duration) {
+	mu.Lock()
+	*counter++
+	mu.Unlock()
+	time.Sleep(delay)
+}
+
+// isOrderGateIndexQuery reports whether q is the per-tick gate INDEX read: one
+// unlabeled non-closed scan per gate store, folded by order-run label, that
+// replaced the per-order label lists (ga-l7jdg).
+//
+// Every #2893 fixture in this file recognizes it as a gate query alongside the
+// two label shapes it replaced. Recognizing only the old spellings would leave
+// the fixtures delaying a query the dispatcher no longer issues — the store
+// would answer instantly, the gate would never time out, and four fail-closed
+// regression tests would pass while testing nothing.
+func isOrderGateIndexQuery(q beads.ListQuery) bool {
+	return q.AllowScan && q.Label == "" && q.Status == "" && q.Assignee == "" &&
+		len(q.IDs) == 0 && len(q.Metadata) == 0 && !q.IncludeClosed && q.Limit == 0
+}
+
+// isOrderGateListQuery reports whether q is a read either open-work gate makes:
+// the per-tick index scan, the strict `order-run:`-labeled fallback, or the
+// open-tracking list.
+func isOrderGateListQuery(q beads.ListQuery) bool {
+	if isOrderGateIndexQuery(q) {
+		return true
+	}
+	if q.IncludeClosed || q.Limit != 0 {
+		return false
+	}
+	return strings.HasPrefix(q.Label, "order-run:") ||
+		(q.Label == labelOrderTracking && q.Status == "open")
+}
+
+// gateTimeoutStore makes the open-work gate's store read block past the
+// per-order gate timeout, reproducing the #2893 hang where
+// storeHasOpenDescendants exceeds its budget under Dolt contention. Only a gate
+// query shape is delayed; every other read stays fast.
 type gateTimeoutStore struct {
 	beads.Store
 	delay time.Duration
 }
 
 func (s *gateTimeoutStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	if strings.HasPrefix(query.Label, "order-run:") && !query.IncludeClosed && query.Limit == 0 {
+	if isOrderGateListQuery(query) {
 		time.Sleep(s.delay)
 	}
 	return s.Store.List(query)
@@ -99,11 +137,8 @@ type openWorkGateCallCountStore struct {
 }
 
 func (s *openWorkGateCallCountStore) List(q beads.ListQuery) ([]beads.Bead, error) {
-	if strings.HasPrefix(q.Label, "order-run:") && !q.IncludeClosed && q.Limit == 0 {
-		s.mu.Lock()
-		s.gateCalls++
-		s.mu.Unlock()
-		time.Sleep(s.delay)
+	if isOrderGateListQuery(q) {
+		countAndDelayGateQuery(&s.mu, &s.gateCalls, s.delay)
 	}
 	return s.Store.List(q)
 }
@@ -223,7 +258,7 @@ type trackingGateTimeoutStore struct {
 }
 
 func (s *trackingGateTimeoutStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	if query.Label == labelOrderTracking && query.Status == "open" && !query.IncludeClosed && query.Limit == 0 {
+	if isOrderGateIndexQuery(query) || (query.Label == labelOrderTracking && query.Status == "open" && !query.IncludeClosed && query.Limit == 0) {
 		s.gateCount.Add(1)
 		time.Sleep(s.delay)
 	}
@@ -336,5 +371,104 @@ func TestOrderDispatchNonIdempotentBackoffOnOpenTrackingTimeout(t *testing.T) {
 	}
 	if got := trackingBeads(t, store.Store, "order-run:"+orderName); len(got) != 0 {
 		t.Fatalf("tick 2: no tracking bead expected while gate-timeout backoff is active; got %d", len(got))
+	}
+}
+
+// bothGatesCallCountStore counts every List call that belongs to an open-work
+// gate query — the first gate (listCanonicalOpenOrderTrackingBeads: Label ==
+// labelOrderTracking, Status open, !IncludeClosed, Limit 0) and the second
+// gate (hasOpenWorkStrict: Label order-run:*, !IncludeClosed, Limit 0). Each
+// such call also sleeps past orderGateTimeout so a non-opt-out order is
+// skipped (fail-closed) — reproducing the #2893 dispatch starvation that
+// NoWorkGate exists to bypass.
+type bothGatesCallCountStore struct {
+	beads.Store
+	delay time.Duration
+	mu    sync.Mutex
+	calls int
+}
+
+func (s *bothGatesCallCountStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if s.isGateQuery(q) {
+		countAndDelayGateQuery(&s.mu, &s.calls, s.delay)
+	}
+	return s.Store.List(q)
+}
+
+func (s *bothGatesCallCountStore) isGateQuery(q beads.ListQuery) bool {
+	return isOrderGateListQuery(q)
+}
+
+func (s *bothGatesCallCountStore) gateCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
+}
+
+// TestOrderDispatchNoWorkGateSkipsGatesUnderStoreDelay is the vp-cixi.6
+// regression test: a pure cooldown probe that tracks no beads sets
+// NoWorkGate, so the dispatcher must NOT run either open-work gate for it —
+// not even under a store so slow the gate would time out and skip the probe
+// every cycle (#2893 dispatch starvation -> stale provider-health cache ->
+// fail-closed provider health). The probe still dispatches on its cooldown,
+// and a plain (gate-protected) order under the same slow store is still
+// skipped (fail-closed) as before.
+func TestOrderDispatchNoWorkGateSkipsGatesUnderStoreDelay(t *testing.T) {
+	prev := orderGateTimeout
+	orderGateTimeout = 20 * time.Millisecond
+	defer func() { orderGateTimeout = prev }()
+
+	store := &bothGatesCallCountStore{Store: beads.NewMemStore(), delay: 300 * time.Millisecond}
+	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+
+	aa := []orders.Order{
+		{Name: "provider-health-probe", Trigger: "cooldown", Interval: "1m", Exec: "true", NoWorkGate: true},
+		{Name: "merge-loop-sweep", Trigger: "cooldown", Interval: "1m", Exec: "true"},
+	}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, successfulExec, nil)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+	ad.dispatch(context.Background(), t.TempDir(), now)
+	ad.drain(context.Background())
+
+	// The NoWorkGate probe must dispatch (fail-closed starvation bypassed).
+	if got := trackingBeads(t, store.Store, "order-run:provider-health-probe"); len(got) == 0 {
+		t.Error("NoWorkGate order should dispatch without entering the gate, but no tracking bead was created (the #2893 starvation this fixes)")
+	}
+	// The plain order must still be skipped (fail-closed) under the slow store.
+	if got := trackingBeads(t, store.Store, "order-run:merge-loop-sweep"); len(got) != 0 {
+		t.Errorf("plain order should fail CLOSED on gate timeout and skip; got %d tracking beads", len(got))
+	}
+	// No gate query should have run for the NoWorkGate order. The plain order's
+	// first gate (hasOpenTracking) runs once before timing out, so the total is
+	// exactly one gate call — NOT one per order, and NOT the second gate.
+	if got := store.gateCalls(); got != 1 {
+		t.Errorf("expected exactly 1 gate query (the plain order's first gate, timed out); got %d — NoWorkGate must skip both gates entirely (#2893)", got)
+	}
+}
+
+// TestOrderDispatchNoWorkGateSkipsTrackingGateDirectly narrows the NoWorkGate
+// behavior to the first gate site: a NoWorkGate order must skip the tracking
+// gate and dispatch, issuing ZERO gate queries.
+func TestOrderDispatchNoWorkGateSkipsTrackingGateDirectly(t *testing.T) {
+	store := &bothGatesCallCountStore{Store: beads.NewMemStore(), delay: 0}
+	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+
+	aa := []orders.Order{
+		{Name: "provider-health-probe", Trigger: "cooldown", Interval: "1m", Exec: "true", NoWorkGate: true},
+	}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, successfulExec, nil)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+	ad.dispatch(context.Background(), t.TempDir(), now)
+	ad.drain(context.Background())
+
+	if got := trackingBeads(t, store.Store, "order-run:provider-health-probe"); len(got) == 0 {
+		t.Fatal("NoWorkGate order should dispatch without entering either gate")
+	}
+	if got := store.gateCalls(); got != 0 {
+		t.Errorf("NoWorkGate order must issue ZERO gate queries; got %d", got)
 	}
 }

@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 549
-baseline_files = 166
+baseline_calls = 657
+baseline_files = 188
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-80po0c.2"
@@ -23,8 +23,8 @@ expires = "2026-10-01"
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 431
-baseline_files = 160
+baseline_calls = 478
+baseline_files = 172
 reported_calls = 447
 reported_files = 157
 owner_bead = "ga-80po0c.2"
@@ -51,8 +51,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 410
-baseline_files = 115
+baseline_calls = 444
+baseline_files = 126
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-80po0c.2"
@@ -64,8 +64,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 286
-baseline_files = 114
+baseline_calls = 321
+baseline_files = 121
 reported_calls = 295
 reported_files = 114
 owner_bead = "ga-80po0c.2"
@@ -77,7 +77,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "cmd/gc+untagged"
 resource = "environment"
-baseline_calls = 128
+baseline_calls = 122
 baseline_files = 13
 reported_calls = 3960
 reported_files = 184
@@ -90,8 +90,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "cmd/gc+untagged"
 resource = "cwd"
-baseline_calls = 174
-baseline_files = 16
+baseline_calls = 176
+baseline_files = 17
 reported_calls = 98
 reported_files = 13
 owner_bead = "ga-80po0c.2.3"
@@ -116,7 +116,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "http_test_server"
-baseline_calls = 317
+baseline_calls = 318
 baseline_files = 66
 reported_calls = 255
 reported_files = 56
@@ -142,8 +142,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "net_listen"
-baseline_calls = 95
-baseline_files = 36
+baseline_calls = 96
+baseline_files = 37
 reported_calls = 92
 reported_files = 34
 owner_bead = "ga-80po0c.2.2.2"
@@ -194,10 +194,10 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "tmux"
-baseline_calls = 6
-baseline_files = 2
-reported_calls = 6
-reported_files = 2
+baseline_calls = 7
+baseline_files = 3
+reported_calls = 7
+reported_files = 3
 owner_bead = "ga-80po0c.2.2.1"
 invariant = "untagged tmux dependency call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "each owning test confines tmux processes and sockets to its isolated namespace and cleanup"
@@ -228,6 +228,17 @@ owner_bead = "ga-80po0c.2.1"
 invariant = "cmd/gc TestMain is the checked package-level Medium owner for process environment and tmux namespace setup"
 resource_owner = "only declared environment and tmux calls lexically inside TestMain leave Small debt"
 migration_target = "P0.4b/P0.4c-tmux"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "cmd/gc"
+package_name = "main"
+owner = "TestPassthroughEnvWithholdsControllerTokenFromChildProcess"
+resources = ["subprocess"]
+owner_bead = "ga-80po0c.2.1"
+invariant = "the controller-token withholding proof is a checked Medium subprocess owner"
+resource_owner = "the one /bin/sh subprocess is confined to TestPassthroughEnvWithholdsControllerTokenFromChildProcess, which exists to read a credential back out of a real child process: the session env is an overlay, so only a real child can prove GC_CONTROLLER_TOKEN is absent rather than merely missing from a map"
+migration_target = "P0.4b"
 expires = "2026-10-01"
 
 [[medium]]
@@ -344,8 +355,8 @@ medium_reason = "package TestMain mutates process state"
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 404
-baseline_files = 112
+baseline_calls = 437
+baseline_files = 122
 reported_calls = 394
 reported_files = 105
 owner_bead = "ga-80po0c.2.1"
@@ -357,8 +368,8 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 286
-baseline_files = 114
+baseline_calls = 321
+baseline_files = 121
 reported_calls = 287
 reported_files = 113
 owner_bead = "ga-80po0c.2.1"
@@ -370,7 +381,7 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "cmd/gc+untagged"
 resource = "environment"
-baseline_calls = 122
+baseline_calls = 116
 baseline_files = 13
 reported_calls = 4348
 reported_files = 200
@@ -383,8 +394,8 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "cmd/gc+untagged"
 resource = "cwd"
-baseline_calls = 174
-baseline_files = 16
+baseline_calls = 176
+baseline_files = 17
 reported_calls = 284
 reported_files = 43
 owner_bead = "ga-80po0c.2.1"
@@ -409,7 +420,7 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "http_test_server"
-baseline_calls = 317
+baseline_calls = 318
 baseline_files = 66
 reported_calls = 300
 reported_files = 66
@@ -435,8 +446,8 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "net_listen"
-baseline_calls = 93
-baseline_files = 35
+baseline_calls = 94
+baseline_files = 36
 reported_calls = 92
 reported_files = 34
 owner_bead = "ga-80po0c.2.2.2"
@@ -487,10 +498,10 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "tmux"
-baseline_calls = 0
-baseline_files = 0
-reported_calls = 0
-reported_files = 0
+baseline_calls = 1
+baseline_files = 1
+reported_calls = 1
+reported_files = 1
 owner_bead = "ga-80po0c.2.2.1"
 invariant = "untagged Small tmux dependency call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "non-Medium lexical owners replace tmux with a fake executor or declare exact isolated ownership"

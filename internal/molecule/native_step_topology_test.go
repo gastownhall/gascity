@@ -131,7 +131,8 @@ func TestCompiledReviewQuorumCollapsesRetryMachineryIntoNativeSteps(t *testing.T
 		t.Fatalf("getwd: %v", err)
 	}
 	searchDir := filepath.Join(cwd, "..", "bootstrap", "packs", "core", "formulas")
-	recipe, err := formula.Compile(context.Background(), "mol-review-quorum", []string{searchDir}, map[string]string{
+	// Fed to both calls below, like sling.go threads a single opts.Vars.
+	vars := map[string]string{
 		"subject":           "PR-123",
 		"lane_one_id":       "primary",
 		"lane_one_provider": "provider-a",
@@ -142,12 +143,13 @@ func TestCompiledReviewQuorumCollapsesRetryMachineryIntoNativeSteps(t *testing.T
 		"lane_two_model":    "model-b",
 		"lane_two_target":   "target-b",
 		"synthesis_target":  "review-synthesis",
-	})
+	}
+	recipe, err := formula.Compile(context.Background(), "mol-review-quorum", []string{searchDir}, vars)
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
 
-	plan, _, _, err := buildRecipeApplyPlan(recipe, Options{})
+	plan, _, _, err := buildRecipeApplyPlan(recipe, Options{Vars: vars})
 	if err != nil {
 		t.Fatalf("buildRecipeApplyPlan: %v", err)
 	}

@@ -39,6 +39,21 @@
 
 package beads
 
+import "fmt"
+
+// MetadataCASOutcome is the durable classification of one metadata CAS
+// attempt. Conflict is an ordinary race result, not an error.
+type MetadataCASOutcome string
+
+const (
+	// MetadataCASSwapped means the expected value matched and was replaced.
+	MetadataCASSwapped MetadataCASOutcome = "swapped"
+	// MetadataCASAlreadyNext means the requested next value was already present.
+	MetadataCASAlreadyNext MetadataCASOutcome = "already_next"
+	// MetadataCASConflict means another value won the comparison.
+	MetadataCASConflict MetadataCASOutcome = "conflict"
+)
+
 // MetadataCASWriter is the metadata value-CAS half of ConditionalWriter,
 // declared on its own so stores that cannot soundly fence on a revision can
 // still offer a sound single-key compare-and-set.
@@ -94,4 +109,38 @@ func MetadataCASWriterFor(store Store) (MetadataCASWriter, bool) {
 		return provider.MetadataCASWriterHandle()
 	}
 	return nil, false
+}
+
+// ApplyMetadataCAS performs one capability-backed metadata compare-and-set and
+// classifies a false result by reading the same bead from the same store. It
+// never searches another store or falls back to an unconditional write;
+// callers that require authoritative classification must pass an authoritative
+// store handle.
+//
+// A CAS transport error is returned immediately. It is intentionally never
+// converted to already_next: the caller cannot know whether that error happened
+// before or after commit. Retrying the whole operation is safe; if the first
+// attempt committed, a later false CAS reads next and returns already_next.
+func ApplyMetadataCAS(store Store, id, key, expected, next string) (MetadataCASOutcome, error) {
+	writer, ok := MetadataCASWriterFor(store)
+	if !ok {
+		return "", fmt.Errorf("metadata CAS for %q: %w", id, ErrConditionalWriteUnsupported)
+	}
+
+	swapped, err := writer.CompareAndSetMetadataKey(id, key, expected, next)
+	if err != nil {
+		return "", fmt.Errorf("metadata CAS for %q key %q: %w", id, key, err)
+	}
+	if swapped {
+		return MetadataCASSwapped, nil
+	}
+
+	bead, err := store.Get(id)
+	if err != nil {
+		return "", fmt.Errorf("read metadata CAS result for %q: %w", id, err)
+	}
+	if bead.Metadata[key] == next {
+		return MetadataCASAlreadyNext, nil
+	}
+	return MetadataCASConflict, nil
 }

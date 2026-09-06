@@ -23,7 +23,7 @@ func TestReapClosedBeadWorktrees_ProtectsFreshWorktreeUnderDefaultQuarantine(t *
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 0 {
 		t.Fatalf("Reaped = %+v, want 0 for a fresh worktree under quarantine\nstderr:\n%s", report.Reaped, stderr.String())
@@ -52,7 +52,7 @@ func TestReapClosedBeadWorktrees_ReapsWorktreeOlderThanDefaultMinAge(t *testing.
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 1 || report.Reaped[0].BeadID != "ga-old0001" {
 		t.Fatalf("Reaped = %+v, want exactly ga-old0001\nstderr:\n%s", report.Reaped, stderr.String())
@@ -75,7 +75,7 @@ func TestReapClosedBeadWorktrees_ZeroMinAgeDisablesQuarantine(t *testing.T) {
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 1 || report.Reaped[0].BeadID != "ga-nomin01" {
 		t.Fatalf("Reaped = %+v, want exactly ga-nomin01 with quarantine disabled\nstderr:\n%s", report.Reaped, stderr.String())
@@ -100,7 +100,7 @@ func TestReapClosedBeadWorktrees_ProtectsWhenAgeIndeterminate(t *testing.T) {
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 0 {
 		t.Fatalf("Reaped = %+v, want 0 when worktree age is indeterminate\nstderr:\n%s", report.Reaped, stderr.String())

@@ -32,6 +32,16 @@ type Filter struct {
 	// stable resume point regardless of concurrent appends.
 	BeforeSeq uint64
 	Limit     int // cap results at this count (0 or negative = unlimited)
+	// MaxScanBytes bounds how far a tail scan (ReadFilteredTail /
+	// TailProvider.ListTail) walks backward from EOF before giving up,
+	// even if Limit hasn't been reached (0 or negative = unbounded). It
+	// exists for callers where "no match within the recent window" is an
+	// acceptable, already-representable result — a rare or optional Type
+	// filter can otherwise force a full-file backward walk with the same
+	// cost as an unfiltered forward scan (#4418). It has no effect on
+	// ReadFiltered's forward scan or on List/ListTail implementations
+	// that are not byte-scanning a file (e.g. Fake, Multiplexer).
+	MaxScanBytes int64
 }
 
 // matchesFilter reports whether e satisfies all non-zero predicates in f.
@@ -88,6 +98,87 @@ func limitReached(count int, filter Filter) bool {
 // archives exist.
 func ReadAll(path string) ([]Event, error) {
 	return ReadFiltered(path, Filter{})
+}
+
+// seqProbeBufSize bounds the read-ahead used when probing a byte offset for the
+// line that begins there. Events average ~1.4 KB on a live log; 64 KB
+// comfortably spans one line plus the partial line a probe may land inside.
+const seqProbeBufSize = 64 * 1024
+
+// seqLineAt probes byte offset off and returns the seq of the next parseable
+// line, along with that line's start offset.
+//
+// Contract, which the binary search in activeScanStart depends on: for off > 0
+// the line containing off is treated as a partial line and DISCARDED, so the
+// result is the first parseable line beginning strictly after off. Only off == 0
+// reads the line starting at off itself. Probing a known line start therefore
+// returns the FOLLOWING line, not the line at that offset.
+//
+// start is always a true line boundary. Unparseable lines are skipped, matching
+// the scanner's long-standing tolerance for malformed rows. ok is false when EOF
+// is reached without finding a parseable line.
+func seqLineAt(f *os.File, off int64) (seq uint64, start int64, ok bool) {
+	if _, err := f.Seek(off, io.SeekStart); err != nil {
+		return 0, 0, false
+	}
+	r := bufio.NewReaderSize(f, seqProbeBufSize)
+	pos := off
+	if off > 0 {
+		partial, err := r.ReadBytes('\n')
+		if err != nil {
+			return 0, 0, false
+		}
+		pos += int64(len(partial))
+	}
+	for {
+		line, err := r.ReadBytes('\n')
+		if len(line) > 0 {
+			var probe struct {
+				Seq uint64 `json:"seq"`
+			}
+			if json.Unmarshal(bytes.TrimRight(line, "\r\n"), &probe) == nil && probe.Seq > 0 {
+				return probe.Seq, pos, true
+			}
+			pos += int64(len(line))
+		}
+		if err != nil {
+			return 0, 0, false
+		}
+	}
+}
+
+// activeScanStart returns the byte offset in the active log at which a scan can
+// begin without missing any event Filter.AfterSeq can match.
+//
+// The active log is append-only with strictly increasing seq (FileRecorder
+// assigns e.Seq = r.seq++ under its mutex), so every line at or below the
+// cursor sorts before every line above it and can be skipped wholesale. This is
+// the seq-window skip archiveOverlapsFilter already applies to .gz archives,
+// extended to the active file. Without it a cursored read re-parses the entire
+// log on every call and AfterSeq saves nothing, because matchesFilter applies
+// it only after each line has been unmarshalled -- the dominant cost of the
+// supervisor's per-tick order-trigger check (gcy-ocb5).
+//
+// Returns 0 (full scan) whenever the boundary cannot be established, so a log
+// that violates the ordering invariant degrades in speed, never in correctness.
+func activeScanStart(f *os.File, size int64, afterSeq uint64) int64 {
+	if afterSeq == 0 || size <= 0 {
+		return 0
+	}
+	// Nothing to skip when the log's first line is already above the cursor.
+	if first, _, ok := seqLineAt(f, 0); !ok || first > afterSeq {
+		return 0
+	}
+	i := sort.Search(int(size), func(i int) bool {
+		seq, _, ok := seqLineAt(f, int64(i))
+		return !ok || seq > afterSeq
+	})
+	seq, start, ok := seqLineAt(f, int64(i))
+	if !ok || seq <= afterSeq {
+		// Cursor is at or beyond the newest event: skip the file entirely.
+		return size
+	}
+	return start
 }
 
 // ReadFiltered reads events from path and sibling archives, returning
@@ -156,6 +247,17 @@ func readFilteredTracked(path string, filter Filter) ([]Event, map[eventSeqWindo
 		return result, listed, fmt.Errorf("reading events: %w", err)
 	}
 	defer f.Close() //nolint:errcheck // read-only file
+
+	// Skip the prefix of the active log the cursor already covers. seqLineAt
+	// leaves the descriptor wherever its last probe ended, so seek explicitly
+	// even when the scan starts at 0 (the uncursored case).
+	scanFrom := int64(0)
+	if st, statErr := f.Stat(); statErr == nil {
+		scanFrom = activeScanStart(f, st.Size(), filter.AfterSeq)
+	}
+	if _, err := f.Seek(scanFrom, io.SeekStart); err != nil {
+		return result, listed, fmt.Errorf("seeking events: %w", err)
+	}
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // handle lines up to 1MB
@@ -234,10 +336,13 @@ func readRotationSources(path string, filter Filter, listedArchives map[eventSeq
 	var result []Event
 	maxSeq := filter.AfterSeq
 	for _, src := range sources {
-		if src.kind == sourceArchive {
-			if _, ok := listedArchives[eventSeqWindow{first: src.firstSeq, last: src.lastSeq}]; ok {
-				continue
-			}
+		// Any source whose exact seq window an already-read archive covers is
+		// redundant: for a stable archive it IS that archive, and for a rotating
+		// file it is the archive's not-yet-removed twin holding the same seqs
+		// (the crash window between archive rename and source removal makes such
+		// twins routine, and mergeEventsBySeq would drop every line anyway).
+		if _, ok := listedArchives[eventSeqWindow{first: src.firstSeq, last: src.lastSeq}]; ok {
+			continue
 		}
 		reader, err := openSegmentReader(src)
 		if err != nil {
@@ -353,6 +458,60 @@ func streamArchive(path string, _ Filter, fn func(Event) bool) error {
 	return nil
 }
 
+// LatestArchivedMatch returns the newest archived event matching filter, and
+// whether one was found. Archives are scanned newest-first and the scan stops
+// at the first archive holding a match, so the cost is one archive rather than
+// the whole retained history.
+//
+// ReadFiltered cannot answer this question cheaply: it walks archives
+// oldest-first, so a Limit stops on the OLDEST match rather than the newest,
+// and without a Limit it gunzips and decodes every retained archive. That walk
+// grows with every rotation, which is why callers that only need the newest
+// match use this instead.
+//
+// Only archives are searched. Callers that also care about the active log
+// should read its tail first, which is the cheap case, and fall back here only
+// when the active log holds no match.
+func LatestArchivedMatch(path string, filter Filter) (Event, bool, error) {
+	dir := filepath.Dir(path)
+	archives, err := archiveFilesIn(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return Event{}, false, nil
+		}
+		return Event{}, false, fmt.Errorf("listing event archives in %q: %w", dir, err)
+	}
+	// archiveFilesIn sorts ascending by FirstSeq, so descending indexes walk
+	// newest archive first.
+	for i := len(archives) - 1; i >= 0; i-- {
+		info := archives[i]
+		if !archiveOverlapsFilter(info, filter) {
+			continue
+		}
+		var (
+			newest Event
+			found  bool
+		)
+		// Events within one archive are ordered oldest-first, so the scan runs
+		// to the end of this archive and keeps the last match.
+		err := streamArchive(filepath.Join(dir, info.Basename), filter, func(e Event) bool {
+			if !matchesFilter(e, filter) {
+				return true
+			}
+			newest = e
+			found = true
+			return true
+		})
+		if err != nil {
+			return Event{}, false, fmt.Errorf("reading archive %q: %w", info.Basename, err)
+		}
+		if found {
+			return newest, true, nil
+		}
+	}
+	return Event{}, false, nil
+}
+
 // ReadFilteredTail reads the trailing matching events from path. A positive
 // limit returns at most that many events in chronological order; limit <= 0
 // falls back to ReadFiltered.
@@ -384,10 +543,21 @@ func readFilteredTailFromFile(f *os.File, size int64, filter Filter, limit int) 
 	var reversed []Event
 	var pending []byte
 	end := size
-	for end > 0 && len(reversed) < limit {
+	for end > 0 && len(reversed) < limit && (filter.MaxScanBytes <= 0 || size-end < filter.MaxScanBytes) {
 		n := chunkSize
 		if end < n {
 			n = end
+		}
+		// Clamp the read to what remains of the byte budget so a
+		// MaxScanBytes that is not a chunkSize multiple stops the walk
+		// mid-chunk rather than overscanning by up to one full chunk.
+		// The loop condition guarantees remaining > 0 on entry, and the
+		// chunk is read at start = end - n, so a smaller n simply moves
+		// the walk's stopping point without misaligning pending.
+		if filter.MaxScanBytes > 0 {
+			if remaining := filter.MaxScanBytes - (size - end); remaining < n {
+				n = remaining
+			}
 		}
 		start := end - n
 		chunk := make([]byte, n)

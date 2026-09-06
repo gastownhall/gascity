@@ -46,17 +46,15 @@ func AssigneeIdentities(i Info) []string {
 	return identities
 }
 
-// AssigneeIdentifier returns the durable agent-facing identity form of a
-// session — its session_name, else alias, else configured named identity —
-// falling back to the bead ID when no name metadata is present so a resolved
-// assignment is never silently cleared. This is the form the agent claims and
-// verifies work with (BEADS_ACTOR / GC_SESSION_NAME), so stamping it keeps
-// assign/update consistent with the claim path (which already stores the raw
-// session-name) and with the form-agnostic matching in AssigneeIdentities.
-// Stamping the bare bead ID here instead made template-routed continuation work
-// unclaimable by name-matching agents.
+// AssigneeIdentifier returns the durable agent-facing ownership identity of a
+// session: its current public alias, configured named identity, or runtime
+// session name, falling back to the bead ID when no name metadata is present.
+// This is the same alias-first identity RuntimeEnvWithSessionContext exposes
+// through GC_ALIAS and BEADS_ACTOR; GC_AGENT mirrors it only for compatibility.
+// Keeping API assignment normalization on this rule prevents one session from
+// owning work under a different exact string than it presents to bd.
 func AssigneeIdentifier(i Info) string {
-	for _, v := range []string{i.SessionNameMetadata, i.Alias, i.ConfiguredNamedIdentity} {
+	for _, v := range []string{i.Alias, i.ConfiguredNamedIdentity, i.SessionNameMetadata} {
 		if v = strings.TrimSpace(v); v != "" {
 			return v
 		}

@@ -11,6 +11,7 @@ Environment:
   CMD_GC_PROCESS_TOTAL  cmd/gc shard count (default: 6)
   GC_TEST_INNER_P        override the per-job GOFLAGS=-p= value (default:
                          outer job budget divided across concurrent jobs)
+  GO_TEST_TIMEOUT       per-package go test budget, <n>s|m|h (default: 20m)
 USAGE
 }
 
@@ -48,7 +49,25 @@ if ! push_gate_acquire_slot "$gate_slot_dir" gate_fd "$gate_label"; then
   echo "push-gate: giving up after the wait bound; rerun once a slot frees, or set GC_PUSH_GATE_NO_CAP=1 to bypass this cap for one invocation" >&2
   exit 75
 fi
-trap 'push_gate_release_slot "$gate_fd"' EXIT
+
+# This invocation owns every process it fans out (gas-px0). The fan-out runs as
+# one supervised process group so a signal here tears down xargs, every shard
+# runner, and every test binary beneath them, instead of leaving the tree to
+# init. The shard runners drain their own nested groups on the way out, so this
+# outer drain window is deliberately wider than theirs.
+# shellcheck source=lib/harness-reap.sh
+source "$repo_root/scripts/lib/harness-reap.sh"
+gc_local_parallel_drain_ticks=100
+gc_local_parallel_on_signal() {
+  local sig="$1"
+  gc_harness_terminate_group "${gc_harness_supervised_pgid:-}" "$gc_local_parallel_drain_ticks"
+  trap - "$sig"
+  kill -"$sig" $$
+}
+trap 'gc_harness_terminate_group "${gc_harness_supervised_pgid:-}" "$gc_local_parallel_drain_ticks"; push_gate_release_slot "$gate_fd"' EXIT
+trap 'gc_local_parallel_on_signal INT' INT
+trap 'gc_local_parallel_on_signal TERM' TERM
+trap 'gc_local_parallel_on_signal HUP' HUP
 
 # GC_DOLT_PORT / BEADS_DOLT_SERVER_PORT point bd at the live shared city Dolt
 # server. They must never reach `go test`, or every bd-forking test writes to
@@ -62,12 +81,30 @@ unset GC_DOLT_PORT BEADS_DOLT_SERVER_PORT
 local_jobs="${LOCAL_TEST_JOBS:-$("$repo_root/scripts/test-local-job-count")}"
 cmd_gc_total="${CMD_GC_PROCESS_TOTAL:-6}"
 
+# One per-package go test budget for the unit sweep and the cmd/gc shards. The
+# fan-out runs LOCAL_TEST_JOBS heavyweight test binaries at once, so a package's
+# wall time here is far above its runtime in isolation and Go's built-in 10m
+# default fires on aggregate load rather than on a real hang: six packages
+# panicked with "test timed out after 10m0s" while still working through their
+# test lists, which made this target unusable as the merge baseline (ga-9au).
+# The unit sweep and the cmd/gc shards contend for the same box, so they share
+# one number — two independently tuned budgets are what drifted apart before.
+# GO_TEST_TIMEOUT deliberately does not reach the integration jobs: it is not
+# in the per-job `env -i` allowlist below and is not prefixed onto their
+# jobspecs, so scripts/test-integration-shard keeps its own 30m default.
+# Adding it there would silently cut that budget from 30m to 20m.
+go_test_timeout="${GO_TEST_TIMEOUT:-20m}"
+
 if ! [[ "$local_jobs" =~ ^[0-9]+$ && "$local_jobs" -gt 0 ]]; then
   echo "LOCAL_TEST_JOBS must be a positive integer" >&2
   exit 1
 fi
 if ! [[ "$cmd_gc_total" =~ ^[0-9]+$ && "$cmd_gc_total" -gt 0 ]]; then
   echo "CMD_GC_PROCESS_TOTAL must be a positive integer" >&2
+  exit 1
+fi
+if ! [[ "$go_test_timeout" =~ ^[0-9]+[smh]$ ]]; then
+  echo "GO_TEST_TIMEOUT must be a Go duration of the form <n>s, <n>m, or <n>h" >&2
   exit 1
 fi
 
@@ -90,9 +127,13 @@ add_fsys_compile_job() {
     'tmp=$(mktemp -d); trap '"'"'rm -rf "$tmp"'"'"' EXIT; GOOS=darwin GOARCH=arm64 go test -c -o "$tmp/fsys.test" ./internal/fsys'
 }
 
+# The unit sweep runs with -count=1, mirroring the cmd/gc shards' GO_TEST_COUNT=1
+# so it is a real run rather than a cached-result stall, and shares the shards'
+# timeout budget. Package parallelism is bounded separately for every job by the
+# GOFLAGS -p export below (ga-04m84s), so it is not pinned on this command.
 add_unit_core_job() {
   add_job "unit-core" \
-    'GC_FAST_UNIT=1 go test $(go list ./... | grep -v '"'"'^github.com/gastownhall/gascity/cmd/gc$'"'"')'
+    "GC_FAST_UNIT=1 go test -count=1 -timeout ${go_test_timeout} \$(go list ./... | grep -v '^github.com/gastownhall/gascity/cmd/gc$')"
 }
 
 # Runs as a direct shell job rather than through a `go test` wrapper because a
@@ -119,7 +160,7 @@ add_cmd_gc_shards() {
   local tags="$3"
   local i command
   for i in $(seq 1 "$cmd_gc_total"); do
-    command="GC_FAST_UNIT=${gc_fast_unit} GO_TEST_COUNT=1 GO_TEST_TIMEOUT=20m"
+    command="GC_FAST_UNIT=${gc_fast_unit} GO_TEST_COUNT=1 GO_TEST_TIMEOUT=${go_test_timeout}"
     if [[ -n "$tags" ]]; then
       command+=" GO_TEST_TAGS=${tags}"
     fi
@@ -230,6 +271,15 @@ if command -v ionice >/dev/null 2>&1; then
 fi
 export TEST_LOCAL_NICE="$nice_prefix"
 
+# Clear what earlier runs stranded before adding load of our own. A wedged
+# orphan from a previous run otherwise sits at ~1 core for hours and is read as
+# ambient host load by the next investigation to look — on the kit side one
+# such orphan was misdiagnosed as disk pressure until it was measured
+# (kit-k72d). The age floor is the go test budget, so nothing belonging to a
+# concurrently starting sibling run is ever in scope.
+sweep_min_age_seconds="$(gc_harness_duration_seconds "$go_test_timeout")" || sweep_min_age_seconds=3600
+gc_harness_sweep_stale_orphans "$sweep_min_age_seconds"
+
 echo "Running ${#jobspecs[@]} ${mode} job(s) with LOCAL_TEST_JOBS=${local_jobs} inner_p=${inner_p}"
 
 set +e
@@ -240,7 +290,11 @@ set +e
 # keeps the FD for the whole run, so nothing is lost. The -n guard is
 # load-bearing: GC_PUSH_GATE_NO_CAP=1 and the missing-flock degrade path both
 # leave gate_fd empty, and `exec >&-` with an empty FD would close stdout.
-(
+#
+# Run as a supervised process group rather than a bare subshell so the whole
+# fan-out is addressable as one tree; the background job it becomes is still a
+# subshell, so the gate-FD severing above keeps its original scope.
+run_fan_out() {
   if [[ -n "$gate_fd" ]]; then
     eval "exec ${gate_fd}>&-"
   fi
@@ -293,7 +347,10 @@ set +e
     exit "$status"
   fi
 ' _
-)
+}
+# No watchdog deadline here: each shard runner owns its own, sized to its own
+# go test budget. A second global one would only fire late and less precisely.
+gc_harness_run_supervised "${mode} fan-out" "" 0 -- run_fan_out
 status=$?
 set -e
 

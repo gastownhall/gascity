@@ -4,6 +4,7 @@ import (
 	"io"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -41,7 +42,7 @@ func TestStampRunSessionIdentityStampsInProgressAssignedBead(t *testing.T) {
 	store := &countingStore{Store: mem}
 	sessions := newSessionBeadSnapshot([]beads.Bead{stampTestSession(sessionName, workDir)})
 
-	stampRunSessionIdentity([]beads.Bead{run}, []beads.Store{store}, sessions, io.Discard)
+	stampRunSessionIdentity(gaConfig(), []beads.Bead{run}, []beads.Store{store}, sessions, io.Discard)
 
 	got, err := mem.Get("co-run1")
 	if err != nil {
@@ -57,9 +58,35 @@ func TestStampRunSessionIdentityStampsInProgressAssignedBead(t *testing.T) {
 	// Idempotent: a second pass over the now-stamped bead writes nothing.
 	stamped, _ := mem.Get("co-run1")
 	store.writes = 0
-	stampRunSessionIdentity([]beads.Bead{stamped}, []beads.Store{store}, sessions, io.Discard)
+	stampRunSessionIdentity(gaConfig(), []beads.Bead{stamped}, []beads.Store{store}, sessions, io.Discard)
 	if store.writes != 0 {
 		t.Errorf("second pass wrote %d times, want 0 (stamp must be idempotent)", store.writes)
+	}
+}
+
+func TestStampRunSessionIdentityDoesNotManufactureWorktreeEvidence(t *testing.T) {
+	const (
+		sessionName = "polecat-gc-734732"
+		slotDir     = "/home/ds/gascity-worktrees/polecat-slots/polecat-2"
+	)
+	run := beads.Bead{ID: "gc-demand", Type: "task", Status: "in_progress", Assignee: sessionName}
+	mem := beads.NewMemStoreFrom(0, []beads.Bead{run}, nil)
+	store := &countingStore{Store: mem}
+	poolSession := stampTestSession(sessionName, slotDir)
+	poolSession.Metadata["pool_managed"] = "true"
+	sessions := newSessionBeadSnapshot([]beads.Bead{poolSession})
+
+	stampRunSessionIdentity(gaConfig(), []beads.Bead{run}, []beads.Store{store}, sessions, io.Discard)
+
+	got, err := mem.Get(run.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", run.ID, err)
+	}
+	if got.Metadata["gc.session_name"] != sessionName {
+		t.Fatalf("gc.session_name = %q, want %q", got.Metadata["gc.session_name"], sessionName)
+	}
+	if value, exists := got.Metadata["gc.work_dir"]; exists {
+		t.Fatalf("gc.work_dir was manufactured as %q from a pool slot; worktree ownership evidence must come from the worktree creator", value)
 	}
 }
 
@@ -75,7 +102,7 @@ func TestStampRunSessionIdentityPropagatesToRunRoot(t *testing.T) {
 	store := &countingStore{Store: mem}
 	sessions := newSessionBeadSnapshot([]beads.Bead{stampTestSession(sn, wd)})
 
-	stampRunSessionIdentity([]beads.Bead{step}, []beads.Store{store}, sessions, io.Discard)
+	stampRunSessionIdentity(gaConfig(), []beads.Bead{step}, []beads.Store{store}, sessions, io.Discard)
 
 	gotStep, _ := mem.Get("gpk-step")
 	if gotStep.Metadata["gc.session_name"] != sn || gotStep.Metadata["gc.work_dir"] != wd {
@@ -92,7 +119,7 @@ func TestStampRunSessionIdentityPropagatesToRunRoot(t *testing.T) {
 	// Idempotent: a second pass writes nothing (step + root already stamped).
 	stamped, _ := mem.Get("gpk-step")
 	store.writes = 0
-	stampRunSessionIdentity([]beads.Bead{stamped}, []beads.Store{store}, sessions, io.Discard)
+	stampRunSessionIdentity(gaConfig(), []beads.Bead{stamped}, []beads.Store{store}, sessions, io.Discard)
 	if store.writes != 0 {
 		t.Errorf("second pass wrote %d times, want 0 (step+root already stamped)", store.writes)
 	}
@@ -113,7 +140,7 @@ func TestStampRunSessionIdentityNamedSessionUsesAlias(t *testing.T) {
 	store := &countingStore{Store: mem}
 	sessions := newSessionBeadSnapshot([]beads.Bead{mayor})
 
-	stampRunSessionIdentity([]beads.Bead{run}, []beads.Store{store}, sessions, io.Discard)
+	stampRunSessionIdentity(gaConfig(), []beads.Bead{run}, []beads.Store{store}, sessions, io.Discard)
 
 	got, _ := mem.Get("dr-run")
 	if got.Metadata["gc.session_name"] != "mayor" {
@@ -159,7 +186,7 @@ func TestStampRunSessionIdentityResolvesByIDAndAliasHistory(t *testing.T) {
 			store := &countingStore{Store: mem}
 			sessions := newSessionBeadSnapshot([]beads.Bead{tc.sess})
 
-			stampRunSessionIdentity([]beads.Bead{run}, []beads.Store{store}, sessions, io.Discard)
+			stampRunSessionIdentity(gaConfig(), []beads.Bead{run}, []beads.Store{store}, sessions, io.Discard)
 
 			got, _ := mem.Get("r")
 			if got.Metadata["gc.session_name"] != tc.wantName {
@@ -179,7 +206,7 @@ func TestStampRunSessionIdentitySkipsAmbiguousAssignee(t *testing.T) {
 	store := &countingStore{Store: mem}
 	sessions := newSessionBeadSnapshot([]beads.Bead{a, b})
 
-	stampRunSessionIdentity([]beads.Bead{run}, []beads.Store{store}, sessions, io.Discard)
+	stampRunSessionIdentity(gaConfig(), []beads.Bead{run}, []beads.Store{store}, sessions, io.Discard)
 
 	if store.writes != 0 {
 		t.Errorf("ambiguous assignee must not be stamped, got %d writes", store.writes)
@@ -195,7 +222,7 @@ func TestStampRunSessionIdentityReassignmentRestamps(t *testing.T) {
 	store := &countingStore{Store: mem}
 	sessions := newSessionBeadSnapshot([]beads.Bead{stampTestSession("worker-b", "/new")})
 
-	stampRunSessionIdentity([]beads.Bead{run}, []beads.Store{store}, sessions, io.Discard)
+	stampRunSessionIdentity(gaConfig(), []beads.Bead{run}, []beads.Store{store}, sessions, io.Discard)
 
 	got, _ := mem.Get("co-run2")
 	if got.Metadata["gc.session_name"] != "worker-b" || got.Metadata["gc.work_dir"] != "/new" {
@@ -217,7 +244,7 @@ func TestStampRunSessionIdentitySkipsNonExecuting(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			mem := beads.NewMemStoreFrom(0, []beads.Bead{wb}, nil)
 			store := &countingStore{Store: mem}
-			stampRunSessionIdentity([]beads.Bead{wb}, []beads.Store{store}, sessions, io.Discard)
+			stampRunSessionIdentity(gaConfig(), []beads.Bead{wb}, []beads.Store{store}, sessions, io.Discard)
 			if store.writes != 0 {
 				t.Errorf("expected no stamp, got %d writes", store.writes)
 			}
@@ -231,10 +258,129 @@ func TestStampRunSessionIdentityToleratesLengthMismatchAndNilSnapshot(t *testing
 	store := &countingStore{Store: mem}
 
 	// Mismatched slice lengths must be a no-op, not a panic.
-	stampRunSessionIdentity([]beads.Bead{run}, []beads.Store{}, newSessionBeadSnapshot(nil), io.Discard)
+	stampRunSessionIdentity(gaConfig(), []beads.Bead{run}, []beads.Store{}, newSessionBeadSnapshot(nil), io.Discard)
 	// Nil snapshot must be a no-op, not a panic.
-	stampRunSessionIdentity([]beads.Bead{run}, []beads.Store{store}, nil, io.Discard)
+	stampRunSessionIdentity(gaConfig(), []beads.Bead{run}, []beads.Store{store}, nil, io.Discard)
 	if store.writes != 0 {
 		t.Errorf("expected no writes on degenerate input, got %d", store.writes)
+	}
+}
+
+func TestStampRunSessionIdentityPreservesRealEvidenceAgainstPoolSlotSelfCwd(t *testing.T) {
+	// ga-3c5isi / #5193: a session whose OWN bead never carries
+	// pool_managed=true (a manual/named session, or a pool session mid
+	// classification) can still be physically running from a pool slot's own
+	// worktree root. Before this guard, !sbInfo.PoolManaged alone satisfied
+	// the stamp condition and gc.work_dir was overwritten unconditionally
+	// from that session's cwd -- clobbering real per-bead worktree evidence
+	// already on the work bead with a pool-slot label.
+	const (
+		sessionName  = "gascity--builder-1"
+		poolSlotSelf = "/home/jaword/projects/gc-management/.gc/worktrees/gascity/builder-1"
+		realEvidence = "/home/ds/gascity-worktrees/ga-3c5isi"
+	)
+	run := beads.Bead{
+		ID: "ga-3c5isi", Type: "task", Status: "in_progress", Assignee: sessionName,
+		Metadata: map[string]string{"gc.work_dir": realEvidence},
+	}
+	mem := beads.NewMemStoreFrom(0, []beads.Bead{run}, nil)
+	store := &countingStore{Store: mem}
+	// Not pool_managed: stampTestSession leaves pool_managed unset/false.
+	sessions := newSessionBeadSnapshot([]beads.Bead{stampTestSession(sessionName, poolSlotSelf)})
+
+	stampRunSessionIdentity(gaConfig(), []beads.Bead{run}, []beads.Store{store}, sessions, io.Discard)
+
+	got, err := mem.Get(run.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", run.ID, err)
+	}
+	if got.Metadata["gc.work_dir"] != realEvidence {
+		t.Fatalf("gc.work_dir = %q, want %q (real worktree evidence must survive a pool-slot-shaped self cwd)", got.Metadata["gc.work_dir"], realEvidence)
+	}
+}
+
+func TestStampRunRootFromStepPreservesRootEvidenceAgainstPoolSlotCwd(t *testing.T) {
+	// The root back-fill carries the same guard as the step stamp, and needs
+	// its own behavior coverage: a non-pool session running from a pool slot
+	// satisfies allowUnownedWorkDir, so without workDirStampWouldClobberEvidence
+	// the root's real per-bead worktree evidence is overwritten with the slot
+	// label -- and the root is the bead the dashboard's root-only snapshot reads.
+	const (
+		sessionName  = "gascity--builder-1"
+		poolSlotSelf = "/home/jaword/projects/gc-management/.gc/worktrees/gascity/builder-1"
+		realEvidence = "/home/ds/gascity-worktrees/ga-3c5isi"
+	)
+	root := beads.Bead{
+		ID: "ga-root", Type: "molecule", Status: "in_progress",
+		Metadata: map[string]string{"gc.kind": "workflow", "gc.work_dir": realEvidence},
+	}
+	step := beads.Bead{
+		ID: "ga-step", Type: "step", Status: "in_progress", Assignee: sessionName,
+		Metadata: map[string]string{"gc.root_bead_id": "ga-root"},
+	}
+	mem := beads.NewMemStoreFrom(0, []beads.Bead{root, step}, nil)
+	store := &countingStore{Store: mem}
+
+	stampRunRootFromStep(gaConfig(), store, step, sessionName, poolSlotSelf, true, map[string]struct{}{}, io.Discard)
+
+	gotRoot, err := mem.Get("ga-root")
+	if err != nil {
+		t.Fatalf("Get(ga-root): %v", err)
+	}
+	if gotRoot.Metadata["gc.work_dir"] != realEvidence {
+		t.Errorf("root gc.work_dir = %q, want %q (real worktree evidence must survive a pool-slot cwd)",
+			gotRoot.Metadata["gc.work_dir"], realEvidence)
+	}
+	// The session_name half of the back-fill is unaffected by the work_dir guard.
+	if gotRoot.Metadata["gc.session_name"] != sessionName {
+		t.Errorf("root gc.session_name = %q, want %q", gotRoot.Metadata["gc.session_name"], sessionName)
+	}
+}
+
+func TestRepairPoolSlotWorkDirClobberThenStampPreservesLiveWorkDir(t *testing.T) {
+	// Ordering regression: the reconciler collects the work slice once and
+	// neither pass refreshes it, so a repair sweep placed AFTER
+	// stampRunSessionIdentity re-reads pre-stamp metadata and reverts the
+	// freshly stamped canonical back to the stale legacy value.
+	// Reconciliation runs repair first, then the live stamp, so the session's
+	// real path survives one full pass.
+	const (
+		sessionName = "gascity--worker-gc-7"
+		liveWorkDir = "/home/ds/gascity-worktrees/ga-live"
+		staleLegacy = "/home/ds/gascity-worktrees/ga-stale"
+		poolSlot    = ".gc/worktrees/gascity/builder-1"
+	)
+	newRun := func() beads.Bead {
+		return beads.Bead{
+			ID: "ga-run", Type: "task", Status: "in_progress", Assignee: sessionName,
+			Metadata: map[string]string{
+				beadmeta.WorkDirMetadataKey:       poolSlot,
+				beadmeta.LegacyWorkDirMetadataKey: staleLegacy,
+			},
+		}
+	}
+	// The store's bead and the collected snapshot must not share a metadata
+	// map: a store query returns clones, so writes through the store are
+	// invisible to the already-collected slice. MemStore seeded from the same
+	// value would alias the map and mask the ordering bug entirely.
+	mem := beads.NewMemStoreFrom(0, []beads.Bead{newRun()}, nil)
+	store := &countingStore{Store: mem}
+	sessions := newSessionBeadSnapshot([]beads.Bead{stampTestSession(sessionName, liveWorkDir)})
+	cfg := gaConfig()
+
+	// Same order, and the same collected-once slice, as
+	// buildDesiredStateWithSessionBeadsAt.
+	snapshot := []beads.Bead{newRun()}
+	stores := []beads.Store{store}
+	repairPoolSlotWorkDirClobber(cfg, snapshot, stores, io.Discard)
+	stampRunSessionIdentity(cfg, snapshot, stores, sessions, io.Discard)
+
+	got, err := mem.Get("ga-run")
+	if err != nil {
+		t.Fatalf("Get(ga-run): %v", err)
+	}
+	if got.Metadata[beadmeta.WorkDirMetadataKey] != liveWorkDir {
+		t.Errorf("gc.work_dir = %q, want %q (live stamp must get the last word over the repair sweep)",
+			got.Metadata[beadmeta.WorkDirMetadataKey], liveWorkDir)
 	}
 }

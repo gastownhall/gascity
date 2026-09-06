@@ -546,8 +546,13 @@ func (c *ZombieSessionsCheck) Run(_ *CheckContext) *CheckResult {
 // CanFix returns true — zombie sessions can be killed.
 func (c *ZombieSessionsCheck) CanFix() bool { return true }
 
-// Fix kills all zombie sessions.
-func (c *ZombieSessionsCheck) Fix(_ *CheckContext) error {
+// Fix kills all zombie sessions. It refuses while a controller is running
+// (GH#5742): the controller's own health patrol already reconciles zombie
+// sessions, and an uncoordinated Stop here would race it.
+func (c *ZombieSessionsCheck) Fix(ctx *CheckContext) error {
+	if IsControllerRunning(ctx.CityPath) {
+		return errControllerRunningFixSkipped
+	}
 	for _, a := range c.cfg.Agents {
 		if a.Suspended || len(a.ProcessNames) == 0 {
 			continue
@@ -627,8 +632,13 @@ func (c *OrphanSessionsCheck) Run(_ *CheckContext) *CheckResult {
 // CanFix returns true — orphan sessions can be killed.
 func (c *OrphanSessionsCheck) CanFix() bool { return true }
 
-// Fix kills all orphaned sessions.
-func (c *OrphanSessionsCheck) Fix(_ *CheckContext) error {
+// Fix kills all orphaned sessions. It refuses while a controller is running
+// (GH#5742): the controller's own health patrol already reconciles orphan
+// sessions, and an uncoordinated Stop here would race it.
+func (c *OrphanSessionsCheck) Fix(ctx *CheckContext) error {
+	if IsControllerRunning(ctx.CityPath) {
+		return errControllerRunningFixSkipped
+	}
 	prefix := "" // per-city socket isolation: all sessions belong to this city
 	running, err := c.sp.ListRunning(prefix)
 	if runtime.IsPartialListError(err) {
@@ -760,6 +770,9 @@ func (c *BDSplitStoreCheck) Run(_ *CheckContext) *CheckResult {
 	serverExists := splitStoreDirExists(serverDir)
 	embeddedExists := splitStoreDirExists(embeddedDir)
 	if !serverExists || !embeddedExists {
+		if unread := c.unreadStoreBesideTheActiveOne(beadsDir, serverDir, embeddedDir); unread != nil {
+			return unread
+		}
 		r.Status = StatusOK
 		r.Message = "no legacy split store detected"
 		return r
@@ -811,6 +824,58 @@ func (c *BDSplitStoreCheck) Run(_ *CheckContext) *CheckResult {
 	r.Details = splitStoreDetails(activeStore, activeSource, serverRepos, embeddedRepos)
 	r.FixHint = splitStoreFixHint(activeStore)
 	return r
+}
+
+// unreadStoreBesideTheActiveOne reports a bead database sitting in the mode
+// directory the scope's metadata does NOT point at, when the mode it does point
+// at has no directory of its own yet.
+//
+// That shape is the one gc's own storage-mode change produces, and it is the
+// one the announcement steers here for: canonicalizing an embedded workspace to
+// server mode re-points the ledger before any .beads/dolt exists, so the
+// both-directories test above answers "no legacy split store detected" for
+// exactly the scope that has one. A diagnostic an operator is told to run and
+// which reports OK on the state they were warned about is worse than no
+// diagnostic — it converts a real warning into a false all-clear.
+//
+// The evidential standard is the one this check already applies: a `.dolt`
+// repository under the inactive mode's directory, without opening it. A
+// repository `bd init` created and never wrote to reports the same as a
+// populated one, which is why this is a WARNING that names both paths and never
+// an error — see splitStoreDetails for the recovery it prescribes.
+//
+// It answers nothing when the active store is unidentifiable, when the inactive
+// directory is absent, or when it holds no repository: each of those is a scope
+// with one ledger, which is the ordinary case.
+func (c *BDSplitStoreCheck) unreadStoreBesideTheActiveOne(beadsDir, serverDir, embeddedDir string) *CheckResult {
+	activeSource, activeStore := c.activeBDStore(beadsDir)
+	inactiveStore, inactiveDir := "embeddeddolt", embeddedDir
+	switch activeStore {
+	case "dolt":
+	case "embeddeddolt":
+		inactiveStore, inactiveDir = "dolt", serverDir
+	default:
+		return nil
+	}
+	if !splitStoreDirExists(inactiveDir) {
+		return nil
+	}
+	inactiveRepos, err := doltReposUnder(inactiveDir)
+	if err != nil || len(inactiveRepos) == 0 {
+		return nil
+	}
+	serverRepos, embeddedRepos := inactiveRepos, []string(nil)
+	if inactiveStore == "embeddeddolt" {
+		serverRepos, embeddedRepos = nil, inactiveRepos
+	}
+	return &CheckResult{
+		Name:   c.Name(),
+		Status: StatusWarning,
+		Message: fmt.Sprintf("unread bead database beside the active store: active .beads/%s (%s), unread .beads/%s contains %d Dolt repo(s)",
+			activeStore, activeSource, inactiveStore, len(inactiveRepos)),
+		Details: splitStoreDetails(activeStore, activeSource, serverRepos, embeddedRepos),
+		FixHint: splitStoreFixHint(activeStore),
+	}
 }
 
 // CanFix returns false; reconciliation requires explicit user review.
@@ -936,11 +1001,27 @@ func splitStoreDetails(activeStore, activeSource string, serverRepos, embeddedRe
 	return details
 }
 
+// splitStoreFixHint prescribes the reconciliation, and names what the operator
+// will see while they are in the middle of it.
+//
+// "Keep both directories until reconciled" parks a scope in the exact shape
+// BdStore's read-time guard notices (internal/beads/unread_store_notice.go): an
+// active store with no rows beside a second bead database. That guard is a
+// notice and never a refusal precisely so this advice stays safe to follow —
+// but an operator who takes it and then sees an unexplained line on every empty
+// `gc ready` has been sent into a state the diagnostic did not warn them about.
+// Naming the override here is what keeps the two from contradicting each other.
+//
+// The bound stated here is the one the guard actually holds: once per scope per
+// process. A `gc` command is one process, so an operator sees it once per
+// command; a supervisor sees it once for the life of the daemon.
 func splitStoreFixHint(activeStore string) string {
+	silence := "; keep both directories until reconciled — while both exist, an empty whole-ledger read from this scope prints one notice per gc process, which " +
+		beads.AllowUnreadStoreReadEnvVar + "=1 silences"
 	if activeStore == "" || activeStore == "unknown" {
-		return "export from each legacy store into backup JSONL, review with bd import --dry-run, then import into the current or intended active store; keep both directories until reconciled"
+		return "export from each legacy store into backup JSONL, review with bd import --dry-run, then import into the current or intended active store" + silence
 	}
-	return "export from the inactive store into a backup JSONL, review with bd import --dry-run, then import into the active store; keep both directories until reconciled"
+	return "export from the inactive store into a backup JSONL, review with bd import --dry-run, then import into the active store" + silence
 }
 
 func describeRepoList(repos []string) string {
@@ -2474,13 +2555,27 @@ func DoltConfigExpectedValuesForConfig(doltConfig config.DoltConfig) []DoltConfi
 		{"listener.back_log", 50},
 		{"listener.max_connections_timeout_millis", 5000},
 	}
-	if waitTimeout := managedDoltConfigExpectedWaitTimeout(); waitTimeout > 0 {
+	if waitTimeout := managedDoltConfigExpectedWaitTimeoutForConfig(doltConfig); waitTimeout > 0 {
 		values = append(values, DoltConfigExpectedValue{
 			Path:  "system_variables.wait_timeout",
 			Value: strconv.Itoa(waitTimeout),
 		})
 	}
 	return values
+}
+
+// managedDoltConfigExpectedWaitTimeoutForConfig mirrors the renderer's
+// resolution order so the drift check compares against what a start would
+// actually write. Reading only the env made the check report drift on any city
+// that configures wait_timeout while doctor runs from a shell that does not
+// export GC_DOLT_WAIT_TIMEOUT — and its remediation hint ("stop dolt and
+// restart to regenerate managed config") then pointed at the one action that
+// would really have introduced drift.
+func managedDoltConfigExpectedWaitTimeoutForConfig(doltConfig config.DoltConfig) int {
+	if doltConfig.WaitTimeoutSeconds > 0 {
+		return doltConfig.WaitTimeoutSeconds
+	}
+	return managedDoltConfigExpectedWaitTimeout()
 }
 
 func managedDoltConfigExpectedWaitTimeout() int {
@@ -2802,6 +2897,13 @@ func (c *DoltVersionCheck) CanFix() bool { return false }
 
 // Fix is a no-op.
 func (c *DoltVersionCheck) Fix(_ *CheckContext) error { return nil }
+
+// errControllerRunningFixSkipped is returned by ZombieSessionsCheck.Fix and
+// OrphanSessionsCheck.Fix when a controller is running (GH#5742). The
+// controller's own health patrol already owns session remediation while it
+// runs; stopping sessions here too would race that reconciliation, so Fix
+// refuses instead of running — a documented no-op, not a silent skip.
+var errControllerRunningFixSkipped = errors.New("controller is running; skipping fix to avoid racing its own session reconciliation")
 
 // IsControllerRunning probes the controller lock file to determine if a
 // controller is currently running. It tries to acquire the flock — if it

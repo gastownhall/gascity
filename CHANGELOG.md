@@ -7,7 +7,213 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`gc storage preflight` reports everything the infra-class cutover would
+  refuse, from outside the window.** `gc storage migrate --from-work` runs its
+  refusals with the fleet stopped, so an operator learned that a rig scope
+  holds an infrastructure bead this binary carries no importer for only after
+  spending the window on it. The new verb runs the same checks — every one of
+  them the migration's own function, not a copy — against a LIVE city, while
+  copying nothing, creating nothing, taking no migration guard, and publishing
+  no event. A live controller is reported by PID rather than refused, because
+  it names the window itself rather than something to go and fix.
+
+- **`storage.binding.not_configured` makes "this city has no split" a verdict
+  a subscriber can see.** A city that relocates nothing used to leave the boot
+  gate having published nothing at all, and nothing reads the same as a gate
+  that crashed before deciding or a build too old to have one. The fifth
+  `storage.binding.*` type carries the same `StorageBindingOutcomePayload` as
+  the other four, so a deploy gated on these events can tell an absent split
+  apart from an absent answer.
+
+- **`storage.binding.*` events now carry `proven_beads`, the size of the
+  proven-copy manifest a serving verdict rests on.** "Converged" alone did not
+  distinguish a city serving its whole infrastructure slice from the binding
+  from one whose copy carried nothing, and those are the two situations an
+  operator watching a cutover most needs to tell apart. Every path that
+  reaches a serving verdict has already read the manifest, so the number costs
+  nothing. Every other outcome leaves it zero, and zero there means the copy's
+  size is not something the verdict established — not that the copy is empty.
+
+### Changed
+
+- **`gc pack registry publish` now refuses an unscoped pack name unless you
+  pass `--allow-unscoped-name`.** Registry pack names are scoped as
+  `<github-owner>/<pack>`, and the registry has always reserved bare names for
+  packs it already holds a claim for — but the CLI submitted one anyway, so the
+  refusal arrived only after the request had been created and parked in the
+  review queue as an unapprovable pending row. Publish now checks the name
+  locally, before any credential or publish traffic, and names the exact
+  `[pack].name` edit that fixes it. It also refuses a scope that is not the
+  lowercased GitHub owner of the source repository, which the registry rejects
+  with no override.
+
+  Upgrading: a publisher of a grandfathered bare name must add
+  `--allow-unscoped-name` to keep publishing under it — the registry still
+  accepts a bare name it already holds a claim for, and a local preflight
+  cannot see the claim table. New packs must set
+  `[pack].name = "<github-owner>/<pack>"` in `pack.toml`. `--name` no longer
+  stands in for a missing `[pack].name`, and it can no longer rename a pack at
+  publish time: the registry byte-compares it with `[pack].name`, so it can
+  only restate the name `pack.toml` already declares.
+
+- **`gc bd` now refuses a `--metadata` body it cannot validate before the
+  write, on `new` as well as `create` and `update`.** `gc bd` validates
+  rig-qualified metadata (`lease_owner`, `routed_to`) ahead of the write so a
+  create naming a rig this city does not configure is stopped before it mints a
+  stranded bead. That guard admitted `create` and `update` but not `new` — the
+  alias `bd` itself registers for `create` — so the same command spelled `gc bd
+  new` skipped validation entirely. It now normalizes the alias and applies the
+  identical check.
+
+  Upgrading: `gc bd new --metadata @file.json` now exits 1, on every city,
+  split or not. The `@file.json` spelling states its object in a file rather
+  than in argv, so `gc bd` cannot read the rig qualification before `bd`
+  resolves the file and mints from it — the one spelling where a refusal is the
+  only fail-closed answer. Pass the JSON inline (`--metadata '{"routed_to":
+  "rig/agent"}'`) instead. A malformed inline body is likewise refused by name
+  rather than forwarded. No in-repo caller uses the `@file.json` spelling.
+
 ### Fixed
+
+- **The infra-class cutover now carries dependency-edge payloads.** Every
+  within-infra edge the copy re-added went in through a writer that clears the
+  pair's metadata sidecar, so the binding received those edges with their
+  endpoints and type intact and their payloads gone. In production the
+  payload-carrying edges are the `waits_for` fanout gates between formula step
+  beads, whose payload records the gate kind; an absent payload reads as the
+  default, `all-children`, so a gate the formula asked to release on the first
+  child waited for every one of them instead. The copy and the recovery path
+  now share one edge writer, a destination that cannot carry a payload is
+  refused rather than written to without it, and the equality witness compares
+  the payload rather than only the edge.
+
+  **Upgrading:** this does not repair a city that already cut over. Its binding
+  still holds the payloadless edges, and no command yet detects or repairs
+  them. See "If this city cut over before edge payloads were carried" in
+  `docs/runbooks/split-storage-classes.md` for what is affected, what is not
+  lost, and the destructive re-converge procedure.
+
+- **A control bead served by a relocated class binding is routed to the
+  dispatcher its own `gc.root_store_ref` names.** On a split city every rig's
+  control beads live in one class binding. The reconciler dropped rig-rooted
+  rows from control-dispatcher demand entirely, because a binding's ref reads
+  as city scope and the candidate filter required a rig match; and it
+  suppressed city-rooted rows from that same demand, because the route repair
+  read the binding's ref (`class:gmnos`) as a rig name, found no dispatcher
+  for that pseudo-scope, and logged `no configured control-dispatcher for its
+  store scope` once per tick. The binding is now collected for every row it
+  serves, and the repair keys the dispatcher on the row's root scope, so rig
+  rows keep (or are repaired toward) their rig dispatcher and city rows their
+  city dispatcher. The diagnostic names the binding and the owning scope.
+  Supersedes #5548 and #5588; fixes #5547 and #5587.
+
+- **Mail archive and delete now expand whitespace-joined message IDs.** Each
+  positional argument is split into individual IDs before single-versus-batch
+  dispatch, so shell variables containing multiple IDs no longer look like one
+  already-handled message.
+
+- **`gc import add` of a local in-git pack now locks to HEAD, not the repo's
+  latest tag.** Per `gc import add --help`, a local path inside a git
+  worktree is documented to be "locked to the current commit," but the
+  default version resolution (absent an explicit `--version`) preferred the
+  repo's latest semver tag whenever one existed. A pack added to the
+  worktree after the last tag was cut resolved to a checkout whose tree
+  predates the pack, failing with a misleading "missing pack.toml" error
+  even though the pack exists at HEAD. A local-worktree-promoted source now
+  always locks to `sha:<HEAD commit>`, matching the documented behavior;
+  registry/remote sources are unaffected. Fixes #3659.
+
+- **`gc doctor`'s `order-firing-current` check no longer hard-fails
+  `gc doctor` (exit code, `BlockingFailed`) when its own order-history
+  lookup times out.** The check races a Dolt-backed order-history query
+  against a 15s budget; on timeout it returned `StatusError` with no
+  `Severity` set, silently defaulting to `SeverityBlocking` (the zero
+  value of `CheckSeverity`) — turning a slow-but-healthy city's doctor run
+  red even when scheduled orders were firing normally, since a timed-out
+  lookup proves nothing about actual order staleness. The timeout branch
+  now explicitly sets `Severity: SeverityAdvisory` and `TimedOut: true`,
+  matching how `Doctor.boundedRun`'s own per-check timeout is already
+  reported, so callers (including `--json` output) can distinguish
+  "confirmed stale" from "the query didn't finish in time." (#4895)
+
+- **Wisp GC now reaps rootless leaf plain-task wisps.** The orphan reaper
+  (`reapOrphanedClosedWisps`) previously skipped any closed wisp-tier row
+  with no `gc.root_bead_id` pointer outright, and the root-rooted closure
+  purge never enumerated it either (it matches none of the root selectors:
+  not a molecule, not `gc.kind=wisp`, not a graph.v2 workflow). A closed
+  plain-task wisp that never had an owning root therefore accumulated
+  uncollected in the wisp tier indefinitely. Such a row now reaps on its
+  own closed status when it is a leaf — no parent and no children — since
+  it then has no root to check for collectibility and the single-bead
+  delete strands nothing. Leaf-ness is tested over both ownership links a
+  bead can carry — the `parent_id` column and a `parent-child` dep row —
+  since some step beads are joined to their parent by the dep row alone.
+  A rootless row that owns a subtree, is itself a subtree member, or is
+  not a plain task, remains out of scope, preserving the original safety
+  boundary. The leaf-ness probes are bounded per sweep (including in the
+  dry-run default, where they are the only backend cost) so the scan never
+  does unbounded reads per tick. Fixes #3780.
+
+- **The legacy workspace-identity deprecation warning now caveats that
+  following it can silently break packs pinned to an older revision.**
+  `city.toml`'s `workspace.name`/`workspace.prefix` deprecation hint told
+  operators to move those fields to `.gc/site.toml`, but any installed pack
+  still pinned to a revision that reads `workspace.name` directly (rather
+  than the newer site-binding-aware resolution) would silently lose its
+  identity/routing once the field was removed — reported after one
+  deployment lost inbound Discord messages for ~2 days with zero alarms
+  before anyone checked delivery receipts. The warning now says so
+  explicitly, naming `gc doctor --fix` (which performs the removal) so
+  operators check pack compatibility before running it. (#3887)
+
+- **The dashboard's bead dependency graph preserves relation type on inverse
+  ("Blocks") edges instead of collapsing every downstream relation to a
+  plain, untyped blocker.** `buildBeadGraph`'s inverse-edge pass previously
+  stored only the raw dependent bead, discarding the `dependencies[].type`
+  (or `needs`) that produced the forward edge; the `BeadDependencies` detail
+  view then rendered every downstream relation — `tracks`, `parent-child`,
+  or a genuine `blocks` need alike — under the same unlabeled "Blocks"
+  heading. A `tracks` relation (e.g. a workflow root tracking a finalizer)
+  could therefore read as a second hard dependency. The inverse edge now
+  carries the same `kind` as its forward counterpart, and the detail view
+  labels it the same way the "Needs" section already labels non-`needs`
+  forward edges. (gascity#4365)
+
+- **A named (on-demand) session no longer replays a trigger stamp for a work
+  bead that has since been parked.** The pool session path already clears
+  `gc.trigger_bead_id` when there is no ready work to route
+  (`bindPoolSessionTriggerBead`), but the named path only ever read and
+  replayed whatever was already stamped, with no equivalent check. A
+  singleton tier re-materializing after its dispatched bead was parked kept
+  re-aiming every new seat at the same stale target — one reported case
+  produced 16 seats on a single parked bead over ~19 hours, each re-deriving
+  the same dead-end analysis. The named path now checks the stamped target's
+  live state before resolving its template and clears the stamp (and its
+  dependent `gc.brain_parent_sid`) when the target is no longer workable,
+  mirroring the pool path's clear semantics. "No longer workable" means
+  closed, absent, or dependency-blocked; the blocked case is read off bd's
+  `is_blocked` ready-work projection, because every production store folds
+  bd's raw `blocked` status into `open`. A target in a store that does not
+  publish that projection is left stamped rather than risk a wrong clear, as
+  are cross-store targets this reconciler tick cannot reach. (gascity#4373)
+
+- **The work-record close gate now resolves `gc.work_branch` against its
+  remote-tracking ref, not the local branch alone.** `gitCommitReachableOnBranch`
+  passed the bare branch name (e.g. `main`) straight to
+  `git merge-base --is-ancestor`; gitrevisions precedence resolves a bare name
+  to the local `refs/heads/<branch>` ahead of any remote-tracking ref. In a
+  refinery/polecat topology, merges land via a push from a *different*
+  worktree — advancing `refs/remotes/origin/<branch>` but never the local ref
+  checked out elsewhere — so a genuinely-landed commit read as unreachable
+  until something happened to fast-forward the local branch, which in that
+  topology may be never. The gate now checks `refs/remotes/origin/<branch>`
+  first when it resolves, and still falls back to the bare branch name — so a
+  commit is reachable if it is on either ref. Purely local repos with no
+  `origin` remote are unaffected, and a commit that has been committed locally
+  but not yet pushed continues to satisfy the gate as it did before.
+  (gascity#5037)
 
 - **The dolt pack's `run_bounded` python3 fallback now sends SIGTERM before
   SIGKILL, matching its documented contract.** The fallback (used when
@@ -21,6 +227,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   permanently unreferenced (`dolt backup` has no prune verb). The fallback
   now uses `Popen` + `terminate()` + a 2s grace `wait()` + `kill()`,
   streaming output instead of buffering it. (gascity#4823)
+
+- **`GET /runs/{id}/steps` returns steps in topological (pipeline) order, not
+  arbitrary fold order.** No level of the read chain — the handler, the
+  member-bead projection, or the run projection fold — applied any sort, so
+  the Runs dashboard's Formula Graph rendered a run's steps in whatever order
+  the projection happened to yield, unreadable as a pipeline. Steps are now
+  topologically sorted on each member's real dependency edges (`Dependencies`
+  and `Needs`), with a deterministic bead-ID tiebreak for independent steps
+  and steps carrying no dependency data. (gascity#4699)
+
+- **`check-core-boundary.sh` no longer false-positives on an in-tree Go
+  build cache.** The `org_` boundary scan walked the whole working tree
+  (`grep -r --exclude-dir=vendor --exclude-dir=testdata`), so any untracked
+  in-tree Go module cache tripped false violations on third-party module
+  sources — the common case is GitLab CI's canonical
+  `$CI_PROJECT_DIR/.cache/go-mod` layout. The scan now runs over
+  `git ls-files` instead, so an untracked cache or build-artifact directory
+  is invisible to it regardless of name, while vendor/testdata (tracked or
+  not) stay excluded as before. (gascity#4479)
+
+- **`gc status` no longer pays a full event-log scan for a cosmetic field.**
+  `storehealth.LastMaintenance` now prefers the `TailProvider` backward-scan
+  fast path over an unbounded forward `List` when the provider supports it,
+  and a new `Filter.MaxScanBytes` bounds that backward scan so a rare or
+  never-emitted event type (the common case: a city that has never run store
+  maintenance) can no longer force a full-file walk just to populate the
+  `Last GC:` status line. Previously this cost two full scans of
+  `events.jsonl` on every `gc status` call, dominating latency on large event
+  logs and surfacing as a spurious "runtime status probe timed out" warning.
+
+  Operator note: `Last GC:` may now be absent on a busy city even though
+  maintenance has run. The tail scan looks back a bounded 8 MiB, and it reads
+  only the active `events.jsonl` — never the rotated `.gz` archives — so a
+  maintenance event that has aged out of the window, or out of the active file
+  entirely, is reported as absent rather than stale. The field is display-only
+  and nothing gates on it. `gc maintenance status` is the fallback, with one
+  caveat: it reads the supervisor's in-memory run history, so it requires a
+  running supervisor and resets when the supervisor restarts. It is a live
+  view, not an equivalent durable source; for durable history, query the event
+  log for `store.maintenance.*` directly. (gascity#4418)
+
+- **`gc formula cook --attach`'s help text no longer claims a parent-child
+  relationship it never creates.** `--attach=<bead-id>` has only ever added
+  a `blocks` dependency from the attached bead to the sub-DAG root
+  (`ensureFormulaCookAttachDep` / `molecule.Attach` both call
+  `store.DepAdd(..., "blocks")`, never setting `ParentID`), but the long
+  help described it as creating the sub-DAG "as children of the given
+  bead." Since convoy auto-close watches parent-child children, not
+  `blocks` dependents, a user following the old description would wrongly
+  expect an attached sub-DAG's completion to trigger the attached convoy's
+  auto-close — it never does. Help text now describes the actual `blocks`
+  -only relationship and says so explicitly (gastownhall/gascity#2392).
+
+- **`gc stop --help` and `gc stop --json` now state what actually happens to
+  a supervisor-managed city's registration.** `gc stop` has always
+  unregistered a supervisor-managed city as part of stopping it, but neither
+  the CLI help nor the `--json` output said so — a user reading "Stop all
+  agent sessions in the city" reasonably expected `gc start` to find the
+  city again later. Help text now documents the unregister behavior and
+  points at `gc register`/`gc unregister` for the split operations; the
+  `--json` envelope gained an `unregistered` field reporting whether this
+  stop also removed the supervisor registration (gastownhall/gascity#4366).
+
+- **`gc bd` no longer lets bd's own error message steer operators into a
+  Dolt-server conflict.** When the managed Dolt server is unreachable, bd
+  (with `dolt.auto-start: false`, which gc always sets) tells the operator
+  to run `bd dolt start` — but that starts a second, unmanaged Dolt server
+  that fights gc's own managed server for the same data directory. `gc bd`
+  now detects that suggestion in bd's stderr and appends a corrective hint
+  pointing at the actual remedy (`gc start` / `gc dolt restart`) alongside
+  bd's original output, without altering bd's own exit code. The hint fires
+  only for gc-managed Dolt endpoints, whose lifecycle gc owns; externally
+  bound or explicitly configured endpoints keep bd's own output unchanged
+  (gastownhall/gascity#1374).
 
 - **ACP activity is now available across process boundaries.** ACP
   `session/update` timestamps are published through an atomic, coalesced

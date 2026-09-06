@@ -318,7 +318,7 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 	// Expand {{.Rig}}/{{.AgentBase}} once so the long-poll drain reuses the
 	// rig-scoped command instead of passing the literal template to the shell
 	// on every iteration. #793.
-	workQuery := expandAgentCommandTemplate(cityPath, cityName, &agentCfg, cfg.Rigs, "work_query", agentCfg.EffectiveWorkQueryForBeads(cfg.Beads), stderr)
+	workQuery := expandAgentCommandTemplate(cityPath, cityName, &agentCfg, cfg.Rigs, "work_query", agentCfg.EffectiveWorkQueryFor(cityQueryTopology(cityPath, cfg)), stderr)
 	if agentCfg.WorkQuery == "" && isWorkflowServeControlDispatcherAgent(agentCfg) {
 		workQuery = workflowServeControlReadyQueryForBeads(agentCfg, cfg.Beads, config.NamedSessionRuntimeName(cityName, cfg.Workspace, agentCfg.QualifiedName()))
 	}
@@ -477,6 +477,17 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 				workflowTracef("serve process-error bead=%s kind=%s err=%v", beadID, kind, err)
 				if dispatch.IsTransientControllerError(err) {
 					pendingCount++
+					// A quiet retry is a verbatim repeat of the failure this
+					// bead already reported. It still gets retried on every
+					// sweep, but it must not count as pending: pendingAny
+					// resets idleSweeps, and a permanently-stuck bead that
+					// resets the backoff every sweep holds the whole loop at
+					// its 1s floor forever. Two such beads consumed 95% of one
+					// city's control dispatches.
+					if dispatch.IsQuietControllerRetry(err) {
+						workflowTracef("serve transient-error-quiet bead=%s kind=%s err=%v", beadID, kind, err)
+						continue
+					}
 					result.pendingAny = true
 					workflowTracef("serve transient-error-pending bead=%s kind=%s err=%v", beadID, kind, err)
 					continue
@@ -610,9 +621,25 @@ func waitForRelevantWorkflowWake(eventCh <-chan workflowWatchResult, sleepDur ti
 	return waitForRelevantWorkflowWakeWithTrace(eventCh, sleepDur, -1)
 }
 
+// workflowServeSelfActor names this process in the event log, and says whether
+// that name is usable as an identity.
+//
+// The serve loop's own control-bead writes append bead.* events now that a
+// relocated class store emits (class_store_emit.go), and waking on those buys
+// an extra heavy ready re-scan and a controller poke per dispatch burst.
+// eventActor's terminal fallback is "human", which every foreign CLI writer
+// shares, so filtering on it would suppress legitimate wakes: an identity is
+// usable only when it is neither empty nor that fallback. It is a variable so a
+// test can pin both arms.
+var workflowServeSelfActor = func() (string, bool) {
+	actor := eventActor()
+	return actor, actor != "" && actor != "human"
+}
+
 func waitForRelevantWorkflowWakeWithTrace(eventCh <-chan workflowWatchResult, sleepDur time.Duration, idleSweeps int) (bool, error) {
 	timer := time.NewTimer(sleepDur)
 	defer timer.Stop()
+	selfActor, selfUsable := workflowServeSelfActor()
 
 	for {
 		select {
@@ -621,6 +648,16 @@ func waitForRelevantWorkflowWakeWithTrace(eventCh <-chan workflowWatchResult, sl
 				return false, res.err
 			}
 			if workflowEventRelevant(res.evt) {
+				if selfUsable && res.evt.Actor == selfActor {
+					// Our own emission. drainWorkflowServeWork already loops
+					// until no control bead is processed, so nothing
+					// discoverable from this loop's own writes can be missed by
+					// ignoring them — while a foreign bead.* event (the worker
+					// close this emission exists to make visible) still wakes
+					// the loop immediately.
+					workflowTracef("serve ignore-self-event type=%s subject=%s", res.evt.Type, res.evt.Subject)
+					continue
+				}
 				if idleSweeps >= 0 {
 					workflowTracef("serve wake-event type=%s subject=%s idle_sweeps=%d sleep=%s", res.evt.Type, res.evt.Subject, idleSweeps, sleepDur)
 				} else {
@@ -726,18 +763,17 @@ func workflowServeControlReadyQuery(agentCfg config.Agent, controlSessionNames .
 	return workflowServeControlReadyQueryForBeads(agentCfg, config.BeadsConfig{}, controlSessionNames...)
 }
 
-// controlReadyExcludeHoldLabelsShellArgs renders a repeated --exclude-label
-// flag for every beadmeta.DispatchHoldLabels value, mirroring internal/config's
-// excludeHoldLabelsShellArgs for routed_ready()'s route-scoped, unassigned
-// bd-ready calls (ga-x9kptu / ga-5736js) -- a bead intentionally parked on a
-// dispatch hold must never surface here. assignee_ready() (Tier 1/2) must
-// stay hold-transparent by design and must never call this.
-func controlReadyExcludeHoldLabelsShellArgs() string {
-	var args string
-	for _, label := range beadmeta.DispatchHoldLabels {
-		args += ` --exclude-label "` + label + `"`
-	}
-	return args
+// controlReadyRoutedDemandArgs renders the flag set routed_ready()'s
+// route-scoped, unassigned bd-ready calls carry: unassigned, no epics, and no
+// bead parked on a dispatch hold (ga-x9kptu / ga-5736js).
+//
+// It renders from config.PoolDemandServeRules — the same value the worker's
+// generated Tier-3 query and the controller's demand predicate are built from —
+// so this probe cannot come to serve a different set than the one the pool
+// counts and the workers claim. assignee_ready() (Tier 1/2) must stay
+// hold-transparent by design and must never call this.
+func controlReadyRoutedDemandArgs() string {
+	return config.PoolDemandServeRulesForQuery().ShellArgs()
 }
 
 func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg config.BeadsConfig, controlSessionNames ...string) string {
@@ -779,8 +815,8 @@ func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg conf
 		`assignee_ready() { cand="$1"; [ -z "$cand" ] && return 0; if grep -Fxq "$cand" "$seen"; then return 0; fi; printf "%s\n" "$cand" >> "$seen"; ` +
 		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --assignee="$cand" --exclude-type=epic --json --limit=` + limit + `; }; ` +
 		`routed_ready() { route="$1"; [ -z "$route" ] && return 0; ` +
-		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$route" --unassigned --exclude-type=epic` + controlReadyExcludeHoldLabelsShellArgs() + ` --json --sort oldest --limit=` + limit + `; ` +
-		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$route" --unassigned --exclude-type=epic` + controlReadyExcludeHoldLabelsShellArgs() + ` --json --sort oldest --limit=` + limit + `; ` +
+		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$route"` + controlReadyRoutedDemandArgs() + ` --json --sort oldest --limit=` + limit + `; ` +
+		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$route"` + controlReadyRoutedDemandArgs() + ` --json --sort oldest --limit=` + limit + `; ` +
 		`}; ` +
 		`for id in "$GC_CONTROL_SESSION_NAME" "$GC_SESSION_NAME" "$GC_ALIAS" "$GC_CONTROL_TARGET" "$GC_SESSION_ID"; do ` +
 		`[ -z "$id" ] && continue; ` +

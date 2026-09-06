@@ -12,13 +12,22 @@ BINARY     := gc
 BUILD_DIR  := bin
 INSTALL_DIR := $(BIN_DIR)
 
-# Version metadata injected via ldflags.
+# Version metadata injected via ldflags. These run git in the build directory,
+# so they resolve a worktree's `.git` gitdir pointer and describe the checkout
+# actually being compiled. The Go toolchain's own buildvcs stamping does not:
+# it identifies a repository by a `.git` *directory*, so from inside a worktree
+# it keeps walking up and stamps whichever repository encloses it. That makes
+# the toolchain stamp actively wrong for a worktree nested in another checkout
+# — a polecat worktree under the city directory picks up the city's commit and
+# the city's dirtiness (ga-u7fb) — so `build` below passes -buildvcs=false and
+# these variables are the single source of truth.
 VERSION    := $(shell tag=$$(git describe --tags --exact-match 2>/dev/null || true); if [ -n "$$tag" ]; then printf '%s' "$$tag" | sed 's/^v//'; else echo "dev"; fi)
 COMMIT     := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-BUILD_TIME := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
+DIRTY      := $(shell test -n "$$(git status --porcelain 2>/dev/null)" && echo "-dirty" || true)
+BUILD_TIME := $(shell git show -s --format=%cI HEAD 2>/dev/null || echo unknown)
 
 LDFLAGS := -X main.version=$(VERSION) \
-           -X main.commit=$(COMMIT) \
+           -X main.commit=$(COMMIT)$(DIRTY) \
            -X main.date=$(BUILD_TIME)
 
 unique_words = $(if $1,$(firstword $1) $(call unique_words,$(filter-out $(firstword $1),$1)))
@@ -94,12 +103,12 @@ endif
 endif
 endif
 
-.PHONY: build check check-all check-bd check-docker check-docs check-dolt check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-version-tag lint lint-full lint-new lint-changed lint-affected fmt-check fmt-check-changed fmt vet test test-ci-policy test-mac test-fast-parallel test-fsys-darwin-compile test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-productmetrics-testhook test-worker-core test-worker-core-phase2 test-worker-core-phase2-all test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-bd-cli-contract test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover check-self-contained install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke dashboard-e2e-go dashboard-e2e-play dashboard-e2e
+.PHONY: build check check-all check-bd check-docker check-docs check-dolt check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-split-topology-rows check-version-tag lint lint-full lint-new lint-changed lint-affected fmt-check fmt-check-changed fmt vet test test-ci-policy test-mac test-fast-parallel test-fsys-darwin-compile test-herdr-live test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-productmetrics-testhook test-worker-core test-worker-core-phase2 test-worker-core-phase2-all test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-bd-cli-contract test-bd-conditional-release-contract test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover check-self-contained install install-tools install-buildx setup clean generate check-schema complexity complexity-diff complexity-check complexity-update docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke dashboard-e2e-go dashboard-e2e-play dashboard-e2e
 .PHONY: check-release-dist-ignore
 
 ## build: compile gc binary with version metadata
 build:
-	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/gc
+	go build -buildvcs=false -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/gc
 ifeq ($(shell uname),Darwin)
 	@scripts/sign-darwin-local.sh $(BUILD_DIR)/$(BINARY)
 endif
@@ -167,8 +176,24 @@ check-schema: generate
 clean:
 	rm -f $(BUILD_DIR)/$(BINARY)
 
+## complexity: print an advisory cyclomatic complexity report for shipped Go
+complexity:
+	@./scripts/ci/complexity.sh report
+
+## complexity-diff: compare head with COMPLEXITY_BASE_REF (origin/main by default)
+complexity-diff:
+	@./scripts/ci/complexity.sh diff
+
+## complexity-check: fail when complexity differs from the checked-in baseline
+complexity-check:
+	@./scripts/ci/complexity.sh check
+
+## complexity-update: intentionally refresh the checked-in complexity snapshot
+complexity-update:
+	@./scripts/ci/complexity.sh update
+
 ## check: run fast quality gates (pre-commit: unit tests only)
-check: fmt-check lint vet check-release-dist-ignore check-routed-test-rows test
+check: fmt-check lint vet check-release-dist-ignore check-routed-test-rows check-split-topology-rows check-residency-boundary test
 
 ## check-release-dist-ignore: keep GoReleaser output from marking release builds dirty
 check-release-dist-ignore:
@@ -191,6 +216,27 @@ check-release-dist-ignore:
 ## api-404-error, controller-down, escape-hatch).
 check-routed-test-rows:
 	./scripts/check-routed-test-rows.sh
+
+## check-split-topology-rows: keep every split-store conformance invariant on both topologies
+## The split-store bug class is a fix that is correct on one store arrangement and
+## wrong on the other, so an invariant that runs on only one row is worse than no
+## invariant: it reads as coverage. Enforces that every t.Run("I<n>...") in
+## TestSplitTopologyConformance routes through forEachTopology/forEachTopologyWithRig
+## and that the suite never constructs an env directly.
+check-split-topology-rows:
+	./scripts/check-split-topology-rows.sh
+
+## check-residency-boundary: forbid a new store-enumeration site outside internal/storeref
+## The lookup contract ("which stores answer this question, in what order, with what
+## failure semantics") lives in internal/storeref. Every list assembled elsewhere
+## re-derives the identity gate, the leg order, the dedupe rule and the fail-loud
+## policy, and each restatement is a chance to get one clause wrong (the ~90-site
+## census behind ga-axin6, ga-whzrt, ga-j4ob9). Shrink-only ratchet against
+## scripts/residency-boundary-baseline.txt; the AST half runs as
+## TestResidencyResolverBoundary in ./scripts.
+check-residency-boundary:
+	./scripts/check-residency-boundary.sh --self-test
+	./scripts/check-residency-boundary.sh
 
 ## check-gomod-replace: block unreleased replace directives (pseudo-version, local path, git ref)
 ## Tripwire for the 2026-06-11 incident where PR #3489 shipped a pseudo-version replace
@@ -259,7 +305,7 @@ LINT_BASE ?= origin/main
 LINT_CHANGED_REF ?= HEAD
 LINT_CHANGED_SCOPE ?= worktree
 LINT_FLAGS ?=
-LINT_READONLY_GOFLAGS = $$(go env GOFLAGS | sed -E 's/(^|[[:space:]])-mod=[^[:space:]]+//g') -mod=readonly
+QUALITY_GATE_GOFLAGS = $$(go env GOFLAGS | sed -E 's/(^|[[:space:]])-mod=[^[:space:]]+//g') -mod=readonly
 CI_STATIC_SELECT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/ci-static-select
 CI_STATIC_GO ?= go
 
@@ -268,15 +314,15 @@ lint: lint-full
 
 ## lint-full: run golangci-lint across all packages
 lint-full: $(GOLANGCI_LINT)
-	GOFLAGS="$(LINT_READONLY_GOFLAGS)" $(GOLANGCI_LINT) run $(LINT_FLAGS) ./...
+	GOFLAGS="$(QUALITY_GATE_GOFLAGS)" $(GOLANGCI_LINT) run $(LINT_FLAGS) ./...
 
 ## lint-new: run golangci-lint for issues introduced since LINT_BASE
 lint-new: $(GOLANGCI_LINT)
-	GOFLAGS="$(LINT_READONLY_GOFLAGS)" $(GOLANGCI_LINT) run $(LINT_FLAGS) --new-from-merge-base=$(LINT_BASE) --whole-files ./...
+	GOFLAGS="$(QUALITY_GATE_GOFLAGS)" $(GOLANGCI_LINT) run $(LINT_FLAGS) --new-from-merge-base=$(LINT_BASE) --whole-files ./...
 
 ## lint-changed: run golangci-lint only for packages touched by changed Go files
 lint-changed: $(GOLANGCI_LINT)
-	@export GOFLAGS="$(LINT_READONLY_GOFLAGS)"; \
+	@export GOFLAGS="$(QUALITY_GATE_GOFLAGS)"; \
 	case "$(LINT_CHANGED_SCOPE)" in \
 		staged) \
 			files="$$(git diff --cached --name-only --diff-filter=ACMRT -- '*.go')"; \
@@ -318,15 +364,15 @@ lint-changed: $(GOLANGCI_LINT)
 
 ## lint-affected: lint packages affected by changed Go build inputs or embedded files
 lint-affected: $(GOLANGCI_LINT)
-	@GOFLAGS="$(LINT_READONLY_GOFLAGS)" "$(CI_STATIC_SELECT)" lint-affected "$(GOLANGCI_LINT)" "$(CI_STATIC_GO)" $(LINT_FLAGS)
+	@GOFLAGS="$(QUALITY_GATE_GOFLAGS)" "$(CI_STATIC_SELECT)" lint-affected "$(GOLANGCI_LINT)" "$(CI_STATIC_GO)" $(LINT_FLAGS)
 
 ## fmt-check: fail if formatting would change files
 fmt-check: $(GOLANGCI_LINT)
-	$(GOLANGCI_LINT) fmt --diff ./...
+	GOFLAGS="$(QUALITY_GATE_GOFLAGS)" $(GOLANGCI_LINT) fmt --diff ./...
 
 ## fmt-check-changed: fail if formatting would change a regular changed Go file
 fmt-check-changed: $(GOLANGCI_LINT)
-	@"$(CI_STATIC_SELECT)" fmt-check-changed "$(GOLANGCI_LINT)"
+	@GOFLAGS="$(QUALITY_GATE_GOFLAGS)" "$(CI_STATIC_SELECT)" fmt-check-changed "$(GOLANGCI_LINT)"
 
 ## fmt: auto-fix formatting
 fmt: $(GOLANGCI_LINT)
@@ -334,7 +380,7 @@ fmt: $(GOLANGCI_LINT)
 
 ## vet: run go vet
 vet:
-	go vet ./...
+	GOFLAGS="$(QUALITY_GATE_GOFLAGS)" go vet ./...
 
 ## TEST_ENV: env -i wrapper for `go test` invocations. Strips host env so
 ## agent-session vars (GC_CITY, GC_HOME, GC_SESSION_ID, ...) cannot leak into
@@ -393,6 +439,13 @@ TEST_ENV = env -i \
 	CLAUDE_CODE_EFFORT_LEVEL="$${CLAUDE_CODE_EFFORT_LEVEL-}" \
 	CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="$${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC-}" \
 	OLLAMA_API_KEY="$${OLLAMA_API_KEY-}" \
+	XIAOMI_API_KEY="$${XIAOMI_API_KEY-}" \
+	ZCODE_API_KEY="$${ZCODE_API_KEY-}" \
+	ZCODE_CJS="$${ZCODE_CJS-}" \
+	ZCODE_MODEL="$${ZCODE_MODEL-}" \
+	ZCODE_BASE_URL="$${ZCODE_BASE_URL-}" \
+	ZCODE_NODE_BIN="$${ZCODE_NODE_BIN-}" \
+	ZCODE_STORAGE_DIR="$${ZCODE_STORAGE_DIR-}" \
 	CGO_CPPFLAGS="$${CGO_CPPFLAGS-}" \
 	CGO_LDFLAGS="$${CGO_LDFLAGS-}" \
 	$(EXTRA_TEST_ENV)
@@ -402,6 +455,7 @@ test-ci-policy:
 	$(TEST_ENV) PYTHONDONTWRITEBYTECODE=1 python3 -S -m unittest discover -s .github/workflows/scripts -p 'test_runner_policy.py'
 	$(TEST_ENV) PYTHONDONTWRITEBYTECODE=1 python3 -S -m unittest discover -s .github/workflows/scripts -p 'test_ci_suite_coverage.py'
 	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 ./scripts/cipolicy
+	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 ./scripts/prwatchdog/...
 	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 -run '^(TestPreflightStaticScopesOrdinaryPRsWithoutWeakeningProtectedRuns|TestFullStaticLintExplicitlyOwnsConfiguredGolangCIGovet|TestChangedStaticTargetsScopeLintAndFormattingToTheDiff|TestCIStaticScopeClassifierFailsClosedOutsideValidatedPullRequestMerge)$$' ./scripts
 
 ## test: run fast unit tests (skip integration-tagged and GC_FAST_UNIT-gated process tests)
@@ -413,7 +467,15 @@ test-ci-policy:
 ## cache input hashes over local working files.
 ## Wrapped in $(TEST_ENV) — see comment above for why.
 test: test-fsys-darwin-compile
-	$(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout 15m ./...
+	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout 15m ./...
+
+## test-herdr-live: run the internal/runtime/herdr live journeys against a real
+## herdr server. These drive panes, force agent-status reports and bounce the
+## server, so they are opt-in rather than part of the fast unit sweep (see
+## internal/runtime/herdr/livegate_test.go). Skips cleanly when herdr is absent.
+## Wrapped in $(TEST_ENV), which is `env -i`, so the opt-in must be set inside it.
+test-herdr-live:
+	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_HERDR_LIVE_TESTS=1 scripts/go-test-observable test -- -count=1 -timeout 10m ./internal/runtime/herdr/
 
 # MAC_UNIT_PKGS excludes cmd/gc from the Mac unit sweep; cmd/gc runs
 # sharded via the mac-cmd-gc-process CI matrix job instead.
@@ -425,16 +487,24 @@ test-mac: test-fsys-darwin-compile
 
 LOCAL_TEST_JOBS ?= $(shell ./scripts/test-local-job-count)
 
+# Deliberately empty: scripts/test-local-parallel owns the default per-package
+# go test budget (ga-9au). Duplicating the number here is how the unit sweep and
+# the cmd/gc shards drifted onto separate timeouts before. The assignment exists
+# only so an operator override survives TEST_ENV's env -i, the way LOCAL_TEST_JOBS
+# does; the sibling *-parallel targets below run without env -i and inherit an
+# override from the environment directly.
+GO_TEST_TIMEOUT ?=
+
 ## test-fast-parallel: run the default fast suite with cmd/gc sharded locally
 test-fast-parallel:
-	$(TEST_ENV) GC_PUSH_GATE_NO_CAP="$${GC_PUSH_GATE_NO_CAP-}" PUSH_GATE_MAX_CONCURRENT="$${PUSH_GATE_MAX_CONCURRENT-}" PUSH_GATE_MAX_WAIT_SECONDS="$${PUSH_GATE_MAX_WAIT_SECONDS-}" PUSH_GATE_POLL_SECONDS="$${PUSH_GATE_POLL_SECONDS-}" LOCAL_TEST_JOBS=$(LOCAL_TEST_JOBS) CMD_GC_PROCESS_TOTAL=$(CMD_GC_PROCESS_TOTAL) ./scripts/test-local-parallel fast
+	$(TEST_ENV) GC_PUSH_GATE_NO_CAP="$${GC_PUSH_GATE_NO_CAP-}" PUSH_GATE_MAX_CONCURRENT="$${PUSH_GATE_MAX_CONCURRENT-}" PUSH_GATE_MAX_WAIT_SECONDS="$${PUSH_GATE_MAX_WAIT_SECONDS-}" PUSH_GATE_POLL_SECONDS="$${PUSH_GATE_POLL_SECONDS-}" LOCAL_TEST_JOBS=$(LOCAL_TEST_JOBS) CMD_GC_PROCESS_TOTAL=$(CMD_GC_PROCESS_TOTAL) GO_TEST_TIMEOUT=$(GO_TEST_TIMEOUT) ./scripts/test-local-parallel fast
 
 ## test-fsys-darwin-compile: cross-compile internal/fsys for macOS so
 ## unix.Stat_t field-type regressions fail in the default fast test path.
 test-fsys-darwin-compile:
 	@tmp=$$(mktemp -d); \
 	trap 'rm -rf "$$tmp"' EXIT; \
-	$(TEST_ENV) GOOS=darwin GOARCH=arm64 go test -c -o "$$tmp/fsys.test" ./internal/fsys
+	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GOOS=darwin GOARCH=arm64 go test -c -o "$$tmp/fsys.test" ./internal/fsys
 
 ## test-pack-registry-live: run the opt-in gascity-packs registry canary
 test-pack-registry-live:
@@ -507,8 +577,16 @@ setup-worker-inference:
 	python3 scripts/worker_inference_setup.py install --profile "$(WORKER_INFERENCE_PROFILE)"
 
 ## test-worker-inference: run the live worker inference conformance package
+##
+## GC_HOME is passed through (and declared to internal/testenv, which scrubs it
+## as a leak vector) because this suite edits city.toml IN-PROCESS, and
+## config.ImplicitGCHome() returns "" inside a *.test binary unless GC_HOME is
+## explicitly set. Without it every managed-city leg dies resolving the city's
+## pack imports against the user-global repo cache. It is a cache path, not a
+## credential; the isolation this suite relies on flows through the per-run
+## GC_HOME it hands to the gc subprocesses it spawns.
 test-worker-inference:
-	$(TEST_ENV) PROFILE="$(WORKER_INFERENCE_PROFILE)" GC_WORKER_REPORT_DIR="$(GC_WORKER_REPORT_DIR)" go test -count=1 -tags acceptance_c -timeout 45m -v ./test/acceptance/worker_inference
+	$(TEST_ENV) GC_ACCEPTANCE_BD_BIN="$${GC_ACCEPTANCE_BD_BIN-}" GC_WORKER_INFERENCE_CURSOR_API_KEY="$${GC_WORKER_INFERENCE_CURSOR_API_KEY-}" GC_WORKER_INFERENCE_CURSOR_API_KEY_FILE="$${GC_WORKER_INFERENCE_CURSOR_API_KEY_FILE-}" CURSOR_API_KEY="$${CURSOR_API_KEY-}" PROFILE="$(WORKER_INFERENCE_PROFILE)" GC_WORKER_REPORT_DIR="$(GC_WORKER_REPORT_DIR)" GC_HOME="$${GC_HOME:-$$HOME/.gc}" GC_TESTENV_PASSTHROUGH=GC_HOME go test -count=1 -tags acceptance_c -timeout 45m -v ./test/acceptance/worker_inference
 
 ## test-worker-inference-phase3: alias for the live worker inference conformance package
 test-worker-inference-phase3: test-worker-inference
@@ -528,6 +606,43 @@ test-bd-cli-contract:
 	@command -v bd >/dev/null 2>&1 || (echo "Error: bd not found; cannot run external CLI contract" >&2; exit 1)
 	$(TEST_ENV) go test -tags acceptance_bd_contract -timeout $(BD_CLI_CONTRACT_TIMEOUT) -count=1 \
 		-run '^(TestBdBasicCRUD|TestBdDependencies|TestBdDestructive|TestBdWorkflow)$$' ./test/acceptance
+
+## test-bd-conditional-release-contract: run the ReleaseIfCurrent CAS contract
+## against the bd on PATH. Split from test-bd-cli-contract because it is the one
+## bd contract the installable default cannot run: deps.env BD_VERSION predates
+## `--if-assignee`/`--if-status`, so it belongs on the source-built
+## BD_CURRENT_REF cell. GC_REQUIRE_BD_CONDITIONAL_RELEASE=1 turns the row's
+## capability skip into a failure, so the cell cannot pass while proving nothing.
+##
+## The existence preflight closes the other way this cell can pass having proven
+## nothing: a `-run` selector that matches no test is not an error to `go test`
+## — it prints "[no tests to run]" and exits 0 — so renaming the row, moving it
+## to another package, or dropping its build tag would leave a permanently green
+## cell guarding nothing. `go test -list` resolves the SAME name, package and
+## tags the run below uses, from the same variables, and must print the name
+## back. Deriving both from one variable is why this guard cannot rot into a
+## false pass: there is no second copy of the selector to drift, and any change
+## to `-list` output that broke the match would fail the cell loudly rather than
+## silently stop catching (which is the failure mode of grepping `go test`'s
+## human-facing "no tests to run" warning instead).
+BD_CONDITIONAL_RELEASE_TIMEOUT ?= 10m
+BD_CONDITIONAL_RELEASE_TEST = TestBdStoreReleaseIfCurrentAgainstRealBd
+BD_CONDITIONAL_RELEASE_PKG = ./internal/beads
+test-bd-conditional-release-contract:
+	@command -v bd >/dev/null 2>&1 || (echo "Error: bd not found; cannot run the conditional-release contract" >&2; exit 1)
+	@listed=$$($(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -tags integration \
+		-list '^$(BD_CONDITIONAL_RELEASE_TEST)$$' $(BD_CONDITIONAL_RELEASE_PKG) 2>&1) || { \
+		printf '%s\n' "$$listed" >&2; \
+		echo "Error: could not list $(BD_CONDITIONAL_RELEASE_TEST) in $(BD_CONDITIONAL_RELEASE_PKG)" >&2; \
+		exit 1; }; \
+	printf '%s\n' "$$listed" | grep -qx '$(BD_CONDITIONAL_RELEASE_TEST)' || { \
+		echo "Error: $(BD_CONDITIONAL_RELEASE_TEST) does not exist in $(BD_CONDITIONAL_RELEASE_PKG) under -tags integration." >&2; \
+		echo "The -run selector below would match nothing, and this cell would pass having run no test." >&2; \
+		echo "Point BD_CONDITIONAL_RELEASE_TEST/_PKG at the row's current name and home." >&2; \
+		exit 1; }
+	$(TEST_ENV) GC_REQUIRE_BD_CONDITIONAL_RELEASE=1 GOFLAGS= GOENV=off GOWORK=off \
+		go test -tags integration -timeout $(BD_CONDITIONAL_RELEASE_TIMEOUT) -count=1 \
+		-run '^$(BD_CONDITIONAL_RELEASE_TEST)$$' $(BD_CONDITIONAL_RELEASE_PKG)
 
 ## test-acceptance-b: run Tier B acceptance tests (lifecycle, ~5 min, nightly)
 ACCEPTANCE_B_TIMEOUT ?= 10m

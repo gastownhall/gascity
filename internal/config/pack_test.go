@@ -451,6 +451,83 @@ scope = "rig"
 	}
 }
 
+// TestLoadWithIncludes_WildcardPatchKeepsCityBeforeRigPrecedence is the
+// regression for the wildcard partitioning bug: a city-level rig="*" patch
+// whose Name also matches an implicit provider-derived agent used to be fully
+// deferred until AFTER rig overrides ran, so it clobbered the rig override and
+// reversed city-before-rig precedence.
+//
+// The agent is named "claude" — the same name as the provider — so it is BOTH
+// an already-present rig-pack agent (proj/gs.claude) AND an implicit-agent name.
+// The wildcard patch must apply in the normal city patch phase (so the rig
+// override, applied later, still wins on the field they share) while ALSO
+// deferring to the injected implicit-agent tail. Assertions: the wildcard ran
+// (it set Nudge, which the rig override does not touch) AND the rig override
+// won (Suspended=false, set after the wildcard's Suspended=true).
+func TestLoadWithIncludes_WildcardPatchKeepsCityBeforeRigPrecedence(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "city.toml", `
+[workspace]
+name = "test"
+
+[providers.claude]
+base = "builtin:claude"
+
+[[rigs]]
+name = "proj"
+path = "/tmp/proj"
+
+[rigs.imports.gs]
+source = "./packs/gastown"
+
+[[rigs.patches]]
+agent = "claude"
+suspended = false
+
+[[patches.agent]]
+name = "claude"
+rig = "*"
+suspended = true
+nudge = "city wildcard applied"
+`)
+	writeFile(t, dir, "packs/gastown/pack.toml", `
+[pack]
+name = "gastown"
+schema = 2
+
+[[agent]]
+name = "claude"
+provider = "claude"
+scope = "rig"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	var claude *Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].QualifiedName() == "proj/gs.claude" {
+			claude = &cfg.Agents[i]
+			break
+		}
+	}
+	if claude == nil {
+		names := make([]string, 0, len(cfg.Agents))
+		for _, a := range cfg.Agents {
+			names = append(names, a.QualifiedName())
+		}
+		t.Fatalf("agent proj/gs.claude not found in merged config; agents: %v", names)
+	}
+	if claude.Nudge != "city wildcard applied" {
+		t.Errorf("claude.Nudge = %q, want city wildcard patch to apply in the normal city phase", claude.Nudge)
+	}
+	if claude.Suspended {
+		t.Errorf("claude.Suspended = true, want false (rig override must win after the city wildcard)")
+	}
+}
+
 func TestLoadWithIncludes_ProvenanceUsesDeferredRigPatchFinalIdentity(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "city.toml", `
@@ -982,6 +1059,42 @@ func TestPackContentHashRecursiveCachesUnchangedTree(t *testing.T) {
 	}
 	if cfs.ReadCount(bigPath) == beforeChange {
 		t.Fatal("changed tree should be re-read, not served from cache")
+	}
+}
+
+// TestPackContentHashRecursiveDetectsMtimePreservingEdit reproduces ga-b675vk:
+// mtime-preserving deploy tooling (cp -p, rsync --checksum --times) can edit
+// file content without changing size or mtime, which previously let a stale
+// hash survive in the cache. ctime cannot be rolled back by any standard
+// syscall, so it must break the tie.
+func TestPackContentHashRecursiveDetectsMtimePreservingEdit(t *testing.T) {
+	ResetPackContentHashCache()
+	t.Cleanup(ResetPackContentHashCache)
+
+	dir := "/pack"
+	path := filepath.Join(dir, "pack.toml")
+	fs := fsys.NewFake()
+	fs.Dirs[dir] = true
+
+	if err := fs.WriteFile(path, []byte("name = \"a\""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h1 := PackContentHashRecursive(fs, dir)
+	origModTime := fs.ModTimes[path]
+
+	// Same size (10 bytes), different content, then mtime forced back to its
+	// original value — simulating tooling that preserves mtime across a
+	// content-changing write. ctime is deliberately left alone: Fake advances
+	// it on every WriteFile and never lets a test roll it back, mirroring the
+	// real kernel where no userspace syscall sets ctime.
+	if err := fs.WriteFile(path, []byte("name = \"b\""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fs.ModTimes[path] = origModTime
+
+	h2 := PackContentHashRecursive(fs, dir)
+	if h2 == h1 {
+		t.Fatal("hash should change when content changes even though size and mtime match the cached fingerprint exactly (ctime must break the tie)")
 	}
 }
 
@@ -3383,7 +3496,7 @@ source = "../shared"
 transitive = false
 `)
 
-	names := resolvedPackNames([]string{"packs/wrapper"}, map[string]Import{
+	names := mustResolvedPackNames(t, []string{"packs/wrapper"}, map[string]Import{
 		"shared": {Source: "packs/shared"},
 	}, fsys.OSFS{}, dir)
 
@@ -3410,7 +3523,7 @@ source = "../maintenance"
 `)
 
 	transitiveFalse := false
-	names := resolvedPackNames(nil, map[string]Import{
+	names := mustResolvedPackNames(t, nil, map[string]Import{
 		"shared": {Source: "packs/shared", Transitive: &transitiveFalse},
 	}, fsys.OSFS{}, dir)
 
@@ -3448,7 +3561,7 @@ source = "../middle"
 transitive = false
 `)
 
-	names := resolvedPackNames([]string{"packs/root"}, nil, fsys.OSFS{}, dir)
+	names := mustResolvedPackNames(t, []string{"packs/root"}, nil, fsys.OSFS{}, dir)
 	if !names["middle"] {
 		t.Fatalf("middle pack was not recorded: names=%v", names)
 	}
@@ -3495,7 +3608,7 @@ source = "../middle"
 		{"packs/shallow", "packs/deep"},
 		{"packs/deep", "packs/shallow"},
 	} {
-		names := resolvedPackNames(includes, nil, fsys.OSFS{}, dir)
+		names := mustResolvedPackNames(t, includes, nil, fsys.OSFS{}, dir)
 		if !names["maintenance"] {
 			t.Fatalf("includes %v did not resolve transitive maintenance after shallow visit: names=%v", includes, names)
 		}
@@ -3514,7 +3627,7 @@ schema = 2
 
 		transitiveFalse := false
 		countingFS := newReadCountingFS()
-		names := resolvedPackNames(nil, map[string]Import{
+		names := mustResolvedPackNames(t, nil, map[string]Import{
 			"shared_a": {Source: "packs/shared", Transitive: &transitiveFalse},
 			"shared_b": {Source: "packs/shared", Transitive: &transitiveFalse},
 		}, countingFS, dir)
@@ -3564,7 +3677,7 @@ source = "../right"
 `)
 
 		countingFS := newReadCountingFS()
-		names := resolvedPackNames([]string{"packs/root"}, nil, countingFS, dir)
+		names := mustResolvedPackNames(t, []string{"packs/root"}, nil, countingFS, dir)
 
 		for _, name := range []string{"root", "left", "right", "shared"} {
 			if !names[name] {
@@ -5375,4 +5488,19 @@ source = "../roles"
 	if !found {
 		t.Fatalf("warnings = %#v, want one containing %q", loaded.Warnings, wantSubstring)
 	}
+}
+
+// mustResolvedPackNames is resolvedPackNames for the blocking callers above.
+// They wait out contention, so the only error class they can hit is a new one
+// the walk grows later. Asserting that here keeps such an error from being
+// silently discarded and turning those assertions into claims about a
+// half-walked graph. The non-blocking mode has its own tests, which care about
+// the error rather than the names.
+func mustResolvedPackNames(t *testing.T, includes []string, imports map[string]Import, sysFS fsys.FS, cityRoot string) map[string]bool {
+	t.Helper()
+	names, err := resolvedPackNames(includes, imports, sysFS, cityRoot, false)
+	if err != nil {
+		t.Fatalf("resolvedPackNames: %v", err)
+	}
+	return names
 }

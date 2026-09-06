@@ -57,19 +57,38 @@ func setPoolTemplateRuntimeIdentityInfo(tp *TemplateParams, desiredAlias string,
 		return
 	}
 	if strings.TrimSpace(info.Alias) != strings.TrimSpace(desiredAlias) && poolRuntimeAliasIsDeferredInfo(info) {
-		tp.Alias = ""
-		if tp.Env == nil {
-			tp.Env = make(map[string]string)
-		}
-		tp.Env["GC_ALIAS"] = ""
-		if tp.SessionName != "" {
-			tp.Env["GC_AGENT"] = tp.SessionName
-		}
-		tp.EnvIdentityStamped = false
+		clearPoolTemplateRuntimeIdentity(tp)
 		return
 	}
 	tp.Alias = desiredAlias
 	setTemplateEnvIdentity(tp, desiredAlias)
+}
+
+// clearPoolTemplateRuntimeIdentity leaves a pool spawn with no public identity:
+// no alias, an explicitly BLANK GC_ALIAS, and GC_AGENT on the session name.
+//
+// Blanking GC_ALIAS rather than skipping the stamp is load-bearing.
+// resolveTemplate seeds GC_ALIAS with the agent's bare qualified name for every
+// session (template_resolve.go), so a skipped stamp would leave every member of
+// a pool advertising the SAME identity — worse than per-slot names, because
+// then two live workers claim under one string. The empty value is also what
+// tmux session creation reads as "unset this key" (`env -u`).
+//
+// This was already the deferred-alias behavior for a slot whose name was
+// unavailable; unaliased pools make it the ordinary case.
+func clearPoolTemplateRuntimeIdentity(tp *TemplateParams) {
+	if tp == nil {
+		return
+	}
+	tp.Alias = ""
+	if tp.Env == nil {
+		tp.Env = make(map[string]string)
+	}
+	tp.Env["GC_ALIAS"] = ""
+	if tp.SessionName != "" {
+		tp.Env["GC_AGENT"] = tp.SessionName
+	}
+	tp.EnvIdentityStamped = false
 }
 
 // claimPoolSlotWithConfigInfo is the session.Info sibling of
@@ -222,6 +241,42 @@ func reusablePoolSessionInfos(bp *agentBuildParams, cfgAgent *config.Agent, temp
 	return candidates
 }
 
+// reusablePoolSessionInfosForRequest narrows ordinary reuse for anonymous
+// generic demand. A currently held/quarantined session cannot satisfy that
+// demand because the awake evaluator will suppress it. Dependency-only slots
+// remain reusable: real demand promotes them and session sync clears the marker
+// before awake evaluation. Concrete requests and pending creates retain their
+// existing reuse semantics: the former preserve resume identity, while the
+// latter must finish the create already counted as in-flight demand even if a
+// hold lands mid-create.
+func reusablePoolSessionInfosForRequest(
+	bp *agentBuildParams,
+	cfgAgent *config.Agent,
+	template string,
+	request SessionRequest,
+	decisionTime time.Time,
+	used map[string]bool,
+) []session.Info {
+	candidates := reusablePoolSessionInfos(bp, cfgAgent, template, used)
+	if request.SessionBeadID != "" {
+		return candidates
+	}
+	filtered := candidates[:0]
+	for _, info := range candidates {
+		if poolSessionConsumesNewDemandInfo(info) {
+			filtered = append(filtered, info)
+			continue
+		}
+		if strings.TrimSpace(info.WaitHold) != "" ||
+			metadataTimeInFuture(info.HeldUntil, decisionTime) ||
+			metadataTimeInFuture(info.QuarantinedUntil, decisionTime) {
+			continue
+		}
+		filtered = append(filtered, info)
+	}
+	return filtered
+}
+
 // findReusableCanonicalNonExpandingPoolSessionInfo is the session.Info sibling of
 // findReusableCanonicalNonExpandingPoolSessionBead.
 func findReusableCanonicalNonExpandingPoolSessionInfo(
@@ -235,6 +290,32 @@ func findReusableCanonicalNonExpandingPoolSessionInfo(
 	}
 	canonical := cfgAgent.QualifiedName()
 	for _, info := range reusablePoolSessionInfos(bp, cfgAgent, template, used) {
+		if strings.TrimSpace(info.SessionNameMetadata) == "" {
+			continue
+		}
+		if staleNonExpandingPoolSessionBeadInfo(cfgAgent, info) {
+			continue
+		}
+		if infoIdentifiesAsCanonical(info, canonical) {
+			return info, true
+		}
+	}
+	return session.Info{}, false
+}
+
+func findReusableCanonicalNonExpandingPoolSessionInfoForRequest(
+	bp *agentBuildParams,
+	cfgAgent *config.Agent,
+	template string,
+	request SessionRequest,
+	decisionTime time.Time,
+	used map[string]bool,
+) (session.Info, bool) {
+	if bp == nil || bp.sessionBeads == nil || !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
+		return session.Info{}, false
+	}
+	canonical := cfgAgent.QualifiedName()
+	for _, info := range reusablePoolSessionInfosForRequest(bp, cfgAgent, template, request, decisionTime, used) {
 		if strings.TrimSpace(info.SessionNameMetadata) == "" {
 			continue
 		}
@@ -291,18 +372,35 @@ func reusableDependencyPoolSessionInfos(bp *agentBuildParams, template string) [
 	return candidates
 }
 
-// findReusableCanonicalNonExpandingDependencyPoolSessionInfo is the session.Info
-// sibling of findReusableCanonicalNonExpandingDependencyPoolSessionBead.
-func findReusableCanonicalNonExpandingDependencyPoolSessionInfo(
+// reusableDependencyPoolSessionInfosAt excludes dependency rows that cannot
+// run at decisionTime. A held/quarantined dependency-only row still owns its
+// concrete slot, but it cannot satisfy the floor; the holder-aware fresh-slot
+// allocator therefore chooses another in-cap slot for the prerequisite.
+func reusableDependencyPoolSessionInfosAt(bp *agentBuildParams, template string, decisionTime time.Time) []session.Info {
+	candidates := reusableDependencyPoolSessionInfos(bp, template)
+	filtered := candidates[:0]
+	for _, info := range candidates {
+		if strings.TrimSpace(info.WaitHold) != "" ||
+			metadataTimeInFuture(info.HeldUntil, decisionTime) ||
+			metadataTimeInFuture(info.QuarantinedUntil, decisionTime) {
+			continue
+		}
+		filtered = append(filtered, info)
+	}
+	return filtered
+}
+
+func findReusableCanonicalNonExpandingDependencyPoolSessionInfoAt(
 	bp *agentBuildParams,
 	cfgAgent *config.Agent,
 	template string,
+	decisionTime time.Time,
 ) (session.Info, bool) {
 	if bp == nil || bp.sessionBeads == nil || !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
 		return session.Info{}, false
 	}
 	canonical := cfgAgent.QualifiedName()
-	for _, info := range reusableDependencyPoolSessionInfos(bp, template) {
+	for _, info := range reusableDependencyPoolSessionInfosAt(bp, template, decisionTime) {
 		if staleNonExpandingPoolSessionBeadInfo(cfgAgent, info) {
 			continue
 		}
@@ -402,7 +500,7 @@ func normalizeNonExpandingPoolSessionInfo(
 	}
 	if aliasNeedsUpdate {
 		if err := session.WithCitySessionAliasLock(bp.cityPath, canonical, func() error {
-			if err := session.EnsureAliasAvailableWithConfig(bp.beadStore, bp.city, canonical, info.ID); err != nil {
+			if err := session.EnsureAliasAvailableWithConfigForOwner(bp.beadStore, bp.city, canonical, info.ID, canonical); err != nil {
 				return err
 			}
 			return apply()
@@ -444,7 +542,11 @@ func normalizeNonExpandingPoolSessionInfo(
 // recordDeferredNonExpandingPoolAliasConflictInfo is the session.Info sibling of
 // recordDeferredNonExpandingPoolAliasConflict. It records the deferred-alias
 // bookkeeping via the SAME bp.beadStore.Update and folds the batch onto the
-// returned Info (ApplyPatch), the authoritative post-write value.
+// returned Info (ApplyPatch), the authoritative post-write value. Writes are
+// throttled by the shared deferredSingletonAliasRetryDue backoff gate (see
+// session_beads.go) keyed off the same pool_alias_conflict_at field the
+// sync-time path reads, so this call site cannot reset that path's clock
+// without also being subject to it.
 func recordDeferredNonExpandingPoolAliasConflictInfo(
 	bp *agentBuildParams,
 	cfgAgent *config.Agent,
@@ -454,6 +556,16 @@ func recordDeferredNonExpandingPoolAliasConflictInfo(
 	count := 0
 	if existing, err := strconv.Atoi(strings.TrimSpace(info.PoolAliasConflictCount)); err == nil && existing > 0 {
 		count = existing
+	}
+	// Canonical singleton pool identity retries share the same unresolvable-
+	// conflict shape as the sync-time path in session_beads.go (a
+	// max_active_sessions=1 agent with two live sessions never releases the
+	// alias), so it must go through the SAME deferredSingletonAliasRetryDue
+	// gate rather than writing on every buildDesiredState call. Do not
+	// duplicate the backoff predicate here -- that duplication is exactly how
+	// this call site went unguarded the first time.
+	if !deferredSingletonAliasRetryDue(info.PoolAliasConflictAt, count, time.Now().UTC()) {
+		return info, nil
 	}
 	metadata := session.UpdatedAliasMetadataFromInfo(info, "")
 	metadata[poolAliasConflictMetadataKey] = canonical

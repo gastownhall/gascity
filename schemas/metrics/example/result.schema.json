@@ -207,7 +207,16 @@
               "whoami",
               "runtime-heartbeat",
               "pack-registry-requests",
-              "events-reemit-execution"
+              "events-reemit-execution",
+              "storage-migrate",
+              "storage-status",
+              "ready",
+              "storage-recover-stranded",
+              "beads-metadata-cas",
+              "worktree-cleanup",
+              "worktree-ensure",
+              "worktree-verify",
+              "storage-preflight"
             ]
           },
           "event_id": {

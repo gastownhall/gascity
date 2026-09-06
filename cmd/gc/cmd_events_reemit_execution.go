@@ -91,7 +91,7 @@ func runEventsReemitExecution(cmd *cobra.Command, runID string, apply bool, stdo
 		return fmt.Errorf("opening city work store: %w", err)
 	}
 	projection, err := executionevent.ProjectCurrent(
-		beads.GraphStore{Store: resolveGraphStore(store, cfg, cityPath, nil)},
+		beads.GraphStore{Store: resolveGraphStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)},
 		beads.WorkStore{Store: store},
 		strings.TrimSpace(runID),
 	)

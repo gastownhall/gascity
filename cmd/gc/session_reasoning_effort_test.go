@@ -33,6 +33,17 @@ func claudeEffortResolvedProvider() *config.ResolvedProvider {
 	}
 }
 
+func antigravityEffortResolvedProvider() *config.ResolvedProvider {
+	agy := config.BuiltinProviders()["antigravity"]
+	return &config.ResolvedProvider{
+		Name:              "antigravity",
+		BuiltinAncestor:   "antigravity",
+		Command:           agy.Command,
+		OptionsSchema:     agy.OptionsSchema,
+		EffectiveDefaults: config.ComputeEffectiveDefaults(agy.OptionsSchema, agy.OptionDefaults, nil),
+	}
+}
+
 // newOptionSessionWithWork creates a session bead plus an in-progress work bead
 // assigned to that session carrying opt_<key> option metadata.
 func newOptionSessionWithWork(t *testing.T, rp *config.ResolvedProvider, baseCommand string, options map[string]string) (startCandidate, *config.City, beads.Store) {
@@ -103,6 +114,36 @@ func TestBuildPreparedStart_ProviderEffortOptionUsesProviderSchema(t *testing.T)
 	}
 	if strings.Contains(prepared.cfg.Command, "model_reasoning_effort") {
 		t.Fatalf("command %q should not contain codex reasoning flags for claude", prepared.cfg.Command)
+	}
+}
+
+func TestBuildPreparedStart_AntigravityDispatchEffortOptionPresent(t *testing.T) {
+	candidate, cfg, store := newOptionSessionWithWork(t, antigravityEffortResolvedProvider(), "agy", map[string]string{"effort": "high"})
+
+	prepared, _, err := buildPreparedStart(candidate, cfg, store)
+	if err != nil {
+		t.Fatalf("buildPreparedStart: %v", err)
+	}
+	if !strings.Contains(prepared.cfg.Command, "--effort high") {
+		t.Fatalf("command %q should contain agy --effort high", prepared.cfg.Command)
+	}
+	if strings.Contains(prepared.cfg.Command, "model_reasoning_effort") {
+		t.Fatalf("command %q should not contain codex reasoning flags for antigravity", prepared.cfg.Command)
+	}
+}
+
+func TestBuildPreparedStart_AntigravityPermissionModePlan(t *testing.T) {
+	candidate, cfg, store := newOptionSessionWithWork(t, antigravityEffortResolvedProvider(), "agy", map[string]string{"permission_mode": "plan"})
+
+	prepared, _, err := buildPreparedStart(candidate, cfg, store)
+	if err != nil {
+		t.Fatalf("buildPreparedStart: %v", err)
+	}
+	if !strings.Contains(prepared.cfg.Command, "--mode plan") {
+		t.Fatalf("command %q should contain agy --mode plan", prepared.cfg.Command)
+	}
+	if strings.Contains(prepared.cfg.Command, "--dangerously-skip-permissions") {
+		t.Fatalf("command %q should not also carry the unrestricted default", prepared.cfg.Command)
 	}
 }
 

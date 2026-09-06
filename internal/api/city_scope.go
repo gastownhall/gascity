@@ -137,6 +137,21 @@ func errorStatuses(codes ...int) func(o *huma.Operation) {
 	}
 }
 
+// describes sets an operation's description, so a contract a caller cannot
+// infer from the method and path is published in the spec rather than left in
+// the handler's Go doc. Generated clients and the OpenAPI document are all most
+// consumers ever see; a semantic the handler comment alone records is, in
+// practice, undocumented.
+func describes(text string) func(o *huma.Operation) {
+	return func(o *huma.Operation) {
+		if o.Description == "" {
+			o.Description = text
+			return
+		}
+		o.Description += "\n\n" + text
+	}
+}
+
 // listOrder documents a list endpoint's total order and cursor contract in
 // its operation description. Every keyset list declares its order here so
 // consumers never have to reverse-engineer it from behavior (the pre-S4

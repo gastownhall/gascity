@@ -14,8 +14,9 @@ import (
 	"time"
 )
 
-func TestAgentScriptBDClaimUsesSessionActor(t *testing.T) {
-	t.Setenv("GC_SESSION_NAME", "demo/worker-1")
+func TestAgentScriptBDClaimUsesCanonicalActor(t *testing.T) {
+	t.Setenv("GC_ALIAS", "demo/worker")
+	t.Setenv("GC_SESSION_NAME", "demo--worker")
 
 	var calls [][]string
 	exec := agentScriptExecutor{
@@ -37,9 +38,42 @@ func TestAgentScriptBDClaimUsesSessionActor(t *testing.T) {
 	if exitCode != nil {
 		t.Fatalf("exitCode = %v, want nil", *exitCode)
 	}
-	want := []string{"bd", "update", "ga-123", "--claim", "--actor", "demo/worker-1"}
+	want := []string{"bd", "update", "ga-123", "--claim", "--actor", "demo/worker"}
 	if len(calls) != 1 || !slices.Equal(calls[0], want) {
 		t.Fatalf("calls = %#v, want %#v", calls, [][]string{want})
+	}
+}
+
+func TestAgentScriptClaimActorFallsBackToSessionName(t *testing.T) {
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_AGENT", "")
+	t.Setenv("GC_SESSION_NAME", "demo--worker")
+	t.Setenv("BEADS_ACTOR", "")
+
+	if got := agentScriptClaimActor(); got != "demo--worker" {
+		t.Fatalf("agentScriptClaimActor() = %q, want session name fallback", got)
+	}
+}
+
+func TestAgentScriptClaimActorPrefersProjectedActor(t *testing.T) {
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("BEADS_ACTOR", "repair-id")
+	t.Setenv("GC_AGENT", "stale")
+	t.Setenv("GC_SESSION_NAME", "s-repair-id")
+
+	if got := agentScriptClaimActor(); got != "repair-id" {
+		t.Fatalf("agentScriptClaimActor() = %q, want projected actor", got)
+	}
+}
+
+func TestAgentScriptAliasPrefersDurableOwner(t *testing.T) {
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("BEADS_ACTOR", "repair-id")
+	t.Setenv("GC_AGENT", "stale")
+	t.Setenv("GC_SESSION_NAME", "s-repair-id")
+
+	if got := agentScriptAlias(); got != "repair-id" {
+		t.Fatalf("agentScriptAlias() = %q, want durable owner", got)
 	}
 }
 
@@ -862,7 +896,7 @@ func TestAgentScriptRunsShippedLifecycleRefineryScript(t *testing.T) {
 			switch {
 			case strings.Contains(command, "git merge --no-edit"):
 				actionOrder = append(actionOrder, "shell:merge")
-			case strings.Contains(command, "git push origin HEAD:main"):
+			case strings.Contains(command, `git push origin "HEAD:$BASE"`):
 				actionOrder = append(actionOrder, "shell:push")
 			case strings.Contains(command, "git push origin --delete"):
 				actionOrder = append(actionOrder, "shell:cleanup")
@@ -907,8 +941,8 @@ func TestAgentScriptRunsShippedLifecycleRefineryScript(t *testing.T) {
 
 	wantCommands := [][]string{
 		{"gc", "mail", "send", "--to", "demo/lifecycle.polecat", "-s", "MERGING: polecat/ga-123 (ga-123)", "-m", "scripted refinery demo/lifecycle.refinery is merging polecat/ga-123."},
-		{"bd", "update", "ga-123", "--status", "closed", "--notes", "scripted refinery: merged polecat/ga-123 into main", "--set-metadata", "merge_result=merged"},
-		{"gc", "mail", "send", "--to", "demo/lifecycle.polecat", "-s", "MERGED: polecat/ga-123 (ga-123)", "-m", "scripted refinery demo/lifecycle.refinery merged polecat/ga-123 into main."},
+		{"bd", "update", "ga-123", "--status", "closed", "--notes", "scripted refinery: merged polecat/ga-123 into the rig mainline", "--set-metadata", "merge_result=merged"},
+		{"gc", "mail", "send", "--to", "demo/lifecycle.polecat", "-s", "MERGED: polecat/ga-123 (ga-123)", "-m", "scripted refinery demo/lifecycle.refinery merged polecat/ga-123 into the rig mainline."},
 	}
 	if !reflect.DeepEqual(commands, wantCommands) {
 		t.Fatalf("commands = %#v, want %#v", commands, wantCommands)

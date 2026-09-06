@@ -107,13 +107,25 @@ test('bead-report fixture: gc 75% against 200k -> 15% against 1M', () => {
   assert.equal(effectiveContextPct(s), 15);
 });
 
-test('claude-sonnet-4-5 also gets 1M scaling', () => {
-  const s = sess({
+test('claude-sonnet-4-5 stays at gc value: Go treats Sonnet 4.5 as 200k, not 1M', () => {
+  // Regression guard for the attempt-1 drift: a 'claude-sonnet-4-5' key made
+  // dated Sonnet 4.5 IDs substring-match and rescale as 1M, under-reporting
+  // usage x5. Go's modelwindow resolves sonnet-4-5 to the 200k Default
+  // (modelwindow_test.go: claude-sonnet-4-5-20250929 -> Default), so the
+  // dashboard must fail open to gc's reported value instead of rescaling.
+  const bare = sess({
     model: 'claude-sonnet-4-5',
     context_pct: 50,
     context_window: 200000,
   });
-  assert.equal(effectiveContextPct(s), 10);
+  assert.equal(effectiveContextPct(bare), 50);
+
+  const dated = sess({
+    model: 'claude-sonnet-4-5-20250929',
+    context_pct: 50,
+    context_window: 200000,
+  });
+  assert.equal(effectiveContextPct(dated), 50);
 });
 
 test('claude-sonnet-4-6 also gets 1M scaling', () => {
@@ -123,6 +135,114 @@ test('claude-sonnet-4-6 also gets 1M scaling', () => {
     context_window: 200000,
   });
   assert.equal(effectiveContextPct(s), 20);
+});
+
+test('claude-opus-5 gets 1M scaling', () => {
+  const s = sess({
+    model: 'claude-opus-5',
+    context_pct: 50,
+    context_window: 200000,
+  });
+  assert.equal(effectiveContextPct(s), 10);
+});
+
+test('claude-sonnet-5 gets 1M scaling', () => {
+  const s = sess({
+    model: 'claude-sonnet-5',
+    context_pct: 80,
+    context_window: 200000,
+  });
+  assert.equal(effectiveContextPct(s), 16);
+});
+
+test('dated claude-opus-5 variant still gets 1M scaling', () => {
+  // The runtime model ID carries a date suffix; substring matching mirrors
+  // the Go modelwindow resolver so it does not fail open to gc's 200k value.
+  const s = sess({
+    model: 'claude-opus-5-20260724',
+    context_pct: 75,
+    context_window: 200000,
+  });
+  assert.equal(effectiveContextPct(s), 15);
+});
+
+test('dated claude-sonnet-5 variant still gets 1M scaling', () => {
+  const s = sess({
+    model: 'claude-sonnet-5-20260101',
+    context_pct: 100,
+    context_window: 200000,
+  });
+  assert.equal(effectiveContextPct(s), 20);
+});
+
+test('upper-case claude-opus-5 variant still gets 1M scaling', () => {
+  // Matching is case-insensitive, mirroring modelwindow's ToLower.
+  const s = sess({
+    model: 'CLAUDE-OPUS-5',
+    context_pct: 90,
+    context_window: 200000,
+  });
+  assert.equal(effectiveContextPct(s), 18);
+});
+
+test('vendor-prefixed claude-opus-5 still gets 1M scaling', () => {
+  // us.anthropic.<id> is a real runtime form the doc comment claims to cover;
+  // substring matching on the 'opus-5' marker resolves it like the Go resolver.
+  const s = sess({
+    model: 'us.anthropic.claude-opus-5',
+    context_pct: 75,
+    context_window: 200000,
+  });
+  assert.equal(effectiveContextPct(s), 15);
+});
+
+test('claude-fable-5 gets 1M scaling', () => {
+  const s = sess({
+    model: 'claude-fable-5',
+    context_pct: 50,
+    context_window: 200000,
+  });
+  assert.equal(effectiveContextPct(s), 10);
+});
+
+test('claude-mythos-1 gets 1M scaling', () => {
+  const s = sess({
+    model: 'claude-mythos-1',
+    context_pct: 80,
+    context_window: 200000,
+  });
+  assert.equal(effectiveContextPct(s), 16);
+});
+
+test('claude-opus-4-6 gets 1M scaling', () => {
+  const s = sess({
+    model: 'claude-opus-4-6',
+    context_pct: 100,
+    context_window: 200000,
+  });
+  assert.equal(effectiveContextPct(s), 20);
+});
+
+test('explicit [1m] suffix forces 1M scaling even for a 200k family', () => {
+  // modelwindow treats the "[1m]" launch suffix as a 1M marker for any family,
+  // including Haiku whose bare form is 200k.
+  const s = sess({
+    model: 'claude-haiku-4-5-20251001[1m]',
+    context_pct: 90,
+    context_window: 200000,
+  });
+  assert.equal(effectiveContextPct(s), 18);
+});
+
+test('claude-opus-4-5 stays at gc value: not a 1M marker in Go', () => {
+  // opus-5 must not swallow opus-4-5 by substring; Go resolves opus-4-5 to the
+  // 200k Default, so the dashboard fails open rather than rescaling.
+  const s = sess({
+    model: 'claude-opus-4-5-20251101',
+    context_pct: 42,
+    context_window: 200000,
+  });
+  assert.equal(effectiveContextPct(s), 42);
 });
 
 test('unknown model falls back to gc-reported value', () => {
@@ -191,12 +311,31 @@ test('result rounds to integer', () => {
   assert.equal(effectiveContextPct(s), 15);
 });
 
-test('TRUE_CONTEXT_WINDOWS includes the deployed Claude models', () => {
-  // Smoke test on the model registry. If a new Claude generation lands,
-  // adding it here should be the only change needed.
-  assert.equal(TRUE_CONTEXT_WINDOWS['claude-opus-4-7'], 1_000_000);
-  assert.equal(TRUE_CONTEXT_WINDOWS['claude-sonnet-4-5'], 1_000_000);
-  assert.equal(TRUE_CONTEXT_WINDOWS['claude-sonnet-4-6'], 1_000_000);
+test('TRUE_CONTEXT_WINDOWS mirrors modelwindow.millionMarkers (mechanical Go parity)', () => {
+  // The dashboard 1M markers must stay in lockstep with the Go source of truth.
+  // Read internal/modelwindow/modelwindow.go, extract the millionMarkers slice,
+  // and assert the TS map keys are exactly that set — so a new Go marker (or a
+  // stray TS key like the earlier 'claude-sonnet-4-5') fails this test until the
+  // two are reconciled, instead of drifting silently across the language
+  // boundary.
+  const goSource = readFileSync(
+    new URL('../../../../../modelwindow/modelwindow.go', import.meta.url),
+    'utf8',
+  );
+  const block = goSource.match(/millionMarkers\s*=\s*\[\]string\{([\s\S]*?)\}/);
+  assert.ok(block, 'could not locate millionMarkers slice in modelwindow.go');
+  const goMarkers = [...block[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  assert.ok(goMarkers.length > 0, 'parsed no markers from modelwindow.millionMarkers');
+
+  const tsMarkers = Object.keys(TRUE_CONTEXT_WINDOWS);
+  assert.deepEqual(
+    [...tsMarkers].sort(),
+    [...goMarkers].sort(),
+    'TRUE_CONTEXT_WINDOWS keys must equal modelwindow.millionMarkers',
+  );
+  for (const marker of tsMarkers) {
+    assert.equal(TRUE_CONTEXT_WINDOWS[marker], 1_000_000);
+  }
 });
 
 test('runtime helpers live in domain leaves and remain re-exported by the barrel', () => {
@@ -212,6 +351,13 @@ test('leaf-owned runtime exports stay available through the barrel', () => {
   assert.equal(leafMakeNodeKey, makeNodeKey);
   assert.equal(SCOPE_REF_RE.test('rig:demo-app'), true);
   assert.equal(CITY_NAME_RE.test('demo-city'), true);
+  // Grammar mirrors the supervisor registry (internal/supervisor/registry.go's
+  // validCityName): dotted/underscored names are reachable, but a name must
+  // still start with an alphanumeric character (gascity#5316).
+  assert.equal(CITY_NAME_RE.test('demo.city'), true);
+  assert.equal(CITY_NAME_RE.test('demo_city'), true);
+  assert.equal(CITY_NAME_RE.test('.demo-city'), false);
+  assert.equal(CITY_NAME_RE.test('demo/city'), false);
   assert.equal(makeNodeKey('bead', 'b-1', 'rig:demo-app'), 'bead:rig:demo-app:b-1');
 });
 

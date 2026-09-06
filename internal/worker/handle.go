@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/pricing"
@@ -181,7 +182,28 @@ type NudgeRequest struct {
 // NudgeResult reports whether the requested live delivery actually happened.
 type NudgeResult struct {
 	Delivered bool `json:"delivered"`
+	// Undelivered names WHY a live delivery did not happen, for the callers
+	// that downgrade to the queue and have to tell a human what they did.
+	// Empty when Delivered is true, and empty for a downgrade this type does
+	// not (yet) distinguish — a caller must treat it as a hint, never as a
+	// second copy of Delivered.
+	Undelivered NudgeUndeliveredReason `json:"undelivered,omitempty"`
 }
+
+// NudgeUndeliveredReason is the closed set of reasons a live nudge did not
+// reach the session. It is a typed enum rather than free text because it is
+// interpolated into operator-facing output.
+type NudgeUndeliveredReason string
+
+const (
+	// NudgeUndeliveredProviderUnsupported means this provider/transport cannot
+	// take a live wait-idle delivery at all, so the nudge can only be queued. It
+	// is a property of the runtime, not of the session's current state.
+	NudgeUndeliveredProviderUnsupported NudgeUndeliveredReason = "live_delivery_unsupported"
+	// NudgeUndeliveredNoIdleBoundary means the provider CAN take live delivery
+	// but the session never reached the idle boundary within the wait window.
+	NudgeUndeliveredNoIdleBoundary NudgeUndeliveredReason = "no_idle_boundary"
+)
 
 // NudgeWakePolicy controls whether a nudge may wake a stopped session.
 type NudgeWakePolicy string
@@ -277,6 +299,13 @@ type SessionHandle struct {
 	// skip both the keyed-path resolve and the write once the sidecar is current.
 	sidecarMu     sync.Mutex
 	sidecarDoneID string
+	// sidecarRetrySchedule is nil in production, where the sidecar retry uses
+	// time.AfterFunc. Tests supply a channel-backed scheduler to drive retries
+	// deterministically.
+	sidecarRetrySchedule  func(time.Duration, func())
+	sidecarRetryID        string
+	sidecarRetryAttempts  int
+	sidecarRetryScheduled bool
 }
 
 var (

@@ -128,7 +128,7 @@ func expandDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Contr
 		if row.UnitConvoyID == "" {
 			var created bool
 			var err error
-			unit, created, err = ensureDrainUnitConvoy(store, bead, parentConvoyID, len(members), *row, member)
+			unit, created, err = ensureDrainUnitConvoy(store, bead, parentConvoyID, len(members), *row, member, opts)
 			if err != nil {
 				return ControlResult{}, err
 			}
@@ -138,7 +138,7 @@ func expandDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Contr
 			row.UnitConvoyID = unit.ID
 			row.Status = "unit-created"
 		} else {
-			reloaded, err := store.Get(row.UnitConvoyID)
+			reloaded, err := reloadDrainUnitConvoy(store, row.UnitConvoyID, opts)
 			if err != nil {
 				return ControlResult{}, fmt.Errorf("%s: loading drain unit convoy %s: %w", bead.ID, row.UnitConvoyID, err)
 			}
@@ -146,11 +146,11 @@ func expandDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Contr
 		}
 
 		if row.ItemRootID == "" {
-			blockerIDs, err := drainProjectedBlockerIDs(store, member.ID, manifest, opts)
+			projection, err := drainProjectedBlockerIDs(store, member.ID, manifest, opts)
 			if err != nil {
 				return ControlResult{}, fmt.Errorf("%s: listing source dependencies for member %s: %w", bead.ID, member.ID, err)
 			}
-			rootID, created, err := ensureDrainItemRoot(store, bead, unit, member, len(members), row, itemFormula, parentVars, blockerIDs, opts)
+			rootID, created, err := ensureDrainItemRoot(store, bead, unit, member, len(members), row, itemFormula, parentVars, projection.BlockerIDs, opts)
 			if err != nil {
 				if errors.Is(err, errDrainInvalidItemFormula) {
 					return closeDrainItemFormulaFailure(store, bead, manifest, err, opts)
@@ -215,7 +215,7 @@ func loadOrBuildDrainManifest(store beads.Store, bead beads.Bead, parentConvoyID
 		}
 		return manifest, members, nil
 	}
-	members, err := convoycore.Members(store, parentConvoyID, false, opts.MemberStores...)
+	members, err := drainConvoyMembers(store, parentConvoyID, opts)
 	if err != nil {
 		return drainManifest{}, nil, fmt.Errorf("%s: loading convoy members for %s: %w", bead.ID, parentConvoyID, err)
 	}
@@ -344,6 +344,81 @@ func drainMemberDepStore(store beads.Store, memberID string, opts ProcessOptions
 		return store, nil
 	}
 	return drainMemberOwningStore(store, memberID, opts)
+}
+
+// drainConvoyMembers reads a drain's input-convoy membership across every
+// candidate store rather than from the one store the drain itself runs in.
+//
+// opts.MemberStores resolves member beads, and that is only the TAIL of the
+// lookup. The head — the convoy's own legacy children (List by ParentID) and its
+// tracks edges (DepList) — is read from a single handle, and reading it from the
+// ambient graph store is what silently loses a whole convoy: a store that has
+// never seen the convoy answers both reads EMPTY rather than erroring, and an
+// empty membership is indistinguishable from a genuinely empty input convoy, so
+// the drain expands to zero rows and closes gc.outcome=pass with every member
+// left open and undispatched.
+//
+// Which store SHOULD answer is settled: a convoy is a work bead, synthetic ones
+// included, so its edges are in the work store while the drain runs in the
+// binding. The work leg is therefore the authoritative one and the graph leg is
+// expected to contribute nothing.
+//
+// It is still read as the UNION of what each candidate store records rather than
+// as a single lookup, for two reasons. A city migrated under the previous
+// classification has an edgeless copy of every synthetic convoy in its binding —
+// the migration copied the row and importInfraSnapshot re-added only the edges
+// whose both endpoints were infra — so "the store that has the convoy bead" is
+// still an ambiguous question on real disks, and answering it wrong is silent.
+// And the failure this guards is not a wrong answer but a green one: a drain
+// that could not read its membership produces byte-for-byte the same terminal
+// state as a drain that correctly found nothing to do.
+//
+// The union cannot be wrong in the way a single lookup can. It is order-free and
+// monotone — a store that never saw the convoy contributes nothing, an edgeless
+// copy contributes nothing, and no store's silence can subtract a member another
+// store records — so a zero-row expansion over a non-empty convoy is structurally
+// impossible rather than merely unlikely, and stays impossible even if some
+// future path mints a convoy somewhere this comment does not predict. A member
+// seen as an unresolved placeholder in one store and as a real bead in another
+// keeps the real bead.
+//
+// With no member stores configured — every single-store caller — this collapses
+// to the single convoycore.Members call it replaces, byte for byte.
+func drainConvoyMembers(store beads.Store, convoyID string, opts ProcessOptions) ([]beads.Bead, error) {
+	if len(opts.MemberStores) == 0 {
+		return convoycore.Members(store, convoyID, false)
+	}
+	var merged []beads.Bead
+	at := make(map[string]int)
+	for _, probe := range drainMemberProbeSet(store, opts) {
+		if probe == nil {
+			continue
+		}
+		members, err := convoycore.Members(probe, convoyID, false, opts.MemberStores...)
+		if err != nil {
+			return nil, err
+		}
+		for _, member := range members {
+			i, seen := at[member.ID]
+			if !seen {
+				at[member.ID] = len(merged)
+				merged = append(merged, member)
+				continue
+			}
+			if convoycore.IsUnresolvedTrackedItem(merged[i]) && !convoycore.IsUnresolvedTrackedItem(member) {
+				merged[i] = member
+			}
+		}
+	}
+	// Same order convoycore.MembersIn returns within one store, so the manifest
+	// row order does not depend on which store answered first.
+	slices.SortStableFunc(merged, func(a, b beads.Bead) int {
+		if c := a.CreatedAt.Compare(b.CreatedAt); c != 0 {
+			return c
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+	return merged, nil
 }
 
 func loadDrainManifestMembers(store beads.Store, controlID string, manifest drainManifest, opts ProcessOptions) ([]beads.Bead, error) {
@@ -554,7 +629,7 @@ func materializeDrainRow(store beads.Store, control beads.Bead, manifest drainMa
 	createdCount := 0
 	var unit beads.Bead
 	if row.UnitConvoyID == "" {
-		createdUnit, created, err := ensureDrainUnitConvoy(store, control, manifest.ParentConvoyID, len(members), *row, member)
+		createdUnit, created, err := ensureDrainUnitConvoy(store, control, manifest.ParentConvoyID, len(members), *row, member, opts)
 		if err != nil {
 			return 0, err
 		}
@@ -565,18 +640,18 @@ func materializeDrainRow(store beads.Store, control beads.Bead, manifest drainMa
 		row.UnitConvoyID = unit.ID
 		row.Status = "unit-created"
 	} else {
-		reloaded, err := store.Get(row.UnitConvoyID)
+		reloaded, err := reloadDrainUnitConvoy(store, row.UnitConvoyID, opts)
 		if err != nil {
 			return 0, fmt.Errorf("%s: loading drain unit convoy %s: %w", control.ID, row.UnitConvoyID, err)
 		}
 		unit = reloaded
 	}
 	if row.ItemRootID == "" {
-		blockerIDs, err := drainProjectedBlockerIDs(store, member.ID, manifest, opts)
+		projection, err := drainProjectedBlockerIDs(store, member.ID, manifest, opts)
 		if err != nil {
 			return 0, fmt.Errorf("%s: listing source dependencies for member %s: %w", control.ID, member.ID, err)
 		}
-		rootID, created, err := ensureDrainItemRoot(store, control, unit, member, len(members), row, itemFormula, parentVars, blockerIDs, opts)
+		rootID, created, err := ensureDrainItemRoot(store, control, unit, member, len(members), row, itemFormula, parentVars, projection.BlockerIDs, opts)
 		if err != nil {
 			return 0, err
 		}
@@ -617,17 +692,20 @@ func ensureDrainDependencyProjection(store beads.Store, control beads.Bead, mani
 }
 
 func ensureDrainRowDependencyProjection(store beads.Store, control beads.Bead, manifest drainManifest, memberID, rootID string, opts ProcessOptions) error {
-	blockerIDs, err := drainProjectedBlockerIDs(store, memberID, manifest, opts)
+	projection, err := drainProjectedBlockerIDs(store, memberID, manifest, opts)
 	if err != nil {
 		return fmt.Errorf("%s: listing source dependencies for member %s: %w", control.ID, memberID, err)
 	}
-	for _, blockerID := range blockerIDs {
+	for _, blockerID := range projection.BlockerIDs {
 		if blockerID == rootID {
 			continue
 		}
 		if err := ensureDrainWorkflowBlocksOn(store, rootID, blockerID); err != nil {
 			return fmt.Errorf("%s: wiring item workflow %s for member %s to blocker %s: %w", control.ID, rootID, memberID, blockerID, err)
 		}
+	}
+	if err := recordUnprojectableDrainBlockers(store, control, memberID, rootID, projection.Unprojectable, opts); err != nil {
+		return fmt.Errorf("%s: recording unprojectable blockers for member %s: %w", control.ID, memberID, err)
 	}
 	if err := repairDrainWorkflowSourceMemberDeps(store, manifest, memberID, rootID); err != nil {
 		return fmt.Errorf("%s: repairing source-member dependencies on item workflow %s for member %s: %w", control.ID, rootID, memberID, err)
@@ -660,7 +738,85 @@ func drainManifestMemberIDs(manifest drainManifest) map[string]bool {
 	return memberIDs
 }
 
-func drainProjectedBlockerIDs(store beads.Store, memberID string, manifest drainManifest, opts ProcessOptions) ([]string, error) {
+// drainBlockerProjection is the result of projecting one drain member's
+// ready-blocking dependencies onto its item workflow.
+type drainBlockerProjection struct {
+	// BlockerIDs are the ids the item workflow's beads can actually depend on:
+	// either another manifest row's item root, or an out-of-manifest blocker the
+	// item workflow's own store can resolve.
+	BlockerIDs []string
+
+	// Unprojectable are out-of-manifest blockers that are still open and that the
+	// item workflow's own store cannot resolve, so the constraint they express
+	// cannot be written down at all. Sorted, and recorded on the item root by
+	// ensureDrainRowDependencyProjection.
+	Unprojectable []string
+}
+
+// drainBlockerResidence classifies one out-of-manifest blocker for projection.
+type drainBlockerResidence int
+
+const (
+	// drainBlockerUnclassified is the zero value, returned only alongside an
+	// error. It is not a decision, and the projection switch refuses it rather
+	// than letting a read failure look like a dropped blocker.
+	drainBlockerUnclassified drainBlockerResidence = iota
+
+	// drainBlockerProjectable: the item workflow's own store resolves the
+	// blocker, so the dependency edge is writable and means what it says.
+	drainBlockerProjectable
+
+	// drainBlockerSatisfied: the blocker is not co-resident, but it is already
+	// terminal, so it constrains nothing. Omitting the edge loses no meaning —
+	// on a single-store city the edge exists and the readiness reader ignores it
+	// for exactly the same reason.
+	drainBlockerSatisfied
+
+	// drainBlockerUnprojectable: the blocker is not co-resident and is still an
+	// open constraint. Omitting the edge does lose meaning, so it is recorded.
+	drainBlockerUnprojectable
+)
+
+// classifyDrainBlocker decides whether an out-of-manifest blocker can be
+// projected onto an item workflow that lives in store.
+//
+// A dependency row lives in one store's dep table and can only reference an id
+// that store resolves — the same rule convoy.ErrMemberNotCoResident enforces for
+// membership edges. Writing one anyway does not degrade to "unenforced": the
+// readiness reader LEFT JOINs the blocker row, so an absent target yields a NULL
+// status that is never 'closed', and the dependent bead drops out of Ready
+// permanently. Closing the real blocker in its own store cannot release it,
+// because the store holding the edge can never see that row. So the choice is
+// not between a strict edge and a loose one, it is between omitting the edge and
+// wedging the workflow forever.
+//
+// Single-store callers skip the check entirely: there is one store, so every id
+// it resolves is co-resident and the probe would be pure overhead.
+func classifyDrainBlocker(store beads.Store, blockerID string, opts ProcessOptions) (drainBlockerResidence, error) {
+	if len(opts.MemberStores) == 0 {
+		return drainBlockerProjectable, nil
+	}
+	if _, err := store.Get(blockerID); err == nil {
+		return drainBlockerProjectable, nil
+	} else if !errors.Is(err, beads.ErrNotFound) {
+		return drainBlockerUnclassified, err
+	}
+	blocker, err := storeref.Resolve(blockerID, opts.MemberStores)
+	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			// Resolvable nowhere: the source member's own edge already dangles.
+			// Report it rather than copying the dangle into another store.
+			return drainBlockerUnprojectable, nil
+		}
+		return drainBlockerUnclassified, err
+	}
+	if convoycore.IsTerminalStatus(blocker.Status) {
+		return drainBlockerSatisfied, nil
+	}
+	return drainBlockerUnprojectable, nil
+}
+
+func drainProjectedBlockerIDs(store beads.Store, memberID string, manifest drainManifest, opts ProcessOptions) (drainBlockerProjection, error) {
 	rootByMember := drainRootByMember(manifest)
 	manifestMembers := drainManifestMemberIDs(manifest)
 	// A member work bead's dependency edges are co-resident with it and may live
@@ -669,14 +825,14 @@ func drainProjectedBlockerIDs(store beads.Store, memberID string, manifest drain
 	// ambient store for single-store callers — see drainMemberDepStore).
 	memberStore, err := drainMemberDepStore(store, memberID, opts)
 	if err != nil {
-		return nil, err
+		return drainBlockerProjection{}, err
 	}
 	deps, err := memberStore.DepList(memberID, "down")
 	if err != nil {
-		return nil, err
+		return drainBlockerProjection{}, err
 	}
 	seen := make(map[string]bool, len(deps))
-	blockerIDs := make([]string, 0, len(deps))
+	projection := drainBlockerProjection{BlockerIDs: make([]string, 0, len(deps))}
 	for _, dep := range deps {
 		if !beads.IsReadyBlockingDependencyType(dep.Type) {
 			continue
@@ -686,8 +842,10 @@ func drainProjectedBlockerIDs(store beads.Store, memberID string, manifest drain
 			continue
 		}
 		blockerID := dependsOnID
+		onItemRoot := false
 		if projectedRootID := strings.TrimSpace(rootByMember[dependsOnID]); projectedRootID != "" {
 			blockerID = projectedRootID
+			onItemRoot = true
 		} else if manifestMembers[dependsOnID] {
 			// An in-manifest member without a materialized item root must not
 			// be embedded as a blocker: drains do not close source members,
@@ -701,9 +859,59 @@ func drainProjectedBlockerIDs(store beads.Store, memberID string, manifest drain
 			continue
 		}
 		seen[blockerID] = true
-		blockerIDs = append(blockerIDs, blockerID)
+		if onItemRoot {
+			// Item roots are minted in store, so this one is co-resident by
+			// construction and needs no probe.
+			projection.BlockerIDs = append(projection.BlockerIDs, blockerID)
+			continue
+		}
+		residence, err := classifyDrainBlocker(store, blockerID, opts)
+		if err != nil {
+			return drainBlockerProjection{}, err
+		}
+		switch residence {
+		case drainBlockerProjectable:
+			projection.BlockerIDs = append(projection.BlockerIDs, blockerID)
+		case drainBlockerSatisfied:
+			opts.tracef("drain: member %s blocker %s is already terminal and lives outside the item workflow's store; not projecting an edge that would constrain nothing", memberID, blockerID)
+		case drainBlockerUnprojectable:
+			projection.Unprojectable = append(projection.Unprojectable, blockerID)
+		default:
+			return drainBlockerProjection{}, fmt.Errorf("classifying blocker %s for member %s: unclassified residence %d", blockerID, memberID, residence)
+		}
 	}
-	return blockerIDs, nil
+	slices.Sort(projection.Unprojectable)
+	return projection, nil
+}
+
+// recordUnprojectableDrainBlockers stamps the blockers a drain could not express
+// onto the item root, so an item workflow that runs without a constraint its
+// source member had says so on its own bead instead of only in a log line.
+//
+// It is a durable record rather than a failure on purpose. Refusing the drain
+// would turn the commonest backlog shape — a member with any out-of-convoy
+// `blocks` edge — into a hard control failure on split cities, which is the
+// terminal state this routing exists to remove; and writing the edge anyway
+// wedges the item workflow permanently (see classifyDrainBlocker). Recording is
+// the only option that neither loses the information nor stalls the work.
+func recordUnprojectableDrainBlockers(store beads.Store, control beads.Bead, memberID, rootID string, blockerIDs []string, opts ProcessOptions) error {
+	if len(blockerIDs) == 0 {
+		return nil
+	}
+	value := strings.Join(blockerIDs, ",")
+	root, err := store.Get(rootID)
+	if err != nil {
+		return fmt.Errorf("loading item root %s: %w", rootID, err)
+	}
+	if root.Metadata[beadmeta.DrainUnprojectedBlockersMetadataKey] == value {
+		return nil
+	}
+	opts.tracef("drain %s: member %s is blocked by %s, which the item workflow's store cannot resolve; item root %s runs without that constraint (recorded as %s)",
+		control.ID, memberID, value, rootID, beadmeta.DrainUnprojectedBlockersMetadataKey)
+	if err := store.SetMetadata(rootID, beadmeta.DrainUnprojectedBlockersMetadataKey, value); err != nil {
+		return fmt.Errorf("recording unprojectable blockers on item root %s: %w", rootID, err)
+	}
+	return nil
 }
 
 func ensureDrainWorkflowBlocksOn(store beads.Store, rootID, blockerID string) error {
@@ -712,7 +920,7 @@ func ensureDrainWorkflowBlocksOn(store beads.Store, rootID, blockerID string) er
 	if rootID == "" || blockerID == "" || rootID == blockerID {
 		return nil
 	}
-	workflowBeads, err := listByWorkflowRoot(store, rootID)
+	workflowBeads, err := beads.DirectMembers(store, rootID)
 	if err != nil {
 		return err
 	}
@@ -734,7 +942,7 @@ func ensureDrainWorkflowBlocksOn(store beads.Store, rootID, blockerID string) er
 // ensureDrainRowDependencyProjection before this repair supersedes it.
 func repairDrainWorkflowSourceMemberDeps(store beads.Store, manifest drainManifest, memberID, rootID string) error {
 	manifestMembers := drainManifestMemberIDs(manifest)
-	workflowBeads, err := listByWorkflowRoot(store, rootID)
+	workflowBeads, err := beads.DirectMembers(store, rootID)
 	if err != nil {
 		return err
 	}
@@ -950,18 +1158,134 @@ func orderDrainMembersByDependencies(store beads.Store, members []beads.Bead, op
 	return ordered, nil
 }
 
-func ensureDrainUnitConvoy(store beads.Store, control beads.Bead, parentConvoyID string, count int, row drainManifestRow, member beads.Bead) (beads.Bead, bool, error) {
+// drainUnitConvoyProbeSet returns the ordered store set a drain resolves its own
+// unit convoys through: the work-class member stores first, then the ambient
+// store.
+//
+// It is the reverse of drainMemberProbeSet, and deliberately so. A unit convoy is
+// a SYNTHETIC convoy and a synthetic convoy is a WORK bead (coordclass.Classify),
+// so the work class is the authoritative answer and the ambient graph binding is
+// only a fallback for rows that predate that ruling. Asking the binding first
+// gets the wrong answer on a real converged city: cities migrated under the
+// previous classification carry an EDGELESS copy of every synthetic convoy in
+// their binding (`gc storage migrate` copied the row; importInfraSnapshot re-added
+// only the edges whose both endpoints were infra), so the binding can answer
+// gc.drain_unit_key with a convoy that has no tracks edge and cannot grow one.
+//
+// With no member stores configured — every single-store caller — this is the one
+// ambient store, so every read through it is the single read it is today.
+func drainUnitConvoyProbeSet(store beads.Store, opts ProcessOptions) []beads.Store {
+	probe := make([]beads.Store, 0, 1+len(opts.MemberStores))
+	probe = append(probe, opts.MemberStores...)
+	probe = append(probe, store)
+	return probe
+}
+
+// drainWorkClassStore returns the handle for the work class: the first member
+// store the caller named, or the ambient store when it named none.
+func drainWorkClassStore(store beads.Store, opts ProcessOptions) beads.Store {
+	for _, probe := range opts.MemberStores {
+		if probe == nil {
+			continue
+		}
+		return probe
+	}
+	return store
+}
+
+// drainUnitConvoyStore returns the store a drain MINTS a unit convoy in: the
+// store that owns the member the unit convoy exists to track.
+//
+// That is not a choice among stores, it is the only store that works. A drain
+// unit convoy is a SYNTHETIC convoy and a synthetic convoy is a WORK bead
+// (coordclass.Classify), which is the same thing the mechanics already require:
+// the convoy's whole content is one `tracks` edge to one work member, and
+// convoy.TrackItemIn refuses an edge whose member is owned by another class,
+// because a dep row cannot reference an id its own store cannot resolve. Minted
+// anywhere else the convoy can never track the member it was created for, and
+// the drain fails on the very next call.
+//
+// A member no store can resolve pins the convoy to the WORK class rather than
+// falling back to the ambient store. An unresolved member is a supported state,
+// not an error — loadDrainManifestMembers synthesizes a placeholder for a member
+// deleted mid-drain and trackDrainMember stamps gc.drain_member_unresolved
+// instead of writing an edge — so the mint still has to happen, and it still has
+// to happen in the class that owns synthetic convoys. Falling back to the ambient
+// graph binding would write a work-class bead into the infra ledger, which the
+// migration's own equality invariant says never happens.
+//
+// Only the mint is derived from the member. Lookup by gc.drain_unit_key and
+// reload by id go through drainUnitConvoyProbeSet, because a member's
+// resolvability can change between drain passes while the convoy it already
+// minted does not move.
+//
+// With no member stores configured — every single-store caller — it returns the
+// ambient store without any probe, so the create is the same single-store write
+// it is today, with no extra round-trip.
+func drainUnitConvoyStore(store beads.Store, member beads.Bead, opts ProcessOptions) (beads.Store, error) {
+	if len(opts.MemberStores) == 0 {
+		return store, nil
+	}
+	memberID := strings.TrimSpace(member.ID)
+	if memberID == "" || convoycore.IsUnresolvedTrackedItem(member) {
+		return drainWorkClassStore(store, opts), nil
+	}
+	for _, probe := range drainUnitConvoyProbeSet(store, opts) {
+		if probe == nil {
+			continue
+		}
+		if _, err := probe.Get(memberID); err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
+			}
+			return nil, err
+		}
+		return probe, nil
+	}
+	return drainWorkClassStore(store, opts), nil
+}
+
+// drainUnitConvoyByKey finds the unit convoy a previous pass already minted for
+// row.UnitKey, and the store that holds it, across every candidate store.
+//
+// The key is the idempotence token for the mint, so the lookup has to see every
+// store the mint could have chosen. Running it against one store re-derived from
+// the member is what mints a duplicate: a member that resolved on the pass that
+// minted the convoy and does not resolve on the pass that resumes sends the
+// lookup to a different store, it misses, and the drain mints a second unit
+// convoy for a row that already has one.
+func drainUnitConvoyByKey(store beads.Store, unitKey string, opts ProcessOptions) (beads.Bead, beads.Store, bool, error) {
+	for _, probe := range drainUnitConvoyProbeSet(store, opts) {
+		if probe == nil {
+			continue
+		}
+		existing, err := probe.ListByMetadata(map[string]string{beadmeta.DrainUnitKeyMetadataKey: unitKey}, 1, beads.WithBothTiers)
+		if err != nil {
+			return beads.Bead{}, nil, false, err
+		}
+		if len(existing) > 0 {
+			return existing[0], probe, true, nil
+		}
+	}
+	return beads.Bead{}, nil, false, nil
+}
+
+func ensureDrainUnitConvoy(store beads.Store, control beads.Bead, parentConvoyID string, count int, row drainManifestRow, member beads.Bead, opts ProcessOptions) (beads.Bead, bool, error) {
 	unlock := graphv2.LockKey(row.UnitKey)
 	defer unlock()
-	existing, err := store.ListByMetadata(map[string]string{beadmeta.DrainUnitKeyMetadataKey: row.UnitKey}, 1, beads.WithBothTiers)
+	existing, existingStore, found, err := drainUnitConvoyByKey(store, row.UnitKey, opts)
 	if err != nil {
 		return beads.Bead{}, false, fmt.Errorf("%s: looking up unit convoy for member %s: %w", control.ID, member.ID, err)
 	}
-	if len(existing) > 0 {
-		if err := ensureDrainUnitTrack(store, control.ID, existing[0].ID, member); err != nil {
+	if found {
+		if err := ensureDrainUnitTrack(existingStore, control.ID, existing.ID, member); err != nil {
 			return beads.Bead{}, false, err
 		}
-		return existing[0], false, nil
+		return existing, false, nil
+	}
+	unitStore, err := drainUnitConvoyStore(store, member, opts)
+	if err != nil {
+		return beads.Bead{}, false, fmt.Errorf("%s: resolving the store for member %s: %w", control.ID, member.ID, err)
 	}
 	metadata := map[string]string{
 		beadmeta.SyntheticMetadataKey:         "true",
@@ -974,7 +1298,7 @@ func ensureDrainUnitConvoy(store beads.Store, control beads.Bead, parentConvoyID
 		beadmeta.DrainMemberAccessMetadataKey: drainMemberAccess(control),
 		beadmeta.DrainUnitKeyMetadataKey:      row.UnitKey,
 	}
-	created, err := store.Create(beads.Bead{
+	created, err := unitStore.Create(beads.Bead{
 		Title:    fmt.Sprintf("drain unit %d for %s", row.Index, member.ID),
 		Type:     "convoy",
 		Priority: member.Priority,
@@ -983,10 +1307,32 @@ func ensureDrainUnitConvoy(store beads.Store, control beads.Bead, parentConvoyID
 	if err != nil {
 		return beads.Bead{}, false, fmt.Errorf("%s: creating unit convoy for member %s: %w", control.ID, member.ID, err)
 	}
-	if err := trackDrainMember(store, created.ID, member); err != nil {
+	if err := trackDrainMember(unitStore, created.ID, member); err != nil {
 		return beads.Bead{}, false, fmt.Errorf("%s: tracking member %s from unit convoy %s: %w", control.ID, member.ID, created.ID, err)
 	}
 	return created, true, nil
+}
+
+// reloadDrainUnitConvoy re-reads a unit convoy a previous pass already minted,
+// by the convoy's OWN id, exactly as loadDrainManifestMembers re-reads a member
+// by its own id.
+//
+// Re-deriving the store from the member instead is unstable across passes, and
+// that instability is a permanent quarantine rather than a retry. The manifest
+// persists row.UnitConvoyID but not the store that answered when it was minted,
+// so a member that resolves on the minting pass and not on the resuming pass —
+// a hard delete between passes, which the drain otherwise tolerates by design —
+// sends the reload to a different store, Get reports a convoy that exists as
+// missing, and a not-found is not a transient controller error, so the caller
+// quarantines the control instead of retrying it.
+//
+// With no member stores configured this is the same single store.Get it has
+// always been, including its error text.
+func reloadDrainUnitConvoy(store beads.Store, unitConvoyID string, opts ProcessOptions) (beads.Bead, error) {
+	if len(opts.MemberStores) == 0 {
+		return store.Get(unitConvoyID)
+	}
+	return storeref.Resolve(unitConvoyID, drainUnitConvoyProbeSet(store, opts))
 }
 
 func ensureDrainUnitTrack(store beads.Store, controlID, unitConvoyID string, member beads.Bead) error {
@@ -1171,6 +1517,20 @@ func stampDrainItemRecipe(recipe *formula.Recipe, control, unit, member beads.Be
 	root.Metadata[beadmeta.Graphv2RootKeyMetadataKey] = graphv2.RootKey(unit.ID, itemFormula, vars, "drain", control.ID+":"+member.ID)
 	if metadata := graphv2.RuntimeVarsMetadata(vars); metadata != "" {
 		root.Metadata[graphv2.RuntimeVarsMetadataKey] = metadata
+	}
+	workDir := strings.TrimSpace(member.Metadata[beadmeta.WorkDirMetadataKey])
+	if workDir == "" {
+		workDir = strings.TrimSpace(member.Metadata[beadmeta.LegacyWorkDirMetadataKey])
+	}
+	if workDir != "" {
+		for i := range recipe.Steps {
+			step := &recipe.Steps[i]
+			if step.Metadata == nil {
+				step.Metadata = make(map[string]string)
+			}
+			step.Metadata[beadmeta.WorkDirMetadataKey] = workDir
+			step.Metadata[beadmeta.LegacyWorkDirMetadataKey] = workDir
+		}
 	}
 	if strings.TrimSpace(control.Metadata[beadmeta.DrainContextMetadataKey]) == beadmeta.DrainContextShared {
 		group := sharedDrainContinuationGroup(control)

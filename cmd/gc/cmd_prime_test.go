@@ -75,9 +75,9 @@ func TestBuildPrimeContextExpandsTemplateCommands(t *testing.T) {
 
 func TestBuildPrimeContextUsesBD105ReadyCompatibility(t *testing.T) {
 	cityPath := filepath.Join(t.TempDir(), "demo-city")
-	ctx := buildPrimeContextForBeads(cityPath, "", &config.Agent{
+	ctx := buildPrimeContextFor(cityPath, "", &config.Agent{
 		Name: "worker",
-	}, nil, config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105}, nil)
+	}, nil, config.QueryTopology{Beads: config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105}}, nil)
 
 	if !strings.Contains(ctx.AssignedReadyQuery, `bd ready --include-ephemeral --assignee="$id"`) {
 		t.Fatalf("AssignedReadyQuery = %q, want bd-1.0.5-compatible assigned ready query", ctx.AssignedReadyQuery)
@@ -877,9 +877,7 @@ provider = "exec:/not-used-by-auto-handoff"
 			if strings.Contains(context, ordinary.ID) || strings.Contains(context, ordinary.Body) {
 				t.Fatalf("additionalContext = %q, want no ordinary mail %q from the exec: provider at SessionStart", context, ordinary.ID)
 			}
-			if _, err := store.Get(auto.ID); !errors.Is(err, beads.ErrNotFound) {
-				t.Fatalf("auto-handoff should be archived after SessionStart injection, got err=%v", err)
-			}
+			assertAutoHandoffRetainedAddressable(t, store, auto.ID)
 			if _, err := store.Get(ordinary.ID); err != nil {
 				t.Fatalf("ordinary mail should remain for UserPromptSubmit: %v", err)
 			}
@@ -1086,9 +1084,7 @@ prompt_template = "prompts/worker.md"
 	if !strings.Contains(hookStdout.String(), auto.ID) {
 		t.Fatalf("hook output = %q, want auto-handoff %q", hookStdout.String(), auto.ID)
 	}
-	if _, err := store.Get(auto.ID); !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("auto-handoff should be archived after the real SessionStart injection, got err=%v", err)
-	}
+	assertAutoHandoffRetainedAddressable(t, store, auto.ID)
 }
 
 func TestDoPrimeWithHookFormat_GatesDefaultFallbackWithoutManagedSession(t *testing.T) {
@@ -1369,4 +1365,25 @@ func createPrimeHookSession(t *testing.T, cityDir, sessionName, template string)
 		t.Fatalf("Create(session %s) returned empty ID", sessionName)
 	}
 	return created.ID
+}
+
+func TestBuildPrimeContextConfigDir(t *testing.T) {
+	// #5315: the bug was a construction site that never populated
+	// ConfigDir. Pin the site, not just the helper.
+	cityPath := filepath.Join(t.TempDir(), "demo-city")
+
+	ctx := buildPrimeContextFor(cityPath, "", &config.Agent{Name: "worker"},
+		nil, config.QueryTopology{}, nil)
+	if ctx.ConfigDir != cityPath {
+		t.Fatalf("ConfigDir = %q, want %q", ctx.ConfigDir, cityPath)
+	}
+
+	packDir := filepath.Join(cityPath, ".gc", "packs", "example")
+	ctx = buildPrimeContextFor(cityPath, "", &config.Agent{
+		Name:      "worker",
+		SourceDir: packDir,
+	}, nil, config.QueryTopology{}, nil)
+	if ctx.ConfigDir != packDir {
+		t.Fatalf("ConfigDir = %q, want SourceDir override %q", ctx.ConfigDir, packDir)
+	}
 }

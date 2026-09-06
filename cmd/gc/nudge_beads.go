@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -26,11 +27,25 @@ type nudgeReference = nudgequeue.Reference
 // every leaf nudge-bead helper; the wrapper carries the same underlying store
 // value (identity to the work store until the nudges class relocates).
 var openNudgeBeadStore = func(cityPath string) beads.NudgesStore {
+	store, _ := openNudgeBeadStoreErr(cityPath)
+	return store
+}
+
+// openNudgeBeadStoreErr is openNudgeBeadStore with the open failure kept instead
+// of swallowed into a nil-safe zero store.
+//
+// The zero store is not harmless: every nudge helper below is nil-tolerant, so a
+// city whose store will not open reported "opening city store for X" with no
+// cause at all — the operator could not tell a missing city from a locked
+// database from a storage refusal. Call sites that surface a failure to a human
+// use this form and print the reason; the seam above stays for the poll/drain
+// helpers whose contract is already "a nil store means do nothing".
+func openNudgeBeadStoreErr(cityPath string) (beads.NudgesStore, error) {
 	store, err := openStoreAtForCity(cityPath, cityPath)
 	if err != nil {
-		return beads.NudgesStore{}
+		return beads.NudgesStore{}, fmt.Errorf("opening the city store at %q: %w", cityPath, err)
 	}
-	return beads.NudgesStore{Store: resolveNudgesStore(store, nil, cityPath, nil)}
+	return beads.NudgesStore{Store: resolveNudgesStore(cliStorageRoutes(cityPath), store, nil, cityPath, nil)}, nil
 }
 
 // nudgeFrontDoor wraps a strongly-typed nudges store as the nudge object's

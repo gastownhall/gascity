@@ -3,8 +3,10 @@ package session
 import (
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -186,6 +188,60 @@ func (s *Store) RecordCurrentBead(id, beadID string) error {
 	return s.setMetadataValue(id, CurrentBeadIDKey, beadID)
 }
 
+// SetCurrentClaim stamps the work bead this session claimed for itself through
+// `gc hook --claim` (beadmeta.CurrentClaimBeadIDMetadataKey) — or clears the
+// stamp when beadID is empty. It reports whether a write was actually issued.
+//
+// It is deliberately a different key from RecordCurrentBead's: that one records
+// a controller-side assignment the reconciler made at wake time, this one
+// records a claim the session made for itself, and a shared key would let the
+// two lanes overwrite each other. Callers must clear it on every path that takes
+// the work back off the session — a stale stamp names a bead the session no
+// longer owns.
+//
+// The read is validatedBead, so the id is resolved EXACTLY (the bead store's
+// Get surfaces a prefix collision as beads.ErrIDCollision) and a non-session
+// bead is refused before any write: bd's fuzzy id resolver would otherwise let a
+// post-claim update land on a prefix-colliding session bead, which is why the
+// claim path historically refused to decorate the session bead at all
+// (cmd/gc/cmd_hook_claim.go publishHookClaimRunMap). The write targets the
+// canonical bead id the read returned, never the caller's raw identifier.
+//
+// The current value is compared first and an unchanged value writes nothing: the
+// claim path re-runs on every hook tick through its adoption branches, so an
+// unconditional write would emit one bead.updated per tick per in-progress bead.
+// It emits a single-key SetMetadata, not a batch, matching RecordCurrentBead.
+func (s *Store) SetCurrentClaim(id, beadID string) (bool, error) {
+	b, err := s.validatedBead(id)
+	if err != nil {
+		return false, err
+	}
+	beadID = strings.TrimSpace(beadID)
+	if strings.TrimSpace(b.Metadata[beadmeta.CurrentClaimBeadIDMetadataKey]) == beadID {
+		return false, nil
+	}
+	if err := s.setMetadataValue(b.ID, beadmeta.CurrentClaimBeadIDMetadataKey, beadID); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// CurrentClaimBeadID returns the id of the work bead this session most recently
+// claimed through `gc hook --claim` ("" when unset). It is the read half of
+// SetCurrentClaim and the front door for `gc hook current`.
+//
+// It shares Get's validation and error contract (both route through
+// validatedBead): a present-but-non-session bead is ErrSessionNotFound and an
+// absent id is the wrapped store not-found error, so a caller can tell "this is
+// not my session" from "nothing is claimed".
+func (s *Store) CurrentClaimBeadID(id string) (string, error) {
+	b, err := s.validatedBead(id)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(b.Metadata[beadmeta.CurrentClaimBeadIDMetadataKey]), nil
+}
+
 // CloseWithoutReason closes the session bead identified by id without stamping
 // terminal close metadata. It is the front door for the raw store.Close(id)
 // call in closeBead, which stamps ClosePatch via setMetaBatch separately and
@@ -345,3 +401,15 @@ func (s *Store) RepairTypeBestEffort(id string) {
 // code must prefer the typed methods; this exists so Phase 4/5 can land
 // incrementally without a flag-day rewrite.
 func (s *Store) Store() beads.SessionStore { return s.store }
+
+// SetLocalString stores a clone-local session value without exposing the
+// underlying Beads store through the sessions front door.
+func (s *Store) SetLocalString(id, key, value string) error {
+	return s.store.SetLocalString(id, key, value)
+}
+
+// GetLocalString returns a clone-local session value without exposing the
+// underlying Beads store through the sessions front door.
+func (s *Store) GetLocalString(id, key string) (string, error) {
+	return s.store.GetLocalString(id, key)
+}

@@ -3,6 +3,7 @@ package tmux
 import (
 	"context"
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -67,6 +68,85 @@ func TestNewSessionWithCommandAndEnvClearsEmptyVars(t *testing.T) {
 	}
 	if got := args[len(args)-1]; got != "env -u LC_ALL -u LC_CTYPE claude" {
 		t.Fatalf("command = %q, want env -u LC_ALL -u LC_CTYPE claude", got)
+	}
+}
+
+// The controller token is withheld from agent panes by an EMPTY value, not by
+// dropping the key (convergence.ScrubTokenEnv, processenv.ControllerOnlyEnvKeys).
+// This pins the adapter half of that contract at the argv boundary: an empty
+// value must become an `env -u` prefix on the pane command, never a `-e KEY=`
+// flag, because -e alone would leave the tmux server's global copy visible to
+// the shell. A key the caller dropped emits neither, which is why dropping
+// withholds nothing.
+func TestNewSessionWithCommandAndEnvUnsetsControllerToken(t *testing.T) {
+	exec := &fakeExecutor{}
+	tm := NewTmux()
+	tm.exec = exec
+
+	env := map[string]string{
+		"GC_CITY":             "/tmp/city",
+		"GC_CONTROLLER_TOKEN": "",
+	}
+	if err := tm.NewSessionWithCommandAndEnv("gc-test-token-pin", "", "claude", env); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
+	}
+	if len(exec.calls) == 0 {
+		t.Fatal("no tmux calls recorded")
+	}
+
+	args := exec.calls[0]
+	joined := strings.Join(args, "\x00")
+	if strings.Contains(joined, "\x00-e\x00GC_CONTROLLER_TOKEN=") {
+		t.Fatalf("new-session exported GC_CONTROLLER_TOKEN with -e instead of unsetting it: %v", args)
+	}
+	if got := args[len(args)-1]; got != "env -u GC_CONTROLLER_TOKEN claude" {
+		t.Fatalf("command = %q, want %q", got, "env -u GC_CONTROLLER_TOKEN claude")
+	}
+}
+
+func TestNewSessionWithCommandAndEnvRejectsUnsafeUnsetKey(t *testing.T) {
+	for _, key := range []string{
+		"BEADS_BAD KEY",
+		"BEADS_BAD;touch /tmp/pwned",
+		"BEADS_BAD$(touch /tmp/pwned)",
+		"BEADS_BAD=other",
+		"-u",
+	} {
+		t.Run(key, func(t *testing.T) {
+			exec := &fakeExecutor{}
+			tm := NewTmux()
+			tm.exec = exec
+
+			err := tm.NewSessionWithCommandAndEnv("gc-test-invalid-env-key", "", "claude", map[string]string{key: ""})
+			if err == nil {
+				t.Fatalf("NewSessionWithCommandAndEnv accepted unsafe unset key %q", key)
+			}
+			if !strings.Contains(err.Error(), "invalid environment variable name") {
+				t.Fatalf("error = %v, want an environment-name validation error", err)
+			}
+			for _, call := range exec.calls {
+				if slices.Contains(call, "new-session") {
+					t.Fatalf("invalid unset key reached tmux new-session: %v", call)
+				}
+			}
+		})
+	}
+}
+
+func TestRespawnAgentRejectsUnsafeWithheldBeadsKey(t *testing.T) {
+	exec := &fakeExecutor{}
+	tm := NewTmux()
+	tm.exec = exec
+	ops := &tmuxStartOps{tm: tm}
+
+	err := ops.respawnAgent("gc-test-invalid-env-key", "", "claude", map[string]string{
+		"BEADS_BAD;touch /tmp/pwned": "",
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid environment variable name") {
+		t.Fatalf("respawnAgent error = %v, want an environment-name validation error", err)
+	}
+	if len(exec.calls) != 0 {
+		t.Fatalf("invalid withheld key reached tmux: %v", exec.calls)
 	}
 }
 
@@ -418,5 +498,196 @@ func TestWaitForRuntimeReadyCapturesPromptAboveBlankFooter(t *testing.T) {
 		if got[i] != want[i] {
 			t.Errorf("first call arg %d = %q, want %q", i, got[i], want[i])
 		}
+	}
+}
+
+// The respawn twin of TestNewSessionWithCommandAndEnvUnsetsControllerToken, and
+// the guard the original fix was missing: respawn-pane takes no env argument, so
+// the create path's `env -u` prefix — a property of one command string — does
+// not reach the relaunched agent. The withholding has to be in the SESSION
+// environment before the respawn, marked with `set-environment -r`.
+//
+// `-r` and not `-u`: -u deletes the session entry and lets the server's global
+// value show through again, which is the leak rather than the fix.
+func TestRespawnAgentMarksControllerTokenRemovedFromSessionEnv(t *testing.T) {
+	exec := &fakeExecutor{}
+	tm := NewTmux()
+	tm.exec = exec
+	ops := &tmuxStartOps{tm: tm}
+
+	env := map[string]string{
+		"GC_CITY":             "/tmp/city",
+		"GC_CONTROLLER_TOKEN": "",
+	}
+	if err := ops.respawnAgent("gc-test-token-pin", "/proj", "claude", env); err != nil {
+		t.Fatalf("respawnAgent: %v", err)
+	}
+	if len(exec.calls) != 2 {
+		t.Fatalf("tmux calls = %d (%v), want 2 (set-environment then respawn-pane)", len(exec.calls), exec.calls)
+	}
+
+	setEnv := strings.Join(exec.calls[0], " ")
+	if !strings.Contains(setEnv, "set-environment -t gc-test-token-pin -r GC_CONTROLLER_TOKEN") {
+		t.Errorf("first call = %q, want it to mark GC_CONTROLLER_TOKEN removed from the session env", setEnv)
+	}
+	if strings.Contains(setEnv, "-u GC_CONTROLLER_TOKEN") {
+		t.Errorf("first call = %q uses -u; that unsets the session entry and re-exposes the server's global value", setEnv)
+	}
+	if respawn := strings.Join(exec.calls[1], " "); !strings.Contains(respawn, "respawn-pane") {
+		t.Errorf("second call = %q, want respawn-pane", respawn)
+	}
+	// A non-empty key is a real value, not a withholding, and must not be
+	// marked for removal.
+	if strings.Contains(setEnv, "GC_CITY") {
+		t.Errorf("first call = %q marked GC_CITY removed; only empty-valued keys are withheld", setEnv)
+	}
+
+	t.Run("hosted beads namespace", func(t *testing.T) {
+		exec := &fakeExecutor{}
+		tm := NewTmux()
+		tm.exec = exec
+		ops := &tmuxStartOps{tm: tm}
+
+		env := map[string]string{
+			"BEADS_DB":               "",
+			"BEADS_DIR":              "/selected/.beads",
+			"BEADS_FUTURE_AUTHORITY": "",
+			"GC_CITY":                "/tmp/city",
+		}
+		if err := ops.respawnAgent("gc-test-beads-pin", "/proj", "claude", env); err != nil {
+			t.Fatalf("respawnAgent: %v", err)
+		}
+		if len(exec.calls) != 3 {
+			t.Fatalf("tmux calls = %d (%v), want two set-environment calls then respawn-pane", len(exec.calls), exec.calls)
+		}
+		for i, key := range []string{"BEADS_DB", "BEADS_FUTURE_AUTHORITY"} {
+			setEnv := strings.Join(exec.calls[i], " ")
+			if !strings.Contains(setEnv, "set-environment -t gc-test-beads-pin -r "+key) {
+				t.Errorf("call %d = %q, want %s marked removed from the session env", i, setEnv, key)
+			}
+		}
+		if respawn := strings.Join(exec.calls[2], " "); !strings.Contains(respawn, "respawn-pane") {
+			t.Errorf("third call = %q, want respawn-pane", respawn)
+		}
+	})
+}
+
+// No withheld CREDENTIAL means no extra tmux round-trip. The nesting-detection
+// flags every session env pins empty are deliberately included here: they are
+// not secrets, the `env -u` prefix already does what they need, and marking them
+// would put an extra tmux call on the hot path of every session in the repo for
+// no gain. Scope is a correctness property, not just a cost one — a marker
+// failure is fatal, so every key marked is a key that can fail a launch.
+func TestRespawnAgentSkipsSessionEnvMarkingWhenNoCredentialWithheld(t *testing.T) {
+	exec := &fakeExecutor{}
+	tm := NewTmux()
+	tm.exec = exec
+	ops := &tmuxStartOps{tm: tm}
+
+	env := map[string]string{
+		"GC_CITY":                "/tmp/city",
+		"CLAUDECODE":             "",
+		"CLAUDE_CODE_ENTRYPOINT": "",
+		"CODEX_THREAD_ID":        "",
+		"CODEX_CI":               "",
+	}
+	if err := ops.respawnAgent("gc-test-no-pins", "/proj", "claude", env); err != nil {
+		t.Fatalf("respawnAgent: %v", err)
+	}
+	if len(exec.calls) != 1 {
+		t.Fatalf("tmux calls = %d (%v), want 1 (respawn-pane only; nesting flags must not be marked)", len(exec.calls), exec.calls)
+	}
+}
+
+// vanishingSessionExecutor fails set-environment the way tmux 3.4 does when the
+// pane command has already exited and taken the session with it, and answers
+// has-session the way tmux does for a session that is gone.
+type vanishingSessionExecutor struct {
+	calls      [][]string
+	sessionOut string
+	sessionErr error
+}
+
+func (v *vanishingSessionExecutor) execute(args []string) (string, error) {
+	cp := make([]string, len(args))
+	copy(cp, args)
+	v.calls = append(v.calls, cp)
+	// runCtx prepends "-u" (and -L when socketed), so the subcommand is not args[0].
+	switch {
+	case slices.Contains(args, "set-environment"):
+		return "", wrapError(errors.New("exit status 1"), "no such session: gone", args)
+	case slices.Contains(args, "has-session"):
+		return v.sessionOut, v.sessionErr
+	}
+	return "", nil
+}
+
+func (v *vanishingSessionExecutor) executeCtx(_ context.Context, args []string) (string, error) {
+	return v.execute(args)
+}
+
+// A short-lived pane command can exit and take its session down while the marker
+// call is in flight. That is not a failure to apply the control: a session that
+// is gone has no pane to leak into and no warm box to respawn. Turning it into
+// an error made every normal creation of a fast-exiting session fail — racily,
+// and reported as "creating session", which named the wrong cause entirely.
+func TestMarkSessionEnvRemovedToleratesSessionThatAlreadyExited(t *testing.T) {
+	exec := &vanishingSessionExecutor{sessionErr: wrapError(errors.New("exit status 1"), "can't find session: gone", []string{"has-session"})}
+	tm := NewTmux()
+	tm.exec = exec
+
+	if err := tm.markSessionEnvRemoved("gone", []string{"GC_CONTROLLER_TOKEN"}); err != nil {
+		t.Fatalf("markSessionEnvRemoved on an exited session = %v, want nil", err)
+	}
+	if len(exec.calls) != 2 {
+		t.Fatalf("tmux calls = %d (%v), want 2 (set-environment then the has-session confirmation)", len(exec.calls), exec.calls)
+	}
+}
+
+// The converse, and the reason the tolerance is scoped to one condition rather
+// than made best-effort: on a session that is still alive, a marker failure is a
+// real failure to apply a security control and must not be swallowed.
+func TestMarkSessionEnvRemovedFailsClosedWhenSessionIsAlive(t *testing.T) {
+	exec := &vanishingSessionExecutor{sessionOut: ""}
+	tm := NewTmux()
+	tm.exec = exec
+
+	err := tm.markSessionEnvRemoved("alive", []string{"GC_CONTROLLER_TOKEN"})
+	if err == nil {
+		t.Fatal("markSessionEnvRemoved on a live session = nil, want the marker failure surfaced")
+	}
+	if !strings.Contains(err.Error(), "GC_CONTROLLER_TOKEN") {
+		t.Errorf("error = %v, want it to name the key that could not be withheld", err)
+	}
+}
+
+// The create path must ALSO plant the durable marker, not only the one-shot
+// prefix — otherwise the very first relaunch of a freshly provisioned box leaks.
+func TestNewSessionWithCommandAndEnvMarksUnsetKeysRemovedFromSessionEnv(t *testing.T) {
+	exec := &fakeExecutor{}
+	tm := NewTmux()
+	tm.exec = exec
+
+	env := map[string]string{
+		"GC_CITY":             "/tmp/city",
+		"CLAUDECODE":          "",
+		"GC_CONTROLLER_TOKEN": "",
+	}
+	if err := tm.NewSessionWithCommandAndEnv("gc-test-token-pin", "", "claude", env); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
+	}
+
+	var marked bool
+	for _, call := range exec.calls {
+		joined := strings.Join(call, " ")
+		if strings.Contains(joined, "set-environment") && strings.Contains(joined, "-r GC_CONTROLLER_TOKEN") {
+			marked = true
+		}
+		if strings.Contains(joined, "set-environment") && strings.Contains(joined, "CLAUDECODE") {
+			t.Errorf("new-session marked the nesting flag CLAUDECODE in the session env: %v", call)
+		}
+	}
+	if !marked {
+		t.Errorf("new-session never marked GC_CONTROLLER_TOKEN removed from the session env; the first respawn would leak it: %v", exec.calls)
 	}
 }

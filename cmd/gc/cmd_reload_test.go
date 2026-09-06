@@ -645,7 +645,7 @@ func TestReloadConfigTracedRescansOrdersWhenConfigRevisionUnchanged(t *testing.T
 		cfg:                cfg,
 		sp:                 runtime.NewFake(),
 		dops:               newDrainOps(runtime.NewFake()),
-		od:                 buildOrderDispatcherFromOrderSet(dir, cfg, initialOrders.Orders, events.Discard, &stderr),
+		od:                 buildOrderDispatcherFromOrderSet(nil, dir, cfg, initialOrders.Orders, events.Discard, &stderr),
 		orderSet:           initialOrders.Orders,
 		orderSetSignature:  initialOrders.Signature,
 		orderRescanEnabled: true,

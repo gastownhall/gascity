@@ -916,6 +916,65 @@ func TestRunStepsClampsFailedRunToCanceled(t *testing.T) {
 	}
 }
 
+// runChildBeadWithNeeds is runChildBead plus a Needs list, scoped to root
+// "sps-1p12" and status "open" (the only fixture that needs step-order data
+// today — ordering is independent of step status). Kept separate from
+// runChildBead (used by many status-focused tests) so adding Needs support
+// here can't perturb their fixtures.
+func runChildBeadWithNeeds(id string, needs ...string) beads.Bead {
+	b := runChildBead(id, "sps-1p12", "open", nil)
+	b.Needs = needs
+	return b
+}
+
+// TestRunStepsEndpointReturnsTopologicalOrder is the end-to-end regression
+// guard for gascity#4699: GET /runs/{id}/steps returned steps in arbitrary
+// fold order, not the pipeline's actual dependency order. This reproduces
+// the issue's own 9-step repro (declared prep -> author-en -> translate-ro
+// -> feature-pr -> review -> gate-merge-feature -> archive-materialize ->
+// merge-archive -> land) with bead-creation (and therefore fold) order
+// scrambled relative to declaration order, matching what the issue observed
+// on a real graph.v2 run.
+func TestRunStepsEndpointReturnsTopologicalOrder(t *testing.T) {
+	root := runRootBead("sps-1p12", "sps-baseline", "open")
+	s := newRunServer(t,
+		beadCreatedEvent(1, root),
+		beadCreatedEvent(2, runChildBeadWithNeeds("sps-1p12.merge-archive", "sps-1p12.archive-materialize")),
+		beadCreatedEvent(3, runChildBeadWithNeeds("sps-1p12.author-en", "sps-1p12.prep")),
+		beadCreatedEvent(4, runChildBeadWithNeeds("sps-1p12.translate-ro", "sps-1p12.author-en")),
+		beadCreatedEvent(5, runChildBeadWithNeeds("sps-1p12.gate-merge-feature", "sps-1p12.review")),
+		beadCreatedEvent(6, runChildBeadWithNeeds("sps-1p12.archive-materialize", "sps-1p12.gate-merge-feature")),
+		beadCreatedEvent(7, runChildBeadWithNeeds("sps-1p12.feature-pr", "sps-1p12.translate-ro")),
+		beadCreatedEvent(8, runChildBeadWithNeeds("sps-1p12.land", "sps-1p12.merge-archive")),
+		beadCreatedEvent(9, runChildBeadWithNeeds("sps-1p12.review", "sps-1p12.feature-pr")),
+		beadCreatedEvent(10, runChildBeadWithNeeds("sps-1p12.prep")),
+	)
+	out, err := s.humaHandleRunSteps(context.Background(), &RunStepsInput{
+		CityScope: CityScope{CityName: "test-city"},
+		RunID:     "sps-1p12",
+	})
+	if err != nil {
+		t.Fatalf("humaHandleRunSteps error: %v", err)
+	}
+	got := make([]string, len(out.Body.Steps))
+	for i, st := range out.Body.Steps {
+		got[i] = st.ID
+	}
+	want := []string{
+		"sps-1p12.prep", "sps-1p12.author-en", "sps-1p12.translate-ro", "sps-1p12.feature-pr",
+		"sps-1p12.review", "sps-1p12.gate-merge-feature", "sps-1p12.archive-materialize",
+		"sps-1p12.merge-archive", "sps-1p12.land",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("steps = %v, want %v (length mismatch)", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("steps = %v, want %v (diverges at index %d)", got, want, i)
+		}
+	}
+}
+
 // TestRunGetBeyondHistoricalCap guards the false-404 defect: with more completed
 // runs than the projection's historical lane cap, every run must still resolve by
 // id (the single-run path bypasses the list cap via BuildRunLane).

@@ -31,3 +31,29 @@ version = "sha:f895c0ff47d6ee9334ed282a416387eb5b084d24"
 [imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
 version = "sha:33d3a430a67d1782ad364556cb566bdb01d0afe3"
+
+# Defense-in-depth: wall-clock restart backstop for the always-on Claude-TUI
+# heartbeat agents (mayor, deacon, boot). The rig-scoped witness already
+# carries max_session_age in its pack agent.toml; these city-scoped agents did
+# not, and so could sit awake-but-idle for hours if idle detection ever
+# regresses (ga-07mi8 / gascity PR #5468 fixed the reconciler idle path;
+# ga-13yy0 tracks this backstop). max_session_age fires on wall-clock age,
+# independent of the activity clock, and the controller gates it on idle — a
+# mid-turn agent is left alone until it settles. 6h staggers these off the
+# witness's 5h and stays below the ~8h Claude Code (Bedrock) cred-cache
+# lifetime, so a preemptive cycle also refreshes creds. Cycling the mayor is
+# self-affecting but intended resilience.
+[[patches.agent]]
+name = "mayor"
+max_session_age = "6h"
+max_session_age_jitter = "15m"
+
+[[patches.agent]]
+name = "deacon"
+max_session_age = "6h"
+max_session_age_jitter = "15m"
+
+[[patches.agent]]
+name = "boot"
+max_session_age = "6h"
+max_session_age_jitter = "15m"
