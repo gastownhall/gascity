@@ -358,6 +358,10 @@ func checkCondition(a Order, opts TriggerOptions) TriggerResult {
 			}
 			return TriggerResult{Due: false, Reason: reason}
 		}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return TriggerResult{Due: false, Reason: fmt.Sprintf("condition: not met (exit %d)", exitErr.ExitCode())}
+		}
 		return TriggerResult{Due: false, Reason: fmt.Sprintf("check command failed: %v", err)}
 	}
 	return TriggerResult{Due: true, Reason: "condition: check passed (exit 0)"}
