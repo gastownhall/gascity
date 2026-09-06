@@ -100,7 +100,12 @@ invocation the generated work query builds, not with all of "bd ready" —
 "gc ready --help" lists what it takes. A city that relocates no class is
 unaffected.
 
-All arguments after "gc bd" are forwarded to bd unchanged. "heartbeat
+All arguments after "gc bd" are forwarded to bd unchanged, with one
+exception: a "list" that filters on the wisps (ephemeral) tier —
+"--type=molecule", "--type=wisp", "--mol-type", "--wisp-type" — also gets
+"--include-infra". bd skips that tier on any list without the flag, so those
+filters would otherwise return [] and exit 0 on a ledger full of live
+molecules. Every other list is forwarded as written. "heartbeat
 <issue-id>" forwards to bd's native heartbeat, which refreshes the claim's
 lease and fails loudly when the caller no longer owns it. gc adds one
 subcommand of its own: "release-if-current <issue-id> <assignee>", which
@@ -322,6 +327,11 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+
+	// A `list` that filters on the wisps tier reaches that tier only with
+	// --include-infra; without it bd answers [] and exit 0 on a ledger full of
+	// molecules. See bd_wisp_tier.go.
+	bdArgs = rewriteBdWispTierArgs(bdArgs)
 
 	// Refuse a dropped --set-metadata pair before any store work, so nothing is
 	// written and the exit code is honest. bd applies the subset and exits 0.

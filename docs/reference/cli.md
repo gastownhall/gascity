@@ -292,7 +292,12 @@ invocation the generated work query builds, not with all of "bd ready" —
 "gc ready --help" lists what it takes. A city that relocates no class is
 unaffected.
 
-All arguments after "gc bd" are forwarded to bd unchanged. "heartbeat
+All arguments after "gc bd" are forwarded to bd unchanged, with one
+exception: a "list" that filters on the wisps (ephemeral) tier —
+"--type=molecule", "--type=wisp", "--mol-type", "--wisp-type" — also gets
+"--include-infra". bd skips that tier on any list without the flag, so those
+filters would otherwise return [] and exit 0 on a ledger full of live
+molecules. Every other list is forwarded as written. "heartbeat
 &lt;issue-id&gt;" forwards to bd's native heartbeat, which refreshes the claim's
 lease and fails loudly when the caller no longer owns it. gc adds one
 subcommand of its own: "release-if-current &lt;issue-id&gt; &lt;assignee&gt;", which
