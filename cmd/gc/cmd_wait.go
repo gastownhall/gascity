@@ -1210,6 +1210,7 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 			SessionID:         sessionID,
 			ContinuationEpoch: wait.RegisteredEpoch,
 			Reference:         &nudgeReference{Kind: "bead", ID: wait.ID},
+			Provenance:        &nudgeProvenance{Sender: "wait-controller", Target: waitNudgeAgent(sessionInfo), Action: "wait-ready"},
 		})
 		if err := enqueueQueuedNudgeWithStore(cityPath, nudges, item); err != nil {
 			return err

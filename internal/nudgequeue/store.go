@@ -66,7 +66,8 @@ type NudgeShadow struct {
 	CloseReason string
 	// Reference is the optional decoded reference (the previously write-only
 	// reference_json field — this decoder is the first reader of it).
-	Reference *Reference
+	Reference  *Reference
+	Provenance *Provenance
 	// Agent / SessionID / Source / Message are carried verbatim from metadata.
 	Agent     string
 	SessionID string
@@ -121,6 +122,12 @@ func decodeNudgeItem(b beads.Bead) NudgeShadow {
 		var ref Reference
 		if err := json.Unmarshal([]byte(raw), &ref); err == nil {
 			s.Reference = &ref
+		}
+	}
+	if raw := b.Metadata["provenance_json"]; raw != "" {
+		var provenance Provenance
+		if err := json.Unmarshal([]byte(raw), &provenance); err == nil {
+			s.Provenance = &provenance
 		}
 	}
 	if raw := b.Metadata["deliver_after"]; raw != "" {
@@ -180,6 +187,7 @@ func (s *Store) Save(item Item) (beadID string, created bool, err error) {
 		"deliver_after":      item.DeliverAfter.UTC().Format(time.RFC3339),
 		"expires_at":         item.ExpiresAt.UTC().Format(time.RFC3339),
 		"reference_json":     marshalReference(item.Reference),
+		"provenance_json":    marshalProvenance(item.Provenance),
 		"last_attempt_at":    formatOptionalTime(item.LastAttemptAt),
 		"last_error":         item.LastError,
 		"terminal_reason":    "",
@@ -537,6 +545,18 @@ func marshalReference(ref *Reference) string {
 		return ""
 	}
 	data, err := json.Marshal(ref)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+// marshalProvenance сохраняет в shadow-bead те же данные аудита, что и в очереди.
+func marshalProvenance(provenance *Provenance) string {
+	if provenance == nil {
+		return ""
+	}
+	data, err := json.Marshal(provenance)
 	if err != nil {
 		return ""
 	}

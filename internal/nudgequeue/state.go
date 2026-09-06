@@ -27,25 +27,34 @@ type Reference struct {
 	ID   string `json:"id"`
 }
 
+// Provenance фиксирует доверенный путь команды, создавший отложенный nudge.
+// Она проверяется перед инъекцией промпта: запись в очереди сама по себе не команда.
+type Provenance struct {
+	Sender string `json:"sender"`
+	Target string `json:"target"`
+	Action string `json:"action"`
+}
+
 // Item is a persisted deferred nudge.
 type Item struct {
-	ID                string     `json:"id"`
-	BeadID            string     `json:"bead_id,omitempty"`
-	Agent             string     `json:"agent"`
-	SessionID         string     `json:"session_id,omitempty"`
-	ContinuationEpoch string     `json:"continuation_epoch,omitempty"`
-	Source            string     `json:"source"`
-	Message           string     `json:"message"`
-	Reference         *Reference `json:"reference,omitempty"`
-	CreatedAt         time.Time  `json:"created_at"`
-	DeliverAfter      time.Time  `json:"deliver_after"`
-	ExpiresAt         time.Time  `json:"expires_at"`
-	Attempts          int        `json:"attempts,omitempty"`
-	LastAttemptAt     time.Time  `json:"last_attempt_at,omitempty"`
-	LastError         string     `json:"last_error,omitempty"`
-	ClaimedAt         time.Time  `json:"claimed_at,omitempty"`
-	LeaseUntil        time.Time  `json:"lease_until,omitempty"`
-	DeadAt            time.Time  `json:"dead_at,omitempty"`
+	ID                string      `json:"id"`
+	BeadID            string      `json:"bead_id,omitempty"`
+	Agent             string      `json:"agent"`
+	SessionID         string      `json:"session_id,omitempty"`
+	ContinuationEpoch string      `json:"continuation_epoch,omitempty"`
+	Source            string      `json:"source"`
+	Message           string      `json:"message"`
+	Reference         *Reference  `json:"reference,omitempty"`
+	Provenance        *Provenance `json:"provenance,omitempty"`
+	CreatedAt         time.Time   `json:"created_at"`
+	DeliverAfter      time.Time   `json:"deliver_after"`
+	ExpiresAt         time.Time   `json:"expires_at"`
+	Attempts          int         `json:"attempts,omitempty"`
+	LastAttemptAt     time.Time   `json:"last_attempt_at,omitempty"`
+	LastError         string      `json:"last_error,omitempty"`
+	ClaimedAt         time.Time   `json:"claimed_at,omitempty"`
+	LeaseUntil        time.Time   `json:"lease_until,omitempty"`
+	DeadAt            time.Time   `json:"dead_at,omitempty"`
 }
 
 // State is the persisted nudge queue snapshot.

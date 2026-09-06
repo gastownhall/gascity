@@ -26,10 +26,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// nudgeFunc is an optional callback for nudging an agent after sending or
-// replying to mail. When non-nil, it is called with the recipient name.
-// Errors are non-fatal.
-type nudgeFunc func(recipient string) error
+// nudgeFunc после отправки связывает nudge с получателем и точным ID письма.
+// Ошибка уведомления не отменяет уже сохранённое письмо.
+type nudgeFunc func(recipient, messageID string) error
 
 const (
 	mailInjectMaxMessages          = 3
@@ -114,12 +113,12 @@ func summarizeMailMessage(m mail.Message) mailMessageSummary {
 }
 
 func newMailNudgeFunc(sender string) nudgeFunc {
-	return func(recipient string) error {
+	return func(recipient, messageID string) error {
 		target, err := resolveNudgeTarget(recipient, io.Discard)
 		if err != nil {
 			return err
 		}
-		return sendMailNotify(target, sender)
+		return sendMailNotifyWithMessage(target, sender, messageID)
 	}
 }
 
@@ -1891,7 +1890,7 @@ func doMailSendJSON(mp mail.Provider, rec events.Recorder, validRecipients map[s
 	// Nudge recipient if requested and recipient is not human.
 	notified := false
 	if nudgeFn != nil && to != "human" {
-		if err := nudgeFn(to); err != nil {
+		if err := nudgeFn(to, m.ID); err != nil {
 			fmt.Fprintf(stderr, "gc mail send: nudge failed: %v\n", err) //nolint:errcheck // best-effort stderr
 		} else {
 			notified = true
@@ -1960,7 +1959,7 @@ func doMailSendAllJSON(mp mail.Provider, rec events.Recorder, validRecipients ma
 		}
 
 		if nudgeFn != nil {
-			if err := nudgeFn(to); err != nil {
+			if err := nudgeFn(to, m.ID); err != nil {
 				fmt.Fprintf(stderr, "gc mail send --all: nudge %s failed: %v\n", to, err) //nolint:errcheck // best-effort stderr
 			} else {
 				notified = true
@@ -2295,7 +2294,7 @@ func doMailReplyJSON(mp mail.Provider, rec events.Recorder, id, sender, subject,
 
 	notified := false
 	if nudgeFn != nil && reply.To != "human" {
-		if err := nudgeFn(reply.To); err != nil {
+		if err := nudgeFn(reply.To, reply.ID); err != nil {
 			fmt.Fprintf(stderr, "gc mail reply: nudge failed: %v\n", err) //nolint:errcheck // best-effort stderr
 		} else {
 			notified = true

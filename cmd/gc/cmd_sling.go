@@ -1671,7 +1671,9 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 		}
 	}
 
-	if err := enqueueQueuedNudgeWithStore(target.cityPath, cliNudgesStore(store, target.cfg, target.cityPath), newQueuedNudgeWithOptions(target.agent.QualifiedName(), msg, "sling", now, queuedNudgeOptionsFromTarget(target))); err != nil {
+	opts := queuedNudgeOptionsFromTarget(target)
+	opts.Provenance = &nudgeProvenance{Sender: "sling", Target: target.agent.QualifiedName(), Action: "work-slung"}
+	if err := enqueueQueuedNudgeWithStore(target.cityPath, cliNudgesStore(store, target.cfg, target.cityPath), newQueuedNudgeWithOptions(target.agent.QualifiedName(), msg, "sling", now, opts)); err != nil {
 		telemetry.RecordNudge(context.Background(), target.agent.QualifiedName(), err)
 		fmt.Fprintf(stderr, "warning: bead routed but nudge failed: %v\n", err) //nolint:errcheck // best-effort
 		return
