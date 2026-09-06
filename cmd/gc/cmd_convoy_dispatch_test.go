@@ -2381,6 +2381,51 @@ func TestQuarantineControlFailureBeadClosesWithDiagnostics(t *testing.T) {
 	}
 }
 
+func TestQuarantineControlFailureBeadSkipsUnscopedDownstream(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow},
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	control, err := store.Create(beads.Bead{
+		Title: "control",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:       beadmeta.KindRetry,
+			beadmeta.RootBeadIDMetadataKey: root.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+	downstream, err := store.Create(beads.Bead{
+		Title: "plan",
+		Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey: root.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create downstream: %v", err)
+	}
+	if err := store.DepAdd(downstream.ID, control.ID, "blocks"); err != nil {
+		t.Fatalf("add dependency: %v", err)
+	}
+
+	if err := quarantineControlFailureBead(store, control.ID, fmt.Errorf("%w: invalid spec", dispatch.ErrControlGraphMalformed)); err != nil {
+		t.Fatalf("quarantineControlFailureBead: %v", err)
+	}
+
+	got, err := store.Get(downstream.ID)
+	if err != nil {
+		t.Fatalf("get downstream: %v", err)
+	}
+	if got.Status != "closed" || got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeSkipped {
+		t.Fatalf("downstream = status %q outcome %q, want closed/skipped", got.Status, got.Metadata[beadmeta.OutcomeMetadataKey])
+	}
+}
+
 func TestQuarantineControlFailureBeadTruncatesReasonAtUTF8Boundary(t *testing.T) {
 	store := beads.NewMemStore()
 	control, err := store.Create(beads.Bead{

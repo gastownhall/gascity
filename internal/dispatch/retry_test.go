@@ -338,6 +338,18 @@ func TestClassifyRetryAttemptCanceledIsTerminalNonRetry(t *testing.T) {
 	}
 }
 
+func TestClassifyRetryAttemptSkippedIsTerminalNonRetry(t *testing.T) {
+	t.Parallel()
+
+	got := classifyRetryAttempt(beads.Bead{
+		Metadata: map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped},
+	})
+	want := retryEvalResult{Outcome: "canceled"}
+	if got != want {
+		t.Fatalf("classifyRetryAttempt(skipped) = %+v, want %+v", got, want)
+	}
+}
+
 // TestClassifyRetryAttemptConsumesTypedCoordinatorOutcome pins strict validation
 // of the typed close that reproduces gc-e2xqk.
 func TestClassifyRetryAttemptConsumesTypedCoordinatorOutcome(t *testing.T) {

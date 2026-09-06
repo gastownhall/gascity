@@ -354,9 +354,11 @@ func classifyRetryAttempt(subject beads.Bead) retryEvalResult {
 		default:
 			return retryEvalResult{Outcome: "transient", Reason: "unknown_failure_class"}
 		}
-	case beadmeta.OutcomeCanceled:
-		// A canceled attempt subject (its run was canceled via the API) is a
-		// terminal non-failure: do not schedule another attempt.
+	case beadmeta.OutcomeCanceled, beadmeta.OutcomeSkipped:
+		// A canceled or skipped attempt subject is a terminal non-failure: do
+		// not schedule another attempt. Skipped normally closes its logical
+		// control too; accepting it here keeps a partially observed graph from
+		// resurrecting downstream work.
 		return retryEvalResult{Outcome: "canceled"}
 	case "":
 		return retryEvalResult{Outcome: "transient", Reason: "missing_outcome"}

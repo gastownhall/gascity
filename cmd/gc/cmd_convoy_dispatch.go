@@ -463,6 +463,13 @@ func quarantineControlFailureBead(store beads.Store, beadID string, cause error)
 		failureReason = "malformed_control_graph"
 	}
 	reason := controlQuarantineReason(cause, failureReason)
+	control, err := store.Get(beadID)
+	if err != nil {
+		return fmt.Errorf("loading control before quarantine: %w", err)
+	}
+	if _, err := dispatch.SkipBlockedWorkflowDependents(store, control); err != nil {
+		return fmt.Errorf("skipping downstream before quarantine: %w", err)
+	}
 	status := "closed"
 	if err := store.Update(beadID, beads.UpdateOpts{
 		Status: &status,
