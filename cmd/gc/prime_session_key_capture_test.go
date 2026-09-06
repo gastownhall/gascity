@@ -69,6 +69,9 @@ func TestPersistPrimeHookProviderSessionKey_ClaudeHookStdinCaptured(t *testing.T
 	isolateProviderSessionEnv(t)
 
 	const claudeSessionID = "8273e9ca-ff09-4260-a03a-1f8534cc1ba5"
+	// The success line is an opt-in operator diagnostic; without GC_DEBUG the
+	// hook stays quiet so it cannot land in the agent's input box (#5564).
+	t.Setenv("GC_DEBUG", "1")
 	var stderr bytes.Buffer
 	persistPrimeHookProviderSessionKey(claudeSessionID, &stderr)
 
@@ -240,4 +243,26 @@ func reloadSessionKey(t *testing.T, cityDir, id string) string {
 		t.Fatalf("get session bead: %v", err)
 	}
 	return strings.TrimSpace(b.Metadata["session_key"])
+}
+
+// The resume key must still be captured with GC_DEBUG unset, and nothing may
+// reach stderr: provider hooks forward a child's stderr into the agent's
+// terminal, so a success announcement lands mid-input-box (#5564).
+func TestPersistPrimeHookProviderSessionKey_QuietWithoutDebug(t *testing.T) {
+	cityDir, store := primeCaptureTestStore(t)
+	id := createCaptureSessionBead(t, store, "claude")
+	t.Setenv("GC_SESSION_ID", id)
+	isolateProviderSessionEnv(t)
+	t.Setenv("GC_DEBUG", "")
+
+	const claudeSessionID = "8273e9ca-ff09-4260-a03a-1f8534cc1ba5"
+	var stderr bytes.Buffer
+	persistPrimeHookProviderSessionKey(claudeSessionID, &stderr)
+
+	if got := reloadSessionKey(t, cityDir, id); got != claudeSessionID {
+		t.Fatalf("session_key = %q, want %q; quieting the diagnostic must not change capture", got, claudeSessionID)
+	}
+	if out := stderr.String(); out != "" {
+		t.Errorf("hook wrote to stderr without GC_DEBUG, which reaches the agent terminal: %q", out)
+	}
 }
