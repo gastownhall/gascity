@@ -302,6 +302,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bound or explicitly configured endpoints keep bd's own output unchanged
   (gastownhall/gascity#1374).
 
+- **`gc init` provider readiness now finds Nix-installed CLIs.** Provider
+  readiness probes (`gc init --default-provider gemini` and friends) search a
+  deterministic, user-aware set of install directories rather than the
+  ambient `$PATH`, so a CLI installed via Nix (`~/.nix-profile/bin` for
+  classic `nix-env`, `~/.local/state/nix/profiles/profile/bin` for the newer
+  `nix profile install`) was reported as "not installed" even when it was on
+  the shell's `PATH`. Both locations are now included, matching the existing
+  npm/pnpm/yarn/cargo/nvm handling in `internal/searchpath`. Fixes #3962.
+
 - **ACP activity is now available across process boundaries.** ACP
   `session/update` timestamps are published through an atomic, coalesced
   sidecar, allowing a process other than the session owner to report
