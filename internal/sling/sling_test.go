@@ -1079,6 +1079,56 @@ func TestDoSlingBeadToFixedAgent(t *testing.T) {
 	}
 }
 
+// TestDoSlingFailsWhenBeadNotVisibleToTargetWorkQuery covers the stranded-bead
+// bug (gastownhall/gascity issue behind ga-wvtgnv): routing succeeds but the
+// target's own work_query — e.g. a pack.toml override that filters on a label
+// this bead lacks — never surfaces the bead, so no worker ever picks it up.
+// DoSling must fail loudly instead of returning success.
+func TestDoSlingFailsWhenBeadNotVisibleToTargetWorkQuery(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	deps := testDeps(cfg, sp, runner.run)
+	deps.Store = seededStore("BL-42")
+	deps.WorkQueryProbe = func(_ config.Agent) (string, error) {
+		// Simulates a work_query whose label filter excludes this bead.
+		return "[]", nil
+	}
+	_, err := DoSling(testOpts(a, "BL-42"), deps, nil)
+	if err == nil {
+		t.Fatal("DoSling error = nil, want error: bead routed but not visible to target's work_query")
+	}
+	if !strings.Contains(err.Error(), "BL-42") || !strings.Contains(err.Error(), "mayor") || !strings.Contains(err.Error(), "work_query") {
+		t.Errorf("DoSling error = %q, want it to name the bead, the target, and work_query", err.Error())
+	}
+}
+
+// TestDoSlingSucceedsWhenBeadVisibleToTargetWorkQuery guards against a false
+// positive from the new postcondition check: when the target's work_query
+// output does include the routed bead, DoSling must succeed exactly as it
+// did before the postcondition check existed.
+func TestDoSlingSucceedsWhenBeadVisibleToTargetWorkQuery(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	deps := testDeps(cfg, sp, runner.run)
+	deps.Store = seededStore("BL-42")
+	deps.WorkQueryProbe = func(_ config.Agent) (string, error) {
+		return `[{"id":"BL-42","status":"open"}]`, nil
+	}
+	result, err := DoSling(testOpts(a, "BL-42"), deps, nil)
+	if err != nil {
+		t.Fatalf("DoSling error: %v", err)
+	}
+	if result.BeadID != "BL-42" {
+		t.Errorf("BeadID = %q, want BL-42", result.BeadID)
+	}
+}
+
 func TestDoSlingSuspendedAgentWarns(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()

@@ -2,6 +2,7 @@ package sling
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -788,7 +789,68 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 		result.NudgeAgent = &a
 	}
 
+	// Postcondition (ga-wvtgnv): verify the routed bead is actually visible
+	// to the target's own work_query, so a pack.toml work_query override
+	// that filters on labels/metadata sling never set can't silently strand
+	// the bead. Skip when no probe is wired (nil = skip, e.g. most tests and
+	// callers), on dry-run (nothing was actually routed to verify), or under
+	// Force (which already tolerates routing a bead the local store/query
+	// may not resolve -- see the auto-convoy Force tolerance above).
+	if deps.WorkQueryProbe != nil && !opts.DryRun && !opts.Force {
+		target := agentutil.RoutedToIdentity(&a)
+		output, err := deps.WorkQueryProbe(a)
+		switch {
+		case errors.Is(err, ErrSkipWorkQueryProbe):
+			// Probe explicitly opted out of checking this call; treat as satisfied.
+		case err != nil:
+			return result, fmt.Errorf("sling: checking %s visible to %s's work_query: %w", beadID, target, err)
+		case !workQueryContainsBead(output, beadID):
+			return result, fmt.Errorf("sling: %s routed to %s but not visible to its work_query "+
+				"after routing — check labels/metadata/holds against the query "+
+				"%s actually runs", beadID, target, target)
+		}
+	}
+
 	return result, nil
+}
+
+// workQueryContainsBead reports whether beadID appears in a work_query's
+// output. It mirrors workQueryHasReadyWork's JSON-array/object/no-work-line
+// parsing (cmd/gc/cmd_hook.go) but matches a specific bead ID within the
+// parsed structure rather than treating any non-empty output as a hit, so a
+// bead ID that happens to be a substring of another bead's ID or fields
+// cannot produce a false match.
+func workQueryContainsBead(output, beadID string) bool {
+	output = strings.TrimSpace(output)
+	if output == "" || strings.Contains(output, "No ready work found") {
+		return false
+	}
+	var decoded any
+	if err := json.Unmarshal([]byte(output), &decoded); err != nil {
+		return false
+	}
+	switch v := decoded.(type) {
+	case []any:
+		for _, item := range v {
+			if workQueryEntryIsBead(item, beadID) {
+				return true
+			}
+		}
+		return false
+	case map[string]any:
+		return workQueryEntryIsBead(v, beadID)
+	default:
+		return false
+	}
+}
+
+func workQueryEntryIsBead(item any, beadID string) bool {
+	m, ok := item.(map[string]any)
+	if !ok {
+		return false
+	}
+	id, ok := m["id"].(string)
+	return ok && id == beadID
 }
 
 func validateBuiltInRouteStoreReachable(deps SlingDeps, beadID string, a config.Agent) error {

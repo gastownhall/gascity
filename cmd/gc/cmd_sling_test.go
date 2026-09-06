@@ -291,7 +291,21 @@ func testDeps(cfg *config.City, sp runtime.Provider, runner SlingRunner) (slingD
 		Runner:   runner,
 		Store:    newSlingTestStore(),
 		StoreRef: "city:test-city",
+		// These tests don't model a real work_query (and many swap Store
+		// out after this call returns, which a Store-backed fake can't
+		// track -- see ga-wvtgnv). Opt out of the postcondition check
+		// explicitly rather than faking visibility.
+		WorkQueryProbe: skipWorkQueryProbe,
 	}, &stdout, &stderr
+}
+
+// skipWorkQueryProbe is the default WorkQueryProbe (see SlingDeps.WorkQueryProbe)
+// for cmd/gc's sling tests: it opts every call out of the routed-bead
+// visibility postcondition via sling.ErrSkipWorkQueryProbe, since these
+// fixtures don't model a real work_query. Tests that specifically exercise
+// the postcondition set deps.WorkQueryProbe themselves.
+func skipWorkQueryProbe(config.Agent) (string, error) {
+	return "", sling.ErrSkipWorkQueryProbe
 }
 
 //nolint:unused // retained for future sling path-resolution scenarios
@@ -2656,6 +2670,10 @@ func TestCmdSlingHyphenatedRigPrefixMultiDashExistingBeadDoesNotOrphan(t *testin
 func TestCmdSlingOneArgHyphenatedPrefixMultiDashExistingBeadUsesDefaultTarget(t *testing.T) {
 	beadID := "agent-diagnostics-spawn-storm"
 	cityDir, rigDir, _ := setupCmdSlingHyphenatedRigPrefixBeadFixture(t, beadID, "agent-diagnostics")
+	// This fixture's file store isn't visible to a real bd subprocess (see
+	// ga-wvtgnv); opt out of the postcondition check like doSling's testDeps does.
+	restore := SetSlingWorkQueryProbeForTest(skipWorkQueryProbe)
+	defer restore()
 
 	var stdout, stderr bytes.Buffer
 	code := cmdSling(
@@ -2827,6 +2845,10 @@ func assertStoreHasNoBeadTitle(t *testing.T, cityDir, storeDir, beadTitle string
 
 func TestCmdSlingConfiguredPrefixAllAlphaExistingBeadUsesSelectedPrefixStore(t *testing.T) {
 	cityDir, frontendDir := setupCmdSlingConfiguredPrefixAllAlphaFrontendFixture(t, false, true)
+	// This fixture's file store isn't visible to a real bd subprocess (see
+	// ga-wvtgnv); opt out of the postcondition check like doSling's testDeps does.
+	restore := SetSlingWorkQueryProbeForTest(skipWorkQueryProbe)
+	defer restore()
 
 	var stdout, stderr bytes.Buffer
 	code := cmdSling(
@@ -2867,6 +2889,10 @@ func TestCmdSlingConfiguredPrefixAllAlphaExistingBeadUsesSelectedPrefixStore(t *
 
 func TestCmdSlingOneArgConfiguredPrefixAllAlphaExistingBeadUsesDefaultTarget(t *testing.T) {
 	cityDir, frontendDir := setupCmdSlingConfiguredPrefixAllAlphaFrontendFixture(t, true, true)
+	// This fixture's file store isn't visible to a real bd subprocess (see
+	// ga-wvtgnv); opt out of the postcondition check like doSling's testDeps does.
+	restore := SetSlingWorkQueryProbeForTest(skipWorkQueryProbe)
+	defer restore()
 
 	var stdout, stderr bytes.Buffer
 	code := cmdSling(
@@ -3081,6 +3107,10 @@ func TestCmdSlingMultiDashBeadIDRoutesExistingBead(t *testing.T) {
 	// gc sling target fo-spawn-storm must route the existing bead and must
 	// not create a new inline bead, when "fo-spawn-storm" exists in the store.
 	cityDir, rigDir := setupCmdSlingMultiDashBeadFixture(t, true)
+	// This fixture's file store isn't visible to a real bd subprocess (see
+	// ga-wvtgnv); opt out of the postcondition check like doSling's testDeps does.
+	restore := SetSlingWorkQueryProbeForTest(skipWorkQueryProbe)
+	defer restore()
 
 	var stdout, stderr bytes.Buffer
 	code := cmdSling(
@@ -3124,6 +3154,10 @@ func TestCmdSlingMultiDashBeadIDRoutesExistingBead(t *testing.T) {
 
 func TestCmdSlingOneArgMultiDashExistingBeadUsesDefaultTarget(t *testing.T) {
 	cityDir, rigDir := setupCmdSlingMultiDashBeadFixture(t, true)
+	// This fixture's file store isn't visible to a real bd subprocess (see
+	// ga-wvtgnv); opt out of the postcondition check like doSling's testDeps does.
+	restore := SetSlingWorkQueryProbeForTest(skipWorkQueryProbe)
+	defer restore()
 
 	var stdout, stderr bytes.Buffer
 	code := cmdSling(
@@ -3296,6 +3330,10 @@ dir = "live_docs"
 		t.Fatalf("WriteFile(city.toml): %v", err)
 	}
 	t.Chdir(cityDir)
+	// This fixture's file store isn't visible to a real bd subprocess (see
+	// ga-wvtgnv); opt out of the postcondition check like doSling's testDeps does.
+	restore := SetSlingWorkQueryProbeForTest(skipWorkQueryProbe)
+	defer restore()
 
 	var stdout, stderr bytes.Buffer
 	code := cmdSling(
@@ -9278,6 +9316,10 @@ func TestCmdSlingMultiDefaultTargetsPicksFromList(t *testing.T) {
 	cityDir, rigDir := setupCmdSlingMultiDefaultTargetsFixture(t,
 		[]string{"foundations/worker-a", "foundations/worker-b"},
 	)
+	// This fixture's file store isn't visible to a real bd subprocess (see
+	// ga-wvtgnv); opt out of the postcondition check like doSling's testDeps does.
+	restore := SetSlingWorkQueryProbeForTest(skipWorkQueryProbe)
+	defer restore()
 
 	var stdout, stderr bytes.Buffer
 	code := cmdSling(
@@ -9313,6 +9355,10 @@ func TestCmdSlingMultiDefaultTargetsSingleEntry(t *testing.T) {
 	cityDir, rigDir := setupCmdSlingMultiDefaultTargetsFixture(t,
 		[]string{"foundations/worker-a"},
 	)
+	// This fixture's file store isn't visible to a real bd subprocess (see
+	// ga-wvtgnv); opt out of the postcondition check like doSling's testDeps does.
+	restore := SetSlingWorkQueryProbeForTest(skipWorkQueryProbe)
+	defer restore()
 
 	var stdout, stderr bytes.Buffer
 	code := cmdSling(

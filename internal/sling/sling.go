@@ -155,7 +155,23 @@ type SlingDeps struct {
 	// DirectSessionResolver optionally materializes direct graph assignee
 	// targets to concrete session bead IDs.
 	DirectSessionResolver func(store beads.Store, cityName, cityPath string, cfg *config.City, target, rigContext string) (string, bool, error)
+	// WorkQueryProbe runs the target agent's own work_query and returns its
+	// raw output, mirroring the probe `gc hook` issues for that agent. Used
+	// by finalize's post-routing postcondition check to confirm a routed
+	// bead is actually visible to whatever will pick it up next. nil = skip
+	// the postcondition check entirely. A non-nil probe that wants to opt
+	// out of a specific call (e.g. a caller whose fixture doesn't model a
+	// real work_query) can return ErrSkipWorkQueryProbe instead of wiring a
+	// probe that fakes visibility.
+	WorkQueryProbe func(a config.Agent) (output string, err error)
 }
+
+// ErrSkipWorkQueryProbe is a sentinel a WorkQueryProbe implementation can
+// return to explicitly opt out of the routed-bead visibility postcondition
+// for one call, distinct from a nil WorkQueryProbe (which opts out for the
+// whole sling operation). Intended for callers that wire a probe for other
+// reasons but have no real work_query to check against.
+var ErrSkipWorkQueryProbe = errors.New("sling: work query probe skipped")
 
 // graphStore returns the store that owns the graph (workflow/v2) beads this
 // sling materializes. It is the create-side seam for the workflow molecule:

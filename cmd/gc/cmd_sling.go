@@ -214,6 +214,25 @@ func SetSlingTargetIndexForTest(fn func(n int) int) (restore func()) {
 	return func() { slingTargetIndex = prev }
 }
 
+// slingWorkQueryProbeOverride lets tests replace the WorkQueryProbe that
+// populateSlingDepsCallbacks would otherwise install on cmdSling's
+// internally-constructed slingDeps. cmdSling takes no deps parameter, so
+// callers that build a slingDeps themselves (doSling + testDeps) can already
+// set deps.WorkQueryProbe directly -- this seam exists for cmdSling-level
+// tests, which have no other way to opt out of the real, shell-executing
+// cliWorkQueryProbe. Default nil: production and any test that doesn't set
+// it get the real probe. See SetSlingWorkQueryProbeForTest.
+var slingWorkQueryProbeOverride func(a config.Agent) (string, error)
+
+// SetSlingWorkQueryProbeForTest overrides the WorkQueryProbe cmdSling installs
+// on its internally-constructed slingDeps and returns a restore func. Test
+// only -- mirrors SetSlingTargetIndexForTest.
+func SetSlingWorkQueryProbeForTest(fn func(a config.Agent) (string, error)) (restore func()) {
+	prev := slingWorkQueryProbeOverride
+	slingWorkQueryProbeOverride = fn
+	return func() { slingWorkQueryProbeOverride = prev }
+}
+
 // inferSling1ArgTarget resolves the routing target for a 1-arg `gc sling <bead>`
 // from the bead's rig default_sling_target(s), probing the existing source bead
 // for its prefix. It is the store-touching pre-core orchestration extracted from
@@ -696,6 +715,52 @@ func populateSlingDepsCallbacks(deps *slingDeps) {
 	deps.Notify = &cliNotifier{}
 	deps.DirectSessionResolver = cliDirectSessionResolver
 	deps.Router = cliBeadRouter{deps: deps}
+	// WorkQueryProbe alone gets a nil-guard: its nil state has an established
+	// "skip the postcondition check" meaning (see SlingDeps.WorkQueryProbe),
+	// and test infra relies on being able to install its own probe instead of
+	// this real, shell-executing one -- typically one that returns
+	// sling.ErrSkipWorkQueryProbe, since a fake modeling real work_query
+	// visibility off the test's Store can't track callers that reassign
+	// deps.Store after the deps are built. Callers that build a slingDeps
+	// themselves (doSling + cmd_sling_test.go's testDeps) set
+	// deps.WorkQueryProbe directly, so this nil-guard is already a no-op for
+	// them; cmdSling builds its own deps with no caller-visible seam, so it
+	// additionally consults slingWorkQueryProbeOverride (see
+	// SetSlingWorkQueryProbeForTest) before falling back to the real probe.
+	// The other callback fields above have no such caller-visible nil
+	// semantic and are safe to always overwrite.
+	if deps.WorkQueryProbe == nil {
+		if slingWorkQueryProbeOverride != nil {
+			deps.WorkQueryProbe = slingWorkQueryProbeOverride
+		} else {
+			deps.WorkQueryProbe = cliWorkQueryProbe(deps.CityPath, deps.CityName, deps.Cfg)
+		}
+	}
+}
+
+// cliWorkQueryProbe implements sling.SlingDeps.WorkQueryProbe by running the
+// target agent's own work_query, reusing the exact env/dir/timeout resolution
+// gc hook already uses (hookQueryEnv + shellWorkQueryWithEnv) so the
+// postcondition check sees precisely what a real hook poll would see.
+func cliWorkQueryProbe(cityPath, cityName string, cfg *config.City) func(a config.Agent) (string, error) {
+	return func(a config.Agent) (string, error) {
+		workQuery := a.EffectiveWorkQueryForBeads(cfg.Beads)
+		workQuery = expandAgentCommandTemplate(cityPath, cityName, &a, cfg.Rigs, "work_query", workQuery, os.Stderr)
+		workDir := agentCommandDir(cityPath, &a, cfg.Rigs)
+		overrides, err := hookQueryEnv(cityPath, cfg, &a)
+		if err != nil {
+			return "", err
+		}
+		resolvedAgentName := a.QualifiedName()
+		overrides["GC_AGENT"] = resolvedAgentName
+		overrides["GC_ALIAS"] = resolvedAgentName
+		overrides["GC_SESSION_NAME"] = cliSessionName(cityPath, cityName, resolvedAgentName, cfg.Workspace.SessionTemplate)
+		overrides["GC_SESSION_ID"] = ""
+		overrides["GC_SESSION_ORIGIN"] = ""
+		overrides["GC_TEMPLATE"] = ""
+		queryEnv := mergeRuntimeEnv(os.Environ(), overrides)
+		return shellWorkQueryWithEnv(workQuery, workDir, queryEnv)
+	}
 }
 
 func cliDirectSessionResolver(store beads.Store, cityName, cityPath string, cfg *config.City, target, rigContext string) (string, bool, error) {
