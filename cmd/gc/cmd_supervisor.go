@@ -1653,14 +1653,22 @@ type panicRecord struct {
 // backoff for cities that fail prepareCityForSupervisor or config load.
 // The configMod field lets us reset backoff when the user fixes their config.
 type initFailRecord struct {
-	count     int
-	backoff   time.Time
-	configMod time.Time // mtime of city.toml at last failure
-	lastError string    // last error message for user-facing feedback
-	dirAbsent int       // consecutive failures where the city directory is gone
+	count      int
+	backoff    time.Time
+	configMod  time.Time // mtime of city.toml at last failure
+	lastError  string    // last error message for user-facing feedback
+	dirAbsent  int       // consecutive failures where the city directory is gone
+	configFail int       // consecutive failures where city.toml itself fails to load
 }
 
 const staleCityDirAbsentThreshold = 3
+
+// staleCityConfigLoadFailThreshold mirrors staleCityDirAbsentThreshold: a
+// city whose city.toml fails to load for this many consecutive reconcile
+// attempts is exactly as dead as one whose directory has vanished, and its
+// registration should be dropped rather than retried under a capped
+// backoff forever (#5313).
+const staleCityConfigLoadFailThreshold = staleCityDirAbsentThreshold
 
 // structuralInitFailureBackoff is the retry interval for init failures
 // classified as structural (see isStructuralInitFailureMessage) -- far
@@ -2051,10 +2059,63 @@ func startOneCity(
 	cfg, prov, loadErr := loadSupervisorCityConfig(path)
 	if loadErr != nil {
 		emitPendingCityCreateFailure(cr, path, name, "city_config_failed", loadErr, stderr)
+
+		// Auto-unregister cities whose city.toml has failed to load for
+		// staleCityConfigLoadFailThreshold consecutive attempts. This
+		// mirrors the dirAbsent handling above: a directory that still
+		// exists but never yields a loadable config is exactly as dead
+		// as one that's gone, and the capped init-failure backoff below
+		// would otherwise retry it forever (#5313).
+		var configFailCount int
+		cr.BatchUpdate(func(
+			_ map[string]*managedCity,
+			_ map[string]cityInitProgress,
+			initFailures map[string]*initFailRecord,
+			_ map[string]*panicRecord,
+		) {
+			ifrec := initFailures[path]
+			if ifrec == nil {
+				ifrec = &initFailRecord{}
+				initFailures[path] = ifrec
+			}
+			ifrec.configFail++
+			configFailCount = ifrec.configFail
+		})
+		if configFailCount >= staleCityConfigLoadFailThreshold {
+			fmt.Fprintf(stderr, "gc supervisor: city '%s': city.toml failed to load for %d consecutive attempts (%v), auto-unregistering\n", name, configFailCount, loadErr) //nolint:errcheck
+			if unregErr := reg.Unregister(path); unregErr != nil {
+				fmt.Fprintf(stderr, "gc supervisor: city '%s': auto-unregister failed: %v\n", name, unregErr) //nolint:errcheck
+			}
+			cr.BatchUpdate(func(
+				_ map[string]*managedCity,
+				_ map[string]cityInitProgress,
+				initFailures map[string]*initFailRecord,
+				_ map[string]*panicRecord,
+			) {
+				delete(initFailures, path)
+			})
+			return
+		}
+
 		recordInitFailure(name, loadErr.Error())
 		return
 	}
 	emitSupervisorLoadCityConfigWarnings(stderr, path, prov)
+
+	// Config loaded successfully this cycle: clear any accumulated
+	// config-load-failure streak so a transient failure doesn't count
+	// toward the auto-unregister threshold above once the city
+	// recovers on its own.
+	cr.BatchUpdate(func(
+		_ map[string]*managedCity,
+		_ map[string]cityInitProgress,
+		initFailures map[string]*initFailRecord,
+		_ map[string]*panicRecord,
+	) {
+		if ifrec := initFailures[path]; ifrec != nil {
+			ifrec.configFail = 0
+		}
+	})
 
 	// Use registered name as authoritative identity. city.toml may keep a
 	// different workspace.name because registration aliases are machine-local.
