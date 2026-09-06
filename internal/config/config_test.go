@@ -2853,6 +2853,39 @@ esac
 	}
 }
 
+// TestEffectivePoolDemandQueryDoesNotCountFailedPartialMolecules is the
+// spawn-side half of the ga-033u0e guard. A pour that aborts partway marks
+// every bead it wrote molecule_failed=true; a v1 step keeps its gc.routed_to,
+// so bd's routed reader still returns it, and the worker's hook strips it
+// before serving. A count-form that kept counting it would mint a seat that
+// reads empty, drains, and is counted again — every tick. The row must fall
+// out of every tier the count-form merges, so the fixture plants one in the
+// canonical routed tier and one in the migration (run_target) tier.
+func TestEffectivePoolDemandQueryDoesNotCountFailedPartialMolecules(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; count-form exercises a jq pipeline")
+	}
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	out := runShellWithFakeBd(t, a.EffectivePoolDemandQuery(), nil, `#!/bin/sh
+set -eu
+case "$*" in
+  *"--metadata-field gc.routed_to=hello-world/worker"*)
+    printf '[{"id":"partial-step","metadata":{"molecule_failed":"true","gc.instantiating":""}},{"id":"healthy","metadata":{"gc.kind":"run"}}]'
+    ;;
+  *"--metadata-field gc.run_target=hello-world/worker"*"--metadata-field gc.kind=workflow"*|\
+  *"--metadata-field gc.kind=workflow"*"--metadata-field gc.run_target=hello-world/worker"*)
+    printf '[{"id":"partial-root","metadata":{"molecule_failed":"true","gc.kind":"workflow"}}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	if strings.TrimSpace(out) != "1" {
+		t.Fatalf("EffectivePoolDemandQuery() count = %q, want 1 (a partially-instantiated workflow's beads are hidden from every hook and must not be counted as demand)", strings.TrimSpace(out))
+	}
+}
+
 // TestEffectivePoolDemandQueryRespectsOverride verifies the user-set
 // scale_check override flows through unchanged. Pass-through behavior
 // preserves config-side flexibility while keeping the default form

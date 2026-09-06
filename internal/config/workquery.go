@@ -387,8 +387,25 @@ func poolDemandCountShell(target string, topo QueryTopology) string {
 		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit 0", topo) + `) || exit $?; ` +
 		`legacy_json=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(0) + `) || exit $?; ` +
 		`legacy_ephemeral_json=$(` + legacyEphemeralPoolDemandShell(0, topo, false) + `); ` +
-		`printf "%s\n%s\n%s\n" "$ready_json" "$legacy_json" "$legacy_ephemeral_json" | jq -s "(add // []) | unique_by(.id) | length"`
+		`printf "%s\n%s\n%s\n" "$ready_json" "$legacy_json" "$legacy_ephemeral_json" | ` + poolDemandCountJQ()
 	return shellquote.Join([]string{"sh", "-c", script, "--", target})
+}
+
+// poolDemandCountJQ merges the count-form's tiers, drops the beads of a
+// partially-instantiated workflow, dedups by id and prints the length.
+//
+// The molecule_failed exclusion is the count-form's twin of the hook's
+// isFailedPartialMoleculeHookCandidate and the controller's demandRowServable
+// (cmd/gc): bd knows nothing about the key, so its routed reader returns such
+// a step like any other, while the worker's hook strips it before serving. A
+// count-form that kept counting it would mint a seat that reads empty,
+// drains, and is counted again — every tick (ga-033u0e). The comparison is
+// exact equality with "true", the rule beadmeta.MoleculeFailed applies on the
+// Go side; TestEffectivePoolDemandQueryDoesNotCountFailedPartialMolecules runs
+// this program to hold the two together.
+func poolDemandCountJQ() string {
+	program := `(add // []) | map(select(` + jqMeta(beadmeta.MoleculeFailedMetadataKey) + ` != "true")) | unique_by(.id) | length`
+	return shellquote.Join([]string{"jq", "-s", program})
 }
 
 func (a *Agent) poolDemandTarget() string {

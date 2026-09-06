@@ -1641,8 +1641,11 @@ func recipeStepRef(step formula.RecipeStep) string {
 	return strings.TrimSpace(step.ID)
 }
 
+// isFailedPartialMolecule reports whether bead belongs to a workflow whose
+// instantiation aborted partway. The rule is beadmeta.MoleculeFailed, shared
+// with every serve and demand surface in cmd/gc.
 func isFailedPartialMolecule(bead beads.Bead) bool {
-	return strings.TrimSpace(bead.Metadata[beadmeta.MoleculeFailedMetadataKey]) == "true"
+	return beadmeta.MoleculeFailed(bead.Metadata[beadmeta.MoleculeFailedMetadataKey])
 }
 
 // findLatestAttempt finds the most recent attempt/iteration child of a control

@@ -369,13 +369,33 @@ const (
 
 	// MoleculeFailedMetadataKey marks the beads of a partially-instantiated
 	// molecule as failed (value "true"). Written best-effort by
-	// internal/molecule markFailed on instantiation error paths; read by
-	// dispatch/sling/cmd/gc to skip or close failed roots.
+	// internal/molecule markFailed on instantiation error paths. Read, through
+	// MoleculeFailed, as a dispatch exclusion: every surface that serves work
+	// to an agent (the hook filter, the control dispatcher's ready scan and
+	// its jq twin) hides a marked bead, every surface that counts pool demand
+	// (the controller's demand predicate, the reconciler's count-form) leaves
+	// it out, convergence's idempotency lookup passes over a marked root, and
+	// the graph.v2 recovery paths close a marked subtree on the next cook of
+	// the same root key (ga-033u0e).
 	MoleculeFailedMetadataKey = "molecule_failed"
 
 	// MergeStrategyMetadataKey records the merge strategy chosen for a slung bead.
 	MergeStrategyMetadataKey = "merge_strategy"
 )
+
+// MoleculeFailed reports whether value — a bead's MoleculeFailedMetadataKey
+// entry — marks it as part of a workflow whose instantiation aborted partway.
+//
+// The rule is exact equality with "true", the only value markFailed writes.
+// It is deliberately not trimmed or case-folded: the predicate has two jq
+// twins (the pool-demand count-form in internal/config and the control-ready
+// scan in cmd/gc) that can only compare exactly, and a Go side that accepted
+// more than the shell side would hide a row the shell still counts or serves.
+// Every dispatch-facing reader of the key — serve, count, re-activate — goes
+// through here so those surfaces cannot drift apart again.
+func MoleculeFailed(value string) bool {
+	return value == "true"
+}
 
 // OptionMetadataPrefix is the dynamic non-"gc."-prefixed key prefix under
 // which provider option choices are stored as opt_<OptionsSchema key> (e.g.

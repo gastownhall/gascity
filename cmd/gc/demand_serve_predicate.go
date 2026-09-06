@@ -11,14 +11,18 @@ package main
 // normalized to T. The worker's Tier-3 query serves a strictly smaller set: it
 // passes --exclude-type=epic and one --exclude-label per dispatch hold, and it
 // matches the route by EXACT string. So three classes of row were permanent
-// capacity demand that no worker could ever claim:
+// capacity demand that no worker could ever claim, and a fourth joined them
+// when the hook began hiding it:
 //
 //   - a routed EPIC (an unassigned parent has no executable spec — the query
 //     excludes it deliberately, workquery.go),
 //   - a bead parked on hold:mayor / hold:external (parked precisely because the
 //     next actor is not this worker),
 //   - a route stamped with a live slot suffix, "<base>-N", which the demand side
-//     normalizes to <base> and every raw consumer rejects.
+//     normalizes to <base> and every raw consumer rejects,
+//   - a step of a workflow whose instantiation aborted partway (molecule_failed,
+//     ga-033u0e): a v1 step keeps the gc.routed_to it was created with, so the
+//     reader returns it and the hook strips it.
 //
 // Each one spawns a seat, the seat's hook reads empty, it drains, and the
 // controller counts the row again on the next tick. Forever.
@@ -101,6 +105,18 @@ func demandRowServable(b beads.Bead) bool {
 				return false
 			}
 		}
+	}
+	// PARTIAL WORKFLOW: exact. A pour that aborts partway marks every bead it
+	// already wrote molecule_failed=true, and a non-graph (v1) recipe is never
+	// fenced, so its steps still carry the gc.routed_to they were created with
+	// and the reader serves them. The hook then strips them
+	// (isFailedPartialMoleculeHookCandidate), so no worker ever holds one: a
+	// row counted here is a seat that spawns, reads empty, drains and is
+	// counted again next tick, forever. Same rule as the hook and the
+	// reconciler's count-form — beadmeta.MoleculeFailed — so the three cannot
+	// disagree by spelling (ga-033u0e).
+	if beadmeta.MoleculeFailed(b.Metadata[beadmeta.MoleculeFailedMetadataKey]) {
+		return false
 	}
 	return true
 }
