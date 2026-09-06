@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -74,6 +75,31 @@ func (s *Server) resolveMailSendRecipientWithContext(ctx context.Context, recipi
 	if recipient == "human" {
 		return recipient, nil
 	}
+	roster := s.mailCityRoster()
+	switch kind, addr := roster.ResolveCityAddress(recipient); kind {
+	case mail.CityAddressForeign:
+		// A peer city's address is canonical as written; its identity can
+		// only be checked by that city, so the session store is never
+		// consulted.
+		return addr, nil
+	case mail.CityAddressLocal:
+		// <local city>/<addr> and <addr> are one mailbox.
+		recipient = addr
+		if recipient == "human" {
+			return recipient, nil
+		}
+	}
+	resolved, err := s.resolveLocalMailSendRecipientWithContext(ctx, recipient)
+	if err != nil {
+		// A slash-form recipient whose first segment names neither a rig nor
+		// a roster city refuses as unknown-city, so a stale roster is never
+		// spelled as a session lookup failure.
+		return "", mail.RefuseUnknownCity(err, recipient, roster, s.state.Config().RigNames())
+	}
+	return resolved, nil
+}
+
+func (s *Server) resolveLocalMailSendRecipientWithContext(ctx context.Context, recipient string) (string, error) {
 	store := s.state.SessionsBeadStore().Store
 	if store == nil {
 		resolved, err := mail.ResolveRecipient(recipient, agentEntries(s.state.Config()))
@@ -108,14 +134,44 @@ func (s *Server) resolveMailSendRecipientWithContext(ctx context.Context, recipi
 	return "", apiSessionTargetNotFound(recipient)
 }
 
+// mailCityRoster builds the cross-city mail roster for this city. The zero
+// roster (no [mail.crosscity] section) is disabled and leaves every recipient
+// resolving exactly as today.
+func (s *Server) mailCityRoster() mail.CityRoster {
+	cfg := s.state.Config()
+	fallback := ""
+	if p := strings.TrimSpace(s.state.CityPath()); p != "" {
+		fallback = filepath.Base(filepath.Clean(p))
+	}
+	local, peers := cfg.MailCityRoster(fallback)
+	return mail.CityRoster{Local: local, Peers: peers}
+}
+
 func (s *Server) resolveMailQueryRecipientsWithContext(ctx context.Context, recipient string) []string {
 	recipient = strings.TrimSpace(recipient)
 	if recipient == "" {
 		return []string{""}
 	}
+	roster := s.mailCityRoster()
 	if recipient == "human" {
-		return []string{"human"}
+		return roster.ExpandLocalRecipients([]string{"human"})
 	}
+	switch kind, addr := roster.ResolveCityAddress(recipient); kind {
+	case mail.CityAddressForeign:
+		// Reads are open-world: a peer city's mailbox is readable with no
+		// session lookup.
+		return []string{addr}
+	case mail.CityAddressLocal:
+		recipient = addr
+		if recipient == "human" {
+			return roster.ExpandLocalRecipients([]string{"human"})
+		}
+	}
+	// Delivery addressed to <local city>/<addr> is a read on <addr>'s inbox.
+	return roster.ExpandLocalRecipients(s.resolveLocalMailQueryRecipientsWithContext(ctx, recipient))
+}
+
+func (s *Server) resolveLocalMailQueryRecipientsWithContext(ctx context.Context, recipient string) []string {
 	store := s.state.SessionsBeadStore().Store
 	if store == nil {
 		if resolved, err := mail.ResolveRecipient(recipient, agentEntries(s.state.Config())); err == nil {

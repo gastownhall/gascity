@@ -1807,6 +1807,9 @@ type MailConfig struct {
 	// RetentionTTL is how long read messages are retained before purge. Empty
 	// or "0" disables read-message retention.
 	RetentionTTL string `toml:"retention_ttl,omitempty"`
+	// CrossCity enables city-qualified mail addressing (<city>/<address>).
+	// Absent means disabled: every recipient resolves exactly as today.
+	CrossCity *MailCrossCityConfig `toml:"crosscity,omitempty"`
 }
 
 // RetentionTTLDuration parses RetentionTTL as a Go time.Duration. Empty or

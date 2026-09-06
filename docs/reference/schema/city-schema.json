@@ -1871,11 +1871,36 @@
         "retention_ttl": {
           "type": "string",
           "description": "RetentionTTL is how long read messages are retained before purge. Empty\nor \"0\" disables read-message retention."
+        },
+        "crosscity": {
+          "$ref": "#/$defs/MailCrossCityConfig",
+          "description": "CrossCity enables city-qualified mail addressing (\u003ccity\u003e/\u003caddress\u003e).\nAbsent means disabled: every recipient resolves exactly as today."
         }
       },
       "additionalProperties": false,
       "type": "object",
       "description": "MailConfig holds mail provider settings."
+    },
+    "MailCrossCityConfig": {
+      "properties": {
+        "city": {
+          "type": "string",
+          "description": "City is this city's own segment in city-qualified addresses. Empty\ndefaults to the effective city name (workspace name, else the city\ndirectory's base name). \u003cCity\u003e/\u003caddress\u003e and \u003caddress\u003e are one mailbox."
+        },
+        "cities": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Cities lists the peer cities addressable as \u003ccity\u003e/\u003caddress\u003e. A\nrecipient naming a listed city resolves against the roster and is never\nlooked up in the local session store."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "cities"
+      ],
+      "description": "MailCrossCityConfig enables city-qualified mail addressing: recipients of the form \u003ccity\u003e/\u003caddress\u003e, where the first path segment names a city and the remainder is that city's own address form."
     },
     "MaintenanceConfig": {
       "properties": {
