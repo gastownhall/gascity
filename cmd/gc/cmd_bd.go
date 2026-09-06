@@ -507,6 +507,16 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
+	// Assignee shape guard (crn-23jqc): refuse a non-empty --assignee value
+	// with an empty rig or role segment (e.g. "cairn/", "/pm", "a//b") before
+	// it reaches bd. Such a value is invisible to both --assignee=<role>
+	// exact matching and --unassigned matching, so a bead written with it
+	// becomes silently unreachable by every agent. "" (clear) is unaffected.
+	if msg, refused := bdAssigneeShapeRefusal(bdArgs); refused {
+		fmt.Fprint(stderr, msg) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
 	// Work-record close gate (ADR-0009): a close routed through the SDK seam
 	// must satisfy the typed work-record contract (gc.work_outcome present;
 	// shipped ⇒ gc.work_commit reachable on gc.work_branch). Warn-only by default;

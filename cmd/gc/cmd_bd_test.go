@@ -2404,6 +2404,66 @@ func TestRewriteBdHeartbeatArgs(t *testing.T) {
 	})
 }
 
+// TestBdAssigneeShapeRefusal pins the crn-23jqc defense-in-depth fix: `gc bd
+// update` refuses a non-empty --assignee value with an empty rig or role
+// segment (e.g. "cairn/", "/pm", "a//b") instead of forwarding it to bd,
+// while still allowing the documented "" clear idiom and any properly-
+// segmented value through. Such a malformed value is invisible to both
+// standard discovery tiers (exact --assignee=<role> match and --unassigned),
+// so a bead written with it becomes silently unreachable -- the 2026-08-15
+// cairn incident this bead defends against.
+func TestBdAssigneeShapeRefusal(t *testing.T) {
+	// Fake bd that echoes its argv to stdout and exits 0 -- proves a case
+	// reached the exec.Command forward, as opposed to being refused first.
+	const echoArgsFakeBdScript = `#!/bin/sh
+echo "$@"
+exit 0
+`
+	cases := []struct {
+		name    string
+		args    []string
+		refused bool
+	}{
+		{"trailing-slash-empty-role", []string{"update", "demo-abc", "--assignee=cairn/"}, true},
+		{"leading-slash-empty-rig-space-form", []string{"update", "demo-abc", "--assignee", "/pm"}, true},
+		{"double-slash-empty-middle-segment", []string{"update", "demo-abc", "--assignee=a//b"}, true},
+		{"empty-value-clears-assignee", []string{"update", "demo-abc", "--assignee="}, false},
+		{"fully-qualified-value", []string{"update", "demo-abc", "--assignee=cairn/pm"}, false},
+		{"bare-role-no-rig", []string{"update", "demo-abc", "--assignee=deep-investigator"}, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			silentFallbackTestSetup(t, echoArgsFakeBdScript)
+
+			var stdout, stderr bytes.Buffer
+			got := doBd(tc.args, &stdout, &stderr)
+
+			if tc.refused {
+				if got == 0 {
+					t.Fatalf("doBd(%v) = 0, want non-zero (refused)", tc.args)
+				}
+				if !strings.Contains(stderr.String(), "empty rig or role segment") {
+					t.Fatalf("stderr = %q, want empty-rig-or-role-segment refusal", stderr.String())
+				}
+				if !strings.Contains(stderr.String(), "crn-23jqc") {
+					t.Fatalf("stderr = %q, want crn-23jqc reference", stderr.String())
+				}
+				if stdout.String() != "" {
+					t.Fatalf("stdout = %q, want empty -- bd must never be invoked on a refusal", stdout.String())
+				}
+				return
+			}
+			if got != 0 {
+				t.Fatalf("doBd(%v) = %d, want 0 (forwarded); stderr=%q", tc.args, got, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "demo-abc") {
+				t.Fatalf("stdout = %q, want forwarded args echoed by fake bd", stdout.String())
+			}
+		})
+	}
+}
+
 // TestBdMutationWriteID covers the compatibility shim (first-ID extraction).
 func TestBdMutationWriteID(t *testing.T) {
 	t.Run("extracts id from write subcommands", func(t *testing.T) {
