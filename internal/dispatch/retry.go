@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,11 +10,25 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/pathutil"
+)
+
+const (
+	// Keep this retry window short and bounded while covering common
+	// sub-second Dolt read-after-write visibility lag between a retry
+	// subject's status=closed write and its gc.outcome/gc.failure_class/
+	// gc.failure_reason metadata becoming visible to a subsequent read: the
+	// agent (or fake-agent test harness) sets status and outcome metadata
+	// together in one call, but a reader can still observe them in two
+	// visibility steps under load. When ProcessOptions.Context is set, retry
+	// waits exit promptly on cancellation.
+	retrySubjectOutcomeResolveAttempts   = 5
+	retrySubjectOutcomeResolveRetryDelay = 100 * time.Millisecond
 )
 
 func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (ControlResult, error) {
@@ -51,6 +66,11 @@ func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (
 	}
 	if subject.Status != "closed" {
 		return ControlResult{}, ErrControlPending
+	}
+	subjectID := subject.ID
+	subject, err = resolveRetrySubjectOutcome(store, subject, bead.ID, opts)
+	if err != nil {
+		return ControlResult{}, fmt.Errorf("%s: resolving retry subject outcome for %s: %w", bead.ID, subjectID, err)
 	}
 
 	result, err := classifyRetryAttemptWithPostconditions(store, subject, opts)
@@ -262,6 +282,66 @@ func resolveRetryRunSubject(store beads.Store, eval beads.Bead, logicalID string
 		return beads.Bead{}, err
 	}
 	return store.Get(subjectID)
+}
+
+// subjectOutcomeAmbiguous reports whether subject is closed but carries none
+// of the signals classifyRetryAttempt uses to determine an outcome. Such a
+// subject is indistinguishable between "the agent closed this without ever
+// recording an outcome" and "the outcome metadata write has not become
+// visible to this read yet."
+func subjectOutcomeAmbiguous(subject beads.Bead) bool {
+	if strings.TrimSpace(subject.Metadata[beadmeta.OutcomeMetadataKey]) != "" {
+		return false
+	}
+	return !typedDeliverableCloseFor(subject)
+}
+
+// resolveRetrySubjectOutcome re-reads subject a bounded number of times while
+// its outcome stays ambiguous, so a closed-but-not-yet-visible outcome write
+// isn't misclassified as gc.failure_reason=missing_outcome. Once attempts are
+// exhausted it gives up and returns the last-read subject unchanged (nil
+// error) — a genuinely outcome-less close still classifies as missing_outcome
+// exactly as before; this only closes the visibility-lag race, it does not
+// change what counts as ambiguous.
+func resolveRetrySubjectOutcome(store beads.Store, subject beads.Bead, traceID string, opts ProcessOptions) (beads.Bead, error) {
+	if !subjectOutcomeAmbiguous(subject) {
+		return subject, nil
+	}
+	ctx := opts.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	current := subject
+	for attempt := 1; attempt <= retrySubjectOutcomeResolveAttempts; attempt++ {
+		if attempt > 1 {
+			next, err := store.Get(current.ID)
+			if err != nil {
+				return beads.Bead{}, err
+			}
+			current = next
+		}
+		if !subjectOutcomeAmbiguous(current) {
+			opts.tracef("retry-eval bead=%s resolve-outcome attempt=%d subject=%s result=ok", traceID, attempt, subject.ID)
+			return current, nil
+		}
+		opts.tracef("retry-eval bead=%s resolve-outcome attempt=%d subject=%s result=retry reason=missing_outcome", traceID, attempt, subject.ID)
+		if attempt < retrySubjectOutcomeResolveAttempts {
+			timer := time.NewTimer(retrySubjectOutcomeResolveRetryDelay)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				return beads.Bead{}, ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
+	opts.tracef("retry-eval bead=%s resolve-outcome attempts=%d subject=%s result=exhausted", traceID, retrySubjectOutcomeResolveAttempts, subject.ID)
+	return current, nil
 }
 
 type retryEvalResult struct {
