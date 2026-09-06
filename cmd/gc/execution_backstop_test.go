@@ -168,6 +168,35 @@ func TestExecutionBackstopNudgesAnIdleClaimHolderExactlyOnce(t *testing.T) {
 	}
 }
 
+// TestExecutionBackstopRetriesAProviderOverloadWithoutGenericGrace is the
+// regression for an observed Codex server_overloaded turn: the provider has
+// already given a high-confidence retryable answer and returned to its prompt
+// while the pool seat still owns the in-progress bead. Waiting for the generic
+// quiet-session grace before even observing the claim adds no safety in this
+// state and leaves an otherwise hands-off workflow visibly parked.
+func TestExecutionBackstopRetriesAProviderOverloadWithoutGenericGrace(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.idleFor(t, 10*time.Second) // recent output: the overload message itself
+	f.sp.SetPeekOutput(f.sessName, "Selected model is at capacity. Please try a different model.")
+
+	f.tick(t)
+
+	if got := f.nudgeCount(); got != 1 {
+		t.Fatalf("nudges after an explicit provider overload = %d, want 1 immediately; stdout=%s", got, f.stdout.String())
+	}
+	if got := f.sessionMeta(t, executionClaimNudgeCountKey); got != "1" {
+		t.Fatalf("persisted attempt count = %q, want 1", got)
+	}
+
+	// The overload response skips only the first grace window. A pane that
+	// continues to show it must not turn the controller tick into a retry loop.
+	f.now = f.now.Add(time.Second)
+	f.tick(t)
+	if got := f.nudgeCount(); got != 1 {
+		t.Fatalf("nudges inside normal retry backoff = %d, want still 1", got)
+	}
+}
+
 // Control A: a WORKING agent. The provider reports recent activity, so the
 // predicate holds — zero nudges and, just as importantly, zero writes, because a
 // backstop that marks a busy session is a backstop that will eventually nudge it

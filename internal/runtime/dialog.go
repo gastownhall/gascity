@@ -1642,6 +1642,23 @@ func ContainsProviderRateLimitScreen(content string) bool {
 		strings.Contains(content, "Stop")
 }
 
+// ContainsProviderRetryableOverloadScreen reports a high-confidence provider
+// response that rejected the current turn because serving capacity was
+// temporarily unavailable. This is deliberately narrower than a substring
+// search: ordinary source, logs, or discussion containing the same words must
+// not make a working session eligible for an immediate retry.
+func ContainsProviderRetryableOverloadScreen(content string) bool {
+	const message = "Selected model is at capacity. Please try a different model."
+	for _, raw := range strings.Split(content, "\n") {
+		line := strings.TrimSpace(raw)
+		line = strings.TrimSpace(strings.TrimLeft(line, "■●•›>│"))
+		if line == message {
+			return true
+		}
+	}
+	return false
+}
+
 // spendLimitModalWindowLines bounds how many consecutive lines the Claude
 // spend-limit modal's anchor tokens may span. The modal renders "Usage credit
 // balance", "Adjust monthly spend limit", and "Wait for limit to reset" on

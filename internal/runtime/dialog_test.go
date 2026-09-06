@@ -1708,6 +1708,29 @@ func TestContainsProviderRateLimitScreen(t *testing.T) {
 	}
 }
 
+func TestContainsProviderRetryableOverloadScreen(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{name: "codex capacity response", content: "Selected model is at capacity. Please try a different model.", want: true},
+		{name: "codex tui marker", content: "■ Selected model is at capacity. Please try a different model.", want: true},
+		{name: "response near prompt", content: "work output\n■ Selected model is at capacity. Please try a different model.\n\n› ", want: true},
+		{name: "quoted source is not a provider response", content: `const message = "Selected model is at capacity. Please try a different model."`, want: false},
+		{name: "ordinary discussion is not a provider response", content: "The selected model is at capacity when the service is busy.", want: false},
+		{name: "rate limit is a different classifier", content: "You've hit your limit, Pro plan", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ContainsProviderRetryableOverloadScreen(tt.content); got != tt.want {
+				t.Errorf("ContainsProviderRetryableOverloadScreen(%q) = %v, want %v", tt.content, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestProviderTerminalErrorReason(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

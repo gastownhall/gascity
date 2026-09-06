@@ -80,6 +80,11 @@ const (
 	backstopResolutionClear backstopResolution = iota
 	backstopResolutionHold
 	backstopResolutionOutstanding
+	// backstopResolutionImmediate is outstanding work with explicit evidence
+	// that the provider rejected the preceding turn before execution. It skips
+	// only the initial observe-first grace; reserved attempts still use the
+	// ordinary backoff and cap.
+	backstopResolutionImmediate
 )
 
 // backstopAction is the shared timing engine's verdict for one session on one
@@ -156,7 +161,7 @@ func runNudgeBackstop(
 		case backstopResolutionClear:
 			pred.clear(store, s, stdout)
 			continue
-		case backstopResolutionOutstanding:
+		case backstopResolutionOutstanding, backstopResolutionImmediate:
 			// Continue below.
 		default:
 			continue
@@ -168,7 +173,16 @@ func runNudgeBackstop(
 			// don't nudge yet — a normal claim/confirmation almost always
 			// lands within the grace window.
 			pred.observe(store, s, target, now, stdout)
-			continue
+			if resolution != backstopResolutionImmediate {
+				continue
+			}
+			// Explicit provider rejection is already the observation. Proceed to
+			// the first delivery now; later attempts retain normal backoff.
+			attempts = 0
+			last = time.Time{}
+		}
+		if resolution == backstopResolutionImmediate && attempts == 0 {
+			last = time.Time{}
 		}
 
 		switch decideBackstopAction(attempts, last, now) {
