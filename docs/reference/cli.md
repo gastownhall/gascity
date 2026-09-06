@@ -2489,7 +2489,12 @@ gc mail mark-unread <id> [flags]
 Display a message without marking it as read.
 
 Same output as "gc mail read" but does not change the message's read status.
-The message will continue to appear in inbox results.
+An unarchived message will continue to appear in inbox results.
+
+peek also reads THROUGH the archive: a message closed by "gc mail archive"
+or "gc mail delete" is still displayable here, even though read, inbox, and
+check report it as not found. Mail removed before this behavior existed
+(closed with no archive reason) stays not-found for peek as well.
 
 ```
 gc mail peek <id> [flags]

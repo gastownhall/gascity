@@ -1556,6 +1556,47 @@ func TestDelete(t *testing.T) {
 	}
 }
 
+// TestDeletePeekRecoverable pins the Delete-alias consequence: Delete is an
+// alias for Archive (#4422 forbids store.Delete on any archive path), so a
+// deleted message is stamped ArchiveCloseReason and stays recoverable through
+// Peek — the same body bd show has always exposed. This is intended, not a
+// leak: Delete's own help says "same effect as archive", and every
+// mail.Provider view still reports it not-found per the removes-from-every-view
+// contract (mailtest.runRemovalVisibilityContract).
+func TestDeletePeekRecoverable(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("alice", "bob", "subject", "delete me")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Delete(sent.ID); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := p.Get(sent.ID); !errors.Is(err, mail.ErrNotFound) {
+		t.Errorf("Get after Delete err = %v, want ErrNotFound", err)
+	}
+	got, err := p.Peek(sent.ID)
+	if err != nil {
+		t.Fatalf("Peek after Delete: %v (#4422: the row is retained)", err)
+	}
+	if got.Body != "delete me" {
+		t.Errorf("Peek body after Delete = %q, want %q", got.Body, "delete me")
+	}
+
+	batch, err := p.Send("alice", "bob", "subject", "delete many")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.DeleteMany([]string{batch.ID}); err != nil {
+		t.Fatalf("DeleteMany: %v", err)
+	}
+	if got, err := p.Peek(batch.ID); err != nil || got.Body != "delete many" {
+		t.Errorf("Peek after DeleteMany = (%q, %v), want (%q, nil)", got.Body, err, "delete many")
+	}
+}
+
 // --- Reply ---
 
 func TestReply(t *testing.T) {
