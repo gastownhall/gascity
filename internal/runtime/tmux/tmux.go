@@ -3598,6 +3598,56 @@ func idlePromptPrefix(configured string) string {
 	return DefaultReadyPromptPrefix
 }
 
+// snapshotPaneIdle takes one observation of the session's pane and reports
+// whether it currently shows a ready prompt with no active-processing
+// indicator. It is the single-observation primitive shared by WaitForIdle
+// (which polls it up to a consecutive-idle threshold) and SnapshotIdle (which
+// returns it directly). A capture error is returned verbatim so callers can
+// distinguish a session that has gone away (ErrSessionNotFound / ErrNoServer)
+// from a transient read failure.
+func (t *Tmux) snapshotPaneIdle(session string) (bool, error) {
+	promptPrefix := DefaultReadyPromptPrefix
+	if configured, err := t.GetEnvironment(session, sessionReadyPromptEnvKey); err == nil {
+		promptPrefix = idlePromptPrefix(configured)
+	}
+	prefix := strings.TrimSpace(promptPrefix)
+
+	lines, err := t.CapturePaneLines(session, promptObservationLines)
+	if err != nil {
+		return false, err
+	}
+
+	// Check for active processing indicator in the status bar.
+	// Claude Code shows "esc to interrupt" while processing — if present,
+	// the agent is busy regardless of whether the prompt is visible.
+	if paneContainsBusyIndicator(lines) {
+		return false, nil
+	}
+
+	// Scan captured lines for the prompt prefix.
+	// Claude Code renders a status bar below the prompt line,
+	// so the prompt may not be the last non-empty line.
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if matchesPromptPrefix(trimmed, promptPrefix) || (prefix != "" && trimmed == prefix) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// SnapshotIdle reports whether the named session is at an idle interactive
+// boundary right now — a ready prompt with no active-processing indicator — in
+// a single non-blocking observation. It implements
+// [runtime.IdleSnapshotProvider]. A session that has gone away is reported as
+// an error, not as idle.
+func (t *Tmux) SnapshotIdle(session string) (bool, error) {
+	return t.snapshotPaneIdle(session)
+}
+
 // WaitForIdle polls until the agent appears to be at an idle prompt.
 // Unlike WaitForRuntimeReady (which is for bootstrap), this is for steady-state
 // idle detection — used to avoid interrupting agents mid-work.
@@ -3610,12 +3660,6 @@ func idlePromptPrefix(configured string) string {
 // Returns nil if the agent becomes idle within the timeout.
 // Returns an error if the timeout expires while the agent is still busy.
 func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Duration) error {
-	promptPrefix := DefaultReadyPromptPrefix
-	if configured, err := t.GetEnvironment(session, sessionReadyPromptEnvKey); err == nil {
-		promptPrefix = idlePromptPrefix(configured)
-	}
-	prefix := strings.TrimSpace(promptPrefix)
-
 	consecutiveIdle := 0
 	const requiredConsecutive = 2
 
@@ -3624,7 +3668,7 @@ func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Dur
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		lines, err := t.CapturePaneLines(session, promptObservationLines)
+		idle, err := t.snapshotPaneIdle(session)
 		if err != nil {
 			// Distinguish terminal errors from transient ones.
 			// Session not found or no server means the session is gone —
@@ -3638,34 +3682,7 @@ func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Dur
 			}
 			continue
 		}
-
-		// Check for active processing indicator in the status bar.
-		// Claude Code shows "esc to interrupt" while processing — if present,
-		// the agent is busy regardless of whether the prompt is visible.
-		if paneContainsBusyIndicator(lines) {
-			consecutiveIdle = 0
-			if err := waitForIdlePoll(ctx); err != nil {
-				return err
-			}
-			continue
-		}
-
-		// Scan captured lines for the prompt prefix.
-		// Claude Code renders a status bar below the prompt line,
-		// so the prompt may not be the last non-empty line.
-		foundPrompt := false
-		for _, line := range lines {
-			trimmed := strings.TrimSpace(line)
-			if trimmed == "" {
-				continue
-			}
-			if matchesPromptPrefix(trimmed, promptPrefix) || (prefix != "" && trimmed == prefix) {
-				foundPrompt = true
-				break
-			}
-		}
-
-		if foundPrompt {
+		if idle {
 			consecutiveIdle++
 			if consecutiveIdle >= requiredConsecutive {
 				return nil

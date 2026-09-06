@@ -459,6 +459,13 @@ func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Du
 	return p.tm.WaitForIdle(ctx, name, timeout)
 }
 
+// SnapshotIdle reports, in a single non-blocking observation, whether the named
+// session is at an idle interactive boundary right now. It implements
+// [runtime.IdleSnapshotProvider].
+func (p *Provider) SnapshotIdle(name string) (bool, error) {
+	return p.tm.SnapshotIdle(name)
+}
+
 // WaitForInterruptBoundary waits for a provider-native interrupt acknowledgement
 // before the next user turn is injected.
 func (p *Provider) WaitForInterruptBoundary(ctx context.Context, name string, since time.Time, timeout time.Duration) error {
