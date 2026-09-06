@@ -293,6 +293,42 @@ type DialogProvider interface {
 	DismissKnownDialogs(ctx context.Context, name string, timeout time.Duration) error
 }
 
+// SessionRosterProvider is an optional extension for providers whose
+// per-session attribute reads are otherwise expensive (e.g. one subprocess
+// fork per call). Callers iterating a full session roster should prefer
+// this over per-name IsAttached/GetLastActivity reads when available.
+//
+// The roster is an ATTRIBUTES source, not a liveness source. Callers must
+// keep using [Provider.IsRunning] to decide whether a session is live and
+// read the roster only for the attributes of a session already known to be
+// running. Roster membership is derived from the runtime's session listing,
+// which still reports a session whose pane has exited (tmux keeps such a
+// corpse listed under remain-on-exit); IsRunning excludes it. Treating
+// presence in the roster as "running" therefore reports crashed agents as
+// idle.
+type SessionRosterProvider interface {
+	// SessionRoster returns attributes for every session currently known
+	// to the runtime, keyed by session name. A name absent from the
+	// result is not running, but the converse does not hold: a name
+	// present in the result is not necessarily running. See the
+	// interface doc.
+	SessionRoster() (map[string]SessionRosterEntry, error)
+}
+
+// SessionRosterEntry holds the batch-readable attributes of a single
+// session, as returned by [SessionRosterProvider.SessionRoster].
+type SessionRosterEntry struct {
+	Attached     bool
+	LastActivity time.Time
+}
+
+// EnvironmentBatchProvider is an optional extension exposing a single-exec
+// full-environment read for a session, letting callers that need multiple
+// keys avoid one subprocess fork per key.
+type EnvironmentBatchProvider interface {
+	GetAllEnvironment(name string) (map[string]string, error)
+}
+
 // TransportCapabilityProvider is an optional extension for providers that can
 // report whether they support starting sessions with a specific transport.
 //

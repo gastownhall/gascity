@@ -475,8 +475,14 @@ func resolveNativeStateDir() string {
 	return filepath.Join(home, ".t3", "gc-bridge-native")
 }
 
+// ensureNativeStateDir creates the bridge state directory owner-only.
+//
+// It holds session meta sidecars and the cached auth bearer session token that
+// [readCachedBearerSessionToken] reads back. Gas City is often the process that
+// creates the directory, so the mode chosen here is the one the token lands in
+// even though T3 writes the token itself.
 func ensureNativeStateDir() error {
-	return os.MkdirAll(resolveNativeStateDir(), 0o755)
+	return runtime.EnsurePrivateDir(resolveNativeStateDir())
 }
 
 func safeMetaPathComponent(value string) string {
@@ -532,7 +538,7 @@ func writeMetaValue(name, key, value string) error {
 	if err := ensureNativeStateDir(); err != nil {
 		return err
 	}
-	return os.WriteFile(metaFilePath(name, key), []byte(value), 0o644)
+	return runtime.WritePrivateFile(metaFilePath(name, key), []byte(value))
 }
 
 func readMetaValue(name, key string) (string, error) {

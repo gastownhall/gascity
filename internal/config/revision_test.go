@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"sort"
 	"testing"
@@ -736,7 +737,32 @@ func TestSkipRevisionSnapshot_StillDetectsPackContentChange(t *testing.T) {
 			}
 			before := Revision(fsys.OSFS{}, prov, cfg, dir)
 
-			writeFile(t, dir, "packs/shared/prompts/worker.md", "edited prompt body\n")
+			// Revision reaches the pack tree through PackContentHashRecursive,
+			// which memoizes each tree behind a cheap per-file (size, mtime)
+			// stat fingerprint — so an edit preserving BOTH is served the stale
+			// hash by design. The fixture body and the replacement used to be
+			// the same length (19 bytes each), leaving mtime as the only
+			// discriminator; on a runner whose timestamp granularity is coarser
+			// than this subtest's runtime both writes share an mtime and the
+			// revision does not move. That is the flake in gastownhall/gascity
+			// ga-b675vk, which failed unrelated PRs #5357/#5358.
+			//
+			// Keep the replacement a different length so the fingerprint moves
+			// at any mtime resolution — the same discipline
+			// TestPackContentHashRecursiveCachesUnchangedTree already applies
+			// with "prompt a (edited, longer)". The guard below fails loudly
+			// rather than flakily if a later edit reintroduces a same-size body.
+			const editedPrompt = "edited prompt body, deliberately a different length\n"
+			promptPath := filepath.Join(dir, "packs", "shared", "prompts", "worker.md")
+			info, err := os.Stat(promptPath)
+			if err != nil {
+				t.Fatalf("stat prompt: %v", err)
+			}
+			if info.Size() == int64(len(editedPrompt)) {
+				t.Fatalf("replacement body must differ in length from the %d-byte original; "+
+					"a same-size edit can reuse the memoized pack content hash and flake", info.Size())
+			}
+			writeFile(t, dir, "packs/shared/prompts/worker.md", editedPrompt)
 
 			reloadedCfg, reloadedProv, err := LoadWithIncludesOptions(fsys.OSFS{}, cityPath, tc.opts)
 			if err != nil {

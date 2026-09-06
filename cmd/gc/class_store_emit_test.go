@@ -595,6 +595,98 @@ func TestEmittingClassStoreKeepsEveryEngineCapability(t *testing.T) {
 	}
 }
 
+// TestEmittingClassStoreCarriesAnEdgePayloadAndEmitsForIt covers the wrapper's
+// edge-payload write, which TestEmittingClassStoreKeepsEveryEngineCapability
+// forces to EXIST but says nothing about the behavior of.
+//
+// Two mutants survive that reflective guard, and both are what this pins. The
+// first is falling back to the inner DepAdd when the inner store cannot carry a
+// payload: on a store keeping the payload in a sidecar, a plain DepAdd over an
+// edge that had one CLEARS it, so the fallback is destructive rather than
+// degraded. The second is dropping the emitUpdated, which would leave a
+// subscriber holding a stale view of exactly the edges formula gating reads.
+func TestEmittingClassStoreCarriesAnEdgePayloadAndEmitsForIt(t *testing.T) {
+	cityPath := t.TempDir()
+	leaf, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("gcg"))
+	if err != nil {
+		t.Fatalf("opening the leaf store: %v", err)
+	}
+	t.Cleanup(func() { _ = closeBeadStoreHandle(leaf) })
+
+	from := seedClassBead(t, leaf, "gated")
+	to := seedClassBead(t, leaf, "gates-it")
+
+	store := splitClassRoutes(leaf).withCLIEmission(cityPath).stores[coordclass.ClassGraph]
+	writer, ok := store.(beads.DepMetadataWriter)
+	if !ok {
+		t.Fatalf("the emitting class store %T cannot carry an edge payload, so the migration would refuse it", store)
+	}
+
+	const payload = `{"gate":"waits_for"}`
+	if err := writer.DepAddWithMetadata(from.ID, to.ID, "blocks", payload); err != nil {
+		t.Fatalf("carrying an edge payload through the emitting store: %v", err)
+	}
+
+	reader, ok := store.(beads.DepMetadataReader)
+	if !ok {
+		t.Fatalf("the emitting class store %T cannot report an edge payload", store)
+	}
+	got, carried, err := reader.DepMetadata(from.ID, to.ID)
+	if err != nil {
+		t.Fatalf("reading the payload back: %v", err)
+	}
+	if !carried || got != payload {
+		t.Fatalf("the edge carries (%q, %v), want (%q, true): the wrapper wrote the edge without its payload", got, carried, payload)
+	}
+
+	appended := beadEvents(readCityJournal(t, cityPath))
+	if len(appended) != 1 {
+		t.Fatalf("the payload-carrying edge write appended %d bead.* events, want exactly 1: %+v", len(appended), appended)
+	}
+	if appended[0].Subject != from.ID {
+		t.Errorf("event subject = %q, want the issue side %q whose DepList changed", appended[0].Subject, from.ID)
+	}
+}
+
+// TestEmittingClassStoreRefusesAnEdgePayloadItsBackingCannotHold is the other
+// half: a leaf with no writer must produce an ERROR, never a silent plain
+// DepAdd. A wrapper that fell back would report success on a write that dropped
+// the gate, which is the one shape the whole edge-payload carry exists to stop.
+func TestEmittingClassStoreRefusesAnEdgePayloadItsBackingCannotHold(t *testing.T) {
+	cityPath := t.TempDir()
+	leaf := beads.NewMemStore()
+	if _, ok := beads.Store(leaf).(beads.DepMetadataWriter); ok {
+		t.Fatal("MemStore now carries edge payloads, so it is no longer the backing this test needs")
+	}
+	from := seedClassBead(t, leaf, "gated")
+	to := seedClassBead(t, leaf, "gates-it")
+
+	store := splitClassRoutes(leaf).withCLIEmission(cityPath).stores[coordclass.ClassGraph]
+	writer, ok := store.(beads.DepMetadataWriter)
+	if !ok {
+		t.Fatalf("the emitting class store %T does not expose the edge-payload write at all", store)
+	}
+
+	err := writer.DepAddWithMetadata(from.ID, to.ID, "blocks", `{"gate":"waits_for"}`)
+	if err == nil {
+		t.Fatal("a backing that cannot hold an edge payload accepted one, which means the wrapper fell back to a plain DepAdd and dropped it")
+	}
+	if !strings.Contains(err.Error(), from.ID) || !strings.Contains(err.Error(), "payload") {
+		t.Errorf("the refusal names neither the edge nor what could not be held: %v", err)
+	}
+
+	// The refusal must also be complete: a fallback that errored AFTER writing
+	// the edge would leave the binding holding a payloadless edge it reports as
+	// having refused.
+	deps, err := leaf.DepList(from.ID, "down")
+	if err != nil {
+		t.Fatalf("DepList: %v", err)
+	}
+	if len(deps) != 0 {
+		t.Fatalf("the refused edge was written anyway: %+v", deps)
+	}
+}
+
 // Emission is best-effort by contract: the mutation has already committed when
 // the event is written, so a journal that cannot be opened must not turn a
 // landed close into a failed command.
@@ -650,6 +742,48 @@ func TestClassStoreEmissionHydratesDependencyEdges(t *testing.T) {
 	}
 	if len(snapshot.Dependencies) != 1 || snapshot.Dependencies[0].DependsOnID != blocker.ID {
 		t.Errorf("payload dependencies = %+v, want the edge just added to %s", snapshot.Dependencies, blocker.ID)
+	}
+}
+
+func TestClassStoreEmissionPreservesStatusBasedDeferralUntilClose(t *testing.T) {
+	cityPath := t.TempDir()
+	leaf := beads.NewMemStore()
+	store := resolveGraphStore(splitClassRoutes(leaf).withCLIEmission(cityPath), beads.NewMemStore(), nil, cityPath, nil)
+
+	deferred, ok := beads.DecodeBeadEventPayload(
+		json.RawMessage(`{"id":"source-deferred","title":"deferred","status":"deferred","issue_type":"task"}`),
+	)
+	if !ok {
+		t.Fatal("deferred fixture did not decode")
+	}
+	created, err := leaf.Create(deferred)
+	if err != nil {
+		t.Fatalf("seeding deferred bead: %v", err)
+	}
+
+	if err := store.SetMetadata(created.ID, "gc.note", "still deferred"); err != nil {
+		t.Fatalf("metadata write: %v", err)
+	}
+	if err := store.Close(created.ID); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	got := beadEvents(readCityJournal(t, cityPath))
+	if len(got) != 2 {
+		t.Fatalf("got %s, want one update and one close", eventSummary(got))
+	}
+	var updateWire struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(got[0].Payload, &updateWire); err != nil {
+		t.Fatalf("decode update payload: %v", err)
+	}
+	if got[0].Type != events.BeadUpdated || updateWire.Status != "deferred" {
+		t.Errorf("first event = %s status=%q, want bead.updated status=deferred", got[0].Type, updateWire.Status)
+	}
+	closed, ok := beads.DecodeBeadEventPayload(got[1].Payload)
+	if !ok || got[1].Type != events.BeadClosed || closed.Status != "closed" {
+		t.Errorf("second event = %s payload=%s, want bead.closed with closed snapshot", got[1].Type, got[1].Payload)
 	}
 }
 

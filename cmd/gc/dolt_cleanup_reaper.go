@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -39,16 +40,23 @@ const (
 // on disk, live when it does, unknown for absent or relative configs and for
 // stat errors. ConfigPathState is not a standalone reap trigger: a deleted
 // config protects (with a confirm-manually reason) unless the deleted-cwd
-// signal corroborates that the scope is truly gone.
+// signal corroborates that the scope is truly gone. ContainerRuntime is the
+// runtime name ("docker" or "podman") when /proc/<pid>/cgroup's first line
+// carries that runtime's cgroup marker, or "" for a normal host process or a
+// host with no /proc (ga-sm1cvj). classifyDoltProcess treats a non-empty
+// value as an unconditional protect signal for a bare (no --config) server:
+// gc does not own container lifecycle, and killing the in-container PID
+// would leave a broken container rather than free anything.
 type DoltProcInfo struct {
-	PID             int
-	Argv            []string
-	Ports           []int
-	RSSBytes        int64
-	StartTimeTicks  uint64
-	StartIdentity   string
-	CWDState        string
-	ConfigPathState string
+	PID              int
+	Argv             []string
+	Ports            []int
+	RSSBytes         int64
+	StartTimeTicks   uint64
+	StartIdentity    string
+	CWDState         string
+	ConfigPathState  string
+	ContainerRuntime string
 }
 
 // reapClassification is the per-process decision produced by classifyDoltProcess.
@@ -93,9 +101,12 @@ type ReapTarget struct {
 
 // ProtectedProcess is a single PID that the reaper refused to kill, with the
 // reason recorded so the report can show operators why nothing was done.
+// ContainerRuntime mirrors the source DoltProcInfo.ContainerRuntime — it may
+// be non-empty even when Action was protected for an unrelated reason.
 type ProtectedProcess struct {
-	PID    int
-	Reason string
+	PID              int
+	Reason           string
+	ContainerRuntime string
 }
 
 // ReapPlan is the outcome of planOrphanReap. Reap is the orphan list; Protected
@@ -150,7 +161,9 @@ func reapDataDir(argv []string, homeDir, tempDir string) string {
 
 // isTestConfigPath reports whether p matches the cleanup allowlist for test
 // Dolt configs: Go test temp roots, plus known Gas City unit-test prefixes
-// that use short socket-safe directories under os.TempDir().
+// that use short socket-safe directories under os.TempDir(). Also allowlists
+// the fleet GOTMPDIR root (AGENTS.md pins /var/tmp/gotmp; the GOTMPDIR env var
+// is checked too when set, in case it differs on a given host) — ga-sm1cvj.
 func isTestConfigPath(p, homeDir, tempDir string) bool {
 	if p == "" {
 		return false
@@ -161,6 +174,14 @@ func isTestConfigPath(p, homeDir, tempDir string) bool {
 	}
 	if hasTestChildPrefix(clean, tempDir, testConfigPathPrefixes()) {
 		return true
+	}
+	if hasTestChildPrefix(clean, "/var/tmp/gotmp", []string{"Test"}) {
+		return true
+	}
+	if gotmpdir := os.Getenv("GOTMPDIR"); gotmpdir != "" {
+		if hasTestChildPrefix(clean, gotmpdir, []string{"Test"}) {
+			return true
+		}
 	}
 	if homeDir == "" {
 		return false
@@ -234,22 +255,28 @@ func configUnderActiveTestRoot(configPath string, activeTestRoots []string) bool
 //  3. Else reap when the working directory is an unlinked inode (ga-10wmzh):
 //     a cwd readlink ending in " (deleted)" can never revert, so it proves the
 //     scope is gone — this also covers bare servers started without --config.
-//  4. Else, for a bare server (no --config): reap when --data-dir is present
+//  4. Else, for a bare server (no --config) running inside a container
+//     (ContainerRuntime non-empty, from a /proc/<pid>/cgroup docker-/libpod-
+//     marker): protect unconditionally. gc does not own container lifecycle,
+//     and killing the in-container PID would leave a broken container rather
+//     than free anything (ga-sm1cvj) — checked before the --data-dir allowlist
+//     below because a container's own --data-dir is never a signal gc can act on.
+//  5. Else, for a bare server (no --config): reap when --data-dir is present
 //     and itself independently passes the test-config-path allowlist from
-//     step 5 below (e.g. examples/gastown's real-dolt integration test,
+//     step 6 below (e.g. examples/gastown's real-dolt integration test,
 //     which launches `dolt sql-server --data-dir <t.TempDir()>/dolt` with no
 //     --config at all — a confirmed regression exemplar). Otherwise protect:
 //     an unidentified dolt server (no --config and no allowlisted
 //     --data-dir) is never killed.
-//  5. Else reap when --config is on the test-config-path allowlist (/tmp/Test*,
-//     os.TempDir()/Test*, known Gas City temp prefixes). The allowlist match
-//     is an ownership signal, so an owned test scope is reaped even if its
-//     --config file was already removed.
-//  6. Else, if a non-allowlist --config has vanished while the cwd is still
+//  6. Else reap when --config is on the test-config-path allowlist (/tmp/Test*,
+//     os.TempDir()/Test*, known Gas City temp prefixes, /var/tmp/gotmp/Test*,
+//     or $GOTMPDIR/Test*). The allowlist match is an ownership signal, so an
+//     owned test scope is reaped even if its --config file was already removed.
+//  7. Else, if a non-allowlist --config has vanished while the cwd is still
 //     live or its state is unknown, protect with a confirm-and-kill-manually
 //     reason: a lone missing-config observation is not proof of scope deletion,
 //     so it reaps only with cross-signal corroboration (a confirmed deleted
-//     cwd, checked in step 3) or an ownership signal (the allowlist in step 5).
+//     cwd, checked in step 3) or an ownership signal (the allowlist in step 6).
 //     Otherwise protect with a reason that echoes the actual config path so
 //     operators can decide whether to kill it manually (architect Open Q 0).
 //     Unknown state is never a reap signal.
@@ -280,6 +307,12 @@ func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, 
 		}
 	}
 	if cfgPath == "" {
+		if p.ContainerRuntime != "" {
+			return reapClassification{
+				Action: "protect",
+				Reason: fmt.Sprintf("container-managed dolt server (%s); not reapable by PID — remove the container with the runtime CLI", p.ContainerRuntime),
+			}
+		}
 		dataDirPath := extractDataDirPath(p.Argv)
 		if dataDirPath == "" {
 			return reapClassification{
@@ -289,7 +322,7 @@ func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, 
 		}
 		if isTestConfigPath(dataDirPath, homeDir, tempDir) {
 			// A --data-dir match against the same allowlist used for --config
-			// (step 5 below) is an ownership signal in its own right: a bare
+			// (step 6 below) is an ownership signal in its own right: a bare
 			// server with no --config but a test-owned --data-dir is a known
 			// regression-test shape and is reaped rather than protected.
 			return reapClassification{Action: "reap", DataDir: dataDirPath}
@@ -359,7 +392,7 @@ func planOrphanReap(procs []DoltProcInfo, rigPortByPort map[int]string, homeDir,
 				StartIdentity:  p.StartIdentity,
 			})
 		default:
-			plan.Protected = append(plan.Protected, ProtectedProcess{PID: p.PID, Reason: c.Reason})
+			plan.Protected = append(plan.Protected, ProtectedProcess{PID: p.PID, Reason: c.Reason, ContainerRuntime: p.ContainerRuntime})
 		}
 	}
 	return plan

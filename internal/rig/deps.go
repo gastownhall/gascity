@@ -57,9 +57,13 @@ type Deps struct {
 	// collectRigRoutes + writeAllRoutes). Required — it runs after the config
 	// write, so a nil here would panic past the topology rollback.
 	WriteRoutes func(cityPath string, cfg *config.City) error
-	// ProbeBranch returns the rig's git default branch, or "" when unknown.
+	// ProbeBranch returns the rig's git default branch and the remote whose
+	// HEAD supplied it. An empty remote with a non-empty branch means the
+	// branch was inferred from the checked-out branch rather than read from a
+	// remote HEAD, which the banner reports so the operator can catch a rig
+	// registered against a feature branch. Both empty = unknown.
 	// nil = skip the probe.
-	ProbeBranch func(rigPath string) string
+	ProbeBranch func(rigPath string) (branch, remote string)
 	// ResolveRegistryPack maps a registry pack name (flat "<name>" or scoped
 	// "<owner>/<name>") to the import source published for it, for --include
 	// tokens that name a registry pack instead of a path. It must not fetch or

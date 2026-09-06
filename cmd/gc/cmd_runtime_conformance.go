@@ -45,7 +45,7 @@ any required requirement fails.`,
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
 
-			target, note := resolveRuntimeCheckTarget(args[0], stderr)
+			target, note, _ := resolveRuntimeCheckTarget(args[0], stderr)
 			if note != "" && !asJSON {
 				fmt.Fprintln(stdout, note) //nolint:errcheck // best-effort stdout
 			}

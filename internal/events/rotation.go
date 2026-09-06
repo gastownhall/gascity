@@ -26,15 +26,34 @@ var rotatingBasenameRE = regexp.MustCompile(
 // .gz.tmp + os.Rename to keep the operation atomic. On success, source
 // is removed and dest is the canonical archive path.
 //
-// Collision guard (designer §8.3): if dest already exists, the source
-// file is left in place for operator inspection and the function
-// writes a warning to stderr and returns an error. This prevents a
-// hash-colliding rotation from silently destroying a prior archive.
+// supersededRotatingPrefix marks a colliding rotation source that was set
+// aside: the canonical archive for its exact timestamp and seq window already
+// exists, so the source's events are already archived. The prefix breaks the
+// events.jsonl.* namespace, which is what makes the file invisible to
+// listBackfillSources and to the startup reaper — the two scanners that
+// otherwise re-decode and re-collide a stranded source forever (ga-jctn6).
+const supersededRotatingPrefix = "superseded-"
+
+// Collision guard (designer §8.3): if dest already exists, the destination is
+// never overwritten — a hash-colliding rotation must not destroy a prior
+// archive. The source is SET ASIDE under supersededRotatingPrefix rather than
+// left in place: the canonical name embeds the timestamp and seq window, so a
+// colliding source holds the same events the archive already holds, and left
+// under its rotating name it is re-collided by the reaper on every startup and
+// re-decoded by every AfterSeq=0 read. The bytes are preserved for operator
+// inspection; the function still reports the collision as an error.
 func gzipAndArchive(source, dest string, stderr io.Writer) error {
 	if _, err := os.Stat(dest); err == nil {
-		fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
-			"events: rotation: target archive %q already exists; leaving %q in place for operator inspection\n",
-			filepath.Base(dest), filepath.Base(source))
+		setAside := filepath.Join(filepath.Dir(source), supersededRotatingPrefix+filepath.Base(source))
+		if renameErr := os.Rename(source, setAside); renameErr != nil {
+			fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
+				"events: rotation: target archive %q already exists; failed to set %q aside: %v\n",
+				filepath.Base(dest), filepath.Base(source), renameErr)
+		} else {
+			fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
+				"events: rotation: target archive %q already exists; set %q aside as %q for operator inspection\n",
+				filepath.Base(dest), filepath.Base(source), filepath.Base(setAside))
+		}
 		return fmt.Errorf("archive %q already exists", filepath.Base(dest))
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("stat %q: %w", dest, err)
@@ -99,8 +118,9 @@ func gzipAndArchive(source, dest string, stderr io.Writer) error {
 // sweep continues — a single corrupt orphan must not block recovery
 // of the others.
 //
-// Designer §8.3: on canonical-name collision, the rotating-* file is
-// left in place rather than overwriting the existing archive.
+// Designer §8.3: on canonical-name collision, gzipAndArchive sets the
+// rotating source aside under supersededRotatingPrefix (see its doc)
+// rather than overwriting the existing archive.
 func reapOrphanedRotatingFiles(dir string, stderr io.Writer) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
