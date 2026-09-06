@@ -200,6 +200,55 @@ func TestRunRalphCheckPackRelativeCheckPathWorkDirFallback(t *testing.T) {
 	}
 }
 
+// TestRunRalphCheckMissingWorkDirFallsBackToStableCWD covers
+// gastownhall/gascity#4128: a transient worker directory may be removed while
+// its inherited gc.work_dir remains on the workflow. Resolving the script from
+// the stable store root is insufficient if exec still tries to chdir into the
+// vanished directory.
+func TestRunRalphCheckMissingWorkDirFallsBackToStableCWD(t *testing.T) {
+	cityPath := t.TempDir()
+	checkRel := filepath.Join("assets", "demo-pack", "scripts", "check.sh")
+	storeScript := filepath.Join(cityPath, checkRel)
+	if err := os.MkdirAll(filepath.Dir(storeScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(storeScript, []byte("#!/bin/sh\nprintf 'cwd=%s\\n' \"$PWD\"\nprintf 'work_dir=%s\\n' \"${GC_WORK_DIR-unset}\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	missingWorkDir := filepath.Join(cityPath, "worktrees", "removed-worker")
+
+	store := beads.NewMemStore()
+	root := mustCreate(t, store, beads.Bead{Title: "workflow", Metadata: map[string]string{"gc.kind": "workflow"}})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "review loop",
+		Metadata: map[string]string{
+			"gc.kind":         "ralph",
+			"gc.root_bead_id": root.ID,
+			"gc.check_path":   filepath.ToSlash(checkRel),
+			"gc.work_dir":     missingWorkDir,
+			"gc.max_attempts": "3",
+		},
+	})
+	subject := mustCreate(t, store, beads.Bead{
+		Title:    "review loop iteration 1",
+		Metadata: map[string]string{"gc.kind": "scope", "gc.root_bead_id": root.ID},
+	})
+
+	result, err := runRalphCheck(store, control, subject, 1, ProcessOptions{CityPath: cityPath})
+	if err != nil {
+		t.Fatalf("runRalphCheck: %v", err)
+	}
+	if result.Outcome != convergence.GatePass {
+		t.Fatalf("Outcome = %q (stderr=%q), want pass", result.Outcome, result.Stderr)
+	}
+	if !strings.Contains(result.Stdout, "cwd="+cityPath+"\n") {
+		t.Fatalf("stdout = %q, want stable cwd %q", result.Stdout, cityPath)
+	}
+	if !strings.Contains(result.Stdout, "work_dir=unset\n") {
+		t.Fatalf("stdout = %q, want stale GC_WORK_DIR omitted", result.Stdout)
+	}
+}
+
 // TestRunRalphCheckWorkDirRelativeCheckPathKeepsPrecedence guards that the
 // #3008 fallback only fires when the work_dir join is missing: a check_path
 // that DOES exist under the worktree must still resolve against the worktree,
