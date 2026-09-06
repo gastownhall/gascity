@@ -1489,27 +1489,128 @@ func managedDoltStatePath(cityPath string) string {
 	return filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-state.json")
 }
 
-func currentManagedDoltPort(cityPath string) string {
+// managedDoltPortResolution classifies the outcome of resolving a city's
+// published managed dolt port, so a caller that must fail closed (doctor's stop
+// guard) can tell a genuinely-stopped city apart from a transient read/parse
+// error it must not act on.
+type managedDoltPortResolution int
+
+const (
+	// managedDoltPortAbsent: the city publishes no managed dolt server.
+	managedDoltPortAbsent managedDoltPortResolution = iota
+	// managedDoltPortFound: a valid, owned, live server is published; the
+	// returned port is its listener.
+	managedDoltPortFound
+	// managedDoltPortError: presence could not be determined because the
+	// ownership probe, the state-file read, or the JSON parse failed. Callers
+	// that stop servers must treat this as "do not touch."
+	managedDoltPortError
+)
+
+// resolveManagedDoltPort resolves cityPath's published managed dolt port with an
+// explicit found/absent/error outcome. A stopped city (nothing owned or nothing
+// published) is absent, not an error; only a probe/read/parse failure that
+// leaves presence genuinely unknown is an error.
+func resolveManagedDoltPort(cityPath string) (string, managedDoltPortResolution) {
 	owned, err := managedDoltLifecycleOwned(cityPath)
 	if err != nil {
 		log.Printf("gc: managed dolt ownership probe failed for %s: %v", cityPath, err)
-		return ""
+		return "", managedDoltPortError
 	}
 	if !owned {
-		return ""
+		return "", managedDoltPortAbsent
 	}
 	data, err := os.ReadFile(managedDoltStatePath(cityPath))
 	if err != nil {
-		return ""
+		if errors.Is(err, os.ErrNotExist) {
+			// The city owns its lifecycle but has published nothing yet:
+			// genuinely stopped, not an error.
+			return "", managedDoltPortAbsent
+		}
+		return "", managedDoltPortError
 	}
 	var state doltRuntimeState
 	if json.Unmarshal(data, &state) != nil {
+		return "", managedDoltPortError
+	}
+	if resolution := resolveDoltRuntimeStatePresence(state, cityPath, defaultManagedDoltStatePresenceProbes()); resolution != managedDoltPortFound {
+		return "", resolution
+	}
+	return strconv.Itoa(state.Port), managedDoltPortFound
+}
+
+// managedDoltStatePresenceProbes are the impure per-process reads that decide
+// whether a parsed dolt runtime state describes our live, owned server. They are
+// injected — mirroring doctorManagedDoltDeps — so the deterministic-vs-transient
+// classification wiring is testable without spawning a real owned-but-unreachable
+// server (gastownhall/gascity#4827 review finding 3).
+type managedDoltStatePresenceProbes struct {
+	identity  func(state doltRuntimeState, cityPath string) (managedDoltRuntimeLayout, bool)
+	pidAlive  func(pid int) bool
+	owned     func(state doltRuntimeState, layout managedDoltRuntimeLayout) bool
+	reachable func(port string) bool
+}
+
+// defaultManagedDoltStatePresenceProbes wires the presence assembly to the real
+// managed-dolt probes.
+func defaultManagedDoltStatePresenceProbes() managedDoltStatePresenceProbes {
+	return managedDoltStatePresenceProbes{
+		identity:  validDoltRuntimeStateIdentity,
+		pidAlive:  pidAlive,
+		owned:     managedDoltRuntimeProcessOwned,
+		reachable: doltPortReachable,
+	}
+}
+
+// resolveDoltRuntimeStatePresence classifies an already-parsed runtime state into
+// found/absent/error.
+//
+// It separates the deterministic "is this our live, owned process" verdict from
+// the one transient probe (port reachability). Structural identity, PID liveness,
+// and ownership are stable reads: when any fails the server is genuinely not
+// running now (stopped, dead PID, wrong layout, or unowned) and the city is
+// absent — so doctor's #4685 self-cleanup guard still arms. The checks
+// short-circuit so a stopped, dead, or unowned city never pays the 250ms port
+// dial. See classifyDoltRuntimeStatePresence for why a present-but-unreachable
+// server fails closed to error rather than absent.
+func resolveDoltRuntimeStatePresence(state doltRuntimeState, cityPath string, probes managedDoltStatePresenceProbes) managedDoltPortResolution {
+	layout, identityOK := probes.identity(state, cityPath)
+	deterministicallyPresent := identityOK &&
+		probes.pidAlive(state.PID) &&
+		probes.owned(state, layout)
+	portReachable := deterministicallyPresent && probes.reachable(strconv.Itoa(state.Port))
+	return classifyDoltRuntimeStatePresence(deterministicallyPresent, portReachable)
+}
+
+// classifyDoltRuntimeStatePresence turns the deterministic "this is our live,
+// owned process" verdict and the transient port-reachability probe into a
+// found/absent/error resolution.
+//
+// When deterministicallyPresent is false the server is genuinely not running
+// (stopped, dead PID, wrong layout, or unowned), so the city is absent. When it
+// is true but the listener did not answer, presence is only transiently unknown
+// — an owned, live server can miss one probe — so the result is error (fail
+// closed), never absent. Classing that transient case absent would arm doctor's
+// stop guard with wasRunning=false and let release stop a pre-existing server
+// the moment its port answered again (gastownhall/gascity#4827 review finding 3).
+func classifyDoltRuntimeStatePresence(deterministicallyPresent, portReachable bool) managedDoltPortResolution {
+	if !deterministicallyPresent {
+		return managedDoltPortAbsent
+	}
+	if !portReachable {
+		return managedDoltPortError
+	}
+	return managedDoltPortFound
+}
+
+// currentManagedDoltPort is the port-or-empty projection of resolveManagedDoltPort
+// for callers that do not distinguish absent from error.
+func currentManagedDoltPort(cityPath string) string {
+	port, resolution := resolveManagedDoltPort(cityPath)
+	if resolution != managedDoltPortFound {
 		return ""
 	}
-	if !validDoltRuntimeState(state, cityPath) {
-		return ""
-	}
-	return strconv.Itoa(state.Port)
+	return port
 }
 
 func validDoltRuntimeState(state doltRuntimeState, cityPath string) bool {

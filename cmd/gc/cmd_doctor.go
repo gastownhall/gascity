@@ -450,6 +450,12 @@ func doDoctor(fix, verbose, jsonOut bool, checkTimeout time.Duration, stdout, st
 	}
 	controllerRunning := doctor.IsControllerRunning(cityPath)
 	supervisorRunning := supervisorAliveHook() != 0
+	// doctor is read-only, but its beads checks can start the managed dolt on
+	// demand via bd's provider script. Leave the process table as we found it:
+	// stop a server (and its scope watchdog) that only doctor caused to start.
+	// Never touches one that was already up, or one a live city owns (#4685).
+	doltGuard := newDoctorManagedDoltGuard(cityPath, controllerRunning || supervisorRunning)
+	defer doltGuard.release(stderr)
 	skipRigDoltChecks := gcDoltSkip()
 	skipCityDoltCheck := skipRigDoltChecks || (!scopeUsesManagedBdStoreContract(cityPath, cityPath) && !workspaceNeedsCityDoltCheck(cityPath, cfg))
 	skipManagedDoltCheck := managedDoltOpsCheckSkip(cityPath, cfg, cfgErr)
