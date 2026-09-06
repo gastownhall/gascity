@@ -251,8 +251,23 @@ func bdQueryEphemeralStatusShell(status string) string {
 	return `bd query --json ` + shellquote.Quote("ephemeral=true AND status="+status) + ` --limit=0`
 }
 
-func bdQueryEphemeralStatusQuietShell(status string) string {
-	return bdQueryEphemeralStatusShell(status) + ` 2>/dev/null`
+func bdQueryEphemeralInProgressQuietShell() string {
+	return bdQueryEphemeralStatusShell("in_progress") + ` 2>/dev/null`
+}
+
+// bdQueryEphemeralAssignedStatusQuietShell pushes the assignee selector into
+// bd's query instead of hydrating every wisp with the requested status and
+// discarding other agents' rows in jq. Agent identities must be quoted in the
+// query language because qualified names contain slashes; the escaped quotes
+// become literal query-string quotes after the shell expands shellVar.
+func bdQueryEphemeralAssignedStatusQuietShell(status, shellVar string) string {
+	return `bd query --json "ephemeral=true AND status=` + status + ` AND assignee=\"$` + shellVar + `\"" --limit=0 2>/dev/null`
+}
+
+// bdQueryEphemeralUnassignedStatusShell scopes a pool fallback to rows bd can
+// prove are unassigned before jq applies the metadata routing predicate.
+func bdQueryEphemeralUnassignedStatusShell(status string) string {
+	return `bd query --json ` + shellquote.Quote("ephemeral=true AND status="+status+" AND assignee=none") + ` --limit=0`
 }
 
 // ephemeralReadyBaseSelectorJQ composes the selector clauses shared by every
@@ -312,9 +327,9 @@ func legacyEphemeralPoolDemandShell(limit int, topo QueryTopology, quiet bool) s
 		limit,
 		true,
 	)
-	query := bdQueryEphemeralStatusShell("open")
+	query := bdQueryEphemeralUnassignedStatusShell("open")
 	if quiet {
-		query = bdQueryEphemeralStatusQuietShell("open")
+		query += ` 2>/dev/null`
 	}
 	jqStderr := ""
 	if quiet {
@@ -632,7 +647,7 @@ func ephemeralAssignedInProgressProbeScript(shellVar string, topo QueryTopology)
 	// through to bd show — skip straight to it. checkHold=false: the filter
 	// above already excludes held candidates before the `.[:1]` truncation, so
 	// the post-truncation nheld check here would always read zero.
-	return `r=$(` + bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
+	return `r=$(` + bdQueryEphemeralAssignedStatusQuietShell("in_progress", shellVar) + ` | ` +
 		`jq --arg id "$` + shellVar + `" ` + shellquote.Quote(filter) + ` 2>/dev/null); ` +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
 		inProgressBlockedByEnrichmentScript(false, false) +
@@ -660,7 +675,7 @@ func ephemeralAssignedReadyProbeScript(shellVar string, topo QueryTopology) stri
 	}
 	fastFilter := legacyEphemeralReadyFilterJQ(`select((.assignee // "") == $id)`, 1, false)
 	slowFilter := ephemeralReadyDependencyCandidateFilterJQ(`select((.assignee // "") == $id)`, 1, false)
-	return `open_ephemeral=$(` + bdQueryEphemeralStatusQuietShell("open") + `); ` +
+	return `open_ephemeral=$(` + bdQueryEphemeralAssignedStatusQuietShell("open", shellVar) + `); ` +
 		`r=$(printf "%s" "$open_ephemeral" | jq --arg id "$` + shellVar + `" ` + shellquote.Quote(fastFilter) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`r=$(printf "%s" "$open_ephemeral" | jq --arg id "$` + shellVar + `" ` + shellquote.Quote(slowFilter) + ` 2>/dev/null); ` +
@@ -1023,7 +1038,7 @@ func buildOnDeath(a *Agent, topo QueryTopology) string {
 		route = a.PoolName
 	}
 	_ = topo
-	ephemeralRead := bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
+	ephemeralRead := bdQueryEphemeralInProgressQuietShell() + ` | ` +
 		`jq -r --arg assignee ` + shellquote.Quote(a.QualifiedName()) + ` '.[] | select((.assignee // "") == $assignee) | [.id, ` + jqMeta(beadmeta.RunTargetMetadataKey) + `, ` + jqMeta(beadmeta.RoutedToMetadataKey) + `] | @tsv' 2>/dev/null; `
 	// Reset both assignee and status: clearing assignee alone leaves the bead
 	// invisible to every work_query tier (Tier 1 needs assignee match, Tiers
@@ -1066,7 +1081,7 @@ func buildOnBoot(a *Agent, topo QueryTopology) string {
 		template = a.PoolName
 	}
 	_ = topo
-	ephemeralRead := bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
+	ephemeralRead := bdQueryEphemeralInProgressQuietShell() + ` | ` +
 		`jq -r --arg template "$template" '.[] | select((.assignee // "") == "") | select((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == $template) or ((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") and (` + jqMeta(beadmeta.RunTargetMetadataKey) + ` == $template) and (` + jqMeta(beadmeta.KindMetadataKey) + ` == "` + beadmeta.KindWorkflow + `"))) | .id' 2>/dev/null; `
 	return `template=` + shellquote.Quote(template) + `; ` +
 		`{ ` +
