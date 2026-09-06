@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -167,12 +168,12 @@ func findPiSessionCandidatesIn(root, workDir string) []piSessionCandidate {
 		if !strings.HasSuffix(strings.ToLower(entry.Name()), ".jsonl") {
 			return nil
 		}
-		sessionID, cwd := piSessionHeader(path)
-		if cleanPiWorkDir(cwd) != workDir {
-			return nil
-		}
 		info, err := entry.Info()
 		if err != nil {
+			return nil
+		}
+		sessionID, cwd := cachedPiSessionHeader(path, info)
+		if cleanPiWorkDir(cwd) != workDir {
 			return nil
 		}
 		if sessionID == "" {
@@ -185,6 +186,48 @@ func findPiSessionCandidatesIn(root, workDir string) []piSessionCandidate {
 		return nil
 	}
 	return candidates
+}
+
+// piHeaderCacheEntry memoizes the parsed first-line header of a pi session
+// file. size+modTime form the stat signature: a rewritten transcript gets a new
+// signature and re-parses, while list/enrichment sweeps that revisit an
+// unchanged tree skip the per-file open+parse entirely.
+type piHeaderCacheEntry struct {
+	size      int64
+	modTimeNS int64
+	sessionID string
+	cwd       string
+}
+
+var (
+	piHeaderCacheMu sync.Mutex
+	piHeaderCache   = make(map[string]piHeaderCacheEntry)
+)
+
+// piHeaderCacheMaxEntries bounds the cache; deleted transcripts leave stale
+// keys behind, so past this size the map resets rather than growing forever.
+const piHeaderCacheMaxEntries = 16384
+
+func cachedPiSessionHeader(path string, info os.FileInfo) (string, string) {
+	size := info.Size()
+	modTimeNS := info.ModTime().UnixNano()
+
+	piHeaderCacheMu.Lock()
+	entry, ok := piHeaderCache[path]
+	piHeaderCacheMu.Unlock()
+	if ok && entry.size == size && entry.modTimeNS == modTimeNS {
+		return entry.sessionID, entry.cwd
+	}
+
+	sessionID, cwd := piSessionHeader(path)
+
+	piHeaderCacheMu.Lock()
+	if len(piHeaderCache) >= piHeaderCacheMaxEntries {
+		piHeaderCache = make(map[string]piHeaderCacheEntry)
+	}
+	piHeaderCache[path] = piHeaderCacheEntry{size: size, modTimeNS: modTimeNS, sessionID: sessionID, cwd: cwd}
+	piHeaderCacheMu.Unlock()
+	return sessionID, cwd
 }
 
 func parsePiFileDetailed(path string) ([]piEntry, string, SessionDiagnostics, error) {

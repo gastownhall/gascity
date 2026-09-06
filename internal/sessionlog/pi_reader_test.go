@@ -438,3 +438,88 @@ func TestFindPiSessionFileFailsClosedOnAmbiguousCWD(t *testing.T) {
 		t.Fatalf("FindPiSessionFileByID(first) = %q, want %q", got, firstPath)
 	}
 }
+
+func writePiSessionHeaderFile(t *testing.T, path, workDir string) {
+	t.Helper()
+	body := `{"type":"session","version":3,"id":"sess-1","cwd":"` + filepath.ToSlash(workDir) + `"}`
+	if err := os.WriteFile(path, []byte(body+"\n"), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func TestFindPiSessionFileByIDSkipsRereadWhenStatSignatureUnchanged(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "project-aa")
+	otherDir := filepath.Join(filepath.Dir(workDir), "project-bb")
+	path := filepath.Join(root, "session.jsonl")
+	writePiSessionHeaderFile(t, path, workDir)
+
+	if got := FindPiSessionFileByID([]string{root}, workDir, "sess-1"); got != path {
+		t.Fatalf("FindPiSessionFileByID() = %q, want %q", got, path)
+	}
+
+	// Rewrite the header to a different cwd of the same byte length and restore
+	// the original mtime, so the (size, mtime) stat signature is unchanged. The
+	// candidate scan must serve the cached header without re-reading the file.
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	writePiSessionHeaderFile(t, path, otherDir)
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat rewritten: %v", err)
+	}
+	if after.Size() != info.Size() {
+		t.Fatalf("rewrite changed size %d -> %d; test needs an identical signature", info.Size(), after.Size())
+	}
+	if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	if got := FindPiSessionFileByID([]string{root}, workDir, "sess-1"); got != path {
+		t.Fatalf("FindPiSessionFileByID() after same-signature rewrite = %q, want cached %q", got, path)
+	}
+}
+
+func TestFindPiSessionFileByIDInvalidatesCacheOnChangedSignature(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "project")
+	movedDir := workDir + "-moved"
+	path := filepath.Join(root, "session.jsonl")
+	writePiSessionHeaderFile(t, path, workDir)
+
+	if got := FindPiSessionFileByID([]string{root}, workDir, "sess-1"); got != path {
+		t.Fatalf("FindPiSessionFileByID() = %q, want %q", got, path)
+	}
+
+	writePiSessionHeaderFile(t, path, movedDir)
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(path, future, future); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	if got := FindPiSessionFileByID([]string{root}, workDir, "sess-1"); got != "" {
+		t.Fatalf("FindPiSessionFileByID(old cwd) = %q, want empty after header rewrite", got)
+	}
+	if got := FindPiSessionFileByID([]string{root}, movedDir, "sess-1"); got != path {
+		t.Fatalf("FindPiSessionFileByID(new cwd) = %q, want %q", got, path)
+	}
+}
+
+func TestFindPiSessionFileByIDDropsDeletedFileDespiteCache(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "project")
+	path := filepath.Join(root, "session.jsonl")
+	writePiSessionHeaderFile(t, path, workDir)
+
+	if got := FindPiSessionFileByID([]string{root}, workDir, "sess-1"); got != path {
+		t.Fatalf("FindPiSessionFileByID() = %q, want %q", got, path)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if got := FindPiSessionFileByID([]string{root}, workDir, "sess-1"); got != "" {
+		t.Fatalf("FindPiSessionFileByID() after delete = %q, want empty", got)
+	}
+}
