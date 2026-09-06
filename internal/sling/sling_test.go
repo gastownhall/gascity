@@ -2364,6 +2364,43 @@ func TestDoSlingDryRunRefusesCrossStoreBeforeMutation(t *testing.T) {
 	}
 }
 
+func TestDoSlingBatchDryRunRefusesCrossStoreBeforeMutation(t *testing.T) {
+	deps, router, target := crossStoreSlingDeps(t)
+	store := deps.Store
+	convoy, err := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("create convoy: %v", err)
+	}
+	children := []beads.Bead{}
+	for _, title := range []string{"one", "two"} {
+		child, createErr := store.Create(beads.Bead{Title: title, Type: "task", ParentID: convoy.ID, Status: "open"})
+		if createErr != nil {
+			t.Fatalf("create child %s: %v", title, createErr)
+		}
+		children = append(children, child)
+	}
+	opts := SlingOpts{
+		Target:        target,
+		BeadOrFormula: convoy.ID,
+		Force:         true,
+		DryRun:        true,
+		NoFormula:     true,
+	}
+
+	result, err := DoSlingBatch(opts, deps, store)
+
+	requireCrossStoreRouteError(t, err)
+	if result.Routed != 0 {
+		t.Fatalf("Routed = %d, want 0", result.Routed)
+	}
+	for _, child := range children {
+		requireNoCrossStoreRouteMutation(t, store, child.ID, "")
+	}
+	if len(router.routed) != 0 {
+		t.Fatalf("router calls = %d, want 0", len(router.routed))
+	}
+}
+
 func TestDoSlingBatchRefusesCrossStoreBeforeFormulaMutation(t *testing.T) {
 	deps, router, target := crossStoreSlingDeps(t)
 	store := deps.Store
