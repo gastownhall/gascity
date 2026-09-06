@@ -2349,15 +2349,17 @@ type LocalDoctorCheck struct {
 // (broken-worktree pointers, missing files) remain hardcoded since they
 // cannot be operator-tuned in any meaningful sense.
 type DoctorConfig struct {
-	// WorktreeRigWarnSize is the per-rig warning threshold for the total
-	// disk footprint under .gc/worktrees/<rig>/. Reported by the
-	// worktree-disk-size check. Go-style human size string ("10GB", "500MB").
+	// WorktreeRigWarnSize is the per-rig warning threshold for a
+	// worktree population's total disk footprint. Reported by the
+	// worktree-disk-size check for .gc/worktrees/<rig>/, and by the
+	// rig:<rig>:worktrees check for the per-bead worktrees at
+	// <rig>/worktrees/. Go-style human size string ("10GB", "500MB").
 	// Empty or unparseable falls back to the default (10 GB).
 	WorktreeRigWarnSize string `toml:"worktree_rig_warn_size,omitempty" jsonschema:"default=10GB"`
 
-	// WorktreeRigErrorSize is the per-rig error threshold. When any rig
-	// exceeds this, the worktree-disk-size check reports an error rather
-	// than a warning. Empty or unparseable falls back to the default
+	// WorktreeRigErrorSize is the per-rig error threshold. When a rig
+	// worktree population exceeds this, the reporting check errors
+	// rather than warns. Empty or unparseable falls back to the default
 	// (50 GB).
 	WorktreeRigErrorSize string `toml:"worktree_rig_error_size,omitempty" jsonschema:"default=50GB"`
 

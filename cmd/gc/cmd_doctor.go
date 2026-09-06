@@ -386,6 +386,10 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		// bead-store-preflight already registered early (near city data gates) when storeOK is false.
 		for _, rig := range activeRigs {
 			register(doctor.NewRigPathCheck(rig))
+			// Per-bead worktrees live at <rig>/worktrees/, not under
+			// $CITY/.gc/worktrees/, so none of the city-scoped worktree
+			// checks above can see them.
+			register(doctor.NewRigWorktreesCheck(rig, doctorCfg))
 			register(doctor.NewRigGitCheck(rig))
 			register(doctor.NewRigRootBranchCheck(rig))
 			register(doctor.NewRigBDSplitStoreCheck(cityPath, rig))
