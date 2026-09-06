@@ -499,6 +499,97 @@ func TestDoSessionWake_NoRunnableTemplateAgeGate(t *testing.T) {
 	}
 }
 
+// TestDoSessionWake_SuspendedRigRejectsWake pins the fix for gastownhall/gascity#5785:
+// waking a session whose owning rig is suspended must fail loudly with a
+// rig-resume hint instead of printing the generic "wake requested" success
+// line, since no reconciler will ever act on the wake. The non-suspended
+// case is the regression guard -- the same session/agent/rig shape must
+// still wake normally when the rig isn't suspended.
+func TestDoSessionWake_SuspendedRigRejectsWake(t *testing.T) {
+	tests := []struct {
+		name             string
+		rigSuspended     bool
+		wantCode         int
+		wantStderrSubstr string
+	}{
+		{
+			name:             "suspended rig rejects wake",
+			rigSuspended:     true,
+			wantCode:         1,
+			wantStderrSubstr: `rig "frontend" is suspended`,
+		},
+		{
+			name:         "non-suspended rig wakes normally",
+			rigSuspended: false,
+			wantCode:     0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			future := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+			sessionBead, err := store.Create(beads.Bead{
+				Title:  "rig-scoped wake session",
+				Type:   session.BeadType,
+				Labels: []string{session.LabelSession},
+				Metadata: map[string]string{
+					"session_name": "s-gc-frontend-worker",
+					"template":     "frontend/worker",
+					"state":        "suspended",
+					"held_until":   future,
+					"sleep_reason": "user-hold",
+				},
+			})
+			if err != nil {
+				t.Fatalf("store.Create(session bead): %v", err)
+			}
+
+			cfg := &config.City{
+				Agents: []config.Agent{{Name: "worker", Dir: "frontend"}},
+				Rigs:   []config.Rig{{Name: "frontend", SuspendedOnStart: tt.rigSuspended}},
+			}
+			deps := sessionWakeDeps{
+				store:        store,
+				cfg:          cfg,
+				cityPath:     "/city",
+				cityResolved: true,
+				now:          time.Now,
+				withdrawQueuedWaitNudges: func(string, []string) error {
+					return nil
+				},
+				cityUsesManagedReconciler: func(string) bool {
+					return false
+				},
+				pokeController: func(string) error {
+					return nil
+				},
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := doSessionWake(sessionBead.ID, &stdout, &stderr, false, deps)
+			if code != tt.wantCode {
+				t.Fatalf("doSessionWake() = %d, want %d; stdout=%s stderr=%s", code, tt.wantCode, stdout.String(), stderr.String())
+			}
+			if tt.wantStderrSubstr != "" {
+				if got := stderr.String(); !strings.Contains(got, tt.wantStderrSubstr) {
+					t.Fatalf("stderr = %q, want substring %q", got, tt.wantStderrSubstr)
+				}
+				if got := stderr.String(); !strings.Contains(got, "gc rig resume frontend") {
+					t.Fatalf("stderr = %q, want rig-resume hint", got)
+				}
+				if got := stdout.String(); strings.Contains(got, "wake requested") {
+					t.Fatalf("stdout = %q, must not report success for a dropped wake", got)
+				}
+				return
+			}
+			if got := stdout.String(); !strings.Contains(got, "wake requested") {
+				t.Fatalf("stdout = %q, want wake requested", got)
+			}
+		})
+	}
+}
+
 // This is the single real CLI/config/file-store/controller-socket composition
 // proof for session wake. Lower-level wake behavior belongs in doSessionWake
 // unit tests; managed-Dolt consistency has its own provider boundary owner.
