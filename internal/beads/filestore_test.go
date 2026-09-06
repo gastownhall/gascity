@@ -77,6 +77,60 @@ type errLocker struct {
 func (l errLocker) Lock() error   { return l.lockErr }
 func (l errLocker) Unlock() error { return l.unlockErr }
 
+// TestFileStoreIDPrefix pins the multi-rig collision fix: a file store opened
+// with WithFileStoreIDPrefix mints under that prefix, so two rig stores in one
+// city no longer both mint gc-N and collide. Without the option the default
+// "gc" prefix is preserved.
+func TestFileStoreIDPrefix(t *testing.T) {
+	open := func(prefix string, opts ...beads.FileStoreOption) *beads.FileStore {
+		path := filepath.Join(t.TempDir(), "beads.json")
+		s, err := beads.OpenFileStore(fsys.OSFS{}, path, opts...)
+		if err != nil {
+			t.Fatalf("OpenFileStore(%q): %v", prefix, err)
+		}
+		return s
+	}
+
+	def := open("default")
+	b, err := def.Create(beads.Bead{Title: "d"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.ID != "gc-1" {
+		t.Errorf("default prefix: got %q, want gc-1", b.ID)
+	}
+
+	asv2 := open("asv2", beads.WithFileStoreIDPrefix("asv2"))
+	oe := open("oe", beads.WithFileStoreIDPrefix("oe"))
+	a, err := asv2.Create(beads.Bead{Title: "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, err := oe.Create(beads.Bead{Title: "o"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.ID != "asv2-1" {
+		t.Errorf("asv2 store: got %q, want asv2-1", a.ID)
+	}
+	if o.ID != "oe-1" {
+		t.Errorf("oe store: got %q, want oe-1", o.ID)
+	}
+	if a.ID == o.ID {
+		t.Errorf("distinct-prefix stores still collide: both %q", a.ID)
+	}
+
+	// Blank/whitespace prefix keeps the default rather than minting "-1".
+	blank := open("blank", beads.WithFileStoreIDPrefix("  "))
+	bb, err := blank.Create(beads.Bead{Title: "b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bb.ID != "gc-1" {
+		t.Errorf("blank prefix should keep default: got %q, want gc-1", bb.ID)
+	}
+}
+
 func TestFileStore(t *testing.T) {
 	factory := func() beads.Store {
 		path := filepath.Join(t.TempDir(), "beads.json")

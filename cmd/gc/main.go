@@ -1503,12 +1503,52 @@ func ensureScopedFileStoreLayout(cityPath string) error {
 
 func openScopeLocalFileStore(scopeRoot string) (*beads.FileStore, error) {
 	beadsPath := filepath.Join(scopeRoot, ".gc", "beads.json")
-	store, err := beads.OpenFileStore(fsys.OSFS{}, beadsPath)
+	store, err := beads.OpenFileStore(fsys.OSFS{}, beadsPath, fileStoreIDPrefixOpts(scopeRoot)...)
 	if err != nil {
 		return nil, err
 	}
 	store.SetLocker(beads.NewFileFlock(beadsPath + ".lock"))
 	return store, nil
+}
+
+// fileStoreIDPrefixOpts resolves the bead-ID prefix a file store at scopeRoot
+// should mint under, so a multi-rig file-backed city does not collide on gc-N
+// across stores (bd/dolt/exec stores already carry their scope's prefix; the
+// file store was the only path that didn't). Returns no option — leaving the
+// default "gc" — when the city config can't be resolved, matching prior
+// behavior for single-scope callers and tests.
+func fileStoreIDPrefixOpts(scopeRoot string) []beads.FileStoreOption {
+	if prefix := effectiveFileStorePrefix(scopeRoot); prefix != "" {
+		return []beads.FileStoreOption{beads.WithFileStoreIDPrefix(prefix)}
+	}
+	return nil
+}
+
+// effectiveFileStorePrefix maps a store scope root to its configured prefix:
+// the owning rig's EffectivePrefix, or the city HQ prefix for the city store.
+// Empty when config is unavailable (e.g. tests that open a bare dir).
+func effectiveFileStorePrefix(scopeRoot string) string {
+	cityPath, err := resolveCity()
+	if err != nil {
+		return ""
+	}
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		return ""
+	}
+	for i := range cfg.Rigs {
+		rig := cfg.Rigs[i]
+		if strings.TrimSpace(rig.Path) == "" {
+			continue
+		}
+		if samePath(resolveStoreScopeRoot(cityPath, rig.Path), scopeRoot) {
+			return rig.EffectivePrefix()
+		}
+	}
+	if samePath(resolveStoreScopeRoot(cityPath, cityPath), scopeRoot) {
+		return config.EffectiveHQPrefix(cfg)
+	}
+	return ""
 }
 
 func ensurePersistedScopeLocalFileStore(scopeRoot string) error {
