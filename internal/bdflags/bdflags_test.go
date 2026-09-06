@@ -90,7 +90,7 @@ func TestSubcommandsListsAllKnownKeys(t *testing.T) {
 	want := []string{
 		"close", "create", "delete", "dep add", "dep list", "dep remove",
 		"gate check", "gate list", "list", "mol burn", "mol current",
-		"mol pour", "mol wisp", "ready", "reopen", "show", "update",
+		"mol pour", "mol wisp", "mol wisp gc", "ready", "reopen", "show", "update",
 	}
 	got := Subcommands()
 	sort.Strings(got)
@@ -237,6 +237,16 @@ func TestCompoundSubcommandFlagSets(t *testing.T) {
 	if ValueFlags("gate check") == nil {
 		t.Fatal(`ValueFlags("gate check") = nil, want non-nil`)
 	}
+	for _, flag := range []string{"--age", "--exclude-type"} {
+		if !ValueFlags("mol wisp gc")[flag] {
+			t.Errorf(`ValueFlags("mol wisp gc")[%q] = false, want true`, flag)
+		}
+	}
+	for _, flag := range []string{"--all", "--closed", "--dry-run", "-f", "--force"} {
+		if !BoolFlags("mol wisp gc")[flag] {
+			t.Errorf(`BoolFlags("mol wisp gc")[%q] = false, want true`, flag)
+		}
+	}
 }
 
 func TestScanUnknownFlagsCleanInvocationsProduceNoFindings(t *testing.T) {
@@ -253,6 +263,8 @@ func TestScanUnknownFlagsCleanInvocationsProduceNoFindings(t *testing.T) {
 		"gc bd ready --label=pool:worker --unassigned --limit=1 --json",
 		`gc bd create "..." -t task`,
 		"gc bd dep add <tests-id> <auth-id>   # tests need auth first",
+		"gc bd mol wisp gc --age 24h --dry-run",
+		"bd mol wisp gc --closed --force --exclude-type agent,rig",
 		"`gc bd list --status=open`",
 		"`gc bd list --status=in_progress`",
 		"`gc bd ready --unassigned`",
@@ -300,6 +312,19 @@ func TestScanUnknownFlagsDetectsTypoInCompoundSubcommand(t *testing.T) {
 	}
 	if findings[0].Flag != "--asignee" {
 		t.Errorf("Flag = %q, want %q", findings[0].Flag, "--asignee")
+	}
+}
+
+func TestScanUnknownFlagsUsesLongestNestedSubcommand(t *testing.T) {
+	findings := ScanUnknownFlags([]byte("gc bd mol wisp gc --age 24h --dry-rnu"))
+	if len(findings) != 1 {
+		t.Fatalf("ScanUnknownFlags() = %v, want exactly 1 finding", findings)
+	}
+	if findings[0].Subcommand != "mol wisp gc" {
+		t.Errorf("Subcommand = %q, want %q", findings[0].Subcommand, "mol wisp gc")
+	}
+	if findings[0].Flag != "--dry-rnu" {
+		t.Errorf("Flag = %q, want %q", findings[0].Flag, "--dry-rnu")
 	}
 }
 

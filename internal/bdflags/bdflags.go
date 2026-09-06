@@ -41,8 +41,9 @@ var globalBoolFlags = map[string]bool{
 
 // valueFlagsBySub holds each subcommand's value-consuming flags (beyond the
 // global set), keyed by subcommand: a single word ("update") or, for
-// compound bd subcommands, "parent child" ("mol pour"). The key set here
-// defines every subcommand this package knows about — see Known/Subcommands.
+// compound bd subcommands, all command words joined by spaces ("mol pour" or
+// "mol wisp gc"). The key set here defines every subcommand this package knows
+// about — see Known/Subcommands.
 var valueFlagsBySub = map[string]map[string]bool{
 	"create": {
 		"--acceptance": true, "--append-notes": true, "-a": true, "--assignee": true,
@@ -116,6 +117,12 @@ var valueFlagsBySub = map[string]map[string]bool{
 	"mol wisp": {
 		"--var": true,
 	},
+	// bd v1.1.0 exposes gc as a command below "mol wisp". Keep these flags
+	// pinned even though discovery can read them from `bd mol wisp gc --help`:
+	// discovery deliberately falls back to this table when bd is unavailable.
+	"mol wisp gc": {
+		"--age": true, "--exclude-type": true,
+	},
 	"mol burn": {},
 	"gate check": {
 		"-l": true, "--limit": true, "-t": true, "--type": true,
@@ -174,6 +181,9 @@ var boolFlagsBySub = map[string]map[string]bool{
 	},
 	"mol wisp": {
 		"--dry-run": true, "--root-only": true,
+	},
+	"mol wisp gc": {
+		"--all": true, "--closed": true, "--dry-run": true, "-f": true, "--force": true,
 	},
 	"mol burn": {
 		"--dry-run": true, "--force": true,
