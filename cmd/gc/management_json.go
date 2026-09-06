@@ -90,7 +90,7 @@ func rigAddJSONSummary(rigPath string, rig config.Rig) managementActionResult {
 		Path:          rigPath,
 		Prefix:        rig.EffectivePrefix(),
 		DefaultBranch: rig.EffectiveDefaultBranch(),
-		Suspended:     managementBoolPtr(rig.Suspended),
+		Suspended:     managementBoolPtr(rig.EffectiveSuspendedOnStart()),
 	}
 	if result.Prefix == "" {
 		result.Prefix = config.DeriveBeadsPrefix(name)
