@@ -401,7 +401,11 @@ func (r *FileRecorder) writeRecordLocked(e *Event) error {
 		return fmt.Errorf("marshal: %w", err)
 	}
 	data = append(data, '\n')
-	if _, err := r.file.Write(data); err != nil {
+	written, err := r.file.Write(data)
+	if written != len(data) {
+		return errors.Join(err, io.ErrShortWrite)
+	}
+	if err != nil {
 		return fmt.Errorf("write: %w", err)
 	}
 	r.recordCount++
