@@ -1428,8 +1428,169 @@ transitive = false
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), `Upgraded import "worker"`) {
+	if !strings.Contains(stdout.String(), `Upgraded import "worker" (worker)`) {
 		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+// TestDoImportUpgradeTargetUnchangedReportsNoMovement covers the targeted
+// upgrade path when the resolved commit matches the pre-upgrade lock: the
+// summary must report that the import was already at that commit rather than
+// claiming an upgrade happened.
+func TestDoImportUpgradeTargetUnchangedReportsNoMovement(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, `[pack]
+name = "demo"
+schema = 1
+
+[defaults.rig.imports.worker]
+source = "https://example.com/worker.git"
+version = "^3.0"
+transitive = false
+`)
+	if err := packman.WriteLockfile(fsys.OSFS{}, dir, &packman.Lockfile{
+		Schema: packman.LockfileSchema,
+		Packs: map[string]packman.LockedPack{
+			"https://example.com/worker.git": {Version: "3.2.0", Commit: "worker"},
+		},
+	}); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+
+	prevSelective := syncImportsSelective
+	t.Cleanup(func() { syncImportsSelective = prevSelective })
+	syncImportsSelective = func(_ string, _ map[string]config.Import, _ map[string]struct{}) (*packman.Lockfile, error) {
+		// Nothing newer satisfies "^3.0", so the import resolves back to the
+		// commit already in the lock.
+		return &packman.Lockfile{
+			Schema: packman.LockfileSchema,
+			Packs: map[string]packman.LockedPack{
+				"https://example.com/worker.git": {Version: "3.2.0", Commit: "worker"},
+			},
+		}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doImportUpgrade(dir, "worker", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `Import "worker" already at worker`) {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "Upgraded") {
+		t.Fatalf("stdout should not claim an upgrade happened: %q", stdout.String())
+	}
+}
+
+// TestDoImportUpgradeReportsActualMovement covers the bug in #5312: the
+// all-imports summary must count how many pins actually moved, not just how
+// many entries the resolved lockfile has.
+func TestDoImportUpgradeReportsActualMovement(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, `[pack]
+name = "demo"
+schema = 1
+
+[imports.moved]
+source = "https://example.com/moved.git"
+version = "^1.0"
+
+[imports.pinned]
+source = "https://example.com/pinned.git"
+version = "sha:cccccccccccccccccccccccccccccccccccccc"
+`)
+	if err := packman.WriteLockfile(fsys.OSFS{}, dir, &packman.Lockfile{
+		Schema: packman.LockfileSchema,
+		Packs: map[string]packman.LockedPack{
+			"https://example.com/moved.git":  {Version: "1.0.0", Commit: "aaaa"},
+			"https://example.com/pinned.git": {Version: "sha:cccc", Commit: "cccc"},
+		},
+	}); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+
+	prevSync := syncImports
+	t.Cleanup(func() { syncImports = prevSync })
+	syncImports = func(_ string, _ map[string]config.Import, mode packman.InstallMode) (*packman.Lockfile, error) {
+		if mode != packman.InstallUpgrade {
+			t.Fatalf("mode = %v, want InstallUpgrade", mode)
+		}
+		return &packman.Lockfile{
+			Schema: packman.LockfileSchema,
+			Packs: map[string]packman.LockedPack{
+				// Resolved to a newer commit: this one moved.
+				"https://example.com/moved.git": {Version: "1.1.0", Commit: "bbbb"},
+				// A sha pin has exactly one satisfying version, so it
+				// resolves back to itself; only Fetched changes.
+				"https://example.com/pinned.git": {Version: "sha:cccc", Commit: "cccc"},
+			},
+		}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doImportUpgrade(dir, "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Upgraded 1 of 2 remote import(s); 1 already up to date") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+// TestDoImportUpgradeAllPinnedReportsNoMovement is the exact scenario from
+// #5312: every import is sha-pinned, so upgrading resolves each one back to
+// itself. The summary must say nothing moved instead of implying an upgrade.
+func TestDoImportUpgradeAllPinnedReportsNoMovement(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, `[pack]
+name = "demo"
+schema = 1
+
+[imports.core]
+source = "https://example.com/core.git"
+version = "sha:f895c0ff47d6ee9334ed282a416387eb5b084d24"
+`)
+	if err := packman.WriteLockfile(fsys.OSFS{}, dir, &packman.Lockfile{
+		Schema: packman.LockfileSchema,
+		Packs: map[string]packman.LockedPack{
+			"https://example.com/core.git": {Version: "sha:f895c0ff", Commit: "f895c0ff"},
+		},
+	}); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+
+	prevSync := syncImports
+	t.Cleanup(func() { syncImports = prevSync })
+	syncImports = func(_ string, _ map[string]config.Import, mode packman.InstallMode) (*packman.Lockfile, error) {
+		if mode != packman.InstallUpgrade {
+			t.Fatalf("mode = %v, want InstallUpgrade", mode)
+		}
+		return &packman.Lockfile{
+			Schema: packman.LockfileSchema,
+			Packs: map[string]packman.LockedPack{
+				// Same commit as before; only Fetched moved under the hood.
+				"https://example.com/core.git": {Version: "sha:f895c0ff", Commit: "f895c0ff"},
+			},
+		}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doImportUpgrade(dir, "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "No import moved; 1 already up to date") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "Upgraded") {
+		t.Fatalf("stdout should not claim an upgrade happened: %q", stdout.String())
 	}
 }
 

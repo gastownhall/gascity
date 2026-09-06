@@ -45,15 +45,23 @@ func TestSplitGlobalFlagsSkipsGlobalFlagValues(t *testing.T) {
 // bypass below: SplitGlobalFlags would read that flag's value as the verb, and
 // every guard keyed off the verb stops firing — with no test failing.
 //
-// Sourced from `bd --help` (bd 1.1.0). bd declares exactly four persistent
-// flags that consume the next argument; -C and --directory are the two spellings
-// of one of them. Every other persistent flag (--global, --ignore-schema-skew,
-// --json, --profile, -q/--quiet, --readonly, --sandbox, -v/--verbose, -h/--help,
-// -V/--version) is boolean and consumes nothing.
+// Filing a value flag as a BOOL is the same bypass wearing a different hat: the
+// flag is skipped without its value, and the value is read as the verb. That is
+// how `--profile` sat in the bool table while bd declared it `--profile string`,
+// so `bd --profile <name> create …` resolved the verb to <name> and every
+// create-side guard went quiet. Both directions are pinned here and in
+// TestGlobalBoolFlagsIsComplete, which is why the two sets are compared exactly
+// rather than merged.
+//
+// Sourced from `bd --help` (bd 1.1.0). bd declares eight persistent flags that
+// consume the next argument — --actor, --database, --db, -C/--directory
+// (two spellings of one flag), --dolt-auto-commit, --mem-profile, --profile,
+// --server-url. Every other persistent flag is boolean and consumes nothing.
 func TestGlobalValueFlagsIsComplete(t *testing.T) {
 	want := map[string]bool{
-		"--actor": true, "--db": true, "-C": true, "--directory": true,
-		"--dolt-auto-commit": true,
+		"--actor": true, "--database": true, "--db": true, "-C": true,
+		"--directory": true, "--dolt-auto-commit": true, "--mem-profile": true,
+		"--profile": true, "--server-url": true,
 	}
 	if got := GlobalValueFlags(); !reflect.DeepEqual(got, want) {
 		t.Errorf("GlobalValueFlags() = %v, want %v; re-check `bd --help` persistent flags", got, want)
@@ -69,9 +77,10 @@ func TestGlobalValueFlagsIsComplete(t *testing.T) {
 // Sourced from `bd --help` (bd 1.1.0), the same pass as the value-flag table.
 func TestGlobalBoolFlagsIsComplete(t *testing.T) {
 	want := map[string]bool{
-		"--global": true, "--ignore-schema-skew": true, "--json": true,
-		"--profile": true, "-q": true, "--quiet": true, "--readonly": true,
-		"--sandbox": true, "-v": true, "--verbose": true, "-h": true, "--help": true,
+		"--cpu-profile": true, "--global": true, "--ignore-schema-skew": true,
+		"--json": true, "--no-color": true, "-q": true, "--quiet": true,
+		"--readonly": true, "--sandbox": true, "-v": true, "--verbose": true,
+		"-h": true, "--help": true, "-V": true, "--version": true,
 	}
 	if got := GlobalBoolFlags(); !reflect.DeepEqual(got, want) {
 		t.Errorf("GlobalBoolFlags() = %v, want %v; re-check `bd --help` persistent flags", got, want)

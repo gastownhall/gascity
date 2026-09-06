@@ -55,6 +55,12 @@ const (
 	// storageStatusVerb is the read-only sibling of the migrate verb.
 	storageStatusVerb = "status"
 
+	// storageStopCommand is the one spelling of the command that clears the
+	// controller a migration refuses under. Both the migration's refusal and the
+	// preflight's advisory print it, for the reason the file header gives: an
+	// instruction naming a command this binary does not carry fails at the shell.
+	storageStopCommand = "gc stop"
+
 	// storageFleetStoppedFlag is the operator's attestation that nothing this
 	// process cannot see is still writing to the source.
 	storageFleetStoppedFlag = "fleet-stopped"
@@ -175,6 +181,7 @@ operator arranges rather than something a program can observe.`,
 	}
 	cmd.AddCommand(
 		newStorageMigrateCmd(surface, stdout, stderr),
+		newStoragePreflightCmd(surface, stdout, stderr),
 		newStorageStatusCmd(surface, stdout, stderr),
 		newStorageRecoverCmd(repair, stdout, stderr),
 	)
@@ -262,7 +269,11 @@ open the binding's engine unless that database already exists, because opening
 it would create the very database the report is being asked about.
 
 It exits non-zero when the city is configured for a binding it has not
-converged on, so a deployment script can gate on it.`,
+converged on, so a deployment script can gate on it. That is the ordinary state
+of every city with a cutover still ahead of it, and it is NOT a fault report: a
+non-zero status here says the migration has not run, not that it would fail. To
+find out whether it would fail, run ` + "`gc storage " + storagePreflightVerb + "`" + `, which rehearses
+every check the migration makes without migrating.`,
 		RunE: func(*cobra.Command, []string) error {
 			request, err := resolveStorageOperatorRequest()
 			if err != nil {
@@ -334,7 +345,7 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 	}
 
 	if pid := infraMigrationForeignControllerPID(request.CityPath); pid != 0 {
-		fmt.Fprintf(stderr, "%s: controller PID %d is live on this city and is still writing to the work store. Stop it (gc stop) and run this again\n", logPrefix, pid) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: controller PID %d is live on this city and is still writing to the work store. Stop it (%s) and run this again\n", logPrefix, pid, storageStopCommand) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if !request.FleetStopped {
@@ -470,6 +481,21 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 		return 1
 	}
 	fmt.Fprintf(stdout, "source: %d infrastructure bead(s) retained in the work store\n", len(rows)) //nolint:errcheck // best-effort stdout
+	// Both sides, always — including on the unconverged arm below, where the
+	// binding's zero is the whole point. The source count alone cannot tell an
+	// operator whether a cutover landed, because the migration retains the
+	// source verbatim and that number is the same either way.
+	//
+	// A census that could not run prints its reason in place of the number
+	// instead of a confident zero. The unreadable case is a whole missing binding
+	// root, which takes the marker and the manifest with it, so this line would
+	// otherwise sit next to "converged: no" as a second piece of positive-looking
+	// evidence for a city that may well have cut over.
+	if held, err := infraBindingCensus(target); err != nil {
+		fmt.Fprintf(stdout, "binding: unknown — %v\n", err) //nolint:errcheck // best-effort stdout
+	} else {
+		fmt.Fprintf(stdout, "binding: %d infrastructure bead(s) held now\n", held) //nolint:errcheck // best-effort stdout
+	}
 
 	if state != infraConvergenceMarked {
 		fmt.Fprintf(stdout, "converged: no\nblocking invariant: boot never migrates; run `%s`\n", storageMigrationCommand) //nolint:errcheck // best-effort stdout
@@ -518,8 +544,15 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 // so a status command that failed over one would report every city that ever
 // migrated as broken. A binding that cannot be read is reported and skipped for
 // the same reason: the layout facts above it stand on their own.
+//
+// It reads through openInfraBindingReadOnly for the reason that opener states:
+// its only caller runs past the convergence gate in doStorageStatus, which is
+// the arm a controller can be serving, and a read-write connection there could
+// checkpoint the WAL of a live binding on close. The gate is also the
+// precondition read-only needs — infraConvergenceMarked means the database is
+// present — so no extra stat is required here.
 func reportBindingRelics(target infraBindingTarget, logPrefix string, stdout, stderr io.Writer) {
-	binding, err := openInfraDestination(target)
+	binding, err := openInfraBindingReadOnly(target)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: counting open relics: opening the binding: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return

@@ -30,6 +30,13 @@ func writeMalformedHistoryTranscript(t *testing.T, profile Profile) string {
 			`not json`,
 			`{"timestamp":"2026-04-04T09:00:01Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"done"}]}}`,
 		})
+	case ProfileCursorTmuxCLI:
+		return writeLinesFile(t, "session.jsonl", []string{
+			`{"type":"system","subtype":"init","cwd":"/tmp/gascity/phase2/cursor","session_id":"malformed-cursor"}`,
+			`{"id":"u1","type":"user","message":{"role":"user","content":"hello"},"session_id":"malformed-cursor"}`,
+			`{"id":"a1","type":"assistant","message":{"role":"assistant","content":"done"},"session_id":"malformed-cursor"}`,
+			`{"id":"torn","type":"assistant","message":`,
+		})
 	case ProfileGeminiTmuxCLI:
 		path := filepath.Join(t.TempDir(), "session.json")
 		if err := os.WriteFile(path, []byte(`{"sessionId":"malformed-gemini","messages":[`), 0o644); err != nil {
@@ -92,6 +99,12 @@ func writeInteractionHistoryTranscript(t *testing.T, profile Profile) string {
 		return writeLinesFile(t, filepath.Join("2026", "04", "04", "session.jsonl"), []string{
 			`{"timestamp":"2026-04-04T09:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"run a tool"}]}}`,
 			`{"timestamp":"2026-04-04T09:00:01Z","type":"response_item","payload":{"type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"],"metadata":{"tool_name":"Read"}}}`,
+		})
+	case ProfileCursorTmuxCLI:
+		return writeLinesFile(t, "session.jsonl", []string{
+			`{"type":"system","subtype":"init","cwd":"/tmp/gascity/phase2/cursor","session_id":"cursor-interaction-phase2"}`,
+			`{"id":"u1","type":"user","message":{"role":"user","content":"run a tool"},"session_id":"cursor-interaction-phase2"}`,
+			`{"id":"a1","type":"assistant","message":{"role":"assistant","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"],"metadata":{"tool_name":"Read"}}]},"session_id":"cursor-interaction-phase2"}`,
 		})
 	case ProfileGeminiTmuxCLI:
 		dir := t.TempDir()
@@ -163,6 +176,12 @@ func writeInteractionLifecycleTranscript(t *testing.T, profile Profile, finalSta
 		return writeLinesFile(t, filepath.Join("2026", "04", "04", "session.jsonl"), []string{
 			`{"timestamp":"2026-04-04T09:00:00Z","type":"response_item","payload":{"type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"]}}`,
 			fmt.Sprintf(`{"timestamp":"2026-04-04T09:00:01Z","type":"response_item","payload":{"type":"interaction","request_id":"approval-1","kind":"approval","state":%q,"action":%q}}`, finalStateText, finalAction),
+		})
+	case ProfileCursorTmuxCLI:
+		return writeLinesFile(t, "session.jsonl", []string{
+			`{"type":"system","subtype":"init","cwd":"/tmp/gascity/phase2/cursor","session_id":"cursor-interaction-lifecycle-phase2"}`,
+			`{"id":"a1","type":"assistant","message":{"role":"assistant","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"]}]},"session_id":"cursor-interaction-lifecycle-phase2"}`,
+			fmt.Sprintf(`{"id":"u1","type":"user","message":{"role":"user","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":%q,"action":%q}]},"session_id":"cursor-interaction-lifecycle-phase2"}`, finalStateText, finalAction),
 		})
 	case ProfileGeminiTmuxCLI:
 		dir := t.TempDir()
@@ -242,6 +261,19 @@ func writeToolTranscript(t *testing.T, profile Profile, openTail bool) string {
 			)
 		}
 		return writeLinesFile(t, filepath.Join("2026", "04", "04", "session.jsonl"), lines)
+	case ProfileCursorTmuxCLI:
+		lines := []string{
+			`{"type":"system","subtype":"init","cwd":"/tmp/gascity/phase2/cursor","session_id":"cursor-tool-phase2"}`,
+			`{"id":"u1","type":"user","message":{"role":"user","content":"read the file"},"session_id":"cursor-tool-phase2"}`,
+			`{"type":"tool_call","subtype":"started","call_id":"call-1","tool_call":{"readToolCall":{"toolCallId":"call-1","args":{"path":"README.md"}}},"session_id":"cursor-tool-phase2"}`,
+		}
+		if !openTail {
+			lines = append(lines,
+				`{"type":"tool_call","subtype":"completed","call_id":"call-1","tool_call":{"readToolCall":{"toolCallId":"call-1","args":{"path":"README.md"},"result":{"success":{"content":"file data","isEmpty":false,"exceededLimit":false,"totalLines":1,"totalChars":9}}}},"session_id":"cursor-tool-phase2"}`,
+				`{"id":"a1","type":"assistant","message":{"role":"assistant","content":"done"},"session_id":"cursor-tool-phase2"}`,
+			)
+		}
+		return writeLinesFile(t, "session.jsonl", lines)
 	case ProfileGeminiTmuxCLI:
 		dir := t.TempDir()
 		projectDir := filepath.Join(dir, "project-a", "chats")

@@ -58,7 +58,20 @@ const (
 	// keys in this same claim-time patch (see hookClaimIdentityPatch in
 	// cmd/gc/cmd_hook_claim.go). Feeds the created→claimed and
 	// claimed→started latency-watch transitions (OBS-001).
-	ClaimedAtMetadataKey                 = "gc.claimed_at"
+	ClaimedAtMetadataKey = "gc.claimed_at"
+	// ClaimGenerationMetadataKey is the scheduler-owned generation-fencing
+	// token for molecule.ClaimExact. It is a counter fenced through
+	// beads.ConditionalWriter.UpdateIfMatch on the bead's revision (distinct
+	// from gc.claimed_at's write-once and gc.control_epoch's
+	// compare-and-overwrite mechanisms): a caller reads the current value,
+	// computes the next generation, and applies a single UpdateIfMatch call
+	// that advances this key AND commits the claim's effects (assignee,
+	// status, session identity) together in one atomic, revision-fenced
+	// write. A stale or racing claimant loses that write outright
+	// (*beads.PreconditionFailedError) with no fallback and no partial
+	// effect ever lands. See molecule.ClaimExact's doc for the exact
+	// guarantee this does and does not provide.
+	ClaimGenerationMetadataKey           = "gc.claim_generation"
 	ClosedByAttemptMetadataKey           = "gc.closed_by_attempt"
 	ContinuationGroupMetadataKey         = "gc.continuation_group"
 	ControlDispatcherFallbackMetadataKey = "gc.control_dispatcher_fallback"
@@ -390,6 +403,7 @@ var KnownMetadataKeys = []string{
 	CheckTimeoutMetadataKey,
 	CityPathMetadataKey,
 	ClaimedAtMetadataKey,
+	ClaimGenerationMetadataKey,
 	ClosedByAttemptMetadataKey,
 	ContinuationGroupMetadataKey,
 	ControlEpochMetadataKey,

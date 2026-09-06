@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 206,
+  "next_id": 207,
   "permanent_ids": [
     {
       "name": "help",
@@ -4009,6 +4009,21 @@
       "classification": "storage-migrate",
       "owner": "immediate",
       "id": 198
+    },
+    {
+      "path": "gc storage preflight",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "storage-preflight",
+      "owner": "immediate",
+      "id": 206
     },
     {
       "path": "gc storage recover-stranded",

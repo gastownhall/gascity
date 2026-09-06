@@ -109,9 +109,11 @@ func ExecCommandRunnerWithExactEnvContext(ctx context.Context, env map[string]st
 
 func execCommandRunner(parent context.Context, env map[string]string, withoutAmbientBeads bool, baseEnvFn func() []string) CommandRunner {
 	return func(dir, name string, args ...string) ([]byte, error) {
+		baseEnv := baseEnvFn()
 		execName := name
 		if name == "bd" {
-			if pinned := strings.TrimSpace(env["BD_BIN"]); filepath.IsAbs(pinned) {
+			pinned, _ := effectiveEnvValue(baseEnv, env, "BD_BIN")
+			if pinned = strings.TrimSpace(pinned); filepath.IsAbs(pinned) {
 				execName = pinned
 			}
 		}
@@ -139,7 +141,6 @@ func execCommandRunner(parent context.Context, env map[string]string, withoutAmb
 		cmd.Cancel = func() error {
 			return killCommandTree(cmd)
 		}
-		baseEnv := baseEnvFn()
 		overrides := env
 		if withoutAmbientBeads {
 			baseEnv = envWithoutPrefix(baseEnv, beadsEnvPrefix)
@@ -162,6 +163,23 @@ func execCommandRunner(parent context.Context, env map[string]string, withoutAmb
 		trace(status, traceErr)
 		return out, resultErr
 	}
+}
+
+// effectiveEnvValue returns the value a child process receives after explicit
+// runner overrides replace the inherited process environment. Reading BD_BIN
+// through the same merge contract keeps executable selection aligned with the
+// environment passed to bd itself.
+func effectiveEnvValue(baseEnv []string, overrides map[string]string, key string) (string, bool) {
+	if value, ok := overrides[key]; ok {
+		return value, true
+	}
+	prefix := key + "="
+	for i := len(baseEnv) - 1; i >= 0; i-- {
+		if strings.HasPrefix(baseEnv[i], prefix) {
+			return strings.TrimPrefix(baseEnv[i], prefix), true
+		}
+	}
+	return "", false
 }
 
 // newBDExecTrace returns the legacy line-format trace callback for one command
@@ -1021,28 +1039,30 @@ func (b *bdIssue) toBead() Bead {
 			}
 		}
 	}
+	status, indefinitelyDeferred := normalizedBdReadState(b.Status, b.DeferUntil)
 	return Bead{
-		ID:           b.ID,
-		Title:        b.Title,
-		Status:       mapBdStatus(b.Status),
-		Type:         b.IssueType,
-		Priority:     cloneIntPtr(b.Priority),
-		CreatedAt:    b.CreatedAt.Truncate(time.Second),
-		UpdatedAt:    b.UpdatedAt.Truncate(time.Second),
-		Assignee:     b.Assignee,
-		From:         from,
-		ParentID:     parentID,
-		Ref:          b.Ref,
-		Needs:        b.Needs,
-		Description:  b.Description,
-		Labels:       b.Labels,
-		Metadata:     b.Metadata,
-		Dependencies: deps,
-		Ephemeral:    b.Ephemeral,
-		NoHistory:    b.NoHistory,
-		DeferUntil:   cloneTimePtr(b.DeferUntil),
-		IsBlocked:    b.IsBlocked.ptr(),
-		Revision:     int64(b.Revision),
+		ID:                   b.ID,
+		Title:                b.Title,
+		Status:               status,
+		Type:                 b.IssueType,
+		Priority:             cloneIntPtr(b.Priority),
+		CreatedAt:            b.CreatedAt.Truncate(time.Second),
+		UpdatedAt:            b.UpdatedAt.Truncate(time.Second),
+		Assignee:             b.Assignee,
+		From:                 from,
+		ParentID:             parentID,
+		Ref:                  b.Ref,
+		Needs:                b.Needs,
+		Description:          b.Description,
+		Labels:               b.Labels,
+		Metadata:             b.Metadata,
+		Dependencies:         deps,
+		Ephemeral:            b.Ephemeral,
+		NoHistory:            b.NoHistory,
+		DeferUntil:           cloneTimePtr(b.DeferUntil),
+		IsBlocked:            b.IsBlocked.ptr(),
+		IndefinitelyDeferred: indefinitelyDeferred,
+		Revision:             int64(b.Revision),
 	}
 }
 
@@ -1116,6 +1136,13 @@ func mapBdStatus(s string) string {
 	default:
 		return "open"
 	}
+}
+
+// normalizedBdReadState preserves bd's status-based indefinite deferral after
+// richer bd statuses collapse to Gas City's three-state model. A time-bound
+// deferral remains governed by DeferUntil so it can become ready after expiry.
+func normalizedBdReadState(status string, deferUntil *time.Time) (string, bool) {
+	return mapBdStatus(status), status == "deferred" && deferUntil == nil
 }
 
 type optionalBool struct {
@@ -1410,10 +1437,11 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 // preconditions server-side and reports a failed one as exit 13 having written
 // nothing (bdstore_conditional_release.go). The raw `bd sql` path below is the
 // fallback for any bd predating the flags (beads#5008) — which today is the LIVE
-// path, not a floor nobody runs: no published beads release carries them, so the
-// installable default (deps.env BD_VERSION) lands here, and that is what every
-// CI job and every operator install obtains. The contract-tested minimum
-// (BD_PREV_VERSION, 1.0.4) lands here too, but it is not what makes the fallback
+// path, not a floor nobody runs: the only release carrying them is a prerelease
+// (v1.2.1), below the published bar this pin holds, so the installable default
+// (deps.env BD_VERSION) lands here, and that is what every CI job and every
+// operator install obtains. The contract-tested minimum (BD_PREV_VERSION, 1.0.4)
+// lands here too, but it is not what makes the fallback
 // load-bearing. On that path the sqlite backend refuses raw DB access, so that
 // rejection — and embedded dolt WITHOUT a configured dolt directory — surface
 // ErrConditionalReleaseUnsupported (the latter via the
@@ -2020,7 +2048,7 @@ func (tx *bdStoreTx) Close(id string) error {
 	if err != nil {
 		return err
 	}
-	item.current.Status = "closed"
+	setBeadStatus(&item.current, "closed")
 	item.closed = true
 	return nil
 }

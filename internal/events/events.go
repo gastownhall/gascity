@@ -158,6 +158,19 @@ const (
 	// remains correlated; the companion reconciler handler is tracked in
 	// #1497.
 	SessionWorkQueryFailed = "session.work_query_failed"
+	// SessionDrainFenceUnavailable fires when a seat's drain-pending probe could
+	// not read its own session row, so the claim fence that stops a draining
+	// seat taking new work failed OPEN for that poll.
+	//
+	// It exists because failing open is silent by design. The same agent-side
+	// store fault also fails open the runtime-identity fence, so a persistent
+	// one — an agent/controller credential-env asymmetry, a permission split in
+	// a hosted pod, a sessions-class binding only the controller can reach —
+	// switches BOTH drain fences off fleet-wide while the reconciler keeps
+	// marking rows draining. Without this event the only trace is stderr inside
+	// agent panes, and nothing off-pane distinguishes "fence acting" from
+	// "fence inert".
+	SessionDrainFenceUnavailable = "session.drain_fence_unavailable"
 	// SessionDemandClaimDivergence fires when a seat the controller spawned on
 	// DEMAND evidence drains with no work. It is a diagnostics counter for the
 	// agreement invariant between the two readers — the controller's demand read
@@ -337,11 +350,24 @@ const (
 	// binding a proven copy already populated, the second created one for a
 	// city that had nothing to move. Unconverged and Uncheckable are the two
 	// refusals: config and data disagree, or the check that would decide could
-	// not run. A city with no [storage] section emits none of them.
-	StorageBindingConverged   = "storage.binding.converged"
-	StorageBindingGenesis     = "storage.binding.genesis"
-	StorageBindingUnconverged = "storage.binding.unconverged"
-	StorageBindingUncheckable = "storage.binding.uncheckable"
+	// not run.
+	//
+	// NotConfigured is the fifth, and it is a verdict rather than the absence of
+	// one. A city that relocates nothing used to leave the gate having published
+	// nothing at all, and nothing reads the same as a gate that crashed before
+	// deciding or a build too old to have one. A subscriber gating a deploy on
+	// these events has to be able to see "this city has no split" as an answer.
+	//
+	// The multi-word segment is spelled with an underscore because every other
+	// multi-word type in this package is. The internal outcome renders itself as
+	// "not-configured" and that spelling is what travels in the payload's outcome
+	// field, but a payload value is not a type name, and matching it here would
+	// have made this the one hyphen among the whole taxonomy.
+	StorageBindingConverged     = "storage.binding.converged"
+	StorageBindingGenesis       = "storage.binding.genesis"
+	StorageBindingUnconverged   = "storage.binding.unconverged"
+	StorageBindingUncheckable   = "storage.binding.uncheckable"
+	StorageBindingNotConfigured = "storage.binding.not_configured"
 )
 
 // KnownEventTypes lists every event-type constant this package defines.
@@ -358,6 +384,7 @@ var KnownEventTypes = []string{
 	SessionWakeRefused,
 	SessionResetStalled,
 	SessionWorkQueryFailed,
+	SessionDrainFenceUnavailable,
 	SessionDemandClaimDivergence,
 	SessionColdStartTimeout,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
@@ -395,6 +422,7 @@ var KnownEventTypes = []string{
 	BeadsConditionalWritesDegraded,
 	StorageBindingConverged, StorageBindingGenesis,
 	StorageBindingUnconverged, StorageBindingUncheckable,
+	StorageBindingNotConfigured,
 	// ProviderHealthGateAlert is intentionally omitted from KnownEventTypes.
 	// The event is emitted by the reconciler but its typed SSE payload is not
 	// yet registered in internal/api (the payload registration lives in a

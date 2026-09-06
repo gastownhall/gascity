@@ -1087,8 +1087,8 @@ func (t *cityRunTailer) writeRunDetailReadError(w http.ResponseWriter, runID str
 // cityRunTailer resolves the exact registered city name to its run tailer,
 // returning false for an unknown city. The resolver is authoritative and
 // returns the path directly, so registry-valid dots and underscores are safe
-// here even though the narrower dashboard deep-link grammar rejects them.
-// Starting the fold loop is lazy.
+// here; the deep-link grammar (ValidCityName) now mirrors the registry, so
+// both paths agree. Starting the fold loop is lazy.
 func (p *Plane) cityRunTailer(name string) (*cityRunTailer, bool) {
 	if name == "" || p.deps.Resolver == nil {
 		return nil, false

@@ -5085,10 +5085,11 @@ type StatusWorkCounts struct {
 
 // StorageBindingOutcomePayload defines model for StorageBindingOutcomePayload.
 type StorageBindingOutcomePayload struct {
-	Binding   string `json:"binding"`
-	Database  string `json:"database"`
-	Invariant string `json:"invariant"`
-	Outcome   string `json:"outcome"`
+	Binding     string `json:"binding"`
+	Database    string `json:"database"`
+	Invariant   string `json:"invariant"`
+	Outcome     string `json:"outcome"`
+	ProvenBeads int64  `json:"proven_beads"`
 }
 
 // StoreDiskCriticalPayload defines model for StoreDiskCriticalPayload.
@@ -6404,6 +6405,22 @@ type TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork struct {
 	Workflow         *WorkflowEventProjection                 `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeSessionDrainFenceUnavailable defines model for TypedEventStreamEnvelopeSessionDrainFenceUnavailable.
+type TypedEventStreamEnvelopeSessionDrainFenceUnavailable struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          SessionLifecyclePayload  `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeSessionDraining defines model for TypedEventStreamEnvelopeSessionDraining.
 type TypedEventStreamEnvelopeSessionDraining struct {
 	Actor            string                   `json:"actor"`
@@ -6646,6 +6663,22 @@ type TypedEventStreamEnvelopeStorageBindingConverged struct {
 
 // TypedEventStreamEnvelopeStorageBindingGenesis defines model for TypedEventStreamEnvelopeStorageBindingGenesis.
 type TypedEventStreamEnvelopeStorageBindingGenesis struct {
+	Actor            string                       `json:"actor"`
+	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                      `json:"message,omitempty"`
+	Payload          StorageBindingOutcomePayload `json:"payload"`
+	RunId            *string                      `json:"run_id,omitempty"`
+	Seq              int64                        `json:"seq"`
+	SessionId        *string                      `json:"session_id,omitempty"`
+	StepId           *string                      `json:"step_id,omitempty"`
+	Subject          *string                      `json:"subject,omitempty"`
+	Ts               time.Time                    `json:"ts"`
+	Type             string                       `json:"type"`
+	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeStorageBindingNotConfigured defines model for TypedEventStreamEnvelopeStorageBindingNotConfigured.
+type TypedEventStreamEnvelopeStorageBindingNotConfigured struct {
 	Actor            string                       `json:"actor"`
 	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
 	Message          *string                      `json:"message,omitempty"`
@@ -7982,6 +8015,23 @@ type TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork struct {
 	Workflow         *WorkflowEventProjection                 `json:"workflow,omitempty"`
 }
 
+// TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable defines model for TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable.
+type TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          SessionLifecyclePayload  `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedTaggedEventStreamEnvelopeSessionDraining defines model for TypedTaggedEventStreamEnvelopeSessionDraining.
 type TypedTaggedEventStreamEnvelopeSessionDraining struct {
 	Actor            string                   `json:"actor"`
@@ -8239,6 +8289,23 @@ type TypedTaggedEventStreamEnvelopeStorageBindingConverged struct {
 
 // TypedTaggedEventStreamEnvelopeStorageBindingGenesis defines model for TypedTaggedEventStreamEnvelopeStorageBindingGenesis.
 type TypedTaggedEventStreamEnvelopeStorageBindingGenesis struct {
+	Actor            string                       `json:"actor"`
+	City             string                       `json:"city"`
+	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                      `json:"message,omitempty"`
+	Payload          StorageBindingOutcomePayload `json:"payload"`
+	RunId            *string                      `json:"run_id,omitempty"`
+	Seq              int64                        `json:"seq"`
+	SessionId        *string                      `json:"session_id,omitempty"`
+	StepId           *string                      `json:"step_id,omitempty"`
+	Subject          *string                      `json:"subject,omitempty"`
+	Ts               time.Time                    `json:"ts"`
+	Type             string                       `json:"type"`
+	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured defines model for TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured.
+type TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured struct {
 	Actor            string                       `json:"actor"`
 	City             string                       `json:"city"`
 	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
@@ -14942,6 +15009,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionDrainAcke
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSessionDrainFenceUnavailable returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionDrainFenceUnavailable
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionDrainFenceUnavailable() (TypedEventStreamEnvelopeSessionDrainFenceUnavailable, error) {
+	var body TypedEventStreamEnvelopeSessionDrainFenceUnavailable
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionDrainFenceUnavailable overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionDrainFenceUnavailable
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionDrainFenceUnavailable(v TypedEventStreamEnvelopeSessionDrainFenceUnavailable) error {
+	v.Type = "session.drain_fence_unavailable"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionDrainFenceUnavailable performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionDrainFenceUnavailable
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionDrainFenceUnavailable(v TypedEventStreamEnvelopeSessionDrainFenceUnavailable) error {
+	v.Type = "session.drain_fence_unavailable"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSessionDraining returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionDraining
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionDraining() (TypedEventStreamEnvelopeSessionDraining, error) {
 	var body TypedEventStreamEnvelopeSessionDraining
@@ -15390,6 +15485,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeStorageBindingGe
 	return err
 }
 
+// AsTypedEventStreamEnvelopeStorageBindingNotConfigured returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeStorageBindingNotConfigured
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeStorageBindingNotConfigured() (TypedEventStreamEnvelopeStorageBindingNotConfigured, error) {
+	var body TypedEventStreamEnvelopeStorageBindingNotConfigured
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeStorageBindingNotConfigured overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeStorageBindingNotConfigured
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeStorageBindingNotConfigured(v TypedEventStreamEnvelopeStorageBindingNotConfigured) error {
+	v.Type = "storage.binding.not_configured"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeStorageBindingNotConfigured performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeStorageBindingNotConfigured
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeStorageBindingNotConfigured(v TypedEventStreamEnvelopeStorageBindingNotConfigured) error {
+	v.Type = "storage.binding.not_configured"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeStorageBindingUncheckable returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeStorageBindingUncheckable
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeStorageBindingUncheckable() (TypedEventStreamEnvelopeStorageBindingUncheckable, error) {
 	var body TypedEventStreamEnvelopeStorageBindingUncheckable
@@ -15822,6 +15945,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeSessionDemandClaimDivergence()
 	case "session.drain_acked_with_assigned_work":
 		return t.AsTypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork()
+	case "session.drain_fence_unavailable":
+		return t.AsTypedEventStreamEnvelopeSessionDrainFenceUnavailable()
 	case "session.draining":
 		return t.AsTypedEventStreamEnvelopeSessionDraining()
 	case "session.idle_killed":
@@ -15854,6 +15979,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeStorageBindingConverged()
 	case "storage.binding.genesis":
 		return t.AsTypedEventStreamEnvelopeStorageBindingGenesis()
+	case "storage.binding.not_configured":
+		return t.AsTypedEventStreamEnvelopeStorageBindingNotConfigured()
 	case "storage.binding.uncheckable":
 		return t.AsTypedEventStreamEnvelopeStorageBindingUncheckable()
 	case "storage.binding.unconverged":
@@ -17791,6 +17918,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSess
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable() (TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable(v TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable) error {
+	v.Type = "session.drain_fence_unavailable"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable(v TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable) error {
+	v.Type = "session.drain_fence_unavailable"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSessionDraining returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionDraining
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionDraining() (TypedTaggedEventStreamEnvelopeSessionDraining, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionDraining
@@ -18239,6 +18394,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeStor
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeStorageBindingNotConfigured returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeStorageBindingNotConfigured() (TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured, error) {
+	var body TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeStorageBindingNotConfigured overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeStorageBindingNotConfigured(v TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured) error {
+	v.Type = "storage.binding.not_configured"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeStorageBindingNotConfigured performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeStorageBindingNotConfigured(v TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured) error {
+	v.Type = "storage.binding.not_configured"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeStorageBindingUncheckable returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeStorageBindingUncheckable
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeStorageBindingUncheckable() (TypedTaggedEventStreamEnvelopeStorageBindingUncheckable, error) {
 	var body TypedTaggedEventStreamEnvelopeStorageBindingUncheckable
@@ -18671,6 +18854,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence()
 	case "session.drain_acked_with_assigned_work":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork()
+	case "session.drain_fence_unavailable":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable()
 	case "session.draining":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionDraining()
 	case "session.idle_killed":
@@ -18703,6 +18888,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeStorageBindingConverged()
 	case "storage.binding.genesis":
 		return t.AsTypedTaggedEventStreamEnvelopeStorageBindingGenesis()
+	case "storage.binding.not_configured":
+		return t.AsTypedTaggedEventStreamEnvelopeStorageBindingNotConfigured()
 	case "storage.binding.uncheckable":
 		return t.AsTypedTaggedEventStreamEnvelopeStorageBindingUncheckable()
 	case "storage.binding.unconverged":

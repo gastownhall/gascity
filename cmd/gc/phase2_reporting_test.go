@@ -222,14 +222,15 @@ func inputOverrideDefaultsResult(tc phase2ProviderCase, prepared *preparedStart)
 		return workertest.Fail(tc.profileID, workertest.RequirementInputOverrideDefaults,
 			"ResolvedProvider = nil, want provider defaults for override comparison").WithEvidence(evidence)
 	}
-	defaultArgs := defaultArgsExceptOption(prepared.candidate.tp.ResolvedProvider, "model")
+	overrideOption := phase2OverrideOption(tc)
+	defaultArgs := defaultArgsExceptOption(prepared.candidate.tp.ResolvedProvider, overrideOption)
 	switch {
 	case !containsOrderedArgs(prepared.cfg.Command, defaultArgs):
 		return workertest.Fail(tc.profileID, workertest.RequirementInputOverrideDefaults,
-			fmt.Sprintf("Command = %q, want non-model default args %v", prepared.cfg.Command, defaultArgs)).WithEvidence(evidence)
-	case !containsOrderedArgs(prepared.cfg.Command, tc.wantModelOverrideArgs):
+			fmt.Sprintf("Command = %q, want default args excluding option %q: %v", prepared.cfg.Command, overrideOption, defaultArgs)).WithEvidence(evidence)
+	case !containsOrderedArgs(prepared.cfg.Command, tc.wantOverrideArgs):
 		return workertest.Fail(tc.profileID, workertest.RequirementInputOverrideDefaults,
-			fmt.Sprintf("Command = %q, want model override args %v", prepared.cfg.Command, tc.wantModelOverrideArgs)).WithEvidence(evidence)
+			fmt.Sprintf("Command = %q, want %s override args %v", prepared.cfg.Command, overrideOption, tc.wantOverrideArgs)).WithEvidence(evidence)
 	case !strings.Contains(got, "Ship it."):
 		return workertest.Fail(tc.profileID, workertest.RequirementInputOverrideDefaults,
 			fmt.Sprintf("PromptSuffix payload = %q, want initial message", got)).WithEvidence(evidence)
@@ -240,6 +241,13 @@ func inputOverrideDefaultsResult(tc phase2ProviderCase, prepared *preparedStart)
 		return workertest.Pass(tc.profileID, workertest.RequirementInputOverrideDefaults,
 			"provider default launch flags survive schema overrides while first-input delivery stays exact-once").WithEvidence(evidence)
 	}
+}
+
+func phase2OverrideOption(tc phase2ProviderCase) string {
+	if tc.overrideOption != "" {
+		return tc.overrideOption
+	}
+	return "model"
 }
 
 func inProgressResumeRestartResult(tc phase2ProviderCase, prepared *preparedStart) workertest.Result {

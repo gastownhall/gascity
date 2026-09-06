@@ -233,16 +233,17 @@ func TestNativeDoltStoreConvertsDefaultPriorityAsUnset(t *testing.T) {
 
 func TestNativeDoltStoreMapsUpstreamStatusesToGasCityContract(t *testing.T) {
 	tests := []struct {
-		upstream beadslib.Status
-		want     string
+		upstream           beadslib.Status
+		want               string
+		wantIndefiniteHold bool
 	}{
-		{beadslib.StatusOpen, "open"},
-		{beadslib.StatusInProgress, "in_progress"},
-		{beadslib.StatusClosed, "closed"},
-		{beadslib.Status("blocked"), "open"},
-		{beadslib.Status("deferred"), "open"},
-		{beadslib.Status("pinned"), "open"},
-		{beadslib.Status("hooked"), "open"},
+		{beadslib.StatusOpen, "open", false},
+		{beadslib.StatusInProgress, "in_progress", false},
+		{beadslib.StatusClosed, "closed", false},
+		{beadslib.Status("blocked"), "open", false},
+		{beadslib.Status("deferred"), "open", true},
+		{beadslib.Status("pinned"), "open", false},
+		{beadslib.Status("hooked"), "open", false},
 	}
 
 	for _, tt := range tests {
@@ -258,6 +259,9 @@ func TestNativeDoltStoreMapsUpstreamStatusesToGasCityContract(t *testing.T) {
 			}
 			if bead.Status != tt.want {
 				t.Fatalf("Status = %q, want %q", bead.Status, tt.want)
+			}
+			if bead.IndefinitelyDeferred != tt.wantIndefiniteHold {
+				t.Fatalf("IndefinitelyDeferred = %v, want %v", bead.IndefinitelyDeferred, tt.wantIndefiniteHold)
 			}
 		})
 	}

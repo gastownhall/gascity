@@ -2,6 +2,7 @@ package main
 
 import (
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -100,6 +101,75 @@ func assignedWorkIDs(work []beads.Bead) []string {
 		ids = append(ids, wb.ID)
 	}
 	return ids
+}
+
+// TestFilterAssignedWorkBeadsForSessionWakeWithStoresProjectsSurvivingStores
+// pins the store projection where alignment is CONSTRUCTED. Every other test of
+// this contract exercises a consumer that is handed an already-aligned slice;
+// this one drops a bead in the MIDDLE and asserts the legs move with it.
+//
+// The assertion is store IDENTITY, not length. A projection that dropped the
+// bead but not its store yields a same-length pair that every downstream length
+// check accepts, and the orphan release then writes the surviving bead through
+// the leg that belonged to the dropped one — the exact cross-leg write ga-b0o6a
+// exists to prevent. Distinct MemStore handles per index are what make that
+// detectable.
+func TestFilterAssignedWorkBeadsForSessionWakeWithStoresProjectsSurvivingStores(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "riga", Path: filepath.Join(cityPath, "riga")},
+			{Name: "rigb", Path: filepath.Join(cityPath, "rigb")},
+		},
+		Agents: []config.Agent{{
+			Name: "worker",
+			Dir:  "riga",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "worker",
+			Dir:      "riga",
+			Mode:     "on_demand",
+		}},
+	}
+	sessions := []beads.Bead{{
+		ID:     "session-1",
+		Status: "open",
+		Type:   sessionBeadType,
+		Metadata: map[string]string{
+			"template":                  "riga/worker",
+			"session_name":              "worker-session",
+			"configured_named_identity": "riga/worker",
+		},
+	}}
+	work := []beads.Bead{
+		{ID: "leading-keep", Status: "in_progress", Assignee: "session-1"},
+		{ID: "other-rig-drop", Status: "in_progress", Assignee: "session-1"},
+		{ID: "own-rig-keep", Status: "in_progress", Assignee: "session-1"},
+	}
+	storeRefs := []string{"", "rigb", "riga"}
+	stores := []beads.Store{beads.NewMemStore(), beads.NewMemStore(), beads.NewMemStore()}
+
+	got, gotRefs, gotStores := filterAssignedWorkBeadsForSessionWakeWithStores(
+		cfg, cityPath, nil, sessionInfosFromBeads(sessions), work, storeRefs, stores,
+	)
+
+	wantIDs := []string{"leading-keep", "own-rig-keep"}
+	if gotIDs := assignedWorkIDs(got); !slices.Equal(gotIDs, wantIDs) {
+		t.Fatalf("filtered work IDs = %v, want %v — the middle bead must drop", gotIDs, wantIDs)
+	}
+	wantRefs := []string{"", "riga"}
+	if !slices.Equal(gotRefs, wantRefs) {
+		t.Fatalf("filtered store refs = %#v, want %#v aligned with beads", gotRefs, wantRefs)
+	}
+	if len(gotStores) != len(wantIDs) {
+		t.Fatalf("filtered stores length = %d, want %d — a store must drop with its bead", len(gotStores), len(wantIDs))
+	}
+	wantStores := []beads.Store{stores[0], stores[2]}
+	for i, want := range wantStores {
+		if gotStores[i] != want {
+			t.Fatalf("filtered store at index %d is not the input store for %q; the projection is misordered, so a release would write through another bead's leg", i, wantIDs[i])
+		}
+	}
 }
 
 func TestFilterAssignedWorkBeadsForSessionWakeCityScopedAgentIsCrossStoreEligible(t *testing.T) {

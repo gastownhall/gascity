@@ -47,7 +47,7 @@ const pollInterval = 100 * time.Millisecond
 // GC_PROVIDER env var; mimocode's binary names differ from its provider
 // name ("mimo" wrapper, ".mimocode" compiled child), so both are listed
 // alongside the family name.
-var providersSkippingEscapeBeforeEnter = []string{"claude", "codex", "copilot", "gemini", "grok", "kimi", "mimocode", "mimo", ".mimocode", "opencode", "pi", "antigravity"}
+var providersSkippingEscapeBeforeEnter = []string{"claude", "codex", "copilot", "cursor", "gemini", "grok", "kimi", "mimocode", "mimo", ".mimocode", "opencode", "pi", "antigravity"}
 
 // defaultNudgeSubmitKeySequence is the ordered tmux key names sent, in
 // order, to submit a pasted nudge for a provider family with no explicit

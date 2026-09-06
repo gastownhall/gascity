@@ -4969,6 +4969,7 @@ export type StorageBindingOutcomePayload = {
     database: string;
     invariant: string;
     outcome: string;
+    proven_beads: number;
 };
 
 export type StoreDiskCriticalPayload = {
@@ -5338,6 +5339,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeSessionDemandClaimDivergence) | ({
     type: 'session.drain_acked_with_assigned_work';
 } & TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork) | ({
+    type: 'session.drain_fence_unavailable';
+} & TypedEventStreamEnvelopeSessionDrainFenceUnavailable) | ({
     type: 'session.draining';
 } & TypedEventStreamEnvelopeSessionDraining) | ({
     type: 'session.idle_killed';
@@ -5370,6 +5373,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeStorageBindingConverged) | ({
     type: 'storage.binding.genesis';
 } & TypedEventStreamEnvelopeStorageBindingGenesis) | ({
+    type: 'storage.binding.not_configured';
+} & TypedEventStreamEnvelopeStorageBindingNotConfigured) | ({
     type: 'storage.binding.uncheckable';
 } & TypedEventStreamEnvelopeStorageBindingUncheckable) | ({
     type: 'storage.binding.unconverged';
@@ -6634,6 +6639,24 @@ export type TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork = {
 };
 
 /**
+ * TypedEventStreamEnvelope session.drain_fence_unavailable
+ */
+export type TypedEventStreamEnvelopeSessionDrainFenceUnavailable = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionLifecyclePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.drain_fence_unavailable';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.draining
  */
 export type TypedEventStreamEnvelopeSessionDraining = {
@@ -6918,6 +6941,24 @@ export type TypedEventStreamEnvelopeStorageBindingGenesis = {
     subject?: string;
     ts: string;
     type: 'storage.binding.genesis';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope storage.binding.not_configured
+ */
+export type TypedEventStreamEnvelopeStorageBindingNotConfigured = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: StorageBindingOutcomePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'storage.binding.not_configured';
     workflow?: WorkflowEventProjection;
 };
 
@@ -7225,6 +7266,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence) | ({
     type: 'session.drain_acked_with_assigned_work';
 } & TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork) | ({
+    type: 'session.drain_fence_unavailable';
+} & TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable) | ({
     type: 'session.draining';
 } & TypedTaggedEventStreamEnvelopeSessionDraining) | ({
     type: 'session.idle_killed';
@@ -7257,6 +7300,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeStorageBindingConverged) | ({
     type: 'storage.binding.genesis';
 } & TypedTaggedEventStreamEnvelopeStorageBindingGenesis) | ({
+    type: 'storage.binding.not_configured';
+} & TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured) | ({
     type: 'storage.binding.uncheckable';
 } & TypedTaggedEventStreamEnvelopeStorageBindingUncheckable) | ({
     type: 'storage.binding.unconverged';
@@ -8590,6 +8635,25 @@ export type TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope session.drain_fence_unavailable
+ */
+export type TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionLifecyclePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.drain_fence_unavailable';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope session.draining
  */
 export type TypedTaggedEventStreamEnvelopeSessionDraining = {
@@ -8890,6 +8954,25 @@ export type TypedTaggedEventStreamEnvelopeStorageBindingGenesis = {
     subject?: string;
     ts: string;
     type: 'storage.binding.genesis';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope storage.binding.not_configured
+ */
+export type TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: StorageBindingOutcomePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'storage.binding.not_configured';
     workflow?: WorkflowEventProjection;
 };
 
