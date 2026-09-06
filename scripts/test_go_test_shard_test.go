@@ -142,6 +142,26 @@ func (f goTestShardFixture) commandForShardWithBash(bashPath, shardIndex, shardT
 	return cmd
 }
 
+// assertSeededGitConfig checks the runner pinned GIT_CONFIG_GLOBAL to the
+// seeded per-user config (scripts/test-gitconfig-path) rather than pinning the
+// exact path: the helper's name embeds uid and a repo hash, so the contract
+// here is containment in the fixture TMPDIR plus a real, writable file.
+func (f goTestShardFixture) assertSeededGitConfig(t *testing.T, env map[string]string) {
+	t.Helper()
+	gitConfig := env["GIT_CONFIG_GLOBAL"]
+	if gitConfig == "" {
+		t.Fatalf("direct product environment lacks GIT_CONFIG_GLOBAL:\n%#v", env)
+	}
+	if !strings.HasPrefix(gitConfig, f.tmpDir+string(os.PathSeparator)) {
+		t.Errorf("GIT_CONFIG_GLOBAL %q escapes the fixture TMPDIR %q", gitConfig, f.tmpDir)
+	}
+	if info, err := os.Stat(gitConfig); err != nil {
+		t.Errorf("GIT_CONFIG_GLOBAL %q does not exist: %v", gitConfig, err)
+	} else if info.Mode().Perm()&0o200 == 0 {
+		t.Errorf("GIT_CONFIG_GLOBAL %q is not writable (mode %v)", gitConfig, info.Mode())
+	}
+}
+
 func writeGoTestManifest(t *testing.T, dir string, lines ...string) string {
 	t.Helper()
 	path := filepath.Join(dir, "tests.manifest")
@@ -348,8 +368,8 @@ func TestGoTestShardWithoutTimingPreservesDirectProductContract(t *testing.T) {
 	wantEnv := map[string]string{
 		"PATH": fixture.binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"HOME": fixture.homeDir, "USER": "", "LOGNAME": "", "SHELL": "/bin/sh",
-		"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
-		"LANG": "C.UTF-8", "TMPDIR": fixture.tmpDir, "XDG_RUNTIME_DIR": "",
+		"GIT_CONFIG_NOSYSTEM": "1",
+		"LANG":                "C.UTF-8", "TMPDIR": fixture.tmpDir, "XDG_RUNTIME_DIR": "",
 		"GOPATH": filepath.Join(fixture.tmpDir, "gopath"), "GOCACHE": filepath.Join(fixture.tmpDir, "gocache"),
 		"GOMODCACHE": filepath.Join(fixture.tmpDir, "gomodcache"), "GOTMPDIR": filepath.Join(fixture.tmpDir, "gotmp"),
 		"GOROOT": filepath.Join(fixture.tmpDir, "goroot"), "GOENV": "", "GOFLAGS": "", "GO111MODULE": "",
@@ -357,7 +377,10 @@ func TestGoTestShardWithoutTimingPreservesDirectProductContract(t *testing.T) {
 		"GOSUMDB": "", "GOINSECURE": "", "GOVCS": "", "GOWORK": "", "GC_FAST_UNIT": "0",
 		"CGO_CPPFLAGS": "", "CGO_LDFLAGS": "", "GC_TEST_SHARD_INDEX": "1", "GC_TEST_SHARD_TOTAL": "2",
 	}
-	if got := fixtureEnvironment(t, readFixtureFile(t, fixture.productEnvFile)); !maps.Equal(got, wantEnv) {
+	got := fixtureEnvironment(t, readFixtureFile(t, fixture.productEnvFile))
+	fixture.assertSeededGitConfig(t, got)
+	delete(got, "GIT_CONFIG_GLOBAL")
+	if !maps.Equal(got, wantEnv) {
 		t.Fatalf("direct product environment = %#v, want %#v", got, wantEnv)
 	}
 	if probes, err := os.ReadFile(fixture.probeFile); err == nil {
