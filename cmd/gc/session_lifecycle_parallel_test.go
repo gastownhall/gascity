@@ -3325,6 +3325,49 @@ func TestRollbackPendingCreateUsesSingleTransactionForAllWrites(t *testing.T) {
 	}
 }
 
+// TestRollbackPendingCreateClearsLocalLastWokeAtNotJustDurable pins that
+// rollbackPendingCreateClears mirrors its last_woke_at clear onto the
+// clone-local sidecar (sessFront.SetLocalString) after the Tx commits, not
+// just the durable metadata inside the Tx, so a stale non-empty local value
+// left by the migrated wake path cannot survive rollback and mask the clear
+// from the front door's local-overlay projection (ga-igcny0.1.2.1 Phase B
+// finding 1; see info_store.go's projectWithLocalOverlay). A durable-only
+// clear would leave the local sidecar's stale non-empty value in place, and
+// the overlay prefers local when non-empty.
+func TestRollbackPendingCreateClearsLocalLastWokeAtNotJustDurable(t *testing.T) {
+	store := newTxSpyStore()
+	now := time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)
+	b, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: creatingMeta(map[string]string{
+			"session_name": "worker",
+			"last_woke_at": now.Format(time.RFC3339),
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessFront := sessionFrontDoor(store)
+	if err := sessFront.SetLocalString(b.ID, "last_woke_at", now.Format(time.RFC3339)); err != nil {
+		t.Fatalf("SetLocalString(last_woke_at seed): %v", err)
+	}
+
+	info := sessionpkg.Info{ID: b.ID, SessionNameExplicit: b.Metadata["session_name_explicit"]}
+	if _, ok := rollbackPendingCreateClears(info, sessFront, now, "test: rollback", ioDiscard{}); !ok {
+		t.Fatal("rollbackPendingCreateClears returned ok=false")
+	}
+
+	got, err := sessFront.Get(b.ID)
+	if err != nil {
+		t.Fatalf("sessFront.Get: %v", err)
+	}
+	if got.LastWokeAt != "" {
+		t.Errorf("LastWokeAt = %q, want cleared (local sidecar must not mask the durable clear)", got.LastWokeAt)
+	}
+}
+
 // TestRollbackPendingCreateIsNoopOnAlreadyClosedBead pins ga-igcny0.1.1: once
 // closeFailedCreateBeadInTx is folded directly into rollbackPendingCreate's
 // own Tx, the implicit already-closed guard closeBead used to provide is no

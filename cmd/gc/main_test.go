@@ -1932,6 +1932,14 @@ func (s lookupPoolSessionNameCandidatesStore) List(query beads.ListQuery) ([]bea
 	return result, nil
 }
 
+// GetLocalString reports every key as never-set: this fixture carries no
+// clone-local data, so the session-info overlay lookupPoolSessionNames's
+// ListAll call projects through is a no-op, matching the pre-overlay
+// behavior these tests were written against.
+func (s lookupPoolSessionNameCandidatesStore) GetLocalString(_, _ string) (string, error) {
+	return "", nil
+}
+
 func TestLookupPoolSessionNames_DoesNotRecoverOwnedPoolSessionNameSlot(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{

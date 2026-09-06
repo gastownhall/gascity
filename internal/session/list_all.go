@@ -179,7 +179,7 @@ func (s *Store) ListAll(opts ListAllOptions) ([]Info, error) {
 	}
 	out := make([]Info, 0, len(rows))
 	for _, b := range rows {
-		out = append(out, infoFromPersistedBead(b))
+		out = append(out, s.projectWithLocalOverlay(b))
 	}
 	return out, err
 }
@@ -216,7 +216,7 @@ func (s *Store) ListAllForReconcile(opts ListAllOptions) ([]ReconcileSession, er
 	out := make([]ReconcileSession, 0, len(rows))
 	for _, b := range rows {
 		out = append(out, ReconcileSession{
-			Info:    infoFromPersistedBead(b),
+			Info:    s.projectWithLocalOverlay(b),
 			Circuit: CircuitStateFromMetadata(b.Metadata),
 		})
 	}
@@ -225,18 +225,43 @@ func (s *Store) ListAllForReconcile(opts ListAllOptions) ([]ReconcileSession, er
 
 // ReconcileRowsFromBeads projects an in-memory slice of raw session beads to the
 // reconcile row feed (Info + circuit cluster per bead), the same per-row projection
-// ListAllForReconcile applies to store rows. It exists for the callers that hold raw
-// beads directly rather than reading them from the store — the reconciler test/compat
-// wrappers and the sync-tail fallback — so the InfoFromPersistedBead +
+// ListAllForReconcile applies to store rows. It exists for callers that hold raw
+// beads directly rather than reading them from the store, have no store handle to
+// overlay from, and do not need the clone-local last_woke_at overlay (e.g. a
+// caller that already has last_woke_at durably on the bead, or a test fixture
+// exercising the raw codec deliberately) — so the InfoFromPersistedBead +
 // CircuitStateFromMetadata codec stays confined to this package. Unlike
 // ListAllForReconcile it applies NO union/dedupe/filter: the input is taken as-is,
 // row for row, order preserved (closed beads included; the snapshot constructor drops
-// them).
+// them). A caller that DOES have a store handle and needs the overlay (a session
+// whose last_woke_at may live in clone-local storage) must use
+// Store.ReconcileRowsFromBeadsWithOverlay instead — see that method's doc for why
+// this one cannot safely apply the overlay itself.
 func ReconcileRowsFromBeads(beadsIn []beads.Bead) []ReconcileSession {
 	out := make([]ReconcileSession, 0, len(beadsIn))
 	for _, b := range beadsIn {
 		out = append(out, ReconcileSession{
 			Info:    infoFromPersistedBead(b),
+			Circuit: CircuitStateFromMetadata(b.Metadata),
+		})
+	}
+	return out
+}
+
+// ReconcileRowsFromBeadsWithOverlay is ReconcileRowsFromBeads for callers that DO
+// hold a store handle: each row's Info is projected via projectWithLocalOverlay
+// instead of the raw infoFromPersistedBead, so LastWokeAt reflects clone-local
+// storage the same way ListAllForReconcile already does for store-read rows. Use
+// this instead of ReconcileRowsFromBeads whenever the raw beads passed in came from
+// (or represent) sessions whose last_woke_at may have been written through the
+// clone-local SetLocalString path (see setMetadataValue in store.go) rather than
+// durably — otherwise LastWokeAt reads empty and callers downstream (notably
+// DecideSessionExit's wokeValid gate) misclassify a live wake as none.
+func (s *Store) ReconcileRowsFromBeadsWithOverlay(beadsIn []beads.Bead) []ReconcileSession {
+	out := make([]ReconcileSession, 0, len(beadsIn))
+	for _, b := range beadsIn {
+		out = append(out, ReconcileSession{
+			Info:    s.projectWithLocalOverlay(b),
 			Circuit: CircuitStateFromMetadata(b.Metadata),
 		})
 	}
@@ -298,7 +323,7 @@ func (s *Store) ListAllForReconcileWithFingerprint(opts ListAllOptions) ([]Recon
 	out := make([]ReconcileSession, 0, len(rows))
 	for _, b := range rows {
 		out = append(out, ReconcileSession{
-			Info:    infoFromPersistedBead(b),
+			Info:    s.projectWithLocalOverlay(b),
 			Circuit: CircuitStateFromMetadata(b.Metadata),
 		})
 	}
@@ -317,7 +342,7 @@ func (s *Store) ListAllWithResponses(opts ListAllOptions) ([]ListedSession, erro
 	out := make([]ListedSession, 0, len(rows))
 	for _, b := range rows {
 		out = append(out, ListedSession{
-			Info:     infoFromPersistedBead(b),
+			Info:     s.projectWithLocalOverlay(b),
 			Response: PersistedResponseFromBead(b),
 		})
 	}

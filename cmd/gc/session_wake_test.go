@@ -109,14 +109,22 @@ func TestPreWakeCommit(t *testing.T) {
 	if got.Metadata["instance_token"] != token {
 		t.Errorf("stored token mismatch")
 	}
-	if got.Metadata["last_woke_at"] == "" {
-		t.Error("expected last_woke_at to be set")
-	}
 	if got.Metadata["sleep_reason"] != "" {
 		t.Error("expected sleep_reason to be cleared")
 	}
 	if got.Metadata["continuation_epoch"] != "1" {
 		t.Errorf("stored continuation_epoch = %q, want 1", got.Metadata["continuation_epoch"])
+	}
+
+	// last_woke_at is allowlisted to clone-local storage (SetLocalString), so
+	// a SET write never reaches durable Metadata — read it back via
+	// GetLocalString instead of the raw map (ga-igcny0.1.2.1 Phase B).
+	local, err := store.GetLocalString(b.ID, "last_woke_at")
+	if err != nil {
+		t.Fatalf("GetLocalString(last_woke_at): %v", err)
+	}
+	if local == "" {
+		t.Error("expected last_woke_at to be set")
 	}
 }
 
@@ -296,7 +304,6 @@ func TestPreWakeCommit_ResumeModePreservesPreviousConversationMetadata(t *testin
 		"continuation_epoch":         "3",
 		"continuation_reset_pending": "",
 		"detached_at":                "",
-		"last_woke_at":               now.UTC().Format(time.RFC3339),
 		"sleep_reason":               "",
 		"sleep_intent":               "",
 	}
@@ -304,6 +311,15 @@ func TestPreWakeCommit_ResumeModePreservesPreviousConversationMetadata(t *testin
 		if got.Metadata[key] != value {
 			t.Errorf("%s = %q, want preserved %q", key, got.Metadata[key], value)
 		}
+	}
+
+	// last_woke_at is allowlisted to clone-local storage (SetLocalString) on a
+	// SET write, so it never reaches durable Metadata — check it separately
+	// (ga-igcny0.1.2.1 Phase B).
+	if local, err := store.GetLocalString(b.ID, "last_woke_at"); err != nil {
+		t.Errorf("GetLocalString(last_woke_at): %v", err)
+	} else if want := now.UTC().Format(time.RFC3339); local != want {
+		t.Errorf("last_woke_at (local) = %q, want %q", local, want)
 	}
 }
 

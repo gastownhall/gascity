@@ -2684,6 +2684,9 @@ func rollbackPendingCreateClears(info sessionpkg.Info, sessFront *sessionpkg.Sto
 		return nil, false
 	}
 	cancelStateAssignedToRetiredSessionBead(store.Store, info.ID, now, stderr)
+	if err := sessFront.SetLocalString(info.ID, "last_woke_at", ""); err != nil {
+		fmt.Fprintf(stderr, "session beads: clearing local last_woke_at for %s: %v\n", info.ID, err) //nolint:errcheck
+	}
 	// Mirror the union of both clears onto the typed snapshot.
 	batch := map[string]string{"last_woke_at": ""}
 	for k, v := range postCloseClears {

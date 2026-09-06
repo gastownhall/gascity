@@ -535,6 +535,11 @@ func reopenClosedConfiguredNamedSessionBead(
 			fmt.Fprintf(stderr, "session beads: reopening configured named session %q: %v\n", identity, txErr) //nolint:errcheck
 			return nil
 		}
+		if pendingCreateClaim == "true" {
+			if err := sessionFrontDoor(store).SetLocalString(bead.ID, "last_woke_at", ""); err != nil {
+				fmt.Fprintf(stderr, "session beads: clearing local last_woke_at for %s: %v\n", bead.ID, err) //nolint:errcheck
+			}
+		}
 		// S19 Stage 3 shadow: record the legacy priming-marker clears so the
 		// converge comparator can attribute this owned-key delta (no-op unless
 		// the shadow harness is enabled).
@@ -2472,10 +2477,14 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 	// convergence class the reload-always at the head of this function already accepts.
 	// On a re-list error (never on the old path, which could not fail) fall back to the
 	// in-memory set via the in-package row projection so the return stays non-nil.
+	// ReconcileRowsFromBeadsWithOverlay (via the sessFront front door already
+	// constructed above), not the plain ReconcileRowsFromBeads: a session whose
+	// last_woke_at lives in clone-local storage must still project correctly on
+	// this fallback path.
 	snap, err := loadSessionBeadSnapshot(store)
 	if err != nil {
 		fmt.Fprintf(stderr, "session beads: reloading snapshot after sync (using in-memory set): %v\n", err) //nolint:errcheck
-		snap = newSessionBeadSnapshotFromReconcileRows(session.ReconcileRowsFromBeads(openBeads))
+		snap = newSessionBeadSnapshotFromReconcileRows(sessFront.ReconcileRowsFromBeadsWithOverlay(openBeads))
 	}
 	return openIndex, snap
 }

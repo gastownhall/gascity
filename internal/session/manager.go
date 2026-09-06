@@ -1476,7 +1476,7 @@ func (m *Manager) Quarantine(id string, until time.Time, cycle int) error {
 		if !cmdLegal {
 			return nil // idempotent: already quarantined
 		}
-		return m.store.SetMetadataBatch(id, QuarantinePatch(until, cycle))
+		return m.PersistedStore().ApplyPatch(id, QuarantinePatch(until, cycle))
 	})
 }
 

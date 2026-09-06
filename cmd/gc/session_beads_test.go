@@ -1503,6 +1503,75 @@ func TestReopenClosedConfiguredNamedSessionBeadClearsStaleStartMarkersWhenRecrea
 	}
 }
 
+// TestReopenClosedConfiguredNamedSessionBeadClearsLocalLastWokeAtNotJustDurable
+// pins ga-igcny0.1.2.1 Phase B finding 1: reopenClosedConfiguredNamedSessionBead's
+// pending-create last_woke_at clear must reach the session front door's local
+// sidecar (sessFront.SetLocalString), not just the durable metadata batch
+// inside store.Tx. A raw-store-only clear leaves a stale non-empty local value
+// that projectWithLocalOverlay (info_store.go) would still prefer over the
+// freshly-cleared durable value, masking the clear from crash/churn trackers.
+func TestReopenClosedConfiguredNamedSessionBeadClearsLocalLastWokeAtNotJustDurable(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	now := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "mayor", StartCommand: "true"},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "mayor", Mode: "always"},
+		},
+	}
+	sessionName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, "mayor")
+	staleLastWokeAt := now.Add(-10 * time.Minute).UTC().Format(time.RFC3339)
+	closed, err := store.Create(beads.Bead{
+		Title:  "mayor",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               sessionName,
+			"alias":                      "mayor",
+			"template":                   "mayor",
+			"state":                      "suspended",
+			"close_reason":               "suspended",
+			"last_woke_at":               staleLastWokeAt,
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "mayor",
+			namedSessionModeMetadata:     "always",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create closed canonical bead: %v", err)
+	}
+	if err := store.Close(closed.ID); err != nil {
+		t.Fatalf("close canonical bead: %v", err)
+	}
+	sessFront := sessionFrontDoor(store)
+	if err := sessFront.SetLocalString(closed.ID, "last_woke_at", staleLastWokeAt); err != nil {
+		t.Fatalf("SetLocalString(last_woke_at seed): %v", err)
+	}
+
+	var stderr bytes.Buffer
+	_, sn, ok := reopenClosedConfiguredNamedSessionBead(
+		cityPath, store, cfg, "test-city", "mayor", sessionName, "creating", now, nil, &stderr,
+	)
+	if !ok {
+		t.Fatalf("reopenClosedConfiguredNamedSessionBead failed: %s", stderr.String())
+	}
+	if sn != sessionName {
+		t.Fatalf("reopen session name = %q, want %q", sn, sessionName)
+	}
+
+	info, err := sessFront.Get(closed.ID)
+	if err != nil {
+		t.Fatalf("sessFront.Get(post-reopen): %v", err)
+	}
+	if info.LastWokeAt != "" {
+		t.Errorf("LastWokeAt = %q, want cleared (local sidecar must not mask the durable clear)", info.LastWokeAt)
+	}
+}
+
 // TestReopenClosedConfiguredNamedSessionBeadUsesSingleTransactionForStatusAndMetadata
 // pins ga-igcny0.1.1: the status flip to "open" and the terminal reopen
 // metadata batch must land inside exactly one store.Tx call, not two
