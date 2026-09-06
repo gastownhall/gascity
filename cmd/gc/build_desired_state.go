@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -6218,12 +6219,41 @@ func prepareTemplateResolution(bp *agentBuildParams, cfgAgent *config.Agent, qua
 	}
 	rigName := sessionSetupContextForAgent(bp.cityPath, bp.cityName, qualifiedName, cfgAgent, bp.rigs).Rig
 	materializeProviderOverlaysBeforeFingerprint(bp, cfgAgent, resolved, qualifiedName, rigName, workDir, stderr)
-	if ih := config.ResolveInstallHooks(cfgAgent, bp.workspace); len(ih) > 0 {
+	ih := ensureFamilyInstallHooks(config.ResolveInstallHooks(cfgAgent, bp.workspace), resolved)
+	if len(ih) > 0 {
 		resolver := func(name string) string { return config.BuiltinFamily(name, bp.providers) }
 		if hErr := hooks.InstallWithResolver(bp.fs, bp.cityPath, workDir, ih, resolver); hErr != nil {
 			fmt.Fprintf(stderr, "agent %q: hooks: %v\n", qualifiedName, hErr) //nolint:errcheck
 		}
 	}
+}
+
+// ensureFamilyInstallHooks returns installHooks with the resolved provider's
+// launch family appended when that family ships managed workdir hook files.
+// stageHookFiles only re-stages hook files that already exist in the agent
+// workdir, and pack overlay staging only materializes them when an imported
+// pack ships a per-provider/<family>/ overlay — so without this an agent on
+// a hooks-bearing family (pi, opencode, ...) whose config never sets
+// install_agent_hooks is created with no lifecycle hook at all: the provider
+// boots without its session_start hook, never registers a session key, and
+// the session churns in "creating" until the start deadline reaps it.
+// Claude is excluded because resolveTemplate already projects managed Claude
+// settings via ensureClaudeSettingsArgs (see the dedup note on
+// installAgentSideEffects).
+func ensureFamilyInstallHooks(installHooks []string, resolved *config.ResolvedProvider) []string {
+	family := resolvedProviderLaunchFamily(resolved)
+	if family == "" || family == "claude" {
+		return installHooks
+	}
+	if !slices.Contains(hooks.SupportedProviders(), family) {
+		return installHooks
+	}
+	if slices.Contains(installHooks, family) {
+		return installHooks
+	}
+	out := make([]string, 0, len(installHooks)+1)
+	out = append(out, installHooks...)
+	return append(out, family)
 }
 
 func materializeProviderOverlaysBeforeFingerprint(
@@ -6334,7 +6364,7 @@ func installAgentSideEffects(bp *agentBuildParams, cfgAgent *config.Agent, tp Te
 	// already projected the settings upstream in resolveTemplate, so
 	// drop the explicit "claude" entry here to avoid duplicating the
 	// filesystem write on every reconciler tick.
-	ih := config.ResolveInstallHooks(cfgAgent, bp.workspace)
+	ih := ensureFamilyInstallHooks(config.ResolveInstallHooks(cfgAgent, bp.workspace), tp.ResolvedProvider)
 	if tp.ResolvedProvider != nil {
 		family := resolvedProviderLaunchFamily(tp.ResolvedProvider)
 		if family == "claude" || tp.ResolvedProvider.Name == "claude" {
