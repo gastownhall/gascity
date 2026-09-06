@@ -48,14 +48,18 @@ import (
 // regress per-dispatcher trace files for control-dispatcher sessions
 // restarted through the API. Dispatcher-trace handling stays the
 // responsibility of the caller that knows the qualified agent name.
+//
+// If the merged baseline+workspace+provider env already targets a remote
+// city (GC_CITY_URL or GC_CITY_CONTEXT set), the local city anchors are
+// omitted entirely: seeding them alongside a remote target makes the
+// nested gc binary in that session fail closed with "conflicting targets"
+// (cmd/gc/remote_target.go's local-vs-remote guard). A remote-targeted
+// session must resolve its city over the remote selector, not a local path.
 func cityAnchoredSessionEnv(cityPath string, workspaceEnv, providerEnv map[string]string) map[string]string {
 	baseline := processenv.ProviderProcessPassthroughEnv()
-	anchors := citylayout.CityIdentityEnvMap(cityPath)
 	gcBin, _ := os.Executable()
-	if len(baseline) == 0 && len(workspaceEnv) == 0 && len(providerEnv) == 0 && len(anchors) == 0 && gcBin == "" {
-		return nil
-	}
-	out := make(map[string]string, len(baseline)+len(workspaceEnv)+len(providerEnv)+len(anchors)+1)
+
+	out := make(map[string]string, len(baseline)+len(workspaceEnv)+len(providerEnv)+4)
 	for k, v := range baseline {
 		out[k] = v
 	}
@@ -64,6 +68,15 @@ func cityAnchoredSessionEnv(cityPath string, workspaceEnv, providerEnv map[strin
 	}
 	for k, v := range providerEnv {
 		out[k] = processenv.ExpandSessionEnvValue(v)
+	}
+
+	remoteTargeted := strings.TrimSpace(out["GC_CITY_URL"]) != "" || strings.TrimSpace(out["GC_CITY_CONTEXT"]) != ""
+	var anchors map[string]string
+	if !remoteTargeted {
+		anchors = citylayout.CityIdentityEnvMap(cityPath)
+	}
+	if len(baseline) == 0 && len(workspaceEnv) == 0 && len(providerEnv) == 0 && len(anchors) == 0 && gcBin == "" {
+		return nil
 	}
 	for k, v := range anchors {
 		out[k] = v
