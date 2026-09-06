@@ -26,6 +26,8 @@ THRESHOLD="${SPAWN_STORM_THRESHOLD:-2}"
 # pack's mayor) can point this at it; "human" is the reserved recipient alias
 # that resolves in every city, including core-only ones.
 ESCALATION_TARGET="${GC_ESCALATION_TARGET:-human}"
+# Count of undeliverable alerts. Load-bearing for the exit code below.
+FAILED=0
 
 if [ ! -e "$LEDGER" ] && [ -e "$CITY/.gc/spawn-storm-counts.json" ]; then
     LEDGER="$CITY/.gc/spawn-storm-counts.json"
@@ -72,9 +74,11 @@ Recommended actions:
 - Check rejection history: metadata.rejection_reason
 - Consider quarantining the bead or investigating the root cause." \
             2>/dev/null; then
-            # Never fail the exec order on an undeliverable alert, but do not
-            # swallow it silently either — a vanished storm alert is invisible.
+            # Do not swallow an undeliverable alert — a vanished storm alert
+            # is invisible. Surfacing it requires a non-zero exit (see below),
+            # so record the failure and keep sweeping the remaining beads.
             echo "spawn-storm-detect: could not mail escalation target '$ESCALATION_TARGET' about $bead_id" >&2
+            FAILED=$((FAILED + 1))
         fi
         STORMS=$((STORMS + 1))
     fi
@@ -107,4 +111,14 @@ echo "$COUNTS" > "$LEDGER"
 
 if [ "$STORMS" -gt 0 ]; then
     echo "spawn-storm-detect: found $STORMS beads exceeding reset threshold"
+fi
+
+# Loud-fail: the ledger has been written above, so a non-zero exit now surfaces
+# the per-bead failure lines to the controller log without losing the recorded
+# counts. The controller captures an exec order's combined output but logs it
+# only on a non-zero exit (order_dispatch.go), so exit 0 would swallow them
+# (gastownhall/gascity#4543).
+if [ "$FAILED" -gt 0 ]; then
+    echo "spawn-storm-detect: $FAILED storm alert(s) could not be delivered to '$ESCALATION_TARGET' (see above)" >&2
+    exit 1
 fi
