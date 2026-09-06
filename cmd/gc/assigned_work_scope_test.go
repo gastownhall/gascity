@@ -901,7 +901,9 @@ func TestResolveTaskWorkDirPrefersPreparedDrainSourceAnchor(t *testing.T) {
 // TestResolveTaskWorkDirPrefersCreatorWorkDirOverStampedCanonical pins the
 // key precedence for non-drain beads: legacy `work_dir` is written by the
 // worktree creator, while `gc.work_dir` is an observability stamp
-// reconciliation mirrors from an observed cwd. The creator's record wins.
+// reconciliation mirrors from an observed cwd and is never launch authority.
+// The creator's record wins when present; a bare stamp with no legacy key
+// must not resolve at all (the launcher's own dir wins by default instead).
 func TestResolveTaskWorkDirPrefersCreatorWorkDirOverStampedCanonical(t *testing.T) {
 	creatorDir := t.TempDir()
 	observedDir := t.TempDir()
@@ -911,8 +913,7 @@ func TestResolveTaskWorkDirPrefersCreatorWorkDirOverStampedCanonical(t *testing.
 		Type:     "task",
 		Assignee: "worker-session",
 		Metadata: map[string]string{
-			beadmeta.LegacyWorkDirMetadataKey: creatorDir,
-			beadmeta.WorkDirMetadataKey:       observedDir,
+			beadmeta.WorkDirMetadataKey: observedDir,
 		},
 	})
 	if err != nil {
@@ -921,6 +922,17 @@ func TestResolveTaskWorkDirPrefersCreatorWorkDirOverStampedCanonical(t *testing.
 	inProgress := "in_progress"
 	if err := store.Update(task.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
 		t.Fatalf("mark assigned task in progress: %v", err)
+	}
+
+	if got := resolveTaskWorkDir("", store, "worker-session"); got != "" {
+		t.Fatalf("resolveTaskWorkDir = %q, want empty: a bare gc.work_dir stamp (no legacy work_dir) must not resolve (stamped dir was %q)", got, observedDir)
+	}
+
+	if err := store.Update(task.ID, beads.UpdateOpts{Metadata: map[string]string{
+		beadmeta.LegacyWorkDirMetadataKey: creatorDir,
+		beadmeta.WorkDirMetadataKey:       observedDir,
+	}}); err != nil {
+		t.Fatalf("add creator work_dir: %v", err)
 	}
 
 	if got := resolveTaskWorkDir("", store, "worker-session"); got != creatorDir {
