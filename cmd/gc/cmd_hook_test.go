@@ -314,7 +314,7 @@ work_query = "printf '[{\"id\":\"ga-pool1\",\"status\":\"open\",\"title\":\"work
 func TestHookNoWork(t *testing.T) {
 	runner := func(string, string) (string, error) { return "", nil }
 	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", "", false, runner, &stdout, &stderr)
+	code := doHook("bd ready", "", false, runner, &stdout, &stderr, hookVisibility{})
 	if code != 1 {
 		t.Errorf("doHook(no work) = %d, want 1", code)
 	}
@@ -326,7 +326,7 @@ func TestHookNoWork(t *testing.T) {
 func TestHookHasWork(t *testing.T) {
 	runner := func(string, string) (string, error) { return "hw-1  open  Fix the bug\n", nil }
 	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", "", false, runner, &stdout, &stderr)
+	code := doHook("bd ready", "", false, runner, &stdout, &stderr, hookVisibility{})
 	if code != 0 {
 		t.Errorf("doHook(has work) = %d, want 0", code)
 	}
@@ -1294,7 +1294,7 @@ func TestDoHookClaimPreassignsContinuationGroupSiblings(t *testing.T) {
 func TestHookCommandError(t *testing.T) {
 	runner := func(string, string) (string, error) { return "", fmt.Errorf("command failed") }
 	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", "", false, runner, &stdout, &stderr)
+	code := doHook("bd ready", "", false, runner, &stdout, &stderr, hookVisibility{})
 	if code != 1 {
 		t.Errorf("doHook(error) = %d, want 1", code)
 	}
@@ -1308,7 +1308,7 @@ func TestHookCommandErrorPrintsPartialOutput(t *testing.T) {
 		return "[]\n", fmt.Errorf("timed out after 15s with partial stdout")
 	}
 	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", "", false, runner, &stdout, &stderr)
+	code := doHook("bd ready", "", false, runner, &stdout, &stderr, hookVisibility{})
 	if code != 1 {
 		t.Errorf("doHook(error with output) = %d, want 1", code)
 	}
@@ -1340,7 +1340,7 @@ func TestShellWorkQueryWithEnvTimeoutReportsPartialOutput(t *testing.T) {
 func TestHookInjectNoWork(t *testing.T) {
 	runner := func(string, string) (string, error) { return "", nil }
 	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", "", true, runner, &stdout, &stderr)
+	code := doHook("bd ready", "", true, runner, &stdout, &stderr, hookVisibility{})
 	if code != 0 {
 		t.Errorf("doHook(inject, no work) = %d, want 0", code)
 	}
@@ -1354,7 +1354,7 @@ func TestHookNoReadyMessagePrintsButExitsOne(t *testing.T) {
 		return "✨ No ready work found (all issues have blocking dependencies)\n", nil
 	}
 	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", "", false, runner, &stdout, &stderr)
+	code := doHook("bd ready", "", false, runner, &stdout, &stderr, hookVisibility{})
 	if code != 1 {
 		t.Errorf("doHook(no-ready-message) = %d, want 1", code)
 	}
@@ -1368,7 +1368,7 @@ func TestHookInjectSuppressesNoReadyMessage(t *testing.T) {
 		return "✨ No ready work found (all issues have blocking dependencies)\n", nil
 	}
 	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", "", true, runner, &stdout, &stderr)
+	code := doHook("bd ready", "", true, runner, &stdout, &stderr, hookVisibility{})
 	if code != 0 {
 		t.Errorf("doHook(inject, no-ready-message) = %d, want 0", code)
 	}
@@ -1380,7 +1380,7 @@ func TestHookInjectSuppressesNoReadyMessage(t *testing.T) {
 func TestHookInjectIsNonIntrusiveWithWork(t *testing.T) {
 	runner := func(string, string) (string, error) { return "hw-1  open  Fix the bug\n", nil }
 	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", "", true, runner, &stdout, &stderr)
+	code := doHook("bd ready", "", true, runner, &stdout, &stderr, hookVisibility{})
 	if code != 0 {
 		t.Errorf("doHook(inject, work) = %d, want 0", code)
 	}
@@ -1396,7 +1396,7 @@ func TestHookInjectDoesNotRunWorkQuery(t *testing.T) {
 		return "hw-1  open  Fix the bug\n", nil
 	}
 	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", "", true, runner, &stdout, &stderr)
+	code := doHook("bd ready", "", true, runner, &stdout, &stderr, hookVisibility{})
 	if code != 0 {
 		t.Errorf("doHook(inject, work) = %d, want 0", code)
 	}
@@ -1679,7 +1679,7 @@ case "$*" in
   *"list --json --status=open"*"gc.continuation_group=body"*"gc.root_bead_id=root-1"*)
     printf '[{"id":"hw-claim","status":"open","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.continuation_group":"body"}},{"id":"hw-next","status":"open","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.continuation_group":"body"}},{"id":"hw-other","status":"open","metadata":{"gc.routed_to":"other","gc.root_bead_id":"root-1","gc.continuation_group":"body"}}]'
     ;;
-  *"update --json hw-next --assignee worker-1"*)
+  *"update --json hw-next --assignee session-id-1"*)
     printf '[{"id":"hw-next","status":"open","assignee":"worker-1","metadata":{"gc.routed_to":"worker"}}]'
     ;;
   *"query --json ephemeral=true AND status=open --limit 0"*)
@@ -1735,8 +1735,12 @@ esac
 	if !strings.Contains(logText, "actor=worker-1 args=show --json hw-claim") {
 		t.Fatalf("bd canonical read did not use BEADS_ACTOR=worker-1; log:\n%s", logText)
 	}
-	if !strings.Contains(logText, "args=update --json hw-next --assignee worker-1") {
-		t.Fatalf("continuation sibling was not preassigned through bd; log:\n%s", logText)
+	// The claim itself is actored and assigned as worker-1 (the alias read paths
+	// query through GC_AGENT), but the continuation pin is a session binding: the
+	// sibling must name GC_SESSION_ID so wake demand and the continuation
+	// backstop can both resolve it back to this session.
+	if !strings.Contains(logText, "args=update --json hw-next --assignee session-id-1") {
+		t.Fatalf("continuation sibling was not preassigned to the session id; log:\n%s", logText)
 	}
 	if strings.Contains(logText, "args=update hw-other --assignee") {
 		t.Fatalf("continuation preassignment crossed route target; log:\n%s", logText)
@@ -2191,7 +2195,7 @@ func TestHookInjectAlwaysExitsZero(t *testing.T) {
 	// Even on command failure, inject mode exits 0.
 	runner := func(string, string) (string, error) { return "", fmt.Errorf("command failed") }
 	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", "", true, runner, &stdout, &stderr)
+	code := doHook("bd ready", "", true, runner, &stdout, &stderr, hookVisibility{})
 	if code != 0 {
 		t.Errorf("doHook(inject, error) = %d, want 0", code)
 	}
@@ -2206,7 +2210,7 @@ func TestHookPassesWorkQuery(t *testing.T) {
 		return "item-1\n", nil
 	}
 	var stdout, stderr bytes.Buffer
-	doHook("bd ready --assignee=mayor", "/tmp/work", false, runner, &stdout, &stderr)
+	doHook("bd ready --assignee=mayor", "/tmp/work", false, runner, &stdout, &stderr, hookVisibility{})
 	if receivedCmd != "bd ready --assignee=mayor" {
 		t.Errorf("runner command = %q, want %q", receivedCmd, "bd ready --assignee=mayor")
 	}
@@ -2856,7 +2860,7 @@ func TestDoHookNormalizesSingleObjectOutputToArray(t *testing.T) {
 		return `{"id":"bd-1","title":"Work"}`, nil
 	}
 
-	code := doHook("bd ready", ".", false, runner, &stdout, &stderr)
+	code := doHook("bd ready", ".", false, runner, &stdout, &stderr, hookVisibility{})
 	if code != 0 {
 		t.Fatalf("doHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}

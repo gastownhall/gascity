@@ -133,7 +133,7 @@ add_fsys_compile_job() {
 # GOFLAGS -p export below (ga-04m84s), so it is not pinned on this command.
 add_unit_core_job() {
   add_job "unit-core" \
-    "GC_FAST_UNIT=1 go test -count=1 -timeout ${go_test_timeout} \$(go list ./... | grep -v '^github.com/gastownhall/gascity/cmd/gc\$')"
+    "GC_FAST_UNIT=1 go test -count=1 -timeout ${go_test_timeout} \$(go list ./... | grep -v '^github.com/gastownhall/gascity/cmd/gc$')"
 }
 
 # Runs as a direct shell job rather than through a `go test` wrapper because a

@@ -70,6 +70,7 @@ func TestIsReadyExcludedType(t *testing.T) {
 		{"agent", true},
 		{"role", true},
 		{"rig", true},
+		{"startup-health-episode", true}, // bookkeeping record; never actionable Ready work (ga-o04bfr.1.1)
 		{"task", false},
 		{"wisp", false},
 		{"", false},

@@ -41,15 +41,6 @@ func (r *mutableStreamResolver) CityPath(name string) (string, bool) {
 	return r.path, true
 }
 
-func (r *mutableStreamResolver) Cities() []CityRef {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	if r.path == "" {
-		return nil
-	}
-	return []CityRef{{Name: "alpha", Path: r.path}}
-}
-
 func (r *mutableStreamResolver) setPath(path string) {
 	r.mu.Lock()
 	r.path = path
