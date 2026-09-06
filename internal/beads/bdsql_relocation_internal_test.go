@@ -120,6 +120,74 @@ func TestRelocatedClassRefusalLeavesTheOverrideToTheCLI(t *testing.T) {
 	}
 }
 
+// nudgesRelocated is the split with a subsystem inside it: the nudges binding
+// mints "gcn" and also HOLDS the queue's "gcnq" records, which the queue itself
+// mints from a content hash rather than from the store's sequence.
+func nudgesRelocated() RelocatedClass {
+	return RelocatedClass{
+		Class:        "nudges",
+		IDPrefix:     "gcn",
+		HeldPrefixes: []string{"gcnq"},
+		Location:     `the "infra" storage binding (provider sqlite-beads, .gc/store)`,
+	}
+}
+
+// TestRelocatedClassGuardsANamespaceItHoldsWithoutMinting is the gap this
+// field closed.
+//
+// A held namespace is exactly as invisible to bd as a minted one: no row of the
+// work ledger carries "gcnq-" either, so a read scoped to one runs successfully
+// against the ledger, matches nothing, and returns the same confident empty
+// answer. Keying the guard on the MINT prefix alone made the queue's own
+// records the one class-owned namespace a raw `bd sql` could ask about without
+// being stopped.
+func TestRelocatedClassGuardsANamespaceItHoldsWithoutMinting(t *testing.T) {
+	nudges := []RelocatedClass{nudgesRelocated()}
+
+	if !nudgesRelocated().matchesID("gcnq-abc-q") {
+		t.Error("a queue record id is not recognized as class-owned; the id-scoped store guard lets it through")
+	}
+	if len(RelocatedClassesInSQL(nudges, "select * from issues where id = 'gcnq-abc-q'")) == 0 {
+		t.Error("bd SQL naming a queue record id is not refused; bd would answer it emptily against the work ledger")
+	}
+	if len(RelocatedClassesInQueryExpr(nudges, "id=gcnq-*")) == 0 {
+		t.Error("a bd query over the queue namespace is not refused")
+	}
+	if len(RelocatedClassesInSelector(nudges, "gc.root_bead_id=gcnq-abc-q")) == 0 {
+		t.Error("a selector predicate over the queue namespace is not refused")
+	}
+
+	// One match, not two. "gcn" is a prefix of "gcnq" as a STRING, and a class
+	// reported twice would print its topology twice in the refusal.
+	if got := RelocatedClassesInSQL(nudges, "select * from issues where id in ('gcn-1','gcnq-abc-q')"); len(got) != 1 {
+		t.Errorf("a statement naming both namespaces matched %d classes, want the class once", len(got))
+	}
+
+	// The control: a class that holds nothing extra must NOT claim the queue
+	// namespace. "gcnq-abc" starts with "gcn" as a string, and the boundary rule
+	// — not the held list — is what keeps that from being a match, so a guard
+	// that "passes" by over-matching is not passing.
+	mintOnly := []RelocatedClass{{Class: "nudges", IDPrefix: "gcn", Location: "somewhere"}}
+	if mintOnly[0].matchesID("gcnq-abc-q") {
+		t.Error("a mint-only class claimed the queue namespace by string prefix; the id boundary rule is gone")
+	}
+	if len(RelocatedClassesInSQL(mintOnly, "select * from issues where id = 'gcnq-abc-q'")) != 0 {
+		t.Error("a mint-only class matched a queue id in SQL; the match is not anchored at an id boundary")
+	}
+}
+
+// TestRelocatedClassRefusalNamesAHeldNamespace pins the operator-facing half.
+// Someone refused while holding a "gcnq-" id and shown a message that names
+// only "gcn-" reads the guard as having misfired, and reaches for the override.
+func TestRelocatedClassRefusalNamesAHeldNamespace(t *testing.T) {
+	msg := RelocatedClassRefusal("bd sql", []RelocatedClass{nudgesRelocated()}).Error()
+	for _, want := range []string{`"gcn-"`, `"gcnq-"`} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("the refusal does not name %s:\n%s", want, msg)
+		}
+	}
+}
+
 func TestRelocatedClassesInSQLMatchesOnlyAtIDBoundaries(t *testing.T) {
 	relocated := []RelocatedClass{graphRelocated()}
 	for name, tc := range map[string]struct {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -186,5 +187,52 @@ func TestCookOnClassRoutedRequiresAParent(t *testing.T) {
 	_, err := cookOnClassRouted(context.Background(), beads.NewMemStore(), beads.NewMemStore(), convergencePouredFormula, []string{dir}, molecule.Options{})
 	if err == nil {
 		t.Fatal("cooking with no ParentID succeeded; the attach-only contract is gone")
+	}
+}
+
+// TestCookOnClassRoutedChoosesItsStoreThroughTheLibraryEntry pins that this
+// helper contributes the CHOICE and nothing else: the compile/validate/
+// instantiate sequence around it belongs to molecule.CookChoosingStore, which
+// calls the chooser exactly once, between validation and the first write. A
+// hand-copied Cook body here would be a second implementation of that contract
+// and would drift silently the next time Cook grows an invariant.
+//
+// The chooser is built inside cookOnClassRouted, so a caller cannot count its
+// calls; what it CAN observe is the contract only the library entry has. A nil
+// choice is refused in the chooser's own vocabulary before anything is written,
+// and an inlined body has no such guard — it hands the nil store straight to
+// molecule.Instantiate, which dereferences it.
+func TestCookOnClassRoutedChoosesItsStoreThroughTheLibraryEntry(t *testing.T) {
+	dir := convergenceResidenceFormulaDir(t)
+	work := beads.NewMemStore()
+
+	// A vapor formula classifies as graph, so a nil graph store IS the chooser
+	// answering nil — the case CookChoosingStore refuses between validation and
+	// the first write.
+	_, err := cookOnClassRouted(context.Background(), work, nil, convergenceVaporFormula, []string{dir}, molecule.Options{
+		ParentID: "gc-parent-lives-in-a-third-store",
+	})
+	if err == nil {
+		t.Fatal("cooking a graph-class formula with no graph store succeeded")
+	}
+	if !strings.Contains(err.Error(), "store chooser returned nil") {
+		t.Errorf("the refusal did not come from molecule.CookChoosingStore's choice guard, so the sequence is inlined here again: %v", err)
+	}
+	if !strings.Contains(err.Error(), convergenceVaporFormula) {
+		t.Errorf("the refusal does not name the formula: %v", err)
+	}
+	if got := countBeads(t, work); got != 0 {
+		t.Errorf("the work store holds %d bead(s) from a cook that never chose a store; the choice happens before the first write", got)
+	}
+
+	// The "after validation" half: a formula that never compiles must not reach
+	// the choice at all, so the nil graph store above cannot be what a caller
+	// with a bad formula name hears about.
+	if _, err := cookOnClassRouted(context.Background(), work, nil, "conv-residence-no-such-formula", []string{dir}, molecule.Options{
+		ParentID: "gc-parent-lives-in-a-third-store",
+	}); err == nil {
+		t.Fatal("cooking a formula that does not exist succeeded")
+	} else if strings.Contains(err.Error(), "store chooser") {
+		t.Errorf("a formula that never compiled reached the store choice: %v", err)
 	}
 }

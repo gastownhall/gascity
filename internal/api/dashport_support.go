@@ -49,6 +49,16 @@ type SeededCityDeps struct {
 
 	// CityBeadStore backs the city (HQ) scope: session beads, mail, and the
 	// graph/formula topology the workflow and formula-feed endpoints read.
+	//
+	// It is ONE store for every coordination class, so this harness expresses a
+	// single-store city and cannot express a split one. That is a deliberate
+	// scope limit, not an oversight — the corpus projects dashboard feeds, and
+	// no case in it relocates a class — but it is a limit a projection case
+	// cannot detect from the inside: a case written against a relocated
+	// messaging or graph binding would be served from this one store and pass
+	// green while proving nothing about the split. Covering a split city means
+	// giving these deps per-class stores first (the shape controllerState holds
+	// as storageRoutes), not seeding a second store beside this one.
 	CityBeadStore beads.Store
 
 	// RigStores maps rig name to that rig's work-class bead store. It is
@@ -189,6 +199,9 @@ func newSeededState(deps SeededCityDeps) *seededState {
 		s.rigStores = map[string]beads.Store{}
 	}
 	if s.cityStore != nil {
+		// Unrouted on purpose: SeededCityDeps carries one store for every
+		// class, so there is no messaging binding to route to. See the
+		// CityBeadStore doc for what that means for a split-city case.
 		svc := extmsg.NewServices(s.cityStore)
 		s.extmsgSvc = &svc
 	}

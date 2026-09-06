@@ -246,6 +246,10 @@ func filterAssignedWorkBeadsForPoolDemand(
 // returns the filtered beads plus their store refs, index-aligned, so callers
 // can resolve store-scoped wake-demand readiness (storeScopedBeadKey) for the
 // surviving beads without re-deriving each bead's originating store.
+//
+// The reconcile paths take the store-aware form below, which also carries the
+// legs the rows were read through; this two-value form is for callers that only
+// read the surviving rows.
 func filterAssignedWorkBeadsForSessionWake(
 	cfg *config.City,
 	cityPath string,
@@ -254,11 +258,45 @@ func filterAssignedWorkBeadsForSessionWake(
 	assignedWorkBeads []beads.Bead,
 	assignedWorkStoreRefs []string,
 ) ([]beads.Bead, []string) {
+	kept, keptRefs, _ := filterAssignedWorkBeadsForSessionWakeWithStores(cfg, cityPath, leading, sessionInfos, assignedWorkBeads, assignedWorkStoreRefs, nil)
+	return kept, keptRefs
+}
+
+// filterAssignedWorkBeadsForSessionWakeWithStores is the store-aware form: it
+// projects the index-aligned snapshot stores through the same filter, so a
+// caller that must WRITE to a surviving row can do it through the leg the census
+// read the row through rather than re-deriving an owner from gc.routed_to (which
+// names a work ledger a binding-resident row does not live in — ga-b0o6a).
+//
+// assignedWorkStores must be as long as assignedWorkBeads; a slice of any other
+// length is dropped rather than partially applied, and the returned stores are
+// then nil.
+//
+// residency:allow — a caller's own snapshot, projected. The []beads.Store this
+// returns is only ever a subsequence of the slice it was HANDED, carried through
+// the same keep/drop decision it applies to the beads; it opens no store and
+// builds no store list of its own. It DOES consult residency to make that
+// keep/drop decision — assignedWorkClaimRefs resolves the topology's claim refs
+// and assignedWorkStoreRefForAgent resolves each agent's rig name — but those are
+// reads of refs, never of legs, and cannot introduce a store the caller did not
+// already hand in.
+func filterAssignedWorkBeadsForSessionWakeWithStores(
+	cfg *config.City,
+	cityPath string,
+	leading beads.Store,
+	sessionInfos []sessionpkg.Info,
+	assignedWorkBeads []beads.Bead,
+	assignedWorkStoreRefs []string,
+	assignedWorkStores []beads.Store,
+) ([]beads.Bead, []string, []beads.Store) {
+	if len(assignedWorkStores) != len(assignedWorkBeads) {
+		assignedWorkStores = nil
+	}
 	if len(assignedWorkBeads) == 0 || len(assignedWorkStoreRefs) == 0 {
-		return assignedWorkBeads, assignedWorkStoreRefs
+		return assignedWorkBeads, assignedWorkStoreRefs, assignedWorkStores
 	}
 	if cfg == nil {
-		return assignedWorkBeads, assignedWorkStoreRefs
+		return assignedWorkBeads, assignedWorkStoreRefs, assignedWorkStores
 	}
 	claimRefs := assignedWorkClaimRefs(cityPath, cfg, leading)
 	reachableRefsByAssignee := make(map[string]map[string]struct{})
@@ -343,6 +381,17 @@ func filterAssignedWorkBeadsForSessionWake(
 
 	filtered := make([]beads.Bead, 0, len(assignedWorkBeads))
 	filteredRefs := make([]string, 0, len(assignedWorkBeads))
+	var filteredStores []beads.Store
+	if assignedWorkStores != nil {
+		filteredStores = make([]beads.Store, 0, len(assignedWorkBeads))
+	}
+	keep := func(i int, wb beads.Bead) {
+		filtered = append(filtered, wb)
+		filteredRefs = append(filteredRefs, assignedWorkStoreRefs[i])
+		if filteredStores != nil {
+			filteredStores = append(filteredStores, assignedWorkStores[i])
+		}
+	}
 	for i, wb := range assignedWorkBeads {
 		if i >= len(assignedWorkStoreRefs) {
 			continue
@@ -353,18 +402,16 @@ func filterAssignedWorkBeadsForSessionWake(
 		}
 		if _, ok := crossStore[assignee]; ok {
 			// City-scoped assignee: reachable from any store (vp-kvp).
-			filtered = append(filtered, wb)
-			filteredRefs = append(filteredRefs, assignedWorkStoreRefs[i])
+			keep(i, wb)
 			continue
 		}
 		if refs := reachableRefsByAssignee[assignee]; refs != nil {
 			if _, ok := refs[assignedWorkStoreRefs[i]]; ok {
-				filtered = append(filtered, wb)
-				filteredRefs = append(filteredRefs, assignedWorkStoreRefs[i])
+				keep(i, wb)
 			}
 		}
 	}
-	return filtered, filteredRefs
+	return filtered, filteredRefs, filteredStores
 }
 
 // readyAssignedFlagsForBeads resolves the store-scoped wake-demand readiness of

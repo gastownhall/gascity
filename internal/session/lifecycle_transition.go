@@ -237,12 +237,13 @@ func ContinuationResetWakePatch(now time.Time) MetadataPatch {
 // selected by the normal wake path.
 func ClearWakeBlockersPatch(state State, sleepReason string) MetadataPatch {
 	patch := MetadataPatch{
-		"held_until":        "",
-		"quarantined_until": "",
-		"wait_hold":         "",
-		"sleep_intent":      "",
-		"wake_attempts":     "0",
-		"churn_count":       "0",
+		"held_until":            "",
+		"quarantined_until":     "",
+		"wait_hold":             "",
+		"sleep_intent":          "",
+		"wake_attempts":         "0",
+		"wake_refused_event_at": "",
+		"churn_count":           "0",
 	}
 	switch state {
 	case StateSuspended, StateDrained:
