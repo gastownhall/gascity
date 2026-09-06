@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dolthub/fslock"
 	"github.com/gastownhall/gascity/internal/clock"
 )
 
@@ -278,5 +279,237 @@ func TestSweep_MultipleCandidatesMixedOutcomes(t *testing.T) {
 		if _, err := os.Stat(d); err != nil {
 			t.Fatalf("dir %s should still exist: %v", d, err)
 		}
+	}
+}
+
+// TestSweep_ConfirmsUnheldWithSecondLsofScanBeforeRemoving reproduces
+// ga-vbyn8v: under heavy host load, a single lsof scan can transiently miss
+// a still-open file for a live process without lsof itself erroring. Sweep
+// must not trust a lone "unheld" reading before deleting anything.
+func TestSweep_ConfirmsUnheldWithSecondLsofScanBeforeRemoving(t *testing.T) {
+	root := t.TempDir()
+	old := time.Now().Add(-2 * time.Hour)
+	dir := mkStoreDir(t, root, "flaky-held", 2, old)
+
+	calls := 0
+	flaky := func(context.Context) ([]byte, error) {
+		calls++
+		if calls == 1 {
+			// First scan transiently misses the live holder.
+			return nil, nil
+		}
+		// Confirming second scan sees it.
+		return []byte(dir + "/noms/oldgen/000001.chunk\n"), nil
+	}
+
+	result := Sweep(SweepConfig{Root: root, RunLsof: flaky})
+
+	if len(result.Removed) != 0 {
+		t.Fatalf("Removed = %v, want none (confirm scan caught what the first scan missed)", result.Removed)
+	}
+	if result.Skipped != 1 {
+		t.Fatalf("Skipped = %d, want 1", result.Skipped)
+	}
+	if calls != 2 {
+		t.Fatalf("RunLsof called %d times, want exactly 2 (initial + confirm)", calls)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("dir %s should still exist: %v", dir, err)
+	}
+}
+
+// TestSweep_SkipsConfirmScanWhenFirstScanAlreadyHeld proves the confirm
+// scan is only spent on candidates about to be deleted, not on every
+// candidate — a directory already known held doesn't need reconfirming.
+func TestSweep_SkipsConfirmScanWhenFirstScanAlreadyHeld(t *testing.T) {
+	root := t.TempDir()
+	old := time.Now().Add(-2 * time.Hour)
+	dir := mkStoreDir(t, root, "held1", 2, old)
+
+	calls := 0
+	held := func(context.Context) ([]byte, error) {
+		calls++
+		return []byte(dir + "/noms/oldgen/000001.chunk\n"), nil
+	}
+
+	result := Sweep(SweepConfig{Root: root, RunLsof: held})
+
+	if len(result.Removed) != 0 || result.Skipped != 1 {
+		t.Fatalf("result = %+v, want held dir skipped without removal", result)
+	}
+	if calls != 1 {
+		t.Fatalf("RunLsof called %d times, want exactly 1 (no confirm scan needed)", calls)
+	}
+}
+
+// TestSweep_RemovesWhenBothScansAgreeUnheld guards against a regression
+// where the confirm scan makes removal impossible: a genuinely orphaned
+// directory that both scans agree is unheld must still be removed.
+func TestSweep_RemovesWhenBothScansAgreeUnheld(t *testing.T) {
+	root := t.TempDir()
+	old := time.Now().Add(-2 * time.Hour)
+	dir := mkStoreDir(t, root, "orphan1", 1, old)
+
+	calls := 0
+	unheld := func(context.Context) ([]byte, error) {
+		calls++
+		return nil, nil
+	}
+
+	result := Sweep(SweepConfig{Root: root, RunLsof: unheld})
+
+	if len(result.Removed) != 1 || result.Removed[0] != dir {
+		t.Fatalf("Removed = %v, want [%s]", result.Removed, dir)
+	}
+	if calls != 2 {
+		t.Fatalf("RunLsof called %d times, want exactly 2 (initial + confirm)", calls)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("dir %s should have been removed, stat err = %v", dir, err)
+	}
+}
+
+// TestSweep_ConfirmScanErrorFailsClosed extends the fail-closed contract to
+// the confirm scan: if it errors, treat the candidate as held rather than
+// falling back to the (possibly wrong) first-scan reading.
+func TestSweep_ConfirmScanErrorFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	old := time.Now().Add(-2 * time.Hour)
+	dir := mkStoreDir(t, root, "orphan1", 1, old)
+
+	calls := 0
+	boom := errors.New("lsof: resource temporarily unavailable")
+	flaky := func(context.Context) ([]byte, error) {
+		calls++
+		if calls == 1 {
+			return nil, nil
+		}
+		return nil, boom
+	}
+
+	result := Sweep(SweepConfig{Root: root, RunLsof: flaky})
+
+	if len(result.Removed) != 0 {
+		t.Fatalf("Removed = %v, want none when the confirm scan fails (fail closed)", result.Removed)
+	}
+	if len(result.Errors) == 0 {
+		t.Fatalf("expected an error to be reported when the confirm lsof scan fails")
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("dir %s should still exist: %v", dir, err)
+	}
+}
+
+// TestSweep_RespectsRealDoltLockEvenWhenLsofMissesIt reproduces ga-63rfxj:
+// lsof is a point-in-time /proc snapshot and can transiently miss a still-
+// open file for a live process under heavy host load without erroring, on
+// both the initial and the confirm scan alike (the gate-fail evidence for
+// ga-vbyn8v showed exactly this — a live dolt sql-server's data dir removed
+// under a 40-job parallel run despite the two-scan confirm). Dolt's NBS
+// store independently holds a real kernel flock on <dir>/.dolt/noms/LOCK
+// for as long as it has the store open; that lock is atomic and race-free
+// because it's enforced by the kernel, not reconstructed from a process
+// listing. This test holds a real fslock on a real LOCK file and configures
+// lsof to report the directory clean on every scan, proving Sweep must
+// still refuse to remove it.
+func TestSweep_RespectsRealDoltLockEvenWhenLsofMissesIt(t *testing.T) {
+	root := t.TempDir()
+	old := time.Now().Add(-2 * time.Hour)
+	dir := mkStoreDir(t, root, "live-dolt-store", 1, old)
+
+	nomsDir := filepath.Join(dir, ".dolt", "noms")
+	if err := os.MkdirAll(nomsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", nomsDir, err)
+	}
+	lockPath := filepath.Join(nomsDir, "LOCK")
+	lock, err := fslock.New(lockPath)
+	if err != nil {
+		t.Fatalf("fslock.New(%s): %v", lockPath, err)
+	}
+	if err := lock.TryLock(); err != nil {
+		t.Fatalf("TryLock(%s): %v", lockPath, err)
+	}
+	defer func() {
+		if err := lock.Unlock(); err != nil {
+			t.Errorf("Unlock(%s): %v", lockPath, err)
+		}
+	}()
+
+	result := Sweep(SweepConfig{Root: root, RunLsof: noLsofHits})
+
+	if len(result.Removed) != 0 {
+		t.Fatalf("Removed = %v, want none (real dolt LOCK held, even though lsof missed it on both scans)", result.Removed)
+	}
+	if result.Skipped != 1 {
+		t.Fatalf("Skipped = %d, want 1", result.Skipped)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("dir %s should still exist: %v", dir, err)
+	}
+}
+
+// TestSweep_RemovesWhenDoltLockFileExistsButIsUnheld guards against the
+// real-lock check over-blocking: a LOCK file left on disk by a store that
+// has since closed (and so released its flock) must not itself prevent a
+// genuinely orphaned directory from being removed.
+func TestSweep_RemovesWhenDoltLockFileExistsButIsUnheld(t *testing.T) {
+	root := t.TempDir()
+	old := time.Now().Add(-2 * time.Hour)
+	dir := mkStoreDir(t, root, "stale-lock-file", 1, old)
+
+	nomsDir := filepath.Join(dir, ".dolt", "noms")
+	if err := os.MkdirAll(nomsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", nomsDir, err)
+	}
+	lockPath := filepath.Join(nomsDir, "LOCK")
+	if err := os.WriteFile(lockPath, nil, 0o600); err != nil {
+		t.Fatalf("WriteFile(%s): %v", lockPath, err)
+	}
+
+	result := Sweep(SweepConfig{Root: root, RunLsof: noLsofHits})
+
+	if len(result.Removed) != 1 || result.Removed[0] != dir {
+		t.Fatalf("Removed = %v, want [%s] (LOCK file present on disk but not held)", result.Removed, dir)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("dir %s should have been removed, stat err = %v", dir, err)
+	}
+}
+
+// TestSweep_LockSearchTraversalErrorFailsClosed covers the gap between the
+// two fail-closed checks that already existed: an unopenable LOCK file fails
+// closed via probeLockHeld, but a subtree we cannot even list used to look
+// identical to "no LOCK here" and permitted removal. ReadDir can fail with
+// EMFILE under exactly the heavy parallel load this whole check exists for.
+func TestSweep_LockSearchTraversalErrorFailsClosed(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions; cannot force a ReadDir failure")
+	}
+	root := t.TempDir()
+	old := time.Now().Add(-2 * time.Hour)
+	dir := mkStoreDir(t, root, "unreadable-noms", 1, old)
+
+	nomsDir := filepath.Join(dir, ".dolt", "noms")
+	if err := os.MkdirAll(nomsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", nomsDir, err)
+	}
+	if err := os.Chmod(nomsDir, 0o000); err != nil {
+		t.Fatalf("Chmod(%s): %v", nomsDir, err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(nomsDir, 0o755) })
+
+	result := Sweep(SweepConfig{Root: root, RunLsof: noLsofHits})
+
+	if len(result.Removed) != 0 {
+		t.Fatalf("Removed = %v, want none (lock search unverifiable; fail closed)", result.Removed)
+	}
+	if result.Skipped != 1 {
+		t.Fatalf("Skipped = %d, want 1", result.Skipped)
+	}
+	if len(result.Errors) == 0 {
+		t.Fatalf("expected an error reported for the unreadable lock search")
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("dir %s should still exist: %v", dir, err)
 	}
 }
