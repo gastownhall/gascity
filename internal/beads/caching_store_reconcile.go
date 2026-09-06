@@ -837,6 +837,13 @@ func (c *CachingStore) preserveCachedReadyProjectionLocked(items map[string]Bead
 	}
 }
 
+// readyBlockingDependencyTargetStatusChangedLocked deliberately compares only
+// Status, not gc.work_outcome: it decides whether a cached IsBlocked=false
+// projection is still safe to carry forward across a reconcile, not the final
+// ready/not-ready verdict. cachedBeadReady re-derives work_outcome fresh from
+// live metadata on every read, so a preserved projection that misses a
+// work_outcome-only change on an already-closed dependency costs at most a
+// stale-but-still-correctly-overridden IsBlocked hint, never a wrong answer.
 func (c *CachingStore) readyBlockingDependencyTargetStatusChangedLocked(deps []Dep, items map[string]Bead) bool {
 	for _, dep := range deps {
 		if !isReadyBlockingDependencyType(dep.Type) {

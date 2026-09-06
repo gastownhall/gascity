@@ -429,6 +429,15 @@ func (c *CachingStore) clearReadyProjectionLocked(id string) bool {
 // evaluated against live cache state instead of a snapshot index: a dep blocks
 // only when its type is ready-blocking AND the target is resident AND the
 // target is not closed. Caller must hold c.mu.
+//
+// Deliberately status-only, not DependencySatisfied: this only decides whether
+// a LOST verdict mark is needed (markReadyProjectionLostLocked), never a final
+// ready/not-ready answer. A closed target whose gc.work_outcome later turns out
+// to be "blocked" still lands on cachedBeadReady's IsBlocked==nil fallback (or
+// its narrow false-verdict override), both of which re-check work_outcome
+// against live c.beads metadata on every read — so under-counting resident
+// blockers here costs at most a stale ready-projection-lost mark, never a wrong
+// verdict.
 func (c *CachingStore) residentEdgesStillBlockLocked(id string) bool {
 	for _, dep := range c.deps[id] {
 		if !isReadyBlockingDependencyType(dep.Type) {
