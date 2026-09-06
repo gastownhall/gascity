@@ -913,6 +913,17 @@ func managedBdWaitTestTemplate(t *testing.T, bdPath, doltPath string) string {
 			managedBdWaitTemplateErr = fmt.Errorf("write template scaffold: %w", err)
 			return
 		}
+		// This template is exclusively for direct-server rebind coverage.
+		cityConfigPath := filepath.Join(cityPath, "city.toml")
+		cityConfig, readErr := os.ReadFile(cityConfigPath)
+		if readErr != nil {
+			managedBdWaitTemplateErr = fmt.Errorf("read template city config: %w", readErr)
+			return
+		}
+		if writeErr := os.WriteFile(cityConfigPath, append(cityConfig, []byte("\n[dolt]\nmode = \"server\"\n")...), 0o644); writeErr != nil {
+			managedBdWaitTemplateErr = fmt.Errorf("write direct template mode: %w", writeErr)
+			return
+		}
 		if err := EnsureBuiltinRuntimeAssets(cityPath, io.Discard); err != nil {
 			managedBdWaitTemplateErr = fmt.Errorf("EnsureBuiltinRuntimeAssets(template): %w", err)
 			return
@@ -928,14 +939,16 @@ func managedBdWaitTestTemplate(t *testing.T, bdPath, doltPath string) string {
 			return
 		}
 		env := waitTestEnv(map[string]string{
-			"GC_BEADS":       "bd",
-			"GC_DOLT":        "",
-			"GC_BIN":         currentGCBinaryForTests(t),
-			"GC_CITY":        cityPath,
-			"GC_CITY_PATH":   cityPath,
-			"HOME":           homeDir,
-			"DOLT_ROOT_PATH": homeDir,
-			"PATH":           strings.Join([]string{filepath.Dir(bdPath), filepath.Dir(doltPath), os.Getenv("PATH")}, string(os.PathListSeparator)),
+			"GC_BEADS":           "bd",
+			"GC_DOLT":            "",
+			"GC_BIN":             currentGCBinaryForTests(t),
+			"GC_CITY":            cityPath,
+			"GC_CITY_PATH":       cityPath,
+			"GC_BEADS_TRANSPORT": "direct",
+			"GC_BEADS_TARGET":    "local",
+			"HOME":               homeDir,
+			"DOLT_ROOT_PATH":     homeDir,
+			"PATH":               strings.Join([]string{filepath.Dir(bdPath), filepath.Dir(doltPath), os.Getenv("PATH")}, string(os.PathListSeparator)),
 		})
 		runScript := func(args ...string) error {
 			cmd := exec.Command(script, args...)
@@ -945,6 +958,18 @@ func managedBdWaitTestTemplate(t *testing.T, bdPath, doltPath string) string {
 				return fmt.Errorf("%s: %w\n%s", strings.Join(args, " "), err, out)
 			}
 			return nil
+		}
+		// Persist the direct selector: gc-beads-bd treats on-disk mode as
+		// authoritative and intentionally ignores ambient transport variables.
+		for _, dir := range []string{cityPath, rigPath} {
+			if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+				managedBdWaitTemplateErr = fmt.Errorf("create direct marker dir: %w", err)
+				return
+			}
+			if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte("dolt.mode: server\n"), 0o600); err != nil {
+				managedBdWaitTemplateErr = fmt.Errorf("write direct mode marker: %w", err)
+				return
+			}
 		}
 		if err := runScript("start"); err != nil {
 			managedBdWaitTemplateErr = err
@@ -2838,9 +2863,6 @@ func setupFreshManagedBdWaitTestCity(t *testing.T) string {
 	if err := initAndHookDir(cityPath, cityPath, "gc"); err != nil {
 		t.Fatalf("initAndHookDir(city): %v", err)
 	}
-	if err := publishManagedDoltRuntimeState(cityPath); err != nil {
-		t.Fatalf("publishManagedDoltRuntimeState: %v", err)
-	}
 	return cityPath
 }
 
@@ -2891,6 +2913,30 @@ func setupManagedBdWaitTestCity(t *testing.T) (string, string) {
 	if err := os.Chmod(filepath.Join(rigPath, ".beads"), 0o700); err != nil {
 		t.Fatalf("Chmod(rig .beads): %v", err)
 	}
+	// Keep this fixture on the legacy direct-server path even when the copied
+	// template was produced by a proxied-default binary. The rebind assertion
+	// is specifically about direct lifecycle recovery.
+	for _, dir := range []string{cityPath, rigPath} {
+		metadataPath := filepath.Join(dir, ".beads", "metadata.json")
+		data, err := os.ReadFile(metadataPath)
+		if err != nil {
+			t.Fatalf("ReadFile(%s): %v", metadataPath, err)
+		}
+		var metadata map[string]any
+		if err := json.Unmarshal(data, &metadata); err != nil {
+			t.Fatalf("Unmarshal(%s): %v", metadataPath, err)
+		}
+		metadata["backend"] = "dolt"
+		metadata["database"] = "dolt"
+		metadata["dolt_mode"] = "server"
+		updated, err := json.MarshalIndent(metadata, "", "  ")
+		if err != nil {
+			t.Fatalf("Marshal(%s): %v", metadataPath, err)
+		}
+		if err := os.WriteFile(metadataPath, append(updated, '\n'), 0o600); err != nil {
+			t.Fatalf("WriteFile(%s): %v", metadataPath, err)
+		}
+	}
 	t.Setenv("GC_CITY", cityPath)
 	t.Setenv("GC_CITY_PATH", cityPath)
 
@@ -2905,6 +2951,8 @@ func setupManagedBdWaitTestCity(t *testing.T) (string, string) {
 	scriptEnv := sanitizedBaseEnv(
 		"GC_CITY="+cityPath,
 		"GC_CITY_PATH="+cityPath,
+		"GC_BEADS_TRANSPORT=direct",
+		"GC_BEADS_TARGET=local",
 	)
 	runScript := func(args ...string) {
 		t.Helper()

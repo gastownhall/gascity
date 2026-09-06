@@ -5757,3 +5757,11 @@ func TestResolveBdBinaryForScope(t *testing.T) {
 		}
 	})
 }
+
+func TestApplyCanonicalDoltTargetEnvUnixSocket(t *testing.T) {
+	env := map[string]string{"GC_DOLT_HOST": "stale", "GC_DOLT_PORT": "3306", "BEADS_DOLT_SERVER_SOCKET": "stale.sock"}
+	applyCanonicalDoltTargetEnv(env, contract.DoltConnectionTarget{Socket: "/tmp/dolt.sock", External: true})
+	if env["BEADS_DOLT_SERVER_SOCKET"] != "/tmp/dolt.sock" || env["GC_DOLT_HOST"] != "" || env["GC_DOLT_PORT"] != "" {
+		t.Fatalf("env = %#v", env)
+	}
+}
