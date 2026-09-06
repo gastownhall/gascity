@@ -31,6 +31,20 @@ const (
 	maxOpenConns    = 5
 	maxIdleConns    = 2
 	connMaxLifetime = time.Hour
+	// connMaxIdleTime must stay STRICTLY BELOW the server's wait_timeout,
+	// which gc's managed dolt config sets to 30s. Without it an idle pooled
+	// connection lives until connMaxLifetime (an hour), so the SERVER reaps
+	// it first and logs an error per reap:
+	//
+	//   Error reading packet from client N: read tcp ... i/o timeout
+	//   io.ReadFull(header size) failed
+	//
+	// 6565 such lines in one day were observed on a single managed city,
+	// arriving on a clean 30s cycle — the reaper working, logged at ERROR.
+	// Closing idle connections client-side first removes the events at the
+	// source rather than muting them. 20s leaves a 10s margin; equality
+	// with wait_timeout would be a race, not a bound.
+	connMaxIdleTime = 20 * time.Second
 	connTimeout     = 5 * time.Second
 	readTimeout     = 30 * time.Second
 	writeTimeout    = 30 * time.Second
@@ -92,6 +106,7 @@ func Open(host, port, user, password, database string) (*sql.DB, error) {
 	db.SetMaxOpenConns(maxOpenConns)
 	db.SetMaxIdleConns(maxIdleConns)
 	db.SetConnMaxLifetime(connMaxLifetime)
+	db.SetConnMaxIdleTime(connMaxIdleTime)
 	registry.dbs[k] = db
 	return db, nil
 }
