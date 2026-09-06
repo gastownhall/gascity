@@ -1775,7 +1775,8 @@ func (cr *CityRuntime) runNudgeMailSweepWatchdog(now time.Time) {
 	}
 	statePtr := &nudgeState
 
-	result, sweepErr := sweepStaleNudgeMail(nudgeStore, mailStore, statePtr, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepWatchdogCloseBudget)
+	mailTTL := nudgeMailSweepMailTTLForConfig(cr.cfg, cr.stderr)
+	result, sweepErr := sweepStaleNudgeMail(nudgeStore, mailStore, statePtr, now, nudgeMailSweepDefaultNudgeTTL, mailTTL, nudgeMailSweepWatchdogCloseBudget)
 	if sweepErr != nil && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: nudge-mail-sweep watchdog: %v\n", cr.logPrefix, sweepErr) //nolint:errcheck // best-effort stderr
 	}

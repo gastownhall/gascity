@@ -2876,7 +2876,7 @@ gc order sweep-nudge-mail [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--dry-run` | bool |  | log what would be closed; make no changes |
-| `--mail-ttl` | duration | `1h0m0s` | min age before a read mail bead is GC'd |
+| `--mail-ttl` | duration | `1h0m0s` | min age before a read mail bead is GC'd; 0 disables the mail-close phase (default: cfg.Mail.RetentionTTL when set, else 1h0m0s) |
 | `--nudge-ttl` | duration | `10m0s` | min age before a delivered nudge bead is GC'd |
 | `--quiet` | bool |  | suppress success output |
 
