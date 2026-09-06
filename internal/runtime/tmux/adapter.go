@@ -825,6 +825,7 @@ type startOps interface {
 	capturePane(name string, lines int) (string, error)
 	recordStartCrash(name, paneContent string) string
 	sendKeys(name, text string) error
+	paneBusy(name string) (bool, error)
 	setRemainOnExit(name string) error
 	disableMouseAndActivity(name string) error
 	runSetupCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration) error
@@ -993,6 +994,18 @@ func (o *tmuxStartOps) recordStartCrash(name, paneContent string) string {
 
 func (o *tmuxStartOps) sendKeys(name, text string) error {
 	return o.tm.NudgeSession(name, text)
+}
+
+// paneBusy reports whether the target agent pane is showing a busy/
+// processing indicator right now — used between startup-nudge retries to
+// avoid blindly re-running the full C-u/paste/submit cycle against a pane
+// that already went busy (see sendStartupNudgeWithRetry).
+func (o *tmuxStartOps) paneBusy(name string) (bool, error) {
+	target := name
+	if agentPane, err := o.tm.FindAgentPane(name); err == nil && agentPane != "" {
+		target = agentPane
+	}
+	return o.tm.paneBusy(target)
 }
 
 func (o *tmuxStartOps) setRemainOnExit(name string) error {
@@ -1398,15 +1411,22 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 		return err
 	}
 	if cfg.Nudge != "" {
-		if err := ops.sendKeys(name, cfg.Nudge); err != nil {
-			// The startup nudge has no retry-capable caller: the keystrokes
-			// reached tmux and the session is verified alive above, so an
-			// unconfirmed submit is a warning, not a start failure. Any other
-			// error still fails the start.
+		if err := sendStartupNudgeWithRetry(ctx, func() error { return ops.sendKeys(name, cfg.Nudge) }, time.Sleep, func() (bool, error) { return ops.paneBusy(name) }); err != nil {
+			// A resume-mode (or cold-start) session's startup nudge races the
+			// TUI's own boot: readiness detection and the TUI actually being
+			// able to accept input are not the same moment, so a submit
+			// injected right after waitForReady returns can land unconfirmed
+			// even though the session itself is alive and verified above
+			// (see sendStartupNudgeWithRetry). The startup nudge has no
+			// retry-capable caller beyond the bounded ladder just spent, so
+			// exhausting it is a warning, not a start failure: the session
+			// starts, but the agent may sit silently idle with the nudge
+			// still drafted in its input line rather than acted on. Any
+			// other error still fails the start.
 			if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
 				return fmt.Errorf("sending startup nudge: %w", err)
 			}
-			fmt.Fprintf(os.Stderr, "warning: startup nudge to %q delivered but not confirmed: %v\n", name, err)
+			fmt.Fprintf(os.Stderr, "warning: startup nudge to %q delivered but not confirmed after retries: %v\n", name, err)
 		}
 	}
 
@@ -1417,6 +1437,117 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 	runSessionLive(ctx, ops, name, cfg, os.Stderr, setupTimeout)
 
 	return nil
+}
+
+// startupNudgeRetryBackoffs are the delays between resend attempts when the
+// startup nudge comes back ErrNudgeSubmitUnconfirmed. Proven empirically: a
+// submit injected right after readiness is observed (~0.3s into a booting
+// claude TUI) sits unconfirmed, while the same injection ~6s later lands —
+// readiness detection and the TUI actually accepting input are not the same
+// moment. A var (not a const) so tests can shrink it.
+var startupNudgeRetryBackoffs = []time.Duration{2 * time.Second, 4 * time.Second, 6 * time.Second, 8 * time.Second}
+
+// startupNudgeRetryBudgetFraction caps the total wall-clock time
+// sendStartupNudgeWithRetry may spend on retries (both the backoff sleeps AND
+// the resend attempts themselves — a single send can itself take seconds:
+// NudgeSession's submitEnterAndConfirm polls for the busy indicator for a
+// couple of seconds per attempt before giving up) to this fraction of ctx's
+// *remaining* deadline, measured once on entry. The full backoff ladder sums
+// to 20s worst case even before counting per-attempt cost, but the nudge is
+// a warning-only step (see the call site in launchOrchestration): exhausting
+// it must still leave the majority of whatever startup budget is left for
+// the steps that follow (session_live, etc.), or a robustness feature turns
+// into an outright start failure whenever the busy indicator never appears.
+// Half is a deliberately conservative split: it guarantees a canceled/
+// exhausted ladder never consumes more of the remaining budget than it
+// leaves behind.
+const startupNudgeRetryBudgetFraction = 0.5
+
+// sendStartupNudgeWithRetry calls send (a full clear+paste+submit cycle, e.g.
+// ops.sendKeys) and, if it reports ErrNudgeSubmitUnconfirmed, waits out a
+// backoff and calls send again — re-running the whole cycle re-pastes the
+// nudge text, which self-heals a draft the still-booting TUI cleared or
+// redrew. Any other error, or exhausting the backoffs, returns immediately so
+// a healthy fast boot never pays this cost.
+//
+// busy is checked once the backoff sleep has elapsed, right before the next
+// resend: send's own busy-indicator poll (submitEnterAndConfirm) only runs
+// for a couple of seconds per attempt and can still miss a pane that goes
+// busy a little later — an agent whose first turn started from a large argv
+// prompt can take several more seconds to render its busy indicator. If busy
+// now reports true, the earlier submit (or a turn that started some other
+// way) has landed, so this returns nil instead of blindly re-running
+// send's C-u/paste/submit cycle: Claude Code queues input typed mid-turn
+// rather than rejecting it, so a resend against an already-busy pane risks
+// enqueueing a second copy of the nudge behind the one that just landed
+// (gastownhall/gascity#5019 review discussion). busy may be nil, in which
+// case this check is skipped and the ladder behaves as before. A busy
+// check's own error is treated the same as "not busy" — best-effort, never
+// a reason to fail the retry loop itself.
+//
+// ctx is checked before each backoff sleep: if the start is already being
+// canceled elsewhere (e.g. the supervising startup_timeout deadline), this
+// stops immediately rather than sleeping through the remainder of the ladder
+// only to hand back the same unconfirmed error a bit later — a canceled
+// start must not be pushed past the budget it's trying to protect.
+//
+// The ladder is additionally bounded by startupNudgeRetryBudgetFraction of
+// ctx's remaining deadline (if any), computed once on entry: a retry (the
+// backoff sleep AND the resend that follows it) is only taken if the actual
+// wall-clock time already spent in this function, plus the next backoff,
+// still fits inside that budget. Wall-clock elapsed — not just the sum of
+// intended sleep durations — is what's measured, because the dominant cost
+// of an unconfirmed attempt is usually the busy-indicator poll inside send
+// itself, not the backoff between attempts; bounding only the sleeps would
+// let a handful of slow, always-unconfirmed sends alone blow through the
+// deadline. This keeps a fully-exhausted ladder from silently eating the
+// whole startup deadline before the warning-and-continue path (the caller's
+// fallback for ErrNudgeSubmitUnconfirmed) gets a chance to return — the
+// retry exists to make startup more robust, not to spend the deadline the
+// rest of startup needs.
+//
+// startupNudgeNow is the clock behind that wall-clock measurement. It is a
+// package variable (same shape as internal/extmsg's timeNow) so the budget
+// test can advance a fake clock from its send/sleep fakes instead of really
+// sleeping — the resourcecensus fixed_sleep ratchet forbids new untagged
+// time.Sleep call sites, and a fake clock also makes the bound deterministic
+// rather than scheduler-dependent.
+var startupNudgeNow = time.Now
+
+func sendStartupNudgeWithRetry(ctx context.Context, send func() error, sleep func(time.Duration), busy func() (bool, error)) error {
+	start := startupNudgeNow()
+	budget := time.Duration(-1)
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := deadline.Sub(start); remaining > 0 {
+			budget = time.Duration(float64(remaining) * startupNudgeRetryBudgetFraction)
+		} else {
+			budget = 0
+		}
+	}
+
+	var err error
+	for attempt := 0; ; attempt++ {
+		err = send()
+		if err == nil || !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+			return err
+		}
+		if attempt >= len(startupNudgeRetryBackoffs) {
+			return err
+		}
+		if ctx.Err() != nil {
+			return err
+		}
+		next := startupNudgeRetryBackoffs[attempt]
+		if budget >= 0 && startupNudgeNow().Sub(start)+next > budget {
+			return err
+		}
+		sleep(next)
+		if busy != nil {
+			if isBusy, _ := busy(); isBusy {
+				return nil
+			}
+		}
+	}
 }
 
 // runSessionSetup runs session_setup commands then session_setup_script.
