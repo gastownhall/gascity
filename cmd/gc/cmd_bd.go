@@ -644,7 +644,18 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 	default:
 		return nil, false, false
 	}
+	ids, ambiguous = bdScanPositionalIDs(sub, args[1:])
+	return ids, true, ambiguous
+}
 
+// bdScanPositionalIDs is the argv scan bdMutationWriteIDs is built from, taken
+// on its own so a caller that has already resolved the subcommand can reuse it.
+//
+// sub names the bd subcommand whose flag manifests decide which tokens are
+// values ("close", "dep list"); rest is the argv AFTER it. ambiguous reports an
+// unrecognized flag that might consume the next token, which every caller must
+// fail closed on — the token would otherwise be read as a bead id.
+func bdScanPositionalIDs(sub string, rest []string) (ids []string, ambiguous bool) {
 	// valueFlags is the complete set of flags that consume the next argument as
 	// their value for this subcommand, in both long and short form.
 	// Sourced from `bd <sub> --help` (2026-06-10).
@@ -655,8 +666,8 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 	boolFlags := bdSubcmdBoolFlags(sub)
 
 	positional := false // true after "--"
-	for i := 1; i < len(args); i++ {
-		arg := args[i]
+	for i := 0; i < len(rest); i++ {
+		arg := rest[i]
 		if positional {
 			if arg != "" {
 				ids = append(ids, arg)
@@ -696,9 +707,9 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 		}
 		// Unknown flag. It might consume a value argument that looks like a
 		// bead ID. Fail-closed: report ambiguity so the caller can reject.
-		return nil, true, true
+		return nil, true
 	}
-	return ids, true, false
+	return ids, false
 }
 
 // bdSubcmdValueFlags returns the set of value-consuming flag names (in
