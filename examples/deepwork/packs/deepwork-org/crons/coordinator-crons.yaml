@@ -1,0 +1,65 @@
+# Coordinator Crons — installed on planner/coordinator nodes
+# These run on the parent GT that manages workers.
+
+role: "coordinator"
+requires:
+  - cron
+  - bash
+  - dolt  # for DoltHub sync
+
+crons:
+  dolthub-sync:
+    schedule: "*/2 * * * *"
+    script: "sync-dolthub.sh"
+    script_path: "$GT_ROOT/mayor/sync-dolthub.sh"
+    log: "/tmp/dolthub-sync.log"
+    purpose: "Sync DoltHub mail database for cross-GT communication"
+
+  mesh-sync:
+    schedule: "*/2 * * * *"
+    script: "mesh-sync.sh"
+    log: "/tmp/gt-mesh-sync.log"
+    purpose: "Mesh heartbeat, knowledge sync, mail handler trigger"
+
+  deacon-pr-review:
+    schedule: "*/30 * * * *"
+    script: "deacon-pr-review.sh"
+    purpose: "Auto-review and merge approved PRs across repos"
+
+  mesh-improve-review:
+    schedule: "*/10 * * * *"
+    script: "mesh-improve.sh review"
+    log: "/tmp/mesh-improve.log"
+    purpose: "Self-improving loop: review and graduate improvements"
+
+  mesh-autosync-digest:
+    schedule: "0 */2 * * *"
+    script: "mesh-auto-sync.sh digest"
+    log: "/tmp/mesh-autosync.log"
+    purpose: "Broadcast work digest to mesh peers every 2 hours"
+
+  mesh-work-watchdog:
+    schedule: "*/5 * * * *"
+    script: "mesh-work-watchdog.sh"
+    purpose: "Check worker container sessions alive, restart if dead"
+
+  mesh-mayor-daemon:
+    schedule: "*/10 * * * *"
+    script: "mesh-mayor-daemon.sh"
+    purpose: "Mayor daemon health check"
+
+  mesh-github-sync:
+    schedule: "0 6 * * *"
+    script: "mesh-github-sync.sh"
+    purpose: "Daily sync to GitHub public repos"
+
+  mesh-pack-updater:
+    schedule: "0 */2 * * *"
+    script: "mesh-pack-updater.sh"
+    purpose: "Update blueprint packs from DoltHub"
+
+  cron-audit:
+    schedule: "0 6 * * *"
+    script: "cron-audit.sh --enforce"
+    log: "/tmp/cron-audit.log"
+    purpose: "Daily audit: verify crontab matches cron-registry.yaml"
