@@ -4929,6 +4929,57 @@ exec "$@"
 	}
 }
 
+func TestBackupScriptRejectsUnusableOffsiteTimeout(t *testing.T) {
+	// 0 is the dangerous one: GNU `timeout 0` drops the bound entirely while
+	// the python3 fallback in runtime.sh expires immediately. Both it and a
+	// non-numeric value must fall back to the documented 300s default.
+	for _, configured := range []string{"0", "not-a-number"} {
+		t.Run(configured, func(t *testing.T) {
+			cityPath := t.TempDir()
+			dataDir := filepath.Join(cityPath, "dolt-data")
+			artifactDir := filepath.Join(cityPath, ".dolt-backup")
+			offsiteDir := filepath.Join(cityPath, "offsite")
+			for _, dir := range []string{
+				filepath.Join(dataDir, "prod", ".dolt"),
+				artifactDir,
+				offsiteDir,
+			} {
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatalf("mkdir %s: %v", dir, err)
+				}
+			}
+
+			binDir := t.TempDir()
+			_ = writeDogFakeGC(t, binDir)
+			_ = writeBackupFakeDolt(t, binDir, "2.1.0", 0, "prod")
+			_ = writeBackupFakeRsync(t, binDir)
+			timeoutLogPath := filepath.Join(binDir, "timeout.log")
+			writeExecutable(t, filepath.Join(binDir, "timeout"), fmt.Sprintf(`#!/bin/sh
+printf 'timeout %%s\n' "$*" >> %s
+[ "$1" = "--kill-after=2" ] && shift
+shift
+exec "$@"
+`, shellQuote(timeoutLogPath)))
+
+			out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir,
+				"GC_BACKUP_OFFSITE_PATH="+offsiteDir,
+				"GC_BACKUP_OFFSITE_TIMEOUT="+configured,
+			)
+			if !strings.Contains(out, "offsite: ok") {
+				t.Fatalf("offsite rsync should still run with an unusable bound:\n%s", out)
+			}
+
+			timeoutLog, err := os.ReadFile(timeoutLogPath)
+			if err != nil {
+				t.Fatalf("read timeout log: %v", err)
+			}
+			if !strings.Contains(string(timeoutLog), "--kill-after=2 300 rsync -a --delete") {
+				t.Fatalf("GC_BACKUP_OFFSITE_TIMEOUT=%q should fall back to 300s:\n%s", configured, timeoutLog)
+			}
+		})
+	}
+}
+
 func TestBackupScriptSkipsConcurrentRunBeforeBackupSync(t *testing.T) {
 	if _, err := exec.LookPath("flock"); err != nil {
 		t.Skip("flock not installed; skipping")

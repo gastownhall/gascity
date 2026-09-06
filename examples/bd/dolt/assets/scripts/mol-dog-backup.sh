@@ -194,7 +194,19 @@ OFFSITE_STATUS="skipped"
 # perfectly healthy — and because rsync transfers in lexical order, the SAME
 # trailing databases get truncated every run, so the offsite copy silently
 # stops tracking part of the city while the earlier entries keep updating.
+#
+# There is a ceiling. The enclosing order (orders/mol-dog-backup.toml) bounds
+# the whole run at 1800s and the modeled budget already spends 1530s (a 30s SQL
+# probe, ten 120s database syncs, and this step's 300s default), so values past
+# roughly 570s need that order's timeout raised too — otherwise the controller
+# kills this script mid-rsync before Step 4 can escalate.
 OFFSITE_TIMEOUT="${GC_BACKUP_OFFSITE_TIMEOUT:-300}"
+# Reject 0 and non-numeric: GNU `timeout 0` disables the bound outright,
+# while the python3 fallback in runtime.sh expires immediately — same
+# config, opposite behavior. Fall back to the documented default.
+case "$OFFSITE_TIMEOUT" in
+    ''|*[!0-9]*|0) OFFSITE_TIMEOUT=300 ;;
+esac
 
 if [ -n "$OFFSITE_PATH" ]; then
     if [ ! -d "$BACKUP_ARTIFACT_DIR" ]; then
@@ -231,6 +243,9 @@ case "$OFFSITE_STATUS" in
             "Dolt backup: offsite publication $OFFSITE_STATUS [MEDIUM]" \
             "Local backup succeeded ($SYNCED/$TOTAL databases) but publication to $OFFSITE_PATH did not.
 Status: $OFFSITE_STATUS. Bound: ${OFFSITE_TIMEOUT}s (raise with GC_BACKUP_OFFSITE_TIMEOUT).
+Raising it past the run's remaining budget also needs timeout raised in
+examples/bd/dolt/orders/mol-dog-backup.toml, or the controller kills this run
+mid-rsync and this escalation never fires.
 Until this clears, the only copy of these databases is on this host." \
             2>/dev/null || true
         ;;
