@@ -579,6 +579,8 @@ func waitForReport(t *testing.T, cityDir, agentName string, timeout time.Duratio
 		time.Sleep(500 * time.Millisecond)
 	}
 
+	logE2EReportTimeoutDiagnostics(t, cityDir, agentName)
+
 	// Timeout: show what we have.
 	data, err := os.ReadFile(reportPath)
 	if err != nil {
@@ -590,6 +592,33 @@ func waitForReport(t *testing.T, cityDir, agentName string, timeout time.Duratio
 	}
 	t.Fatalf("timed out waiting for report from %s (STATUS=complete not found):\n%s", agentName, string(data))
 	return nil // unreachable
+}
+
+func logE2EReportTimeoutDiagnostics(t *testing.T, cityDir, agentName string) {
+	t.Helper()
+	env := commandEnvForDir(cityDir, false)
+	if gcHome := parseEnvList(env)["GC_HOME"]; gcHome != "" {
+		if data, err := os.ReadFile(filepath.Join(gcHome, "supervisor.log")); err == nil {
+			t.Logf("report timeout for %s: isolated supervisor log:\n%s", agentName, string(data))
+		} else {
+			t.Logf("report timeout for %s: read isolated supervisor log: %v", agentName, err)
+		}
+	}
+	if out, err := runGCWithEnv(env, "", "supervisor", "status"); err != nil {
+		t.Logf("report timeout for %s: supervisor status failed: %v\n%s", agentName, err, out)
+	} else {
+		t.Logf("report timeout for %s: supervisor status:\n%s", agentName, out)
+	}
+	if out, err := runGCWithEnv(env, cityDir, "status", "--json"); err != nil {
+		t.Logf("report timeout for %s: city status failed: %v\n%s", agentName, err, out)
+	} else {
+		t.Logf("report timeout for %s: city status:\n%s", agentName, out)
+	}
+	if out, err := runGCWithEnv(env, cityDir, "config", "show", "--json"); err != nil {
+		t.Logf("report timeout for %s: composed config failed: %v\n%s", agentName, err, out)
+	} else {
+		t.Logf("report timeout for %s: composed config:\n%s", agentName, out)
+	}
 }
 
 // waitForPoolMemberReports resolves a pool template's live members and returns

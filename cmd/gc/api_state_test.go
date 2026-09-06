@@ -3169,10 +3169,11 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 	// instead of spawning managed Dolt. Other rows are unaffected.
 	t.Setenv("GC_BEADS", "file")
 	cases := []struct {
-		name    string
-		initial func(*config.City)
-		mutate  func(*controllerState) error
-		verify  func(t *testing.T, cfg *config.City, cityDir string)
+		name        string
+		initial     func(*config.City)
+		mutate      func(*controllerState) error
+		verify      func(t *testing.T, cfg *config.City, cityDir string)
+		runtimeOnly bool
 	}{
 		{
 			name: "suspend agent",
@@ -3202,7 +3203,8 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 			},
 		},
 		{
-			name: "suspend rig",
+			name:        "suspend rig",
+			runtimeOnly: true,
 			mutate: func(cs *controllerState) error {
 				return cs.SuspendRig("rig1")
 			},
@@ -3221,7 +3223,8 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 			},
 		},
 		{
-			name: "resume rig",
+			name:        "resume rig",
+			runtimeOnly: true,
 			initial: func(cfg *config.City) {
 				cfg.Rigs[0].SuspendedOnStart = true
 			},
@@ -3245,7 +3248,8 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 			},
 		},
 		{
-			name: "suspend city",
+			name:        "suspend city",
+			runtimeOnly: true,
 			mutate: func(cs *controllerState) error {
 				return cs.SuspendCity()
 			},
@@ -3264,7 +3268,8 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 			},
 		},
 		{
-			name: "resume city",
+			name:        "resume city",
+			runtimeOnly: true,
 			initial: func(cfg *config.City) {
 				cfg.Workspace.SuspendedOnStart = true
 			},
@@ -3561,8 +3566,11 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 			default:
 				t.Fatal("expected controller mutation to poke reconciler")
 			}
-			if cs.configDirty == nil || !cs.configDirty.Load() {
-				t.Fatal("expected controller mutation to mark config dirty")
+			if cs.configDirty == nil {
+				t.Fatal("controller mutation harness has no config dirty flag")
+			}
+			if got, want := cs.configDirty.Load(), !tc.runtimeOnly; got != want {
+				t.Fatalf("config dirty = %v, want %v (runtimeOnly=%v)", got, want, tc.runtimeOnly)
 			}
 
 			got, err := config.Load(fsys.OSFS{}, tomlPath)
