@@ -756,6 +756,18 @@ func BuiltinProviders() map[string]BuiltinProviderSpec {
 	return out
 }
 
+// BuiltinProvider returns one canonical builtin worker provider definition
+// (a fresh clone, like BuiltinProviders) without cloning the whole set.
+//
+//nolint:revive // Mirrors the config boundary naming intentionally.
+func BuiltinProvider(name string) (BuiltinProviderSpec, bool) {
+	spec, ok := builtinProviderSpecs[name]
+	if !ok {
+		return BuiltinProviderSpec{}, false
+	}
+	return cloneBuiltinProviderSpec(spec), true
+}
+
 // CanonicalProfileIdentity returns the explicit compatibility identity for one
 // of the canonical worker profiles.
 func CanonicalProfileIdentity(profile string) (ProfileIdentity, bool) {

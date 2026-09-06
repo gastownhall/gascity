@@ -24,6 +24,19 @@ type chainResolveContext struct {
 	chainPath  []string       // human-readable chain names for error messages
 }
 
+// builtin looks up a built-in preset by name. The chain walker only reaches a
+// built-in hop when a custom provider declares one as its base, so the
+// presets are cloned on first use rather than for every resolution
+// (sys-4za3nm: resolveProviderChain runs per agent per supervisor tick and
+// per API request, and BuiltinProviders deep-clones every preset per call).
+func (c *chainResolveContext) builtin(name string) (ProviderSpec, bool) {
+	if c.builtins == nil {
+		c.builtins = BuiltinProviders()
+	}
+	spec, ok := c.builtins[name]
+	return spec, ok
+}
+
 // ResolveProviderChain walks the base chain for a custom provider and
 // returns a merged ProviderSpec plus chain metadata.
 //
@@ -48,7 +61,7 @@ func ResolveProviderChain(leafName string, leaf ProviderSpec, customProviders ma
 func resolveProviderChain(leafName string, leaf ProviderSpec, customProviders map[string]ProviderSpec, completeResumeDefaults bool) (ResolvedProvider, error) {
 	ctx := &chainResolveContext{
 		all:       customProviders,
-		builtins:  BuiltinProviders(),
+		builtins:  nil, // materialized lazily by builtin(): most leaves never walk to a built-in hop
 		visited:   make(map[HopIdentity]bool),
 		chain:     []HopIdentity{},
 		chainPath: []string{},
@@ -171,7 +184,7 @@ func (ctx *chainResolveContext) lookupBase(leafName, baseValue, parentKind, pare
 	// of the `base` field we're following), not the original walk leaf.
 	switch parentKind {
 	case "builtin":
-		if spec, ok := ctx.builtins[parentName]; ok {
+		if spec, ok := ctx.builtin(parentName); ok {
 			return spec, "builtin", nil
 		}
 		return ProviderSpec{}, "", &ProviderChainError{
@@ -203,7 +216,7 @@ func (ctx *chainResolveContext) lookupBase(leafName, baseValue, parentKind, pare
 				return spec, "custom", nil
 			}
 		}
-		if spec, ok := ctx.builtins[parentName]; ok {
+		if spec, ok := ctx.builtin(parentName); ok {
 			return spec, "builtin", nil
 		}
 		// If no built-in and bare name equals leaf name with no custom
@@ -278,7 +291,7 @@ func (ctx *chainResolveContext) validateWrapperResume(leafName string, leaf, mer
 	// A simple way: look up the nearest builtin ancestor and read its Command.
 	for _, hop := range ctx.chain[1:] {
 		if hop.Kind == "builtin" {
-			if b, ok := ctx.builtins[hop.Name]; ok {
+			if b, ok := ctx.builtin(hop.Name); ok {
 				inheritedCommand = b.Command
 				break
 			}

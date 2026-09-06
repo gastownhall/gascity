@@ -106,7 +106,7 @@ func providerReferenceLabel(ref ProviderReference) string {
 }
 
 func providerReferenceFixHint(provider string) string {
-	if _, ok := BuiltinProviders()[provider]; ok {
+	if _, ok := BuiltinProvider(provider); ok {
 		return fmt.Sprintf("add [providers.%s] base = %q", provider, BasePrefixBuiltin+provider)
 	}
 	return fmt.Sprintf("add [providers.%s] with command = ...", provider)

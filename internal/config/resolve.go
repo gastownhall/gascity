@@ -195,14 +195,13 @@ func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath
 			}
 			// Phase A legacy: layer city overrides on top of the built-in
 			// if the provider name or command matches a known builtin.
-			builtins := BuiltinProviders()
-			if base, ok := builtins[name]; ok {
+			if base, ok := BuiltinProvider(name); ok {
 				base = normalizeProviderLayerArgsForSchema(base, base.OptionsSchema)
 				child := normalizeProviderLayerArgsForSchema(spec, providerSchemaForLayerArgs(base, spec))
 				merged := MergeProviderOverBuiltin(base, child)
 				return &merged, nil
 			}
-			if base, ok := builtins[spec.Command]; ok {
+			if base, ok := BuiltinProvider(spec.Command); ok {
 				base = normalizeProviderLayerArgsForSchema(base, base.OptionsSchema)
 				child := normalizeProviderLayerArgsForSchema(spec, providerSchemaForLayerArgs(base, spec))
 				merged := MergeProviderOverBuiltin(base, child)
@@ -214,8 +213,7 @@ func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath
 	}
 
 	// Fall back to built-in presets.
-	builtins := BuiltinProviders()
-	if spec, ok := builtins[name]; ok {
+	if spec, ok := BuiltinProvider(name); ok {
 		if _, err := lookPath(spec.pathCheckBinary()); err != nil {
 			return nil, fmt.Errorf("%w: provider %q command %q", ErrProviderNotInPATH, name, spec.pathCheckBinary())
 		}

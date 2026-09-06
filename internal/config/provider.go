@@ -430,6 +430,18 @@ func BuiltinProviderOrder() []string {
 }
 
 // BuiltinProviders returns the built-in provider presets.
+// BuiltinProvider returns the built-in preset named name, or false. Prefer
+// this over BuiltinProviders()[name]: the map form deep-clones every preset
+// on each call, and provider resolution runs per agent per supervisor tick
+// and per API request (sys-4za3nm).
+func BuiltinProvider(name string) (ProviderSpec, bool) {
+	spec, ok := workerbuiltin.BuiltinProvider(name)
+	if !ok {
+		return ProviderSpec{}, false
+	}
+	return providerSpecFromWorker(spec), true
+}
+
 func BuiltinProviders() map[string]ProviderSpec {
 	specs := workerbuiltin.BuiltinProviders()
 	out := make(map[string]ProviderSpec, len(specs))
