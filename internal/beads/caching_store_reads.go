@@ -787,6 +787,24 @@ func (c *CachingStore) DepList(id, direction string) ([]Dep, error) {
 	return c.backing.DepList(id, direction)
 }
 
+// DepMetadata reads the edge payload straight from the backing store. The
+// cache holds Dep values, which carry the pair and the type alone, so there is
+// no cached form of this answer to serve and nothing to invalidate.
+//
+// Forwarded explicitly because the capability is discovered by type-assertion
+// and this wrapper is not an interface embed: a caller that refuses on
+// uncertainty — the infra-class migration is one — would read the cache as
+// UNABLE TO ANSWER and refuse a city whose backing store answers fine. A
+// backing store without the read gets an error rather than ("", false, nil),
+// because "cannot be asked" and "carries nothing" are different answers.
+func (c *CachingStore) DepMetadata(issueID, dependsOnID string) (string, bool, error) {
+	reader, ok := c.backing.(DepMetadataReader)
+	if !ok {
+		return "", false, fmt.Errorf("reading dependency metadata %s -> %s: backing store %T exposes no edge-payload read", issueID, dependsOnID, c.backing)
+	}
+	return reader.DepMetadata(issueID, dependsOnID)
+}
+
 // Ping delegates to the backing store.
 func (c *CachingStore) Ping() error {
 	return c.backing.Ping()

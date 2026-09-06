@@ -144,6 +144,7 @@ var (
 	_ beads.GraphApplyHandleProvider         = (*StrictStore)(nil)
 	_ beads.AtomicTxStore                    = (*StrictStore)(nil)
 	_ beads.ParentProjectionWaiter           = (*StrictStore)(nil)
+	_ beads.DepMetadataReader                = (*StrictStore)(nil)
 	_ storeref.HasIDPrefix                   = (*StrictStore)(nil)
 )
 
@@ -171,7 +172,7 @@ var (
 // handles, so beads.GraphApplyFor and beads.ConditionalWriterFor keep working
 // without a false claim), the conditional-writes resolve target, Counter,
 // ConditionalAssignmentReleaser, BatchDeleter, ForeignIDCreator, DepListBatch,
-// CloseStore, AtomicTx, Backing, and WaitForParentProjection.
+// DepMetadata, CloseStore, AtomicTx, Backing, and WaitForParentProjection.
 // StorageCreateStore is forwarded only when the leaf implements it (a
 // capability-preserving variant type), so the wrapper never falsely claims
 // CreateWithStorage for leaves without it — the storage-policy fallback in
@@ -537,6 +538,22 @@ func (s *StrictStore) DepListBatch(ids []string) (map[string][]beads.Dep, error)
 		result[id] = deps
 	}
 	return result, nil
+}
+
+// DepMetadata forwards the leaf's edge-payload read. Wrapping changes nothing
+// about what an edge carries, so the leaf's answer passes through untouched.
+//
+// Forwarded rather than dropped because a caller that refuses on uncertainty —
+// the infra-class migration is one — reads a stripped capability as UNABLE TO
+// ANSWER and refuses a leaf that answers fine. A leaf without the read gets an
+// error rather than ("", false, nil): "cannot be asked" and "carries nothing"
+// are different answers, and every kit leaf that can hold a payload answers.
+func (s *StrictStore) DepMetadata(issueID, dependsOnID string) (string, bool, error) {
+	reader, ok := s.Store.(beads.DepMetadataReader)
+	if !ok {
+		return "", false, fmt.Errorf("reading dependency metadata %s -> %s: strict-wrapped leaf %T exposes no edge-payload read", issueID, dependsOnID, s.Store)
+	}
+	return reader.DepMetadata(issueID, dependsOnID)
 }
 
 // CloseStore releases the leaf's backing handle when it has one (asserted by

@@ -69,6 +69,7 @@ work-option-metadata-migration
 backlog-depth
 order-tracking-retention
 session-model
+startup-health-episodes
 dolt-server
 fork-rate
 dolt-noms-size

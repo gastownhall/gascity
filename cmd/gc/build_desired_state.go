@@ -792,6 +792,17 @@ func buildDesiredStateWithSessionBeadsAt(
 		} else {
 			fmt.Fprintf(stderr, "assignedWorkBeads: 0 beads (rigStores=%d)\n", len(rigStores)) //nolint:errcheck
 		}
+		// One-shot repair for beads a prior reconciler tick already clobbered
+		// (ga-3c5isi / #5193): restores gc.work_dir from the still-intact
+		// legacy work_dir when the canonical value was overwritten with a
+		// pool-slot label before workDirStampWouldClobberEvidence existed to
+		// prevent it. Idempotent — see repairPoolSlotWorkDirClobber. Runs
+		// BEFORE the stamp below: stampRunSessionIdentity writes through the
+		// store without refreshing assignedWorkBeads, so a sweep placed after
+		// it would read pre-stamp metadata and could undo a legitimate fresh
+		// stamp. Repair reads the snapshot it was collected with; the live
+		// stamp gets the last word.
+		repairPoolSlotWorkDirClobber(cfg, assignedWorkBeads, assignedWorkStores, stderr)
 		// Durably record which session is executing each in-progress work
 		// bead. The Assignee link is transient (cleared on close), so without
 		// this a completed run carries no session/worktree reference. See
@@ -799,7 +810,7 @@ func buildDesiredStateWithSessionBeadsAt(
 		// storePartial: stamping the beads that WERE collected is always
 		// correct, and any bead missed by a partial query simply gets stamped
 		// on a later tick.
-		stampRunSessionIdentity(assignedWorkBeads, assignedWorkStores, sessionBeads, stderr)
+		stampRunSessionIdentity(cfg, assignedWorkBeads, assignedWorkStores, sessionBeads, stderr)
 		// Re-home work pre-assigned to a legacy template identity onto the
 		// configured canonical identity, so the canonical session the awake/scale
 		// accounting wakes for it can actually surface and claim it (the
@@ -815,6 +826,13 @@ func buildDesiredStateWithSessionBeadsAt(
 		subPhaseStart = time.Now()
 		var unassignedRoutedPartial bool
 		unassignedRoutedBeads, unassignedRoutedStores, unassignedRoutedStoreRefs, unassignedRoutedPartial = collectOpenUnassignedRoutedWork(cityPath, cfg, store, rigStores, suspendedRigPaths, stderr)
+		// Same repair as above, over the open/unassigned collection: a bead
+		// released back to open by a drain is clobbered the same way an
+		// in_progress one is, and never appears in assignedWorkBeads once
+		// reopened. Ordered first here for the same reason as the assigned
+		// site: the sweep reads the snapshot it was collected with, before any
+		// later pass writes through the store behind it.
+		repairPoolSlotWorkDirClobber(cfg, unassignedRoutedBeads, unassignedRoutedStores, stderr)
 		canonicalizeLegacyBoundUnassignedRoutedWork(cfg, unassignedRoutedBeads, unassignedRoutedStores, stderr)
 		// Same pass, same reason, different legacy form: a route stamped at a
 		// live slot ("<base>-N") is a load-balancing HINT that every raw reader
@@ -5000,7 +5018,7 @@ func sessionBeadIdentifierInfo(info session.Info) string {
 // only a newly claimed (or reassigned) bead triggers a single write. A write
 // failure is logged and skipped — stamping is best-effort observability and
 // must never block reconciliation.
-func stampRunSessionIdentity(workBeads []beads.Bead, workStores []beads.Store, sessionBeads *sessionBeadSnapshot, stderr io.Writer) {
+func stampRunSessionIdentity(cfg *config.City, workBeads []beads.Bead, workStores []beads.Store, sessionBeads *sessionBeadSnapshot, stderr io.Writer) {
 	if sessionBeads == nil || len(workBeads) != len(workStores) {
 		return
 	}
@@ -5035,7 +5053,8 @@ func stampRunSessionIdentity(workBeads []beads.Bead, workStores []beads.Store, s
 			patch[beadmeta.SessionNameMetadataKey] = sessionName
 		}
 		if workDir != "" && strings.TrimSpace(wb.Metadata[beadmeta.WorkDirMetadataKey]) != workDir &&
-			(!sbInfo.PoolManaged || workDirStampHasOwnershipEvidence(wb.Metadata, workDir)) {
+			(!sbInfo.PoolManaged || workDirStampHasOwnershipEvidence(wb.Metadata, workDir)) &&
+			!workDirStampWouldClobberEvidence(cfg, wb.Metadata, workDir) {
 			patch[beadmeta.WorkDirMetadataKey] = workDir
 		}
 		if len(patch) > 0 {
@@ -5048,7 +5067,7 @@ func stampRunSessionIdentity(workBeads []beads.Bead, workStores []beads.Store, s
 		// workBeads and route-time stamping skips it for pool agents. The
 		// dashboard's root-only snapshot reads the root's own metadata, so a
 		// worked step back-fills its root via gc.root_bead_id. (#2843)
-		stampRunRootFromStep(store, wb, sessionName, workDir, !sbInfo.PoolManaged, stampedRoots, stderr)
+		stampRunRootFromStep(cfg, store, wb, sessionName, workDir, !sbInfo.PoolManaged, stampedRoots, stderr)
 	}
 }
 
@@ -5070,7 +5089,7 @@ func workDirStampHasOwnershipEvidence(metadata map[string]string, workDir string
 // the root and writes only the keys that differ. Best-effort — a root that is
 // in another store, already gone, or already stamped is silently skipped (a
 // cross-store root gets stamped on its own store's reconcile pass).
-func stampRunRootFromStep(store beads.Store, step beads.Bead, sessionName, workDir string, allowUnownedWorkDir bool, stampedRoots map[string]struct{}, stderr io.Writer) {
+func stampRunRootFromStep(cfg *config.City, store beads.Store, step beads.Bead, sessionName, workDir string, allowUnownedWorkDir bool, stampedRoots map[string]struct{}, stderr io.Writer) {
 	rootID := strings.TrimSpace(step.Metadata[beadmeta.RootBeadIDMetadataKey])
 	if rootID == "" || rootID == step.ID {
 		return
@@ -5090,7 +5109,8 @@ func stampRunRootFromStep(store beads.Store, step beads.Bead, sessionName, workD
 		patch[beadmeta.SessionNameMetadataKey] = sessionName
 	}
 	if workDir != "" && strings.TrimSpace(root.Metadata[beadmeta.WorkDirMetadataKey]) != workDir &&
-		(allowUnownedWorkDir || workDirStampHasOwnershipEvidence(root.Metadata, workDir)) {
+		(allowUnownedWorkDir || workDirStampHasOwnershipEvidence(root.Metadata, workDir)) &&
+		!workDirStampWouldClobberEvidence(cfg, root.Metadata, workDir) {
 		patch[beadmeta.WorkDirMetadataKey] = workDir
 	}
 	if len(patch) == 0 {

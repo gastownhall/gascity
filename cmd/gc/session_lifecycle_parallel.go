@@ -2251,6 +2251,24 @@ func commitStartResultTraced(
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "metadata_batch_failed", result.started, result.finished, err, result.phases)
 		return false
 	}
+	// A successful, durably-committed start clears any accrued startup-health
+	// episode for this session name (ga-o04bfr.1.1). Skipped when there is
+	// nothing to clear so a healthy session's first-ever start does not mint
+	// a startup-health-episode bead it will never need.
+	if prior, loadErr := sessFront.LoadStartupHealthEpisode(name); loadErr != nil {
+		fmt.Fprintf(stderr, "session reconciler: loading startup-health episode for %s: %v\n", name, loadErr) //nolint:errcheck
+	} else if prior.ConsecutiveCount != 0 || !prior.QuarantinedUntil.IsZero() {
+		cleared := sessionpkg.ClearStartupHealthEpisode(name)
+		if saveErr := sessFront.SaveStartupHealthEpisode(cleared); saveErr != nil {
+			fmt.Fprintf(stderr, "session reconciler: clearing startup-health episode for %s: %v\n", name, saveErr) //nolint:errcheck
+		}
+		// Clear the mirrored count/kind alongside the episode itself so a
+		// recovered session does not keep showing stale "quarantined"
+		// metadata on its visible row (ga-em8g4o).
+		if mirrorErr := mirrorStartupHealthEpisodeMetadata(sessFront, info.ID, cleared); mirrorErr != nil {
+			fmt.Fprintf(stderr, "session reconciler: clearing mirrored startup-health metadata for %s: %v\n", name, mirrorErr) //nolint:errcheck
+		}
+	}
 	// Announce the wake only after the metadata batch has durably landed.
 	// Emitting earlier lets a subscriber observe a session.woke for a start
 	// whose commit then fails — a fact the store never recorded, since the
@@ -2341,11 +2359,29 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 		// next tick, so it deliberately does not record a wake failure (see
 		// TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError).
 		// Genuine wake-failure accounting happens on the non-rollback path
-		// below via recordWakeFailure.
+		// below via recordWakeFailure. It does, however, accrue a
+		// session-name-keyed startup-health episode: unlike wake-failure
+		// accounting (keyed to this bead's own metadata, reset when the
+		// bead closes and is recreated), the episode survives the
+		// pending-create bead's replacement so a session name that never
+		// gets past pending-create still quarantines (ga-o04bfr.1.1).
 		if trace != nil {
 			trace.RecordOperation(TraceSiteLifecycleStartRollback, TraceReasonStart, result.outcome, "", tp.TemplateName, name, 0, traceRecordPayload{
 				"error": formatLifecycleError(result.err),
 			})
+		}
+		if prior, loadErr := sessFront.LoadStartupHealthEpisode(name); loadErr != nil {
+			fmt.Fprintf(stderr, "session reconciler: loading startup-health episode for %s: %v\n", name, loadErr) //nolint:errcheck
+		} else {
+			prior.SessionName = name
+			kind := sessionpkg.FailureKindOther
+			if errors.Is(result.err, context.DeadlineExceeded) {
+				kind = sessionpkg.FailureKindTimeout
+			}
+			episode := sessionpkg.RecordStartupFailure(prior, kind, result.err.Error(), clk.Now(), defaultMaxWakeAttempts, defaultQuarantineDuration)
+			if saveErr := sessFront.SaveStartupHealthEpisode(episode); saveErr != nil {
+				fmt.Fprintf(stderr, "session reconciler: saving startup-health episode for %s: %v\n", name, saveErr) //nolint:errcheck
+			}
 		}
 		rollbackPendingCreate(info, sessFront, clk.Now().UTC(), stderr)
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.err, result.phases)
