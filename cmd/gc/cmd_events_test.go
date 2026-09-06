@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1635,6 +1636,169 @@ func TestFetchCityEventsPaginatesSinceWindow(t *testing.T) {
 	// A drained window is complete, so no truncation notice.
 	if warn.Len() != 0 {
 		t.Fatalf("unexpected truncation notice for a fully drained window: %q", warn.String())
+	}
+}
+
+// delayedHandler wraps a route so each page request costs a fixed amount of
+// wall time, letting the budget tests below distinguish "per page" from
+// "per walk" without depending on real network latency.
+func delayedHandler(delay time.Duration, next func(http.ResponseWriter, *http.Request)) func(http.ResponseWriter, *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(delay):
+		case <-r.Context().Done():
+			return
+		}
+		next(w, r)
+	}
+}
+
+// TestFetchCityEventsPageBudgetDoesNotAccumulateAcrossWalk pins the fix for the
+// deadline that #4385 left behind: draining a --since window across pages made
+// the walk unbounded in page count, but the budget stayed the single fixed one
+// written for the one-page world. The result was a command that failed on
+// window SIZE rather than on server health -- deterministically, and discarding
+// every page it had already fetched.
+//
+// The walk here costs more wall time in aggregate than one page budget, while
+// each individual page fits comfortably inside it. It must drain in full.
+func TestFetchCityEventsPageBudgetDoesNotAccumulateAcrossWalk(t *testing.T) {
+	const (
+		total     = 2000 // 4 keyset pages of 500
+		pageDelay = 150 * time.Millisecond
+		budget    = 400 * time.Millisecond // > pageDelay, < 4*pageDelay
+	)
+	restore := cityEventsPageTimeout
+	cityEventsPageTimeout = budget
+	t.Cleanup(func() { cityEventsPageTimeout = restore })
+
+	allDesc := make([]cliWireEvent, 0, total)
+	for seq := total; seq >= 1; seq-- {
+		allDesc = append(allDesc, cliWireEvent{
+			Actor: "gc", Seq: int64(seq), Type: "e.t",
+			Ts: time.Unix(1700000000+int64(seq), 0).UTC(),
+		})
+	}
+	server := newEventsTestServer(t, testEventRoutes{
+		cityEvents: delayedHandler(pageDelay, pagedCityEventsHandler(t, allDesc, 500)),
+	})
+	defer server.Close()
+
+	client, err := genclient.NewClientWithResponses(server.URL)
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	var warn bytes.Buffer
+	start := time.Now()
+	got, err := fetchCityEvents(context.Background(), client, "mc-city", "", "24h", &warn)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("fetchCityEvents: %v (a multi-page walk must not share one budget)", err)
+	}
+	if len(got) != total {
+		t.Fatalf("got %d events, want %d (full window drained across pages)", len(got), total)
+	}
+	// The point of the test: the walk outlived a single page budget. If this
+	// does not hold the timings above no longer exercise the regression.
+	if elapsed <= budget {
+		t.Fatalf("walk took %v, expected > one page budget (%v); test no longer pins the bug", elapsed, budget)
+	}
+}
+
+// TestFetchCityEventsPageBudgetBoundsASinglePage is the other half of the
+// contract: moving the deadline onto each page must not remove it. A page that
+// cannot be served inside the budget still fails, and still surfaces as a
+// deadline rather than as an empty success.
+func TestFetchCityEventsPageBudgetBoundsASinglePage(t *testing.T) {
+	const (
+		pageDelay = 800 * time.Millisecond
+		budget    = 100 * time.Millisecond
+	)
+	restore := cityEventsPageTimeout
+	cityEventsPageTimeout = budget
+	t.Cleanup(func() { cityEventsPageTimeout = restore })
+
+	allDesc := []cliWireEvent{{
+		Actor: "gc", Seq: 1, Type: "e.t",
+		Ts: time.Unix(1700000001, 0).UTC(),
+	}}
+	server := newEventsTestServer(t, testEventRoutes{
+		cityEvents: delayedHandler(pageDelay, pagedCityEventsHandler(t, allDesc, 500)),
+	})
+	defer server.Close()
+
+	client, err := genclient.NewClientWithResponses(server.URL)
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	var warn bytes.Buffer
+	got, err := fetchCityEvents(context.Background(), client, "mc-city", "", "24h", &warn)
+	if err == nil {
+		t.Fatalf("expected a deadline error for a page slower than the budget, got %d events", len(got))
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v, want it to unwrap to context.DeadlineExceeded", err)
+	}
+}
+
+// TestFetchCityEventsWalkBudgetTruncatesInsteadOfDiscarding pins the other
+// half of the reported failure. Before this fix a --since walk that ran out of
+// budget returned an error and *nothing at all* -- roughly fifty pages of
+// already-fetched events were thrown away on the way out. A short window the
+// caller can see is short beats thirty seconds of work returning zero rows.
+func TestFetchCityEventsWalkBudgetTruncatesInsteadOfDiscarding(t *testing.T) {
+	const (
+		total     = 2000
+		pageSize  = 250 // 8 pages: the budget must land mid-walk, not at a seam
+		pageDelay = 120 * time.Millisecond
+		walk      = 300 * time.Millisecond // enough for ~2 pages, not 8
+	)
+	restore := cityEventsPageTimeout
+	cityEventsPageTimeout = 5 * time.Second // page budget must not be what bites
+	t.Cleanup(func() { cityEventsPageTimeout = restore })
+
+	allDesc := make([]cliWireEvent, 0, total)
+	for seq := total; seq >= 1; seq-- {
+		allDesc = append(allDesc, cliWireEvent{
+			Actor: "gc", Seq: int64(seq), Type: "e.t",
+			Ts: time.Unix(1700000000+int64(seq), 0).UTC(),
+		})
+	}
+	server := newEventsTestServer(t, testEventRoutes{
+		cityEvents: delayedHandler(pageDelay, pagedCityEventsHandler(t, allDesc, pageSize)),
+	})
+	defer server.Close()
+
+	client, err := genclient.NewClientWithResponses(server.URL)
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), walk)
+	defer cancel()
+
+	var warn bytes.Buffer
+	got, err := fetchCityEvents(ctx, client, "mc-city", "", "24h", &warn)
+	if err != nil {
+		t.Fatalf("a budget-exhausted walk must return its pages, not an error: %v", err)
+	}
+	if len(got) == 0 {
+		t.Fatal("got 0 events; the fetched pages were discarded again")
+	}
+	if len(got) >= total {
+		t.Fatalf("got %d of %d events; the walk was expected to be cut short", len(got), total)
+	}
+	// The caller must be able to tell the window is incomplete.
+	if !strings.Contains(warn.String(), "ran out of time") {
+		t.Fatalf("truncated window carried no notice; warn = %q", warn.String())
+	}
+	// What comes back is the NEWEST end of the window, contiguous and ascending.
+	for i := 1; i < len(got); i++ {
+		if got[i].Seq != got[i-1].Seq+1 {
+			t.Fatalf("gap at %d: seq %d then %d", i, got[i-1].Seq, got[i].Seq)
+		}
+	}
+	if got[len(got)-1].Seq != int64(total) {
+		t.Fatalf("last seq = %d, want %d (newest end retained)", got[len(got)-1].Seq, total)
 	}
 }
 
