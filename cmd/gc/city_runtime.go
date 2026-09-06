@@ -186,6 +186,10 @@ type CityRuntime struct {
 	// bounded discovery and transcript reads for every awake session.
 	liveSweepMemos sync.Map // session bead id -> liveSweepMemo
 
+	// recentlyClosedUsageNextAt floors how often emitRecentlyClosedUsage may
+	// re-list closed session beads (IncludeClosed + AllowScan).
+	recentlyClosedUsageNextAt time.Time
+
 	// transcriptMetaEnabled is set only by the machine-wide supervisor after it
 	// has armed the event-correlation sidecar gate. One asynchronous snapshot pass
 	// is permitted for this supervisor lifetime; a restart deliberately rebuilds
@@ -2525,13 +2529,15 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	// tick already loaded, rather than issuing a second redundant store scan. The
 	// boot pass covers the whole fleet at once on the readiness path, so it takes
 	// only the marker-gated terminal lane and leaves the fleet-proportional live
-	// lane to the first steady-state tick.
+	// lane to the first steady-state tick. Recently-closed recovers drain→close
+	// races that left the open set unswept; same boot skip as the live lane.
 	cr.emitDueComputeFacts(ctx, sessionBeads.OpenInfos(), bootReconcile)
-	// Historical sidecar reconciliation is supervisor-owned and asynchronous.
-	// Keep it off the synchronous boot/readiness pass; the first steady-state
-	// patrol starts one bounded-batch background pass without delaying city
-	// availability or later controller ticks.
 	if !bootReconcile {
+		cr.emitRecentlyClosedUsage(ctx)
+		// Historical sidecar reconciliation is supervisor-owned and asynchronous.
+		// Keep it off the synchronous boot/readiness pass; the first steady-state
+		// patrol starts one bounded-batch background pass without delaying city
+		// availability or later controller ticks.
 		cr.startHistoricalTranscriptMetaReconcile(ctx)
 	}
 	rigStores := cr.rigBeadStores()
