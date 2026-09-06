@@ -59,13 +59,19 @@ const (
 type TraceSiteCode string
 
 const (
-	TraceSiteUnknown                        TraceSiteCode = "unknown"
-	TraceSiteScaleCheckExec                 TraceSiteCode = "trace.scale_check_exec"
-	TraceSiteCycleStart                     TraceSiteCode = "cycle.start"
-	TraceSiteCycleFinish                    TraceSiteCode = "cycle.finish"
-	TraceSiteConfigReload                   TraceSiteCode = "config.reload"
-	TraceSiteControllerTickPhase            TraceSiteCode = "controller.tick.phase"
-	TraceSiteDesiredStateBuild              TraceSiteCode = "desired_state.build"
+	TraceSiteUnknown             TraceSiteCode = "unknown"
+	TraceSiteScaleCheckExec      TraceSiteCode = "trace.scale_check_exec"
+	TraceSiteCycleStart          TraceSiteCode = "cycle.start"
+	TraceSiteCycleFinish         TraceSiteCode = "cycle.finish"
+	TraceSiteConfigReload        TraceSiteCode = "config.reload"
+	TraceSiteControllerTickPhase TraceSiteCode = "controller.tick.phase"
+	TraceSiteDesiredStateBuild   TraceSiteCode = "desired_state.build"
+	// TraceSiteDesiredStateProviderUnresolved records a template dropped
+	// from the desired set because its provider command is not on PATH.
+	// ob-woag: without it a missing binary reads exactly like no demand —
+	// desired_session_count falls to zero and the word "provider" never
+	// appears in the cycle.
+	TraceSiteDesiredStateProviderUnresolved TraceSiteCode = "desired_state.provider_unresolved"
 	TraceSiteDemandSnapshot                 TraceSiteCode = "demand_snapshot.load"
 	TraceSiteOrderDispatch                  TraceSiteCode = "orders.dispatch"
 	TraceSitePoolDemandCompute              TraceSiteCode = "pool_desired.compute"
@@ -168,19 +174,24 @@ const (
 	TraceReasonFSPressure             TraceReasonCode = "fs_pressure"
 	TraceReasonResetStalled           TraceReasonCode = "reset_stalled"
 
-	TraceReasonRateLimit                     TraceReasonCode = "rate_limit"
-	TraceReasonPendingCreate                 TraceReasonCode = "pending_create"
-	TraceReasonPreserve                      TraceReasonCode = "preserve"
-	TraceReasonConfigDriftAttachmentError    TraceReasonCode = "config_drift_attachment_error"
-	TraceReasonConfigDriftAttached           TraceReasonCode = "config_drift_attached"
-	TraceReasonConfigDriftRecentlyAttached   TraceReasonCode = "config_drift_recently_attached"
-	TraceReasonPending                       TraceReasonCode = "pending"
-	TraceReasonAcknowledged                  TraceReasonCode = "acknowledged"
-	TraceReasonMinFloorIdleWorker            TraceReasonCode = "min_floor_idle_worker"
-	TraceReasonLiveDrift                     TraceReasonCode = "live_drift"
-	TraceReasonCircuitOpen                   TraceReasonCode = "circuit_open"
-	TraceReasonCircuitTrip                   TraceReasonCode = "circuit_trip"
-	TraceReasonProviderRed                   TraceReasonCode = "provider_red"
+	TraceReasonRateLimit                   TraceReasonCode = "rate_limit"
+	TraceReasonPendingCreate               TraceReasonCode = "pending_create"
+	TraceReasonPreserve                    TraceReasonCode = "preserve"
+	TraceReasonConfigDriftAttachmentError  TraceReasonCode = "config_drift_attachment_error"
+	TraceReasonConfigDriftAttached         TraceReasonCode = "config_drift_attached"
+	TraceReasonConfigDriftRecentlyAttached TraceReasonCode = "config_drift_recently_attached"
+	TraceReasonPending                     TraceReasonCode = "pending"
+	TraceReasonAcknowledged                TraceReasonCode = "acknowledged"
+	TraceReasonMinFloorIdleWorker          TraceReasonCode = "min_floor_idle_worker"
+	TraceReasonLiveDrift                   TraceReasonCode = "live_drift"
+	TraceReasonCircuitOpen                 TraceReasonCode = "circuit_open"
+	TraceReasonCircuitTrip                 TraceReasonCode = "circuit_trip"
+	TraceReasonProviderRed                 TraceReasonCode = "provider_red"
+	// TraceReasonProviderNotInPath is distinct from TraceReasonProviderRed:
+	// red is a healthy-but-failing provider the gate parks and later
+	// resumes, whereas this one never resolved a binary at all and no
+	// amount of waiting fixes it.
+	TraceReasonProviderNotInPath             TraceReasonCode = "provider_not_in_path"
 	TraceReasonHealClearedStaleLease         TraceReasonCode = "heal_cleared_stale_lease"
 	TraceReasonPendingCreateRecoveryInFlight TraceReasonCode = "pending_create_recovery_in_flight"
 	TraceReasonPendingCreateRebuildFailed    TraceReasonCode = "pending_create_rebuild_failed"

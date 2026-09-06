@@ -231,6 +231,19 @@ type CityRuntime struct {
 	forceStopShutdown *atomic.Bool
 	logPrefix         string // "gc start" or "gc supervisor"
 	stdout, stderr    io.Writer
+
+	// providerUnresolvedAlerted latches the once-per-episode alert for a
+	// provider whose command is not on PATH, keyed by provider+command.
+	// The desired-state build repeats the same failure on every tick (and
+	// the cached demand snapshot replays it even between builds), so an
+	// unlatched report would put one line per provider per tick into the
+	// log and one event per tick into .gc/events.jsonl — a storm nobody
+	// reads, which is the failure mode ob-woag was reporting in the first
+	// place, only louder. The key is cleared once the provider resolves
+	// again, so a reinstall-then-remove fires a second alert. Mutated only
+	// from the reconcile tick, same single-goroutine convention as
+	// cr.demandSnapshot.
+	providerUnresolvedAlerted map[string]bool
 }
 
 // runtimeDemandSnapshotBackstopMaxAge bounds how long an EVENT-BACKED demand
@@ -2498,6 +2511,13 @@ func (cr *CityRuntime) newWarmClaimTriggerResolver(servingRigs map[string]beads.
 // first steady-state tick performs both.
 func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStateResult, sessionBeads *sessionBeadSnapshot, trace *sessionReconcilerTraceCycle, bootReconcile bool) {
 	desiredState := result.State
+	// Before anything else this tick: if the build dropped templates because
+	// a provider command is missing, say so. ob-woag: a city whose only
+	// always-on template used an uninstalled binary reconciled to an empty
+	// desired set and every surface reported that as normal. This runs ahead
+	// of the store guard on purpose — a storeless city that cannot resolve
+	// its provider is exactly as broken and exactly as silent.
+	cr.reportUnresolvedProviders(result)
 	store := cr.cityBeadStore()
 	if store == nil {
 		return
@@ -2911,6 +2931,12 @@ func (cr *CityRuntime) recordReconcileTraceInputs(
 		"named_scale_check_partial_templates": sortedBoolMapKeys(result.NamedScaleCheckPartialTemplates),
 		"session_query_partial":               result.SessionQueryPartial,
 		"snapshot_query_partial":              result.snapshotQueryPartial(),
+		// Carried in the same record as desired_session_count so the two
+		// are read together. A zero desired count with a non-zero
+		// unresolved count is a broken host, not an idle city — the
+		// distinction ob-woag's trace could not express.
+		"provider_unresolved_count":     len(result.ProviderUnresolved),
+		"provider_unresolved_providers": providerUnresolvedProviderNames(result.ProviderUnresolved),
 	})
 	for _, agent := range cr.cfg.Agents {
 		template := agent.QualifiedName()

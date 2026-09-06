@@ -326,6 +326,20 @@ const (
 	// the next episode fires independently. (ADR-0013 A1 M3a)
 	ProviderHealthGateAlert = "provider.health_gate_alert"
 
+	// ProviderUnresolved fires once per episode when the desired-state build
+	// drops one or more templates because a referenced provider's command is
+	// not on PATH. Carries the provider reference, the command that failed,
+	// the dropped-template count and sample, and the desired_session_count
+	// the drop produced.
+	//
+	// It exists because ob-woag found a city that came up completely empty
+	// with no record anywhere: `gc start` reported success, `gc doctor`
+	// passed, the reconciler trace showed desired_session_count=0 without
+	// naming a provider, and this log had nothing in it at all. Latched by
+	// the emitter (CityRuntime.reportUnresolvedProviders) because the
+	// underlying failure re-derives on every controller tick.
+	ProviderUnresolved = "provider.unresolved"
+
 	// Emergency events are dolt-independent escalation records written to
 	// .gc/emergency and mirrored into the city event log.
 	EmergencySignaled = "emergency.signaled"
@@ -423,11 +437,11 @@ var KnownEventTypes = []string{
 	StorageBindingConverged, StorageBindingGenesis,
 	StorageBindingUnconverged, StorageBindingUncheckable,
 	StorageBindingNotConfigured,
-	// ProviderHealthGateAlert is intentionally omitted from KnownEventTypes.
-	// The event is emitted by the reconciler but its typed SSE payload is not
-	// yet registered in internal/api (the payload registration lives in a
-	// follow-up that adds the full SSE projection). Until then, subscribers
-	// receive it via the custom-event envelope.
+	// ProviderHealthGateAlert and ProviderUnresolved are intentionally omitted
+	// from KnownEventTypes. Both are emitted by the reconciler but neither has
+	// a typed SSE payload registered in internal/api (the payload registration
+	// lives in a follow-up that adds the full SSE projection). Until then,
+	// subscribers receive them via the custom-event envelope.
 }
 
 // Event is a single recorded occurrence in the system.

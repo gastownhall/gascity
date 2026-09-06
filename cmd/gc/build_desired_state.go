@@ -156,6 +156,15 @@ type DesiredStateResult struct {
 	SessionSnapshotComplete bool
 	SessionOccupancyInfos   []session.Info
 	BeaconTime              time.Time
+	// ProviderUnresolved names every provider whose command did not resolve
+	// on PATH during this build, with the templates it cost. It is the
+	// answer to "why is desired_session_count zero" that ob-woag could not
+	// get from any surface: the drop sites log to a supervisor stderr and
+	// otherwise return a quietly smaller State. Non-empty here means the
+	// desired set is smaller than the config asked for, and by exactly the
+	// templates listed. The controller turns it into a trace record, an
+	// event, and a once-per-episode log line.
+	ProviderUnresolved []ProviderUnresolvedGroup
 }
 
 func (r DesiredStateResult) snapshotQueryPartial() bool {
@@ -1171,6 +1180,26 @@ func buildDesiredStateWithSessionBeadsAt(
 		)
 	}
 
+	// Publish the build's provider-PATH failures before the result is
+	// assembled, and put them in the trace next to the desired-state build
+	// site. ob-woag's trace showed desired_session_count=0 with the string
+	// "provider" absent from the whole cycle, which is what made the empty
+	// city look like an absence of demand rather than a broken host.
+	providerUnresolved := bp.providerUnresolved.snapshot()
+	for _, group := range providerUnresolved {
+		trace.RecordControllerDecision(
+			TraceSiteDesiredStateProviderUnresolved,
+			TraceReasonProviderNotInPath,
+			TraceOutcomeSkipped,
+			map[string]any{
+				"provider":          group.Provider,
+				"command":           group.Command,
+				"dropped_templates": group.DroppedTemplates,
+				"templates":         group.Templates,
+			},
+		)
+	}
+
 	sessionSnapshotComplete := bp.hasCompleteSessionSnapshot()
 	sessionOccupancyInfos := make([]session.Info, len(allOpenSessionInfos))
 	copy(sessionOccupancyInfos, allOpenSessionInfos)
@@ -1197,6 +1226,7 @@ func buildDesiredStateWithSessionBeadsAt(
 		SessionSnapshotComplete:            sessionSnapshotComplete,
 		SessionOccupancyInfos:              sessionOccupancyInfos,
 		BeaconTime:                         beaconTime,
+		ProviderUnresolved:                 providerUnresolved,
 	}
 }
 
@@ -6282,6 +6312,17 @@ func materializeProviderOverlaysBeforeFingerprint(
 
 func resolveTemplatePrepared(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, fpExtra map[string]string) (TemplateParams, error) {
 	if err := validateAgentSessionTransportForBuild(bp, cfgAgent, qualifiedName); err != nil {
+		// Every path that drops a template from the desired set — pool
+		// instances, named sessions, dependency floors, session-bead
+		// reuse — funnels its resolution through here and then does
+		// `continue`/`return` on the error, printing one line to a stderr
+		// that under the supervisor is a log file. ob-woag: that made a
+		// missing provider binary indistinguishable from "no demand" on
+		// every surface an operator actually looks at. Recording the
+		// failure here (rather than at each of the four call sites) keeps
+		// the diagnostic and the drop at the same seam, so a future drop
+		// site cannot forget to report.
+		bp.recordProviderUnresolved(qualifiedName, err)
 		return TemplateParams{}, err
 	}
 	prepareTemplateResolution(bp, cfgAgent, qualifiedName, bp.stderr)

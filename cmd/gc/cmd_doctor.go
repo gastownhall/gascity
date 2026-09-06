@@ -213,6 +213,13 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(doctor.NewConfigSemanticsCheck(cfg, filepath.Join(cityPath, "city.toml")))
 		register(doctor.NewDurationRangeCheck(cfg))
 		register(doctor.NewProviderParityCheck(cfg))
+		// provider-path asks the host question its neighbors deliberately
+		// skip: provider-catalog checks the reference is declared and
+		// provider-parity inspects capability fields under a stub PATH
+		// lookup, so before ob-woag nothing verified that a referenced
+		// provider's binary actually exists. Real exec.LookPath here — a
+		// stub would reproduce the silence.
+		register(doctor.NewProviderPathCheck(cfg, exec.LookPath))
 		register(doctor.NewFormulaRequirementsCheck(cfg, cityPath))
 		register(doctor.NewNamedAlwaysMinConflictCheck(cfg))
 		register(doctor.NewInstructionsFileCheck(cfg, cityPath))
