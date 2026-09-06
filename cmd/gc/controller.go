@@ -885,19 +885,31 @@ func watchConfigTargets(targets []config.WatchTarget, dirty *atomic.Bool, pokeCh
 	}
 }
 
+// configWatchIgnoredDirs names directories whose subtrees never carry config
+// content, so the config watcher neither registers a watch inside them nor
+// treats an event under one as config drift. It mirrors the runtime-path
+// exclusions the pack content hash already applies (isIgnoredPackRuntimePath,
+// internal/config/pack.go): a write under one of these cannot change a pack's
+// content hash, so a reload it triggers can only ever be a no-op. Watching
+// them is pure cost — a local-git-repo import's whole .git/objects tree is
+// registered on every watcher rebuild, and on macOS each rebuild leaks those
+// per-path kqueue descriptors (gastownhall/gascity#4504).
+var configWatchIgnoredDirs = []string{".gc", ".beads", ".git"}
+
 func shouldIgnoreConfigWatchEvent(path string) bool {
 	clean := filepath.Clean(path)
 	if clean == "" || clean == "." {
 		return false
 	}
-	sepGC := string(filepath.Separator) + ".gc"
-	sepBeads := string(filepath.Separator) + ".beads"
-	return clean == ".gc" ||
-		clean == ".beads" ||
-		strings.HasSuffix(clean, sepGC) ||
-		strings.HasSuffix(clean, sepBeads) ||
-		strings.Contains(clean, sepGC+string(filepath.Separator)) ||
-		strings.Contains(clean, sepBeads+string(filepath.Separator))
+	sep := string(filepath.Separator)
+	for _, name := range configWatchIgnoredDirs {
+		if clean == name ||
+			strings.HasSuffix(clean, sep+name) ||
+			strings.Contains(clean, sep+name+sep) {
+			return true
+		}
+	}
+	return false
 }
 
 // reloadResult holds the result of a config reload attempt.
