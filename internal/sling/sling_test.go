@@ -2350,6 +2350,20 @@ func TestDoSlingRefusesCrossStoreReassignBeforeClearingAssignee(t *testing.T) {
 	}
 }
 
+func TestDoSlingDryRunRefusesCrossStoreBeforeMutation(t *testing.T) {
+	opts, deps, router, bead := crossStoreSlingFixture(t, "")
+	opts.NoFormula = true
+	opts.DryRun = true
+
+	_, err := DoSling(opts, deps, deps.Store)
+
+	requireCrossStoreRouteError(t, err)
+	requireNoCrossStoreRouteMutation(t, deps.Store, bead.ID, "")
+	if len(router.routed) != 0 {
+		t.Fatalf("router calls = %d, want 0", len(router.routed))
+	}
+}
+
 func TestDoSlingBatchRefusesCrossStoreBeforeFormulaMutation(t *testing.T) {
 	deps, router, target := crossStoreSlingDeps(t)
 	store := deps.Store
