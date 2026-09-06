@@ -134,6 +134,29 @@ func (c *CachingStore) Count(ctx context.Context, query ListQuery, excludeTypes 
 	return counter.Count(ctx, liveListQuery(query), excludeTypes...)
 }
 
+// SawRows implements RowWitness for a cached store, which is the shape the
+// API server actually holds: the witness has to answer for the wrapper, not
+// only for whatever sits behind it.
+//
+// A populated cache is proof on its own — the rows in it came from this
+// ledger — and it is the only evidence available when the backing store
+// cannot witness itself, which is every backend but the bd CLI one. Falling
+// through to the backing store covers the opposite case, a cache that is cold
+// or unprimed on a scope bd has already answered with rows.
+//
+// Both arms only ever prove rows are present, matching the one-directional
+// contract on RowWitness: false here means no evidence, never an empty ledger.
+func (c *CachingStore) SawRows() bool {
+	c.mu.RLock()
+	cached := len(c.beads)
+	c.mu.RUnlock()
+	if cached > 0 {
+		return true
+	}
+	witness, ok := c.backing.(RowWitness)
+	return ok && witness.SawRows()
+}
+
 // cachedCountContext serves only a clean active snapshot. Dirty overlays use
 // context-blind Store.Get calls, so a deadline-sensitive Count delegates those
 // cases to the backing Counter instead. Lock acquisition and the scan both

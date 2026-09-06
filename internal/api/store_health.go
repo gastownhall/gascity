@@ -89,8 +89,9 @@ func (s *Server) computeStoreHealth(ctx context.Context) (*StatusStoreHealth, er
 	}
 	lastAt, lastStatus := storehealth.LastMaintenance(s.state.EventProvider())
 	// countBeadStoreRows returns an error (handled above) rather than a
-	// fabricated count on every failure path, so rows here is always a
-	// real measurement.
+	// fabricated count on every failure path, and refuses a zero the store's
+	// own row witness contradicts, so rows here is a count this process holds
+	// no evidence against. That is what the true below asserts.
 	h := storehealth.Compute(cityPath, size, rows, true, lastAt, lastStatus)
 	return statusStoreHealthFromDomain(h), nil
 }
@@ -115,7 +116,13 @@ func statusStoreHealthFromDomain(h storehealth.Health) *StatusStoreHealth {
 
 // countBeadStoreRows returns the number of retained beads in store, including
 // open and closed beads. A nil store and measurement failures are returned as
-// errors so callers do not mistake an unavailable denominator for zero.
+// errors so callers do not mistake an unavailable denominator for zero, and so
+// is a zero the store's own beads.RowWitness contradicts (measuredStoreRows
+// carries why a zero needs corroborating when the other counts do not). Errors
+// name which of the two branches answered: both can produce a zero, they fail
+// for different reasons, and after the fact nothing else recovers which one it
+// was.
+//
 // The closed-inclusive query is never answerable from the in-memory cache, so
 // the count prefers the hydration-free beads.Counter path (the #1896
 // follow-up): hydrating tens of thousands of closed rows cannot finish inside
@@ -137,15 +144,62 @@ func countBeadStoreRows(ctx context.Context, state State, store beads.Store) (in
 		n, err := counter.Count(reqCtx, query)
 		cancel()
 		if err == nil {
-			return n, nil
+			return measuredStoreRows(store, n, countBranchCounter)
 		}
 		if !errors.Is(err, beads.ErrCountUnsupported) {
-			return 0, fmt.Errorf("counting retained bead rows: %w", err)
+			return 0, fmt.Errorf("counting retained bead rows: %s: %w", countBranchCounter, err)
 		}
 	}
 	list, err := statusListStoreWithTimeout(ctx, state, store, query)
 	if err != nil {
-		return 0, fmt.Errorf("counting retained bead rows: %w", err)
+		return 0, fmt.Errorf("counting retained bead rows: %s: %w", countBranchList, err)
 	}
-	return len(list), nil
+	return measuredStoreRows(store, len(list), countBranchList)
+}
+
+// The two branches countBeadStoreRows can answer from, as they appear in its
+// errors. A zero observed in the field was previously attributable only by
+// working out which store the city had open at the time, which is a question
+// the status response no longer makes anyone answer.
+const (
+	countBranchCounter = "counter fast path"
+	countBranchList    = "hydrating list fallback"
+)
+
+// errRowCountContradicted marks a zero row count the store's own row witness
+// disproves. It is a sentinel so tests and any later caller can recognize the
+// condition without matching message text.
+var errRowCountContradicted = errors.New("store answered zero for a whole-ledger read after already returning rows in this process")
+
+// measuredStoreRows passes a row count through when it can stand as a
+// measurement, and turns it into an error when it cannot.
+//
+// Only zero is ever in question. It is the one answer the store-health
+// denominator cannot use, since storehealth.Compute already refuses to derive
+// the ratio or the warning from it, and it is also what a read that could not
+// see its ledger produces, byte-identically to a real empty store.
+// beads.RowWitness is the cheap disproof: a store that has already handed this
+// process a row is not empty, so a whole-ledger read of it answering zero
+// measured nothing.
+//
+// Returning an error rather than a zero is what routes the outcome into the
+// machinery that already exists for an unavailable count: computeStoreHealth
+// returns nil, the status handler records a `store health:` partial error, and
+// the block is omitted instead of rendering `Live rows: 0` and a ratio derived
+// from a count nobody took. The status response still serves, one block lighter
+// and with the reason attached.
+//
+// A store with no witness, or one this process has not yet seen return a row,
+// keeps the prior behavior and its zero. That is deliberate: a genuinely
+// empty ledger must still report a healthy zero, and RowWitness proves only
+// presence, never absence.
+func measuredStoreRows(store beads.Store, rows int, branch string) (int, error) {
+	if rows > 0 {
+		return rows, nil
+	}
+	witness, ok := store.(beads.RowWitness)
+	if !ok || !witness.SawRows() {
+		return rows, nil
+	}
+	return 0, fmt.Errorf("counting retained bead rows: %s: %w", branch, errRowCountContradicted)
 }

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	beadslib "github.com/steveyegge/beads"
@@ -304,6 +305,12 @@ type NativeDoltStore struct {
 	generation uint64
 	actor      string
 	idPrefix   string
+
+	// sawRows latches when the backend answered a read of this store with at
+	// least one row, counted as the backend returned it and before
+	// ApplyListQuery narrows it. It is the RowWitness evidence for this
+	// backend; see row_witness.go for what a caller may conclude from it.
+	sawRows atomic.Bool
 
 	// reopen re-establishes the managed Dolt connection after a transient
 	// connection failure (a :3307 hard-kill/rebind). It MUST re-resolve the
@@ -1359,6 +1366,7 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 			}
 			beads = append(beads, bead)
 		}
+		s.noteRows(len(issues))
 		out = ApplyListQuery(beads, query)
 		return nil
 	})

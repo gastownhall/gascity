@@ -746,6 +746,15 @@ func (s *emittingClassStore) SupportsEphemeralGraphApply() bool {
 	return ok && supporter.SupportsEphemeralGraphApply()
 }
 
+// SawRows forwards beads.RowWitness. Collapsing "the wrapped store is not a
+// witness" into false is exact rather than lossy: the capability certifies
+// presence only, so every consumer already treats a missing witness and a
+// false one the same way.
+func (s *emittingClassStore) SawRows() bool {
+	witness, ok := s.Store.(interface{ SawRows() bool })
+	return ok && witness.SawRows()
+}
+
 // ---------------------------------------------------------------------------
 // Diagnostics and small shared helpers.
 
