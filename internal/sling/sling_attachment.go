@@ -516,25 +516,71 @@ func needsConvoyRecovery(q BeadQuerier, b beads.Bead, deps SlingDeps, opts BeadC
 }
 
 func hasLiveTrackingConvoy(store beads.Store, itemID string) (bool, error) {
+	live, err := liveTrackingConvoys(store, itemID)
+	if err != nil {
+		return false, err
+	}
+	return len(live) > 0, nil
+}
+
+// liveTrackingConvoys returns every non-terminal convoy tracking itemID that is
+// eligible to serve as an auto-convoy root, oldest first
+// (TrackingConvoysForItem sorts by creation time).
+//
+// It is the shared live-root lookup behind both the convoy-recovery check
+// (which only needs existence) and auto-convoy reuse at the mint site (which
+// needs the roots themselves, to reuse the first and reap the rest).
+//
+// These are convoys by construction, so the convoy type's Ready exclusion
+// (#3591) does not apply here — only convoys excluded by infrastructure label
+// (session/order-tracking bookkeeping) are skipped. Those track the item for
+// their own bookkeeping and are neither dispatch roots to reuse nor duplicates
+// to reap.
+func liveTrackingConvoys(store beads.Store, itemID string) ([]beads.Bead, error) {
 	if store == nil {
-		return false, nil
+		return nil, nil
 	}
 	convoys, err := convoycore.TrackingConvoysForItem(store, itemID)
 	if err != nil {
-		return false, fmt.Errorf("listing tracking convoys for %s: %w", itemID, err)
+		return nil, fmt.Errorf("listing tracking convoys for %s: %w", itemID, err)
 	}
+	live := make([]beads.Bead, 0, len(convoys))
 	for _, convoy := range convoys {
-		// These are convoys by construction, so the convoy type's Ready
-		// exclusion (#3591) does not apply here — only skip convoys excluded
-		// by infrastructure label (session/order-tracking bookkeeping).
-		if beads.HasReadyExcludedLabel(convoy) {
+		if beads.HasReadyExcludedLabel(convoy) || convoycore.IsTerminalStatus(convoy.Status) {
 			continue
 		}
-		if !convoycore.IsTerminalStatus(convoy.Status) {
-			return true, nil
+		live = append(live, convoy)
+	}
+	return live, nil
+}
+
+// convoyReapReason is the close_reason stamped on an auto-convoy root that a
+// re-sling superseded. Long enough to satisfy bd's validation.on-close=error
+// length requirement while naming why the root was closed.
+const convoyReapReason = "convoy reap: superseded duplicate root"
+
+// reapSupersededConvoyRoots closes auto-convoy roots that a re-sling has
+// superseded, so a bead carrying several live roots converges to the single one
+// being reused instead of staying stuck at N until the tracked bead closes
+// (ga-5jnq).
+//
+// Reaping is best-effort and never blocks the dispatch: each failure is
+// returned as a message for SlingResult.MetadataErrors. A root left open is the
+// pre-existing over-count, which the drain still clears when the tracked bead
+// goes terminal; failing the sling over it would be strictly worse.
+//
+// Callers must pass only unowned roots. The "owned" label is what suppresses
+// convoy autoclose, so closing one here would silently convert a
+// caller-managed lifecycle into an auto-managed one.
+func reapSupersededConvoyRoots(store beads.Store, superseded []beads.Bead, keptID string) []string {
+	var problems []string
+	for _, root := range superseded {
+		if err := convoycore.CloseWithReason(store, root.ID, convoyReapReason); err != nil {
+			problems = append(problems,
+				fmt.Sprintf("reaping convoy root %s superseded by %s: %v", root.ID, keptID, err))
 		}
 	}
-	return false, nil
+	return problems
 }
 
 // resolveConvoyRecovery maps needsConvoyRecovery onto a BeadCheckResult for an

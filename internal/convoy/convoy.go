@@ -2,6 +2,7 @@ package convoy
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -134,6 +135,36 @@ func ConvoyAddItems(_ ConvoyDeps, classes MemberClasses, convoyID string, items 
 		}
 	}
 	return nil
+}
+
+// explicitReasonCloser is implemented by stores whose close path accepts a
+// reason directly (BdStore maps it to `bd close --reason ...`).
+type explicitReasonCloser interface {
+	CloseWithReason(id, reason string) error
+}
+
+// CloseWithReason stamps a close_reason metadata key on a convoy bead before
+// closing it. Stores that accept a reason on the close call receive the same
+// text, which lets cities running with validation.on-close=error accept
+// system-driven closes whose default reason ("Closed") would otherwise be
+// rejected as terse. For stores whose Close path does not consult the reason,
+// the metadata still serves as a permanent audit trail of why the convoy was
+// closed.
+//
+// An empty or whitespace-only reason falls through to a plain Close rather
+// than stamping a meaningless value that downstream validators would trip on.
+func CloseWithReason(store beads.Store, id, reason string) error {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return store.Close(id)
+	}
+	if err := store.SetMetadata(id, "close_reason", reason); err != nil {
+		return fmt.Errorf("stamping convoy %s close reason: %w", id, err)
+	}
+	if closer, ok := store.(explicitReasonCloser); ok {
+		return closer.CloseWithReason(id, reason)
+	}
+	return store.Close(id)
 }
 
 // ConvoyClose closes a convoy bead and emits a ConvoyClosed event.
