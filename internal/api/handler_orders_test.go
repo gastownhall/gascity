@@ -402,6 +402,131 @@ func TestHandleOrderDisableThenEnableResolvesFilteredOrder(t *testing.T) {
 	}
 }
 
+// TestHandleOrdersFeedSkipsPerRootChildHistoryQueries pins the root-only
+// projection switch: a feed rebuild must not issue per-root child-history
+// Lists (Metadata gc.root_bead_id + IncludeClosed), so a store that fails
+// exactly those queries still serves a complete, non-partial feed. Before
+// the switch this surfaced as partial_errors ("workflow history
+// incomplete") on every rebuild against such a store.
+func TestHandleOrdersFeedSkipsPerRootChildHistoryQueries(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cityBeadStore = beads.NewMemStore()
+	mem := beads.NewMemStore()
+	fs.stores = map[string]beads.Store{"myrig": &workflowProjectionStore{MemStore: mem}}
+
+	root, err := mem.Create(beads.Bead{
+		Title: "Deploy",
+		Type:  "workflow",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.workflow_id":      "wf-rootonly",
+			"gc.scope_kind":       "rig",
+			"gc.scope_ref":        "myrig",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create workflow root: %v", err)
+	}
+	inProgress := "in_progress"
+	assignee := "myrig/claude"
+	if err := mem.Update(root.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &assignee}); err != nil {
+		t.Fatalf("set workflow in_progress: %v", err)
+	}
+	child, err := mem.Create(beads.Bead{
+		Title:    "Run step",
+		Type:     "task",
+		Metadata: map[string]string{"gc.root_bead_id": root.ID},
+	})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	if err := mem.Close(child.ID); err != nil {
+		t.Fatalf("close child: %v", err)
+	}
+
+	h := newTestCityHandler(t, fs)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/feed?scope_kind=rig&scope_ref=myrig"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var resp struct {
+		Items         []monitorFeedItemResponse `json:"items"`
+		Partial       bool                      `json:"partial"`
+		PartialErrors []string                  `json:"partial_errors"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.Partial || len(resp.PartialErrors) != 0 {
+		t.Fatalf("feed partial = %v errors = %v, want complete feed without child-history queries", resp.Partial, resp.PartialErrors)
+	}
+	if len(resp.Items) != 1 || resp.Items[0].WorkflowID != "wf-rootonly" {
+		t.Fatalf("items = %+v, want single wf-rootonly item", resp.Items)
+	}
+	if resp.Items[0].Status != "active" {
+		t.Fatalf("status = %q, want active from root+open children only", resp.Items[0].Status)
+	}
+}
+
+func TestHandleOrdersFeedRootOnlyUsesRootTerminalOutcome(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cityBeadStore = beads.NewMemStore()
+	mem := beads.NewMemStore()
+	fs.stores = map[string]beads.Store{"myrig": &workflowProjectionStore{MemStore: mem}}
+
+	root, err := mem.Create(beads.Bead{
+		Title: "Deploy",
+		Type:  "workflow",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.workflow_id":      "wf-failed-root",
+			"gc.scope_kind":       "rig",
+			"gc.scope_ref":        "myrig",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create workflow root: %v", err)
+	}
+	closed := "closed"
+	if err := mem.Update(root.ID, beads.UpdateOpts{
+		Status:   &closed,
+		Metadata: map[string]string{"gc.outcome": "fail"},
+	}); err != nil {
+		t.Fatalf("close workflow root: %v", err)
+	}
+
+	h := newTestCityHandler(t, fs)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/feed?scope_kind=rig&scope_ref=myrig"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var resp struct {
+		Items         []monitorFeedItemResponse `json:"items"`
+		Partial       bool                      `json:"partial"`
+		PartialErrors []string                  `json:"partial_errors"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.Partial || len(resp.PartialErrors) != 0 {
+		t.Fatalf("feed partial = %v errors = %v, want complete feed from root summary", resp.Partial, resp.PartialErrors)
+	}
+	if len(resp.Items) != 1 || resp.Items[0].WorkflowID != "wf-failed-root" {
+		t.Fatalf("items = %+v, want single wf-failed-root item", resp.Items)
+	}
+	if resp.Items[0].Status != "failed" {
+		t.Fatalf("status = %q, want failed from root gc.outcome", resp.Items[0].Status)
+	}
+}
+
 func TestHandleOrdersFeedReturnsWorkflowAndScheduledOrderRuns(t *testing.T) {
 	fs := newFakeState(t)
 	fs.cityBeadStore = beads.NewMemStore()
