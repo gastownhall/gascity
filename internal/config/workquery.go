@@ -782,8 +782,7 @@ func ephemeralAssignedInProgressProbeScript(shellVar string, topo QueryTopology)
 func ephemeralAssignedInProgressProbeScriptDeferringGraphAnchor(shellVar string, topo QueryTopology) string {
 	_ = topo
 	baseFilter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + `]`
-	query := bdQueryEphemeralStatusQuietShell("in_progress")
-	return `gc_open_ephemeral_in_progress=$(` + query + `); ` +
+	return ephemeralStatusSnapshotShell("gc_open_ephemeral_in_progress", "in_progress") +
 		`r=$(printf "%s" "$gc_open_ephemeral_in_progress" | jq --arg id "$` + shellVar + `" ` + shellquote.Quote(baseFilter+` | .[:1]`) + ` 2>/dev/null); ` +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
 		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(false, false) +
