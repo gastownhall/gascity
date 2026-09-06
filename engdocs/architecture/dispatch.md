@@ -207,6 +207,42 @@ changes; tests `TestPoolDemandPredicateSharedWithWorkQuery` (structural) and
 `TestPoolDemandAndWorkQueryAgreeOnRoutedSemantics` (behavioral) guard against
 regressions.
 
+### Store-set symmetry (federated custom `scale_check`)
+
+The correspondence above is single-store: it keeps the *predicate* applied
+to one target's bead store in sync between the two read sides. For a
+city-scoped agent with a custom `scale_check`, there is a second,
+independent invariant: the *set of stores* each side fans out across must
+also match.
+
+- **Worker (claim side)**: `gc hook`'s cross-store fan-out resolves targets
+  via `appendRigHookStores` (`hook_cross_store.go`), which adds one store
+  per non-suspended rig.
+- **Reconciler (spawn side)**: a city-scoped agent's custom `scale_check`
+  fans out via `cityScopedFanOutProbes` + `evaluatePoolFanOutSum`
+  (`pool_scale_check_fanout.go`), summing per-store counts instead of
+  picking a winner — `scale_check` is a count, so federating it
+  winner-takes-all would under-report demand from every store but the
+  largest (see `ga-itb5co`).
+
+Both call sites resolve their suspended-rig exclusion through the same
+`buildSuspendedRigPathsForCity` helper (`build_desired_state.go`) — the
+worker path calls it directly inside `appendRigHookStores`, and the
+reconciler path computes it once per desired-state pass and threads it into
+`cityScopedFanOutProbes` at each custom-`scale_check` call site. Sharing one
+helper is what makes the store sets match by construction rather than by
+convention: a rig suspension becomes invisible to a city-scoped agent's
+`scale_check` demand the same tick it becomes invisible to that agent's
+`work_query` claims, and vice versa.
+
+Diverging the two store sets — for example, filtering suspended rigs on
+one side but not the other — reintroduces the same class of bug the
+predicate correspondence above guards against, but at the store-selection
+layer instead of the query-filter layer: an agent could wake on summed
+demand from a rig it can never actually claim work from, or the reverse,
+staying asleep while claimable work sits in a rig its `scale_check` no
+longer counts.
+
 ## Invariants
 
 1. **Sling query placeholder is always `{}`.** The `buildSlingCommand`
