@@ -332,7 +332,7 @@ func onFormulaNeedsAttachment(opts SlingOpts, querier BeadQuerier, deps SlingDep
 }
 
 func shouldValidateBuiltInRouteStoreReachable(opts SlingOpts, deps SlingDeps) bool {
-	return deps.Router != nil && !opts.IsFormula && !opts.DryRun
+	return deps.Router != nil && !opts.IsFormula
 }
 
 // shouldReopenForReassign reports whether the pre-flight reassign reopen should
@@ -1652,6 +1652,11 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 	// Cross-rig guard on container.
 	if !opts.Force && !opts.DryRun {
 		if err := CrossRigRouteError(b.ID, a, deps.Cfg); err != nil {
+			return SlingResult{}, err
+		}
+	}
+	if opts.DryRun && shouldValidateBuiltInRouteStoreReachable(opts, deps) {
+		if err := validateBuiltInRouteStoreReachable(deps, b.ID, a); err != nil {
 			return SlingResult{}, err
 		}
 	}
