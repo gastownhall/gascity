@@ -2110,7 +2110,7 @@ func TestSupervisorCreatesControllerSocketForManagedCity(t *testing.T) {
 name = "test-city"
 
 [orders]
-skip = ["beads-health", "cross-rig-deps", "gate-sweep", "jsonl-export", "reaper", "order-tracking-sweep", "orphan-sweep", "prune-branches", "spawn-storm-detect", "wisp-compact"]
+skip = ["beads-health", "cross-rig-deps", "dead-run-detect", "gate-sweep", "jsonl-export", "reaper", "order-tracking-sweep", "orphan-sweep", "prune-branches", "spawn-storm-detect", "wisp-compact"]
 
 [session]
 provider = "fake"

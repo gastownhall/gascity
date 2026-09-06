@@ -6723,6 +6723,7 @@ func writeCityRuntimeSoftReloadConfig(t *testing.T, tomlPath, shutdownTimeout st
 	skippedOrders := []string{
 		"beads-health",
 		"cross-rig-deps",
+		"dead-run-detect",
 		"gate-sweep",
 		"jsonl-export",
 		"reaper",
