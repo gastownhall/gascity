@@ -585,6 +585,13 @@ metadata (for example `opt_model`), validated against the provider's
 options schema at spawn; `gc.model` is a deprecated spelling that the
 `gc doctor` check `work-option-metadata-migration` migrates to `opt_model`.
 
+**Role target aliases.** In the *value* of `gc.run_target`, `gc.<role>` is a
+semantic role alias used by imported role packs. The resolver first treats the
+complete value as an exact configured agent identity; this preserves an agent
+actually named or bound as `gc.<role>`. Only when that exact identity is absent
+does it retry the bare `<role>` within the workflow's rig context. This value
+alias does not change the separate reservation of `gc.*` *metadata keys*.
+
 **Gates and waits_for.** A `[steps.gate]` table synthesizes a sibling gate
 bead (type `gate`, title `Gate: <type> <id>`) and a `blocks` edge from the
 gated step to it: the step stays blocked until the gate bead is closed.

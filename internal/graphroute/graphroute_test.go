@@ -40,6 +40,15 @@ func TestIsCompiledGraphWorkflow(t *testing.T) {
 	})
 }
 
+func TestFormulaRoleAliasUsesBareRigRole(t *testing.T) {
+	if got := formulaRoleTarget("gc.run-operator"); got != "run-operator" {
+		t.Fatalf("formulaRoleTarget(gc.run-operator) = %q, want run-operator", got)
+	}
+	if got := formulaRoleTarget("mayor"); got != "mayor" {
+		t.Fatalf("formulaRoleTarget(mayor) = %q, want mayor", got)
+	}
+}
+
 func TestIsControlDispatcherKind(t *testing.T) {
 	for _, kind := range []string{"check", "fanout", "retry-eval", "scope-check", "workflow-finalize", "retry", "ralph"} {
 		if !IsControlDispatcherKind(kind) {
@@ -333,6 +342,64 @@ func TestDecorateGraphWorkflowRecipe_ControlRouteUsesOwningStoreScope(t *testing
 	}
 	if got := finalize.Metadata[GraphExecutionRouteMetaKey]; got != "city-worker" {
 		t.Fatalf("finalize gc.execution_routed_to = %q, want city-worker", got)
+	}
+}
+
+func TestDecorateGraphWorkflowRecipe_RigScopeDoesNotRetargetUnscopedControlRoute(t *testing.T) {
+	maxActive := 1
+	cfg := &config.City{Agents: []config.Agent{
+		{Name: "city-worker", Scope: "city"},
+		{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxActive,
+		},
+		{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			Dir:               "fixture",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxActive,
+		},
+	}}
+	recipe := &formula.Recipe{
+		Name: "wf-unscoped-rig",
+		Steps: []formula.RecipeStep{
+			{ID: "wf-unscoped-rig", IsRoot: true, Metadata: map[string]string{
+				beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+				beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+			}},
+			{ID: "wf-unscoped-rig.finalize", Metadata: map[string]string{
+				beadmeta.KindMetadataKey: beadmeta.KindWorkflowFinalize,
+			}},
+		},
+	}
+
+	err := DecorateGraphWorkflowRecipe(
+		recipe,
+		nil,
+		"",
+		"rig",
+		"fixture",
+		"", // An unscoped root store must keep the city control dispatcher.
+		"city-worker",
+		"test-city--city-worker",
+		nil,
+		"test-city",
+		cfg,
+		Deps{Resolver: testAgentResolver{}},
+	)
+	if err != nil {
+		t.Fatalf("DecorateGraphWorkflowRecipe: %v", err)
+	}
+
+	finalize := recipe.Steps[1]
+	if got := finalize.Metadata[beadmeta.RoutedToMetadataKey]; got != "core.control-dispatcher" {
+		t.Fatalf("finalize gc.routed_to = %q, want city control dispatcher", got)
+	}
+	if _, ok := finalize.Metadata[GraphExecutionRigContextMetaKey]; ok {
+		t.Fatalf("finalize must not acquire execution rig context from scope alone: %q", finalize.Metadata[GraphExecutionRigContextMetaKey])
 	}
 }
 
