@@ -214,6 +214,7 @@
             "pages": [
               "runbooks/managed-city-endpoints",
               "runbooks/remote-hardened-city",
+              "runbooks/dolt-compact",
               "runbooks/split-storage-classes"
             ]
           }
