@@ -15,6 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
@@ -240,23 +241,32 @@ func (p *gatedStartProvider) ensureNoFurtherStart(t *testing.T, wait time.Durati
 // arriving after the old 3s literal (but well inside hangBudget) must still
 // be observed rather than reported as a timeout.
 func TestGatedStartProviderWaitForStartsSurvivesDelayPastOldFixedDeadline(t *testing.T) {
-	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		const oldFixedDeadline = 3 * time.Second
+		if hangBudget <= oldFixedDeadline {
+			t.Fatalf("hangBudget = %s, want > %s (the fixed deadline this helper replaced)", hangBudget, oldFixedDeadline)
+		}
 
-	const oldFixedDeadline = 3 * time.Second
-	if hangBudget <= oldFixedDeadline {
-		t.Fatalf("hangBudget = %s, want > %s (the fixed deadline this helper replaced)", hangBudget, oldFixedDeadline)
-	}
+		p := newGatedStartProvider()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			select {
+			case <-time.After(oldFixedDeadline + time.Second):
+			case <-ctx.Done():
+				return
+			}
+			p.startSignals <- "late-start"
+		}()
 
-	p := newGatedStartProvider()
-	go func() {
-		<-time.After(oldFixedDeadline + time.Second)
-		p.startSignals <- "late-start"
-	}()
-
-	got := p.waitForStarts(t, 1)
-	if len(got) != 1 || got[0] != "late-start" {
-		t.Fatalf("waitForStarts = %v, want [late-start]", got)
-	}
+		got := p.waitForStarts(t, 1)
+		if len(got) != 1 || got[0] != "late-start" {
+			t.Fatalf("waitForStarts = %v, want [late-start]", got)
+		}
+		<-done
+	})
 }
 
 type shutdownWaitProvider struct {
