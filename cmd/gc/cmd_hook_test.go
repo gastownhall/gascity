@@ -1946,6 +1946,85 @@ esac
 	}
 }
 
+func TestCmdHookPoolDemandOriginGate(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+	cityDir := t.TempDir()
+	fakeBin := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "bd.log")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+max_active_sessions = 3
+
+[[named_session]]
+template = "worker"
+mode = "on_demand"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %q
+case "$*" in
+  *"--metadata-field gc.routed_to=worker"*) printf '[{"id":"pool-work","title":"routed work"}]' ;;
+  *) printf '[]' ;;
+esac
+`, logPath)
+	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name       string
+		origin     string
+		alias      string
+		session    string
+		wantCode   int
+		wantRouted bool
+	}{
+		{name: "demand-created pool", origin: "ephemeral", alias: "worker-1", session: "test-city--worker-1", wantCode: 0, wantRouted: true},
+		{name: "manual", origin: "manual", alias: "worker-adhoc-manual", session: "worker-adhoc-manual", wantCode: 1},
+		{name: "named", origin: "named", alias: "worker", session: "test-city--worker", wantCode: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearGCEnv(t)
+			clearInheritedCityRoutingEnv(t)
+			t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("GC_BEADS", "exec:"+filepath.Join(fakeBin, "bd"))
+			t.Setenv("GC_CITY", cityDir)
+			t.Setenv("GC_TEMPLATE", "worker")
+			t.Setenv("GC_ALIAS", tc.alias)
+			t.Setenv("GC_SESSION_ID", "session-"+strings.ReplaceAll(tc.name, " ", "-"))
+			t.Setenv("GC_SESSION_NAME", tc.session)
+			t.Setenv("GC_SESSION_ORIGIN", tc.origin)
+			if err := os.WriteFile(logPath, nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := cmdHook(nil, &stdout, &stderr)
+			if code != tc.wantCode {
+				t.Fatalf("cmdHook() = %d, want %d; stdout=%q stderr=%s", code, tc.wantCode, stdout.String(), stderr.String())
+			}
+			if got := strings.Contains(stdout.String(), `"pool-work"`); got != tc.wantRouted {
+				t.Fatalf("routed work visible = %v, want %v; stdout=%q", got, tc.wantRouted, stdout.String())
+			}
+			logData, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Contains(string(logData), "--metadata-field gc.routed_to=worker"); got != tc.wantRouted {
+				t.Fatalf("routed query executed = %v, want %v; bd log:\n%s", got, tc.wantRouted, logData)
+			}
+		})
+	}
+}
+
 // TestCmdHookClaimSuffixedPoolWorkerDoesNotAdoptBareTemplateInProgressWork is
 // the ga-80pen8 end-to-end regression: "builder" is BOTH a [[named_session]]
 // holder's own identity AND a pool template shared by suffixed instances

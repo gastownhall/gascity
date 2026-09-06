@@ -16,6 +16,15 @@ type agentCreateContext struct {
 	WorkDir      string
 }
 
+func agentSessionCreateMetadata(metadata map[string]string, identity string) map[string]string {
+	if metadata == nil {
+		metadata = make(map[string]string)
+	}
+	metadata["agent_name"] = identity
+	metadata["session_origin"] = "ephemeral"
+	return metadata
+}
+
 func (s *Server) resolveAgentCreateContext(template, alias string) (agentCreateContext, error) {
 	cfg := s.state.Config()
 	if cfg == nil {
