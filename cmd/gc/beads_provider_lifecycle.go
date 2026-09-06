@@ -989,18 +989,29 @@ func initBeadsForDirWithExecutor(cityPath, dir, prefix, doltDatabase string, exe
 				if isBdAlreadyInitializedError(err) {
 					return finalizeCanonicalBdScopeInit(cityPath, dir, prefix, canonicalDoltDatabase)
 				}
+				reinit := func() error { return execute(script, env, args...) }
 				if shouldRetryExecBdInit(err) {
 					for attempt := 0; attempt < 3; attempt++ {
 						time.Sleep(time.Second)
-						retryErr := execute(script, env, args...)
+						retryErr := reinit()
 						if retryErr == nil {
 							return finalizeCanonicalBdScopeInit(cityPath, dir, prefix, canonicalDoltDatabase)
 						}
-						if !shouldRetryExecBdInit(retryErr) {
-							return retryErr
-						}
 						err = retryErr
+						if !shouldRetryExecBdInit(retryErr) {
+							break
+						}
 					}
+				}
+				// beads refuses to migrate tables with an uncommitted working
+				// set and prescribes a remedy that hits the same refusal. We
+				// created this database, so clear it here instead of handing
+				// the operator that circular advice.
+				if isBdInitDirtyTablesError(err) {
+					if recoverErr := recoverBdInitFromDirtyTables(cityPath, canonicalDoltDatabase, err, reinit); recoverErr != nil {
+						return recoverErr
+					}
+					return finalizeCanonicalBdScopeInit(cityPath, dir, prefix, canonicalDoltDatabase)
 				}
 				return err
 			}
