@@ -576,6 +576,11 @@ func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
 		return nil
 	}
 
+	// Wrap in system-reminder envelope so the LLM treats this as system
+	// context rather than human input. Matches the pattern used by
+	// UserPromptSubmit hooks (see gc-239).
+	message = "<system-reminder>\ngc-nudge: " + message + "\n</system-reminder>"
+
 	if used, err := p.tm.sendHiddenAttachedText(name, message); used {
 		if err != nil {
 			return err
