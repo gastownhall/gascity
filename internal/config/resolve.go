@@ -887,6 +887,21 @@ func resolvedChainToSpec(r ResolvedProvider, leaf ProviderSpec) ProviderSpec {
 			out.Env[k] = v
 		}
 	}
+	// upstream_env is the harness's serving-env contract, and it is merged
+	// through the chain by MergeProviderOverBuiltin. Folding the resolved
+	// chain back onto the leaf has to carry it, or a provider written as
+	// `base = "builtin:claude"` loses the binding its base declares: the
+	// upstream axis then hard-errors with "declares no upstream_env.api_key
+	// binding" for a harness that does declare one. Per field, leaf wins.
+	if out.UpstreamEnv.BaseURL == "" {
+		out.UpstreamEnv.BaseURL = r.UpstreamEnv.BaseURL
+	}
+	if out.UpstreamEnv.APIKey == "" {
+		out.UpstreamEnv.APIKey = r.UpstreamEnv.APIKey
+	}
+	if out.UpstreamEnv.AuthToken == "" {
+		out.UpstreamEnv.AuthToken = r.UpstreamEnv.AuthToken
+	}
 	if r.PermissionModes != nil {
 		out.PermissionModes = make(map[string]string, len(r.PermissionModes))
 		for k, v := range r.PermissionModes {
