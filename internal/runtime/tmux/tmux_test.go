@@ -2740,6 +2740,75 @@ func TestPaneContainsBusyIndicator(t *testing.T) {
 	}
 }
 
+func TestPaneShowsDrainedComposer(t *testing.T) {
+	longSent := strings.Repeat("x", 50)
+	longSentFirst40 := strings.Repeat("x", 40)
+
+	tests := []struct {
+		name  string
+		lines []string
+		sent  string
+		want  bool
+	}{
+		{"nil lines", nil, "hello", false},
+		{"no ready-prompt line observed", []string{"some output", "still no prompt"}, "hello", false},
+		{"bare drained composer", []string{"❯ "}, "hello", true},
+		{"composer still holds exact sent draft", []string{"❯ hello"}, "hello", false},
+		{"composer holds sent draft with trailing padding", []string{"❯ hello  "}, "hello", false},
+		{"composer holds unrelated newer text", []string{"❯ something else entirely"}, "hello", true},
+		{
+			"long draft truncated to pane width still detected via 40-rune compare",
+			[]string{"❯ " + longSentFirst40},
+			longSent,
+			false,
+		},
+		{
+			"long draft's composer drained",
+			[]string{"❯ "},
+			longSent,
+			true,
+		},
+		{
+			"only the LAST ready-prompt line is the live composer: earlier draft, now bare",
+			[]string{"❯ hello", "✻ Worked for 2s", "❯ "},
+			"hello",
+			true,
+		},
+		{
+			"only the LAST ready-prompt line is the live composer: earlier bare, now drafted",
+			[]string{"❯ ", "some noise", "❯ hello"},
+			"hello",
+			false,
+		},
+		{
+			"real captured idle mayor pane: bare composer beneath a done marker",
+			[]string{"✻ Worked for 1m 49s", "", "❯ ", "  bypass permissions on"},
+			"reminder: please respond to the review",
+			true,
+		},
+		{
+			"multiline sent: only its first non-empty line is compared, still drafted",
+			[]string{"❯ first line of reminder"},
+			"\nfirst line of reminder\nsecond line",
+			false,
+		},
+		{
+			"multiline sent: only its first non-empty line is compared, composer drained",
+			[]string{"❯ "},
+			"\nfirst line of reminder\nsecond line",
+			true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := paneShowsDrainedComposer(tt.lines, tt.sent)
+			if got != tt.want {
+				t.Errorf("paneShowsDrainedComposer(%v, %q) = %v, want %v", tt.lines, tt.sent, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCodexTranscriptTailContainsTurnAborted(t *testing.T) {
 	tail := strings.Join([]string{
 		`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}}`,

@@ -216,6 +216,15 @@ var (
 	// ga-bwm proved that treating an unconfirmed submit as a clean success is
 	// exactly what lets a stalled nudge go undetected for many minutes.
 	ErrNudgeSubmitUnconfirmed = errors.New("nudge: submit Enter delivered to tmux but not confirmed (busy state never observed)")
+	// ErrNudgeSubmitDeliveredUnobserved indicates the submit Enter reached the
+	// pane AND the composer drained, so delivery is proven -- only the busy
+	// state OBSERVATION failed (the indicator rendered outside the confirm
+	// budget, or never rendered at all). Unlike ErrNudgeSubmitUnconfirmed,
+	// callers must NOT retry this: retrying would re-inject a message the
+	// session already received, which is the ga-civwyz duplicate-reminder
+	// failure mode (up to 5 copies of one reminder, 1201 occurrences in 5
+	// days of production logs).
+	ErrNudgeSubmitDeliveredUnobserved = errors.New("nudge: submit Enter delivered and composer drained but busy state was never observed")
 	// ErrServerDegraded indicates the tmux server bound to SocketName is
 	// reachable on the filesystem but unresponsive. Creating a new session
 	// in this state would let tmux's own (very short) liveness probe time
@@ -3846,6 +3855,27 @@ func paneContainsBusyIndicator(lines []string) bool {
 			return true
 		}
 	}
+	return false
+}
+
+// paneShowsDrainedComposer reports whether the pane's live composer -- the
+// LAST captured line matching the ready prompt prefix (DefaultReadyPromptPrefix)
+// -- has drained, meaning the submit Enter actually reached the pane and the
+// agent consumed it. Earlier lines that also start with the prompt prefix are
+// scrollback transcript entries, not the live composer, and are ignored.
+//
+// It returns false when the composer still holds sent: the first non-empty
+// line of sent (compared on its first 40 runes, trimmed) is still present in
+// what remains after stripping the prompt prefix. That is the ga-bwm case --
+// the message is sitting drafted-but-unsubmitted -- and callers must keep
+// treating it as unconfirmed and retry. It returns true otherwise: the
+// composer is bare (or holds different, newer text), so the prior submit
+// drained it and only the busy-state OBSERVATION failed. When no line
+// matches the prompt prefix at all, the composer cannot be observed, so this
+// conservatively returns false rather than claiming delivery is proven.
+//
+//nolint:unused // called only from TestPaneShowsDrainedComposer, gated by the integration build tag this lint pass doesn't build with
+func paneShowsDrainedComposer(_ []string, _ string) bool {
 	return false
 }
 
