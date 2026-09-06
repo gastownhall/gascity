@@ -755,7 +755,8 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		storesForGate, storeKeysForGate := cand.gateStores, cand.gateStoreKeys
 		scoped := cand.scoped
 
-		baseLastRunFn := trackingIndex.lastRunFunc(storesForGate, storeKeysForGate, orders.LastRunAcross(orderFrontDoorsForStores(storesForGate)))
+		baseLastRunFn := trackingIndex.lastRunFunc(storesForGate, storeKeysForGate,
+			orders.LastRunFuncWithEventFallback(orders.LastRunAcross(orderFrontDoorsForStores(storesForGate)), m.ep))
 		var lastRunErr error
 		var lastRunFromCache bool
 		lastRunFn := func(orderName string) (time.Time, error) {
