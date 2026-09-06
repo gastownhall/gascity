@@ -254,7 +254,7 @@ func openNativeStorageWithoutAmbientEnvWithCredentialCommand(ctx context.Context
 	}
 	var prefix string
 	if readPrefix {
-		prefix, err = storage.GetConfig(ctx, "issue_prefix")
+		prefix, err = storage.GetConfig(ctx, nativeIssuePrefixConfigKey)
 		if err != nil {
 			_ = storage.Close()
 			return nil, "", fmt.Errorf("reading native issue prefix: %w", err)
@@ -443,6 +443,10 @@ func OpenNativeStorageAtWithoutAmbientEnvWithCredentialCommand(ctx context.Conte
 	return storage, err
 }
 
+// nativeIssuePrefixConfigKey is the upstream config key naming the namespace a
+// Dolt-backed ledger mints under.
+const nativeIssuePrefixConfigKey = "issue_prefix"
+
 // openNativeStorage projects the scoped Dolt env, opens the best-available
 // native storage, and (when readPrefix) reads the configured issue prefix while
 // the env is still projected. It is shared by the initial open and the
@@ -463,7 +467,7 @@ func openNativeStorageWithCredentialCommand(ctx context.Context, scopeRoot strin
 	}
 	var prefix string
 	if readPrefix {
-		prefix, err = storage.GetConfig(ctx, "issue_prefix")
+		prefix, err = storage.GetConfig(ctx, nativeIssuePrefixConfigKey)
 		if err != nil {
 			_ = storage.Close()
 			return nil, "", fmt.Errorf("reading native issue prefix: %w", err)
@@ -2047,13 +2051,32 @@ func (s *NativeDoltStore) validateCreatedDependencies(ctx context.Context, stora
 		// only place it can refuse without writing: the upstream library
 		// resolves a same-namespace dependency target itself, after the issue
 		// is committed, so skipping would turn a clean refusal into a create
-		// followed by a compensating delete. Foreign ids the library already
-		// classifies as external and never resolves, so this skip and the
-		// library agree on exactly one line.
-		if dep.Type == beadslib.DepParentChild && !nativeParentIsLocal(issueID, targetID, s.idPrefix) {
-			continue
-		}
-		if !shouldPrevalidateNativeDependency(issueID, targetID, s.idPrefix) {
+		// followed by a compensating delete. Every id this skip lets through
+		// under a PREFIXED child is one the library already classifies as
+		// external (isCrossPrefixDep compares the CHILD's prefix to the
+		// target's), so nothing skipped there is resolved post-commit. The
+		// one shape it would still resolve is a dashless parent under a
+		// dashless child — ExtractPrefix reads both as "", so the library
+		// calls them same-namespace; on a mint the library sees the child's
+		// final minted id, not the empty one this check gets. The converse
+		// stopped holding when the store's prefix entered the question below:
+		// a parent inside this store's namespace, under a foreign-prefixed
+		// child, is external to the library and is still refused here, in
+		// front of the write.
+		//
+		// The namespace question is asked about the STORE here, not about
+		// issueID: on a mint the child has no id yet, and the cross-prefix rule
+		// the other dependency kinds use would then skip a parent this store
+		// owns — which is the one parent it can refuse before writing.
+		if dep.Type == beadslib.DepParentChild {
+			local, err := s.parentIsLocalForCreate(ctx, storage, issueID, targetID)
+			if err != nil {
+				return err
+			}
+			if !local {
+				continue
+			}
+		} else if !shouldPrevalidateNativeDependency(issueID, targetID, s.idPrefix) {
 			continue
 		}
 		issue, err := storage.GetIssue(ctx, targetID)
@@ -2065,6 +2088,37 @@ func (s *NativeDoltStore) validateCreatedDependencies(ctx context.Context, stora
 		}
 	}
 	return nil
+}
+
+// parentIsLocalForCreate answers nativeParentIsLocal's question on the create
+// path, where the child's id may not exist yet.
+//
+// A minted child lands in the namespace this store mints under, so that is the
+// namespace the answer has to be about. Every production open already knows it
+// — openNativeStorage reads issue_prefix while the scoped env is projected — and
+// a store constructed without one asks the storage layer, rather than
+// answering "foreign" for every parent, when the child's id names no
+// namespace either. Answering foreign there is what let Create admit a
+// dangling parent inside this store's own namespace while Update, which
+// sees the child's real id, refused the same value.
+//
+// The fallback reaches no further than that. A foreign-prefixed child on a
+// prefix-less store is still judged against the CHILD's prefix, so the two
+// arms can still disagree on that shape — but only a handle built without
+// an open reaches it, since every production open caches the prefix, and
+// an empty one there means the ledger declares no namespace at all. Closing
+// the residual needs storage plumbed through the update arms too; ga-0fmv4
+// tracks it.
+func (s *NativeDoltStore) parentIsLocalForCreate(ctx context.Context, storage beadslib.Storage, issueID, parentID string) (bool, error) {
+	prefix := s.idPrefix
+	if prefix == "" && nativeBeadIDPrefix(issueID) == "" {
+		configured, err := storage.GetConfig(ctx, nativeIssuePrefixConfigKey)
+		if err != nil {
+			return false, fmt.Errorf("reading native issue prefix: %w", err)
+		}
+		prefix = normalizeIDPrefix(configured)
+	}
+	return nativeParentIsLocal(issueID, parentID, prefix), nil
 }
 
 func (s *NativeDoltStore) compensateFailedCreate(ctx context.Context, storage beadslib.Storage, issueID string, deps []*beadslib.Dependency) error {
@@ -2109,23 +2163,33 @@ func shouldPrevalidateNativeDependency(issueID, targetID, storePrefix string) bo
 	return sourcePrefix == "" || targetPrefix == "" || sourcePrefix == targetPrefix
 }
 
-// nativeParentIsLocal reports whether a parent id is one THIS store could have
-// minted — the only case in which resolving it is a legitimate refusal rather
+// nativeParentIsLocal reports whether a parent id names a row THIS store would
+// hold — the only case in which resolving it is a legitimate refusal rather
 // than a blind spot.
 //
-// A store that declares no namespace answers false for every id. That is not a
-// technicality: such a store cannot tell its own rows from another ledger's, so
-// every id it is handed might be foreign, and the weak reading is the only one
-// that cannot refuse a bead that exists.
+// Two prefixes make a parent local, and they answer different questions. The
+// STORE's own mint prefix is the namespace it owns: an absent row there is an
+// absence this store can see, whatever prefix the CHILD carries — a pinned id
+// or a relic a storage migration copied in carries another ledger's, and
+// reading the question off the child alone would call the store's own namespace
+// foreign and let the reparent land dangling. The child's prefix is local too,
+// because that is where the upstream library draws the line: issueops resolves
+// a same-prefix dependency target itself, post-commit, with no embedder knob to
+// weaken it, so agreeing with it here keeps the refusal in front of the write
+// instead of behind a compensating delete.
+//
+// Everything else is weak. A store that declares no namespace, asked about a
+// child whose own id names none, cannot tell its rows from another ledger's,
+// and the weak reading is the only one that cannot refuse a bead that exists.
 func nativeParentIsLocal(issueID, parentID, storePrefix string) bool {
-	source := nativeBeadIDPrefix(issueID)
-	if source == "" {
-		source = normalizeIDPrefix(storePrefix)
-	}
-	if source == "" {
+	target := nativeBeadIDPrefix(parentID)
+	if target == "" {
 		return false
 	}
-	return source == nativeBeadIDPrefix(parentID)
+	if store := normalizeIDPrefix(storePrefix); store != "" && target == store {
+		return true
+	}
+	return target == nativeBeadIDPrefix(issueID)
 }
 
 func nativeBeadIDPrefix(id string) string {

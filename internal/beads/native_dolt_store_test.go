@@ -3056,8 +3056,15 @@ func (s *nativeDoltMemStorage) GetDependentsWithMetadata(_ context.Context, issu
 	return items, nil
 }
 
-func (s *nativeDoltMemStorage) GetConfig(context.Context, string) (string, error) {
-	return "gc", nil
+// GetConfig answers only the key the store actually asks for. The key is
+// spelled as a literal on purpose: naming nativeIssuePrefixConfigKey here
+// would make every caller agree with itself by construction, and the point of
+// the fixture is to pin which key the create-path prefix read asks for.
+func (s *nativeDoltMemStorage) GetConfig(_ context.Context, key string) (string, error) {
+	if key == "issue_prefix" {
+		return "gc", nil
+	}
+	return "", nil
 }
 
 func (s *nativeDoltMemStorage) AddComment(context.Context, string, string, string) error {

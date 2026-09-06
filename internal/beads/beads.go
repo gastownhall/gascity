@@ -95,7 +95,7 @@ type Bead struct {
 	//
 	// Weak, therefore, is the contract and not an admission. A store persists
 	// and filters this verbatim (Children and ListQuery.ParentID are string
-	// matches), and for any id OUTSIDE the namespace it mints it must never
+	// matches), and for any id in a namespace it does not serve it must never
 	// resolve, validate, rewrite, or place by it. A store that started
 	// rejecting an id it cannot see would break every cross-store molecule at
 	// once, and a store that started placing by it would strand the child in
@@ -105,12 +105,34 @@ type Bead struct {
 	// where the backends can actually agree. A dangling id INSIDE a store's own
 	// namespace is a row that store can see the absence of, and the strong
 	// backends refuse it before writing anything; the weak ones cannot detect
-	// it at all. That divergence is left explicit rather than papered over —
-	// what every backend owes is that a foreign parent is carried without
-	// question. The conformance suite pins that owing for the providers that
-	// execute it (SQLite, native Dolt, mem, file, exec); it is not yet verified
-	// against the bd provider, whose RunStoreTests row is skipped pending a
-	// version bump (ga-e7z613), so there the contract holds by convention.
+	// it at all. Which ids count as inside is read off the STORE, not off the
+	// child — a row carrying another ledger's prefix (a pinned id, a relic a
+	// migration copied in) does not move the boundary — and, on a backend whose
+	// library resolves same-prefix dependency targets itself, off the child's
+	// prefix as well. What must never be resolved is an id in a namespace
+	// neither of those names. That divergence is left explicit rather than
+	// papered over — what the conformance suite pins, and what every provider
+	// here owes except the one named next, is that a foreign parent is carried
+	// without question.
+	//
+	// MemStore, FileStore, SQLiteStore and the script-backed exec provider
+	// carry every parent verbatim, resolving none of them. NativeDoltStore
+	// carries a foreign one the same way and additionally refuses a dangling id
+	// inside the namespace it serves, before writing anything — the strong
+	// reading, which its library forces (issueops resolves a same-prefix
+	// dependency target itself, post-commit).
+	//
+	// The bd-CLI provider (BdStore) is the exception, and it is named rather
+	// than implied. It hands this field to bd as --parent on Create and Update,
+	// and bd resolves it unconditionally: an id bd cannot see fails the command
+	// outright, and one it can see supplies the child's id, so placement follows
+	// the parent's namespace instead of the child's class. That is bd's
+	// contract, not something this package layers over it, and the provider is
+	// left following the tool it drives. Nothing in CI can see the divergence
+	// either — the only conformance run over a real bd is skipped (ga-e7z613).
+	// ga-6od57 tracks making the provider comply or un-skipping that run; until
+	// one of them lands, a caller pointing a bd-backed store at a parent in
+	// another ledger gets a refusal, not a weak reference.
 	ParentID    string   `json:"parent,omitempty"`
 	Ref         string   `json:"ref,omitempty"`         // formula step ID or formula name
 	Needs       []string `json:"needs,omitempty"`       // dependency step refs
