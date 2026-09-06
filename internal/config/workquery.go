@@ -197,10 +197,17 @@ type PoolDemandServeRules struct {
 // PoolDemandServeRulesForQuery returns the serving rules of the generated
 // routed pool-demand tier. Callers that classify a row (rather than build a
 // query) consume this; see the controller demand loop in cmd/gc.
+//
+// "message" is excluded alongside "epic": mail is read, not claimed as work
+// (#4419). A mail bead always carries its recipient as assignee, so
+// RequireUnassigned already keeps delivered mail out of this tier in
+// practice — declaring the type here makes the contract structural: the
+// query never serves a message bead, the controller never counts one as
+// capacity demand, and the two cannot drift apart.
 func PoolDemandServeRulesForQuery() PoolDemandServeRules {
 	return PoolDemandServeRules{
 		RequireUnassigned: true,
-		ExcludeTypes:      []string{"epic"},
+		ExcludeTypes:      []string{"epic", "message"},
 		ExcludeLabels:     append([]string(nil), beadmeta.DispatchHoldLabels...),
 	}
 }
@@ -268,6 +275,16 @@ func ephemeralReadyBaseSelectorJQ(selector string, excludeHoldLabels bool) strin
 		body += excludeHoldLabelsJQClause()
 	}
 	return body
+}
+
+// assignedReadySelectorJQ is the shared jq selector of both ephemeral
+// assigned-ready candidate filters: rows addressed to this identity, minus
+// mail message beads. Mail is read, not claimed as work (#4419): a message
+// bead's assignee is its recipient, so it has the same assignee-matches-
+// identity shape as a real pre-assigned wisp and would otherwise occupy the
+// tier's single serve slot.
+func assignedReadySelectorJQ() string {
+	return `select((.assignee // "") == $id) | select(((.issue_type // .type // "") != "message"))`
 }
 
 // legacyEphemeralReadyFilterJQ is the fast path: it withholds any candidate
@@ -555,10 +572,19 @@ func inProgressBlockedByEnrichmentScript(federated bool, checkHold bool) string 
 // assignedReadyTierCommand is the assigned-ready read for one identity: the
 // pre-assigned tier, and the tier a graph step assigned to this worker arrives
 // on. It is one of the four ready reads the federation swap covers.
+//
+// It excludes message beads explicitly: mail is read, not claimed as work
+// (#4419), and a mail bead's assignee is its recipient, so an unswept mail
+// wisp satisfies the assignee match and — at --limit=1 — consumes the tier's
+// only row, exiting the work query before the routed-pool tier runs. Recent
+// bd excludes messages from ready natively; the flag keeps the read safe on
+// older bd (>= 1.0.4 parses --exclude-type — the pool tier has leaned on
+// --exclude-type=epic there all along) and keeps the contract visible in the
+// generated query.
 func assignedReadyTierCommand(shellVar string, topo QueryTopology) string {
 	fed := topo.FederatedReady
 	return `r=$(` + readyReaderCommand(fed) + bdReadyIncludeEphemeralArg(topo.includeEphemeralReady()) +
-		` --assignee="$` + shellVar + `" --json --limit=1` + readyReaderStderrSink(fed) + `)` +
+		` --assignee="$` + shellVar + `" --exclude-type=message --json --limit=1` + readyReaderStderrSink(fed) + `)` +
 		readyReaderFailurePropagation(fed) + `; `
 }
 
@@ -654,12 +680,21 @@ func ephemeralAssignedInProgressProbeScript(shellVar string, topo QueryTopology)
 // checkHold=false: this is an assignee-scoped existence probe, not the
 // in_progress work-serving gate, so it must stay hold-transparent (ga-5736js;
 // pinned by TestEphemeralAssignedReadyProbeScriptDoesNotExcludeDispatchHoldLabels).
+//
+// Both filters exclude message beads via assignedReadySelectorJQ: mail lives
+// in the same ephemeral tier as order-dispatched wisps, so without the type
+// exclusion a read mail wisp awaiting its GC sweep was served as this tier's
+// only candidate and the script exited before the routed-pool tier ran — the
+// hook's #4419 message filter then stripped it and reported no_work while
+// routed work sat unqueried below. Same starvation as the held-wisp bug
+// (gas-kg6, #5114), and the same remedy: filter before the `.[:1]`
+// truncation, so a real assigned wisp behind the mail is served instead.
 func ephemeralAssignedReadyProbeScript(shellVar string, topo QueryTopology) string {
 	if topo.includeEphemeralReady() {
 		return ""
 	}
-	fastFilter := legacyEphemeralReadyFilterJQ(`select((.assignee // "") == $id)`, 1, false)
-	slowFilter := ephemeralReadyDependencyCandidateFilterJQ(`select((.assignee // "") == $id)`, 1, false)
+	fastFilter := legacyEphemeralReadyFilterJQ(assignedReadySelectorJQ(), 1, false)
+	slowFilter := ephemeralReadyDependencyCandidateFilterJQ(assignedReadySelectorJQ(), 1, false)
 	return `open_ephemeral=$(` + bdQueryEphemeralStatusQuietShell("open") + `); ` +
 		`r=$(printf "%s" "$open_ephemeral" | jq --arg id "$` + shellVar + `" ` + shellquote.Quote(fastFilter) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
