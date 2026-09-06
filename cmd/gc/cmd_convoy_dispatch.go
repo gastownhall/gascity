@@ -370,7 +370,7 @@ func handleControlDispatchError(cityPath, storePath string, graphStore beads.Sto
 	// because RecordSemanticControlRetry already persisted first_seen/count/error
 	// on the bead, so `bd show` still explains the stall even when the event is
 	// lost.
-	if quarantineErr := quarantineControlFailureBead(graphStore, bead, cause); quarantineErr != nil {
+	if _, quarantineErr := quarantineControlFailureBead(graphStore, bead, cause); quarantineErr != nil {
 		return errors.Join(cause, quarantineErr)
 	}
 	if stalled != nil {
@@ -457,7 +457,25 @@ func emitControlStalled(cityPath, storePath string, store beads.Store, bead bead
 	}
 }
 
-func quarantineControlFailureBead(store beads.Store, bead beads.Bead, cause error) error {
+// rootSettleFailure records a workflow root that failed to settle after its
+// workflow-finalize control bead was quarantined. quarantineControlFailureBead
+// hands one back (non-nil) whenever settleRootForQuarantinedFinalizer's close
+// attempt fails, so the caller can make the failure durably visible instead of
+// letting it vanish into a trace line. See ga-li4qa4.
+type rootSettleFailure struct {
+	RootBeadID      string
+	FinalizerBeadID string
+	// ErrorClass names the failure tier, mirroring beadmeta.ControllerErrorClassMetadataKey.
+	ErrorClass string
+	// Error is the store's refusal, truncated the same way controlQuarantineReason
+	// truncates the control bead's own reason.
+	Error string
+	// FollowUpBeadID is the reconciliation bead filed for this settle failure,
+	// when bead creation itself succeeded.
+	FollowUpBeadID string
+}
+
+func quarantineControlFailureBead(store beads.Store, bead beads.Bead, cause error) (*rootSettleFailure, error) { //nolint:unparam // result 0 is always nil at this RED commit; the immediately-following GREEN commit populates it on the settle-failure path (ga-li4qa4)
 	beadID := bead.ID
 	failureReason := "control_dispatch_error"
 	if errors.Is(cause, dispatch.ErrControlGraphMalformed) {
@@ -481,7 +499,7 @@ func quarantineControlFailureBead(store beads.Store, bead beads.Bead, cause erro
 			beadmeta.ControlQuarantinedAtMetadataKey:    workflowTraceNow().UTC().Format(time.RFC3339),
 		},
 	}); err != nil {
-		return err
+		return nil, err
 	}
 	_, _ = dispatch.ReconcileClosedScopeMember(store, beadID)
 
@@ -497,7 +515,7 @@ func quarantineControlFailureBead(store beads.Store, bead beads.Bead, cause erro
 			workflowTracef("control-quarantine bead=%s: closing root for quarantined finalizer failed (will retry later) err=%v", beadID, err)
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 // settleRootForQuarantinedFinalizer closes a workflow root whose

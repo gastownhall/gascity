@@ -36,6 +36,37 @@ func ControlStalledPayloadJSON(p ControlStalledPayload) json.RawMessage {
 	return b
 }
 
+// ControlRootSettleFailedPayload is the typed payload for
+// control.root_settle_failed events. It carries what an operator needs to
+// find and reconcile the stranded root without reading a trace log: which
+// root failed to settle, which finalizer quarantine triggered the attempt,
+// what the store refused, and the follow-up bead filed to track the
+// reconciliation (durable visibility standing in for the "later pass" that
+// never existed).
+type ControlRootSettleFailedPayload struct {
+	RootBeadID      string `json:"root_bead_id"`
+	FinalizerBeadID string `json:"finalizer_bead_id"`
+	StorePath       string `json:"store_path,omitempty"`
+	// ErrorClass names the failure tier ("hard").
+	ErrorClass string `json:"error_class"`
+	// Error is the store's refusal, truncated at the record site.
+	Error string `json:"error"`
+	// FollowUpBeadID is the reconciliation bead filed for this settle
+	// failure, when bead creation itself succeeded.
+	FollowUpBeadID string `json:"follow_up_bead_id,omitempty"`
+}
+
+// IsEventPayload marks ControlRootSettleFailedPayload as an events.Payload variant.
+func (ControlRootSettleFailedPayload) IsEventPayload() {}
+
+// ControlRootSettleFailedPayloadJSON builds the JSON wire form for attachment
+// to an Event.Payload field.
+func ControlRootSettleFailedPayloadJSON(p ControlRootSettleFailedPayload) json.RawMessage {
+	b, _ := json.Marshal(p) //nolint:errcheck // a struct of scalars cannot fail to marshal
+	return b
+}
+
 func init() {
 	RegisterPayload(ControlStalled, ControlStalledPayload{})
+	RegisterPayload(ControlRootSettleFailed, ControlRootSettleFailedPayload{})
 }

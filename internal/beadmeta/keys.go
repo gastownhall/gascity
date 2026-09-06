@@ -149,6 +149,7 @@ const (
 	FanoutModeMetadataKey                = "gc.fanout_mode"
 	FanoutStateMetadataKey               = "gc.fanout_state"
 	FinalDispositionMetadataKey          = "gc.final_disposition"
+	FinalizerBeadIDMetadataKey           = "gc.finalizer_bead_id"
 	ForEachMetadataKey                   = "gc.for_each"
 	FormulaMetadataKey                   = "gc.formula"
 	FormulaContractMetadataKey           = "gc.formula_contract"
@@ -207,6 +208,8 @@ const (
 	RetryStateMetadataKey               = "gc.retry_state"
 	RigRootMetadataKey                  = "gc.rig_root"
 	RootBeadIDMetadataKey               = "gc.root_bead_id"
+	RootSettleFailedAtMetadataKey       = "gc.root_settle_failed_at"
+	RootSettleFailedMetadataKey         = "gc.root_settle_failed"
 	RootStoreRefMetadataKey             = "gc.root_store_ref"
 	RouteQuarantineMetadataKey          = "gc.route_recovery_quarantined"
 	RouteQuarantineReasonMetadataKey    = "gc.route_recovery_quarantine_reason"
@@ -456,6 +459,7 @@ var KnownMetadataKeys = []string{
 	FanoutModeMetadataKey,
 	FanoutStateMetadataKey,
 	FinalDispositionMetadataKey,
+	FinalizerBeadIDMetadataKey,
 	ForEachMetadataKey,
 	FormulaMetadataKey,
 	FormulaContractMetadataKey,
@@ -505,6 +509,8 @@ var KnownMetadataKeys = []string{
 	RetryStateMetadataKey,
 	RigRootMetadataKey,
 	RootBeadIDMetadataKey,
+	RootSettleFailedAtMetadataKey,
+	RootSettleFailedMetadataKey,
 	RootStoreRefMetadataKey,
 	RouteQuarantineMetadataKey,
 	RouteQuarantineReasonMetadataKey,

@@ -2338,7 +2338,7 @@ func TestQuarantineControlFailureBeadClosesWithDiagnostics(t *testing.T) {
 		t.Fatalf("create control: %v", err)
 	}
 
-	if err := quarantineControlFailureBead(store, control, fmt.Errorf("%w: bad workflow", dispatch.ErrControlGraphMalformed)); err != nil {
+	if _, err := quarantineControlFailureBead(store, control, fmt.Errorf("%w: bad workflow", dispatch.ErrControlGraphMalformed)); err != nil {
 		t.Fatalf("quarantineControlFailureBead: %v", err)
 	}
 
@@ -2395,7 +2395,7 @@ func TestQuarantineControlFailureBeadTruncatesReasonAtUTF8Boundary(t *testing.T)
 	}
 	reason := strings.Repeat("a", maxControlQuarantineReasonMetadata-1) + "é tail"
 
-	if err := quarantineControlFailureBead(store, control, errors.New(reason)); err != nil {
+	if _, err := quarantineControlFailureBead(store, control, errors.New(reason)); err != nil {
 		t.Fatalf("quarantineControlFailureBead: %v", err)
 	}
 
@@ -2436,7 +2436,8 @@ func TestQuarantineControlFailureBeadSettlesRootWhenFinalizerQuarantined(t *test
 		t.Fatalf("create finalizer: %v", err)
 	}
 
-	if err := quarantineControlFailureBead(store, finalizer, errors.New("finalizer exploded")); err != nil {
+	settleFailure, err := quarantineControlFailureBead(store, finalizer, errors.New("finalizer exploded"))
+	if err != nil {
 		t.Fatalf("quarantineControlFailureBead: %v", err)
 	}
 
@@ -2455,6 +2456,12 @@ func TestQuarantineControlFailureBeadSettlesRootWhenFinalizerQuarantined(t *test
 	}
 	if gotRoot.Metadata["gc.failure_reason"] != "finalizer_control_quarantined" {
 		t.Fatalf("root failure_reason = %q, want finalizer_control_quarantined", gotRoot.Metadata["gc.failure_reason"])
+	}
+	if gotRoot.Metadata["gc.root_settle_failed"] != "" {
+		t.Fatalf("root_settle_failed = %q, want empty (settle succeeded)", gotRoot.Metadata["gc.root_settle_failed"])
+	}
+	if settleFailure != nil {
+		t.Fatalf("settleFailure = %+v, want nil (settle succeeded)", settleFailure)
 	}
 }
 
@@ -2482,7 +2489,8 @@ func TestQuarantineControlFailureBeadDoesNotTouchRootForNonFinalizerControl(t *t
 		t.Fatalf("create control: %v", err)
 	}
 
-	if err := quarantineControlFailureBead(store, control, errors.New("fanout exploded")); err != nil {
+	settleFailure, err := quarantineControlFailureBead(store, control, errors.New("fanout exploded"))
+	if err != nil {
 		t.Fatalf("quarantineControlFailureBead: %v", err)
 	}
 
@@ -2498,6 +2506,9 @@ func TestQuarantineControlFailureBeadDoesNotTouchRootForNonFinalizerControl(t *t
 	}
 	if gotRoot.Metadata["gc.final_disposition"] != "" {
 		t.Fatalf("root final_disposition = %q, want empty (untouched)", gotRoot.Metadata["gc.final_disposition"])
+	}
+	if settleFailure != nil {
+		t.Fatalf("settleFailure = %+v, want nil (non-finalizer control bead)", settleFailure)
 	}
 }
 
@@ -2531,7 +2542,8 @@ func TestQuarantineControlFailureBeadNeverDowngradesAlreadySettledRoot(t *testin
 		t.Fatalf("create finalizer: %v", err)
 	}
 
-	if err := quarantineControlFailureBead(store, finalizer, errors.New("finalizer exploded")); err != nil {
+	settleFailure, err := quarantineControlFailureBead(store, finalizer, errors.New("finalizer exploded"))
+	if err != nil {
 		t.Fatalf("quarantineControlFailureBead: %v", err)
 	}
 
@@ -2545,6 +2557,9 @@ func TestQuarantineControlFailureBeadNeverDowngradesAlreadySettledRoot(t *testin
 	if gotRoot.Metadata["gc.outcome"] != "pass" {
 		t.Fatalf("root outcome = %q, want pass (never downgraded)", gotRoot.Metadata["gc.outcome"])
 	}
+	if settleFailure != nil {
+		t.Fatalf("settleFailure = %+v, want nil (root already settled, nothing to do)", settleFailure)
+	}
 }
 
 // TestQuarantineControlFailureBeadToleratesRootCloseFailure is the
@@ -2555,6 +2570,13 @@ func TestQuarantineControlFailureBeadNeverDowngradesAlreadySettledRoot(t *testin
 // follow-up root close does not -- the finalizer's own quarantine is the
 // load-bearing action here, exactly as emitControlStalled's own event loss is
 // already tolerated by handleControlDispatchError. See ga-japz50.
+//
+// ga-li4qa4 closed the resulting visibility gap: a stranded root used to be
+// silently unrecoverable behind a comment claiming it was "retried by a
+// later pass" that never existed. Now the failed settle is recorded durably
+// on the root itself and handed back to the caller so a follow-up bead can
+// be filed -- the reconciliation is discoverable and actionable instead of
+// invisible.
 func TestQuarantineControlFailureBeadToleratesRootCloseFailure(t *testing.T) {
 	base := beads.NewMemStore()
 	root, err := base.Create(beads.Bead{
@@ -2580,7 +2602,8 @@ func TestQuarantineControlFailureBeadToleratesRootCloseFailure(t *testing.T) {
 	}
 	store := &refusingCloseStore{Store: base, blockedID: root.ID, blockerID: finalizer.ID}
 
-	if err := quarantineControlFailureBead(store, finalizer, errors.New("finalizer exploded")); err != nil {
+	settleFailure, err := quarantineControlFailureBead(store, finalizer, errors.New("finalizer exploded"))
+	if err != nil {
 		t.Fatalf("quarantineControlFailureBead: %v, want nil -- a root close failure must not undo an already-successful finalizer quarantine", err)
 	}
 
@@ -2600,7 +2623,49 @@ func TestQuarantineControlFailureBeadToleratesRootCloseFailure(t *testing.T) {
 		t.Fatalf("get root: %v", err)
 	}
 	if gotRoot.Status != "open" {
-		t.Fatalf("root status = %q, want open -- the store refused the close, so the root is left untouched for a later pass", gotRoot.Status)
+		t.Fatalf("root status = %q, want open -- the store refused the close", gotRoot.Status)
+	}
+	if !strings.Contains(gotRoot.Metadata["gc.controller_error"], "cannot close blocked issue") {
+		t.Fatalf("root controller_error = %q, want mention of the close failure", gotRoot.Metadata["gc.controller_error"])
+	}
+	if gotRoot.Metadata["gc.controller_error_class"] != "hard" {
+		t.Fatalf("root controller_error_class = %q, want hard", gotRoot.Metadata["gc.controller_error_class"])
+	}
+	if gotRoot.Metadata["gc.root_settle_failed"] != "true" {
+		t.Fatalf("root_settle_failed = %q, want true", gotRoot.Metadata["gc.root_settle_failed"])
+	}
+	if gotRoot.Metadata["gc.root_settle_failed_at"] == "" {
+		t.Fatal("root_settle_failed_at is empty")
+	}
+
+	if settleFailure == nil {
+		t.Fatal("settleFailure = nil, want non-nil -- the root failed to settle")
+	}
+	if settleFailure.RootBeadID != root.ID {
+		t.Fatalf("settleFailure.RootBeadID = %q, want %q", settleFailure.RootBeadID, root.ID)
+	}
+	if settleFailure.FinalizerBeadID != finalizer.ID {
+		t.Fatalf("settleFailure.FinalizerBeadID = %q, want %q", settleFailure.FinalizerBeadID, finalizer.ID)
+	}
+	if settleFailure.ErrorClass != "hard" {
+		t.Fatalf("settleFailure.ErrorClass = %q, want hard", settleFailure.ErrorClass)
+	}
+	if !strings.Contains(settleFailure.Error, "cannot close blocked issue") {
+		t.Fatalf("settleFailure.Error = %q, want mention of the close failure", settleFailure.Error)
+	}
+	if settleFailure.FollowUpBeadID == "" {
+		t.Fatal("settleFailure.FollowUpBeadID is empty -- want a reconciliation bead filed")
+	}
+
+	followUp, err := base.Get(settleFailure.FollowUpBeadID)
+	if err != nil {
+		t.Fatalf("get follow-up bead %s: %v", settleFailure.FollowUpBeadID, err)
+	}
+	if followUp.Metadata["gc.root_bead_id"] != root.ID {
+		t.Fatalf("follow-up bead root_bead_id = %q, want %q", followUp.Metadata["gc.root_bead_id"], root.ID)
+	}
+	if followUp.Metadata["gc.finalizer_bead_id"] != finalizer.ID {
+		t.Fatalf("follow-up bead finalizer_bead_id = %q, want %q", followUp.Metadata["gc.finalizer_bead_id"], finalizer.ID)
 	}
 }
 
