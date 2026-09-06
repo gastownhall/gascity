@@ -885,19 +885,37 @@ func watchConfigTargets(targets []config.WatchTarget, dirty *atomic.Bool, pokeCh
 	}
 }
 
+// ignoredConfigWatchDirs are directory names that never carry configuration
+// and are skipped at any depth, both when registering recursive watches
+// (configWatchRegistrar.addPath) and when classifying events.
+//
+// .gc and .beads are runtime state. .git, node_modules and __pycache__ are
+// the ecosystem trees every other pack-tree walk already skips
+// (config.isIgnoredPackRuntimePath, the cmd_lint walk): watching them
+// registers thousands of descriptors that carry no config, and — because a
+// watch event marks the config dirty — turns an ordinary commit, fetch or
+// dependency install inside a watched repo into a full config reload plus a
+// watcher restart. gastownhall/gascity#2954 removed node_modules from pack
+// content hashing (#3063); the watch walk kept descending into it.
+var ignoredConfigWatchDirs = map[string]struct{}{
+	".gc":          {},
+	".beads":       {},
+	".git":         {},
+	"node_modules": {},
+	"__pycache__":  {},
+}
+
 func shouldIgnoreConfigWatchEvent(path string) bool {
 	clean := filepath.Clean(path)
 	if clean == "" || clean == "." {
 		return false
 	}
-	sepGC := string(filepath.Separator) + ".gc"
-	sepBeads := string(filepath.Separator) + ".beads"
-	return clean == ".gc" ||
-		clean == ".beads" ||
-		strings.HasSuffix(clean, sepGC) ||
-		strings.HasSuffix(clean, sepBeads) ||
-		strings.Contains(clean, sepGC+string(filepath.Separator)) ||
-		strings.Contains(clean, sepBeads+string(filepath.Separator))
+	for _, part := range strings.Split(filepath.ToSlash(clean), "/") {
+		if _, ok := ignoredConfigWatchDirs[part]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // reloadResult holds the result of a config reload attempt.
