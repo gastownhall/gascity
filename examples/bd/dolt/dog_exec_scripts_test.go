@@ -515,7 +515,7 @@ set_hash() {
 case "$query" in
   *"SELECT COUNT(*) FROM dolt_remotes WHERE name = 'origin'"*)
     case "$mode" in
-      remote_success|remote_active_branch|remote_invalid_active_branch|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|remote_writer_race_before_flatten|multiple_remotes_with_origin|backup_remote_reconcile|backup_remote_push_failure|backup_remote_filters_non_file_and_authoritative)
+      backup_remote_reconcile|backup_remote_push_failure|backup_remote_filters_non_file_and_authoritative)
         print_cell 1
         ;;
       *)
@@ -540,8 +540,11 @@ case "$query" in
       remote_success|remote_active_branch|remote_invalid_active_branch|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|remote_writer_race_before_flatten)
         print_cell 1
         ;;
-      multiple_remotes_with_origin|multiple_remotes_no_origin)
+      multiple_remotes_with_origin|multiple_remotes_no_origin|multiple_remotes_local_beats_origin)
         print_cell 2
+        ;;
+      remote_sole_non_local)
+        print_cell 1
         ;;
       explicit_backup_remote)
         print_cell 1
@@ -558,22 +561,23 @@ case "$query" in
     esac
     exit 0
     ;;
-  *"SELECT name FROM dolt_remotes ORDER BY name LIMIT 1"*)
-    case "$mode" in
-      remote_success|remote_active_branch|remote_invalid_active_branch|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|remote_writer_race_before_flatten|multiple_remotes_with_origin)
-        print_cell origin
-        ;;
-      explicit_backup_remote)
-        print_cell backup
-        ;;
-      *)
-        print_cell ""
-        ;;
-    esac
-    exit 0
-    ;;
   *"SELECT name, url FROM dolt_remotes ORDER BY name"*)
     case "$mode" in
+      remote_success|remote_active_branch|remote_invalid_active_branch|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|remote_writer_race_before_flatten)
+        print_remote_rows origin "file:///data/beads"
+        ;;
+      remote_sole_non_local)
+        print_remote_rows origin "https://example.test/beads"
+        ;;
+      multiple_remotes_with_origin)
+        print_remote_rows mirror "https://mirror.test/beads" origin "file:///data/beads"
+        ;;
+      multiple_remotes_no_origin)
+        print_remote_rows mirror "https://mirror.test/beads" hosted "https://hosted.test/beads"
+        ;;
+      multiple_remotes_local_beats_origin)
+        print_remote_rows backup "file:///data/backup/beads" origin "https://example.test/beads"
+        ;;
       backup_remote_reconcile|backup_remote_push_failure)
         print_remote_rows origin "https://example.test/beads" backup "file:///data/backup/beads"
         ;;
@@ -1471,8 +1475,8 @@ func TestCompactScriptFailsWhenMultipleRemotesLackOrigin(t *testing.T) {
 	if err == nil {
 		t.Fatalf("compact succeeded despite ambiguous remotes:\n%s", out)
 	}
-	if !strings.Contains(out, "multiple remotes found without origin") {
-		t.Fatalf("output missing ambiguous remote failure:\n%s", out)
+	if !strings.Contains(out, "no local (file://) remote found") {
+		t.Fatalf("output missing no-local-remote failure:\n%s", out)
 	}
 	data, err := os.ReadFile(fixture.doltLog)
 	if err != nil {
@@ -1482,6 +1486,59 @@ func TestCompactScriptFailsWhenMultipleRemotesLackOrigin(t *testing.T) {
 		if strings.Contains(string(data), forbidden) {
 			t.Fatalf("ambiguous remotes must block compaction before %s:\n%s", forbidden, data)
 		}
+	}
+}
+
+// TestCompactScriptFailsWhenSoleRemoteIsNonLocal asserts that compact never
+// auto-selects the one and only configured remote unless it is a local
+// file:// path — a lone hosted "origin" must not silently become the compact
+// target without an explicit GC_DOLT_COMPACT_REMOTE override.
+func TestCompactScriptFailsWhenSoleRemoteIsNonLocal(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "remote_sole_non_local", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("compact succeeded despite a sole non-local remote:\n%s", out)
+	}
+	if !strings.Contains(out, "no local (file://) remote found") {
+		t.Fatalf("output missing no-local-remote failure:\n%s", out)
+	}
+	data, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	for _, forbidden := range []string{"DOLT_FETCH", "DOLT_RESET", "DOLT_PUSH"} {
+		if strings.Contains(string(data), forbidden) {
+			t.Fatalf("a sole non-local remote must never be auto-selected or pushed to before %s:\n%s", forbidden, data)
+		}
+	}
+}
+
+// TestCompactScriptPrefersLocalRemoteOverNonLocalOrigin asserts that
+// select_remote's locality policy beats name-based preference: when "origin"
+// is configured but is not a local file:// remote, and another candidate is
+// local, compact selects and pushes to the local candidate instead of origin.
+func TestCompactScriptPrefersLocalRemoteOverNonLocalOrigin(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "multiple_remotes_local_beats_origin", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("compact failed with a local remote available among multiple remotes: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "remote=backup") {
+		t.Fatalf("output missing local remote selection:\n%s", out)
+	}
+	data, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	log := string(data)
+	if !strings.Contains(log, "DOLT_FETCH('backup')") {
+		t.Fatalf("compact did not fetch the local remote:\n%s", log)
+	}
+	if !strings.Contains(log, "DOLT_PUSH('--force', '--set-upstream', 'backup', 'main')") {
+		t.Fatalf("compact did not push the local remote:\n%s", log)
+	}
+	if strings.Contains(log, "DOLT_FETCH('origin')") || strings.Contains(log, "'origin', 'main'") {
+		t.Fatalf("compact must never select the non-local origin remote when a local candidate exists:\n%s", log)
 	}
 }
 
