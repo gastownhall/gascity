@@ -114,6 +114,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dispatch, so shell variables containing multiple IDs no longer look like one
   already-handled message.
 
+- **A `lifecycle=one_shot` pool session that exits normally no longer blocks
+  its own runtime name forever.** The session's bounded-work exit lands its
+  bead in `state=asleep` via the generic heal path, same as any other dead
+  session, but `reusablePoolSessionInfo` excluded every asleep session from
+  reuse on the assumption that "the reconciler closes orphaned asleep
+  beads" — no such closing exists. The bead stayed open holding the
+  identity's `session_name`, and the next tick's fresh create failed closed
+  on that same name ("pool session name unavailable ... session name
+  already exists") until an operator ran `gc session close` by hand. The
+  asleep exclusion is now scoped: a `one_shot` session whose sleep reason is
+  already in the freeable allow-list (idle, idle-timeout, city-stop,
+  failed-create, runtime-missing, provider-terminal-error) is reused
+  through the ordinary wake path instead. Persistent (non-`one_shot`) pools
+  are unaffected — a genuine crash still gets a fresh identity.
+
 - **`gc import add` of a local in-git pack now locks to HEAD, not the repo's
   latest tag.** Per `gc import add --help`, a local path inside a git
   worktree is documented to be "locked to the current commit," but the

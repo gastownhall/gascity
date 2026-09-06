@@ -4910,6 +4910,41 @@ func sessionBeadHasAssignedWorkInfo(workBeads []beads.Bead, info session.Info) b
 	return false
 }
 
+// sessionBeadHasAssignedWorkByAnyIdentityInfo is the broader sibling of
+// sessionBeadHasAssignedWorkInfo: it matches an open/in-progress work bead's
+// Assignee against every current identity of the session (ID,
+// SessionNameMetadata, ConfiguredNamedIdentity, Alias, AliasHistory — see
+// session.AssigneeIdentities), not just the narrower ID/SessionNameMetadata/
+// ConfiguredNamedIdentity trio sessionBeadHasAssignedWorkInfo pins. Work
+// claimed by an agent is commonly assigned under its actor alias (GC_ALIAS /
+// BEADS_ACTOR, see session.AssigneeIdentifier), which the narrower check
+// does not consider, so it can miss live assigned work entirely.
+//
+// It exists as a separate function (not a change to the pinned
+// sessionBeadHasAssignedWorkInfo) so its wider match is opt-in for callers
+// that need it — currently only the one_shot asleep-freeable wake-reuse
+// guard in reusablePoolSessionInfo, where under-detecting assigned work lets
+// the ordinary wake path "reuse" an identity that still holds an unfinished
+// step, orphaning it a tick later with the step pinned in_progress forever.
+func sessionBeadHasAssignedWorkByAnyIdentityInfo(workBeads []beads.Bead, info session.Info) bool {
+	identities := make(map[string]bool, 5)
+	for _, id := range sessionBeadAssigneeIdentitiesInfo(info) {
+		if id = strings.TrimSpace(id); id != "" {
+			identities[id] = true
+		}
+	}
+	for _, wb := range workBeads {
+		assignee := strings.TrimSpace(wb.Assignee)
+		if assignee == "" || (wb.Status != "open" && wb.Status != "in_progress") {
+			continue
+		}
+		if identities[assignee] {
+			return true
+		}
+	}
+	return false
+}
+
 // poolRequestResumesAssignedWorkInfo proves that a concrete resume request is
 // still backed by its exact actionable work bead and that the bead is assigned
 // through any current or historical identity of the preferred session.

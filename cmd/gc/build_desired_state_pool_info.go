@@ -209,7 +209,37 @@ func reusablePoolSessionInfo(bp *agentBuildParams, cfgAgent *config.Agent, templ
 		return false
 	}
 	if info.MetadataState == "asleep" {
-		return false
+		// A one_shot pool's own exit is expected completion, not a crash to
+		// avoid resuming: nothing closes its bead (the reconciler does not
+		// actually implement the "closes orphaned asleep beads" behavior this
+		// file's callers assume), so blanket-excluding every asleep session
+		// leaves it open forever holding the identity's runtime session_name
+		// — the next tick's fresh create then fails closed on that same name
+		// (derivePoolSessionName -> errPoolSessionNameUnavailable) until an
+		// operator manually closes it. A freeable-asleep (idle/idle-timeout/
+		// etc — see isPoolSessionSlotFreeableInfo) one_shot exit carries no
+		// deliberate hold, so it is reused instead: the ordinary wake path
+		// retires the exit and remints the identity in place. Persistent
+		// pools keep today's behavior (a genuine crash gets a fresh identity
+		// rather than resuming a possibly-corrupt conversation).
+		if cfgAgent.Lifecycle != config.AgentLifecycleOneShot || !isPoolSessionSlotFreeableInfo(info) {
+			return false
+		}
+		// A one_shot exit that still holds an open/in-progress assigned work
+		// bead under any of its identities is not a clean exit: the bounded
+		// unit of work never finished, so waking/reusing it here hands the
+		// step no real execution turn — the reused session drains and lands
+		// orphaned ~45-55s later, and the step stays pinned in_progress on
+		// the dead name with retry control never re-attempting it. Fall
+		// through to fresh-identity creation instead (the pre-6f1ee854b
+		// behavior for this case), which claims the step properly. Uses the
+		// wider by-any-identity match (including actor alias) because
+		// claimed work is commonly assigned under GC_ALIAS/BEADS_ACTOR, not
+		// necessarily the raw SessionNameMetadata the narrower
+		// sessionBeadHasAssignedWorkInfo check below matches.
+		if sessionBeadHasAssignedWorkByAnyIdentityInfo(bp.assignedWorkBeads, info) {
+			return false
+		}
 	}
 	if isManualSessionInfoForAgent(info, cfgAgent) {
 		return false
