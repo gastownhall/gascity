@@ -130,6 +130,104 @@ lane. This is the starting classification:
 | GoReleaser snapshot | `rc-gate.yml` | RC-only |
 | macOS parity | `mac-regression.yml`, `rc-gate.yml` | Separate macOS gate with separate SLO |
 
+### Mac-Sensitive Path Auto-Labeling
+
+`needs-mac` gates whether `mac-regression.yml` runs at all on a PR through
+its own native `pull_request` trigger: the `gate` job's `pull_request`
+branch only sets `run_smoke`/`run_full` when `needs-mac` is present in that
+event's label snapshot; a same-repo, non-draft PR without the label gets
+`run_smoke=false; run_full=false` and every Mac tier job is skipped. This
+subsection documents the current, shipped mechanism that gets that label
+onto a same-repo PR. It is a separate, already-landed concern from the
+two-minute planner proposed elsewhere in this document, not a design this
+document is proposing.
+
+**Curated path policy.** The `auto-label-path-sensitive` job in
+`.github/workflows/dispatch-labeled-pr-suite.yml` lists each same-repo PR's
+changed files and matches them against a fixed allowlist:
+
+- `internal/pathutil/**`
+- `internal/fsys/**`
+- `internal/testutil/path.go`
+- `cmd/gc/path_*.go`
+- `cmd/gc/*_path*.go`
+- `cmd/gc/city_discovery*.go`
+- `cmd/gc/*worktree*.go`
+- `cmd/gc/cmd_supervisor_city*.go`
+- `.github/actions/setup-gascity-macos/**`
+- `**/*_darwin.go`
+- `**/*_darwin_test.go`
+
+The list is deliberately narrower than all of `cmd/gc/**`: it targets the
+path/worktree/reaper containment code that actually broke macOS in the
+ga-xbilek incident (PR #4844), not every `cmd/gc` change. Maintainers extend
+the allowlist by editing the `case` statement in that job's "Label
+path-sensitive PRs and dispatch Mac Regression" step and the parallel
+`macSensitivePathFamilies` slice in
+`test/workflows/mac_sensitive_auto_label_test.go`, which parses the checked-in
+workflow YAML and asserts against both directly. That test pins: the path
+policy against positive fixtures (the original incident file plus one per
+family above) and negative fixtures (unrelated `cmd/gc` changes, a docs-only
+change, an ordinary workflow file, and near-miss package/extension names
+that must NOT match); that the job's guards and dispatch run in a fixed order
+(same-repo guard, file listing, add-only label, draft stop, shared trust
+check, head-SHA dedup, then dispatch); that the source never bypasses the Mac
+workflow's own gate (no `run_smoke`/`run_full`/`ruleset` in the job source);
+and that the trust boundary is invoked, not re-implemented, in both this job
+and `dispatch-suite`. A policy change is a red/green edit to the fixture
+tables and `macSensitivePathFamilies` in that test file together with the
+workflow's `case` statement.
+
+**Automatic same-repo labeling and dispatch.** The job runs on `opened`,
+`reopened`, `synchronize`, and `ready_for_review` — every event that can
+change the net PR diff — and re-evaluates the current diff each time. On a
+path match it:
+
+1. Adds the `needs-mac` label if not already present. This never removes the
+   label: a later push that stops touching a matched path leaves the label
+   in place. A maintainer can still remove the label by hand at any time
+   (the job has no removal path), but a later `synchronize` whose diff still
+   matches the policy adds it right back.
+2. Stops after labeling if the PR is a draft — drafts may carry the label
+   but must not consume Mac minutes.
+3. Otherwise checks the same trust boundary used for manual dispatch
+   (`.github/workflows/scripts/pr_trust_check.py`: `author_association` of
+   `OWNER`, `MEMBER`, or `COLLABORATOR`, or an allowlisted login in
+   `.github/blacksmith-allowlist.txt`) and stops if the author is not
+   trusted.
+4. Otherwise dispatches `mac-regression.yml` directly
+   (`gh workflow run mac-regression.yml --ref "$BASE_REF" -f suite=needs-mac
+   ...`, run from the trusted base ref), skipping only if a run is already
+   queued or in progress for the same head SHA.
+
+**Labeling is not dispatch — `dispatch-labeled-pr-suite.yml` owns both.**
+The auto-labeling job dispatches Mac Regression itself rather than relying on
+GitHub to route the label into a run, for two independent reasons. First, a
+label applied with the workflow's own `GITHUB_TOKEN` does not produce a new
+`pull_request_target: labeled` delivery, so chaining through that event
+would never reach the pre-existing `dispatch-suite` job (the one that
+already handles a human manually applying `needs-mac` or
+`needs-review-formulas` by hand). Second, `mac-regression.yml`'s own native
+`pull_request` trigger fires on the same `opened`/`reopened`/`synchronize`/
+`ready_for_review` events as the auto-labeler, from the same webhook
+delivery, and its gate reads `needs-mac` from that same event's label
+snapshot — which predates the auto-labeler's `gh pr edit --add-label` call.
+So on the PR revision that first qualifies for the label, `mac-regression.yml`'s
+own trigger almost always observes the label as not-yet-present and skips.
+Only a later push, after the label already exists in the PR's real label
+set, would reach `run_full` through that native path on its own. Explicit
+dispatch is what makes the *first* qualifying revision actually run Mac
+Regression. Both jobs in `dispatch-labeled-pr-suite.yml` live in the same
+file and apply the same `pr_trust_check.py` trust boundary before
+dispatching — the auto-labeler adds a path-sensitivity policy in front of
+that boundary, it does not bypass or duplicate it.
+
+**Fork PRs.** The auto-labeling job exits before labeling or dispatching
+whenever the PR's head repository differs from the base repository. Fork PRs
+keep the pre-existing manual path: a maintainer applies `needs-mac` by hand,
+which `dispatch-suite` picks up on the `labeled` event, subject to the same
+trust check.
+
 ### Two-Minute Latency Budget
 
 The two-minute target is only accepted after a pilot proves this budget can
