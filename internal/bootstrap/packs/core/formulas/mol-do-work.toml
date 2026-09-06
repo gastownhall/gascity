@@ -16,11 +16,21 @@ review).
 | Variable | Source | Description |
 |----------|--------|-------------|
 | convoy_id | runtime | Input convoy tracking the single work bead |
+| escalation_target | caller / rig `formula_vars` | Mail recipient for blocked work (default: `human`) |
 """
 formula = "mol-do-work"
 
 [requires]
 formula_compiler = ">=2.0.0"
+
+[vars.escalation_target]
+description = """
+Mail recipient for escalations when work cannot be completed. Defaults to the
+reserved `human` alias, which resolves in every city. Cities that staff a
+work-health role (e.g. the gastown pack's witness) can point this at it, for
+example `escalation_target = "<rig>/witness"`.
+"""
+default = "human"
 
 [[steps]]
 id = "do-work"
@@ -91,7 +101,7 @@ actually happened:
   (the SHA) and `gc.work_branch` (the branch it is on).
 - `no-op` — the bead needed no change (already satisfied / duplicate); omit
   `gc.work_commit` and `gc.work_branch`.
-- `blocked` / `abandoned` — you could not complete it (also mail Witness).
+- `blocked` / `abandoned` — you could not complete it (also mail `{{escalation_target}}`).
 
 `gc.outcome=pass` stays — it is the control-plane step result and is disjoint
 from `gc.work_outcome`.
@@ -120,7 +130,7 @@ gc bd update "$WORK_BEAD_ID" \
   --notes "No-op: <why no change was needed>."
 ```
 For `blocked` / `abandoned`, use that value for `gc.work_outcome` and also mail
-Witness.
+`{{escalation_target}}`.
 
 **4. Close this formula step:**
 

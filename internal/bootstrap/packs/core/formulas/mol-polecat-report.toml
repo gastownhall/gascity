@@ -21,10 +21,10 @@ to `git push` or `gh pr create`.
 
 | Situation | Action |
 |-----------|--------|
-| Investigation blocked | Mail Witness, mark yourself stuck |
-| Blocked on external | Mail Witness, mark yourself stuck |
+| Investigation blocked | Mail the escalation target, mark yourself stuck |
+| Blocked on external | Mail the escalation target, mark yourself stuck |
 | Context filling | `gc runtime request-restart` (blocks until controller kills you) |
-| Unsure what to do | Mail Witness, don't guess |"""
+| Unsure what to do | Mail the escalation target, don't guess |"""
 formula = "mol-polecat-report"
 extends = ["mol-polecat-base"]
 
@@ -41,7 +41,7 @@ verify the investigation environment is ready.
 
 **No git checkout, no isolated worktree.** You investigate with existing
 sources in place. If you discover the issue requires a code fix, do NOT
-attempt it here — mail Witness and drain-ack so the operator can
+attempt it here — mail `{{escalation_target}}` and drain-ack so the operator can
 re-pour with `mol-polecat-commit` or `mol-polecat-pr`.
 
 **1. Confirm scope:**
@@ -89,7 +89,7 @@ code changes.
 - Gather concrete evidence: file paths, line numbers, command output.
 - Identify the root cause, or state clearly that it is unknown.
 - Do NOT edit, create, or delete any files. If you discover a code fix is
-  required, do NOT attempt it here — mail Witness and drain-ack so the
+  required, do NOT attempt it here — mail `{{escalation_target}}` and drain-ack so the
   operator can re-pour with mol-polecat-commit or mol-polecat-pr.
 
 **Exit criteria:** Investigation complete, evidence gathered, no files modified."""
@@ -118,7 +118,7 @@ git status
 There must be NO uncommitted code changes. If `git status` shows any
 modifications, STOP — do not run a broad `git checkout`. This is a shared,
 non-isolated checkout, so a blanket discard can wipe unrelated local work.
-Mail Witness, note the unexpected dirty state, and drain-ack so the
+Mail `{{escalation_target}}`, note the unexpected dirty state, and drain-ack so the
 operator can inspect. Only revert files you are certain you touched, by
 explicit path (e.g. `git checkout -- path/to/file`).
 

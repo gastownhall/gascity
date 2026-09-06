@@ -87,10 +87,12 @@ the bead description directly.
 
 ## Escalation
 
-When blocked, escalate — do not wait silently:
+When blocked, escalate — do not wait silently. `human` is the reserved
+recipient alias that resolves in every city; if your city staffs a
+coordinator role (e.g. the gastown pack's mayor), mail that instead:
 
 ```bash
-gc mail send mayor -s "BLOCKED: Brief description" -m "Details of the issue"
+gc mail send human -s "BLOCKED: Brief description" -m "Details of the issue"
 ```
 
 ## Context Exhaustion
