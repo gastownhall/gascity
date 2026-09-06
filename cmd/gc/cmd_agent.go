@@ -400,6 +400,14 @@ func resolvePoolInstance(cfg *config.City, input string) (config.Agent, bool) {
 		if !a.SupportsInstanceExpansion() || a.UsesCanonicalSingletonPoolIdentity() {
 			continue
 		}
+		for slot, instanceName := range a.NamepoolNames {
+			if sp.Max >= 0 && slot+1 > sp.Max {
+				break
+			}
+			if input == a.QualifiedInstanceName(instanceName) {
+				return deepCopyAgent(&a, instanceName, a.Dir), true
+			}
+		}
 		prefix := a.QualifiedName() + "-"
 		if !strings.HasPrefix(input, prefix) {
 			continue
@@ -425,6 +433,18 @@ func matchPoolInstance(a config.Agent, input string) (config.Agent, bool) {
 	sp := scaleParamsFor(&a)
 	if !a.SupportsInstanceExpansion() || a.UsesCanonicalSingletonPoolIdentity() {
 		return config.Agent{}, false
+	}
+	for slot, instanceName := range a.NamepoolNames {
+		if sp.Max >= 0 && slot+1 > sp.Max {
+			break
+		}
+		candidate := instanceName
+		if a.BindingName != "" {
+			candidate = a.BindingName + "." + instanceName
+		}
+		if input == candidate {
+			return deepCopyAgent(&a, instanceName, a.Dir), true
+		}
 	}
 	prefix := a.Name + "-"
 	if !strings.HasPrefix(input, prefix) {
