@@ -160,7 +160,27 @@ func (ctx *chainResolveContext) walkFromLeaf(name string, spec ProviderSpec, cha
 	layerSchema := providerSchemaForLayerArgs(parentMerged, spec)
 	child := normalizeProviderLayerArgsForSchema(spec, layerSchema)
 	ctx.chainSpecs[chainIndex] = child
-	return MergeProviderOverBuiltin(parentMerged, child), nil
+	merged := MergeProviderOverBuiltin(parentMerged, child)
+	// #5441: profile-aware gate on the final (leaf, index 0) merge only,
+	// so its condition is evaluated against the provider's fully merged
+	// effective args. See suppressPresetModelEffortForProfile.
+	if chainIndex == 0 {
+		merged = suppressPresetModelEffortForProfile(ctx.builtinAncestor(), child, merged)
+	}
+	return merged, nil
+}
+
+// builtinAncestor returns the name of the first built-in hop in the
+// chain (leaf -> root order), or "" when the chain has no built-in
+// terminus. Mirrors the BuiltinAncestor computation in
+// resolveProviderChain.
+func (ctx *chainResolveContext) builtinAncestor() string {
+	for _, hop := range ctx.chain {
+		if hop.Kind == "builtin" {
+			return hop.Name
+		}
+	}
+	return ""
 }
 
 // lookupBase resolves a base reference to a ProviderSpec and confirms its
