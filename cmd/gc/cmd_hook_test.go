@@ -1946,6 +1946,107 @@ esac
 	}
 }
 
+// TestCmdHookClaimTargetlessImplicitCityAgentFindsRawRouteAcrossStores covers
+// A provider-derived city agent invoked from its demand-spawned session
+// must fan its targetless hook query into rig stores while preserving the
+// canonical bare route target. Before the fix the implicit agent had no city
+// scope, so hook fanout searched only the city store and acknowledged a false
+// no_work drain even though the triggering routed bead was waiting in a rig.
+func TestCmdHookClaimTargetlessImplicitCityAgentFindsRawRouteAcrossStores(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "raw-rig")
+	fakeBin := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "bd.log")
+	for _, dir := range []string{filepath.Join(cityDir, ".gc"), rigDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cityToml := fmt.Sprintf(`[workspace]
+name = "test-city"
+
+[providers.claude]
+base = "builtin:claude"
+
+[[rigs]]
+name = "raw-rig"
+path = %q
+
+[[patches.agent]]
+name = "claude"
+max_active_sessions = 1
+`, rigDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	script := fmt.Sprintf(`#!/bin/sh
+printf 'cwd=%%s store=%%s args=%%s\n' "$(pwd)" "${BEADS_DIR:-}" "$*" >> %q
+case "$*" in
+  *"update ch-raw-route --claim --json"*)
+    printf '[{"id":"ch-raw-route","status":"in_progress","issue_type":"task","assignee":"claude","metadata":{"gc.routed_to":"claude"}}]'
+    ;;
+  *"show --json ch-raw-route"*)
+    printf '[{"id":"ch-raw-route","status":"in_progress","issue_type":"task","assignee":"claude","metadata":{"gc.routed_to":"claude"}}]'
+    ;;
+  *"--metadata-field gc.routed_to=claude"*)
+    if [ "$(pwd)" = %q ]; then
+      printf '[{"id":"ch-raw-route","status":"open","issue_type":"task","metadata":{"gc.routed_to":"claude"}}]'
+    else
+      printf '[]'
+    fi
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`, logPath, rigDir)
+	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+	t.Setenv("GC_AGENT", "claude")
+	t.Setenv("GC_ALIAS", "claude")
+	t.Setenv("GC_TEMPLATE", "claude")
+	t.Setenv("GC_SESSION_NAME", "test-city--claude")
+	t.Setenv("GC_SESSION_ORIGIN", "ephemeral")
+	t.Setenv("GC_SPAWN_ORIGIN", "demand")
+	t.Setenv("GC_TRIGGER_WORK_BEAD_ID", "ch-raw-route")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithOptions(nil, hookCommandOptions{Claim: true, DrainAck: true, JSON: true}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("targetless implicit hook = %d, want 0; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", logPath, err)
+	}
+	logText := string(logData)
+	if result.Action != "work" || result.Reason != "claimed" || result.BeadID != "ch-raw-route" || result.Route != "claude" {
+		t.Fatalf("targetless implicit hook = %+v, want claimed ch-raw-route routed to claude; bd log:\n%s", result, logText)
+	}
+	if result.DrainAcknowledged {
+		t.Fatalf("successful claim unexpectedly acknowledged drain: %+v", result)
+	}
+	if !strings.Contains(logText, "cwd="+rigDir+" ") {
+		t.Fatalf("targetless implicit city hook did not query the rig store; bd log:\n%s", logText)
+	}
+	if !strings.Contains(logText, "--metadata-field gc.routed_to=claude") {
+		t.Fatalf("targetless implicit city hook lost canonical route target claude; bd log:\n%s", logText)
+	}
+}
+
 // TestCmdHookClaimSuffixedPoolWorkerDoesNotAdoptBareTemplateInProgressWork is
 // the ga-80pen8 end-to-end regression: "builder" is BOTH a [[named_session]]
 // holder's own identity AND a pool template shared by suffixed instances
