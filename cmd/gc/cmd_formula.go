@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/spf13/cobra"
 )
@@ -931,10 +932,42 @@ store, copy them into the binding with
 				// its own graph leg through resolveGraphStore, which already
 				// names the binding, and its work leg is only read for an input
 				// convoy this arm never mints.
+				//
+				// Unlike the graph.v2 arm above, this path had no
+				// existing-attachment guard at all: attach targets a
+				// caller-named bead rather than a workflow-scoped step, so a
+				// bead that already carries a live molecule/workflow
+				// attachment (e.g. a sling finishing-sling wrapper) could
+				// accumulate a second, unrelated one on every cook --attach
+				// (ga-qiplt2). CheckNoMoleculeChildren is the same guard
+				// sling's own legacy (non-graph) attach path uses before
+				// instantiating a molecule (sling_core.go).
+				var attachCheck sling.SlingResult
+				if err := sling.CheckNoMoleculeChildren(attachStore, attach, attachStore, &attachCheck); err != nil {
+					return formulaCommandError(stderr, "gc formula cook: attach", jsonOutput, err)
+				}
+				for _, id := range attachCheck.AutoBurned {
+					_, _ = fmt.Fprintf(stderr, "Auto-burned stale molecule %s\n", id)
+				}
+
+				attachBead, err := attachStore.Get(attach)
+				if err != nil {
+					return formulaCommandError(stderr, "gc formula cook: attach", jsonOutput, fmt.Errorf("attach bead %s: %w", attach, err))
+				}
+
 				result, err := molecule.Attach(cmd.Context(), attachStore, recipe, attach, molecule.AttachOptions{
 					Title:          title,
 					Vars:           cookVars,
 					IdempotencyKey: graphRootKey,
+					// CheckNoMoleculeChildren above only rules out a molecule
+					// already ATTACHED TO attach (downward). It says nothing
+					// about whether attach is itself a step INSIDE a live
+					// workflow (upward, via gc.root_bead_id) -- self-root
+					// only when attach carries no gc.root_bead_id of its own,
+					// otherwise ResolveRunID's chain-walk must run so a
+					// workflow step grafts onto the real root, not itself
+					// (ga-er5u7k).
+					SelfRoot: attachBead.Metadata[beadmeta.RootBeadIDMetadataKey] == "",
 				})
 				if err != nil {
 					return formulaCommandError(stderr, "gc formula cook: attach", jsonOutput, err)

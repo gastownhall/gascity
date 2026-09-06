@@ -233,6 +233,17 @@ type AttachOptions struct {
 	// Callers should always use IdempotencyKey together with ExpectedEpoch
 	// to ensure crash-recovery correctness.
 	ExpectedEpoch int
+
+	// SelfRoot roots the new sub-DAG at attachBeadID itself instead of
+	// chain-walking attachBeadID's workflow_id/molecule_id metadata via
+	// beadmeta.ResolveRunID. Set this when the caller knows attachBeadID is
+	// its own root and any workflow_id/molecule_id it carries names a
+	// SEPARATE attachment (e.g. a sling finishing-sling wrapper tracking
+	// work about attachBeadID), not a container attachBeadID lives inside.
+	// Leave false (default) for the run-chain case the chain-walk exists
+	// for: a wisp/step bead grafted mid-workflow, whose workflow_id truly
+	// does name the containing workflow's root (gcg-wisp-y785sz).
+	SelfRoot bool
 }
 
 // ErrEpochConflict is returned when AttachOptions.ExpectedEpoch does not match
@@ -304,7 +315,19 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 	// (maintainer-city incident gcg-wisp-y785sz). A genuine top-level head
 	// with no run chain still self-roots via its own id (ResolveRunID's
 	// selfID fallback).
-	rootBeadID := beadmeta.ResolveRunID(parentBead.Metadata, attachBeadID, "")
+	//
+	// opts.SelfRoot skips the chain-walk entirely. workflow_id/molecule_id
+	// is overloaded: it also means "a molecule is ATTACHED TO me" (sling's
+	// finishing-sling pattern) rather than "I am a step INSIDE that
+	// molecule" -- the attach target is not part of the attached molecule's
+	// DAG at all, so chain-walking through it resolves to the wrong root
+	// and lets a second, unrelated attachment accumulate on the same target
+	// (ga-qiplt2). Callers in that position already know attachBeadID is
+	// its own root and opt in explicitly.
+	rootBeadID := attachBeadID
+	if !opts.SelfRoot {
+		rootBeadID = beadmeta.ResolveRunID(parentBead.Metadata, attachBeadID, "")
+	}
 	rootStoreRef := parentBead.Metadata[beadmeta.RootStoreRefMetadataKey]
 
 	// Idempotency: check for existing sub-DAG with the same key.
