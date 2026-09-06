@@ -17,7 +17,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -1261,9 +1260,8 @@ func graphFallbackBindingForBead(source beads.Bead, store beads.Store, cityName,
 		return graphRouteBinding{}, fmt.Errorf("unknown formulas v2 fallback target %q on %s", routedTo, source.ID)
 	}
 
-	binding := graphRouteBinding{QualifiedName: agentutil.RoutedToIdentity(&agentCfg)}
-	if agentCfg.SupportsInstanceExpansion() {
-		binding.MetadataOnly = true
+	binding := graphroute.GraphRouteBindingForAgent(agentCfg)
+	if binding.MetadataOnly {
 		return binding, nil
 	}
 	if source.Assignee != "" {
