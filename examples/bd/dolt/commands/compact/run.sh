@@ -449,6 +449,7 @@ pending_gc_dir="$PACK_STATE_DIR/compact-pending-gc"
 pending_push_dir="$PACK_STATE_DIR/compact-pending-push"
 pending_push_backup_dir="$PACK_STATE_DIR/compact-pending-push-backup"
 quarantine_dir="$PACK_STATE_DIR/compact-quarantine"
+notify_state_root="$PACK_STATE_DIR/compact-notify-state"
 
 # DB discovery uses rig metadata.json files first (authoritative), with a
 # filesystem-scan fallback when gc itself is unavailable.
@@ -1451,6 +1452,33 @@ has_compact_marker() {
   [ -f "$(compact_marker_path "$dir" "$db")" ]
 }
 
+# compact_notify_state_dir MARKER_DIR
+#   Notification cadence is operational state, not quarantine evidence. Keep
+#   it under a parallel tree keyed by marker kind so alert bookkeeping never
+#   rewrites the marker an operator must preserve for recovery.
+compact_notify_state_dir() {
+  _ns_marker_dir="$1"
+  _ns_marker_kind=$(basename "$_ns_marker_dir")
+  printf '%s/%s\n' "$notify_state_root" "$_ns_marker_kind"
+}
+
+# compact_notify_state_value MARKER_DIR DB KEY
+#   Read the dedicated sidecar when present. Fall back to legacy bookkeeping
+#   embedded in the marker so an upgrade does not immediately re-page every
+#   already-deduplicated quarantine.
+compact_notify_state_value() {
+  _ns_marker_dir="$1"
+  _ns_db="$2"
+  _ns_key="$3"
+  _ns_state_dir=$(compact_notify_state_dir "$_ns_marker_dir")
+  _ns_state_path=$(compact_marker_path "$_ns_state_dir" "$_ns_db")
+  if [ -f "$_ns_state_path" ]; then
+    compact_marker_value "$_ns_state_dir" "$_ns_db" "$_ns_key"
+    return
+  fi
+  compact_marker_value "$_ns_marker_dir" "$_ns_db" "$_ns_key"
+}
+
 write_compact_marker() {
   dir="$1"
   db="$2"
@@ -1565,15 +1593,16 @@ mail_compact_quarantine_alert() {
 }
 
 # marker_should_notify DIR DB REASON BACKSTOP_SECS
-#   Fail-open dedup+backstop check: EMIT (return 0) unless DIR/DB's marker
-#   last_notified_reason already matches REASON exactly AND fewer than
-#   BACKSTOP_SECS have elapsed since last_notified_ts. A missing/unreadable
-#   marker, a marker never notified before, a changed reason, or a
-#   missing/unparseable last_notified_ts all emit — this must never wrongly
-#   suppress a real alert. BACKSTOP_SECS<=0 disables the backstop re-notify
+#   Fail-open dedup+backstop check: EMIT (return 0) unless DIR/DB's notify
+#   sidecar already matches REASON and the marker instance exactly AND fewer
+#   than BACKSTOP_SECS have elapsed since last_notified_ts. A missing/
+#   unreadable marker or sidecar, a marker never notified before, a changed
+#   reason or marker instance, or a missing/unparseable last_notified_ts all
+#   emit — this must never wrongly suppress a real alert. BACKSTOP_SECS<=0
+#   disables the backstop re-notify
 #   (dedup holds forever once a reason has been notified, matching the
 #   original notify-once-per-distinct-state contract). Shared by quarantine,
-#   pending-push, and pending-gc markers — they carry the same
+#   pending-push, and pending-gc markers — their sidecars carry the same
 #   seen_count/notify_count/last_notified_ts/last_notified_reason shape.
 #   Mirrors the notify-once-per-distinct-state marker shape in
 #   gc-management's packs/maintainer-pr-review/scripts/hold-notice-lib.sh,
@@ -1588,13 +1617,19 @@ marker_should_notify() {
   _mn_marker=$(compact_marker_path "$_mn_dir" "$_mn_db")
   [ -f "$_mn_marker" ] && [ -r "$_mn_marker" ] || return 0
 
-  _mn_prev_reason=$(compact_marker_value "$_mn_dir" "$_mn_db" last_notified_reason || true)
+  _mn_prev_reason=$(compact_notify_state_value "$_mn_dir" "$_mn_db" last_notified_reason || true)
   [ -n "$_mn_prev_reason" ] || return 0
   [ "$_mn_prev_reason" = "$_mn_reason" ] || return 0
 
+  _mn_created_at=$(compact_marker_value "$_mn_dir" "$_mn_db" created_at || true)
+  _mn_prev_created_at=$(compact_notify_state_value "$_mn_dir" "$_mn_db" last_notified_created_at || true)
+  if [ -n "$_mn_prev_created_at" ] && [ "$_mn_prev_created_at" != "$_mn_created_at" ]; then
+    return 0
+  fi
+
   [ "$_mn_backstop_secs" -gt 0 ] 2>/dev/null || return 1
 
-  _mn_last_ts=$(compact_marker_value "$_mn_dir" "$_mn_db" last_notified_ts || true)
+  _mn_last_ts=$(compact_notify_state_value "$_mn_dir" "$_mn_db" last_notified_ts || true)
   _mn_last_epoch=$(parse_compact_timestamp "$_mn_last_ts" || true)
   [ -n "$_mn_last_epoch" ] || return 0
 
@@ -1606,14 +1641,14 @@ marker_should_notify() {
 }
 
 # record_marker_notify_state DIR DB REASON EMITTED
-#   Patches only the notify-bookkeeping fields (seen_count, notify_count,
-#   last_notified_ts, last_notified_reason, last_notify_error) onto DB's
-#   existing marker in DIR, preserving every other field byte-for-byte.
-#   EMITTED=1 bumps notify_count, stamps last_notified_ts/last_notified_reason
-#   and clears last_notify_error; EMITTED=0 bumps seen_count and records
-#   ERROR, so a marker stuck at notify_count=0 says why instead of leaving
-#   the operator to guess. A missing marker or write failure is a silent
-#   no-op — bookkeeping must never block or fail compaction.
+#   Writes notify-bookkeeping fields (seen_count, notify_count,
+#   last_notified_ts, last_notified_reason, last_notified_created_at,
+#   last_notify_error) to a dedicated sidecar. DB's evidence marker in DIR is
+#   never rewritten. EMITTED=1 bumps notify_count, stamps the notified state,
+#   and clears last_notify_error; EMITTED=0 bumps seen_count and records ERROR,
+#   so a marker stuck at notify_count=0 says why instead of leaving the
+#   operator to guess. A missing marker or write failure is a silent no-op —
+#   bookkeeping must never block or fail compaction.
 record_marker_notify_state() {
   _mn_dir="$1"
   _mn_db="$2"
@@ -1623,41 +1658,58 @@ record_marker_notify_state() {
 
   _mn_marker=$(compact_marker_path "$_mn_dir" "$_mn_db")
   [ -f "$_mn_marker" ] && [ -r "$_mn_marker" ] || return 0
+  _mn_state_dir=$(compact_notify_state_dir "$_mn_dir")
+  _mn_state=$(compact_marker_path "$_mn_state_dir" "$_mn_db")
+  if [ -f "$_mn_state" ] && [ ! -r "$_mn_state" ]; then
+    return 0
+  fi
 
-  _mn_seen_count=$(compact_marker_value "$_mn_dir" "$_mn_db" seen_count || true)
+  _mn_seen_count=$(compact_notify_state_value "$_mn_dir" "$_mn_db" seen_count || true)
   case "$_mn_seen_count" in ''|*[!0-9]*) _mn_seen_count=0 ;; esac
   _mn_seen_count=$((_mn_seen_count + 1))
 
-  _mn_notify_count=$(compact_marker_value "$_mn_dir" "$_mn_db" notify_count || true)
+  _mn_notify_count=$(compact_notify_state_value "$_mn_dir" "$_mn_db" notify_count || true)
   case "$_mn_notify_count" in ''|*[!0-9]*) _mn_notify_count=0 ;; esac
-  _mn_last_ts=$(compact_marker_value "$_mn_dir" "$_mn_db" last_notified_ts || true)
-  _mn_last_reason=$(compact_marker_value "$_mn_dir" "$_mn_db" last_notified_reason || true)
+  _mn_last_ts=$(compact_notify_state_value "$_mn_dir" "$_mn_db" last_notified_ts || true)
+  _mn_last_reason=$(compact_notify_state_value "$_mn_dir" "$_mn_db" last_notified_reason || true)
+  _mn_last_created_at=$(compact_notify_state_value "$_mn_dir" "$_mn_db" last_notified_created_at || true)
+  _mn_current_created_at=$(compact_marker_value "$_mn_dir" "$_mn_db" created_at || true)
   _mn_last_error="$_mn_error"
   if [ "$_mn_emitted" = "1" ]; then
     _mn_notify_count=$((_mn_notify_count + 1))
     _mn_last_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     _mn_last_reason="$_mn_reason"
+    _mn_last_created_at="$_mn_current_created_at"
     _mn_last_error=""
+  elif [ -z "$_mn_last_created_at" ] && [ -n "$_mn_last_reason" ]; then
+    # Migrate legacy in-marker cadence state to the sidecar without paging or
+    # touching the evidence marker. Pin it to the marker instance that carried
+    # the legacy fields so a later replacement with the same reason still
+    # alerts immediately.
+    _mn_last_created_at="$_mn_current_created_at"
   fi
 
   _mn_old_umask=$(umask)
   umask 077
-  _mn_tmp=$(mktemp "$_mn_dir/$_mn_db.tmp.XXXXXX") || {
+  if ! mkdir -p "$_mn_state_dir"; then
+    umask "$_mn_old_umask"
+    return 0
+  fi
+  _mn_tmp=$(mktemp "$_mn_state_dir/$_mn_db.tmp.XXXXXX") || {
     umask "$_mn_old_umask"
     return 0
   }
   umask "$_mn_old_umask"
-  if ! awk '!/^(seen_count|notify_count|last_notified_ts|last_notified_reason|last_notify_error)=/' "$_mn_marker" > "$_mn_tmp" 2>/dev/null; then
-    rm -f "$_mn_tmp"
-    return 0
-  fi
   if ! {
+    printf 'db=%s\n' "$_mn_db"
+    printf 'marker_kind=%s\n' "$(basename "$_mn_dir")"
     printf 'seen_count=%s\n' "$_mn_seen_count"
     printf 'notify_count=%s\n' "$_mn_notify_count"
     printf 'last_notified_ts=%s\n' "$_mn_last_ts"
     printf 'last_notified_reason=%s\n' "$_mn_last_reason"
+    printf 'last_notified_created_at=%s\n' "$_mn_last_created_at"
     printf 'last_notify_error=%s\n' "$_mn_last_error"
-  } >> "$_mn_tmp" 2>/dev/null; then
+  } > "$_mn_tmp" 2>/dev/null; then
     rm -f "$_mn_tmp"
     return 0
   fi
@@ -1665,7 +1717,7 @@ record_marker_notify_state() {
     rm -f "$_mn_tmp"
     return 0
   fi
-  mv -f "$_mn_tmp" "$_mn_marker" || rm -f "$_mn_tmp"
+  mv -f "$_mn_tmp" "$_mn_state" || rm -f "$_mn_tmp"
   return 0
 }
 
@@ -1688,7 +1740,7 @@ report_existing_quarantine() {
 
   quarantine_alert_emitted=0
   if marker_should_notify "$quarantine_dir" "$db" "${quarantine_reason:-<unknown>}" "$compact_renotify_backstop_secs"; then
-    quarantine_seen_count=$(compact_marker_value "$quarantine_dir" "$db" seen_count || true)
+    quarantine_seen_count=$(compact_notify_state_value "$quarantine_dir" "$db" seen_count || true)
     case "$quarantine_seen_count" in ''|*[!0-9]*) quarantine_seen_count=0 ;; esac
     if mail_compact_quarantine_alert "$db" "compact-quarantine" "$quarantine_marker" "${quarantine_reason:-<unknown>} seen=$((quarantine_seen_count + 1))" "${quarantine_created_at:-<unknown>}"; then
       quarantine_alert_emitted=1
@@ -1887,7 +1939,7 @@ ensure_remote_push_retry_fresh() {
     stale_created_at=$(compact_marker_value "$dir" "$db" created_at || true)
     emit_compact_quarantine_event "$db" "$stale_marker_type" "$stale_marker_path" "$stale_reason" "$stale_created_at"
     if marker_should_notify "$dir" "$db" "$stale_reason" "$compact_renotify_backstop_secs"; then
-      stale_seen_count=$(compact_marker_value "$dir" "$db" seen_count || true)
+      stale_seen_count=$(compact_notify_state_value "$dir" "$db" seen_count || true)
       case "$stale_seen_count" in ''|*[!0-9]*) stale_seen_count=0 ;; esac
       if mail_compact_quarantine_alert "$db" "$stale_marker_type" "$stale_marker_path" "$stale_reason age=${age_secs}s seen=$((stale_seen_count + 1))" "$stale_created_at"; then
         record_marker_notify_state "$dir" "$db" "$stale_reason" 1

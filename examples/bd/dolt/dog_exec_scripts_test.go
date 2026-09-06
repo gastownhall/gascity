@@ -271,6 +271,15 @@ func compactMarkerValue(t *testing.T, markerPath, key string) string {
 	return ""
 }
 
+func compactBeadsQuarantineNotifyStatePath(cityPath string) string {
+	return filepath.Join(
+		cityPath,
+		".gc", "runtime", "packs", "dolt", "compact-notify-state",
+		"compact-quarantine",
+		"beads",
+	)
+}
+
 func assertCompactMarkerHasEvidence(t *testing.T, markerPath string, want ...string) {
 	t.Helper()
 	data, err := os.ReadFile(markerPath)
@@ -3842,6 +3851,97 @@ func TestCompactScriptExistingQuarantineMarkerAlertsOnceAcrossRepeatedCycles(t *
 	}
 }
 
+func TestCompactScriptExistingQuarantineNotificationDoesNotMutateEvidenceMarker(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
+		t.Fatalf("mkdir quarantine dir: %v", err)
+	}
+	markerData := []byte("db=beads\nreason=manual repair pending\ncreated_at=2026-05-01T00:00:00Z\n")
+	if err := os.WriteFile(marker, markerData, 0o600); err != nil {
+		t.Fatalf("write quarantine marker: %v", err)
+	}
+
+	for run := 1; run <= 2; run++ {
+		out, err := fixture.run(t, "below_threshold")
+		if err == nil {
+			t.Fatalf("compact run %d succeeded despite quarantine:\n%s", run, out)
+		}
+	}
+
+	gotMarkerData, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("read quarantine marker: %v", err)
+	}
+	if string(gotMarkerData) != string(markerData) {
+		t.Fatalf("notification bookkeeping mutated the evidence marker\nwant:\n%s\ngot:\n%s", markerData, gotMarkerData)
+	}
+
+	notifyState := compactBeadsQuarantineNotifyStatePath(fixture.cityPath)
+	if got := compactMarkerValue(t, notifyState, "seen_count"); got != "2" {
+		t.Fatalf("two quarantine checks should be recorded in the notify sidecar, got seen_count=%q", got)
+	}
+	if got := compactMarkerValue(t, notifyState, "notify_count"); got != "1" {
+		t.Fatalf("unchanged quarantine should notify once, got notify_count=%q", got)
+	}
+}
+
+func TestCompactScriptMigratesLegacyMarkerNotifyStateWithoutMutationOrRemail(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
+		t.Fatalf("mkdir quarantine dir: %v", err)
+	}
+
+	const (
+		reason    = "post-flatten table value hash changed without row-count increase"
+		createdAt = "2026-08-29T07:11:12Z"
+	)
+	lastNotifiedAt := time.Now().UTC().Format(time.RFC3339)
+	markerData := []byte(fmt.Sprintf(
+		"db=beads\nreason=%s\ncreated_at=%s\nseen_count=1\nnotify_count=1\nlast_notified_ts=%s\nlast_notified_reason=%s\nlast_notify_error=\n",
+		reason, createdAt, lastNotifiedAt, reason,
+	))
+	if err := os.WriteFile(marker, markerData, 0o600); err != nil {
+		t.Fatalf("write legacy quarantine marker: %v", err)
+	}
+
+	out, err := fixture.run(t, "below_threshold")
+	if err == nil {
+		t.Fatalf("compact succeeded despite legacy quarantine marker:\n%s", out)
+	}
+	if !strings.Contains(out, "integrity quarantine marker exists") {
+		t.Fatalf("compact missing quarantine refusal:\n%s", out)
+	}
+
+	gotMarkerData, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("read legacy quarantine marker: %v", err)
+	}
+	if string(gotMarkerData) != string(markerData) {
+		t.Fatalf("legacy notify-state migration mutated the evidence marker\nwant:\n%s\ngot:\n%s", markerData, gotMarkerData)
+	}
+
+	log := readCompactGCLog(t, fixture)
+	if mailLines := compactGCLogLinesWithPrefix(log, "gc mail send "); len(mailLines) != 0 {
+		t.Fatalf("recent legacy notification state should migrate without re-mailing, got %d mail attempt(s)\nlog:\n%s", len(mailLines), log)
+	}
+
+	notifyState := compactBeadsQuarantineNotifyStatePath(fixture.cityPath)
+	for key, want := range map[string]string{
+		"seen_count":               "2",
+		"notify_count":             "1",
+		"last_notified_ts":         lastNotifiedAt,
+		"last_notified_reason":     reason,
+		"last_notified_created_at": createdAt,
+		"last_notify_error":        "",
+	} {
+		if got := compactMarkerValue(t, notifyState, key); got != want {
+			t.Fatalf("migrated notify sidecar %s=%q, want %q", key, got, want)
+		}
+	}
+}
+
 func TestCompactScriptQuarantineMailFailureIsRetriedNextCycle(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	if err := os.WriteFile(fixture.mailFailFile, nil, 0o644); err != nil {
@@ -3879,7 +3979,7 @@ func TestCompactScriptQuarantineMailFailureIsRetriedNextCycle(t *testing.T) {
 	}
 }
 
-func TestCompactScriptUndeliverableQuarantineAlertRecordsWhyInMarker(t *testing.T) {
+func TestCompactScriptUndeliverableQuarantineAlertRecordsWhyInNotifyState(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	if err := os.WriteFile(fixture.mailFailFile, nil, 0o644); err != nil {
 		t.Fatalf("arm mail-failure sentinel: %v", err)
@@ -3892,9 +3992,9 @@ func TestCompactScriptUndeliverableQuarantineAlertRecordsWhyInMarker(t *testing.
 
 	// An alert that never lands is how five cities stayed fail-closed for a
 	// month: notify_count=0, and nothing anywhere saying why.
-	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
-	if got := compactMarkerValue(t, marker, "last_notify_error"); !strings.Contains(got, "mail send failed") {
-		t.Fatalf("marker must record why the alert did not land, got %q", got)
+	notifyState := compactBeadsQuarantineNotifyStatePath(fixture.cityPath)
+	if got := compactMarkerValue(t, notifyState, "last_notify_error"); !strings.Contains(got, "mail send failed") {
+		t.Fatalf("notify sidecar must record why the alert did not land, got %q", got)
 	}
 	if !strings.Contains(firstOut, "quarantine alert did not reach recipient") || !strings.Contains(firstOut, "nobody") {
 		t.Fatalf("compact must name the unreachable recipient:\n%s", firstOut)
@@ -3909,10 +4009,10 @@ func TestCompactScriptUndeliverableQuarantineAlertRecordsWhyInMarker(t *testing.
 	if err == nil {
 		t.Fatalf("second compact succeeded despite quarantine:\n%s", secondOut)
 	}
-	if got := compactMarkerValue(t, marker, "last_notify_error"); got != "" {
+	if got := compactMarkerValue(t, notifyState, "last_notify_error"); got != "" {
 		t.Fatalf("a delivered alert must clear last_notify_error, got %q", got)
 	}
-	if got := compactMarkerValue(t, marker, "notify_count"); got != "1" {
+	if got := compactMarkerValue(t, notifyState, "notify_count"); got != "1" {
 		t.Fatalf("delivered alert should count once, got %q", got)
 	}
 }
@@ -3950,6 +4050,27 @@ func TestCompactScriptQuarantineReasonChangeReMails(t *testing.T) {
 	}
 	if !strings.Contains(mailLines[1], "reason="+newReason) {
 		t.Fatalf("re-sent mail should carry the new reason\nline:\n%s\nlog:\n%s", mailLines[1], log)
+	}
+}
+
+func TestCompactScriptReplacementMarkerWithSameReasonReMails(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	firstOut, err := fixture.run(t, "row_count_decreases", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("first compact succeeded despite row-count decrease:\n%s", firstOut)
+	}
+
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	replaceCompactMarkerCreatedAt(t, marker, "2026-09-02T00:00:00Z")
+
+	secondOut, err := fixture.run(t, "below_threshold")
+	if err == nil {
+		t.Fatalf("second compact succeeded despite replacement quarantine marker:\n%s", secondOut)
+	}
+	log := readCompactGCLog(t, fixture)
+	mailLines := compactGCLogLinesWithPrefix(log, "gc mail send ")
+	if len(mailLines) != 2 {
+		t.Fatalf("a replacement marker with the same reason must send a fresh mail, want 2, got %d\nlog:\n%s", len(mailLines), log)
 	}
 }
 
@@ -4509,8 +4630,8 @@ func TestCompactScriptGCOnlyQuarantineRefusalStillReports(t *testing.T) {
 	if after := len(compactGCLogLinesWithPrefix(log, "gc event emit dolt.compact.quarantine")); after != before+1 {
 		t.Fatalf("gc-only refusal must emit a dolt.compact.quarantine event, want %d got %d\nlog:\n%s", before+1, after, log)
 	}
-	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
-	if got := compactMarkerValue(t, marker, "seen_count"); got != "2" {
+	notifyState := compactBeadsQuarantineNotifyStatePath(fixture.cityPath)
+	if got := compactMarkerValue(t, notifyState, "seen_count"); got != "2" {
 		t.Fatalf("gc-only refusal must count as a sighting, got seen_count=%q", got)
 	}
 }
