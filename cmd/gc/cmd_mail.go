@@ -832,6 +832,16 @@ func formatInjectOutput(messages []mail.Message) string {
 		subject := extmsg.SanitizeForSystemReminder(rawSubject)
 		rawBody, bodyTruncated := mailInjectBodyPreview(m.Body)
 		body := extmsg.SanitizeForSystemReminder(rawBody)
+		// A message with no body is not a message whose content went missing:
+		// the subject IS the content. `gc mail send <to> -s "text"` and
+		// POST /v0/mail with the optional body omitted both produce this shape.
+		// Without the substitution it renders as "[subject]: " — a subject in
+		// brackets and nothing behind the colon, which reads as lost content
+		// and is what made ga-6eukj0 look like a storage bug. Substituting here
+		// covers every ingress, since all of them converge on this read path.
+		if body == "" {
+			body, bodyTruncated = subject, subjectTruncated
+		}
 		if subject != "" && subject != body {
 			fmt.Fprintf(&sb, "- %s from %s [%s", m.ID, from, subject)
 			if subjectTruncated {

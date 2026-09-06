@@ -3309,6 +3309,103 @@ func TestMailSendSubjectAndMessage(t *testing.T) {
 	}
 }
 
+// TestMailSendSubjectOnlyStoresEmptyBody pins the storage contract for
+// `gc mail send <to> -s "text"` with no -m and no positional body: an empty
+// body is a legal stored state and stays empty. The subject is required
+// (POST /v0/mail marks it minLength:1) and the body is explicitly optional
+// there, so a subject-only message is well-formed rather than a message whose
+// content went missing. What was broken was the rendering, not the storage;
+// see TestFormatInjectOutputSubjectOnlyRendersSubjectAsMessage (ga-6eukj0).
+func TestMailSendSubjectOnlyStoresEmptyBody(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	recipients := map[string]bool{"human": true, "mayor": true}
+
+	var stdout bytes.Buffer
+	code := doMailSend(mp, events.Discard, recipients, "human", []string{"mayor", "Build is green", ""}, nil, &stdout, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("doMailSend = %d, want 0", code)
+	}
+
+	b, err := store.Get("gc-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Title != "Build is green" {
+		t.Errorf("bead Title = %q, want %q", b.Title, "Build is green")
+	}
+	if b.Description != "" {
+		t.Errorf("bead Description = %q, want empty (an omitted body is a legal state, not a lost one)", b.Description)
+	}
+}
+
+// TestFormatInjectOutputSubjectOnlyRendersSubjectAsMessage is the actual
+// ga-6eukj0 defect. A subject-only message reached the agent-facing injection
+// as "[Build is green]: " — a subject in brackets and nothing behind the
+// colon, which reads as a message whose body was lost. The subject IS the
+// message here, so it must render as the message.
+func TestFormatInjectOutputSubjectOnlyRendersSubjectAsMessage(t *testing.T) {
+	out := formatInjectOutput([]mail.Message{
+		{ID: "gc-1", From: "human", To: "mayor", Subject: "Build is green"},
+	})
+
+	if want := "- gc-1 from human: Build is green"; !strings.Contains(out, want) {
+		t.Errorf("inject output missing %q:\n%s", want, out)
+	}
+	if strings.Contains(out, "[Build is green]: \n") {
+		t.Errorf("subject-only message rendered as an empty-bodied message:\n%s", out)
+	}
+}
+
+// TestFormatInjectOutputSubjectEqualToBodyRendersOnce guards the pre-existing
+// subject==body shape produced by the positional form: `gc mail send <to>
+// "text"` arrives with no subject, and beadmail.Send backfills the title from
+// the body, so Title and Description are identical.
+func TestFormatInjectOutputSubjectEqualToBodyRendersOnce(t *testing.T) {
+	out := formatInjectOutput([]mail.Message{
+		{ID: "gc-1", From: "human", To: "mayor", Subject: "Build is green", Body: "Build is green"},
+	})
+
+	if want := "- gc-1 from human: Build is green"; !strings.Contains(out, want) {
+		t.Errorf("inject output missing %q:\n%s", want, out)
+	}
+	if strings.Contains(out, "[Build is green]") {
+		t.Errorf("identical subject and body rendered twice:\n%s", out)
+	}
+}
+
+// TestPrintMessageKeepsBodyIdenticalToSubject pins the documented output of
+// the positional send. `gc mail send <to> "text"` supplies a body and no
+// subject, and beadmail.Send synthesizes the title from that body, so the two
+// fields hold the same string with the SUBJECT being the derived one.
+// Suppressing the Body line here would print only the synthesized field and
+// hide the one the user actually typed, which is the "content renders as
+// though it were lost" failure this command family exists to avoid.
+//
+// This duplicates cmd/gc/testdata/events.txtar:32 on purpose. That txtar runs
+// only under GC_FAST_UNIT=0, so a suppression reintroduced here would survive
+// the whole fast unit loop and surface only in CI.
+//
+// Note the injection path deliberately renders such a message ONCE (see
+// TestFormatInjectOutputSubjectEqualToBodyRendersOnce): it emits a single
+// "from X: message" line, where repeating the string is pure noise. The
+// labeled Subject/Body view is a different contract and shows both.
+func TestPrintMessageKeepsBodyIdenticalToSubject(t *testing.T) {
+	var out bytes.Buffer
+	printMessage(mail.Message{
+		ID: "gc-1", From: "human", To: "mayor",
+		Subject: "hey there", Body: "hey there",
+	}, &out)
+
+	got := out.String()
+	if !strings.Contains(got, "Subject:  hey there") {
+		t.Errorf("missing Subject line:\n%s", got)
+	}
+	if !strings.Contains(got, "Body:     hey there") {
+		t.Errorf("Body line dropped for a positional send; the body is what the user typed:\n%s", got)
+	}
+}
+
 // --- gc mail send --from ---
 
 func TestMailSendFromFlag(t *testing.T) {
