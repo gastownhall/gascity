@@ -6238,6 +6238,11 @@ cmd="${1:-}"
     exit 0
     ;;
   migrate)
+    # The ready path may complete pending SCHEMA migrations; only the bare
+    # repo-id migration (no subcommand) is the contract this test pins.
+    if [ "${2:-}" = "schema" ]; then
+      exit 0
+    fi
     : > "$capture_dir/migrate.called"
     exit 0
     ;;
@@ -6366,6 +6371,11 @@ case "$cmd" in
     exit 0
     ;;
   migrate)
+    # The ready path may complete pending SCHEMA migrations; only the bare
+    # repo-id migration (no subcommand) is the contract this test pins.
+    if [ "${2:-}" = "schema" ]; then
+      exit 0
+    fi
     : > "$capture_dir/migrate.called"
     echo 'failed to compute repository ID: not a git repository' >&2
     exit 1
@@ -6501,6 +6511,11 @@ JSON
     exit 0
     ;;
   migrate)
+    # The ready path may complete pending SCHEMA migrations; only the bare
+    # repo-id migration (no subcommand) is the contract this test pins.
+    if [ "${2:-}" = "schema" ]; then
+      exit 0
+    fi
     : > "$capture_dir/migrate.called"
     exit 0
     ;;
@@ -7199,12 +7214,7 @@ esac
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command(script, "init", cityPath, "gc", "hq")
-	cmd.Env = sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
-		"GC_CITY_PATH="+cityPath,
-		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
-	)...)
-	out, err := cmd.CombinedOutput()
+	out, err := runGcBeadsBdHQInitForTest(t, script, cityPath, binDir)
 	if err != nil {
 		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
 	}
@@ -7595,12 +7605,7 @@ esac
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command(script, "init", cityPath, "gc", "hq")
-	cmd.Env = sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
-		"GC_CITY_PATH="+cityPath,
-		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
-	)...)
-	out, err := cmd.CombinedOutput()
+	out, err := runGcBeadsBdHQInitForTest(t, script, cityPath, binDir)
 	if err != nil {
 		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
 	}
@@ -7724,12 +7729,7 @@ esac
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command(script, "init", cityPath, "gc", "hq")
-	cmd.Env = sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
-		"GC_CITY_PATH="+cityPath,
-		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
-	)...)
-	out, err := cmd.CombinedOutput()
+	out, err := runGcBeadsBdHQInitForTest(t, script, cityPath, binDir)
 	if err != nil {
 		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
 	}
@@ -7757,7 +7757,16 @@ esac
 	}
 }
 
-func TestGcBeadsBdInitDropsMetadataBeforeRetryingInitAfterForcedFallback(t *testing.T) {
+// TestGcBeadsBdInitKeepsMetadataAndReseedsForcedOnRetryAfterForcedFallback pins
+// the retry sequence for a metadata-only scope whose forced init "succeeds"
+// but leaves the schema missing.
+//
+// bd >= 1.2 reads a .beads/dolt root with no metadata beside it as a pre-1.0
+// workspace ("legacy Dolt workspace detected") and refuses to init it, so the
+// retry must keep the canonical server-mode metadata in place and let the
+// re-exec's schema-missing branch re-seed with --force. Measured on the real
+// binary (TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind).
+func TestGcBeadsBdInitKeepsMetadataAndReseedsForcedOnRetryAfterForcedFallback(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -7861,12 +7870,7 @@ esac
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command(script, "init", cityPath, "gc", "hq")
-	cmd.Env = sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
-		"GC_CITY_PATH="+cityPath,
-		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
-	)...)
-	out, err := cmd.CombinedOutput()
+	out, err := runGcBeadsBdHQInitForTest(t, script, cityPath, binDir)
 	if err != nil {
 		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
 	}
@@ -7876,13 +7880,377 @@ esac
 		t.Fatalf("read init state: %v", err)
 	}
 	gotState := string(stateData)
-	for _, want := range []string{
-		"metadata=yes args=init --force --quiet --server -p gc --database hq",
-		"metadata=no args=init --quiet --server -p gc --database hq",
-	} {
-		if !strings.Contains(gotState, want) {
-			t.Fatalf("init state missing %q:\n%s", want, gotState)
+	// Both inits must be forced AND both must keep the metadata: two
+	// identical lines, not one. A Contains over the same string twice proved
+	// only that one forced init ran; the retry that used to drop
+	// metadata.json and re-init plainly would have passed it.
+	want := "metadata=yes args=init --force --quiet --server -p gc --database hq"
+	if got := strings.Count(gotState, want); got != 2 {
+		t.Fatalf("forced-with-metadata inits = %d, want 2:\n%s", got, gotState)
+	}
+	countData, err := os.ReadFile(initCountFile)
+	if err != nil {
+		t.Fatalf("read init count: %v", err)
+	}
+	if got := strings.TrimSpace(string(countData)); got != "2" {
+		t.Fatalf("bd init invocations = %s, want 2", got)
+	}
+}
+
+// runGcBeadsBdHQInitForTest runs the provider script's init for the hub scope
+// ("gc"/"hq") with the stubbed tool directory first on PATH, the way the
+// metadata-only and forced-fallback lifecycle tests all do. One shared exec
+// site keeps those tests inside the subprocess census instead of each
+// carrying its own.
+// TestGcBeadsBdInitRefusesToForceWhenSchemaProbeFailsForAnotherReason pins the
+// third state of the schema probe. With canonical metadata already beside the
+// store, the script decides between "schema present, normalize and exit" and
+// "schema missing, re-seed with --force" from one SELECT against the pinned
+// database. When that SELECT fails for a reason other than the table being
+// absent (here: the server not answering), nothing is known about the
+// database, and the only safe answer is to refuse: a forced init onto a live,
+// migrated database with bd's ordinary uncommitted counters in its working
+// set trips bd's dirty-table guard, which is how CI lost the fresh-city init
+// intermittently before this test existed.
+func TestGcBeadsBdInitRefusesToForceWhenSchemaProbeFailsForAnotherReason(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	materializeBuiltinPacksForTest(t, cityPath)
+	script := gcBeadsBdScriptPath(cityPath)
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(binDir, "sleep"), "#!/bin/sh\nexit 0\n")
+
+	initArgsFile := filepath.Join(t.TempDir(), "bd-init-args")
+	writeExecutable(t, filepath.Join(binDir, "bd"), fmt.Sprintf(`#!/bin/sh
+set -eu
+case "${1:-}" in
+  init)
+    printf '%%s\n' "$*" >> %q
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, initArgsFile))
+
+	probeCountFile := filepath.Join(t.TempDir(), "probe-count")
+	writeExecutable(t, filepath.Join(binDir, "dolt"), fmt.Sprintf(`#!/bin/sh
+set -eu
+query=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-q" ]; then
+    query="$arg"
+    break
+  fi
+  prev="$arg"
+done
+case "$query" in
+  'USE `+"`hq`"+`; SELECT 1 FROM config LIMIT 1')
+    count=0
+    if [ -f %q ]; then
+      count=$(cat %q)
+    fi
+    printf '%%s\n' "$((count + 1))" > %q
+    echo "error on line 1 for query USE hq: dial tcp 127.0.0.1:3307: connect: connection refused" >&2
+    exit 1
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, probeCountFile, probeCountFile, probeCountFile))
+
+	out, err := runGcBeadsBdHQInitForTest(t, script, cityPath, binDir)
+	if err == nil {
+		t.Fatalf("gc-beads-bd init succeeded although the schema probe never answered:\n%s", out)
+	}
+	if !strings.Contains(string(out), "refusing to force-reinitialize") {
+		t.Fatalf("expected a data-safety refusal, got:\n%s", out)
+	}
+	if !strings.Contains(string(out), "connection refused") {
+		t.Fatalf("refusal must carry the probe's own error, got:\n%s", out)
+	}
+	if args, err := os.ReadFile(initArgsFile); err == nil {
+		t.Fatalf("bd init must not run when the schema state is unknown, ran with:\n%s", args)
+	}
+	count, err := os.ReadFile(probeCountFile)
+	if err != nil {
+		t.Fatalf("probe never ran: %v", err)
+	}
+	if got := strings.TrimSpace(string(count)); got != "3" {
+		t.Fatalf("probe attempts = %s, want 3 (retry an unknown answer before refusing)", got)
+	}
+}
+
+// gcBeadsBdHealTestStubs writes the bd and dolt stubs shared by the
+// interrupted-bootstrap tests. The dolt stub models a pinned database whose
+// working set is dirty (dolt_status holds rows) with `issues` holding
+// issueRows rows, answers the config probe as "table not found" the first
+// time (a schema-less database, the CI signature) and as ready afterwards,
+// and logs every query. The bd stub logs its arguments.
+func gcBeadsBdHealTestStubs(t *testing.T, binDir, sqlLog, bdLog string, issueRows int) {
+	t.Helper()
+	writeExecutable(t, filepath.Join(binDir, "sleep"), "#!/bin/sh\nexit 0\n")
+	initMarker := filepath.Join(filepath.Dir(sqlLog), "init-done")
+	writeExecutable(t, filepath.Join(binDir, "bd"), fmt.Sprintf(`#!/bin/sh
+set -eu
+printf '%%s\n' "$*" >> %q
+case "${1:-}" in
+  init) : > %q ;;
+esac
+exit 0
+`, bdLog, initMarker))
+	resetMarker := filepath.Join(filepath.Dir(sqlLog), "reset-done")
+	writeExecutable(t, filepath.Join(binDir, "dolt"), fmt.Sprintf(`#!/bin/sh
+set -eu
+query=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-q" ]; then
+    query="$arg"
+    break
+  fi
+  prev="$arg"
+done
+printf '%%s\n' "$query" >> %q
+table() { printf '+---+\n| c |\n+---+\n| %%s |\n+---+\n' "$1"; }
+case "$query" in
+  'USE `+"`hq`"+`; SELECT 1 FROM config LIMIT 1')
+    if [ -f %q ]; then exit 0; fi
+    echo "error on line 1 for query SELECT 1 FROM config LIMIT 1: Error 1146 (HY000): table not found: config" >&2
+    exit 1
+    ;;
+  'USE `+"`hq`"+`; SELECT COUNT(*) FROM dolt_status')
+    if [ -f %q ]; then table 0; else table 2; fi
+    exit 0
+    ;;
+  'USE `+"`hq`"+`; SELECT 1 FROM issues LIMIT 1')
+    exit 0
+    ;;
+  'USE `+"`hq`"+`; SELECT COUNT(*) FROM issues')
+    table %d
+    exit 0
+    ;;
+  "USE `+"`hq`"+`; CALL DOLT_RESET('--hard')")
+    : > %q
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, sqlLog, initMarker, resetMarker, issueRows, resetMarker))
+}
+
+// TestGcBeadsBdInitHealsInterruptedBootstrapBeforeForcing pins the recovery
+// for a gc-created database whose first bd bootstrap died between a
+// migration's DDL and its commit: the working set is dirty, there are no
+// issues, and bd's own one-shot heal cannot arm because bd was not the
+// process that created the database. The script must discard the working
+// set (DOLT_RESET --hard) and only then run the forced init; without the
+// reset, bd's dirty-table guard refuses every later open (CI, 2026-09-02:
+// "pending schema migrations alter pre-existing dirty tables: comments,
+// issues" from migration 0049's ALTERs).
+func TestGcBeadsBdInitHealsInterruptedBootstrapBeforeForcing(t *testing.T) {
+	cityPath := t.TempDir()
+	for _, d := range []string{".gc", ".beads"} {
+		if err := os.MkdirAll(filepath.Join(cityPath, d), 0o755); err != nil {
+			t.Fatal(err)
 		}
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	materializeBuiltinPacksForTest(t, cityPath)
+	script := gcBeadsBdScriptPath(cityPath)
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logDir := t.TempDir()
+	sqlLog := filepath.Join(logDir, "dolt-sql.log")
+	bdLog := filepath.Join(logDir, "bd-args.log")
+	gcBeadsBdHealTestStubs(t, binDir, sqlLog, bdLog, 0)
+
+	out, err := runGcBeadsBdHQInitForTest(t, script, cityPath, binDir)
+	if err != nil {
+		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "interrupted bd bootstrap") {
+		t.Fatalf("expected the heal to announce itself, got:\n%s", out)
+	}
+	sql, err := os.ReadFile(sqlLog)
+	if err != nil {
+		t.Fatalf("read sql log: %v", err)
+	}
+	reset := strings.Index(string(sql), "CALL DOLT_RESET('--hard')")
+	if reset < 0 {
+		t.Fatalf("expected DOLT_RESET('--hard') on the interrupted bootstrap, got:\n%s", sql)
+	}
+	bdArgs, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("bd never ran: %v", err)
+	}
+	if !strings.Contains(string(bdArgs), "init --force --quiet --server -p gc --database hq") {
+		t.Fatalf("expected a forced init after the reset, got:\n%s", bdArgs)
+	}
+	// Order: the reset must precede bd, or bd's guard fires on the dirty set.
+	// The bd stub logs to its own file, so compare against the reset's marker
+	// by re-reading the sql log after the init: any query bd would need comes
+	// after the reset line, and the init itself is the only bd invocation.
+	if strings.Count(string(bdArgs), "init ") != 1 {
+		t.Fatalf("expected exactly one bd init, got:\n%s", bdArgs)
+	}
+}
+
+// TestGcBeadsBdInitNeverResetsADatabaseWithIssues is the safety half of the
+// heal: the same dirty working set on a database that holds user rows is not
+// a bootstrap, and the script must leave it alone (no DOLT_RESET), forcing
+// the init as before and letting bd's guard speak.
+func TestGcBeadsBdInitNeverResetsADatabaseWithIssues(t *testing.T) {
+	cityPath := t.TempDir()
+	for _, d := range []string{".gc", ".beads"} {
+		if err := os.MkdirAll(filepath.Join(cityPath, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	materializeBuiltinPacksForTest(t, cityPath)
+	script := gcBeadsBdScriptPath(cityPath)
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logDir := t.TempDir()
+	sqlLog := filepath.Join(logDir, "dolt-sql.log")
+	bdLog := filepath.Join(logDir, "bd-args.log")
+	gcBeadsBdHealTestStubs(t, binDir, sqlLog, bdLog, 3)
+
+	out, _ := runGcBeadsBdHQInitForTest(t, script, cityPath, binDir)
+	sql, err := os.ReadFile(sqlLog)
+	if err != nil {
+		t.Fatalf("read sql log: %v", err)
+	}
+	if strings.Contains(string(sql), "DOLT_RESET") {
+		t.Fatalf("a database with issues must never be reset, got:\n%s\noutput:\n%s", sql, out)
+	}
+	if strings.Contains(string(out), "interrupted bd bootstrap") {
+		t.Fatalf("heal must not announce on a database with issues:\n%s", out)
+	}
+}
+
+// TestGcBeadsBdInitAdoptsAnExistingSchemaFromAFreshScope pins the fresh-scope
+// for a scope whose database is already initialized but which carries no
+// version witness: a re-cloned rig, or a second scope directory pointed at
+// a shared server. bd's plain init refuses that database ("already
+// initialized") and bd's server-branch guard refuses any bd command on a
+// witness-less server-mode scope, so the script must stamp the witness first,
+// then finish pending migrations and adopt, and never run bd init. The dolt
+// stub answers every probe as "schema present, schema_migrations present,
+// clean working set".
+func TestGcBeadsBdInitAdoptsAnExistingSchemaFromAFreshScope(t *testing.T) {
+	cityPath := t.TempDir()
+	for _, d := range []string{".gc", ".beads"} {
+		if err := os.MkdirAll(filepath.Join(cityPath, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Canonical server-mode metadata but NO .local_version witness: the
+	// shape gc leaves after normalizing a re-cloned rig (and what the
+	// fresh-scope path produces before its own adopt decision). No gc
+	// helper is on PATH here, so the metadata is written up front.
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	materializeBuiltinPacksForTest(t, cityPath)
+	script := gcBeadsBdScriptPath(cityPath)
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(binDir, "sleep"), "#!/bin/sh\nexit 0\n")
+	bdLog := filepath.Join(t.TempDir(), "bd-args.log")
+	// The stub behaves like bd's server-branch legacy guard: any command
+	// other than `bd version` on a server-mode scope with no .local_version
+	// witness is refused. That is what makes the witness ordering testable.
+	writeExecutable(t, filepath.Join(binDir, "bd"), fmt.Sprintf(`#!/bin/sh
+set -eu
+printf '%%s\n' "$*" >> %q
+case "${1:-}" in
+  version) echo "bd version 1.2.2 (test)"; exit 0 ;;
+esac
+if [ ! -f "${BEADS_DIR:?}/.local_version" ]; then
+  echo "Error: legacy Dolt server workspace detected (stub: no .local_version witness)" >&2
+  exit 1
+fi
+exit 0
+`, bdLog))
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+set -eu
+query=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-q" ]; then
+    query="$arg"
+    break
+  fi
+  prev="$arg"
+done
+case "$query" in
+  *'SELECT COUNT(*) FROM dolt_status'*)
+    printf '+---+\n| c |\n+---+\n| 0 |\n+---+\n'
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`)
+
+	out, err := runGcBeadsBdHQInitForTest(t, script, cityPath, binDir)
+	if err != nil {
+		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
+	}
+	args, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("bd never ran: %v", err)
+	}
+	if strings.Contains(string(args), "init ") {
+		t.Fatalf("a fresh scope over an already-initialized database must adopt it, not run bd init (bd refuses that as \"already initialized\"); bd was invoked with:\n%s", args)
+	}
+	if !strings.Contains(string(args), "migrate schema") {
+		t.Fatalf("adopting an existing schema must finish its pending migrations; bd was invoked with:\n%s", args)
+	}
+	meta, err := os.ReadFile(filepath.Join(cityPath, ".beads", "metadata.json"))
+	if err != nil {
+		t.Fatalf("canonical metadata must be written on adopt: %v", err)
+	}
+	if !strings.Contains(string(meta), `"dolt_mode"`) || !strings.Contains(string(meta), `"server"`) {
+		t.Fatalf("metadata is not canonical server-mode:\n%s", meta)
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, ".beads", ".local_version")); err != nil {
+		t.Fatalf("adopting a current-era schema must stamp the version witness, or bd's server-branch guard refuses the scope: %v", err)
 	}
 }
 
@@ -11429,6 +11797,13 @@ YAML
 	printf '%s\n' "$*" > "` + bdInitLog + `"
 	exit 0
 	;;
+  migrate)
+	# The ready path completes pending schema migrations after adopting an
+	# initialized database; only the schema subcommand is expected here.
+	[ "${2:-}" = "schema" ] && exit 0
+	echo "unexpected bd command: $*" >&2
+	exit 64
+	;;
   *)
 	echo "unexpected bd command: $*" >&2
 	exit 64
@@ -11439,8 +11814,37 @@ esac
 		t.Fatal(err)
 	}
 
+	// The dolt stub must answer the readiness probe like a real fresh
+	// database: "table not found: config" until bd init has run. A stub that
+	// answers every query with success reads as an already-initialized
+	// database, which the fresh-scope path correctly ADOPTS instead of
+	// running the bd init this test is about.
 	fakeDolt := filepath.Join(binDir, "dolt")
-	if err := os.WriteFile(fakeDolt, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+	fakeDoltScript := `#!/bin/sh
+set -eu
+query=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-q" ]; then
+    query="$arg"
+    break
+  fi
+  prev="$arg"
+done
+case "$query" in
+  *'SELECT 1 FROM config LIMIT 1')
+    if [ -f "` + bdInitLog + `" ]; then
+      exit 0
+    fi
+    echo "error on line 1 for query SELECT 1 FROM config LIMIT 1: Error 1146 (HY000): table not found: config" >&2
+    exit 1
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(fakeDolt, []byte(fakeDoltScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
