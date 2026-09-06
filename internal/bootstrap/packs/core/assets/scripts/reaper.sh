@@ -66,6 +66,11 @@ WORKFLOW_ROOT_CLOSE_STATUSES="'open', 'hooked', 'in_progress'"
 WORKFLOW_ROOT_LIVE_STATUSES="'open', 'hooked', 'in_progress', 'blocked', 'deferred', 'pinned', 'review', 'testing'"
 WORKFLOW_ROOT_DESCENDANT_DEP_TYPES="'parent-child', 'tracks', 'blocks'"
 WORKFLOW_ROOT_CLOSE_REASON="stale inactive workflow root auto-closed by reaper"
+WORKFLOW_ROOT_BATCH_SIZE="${GC_REAPER_WORKFLOW_ROOT_BATCH_SIZE:-1}"
+
+if ! [[ "$WORKFLOW_ROOT_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]]; then
+    WORKFLOW_ROOT_BATCH_SIZE=1
+fi
 
 # Convert Go durations to SQL INTERVAL hours for Dolt.
 duration_to_hours() {
@@ -455,6 +460,7 @@ fi
 discover_rig_store_refs
 
 SQL_COUNT_RESULT=0
+SQL_COUNT_OK=0
 get_sql_count() {
     local db="$1"
     local label="$2"
@@ -465,6 +471,7 @@ get_sql_count() {
     local count
 
     SQL_COUNT_RESULT=0
+    SQL_COUNT_OK=0
     if ! stderr_file=$(mktemp); then
         record_anomaly "$db" "$label count failed for $db: could not create stderr capture file"
         return 0
@@ -484,9 +491,11 @@ get_sql_count() {
     fi
 
     SQL_COUNT_RESULT="$count"
+    SQL_COUNT_OK=1
 }
 
 SQL_ROWS_RESULT=""
+SQL_ROWS_OK=0
 get_sql_rows() {
     local db="$1"
     local label="$2"
@@ -496,6 +505,7 @@ get_sql_rows() {
     local stderr_output
 
     SQL_ROWS_RESULT=""
+    SQL_ROWS_OK=0
     if ! stderr_file=$(mktemp); then
         record_anomaly "$db" "$label query failed for $db: could not create stderr capture file"
         return 0
@@ -509,6 +519,7 @@ get_sql_rows() {
     rm -f "$stderr_file"
 
     SQL_ROWS_RESULT=$(printf '%s\n' "$output" | tail -n +2 | tr -d '\r')
+    SQL_ROWS_OK=1
 }
 
 has_dependency_target_column() {
@@ -539,7 +550,7 @@ has_dependency_target_column() {
     return 0
 }
 
-workflow_root_candidates_cte() {
+workflow_root_candidate_ctes() {
     local db="$1"
     local candidate_cte="$2"
     local table="$3"
@@ -547,7 +558,7 @@ workflow_root_candidates_cte() {
     local issue_type_exclusions="$5"
 
     cat <<SQL
-        WITH RECURSIVE ${candidate_cte}_base(id) AS (
+${candidate_cte}_base(id) AS (
             SELECT $alias.id FROM \`$db\`.$table $alias
             WHERE $alias.status IN ($WORKFLOW_ROOT_CLOSE_STATUSES)
             AND $alias.issue_type NOT IN ($issue_type_exclusions)
@@ -567,29 +578,49 @@ workflow_root_candidates_cte() {
             WHERE (
 $(workflow_root_store_ref_local_condition "$db" "$alias")
             )
+        )
+SQL
+}
+
+workflow_root_candidates_cte() {
+    local db="$1"
+    local candidate_cte="$2"
+    local table="$3"
+    local alias="$4"
+    local issue_type_exclusions="$5"
+    local page_limit="$6"
+    local page_offset="$7"
+
+    cat <<SQL
+        WITH RECURSIVE $(workflow_root_candidate_ctes "$db" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions"),
+        ${candidate_cte}_page(id) AS (
+            SELECT id
+            FROM $candidate_cte
+            ORDER BY id
+            LIMIT $page_limit OFFSET $page_offset
         ),
         workflow_descendants(root_id, id) AS (
             SELECT root.id, child_wisp.id
-            FROM $candidate_cte root
+            FROM ${candidate_cte}_page root
             INNER JOIN \`$db\`.wisps child_wisp
                 ON child_wisp.id != root.id
                 AND JSON_UNQUOTE(JSON_EXTRACT(child_wisp.metadata, '$."gc.root_bead_id"')) = root.id
             UNION
             SELECT root.id, child_issue.id
-            FROM $candidate_cte root
+            FROM ${candidate_cte}_page root
             INNER JOIN \`$db\`.issues child_issue
                 ON child_issue.id != root.id
                 AND JSON_UNQUOTE(JSON_EXTRACT(child_issue.metadata, '$."gc.root_bead_id"')) = root.id
             UNION
             SELECT root.id, child_dep.issue_id
-            FROM $candidate_cte root
+            FROM ${candidate_cte}_page root
             INNER JOIN \`$db\`.wisp_dependencies child_dep
                 ON child_dep.type IN ($WORKFLOW_ROOT_DESCENDANT_DEP_TYPES)
                 AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = root.id
                 AND child_dep.issue_id != root.id
             UNION
             SELECT root.id, child_dep.issue_id
-            FROM $candidate_cte root
+            FROM ${candidate_cte}_page root
             INNER JOIN \`$db\`.dependencies child_dep
                 ON child_dep.type IN ($WORKFLOW_ROOT_DESCENDANT_DEP_TYPES)
                 AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = root.id
@@ -639,7 +670,7 @@ workflow_root_store_ref_skipped_count_query() {
     local issue_type_exclusions="$5"
 
     cat <<SQL
-$(workflow_root_candidates_cte "$db" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions")
+        WITH $(workflow_root_candidate_ctes "$db" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions")
         SELECT COUNT(*) FROM ${candidate_cte}_base base
         LEFT JOIN $candidate_cte candidate ON candidate.id = base.id
         WHERE candidate.id IS NULL
@@ -651,7 +682,7 @@ workflow_root_closeable_select() {
 
     cat <<SQL
         SELECT DISTINCT root.id
-        FROM $candidate_cte root
+        FROM ${candidate_cte}_page root
         LEFT JOIN roots_with_live_descendants live ON live.root_id = root.id
         LEFT JOIN roots_with_recent_descendants recent ON recent.root_id = root.id
         WHERE live.root_id IS NULL
@@ -659,7 +690,7 @@ workflow_root_closeable_select() {
 SQL
 }
 
-workflow_root_count_query() {
+workflow_root_candidate_count_query() {
     local db="$1"
     local candidate_cte="$2"
     local table="$3"
@@ -667,10 +698,8 @@ workflow_root_count_query() {
     local issue_type_exclusions="$5"
 
     cat <<SQL
-$(workflow_root_candidates_cte "$db" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions")
-        SELECT COUNT(*) FROM (
-$(workflow_root_closeable_select "$candidate_cte")
-        ) closeable_workflow_roots
+        WITH $(workflow_root_candidate_ctes "$db" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions")
+        SELECT COUNT(*) FROM $candidate_cte
 SQL
 }
 
@@ -680,25 +709,67 @@ workflow_root_ids_query() {
     local table="$3"
     local alias="$4"
     local issue_type_exclusions="$5"
+    local page_limit="$6"
+    local page_offset="$7"
 
     cat <<SQL
-$(workflow_root_candidates_cte "$db" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions")
+$(workflow_root_candidates_cte "$db" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions" "$page_limit" "$page_offset")
 $(workflow_root_closeable_select "$candidate_cte")
 SQL
 }
 
 workflow_wisp_root_update_query() {
-    local db="$1"
+	local db="$1"
+	local ids="$2"
 
     cat <<SQL
-$(workflow_root_candidates_cte "$db" "workflow_wisp_root_candidates" "wisps" "w" "'message'")
-        ,
-        closeable_workflow_wisp_roots AS (
-$(workflow_root_closeable_select "workflow_wisp_root_candidates")
-        )
         UPDATE \`$db\`.wisps SET status='closed', closed_at=NOW(), metadata = JSON_SET(COALESCE(metadata, JSON_OBJECT()), '$."gc.outcome"', 'skipped', '$."close_reason"', '$WORKFLOW_ROOT_CLOSE_REASON')
-        WHERE id IN (SELECT id FROM closeable_workflow_wisp_roots)
+        WHERE id IN ($ids)
 SQL
+}
+
+WORKFLOW_ROOT_IDS_RESULT=""
+WORKFLOW_ROOT_CENSUS_OK=0
+collect_workflow_root_ids() {
+    local db="$1"
+    local label="$2"
+    local candidate_cte="$3"
+    local table="$4"
+    local alias="$5"
+    local issue_type_exclusions="$6"
+    local candidate_count
+    local page_offset=0
+    local ids=""
+
+    WORKFLOW_ROOT_IDS_RESULT=""
+    WORKFLOW_ROOT_CENSUS_OK=0
+
+    get_sql_count "$db" "$label candidate" "$(workflow_root_candidate_count_query "$db" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions")"
+    if [ "$SQL_COUNT_OK" -ne 1 ]; then
+        record_anomaly "$db" "$label census incomplete: candidate count failed"
+        return 0
+    fi
+    candidate_count=$SQL_COUNT_RESULT
+
+    while [ "$page_offset" -lt "$candidate_count" ]; do
+        get_sql_rows "$db" "$label page at offset $page_offset" "$(workflow_root_ids_query "$db" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions" "$WORKFLOW_ROOT_BATCH_SIZE" "$page_offset")"
+        if [ "$SQL_ROWS_OK" -ne 1 ]; then
+            record_anomaly "$db" "$label census incomplete: page at offset $page_offset failed"
+            return 0
+        fi
+        if [ -n "$SQL_ROWS_RESULT" ]; then
+            if [ -n "$ids" ]; then
+                ids="$ids
+$SQL_ROWS_RESULT"
+            else
+                ids="$SQL_ROWS_RESULT"
+            fi
+        fi
+        page_offset=$((page_offset + WORKFLOW_ROOT_BATCH_SIZE))
+    done
+
+    WORKFLOW_ROOT_IDS_RESULT="$ids"
+    WORKFLOW_ROOT_CENSUS_OK=1
 }
 
 SQL_CHANGE_ROWS_RESULT=0
@@ -879,26 +950,39 @@ while IFS= read -r DB; do
     get_sql_count "$DB" "workflow wisp roots skipped by root store ref" "$(workflow_root_store_ref_skipped_count_query "$DB" "workflow_wisp_root_candidates" "wisps" "w" "'message'")"
     TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED=$((TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED + SQL_COUNT_RESULT))
 
-    get_sql_count "$DB" "stale inactive workflow wisp root" "$(workflow_root_count_query "$DB" "workflow_wisp_root_candidates" "wisps" "w" "'message'")"
-    WORKFLOW_WISP_ROOT_COUNT=$SQL_COUNT_RESULT
-    if [ "$WORKFLOW_WISP_ROOT_COUNT" -gt 0 ]; then
+    collect_workflow_root_ids "$DB" "workflow wisp root" "workflow_wisp_root_candidates" "wisps" "w" "'message'"
+    WORKFLOW_WISP_ROOT_IDS=$WORKFLOW_ROOT_IDS_RESULT
+    WORKFLOW_WISP_ROOT_CENSUS_OK=$WORKFLOW_ROOT_CENSUS_OK
+    WORKFLOW_WISP_ROOT_COUNT=$(printf '%s\n' "$WORKFLOW_WISP_ROOT_IDS" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
+    if [ "$WORKFLOW_WISP_ROOT_CENSUS_OK" -eq 1 ] && [ "$WORKFLOW_WISP_ROOT_COUNT" -gt 0 ]; then
         if [ -n "$DRY_RUN" ]; then
             TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS=$((TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS + WORKFLOW_WISP_ROOT_COUNT))
-        elif run_sql_change "$DB" "closing stale inactive workflow wisp roots" "$(workflow_wisp_root_update_query "$DB")"; then
+        else
+            WORKFLOW_WISP_ROOT_SQL_IDS=""
+            while IFS= read -r workflow_wisp_root_id; do
+                [ -z "$workflow_wisp_root_id" ] && continue
+                if [ -n "$WORKFLOW_WISP_ROOT_SQL_IDS" ]; then
+                    WORKFLOW_WISP_ROOT_SQL_IDS="$WORKFLOW_WISP_ROOT_SQL_IDS, "
+                fi
+                WORKFLOW_WISP_ROOT_SQL_IDS="$WORKFLOW_WISP_ROOT_SQL_IDS$(sql_string_literal "$workflow_wisp_root_id")"
+            done <<< "$WORKFLOW_WISP_ROOT_IDS"
+            if [ -n "$WORKFLOW_WISP_ROOT_SQL_IDS" ] && run_sql_change "$DB" "closing stale inactive workflow wisp roots" "$(workflow_wisp_root_update_query "$DB" "$WORKFLOW_WISP_ROOT_SQL_IDS")"; then
             WORKFLOW_WISP_ROOT_ROWS=$SQL_CHANGE_ROWS_RESULT
             DB_WORKFLOW_ROOTS_CLOSED=$((DB_WORKFLOW_ROOTS_CLOSED + WORKFLOW_WISP_ROOT_ROWS))
             TOTAL_WORKFLOW_ROOTS_CLOSED=$((TOTAL_WORKFLOW_ROOTS_CLOSED + WORKFLOW_WISP_ROOT_ROWS))
             DB_MUTATIONS=$((DB_MUTATIONS + WORKFLOW_WISP_ROOT_ROWS))
+            fi
         fi
     fi
 
     get_sql_count "$DB" "workflow issue roots skipped by root store ref" "$(workflow_root_store_ref_skipped_count_query "$DB" "workflow_issue_root_candidates" "issues" "i" "'message', 'epic'")"
     TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED=$((TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED + SQL_COUNT_RESULT))
 
-    get_sql_rows "$DB" "stale inactive workflow issue root" "$(workflow_root_ids_query "$DB" "workflow_issue_root_candidates" "issues" "i" "'message', 'epic'")"
-    WORKFLOW_ISSUE_ROOT_IDS=$SQL_ROWS_RESULT
+    collect_workflow_root_ids "$DB" "workflow issue root" "workflow_issue_root_candidates" "issues" "i" "'message', 'epic'"
+    WORKFLOW_ISSUE_ROOT_IDS=$WORKFLOW_ROOT_IDS_RESULT
+    WORKFLOW_ISSUE_ROOT_CENSUS_OK=$WORKFLOW_ROOT_CENSUS_OK
     WORKFLOW_ISSUE_ROOT_COUNT=$(printf '%s\n' "$WORKFLOW_ISSUE_ROOT_IDS" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
-    if [ "$WORKFLOW_ISSUE_ROOT_COUNT" -gt 0 ]; then
+    if [ "$WORKFLOW_ISSUE_ROOT_CENSUS_OK" -eq 1 ] && [ "$WORKFLOW_ISSUE_ROOT_COUNT" -gt 0 ]; then
         if [ -z "$CITY_DB" ]; then
             if [ "$CITY_DB_ANOMALY_RECORDED" -eq 0 ]; then
                 record_anomaly "city" "city database could not be determined from GC_REAPER_CITY_DATABASE or $CITY/.beads/metadata.json; workflow issue-root close disabled"
