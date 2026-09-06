@@ -2451,6 +2451,10 @@ List all unread messages for a session alias or human.
 Shows message ID, sender, subject, and body in a table. The recipient defaults
 to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human". Pass a session alias to view another inbox.
 
+With --context/--city-url the inbox is read from a REMOTE city; with no
+argument it lists mail addressed to this client's remote identity
+("&lt;local city&gt;/&lt;identity&gt;") — where a far-side 'gc mail reply' lands.
+
 ```
 gc mail inbox [session] [flags]
 ```
@@ -2523,6 +2527,10 @@ it can request a wake for a non-running recipient.
 Unread mail alone does not request a wake.
 Use -s/--subject for the reply subject and -m/--message for the reply body.
 
+With --context/--city-url the reply is sent inside a REMOTE city (the reply
+is addressed by that city to the original sender); the sender is
+"&lt;local city&gt;/&lt;identity&gt;" and --notify is refused.
+
 ```
 gc mail reply <id> [-s subject] [-m body] [flags]
 ```
@@ -2546,6 +2554,15 @@ Use --from to override the sender identity.
 Use --to as an alternative to the positional &lt;to&gt; argument.
 Use -s/--subject for the summary line and -m/--message for the body text.
 Use --all to broadcast to all live sessions (excluding sender and "human").
+
+With --context/--city-url the message is sent to a REMOTE city over the
+control plane (a hardened city requires the context's grant_command). The
+sender then defaults to "&lt;local city&gt;/&lt;identity&gt;" (e.g. citadel/mayor) so the
+far side knows which city to answer with 'gc --context &lt;city&gt; mail send';
+--from overrides it. The remote city stores an unknown sender literally, but
+if it has a session whose alias equals that string (a rig named after the
+sending city) the message binds to that session — do not name a rig after a
+city that mails you. --all and --notify are refused for a remote city.
 
 ```
 gc mail send [<to>] [<body>] [flags]

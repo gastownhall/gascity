@@ -6771,3 +6771,125 @@ func TestRunSupervisorNoWarningForLowAPIPort(t *testing.T) {
 		t.Errorf("stdout = %q, want API listening message for low port", stdout.String())
 	}
 }
+
+// writeSupervisorBootFixture writes supervisor.toml under a fresh GC_HOME and
+// pre-occupies the control-socket path so runSupervisor returns right after the
+// API listeners come up (the same trick as the ephemeral-port tests).
+func writeSupervisorBootFixture(t *testing.T, cfg string) {
+	t.Helper()
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+	if err := os.WriteFile(supervisor.ConfigPath(), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sockPath := filepath.Join(supervisor.RuntimeDir(), "supervisor.sock")
+	if err := os.MkdirAll(sockPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sockPath, "sentinel"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// freeAnyLoopbackPort returns a currently free loopback port (any range; the
+// ephemeral-port warning applies only to the PRIMARY listener).
+func freeAnyLoopbackPort(t *testing.T) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	_ = l.Close()
+	return port
+}
+
+// [supervisor.hardened] with a verify key boots a second, grant-gated listener
+// next to the primary one and announces it.
+func TestRunSupervisorHardenedListenerBoots(t *testing.T) {
+	port := freeLowLoopbackPort(t)
+	hardenedPort := freeAnyLoopbackPort(t)
+	writeSupervisorBootFixture(t, "[supervisor]\nport = "+strconv.Itoa(port)+"\n\n[supervisor.hardened]\nport = "+strconv.Itoa(hardenedPort)+"\nwrite_auth_verify_key = \"peer:QAXnBkSUJFXHA/sCICfJ1auCLZn4Lq4xWT8ASnAsEWY=\"\n")
+	var stdout, stderr bytes.Buffer
+	_ = runSupervisor(&stdout, &stderr)
+	if !strings.Contains(stdout.String(), "Supervisor API listening on http://127.0.0.1:"+strconv.Itoa(port)) {
+		t.Errorf("stdout = %q, want primary listening line", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "Supervisor hardened API listening on http://127.0.0.1:"+strconv.Itoa(hardenedPort)) {
+		t.Errorf("stdout = %q, want hardened listening line", stdout.String())
+	}
+	if strings.Contains(stderr.String(), "hardened listener:") {
+		t.Errorf("stderr = %q, hardened boot must not error", stderr.String())
+	}
+}
+
+// A hardened port WITHOUT a verify key is a fail-closed boot error: no listener
+// (primary included) comes up, so a hardened plane can never start ungated.
+func TestRunSupervisorHardenedListenerRequiresKey(t *testing.T) {
+	port := freeLowLoopbackPort(t)
+	writeSupervisorBootFixture(t, "[supervisor]\nport = "+strconv.Itoa(port)+"\n\n[supervisor.hardened]\nport = "+strconv.Itoa(freeAnyLoopbackPort(t))+"\n")
+	var stdout, stderr bytes.Buffer
+	if code := runSupervisor(&stdout, &stderr); code == 0 {
+		t.Errorf("exit = 0, want non-zero for a hardened listener without a key")
+	}
+	if !strings.Contains(stderr.String(), "hardened listener") || !strings.Contains(stderr.String(), "write_auth_verify_key") {
+		t.Errorf("stderr = %q, want hardened key error", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "listening") {
+		t.Errorf("stdout = %q, no listener may come up when the hardened config is invalid", stdout.String())
+	}
+}
+
+// A hardened port equal to the primary address is refused before binding.
+func TestRunSupervisorHardenedListenerRefusesPrimaryAddress(t *testing.T) {
+	port := freeLowLoopbackPort(t)
+	writeSupervisorBootFixture(t, "[supervisor]\nport = "+strconv.Itoa(port)+"\n\n[supervisor.hardened]\nport = "+strconv.Itoa(port)+"\nwrite_auth_verify_key = \"peer:QAXnBkSUJFXHA/sCICfJ1auCLZn4Lq4xWT8ASnAsEWY=\"\n")
+	var stdout, stderr bytes.Buffer
+	if code := runSupervisor(&stdout, &stderr); code == 0 {
+		t.Errorf("exit = 0, want non-zero when the hardened port equals the primary")
+	}
+	if !strings.Contains(stderr.String(), "distinct port") {
+		t.Errorf("stderr = %q, want distinct-port error", stderr.String())
+	}
+}
+
+// A hardened key that shares a kid with the primary write-auth key is refused
+// at boot (cross-listener single-use replay).
+func TestRunSupervisorHardenedListenerRefusesSharedKid(t *testing.T) {
+	port := freeLowLoopbackPort(t)
+	const key = "\"peer:QAXnBkSUJFXHA/sCICfJ1auCLZn4Lq4xWT8ASnAsEWY=\""
+	writeSupervisorBootFixture(t, "[supervisor]\nport = "+strconv.Itoa(port)+"\nwrite_auth_verify_key = "+key+"\n\n[supervisor.hardened]\nport = "+strconv.Itoa(freeAnyLoopbackPort(t))+"\nwrite_auth_verify_key = "+key+"\n")
+	var stdout, stderr bytes.Buffer
+	if code := runSupervisor(&stdout, &stderr); code == 0 {
+		t.Errorf("exit = 0, want non-zero for a shared kid")
+	}
+	if !strings.Contains(stderr.String(), "kids must be disjoint") {
+		t.Errorf("stderr = %q, want disjoint-kid error", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "listening") {
+		t.Errorf("stdout = %q, no listener may come up", stdout.String())
+	}
+}
+
+// A hardened port that cannot be bound fails startup before the primary ever
+// serves (all-or-nothing across both listeners).
+func TestRunSupervisorHardenedListenerBindFailureIsAllOrNothing(t *testing.T) {
+	port := freeLowLoopbackPort(t)
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer occupied.Close()
+	taken := occupied.Addr().(*net.TCPAddr).Port
+	writeSupervisorBootFixture(t, "[supervisor]\nport = "+strconv.Itoa(port)+"\n\n[supervisor.hardened]\nport = "+strconv.Itoa(taken)+"\nwrite_auth_verify_key = \"peer:QAXnBkSUJFXHA/sCICfJ1auCLZn4Lq4xWT8ASnAsEWY=\"\n")
+	var stdout, stderr bytes.Buffer
+	if code := runSupervisor(&stdout, &stderr); code == 0 {
+		t.Errorf("exit = 0, want non-zero when the hardened port is taken")
+	}
+	if !strings.Contains(stderr.String(), "hardened listener: listen") {
+		t.Errorf("stderr = %q, want hardened listen error", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "listening") {
+		t.Errorf("stdout = %q, the primary must not announce before the hardened bind succeeds", stdout.String())
+	}
+}

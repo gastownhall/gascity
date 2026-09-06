@@ -23,6 +23,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citywriteauth"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/events"
@@ -1403,6 +1404,38 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc supervisor: read-auth: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	// [supervisor.hardened]: an OPTIONAL second listener that serves the same
+	// mux with its own write-auth verifier, so a TLS-fronted remote port requires
+	// a signed grant on every mutation while the primary (loopback) listener keeps
+	// serving first-party callers that mint no grant. Resolve its verifier
+	// fail-closed BEFORE any listener binds: a hardened port must never come up
+	// ungated, and a misconfigured one must not leave the primary running while
+	// the hardened plane silently failed to start.
+	hardenedCfg := supCfg.Supervisor.Hardened
+	var hardenedVerifier *citywriteauth.Verifier
+	if hardenedCfg.Enabled() {
+		v, err := api.ResolveHardenedWriteAuthVerifier(hardenedCfg.WriteAuthVerifyKey)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc supervisor: hardened listener: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		if readOnly {
+			// The mux is built read-only for a non-loopback primary bind without
+			// allow_mutations; a grant-gated listener over a read-only mux would
+			// accept grants and still refuse every mutation — refuse the config.
+			fmt.Fprintf(stderr, "gc supervisor: hardened listener: the primary bind %s is read-only (non-loopback without allow_mutations); a hardened listener needs a mutation-capable mux\n", bind) //nolint:errcheck
+			return 1
+		}
+		if hardenedCfg.BindOrDefault() == bind && hardenedCfg.Port == port {
+			fmt.Fprintf(stderr, "gc supervisor: hardened listener: %s:%d is the primary listener address; use a distinct port\n", bind, port) //nolint:errcheck
+			return 1
+		}
+		if err := api.HardenedVerifierKidsDisjoint(supCfg.Supervisor.WriteAuthVerifyKey, hardenedCfg.WriteAuthVerifyKey); err != nil {
+			fmt.Fprintf(stderr, "gc supervisor: hardened listener: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		hardenedVerifier = v
+	}
 	// G23: a hardened supervisor bind (non-loopback + allow_mutations) previously
 	// booted silent. Emit the loud unauthenticated-read-plane warning (shared with
 	// the standalone controller seam) so an operator sees the read surface needs a
@@ -1465,6 +1498,22 @@ func runSupervisor(stdout, stderr io.Writer) int {
 			"gc supervisor: WARNING: API binding to ephemeral port %d -- "+
 				"set port = 8372 in ~/.gc/supervisor.toml\n", port)
 	}
+	// Bind the hardened listener BEFORE either listener starts serving, so a
+	// hardened bind failure (port taken, overlapping bind) never leaves the
+	// primary accepting requests for a window that the hardened plane then
+	// fails to join: startup is all-or-nothing across both listeners.
+	var hardenedLis net.Listener
+	var hardenedAddr string
+	if hardenedVerifier != nil {
+		hardenedAddr = net.JoinHostPort(hardenedCfg.BindOrDefault(), strconv.Itoa(hardenedCfg.Port))
+		var hardenedErr error
+		hardenedLis, hardenedErr = net.Listen("tcp", hardenedAddr)
+		if hardenedErr != nil {
+			_ = apiLis.Close()
+			fmt.Fprintf(stderr, "gc supervisor: hardened listener: listen %s failed: %v\n", hardenedAddr, hardenedErr) //nolint:errcheck
+			return 1
+		}
+	}
 	go func() {
 		if err := apiMux.Serve(apiLis); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			fmt.Fprintf(stderr, "gc supervisor: api: %v\n", err) //nolint:errcheck
@@ -1477,6 +1526,27 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	}()
 	fmt.Fprintf(stdout, "Supervisor API listening on http://%s\n", addr) //nolint:errcheck
 	writeSupervisorDashboardStartup(stdout, dashboardMounted, readOnly, bind, port)
+
+	if hardenedLis != nil {
+		hardenedBind := hardenedCfg.BindOrDefault()
+		hardenedSrv := &http.Server{Handler: apiMux.HardenedHandler(hardenedVerifier)}
+		go func() {
+			if err := hardenedSrv.Serve(hardenedLis); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				fmt.Fprintf(stderr, "gc supervisor: hardened listener: %v\n", err) //nolint:errcheck
+			}
+		}()
+		defer func() {
+			shutCtx, c := context.WithTimeout(context.Background(), 5*time.Second)
+			defer c()
+			hardenedSrv.Shutdown(shutCtx) //nolint:errcheck
+		}()
+		fmt.Fprintf(stdout, "Supervisor hardened API listening on http://%s (every city mutation requires a signed X-GC-City-Write grant)\n", hardenedAddr) //nolint:errcheck
+		if hardenedBind != "127.0.0.1" && hardenedBind != "localhost" && hardenedBind != "::1" {
+			// gc has no TLS of its own and the read plane on this listener is the
+			// primary's: name the exposure exactly as the G23 warning does.
+			warnUnauthenticatedReadPlane(stderr, hardenedBind, true, hardenedReadAuthInstalled(supCfg))
+		}
+	}
 
 	// External event forwarders consume the typed supervisor stream without
 	// configuring [events.export]. Allow that long-lived supervisor unit to arm
@@ -2834,3 +2904,11 @@ type cityInitProgress struct {
 
 // Compile-time check that *cityRegistry satisfies api.CityResolver.
 var _ api.CityResolver = (*cityRegistry)(nil)
+
+// hardenedReadAuthInstalled reports whether the primary listener's read-auth
+// verifier is installed (the hardened listener shares it), for the hardened
+// listener's non-loopback read-plane warning.
+func hardenedReadAuthInstalled(supCfg supervisor.Config) bool {
+	v, err := api.ResolveReadAuthVerifier(supCfg.Supervisor.ReadAuthVerifyKey, supCfg.Supervisor.ReadAuthRequired)
+	return err == nil && v != nil
+}

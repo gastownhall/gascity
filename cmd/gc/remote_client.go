@@ -155,6 +155,26 @@ func resolveReadTarget() (remoteClient *api.Client, isRemote bool, cityPath stri
 	return nil, false, ctx.CityPath, nil
 }
 
+// resolveReadTargetEcho is resolveReadTarget for a READ command that also
+// wants to echo the resolved remote target (the way mutating commands do): it
+// returns the *remoteTarget alongside the no-fallback remote client. For a
+// LOCAL target it returns isRemote=false and a nil client; the caller uses its
+// existing local seam.
+func resolveReadTargetEcho() (remoteClient *api.Client, isRemote bool, target *remoteTarget, err error) {
+	ctx, err := resolveContextAllowRemote()
+	if err != nil {
+		return nil, false, nil, err
+	}
+	if ctx.Remote != nil {
+		c, berr := buildRemoteClient(ctx.Remote)
+		if berr != nil {
+			return nil, true, ctx.Remote, berr
+		}
+		return c, true, ctx.Remote, nil
+	}
+	return nil, false, nil, nil
+}
+
 // resolveWriteTarget resolves a MUTATING command's target. It is the write-side
 // sibling of resolveReadTarget: identical context resolution, but a remote
 // client is built with buildRemoteWriteClient so it carries the city-write grant

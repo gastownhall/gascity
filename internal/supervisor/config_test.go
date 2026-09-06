@@ -408,3 +408,43 @@ func TestRegistryRegisterPanicsOnHostPath(t *testing.T) {
 	}()
 	_ = reg.Register(t.TempDir(), "test-city")
 }
+
+func TestLoadConfigHardenedListener(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "supervisor.toml")
+	if err := os.WriteFile(path, []byte(`
+[supervisor]
+allowed_hosts = ["city.example.ts.net"]
+
+[supervisor.hardened]
+port = 8447
+write_auth_verify_key = "peer:QAXnBkSUJFXHA/sCICfJ1auCLZn4Lq4xWT8ASnAsEWY="
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := cfg.Supervisor.Hardened
+	if !h.Enabled() || h.Port != 8447 {
+		t.Errorf("Hardened = %#v, want enabled on 8447", h)
+	}
+	if h.BindOrDefault() != "127.0.0.1" {
+		t.Errorf("Hardened.BindOrDefault() = %q, want loopback default", h.BindOrDefault())
+	}
+	if h.WriteAuthVerifyKey != "peer:QAXnBkSUJFXHA/sCICfJ1auCLZn4Lq4xWT8ASnAsEWY=" {
+		t.Errorf("Hardened.WriteAuthVerifyKey = %q", h.WriteAuthVerifyKey)
+	}
+	// Absent table => disabled.
+	if err := os.WriteFile(path, []byte("[supervisor]\nport = 8372\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Supervisor.Hardened.Enabled() {
+		t.Errorf("Hardened must be disabled when the table is absent: %#v", cfg.Supervisor.Hardened)
+	}
+}
