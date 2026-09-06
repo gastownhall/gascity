@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -43,6 +44,9 @@ const (
 	// routing; the two must stay in sync.
 	labelOrderTracking    = "order-tracking"
 	labelTriggerEnvFailed = "trigger-env-failed"
+	orderEventCursorEnv   = "GC_EVENT_CURSOR"
+	orderEventJSONEnv     = "GC_EVENT_JSON"
+	orderEventPayloadEnv  = "GC_EVENT_PAYLOAD"
 
 	orderTrackingSweepOrder                = "order-tracking-sweep"
 	orderTrackingBeadPolicyName            = "order_tracking"
@@ -905,9 +909,24 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		// before the launch and released via onDone; on a create failure nothing
 		// launched, so it is released immediately to balance the reservation.
 		//
-		// Auto-triggered orders carry no args channel: vars/execEnv are nil.
+		// Auto-triggered event execs receive the exact event envelope and sequence
+		// selected by CheckTrigger. GC_EVENT_PAYLOAD remains an alias for
+		// existing pack scripts. Other auto-triggered orders carry no args channel.
+		var autoExecEnv map[string]string
+		if a.IsExec() && a.Trigger == "event" && result.Event != nil {
+			eventJSON, marshalErr := json.Marshal(result.Event)
+			if marshalErr != nil {
+				logDispatchError(m.stderr, "gc: order dispatch: encoding event payload for %s: %v", scoped, marshalErr)
+				continue
+			}
+			autoExecEnv = map[string]string{
+				orderEventCursorEnv:  strconv.FormatUint(result.Cursor, 10),
+				orderEventJSONEnv:    string(eventJSON),
+				orderEventPayloadEnv: string(eventJSON),
+			}
+		}
 		inFlight.Add(1)
-		trackingBead, err := m.launchResolvedDispatch(ctx, store, target, a, cityPath, nil, nil, inFlight.Done)
+		trackingBead, err := m.launchResolvedDispatch(ctx, store, target, a, cityPath, nil, autoExecEnv, inFlight.Done)
 		if err != nil {
 			inFlight.Done()
 			logDispatchError(m.stderr, "gc: order dispatch: creating tracking bead for %s: %v", scoped, err)
@@ -1748,7 +1767,11 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 	var hasEventCursor bool
 	if a.Trigger == "event" && m.ep != nil {
 		var err error
-		headSeq, err = m.ep.LatestSeq()
+		if rawCursor := strings.TrimSpace(vars[orderEventCursorEnv]); rawCursor != "" {
+			headSeq, err = strconv.ParseUint(rawCursor, 10, 64)
+		} else {
+			headSeq, err = m.ep.LatestSeq()
+		}
 		if err != nil {
 			errMsg := fmt.Sprintf("reading event cursor: %v", err)
 			outcome = orders.RunOutcomeExecFailed
