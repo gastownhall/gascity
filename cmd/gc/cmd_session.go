@@ -1280,6 +1280,10 @@ type attachmentCachingProvider struct {
 	cache map[string]bool
 }
 
+func (p *attachmentCachingProvider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	return runtime.ObserveLivenessWithError(p.Provider, name, processNames)
+}
+
 func (p *attachmentCachingProvider) GetMeta(name, key string) (string, error) {
 	if p.Provider == nil {
 		return "", nil

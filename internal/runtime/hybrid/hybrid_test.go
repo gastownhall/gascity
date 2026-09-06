@@ -12,6 +12,32 @@ import (
 
 func isRemote(name string) bool { return strings.Contains(name, "remote-agent") }
 
+type livenessObservationErrorProvider struct {
+	*runtime.Fake
+	err error
+}
+
+func (p *livenessObservationErrorProvider) ObserveLivenessWithError(string, []string) (runtime.Liveness, error) {
+	return runtime.Liveness{}, p.err
+}
+
+func TestProvider_ForwardsLivenessObservationErrorToRoutedBackend(t *testing.T) {
+	wantErr := errors.New("snapshot unavailable")
+	local := &livenessObservationErrorProvider{Fake: runtime.NewFake(), err: wantErr}
+	remote := &livenessObservationErrorProvider{Fake: runtime.NewFake(), err: wantErr}
+	h := New(local, remote, isRemote)
+
+	for _, name := range []string{"local-agent", "remote-agent-1"} {
+		got, err := h.ObserveLivenessWithError(name, nil)
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("ObserveLivenessWithError(%q) error = %v, want %v", name, err, wantErr)
+		}
+		if got != (runtime.Liveness{}) {
+			t.Fatalf("ObserveLivenessWithError(%q) = %+v, want zero while routed result is unknown", name, got)
+		}
+	}
+}
+
 // Relaunch must reach the routed backend (local vs remote), or the reconciler's
 // RelaunchProvider type-assert would be masked by the hybrid router and fall
 // back to Stop+Start.
