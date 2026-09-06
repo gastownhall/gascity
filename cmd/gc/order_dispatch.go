@@ -2166,10 +2166,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		}
 	}
 
-	var searchPaths []string
-	if a.FormulaLayer != "" {
-		searchPaths = []string{a.FormulaLayer}
-	}
+	searchPaths := orderFormulaSearchPaths(m.cfg, a)
 	recipe, effectiveVars, err := prepareOrderWispRecipe(ctx, store, a, searchPaths, vars)
 	if err != nil {
 		m.rec.Record(events.Event{

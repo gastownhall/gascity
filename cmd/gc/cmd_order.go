@@ -798,10 +798,7 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 
 	// Compile wisp from formula so graph workflows can be decorated with
 	// routing metadata before instantiation.
-	var searchPaths []string
-	if a.FormulaLayer != "" {
-		searchPaths = []string{a.FormulaLayer}
-	}
+	searchPaths := orderFormulaSearchPaths(cfg, a)
 	// Pass the unwrapped store to the generic molecule/graph-routing boundaries:
 	// the beads.OrdersStore wrapper does not promote optional capabilities, so
 	// handing it to molecule.Instantiate would hide the underlying
