@@ -951,6 +951,11 @@ func doSling(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, stderr
 			printMissingBeadError(stderr, missingBeadErr, missingBeadForceApplies(opts))
 			return 1
 		}
+		var blockedErr *sling.BlockedError
+		if errors.As(err, &blockedErr) {
+			printBlockedError(stderr, blockedErr)
+			return 1
+		}
 		fmt.Fprintln(stderr, err) //nolint:errcheck
 		return 1
 	}
@@ -1024,6 +1029,11 @@ func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQueri
 		var missingBeadErr *sling.MissingBeadError
 		if errors.As(err, &missingBeadErr) {
 			printMissingBeadError(stderr, missingBeadErr, missingBeadForceApplies(opts))
+			return 1
+		}
+		var blockedErr *sling.BlockedError
+		if errors.As(err, &blockedErr) {
+			printBlockedError(stderr, blockedErr)
 			return 1
 		}
 		// In batch mode, per-child FailReasons have already been rendered
@@ -1186,6 +1196,16 @@ func printMissingBeadError(stderr io.Writer, err *sling.MissingBeadError, allowF
 		return
 	}
 	fmt.Fprintln(stderr, "  verify the bead ID; --force does not bypass missing source validation for formula-backed routes") //nolint:errcheck
+}
+
+// printBlockedError renders a refused sling plus one line per blocker, so the
+// operator sees which beads to close instead of having to go find them. The
+// error string itself stays single-line for log and errors.As use.
+func printBlockedError(stderr io.Writer, err *sling.BlockedError) {
+	fmt.Fprintln(stderr, err) //nolint:errcheck
+	for _, b := range err.Blockers {
+		fmt.Fprintf(stderr, "  blocked by %s\n", b) //nolint:errcheck
+	}
 }
 
 func missingBeadForceApplies(opts sling.SlingOpts) bool {
