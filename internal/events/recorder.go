@@ -396,15 +396,31 @@ func (r *FileRecorder) writeRecordLocked(e *Event) error {
 		// See marshalBatch's matching normalization for why (#5300).
 		e.Ts = e.Ts.Local()
 	}
+	if err := encodeAndWriteRecord(r.file, e); err != nil {
+		return err
+	}
+	r.recordCount++
+	return nil
+}
+
+// encodeAndWriteRecord marshals e as one JSONL line and writes it to w,
+// treating a short write as an error rather than a success.
+//
+// The guard matters because a partial line is indistinguishable from a
+// torn write to every downstream reader: the recorder would otherwise
+// count the record as written and continue appending after the fragment,
+// which is the corrupted-tail shape that startup truncation has to repair.
+// Sharing writeBatch keeps the single-record and batch paths honest about
+// short writes in the same way, from one implementation.
+func encodeAndWriteRecord(w io.Writer, e *Event) error {
 	data, err := json.Marshal(e)
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
 	data = append(data, '\n')
-	if _, err := r.file.Write(data); err != nil {
+	if err := writeBatch(w, data); err != nil {
 		return fmt.Errorf("write: %w", err)
 	}
-	r.recordCount++
 	return nil
 }
 
