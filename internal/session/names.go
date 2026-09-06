@@ -367,6 +367,15 @@ func ensureSessionNameAvailableForSelfAndOwner(store beads.Store, name, selfID, 
 			if continuityIneligibleConfiguredOwner(b, selfOwner) {
 				continue
 			}
+			// The caller that provides selfOwner has already proved, under the
+			// city-level identifier lock, that it is materializing the configured
+			// identity which owns name. A closed lifecycle record may predate the
+			// configured-name markers (for example, a drained pool slot), so it
+			// cannot be allowed to monopolize that configured identity. Preserve
+			// the historical bead; only release its name for the fresh successor.
+			if b.Status == "closed" && selfOwner != "" {
+				continue
+			}
 			if b.Status == "closed" && wasConfiguredNamedSession(b) {
 				continue
 			}
