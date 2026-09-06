@@ -184,6 +184,30 @@ func TestWorktreeSpecForBeadTreatsWorkDirOnlyAsLegacy(t *testing.T) {
 	}
 }
 
+// TestWorktreeSpecForBeadTreatsWorkBranchOnlyAsUnmanaged covers the shape a
+// hook claim's ambient branch stamp actually produces on a legitimately
+// unmanaged bead (ga-ryeij1.1): work_dir + work_branch set, none of the other
+// eight ownership keys published. A hook claim stamps gc.work_branch alone
+// the moment it adopts any bead with a resolvable worktree branch, regardless
+// of whether the bead ever published ownership evidence -- so this shape is
+// not "incomplete evidence" any more than the zero-key case above is. Treat
+// it as unmanaged, not a hard error, or the pool seat starves permanently the
+// first time a hook claim touches it.
+func TestWorktreeSpecForBeadTreatsWorkBranchOnlyAsUnmanaged(t *testing.T) {
+	bead := beads.Bead{ID: "gc-test", Metadata: map[string]string{
+		beadmeta.WorkDirMetadataKey:    "/worktrees/gc-test",
+		beadmeta.WorkBranchMetadataKey: "work/gc-test",
+	}}
+
+	spec, err := worktreeSpecForBead(bead, "rig:gascity")
+	if err != nil {
+		t.Fatalf("worktreeSpecForBead: %v, want a work_dir+work_branch-only bead to be treated as unmanaged, not errored", err)
+	}
+	if spec != nil {
+		t.Fatalf("spec = %+v, want nil so the seat spawns unmanaged instead of starving", spec)
+	}
+}
+
 // TestWorktreeSpecForBeadRejectsSingleOwnershipKey pins the boundary the
 // unmanaged branch creates: nine missing ownership keys is "never published",
 // but eight missing is partial evidence and must still fail closed. An
@@ -206,6 +230,30 @@ func TestWorktreeSpecForBeadRejectsSingleOwnershipKey(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), beadmeta.WorktreeRepoMetadataKey) {
 		t.Fatalf("error = %v, want it to name the first missing key %q", err, beadmeta.WorktreeRepoMetadataKey)
+	}
+}
+
+// TestWorktreeSpecForBeadRejectsWorkBranchPlusOneOtherKey pins the boundary
+// the work_branch-only carve-out below must NOT swallow: work_dir +
+// work_branch plus exactly one of the other eight ownership keys is still a
+// partial, half-published shape and must fail closed exactly like
+// TestWorktreeSpecForBeadRejectsSingleOwnershipKey above. An overly broad
+// carve-out that matched on "work_branch present" rather than "work_branch is
+// the ONLY one of the nine present" would wrongly wave this shape through as
+// unmanaged too.
+func TestWorktreeSpecForBeadRejectsWorkBranchPlusOneOtherKey(t *testing.T) {
+	bead := beads.Bead{ID: "gc-test", Metadata: map[string]string{
+		beadmeta.WorkDirMetadataKey:       "/worktrees/gc-test",
+		beadmeta.WorkBranchMetadataKey:    "work/gc-test",
+		beadmeta.WorktreeOwnerMetadataKey: "gc-sling",
+	}}
+
+	spec, err := worktreeSpecForBead(bead, "rig:gascity")
+	if err == nil {
+		t.Fatalf("spec = %+v err = nil, want work_branch plus one other key to still fail closed", spec)
+	}
+	if spec != nil {
+		t.Fatalf("spec = %+v, want nil alongside the error", spec)
 	}
 }
 
