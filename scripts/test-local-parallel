@@ -58,6 +58,7 @@ fi
 # shellcheck source=lib/harness-reap.sh
 source "$repo_root/scripts/lib/harness-reap.sh"
 gc_local_parallel_drain_ticks=100
+# shellcheck disable=SC2329 # invoked by signal traps below
 gc_local_parallel_on_signal() {
   local sig="$1"
   gc_harness_terminate_group "${gc_harness_supervised_pgid:-}" "$gc_local_parallel_drain_ticks"
@@ -154,6 +155,10 @@ add_local_concurrency_selftest_job() {
   add_job "local-concurrency-selftest" "bash scripts/test-local-concurrency.sh"
 }
 
+add_local_fail_fast_selftest_job() {
+  add_job "local-fail-fast-selftest" "bash scripts/test-local-fail-fast.sh"
+}
+
 add_cmd_gc_shards() {
   local label_prefix="$1"
   local gc_fast_unit="$2"
@@ -206,6 +211,7 @@ case "$mode" in
     add_unit_core_job
     add_push_gate_lock_selftest_job
     add_local_concurrency_selftest_job
+    add_local_fail_fast_selftest_job
     add_cmd_gc_shards "unit-cmd-gc" "1" ""
     ;;
   cmd-gc-process)
@@ -220,6 +226,7 @@ case "$mode" in
     add_unit_core_job
     add_push_gate_lock_selftest_job
     add_local_concurrency_selftest_job
+    add_local_fail_fast_selftest_job
     add_cmd_gc_shards "cmd-gc-process" "0" ""
     add_productmetrics_testhook_job
     add_integration_jobs
@@ -283,6 +290,18 @@ gc_harness_sweep_stale_orphans "$sweep_min_age_seconds"
 echo "Running ${#jobspecs[@]} ${mode} job(s) with LOCAL_TEST_JOBS=${local_jobs} inner_p=${inner_p}"
 
 set +e
+# shellcheck disable=SC2329 # invoked from run_fan_out, which shellcheck cannot see through the supervisor callback
+gc_local_parallel_progress_ts() {
+  date -u '+%Y-%m-%dT%H:%M:%SZ'
+}
+
+# shellcheck disable=SC2329 # invoked from run_fan_out, which shellcheck cannot see through the supervisor callback
+gc_local_parallel_report_progress() {
+  local started="$1" completed="$2" failed="$3" skipped="$4" total="$5"
+  printf 'test-local-progress timestamp=%s mode=%s total=%s started=%s completed=%s failed=%s skipped=%s\n' \
+    "$(gc_local_parallel_progress_ts)" "$mode" "$total" "$started" "$completed" "$failed" "$skipped"
+}
+
 # Sever gate-FD inheritance at the fan-out boundary (ga-owh20p): the slot FD
 # is closed inside this subshell before any job starts, so no job — and no
 # daemon a job leaks (tmux server, dolt sql-server, an escaped `gc`) — ever
@@ -294,59 +313,133 @@ set +e
 # Run as a supervised process group rather than a bare subshell so the whole
 # fan-out is addressable as one tree; the background job it becomes is still a
 # subshell, so the gate-FD severing above keeps its original scope.
+# shellcheck disable=SC2329 # invoked by gc_harness_run_supervised below
 run_fan_out() {
   if [[ -n "$gate_fd" ]]; then
     eval "exec ${gate_fd}>&-"
   fi
-  printf '%s\0' "${jobspecs[@]}" | xargs -0 -n1 -P "$local_jobs" bash -c '
-  set -euo pipefail
-  spec="$1"
-  label="${spec%%::*}"
-  command="${spec#*::}"
-  safe_label="$(printf "%s" "$label" | tr -c "A-Za-z0-9._-" "_")"
-  log="$LOCAL_TEST_LOG_DIR/${safe_label}.log"
 
-  echo "[$label] start"
-  if ${TEST_LOCAL_NICE:-} env -i \
-    PATH="${PATH}" \
-    HOME="${HOME:-}" \
-    USER="${USER:-}" \
-    LOGNAME="${LOGNAME:-}" \
-    SHELL="${SHELL:-/bin/sh}" \
-    LANG="${LANG:-C.UTF-8}" \
-    TMPDIR="${TMPDIR:-/var/tmp}" \
-    OBSERVABLE_TEST_LOG="${OBSERVABLE_TEST_LOG-}" \
-    OBSERVABLE_FAILURE_LINES="${OBSERVABLE_FAILURE_LINES-}" \
-    GC_TEST_NO_SLICE="${GC_TEST_NO_SLICE-}" \
-    XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
-    GOPATH="${TEST_LOCAL_GOPATH}" \
-    GOCACHE="${TEST_LOCAL_GOCACHE}" \
-    GOMODCACHE="${TEST_LOCAL_GOMODCACHE}" \
-    GOTMPDIR="${TEST_LOCAL_GOTMPDIR}" \
-    GOROOT="${TEST_LOCAL_GOROOT}" \
-    GOENV="${GOENV-}" \
-    CGO_CPPFLAGS="${CGO_CPPFLAGS-}" \
-    CGO_LDFLAGS="${CGO_LDFLAGS-}" \
-    GOFLAGS="${GOFLAGS-}" \
-    GO111MODULE="${GO111MODULE-}" \
-    GOEXPERIMENT="${GOEXPERIMENT-}" \
-    GOPROXY="${GOPROXY-}" \
-    GOPRIVATE="${GOPRIVATE-}" \
-    GONOPROXY="${GONOPROXY-}" \
-    GONOSUMDB="${GONOSUMDB-}" \
-    GOSUMDB="${GOSUMDB-}" \
-    GOINSECURE="${GOINSECURE-}" \
-    GOVCS="${GOVCS-}" \
-    GOWORK="${GOWORK-}" \
-    bash -lc "$command" >"$log" 2>&1; then
-    echo "[$label] ok"
-  else
-    status=$?
-    echo "[$label] failed with exit ${status}; log: ${log}" >&2
-    sed -n '"'"'1,240p'"'"' "$log" >&2
-    exit "$status"
+  local total="${#jobspecs[@]}"
+  local started=0 completed=0 failed=0 skipped=0 first_status=0
+  local wait_status spec
+  local -a running_pids=()
+
+  gc_local_parallel_start_job() {
+    local spec="$1"
+    local label="${spec%%::*}"
+    local command="${spec#*::}"
+    local safe_label log status
+    safe_label="$(printf "%s" "$label" | tr -c "A-Za-z0-9._-" "_")"
+    log="$LOCAL_TEST_LOG_DIR/${safe_label}.log"
+
+    echo "[$label] start"
+    if ${TEST_LOCAL_NICE:-} env -i \
+      PATH="${PATH}" \
+      HOME="${HOME:-}" \
+      USER="${USER:-}" \
+      LOGNAME="${LOGNAME:-}" \
+      SHELL="${SHELL:-/bin/sh}" \
+      LANG="${LANG:-C.UTF-8}" \
+      TMPDIR="${TMPDIR:-/var/tmp}" \
+      OBSERVABLE_TEST_LOG="${OBSERVABLE_TEST_LOG-}" \
+      OBSERVABLE_FAILURE_LINES="${OBSERVABLE_FAILURE_LINES-}" \
+      GC_TEST_NO_SLICE="${GC_TEST_NO_SLICE-}" \
+      XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
+      GOPATH="${TEST_LOCAL_GOPATH}" \
+      GOCACHE="${TEST_LOCAL_GOCACHE}" \
+      GOMODCACHE="${TEST_LOCAL_GOMODCACHE}" \
+      GOTMPDIR="${TEST_LOCAL_GOTMPDIR}" \
+      GOROOT="${TEST_LOCAL_GOROOT}" \
+      GOENV="${GOENV-}" \
+      CGO_CPPFLAGS="${CGO_CPPFLAGS-}" \
+      CGO_LDFLAGS="${CGO_LDFLAGS-}" \
+      GOFLAGS="${GOFLAGS-}" \
+      GO111MODULE="${GO111MODULE-}" \
+      GOEXPERIMENT="${GOEXPERIMENT-}" \
+      GOPROXY="${GOPROXY-}" \
+      GOPRIVATE="${GOPRIVATE-}" \
+      GONOPROXY="${GONOPROXY-}" \
+      GONOSUMDB="${GONOSUMDB-}" \
+      GOSUMDB="${GOSUMDB-}" \
+      GOINSECURE="${GOINSECURE-}" \
+      GOVCS="${GOVCS-}" \
+      GOWORK="${GOWORK-}" \
+      bash -lc "$command" >"$log" 2>&1; then
+      echo "[$label] ok"
+    else
+      status=$?
+      echo "[$label] failed with exit ${status}; log: ${log}" >&2
+      sed -n '1,240p' "$log" >&2
+      return "$status"
+    fi
+  }
+
+  gc_local_parallel_forget_running() {
+    local idx="$1"
+    running_pids=("${running_pids[@]:0:$idx}" "${running_pids[@]:$((idx + 1))}")
+  }
+
+  gc_local_parallel_wait_one() {
+    local idx pid status
+    while :; do
+      for idx in "${!running_pids[@]}"; do
+        pid="${running_pids[$idx]}"
+        if ! jobs -pr | grep -Fxq "$pid"; then
+          status=0
+          wait "$pid" || status=$?
+          gc_local_parallel_forget_running "$idx"
+          return "$status"
+        fi
+      done
+      sleep 0.2
+    done
+  }
+
+  gc_local_parallel_report_progress "$started" "$completed" "$failed" "$skipped" "$total"
+  while (( started < total )); do
+    while (( ${#running_pids[@]} < local_jobs && started < total )); do
+      spec="${jobspecs[$started]}"
+      gc_local_parallel_start_job "$spec" &
+      running_pids+=("$!")
+      started=$((started + 1))
+      gc_local_parallel_report_progress "$started" "$completed" "$failed" "$skipped" "$total"
+    done
+
+    if (( ${#running_pids[@]} == 0 )); then
+      break
+    fi
+
+    wait_status=0
+    gc_local_parallel_wait_one || wait_status=$?
+    completed=$((completed + 1))
+    if (( wait_status != 0 )); then
+      failed=$((failed + 1))
+      if (( first_status == 0 )); then
+        first_status="$wait_status"
+      fi
+      skipped=$((total - started))
+      gc_local_parallel_report_progress "$started" "$completed" "$failed" "$skipped" "$total"
+      break
+    fi
+    gc_local_parallel_report_progress "$started" "$completed" "$failed" "$skipped" "$total"
+  done
+
+  while (( ${#running_pids[@]} > 0 )); do
+    wait_status=0
+    gc_local_parallel_wait_one || wait_status=$?
+    completed=$((completed + 1))
+    if (( wait_status != 0 )); then
+      failed=$((failed + 1))
+      if (( first_status == 0 )); then
+        first_status="$wait_status"
+      fi
+    fi
+    gc_local_parallel_report_progress "$started" "$completed" "$failed" "$skipped" "$total"
+  done
+
+  if (( first_status != 0 )); then
+    return "$first_status"
   fi
-' _
 }
 # No watchdog deadline here: each shard runner owns its own, sized to its own
 # go test budget. A second global one would only fire late and less precisely.

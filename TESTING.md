@@ -1021,6 +1021,28 @@ are node-local and ephemeral, never committed to Dolt, so extending them
 here would be a no-op). The underlying claim-staleness concern this would
 have addressed is tracked separately under `ga-aw5356`, not here.
 
+#### Fail-fast scheduling and progress summaries
+
+`scripts/test-local-parallel` owns the per-invocation job scheduler directly.
+It starts at most `LOCAL_TEST_JOBS` jobs, stops launching later queued jobs as
+soon as the first jobspec exits nonzero, and then drains whatever was already
+running under the existing supervised process group. That means a `LOCAL_TEST_JOBS=1`
+run fails without starting any later job, while a `LOCAL_TEST_JOBS>1` run may
+finish sibling jobs that had already started before the failure was observed.
+The scheduler preserves the first failing jobspec's exit status as the runner's
+exit status.
+
+The runner prints top-level progress lines outside per-job logs:
+
+```text
+test-local-progress timestamp=2026-08-15T03:00:00Z mode=fast total=11 started=4 completed=3 failed=1 skipped=7
+```
+
+Those lines are intentionally plain text so a live session can see started,
+completed, failed, and skipped counts without opening shard logs. The contract
+is covered by `scripts/test-local-fail-fast.sh`, run directly as the
+`local-fail-fast-selftest` job in `fast` and `full` modes.
+
 ### 2. Testscript (`.txtar` files in `cmd/gc/testdata/`)
 
 Test what the USER sees. Exercise the real CLI entrypoint by re-executing the

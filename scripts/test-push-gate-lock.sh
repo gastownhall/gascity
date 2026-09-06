@@ -361,7 +361,7 @@ assert_true "wiring.releases_slot_on_exit" grep -qE 'trap .*push_gate_release_sl
 # invocation's death. Line ordering is the assertion: a close that lands after
 # the fan-out is worthless.
 close_line="$(grep -nE 'exec \$\{gate_fd\}>&-' "$LOCAL_PARALLEL" | head -1 | cut -d: -f1)"
-fanout_line="$(grep -n 'xargs -0' "$LOCAL_PARALLEL" | head -1 | cut -d: -f1)"
+fanout_line="$(grep -n 'gc_local_parallel_start_job "\$spec" &' "$LOCAL_PARALLEL" | head -1 | cut -d: -f1)"
 if [[ -n "$close_line" && -n "$fanout_line" && "$close_line" -lt "$fanout_line" ]]; then
     record_pass "wiring.closes_gate_fd_before_fanout"
 else
