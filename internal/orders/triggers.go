@@ -183,12 +183,13 @@ const wallMinuteLayout = "2006-01-02 15:04"
 //     match a real instant; the catch-up scan detects the gap and fires the
 //     order once at the first real minute after the jump.
 func checkCron(a Order, now time.Time, lastRunFn LastRunFunc) TriggerResult {
-	fields := strings.Fields(a.Schedule)
-	if len(fields) != 5 {
-		return TriggerResult{Due: false, Reason: fmt.Sprintf("bad cron schedule: want 5 fields, got %d", len(fields))}
+	// Parsed once, not per candidate minute: the catch-up scan below walks
+	// minute-by-minute over a bounded lookback, and the old matcher re-parsed
+	// all five fields on every step.
+	sched, err := ParseCronSchedule(a.Schedule)
+	if err != nil {
+		return TriggerResult{Due: false, Reason: fmt.Sprintf("bad cron schedule: %v", err)}
 	}
-
-	minute, hour, dom, month, dow := fields[0], fields[1], fields[2], fields[3], fields[4]
 
 	loc, err := resolveOrderLocation(a, now)
 	if err != nil {
@@ -196,13 +197,7 @@ func checkCron(a Order, now time.Time, lastRunFn LastRunFunc) TriggerResult {
 	}
 	now = now.In(loc)
 
-	matchesAt := func(t time.Time) bool {
-		return cronFieldMatches(minute, t.Minute()) &&
-			cronFieldMatches(hour, t.Hour()) &&
-			cronFieldMatches(dom, t.Day()) &&
-			cronFieldMatches(month, int(t.Month())) &&
-			cronFieldMatches(dow, int(t.Weekday()))
-	}
+	matchesAt := sched.MatchesAt
 	sameWallMinute := func(x, y time.Time) bool {
 		return x.Format(wallMinuteLayout) == y.Format(wallMinuteLayout)
 	}
@@ -281,29 +276,6 @@ func matchesInWallGap(matchesAt func(time.Time) bool, prev, t time.Time) bool {
 	}
 	for w, end := naive(prev).Add(time.Minute), naive(t); w.Before(end); w = w.Add(time.Minute) {
 		if matchesAt(w) {
-			return true
-		}
-	}
-	return false
-}
-
-// cronFieldMatches checks if a single cron field matches a value.
-// Supports: "*" (any), exact integer, or comma-separated values.
-func cronFieldMatches(field string, value int) bool {
-	if field == "*" {
-		return true
-	}
-	for _, part := range strings.Split(field, ",") {
-		part = strings.TrimSpace(part)
-		if strings.HasPrefix(part, "*/") {
-			step, err := strconv.Atoi(strings.TrimPrefix(part, "*/"))
-			if err == nil && step > 0 && value%step == 0 {
-				return true
-			}
-			continue
-		}
-		n, err := strconv.Atoi(part)
-		if err == nil && n == value {
 			return true
 		}
 	}

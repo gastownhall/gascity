@@ -173,7 +173,10 @@ Notes per trigger:
   waits `interval` since the last run. Drifts: a 3:02 run means the next is at
   3:07.
 - **`cron`** — a 5-field expression (minute, hour, day-of-month, month,
-  day-of-week) supporting `*`, integers, comma lists (`1,15`), and `*/N` steps.
+  day-of-week) supporting `*`, integers, comma lists (`1,15`), ranges (`16-23`),
+  and steps on either (`*/15`, `1-5/2`). A step counts from the start of its
+  range, so `*/2` on day-of-month is 1,3,5,…. Day-of-week takes 0 or 7 for
+  Sunday. A schedule that cannot be parsed is rejected when the order loads.
   Unlike cooldown it hits the same wall-clock times every day. Fires at most
   once per minute.
 - **`condition`** — the orchestrator runs `sh -c "<check>"` each tick, bounded by

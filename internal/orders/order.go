@@ -318,6 +318,15 @@ func Validate(a Order) error {
 		if a.Schedule == "" {
 			return fmt.Errorf("order %q: cron trigger requires schedule", a.Name)
 		}
+		// Validate the schedule's CONTENTS, not just its presence. Until this
+		// existed, a schedule the matcher could not read loaded clean and then
+		// never fired — the order was configured, listed, and reported active,
+		// and the only evidence it was dead was the absence of runs nobody was
+		// counting. Same reasoning as tz and check_timeout above: a typo must
+		// fail at load, where someone is looking.
+		if _, err := ParseCronSchedule(a.Schedule); err != nil {
+			return fmt.Errorf("order %q: %w %q: %w", a.Name, ErrInvalidSchedule, a.Schedule, err)
+		}
 	case "condition":
 		if a.Check == "" {
 			return fmt.Errorf("order %q: condition trigger requires check command", a.Name)
