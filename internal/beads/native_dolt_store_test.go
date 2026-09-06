@@ -2548,6 +2548,8 @@ type nativeDoltTransactionTestStorage interface {
 	AddDependency(context.Context, *beadslib.Dependency, string) error
 	RemoveDependency(context.Context, string, string, string) error
 	GetDependencyRecords(context.Context, string) ([]*beadslib.Dependency, error)
+	ImportIssueComment(context.Context, string, string, string, time.Time) (*beadslib.Comment, error)
+	GetIssueComments(context.Context, string) ([]*beadslib.Comment, error)
 }
 
 type nativeDoltTransactionForTest struct {
@@ -2597,6 +2599,14 @@ func (tx nativeDoltTransactionForTest) RemoveDependency(ctx context.Context, iss
 
 func (tx nativeDoltTransactionForTest) GetDependencyRecords(ctx context.Context, issueID string) ([]*beadslib.Dependency, error) {
 	return tx.storage.GetDependencyRecords(ctx, issueID)
+}
+
+func (tx nativeDoltTransactionForTest) ImportIssueComment(ctx context.Context, issueID, author, text string, createdAt time.Time) (*beadslib.Comment, error) {
+	return tx.storage.ImportIssueComment(ctx, issueID, author, text, createdAt)
+}
+
+func (tx nativeDoltTransactionForTest) GetIssueComments(ctx context.Context, issueID string) ([]*beadslib.Comment, error) {
+	return tx.storage.GetIssueComments(ctx, issueID)
 }
 
 type nativeDoltStorageSpy struct {
@@ -2794,12 +2804,18 @@ func (s *nativeDoltStorageSpy) Close() error {
 
 type nativeDoltMemStorage struct {
 	beadslib.Storage
-	store *MemStore
-	txMu  sync.Mutex
+	store          *MemStore
+	txMu           sync.Mutex
+	comments       map[string][]*beadslib.Comment
+	commentSeq     int
+	commentReadErr error
 }
 
 func newNativeDoltMemStorage() *nativeDoltMemStorage {
-	return &nativeDoltMemStorage{store: NewMemStore()}
+	return &nativeDoltMemStorage{
+		store:    NewMemStore(),
+		comments: make(map[string][]*beadslib.Comment),
+	}
 }
 
 func (s *nativeDoltMemStorage) RunInTransaction(_ context.Context, _ string, fn func(beadslib.Transaction) error) error {
@@ -2814,8 +2830,12 @@ func runNativeDoltMemStorageTransactionForTest(storage *nativeDoltMemStorage, fn
 	storage.store.mu.Lock()
 	seq, beads, deps := storage.store.snapshot()
 	storage.store.mu.Unlock()
+	commentSeq := storage.commentSeq
+	comments := cloneNativeDoltTestComments(storage.comments)
 	if err := fn(); err != nil {
 		storage.store.restoreFrom(seq, beads, deps)
+		storage.commentSeq = commentSeq
+		storage.comments = comments
 		return err
 	}
 	return nil
@@ -3064,12 +3084,51 @@ func (s *nativeDoltMemStorage) AddComment(context.Context, string, string, strin
 	return nil
 }
 
-func (s *nativeDoltMemStorage) ImportIssueComment(context.Context, string, string, string, time.Time) (*beadslib.Comment, error) {
-	return nil, nil
+func (s *nativeDoltMemStorage) ImportIssueComment(_ context.Context, issueID, author, text string, createdAt time.Time) (*beadslib.Comment, error) {
+	if _, err := s.store.Get(issueID); err != nil {
+		return nil, err
+	}
+	s.commentSeq++
+	comment := &beadslib.Comment{
+		ID:        fmt.Sprintf("comment-%d", s.commentSeq),
+		IssueID:   issueID,
+		Author:    author,
+		Text:      text,
+		CreatedAt: createdAt.UTC(),
+	}
+	s.comments[issueID] = append(s.comments[issueID], comment)
+	copiedComment := *comment
+	return &copiedComment, nil
+}
+
+func (s *nativeDoltMemStorage) GetIssueComments(_ context.Context, issueID string) ([]*beadslib.Comment, error) {
+	if s.commentReadErr != nil {
+		return nil, s.commentReadErr
+	}
+	rows := s.comments[issueID]
+	result := make([]*beadslib.Comment, 0, len(rows))
+	for _, row := range rows {
+		copiedComment := *row
+		result = append(result, &copiedComment)
+	}
+	return result, nil
 }
 
 func (s *nativeDoltMemStorage) Close() error {
 	return nil
+}
+
+func cloneNativeDoltTestComments(source map[string][]*beadslib.Comment) map[string][]*beadslib.Comment {
+	clone := make(map[string][]*beadslib.Comment, len(source))
+	for issueID, rows := range source {
+		copies := make([]*beadslib.Comment, 0, len(rows))
+		for _, row := range rows {
+			copiedComment := *row
+			copies = append(copies, &copiedComment)
+		}
+		clone[issueID] = copies
+	}
+	return clone
 }
 
 type nativeDoltCloseCapturingStorage struct {

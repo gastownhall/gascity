@@ -386,8 +386,8 @@ func TestReadyWireFieldSetIsPinnedToTheHTTPBeadShape(t *testing.T) {
 	computedReadyWireFields := map[string]bool{"blocked_by": true}
 
 	want := []string{
-		"assignee", "blocked_by", "created_at", "defer_until", "dependencies",
-		"description", "ephemeral", "from", "id", "is_blocked", "issue_type",
+		"acceptance_criteria", "assignee", "blocked_by", "created_at", "defer_until", "dependencies",
+		"description", "ephemeral", "external_ref", "from", "id", "is_blocked", "issue_type",
 		"labels", "metadata", "needs", "no_history", "parent", "priority",
 		"ref", "status", "title", "updated_at",
 	}
@@ -412,12 +412,14 @@ func TestReadyWireFieldSetIsPinnedToTheHTTPBeadShape(t *testing.T) {
 func TestReadyRowMarshalsUnderBdWireTags(t *testing.T) {
 	created := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
 	row := toReadyBead(beads.Bead{
-		ID:        "gcg-1",
-		Title:     "graph step",
-		Status:    "open",
-		Type:      "task",
-		ParentID:  "gcg-root",
-		CreatedAt: created,
+		ID:                 "gcg-1",
+		Title:              "graph step",
+		Status:             "open",
+		Type:               "task",
+		ParentID:           "gcg-root",
+		CreatedAt:          created,
+		AcceptanceCriteria: "exact readback",
+		ExternalRef:        "https://github.com/opsime-space/product/issues/42",
 	})
 	data, err := json.Marshal(row)
 	if err != nil {
@@ -433,6 +435,12 @@ func TestReadyRowMarshalsUnderBdWireTags(t *testing.T) {
 	if decoded["parent"] != "gcg-root" {
 		t.Fatalf("row = %s, want parent=gcg-root (bd's tag, not the \"parent_id\" gc bd dep tree emits)", data)
 	}
+	if decoded["acceptance_criteria"] != "exact readback" {
+		t.Fatalf("row = %s, want acceptance_criteria preserved", data)
+	}
+	if decoded["external_ref"] != "https://github.com/opsime-space/product/issues/42" {
+		t.Fatalf("row = %s, want external_ref preserved", data)
+	}
 	if _, ok := decoded["parent_id"]; ok {
 		t.Fatalf("row = %s, must not carry parent_id: consumers decode this array into []beads.Bead, where the tag is \"parent\"", data)
 	}
@@ -441,8 +449,10 @@ func TestReadyRowMarshalsUnderBdWireTags(t *testing.T) {
 	if err := json.Unmarshal(data, &back); err != nil {
 		t.Fatalf("decode into beads.Bead: %v", err)
 	}
-	if back.Type != "task" || back.ParentID != "gcg-root" {
-		t.Fatalf("decoded beads.Bead = %+v, want type=task parent=gcg-root", back)
+	if back.Type != "task" || back.ParentID != "gcg-root" ||
+		back.AcceptanceCriteria != "exact readback" ||
+		back.ExternalRef != "https://github.com/opsime-space/product/issues/42" {
+		t.Fatalf("decoded beads.Bead = %+v, want type, parent, acceptance criteria, and external ref preserved", back)
 	}
 }
 

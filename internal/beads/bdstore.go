@@ -878,22 +878,24 @@ func (r *bdRevision) UnmarshalJSON(data []byte) error {
 // bdIssue is the JSON shape returned by bd CLI commands. We decode only the
 // fields Gas City cares about; all others are silently ignored.
 type bdIssue struct {
-	ID           string       `json:"id"`
-	Title        string       `json:"title"`
-	Status       string       `json:"status"`
-	IssueType    string       `json:"issue_type"`
-	Priority     *int         `json:"priority,omitempty"`
-	CreatedAt    time.Time    `json:"created_at"`
-	UpdatedAt    time.Time    `json:"updated_at"`
-	Assignee     string       `json:"assignee"`
-	From         string       `json:"from"`
-	ParentID     string       `json:"parent"`
-	Ref          string       `json:"ref"`
-	Needs        []string     `json:"needs"`
-	Description  string       `json:"description"`
-	Labels       []string     `json:"labels"`
-	Metadata     StringMap    `json:"metadata,omitempty"`
-	Dependencies []bdIssueDep `json:"dependencies,omitempty"`
+	ID                 string       `json:"id"`
+	Title              string       `json:"title"`
+	Status             string       `json:"status"`
+	IssueType          string       `json:"issue_type"`
+	Priority           *int         `json:"priority,omitempty"`
+	CreatedAt          time.Time    `json:"created_at"`
+	UpdatedAt          time.Time    `json:"updated_at"`
+	Assignee           string       `json:"assignee"`
+	From               string       `json:"from"`
+	ParentID           string       `json:"parent"`
+	Ref                string       `json:"ref"`
+	Needs              []string     `json:"needs"`
+	Description        string       `json:"description"`
+	AcceptanceCriteria string       `json:"acceptance_criteria,omitempty"`
+	ExternalRef        string       `json:"external_ref,omitempty"`
+	Labels             []string     `json:"labels"`
+	Metadata           StringMap    `json:"metadata,omitempty"`
+	Dependencies       []bdIssueDep `json:"dependencies,omitempty"`
 	// DependencyCount is bd's own count of this row's BLOCKING edges,
 	// projected from the same dependency table and the same query as
 	// Dependencies. It is the control that turns "bd carried edges inline"
@@ -1054,6 +1056,8 @@ func (b *bdIssue) toBead() Bead {
 		Ref:                  b.Ref,
 		Needs:                b.Needs,
 		Description:          b.Description,
+		AcceptanceCriteria:   b.AcceptanceCriteria,
+		ExternalRef:          b.ExternalRef,
 		Labels:               b.Labels,
 		Metadata:             b.Metadata,
 		Dependencies:         deps,
@@ -1308,6 +1312,18 @@ func effectiveStorageFlags(b Bead, storage StorageClass) (ephemeral bool, noHist
 
 // Get retrieves a bead by ID via bd show.
 func (s *BdStore) Get(id string) (Bead, error) {
+	return s.get(id, false)
+}
+
+// ReadUpdateCASBead is the BdStore counterpart to the native exact
+// CAS readback. Ordinary Gas City reads keep their scheduler-oriented status
+// normalization; the exact conditional projection path compares the persisted
+// Beads status vocabulary instead.
+func (s *BdStore) ReadUpdateCASBead(id string) (Bead, error) {
+	return s.get(id, true)
+}
+
+func (s *BdStore) get(id string, preserveUpstreamStatus bool) (Bead, error) {
 	// Read via the transient-retry wrapper so a Get that races a managed-Dolt
 	// restart (SIGKILL + port rebind) recovers instead of surfacing a one-shot
 	// "invalid connection"/"i/o timeout" transport error. The runner performs a
@@ -1327,7 +1343,7 @@ func (s *BdStore) Get(id string) (Bead, error) {
 		// non-bead names (e.g. slash-qualified session recipients), which
 		// must not leak into a supplemental wisp query.
 		if isWispQueryableID(id) {
-			wisps, queryErr := s.getEphemeralByID(id)
+			wisps, queryErr := s.getEphemeralByID(id, preserveUpstreamStatus)
 			if queryErr == nil {
 				for _, b := range wisps {
 					if b.ID == id {
@@ -1346,6 +1362,9 @@ func (s *BdStore) Get(id string) (Bead, error) {
 		return Bead{}, fmt.Errorf("getting bead %q: %w", id, ErrNotFound)
 	}
 	bead := issues[0].toBead()
+	if preserveUpstreamStatus {
+		bead.Status = issues[0].Status
+	}
 	// Guard against bd's fuzzy/substring ID resolution silently returning a
 	// different bead than requested (gascity#gcy-g4o). bd may resolve a short
 	// ID like "gcy-dv7" to an unrelated bead whose ID contains "dv7" as a
@@ -1384,6 +1403,12 @@ func bdUpdateArgs(id string, opts UpdateOpts) []string {
 	}
 	if opts.Description != nil {
 		args = append(args, "--description", *opts.Description)
+	}
+	if opts.AcceptanceCriteria != nil {
+		args = append(args, "--acceptance", *opts.AcceptanceCriteria)
+	}
+	if opts.ExternalRef != nil {
+		args = append(args, "--external-ref", *opts.ExternalRef)
 	}
 	if opts.ParentID != nil {
 		args = append(args, "--parent", *opts.ParentID)
@@ -2896,7 +2921,7 @@ func isWispQueryableID(id string) bool {
 	return true
 }
 
-func (s *BdStore) getEphemeralByID(id string) ([]Bead, error) {
+func (s *BdStore) getEphemeralByID(id string, preserveUpstreamStatus bool) ([]Bead, error) {
 	clause := "ephemeral=true AND id=" + id
 	args := []string{"query", "--json", clause, "--all", "--limit", "1"}
 	out, err := s.runner(s.dir, "bd", args...)
@@ -2910,6 +2935,9 @@ func (s *BdStore) getEphemeralByID(id string) ([]Bead, error) {
 	result := make([]Bead, len(issues))
 	for i := range issues {
 		result[i] = issues[i].toBead()
+		if preserveUpstreamStatus {
+			result[i].Status = issues[i].Status
+		}
 		result[i].Ephemeral = true
 	}
 	if parseErr != nil {
