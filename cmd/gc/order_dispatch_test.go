@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -69,6 +70,27 @@ type eventCursorUpdateFailStore struct {
 
 type latestSeqFailProvider struct {
 	events.Provider
+}
+
+type blockingListEventProvider struct {
+	*events.Fake
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newBlockingListEventProvider() *blockingListEventProvider {
+	return &blockingListEventProvider{
+		Fake:    events.NewFake(),
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (p *blockingListEventProvider) List(filter events.Filter) ([]events.Event, error) {
+	p.once.Do(func() { close(p.started) })
+	<-p.release
+	return p.Fake.List(filter)
 }
 
 type triggerEvaluationFailStore struct {
@@ -1672,6 +1694,240 @@ func TestOrderDispatchMultiple(t *testing.T) {
 	if trackingCount != 1 {
 		t.Errorf("expected 1 tracking bead for order-a, got %d", trackingCount)
 	}
+}
+
+func TestOrderDispatchBlockedEventTriggerDoesNotStarveCooldownPeer(t *testing.T) {
+	provider := newBlockingListEventProvider()
+	defer close(provider.release)
+	provider.Record(events.Event{Type: events.BeadCreated})
+
+	store := beads.NewMemStore()
+	var executions []string
+	ad := buildOrderDispatcherFromListExec([]orders.Order{
+		{Name: "blocked-event", Trigger: "event", On: events.BeadCreated, Exec: "true"},
+		{Name: "cooldown-peer", Trigger: "cooldown", Interval: "1m", Exec: "true"},
+	}, store, provider, func(_ context.Context, command, _ string, _ []string) ([]byte, error) {
+		executions = append(executions, command)
+		return nil, nil
+	}, events.Discard)
+	if ad == nil {
+		t.Fatal("expected dispatcher")
+	}
+	m := ad.(*memoryOrderDispatcher)
+	originalTimeout := orderTriggerTimeout
+	orderTriggerTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { orderTriggerTimeout = originalTimeout })
+
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+	select {
+	case <-provider.started:
+	default:
+		t.Fatal("event trigger List was not evaluated")
+	}
+	m.drain(context.Background())
+
+	if len(executions) != 1 || executions[0] != "true" {
+		t.Fatalf("executions = %v, want cooldown peer to run despite blocked event trigger", executions)
+	}
+}
+
+func TestCheckOrderTriggerBoundedDoesNotCapConditionTimeout(t *testing.T) {
+	originalTimeout := orderTriggerTimeout
+	orderTriggerTimeout = time.Millisecond
+	t.Cleanup(func() { orderTriggerTimeout = originalTimeout })
+
+	a := orders.Order{
+		Name:         "slow-condition",
+		Trigger:      "condition",
+		Check:        "sleep 0.05",
+		CheckTimeout: "1s",
+	}
+	result, err := checkOrderTriggerBounded(
+		context.Background(),
+		a,
+		time.Now(),
+		func(string) (time.Time, error) { return time.Time{}, nil },
+		nil,
+		nil,
+		orders.TriggerOptions{ConditionTimeout: a.CheckTimeoutOrDefault()},
+	)
+	if err != nil {
+		t.Fatalf("checkOrderTriggerBounded() error = %v; event-read isolation must not cap condition check_timeout", err)
+	}
+	if !result.Due {
+		t.Fatalf("Due = false, want true; reason: %s", result.Reason)
+	}
+}
+
+func TestOrderDispatchEventTrackingOnlyPageAdvancesDurableCursor(t *testing.T) {
+	provider := events.NewFake()
+	provider.Record(events.Event{
+		Type:    events.BeadCreated,
+		Payload: mustMarshalOrderDispatchLabels(t, []string{labelOrderTracking}),
+	})
+	store := beads.NewMemStore()
+	ad := buildOrderDispatcherFromListExec([]orders.Order{{
+		Name: "event-order", Trigger: "event", On: events.BeadCreated, Exec: "true",
+	}}, store, provider, successfulExec, events.Discard)
+	if ad == nil {
+		t.Fatal("expected dispatcher")
+	}
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	ad.drain(context.Background())
+
+	runs := trackingBeads(t, store, "order-run:event-order")
+	if len(runs) != 1 {
+		t.Fatalf("cursor advance runs = %d, want 1", len(runs))
+	}
+	if !slicesContain(runs[0].Labels, "order:event-order") || !slicesContain(runs[0].Labels, "seq:1") {
+		t.Fatalf("cursor advance labels = %v, want order:event-order and seq:1", runs[0].Labels)
+	}
+	if runs[0].Status != "closed" {
+		t.Errorf("cursor advance status = %q, want closed", runs[0].Status)
+	}
+}
+
+func TestOrderDispatchEventCursorAdvanceDoesNotSelfRegenerate(t *testing.T) {
+	provider := events.NewFake()
+	backing := beads.NewMemStore()
+	store := beads.NewCachingStoreForTest(backing, func(eventType, _ string, payload json.RawMessage) {
+		provider.Record(events.Event{Type: eventType, Payload: payload})
+	})
+	provider.Record(events.Event{
+		Type:    events.BeadCreated,
+		Payload: mustMarshalOrderDispatchLabels(t, []string{labelOrderTracking}),
+	})
+	ad := buildOrderDispatcherFromListExec([]orders.Order{{
+		Name: "event-order", Trigger: "event", On: events.BeadCreated, Exec: "true",
+	}}, store, provider, successfulExec, events.Discard)
+	if ad == nil {
+		t.Fatal("expected dispatcher")
+	}
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	ad.drain(context.Background())
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	ad.drain(context.Background())
+
+	runs := trackingBeads(t, store, "order-run:event-order")
+	if len(runs) != 1 {
+		t.Fatalf("cursor advance runs after two ticks = %d, want 1; the cursor bead must cover its own bead.created event", len(runs))
+	}
+}
+
+func TestOrderDispatchPeerEventCursorCheckpointsDoNotRegenerate(t *testing.T) {
+	provider := events.NewFake()
+	backing := beads.NewMemStore()
+	store := beads.NewCachingStoreForTest(backing, func(eventType, _ string, payload json.RawMessage) {
+		provider.Record(events.Event{Type: eventType, Payload: payload})
+	})
+	provider.Record(events.Event{
+		Type:    events.BeadCreated,
+		Payload: mustMarshalOrderDispatchLabels(t, []string{labelOrderTracking}),
+	})
+	ad := buildOrderDispatcherFromListExec([]orders.Order{
+		{Name: "event-order-a", Trigger: "event", On: events.BeadCreated, Exec: "true"},
+		{Name: "event-order-b", Trigger: "event", On: events.BeadCreated, Exec: "true"},
+	}, store, provider, successfulExec, events.Discard)
+	if ad == nil {
+		t.Fatal("expected dispatcher")
+	}
+
+	for range 3 {
+		ad.dispatch(context.Background(), t.TempDir(), time.Now())
+		ad.drain(context.Background())
+	}
+
+	for _, name := range []string{"event-order-a", "event-order-b"} {
+		runs := trackingBeads(t, store, "order-run:"+name)
+		if len(runs) != 1 {
+			t.Fatalf("%s cursor advance runs after three ticks = %d, want 1; peer cursor beads must be covered in the same tick", name, len(runs))
+		}
+	}
+}
+
+func TestOrderDispatchEventCursorAdvancePreservesConcurrentRealEvent(t *testing.T) {
+	provider := events.NewFake()
+	backing := beads.NewMemStore()
+	injected := false
+	store := beads.NewCachingStoreForTest(backing, func(eventType, _ string, payload json.RawMessage) {
+		if eventType == events.BeadCreated && !injected {
+			var created struct {
+				Labels []string `json:"labels"`
+			}
+			if err := json.Unmarshal(payload, &created); err == nil && slicesContain(created.Labels, labelOrderTracking) {
+				injected = true
+				provider.Record(events.Event{Type: events.BeadCreated})
+			}
+		}
+		provider.Record(events.Event{Type: eventType, Payload: payload})
+	})
+	provider.Record(events.Event{
+		Type:    events.BeadCreated,
+		Payload: mustMarshalOrderDispatchLabels(t, []string{labelOrderTracking}),
+	})
+	executions := 0
+	ad := buildOrderDispatcherFromListExec([]orders.Order{{
+		Name: "event-order", Trigger: "event", On: events.BeadCreated, Exec: "true",
+	}}, store, provider, func(context.Context, string, string, []string) ([]byte, error) {
+		executions++
+		return nil, nil
+	}, events.Discard)
+	if ad == nil {
+		t.Fatal("expected dispatcher")
+	}
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	ad.drain(context.Background())
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	ad.drain(context.Background())
+
+	if executions != 1 {
+		t.Fatalf("executions = %d, want 1; a real event interleaved with cursor persistence must remain dispatchable", executions)
+	}
+}
+
+func TestOrderDispatchTrackingOnlyBeadUpdatedAdvancesWithoutRecursiveCursorRun(t *testing.T) {
+	provider := events.NewFake()
+	provider.Record(events.Event{
+		Type:    events.BeadUpdated,
+		Payload: mustMarshalOrderDispatchLabels(t, []string{labelOrderTracking}),
+	})
+	backing := beads.NewMemStore()
+	store := beads.NewCachingStoreForTest(backing, func(eventType, _ string, payload json.RawMessage) {
+		provider.Record(events.Event{Type: eventType, Payload: payload})
+	})
+	ad := buildOrderDispatcherFromListExec([]orders.Order{{
+		Name: "update-order", Trigger: "event", On: events.BeadUpdated, Exec: "true",
+	}}, store, provider, successfulExec, events.Discard)
+	if ad == nil {
+		t.Fatal("expected dispatcher")
+	}
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	ad.drain(context.Background())
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	ad.drain(context.Background())
+
+	runs := trackingBeads(t, store, "order-run:update-order")
+	if len(runs) != 1 {
+		t.Fatalf("cursor advance runs after two ticks = %d, want 1", len(runs))
+	}
+	if !slicesContain(runs[0].Labels, "seq:1") {
+		t.Fatalf("cursor labels = %v, want seq:1", runs[0].Labels)
+	}
+}
+
+func mustMarshalOrderDispatchLabels(t *testing.T, labels []string) []byte {
+	t.Helper()
+	data, err := json.Marshal(struct {
+		Labels []string `json:"labels"`
+	}{Labels: labels})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
 
 func TestOrderDispatchRespectsMaxDispatchesPerTick(t *testing.T) {

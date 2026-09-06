@@ -115,6 +115,26 @@ func TestSetCursorLabelPair(t *testing.T) {
 	}
 }
 
+func TestAdvanceCursorReplacesSequenceLabel(t *testing.T) {
+	st, rec := recordingOrdersStore()
+	seeded, err := st.store.Create(beads.Bead{Title: "order:rig/agent", Labels: []string{"order:rig/agent", "seq:7"}})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	rec.Reset()
+
+	if err := st.AdvanceCursor(seeded.ID, "rig/agent", EventCursor(7), EventCursor(11)); err != nil {
+		t.Fatalf("AdvanceCursor: %v", err)
+	}
+	call := rec.CallsForOp("Update")[0].Opts
+	if want := []string{"order:rig/agent", "seq:11"}; !reflect.DeepEqual(call.Labels, want) {
+		t.Errorf("cursor labels = %v, want %v", call.Labels, want)
+	}
+	if want := []string{"seq:7"}; !reflect.DeepEqual(call.RemoveLabels, want) {
+		t.Errorf("removed labels = %v, want %v", call.RemoveLabels, want)
+	}
+}
+
 // TestCloseRunStampsReasonThenCloses proves CloseRun stamps close_reason then
 // closes — matching cmd_order.go's SetMetadata(close_reason)+Close.
 func TestCloseRunStampsReasonThenCloses(t *testing.T) {
@@ -199,6 +219,37 @@ func TestCreateRunClosedWithCursor(t *testing.T) {
 	}
 	if got := updates[1].Opts.Labels; !reflect.DeepEqual(got, []string{"exec"}) {
 		t.Errorf("outcome labels = %v, want [exec]", got)
+	}
+}
+
+func TestCreateCursorCheckpointDoesNotEmitUpdate(t *testing.T) {
+	st, rec := recordingOrdersStore()
+
+	run, err := st.CreateCursorCheckpoint("rig/agent", EventCursor(9), "tracking-only event page consumed")
+	if err != nil {
+		t.Fatalf("CreateCursorCheckpoint: %v", err)
+	}
+	if run.Open || run.Cursor != EventCursor(9) {
+		t.Fatalf("run = %+v, want closed cursor 9", run)
+	}
+
+	ops := make([]string, 0)
+	for _, c := range rec.Calls() {
+		ops = append(ops, c.Op)
+	}
+	if want := []string{"Create", "Close"}; !reflect.DeepEqual(ops, want) {
+		t.Fatalf("ops = %v, want %v; a cursor checkpoint must not emit bead.updated", ops, want)
+	}
+	create := rec.CallsForOp("Create")[0].Bead
+	wantLabels := []string{"order-run:rig/agent", "order-tracking", "order:rig/agent", "seq:9"}
+	if !reflect.DeepEqual(create.Labels, wantLabels) {
+		t.Errorf("labels = %v, want %v", create.Labels, wantLabels)
+	}
+	if create.Metadata["close_reason"] != "tracking-only event page consumed" {
+		t.Errorf("close_reason = %q", create.Metadata["close_reason"])
+	}
+	if !create.NoHistory {
+		t.Error("NoHistory = false, want true")
 	}
 }
 

@@ -558,6 +558,15 @@ type orderDispatchCandidate struct {
 	conditionResult *orders.TriggerResult
 }
 
+type pendingEventCursorCheckpoint struct {
+	order     orders.Order
+	scoped    string
+	front     *orders.Store
+	cursor    uint64
+	lastRunFn orders.LastRunFunc
+	opts      orders.TriggerOptions
+}
+
 // prefetchConditionResults runs every candidate condition check concurrently,
 // bounded by orderConditionCheckConcurrency.
 //
@@ -643,6 +652,10 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 	}()
 	trackingIndex := newOrderDispatchTrackingIndex(m.stderr)
 	budgetSpent := 0
+	var pendingCursorCheckpoints []pendingEventCursorCheckpoint
+	defer func() {
+		m.flushEventCursorCheckpoints(ctx, now, pendingCursorCheckpoints)
+	}()
 
 	total := len(m.aa)
 	if total == 0 {
@@ -769,12 +782,14 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			return last, err
 		}
 		cursorFn := orders.CursorAcross(orderFrontDoorsForStores(storesForGate))
+		var eventCursor uint64
 		if a.Trigger == "event" {
 			cursor, err := bdCursorAcrossStores(a.ScopedName(), storesForGate...)
 			if err != nil {
 				logDispatchError(m.stderr, "gc: order dispatch: reading event cursor for %s: %v", a.ScopedName(), err)
 				continue
 			}
+			eventCursor = cursor
 			cursorFn = func(string) uint64 {
 				return cursor
 			}
@@ -809,7 +824,16 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		if cand.conditionResult != nil {
 			result = *cand.conditionResult
 		} else {
-			result = orders.CheckTriggerWithOptions(a, now, lastRunFn, m.ep, cursorFn, triggerOpts)
+			var triggerErr error
+			result, triggerErr = checkOrderTriggerBounded(ctx, a, now, lastRunFn, m.ep, cursorFn, triggerOpts)
+			if triggerErr != nil {
+				logDispatchError(m.stderr, "gc: order dispatch: evaluating trigger for %s: %v", a.ScopedName(), triggerErr)
+				continue
+			}
+		}
+		if result.Err != nil {
+			logDispatchError(m.stderr, "gc: order dispatch: evaluating trigger for %s: %v", a.ScopedName(), result.Err)
+			continue
 		}
 		if lastRunErr != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: reading last run for %s: %v", a.ScopedName(), lastRunErr)
@@ -835,6 +859,12 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			// (ga-ocypq2). Raise the order's check_timeout to fix.
 			if a.Trigger == "condition" && strings.Contains(result.Reason, orders.ConditionCheckTimedOutMarker) {
 				logDispatchError(m.stderr, "gc: order dispatch: %s %s — raise check_timeout if the check needs a slow store read", a.ScopedName(), result.Reason)
+			}
+			if a.Trigger == "event" && result.Cursor > eventCursor {
+				pendingCursorCheckpoints = append(pendingCursorCheckpoints, pendingEventCursorCheckpoint{
+					order: a, scoped: scoped, front: m.orderFrontDoorFor(store), cursor: result.Cursor,
+					lastRunFn: lastRunFn, opts: triggerOpts,
+				})
 			}
 			continue
 		}
@@ -916,6 +946,42 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		m.rememberLastRun(scoped, storeKeysForGate, trackingBead.CreatedAt)
 		if spendDispatchBudget(idx) {
 			return
+		}
+	}
+}
+
+func (m *memoryOrderDispatcher) flushEventCursorCheckpoints(ctx context.Context, now time.Time, pending []pendingEventCursorCheckpoint) {
+	type createdCheckpoint struct {
+		pendingEventCursorCheckpoint
+		run orders.OrderRun
+	}
+	created := make([]createdCheckpoint, 0, len(pending))
+	for _, checkpoint := range pending {
+		run, err := checkpoint.front.CreateCursorCheckpoint(checkpoint.scoped, orders.EventCursor(checkpoint.cursor), "event trigger cursor advanced past controller bookkeeping events")
+		if err != nil {
+			logDispatchError(m.stderr, "gc: order dispatch: advancing event cursor for %s: %v", checkpoint.scoped, err)
+			continue
+		}
+		created = append(created, createdCheckpoint{pendingEventCursorCheckpoint: checkpoint, run: run})
+	}
+
+	// Create every checkpoint before re-reading the event log. Otherwise one
+	// event order can checkpoint before a peer creates its tracking bead, and
+	// the two orders generate cursor beads for each other forever.
+	for _, checkpoint := range created {
+		if checkpoint.order.On != events.BeadCreated && checkpoint.order.On != events.BeadClosed {
+			continue
+		}
+		post, postErr := checkOrderTriggerBounded(ctx, checkpoint.order, now, checkpoint.lastRunFn, m.ep, func(string) uint64 { return checkpoint.cursor }, checkpoint.opts)
+		switch {
+		case postErr != nil:
+			logDispatchError(m.stderr, "gc: order dispatch: verifying advanced event cursor for %s: %v", checkpoint.scoped, postErr)
+		case post.Err != nil:
+			logDispatchError(m.stderr, "gc: order dispatch: verifying advanced event cursor for %s: %v", checkpoint.scoped, post.Err)
+		case !post.Due && post.Cursor > checkpoint.cursor:
+			if err := checkpoint.front.AdvanceCursor(checkpoint.run.ID, checkpoint.scoped, orders.EventCursor(checkpoint.cursor), orders.EventCursor(post.Cursor)); err != nil {
+				logDispatchError(m.stderr, "gc: order dispatch: covering cursor bookkeeping event for %s: %v", checkpoint.scoped, err)
+			}
 		}
 	}
 }
@@ -2676,6 +2742,28 @@ func isOrderWispDescendantDepType(depType string) bool {
 // the rest of the sweep proceeds. Package-level var so it is tunable and
 // overridable in tests.
 var orderGateTimeout = 8 * time.Second
+
+// orderTriggerTimeout bounds event-provider reads, whose interface does not
+// accept a context, so one stalled order cannot starve peer dispatches.
+var orderTriggerTimeout = 8 * time.Second
+
+func checkOrderTriggerBounded(ctx context.Context, a orders.Order, now time.Time, lastRunFn orders.LastRunFunc, ep events.Provider, cursorFn orders.CursorFunc, opts orders.TriggerOptions) (orders.TriggerResult, error) {
+	if a.Trigger != "event" {
+		return orders.CheckTriggerWithOptions(a, now, lastRunFn, ep, cursorFn, opts), nil
+	}
+	resultCh := make(chan orders.TriggerResult, 1)
+	go func() { resultCh <- orders.CheckTriggerWithOptions(a, now, lastRunFn, ep, cursorFn, opts) }()
+	timer := time.NewTimer(orderTriggerTimeout)
+	defer timer.Stop()
+	select {
+	case result := <-resultCh:
+		return result, nil
+	case <-timer.C:
+		return orders.TriggerResult{}, fmt.Errorf("trigger evaluation timed out after %s", orderTriggerTimeout)
+	case <-ctx.Done():
+		return orders.TriggerResult{}, fmt.Errorf("trigger evaluation aborted: %w", ctx.Err())
+	}
+}
 
 // orderGateBackoffDuration is the suppression window set after a gate timeout,
 // anchored to the actual wall clock at the moment the timeout fires (not the
