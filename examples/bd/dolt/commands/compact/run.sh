@@ -3027,6 +3027,28 @@ flatten_database() {
     printf 'compact: db=%s row-count increase passed value-hash verification — full GC allowed\n' \
       "$db"
   fi
+
+  # Treat HEAD movement after the database-hash probes as a final signal that
+  # this is not a quiet compaction window. Deferring here avoids starting an
+  # expensive full GC while a writer is already known to be active. This probe
+  # is intentionally not described as quiescence: a writer can still commit
+  # after it. Concurrent-GC correctness comes from Dolt's online-GC safepoint
+  # controller; this check only detects the residual window we can observe and
+  # leaves reclamation for a quieter retry.
+  final_verify_head=$(head_commit "$db" || true)
+  if [ -n "$flatten_head" ] && [ -n "$final_verify_head" ] && [ "$final_verify_head" != "$flatten_head" ]; then
+    printf 'compact: db=%s writer race detected during flatten verification (snapshot_HEAD=%s flatten_HEAD=%s final_verify_HEAD=%s) — deferring full GC until the next quiet run\n' \
+      "$db" "$head" "$flatten_head" "$final_verify_head" >&2
+    if ! defer_writer_race_after_flatten "$db" "$flatten_head" \
+      "$remote" "$expected_remote_head" "$expected_remote_head_verified" \
+      "$compacted_from_head" "$local_branch" "$remote_branch"; then
+      rm -f "$preflight_tmp"
+      return 1
+    fi
+    rm -f "$preflight_tmp"
+    return 0
+  fi
+
   rm -f "$preflight_tmp"
 
   after_count=$(commit_count "$db" || true)
