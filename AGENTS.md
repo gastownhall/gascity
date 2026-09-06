@@ -519,7 +519,12 @@ bd close <id>         # Complete work
 
 ## Session Completion
 
-**When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
+**Gas City local-only beads:** this rig's Beads/Dolt store is intentionally
+local-only. Do **not** run `bd dolt push`, `bd dolt pull`, or `gc dolt sync`
+for gascity. Code/documentation changes still use normal Git push.
+
+**When ending a work session**, you MUST complete ALL steps below. Work with
+code or documentation changes is NOT complete until `git push` succeeds.
 
 **MANDATORY WORKFLOW:**
 
