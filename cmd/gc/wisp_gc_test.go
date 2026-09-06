@@ -1606,6 +1606,11 @@ func TestWispGC_LeavesOpenRootWithLiveDescendant(t *testing.T) {
 	}
 }
 
+// TestWispGC_LeavesSteplessRoot pins the instantiator race window: a stepless
+// root that is still INSIDE the close TTL may simply be mid-instantiation (root
+// written, steps not yet), so the sweep must leave it alone. The TTL — not
+// steplessness alone — is what bounds that window; see
+// TestWispGC_ClosesAbandonedSteplessUnclaimedRootPastTTL for the far side of it.
 func TestWispGC_LeavesSteplessRoot(t *testing.T) {
 	now := time.Now()
 	store := newGCStore([]beads.Bead{
@@ -1613,10 +1618,14 @@ func TestWispGC_LeavesSteplessRoot(t *testing.T) {
 	})
 
 	withCloseAbandonedEnforced(t, func() {
-		wg := newWispGC(5*time.Minute, time.Hour, 0)
-		if _, err := wg.runGC(beads.GraphStore{Store: store}, beads.MailStore{Store: store}, now); err != nil {
-			t.Fatalf("runGC: %v", err)
-		}
+		// Close TTL well beyond the root's 2h idle age: the root is inside the
+		// instantiator race window.
+		withCloseAbandonedTTL(t, 24*time.Hour, func() {
+			wg := newWispGC(5*time.Minute, time.Hour, 0)
+			if _, err := wg.runGC(beads.GraphStore{Store: store}, beads.MailStore{Store: store}, now); err != nil {
+				t.Fatalf("runGC: %v", err)
+			}
+		})
 	})
 
 	root, err := store.Get("mol-root")
@@ -1625,6 +1634,289 @@ func TestWispGC_LeavesSteplessRoot(t *testing.T) {
 	}
 	if root.Status != "open" {
 		t.Fatalf("stepless mol-root status = %q, want open (must not race instantiator)", root.Status)
+	}
+}
+
+// TestWispGC_ClosesAbandonedSteplessUnclaimedRootPastTTL covers the leaked
+// root-only patrol wisp (ga-98b): poured stepless, left at the unclaimed pour
+// status, never picked up, idle past the TTL. Before this case the sweep
+// skipped every stepless root unconditionally, so this exact shape — the one
+// that actually accumulates — was the one shape GC could never reap.
+func TestWispGC_ClosesAbandonedSteplessUnclaimedRootPastTTL(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		{
+			ID:        "wisp-leaked",
+			Status:    "open",
+			Type:      "molecule",
+			CreatedAt: now.Add(-30 * time.Minute),
+			UpdatedAt: now.Add(-30 * time.Minute),
+			Ephemeral: true,
+			Metadata:  map[string]string{"gc.kind": "wisp"},
+		},
+	})
+
+	withCloseAbandonedEnforced(t, func() {
+		withCloseAbandonedTTL(t, 5*time.Minute, func() {
+			wg := newWispGC(5*time.Minute, time.Hour, 0)
+			if _, err := wg.runGC(beads.GraphStore{Store: store}, beads.MailStore{Store: store}, now); err != nil {
+				t.Fatalf("runGC: %v", err)
+			}
+		})
+	})
+
+	root, err := store.Get("wisp-leaked")
+	if err != nil {
+		t.Fatalf("Get(wisp-leaked): %v", err)
+	}
+	if root.Status != "closed" {
+		t.Fatalf("stepless unclaimed wisp status = %q, want closed (leaked past TTL)", root.Status)
+	}
+	if got := root.Metadata["close_reason"]; got != abandonedRootCloseReason {
+		t.Fatalf("close_reason = %q, want %q", got, abandonedRootCloseReason)
+	}
+}
+
+// TestWispGC_ClosesAssignedButUnclaimedSteplessRootPastTTL pins the behavior
+// steplessRootIsAbandoned's doc comment declares intentional: routed demand
+// that has sat unclaimed past the TTL is reaped. The candidate query applies
+// no assignee filter, so an assigned root reaches the predicate exactly as an
+// unassigned one does — asserted here so a future edit cannot flip it silently.
+func TestWispGC_ClosesAssignedButUnclaimedSteplessRootPastTTL(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		{
+			ID:        "wisp-routed",
+			Status:    "open",
+			Type:      "molecule",
+			Assignee:  "repo/refinery",
+			CreatedAt: now.Add(-30 * time.Minute),
+			UpdatedAt: now.Add(-30 * time.Minute),
+			Ephemeral: true,
+			Metadata:  map[string]string{"gc.kind": "wisp"},
+		},
+	})
+
+	withCloseAbandonedEnforced(t, func() {
+		withCloseAbandonedTTL(t, 5*time.Minute, func() {
+			wg := newWispGC(5*time.Minute, time.Hour, 0)
+			if _, err := wg.runGC(beads.GraphStore{Store: store}, beads.MailStore{Store: store}, now); err != nil {
+				t.Fatalf("runGC: %v", err)
+			}
+		})
+	})
+
+	root, err := store.Get("wisp-routed")
+	if err != nil {
+		t.Fatalf("Get(wisp-routed): %v", err)
+	}
+	if root.Status != "closed" {
+		t.Fatalf("assigned unclaimed wisp status = %q, want closed (stale routed demand past TTL)", root.Status)
+	}
+}
+
+// TestWispGC_LeavesSteplessClaimedRootPastTTL is the safety half of the
+// stepless allowance. A claimed (in_progress) stepless root is held by a live
+// worker, and a root bead's UpdatedAt does NOT advance while its agent works —
+// so idle age alone cannot distinguish "abandoned" from "busy" here. Only the
+// unclaimed pour status can, and this root no longer carries it.
+func TestWispGC_LeavesSteplessClaimedRootPastTTL(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		{
+			ID:        "wisp-live",
+			Status:    "in_progress",
+			Type:      "molecule",
+			CreatedAt: now.Add(-30 * time.Minute),
+			UpdatedAt: now.Add(-30 * time.Minute),
+			Ephemeral: true,
+			Metadata:  map[string]string{"gc.kind": "wisp"},
+		},
+	})
+
+	withCloseAbandonedEnforced(t, func() {
+		withCloseAbandonedTTL(t, 5*time.Minute, func() {
+			wg := newWispGC(5*time.Minute, time.Hour, 0)
+			if _, err := wg.runGC(beads.GraphStore{Store: store}, beads.MailStore{Store: store}, now); err != nil {
+				t.Fatalf("runGC: %v", err)
+			}
+		})
+	})
+
+	root, err := store.Get("wisp-live")
+	if err != nil {
+		t.Fatalf("Get(wisp-live): %v", err)
+	}
+	if root.Status != "in_progress" {
+		t.Fatalf("stepless claimed wisp status = %q, want in_progress (live worker holds it)", root.Status)
+	}
+}
+
+// TestWispGC_DryRunDefaultDoesNotCloseSteplessRoot proves the stepless
+// allowance inherits the sweep's dry-run default rather than bypassing it.
+func TestWispGC_DryRunDefaultDoesNotCloseSteplessRoot(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		{
+			ID:        "wisp-leaked",
+			Status:    "open",
+			Type:      "molecule",
+			CreatedAt: now.Add(-30 * time.Minute),
+			UpdatedAt: now.Add(-30 * time.Minute),
+			Ephemeral: true,
+			Metadata:  map[string]string{"gc.kind": "wisp"},
+		},
+	})
+
+	var logOutput string
+	withCloseAbandonedTTL(t, 5*time.Minute, func() {
+		logOutput = captureWispGCLog(t, func() {
+			wg := newWispGC(5*time.Minute, time.Hour, 0)
+			if _, err := wg.runGC(beads.GraphStore{Store: store}, beads.MailStore{Store: store}, now); err != nil {
+				t.Fatalf("runGC: %v", err)
+			}
+		})
+	})
+
+	root, err := store.Get("wisp-leaked")
+	if err != nil {
+		t.Fatalf("Get(wisp-leaked): %v", err)
+	}
+	if root.Status != "open" {
+		t.Fatalf("stepless wisp status = %q, want open (dry-run default must not close)", root.Status)
+	}
+	if !strings.Contains(logOutput, "would be closed (dry-run") {
+		t.Fatalf("log output = %q, want dry-run would-close log", logOutput)
+	}
+}
+
+// TestWispGC_LeavesSteplessExemptRootPastTTL proves the gc.gc_exempt opt-out
+// still protects a stepless unclaimed root, so a deployment can park a
+// perpetual root-only root without the sweep reaping it.
+func TestWispGC_LeavesSteplessExemptRootPastTTL(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		{
+			ID:        "wisp-exempt",
+			Status:    "open",
+			Type:      "molecule",
+			CreatedAt: now.Add(-30 * time.Minute),
+			UpdatedAt: now.Add(-30 * time.Minute),
+			Ephemeral: true,
+			Metadata:  map[string]string{"gc.kind": "wisp", beadmeta.GCExemptMetadataKey: "true"},
+		},
+	})
+
+	withCloseAbandonedEnforced(t, func() {
+		withCloseAbandonedTTL(t, 5*time.Minute, func() {
+			wg := newWispGC(5*time.Minute, time.Hour, 0)
+			if _, err := wg.runGC(beads.GraphStore{Store: store}, beads.MailStore{Store: store}, now); err != nil {
+				t.Fatalf("runGC: %v", err)
+			}
+		})
+	})
+
+	root, err := store.Get("wisp-exempt")
+	if err != nil {
+		t.Fatalf("Get(wisp-exempt): %v", err)
+	}
+	if root.Status != "open" {
+		t.Fatalf("exempt stepless wisp status = %q, want open (gc.gc_exempt opt-out)", root.Status)
+	}
+}
+
+// TestWispGC_LeavesSteplessRootWithLiveAttachmentSourcePastTTL pins the
+// attached-wisp exception. privatizeAttachedRootOnlyWisp
+// (internal/sling/sling.go) leaves an attached root-only wisp as a type=molecule
+// root with gc.kind stripped, deliberately never routed and never claimed — the
+// SOURCE bead is the claimable unit — so it is unclaimed by construction and the
+// claim predicate alone would close it one TTL after pour. The source bead's
+// forward molecule_id pointer is what keeps it alive; closing the root out from
+// under a live source would un-block findBlockingMolecule and let a second
+// attachment land on the same source bead.
+func TestWispGC_LeavesSteplessRootWithLiveAttachmentSourcePastTTL(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		{
+			ID:        "wisp-attached",
+			Status:    "open",
+			Type:      "molecule",
+			CreatedAt: now.Add(-30 * time.Minute),
+			UpdatedAt: now.Add(-30 * time.Minute),
+			Ephemeral: true,
+		},
+		{
+			ID:        "src-live",
+			Status:    "open",
+			Type:      "task",
+			CreatedAt: now.Add(-30 * time.Minute),
+			UpdatedAt: now.Add(-30 * time.Minute),
+			Metadata:  map[string]string{beadmeta.MoleculeIDMetadataKey: "wisp-attached"},
+		},
+	})
+
+	withCloseAbandonedEnforced(t, func() {
+		withCloseAbandonedTTL(t, 5*time.Minute, func() {
+			wg := newWispGC(5*time.Minute, time.Hour, 0)
+			if _, err := wg.runGC(beads.GraphStore{Store: store}, beads.MailStore{Store: store}, now); err != nil {
+				t.Fatalf("runGC: %v", err)
+			}
+		})
+	})
+
+	root, err := store.Get("wisp-attached")
+	if err != nil {
+		t.Fatalf("Get(wisp-attached): %v", err)
+	}
+	if root.Status != "open" {
+		t.Fatalf("attached stepless wisp status = %q, want open (live source bead still attached)", root.Status)
+	}
+}
+
+// TestWispGC_ClosesSteplessRootWhenAttachmentSourceTerminal is the far side of
+// the attachment guard: once the source bead goes terminal there is no live
+// attachment state left to protect, so the root reaps normally. Without this
+// case the guard above could silently blunt the fix into "never close a
+// stepless root" again.
+func TestWispGC_ClosesSteplessRootWhenAttachmentSourceTerminal(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		{
+			ID:        "wisp-attached",
+			Status:    "open",
+			Type:      "molecule",
+			CreatedAt: now.Add(-30 * time.Minute),
+			UpdatedAt: now.Add(-30 * time.Minute),
+			Ephemeral: true,
+		},
+		{
+			ID:        "src-done",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-30 * time.Minute),
+			UpdatedAt: now.Add(-30 * time.Minute),
+			Metadata:  map[string]string{beadmeta.MoleculeIDMetadataKey: "wisp-attached"},
+		},
+	})
+
+	withCloseAbandonedEnforced(t, func() {
+		withCloseAbandonedTTL(t, 5*time.Minute, func() {
+			wg := newWispGC(5*time.Minute, time.Hour, 0)
+			if _, err := wg.runGC(beads.GraphStore{Store: store}, beads.MailStore{Store: store}, now); err != nil {
+				t.Fatalf("runGC: %v", err)
+			}
+		})
+	})
+
+	root, err := store.Get("wisp-attached")
+	if err != nil {
+		t.Fatalf("Get(wisp-attached): %v", err)
+	}
+	if root.Status != "closed" {
+		t.Fatalf("attached stepless wisp status = %q, want closed (source bead terminal)", root.Status)
+	}
+	if got := root.Metadata["close_reason"]; got != abandonedRootCloseReason {
+		t.Fatalf("close_reason = %q, want %q", got, abandonedRootCloseReason)
 	}
 }
 
