@@ -67,8 +67,27 @@ import (
 //	gemini   → .gemini/skills   (github.com/google-gemini/gemini-cli docs/cli/skills.md)
 //	opencode → .opencode/skills (opencode.ai/docs/skills)
 //	mimocode → .mimocode/skills (mimo.xiaomi.com/mimocode/skills)
+//	pi       → .agents/skills   (pi docs/skills.md "Locations", verified
+//	                             against pi 0.84.2 — see below)
 //
-// The other providers recognized by hooks.go (copilot, cursor, pi, omp)
+// pi is the one provider that shares another's sink. It scans two
+// project-scoped locations, .pi/skills and .agents/skills, and .agents/skills
+// is the correct target for three reasons:
+//
+//   - The only behavioral difference between them does not apply here. Both
+//     discover <name>/SKILL.md directories recursively; .pi/skills
+//     additionally discovers root .md files as individual skills, which this
+//     package never writes — it materializes exclusively as <name> symlinks
+//     to skill directories.
+//   - pi documents .agents/skills as the cross-harness location, and relaxes
+//     the Agent Skills name-matches-directory rule specifically because it is
+//     "suboptimal for shared skill directories used across multiple agent
+//     harnesses".
+//   - Materializing to a separate .pi/skills alongside a codex agent's
+//     .agents/skills would make pi scan both and hit its name-collision path
+//     ("warn and keep the first skill found") on every shared skill.
+//
+// The other providers recognized by hooks.go (copilot, cursor, omp)
 // intentionally have no entry — VendorSink returns ok=false so the caller
 // can log a single skip line per session.
 var vendorSinks = map[string]string{
@@ -77,6 +96,7 @@ var vendorSinks = map[string]string{
 	"gemini":   ".gemini/skills",
 	"opencode": ".opencode/skills",
 	"mimocode": ".mimocode/skills",
+	"pi":       ".agents/skills",
 }
 
 // VendorSink returns the sink subdirectory for a provider, relative to

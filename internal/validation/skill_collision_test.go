@@ -100,6 +100,31 @@ func TestValidateSkillCollisions(t *testing.T) {
 		}
 	})
 
+	t.Run("pi agents at one scope root collide", func(t *testing.T) {
+		tmp := t.TempDir()
+		aSkills := makeAgentSkillsDir(t, tmp, "a")
+		bSkills := makeAgentSkillsDir(t, tmp, "b")
+		writeAgentSkill(t, aSkills, "plan")
+		writeAgentSkill(t, bSkills, "plan")
+
+		cfg := &config.City{
+			Agents: []config.Agent{
+				{Name: "a", Provider: "pi", Scope: "city", SkillsDir: aSkills},
+				{Name: "b", Provider: "pi", Scope: "city", SkillsDir: bSkills},
+			},
+		}
+		got := ValidateSkillCollisions(cfg)
+		want := []SkillCollision{{
+			ScopeRoot:  "<city>",
+			Vendor:     "pi",
+			SkillName:  "plan",
+			AgentNames: []string{"a", "b"},
+		}}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("got %+v, want %+v", got, want)
+		}
+	})
+
 	t.Run("different vendors do not collide", func(t *testing.T) {
 		tmp := t.TempDir()
 		aSkills := makeAgentSkillsDir(t, tmp, "a")
