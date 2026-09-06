@@ -1655,7 +1655,7 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 			return SlingResult{}, err
 		}
 	}
-	if shouldValidateBuiltInRouteStoreReachable(opts, deps) {
+	if opts.DryRun && shouldValidateBuiltInRouteStoreReachable(opts, deps) {
 		if err := validateBuiltInRouteStoreReachable(deps, b.ID, a); err != nil {
 			return SlingResult{}, err
 		}
