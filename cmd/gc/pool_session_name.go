@@ -208,6 +208,9 @@ func releaseOrphanedPoolAssignments(
 	}
 
 	var released []releasedPoolAssignment
+	var protectedForeign protectedForeignAssignees
+	defer protectedForeign.log()
+	cityName := cfg.EffectiveCityName()
 	for i, wb := range assignedWorkBeads {
 		if wb.Status != "open" && wb.Status != "in_progress" {
 			continue
@@ -229,6 +232,13 @@ func releaseOrphanedPoolAssignments(
 		// it was, so a bead skipped by a liveness gate never reaches it.
 		ownerStore := assignedWorkOwnerStore(cfg, store, rigStores, assignedWorkStores, i, wb)
 		if assignee == "" {
+			// OUTSIDE the roster gate by construction: an empty assignee
+			// carries no identity to test, so this arm shares the stated
+			// residual with bare session names (see the package comment in
+			// pool_orphan_foreign_identity.go). The damage class the gate
+			// exists for — writing away another city's CLAIM — cannot occur
+			// here, since there is no claim identity to strip; what this arm
+			// touches is unassigned in_progress routing state only.
 			if wb.Status != "in_progress" {
 				continue
 			}
@@ -241,6 +251,17 @@ func releaseOrphanedPoolAssignments(
 				continue
 			}
 			if assigneePreservesNamedSessionRoute(cfg, cityPath, template, assignee, workStoreRef, storeRefAware) {
+				continue
+			}
+			// Roster gate, deliberately AHEAD of the liveness question:
+			// liveOpenSessionAssignmentExists answers from THIS city's stores
+			// only, so for an identity this city does not configure a missing
+			// session bead is unobservable rather than absent. The two
+			// positive-evidence checks above can only ever SKIP a release, so
+			// running them first costs nothing and keeps the protected count
+			// reporting exactly the claims this gate saved.
+			if !poolAssigneeIsLocallyObservable(cfg, cityName, assignee) {
+				protectedForeign.add(assignee, wb.ID)
 				continue
 			}
 			if liveOpenSessionAssignmentExists(sessionStore.Store, assignee) {
@@ -344,6 +365,21 @@ func releaseConfirmedOrphanSessionWork(
 			continue
 		}
 		if _, ok := identifiers[assignee]; !ok {
+			continue
+		}
+		// Roster gate on the SECOND release site. The identifiers set is
+		// built from this city's own session info, but it includes RAW
+		// metadata strings (bead ID, session_name, configured identity read
+		// off the store — see sessionAssignmentIdentifierRawInfo), not
+		// roster-derived names; a stored value that collides with another
+		// city's identity would otherwise carry that identity straight into
+		// a release here, ungated. Same predicate, same failure direction as
+		// the sweep path: unobservable means protect, loudly. The
+		// shared-pack residual applies here as everywhere — a pool instance
+		// byte-identical across cities passes any roster test (see the
+		// package comment in pool_orphan_foreign_identity.go).
+		if !poolAssigneeIsLocallyObservable(cfg, config.EffectiveCityName(cfg, ""), assignee) {
+			log.Printf("releaseConfirmedOrphanSessionWork: protected %q (%s): assignee is not locally observable — refusing orphan-close release", assignee, wb.ID)
 			continue
 		}
 		template := routedToOrLegacyWorkflowTarget(wb)
