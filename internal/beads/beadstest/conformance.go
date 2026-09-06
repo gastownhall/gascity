@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -818,6 +819,63 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		}
 		if got[0].Title != "task" {
 			t.Errorf("Ready()[0].Title = %q, want %q", got[0].Title, "task")
+		}
+	})
+
+	t.Run("ReadyExcludesDependentWhenBlockerClosedAsWorkOutcomeBlocked", func(t *testing.T) {
+		s := newStore()
+		blocker, err := s.Create(beads.Bead{Title: "blocker", Type: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		dependent, err := s.Create(beads.Bead{Title: "dependent", Type: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.DepAdd(dependent.ID, blocker.ID, "blocks"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Close(blocker.ID); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetMetadataBatch(blocker.ID, map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.Ready()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("Ready() = %v, want empty: a blocker closed with gc.work_outcome=blocked must not satisfy the dependent's blocking dependency", titlesOf(got))
+		}
+	})
+
+	t.Run("ReadyIncludesDependentWhenBlockerClosedWithNoWorkOutcome", func(t *testing.T) {
+		s := newStore()
+		blocker, err := s.Create(beads.Bead{Title: "blocker", Type: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		dependent, err := s.Create(beads.Bead{Title: "dependent", Type: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.DepAdd(dependent.ID, blocker.ID, "blocks"); err != nil {
+			t.Fatal(err)
+		}
+		// Close with no gc.work_outcome metadata at all: the legacy/pre-ADR-0009
+		// shape. This must keep satisfying the dependency — it is the explicit
+		// backward-compat guarantee, not merely an absence of the new behavior.
+		if err := s.Close(blocker.ID); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.Ready()
+		if err != nil {
+			t.Fatal(err)
+		}
+		titles := titlesOf(got)
+		if !hasExactly(titles, "dependent") {
+			t.Fatalf("Ready() titles = %v, want [dependent]: a blocker closed with no gc.work_outcome must still satisfy the dependency (backward-compat)", titles)
 		}
 	})
 

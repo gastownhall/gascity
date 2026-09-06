@@ -574,6 +574,13 @@ func IsReadyBlockingDependencyType(t string) bool {
 	return readyBlockingDependencyTypes[t]
 }
 
+// DependencySatisfied reports whether a blocking dependency's current state
+// satisfies the dependent, given the dependency's status and its
+// gc.work_outcome metadata value (ga-a7v0ex).
+func DependencySatisfied(_, _ string) bool {
+	return false
+}
+
 // IsReadyExcludedType reports whether the bead type is excluded from
 // Ready() results by default.
 func IsReadyExcludedType(t string) bool {
