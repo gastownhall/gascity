@@ -332,7 +332,7 @@ func onFormulaNeedsAttachment(opts SlingOpts, querier BeadQuerier, deps SlingDep
 }
 
 func shouldValidateBuiltInRouteStoreReachable(opts SlingOpts, deps SlingDeps) bool {
-	return deps.Router != nil && !opts.IsFormula && !opts.DryRun
+	return deps.Router != nil && !opts.IsFormula
 }
 
 // shouldReopenForReassign reports whether the pre-flight reassign reopen should
