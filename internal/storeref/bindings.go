@@ -41,6 +41,18 @@ type BindingOptions struct {
 	// "known to hold none" may retire a probe.
 	Relics func(beads.Store) bool
 
+	// KnownRelics answers the same question from a DURABLE record, keyed by the
+	// binding's ref rather than by its store: has a census ever proven this
+	// binding holds a bead outside its reserved namespaces?
+	//
+	// It is separate from Relics because it survives a boot that cannot read
+	// the binding at all — the refused city, where the live census has no store
+	// to ask and every answer falls back to the pessimistic default. A ref the
+	// record does not name is "not known", so nil means "no record to ask" and
+	// the answer is false for every binding: this bit is evidence, and its
+	// absence must never be read as proof.
+	KnownRelics func(StoreRef) bool
+
 	// CompleteClasses rounds an observed class set up to include classes the
 	// calling plane cannot see a store for.
 	//
@@ -74,17 +86,23 @@ func BuildBindings(order []beads.Store, byStore map[beads.Store][]coordclass.Cla
 			classes = opts.CompleteClasses(classes)
 		}
 		prefixes := ReservedPrefixesFor(classes)
+		ref := ClassRef(classes)
+		known := knownLegacyResidents(opts.KnownRelics, ref)
 		bindings = append(bindings, ClassBinding{
 			Classes:  classes,
 			Prefixes: prefixes,
-			Leg:      Leg{Ref: ClassRef(classes), Store: store},
+			Leg:      Leg{Ref: ref, Store: store},
 			// Both bits are observations, and neither is ever optimistic by
 			// default: the mint bit comes from the store's own declaration, so
 			// a store that declares nothing reports false, and the relic bit
 			// comes from a census that was actually run, so a binding no census
 			// reached still has relics as far as this build knows.
-			MintsReserved:      MintsInsideNamespace(store, prefixes),
-			HasLegacyResidents: hasLegacyResidents(opts.Relics, store),
+			MintsReserved: MintsInsideNamespace(store, prefixes),
+			// Proof implies the pessimistic bit, so the two cannot disagree —
+			// a live census that answered "clean" on a binding a durable record
+			// says is dirty is a census that could not read it.
+			HasLegacyResidents:   known || hasLegacyResidents(opts.Relics, store),
+			KnownLegacyResidents: known,
 		})
 		if refusing, ok := store.(RefusingStore); ok && refused == nil {
 			refused = refusing.StorageRefusal()
@@ -116,4 +134,15 @@ func hasLegacyResidents(relics func(beads.Store) bool, store beads.Store) bool {
 		return true
 	}
 	return relics(store)
+}
+
+// knownLegacyResidents applies the durable record, or false when there is none
+// to ask. The default is the opposite of hasLegacyResidents's for the same
+// reason it is safe: this bit only ever DENIES an answer, so an unknown must
+// never assert it.
+func knownLegacyResidents(known func(StoreRef) bool, ref StoreRef) bool {
+	if known == nil {
+		return false
+	}
+	return known(ref)
 }

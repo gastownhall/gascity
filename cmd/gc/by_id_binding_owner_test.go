@@ -280,26 +280,39 @@ func TestBeadsShowFallbackScansForAnIdNoBindingHolds(t *testing.T) {
 	}
 }
 
-// TestBindingOwnerLeavesTheWorkResidualUnprobed is the sentinel's contract.
+// TestBindingOwnerLeavesTheWorkResidualUnprobed is the delegation pin: this
+// arm's work axis is a directory scan the resolver must not run, and
+// storeref.ResolveBindingOwner is what guarantees it does not.
 //
-// cliByIDBindingOwner hands the plan a placeholder where the work leg goes,
-// because this arm's work axis is a directory scan the resolver must not run.
-// That is safe only while the residual is returned UNPROBED, so the placeholder
-// reports being read as an internal error — and a clean ok=false here is the
-// proof it was not.
+// The measurement is a COUNT rather than a sentinel's refusal, because the
+// dangerous case is not a work store that errors — it is one that answers. The
+// city store still holds the copy `gc storage migrate` retained, so a work leg
+// that got probed here would report a real, stale bead as a binding owner and
+// the caller's fall-through would never run. Zero Gets is the only shape that
+// rules that out.
 func TestBindingOwnerLeavesTheWorkResidualUnprobed(t *testing.T) {
-	cityPath := oneShotCLICity(t, "")
-	refuseInfraMigrationSource(t)
-	captureCLIStorageStderr(t)
-
-	owner, ok, err := cliByIDBindingOwner(cityPath, "gc-1")
+	cityPath, _ := foreignProviderCity(t)
+	counted := &countingGetStore{Store: splittest.NewWorkStore(t, "hq")}
+	held, err := counted.Create(beads.Bead{Title: "a bead only the work axis holds", Type: "task"})
 	if err != nil {
-		t.Fatalf("a city that relocates nothing resolved to err=%v; the residual must come back unprobed, not read", err)
+		t.Fatalf("seeding the work store: %v", err)
+	}
+	counted.gets = 0
+
+	owner, ok, err := byIDBindingOwnerForTopology(cliResidencyTopology(cityPath, nil, counted, nil), held.ID)
+	if err != nil {
+		t.Fatalf("an id no binding holds resolved to err=%v; a clean miss is ok=false, not a failure", err)
 	}
 	if ok {
-		t.Errorf("a city that relocates nothing reported a binding owner %p", owner.Store)
+		t.Errorf("the work axis's own copy of %s came back as a binding owner (%p); the caller would never run its scan", held.ID, owner.Store)
+	}
+	if counted.gets != 0 {
+		t.Errorf("the work leg was probed %d time(s), want 0 — the retained pre-migration copy lives there, so a probe answers with a stale bead rather than a miss", counted.gets)
 	}
 
+	// The placeholder both call sites hand the plan is defense in depth for the
+	// same guarantee: if the executor ever does reach the work leg, it must be a
+	// loud error rather than a plausible answer.
 	residual := newUnprobedWorkResidual()
 	got, err := residual.Get("gc-1")
 	if err == nil {
@@ -321,6 +334,78 @@ func TestBindingOwnerLeavesTheWorkResidualUnprobed(t *testing.T) {
 	}
 	if _, err := residual.Create(beads.Bead{Title: "written through a placeholder"}); !errors.Is(err, errWorkResidualProbed) {
 		t.Errorf("the residual answered Create with err=%v, want the contract violation", err)
+	}
+}
+
+// refusedRelicTopology is a city whose boot could not serve its configured
+// split: every infrastructure class resolves to a refusing store and the
+// standing refusal rides on the topology. proven says whether a census has
+// PROVED that binding holds ids outside its reserved namespaces.
+//
+// It is assembled by hand rather than resolved from a city, so these two rows
+// stay about the RESOLVER's verdict alone. Where the proof comes from is
+// by_id_relic_proof_test.go's subject.
+func refusedRelicTopology(proven bool) storeref.Topology {
+	refusal := standingStorageRefusal{err: errors.New("storage refused: this city has not converged on its configured [storage] binding; run `gc storage migrate`")}
+	classes := infrastructureClasses()
+	return assembleResidencyTopology(nil, newUnprobedWorkResidual(), nil, []storeref.ClassBinding{{
+		Classes:  classes,
+		Prefixes: storeref.ReservedPrefixesFor(classes),
+		Leg:      storeref.Leg{Ref: storeref.ClassRef(classes), Store: refusedClassStore{err: refusal}},
+		// A refused store declares no mint namespace, so the pessimistic bit
+		// stands whatever the proof says.
+		HasLegacyResidents:   true,
+		KnownLegacyResidents: proven,
+	}}, refusal)
+}
+
+// TestBindingOwnerRefusedCityWithKnownRelicsRefuses is the ga-q8ick bug.
+//
+// A refused city still serves WORK, so the resolver tolerates the refusal on a
+// residence probe and the surface falls through to its own scan. That is right
+// until the binding is PROVEN to hold work-prefixed relics: `gc storage migrate`
+// preserved those ids and deleted nothing, so the scan finds the retained
+// pre-migration copy in the city work store, serves it, and the close that
+// follows writes it. Exit 0, no diagnostic.
+func TestBindingOwnerRefusedCityWithKnownRelicsRefuses(t *testing.T) {
+	_, ok, err := byIDBindingOwnerForTopology(refusedRelicTopology(true), "gc-1")
+	if err == nil {
+		t.Fatalf("a refused city proven to hold work-prefixed relics resolved to ok=%v with no error; the caller's scan then serves the copy the migration left in the work store", ok)
+	}
+	if !storeref.IsStandingRefusal(err) {
+		t.Errorf("the refusal came back as %v, want the standing storage refusal that names the remedy", err)
+	}
+	// The refusal's own sentence is the boot gate's, and a city takes the
+	// identical one for an infrastructure-class id it simply cannot serve. What
+	// makes this denial actionable is the reason behind it and the move that
+	// clears it, and neither is in that sentence.
+	if !errors.Is(err, storeref.ErrProvenRelicRefusal) {
+		t.Errorf("the denial reads %q and carries nothing that tells it apart from the refusal an in-namespace id takes; the operator goes looking for a missing bead", err)
+	}
+	if !strings.Contains(err.Error(), "gc doctor") {
+		t.Errorf("the denial reads %q with no route back to a served city", err)
+	}
+	// One line, because every caller prints this as `gc <cmd>: %v` and a second
+	// line arrives without the command prefix that says which surface refused.
+	if strings.Contains(err.Error(), "\n") {
+		t.Errorf("the denial is multi-line (%q); callers print it as `gc <cmd>: %%v`, so everything after the newline loses the command that refused", err)
+	}
+}
+
+// TestBindingOwnerRefusedCityWithoutProofStillDeclines is the control, and it
+// must pass on both sides of the fix.
+//
+// The proof is TRUE-only: a binding it says nothing about is "not known", never
+// "known clean". So absence must not deny anything — a city that was never
+// migrated, or whose binding could not be read, keeps today's behavior, and
+// work is still served from the ledger work never left.
+func TestBindingOwnerRefusedCityWithoutProofStillDeclines(t *testing.T) {
+	owner, ok, err := byIDBindingOwnerForTopology(refusedRelicTopology(false), "gc-1")
+	if err != nil {
+		t.Fatalf("a refused city with no relic evidence resolved to err=%v; absence of proof is not evidence, and denying here takes work-bead reads away from every unconverged city", err)
+	}
+	if ok {
+		t.Errorf("a refusing binding reported ownership of gc-1 (%p)", owner.Store)
 	}
 }
 

@@ -19,7 +19,8 @@ package main
 // RoleWorkFallback leg is returned UNPROBED, which means "no binding answered —
 // run your own work axis". A caller whose work axis IS a store passes that
 // store and uses the answer directly; a caller whose work axis is a subprocess
-// or a scan passes a sentinel and treats it as the signal to fall through.
+// or a scan asks only the binding half, through storeref.ResolveBindingOwner,
+// and reads its ok=false as the signal to fall through.
 //
 // That residual is also what keeps a single-store city byte-identical: its plan
 // has one leg, nothing is probed, and the caller gets back the exact store value
@@ -52,19 +53,43 @@ import (
 //
 // An error is a read that FAILED, never absence. Reading "the binding could not
 // answer" as "the bead is not there" is the root-loss shape this lane exists to
-// prevent. The one error that is not a fault is the one-shot funnel's standing
-// refusal: it is a verdict about a CITY's storage configuration and says nothing
-// about a bead, and a refused city still serves WORK from its work ledger. The
-// resolver applies that distinction from the leg's own role — a residence probe
-// for an id no relocated class could own tolerates the refusal, while the
-// authority leg for an id inside a reserved namespace surfaces it, because there
-// the refusal IS the answer.
+// prevent. The one error that is not always a fault is the one-shot funnel's
+// standing refusal: it is a verdict about a CITY's storage configuration and
+// says nothing about a bead, and a refused city still serves WORK from its work
+// ledger. The resolver applies that distinction from the leg's own role — the
+// authority leg for an id inside a reserved namespace surfaces the refusal,
+// because there the refusal IS the answer, while a residence probe for an id no
+// relocated class could own tolerates it.
+//
+// That toleration is conditional, and the condition is a relic census proving
+// the binding holds ids the migration preserved. Then the probe's miss is not
+// harmless — the work store's frozen pre-migration copy is what the caller
+// falls through to — so the refusal is surfaced there too, wrapped by
+// withProvenRelicRemedy with the move that clears it.
 func cliByIDOwner(cityPath, id string, work beads.Store) (storeref.Owner, error) {
-	plan, err := cliByIDPlan(cityPath, id, work)
+	return byIDOwnerForTopology(byIDResidencyTopology(cityPath, nil, work, nil), id, work)
+}
+
+// byIDOwnerForTopology is cliByIDOwner over a topology the caller already holds.
+//
+// The split is at the topology line because that is the only thing the one-shot
+// funnel contributes: everything below it — the ByID plan, the residual
+// contract, the two miss shapes — is the same question asked of whatever legs
+// are in play. A caller that captured its topology at construction gets the
+// resolver's rules without re-entering the funnel per bead, which is what makes
+// its probe handle and its write handle the same store by construction rather
+// than by coincidence.
+//
+// work is passed again rather than read back off the topology: it is the value
+// the not-found fallback below must return, and reaching into topo.Work.Store
+// for it would be this file picking a store out of a leg — the residency
+// boundary's one forbidden move, and pointless when the caller already has it.
+func byIDOwnerForTopology(topo storeref.Topology, id string, work beads.Store) (storeref.Owner, error) {
+	plan, err := byIDPlanForTopology(topo, id)
 	if err != nil {
 		return storeref.Owner{}, err
 	}
-	owner, err := storeref.ResolveOwnerRow(plan, id)
+	owner, err := withProvenRelicRemedy(storeref.ResolveOwnerRow(plan, id))
 	switch {
 	case err == nil:
 		return owner, nil
@@ -99,8 +124,19 @@ func cliByIDOwner(cityPath, id string, work beads.Store) (storeref.Owner, error)
 // seam actually executes rather than one assembled the same way beside it. A
 // pin over a parallel construction proves the topology constructor is right and
 // says nothing about whether the seam still uses it.
+//
+// It stays a composition of the two calls cliByIDOwner makes, not a third
+// spelling of them: the same residencyTopologyForCity and the same
+// byIDPlanForTopology, so the pin cannot drift from the executed path without
+// one of those two changing under both.
 func cliByIDPlan(cityPath, id string, work beads.Store) (storeref.ResolvedPlan, error) {
-	return storeref.Plan(storeref.ByID{ID: id}, residencyTopologyForCity(cityPath, nil, work, nil))
+	return byIDPlanForTopology(byIDResidencyTopology(cityPath, nil, work, nil), id)
+}
+
+// byIDPlanForTopology is the ByID plan itself, the one line both the cityPath
+// and the captured-topology forms go through.
+func byIDPlanForTopology(topo storeref.Topology, id string) (storeref.ResolvedPlan, error) {
+	return storeref.Plan(storeref.ByID{ID: id}, topo)
 }
 
 // cliByIDBindingOwner answers the binding half of the by-id question for a
@@ -115,19 +151,53 @@ func cliByIDPlan(cityPath, id string, work beads.Store) (storeref.ResolvedPlan, 
 // and the id it cannot reach is answered instead by the retained pre-migration
 // copy sitting in the city store — successfully, with no error to notice.
 //
-// So the plan is resolved with a SENTINEL where the work leg goes and the
-// answer is read as a yes/no. ok=true is a binding that owns the id, with the
-// row it already read; ok=false is "no binding answered, run your own scan",
-// and the caller then does exactly what it did before.
+// So the plan is executed by storeref.ResolveBindingOwner, the executor that
+// walks the binding legs and stops at the work axis. ok=true is a binding that
+// owns the id, with the row it already read; ok=false is "no binding answered,
+// run your own scan", and the caller then does exactly what it did before.
 func cliByIDBindingOwner(cityPath, id string) (storeref.Owner, bool, error) {
-	owner, err := cliByIDOwner(cityPath, id, newUnprobedWorkResidual())
+	return byIDBindingOwnerForTopology(byIDResidencyTopology(cityPath, nil, newUnprobedWorkResidual(), nil), id)
+}
+
+// byIDBindingOwnerForTopology is cliByIDBindingOwner over a topology the caller
+// already holds.
+//
+// The work leg is still supplied — Plan(ByID) ends every plan in one, and a
+// topology without it is not a topology — but the executor never reads it, so
+// what goes there only has to be a beads.Store. Both call sites pass the
+// unprobedWorkResidual sentinel, which turns a resolver that started probing
+// the work leg into a loud error here rather than a silent "the work ledger
+// owns it" on every convoy command of every relocated city.
+func byIDBindingOwnerForTopology(topo storeref.Topology, id string) (storeref.Owner, bool, error) {
+	plan, err := byIDPlanForTopology(topo, id)
 	if err != nil {
 		return storeref.Owner{}, false, err
 	}
-	if _, isResidual := owner.Store.(unprobedWorkResidual); isResidual {
-		return storeref.Owner{}, false, nil
+	owner, ok, err := storeref.ResolveBindingOwner(plan, id)
+	owner, err = withProvenRelicRemedy(owner, err)
+	return owner, ok, err
+}
+
+// withProvenRelicRemedy names the operator's next move on the one denial that
+// is otherwise unactionable.
+//
+// storeref decides that a refused binding proven to hold migration-preserved
+// ids may not be skipped, and says why — but it does not know what clears the
+// condition, because that is a fact about this plane's boot gate rather than
+// about a plan. The refusal's own text is the boot gate's, identical to the one
+// a city sees for an infrastructure-class id it simply cannot serve, so an
+// operator reading it looks for a missing bead. What they need is that
+// converging the split is what makes the id resolve from the binding again.
+//
+// The remedy is a SECOND SENTENCE on one line, not a second line. Every caller
+// prints this value as `gc <cmd>: %v`, so an embedded newline drops the command
+// prefix off everything after it and the operator cannot tell which surface
+// refused.
+func withProvenRelicRemedy(owner storeref.Owner, err error) (storeref.Owner, error) {
+	if err == nil || !errors.Is(err, storeref.ErrProvenRelicRefusal) {
+		return owner, err
 	}
-	return owner, true, nil
+	return owner, fmt.Errorf("%w. Converge the configured [storage] split and this id resolves from the binding again; `gc doctor` reports what is outstanding", err)
 }
 
 // beadForOwner returns the row the owner names, reading it only when the
@@ -142,12 +212,13 @@ func beadForOwner(owner storeref.Owner, id string) (beads.Bead, error) {
 
 // unprobedWorkResidual stands in for a work axis the resolver must not run.
 //
-// Plan(ByID) ends every plan in a work leg and hands the LAST one back
-// UNPROBED, which is the contract cliByIDBindingOwner rests on: this value is
-// returned, never read. Its Get therefore reports a bug rather than a miss — a
-// resolver that started probing the residual would otherwise turn "the caller
-// runs its own scan" into "the bead is absent", silently, on every convoy
-// command of every relocated city.
+// Plan(ByID) ends every plan in a work leg, so a surface that owns its own work
+// axis still has to put something there. storeref.ResolveBindingOwner
+// guarantees the leg is never read; this value makes a broken guarantee visible
+// instead of plausible. Its Get reports a bug rather than a miss, because a
+// resolver that started probing here would otherwise turn "the caller runs its
+// own scan" into "the work ledger owns it" — silently, on every convoy command
+// of every relocated city.
 //
 // It refuses through a WHOLE beads.Store rather than an embedded nil one, for
 // the reason refusedClassStore already carries: a nil embedded interface makes

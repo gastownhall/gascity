@@ -198,7 +198,7 @@ cmd/gc/ready_federation.go	readyRigLegStores	ast:returns-store-list	1
 cmd/gc/residency_topology.go	cliSoleClassBinding	ast:plan-leg-store-chain	1
 cmd/gc/residency_topology.go	cliSoleClassBinding	b:cliSoleClassBinding	1
 cmd/gc/residency_topology.go	cliSoleClassBinding	c:plan-leg-store-access	1
-cmd/gc/residency_topology.go	residencyBindingsFromRoutes	b:routes.storeFor	1
+cmd/gc/residency_topology.go	residencyBindingsFromRoutesWithProof	b:routes.storeFor	1
 internal/api/dashport_support.go	BeadStores	a:BeadStores	1
 internal/api/dashport_support.go	BeadStores	ast:returns-store-list	1
 internal/api/handler_agents.go	findActiveBeadForAssigneesWithFreshness	a:BeadStores	1

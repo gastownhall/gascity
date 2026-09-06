@@ -195,6 +195,57 @@ func TestStandingRefusalIsToleratedOnlyOutsideTheReservedNamespace(t *testing.T)
 	}
 }
 
+// TestStandingRefusalSurfacesOnAProvenRelicBinding is the other side of that
+// carve-out, and it is a bug fix rather than a symmetry.
+//
+// Tolerating the refusal is justified by one sentence — "this leg was only ever
+// a residence probe for an id no relocated class could own" — and a durable
+// census that PROVED this binding holds ids outside its reserved namespaces has
+// falsified it. `gc storage migrate` preserved those ids and deleted nothing, so
+// the work store still holds a copy of every one of them. Skipping the refusing
+// binding here does not fall back to "no answer": it falls back to the frozen
+// pre-migration copy, successfully, and the write that follows lands on it.
+//
+// So the probe becomes Fatal and the refusal reaches the caller, naming the
+// remedy. This deliberately denies work-shaped by-id reads on a refused city
+// that is proven to hold relics: that city is already in an incident state its
+// boot gate reported, and a loud denial during an incident beats a confident
+// wrong-copy write.
+func TestStandingRefusalSurfacesOnAProvenRelicBinding(t *testing.T) {
+	f := newT3Known()
+	plan := mustPlan(t, ByID{ID: workShapedID}, f.topo)
+
+	_, ref, err := ResolveOwner(plan, workShapedID)
+	if err == nil {
+		t.Fatalf("a refused city whose binding is proven to hold relics answered %q for a work-shaped id; the retained pre-migration copy lives there", ref)
+	}
+	if !errors.Is(err, f.topo.Refused) {
+		t.Fatalf("the surfaced error is not the refusal that names the remedy: %v", err)
+	}
+}
+
+// TestBindingOwnerSurfacesTheRefusalOnAProvenRelicBinding carries the same
+// verdict to the executor the scan-backed surfaces use. This is the one that
+// matters in production: ok=false there is not a miss, it is permission to run a
+// directory scan that CAN reach the frozen copy.
+func TestBindingOwnerSurfacesTheRefusalOnAProvenRelicBinding(t *testing.T) {
+	proven := mustPlan(t, ByID{ID: workShapedID}, newT3Known().topo)
+	if _, ok, err := ResolveBindingOwner(proven, workShapedID); err == nil {
+		t.Fatalf("a proven-relic refused city resolved to ok=%v with no error; the caller's own scan then serves the copy the migration left behind", ok)
+	}
+
+	// Control: no proof, no denial. Absence of evidence is not evidence, and work
+	// never left the work ledger.
+	tolerated := mustPlan(t, ByID{ID: workShapedID}, newT3().topo)
+	owner, ok, err := ResolveBindingOwner(tolerated, workShapedID)
+	if err != nil {
+		t.Fatalf("a refused city with no relic evidence resolved to err=%v, want a clean decline: %s", err, storeNameOf(owner.Store))
+	}
+	if ok {
+		t.Errorf("a refusing binding reported ownership of %s (%s)", workShapedID, storeNameOf(owner.Store))
+	}
+}
+
 // ---------------------------------------------------------------------------
 // §6 T5 — the identity fast-path. A single-store city pays nothing for a seam
 // it cannot use (the ga-4qdfn short-circuit, as a resolver property).
@@ -245,6 +296,193 @@ func TestResidenceProbeRetirementFlip(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// The binding-only executor. A surface whose work axis is not a beads.Store —
+// `gc convoy`'s directory scan, `gc bd`'s subprocess fall-through — asks only
+// the binding half of the by-id question and runs its own axis for the rest.
+
+// TestResolveBindingOwnerNeverProbesTheWorkLeg is the executor's whole contract:
+// the work leg is in the plan (it has to be — the plan is the same one every
+// by-id surface gets) and is never READ. A caller whose work axis is a scan
+// would otherwise be told its own retained pre-migration copy is the owner.
+func TestResolveBindingOwnerNeverProbesTheWorkLeg(t *testing.T) {
+	f := newT1()
+	f.work.seed(t, workShapedID) // the copy `gc storage migrate` retained
+	plan := mustPlan(t, ByID{ID: workShapedID}, f.topo)
+	f.resetGets()
+
+	owner, ok, err := ResolveBindingOwner(plan, workShapedID)
+	if err != nil {
+		t.Fatalf("a clean binding miss produced an error: %v", err)
+	}
+	if ok {
+		t.Fatalf("the work store's copy of %s came back as a binding owner (%s); ok=false is what tells the caller to run its own axis", workShapedID, storeNameOf(owner.Store))
+	}
+	if *f.work.gets != 0 {
+		t.Fatalf("the work leg was probed %d time(s), want 0 — this executor answers about the BINDING and must never run an axis the caller owns", *f.work.gets)
+	}
+}
+
+// TestProvenRelicRefusalSaysWhyItRefused pins the sentence apart from the
+// verdict.
+//
+// The two refusal outcomes are decided by evidence the operator cannot see and
+// reported in text they cannot tell apart: a tolerated probe and a denied one
+// both end in the boot gate's own sentence, so a denial reads as "your bead is
+// missing on a broken city" rather than "a census proved this binding holds the
+// id and the copy you would have been served is frozen". The sentinel is what
+// lets the plane that OWNS the proof name where it is written down.
+func TestProvenRelicRefusalSaysWhyItRefused(t *testing.T) {
+	proven := mustPlan(t, ByID{ID: workShapedID}, newT3Known().topo)
+	_, _, err := ResolveBindingOwner(proven, workShapedID)
+	if err == nil {
+		t.Fatal("a proven-relic refused city resolved cleanly")
+	}
+	if !errors.Is(err, ErrProvenRelicRefusal) {
+		t.Errorf("the denial reads %v, and carries nothing that distinguishes it from the refusal an in-namespace id takes", err)
+	}
+	if !IsStandingRefusal(err) {
+		t.Errorf("the denial stopped reading as a standing storage refusal (%v); callers classify on that", err)
+	}
+
+	// The control the sentinel needs: a leg that genuinely could not be READ is
+	// a fault, not this denial, and attaching the relic sentence to it would
+	// send an operator at a note that has nothing to do with the failure.
+	f := newT1()
+	f.legStore(ClassRef(infraClasses)).getErr = errors.New("binding unreachable")
+	faulted := mustPlan(t, ByID{ID: workShapedID}, f.topo)
+	if _, _, err := ResolveBindingOwner(faulted, workShapedID); errors.Is(err, ErrProvenRelicRefusal) {
+		t.Errorf("an ordinary read fault came back as a proven-relic denial: %v", err)
+	}
+}
+
+// TestResolveBindingOwnerLeavesEveryLegBelowWorkAlone carries that zero to the
+// legs the work leg stands in front of.
+//
+// The work leg is not the last leg of a by-id plan on a city with rigs: a rig
+// whose CONFIGURED prefix also covers the id follows it as a shadow. Those legs
+// belong to the caller's axis for the same reason the work leg does — a surface
+// that scans a directory for its city scans its rigs the same way — so a walk
+// that merely declined the work leg and kept going would answer with a rig
+// store, succeeding against a store this executor promised not to touch.
+//
+// Both production callers pass rigs=nil, so nothing reached this shape and the
+// contract sentence was pinning itself.
+func TestResolveBindingOwnerLeavesEveryLegBelowWorkAlone(t *testing.T) {
+	f := newT2()
+	alpha := f.rigs["alpha"]
+	alpha.seed(t, rigShapedID)
+	plan := mustPlan(t, ByID{ID: rigShapedID}, f.topo)
+	f.resetGets()
+
+	owner, ok, err := ResolveBindingOwner(plan, rigShapedID)
+	if err != nil {
+		t.Fatalf("a clean binding miss produced an error: %v", err)
+	}
+	if ok {
+		t.Fatalf("a leg below the work axis (%s) came back as the binding owner of %s; ok=false is what hands the id to the caller's own scan", storeNameOf(owner.Store), rigShapedID)
+	}
+	if *alpha.gets != 0 {
+		t.Fatalf("the rig shadow leg was probed %d time(s), want 0", *alpha.gets)
+	}
+	if got := *f.legStore(ClassRef(infraClasses)).gets; got != 1 {
+		t.Fatalf("the binding was probed %d time(s), want 1 — the walk has to reach the work axis for a stop there to mean anything", got)
+	}
+}
+
+// TestResolveBindingOwnerStopsAtAShadowTheDedupeExposed is that stop with the
+// work leg itself gone.
+//
+// dedupeLegs drops a repeat of a store the plan already carries, and on a city
+// whose binding resolved back to the work store — the shape that function's own
+// doc names — the work leg is the repeat. What survives is a plan whose
+// caller-owned legs wear RoleShadow and nothing else, so a stop keyed on
+// RoleWorkFallback alone walks straight past them and probes a rig.
+func TestResolveBindingOwnerStopsAtAShadowTheDedupeExposed(t *testing.T) {
+	f := newT2()
+	f.topo.Bindings[0].Leg.Store = f.work // the binding IS the work ledger
+	alpha := f.rigs["alpha"]
+	alpha.seed(t, rigShapedID)
+
+	plan := mustPlan(t, ByID{ID: rigShapedID}, f.topo)
+	for _, leg := range plan.Legs {
+		if leg.Role == RoleWorkFallback {
+			t.Fatalf("plan %s still carries a work-fallback leg; the dedupe this row is about did not happen", plan)
+		}
+	}
+	f.resetGets()
+
+	owner, ok, err := ResolveBindingOwner(plan, rigShapedID)
+	if err != nil {
+		t.Fatalf("a clean binding miss produced an error: %v", err)
+	}
+	if ok {
+		t.Fatalf("%s answered as the binding owner of %s on a plan whose work leg the dedupe removed", storeNameOf(owner.Store), rigShapedID)
+	}
+	if *alpha.gets != 0 {
+		t.Fatalf("the rig shadow leg was probed %d time(s), want 0", *alpha.gets)
+	}
+}
+
+// TestResolveBindingOwnerReturnsTheBindingRow is the other half: a binding that
+// DOES hold the id answers with the row it already read, so the caller does not
+// pay for the same read twice — and does not open a window in which the second
+// read disagrees with the one ownership was decided from.
+func TestResolveBindingOwnerReturnsTheBindingRow(t *testing.T) {
+	f := newT1()
+	f.legStore(ClassRef(infraClasses)).seed(t, workShapedID)
+	plan := mustPlan(t, ByID{ID: workShapedID}, f.topo)
+
+	owner, ok, err := ResolveBindingOwner(plan, workShapedID)
+	if err != nil {
+		t.Fatalf("ResolveBindingOwner: %v", err)
+	}
+	if !ok {
+		t.Fatalf("a binding-resident id resolved to ok=false; the caller would fall through to a work axis that holds a stale copy or nothing at all")
+	}
+	if owner.Ref != ClassRef(infraClasses) {
+		t.Fatalf("pinned %q (%s), want the binding", owner.Ref, storeNameOf(owner.Store))
+	}
+	if !owner.Read || owner.Bead.ID != workShapedID {
+		t.Fatalf("the winning probe's row was dropped (Read=%v, bead %q); the leg's read IS the caller's read", owner.Read, owner.Bead.ID)
+	}
+}
+
+// TestResolveBindingOwnerSurfacesAReadFault keeps the fail-loud classification
+// on this executor too: a binding that could not answer has said nothing about
+// the id, and reporting that as "no binding owns it" sends the caller's own
+// scan at the ledger holding the frozen copy.
+func TestResolveBindingOwnerSurfacesAReadFault(t *testing.T) {
+	f := newT1()
+	boom := errors.New("binding unreachable")
+	f.legStore(ClassRef(infraClasses)).getErr = boom
+	plan := mustPlan(t, ByID{ID: workShapedID}, f.topo)
+
+	if _, ok, err := ResolveBindingOwner(plan, workShapedID); !errors.Is(err, boom) {
+		t.Fatalf("an unreadable binding resolved to (ok=%v, err=%v), want the read failure", ok, err)
+	}
+}
+
+// TestResolveBindingOwnerRejectsAUnionPlan also pins WHICH executor the
+// refusal names.
+//
+// The guard is shared by both ModeFirstOwner executors, so it is the one
+// sentence in this package that can name a function the caller did not call.
+// The message is a caller's only pointer back to the contract it broke, and
+// sending someone reading ResolveBindingOwner's fall-through semantics to
+// ResolveOwner's doc is a wrong answer delivered with total confidence.
+func TestResolveBindingOwnerRejectsAUnionPlan(t *testing.T) {
+	f := newT1()
+	plan := mustPlan(t, RoutedWork{}, f.topo)
+	_, _, err := ResolveBindingOwner(plan, workShapedID)
+	if err == nil {
+		t.Fatal("ResolveBindingOwner accepted a Union plan; the mode decides the executor")
+	}
+	if !strings.Contains(err.Error(), "ResolveBindingOwner") {
+		t.Errorf("the refusal reads %q and names an executor this caller never called", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Executor guards.
 
 func TestResolveOwnerRejectsAMismatchedID(t *testing.T) {
@@ -255,11 +493,19 @@ func TestResolveOwnerRejectsAMismatchedID(t *testing.T) {
 	}
 }
 
+// TestResolveOwnerRejectsAUnionPlan is the other half of the naming pin: the
+// shared guard must still name THIS executor for the caller that walks the
+// whole plan, or a fix that stopped hard-coding one name has just hard-coded
+// the other.
 func TestResolveOwnerRejectsAUnionPlan(t *testing.T) {
 	f := newT1()
 	plan := mustPlan(t, RoutedWork{}, f.topo)
-	if _, _, err := ResolveOwner(plan, workShapedID); err == nil {
+	_, _, err := ResolveOwner(plan, workShapedID)
+	if err == nil {
 		t.Fatal("ResolveOwner accepted a Union plan; the mode decides the executor")
+	}
+	if !strings.Contains(err.Error(), "ResolveOwner") || strings.Contains(err.Error(), "ResolveBindingOwner") {
+		t.Errorf("the refusal reads %q, want the whole-plan executor named", err)
 	}
 }
 

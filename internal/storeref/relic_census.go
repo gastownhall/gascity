@@ -77,6 +77,30 @@ func HasOpenLegacyResidents(b ClassBinding) bool {
 	return len(relics) > 0
 }
 
+// ProvenLegacyResidents is the PROOF form of the census: the value
+// ClassBinding.KnownLegacyResidents is allowed to be set from.
+//
+// It is HasOpenLegacyResidents with the default inverted, and the inversion is
+// the whole reason there are two. That one decides whether to KEEP a residence
+// probe, so a census that failed answers true — an unread binding has cleared
+// nothing. This one decides whether to DENY a read, so a census that failed
+// answers false: a binding nobody could read has PROVED nothing, and denying on
+// it would take work-bead reads away from every city whose binding is merely
+// unreachable.
+//
+// So the only true answer here is a read that completed and found a resident.
+// It is also the one line to change when the census stops excluding closed
+// beads: swap OpenLegacyResidents for the closed-inclusive form and every
+// caller inherits it, because nobody outside this file names the census
+// directly.
+func ProvenLegacyResidents(b ClassBinding) bool {
+	relics, err := OpenLegacyResidents(b.Leg.Store, b.Prefixes)
+	if err != nil {
+		return false
+	}
+	return len(relics) > 0
+}
+
 // idInAnyNamespace reports whether any prefix claims id's namespace. It is the
 // one rule the census and ClassBinding.coversID both read ids by.
 func idInAnyNamespace(id string, prefixes []string) bool {

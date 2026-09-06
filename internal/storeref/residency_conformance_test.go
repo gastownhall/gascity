@@ -152,6 +152,29 @@ var residencyCorpus = map[string]string{
 	"Class(graph) x T3":                   "error: storage refused: run `gc storage migrate`",
 	"Class(sessions) x T3":                "error: storage refused: run `gc storage migrate`",
 
+	// ---- T3k: T3 whose binding a durable census PROVED holds ids outside its
+	// reserved namespaces. Every row is character-for-character T3's except the
+	// three residence probes, which become Fatal. The carve-out above rests on
+	// "this leg was only ever a probe for an id no relocated class could own",
+	// and that sentence is known to be false here: the migration preserved ids,
+	// so a work-shaped id CAN be resident in this binding, and the retained
+	// pre-migration copy is sitting in the work store ready to answer for it.
+	"ByID(gcg-abc) x T3k":                  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
+	"ByID(ga-xyz) x T3k":                   `FirstOwner: class:gmnos[ResidenceProbe,Fatal] > ""[WorkFallback,Fatal]`,
+	"ByID(ra-7) x T3k":                     `FirstOwner: class:gmnos[ResidenceProbe,Fatal] > ""[WorkFallback,Fatal]`,
+	"ByID(ga-xyz,routed) x T3k":            `FirstOwner: class:gmnos[ResidenceProbe,Fatal] > ""[WorkFallback,Fatal] > rig:routed[Shadow,Fatal]`,
+	"ByID(gcg-abc,routed) x T3k":           `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
+	"RoutedWork x T3k":                     "error: storage refused: run `gc storage migrate`",
+	"AssignedWork(sweep) x T3k":            "error: storage refused: run `gc storage migrate`",
+	"AssignedWork(claim-escalation) x T3k": "error: storage refused: run `gc storage migrate`",
+	"Session x T3k":                        "error: storage refused: run `gc storage migrate`",
+	"Census(all) x T3k":                    "error: storage refused: run `gc storage migrate`",
+	"Census(work) x T3k":                   `Union(first-leg-wins): ""[Authority,Fatal]`,
+	"Census(graph) x T3k":                  "error: storage refused: run `gc storage migrate`",
+	"Class(work) x T3k":                    `SingleOwner: ""[Authority,Fatal]`,
+	"Class(graph) x T3k":                   "error: storage refused: run `gc storage migrate`",
+	"Class(sessions) x T3k":                "error: storage refused: run `gc storage migrate`",
+
 	// ---- T4: T2 with the bravo rig suspended. The constructor is TOLD which
 	// rigs to include; the resolver never re-invents an excluded leg.
 	"ByID(gcg-abc) x T4":                  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
@@ -244,6 +267,7 @@ var residencyCorpus = map[string]string{
 	"ByID(gcnq-abc-q) x T1":  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"ByID(gcnq-abc-q) x T2":  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"ByID(gcnq-abc-q) x T3":  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
+	"ByID(gcnq-abc-q) x T3k": `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"ByID(gcnq-abc-q) x T4":  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"ByID(gcnq-abc-q) x T5":  `FirstOwner: class:g[ResidenceProbe,RefusalTolerated] > class:s[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal]`,
 	"ByID(gcnq-abc-q) x T6":  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
@@ -320,6 +344,15 @@ var residencyRuntimeCorpus = map[string]string{
 	"Session@runtime x T3":                        "error: storage refused: run `gc storage migrate`",
 	"Census(all)@runtime x T3":                    "error: storage refused: run `gc storage migrate`",
 	"ByID(ga-xyz)@runtime x T3":                   `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated]`,
+
+	// T3k narrows identically — narrowing keeps a leg's role and policy, so the
+	// Fatal probe stays Fatal here too.
+	"RoutedWork@runtime x T3k":                     "error: storage refused: run `gc storage migrate`",
+	"AssignedWork(sweep)@runtime x T3k":            "error: storage refused: run `gc storage migrate`",
+	"AssignedWork(claim-escalation)@runtime x T3k": "error: storage refused: run `gc storage migrate`",
+	"Session@runtime x T3k":                        "error: storage refused: run `gc storage migrate`",
+	"Census(all)@runtime x T3k":                    "error: storage refused: run `gc storage migrate`",
+	"ByID(ga-xyz)@runtime x T3k":                   `FirstOwner: class:gmnos[ResidenceProbe,Fatal]`,
 
 	"RoutedWork@runtime x T4":                     `Union(first-leg-wins): class:gmnos[FederationTail,Fatal]`,
 	"AssignedWork(sweep)@runtime x T4":            `Union(first-leg-wins): class:gmnos[FederationTail,Fatal]`,
