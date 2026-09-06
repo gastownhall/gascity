@@ -3697,8 +3697,10 @@ func (cr *CityRuntime) loadDemandSnapshot(
 		refresh = cr.demandSnapshot.readyDemandFingerprint != readyDemandFingerprint
 	}
 	if refresh {
-		if trigger == "patrol" && cr.demandSnapshotsEnabled() && readyDemandFingerprint == "" {
-			readyDemandFingerprint = cr.readyDemandSnapshotFingerprint()
+		if trigger == "patrol" && cr.demandSnapshotsEnabled() {
+			if readyDemandFingerprint == "" {
+				readyDemandFingerprint = cr.readyDemandSnapshotFingerprint()
+			}
 		} else if cr.demandSnapshot != nil {
 			readyDemandFingerprint = cr.demandSnapshot.readyDemandFingerprint
 		}
