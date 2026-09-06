@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"path/filepath"
 	"runtime/debug"
 	"sort"
@@ -1044,6 +1045,30 @@ func buildPreparedStartWithWorkDirResolver(
 	// those already-rendered strings so scaffold staging lands next to the
 	// session it actually launches into, not the directory templating assumed.
 	agentCfg.PreStart = retargetPreStartWorkDir(agentCfg.PreStart, preOverrideWorkDir, agentCfg.WorkDir)
+	// Step-dispatch (named/direct, non-pool-managed) spawns must not silently
+	// launch into a fallback directory when the resolved per-step workdir does
+	// not exist: effectiveWorkDir (herdr) and the tmux GC_DIR fallback read
+	// both redirect to city root when cfg.WorkDir is missing, bleeding an
+	// unrelated session's cwd/context into this one (ga-zogqc1.1). Create it
+	// here, or fail the spawn loudly, instead of letting that fallback fire
+	// silently downstream. MkdirAll no-ops if the directory already exists and
+	// fails if the path is occupied by a non-directory, so this covers both
+	// the "missing" and "wrong type" cases in one call.
+	//
+	// Pool-managed candidates are exempt: computePoolTriggerBindingPatch
+	// intentionally hands a wisp its per-work-bead directory before the
+	// worktree-per-bead dispatch that creates it has necessarily landed,
+	// relying on this same provider-level fallback as its safety net — gating
+	// on PoolManaged keeps that already-fixed case working unchanged. cityPath
+	// == "" only at the crash-recovery rebuild call (buildPreparedStart from
+	// recoverRunningPendingCreate), which isn't a live spawn; any inconsistency
+	// it finds falls through to a fresh, gated restart via
+	// prepareStartCandidateForCity.
+	if cityPath != "" && !candidate.info.PoolManaged && agentCfg.WorkDir != "" && filepath.IsAbs(agentCfg.WorkDir) {
+		if mkErr := os.MkdirAll(agentCfg.WorkDir, 0o755); mkErr != nil {
+			return nil, candidate.info, fmt.Errorf("creating step-dispatch workdir %q: %w", agentCfg.WorkDir, mkErr)
+		}
+	}
 	// Pre-flight stale-resume guard: if the bead carries a session_key whose
 	// keyed transcript is no longer on disk (provider session retention
 	// disabled, manual cleanup, worktree rebuild), a resume would hard-fail

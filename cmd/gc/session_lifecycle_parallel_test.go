@@ -929,6 +929,167 @@ func TestPrepareStartCandidate_UsesAssignedWorkSnapshotForTaskWorkDir(t *testing
 	}
 }
 
+// TestPrepareStartCandidateForCity_CreatesMissingStepDispatchWorkDir covers
+// ga-zogqc1.1: a step-dispatch (named/direct, non-pool-managed) candidate
+// whose resolved workdir (session-bead work_dir metadata, Branch B of the
+// override in buildPreparedStartWithWorkDirResolver) does not exist yet must
+// have it created rather than silently falling through to the provider-level
+// city-root fallback (effectiveWorkDir / tmux GC_DIR read).
+func TestPrepareStartCandidateForCity_CreatesMissingStepDispatchWorkDir(t *testing.T) {
+	cityPath := t.TempDir()
+	relWorkDir := filepath.Join(".gc", "worktrees", "gascity", "builder", "missing-slug")
+	targetWorkDir := filepath.Join(cityPath, relWorkDir)
+
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  "builder",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:gascity/builder"},
+		Metadata: map[string]string{
+			"template":     "builder",
+			"session_name": "builder-missing-slug",
+			"work_dir":     relWorkDir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(targetWorkDir); !os.IsNotExist(err) {
+		t.Fatalf("targetWorkDir %q must not exist before prepare: %v", targetWorkDir, err)
+	}
+
+	prepared, err := prepareStartCandidateForCity(startCandidate{
+		info: sessiontest.SeedBead(t, session),
+		tp: TemplateParams{
+			TemplateName: "gascity/builder",
+			SessionName:  "builder-missing-slug",
+		},
+		order: 0,
+	}, cityPath, "city", &config.City{
+		Agents: []config.Agent{
+			{Name: "builder", Dir: "gascity", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2)},
+		},
+	}, nil, store, &clock.Fake{Time: time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)}, nil, nil)
+	if err != nil {
+		t.Fatalf("prepareStartCandidateForCity: %v", err)
+	}
+	if prepared.cfg.WorkDir != targetWorkDir {
+		t.Fatalf("prepared.cfg.WorkDir = %q, want %q", prepared.cfg.WorkDir, targetWorkDir)
+	}
+	st, statErr := os.Stat(targetWorkDir)
+	if statErr != nil {
+		t.Fatalf("stat %q after prepare: %v", targetWorkDir, statErr)
+	}
+	if !st.IsDir() {
+		t.Fatalf("%q exists but is not a directory", targetWorkDir)
+	}
+}
+
+// TestPrepareStartCandidateForCity_FailsLoudlyWhenStepDispatchWorkDirCannotBeCreated
+// covers the "fail loudly" half of ga-zogqc1.1's acceptance criteria: when the
+// resolved workdir path is occupied by a non-directory, MkdirAll cannot
+// recover, so the spawn must fail with a clear, workdir-referencing error
+// instead of silently proceeding to launch against a fallback directory.
+func TestPrepareStartCandidateForCity_FailsLoudlyWhenStepDispatchWorkDirCannotBeCreated(t *testing.T) {
+	cityPath := t.TempDir()
+	relWorkDir := filepath.Join(".gc", "worktrees", "gascity", "builder", "blocked-slug")
+	targetWorkDir := filepath.Join(cityPath, relWorkDir)
+	if err := os.MkdirAll(filepath.Dir(targetWorkDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(targetWorkDir, []byte("occupied"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  "builder",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:gascity/builder"},
+		Metadata: map[string]string{
+			"template":     "builder",
+			"session_name": "builder-blocked-slug",
+			"work_dir":     relWorkDir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prepared, err := prepareStartCandidateForCity(startCandidate{
+		info: sessiontest.SeedBead(t, session),
+		tp: TemplateParams{
+			TemplateName: "gascity/builder",
+			SessionName:  "builder-blocked-slug",
+		},
+		order: 0,
+	}, cityPath, "city", &config.City{
+		Agents: []config.Agent{
+			{Name: "builder", Dir: "gascity", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2)},
+		},
+	}, nil, store, &clock.Fake{Time: time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)}, nil, nil)
+	if err == nil {
+		t.Fatalf("prepareStartCandidateForCity: want error for uncreatable workdir %q, got prepared=%+v", targetWorkDir, prepared)
+	}
+	if !strings.Contains(err.Error(), targetWorkDir) {
+		t.Fatalf("error = %q, want it to reference workdir %q", err.Error(), targetWorkDir)
+	}
+	if prepared != nil {
+		t.Fatalf("prepared = %+v, want nil on error", prepared)
+	}
+}
+
+// TestPrepareStartCandidateForCity_PoolManagedSkipsWorkDirCreation guards the
+// ga-zogqc1.1 fix's exemption for pool-managed candidates: pool wisps
+// intentionally start before their per-work-bead worktree exists
+// (computePoolTriggerBindingPatch), relying on the provider-level
+// effectiveWorkDir/GC_DIR fallback as their safety net. A pool-managed
+// candidate's unresolved workdir must NOT be eagerly created here, or that
+// already-fixed case would regress.
+func TestPrepareStartCandidateForCity_PoolManagedSkipsWorkDirCreation(t *testing.T) {
+	cityPath := t.TempDir()
+	relWorkDir := filepath.Join(".gc", "worktrees", "gascity", "builder", "pool-slug")
+	targetWorkDir := filepath.Join(cityPath, relWorkDir)
+
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  "builder",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:gascity/builder"},
+		Metadata: map[string]string{
+			"template":     "builder",
+			"session_name": "builder-pool-slug",
+			"pool_managed": "true",
+			"work_dir":     relWorkDir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prepared, err := prepareStartCandidateForCity(startCandidate{
+		info: sessiontest.SeedBead(t, session),
+		tp: TemplateParams{
+			TemplateName: "gascity/builder",
+			SessionName:  "builder-pool-slug",
+		},
+		order: 0,
+	}, cityPath, "city", &config.City{
+		Agents: []config.Agent{
+			{Name: "builder", Dir: "gascity", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2)},
+		},
+	}, nil, store, &clock.Fake{Time: time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)}, nil, nil)
+	if err != nil {
+		t.Fatalf("prepareStartCandidateForCity: %v", err)
+	}
+	if prepared.cfg.WorkDir != targetWorkDir {
+		t.Fatalf("prepared.cfg.WorkDir = %q, want %q (path resolution unchanged)", prepared.cfg.WorkDir, targetWorkDir)
+	}
+	if _, statErr := os.Stat(targetWorkDir); !os.IsNotExist(statErr) {
+		t.Fatalf("pool-managed candidate must not have its workdir eagerly created; stat %q = %v", targetWorkDir, statErr)
+	}
+}
+
 func TestPrepareStartCandidateReloadsOverridesBeforeWake(t *testing.T) {
 	store := beads.NewMemStore()
 	session, err := store.Create(beads.Bead{
