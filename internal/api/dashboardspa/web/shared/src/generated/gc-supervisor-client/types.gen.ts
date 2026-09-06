@@ -18226,6 +18226,10 @@ export type GetV0CityByCityNameSessionsData = {
          * Include last output preview.
          */
         peek?: boolean;
+        /**
+         * Include per-session runtime enrichment (running state, active bead, peek/model info). Defaults to true; set false for a cheap read-model-only roster with zero runtime calls. With enrich=false the runtime stale-active downgrade is skipped too, so state is the persisted value and an active session whose runtime is no longer alive is still reported as active.
+         */
+        enrich?: boolean;
     };
     url: '/v0/city/{cityName}/sessions';
 };
