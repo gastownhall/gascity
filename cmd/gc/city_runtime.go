@@ -2245,6 +2245,15 @@ func (cr *CityRuntime) reloadConfigTraced(
 		fmt.Fprintf(cr.stderr, "%s: orders reloaded: %s\n", cr.logPrefix, orderSummary) //nolint:errcheck // best-effort stderr
 	}
 
+	// Diff pool bounds against the still-current config before the swap
+	// below (#2897 FR-PM.3). Session counting is only needed for drain
+	// warnings (finite decreases); skip store work on no-op and increase-only reloads.
+	poolBoundChanges := poolMaxActiveSessionChanges(cr.cfg, nextCfg)
+	var poolActiveCounts map[string]int
+	if poolBoundChangesNeedActiveCounts(poolBoundChanges) {
+		poolActiveCounts = cr.countActiveSessionsByTemplate(cr.cfg)
+	}
+
 	cr.serviceStateMu.Lock()
 	cr.cfg = nextCfg
 	cr.sp = nextSp
@@ -2318,6 +2327,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 	message := fmt.Sprintf("Config reloaded: %s (rev %s)",
 		configReloadSummary(oldAgentCount, oldRigCount, len(nextCfg.Agents), len(nextCfg.Rigs)),
 		shortRev(result.Revision))
+	message, warnings = appendPoolMaxBoundFeedback(message, warnings, poolBoundChanges, poolActiveCounts)
 	fmt.Fprintln(cr.stdout, message) //nolint:errcheck // best-effort stdout
 	telemetry.RecordConfigReload(ctx, result.Revision, string(source), string(reloadOutcomeApplied), len(warnings), nil)
 	if trace != nil {
