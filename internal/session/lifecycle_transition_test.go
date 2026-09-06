@@ -123,6 +123,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"priming_attempted_at":       "",
 				"prompt_hash":                "",
 				"continuation_reset_pending": "true",
+				ResetCommittedAtKey:          now.UTC().Format(time.RFC3339),
 			},
 		},
 		{
@@ -163,7 +164,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 		},
 		{
 			name:  "acknowledge drain resume mode",
-			patch: AcknowledgeDrainPatch(false),
+			patch: AcknowledgeDrainPatch(now, false),
 			want: MetadataPatch{
 				"state":                     "drained",
 				"state_reason":              "",
@@ -174,7 +175,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 		},
 		{
 			name:  "acknowledge drain fresh mode",
-			patch: AcknowledgeDrainPatch(true),
+			patch: AcknowledgeDrainPatch(now, true),
 			want: MetadataPatch{
 				"state":                      "drained",
 				"state_reason":               "",
@@ -190,6 +191,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"priming_attempted_at":       "",
 				"prompt_hash":                "",
 				"continuation_reset_pending": "true",
+				ResetCommittedAtKey:          now.UTC().Format(time.RFC3339),
 			},
 		},
 		{
@@ -213,6 +215,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"priming_attempted_at":       "",
 				"prompt_hash":                "",
 				"continuation_reset_pending": "true",
+				ResetCommittedAtKey:          now.UTC().Format(time.RFC3339),
 			},
 		},
 		{
@@ -267,6 +270,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"last_woke_at":               "",
 				"restart_requested":          "",
 				"continuation_reset_pending": "true",
+				ResetCommittedAtKey:          now.UTC().Format(time.RFC3339),
 				"pending_create_claim":       "true",
 				"pending_create_started_at":  now.UTC().Format(time.RFC3339),
 				"session_key":                "new-session-key",
@@ -287,6 +291,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"last_woke_at":               "",
 				"restart_requested":          "",
 				"continuation_reset_pending": "true",
+				ResetCommittedAtKey:          now.UTC().Format(time.RFC3339),
 				"pending_create_claim":       "",
 				"pending_create_started_at":  "",
 				"session_key":                "new-session-key",
@@ -307,6 +312,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"last_woke_at":               "",
 				"restart_requested":          "",
 				"continuation_reset_pending": "true",
+				ResetCommittedAtKey:          now.UTC().Format(time.RFC3339),
 				"pending_create_claim":       "",
 				"pending_create_started_at":  "",
 			},
@@ -682,7 +688,7 @@ func TestDrainCompletionPatchesClearStopPendingReason(t *testing.T) {
 		name  string
 		patch MetadataPatch
 	}{
-		{name: "acknowledge", patch: AcknowledgeDrainPatch(false)},
+		{name: "acknowledge", patch: AcknowledgeDrainPatch(now, false)},
 		{name: "complete", patch: CompleteDrainPatch(now, "idle", false)},
 	}
 	for _, tt := range tests {
@@ -860,12 +866,38 @@ func TestSleepPatchClearsStaleStateReasonOnApply(t *testing.T) {
 }
 
 func TestAcknowledgeDrainPatchClearsStaleStateReasonOnApply(t *testing.T) {
-	merged := AcknowledgeDrainPatch(false).Apply(map[string]string{
+	now := time.Date(2026, 5, 14, 16, 0, 0, 0, time.UTC)
+	merged := AcknowledgeDrainPatch(now, false).Apply(map[string]string{
 		"state":        string(StateDraining),
 		"state_reason": "creation_complete",
 	})
 	if got := merged["state_reason"]; got != "" {
 		t.Fatalf("state_reason = %q, want cleared", got)
+	}
+}
+
+// TestFreshWakeReRearmRefreshesResetCommittedAt is a regression test for
+// gascity#4067: a session that re-arms continuation_reset_pending on a
+// second fresh-wake drain cycle must get a fresh ResetCommittedAtKey, not
+// inherit the timestamp from an earlier, unrelated restart. Without the
+// fix, the stall check in recordResetStallIfDue measures elapsed time
+// against the stale first-cycle timestamp and fires a false reset-stalled
+// diagnostic on a perfectly healthy session.
+func TestFreshWakeReRearmRefreshesResetCommittedAt(t *testing.T) {
+	firstRestart := time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC)
+	secondDrainComplete := firstRestart.Add(3 * time.Hour)
+
+	first := RestartRequestPatch("session-key-1", firstRestart)
+	if got := first[ResetCommittedAtKey]; got != firstRestart.UTC().Format(time.RFC3339) {
+		t.Fatalf("first cycle ResetCommittedAtKey = %q, want %q", got, firstRestart.UTC().Format(time.RFC3339))
+	}
+
+	second := CompleteDrainPatch(secondDrainComplete, "idle", true)
+	if got := second[ResetCommittedAtKey]; got != secondDrainComplete.UTC().Format(time.RFC3339) {
+		t.Fatalf("second cycle ResetCommittedAtKey = %q, want %q (fresh), not the first cycle's stale value", got, secondDrainComplete.UTC().Format(time.RFC3339))
+	}
+	if second["continuation_reset_pending"] != "true" {
+		t.Fatalf("second cycle continuation_reset_pending = %q, want %q", second["continuation_reset_pending"], "true")
 	}
 }
 

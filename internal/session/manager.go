@@ -1307,6 +1307,7 @@ func (m *Manager) RequestFreshRestart(id string) error {
 		return m.store.SetMetadataBatch(id, map[string]string{
 			"restart_requested":          "true",
 			"continuation_reset_pending": "true",
+			ResetCommittedAtKey:          m.now().UTC().Format(time.RFC3339),
 		})
 	})
 }
