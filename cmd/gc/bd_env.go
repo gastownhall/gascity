@@ -1620,7 +1620,8 @@ func nativeDoltOpenEnvForScope(cityPath string, cfg *config.City, scopeRoot stri
 func nativeDoltOpenEnvForScopeContext(ctx context.Context, cityPath string, cfg *config.City, scopeRoot string) (map[string]string, error) {
 	scopeRoot = resolveStoreScopeRoot(cityPath, scopeRoot)
 	if samePath(scopeRoot, cityPath) {
-		return bdRuntimeEnvWithErrorRecoveryContext(ctx, cityPath, true)
+		env, err := bdRuntimeEnvWithErrorRecoveryContext(ctx, cityPath, true)
+		return nativeDoltCliPoolCap(env), err
 	}
 	if cfg == nil {
 		loaded, err := loadCityConfig(cityPath, io.Discard)
@@ -1629,7 +1630,34 @@ func nativeDoltOpenEnvForScopeContext(ctx context.Context, cityPath string, cfg 
 		}
 		cfg = loaded
 	}
-	return bdRuntimeEnvForRigWithErrorRecoveryContext(ctx, cityPath, cfg, scopeRoot, true)
+	env, err := bdRuntimeEnvForRigWithErrorRecoveryContext(ctx, cityPath, cfg, scopeRoot, true)
+	return nativeDoltCliPoolCap(env), err
+}
+
+// nativeDoltCliPoolCap pins the native-Dolt project pool ceiling for
+// in-process store opens to a single connection. gc opens the store fresh on
+// every one-shot CLI invocation (gc ready, gc convoy status, gc hook
+// --claim, orders' scale_check probes): each open pays a fail-fast probe
+// dial, a no-database initDB check, and one project-pool connection in the
+// beads library's openServerConnection path. The upstream pool defaults
+// (MaxOpenConns=10 / MaxIdleConns=5, "deliberately oriented at long-lived
+// daemons") are sized for the wrong program: at the measured ~10 store opens
+// per second the city makes, a 10-wide pool ceiling lets churn reach ~40 new
+// connections per second against the dolt server although a serial one-shot
+// never holds more than one pool connection at a time. Capping MaxOpenConns
+// at 1 via the documented BEADS_DOLT_MAX_CONNS knob makes the pool ceiling
+// match the one connection a serial CLI actually uses: zero behavior change
+// for the serial CLI today, and a hard ceiling if a concurrent-query path is
+// ever added to a one-shot command. The fail-fast probe and initDB
+// connections are separate sql.DB opens outside this pool; eliminating them
+// is a separate, larger change (see the gc-side connection-churn issue that
+// this pin accompanies).
+func nativeDoltCliPoolCap(env map[string]string) map[string]string {
+	if env == nil {
+		return env
+	}
+	env["BEADS_DOLT_MAX_CONNS"] = "1"
+	return env
 }
 
 func bdRuntimeEnvWithError(cityPath string) (map[string]string, error) {
