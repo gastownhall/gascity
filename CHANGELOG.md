@@ -109,6 +109,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   city dispatcher. The diagnostic names the binding and the owning scope.
   Supersedes #5548 and #5588; fixes #5547 and #5587.
 
+- **`gc init`, `gc register`, and `gc start` no longer print a systemd
+  install error when a supervisor is already serving the home.** The
+  platform-service install is still refreshed on hosts with a service
+  manager. Where none can host a unit (a foreground supervisor under a
+  container init, or a shell without a user-systemd session) the only
+  thing the install could do was fail and tell the user to enable
+  lingering or start a supervisor that was already running.
+
 - **Mail archive and delete now expand whitespace-joined message IDs.** Each
   positional argument is split into individual IDs before single-versus-batch
   dispatch, so shell variables containing multiple IDs no longer look like one
