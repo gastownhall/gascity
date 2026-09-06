@@ -4945,21 +4945,28 @@ func (s *countingNudgeStore) CloseStore() error {
 	return nil
 }
 
-// installCountingNudgeStoreSeam swaps openNudgeBeadStore for a fake that hands
-// out a fresh countingNudgeStore over a single shared MemStore on every call
-// (mirroring the deployed binary, where each per-tick open resolves to the same
-// backing native store). It returns pointers to the open and close counters and
-// restores the original seam via t.Cleanup. Tests using it must stay serial.
+// installCountingNudgeStoreSeam swaps openOwnedNudgeBeadStore for a fake that
+// hands out a fresh countingNudgeStore over a single shared MemStore on every
+// call (mirroring the deployed binary, where each per-tick open resolves to the
+// same backing native store). It returns pointers to the open and close counters
+// and restores the original seam via t.Cleanup. Tests using it must stay serial.
+//
+// It replaces the OWNING seam, not openNudgeBeadStore, because that is the one
+// the closing frames call and openNudgeBeadStore delegates to it — so both forms
+// move together and the counters cannot miss an open. The fake returns the same
+// store as both the class store and the opened handle, which is the unrelocated
+// shape: a frame that closes the handle closes the store the counter watches.
 func installCountingNudgeStoreSeam(t *testing.T) (opens, closes *int) {
 	t.Helper()
 	backing := beads.NewMemStore()
 	var openCount, closeCount int
-	prev := openNudgeBeadStore
-	openNudgeBeadStore = func(string) beads.NudgesStore {
+	prev := openOwnedNudgeBeadStore
+	openOwnedNudgeBeadStore = func(string) (beads.NudgesStore, beads.Store) {
 		openCount++
-		return beads.NudgesStore{Store: &countingNudgeStore{MemStore: backing, closes: &closeCount}}
+		store := &countingNudgeStore{MemStore: backing, closes: &closeCount}
+		return beads.NudgesStore{Store: store}, store
 	}
-	t.Cleanup(func() { openNudgeBeadStore = prev })
+	t.Cleanup(func() { openOwnedNudgeBeadStore = prev })
 	return &openCount, &closeCount
 }
 
