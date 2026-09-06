@@ -148,9 +148,9 @@ cmd/gc/class_store.go	workBeadStores	a:BeadStores	1
 cmd/gc/class_store.go	workBeadStores	a:rigBeadStores	1
 cmd/gc/cli_class_stores.go	cliSessionsRelocated	ast:uncounted-call-spelling	1
 cmd/gc/cmd_bd_by_id.go	bdByIDRefusedVerb	d:bdIDIsClassReserved	1
-cmd/gc/cmd_bd_by_id.go	bdFirstReservedClassID	d:bdIDIsClassReserved	1
 cmd/gc/cmd_bd_by_id.go	bdIDIsClassReserved	d:AllReservedClassPrefixes	1
 cmd/gc/cmd_bd_by_id.go	bdIDIsClassReserved	d:bdIDIsClassReserved	1
+cmd/gc/cmd_bd_by_id.go	bdReservedClassIDs	d:bdIDIsClassReserved	1
 cmd/gc/cmd_bd_by_id.go	openBdByIDClassFrontDoor	b:cliSoleClassBinding	1
 cmd/gc/cmd_bd_by_id.go	resolve	d:bdIDIsClassReserved	1
 cmd/gc/cmd_beads.go	doBeadsListFallback	a:openAllConvoyStoresAt	1

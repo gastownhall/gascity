@@ -37,8 +37,12 @@ package main
 //
 // storeref.ClassCandidates is the tree's by-id resolver, and its answer for a
 // relocated city is [class, work] — the class store first, because it is the
-// sole MINTER of the reserved namespace, then the work store, because minting
-// is not holding. This surface probes exactly that list in exactly that order.
+// reserved namespace's AUTHORITY, then the work store, because authority is not
+// exclusive possession. The class store is not the namespace's only MINTER
+// either: a rig configured with a prefix inside one mints work beads there, and
+// `gc storage migrate` preserved ids in the other direction. Leading is a
+// statement about probe ORDER, never about who could have created the id. This
+// surface probes exactly that list in exactly that order.
 // What differs is only how the work leg is READ: here it is the `bd`
 // subprocess, which is why the leg appears as a fall-through rather than as a
 // beads.Store. The in-process form of the same list, for the one-shot commands
@@ -60,11 +64,14 @@ package main
 //     (storebinding.GraphStore). They cannot reach a raw bead store through
 //     their parameter, so claim/release CAS lives in the store the contract is
 //     bound to and is never re-implemented as a read-then-write in the CLI.
-//   - A miss is not flattened into a fall-through when the id can only live in
-//     the class store. A reserved-prefix id (gcg-…) is minted by that store and
-//     nowhere else, so its absence is genuine absence and is reported in bd's
-//     own shape. Falling through would print a work-store answer for a bead the
-//     work store never held.
+//   - A binding MISS is a fall-through, for every id. The binding is the
+//     authority for its reserved namespaces, not their only lawful holder: a
+//     rig may be configured with a prefix inside one (config.ValidateRigs
+//     allows it and ReservedPrefixWarnings only advises), and `gc storage
+//     migrate` preserved ids in the other direction. So "the binding does not
+//     hold it" is a statement about the binding, and the ledger the passthrough
+//     is pointed at answers next. Answering absence here instead stranded every
+//     read and every write addressed at such a rig's own beads.
 //   - A resolution failure surfaces. Reading "the binding could not be opened"
 //     as "the bead is not there" is the root-loss shape this whole lane exists
 //     to prevent. On a city this build must not serve, an id only the class
@@ -79,11 +86,14 @@ package main
 // forwards to bd's native owner-only lease-refresh verb (commit 80aad8c), a
 // literal spelling parseBdByIDOp does not recognize, and it is no longer
 // rewritten to a metadata update the way it once was. On a city that relocates
-// the owning class this is not a fall-through: a reserved-prefix heartbeat is
-// caught by the ownership gate below (bdArgsNameClassOwnedBead) and refused by
-// refuseClassOwnedTarget, which names the routing cause rather than letting the
-// work store answer with bd's not-found. The general query surface is likewise
-// unserved, and bd_relocated_classes.go refuses it on its own terms.
+// the owning class a heartbeat of a bead the binding HOLDS is not a
+// fall-through: the ownership gate below (bdArgsAddressedClassIDs) puts the id
+// to the residence walk, and a hit is refused by refuseClassOwnedTarget, which
+// names the routing cause rather than letting the work store answer with bd's
+// not-found. A miss falls through with every other binding miss, so a rig whose
+// prefix shadows the namespace keeps bd's own heartbeat against its own ledger.
+// The general query surface is likewise unserved, and
+// bd_relocated_classes.go refuses it on its own terms.
 //
 // close and reopen are here for the same reason update is, one lifecycle step
 // further on. A class store MINTS ids from its binding workspace's own prefix,
@@ -101,35 +111,46 @@ package main
 //
 // # Ownership is decided before servability
 //
-// An operation that is NOT served but whose subject the class store owns does
-// not fall through either: bd would open the work store, which cannot see the
-// bead, and the command would hang or answer about the wrong workspace. It is
-// refused instead, before the subprocess.
+// An operation that is NOT served but whose subject the class binding HOLDS
+// does not fall through either: bd would open the work store, which cannot see
+// the bead, and the command would hang or answer about the wrong workspace. It
+// is refused instead, before the subprocess.
 //
-// Ownership is proven two ways, and the second exists because the first covers
-// only half the population. A RESERVED prefix proves it from the argv alone —
-// that namespace is minted by the class store and nowhere else. RESIDENCE
-// proves it for everything else: a MUTATION whose positional ids are
-// unambiguous is probed against the class binding, and a hit refuses the same
-// way. Without that second proof a work-prefixed class resident got no
-// protection at all — its `--notes` update or its `delete` fell through to a
-// ledger that cannot hold it and died with bd's not-found, which reads as "the
-// bead is gone" rather than "you addressed the wrong store".
+// Ownership is one question with one answer: RESIDENCE. A reserved prefix is
+// what decides which ids get ASKED — bdArgsAddressedClassIDs reads them from the
+// argv, so every reserved id is put to the binding even in an invocation the
+// mutation scanner cannot reduce to subjects — and residence is what decides
+// the answer. Reading the prefix as the answer instead was the defect this
+// door carried: the binding is its namespaces' authority, not their only lawful
+// holder, so every id a shadow-prefixed rig minted was refused on a proof that
+// did not hold. The other half of the population runs the same walk from the
+// other end: a MUTATION whose positional ids are unambiguous is probed even
+// though its ids carry a work prefix, because `gc storage migrate` preserved
+// ids and its relics reside in the binding. Without that a work-prefixed class
+// resident got no protection at all — its `--notes` update or its `delete` fell
+// through to a ledger that cannot hold it and died with bd's not-found, which
+// reads as "the bead is gone" rather than "you addressed the wrong store".
 //
-// The two questions are answered by different code on purpose, and answering
-// them with one function was a real defect rather than a hypothetical. The
-// served parsers reject every flag they do not implement, so "can this be
-// served" said no to `show --long`, `show --id`, `dep list -t` and the rest of
-// bd's own manifest — and while a rejection meant fall-through, those were
-// precisely the invocations sent to the ledger that cannot answer. Ownership is
-// now decided by bdArgsNameClassOwnedBead, which reads only the argv and knows
-// nothing about what this surface implements.
+// Ownership and servability are answered by different code on purpose, and
+// answering them with one function was a real defect rather than a
+// hypothetical. The served parsers reject every flag they do not implement, so
+// "can this be served" said no to `show --long`, `show --id`, `dep list -t` and
+// the rest of bd's own manifest — and while a rejection meant fall-through,
+// those were precisely the invocations sent to the ledger that cannot answer.
+// Which ids to ask about is now decided by bdArgsAddressedClassIDs, which reads
+// only the argv and knows nothing about what this surface implements.
 //
-// Ownership is read from an id in an ID POSITION and never from an id-shaped
+// The id asked about is read from an ID POSITION and never from an id-shaped
 // value. A `gc bd list --metadata-field workflow_id=gcg-…` probe quotes a class
 // id rather than addressing one, so this surface declines it — OWNERSHIP is not
-// what is wrong with it. A `--parent gcg-…` names a class bead, and letting the
-// work store answer that returns a silent empty result.
+// what is wrong with it. A `--parent gcg-…` DOES address one, so it is put to
+// the binding — and the binding's answer, not the prefix, is what happens next.
+// A parent the binding holds is refused, because letting the work store answer
+// that returns a silent empty result. A parent it cleanly misses falls through,
+// and bd runs the create against the work ledger, which is the right ledger for
+// the population this door re-routed: a shadow-prefix rig referencing its own
+// bead. An id no ledger holds is bd's own dep validation to reject, not this
+// door's to guess about.
 //
 // Declining is not forwarding. That same selector is refused one pre-flight
 // earlier, by bd_relocated_classes.go, and for a different reason: `list` is a
@@ -670,19 +691,19 @@ func parseBdByIDPositional(args []string, extra map[string]*bool) (id string, js
 	return id, jsonOut, true
 }
 
-// bdByIDResolution is what the class-ownership walk concluded about one id: the
-// front door of the class that would own it, whether the id can only live there
-// (a reserved-prefix id), and the row itself when it is resident.
+// bdByIDResolution is what the residency walk concluded about one id: the front
+// door of the class that would own it, and the row itself when the binding
+// holds it.
+//
+// There is no "the id's prefix says it is ours" bit. RESIDENCE is the whole
+// answer — a reserved prefix names the authority for a namespace, not its only
+// lawful holder — and a second bit that could disagree with Found is exactly
+// how this door came to report a rig's own bead as absent.
 type bdByIDResolution struct {
-	Graph    storebinding.GraphStore
-	Bead     beads.Bead
-	Found    bool
-	Reserved bool
+	Graph storebinding.GraphStore
+	Bead  beads.Bead
+	Found bool
 }
-
-// Owned reports whether the class store answers for this id — either because
-// the id carries the class's reserved prefix, or because the row is resident.
-func (r bdByIDResolution) Owned() bool { return r.Reserved || r.Found }
 
 // bdByIDClassDoor is the opened class front door serving this city.
 //
@@ -780,14 +801,15 @@ func openBdByIDClassFrontDoor(cityPath string) (bdByIDClassDoor, bool, error) {
 // existing path stands; for an id only the class binding could own it is the
 // answer, and falls through to the fault arm.
 func (d bdByIDClassDoor) resolve(id string) (bdByIDResolution, error) {
-	resolution := bdByIDResolution{Graph: d.Graph, Reserved: bdIDIsClassReserved(id)}
+	resolution := bdByIDResolution{Graph: d.Graph}
+	reserved := bdIDIsClassReserved(id)
 	bead, err := d.Graph.Get(id)
 	switch {
 	case err == nil:
 		resolution.Bead = bead
 		resolution.Found = true
 	case errors.Is(err, beads.ErrNotFound):
-	case isStandingStorageRefusal(err) && !resolution.Reserved:
+	case isStandingStorageRefusal(err) && !reserved:
 	default:
 		return bdByIDResolution{}, fmt.Errorf("reading %q from %s: %w", id, d.bindingName(), err)
 	}
@@ -833,8 +855,10 @@ func bdByIDMutationSubjects(bdArgs []string) []string {
 
 // bdIDIsClassReserved reports whether id carries a reserved class id prefix.
 // Those namespaces belong to the relocated class stores — whether the store's
-// own sequence minted the id or a subsystem inside it did — so such an id
-// existing anywhere else is not a thing bd can answer for.
+// own sequence minted the id or a subsystem inside it did — so a binding that
+// cannot answer for one is a failure to decide rather than an absence. The
+// prefix decides which ids get ASKED about; residence, never the prefix,
+// decides the answer.
 func bdIDIsClassReserved(id string) bool {
 	for _, prefix := range config.AllReservedClassPrefixes() {
 		if prefix != "" && strings.HasPrefix(id, prefix+"-") {
@@ -858,9 +882,9 @@ func bdIDIsClassReserved(id string) bool {
 // refuseRigScopedClassOwnedTarget.
 func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr io.Writer) (int, bool) {
 	op, served := parseBdByIDOp(bdArgs)
-	named, namesClassBead := bdArgsNameClassOwnedBead(bdArgs)
+	classIDs := bdArgsAddressedClassIDs(bdArgs)
 	mutationIDs := bdByIDMutationSubjects(bdArgs)
-	if !served && !namesClassBead && len(mutationIDs) == 0 {
+	if !served && len(classIDs) == 0 && len(mutationIDs) == 0 {
 		// Nothing here can concern a class-owned bead, so the binding is not
 		// opened and the funnel is not entered.
 		//
@@ -880,65 +904,87 @@ func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr 
 		return 0, false
 	}
 	if !served {
-		return refuseUnservedClassMutation(door, bdArgs, named, namesClassBead, mutationIDs, stderr)
+		return refuseUnservedClassMutation(door, bdArgs, classIDs, mutationIDs, stderr)
 	}
 	return serveBdByIDResolved(door, op, bdArgs, rigName, cityPath, stdout, stderr)
 }
 
 // refuseUnservedClassMutation answers a by-ID invocation that addresses a bead
-// the class binding owns in a spelling this surface does not serve. Ownership
-// is proven from a reserved prefix (namesClassBead) or, failing that, from
-// RESIDENCE: an unserved mutation whose subjects the class binding actually
-// holds cannot be answered by the work store. Returning (0, false) means every
-// subject is an ordinary work bead — bd is still their truth and the caller's
-// passthrough answers byte-identically, including doBd's own exact-ID collision
-// guard, which this arm must not displace.
-func refuseUnservedClassMutation(door bdByIDClassDoor, bdArgs []string, named string, namesClassBead bool, mutationIDs []string, stderr io.Writer) (int, bool) {
-	if !namesClassBead {
-		resident, err := door.firstResident(mutationIDs)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1, true
-		}
-		if resident == "" {
-			return 0, false
-		}
-		named = resident
+// the class binding HOLDS in a spelling this surface does not serve. Returning
+// (0, false) means none of the subjects PROBED is resident there — bd is still
+// their truth and the caller's passthrough answers byte-identically, including
+// doBd's own exact-ID collision guard, which this arm must not displace.
+//
+// The candidates are EVERY reserved-prefix id the argv addresses
+// (bdArgsAddressedClassIDs) plus whatever bdMutationWriteIDs could reduce to
+// subjects. Probing every addressed id, not just the first, is what makes a
+// multi-subject `dep add`/`dep remove` order-independent: an argv whose first
+// reserved id is a clean miss and whose LATER id is class-resident is refused on
+// the later id rather than falling through on the first miss. The one spelling
+// still outside this net is the all-work-prefix argv, which carries no reserved
+// id and is no write-mutation verb, so it never opens this door to be probed at
+// all; ga-zvetw tracks that remaining end.
+//
+// Ownership is decided by RESIDENCE for every subject, including one carrying a
+// reserved prefix. The prefix decides which ids are asked about — an argv naming
+// a reserved id is asking about that id whether or not the mutation scanner
+// could reduce the rest to subjects — but it does not decide the answer. The
+// binding is the namespace's authority, not its only lawful holder, so refusing
+// on the prefix alone strands every write to a rig configured with a prefix
+// inside the namespace.
+func refuseUnservedClassMutation(door bdByIDClassDoor, bdArgs, classIDs, mutationIDs []string, stderr io.Writer) (int, bool) {
+	candidates := make([]string, 0, len(classIDs)+len(mutationIDs))
+	candidates = append(candidates, classIDs...)
+	candidates = append(candidates, mutationIDs...)
+	resident, err := door.firstResident(candidates)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1, true
 	}
-	// The invocation addresses a bead the class binding owns, in a spelling
+	if resident == "" {
+		return 0, false
+	}
+	// The invocation addresses a bead the class binding holds, in a spelling
 	// this surface does not serve. Forwarding it would run the command against
 	// the one ledger that cannot hold the bead.
-	return refuseClassOwnedTarget(door, bdByIDRefusedVerb(bdArgs), named, bdByIDUnservedFlag(bdArgs), stderr)
+	return refuseClassOwnedTarget(door, bdByIDRefusedVerb(bdArgs), resident, bdByIDUnservedFlag(bdArgs), stderr)
 }
 
 // serveBdByIDResolved answers a served by-ID op from the class front door. It
-// resolves the id against the class binding, refuses the cases this surface
-// must not serve (a work-store id it does not own, a reserved-prefix id with no
-// row, an explicit --rig work scope), runs the ADR-0009 work-record close gate,
-// and dispatches the verb against the class graph. repoFallback is the git repo
-// the close gate falls back to when a closing bead carries no gc.work_dir.
+// resolves the id against the class binding, falls through to the passthrough
+// on any binding miss whatever the id's prefix, refuses the one case this
+// surface must not serve (an explicit --rig work scope on a bead the binding
+// holds), runs the ADR-0009 work-record close gate, and dispatches the verb
+// against the class graph. repoFallback is the git repo the close gate falls
+// back to when a closing bead carries no gc.work_dir.
 func serveBdByIDResolved(door bdByIDClassDoor, op bdByIDOp, bdArgs []string, rigName, repoFallback string, stdout, stderr io.Writer) (int, bool) {
 	resolution, err := door.resolve(op.ID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1, true
 	}
-	if !resolution.Owned() {
-		// A work-store id the class store has never seen: bd is still its
-		// truth, and the passthrough answers it byte-identically.
-		return 0, false
-	}
 	if !resolution.Found {
-		// Reserved-prefix id with no row: it has nowhere else to live.
+		// The binding does not hold this id: bd is still its truth, and the
+		// passthrough answers it byte-identically. That is the same answer
+		// whatever the id's prefix, because a reserved prefix makes the binding
+		// the namespace's AUTHORITY and not its only lawful holder — a rig
+		// configured with a prefix inside the namespace mints work beads there
+		// (config.ValidateRigs allows it; ReservedPrefixWarnings only advises),
+		// and the migration preserved ids in the other direction.
 		//
-		// This runs BEFORE the --rig refusal below, and the order is the
+		// It runs BEFORE the --rig refusal below, and the order is the
 		// diagnosis. The refusal's whole claim is that the binding owns this
 		// bead and the named rig's work store does not hold it — a sentence
-		// that is false when nothing holds it. A mistyped reserved-prefix id
-		// under --rig is an id error, not a scope error, and blaming the flag
-		// sends the operator to fix the one thing that was not wrong.
-		printBdByIDNotFound(stderr, op.ID)
-		return 1, true
+		// that is false when the binding never answered for it. Blaming the
+		// flag there sends the operator to fix the one thing that was not
+		// wrong, and refuses the one scope that could still resolve the id.
+		//
+		// A miss is not a shrug: only an ANSWER of "absent" reaches here. A
+		// binding that could not answer — unopenable, refusing, or faulting —
+		// left through the error arm above, because the plan carries the
+		// authority leg as PolicyFatal and resolve classifies every non-absence
+		// as a read failure.
+		return 0, false
 	}
 	if rig := strings.TrimSpace(rigName); rig != "" {
 		// The invocation pins a WORK rig scope and names a bead the class
@@ -1098,9 +1144,11 @@ func bdByIDRefusedVerb(bdArgs []string) string {
 	return strings.Join(words, " ")
 }
 
-// bdArgsNameClassOwnedBead reports the first reserved-prefix id an invocation
-// ADDRESSES, for any bd subcommand, and is what keeps an unserved spelling from
-// reaching the work ledger.
+// bdArgsAddressedClassIDs returns EVERY reserved-prefix id an invocation
+// ADDRESSES, in argv order, for any bd subcommand, and is what keeps an unserved
+// spelling from reaching the work ledger. Returning all addressed ids — not just
+// the first — is what makes a multi-subject verb's protection independent of the
+// order the subjects were typed (see refuseUnservedClassMutation).
 //
 // It exists because the served parsers are deliberately strict: they reject
 // every flag they do not implement, and a rejection used to mean the command
@@ -1141,7 +1189,7 @@ func bdByIDRefusedVerb(bdArgs []string) string {
 // token is treated as addressed. That is the same choice bdRelocatedClassVerb
 // makes and it is bounded the same way, because only a token that actually
 // carries a reserved class prefix can refuse anything.
-func bdArgsNameClassOwnedBead(bdArgs []string) (string, bool) {
+func bdArgsAddressedClassIDs(bdArgs []string) []string {
 	sub, args, resolved := bdByIDSubcommand(bdArgs)
 	valueFlags := bdflags.GlobalValueFlags()
 	boolFlags := bdflags.GlobalBoolFlags()
@@ -1158,55 +1206,59 @@ func bdArgsNameClassOwnedBead(bdArgs []string) (string, bool) {
 	undecidable := !resolved
 	positionalOnly := false
 
+	var ids []string
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
 		case positionalOnly:
+			ids = append(ids, bdReservedClassIDs(arg)...)
 		case arg == "--":
 			positionalOnly = true
-			continue
 		case strings.HasPrefix(arg, "-") && arg != "-":
-			name, inline, hasInline := strings.Cut(arg, "=")
-			if hasInline {
-				if bdIDValuedFlags[name] || (undecidable && !boolFlags[name]) {
-					if id, named := bdFirstReservedClassID(inline); named {
-						return id, true
-					}
-				}
-				continue
-			}
-			if boolFlags[name] {
-				continue
-			}
-			if !valueFlags[name] {
-				// Unknown flag: it may or may not consume the next token, so
-				// from here nothing is skipped.
-				undecidable = true
-				continue
-			}
-			if i+1 >= len(args) {
-				continue
-			}
-			i++
-			if bdIDValuedFlags[name] {
-				if id, named := bdFirstReservedClassID(args[i]); named {
-					return id, true
-				}
-			} else if undecidable {
-				// The flag is known to consume this token, so it is a value —
-				// but an earlier unknown flag may already have shifted the
-				// alignment, so judge it rather than trust the offset.
-				if id, named := bdFirstReservedClassID(args[i]); named {
-					return id, true
-				}
-			}
-			continue
-		}
-		if id, named := bdFirstReservedClassID(arg); named {
-			return id, true
+			var flagIDs []string
+			flagIDs, i, undecidable = bdArgsFlagAddressedIDs(args, i, undecidable, valueFlags, boolFlags)
+			ids = append(ids, flagIDs...)
+		default:
+			ids = append(ids, bdReservedClassIDs(arg)...)
 		}
 	}
-	return "", false
+	return ids
+}
+
+// bdArgsFlagAddressedIDs judges a single flag token args[i] — already known to
+// start with "-" and not be a bare "-" — for the reserved-prefix class ids its
+// value addresses. It returns those ids, the index to resume the argv scan from
+// (advanced past a value token the flag consumed), and whether argv alignment is
+// now undecidable.
+//
+// A bd flag either inlines its value (`--deps=a,b`), consumes the next token
+// (`--deps a,b`), or takes none (a bool). An unknown flag might do any of these,
+// so once one is seen every following offset is undecidable and no later token is
+// skipped; the caller threads that state in and back out.
+func bdArgsFlagAddressedIDs(args []string, i int, undecidable bool, valueFlags, boolFlags map[string]bool) ([]string, int, bool) {
+	name, inline, hasInline := strings.Cut(args[i], "=")
+	var ids []string
+	switch {
+	case hasInline:
+		if bdIDValuedFlags[name] || (undecidable && !boolFlags[name]) {
+			ids = bdReservedClassIDs(inline)
+		}
+	case boolFlags[name]:
+		// A bool flag takes no value; there is nothing to judge.
+	case !valueFlags[name]:
+		// Unknown flag: it may or may not consume the next token, so from here
+		// nothing is skipped.
+		undecidable = true
+	case i+1 < len(args):
+		// A value flag consumes the next token. Judge it when the flag names a
+		// bead, or when an earlier unknown flag may already have shifted the
+		// alignment so the offset cannot be trusted.
+		i++
+		if bdIDValuedFlags[name] || undecidable {
+			ids = bdReservedClassIDs(args[i])
+		}
+	}
+	return ids, i, undecidable
 }
 
 // bdByIDSubcommand locates the bd subcommand in an argv and returns the
@@ -1261,17 +1313,21 @@ var bdIDValuedFlags = map[string]bool{
 	"--for": true, "--attach": true,
 }
 
-// bdFirstReservedClassID returns the first reserved-prefix id in a token,
-// splitting the comma lists bd accepts for `--deps` and friends so an id in a
-// later position is not missed.
-func bdFirstReservedClassID(token string) (string, bool) {
+// bdReservedClassIDs returns EVERY reserved-prefix id in a token, splitting the
+// comma lists bd accepts for `--deps`/`--blocked-by`/`--depends-on` and friends.
+// A single value can address more than one bead, and each reserved id is a
+// distinct class-ownership question, so returning only the first would let a
+// later class-resident id fall through on an earlier clean miss — the exact
+// order dependence the by-id door exists to remove, reproduced inside one token.
+func bdReservedClassIDs(token string) []string {
+	var ids []string
 	for _, part := range strings.Split(token, ",") {
 		part = strings.TrimSpace(part)
 		if bdIDIsClassReserved(part) {
-			return part, true
+			ids = append(ids, part)
 		}
 	}
-	return "", false
+	return ids
 }
 
 // bdByIDClaimActor returns the identity a routed claim acquires the bead for.
@@ -1664,14 +1720,4 @@ func doBdByIDLifecycleWrite(graph storebinding.GraphStore, op bdByIDOp, verb str
 		return 1
 	}
 	return printBdByIDBead(written, op.JSON, binding, stdout, stderr)
-}
-
-// printBdByIDNotFound renders genuine absence in bd's own shape so existing
-// parsers see the same signal the passthrough would have produced, and adds the
-// one thing that differs: class stores resolve ids exactly, so a truncated id
-// pasted from a log reads as absent here where bd would have substring-matched
-// it.
-func printBdByIDNotFound(stderr io.Writer, id string) {
-	fmt.Fprintf(stderr, "Error fetching %s: no issue found matching %q\n", id, id)                                                       //nolint:errcheck // best-effort stderr
-	fmt.Fprintf(stderr, "gc bd: %s is a class-store id; class stores resolve ids exactly (no substring match) — pass the full id\n", id) //nolint:errcheck // best-effort stderr
 }

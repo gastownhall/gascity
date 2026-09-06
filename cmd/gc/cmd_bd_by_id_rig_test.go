@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // This file pins the --rig RULE for `gc bd`'s by-id surface.
@@ -27,12 +28,21 @@ import (
 
 const byIDRigName = "workflows"
 
+// byIDRigWorkPrefix is the ordinary, non-shadowing rig prefix. Rows that care
+// about the reserved namespace pass their own.
+const byIDRigWorkPrefix = "wf"
+
 // writeRiggedForeignProviderCityTOML is writeForeignProviderCityTOML plus one
 // bound rig, so the --rig flag has a real target to resolve to. Without a
 // resolvable rig, resolveBdScopeTarget fails first with "rig not found" and the
 // class-routing rule is never reached — which is a different, already-loud
 // failure.
-func writeRiggedForeignProviderCityTOML(t *testing.T, cityPath, rigPath string) {
+//
+// The rig's prefix is a parameter because it is the input to the shadow rule:
+// config.ValidateRigs does not reject a prefix inside a relocated class's
+// reserved namespace, so a real city can carry one and the door has to answer
+// for it.
+func writeRiggedForeignProviderCityTOML(t *testing.T, cityPath, rigPath, rigPrefix string) {
 	t.Helper()
 	body := fmt.Sprintf(`[workspace]
 name = "by-id-rig-city"
@@ -40,7 +50,7 @@ name = "by-id-rig-city"
 [[rigs]]
 name = %q
 path = %q
-prefix = "wf"
+prefix = %q
 
 [storage.classes]
 work = %q
@@ -53,23 +63,24 @@ nudges = "infra"
 [storage.bindings.infra]
 provider = %q
 config_ref = "infra"
-`, byIDRigName, rigPath, config.StorageWorkBinding, string(configRefEngineProviderID))
+`, byIDRigName, rigPath, rigPrefix, config.StorageWorkBinding, string(configRefEngineProviderID))
 	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(body), 0o644); err != nil {
 		t.Fatalf("writing city.toml: %v", err)
 	}
 }
 
 // riggedForeignProviderCity is foreignProviderCity with a bound rig, for the
-// end-to-end doBd rows.
-func riggedForeignProviderCity(t *testing.T) (cityPath string, classStore beads.Store) {
+// end-to-end doBd rows. It returns the rig's root beside the city's so a caller
+// can seed the rig's own work ledger.
+func riggedForeignProviderCity(t *testing.T, rigPrefix string) (cityPath, rigPath string, classStore beads.Store) {
 	t.Helper()
 	clearGCEnv(t)
 	cityPath = t.TempDir()
-	rigPath := filepath.Join(cityPath, "rigs", byIDRigName)
+	rigPath = filepath.Join(cityPath, "rigs", byIDRigName)
 	if err := os.MkdirAll(rigPath, 0o755); err != nil {
 		t.Fatalf("creating the rig dir: %v", err)
 	}
-	writeRiggedForeignProviderCityTOML(t, cityPath, rigPath)
+	writeRiggedForeignProviderCityTOML(t, cityPath, rigPath, rigPrefix)
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_CITY", cityPath)
 	registerConfigRefEngineProvider(t)
@@ -81,7 +92,46 @@ func riggedForeignProviderCity(t *testing.T) (cityPath string, classStore beads.
 	if !relocated {
 		t.Fatal("a city serving its classes from a foreign provider resolved no class binding")
 	}
-	return cityPath, store
+	return cityPath, rigPath, store
+}
+
+// seedRigWorkBead plants a bead in the rig's OWN file-backed work ledger, under
+// a pinned id in the rig's configured namespace, and returns it.
+//
+// It opens the file the rig scope resolves to directly rather than through
+// openStoreAtForCity, because the id has to be pinned: a minted one would race
+// the binding's own sequence, which mints from the same reserved prefix when the
+// rig shadows it, and a fixture whose two stores can agree on an id proves
+// nothing about which one answered. The caller re-reads it through the
+// production accessor, so the seam this bypasses is still covered.
+func seedRigWorkBead(t *testing.T, cityPath, rigPath, rigPrefix, title string) beads.Bead {
+	t.Helper()
+	beadsPath := filepath.Join(rigPath, ".gc", "beads.json")
+	if err := os.MkdirAll(filepath.Dir(beadsPath), 0o755); err != nil {
+		t.Fatalf("creating the rig's store dir: %v", err)
+	}
+	store, err := beads.OpenFileStore(fsys.OSFS{}, beadsPath)
+	if err != nil {
+		t.Fatalf("opening the rig's work ledger at %s: %v", beadsPath, err)
+	}
+	store.IDPrefix = rigPrefix
+	store.HonorExplicitIDs = true
+	created, err := store.Create(beads.Bead{ID: rigPrefix + "-rig1", Title: title, Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the rig's work ledger: %v", err)
+	}
+
+	// Re-read through the accessor production points the passthrough's scope at,
+	// so the row is proved reachable on the far side of the door rather than only
+	// present in a file.
+	viaProduction, err := openStoreAtForCity(rigPath, cityPath)
+	if err != nil {
+		t.Fatalf("opening the rig scope the way production does: %v", err)
+	}
+	if _, err := viaProduction.Get(created.ID); err != nil {
+		t.Fatalf("the rig scope does not resolve %s: %v — the seed did not land where the passthrough would read it", created.ID, err)
+	}
+	return created
 }
 
 // TestBdByIDRefusesAnExplicitRigScopeOnAClassOwnedBead is the rule.
@@ -128,30 +178,25 @@ func TestBdByIDRefusesAnExplicitRigScopeOnAClassOwnedBead(t *testing.T) {
 	}
 }
 
-// TestBdByIDRigRuleDoesNotBlameTheFlagForAnIDThatDoesNotExist pins the ORDER of
-// the two refusals, which is the difference between a correct diagnosis and a
-// wrong one.
+// TestBdByIDReservedMissUnderExplicitRigFallsThrough pins the ORDER of the two
+// arms, which is the difference between a correct diagnosis and a wrong one.
 //
 // The --rig refusal asserts a fact: the binding owns this bead and the named
-// rig's work store does not hold it. For a mistyped reserved-prefix id that
-// sentence is false — nothing holds it — and the operator is sent to fix the
-// flag, which was the one thing that was not wrong. The not-found answer has to
-// come first.
-func TestBdByIDRigRuleDoesNotBlameTheFlagForAnIDThatDoesNotExist(t *testing.T) {
+// rig's work store does not hold it. For a reserved-prefix id the binding does
+// not hold, that sentence is false, and blaming the flag sends the operator to
+// fix the one thing that was not wrong. The residence answer comes first — and
+// since the binding is only the namespace's AUTHORITY, its miss hands the id to
+// the passthrough, which already carries the rig scope the operator asked for.
+// That is exactly the population --rig is for: a rig legitimately configured
+// with a prefix inside the reserved namespace.
+func TestBdByIDReservedMissUnderExplicitRigFallsThrough(t *testing.T) {
 	cityPath, classStore := foreignProviderCity(t)
 	missing := reservedClassID(t, "9999")
 
 	var stdout, stderr bytes.Buffer
 	code, handled := maybeRouteBdByID(cityPath, byIDRigName, []string{"show", missing}, &stdout, &stderr)
-	if !handled || code != 1 {
-		t.Fatalf("show %s under --rig exited %d (handled=%v), want a handled failure: %s", missing, code, handled, stderr.String())
-	}
-	msg := stderr.String()
-	if !strings.Contains(msg, "no issue found") {
-		t.Errorf("show %s under --rig reported %q, want the not-found answer — the id is what is wrong here, not the scope", missing, msg)
-	}
-	if strings.Contains(msg, "drop --rig") {
-		t.Errorf("show %s under --rig blamed the flag: %q. The refusal claims the binding owns the bead and the rig store does not hold it; nothing holds it, so that claim is false", missing, msg)
+	if handled {
+		t.Fatalf("show %s under --rig was answered here (exit %d): %s%s — the binding does not hold it, so the rig's own store is what the flag pinned", missing, code, stdout.String(), stderr.String())
 	}
 
 	// The control: the same city, the same flag, an id the binding DOES own
@@ -164,6 +209,114 @@ func TestBdByIDRigRuleDoesNotBlameTheFlagForAnIDThatDoesNotExist(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "drop --rig") {
 		t.Errorf("show %s under --rig lost the refusal: %q", bead.ID, stderr.String())
+	}
+}
+
+// TestBdByIDShadowPrefixRigBeadReachesThePassthrough is the population proof
+// behind the fall-through: the beads a binding miss is ABOUT, and where they
+// actually live.
+//
+// A rig may lawfully be configured with a prefix inside a relocated class's
+// reserved namespace. config.ValidateRigs does not reject one and
+// config.ReservedPrefixWarnings only advises, so such a rig starts, serves, and
+// mints work beads carrying ids the binding has never held and never will. On a
+// split city every `gc bd` invocation naming one used to be answered at this
+// door — a read reported as absent and a write refused — including the
+// step-completion write the core pack renders on every worked bead. The binding
+// is the namespace's AUTHORITY, not its only lawful holder, so its miss hands
+// the id to the passthrough that is pointed at the ledger holding it.
+//
+// Both spellings are driven. The exact reserved prefix is the one an operator
+// gets warned about; the longer prefix inside the same namespace is the one
+// IsReservedClassPrefix's exact match does not warn about at all, and is
+// therefore the likelier of the two to be running somewhere.
+func TestBdByIDShadowPrefixRigBeadReachesThePassthrough(t *testing.T) {
+	reserved, ok := config.ReservedClassPrefix(config.BeadClassGraph)
+	if !ok || reserved == "" {
+		t.Fatalf("no reserved id prefix is registered for the %q class", config.BeadClassGraph)
+	}
+	for _, rigPrefix := range []string{reserved, reserved + "-alpha"} {
+		t.Run(rigPrefix, func(t *testing.T) {
+			cityPath, rigPath, classStore := riggedForeignProviderCity(t, rigPrefix)
+			resident := seedRigWorkBead(t, cityPath, rigPath, rigPrefix, "a rig work bead inside the reserved namespace")
+			if !bdIDIsClassReserved(resident.ID) {
+				t.Fatalf("the rig's id %q is outside the reserved namespace; the fixture proves nothing about the shadow rule", resident.ID)
+			}
+			if _, err := classStore.Get(resident.ID); err == nil {
+				t.Fatalf("the class binding also holds %s; the fixture cannot tell a fall-through from a served read", resident.ID)
+			}
+
+			for _, rig := range []string{"", byIDRigName} {
+				var stdout, stderr bytes.Buffer
+				code, handled := maybeRouteBdByID(cityPath, rig, []string{"show", resident.ID}, &stdout, &stderr)
+				if handled {
+					t.Fatalf("show %s (--rig %q) was answered at this door (exit %d): %s%s — the only ledger holding it is the rig's, on the far side of the passthrough", resident.ID, rig, code, stdout.String(), stderr.String())
+				}
+			}
+
+			// The control: on the same city an id the binding DOES hold is still
+			// served here. Without it the fix could be "stop routing".
+			held := mustCreateClassBead(t, classStore, beads.Bead{Title: "held by the binding", Type: "task"})
+			if held.ID == resident.ID {
+				t.Fatalf("the binding minted the rig's id %s; the two ledgers agreed and the control is meaningless", held.ID)
+			}
+			var stdout, stderr bytes.Buffer
+			if code, handled := maybeRouteBdByID(cityPath, "", []string{"show", held.ID, "--json"}, &stdout, &stderr); !handled || code != 0 {
+				t.Fatalf("show %s = (%d, %t): %s", held.ID, code, handled, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), held.ID) {
+				t.Errorf("the served show printed %q, want %s", stdout.String(), held.ID)
+			}
+		})
+	}
+}
+
+// TestBdByIDStrandedMintReachesThePassthrough is the other row of the
+// warned-and-allowed population, and the one with no rig in it.
+//
+// A shadow prefix does not have to belong to a rig. A city whose own HQ work
+// ledger was configured with a prefix inside a reserved namespace — or that
+// carries beads minted under one before the split — holds reserved-prefix rows
+// the binding has never held, at CITY scope, where no --rig can be dropped and
+// no rig store can be pointed at. The binding is still only the namespace's
+// authority, so the miss hands the id to the passthrough exactly as it does for
+// a rig's own bead.
+//
+// The rig helper does the seeding, pointed at the city root: the ledger a
+// scope resolves to is the same file either way, and reusing it keeps the two
+// rows provably on the same seam.
+func TestBdByIDStrandedMintReachesThePassthrough(t *testing.T) {
+	reserved, ok := config.ReservedClassPrefix(config.BeadClassGraph)
+	if !ok || reserved == "" {
+		t.Fatalf("no reserved id prefix is registered for the %q class", config.BeadClassGraph)
+	}
+	cityPath, classStore := foreignProviderCity(t)
+	stranded := seedRigWorkBead(t, cityPath, cityPath, reserved, "a reserved-prefix bead stranded in the city work ledger")
+	if !bdIDIsClassReserved(stranded.ID) {
+		t.Fatalf("the seeded id %q is outside the reserved namespace; the fixture proves nothing about the shadow rule", stranded.ID)
+	}
+	if _, err := classStore.Get(stranded.ID); err == nil {
+		t.Fatalf("the class binding also holds %s; the fixture cannot tell a fall-through from a served read", stranded.ID)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code, handled := maybeRouteBdByID(cityPath, "", []string{"show", stranded.ID}, &stdout, &stderr); handled {
+		t.Fatalf("show %s was answered at this door (exit %d): %s%s — the only ledger holding it is the city work store, on the far side of the passthrough", stranded.ID, code, stdout.String(), stderr.String())
+	}
+
+	// The control: on the same city an id the binding DOES hold is still served
+	// here. Without it the fix could be "stop routing".
+	held := mustCreateClassBead(t, classStore, beads.Bead{Title: "held by the binding", Type: "task"})
+	if held.ID == stranded.ID {
+		t.Fatalf("the binding minted the stranded id %s; the two ledgers agreed and the control is meaningless", held.ID)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code, handled := maybeRouteBdByID(cityPath, "", []string{"show", held.ID, "--json"}, &stdout, &stderr); !handled || code != 0 {
+		t.Fatalf("show %s = (%d, %t): %s", held.ID, code, handled, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), held.ID) {
+		t.Errorf("the served show printed %q, want %s", stdout.String(), held.ID)
 	}
 }
 
@@ -210,7 +363,7 @@ func TestBdByIDRigScopeIsInertOnACityThatRelocatesNothing(t *testing.T) {
 // resolveBdScopeTarget and never reaches the by-id surface — a unit call could
 // not tell the two apart.
 func TestBdByIDRigRuleAppliesToTheFlagAndNotToAutoDetectedScope(t *testing.T) {
-	_, classStore := riggedForeignProviderCity(t)
+	_, _, classStore := riggedForeignProviderCity(t, byIDRigWorkPrefix)
 	bead := mustCreateClassBead(t, classStore, beads.Bead{Title: "a worked step", Type: "task"})
 
 	t.Setenv("GC_RIG", byIDRigName)
