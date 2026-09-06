@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"text/tabwriter"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -421,6 +422,7 @@ func doConvoyListFallback(cityPath string, jsonOut bool, stdout, stderr io.Write
 	if stores == nil {
 		return code
 	}
+	stores = convoyStoreViewsForRead(cityPath, stores, stderr, "gc convoy list")
 	return doConvoyListAcrossStores(stores, jsonOut, stdout, stderr)
 }
 
@@ -485,6 +487,261 @@ func convoyStoreCandidatesWithProvider(cfg *config.City, cityPath, beadID string
 type convoyStoreView struct {
 	path  string
 	store beads.Store
+	role  convoyViewRole
+}
+
+// convoyViewRole says how a view's rows relate to the other views' rows. It is
+// the only thing a fan-out merge needs to know about where a store came from.
+type convoyViewRole int
+
+const (
+	// convoyViewOrdinary is a store the directory scan enumerated. Its ids are
+	// its own: a city and a rig that each mint "gc-1" hold two different beads,
+	// and a merge that collapsed them would delete one from the output.
+	convoyViewOrdinary convoyViewRole = iota
+	// convoyViewClassBinding is the city's relocated class binding — the store
+	// `gc storage migrate` moved the infrastructure classes INTO, and the one
+	// the city has gone on mutating since.
+	convoyViewClassBinding
+	// convoyViewMigrationSource is the city store the migration copied OUT of.
+	// The copies it retained are frozen at cutover and share their ids with the
+	// binding's live rows, so they are the one duplicate a merge can safely
+	// collapse.
+	convoyViewMigrationSource
+)
+
+// convoyBindingViewPath is what the class binding is called in fan-out output.
+//
+// It is deliberately not a directory. No `bd` invocation can be rooted there
+// and no lock can be taken on it, so a caller that treats a view's path as a
+// working directory has to check the view's role first.
+const convoyBindingViewPath = "city (class binding)"
+
+// isClassBinding reports whether this view is the city's relocated class
+// binding rather than one of the directories the scan enumerated.
+func (v convoyStoreView) isClassBinding() bool {
+	return v.role == convoyViewClassBinding
+}
+
+// scopePath is the directory whose SCOPE owns the view's rows.
+//
+// Every view but the class binding is itself a scope root, so this is usually
+// the view's own path. The binding is not a directory at all — it is where the
+// city's infrastructure classes were relocated to — and its rows belong to the
+// city scope, which is the answer three separate questions need: which store ref
+// a workflow root implies when it carries none, which scope a source-workflow
+// lock is keyed on, and whether two matched views are one scope or two.
+func (v convoyStoreView) scopePath(cityPath string) string {
+	if v.isClassBinding() {
+		return cityPath
+	}
+	return v.path
+}
+
+// convoyStoreViewsWithBinding federates a directory scan's views with the
+// city's relocated class binding, and reports a refusal rather than deciding
+// what to do about it.
+//
+// The scan enumerates DIRECTORIES, and a relocated binding is not one of them.
+// On a converged city that makes every fan-out read the copies `gc storage
+// migrate` retained — frozen at cutover, never mutated since — while the rows
+// the city actually works are invisible. Appending the binding as one more view
+// is what closes that, and marking the city's view as the migration source is
+// what lets the merge collapse the resulting duplicate.
+//
+// A REFUSED binding comes back as an error with the views unchanged, because
+// the two kinds of caller need opposite things from it. A read can print what
+// it has and say what is missing; a destructive sweep cannot, because reaching
+// only some of the rows it was asked to delete is worse than deleting nothing.
+// Deciding that here would force one of them to be wrong.
+//
+// Both shapes of refusal arrive as an error and neither arrives as "this city
+// relocates nothing". A city configured for a binding it has not converged on
+// resolves to a refusedClassStore carrying the boot gate's sentence; a city
+// serving its classes from more than one binding is a topology this build
+// refuses outright, and that is a STANDING verdict about the city rather than a
+// fault this read ran into, so it is marked as one. Reporting either as
+// unrelocated would send the fan-out to the directory scan alone — the retained
+// pre-migration copies, printed as live rows — which is the confidently stale
+// answer this federation exists to close.
+func convoyStoreViewsWithBinding(cityPath string, views []convoyStoreView) ([]convoyStoreView, error) {
+	relocated, isRelocated, err := cliSoleClassBinding(cityPath)
+	if err != nil {
+		return views, standingStorageRefusal{err: err}
+	}
+	binding := relocated.Store
+	if !isRelocated || binding == nil {
+		return views, nil
+	}
+	if refusal, refused := binding.(refusedClassStore); refused {
+		return views, refusal.err
+	}
+	for _, view := range views {
+		// The scan already opened this exact store, so the binding is not a
+		// second leg — it is the one that is there. Adding it would duplicate
+		// every row against itself. This is relocatedGraphLegFrom's identity
+		// gate, applied to a list of views.
+		//
+		// Both operands are pointer-typed HERE, which is what keeps the `==`
+		// away from the non-comparable dynamic type that panics an interface
+		// compare: the scan side is whatever opener openConvoyStores was handed,
+		// and both production openers end in a pointer store — openStoreAtForCity
+		// through wrapStoreWithBeadPolicies, openControlStoreAtForCity through
+		// that or the *beads.BdStore control factory — while the binding side is
+		// constructor-opened and its one value-typed route, refusedClassStore,
+		// already returned above. relocatedGraphLegFrom carries the same
+		// argument, but its own doc says production no longer calls it, so the
+		// operand set is named here rather than only by reference to a function
+		// documented as dead.
+		if view.store == binding {
+			return views, nil
+		}
+	}
+
+	merged := make([]convoyStoreView, 0, len(views)+1)
+	for _, view := range views {
+		if samePath(view.path, cityPath) {
+			view.role = convoyViewMigrationSource
+		}
+		merged = append(merged, view)
+	}
+	return append(merged, convoyStoreView{
+		path:  convoyBindingViewPath,
+		store: binding,
+		role:  convoyViewClassBinding,
+	}), nil
+}
+
+// convoyStoreViewsForRead is convoyStoreViewsWithBinding for the surfaces that
+// only READ, which continue past a refusal and say so.
+//
+// A refused city still serves work from its work ledger, so failing the whole
+// listing would take `gc beads list` and `gc convoy list` away from every city
+// whose storage configuration is mid-repair. The rows the binding holds are
+// missing from that output, though, so the omission is announced — every run,
+// not once per process, because each invocation is a fresh answer and has to
+// carry its own caveat.
+//
+// The caveat says both halves, because on a converged city the omission is not
+// the whole hazard. The migration RETAINED a frozen copy of every row it moved,
+// and it is the binding's answer that supersedes those copies — so while the
+// refusal stands they are no longer superseded and print as live rows in place
+// of the ones that are missing. A convoy the city closed in the binding lists
+// open again for exactly as long as the binding cannot be read.
+//
+// "Only READ" is the whole precondition, so the caller set is named rather than
+// assumed: `gc beads list`, `gc convoy list`, and `gc convoy stranded`, none of
+// which write. A caller that mutates takes convoyStoreViewsWithBinding directly
+// and refuses — doConvoyCheckFallback does, and federateSweepViews does it for
+// the sweeps — because the frozen rows this tolerates printing are rows a
+// mutation would act on.
+func convoyStoreViewsForRead(cityPath string, views []convoyStoreView, stderr io.Writer, cmdName string) []convoyStoreView {
+	merged, err := convoyStoreViewsWithBinding(cityPath, views)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: the city's relocated class binding is unreadable, so any beads it holds are missing from this output and retained pre-migration copies of them may appear in their place as stale open rows: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
+	}
+	return merged
+}
+
+// convoyOwnershipProbeBatch bounds how many ids one ownership probe puts on the
+// wire, because an unbounded IN-list is a query no sqlite binding can run.
+//
+// The IDs filter compiles to one bound variable per id (`b.id IN (?,...,?)` in
+// sqliteListSQL, with no chunking of its own) and modernc sqlite refuses any
+// statement carrying more than 32766 of them. The candidate set is every
+// migration-source row matching the caller's query and `gc beads list` runs
+// unbounded, so on a converged city with a long history the probe would carry
+// the whole work ledger and come back "too many SQL variables" — failing the
+// read outright on exactly the large migrated cities the federation exists for.
+// Batching under the cap keeps the probe O(candidates/batch) round trips rather
+// than the one-per-row it replaced.
+const convoyOwnershipProbeBatch = 30000
+
+// convoyBindingOwnedIDs asks the class binding which of these ids it HOLDS.
+//
+// This is deliberately not "which of these ids did the binding return for the
+// caller's query". Those are different questions, and answering the second one
+// is how a migrated city ends up serving frozen rows: `gc convoy list` asks
+// every store for its OPEN convoys, so the moment the city closes a relocated
+// convoy in the binding — the normal end of every migrated workflow, not an edge
+// case — the binding stops answering for that id, the retained copy stops
+// looking superseded, and a convoy the city finished prints open forever.
+//
+// So the ownership probe carries only the ids it is asking about and
+// IncludeClosed, and no filter of the caller's reaches it. ListQuery.IDs is the
+// IN-list form of a batch of Gets and counts as a filter, so it needs no
+// AllowScan and costs one query per batch rather than one per row.
+//
+// A probe that FAILS is an error, never an empty answer. Reading a fault as "the
+// binding holds none of these" would serve every frozen twin as live data and
+// say nothing about why.
+func convoyBindingOwnedIDs(binding beads.Store, ids []string) (map[string]bool, error) {
+	owned := make(map[string]bool, len(ids))
+	if binding == nil || len(ids) == 0 {
+		return owned, nil
+	}
+	for start := 0; start < len(ids); start += convoyOwnershipProbeBatch {
+		batch := ids[start:min(start+convoyOwnershipProbeBatch, len(ids))]
+		held, err := binding.List(beads.ListQuery{IDs: batch, IncludeClosed: true})
+		if err != nil {
+			return nil, fmt.Errorf("asking %s which ids it holds: %w", convoyBindingViewPath, err)
+		}
+		for _, b := range held {
+			owned[b.ID] = true
+		}
+	}
+	return owned, nil
+}
+
+// mergeConvoyViewRows folds one row set per view into one, dropping the frozen
+// copies a class binding supersedes.
+//
+// Ids are unique only WITHIN a store, so this is not an id dedupe: a city and a
+// rig that each mint "gc-1" hold two different beads and both belong in the
+// output. The one place an id means the same bead twice is the migration, which
+// copies a class into the binding with ids preserved and deletes nothing — so
+// the migration source's copy is a frozen duplicate of a row the binding now
+// owns. That pair, and only that pair, collapses, with the binding winning.
+//
+// Which is why the supersede question is asked of the BINDING and only about the
+// migration source's ids, rather than read off the two row sets. A rig's id is
+// never put to the binding at all, so the role scoping is structural; and the
+// answer does not depend on whether the binding's own row happened to survive
+// the caller's filter, so a relocated bead the city has since closed still
+// supersedes its twin.
+func mergeConvoyViewRows[T any](views []convoyStoreView, rows [][]T, idOf func(T) string) ([]T, error) {
+	var binding beads.Store
+	for i, view := range views {
+		if view.role == convoyViewClassBinding && len(rows) > i {
+			binding = view.store
+		}
+	}
+	var candidates []string
+	for i, view := range views {
+		if view.role != convoyViewMigrationSource || len(rows) <= i {
+			continue
+		}
+		for _, row := range rows[i] {
+			candidates = append(candidates, idOf(row))
+		}
+	}
+	owned, err := convoyBindingOwnedIDs(binding, candidates)
+	if err != nil {
+		return nil, err
+	}
+	merged := make([]T, 0)
+	for i, view := range views {
+		if len(rows) <= i {
+			continue
+		}
+		for _, row := range rows[i] {
+			if view.role == convoyViewMigrationSource && owned[idOf(row)] {
+				continue
+			}
+			merged = append(merged, row)
+		}
+	}
+	return merged, nil
 }
 
 func openConvoyStores(cfg *config.City, cityPath, beadID string, openStore func(string) (beads.Store, error)) ([]convoyStoreView, error) {
@@ -500,7 +757,7 @@ func openConvoyStores(cfg *config.City, cityPath, beadID string, openStore func(
 			}
 			continue
 		}
-		stores = append(stores, convoyStoreView{path: dir, store: store})
+		stores = append(stores, convoyStoreView{path: dir, store: store, role: convoyViewOrdinary})
 	}
 	if len(stores) > 0 {
 		return stores, nil
@@ -530,7 +787,39 @@ func resolveConvoyStore(convoyID string, cfg *config.City, cityPath string, open
 // contract. A candidate's not-found probe is skipped; any other error is
 // returned immediately. The returned directory maps back to the owning
 // candidate.
+//
+// # The binding leg comes first, and it short-circuits the uniqueness contract
+//
+// A relocated class binding is not one of the city's directories, so the scan
+// below cannot reach it. On a converged city that means an infrastructure bead
+// is answered by the copy `gc storage migrate` RETAINED in the city store —
+// frozen at migration time — and the caller then writes through it. So the
+// binding is resolved first, through the shared residency contract.
+//
+// A binding hit returns without consulting the ambiguity rule, deliberately.
+// Dual residency is not ambiguity: the migration copies with ids preserved and
+// deletes nothing, so a relocated bead is SUPPOSED to exist twice and there is
+// a known winner. Refusing it as ambiguous would break every convoy command on
+// exactly the cities that completed the migration.
+//
+// The directory reported for a binding hit is the CITY's, not the binding's,
+// and that is not a fudge. Callers map this directory to a store-ref
+// ("city:<name>" / "rig:<name>") that scopes molecule-root lookups. These beads
+// lived in the city store and carried the city's ref before the migration moved
+// them; a binding is not a rig and has no ref of its own, and inventing one
+// would strand every root recorded before the move.
 func resolveOwningStoreDir(beadID string, cfg *config.City, cityPath string, openStore func(string) (beads.Store, error)) (beads.Store, string, error) {
+	owner, ownedByBinding, err := cliByIDBindingOwner(cityPath, beadID)
+	if err != nil {
+		return nil, "", err
+	}
+	if ownedByBinding {
+		if err := refuseBindingRigCollision(beadID, cfg, cityPath, openStore); err != nil {
+			return nil, "", err
+		}
+		return owner.Store, cityPath, nil
+	}
+
 	candidates, err := openConvoyStores(cfg, cityPath, beadID, openStore)
 	if err != nil {
 		return nil, "", err
@@ -561,16 +850,56 @@ func resolveOwningStoreDir(beadID string, cfg *config.City, cityPath string, ope
 	return foundStore, foundDir, nil
 }
 
-func openAllConvoyStores(stderr io.Writer, cmdName string) ([]convoyStoreView, int) {
-	cityPath, err := resolveCity()
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
-		return nil, 1
+// refuseBindingRigCollision restores the uniqueness contract to the one case
+// the binding short-circuit takes it away from without meaning to.
+//
+// A binding hit returns before the scan runs, and the scan is where "this id
+// exists in more than one store" is refused. Skipping it is right for the CITY
+// store, whose copy of a relocated id is the migration working as designed, and
+// wrong for a RIG: a rig is never a migration target, so it has no retained copy
+// to be excused, and one holding the same id is two ledgers disagreeing by
+// accident. Answering that silently from the binding means whichever caller
+// follows — a close, a land, a convoy walk — acts on one copy while the other
+// stays open forever, which is the failure the contract was written for.
+//
+// So the probe is the rigs and only the rigs, and only for an id no reserved
+// class prefix claims. A reserved prefix is minted by the binding and by nothing
+// else, so a rig cannot hold one legitimately and the walk would cost every
+// reserved-id resolution — bd's on-close hook among them, and it closes in
+// bursts — to learn nothing.
+//
+// Read faults are refusals, not skips. This fronts resolveOwningStoreDir, whose
+// callers are the mutations reached through resolveConvoyStore — `gc convoy
+// target`/`add`/`close`/`land` — and autocloseOwningStore, which absorbs the
+// refusal into its own ok=false, but ALSO the pure read `gc convoy status`. It
+// refuses there too: a rig that cannot answer has not established the id is
+// uniquely addressable, and a read served from one of two disagreeing ledgers is
+// the same wrong answer whether or not a write follows it. The error policy is
+// the scan's own, one function down, for the same probe.
+func refuseBindingRigCollision(beadID string, cfg *config.City, cityPath string, openStore func(string) (beads.Store, error)) error {
+	if bdIDIsClassReserved(beadID) {
+		return nil
 	}
-	return openAllConvoyStoresAt(cityPath, stderr, cmdName)
+	candidates, err := openConvoyStores(cfg, cityPath, beadID, openStore)
+	if err != nil {
+		return err
+	}
+	for _, candidate := range candidates {
+		if candidate.store == nil || samePath(candidate.path, cityPath) {
+			continue
+		}
+		if _, err := candidate.store.Get(beadID); err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
+			}
+			return err
+		}
+		return fmt.Errorf("bead %s exists in multiple stores (%s and %s); resolution requires a uniquely addressable bead id", beadID, convoyBindingViewPath, candidate.path)
+	}
+	return nil
 }
 
-// openAllConvoyStoresAt is openAllConvoyStores with a pre-resolved cityPath,
+// openAllConvoyStoresAt opens every convoy store for a pre-resolved cityPath,
 // used by routed callers that already resolved the city before dispatching
 // to the fallback path.
 func openAllConvoyStoresAt(cityPath string, stderr io.Writer, cmdName string) ([]convoyStoreView, int) {
@@ -655,15 +984,19 @@ type convoyStatusResultJSON struct {
 }
 
 func collectOpenConvoys(stores []convoyStoreView) ([]convoyWithStore, error) {
-	convoys := make([]convoyWithStore, 0)
-	for _, candidate := range stores {
+	rows := make([][]convoyWithStore, len(stores))
+	for i, candidate := range stores {
 		all, err := candidate.store.List(beads.ListQuery{Type: "convoy"})
 		if err != nil {
 			return nil, err
 		}
 		for _, b := range all {
-			convoys = append(convoys, convoyWithStore{store: candidate.store, bead: b})
+			rows[i] = append(rows[i], convoyWithStore{store: candidate.store, bead: b})
 		}
+	}
+	convoys, err := mergeConvoyViewRows(stores, rows, func(c convoyWithStore) string { return c.bead.ID })
+	if err != nil {
+		return nil, err
 	}
 	sort.SliceStable(convoys, func(i, j int) bool {
 		if convoys[i].bead.ID == convoys[j].bead.ID {
@@ -1362,10 +1695,24 @@ func routeConvoyCheck(cityPath string, _ *api.Client, nilReason string, jsonOut 
 }
 
 // doConvoyCheckFallback is the direct-bd path for "gc convoy check".
+//
+// It federates through convoyStoreViewsWithBinding rather than through
+// convoyStoreViewsForRead, because this command CLOSES convoys. A refusal hands
+// back the views unchanged, which leaves the city's retained pre-migration
+// copies unsuperseded and walks them as live rows — and their children were
+// frozen at cutover, so a convoy the city is still working reads as complete.
+// Degrading here would auto-close it and report that as success while the
+// binding's open row went untouched, so the check refuses instead: a mutation
+// on a view this build could not prove is worse than no mutation.
 func doConvoyCheckFallback(cityPath string, jsonOut bool, stdout, stderr io.Writer) int {
 	stores, code := openAllConvoyStoresAt(cityPath, stderr, "gc convoy check")
 	if stores == nil {
 		return code
+	}
+	stores, err := convoyStoreViewsWithBinding(cityPath, stores)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc convoy check: the city's relocated class binding is unreadable, so this refuses rather than auto-close convoys from the retained pre-migration copies it cannot supersede: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 	rec := openCityRecorderAt(cityPath, stderr)
 	return doConvoyCheckAcrossStoresJSON(stores, rec, jsonOut, stdout, stderr)
@@ -1516,10 +1863,28 @@ func cmdConvoyStranded(stdout, stderr io.Writer) int {
 }
 
 func cmdConvoyStrandedJSON(jsonOut bool, stdout, stderr io.Writer) int {
-	stores, code := openAllConvoyStores(stderr, "gc convoy stranded")
+	cityPath, err := resolveCity()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc convoy stranded: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	return doConvoyStrandedFallback(cityPath, jsonOut, stdout, stderr)
+}
+
+// doConvoyStrandedFallback is the direct-bd path for "gc convoy stranded".
+//
+// This is a pure read, so it takes the tolerant helper its list sibling takes.
+// It needs the helper at all because an unfederated stranded query is wrong in
+// both directions at once on a migrated city: a retained copy still carries the
+// assignees and open children it had at cutover and reports work that is not
+// stranded, while a convoy living in the binding is never walked and genuinely
+// stranded work stays invisible.
+func doConvoyStrandedFallback(cityPath string, jsonOut bool, stdout, stderr io.Writer) int {
+	stores, code := openAllConvoyStoresAt(cityPath, stderr, "gc convoy stranded")
 	if stores == nil {
 		return code
 	}
+	stores = convoyStoreViewsForRead(cityPath, stores, stderr, "gc convoy stranded")
 	return doConvoyStrandedAcrossStoresJSON(stores, jsonOut, stdout, stderr)
 }
 
@@ -1796,6 +2161,10 @@ func doConvoyAutoclose(beadID string, stdout, stderr io.Writer) {
 // city config cannot be loaded or no candidate store holds the bead, so the
 // caller can fall back to cwd-rooted resolution. The store directory lets
 // molecule autoclose derive the matching store-ref label.
+//
+// A resolution that FAILED is still ok=false — the hooks cannot be made fatal
+// without wedging every close on a city with a sick store — but it is announced
+// first. See warnAutocloseResolutionFault.
 func autocloseOwningStore(beadID, cityPath string) (beads.Store, string, bool) {
 	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
@@ -1805,9 +2174,37 @@ func autocloseOwningStore(beadID, cityPath string) (beads.Store, string, bool) {
 		return openStoreAtForCity(storeDir, cityPath)
 	})
 	if err != nil {
+		if !errors.Is(err, beads.ErrNotFound) {
+			warnAutocloseResolutionFault(beadID, err)
+		}
 		return nil, "", false
 	}
 	return store, dir, true
+}
+
+// autocloseFaultOnce bounds warnAutocloseResolutionFault to one line per
+// process.
+var autocloseFaultOnce sync.Once
+
+// warnAutocloseResolutionFault announces a by-id resolution that failed rather
+// than missed, once per process.
+//
+// The autoclose hooks are best-effort by design: bd's on_close must not fail
+// because a molecule root could not be found, so every error here is swallowed
+// and the caller falls back to the cwd-rooted store. That is right for absence
+// and wrong for a fault. A binding that cannot be read, or an id the scan
+// refuses as ambiguous, makes the fallback close a root in a ledger that may
+// not hold it — the silent wrong-store write this lane exists to end — and it
+// cannot be made fatal without wedging closes on a city whose binding is sick.
+// So it is made LOUD instead.
+//
+// Once per process, because bd closes beads in bursts: a persistent fault would
+// otherwise print the same line on every close of a drain and bury the hook log
+// it is trying to be seen in.
+func warnAutocloseResolutionFault(beadID string, err error) {
+	autocloseFaultOnce.Do(func() {
+		fmt.Fprintf(cliStorageStderr, "gc autoclose: resolving the store that owns %s failed (%v); falling back to the cwd-rooted store, which may not hold it. Further occurrences this process are not repeated.\n", beadID, err) //nolint:errcheck // best-effort stderr
+	})
 }
 
 func convoyAutocloseStoreRoot(cwd string) string {

@@ -21,16 +21,16 @@ var retiredHoldLabels = []string{
 	"blocked-on-upstream",
 	"blocked-prereq",
 	"human-hold",
-	"human",
 	"on-hold",
 }
 
 // holdLabelConventionsFixHint mirrors ga-tug8ry.1's disposition table.
-// engdocs/contributors/hold-label-conventions.md does not exist on
-// origin/main yet, so the hint must stand on its own rather than point at it.
+// Bare "human" is not a hold label (it answers who executes, not what the
+// bead is waiting on) and is intentionally absent. The hint stands on its
+// own rather than pointing at hold-label-conventions.md.
 const holdLabelConventionsFixHint = "Retired hold/blocked label in use (ga-tug8ry.1 taxonomy): " +
 	"arch-hold and blocked-prereq retire with no migration; blocked retires in favor of the " +
-	"native status field; blocked-by-operator, blocked-on-upstream, human-hold, and human " +
+	"native status field; blocked-by-operator, blocked-on-upstream, and human-hold " +
 	"migrate to hold:mayor; blocked-on-external migrates to hold:external; on-hold retires as " +
 	"already-superseded. Set a sanctioned hold label with " +
 	"'bd set-state <id> hold=mayor|external --reason \"...\"'."

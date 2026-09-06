@@ -145,7 +145,7 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 		var rigImportPackDirs []string
 		var rigGlobals []ResolvedPackGlobal
 		for _, ref := range topoRefs {
-			topoDir, err := resolvePackRef(ref, cityRoot, cityRoot)
+			topoDir, err := resolvePackRef(ref, cityRoot, cityRoot, opts.RepoCacheNonBlocking)
 			if err != nil {
 				return fmt.Errorf("rig %q pack %q: %w", rig.Name, ref, err)
 			}
@@ -271,7 +271,7 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 					continue
 				}
 
-				impDir, err := resolveImportPackRef(imp.Source, imp.Version, cityRoot, cityRoot)
+				impDir, err := resolveImportPackRef(imp.Source, imp.Version, cityRoot, cityRoot, opts.RepoCacheNonBlocking)
 				if err != nil {
 					return fmt.Errorf("rig %q import %q: %w", rig.Name, bindingName, err)
 				}
@@ -589,7 +589,7 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 	cache := &packLoadCache{results: make(map[string]*packLoadResult)}
 
 	for _, ref := range topos {
-		topoDir, err := resolvePackRef(ref, cityRoot, cityRoot)
+		topoDir, err := resolvePackRef(ref, cityRoot, cityRoot, opts.RepoCacheNonBlocking)
 		if err != nil {
 			// Pack directory may have been removed upstream (e.g. renamed/deleted
 			// in the remote repo). Skip gracefully so the rest of the city loads.
@@ -716,7 +716,7 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 			// Unlike V1 includes (which skip gracefully for missing remote
 			// subpaths), V2 imports are always fatal on missing source.
 			// A typo in [imports.X].source should not be silently ignored.
-			impDir, err := resolveImportPackRef(imp.Source, imp.Version, cityRoot, cityRoot)
+			impDir, err := resolveImportPackRef(imp.Source, imp.Version, cityRoot, cityRoot, opts.RepoCacheNonBlocking)
 			if err != nil {
 				return nil, nil, nil, fmt.Errorf("city import %q: %w", bindingName, err)
 			}
@@ -977,10 +977,10 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 // declaredVersion is the import's declared version constraint; it gates the
 // no-lock bundled fallback so a declared non-canonical pin never silently
 // composes the binary's embedded content.
-func resolveImportPackRef(ref, declaredVersion, declDir, cityRoot string) (string, error) {
+func resolveImportPackRef(ref, declaredVersion, declDir, cityRoot string, nonBlocking bool) (string, error) {
 	if isGitHubTreeURL(ref) {
 		_, subpath, _ := parseGitHubTreeURL(ref)
-		cacheDir, err := resolveInstalledRemoteImport(ref, declaredVersion, cityRoot)
+		cacheDir, err := resolveInstalledRemoteImport(ref, declaredVersion, cityRoot, nonBlocking)
 		if err != nil {
 			return "", err
 		}
@@ -991,7 +991,7 @@ func resolveImportPackRef(ref, declaredVersion, declDir, cityRoot string) (strin
 	}
 	if isRemoteInclude(ref) {
 		_, subpath, _ := parseRemoteInclude(ref)
-		cacheDir, err := resolveInstalledRemoteImport(ref, declaredVersion, cityRoot)
+		cacheDir, err := resolveInstalledRemoteImport(ref, declaredVersion, cityRoot, nonBlocking)
 		if err != nil {
 			return "", err
 		}
@@ -1000,7 +1000,7 @@ func resolveImportPackRef(ref, declaredVersion, declDir, cityRoot string) (strin
 		}
 		return cacheDir, nil
 	}
-	return resolvePackRef(ref, declDir, cityRoot)
+	return resolvePackRef(ref, declDir, cityRoot, nonBlocking)
 }
 
 // ComputeFormulaLayers builds the FormulaLayers from the resolved formula
@@ -1209,7 +1209,7 @@ func loadPackWithCacheOptions(fs fsys.FS, topoPath, topoDir, cityRoot, rigName s
 	var topoDirs []string
 	var requirements []PackRequirement
 	var globals []ResolvedPackGlobal
-	err := withRepoCacheReadLockForPath(topoDir, func() error {
+	err := withRepoCacheReadLockForPath(topoDir, opts.RepoCacheNonBlocking, func() error {
 		var loadErr error
 		agents, namedSessions, providers, upstreams, services, topoDirs, requirements, globals, loadErr = loadPackWithCacheOptionsLocked(
 			fs, topoPath, topoDir, cityRoot, rigName, seen, cache, opts)
@@ -1291,7 +1291,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 	includedUpstreams := make(map[string]UpstreamSpec)
 
 	for _, inc := range tc.Pack.Includes {
-		incTopoDir, err := resolvePackRef(inc, topoDir, cityRoot)
+		incTopoDir, err := resolvePackRef(inc, topoDir, cityRoot, opts.RepoCacheNonBlocking)
 		if err != nil {
 			return nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("include %q: %w", inc, err)
 		}
@@ -1349,7 +1349,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 		// remote sources, and a bundled source at its canonical pin
 		// self-heals from the binary's embedded content when the lock is
 		// absent or lacks the entry — matching city- and rig-scope imports.
-		impDir, err := resolveImportPackRef(imp.Source, imp.Version, topoDir, cityRoot)
+		impDir, err := resolveImportPackRef(imp.Source, imp.Version, topoDir, cityRoot, opts.RepoCacheNonBlocking)
 		if err != nil {
 			return nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("import %q: %w", bindingName, err)
 		}
@@ -2893,12 +2893,17 @@ func PackContentHash(fs fsys.FS, topoDir string) string {
 // connection churn was eliminated (gastownhall/gascity#1978 follow-up).
 //
 // The cache keys the content hash by absolute pack dir plus a cheap stat
-// fingerprint (per-file size+mtime, no content reads). An unchanged tree is
-// content-hashed once and reused — both for repeats within a single tick and
-// across ticks. Invalidation follows standard build-cache semantics: any file
-// add/remove, size change, or mtime bump (every normal edit and git checkout)
-// changes the fingerprint and forces a re-hash. The only blind spot is an edit
-// that preserves both size and mtime, which pack tooling does not do.
+// fingerprint (per-file size+mtime+ctime, no content reads). An unchanged
+// tree is content-hashed once and reused — both for repeats within a single
+// tick and across ticks. Invalidation follows standard build-cache semantics:
+// any file add/remove, size change, or mtime bump (every normal edit and git
+// checkout) changes the fingerprint and forces a re-hash. ctime guards the one
+// gap size+mtime leaves open: mtime-preserving deploy tooling (cp -p,
+// rsync --checksum --times) can edit content while leaving size and mtime
+// unchanged, but no standard syscall lets userspace roll ctime back, so it
+// still moves. The residual blind spot is narrower, not gone: a false cache
+// hit now requires size, mtime, AND ctime to all collide simultaneously
+// (e.g. two edits landing in the same coarse filesystem timestamp granule).
 var packContentHashCache sync.Map // absDir(string) -> packContentHashEntry
 
 type packContentHashEntry struct {
@@ -2944,6 +2949,9 @@ func packContentHashRecursive(fs fsys.FS, topoDir string, useCache bool) string 
 		fmt.Fprintf(fp, "%s\x00", relPath) //nolint:errcheck // hash.Write never errors
 		if info, statErr := fs.Stat(filepath.Join(topoDir, relPath)); statErr == nil {
 			fmt.Fprintf(fp, "%d\x00%d\x00", info.Size(), info.ModTime().UnixNano()) //nolint:errcheck
+			if ctime, ok := statCtimeNanos(info); ok {
+				fmt.Fprintf(fp, "%d\x00", ctime) //nolint:errcheck // hash.Write never errors
+			}
 		}
 	}
 	fpSum := fp.Sum64()
@@ -3055,7 +3063,7 @@ func resolveNamedPacks(cfg *City, cityRoot string) {
 // defines a rig-scoped agent with the given name. Returns false on error
 // (fail-open: caller should add the default polecat).
 func PackDefinesAgent(fs fsys.FS, packRef, cityRoot, agentName string) bool {
-	topoDir, err := resolvePackRef(packRef, cityRoot, cityRoot)
+	topoDir, err := resolvePackRef(packRef, cityRoot, cityRoot, false)
 	if err != nil {
 		return false
 	}
@@ -3123,7 +3131,7 @@ func PackSummary(cfg *City, fs fsys.FS, cityRoot string) map[string]string {
 
 // packSummaryOne builds a summary string for a single pack reference.
 func packSummaryOne(fs fsys.FS, ref, cityRoot string) string {
-	topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
+	topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot, false)
 	topoPath := filepath.Join(topoDir, packFile)
 	data, err := fs.ReadFile(topoPath)
 	if err != nil {

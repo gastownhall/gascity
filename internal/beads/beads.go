@@ -21,6 +21,16 @@ var ErrNotFound = errors.New("bead not found")
 // absent bead should check errors.Is(err, ErrIDCollision).
 var ErrIDCollision = fmt.Errorf("bd resolved a different bead ID (substring collision): %w", ErrNotFound)
 
+// ErrPinnedIDOutsideNamespace is returned by a namespace-fenced store when a
+// create pins an id in a namespace that store does not serve. It is distinct
+// from a duplicate-id error, which says the store DOES serve the namespace and
+// already holds the row.
+//
+// A fenced store must wrap this rather than rely on its message: a provider
+// contract cannot demand error prose of an out-of-tree store, only a sentinel
+// it can wrap. See beadstest.RunPinnedIDFenceConformance.
+var ErrPinnedIDOutsideNamespace = errors.New("pinned id outside this store's namespaces")
+
 // ErrMetadataParse is returned when a bead exists but its stored metadata
 // cannot be decoded into the Store object model.
 var ErrMetadataParse = errors.New("bead metadata parse")
@@ -69,14 +79,43 @@ type Bead struct {
 	Priority  *int      `json:"priority,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	// UpdatedAt is zero for legacy beads; UpdatedBefore falls back to CreatedAt.
-	UpdatedAt   time.Time `json:"updated_at,omitempty,omitzero"`
-	Assignee    string    `json:"assignee,omitempty"`
-	From        string    `json:"from,omitempty"`
-	ParentID    string    `json:"parent,omitempty"`      // step → molecule; matches bd wire format
-	Ref         string    `json:"ref,omitempty"`         // formula step ID or formula name
-	Needs       []string  `json:"needs,omitempty"`       // dependency step refs
-	Description string    `json:"description,omitempty"` // step instructions
-	Labels      []string  `json:"labels,omitempty"`
+	UpdatedAt time.Time `json:"updated_at,omitempty,omitzero"`
+	Assignee  string    `json:"assignee,omitempty"`
+	From      string    `json:"from,omitempty"`
+	// ParentID is a CITY-SCOPED bead id held as a WEAK reference: step →
+	// molecule, matching bd's wire format.
+	//
+	// City-scoped, not store-scoped. A split city routes by CLASS, so a parent
+	// and its child are co-resident only when they classify the same way, and
+	// the cases where they do not are ordinary: a graph.v2 workflow whose root
+	// is a graph-class molecule in the binding hangs its steps off a work-class
+	// bead in a rig ledger. Nothing reconciles the two ledgers, and nothing
+	// should — a create that moved the child to reach its parent would mint it
+	// under the wrong prefix, which is unfixable afterwards.
+	//
+	// Weak, therefore, is the contract and not an admission. A store persists
+	// and filters this verbatim (Children and ListQuery.ParentID are string
+	// matches), and for any id OUTSIDE the namespace it mints it must never
+	// resolve, validate, rewrite, or place by it. A store that started
+	// rejecting an id it cannot see would break every cross-store molecule at
+	// once, and a store that started placing by it would strand the child in
+	// the parent's namespace, where no later copy can move it.
+	//
+	// The boundary is drawn at the namespace, not at the field, because that is
+	// where the backends can actually agree. A dangling id INSIDE a store's own
+	// namespace is a row that store can see the absence of, and the strong
+	// backends refuse it before writing anything; the weak ones cannot detect
+	// it at all. That divergence is left explicit rather than papered over —
+	// what every backend owes is that a foreign parent is carried without
+	// question. The conformance suite pins that owing for the providers that
+	// execute it (SQLite, native Dolt, mem, file, exec); it is not yet verified
+	// against the bd provider, whose RunStoreTests row is skipped pending a
+	// version bump (ga-e7z613), so there the contract holds by convention.
+	ParentID    string   `json:"parent,omitempty"`
+	Ref         string   `json:"ref,omitempty"`         // formula step ID or formula name
+	Needs       []string `json:"needs,omitempty"`       // dependency step refs
+	Description string   `json:"description,omitempty"` // step instructions
+	Labels      []string `json:"labels,omitempty"`
 	// Metadata uses StringMap (not map[string]string) so decode tolerates the
 	// non-string JSON values the external bd CLI emits — `--set-metadata
 	// key=true` is type-inferred to a JSON boolean, and a strict decode of a
@@ -100,10 +139,25 @@ type Bead struct {
 	// nil or past means ready). Create paths preserve it; UpdateOpts does not
 	// mutate it.
 	DeferUntil *time.Time `json:"defer_until,omitempty"`
-	// IsBlocked carries bd's denormalized ready-work projection. Nil means the
-	// store did not provide the projection and cached ready falls back to
+	// IsBlocked carries bd's denormalized dependency-ready projection. Nil
+	// means the store did not provide it and cached ready falls back to
 	// dependency-derived readiness for backward compatibility.
 	IsBlocked *bool `json:"is_blocked,omitempty"`
+	// IndefinitelyDeferred preserves bd's status-based indefinite deferral
+	// after richer statuses normalize to Gas City's three-state model. Cache
+	// notifications restore status="deferred" on the event wire so another
+	// process can reconstruct it; other JSON surfaces remain unchanged.
+	//
+	// No read surface exposes it, so the two projections of the same bead
+	// disagree by design: a direct .gc/events.jsonl reader sees the
+	// status="deferred" EncodeBeadEventPayload wrote, while the HTTP, SSE and
+	// --json surfaces re-project through this struct and report status="open",
+	// defer_until=null, is_blocked=false — three signals that all read as
+	// "ready" for a bead ready deliberately excludes. An operator asking why a
+	// bead is not being picked up has nothing to read; giving the exclusion a
+	// derived read-only representation is a wire-design decision, not a
+	// consequence of this tag.
+	IndefinitelyDeferred bool `json:"-"`
 	// Revision is the store-internal optimistic-concurrency token for
 	// ConditionalWriter. It is deliberately json:"-" so it stays off every HTTP
 	// and SSE wire path (beads.Bead is both the Huma response type and the SSE
@@ -495,16 +549,17 @@ func IsMoleculeType(t string) bool {
 // represent internal bookkeeping rather than actionable work. This
 // matches the exclusion list in the bd CLI's GetReadyWork query.
 var readyExcludeTypes = map[string]bool{
-	"merge-request": true, // processed by automation
-	"gate":          true, // async wait conditions
-	"molecule":      true, // workflow containers
-	"step":          true, // non-root formula steps; parent molecule is the actionable unit (#1039)
-	"convoy":        true, // sling-minted container; groups child beads, never actionable Ready work (#3591)
-	"message":       true, // mail/communication items
-	"session":       true, // runtime/session continuity beads, never actionable work
-	"agent":         true, // identity/state tracking beads
-	"role":          true, // agent role definitions
-	"rig":           true, // rig identity beads
+	"merge-request":          true, // processed by automation
+	"gate":                   true, // async wait conditions
+	"molecule":               true, // workflow containers
+	"step":                   true, // non-root formula steps; parent molecule is the actionable unit (#1039)
+	"convoy":                 true, // sling-minted container; groups child beads, never actionable Ready work (#3591)
+	"message":                true, // mail/communication items
+	"session":                true, // runtime/session continuity beads, never actionable work
+	"agent":                  true, // identity/state tracking beads
+	"role":                   true, // agent role definitions
+	"rig":                    true, // rig identity beads
+	"startup-health-episode": true, // per-session-name bookkeeping record, never actionable Ready work (ga-o04bfr.1.1)
 }
 
 var readyBlockingDependencyTypes = map[string]bool{
@@ -575,11 +630,20 @@ func HasReadyExcludedLabel(b Bead) bool {
 	return false
 }
 
-// IsDeferred reports whether a bead is hidden by a future defer_until,
-// mirroring bd ready's server-side filter (defer_until IS NULL OR <= now is
-// ready) and cmd_hook.isFutureDeferredHookCandidate.
+// IsDeferred reports whether a bead is hidden indefinitely by bd's deferred
+// status or temporarily by a future defer_until.
+// cmd_hook.isFutureDeferredHookCandidate mirrors only the time-bound half; it
+// operates on raw bd JSON before this normalization.
 func IsDeferred(b Bead, now time.Time) bool {
-	return b.DeferUntil != nil && b.DeferUntil.After(now)
+	return b.IndefinitelyDeferred ||
+		(b.DeferUntil != nil && b.DeferUntil.After(now))
+}
+
+// setBeadStatus applies an explicit Gas City status transition. Any such
+// transition supersedes richer source status that was normalized on read.
+func setBeadStatus(b *Bead, status string) {
+	b.Status = status
+	b.IndefinitelyDeferred = false
 }
 
 func isReadyBlockingDependencyType(t string) bool {
@@ -672,6 +736,16 @@ type Store interface {
 	// Legacy helper; prefer List with ListQuery in new code.
 	// Children returns all beads whose ParentID matches the given ID,
 	// in creation order. Pass IncludeClosed to include closed children.
+	//
+	// The match is a string comparison against THIS store's rows, and
+	// parentID's own row is never read. A parent that lives in another store
+	// is neither an error nor an empty answer: its children here still come
+	// back, because ParentID is a weak city-scoped reference (see Bead.ParentID)
+	// and the alternative — resolving the parent first — would make every
+	// cross-store molecule's step list depend on a lookup the store cannot do.
+	// The corollary is that a caller wanting EVERY child of a city-scoped
+	// parent must ask every store, which is the residency resolver's job, not
+	// this method's.
 	Children(parentID string, opts ...QueryOpt) ([]Bead, error)
 
 	// Legacy helper; prefer List with ListQuery in new code.

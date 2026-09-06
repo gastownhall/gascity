@@ -9,12 +9,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/pathutil"
 	zcodeadapter "github.com/gastownhall/gascity/internal/worker/adapters/zcode"
 )
 
@@ -298,7 +300,11 @@ func (s *session) sendRaw(text string) {
 func (s *session) signal(sig syscall.Signal) {
 	s.t.Helper()
 	if err := syscall.Kill(-s.cmd.Process.Pid, sig); err != nil {
-		s.t.Fatalf("signal %v: %v", sig, err)
+		// An adapter that already died leaves a zombie process group, and
+		// signaling one reports EPERM on macOS rather than ESRCH — which reads
+		// as a permissions problem and hides the real story. Print what the
+		// adapter said before it went, which is where the cause actually is.
+		s.t.Fatalf("signal %v: %v\nadapter output so far:\n%s", sig, err, s.output())
 	}
 }
 
@@ -645,10 +651,23 @@ func TestDrainKeepsPartialTrailingLine(t *testing.T) {
 	time.Sleep(2500 * time.Millisecond)
 	s.sendRaw("\n")
 	time.Sleep(2500 * time.Millisecond)
+	// Surviving the drain is the assertion that must hold on every platform: an
+	// unbound $more here killed the adapter under `set -u` on bash 3.2, which
+	// is exactly the regression this test's own shape provokes.
 	if _, code := s.closeAndWait(); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
 
+	// *Keeping* the fragment, by contrast, is a bash 4.0 behavior: only there
+	// does a timed-out `read -t` save the partial line into the variable. bash
+	// 3.2 — what `#!/usr/bin/env bash` resolves to on stock macOS — consumes
+	// the fragment off the fd and discards it before the script regains
+	// control, so no adapter change can recover it. Gated by GOOS rather than
+	// by probing the shell because probing costs a subprocess, and the source
+	// resource ledger (test/test-resources.toml) ratchets those down, not up.
+	if runtime.GOOS == "darwin" {
+		return
+	}
 	joined := strings.Join(h.prompts(), "|")
 	if !strings.Contains(joined, "trailing line without a newline") {
 		t.Fatalf("partial trailing line was dropped; prompts = %q", h.prompts())
@@ -1017,7 +1036,12 @@ func TestExportMirrorAccumulatesTurns(t *testing.T) {
 	if export.Info.ID != "sess_mirror" {
 		t.Fatalf("info.id = %q, want sess_mirror", export.Info.ID)
 	}
-	if export.Info.Directory != h.workDir {
+	// The adapter reports the shell's $PWD, which bash derives from getcwd()
+	// because the harness hands it an env with no PWD to inherit — so it is the
+	// physical path. h.workDir is whatever t.TempDir() handed out, which on
+	// macOS is the /var symlink to the same directory. Same directory, two
+	// spellings: compare by path identity, not by string.
+	if !pathutil.SamePath(export.Info.Directory, h.workDir) {
 		t.Fatalf("info.directory = %q, want %q", export.Info.Directory, h.workDir)
 	}
 	if len(export.Messages) != 2 {
@@ -1438,4 +1462,120 @@ func equalStrings(got, want []string) bool {
 		}
 	}
 	return true
+}
+
+// extractPyFunc slices a top-level function definition out of the embedded
+// adapter script so a test can exercise it in isolation, without the script's
+// argv dispatch running. Top-level defs are separated by blank lines.
+func extractPyFunc(t *testing.T, name string) string {
+	t.Helper()
+	src := string(zcodeadapter.Script())
+	start := strings.Index(src, "\ndef "+name+"(")
+	if start < 0 {
+		t.Fatalf("function %q not found in adapter script", name)
+	}
+	start++ // step past the newline onto the def
+	body := src[start:]
+	end := strings.Index(body, "\n\ndef ")
+	if end < 0 {
+		t.Fatalf("could not bound function %q in adapter script", name)
+	}
+	return body[:end]
+}
+
+// TestLastUserTextScansBackwardForTheLastUserMessage pins the helper's
+// documented contract: it returns the text of the LAST user message anywhere in
+// the history, not only when the final message happens to be the user's. The
+// dedup guard in mode_reply relies on that backward scan to avoid re-publishing
+// a user turn mode_prompt already wrote; a version that inspects only the final
+// message returns None the moment an assistant reply sits at the tail.
+func TestLastUserTextScansBackwardForTheLastUserMessage(t *testing.T) {
+	t.Parallel()
+
+	driver := extractPyFunc(t, "last_user_text") + "\n\n" +
+		"import json, sys\n" +
+		"val = last_user_text(json.load(open(sys.argv[1])))\n" +
+		"sys.stdout.write('NONE' if val is None else val)\n"
+	driverPath := filepath.Join(t.TempDir(), "driver.py")
+	if err := os.WriteFile(driverPath, []byte(driver), 0o644); err != nil {
+		t.Fatalf("write driver: %v", err)
+	}
+
+	cases := []struct {
+		name     string
+		messages string
+		want     string
+	}{
+		{
+			name:     "user before assistant tail",
+			messages: `[{"info":{"role":"user"},"parts":[{"text":"hello"}]},{"info":{"role":"assistant"},"parts":[{"text":"hi"}]}]`,
+			want:     "hello",
+		},
+		{
+			name:     "most recent of several user turns",
+			messages: `[{"info":{"role":"user"},"parts":[{"text":"first"}]},{"info":{"role":"assistant"},"parts":[{"text":"a"}]},{"info":{"role":"user"},"parts":[{"text":"second"}]},{"info":{"role":"assistant"},"parts":[{"text":"b"}]}]`,
+			want:     "second",
+		},
+		{
+			name:     "no user message",
+			messages: `[{"info":{"role":"assistant"},"parts":[{"text":"only"}]}]`,
+			want:     "NONE",
+		},
+		{
+			name:     "empty history",
+			messages: `[]`,
+			want:     "NONE",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			exportPath := filepath.Join(t.TempDir(), "export.json")
+			if err := os.WriteFile(exportPath, []byte(`{"info":{"id":"s"},"messages":`+tc.messages+`}`), 0o644); err != nil {
+				t.Fatalf("write export: %v", err)
+			}
+			out, err := exec.Command("python3", driverPath, exportPath).Output()
+			if err != nil {
+				t.Fatalf("run driver: %v", err)
+			}
+			if got := string(out); got != tc.want {
+				t.Fatalf("last_user_text = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestUnparsableResponseClosesTheMirrorEntry is the rc=0 twin of
+// TestFailedTurnClosesTheMirrorEntry. An unparsable reply still finishes the
+// turn, so the user message mode_prompt published when the turn started must be
+// closed out — a trailing user tail reads as "still in flight" to every
+// consumer of the mirror even though the pane is idle at its marker.
+func TestUnparsableResponseClosesTheMirrorEntry(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, map[string]string{"STUB_SID": "sess_unparsable"})
+	h.run("establish the session\n")
+
+	h.env["STUB_BAD_JSON"] = "1"
+	out, code := h.run("go dark\n")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if !strings.Contains(out, "zcode-repl error rc=0 (unparsable response)") {
+		t.Fatalf("missing unparsable-response report:\n%s", out)
+	}
+
+	export := h.readExport("sess_unparsable")
+	if len(export.Messages) != 4 {
+		t.Fatalf("messages = %d, want 4 (turn 1 pair + published + closed-out unparsable turn):\n%+v", len(export.Messages), export.Messages)
+	}
+	if third := export.Messages[2]; third.Info.Role != "user" || third.Parts[0].Text != "go dark" {
+		t.Fatalf("third message = %+v, want the published user turn", third)
+	}
+	last := export.Messages[3]
+	if last.Info.Role != "assistant" {
+		t.Fatalf("tail role = %q, want assistant so the turn reads as finished", last.Info.Role)
+	}
+	if !strings.Contains(last.Parts[0].Text, "unparsable response") {
+		t.Fatalf("tail note = %q, want the unparsable-response outcome", last.Parts[0].Text)
+	}
 }

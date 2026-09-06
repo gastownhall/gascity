@@ -55,6 +55,22 @@ func BuildProviderResumeCommand(resolved *ResolvedProvider, optionOverrides map[
 		return "", fmt.Errorf("resolved provider is nil")
 	}
 	command := strings.TrimSpace(resolved.ResumeCommand)
+	// Unlike the launch-side gate above, this deliberately checks explicit
+	// overrides only. For a provider-supplied resume_command, resolve.go has
+	// already run completeResumeCommandDefaults, inserting the missing
+	// EffectiveDefaults flags around the template's own tokens. Gating on
+	// EffectiveDefaults here too would take the path below instead, which
+	// strips the schema's declared flags and aliases (an undeclared alias
+	// survives) and re-emits the merged set in schema order,
+	// reordering a template whose flags were already positioned deliberately
+	// and replacing a declared short alias with its canonical spelling.
+	//
+	// That resolve-time completion is skipped when the agent supplies its own
+	// resume_command (resolve.go's agent.ResumeCommand == "" guard). Such a
+	// template still picks up EffectiveDefaults here when an explicit override
+	// is present, since providerOptionArgs merges defaults with overrides, but
+	// with no override it keeps none of them. Widening this gate is not the fix
+	// for that, for the reason above; see issue #5659.
 	if command == "" || len(resolved.OptionsSchema) == 0 || !hasSchemaOptionOverrides(optionOverrides) {
 		return command, nil
 	}

@@ -191,6 +191,31 @@ enforced by the conformance suite in `internal/beads/beadstest/conformance.go`.
     file first, then `os.Rename` to the target path -- never partial
     writes.
 
+16. **A namespace-fenced store refuses a pinned id outside the namespaces
+    it serves.** Minting settles the ids a store *generates*, not the ids a
+    caller *pins*, and Create honors a pinned id verbatim -- so a binding
+    that claims a namespace stops holding that claim the moment anything
+    pins a foreign id into it. A fenced store refuses one, wrapping
+    `beads.ErrPinnedIDOutsideNamespace` (the contract is the sentinel; an
+    out-of-tree store cannot be held to error prose). The refusal writes
+    nothing and runs before normalization and before any read, so it neither
+    advances the mint sequence nor reveals whether the store holds the row.
+    Membership covers every namespace the binding holds, not just the mint
+    one, is tested on the separator and on the id exactly as it will be
+    stored, and folds case without rewriting the id. Mints,
+    `CreateWithForeignID` (the `gc storage migrate` copy path) and the ids a
+    bead *refers* to are all outside the fence. A store configured with no
+    namespaces is unfenced, which is how a binding serving the work class is
+    opened -- work beads carry the operator's configured prefix.
+    `beadstest.RunPinnedIDFenceConformance` is the executable form, and its
+    `OverRestrictionControls` rows pass unfenced by design: without them,
+    refusing every pinned id would conform.
+
+    Fencing is a property of the binding provider, not of every Store. The
+    SQLite provider (`internal/storebinding/sqlite`) fences; the
+    beads-workspace provider does not yet, and until it does its bindings
+    hold the claim by convention alone (ga-qdt5y.14).
+
 ## Metadata vocabulary (gc.*)
 
 `bead.Metadata` is a `map[string]string`, and the `gc.` prefix is the
