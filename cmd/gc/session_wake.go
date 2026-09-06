@@ -564,7 +564,12 @@ func advanceSessionDrainsWithSessionsTraced(
 		// Check if process exited.
 		running, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, info.ID)
 		if err != nil {
-			running = false
+			if trace != nil {
+				trace.RecordDecision(TraceSiteDrainComplete, TraceReasonCode(ds.reason), TraceOutcomeSkippedLivenessError, normalizedSessionTemplateInfo(info, cfg), name, traceRecordPayload{
+					"liveness_error": err.Error(),
+				})
+			}
+			continue
 		}
 		if !running {
 			// Process exited — drain complete.
@@ -683,7 +688,12 @@ func advanceSessionDrainsWithSessionsTraced(
 			// before marking metadata as asleep.
 			running, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, info.ID)
 			if err != nil {
-				running = false
+				if trace != nil {
+					trace.RecordDecision(TraceSiteDrainTimeout, TraceReasonCode(ds.reason), TraceOutcomeSkippedLivenessError, normalizedSessionTemplateInfo(info, cfg), name, traceRecordPayload{
+						"liveness_error": err.Error(),
+					})
+				}
+				continue
 			}
 			if !running {
 				completeDrain(info, sessFront, ds, clk)
