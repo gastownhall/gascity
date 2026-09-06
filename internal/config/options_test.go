@@ -1268,6 +1268,7 @@ func TestResolveClaudeCanonicalModelIDsThroughResolvers(t *testing.T) {
 		"claude-opus-5[1m]",
 		"claude-sonnet-5",
 		"claude-fable-5",
+		"claude-fable-5-1",
 	} {
 		t.Run(model, func(t *testing.T) {
 			want := []string{"--model", model}
