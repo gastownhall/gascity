@@ -53,6 +53,9 @@ type Fake struct {
 	// RelaunchErrors configures Fake.Relaunch errors per session name; an absent
 	// entry relaunches successfully (records the call, updates the live config).
 	RelaunchErrors map[string]error
+	// NudgeErrors configures Fake.Nudge/Fake.NudgeNow errors per session name;
+	// an absent entry nudges successfully.
+	NudgeErrors map[string]error
 }
 
 var (
@@ -385,6 +388,9 @@ func (f *Fake) Nudge(name string, content []ContentBlock) error {
 	if f.broken {
 		return fmt.Errorf("session unavailable")
 	}
+	if err, ok := f.NudgeErrors[name]; ok {
+		return err
+	}
 	return nil
 }
 
@@ -400,6 +406,9 @@ func (f *Fake) NudgeNow(name string, content []ContentBlock) error {
 	})
 	if f.broken {
 		return fmt.Errorf("session unavailable")
+	}
+	if err, ok := f.NudgeErrors[name]; ok {
+		return err
 	}
 	return nil
 }

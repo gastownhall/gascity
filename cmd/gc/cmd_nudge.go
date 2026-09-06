@@ -30,6 +30,7 @@ import (
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -1548,6 +1549,16 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 				return false, errors.Join(bookkeepErr, recErr)
 			}
 			return false, bookkeepErr
+		}
+		if errors.Is(err, tmux.ErrNudgeSubmitDeliveredUnobserved) {
+			// The submit Enter was delivered and the composer drained; only the
+			// busy-indicator OBSERVATION timed out. Delivery is proven, so this
+			// must ack like a success, not run through failedQueuedNudge's
+			// attempt-counting/dead-letter path — that would re-inject the same
+			// reminder on the next pass.
+			stampLastNudgeDeliveredAt(deliverySessFront, target.sessionID, time.Now())
+			ackErr := ackQueuedNudgesWithOutcome(target.cityPath, queuedNudgeIDs(items), "injected_unobserved", "", "provider-nudge-return")
+			return true, errors.Join(bookkeepErr, ackErr)
 		}
 		if recErr := recordQueuedNudgeFailureWithStore(target.cityPath, beads.NudgesStore{Store: deliveryStore}, queuedNudgeIDs(items), err, time.Now()); recErr != nil {
 			return false, errors.Join(bookkeepErr, recErr)

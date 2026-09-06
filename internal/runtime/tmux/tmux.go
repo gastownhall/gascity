@@ -2331,6 +2331,16 @@ func (t *Tmux) NudgeSession(session, message string) error {
 			// normal retry delay and spends one of its bounded attempts —
 			// the same handling as any other delivery failure — instead of
 			// silently losing the nudge.
+			//
+			// One extra capture here, on the already-failed path only: check
+			// whether the composer actually drained before concluding the
+			// submit itself is in doubt. A drained composer is positive
+			// evidence the Enter reached the pane and the agent consumed it —
+			// only the busy-state OBSERVATION missed it — so that case must be
+			// reported as proven delivery, not requeued as a failure.
+			if lines, capErr := t.CapturePaneLines(target, promptObservationLines); capErr == nil && paneShowsDrainedComposer(lines, message) {
+				return fmt.Errorf("%w: session %q", ErrNudgeSubmitDeliveredUnobserved, session)
+			}
 			return fmt.Errorf("%w: session %q", ErrNudgeSubmitUnconfirmed, session)
 		}
 		return nil
@@ -3873,10 +3883,65 @@ func paneContainsBusyIndicator(lines []string) bool {
 // drained it and only the busy-state OBSERVATION failed. When no line
 // matches the prompt prefix at all, the composer cannot be observed, so this
 // conservatively returns false rather than claiming delivery is proven.
-//
-//nolint:unused // called only from TestPaneShowsDrainedComposer, gated by the integration build tag this lint pass doesn't build with
-func paneShowsDrainedComposer(_ []string, _ string) bool {
-	return false
+func paneShowsDrainedComposer(lines []string, sent string) bool {
+	remainder, observed := lastComposerRemainder(lines, DefaultReadyPromptPrefix)
+	if !observed {
+		return false
+	}
+	draft := firstNRunes(strings.TrimSpace(firstNonEmptyLine(sent)), 40)
+	if draft != "" && strings.Contains(remainder, draft) {
+		return false
+	}
+	return true
+}
+
+// lastComposerRemainder returns the text after the ready-prompt prefix on the
+// LAST captured line that matches it -- the live composer, since any earlier
+// match is a scrollback transcript entry -- and whether any line matched at
+// all. Mirrors matchesPromptPrefix's normalization (NBSP folding, box-border
+// stripping) so a line it would call a match also yields a remainder here.
+func lastComposerRemainder(lines []string, readyPromptPrefix string) (string, bool) {
+	normalizedPrefix := strings.ReplaceAll(readyPromptPrefix, "\u00a0", " ")
+	prefixTrimmed := strings.TrimSpace(normalizedPrefix)
+
+	var remainder string
+	var observed bool
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(strings.ReplaceAll(line, "\u00a0", " "))
+		for _, cand := range []string{trimmed, stripLeadingBoxBorder(trimmed)} {
+			switch {
+			case strings.HasPrefix(cand, normalizedPrefix):
+				remainder, observed = cand[len(normalizedPrefix):], true
+			case prefixTrimmed != "" && cand == prefixTrimmed:
+				remainder, observed = "", true
+			default:
+				continue
+			}
+			break
+		}
+	}
+	return remainder, observed
+}
+
+// firstNonEmptyLine returns the first line of s (split on "\n") that is not
+// blank after trimming, or "" if every line is blank.
+func firstNonEmptyLine(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+// firstNRunes returns the first n runes of s, or all of s when it has n
+// runes or fewer.
+func firstNRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
 }
 
 // GetSessionInfo returns detailed information about a session.

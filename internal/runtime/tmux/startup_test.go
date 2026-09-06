@@ -961,6 +961,27 @@ func TestDoStartSessionReturnsNudgeDeliveryError(t *testing.T) {
 
 		assertCallSequence(t, ops, wantCalls)
 	})
+
+	// Same reasoning as above: a submit proven delivered but never observed
+	// busy (composer drained before the confirm budget saw it) must not fail
+	// the start either.
+	t.Run("delivered-but-unobserved submit is not fatal", func(t *testing.T) {
+		ops := &fakeStartOps{
+			hasSessionResult: true,
+			sendKeysErr:      fmt.Errorf("%w: session %q", ErrNudgeSubmitDeliveredUnobserved, "test"),
+		}
+
+		cfg := runtime.Config{
+			Command: "claude",
+			Nudge:   "startup prompt",
+		}
+
+		if err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout); err != nil {
+			t.Fatalf("doStartSession = %v, want nil for a delivered-but-unobserved startup nudge", err)
+		}
+
+		assertCallSequence(t, ops, wantCalls)
+	})
 }
 
 func TestDoStartSession_AcceptStartupDialogsOnly(t *testing.T) {

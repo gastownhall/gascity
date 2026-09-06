@@ -503,7 +503,7 @@ all-source audit while staying outside untagged and Small debt.
 <!-- BEGIN CHECKED TEST RESOURCE LEDGER -->
 | Ledger kind | Source scope | Resource baseline | Tracking owner | Invariant / resource owner | Migration | Expiry |
 | --- | --- | --- | --- | --- | --- | --- |
-| Audit baseline | all tracked test source | fixed_sleep: 481 calls / 172 files (historical regex census: 447 / 157) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-01 |
+| Audit baseline | all tracked test source | fixed_sleep: 483 calls / 173 files (historical regex census: 447 / 157) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-01 |
 | Audit baseline | all tracked test source | listener_helper: 58 calls / 23 files | ga-cp3hwi | all-source listener-helper call/file totals cannot drift without an explicit checked policy update; ga-cp3hwi owns this all-source audit; tagged calls stay Large and receive no Medium exemption | P0.4c-listener-helper | 2026-10-01 |
 | Audit baseline | all tracked test source | subprocess: 662 calls / 191 files (historical regex census: 495 / 135) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-01 |
 | Medium owner | `cmd/gc` package `main` | TestMain: environment, tmux | ga-cp3hwi | cmd/gc TestMain is the checked package-level Medium owner for process environment and tmux namespace setup; only declared environment and tmux calls lexically inside TestMain leave Small debt | P0.4b/P0.4c-tmux | 2026-10-01 |

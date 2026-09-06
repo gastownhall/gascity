@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -2541,6 +2542,77 @@ func TestTryDeliverQueuedNudgesByPollerDeliversAndAcks(t *testing.T) {
 	}
 	if len(dead) != 0 {
 		t.Fatalf("dead = %d, want 0", len(dead))
+	}
+}
+
+// TestTryDeliverQueuedNudgesByPollerAcksDeliveredUnobservedInsteadOfRetrying
+// guards ga-civwyz: when the provider reports
+// tmux.ErrNudgeSubmitDeliveredUnobserved (submit Enter delivered, composer
+// drained, but the busy indicator was never observed inside the confirm
+// budget), the poller must treat the item as delivered instead of routing it
+// through failedQueuedNudge's attempt-counting/dead-letter path — which
+// would requeue it and re-inject the identical reminder on the next pass.
+func TestTryDeliverQueuedNudgesByPollerAcksDeliveredUnobservedInsteadOfRetrying(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now().Add(-1 * time.Minute)
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "review the deploy logs", now)); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	idleSince := time.Now().Add(-10 * time.Second)
+	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
+	fake.NudgeErrors = map[string]error{info.SessionName: tmux.ErrNudgeSubmitDeliveredUnobserved}
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		sessionID:   info.ID,
+		resolved:    &config.ResolvedProvider{Name: "codex"},
+		sessionName: info.SessionName,
+	}
+	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
+	if err != nil {
+		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
+	}
+	if !delivered {
+		t.Fatal("delivered = false, want true: a drained-but-unobserved submit is proven delivery, not a failure")
+	}
+
+	var nudgeCalls []runtime.Call
+	for _, call := range fake.Calls {
+		if call.Method == "Nudge" {
+			nudgeCalls = append(nudgeCalls, call)
+		}
+	}
+	if len(nudgeCalls) != 1 {
+		t.Fatalf("nudge calls = %d, want exactly 1 (injected once, never retried)", len(nudgeCalls))
+	}
+
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("pending = %d, want 0: failedQueuedNudge must never be reached for ErrNudgeSubmitDeliveredUnobserved", len(pending))
+	}
+	if len(inFlight) != 0 {
+		t.Fatalf("inFlight = %d, want 0", len(inFlight))
+	}
+	if len(dead) != 0 {
+		t.Fatalf("dead = %d, want 0: a single delivered-unobserved attempt must not dead-letter", len(dead))
 	}
 }
 
