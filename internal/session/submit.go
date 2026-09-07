@@ -83,21 +83,37 @@ func (m *Manager) SubmissionCapabilities(id string) (SubmissionCapabilities, err
 
 // Submit delivers a user message according to the requested semantic intent.
 func (m *Manager) Submit(ctx context.Context, id, message, resumeCommand string, hints runtime.Config, intent SubmitIntent) (SubmitOutcome, error) {
+	return m.SubmitWithConfirmation(ctx, id, message, resumeCommand, hints, intent, nil)
+}
+
+// SubmitWithConfirmation captures optional native receipt evidence under the
+// session's delivery lock. The returned confirmation runs only when runtime
+// delivery is unconfirmed; it must prove this particular input was accepted.
+func (m *Manager) SubmitWithConfirmation(ctx context.Context, id, message, resumeCommand string, hints runtime.Config, intent SubmitIntent, observe func() func() bool) (SubmitOutcome, error) {
 	switch intent {
 	case "", SubmitIntentDefault, SubmitIntentFollowUp, SubmitIntentInterruptNow:
 	default:
 		return SubmitOutcome{}, fmt.Errorf("invalid submit intent %q", intent)
 	}
-	return m.submit(ctx, id, message, resumeCommand, hints, intent)
+	return m.submit(ctx, id, message, resumeCommand, hints, intent, observe)
 }
 
-func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string, hints runtime.Config, intent SubmitIntent) (SubmitOutcome, error) {
+func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string, hints runtime.Config, intent SubmitIntent, observe func() func() bool) (SubmitOutcome, error) {
 	var outcome SubmitOutcome
-	err := withSessionMutationLock(id, func() error {
+	err := withSessionMutationLock(id, func() (err error) {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
 		}
+		var confirm func() bool
+		if observe != nil {
+			confirm = observe()
+		}
+		defer func() {
+			if errors.Is(err, runtime.ErrSubmitUnconfirmed) && confirm != nil && ctx.Err() == nil && confirm() {
+				err = nil
+			}
+		}()
 		switch intent {
 		case SubmitIntentFollowUp:
 			if !m.supportsFollowUpLocked(b) {

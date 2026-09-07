@@ -32,6 +32,11 @@ var ErrSessionInitializing = errors.New("session is initializing")
 // structured pending/respond interaction capability for the requested session.
 var ErrInteractionUnsupported = errors.New("session interaction is unsupported")
 
+// ErrSubmitUnconfirmed means input reached the runtime, but its acceptance by
+// the agent was not observed. Native transcript evidence may confirm receipt;
+// otherwise callers must retain the uncertainty rather than assume success.
+var ErrSubmitUnconfirmed = errors.New("submit acceptance was not confirmed")
+
 // ErrSessionDiedDuringStartup reports that a provider created a session
 // process, but it exited before startup completed successfully.
 var ErrSessionDiedDuringStartup = errors.New("session died during startup")
