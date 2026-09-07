@@ -36,7 +36,7 @@ type wedgedRemote struct {
 // leaves CombinedOutput blocked on a pipe a child still holds. This shim
 // reproduces that on purpose — it backgrounds a child that inherits stdout and
 // stderr, then waits — instead of hoping a real git happens to do it. It also
-// needs no port, no listener and no network, so it cannot flake on a busy host.
+// needs no port, no listener and no network.
 //
 // The child appends to a heartbeat file rather than merely sleeping, so its
 // liveness is observable as a file that stops growing. That is what lets these
@@ -67,20 +67,14 @@ func wedgedGit(t *testing.T) wedgedRemote {
 		PIDPath:       filepath.Join(dir, "child.pid"),
 		HeartbeatPath: filepath.Join(dir, "child.heartbeat"),
 	}
-	// The first heartbeat is written by the foreground shim, before the loop is
-	// backgrounded. Left to the child, it races the deadline: the tests shrink
-	// networkGitTimeout to a few hundred milliseconds, and on a loaded host a
-	// fork/exec can lose that race, so *correct* code would kill the group
-	// before any byte landed and the test would fail waiting for a file that is
-	// never coming. Writing it here removes the race without weakening the
-	// assertion — a shim whose child never starts exits immediately, which
-	// makes the clone succeed, which every caller already fails on.
+	// Only the child writes the heartbeat. A caller testing descendant death
+	// must observe both this child output and the PID file before canceling;
+	// a foreground-written marker would not prove the child ever ran.
 	//
 	// The 50ms cadence is the convention the other users of these helpers use
 	// (internal/orders, cmd/gc): it has to be well under the caller's stability
 	// window, or a live child idling between writes reads as a dead one.
 	script := "#!/bin/sh\n" +
-		"echo . >> " + w.HeartbeatPath + "\n" +
 		"{ while : ; do echo . >> " + w.HeartbeatPath + " ; " + sleep + " 0.05 ; done ; } &\n" +
 		"echo $! > " + w.PIDPath + "\n" +
 		"wait\n"

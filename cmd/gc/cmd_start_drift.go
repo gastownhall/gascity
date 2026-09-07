@@ -213,6 +213,13 @@ const (
 // should `return exitCode` immediately. continue=true means no terminal
 // drift action happened and the caller should proceed with normal start.
 func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
+	return runStartDriftCheckWithDelegatedRestart(cityPath, stdout, stderr, runDelegatedSystemctlTimeout)
+}
+
+// runStartDriftCheckWithDelegatedRestart keeps delegated restart execution at
+// the composition edge so coordination tests can supply a completed outcome
+// without coupling the independent service-manager job to CLI process startup.
+func runStartDriftCheckWithDelegatedRestart(cityPath string, stdout, stderr io.Writer, delegatedRestart func(systemdDelegation, string, time.Duration) error) (int, bool) {
 	pid := supervisorAliveHook()
 	if pid == 0 {
 		// No supervisor running. There's nothing to be stale relative
@@ -342,7 +349,7 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 			// try-restart: restart only if the unit is running. The drift
 			// path only fires when a supervisor is alive, and a stopped
 			// delegated unit must stay stopped — its operator owns starts.
-			restartErr = runDelegatedSystemctlTimeout(delegation, "try-restart", delegatedSystemctlJobTimeout)
+			restartErr = delegatedRestart(delegation, "try-restart", delegatedSystemctlJobTimeout)
 		} else {
 			restartErr = restartSupervisor(spec, restartHelpersHook())
 		}

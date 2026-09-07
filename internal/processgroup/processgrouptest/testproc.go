@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // RequireRealProcessSignals skips tests that intentionally send OS signals
@@ -50,7 +52,8 @@ func KillFromPIDFile(t *testing.T, path string) {
 // WaitForFileSize waits until path exists with non-empty contents.
 func WaitForFileSize(t *testing.T, path string) int64 {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	// This is a subprocess-readiness hang detector, not the timeout under test.
+	deadline := time.Now().Add(testutil.ExecRaceTimeout)
 	for {
 		info, err := os.Stat(path)
 		if err == nil {

@@ -384,12 +384,21 @@ func redactNetworkGitArgs(args []string) string {
 // URL credential resolution matches on; cityRoot scopes the per-city rule
 // layer.
 func defaultRunNetworkGit(cityRoot, remoteURL, dir string, args ...string) (string, error) {
+	return runNetworkGitWithContextFactory(func() (context.Context, context.CancelFunc) {
+		return context.WithTimeout(context.Background(), networkGitTimeout)
+	}, cityRoot, remoteURL, dir, args...)
+}
+
+// runNetworkGitWithContextFactory creates the command context after credential
+// resolution. The caller owns cancellation policy; command setup and process
+// group termination remain shared with the default deadline path.
+func runNetworkGitWithContextFactory(newContext func() (context.Context, context.CancelFunc), cityRoot, remoteURL, dir string, args ...string) (string, error) {
 	inj, err := gitcred.CredentialedNetworkArgs("", cityRoot, remoteURL)
 	if err != nil {
 		return "", fmt.Errorf("loading git credentials for %s: %w", gitcred.RedactUserinfo(remoteURL), err)
 	}
 	cmdArgs := buildNetworkGitArgs(inj, args...)
-	ctx, cancel := context.WithTimeout(context.Background(), networkGitTimeout)
+	ctx, cancel := newContext()
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
 	if dir != "" {
