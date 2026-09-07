@@ -83,13 +83,13 @@ func isEphemeralSessionInfo(i sessionpkg.Info) bool {
 	return sessionOriginInfo(i) == "ephemeral"
 }
 
-// Legacy pooled sessions created before manual-session origin backfill were
-// persisted as session_origin="ephemeral" even though they were user-created.
-// Pool-managed controller beads always stamp pool_managed/pool_slot, so a
-// multi-session bead with ephemeral origin but without those markers is the
-// upgrade shape we need to preserve and migrate.
+// API-created agent sessions and legacy manual sessions can be persisted as
+// session_origin="ephemeral" even though they were explicitly requested.
+// Controller-created capacity stamps pool_managed/pool_slot, so an ephemeral
+// bead without those markers is user-owned even for a max_active_sessions=1
+// template. The cap does not change ownership of an explicit session.
 func isLegacyManualSessionBeadForAgent(bead beads.Bead, cfgAgent *config.Agent) bool {
-	if cfgAgent == nil || !cfgAgent.SupportsMultipleSessions() {
+	if cfgAgent == nil {
 		return false
 	}
 	if strings.TrimSpace(bead.Metadata["session_origin"]) != "ephemeral" {
@@ -144,7 +144,7 @@ func isEphemeralSessionInfoForAgent(info sessionpkg.Info, cfgAgent *config.Agent
 // isLegacyManualSessionBeadForAgent, reading typed Info fields instead of raw
 // bead metadata. Equivalence-proven.
 func isLegacyManualSessionInfoForAgent(info sessionpkg.Info, cfgAgent *config.Agent) bool {
-	if cfgAgent == nil || !cfgAgent.SupportsMultipleSessions() {
+	if cfgAgent == nil {
 		return false
 	}
 	if strings.TrimSpace(info.SessionOrigin) != "ephemeral" {
