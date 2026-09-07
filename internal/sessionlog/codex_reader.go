@@ -149,7 +149,10 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 				lastUUID = entry.UUID
 				messages = append(messages, entry)
 
-			case "error", "stream_error", "turn_aborted":
+			case "error", "stream_error", "turn_aborted", "task_complete":
+				if em.Type == "task_complete" && em.Error == nil {
+					continue
+				}
 				systemEvent := codexSystemEvent(em)
 				entry := &Entry{
 					UUID:        eventID.ID("event_msg:" + em.Type),
@@ -1503,6 +1506,10 @@ func codexSystemEvent(em codexEventMsg) *SystemEvent {
 	var category string
 	code := strings.TrimSpace(em.CodexErrorInfo)
 	message := strings.TrimSpace(em.Message)
+	if em.Type == "task_complete" && em.Error != nil {
+		code = strings.TrimSpace(em.Error.CodexErrorInfo)
+		message = strings.TrimSpace(em.Error.Message)
+	}
 	switch strings.TrimSpace(em.Type) {
 	case "stream_error":
 		category = "stream_error"
@@ -1578,10 +1585,16 @@ type codexEventMsg struct {
 	Message        string                      `json:"message"`          // for user_message, agent_message, error
 	Text           string                      `json:"text"`             // for agent_reasoning
 	CodexErrorInfo string                      `json:"codex_error_info"` // for usage_limit_exceeded and related errors
+	Error          *codexTaskCompleteError     `json:"error,omitempty"`
 	CallID         string                      `json:"call_id,omitempty"`
 	Stdout         string                      `json:"stdout,omitempty"`
 	Stderr         string                      `json:"stderr,omitempty"`
 	Changes        map[string]codexPatchChange `json:"changes,omitempty"`
+}
+
+type codexTaskCompleteError struct {
+	Message        string `json:"message"`
+	CodexErrorInfo string `json:"codex_error_info"`
 }
 
 type codexPatchChange struct {
