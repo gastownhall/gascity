@@ -2893,7 +2893,21 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		}
 		if alive && shouldRollbackPendingCreateInfo(infoByID[id]) {
 			switch stateBeforeHeal {
-			case sessionpkg.StateStartPending, sessionpkg.StateCreating:
+			// StateAwake belongs here with the two pre-start states: it is written
+			// only by the heal pass, which projects an alive tmux runtime to awake
+			// on the tick after PreWakePatch while the async provider.Start is
+			// still running under the startup timeout. Without it, that awake
+			// rewrite handed the still-starting session to
+			// recoverRunningPendingCreate, which committed the start (claim
+			// cleared, started_config_hash set) seconds before the goroutine's own
+			// deadline fired; the deadline then recorded a wake failure —
+			// continuation_reset_pending=true, session_key and started_config_hash
+			// cleared, wake_attempts accrued — against a runtime already committed
+			// as started, and nothing ever cleared the flag on the live runtime.
+			// StateActive is deliberately NOT here: only CommitStartedPatch writes
+			// it, so a claim on an active bead is a partial write to repair now
+			// (sys-ot93jj).
+			case sessionpkg.StateStartPending, sessionpkg.StateCreating, sessionpkg.StateAwake:
 				if pendingCreateStartInFlightInfo(infoByID[id], clk, startupTimeout) {
 					if trace != nil {
 						trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateRecoveryInFlight, TraceOutcomeDeferred, tp.TemplateName, name, nil)
