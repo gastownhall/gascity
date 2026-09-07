@@ -269,25 +269,24 @@ func isInterruptMessage(message json.RawMessage) bool {
 	if err := json.Unmarshal(raw, &msg); err != nil || len(msg.Content) == 0 {
 		return false
 	}
-	// String content
+	var text string
 	if msg.Content[0] == '"' {
-		var s string
-		if json.Unmarshal(msg.Content, &s) == nil {
-			return bytes.Contains([]byte(s), []byte("[Request interrupted by user]"))
+		if json.Unmarshal(msg.Content, &text) != nil {
+			return false
 		}
-	}
-	// Array content: [{"type":"text","text":"..."}]
-	var blocks []struct {
-		Text string `json:"text"`
-	}
-	if json.Unmarshal(msg.Content, &blocks) == nil {
-		for _, b := range blocks {
-			if bytes.Contains([]byte(b.Text), []byte("[Request interrupted by user]")) {
-				return true
-			}
+	} else {
+		var blocks []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
 		}
+		if json.Unmarshal(msg.Content, &blocks) != nil || len(blocks) != 1 || blocks[0].Type != "text" {
+			return false
+		}
+		text = blocks[0].Text
 	}
-	return false
+	// Only whole native markers end a turn; quoted markers and additional
+	// content remain ordinary user input.
+	return text == "[Request interrupted by user]" || text == "[Request interrupted by user for tool use]"
 }
 
 // unwrapJSONString handles JSONL files where the message field is stored

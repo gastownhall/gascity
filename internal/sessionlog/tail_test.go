@@ -371,6 +371,36 @@ func TestInferActivity(t *testing.T) {
 			wantAct: "idle",
 		},
 		{
+			name:    "user tool interrupt array content → idle",
+			typ:     "user",
+			message: `{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}`,
+			wantAct: "idle",
+		},
+		{
+			name:    "user tool interrupt string content → idle",
+			typ:     "user",
+			message: `{"role":"user","content":"[Request interrupted by user for tool use]"}`,
+			wantAct: "idle",
+		},
+		{
+			name:    "quoted interrupt marker does not end a user turn",
+			typ:     "user",
+			message: `{"role":"user","content":"Explain the text [Request interrupted by user] please."}`,
+			wantAct: "in-turn",
+		},
+		{
+			name:    "interrupt marker with another block does not end a user turn",
+			typ:     "user",
+			message: `{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"},{"type":"text","text":"Explain this message."}]}`,
+			wantAct: "in-turn",
+		},
+		{
+			name:    "nontext interrupt marker does not end a user turn",
+			typ:     "user",
+			message: `{"role":"user","content":[{"type":"tool_result","text":"[Request interrupted by user]"}]}`,
+			wantAct: "in-turn",
+		},
+		{
 			name:    "user normal message → in-turn",
 			typ:     "user",
 			message: `{"role":"user","content":[{"type":"text","text":"Please fix the bug"}]}`,
