@@ -707,11 +707,11 @@ func TestSessionReconcilePhaseTraceUsesDistinctSites(t *testing.T) {
 	}
 }
 
-// livenessGetErrStore forces Get(target) to fail so the reconciler's runtime
-// liveness probe returns an observation error (livenessErr != nil) for that one
-// session, without disturbing any other store access. The reconcile loop body
-// never re-reads the session bead through the store (it works off the passed-in
-// slice and the mid-tick snapshot), so this affects only the liveness probe.
+// livenessGetErrStore makes the runtime probe's ordinary Get(target) fail.
+// Its explicit live handle remains healthy so the controller can independently
+// validate persisted lifecycle state before reaching the liveness-error guard.
+// This isolates an unavailable runtime observation from an unavailable live
+// session read without depending on the number or order of store reads.
 type livenessGetErrStore struct {
 	beads.Store
 	target string
@@ -723,6 +723,10 @@ func (s livenessGetErrStore) Get(id string) (beads.Bead, error) {
 		return beads.Bead{}, s.err
 	}
 	return s.Store.Get(id)
+}
+
+func (s livenessGetErrStore) Handles() beads.StoreHandles {
+	return beads.HandlesFor(s.Store)
 }
 
 // TestReconcileOrphanCloseFailsClosedOnLivenessError proves the S16 fail-closed

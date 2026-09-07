@@ -758,6 +758,16 @@ func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead) error {
 		return nil
 	}
 	batch := make(map[string]string)
+	// Normal manager start/send/attach is explicit wake intent. Release the
+	// suspension hold only after the runtime has successfully resumed; the
+	// runtime-only controller bridge keeps ownership of its own metadata.
+	if b.Metadata["sleep_intent"] == string(SleepReasonUserHold) {
+		batch["held_until"] = ""
+		batch["sleep_intent"] = ""
+		if b.Metadata["sleep_reason"] == string(SleepReasonUserHold) {
+			batch["sleep_reason"] = ""
+		}
+	}
 	switch State(b.Metadata["state"]) {
 	case "", StateStartPending, StateCreating, StateAsleep, StateSuspended:
 		batch["state"] = string(StateActive)

@@ -166,6 +166,10 @@ func RequestExplicitWakePatch(reason string, now time.Time) MetadataPatch {
 	}
 }
 
+// IndefiniteHoldDuration parks a suspended session for effectively forever
+// without overflowing time arithmetic. Explicit wake clears the hold.
+const IndefiniteHoldDuration = 100 * 365 * 24 * time.Hour
+
 // RequestWakePatch records a controller-owned one-shot create claim.
 func RequestWakePatch(reason string, now time.Time) MetadataPatch {
 	return MetadataPatch{

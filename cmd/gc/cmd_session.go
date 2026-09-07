@@ -31,7 +31,7 @@ import (
 // used when setting held_until on a session bead. The reconciler treats any
 // held_until in the future as "do not wake." 100 years is effectively forever
 // without risking time arithmetic overflow.
-const indefiniteHoldDuration = 100 * 365 * 24 * time.Hour
+const indefiniteHoldDuration = session.IndefiniteHoldDuration
 
 func newSessionCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{

@@ -119,8 +119,16 @@ Optional provider extensions also live in `runtime/runtime.go`:
 
 ### Intentional Suspension
 
-A successful `Manager.Suspend` records deliberate sleep and clears the prior
-wake attempt while preserving the provider conversation key. The controller's
+A successful `Manager.Suspend` preserves the provider conversation key and
+records the same durable hold used by managed CLI suspension: a far-future
+`held_until` and `sleep_intent=user-hold`. It clears the prior wake attempt and
+keeps the session dormant across controller ticks despite ordinary demand.
+Repeating a durable suspension is idempotent; older suspended rows missing the
+hold are repaired. Successful explicit manager start, attach, send, or submit
+releases the suspension hold after runtime startup succeeds. Failed resume and
+runtime-only startup preserve it; heartbeat holds retain their existing behavior.
+
+The controller's
 dead-runtime reconciliation checks authoritative persisted state under the same
 session mutation lock used by in-process API lifecycle commands. It defers a
 stale decision instead of overwriting a newer hold or counting the intentional

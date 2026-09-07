@@ -1224,7 +1224,12 @@ func (m *Manager) Suspend(id string) error {
 		}
 		current := State(b.Metadata["state"])
 		if current == StateSuspended {
-			return nil // idempotent: already suspended
+			heldUntil, err := time.Parse(time.RFC3339, b.Metadata["held_until"])
+			if err == nil && heldUntil.After(time.Now()) && b.Metadata["sleep_intent"] == string(SleepReasonUserHold) {
+				return nil // idempotent: already durably suspended
+			}
+			// Legacy suspension markers did not prevent controller wake demand.
+			// Finish the normal stop and persist the missing durable hold below.
 		}
 		// failed-create is a create-rollback terminal state: the create never
 		// reached creation_complete, so there is no live turn to suspend — only
@@ -1257,8 +1262,10 @@ func (m *Manager) Suspend(id string) error {
 		// after the failed-create pre-check above, preserving closed-guard-
 		// first ordering.
 		current = canonicalLifecycleState(current)
-		if _, err := Transition(current, CmdSuspend); err != nil {
-			return err
+		if current != StateSuspended {
+			if _, err := Transition(current, CmdSuspend); err != nil {
+				return err
+			}
 		}
 
 		// Kill the runtime session. Stop is provider-idempotent, so call it
@@ -1281,10 +1288,13 @@ func (m *Manager) Suspend(id string) error {
 		// Record the intentional stop with its state. The reconciler may heal
 		// suspended to asleep; retaining last_woke_at would then classify this
 		// stop as a crash or churn and discard the saved conversation key.
+		now := time.Now().UTC()
 		if err := m.store.Update(id, beads.UpdateOpts{Metadata: map[string]string{
 			"state":        string(StateSuspended),
-			"suspended_at": time.Now().UTC().Format(time.RFC3339),
+			"suspended_at": now.Format(time.RFC3339),
 			"sleep_reason": string(SleepReasonUserHold),
+			"sleep_intent": string(SleepReasonUserHold),
+			"held_until":   now.Add(IndefiniteHoldDuration).Format(time.RFC3339),
 			"last_woke_at": "",
 		}}); err != nil {
 			return fmt.Errorf("updating suspension state: %w", err)
