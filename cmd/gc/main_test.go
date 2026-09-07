@@ -7259,11 +7259,42 @@ base = "builtin:codex"`)
 	}
 }
 
-func TestDoPrimeHookIgnoresProviderSessionKeyFromHookStdinForNonCodex(t *testing.T) {
+func TestDoPrimeClaudeHookPersistsProviderSessionKeyFromHookStdin(t *testing.T) {
 	dir, sessionID := setupPrimeHookProviderSessionKeyTest(t, "claude", `[providers.claude]
 base = "builtin:claude"`)
+	t.Setenv(managedSessionHookEnv, "1")
+	t.Setenv("GC_HOOK_EVENT_NAME", "SessionStart")
 	setPrimeHookStdinJSON(t, map[string]string{
-		"session_id":      "claude-provider-session",
+		"session_id":      "019ea3bd-ebb6-7530-a8b5-48b6c43e9153",
+		"transcript_path": "/home/test/.claude/projects/workspace/019ea3bd-ebb6-7530-a8b5-48b6c43e9153.jsonl",
+		"hook_event_name": "SessionStart",
+		"source":          "startup",
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithHookFormat(nil, &stdout, &stderr, true, hookOutputFormatCodex, false)
+	if code != 0 {
+		t.Fatalf("doPrimeWithHookFormat = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	updatedStore, err := openCityStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := updatedStore.Get(sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(updated.Metadata["session_key"]); got != "019ea3bd-ebb6-7530-a8b5-48b6c43e9153" {
+		t.Fatalf("session_key = %q, want Claude provider session id from hook stdin", got)
+	}
+}
+
+func TestDoPrimeHookIgnoresProviderSessionKeyFromHookStdinForUnsupportedProvider(t *testing.T) {
+	dir, sessionID := setupPrimeHookProviderSessionKeyTest(t, "gemini", `[providers.gemini]
+base = "builtin:gemini"`)
+	setPrimeHookStdinJSON(t, map[string]string{
+		"session_id":      "gemini-provider-session",
 		"hook_event_name": "SessionStart",
 		"source":          "startup",
 	})
@@ -7283,7 +7314,7 @@ base = "builtin:claude"`)
 		t.Fatal(err)
 	}
 	if got := strings.TrimSpace(updated.Metadata["session_key"]); got != "" {
-		t.Fatalf("session_key = %q, want empty for non-Codex hook stdin session id", got)
+		t.Fatalf("session_key = %q, want empty for unsupported-provider hook stdin session id", got)
 	}
 }
 

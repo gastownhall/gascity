@@ -271,7 +271,12 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 	}
 	compactionCount, lastEntryID, pendingIDs := transcriptGlobalFacts(fullSession.Messages)
 
-	tailMeta, err := sessionlog.ExtractTailMeta(path)
+	var tailMeta *sessionlog.TailMeta
+	if sessionlog.ProviderFamily(req.Provider) == "codex" {
+		tailMeta, err = sessionlog.ExtractCodexTailMeta(path)
+	} else {
+		tailMeta, err = sessionlog.ExtractTailMeta(path)
+	}
 	if err != nil {
 		return nil, err
 	}

@@ -1620,7 +1620,10 @@ func nextPasteBufferName() string {
 }
 
 func (t *Tmux) sendLiteralText(target, text string) error {
-	if len(text) > maxSendKeysLiteralLen {
+	// Claude can discard the prefix of unbracketed input when its TUI reads
+	// multiple chunks. Paste even short prompts as one bracketed operation.
+	// GC_PROVIDER is the resolved builtin ancestor for custom providers too.
+	if len(text) > maxSendKeysLiteralLen || sessionlog.ProviderFamily(t.providerEnv(target)) == "claude" {
 		return t.pasteLiteralText(target, text)
 	}
 	_, err := t.run("send-keys", "-t", target, "-l", text)
@@ -3005,6 +3008,9 @@ func idlePromptPrefix(configured string) string {
 // Returns nil if the agent becomes idle within the timeout.
 // Returns an error if the timeout expires while the agent is still busy.
 func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Duration) error {
+	if sessionlog.ProviderFamily(t.providerEnv(session)) == "codex" {
+		return t.waitForCodexIdle(ctx, session, timeout)
+	}
 	promptPrefix := DefaultReadyPromptPrefix
 	if configured, err := t.GetEnvironment(session, sessionReadyPromptEnvKey); err == nil {
 		promptPrefix = idlePromptPrefix(configured)
