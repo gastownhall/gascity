@@ -285,7 +285,7 @@ func TestMaterializeProviderOverlays_SkipsMergeableCodexHook(t *testing.T) {
 
 	codexBase := "builtin:codex"
 	cfg := &config.City{
-		Workspace: config.Workspace{Name: "test-city"},
+		Workspace: config.Workspace{Name: "test-city", InstallAgentHooks: []string{"codex"}},
 		Agents: []config.Agent{{
 			Name:     "polecat",
 			Provider: "codex",
