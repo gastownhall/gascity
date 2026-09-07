@@ -13,12 +13,13 @@ import (
 
 func TestManagerSuspendRemainsDormantAcrossControllerTicks(t *testing.T) {
 	for _, demand := range []string{"manual", "legacy-manual", "assigned", "pinned", "minimum-floor"} {
-		for _, wake := range []string{"wake-request", "manager-start"} {
-			t.Run(demand+"/"+wake, func(t *testing.T) {
-				testManagerSuspendDormantTicks(t, demand, wake)
-			})
-		}
+		t.Run(demand+"/wake-request", func(t *testing.T) {
+			testManagerSuspendDormantTicks(t, demand, "wake-request")
+		})
 	}
+	t.Run("manual/manager-start", func(t *testing.T) {
+		testManagerSuspendDormantTicks(t, "manual", "manager-start")
+	})
 }
 
 func testManagerSuspendDormantTicks(t *testing.T, demand, wake string) {

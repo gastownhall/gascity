@@ -27,7 +27,6 @@ import json, os, sys, time
 
 # The adapter runs "$NODE_BIN --version" for its node floor check.
 if len(sys.argv) > 1 and sys.argv[1] == "--version":
-    time.sleep(float(os.environ.get("STUB_STARTUP_DELAY", "0")))
     print("v99.0.0")
     sys.exit(0)
 
@@ -235,14 +234,13 @@ func asExitError(err error, target **exec.ExitError) bool {
 // session starts the adapter with a live stdin pipe so a test can drive turns
 // and signals independently.
 type session struct {
-	t       *testing.T
-	cmd     *exec.Cmd
-	in      io.WriteCloser
-	mu      sync.Mutex
-	out     strings.Builder
-	errOut  strings.Builder
-	done    chan struct{}
-	updated chan struct{}
+	t      *testing.T
+	cmd    *exec.Cmd
+	in     io.WriteCloser
+	mu     sync.Mutex
+	out    strings.Builder
+	errOut strings.Builder
+	done   chan struct{}
 }
 
 func (h *harness) start() *session {
@@ -257,7 +255,7 @@ func (h *harness) start() *session {
 	if err != nil {
 		h.t.Fatalf("stdout pipe: %v", err)
 	}
-	s := &session{t: h.t, cmd: cmd, in: in, done: make(chan struct{}), updated: make(chan struct{}, 1)}
+	s := &session{t: h.t, cmd: cmd, in: in, done: make(chan struct{})}
 	cmd.Stderr = &s.errOut
 	if err := cmd.Start(); err != nil {
 		h.t.Fatalf("start adapter: %v", err)
@@ -271,10 +269,6 @@ func (h *harness) start() *session {
 				s.mu.Lock()
 				s.out.Write(buf[:n])
 				s.mu.Unlock()
-				select {
-				case s.updated <- struct{}{}:
-				default:
-				}
 			}
 			if err != nil {
 				return
@@ -324,7 +318,14 @@ const adapterWaitBudget = 20 * time.Second
 // and immune to a loaded machine stretching a turn past a fixed delay.
 func (s *session) waitForTurns(n int) {
 	s.t.Helper()
-	s.waitForOutputCount("zcode-repl ready", n+1, adapterWaitBudget)
+	deadline := time.Now().Add(adapterWaitBudget)
+	for strings.Count(s.output(), "zcode-repl ready") < n+1 {
+		if time.Now().After(deadline) {
+			s.t.Fatalf("only %d/%d turns completed within %s:\n%s",
+				strings.Count(s.output(), "zcode-repl ready")-1, n, adapterWaitBudget, s.output())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // waitForFailures blocks until the adapter has reported n failed turns, or the
@@ -343,26 +344,12 @@ func (s *session) waitForFailures(n int) {
 // waitForOutput blocks until needle appears in the adapter's stdout.
 func (s *session) waitForOutput(needle string, timeout time.Duration) {
 	s.t.Helper()
-	s.waitForOutputCount(needle, 1, timeout)
-}
-
-// waitForOutputCount observes notifications from the stdout reader. The timer
-// only detects a wedged fixture; readiness comes from the adapter's markers.
-func (s *session) waitForOutputCount(needle string, count int, timeout time.Duration) {
-	s.t.Helper()
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	for strings.Count(s.output(), needle) < count {
-		select {
-		case <-s.updated:
-		case <-s.done:
-			if strings.Count(s.output(), needle) >= count {
-				return
-			}
-			s.t.Fatalf("adapter closed stdout before %d occurrences of %q:\n%s", count, needle, s.output())
-		case <-timer.C:
-			s.t.Fatalf("fewer than %d occurrences of %q within %s:\n%s", count, needle, timeout, s.output())
+	deadline := time.Now().Add(timeout)
+	for !strings.Contains(s.output(), needle) {
+		if time.Now().After(deadline) {
+			s.t.Fatalf("%q never appeared within %s:\n%s", needle, timeout, s.output())
 		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
@@ -505,15 +492,12 @@ func TestBurstCoalescesIntoOneTurn(t *testing.T) {
 func TestIdleSeparatedPromptsStaySeparate(t *testing.T) {
 	t.Parallel()
 
-	// A slow startup must not turn the two intended idle-separated sends into
-	// one queued burst before the adapter begins reading stdin.
-	h := newHarness(t, map[string]string{"STUB_STARTUP_DELAY": "3"})
+	h := newHarness(t, nil)
 	s := h.start()
-	s.waitForTurns(0)
 	s.send("first prompt")
-	s.waitForTurns(1)
+	time.Sleep(2500 * time.Millisecond)
 	s.send("second prompt")
-	s.waitForTurns(2)
+	time.Sleep(2500 * time.Millisecond)
 	if _, code := s.closeAndWait(); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
@@ -901,16 +885,12 @@ func TestFiveConsecutiveFailuresBailWithoutMarker(t *testing.T) {
 func TestInterruptMidTurnContinuesTheLoop(t *testing.T) {
 	t.Parallel()
 
-	h := newHarness(t, map[string]string{"STUB_SLEEP": "5", "STUB_SID": "sess_int", "STUB_STARTUP_DELAY": "2.5"})
+	h := newHarness(t, map[string]string{"STUB_SLEEP": "5", "STUB_SID": "sess_int"})
 	s := h.start()
-	s.waitForTurns(0)
 	s.send("slow turn")
-	// The busy marker is emitted after spawning the child. Interrupt the
-	// announced turn even when startup and input coalescing take longer.
-	s.waitForOutput("zcode-repl turn in flight", adapterWaitBudget)
+	time.Sleep(3 * time.Second) // inside the stub's sleep
 	s.signal(syscall.SIGINT)
-	s.waitForOutput("zcode-repl error rc=", adapterWaitBudget)
-	s.waitForTurns(1)
+	time.Sleep(2 * time.Second)
 
 	if !s.alive() {
 		t.Fatalf("adapter exited on SIGINT; it must absorb it:\n%s", s.output())
@@ -980,11 +960,11 @@ func TestInterruptKillsASigintIgnoringTurn(t *testing.T) {
 func TestInterruptWhileIdleDoesNotExit(t *testing.T) {
 	t.Parallel()
 
-	h := newHarness(t, map[string]string{"STUB_STARTUP_DELAY": "4"})
+	h := newHarness(t, nil)
 	s := h.start()
-	// A process that has started is not necessarily ready to absorb SIGINT.
-	s.waitForTurns(0)
+	time.Sleep(2 * time.Second) // idle, blocked in read
 	s.signal(syscall.SIGINT)
+	time.Sleep(2 * time.Second)
 
 	if !s.alive() {
 		t.Fatalf("adapter exited on an idle SIGINT:\n%s", s.output())

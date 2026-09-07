@@ -1285,7 +1285,6 @@ func TestExecutePlannedStarts_FreshWakeAfterDrainRetainsStartupContext(t *testin
 	}
 	if startCfg == nil {
 		t.Fatalf("expected Start call for mayor, calls=%#v", sp.Calls)
-		return
 	}
 	if !strings.HasPrefix(startCfg.Command, "claude --dangerously-skip-permissions --session-id ") {
 		t.Fatalf("Start command = %q, want fresh session-id launch", startCfg.Command)

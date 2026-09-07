@@ -27,7 +27,6 @@
 # signal trap can tear the group down. Empty when no run is in flight.
 # shellcheck disable=SC2034  # read by the sourcing entrypoints' signal traps
 gc_harness_supervised_pgid=""
-gc_harness_watchdog_pgid=""
 
 # gc_harness_duration_seconds converts a Go-style duration of the form
 # <n>[s|m|h] (a bare <n> is seconds) to whole seconds on stdout. It fails on
@@ -83,20 +82,6 @@ gc_harness_terminate_group() {
   gc_harness_signal_group "$pgid" KILL
 }
 
-# gc_harness_cleanup_supervised reaps both groups on completion or a caller's
-# signal/EXIT trap. The watchdog must stop even when the trap re-raises a signal
-# before run_supervised reaches its normal wait/cleanup path.
-gc_harness_cleanup_supervised() {
-  local drain_ticks="${1:-25}"
-  if [[ -n "${gc_harness_watchdog_pgid:-}" ]]; then
-    gc_harness_signal_group "$gc_harness_watchdog_pgid" KILL
-    wait "$gc_harness_watchdog_pgid" 2>/dev/null || true
-    gc_harness_watchdog_pgid=""
-  fi
-  gc_harness_terminate_group "${gc_harness_supervised_pgid:-}" "$drain_ticks"
-  gc_harness_supervised_pgid=""
-}
-
 # gc_harness_watchdog kills process group pgid once fire_after seconds have
 # passed. SIGQUIT goes first on purpose: the Go runtime answers it by dumping
 # every goroutine's stack, which names the wedged test in the shard log. That
@@ -119,7 +104,7 @@ gc_harness_watchdog() {
 #   gc_harness_run_supervised <label> <deadline-seconds|""> <quit-grace> -- cmd...
 #
 # An empty deadline runs without a watchdog. The caller is expected to trap
-# INT/TERM/EXIT and call gc_harness_cleanup_supervised
+# INT/TERM/EXIT and call gc_harness_terminate_group "$gc_harness_supervised_pgid"
 # so a signal to the runner tears down the run rather than orphaning it.
 gc_harness_run_supervised() {
   local label="${1}" deadline="${2}" quit_grace="${3}"
@@ -151,11 +136,11 @@ gc_harness_run_supervised() {
   # caller's stdout pipe, which keeps the caller's read blocked for the full
   # remaining budget. That is the very failure this file exists to prevent,
   # reintroduced one level up.
-  gc_harness_watchdog_pgid=""
+  local watchdog_pgid=""
   if [[ -n "$deadline" ]]; then
     set -m
     gc_harness_watchdog "$job_pgid" "$deadline" "$quit_grace" "$label" &
-    gc_harness_watchdog_pgid=$!
+    watchdog_pgid=$!
     if (( monitor_was_on == 0 )); then
       set +m
     fi
@@ -164,8 +149,14 @@ gc_harness_run_supervised() {
   local status=0
   wait "$job_pgid" || status=$?
 
-  # The group leader can exit while a descendant it spawned is still running.
-  gc_harness_cleanup_supervised
+  if [[ -n "$watchdog_pgid" ]]; then
+    gc_harness_signal_group "$watchdog_pgid" KILL
+    wait "$watchdog_pgid" 2>/dev/null || true
+  fi
+  # The group leader can exit while a descendant it spawned is still running;
+  # that descendant is the orphan this whole file exists to prevent.
+  gc_harness_terminate_group "$job_pgid"
+  gc_harness_supervised_pgid=""
   return "$status"
 }
 

@@ -3,18 +3,14 @@
 package packman
 
 import (
-	"context"
-	"errors"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
-	"github.com/gastownhall/gascity/internal/testutil"
 )
 
-// TestDefaultRunNetworkGitKillsDescendants pins that context cancellation
-// reaches git's children, not just git. TestDefaultRunNetworkGitIsBounded owns
-// the real deadline; this test waits for an actual descendant before canceling.
+// TestDefaultRunNetworkGitKillsDescendants pins that the deadline reaches git's
+// children, not just git.
 //
 // The first version of this bound relied on cmd.WaitDelay, whose contract is to
 // close the parent's ends of the I/O pipes and kill the command's own process.
@@ -34,45 +30,15 @@ import (
 func TestDefaultRunNetworkGitKillsDescendants(t *testing.T) {
 	wedged := wedgedGit(t)
 
+	restore := networkGitTimeout
+	networkGitTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { networkGitTimeout = restore })
 	restoreWait := networkGitWaitDelay
 	networkGitWaitDelay = time.Second
 	t.Cleanup(func() { networkGitWaitDelay = restoreWait })
 
-	ctx, cancel := context.WithCancel(context.Background())
-	finished := make(chan struct{})
-	var runErr error
-	dest := t.TempDir() + "/dest"
-	go func() {
-		defer close(finished)
-		_, runErr = runNetworkGitWithContextFactory(func() (context.Context, context.CancelFunc) {
-			return ctx, cancel
-		}, "", wedged.URL, "", "clone", "--quiet", wedged.URL, dest)
-	}()
-	// Register after global restoration callbacks so even a readiness failure
-	// cancels and drains this invocation before its knobs can be restored.
-	t.Cleanup(func() {
-		cancel()
-		processgrouptest.KillFromPIDFile(t, wedged.PIDPath)
-		select {
-		case <-finished:
-		case <-time.After(testutil.ExecRaceTimeout):
-			t.Error("network git did not stop during fixture cleanup")
-		}
-	})
-
-	// The parent must publish the child PID before cancellation, including on
-	// the negative-control path where only the parent is killed. The child,
-	// not the parent, must then prove it is writing before we stop the group.
-	processgrouptest.WaitForFileSize(t, wedged.PIDPath)
-	processgrouptest.WaitForFileSize(t, wedged.HeartbeatPath)
-	cancel()
-	select {
-	case <-finished:
-	case <-time.After(testutil.ExecRaceTimeout):
-		t.Fatal("network git did not return after cancellation")
-	}
-	if !errors.Is(runErr, errNetworkGitTimeout) {
-		t.Fatalf("cloning a wedged remote returned %v, want a cancellation timeout", runErr)
+	if _, err := defaultRunNetworkGit("", wedged.URL, "", "clone", "--quiet", wedged.URL, t.TempDir()+"/dest"); err == nil {
+		t.Fatal("cloning a wedged remote succeeded, want a timeout error")
 	}
 
 	size := processgrouptest.WaitForFileSize(t, wedged.HeartbeatPath)

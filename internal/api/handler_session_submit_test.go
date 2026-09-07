@@ -42,7 +42,6 @@ func TestHandleSessionSubmitDefaultsToProviderDefaultBehavior(t *testing.T) {
 	success, failure := waitForSessionSubmitResult(t, fs.eventProv, accepted.RequestID)
 	if success == nil {
 		t.Fatalf("session submit failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
-		return
 	}
 	// Default intent on a suspended session resumes immediately (not queued).
 	if success.Queued {

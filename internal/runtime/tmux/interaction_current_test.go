@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"testing/synctest"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -55,22 +56,27 @@ func TestRespondApprovalUsesCurrentExactChoice(t *testing.T) {
 		{"legacy-deny", approvalPromptPane(), "deny", "3"},
 		{"renumbered-deny", strings.Replace(current, "4. No", "7. No", 1), "deny", "7"},
 		{"renumbered-approve", strings.Replace(current, "1. Yes", "5. Yes", 1), "approve", "5"},
+		{"legacy-approve-always", approvalPromptPane(), "approve_always", "2"},
+		{"renumbered-accept-edits", strings.Replace(approvalPromptPane(), "2. Yes, and don't ask again for: Read:*", "6. Yes, and don't ask again for edits", 1), "approve_accept_edits", "6"},
+		{"wrapped-persistent-rule", strings.Replace(approvalPromptPane(), "2. Yes, and don't ask again for: Read:*", "7. Yes, and don't ask again\n      for: Read:*", 1), "approve_always", "7"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			fe := &fakeExecutor{outs: []string{tc.pane, "0", "", "assistant ready"}}
-			provider := &Provider{tm: &Tmux{exec: fe}}
-			if err := provider.Respond("fixture", runtime.InteractionResponse{Action: tc.action}); err != nil {
-				t.Fatal(err)
-			}
-			var sent []string
-			for _, call := range fe.calls {
-				if strings.Contains(strings.Join(call, " "), "send-keys") {
-					sent = append(sent, call[len(call)-1])
+			synctest.Test(t, func(t *testing.T) {
+				fe := &fakeExecutor{outs: []string{tc.pane, "0", "", "assistant ready"}}
+				provider := &Provider{tm: &Tmux{exec: fe}}
+				if err := provider.Respond("fixture", runtime.InteractionResponse{Action: tc.action}); err != nil {
+					t.Fatal(err)
 				}
-			}
-			if len(sent) != 1 || sent[0] != tc.key {
-				t.Fatalf("sent %q, want exactly %q", sent, tc.key)
-			}
+				var sent []string
+				for _, call := range fe.calls {
+					if strings.Contains(strings.Join(call, " "), "send-keys") {
+						sent = append(sent, call[len(call)-1])
+					}
+				}
+				if len(sent) != 1 || sent[0] != tc.key {
+					t.Fatalf("sent %q, want exactly %q", sent, tc.key)
+				}
+			})
 		})
 	}
 }
@@ -87,6 +93,18 @@ func TestRespondApprovalNeverEscalatesPermissions(t *testing.T) {
 				t.Fatalf("unsafe approval mutated the pane: %v", fe.calls)
 			}
 		})
+	}
+}
+
+func TestRespondRejectsAmbiguousPersistentApproval(t *testing.T) {
+	pane := strings.Replace(approvalPromptPane(), "   3. No", "   4. Yes, and don't ask again for edits\n   3. No", 1)
+	fe := &fakeExecutor{out: pane}
+	provider := &Provider{tm: &Tmux{exec: fe}}
+	if err := provider.Respond("fixture", runtime.InteractionResponse{Action: "approve_always"}); err == nil {
+		t.Fatal("ambiguous persistent approval succeeded")
+	}
+	if len(fe.calls) != 1 || !strings.Contains(strings.Join(fe.calls[0], " "), "capture-pane") {
+		t.Fatalf("ambiguous approval mutated the pane: %v", fe.calls)
 	}
 }
 

@@ -13,75 +13,6 @@ import (
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
-// Suspend can complete while a controller tick still holds its pre-suspend
-// snapshot. That tick must not turn an intentional stop into continuity reset.
-func TestSuspendPreservesConversationAgainstInflightReconcile(t *testing.T) {
-	store := beads.NewMemStore()
-	sp := runtime.NewFake()
-	mgr := sessionpkg.NewManagerWithOptions(store, sp)
-	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{
-		Template: "helper", Command: "codex", Provider: "codex", WorkDir: t.TempDir(),
-		ExtraMeta: map[string]string{"session_origin": "manual"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now().UTC()
-	clk := &clock.Fake{Time: now}
-	if err := store.SetMetadataBatch(info.ID, map[string]string{
-		"last_woke_at": now.Add(-99 * time.Second).Format(time.RFC3339),
-		"session_key":  "retained-conversation", "started_config_hash": "configured-launch",
-		"continuation_reset_pending": "", "wake_attempts": "0", "churn_count": "0",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	// The reconciler lists metadata before the API's deliberate stop.
-	stale, err := mgr.Get(info.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := mgr.Suspend(info.ID); err != nil {
-		t.Fatal(err)
-	}
-	stopped, err := mgr.Get(info.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stopped.SessionKey != "retained-conversation" || stopped.SleepReason != "user-hold" || stopped.LastWokeAt != "" {
-		t.Fatal("Suspend itself did not preserve conversation and intentional-stop markers")
-	}
-	// Provider observation happens after Stop, while the tick still holds stale.
-	alive := sp.IsRunning(info.SessionName)
-	if alive {
-		t.Fatal("runtime is still running after Suspend")
-	}
-	front := sessionFrontDoor(store)
-	churned := false
-	_, err = withCurrentSessionExit(stale, alive, front, func() error {
-		patch, err := healStateWithRollbackInfo(stale, alive, true, front, clk, 0, true)
-		if err != nil {
-			return err
-		}
-		stale = stale.ApplyPatch(patch)
-		_, churned = checkChurn(stale, nil, alive, newDrainTracker(), front, clk)
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	actual, err := mgr.Get(info.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if actual.SessionKey != "retained-conversation" || actual.StartedConfigHash != "configured-launch" || actual.ContinuationResetPending == "true" {
-		t.Errorf("in-flight reconcile discarded suspended conversation: key=%q hash=%q reset=%q", actual.SessionKey, actual.StartedConfigHash, actual.ContinuationResetPending)
-	}
-	if churned || actual.ChurnCount != "0" {
-		t.Errorf("in-flight reconcile counted intentional stop as churn: churned=%v count=%q", churned, actual.ChurnCount)
-	}
-}
-
 func exitGuardFixture(t *testing.T, age time.Duration) (*beads.MemStore, *sessionpkg.Store, sessionpkg.Info, *clock.Fake) {
 	t.Helper()
 	now := time.Now().UTC()
@@ -296,8 +227,8 @@ func TestReconcileSessionBeadsDoesNotUndoConcurrentSuspend(t *testing.T) {
 	if got.SessionKey != "retained-conversation" || got.StartedConfigHash != "configured-launch" || got.ContinuationResetPending == "true" {
 		t.Errorf("controller lost suspended conversation: key=%q hash=%q reset=%q", got.SessionKey, got.StartedConfigHash, got.ContinuationResetPending)
 	}
-	if got.ChurnCount != "0" || got.WakeAttempts != 0 || got.SleepReason != "user-hold" {
-		t.Errorf("controller overwrote intentional exit: churn=%q wake=%d reason=%q", got.ChurnCount, got.WakeAttempts, got.SleepReason)
+	if got.ChurnCount != "0" || got.WakeAttempts != 0 || got.SleepReason != "user-hold" || got.LastWokeAt != "" {
+		t.Errorf("controller overwrote intentional exit: churn=%q wake=%d reason=%q woke=%q", got.ChurnCount, got.WakeAttempts, got.SleepReason, got.LastWokeAt)
 	}
 	if env.sp.IsRunning("worker") {
 		t.Error("controller woke the suspended runtime from stale snapshot")

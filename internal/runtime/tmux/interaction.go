@@ -123,7 +123,7 @@ func parseApprovalPrompt(paneText string) *parsedApproval {
 
 // Require a selected, numbered menu with unambiguous one-time approval and
 // denial. Wrapped labels are retained, including workspace/mode escalation
-// choices, but those choices are never mapped to an approval action.
+// choices, so responses can match only their supported approval labels.
 func parseApprovalOptions(text string) []approvalOption {
 	var options []approvalOption
 	seen := make(map[string]bool)
@@ -313,9 +313,9 @@ const (
 )
 
 // Respond sends the appropriate keystroke to the tmux pane to approve or deny
-// a pending tool approval, then verifies the prompt was consumed. Only approve
-// (once) and deny are supported; persistent approval and permission-mode changes
-// must be made in the native UI, whose menu positions vary between releases.
+// a pending tool approval, then verifies the prompt was consumed. Explicit
+// persistent actions require a recognized "don't ask again" choice; workspace
+// access and permission-mode changes remain native UI actions.
 func (t *Tmux) Respond(name string, response runtime.InteractionResponse) error {
 	// Verify the expected approval is still present before sending keys.
 	paneText, err := t.CapturePane(name, 40)
@@ -344,17 +344,29 @@ func (t *Tmux) Respond(name string, response runtime.InteractionResponse) error 
 	// Select by the current label, never a fixed position: newer Claude
 	// menus place "switch to auto mode" at the former denial position.
 	var label string
+	persistent := false
 	switch response.Action {
 	case "approve":
 		label = "Yes"
 	case "deny":
 		label = "No"
+	case "approve_always", "approve_accept_edits":
+		label = "Yes, and don't ask again"
+		persistent = true
 	default:
-		return fmt.Errorf("unsupported approval action %q; only approve-once or deny is supported", response.Action)
+		return fmt.Errorf("unsupported approval action %q", response.Action)
 	}
 	var key string
 	for _, option := range current.Options {
-		if option.Label == label {
+		matches := option.Label == label
+		if persistent {
+			matches = option.Label == "Yes, and don't ask again for edits" ||
+				strings.HasPrefix(option.Label, "Yes, and don't ask again for: ")
+		}
+		if matches {
+			if key != "" {
+				return fmt.Errorf("current approval menu has no unambiguous %q option", label)
+			}
 			key = option.Key
 		}
 	}

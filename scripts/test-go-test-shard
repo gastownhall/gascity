@@ -40,11 +40,11 @@ source "$repo_root/scripts/lib/harness-reap.sh"
 # reports the signal to its caller.
 gc_shard_on_signal() {
   local sig="$1"
-  gc_harness_cleanup_supervised
+  gc_harness_terminate_group "${gc_harness_supervised_pgid:-}"
   trap - "$sig"
   kill -"$sig" $$
 }
-trap 'gc_harness_cleanup_supervised' EXIT
+trap 'gc_harness_terminate_group "${gc_harness_supervised_pgid:-}"' EXIT
 trap 'gc_shard_on_signal INT' INT
 trap 'gc_shard_on_signal TERM' TERM
 trap 'gc_shard_on_signal HUP' HUP
