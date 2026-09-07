@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -108,14 +110,119 @@ func TestMessageConfirmsNativeReceiptWithoutBusyIndicator(t *testing.T) {
 				t.Fatalf("native accepted prompt: result=%+v deliveries=%d error=%v", result, sp.calls, err)
 			}
 			sp.deliver = func() {}
-			if _, err = h.Message(context.Background(), MessageRequest{Text: prompt}); !errors.Is(err, tmux.ErrNudgeSubmitUnconfirmed) {
-				t.Fatalf("old receipt accepted a later undelivered identical prompt: %v", err)
-			}
+			synctest.Test(t, func(t *testing.T) {
+				if _, err = h.Message(context.Background(), MessageRequest{Text: prompt}); !errors.Is(err, tmux.ErrNudgeSubmitUnconfirmed) {
+					t.Fatalf("old receipt accepted a later undelivered identical prompt: %v", err)
+				}
+			})
 			if sp.calls != 2 {
 				t.Fatalf("deliveries=%d, want exactly one per request", sp.calls)
 			}
 		})
 	}
+}
+
+func TestMessageWaitsForDelayedNativeReceiptWithoutResending(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h, sp, path, lines, prompt := newReceiptHandle(t)
+		delivered := make(chan struct{})
+		sp.deliver = func() { close(delivered) }
+		done := make(chan error, 1)
+		go func() {
+			_, err := h.Message(context.Background(), MessageRequest{Text: prompt})
+			done <- err
+		}()
+		<-delivered
+		synctest.Wait()
+		select {
+		case err := <-done:
+			t.Fatalf("submit finished before the provider published its receipt: %v", err)
+		default:
+		}
+		// Claude may create the user row before its async file snapshot finishes,
+		// but append both only after terminal submit confirmation has expired.
+		appendReceiptLines(t, path, lines[0])
+		if err := <-done; err != nil {
+			t.Fatalf("delayed native receipt was not accepted: %v", err)
+		}
+		if sp.calls != 1 {
+			t.Fatalf("deliveries=%d, want exactly one", sp.calls)
+		}
+	})
+}
+
+func TestMessageReceiptWaitExpiresWithoutChangingTheDeliveryError(t *testing.T) {
+	for _, callerDeadline := range []bool{false, true} {
+		t.Run(map[bool]string{false: "receipt budget", true: "earlier caller deadline"}[callerDeadline], func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				h, sp, _, _, prompt := newReceiptHandle(t)
+				sp.deliver = func() {}
+				ctx := context.Background()
+				wantWait := 5 * time.Second
+				if callerDeadline {
+					var cancel context.CancelFunc
+					wantWait = 50 * time.Millisecond
+					ctx, cancel = context.WithTimeout(ctx, wantWait)
+					defer cancel()
+				}
+				started := time.Now()
+				_, err := h.Message(ctx, MessageRequest{Text: prompt})
+				if !errors.Is(err, tmux.ErrNudgeSubmitUnconfirmed) || sp.calls != 1 {
+					t.Fatalf("unconfirmed input: deliveries=%d error=%v", sp.calls, err)
+				}
+				if elapsed := time.Since(started); elapsed != wantWait {
+					t.Fatalf("receipt wait=%v, want %v", elapsed, wantWait)
+				}
+			})
+		})
+	}
+}
+
+func TestMessageReceiptWaitStopsOnCancellation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h, sp, path, lines, prompt := newReceiptHandle(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		delivered := make(chan struct{})
+		sp.deliver = func() { close(delivered) }
+		done := make(chan error, 1)
+		go func() {
+			_, err := h.Message(ctx, MessageRequest{Text: prompt})
+			done <- err
+		}()
+		<-delivered
+		synctest.Wait()
+		select {
+		case err := <-done:
+			t.Fatalf("receipt wait ended before cancellation: %v", err)
+		default:
+		}
+		cancelledAt := time.Now()
+		cancel()
+		// Publication concurrent with cancellation must not turn cancellation
+		// into an accepted submit or cause another delivery.
+		appendReceiptLines(t, path, lines[0])
+		if err := <-done; !errors.Is(err, tmux.ErrNudgeSubmitUnconfirmed) {
+			t.Fatalf("canceled receipt wait changed the original error: %v", err)
+		}
+		if elapsed := time.Since(cancelledAt); elapsed != 0 || sp.calls != 1 {
+			t.Fatalf("cancellation wait=%v deliveries=%d", elapsed, sp.calls)
+		}
+	})
+}
+
+func TestMessageRejectsContradictoryReceiptWithoutWaiting(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h, sp, path, lines, prompt := newReceiptHandle(t)
+		sp.deliver = func() {
+			appendReceiptLines(t, path, lines[0], strings.ReplaceAll(lines[0], "0f87726d-9ba0-4007-baec-f89f8c5c3945", "duplicate-user"))
+		}
+		started := time.Now()
+		_, err := h.Message(context.Background(), MessageRequest{Text: prompt})
+		if !errors.Is(err, tmux.ErrNudgeSubmitUnconfirmed) || sp.calls != 1 || time.Since(started) != 0 {
+			t.Fatalf("contradictory receipt: deliveries=%d elapsed=%v error=%v", sp.calls, time.Since(started), err)
+		}
+	})
 }
 
 func TestMessagePreservesUnconfirmedWhenNativeProofIsIncomplete(t *testing.T) {

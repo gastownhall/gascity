@@ -275,7 +275,7 @@ func (h *SessionHandle) Message(ctx context.Context, req MessageRequest) (result
 		return MessageResult{}, err
 	}
 	outcome, err := h.manager.SubmitWithConfirmation(ctx, id, req.Text, resumeCommand, h.runtimeHints(), submitIntent(req.Delivery), func() func() bool {
-		return h.confirmMessageFromHistory(req.Text)
+		return h.confirmMessageFromHistory(ctx, req.Text)
 	})
 	if err != nil {
 		return MessageResult{}, err
