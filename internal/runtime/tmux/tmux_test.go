@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	runtimepkg "github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
@@ -2330,7 +2331,7 @@ func TestNudgeSessionFallbackRecordsUnconfirmedDiagnostic(t *testing.T) {
 
 	// ...while recording a best-effort diagnostic so the gap stays
 	// observable (bead dr-6siig DoD option (b)).
-	path := filepath.Join(runtimeDir, "sessions", sessionName, "nudge-unconfirmed.log")
+	path := filepath.Join(citylayout.SessionDiagnosticsDirForRuntimeDir(runtimeDir), sessionName, "nudge-unconfirmed.log")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("expected diagnostic file at %s: %v", path, err)

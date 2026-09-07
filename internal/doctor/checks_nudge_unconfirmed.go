@@ -39,7 +39,10 @@ func (c *NudgeUnconfirmedCheck) Name() string { return "nudge-unconfirmed" }
 func (c *NudgeUnconfirmedCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 
-	sessionsDir := filepath.Join(citylayout.RuntimeDataDir(ctx.CityPath), "sessions")
+	// citylayout owns this path. Joining a literal onto a runtime helper here
+	// is how this check spent its whole life scanning .gc/runtime/sessions while
+	// the writers filled .gc/sessions.
+	sessionsDir := citylayout.SessionDiagnosticsDir(ctx.CityPath)
 	entries, err := os.ReadDir(sessionsDir)
 	if err != nil {
 		r.Status = StatusOK

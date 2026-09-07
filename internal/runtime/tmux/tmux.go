@@ -130,9 +130,16 @@ type Config struct {
 	// When set, all tmux commands use "tmux -L <socket>" to connect to
 	// a dedicated server. Empty means use the default tmux server.
 	SocketName string
-	// RuntimeDir is the city runtime root (".gc/runtime") under which a
-	// per-session start-crash diagnostic is persisted. Empty disables the
-	// durable capture (e.g. ad-hoc invocations and tests run unchanged).
+	// RuntimeDir is the city runtime root under which per-session
+	// diagnostics are persisted. Production sets it to
+	// citylayout.RuntimePath(cityPath), which is "<city>/.gc" -- this doc
+	// said ".gc/runtime" and it was wrong, which is the same mistake gc
+	// doctor made when it went looking for these artifacts under
+	// .gc/runtime/sessions and found a permanently empty directory
+	// (dr-6siig HIGH 1). Resolve the subdirectory through
+	// citylayout.SessionDiagnosticsDirForRuntimeDir, never by joining a
+	// literal. Empty disables the durable capture, so ad-hoc invocations
+	// and tests run unchanged.
 	RuntimeDir string
 }
 
@@ -2410,15 +2417,19 @@ func (t *Tmux) NudgeSession(session, message string) error {
 // contract: the send is still reported as successful to the caller, since
 // treating it as a retryable failure would duplicate every delivery for
 // these provider families (see the comment above the call site). Disabled
-// (no-op) when RuntimeDir is unset; any I/O error is swallowed, matching
-// the tmuxStartOps.recordStartCrash / recordUnconfirmedNudge precedent.
+// (no-op) when RuntimeDir is unset. An I/O error is NOT swallowed: it is
+// warned on stderr, because the caller's decision to report success rests
+// entirely on this artifact existing, and a discarded write error leaves the
+// operation returning success with neither confirmation nor evidence.
 func (t *Tmux) recordUnconfirmedSubmit(session, message string) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "session: %s\n", session)
 	b.WriteString("cause: submit delivered but not confirmed (no busy-state indicator for this provider family)\n")
 	writeDiagnosticTextBlock(&b, "--- nudge text ---\n", message)
 
-	writeSessionDiagnosticFile(t.cfg.RuntimeDir, session, "nudge-unconfirmed.log", b.String())
+	if _, err := writeSessionDiagnosticFile(t.cfg.RuntimeDir, session, "nudge-unconfirmed.log", b.String()); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: session %q diagnostic nudge-unconfirmed.log not written: %v\n", session, err)
+	}
 }
 
 // NudgePane sends a message to a specific pane reliably.

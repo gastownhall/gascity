@@ -14,6 +14,8 @@ import (
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/shellquote"
+
+	"github.com/gastownhall/gascity/internal/citylayout"
 )
 
 func boolPtr(b bool) *bool { return &b }
@@ -3156,7 +3158,7 @@ func TestRecordStartCrashWritesDurableArtifact(t *testing.T) {
 	o := &tmuxStartOps{tm: tm, runtimeDir: dir}
 
 	path := o.recordStartCrash("mayor", "panic: startup failed\nPane is dead")
-	want := filepath.Join(dir, "sessions", "mayor", "start-stderr.log")
+	want := filepath.Join(citylayout.SessionDiagnosticsDirForRuntimeDir(dir), "mayor", "start-stderr.log")
 	if path != want {
 		t.Fatalf("path = %q, want %q", path, want)
 	}

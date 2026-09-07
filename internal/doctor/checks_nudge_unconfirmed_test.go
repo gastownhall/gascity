@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/citylayout"
 )
 
 func TestNudgeUnconfirmedCheckOKWhenNoDiagnostics(t *testing.T) {
@@ -18,7 +20,7 @@ func TestNudgeUnconfirmedCheckOKWhenNoDiagnostics(t *testing.T) {
 
 func TestNudgeUnconfirmedCheckWarnsOnDiagnosticFile(t *testing.T) {
 	cityRoot := t.TempDir()
-	sessionDir := filepath.Join(cityRoot, ".gc", "runtime", "sessions", "gc-worker-1")
+	sessionDir := filepath.Join(citylayout.SessionDiagnosticsDir(cityRoot), "gc-worker-1")
 	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -38,7 +40,7 @@ func TestNudgeUnconfirmedCheckWarnsOnDiagnosticFile(t *testing.T) {
 
 func TestNudgeUnconfirmedCheckWarnsOnStartupDiagnosticFile(t *testing.T) {
 	cityRoot := t.TempDir()
-	sessionDir := filepath.Join(cityRoot, ".gc", "runtime", "sessions", "gc-worker-2")
+	sessionDir := filepath.Join(citylayout.SessionDiagnosticsDir(cityRoot), "gc-worker-2")
 	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
