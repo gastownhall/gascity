@@ -1255,7 +1255,9 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 	// Always attempted when process names are set, since any Claude-like
 	// agent may show a trust dialog regardless of EmitsPermissionWarning.
 	if shouldAcceptStartupDialogs(cfg) {
-		_ = ops.acceptStartupDialogs(ctx, name) // best-effort
+		if err := ops.acceptStartupDialogs(ctx, name); errors.Is(err, runtime.ErrUnrecognizedWorkspaceTrust) {
+			return fmt.Errorf("accepting startup dialogs: %w", err)
+		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -1282,7 +1284,9 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 	// ready screen. Re-run dialog acceptance after readiness so late dialogs do
 	// not strand the session in an unusable startup state.
 	if shouldAcceptStartupDialogs(cfg) {
-		_ = ops.acceptStartupDialogs(ctx, name) // best-effort
+		if err := ops.acceptStartupDialogs(ctx, name); errors.Is(err, runtime.ErrUnrecognizedWorkspaceTrust) {
+			return fmt.Errorf("accepting startup dialogs after readiness: %w", err)
+		}
 		if err := ctx.Err(); err != nil {
 			return ignoreDeadlineIfSessionAlive(ops, name, err)
 		}

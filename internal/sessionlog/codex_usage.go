@@ -422,26 +422,8 @@ func ExtractCodexTailUsage(path string) ([]TailUsage, error) {
 		if entry.Type != "event_msg" || payload.Type != "token_count" || payload.Info == nil {
 			continue
 		}
-		last := payload.Info.LastTokenUsage
-		input := last.InputTokens - last.CachedInputTokens
-		if input < 0 {
-			input = 0
-		}
-		contextWindowTokens := 0
-		if payload.Info.ModelContextWindow != nil {
-			contextWindowTokens = *payload.Info.ModelContextWindow
-		}
-		u := TailUsage{
-			EntryUUID:           entry.Timestamp,
-			MessageID:           fmt.Sprintf("total:%d", payload.Info.TotalTokenUsage.TotalTokens),
-			Model:               turnModel,
-			InputTokens:         input,
-			OutputTokens:        last.OutputTokens,
-			ReasoningTokens:     last.ReasoningOutputTokens,
-			CacheReadTokens:     last.CachedInputTokens,
-			ContextWindowTokens: contextWindowTokens,
-		}
-		if u.InputTokens <= 0 && u.OutputTokens <= 0 && u.ReasoningTokens <= 0 && u.CacheReadTokens <= 0 {
+		u, ok := codexInvocationUsage(entry, payload, turnModel)
+		if !ok {
 			continue
 		}
 		if i, seen := byMessageID[u.MessageID]; seen {
@@ -470,4 +452,61 @@ func ExtractCodexTailUsageFromSearchPaths(searchPaths []string, path string) ([]
 		return nil, err
 	}
 	return ExtractCodexTailUsage(safePath)
+}
+
+// codexHistoryUsage uses the records already read by the full transcript parser.
+// First observations fix the invocation timestamp and model: later duplicate
+// cumulative snapshots must not move usage onto a newer assistant message.
+func codexHistoryUsage(entries []codexEntry) []TailUsage {
+	var usages []TailUsage
+	seen := make(map[string]bool)
+	var model string
+	for _, entry := range entries {
+		if entry.raw.Type != "turn_context" && entry.raw.Type != "event_msg" {
+			continue
+		}
+		var payload codexUsagePayload
+		if json.Unmarshal(entry.raw.Payload, &payload) != nil {
+			continue
+		}
+		if entry.raw.Type == "turn_context" && payload.Model != "" {
+			model = payload.Model
+		}
+		if entry.raw.Type != "event_msg" || payload.Type != "token_count" || payload.Info == nil {
+			continue
+		}
+		usage, ok := codexInvocationUsage(entry.raw, payload, model)
+		if !ok || seen[usage.MessageID] {
+			continue
+		}
+		seen[usage.MessageID] = true
+		usages = append(usages, usage)
+	}
+	return usages
+}
+
+func codexInvocationUsage(entry codexRawEntry, payload codexUsagePayload, model string) (TailUsage, bool) {
+	last := payload.Info.LastTokenUsage
+	input := last.InputTokens - last.CachedInputTokens
+	if input < 0 {
+		input = 0
+	}
+	contextWindowTokens := 0
+	if payload.Info.ModelContextWindow != nil {
+		contextWindowTokens = *payload.Info.ModelContextWindow
+	}
+	u := TailUsage{
+		EntryUUID:           entry.Timestamp,
+		MessageID:           fmt.Sprintf("total:%d", payload.Info.TotalTokenUsage.TotalTokens),
+		Model:               model,
+		InputTokens:         input,
+		OutputTokens:        last.OutputTokens,
+		ReasoningTokens:     last.ReasoningOutputTokens,
+		CacheReadTokens:     last.CachedInputTokens,
+		ContextWindowTokens: contextWindowTokens,
+	}
+	if u.InputTokens <= 0 && u.OutputTokens <= 0 && u.ReasoningTokens <= 0 && u.CacheReadTokens <= 0 {
+		return TailUsage{}, false
+	}
+	return u, true
 }

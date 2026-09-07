@@ -24,6 +24,10 @@ type Session struct {
 	// progress hooks) are filtered out.
 	Messages []*Entry
 
+	// DetachedUsage contains invocation records parsed from this full snapshot.
+	// Consumers must associate them against the full message list before paging.
+	DetachedUsage []TailUsage
+
 	// OrphanedToolUseIDs contains tool_use IDs with no matching result.
 	OrphanedToolUseIDs map[string]bool
 

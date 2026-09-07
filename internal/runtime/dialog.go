@@ -445,8 +445,8 @@ func containsPostUpdateStartupDialog(content string) bool {
 // acceptWorkspaceTrustDialog dismisses workspace trust dialogs for supported
 // agents. Claude shows "Quick safety check"; Codex shows
 // "Do you trust the contents of this directory?"; pi (>= 0.79) shows
-// "Trust project folder?". In all cases the safe continue option is
-// pre-selected, so Enter accepts.
+// "Trust project folder?". Claude's selected option varies by version, so
+// resolve its explicit trust choice instead of assuming Enter accepts.
 func acceptWorkspaceTrustDialog(
 	ctx context.Context,
 	timeout time.Duration,
@@ -465,11 +465,11 @@ func acceptWorkspaceTrustDialog(
 		}
 
 		if containsWorkspaceTrustDialog(content) {
-			if err := sendKeys("Enter"); err != nil {
+			keys, err := workspaceTrustDialogKeys(content)
+			if err != nil {
 				return err
 			}
-			sleep(ctx, startupDialogAcceptDelay)
-			return nil
+			return sendDialogKeys(ctx, sendKeys, keys, startupDialogAcceptDelay)
 		}
 
 		if containsPromptIndicator(content) {
@@ -497,11 +497,11 @@ func acceptWorkspaceTrustDialogFromStream(
 	sendKeys func(keys ...string) error,
 ) (bool, error) {
 	return acceptDialogFromStream(ctx, timeout, snapshots, sendKeys, streamDialogSpec{
-		match:       containsWorkspaceTrustDialog,
-		matchKeys:   []string{"Enter"},
-		matchDelay:  startupDialogAcceptDelay,
-		ready:       containsPromptIndicator,
-		readyOrNext: containsPostTrustStartupDialog,
+		match:               containsWorkspaceTrustDialog,
+		matchKeysForContent: workspaceTrustDialogKeys,
+		matchDelay:          startupDialogAcceptDelay,
+		ready:               containsPromptIndicator,
+		readyOrNext:         containsPostTrustStartupDialog,
 	})
 }
 
@@ -1029,11 +1029,12 @@ func dismissRateLimitDialogFromStream(
 }
 
 type streamDialogSpec struct {
-	match       func(string) bool
-	ready       func(string) bool
-	readyOrNext func(string) bool
-	matchKeys   []string
-	matchDelay  time.Duration
+	match               func(string) bool
+	ready               func(string) bool
+	readyOrNext         func(string) bool
+	matchKeys           []string
+	matchKeysForContent func(string) ([]string, error)
+	matchDelay          time.Duration
 }
 
 type replayableSnapshotStream struct {
@@ -1171,7 +1172,15 @@ func acceptDialogFromStream(
 			for idx, content := range history {
 				if spec.match != nil && spec.match(content) {
 					snapshots.replay(history[idx+1:])
-					return true, sendDialogKeys(ctx, sendKeys, spec.matchKeys, spec.matchDelay)
+					keys := spec.matchKeys
+					if spec.matchKeysForContent != nil {
+						var err error
+						keys, err = spec.matchKeysForContent(content)
+						if err != nil {
+							return true, err
+						}
+					}
+					return true, sendDialogKeys(ctx, sendKeys, keys, spec.matchDelay)
 				}
 				if spec.readyOrNext != nil && spec.readyOrNext(content) {
 					snapshots.replay(history[idx:])

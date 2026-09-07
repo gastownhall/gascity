@@ -60,11 +60,9 @@ func TestAttachStructuredToolDataWithContextPairsOffPageToolUse(t *testing.T) {
 	}
 }
 
-// TestLoadHistorySkipsCodexTailUsageOnBeforePage pins Finding 6: Codex tail
-// usage is extracted from the file tail (the newest turns), so it must land on a
-// page only when that page includes the tail. On an older "before" page the tail
-// usages belong to newer, off-page turns and must not be back-filled onto the
-// page's earlier assistants.
+// TestLoadHistorySkipsCodexTailUsageOnBeforePage pins Finding 6: usage for a
+// newer, off-page invocation must not be back-filled onto an older page.
+// Metadata is associated against the full history before page selection.
 func TestLoadHistorySkipsCodexTailUsageOnBeforePage(t *testing.T) {
 	t.Parallel()
 
