@@ -857,6 +857,23 @@ func candidateWaveOrder(
 	return candidateWave, true
 }
 
+// A selected wake is advisory. A later Suspend/hold wins until a new explicit
+// wake or submit releases it; rejecting that selection must not clear any lease.
+var errStartCandidateSuperseded = errors.New("start candidate superseded by newer lifecycle intent")
+
+func startCandidateHasNewHold(selected, current sessionpkg.Info, now time.Time) bool {
+	if current.Closed {
+		return true
+	}
+	hasHold := current.MetadataState == string(sessionpkg.StateSuspended) ||
+		current.SleepReason == string(sessionpkg.SleepReasonUserHold) ||
+		current.SleepIntent == string(sessionpkg.SleepReasonUserHold) ||
+		metadataTimeInFuture(current.HeldUntil, now)
+	return hasHold && (selected.MetadataState != current.MetadataState ||
+		selected.SleepReason != current.SleepReason || selected.SleepIntent != current.SleepIntent ||
+		selected.HeldUntil != current.HeldUntil)
+}
+
 func prepareStartCandidate(
 	candidate startCandidate,
 	cfg *config.City,
@@ -880,18 +897,15 @@ func prepareStartCandidateForCity(
 	if id := strings.TrimSpace(candidate.info.ID); id != "" && store != nil {
 		if err := sessionpkg.WithSessionMutationLock(id, func() error {
 			sessFront := sessionFrontDoor(store)
-			// GENUINE store re-Get (WI-6 R4): the whole bead is reloaded through the
-			// session front door AS Info (template_overrides can change out of band,
-			// e.g. bd update; TestPrepareStartCandidateReloadsOverridesBeforeWake), so
-			// the append-captured twin cannot be folded forward — it must be re-read.
-			// GetPersistedResponse returns the Info directly (no raw-bead codec call in
-			// this file): it wraps a load failure with "loading session %q" and rejects
-			// a bead that is no longer a session (IsSessionBeadOrRepairable), the
-			// documented front-door-Get delta from the former raw store.Get. This is
-			// the SANCTIONED cross-goroutine freshness re-read, not a per-patch re-Get.
-			current, _, err := sessFront.GetPersistedResponse(id)
+			// Read lifecycle and launch metadata together from the live store under
+			// the same mutation lock as Suspend. A cached snapshot can predate
+			// the user's hold even though this selected candidate is re-read.
+			current, err := sessFront.GetLive(id)
 			if err != nil {
 				return err
+			}
+			if startCandidateHasNewHold(candidate.info, current, clk.Now()) {
+				return errStartCandidateSuperseded
 			}
 			// preWakeCommit persists its PreWakePatch through the front door and returns
 			// the batch; folding it onto the freshly re-read Info keeps the twin
@@ -2981,7 +2995,12 @@ func executePlannedStartsTraced(
 				}
 				item, err := prepareStartCandidateForCity(candidate, cityPath, cityName, cfg, sp, store, clk, stderr, startOpts.workDirResolver)
 				if err != nil {
-					clearPendingStartInFlightLease(candidate.info.ID, sessFront, stderr)
+					// A superseded candidate committed no pre-wake lease. Clearing
+					// one after releasing its guard could erase a newer user's start.
+					superseded := errors.Is(err, errStartCandidateSuperseded)
+					if !superseded {
+						clearPendingStartInFlightLease(candidate.info.ID, sessFront, stderr)
+					}
 					if release != nil {
 						release()
 					}
@@ -2989,7 +3008,11 @@ func executePlannedStartsTraced(
 						done()
 					}
 					fmt.Fprintf(stderr, "session reconciler: pre-wake %s: %s\n", candidate.name(), formatLifecycleError(err)) //nolint:errcheck
-					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "failed", time.Time{}, time.Time{}, err)
+					outcome := "failed"
+					if superseded {
+						outcome = "deferred"
+					}
+					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), outcome, time.Time{}, time.Time{}, err)
 					continue
 				}
 				if startOpts.async {

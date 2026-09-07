@@ -117,6 +117,20 @@ Optional provider extensions also live in `runtime/runtime.go`:
 - `IdleWaitProvider`
 - `ImmediateNudgeProvider`
 
+### Intentional Suspension
+
+A successful `Manager.Suspend` records deliberate sleep and clears the prior
+wake attempt while preserving the provider conversation key. The controller's
+dead-runtime reconciliation checks authoritative persisted state under the same
+session mutation lock used by in-process API lifecycle commands. It defers a
+stale decision instead of overwriting a newer hold or counting the intentional
+stop as a crash or churn event. Wake preparation likewise defers a candidate
+selected before a newer hold; a later explicit wake remains valid.
+
+This coordination covers the guarded reconciliation and wake-preparation paths
+within one controller process. It does not provide cross-process compare-and-swap
+against independent CLI writers or serialize every lifecycle path.
+
 ### Providers
 
 - **tmux**: Primary interactive runtime in
@@ -190,6 +204,13 @@ Optional provider extensions also live in `runtime/runtime.go`:
 - `internal/runtime/k8s/provider_test.go` covers the Kubernetes provider
 - `internal/session/manager_test.go` and `internal/session/manager_states_test.go`
   cover higher-level session bookkeeping layered on top of the runtime
+- `cmd/gc/session_suspend_overlap_test.go` covers concurrent API suspension
+  with `TestReconcileSessionBeadsDoesNotUndoConcurrentSuspend`,
+  `TestCurrentSessionExitSerializesSuspendAcrossWholeDecision`, and
+  `TestCurrentSessionExitBypassesStaleCachingStore`.
+- `cmd/gc/session_start_suspend_overlap_test.go` covers stale wake selection
+  with `TestSelectedStartCandidateCannotUndoLaterSuspend` and preserves later
+  explicit demand with `TestSelectedStartCandidateAllowsNewExplicitWakeAfterSuspend`.
 
 ## Fingerprint Versioning
 

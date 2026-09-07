@@ -82,6 +82,23 @@ func (s *Store) Get(id string) (Info, error) {
 	return infoFromPersistedBead(b), nil
 }
 
+// GetLive reads authoritative persisted state, bypassing a store's snapshot
+// cache. Lifecycle writers use this only when fencing a destructive decision;
+// ordinary projections and write-and-fold paths keep their existing read budget.
+func (s *Store) GetLive(id string) (Info, error) {
+	if s == nil || s.store.Store == nil {
+		return Info{}, fmt.Errorf("loading session %q: %w", id, beads.ErrNotFound)
+	}
+	b, err := beads.HandlesFor(s.store.Store).Live.Get(id)
+	if err != nil {
+		return Info{}, fmt.Errorf("loading session %q: %w", id, err)
+	}
+	if strings.TrimSpace(b.ID) == "" || !IsSessionBeadOrRepairable(b) {
+		return Info{}, fmt.Errorf("%w: %s", ErrSessionNotFound, id)
+	}
+	return infoFromPersistedBead(b), nil
+}
+
 // GetPersistedResponse returns the persisted session.Info paired with the
 // persisted-response projection (status + metadata) for id, in a single store
 // fetch. It is the persisted-read half of the session Get read model — pair it

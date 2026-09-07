@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -1023,6 +1024,48 @@ func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, observed b
 		}
 	}
 	return emptyNil(batch)
+}
+
+// withCurrentSessionExit fences the dead-runtime lifecycle lane against API
+// mutations such as Suspend and Close in this controller process. The provider
+// observation may follow a snapshot that those operations have already changed.
+// On a changed or unavailable persisted view, defer the whole session until the
+// next tick; never apply only half of the heal/failure-accounting decision.
+//
+// This is process-local serialization, not CAS against independent CLI writers.
+// Alive sessions retain the existing fast path with no additional store reads.
+func withCurrentSessionExit(info sessionpkg.Info, alive bool, sessFront *sessionpkg.Store, apply func() error) (bool, error) {
+	if alive {
+		return true, apply()
+	}
+	applied := false
+	err := sessionpkg.WithSessionMutationLock(info.ID, func() error {
+		current, err := sessFront.GetLive(info.ID)
+		if err != nil {
+			return err
+		}
+		if current.Closed || !sameSessionExitSnapshot(info, current) {
+			return nil
+		}
+		applied = true
+		return apply()
+	})
+	return applied, err
+}
+
+// sameSessionExitSnapshot compares persisted inputs to the guarded lifecycle
+// decision, not unrelated notification/reset bookkeeping. Some controller paths
+// deliberately defer those unrelated fields' local folds until the next tick.
+func sameSessionExitSnapshot(a, b sessionpkg.Info) bool {
+	return reflect.DeepEqual(sessionpkg.LifecycleInputFromInfo(a), sessionpkg.LifecycleInputFromInfo(b)) &&
+		a.CreatedAt.Equal(b.CreatedAt) && a.Type == b.Type &&
+		a.SessionNameMetadata == b.SessionNameMetadata && a.InstanceToken == b.InstanceToken &&
+		a.Generation == b.Generation && a.ContinuationEpoch == b.ContinuationEpoch &&
+		a.Provider == b.Provider && a.ProviderKind == b.ProviderKind && a.WorkDir == b.WorkDir &&
+		a.ConfiguredNamedSession == b.ConfiguredNamedSession && a.ConfiguredNamedMode == b.ConfiguredNamedMode &&
+		a.WakeAttemptsMetadata == b.WakeAttemptsMetadata && a.ChurnCount == b.ChurnCount &&
+		a.RestartRequested == b.RestartRequested && a.SleepIntent == b.SleepIntent &&
+		(a.SleepIntent != "idle-stop-pending" || a.SleepPolicyFingerprint == b.SleepPolicyFingerprint) && a.DetachedAt == b.DetachedAt
 }
 
 // healStateWithRollbackInfo computes and persists an advisory-state heal.

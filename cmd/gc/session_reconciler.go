@@ -2080,9 +2080,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			stateBeforeHeal := strings.TrimSpace(infoByID[id].MetadataState)
 			pendingCreateStartedAtBeforeHeal := strings.TrimSpace(infoByID[id].PendingCreateStartedAt)
 			lastWokeAtBeforeHeal := strings.TrimSpace(infoByID[id].LastWokeAt)
-			healBatch, healErr := healStateWithRollbackInfo(infoByID[id], providerAlive, livenessErr == nil, sessFront, clk, startupTimeout, !storeQueryPartial)
+			var healBatch map[string]string
+			healed, healErr := withCurrentSessionExit(infoByID[id], providerAlive, sessFront, func() error {
+				var err error
+				healBatch, err = healStateWithRollbackInfo(infoByID[id], providerAlive, livenessErr == nil, sessFront, clk, startupTimeout, !storeQueryPartial)
+				return err
+			})
 			if healErr != nil {
 				fmt.Fprintf(stderr, "healState: SetMetadataBatch %s: %v\n", id, healErr) //nolint:errcheck
+				continue
+			}
+			if !healed {
 				continue
 			}
 			traceHealClearedPendingCreateLeaseInfo(
@@ -2942,83 +2950,97 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 
 		policy := resolveSessionSleepPolicyInfo(infoByID[id], cfg, sp)
 
-		rlNextFwd, rateLimitHit, rateLimitErr := checkRateLimitStability(infoByID[id], cfg, alive, dt, sessFront, clk, peek)
-		if rateLimitHit || rateLimitErr != nil {
-			// Advance the snapshot with the write-returns-Info result (Step 6d, group 1).
-			tick.set(id, rlNextFwd)
-			continue // rate-limit hold recorded before state healing resets continuity metadata
-		}
+		var stateBeforeHeal sessionpkg.State
+		var pendingCreateStartedAtBeforeHeal, lastWokeAtBeforeHeal string
+		exitHandled := false
+		exitApplied, exitErr := withCurrentSessionExit(infoByID[id], alive, sessFront, func() error {
+			rlNextFwd, rateLimitHit, rateLimitErr := checkRateLimitStability(infoByID[id], cfg, alive, dt, sessFront, clk, peek)
+			if rateLimitHit || rateLimitErr != nil {
+				// Advance the snapshot with the write-returns-Info result (Step 6d, group 1).
+				tick.set(id, rlNextFwd)
+				exitHandled = true
+				return rateLimitErr // rate-limit hold precedes continuity reset
+			}
 
-		// Heal advisory state metadata.
-		stateBeforeHeal := sessionpkg.State(strings.TrimSpace(infoByID[id].MetadataState))
-		pendingCreateStartedAtBeforeHeal := strings.TrimSpace(infoByID[id].PendingCreateStartedAt)
-		lastWokeAtBeforeHeal := strings.TrimSpace(infoByID[id].LastWokeAt)
-		healBatch, healErr := healStateWithRollbackInfo(infoByID[id], alive, true, sessFront, clk, startupTimeout, true)
-		if healErr != nil {
-			fmt.Fprintf(stderr, "healState: SetMetadataBatch %s: %v\n", id, healErr) //nolint:errcheck
+			// Heal advisory state metadata.
+			stateBeforeHeal = sessionpkg.State(strings.TrimSpace(infoByID[id].MetadataState))
+			pendingCreateStartedAtBeforeHeal = strings.TrimSpace(infoByID[id].PendingCreateStartedAt)
+			lastWokeAtBeforeHeal = strings.TrimSpace(infoByID[id].LastWokeAt)
+			healBatch, healErr := healStateWithRollbackInfo(infoByID[id], alive, true, sessFront, clk, startupTimeout, true)
+			if healErr != nil {
+				return healErr
+			}
+			traceHealClearedPendingCreateLeaseInfo(
+				trace,
+				infoByID[id],
+				cfg,
+				tp.TemplateName,
+				name,
+				string(stateBeforeHeal),
+				pendingCreateStartedAtBeforeHeal,
+				lastWokeAtBeforeHeal,
+				alive,
+				healBatch,
+			)
+			// Fold heal#2's batch onto the snapshot (Step 6d write-returns-Info),
+			// identical to the heal#1 fold above (~1713): healStateWithRollback returns
+			// exactly the batch it mirrored (nil ⇒ ApplyPatch no-op). The base is
+			// coherent here — the pre-heal rate-limit gate `continue`s on hit and the
+			// restart/drain-ack blocks above either `continue` or self-refresh. This is
+			// one of the forward-pass writers the blanket pre-pass still masks; folding it
+			// is a prerequisite for that pre-pass's deletion (STEP6-PREPASS-AUDIT group 4).
+			tick.apply(id, healBatch)
+			if recoverPendingIdleSleepInfo(infoByID[id], sessFront, running, clk) {
+				alive = false
+				// Fold the idle-stop-pending recovery sleep onto the snapshot (Step 6d).
+				// recoverPendingIdleSleep mirrors SleepPatch(now,"idle") only on this true
+				// return; its Info-projected keys are time-independent, so reconstructing
+				// the same SleepPatch reproduces the mirror exactly (slept_at /
+				// sleep_policy_fingerprint are non-Info). Pre-pass-masked (STEP6-PREPASS-AUDIT
+				// group 6).
+				tick.apply(id, sessionpkg.SleepPatch(clk.Now().UTC(), string(sessionpkg.SleepReasonIdle)))
+			}
+			// Fold detached_at change onto the snapshot (Step 6d write-returns-Info).
+			// reconcileDetachedAt returns the {"detached_at": <value>} batch it mirrored,
+			// or nil on no-op. Pre-pass-masked (STEP6-PREPASS-AUDIT group 6).
+			detachedPatch, detachedErr := reconcileDetachedAtInfo(infoByID[id], store, policy, alive, sp, clk)
+			if detachedErr != nil {
+				return fmt.Errorf("attachment observation failure: %w", detachedErr)
+			}
+			tick.apply(id, detachedPatch)
+
+			// Stability check: detect rapid crash after state healing. Rate-limit
+			// detection intentionally ran above before healState.
+			// checkStability returns the write-returns-Info result (Step 6d); the input
+			// Info unchanged when no stability event was recorded, so the assignment on the
+			// true branch is the only snapshot advance. Pre-pass-masked (STEP6-PREPASS-AUDIT group 2).
+			if stabInfo, stab := checkStability(infoByID[id], cfg, alive, dt, sessFront, clk, nil); stab {
+				tick.set(id, stabInfo)
+				exitHandled = true
+				return nil // rapid exit recorded
+			}
+
+			// Churn check: detect context exhaustion death spiral.
+			// Fires for sessions that survived past stabilityThreshold but
+			// died before churnProductivityThreshold — alive long enough to
+			// not be a rapid crash, but too short to be productive.
+			// Assign checkChurn's write-returns-Info result regardless of the bool —
+			// ExitProductiveDeath may clear churn_count (the default rapid-crash path
+			// returns the input Info unchanged). Pre-pass-masked (STEP6-PREPASS-AUDIT group 5).
+			churnInfo, churn := checkChurn(infoByID[id], cfg, alive, dt, sessFront, clk)
+			tick.set(id, churnInfo)
+			if churn {
+				exitHandled = true
+				return nil // churn recorded
+			}
+
+			return nil
+		})
+		if exitErr != nil {
+			fmt.Fprintf(stderr, "session reconciler: deferring lifecycle update for %s: %v\n", id, exitErr) //nolint:errcheck
+		}
+		if exitErr != nil || !exitApplied || exitHandled {
 			continue
-		}
-		traceHealClearedPendingCreateLeaseInfo(
-			trace,
-			infoByID[id],
-			cfg,
-			tp.TemplateName,
-			name,
-			string(stateBeforeHeal),
-			pendingCreateStartedAtBeforeHeal,
-			lastWokeAtBeforeHeal,
-			alive,
-			healBatch,
-		)
-		// Fold heal#2's batch onto the snapshot (Step 6d write-returns-Info),
-		// identical to the heal#1 fold above (~1713): healStateWithRollback returns
-		// exactly the batch it mirrored (nil ⇒ ApplyPatch no-op). The base is
-		// coherent here — the pre-heal rate-limit gate `continue`s on hit and the
-		// restart/drain-ack blocks above either `continue` or self-refresh. This is
-		// one of the forward-pass writers the blanket pre-pass still masks; folding it
-		// is a prerequisite for that pre-pass's deletion (STEP6-PREPASS-AUDIT group 4).
-		tick.apply(id, healBatch)
-		if recoverPendingIdleSleepInfo(infoByID[id], sessFront, running, clk) {
-			alive = false
-			// Fold the idle-stop-pending recovery sleep onto the snapshot (Step 6d).
-			// recoverPendingIdleSleep mirrors SleepPatch(now,"idle") only on this true
-			// return; its Info-projected keys are time-independent, so reconstructing
-			// the same SleepPatch reproduces the mirror exactly (slept_at /
-			// sleep_policy_fingerprint are non-Info). Pre-pass-masked (STEP6-PREPASS-AUDIT
-			// group 6).
-			tick.apply(id, sessionpkg.SleepPatch(clk.Now().UTC(), string(sessionpkg.SleepReasonIdle)))
-		}
-		// Fold detached_at change onto the snapshot (Step 6d write-returns-Info).
-		// reconcileDetachedAt returns the {"detached_at": <value>} batch it mirrored,
-		// or nil on no-op. Pre-pass-masked (STEP6-PREPASS-AUDIT group 6).
-		detachedPatch, detachedErr := reconcileDetachedAtInfo(infoByID[id], store, policy, alive, sp, clk)
-		if detachedErr != nil {
-			fmt.Fprintf(stderr, "session reconciler: deferring lifecycle for %s after attachment observation failure: %v\n", name, detachedErr) //nolint:errcheck
-			continue
-		}
-		tick.apply(id, detachedPatch)
-
-		// Stability check: detect rapid crash after state healing. Rate-limit
-		// detection intentionally ran above before healState.
-		// checkStability returns the write-returns-Info result (Step 6d); the input
-		// Info unchanged when no stability event was recorded, so the assignment on the
-		// true branch is the only snapshot advance. Pre-pass-masked (STEP6-PREPASS-AUDIT group 2).
-		if stabInfo, stab := checkStability(infoByID[id], cfg, alive, dt, sessFront, clk, nil); stab {
-			tick.set(id, stabInfo)
-			continue // rapid exit recorded, skip further processing
-		}
-
-		// Churn check: detect context exhaustion death spiral.
-		// Fires for sessions that survived past stabilityThreshold but
-		// died before churnProductivityThreshold — alive long enough to
-		// not be a rapid crash, but too short to be productive.
-		// Assign checkChurn's write-returns-Info result regardless of the bool —
-		// ExitProductiveDeath may clear churn_count (the default rapid-crash path
-		// returns the input Info unchanged). Pre-pass-masked (STEP6-PREPASS-AUDIT group 5).
-		churnInfo, churn := checkChurn(infoByID[id], cfg, alive, dt, sessFront, clk)
-		tick.set(id, churnInfo)
-		if churn {
-			continue // churn recorded, skip further processing
 		}
 
 		// Clear wake failures for sessions that have been stable long enough.
