@@ -19,11 +19,44 @@ func TestMakefileTestEnvIgnoresUserGitConfiguration(t *testing.T) {
 		t.Fatalf("write poisoned global git config: %v", err)
 	}
 
+	// Exercise the actual xargs -> bash child and its env scrub without
+	// launching a test suite. A source-only pin cannot catch an unexported
+	// parent variable that disappears at this boundary.
+	parallel := localParallelScript(t)
+	setupStart := strings.Index(parallel, "# One shared seeded gitconfig")
+	setupEnd := strings.Index(parallel, "# shellcheck source=lib/test-slice.sh")
+	if setupStart < 0 || setupEnd <= setupStart {
+		t.Fatal("cannot locate parallel runner gitconfig setup")
+	}
+	probeDir := t.TempDir()
+	probe := filepath.Join(probeDir, "fanout.sh")
+	probeScript := `#!/usr/bin/env bash
+set -euo pipefail
+repo_root="$1"
+export LOCAL_TEST_LOG_DIR="$2"
+gate_fd=""
+local_jobs=1
+export TEST_LOCAL_GOPATH="" TEST_LOCAL_GOCACHE="" TEST_LOCAL_GOMODCACHE=""
+export TEST_LOCAL_GOTMPDIR="" TEST_LOCAL_GOROOT=""
+` + parallel[setupStart:setupEnd] + `
+printf -v probe_command 'test "$GIT_CONFIG_GLOBAL" = %q && test "$GIT_CONFIG_NOSYSTEM" = 1 && test "${GIT_DIR-unset}" = unset && test "$(git config --global --get beads.role)" = maintainer && printf "fanout-git-env-ok\n"' "$gc_test_gitconfig"
+jobspecs=("git-env::$probe_command")
+run_fan_out() {
+` + shellFunctionBody(t, parallel, "run_fan_out") + `
+}
+run_fan_out
+cat "$LOCAL_TEST_LOG_DIR/git-env.log"
+`
+	if err := os.WriteFile(probe, []byte(probeScript), 0o600); err != nil {
+		t.Fatalf("write fanout probe: %v", err)
+	}
+
 	testMakefile := filepath.Join(t.TempDir(), "Makefile")
 	content := string(makefile) + `
 .PHONY: print-test-env-git
 print-test-env-git:
 	@$(TEST_ENV) sh -c 'printf "global=%s\nnosystem=%s\ngitdir=%s\ngpgsign=%s\n" "$$GIT_CONFIG_GLOBAL" "$$GIT_CONFIG_NOSYSTEM" "$${GIT_DIR-unset}" "$$(git config --global --get commit.gpgsign 2>/dev/null || printf unset)"'
+	@bash "$(FANOUT_PROBE)" "$(CURDIR)" "$(FANOUT_LOG_DIR)"
 `
 	if err := os.WriteFile(testMakefile, []byte(content), 0o644); err != nil {
 		t.Fatalf("write test Makefile: %v", err)
@@ -37,6 +70,9 @@ print-test-env-git:
 		"USER=" + os.Getenv("USER"),
 		"SHELL=/bin/sh",
 		"GIT_DIR=/poison/.git",
+		"FANOUT_PROBE=" + probe,
+		"FANOUT_LOG_DIR=" + probeDir,
+		"TMPDIR=" + probeDir,
 	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -46,6 +82,7 @@ print-test-env-git:
 		"nosystem=1",
 		"gitdir=unset",
 		"gpgsign=unset",
+		"fanout-git-env-ok",
 	} {
 		if !strings.Contains(string(out), want+"\n") {
 			t.Errorf("TEST_ENV output missing %q:\n%s", want, out)
