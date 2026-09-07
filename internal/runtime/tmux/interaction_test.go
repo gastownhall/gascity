@@ -33,6 +33,7 @@ func TestParseApprovalPrompt_BashCommand(t *testing.T) {
 	a := parseApprovalPrompt(pane)
 	if a == nil {
 		t.Fatal("expected approval prompt, got nil")
+		return
 	}
 	if a.ToolName != "Bash" {
 		t.Errorf("expected ToolName=Bash, got %q", a.ToolName)
@@ -57,6 +58,7 @@ func TestParseApprovalPrompt_EditCommand(t *testing.T) {
 	a := parseApprovalPrompt(pane)
 	if a == nil {
 		t.Fatal("expected approval prompt, got nil")
+		return
 	}
 	if a.ToolName != "Edit" {
 		t.Errorf("expected ToolName=Edit, got %q", a.ToolName)
@@ -101,6 +103,7 @@ func TestParseApprovalPrompt_WriteCommand(t *testing.T) {
 	a := parseApprovalPrompt(pane)
 	if a == nil {
 		t.Fatal("expected approval prompt, got nil")
+		return
 	}
 	if a.ToolName != "Write" {
 		t.Errorf("expected ToolName=Write, got %q", a.ToolName)
@@ -119,6 +122,7 @@ func TestParseApprovalPrompt_NestedParens(t *testing.T) {
 	a := parseApprovalPrompt(pane)
 	if a == nil {
 		t.Fatal("expected approval prompt, got nil")
+		return
 	}
 	if a.ToolName != "Bash" {
 		t.Errorf("expected ToolName=Bash, got %q", a.ToolName)
@@ -145,6 +149,7 @@ func TestParseApprovalPrompt_MultipleToolHeaders_BindsToNearest(t *testing.T) {
 	a := parseApprovalPrompt(pane)
 	if a == nil {
 		t.Fatal("expected approval prompt, got nil")
+		return
 	}
 	if a.ToolName != "Bash" {
 		t.Errorf("expected ToolName=Bash (nearest to approval), got %q", a.ToolName)
@@ -264,10 +269,7 @@ func TestPhase2ProviderRespondApprovesAndClearsPrompt(t *testing.T) {
 		},
 	}
 
-	requestID := "tmux-" + approvalHash(&parsedApproval{
-		ToolName: "Read",
-		Input:    "file_path: /tmp/test.txt",
-	})
+	requestID := "tmux-" + approvalHash(parseApprovalPrompt(approvalPromptPane()))
 	err := provider.Respond(session, runtime.InteractionResponse{
 		RequestID: requestID,
 		Action:    "approve",

@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -105,8 +106,8 @@ func TestWorkspaceTrustConfirmKeysUnrecognizedLayoutSendsNothing(t *testing.T) {
 		func(int) (string, error) { return content, nil },
 		func(keys ...string) error { sent = append(sent, keys...); return nil },
 	)
-	if err != nil {
-		t.Fatalf("acceptWorkspaceTrustDialog() error = %v", err)
+	if !errors.Is(err, ErrUnrecognizedWorkspaceTrust) {
+		t.Fatalf("acceptWorkspaceTrustDialog() error = %v, want launch-blocking trust error", err)
 	}
 	if len(sent) != 0 {
 		t.Errorf("acceptWorkspaceTrustDialog() sent = %v, want no keys sent for an unrecognized trust layout", sent)

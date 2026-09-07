@@ -215,13 +215,15 @@ func (c startCandidate) logicalTemplate(cfg *config.City) string {
 }
 
 type preparedStart struct {
-	candidate     startCandidate
-	cfg           runtime.Config
-	coreHash      string
-	coreBreakdown runtime.BreakdownV1
-	liveHash      string
-	provisionHash string
-	launchHash    string
+	// Keep failure recovery on the same transcript roots as launch preflight.
+	transcriptSearchPaths []string
+	candidate             startCandidate
+	cfg                   runtime.Config
+	coreHash              string
+	coreBreakdown         runtime.BreakdownV1
+	liveHash              string
+	provisionHash         string
+	launchHash            string
 	// promptDelivered reports whether a delivery mechanism was selected for
 	// THIS incarnation's rendered startup prompt (S19 confirmation signal 1)
 	// — a pure routing decision, not I/O: it means delivery was
@@ -1058,12 +1060,13 @@ func buildPreparedStartWithWorkDirResolver(
 	// transcript layer so each provider keeps its own resumability rules; for
 	// providers whose resume state we cannot probe on disk (codex/gemini/...)
 	// the probe reports !probeable and we leave their metadata untouched.
+	searchPaths := sessionTranscriptSearchPaths(cfg)
 	// transcriptState carries the same probe result forward to the firstStart
 	// classification below, so the disk is read once per launch.
 	transcriptState := sessTranscriptUnknown
 	if sk := strings.TrimSpace(candidate.info.SessionKey); sk != "" && agentCfg.WorkDir != "" {
 		provider := sessionTranscriptProvider(tp.ResolvedProvider, candidate.info)
-		present, probeable := staleResumeKeyProbe(provider, agentCfg.WorkDir, sk)
+		present, probeable := staleResumeKeyProbe(searchPaths, provider, agentCfg.WorkDir, sk)
 		if probeable {
 			if present {
 				transcriptState = sessTranscriptPresent
@@ -1131,7 +1134,7 @@ func buildPreparedStartWithWorkDirResolver(
 		parentStale := false
 		if firstStart && !forceFresh && tp.ResolvedProvider != nil && agentCfg.WorkDir != "" {
 			provider := sessionTranscriptProvider(tp.ResolvedProvider, candidate.info)
-			if present, probeable := staleResumeKeyProbe(provider, agentCfg.WorkDir, parentSID); probeable && !present {
+			if present, probeable := staleResumeKeyProbe(searchPaths, provider, agentCfg.WorkDir, parentSID); probeable && !present {
 				parentStale = true
 			}
 		}
@@ -1230,15 +1233,16 @@ func buildPreparedStartWithWorkDirResolver(
 	}
 	agentCfg = runtime.SyncWorkDirEnv(agentCfg)
 	return &preparedStart{
-		candidate:       candidate,
-		cfg:             agentCfg,
-		coreHash:        coreHash,
-		coreBreakdown:   coreBreakdown,
-		liveHash:        liveHash,
-		provisionHash:   provisionHash,
-		launchHash:      launchHash,
-		promptDelivered: promptDelivered,
-		promptHash:      promptHash,
+		transcriptSearchPaths: searchPaths,
+		candidate:             candidate,
+		cfg:                   agentCfg,
+		coreHash:              coreHash,
+		coreBreakdown:         coreBreakdown,
+		liveHash:              liveHash,
+		provisionHash:         provisionHash,
+		launchHash:            launchHash,
+		promptDelivered:       promptDelivered,
+		promptHash:            promptHash,
 	}, candidate.info, nil
 }
 
@@ -2021,11 +2025,8 @@ func observeRuntimeProviderLiveness(sp runtime.Provider, name string, processNam
 // so tests can model a present or absent transcript without materializing
 // provider-specific transcript trees. Production delegates to the transcript
 // discovery layer, which knows each provider's on-disk layout and merges each
-// provider's own default roots on top of the supplied claude default, so
-// claude/kimi/pi each probe their real location.
-var staleResumeKeyProbe = func(provider, workDir, sessionKey string) (present, probeable bool) {
-	return workertranscript.HasKeyedTranscript(worker.DefaultSearchPaths(), provider, workDir, sessionKey)
-}
+// provider's own default roots on top of the configured worker search paths.
+var staleResumeKeyProbe = workertranscript.HasKeyedTranscript
 
 // validateForkLaunch enforces fork-launch invariants before command resolution.
 // It fails loud rather than ever silently degrading a brain-forked (warm) arm to
@@ -2076,6 +2077,15 @@ func validateForkLaunch(parentSID string, rp *config.ResolvedProvider, firstStar
 		return fmt.Errorf("fork-launch: parent brain session %q (provider %q) is missing on disk; gc-core does not regenerate brains - regen is owned by brains/mem", parentSID, providerName)
 	}
 	return nil
+}
+
+// sessionTranscriptSearchPaths keeps launch and failure recovery aligned with
+// the transcript stores used by history discovery.
+func sessionTranscriptSearchPaths(cfg *config.City) []string {
+	if cfg != nil {
+		return worker.MergeSearchPaths(cfg.Daemon.ObservePaths)
+	}
+	return worker.DefaultSearchPaths()
 }
 
 // sessionTranscriptProvider resolves the provider-family identifier consumed by
@@ -2432,7 +2442,7 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 	// not carry it. Terminal failure arm; discard the fold (never assign back into
 	// infoByID — this is the async start goroutine). The persist lands via
 	// recordWakeFailure's ApplyPatchInfo/SetMarker writes.
-	_ = recordWakeFailure(result.prepared.candidate.info, sessFront, clk, tp.DisplayName())
+	_ = recordWakeFailure(result.prepared.candidate.info, result.prepared.transcriptSearchPaths, sessFront, clk, tp.DisplayName())
 	if trace != nil {
 		trace.RecordOperation(TraceSiteLifecycleStartFailed, TraceReasonStart, result.outcome, "", tp.TemplateName, name, 0, traceRecordPayload{
 			"error": formatLifecycleError(result.err),

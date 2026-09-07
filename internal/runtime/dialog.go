@@ -588,9 +588,8 @@ func containsPostUpdateStartupDialog(content string) bool {
 // stale Claude Code build can default the cursor to "No, exit" — so the
 // handler locates the cursor and the trust option in the rendered content
 // and moves the selection before confirming; it never blind-sends a fixed
-// key sequence. When it can't locate both rows it sends no keys, and the
-// snapshot falls through to the existing readiness check, which hands the
-// phase off. Holding the phase open instead is tracked separately.
+// key sequence. An unrecognized Claude menu stops launch before readiness or
+// startup input can accidentally confirm it.
 func acceptWorkspaceTrustDialog(
 	ctx context.Context,
 	budget *startupDialogBudget,
@@ -608,7 +607,11 @@ func acceptWorkspaceTrustDialog(
 		}
 
 		if containsWorkspaceTrustDialog(content) {
-			if keys, ok := workspaceTrustConfirmKeys(content); ok {
+			keys, err := workspaceTrustDialogKeys(content)
+			if err != nil {
+				return err
+			}
+			if len(keys) > 0 {
 				budget.observe()
 				if err := sendKeys(keys...); err != nil {
 					return err
@@ -646,7 +649,7 @@ func acceptWorkspaceTrustDialogFromStream(
 ) (bool, error) {
 	return acceptDialogFromStream(ctx, timeout, snapshots, sendKeys, streamDialogSpec{
 		match:        containsWorkspaceTrustDialog,
-		matchKeysFor: workspaceTrustConfirmKeys,
+		matchKeysFor: workspaceTrustDialogKeys,
 		matchDelay:   startupDialogAcceptDelay,
 		ready:        containsPromptIndicator,
 		readyOrNext:  containsPostTrustStartupDialog,
@@ -713,6 +716,9 @@ var piTrustDialogLayout = trustDialogLayout{
 func workspaceTrustConfirmKeys(content string) ([]string, bool) {
 	switch {
 	case strings.Contains(content, "trust this folder") || strings.Contains(content, "Quick safety check"):
+		if !validClaudeWorkspaceTrust(content) {
+			return nil, false
+		}
 		// "Quick safety check" is the dialog's header line, so it anchors the
 		// scan above every option row. "trust this folder" is itself an option
 		// label, so it only anchors when the header isn't rendered.
@@ -1344,11 +1350,9 @@ type streamDialogSpec struct {
 	// matchKeysFor, when set, computes the keys to send from the matched
 	// content instead of using the static matchKeys — e.g. deriving the
 	// cursor movement needed for a dialog whose safe option isn't always
-	// pre-selected. A false second return means the content matched but
-	// the correct keys couldn't be determined; no keys are sent for that
-	// snapshot rather than guessing, and it falls through to the spec's
-	// readiness checks like any unmatched snapshot.
-	matchKeysFor func(string) ([]string, bool)
+	// pre-selected. No keys means the snapshot falls through to readiness;
+	// an error stops the phase without sending input.
+	matchKeysFor func(string) ([]string, error)
 	matchDelay   time.Duration
 }
 
@@ -1486,11 +1490,15 @@ func acceptDialogFromStream(
 		if len(history) > 0 {
 			for idx, content := range history {
 				if spec.match != nil && spec.match(content) {
-					keys, ok := spec.matchKeys, true
+					keys := spec.matchKeys
 					if spec.matchKeysFor != nil {
-						keys, ok = spec.matchKeysFor(content)
+						var err error
+						keys, err = spec.matchKeysFor(content)
+						if err != nil {
+							return true, err
+						}
 					}
-					if ok {
+					if len(keys) > 0 {
 						snapshots.replay(history[idx+1:])
 						return true, sendDialogKeys(ctx, sendKeys, keys, spec.matchDelay)
 					}

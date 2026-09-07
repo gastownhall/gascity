@@ -1,0 +1,24 @@
+  write it. If permission is denied, do not retry or use another method; end
+  with DENIED_A. If allowed, read the file using Read, then end with
+  APPROVED_A.
+
+⏺ Writing approval test string to file
+  ⎿  $ printf 'APPROVED_fixture\n' > approved-fixture.txt
+
+────────────────────────────────────────────────────────────────────────────────
+ Bash command
+ Tip: auto mode handles these prompts for you — choose "switch to auto mode"
+ below
+
+   printf 'APPROVED_fixture\n' > approved-fixture.txt
+   Write approval test string to file
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and always allow access to
+      /tmp/bb-live-test/workspaces/approvals-fixture from this
+      project
+   3. Yes, and switch to auto mode · auto mode handles these prompts for you
+   4. No
+
+ Esc to cancel · Tab to amend

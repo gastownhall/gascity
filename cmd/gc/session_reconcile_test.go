@@ -15,9 +15,11 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
@@ -1455,7 +1457,7 @@ func TestCheckStability_SubprocessProviderSkipsCrashCounting(t *testing.T) {
 // conversation is actually unresumable. Attempt accrual is unaffected.
 func TestRecordWakeFailure_KeepsResumableConversation(t *testing.T) {
 	prevProbe := staleResumeKeyProbe
-	staleResumeKeyProbe = func(_, _, _ string) (present, probeable bool) { return true, true }
+	staleResumeKeyProbe = func(_ []string, _, _, _ string) (present, probeable bool) { return true, true }
 	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
 
 	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
@@ -1468,7 +1470,7 @@ func TestRecordWakeFailure_KeepsResumableConversation(t *testing.T) {
 		"work_dir":            "/work",
 	})
 
-	recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	recordWakeFailure(seedSessionInfo(session), sessionTranscriptSearchPaths(nil), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 	syncBeadFromStore(&session, store)
 
 	if got := session.Metadata["session_key"]; got != "live-key" {
@@ -1486,7 +1488,7 @@ func TestRecordWakeFailure_KeepsResumableConversation(t *testing.T) {
 // absent transcript keeps the existing unconditional reset.
 func TestRecordWakeFailure_ClearsUnresumableConversation(t *testing.T) {
 	prevProbe := staleResumeKeyProbe
-	staleResumeKeyProbe = func(_, _, _ string) (present, probeable bool) { return false, true }
+	staleResumeKeyProbe = func(_ []string, _, _, _ string) (present, probeable bool) { return false, true }
 	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
 
 	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
@@ -1499,7 +1501,7 @@ func TestRecordWakeFailure_ClearsUnresumableConversation(t *testing.T) {
 		"work_dir":            "/work",
 	})
 
-	recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	recordWakeFailure(seedSessionInfo(session), sessionTranscriptSearchPaths(nil), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 	syncBeadFromStore(&session, store)
 
 	if got := session.Metadata["session_key"]; got != "" {
@@ -1515,7 +1517,7 @@ func TestRecordWakeFailure_ClearsUnresumableConversation(t *testing.T) {
 // gaining the new keep-the-conversation behavior.
 func TestRecordWakeFailure_ClearsWhenProviderUnprobeable(t *testing.T) {
 	prevProbe := staleResumeKeyProbe
-	staleResumeKeyProbe = func(_, _, _ string) (present, probeable bool) { return false, false }
+	staleResumeKeyProbe = func(_ []string, _, _, _ string) (present, probeable bool) { return false, false }
 	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
 
 	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
@@ -1527,7 +1529,7 @@ func TestRecordWakeFailure_ClearsWhenProviderUnprobeable(t *testing.T) {
 		"work_dir":      "/work",
 	})
 
-	recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	recordWakeFailure(seedSessionInfo(session), sessionTranscriptSearchPaths(nil), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 	syncBeadFromStore(&session, store)
 
 	if got := session.Metadata["session_key"]; got != "" {
@@ -1544,7 +1546,7 @@ func TestRecordWakeFailure_Quarantine(t *testing.T) {
 		"wake_attempts": "4", // one below threshold
 	})
 
-	recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	recordWakeFailure(seedSessionInfo(session), sessionTranscriptSearchPaths(nil), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 	syncBeadFromStore(&session, store)
 
 	if session.Metadata["wake_attempts"] != "5" {
@@ -1567,7 +1569,7 @@ func TestRecordWakeFailure_BelowThreshold(t *testing.T) {
 		"wake_attempts": "1",
 	})
 
-	recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	recordWakeFailure(seedSessionInfo(session), sessionTranscriptSearchPaths(nil), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 	syncBeadFromStore(&session, store)
 
 	if session.Metadata["wake_attempts"] != "2" {
@@ -1588,7 +1590,7 @@ func TestRecordWakeFailure_ClearsStartedConfigHash(t *testing.T) {
 		"started_config_hash": "abc123",
 	})
 
-	recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	recordWakeFailure(seedSessionInfo(session), sessionTranscriptSearchPaths(nil), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 	syncBeadFromStore(&session, store)
 
 	if session.Metadata["session_key"] != "" {
@@ -1608,7 +1610,7 @@ func TestRecordWakeFailure_ClearsStartedConfigHashWhenSessionKeyAlreadyEmpty(t *
 		"started_config_hash": "abc123",
 	})
 
-	recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	recordWakeFailure(seedSessionInfo(session), sessionTranscriptSearchPaths(nil), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 	syncBeadFromStore(&session, store)
 
 	if session.Metadata["started_config_hash"] != "" {
@@ -3379,5 +3381,66 @@ func TestComputeWorkSet_RigScopedWorkQueryExpandsRigTemplate(t *testing.T) {
 	}
 	if got := seenCommands[betaDir]; !strings.Contains(got, "gc.routed_to=beta/worker") {
 		t.Errorf("beta probe command = %q, want expanded gc.routed_to=beta/worker", got)
+	}
+}
+
+// A transient runtime failure must not discard a conversation that launch
+// preflight can resume from a configured transcript root.
+func TestWakeFailureUsesConfiguredTranscriptRoots(t *testing.T) {
+	for _, path := range []string{"rapid exit", "launch failure"} {
+		t.Run(path, func(t *testing.T) {
+			now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+			clk := &clock.Fake{Time: now}
+			rp := forkClaude()
+			rp.Command = "claude"
+			rp.BuiltinAncestor = "claude"
+			candidate, cfg, store := newForkSessionCandidate(t, rp, "", "")
+			front := sessionFrontDoor(store)
+			patch := map[string]string{"provider": "claude", "last_woke_at": now.Add(-10 * time.Second).Format(time.RFC3339), "wake_attempts": "0"}
+			if err := front.ApplyPatch(candidate.info.ID, patch); err != nil {
+				t.Fatal(err)
+			}
+			candidate.info = candidate.info.ApplyPatch(patch)
+			key, hash := candidate.info.SessionKey, candidate.info.StartedConfigHash
+			root := filepath.Join(t.TempDir(), "isolated-claude", "projects")
+			cfg.Daemon.ObservePaths = []string{root}
+			project := filepath.Join(root, sessionlog.ProjectSlug(candidate.info.WorkDir))
+			if err := os.MkdirAll(project, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(project, key+".jsonl"), []byte("{}\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if path == "rapid exit" {
+				after, handled := checkStability(candidate.info, cfg, false, newDrainTracker(), front, clk, nil)
+				if !handled {
+					t.Fatal("rapid exit did not accrue wake failure")
+				}
+				if after.SessionKey != key || after.StartedConfigHash != hash {
+					t.Error("returned snapshot lost resumable conversation")
+				}
+			} else {
+				prepared, _, err := buildPreparedStart(candidate, cfg, store)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(prepared.cfg.Command, "--resume "+key) {
+					t.Fatalf("preflight did not resume existing conversation: %q", prepared.cfg.Command)
+				}
+				if commitStartResult(startResult{prepared: *prepared, err: fmt.Errorf("temporary runtime spawn failure"), started: now, finished: now}, front, clk, events.NewFake(), 0, ioDiscard{}, ioDiscard{}) {
+					t.Fatal("failed launch reported success")
+				}
+			}
+			persisted, err := store.Get(candidate.info.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if persisted.Metadata["session_key"] != key || persisted.Metadata["started_config_hash"] != hash || persisted.Metadata["continuation_reset_pending"] == "true" {
+				t.Errorf("transient failure discarded a valid configured-root conversation: key=%q hash=%q reset=%q", persisted.Metadata["session_key"], persisted.Metadata["started_config_hash"], persisted.Metadata["continuation_reset_pending"])
+			}
+			if persisted.Metadata["wake_attempts"] != "1" || persisted.Metadata["last_woke_at"] != "" {
+				t.Errorf("wake failure accounting changed: attempts=%q woke=%q", persisted.Metadata["wake_attempts"], persisted.Metadata["last_woke_at"])
+			}
+		})
 	}
 }

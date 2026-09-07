@@ -92,14 +92,14 @@ func (h *SessionHandle) historyWithRequest(req HistoryRequest) (*HistorySnapshot
 		return nil, ErrHistoryUnavailable
 	}
 
-	gcSessionID := strings.TrimSpace(info.SessionKey)
-	if gcSessionID == "" {
-		gcSessionID = info.ID
-	}
+	// A hook may publish the provider resume key after history is already
+	// visible. Keep the GC/logical identity anchored to the durable GC session;
+	// the adapter reports the provider's identity separately. Promoting a key
+	// must not look like a transcript replacement to structured stream clients.
 	snapshot, err := h.adapter.LoadHistory(LoadRequest{
 		Provider:              h.historyProvider(info),
 		TranscriptPath:        path,
-		GCSessionID:           gcSessionID,
+		GCSessionID:           info.ID,
 		LogicalConversationID: strings.TrimSpace(req.LogicalID),
 		TailCompactions:       req.TailCompactions,
 		BeforeEntryID:         req.BeforeEntryID,

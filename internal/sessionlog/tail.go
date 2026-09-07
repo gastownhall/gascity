@@ -204,6 +204,11 @@ type messageStopReason struct {
 func InferActivity(entryType, subtype string, message json.RawMessage) string {
 	switch entryType {
 	case "system":
+		if subtype == "api_error" {
+			// Claude's active retry notices are distinct from its terminal
+			// synthetic assistant API-error messages.
+			return "in-turn"
+		}
 		if subtype == "turn_duration" {
 			return "idle"
 		}

@@ -275,6 +275,11 @@ For PRs that touch `internal/runtime/fingerprint.go`:
 
 ## Known Limitations
 
+- The tmux Claude approval adapter accepts only `approve` (once) and `deny`,
+  matched to the current menu labels. It rejects `approve_always` and
+  `approve_accept_edits`, which older versions mapped to a fixed menu position.
+  That position can now grant workspace access or switch permission modes;
+  broader permission changes must be made in the native Claude UI.
 - Provider capabilities differ: interactive attach, idle waiting, and pending
   interactions are not uniformly supported everywhere.
 - Metadata persistence depends on the backing provider.

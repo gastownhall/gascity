@@ -32,6 +32,8 @@ type Entry struct {
 	// Classification
 	Type    string `json:"type"`    // user, assistant, system, tool_use, tool_result, progress, result, file-history-snapshot
 	Subtype string `json:"subtype"` // compact_boundary, init, status, etc. (system entries only)
+	// Claude records terminal API errors as synthetic assistant messages.
+	IsAPIErrorMessage bool `json:"isApiErrorMessage,omitempty"`
 
 	// Content
 	Message     json.RawMessage `json:"message"` // {role, content} for user/assistant

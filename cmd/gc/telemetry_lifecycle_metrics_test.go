@@ -422,7 +422,7 @@ func TestRecordWakeFailure_QuarantineRecordsMetric(t *testing.T) {
 			"session_name":  "gascity--gc__worker",
 		})
 
-		recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+		recordWakeFailure(seedSessionInfo(session), sessionTranscriptSearchPaths(nil), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 		syncBeadFromStore(&session, store)
 
 		if session.Metadata["quarantined_until"] == "" {
@@ -445,7 +445,7 @@ func TestRecordWakeFailure_QuarantineRecordsMetric(t *testing.T) {
 			"session_name":  "worker-1",
 		})
 
-		recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+		recordWakeFailure(seedSessionInfo(session), sessionTranscriptSearchPaths(nil), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 		syncBeadFromStore(&session, store)
 
 		if session.Metadata["quarantined_until"] != "" {
@@ -465,7 +465,7 @@ func TestRecordWakeFailure_QuarantineRecordsMetric(t *testing.T) {
 			"session_name":  "gc-city-dog-1",
 		})
 
-		recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+		recordWakeFailure(seedSessionInfo(session), sessionTranscriptSearchPaths(nil), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 		syncBeadFromStore(&session, store)
 
 		points := collectCounterDataPoints(t, reader, "gc.agent.quarantines.total")
@@ -912,7 +912,7 @@ func TestRecordWakeFailure_QuarantineLegacyPooledIdentity(t *testing.T) {
 			"session_name":  "s-dog-3-legacy",
 		})
 
-		recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+		recordWakeFailure(seedSessionInfo(session), sessionTranscriptSearchPaths(nil), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 		syncBeadFromStore(&session, store)
 
 		if session.Metadata["quarantined_until"] == "" {
@@ -940,7 +940,7 @@ func TestRecordWakeFailure_QuarantineLegacyPooledIdentity(t *testing.T) {
 			"session_name":  "s-fenrir-legacy",
 		})
 
-		recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, cfg))
+		recordWakeFailure(seedSessionInfo(session), sessionTranscriptSearchPaths(nil), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, cfg))
 		syncBeadFromStore(&session, store)
 
 		if session.Metadata["quarantined_until"] == "" {
