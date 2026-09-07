@@ -418,44 +418,99 @@ func TestHarnessDurationParsingDisarmsRatherThanGuesses(t *testing.T) {
 	}
 }
 
-// TestGoTestShardLeavesNothingHoldingTheCallersPipe pins that a completed
-// shard leaves no descendant holding the caller's stdout. CombinedOutput
-// reads until every inheritor of the write end closes it, so a single leaked
-// helper — the watchdog's own sleep(1) is the one that got this wrong —
-// blocks the caller for the whole remaining watchdog budget even though the
-// run itself finished in milliseconds. The armed budget here is far longer
-// than the deadline, so a regression hangs rather than merely slows.
+// TestGoTestShardLeavesNothingHoldingTheCallersPipe covers both ordinary
+// completion and signal traps: every watchdog writer must close before Wait
+// returns. WaitDelay makes a leaked pipe fail without wedging the suite.
 func TestGoTestShardLeavesNothingHoldingTheCallersPipe(t *testing.T) {
-	fixture := newReapFixture(t, `    exit 0`)
+	for _, tc := range []struct {
+		name   string
+		signal syscall.Signal
+	}{
+		{name: "completed"},
+		{name: "terminated", signal: syscall.SIGTERM},
+		{name: "interrupted", signal: syscall.SIGINT},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pidDir := t.TempDir()
+			watchdogPIDFile := filepath.Join(pidDir, "watchdog-sleep.pid")
+			productPIDFile := filepath.Join(pidDir, "product.pid")
+			runBody := fmt.Sprintf(`
+    attempts=0
+    while [ ! -s %q ]; do
+      attempts=$(( attempts + 1 ))
+      [ "$attempts" -lt 250 ] || exit 99
+      sleep 0.02
+    done
+    echo $$ > %q
+`, watchdogPIDFile, productPIDFile)
+			if tc.signal != 0 {
+				runBody += "    exec sleep 6\n"
+			}
+			fixture := newReapFixture(t, runBody)
+			// Record only this fixture's watchdog sleep for cleanup on RED.
+			// Both product and watchdog also have finite lifetimes, including
+			// when a package timeout prevents t.Cleanup from running.
+			writeExecutable(t, filepath.Join(fixture.binDir, "sleep"), fmt.Sprintf(`#!/bin/sh
+if [ "$1" = 8 ]; then echo $$ > %q; fi
+exec /bin/sleep "$@"
+`, watchdogPIDFile))
 
-	cmd := exec.Command(filepath.Join(fixture.repoRoot, "scripts", "test-go-test-shard"), "./example", "1", "2")
-	cmd.Dir = fixture.repoRoot
-	cmd.Env = []string{
-		"PATH=" + fixture.binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
-		"HOME=" + fixture.homeDir,
-		"SHELL=/bin/sh",
-		"TMPDIR=" + fixture.tmpDir,
-		"GC_TEST_NO_SLICE=1",
-		"SYS_USR_CGO_FALLBACK=0",
-		// A watchdog armed well past the test's own patience: whatever the
-		// runner leaves behind would hold the pipe for this long.
-		"GO_TEST_TIMEOUT=1h",
-		"GO_TEST_WATCHDOG_GRACE=1h",
-	}
-
-	done := make(chan error, 1)
-	go func() {
-		_, err := cmd.CombinedOutput()
-		done <- err
-	}()
-
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("shard runner failed: %v", err)
-		}
-	case <-time.After(60 * time.Second):
-		_ = cmd.Process.Kill()
-		t.Fatal("reading the shard runner's output blocked after the run finished: a descendant outlived the run holding the caller's pipe")
+			cmd := exec.Command(filepath.Join(fixture.repoRoot, "scripts", "test-go-test-shard"), "./example", "1", "2")
+			cmd.Dir = fixture.repoRoot
+			cmd.Env = []string{
+				"PATH=" + fixture.binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"HOME=" + fixture.homeDir,
+				"SHELL=/bin/sh",
+				"TMPDIR=" + fixture.tmpDir,
+				"GC_TEST_NO_SLICE=1",
+				"SYS_USR_CGO_FALLBACK=0",
+				"GO_TEST_TIMEOUT=4s",
+				"GO_TEST_WATCHDOG_GRACE=4s",
+			}
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			cmd.WaitDelay = 2 * time.Second
+			var output strings.Builder
+			cmd.Stdout, cmd.Stderr = &output, &output
+			if err := cmd.Start(); err != nil {
+				t.Fatalf("start shard runner: %v", err)
+			}
+			t.Cleanup(func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) })
+			done := make(chan error, 1)
+			go func() { done <- cmd.Wait() }()
+			watchdog := waitForPIDFile(t, watchdogPIDFile, 10*time.Second)
+			t.Cleanup(func() { _ = syscall.Kill(watchdog, syscall.SIGKILL) })
+			product := waitForPIDFile(t, productPIDFile, 10*time.Second)
+			t.Cleanup(func() { _ = syscall.Kill(product, syscall.SIGKILL) })
+			if tc.signal != 0 {
+				if err := cmd.Process.Signal(tc.signal); err != nil {
+					t.Fatalf("signal runner: %v", err)
+				}
+			}
+			select {
+			case err := <-done:
+				if errors.Is(err, exec.ErrWaitDelay) {
+					t.Fatal("watchdog outlived the runner holding the caller's pipe")
+				}
+				if tc.signal == 0 {
+					if err != nil {
+						t.Fatalf("shard runner failed: %v", err)
+					}
+				} else {
+					var exitErr *exec.ExitError
+					if !errors.As(err, &exitErr) {
+						t.Fatalf("runner did not preserve signal exit: %v", err)
+					}
+					if status, ok := exitErr.Sys().(syscall.WaitStatus); !ok || status.Signal() != tc.signal {
+						t.Fatalf("runner exit = %v, want signal %v", err, tc.signal)
+					}
+				}
+				if !processGone(watchdog, time.Second) {
+					t.Fatal("watchdog sleep survived the runner")
+				}
+			case <-time.After(12 * time.Second):
+				_ = cmd.Process.Kill()
+				t.Fatal("runner did not finish within the fixture bound")
+			}
+		})
 	}
 }
