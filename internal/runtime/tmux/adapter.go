@@ -276,7 +276,12 @@ func (p *Provider) Interrupt(name string) error {
 		if parseApprovalPrompt(pane) != nil {
 			// The approval dialog advertises Escape to cancel; Ctrl-C can leave
 			// it open. Never select a numbered permission option to interrupt.
-			return p.tm.SendKeysRaw(name, "Escape")
+			p.tm.cancelCopyModeIfParked(name)
+			err := p.tm.SendKeysRaw(name, "Escape")
+			if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+				return nil
+			}
+			return err
 		}
 	}
 	if p.tm.requiresHiddenAttachedInterrupt(name) && !p.tm.IsSessionAttached(name) {

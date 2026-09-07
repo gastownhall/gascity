@@ -1532,12 +1532,16 @@ func claudeProjectSlugCandidates(workDir string) []string {
 	seenSlugs := make(map[string]bool)
 	var slugs []string
 	for _, path := range paths {
-		slug := ProjectSlug(path)
-		if seenSlugs[slug] {
-			continue
+		legacy := ProjectSlug(path)
+		// Current Claude also replaces underscores. Keep the earlier spelling
+		// as a candidate so existing keyed transcripts remain resumable.
+		for _, slug := range []string{strings.ReplaceAll(legacy, "_", "-"), legacy} {
+			if seenSlugs[slug] {
+				continue
+			}
+			seenSlugs[slug] = true
+			slugs = append(slugs, slug)
 		}
-		seenSlugs[slug] = true
-		slugs = append(slugs, slug)
 	}
 	return slugs
 }

@@ -12,6 +12,8 @@ import (
 type claudeInterruptExecutor struct {
 	panes      []string
 	captureErr error
+	sendErr    error
+	parked     bool
 	captures   [][]string
 	keys       []string
 }
@@ -34,9 +36,19 @@ func (f *claudeInterruptExecutor) execute(args []string) (string, error) {
 			f.panes = f.panes[1:]
 		}
 		return pane, nil
+	case "display-message":
+		if f.parked {
+			return "1", nil
+		}
+		return "0", nil
 	case "send-keys":
-		f.keys = append(f.keys, args[len(args)-1])
-		return "", nil
+		key := args[len(args)-1]
+		f.keys = append(f.keys, key)
+		if key == "cancel" {
+			f.parked = false
+			return "", nil
+		}
+		return "", f.sendErr
 	default:
 		return "", errors.New("unexpected command: " + strings.Join(args, " "))
 	}
@@ -113,6 +125,32 @@ func TestClaudeInterruptSettlesOnlyAfterCurrentComposerReturns(t *testing.T) {
 	for _, args := range fe.captures {
 		if args[len(args)-1] != "-0" {
 			t.Fatalf("observed history instead of current viewport: %q", args)
+		}
+	}
+}
+
+func TestClaudeInterruptExitsCopyModeBeforeCancelingApproval(t *testing.T) {
+	fe := &claudeInterruptExecutor{panes: []string{currentClaudeApprovalPane(t)}, parked: true}
+	tm := NewTmux()
+	tm.exec = fe
+	if err := (&Provider{tm: tm}).Interrupt("custom-claude-worker"); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(fe.keys, []string{"cancel", "Escape"}) || fe.parked {
+		t.Fatalf("interrupt did not leave copy mode before Escape: keys=%q parked=%v", fe.keys, fe.parked)
+	}
+}
+
+func TestClaudeInterruptVanishedApprovalIsBestEffort(t *testing.T) {
+	for _, gone := range []error{ErrSessionNotFound, ErrNoServer} {
+		fe := &claudeInterruptExecutor{panes: []string{currentClaudeApprovalPane(t)}, sendErr: gone}
+		tm := NewTmux()
+		tm.exec = fe
+		if err := (&Provider{tm: tm}).Interrupt("custom-claude-worker"); err != nil {
+			t.Fatalf("vanished session: %v", err)
+		}
+		if !reflect.DeepEqual(fe.keys, []string{"Escape"}) {
+			t.Fatalf("unexpected keys: %q", fe.keys)
 		}
 	}
 }
