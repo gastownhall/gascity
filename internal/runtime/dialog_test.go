@@ -1304,7 +1304,7 @@ func TestPollsUntilDialogAppears(t *testing.T) {
 			if n < 3 {
 				return "starting up...", nil
 			}
-			return "Quick safety check\ntrust this folder", nil
+			return claudeWorkspaceTrustFixture(t), nil
 		},
 		func(...string) error {
 			return nil

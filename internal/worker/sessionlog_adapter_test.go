@@ -1157,10 +1157,12 @@ func TestSessionLogAdapterLoadHistoryCodex(t *testing.T) {
 	path := filepath.Join(dayDir, "rollout-1.jsonl")
 	lines := []string{
 		fmt.Sprintf(`{"timestamp":"2026-01-02T00:00:00Z","type":"session_meta","payload":{"cwd":%q}}`, workDir),
+		`{"timestamp":"2026-01-02T00:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}`,
 		`{"timestamp":"2026-01-02T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"hello codex"}]}}`,
 		`{"timestamp":"2026-01-02T00:00:02Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"call-1","name":"apply_patch","input":{"patch":"*** Begin Patch\n*** End Patch"}}}`,
 		`{"timestamp":"2026-01-02T00:00:03Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-1","output":{"output":"Success. Updated files."}}}`,
 		`{"timestamp":"2026-01-02T00:00:04Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"done"}]}}`,
+		`{"timestamp":"2026-01-02T00:00:05Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}`,
 	}
 	writeLines(t, path, lines...)
 
@@ -1181,6 +1183,9 @@ func TestSessionLogAdapterLoadHistoryCodex(t *testing.T) {
 
 	if snapshot.LogicalConversationID != "codex-logical" {
 		t.Fatalf("LogicalConversationID = %q, want codex-logical", snapshot.LogicalConversationID)
+	}
+	if snapshot.TailState.Activity != TailActivityIdle {
+		t.Fatalf("TailState.Activity = %q, want %q after matching Codex completion", snapshot.TailState.Activity, TailActivityIdle)
 	}
 	if snapshot.Continuity.Status != ContinuityStatusContinuous {
 		t.Fatalf("Continuity.Status = %q, want %q", snapshot.Continuity.Status, ContinuityStatusContinuous)

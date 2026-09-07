@@ -36,56 +36,140 @@ func (p *Provider) Respond(name string, response runtime.InteractionResponse) er
 var (
 	// "This command requires approval" or "Approve edits?" patterns
 	requiresApprovalRe = regexp.MustCompile(`(?m)(This command requires approval|Approve edits\?)`)
+	proceedRe          = regexp.MustCompile(`(?m)^\s*Do you want to proceed\?\s*$`)
+	approvalOptionRe   = regexp.MustCompile(`^\s*(❯)?\s*([1-9])\. (.+?)\s*$`)
 
 	// Tool call header: "● ToolName(args)" or "● ToolName"
 	// Uses greedy match to last ")" to handle nested parens in args.
 	toolHeaderRe = regexp.MustCompile(`● (\w+)(?:\((.+)\))?`)
 )
 
-// parsedApproval holds the parsed approval prompt from a tmux pane capture.
+// approvalOption binds a visible label to its literal selection key.
+type approvalOption struct {
+	Key   string
+	Label string
+}
+
+// parsedApproval holds the active tool request and its currently displayed menu.
 type parsedApproval struct {
 	ToolName string
 	Input    string
+	Options  []approvalOption
 }
 
 // parseApprovalPrompt parses the tmux pane text for a Claude Code approval prompt.
 // Returns nil if no approval prompt is found or if the prompt can't be associated
-// with a tool header (avoids false positives from conversational text).
+// with a tool header or bordered tool modal (avoids conversational matches).
 func parseApprovalPrompt(paneText string) *parsedApproval {
-	if !requiresApprovalRe.MatchString(paneText) {
+	questions := proceedRe.FindAllStringIndex(paneText, -1)
+	if len(questions) == 0 {
 		return nil
 	}
-
-	// Find the tool header closest to (before) the approval text.
-	// This prevents binding a historical tool output to the active prompt.
-	approvalIdx := requiresApprovalRe.FindStringIndex(paneText)
-	if approvalIdx == nil {
+	question := questions[len(questions)-1]
+	options := parseApprovalOptions(paneText[question[1]:])
+	if options == nil {
 		return nil
 	}
-	textBeforeApproval := paneText[:approvalIdx[0]]
-
-	// Find the LAST tool header before the approval marker.
+	start := 0
+	if len(questions) > 1 {
+		// Earlier approval dialogs in scrollback cannot supply the current tool.
+		start = questions[len(questions)-2][1]
+	}
+	before := paneText[start:question[0]]
+	// Claude 2.1.263 renders a bordered Bash modal without either the old
+	// approval marker or a structured tool-call bullet. Associate its command
+	// only with that modal, never with preceding conversational output.
+	lines := strings.Split(before, "\n")
+	for i := len(lines) - 1; i > 0; i-- {
+		if strings.TrimSpace(lines[i]) != "Bash command" {
+			continue
+		}
+		if toolHeaderRe.MatchString(strings.Join(lines[i+1:], "\n")) {
+			// A newer legacy tool header owns this prompt even when the prior
+			// Bash dialog's question/menu was erased from the captured pane.
+			break
+		}
+		border := strings.TrimSpace(lines[i-1])
+		if len([]rune(border)) < 8 || strings.Trim(border, "─") != "" {
+			return nil
+		}
+		var input []string
+		for _, line := range lines[i+1:] {
+			if strings.HasPrefix(line, "   ") && strings.TrimSpace(line) != "" {
+				input = append(input, strings.TrimSpace(line))
+			}
+		}
+		if len(input) == 0 {
+			return nil
+		}
+		return &parsedApproval{ToolName: "Bash", Input: strings.Join(input, "\n"), Options: options}
+	}
+	markers := requiresApprovalRe.FindAllStringIndex(before, -1)
+	if len(markers) == 0 {
+		return nil
+	}
+	textBeforeApproval := before[:markers[len(markers)-1][0]]
 	matches := toolHeaderRe.FindAllStringSubmatch(textBeforeApproval, -1)
 	if len(matches) == 0 {
-		// No tool header found — can't associate this approval with a tool.
-		// Return nil to avoid false positives from conversational output.
 		return nil
 	}
 	lastMatch := matches[len(matches)-1]
-
-	approval := &parsedApproval{
-		ToolName: lastMatch[1],
-	}
-	if len(lastMatch) >= 3 && lastMatch[2] != "" {
-		approval.Input = lastMatch[2]
-	}
-
-	// Try to extract the command/content shown between the tool header and approval prompt.
+	approval := &parsedApproval{ToolName: lastMatch[1], Input: lastMatch[2], Options: options}
 	if approval.Input == "" {
 		approval.Input = extractToolInput(textBeforeApproval, approval.ToolName)
 	}
-
 	return approval
+}
+
+// Require a selected, numbered menu with unambiguous one-time approval and
+// denial. Wrapped labels are retained, including workspace/mode escalation
+// choices, but those choices are never mapped to an approval action.
+func parseApprovalOptions(text string) []approvalOption {
+	var options []approvalOption
+	seen := make(map[string]bool)
+	selected, yes, no := 0, 0, 0
+	footer := false
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if footer {
+			return nil
+		}
+		if strings.HasPrefix(trimmed, "Esc to cancel") {
+			footer = true
+			continue
+		}
+		match := approvalOptionRe.FindStringSubmatch(line)
+		if match != nil {
+			if seen[match[2]] {
+				return nil
+			}
+			seen[match[2]] = true
+			if match[1] != "" {
+				selected++
+			}
+			options = append(options, approvalOption{Key: match[2], Label: match[3]})
+			continue
+		}
+		if len(options) == 0 || !strings.HasPrefix(line, "      ") {
+			return nil
+		}
+		options[len(options)-1].Label += " " + trimmed
+	}
+	for _, option := range options {
+		if option.Label == "Yes" {
+			yes++
+		}
+		if option.Label == "No" {
+			no++
+		}
+	}
+	if selected != 1 || yes != 1 || no != 1 {
+		return nil
+	}
+	return options
 }
 
 // extractToolInput extracts the indented tool input block from pane text.
@@ -128,12 +212,7 @@ func extractToolInput(textBeforeApproval, toolName string) string {
 	if len(captured) == 0 {
 		return ""
 	}
-	result := strings.Join(captured, "\n")
-	// Truncate very long inputs
-	if len(result) > 500 {
-		result = result[:500] + "…"
-	}
-	return result
+	return strings.Join(captured, "\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -147,7 +226,11 @@ type approvalDedup struct {
 }
 
 func approvalHash(a *parsedApproval) string {
-	h := sha256.Sum256([]byte(a.ToolName + "\x00" + a.Input))
+	identity := a.ToolName + "\x00" + a.Input
+	for _, option := range a.Options {
+		identity += "\x00" + option.Key + "\x00" + option.Label
+	}
+	h := sha256.Sum256([]byte(identity))
 	return fmt.Sprintf("%x", h[:8])
 }
 
@@ -208,11 +291,15 @@ func (t *Tmux) Pending(name string) (*runtime.PendingInteraction, error) {
 		prompt = "Allow " + approval.ToolName + "?"
 	}
 
+	options := make([]string, len(approval.Options))
+	for i, option := range approval.Options {
+		options[i] = option.Label
+	}
 	return &runtime.PendingInteraction{
 		RequestID: requestID,
 		Kind:      "approval",
 		Prompt:    prompt,
-		Options:   []string{"Yes", "Yes, and don't ask again", "No"},
+		Options:   options,
 		Metadata: map[string]string{
 			"tool_name": approval.ToolName,
 			"source":    "tmux",
@@ -226,7 +313,9 @@ const (
 )
 
 // Respond sends the appropriate keystroke to the tmux pane to approve or deny
-// a pending tool approval, then verifies the prompt was consumed.
+// a pending tool approval, then verifies the prompt was consumed. Only approve
+// (once) and deny are supported; persistent approval and permission-mode changes
+// must be made in the native UI, whose menu positions vary between releases.
 func (t *Tmux) Respond(name string, response runtime.InteractionResponse) error {
 	// Verify the expected approval is still present before sending keys.
 	paneText, err := t.CapturePane(name, 40)
@@ -238,6 +327,9 @@ func (t *Tmux) Respond(name string, response runtime.InteractionResponse) error 
 	}
 	current := parseApprovalPrompt(paneText)
 	if current == nil {
+		if proceedRe.MatchString(paneText) {
+			return fmt.Errorf("cannot safely identify the current approval menu")
+		}
 		t.approvalDedup().clear(name)
 		return nil // prompt already gone
 	}
@@ -249,20 +341,25 @@ func (t *Tmux) Respond(name string, response runtime.InteractionResponse) error 
 		}
 	}
 
-	// Map action to keystroke. Claude's prompt shows:
-	// 1. Yes
-	// 2. Yes, and don't ask again for: <tool>
-	// 3. No
-	var key string
+	// Select by the current label, never a fixed position: newer Claude
+	// menus place "switch to auto mode" at the former denial position.
+	var label string
 	switch response.Action {
 	case "approve":
-		key = "1"
-	case "approve_accept_edits", "approve_always":
-		key = "2"
+		label = "Yes"
 	case "deny":
-		key = "3"
+		label = "No"
 	default:
-		return fmt.Errorf("unknown action %q", response.Action)
+		return fmt.Errorf("unsupported approval action %q; only approve-once or deny is supported", response.Action)
+	}
+	var key string
+	for _, option := range current.Options {
+		if option.Label == label {
+			key = option.Key
+		}
+	}
+	if key == "" {
+		return fmt.Errorf("current approval menu has no unambiguous %q option", label)
 	}
 
 	// Exit copy-mode first if the pane is parked (the ga-c4w wheel binding),

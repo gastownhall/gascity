@@ -1260,11 +1260,14 @@ func (m *Manager) Suspend(id string) error {
 			}
 		}
 
-		// Update state and suspension timestamp together so stores with a
-		// write-through cache preserve one coherent lifecycle transition.
+		// Record the intentional stop with its state. The reconciler may heal
+		// suspended to asleep; retaining last_woke_at would then classify this
+		// stop as a crash or churn and discard the saved conversation key.
 		if err := m.store.Update(id, beads.UpdateOpts{Metadata: map[string]string{
 			"state":        string(StateSuspended),
 			"suspended_at": time.Now().UTC().Format(time.RFC3339),
+			"sleep_reason": string(SleepReasonUserHold),
+			"last_woke_at": "",
 		}}); err != nil {
 			return fmt.Errorf("updating suspension state: %w", err)
 		}

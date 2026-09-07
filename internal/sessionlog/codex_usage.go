@@ -1,8 +1,10 @@
 package sessionlog
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 )
 
@@ -26,9 +28,10 @@ type codexUsageInfo struct {
 // codexUsagePayload is the subset of an event_msg payload needed for usage
 // extraction. Info is null on rate-limit-only refreshes.
 type codexUsagePayload struct {
-	Type  string          `json:"type"`
-	Model string          `json:"model"` // turn_context payloads only
-	Info  *codexUsageInfo `json:"info"`
+	Type   string          `json:"type"`
+	Model  string          `json:"model"` // turn_context payloads only
+	Info   *codexUsageInfo `json:"info"`
+	TurnID string          `json:"turn_id"`
 }
 
 // ExtractCodexTailMeta reads model and context metadata from the tail of a
@@ -41,7 +44,10 @@ type codexUsagePayload struct {
 // a later distinct total can be paired only with an in-window turn_context.
 // When no attributable usage exists, the latest turn_context still supplies
 // model-only metadata. Codex input_tokens already includes cached_input_tokens,
-// so context occupancy uses input_tokens directly.
+// so context occupancy uses input_tokens directly. Activity follows identified
+// task lifecycle events, not assistant text or usage. If the tail omits the
+// lifecycle needed to establish activity, a bounded backwards scan stops at the
+// latest identified start/context without expanding the usage attribution window.
 func ExtractCodexTailMeta(path string) (*TailMeta, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -53,7 +59,15 @@ func ExtractCodexTailMeta(path string) (*TailMeta, error) {
 	if err != nil {
 		return nil, err
 	}
-	return extractCodexTailMetaFromLines(splitLines(data), startsMidLine, truncated), nil
+	scan := scanCodexTailMetaFromLines(splitLines(data), startsMidLine, truncated)
+	if truncated && scan.activity.state == "" && !scan.malformedTail {
+		activity, err := readCodexActivity(f)
+		if err != nil {
+			return nil, err
+		}
+		scan.activity = activity
+	}
+	return scan.result(), nil
 }
 
 // ExtractCodexTailMetaFromSearchPaths reads Codex tail metadata only after
@@ -68,6 +82,10 @@ func ExtractCodexTailMetaFromSearchPaths(searchPaths []string, path string) (*Ta
 }
 
 func extractCodexTailMetaFromLines(lines [][]byte, startsMidLine, truncated bool) *TailMeta {
+	return scanCodexTailMetaFromLines(lines, startsMidLine, truncated).result()
+}
+
+func scanCodexTailMetaFromLines(lines [][]byte, startsMidLine, truncated bool) *codexTailScan {
 	scan := &codexTailScan{
 		truncated:          truncated,
 		anchorFirstTotal:   truncated,
@@ -76,6 +94,7 @@ func extractCodexTailMetaFromLines(lines [][]byte, startsMidLine, truncated bool
 	for i := 0; i < len(lines); i++ {
 		var entry codexRawEntry
 		if err := json.Unmarshal(lines[i], &entry); err != nil {
+			scan.activity = codexActivity{}
 			if i == len(lines)-1 && (i != 0 || !startsMidLine) {
 				scan.malformedTail = true
 			}
@@ -84,8 +103,13 @@ func extractCodexTailMetaFromLines(lines [][]byte, startsMidLine, truncated bool
 
 		var payload codexUsagePayload
 		if err := json.Unmarshal(entry.Payload, &payload); err != nil {
+			scan.activity = codexActivity{}
+			if i == len(lines)-1 {
+				scan.malformedTail = true
+			}
 			continue
 		}
+		scan.activity.observe(entry.Type, payload)
 		if entry.Type == "turn_context" && payload.Model != "" {
 			scan.latestModel = payload.Model
 			continue
@@ -94,7 +118,119 @@ func extractCodexTailMetaFromLines(lines [][]byte, startsMidLine, truncated bool
 			scan.observeTokenCount(payload.Info)
 		}
 	}
-	return scan.result()
+	return scan
+}
+
+// codexActivity requires an in-order start/context for the same turn before
+// accepting its terminal event. A late prior-turn completion cannot end the
+// current task. Missing identities or malformed records discard that evidence.
+type codexActivity struct {
+	turnID string
+	state  string
+}
+
+func (a *codexActivity) observe(entryType string, payload codexUsagePayload) {
+	if entryType == "turn_context" || (entryType == "event_msg" && payload.Type == "task_started") {
+		*a = codexActivity{}
+		if payload.TurnID != "" {
+			a.turnID, a.state = payload.TurnID, "in-turn"
+		}
+		return
+	}
+	if entryType != "event_msg" || (payload.Type != "task_complete" && payload.Type != "turn_aborted") {
+		return
+	}
+	switch payload.TurnID {
+	case "":
+		*a = codexActivity{}
+	case a.turnID:
+		a.state = "idle"
+	}
+}
+
+func readCodexActivity(r io.ReadSeeker) (codexActivity, error) {
+	offset, err := r.Seek(0, io.SeekEnd)
+	if err != nil {
+		return codexActivity{}, err
+	}
+	terminals := make(map[string]bool)
+	// Only the current JSONL record is retained across 64 KiB chunks. Keep
+	// fragments instead of repeatedly copying a large tool-output line.
+	var fragments [][]byte
+	lineBytes := 0
+	appendFragment := func(fragment []byte) error {
+		lineBytes += len(fragment)
+		// Match ReadCodexFile's maximum rollout record size.
+		if lineBytes > 50*1024*1024 {
+			return fmt.Errorf("scanning codex activity: rollout record exceeds 50 MiB")
+		}
+		if len(fragment) > 0 {
+			fragments = append(fragments, fragment)
+		}
+		return nil
+	}
+	observeLine := func() (codexActivity, bool) {
+		if lineBytes == 0 {
+			return codexActivity{}, false
+		}
+		line := make([]byte, lineBytes)
+		position := 0
+		for i := len(fragments) - 1; i >= 0; i-- {
+			position += copy(line[position:], fragments[i])
+		}
+		fragments, lineBytes = nil, 0
+		var entry codexRawEntry
+		var payload codexUsagePayload
+		if json.Unmarshal(line, &entry) != nil || json.Unmarshal(entry.Payload, &payload) != nil {
+			// An unreadable record could hide a newer start. Do not reach past
+			// that barrier and report an older task's completion as current.
+			return codexActivity{}, true
+		}
+		if entry.Type == "turn_context" || (entry.Type == "event_msg" && payload.Type == "task_started") {
+			var activity codexActivity
+			activity.observe(entry.Type, payload)
+			if activity.turnID != "" && terminals[activity.turnID] {
+				activity.state = "idle"
+			}
+			return activity, true
+		}
+		if entry.Type == "event_msg" && (payload.Type == "task_complete" || payload.Type == "turn_aborted") {
+			if payload.TurnID == "" {
+				return codexActivity{}, true
+			}
+			terminals[payload.TurnID] = true
+		}
+		return codexActivity{}, false
+	}
+	for offset > 0 {
+		size := min(offset, int64(tailChunkSize))
+		offset -= size
+		if _, err := r.Seek(offset, io.SeekStart); err != nil {
+			return codexActivity{}, err
+		}
+		chunk := make([]byte, int(size))
+		if _, err := io.ReadFull(r, chunk); err != nil {
+			return codexActivity{}, fmt.Errorf("reading codex activity: %w", err)
+		}
+		for {
+			newline := bytes.LastIndexByte(chunk, '\n')
+			if newline < 0 {
+				break
+			}
+			if err := appendFragment(chunk[newline+1:]); err != nil {
+				return codexActivity{}, err
+			}
+			if activity, done := observeLine(); done {
+				return activity, nil
+			}
+			chunk = chunk[:newline]
+		}
+		if err := appendFragment(chunk); err != nil {
+			return codexActivity{}, err
+		}
+	}
+	activity, _ := observeLine()
+	return activity, nil
 }
 
 // codexTailScan folds Codex rollout tail entries into the latest model and the
@@ -112,6 +248,7 @@ type codexTailScan struct {
 	usageModelsByTotal  map[int]string
 	malformedTail       bool
 	anchorFirstTotal    bool
+	activity            codexActivity
 }
 
 // observeTokenCount folds one non-nil token_count event payload into the scan.
@@ -166,10 +303,10 @@ func (s *codexTailScan) result() *TailMeta {
 		// model with the prior turn's usage would produce inconsistent context.
 		model = s.usageModel
 	}
-	if model == "" && s.latestUsage == nil && !s.malformedTail {
+	if model == "" && s.latestUsage == nil && !s.malformedTail && s.activity.state == "" {
 		return nil
 	}
-	result := &TailMeta{Model: model, MalformedTail: s.malformedTail}
+	result := &TailMeta{Model: model, MalformedTail: s.malformedTail, Activity: s.activity.state}
 	if s.latestUsage == nil {
 		return result
 	}
@@ -285,26 +422,8 @@ func ExtractCodexTailUsage(path string) ([]TailUsage, error) {
 		if entry.Type != "event_msg" || payload.Type != "token_count" || payload.Info == nil {
 			continue
 		}
-		last := payload.Info.LastTokenUsage
-		input := last.InputTokens - last.CachedInputTokens
-		if input < 0 {
-			input = 0
-		}
-		contextWindowTokens := 0
-		if payload.Info.ModelContextWindow != nil {
-			contextWindowTokens = *payload.Info.ModelContextWindow
-		}
-		u := TailUsage{
-			EntryUUID:           entry.Timestamp,
-			MessageID:           fmt.Sprintf("total:%d", payload.Info.TotalTokenUsage.TotalTokens),
-			Model:               turnModel,
-			InputTokens:         input,
-			OutputTokens:        last.OutputTokens,
-			ReasoningTokens:     last.ReasoningOutputTokens,
-			CacheReadTokens:     last.CachedInputTokens,
-			ContextWindowTokens: contextWindowTokens,
-		}
-		if u.InputTokens <= 0 && u.OutputTokens <= 0 && u.ReasoningTokens <= 0 && u.CacheReadTokens <= 0 {
+		u, ok := codexInvocationUsage(entry, payload, turnModel)
+		if !ok {
 			continue
 		}
 		if i, seen := byMessageID[u.MessageID]; seen {
@@ -333,4 +452,61 @@ func ExtractCodexTailUsageFromSearchPaths(searchPaths []string, path string) ([]
 		return nil, err
 	}
 	return ExtractCodexTailUsage(safePath)
+}
+
+// codexHistoryUsage uses the records already read by the full transcript parser.
+// First observations fix the invocation timestamp and model: later duplicate
+// cumulative snapshots must not move usage onto a newer assistant message.
+func codexHistoryUsage(entries []codexEntry) []TailUsage {
+	var usages []TailUsage
+	seen := make(map[string]bool)
+	var model string
+	for _, entry := range entries {
+		if entry.raw.Type != "turn_context" && entry.raw.Type != "event_msg" {
+			continue
+		}
+		var payload codexUsagePayload
+		if json.Unmarshal(entry.raw.Payload, &payload) != nil {
+			continue
+		}
+		if entry.raw.Type == "turn_context" && payload.Model != "" {
+			model = payload.Model
+		}
+		if entry.raw.Type != "event_msg" || payload.Type != "token_count" || payload.Info == nil {
+			continue
+		}
+		usage, ok := codexInvocationUsage(entry.raw, payload, model)
+		if !ok || seen[usage.MessageID] {
+			continue
+		}
+		seen[usage.MessageID] = true
+		usages = append(usages, usage)
+	}
+	return usages
+}
+
+func codexInvocationUsage(entry codexRawEntry, payload codexUsagePayload, model string) (TailUsage, bool) {
+	last := payload.Info.LastTokenUsage
+	input := last.InputTokens - last.CachedInputTokens
+	if input < 0 {
+		input = 0
+	}
+	contextWindowTokens := 0
+	if payload.Info.ModelContextWindow != nil {
+		contextWindowTokens = *payload.Info.ModelContextWindow
+	}
+	u := TailUsage{
+		EntryUUID:           entry.Timestamp,
+		MessageID:           fmt.Sprintf("total:%d", payload.Info.TotalTokenUsage.TotalTokens),
+		Model:               model,
+		InputTokens:         input,
+		OutputTokens:        last.OutputTokens,
+		ReasoningTokens:     last.ReasoningOutputTokens,
+		CacheReadTokens:     last.CachedInputTokens,
+		ContextWindowTokens: contextWindowTokens,
+	}
+	if u.InputTokens <= 0 && u.OutputTokens <= 0 && u.ReasoningTokens <= 0 && u.CacheReadTokens <= 0 {
+		return TailUsage{}, false
+	}
+	return u, true
 }

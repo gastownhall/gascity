@@ -33,7 +33,7 @@ func TestRecoverRunningPendingCreate_BuildFailResidueMatchesStore(t *testing.T) 
 	// pre-flight guard fires clearStaleResumeKeyMetadata (persisting started_config_hash="")
 	// before validateForkLaunch aborts on fork + wake_mode=fresh.
 	prevProbe := staleResumeKeyProbe
-	staleResumeKeyProbe = func(_, _, _ string) (present, probeable bool) { return false, true }
+	staleResumeKeyProbe = func(_ []string, _, _, _ string) (present, probeable bool) { return false, true }
 	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
 
 	ok, residue := recoverRunningPendingCreate(candidate.info, candidate.tp, cfg, store, clock.Real{}, nil)
@@ -356,7 +356,7 @@ func TestBuildPreparedStart_ForkValidationNotBypassedByStaleKeyRecovery(t *testi
 			prevProbe := staleResumeKeyProbe
 			// The own session_key is stale (transcript gone) so recovery fires; the
 			// parent's presence is controlled per case.
-			staleResumeKeyProbe = func(_, _, key string) (present, probeable bool) {
+			staleResumeKeyProbe = func(_ []string, _, _, key string) (present, probeable bool) {
 				if key == parentSID {
 					return tc.parentPresent, true
 				}

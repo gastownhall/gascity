@@ -174,9 +174,10 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 	}
 
 	return &Session{
-		ID:          codexSessionID(path),
-		Messages:    messages,
-		Diagnostics: diagnostics,
+		ID:            codexSessionID(path),
+		Messages:      messages,
+		Diagnostics:   diagnostics,
+		DetachedUsage: codexHistoryUsage(entries),
 	}, nil
 }
 

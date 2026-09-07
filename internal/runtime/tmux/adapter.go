@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/overlay"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
+	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -261,9 +262,28 @@ func (p *Provider) Stop(name string) error {
 	return err
 }
 
-// Interrupt sends Ctrl-C to the named tmux session.
+// Interrupt sends Ctrl-C, or cancels a recognized Claude approval with Escape.
 // Best-effort: returns nil if the session doesn't exist.
 func (p *Provider) Interrupt(name string) error {
+	if sessionlog.ProviderFamily(p.tm.providerEnv(name)) == "claude" {
+		pane, err := p.tm.CapturePane(name, 0)
+		if err != nil {
+			if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+				return nil
+			}
+			return fmt.Errorf("observing Claude before interrupt: %w", err)
+		}
+		if parseApprovalPrompt(pane) != nil {
+			// The approval dialog advertises Escape to cancel; Ctrl-C can leave
+			// it open. Never select a numbered permission option to interrupt.
+			p.tm.cancelCopyModeIfParked(name)
+			err := p.tm.SendKeysRaw(name, "Escape")
+			if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+				return nil
+			}
+			return err
+		}
+	}
 	if p.tm.requiresHiddenAttachedInterrupt(name) && !p.tm.IsSessionAttached(name) {
 		if err := p.tm.ensureHiddenAttachedClient(name); err != nil {
 			return fmt.Errorf("preparing detached interrupt: %w", err)
@@ -1235,7 +1255,9 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 	// Always attempted when process names are set, since any Claude-like
 	// agent may show a trust dialog regardless of EmitsPermissionWarning.
 	if shouldAcceptStartupDialogs(cfg) {
-		_ = ops.acceptStartupDialogs(ctx, name) // best-effort
+		if err := ops.acceptStartupDialogs(ctx, name); errors.Is(err, runtime.ErrUnrecognizedWorkspaceTrust) {
+			return fmt.Errorf("accepting startup dialogs: %w", err)
+		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -1262,7 +1284,9 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 	// ready screen. Re-run dialog acceptance after readiness so late dialogs do
 	// not strand the session in an unusable startup state.
 	if shouldAcceptStartupDialogs(cfg) {
-		_ = ops.acceptStartupDialogs(ctx, name) // best-effort
+		if err := ops.acceptStartupDialogs(ctx, name); errors.Is(err, runtime.ErrUnrecognizedWorkspaceTrust) {
+			return fmt.Errorf("accepting startup dialogs after readiness: %w", err)
+		}
 		if err := ctx.Err(); err != nil {
 			return ignoreDeadlineIfSessionAlive(ops, name, err)
 		}

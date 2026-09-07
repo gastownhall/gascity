@@ -683,7 +683,7 @@ func persistPrimeHookProviderSessionKey(hookProviderSessionID string, stderr io.
 	// absence as "loading session %q" and rejects non-session beads with
 	// ErrSessionNotFound; on this hook path both surface through the existing
 	// warn-and-return diagnostic (a foreign/absent bead never reaches the write),
-	// and the codex guard now resolves the family off Info (Provider precedence:
+	// and the stdin guard resolves the family off Info (Provider precedence:
 	// builtin_ancestor → provider_kind → provider, all carried on Info).
 	sessFront := sessionFrontDoor(sessStore)
 	info, err := sessFront.Get(gcSessionID)
@@ -693,9 +693,15 @@ func persistPrimeHookProviderSessionKey(hookProviderSessionID string, stderr io.
 		warn("%v", err)
 		return
 	}
-	if fromHookStdin && sessionProviderFamily(info) != "codex" {
-		warn("hook stdin provider session id is only accepted for codex session %q", gcSessionID)
-		return
+	if fromHookStdin {
+		// Both providers report their authoritative session_id in SessionStart
+		// hook JSON. Keep other families on their existing environment path.
+		switch sessionProviderFamily(info) {
+		case "codex", "claude":
+		default:
+			warn("hook stdin provider session id is only accepted for codex/claude session %q", gcSessionID)
+			return
+		}
 	}
 	if existing := strings.TrimSpace(info.SessionKey); existing != "" {
 		return

@@ -966,6 +966,7 @@ func TestExecutePlannedStarts_FreshWakeAfterDrainRetainsStartupContext(t *testin
 	}
 	if startCfg == nil {
 		t.Fatalf("expected Start call for mayor, calls=%#v", sp.Calls)
+		return
 	}
 	if !strings.HasPrefix(startCfg.Command, "claude --dangerously-skip-permissions --session-id ") {
 		t.Fatalf("Start command = %q, want fresh session-id launch", startCfg.Command)
@@ -7573,7 +7574,7 @@ func TestStaleResumeKeyProbe(t *testing.T) {
 
 	// Missing transcript: claude is probeable and reports absent, so the guard
 	// would treat the resume key as stale.
-	if present, probeable := staleResumeKeyProbe("claude", workDir, key); !probeable || present {
+	if present, probeable := staleResumeKeyProbe(sessionlog.DefaultSearchPaths(), "claude", workDir, key); !probeable || present {
 		t.Fatalf("missing claude transcript: probeable=%v present=%v, want probeable && !present", probeable, present)
 	}
 
@@ -7587,20 +7588,20 @@ func TestStaleResumeKeyProbe(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(projDir, key+".jsonl"), []byte("{}\n"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if present, probeable := staleResumeKeyProbe("claude", workDir, key); !probeable || !present {
+	if present, probeable := staleResumeKeyProbe(sessionlog.DefaultSearchPaths(), "claude", workDir, key); !probeable || !present {
 		t.Fatalf("present claude transcript: probeable=%v present=%v, want probeable && present", probeable, present)
 	}
 
 	// Codex resolves transcripts by cwd/date, not a keyed file, so it is never
 	// probeable and the guard leaves its metadata untouched.
-	if _, probeable := staleResumeKeyProbe("codex", workDir, key); probeable {
+	if _, probeable := staleResumeKeyProbe(sessionlog.DefaultSearchPaths(), "codex", workDir, key); probeable {
 		t.Fatal("codex probeable = true, want false")
 	}
 	// Empty inputs are not probeable.
-	if _, probeable := staleResumeKeyProbe("claude", "", key); probeable {
+	if _, probeable := staleResumeKeyProbe(sessionlog.DefaultSearchPaths(), "claude", "", key); probeable {
 		t.Fatal("empty workDir probeable = true, want false")
 	}
-	if _, probeable := staleResumeKeyProbe("claude", workDir, ""); probeable {
+	if _, probeable := staleResumeKeyProbe(sessionlog.DefaultSearchPaths(), "claude", workDir, ""); probeable {
 		t.Fatal("empty key probeable = true, want false")
 	}
 }

@@ -24,6 +24,10 @@ type Session struct {
 	// progress hooks) are filtered out.
 	Messages []*Entry
 
+	// DetachedUsage contains invocation records parsed from this full snapshot.
+	// Consumers must associate them against the full message list before paging.
+	DetachedUsage []TailUsage
+
 	// OrphanedToolUseIDs contains tool_use IDs with no matching result.
 	OrphanedToolUseIDs map[string]bool
 
@@ -1532,12 +1536,16 @@ func claudeProjectSlugCandidates(workDir string) []string {
 	seenSlugs := make(map[string]bool)
 	var slugs []string
 	for _, path := range paths {
-		slug := ProjectSlug(path)
-		if seenSlugs[slug] {
-			continue
+		legacy := ProjectSlug(path)
+		// Current Claude also replaces underscores. Keep the earlier spelling
+		// as a candidate so existing keyed transcripts remain resumable.
+		for _, slug := range []string{strings.ReplaceAll(legacy, "_", "-"), legacy} {
+			if seenSlugs[slug] {
+				continue
+			}
+			seenSlugs[slug] = true
+			slugs = append(slugs, slug)
 		}
-		seenSlugs[slug] = true
-		slugs = append(slugs, slug)
 	}
 	return slugs
 }

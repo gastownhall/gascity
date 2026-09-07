@@ -2,6 +2,7 @@ package sessionlog
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,6 +35,117 @@ func codexTurnContextLine(ts, model string) string {
 
 func codexSessionMetaLine(ts, cwd string) string {
 	return fmt.Sprintf(`{"timestamp":%q,"type":"session_meta","payload":{"id":"019d9845-4273-7ee3-a7d7-15b71ec6f096","timestamp":%q,"cwd":%q,"originator":"codex-tui","cli_version":"0.121.0","source":"cli","model_provider":"openai"}}`, ts, ts, cwd)
+}
+
+// A Codex answer is not completion: only an identified lifecycle boundary may
+// make the current turn idle, including when the tail read omits older entries.
+func TestExtractCodexTailMetaActivity(t *testing.T) {
+	started := `{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}`
+	context := `{"type":"turn_context","payload":{"turn_id":"turn-1","model":"gpt-5.5"}}`
+	complete := `{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1","last_agent_message":"Done"}}`
+	aborted := `{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-1","reason":"interrupted"}}`
+	second := `{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-2"}}`
+	answer := `{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done"}]}}`
+	for _, tc := range []struct {
+		name          string
+		lines         []string
+		truncated     bool
+		startsMidLine bool
+		want          string
+		malformed     bool
+	}{
+		{name: "start without model", lines: []string{started}, want: "in-turn"},
+		{name: "answer still running", lines: []string{started, context, answer}, want: "in-turn"},
+		{name: "completed matching turn", lines: []string{started, context, answer, complete}, want: "idle"},
+		{name: "aborted matching turn", lines: []string{started, aborted}, want: "idle"},
+		{name: "next turn clears idle", lines: []string{started, complete, second}, want: "in-turn"},
+		{name: "stale completion cannot end next turn", lines: []string{started, complete, second, complete}, want: "in-turn"},
+		{name: "missing terminal identity", lines: []string{started, `{"type":"event_msg","payload":{"type":"task_complete"}}`}, want: ""},
+		{name: "tail context identifies active turn", lines: []string{context, complete}, truncated: true, want: "idle"},
+		{name: "tail completion without identified start", lines: []string{answer, complete}, truncated: true, want: ""},
+		{name: "partial initial line is not final corruption", lines: []string{`partial`, started, complete}, truncated: true, startsMidLine: true, want: "idle"},
+		{name: "malformed trailing record invalidates idle", lines: []string{started, complete, `{"type":`}, want: "", malformed: true},
+		{name: "malformed payload invalidates idle", lines: []string{started, complete, `{"type":"event_msg","payload":17}`}, want: "", malformed: true},
+		{name: "missing interior lifecycle cannot prove completion", lines: []string{started, `bad-record`, complete}, want: ""},
+		{name: "new start recovers after malformed record", lines: []string{`bad-record`, started, complete}, want: "idle"},
+		{name: "model and tokens do not establish idle", lines: []string{`{"type":"turn_context","payload":{"model":"gpt-5.5"}}`, codexNullInfoTokenCountLine, answer}, want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			meta := extractCodexTailMetaFromLines(splitLines([]byte(strings.Join(tc.lines, "\n"))), tc.startsMidLine, tc.truncated)
+			var activity string
+			if meta != nil {
+				activity = meta.Activity
+			}
+			if activity != tc.want {
+				t.Fatalf("Activity = %q, want %q", activity, tc.want)
+			}
+			if tc.malformed && (meta == nil || !meta.MalformedTail) {
+				t.Fatal("malformed trailing record was not reported")
+			}
+			backwards, err := readCodexActivity(strings.NewReader(strings.Join(tc.lines, "\n")))
+			if err != nil || backwards.state != tc.want {
+				t.Fatalf("backwards activity = %+v, error = %v; want %q", backwards, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestExtractCodexTailMetaActivityBeyondUsageWindow(t *testing.T) {
+	for _, tc := range []struct {
+		name, terminalTurn, want string
+	}{
+		{"matching completion", "turn-2", "idle"},
+		{"stale completion", "turn-1", "in-turn"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "rollout.jsonl")
+			writeCodexUsageLines(t, path, []string{
+				`{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}`,
+				fmt.Sprintf(`{"type":"response_item","payload":{"type":"function_call_output","output":%q}}`, strings.Repeat("old", 700*1024)),
+				`{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}`,
+				`{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-2"}}`,
+				`{"type":"turn_context","payload":{"turn_id":"turn-2","model":"gpt-5.5"}}`,
+				codexTokenCountLine("2026-09-06T00:00:00Z", 100, 80, 0, 20, 0),
+				// Larger than both the usage window and splitLines' token limit.
+				fmt.Sprintf(`{"type":"response_item","payload":{"type":"function_call_output","output":%q}}`, strings.Repeat("x", 300*1024)),
+				fmt.Sprintf(`{"type":"event_msg","payload":{"type":"task_complete","turn_id":%q}}`, tc.terminalTurn),
+			})
+			meta, err := ExtractCodexTailMeta(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if meta == nil || meta.Activity != tc.want {
+				t.Fatalf("metadata = %+v, want activity %q", meta, tc.want)
+			}
+			if meta.Model != "" || meta.ContextUsage != nil {
+				t.Fatalf("lifecycle fallback changed usage-window semantics: %+v", meta)
+			}
+			file, err := os.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer file.Close() //nolint:errcheck // read-only test file
+			reader := &codexCountingReadSeeker{ReadSeeker: file}
+			activity, err := readCodexActivity(reader)
+			if err != nil || activity.state != tc.want {
+				t.Fatalf("activity = %+v, error = %v", activity, err)
+			}
+			if reader.bytesRead > 400*1024 {
+				t.Fatalf("read %d bytes for a 300 KiB last turn; scanned unrelated older history", reader.bytesRead)
+			}
+		})
+	}
+}
+
+type codexCountingReadSeeker struct {
+	io.ReadSeeker
+	bytesRead int
+}
+
+func (r *codexCountingReadSeeker) Read(p []byte) (int, error) {
+	n, err := r.ReadSeeker.Read(p)
+	r.bytesRead += n
+	return n, err
 }
 
 const codexNullInfoTokenCountLine = `{"timestamp":"2026-04-16T21:49:31.051Z","type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"limit_id":"codex","limit_name":null,"primary":{"used_percent":0.0,"window_minutes":300,"resets_at":1776394093},"secondary":{"used_percent":0.0,"window_minutes":10080,"resets_at":1776980893},"credits":null,"plan_type":"pro"}}}`
