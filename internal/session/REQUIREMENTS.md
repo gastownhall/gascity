@@ -121,6 +121,7 @@ unless the row names how they map to the canonical projection.
 | SESSION-START-006 | Stop failure does not close | If provider stop fails during detailed close, the bead remains open; successful stop closes it. | `internal/session/manager_test.go` |
 | SESSION-START-007 | Template override safety | Template overrides are rejected for running sessions, recent wake-in-flight sessions, and pending create claims. Suspended sessions, old wake timestamps, and failed-create states can be updated where tests allow. | `internal/session/manager_test.go` |
 | SESSION-START-008 | Parallel lifecycle start | Independent start candidates can begin in the same wave before dependent sessions. A failed dependency blocks its dependent but not unrelated siblings. | `cmd/gc/session_lifecycle_parallel_test.go` |
+| SESSION-START-009 | Suspend preserves conversation continuity | Successful runtime suspension records deliberate sleep and clears the prior wake attempt. Subsequent controller state healing and exit classification must neither count a crash/churn event nor discard the provider session key, including suspension inside the rapid-crash and churn windows. | `cmd/gc/session_suspend_continuity_test.go` (`TestSuspendPreservesConversationThroughExitReconciliation`); `internal/session/manager.go` (`Suspend`) |
 
 ### Reconciler, Pools, And Scaling
 

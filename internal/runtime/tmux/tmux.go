@@ -2996,6 +2996,10 @@ func idlePromptPrefix(configured string) string {
 	return DefaultReadyPromptPrefix
 }
 
+// Claude uses its composer glyph for selected menu rows too. Such a row is
+// never evidence that an interrupted turn has returned to the composer.
+var claudeMenuSelectionRe = regexp.MustCompile(`(?m)^\s*(?:[│┃]\s*)?❯\s*\d+[.)](?:\s|$)`)
+
 // WaitForIdle polls until the agent appears to be at an idle prompt.
 // Unlike WaitForRuntimeReady (which is for bootstrap), this is for steady-state
 // idle detection — used to avoid interrupting agents mid-work.
@@ -3008,8 +3012,14 @@ func idlePromptPrefix(configured string) string {
 // Returns nil if the agent becomes idle within the timeout.
 // Returns an error if the timeout expires while the agent is still busy.
 func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Duration) error {
-	if sessionlog.ProviderFamily(t.providerEnv(session)) == "codex" {
+	family := sessionlog.ProviderFamily(t.providerEnv(session))
+	if family == "codex" {
 		return t.waitForCodexIdle(ctx, session, timeout)
+	}
+	observationLines := promptObservationLines
+	if family == "claude" {
+		// Historical input prompts cannot establish a current stop boundary.
+		observationLines = 0
 	}
 	promptPrefix := DefaultReadyPromptPrefix
 	if configured, err := t.GetEnvironment(session, sessionReadyPromptEnvKey); err == nil {
@@ -3025,7 +3035,7 @@ func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Dur
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		lines, err := t.CapturePaneLines(session, promptObservationLines)
+		lines, err := t.CapturePaneLines(session, observationLines)
 		if err != nil {
 			// Distinguish terminal errors from transient ones.
 			// Session not found or no server means the session is gone —
@@ -3043,7 +3053,9 @@ func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Dur
 		// Check for active processing indicator in the status bar.
 		// Claude Code shows "esc to interrupt" while processing — if present,
 		// the agent is busy regardless of whether the prompt is visible.
-		if paneContainsBusyIndicator(lines) {
+		pane := strings.Join(lines, "\n")
+		modal := family == "claude" && (claudeMenuSelectionRe.MatchString(pane) || parseApprovalPrompt(pane) != nil)
+		if modal || paneContainsBusyIndicator(lines) {
 			consecutiveIdle = 0
 			if err := waitForIdlePoll(ctx); err != nil {
 				return err
