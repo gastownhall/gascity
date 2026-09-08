@@ -356,7 +356,7 @@ func issueT3WebSocketTicket(wsURL, bearerToken string) (string, error) {
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 		detail := runtime.RedactSecrets(strings.TrimSpace(string(body)), []string{bearerToken})
-		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
+		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusNotImplemented {
 			return "", fmt.Errorf("%w: status %d: %s", errWebSocketTicketUnsupported, resp.StatusCode, detail)
 		}
 		return "", fmt.Errorf("request websocket ticket: status %d: %s", resp.StatusCode, detail)
@@ -366,11 +366,11 @@ func issueT3WebSocketTicket(wsURL, bearerToken string) (string, error) {
 		Ticket string `json:"ticket"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return "", fmt.Errorf("decode websocket ticket: %w", err)
+		return "", fmt.Errorf("%w: decode websocket ticket: %v", errWebSocketTicketUnsupported, err)
 	}
 	payload.Ticket = strings.TrimSpace(payload.Ticket)
 	if payload.Ticket == "" {
-		return "", fmt.Errorf("decode websocket ticket: empty ticket")
+		return "", fmt.Errorf("%w: decode websocket ticket: empty ticket", errWebSocketTicketUnsupported)
 	}
 	return payload.Ticket, nil
 }
@@ -1157,7 +1157,7 @@ func (p *Provider) rpcHTTPSnapshot(bearerToken string) (map[string]interface{}, 
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 			_ = resp.Body.Close()
 			detail := runtime.RedactSecrets(strings.TrimSpace(string(body)), []string{bearerToken})
-			if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
+			if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusNotImplemented {
 				unsupportedErr = fmt.Errorf("%w: status %d: %s", errHTTPSnapshotUnsupported, resp.StatusCode, detail)
 				failures = append(failures, unsupportedErr.Error())
 				continue
@@ -1170,8 +1170,8 @@ func (p *Provider) rpcHTTPSnapshot(bearerToken string) (map[string]interface{}, 
 		err = json.NewDecoder(resp.Body).Decode(&snapshot)
 		_ = resp.Body.Close()
 		if err != nil {
-			lastErr = fmt.Errorf("%s: decode orchestration snapshot: %w", candidate, err)
-			failures = append(failures, lastErr.Error())
+			unsupportedErr = fmt.Errorf("%w: %s: decode orchestration snapshot: %v", errHTTPSnapshotUnsupported, candidate, err)
+			failures = append(failures, unsupportedErr.Error())
 			continue
 		}
 		return snapshot, nil
