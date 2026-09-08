@@ -35,7 +35,7 @@ func TestGated(t *testing.T) {
 		{
 			name: "workflow step with step id is not gated",
 			bead: beads.Bead{
-				Type: "task",
+				Type:     "task",
 				Metadata: map[string]string{beadmeta.StepIDMetadataKey: "mol-do-work.drain"},
 			},
 			want: false,
@@ -43,7 +43,7 @@ func TestGated(t *testing.T) {
 		{
 			name: "workflow step with step ref is not gated",
 			bead: beads.Bead{
-				Type: "task",
+				Type:     "task",
 				Metadata: map[string]string{beadmeta.StepRefMetadataKey: "mol-do-work.drain"},
 			},
 			want: false,
@@ -51,7 +51,7 @@ func TestGated(t *testing.T) {
 		{
 			name: "workflow root is not gated",
 			bead: beads.Bead{
-				Type: "task",
+				Type:     "task",
 				Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow},
 			},
 			want: false,
