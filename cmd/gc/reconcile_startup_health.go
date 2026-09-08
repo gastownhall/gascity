@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -29,8 +31,10 @@ func (r startupHealthRecord) clear(key string) error {
 // fail accrues one failed start on key's episode (legacy's
 // recordStartupHealthFailure, START-031): a deadline accrues a timeout, any
 // other error a failure, and the episode quarantines key once it reaches
-// defaultMaxWakeAttempts. A read error accrues nothing.
-func (r startupHealthRecord) fail(key string, err error, now time.Time) error {
+// defaultMaxWakeAttempts. Like legacy, it stamps the per-failure retry
+// backoff and emits the once-per-episode startup-health alert to rec and
+// stderr on crossing the threshold (sr-xf2xj). A read error accrues nothing.
+func (r startupHealthRecord) fail(key, template string, err error, now time.Time, rec events.Recorder, stderr io.Writer) error {
 	front := sessionFrontDoor(r.store)
 	prior, loadErr := front.LoadStartupHealthEpisode(key)
 	if loadErr != nil {
@@ -41,5 +45,13 @@ func (r startupHealthRecord) fail(key string, err error, now time.Time) error {
 	if errors.Is(err, context.DeadlineExceeded) {
 		kind = session.FailureKindTimeout
 	}
-	return front.SaveStartupHealthEpisode(session.RecordStartupFailure(prior, kind, err.Error(), now, defaultMaxWakeAttempts, defaultQuarantineDuration))
+	episode := session.RecordStartupFailure(prior, kind, err.Error(), now, defaultMaxWakeAttempts, defaultQuarantineDuration)
+	episode.BackoffUntil = startupBackoffUntil(episode.ConsecutiveCount, now)
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	// Recorded before the save, as legacy does: a lost save re-alerts on the
+	// next failure rather than losing the escalation.
+	episode = emitStartupHealthAlert(rec, stderr, episode, template)
+	return front.SaveStartupHealthEpisode(episode)
 }

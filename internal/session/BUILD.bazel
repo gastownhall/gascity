@@ -199,6 +199,7 @@ go_test(
         "runtime_lease_test.go",
         "session_mutation_lock_test.go",
         "sleep_reason_test.go",
+        "startup_health_backoff_test.go",
         "startup_health_test.go",
         "state_machine_test.go",
         "steer_test.go",

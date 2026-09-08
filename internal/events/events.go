@@ -512,6 +512,15 @@ const (
 	// payload's "alert" names it (cmd/gc reconcile_observe_v2.go).
 	ReconcilerAlert = "reconciler.alert"
 
+	// SessionStartupHealthAlert fires once per startup-health episode, when a
+	// session's consecutive cold-start failures cross the quarantine
+	// threshold. session.cold_start_timeout is emitted per attempt and is a
+	// raw datapoint; this is the escalation, carrying the consecutive count,
+	// the failure kind and how long starts are held back. AlertDisposition on
+	// the episode latches it to one alert per episode; a successful start
+	// clears the episode so the next one alerts independently (sr-xf2xj).
+	SessionStartupHealthAlert = "session.startup_health_alert"
+
 	// Emergency events are dolt-independent escalation records written to
 	// .gc/emergency and mirrored into the city event log.
 	EmergencySignaled = "emergency.signaled"
@@ -679,9 +688,10 @@ var KnownEventTypes = []string{
 	StorageBindingUnconverged, StorageBindingUncheckable,
 	StorageBindingNotConfigured,
 	StorageRigImport, StorageRigResidue,
-	// ProviderHealthGateAlert and ReconcilerAlert are intentionally omitted
-	// from KnownEventTypes. Each is emitted by the reconciler but its typed
-	// SSE payload is not yet registered in internal/api (the payload registration lives in a
+	// ProviderHealthGateAlert, ReconcilerAlert and SessionStartupHealthAlert
+	// are intentionally omitted from KnownEventTypes. Each is emitted by the
+	// reconciler but its typed SSE payload is not yet registered in
+	// internal/api (the payload registration lives in a
 	// follow-up that adds the full SSE projection). Until then, subscribers
 	// receive it via the custom-event envelope.
 }

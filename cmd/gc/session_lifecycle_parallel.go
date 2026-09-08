@@ -3155,7 +3155,7 @@ func commitStartResultTraced(
 		// crash-loop accounting: a provider Start that failed still delays the
 		// next one. A collision with an existing session is not a start failure.
 		if result.unattributedErr != nil && result.providerStartCalled && !errors.Is(result.unattributedErr, runtime.ErrSessionExists) {
-			recordStartupHealthFailure(info, name, result.unattributedErr, sessFront, clk, stderr)
+			recordStartupHealthFailure(info, name, tp.TemplateName, result.unattributedErr, sessFront, clk, rec, stderr)
 		}
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.unattributedErr, result.phases)
 		return startCommitFailed
@@ -3572,7 +3572,7 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 				"error": formatLifecycleError(result.err),
 			})
 		}
-		recordStartupHealthFailure(info, name, result.err, sessFront, clk, stderr)
+		recordStartupHealthFailure(info, name, tp.TemplateName, result.err, sessFront, clk, rec, stderr)
 		if !result.prepared.candidate.configured || result.diedDuringStartup {
 			// A configured named session (declared via [[named_session]]) must
 			// survive a single transient start failure mid pending-create (e.g.
@@ -3644,8 +3644,9 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 
 // recordStartupHealthFailure accrues one failed start on the session's
 // startup-health episode, which quarantines the name once it reaches
-// defaultMaxWakeAttempts.
-func recordStartupHealthFailure(info sessionpkg.Info, name string, err error, sessFront *sessionpkg.Store, clk clock.Clock, stderr io.Writer) {
+// defaultMaxWakeAttempts, stamps the per-failure retry backoff, and emits the
+// once-per-episode startup-health alert on crossing the threshold.
+func recordStartupHealthFailure(info sessionpkg.Info, name, template string, err error, sessFront *sessionpkg.Store, clk clock.Clock, rec events.Recorder, stderr io.Writer) {
 	episodeKey := startupHealthEpisodeKey(info, name)
 	prior, loadErr := sessFront.LoadStartupHealthEpisode(episodeKey)
 	if loadErr != nil {
@@ -3658,6 +3659,20 @@ func recordStartupHealthFailure(info sessionpkg.Info, name string, err error, se
 		kind = sessionpkg.FailureKindTimeout
 	}
 	episode := sessionpkg.RecordStartupFailure(prior, kind, err.Error(), clk.Now(), defaultMaxWakeAttempts, defaultQuarantineDuration)
+	// Stamp the retry backoff (caller-owned policy, see
+	// RecordStartupFailure's contract). Below the quarantine threshold
+	// this is the ONLY thing bounding the retry cadence, and it is
+	// what turns an indefinite ~65s respawn loop into a capped one.
+	episode.BackoffUntil = startupBackoffUntil(episode.ConsecutiveCount, clk.Now())
+	// Escalate exactly once per episode. RecordStartupFailure raises
+	// the disposition to pending on crossing the threshold and never
+	// regresses it from sent, so this fires on the threshold failure
+	// only. The event is recorded BEFORE the disposition is persisted:
+	// if the save below fails, the next failure re-alerts rather than
+	// losing the escalation entirely. At-least-once is the right
+	// failure mode for an alert whose whole purpose is that 42 silent
+	// hours never happen again.
+	episode = emitStartupHealthAlert(rec, stderr, episode, template)
 	if saveErr := sessFront.SaveStartupHealthEpisode(episode); saveErr != nil {
 		fmt.Fprintf(stderr, "session reconciler: saving startup-health episode for %s: %v\n", name, saveErr) //nolint:errcheck
 	}
