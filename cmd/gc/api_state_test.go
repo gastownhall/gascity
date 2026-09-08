@@ -2296,6 +2296,118 @@ func TestWrapWithCachingStoreNoBackgroundRefresh(t *testing.T) {
 	}
 }
 
+// identityRouteNormalizer treats every target as already normalized --
+// sufficient for tests that don't exercise pool-slot-suffix collapsing.
+var identityRouteNormalizer = beads.RouteNormalizerFunc(func(target string) string { return target })
+
+// TestWrapWithCachingStorePreservesPolicyTierExpansionOverCache pins the
+// composition-ordering fix for ga-cm2o5t.1.1 Root #1: openStoreResultAt-
+// ForCityWithConfig builds RouteClear(Policy(raw)) (RouteClear outermost),
+// so unwrapBeadPolicyStore must see through the RouteClear decorator to find
+// the Policy store beneath it, or wrapWithCachingStore would splice the
+// cache in above Policy instead of below it -- silently dropping Policy's
+// TierIssues->TierBoth read-tier expansion for every cache-served List call.
+// Before the fix, unwrapBeadPolicyStore only recognized *beadPolicyStore /
+// *beadPolicyGraphStore directly, so RouteClear-then-Policy input made it
+// return (store, nil, false): wrapWithCachingStore then skipped the
+// Policy-reinstating branch entirely, and an Ephemeral bead -- present in
+// the cache via PrimeActive's unconditional TierBoth prime -- would vanish
+// from a default-tier (TierIssues) List because the expansion never ran.
+func TestWrapWithCachingStorePreservesPolicyTierExpansionOverCache(t *testing.T) {
+	backing := beads.NewMemStore()
+	wisp, err := backing.Create(beads.Bead{Title: "ephemeral wisp", Ephemeral: true})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Mirror openStoreResultAtForCityWithConfig's exact composition order:
+	// Policy applied first, then RouteClear wrapped around it.
+	input := wrapStoreWithBeadPolicies(backing, nil)
+	input = beads.WithRouteChangeClearing(input, identityRouteNormalizer)
+
+	store := wrapWithCachingStore(context.Background(), input, nil, true)
+	if _, ok := store.(*beadPolicyStore); !ok {
+		t.Fatalf("wrapWithCachingStore output type = %T, want *beadPolicyStore (Policy must wrap the cache)", store)
+	}
+
+	got, err := store.List(beads.ListQuery{Status: "open", AllowScan: true})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	var found bool
+	for _, b := range got {
+		if b.ID == wisp.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("List(default tier) = %d beads, missing ephemeral wisp %s -- Policy's TierIssues->TierBoth expansion is not reaching the cache-served read path", len(got), wisp.ID)
+	}
+}
+
+// TestWrapWithCachingStoreClearsStampsOnGenuineReroute is an end-to-end
+// integration check that a genuine gc.routed_to reroute still clears the
+// three executor-identity stamps when performed through the full
+// production-shaped composition (Policy(CachingStore(RouteClear(raw))), the
+// actual return value of wrapWithCachingStore given RouteClear(Policy(raw))
+// input). Unlike TestWrapWithCachingStorePreservesPolicyTierExpansionOverCache,
+// this does not by itself distinguish the Root #1 composition-ordering fix:
+// RouteClear's write interception (SetMetadata/SetMetadataBatch/Update) is
+// always reached as CachingStore's direct backing regardless of whether
+// Policy is reinstated above the cache or left wrapping the pre-fix
+// unrecognized chain, since CachingStore always delegates writes straight to
+// c.backing and Policy overrides neither Get nor the write methods. This
+// test instead guards the write-path half of the feature (stamp-clearing
+// surviving embedding in the real wrapping stack) against unrelated future
+// regressions -- e.g. RouteClear being dropped from the chain entirely, or
+// CachingStore's write-then-refresh no longer picking up RouteClear's
+// out-of-band clear.
+func TestWrapWithCachingStoreClearsStampsOnGenuineReroute(t *testing.T) {
+	backing := beads.NewMemStore()
+
+	// Mirror openStoreResultAtForCityWithConfig's exact composition order:
+	// Policy applied first, then RouteClear wrapped around it.
+	input := wrapStoreWithBeadPolicies(backing, nil)
+	input = beads.WithRouteChangeClearing(input, identityRouteNormalizer)
+
+	store := wrapWithCachingStore(context.Background(), input, nil, true)
+
+	const oldTarget, newTarget = "gascity/old-executor", "gascity/new-executor"
+	created, err := store.Create(beads.Bead{
+		Title: "stamped bead",
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey:      oldTarget,
+			beadmeta.SessionNameMetadataKey:   "gascity--old-executor",
+			beadmeta.WorkDirMetadataKey:       "worktrees/old-executor",
+			beadmeta.LegacyWorkDirMetadataKey: "worktrees/old-executor-legacy",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := store.SetMetadata(created.ID, beadmeta.RoutedToMetadataKey, newTarget); err != nil {
+		t.Fatalf("SetMetadata: %v", err)
+	}
+
+	got, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Metadata[beadmeta.RoutedToMetadataKey] != newTarget {
+		t.Errorf("gc.routed_to: want %q, got %q", newTarget, got.Metadata[beadmeta.RoutedToMetadataKey])
+	}
+	for _, key := range []string{
+		beadmeta.SessionNameMetadataKey,
+		beadmeta.WorkDirMetadataKey,
+		beadmeta.LegacyWorkDirMetadataKey,
+	} {
+		if got.Metadata[key] != "" {
+			t.Errorf("%s: want cleared (empty) after genuine reroute through the full cache composition, got %q", key, got.Metadata[key])
+		}
+	}
+}
+
 type closeStoreSpy struct {
 	beads.Store
 	closed   atomic.Int32
@@ -3049,8 +3161,19 @@ provider = "file"
 	if !ok {
 		t.Fatalf("frontend store = %T, want caching store", frontendStore)
 	}
-	if cached.Backing() != nativeBacking {
-		t.Fatalf("frontend backing = %T, want native factory backing", cached.Backing())
+	// The caching store's immediate backing is now the route-change-clearing
+	// wrap (wrapWithCachingStore applies beads.WithRouteChangeClearing to any
+	// policy-wrapped store, and openRigStore always policy-wraps), not the
+	// factory's raw store directly. See through it via
+	// ConditionalWritesResolveTargeter, exactly as
+	// TestOpenControlBdStoreThroughFactoryStamps (store_rollout_test.go) does.
+	backing := cached.Backing()
+	targeter, ok := backing.(beads.ConditionalWritesResolveTargeter)
+	if !ok {
+		t.Fatalf("frontend backing = %T, want a beads.ConditionalWritesResolveTargeter (the route-clearing wrap)", backing)
+	}
+	if targeter.ConditionalWritesResolveTarget() != beads.Store(nativeBacking) {
+		t.Fatalf("frontend backing resolve target = %T, want native factory backing", targeter.ConditionalWritesResolveTarget())
 	}
 }
 

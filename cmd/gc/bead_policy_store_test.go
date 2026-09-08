@@ -679,3 +679,65 @@ func TestBeadPolicyStoreCountUnsupportedWithoutInnerCounter(t *testing.T) {
 		t.Fatalf("Count error = %v, want ErrCountUnsupported", err)
 	}
 }
+
+// resolveTargetOnlyStore is a minimal beads.ConditionalWritesResolveTargeter
+// wrapper that declares no other behavior -- used to test
+// unwrapBeadPolicyStore's peel-through walk in isolation from
+// beads.WithRouteChangeClearing's full decorator surface.
+type resolveTargetOnlyStore struct {
+	beads.Store
+	target beads.Store
+}
+
+func (s *resolveTargetOnlyStore) ConditionalWritesResolveTarget() beads.Store { return s.target }
+
+var _ beads.ConditionalWritesResolveTargeter = (*resolveTargetOnlyStore)(nil)
+
+func TestUnwrapBeadPolicyStoreSeesThroughResolveTargeterWrapper(t *testing.T) {
+	raw := beads.NewMemStore()
+	policyStore := wrapStoreWithBeadPolicies(raw, nil)
+	wrapped := &resolveTargetOnlyStore{Store: policyStore, target: policyStore}
+
+	base, policy, ok := unwrapBeadPolicyStore(wrapped)
+	if !ok {
+		t.Fatal("unwrapBeadPolicyStore ok = false, want true (Policy is reachable through the resolve-targeter wrapper)")
+	}
+	if base != raw {
+		t.Fatalf("unwrapBeadPolicyStore base = %v, want the raw MemStore", base)
+	}
+	if policy != policyStore {
+		t.Fatalf("unwrapBeadPolicyStore policy = %v, want %v", policy, policyStore)
+	}
+}
+
+func TestUnwrapBeadPolicyStoreNotFoundReturnsOriginalUnchanged(t *testing.T) {
+	raw := beads.NewMemStore()
+	wrapped := &resolveTargetOnlyStore{Store: raw, target: raw}
+
+	base, policy, ok := unwrapBeadPolicyStore(wrapped)
+	if ok {
+		t.Fatal("unwrapBeadPolicyStore ok = true, want false (no Policy layer anywhere in the chain)")
+	}
+	if policy != nil {
+		t.Fatalf("unwrapBeadPolicyStore policy = %v, want nil", policy)
+	}
+	if base != beads.Store(wrapped) {
+		t.Fatalf("unwrapBeadPolicyStore base = %v, want the original wrapper unchanged", base)
+	}
+}
+
+func TestUnwrapBeadPolicyStoreSelfCycleTerminates(t *testing.T) {
+	cyclic := &resolveTargetOnlyStore{Store: beads.NewMemStore()}
+	cyclic.target = cyclic
+
+	base, policy, ok := unwrapBeadPolicyStore(cyclic)
+	if ok {
+		t.Fatal("unwrapBeadPolicyStore ok = true, want false (self-referential wrapper has no Policy layer)")
+	}
+	if policy != nil {
+		t.Fatalf("unwrapBeadPolicyStore policy = %v, want nil", policy)
+	}
+	if base != beads.Store(cyclic) {
+		t.Fatalf("unwrapBeadPolicyStore base = %v, want the original cyclic wrapper unchanged", base)
+	}
+}

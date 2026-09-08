@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	beadsexec "github.com/gastownhall/gascity/internal/beads/exec"
@@ -282,6 +283,24 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 	baseStore, policyStore, policyWrapped := unwrapBeadPolicyStore(store)
 	if baseStore == nil {
 		return nil
+	}
+	// Route-change clearing (if the caller's store had it, via
+	// beads.WithRouteChangeClearing) rides above baseStore and below the
+	// cache, mirroring openStoreResultAtForCityWithConfig's own ordering
+	// (RouteClear directly on the raw store, Policy outermost). It is only
+	// reinstated when policyWrapped: unwrapBeadPolicyStore only sees through
+	// a RouteClear decorator on its way to finding Policy, so a bare
+	// non-Policy store here never had RouteClear applied to begin with, and
+	// must keep flowing into NewCachingStore unchanged (pinned by
+	// TestWrapWithCachingStoreCachesNonBdStore's Backing() identity check).
+	if policyWrapped {
+		var cfg *config.City
+		if policyStore != nil {
+			cfg = policyStore.cfg
+		}
+		baseStore = beads.WithRouteChangeClearing(baseStore, func(target string) string {
+			return agentutil.NormalizePoolRouteTarget(cfg, target)
+		})
 	}
 	if ctx == nil {
 		ctx = context.Background()
