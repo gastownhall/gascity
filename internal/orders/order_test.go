@@ -163,6 +163,89 @@ timeout = "120s"
 	}
 }
 
+// TestOrderReservedDispatchParsed covers ga-xxyzgq: a pack author declares an
+// order eligible for the dispatcher's bounded reserved-dispatch lane via
+// reserved_dispatch, in TOML, with no name-based logic in Go. Every order is
+// opted out by default; only the 3 bundled core-health orders (beads-health,
+// gate-sweep, dolt-health) set the flag. This test pins their deployed shape
+// the same way TestProviderHealthProbeOrderOptsOutOfWorkGate pins
+// provider-health-probe's — the actual capped-budget dispatch behavior that
+// consumes this flag is separate (gastownhall/gascity ga-1ocm3f).
+func TestOrderReservedDispatchParsed(t *testing.T) {
+	on, err := Parse([]byte("[order]\nexec = \"true\"\ntrigger = \"cooldown\"\ninterval = \"30s\"\nreserved_dispatch = true\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !on.ReservedDispatch {
+		t.Error("ReservedDispatch = false, want true")
+	}
+	off, err := Parse([]byte("[order]\nexec = \"true\"\ntrigger = \"cooldown\"\ninterval = \"30s\"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if off.ReservedDispatch {
+		t.Error("ReservedDispatch = true, want false (default)")
+	}
+	// Validate must accept the flag (no extra constraint).
+	if err := Validate(Order{Name: "probe", Exec: "true", Trigger: "cooldown", Interval: "30s", ReservedDispatch: true}); err != nil {
+		t.Errorf("Validate with ReservedDispatch: %v", err)
+	}
+
+	// Pin the deployed shape of the 3 bundled core-health orders: each ships
+	// with reserved_dispatch = true today.
+	bundled := []struct {
+		name string
+		toml string
+	}{
+		{"beads-health", `[order]
+description = "Check beads provider health and recover on failure"
+trigger = "cooldown"
+interval = "30s"
+exec = "gc beads health --quiet"
+timeout = "60s"
+reserved_dispatch = true
+`},
+		{"gate-sweep", `[order]
+description = "Evaluate and close pending gates (timer, GitHub)"
+trigger = "cooldown"
+interval = "30s"
+exec = "$PACK_DIR/assets/scripts/gate-sweep.sh"
+reserved_dispatch = true
+`},
+		{"dolt-health", `[order]
+description = "Check dolt server health without restarting it"
+trigger = "cooldown"
+interval = "30s"
+exec = "gc dolt health --json | gc dolt health-check"
+reserved_dispatch = true
+`},
+	}
+	for _, b := range bundled {
+		a, err := Parse([]byte(b.toml))
+		if err != nil {
+			t.Fatalf("%s: Parse: %v", b.name, err)
+		}
+		if !a.ReservedDispatch {
+			t.Errorf("%s: ReservedDispatch = false, want true", b.name)
+		}
+	}
+
+	// An ordinary order outside the bundle stays opted out with no explicit
+	// flag — the default, not a name-based check in Go.
+	ordinary, err := Parse([]byte(`[order]
+description = "Generate daily digest"
+formula = "mol-digest-generate"
+trigger = "cooldown"
+interval = "24h"
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if ordinary.ReservedDispatch {
+		t.Error("ReservedDispatch = true, want false (default) for an ordinary order")
+	}
+}
+
 func TestValidateCooldown(t *testing.T) {
 	a := Order{Name: "digest", Formula: "mol-digest", Trigger: "cooldown", Interval: "24h"}
 	if err := Validate(a); err != nil {
