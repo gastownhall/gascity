@@ -1,13 +1,34 @@
 package beads_test
 
 import (
+	"bytes"
 	"errors"
+	"log"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
+
+// captureLog redirects the default logger's output to a buffer for the
+// duration of the test, mirroring internal/beads' own
+// caching_store_cadence_internal_test.go:captureLog. Duplicated rather than
+// imported: that helper is unexported in package beads, and this file is
+// package beads_test.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	buf := &bytes.Buffer{}
+	prev := log.Writer()
+	prevFlags := log.Flags()
+	log.SetOutput(buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(prev)
+		log.SetFlags(prevFlags)
+	})
+	return buf
+}
 
 // These tests pin the acceptance criteria for ga-cm2o5t.1.1 (clear
 // executor-identity stamps on a genuine gc.routed_to reroute), per the
@@ -306,6 +327,86 @@ func TestRouteChangeClearingStore_ClearWrite_DoesNotReenterGate(t *testing.T) {
 // (WorkStore, GraphStore, SessionStore, MailStore, OrdersStore, NudgesStore,
 // the cmd/gc policy store, splittest.StrictStore) declares this the same
 // way: return the immediate backing store, unchanged.
+// failingClearBatchStore fails SetMetadataBatch for one chosen bead id,
+// letting a test observe that a backing-store rejection of the internal
+// stamp-clearing write (as opposed to the routing write itself, which never
+// goes through SetMetadataBatch when the reroute is triggered via
+// SetMetadata) is logged rather than silently discarded.
+type failingClearBatchStore struct {
+	beads.Store
+	failID string
+}
+
+func (f *failingClearBatchStore) SetMetadataBatch(id string, kv map[string]string) error {
+	if id == f.failID {
+		return errors.New("injected clear-batch failure")
+	}
+	return f.Store.SetMetadataBatch(id, kv)
+}
+
+// TestRouteChangeClearingStore_ClearWriteFailure_IsLogged pins design NFR-5
+// ("clear failures are logged, never block the triggering write" -- Sec 1
+// requirements table; "Clear failures are logged and swallowed" verbatim in
+// Sec 6 prose and Sec 13.1): a backing-store rejection of the bead's own
+// stamp-clearing write must produce a log line, and must never surface as an
+// error from the triggering routing write.
+func TestRouteChangeClearingStore_ClearWriteFailure_IsLogged(t *testing.T) {
+	mem := beads.NewMemStore()
+	b := seedRoutedBead(t, mem, testOldTarget)
+
+	fs := &failingClearBatchStore{Store: mem, failID: b.ID}
+	wrapped := beads.WithRouteChangeClearing(fs, identityNormalizer)
+
+	buf := captureLog(t)
+
+	if err := wrapped.SetMetadata(b.ID, beadmeta.RoutedToMetadataKey, testNewTarget); err != nil {
+		t.Fatalf("SetMetadata: want nil -- a failed clear write must never fail the triggering routing write, got %v", err)
+	}
+
+	if got := buf.String(); !strings.Contains(got, b.ID) || !strings.Contains(got, "injected clear-batch failure") {
+		t.Errorf("want a log line naming bead %s and the swallowed clear-write failure, got log output: %q", b.ID, got)
+	}
+}
+
+// TestRouteChangeClearingStore_MoleculeRootClearWriteFailure_IsLogged pins
+// the same NFR-5 guarantee for the second of the two swallowed
+// SetMetadataBatch calls clearIfGenuine makes: the molecule-root mirror
+// clear. The step's own clear is left to succeed so this test isolates the
+// root-clear call site specifically.
+func TestRouteChangeClearingStore_MoleculeRootClearWriteFailure_IsLogged(t *testing.T) {
+	mem := beads.NewMemStore()
+	seed := beads.WithRouteChangeClearing(mem, identityNormalizer)
+
+	root := seedRoutedBead(t, seed, testOldTarget)
+	step, err := seed.Create(beads.Bead{
+		Title: "molecule step",
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey:      testOldTarget,
+			beadmeta.SessionNameMetadataKey:   "gascity--old-executor",
+			beadmeta.WorkDirMetadataKey:       "worktrees/old-executor-step",
+			beadmeta.LegacyWorkDirMetadataKey: "worktrees/old-executor-step-legacy",
+			beadmeta.RootBeadIDMetadataKey:    root.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create step: %v", err)
+	}
+
+	fs := &failingClearBatchStore{Store: mem, failID: root.ID}
+	wrapped := beads.WithRouteChangeClearing(fs, identityNormalizer)
+
+	buf := captureLog(t)
+
+	if err := wrapped.SetMetadata(step.ID, beadmeta.RoutedToMetadataKey, testNewTarget); err != nil {
+		t.Fatalf("SetMetadata: want nil -- a failed root-mirror clear must never fail the triggering routing write, got %v", err)
+	}
+	assertStampsCleared(t, wrapped, step.ID)
+
+	if got := buf.String(); !strings.Contains(got, root.ID) || !strings.Contains(got, "injected clear-batch failure") {
+		t.Errorf("want a log line naming molecule root %s and the swallowed clear-write failure, got log output: %q", root.ID, got)
+	}
+}
+
 func TestRouteChangeClearingStore_ImplementsConditionalWritesResolveTargeter(t *testing.T) {
 	mem := beads.NewMemStore()
 	wrapped := beads.WithRouteChangeClearing(mem, identityNormalizer)
