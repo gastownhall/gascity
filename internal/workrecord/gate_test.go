@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 // The contract rows — which beads Gated covers and what ValidateOnClose calls a
@@ -21,6 +24,49 @@ import (
 // it is deliberately built inside this runnable rather than in a package-level
 // helper: the resource census only recognizes an owner it can name, and a
 // process a shared helper spawns belongs to no test in particular.
+func TestGated(t *testing.T) {
+	tests := []struct {
+		name string
+		bead beads.Bead
+		want bool
+	}{
+		{name: "plain task is gated", bead: beads.Bead{Type: "task"}, want: true},
+		{name: "empty type defaults to gated", bead: beads.Bead{}, want: true},
+		{
+			name: "workflow step with step id is not gated",
+			bead: beads.Bead{
+				Type: "task",
+				Metadata: map[string]string{beadmeta.StepIDMetadataKey: "mol-do-work.drain"},
+			},
+			want: false,
+		},
+		{
+			name: "workflow step with step ref is not gated",
+			bead: beads.Bead{
+				Type: "task",
+				Metadata: map[string]string{beadmeta.StepRefMetadataKey: "mol-do-work.drain"},
+			},
+			want: false,
+		},
+		{
+			name: "workflow root is not gated",
+			bead: beads.Bead{
+				Type: "task",
+				Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow},
+			},
+			want: false,
+		},
+		{name: "convoy is not gated", bead: beads.Bead{Type: "convoy"}, want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Gated(tc.bead); got != tc.want {
+				t.Fatalf("Gated = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestCommitReachableOnBranch(t *testing.T) {
 	runGit := func(dir string, args ...string) string {
 		t.Helper()
