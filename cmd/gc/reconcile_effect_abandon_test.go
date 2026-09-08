@@ -1314,7 +1314,7 @@ func TestAbandonRateLimitAndTimeoutKind(t *testing.T) {
 		t.Fatalf("a rate-limited pending create: %+v, want quarantined, not rolled back", step)
 	}
 	m := beads.NewMemStore()
-	if err := (startupHealthRecord{store: m}).fail("s-gc-1", fmt.Errorf("startup: %w", context.DeadlineExceeded), gatherNow); err != nil {
+	if err := (startupHealthRecord{store: m}).fail("s-gc-1", "", fmt.Errorf("startup: %w", context.DeadlineExceeded), gatherNow, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if ep, _ := sessionFrontDoor(m).LoadStartupHealthEpisode("s-gc-1"); ep.Kind != session.FailureKindTimeout {
