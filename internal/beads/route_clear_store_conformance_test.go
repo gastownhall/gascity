@@ -172,7 +172,7 @@ var routedToAllowlist = []routedToSite{
 	},
 	{
 		path:   "cmd/gc/cmd_convoy_dispatch.go",
-		line:   2110,
+		line:   2272,
 		reason: "write to a pre-existing bead; Root #7 (cmd_convoy_dispatch.go openStoreAtForCity) -- wrap that root's store construction in GREEN phase",
 	},
 	{

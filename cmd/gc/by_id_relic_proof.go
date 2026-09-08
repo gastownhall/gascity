@@ -190,7 +190,7 @@ func censusRefusedCityBinding(cityPath string) map[storeref.StoreRef]bool {
 	if err != nil {
 		return nil
 	}
-	routes, err := openStorageRoutes(plan, infraBindingTarget{Binding: binding})
+	routes, err := openStorageRoutes(plan, infraBindingTarget{Binding: binding}, cfg)
 	if err != nil {
 		// "Cannot open the binding" — the one refusal that really does say the
 		// binding is unreadable. No proof, and the read falls through.

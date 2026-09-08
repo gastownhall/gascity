@@ -149,7 +149,7 @@ func TestBootCensusIsLiveAndLeavesNothingOnDisk(t *testing.T) {
 	target := mustResolveInfraTarget(t, root, cfg)
 
 	openAndCensus := func() bool {
-		routes, err := openStorageRoutes(plan, target)
+		routes, err := openStorageRoutes(plan, target, cfg)
 		if err != nil {
 			t.Fatalf("openStorageRoutes: %v", err)
 		}
@@ -162,7 +162,7 @@ func TestBootCensusIsLiveAndLeavesNothingOnDisk(t *testing.T) {
 		t.Fatalf("a binding with nothing carried across reported relics = %v", first)
 	}
 
-	store, err := openStorageRoutes(plan, target)
+	store, err := openStorageRoutes(plan, target, cfg)
 	if err != nil {
 		t.Fatalf("openStorageRoutes: %v", err)
 	}
