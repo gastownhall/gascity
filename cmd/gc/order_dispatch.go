@@ -1844,12 +1844,51 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 	})
 }
 
-func prepareOrderWispRecipe(ctx context.Context, store beads.Store, a orders.Order, searchPaths []string, vars map[string]string) (*formula.Recipe, error) {
+// prepareOrderWispRecipe compiles an order's formula into a recipe and returns
+// the resolved invocation vars alongside it. The caller must thread those vars
+// into molecule.Instantiate; without them every {{var}} referencing a
+// caller-supplied value renders empty on the instantiated beads (#4668).
+func prepareOrderWispRecipe(ctx context.Context, store beads.Store, a orders.Order, searchPaths []string, vars map[string]string) (*formula.Recipe, map[string]string, error) {
 	inv, err := graphv2.PrepareInvocation(ctx, store, a.Formula, searchPaths, "", vars)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return formula.CompileWithoutRuntimeVarValidation(ctx, a.Formula, searchPaths, inv.Vars)
+	recipe, err := formula.CompileWithoutRuntimeVarValidation(ctx, a.Formula, searchPaths, inv.Vars)
+	if err != nil {
+		return nil, nil, err
+	}
+	return recipe, inv.Vars, nil
+}
+
+// stampOrderWispRuntimeVars records the resolved runtime vars on a graph.v2
+// order wisp root (and any drain steps) so downstream fan-out recovers the
+// caller-supplied values, mirroring the sling path's runtime-vars stamp. It
+// deliberately omits the input-convoy and root-key identity metadata that the
+// cook/sling stamps also write: order dispatch does not dedup wisps by root
+// key, and stamping one would suppress legitimate repeat runs of a scheduled
+// or event order. No-op for non-graph recipes or when no vars are supplied.
+func stampOrderWispRuntimeVars(recipe *formula.Recipe, vars map[string]string) {
+	if recipe == nil || len(recipe.Steps) == 0 || !graphroute.IsCompiledGraphWorkflow(recipe) {
+		return
+	}
+	runtimeVars := graphv2.RuntimeVarsMetadata(vars)
+	if runtimeVars == "" {
+		return
+	}
+	root := &recipe.Steps[0]
+	if root.Metadata == nil {
+		root.Metadata = make(map[string]string)
+	}
+	root.Metadata[graphv2.RuntimeVarsMetadataKey] = runtimeVars
+	for i := range recipe.Steps {
+		if recipe.Steps[i].Metadata[beadmeta.KindMetadataKey] != beadmeta.KindDrain {
+			continue
+		}
+		if recipe.Steps[i].Metadata == nil {
+			recipe.Steps[i].Metadata = make(map[string]string)
+		}
+		recipe.Steps[i].Metadata[graphv2.RuntimeVarsMetadataKey] = runtimeVars
+	}
 }
 
 func poolOrderRouteVisibilityWarning(a orders.Order, recipe *formula.Recipe) string {
@@ -2131,7 +2170,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 	if a.FormulaLayer != "" {
 		searchPaths = []string{a.FormulaLayer}
 	}
-	recipe, err := prepareOrderWispRecipe(ctx, store, a, searchPaths, vars)
+	recipe, effectiveVars, err := prepareOrderWispRecipe(ctx, store, a, searchPaths, vars)
 	if err != nil {
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
@@ -2142,7 +2181,13 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
 		return
 	}
-	if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{}); err != nil {
+	// Same fix as `gc order run` (cmd_order.go): validate against the resolved
+	// invocation vars (declared defaults applied), not the caller's raw --var
+	// map. An empty Options drops them and reports every required var as
+	// missing. On this path that is worse than on the manual one — the
+	// controller fires unattended, so a cooldown/cron order using a required
+	// var would fail on every tick with nobody reading the order.failed events.
+	if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{Vars: effectiveVars}); err != nil {
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
 			Actor:   "controller",
@@ -2208,7 +2253,14 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		return
 	}
 
-	cookResult, err := molecule.Instantiate(ctx, graphStore, recipe, molecule.Options{})
+	// Same fix as `gc order run` (cmd_order.go): thread the resolved
+	// invocation vars used for validation above into instantiation. An empty
+	// Options here falls back to formula defaults only, so every {{var}}
+	// referencing a caller-supplied value renders empty (or its default) on
+	// the created bead text instead of the caller's value (#4668).
+	stampOrderWispRuntimeVars(recipe, effectiveVars)
+
+	cookResult, err := molecule.Instantiate(ctx, graphStore, recipe, molecule.Options{Vars: effectiveVars})
 	if err != nil {
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,

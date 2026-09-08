@@ -552,6 +552,22 @@ func TestCanonicalProfileIdentity(t *testing.T) {
 	}
 }
 
+func TestCanonicalProfileIdentityCursor(t *testing.T) {
+	identity, ok := CanonicalProfileIdentity(ProfileCursorTmuxCLI)
+	if !ok {
+		t.Fatal("CanonicalProfileIdentity(ProfileCursorTmuxCLI) = false, want true")
+	}
+	if identity.ProviderFamily != "cursor" {
+		t.Fatalf("ProviderFamily = %q, want cursor", identity.ProviderFamily)
+	}
+	if identity.TransportClass != "tmux-cli" {
+		t.Fatalf("TransportClass = %q, want tmux-cli", identity.TransportClass)
+	}
+	if identity.CertificationFingerprint == "" {
+		t.Fatal("CertificationFingerprint is empty")
+	}
+}
+
 func TestCanonicalProfileIdentityOpenCode(t *testing.T) {
 	identity, ok := CanonicalProfileIdentity(ProfileOpenCodeTmuxCLI)
 	if !ok {

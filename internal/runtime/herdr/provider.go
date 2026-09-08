@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,13 +28,16 @@ import (
 type Provider struct {
 	c            *client
 	metaDir      string        // sidecar KV root (herdr has no per-session metadata store)
-	setupTimeout time.Duration // per-command timeout for pre_start ([session] setup_timeout)
+	setupTimeout time.Duration // per-command timeout for pre_start/session_setup ([session] setup_timeout)
 	// setupMaxTimeout enables the activity-aware pre_start budget
 	// ([session] setup_max_timeout): when > 0, runSetupCommand replaces the
 	// fixed wall-clock deadline with "no output for setupTimeout" (idle)
 	// plus this absolute ceiling.
 	setupMaxTimeout time.Duration
 	mu              sync.Mutex // serializes workspace/tab find-or-create across concurrent Starts
+	// act is the tracker-backed activity source behind GetLastActivity /
+	// CanReportActivity (#4217); started lazily on first GetLastActivity.
+	act activityTracker
 }
 
 // defaultSetupTimeout mirrors the tmux provider's [session] setup_timeout
@@ -50,9 +54,10 @@ var (
 // fallback is used when empty, e.g. a city-less standalone construction); cityRoot
 // is the city directory used as the shared server's launch cwd and as the
 // effectiveWorkDir fallback for sessions whose WorkDir doesn't exist yet (empty in
-// city-less construction). setupTimeout bounds each pre_start command
-// ([session] setup_timeout); non-positive values fall back to
-// defaultSetupTimeout.
+// city-less construction). setupTimeout bounds each pre_start/session_setup
+// command ([session] setup_timeout); non-positive values fall back to
+// defaultSetupTimeout. setupMaxTimeout enables the activity-aware pre_start
+// budget ([session] setup_max_timeout).
 func New(herdrSession, metaDir, cityRoot string, setupTimeout, setupMaxTimeout time.Duration) *Provider {
 	if metaDir == "" {
 		// Per-euid, because the fallback path is otherwise identical for every
@@ -82,22 +87,46 @@ func (p *Provider) TeardownServer() error { return p.c.stopServer() }
 
 // ── Provider core ────────────────────────────────────────────────────────────
 
-// Start ensures the shared server is up, spawns the agent into its placed
-// workspace/tab, and delivers the startup nudge once the agent reaches idle.
+// Start ensures the shared server is up, prepares the session's working
+// directory (overlay/CopyFiles staging + pre_start), spawns the agent into its
+// placed workspace/tab, runs session_setup, and delivers the startup nudge
+// once the agent reaches idle.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
 	if err := p.ConfigureServer(); err != nil {
 		return fmt.Errorf("herdr: configure server: %w", err)
 	}
+	return p.start(ctx, name, cfg)
+}
+
+// start is Start minus the shared-server ensure: the per-session orchestration,
+// separated so tests can drive it against a fake herdr CLI without booting a
+// real session-server socket (mirroring tmux's Start/doStartSession split).
+func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) error {
 	if p.IsRunning(name) {
 		return runtime.ErrSessionExists
 	}
-	// Step 0: pre_start — workDir/worktree preparation, and the carrier for
-	// stage-2 skill/MCP materialization. Mirrors tmux doStartSession's first
-	// step; fatal on failure so an agent never launches into an unprepared
-	// workDir. Runs only once we know we're actually creating the agent (the
+	// Step 0: stage the working directory, then run pre_start host-side,
+	// mirroring the other host-side providers (tmux stageStartFiles +
+	// doStartSession Step 0, subprocess/acp StageSessionWorkDir): stage
+	// overlays/CopyFiles first, then pre_start (workDir/worktree preparation and
+	// the carrier for stage-2 skill/MCP materialization). Both are fatal so an
+	// agent never launches into an unprepared workDir — pre_start commands do
+	// directory/worktree prep (e.g. pack scripts running `git worktree add` for a
+	// per-bead worktree) and launching without them points the agent at the wrong
+	// repo. Runs only once we know we're actually creating the agent (the
 	// ErrSessionExists check above), so an existing session never re-runs prep.
+	// Before this, herdr never staged or ran pre_start — per-bead worktrees were
+	// never materialized and effectiveWorkDir silently dropped agents in the city
+	// root.
+	if err := runtime.StageSessionWorkDir(cfg); err != nil {
+		return fmt.Errorf("herdr: staging workdir for %q: %w", name, err)
+	}
 	if err := p.runPreStart(ctx, cfg); err != nil {
 		return fmt.Errorf("herdr: running pre_start: %w", err)
+	}
+	workDir, err := effectiveWorkDir(cfg, p.c.cityRoot)
+	if err != nil {
+		return fmt.Errorf("herdr: start %q: %w", name, err)
 	}
 	// Place the agent in its own tab under a per-rig (per-town) workspace, so
 	// agents are separate switchable spaces rather than tiled panes. The
@@ -107,7 +136,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// the agent's pane.
 	wsLabel, tabLabel := placementFor(name, cfg.Env)
 	p.mu.Lock()
-	tabID, paneID, err := p.c.ensurePlacement(ctx, wsLabel, tabLabel, effectiveWorkDir(cfg, p.c.cityRoot), cfg.Env)
+	tabID, paneID, err := p.c.ensurePlacement(ctx, wsLabel, tabLabel, workDir, cfg.Env)
 	p.mu.Unlock()
 	if err != nil {
 		return fmt.Errorf("herdr: place %q: %w", name, err)
@@ -208,8 +237,12 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if err := p.bindPlacement(name, info, mode); err != nil {
 		return fmt.Errorf("herdr: persist pane binding for %q: %w", name, err)
 	}
-	// Deliver the agent's first turn. Two independent sources, mirroring tmux:
-	// a named always-awake Claude session carries its behavioral prime in
+	// Post-launch steps mirror tmux's doStartSession ordering: wait for
+	// readiness, run session_setup (Step 5.5), then deliver the startup nudge
+	// (Step 6).
+	//
+	// The first turn has two independent sources, mirroring tmux: a named
+	// always-awake Claude session carries its behavioral prime in
 	// cfg.PromptSuffix (PromptMode=arg); a pool/sling slot carries its claim
 	// instruction in cfg.Nudge; a named session may carry BOTH. herdr launches
 	// via exec argv and — unlike tmux/acp/t3bridge — has no shell-arg slot to
@@ -218,32 +251,53 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// startupPromptDeliveredEnv, suppressing the SessionStart hook's copy of the
 	// prime) leave the agent wholly unprimed and idle. startupDeliveryText
 	// returns prime-then-nudge when both are set; a pool slot's claim nudge is
-	// returned unchanged. Route it through the one hardened post-idle
-	// paste+submit path. See startupDeliveryText.
-	// Skip delivery when we adopted an already-running holder: it is a live,
-	// already-primed agent, and re-delivering would inject the startup prime into
-	// a working session.
-	if startupText := startupDeliveryText(cfg); !adopted && startupText != "" && info.PaneID != "" {
+	// returned unchanged. Route it through the one hardened post-idle delivery
+	// path. See startupDeliveryText.
+	//
+	// The identity keys (GC_SESSION_ID/GC_INSTANCE_TOKEN/…) a reconcile tick
+	// probes via GetMeta during this window are already in the sidecar: Start
+	// seeds the whole cfg.Env before the launch (seedMetaFromEnv above), a
+	// superset of and earlier than a post-launch identity stamp.
+	//
+	// Skip the whole provisioning tail when we adopted an already-running
+	// holder: it is a live, already-primed agent whose winning Start already ran
+	// session_setup and delivered its prime; re-running here would double
+	// session_setup and inject the startup prime into a working session.
+	startupText := startupDeliveryText(cfg)
+	if !adopted && info.PaneID != "" && (startupText != "" || hasSessionSetup(cfg)) {
 		// A freshly-spawned agent boots through a shell→TUI handoff before its
-		// input prompt is listening. The paste buffers and survives that window,
-		// but the submit CR does not: delivered too early it is swallowed, leaving
-		// the text typed-but-unsubmitted in the box — and the agent then idles
-		// forever instead of running its first turn. Wait for herdr to report the
-		// agent idle (its prompt rendered) before delivering, mirroring how tmux's
-		// doStartSession waits for readiness before its Step-6 startup nudge.
+		// input prompt is listening; a paste or submit delivered in that window is
+		// silently swallowed, leaving the agent idle forever instead of running its
+		// first turn. Wait for herdr to report the agent idle (its prompt rendered)
+		// before delivering, mirroring how tmux's doStartSession waits for readiness
+		// before its Step-5.5 session_setup and Step-6 startup nudge. Idle is
+		// necessary but not sufficient — input-readiness lags it — but deliverNudge
+		// delegates the type+submit handshake to herdr ≥0.7.5's native `agent
+		// prompt`, which owns landing the input reliably rather than trusting a bare
+		// `pane run` paste.
 		// Bounded and best-effort: on a boot that never idles we deliver anyway (no
 		// worse than the prior unconditional send), and the reconciler tolerates a
 		// slow Start (pendingCreateNeverStartedTimeout = 10m).
 		idleOutcome := p.waitForIdleOutcome(ctx, name, startupNudgeIdleTimeout)
+		// session_setup runs host-side ("in gc's process via sh -c", per the Config
+		// contract), so herdr can honor it the same way tmux does. Non-fatal, and
+		// ordered before the first turn so the agent's workspace is prepared when
+		// it starts working.
+		p.runSessionSetup(ctx, name, cfg, os.Stderr)
 		// Deliver with submission confirmation: the swallowed-CR strand is
 		// detected (agent_prompt_stalled) and recovered in-band with an explicit
 		// Enter (deliverStartupTurn). An error here means even recovery could not
 		// confirm the first turn started — the session is live, so failing Start
 		// would only trigger a respawn storm; record the strand durably instead
-		// so it is machine-visible and countable. nudgeStalledPoolClaims remains
-		// the reconcile-tick backstop of last resort for pool slots.
-		if err := p.c.deliverStartupTurn(ctx, info.PaneID, startupText); err != nil {
-			p.recordStartupDeliveryUnconfirmed(name, info.PaneID, idleOutcome, err)
+		// so it is machine-visible and countable. For a warm-bind slot, the
+		// event-based claim nudge (startPreparedStartCandidate's warm-reuse
+		// branch) also re-delivers on the next reconcile tick; for every other
+		// path nudgeStalledPoolClaims remains the reconcile-tick backstop of
+		// last resort.
+		if startupText != "" {
+			if err := p.c.deliverStartupTurn(ctx, info.PaneID, startupText); err != nil {
+				p.recordStartupDeliveryUnconfirmed(name, info.PaneID, idleOutcome, err)
+			}
 		}
 	}
 	return nil
@@ -278,6 +332,42 @@ func (p *Provider) recordStartupDeliveryUnconfirmed(name, paneID string, idleOut
 		fmt.Fprintf(os.Stderr, "herdr: recording unconfirmed startup delivery for %q failed: %v\n", name, err) //nolint:errcheck // best-effort diagnostic
 	}
 	fmt.Fprintf(os.Stderr, "herdr: startup delivery for %q not confirmed: %v\n", name, derr) //nolint:errcheck // best-effort diagnostic
+}
+
+// runSessionSetup runs cfg.SessionSetup commands then cfg.SessionSetupScript
+// host-side after the agent is up, mirroring the tmux adapter's
+// runSessionSetup (Step 5.5): commands execute in gc's process via sh -c with
+// GC_SESSION added to the env, and failures are non-fatal warnings — the
+// session still works. The tmux-specific GC_TMUX_SOCKET is not injected here;
+// setup scripts that shell out to tmux are inapplicable under herdr.
+//
+// session_live is deliberately NOT wired: its documented use is tmux cosmetics
+// (theming, keybindings, status bars), and herdr's RunLive stays a no-op like
+// subprocess/acp.
+func (p *Provider) runSessionSetup(ctx context.Context, name string, cfg runtime.Config, stderr io.Writer) {
+	if !hasSessionSetup(cfg) {
+		return
+	}
+	setupEnv := make(map[string]string, len(cfg.Env)+1)
+	for k, v := range cfg.Env {
+		setupEnv[k] = v
+	}
+	setupEnv["GC_SESSION"] = name
+	for i, cmd := range cfg.SessionSetup {
+		if err := p.runSetupCommand(ctx, cmd, setupEnv); err != nil {
+			fmt.Fprintf(stderr, "gc: session_setup[%d] warning: %v\n", i, err) //nolint:errcheck // best-effort warning
+		}
+	}
+	if cfg.SessionSetupScript != "" {
+		if err := p.runSetupCommand(ctx, cfg.SessionSetupScript, setupEnv); err != nil {
+			fmt.Fprintf(stderr, "gc: session_setup_script warning: %v\n", err) //nolint:errcheck // best-effort warning
+		}
+	}
+}
+
+// hasSessionSetup reports whether cfg carries any session_setup work.
+func hasSessionSetup(cfg runtime.Config) bool {
+	return len(cfg.SessionSetup) > 0 || cfg.SessionSetupScript != ""
 }
 
 // startupDeliveryText resolves the first-turn text Start delivers to a freshly
@@ -813,17 +903,30 @@ func (p *Provider) SendKeys(name string, keys ...string) error {
 func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 	return runtime.ProviderCapabilities{
 		CanReportAttachment: false, // no clean IsAttached query
-		CanReportActivity:   false, // no GetLastActivity
-		CanStream:           false, // socket-event streaming is a later optimization
+		CanReportActivity:   true,  // tracker-backed GetLastActivity (activity.go)
+		CanStream:           true,  // push session-event stream via SubscribeSessionEvents (events.subscribe socket API)
 		CanAttachTTY:        true,  // agent attach
+		// Reporting activity must not turn off the stalled-claim nudge
+		// backstop: a swallowed startup paste still has no relaunch/respawn
+		// redelivery path here (Relaunch is deliberately unimplemented —
+		// Stop+Start only), so the backstop stays the recovery of record.
+		NeedsClaimBackstop: true,
 	}
 }
 
-// ── best-effort / unsupported (the contract permits these) ───────────────────
+// GetLastActivity reports the session's last observed activity, maintained by
+// the lazily started activity tracker (activity.go): now while the agent's
+// status sits at working, the frozen stamp of its last observed change
+// otherwise, and the zero time for sessions the tracker has not observed. The
+// error is always nil — a tracker that cannot reach the server keeps its last
+// known state, and never-observed sessions read as unknown (zero), which every
+// consumer already treats as "no signal".
+func (p *Provider) GetLastActivity(name string) (time.Time, error) {
+	p.act.start(p, name)
+	return p.act.lastActivity(name), nil
+}
 
-// GetLastActivity is unsupported (herdr exposes no activity timestamp); it
-// returns the zero time.
-func (p *Provider) GetLastActivity(_ string) (time.Time, error) { return time.Time{}, nil }
+// ── best-effort / unsupported (the contract permits these) ───────────────────
 
 // ClearScrollback is a no-op: herdr exposes no scrollback-clear op.
 func (p *Provider) ClearScrollback(_ string) error { return nil }
@@ -856,7 +959,8 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 // at creation) doubles as the GetMeta store. Ownership/identity keys like
 // GC_SESSION_ID and GC_INSTANCE_TOKEN must be readable via GetMeta from the
 // moment the runtime is alive. Later SetMeta calls override individual keys,
-// exactly as tmux setenv does.
+// exactly as tmux setenv does. Start calls this before the launch, so it is a
+// superset of (and earlier than) the identity-key-only stampIdentityMeta below.
 //
 // It seeds the classified half of the environment rather than all of it. tmux's
 // store is the session environment, which dies with the server; herdr's is a
@@ -872,6 +976,25 @@ func (p *Provider) seedMetaFromEnv(name string, env map[string]string) error {
 		}
 	}
 	return nil
+}
+
+// identityMetaKeys are the session-identity keys the reconciler probes via
+// GetMeta to bind a live runtime to its session bead (session id, instance
+// token, runtime epoch).
+var identityMetaKeys = []string{"GC_SESSION_ID", "GC_INSTANCE_TOKEN", "GC_RUNTIME_EPOCH"}
+
+// stampIdentityMeta copies just the identity keys present in env into the
+// sidecar, best-effort. Start uses seedMetaFromEnv (the full env, pre-launch)
+// instead; this narrower helper remains for callers that only need the identity
+// subset stamped.
+func (p *Provider) stampIdentityMeta(name string, env map[string]string) {
+	for _, key := range identityMetaKeys {
+		if v := env[key]; v != "" {
+			if err := p.SetMeta(name, key, v); err != nil {
+				fmt.Fprintf(os.Stderr, "herdr: stamping %s for %q: %v\n", key, name, err) //nolint:errcheck // best-effort diagnostic
+			}
+		}
+	}
 }
 
 // SetMeta writes a per-session metadata value to the sidecar store (herdr has
@@ -977,7 +1100,8 @@ func workspaceTabFor(name string) (workspace, tab string) {
 // populates these via RuntimeEnvWithSessionContext).
 //
 // This matters for ephemeral pool wisps: their runtime name is town-qualified
-// (e.g. "gastown__polecat-gc-wisp-3nvj3yx"), so workspaceTabFor alone drops them
+// (e.g. "gastown__polecat-az-wisp-3nvj3yx", where "az" is the pouring scope's
+// beads prefix and varies by city), so workspaceTabFor alone drops them
 // in the town workspace under an opaque wisp-id tab. GC_RIG restores the
 // originating rig workspace (webapp/mobile), and GC_ALIAS swaps the wisp id for
 // the themed instance name, yielding e.g. workspace "webapp", tab
@@ -994,19 +1118,37 @@ func placementFor(name string, env map[string]string) (workspace, tab string) {
 		workspace = rig
 	}
 	// Replace a wisp id with the themed instance alias so tabs read e.g.
-	// "polecat-furiosa" rather than "polecat-gc-wisp-3nvj3yx". The role prefix
+	// "polecat-furiosa" rather than "polecat-az-wisp-3nvj3yx". The role prefix
 	// (everything before the wisp id) is preserved. Falls through unchanged when
 	// no alias is available yet, or when the alias is itself the wisp identity.
-	if i := strings.Index(tab, "gc-wisp-"); i >= 0 {
+	if i := wispIDStart(tab); i >= 0 {
 		alias := strings.TrimSpace(env["GC_ALIAS"])
 		if alias == "" {
 			alias = strings.TrimSpace(env["GC_AGENT"])
 		}
-		if leaf := lastSegment(alias); leaf != "" && !strings.Contains(leaf, "gc-wisp-") {
+		if leaf := lastSegment(alias); leaf != "" && wispIDStart(leaf) < 0 {
 			tab = tab[:i] + leaf
 		}
 	}
 	return workspace, tab
+}
+
+// wispIDStart reports the index where a wisp id begins inside s, or -1 when s
+// carries none. A wisp id is a bead id minted by PourWisp, so it reads
+// "<prefix>-wisp-<suffix>" where <prefix> is the beads prefix of the scope that
+// poured it — "gc" in a default city, but "az", "py", … anywhere else.
+// Detection therefore keys on the "-wisp-" infix and walks back over the prefix
+// token; keying on a literal "gc-wisp-" silently no-ops on every other city,
+// and keying on "-wisp-" alone would cut mid-id ("polecat-az" + leaf).
+func wispIDStart(s string) int {
+	i := strings.Index(s, "-wisp-")
+	if i < 0 {
+		return -1
+	}
+	// i sits on the "-" closing the beads prefix, so the id starts just after
+	// the preceding "-" — or at 0 when the wisp id has no role prefix, which
+	// LastIndex's -1 gives for free.
+	return strings.LastIndex(s[:i], "-") + 1
 }
 
 // lastSegment returns the trailing identity segment after the final "/" or ".",
@@ -1019,33 +1161,40 @@ func lastSegment(s string) string {
 	return s
 }
 
-// effectiveWorkDir picks the directory the agent should launch in. herdr falls
-// back to its server cwd when --cwd is empty and to $HOME when --cwd points at a
-// path that does not exist, and Claude Code never persists trust acceptance from
-// $HOME — so it re-prompts "trust this folder?" on every launch and (worse) an
-// ephemeral pool spawn that lands in $HOME boots a different shell state that
-// swallows the startup nudge, leaving it idle and unclaimed. Ephemeral pool wisps
-// are started before their per-bead worktree is created, so cfg.WorkDir may not
-// exist yet at launch; fall back to the city root (a stable project dir where
-// trust is saved once) rather than let herdr land the session in $HOME.
+// effectiveWorkDir resolves the directory the agent should launch in. Start
+// calls it AFTER staging and pre_start have run, so a configured cfg.WorkDir
+// must exist on disk by now — pre_start is what creates per-bead worktrees
+// (pack worktree-setup scripts) — and a missing directory means preparation
+// failed or the config points somewhere wrong. That is a loud error: herdr
+// itself falls back to $HOME when --cwd points at a nonexistent path, where
+// Claude Code never persists trust acceptance (it re-prompts "trust this
+// folder?" every launch) and the altered boot shell state swallows the startup
+// nudge; and this provider's previous behavior — silently substituting the
+// city root — masked the missing worktree entirely, leaving agents running in
+// the wrong repo. (That substitution predates herdr executing pre_start, when
+// a pool wisp's WorkDir could not exist yet at launch; with pre_start wired,
+// set-but-absent means preparation genuinely failed. tmux, for its part, would
+// silently land the pane in the server's cwd — verified: `new-session -c
+// /nonexistent` exits 0 with the pane in $HOME — so failing loudly here is
+// deliberate hardening over tmux, not parity with it.)
 //
-// Resolution order: an existing cfg.WorkDir; else a non-empty GC_CITY_ROOT env
-// (legacy/explicit override); else the provider's cityRoot. The final fallback is
-// the fix for the pool-spawn-in-$HOME bug: GC_CITY_ROOT is not actually populated
-// in cfg.Env today, so before this the result was "" and herdr used its server
-// cwd — which is $HOME whenever the daemon was launched from a login shell. An
-// empty cityRoot (city-less construction) returns "" and defers to the server cwd
-// (now itself pinned to the city root in startServer).
-func effectiveWorkDir(cfg runtime.Config, cityRoot string) string {
+// An EMPTY cfg.WorkDir keeps the legitimate fallback chain: a non-empty
+// GC_CITY_ROOT env (legacy/explicit override); else the provider's cityRoot (a
+// stable project dir where trust is saved once, rather than herdr's server
+// cwd — which is $HOME whenever the daemon was launched from a login shell).
+// An empty cityRoot (city-less construction) returns "" and defers to the
+// server cwd (itself pinned to the city root in startServer).
+func effectiveWorkDir(cfg runtime.Config, cityRoot string) (string, error) {
 	if cfg.WorkDir != "" {
-		if _, err := os.Stat(cfg.WorkDir); err == nil {
-			return cfg.WorkDir
+		if _, err := os.Stat(cfg.WorkDir); err != nil {
+			return "", fmt.Errorf("workdir %q unavailable after staging/pre_start (refusing fallback launch dir): %w", cfg.WorkDir, err)
 		}
+		return cfg.WorkDir, nil
 	}
 	if root := cfg.Env["GC_CITY_ROOT"]; root != "" {
-		return root
+		return root, nil
 	}
-	return cityRoot
+	return cityRoot, nil
 }
 
 // translateKey maps tmux-style key names (SendKeys uses "Enter"/"C-c"/"Down")

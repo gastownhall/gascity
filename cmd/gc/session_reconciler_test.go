@@ -2480,6 +2480,63 @@ func TestReconcileSessionBeads_AsleepIdlePoolBeadFreesSlot(t *testing.T) {
 	}
 }
 
+// TestReconcileSessionBeads_AsleepMaxSessionAgePoolBeadFreesSlot mirrors
+// TestReconcileSessionBeads_AsleepIdlePoolBeadFreesSlot for
+// sleep_reason=max-session-age: a session forced to stop by the max-session-age
+// timer must free its pool slot through the same live-query close gate,
+// instead of wedging the slot until an operator intervenes.
+func TestReconcileSessionBeads_AsleepMaxSessionAgePoolBeadFreesSlot(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker"}},
+	}
+	env.addDesired("worker", "worker", false) // NOT running
+	session := env.createSessionBead("worker", "worker")
+	// Simulate the post-max-session-age-stop state: asleep +
+	// sleep_reason=max-session-age + pool-managed, but the runtime has
+	// exited and no work is assigned.
+	env.setSessionMetadata(&session, map[string]string{
+		"state":                "asleep",
+		"sleep_reason":         string(sessionpkg.SleepReasonMaxSessionAge),
+		poolManagedMetadataKey: boolMetadata(true),
+	})
+
+	reconcileSessionBeadsAtPath(
+		context.Background(),
+		"",
+		[]beads.Bead{session},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		env.store,
+		newFakeDrainOps(),
+		nil,
+		nil, // rigStores
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed — asleep-max-session-age pool beads must free their slot via the live-query close gate", got.Status)
+	}
+}
+
 // capturingRecorder is an in-memory events.Recorder used in tests that
 // need to assert which events were emitted.
 type capturingRecorder struct {
@@ -6838,12 +6895,63 @@ func TestResolvePreservedConfiguredNamedSessionTemplate_StoreOnlyClosedDuplicate
 	closedTwin.ID = "closed-twin"
 	closedTwin.Closed = true
 
-	preservedTP, err := resolvePreservedConfiguredNamedSessionTemplate(".", env.cfg.Workspace.Name, env.cfg, env.sp, env.store, []sessionpkg.Info{closedTwin, sessionInfo}, sessionInfo, env.clk, io.Discard)
+	preservedTP, _, err := resolvePreservedConfiguredNamedSessionTemplate(".", env.cfg.Workspace.Name, env.cfg, env.sp, env.store, []sessionpkg.Info{closedTwin, sessionInfo}, sessionInfo, env.clk, io.Discard)
 	if err != nil {
 		t.Fatalf("resolve preserved named session: %v", err)
 	}
 	if got := preservedTP.Env["GC_SESSION_ID"]; got != session.ID {
 		t.Fatalf("GC_SESSION_ID = %q, want the live preserved bead ID %q (store-only-closed twin must be filtered from the feed)", got, session.ID)
+	}
+}
+
+// TestResolvePreservedConfiguredNamedSessionTemplate_ClearsStaleTriggerStamp
+// is the end-to-end wiring proof for gascity#4373: a named session's
+// resolved template must not replay a trigger stamp whose target has since
+// been parked. Unit coverage for the clear logic itself lives in
+// bindNamedSessionTriggerBead's own tests
+// (build_desired_state_named_trigger_bind_test.go); this pins that the
+// reconciler actually calls it and uses the cleared Info, not the stale one.
+func TestResolvePreservedConfiguredNamedSessionTemplate_ClearsStaleTriggerStamp(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		SessionSleep:  config.SessionSleepConfig{InteractiveResume: "60s"},
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	// The production shape of a parked target: every real store folds bd's raw
+	// `blocked` into "open" (gc-4zb/#4395) and reports the park through the
+	// IsBlocked ready-work projection instead.
+	blocked := true
+	work, err := env.store.Create(beads.Bead{Title: "parked work", Status: "open", IsBlocked: &blocked})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	session := env.createSessionBead(sessionName, "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:           "true",
+		namedSessionIdentityMetadata:      "worker",
+		namedSessionModeMetadata:          "on_demand",
+		beadmeta.TriggerBeadIDMetadataKey: work.ID,
+	})
+	sessionInfo := env.sessionInfo(session.ID)
+
+	preservedTP, preservedInfo, err := resolvePreservedConfiguredNamedSessionTemplate(".", env.cfg.Workspace.Name, env.cfg, env.sp, env.store, []sessionpkg.Info{sessionInfo}, sessionInfo, env.clk, io.Discard)
+	if err != nil {
+		t.Fatalf("resolve preserved named session: %v", err)
+	}
+	if got := preservedTP.Env["GC_TRIGGER_BEAD_ID"]; got != "" {
+		t.Errorf("GC_TRIGGER_BEAD_ID = %q, want cleared for a blocked target", got)
+	}
+	if got := preservedTP.Env["GC_TRIGGER_WORK_BEAD_ID"]; got != "" {
+		t.Errorf("GC_TRIGGER_WORK_BEAD_ID = %q, want cleared for a blocked target", got)
+	}
+	// The returned Info carries the clear back to the caller's snapshot; a
+	// caller that keeps its pre-call Info re-injects the stamp downstream.
+	if preservedInfo.TriggerBeadID != "" {
+		t.Errorf("returned Info TriggerBeadID = %q, want cleared", preservedInfo.TriggerBeadID)
 	}
 }
 
@@ -6866,7 +6974,7 @@ func TestReconcileSessionBeads_PreservedRunningNamedSessionStillIdleDrains(t *te
 		namedSessionModeMetadata:     "on_demand",
 	})
 	sessionInfo := env.sessionInfo(session.ID)
-	preservedTP, err := resolvePreservedConfiguredNamedSessionTemplate(".", env.cfg.Workspace.Name, env.cfg, env.sp, env.store, []sessionpkg.Info{sessionInfo}, sessionInfo, env.clk, io.Discard)
+	preservedTP, _, err := resolvePreservedConfiguredNamedSessionTemplate(".", env.cfg.Workspace.Name, env.cfg, env.sp, env.store, []sessionpkg.Info{sessionInfo}, sessionInfo, env.clk, io.Discard)
 	if err != nil {
 		t.Fatalf("resolve preserved named session: %v", err)
 	}
@@ -10944,7 +11052,7 @@ func TestReconcileSessionBeads_RecordsResetStallDiagnostic(t *testing.T) {
 	}
 
 	env.stderr.Reset()
-	recordResetStallIfDue(sessiontest.SeedBead(t, session), "worker", "worker", false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
+	recordResetStallIfDue("", env.store, env.sp, env.cfg, sessiontest.SeedBead(t, session), "worker", "worker", false, false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
 	if got := strings.TrimSpace(env.stderr.String()); got != "" {
 		t.Fatalf("second stalled pass stderr = %q, want debounce silence", got)
 	}
@@ -10956,18 +11064,328 @@ func TestReconcileSessionBeads_RecordsResetStallDiagnostic(t *testing.T) {
 		"continuation_reset_pending":   "",
 		sessionpkg.ResetCommittedAtKey: "",
 	})
-	recordResetStallIfDue(sessiontest.SeedBead(t, session), "worker", "worker", false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
+	recordResetStallIfDue("", env.store, env.sp, env.cfg, sessiontest.SeedBead(t, session), "worker", "worker", false, false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
 	env.setSessionMetadata(&session, map[string]string{
 		"continuation_reset_pending":   "true",
 		sessionpkg.ResetCommittedAtKey: committedAt,
 	})
 	env.stderr.Reset()
-	recordResetStallIfDue(sessiontest.SeedBead(t, session), "worker", "worker", false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
+	recordResetStallIfDue("", env.store, env.sp, env.cfg, sessiontest.SeedBead(t, session), "worker", "worker", false, false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
 	if got := strings.TrimSpace(env.stderr.String()); got != wantMessage {
 		t.Fatalf("re-stalled pass stderr = %q, want %q", got, wantMessage)
 	}
 	if len(rec.Events) != 2 {
 		t.Fatalf("recorded events after reset clear = %d, want 2", len(rec.Events))
+	}
+}
+
+// TestReconcileSessionBeads_ResetStallEvictsStaleRuntime verifies the
+// reconciler evicts a stale tmux runtime once a continuation reset has been
+// pending longer than the startup timeout, instead of only re-recording the
+// stall diagnostic and leaving the session wedged forever. Regression test
+// for gastownhall/gascity#5355: a provider-profile flip left an old runtime's
+// tmux session alive (process dead) while continuation_reset_pending stayed
+// true — reset-pending never evicted the stale occupant, so the config
+// change never took effect.
+func TestReconcileSessionBeads_ResetStallEvictsStaleRuntime(t *testing.T) {
+	env := newReconcilerTestEnv()
+	rec := events.NewFake()
+	env.rec = rec
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+		Session:   config.SessionConfig{StartupTimeout: "60s"},
+	}
+	tp := TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  "worker",
+		TemplateName: "worker",
+		Hints:        agent.StartupHints{ProcessNames: []string{"test-cmd"}},
+	}
+	env.desiredState["worker"] = tp
+
+	// Simulate the wedge: the OLD runtime's tmux session is still alive
+	// (running), but its process is dead (Zombies), so alive=false while
+	// running=true — exactly the "stale runtime still occupies the tmux
+	// session" condition #5355 describes.
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("starting fake session: %v", err)
+	}
+	env.sp.Zombies["worker"] = true
+
+	session := env.createSessionBead("worker", "worker")
+	committedAt := env.clk.Now().Add(-75 * time.Second).UTC().Format(time.RFC3339)
+	env.setSessionMetadata(&session, map[string]string{
+		"continuation_reset_pending":   "true",
+		sessionpkg.ResetCommittedAtKey: committedAt,
+	})
+
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{session}, env.desiredState, configuredSessionNames(env.cfg, "", env.store),
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{"worker": 0}, false, nil, "test-city",
+		nil, env.clk, rec, env.cfg.Session.StartupTimeoutDuration(), 0, &env.stdout, &env.stderr,
+	)
+
+	// The stale runtime must actually be evicted (Stop issued against the
+	// wedged tmux session), not just re-recorded. The normal spawn path may
+	// then respawn it fresh within the same tick (desired state still wants
+	// "worker" running) — that respawn is the whole point of the fix, so
+	// this asserts on the Stop call rather than on IsRunning at tick end.
+	evicted := false
+	for _, c := range env.sp.SnapshotCalls() {
+		if c.Method == "Stop" && c.Name == "worker" {
+			evicted = true
+			break
+		}
+	}
+	if !evicted {
+		t.Fatalf("expected the stale reset-pending runtime to be evicted (Stop called for %q), calls: %#v", "worker", env.sp.SnapshotCalls())
+	}
+
+	foundStall := false
+	for _, e := range rec.Events {
+		if e.Type == events.SessionResetStalled {
+			foundStall = true
+		}
+	}
+	if !foundStall {
+		t.Fatalf("expected a session.reset_stalled event, got: %#v", rec.Events)
+	}
+}
+
+// TestReconcileSessionBeads_ResetStallEvictionRetriesAfterKillFailure verifies
+// the stale-runtime eviction is retried on later overdue ticks after a kill
+// failure. The stall diagnostic and its event are deduped once per episode,
+// but the eviction must not be: the dedup mark only clears when
+// continuation_reset_pending clears, which a wedged session never does, so
+// gating the kill behind the mark would let one transient tmux failure disarm
+// the fix for the rest of the episode.
+func TestReconcileSessionBeads_ResetStallEvictionRetriesAfterKillFailure(t *testing.T) {
+	env := newReconcilerTestEnv()
+	rec := events.NewFake()
+	env.rec = rec
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+		Session:   config.SessionConfig{StartupTimeout: "60s"},
+	}
+	tp := TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  "worker",
+		TemplateName: "worker",
+		Hints:        agent.StartupHints{ProcessNames: []string{"test-cmd"}},
+	}
+	env.desiredState["worker"] = tp
+
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("starting fake session: %v", err)
+	}
+	env.sp.Zombies["worker"] = true
+	// Fake.Stop returns the injected error before deleting the session, so
+	// the stale runtime survives and the next tick still observes
+	// running=true, alive=false — the same overdue condition.
+	env.sp.StopErrors["worker"] = errors.New("tmux kill-session: server not responding")
+
+	session := env.createSessionBead("worker", "worker")
+	committedAt := env.clk.Now().Add(-75 * time.Second).UTC().Format(time.RFC3339)
+	env.setSessionMetadata(&session, map[string]string{
+		"continuation_reset_pending":   "true",
+		sessionpkg.ResetCommittedAtKey: committedAt,
+	})
+
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+	tick := func() {
+		reconcileSessionBeads(
+			context.Background(), []beads.Bead{session}, env.desiredState, cfgNames,
+			env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{"worker": 0}, false, nil, "test-city",
+			nil, env.clk, rec, env.cfg.Session.StartupTimeoutDuration(), 0, &env.stdout, &env.stderr,
+		)
+	}
+	// The eviction's own stderr line is the discriminating signal: the
+	// reconciler's other stale-session paths issue their own Stop calls in
+	// the same tick, so a raw Stop count cannot attribute the kill to
+	// recordResetStallIfDue.
+	const evictionLine = "session reconciler: evicting stale reset-pending runtime worker:"
+
+	env.stderr.Reset()
+	tick()
+	if got := strings.Count(env.stderr.String(), evictionLine); got != 1 {
+		t.Fatalf("eviction attempts after the first overdue tick = %d, want 1; stderr: %s", got, env.stderr.String())
+	}
+	if !env.sp.IsRunning("worker") {
+		t.Fatalf("stale runtime should still be running after the kill failed")
+	}
+
+	tick()
+	if got := strings.Count(env.stderr.String(), evictionLine); got != 2 {
+		t.Fatalf("eviction attempts after the second overdue tick = %d, want 2 (retried; the stall dedup mark must not disarm the kill); stderr: %s", got, env.stderr.String())
+	}
+
+	// Kill succeeds now: the retry lands, so no further failure is reported
+	// and the stale runtime is gone.
+	delete(env.sp.StopErrors, "worker")
+	env.stderr.Reset()
+	tick()
+	if got := strings.Count(env.stderr.String(), evictionLine); got != 0 {
+		t.Fatalf("eviction reported a failure after the kill should have landed; stderr: %s", env.stderr.String())
+	}
+	stopped := false
+	for _, c := range env.sp.SnapshotCalls() {
+		if c.Method == "Stop" && c.Name == "worker" {
+			stopped = true
+		}
+	}
+	if !stopped {
+		t.Fatalf("expected the stale runtime to be stopped, calls: %#v", env.sp.SnapshotCalls())
+	}
+}
+
+// TestReconcileSessionBeads_ZombieCrashDedupesAcrossTicks verifies that
+// repeated zombie detection (tmux session alive, expected process dead) on
+// the same session dedupes the session.crashed event instead of re-firing on
+// every reconciler tick. Regression test for gastownhall/gascity#5355: the
+// zombie branch fired session.crashed unconditionally on every ~30s tick with
+// zero dedup, producing 299 identical events over 5.3 hours for one wedged
+// session.
+func TestReconcileSessionBeads_ZombieCrashDedupesAcrossTicks(t *testing.T) {
+	env := newReconcilerTestEnv()
+	rec := events.NewFake()
+	env.rec = rec
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+
+	tp := TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  "worker",
+		TemplateName: "worker",
+		Hints:        agent.StartupHints{ProcessNames: []string{"test-cmd"}},
+	}
+	env.desiredState["worker"] = tp
+	_ = env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"})
+	env.sp.Zombies["worker"] = true
+	env.sp.SetPeekOutput("worker", "panic: nil pointer dereference\ngoroutine 1 [running]:")
+
+	session := env.createSessionBead("worker", "worker")
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+
+	for tick := 0; tick < 3; tick++ {
+		reconcileSessionBeads(
+			context.Background(), []beads.Bead{session}, env.desiredState, cfgNames,
+			env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+			nil, env.clk, rec, 0, 0, &env.stdout, &env.stderr,
+		)
+	}
+
+	got := 0
+	for _, e := range rec.Events {
+		if e.Type == events.SessionCrashed {
+			got++
+		}
+	}
+	if got != 1 {
+		t.Fatalf("session.crashed events after 3 ticks of the same zombie condition = %d, want 1 (deduped)", got)
+	}
+}
+
+// TestReconcileSessionBeads_ZombieCrashRefiresAfterRecovery verifies the
+// zombie-crash dedup suppresses a flood without permanently silencing a
+// flapping session: once the session is observed alive again the mark clears
+// (clearZombieCrash), so a later genuine zombie episode fires a fresh
+// session.crashed event.
+func TestReconcileSessionBeads_ZombieCrashRefiresAfterRecovery(t *testing.T) {
+	env := newReconcilerTestEnv()
+	rec := events.NewFake()
+	env.rec = rec
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+
+	tp := TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  "worker",
+		TemplateName: "worker",
+		Hints:        agent.StartupHints{ProcessNames: []string{"test-cmd"}},
+	}
+	env.desiredState["worker"] = tp
+	_ = env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"})
+	env.sp.SetPeekOutput("worker", "panic: nil pointer dereference\ngoroutine 1 [running]:")
+
+	session := env.createSessionBead("worker", "worker")
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+	tick := func(zombie bool) {
+		env.sp.Zombies["worker"] = zombie
+		reconcileSessionBeads(
+			context.Background(), []beads.Bead{session}, env.desiredState, cfgNames,
+			env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+			nil, env.clk, rec, 0, 0, &env.stdout, &env.stderr,
+		)
+	}
+
+	tick(true)  // first zombie episode: fires
+	tick(false) // recovered: clears the dedup mark
+	tick(true)  // second zombie episode: fires again
+
+	got := 0
+	for _, e := range rec.Events {
+		if e.Type == events.SessionCrashed {
+			got++
+		}
+	}
+	if got != 2 {
+		t.Fatalf("session.crashed events across zombie -> alive -> zombie = %d, want 2 (one per episode)", got)
+	}
+}
+
+// TestReconcileSessionBeads_ZombieCrashPayloadTruncated verifies the
+// session.crashed event's Message is bounded regardless of pane size, so a
+// zombie detection cannot bloat the events log with a full raw pane capture.
+// Regression test for gastownhall/gascity#5355: each of the 299 flood events
+// carried the full ~6.6KB pane dump.
+func TestReconcileSessionBeads_ZombieCrashPayloadTruncated(t *testing.T) {
+	env := newReconcilerTestEnv()
+	rec := events.NewFake()
+	env.rec = rec
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+
+	tp := TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  "worker",
+		TemplateName: "worker",
+		Hints:        agent.StartupHints{ProcessNames: []string{"test-cmd"}},
+	}
+	env.desiredState["worker"] = tp
+	_ = env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"})
+	env.sp.Zombies["worker"] = true
+
+	// Build a pane capture far larger than crashEventPaneOutputMaxLines.
+	lines := make([]string, 0, rateLimitPeekLines)
+	for i := 0; i < rateLimitPeekLines; i++ {
+		lines = append(lines, fmt.Sprintf("line %d: some pane output that is not empty", i))
+	}
+	bigOutput := strings.Join(lines, "\n")
+	env.sp.SetPeekOutput("worker", bigOutput)
+
+	session := env.createSessionBead("worker", "worker")
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames,
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+		nil, env.clk, rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	var gotEvent *events.Event
+	for i := range rec.Events {
+		if rec.Events[i].Type == events.SessionCrashed {
+			gotEvent = &rec.Events[i]
+			break
+		}
+	}
+	if gotEvent == nil {
+		t.Fatalf("expected a session.crashed event, got: %#v", rec.Events)
+	}
+	if got := len(strings.Split(gotEvent.Message, "\n")); got > crashEventPaneOutputMaxLines+1 {
+		t.Fatalf("session.crashed message has %d lines, want <= %d (plus the elision marker line)", got, crashEventPaneOutputMaxLines+1)
+	}
+	if len(gotEvent.Message) >= len(bigOutput) {
+		t.Fatalf("session.crashed message (%d bytes) was not truncated relative to the raw pane capture (%d bytes)", len(gotEvent.Message), len(bigOutput))
 	}
 }
 

@@ -137,6 +137,15 @@ const (
 	// threshold), never as a recovery action — pack-level subscribers or
 	// operators own recovery. See gastownhall/gascity#1497, #2085, #2389.
 	SessionUnknownState = "session.unknown_state"
+	// SessionWakeRefused fires when a durable explicit wake request
+	// (wake_request=explicit) is refused before the session ever reaches a
+	// live runtime — held, quarantined, or asleep past its idle-sleep
+	// window. Distinguishes a policy-suppressed wake from
+	// recordWakeFailure's post-start failure accrual; wake_attempts still
+	// increments (via a direct marker write, not the accrual path) so a
+	// persistent refusal remains visible without risking self-quarantine.
+	// See gastownhall/gascity#5739, ga-fxvdit.
+	SessionWakeRefused = "session.wake_refused"
 	// SessionResetStalled fires when a session reset was committed but
 	// the follow-up wake remains pending past the configured startup
 	// timeout. Operators use the typed payload to correlate the stuck
@@ -149,6 +158,19 @@ const (
 	// remains correlated; the companion reconciler handler is tracked in
 	// #1497.
 	SessionWorkQueryFailed = "session.work_query_failed"
+	// SessionDrainFenceUnavailable fires when a seat's drain-pending probe could
+	// not read its own session row, so the claim fence that stops a draining
+	// seat taking new work failed OPEN for that poll.
+	//
+	// It exists because failing open is silent by design. The same agent-side
+	// store fault also fails open the runtime-identity fence, so a persistent
+	// one — an agent/controller credential-env asymmetry, a permission split in
+	// a hosted pod, a sessions-class binding only the controller can reach —
+	// switches BOTH drain fences off fleet-wide while the reconciler keeps
+	// marking rows draining. Without this event the only trace is stderr inside
+	// agent panes, and nothing off-pane distinguishes "fence acting" from
+	// "fence inert".
+	SessionDrainFenceUnavailable = "session.drain_fence_unavailable"
 	// SessionDemandClaimDivergence fires when a seat the controller spawned on
 	// DEMAND evidence drains with no work. It is a diagnostics counter for the
 	// agreement invariant between the two readers — the controller's demand read
@@ -181,6 +203,21 @@ const (
 	// could also observe expiry and emit; consumers should tolerate a duplicate
 	// rather than assume a globally exactly-once signal.
 	ControlStalled = "control.stalled"
+	// ControlRootSettleFailed fires when a workflow-finalize control bead is
+	// quarantined but the store then refuses the follow-up close of the
+	// workflow root the finalizer was gating (e.g. a "blocked by" edge the
+	// store has not yet reconciled against the finalizer's own quarantine).
+	// quarantineControlFailureBead always returns nil in this case -- the
+	// finalizer's quarantine is the load-bearing action and must stand -- but
+	// an unclosed root left with no signal reintroduces the dead-root/
+	// hook-claim-leak bug (#2763) the finalizer-quarantine path exists to
+	// close. This event, together with the gc.root_settle_failed* metadata
+	// stamped on the root and a created follow-up bead, is the durable
+	// visibility that replaces the silently-assumed "retried by a later
+	// pass" that never actually existed. Edge-triggered, once per failed
+	// settle attempt; a duplicate is possible under a misconfigured second
+	// dispatcher, same as ControlStalled.
+	ControlRootSettleFailed = "control.root_settle_failed"
 	// SupervisorStarted fires once per supervisor startup, after the
 	// instance lock is acquired. Its payload classifies how the previous
 	// supervisor instance exited (clean, crash, or unknown), derived from
@@ -328,11 +365,24 @@ const (
 	// binding a proven copy already populated, the second created one for a
 	// city that had nothing to move. Unconverged and Uncheckable are the two
 	// refusals: config and data disagree, or the check that would decide could
-	// not run. A city with no [storage] section emits none of them.
-	StorageBindingConverged   = "storage.binding.converged"
-	StorageBindingGenesis     = "storage.binding.genesis"
-	StorageBindingUnconverged = "storage.binding.unconverged"
-	StorageBindingUncheckable = "storage.binding.uncheckable"
+	// not run.
+	//
+	// NotConfigured is the fifth, and it is a verdict rather than the absence of
+	// one. A city that relocates nothing used to leave the gate having published
+	// nothing at all, and nothing reads the same as a gate that crashed before
+	// deciding or a build too old to have one. A subscriber gating a deploy on
+	// these events has to be able to see "this city has no split" as an answer.
+	//
+	// The multi-word segment is spelled with an underscore because every other
+	// multi-word type in this package is. The internal outcome renders itself as
+	// "not-configured" and that spelling is what travels in the payload's outcome
+	// field, but a payload value is not a type name, and matching it here would
+	// have made this the one hyphen among the whole taxonomy.
+	StorageBindingConverged     = "storage.binding.converged"
+	StorageBindingGenesis       = "storage.binding.genesis"
+	StorageBindingUnconverged   = "storage.binding.unconverged"
+	StorageBindingUncheckable   = "storage.binding.uncheckable"
+	StorageBindingNotConfigured = "storage.binding.not_configured"
 )
 
 // KnownEventTypes lists every event-type constant this package defines.
@@ -346,8 +396,10 @@ var KnownEventTypes = []string{
 	SessionDrainAckedWithAssignedWork,
 	SessionStranded,
 	SessionUnknownState,
+	SessionWakeRefused,
 	SessionResetStalled,
 	SessionWorkQueryFailed,
+	SessionDrainFenceUnavailable,
 	SessionDemandClaimDivergence,
 	SessionColdStartTimeout,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
@@ -362,6 +414,7 @@ var KnownEventTypes = []string{
 	ConvoyCreated, ConvoyClosed,
 	ControllerStarted, ControllerStopped,
 	ControlStalled,
+	ControlRootSettleFailed,
 	CitySuspended, CityResumed,
 	RequestResultCityCreate, RequestResultCityUnregister,
 	RequestResultSessionCreate, RequestResultSessionMessage,
@@ -385,6 +438,7 @@ var KnownEventTypes = []string{
 	BeadsConditionalWritesDegraded,
 	StorageBindingConverged, StorageBindingGenesis,
 	StorageBindingUnconverged, StorageBindingUncheckable,
+	StorageBindingNotConfigured,
 	// ProviderHealthGateAlert is intentionally omitted from KnownEventTypes.
 	// The event is emitted by the reconciler but its typed SSE payload is not
 	// yet registered in internal/api (the payload registration lives in a

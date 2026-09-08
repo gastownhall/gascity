@@ -137,21 +137,70 @@ type FragmentResult struct {
 	Created   int
 }
 
+// StoreChooser picks the store a compiled recipe's molecule belongs in.
+//
+// It exists because the destination is a property of the COMPILED recipe, not
+// of the call site: on a city that has relocated its coordination classes, a
+// recipe whose root classifies as infrastructure belongs in the binding and one
+// that classifies as work belongs in the work store, and nothing before compile
+// can tell which. A caller with one store for every recipe passes a chooser that
+// ignores its argument.
+//
+// A chooser is a pure classification of the recipe. It must not mutate the
+// recipe, take locks, or do I/O — CookChoosingStore calls it once, between
+// validation and the first bead write, with no way to undo either side.
+type StoreChooser func(recipe *formula.Recipe) beads.Store
+
 // Cook compiles a formula by name and instantiates it as a molecule.
 // This is the convenience wrapper that most callers should use.
 func Cook(ctx context.Context, store beads.Store, formulaName string, searchPaths []string, opts Options) (*Result, error) {
+	// Refused here rather than left to the chooser's nil check, so a Cook caller
+	// reads an error about the argument it passed instead of one naming a store
+	// chooser it never wrote.
+	if store == nil {
+		return nil, fmt.Errorf("cooking formula %q: nil store", formulaName)
+	}
+	result, _, err := CookChoosingStore(ctx, formulaName, searchPaths, opts, func(*formula.Recipe) beads.Store { return store })
+	return result, err
+}
+
+// CookChoosingStore is Cook for a caller that cannot name the store until the
+// recipe is compiled. It compiles, validates runtime vars, calls choose exactly
+// once, and instantiates into what choose returned — which it also returns, so a
+// caller that stamps metadata on the new root writes to the store that holds it
+// rather than to one that has never seen it. The store is nil when err is not,
+// and a nil chooser or a nil choice is an error before anything is written.
+//
+// The three capabilities this deliberately does NOT have, because each would
+// require reordering the steps above: deriving Options from the compiled recipe
+// (an idempotency key computed off the recipe), holding a lock past the return,
+// and decorating the recipe through the chosen store. One live call site needs
+// all three — the graph.v2 arm of `gc formula cook` — and it writes the sequence
+// out rather than calling this.
+func CookChoosingStore(ctx context.Context, formulaName string, searchPaths []string, opts Options, choose StoreChooser) (*Result, beads.Store, error) {
+	if choose == nil {
+		return nil, nil, errors.New("CookChoosingStore requires a StoreChooser")
+	}
 	compileVars := opts.Vars
 	if compileVars == nil {
 		compileVars = map[string]string{}
 	}
 	recipe, err := formula.CompileWithoutRuntimeVarValidation(ctx, formulaName, searchPaths, compileVars)
 	if err != nil {
-		return nil, fmt.Errorf("compiling formula %q: %w", formulaName, err)
+		return nil, nil, fmt.Errorf("compiling formula %q: %w", formulaName, err)
 	}
 	if err := ValidateRecipeRuntimeVars(recipe, opts); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return Instantiate(ctx, store, recipe, opts)
+	store := choose(recipe)
+	if store == nil {
+		return nil, nil, fmt.Errorf("choosing the store for formula %q: store chooser returned nil", formulaName)
+	}
+	result, err := Instantiate(ctx, store, recipe, opts)
+	if err != nil {
+		return nil, nil, err
+	}
+	return result, store, nil
 }
 
 // CookOn compiles a formula and attaches it to an existing bead.

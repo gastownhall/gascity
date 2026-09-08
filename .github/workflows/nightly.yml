@@ -127,3 +127,22 @@ jobs:
             fi
             sleep $((attempt * 10))
           done
+
+  # The push path runs these same ledgers in grace mode, so a lapsed waiver
+  # warns for 14 days before it blocks anyone (internal/testpolicy/waiverclock).
+  # This job is what is supposed to spend those 14 days getting the owner's
+  # attention. The mode lives inside the script, not in this YAML, so the
+  # maintainer city's audit order runs the identical artifact.
+  waiver-clock:
+    name: Waiver expiry clock audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+
+      - name: Audit dated waivers in strict mode
+        run: scripts/waiver-clock-audit

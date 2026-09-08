@@ -72,6 +72,14 @@ func humaStoreError(err error) error {
 	if errors.Is(err, beads.ErrNotFound) {
 		return apierr.SessionNotFound.Msg("not_found: " + err.Error())
 	}
+	// A store write that lost a serialization race and exhausted the store's
+	// bounded retry is transient, not a server fault: the transaction never
+	// committed and the same request succeeds on a retry. Surfacing it as 500
+	// both misreports the cause and is undeclared on these routes, which
+	// declare 503 (internal/api/supervisor_city_routes.go).
+	if isRetryableStoreConflict(err) {
+		return apierr.StoreUnavailable.Msg("store_conflict: " + err.Error())
+	}
 	return apierr.Internal.Msg("internal: " + err.Error())
 }
 

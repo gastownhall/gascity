@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -245,5 +246,99 @@ func TestReparentedOrphans_SkipsKnownDescendants(t *testing.T) {
 	parentOf := func(string) string { return "1" }
 	if got := reparentedOrphans([]string{"200", "300"}, known, parentOf); len(got) != 0 {
 		t.Fatalf("reparentedOrphans = %v, want empty (all are known descendants)", got)
+	}
+}
+
+// TestSelectBindingLine covers the row selection that both getKeyBinding and
+// isGTBinding depend on. These fixtures are real `tmux list-keys -T <table>`
+// output shapes, so the tests are version-independent and need no live tmux —
+// unlike the gated tests in tmux_test.go, which never run without one.
+func TestSelectBindingLine(t *testing.T) {
+	const prefixTable = `bind-key    -T prefix       C-g               display-popup -E "gt agents menu"
+bind-key    -T prefix       n                 next-window
+bind-key -r -T prefix       Up                resize-pane -U
+bind-key    -T prefix       p                 previous-window`
+
+	tests := []struct {
+		name   string
+		output string
+		key    string
+		want   string
+	}{
+		{
+			name:   "exact match",
+			output: `bind-key    -T prefix n     next-window`,
+			key:    "n",
+			want:   `bind-key    -T prefix n     next-window`,
+		},
+		{
+			name:   "near miss does not match C-g prefix",
+			output: `bind-key    -T prefix C-g   display-popup -E "gt agents menu"`,
+			key:    "g",
+			want:   "",
+		},
+		{
+			name:   "repeat flag present",
+			output: `bind-key -r -T prefix Up  resize-pane -U`,
+			key:    "Up",
+			want:   `bind-key -r -T prefix Up  resize-pane -U`,
+		},
+		{
+			name:   "column padding preserved in returned line",
+			output: prefixTable,
+			key:    "n",
+			want:   `bind-key    -T prefix       n                 next-window`,
+		},
+		{
+			name:   "key absent from table",
+			output: prefixTable,
+			key:    "z",
+			want:   "",
+		},
+		{
+			name:   "target row is not first",
+			output: prefixTable,
+			key:    "p",
+			want:   `bind-key    -T prefix       p                 previous-window`,
+		},
+		{
+			name:   "repeat row selected from full table",
+			output: prefixTable,
+			key:    "Up",
+			want:   `bind-key -r -T prefix       Up                resize-pane -U`,
+		},
+		{
+			name:   "empty output",
+			output: "",
+			key:    "n",
+			want:   "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := selectBindingLine(tt.output, tt.key); got != tt.want {
+				t.Errorf("selectBindingLine(_, %q) = %q, want %q", tt.key, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSelectBindingLineScopesGTDetection locks in why isGTBinding must test the
+// selected line rather than the whole table: against the full output, the
+// "if-shell"+"gt " check reports a Gas Town binding for every key as soon as any
+// Gas Town binding exists in that table.
+func TestSelectBindingLineScopesGTDetection(t *testing.T) {
+	const table = `bind-key    -T prefix g  if-shell -F -t = "#{==:#{session_name},x}" "run-shell 'gt agents menu'" ":"
+bind-key    -T prefix n  next-window`
+
+	gtLine := selectBindingLine(table, "g")
+	if !strings.Contains(gtLine, "if-shell") || !strings.Contains(gtLine, "gt ") {
+		t.Fatalf("expected the g row to look like a Gas Town binding, got %q", gtLine)
+	}
+
+	userLine := selectBindingLine(table, "n")
+	if strings.Contains(userLine, "if-shell") || strings.Contains(userLine, "gt ") {
+		t.Errorf("the n row must not inherit the g row's Gas Town markers, got %q", userLine)
 	}
 }

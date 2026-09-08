@@ -220,12 +220,15 @@ func (p *Provider) RunLive(name string, cfg runtime.Config) error {
 
 // Capabilities returns the intersection of both backends' capabilities.
 // A capability is reported only if both local and remote support it.
+// NeedsClaimBackstop is a need, not an ability, so it unions instead: if
+// either backend requires the stalled-claim backstop, the composite does too.
 func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 	lc := p.local.Capabilities()
 	rc := p.remote.Capabilities()
 	return runtime.ProviderCapabilities{
 		CanReportAttachment: lc.CanReportAttachment && rc.CanReportAttachment,
 		CanReportActivity:   lc.CanReportActivity && rc.CanReportActivity,
+		NeedsClaimBackstop:  lc.NeedsClaimBackstop || rc.NeedsClaimBackstop,
 	}
 }
 

@@ -51,10 +51,10 @@ export function BeadDependencies({ node, onOpenBead }: BeadDependenciesProps) {
               <ul className="space-y-1">
                 {blocks.map((b) => (
                   <DepLine
-                    key={`blocks-${b.id}`}
-                    relation={null}
-                    targetId={b.id}
-                    targetTitle={b.title}
+                    key={`blocks-${b.bead.id}`}
+                    relation={b.kind === 'needs' ? null : b.kind}
+                    targetId={b.bead.id}
+                    targetTitle={b.bead.title}
                     {...(onOpenBead ? { onOpenBead } : {})}
                   />
                 ))}

@@ -233,16 +233,17 @@ func TestNativeDoltStoreConvertsDefaultPriorityAsUnset(t *testing.T) {
 
 func TestNativeDoltStoreMapsUpstreamStatusesToGasCityContract(t *testing.T) {
 	tests := []struct {
-		upstream beadslib.Status
-		want     string
+		upstream           beadslib.Status
+		want               string
+		wantIndefiniteHold bool
 	}{
-		{beadslib.StatusOpen, "open"},
-		{beadslib.StatusInProgress, "in_progress"},
-		{beadslib.StatusClosed, "closed"},
-		{beadslib.Status("blocked"), "open"},
-		{beadslib.Status("deferred"), "open"},
-		{beadslib.Status("pinned"), "open"},
-		{beadslib.Status("hooked"), "open"},
+		{beadslib.StatusOpen, "open", false},
+		{beadslib.StatusInProgress, "in_progress", false},
+		{beadslib.StatusClosed, "closed", false},
+		{beadslib.Status("blocked"), "open", false},
+		{beadslib.Status("deferred"), "open", true},
+		{beadslib.Status("pinned"), "open", false},
+		{beadslib.Status("hooked"), "open", false},
 	}
 
 	for _, tt := range tests {
@@ -258,6 +259,9 @@ func TestNativeDoltStoreMapsUpstreamStatusesToGasCityContract(t *testing.T) {
 			}
 			if bead.Status != tt.want {
 				t.Fatalf("Status = %q, want %q", bead.Status, tt.want)
+			}
+			if bead.IndefinitelyDeferred != tt.wantIndefiniteHold {
+				t.Fatalf("IndefinitelyDeferred = %v, want %v", bead.IndefinitelyDeferred, tt.wantIndefiniteHold)
 			}
 		})
 	}
@@ -2209,6 +2213,99 @@ func TestProcessEnvSnapshotWaitsForNativeDoltOpenEnvRestore(t *testing.T) {
 	}
 }
 
+func TestProcessEnvSnapshotWaitsForWholeBeadsNamespaceRestore(t *testing.T) {
+	t.Setenv("BEADS_FUTURE_AUTHORITY", "ambient-authority")
+	restoreEnv, err := withWithheldBeadsEnv()
+	if err != nil {
+		t.Fatalf("withWithheldBeadsEnv: %v", err)
+	}
+	restored := false
+	t.Cleanup(func() {
+		if !restored {
+			restoreEnv()
+		}
+	})
+
+	envCh := make(chan []string, 1)
+	go func() {
+		envCh <- ProcessEnvSnapshotExcludingNativeDoltOpen()
+	}()
+	select {
+	case env := <-envCh:
+		t.Fatalf("process env snapshot completed while BEADS_ was withheld: %v", envValues(env, "BEADS_FUTURE_AUTHORITY"))
+	case <-time.After(10 * time.Millisecond):
+	}
+
+	restoreEnv()
+	restored = true
+	select {
+	case env := <-envCh:
+		if got := envValues(env, "BEADS_FUTURE_AUTHORITY"); len(got) != 1 || got[0] != "ambient-authority" {
+			t.Fatalf("BEADS_FUTURE_AUTHORITY after restore = %v, want [ambient-authority]", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("process env snapshot did not complete after the BEADS_ namespace was restored")
+	}
+}
+
+func TestOrdinaryNativeOpenWaitsForWholeBeadsNamespaceRestore(t *testing.T) {
+	t.Setenv("BEADS_FUTURE_AUTHORITY", "ambient-authority")
+	restoreEnv, err := withWithheldBeadsEnv()
+	if err != nil {
+		t.Fatalf("withWithheldBeadsEnv: %v", err)
+	}
+	restored := false
+	t.Cleanup(func() {
+		if !restored {
+			restoreEnv()
+		}
+	})
+
+	oldOpen := nativeDoltOpenBestAvailable
+	t.Cleanup(func() { nativeDoltOpenBestAvailable = oldOpen })
+	seen := make(chan string, 1)
+	nativeDoltOpenBestAvailable = func(context.Context, string) (beadslib.Storage, error) {
+		seen <- os.Getenv("BEADS_FUTURE_AUTHORITY")
+		return &nativeDoltStorageSpy{
+			getConfig: func(context.Context, string) (string, error) { return "gc", nil },
+		}, nil
+	}
+
+	openDone := make(chan error, 1)
+	scopeRoot := t.TempDir()
+	go func() {
+		store, openErr := OpenNativeDoltStoreAt(context.Background(), scopeRoot, nil)
+		if store != nil {
+			_ = store.CloseStore()
+		}
+		openDone <- openErr
+	}()
+	select {
+	case got := <-seen:
+		t.Fatalf("ordinary native open ran while BEADS_ was withheld (saw %q)", got)
+	case <-time.After(10 * time.Millisecond):
+	}
+
+	restoreEnv()
+	restored = true
+	select {
+	case got := <-seen:
+		if got != "ambient-authority" {
+			t.Fatalf("ordinary native open saw BEADS_FUTURE_AUTHORITY=%q, want ambient-authority", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ordinary native open did not continue after the BEADS_ namespace was restored")
+	}
+	select {
+	case err := <-openDone:
+		if err != nil {
+			t.Fatalf("OpenNativeDoltStoreAt: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ordinary native open did not return")
+	}
+}
+
 // TestAmbientNativeDoltOpenEnvWaitsForNativeDoltOpenEnvRestore proves the guarded
 // single-key ambient read serializes with an in-flight native Dolt open. A native
 // open for a non-external scope unsets BEADS_DOLT_SERVER_TLS under nativeDoltOpenEnvMu
@@ -3245,6 +3342,48 @@ func TestOpenNativeDoltStoreAtWithoutAmbientEnvWithholdsTheWholeNamespace(t *tes
 	}
 }
 
+func TestOpenNativeDoltStoreAtWithoutAmbientEnvWithCredentialCommandProjectsOnlyTheSelectedCommand(t *testing.T) {
+	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "/poison/credential-command")
+	t.Setenv("BEADS_DB", "/poison/db")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient.example.com")
+	oldOpen := nativeDoltOpenBestAvailable
+	t.Cleanup(func() { nativeDoltOpenBestAvailable = oldOpen })
+
+	var seen map[string]string
+	nativeDoltOpenBestAvailable = func(context.Context, string) (beadslib.Storage, error) {
+		seen = map[string]string{}
+		for _, key := range []string{"BEADS_DOLT_CREDENTIAL_COMMAND", "BEADS_DB", "BEADS_DOLT_SERVER_HOST"} {
+			seen[key] = os.Getenv(key)
+		}
+		return &nativeDoltStorageSpy{
+			getConfig: func(context.Context, string) (string, error) { return "gcg", nil },
+		}, nil
+	}
+
+	store, err := OpenNativeDoltStoreAtWithoutAmbientEnvWithCredentialCommand(
+		context.Background(), filepath.Join(t.TempDir(), "scope"), "/selected/gc internal beads-credential")
+	if err != nil {
+		t.Fatalf("OpenNativeDoltStoreAtWithoutAmbientEnvWithCredentialCommand: %v", err)
+	}
+	if err := store.CloseStore(); err != nil {
+		t.Fatalf("CloseStore: %v", err)
+	}
+	if got := seen["BEADS_DOLT_CREDENTIAL_COMMAND"]; got != "/selected/gc internal beads-credential" {
+		t.Errorf("BEADS_DOLT_CREDENTIAL_COMMAND during the open = %q, want the selected command", got)
+	}
+	for _, key := range []string{"BEADS_DB", "BEADS_DOLT_SERVER_HOST"} {
+		if got := seen[key]; got != "" {
+			t.Errorf("%s = %q during the open, want withheld", key, got)
+		}
+	}
+	if got := os.Getenv("BEADS_DOLT_CREDENTIAL_COMMAND"); got != "/poison/credential-command" {
+		t.Errorf("BEADS_DOLT_CREDENTIAL_COMMAND after the open = %q, want the ambient value restored", got)
+	}
+	if got := os.Getenv("BEADS_DOLT_SERVER_HOST"); got != "ambient.example.com" {
+		t.Errorf("BEADS_DOLT_SERVER_HOST after the open = %q, want the ambient value restored", got)
+	}
+}
+
 // TestScopedNativeDoltOpenEnvIgnoresKeysOutsideItsList is the falsification the
 // hermetic open exists for: the scoped projection honors exactly the keys it
 // names, so passing an "empty environment" to it withholds nothing else.
@@ -3258,5 +3397,90 @@ func TestScopedNativeDoltOpenEnvIgnoresKeysOutsideItsList(t *testing.T) {
 	restore()
 	if got != "/poison/credential-command" {
 		t.Fatalf("BEADS_DOLT_CREDENTIAL_COMMAND during a scoped projection = %q; if the projection now honors unlisted keys, the hermetic open's reason to exist has changed", got)
+	}
+}
+
+// nativeReadyGateBlocker builds one GetDependenciesWithMetadata row: the
+// blocker's own Issue (IssueWithDependencyMetadata embeds Issue, so Status and
+// Metadata are the blocker's) plus the edge type joining it to the dependent.
+func nativeReadyGateBlocker(id string, status beadslib.Status, depType beadslib.DependencyType, metadata string) *beadslib.IssueWithDependencyMetadata {
+	issue := beadslib.Issue{ID: id, Title: id, Status: status, IssueType: beadslib.TypeTask, Priority: 2}
+	if metadata != "" {
+		issue.Metadata = json.RawMessage(metadata)
+	}
+	return &beadslib.IssueWithDependencyMetadata{Issue: issue, DependencyType: depType}
+}
+
+// TestNativeDoltStoreReadyWorkOutcomeFilterToleratesOpenGates pins that the
+// gc.work_outcome post-filter is a NARROW veto layered on GetReadyWork's
+// verdict, not a from-scratch recompute of blocking status.
+//
+// The backing store's gating is richer than "the blocker is closed": a pinned
+// blocker satisfies a blocks edge, and a waits-for edge gates on the spawner's
+// children rather than on the spawner's own status. GetReadyWork already
+// cleared both when it offered the candidate. Applying the full
+// DependencySatisfied predicate here would re-block them, silently overriding
+// an answer this filter cannot reproduce. Only the closed-and-blocked case —
+// which the backing store's own check cannot see — may veto.
+func TestNativeDoltStoreReadyWorkOutcomeFilterToleratesOpenGates(t *testing.T) {
+	tests := []struct {
+		name    string
+		blocker *beadslib.IssueWithDependencyMetadata
+		want    bool
+	}{
+		{
+			name:    "pinned blocks blocker satisfies (beadslib treats pinned as satisfying)",
+			blocker: nativeReadyGateBlocker("gc-pinned", beadslib.Status("pinned"), beadslib.DependencyType("blocks"), ""),
+			want:    true,
+		},
+		{
+			name:    "open waits-for spawner satisfies (the gate opens on its children)",
+			blocker: nativeReadyGateBlocker("gc-spawner", beadslib.StatusOpen, beadslib.DependencyType("waits-for"), ""),
+			want:    true,
+		},
+		{
+			name:    "closed blocker with no work outcome satisfies",
+			blocker: nativeReadyGateBlocker("gc-done", beadslib.StatusClosed, beadslib.DependencyType("blocks"), ""),
+			want:    true,
+		},
+		{
+			name:    "closed blocker with a non-blocked work outcome satisfies",
+			blocker: nativeReadyGateBlocker("gc-shipped", beadslib.StatusClosed, beadslib.DependencyType("blocks"), `{"gc.work_outcome":"shipped"}`),
+			want:    true,
+		},
+		{
+			name:    "closed blocker recorded gc.work_outcome=blocked vetoes",
+			blocker: nativeReadyGateBlocker("gc-gaveup", beadslib.StatusClosed, beadslib.DependencyType("blocks"), `{"gc.work_outcome":"blocked"}`),
+			want:    false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			storage := &nativeDoltStorageSpy{
+				getReadyWork: func(_ context.Context, _ beadslib.WorkFilter) ([]*beadslib.Issue, error) {
+					return []*beadslib.Issue{
+						{ID: "gc-candidate", Title: "candidate", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2},
+					}, nil
+				},
+				getDependenciesWithMetadata: func(_ context.Context, id string) ([]*beadslib.IssueWithDependencyMetadata, error) {
+					if id != "gc-candidate" {
+						return nil, nil
+					}
+					return []*beadslib.IssueWithDependencyMetadata{tt.blocker}, nil
+				},
+			}
+			store := newNativeDoltStoreForTest(storage)
+
+			got, err := store.Ready(ReadyQuery{TierMode: TierBoth})
+			if err != nil {
+				t.Fatalf("Ready: %v", err)
+			}
+			if tt.want && (len(got) != 1 || got[0].ID != "gc-candidate") {
+				t.Fatalf("Ready = %+v, want [gc-candidate]: GetReadyWork already cleared this gate, so the work-outcome filter must not re-block it", got)
+			}
+			if !tt.want && len(got) != 0 {
+				t.Fatalf("Ready = %+v, want empty: a blocker closed with gc.work_outcome=blocked must veto its dependent", got)
+			}
+		})
 	}
 }

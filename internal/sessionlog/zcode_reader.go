@@ -107,25 +107,54 @@ func FindZCodeSessionFileByID(searchPaths []string, workDir, sessionID string) s
 	return bestPath
 }
 
-// ZCodeMirrorScope is the per-session, per-conversation subdirectory the zcode
-// adapter writes its mirrors into: "<session-name>#<continuation-epoch>",
-// sanitized the same way the adapter sanitizes it. Returns "" when either part
-// is missing.
+// ZCodeMirrorScope is the name-only, per-conversation subdirectory the zcode
+// adapter writes its mirrors into when it holds no session bead id:
+// "<session-name>#<continuation-epoch>", sanitized the same way the adapter
+// sanitizes it. Returns "" when either part is missing.
 func ZCodeMirrorScope(sessionName, continuationEpoch string) string {
 	sessionName = strings.TrimSpace(sessionName)
-	if sessionName == "" {
+	epoch := zcodeScopeEpoch(continuationEpoch)
+	if sessionName == "" || epoch == "" {
 		return ""
 	}
+	return sanitizeZCodeComponent(sessionName) + "#" + epoch
+}
+
+// ZCodeSeatMirrorScope is the per-seat mirror subdirectory:
+// "<session-name>@<session-bead-id>#<continuation-epoch>".
+//
+// Two seats can share a session name and continuation epoch — a pool slot
+// re-seated within one run does exactly that — so the name-only scope
+// collapsed both onto one mirror and one seat's transcript showed for both.
+// The adapter therefore keys its state by the session bead id gc exports to
+// the pane as GC_SESSION_ID whenever it has one; a resumed seat keeps its bead
+// id, which is what makes the key stable across restarts. "@" cannot survive
+// the adapter's component sanitization, so it is an unambiguous delimiter.
+// Returns "" when any part is missing, so a caller falls back to the name-only
+// scope.
+func ZCodeSeatMirrorScope(sessionName, sessionBeadID, continuationEpoch string) string {
+	sessionName = strings.TrimSpace(sessionName)
+	sessionBeadID = strings.TrimSpace(sessionBeadID)
+	epoch := zcodeScopeEpoch(continuationEpoch)
+	if sessionName == "" || sessionBeadID == "" || epoch == "" {
+		return ""
+	}
+	return sanitizeZCodeComponent(sessionName) + "@" + sanitizeZCodeComponent(sessionBeadID) + "#" + epoch
+}
+
+// zcodeScopeEpoch normalizes the continuation epoch the way the adapter does
+// (empty means the first epoch) and returns "" for anything non-numeric.
+func zcodeScopeEpoch(continuationEpoch string) string {
 	epoch := strings.TrimSpace(continuationEpoch)
 	if epoch == "" {
-		epoch = "1"
+		return "1"
 	}
 	for _, r := range epoch {
 		if r < '0' || r > '9' {
 			return ""
 		}
 	}
-	return sanitizeZCodeComponent(sessionName) + "#" + epoch
+	return epoch
 }
 
 // FindZCodeSessionFileByScope resolves the mirror for a session by the identity
@@ -133,22 +162,47 @@ func ZCodeMirrorScope(sessionName, continuationEpoch string) string {
 //
 // gc never learns zcode's provider session id — the family has no session-id
 // flag and no hook plugin, so session_key stays empty and every id-keyed lookup
-// misses. But the adapter names its mirror directory
-// "<session-name>#<continuation-epoch>", and both values live on the session
-// bead, so this resolves a specific session's transcript exactly: two workers
-// sharing a work dir each find their own, and a mirror left behind by a dead
-// session in a reused work dir is not surfaced for a fresh one.
-func FindZCodeSessionFileByScope(searchPaths []string, workDir, sessionName, continuationEpoch string) string {
-	scope := ZCodeMirrorScope(sessionName, continuationEpoch)
+// misses. But the adapter names its mirror directory from the session name,
+// the session bead id and the continuation epoch (ZCodeSeatMirrorScope), and
+// all three live on the session bead, so this resolves a specific seat's
+// transcript exactly: two seats sharing a work dir — or a session name — each
+// find their own, and a mirror left behind by a dead session in a reused work
+// dir is not surfaced for a fresh one.
+//
+// Mirrors written before the scope carried the seat, or by an adapter that was
+// not handed a session bead id, live under the name-only scope
+// (ZCodeMirrorScope). That scope is consulted only when the seat scope holds
+// nothing for this work dir — including when no seat id was supplied: once the
+// seat has written anything for this work dir, a name-only mirror is a sibling
+// seat's or stale.
+func FindZCodeSessionFileByScope(searchPaths []string, workDir, sessionName, sessionBeadID, continuationEpoch string) string {
 	workDir = cleanOpenCodeWorkDir(workDir)
-	if scope == "" || workDir == "" {
+	if workDir == "" {
 		return ""
 	}
+	roots := mergeZCodeSearchPaths(searchPaths)
+	if seat := ZCodeSeatMirrorScope(sessionName, sessionBeadID, continuationEpoch); seat != "" {
+		if path := findZCodeMirrorInScope(roots, seat, workDir); path != "" {
+			return path
+		}
+	}
+	scope := ZCodeMirrorScope(sessionName, continuationEpoch)
+	if scope == "" {
+		return ""
+	}
+	return findZCodeMirrorInScope(roots, scope, workDir)
+}
+
+// findZCodeMirrorInScope returns the newest mirror for workDir under scope
+// across roots, preferring a real mirror over a canceled-boot placeholder.
+func findZCodeMirrorInScope(roots []string, scope, workDir string) string {
 	var (
-		bestPath string
-		bestTime time.Time
+		bestPath        string
+		bestTime        time.Time
+		bestPending     string
+		bestPendingTime time.Time
 	)
-	for _, root := range mergeZCodeSearchPaths(searchPaths) {
+	for _, root := range roots {
 		dir := filepath.Join(root, scope)
 		entries, err := os.ReadDir(dir)
 		if err != nil {
@@ -159,17 +213,26 @@ func FindZCodeSessionFileByScope(searchPaths []string, workDir, sessionName, con
 			if entry.IsDir() || !strings.HasSuffix(name, ".json") {
 				continue
 			}
-			// The placeholder holds turns canceled before a session existed;
-			// it is adopted by the first real mirror and is never the answer.
-			if strings.HasPrefix(name, "pending-") {
-				continue
-			}
 			path := filepath.Join(dir, name)
+			// The placeholder embeds its work dir (written through load_export
+			// when a boot turn is canceled), so it is scoped like a real mirror.
 			if cleanOpenCodeWorkDir(openCodeExportDirectory(path)) != workDir {
 				continue
 			}
 			info, err := entry.Info()
 			if err != nil {
+				continue
+			}
+			// The placeholder holds turns canceled before a session id existed.
+			// A real mirror always wins — it adopts the placeholder on the first
+			// successful turn — but a first-turn failure leaves ONLY the
+			// placeholder, and it is then the sole record of what happened, so
+			// it must stay resolvable instead of the scope reading as empty.
+			if strings.HasPrefix(name, "pending-") {
+				if bestPending == "" || info.ModTime().After(bestPendingTime) {
+					bestPending = path
+					bestPendingTime = info.ModTime()
+				}
 				continue
 			}
 			if bestPath == "" || info.ModTime().After(bestTime) {
@@ -178,7 +241,10 @@ func FindZCodeSessionFileByScope(searchPaths []string, workDir, sessionName, con
 			}
 		}
 	}
-	return bestPath
+	if bestPath != "" {
+		return bestPath
+	}
+	return bestPending
 }
 
 // sanitizeZCodeComponent mirrors the adapter's path-component sanitization

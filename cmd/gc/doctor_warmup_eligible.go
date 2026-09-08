@@ -83,3 +83,7 @@ func (c *censusOwnerLivenessCheck) WarmupEligible() bool { return false }
 // WarmupEligible returns false; this check is not part of the
 // `gc start` warm-up scan.
 func (c *poolIdleRoutedWorkCheck) WarmupEligible() bool { return false }
+
+// WarmupEligible returns false; this check is not part of the
+// `gc start` warm-up scan.
+func (c *startupHealthEpisodesCheck) WarmupEligible() bool { return false }

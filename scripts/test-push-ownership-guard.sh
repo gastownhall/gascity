@@ -330,6 +330,33 @@ test_allow_when_assignee_is_session_name() {
     rm -rf "$repo" "$fbd"
 }
 
+# Regression (ga-kzl21p): a session running as pool instance "<agent>-N" has
+# GC_TEMPLATE set to the bare pool identity "<agent>" (stamped by the SDK at
+# session start regardless of which instance is running — see
+# internal/session/lifecycle.go), but work routed to the whole pool can carry
+# that same bare "<agent>" string as bead.assignee (not any instance-suffixed
+# form). GC_TEMPLATE was missing from the identity-set match, so a session
+# whose GC_AGENT/GC_SESSION_ID/GC_SESSION_NAME are all instance-specific could
+# never match a pool-level assignee — completed, gate-verified work became
+# unpushable with no reassignment and no bypass. Concrete instance: TEMPLATE=
+# gascity/builder, TARGET=gascity/builder-1, assignee=gascity/builder.
+test_allow_when_assignee_is_bare_pool_template() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    # assignee is the bare pool template ("tmpl-x"), matching GC_TEMPLATE —
+    # not GC_AGENT/GC_SESSION_ID/GC_SESSION_NAME, which are all instance-shaped.
+    write_show_json "$fbd" "ga-abc123.1" "in_progress" "tmpl-x" "tmpl-x" "[]"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 5 "sess-id-x" "sess-name-x" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]]; then
+        record_pass "allow/assignee-is-bare-pool-template (rc=0, GC_AGENT/SESSION_ID/SESSION_NAME all differ)"
+    else
+        record_fail "allow/assignee-is-bare-pool-template" "expected rc=0, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
 test_block_on_routed_to_changed() {
     local repo fbd out rc
     repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
@@ -694,18 +721,142 @@ FAKE
 # metadata.branch/build_bead tying it to THIS branch or to the closed
 # branch-derived bead must never be silently substituted -- the guard must
 # keep blocking on the real (closed) branch-derived bead instead.
+#
+# Needs an id-aware fake (unlike the pre-ga-0ywrmy.1 version of this test,
+# which used the single-canned-response write_show_json helper): that fake
+# answers ANY bd show call with the SAME "ga-oldbld closed" payload
+# regardless of id, which can no longer distinguish "the undeclared-match
+# tier fetched ga-unrel8d fresh and correctly rejected it" from "the tier
+# never looked at ga-unrel8d at all" -- both produce the exact same
+# observable rc/output. This fixture instead gives ga-unrel8d its own
+# genuinely distinguishable (and genuinely not-owned) response, and asserts
+# on show-ids.log that it was actually queried.
 test_bead_id_branch_reused_does_not_pick_unrelated_inprogress_bead_as_successor() {
-    local repo fbd out rc
+    local repo fbd out rc show_ids
     repo="$(new_repo_with_branch "builder/ga-oldbld-my-feature")"
     fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
-    write_fake_bd "$fbd"
-    printf '[{"id":"ga-unrel8d","metadata":{}}]' > "$fbd/fake-bd-state/list-json"
-    write_show_json "$fbd" "ga-oldbld" "closed" "agent-x" "tmpl-x" "[]"
+    cat > "$fbd/bd" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  show)
+    echo "$2" >> "$(dirname "$0")/show-ids.log"
+    case "$2" in
+      ga-oldbld) printf '[{"id":"ga-oldbld","status":"closed","assignee":"agent-x","metadata":{"gc.routed_to":"tmpl-x"},"labels":[]}]' ;;
+      ga-unrel8d) printf '[{"id":"ga-unrel8d","status":"in_progress","assignee":"someone-else","metadata":{"gc.routed_to":"tmpl-x"},"labels":[]}]' ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  list)
+    printf '[{"id":"ga-unrel8d","metadata":{}}]'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+FAKE
+    chmod +x "$fbd/bd"
     out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
-    if [[ $rc -ne 0 ]] && grep -qi "status" <<<"$out" && grep -q -- "--no-verify" <<<"$out"; then
-        record_pass "resolve/branch-reused-does-not-pick-unrelated-inprogress-bead-as-successor (rc=$rc, unrelated concurrent bead correctly ignored, blocks on the real closed bead)"
+    show_ids="$(cat "$fbd/show-ids.log" 2>/dev/null || true)"
+    if [[ $rc -ne 0 ]] && grep -qx "ga-oldbld" <<<"$show_ids" && grep -qx "ga-unrel8d" <<<"$show_ids" \
+        && grep -qi "status" <<<"$out" && grep -q -- "--no-verify" <<<"$out"; then
+        record_pass "resolve/branch-reused-does-not-pick-unrelated-inprogress-bead-as-successor (rc=$rc, unrelated candidate ga-unrel8d checked fresh and rejected on its own assignee mismatch, still blocks on the real closed ga-oldbld)"
     else
-        record_fail "resolve/branch-reused-does-not-pick-unrelated-inprogress-bead-as-successor" "expected non-zero rc mentioning status+--no-verify (an unrelated in-progress bead under the same assignee must never be silently substituted), got rc=$rc, output: $out"
+        record_fail "resolve/branch-reused-does-not-pick-unrelated-inprogress-bead-as-successor" "expected non-zero rc mentioning status+--no-verify with BOTH ga-oldbld and ga-unrel8d fresh-checked (an unrelated in-progress bead must be verified, not blindly trusted or blindly ignored, and still not substituted once its own read shows a different assignee), got rc=$rc show_ids=[$show_ids], output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# The undeclared-single-match tier (ga-0ywrmy.1): once the branch-derived
+# bead is confirmed inactive and NO in-progress bead declares itself its
+# successor via metadata, a session holding exactly one OTHER in-progress
+# bead -- with no declared link at all -- may still use it, but only if that
+# candidate independently passes the same live-ownership checks
+# assert_bead_still_claimed itself applies (status, assignee, routed_to,
+# hold). This is deliberately narrower than "any live claim wins": cardinality
+# (exactly one) is the resolution-time safety bound, and the fresh ownership
+# read is the verification-time safety bound -- see the sibling test above,
+# which pins the identical shape (single in-progress candidate, no declared
+# link) failing when that second bound doesn't hold.
+test_bead_id_branch_reused_accepts_undeclared_single_inprogress_match_when_branch_bead_closed() {
+    local repo fbd out rc show_ids
+    repo="$(new_repo_with_branch "builder/ga-oldbld-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    cat > "$fbd/bd" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  show)
+    echo "$2" >> "$(dirname "$0")/show-ids.log"
+    case "$2" in
+      ga-oldbld) printf '[{"id":"ga-oldbld","status":"closed","assignee":"agent-x","metadata":{"gc.routed_to":"tmpl-x"},"labels":[]}]' ;;
+      ga-undecl) printf '[{"id":"ga-undecl","status":"in_progress","assignee":"agent-x","metadata":{"gc.routed_to":"tmpl-x"},"labels":[]}]' ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  list)
+    printf '[{"id":"ga-undecl","metadata":{}}]'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+FAKE
+    chmod +x "$fbd/bd"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    show_ids="$(cat "$fbd/show-ids.log" 2>/dev/null || true)"
+    if [[ $rc -eq 0 ]] && grep -qx "ga-oldbld" <<<"$show_ids" && grep -qx "ga-undecl" <<<"$show_ids" \
+        && grep -qi "undeclared single match" <<<"$out"; then
+        record_pass "resolve/branch-reused-accepts-undeclared-single-inprogress-match-when-branch-bead-closed (rc=0, checked ga-oldbld (found closed) then verified+used the undeclared live candidate ga-undecl with no declared link at all)"
+    else
+        record_fail "resolve/branch-reused-accepts-undeclared-single-inprogress-match-when-branch-bead-closed" "expected rc=0 with bd show called against both ga-oldbld and ga-undecl and a NOTE naming the undeclared-single-match path, got rc=$rc show_ids=[$show_ids], output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# Cardinality safety, mirrored for the undeclared-match tier: with TWO
+# in-progress beads and no declared link on either, "exactly one" fails and
+# the undeclared-match tier must not activate at all -- even though the
+# branch-derived bead is confirmed closed, there is no positive signal for
+# which (if either) in-progress bead continues it. Falls through to the
+# pre-existing block-on-branch_id behavior. Only ga-oldbld gets a configured
+# show-json response here -- if the tier ever mistakenly fired against
+# ambiguous cardinality, the resulting bd show on an unconfigured candidate
+# id would exit 1 and surface as a different failure shape than this test
+# asserts on, an incidental second guard on top of the explicit
+# show-ids.log negative assertion below.
+test_bead_id_branch_reused_undeclared_match_does_not_activate_with_multiple_inprogress() {
+    local repo fbd out rc show_ids
+    repo="$(new_repo_with_branch "builder/ga-oldbld-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    cat > "$fbd/bd" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  show)
+    echo "$2" >> "$(dirname "$0")/show-ids.log"
+    case "$2" in
+      ga-oldbld) printf '[{"id":"ga-oldbld","status":"closed","assignee":"agent-x","metadata":{"gc.routed_to":"tmpl-x"},"labels":[]}]' ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  list)
+    printf '[{"id":"ga-cand01","metadata":{}},{"id":"ga-cand02","metadata":{}}]'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+FAKE
+    chmod +x "$fbd/bd"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    show_ids="$(cat "$fbd/show-ids.log" 2>/dev/null || true)"
+    if [[ $rc -ne 0 ]] && grep -qx "ga-oldbld" <<<"$show_ids" \
+        && ! grep -qx "ga-cand01" <<<"$show_ids" && ! grep -qx "ga-cand02" <<<"$show_ids" \
+        && grep -qi "status" <<<"$out" && grep -q -- "--no-verify" <<<"$out"; then
+        record_pass "resolve/branch-reused-undeclared-match-does-not-activate-with-multiple-inprogress (rc=$rc, 2+ undeclared in-progress beads leaves the tier inactive, blocks on the real closed ga-oldbld, neither candidate ever queried)"
+    else
+        record_fail "resolve/branch-reused-undeclared-match-does-not-activate-with-multiple-inprogress" "expected non-zero rc mentioning status+--no-verify with neither candidate ever bd-show'd (2+ undeclared in-progress beads is not a positive single-match signal), got rc=$rc show_ids=[$show_ids], output: $out"
     fi
     rm -rf "$repo" "$fbd"
 }
@@ -836,6 +987,67 @@ test_bead_id_deploy_gate_branch_blocks_when_assignee_lookup_fails() {
         record_pass "resolve/deploy-gate-branch-blocks-when-assignee-lookup-fails (rc=$rc, fail-closed with a bypass hint)"
     else
         record_fail "resolve/deploy-gate-branch-blocks-when-assignee-lookup-fails" "expected rc!=0 with a --no-verify bypass hint (an unreadable assignee lookup is ambiguity and must block), got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# Regression (ga-1qepfl mechanism 2, found by gascity/reviewer 2026-08-18,
+# verified by the mayor): the assignee fallback took .[0] of whatever
+# `bd list --status=in_progress` returned, so a session holding an UNRELATED
+# in-progress bead (e.g. one correctly held open for its own merge-tracking)
+# had that bead's status/assignee/hold-labels checked against a completely
+# different deploy/*-gate push — and could block it, even though the
+# blocking bead was doing exactly what it was told to do (real repro: bead
+# ga-3fw26n, legitimately held for its own merge-tracking, blocked pushes for
+# an unrelated deploy-gate branch). Two or more in-progress beads for this
+# session is not a positive identification of which one (if any) this push
+# is for, so it must resolve the same as finding none: nothing to check,
+# allowed — not the fail-closed ambiguity path above, which is reserved for
+# a failed read, not a successful read with too many answers. `bd show` must
+# never be called on either candidate id — with no show-json configured, the
+# fake exits 1 on any show, which would surface as a BLOCKED line if
+# resolution ever fell back to guessing one of them (same technique as
+# deploy-gate-branch-allows-when-no-live-assignee above).
+test_bead_id_deploy_gate_branch_ignores_ambiguous_inprogress_beads() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "deploy/ga-bucf4p-gate")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    printf '[{"id":"ga-3fw26n"},{"id":"ga-other02"}]' > "$fbd/fake-bd-state/list-json"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]] && ! grep -qi "BLOCKED" <<<"$out"; then
+        record_pass "resolve/deploy-gate-branch-ignores-ambiguous-inprogress-beads (rc=0, two unrelated in-progress beads leave nothing to check)"
+    else
+        record_fail "resolve/deploy-gate-branch-ignores-ambiguous-inprogress-beads" "expected rc=0 and no BLOCKED text (an unrelated in-progress bead must not be checked against a different branch's push), got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# Companion to the deploy-gate test above, on the GENERAL fallback path: the
+# single-match requirement lives in shared path 2, not in the deploy/*-gate
+# branch shape, so it applies to every branch whose name doesn't encode a
+# bead id (chore/…, docs/…) too. That is a deliberate relaxation — with 2+
+# concurrent in-progress beads this session's push is no longer checked
+# against ANY of them, including past an active hold:mayor. It is the right
+# tradeoff (picking .[0] of an unordered multi-match could just as easily
+# have checked a healthy bead and allowed a push whose real bead was held),
+# but it is a real behavior change and is pinned here so a future edit to
+# path 2 is a visible decision on both branch shapes. The show-json fixture
+# below is deliberately hold:mayor and must never be consulted: if
+# resolution ever falls back to guessing a candidate, this blocks and the
+# assertion catches it.
+test_bead_id_general_branch_ignores_ambiguous_inprogress_beads() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "chore/unrelated-cleanup")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    printf '[{"id":"ga-held01"},{"id":"ga-other9"}]' > "$fbd/fake-bd-state/list-json"
+    write_show_json "$fbd" "ga-held01" "in_progress" "agent-x" "tmpl-x" '["hold:mayor"]'
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]] && ! grep -qi "BLOCKED" <<<"$out"; then
+        record_pass "resolve/general-branch-ignores-ambiguous-inprogress-beads (rc=0, multi-match leaves nothing to check on a non-gate branch too)"
+    else
+        record_fail "resolve/general-branch-ignores-ambiguous-inprogress-beads" "expected rc=0 and no BLOCKED text (2+ in-progress beads is not a positive id of this push's bead on any branch shape), got rc=$rc, output: $out"
     fi
     rm -rf "$repo" "$fbd"
 }
@@ -1035,6 +1247,7 @@ run_all() {
     test_block_on_reassigned
     test_allow_when_assignee_is_session_id
     test_allow_when_assignee_is_session_name
+    test_allow_when_assignee_is_bare_pool_template
     test_block_on_routed_to_changed
     test_block_on_hold_mayor
     test_block_on_hold_external
@@ -1052,10 +1265,14 @@ run_all() {
     test_bead_id_branch_reused_successor_match_via_branch_metadata_alone
     test_bead_id_branch_reused_successor_match_via_build_bead_metadata_alone
     test_bead_id_branch_reused_does_not_pick_unrelated_inprogress_bead_as_successor
+    test_bead_id_branch_reused_accepts_undeclared_single_inprogress_match_when_branch_bead_closed
+    test_bead_id_branch_reused_undeclared_match_does_not_activate_with_multiple_inprogress
     test_bead_id_branch_reused_does_not_override_when_branch_bead_still_active
     test_bead_id_deploy_gate_branch_prefers_live_assignee
     test_bead_id_deploy_gate_branch_allows_when_no_live_assignee
     test_bead_id_deploy_gate_branch_blocks_when_assignee_lookup_fails
+    test_bead_id_deploy_gate_branch_ignores_ambiguous_inprogress_beads
+    test_bead_id_general_branch_ignores_ambiguous_inprogress_beads
     test_retry_recovers_bead_id_fallback_from_transient_failure
     test_allow_when_no_bead_id_resolvable
     test_fallback_cannot_detect_staleness_after_status_leaves_in_progress

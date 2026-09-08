@@ -1439,7 +1439,7 @@ func TestGreaterEpochResumeWaitsForUploaderLockBeforeCleanup(t *testing.T) {
 	go func() { permitResult <- service.RecordingPermit(recordableInvocationAt(testRecordHour)) }()
 	select {
 	case <-reachedLock:
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("greater-epoch cleanup did not attempt uploader lock")
 	}
 	if state := readStateFixture(t, home); state != paused {
@@ -1453,7 +1453,7 @@ func TestGreaterEpochResumeWaitsForUploaderLockBeforeCleanup(t *testing.T) {
 		if permit.Valid() {
 			t.Fatal("uploader-barrier transition invocation received a permit")
 		}
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("greater-epoch cleanup did not finish after uploader release")
 	}
 	if err := root.Close(); err != nil {

@@ -571,7 +571,7 @@ func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message st
 		ID:                "nudge-" + NewInstanceToken()[:12],
 		Agent:             deferredSubmitAgentKey(b),
 		SessionID:         b.ID,
-		ContinuationEpoch: strings.TrimSpace(b.Metadata["continuation_epoch"]),
+		ContinuationEpoch: deferredSubmitEpoch(b),
 		Source:            "session",
 		Message:           message,
 		CreatedAt:         now,
@@ -589,6 +589,28 @@ func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message st
 		_ = startSessionSubmitPoller(m.cityPath, deferredSubmitPollerKey(b), sessName)
 	}
 	return nil
+}
+
+// deferredSubmitEpoch returns the continuation epoch a deferred submit is
+// fenced against.
+//
+// A submit deferred while a conversation reset is pending must survive the
+// reset's epoch rotation: commitPendingContinuationReset advances
+// continuation_epoch N->N+1 when the replacement incarnation starts, which
+// happens after this item is queued. A fixed epoch-N stamp would then fail the
+// queued-nudge fence (queuedNudgeMatchesTargetFence) and be dead-lettered,
+// silently dropping the message. Returning an empty epoch leaves the item
+// fenced by SessionID alone, so the post-reset incarnation — same session
+// bead, epoch N+1 — still claims and delivers it.
+//
+// A plain restart (restart_requested without a reset) does not rotate the
+// epoch, so those defers keep the current-epoch stamp and stay fenced to the
+// resumed conversation.
+func deferredSubmitEpoch(b beads.Bead) string {
+	if strings.TrimSpace(b.Metadata["continuation_reset_pending"]) != "" {
+		return ""
+	}
+	return strings.TrimSpace(b.Metadata["continuation_epoch"])
 }
 
 func deferredSubmitAgentKey(b beads.Bead) string {

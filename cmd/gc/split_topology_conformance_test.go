@@ -834,6 +834,27 @@ func conformanceClaimRouting(t *testing.T, e splitEnv) {
 	if (cityRoute != nil) != e.split {
 		t.Fatalf("hookClaimClassRouteForCity returned route!=nil = %v on a split=%v city; a claim routed on a city that relocates nothing writes through a binding it has no business opening, and one NOT routed on a split city writes ownership into a ledger that does not hold the bead", cityRoute != nil, e.split)
 	}
+	if e.split {
+		// WHICH store it bound, not merely that it bound one. "A route exists"
+		// is satisfied by handing back the work store, and that is the exact
+		// failure this route was built to end: a claim escalating off a
+		// work-store not-found only to write its ownership back into the same
+		// work ledger, while the reader keeps answering from the binding.
+		//
+		// The store is identified by the id space it mints, because the route
+		// resolves through the one-shot funnel — a second handle on the same
+		// binding root — so it is never pointer-identical to e.class and no
+		// identity comparison is available. The namespace is the property that
+		// distinguishes the two ledgers, and it is the one the by-id door routes
+		// on.
+		probe, err := cityRoute.class.Create(beads.Bead{Title: "which ledger did the claim route bind?", Type: "task"})
+		if err != nil {
+			t.Fatalf("creating through the claim route's bound store: %v", err)
+		}
+		if !strings.HasPrefix(probe.ID, classPrefix+"-") {
+			t.Errorf("the claim route bound a store minting %q, want the %q- namespace; it is holding the WORK ledger, so every routed claim writes ownership into the store whose not-found opened the escalation", probe.ID, classPrefix)
+		}
+	}
 
 	if !e.split {
 		wisp := e.mintWisp(t, "claim-routing wisp")
@@ -990,14 +1011,26 @@ func conformanceHookClaimClassRouting(t *testing.T, e splitEnv, workBeadID strin
 	}
 	classResident := e.mintWispWith(t, wispOpts{title: "hook-claim routed graph step"})
 
-	// The migration copy: a WORK-shaped id live in both stores. The class leaf
-	// models SQLite, which accepts a foreign-prefix pinned id and records the
-	// residence violation instead of refusing, so the fixture claims the record.
-	if _, err := e.class.Create(beads.Bead{ID: workBeadID, Title: "migrated copy of a work bead", Type: "task"}); err != nil {
+	// The migration copy: a WORK-shaped id live in both stores. It is staged
+	// through the SAME door `gc storage migrate` uses — beads.ForeignIDCreator,
+	// the forced create — because the class binding is fenced to the namespaces
+	// it claims and a plain Create of a work id is refused. That refusal is the
+	// point of the fence; the migration copy is the one sanctioned way past it,
+	// which is exactly why the co-resident steady state this pins can exist at
+	// all.
+	creator, ok := e.class.(beads.ForeignIDCreator)
+	if !ok {
+		t.Fatalf("the class store %T is not a beads.ForeignIDCreator; the migration copy has no door and the co-resident state below cannot be staged the way production reaches it", e.class)
+	}
+	if _, err := creator.CreateWithForeignID(beads.Bead{ID: workBeadID, Title: "migrated copy of a work bead", Type: "task"}); err != nil {
 		t.Fatalf("staging the co-resident migration copy of %s in the class store: %v", workBeadID, err)
 	}
-	if violations := splittest.TakeResidenceViolations(e.class); len(violations) == 0 {
-		t.Fatal("class store recorded no residence violation for the co-resident work id; the SQLite-semantics leaf is not modeling the migrated steady state")
+	// Read the copy back. The staging is what MAKES the last row co-resident, and
+	// a CreateWithForeignID that returned nil and wrote nothing would leave the
+	// row a byte-identical rerun of the work-only row above it — still green,
+	// still claiming to pin the tie-break, and pinning nothing.
+	if _, err := e.class.Get(workBeadID); err != nil {
+		t.Fatalf("the staged migration copy of %s is not resident in the class store: %v; the co-resident row below would be a rerun of the work-only row", workBeadID, err)
 	}
 
 	for _, tt := range []struct {
@@ -1275,10 +1308,13 @@ func conformanceStrictCrossStoreDeps(t *testing.T, e splitEnv) {
 // answering from the work ledger for relocated graph ids and reported every live
 // molecule root as missing (#5125). Two things must hold on a split city:
 //
-//   - storeref.Resolve, the federating point read every future by-id router is
-//     built on, finds a class-resident bead across [work, class] legs — for the
-//     durable shape AND for the -wisp- suffix shape, whose prefix heuristic
-//     answer differs from an ordinary class id's.
+//   - the by-id plan every by-id router is now built on finds a class-resident
+//     bead over the city's own bindings — for the durable shape AND for the
+//     -wisp- suffix shape, whose prefix heuristic answer differs from an
+//     ordinary class id's. It reads through the same derivation the controller
+//     uses (residencyBindingsFromRoutes -> byIDBeadForTopology) rather than
+//     through storeref.Resolve, whose PrefixOwner fast path answers a
+//     migration-preserved id from the work ledger's frozen copy (ga-cu12x).
 //   - the shipped protection holds: a `bd sql` / `bd query` naming a relocated
 //     id is REFUSED rather than answered from the work ledger, and the refusal
 //     names the class-routed verb.
@@ -1288,15 +1324,16 @@ func conformanceStrictCrossStoreDeps(t *testing.T, e splitEnv) {
 func conformanceByIDReadFederation(t *testing.T, e splitEnv) {
 	durable := mintDurableGraphBead(t, e, "federated durable graph bead", "")
 	wisp := e.mintWisp(t, "federated read wisp")
-	legs := []beads.Store{e.work, e.class} // class is nil on single-store; Resolve skips nil legs
+	bindings, refused := residencyBindingsFromRoutes(e.routes)
+	topo := assembleResidencyTopology(e.cfg, e.work, nil, bindings, refused)
 
 	for _, tt := range []struct{ name, id string }{
 		{"durable", durable.ID},
 		{"wisp", wisp.ID},
 	} {
-		got, err := storeref.Resolve(tt.id, legs)
+		got, err := byIDBeadForTopology(topo, tt.id)
 		if err != nil || got.ID != tt.id {
-			t.Errorf("%s: storeref.Resolve(%q) = (%q, %v), want the bead — a federating by-id read that misses is the \"root does not exist\" report of #5125", tt.name, tt.id, got.ID, err)
+			t.Errorf("%s: byIDBeadForTopology(%q) = (%q, %v), want the bead — a federating by-id read that misses is the \"root does not exist\" report of #5125", tt.name, tt.id, got.ID, err)
 		}
 		msg, refused := bdSQLRelocatedClassRefusal(e.cfg, []string{"sql", "select id, status from issues where id = '" + tt.id + "'"})
 		if refused != e.split {
@@ -2258,17 +2295,25 @@ func assertFederationServesWholeLeg(t *testing.T, surface, legName string, legID
 // The bug is win-mc-forge's measurement row #2, and it survived the by-id lane
 // because it does not look like a by-id read. On a converged split city:
 //
-//	gc bd dep tree <gcg root>                          → exit 1, refused
+//	gc bd dep tree <gcg root>                          → diverted from the blind ledger
 //	gc bd list --metadata-field gc.root_bead_id=<root> → 0 rows, exit 0
 //
-// Two projections, the same molecule, the same command, opposite failure
-// semantics. `dep tree` names the bead in an id POSITION so the by-id door
-// decides ownership and refuses; --metadata-field is not id-valued, so that door
+// Two projections, the same molecule, the same command, opposite semantics.
+// `dep tree` names the bead in an id POSITION so the by-id door decides
+// ownership and takes it; --metadata-field is not id-valued, so that door
 // correctly declines (a QUOTED id decides nothing about ownership — see
 // cmd_bd_by_id.go) and the passthrough asks the one ledger that holds no gcg-
 // row, which answers `[]` and exits 0. The value named an id; the VERB is a
 // projection. Invariant 0 of ga-iaj7k: a projection that cannot see a class must
 // fail LOUDLY, and `[]` is forbidden.
+//
+// What the by-id door DOES with `dep tree` changed under ga-pxppl — it used to
+// refuse, and now it walks the molecule from the binding the class is served
+// from — and that does not weaken this invariant, it strengthens it. The claim
+// was never "both refuse". It is that neither answers `[]` from a ledger that
+// cannot hold the bead: on a split city all three argvs divert away from that
+// ledger, `dep tree` to an ANSWER and `list`/`ready` to a REFUSAL that names the
+// federated reader.
 //
 // The asymmetry is what makes it urgent rather than merely wrong. An operator
 // who has learned that this CLI refuses what it cannot see reads the empty array
@@ -2280,9 +2325,10 @@ func assertFederationServesWholeLeg(t *testing.T, surface, legName string, legID
 // of (config, argv): bdSQLRelocatedClassRefusal for `list` and
 // bdArgsNameClassOwnedBead for every other verb. So the coherence claim is
 // checkable exactly where it is decided, and the row runs on both topologies
-// without opening a binding. The end-to-end proof through the real command —
-// real doBd, real refusals, a bd stub that answers `[]` and exits 0 — is
-// TestGcBdProjectionsAgreeOnAClassTheyCannotSee.
+// without opening a binding. The end-to-end proofs through the real command —
+// real doBd, a bd stub that answers `[]` and exits 0 — are
+// TestGcBdProjectionsAgreeOnAClassTheyCannotSee for the refusing verbs and
+// TestGcBdDepTreeSplitsOnOwnershipNotOnServability for the answering one.
 //
 // # The single-store row is the byte-identity claim
 //
@@ -2352,19 +2398,20 @@ func conformanceProjectionCoherence(t *testing.T, e splitEnv) {
 	readyArgs := []string{"ready", "--metadata-field", selector, "--json"}
 	depTreeArgs := []string{"dep", "tree", root.ID}
 
-	// `dep tree` must stay UNSERVED in process, or the arm being compared here is
-	// not the refusal arm and the coherence claim is about something else.
-	if _, served := parseBdByIDOp(depTreeArgs); served {
-		t.Fatalf("`gc bd dep tree` is now served in process; I14 compares the REFUSAL arms, so re-point this row at the served answer")
+	// The by-id door must still be able to ANSWER this argv, or the row below is
+	// asserting that dep tree is diverted somewhere that cannot serve it — which
+	// is the refusal this invariant used to compare, not the answer it now does.
+	if _, served := parseBdByIDOp(depTreeArgs); !served {
+		t.Fatalf("`gc bd dep tree %s` is no longer served in process; I14 pins that it is diverted from the blind ledger TO AN ANSWER, so a diversion into a refusal has moved the dead end rather than removed it (ga-pxppl)", root.ID)
 	}
 
 	msg, listRefused := bdSQLRelocatedClassRefusal(e.cfg, listArgs)
 	_, readyRefused := bdSQLRelocatedClassRefusal(e.cfg, readyArgs)
-	_, depTreeRefused := bdArgsNameClassOwnedBead(depTreeArgs)
+	_, depTreeRouted := bdArgsNameClassOwnedBead(depTreeArgs)
 
-	if listRefused != depTreeRefused {
-		t.Fatalf("`gc bd list --metadata-field %s` refused = %v but `gc bd dep tree %s` refused = %v on the same molecule; two projections over the same data must not disagree about what happens when a class cannot be seen",
-			selector, listRefused, root.ID, depTreeRefused)
+	if listRefused != depTreeRouted {
+		t.Fatalf("`gc bd list --metadata-field %s` refused = %v but `gc bd dep tree %s` was diverted from the work ledger = %v on the same molecule; two projections over the same data must not disagree about whether that ledger can answer for the class",
+			selector, listRefused, root.ID, depTreeRouted)
 	}
 	if readyRefused != listRefused {
 		t.Fatalf("`gc bd ready --metadata-field %s` refused = %v but `gc bd list` with the same selector refused = %v; the two verbs take the same predicate and answer no-match the same way, so guarding one moves the silent empty rather than removing it",

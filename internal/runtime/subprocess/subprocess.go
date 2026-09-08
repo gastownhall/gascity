@@ -168,7 +168,9 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 	cmd.Stdout = nullFile
 	cmd.Stderr = nullFile
 
-	// Build environment: inherit parent env + apply overrides.
+	// Build environment: inherit parent env + apply overrides. An empty override
+	// spells withholding, matching the tmux adapter: remove the inherited entry
+	// instead of passing KEY=, so namespace isolation remains real to children.
 	env := os.Environ()
 	if len(cfg.Env) > 0 {
 		keys := make([]string, 0, len(cfg.Env))
@@ -177,6 +179,10 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
+			env = envWithoutKey(env, k)
+			if cfg.Env[k] == "" {
+				continue
+			}
 			env = append(env, k+"="+cfg.Env[k])
 		}
 	}
@@ -228,6 +234,17 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 
 	p.procs[name] = &sessionConn{cmd: cmd, done: done, listener: lis}
 	return nil
+}
+
+func envWithoutKey(env []string, key string) []string {
+	prefix := key + "="
+	out := make([]string, 0, len(env))
+	for _, entry := range env {
+		if !strings.HasPrefix(entry, prefix) {
+			out = append(out, entry)
+		}
+	}
+	return out
 }
 
 // Stop terminates the named session. Returns nil if it doesn't exist

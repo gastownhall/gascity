@@ -110,6 +110,38 @@ sid_dir="$state_home/gascity/zcode/sids"
 mkdir -p "$sid_dir"
 sid_name="$(sid_key | tr -c 'A-Za-z0-9._-' '_')"
 
+# The seat. gc exports the session bead id as GC_SESSION_ID, and two seats can
+# share a session name and continuation epoch — a pool slot re-seated within
+# one run does exactly that. Keyed by name alone they resumed each other's
+# conversation and wrote one mirror between them, so one seat's transcript
+# showed for both. A resumed seat keeps its bead id, which is what makes this
+# key stable across restarts. "@" cannot survive the sanitization, so a seat
+# key never collides with, or globs as, a name-only one. Without a bead id
+# (host-session setups) the key stays the name alone.
+seat_name="$sid_name"
+if [[ -n "${GC_SESSION_ID:-}" ]]; then
+    seat_name="$sid_name@$(printf '%s' "$GC_SESSION_ID" | tr -c 'A-Za-z0-9._-' '_')"
+fi
+
+# adopt_name_only <legacy> <current>: an earlier adapter keyed this state by
+# session name alone. It belonged to the one seat that then had the name — or,
+# in the collision this fix removes, to both — so the first seat-keyed start
+# takes it over: the conversation resumes across the upgrade, and the adopted
+# copy stops sitting adjacent to the fresh one for the model to read.
+#
+# Adoption is same-epoch only, and every sweep below globs the seat key, which
+# can never match a name-only path. Legacy state at a different epoch is
+# therefore left in place: sweeping the name-only scope from a seat-keyed start
+# could destroy state a concurrently live host-session seat of the same name
+# still owns, which is the cross-seat interference this fix exists to remove.
+# The residue is at most one generation per pre-upgrade name; reclaiming it
+# belongs in an offline sweep, not here.
+adopt_name_only() {
+    if [[ "$seat_name" != "$sid_name" && -e "$1" && ! -e "$2" ]]; then
+        mv "$1" "$2" 2>/dev/null || true
+    fi
+}
+
 # The sid file is scoped to the session's continuation epoch, which is how gc
 # distinguishes "resume the same conversation" from "start a fresh one".
 # GC_RUNTIME_EPOCH bumps on every wake (a plain restart included), so it cannot
@@ -121,11 +153,12 @@ sid_name="$(sid_key | tr -c 'A-Za-z0-9._-' '_')"
 continuation_epoch="${GC_CONTINUATION_EPOCH:-1}"
 continuation_epoch="${continuation_epoch//[^0-9]/}"
 : "${continuation_epoch:=1}"
-sid_path="$sid_dir/$sid_name#$continuation_epoch"
+sid_path="$sid_dir/$seat_name#$continuation_epoch"
+adopt_name_only "$sid_dir/$sid_name#$continuation_epoch" "$sid_path"
 
-# Drop this session's superseded epochs so the sid dir does not grow one file
+# Drop this seat's superseded epochs so the sid dir does not grow one file
 # per reset for the life of the host.
-for stale in "$sid_dir/$sid_name"#*; do
+for stale in "$sid_dir/$seat_name"#*; do
     if [[ -f "$stale" && "$stale" != "$sid_path" ]]; then rm -f "$stale"; fi
 done
 
@@ -145,11 +178,12 @@ transcript_dir="${GC_ZCODE_TRANSCRIPT_DIR:-$HOME/.local/share/gascity/zcode-tran
 #   - the ZCode CLI's session sqlite, which lives under $HOME/.zcode and which
 #     ZCODE_STORAGE_DIR does not relocate.
 #
-# So the mirror is epoch-scoped exactly like the sid, superseded epochs are
-# swept, and the CLI child gets a per-epoch HOME so its own history cannot
-# outlive the conversation it belongs to.
+# So the mirror is seat- and epoch-scoped exactly like the sid, superseded
+# epochs are swept, and the CLI child gets a per-epoch HOME so its own history
+# cannot outlive the conversation it belongs to.
 mirror_root="$transcript_dir"
-transcript_dir="$transcript_dir/$sid_name#$continuation_epoch"
+transcript_dir="$transcript_dir/$seat_name#$continuation_epoch"
+adopt_name_only "$mirror_root/$sid_name#$continuation_epoch" "$transcript_dir"
 
 # A superseded conversation is ARCHIVED, not deleted. gc's reset contract is
 # record rotation, not record destruction: `gc session reset` is issued and the
@@ -166,7 +200,7 @@ transcript_dir="$transcript_dir/$sid_name#$continuation_epoch"
 # ZCode's own session database has no preservation contract and is the one copy
 # the CLI itself would reattach to.
 archive_root="$state_home/gascity/zcode/archived-transcripts"
-for stale in "$mirror_root/$sid_name"#*; do
+for stale in "$mirror_root/$seat_name"#*; do
     if [[ -d "$stale" && "$stale" != "$transcript_dir" ]]; then
         mkdir -p "$archive_root"
         rm -rf "$archive_root/$(basename "$stale")"
@@ -178,8 +212,9 @@ mkdir -p "$transcript_dir"
 # Per-epoch HOME for the CLI child only; this shell keeps the real HOME so the
 # sid and mirror paths above are unaffected.
 zcode_home_root="$state_home/gascity/zcode/homes"
-zcode_home="$zcode_home_root/$sid_name#$continuation_epoch"
-for stale in "$zcode_home_root/$sid_name"#*; do
+zcode_home="$zcode_home_root/$seat_name#$continuation_epoch"
+adopt_name_only "$zcode_home_root/$sid_name#$continuation_epoch" "$zcode_home"
+for stale in "$zcode_home_root/$seat_name"#*; do
     if [[ -d "$stale" && "$stale" != "$zcode_home" ]]; then rm -rf "$stale"; fi
 done
 mkdir -p "$zcode_home"
@@ -346,15 +381,14 @@ def last_user_text(export):
     for message in reversed(export["messages"]):
         if message["info"].get("role") == "user":
             return message["parts"][0].get("text", "")
-        return None
     return None
 
 
 def pending_session_id(mirror_dir):
     """Placeholder id for turns cancelled before a session id existed.
 
-    Derived from the mirror scope (<session-name>#<epoch>) so two workers
-    sharing a transcript root cannot collide on a literal "pending".
+    Derived from the mirror scope (<seat>#<epoch>) so two workers sharing a
+    transcript root cannot collide on a literal "pending".
     """
     scope = os.path.basename(os.path.normpath(mirror_dir)) or "default"
     return "pending-" + re.sub(r"[^A-Za-z0-9._-]", "_", scope)
@@ -582,7 +616,21 @@ while :; do
     # Enter, so a 1s idle window closes the paste without splitting it. A
     # timed-out read still assigns whatever partial line arrived, so take it
     # before breaking — otherwise the tail of the last line is silently lost.
+    #
+    # Saving partial input on timeout is a bash 4.0 feature; bash 3.2 (still
+    # /bin/bash on stock macOS) returns from a timed-out read without touching
+    # the variable at all, having already consumed and discarded the fragment.
+    # Clearing it before every read is what makes the loop correct on both:
+    # bash >= 4 overwrites it with the fragment, bash 3.2 leaves the empty
+    # value and the branch below simply does not fire. Without this, $more is
+    # *unbound* on the first timed-out drain and `set -u` kills the whole
+    # adapter mid-prompt — on macOS that is every pane, on the first prompt.
+    # The 3.2 fragment itself is unrecoverable at this layer (the shell ate it
+    # before the script ran), so there it is dropped rather than misplaced;
+    # gc's own nudge always terminates its last line, so only a human pausing
+    # mid-line for longer than the drain window can hit it.
     while :; do
+        more=
         IFS= read -r -t "$DRAIN_TIMEOUT" more
         drain_rc=$?
         if (( drain_rc == 0 )); then
@@ -689,6 +737,12 @@ while :; do
         # rc was 0, so report_failure never ran: surface the CLI's stderr here
         # or an empty/!JSON stdout is an unattributable dead end.
         printf 'zcode-repl error rc=0 (unparsable response)\n'
+        # The user turn was published when it started (2nd turn on), and an
+        # unparsable reply is still a finished turn: close it out just like the
+        # rc!=0 branch above, or the trailing user message reads as "in flight"
+        # forever while the pane sits idle at its marker.
+        python3 "$helper" cancelled "$transcript_dir" "$PWD" "$published_sid" "$prompt_file" \
+            "zcode-repl error rc=0 (unparsable response)" || true
         report_stderr
         note_failure_and_maybe_bail
     fi

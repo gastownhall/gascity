@@ -3,10 +3,11 @@
 #
 # Replaces the deacon patrol town-orphan-sweep step. Cross-references
 # in-progress beads against all known agents. Beads assigned to agents
-# that don't exist in ANY rig get reset to open/unassigned so the rig's
-# witness picks them up on its next patrol.
+# that don't exist in ANY rig get reset to open/unassigned so they are
+# routable again.
 #
-# Does NOT do worktree salvage — that's the witness's job.
+# Does NOT do worktree salvage — cities that staff a work-health patrol role
+# (e.g. the gastown pack's witness) handle that separately.
 #
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
@@ -18,6 +19,11 @@ case "${BASH_SOURCE[0]}" in
 esac
 # shellcheck disable=SC1091
 . "$__SCRIPT_DIR/_bd_trace.sh" "orphan-sweep"
+
+# Where the recovery summary goes. Cities that staff a coordinator role (e.g.
+# the gastown pack's mayor) can point this at it; "human" is the reserved
+# recipient alias that resolves in every city, including core-only ones.
+ESCALATION_TARGET="${GC_ESCALATION_TARGET:-human}"
 
 # Step 1: Collect in-progress beads from HQ and every rig whose session
 # liveness can be determined.
@@ -38,8 +44,23 @@ fi
 
 append_session_list() {
     local session_fetch_tmp
+    local row_count
     session_fetch_tmp=$(mktemp) || return 1
     if "$@" >"$session_fetch_tmp" 2>/dev/null; then
+        # An exit-0 response that parses to zero session rows carries no
+        # liveness evidence at all. A city always has at least the calling
+        # session live, so zero rows is never a legitimate steady state --
+        # treat it the same as a hard failure so the caller skips this
+        # scope's beads instead of staging them with no evidence to check
+        # against.
+        row_count=$(jq -r '.sessions // [] | length' "$session_fetch_tmp" 2>/dev/null) || row_count=""
+        case "$row_count" in
+            '' | *[!0-9]*) row_count=0 ;;
+        esac
+        if [ "$row_count" -eq 0 ]; then
+            rm -f "$session_fetch_tmp"
+            return 1
+        fi
         cat "$session_fetch_tmp" >>"$SESSION_TMP"
         rm -f "$session_fetch_tmp"
         return 0
@@ -201,7 +222,8 @@ session_bead_candidates() {
     printf '%s\n' "$work_json" | jq -r "$first_bead_jq | [
         .metadata[\"gc.session_id\"],
         .metadata[\"gc.session_bead_id\"],
-        .metadata[\"session_id\"]
+        .metadata[\"session_id\"],
+        .metadata[\"gc.session_name\"]
     ] | .[]? | select(. != null and . != \"\")" 2>/dev/null || true
 
     printf '%s\n' "$assignee" | grep -Eo '[[:alnum:]]+-wisp-[[:alnum:]][[:alnum:]-]*$' || true
@@ -213,6 +235,11 @@ session_probe_failure_is_unverifiable() {
 
     [ "$session_id" != "$assignee" ] && return 0
     [[ "$session_id" == mc-* ]] && return 0
+    # A session-name-shaped self-probe (e.g. "beads--deployer-pool") has
+    # nothing else resolvable to ask about -- bead ids never contain a
+    # double dash, so this shape means the probe could not be performed,
+    # not that the candidate resolved and came back dead.
+    [[ "$session_id" == *--* ]] && return 0
     return 1
 }
 
@@ -273,7 +300,12 @@ reset_orphan_if_current() {
     reset_output=$(gc bd release-if-current "$bead_id" "$expected_assignee" 2>/dev/null) || return 1
     reset_state=$(printf '%s\n' "$reset_output" | awk 'NF { print $1; exit }')
     case "$reset_state" in
-        released) return 0 ;;
+        released)
+            if ! gc bd update "$bead_id" --append-notes "orphan-sweep: reset from assignee $expected_assignee -- no live session matched" >/dev/null 2>&1; then
+                echo "orphan-sweep: failed to record cause note on $bead_id" >&2
+            fi
+            return 0
+            ;;
         skipped) return 2 ;;
         *) return 1 ;;
     esac
@@ -336,6 +368,8 @@ is_known_agent() {
 
 ORPHANED=0
 UNVERIFIABLE=0
+# Count of undeliverable summaries. Load-bearing for the exit code below.
+FAILED=0
 # Process substitution (not a pipe) keeps the loop body in the parent
 # shell so $ORPHANED survives for the summary message below.
 while IFS=$'\t' read -r bead_id assignee; do
@@ -375,4 +409,30 @@ if [ "$ORPHANED" -gt 0 ] || [ "$UNVERIFIABLE" -gt 0 ]; then
         SUMMARY="$SUMMARY, skipped $UNVERIFIABLE unverifiable"
     fi
     echo "$SUMMARY"
+    if [ "$ORPHANED" -gt 0 ]; then
+        if ! gc mail send "$ESCALATION_TARGET" \
+            -s "orphan-sweep: reset $ORPHANED orphaned beads" \
+            -m "$SUMMARY
+
+orphan-sweep resets in-progress beads whose assignee has no live session or
+known agent. Each reset bead now carries a one-line cause note (see its
+history). Repeated resets of the same bead may indicate a stuck or
+misidentified live session -- inspect via gc bd show <id> --json." \
+            2>/dev/null; then
+            # Do not swallow an undeliverable summary — a vanished escalation
+            # is invisible. Surfacing it requires a non-zero exit (see below).
+            echo "orphan-sweep: could not mail escalation target '$ESCALATION_TARGET': $SUMMARY" >&2
+            FAILED=$((FAILED + 1))
+        fi
+    fi
+fi
+
+# Loud-fail: the summary has been printed above, so a non-zero exit now
+# surfaces the failure line to the controller log without losing the sweep's
+# own output. The controller captures an exec order's combined output but logs
+# it only on a non-zero exit (order_dispatch.go), so exit 0 would swallow it
+# (gastownhall/gascity#4543).
+if [ "$FAILED" -gt 0 ]; then
+    echo "orphan-sweep: $FAILED escalation summary(ies) could not be delivered to '$ESCALATION_TARGET' (see above)" >&2
+    exit 1
 fi

@@ -273,9 +273,33 @@ func (c PreflightChecker) checkVersionCompat(ctx PreflightBDContext, err error) 
 		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "bd/beads schema compatible; linked library version unconfirmed ("+reason+")", details)
 	}
 	if strings.TrimPrefix(ctx.BDVersion, "v") != libraryVersion {
+		if newerSemverCompatibleBD(ctx.BDVersion, libraryVersion) {
+			return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "bd version is a newer semver-compatible release of the linked beads library version", details)
+		}
 		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckFail, "bd version differs from linked beads library version", details)
 	}
 	return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "bd and linked beads library versions match", details)
+}
+
+// newerSemverCompatibleBD reports whether bdVersion is a semver-compatible
+// upgrade of libraryVersion: the same major version, and not older. Per
+// semver, only a major bump breaks compatibility, so a newer bd release
+// within the linked library's major version — the common case when an
+// unversioned Homebrew dependency drifts ahead of gc's pinned go.mod release
+// (gastownhall/gascity#5164) — is safe to treat as compatible rather than a
+// hard version mismatch. Returns false (falling back to the exact-match
+// behavior already applied above) whenever either version does not parse as
+// valid semver, so this only ever widens what passes, never what fails.
+func newerSemverCompatibleBD(bdVersion, libraryVersion string) bool {
+	bdCanonical := "v" + strings.TrimPrefix(strings.TrimSpace(bdVersion), "v")
+	libCanonical := "v" + strings.TrimPrefix(strings.TrimSpace(libraryVersion), "v")
+	if !semver.IsValid(bdCanonical) || !semver.IsValid(libCanonical) {
+		return false
+	}
+	if semver.Major(bdCanonical) != semver.Major(libCanonical) {
+		return false
+	}
+	return semver.Compare(bdCanonical, libCanonical) >= 0
 }
 
 func (c PreflightChecker) checkContractShape(metadata preflightMetadata) PreflightCheckResult {

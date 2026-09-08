@@ -36,6 +36,7 @@ service-secrets-perms
 skill-collision
 skill-dangling-sink
 order-firing-current
+order-outcome-healthy
 codex-hooks-drift
 rig-pack-coverage
 pack-runtimes
@@ -68,6 +69,7 @@ work-option-metadata-migration
 backlog-depth
 order-tracking-retention
 session-model
+startup-health-episodes
 dolt-server
 fork-rate
 dolt-noms-size

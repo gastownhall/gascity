@@ -14,8 +14,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-
-	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 const (
@@ -250,7 +248,7 @@ func (c *sqliteSequenceFloorChild) line(t *testing.T) string {
 			ok   bool
 		}{line: c.stdout.Text(), ok: ok}
 	}()
-	ctx, cancel := context.WithTimeout(context.Background(), testutil.ExecRaceTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), beadsSequenceFloorHangBudget)
 	defer cancel()
 	select {
 	case result := <-lines:
@@ -259,7 +257,7 @@ func (c *sqliteSequenceFloorChild) line(t *testing.T) string {
 		}
 		return result.line
 	case <-ctx.Done():
-		t.Fatalf("timed out waiting for sequence-floor child protocol after %s", testutil.ExecRaceTimeout)
+		t.Fatalf("timed out waiting for sequence-floor child protocol after %s", beadsSequenceFloorHangBudget)
 		return ""
 	}
 }

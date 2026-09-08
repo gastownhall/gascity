@@ -182,7 +182,8 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		cmd.Dir = cfg.WorkDir
 	}
 
-	// Build environment: inherit parent env + apply overrides.
+	// Build environment: inherit parent env + apply overrides. Empty overrides
+	// withhold inherited variables, as they do for the other session runtimes.
 	env := os.Environ()
 	if len(cfg.Env) > 0 {
 		keys := make([]string, 0, len(cfg.Env))
@@ -191,6 +192,10 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
+			env = envWithoutKey(env, k)
+			if cfg.Env[k] == "" {
+				continue
+			}
 			env = append(env, k+"="+cfg.Env[k])
 		}
 	}
@@ -374,6 +379,17 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	}
 
 	return nil
+}
+
+func envWithoutKey(env []string, key string) []string {
+	prefix := key + "="
+	out := make([]string, 0, len(env))
+	for _, entry := range env {
+		if !strings.HasPrefix(entry, prefix) {
+			out = append(out, entry)
+		}
+	}
+	return out
 }
 
 // handshake performs the ACP initialize → initialized → session/new sequence.
