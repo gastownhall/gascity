@@ -15,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
@@ -798,7 +799,7 @@ func TestStorageRoutesRefuseAProviderThatOpensNoEngine(t *testing.T) {
 		t.Fatal("the binding in the resolved plan still offers an engine opener")
 	}
 
-	routes, err := openStorageRoutes(plan, target)
+	routes, err := openStorageRoutes(plan, target, cfg)
 	if err == nil {
 		_ = routes.close()
 		t.Fatal("routes opened for a binding whose provider opens no bead engine; the classes assigned to it would have fallen through to the work store")
@@ -820,6 +821,69 @@ func TestStorageRoutesRefuseAProviderThatOpensNoEngine(t *testing.T) {
 	// path would report "absent" just as readily for a path typo.
 	if directoryHolds(t, root, filepath.Base(target.Root)) {
 		t.Errorf("a refused route open created the binding root %s (the database would be %s)", target.Root, target.Database)
+	}
+}
+
+// TestOpenStorageRoutesClearsExecutorStampsOnGenuineReroute pins the
+// ga-cm2o5t.1 composition-root contract for the graph-class storage binding:
+// a store built by openStorageRoutes must clear a rerouted bead's
+// executor-identity stamps on a genuine gc.routed_to change, exactly like
+// every other write-capable composition root (cmd/gc/api_state.go,
+// cmd/gc/store_rollout.go, cmd/gc/main.go). Without
+// beads.WithRouteChangeClearing wired in here, a bead reached only through a
+// storage binding -- e.g. gc convoy reopen-source via
+// findUniqueBeadAcrossStoresView's binding-owner branch -- keeps its stale
+// gc.session_name/gc.work_dir stamps after a genuine reroute.
+func TestOpenStorageRoutesClearsExecutorStampsOnGenuineReroute(t *testing.T) {
+	root := t.TempDir()
+	cfg := infraSplitConfig(filepath.Join(root, "store"))
+
+	plan, err := resolveCityStoragePlan(root, cfg)
+	if err != nil {
+		t.Fatalf("resolving the plan: %v", err)
+	}
+	target := mustResolveInfraTarget(t, root, cfg)
+
+	routes, err := openStorageRoutes(plan, target, cfg)
+	if err != nil {
+		t.Fatalf("opening storage routes: %v", err)
+	}
+	defer routes.close() //nolint:errcheck // the test asserts on stamp clearing, not on close
+
+	store, ok := routes.storeFor(coordclass.ClassGraph)
+	if !ok {
+		t.Fatal("no store served for the graph class")
+	}
+
+	created, err := store.Create(beads.Bead{
+		Title: "stamped bead",
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey:      "gascity/old-executor",
+			beadmeta.SessionNameMetadataKey:   "gascity--old-executor",
+			beadmeta.WorkDirMetadataKey:       "worktrees/old-executor",
+			beadmeta.LegacyWorkDirMetadataKey: "worktrees/old-executor-legacy",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := store.SetMetadata(created.ID, beadmeta.RoutedToMetadataKey, "gascity/new-executor"); err != nil {
+		t.Fatalf("SetMetadata: %v", err)
+	}
+
+	got, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	for _, key := range []string{
+		beadmeta.SessionNameMetadataKey,
+		beadmeta.WorkDirMetadataKey,
+		beadmeta.LegacyWorkDirMetadataKey,
+	} {
+		if got.Metadata[key] != "" {
+			t.Errorf("%s: want cleared after a genuine gc.routed_to reroute through a storage-binding store, got %q -- openStorageRoutes must wrap its opened store with beads.WithRouteChangeClearing like every other composition root", key, got.Metadata[key])
+		}
 	}
 }
 

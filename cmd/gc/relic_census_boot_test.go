@@ -35,7 +35,7 @@ func openSplitBindingRoutes(t *testing.T) *storageRoutes {
 	if err != nil {
 		t.Fatalf("resolving the storage plan for a converged split city: %v", err)
 	}
-	routes, err := openStorageRoutes(plan, mustResolveInfraTarget(t, root, cfg))
+	routes, err := openStorageRoutes(plan, mustResolveInfraTarget(t, root, cfg), cfg)
 	if err != nil {
 		t.Fatalf("openStorageRoutes: %v", err)
 	}
