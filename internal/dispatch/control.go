@@ -1068,10 +1068,9 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 			formula.ApplyDrainControlMetadata(childMeta, child.Drain)
 			// A plain child (none of Retry/Ralph/Drain) reaches here with no
 			// gc.kind at all, unlike the root above which always gets one.
-			// Default it to task, mirroring rootMeta's unconditional stamp,
-			// so isWorkRecordGatedBead's (Type=="task" && gc.kind=="") test
-			// does not wrongly sweep it into the ADR-0009 work-record close
-			// gate. See gastownhall/gascity#5246.
+			// Default it to task, mirroring rootMeta's unconditional stamp, so
+			// its control-plane identity remains explicit and it stays out of
+			// the ADR-0009 work-record close gate. See gastownhall/gascity#5246.
 			if childMeta[beadmeta.KindMetadataKey] == "" {
 				childMeta[beadmeta.KindMetadataKey] = beadmeta.KindTask
 			}
