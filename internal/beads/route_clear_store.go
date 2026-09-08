@@ -2,6 +2,7 @@ package beads
 
 import (
 	"fmt"
+	"log"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 )
@@ -177,6 +178,11 @@ func (w *routeChangeClearingStore) Update(id string, opts UpdateOpts) error {
 // oldTarget and newTarget normalize to different values. before is the
 // bead's pre-write state, read to recover its prior gc.routed_to and
 // gc.root_bead_id before the routing write overwrote them.
+//
+// A clear failure is logged and swallowed, never returned: the routing write
+// this decorator delegates to has already succeeded by the time
+// clearIfGenuine runs, and that write must never be reported as failed
+// because a best-effort follow-up cleanup was rejected (design sec 1 NFR-5).
 func (w *routeChangeClearingStore) clearIfGenuine(id string, before Bead, oldTarget, newTarget string) {
 	if w.normalizer(oldTarget) == w.normalizer(newTarget) {
 		return
@@ -187,9 +193,13 @@ func (w *routeChangeClearingStore) clearIfGenuine(id string, before Bead, oldTar
 		beadmeta.WorkDirMetadataKey:       "",
 		beadmeta.LegacyWorkDirMetadataKey: "",
 	}
-	_ = w.Store.SetMetadataBatch(id, clearStamps)
+	if err := w.Store.SetMetadataBatch(id, clearStamps); err != nil {
+		log.Printf("beads route-clear: clearing executor-identity stamps on %s after reroute to %q: %v", id, newTarget, err)
+	}
 
 	if rootID := before.Metadata[beadmeta.RootBeadIDMetadataKey]; rootID != "" && rootID != id {
-		_ = w.Store.SetMetadataBatch(rootID, clearStamps)
+		if err := w.Store.SetMetadataBatch(rootID, clearStamps); err != nil {
+			log.Printf("beads route-clear: clearing executor-identity stamps on molecule root %s (step %s rerouted to %q): %v", rootID, id, newTarget, err)
+		}
 	}
 }
