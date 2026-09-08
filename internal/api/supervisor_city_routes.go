@@ -217,6 +217,19 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityDelete(sm, "/bead/{id}", (*Server).humaHandleBeadDelete, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict),
 		describes("Closes the bead. This is a soft delete: the bead remains readable and retains its history, with status \"closed\". The API exposes no hard delete, so a caller that needs the record actually removed must not rely on this endpoint."))
 
+	// Worker lifecycle (cr-gdeav.5.4 draft): the four verbs a worker needs when
+	// it is not on the city host. Each route is transport for an existing store
+	// capability — the two-argument claim, ConditionalAssignmentReleaser,
+	// AtomicConditionalCloser — and a store that lacks one answers 501 rather
+	// than emulating the CAS, which is why NotImplemented is declared here.
+	// The bead verbs above are deliberately NOT widened: /bead/{id}/assign is
+	// last-write-wins and /bead/{id}/close takes no record, so changing those
+	// would change what every current caller observes.
+	cityPost(sm, "/worker/claim", (*Server).humaHandleWorkerClaim, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented))
+	cityPost(sm, "/worker/heartbeat", (*Server).humaHandleWorkerHeartbeat, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented))
+	cityDelete(sm, "/worker/claim", (*Server).humaHandleWorkerRelease, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented))
+	cityPost(sm, "/worker/close", (*Server).humaHandleWorkerClose, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity, http.StatusNotImplemented))
+
 	// Mail. Part of the P12 error-contract slice (see Beads above): each op
 	// enumerates the error statuses it can return (Huma adds auto 422/500);
 	// mutations declare 403 for the CSRF/read-only middleware.
