@@ -47,6 +47,7 @@ var (
 	_ ConditionalWritesResolveTargeter = (*routeChangeClearingStore)(nil)
 	_ DepMetadataReader                = (*routeChangeClearingStore)(nil)
 	_ ConditionalAssignmentReleaser    = (*routeChangeClearingStore)(nil)
+	_ ForeignIDCreator                 = (*routeChangeClearingStore)(nil)
 )
 
 // ConditionalWritesResolveTarget declares the immediate backing store as the
@@ -107,6 +108,64 @@ func (w *routeChangeClearingStore) ReleaseIfCurrent(id, expectedAssignee string)
 		return false, ErrConditionalReleaseUnsupported
 	}
 	return releaser.ReleaseIfCurrent(id, expectedAssignee)
+}
+
+// Claim forwards the backing store's atomic first-claim. No named Claimer
+// interface exists in this package, so this matches it the same way
+// emittingClassStore.Claim itself does (cmd/gc/class_store_emit.go): an
+// anonymous Claim(string, string) (Bead, bool, error) interface. Forwarded
+// for the same reason as DepMetadata and ReleaseIfCurrent above: the
+// embedded Store field does not promote an optional capability. Without this
+// forward, claiming a class-bound bead through a route-clearing-wrapped
+// store (openStorageRoutes, then withCLIEmission on the CLI one-shot path)
+// fails every claim with ErrConditionalWriteUnsupported -- the same miss
+// error emittingClassStore.Claim itself returns when its own type assertion
+// fails, which is what this forward prevents from happening spuriously.
+func (w *routeChangeClearingStore) Claim(id, assignee string) (Bead, bool, error) {
+	claimer, ok := w.Store.(interface {
+		Claim(string, string) (Bead, bool, error)
+	})
+	if !ok {
+		return Bead{}, false, ErrConditionalWriteUnsupported
+	}
+	return claimer.Claim(id, assignee)
+}
+
+// CreateWithForeignID forwards the backing store's foreign-id create
+// (ForeignIDCreator), for the same reason as DepMetadata and ReleaseIfCurrent
+// above: the embedded Store field does not promote an optional capability.
+// Without this forward, wrapping a class binding's store in
+// WithRouteChangeClearing (openStorageRoutes) would silently take away the
+// class-store migration's only path for carrying a legacy bead's id across a
+// prefix fence (cmd/gc/infra_class_migrate.go, infra_class_recover.go) --
+// both already type-assert for this capability and treat its absence as a
+// hard migration error, not a degrade.
+func (w *routeChangeClearingStore) CreateWithForeignID(b Bead) (Bead, error) {
+	creator, ok := w.Store.(ForeignIDCreator)
+	if !ok {
+		return Bead{}, fmt.Errorf("creating %s with a foreign id: route-clearing-wrapped store %T does not implement ForeignIDCreator", b.ID, w.Store)
+	}
+	return creator.CreateWithForeignID(b)
+}
+
+// IDPrefix forwards the backing store's declared mint-namespace prefix
+// (storeref.HasIDPrefix, matched here as an anonymous interface -- storeref
+// imports beads, so beads cannot name that interface directly, the same
+// constraint CachingStore's own IDPrefix capture works around in
+// NewCachingStore). Forwarded for the same reason as DepMetadata,
+// ReleaseIfCurrent, and CreateWithForeignID above: the embedded Store field
+// does not promote an optional capability. Without this forward,
+// storeref.MintsInsideNamespace can never see a route-clearing-wrapped
+// binding's own declared prefix, so the boot census's mint bit
+// (ClassBinding.MintsReserved) reads permanently false and its relic bit
+// stays pessimistically true forever -- even for a binding a live census
+// proved clean -- because censusBindingRelics (cmd/gc/storage_boot.go) skips
+// any binding whose MintsReserved is false.
+func (w *routeChangeClearingStore) IDPrefix() string {
+	if declaring, ok := w.Store.(interface{ IDPrefix() string }); ok {
+		return declaring.IDPrefix()
+	}
+	return ""
 }
 
 // SetMetadata clears the rerouted bead's (and its molecule root's) executor-
