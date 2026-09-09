@@ -549,7 +549,10 @@ func armCurrentBead(r *rowFacts) (intent, bool) {
 	case e.AssignedWork.RequiresFreshCycle && info.WakeMode == "fresh" && strings.TrimSpace(info.CurrentClaimBeadID) != bead:
 		return intent{}, false
 	}
-	return r.heal(intentRowHeal, decideCurrentBead, session.MetadataPatch{session.CurrentBeadIDKey: bead})
+	return r.heal(intentRowHeal, decideCurrentBead, session.MetadataPatch{
+		session.CurrentBeadIDKey:       bead,
+		session.CurrentWorkflowRootKey: strings.TrimSpace(e.AssignedWork.WorkflowRoot),
+	})
 }
 
 // asleepHealPatch is legacy's heal patch (healStatePatchWithRollbackInfo)
