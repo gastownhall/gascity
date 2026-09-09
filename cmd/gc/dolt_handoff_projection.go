@@ -62,15 +62,13 @@ func committedBeadsHandoffOwnsScope(scopeRoot string) (bool, error) {
 	if err := json.Unmarshal(data, &journal); err != nil {
 		return false, fmt.Errorf("parse ownership handoff journal: %w", err)
 	}
-	scopeRoot, err = handoffPhysicalExistingPath(scopeRoot)
+	scopeRoot, err = filepath.EvalSymlinks(scopeRoot)
 	if err != nil {
 		return false, fmt.Errorf("resolve ownership handoff scope root: %w", err)
 	}
+	scopeRoot = filepath.Clean(scopeRoot)
 	if err := validateProjectionRequest(scopeRoot, journal); err != nil {
 		return false, err
-	}
-	if normalizePathForCompare(journal.Request.CityRoot) != scopeRoot || normalizePathForCompare(journal.Request.Root) != scopeRoot {
-		return false, errors.New("ownership handoff journal does not bind this scope root")
 	}
 	switch journal.Phase {
 	case "committed":
