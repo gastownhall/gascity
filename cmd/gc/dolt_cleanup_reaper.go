@@ -136,11 +136,11 @@ func extractConfigPath(argv []string) string {
 }
 
 // extractDataDirPath pulls the --data-dir <path> argument from a dolt
-// sql-server argv, reusing the generic flag-value parser already shared by
-// the standalone-conflict detector (dolt_standalone_conflict.go) rather than
-// hand-rolling a second parser.
+// sql-server argv, reusing the parser already shared by the
+// standalone-conflict detector (dolt_standalone_conflict.go) rather than
+// hand-rolling a second one.
 func extractDataDirPath(argv []string) string {
-	v, _ := argvFlagValue(argv, "--data-dir")
+	v, _ := argvFlagValue(argv)
 	return v
 }
 
