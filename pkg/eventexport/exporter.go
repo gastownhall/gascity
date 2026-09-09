@@ -248,8 +248,10 @@ func (e *Exporter) flushAll(ctx context.Context) {
 }
 
 // flushCity ships one city's pending batch (if any) and, on success, advances
-// the cursor to the high-water of processed seqs — past dropped events too, so
-// filtered churn is never re-fetched.
+// the cursor: to the high-water of processed seqs when the whole buffer ships —
+// past dropped events too, so filtered churn is never re-fetched — or only to
+// the last shipped seq when the batch is capped at BatchMax, since the events
+// above it have not been delivered yet.
 func (e *Exporter) flushCity(ctx context.Context, city string) {
 	e.mu.Lock()
 	batch := e.pending[city]
@@ -277,8 +279,21 @@ func (e *Exporter) flushCity(ctx context.Context, city string) {
 	}
 	if len(batch) > 0 {
 		if err := e.post(ctx, city, batch); err != nil {
-			e.cfg.Logf("eventexport: post failed for %s (cursor held at %d): %v", city, cur, err)
-			e.holdOff(city, err)
+			// Caller-side cancellation is not sink pushback. Holding off on it
+			// would suppress Run's best-effort final drain, which runs on a fresh
+			// context but still passes through the hold gate above. Discriminate
+			// on the caller's context rather than the error chain: an http.Client
+			// timeout against a hung sink also reports context.DeadlineExceeded,
+			// and that is sink pushback — the case most in need of the hold.
+			if ctx.Err() != nil {
+				e.cfg.Logf("eventexport: post failed for %s (cursor held at %d): %v", city, cur, err)
+				return // hold cursor; the next flush retries immediately
+			}
+			// Held flushes return silently, so this one line is the only notice an
+			// operator gets for the whole backoff window — say when it ends, or a
+			// designed hold is indistinguishable from a stalled exporter.
+			hold := e.holdOff(city, err)
+			e.cfg.Logf("eventexport: post failed for %s (cursor held at %d): %v; next attempt in %s", city, cur, err, hold)
 			return // hold cursor; retry once the backoff deadline passes
 		}
 	}
@@ -301,8 +316,9 @@ const maxHoldOff = 5 * time.Minute
 // Retry-After when it sent a usable one, else a backoff that doubles per
 // consecutive failure starting at BatchInterval. Without this a rate-limited
 // sink is self-reinforcing — retrying at the ingest-path flush rate keeps the
-// caller over the limit, so the window never clears.
-func (e *Exporter) holdOff(city string, err error) {
+// caller over the limit, so the window never clears. It returns the hold it
+// chose so the caller can report the backoff window it just entered.
+func (e *Exporter) holdOff(city string, err error) time.Duration {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	hold := e.retryHold[city] * 2
@@ -318,6 +334,7 @@ func (e *Exporter) holdOff(city string, err error) {
 	}
 	e.retryHold[city] = hold
 	e.retryAt[city] = time.Now().Add(hold)
+	return hold
 }
 
 func (e *Exporter) post(ctx context.Context, city string, batch []Envelope) error {
@@ -363,6 +380,15 @@ func (e *statusError) Error() string { return fmt.Sprintf("endpoint returned %d"
 
 // parseRetryAfter reads either RFC 9110 Retry-After form (delay-seconds or an
 // HTTP-date), returning 0 when the header is absent, unparsable, or already past.
+//
+// This is the third Retry-After parser in the repo, alongside cmd/gc's
+// parseRetryAfter (remote stream reconnect) and internal/api's
+// parseRigRetryAfter (rig-create wait client), which are maintained as
+// documented twins. Both of those deliberately ignore the HTTP-date form as
+// over-precise for a client backoff; honoring it here is intentional, because an
+// export sink refusing a batch is exactly the case where it can name an absolute
+// time it will be ready. pkg/ cannot import cmd/gc and each caller carries its
+// own bound, so unification waits for a fourth consumer.
 func parseRetryAfter(v string) time.Duration {
 	v = strings.TrimSpace(v)
 	if v == "" {
@@ -371,6 +397,12 @@ func parseRetryAfter(v string) time.Duration {
 	if secs, err := strconv.Atoi(v); err == nil {
 		if secs <= 0 {
 			return 0
+		}
+		// Clamp before the conversion, not after: seconds beyond maxHoldOff are
+		// capped anyway, and multiplying an unbounded value would wrap int64 into
+		// a positive sub-second hold that slips past holdOff's own bound.
+		if secs > int(maxHoldOff/time.Second) {
+			return maxHoldOff
 		}
 		return time.Duration(secs) * time.Second
 	}
