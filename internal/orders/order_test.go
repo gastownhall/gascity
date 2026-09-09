@@ -1,6 +1,7 @@
 package orders
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -167,10 +168,11 @@ timeout = "120s"
 // order eligible for the dispatcher's bounded reserved-dispatch lane via
 // reserved_dispatch, in TOML, with no name-based logic in Go. Every order is
 // opted out by default; only the 3 bundled core-health orders (beads-health,
-// gate-sweep, dolt-health) set the flag. This test pins their deployed shape
-// the same way TestProviderHealthProbeOrderOptsOutOfWorkGate pins
-// provider-health-probe's — the actual capped-budget dispatch behavior that
-// consumes this flag is separate (gastownhall/gascity ga-1ocm3f).
+// gate-sweep, dolt-health) set the flag. This test pins their deployed shape by
+// parsing the shipped TOML files themselves, the same way
+// TestProviderHealthProbeOrderOptsOutOfWorkGate pins provider-health-probe's —
+// the actual capped-budget dispatch behavior that consumes this flag is
+// separate (gastownhall/gascity ga-1ocm3f).
 func TestOrderReservedDispatchParsed(t *testing.T) {
 	on, err := Parse([]byte("[order]\nexec = \"true\"\ntrigger = \"cooldown\"\ninterval = \"30s\"\nreserved_dispatch = true\n"))
 	if err != nil {
@@ -191,37 +193,23 @@ func TestOrderReservedDispatchParsed(t *testing.T) {
 		t.Errorf("Validate with ReservedDispatch: %v", err)
 	}
 
-	// Pin the deployed shape of the 3 bundled core-health orders: each ships
-	// with reserved_dispatch = true today.
+	// Pin the deployed shape of the 3 bundled core-health orders by reading the
+	// files themselves — an embedded copy would stay green if a shipped pack
+	// dropped the flag.
 	bundled := []struct {
 		name string
-		toml string
+		path string
 	}{
-		{"beads-health", `[order]
-description = "Check beads provider health and recover on failure"
-trigger = "cooldown"
-interval = "30s"
-exec = "gc beads health --quiet"
-timeout = "60s"
-reserved_dispatch = true
-`},
-		{"gate-sweep", `[order]
-description = "Evaluate and close pending gates (timer, GitHub)"
-trigger = "cooldown"
-interval = "30s"
-exec = "$PACK_DIR/assets/scripts/gate-sweep.sh"
-reserved_dispatch = true
-`},
-		{"dolt-health", `[order]
-description = "Check dolt server health without restarting it"
-trigger = "cooldown"
-interval = "30s"
-exec = "gc dolt health --json | gc dolt health-check"
-reserved_dispatch = true
-`},
+		{"beads-health", "../bootstrap/packs/core/orders/beads-health.toml"},
+		{"gate-sweep", "../bootstrap/packs/core/orders/gate-sweep.toml"},
+		{"dolt-health", "../../examples/bd/dolt/orders/dolt-health.toml"},
 	}
 	for _, b := range bundled {
-		a, err := Parse([]byte(b.toml))
+		data, err := os.ReadFile(b.path)
+		if err != nil {
+			t.Fatalf("%s: ReadFile %s: %v", b.name, b.path, err)
+		}
+		a, err := Parse(data)
 		if err != nil {
 			t.Fatalf("%s: Parse: %v", b.name, err)
 		}

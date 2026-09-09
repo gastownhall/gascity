@@ -404,6 +404,18 @@ it. Use `no_work_gate` only when the order genuinely tracks no beads — it
 disables single-flight protection, so the order must be self-idempotent or
 interval-bounded to guard against overlapping re-runs.
 
+A separate flag governs *capacity* rather than duplicates. Each tick dispatches
+only a bounded number of orders, so when general dispatch capacity is saturated
+the core fleet-health orders can be crowded out by ordinary work. Setting
+`reserved_dispatch = true` declares an order eligible for a small reserved lane
+that keeps those health orders running under saturation. Declaring it in TOML is
+the only way to grant that eligibility — the orchestrator never name-matches
+specific orders — and every order defaults opted out. Today the flag is
+**declaration-only**: the bundled health orders carry it, but no dispatcher
+consumes it yet, and it changes nothing about gate, suspension, or single-flight
+semantics — a reserved order is still skipped when its city or rig is suspended,
+still subject to the open-work gate, and still single-flighted.
+
 ## Rig-scoped orders
 
 When a pack is applied to a rig, that pack's orders come along and run scoped to
