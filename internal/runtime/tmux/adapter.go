@@ -640,11 +640,22 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 // holding independent proof of death (for example a session bead created
 // before the host booted) can distinguish "no server at all" from a server
 // that answered partially, without weakening the fail-safe for either.
+// ServerAbsent is only set when an independent socket observation
+// corroborates the protocol-level ErrNoServer, the same standard
+// [Tmux.probeServerAlive] holds itself to: a wedged-but-live server that
+// answers "no server" over the control protocol while its socket is still
+// present must not be mistaken for a dead one, because ServerAbsent gates a
+// destructive path (reapPreBootSessionBeads).
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	all, err := p.tm.listSessionNames()
 	if err != nil {
 		if errors.Is(err, ErrNoServer) {
-			return nil, &runtime.PartialListError{Err: fmt.Errorf("tmux server unreachable: %w", err), ServerAbsent: true}
+			ctx, cancel := context.WithTimeout(context.Background(), newSessionProbeTimeout)
+			defer cancel()
+			return nil, &runtime.PartialListError{
+				Err:          fmt.Errorf("tmux server unreachable: %w", err),
+				ServerAbsent: p.tm.serverSocketConfirmsAbsence(ctx),
+			}
 		}
 		return nil, err
 	}
