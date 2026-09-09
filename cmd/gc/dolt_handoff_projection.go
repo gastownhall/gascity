@@ -50,7 +50,6 @@ type handoffProjectionJournal struct {
 // provider-owned. Only a byte-exact restored rollback is legacy-owned;
 // pending, corrupt, and conflicting records fail closed.
 func committedBeadsHandoffOwnsScope(scopeRoot string) (bool, error) {
-	scopeRoot = normalizePathForCompare(scopeRoot)
 	path := filepath.Join(scopeRoot, ".beads", "ownership-handoff.json")
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -62,6 +61,10 @@ func committedBeadsHandoffOwnsScope(scopeRoot string) (bool, error) {
 	var journal handoffProjectionJournal
 	if err := json.Unmarshal(data, &journal); err != nil {
 		return false, fmt.Errorf("parse ownership handoff journal: %w", err)
+	}
+	scopeRoot, err = handoffPhysicalExistingPath(scopeRoot)
+	if err != nil {
+		return false, fmt.Errorf("resolve ownership handoff scope root: %w", err)
 	}
 	if err := validateProjectionRequest(scopeRoot, journal); err != nil {
 		return false, err
@@ -79,6 +82,9 @@ func committedBeadsHandoffOwnsScope(scopeRoot string) (bool, error) {
 		if journal.Owner != "legacy-gc" {
 			return false, errors.New("ownership handoff journal has invalid restored owner")
 		}
+		if err := validateRestoredProjection(journal); err != nil {
+			return false, err
+		}
 		if err := handoffJournalRestoredArtifactsMatch(scopeRoot, journal.Snapshot.WorkspaceMetadata, journal.Snapshot.WorkspaceConfig, journal.Snapshot.WorkspacePort, journal.Snapshot.WorkspaceMetadataPresent, journal.Snapshot.WorkspaceConfigPresent, journal.Snapshot.WorkspacePortPresent, journal.Snapshot.WorkspaceMetadataMode, journal.Snapshot.WorkspaceConfigMode, journal.Snapshot.WorkspacePortMode); err != nil {
 			return false, err
 		}
@@ -91,6 +97,23 @@ func committedBeadsHandoffOwnsScope(scopeRoot string) (bool, error) {
 	default:
 		return false, errors.New("ownership handoff journal has unknown phase")
 	}
+}
+
+func validateRestoredProjection(journal handoffProjectionJournal) error {
+	if !journal.SnapshotCaptured || journal.CommitHookInProgress || journal.CommitHookRan {
+		return errors.New("ownership handoff journal has incomplete restored checkpoint")
+	}
+	var legacy struct {
+		SchemaVersion int    `json:"schema_version"`
+		Operation     string `json:"operation"`
+		Result        string `json:"result"`
+		Owner         string `json:"owner"`
+		IdentityToken string `json:"identity_token"`
+	}
+	if err := json.Unmarshal(journal.Snapshot.Metadata, &legacy); err != nil || legacy.SchemaVersion != 1 || legacy.Operation != "handoff-inspect" || legacy.Result != "eligible" || legacy.Owner != "legacy-gc" || strings.TrimSpace(legacy.IdentityToken) == "" {
+		return errors.New("ownership handoff journal has invalid legacy protocol snapshot")
+	}
+	return nil
 }
 
 func validateProjectionRequest(scopeRoot string, journal handoffProjectionJournal) error {
