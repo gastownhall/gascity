@@ -313,7 +313,7 @@ var routedToAllowlist = []routedToSite{
 	},
 	{
 		path:   "internal/molecule/molecule.go",
-		line:   1486,
+		line:   1503,
 		reason: "deferred-activation: deferredRoutingActivationUpdate writes the first real gc.routed_to for a bead fenced (type=\"gate\", real key deleted via deferBeadMetadataValue, not merely stale) since its own creation in the same Instantiate/InstantiateFragment call (fenceGraphWorkflowBead at molecule.go:993) or a crash-recovery re-activation of that same never-dispatched state (activateAttachCandidate). The bead is never dispatchable before activation, so it never received live-executor stamps to clear",
 	},
 
