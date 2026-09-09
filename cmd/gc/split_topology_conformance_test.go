@@ -2323,11 +2323,18 @@ func assertFederationServesWholeLeg(t *testing.T, surface, legName string, legID
 //
 // # What this asserts, and why on the argv predicates
 //
-// The two fates are decided before any store is touched, by two pure functions
-// of (config, argv): bdSQLRelocatedClassRefusal for `list` and
-// bdArgsAddressedClassIDs for every other verb. So the coherence claim is
-// checkable exactly where it is decided, and the row runs on both topologies
-// without opening a binding. The end-to-end proofs through the real command —
+// Both fates are visible before any store is touched, from two pure functions
+// of (config, argv): bdSQLRelocatedClassRefusal DECIDES the `list` refusal, and
+// bdArgsAddressedClassIDs DETECTS that every other verb addresses a reserved
+// id. The second is a detection rather than a decision because a residence
+// probe, not the prefix, now decides whether the by-id door serves that id — a
+// clean binding miss falls through. So the equivalence this row asserts rests
+// on the fixture minting its root INTO the graph store (mintDurableGraphBead
+// below): addressing and diversion coincide only for a binding-resident root,
+// and a fixture whose root was not resident would make the row vacuous rather
+// than red. The coherence claim stays checkable from the argv predicates alone,
+// and the row runs on both topologies without opening a binding. The end-to-end
+// proofs through the real command —
 // real doBd, a bd stub that answers `[]` and exits 0 — are
 // TestGcBdProjectionsAgreeOnAClassTheyCannotSee for the refusing verbs and
 // TestGcBdDepTreeSplitsOnOwnershipNotOnServability for the answering one.
@@ -2409,11 +2416,11 @@ func conformanceProjectionCoherence(t *testing.T, e splitEnv) {
 
 	msg, listRefused := bdSQLRelocatedClassRefusal(e.cfg, listArgs)
 	_, readyRefused := bdSQLRelocatedClassRefusal(e.cfg, readyArgs)
-	depTreeRouted := len(bdArgsAddressedClassIDs(depTreeArgs)) > 0
+	depTreeAddressed := len(bdArgsAddressedClassIDs(depTreeArgs)) > 0
 
-	if listRefused != depTreeRouted {
-		t.Fatalf("`gc bd list --metadata-field %s` refused = %v but `gc bd dep tree %s` was diverted from the work ledger = %v on the same molecule; two projections over the same data must not disagree about whether that ledger can answer for the class",
-			selector, listRefused, root.ID, depTreeRouted)
+	if listRefused != depTreeAddressed {
+		t.Fatalf("`gc bd list --metadata-field %s` refused = %v but `gc bd dep tree %s` addresses a reserved id = %v on the same molecule; two projections over the same data must not disagree about whether that ledger can answer for the class",
+			selector, listRefused, root.ID, depTreeAddressed)
 	}
 	if readyRefused != listRefused {
 		t.Fatalf("`gc bd ready --metadata-field %s` refused = %v but `gc bd list` with the same selector refused = %v; the two verbs take the same predicate and answer no-match the same way, so guarding one moves the silent empty rather than removing it",

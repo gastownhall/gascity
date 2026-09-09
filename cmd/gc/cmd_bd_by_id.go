@@ -822,7 +822,8 @@ func openBdByIDClassFrontDoor(cityPath string) (bdByIDClassDoor, bool, error) {
 // The standing storage refusal is the single error that is not a fault, and the
 // plan splits it by leg — tolerated on the probe, where a refused city still
 // serves work from its work ledger, and surfaced on the authority leg, where a
-// reserved id has nowhere else to live and the refusal IS the answer.
+// binding that cannot answer for a reserved id is a failure to DECIDE rather
+// than proof of absence.
 func (d bdByIDClassDoor) resolve(id string) (bdByIDResolution, error) {
 	resolution := bdByIDResolution{Graph: d.Graph}
 	owner, owned, err := cliByIDBindingOwner(d.CityPath, id)
