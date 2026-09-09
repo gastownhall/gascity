@@ -318,3 +318,152 @@ func TestExporter_NoTokenProviderNoAuthHeader(t *testing.T) {
 		t.Fatalf("nil TokenProvider must send no Authorization header, got %q", h)
 	}
 }
+
+// TestParseRetryAfter covers both RFC 9110 Retry-After forms plus the inputs a
+// sink can realistically get wrong, which must fall back to our own backoff.
+func TestParseRetryAfter(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   string
+		want time.Duration
+	}{
+		{"absent", "", 0},
+		{"delay seconds", "30", 30 * time.Second},
+		{"padded delay seconds", "  7  ", 7 * time.Second},
+		{"zero", "0", 0},
+		{"negative", "-5", 0},
+		{"unparsable", "soon", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parseRetryAfter(tc.in); got != tc.want {
+				t.Fatalf("parseRetryAfter(%q) = %s, want %s", tc.in, got, tc.want)
+			}
+		})
+	}
+
+	future := time.Now().UTC().Add(90 * time.Second).Format(http.TimeFormat)
+	if got := parseRetryAfter(future); got <= 0 || got > 90*time.Second {
+		t.Fatalf("parseRetryAfter(future HTTP-date) = %s, want within (0, 90s]", got)
+	}
+	past := time.Now().UTC().Add(-time.Hour).Format(http.TimeFormat)
+	if got := parseRetryAfter(past); got != 0 {
+		t.Fatalf("parseRetryAfter(past HTTP-date) = %s, want 0", got)
+	}
+}
+
+// TestExporterHoldOffBacksOffAndHonorsRetryAfter proves consecutive failures
+// back off geometrically from BatchInterval, that a sink's Retry-After wins
+// when it sends one, and that neither can park a city past maxHoldOff.
+func TestExporterHoldOffBacksOffAndHonorsRetryAfter(t *testing.T) {
+	exp := New(Config{Endpoint: "https://example.invalid/ingest", BatchInterval: time.Second})
+
+	generic := errors.New("dial failed")
+	for i, want := range []time.Duration{time.Second, 2 * time.Second, 4 * time.Second} {
+		exp.holdOff("c1", generic)
+		if got := exp.retryHold["c1"]; got != want {
+			t.Fatalf("failure %d: hold = %s, want %s", i+1, got, want)
+		}
+		if !exp.retryAt["c1"].After(time.Now()) {
+			t.Fatalf("failure %d: retryAt must be in the future", i+1)
+		}
+	}
+
+	// A usable Retry-After replaces the doubling schedule outright.
+	exp.holdOff("c1", &statusError{code: http.StatusTooManyRequests, retryAfter: 45 * time.Second})
+	if got := exp.retryHold["c1"]; got != 45*time.Second {
+		t.Fatalf("Retry-After hold = %s, want 45s", got)
+	}
+
+	// An absurd one is capped, so a bad hint cannot disable the export.
+	exp.holdOff("c1", &statusError{code: http.StatusTooManyRequests, retryAfter: 72 * time.Hour})
+	if got := exp.retryHold["c1"]; got != maxHoldOff {
+		t.Fatalf("oversized Retry-After hold = %s, want the %s cap", got, maxHoldOff)
+	}
+}
+
+// TestExporterFlushHoldsCursorWhileBackedOff proves a city under an active hold
+// issues no request at all. Retrying through a rate limit is self-reinforcing —
+// it keeps the caller over the limit — so suppressing the attempt is the point.
+func TestExporterFlushHoldsCursorWhileBackedOff(t *testing.T) {
+	var dialed int32
+	rt := roundTripFunc(func(*http.Request) (*http.Response, error) {
+		atomic.AddInt32(&dialed, 1)
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(""))}, nil
+	})
+	exp := New(Config{
+		Endpoint: "https://example.invalid/ingest", Salt: testSalt, ExportRef: true,
+		BatchInterval: time.Second, Client: &http.Client{Transport: rt},
+	})
+	exp.ingest(tev("c1", 1, "bead.closed", "controller", "mc-1"))
+	exp.retryAt["c1"] = time.Now().Add(time.Hour)
+
+	exp.flushCity(context.Background(), "c1")
+	if n := atomic.LoadInt32(&dialed); n != 0 {
+		t.Fatalf("made %d requests while backed off, want 0", n)
+	}
+	if c := exp.Cursors()["c1"]; c != 0 {
+		t.Fatalf("cursor advanced to %d while backed off", c)
+	}
+
+	// Once the hold expires the same flush ships, and success clears the hold.
+	exp.retryAt["c1"] = time.Now().Add(-time.Second)
+	exp.flushCity(context.Background(), "c1")
+	if n := atomic.LoadInt32(&dialed); n != 1 {
+		t.Fatalf("made %d requests after the hold expired, want 1", n)
+	}
+	if c := exp.Cursors()["c1"]; c != 1 {
+		t.Fatalf("cursor = %d after a confirmed POST, want 1", c)
+	}
+	if _, held := exp.retryAt["c1"]; held {
+		t.Fatalf("a confirmed POST must clear the hold")
+	}
+}
+
+// TestExporterFlushCapsBatchAtBatchMax proves a backlog ships in BatchMax-sized
+// POSTs and that a capped flush advances the cursor only to the prefix it
+// shipped: advancing to the processed high-water would skip the remainder.
+func TestExporterFlushCapsBatchAtBatchMax(t *testing.T) {
+	const batchMax = 3
+	const lastSeq = uint64(7)
+
+	var sizes []int
+	rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			return nil, err
+		}
+		var b Batch
+		if err := json.Unmarshal(body, &b); err != nil {
+			return nil, err
+		}
+		sizes = append(sizes, len(b.Events))
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(""))}, nil
+	})
+	exp := New(Config{
+		Endpoint: "https://example.invalid/ingest", Salt: testSalt, ExportRef: true,
+		BatchMax: batchMax, BatchInterval: time.Second, Client: &http.Client{Transport: rt},
+	})
+	for seq := uint64(1); seq <= lastSeq; seq++ {
+		exp.ingest(tev("c1", seq, "bead.closed", "controller", "mc-x"))
+	}
+
+	exp.flushCity(context.Background(), "c1")
+	if c := exp.Cursors()["c1"]; c != batchMax {
+		t.Fatalf("cursor = %d after a capped flush, want the last shipped seq (%d)", c, batchMax)
+	}
+	exp.flushCity(context.Background(), "c1")
+	exp.flushCity(context.Background(), "c1")
+	if c := exp.Cursors()["c1"]; c != lastSeq {
+		t.Fatalf("cursor = %d after draining, want %d", c, lastSeq)
+	}
+
+	want := []int{batchMax, batchMax, 1}
+	if len(sizes) != len(want) {
+		t.Fatalf("posted batches %v, want %v", sizes, want)
+	}
+	for i := range want {
+		if sizes[i] != want[i] {
+			t.Fatalf("posted batches %v, want %v", sizes, want)
+		}
+	}
+}
