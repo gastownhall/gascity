@@ -28,10 +28,17 @@ import (
 // cache necessarily got its negative verdict from a full validation, and the
 // next question about that directory runs a full validation too.
 //
-// A verifier is scoped to one readiness pass and is not safe for concurrent
-// use. A verdict therefore never outlives the pass that produced it: every
-// pass still runs the full validator at least once, which is what detects and
-// repairs a corrupted cache.
+// A verifier's own memo map is not safe for concurrent use. For a verifier
+// from newSyntheticCacheVerifier that map is also the whole story: it is
+// scoped to one readiness pass, so a verdict never outlives the pass that
+// produced it, and every pass still runs the full validator at least once,
+// which is what detects and repairs a corrupted cache.
+//
+// newWarmSyntheticCacheVerifier is the cross-pass variant used by the ready
+// fast path. Its positive verdicts DO outlive the pass that produced them:
+// they are recorded in the process-global warmSyntheticCacheVerdicts and
+// gated by a stat fingerprint of the cache tree rather than by the pass
+// boundary.
 type syntheticCacheVerifier struct {
 	valid    map[string]struct{}
 	validate func(cachePath, repository, commit string) error
@@ -159,8 +166,13 @@ func syntheticCacheStatFingerprint(dir string) (uint64, error) {
 }
 
 // Valid reports whether the synthetic pack cache at cachePath validates as
-// repository's cache at commit, reusing a positive verdict already reached in
-// this pass.
+// repository's cache at commit, reusing a positive verdict already reached
+// through this verifier.
+//
+// Beyond that per-verifier memo, the reuse scope is whatever the injected
+// validate hook defines: the cold constructor's hook always runs the full
+// validator, while the warm constructor's may reuse a positive verdict
+// reached in an earlier pass.
 //
 // The repository is part of the memo key even though a cache directory can
 // only ever belong to one repository: a verdict is recorded for the exact
