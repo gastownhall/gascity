@@ -45,6 +45,7 @@
 #   ZCODE_BASE_URL  optional, API base (read by the bundle)
 #   ZCODE_NODE_BIN  optional, node override (default: node from PATH)
 #   GC_ZCODE_TRANSCRIPT_DIR  optional, export-mirror root override
+#   ZCODE_REPL_HEARTBEAT_SECS  optional, seconds between busy-line redraws on a tty (default 30)
 set -uo pipefail   # deliberately no -e: a failed turn must not kill the loop
 
 readonly PROG="zcode-repl"
@@ -80,6 +81,14 @@ if [[ ! -r "$ZCODE_CJS" ]]; then
 fi
 if [[ -z "${ZCODE_API_KEY:-}" ]]; then
     die_config "ZCODE_API_KEY is unset"
+fi
+
+# How often a running turn redraws its busy line on a tty (see start_heartbeat).
+# gc drains a seat that has been silent for 90 s; a test shortens this so it can
+# watch a redraw without holding a turn open for half a minute.
+readonly HEARTBEAT_SECS="${ZCODE_REPL_HEARTBEAT_SECS:-30}"
+if [[ ! "$HEARTBEAT_SECS" =~ ^[1-9][0-9]*$ ]]; then
+    die_config "ZCODE_REPL_HEARTBEAT_SECS=$HEARTBEAT_SECS is not a whole number of seconds"
 fi
 
 NODE_BIN="${ZCODE_NODE_BIN:-$(command -v node || true)}"
@@ -302,6 +311,7 @@ fi
 workdir="$(mktemp -d)"
 stty_saved=""
 turn_pid=""
+heartbeat_pid=""
 
 # stop_turn signals the in-flight turn's process group, escalating until it is
 # actually gone.
@@ -328,8 +338,46 @@ stop_turn() {
     done
 }
 
+# start_heartbeat redraws the busy line in place every HEARTBEAT_SECS for as
+# long as the turn runs. gc's execution backstop drains a seat that holds a
+# claim but whose pane has produced no output for its grace window (90 s), and
+# a headless turn is silent from its announcement until the reply lands — so
+# every turn longer than the grace was cut off as "execution-stalled"
+# (2026-09-09: a design seat was woken and drained every ~2.3 min, five turns
+# started, none finished). The redraw is the same bytes announce_turn left, so
+# the pane's tail never changes — one state at a time, as that comment
+# requires — while tmux still sees fresh output. tty-only: off a tty the busy
+# line is a plain line and a repeat would stack copies.
+#
+# The nap is a job of the heartbeat's own so that stopping the heartbeat takes
+# the nap down with it instead of leaving a sleep to run out on its own.
+start_heartbeat() {
+    [[ -t 1 ]] || return 0
+    (
+        nap=""
+        trap 'kill "$nap" 2>/dev/null; exit 0' TERM
+        while kill -0 "$turn_pid" 2>/dev/null; do
+            sleep "$HEARTBEAT_SECS" & nap=$!
+            wait "$nap" || break
+            kill -0 "$turn_pid" 2>/dev/null || break
+            printf '\r\033[2K%s' "$BUSY"
+        done
+    ) &
+    heartbeat_pid=$!
+}
+
+# stop_heartbeat runs once the turn is reaped and before its announcement is
+# cleared, so no redraw can land on top of the reply.
+stop_heartbeat() {
+    [[ -z "$heartbeat_pid" ]] && return 0
+    kill "$heartbeat_pid" 2>/dev/null
+    wait "$heartbeat_pid" 2>/dev/null
+    heartbeat_pid=""
+}
+
 cleanup() {
     stop_turn
+    stop_heartbeat
     if [[ -n "$stty_saved" ]]; then stty "$stty_saved" 2>/dev/null || true; fi
     rm -rf "$workdir"
 }
@@ -605,7 +653,8 @@ PY
 #
 # So on a tty the announcement overwrites the marker line in place and is
 # erased when the turn ends, leaving the pane's tail carrying exactly one of
-# the two states at any moment. Off a tty (piped, as in tests) both are plain
+# the two states at any moment; while the turn runs, start_heartbeat redraws
+# that same line in place. Off a tty (piped, as in tests) both are plain
 # lines and ordering carries the same information.
 announce_turn() {
     if [[ -t 1 ]]; then
@@ -642,6 +691,7 @@ run_turn() {
     set +m
 
     announce_turn
+    start_heartbeat
 
     # A trapped signal interrupts wait and yields 128+signo, which is not the
     # child's status. Re-wait until the child is genuinely reaped.
@@ -653,6 +703,7 @@ run_turn() {
         break
     done
     turn_pid=""
+    stop_heartbeat
     clear_turn_announcement
     return "$rc"
 }
