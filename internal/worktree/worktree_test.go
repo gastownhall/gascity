@@ -22,10 +22,16 @@ func runGit(t *testing.T, dir string, args ...string) string {
 }
 
 // initTestRepo creates a git repo with one commit and returns its path and
-// the name of its initial branch.
+// the name of its initial branch. Background maintenance is disabled so no
+// transient object (e.g. objects/maintenance.lock) can appear in the repo
+// during a test — see snapshotTree, which several purity assertions in this
+// package rely on to prove a dry-run touched nothing.
 func initTestRepo(t *testing.T) (string, string) {
 	t.Helper()
-	return testutil.InitGitRepo(t)
+	dir, branch := testutil.InitGitRepo(t)
+	runGit(t, dir, "config", "maintenance.auto", "false")
+	runGit(t, dir, "config", "gc.auto", "0")
+	return dir, branch
 }
 
 func managedSpec(repo, root, path, branch, base string) Spec {
@@ -47,12 +53,23 @@ func managedSpec(repo, root, path, branch, base string) Spec {
 // snapshotTree returns every path under dir, relative and sorted. Unlike
 // snapshotDir it recurses, so it catches a write anywhere in the tree rather
 // than only a new top-level entry.
+//
+// Transient git lock files (*.lock) are excluded: git's own background
+// maintenance can create and remove one (e.g. objects/maintenance.lock)
+// inside the window between a before and after snapshot, independent of
+// anything the code under test did. initTestRepo disables that maintenance
+// so the window should be empty in practice; this filter is the second,
+// belt-and-braces layer in case some other lock-taking git operation runs
+// against the fixture repo.
 func snapshotTree(t *testing.T, dir string) []string {
 	t.Helper()
 	var found []string
-	err := filepath.WalkDir(dir, func(path string, _ fs.DirEntry, err error) error {
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		if !d.IsDir() && strings.HasSuffix(path, ".lock") {
+			return nil
 		}
 		rel, relErr := filepath.Rel(dir, path)
 		if relErr != nil {
@@ -89,6 +106,37 @@ func snapshotDir(t *testing.T, dir string) []string {
 		names = append(names, e.Name())
 	}
 	return names
+}
+
+// TestSnapshotTreeExcludesLockFiles is the #6175 regression: a transient
+// git lock file appearing between a before and after snapshotTree call must
+// not fail a purity assertion, since git's own background maintenance can
+// create and remove one independent of anything the code under test did.
+func TestSnapshotTreeExcludesLockFiles(t *testing.T) {
+	dir := t.TempDir()
+	// objects/ always pre-exists in a real git dir (created by "git init"),
+	// so it belongs in the "before" snapshot too — only the transient lock
+	// file inside it should be filtered, matching the real shape of
+	// objects/maintenance.lock rather than a synthetic new directory.
+	objectsDir := filepath.Join(dir, "objects")
+	if err := os.MkdirAll(objectsDir, 0o755); err != nil {
+		t.Fatalf("mkdir objects: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "durable"), nil, 0o644); err != nil {
+		t.Fatalf("seeding durable file: %v", err)
+	}
+	before := snapshotTree(t, dir)
+
+	lock := filepath.Join(objectsDir, "maintenance.lock")
+	if err := os.WriteFile(lock, nil, 0o644); err != nil {
+		t.Fatalf("seeding lock file: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(lock) })
+
+	after := snapshotTree(t, dir)
+	if strings.Join(after, "\x00") != strings.Join(before, "\x00") {
+		t.Fatalf("snapshotTree observed a transient lock file:\n  before=%v\n  after=%v", before, after)
+	}
 }
 
 func TestVerifyValidWorktree(t *testing.T) {
