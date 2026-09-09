@@ -1324,26 +1324,39 @@ func (c *RigDoltServerCheck) Run(_ *CheckContext) *CheckResult {
 		r.FixHint = "reconcile the canonical external Dolt endpoint"
 		return r
 	}
-	if !explicit {
-		r.Status = StatusOK
-		r.Message = "inherits city dolt endpoint"
-		return r
-	}
-	if target, targetErr := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, c.cityPath, rigPath); targetErr == nil && target.DoltMode == "proxied-server" && target.Host == "" && target.Port == "" && target.Socket == "" {
-		r.Status = StatusOK
-		r.Message = "managed by beads proxied-server provider"
-		return r
-	}
 	target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, c.cityPath, rigPath)
 	if err != nil {
+		if !explicit && contract.IsManagedRuntimeUnavailable(err) {
+			r.Status = StatusOK
+			r.Message = "inherits city dolt endpoint"
+			return r
+		}
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("resolve dolt target: %v", err)
 		r.FixHint = "reconcile the canonical external Dolt endpoint"
 		return r
 	}
+	if strings.EqualFold(target.DoltMode, "proxied-server") && target.External {
+		addr, conn, dialErr := dialDoltTarget(target)
+		if dialErr != nil {
+			r.Status = StatusError
+			r.Message = fmt.Sprintf("dolt server not reachable at %s", addr)
+			r.FixHint = doltServerFixHint(target)
+			return r
+		}
+		conn.Close() //nolint:errcheck // best-effort close
+		r.Status = StatusOK
+		r.Message = fmt.Sprintf("reachable on %s (proxied-server external)", addr)
+		return r
+	}
 	if strings.EqualFold(target.DoltMode, "proxied-server") && !target.External {
 		r.Status = StatusOK
 		r.Message = "not required (bd backend=dolt proxied-server)"
+		return r
+	}
+	if !explicit {
+		r.Status = StatusOK
+		r.Message = "inherits city dolt endpoint"
 		return r
 	}
 	addr, conn, err := dialDoltTarget(target)
