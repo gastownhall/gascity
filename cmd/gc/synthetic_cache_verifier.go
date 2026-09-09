@@ -71,7 +71,10 @@ func newSyntheticCacheVerifier() *syntheticCacheVerifier {
 // One gap remains, and here it is wider than the sibling's rather than equal to
 // it: this fingerprint does not hash ctime, so a content edit that preserves
 // size and mtime (cp -p, rsync --checksum --times) can still ride a stale
-// positive verdict, which #5367 closed for packContentHashCache. Adopting it
+// positive verdict, which #5367 closed for packContentHashCache. Because this
+// memo is process-global, that window is a single command for short-lived `gc`
+// invocations (the memo starts empty) but the full process lifetime inside a
+// long-running supervisor, which calls this boundary directly. Adopting ctime
 // here needs internal/config's statCtimeNanos to be shared rather than
 // duplicated, so it is deliberately left as follow-up work.
 var warmSyntheticCacheVerdicts sync.Map // key(string) -> uint64 fingerprint

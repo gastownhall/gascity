@@ -348,15 +348,16 @@ func TestWarmSyntheticCacheVerifierNoticesAModeChange(t *testing.T) {
 	}
 
 	if newWarmSyntheticCacheVerifier().Valid(cacheDir, builtinpacks.Repository, commit) {
-		t.Errorf("a cache whose %s lost its executable bit reported valid; the stat fingerprint ignores mode, so the ready path would never repair it", filepath.Base(target))
+		t.Errorf("a cache whose %s lost its executable bit reported valid; the stat fingerprint is no longer covering mode, so the ready path would never repair it", filepath.Base(target))
 	}
 }
 
 // TestWarmSyntheticCacheVerifierNoticesAnUnexpectedDirectory pins the second
 // gap. validateSyntheticRepoFileSet rejects any directory outside the layout's
-// allowed set, but the fingerprint walk skips directory entries entirely, so an
-// added directory changes no hashed entry — it contains no files, and a parent
-// directory's own mtime is never hashed. The memo must not outlive it.
+// allowed set, but a fingerprint over files alone would skip directory entries
+// entirely, so an added directory would change no hashed entry — it contains no
+// files, and a parent directory's own mtime is never hashed. This is why the
+// walk hashes directory paths; the memo must not outlive a stray directory.
 func TestWarmSyntheticCacheVerifierNoticesAnUnexpectedDirectory(t *testing.T) {
 	clearGCEnv(t) // isolated GC_HOME, so this cache path is unique to this test
 	source, ok := builtinpacks.Source("core")
@@ -378,6 +379,6 @@ func TestWarmSyntheticCacheVerifierNoticesAnUnexpectedDirectory(t *testing.T) {
 	}
 
 	if newWarmSyntheticCacheVerifier().Valid(cacheDir, builtinpacks.Repository, commit) {
-		t.Error("a cache containing an unexpected directory reported valid; the stat fingerprint skips directories, so the ready path would never repair it")
+		t.Error("a cache containing an unexpected directory reported valid; the stat fingerprint is no longer covering directory entries, so the ready path would never repair it")
 	}
 }
