@@ -94,6 +94,10 @@ type CleanupPurgeReport struct {
 type CleanupReapedReport struct {
 	Count         int   `json:"count"`
 	ProtectedPIDs []int `json:"protected_pids"`
+	// Protected carries a per-PID protect reason alongside ProtectedPIDs.
+	// Additive field: ProtectedPIDs stays for backward compatibility and
+	// gc.dolt.cleanup.v1 is not bumped (ga-sm1cvj).
+	Protected []CleanupProtectedPID `json:"protected"`
 	// VanishedPIDs records reap targets missing before any signal was sent.
 	// Post-SIGTERM disappearance is counted as a successful reap because this
 	// process sent the termination signal and the process exited before SIGKILL.
@@ -119,6 +123,17 @@ type CleanupReapTarget struct {
 	ConfigPath string `json:"config_path"`
 	Reason     string `json:"reason,omitempty"`
 	DataDir    string `json:"data_dir,omitempty"`
+}
+
+// CleanupProtectedPID is a single PID the reaper refused to kill, with the
+// reason recorded so both the JSON report and the human-readable summary can
+// show operators why nothing was done (ga-sm1cvj). ContainerRuntime mirrors
+// ProtectedProcess.ContainerRuntime and is empty unless the process was
+// protected for being a container-managed dolt server.
+type CleanupProtectedPID struct {
+	PID              int    `json:"pid"`
+	Reason           string `json:"reason"`
+	ContainerRuntime string `json:"container_runtime,omitempty"`
 }
 
 // CleanupSummary aggregates totals across the three steps.
@@ -167,6 +182,9 @@ func (r CleanupReport) MarshalJSON() ([]byte, error) {
 	}
 	if r.Reaped.ProtectedPIDs == nil {
 		r.Reaped.ProtectedPIDs = []int{}
+	}
+	if r.Reaped.Protected == nil {
+		r.Reaped.Protected = []CleanupProtectedPID{}
 	}
 	if r.Reaped.VanishedPIDs == nil {
 		r.Reaped.VanishedPIDs = []int{}
@@ -389,8 +407,10 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 	plan := planOrphanReap(procs, rigPorts, opts.HomeDir, tempDir, activeTestRoots)
 
 	report.Reaped.ProtectedPIDs = nil
+	report.Reaped.Protected = nil
 	for _, p := range plan.Protected {
 		report.Reaped.ProtectedPIDs = append(report.Reaped.ProtectedPIDs, p.PID)
+		report.Reaped.Protected = append(report.Reaped.Protected, CleanupProtectedPID(p))
 	}
 	report.Reaped.Targets = nil
 	for _, t := range plan.Reap {
@@ -519,7 +539,7 @@ func revalidateReapTarget(report *CleanupReport, discover func() ([]DoltProcInfo
 		}
 		recheck := classifyDoltProcess(proc, rigPorts, homeDir, tempDir, activeTestRoots)
 		if recheck.Action != "reap" || recheck.ConfigPath != target.ConfigPath || !sameReapProcessIdentity(target, proc) {
-			appendProtectedPID(report, target.PID)
+			appendProtectedPID(report, target.PID, recheck.Reason, proc.ContainerRuntime)
 			return reapRevalidationProtected
 		}
 		return reapRevalidationEligible
@@ -582,13 +602,18 @@ func isRigPortFileSource(source string) bool {
 	return filepath.Base(source) == "dolt-server.port" && filepath.Base(filepath.Dir(source)) == ".beads"
 }
 
-func appendProtectedPID(report *CleanupReport, pid int) {
+func appendProtectedPID(report *CleanupReport, pid int, reason, containerRuntime string) {
 	for _, existing := range report.Reaped.ProtectedPIDs {
 		if existing == pid {
 			return
 		}
 	}
 	report.Reaped.ProtectedPIDs = append(report.Reaped.ProtectedPIDs, pid)
+	report.Reaped.Protected = append(report.Reaped.Protected, CleanupProtectedPID{
+		PID:              pid,
+		Reason:           reason,
+		ContainerRuntime: containerRuntime,
+	})
 }
 
 func appendVanishedPID(report *CleanupReport, pid int) {
@@ -739,8 +764,22 @@ func emitProtectedSection(report CleanupReport, stdout io.Writer) {
 		fmt.Fprintf(stdout, "  rig %q → DB %q\n", rp.Rig, rp.DB) //nolint:errcheck
 	}
 	for _, pid := range report.Reaped.ProtectedPIDs {
-		fmt.Fprintf(stdout, "  PID %d (active server or non-test path)\n", pid) //nolint:errcheck
+		fmt.Fprintf(stdout, "  PID %d (%s)\n", pid, protectedPIDReason(report, pid)) //nolint:errcheck
 	}
+}
+
+// protectedPIDReason looks up pid's recorded protect reason in
+// report.Reaped.Protected. Falls back to the pre-ga-sm1cvj generic message
+// when no matching non-empty Reason is found (e.g. a classification with an
+// intentionally empty Reason, such as the classic test-config-path allowlist
+// reap's sibling protect case).
+func protectedPIDReason(report CleanupReport, pid int) string {
+	for _, p := range report.Reaped.Protected {
+		if p.PID == pid && p.Reason != "" {
+			return p.Reason
+		}
+	}
+	return "active server or non-test path"
 }
 
 func emitForceBlockersSection(report CleanupReport, stdout io.Writer) {
@@ -882,7 +921,8 @@ always protected, and any process whose state cannot be determined degrades to
 protected. A dolt sql-server is reaped only when its scope is provably gone —
 its working directory is an unlinked inode (the kernel "(deleted)" cwd marker),
 or its --config path is on the test-config-path allowlist (/tmp/Test*,
-os.TempDir()/Test*, known Gas City test prefixes, ~/.gotmp/Test*). A server
+os.TempDir()/Test*, known Gas City test prefixes, ~/.gotmp/Test*,
+/var/tmp/gotmp/Test*, $GOTMPDIR/Test*). A server
 whose --config has merely vanished while its working directory is still live is
 protected, not reaped, until an operator confirms; a lone missing-config
 observation is not proof of scope deletion. See the PROTECTED section of the

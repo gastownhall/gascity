@@ -717,9 +717,13 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			})
 			if err != nil {
 				if m.gateFailClosed(ctx, a, scoped, err) {
-					if errors.Is(err, errGateTimeout) {
-						// Anchor to actual wall clock after the gate consumed orderGateTimeout;
-						// using the tick-start 'now' would set a deadline that has already passed.
+					if isGateContentionTimeout(err) {
+						// Anchor to actual wall clock after the gate consumed its time
+						// budget (the per-order bound OR the underlying store query
+						// timing out, vp-gprv); using the tick-start 'now' would set a
+						// deadline that has already passed. Backing off on the store-query
+						// timeout too keeps a non-idempotent order from re-hammering a
+						// contended Dolt every tick (#3688 #3770).
 						m.setGateBackoff(scoped, time.Now().Add(orderGateBackoffDuration))
 					}
 					continue
@@ -867,9 +871,13 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			})
 			if err != nil {
 				if m.gateFailClosed(ctx, a, scoped, err) {
-					if errors.Is(err, errGateTimeout) {
-						// Anchor to actual wall clock after the gate consumed orderGateTimeout;
-						// using the tick-start 'now' would set a deadline that has already passed.
+					if isGateContentionTimeout(err) {
+						// Anchor to actual wall clock after the gate consumed its time
+						// budget (the per-order bound OR the underlying store query
+						// timing out, vp-gprv); using the tick-start 'now' would set a
+						// deadline that has already passed. Backing off on the store-query
+						// timeout too keeps a non-idempotent order from re-hammering a
+						// contended Dolt every tick (#3688 #3770).
 						m.setGateBackoff(scoped, time.Now().Add(orderGateBackoffDuration))
 					}
 					continue
@@ -1844,12 +1852,51 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 	})
 }
 
-func prepareOrderWispRecipe(ctx context.Context, store beads.Store, a orders.Order, searchPaths []string, vars map[string]string) (*formula.Recipe, error) {
+// prepareOrderWispRecipe compiles an order's formula into a recipe and returns
+// the resolved invocation vars alongside it. The caller must thread those vars
+// into molecule.Instantiate; without them every {{var}} referencing a
+// caller-supplied value renders empty on the instantiated beads (#4668).
+func prepareOrderWispRecipe(ctx context.Context, store beads.Store, a orders.Order, searchPaths []string, vars map[string]string) (*formula.Recipe, map[string]string, error) {
 	inv, err := graphv2.PrepareInvocation(ctx, store, a.Formula, searchPaths, "", vars)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return formula.CompileWithoutRuntimeVarValidation(ctx, a.Formula, searchPaths, inv.Vars)
+	recipe, err := formula.CompileWithoutRuntimeVarValidation(ctx, a.Formula, searchPaths, inv.Vars)
+	if err != nil {
+		return nil, nil, err
+	}
+	return recipe, inv.Vars, nil
+}
+
+// stampOrderWispRuntimeVars records the resolved runtime vars on a graph.v2
+// order wisp root (and any drain steps) so downstream fan-out recovers the
+// caller-supplied values, mirroring the sling path's runtime-vars stamp. It
+// deliberately omits the input-convoy and root-key identity metadata that the
+// cook/sling stamps also write: order dispatch does not dedup wisps by root
+// key, and stamping one would suppress legitimate repeat runs of a scheduled
+// or event order. No-op for non-graph recipes or when no vars are supplied.
+func stampOrderWispRuntimeVars(recipe *formula.Recipe, vars map[string]string) {
+	if recipe == nil || len(recipe.Steps) == 0 || !graphroute.IsCompiledGraphWorkflow(recipe) {
+		return
+	}
+	runtimeVars := graphv2.RuntimeVarsMetadata(vars)
+	if runtimeVars == "" {
+		return
+	}
+	root := &recipe.Steps[0]
+	if root.Metadata == nil {
+		root.Metadata = make(map[string]string)
+	}
+	root.Metadata[graphv2.RuntimeVarsMetadataKey] = runtimeVars
+	for i := range recipe.Steps {
+		if recipe.Steps[i].Metadata[beadmeta.KindMetadataKey] != beadmeta.KindDrain {
+			continue
+		}
+		if recipe.Steps[i].Metadata == nil {
+			recipe.Steps[i].Metadata = make(map[string]string)
+		}
+		recipe.Steps[i].Metadata[graphv2.RuntimeVarsMetadataKey] = runtimeVars
+	}
 }
 
 func poolOrderRouteVisibilityWarning(a orders.Order, recipe *formula.Recipe) string {
@@ -2131,7 +2178,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 	if a.FormulaLayer != "" {
 		searchPaths = []string{a.FormulaLayer}
 	}
-	recipe, err := prepareOrderWispRecipe(ctx, store, a, searchPaths, vars)
+	recipe, effectiveVars, err := prepareOrderWispRecipe(ctx, store, a, searchPaths, vars)
 	if err != nil {
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
@@ -2142,12 +2189,13 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
 		return
 	}
-	// Same fix as `gc order run` (cmd_order.go): validate against the supplied vars.
-	// An empty Options drops them and reports every required var as missing. On this
-	// path that is worse than on the manual one — the controller fires unattended, so
-	// a cooldown/cron order using a required var would fail on every tick with nobody
-	// reading the order.failed events.
-	if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{Vars: vars}); err != nil {
+	// Same fix as `gc order run` (cmd_order.go): validate against the resolved
+	// invocation vars (declared defaults applied), not the caller's raw --var
+	// map. An empty Options drops them and reports every required var as
+	// missing. On this path that is worse than on the manual one — the
+	// controller fires unattended, so a cooldown/cron order using a required
+	// var would fail on every tick with nobody reading the order.failed events.
+	if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{Vars: effectiveVars}); err != nil {
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
 			Actor:   "controller",
@@ -2213,7 +2261,14 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		return
 	}
 
-	cookResult, err := molecule.Instantiate(ctx, graphStore, recipe, molecule.Options{})
+	// Same fix as `gc order run` (cmd_order.go): thread the resolved
+	// invocation vars used for validation above into instantiation. An empty
+	// Options here falls back to formula defaults only, so every {{var}}
+	// referencing a caller-supplied value renders empty (or its default) on
+	// the created bead text instead of the caller's value (#4668).
+	stampOrderWispRuntimeVars(recipe, effectiveVars)
+
+	cookResult, err := molecule.Instantiate(ctx, graphStore, recipe, molecule.Options{Vars: effectiveVars})
 	if err != nil {
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
@@ -2697,20 +2752,38 @@ func gateOpenWorkBounded(ctx context.Context, timeout time.Duration, scoped stri
 	}
 }
 
+// isGateContentionTimeout reports whether a gate error is a store-contention
+// timeout that is safe to relax for idempotent orders. Two layers produce it:
+// the per-order gate bound elapsing (errGateTimeout, #2893) and the underlying
+// store/bd query itself timing out (beads.IsTimeoutError — e.g. the wisp-tier
+// "bd list both tiers: bd query: timed out after 30s", vp-gprv). Both mean the
+// gate could not complete because the store ran out of time, not because it
+// read a definitive answer or hit a genuine failure. A canceled dispatch
+// context and a real store-read error (parse/connection/"read failed") are NOT
+// contention timeouts.
+func isGateContentionTimeout(err error) bool {
+	return errors.Is(err, errGateTimeout) || beads.IsTimeoutError(err)
+}
+
 // gateFailClosed decides whether an open-work gate error must block dispatch of
 // this order, and logs the error. The blanket "skip on any gate error" was
-// wrong: idempotent sweep orders (feeders, nudger, route-reclaim) are safe to
-// double-dispatch, so a gate that times out under store contention must not
-// starve them forever (#2893 #2'). Policy:
+// wrong: idempotent sweep orders (feeders, nudger, route-reclaim, the
+// code-review-gate) are safe to double-dispatch, so a gate that times out under
+// store contention must not starve them forever (#2893 #2', vp-gprv). Policy:
 //   - dispatch context done (shutdown / tick deadline): always block — there is
 //     no point dispatching into a canceled context.
-//   - a per-order gate TIMEOUT (errGateTimeout): a non-idempotent order fails
-//     CLOSED (block, preserving single-flight); an idempotent order fails OPEN
-//     (dispatch anyway), since its re-run is a no-op.
+//   - a gate contention TIMEOUT (the per-order bound errGateTimeout OR the
+//     underlying store/bd query timing out, isGateContentionTimeout): a
+//     non-idempotent order fails CLOSED (block, preserving single-flight); an
+//     idempotent order fails OPEN (dispatch anyway), since its re-run is a
+//     no-op. The store-query timeout is folded in here because it is the same
+//     contention signal as the bound — before vp-gprv it reached this function
+//     as a raw store error and blocked even idempotent orders, starving
+//     code-review-gate fleet-wide whenever the wisp query timed out.
 //   - any other gate error (e.g. a genuine store-read failure): always block.
-//     Only the bounded-gate timeout is the #2893 contention signal that is
-//     safe to relax; a real store/gate error is a different signal where the
-//     conservative response is to fail CLOSED, matching the pre-#2893 behavior.
+//     Only a contention timeout is safe to relax; a real store/gate error is a
+//     different signal where the conservative response is to fail CLOSED,
+//     matching the pre-#2893 behavior.
 //
 // Failing open deliberately relaxes single-flight for idempotent orders: it may
 // dispatch while a prior run is still in flight. That is safe by the
@@ -2725,8 +2798,8 @@ func (m *memoryOrderDispatcher) gateFailClosed(ctx context.Context, a orders.Ord
 	if ctx.Err() != nil {
 		return true
 	}
-	if a.Idempotent && errors.Is(err, errGateTimeout) {
-		logDispatchError(m.stderr, "gc: order dispatch: %s open-work gate failed but order is idempotent; dispatching anyway (#2893)", scoped)
+	if a.Idempotent && isGateContentionTimeout(err) {
+		logDispatchError(m.stderr, "gc: order dispatch: %s open-work gate timed out but order is idempotent; dispatching anyway (#2893, vp-gprv)", scoped)
 		return false
 	}
 	return true

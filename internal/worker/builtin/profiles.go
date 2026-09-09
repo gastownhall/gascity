@@ -224,7 +224,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		TitleModel:        "o4-mini",
 		PermissionModes: map[string]string{
 			"suggest":      "--ask-for-approval untrusted --sandbox read-only",
-			"auto-edit":    "--full-auto",
+			"auto-edit":    "--sandbox workspace-write --ask-for-approval never",
 			"unrestricted": "--dangerously-bypass-approvals-and-sandbox",
 		},
 		OptionsSchema: []BuiltinProviderOption{
@@ -235,7 +235,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				Default: "unrestricted",
 				Choices: []BuiltinOptionChoice{
 					{Value: "suggest", Label: "Suggest (ask for approval)", FlagArgs: []string{"--ask-for-approval", "untrusted", "--sandbox", "read-only"}},
-					{Value: "auto-edit", Label: "Full auto (sandboxed)", FlagArgs: []string{"--full-auto"}},
+					{Value: "auto-edit", Label: "Full auto (sandboxed)", FlagArgs: []string{"--sandbox", "workspace-write", "--ask-for-approval", "never"}},
 					{Value: "unrestricted", Label: "Bypass all (no sandbox)", FlagArgs: []string{"--dangerously-bypass-approvals-and-sandbox"}},
 				},
 			},
@@ -465,7 +465,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		// Cursor: CURSOR_API_KEY for headless (login is the default). Serving is
 		// Cursor's own backend — no base-URL override env.
 		UpstreamAPIKeyEnv: "CURSOR_API_KEY",
-		Args:              []string{"-f"},
+		Args:              []string{"-f", "--trust"},
 		PromptMode:        "arg",
 		ReadyPromptPrefix: "\u2192 ",
 		ReadyDelayMs:      10000,
@@ -868,6 +868,8 @@ func CanonicalProfileIdentity(profile string) (ProfileIdentity, bool) {
 		return newProfileIdentity(profile, "claude"), true
 	case "codex/tmux-cli":
 		return newProfileIdentity(profile, "codex"), true
+	case "cursor/tmux-cli":
+		return newProfileIdentity(profile, "cursor"), true
 	case "gemini/tmux-cli":
 		return newProfileIdentity(profile, "gemini"), true
 	case "kimi/tmux-cli":

@@ -148,9 +148,11 @@ var beadEventWatcherRetryDelay = time.Second
 
 // newControllerStateOpenCityStore opens the city-level bead store for
 // newControllerState. Test code can swap this to return an in-memory store
-// and skip spawning managed dolt (~12s per call).
+// and skip spawning managed dolt (~12s per call). The store is long-lived —
+// the controller holds it for the process lifetime — so it keeps the beads
+// library's daemon-sized project pool rather than the one-shot CLI cap.
 var newControllerStateOpenCityStore = func(cityPath string, mode gate.Mode) (beads.StoreOpenResult, error) {
-	return openStoreResultAtForCityWithMode(cityPath, cityPath, mode, true)
+	return openStoreResultAtForCityWithMode(cityPath, cityPath, mode, true, true)
 }
 
 // controllerStateOpenRigStoreAtForCity routes controller rig stores through

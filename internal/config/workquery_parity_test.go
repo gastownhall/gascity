@@ -32,15 +32,22 @@ func oldEffectiveWorkQuery(a *Agent, topo QueryTopology) string {
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
 		script := standardAssignedWorkQueryScript(topo) +
-			poolDemandOriginGateScript() +
+			poolDemandOriginGateScriptWithGraphAnchorFallback() +
 			poolDemandFirstRowFunctionScript(topo) +
+			assignedGraphWorkflowAnchorReadyFunctionScript(topo) +
+			`probe_assigned_graph_anchor_ready "$1"; ` +
+			graphWorkflowAnchorFallbackBeforeFreshPoolScript() +
 			`probe_pool_demand "$1"; ` +
 			`printf "[]"`
 		return shellquote.Join([]string{"sh", "-c", script, "--", target})
 	}
 	script := legacyControlAssignedWorkQueryScript(topo) +
-		poolDemandOriginGateScript() +
+		poolDemandOriginGateScriptWithGraphAnchorFallback() +
 		poolDemandFirstRowFunctionScript(topo) +
+		assignedGraphWorkflowAnchorReadyFunctionScript(topo) +
+		`probe_assigned_graph_anchor_ready "$1"; ` +
+		`probe_assigned_graph_anchor_ready "$2"; ` +
+		graphWorkflowAnchorFallbackBeforeFreshPoolScript() +
 		`probe_pool_demand "$1"; ` +
 		`probe_pool_demand "$2"; ` +
 		`printf "[]"`
@@ -375,10 +382,16 @@ func renormalizeFederatedCommand(federated string) string {
 	federated = replaceFragment(federated,
 		inProgressBlockedByEnrichmentScript(true, true),
 		inProgressBlockedByEnrichmentScript(false, true))
+	federated = replaceFragment(federated,
+		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(true, true),
+		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(false, true))
 	for _, shellVar := range []string{"id", "cand"} {
 		federated = replaceFragment(federated,
 			assignedInProgressTierCommand(shellVar, QueryTopology{FederatedReady: true}),
 			assignedInProgressTierCommand(shellVar, QueryTopology{}))
+		federated = replaceFragment(federated,
+			assignedInProgressCandidatesTierCommand(shellVar, QueryTopology{FederatedReady: true}),
+			assignedInProgressCandidatesTierCommand(shellVar, QueryTopology{}))
 	}
 	federated = strings.ReplaceAll(federated, gcReadyCommand, bdReadyCommand)
 	federated = strings.ReplaceAll(federated, `--json --limit=1) || exit $?`, `--json --limit=1 2>/dev/null)`)

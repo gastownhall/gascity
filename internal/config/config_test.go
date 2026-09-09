@@ -4769,6 +4769,30 @@ func TestValidateRigs_Empty(t *testing.T) {
 	}
 }
 
+// TestValidateRigs_DefaultBranchCharset pins the conservative alphabet for
+// default_branch: the value is interpolated into formula variables and
+// pre_start shell lines (GC_DEFAULT_BRANCH='{{.DefaultBranch}}'), so quotes
+// and shell metacharacters — legal in git ref names — are refused at config
+// validation instead of silently breaking every pre_start of the rig's agents.
+func TestValidateRigs_DefaultBranchCharset(t *testing.T) {
+	for _, branch := range []string{"main", "release/v2.1", "user@feature", "wip+x", "a=b"} {
+		rigs := []Rig{{Name: "frontend", Path: "/home/user/frontend", DefaultBranch: branch}}
+		if err := ValidateRigs(rigs, "mc"); err != nil {
+			t.Errorf("ValidateRigs(default_branch=%q): unexpected error: %v", branch, err)
+		}
+	}
+	for _, branch := range []string{"release'2026", `say"hi`, "a b", "x;rm", "$(cmd)", "back`tick"} {
+		rigs := []Rig{{Name: "frontend", Path: "/home/user/frontend", DefaultBranch: branch}}
+		err := ValidateRigs(rigs, "mc")
+		if err == nil {
+			t.Fatalf("ValidateRigs(default_branch=%q): expected shell-unsafe error", branch)
+		}
+		if !strings.Contains(err.Error(), "default_branch") {
+			t.Errorf("error = %q, want mention of default_branch", err)
+		}
+	}
+}
+
 func TestValidateRigs_MissingName(t *testing.T) {
 	rigs := []Rig{{Path: "/path"}}
 	err := ValidateRigs(rigs, "ci")

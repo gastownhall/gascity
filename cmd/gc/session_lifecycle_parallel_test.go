@@ -797,6 +797,226 @@ func TestPrepareStartCandidate_UsesSessionIDForTaskWorkDir(t *testing.T) {
 	}
 }
 
+// TestPrepareStartCandidate_StampOnlyWorkDirDoesNotOverrideSessionID is the
+// integration-level regression for the gc.work_dir feedback loop: gc.work_dir
+// is an observability stamp reconciliation mirrors from observed cwd, not
+// launch authority. A task bead assigned to the session ID that carries ONLY
+// gc.work_dir (no legacy work_dir) must not redirect the session away from
+// its own configured work dir.
+func TestPrepareStartCandidate_StampOnlyWorkDirDoesNotOverrideSessionID(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionWorkDir := t.TempDir()
+	stampedWorkDir := t.TempDir()
+	session, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:frontend/worker-1"},
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "custom-worker-1",
+			"pool_slot":    "1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := store.Create(beads.Bead{
+		Title: "task",
+		Metadata: map[string]string{
+			beadmeta.WorkDirMetadataKey: stampedWorkDir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := "in_progress"
+	assignee := session.ID
+	if err := store.Update(task.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatal(err)
+	}
+
+	prepared, err := prepareStartCandidate(startCandidate{
+		info: sessiontest.SeedBead(t, session),
+		tp: TemplateParams{
+			TemplateName: "frontend/worker",
+			SessionName:  "custom-worker-1",
+			WorkDir:      sessionWorkDir,
+		},
+		order: 0,
+	}, &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2)},
+		},
+	}, store, &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatalf("prepareStartCandidate: %v", err)
+	}
+	if prepared.cfg.WorkDir != sessionWorkDir {
+		t.Fatalf("prepared.cfg.WorkDir = %q, want session work dir %q (must not follow gc.work_dir-only stamp %q)", prepared.cfg.WorkDir, sessionWorkDir, stampedWorkDir)
+	}
+}
+
+// TestPrepareStartCandidate_StampOnlyWorkDirDoesNotOverrideRoleName is the
+// same regression as TestPrepareStartCandidate_StampOnlyWorkDirDoesNotOverrideSessionID,
+// but the stamped task bead is assigned to the bare logical template (role)
+// name instead of the session ID. Fleet bd identity is role-level, so this
+// covers the scope-widener path in taskWorkDirAssignees: an in_progress bead
+// assigned to any session of the role must not be able to redirect this
+// session's cwd via an observability-only stamp either.
+func TestPrepareStartCandidate_StampOnlyWorkDirDoesNotOverrideRoleName(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionWorkDir := t.TempDir()
+	stampedWorkDir := t.TempDir()
+	session, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:frontend/worker-1"},
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "custom-worker-1",
+			"pool_slot":    "1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := store.Create(beads.Bead{
+		Title: "task",
+		Metadata: map[string]string{
+			beadmeta.WorkDirMetadataKey: stampedWorkDir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := "in_progress"
+	assignee := "frontend/worker"
+	if err := store.Update(task.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatal(err)
+	}
+
+	prepared, err := prepareStartCandidate(startCandidate{
+		info: sessiontest.SeedBead(t, session),
+		tp: TemplateParams{
+			TemplateName: "frontend/worker",
+			SessionName:  "custom-worker-1",
+			WorkDir:      sessionWorkDir,
+		},
+		order: 0,
+	}, &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2)},
+		},
+	}, store, &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatalf("prepareStartCandidate: %v", err)
+	}
+	if prepared.cfg.WorkDir != sessionWorkDir {
+		t.Fatalf("prepared.cfg.WorkDir = %q, want session work dir %q (must not follow gc.work_dir-only stamp %q via role-name assignment)", prepared.cfg.WorkDir, sessionWorkDir, stampedWorkDir)
+	}
+}
+
+// TestPrepareStartCandidate_NoAssignedTaskKeepsSessionWorkDir is the no-task
+// control for the two StampOnlyWorkDir tests above: with no assigned
+// in_progress bead at all, the session's own configured work dir must win.
+// This proves the session's dir was genuinely set and would have been lost
+// to a real redirect, not just left untouched by an inert test setup.
+func TestPrepareStartCandidate_NoAssignedTaskKeepsSessionWorkDir(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionWorkDir := t.TempDir()
+	session, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:frontend/worker-1"},
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "custom-worker-1",
+			"pool_slot":    "1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prepared, err := prepareStartCandidate(startCandidate{
+		info: sessiontest.SeedBead(t, session),
+		tp: TemplateParams{
+			TemplateName: "frontend/worker",
+			SessionName:  "custom-worker-1",
+			WorkDir:      sessionWorkDir,
+		},
+		order: 0,
+	}, &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2)},
+		},
+	}, store, &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatalf("prepareStartCandidate: %v", err)
+	}
+	if prepared.cfg.WorkDir != sessionWorkDir {
+		t.Fatalf("prepared.cfg.WorkDir = %q, want session work dir %q", prepared.cfg.WorkDir, sessionWorkDir)
+	}
+}
+
+// TestPrepareStartCandidate_NonexistentStampedWorkDirKeepsSessionWorkDir is
+// the nonexistent-stamp control: a gc.work_dir stamp naming a directory that
+// does not exist on disk must not redirect the session either. The resolver
+// stats the path, so only existing directories are even eligible to
+// redirect — this proves that guard still holds after the fix.
+func TestPrepareStartCandidate_NonexistentStampedWorkDirKeepsSessionWorkDir(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionWorkDir := t.TempDir()
+	missingWorkDir := filepath.Join(t.TempDir(), "does-not-exist")
+	session, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:frontend/worker-1"},
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "custom-worker-1",
+			"pool_slot":    "1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := store.Create(beads.Bead{
+		Title: "task",
+		Metadata: map[string]string{
+			beadmeta.WorkDirMetadataKey: missingWorkDir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := "in_progress"
+	assignee := session.ID
+	if err := store.Update(task.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatal(err)
+	}
+
+	prepared, err := prepareStartCandidate(startCandidate{
+		info: sessiontest.SeedBead(t, session),
+		tp: TemplateParams{
+			TemplateName: "frontend/worker",
+			SessionName:  "custom-worker-1",
+			WorkDir:      sessionWorkDir,
+		},
+		order: 0,
+	}, &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2)},
+		},
+	}, store, &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatalf("prepareStartCandidate: %v", err)
+	}
+	if prepared.cfg.WorkDir != sessionWorkDir {
+		t.Fatalf("prepared.cfg.WorkDir = %q, want session work dir %q (nonexistent stamp %q must not resolve)", prepared.cfg.WorkDir, sessionWorkDir, missingWorkDir)
+	}
+}
+
 func TestPrepareStartCandidate_UsesTriggerBeadWorkDirBeforeClaim(t *testing.T) {
 	store := beads.NewMemStore()
 	sourceWorkDir := t.TempDir()

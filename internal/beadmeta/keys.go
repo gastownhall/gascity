@@ -39,18 +39,24 @@ const Namespace = "gc."
 // cmd/. Keep this block sorted by identifier; the Go compiler rejects duplicate
 // identifiers, giving us a free compile-time uniqueness guarantee.
 const (
-	AttemptLogMetadataKey      = "gc.attempt_log"
-	AttemptMetadataKey         = "gc.attempt"
-	BondMetadataKey            = "gc.bond"
-	BondVarsMetadataKey        = "gc.bond_vars"
-	BoundStepIDMetadataKey     = "gc.bound_step_id"
-	BrainParentSIDMetadataKey  = "gc.brain_parent_sid"
-	CancelRequestedMetadataKey = "gc.cancel_requested"
-	CheckInfraRetryMetadataKey = "gc.check_infra_retry"
-	CheckModeMetadataKey       = "gc.check_mode"
-	CheckPathMetadataKey       = "gc.check_path"
-	CheckTimeoutMetadataKey    = "gc.check_timeout"
-	CityPathMetadataKey        = "gc.city_path"
+	AttemptLogMetadataKey     = "gc.attempt_log"
+	AttemptMetadataKey        = "gc.attempt"
+	BondMetadataKey           = "gc.bond"
+	BondVarsMetadataKey       = "gc.bond_vars"
+	BoundStepIDMetadataKey    = "gc.bound_step_id"
+	BrainParentSIDMetadataKey = "gc.brain_parent_sid"
+	// BudgetDeferredUntilMetadataKey holds an RFC3339 timestamp stamped by the
+	// sling boundary (host/bin/gc in the outer city repo) when a claim attempt
+	// is refused for build-budget reasons; deacon-dispatch.sh clears it on
+	// successful dispatch. `gc hook --claim` must not hand out a candidate
+	// while this timestamp is still in the future. See gm-o45y5y.
+	BudgetDeferredUntilMetadataKey = "gc.budget_deferred_until"
+	CancelRequestedMetadataKey     = "gc.cancel_requested"
+	CheckInfraRetryMetadataKey     = "gc.check_infra_retry"
+	CheckModeMetadataKey           = "gc.check_mode"
+	CheckPathMetadataKey           = "gc.check_path"
+	CheckTimeoutMetadataKey        = "gc.check_timeout"
+	CityPathMetadataKey            = "gc.city_path"
 	// ClaimedAtMetadataKey records the RFC3339 UTC instant a bead was first
 	// claimed through `gc hook --claim`. It is write-once: the claim hook
 	// stamps it only when absent from the bead's current metadata and never
@@ -58,7 +64,20 @@ const (
 	// keys in this same claim-time patch (see hookClaimIdentityPatch in
 	// cmd/gc/cmd_hook_claim.go). Feeds the created→claimed and
 	// claimed→started latency-watch transitions (OBS-001).
-	ClaimedAtMetadataKey                 = "gc.claimed_at"
+	ClaimedAtMetadataKey = "gc.claimed_at"
+	// ClaimGenerationMetadataKey is the scheduler-owned generation-fencing
+	// token for molecule.ClaimExact. It is a counter fenced through
+	// beads.ConditionalWriter.UpdateIfMatch on the bead's revision (distinct
+	// from gc.claimed_at's write-once and gc.control_epoch's
+	// compare-and-overwrite mechanisms): a caller reads the current value,
+	// computes the next generation, and applies a single UpdateIfMatch call
+	// that advances this key AND commits the claim's effects (assignee,
+	// status, session identity) together in one atomic, revision-fenced
+	// write. A stale or racing claimant loses that write outright
+	// (*beads.PreconditionFailedError) with no fallback and no partial
+	// effect ever lands. See molecule.ClaimExact's doc for the exact
+	// guarantee this does and does not provide.
+	ClaimGenerationMetadataKey           = "gc.claim_generation"
 	ClosedByAttemptMetadataKey           = "gc.closed_by_attempt"
 	ContinuationGroupMetadataKey         = "gc.continuation_group"
 	ControlDispatcherFallbackMetadataKey = "gc.control_dispatcher_fallback"
@@ -136,6 +155,7 @@ const (
 	FanoutModeMetadataKey                = "gc.fanout_mode"
 	FanoutStateMetadataKey               = "gc.fanout_state"
 	FinalDispositionMetadataKey          = "gc.final_disposition"
+	FinalizerBeadIDMetadataKey           = "gc.finalizer_bead_id"
 	ForEachMetadataKey                   = "gc.for_each"
 	FormulaMetadataKey                   = "gc.formula"
 	FormulaContractMetadataKey           = "gc.formula_contract"
@@ -194,6 +214,8 @@ const (
 	RetryStateMetadataKey               = "gc.retry_state"
 	RigRootMetadataKey                  = "gc.rig_root"
 	RootBeadIDMetadataKey               = "gc.root_bead_id"
+	RootSettleFailedAtMetadataKey       = "gc.root_settle_failed_at"
+	RootSettleFailedMetadataKey         = "gc.root_settle_failed"
 	RootStoreRefMetadataKey             = "gc.root_store_ref"
 	RouteQuarantineMetadataKey          = "gc.route_recovery_quarantined"
 	RouteQuarantineReasonMetadataKey    = "gc.route_recovery_quarantine_reason"
@@ -383,6 +405,7 @@ var KnownMetadataKeys = []string{
 	BondVarsMetadataKey,
 	BoundStepIDMetadataKey,
 	BrainParentSIDMetadataKey,
+	BudgetDeferredUntilMetadataKey,
 	CancelRequestedMetadataKey,
 	CheckInfraRetryMetadataKey,
 	CheckModeMetadataKey,
@@ -390,6 +413,7 @@ var KnownMetadataKeys = []string{
 	CheckTimeoutMetadataKey,
 	CityPathMetadataKey,
 	ClaimedAtMetadataKey,
+	ClaimGenerationMetadataKey,
 	ClosedByAttemptMetadataKey,
 	ContinuationGroupMetadataKey,
 	ControlEpochMetadataKey,
@@ -442,6 +466,7 @@ var KnownMetadataKeys = []string{
 	FanoutModeMetadataKey,
 	FanoutStateMetadataKey,
 	FinalDispositionMetadataKey,
+	FinalizerBeadIDMetadataKey,
 	ForEachMetadataKey,
 	FormulaMetadataKey,
 	FormulaContractMetadataKey,
@@ -491,6 +516,8 @@ var KnownMetadataKeys = []string{
 	RetryStateMetadataKey,
 	RigRootMetadataKey,
 	RootBeadIDMetadataKey,
+	RootSettleFailedAtMetadataKey,
+	RootSettleFailedMetadataKey,
 	RootStoreRefMetadataKey,
 	RouteQuarantineMetadataKey,
 	RouteQuarantineReasonMetadataKey,

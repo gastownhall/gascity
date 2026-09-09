@@ -196,6 +196,22 @@ func releaseOrphanedPoolAssignments(
 		log.Printf("releaseOrphanedPoolAssignments: assigned work/store-ref length mismatch: work=%d storeRefs=%d", len(assignedWorkBeads), len(assignedWorkStoreRefs))
 	}
 
+	// The live gc:session listing inside liveOpenSessionAssignmentExists carries
+	// no assignee filter — it lists every session bead in the store and compares
+	// identities in Go — so its answer depends only on (store, assignee), and it
+	// cannot change while this sweep runs: the sweep writes WORK beads, never
+	// session beads. Memoize it per store so the cost is O(distinct assignees)
+	// live round-trips instead of O(assigned work beads).
+	//
+	// MEASURED on gc-management 2026-09-05 (ga-451jnv): 68-69 assigned work beads
+	// across 18 distinct assignees re-issued this listing once per bead per store,
+	// costing 645-725s per reconcile tick against a 30s patrol interval — and
+	// releasing 0 beads on every one of those ticks. buildDesiredState runs once
+	// per tick, so that phase alone bounded on-demand named-session wake latency
+	// at ~14 minutes.
+	sessionStoreLiveAssignee := make(map[string]bool, len(assignedWorkBeads))
+	ownerStoreLiveAssignee := make(map[string]bool, len(assignedWorkBeads))
+
 	openIdentifiers := makeOpenSessionStoreRefIndex(cityPath, cfg, store, openSessionInfos, storeRefAware)
 	legacyOpenIdentifiers := make(map[string]struct{}, len(openSessionInfos)*5)
 	for _, info := range openSessionInfos {
@@ -243,7 +259,7 @@ func releaseOrphanedPoolAssignments(
 			if assigneePreservesNamedSessionRoute(cfg, cityPath, template, assignee, workStoreRef, storeRefAware) {
 				continue
 			}
-			if liveOpenSessionAssignmentExists(sessionStore.Store, assignee) {
+			if memoizedLiveOpenSessionAssignmentExists(sessionStoreLiveAssignee, assignee, sessionStore.Store, assignee) {
 				continue
 			}
 			// The sessions binding is not the only ledger that can hold a session
@@ -254,8 +270,26 @@ func releaseOrphanedPoolAssignments(
 			// claims. A session bead of that shape lives in the work bead's own
 			// owner store, so probing that one store after the sessions store
 			// misses closes the gap without enumerating every attached store.
-			if ownerStore != nil && liveOpenSessionAssignmentExists(ownerStore, assignee) {
-				continue
+			// ownerStore varies per bead, so the memo key must name the store.
+			// assignedWorkStoreRefs is the index-aligned ref the caller already
+			// uses to scope readiness (storeScopedBeadKey), but it only IDENTIFIES
+			// the store when assignedWorkStores is what ownerStore came from: both
+			// slices are index-aligned to the same leg, so equal refs mean the same
+			// leg. Without that slice assignedWorkOwnerStore falls back to routing
+			// each bead through storeForPoolAssignment(wb), and two beads sharing a
+			// ref can then resolve to DIFFERENT stores — collapsing them onto one
+			// cached answer could release a live holder's claim. Require both, and
+			// leave the fallback unmemoized rather than risk that.
+			if ownerStore != nil {
+				live := false
+				if storeAware && storeRefAware {
+					live = memoizedLiveOpenSessionAssignmentExists(ownerStoreLiveAssignee, workStoreRef+"\x00"+assignee, ownerStore, assignee)
+				} else {
+					live = liveOpenSessionAssignmentExists(ownerStore, assignee)
+				}
+				if live {
+					continue
+				}
 			}
 		}
 
@@ -301,11 +335,24 @@ func releaseOrphanedPoolAssignments(
 // Every per-bead gate from releaseOrphanedPoolAssignments applies unchanged,
 // including the live re-read in liveWorkAssignmentStillReleasable — the tick
 // snapshot names candidates but never by itself justifies a release.
+//
+// assignedWorkStores is the index-aligned snapshot of the legs the census read
+// assignedWorkBeads through, and it is how a binding-resident row is released at
+// all: gc.routed_to names a WORK ledger, and on a split city a graph-class step
+// no longer lives there, so the routed fallback asks a store that answers "no
+// such bead" and the release is silently skipped (ga-b0o6a). An absent slice
+// (nil or empty) keeps the routed fallback, so callers that supply nothing are
+// unchanged. A non-empty slice of any other length is a DIFFERENT snapshot, not
+// a smaller one: in-range beads are still resolved through it, and out-of-range
+// beads are skipped entirely rather than routed-fallback resolved. Callers must
+// reject a misaligned slice before calling — see reconcileSessionBeads, which
+// nils it and logs the mismatch.
 func releaseConfirmedOrphanSessionWork(
 	cfg *config.City,
 	store beads.Store,
 	rigStores map[string]beads.Store,
 	assignedWorkBeads []beads.Bead,
+	assignedWorkStores []beads.Store,
 	info session.Info,
 ) []releasedPoolAssignment {
 	if cfg == nil || store == nil || len(assignedWorkBeads) == 0 {
@@ -341,8 +388,11 @@ func releaseConfirmedOrphanSessionWork(
 		if agentCfg == nil || !agentCfg.SupportsGenericEphemeralSessions() {
 			continue
 		}
-		ownerStore := storeForPoolAssignment(cfg, store, rigStores, wb)
+		ownerStore := assignedWorkOwnerStore(cfg, store, rigStores, assignedWorkStores, i, wb)
 		if ownerStore == nil {
+			if len(assignedWorkStores) > 0 {
+				log.Printf("releaseConfirmedOrphanSessionWork: missing owner store for assigned work %q at index %d", wb.ID, i)
+			}
 			continue
 		}
 		if !liveWorkAssignmentStillReleasable(ownerStore, wb.ID, wb.Status, assignee) {
@@ -736,6 +786,26 @@ func liveOpenSessionAssignmentExists(store beads.Store, assignee string) bool {
 		}
 	}
 	return false
+}
+
+// memoizedLiveOpenSessionAssignmentExists caches liveOpenSessionAssignmentExists
+// under a caller-supplied key for the duration of one orphan-release sweep.
+//
+// The underlying probe's expensive arm is an assignee-independent live listing of
+// every session bead in the store, so repeating it for each work bead is pure
+// redundant I/O against the store the reconciler is already blocked on. The key
+// must identify the store as well as the assignee wherever more than one store is
+// probed; a caller with no stable store identifier must call the unmemoized form.
+func memoizedLiveOpenSessionAssignmentExists(memo map[string]bool, key string, store beads.Store, assignee string) bool {
+	if memo == nil {
+		return liveOpenSessionAssignmentExists(store, assignee)
+	}
+	if cached, ok := memo[key]; ok {
+		return cached
+	}
+	live := liveOpenSessionAssignmentExists(store, assignee)
+	memo[key] = live
+	return live
 }
 
 func liveSessionBeadExistsByIdentity(store beads.Store, assignee string) bool {

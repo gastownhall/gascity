@@ -551,7 +551,7 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 				}
 				return result, fmt.Errorf("%w", err)
 			}
-			if err := checkLegacySourceWorkflowConflict(deps, beadID); err != nil {
+			if err := checkLegacySourceWorkflowConflict(deps, beadID, formulaName, opts.Force); err != nil {
 				return result, fmt.Errorf("%w", err)
 			}
 			// The replaced root is a graph.v2 workflow root, and every root
@@ -747,12 +747,68 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 			createAutoConvoy = false
 		}
 		if createAutoConvoy {
+			// Re-slinging a bead that still has a live root reuses that root
+			// instead of minting a second one. A bounced bead comes back with
+			// its routing metadata and assignee cleared (submit-and-exit, then
+			// the refinery's reject-to-pool), so CheckBeadStateWithOptions no
+			// longer reads it as routed and the duplicate-convoy guard in
+			// resolveConvoyRecovery never runs. The mint site is the one place
+			// every dispatch path passes through, so the reuse belongs here.
+			//
+			// The extra roots were never orphans — the drain closes them all
+			// together when the tracked bead goes terminal — but each one
+			// double-counts a single piece of in-flight work on the ready
+			// board until then (ga-qar0).
+			//
+			// Reuse is scoped to roots this dispatch path minted — the
+			// AutoConvoyRootTitle set. A user convoy (gc convoy create), a
+			// drain unit convoy or a graph.v2 input convoy can track the same
+			// bead with the same unowned, unlabeled shape; adopting one as a
+			// dispatch root, or reaping it as a duplicate, would take over a
+			// convoy that is not ours.
+			//
+			// Reuse is scoped further to roots of the same ownership shape:
+			// the "owned" label suppresses convoy autoclose, so adopting a
+			// root that disagrees with this dispatch would silently change the
+			// lifecycle the caller asked for.
+			//
+			// Reuse alone only holds the line at one root; it cannot converge
+			// a bead that already carries several, because every re-sling
+			// picks the same first root and leaves the rest untouched. So the
+			// re-sling also reaps the predecessors it superseded (ga-5jnq).
+			// Owned roots are exempt — their lifecycle is the caller's.
+			if live, err := liveAutoConvoyRoots(deps.Store, beadID); err != nil {
+				// Unlike the recovery check (#2987), a lookup failure here
+				// falls through to minting. The costs are asymmetric at this
+				// site: a duplicate root is a cosmetic over-count that drains
+				// itself, while skipping the mint can leave the bead with no
+				// convoy at all, which breaks the dispatch that depends on it.
+				result.MetadataErrors = append(result.MetadataErrors,
+					fmt.Sprintf("checking for reusable auto-convoy: %v", err))
+			} else {
+				matching := make([]beads.Bead, 0, len(live))
+				for _, root := range live {
+					if slices.Contains(root.Labels, "owned") == opts.Owned {
+						matching = append(matching, root)
+					}
+				}
+				if len(matching) > 0 {
+					result.ConvoyID = matching[0].ID
+					createAutoConvoy = false
+					if !opts.Owned {
+						result.MetadataErrors = append(result.MetadataErrors,
+							reapSupersededConvoyRoots(deps.Store, matching[1:], matching[0].ID)...)
+					}
+				}
+			}
+		}
+		if createAutoConvoy {
 			var convoyLabels []string
 			if opts.Owned {
 				convoyLabels = []string{"owned"}
 			}
 			convoy, err := deps.Store.Create(beads.Bead{
-				Title:  fmt.Sprintf("sling-%s", beadID),
+				Title:  AutoConvoyRootTitle(beadID),
 				Type:   "convoy",
 				Labels: convoyLabels,
 			})
@@ -1479,17 +1535,50 @@ func validateSlingFormulaRuntimeVars(ctx context.Context, formulaName string, se
 	return molecule.ValidateRecipeRuntimeVars(recipe, opts)
 }
 
-func checkLegacySourceWorkflowConflict(deps SlingDeps, beadID string) error {
+func checkLegacySourceWorkflowConflict(deps SlingDeps, beadID, formulaName string, force bool) error {
+	// The gc.source_bead_id half stays unconditional even under force: it
+	// already fired under --force before the convoy-tracking lookup below
+	// existed, and gating it here would let --force bypass a pre-existing
+	// check -- a behavior change beyond the scope of the #5420 fix.
 	roots, err := listSourceWorkflowRoots(deps, beadID)
 	if err != nil {
 		return fmt.Errorf("list live workflows for %s: %w", beadID, err)
 	}
-	if len(roots) == 0 {
+	ids := blockingWorkflowIDs(roots)
+
+	// listSourceWorkflowRoots resolves live workflows via gc.source_bead_id,
+	// which a convoy-first `--on` launch never stamps on the root -- the
+	// source is tracked through the input convoy instead (see
+	// attachFormulaToBead's isGraph branch above). That makes the check
+	// above structurally vacuous for every formulas-v2 `--on` launch, so
+	// resolve the convoy-tracking edge here too, scoped to the SAME formula
+	// being attached -- distinct formulas concurrently targeting one bead
+	// are legitimate, only relaunching the same one while its root is still
+	// live is the duplicate (#5420).
+	//
+	// --force skips this lookup: the CLI advertises --force as the override
+	// for exactly this conflict, and the sibling check in
+	// withSourceWorkflowLaunchLock gates on `if !force` the same way.
+	var convoyRoots []beads.Bead
+	if !force {
+		convoyRoots, err = liveConvoyTrackedWorkflowRoots(deps.Store, deps.graphStore(), beadID, formulaName)
+		if err != nil {
+			return fmt.Errorf("list convoy-tracked live workflows for %s: %w", beadID, err)
+		}
+	}
+	for _, root := range convoyRoots {
+		if !slices.Contains(ids, root.ID) {
+			ids = append(ids, root.ID)
+		}
+	}
+
+	if len(ids) == 0 {
 		return nil
 	}
+	slices.Sort(ids)
 	return &sourceworkflow.ConflictError{
 		SourceBeadID: beadID,
-		WorkflowIDs:  blockingWorkflowIDs(roots),
+		WorkflowIDs:  ids,
 	}
 }
 

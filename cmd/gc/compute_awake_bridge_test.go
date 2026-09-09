@@ -270,6 +270,91 @@ func TestBuildAwakeInputFromReconcilerCarriesResetPendingMetadata(t *testing.T) 
 	}
 }
 
+func TestBuildAwakeInputFromReconcilerCarriesDrainedResetPendingCombination(t *testing.T) {
+	now := time.Now().UTC()
+	metadata := func(withMarker bool) map[string]string {
+		m := map[string]string{
+			"state":                      "drained",
+			"session_name":               "s-drained-reset",
+			"template":                   "build-agent",
+			"continuation_reset_pending": "true",
+		}
+		if withMarker {
+			m[session.ResetCommittedAtKey] = now.Format(time.RFC3339)
+		}
+		return m
+	}
+
+	// A stalled reset (marker committed, start never happened) followed by a
+	// drain-ack leaves drained + pending + marker. The bridge must surface
+	// that combination, or the Drained guard on the reset-pending awake arm
+	// can never observe the state it exists for.
+	input := buildAwakeInputFromReconciler(
+		&config.City{},
+		"", // cityPath: empty exercises zero suspension state
+		[]session.Info{sessiontest.SeedBead(t, beads.Bead{
+			ID:       "mc-session-1",
+			Status:   "open",
+			Type:     "session",
+			Metadata: metadata(true),
+		})},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		now,
+	)
+	if len(input.SessionBeads) != 1 {
+		t.Fatalf("SessionBeads length = %d, want 1", len(input.SessionBeads))
+	}
+	got := input.SessionBeads[0]
+	if !got.Drained {
+		t.Fatalf("Drained = false, want true")
+	}
+	if !got.ContinuationResetPending {
+		t.Fatalf("ContinuationResetPending = false, want true")
+	}
+
+	// A drain-ack alone stamps continuation_reset_pending without
+	// reset_committed_at; the bridge deliberately does not surface that
+	// shape as reset-pending.
+	input = buildAwakeInputFromReconciler(
+		&config.City{},
+		"", // cityPath: empty exercises zero suspension state
+		[]session.Info{sessiontest.SeedBead(t, beads.Bead{
+			ID:       "mc-session-2",
+			Status:   "open",
+			Type:     "session",
+			Metadata: metadata(false),
+		})},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		now,
+	)
+	if len(input.SessionBeads) != 1 {
+		t.Fatalf("SessionBeads length = %d, want 1", len(input.SessionBeads))
+	}
+	got = input.SessionBeads[0]
+	if !got.Drained {
+		t.Fatalf("Drained = false, want true")
+	}
+	if got.ContinuationResetPending {
+		t.Fatalf("ContinuationResetPending = true for drain-ack-only metadata, want false")
+	}
+}
+
 func TestBuildAwakeInputFromReconcilerPopulatesPendingInteractions(t *testing.T) {
 	now := time.Now().UTC()
 	sp := runtime.NewFake()
