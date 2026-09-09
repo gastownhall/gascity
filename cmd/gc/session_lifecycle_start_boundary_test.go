@@ -156,6 +156,7 @@ func TestStartPreparedStartCandidateDefersWhenLivenessUnavailable(t *testing.T) 
 		nil,
 		nil,
 		nil,
+		nil,
 	)
 	if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
 		t.Fatalf("startPreparedStartCandidate error = %v, want runtime unavailable", err)
@@ -182,7 +183,7 @@ func TestStartPreparedStartCandidateConvergesFromConfirmedAbsence(t *testing.T) 
 			},
 			cfg: runtime.Config{Command: "claude", WorkDir: t.TempDir()},
 		},
-		"", nil, sp, nil, nil, nil,
+		"", nil, sp, nil, nil, nil, nil,
 	)
 	if err != nil || !started {
 		t.Fatalf("startPreparedStartCandidate = (%v, %v), want started without error", started, err)
