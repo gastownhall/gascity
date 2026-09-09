@@ -791,10 +791,12 @@ func TestBdByIDRefusesAnUnservedCommaListValueWhenALaterIDIsResident(t *testing.
 //
 // The refusal's claim is that the binding owns the bead and the work ledger does
 // not hold it. For an id the binding cleanly misses that claim is false, and the
-// spellings it captured are the whole unserved manifest — `show --long`,
-// `heartbeat`, `delete` — on every bead a warned-and-allowed work-axis prefix
+// spellings it captured span every route an unserved verb has into this door —
+// a bare positional (`show --long`), a positional the door ALSO collects as a
+// write subject (`delete`, `heartbeat`), and an id riding a valued flag
+// (`create --parent`) — on every bead a warned-and-allowed work-axis prefix
 // mints. So ownership is proven by RESIDENCE here too, exactly as it already is
-// for a work-shaped id, and a clean miss goes to the passthrough.
+// for a work-shaped id, and a clean miss goes to the passthrough on all three.
 //
 // The refusal for a bead the binding really holds is the control, and it lives
 // in TestBdByIDRefusesAnUnservedVerbOnAClassOwnedBead.
@@ -806,6 +808,12 @@ func TestBdByIDUnservedVerbReservedMissFallsThrough(t *testing.T) {
 		{"delete", missing},
 		{"show", missing, "--long"},
 		{"heartbeat", missing},
+		// The valued-flag route: the id is never a positional, so it
+		// reaches the door only through bdArgsFlagAddressedIDs. Its
+		// clean miss must fall through too, or a `--parent` pointing at
+		// the operator's own bead is unreachable for the whole
+		// warned-and-allowed prefix.
+		{"create", "--type", "task", "--parent", missing, "x"},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
@@ -1107,18 +1115,19 @@ func TestBdByIDSurfaceResolvesOneStoreNotAProviderPerOperation(t *testing.T) {
 // collapse onto storeref made load-bearing between two packages.
 //
 // Two derivations of "is this id reserved" now meet inside one resolve. This
-// file's bdIDIsClassReserved reads config.AllReservedClassPrefixes and sets the
-// Reserved bit, which alone makes bdByIDResolution.Owned true — a reserved id
-// with no row is answered here rather than passed through, because it has
-// nowhere else to live. storeref's ClassBinding.coversID reads
+// file's bdIDIsClassReserved reads config.AllReservedClassPrefixes and decides
+// which ids get ASKED about: an id it calls reserved is collected by
+// bdArgsAddressedClassIDs and put to the binding, and residence — never the
+// prefix — decides the answer. storeref's ClassBinding.coversID reads
 // ReservedPrefixesFor(binding.Classes) and decides whether the id gets an
 // authority leg or the residence-probe tail.
 //
 // Let those sets drift and the failure is silent and one-directional: a prefix
-// this file calls reserved but no binding covers gets planned as work-shaped —
-// probes, then the work axis — while Owned still swears the door owns it. The
-// door then reports absent for an id the work store may well hold, and no row
-// in this file would notice, because both halves are individually consistent.
+// storeref covers but this file omits is never collected, so an unserved
+// NON-MUTATION verb never opens this door at all — the argv addresses no class
+// id and the mutation scanner claims no subject — and bd answers its own
+// not-found for a bead the binding really holds. No row in this file would
+// notice, because both halves are individually consistent.
 //
 // The pin is at the source rather than over a fixture's bindings on purpose: a
 // fixture proves the sets agree for the classes that fixture happens to bind,
@@ -1130,7 +1139,7 @@ func TestBdByIDReservedPrefixSetsAgreeAcrossTheTwoReaders(t *testing.T) {
 	sort.Strings(fromStoreref)
 
 	if !slices.Equal(fromConfig, fromStoreref) {
-		t.Errorf("the two reserved-prefix readers disagree:\n  bdIDIsClassReserved (config.AllReservedClassPrefixes): %v\n  coversID (storeref.ReservedPrefixesFor over every class): %v\nan id in the first set but not the second is claimed by this door and planned as work-shaped, so it is reported absent instead of passed through", fromConfig, fromStoreref)
+		t.Errorf("the two reserved-prefix readers disagree:\n  bdIDIsClassReserved (config.AllReservedClassPrefixes): %v\n  coversID (storeref.ReservedPrefixesFor over every class): %v\nan id in the second set but not the first is never asked about here, so an unserved non-mutation verb passes it through and bd reports not-found for a bead the binding holds", fromConfig, fromStoreref)
 	}
 	if len(fromConfig) == 0 {
 		t.Fatal("no reserved prefixes at all, so the comparison above is vacuous and would pass against any drift")
@@ -2530,9 +2539,9 @@ func TestBdByIDWorkIDOnARefusedCityKeepsThePassthrough(t *testing.T) {
 // storeref.IDInNamespace admits it (`id == prefix || HasPrefix(id, prefix+"-")`,
 // class_candidates.go), so ClassBinding.coversID claims it and the plan gives
 // it the AUTHORITY leg, whose refusal policy is fatal. bdIDIsClassReserved
-// requires the dash, so the door's own Reserved bit reads false. Before the
-// collapse that bit decided the refusal arm and a bare token passed through to
-// bd; now the plan decides, and the refusal surfaces.
+// requires the dash, so this door never asks about a bare token. Before the
+// collapse that omission decided the refusal arm and a bare token passed
+// through to bd; now the plan decides, and the refusal surfaces.
 //
 // Surfacing is the better answer — no store mints a bare token, so bd would
 // only have reported not-found on a city whose storage is the actual problem —

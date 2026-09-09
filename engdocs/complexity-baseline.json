@@ -2057,12 +2057,6 @@
     },
     {
       "package": "main",
-      "function": "bdArgsNameClassOwnedBead",
-      "file": "cmd/gc/cmd_bd_by_id.go",
-      "ccn": 22
-    },
-    {
-      "package": "main",
       "function": "bestStoreWithWork",
       "file": "cmd/gc/hook_cross_store.go",
       "ccn": 22
