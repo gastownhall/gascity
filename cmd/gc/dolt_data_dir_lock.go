@@ -1,16 +1,20 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"golang.org/x/sys/unix"
 )
 
 // Dolt holds an exclusive flock on each database's `.dolt/noms/LOCK` for the
@@ -127,24 +131,131 @@ func waitForManagedDoltDataDirLockFree(dataDir string, timeout time.Duration) er
 	return fmt.Errorf("dolt exclusive store lock %s is still held by a live process after %s; a prior dolt sql-server has not released the data dir", holder, timeout)
 }
 
+type managedDoltProcLock struct {
+	pid                 int
+	major, minor, inode uint64
+}
+
+func parseManagedDoltProcFlock(line string) (managedDoltProcLock, bool, error) {
+	fields := strings.Fields(line)
+	if len(fields) < 2 || fields[1] != "FLOCK" {
+		return managedDoltProcLock{}, false, nil
+	}
+	if len(fields) < 8 {
+		return managedDoltProcLock{}, true, fmt.Errorf("expected at least 8 fields")
+	}
+	pid, err := strconv.Atoi(fields[4])
+	if err != nil {
+		return managedDoltProcLock{}, true, fmt.Errorf("pid %q: %w", fields[4], err)
+	}
+	deviceInode := strings.Split(fields[5], ":")
+	if len(deviceInode) != 3 {
+		return managedDoltProcLock{}, true, fmt.Errorf("device and inode %q", fields[5])
+	}
+	major, err := strconv.ParseUint(deviceInode[0], 16, 64)
+	if err != nil {
+		return managedDoltProcLock{}, true, fmt.Errorf("major %q as hexadecimal: %w", deviceInode[0], err)
+	}
+	minor, err := strconv.ParseUint(deviceInode[1], 16, 64)
+	if err != nil {
+		return managedDoltProcLock{}, true, fmt.Errorf("minor %q as hexadecimal: %w", deviceInode[1], err)
+	}
+	inode, err := strconv.ParseUint(deviceInode[2], 10, 64)
+	if err != nil {
+		return managedDoltProcLock{}, true, fmt.Errorf("inode %q as decimal: %w", deviceInode[2], err)
+	}
+	return managedDoltProcLock{pid: pid, major: major, minor: minor, inode: inode}, true, nil
+}
+
+// managedDoltLockHolderPIDs returns the PIDs whose FLOCK rows in procLocksPath
+// match lockPath's device and inode. Linux prints the device major and minor in
+// hexadecimal but the inode in decimal, so the three components are parsed
+// with their respective bases before comparison.
+func managedDoltLockHolderPIDs(lockPath, procLocksPath string) ([]int, error) {
+	info, err := os.Stat(lockPath)
+	if err != nil {
+		return nil, fmt.Errorf("stat lock file %s: %w", lockPath, err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return nil, fmt.Errorf("stat lock file %s: unsupported file metadata %T", lockPath, info.Sys())
+	}
+	f, err := os.Open(procLocksPath) //nolint:gosec // fixed procfs path in production; injectable only for tests
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", procLocksPath, err)
+	}
+	defer f.Close() //nolint:errcheck
+
+	wantMajor := uint64(unix.Major(stat.Dev))
+	wantMinor := uint64(unix.Minor(stat.Dev))
+	wantInode := stat.Ino
+	holders := make(map[int]struct{})
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		lock, flock, err := parseManagedDoltProcFlock(scanner.Text())
+		if err != nil {
+			return nil, fmt.Errorf("parse %s FLOCK row %q: %w", procLocksPath, scanner.Text(), err)
+		}
+		if !flock {
+			continue
+		}
+		if lock.major == wantMajor && lock.minor == wantMinor && lock.inode == wantInode {
+			holders[lock.pid] = struct{}{}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read %s: %w", procLocksPath, err)
+	}
+	pids := make([]int, 0, len(holders))
+	for pid := range holders {
+		pids = append(pids, pid)
+	}
+	sort.Ints(pids)
+	return pids, nil
+}
+
 // waitManagedDoltSIGKILLLockGate gates a SIGKILL on the dolt exclusive store
-// lock being free. It blocks until no live process holds a lock under
-// dataDir, pid exits, or lockWindow elapses — whichever comes first. A nil
-// return means SIGKILL is safe (lock free or pid already gone); an error
-// names the held lock so callers fail closed instead of tearing the holder's
-// journal mid-flush (gastownhall/gascity#3174). gracePeriod is the SIGTERM
-// grace that already elapsed, reported in the error for context.
+// lock being free or held solely by the process being terminated. It blocks
+// until the gate is safe, pid exits, or lockWindow elapses. A measurement
+// failure or any other holder fails closed to protect the journal
+// (gastownhall/gascity#3174). gracePeriod is the SIGTERM grace that already
+// elapsed, reported in the error for context.
 func waitManagedDoltSIGKILLLockGate(pid int, dataDir string, alive func(int) bool, gracePeriod, lockWindow, pollInterval time.Duration) error {
-	holder := managedDoltDataDirLockHolder(dataDir)
+	return waitManagedDoltSIGKILLLockGateWithProcLocks(pid, dataDir, alive, gracePeriod, lockWindow, pollInterval, "/proc/locks")
+}
+
+func waitManagedDoltSIGKILLLockGateWithProcLocks(pid int, dataDir string, alive func(int) bool, gracePeriod, lockWindow, pollInterval time.Duration, procLocksPath string) error {
 	lockDeadline := time.Now().Add(lockWindow)
-	for alive(pid) && holder != "" && time.Now().Before(lockDeadline) {
+	for {
+		if !alive(pid) {
+			return nil
+		}
+		holder := managedDoltDataDirLockHolder(dataDir)
+		if holder == "" {
+			return nil
+		}
+		holderPIDs, measureErr := managedDoltLockHolderPIDs(holder, procLocksPath)
+		if measureErr == nil && len(holderPIDs) == 1 && holderPIDs[0] == pid {
+			return nil
+		}
+		if !time.Now().Before(lockDeadline) {
+			base := fmt.Sprintf("pid %d did not exit within %s and a live process still holds dolt exclusive store lock %s; refusing SIGKILL mid-journal-write (gastownhall/gascity#3174)", pid, gracePeriod, holder)
+			if measureErr != nil {
+				return fmt.Errorf("%s; could not measure lock ownership: %w", base, measureErr)
+			}
+			if len(holderPIDs) == 0 {
+				return fmt.Errorf("%s; could not measure lock ownership: flock probe reports held but %s has no matching FLOCK row", base, procLocksPath)
+			}
+			otherPIDs := make([]int, 0, len(holderPIDs))
+			for _, holderPID := range holderPIDs {
+				if holderPID != pid {
+					otherPIDs = append(otherPIDs, holderPID)
+				}
+			}
+			return fmt.Errorf("%s; other holder pid(s): %v", base, otherPIDs)
+		}
 		time.Sleep(pollInterval)
-		holder = managedDoltDataDirLockHolder(dataDir)
 	}
-	if alive(pid) && holder != "" {
-		return fmt.Errorf("pid %d did not exit within %s and a live process still holds dolt exclusive store lock %s; refusing SIGKILL mid-journal-write (gastownhall/gascity#3174)", pid, gracePeriod, holder)
-	}
-	return nil
 }
 
 // resolveManagedDoltLockReleaseTimeout returns the configured wait window for
