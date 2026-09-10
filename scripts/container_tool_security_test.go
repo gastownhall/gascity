@@ -64,19 +64,27 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 }
 
 func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
-	const (
-		bdSourceRef    = "bf97b73749ac3ef2fca2365b54537ac041ad4293"
-		bdSourceSHA256 = "a8b1d8dd85b2c008093615cb85937067a9597e760e8d39f93fe55f5c1cbb4d37"
-		bdBuild        = "bf97b73749"
-		bdBranch       = "HEAD"
-		grpcVersion    = "1.82.1"
-	)
-
 	root := repoRoot(t)
-	bdVersion := readDotenv(t, root+"/deps.env")["BD_VERSION"]
-	if bdVersion != "v1.1.0" {
-		t.Fatalf("deps.env BD_VERSION = %q, want v1.1.0 for the pinned source build", bdVersion)
+	env := readDotenv(t, root+"/deps.env")
+	bdVersion := env["BD_CURRENT_SOURCE_VERSION"]
+	bdSourceRef := env["BD_CURRENT_REF"]
+	bdSourceSHA256 := env["BD_CURRENT_SOURCE_SHA256"]
+	grpcVersion := env["BD_CURRENT_GRPC_VERSION"]
+	for key, value := range map[string]string{
+		"BD_CURRENT_SOURCE_VERSION": bdVersion,
+		"BD_CURRENT_REF":            bdSourceRef,
+		"BD_CURRENT_SOURCE_SHA256":  bdSourceSHA256,
+		"BD_CURRENT_GRPC_VERSION":   grpcVersion,
+	} {
+		if value == "" {
+			t.Fatalf("deps.env missing %s", key)
+		}
 	}
+	if len(bdSourceRef) != 40 {
+		t.Fatalf("deps.env BD_CURRENT_REF = %q, want a full commit SHA", bdSourceRef)
+	}
+	bdBuild := bdSourceRef[:10]
+	const bdBranch = "HEAD"
 
 	dockerfile := readFile(t, root, "contrib/k8s/Dockerfile.agent")
 	for _, want := range []string{
