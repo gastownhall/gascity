@@ -3311,6 +3311,25 @@ func bdReadyArgs(q ReadyQuery, includeEphemeral bool) []string {
 	return args
 }
 
+// crossStoreDependencyError reports a non-nil error when issueID and
+// dependsOnID carry different, well-formed bead-ID prefixes -- i.e. they
+// belong to different stores. gc bd dep add has no cross-store dependency
+// model: such a pair must fail loudly instead of silently no-oping.
+func (s *BdStore) crossStoreDependencyError(issueID, dependsOnID string) error {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(dependsOnID)), "external:") {
+		return nil
+	}
+	sourcePrefix := beadIDPrefix(issueID)
+	if sourcePrefix == "" {
+		sourcePrefix = normalizeIDPrefix(s.idPrefix)
+	}
+	targetPrefix := beadIDPrefix(dependsOnID)
+	if sourcePrefix == "" || targetPrefix == "" || sourcePrefix == targetPrefix {
+		return nil
+	}
+	return fmt.Errorf("cross-store dependency: %s (store %q) cannot depend on %s (store %q): cross-store dependencies are not supported", issueID, sourcePrefix, dependsOnID, targetPrefix)
+}
+
 // DepAdd records a dependency via bd dep add.
 func (s *BdStore) DepAdd(issueID, dependsOnID, depType string) error {
 	if depType == "parent-child" {
@@ -3318,6 +3337,9 @@ func (s *BdStore) DepAdd(issueID, dependsOnID, depType string) error {
 		if err == nil && bead.ParentID == dependsOnID {
 			return nil
 		}
+	}
+	if err := s.crossStoreDependencyError(issueID, dependsOnID); err != nil {
+		return err
 	}
 	err := s.runBDTransientWrite("dep", "add", issueID, dependsOnID, "--type", depType)
 	if err != nil {
