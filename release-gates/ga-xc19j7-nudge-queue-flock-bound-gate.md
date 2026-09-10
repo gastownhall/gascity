@@ -92,6 +92,33 @@ the deployer to request a waiver in precisely that case. That request was made
 as peek-verified mail `gm-wisp-wdznl`, and mayor supplied the narrow waiver
 recorded above.
 
+### Pre-push fast-gate attribution
+
+The ordinary push ran the repository's 10-job fast gate. All six `cmd/gc`
+shards, both gate self-tests, and the filesystem cross-compile lane passed.
+`unit-core` raw-failed on exactly two pre-existing conditions:
+
+- `TestProviderLiveClaudeKindPath` -> `ga-iepsvr`: the live `herdr` provider
+  reported the tracker's exact `agent_pane_busy` plus startup-delivery timeout
+  signature. The tracker predates this run, and
+  `go list -deps ./internal/runtime/herdr` contains neither changed production
+  package. The candidate has no `internal/runtime/herdr` test or path overlap.
+- `TestCatalogMatchesProductionWiringAndDocumentation` -> `ga-cojd80`: the
+  provider catalog reported the tracker's expired `runtime.Provider` waivers.
+  The tracker predates this run, and
+  `go list -deps ./internal/testutil/providerledger` contains neither changed
+  production package. The candidate has no provider-ledger path overlap.
+
+Both sightings were appended to their open trackers and read back. They meet
+all four non-diff-owned attribution clauses via mechanism proof, so the shared
+protocol authorizes a `--no-verify` retry for this exact head. Raw log:
+`/var/tmp/gc-local-tests.AyJDDn/unit-core.log`.
+
+```text
+pre_push_attribution: TestProviderLiveClaudeKindPath -> ga-iepsvr | clause 3(a) mechanism; no path overlap
+pre_push_attribution: TestCatalogMatchesProductionWiringAndDocumentation -> ga-cojd80 | clause 3(a) mechanism; no path overlap
+```
+
 ## Resume validation and disposition
 
 - The deploy bead's authoritative `**Commit:**` field and `metadata.commit`
