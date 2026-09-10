@@ -2251,8 +2251,10 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	}
 
 	// 1.5. Dismiss Claude Code's post-turn feedback survey if it is parked on
-	// the pane (ga-zg7fjq). The composer is empty at this point -- the C-u
-	// above guarantees that, and it matters: the survey's onDigit handler
+	// the pane (ga-zg7fjq). On the unattached path the C-u above has cleared
+	// the composer; on an attached session it deliberately did not, so a
+	// human draft may still be on the line. That matters: the survey's
+	// onDigit handler
 	// only fires on a single-character input value, so a digit landing on
 	// top of other content silently corrupts the draft instead of
 	// dismissing anything. A parked survey reads idle to WaitForIdle (no
