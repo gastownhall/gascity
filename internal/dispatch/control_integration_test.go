@@ -1197,7 +1197,7 @@ func TestResolveAttemptRouteBinding_NamedSessionTargetUsesCanonicalBeadID(t *tes
 	if binding.directSessionID != named.ID {
 		t.Fatalf("directSessionID = %q, want canonical named bead ID %q", binding.directSessionID, named.ID)
 	}
-	if binding.qualifiedName != "" || binding.sessionName != "" {
+	if binding.qualifiedName != "" {
 		t.Fatalf("binding = %+v, want direct named session only", binding)
 	}
 	// Per-resolution List calls must stay bounded so the per-attempt cost
@@ -1245,11 +1245,45 @@ func TestResolveAttemptRouteBinding_NamedSessionTargetWithoutCanonicalBeadUsesMe
 	if binding.directSessionID != "" {
 		t.Fatalf("directSessionID = %q, want empty without canonical bead", binding.directSessionID)
 	}
-	if binding.sessionName != "" {
-		t.Fatalf("sessionName = %q, want empty so future runtime names are not assigned", binding.sessionName)
-	}
 	if binding.qualifiedName != "worker" || !binding.metadataOnly {
 		t.Fatalf("binding = %+v, want metadata-only worker route", binding)
+	}
+}
+
+// Regression for the "munged pre-assignment" bug: a single-session config
+// agent's attempt/fanout steps must be delivered by gc.routed_to (the alias)
+// with an EMPTY Assignee, not pre-stamped with the munged runtime session name
+// (e.g. "gascity-packs/gc.run-operator" -> "gascity-packs--gc__run-operator").
+// A pre-stamped agent-shaped Assignee matched no claim/wake/reaper identity and
+// hid the bead from --unassigned routed demand, leaving it unclaimable.
+func TestApplyAttemptStepRoute_SingleSessionConfigAgentRoutesUnassigned(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	maxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "gascity-packs"},
+		Agents: []config.Agent{{
+			Name:              "gc.run-operator",
+			MaxActiveSessions: &maxActive,
+		}},
+	}
+
+	binding, ok := resolveAttemptRouteBinding("gc.run-operator", cfg, store)
+	if !ok {
+		t.Fatal("resolveAttemptRouteBinding did not resolve config-agent target")
+	}
+	if binding.directSessionID != "" || binding.qualifiedName == "" {
+		t.Fatalf("binding = %+v, want a routed config-agent binding", binding)
+	}
+
+	step := &formula.RecipeStep{ID: "s1", Metadata: map[string]string{}}
+	applyAttemptStepRoute(step, "gc.run-operator", cfg, store)
+	if step.Assignee != "" {
+		t.Fatalf("Assignee = %q, want empty (delivered via gc.routed_to; session binds on claim)", step.Assignee)
+	}
+	if step.Metadata[beadmeta.RoutedToMetadataKey] != binding.qualifiedName {
+		t.Fatalf("gc.routed_to = %q, want the config alias %q", step.Metadata[beadmeta.RoutedToMetadataKey], binding.qualifiedName)
 	}
 }
 

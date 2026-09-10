@@ -225,7 +225,16 @@ func ApplyGraphRouteBinding(step *formula.RecipeStep, binding GraphRouteBinding)
 		// only when a slot claims the step — out of scope for route-time.
 		step.Metadata[beadmeta.SessionNameMetadataKey] = binding.SessionName
 	}
-	step.Assignee = binding.SessionName
+	// Config-agent work is delivered by gc.routed_to (the alias), not by a
+	// pre-stamped Assignee. Assignee is a unique reference to a concrete
+	// session; it must stay empty until a session claims the step and stamps
+	// its own id. Pre-stamping the session *name* here (the munged runtime
+	// handle) put an agent/template-shaped value in Assignee that no claim,
+	// wake-demand, or reaper identity set matched, and also hid the bead from
+	// the --unassigned routed-demand that wakes the seat — leaving it
+	// permanently unclaimable. The gc.session_name back-reference above is the
+	// durable dashboard handle and is kept.
+	step.Assignee = ""
 }
 
 // ApplyGraphControlRouteBinding routes control steps to the store-scoped

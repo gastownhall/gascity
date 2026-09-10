@@ -6,9 +6,16 @@ import (
 	"github.com/gastownhall/gascity/internal/formula"
 )
 
-// #2843: run/step beads must carry a durable session back-reference so
-// consumers (the dashboard run-detail session + diff views) can resolve a
-// step's session after the transient Assignee is cleared on close.
+// #2843: run/step beads must carry a durable session back-reference (the
+// gc.session_name metadata) so consumers (the dashboard run-detail session +
+// diff views) can resolve a step's session.
+//
+// Assignee itself stays EMPTY at route time: config-agent work is delivered by
+// gc.routed_to (the alias), and Assignee — a unique reference to a concrete
+// session — is stamped only when a session claims the step. Pre-stamping the
+// session name here put a template-shaped value in Assignee that no claim /
+// wake-demand / reaper identity matched and hid the bead from --unassigned
+// routed demand, leaving it unclaimable.
 
 func TestApplyGraphRouteBinding_StampsSessionName(t *testing.T) {
 	step := &formula.RecipeStep{ID: "s1", Metadata: map[string]string{}}
@@ -17,8 +24,8 @@ func TestApplyGraphRouteBinding_StampsSessionName(t *testing.T) {
 	if got := step.Metadata["gc.session_name"]; got != "polecat-gc-123" {
 		t.Errorf("gc.session_name = %q, want polecat-gc-123 (durable session back-ref)", got)
 	}
-	if step.Assignee != "polecat-gc-123" {
-		t.Errorf("Assignee = %q, want polecat-gc-123", step.Assignee)
+	if step.Assignee != "" {
+		t.Errorf("Assignee = %q, want empty (delivered via gc.routed_to; session binds on claim)", step.Assignee)
 	}
 	if step.Metadata["gc.routed_to"] != "worker" {
 		t.Errorf("gc.routed_to = %q, want worker", step.Metadata["gc.routed_to"])

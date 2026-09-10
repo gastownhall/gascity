@@ -1295,11 +1295,13 @@ func applyAttemptStepRoute(step *formula.RecipeStep, target string, cfg *config.
 			delete(step.Metadata, beadmeta.ExecutionRoutedToMetadataKey)
 		}
 		step.Labels = removeAttemptPoolLabels(step.Labels)
-		if binding.metadataOnly {
-			step.Assignee = ""
-			return
-		}
-		step.Assignee = binding.sessionName
+		// Config-agent attempt/fanout work is delivered by gc.routed_to (the
+		// alias), not by a pre-stamped Assignee. Assignee names a concrete
+		// session and stays empty until one claims the step and stamps its own
+		// id. The previous single-session branch stamped the munged runtime
+		// session name, which no claim/wake/reaper identity matched and which
+		// hid the bead from the --unassigned routed-demand that wakes the seat.
+		step.Assignee = ""
 		return
 	}
 
@@ -1392,7 +1394,6 @@ func latestAttemptCandidateIsControlInfrastructure(kind string) bool {
 type attemptRouteBinding struct {
 	qualifiedName   string
 	metadataOnly    bool
-	sessionName     string
 	directSessionID string
 }
 
@@ -1421,9 +1422,7 @@ func resolveAttemptRouteBinding(target string, cfg *config.City, store beads.Sto
 			binding := attemptRouteBinding{qualifiedName: agentCfg.QualifiedName()}
 			if isAttemptMultiSessionTarget(agentCfg.QualifiedName(), cfg) {
 				binding.metadataOnly = true
-				return binding, true
 			}
-			binding.sessionName = config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, agentCfg.QualifiedName())
 			return binding, true
 		}
 	}
