@@ -1069,6 +1069,108 @@ func TestInstantiateGraphWorkflowFailureClearsInstantiationFence(t *testing.T) {
 	}
 }
 
+// errRootActivationStore fails the root's own fenced-activation Update
+// exactly once, and separately fails the root's molecule_failed stamp
+// exactly once — the two correlated faults #6235 describes: a hot row
+// conflict on the root's activation drops through to markFailed, whose
+// very first write targets that same still-hot row and used to be dropped
+// with no retry. Every other id is untouched.
+type errRootActivationStore struct {
+	beads.Store
+	rootID             string
+	failActivateOnce   bool
+	failFirstStampOnce bool
+}
+
+func (e *errRootActivationStore) Create(b beads.Bead) (beads.Bead, error) {
+	created, err := e.Store.Create(b)
+	if err == nil && e.rootID == "" {
+		e.rootID = created.ID
+	}
+	return created, err
+}
+
+func (e *errRootActivationStore) Update(id string, opts beads.UpdateOpts) error {
+	if e.failActivateOnce && id == e.rootID {
+		e.failActivateOnce = false
+		return fmt.Errorf("injected root activation conflict")
+	}
+	return e.Store.Update(id, opts)
+}
+
+func (e *errRootActivationStore) SetMetadataBatch(id string, metadata map[string]string) error {
+	if e.failFirstStampOnce && id == e.rootID {
+		e.failFirstStampOnce = false
+		return fmt.Errorf("injected root mark-failed conflict")
+	}
+	return e.Store.SetMetadataBatch(id, metadata)
+}
+
+// TestInstantiateFailureStampsTheRootWhoseActivationFailed is the #6235
+// regression: when the root's own fenced-activation Update fails, markFailed's
+// very first write targets that same hot row and — before the two-pass
+// retry — could lose to the identical correlated fault, leaving the root
+// fenced (gc.instantiating still "true") and NOT stamped molecule_failed,
+// while every later member (never activated, so never contended) is
+// stamped and un-fenced normally. A root left in that state is invisible
+// to every dispatch/sweep gate that filters on molecule_failed.
+func TestInstantiateFailureStampsTheRootWhoseActivationFailed(t *testing.T) {
+	prev := IsGraphApplyEnabled()
+	SetGraphApplyEnabled(false)
+	t.Cleanup(func() { SetGraphApplyEnabled(prev) })
+
+	base := beads.NewMemStore()
+	store := &errRootActivationStore{Store: base, failActivateOnce: true, failFirstStampOnce: true}
+	recipe := &formula.Recipe{
+		Name: "wf",
+		Steps: []formula.RecipeStep{
+			{
+				ID:       "wf",
+				Title:    "Workflow",
+				Type:     "task",
+				IsRoot:   true,
+				Assignee: "controller",
+				Metadata: map[string]string{
+					"gc.kind":      "workflow",
+					"gc.routed_to": "gascity/control-dispatcher",
+				},
+			},
+			{
+				ID:       "wf.body",
+				Title:    "Body",
+				Type:     "task",
+				Assignee: "worker",
+				Metadata: map[string]string{
+					"gc.kind":      "scope",
+					"gc.routed_to": "gascity/worker",
+				},
+			},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "wf.body", DependsOnID: "wf", Type: "parent-child"},
+		},
+	}
+
+	_, err := Instantiate(context.Background(), store, recipe, Options{})
+	if err == nil {
+		t.Fatal("expected error on root activation failure")
+	}
+	if store.rootID == "" {
+		t.Fatal("root id never observed")
+	}
+
+	root, getErr := base.Get(store.rootID)
+	if getErr != nil {
+		t.Fatalf("Get(root): %v", getErr)
+	}
+	if root.Metadata["molecule_failed"] != "true" {
+		t.Errorf("root molecule_failed = %q, want true", root.Metadata["molecule_failed"])
+	}
+	if root.Metadata[InstantiatingMetadataKey] != "" {
+		t.Errorf("root instantiating metadata = %q, want cleared", root.Metadata[InstantiatingMetadataKey])
+	}
+}
+
 type observingCreateStore struct {
 	*beads.MemStore
 	created []beads.Bead
