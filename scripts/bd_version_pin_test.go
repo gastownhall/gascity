@@ -39,9 +39,9 @@ func TestBDVersionPins(t *testing.T) {
 		t.Fatal("deps.env missing BD_CURRENT_VERSION (the bleeding-edge contract-matrix cell)")
 	}
 
-	// The current cell has no release tarball, so it is built from a pinned beads
-	// commit. A non-deterministic ref (branch name, short SHA) would make the cell
-	// irreproducible; require a full 40-char commit SHA.
+	// The current cell is built from a pinned beads commit, which need not be a
+	// tagged release. A non-deterministic ref (branch name, short SHA) would make
+	// the cell irreproducible; require a full 40-char commit SHA.
 	if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(bdCurrentRef) {
 		t.Fatalf("deps.env BD_CURRENT_REF = %q, want a full 40-char gastownhall/beads commit SHA", bdCurrentRef)
 	}

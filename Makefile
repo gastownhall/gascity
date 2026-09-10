@@ -614,7 +614,7 @@ test-bd-cli-contract:
 ## the one bd contract the installable default could not run -- deps.env
 ## BD_VERSION predated `--if-assignee`/`--if-status`, so the row only had a home
 ## on the source-built BD_CURRENT_REF cell. That is no longer true as of
-## BD_VERSION=v1.3.0-rc.1, which carries the flags, so the row now runs on every
+## BD_VERSION=v1.3.0-rc.2, which carries the flags, so the row now runs on every
 ## cell rather than skipping on most. Kept separate anyway: it is the only
 ## contract that needs a real CAS-capable bd, and BD_PREV_VERSION (v1.0.4) still
 ## cannot run it. GC_REQUIRE_BD_CONDITIONAL_RELEASE=1 turns the row's capability

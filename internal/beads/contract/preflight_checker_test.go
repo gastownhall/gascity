@@ -685,18 +685,18 @@ func TestCheckVersionCompatSemverCompatibleNewerBD(t *testing.T) {
 	}
 }
 
-// TestCheckVersionCompatSamePrereleaseSeries pins the second widening, added for
-// the beads v1.3.0-rc.2 pin bump. That bump had to split the two anchors --
-// go.mod took rc.2, deps.env BD_VERSION stayed on rc.1, because upstream
-// published rc.2 with no darwin assets and every macOS runner installs
-// BD_VERSION from a tarball. So the shipped pairing is an OLDER bd against a
-// NEWER library, which newerSemverCompatibleBD refuses by design.
+// TestCheckVersionCompatSamePrereleaseSeries pins the second widening, added
+// during the beads v1.3.0-rc.2 pin bump. gascity's own anchors are not split --
+// go.mod and deps.env BD_VERSION are both rc.2 -- so this does not gate the
+// shipped pairing. It gates the general case: an OLDER bd against a NEWER
+// library, which newerSemverCompatibleBD refuses by design.
 //
 // Within one prerelease series that refusal is wrong: rc.1 and rc.2 embed a
 // byte-identical internal/storage/schema (LatestVersion() == 66 on both), so
-// there is no skew to catch. Without this case the check FAILs, the verdict goes
-// BLOCKED, and every scope silently falls off the native Dolt store onto the
-// fork-per-op BdStore -- the exact degradation #5164 was fixed to prevent.
+// there is no skew to catch. Where such a pairing does occur, the check would
+// FAIL, the verdict would go BLOCKED, and every scope would silently fall off
+// the native Dolt store onto the fork-per-op BdStore -- the exact degradation
+// #5164 was fixed to prevent.
 //
 // The widening stays narrow, and the negative cases below are the point: a
 // different release's prerelease, and an RC against its own final release, must

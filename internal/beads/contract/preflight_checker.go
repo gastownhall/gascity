@@ -310,12 +310,16 @@ func newerSemverCompatibleBD(bdVersion, libraryVersion string) bool {
 //
 // newerSemverCompatibleBD deliberately refuses an OLDER bd, because an older bd
 // may not understand a newer library's schema. Within one prerelease series that
-// reasoning does not apply: an RC series converges on a single release, and the
-// pin bump that motivated this (gascity's move to beads v1.3.0-rc.2) had to run
-// an rc.1 bd against an rc.2 library because upstream published rc.2 with no
-// darwin assets, so BD_VERSION could not follow the go.mod pin. Those two RCs
-// embed a byte-identical internal/storage/schema — both compute LatestVersion()
-// == 66 — so the skew the check exists to catch is not present.
+// reasoning does not apply: an RC series converges on a single release, so its
+// candidates carry no schema-skew signal relative to each other — v1.3.0-rc.1
+// and v1.3.0-rc.2 embed a byte-identical internal/storage/schema, both computing
+// LatestVersion() == 66.
+//
+// gascity's own pins do not currently produce that pairing (BD_VERSION and
+// BD_CURRENT_VERSION are both v1.3.0-rc.2), so this widening is not load-bearing
+// for the current bump. It is kept because it is correct on its own terms: any
+// operator running a bd from elsewhere in the same RC series should not be
+// refused for a skew that cannot exist.
 //
 // Kept deliberately narrow: BOTH sides must be prereleases and the release they
 // are candidates for must be identical, so every cross-release skew, and an RC

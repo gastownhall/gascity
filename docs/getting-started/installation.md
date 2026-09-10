@@ -41,7 +41,7 @@ under heavy write load.
 
 The exact versions CI pins are in [`deps.env`](https://github.com/gastownhall/gascity/blob/main/deps.env).
 
-**bd note:** `deps.env` currently pins `BD_VERSION=v1.3.0-rc.1`, a prerelease
+**bd note:** `deps.env` currently pins `BD_VERSION=v1.3.0-rc.2`, a prerelease
 that is deliberately not published to Homebrew, npm or PyPI. `brew install
 beads` gives you the latest stable release instead, which is an OLDER bd than
 the one this gc was built and tested against. To match CI exactly, install the
