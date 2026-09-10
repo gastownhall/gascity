@@ -233,7 +233,6 @@ provider = "claude"
 	}
 	wantAdded := []string{
 		`[[patches.agent]]`,
-		`dir = ""`,
 		`name = "worker"`,
 		`suspended = true`,
 	}

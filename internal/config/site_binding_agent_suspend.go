@@ -21,8 +21,16 @@ import (
 var ErrSurgicalAgentEditUnsupported = errors.New("surgical agent suspend/resume edit not supported for this city.toml")
 
 var (
-	tomlNameLineRe      = regexp.MustCompile(`^\s*name\s*=\s*"((?:[^"\\]|\\.)*)"\s*(?:#.*)?$`)
-	tomlDirLineRe       = regexp.MustCompile(`^\s*dir\s*=\s*"((?:[^"\\]|\\.)*)"\s*(?:#.*)?$`)
+	tomlNameLineRe = regexp.MustCompile(`^\s*name\s*=\s*"((?:[^"\\]|\\.)*)"\s*(?:#.*)?$`)
+	tomlDirLineRe  = regexp.MustCompile(`^\s*dir\s*=\s*"((?:[^"\\]|\\.)*)"\s*(?:#.*)?$`)
+	// tomlRigLineRe deliberately matches the key alone, not a quoted value
+	// like its siblings: rig is a second targeting key that folds into the
+	// same identity as dir (see AgentPatch.TargetQualifiedName), including
+	// the "*" wildcard scope. This matcher does not model that fold, so any
+	// block carrying a rig key -- in any value syntax -- is refused rather
+	// than matched on dir alone, which would silently edit a rig-scoped
+	// block on behalf of a city-scoped target.
+	tomlRigLineRe       = regexp.MustCompile(`^\s*rig\s*=`)
 	tomlSuspendedLineRe = regexp.MustCompile(`^(\s*suspended\s*=\s*)(?:true|false)\b(.*)$`)
 )
 
@@ -224,7 +232,7 @@ func findTOMLArrayBlock(lines []string, header, targetName, targetDir string) (s
 			}
 		}
 
-		name, dir, hasName := "", "", false
+		name, dir, hasName, hasRig := "", "", false, false
 		for j := bodyStart; j < bodyEnd; j++ {
 			if m := tomlNameLineRe.FindStringSubmatch(lines[j]); m != nil {
 				name, hasName = m[1], true
@@ -232,7 +240,14 @@ func findTOMLArrayBlock(lines []string, header, targetName, targetDir string) (s
 			}
 			if m := tomlDirLineRe.FindStringSubmatch(lines[j]); m != nil {
 				dir = m[1]
+				continue
 			}
+			if tomlRigLineRe.MatchString(lines[j]) {
+				hasRig = true
+			}
+		}
+		if hasRig {
+			continue
 		}
 		if hasName && name == targetName && dir == targetDir {
 			matches++

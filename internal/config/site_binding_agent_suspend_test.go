@@ -308,3 +308,54 @@ func strippedLines(data []byte) []string {
 	}
 	return out
 }
+
+// TestStripAgentPatchSuspendedForEdit_RefusesRigScopedPatchBlock pins the
+// rig-targeting safety valve. AgentPatch grew a second targeting key, `rig`,
+// which folds into the same identity as the legacy `dir` key (see
+// AgentPatch.TargetQualifiedName). The byte matcher reads only `name` and
+// `dir`, so a block written with `rig = "myrig"` would otherwise parse as
+// dir == "" and match a *city*-scoped target -- a confident wrong match that
+// the "refuse rather than guess" guard cannot see, because nothing looks
+// ambiguous. A block carrying a rig key must therefore never match: the edit
+// refuses with ErrSurgicalAgentEditUnsupported and leaves city.toml
+// byte-for-byte unchanged.
+func TestStripAgentPatchSuspendedForEdit_RefusesRigScopedPatchBlock(t *testing.T) {
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "city.toml")
+	original := []byte(`# City configuration for Acme Corp.
+[workspace]
+name = "acme-city"
+
+[[agent]]
+name = "worker"
+
+# Rig-scoped override -- must not be touched by a city-scoped resume.
+[[patches.agent]]
+rig = "myrig"
+name = "worker"
+suspended = true
+`)
+	if err := os.WriteFile(cityPath, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// Resume the city-scoped "worker" (dir == ""), whose identity is
+	// distinct from the rig-scoped patch block's.
+	err = StripAgentPatchSuspendedForEdit(fsys.OSFS{}, cityPath, cfg, "", "worker")
+	if !errors.Is(err, ErrSurgicalAgentEditUnsupported) {
+		t.Fatalf("StripAgentPatchSuspendedForEdit(city-scoped target, rig-scoped block) error = %v, want wrapping ErrSurgicalAgentEditUnsupported", err)
+	}
+
+	final, err := os.ReadFile(cityPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !bytes.Equal(final, original) {
+		t.Fatalf("rig-scoped [[patches.agent]] block was modified by a city-scoped resume:\nbefore:\n%s\nafter:\n%s", original, final)
+	}
+}
