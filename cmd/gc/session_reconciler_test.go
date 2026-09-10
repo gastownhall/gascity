@@ -8754,6 +8754,71 @@ func TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError(t *testing.
 	}
 }
 
+// TestReconcileSessionBeads_RollsBackPendingCreatePreservesConfiguredNamedSession
+// probes ga-pmafyc (round 3): unlike TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError
+// above — where "sky" is an ORPHANED named session (not present in
+// cfg.NamedSessions, so configuredNames["sky"] is false) and is correctly
+// destructively closed — a CONFIGURED named session (mode="always", present
+// in cfg.NamedSessions) that hits the exact same single transient provider
+// start error during a pending-create (e.g. a gc suspend/resume cycle: the
+// session bead re-enters pending-create to be woken again, and the resume
+// attempt transiently fails) must NOT be destructively closed with its
+// session_name cleared. commitStartFailure's rollbackPendingCreate call in
+// the rollbackPending branch has no configuredNames[name] guard, unlike the
+// sibling finalizeDrainAckStoppedSession call site fixed for the same bug
+// (mechanism #2, 25798164ae), so a resume-in-progress on a named/configured
+// session currently loses its pending-create bead and identity on a single
+// transient start failure instead of surviving for the reconciler to retry.
+func TestReconcileSessionBeads_RollsBackPendingCreatePreservesConfiguredNamedSession(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "helper",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{Template: "helper", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "helper")
+	env.sp.StartErrors = map[string]error{sessionName: errors.New("start failed")}
+	env.desiredState[sessionName] = TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  sessionName,
+		TemplateName: "helper",
+	}
+
+	session := env.createSessionBead(sessionName, "helper")
+	env.setSessionMetadata(&session, map[string]string{
+		"session_name_explicit":      "true",
+		"pending_create_claim":       "true",
+		"state":                      "creating",
+		"continuation_epoch":         "1",
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "helper",
+		namedSessionModeMetadata:     "always",
+	})
+
+	woken := env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{session}, nil, nil)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+
+	b, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	t.Logf("post-reconcile bead: status=%q metadata=%#v", b.Status, b.Metadata)
+	if b.Status != "open" {
+		t.Fatalf("status = %q, want open (configured named session must survive a transient rollback-pending start failure, not be destructively closed)", b.Status)
+	}
+	if got := b.Metadata["session_name"]; got != sessionName {
+		t.Errorf("session_name = %q, want %q (identity must survive a transient rollback-pending start failure)", got, sessionName)
+	}
+	if got := b.Metadata[namedSessionMetadataKey]; got != "true" {
+		t.Errorf("configured_named_session = %q, want true (must survive)", got)
+	}
+}
+
 func TestReconcileSessionBeads_PoolScaleDownOrphansExcess(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
