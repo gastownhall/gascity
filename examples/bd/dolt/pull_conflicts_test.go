@@ -43,6 +43,11 @@ func writePullConflictFakeDolt(t *testing.T, dir, mode string) string {
 		session = "printf '%s' " + shellQuote(fakePullRealSession) + "; exit 1"
 	case "nothing":
 		session = "printf '%s\\n' 'k,t,n' 'error on line 1 for query CALL DOLT_COMMIT(...): Error 1105 (HY000): nothing to commit'; exit 1"
+	case "nothingadversary":
+		// A conflicted table literally named "nothing to commit" beside the
+		// unresolved issues conflict: the report carries the phrase, the
+		// commit was refused.
+		session = "printf '%s\\n' 'k,t,n' 'conflict,issues,1' 'conflict,nothing to commit,1' 'k,id,differing' 'row,hw-2,\"status,updated_at,row_lock,closed_at\"' 'k,t,n' 'remaining,issues,1' 'remaining,nothing to commit,1' 'error on line 1 for query CALL DOLT_COMMIT(...): Error 1105 (HY000): error: the table(s) issues, nothing to commit are in conflict'; exit 1"
 	}
 	pullFailure := "printf '%s\\n' " + shellQuote(fakePullConflictError) + " >&2; exit 1"
 	if mode == "plainfail" {
@@ -175,12 +180,12 @@ func TestPullResolvesRowLockOnlyConflictInsideOneTransaction(t *testing.T) {
 			predicate, _, _ := strings.Cut(session[deleteIdx:], ";")
 			for _, want := range []string{
 				"our_diff_type = 'modified' AND their_diff_type = 'modified'",
-				"`our_id` <=> `their_id`",
-				"`our_title` <=> `their_title`",
-				"`our_description` <=> `their_description`",
-				"`our_status` <=> `their_status`",
-				"`our_metadata` <=> `their_metadata`",
-				"`our_closed_at` <=> `their_closed_at`",
+				"BINARY `our_id` <=> BINARY `their_id`",
+				"BINARY `our_title` <=> BINARY `their_title`",
+				"BINARY `our_description` <=> BINARY `their_description`",
+				"BINARY `our_status` <=> BINARY `their_status`",
+				"BINARY `our_metadata` <=> BINARY `their_metadata`",
+				"BINARY `our_closed_at` <=> BINARY `their_closed_at`",
 				"table_name = 'issues') = 'id,title,description,status,metadata,updated_at,row_lock,closed_at'",
 			} {
 				if !strings.Contains(predicate, want) {
@@ -197,7 +202,7 @@ func TestPullResolvesRowLockOnlyConflictInsideOneTransaction(t *testing.T) {
 				"updated_at = (SELECT c.their_updated_at FROM dolt_conflicts_issues c WHERE c.our_id = issues.id AND ",
 				"SELECT 'remaining' AS k, `table` AS t, num_conflicts AS n FROM dolt_conflicts;",
 				"CALL DOLT_ADD('-A'); CALL DOLT_COMMIT('-m', 'gc dolt pull: merge origin/main (row_lock/updated_at-only conflicts in issues resolved to the remote)', '--author', 'gc dolt pull <gc-dolt-pull@gascity.local>'); COMMIT;",
-				"IF(`our_row_lock` <=> `their_row_lock`, NULL, 'row_lock')",
+				"IF(BINARY `our_row_lock` <=> BINARY `their_row_lock`, NULL, 'row_lock')",
 			} {
 				if !strings.Contains(session, want) {
 					t.Errorf("session missing %q:\n%s", want, session)
@@ -252,15 +257,43 @@ func TestPullReportsRetriedPullWithNoConflictAsPlainPull(t *testing.T) {
 }
 
 func TestPullNeverAutoResolvesANonBdIssuesTable(t *testing.T) {
-	out, log, code := runPullConflictScript(t, "notbd", true)
-	if code != 1 {
-		t.Fatalf("exit = %d, want 1\n%s", code, out)
+	for _, sqlMode := range []bool{true, false} {
+		t.Run(fmt.Sprintf("sql=%v", sqlMode), func(t *testing.T) {
+			out, log, code := runPullConflictScript(t, "notbd", sqlMode)
+			if code != 1 {
+				t.Fatalf("exit = %d, want 1\n%s", code, out)
+			}
+			if resolvingSession(log) != "" {
+				t.Fatalf("no resolving session may run without row_lock/updated_at columns\nlog:\n%s", log)
+			}
+			if !strings.Contains(out, "app: ERROR: pull failed: merge conflict, and the issues table is not a bd store (no row_lock/updated_at) — resolve manually") {
+				t.Fatalf("output missing the not-a-bd-store error:\n%s", out)
+			}
+			// CLI mode holds the merge on disk; every refused path puts it back.
+			if strings.Contains(log, "merge --abort") != !sqlMode {
+				t.Fatalf("merge --abort logged = %v, want %v\nlog:\n%s", strings.Contains(log, "merge --abort"), !sqlMode, log)
+			}
+		})
 	}
-	if resolvingSession(log) != "" {
-		t.Fatalf("no resolving session may run without row_lock/updated_at columns\nlog:\n%s", log)
-	}
-	if !strings.Contains(out, "app: ERROR: pull failed: merge conflict, and the issues table is not a bd store (no row_lock/updated_at) — resolve manually") {
-		t.Fatalf("output missing the not-a-bd-store error:\n%s", out)
+}
+
+func TestPullNothingToCommitIsMatchedByTheErrorLineNotByResultText(t *testing.T) {
+	for _, sqlMode := range []bool{true, false} {
+		t.Run(fmt.Sprintf("sql=%v", sqlMode), func(t *testing.T) {
+			out, log, code := runPullConflictScript(t, "nothingadversary", sqlMode)
+			if code != 1 {
+				t.Fatalf("exit = %d, want 1\n%s", code, out)
+			}
+			if strings.Contains(out, "pulled from") {
+				t.Fatalf("a refused merge reported as success:\n%s", out)
+			}
+			if !strings.Contains(out, "app: ERROR: pull failed: 2 conflict(s) in issues nothing to commit need manual resolution; nothing was written") {
+				t.Fatalf("output missing the manual-resolution error:\n%s", out)
+			}
+			if strings.Contains(log, "merge --abort") != !sqlMode {
+				t.Fatalf("merge --abort logged = %v, want %v\nlog:\n%s", strings.Contains(log, "merge --abort"), !sqlMode, log)
+			}
+		})
 	}
 }
 

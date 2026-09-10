@@ -190,11 +190,13 @@ valid_column_name() {
 #
 # CONFLICT_PREDICATE selects a row of dolt_conflicts_issues that is a benign
 # conflict: both sides modified the row, every column other than row_lock
-# and updated_at is equal on both sides (NULL-safe), and the `issues` schema
-# the merge produced is still the schema this predicate was built from (a
-# schema change under the merge would have added a column the predicate
-# does not compare, so the fingerprint makes the predicate match nothing and
-# the transaction fails closed).
+# and updated_at is equal on both sides — compared as bytes (BINARY), so a
+# case-insensitive collation cannot make "Fix API" and "fix api" equal, and
+# NULL-safe (<=>) — and the `issues` schema the merge produced is still the
+# schema this predicate was built from (a schema change under the merge
+# would have added a column the predicate does not compare, so the
+# fingerprint makes the predicate match nothing and the transaction fails
+# closed).
 #
 # CONFLICT_DIFFERING is the comma-separated list of columns that differ on a
 # conflicted row, for the report.
@@ -212,18 +214,28 @@ benign_conflict_sql() {
   for col in $cols; do
     valid_column_name "$col" || return 1
     fingerprint="${fingerprint:+$fingerprint,}$col"
-    differing="${differing:+$differing, }IF(\`our_$col\` <=> \`their_$col\`, NULL, '$col')"
+    differing="${differing:+$differing, }IF(BINARY \`our_$col\` <=> BINARY \`their_$col\`, NULL, '$col')"
     case "$col" in
       row_lock) has_row_lock=true; continue ;;
       updated_at) has_updated_at=true; continue ;;
     esac
-    predicate="$predicate AND \`our_$col\` <=> \`their_$col\`"
+    predicate="$predicate AND BINARY \`our_$col\` <=> BINARY \`their_$col\`"
   done
   [ "$has_row_lock" = true ] && [ "$has_updated_at" = true ] || return 1
   predicate="$predicate AND (SELECT GROUP_CONCAT(column_name ORDER BY ordinal_position) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'issues') = '$fingerprint'"
   CONFLICT_PREDICATE="$predicate"
   CONFLICT_DIFFERING="CONCAT_WS(',', $differing)"
   return 0
+}
+
+# abort_cli_merge NAME DIR — CLI mode holds a refused merge in the working
+# set on disk; put the database back at its pre-pull head. SQL mode never
+# wrote anything to abort. An abort that fails is reported, not hidden.
+abort_cli_merge() {
+  [ "$server_running" = true ] && return 0
+  if ! (cd "$2" && dolt merge --abort >/dev/null 2>&1); then
+    echo "  $1: WARNING: dolt merge --abort failed; the conflicted merge is still in the working set (dolt conflicts cat issues)" >&2
+  fi
 }
 
 # resolve_benign_conflicts NAME DIR REMOTE URL — the conflicted pull, retried
@@ -247,6 +259,7 @@ benign_conflict_sql() {
 resolve_benign_conflicts() {
   name="$1"; dir="$2"; remote_name="$3"; remote_url="$4"
   if ! benign_conflict_sql "$name" "$dir"; then
+    abort_cli_merge "$name" "$dir"
     echo "  $name: ERROR: pull failed: merge conflict, and the issues table is not a bd store (no row_lock/updated_at) — resolve manually" >&2
     return 1
   fi
@@ -272,12 +285,16 @@ resolve_benign_conflicts() {
     echo "  $name: pulled from $remote_url (resolved $row_count row_lock/updated_at-only conflict(s) in issues: $ids)"
     return 0
   fi
-  case "$out" in
-    *"nothing to commit"*)
-      echo "  $name: pulled from $remote_url"
-      return 0
-      ;;
-  esac
+  reported=$(printf '%s\n' "$out" | grep -c '^conflict,' || true)
+  # The retried pull found no conflict (a fast-forward or a clean merge,
+  # both durable before COMMIT) exactly when the session reported no
+  # conflicted table and then DOLT_COMMIT itself had nothing to commit. The
+  # error line is matched by its own shape — result rows (a table could be
+  # named anything) never count.
+  if [ "$reported" -eq 0 ] && printf '%s\n' "$out" | grep -q '^error on line [0-9]* for query CALL DOLT_COMMIT(.*nothing to commit'; then
+    echo "  $name: pulled from $remote_url"
+    return 0
+  fi
   remaining=$(printf '%s\n' "$out" | awk -F, '$1 == "remaining" {n += $3} END {print n + 0}')
   if [ "$remaining" -eq 0 ]; then
     remaining=$(printf '%s\n' "$out" | awk -F, '$1 == "conflict" {n += $3} END {print n + 0}')
@@ -286,9 +303,7 @@ resolve_benign_conflicts() {
   if [ -n "$rows" ]; then
     printf '%s\n' "$rows" | sed "s/^/  $name: conflict /" >&2
   fi
-  if [ "$server_running" != true ]; then
-    (cd "$dir" && dolt merge --abort >/dev/null 2>&1) || true
-  fi
+  abort_cli_merge "$name" "$dir"
   echo "  $name: ERROR: pull failed: $remaining conflict(s) in ${tables:-unknown table(s)} need manual resolution; nothing was written" >&2
   case "$out" in
     *"nothing to commit"*|*"in conflict"*|*"unresolved conflicts"*) ;;

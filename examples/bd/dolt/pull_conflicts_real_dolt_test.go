@@ -20,11 +20,12 @@ import (
 // `go test -tags dolt_integration -run RealDoltTwoClones ./examples/bd/dolt/`.
 
 // bdIssuesSchema is the shape of bd's issues table that matters here: the
-// primary key, text and JSON columns the equality predicate must handle,
-// and the three columns automatic sweeps touch.
+// primary key, text and JSON columns the equality predicate must handle, a
+// case-insensitive collation on title (the predicate compares bytes, not
+// collation-equal strings), and the three columns automatic sweeps touch.
 const bdIssuesSchema = `CREATE TABLE issues (
   id VARCHAR(255) PRIMARY KEY,
-  title VARCHAR(500) NOT NULL,
+  title VARCHAR(500) NOT NULL COLLATE utf8mb4_0900_ai_ci,
   description TEXT NOT NULL,
   status VARCHAR(32) NOT NULL DEFAULT 'open',
   assignee VARCHAR(255),
@@ -182,6 +183,14 @@ func TestRealDoltTwoClonesPull(t *testing.T) {
 			jadegate: `UPDATE issues SET status = 'closed', closed_at = '2026-09-10 15:10:03', updated_at = '2026-09-10 15:10:03', row_lock = 'jadegate-lock', metadata = JSON_OBJECT('close_reason', 'convoy autoclose: all children closed') WHERE id = 'hw-c'`,
 		},
 		{
+			// Two titles equal under the column's case-insensitive collation
+			// are not the same title; the predicate compares bytes.
+			name:     "collation",
+			seed:     deferred,
+			citadel:  wakeCitadel + `; UPDATE issues SET title = 'Fix API' WHERE id = 'hw-1'`,
+			jadegate: wakeJadegate + `; UPDATE issues SET title = 'fix api' WHERE id = 'hw-1'`,
+		},
+		{
 			// A benign row and a real one in the same pull: nothing is
 			// written, the benign row included.
 			name:     "mixed",
@@ -281,6 +290,30 @@ func TestRealDoltTwoClonesPull(t *testing.T) {
 		}
 		if head(jadegate) != headBefore {
 			t.Fatalf("jadegate HEAD moved under a refused pull: %s -> %s", headBefore, head(jadegate))
+		}
+		assertClean(jadegate)
+	})
+
+	t.Run("collation-equal titles are a real conflict", func(t *testing.T) {
+		_, jadegate := clones["collation"][0], clones["collation"][1]
+		before := serverSQL(t, doltPath, port, jadegate, rowQuery+", title")
+		headBefore := head(jadegate)
+		if got := serverSQL(t, doltPath, port, jadegate, "SELECT title = 'Fix API' FROM issues WHERE id = 'hw-1'"); !strings.HasSuffix(got, "\n1") && !strings.HasSuffix(got, "\ntrue") {
+			t.Fatalf("fixture: title should be collation-equal to citadel's, got %q", got)
+		}
+
+		out, code := runPullScript(t, root, cityPath, dataDir, port, jadegate)
+		if code != 1 {
+			t.Fatalf("jadegate pull exit = %d, want 1\n%s", code, out)
+		}
+		if !strings.Contains(out, jadegate+": conflict hw-1: title,updated_at,row_lock") {
+			t.Errorf("output missing the title in the differing columns:\n%s", out)
+		}
+		if got := serverSQL(t, doltPath, port, jadegate, rowQuery+", title"); got != before {
+			t.Fatalf("rows changed under a refused pull:\n%s\nwas:\n%s", got, before)
+		}
+		if head(jadegate) != headBefore {
+			t.Fatalf("jadegate HEAD moved under a refused pull")
 		}
 		assertClean(jadegate)
 	})
