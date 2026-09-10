@@ -232,7 +232,7 @@ func TestPullResolvesRowLockOnlyConflictInsideOneTransaction(t *testing.T) {
 			for _, want := range []string{
 				"UPDATE issues SET row_lock = (SELECT c.their_row_lock FROM dolt_conflicts_issues c WHERE c.our_id = issues.id AND ",
 				"updated_at = (SELECT c.their_updated_at FROM dolt_conflicts_issues c WHERE c.our_id = issues.id AND ",
-				"SELECT 'conflict' AS k, num_conflicts AS n, `table` AS t FROM dolt_conflicts; SELECT 'schema' AS k, COUNT(*) AS n FROM dolt_schema_conflicts; SELECT 'row' AS k, CONCAT(our_id, ': ', CONCAT_WS(',', IF(BINARY `our_id` <=> BINARY `their_id`, NULL, 'id'),",
+				"SELECT 'conflict' AS k, num_conflicts AS n, `table` AS t FROM dolt_conflicts; SELECT 'schema' AS k, COUNT(*) AS n FROM dolt_schema_conflicts; SELECT 'row' AS k, CONCAT(COALESCE(our_id, their_id, base_id), ': ', CONCAT_WS(',', IF(BINARY `our_id` <=> BINARY `their_id`, NULL, 'id'),",
 				"SELECT 'remaining' AS k, num_conflicts AS n, `table` AS t FROM dolt_conflicts;",
 				"CALL DOLT_ADD('-A'); CALL DOLT_COMMIT('-m', 'gc dolt pull: merge origin/main (row_lock/updated_at-only conflicts in issues resolved to the remote)', '--author', 'gc dolt pull <gc-dolt-pull@gascity.local>'); COMMIT;",
 				"IF(BINARY `our_row_lock` <=> BINARY `their_row_lock`, NULL, 'row_lock')",

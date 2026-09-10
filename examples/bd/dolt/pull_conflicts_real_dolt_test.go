@@ -198,6 +198,15 @@ func TestRealDoltTwoClonesPull(t *testing.T) {
 			citadel:  wakeCitadel + `; UPDATE issues SET status = 'closed', closed_at = '2026-09-10 06:00:00', updated_at = '2026-09-10 06:00:00', row_lock = 'citadel-lock' WHERE id = 'hw-2'`,
 			jadegate: wakeJadegate + `; UPDATE issues SET status = 'in_progress', assignee = 'jg-worker', updated_at = '2026-09-10 06:00:01', row_lock = 'jadegate-lock' WHERE id = 'hw-2'`,
 		},
+		{
+			// A delete/modify conflict: OUR side (jadegate) removed the row,
+			// THEIR side modified it, so our_* is NULL in dolt_conflicts_issues.
+			// Not benign — and the report must still name the row.
+			name:     "deletemodify",
+			seed:     `INSERT INTO issues (id, title, description, status, metadata, created_at, updated_at, row_lock) VALUES ('hw-d', 'doomed', '', 'open', JSON_OBJECT(), '2026-09-09 00:00:00', '2026-09-09 00:00:00', 'base');`,
+			citadel:  `UPDATE issues SET title = 'kept', updated_at = '2026-09-10 07:00:00', row_lock = 'citadel-lock' WHERE id = 'hw-d'`,
+			jadegate: `DELETE FROM issues WHERE id = 'hw-d'`,
+		},
 	}
 	clones := map[string][2]string{}
 	for _, sc := range scenarios {
@@ -287,6 +296,32 @@ func TestRealDoltTwoClonesPull(t *testing.T) {
 		}
 		if got := serverSQL(t, doltPath, port, jadegate, rowQuery); got != before {
 			t.Fatalf("jadegate row changed under a refused pull:\n%s\nwas:\n%s", got, before)
+		}
+		if head(jadegate) != headBefore {
+			t.Fatalf("jadegate HEAD moved under a refused pull: %s -> %s", headBefore, head(jadegate))
+		}
+		assertClean(jadegate)
+	})
+
+	t.Run("a delete/modify conflict names its row", func(t *testing.T) {
+		_, jadegate := clones["deletemodify"][0], clones["deletemodify"][1]
+		before := serverSQL(t, doltPath, port, jadegate, rowQuery)
+		headBefore := head(jadegate)
+
+		out, code := runPullScript(t, root, cityPath, dataDir, port, jadegate)
+		if code != 1 {
+			t.Fatalf("jadegate pull exit = %d, want 1\n%s", code, out)
+		}
+		for _, want := range []string{
+			jadegate + ": conflict hw-d: ",
+			jadegate + ": ERROR: pull failed: 1 conflict(s) in issues need manual resolution; nothing was written",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("output missing %q:\n%s", want, out)
+			}
+		}
+		if got := serverSQL(t, doltPath, port, jadegate, rowQuery); got != before {
+			t.Fatalf("jadegate rows changed under a refused pull:\n%s\nwas:\n%s", got, before)
 		}
 		if head(jadegate) != headBefore {
 			t.Fatalf("jadegate HEAD moved under a refused pull: %s -> %s", headBefore, head(jadegate))

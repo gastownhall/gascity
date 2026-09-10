@@ -274,7 +274,9 @@ resolve_benign_conflicts() {
   # displayed name only).
   sql="$sql SELECT 'conflict' AS k, num_conflicts AS n, \`table\` AS t FROM dolt_conflicts;"
   sql="$sql SELECT 'schema' AS k, COUNT(*) AS n FROM dolt_schema_conflicts;"
-  sql="$sql SELECT 'row' AS k, CONCAT(our_id, ': ', $CONFLICT_DIFFERING) AS detail FROM dolt_conflicts_issues;"
+  # A delete/modify conflict has no our_id (our side removed the row); the
+  # row is still named from whichever side has it.
+  sql="$sql SELECT 'row' AS k, CONCAT(COALESCE(our_id, their_id, base_id), ': ', $CONFLICT_DIFFERING) AS detail FROM dolt_conflicts_issues;"
   sql="$sql UPDATE issues SET row_lock = (SELECT c.their_row_lock FROM dolt_conflicts_issues c WHERE c.our_id = issues.id AND $p), updated_at = (SELECT c.their_updated_at FROM dolt_conflicts_issues c WHERE c.our_id = issues.id AND $p) WHERE id IN (SELECT c.our_id FROM dolt_conflicts_issues c WHERE $p);"
   sql="$sql DELETE FROM dolt_conflicts_issues WHERE $p;"
   sql="$sql SELECT 'remaining' AS k, num_conflicts AS n, \`table\` AS t FROM dolt_conflicts;"
