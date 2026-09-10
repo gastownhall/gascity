@@ -411,6 +411,7 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 	cmd.Flags().StringVar(&doltProjectIDFlag, "dolt-project-id", "", "authoritative beads project_id for the identity handshake (or "+envBeadsProjectID+"); derived from a bd_<id> --dolt-database when omitted")
 	cmd.Flags().BoolVar(&skipProviderReadiness, "skip-provider-readiness", false, "skip provider login/readiness checks during init and continue startup")
 	cmd.Flags().BoolVar(&noStart, "no-start", false, "initialize files and imports without registering or starting the city")
+	cmd.Flags().BoolVar(&noStart, "standalone", false, "alias for --no-start: never touch the shared supervisor (no service-file install, no registration, no start); run the city isolated afterwards with 'gc start --foreground'")
 	cmd.Flags().BoolVar(&preserveExisting, "preserve-existing", false, "keep any pre-authored pack.toml, city.toml, or agent prompt files instead of overwriting them")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON summary")
 	cmd.Flags().BoolVar(&assumeYesForSupervisorCycle, "yes", false, "bypass the cross-city supervisor cycle confirmation prompt (warning is still printed for the audit trail)")
