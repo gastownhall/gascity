@@ -218,7 +218,7 @@ func TestPullResolvesRowLockOnlyConflictInsideOneTransaction(t *testing.T) {
 				"BINARY `our_status` <=> BINARY `their_status`",
 				"BINARY `our_metadata` <=> BINARY `their_metadata`",
 				"BINARY `our_closed_at` <=> BINARY `their_closed_at`",
-				"table_name = 'issues') = 'id,title,description,status,metadata,updated_at,row_lock,closed_at'",
+				"table_name = 'issues') = '8:id,title,description,status,metadata,updated_at,row_lock,closed_at'",
 			} {
 				if !strings.Contains(predicate, want) {
 					t.Errorf("predicate missing %q:\n%s", want, predicate)

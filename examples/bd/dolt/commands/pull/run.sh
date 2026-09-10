@@ -222,7 +222,13 @@ benign_conflict_sql() {
     predicate="$predicate AND BINARY \`our_$col\` <=> BINARY \`their_$col\`"
   done
   [ "$has_row_lock" = true ] && [ "$has_updated_at" = true ] || return 1
-  predicate="$predicate AND (SELECT GROUP_CONCAT(column_name ORDER BY ordinal_position) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'issues') = '$fingerprint'"
+  # The schema guard: the merged table must still have exactly the columns
+  # the predicate compared. GROUP_CONCAT obeys group_concat_max_len and
+  # truncates silently, so the count travels beside the names (a column
+  # appended past a truncation point changes the count) and every session
+  # that evaluates the predicate raises the limit (see session_prelude).
+  ncols=$(printf '%s\n' "$cols" | grep -c '.')
+  predicate="$predicate AND (SELECT CONCAT(COUNT(*), ':', GROUP_CONCAT(column_name ORDER BY ordinal_position)) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'issues') = '$ncols:$fingerprint'"
   CONFLICT_PREDICATE="$predicate"
   CONFLICT_DIFFERING="CONCAT_WS(',', $differing)"
   return 0
@@ -264,7 +270,7 @@ resolve_benign_conflicts() {
     return 1
   fi
   p="$CONFLICT_PREDICATE"
-  sql="SET @@autocommit = 0;"
+  sql="SET @@autocommit = 0; SET @@session.group_concat_max_len = 1048576;"
   if [ "$server_running" = true ]; then
     sql="$sql CALL DOLT_PULL('$remote_name', 'main');"
   fi
