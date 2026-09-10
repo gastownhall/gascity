@@ -141,13 +141,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   qualifier — `gc.routed_to` landed unscoped and no pool ever claimed the
   re-attempt. Separately, `applyAttemptStepRoute`'s metadata-only pool
   branch never cleared `gc.session_affinity`/`gc.continuation_group` the
-  way `graphroute.ApplyGraphRouteBinding`'s `IndependentSteps` handling
+  way `graphroute.ApplyGraphRouteBinding`'s pool-branch affinity clear
   does, so a re-attempt for a one_shot lifecycle agent stayed pinned to
   session affinity for a runtime that had already exited after its
   bounded invocation. Both are fixed: the target qualifier now falls back
   to the step's own execution rig context, and metadata-only pool
   attempts for one_shot agents now clear the stale continuation/affinity
-  keys, mirroring `graphroute.GraphRouteBindingForAgent`.
+  keys, mirroring `graphroute.ApplyGraphRouteBinding`'s pool branch.
 
 - **A `lifecycle=one_shot` pool session that exits into a freeable sleep
   reason no longer blocks its own runtime name forever.** The session's

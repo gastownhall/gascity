@@ -1319,12 +1319,13 @@ func applyAttemptStepRoute(step *formula.RecipeStep, target string, cfg *config.
 		step.Labels = removeAttemptPoolLabels(step.Labels)
 		if binding.metadataOnly {
 			if binding.independentSteps {
-				// A one-shot runtime exits after one bounded invocation. Clear
-				// any session-pinning metadata the frozen step spec carried
-				// forward — it names a session that already exited and no
-				// pool slot will ever claim.
-				delete(step.Metadata, beadmeta.ContinuationGroupMetadataKey)
-				delete(step.Metadata, beadmeta.SessionAffinityMetadataKey)
+				// A one-shot runtime exits after one bounded invocation. Clear the
+				// pinned affinity pair the frozen step spec carried forward — it
+				// names a session that already exited, and a stale group
+				// re-vacuums this re-attempt onto an unrelated claiming session.
+				for _, key := range beadmeta.SessionAffinityMetadataKeys {
+					delete(step.Metadata, key)
+				}
 			}
 			step.Assignee = ""
 			return
@@ -1454,7 +1455,11 @@ func resolveAttemptRouteBinding(target string, cfg *config.City, store beads.Sto
 				binding.metadataOnly = true
 				// A one-shot runtime exits after a single bounded invocation, so
 				// no session survives between attempts to carry continuation.
-				// Mirrors graphroute.GraphRouteBindingForAgent's IndependentSteps.
+				// The compile-time analog is graphroute.ApplyGraphRouteBinding's
+				// pool branch, which clears the same pinned pair — but keys it on
+				// whether the authored recipe declared a continuation group. The
+				// retry path has no authored binding to read, so it keys on the
+				// target agent's lifecycle instead.
 				binding.independentSteps = agentCfg.Lifecycle == config.AgentLifecycleOneShot
 				return binding, true
 			}
