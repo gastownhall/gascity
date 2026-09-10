@@ -86,7 +86,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `protected N foreign/unknown identities` summary per sweep. Migration note
   for the removed-binding case: decommissioning an agent from config no longer
   lets the sweep reclaim its outstanding claims — release them explicitly
-  (`gc bd release`/reassign) when retiring a binding, and watch the summary
+  (`gc bd release-if-current <id> <assignee>`/reassign) when retiring a
+  binding, and watch the summary
   line for claims held back.
 
 - **The work-record close gate asks the repository the bead's OWNER points at,

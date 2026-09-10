@@ -230,7 +230,7 @@ func TestPoolAssigneeIsLocallyObservable(t *testing.T) {
 		{"namepool-themed instance", "repo/furiosa", true},
 		// cmd_hook.go writes session.GenerateAdhocIdentity straight into the
 		// claim assignee for an aliasless pool worker ("rig/polecat-adhoc-<hash>").
-		// Unrecognised, its work would be protected forever the moment that
+		// Unrecognized, its work would be protected forever the moment that
 		// session died — a silent LOCAL leak, the worst failure this gate has.
 		{"adhoc pool instance", "repo/worker-adhoc-a1b2c3d4e5", true},
 		{"legacy bound adhoc pool instance", "repo/pack.worker-adhoc-a1b2c3d4e5", true},
@@ -245,7 +245,7 @@ func TestPoolAssigneeIsLocallyObservable(t *testing.T) {
 		{"runtime session name", "gastown__dog-ga-up143", true},
 		{"session bead id form", "claude-mc-xyz", true},
 		{"empty", "", true},
-		// ga-8yi7ne: a NEIGHBOURING city's canonical "<rig>/<binding>.<name>"
+		// ga-8yi7ne: a NEIGHBORING city's canonical "<rig>/<binding>.<name>"
 		// whose binding this city does not mint. "pool" is not one of our
 		// imports; "worker" is our agent. Before the binding gate, every one of
 		// these resolved to our local worker and their live claims were
@@ -342,12 +342,12 @@ func TestProtectedForeignAssigneesSummary(t *testing.T) {
 // "<binding>.<name>" identity could have been minted HERE (ga-8yi7ne).
 //
 // Both sources are asserted, and so is the refusal: an unknown binding must be
-// rejected, because that is the only thing standing between a neighbouring
+// rejected, because that is the only thing standing between a neighboring
 // city's canonical identity and our local agent of the same leaf name.
 func TestCityMintsBinding(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "worker"},                            // unbound: contributes nothing
+			{Name: "worker"}, // unbound: contributes nothing
 			{Name: "polecat", BindingName: "gastown"},   // bound: contributes "gastown"
 			{Name: "dog", BindingName: "bd"},            // bound: contributes "bd"
 			{Name: "spaced", BindingName: "  padded  "}, // trimmed on both sides
@@ -363,8 +363,8 @@ func TestCityMintsBinding(t *testing.T) {
 		{"second binding on the same city", "bd", true},
 		{"binding is trimmed before comparison", "padded", true},
 		{"default rig import with no instantiated agent", "core", true},
-		{"neighbouring city's binding", "pool", false},
-		{"neighbouring city's other binding", "review", false},
+		{"neighboring city's binding", "pool", false},
+		{"neighboring city's other binding", "review", false},
 		{"empty binding is never ours", "", false},
 		{"whitespace binding is never ours", "   ", false},
 		{"agent NAME is not a binding", "worker", false},
