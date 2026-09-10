@@ -75,7 +75,7 @@ concurrency:
 
 env:
   DOLT_VERSION: "2.1.7"
-  BD_VERSION: "v1.1.0"
+  BD_VERSION: "v1.3.0-rc.1"
 
 # Tier routing is centralized in the `gate` job below, which always runs
 # and computes run_smoke/run_full/run_review_formulas plus a human-readable
