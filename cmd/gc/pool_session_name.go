@@ -143,6 +143,7 @@ func releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 	result DesiredStateResult,
 	rigStores map[string]beads.Store,
 	protectedWakeWork map[storeScopedBeadKey]struct{},
+	recordPhase func(TraceSiteCode, string, time.Time, map[string]any),
 ) []releasedPoolAssignment {
 	// Partial input snapshots can make active work look orphaned for this
 	// tick only: missing work affects drain decisions, and missing sessions
@@ -150,7 +151,7 @@ func releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 	if result.snapshotQueryPartial() {
 		return nil
 	}
-	return releaseOrphanedPoolAssignments(store, sessionStore, cfg, cityPath, openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStores, result.AssignedWorkStoreRefs, rigStores, protectedWakeWork)
+	return releaseOrphanedPoolAssignments(store, sessionStore, cfg, cityPath, openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStores, result.AssignedWorkStoreRefs, rigStores, protectedWakeWork, recordPhase)
 }
 
 // protectedWakeWorkKeys indexes the wake-candidate slice by store ref + bead ID
@@ -215,6 +216,7 @@ func releaseOrphanedPoolAssignments(
 	assignedWorkStoreRefs []string,
 	rigStores map[string]beads.Store,
 	protectedWakeWork map[storeScopedBeadKey]struct{},
+	recordPhase func(TraceSiteCode, string, time.Time, map[string]any),
 ) []releasedPoolAssignment {
 	if store == nil || cfg == nil || len(assignedWorkBeads) == 0 {
 		return nil
@@ -250,6 +252,9 @@ func releaseOrphanedPoolAssignments(
 	// at ~14 minutes.
 	sessionStoreLiveAssignee := make(map[string]bool, len(assignedWorkBeads))
 	ownerStoreLiveAssignee := make(map[string]bool, len(assignedWorkBeads))
+	probeStart := time.Now()
+	memoizedProbeCount := 0
+	fallbackProbeCount := 0
 
 	openIdentifiers := makeOpenSessionStoreRefIndex(cityPath, cfg, store, openSessionInfos, storeRefAware)
 	legacyOpenIdentifiers := make(map[string]struct{}, len(openSessionInfos)*5)
@@ -331,8 +336,10 @@ func releaseOrphanedPoolAssignments(
 			if ownerStore != nil {
 				live := false
 				if storeAware && storeRefAware {
+					memoizedProbeCount++
 					live = memoizedLiveOpenSessionAssignmentExists(ownerStoreLiveAssignee, workStoreRef+"\x00"+assignee, ownerStore, assignee)
 				} else {
+					fallbackProbeCount++
 					live = liveOpenSessionAssignmentExists(ownerStore, assignee)
 				}
 				if live {
@@ -358,6 +365,12 @@ func releaseOrphanedPoolAssignments(
 			continue
 		}
 		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
+	}
+	if recordPhase != nil {
+		recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.release_orphaned_pool_assignments.liveness_probe", probeStart, map[string]any{
+			"memoized_count": memoizedProbeCount,
+			"fallback_count": fallbackProbeCount,
+		})
 	}
 	return released
 }
