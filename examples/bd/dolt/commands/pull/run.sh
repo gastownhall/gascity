@@ -5,6 +5,21 @@
 # active databases. Falls back to CLI mode only when no server is running.
 # Pulls the configured remote's `main` branch in both SQL and CLI modes.
 #
+# Conflicts: a bd store shared between cities (pushed and pulled through a
+# hub) has the same automatic sweep run by every city — bd's defer wake flips
+# an expired deferred `issues` row to open on every store that reads the
+# ready front, and each store writes its own fresh row_lock and updated_at.
+# The change is the same on both sides; only those two columns differ, and
+# dolt reports the row as a conflict on the next pull (hw-ynz1w, 2026-09-10).
+# The pull resolves exactly that class and nothing else: a conflicted
+# `issues` row whose EVERY other column is equal on both sides takes the
+# remote's row_lock and updated_at (so the other city's next pull of this
+# merge is a fast-forward), inside one transaction dolt refuses to commit
+# while any conflict remains. A row that differs in any other column, a
+# conflict in any other table, or a schema change under the merge leaves the
+# store exactly as it was and the pull fails with the rows listed for manual
+# resolution. See resolve_benign_conflicts.
+#
 # Environment: GC_CITY_PATH, GC_DOLT_PORT, GC_DOLT_USER, GC_DOLT_PASSWORD,
 # GC_DOLT_REMOTE_<DB> (select among multiple remotes), GC_DOLT_PULL_ALLOW_REMOTE_<DB>=1 (permit a non-file:// pull)
 set -e
@@ -30,6 +45,13 @@ while [ $# -gt 0 ]; do
       echo "Environment:"
       echo "  GC_DOLT_REMOTE_<DB>                Select which remote to pull from when a database has several"
       echo "  GC_DOLT_PULL_ALLOW_REMOTE_<DB>=1   Permit pulling from a non-file:// remote"
+      echo ""
+      echo "Conflicts:"
+      echo "  A conflicted bd issues row that differs from the remote ONLY in"
+      echo "  row_lock and updated_at (the same automatic change written by two"
+      echo "  cities, e.g. bd's defer wake) takes the remote's values and the pull"
+      echo "  completes. Any other conflict leaves the database exactly as it was,"
+      echo "  prints the conflicted rows, and fails the pull for manual resolution."
       exit 0
       ;;
     *) echo "gc dolt pull: unknown flag: $1" >&2; exit 1 ;;
@@ -139,6 +161,142 @@ dolt_sql() {
     sql --result-format csv -q "$query"
 }
 
+# --- Conflict resolution -----------------------------------------------------
+#
+# run_db_sql NAME DIR QUERY — run QUERY against database NAME (SQL mode, on
+# the live server) or the database checkout at DIR (CLI mode), CSV on stdout.
+run_db_sql() {
+  if [ "$server_running" = true ]; then
+    dolt_sql "USE \`$1\`; $3"
+  else
+    (cd "$2" && run_bounded 120 dolt sql --result-format csv -q "$3")
+  fi
+}
+
+# valid_column_name — a bd column name is a plain identifier; anything else
+# is never spliced into SQL.
+valid_column_name() {
+  case "$1" in
+    ''|*[!A-Za-z0-9_]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# benign_conflict_sql NAME DIR — set CONFLICT_PREDICATE and CONFLICT_DIFFERING
+# from the `issues` schema of the database. Returns 1 (and sets neither) when
+# the schema cannot be read, has a column name that is not a plain
+# identifier, or is not a bd issues table (no row_lock or no updated_at):
+# then nothing is ever auto-resolved for this database.
+#
+# CONFLICT_PREDICATE selects a row of dolt_conflicts_issues that is a benign
+# conflict: both sides modified the row, every column other than row_lock
+# and updated_at is equal on both sides (NULL-safe), and the `issues` schema
+# the merge produced is still the schema this predicate was built from (a
+# schema change under the merge would have added a column the predicate
+# does not compare, so the fingerprint makes the predicate match nothing and
+# the transaction fails closed).
+#
+# CONFLICT_DIFFERING is the comma-separated list of columns that differ on a
+# conflicted row, for the report.
+benign_conflict_sql() {
+  CONFLICT_PREDICATE=""
+  CONFLICT_DIFFERING=""
+  cols_csv=$(run_db_sql "$1" "$2" "SELECT column_name FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'issues' ORDER BY ordinal_position" 2>/dev/null) || return 1
+  cols=$(printf '%s\n' "$cols_csv" | awk 'NR > 1 && $0 != "" {print}' | tr -d '\r"')
+  [ -n "$cols" ] || return 1
+  fingerprint=""
+  predicate="our_diff_type = 'modified' AND their_diff_type = 'modified'"
+  differing=""
+  has_row_lock=false
+  has_updated_at=false
+  for col in $cols; do
+    valid_column_name "$col" || return 1
+    fingerprint="${fingerprint:+$fingerprint,}$col"
+    differing="${differing:+$differing, }IF(\`our_$col\` <=> \`their_$col\`, NULL, '$col')"
+    case "$col" in
+      row_lock) has_row_lock=true; continue ;;
+      updated_at) has_updated_at=true; continue ;;
+    esac
+    predicate="$predicate AND \`our_$col\` <=> \`their_$col\`"
+  done
+  [ "$has_row_lock" = true ] && [ "$has_updated_at" = true ] || return 1
+  predicate="$predicate AND (SELECT GROUP_CONCAT(column_name ORDER BY ordinal_position) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'issues') = '$fingerprint'"
+  CONFLICT_PREDICATE="$predicate"
+  CONFLICT_DIFFERING="CONCAT_WS(',', $differing)"
+  return 0
+}
+
+# resolve_benign_conflicts NAME DIR REMOTE URL — the conflicted pull, retried
+# inside one transaction that resolves the benign rows and commits only when
+# no conflict is left. Prints the pull result line and returns 0 when the
+# merge landed; otherwise prints the conflicted rows and the error and
+# returns 1 with the database exactly as it was before the pull (in CLI
+# mode the on-disk merge is aborted).
+#
+# SQL mode pulls again inside the transaction (the failed autocommit pull
+# rolled its merge back); CLI mode already holds the merge in the working
+# set. Either way the statements are the same: report every conflicted
+# table and every conflicted `issues` row with its differing columns; give
+# each benign row the remote's row_lock and updated_at and clear its
+# conflict marker; report what is left; stage and commit. DOLT_COMMIT
+# refuses a working set with any conflict left, and a transaction that never
+# reaches COMMIT is discarded — the fail-closed operand is dolt's own, not a
+# check of ours. "nothing to commit" on the retry means the pull found no
+# conflict this time (a fast-forward or a clean merge, both durable before
+# COMMIT), so it is reported as a plain pull.
+resolve_benign_conflicts() {
+  name="$1"; dir="$2"; remote_name="$3"; remote_url="$4"
+  if ! benign_conflict_sql "$name" "$dir"; then
+    echo "  $name: ERROR: pull failed: merge conflict, and the issues table is not a bd store (no row_lock/updated_at) — resolve manually" >&2
+    return 1
+  fi
+  p="$CONFLICT_PREDICATE"
+  sql="SET @@autocommit = 0;"
+  if [ "$server_running" = true ]; then
+    sql="$sql CALL DOLT_PULL('$remote_name', 'main');"
+  fi
+  sql="$sql SELECT 'conflict' AS k, \`table\` AS t, num_conflicts AS n FROM dolt_conflicts;"
+  sql="$sql SELECT 'row' AS k, our_id AS id, $CONFLICT_DIFFERING AS differing FROM dolt_conflicts_issues;"
+  sql="$sql UPDATE issues SET row_lock = (SELECT c.their_row_lock FROM dolt_conflicts_issues c WHERE c.our_id = issues.id AND $p), updated_at = (SELECT c.their_updated_at FROM dolt_conflicts_issues c WHERE c.our_id = issues.id AND $p) WHERE id IN (SELECT c.our_id FROM dolt_conflicts_issues c WHERE $p);"
+  sql="$sql DELETE FROM dolt_conflicts_issues WHERE $p;"
+  sql="$sql SELECT 'remaining' AS k, \`table\` AS t, num_conflicts AS n FROM dolt_conflicts;"
+  sql="$sql CALL DOLT_ADD('-A');"
+  sql="$sql CALL DOLT_COMMIT('-m', 'gc dolt pull: merge $remote_name/main (row_lock/updated_at-only conflicts in issues resolved to the remote)', '--author', 'gc dolt pull <gc-dolt-pull@gascity.local>');"
+  sql="$sql COMMIT;"
+  resolve_rc=0
+  out=$(run_db_sql "$name" "$dir" "$sql" 2>&1) || resolve_rc=$?
+  rows=$(printf '%s\n' "$out" | grep '^row,' | sed 's/^row,//; s/"//g; s/,/: /' || true)
+  row_count=$(printf '%s\n' "$rows" | grep -c '.' || true)
+  if [ "$resolve_rc" -eq 0 ]; then
+    ids=$(printf '%s\n' "$rows" | sed 's/:.*//' | tr '\n' ' ' | sed 's/ $//')
+    echo "  $name: pulled from $remote_url (resolved $row_count row_lock/updated_at-only conflict(s) in issues: $ids)"
+    return 0
+  fi
+  case "$out" in
+    *"nothing to commit"*)
+      echo "  $name: pulled from $remote_url"
+      return 0
+      ;;
+  esac
+  remaining=$(printf '%s\n' "$out" | awk -F, '$1 == "remaining" {n += $3} END {print n + 0}')
+  if [ "$remaining" -eq 0 ]; then
+    remaining=$(printf '%s\n' "$out" | awk -F, '$1 == "conflict" {n += $3} END {print n + 0}')
+  fi
+  tables=$(printf '%s\n' "$out" | awk -F, '$1 == "conflict" {print $2}' | sort -u | tr '\n' ' ' | sed 's/ $//')
+  if [ -n "$rows" ]; then
+    printf '%s\n' "$rows" | sed "s/^/  $name: conflict /" >&2
+  fi
+  if [ "$server_running" != true ]; then
+    (cd "$dir" && dolt merge --abort >/dev/null 2>&1) || true
+  fi
+  echo "  $name: ERROR: pull failed: $remaining conflict(s) in ${tables:-unknown table(s)} need manual resolution; nothing was written" >&2
+  case "$out" in
+    *"nothing to commit"*|*"in conflict"*|*"unresolved conflicts"*) ;;
+    *) printf '%s\n' "$out" | grep -i 'error' | head -3 | sed "s/^/  $name: /" >&2 || true ;;
+  esac
+  return 1
+}
+
 find_remote_sql() {
   db="$1"
   remote_csv=$(dolt_sql "USE \`$db\`; SELECT name, url FROM dolt_remotes ORDER BY name") || return 1
@@ -172,9 +330,17 @@ pull_database_sql() {
     return 1
   fi
 
-  if dolt_sql "USE \`$name\`; CALL DOLT_PULL('$remote_name', 'main')" >/dev/null 2>&1; then
+  pull_out=""
+  if pull_out=$(dolt_sql "USE \`$name\`; CALL DOLT_PULL('$remote_name', 'main')" 2>&1); then
     echo "  $name: pulled from $remote_url"
     return 0
+  fi
+
+  # A failed autocommit pull with conflicts rolled its merge back and wrote
+  # nothing; retry it inside the resolving transaction.
+  if printf '%s\n' "$pull_out" | grep -qi 'conflict'; then
+    resolve_benign_conflicts "$name" "$data_dir/$name" "$remote_name" "$remote_url"
+    return $?
   fi
 
   echo "  $name: ERROR: pull failed" >&2
@@ -210,6 +376,14 @@ pull_database_cli() {
   if (cd "$d" && dolt pull "$remote_name" main 2>&1); then
     echo "  $name: pulled from $remote_url"
     return 0
+  fi
+
+  # CLI mode leaves a conflicted merge in the working set; the conflict
+  # tables say whether that is what happened.
+  conflicts=$(run_db_sql "$name" "$d" "SELECT COUNT(*) FROM dolt_conflicts" 2>/dev/null | awk 'NR == 2 {print $1 + 0}') || conflicts=0
+  if [ "${conflicts:-0}" -gt 0 ]; then
+    resolve_benign_conflicts "$name" "$d" "$remote_name" "$remote_url"
+    return $?
   fi
 
   echo "  $name: ERROR: pull failed" >&2
