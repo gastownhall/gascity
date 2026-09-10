@@ -171,23 +171,32 @@ suffixes are simple, predictable, and debuggable.
 ### Graph workflow continuity
 
 Graph steps routed to a pool remain unassigned until a concrete session
-claims them. The agent lifecycle determines whether the router also requests
-cross-step session continuity:
+claims them. Continuation is always formula-declared: Go propagates a group
+the authored recipe already carries and never manufactures one. The agent
+lifecycle decides whether that declared group survives routing:
 
-- The default long-lived lifecycle stamps the automatic
-  `gc.continuation_group=pool-workflow` and `gc.session_affinity=require`
-  pair. Claiming one executable step pre-assigns its workflow siblings to the
-  same persistent session, preserving its worktree and conversation context.
+- The default long-lived lifecycle propagates a formula-declared
+  `gc.continuation_group` and pins `gc.session_affinity=require` alongside it.
+  Claiming one executable step pre-assigns its workflow siblings to the same
+  persistent session, preserving its worktree and conversation context.
 - `lifecycle = "one_shot"` is an independent-step route. Each executable step
-  stays routed to the configured pool but carries no automatic continuation
-  group or required session affinity, so a fresh session may claim the next
-  ready step after the prior bounded invocation exits.
+  stays routed to the configured pool but carries no continuation group or
+  required session affinity, so a fresh session may claim the next ready step
+  after the prior bounded invocation exits.
+
+A one-shot route drops *any* formula-declared continuation group, including
+the shared-drain groups `stampDrainItemRecipe` stamps for `context = "shared"`
+drains. A runtime that exits after each bounded invocation cannot hold the
+single shared session those contracts ask for, so routing to a one-shot pool
+overrides them rather than stamping affinity no session can honor.
 
 A formula sent through a one-shot pool must therefore persist every input a
 later step needs in the work artifact or bead graph rather than relying on a
-surviving process or conversation. Explicit graph mechanisms that request a
-shared execution context, such as shared single-lane drains, remain separate
-formula contracts rather than an inference from ordinary pool routing.
+surviving process or conversation.
+
+This applies only to pool-flavored agents (`SupportsInstanceExpansion()`). A
+one-shot agent with `max_active_sessions = 1` and no `min_active_sessions` or
+`scale_check` is a named-session agent, not a pool, and is unaffected.
 
 ## Upscaling
 
