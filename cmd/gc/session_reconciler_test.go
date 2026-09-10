@@ -2361,6 +2361,71 @@ func TestReconcileSessionBeads_UndesiredDrainAckWithAssignedOpenWorkSleepsInstea
 	}
 }
 
+// TestReconcileSessionBeads_DrainAckPreservesConfiguredNamedSession probes
+// ga-pmafyc: a configured named session (mode="always") that reaches the
+// drain-ack finalize default branch (state="stopped", drain-acked, provider
+// not alive, no assigned work) must NOT be destructively closed the way an
+// ordinary undesired session is in
+// TestReconcileSessionBeads_UndesiredDrainAckStopsAndCloses above.
+// finalizeDrainAckStoppedSession's closeIfUnassigned parameter is a
+// hardcoded true at this call site, missing the configuredNames[name] guard
+// used by the sibling call sites — gc suspend (which drives sessions
+// through this exact path) retires every named session and empties its
+// identity as a result.
+//
+// state="stopped" (rather than simulating the full sp.Start-then-stop-pending
+// multi-tick sequence the ordinary UndesiredDrainAck* tests above use) stages
+// the post-stop condition directly: preserveConfiguredNamedSessionBeadInfo is
+// computed pre-heal from this same fixture state, and only state=="stopped"
+// (or "failed-create") lets a configured named session's preserveNamed gate
+// go false and reach the drain-ack default branch at all — the async
+// stop-pending path would leave an intermediate state that keeps the session
+// protected by preserveNamed==true on the tick that matters.
+func TestReconcileSessionBeads_DrainAckPreservesConfiguredNamedSession(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "worker",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	session := env.createSessionBead(sessionName, "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "always",
+		"state":                      "stopped",
+	})
+
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck(sessionName); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+
+	woken := env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{session}, nil, dops)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+
+	b, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	t.Logf("post-reconcile bead: status=%q metadata=%#v", b.Status, b.Metadata)
+	if b.Status != "open" {
+		t.Fatalf("status = %q, want open (configured named session must survive drain-ack finalize, not be destructively closed)", b.Status)
+	}
+	if got := b.Metadata[namedSessionMetadataKey]; got != "true" {
+		t.Errorf("configured_named_session = %q, want true (must survive)", got)
+	}
+	if got := b.Metadata[namedSessionIdentityMetadata]; got != "worker" {
+		t.Errorf("configured_named_identity = %q, want worker (must survive)", got)
+	}
+}
+
 // TestReconcileSessionBeads_DrainAckUsesLiveStoreQuery is the regression
 // guard for the stuck-pool-worker bug on ga-ttn5z. Pool workers close
 // their own work bead with `bd close` BEFORE calling `gc runtime
