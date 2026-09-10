@@ -12283,6 +12283,14 @@ func TestDefaultScopeDoltDatabase(t *testing.T) {
 // post-commit re-init that reports the same thing means the recovery worked, so
 // it must not turn a recovered rig into a hard `gc rig add` failure.
 func TestInitBeadsForDirWithExecutorTreatsAlreadyInitializedRecoveryAsSuccess(t *testing.T) {
+	oldFinalize := finalizeCanonicalBdScopeInitForProvider
+	finalizeCalls := 0
+	finalizeCanonicalBdScopeInitForProvider = func(_, _, _, _ string) error {
+		finalizeCalls++
+		return nil
+	}
+	t.Cleanup(func() { finalizeCanonicalBdScopeInitForProvider = oldFinalize })
+
 	cityDir := t.TempDir()
 	cleanupManagedDoltTestCity(t, cityDir)
 	cityConfig := `[workspace]
@@ -12324,5 +12332,8 @@ provider = "bd"
 	}
 	if commits != 1 {
 		t.Fatalf("commit rounds = %d, want 1", commits)
+	}
+	if finalizeCalls != 1 {
+		t.Fatalf("finalize calls = %d, want 1 after recovery", finalizeCalls)
 	}
 }

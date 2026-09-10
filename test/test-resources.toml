@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 658
-baseline_files = 189
+baseline_calls = 659
+baseline_files = 190
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-80po0c.2"
@@ -23,8 +23,8 @@ expires = "2026-10-01"
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 478
-baseline_files = 172
+baseline_calls = 479
+baseline_files = 173
 reported_calls = 447
 reported_files = 157
 owner_bead = "ga-80po0c.2"
@@ -51,8 +51,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 445
-baseline_files = 127
+baseline_calls = 446
+baseline_files = 128
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-80po0c.2"
@@ -64,8 +64,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 321
-baseline_files = 121
+baseline_calls = 322
+baseline_files = 122
 reported_calls = 295
 reported_files = 114
 owner_bead = "ga-80po0c.2"
@@ -326,6 +326,17 @@ resources = ["subprocess"]
 owner_bead = "ga-8pkpor"
 invariant = "doctor custom-types test-owned-HOME dolt-isolation regression proof is a checked Medium owner"
 resource_owner = "the bd subprocess is confined to TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext, which proves bd routes to an embedded, test-owned dolt store rather than a machine-level shared server"
+migration_target = "P0.4b"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "cmd/gc"
+package_name = "main"
+owner = "TestDoltStateHandoffInspectAndStopOwnedProcess"
+resources = ["subprocess", "fixed_sleep"]
+owner_bead = "ga-p9iuv.30.1.1.5"
+invariant = "managed Dolt ownership handoff subprocess and lifecycle timing proof is a checked Medium owner"
+resource_owner = "the fixture subprocess and bounded lifecycle sleeps are confined to TestDoltStateHandoffInspectAndStopOwnedProcess"
 migration_target = "P0.4b"
 expires = "2026-10-01"
 

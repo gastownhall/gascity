@@ -933,6 +933,11 @@ func initBeadsForDir(cityPath, dir, prefix, doltDatabase string) error {
 
 type providerOpExecutor func(script string, environ []string, args ...string) error
 
+// finalizeCanonicalBdScopeInitForProvider isolates the real store-readiness
+// proof from the operation coordinator. Recording-executor tests exercise
+// retry and recovery ordering without owning a real Dolt process.
+var finalizeCanonicalBdScopeInitForProvider = finalizeCanonicalBdScopeInit
+
 func initBeadsForDirWithExecutor(cityPath, dir, prefix, doltDatabase string, execute providerOpExecutor) error {
 	if cityUsesBdStoreContract(cityPath) && gcDoltSkip() {
 		if err := seedDeferredManagedBeadsErr(cityPath, dir, prefix, doltDatabase); err != nil {
@@ -987,7 +992,7 @@ func initBeadsForDirWithExecutor(cityPath, dir, prefix, doltDatabase string, exe
 			env := overlayEnvEntries(baseEnv, overrides)
 			if err := execute(script, env, args...); err != nil {
 				if isBdAlreadyInitializedError(err) {
-					return finalizeCanonicalBdScopeInit(cityPath, dir, prefix, canonicalDoltDatabase)
+					return finalizeCanonicalBdScopeInitForProvider(cityPath, dir, prefix, canonicalDoltDatabase)
 				}
 				reinit := func() error { return execute(script, env, args...) }
 				if shouldRetryExecBdInit(err) {
@@ -995,7 +1000,7 @@ func initBeadsForDirWithExecutor(cityPath, dir, prefix, doltDatabase string, exe
 						time.Sleep(time.Second)
 						retryErr := reinit()
 						if retryErr == nil {
-							return finalizeCanonicalBdScopeInit(cityPath, dir, prefix, canonicalDoltDatabase)
+							return finalizeCanonicalBdScopeInitForProvider(cityPath, dir, prefix, canonicalDoltDatabase)
 						}
 						err = retryErr
 						if !shouldRetryExecBdInit(retryErr) {
@@ -1016,11 +1021,11 @@ func initBeadsForDirWithExecutor(cityPath, dir, prefix, doltDatabase string, exe
 							return recoverErr
 						}
 					}
-					return finalizeCanonicalBdScopeInit(cityPath, dir, prefix, canonicalDoltDatabase)
+					return finalizeCanonicalBdScopeInitForProvider(cityPath, dir, prefix, canonicalDoltDatabase)
 				}
 				return err
 			}
-			return finalizeCanonicalBdScopeInit(cityPath, dir, prefix, canonicalDoltDatabase)
+			return finalizeCanonicalBdScopeInitForProvider(cityPath, dir, prefix, canonicalDoltDatabase)
 		}
 		if !execProviderNeedsScopedDoltInit(provider) {
 			baseEnv, err := cityRuntimeProcessEnvWithError(cityPath)

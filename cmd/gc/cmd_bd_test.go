@@ -517,11 +517,24 @@ func TestResolveBdScopeTargetErrorsOnForeignRedirect(t *testing.T) {
 func TestBdCommandEnvUsesCanonicalRigTarget(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BIN", "/tmp/ambient-gc")
+	invokingDir := t.TempDir()
+	invokingGC := filepath.Join(invokingDir, "gc")
+	if err := os.WriteFile(invokingGC, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write invoking gc fixture: %v", err)
+	}
+	invokingLink := filepath.Join(invokingDir, "gc-link")
+	if err := os.Symlink(invokingGC, invokingLink); err != nil {
+		t.Fatalf("symlink invoking gc fixture: %v", err)
+	}
+	oldResolve := resolveInvokingExecutable
+	resolveInvokingExecutable = func() (string, error) { return invokingLink, nil }
+	t.Cleanup(func() { resolveInvokingExecutable = oldResolve })
 	_ = os.Unsetenv("BEADS_ACTOR")
 
-	cityDir := t.TempDir()
+	cityDir := normalizePathForCompare(t.TempDir())
 	wantPort := strconv.Itoa(writeReachableManagedDoltState(t, cityDir))
-	rigDir := filepath.Join(t.TempDir(), "repo")
+	rigDir := filepath.Join(normalizePathForCompare(t.TempDir()), "repo")
 	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -564,9 +577,33 @@ dolt.auto-start: false
 	if got := env["GC_BEADS_PREFIX"]; got != "repo" {
 		t.Fatalf("GC_BEADS_PREFIX = %q, want %q", got, "repo")
 	}
+	wantGC, err := filepath.EvalSymlinks(invokingGC)
+	if err != nil {
+		t.Fatalf("resolve invoking gc fixture: %v", err)
+	}
+	if got := env["GC_BIN"]; got != wantGC {
+		t.Fatalf("GC_BIN = %q, want physical invoking executable %q", got, wantGC)
+	}
 	if _, present := env["BEADS_ACTOR"]; present {
 		t.Fatalf("BEADS_ACTOR = %q, want absent for direct gc bd env without explicit actor", env["BEADS_ACTOR"])
 	}
+}
+
+func TestResolveBdInvokingGCBinaryFailsClosed(t *testing.T) {
+	oldResolve := resolveInvokingExecutable
+	t.Cleanup(func() { resolveInvokingExecutable = oldResolve })
+	t.Run("resolver error", func(t *testing.T) {
+		resolveInvokingExecutable = func() (string, error) { return "", errors.New("unavailable") }
+		if _, err := resolveBdInvokingGCBinary(); err == nil {
+			t.Fatal("resolveBdInvokingGCBinary unexpectedly succeeded")
+		}
+	})
+	t.Run("relative path", func(t *testing.T) {
+		resolveInvokingExecutable = func() (string, error) { return "gc", nil }
+		if _, err := resolveBdInvokingGCBinary(); err == nil {
+			t.Fatal("resolveBdInvokingGCBinary unexpectedly accepted a relative path")
+		}
+	})
 }
 
 func TestBdCommandEnvRefusesAnUnregisteredBackend(t *testing.T) {
