@@ -2623,7 +2623,21 @@ func unscannedSourceWorkflowStoreSkips(cfg *config.City, cityPath, selectedStore
 // expected to surface these (see formatSourceWorkflowStoreSkips) so operators
 // can see when singleton coverage degraded.
 func openSourceWorkflowStores(cfg *config.City, cityPath, beadID string) ([]convoyStoreView, []sourceWorkflowStoreSkip, error) {
-	return openSourceWorkflowStoresWith(cfg, cityPath, beadID, sourceWorkflowStoreOpener(cityPath))
+	// Keep the directory scan's ordinary views: source beads and legacy
+	// workflow roots still live in the work store after graph-class migration.
+	// Federation appends the relocated binding for the graph roots instead of
+	// replacing the work store with it.
+	stores, skips, err := openSourceWorkflowStoresWith(cfg, cityPath, beadID, func(dir string) (beads.Store, error) {
+		return openStoreAtForCity(dir, cityPath)
+	})
+	if err != nil {
+		return stores, skips, err
+	}
+	stores, err = convoyStoreViewsWithBinding(cityPath, stores)
+	if err != nil {
+		return nil, skips, err
+	}
+	return stores, skips, nil
 }
 
 // openSourceWorkflowStoresWith is the testable core of openSourceWorkflowStores.
