@@ -2963,6 +2963,22 @@ func discoverSessionBeadsWithRoots(
 				tp.InstanceName = sn
 			}
 		}
+		if isNamedSessionInfo(info) {
+			// Rediscovery runs whenever the primary cfg-driven namedSpecs loop
+			// (build_desired_state.go ~1130-1139) did not populate this bead into
+			// desired this tick — e.g. during city suspend, which gates only that
+			// primary build and not this backfill. resolveTemplateForSessionBeadInfo
+			// above recovers identity/work-dir via canonicalSessionIdentityWithConfigInfo,
+			// but never sets these three fields, so without this the named-session
+			// markers session_beads.go and templateParamsSessionOrigin key off go
+			// missing and the bead is wrongly treated as non-named.
+			tp.ConfiguredNamedIdentity = info.ConfiguredNamedIdentity
+			tp.ConfiguredNamedMode = info.ConfiguredNamedMode
+			if tp.Env == nil {
+				tp.Env = make(map[string]string)
+			}
+			tp.Env["GC_SESSION_ORIGIN"] = "named"
+		}
 		installAgentSideEffects(bp, cfgAgent, tp, stderr)
 		desired[sn] = tp
 	}
