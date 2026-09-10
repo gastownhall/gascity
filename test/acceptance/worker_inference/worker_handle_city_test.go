@@ -18,6 +18,7 @@ import (
 
 func TestProfileUsesHookSessionKeyPersistence(t *testing.T) {
 	for _, profile := range []workerpkg.Profile{
+		workerpkg.ProfileCursorTmuxCLI,
 		workerpkg.ProfileOpenCodeTmuxCLI,
 		workerpkg.ProfileMimoCodeTmuxCLI,
 		workerpkg.ProfileKimiTmuxCLI,

@@ -896,7 +896,7 @@ func TestAgentScriptRunsShippedLifecycleRefineryScript(t *testing.T) {
 			switch {
 			case strings.Contains(command, "git merge --no-edit"):
 				actionOrder = append(actionOrder, "shell:merge")
-			case strings.Contains(command, "git push origin HEAD:main"):
+			case strings.Contains(command, `git push origin "HEAD:$BASE"`):
 				actionOrder = append(actionOrder, "shell:push")
 			case strings.Contains(command, "git push origin --delete"):
 				actionOrder = append(actionOrder, "shell:cleanup")
@@ -941,8 +941,8 @@ func TestAgentScriptRunsShippedLifecycleRefineryScript(t *testing.T) {
 
 	wantCommands := [][]string{
 		{"gc", "mail", "send", "--to", "demo/lifecycle.polecat", "-s", "MERGING: polecat/ga-123 (ga-123)", "-m", "scripted refinery demo/lifecycle.refinery is merging polecat/ga-123."},
-		{"bd", "update", "ga-123", "--status", "closed", "--notes", "scripted refinery: merged polecat/ga-123 into main", "--set-metadata", "merge_result=merged"},
-		{"gc", "mail", "send", "--to", "demo/lifecycle.polecat", "-s", "MERGED: polecat/ga-123 (ga-123)", "-m", "scripted refinery demo/lifecycle.refinery merged polecat/ga-123 into main."},
+		{"bd", "update", "ga-123", "--status", "closed", "--notes", "scripted refinery: merged polecat/ga-123 into the rig mainline", "--set-metadata", "merge_result=merged"},
+		{"gc", "mail", "send", "--to", "demo/lifecycle.polecat", "-s", "MERGED: polecat/ga-123 (ga-123)", "-m", "scripted refinery demo/lifecycle.refinery merged polecat/ga-123 into the rig mainline."},
 	}
 	if !reflect.DeepEqual(commands, wantCommands) {
 		t.Fatalf("commands = %#v, want %#v", commands, wantCommands)

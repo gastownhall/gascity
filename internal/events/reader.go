@@ -424,11 +424,43 @@ func archiveFilesIn(dir string) ([]archiveInfo, error) {
 	return archives, nil
 }
 
+// archiveSeq reads the top-level seq of a raw archive line without decoding
+// the record. FileRecorder writes seq as the first field, so the hot path is a
+// prefix scan with no allocation. Any other layout reports false and the
+// caller falls back to a full decode, which keeps a foreign writer's archive
+// readable.
+func archiveSeq(line []byte) (uint64, bool) {
+	const prefix = `{"seq":`
+	if !bytes.HasPrefix(line, []byte(prefix)) {
+		return 0, false
+	}
+	digits := line[len(prefix):]
+	var seq uint64
+	i := 0
+	for ; i < len(digits) && digits[i] >= '0' && digits[i] <= '9'; i++ {
+		seq = seq*10 + uint64(digits[i]-'0')
+	}
+	if i == 0 {
+		return 0, false
+	}
+	return seq, true
+}
+
 // streamArchive gunzip-streams the file at path, decoding each line
 // as an Event and invoking fn for every event. fn returns false to
 // abort iteration early. Returns nil if iteration completed cleanly
 // or fn requested abort; errors from gzip / scanner are wrapped.
-func streamArchive(path string, _ Filter, fn func(Event) bool) error {
+//
+// Records outside filter's seq window are skipped before json.Unmarshal.
+// archiveOverlapsFilter only rules out an archive that ENDS at or below
+// AfterSeq, so an order whose cursor sits INSIDE the archive's window still
+// opens it — and without this skip every such read decoded the entire archive
+// to reach a handful of trailing records.
+//
+// The skip deliberately does not early-return on BeforeSeq. Archives come from
+// a monotonic log and should be seq-ordered, but `continue` saves the same
+// decode without depending on that.
+func streamArchive(path string, filter Filter, fn func(Event) bool) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -444,8 +476,17 @@ func streamArchive(path string, _ Filter, fn func(Event) bool) error {
 	scanner := bufio.NewScanner(gr)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
+		line := scanner.Bytes()
+		if seq, ok := archiveSeq(line); ok {
+			if filter.AfterSeq > 0 && seq <= filter.AfterSeq {
+				continue
+			}
+			if filter.BeforeSeq > 0 && seq >= filter.BeforeSeq {
+				continue
+			}
+		}
 		var e Event
-		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
+		if err := json.Unmarshal(line, &e); err != nil {
 			continue
 		}
 		if !fn(e) {

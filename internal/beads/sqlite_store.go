@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	_ "modernc.org/sqlite" // pure-Go SQLite driver, CGO_ENABLED=0 safe
 )
 
@@ -104,11 +105,7 @@ func WithSQLiteStoreIDPrefix(prefix string) SQLiteStoreOption {
 // foreign id across is the store-migration copy path's entire job.
 func WithSQLiteStoreReservedIDPrefixes(prefixes ...string) SQLiteStoreOption {
 	return func(o *SQLiteStoreOptions) {
-		for _, p := range prefixes {
-			if p = normalizeIDPrefix(p); p != "" {
-				o.reservedPrefixes = append(o.reservedPrefixes, p)
-			}
-		}
+		o.reservedPrefixes = collectReservedIDPrefixes(o.reservedPrefixes, prefixes)
 	}
 }
 
@@ -648,23 +645,18 @@ func (s *SQLiteStore) create(b Bead, allowForeign bool) (Bead, error) {
 	return cloneBead(stored), nil
 }
 
-// checkPinnedIDNamespace enforces the fence. An empty id is a mint request and
-// an unfenced store claims no namespace, so both pass untouched.
+// checkPinnedIDNamespace enforces the fence, which is the shared rule in
+// pinned_id_fence.go rather than this store's own — two providers serve class
+// bindings and a namespace claim that meant different things in each would rule
+// nothing out.
+//
+// It runs BEFORE any read of the database, which is deliberate and is part of
+// the contract: a store must answer "I do not serve that namespace" without
+// first checking whether it happens to hold the row. Checking existence first
+// would leak the presence of a relic — CreateWithForeignID can carry a foreign
+// id in — through a refusal about a namespace the store disclaims.
 func (s *SQLiteStore) checkPinnedIDNamespace(id string) error {
-	if len(s.reservedPrefixes) == 0 {
-		return nil
-	}
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return nil
-	}
-	lowered := strings.ToLower(id)
-	for _, prefix := range s.reservedPrefixes {
-		if strings.HasPrefix(lowered, prefix+"-") {
-			return nil
-		}
-	}
-	return fmt.Errorf("sqlite create: id %q is outside this store's namespaces (%s): a pinned id must carry one of them, or use the foreign-id create the store migration uses", id, strings.Join(s.reservedPrefixes, ", "))
+	return checkPinnedIDNamespace("sqlite create", id, s.reservedPrefixes)
 }
 
 func (s *SQLiteStore) normalizeCreate(b Bead) Bead {
@@ -1512,13 +1504,21 @@ func sqliteReadySQL(q ReadyQuery, projection string) (string, []any) {
 	where := []string{
 		"b.status='open'",
 		`b.issue_type NOT IN ('merge-request','gate','molecule','step','message','session','agent','role','rig')`,
-		`NOT EXISTS (
+		fmt.Sprintf(`NOT EXISTS (
 			SELECT 1 FROM deps d
 			LEFT JOIN beads blocker ON blocker.id=d.depends_on_id
 			WHERE d.issue_id=b.id
 			  AND d.dep_type IN ('blocks','waits-for','conditional-blocks')
-			  AND COALESCE(blocker.status, '') <> 'closed'
-		  )`,
+			  AND (
+			    COALESCE(blocker.status, '') <> 'closed'
+			    OR EXISTS (
+			         SELECT 1 FROM metadata m
+			         WHERE m.bead_id = blocker.id
+			           AND m.meta_key = '%s'
+			           AND m.meta_value = '%s'
+			       )
+			  )
+		  )`, beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkOutcomeBlocked),
 	}
 	switch q.TierMode {
 	case TierWisps:
@@ -1665,7 +1665,20 @@ type sqliteStoreTx struct {
 	tx    *sql.Tx
 }
 
+// Create fences the same way the standalone Create does. A transaction is not
+// an exemption: the bead it writes is as resident, and as unreachable by an
+// id-shaped lookup of the namespace it lands in, as one written outside a
+// transaction. The check runs before normalization and before
+// ensureCreateDoesNotExist, so a refusal about a disclaimed namespace still
+// reveals nothing about what this store holds.
+//
+// There is no foreign-id variant here on purpose. The migration copy that needs
+// the exemption runs through CreateWithForeignID on the store, not inside a
+// caller's transaction, so adding one would open a bypass nothing asks for.
 func (t *sqliteStoreTx) Create(b Bead) (Bead, error) {
+	if err := t.store.checkPinnedIDNamespace(b.ID); err != nil {
+		return Bead{}, err
+	}
 	stored := t.store.normalizeCreate(b)
 	if b.ID == "" {
 		id, err := t.store.mintUniqueIDTx(t.ctx, t.tx, stored.ID, nil)
@@ -1777,6 +1790,28 @@ func (s *SQLiteStore) DepAdd(issueID, dependsOnID, depType string) error {
 		}
 		defer tx.Rollback() //nolint:errcheck
 		if err := s.depAddTx(context.Background(), tx, issueID, dependsOnID, depType); err != nil {
+			return err
+		}
+		return tx.Commit()
+	})
+}
+
+// DepAddWithMetadata records a dependency edge together with the opaque payload
+// it carries. It is DepAdd for a caller that has a payload to preserve — the
+// infra-class migration is the one in tree — and is otherwise identical,
+// including the empty-payload behavior: passing "" stores no sidecar, so the
+// edge reads back carrying nothing rather than carrying an empty payload.
+func (s *SQLiteStore) DepAddWithMetadata(issueID, dependsOnID, depType, metadata string) error {
+	if err := s.ensureOpen(); err != nil {
+		return err
+	}
+	return retryOnBusy(func() error {
+		tx, err := s.db.BeginTx(context.Background(), nil)
+		if err != nil {
+			return fmt.Errorf("sqlite dep add with metadata: begin tx: %w", err)
+		}
+		defer tx.Rollback() //nolint:errcheck
+		if err := s.depAddWithMetadataTx(context.Background(), tx, issueID, dependsOnID, depType, metadata); err != nil {
 			return err
 		}
 		return tx.Commit()

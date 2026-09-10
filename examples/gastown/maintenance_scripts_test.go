@@ -239,6 +239,9 @@ if [ "$1" = "--rig" ]; then
   shift 2
 fi
 case "$1" in
+  mail)
+    exit 0
+    ;;
   config)
     if [ "$2" = "explain" ]; then
       cat <<'EOF'
@@ -354,6 +357,9 @@ if [ "$1" = "--rig" ]; then
   shift 2
 fi
 case "$1" in
+  mail)
+    exit 0
+    ;;
   config)
     if [ "$2" = "explain" ]; then
       cat <<'EOF'
@@ -493,6 +499,9 @@ if [ "$1" = "--rig" ]; then
   shift 2
 fi
 case "$1" in
+  mail)
+    exit 0
+    ;;
   config)
     if [ "$2" = "explain" ]; then
       cat <<'EOF'
@@ -630,6 +639,9 @@ if [ "$1" = "--rig" ]; then
   shift 2
 fi
 case "$1" in
+  mail)
+    exit 0
+    ;;
   config)
     if [ "$2" = "explain" ]; then
       exit 1
@@ -1432,6 +1444,9 @@ else
   rig=""
 fi
 case "$1" in
+  mail)
+    exit 0
+    ;;
   config)
     if [ "$2" = "explain" ]; then
       cat <<'EOF'
@@ -1556,6 +1571,9 @@ else
   rig=""
 fi
 case "$1" in
+  mail)
+    exit 0
+    ;;
   config)
     if [ "$2" = "explain" ]; then
       cat <<'EOF'
@@ -1679,6 +1697,9 @@ else
   rig=""
 fi
 case "$1" in
+  mail)
+    exit 0
+    ;;
   config)
     if [ "$2" = "explain" ]; then
       cat <<'EOF'
@@ -2011,7 +2032,7 @@ if [ "$*" = "bd update $ORPHAN_SWEEP_ORPHAN_ID --append-notes orphan-sweep: rese
   exit 0
 fi
 case "$*" in
-  "mail send mayor/ "*) exit 0 ;;
+  "mail send human "*) exit 0 ;;
 esac
 printf 'UNEXPECTED: %s\n' "$*" >> "$GC_CALL_LOG"
 printf 'UNEXPECTED: %s\n' "$*" >&2
@@ -2209,6 +2230,9 @@ else
   rig=""
 fi
 case "$1" in
+  mail)
+    exit 0
+    ;;
   config)
     if [ "$2" = "explain" ]; then
       cat <<'EOF'
@@ -2524,6 +2548,9 @@ func TestOrphanSweepRecordsCauseNoteOnEveryReset(t *testing.T) {
 	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 case "$1" in
+  mail)
+    exit 0
+    ;;
   config)
     if [ "$2" = "explain" ]; then
       cat <<'EOF'

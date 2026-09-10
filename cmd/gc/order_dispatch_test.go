@@ -10549,3 +10549,72 @@ func TestOrderDispatchExecFailureEventBoundsTheOutputItCarries(t *testing.T) {
 		}
 	}
 }
+
+// TestDispatchWispSubstitutesCallerVarsIntoBeadText is the regression guard for
+// #4668: dispatchWisp must thread the caller's runtime vars into
+// molecule.Instantiate so a caller `--var` renders into the instantiated bead
+// TEXT (Title/Description), not just into compile-time control flow. The var
+// carries a non-empty default ("DEFAULT"), so the pre-fix path — which passed
+// an empty molecule.Options and fell back to defaults — rendered "DEFAULT"
+// instead of the caller value. This test fails on exactly that bug.
+func TestDispatchWispSubstitutesCallerVarsIntoBeadText(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "e-var-text.toml"), `
+formula = "e-var-text"
+version = 1
+
+[vars.subject]
+description = "subject to work on"
+default = "DEFAULT"
+
+[[steps]]
+id = "work"
+title = "Work on {{subject}}"
+description = "Handle {{subject}} now."
+`)
+
+	store := beads.NewMemStore()
+	a := orders.Order{Name: "text-order", Trigger: "manual", Formula: "e-var-text", FormulaLayer: dir}
+
+	m := &memoryOrderDispatcher{
+		rec:      events.Discard,
+		stderr:   lockedStderr(&bytes.Buffer{}),
+		cfg:      &config.City{},
+		cityName: "test-city",
+	}
+	m.dispatchWisp(context.Background(), store, execStoreTarget{}, a, t.TempDir(), "gc-tracking", map[string]string{"subject": "widgets"})
+
+	// The wisp root is a legacy molecule container; the substituted text lives
+	// on the "work" step bead. Find it by its rendered title prefix.
+	all, err := store.List(beads.ListQuery{IncludeClosed: true, AllowScan: true})
+	if err != nil {
+		t.Fatalf("store.List: %v", err)
+	}
+	var work *beads.Bead
+	for i := range all {
+		if strings.HasPrefix(all[i].Title, "Work on") {
+			work = &all[i]
+			break
+		}
+	}
+	if work == nil {
+		var titles []string
+		for _, b := range all {
+			titles = append(titles, b.Title)
+		}
+		t.Fatalf("no step bead with title prefix %q created; titles=%v", "Work on", titles)
+	}
+
+	if !strings.Contains(work.Description, "widgets") {
+		t.Fatalf("step description = %q, want it to contain caller var value \"widgets\"", work.Description)
+	}
+	if !strings.Contains(work.Title, "widgets") {
+		t.Fatalf("step title = %q, want it to contain caller var value \"widgets\"", work.Title)
+	}
+	if strings.Contains(work.Description, "DEFAULT") {
+		t.Fatalf("step description = %q still shows the var default; caller --var did not reach molecule.Instantiate (the #4668 bug)", work.Description)
+	}
+	if strings.Contains(work.Description, "{{subject}}") {
+		t.Fatalf("step description = %q left the placeholder unresolved", work.Description)
+	}
+}

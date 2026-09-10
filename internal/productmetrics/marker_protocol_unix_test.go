@@ -14,7 +14,6 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/gchome"
-	"github.com/gastownhall/gascity/internal/testutil"
 	"golang.org/x/sys/unix"
 )
 
@@ -253,7 +252,7 @@ func TestRootAtomicWriterCrashReplayAtEveryProtocolOrdinal(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			home := newMetricsTestHome(t)
 			ensureMetricsRoot(t, home)
-			ctx, cancel := context.WithTimeout(context.Background(), testutil.ExecRaceTimeout)
+			ctx, cancel := context.WithTimeout(context.Background(), hangBudget)
 			defer cancel()
 			command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestRootAtomicWriterCrashHelper$", "--",
 				"--productmetrics-root-temp-crash", home.Home().Path(), test.point)

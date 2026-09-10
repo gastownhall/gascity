@@ -3,10 +3,11 @@
 #
 # Replaces the deacon patrol town-orphan-sweep step. Cross-references
 # in-progress beads against all known agents. Beads assigned to agents
-# that don't exist in ANY rig get reset to open/unassigned so the rig's
-# witness picks them up on its next patrol.
+# that don't exist in ANY rig get reset to open/unassigned so they are
+# routable again.
 #
-# Does NOT do worktree salvage — that's the witness's job.
+# Does NOT do worktree salvage — cities that staff a work-health patrol role
+# (e.g. the gastown pack's witness) handle that separately.
 #
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
@@ -18,6 +19,11 @@ case "${BASH_SOURCE[0]}" in
 esac
 # shellcheck disable=SC1091
 . "$__SCRIPT_DIR/_bd_trace.sh" "orphan-sweep"
+
+# Where the recovery summary goes. Cities that staff a coordinator role (e.g.
+# the gastown pack's mayor) can point this at it; "human" is the reserved
+# recipient alias that resolves in every city, including core-only ones.
+ESCALATION_TARGET="${GC_ESCALATION_TARGET:-human}"
 
 # Step 1: Collect in-progress beads from HQ and every rig whose session
 # liveness can be determined.
@@ -362,6 +368,8 @@ is_known_agent() {
 
 ORPHANED=0
 UNVERIFIABLE=0
+# Count of undeliverable summaries. Load-bearing for the exit code below.
+FAILED=0
 # Process substitution (not a pipe) keeps the loop body in the parent
 # shell so $ORPHANED survives for the summary message below.
 while IFS=$'\t' read -r bead_id assignee; do
@@ -402,7 +410,7 @@ if [ "$ORPHANED" -gt 0 ] || [ "$UNVERIFIABLE" -gt 0 ]; then
     fi
     echo "$SUMMARY"
     if [ "$ORPHANED" -gt 0 ]; then
-        gc mail send mayor/ \
+        if ! gc mail send "$ESCALATION_TARGET" \
             -s "orphan-sweep: reset $ORPHANED orphaned beads" \
             -m "$SUMMARY
 
@@ -410,6 +418,21 @@ orphan-sweep resets in-progress beads whose assignee has no live session or
 known agent. Each reset bead now carries a one-line cause note (see its
 history). Repeated resets of the same bead may indicate a stuck or
 misidentified live session -- inspect via gc bd show <id> --json." \
-            2>/dev/null || true
+            2>/dev/null; then
+            # Do not swallow an undeliverable summary — a vanished escalation
+            # is invisible. Surfacing it requires a non-zero exit (see below).
+            echo "orphan-sweep: could not mail escalation target '$ESCALATION_TARGET': $SUMMARY" >&2
+            FAILED=$((FAILED + 1))
+        fi
     fi
+fi
+
+# Loud-fail: the summary has been printed above, so a non-zero exit now
+# surfaces the failure line to the controller log without losing the sweep's
+# own output. The controller captures an exec order's combined output but logs
+# it only on a non-zero exit (order_dispatch.go), so exit 0 would swallow it
+# (gastownhall/gascity#4543).
+if [ "$FAILED" -gt 0 ]; then
+    echo "orphan-sweep: $FAILED escalation summary(ies) could not be delivered to '$ESCALATION_TARGET' (see above)" >&2
+    exit 1
 fi

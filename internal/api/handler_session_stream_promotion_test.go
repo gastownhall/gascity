@@ -11,7 +11,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
-	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -124,7 +123,7 @@ func TestStructuredPeekEmitsSameRequestPendingUpdates(t *testing.T) {
 					close(done)
 				}()
 				waitForPrompt = func(prompt string) {
-					if body := waitForRecorderSubstring(t, rec, prompt, testutil.GoroutineRaceTimeout); !strings.Contains(body, prompt) {
+					if body := waitForRecorderSubstring(t, rec, prompt, hangBudget); !strings.Contains(body, prompt) {
 						t.Fatalf("structured stream body missing pending prompt %q: %s", prompt, body)
 					}
 				}
@@ -149,7 +148,7 @@ func TestStructuredPeekEmitsSameRequestPendingUpdates(t *testing.T) {
 						if got != want {
 							t.Fatalf("pending prompt = %q, want %q", got, want)
 						}
-					case <-time.After(testutil.GoroutineRaceTimeout):
+					case <-time.After(hangBudget):
 						t.Fatalf("structured stream missing pending prompt %q", want)
 					}
 				}
@@ -163,7 +162,7 @@ func TestStructuredPeekEmitsSameRequestPendingUpdates(t *testing.T) {
 			cancel()
 			select {
 			case <-done:
-			case <-time.After(testutil.GoroutineRaceTimeout):
+			case <-time.After(hangBudget):
 				t.Fatal("structured stream did not stop after cancellation")
 			}
 		})

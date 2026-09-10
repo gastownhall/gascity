@@ -27,6 +27,7 @@ func runDogScriptCommand(t *testing.T, scriptName, binDir, cityPath, dataDir str
 		"GC_DOLT_PASSWORD",
 		"GC_BACKUP_DATABASES",
 		"GC_BACKUP_OFFSITE_PATH",
+		"GC_BACKUP_OFFSITE_TIMEOUT",
 		"GC_BACKUP_ARTIFACT_DIR",
 		"GC_PHANTOM_DATA_DIR",
 		"GC_ESCALATE_SCRIPT",
@@ -787,7 +788,7 @@ case "$query" in
     ;;
   *"DOLT_HASHOF_DB"*)
     case "$mode" in
-      absorbed_ws_db_hash_drift|absorbed_ws_db_hash_drift_system_table|first_commit_probe_table_db_hash_drift|first_commit_table_nonadditive_diff|first_commit_table_diff_probe_failure|absorbed_ws_plus_first_commit_drift)
+      absorbed_ws_db_hash_drift|absorbed_ws_db_hash_drift_system_table|first_commit_probe_table_db_hash_drift|first_commit_table_nonadditive_diff|first_commit_table_diff_probe_failure|absorbed_ws_plus_first_commit_drift|dropped_ignored_table_db_hash_drift)
         # Standing uncommitted working-set state absorbed by the flatten's -Am:
         # the committed root legitimately differs across the flatten while HEAD
         # never moves and every per-table working-set hash stays stable. The
@@ -895,7 +896,7 @@ case "$query" in
     # dolt#11131 heal but is still dolt_ignore'd — the fix must detect this and
     # exclude wisps from flatten verification (#3541).
     case "$mode" in
-      ignored_committed_table_drift)
+      ignored_committed_table_drift|dropped_ignored_table_db_hash_drift)
         print_cell wisps
         ;;
       *)
@@ -964,7 +965,7 @@ case "$query" in
     # was inlined into HEAD by DOLT_ADD('--force',...)+commit, so SHOW TABLES
     # AS OF HEAD returns it — unlike the normal ignored_table_drift case where
     # wisps is absent from every commit root. Both queries return wisps here.
-    if [ "$mode" = "ignored_committed_table_drift" ]; then
+    if [ "$mode" = "ignored_committed_table_drift" ] || [ "$mode" = "dropped_ignored_table_db_hash_drift" ]; then
       print_cells beads wisps
       exit 0
     fi
@@ -1022,6 +1023,15 @@ case "$query" in
       exit 0
     fi
     print_cell beads
+    exit 0
+    ;;
+  *"DOLT_DIFF("*"'wisps')"*)
+    # Same ordering requirement as the probe-table arm below: this query's
+    # text also matches the generic "SELECT COUNT(*) FROM" arm, so it must be
+    # dispatched first.
+    # The flatten commit DROPS a dolt_ignore'd table, so its content diff
+    # reports deletions: never added-only, by construction.
+    print_cell 1
     exit 0
     ;;
   *"DOLT_DIFF("*"'__gc_read_only_probe')"*)
@@ -1126,6 +1136,10 @@ case "$query" in
     fi
     if [ "$mode" = "absorbed_ws_db_hash_drift_system_table" ]; then
       print_cell dolt_schemas
+      exit 0
+    fi
+    if [ "$mode" = "dropped_ignored_table_db_hash_drift" ]; then
+      print_cell wisps
       exit 0
     fi
     case "$mode" in
@@ -2895,6 +2909,49 @@ func TestCompactScriptStillQuarantinesDbHashDriftBeyondVerifiedTables(t *testing
 	}
 	if strings.Contains(string(data), "DOLT_GC") {
 		t.Fatalf("unexplained db root drift must block full GC:\n%s", string(data))
+	}
+}
+
+// Production incident (hq 2026-08-03, sysadmin 2026-08-04): a store force-healed
+// per #3541/dolt#11131 has dolt_ignore'd tables inlined into the committed root
+// via DOLT_ADD('--force')+commit. preflight_counts correctly drops them from
+// per-table verification, but DOLT_HASHOF_DB('HEAD') still counts them -- and
+// the flatten's DOLT_RESET('--soft', root) un-tracks them while -Am cannot
+// re-stage a dolt_ignore'd table, so the flatten commit DROPS them. The
+// committed root drifts with a stable HEAD, every verified table stays
+// byte-identical, and DOLT_DIFF_STAT names a table whose diff is a deletion --
+// so #5049's added-only proof can never admit it and the database hard-
+// quarantines, blocking compaction and GC indefinitely.
+//
+// The drop is by construction rather than evidence of loss: the rows stay in
+// the working set, which DOLT_GC keeps reachable. Admit it on preflight's own
+// positive identification and take the existing defer path. That converges --
+// the defer leaves the flatten HEAD in place, and that HEAD no longer carries
+// the table, so the next run sees an ordinary never-committed table.
+func TestCompactScriptDefersDroppedDoltIgnoredTableDbHashDrift(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "dropped_ignored_table_db_hash_drift", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("dropped dolt_ignore'd table drift must defer, not fail: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "dropped dolt_ignore'd table(s) [wisps]") ||
+		!strings.Contains(out, "deferring, will retry next run") {
+		t.Fatalf("output missing dropped dolt_ignore'd table defer message:\n%s", out)
+	}
+	quarantine := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if _, statErr := os.Stat(quarantine); !os.IsNotExist(statErr) {
+		t.Fatalf("dropped dolt_ignore'd table drift must NOT write a quarantine marker; stat=%v", statErr)
+	}
+	pendingGC := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
+	if reason := compactMarkerValue(t, pendingGC, "reason"); reason != "writer race during flatten deferred full GC" {
+		t.Fatalf("dropped dolt_ignore'd table defer should record pending-GC retry marker, got reason %q", reason)
+	}
+	data, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read fake dolt log: %v", readErr)
+	}
+	if strings.Contains(string(data), "DOLT_HASHOF_TABLE('wisps')") {
+		t.Fatalf("dolt_ignore'd committed table must not be hash-verified:\n%s", string(data))
 	}
 }
 
@@ -4737,13 +4794,17 @@ exit 0
 	return logPath
 }
 
-func writeBackupFakeRsync(t *testing.T, binDir string) string {
+func writeBackupFakeRsync(t *testing.T, binDir string, exitCodes ...int) string {
 	t.Helper()
+	exitCode := 0
+	if len(exitCodes) > 0 {
+		exitCode = exitCodes[0]
+	}
 	logPath := filepath.Join(binDir, "rsync.log")
 	writeExecutable(t, filepath.Join(binDir, "rsync"), fmt.Sprintf(`#!/bin/sh
 printf 'rsync %s\n' "$*" >> %s
-exit 0
-`, "%s", shellQuote(logPath)))
+exit %d
+`, "%s", shellQuote(logPath), exitCode))
 	return logPath
 }
 
@@ -4863,6 +4924,115 @@ func TestBackupScriptDiscoversNamedBackupsAndSyncsArtifactsOffsite(t *testing.T)
 	}
 	if strings.Contains(string(rsyncLog), dataDir+"/") {
 		t.Fatalf("rsync must not use live data dir, log:\n%s", rsyncLog)
+	}
+}
+
+func TestBackupScriptEscalatesOffsiteFailureWithConfiguredBound(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	artifactDir := filepath.Join(cityPath, ".dolt-backup")
+	offsiteDir := filepath.Join(cityPath, "offsite")
+	for _, dir := range []string{
+		filepath.Join(dataDir, "prod", ".dolt"),
+		artifactDir,
+		offsiteDir,
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	_ = writeBackupFakeDolt(t, binDir, "2.1.0", 0, "prod")
+	_ = writeBackupFakeRsync(t, binDir, 1)
+	timeoutLogPath := filepath.Join(binDir, "timeout.log")
+	writeExecutable(t, filepath.Join(binDir, "timeout"), fmt.Sprintf(`#!/bin/sh
+printf 'timeout %%s\n' "$*" >> %s
+[ "$1" = "--kill-after=2" ] && shift
+shift
+exec "$@"
+`, shellQuote(timeoutLogPath)))
+
+	out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir,
+		"GC_BACKUP_OFFSITE_PATH="+offsiteDir,
+		"GC_BACKUP_OFFSITE_TIMEOUT=17",
+	)
+	if !strings.Contains(out, "synced: 1/1") || !strings.Contains(out, "offsite: failed") {
+		t.Fatalf("offsite failure should stay non-fatal and remain visible in the summary:\n%s", out)
+	}
+
+	timeoutLog, err := os.ReadFile(timeoutLogPath)
+	if err != nil {
+		t.Fatalf("read timeout log: %v", err)
+	}
+	if !strings.Contains(string(timeoutLog), "--kill-after=2 17 rsync -a --delete") {
+		t.Fatalf("offsite rsync did not use GC_BACKUP_OFFSITE_TIMEOUT=17:\n%s", timeoutLog)
+	}
+
+	gcLog, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	for _, want := range []string{
+		"mail send human -s Dolt backup: offsite publication failed [MEDIUM]",
+		"Status: failed. Bound: 17s (raise with GC_BACKUP_OFFSITE_TIMEOUT).",
+		"Until this clears, the only copy of these databases is on this host.",
+	} {
+		if !strings.Contains(string(gcLog), want) {
+			t.Fatalf("offsite failure escalation missing %q:\n%s", want, gcLog)
+		}
+	}
+}
+
+func TestBackupScriptRejectsUnusableOffsiteTimeout(t *testing.T) {
+	// 0 is the dangerous one: GNU `timeout 0` drops the bound entirely while
+	// the python3 fallback in runtime.sh expires immediately. Both it and a
+	// non-numeric value must fall back to the documented 300s default.
+	for _, configured := range []string{"0", "not-a-number"} {
+		t.Run(configured, func(t *testing.T) {
+			cityPath := t.TempDir()
+			dataDir := filepath.Join(cityPath, "dolt-data")
+			artifactDir := filepath.Join(cityPath, ".dolt-backup")
+			offsiteDir := filepath.Join(cityPath, "offsite")
+			for _, dir := range []string{
+				filepath.Join(dataDir, "prod", ".dolt"),
+				artifactDir,
+				offsiteDir,
+			} {
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatalf("mkdir %s: %v", dir, err)
+				}
+			}
+
+			binDir := t.TempDir()
+			_ = writeDogFakeGC(t, binDir)
+			_ = writeBackupFakeDolt(t, binDir, "2.1.0", 0, "prod")
+			_ = writeBackupFakeRsync(t, binDir)
+			timeoutLogPath := filepath.Join(binDir, "timeout.log")
+			writeExecutable(t, filepath.Join(binDir, "timeout"), fmt.Sprintf(`#!/bin/sh
+printf 'timeout %%s\n' "$*" >> %s
+[ "$1" = "--kill-after=2" ] && shift
+shift
+exec "$@"
+`, shellQuote(timeoutLogPath)))
+
+			out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir,
+				"GC_BACKUP_OFFSITE_PATH="+offsiteDir,
+				"GC_BACKUP_OFFSITE_TIMEOUT="+configured,
+			)
+			if !strings.Contains(out, "offsite: ok") {
+				t.Fatalf("offsite rsync should still run with an unusable bound:\n%s", out)
+			}
+
+			timeoutLog, err := os.ReadFile(timeoutLogPath)
+			if err != nil {
+				t.Fatalf("read timeout log: %v", err)
+			}
+			if !strings.Contains(string(timeoutLog), "--kill-after=2 300 rsync -a --delete") {
+				t.Fatalf("GC_BACKUP_OFFSITE_TIMEOUT=%q should fall back to 300s:\n%s", configured, timeoutLog)
+			}
+		})
 	}
 }
 

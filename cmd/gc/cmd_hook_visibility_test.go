@@ -24,14 +24,17 @@ func TestHookRouteIdentitiesEqual(t *testing.T) {
 		{"different rigs", "rig-a/planner", "rig-b/planner", false},
 		{"different agents, same rig", "gascity/builder", "gascity/reviewer", false},
 		{"empty vs non-empty", "", "gascity/builder", false},
-		{"case insensitive", "Gascity/Builder", "gascity/builder", true},
-		{"case insensitive, dash-encoded", "Gascity--Builder", "gascity/builder", true},
 		// A legacy bound-template spelling ("dir/binding.name") is deliberately
 		// NOT collapsed onto its unbound form here - that migration is owned by
 		// canonicalizeLegacyBoundUnassignedRoutedWork, which rewrites the
 		// persisted route explicitly rather than treating the two spellings as
 		// always-already-equal at compare time.
 		{"legacy bound-template spelling is not collapsed", "gascity/gastown.builder", "gascity/builder", false},
+		// config accepts "builder" and "Builder" as two separate agents
+		// (ValidateAgents keys on a case-sensitive {dir, binding, name}), so
+		// treating them as equal here is a cross-agent work-visibility bug
+		// (ga-lmy6yj), not a convenience.
+		{"case-differing spellings are DISTINCT agents", "gascity/Builder", "gascity/builder", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

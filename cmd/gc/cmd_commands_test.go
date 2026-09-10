@@ -312,7 +312,161 @@ func runPackCommandProcessWithEnv(t *testing.T, cityPath, scenario string, extra
 	if got, err := os.ReadFile(afterRun); err != nil || string(got) != "reached\n" {
 		t.Fatalf("post-run marker = %q, err=%v; run did not return through deferred lifecycle", got, err)
 	}
-	return packCommandProcessResult{exitCode: exitCode, stdout: stdout.String(), stderr: stderr.String()}
+	return packCommandProcessResult{exitCode: exitCode, stdout: stdout.String(), stderr: stripLeakGuardNoise(stderr.String())}
+}
+
+// stripLeakGuardNoise removes BOTH test leak guards' own diagnostic lines from
+// captured subprocess stderr:
+//
+//   - the tmux guard (cmd/gc/tmux_leak_guard_test.go: sweepStaleTmuxTestServers,
+//     writeTmuxLeakReport, and tmuxLeakGuardedTestingM.runWith's teardown report)
+//   - the dolt guard (cmd/gc/path_helpers_test.go: sweepStaleCmdGCTestDoltProcesses,
+//     reapDoltProcessesUnderRoot, sweepOrphanDoltStoreDirs, writeDoltLeakReport,
+//     and doltLeakGuardedTestingM's teardown scan)
+//
+// TestMain wraps m in both (newDoltLeakGuardedTestingM inside,
+// newTmuxLeakGuardedTestingM outside) and re-runs in every re-exec'd
+// subprocess, so either guard's startup sweep or teardown leak check can emit
+// lines nondeterministically depending on unrelated concurrent sibling suites'
+// teardown timing — real CLI stderr assertions must not depend on that timing.
+//
+// Both guards' per-process detail lines share the "  pid=" prefix, so a single
+// case covers them. Only the header prefixes differ, and omitting the dolt one
+// is what made main CI red for ~26h (ga-vqhh23): the eager side reaped a stale
+// dolt server and announced it while the lazy side had nothing left to reap, so
+// TestPackCommandCobraHelpAndUnknownParity's stderr-equality assertion failed on
+// a difference that had nothing to do with cobra dispatch.
+func stripLeakGuardNoise(s string) string {
+	if s == "" {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	trailingNewline := false
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		trailingNewline = true
+		lines = lines[:len(lines)-1]
+	}
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		switch {
+		case strings.HasPrefix(line, "cmd/gc tmux leak guard: "):
+		case strings.HasPrefix(line, "cmd/gc test dolt leak guard: "):
+		case strings.HasPrefix(line, "  pid="):
+		case strings.HasPrefix(line, "  socket="):
+		default:
+			kept = append(kept, line)
+		}
+	}
+	if len(kept) == 0 {
+		return ""
+	}
+	out := strings.Join(kept, "\n")
+	if trailingNewline {
+		out += "\n"
+	}
+	return out
+}
+
+// TestStripLeakGuardNoise expresses the acceptance criteria for isolating
+// captured subprocess stderr from BOTH test leak guards' harness-level
+// diagnostics (cmd/gc/tmux_leak_guard_test.go and cmd/gc/path_helpers_test.go):
+// stripLeakGuardNoise must remove exactly those guards' startup-sweep and
+// teardown-leak lines, in any position, while leaving real CLI stderr output
+// (and its line order) untouched. Without this,
+// TestPackCommandCobraHelpAndUnknownParity's eager/lazy stderr-equality
+// assertion — and the several exact-empty-stderr assertions elsewhere in this
+// file — are vulnerable to a concurrent sibling suite's teardown racing exactly
+// one of the two subprocess launches' startup sweep (ga-5pe5xv gate evidence:
+// "a concurrent tmux leak-guard stderr line captured by one parity side only";
+// ga-vqhh23: the same failure via the dolt guard, which kept main CI red ~26h).
+//
+// Coverage rule for whoever adds the NEXT guard to TestMain: a guard that
+// writes to os.Stderr from TestMain is captured by every re-exec'd subprocess
+// assertion in this file, so it must gain a case here in the same change. The
+// dolt guard did not, and the gap stayed invisible until a stale server
+// happened to exist during exactly one of two subprocess launches.
+func TestStripLeakGuardNoise(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "no guard output left untouched",
+			in:   "Error: unknown command \"missing\" for \"gc backstage\"\n",
+			want: "Error: unknown command \"missing\" for \"gc backstage\"\n",
+		},
+		{
+			name: "empty stays empty",
+			in:   "",
+			want: "",
+		},
+		{
+			name: "strips a leading startup-sweep block, keeps real stderr after it",
+			in: "cmd/gc tmux leak guard: startup sweep reaping 1 stale test tmux server(s) whose socket root is gone\n" +
+				"  pid=12345 argv=\"tmux -u -L test-city new-session -s mayor\"\n" +
+				"Error: unknown command \"missing\" for \"gc backstage\"\n",
+			want: "Error: unknown command \"missing\" for \"gc backstage\"\n",
+		},
+		{
+			name: "strips a trailing teardown-leak block, keeps real stderr before it",
+			in: "Error: unknown command \"missing\" for \"gc backstage\"\n" +
+				"cmd/gc tmux leak guard: 1 tmux server(s) leaked by this run under /tmp/gct-1-a\n" +
+				"  socket=/tmp/gct-1-a/tmux-1000/test-city (killed)\n" +
+				"cmd/gc tmux leak guard: a test created a real tmux session without tearing its server down; city-name sockets (e.g. -L test-city) have exit-empty off and live forever unless killed (dip-73cr05)\n",
+			want: "Error: unknown command \"missing\" for \"gc backstage\"\n",
+		},
+		{
+			name: "strips a guard block sandwiched between two real stderr lines",
+			in: "Usage:\n" +
+				"cmd/gc tmux leak guard: startup sweep reaping 1 stale test tmux server(s) whose socket root is gone\n" +
+				"  pid=999 argv=\"tmux -u -L test-city new-session -s mayor\"\n" +
+				"  gc backstage repo\n",
+			want: "Usage:\n  gc backstage repo\n",
+		},
+		{
+			// The dolt leak guard is the tmux guard's sibling in TestMain
+			// (newDoltLeakGuardedTestingM wraps m; newTmuxLeakGuardedTestingM
+			// wraps that) and re-runs in every re-exec'd subprocess with the
+			// same nondeterminism, so its lines must be stripped for the same
+			// reason. Verbatim from the ga-vqhh23 CI failure (job 102498944987).
+			name: "strips the dolt guard's startup stale-sweep block",
+			in: "cmd/gc test dolt leak guard: startup sweep reaping 1 stale cmd/gc test dolt sql-server process(es)\n" +
+				"  pid=4242 argv=\"dolt sql-server --config /tmp/x/hq/.beads/config.yaml\"\n" +
+				"Error: unknown command \"missing\" for \"gc backstage\"\n",
+			want: "Error: unknown command \"missing\" for \"gc backstage\"\n",
+		},
+		{
+			name: "strips the dolt guard's teardown leak block",
+			in: "Error: unknown command \"missing\" for \"gc backstage\"\n" +
+				"cmd/gc test dolt leak guard: leaked 1 dolt sql-server process(es) under /tmp/gct-1-a\n" +
+				"  pid=4243 argv=\"dolt sql-server --config /tmp/gct-1-a/r001/.beads/config.yaml\"\n",
+			want: "Error: unknown command \"missing\" for \"gc backstage\"\n",
+		},
+		{
+			name: "strips the dolt guard's orphan-store-dir and scan-error lines",
+			in: "cmd/gc test dolt leak guard: startup sweep removed orphaned dolt store dir /tmp/tmp.abc\n" +
+				"cmd/gc test dolt leak guard: startup sweep error: permission denied\n" +
+				"Usage:\n",
+			want: "Usage:\n",
+		},
+		{
+			// The actual ga-vqhh23 regression: the eager side reaped a stale
+			// server and announced it, the lazy side had nothing left to reap.
+			// After stripping, both sides must compare equal.
+			name: "eager-with-dolt-noise and lazy-empty normalize to equal",
+			in: "cmd/gc test dolt leak guard: startup sweep reaping 1 stale cmd/gc test dolt sql-server process(es)\n" +
+				"  pid=4242 argv=\"dolt sql-server --config /tmp/x/hq/.beads/config.yaml\"\n",
+			want: "",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := stripLeakGuardNoise(test.in); got != test.want {
+				t.Fatalf("stripLeakGuardNoise(%q) = %q, want %q", test.in, got, test.want)
+			}
+		})
+	}
 }
 
 const testTmuxSocketParentRootEnv = "GC_TEST_TMUX_SOCKET_PARENT_ROOT"
@@ -2672,13 +2826,13 @@ func TestPackCommandCobraHelpAndUnknownParity(t *testing.T) {
 			name:           "known namespace miss",
 			args:           []string{"backstage", "missing"},
 			wantExit:       1,
-			wantStderrText: []string{`unknown command "missing"`, "Usage:", "gc backstage", "hello", "repo"},
+			wantStderrText: []string{`unknown command "missing"`, `Run "gc backstage --help" for usage.`},
 		},
 		{
 			name:           "known intermediate miss",
 			args:           []string{"backstage", "repo", "missing"},
 			wantExit:       1,
-			wantStderrText: []string{`unknown command "missing"`, "Usage:", "gc backstage repo", "sync"},
+			wantStderrText: []string{`unknown command "missing"`, `Run "gc backstage repo --help" for usage.`},
 		},
 	}
 	for _, test := range tests {
@@ -2718,12 +2872,12 @@ func TestPackCommandGroupMissRejectsUnknownSubcommands(t *testing.T) {
 		{
 			name: "namespace",
 			args: []string{"backstage", "missing"},
-			want: []string{`unknown command "missing"`, "Usage:", "gc backstage", "hello", "repo"},
+			want: []string{`unknown command "missing"`, `Run "gc backstage --help" for usage.`},
 		},
 		{
 			name: "intermediate",
 			args: []string{"backstage", "repo", "missing"},
-			want: []string{`unknown command "missing"`, "Usage:", "gc backstage repo", "sync"},
+			want: []string{`unknown command "missing"`, `Run "gc backstage repo --help" for usage.`},
 		},
 	}
 	for _, test := range tests {
@@ -2933,7 +3087,7 @@ func TestResolveDiscoveredCommandFallbackSelectsNestedUnknown(t *testing.T) {
 	if got := stdout.String(); got != "" {
 		t.Fatalf("stdout = %q, want empty", got)
 	}
-	for _, text := range []string{`gc: unknown command "missing"`, "Usage:", "gc private-binding repo"} {
+	for _, text := range []string{`gc: unknown command "missing"`, `Run "gc private-binding repo --help" for usage.`} {
 		if !strings.Contains(stderr.String(), text) {
 			t.Fatalf("stderr missing %q:\n%s", text, stderr.String())
 		}

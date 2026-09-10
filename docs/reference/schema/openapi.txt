@@ -1797,6 +1797,36 @@
         ],
         "type": "object"
       },
+      "ControlRootSettleFailedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "error_class": {
+            "type": "string"
+          },
+          "finalizer_bead_id": {
+            "type": "string"
+          },
+          "follow_up_bead_id": {
+            "type": "string"
+          },
+          "root_bead_id": {
+            "type": "string"
+          },
+          "store_path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "root_bead_id",
+          "finalizer_bead_id",
+          "error_class",
+          "error"
+        ],
+        "type": "object"
+      },
       "ControlStalledPayload": {
         "additionalProperties": false,
         "properties": {
@@ -2495,6 +2525,9 @@
           },
           {
             "$ref": "#/components/schemas/ConditionalWritesDegradedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/ControlRootSettleFailedPayload"
           },
           {
             "$ref": "#/components/schemas/ControlStalledPayload"
@@ -11650,12 +11683,17 @@
           },
           "outcome": {
             "type": "string"
+          },
+          "proven_beads": {
+            "format": "int64",
+            "type": "integer"
           }
         },
         "required": [
           "binding",
           "database",
           "outcome",
+          "proven_beads",
           "invariant"
         ],
         "type": "object"
@@ -12163,6 +12201,7 @@
             "city.resumed": "#/components/schemas/TypedEventStreamEnvelopeCityResumed",
             "city.suspended": "#/components/schemas/TypedEventStreamEnvelopeCitySuspended",
             "city.unregister_requested": "#/components/schemas/TypedEventStreamEnvelopeCityUnregisterRequested",
+            "control.root_settle_failed": "#/components/schemas/TypedEventStreamEnvelopeControlRootSettleFailed",
             "control.stalled": "#/components/schemas/TypedEventStreamEnvelopeControlStalled",
             "controller.started": "#/components/schemas/TypedEventStreamEnvelopeControllerStarted",
             "controller.stopped": "#/components/schemas/TypedEventStreamEnvelopeControllerStopped",
@@ -12216,6 +12255,7 @@
             "session.crashed": "#/components/schemas/TypedEventStreamEnvelopeSessionCrashed",
             "session.demand_claim_divergence": "#/components/schemas/TypedEventStreamEnvelopeSessionDemandClaimDivergence",
             "session.drain_acked_with_assigned_work": "#/components/schemas/TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork",
+            "session.drain_fence_unavailable": "#/components/schemas/TypedEventStreamEnvelopeSessionDrainFenceUnavailable",
             "session.draining": "#/components/schemas/TypedEventStreamEnvelopeSessionDraining",
             "session.idle_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionIdleKilled",
             "session.max_age_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionMaxAgeKilled",
@@ -12232,6 +12272,7 @@
             "session.work_query_failed": "#/components/schemas/TypedEventStreamEnvelopeSessionWorkQueryFailed",
             "storage.binding.converged": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingConverged",
             "storage.binding.genesis": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingGenesis",
+            "storage.binding.not_configured": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingNotConfigured",
             "storage.binding.uncheckable": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingUncheckable",
             "storage.binding.unconverged": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingUnconverged",
             "supervisor.fs_pressure.skipped_tick": "#/components/schemas/TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick",
@@ -12289,6 +12330,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeCityUnregisterRequested"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeControlRootSettleFailed"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeControlStalled"
@@ -12450,6 +12494,9 @@
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork"
           },
           {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionDrainFenceUnavailable"
+          },
+          {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionDraining"
           },
           {
@@ -12496,6 +12543,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingGenesis"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingNotConfigured"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingUncheckable"
@@ -13385,6 +13435,63 @@
         "title": "TypedEventStreamEnvelope city.unregister_requested",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeControlRootSettleFailed": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ControlRootSettleFailedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "control.root_settle_failed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope control.root_settle_failed",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeControlStalled": {
         "additionalProperties": false,
         "properties": {
@@ -13726,6 +13833,7 @@
                 "session.wake_refused",
                 "session.reset_stalled",
                 "session.work_query_failed",
+                "session.drain_fence_unavailable",
                 "session.demand_claim_divergence",
                 "session.cold_start_timeout",
                 "bead.created",
@@ -13756,6 +13864,7 @@
                 "controller.started",
                 "controller.stopped",
                 "control.stalled",
+                "control.root_settle_failed",
                 "city.suspended",
                 "city.resumed",
                 "request.result.city.create",
@@ -13802,7 +13911,8 @@
                 "storage.binding.converged",
                 "storage.binding.genesis",
                 "storage.binding.unconverged",
-                "storage.binding.uncheckable"
+                "storage.binding.uncheckable",
+                "storage.binding.not_configured"
               ]
             },
             "type": "string"
@@ -16557,6 +16667,63 @@
         "title": "TypedEventStreamEnvelope session.drain_acked_with_assigned_work",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSessionDrainFenceUnavailable": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionLifecyclePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.drain_fence_unavailable",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.drain_fence_unavailable",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSessionDraining": {
         "additionalProperties": false,
         "properties": {
@@ -17469,6 +17636,63 @@
         "title": "TypedEventStreamEnvelope storage.binding.genesis",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeStorageBindingNotConfigured": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/StorageBindingOutcomePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "storage.binding.not_configured",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope storage.binding.not_configured",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeStorageBindingUncheckable": {
         "additionalProperties": false,
         "properties": {
@@ -18001,6 +18225,7 @@
             "city.resumed": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityResumed",
             "city.suspended": "#/components/schemas/TypedTaggedEventStreamEnvelopeCitySuspended",
             "city.unregister_requested": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityUnregisterRequested",
+            "control.root_settle_failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeControlRootSettleFailed",
             "control.stalled": "#/components/schemas/TypedTaggedEventStreamEnvelopeControlStalled",
             "controller.started": "#/components/schemas/TypedTaggedEventStreamEnvelopeControllerStarted",
             "controller.stopped": "#/components/schemas/TypedTaggedEventStreamEnvelopeControllerStopped",
@@ -18054,6 +18279,7 @@
             "session.crashed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionCrashed",
             "session.demand_claim_divergence": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence",
             "session.drain_acked_with_assigned_work": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork",
+            "session.drain_fence_unavailable": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable",
             "session.draining": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDraining",
             "session.idle_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionIdleKilled",
             "session.max_age_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled",
@@ -18070,6 +18296,7 @@
             "session.work_query_failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed",
             "storage.binding.converged": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingConverged",
             "storage.binding.genesis": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingGenesis",
+            "storage.binding.not_configured": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured",
             "storage.binding.uncheckable": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingUncheckable",
             "storage.binding.unconverged": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingUnconverged",
             "supervisor.fs_pressure.skipped_tick": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick",
@@ -18127,6 +18354,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityUnregisterRequested"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeControlRootSettleFailed"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeControlStalled"
@@ -18288,6 +18518,9 @@
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork"
           },
           {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable"
+          },
+          {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDraining"
           },
           {
@@ -18334,6 +18567,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingGenesis"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingUncheckable"
@@ -19283,6 +19519,67 @@
         "title": "TypedTaggedEventStreamEnvelope city.unregister_requested",
         "type": "object"
       },
+      "TypedTaggedEventStreamEnvelopeControlRootSettleFailed": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ControlRootSettleFailedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "control.root_settle_failed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope control.root_settle_failed",
+        "type": "object"
+      },
       "TypedTaggedEventStreamEnvelopeControlStalled": {
         "additionalProperties": false,
         "properties": {
@@ -19647,6 +19944,7 @@
                 "session.wake_refused",
                 "session.reset_stalled",
                 "session.work_query_failed",
+                "session.drain_fence_unavailable",
                 "session.demand_claim_divergence",
                 "session.cold_start_timeout",
                 "bead.created",
@@ -19677,6 +19975,7 @@
                 "controller.started",
                 "controller.stopped",
                 "control.stalled",
+                "control.root_settle_failed",
                 "city.suspended",
                 "city.resumed",
                 "request.result.city.create",
@@ -19723,7 +20022,8 @@
                 "storage.binding.converged",
                 "storage.binding.genesis",
                 "storage.binding.unconverged",
-                "storage.binding.uncheckable"
+                "storage.binding.uncheckable",
+                "storage.binding.not_configured"
               ]
             },
             "type": "string"
@@ -22671,6 +22971,67 @@
         "title": "TypedTaggedEventStreamEnvelope session.drain_acked_with_assigned_work",
         "type": "object"
       },
+      "TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionLifecyclePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.drain_fence_unavailable",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.drain_fence_unavailable",
+        "type": "object"
+      },
       "TypedTaggedEventStreamEnvelopeSessionDraining": {
         "additionalProperties": false,
         "properties": {
@@ -23645,6 +24006,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope storage.binding.genesis",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/StorageBindingOutcomePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "storage.binding.not_configured",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope storage.binding.not_configured",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeStorageBindingUncheckable": {
@@ -43941,6 +44363,16 @@
               "maximum": 10000,
               "minimum": 0,
               "type": "integer"
+            }
+          },
+          {
+            "description": "Resolve {id} as an exact session bead id only: a single point read that also finds closed sessions and answers 404 when no bead has that id. Skips the alias, runtime session_name, configured-name and closed-session name lookups. For callers holding a durable id.",
+            "explode": false,
+            "in": "query",
+            "name": "exact_id",
+            "schema": {
+              "description": "Resolve {id} as an exact session bead id only: a single point read that also finds closed sessions and answers 404 when no bead has that id. Skips the alias, runtime session_name, configured-name and closed-session name lookups. For callers holding a durable id.",
+              "type": "boolean"
             }
           }
         ],
