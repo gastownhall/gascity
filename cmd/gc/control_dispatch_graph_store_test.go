@@ -655,6 +655,57 @@ func TestSourceWorkflowStoresScanTheLedgerThatHoldsWorkflowRoots(t *testing.T) {
 	}
 }
 
+// TestOpenSourceWorkflowStoresScanTheBindingOnSplitCity pins the command-side
+// delete-source path to the same relocated graph ledger as workflow-finalize.
+// The lister above injects its opener, so it cannot catch openSourceWorkflowStores
+// accidentally using the raw scope opener again.
+func TestOpenSourceWorkflowStoresScanTheBindingOnSplitCity(t *testing.T) {
+	cityPath := t.TempDir()
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatalf("mkdir file store: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".gc", "beads.json"), []byte("{\"seq\":0,\"beads\":[]}\n"), 0o644); err != nil {
+		t.Fatalf("seed scope store: %v", err)
+	}
+
+	graphStore := beads.NewMemStoreFrom(1000, nil, nil)
+	seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(graphStore))
+	const sourceBeadID = "gc-1"
+	root, err := graphStore.Create(beads.Bead{
+		Title: "binding-resident workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:           beadmeta.KindWorkflow,
+			beadmeta.SourceBeadIDMetadataKey:   sourceBeadID,
+			beadmeta.SourceStoreRefMetadataKey: "city:test-city",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create live workflow root: %v", err)
+	}
+
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	stores, _, err := openSourceWorkflowStores(cfg, cityPath, "")
+	if err != nil {
+		t.Fatalf("open source workflow stores: %v", err)
+	}
+	var found []string
+	for _, info := range stores {
+		roots, err := sourceworkflow.ListLiveRoots(info.store, sourceBeadID, "city:test-city", "city:test-city")
+		if err != nil {
+			t.Fatalf("ListLiveRoots(%s): %v", info.path, err)
+		}
+		for _, live := range roots {
+			found = append(found, live.ID)
+		}
+	}
+	if !slices.Contains(found, root.ID) {
+		t.Fatalf("openSourceWorkflowStores scanned %v, want binding-resident root %s", found, root.ID)
+	}
+}
+
 // TestSourceWorkflowStoresStayOnTheScopeStoreWithNoRelocation is the
 // compatibility half: a city that relocates nothing resolves the same scope
 // store the scan always used, and no graph binding is consulted.
