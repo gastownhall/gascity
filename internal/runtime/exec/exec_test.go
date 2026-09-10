@@ -1605,7 +1605,7 @@ esac
 		//
 		//   well under budget -> the forced kill beat the trap outright. The
 		//     grace was skipped, which the plumbing should make impossible.
-		//   at or over budget -> the whole budget elapsed and went unused.
+		//   at or past half the budget -> most or all of it elapsed and went unused.
 		//
 		// Be careful about what the second case does NOT prove. It is still a
 		// failure, and at least three mechanisms produce it identically:
@@ -1629,12 +1629,15 @@ esac
 		// which makes the threshold a diagnostic-quality choice and never a
 		// correctness risk. Do not "tighten" it into a skip or a retry.
 		if graceUsed >= startCancellationGrace/2 {
-			t.Fatalf("rollback trap never ran; the full %v cancellation grace elapsed unused "+
-				"(%v from cancel to return), and Start returned %v. The grace was honored rather "+
-				"than skipped, which narrows this to: the adapter was never scheduled to run its "+
-				"trap (host starvation), or cancellation reached only the shell leader and left the "+
-				"foreground child holding the pipes. The latter two are real defects — do not "+
-				"dismiss this as environmental without checking: %v",
+			t.Fatalf("rollback trap never ran and most or all of the %v cancellation grace elapsed "+
+				"unused (%v from cancel to return), and Start returned %v. The grace was honored "+
+				"rather than skipped, which narrows this to three mechanisms: the adapter was never "+
+				"scheduled to run its trap (host starvation — environmental); interruptProcessGroup "+
+				"failed, so the execgrace fallback SIGKILLed only the shell and the orphaned "+
+				"foreground child held the I/O pipes until WaitDelay fired; or cancellation reached "+
+				"only the shell leader and left the trap deferred behind the foreground child. The "+
+				"last two are real defects — do not dismiss this as environmental without "+
+				"checking: %v",
 				startCancellationGrace, graceUsed.Round(time.Millisecond), startErr, err)
 		}
 		t.Fatalf("rollback trap never ran and only %v of the %v cancellation grace elapsed "+
