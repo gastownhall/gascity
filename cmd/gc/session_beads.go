@@ -1631,14 +1631,18 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 	// snapshotOrLoadSessionBeads only re-listed on a same-cycle create skew).
 	loadExistingStart := time.Now()
 	existing, err := loadSessionBeads(store)
-	if err != nil {
-		fmt.Fprintf(stderr, "session beads: listing existing: %v\n", err) //nolint:errcheck
-		return nil, sessionBeads
-	}
+	// Record before the error return: under store pressure the slow scan is
+	// also the one most likely to fail, so the failing case is the one the
+	// trace most needs. len(existing) is 0 on the error path, which is correct.
 	if recordPhase != nil {
 		recordPhase(TraceSiteSessionSync, "sync_beads_and_update_index.load_existing", loadExistingStart, map[string]any{
 			"existing_count": len(existing),
+			"ok":             err == nil,
 		})
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "session beads: listing existing: %v\n", err) //nolint:errcheck
+		return nil, sessionBeads
 	}
 
 	// Repair session beads with empty types. The gc:session label (used by
@@ -1728,15 +1732,20 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		}
 		loadVisibleStart := time.Now()
 		open, err := loadSessionBeads(store)
-		if err != nil {
-			return nil, err
+		if err == nil {
+			visibleBySessionName = indexSessionBeadsByName(open)
+			visibleLoaded = true
 		}
-		visibleBySessionName = indexSessionBeadsByName(open)
-		visibleLoaded = true
+		// Record before the error return, for the same reason as the scan
+		// above: a failing recovery scan is exactly the one worth timing.
 		if recordPhase != nil {
 			recordPhase(TraceSiteSessionSync, "sync_beads_and_update_index.load_visible_by_session_name", loadVisibleStart, map[string]any{
 				"visible_count": len(visibleBySessionName),
+				"ok":            err == nil,
 			})
+		}
+		if err != nil {
+			return nil, err
 		}
 		return visibleBySessionName, nil
 	}

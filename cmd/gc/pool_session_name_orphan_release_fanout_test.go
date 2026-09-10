@@ -307,15 +307,31 @@ func TestReleaseOrphanedPoolAssignments_RecordsMemoizedVsFallbackBranchCounts(t 
 			work, stores, storeRefs, nil, nil, recordPhase,
 		)
 
-		phase := findCapturedTracePhase(t, captured, "bead_reconcile.release_orphaned_pool_assignments.liveness_probe")
+		phase := findCapturedTracePhase(t, captured, "bead_reconcile.release_orphaned_pool_assignments.release_sweep")
 		if phase.site != TraceSiteControllerTickPhase {
-			t.Fatalf("liveness_probe site = %q, want %q", phase.site, TraceSiteControllerTickPhase)
+			t.Fatalf("release_sweep site = %q, want %q", phase.site, TraceSiteControllerTickPhase)
 		}
 		if got := phase.fields["memoized_count"]; got != 3 {
 			t.Fatalf("memoized_count = %v, want 3", got)
 		}
 		if got := phase.fields["fallback_count"]; got != 0 {
 			t.Fatalf("fallback_count = %v, want 0 — a store-aware, store-ref-aware call shape must stay on the memoized branch", got)
+		}
+		// probe_ms isolates the liveness-probe cost from the rest of the sweep
+		// body (ownership-index build, gates, release writes), which is the
+		// number ga-ihbl3e needs. Against a MemStore the probes finish in
+		// microseconds and floor to 0, so assert presence and a sane type
+		// rather than a nonzero duration.
+		probeMS, ok := phase.fields["probe_ms"]
+		if !ok {
+			t.Fatalf("release_sweep fields have no probe_ms; fields=%+v", phase.fields)
+		}
+		probeMSInt, ok := probeMS.(int64)
+		if !ok {
+			t.Fatalf("probe_ms = %v (%T), want int64", probeMS, probeMS)
+		}
+		if probeMSInt < 0 {
+			t.Fatalf("probe_ms = %d, want >= 0", probeMSInt)
 		}
 	})
 
@@ -336,7 +352,7 @@ func TestReleaseOrphanedPoolAssignments_RecordsMemoizedVsFallbackBranchCounts(t 
 			work, nil, nil, nil, nil, recordPhase,
 		)
 
-		phase := findCapturedTracePhase(t, captured, "bead_reconcile.release_orphaned_pool_assignments.liveness_probe")
+		phase := findCapturedTracePhase(t, captured, "bead_reconcile.release_orphaned_pool_assignments.release_sweep")
 		if got := phase.fields["fallback_count"]; got != 3 {
 			t.Fatalf("fallback_count = %v, want 3", got)
 		}

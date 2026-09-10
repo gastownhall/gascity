@@ -252,7 +252,8 @@ func releaseOrphanedPoolAssignments(
 	// at ~14 minutes.
 	sessionStoreLiveAssignee := make(map[string]bool, len(assignedWorkBeads))
 	ownerStoreLiveAssignee := make(map[string]bool, len(assignedWorkBeads))
-	probeStart := time.Now()
+	sweepStart := time.Now()
+	var probeElapsed time.Duration
 	memoizedProbeCount := 0
 	fallbackProbeCount := 0
 
@@ -335,6 +336,7 @@ func releaseOrphanedPoolAssignments(
 			// leave the fallback unmemoized rather than risk that.
 			if ownerStore != nil {
 				live := false
+				probeCallStart := time.Now()
 				if storeAware && storeRefAware {
 					memoizedProbeCount++
 					live = memoizedLiveOpenSessionAssignmentExists(ownerStoreLiveAssignee, workStoreRef+"\x00"+assignee, ownerStore, assignee)
@@ -342,6 +344,7 @@ func releaseOrphanedPoolAssignments(
 					fallbackProbeCount++
 					live = liveOpenSessionAssignmentExists(ownerStore, assignee)
 				}
+				probeElapsed += time.Since(probeCallStart)
 				if live {
 					continue
 				}
@@ -367,9 +370,10 @@ func releaseOrphanedPoolAssignments(
 		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
 	}
 	if recordPhase != nil {
-		recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.release_orphaned_pool_assignments.liveness_probe", probeStart, map[string]any{
+		recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.release_orphaned_pool_assignments.release_sweep", sweepStart, map[string]any{
 			"memoized_count": memoizedProbeCount,
 			"fallback_count": fallbackProbeCount,
+			"probe_ms":       probeElapsed.Milliseconds(),
 		})
 	}
 	return released
