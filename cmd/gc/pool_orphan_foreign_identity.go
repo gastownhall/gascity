@@ -22,7 +22,7 @@ import (
 // OBSERVABLE from here":
 //
 //	foreign / unknown  -> unobservable -> PROTECTED (skip, do not release)
-//	locally configured -> observable   -> today's behaviour, UNCHANGED
+//	locally configured -> observable   -> today's behavior, UNCHANGED
 //
 // The unchanged-for-local property is what makes this shippable onto a box
 // running live reviews, so every helper here is a pure read of local config.
@@ -53,7 +53,7 @@ import (
 // aliases, session bead IDs and runtime session names ("gastown__dog-ga-up143",
 // "claude-mc-xyz") are this city's own naming and were never the cross-city
 // hazard. Keeping them on the existing path is what preserves current
-// behaviour for every local assignee shape.
+// behavior for every local assignee shape.
 func poolAssigneeIsLocallyObservable(cfg *config.City, cityName, assignee string) bool {
 	assignee = strings.TrimSpace(assignee)
 	if cfg == nil || assignee == "" {
@@ -137,7 +137,7 @@ func poolIdentityInLocalRoster(cfg *config.City, cityName, identity string) bool
 // carried them (config.Agent.BindingName), so the set is exact and needs no
 // heuristic. Measured on this city: {bd, cherub-law, core, gastown, gc,
 // oversight} — which covers every historically-reaped local identity — while
-// the neighbouring city's "pool" and "review" are absent. Their naming is
+// the neighboring city's "pool" and "review" are absent. Their naming is
 // linter-certified canonical on their side and cannot be changed, so the
 // discriminator has to live here.
 func poolIdentityLocalCandidates(cfg *config.City, identity string) []string {
@@ -181,7 +181,7 @@ func poolIdentityLocalCandidates(cfg *config.City, identity string) []string {
 // It fails in the safe direction: declining to resolve only ever PROTECTS a
 // claim. Stranding this city's own stale work is repairable and, in the pool
 // sweeper, reported in the per-sweep protected-identity summary; releasing a
-// neighbouring city's live claim is neither.
+// neighboring city's live claim is neither.
 func cityMintsBinding(cfg *config.City, binding string) bool {
 	binding = strings.TrimSpace(binding)
 	if cfg == nil || binding == "" {
@@ -274,7 +274,7 @@ func cityHasRigNamed(cfg *config.City, name string) bool {
 // Those are the two instance-name generators in the tree — poolInstanceName's
 // numeric slot form and session.GenerateAdhocIdentity, which cmd_hook.go writes
 // straight into the claim assignee for an aliasless pool worker
-// ("rig/polecat-adhoc-<hash>"). Both are recognised WITHOUT consulting the
+// ("rig/polecat-adhoc-<hash>"). Both are recognized WITHOUT consulting the
 // pool's configured ceiling: see the capacity note at the top of this file.
 //
 // The grammar is closed on purpose rather than accepting any suffix, so this
@@ -299,7 +299,7 @@ func poolIdentityIsInstanceOfLocalAgent(cfg *config.City, identity string) bool 
 	return false
 }
 
-// poolInstanceBaseNames strips a recognised instance suffix off an identity's
+// poolInstanceBaseNames strips a recognized instance suffix off an identity's
 // local part and returns the candidate agent names it could have been minted
 // from.
 func poolInstanceBaseNames(local string) []string {
@@ -362,7 +362,7 @@ func cutLastDash(s string) (string, string, bool) {
 // would be a fresh instance of the class it was written to fix. A local agent
 // removed from config is also "not in the local roster", so its claims become
 // protected too — correct as a default, but a permanent silent leak if nobody
-// can see it. Fifty protected claims for an identity nobody recognises has to
+// can see it. Fifty protected claims for an identity nobody recognizes has to
 // read as a decommissioned agent leaking, from the log alone, without knowing
 // to look for it.
 type protectedForeignAssignees struct {
