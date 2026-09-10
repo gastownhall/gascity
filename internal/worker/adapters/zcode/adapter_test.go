@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -498,7 +497,7 @@ func TestIdleSeparatedPromptsStaySeparate(t *testing.T) {
 	s.send("first prompt")
 	time.Sleep(2500 * time.Millisecond)
 	s.send("second prompt")
-	time.Sleep(2500 * time.Millisecond)
+	s.waitForTurns(2)
 	if _, code := s.closeAndWait(); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
@@ -649,7 +648,11 @@ func TestBracketedPasteWrappersAreStripped(t *testing.T) {
 }
 
 // A drain read that times out still holds whatever partial line arrived; losing
-// it silently truncates the prompt's last line.
+// it silently truncates the prompt's last line. This held only on bash >= 4
+// until the drain stopped timing a line read: bash 3.2 consumed the fragment
+// off the fd and discarded it before the script regained control. Now the
+// timer guards a one-byte read that has consumed nothing when it fires, so the
+// fragment survives on every shell and the assertion is unconditional.
 func TestDrainKeepsPartialTrailingLine(t *testing.T) {
 	t.Parallel()
 
@@ -660,27 +663,79 @@ func TestDrainKeepsPartialTrailingLine(t *testing.T) {
 	s.sendRaw("trailing line without a newline")
 	time.Sleep(2500 * time.Millisecond)
 	s.sendRaw("\n")
-	time.Sleep(2500 * time.Millisecond)
+	s.waitForTurns(1)
 	// Surviving the drain is the assertion that must hold on every platform: an
-	// unbound $more here killed the adapter under `set -u` on bash 3.2, which
-	// is exactly the regression this test's own shape provokes.
+	// unbound drain variable here killed the adapter under `set -u` on bash
+	// 3.2, which is exactly the regression this test's own shape provokes. The
+	// drain still clears its variables before every read for that reason.
 	if _, code := s.closeAndWait(); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
 
-	// *Keeping* the fragment, by contrast, is a bash 4.0 behavior: only there
-	// does a timed-out `read -t` save the partial line into the variable. bash
-	// 3.2 — what `#!/usr/bin/env bash` resolves to on stock macOS — consumes
-	// the fragment off the fd and discards it before the script regains
-	// control, so no adapter change can recover it. Gated by GOOS rather than
-	// by probing the shell because probing costs a subprocess, and the source
-	// resource ledger (test/test-resources.toml) ratchets those down, not up.
-	if runtime.GOOS == "darwin" {
-		return
-	}
 	joined := strings.Join(h.prompts(), "|")
 	if !strings.Contains(joined, "trailing line without a newline") {
 		t.Fatalf("partial trailing line was dropped; prompts = %q", h.prompts())
+	}
+}
+
+// A line whose bytes straddle the drain window must still reach the CLI whole.
+// The idle timer that closes a burst used to guard a whole-line read, and
+// `read -t` throws away everything it has already consumed when it fires: bash
+// >= 4 hands the fragment back and the loop appended it and ran the prompt
+// without its tail, bash 3.2 (stock macOS /bin/bash, and the Mac CI lane) had
+// already eaten those bytes off the fd and ran the prompt with them simply
+// gone. Both are the same defect — a prompt executed with bytes missing — and
+// this is a production defect, not a test artifact: the GLM 5.3 review arm runs
+// its prompts through this adapter (ga-fasb8).
+func TestALineSplitAcrossTheDrainWindowStaysOnePrompt(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, nil)
+	s := h.start()
+	s.sendRaw("first line\n")
+	s.sendRaw("second line, part one - ")
+	// Longer than the adapter's drain window, so the idle timer expires with
+	// the second line half delivered.
+	time.Sleep(2500 * time.Millisecond)
+	s.sendRaw("part two\n")
+	s.waitForTurns(1)
+	if _, code := s.closeAndWait(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+
+	want := "first line\nsecond line, part one - part two"
+	if got := h.prompts(); !equalStrings(got, []string{want}) {
+		t.Fatalf("prompts = %q, want %q", got, []string{want})
+	}
+}
+
+// An interrupt that lands with a half-delivered line in the adapter's hands
+// must DROP it, not run it. The signal here is followed by a stdin close, and
+// that end-of-input is what ends the read: it returns rc=1 with the partial
+// input assigned, which by status alone is indistinguishable from the
+// unterminated last line the adapter deliberately runs — so the loop has to
+// consult the INT trap, or a canceled prompt is executed with its tail
+// missing. A trapped INT on its own does not necessarily end the read: on bash
+// 5.2, if the rest of the line arrives the read resumes and completes with
+// rc=0, so this pins the end-of-input shape, which is the one that would
+// otherwise run the fragment.
+func TestInterruptWithAPartialLineInHandRunsNoPrompt(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, nil)
+	s := h.start()
+	s.waitForOutput("zcode-repl ready", adapterWaitBudget)
+	s.sendRaw("half a prompt, interrupted here")
+	// The adapter is silent while reading, so there is no lifecycle signal for
+	// "the bytes are in hand"; this gap is what puts them there.
+	time.Sleep(2500 * time.Millisecond)
+	s.signal(syscall.SIGINT)
+
+	if _, code := s.closeAndWait(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if got := h.prompts(); len(got) != 0 {
+		t.Fatalf("an interrupt-truncated fragment was executed as a prompt: %q", got)
 	}
 }
 

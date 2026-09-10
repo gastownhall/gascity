@@ -12,8 +12,12 @@
 # NudgeSession): one literal send-keys of the whole message (embedded newlines
 # included), a short debounce, an Escape, then Enter. So a multi-line prompt
 # lands as N lines with a trailing ESC byte on the last one. We read the first
-# line blocking, drain the rest of the burst on a 1s idle timeout, strip control
-# bytes, and run ONE turn on the join.
+# line blocking, drain the rest of the burst on a 1s idle timeout — timed one
+# byte at a time, so the timer can never cut a line in half — strip control
+# bytes, and run ONE turn on the join. The cap is MAX_LINE_BYTES per LINE, not
+# per prompt: a prompt of any size is fine as long as its lines are, but one
+# unbroken line longer than the cap comes back rejoined with a newline the
+# sender never sent, changing that prompt's content and not just its framing.
 #
 # Prints "zcode-repl ready" at startup and after every turn — the provider's
 # ready_prompt_prefix. Turn failures print "zcode-repl error rc=N" and keep
@@ -49,6 +53,19 @@ readonly BUSY="zcode-repl turn in flight (C-c to interrupt)"
 readonly GUARD_TOKEN="zcode-repl "
 readonly MAX_CONSECUTIVE_FAILURES=5
 readonly DRAIN_TIMEOUT=1
+# Every read below passes -n, which is what keeps bash on its unbuffered,
+# byte-at-a-time reader for a tty and a pipe alike. Without it bash reads a line
+# through a 128-byte static buffer (zreadc) and pushes the remainder back with
+# lseek, which fails on a tty and a pipe — so the leftover bytes live only in
+# that buffer, and the one-byte read the drain uses to time the idle window,
+# which is always unbuffered, would step straight past them. The value is a
+# ceiling on one line, not on a prompt, and it bounds a read that was otherwise
+# unbounded in memory. Two things it is not: bash counts -n in characters, so in
+# a multibyte locale this is a character ceiling and the name is optimistic; and
+# a line over it does not merely split — the read returns rc=0 mid-line and the
+# drain rejoins the remainder as if it were the next line, inserting a newline
+# the sender never sent.
+readonly MAX_LINE_BYTES=1048576
 
 die_config() {
     printf '%s: %s\n' "$PROG" "$1" >&2
@@ -604,43 +621,67 @@ printf '%s\n' "$MARKER"
 
 while :; do
     interrupted=0
-    IFS= read -r line
+    # Cleared before every read: bash 3.2 returns from a signal-interrupted
+    # read without touching the variable, so a stale value would be re-run.
+    line=
+    IFS= read -r -n "$MAX_LINE_BYTES" line
     read_rc=$?
     if (( read_rc != 0 )); then
-        # A trapped INT interrupts read; that is an interrupt, not end of input.
+        # An INT is an interrupt, not end of input. A trapped INT reaches a
+        # failed read in more than one shape: it can abort the read outright
+        # (rc > 128), or — measured on bash 5.2 — leave the read running and
+        # surface only at the end of input that follows, as rc=1 with the
+        # fragment assigned. The flag and the status together cover both, so
+        # DROP what is in hand: running a fragment the operator just canceled
+        # is the same defect this loop exists to prevent, a prompt with bytes
+        # missing.
+        #
+        # What no check here can do is recall bytes already taken. On bash 5.2
+        # a trapped INT does not end the read at all: if the rest of the line
+        # still arrives, the read resumes and completes with rc=0 and the whole
+        # line, never reaching this branch. So a live-pane C-c only cancels the
+        # partial line when an end of input follows it.
         if (( interrupted )) || (( read_rc > 128 )); then continue; fi
-        break
+        # Nothing in hand and no interrupt: end of input.
+        if [[ -z "$line" ]]; then break; fi
+        # A non-empty line with a failed status is end of input on an
+        # unterminated last line. Nothing more is coming, so run it rather than
+        # discard it; the next read sees the same end of input and stops.
     fi
 
     # Coalesce the rest of a pasted burst: gc sends the body, waits, then
-    # Enter, so a 1s idle window closes the paste without splitting it. A
-    # timed-out read still assigns whatever partial line arrived, so take it
-    # before breaking — otherwise the tail of the last line is silently lost.
+    # Enter, so a 1s idle window closes the paste without splitting it.
     #
-    # Saving partial input on timeout is a bash 4.0 feature; bash 3.2 (still
-    # /bin/bash on stock macOS) returns from a timed-out read without touching
-    # the variable at all, having already consumed and discarded the fragment.
-    # Clearing it before every read is what makes the loop correct on both:
-    # bash >= 4 overwrites it with the fragment, bash 3.2 leaves the empty
-    # value and the branch below simply does not fire. Without this, $more is
-    # *unbound* on the first timed-out drain and `set -u` kills the whole
-    # adapter mid-prompt — on macOS that is every pane, on the first prompt.
-    # The 3.2 fragment itself is unrecoverable at this layer (the shell ate it
-    # before the script ran), so there it is dropped rather than misplaced;
-    # gc's own nudge always terminates its last line, so only a human pausing
-    # mid-line for longer than the drain window can hit it.
+    # The timer must never be allowed to expire in the middle of a line.
+    # `read -t` throws away everything it has already consumed when the timer
+    # fires — bash >= 4 hands that fragment back in the variable, bash 3.2
+    # (still /bin/bash on stock macOS) has eaten it off the fd and returns
+    # without touching the variable at all — and a loop that appends the
+    # fragment runs a prompt whose tail is missing, while one that drops it
+    # runs a prompt whose tail is gone entirely. Both are the same defect:
+    # a prompt executed with bytes missing.
+    #
+    # So the timer only ever guards a ONE-BYTE read. A one-byte read has
+    # consumed nothing when it times out, so there is nothing to lose; and
+    # once that byte is in hand the burst is known to be continuing, so the
+    # rest of its line comes from a blocking read that cannot end early. A
+    # prompt is therefore only ever run on whole lines.
     while :; do
-        more=
-        IFS= read -r -t "$DRAIN_TIMEOUT" more
-        drain_rc=$?
-        if (( drain_rc == 0 )); then
-            # A blank interior line reads as empty and must be kept: paragraph
-            # breaks are part of the prompt.
-            line+=$'\n'"$more"
+        peek=
+        IFS= read -r -n 1 -t "$DRAIN_TIMEOUT" peek
+        peek_rc=$?
+        # Non-zero is the idle window closing or end of input; either way the
+        # burst is over, and no byte was taken off the fd to lose.
+        if (( peek_rc != 0 )); then break; fi
+        if [[ -z "$peek" ]]; then
+            # The byte was the newline itself: a blank interior line, which is
+            # part of the prompt — paragraph breaks matter.
+            line+=$'\n'
             continue
         fi
-        if [[ -n "$more" ]]; then line+=$'\n'"$more"; fi
-        break
+        rest=
+        IFS= read -r -n "$MAX_LINE_BYTES" rest
+        line+=$'\n'"$peek$rest"
     done
 
     # Prompts over tmux's send-keys literal limit arrive as a bracketed paste
