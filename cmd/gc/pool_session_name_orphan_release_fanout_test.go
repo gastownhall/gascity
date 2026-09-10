@@ -73,6 +73,7 @@ func countOrphanReleaseLiveSessionLists(t *testing.T, workBeadCount int) int {
 		stores,
 		storeRefs,
 		nil,
+		nil,
 	)
 	return store.liveSessionLists
 }
@@ -201,6 +202,7 @@ func TestReleaseOrphanedPoolAssignments_OwnerStoreMemoDoesNotCollapseDistinctSto
 				tc.work,
 				tc.store,
 				tc.refs,
+				nil,
 				nil,
 			)
 
