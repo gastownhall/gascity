@@ -2719,13 +2719,25 @@ func TestComputePoolDesiredStates_ZeroDemandRecordsSkipDecision(t *testing.T) {
 	tests := []struct {
 		name             string
 		suspended        bool
+		sessions         []beads.Bead
 		scaleCheckCounts map[string]int
 		wantNoDemand     bool
+		wantInFlight     int
 		wantRequests     int
 	}{
 		{name: "absent from scale check", scaleCheckCounts: map[string]int{}, wantNoDemand: true},
 		{name: "nil scale check", wantNoDemand: true},
 		{name: "other template has demand", scaleCheckCounts: map[string]int{"other": 3}, wantNoDemand: true},
+		// scale_check and protected are 0 by the branch condition itself, so
+		// in_flight is the only payload field that can ever carry information
+		// here — and pool sessions still in flight while nothing demands them
+		// is the diagnostic this record exists to surface.
+		{
+			name:         "in-flight sessions with no demand",
+			sessions:     []beads.Bead{pendingPoolSessionBead("sess-1"), pendingPoolSessionBead("sess-2")},
+			wantNoDemand: true,
+			wantInFlight: 2,
+		},
 		{name: "demand present", scaleCheckCounts: map[string]int{"claude": 1}, wantRequests: 1},
 		{name: "suspended template", suspended: true},
 	}
@@ -2735,10 +2747,11 @@ func TestComputePoolDesiredStates_ZeroDemandRecordsSkipDecision(t *testing.T) {
 			agent.Suspended = tt.suspended
 			cfg := &config.City{Agents: []config.Agent{agent}}
 			trace := newPoolDesiredStateTestTrace("claude")
+			sessions := sessionInfosFromBeads(tt.sessions)
 
-			result := computePoolDesiredStates(cfg, nil, nil, tt.scaleCheckCounts, nil, trace)
+			result := computePoolDesiredStates(cfg, nil, sessions, tt.scaleCheckCounts, nil, trace)
 
-			if untraced := ComputePoolDesiredStates(cfg, nil, nil, tt.scaleCheckCounts); !reflect.DeepEqual(result, untraced) {
+			if untraced := ComputePoolDesiredStates(cfg, nil, sessions, tt.scaleCheckCounts); !reflect.DeepEqual(result, untraced) {
 				t.Fatalf("traced result = %#v, want identical to untraced %#v", result, untraced)
 			}
 			requests := 0
@@ -2770,7 +2783,7 @@ func TestComputePoolDesiredStates_ZeroDemandRecordsSkipDecision(t *testing.T) {
 			for key, want := range map[string]int{
 				"scale_check": 0,
 				"protected":   0,
-				"in_flight":   0,
+				"in_flight":   tt.wantInFlight,
 			} {
 				if got := poolTraceFieldInt(t, rec.Fields, key); got != want {
 					t.Fatalf("%s = %d, want %d", key, got, want)
