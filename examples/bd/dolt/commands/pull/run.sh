@@ -268,17 +268,22 @@ resolve_benign_conflicts() {
   if [ "$server_running" = true ]; then
     sql="$sql CALL DOLT_PULL('$remote_name', 'main');"
   fi
-  sql="$sql SELECT 'conflict' AS k, \`table\` AS t, num_conflicts AS n FROM dolt_conflicts;"
-  sql="$sql SELECT 'row' AS k, our_id AS id, $CONFLICT_DIFFERING AS differing FROM dolt_conflicts_issues;"
+  # Report rows put the count BEFORE the table name and fold a row's id and
+  # differing columns into one field, so a table name with a comma, a quote
+  # or a space cannot shift the parsed count (CSV quoting is undone on the
+  # displayed name only).
+  sql="$sql SELECT 'conflict' AS k, num_conflicts AS n, \`table\` AS t FROM dolt_conflicts;"
+  sql="$sql SELECT 'schema' AS k, COUNT(*) AS n FROM dolt_schema_conflicts;"
+  sql="$sql SELECT 'row' AS k, CONCAT(our_id, ': ', $CONFLICT_DIFFERING) AS detail FROM dolt_conflicts_issues;"
   sql="$sql UPDATE issues SET row_lock = (SELECT c.their_row_lock FROM dolt_conflicts_issues c WHERE c.our_id = issues.id AND $p), updated_at = (SELECT c.their_updated_at FROM dolt_conflicts_issues c WHERE c.our_id = issues.id AND $p) WHERE id IN (SELECT c.our_id FROM dolt_conflicts_issues c WHERE $p);"
   sql="$sql DELETE FROM dolt_conflicts_issues WHERE $p;"
-  sql="$sql SELECT 'remaining' AS k, \`table\` AS t, num_conflicts AS n FROM dolt_conflicts;"
+  sql="$sql SELECT 'remaining' AS k, num_conflicts AS n, \`table\` AS t FROM dolt_conflicts;"
   sql="$sql CALL DOLT_ADD('-A');"
   sql="$sql CALL DOLT_COMMIT('-m', 'gc dolt pull: merge $remote_name/main (row_lock/updated_at-only conflicts in issues resolved to the remote)', '--author', 'gc dolt pull <gc-dolt-pull@gascity.local>');"
   sql="$sql COMMIT;"
   resolve_rc=0
   out=$(run_db_sql "$name" "$dir" "$sql" 2>&1) || resolve_rc=$?
-  rows=$(printf '%s\n' "$out" | grep '^row,' | sed 's/^row,//; s/"//g; s/,/: /' || true)
+  rows=$(printf '%s\n' "$out" | grep '^row,' | sed 's/^row,//; s/^"//; s/"$//; s/""/"/g' || true)
   row_count=$(printf '%s\n' "$rows" | grep -c '.' || true)
   if [ "$resolve_rc" -eq 0 ]; then
     ids=$(printf '%s\n' "$rows" | sed 's/:.*//' | tr '\n' ' ' | sed 's/ $//')
@@ -286,25 +291,30 @@ resolve_benign_conflicts() {
     return 0
   fi
   reported=$(printf '%s\n' "$out" | grep -c '^conflict,' || true)
+  schema_conflicts=$(printf '%s\n' "$out" | awk -F, '$1 == "schema" {n += $2} END {print n + 0}')
   # The retried pull found no conflict (a fast-forward or a clean merge,
   # both durable before COMMIT) exactly when the session reported no
-  # conflicted table and then DOLT_COMMIT itself had nothing to commit. The
-  # error line is matched by its own shape — result rows (a table could be
-  # named anything) never count.
-  if [ "$reported" -eq 0 ] && printf '%s\n' "$out" | grep -q '^error on line [0-9]* for query CALL DOLT_COMMIT(.*nothing to commit'; then
+  # conflicted table, no schema conflict, and then DOLT_COMMIT itself had
+  # nothing to commit. The error line is matched by its own shape — result
+  # rows (a table could be named anything) never count.
+  if [ "$reported" -eq 0 ] && [ "$schema_conflicts" -eq 0 ] && printf '%s\n' "$out" | grep -q '^error on line [0-9]* for query CALL DOLT_COMMIT(.*nothing to commit'; then
     echo "  $name: pulled from $remote_url"
     return 0
   fi
-  remaining=$(printf '%s\n' "$out" | awk -F, '$1 == "remaining" {n += $3} END {print n + 0}')
+  remaining=$(printf '%s\n' "$out" | awk -F, '$1 == "remaining" {n += $2} END {print n + 0}')
   if [ "$remaining" -eq 0 ]; then
-    remaining=$(printf '%s\n' "$out" | awk -F, '$1 == "conflict" {n += $3} END {print n + 0}')
+    remaining=$(printf '%s\n' "$out" | awk -F, '$1 == "conflict" {n += $2} END {print n + 0}')
   fi
-  tables=$(printf '%s\n' "$out" | awk -F, '$1 == "conflict" {print $2}' | sort -u | tr '\n' ' ' | sed 's/ $//')
+  tables=$(printf '%s\n' "$out" | grep '^conflict,' | sed 's/^conflict,[0-9]*,//; s/^"//; s/"$//; s/""/"/g' | sort -u | tr '\n' ' ' | sed 's/ $//')
   if [ -n "$rows" ]; then
     printf '%s\n' "$rows" | sed "s/^/  $name: conflict /" >&2
   fi
   abort_cli_merge "$name" "$dir"
-  echo "  $name: ERROR: pull failed: $remaining conflict(s) in ${tables:-unknown table(s)} need manual resolution; nothing was written" >&2
+  if [ "$schema_conflicts" -gt 0 ]; then
+    echo "  $name: ERROR: pull failed: $schema_conflicts schema conflict(s) and $remaining row conflict(s) in ${tables:-no table} need manual resolution; nothing was written" >&2
+  else
+    echo "  $name: ERROR: pull failed: $remaining conflict(s) in ${tables:-unknown table(s)} need manual resolution; nothing was written" >&2
+  fi
   case "$out" in
     *"nothing to commit"*|*"in conflict"*|*"unresolved conflicts"*) ;;
     *) printf '%s\n' "$out" | grep -i 'error' | head -3 | sed "s/^/  $name: /" >&2 || true ;;
@@ -393,15 +403,45 @@ pull_database_cli() {
     return 0
   fi
 
-  # CLI mode leaves a conflicted merge in the working set; the conflict
-  # tables say whether that is what happened.
-  conflicts=$(run_db_sql "$name" "$d" "SELECT COUNT(*) FROM dolt_conflicts" 2>/dev/null | awk 'NR == 2 {print $1 + 0}') || conflicts=0
+  # CLI mode leaves a failed merge in the working set. Read the merge state
+  # first — a failed read is a failure, never "no merge" — and put the
+  # database back on every path that does not complete the merge.
+  if ! merge_status=$(run_db_sql "$name" "$d" "SELECT is_merging FROM dolt_merge_status" 2>&1); then
+    abort_cli_merge "$name" "$d"
+    echo "  $name: ERROR: pull failed, and the merge state could not be read ($(printf '%s\n' "$merge_status" | head -1)); any merge in progress was aborted" >&2
+    return 1
+  fi
+  case "$(printf '%s\n' "$merge_status" | awk 'NR == 2 {print $1}')" in
+    true|1) ;;
+    *)
+      echo "  $name: ERROR: pull failed" >&2
+      return 1
+      ;;
+  esac
+  if ! schema_out=$(run_db_sql "$name" "$d" "SELECT COUNT(*) FROM dolt_schema_conflicts" 2>&1); then
+    abort_cli_merge "$name" "$d"
+    echo "  $name: ERROR: pull failed, and the schema conflicts could not be read ($(printf '%s\n' "$schema_out" | head -1)); the merge was aborted" >&2
+    return 1
+  fi
+  schema_conflicts=$(printf '%s\n' "$schema_out" | awk 'NR == 2 {print $1 + 0}')
+  if [ "${schema_conflicts:-0}" -gt 0 ]; then
+    abort_cli_merge "$name" "$d"
+    echo "  $name: ERROR: pull failed: $schema_conflicts schema conflict(s) need manual resolution; the merge was aborted, nothing was written" >&2
+    return 1
+  fi
+  if ! conflicts_out=$(run_db_sql "$name" "$d" "SELECT COUNT(*) FROM dolt_conflicts" 2>&1); then
+    abort_cli_merge "$name" "$d"
+    echo "  $name: ERROR: pull failed, and the conflicts could not be read ($(printf '%s\n' "$conflicts_out" | head -1)); the merge was aborted" >&2
+    return 1
+  fi
+  conflicts=$(printf '%s\n' "$conflicts_out" | awk 'NR == 2 {print $1 + 0}')
   if [ "${conflicts:-0}" -gt 0 ]; then
     resolve_benign_conflicts "$name" "$d" "$remote_name" "$remote_url"
     return $?
   fi
 
-  echo "  $name: ERROR: pull failed" >&2
+  abort_cli_merge "$name" "$d"
+  echo "  $name: ERROR: pull failed: the merge did not complete and reported no conflict; the merge was aborted" >&2
   return 1
 }
 

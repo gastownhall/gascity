@@ -345,3 +345,98 @@ func TestRealDoltTwoClonesPull(t *testing.T) {
 		assertClean(jadegate)
 	})
 }
+
+// The same race in CLI mode (no dolt sql-server): `dolt pull` leaves the
+// merge in the working set, the resolving transaction runs against the
+// files, and a refused merge is aborted on disk.
+func TestRealDoltTwoClonesPullCLI(t *testing.T) {
+	doltPath, err := exec.LookPath("dolt")
+	if err != nil {
+		t.Skipf("dolt not found: %v", err)
+	}
+	root := repoRoot(t)
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, ".beads", "dolt")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hubParent := t.TempDir()
+	const deferred = `INSERT INTO issues (id, title, description, status, metadata, created_at, updated_at, defer_until, row_lock) VALUES ('hw-1', 'tile', 'founder-gated', 'deferred', JSON_OBJECT('gc.owner', 'citadel'), '2026-09-09 00:00:00', '2026-09-09 00:00:00', '2026-09-10 05:00:00', 'base');`
+	benign := twoCloneScenario{
+		name:     "clibenign",
+		seed:     deferred,
+		citadel:  `UPDATE issues SET status = 'open', defer_until = NULL, updated_at = '2026-09-10 05:00:17', row_lock = 'citadel-lock' WHERE id = 'hw-1'`,
+		jadegate: `UPDATE issues SET status = 'open', defer_until = NULL, updated_at = '2026-09-10 05:00:18', row_lock = 'jadegate-lock' WHERE id = 'hw-1'`,
+	}
+	real := twoCloneScenario{
+		name:     "clireal",
+		seed:     deferred,
+		citadel:  `UPDATE issues SET status = 'closed', closed_at = '2026-09-10 06:00:00', updated_at = '2026-09-10 06:00:00', row_lock = 'citadel-lock' WHERE id = 'hw-1'`,
+		jadegate: `UPDATE issues SET status = 'open', defer_until = NULL, updated_at = '2026-09-10 05:00:18', row_lock = 'jadegate-lock' WHERE id = 'hw-1'`,
+	}
+	bc, bj := twoClones(t, doltPath, dataDir, hubParent, benign)
+	_, rj := twoClones(t, doltPath, dataDir, hubParent, real)
+	// The script's CLI branch (unchanged here) discovers the remote from the
+	// compact .dolt/remotes.json; a dolt 2.x clone records it in
+	// repo_state.json instead, so the fixture writes the file the branch reads.
+	for _, db := range []string{bj, rj} {
+		hub := filepath.Join(hubParent, "hub_"+strings.TrimSuffix(db, "-jadegate"))
+		if err := os.WriteFile(filepath.Join(dataDir, db, ".dolt", "remotes.json"), []byte(`{"name":"origin","url":"file://`+hub+`"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	const rowQuery = "SELECT id, status, updated_at, closed_at, defer_until, row_lock FROM issues ORDER BY id"
+	cliSQL := func(db, q string) string {
+		return strings.TrimSpace(runDoltForCompactTest(t, doltPath, filepath.Join(dataDir, db), "sql", "-r", "csv", "-q", q))
+	}
+	// Port 1 is never a listening dolt server: the script takes the CLI path.
+	const noServer = 1
+
+	t.Run("benign resolves on disk", func(t *testing.T) {
+		citadelRow := cliSQL(bc, rowQuery)
+		out, code := runPullScript(t, root, cityPath, dataDir, noServer, bj)
+		if code != 0 {
+			t.Fatalf("exit = %d\n%s", code, out)
+		}
+		if !strings.Contains(out, bj+": pulled from file://") || !strings.Contains(out, "(resolved 1 row_lock/updated_at-only conflict(s) in issues: hw-1)") {
+			t.Fatalf("output missing the resolved line:\n%s", out)
+		}
+		if got := cliSQL(bj, rowQuery); got != citadelRow {
+			t.Fatalf("jadegate row = %q, want citadel's %q", got, citadelRow)
+		}
+		if got := cliSQL(bj, "SELECT is_merging FROM dolt_merge_status"); !strings.HasSuffix(got, "\nfalse") {
+			t.Fatalf("merge still in progress: %q", got)
+		}
+		if got := cliSQL(bj, "SELECT COUNT(*) FROM dolt_status"); !strings.HasSuffix(got, "\n0") {
+			t.Fatalf("working set not clean: %q", got)
+		}
+	})
+
+	t.Run("real conflict is aborted on disk", func(t *testing.T) {
+		before := cliSQL(rj, rowQuery)
+		headBefore := cliSQL(rj, "SELECT commit_hash FROM dolt_log LIMIT 1")
+		out, code := runPullScript(t, root, cityPath, dataDir, noServer, rj)
+		if code != 1 {
+			t.Fatalf("exit = %d, want 1\n%s", code, out)
+		}
+		if !strings.Contains(out, rj+": conflict hw-1: status,updated_at,closed_at,defer_until,row_lock") {
+			t.Errorf("output missing the row detail:\n%s", out)
+		}
+		if !strings.Contains(out, rj+": ERROR: pull failed: 1 conflict(s) in issues need manual resolution; nothing was written") {
+			t.Errorf("output missing the manual-resolution error:\n%s", out)
+		}
+		if got := cliSQL(rj, "SELECT is_merging FROM dolt_merge_status"); !strings.HasSuffix(got, "\nfalse") {
+			t.Fatalf("refused merge left in progress: %q", got)
+		}
+		if got := cliSQL(rj, "SELECT COUNT(*) FROM dolt_conflicts"); !strings.HasSuffix(got, "\n0") {
+			t.Fatalf("conflicts left on disk: %q", got)
+		}
+		if got := cliSQL(rj, rowQuery); got != before {
+			t.Fatalf("rows changed under a refused pull:\n%s\nwas:\n%s", got, before)
+		}
+		if got := cliSQL(rj, "SELECT commit_hash FROM dolt_log LIMIT 1"); got != headBefore {
+			t.Fatalf("HEAD moved under a refused pull")
+		}
+	})
+}

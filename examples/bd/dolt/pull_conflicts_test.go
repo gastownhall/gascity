@@ -19,17 +19,22 @@ import (
 const (
 	fakePullConflictError = "error on line 1 for query CALL DOLT_PULL('origin', 'main'): Error 1105 (HY000): Merge conflict detected, @autocommit transaction rolled back. @autocommit must be disabled so that merge conflicts can be resolved using the dolt_conflicts and dolt_schema_conflicts tables before manually committing the transaction."
 	fakePullColumnsCSV    = "COLUMN_NAME\nid\ntitle\ndescription\nstatus\nmetadata\nupdated_at\nrow_lock\nclosed_at\n"
-	fakePullBenignSession = "k,t,n\nconflict,issues,1\nk,id,differing\nrow,hw-1,\"updated_at,row_lock\"\nk,t,n\nremaining,issues,0\nstatus\n0\nhash\nabc\n"
-	fakePullRealSession   = "k,t,n\nconflict,issues,2\nk,id,differing\nrow,hw-1,\"updated_at,row_lock\"\nrow,hw-2,\"status,updated_at,row_lock,closed_at\"\nk,t,n\nremaining,issues,1\nstatus\n0\nerror on line 1 for query CALL DOLT_COMMIT(...): Error 1105 (HY000): error: the table(s) issues are in conflict\n"
+	fakePullBenignSession = "k,n,t\nconflict,1,issues\nk,n\nschema,0\nk,detail\nrow,\"hw-1: updated_at,row_lock\"\nk,n,t\nremaining,0,issues\nstatus\n0\nhash\nabc\n"
+	fakePullRealSession   = "k,n,t\nconflict,2,issues\nk,n\nschema,0\nk,detail\nrow,\"hw-1: updated_at,row_lock\"\nrow,\"hw-2: status,updated_at,row_lock,closed_at\"\nk,n,t\nremaining,1,issues\nstatus\n0\nerror on line 1 for query CALL DOLT_COMMIT(...): Error 1105 (HY000): error: the table(s) issues are in conflict\n"
+	fakePullSchemaSession = "k,n,t\nk,n\nschema,1\nk,detail\nk,n,t\nstatus\n0\nerror on line 1 for query CALL DOLT_COMMIT(...): Error 1105 (HY000): error: merge has unresolved conflicts or constraint violations\n"
 )
 
 // writePullConflictFakeDolt scripts a dolt whose first (autocommit) pull
 // fails with the conflict error and whose resolving session answers per
 // mode: "benign" (resolved, exit 0), "real" (a conflict left, exit 1),
-// "nothing" (the retried pull found no conflict), "notbd" (the issues
-// table has no row_lock column), "plainfail" (a non-conflict pull error).
-// CLI mode is scripted too: `dolt pull` fails with dolt's conflict text and
-// the conflict count query reports one conflicted table.
+// "nothing" (the retried pull found no conflict), "nothingadversary" (a
+// conflicted table named "nothing to commit" and one named "a,b"), "notbd"
+// (the issues table has no row_lock column), "plainfail" (a non-conflict
+// pull error), "schemaonly" (a schema conflict and no row conflict),
+// "countfail" (the conflict-count query fails), "notmerging" (the CLI pull
+// failed without leaving a merge). CLI mode is scripted too: `dolt pull`
+// fails with dolt's conflict text, dolt_merge_status says a merge is in
+// progress, and the conflict count query reports one conflicted table.
 func writePullConflictFakeDolt(t *testing.T, dir, mode string) string {
 	t.Helper()
 	logPath := filepath.Join(dir, "dolt.log")
@@ -42,12 +47,26 @@ func writePullConflictFakeDolt(t *testing.T, dir, mode string) string {
 	case "real":
 		session = "printf '%s' " + shellQuote(fakePullRealSession) + "; exit 1"
 	case "nothing":
-		session = "printf '%s\\n' 'k,t,n' 'error on line 1 for query CALL DOLT_COMMIT(...): Error 1105 (HY000): nothing to commit'; exit 1"
+		session = "printf '%s\\n' 'k,n,t' 'k,n' 'schema,0' 'k,detail' 'error on line 1 for query CALL DOLT_COMMIT(...): Error 1105 (HY000): nothing to commit'; exit 1"
 	case "nothingadversary":
-		// A conflicted table literally named "nothing to commit" beside the
-		// unresolved issues conflict: the report carries the phrase, the
-		// commit was refused.
-		session = "printf '%s\\n' 'k,t,n' 'conflict,issues,1' 'conflict,nothing to commit,1' 'k,id,differing' 'row,hw-2,\"status,updated_at,row_lock,closed_at\"' 'k,t,n' 'remaining,issues,1' 'remaining,nothing to commit,1' 'error on line 1 for query CALL DOLT_COMMIT(...): Error 1105 (HY000): error: the table(s) issues, nothing to commit are in conflict'; exit 1"
+		// Conflicted tables literally named "nothing to commit" and "a,b"
+		// beside the unresolved issues conflict: the report carries the
+		// phrase and a comma, the commit was refused.
+		session = "printf '%s\\n' 'k,n,t' 'conflict,1,issues' 'conflict,1,\"a,b\"' 'conflict,1,nothing to commit' 'k,n' 'schema,0' 'k,detail' 'row,\"hw-2: status,updated_at,row_lock,closed_at\"' 'k,n,t' 'remaining,1,issues' 'remaining,1,\"a,b\"' 'remaining,1,nothing to commit' 'error on line 1 for query CALL DOLT_COMMIT(...): Error 1105 (HY000): error: the table(s) issues, a,b, nothing to commit are in conflict'; exit 1"
+	case "schemaonly":
+		session = "printf '%s' " + shellQuote(fakePullSchemaSession) + "; exit 1"
+	}
+	mergeStatus := "true"
+	if mode == "notmerging" {
+		mergeStatus = "false"
+	}
+	schemaCount := "0"
+	if mode == "schemaonly" {
+		schemaCount = "1"
+	}
+	conflictCount := "printf 'COUNT(*)\\n1\\n'"
+	if mode == "countfail" {
+		conflictCount = "printf '%s\\n' 'error on line 1 for query SELECT COUNT(*) FROM dolt_conflicts: database is locked' >&2; exit 1"
 	}
 	pullFailure := "printf '%s\\n' " + shellQuote(fakePullConflictError) + " >&2; exit 1"
 	if mode == "plainfail" {
@@ -68,8 +87,14 @@ case "$*" in
   *"information_schema.columns"*)
     printf '%s' ` + shellQuote(columns) + `
     ;;
+  *"SELECT is_merging FROM dolt_merge_status"*)
+    printf 'is_merging\n` + mergeStatus + `\n'
+    ;;
+  *"SELECT COUNT(*) FROM dolt_schema_conflicts"*)
+    printf 'COUNT(*)\n` + schemaCount + `\n'
+    ;;
   *"SELECT COUNT(*) FROM dolt_conflicts"*)
-    printf 'COUNT(*)\n1\n'
+    ` + conflictCount + `
     ;;
   "pull origin main")
     printf '%s\n' 'Auto-merging issues' 'CONFLICT (content): Merge conflict in issues' 'Automatic merge failed; 1 table(s) are unmerged.'
@@ -200,7 +225,8 @@ func TestPullResolvesRowLockOnlyConflictInsideOneTransaction(t *testing.T) {
 			for _, want := range []string{
 				"UPDATE issues SET row_lock = (SELECT c.their_row_lock FROM dolt_conflicts_issues c WHERE c.our_id = issues.id AND ",
 				"updated_at = (SELECT c.their_updated_at FROM dolt_conflicts_issues c WHERE c.our_id = issues.id AND ",
-				"SELECT 'remaining' AS k, `table` AS t, num_conflicts AS n FROM dolt_conflicts;",
+				"SELECT 'conflict' AS k, num_conflicts AS n, `table` AS t FROM dolt_conflicts; SELECT 'schema' AS k, COUNT(*) AS n FROM dolt_schema_conflicts; SELECT 'row' AS k, CONCAT(our_id, ': ', CONCAT_WS(',', IF(BINARY `our_id` <=> BINARY `their_id`, NULL, 'id'),",
+				"SELECT 'remaining' AS k, num_conflicts AS n, `table` AS t FROM dolt_conflicts;",
 				"CALL DOLT_ADD('-A'); CALL DOLT_COMMIT('-m', 'gc dolt pull: merge origin/main (row_lock/updated_at-only conflicts in issues resolved to the remote)', '--author', 'gc dolt pull <gc-dolt-pull@gascity.local>'); COMMIT;",
 				"IF(BINARY `our_row_lock` <=> BINARY `their_row_lock`, NULL, 'row_lock')",
 			} {
@@ -287,8 +313,11 @@ func TestPullNothingToCommitIsMatchedByTheErrorLineNotByResultText(t *testing.T)
 			if strings.Contains(out, "pulled from") {
 				t.Fatalf("a refused merge reported as success:\n%s", out)
 			}
-			if !strings.Contains(out, "app: ERROR: pull failed: 2 conflict(s) in issues nothing to commit need manual resolution; nothing was written") {
-				t.Fatalf("output missing the manual-resolution error:\n%s", out)
+			if !strings.Contains(out, "app: ERROR: pull failed: 3 conflict(s) in a,b issues nothing to commit need manual resolution; nothing was written") {
+				t.Fatalf("output missing the manual-resolution error with every table named as it is:\n%s", out)
+			}
+			if !strings.Contains(out, "app: conflict hw-2: status,updated_at,row_lock,closed_at") {
+				t.Fatalf("output missing the row detail:\n%s", out)
 			}
 			if strings.Contains(log, "merge --abort") != !sqlMode {
 				t.Fatalf("merge --abort logged = %v, want %v\nlog:\n%s", strings.Contains(log, "merge --abort"), !sqlMode, log)
@@ -307,5 +336,58 @@ func TestPullNonConflictFailureIsUnchanged(t *testing.T) {
 	}
 	if resolvingSession(log) != "" || strings.Contains(log, "information_schema") {
 		t.Fatalf("a non-conflict failure must not start resolution\nlog:\n%s", log)
+	}
+}
+
+func TestPullCLISchemaOnlyConflictAbortsTheMerge(t *testing.T) {
+	for _, sqlMode := range []bool{true, false} {
+		t.Run(fmt.Sprintf("sql=%v", sqlMode), func(t *testing.T) {
+			out, log, code := runPullConflictScript(t, "schemaonly", sqlMode)
+			if code != 1 {
+				t.Fatalf("exit = %d, want 1\n%s", code, out)
+			}
+			if strings.Contains(out, "pulled from") {
+				t.Fatalf("a schema conflict reported as success:\n%s", out)
+			}
+			want := "app: ERROR: pull failed: 1 schema conflict(s) need manual resolution; the merge was aborted, nothing was written"
+			if sqlMode {
+				want = "app: ERROR: pull failed: 1 schema conflict(s) and 0 row conflict(s) in no table need manual resolution; nothing was written"
+			}
+			if !strings.Contains(out, want) {
+				t.Fatalf("output missing %q:\n%s", want, out)
+			}
+			if strings.Contains(log, "merge --abort") != !sqlMode {
+				t.Fatalf("merge --abort logged = %v, want %v\nlog:\n%s", strings.Contains(log, "merge --abort"), !sqlMode, log)
+			}
+			if !sqlMode && resolvingSession(log) != "" {
+				t.Fatalf("CLI mode must not open a resolving session for a schema-only conflict\nlog:\n%s", log)
+			}
+		})
+	}
+}
+
+func TestPullCLIAbortsWhenTheConflictsCannotBeRead(t *testing.T) {
+	out, log, code := runPullConflictScript(t, "countfail", false)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1\n%s", code, out)
+	}
+	if !strings.Contains(out, "app: ERROR: pull failed, and the conflicts could not be read (error on line 1 for query SELECT COUNT(*) FROM dolt_conflicts: database is locked); the merge was aborted") {
+		t.Fatalf("output missing the read-failure error:\n%s", out)
+	}
+	if !strings.Contains(log, "merge --abort") || resolvingSession(log) != "" {
+		t.Fatalf("a failed read must abort and never resolve\nlog:\n%s", log)
+	}
+}
+
+func TestPullCLIWithoutAMergeInProgressIsAPlainFailure(t *testing.T) {
+	out, log, code := runPullConflictScript(t, "notmerging", false)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1\n%s", code, out)
+	}
+	if !strings.Contains(out, "app: ERROR: pull failed\n") {
+		t.Fatalf("output missing the plain failure line:\n%s", out)
+	}
+	if strings.Contains(log, "merge --abort") || resolvingSession(log) != "" {
+		t.Fatalf("no merge in progress: nothing to abort or resolve\nlog:\n%s", log)
 	}
 }
