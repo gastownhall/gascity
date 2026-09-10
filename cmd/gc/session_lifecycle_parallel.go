@@ -164,6 +164,17 @@ type startCandidate struct {
 	info  sessionpkg.Info
 	tp    TemplateParams
 	order int
+
+	// configured mirrors configuredNames[name()] at the pipeline's true
+	// construction site (reconcileSessionBeadsTracedWithNamedDemand). It
+	// propagates by value through preparedStart.candidate to
+	// startResult.prepared.candidate, letting commitStartFailure tell a
+	// controller-owned named session apart from an orphaned one without
+	// threading configuredNames through the intervening call chain. Left
+	// at its zero value (false) on the two non-pipeline construction sites
+	// (relaunchAgentForLaunchDrift, recoverRunningPendingCreate), which
+	// never produce a startResult and so never read it.
+	configured bool
 }
 
 // name reads the RAW session_name metadata off the typed twin
@@ -2414,7 +2425,16 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 				fmt.Fprintf(stderr, "session reconciler: saving startup-health episode for %s: %v\n", name, saveErr) //nolint:errcheck
 			}
 		}
-		rollbackPendingCreate(info, sessFront, clk.Now().UTC(), stderr)
+		if !result.prepared.candidate.configured {
+			// A configured named session (declared via [[named_session]]) must
+			// survive a single transient start failure mid pending-create (e.g.
+			// a gc suspend/resume cycle) so the reconciler can retry it, instead
+			// of being destructively closed with its session_name cleared — see
+			// TestReconcileSessionBeads_RollsBackPendingCreatePreservesConfiguredNamedSession.
+			// An orphaned (unconfigured) pending-create still rolls back here,
+			// per TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError.
+			rollbackPendingCreate(info, sessFront, clk.Now().UTC(), stderr)
+		}
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.err, result.phases)
 		return
 	}

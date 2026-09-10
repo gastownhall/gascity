@@ -4008,9 +4008,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// sanctioned re-reads at prepareStartCandidateForCity / refreshAsyncStartResult
 			// refresh it before the commit decision.
 			startCandidates = append(startCandidates, startCandidate{
-				info:  infoByID[target.info.ID],
-				tp:    target.tp,
-				order: len(startCandidates),
+				info:       infoByID[target.info.ID],
+				tp:         target.tp,
+				order:      len(startCandidates),
+				configured: configuredNames[name],
 			})
 		}
 
