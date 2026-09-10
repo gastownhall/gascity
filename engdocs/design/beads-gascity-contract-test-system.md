@@ -5,6 +5,26 @@
 > *contract*; this defines how we *test and gate* it across versions).
 > **Decision owner:** integration-branch maintainers.
 
+> **Pin state superseded — 2026-09-10.** Every concrete version below (`BD_VERSION=v1.0.4`,
+> the v1.0.5-is-a-Draft question, `BD_CURRENT_VERSION=v1.1.0-rc.1`) describes 2026-06-24
+> and is kept as the design record, not as an operative anchor. The live values are
+> always `deps.env`, enforced by `scripts/bd_version_pin_test.go`. As of the
+> v1.3.0-rc.2 bump: `BD_PREV_VERSION=v1.0.4` (unchanged floor),
+> `BD_VERSION=v1.3.0-rc.1`, `BD_CURRENT_VERSION=v1.3.0-rc.2`.
+>
+> The intervening v1.3.0-rc.1 bump had set `BD_VERSION` and `BD_CURRENT_VERSION`
+> to the same value, collapsing the *current* axis for one cycle. rc.2 restores
+> it, and does so for the reason this design anticipates: `v1.3.0-rc.2` publishes
+> no darwin assets (its `checksums.txt` covers android, freebsd, linux and
+> windows only), so it cannot be the installable default that every macOS runner
+> downloads — but it *can* be the current cell, which is reached the way that
+> cell always reaches its pin: a source build at `BD_CURRENT_REF`. The
+> installable default stays on rc.1, the newest tag with a complete asset set.
+> That asymmetry is the normal operating shape here, not a degraded one.
+>
+> The **mechanism** this doc specifies is unchanged and was followed by both
+> bumps: the corpus re-vendor rides in the same PR as the pin move.
+
 ## Summary
 
 `bd` (beads) and `gc` (Gas City) drift out of sync because gascity drives the
