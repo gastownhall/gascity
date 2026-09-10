@@ -217,11 +217,13 @@ func reusablePoolSessionInfo(bp *agentBuildParams, cfgAgent *config.Agent, templ
 		// — the next tick's fresh create then fails closed on that same name
 		// (derivePoolSessionName -> errPoolSessionNameUnavailable) until an
 		// operator manually closes it. A freeable-asleep (idle/idle-timeout/
-		// etc — see isPoolSessionSlotFreeableInfo) one_shot exit carries no
-		// deliberate hold, so it is reused instead: the ordinary wake path
-		// retires the exit and remints the identity in place. Persistent
-		// pools keep today's behavior (a genuine crash gets a fresh identity
-		// rather than resuming a possibly-corrupt conversation).
+		// city-stop/failed-create/runtime-missing/provider-terminal-error/
+		// max-session-age — see isPoolSessionSlotFreeableInfo) one_shot exit
+		// carries no deliberate hold, so it is reused instead: the ordinary
+		// wake path retires the exit and remints the identity in place.
+		// Persistent pools keep today's behavior (a genuine crash gets a
+		// fresh identity rather than resuming a possibly-corrupt
+		// conversation).
 		if cfgAgent.Lifecycle != config.AgentLifecycleOneShot || !isPoolSessionSlotFreeableInfo(info) {
 			return false
 		}

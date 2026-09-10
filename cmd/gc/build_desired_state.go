@@ -4381,9 +4381,12 @@ func selectOrPlanPoolSessionBead(
 		info, err := normalizeNonExpandingPoolSessionInfoForSelection(bp, cfgAgent, canonical)
 		return info, slot, nil, err
 	}
-	// Reuse an existing active/creating session bead. Skip drained, closed,
-	// and asleep — asleep ephemerals are not restarted; a fresh session is
-	// created instead. The reconciler closes orphaned asleep beads.
+	// Reuse an existing active/creating session bead. Skip drained and
+	// closed. Asleep is skipped too, with one carve-out: a
+	// lifecycle=one_shot session whose sleep reason is freeable and which
+	// holds no assigned work is reused through the wake path — see
+	// reusablePoolSessionInfo. Nothing in the reconciler closes orphaned
+	// asleep beads; an earlier version of this comment claimed it did.
 	for _, candidate := range reusablePoolSessionInfosForRequest(bp, cfgAgent, template, request, decisionTime, used) {
 		if desiredName := strings.TrimSpace(candidate.SessionNameMetadata); desiredName != "" {
 			slot := claimDesiredPoolSlotInfo(bp.city, cfgAgent, candidate, usedSlots)
