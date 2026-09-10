@@ -56,9 +56,16 @@ func writePullConflictFakeDolt(t *testing.T, dir, mode string) string {
 	case "schemaonly":
 		session = "printf '%s' " + shellQuote(fakePullSchemaSession) + "; exit 1"
 	}
-	mergeStatus := "true"
-	if mode == "notmerging" {
-		mergeStatus = "false"
+	// CLI mode reads the merge state before the pull (no merge) and after the
+	// failed pull (a merge): the fake answers false first, true after, through
+	// a marker file — except "premerging", where a merge is already in
+	// progress before the command runs.
+	mergeStatus := `if [ -f "` + logPath + `.merged" ]; then printf 'is_merging\ntrue\n'; else touch "` + logPath + `.merged"; printf 'is_merging\nfalse\n'; fi`
+	switch mode {
+	case "notmerging":
+		mergeStatus = "printf 'is_merging\\nfalse\\n'"
+	case "premerging":
+		mergeStatus = "printf 'is_merging\\ntrue\\n'"
 	}
 	schemaCount := "0"
 	if mode == "schemaonly" {
@@ -88,7 +95,7 @@ case "$*" in
     printf '%s' ` + shellQuote(columns) + `
     ;;
   *"SELECT is_merging FROM dolt_merge_status"*)
-    printf 'is_merging\n` + mergeStatus + `\n'
+    ` + mergeStatus + `
     ;;
   *"SELECT COUNT(*) FROM dolt_schema_conflicts"*)
     printf 'COUNT(*)\n` + schemaCount + `\n'
@@ -389,5 +396,20 @@ func TestPullCLIWithoutAMergeInProgressIsAPlainFailure(t *testing.T) {
 	}
 	if strings.Contains(log, "merge --abort") || resolvingSession(log) != "" {
 		t.Fatalf("no merge in progress: nothing to abort or resolve\nlog:\n%s", log)
+	}
+}
+
+func TestPullCLIRefusesToTouchAMergeAlreadyInProgress(t *testing.T) {
+	out, log, code := runPullConflictScript(t, "premerging", false)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1\n%s", code, out)
+	}
+	if !strings.Contains(out, "app: ERROR: a merge is already in progress; resolve it or abort it (dolt merge --abort) before pulling; nothing was done") {
+		t.Fatalf("output missing the refusal:\n%s", out)
+	}
+	for _, forbidden := range []string{"pull origin main", "merge --abort", "SET @@autocommit = 0;"} {
+		if strings.Contains(log, forbidden) {
+			t.Fatalf("an existing merge must not be pulled over, aborted or resolved; log has %q:\n%s", forbidden, log)
+		}
 	}
 }

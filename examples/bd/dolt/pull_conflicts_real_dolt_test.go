@@ -374,12 +374,19 @@ func TestRealDoltTwoClonesPullCLI(t *testing.T) {
 		citadel:  `UPDATE issues SET status = 'closed', closed_at = '2026-09-10 06:00:00', updated_at = '2026-09-10 06:00:00', row_lock = 'citadel-lock' WHERE id = 'hw-1'`,
 		jadegate: `UPDATE issues SET status = 'open', defer_until = NULL, updated_at = '2026-09-10 05:00:18', row_lock = 'jadegate-lock' WHERE id = 'hw-1'`,
 	}
+	existing := twoCloneScenario{
+		name:     "cliexisting",
+		seed:     deferred,
+		citadel:  `UPDATE issues SET status = 'closed', closed_at = '2026-09-10 06:00:00', updated_at = '2026-09-10 06:00:00', row_lock = 'citadel-lock' WHERE id = 'hw-1'`,
+		jadegate: `UPDATE issues SET status = 'open', defer_until = NULL, updated_at = '2026-09-10 05:00:18', row_lock = 'jadegate-lock' WHERE id = 'hw-1'`,
+	}
 	bc, bj := twoClones(t, doltPath, dataDir, hubParent, benign)
 	_, rj := twoClones(t, doltPath, dataDir, hubParent, real)
+	_, ej := twoClones(t, doltPath, dataDir, hubParent, existing)
 	// The script's CLI branch (unchanged here) discovers the remote from the
 	// compact .dolt/remotes.json; a dolt 2.x clone records it in
 	// repo_state.json instead, so the fixture writes the file the branch reads.
-	for _, db := range []string{bj, rj} {
+	for _, db := range []string{bj, rj, ej} {
 		hub := filepath.Join(hubParent, "hub_"+strings.TrimSuffix(db, "-jadegate"))
 		if err := os.WriteFile(filepath.Join(dataDir, db, ".dolt", "remotes.json"), []byte(`{"name":"origin","url":"file://`+hub+`"}`), 0o644); err != nil {
 			t.Fatal(err)
@@ -437,6 +444,37 @@ func TestRealDoltTwoClonesPullCLI(t *testing.T) {
 		}
 		if got := cliSQL(rj, "SELECT commit_hash FROM dolt_log LIMIT 1"); got != headBefore {
 			t.Fatalf("HEAD moved under a refused pull")
+		}
+	})
+
+	t.Run("a merge already in progress is left alone", func(t *testing.T) {
+		dir := filepath.Join(dataDir, ej)
+		// Someone started the pull by hand and is mid-resolution.
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		pull := exec.CommandContext(ctx, doltPath, "pull", "origin", "main")
+		pull.Dir = dir
+		pull.Env = append(os.Environ(), "NO_COLOR=1")
+		if pullOut, err := pull.CombinedOutput(); err == nil {
+			t.Fatalf("fixture: the manual pull should have conflicted:\n%s", pullOut)
+		}
+		if got := cliSQL(ej, "SELECT is_merging FROM dolt_merge_status"); !strings.HasSuffix(got, "\ntrue") {
+			t.Fatalf("fixture: no merge in progress: %q", got)
+		}
+		conflictsBefore := cliSQL(ej, "SELECT COUNT(*) FROM dolt_conflicts")
+
+		out, code := runPullScript(t, root, cityPath, dataDir, noServer, ej)
+		if code != 1 {
+			t.Fatalf("exit = %d, want 1\n%s", code, out)
+		}
+		if !strings.Contains(out, ej+": ERROR: a merge is already in progress; resolve it or abort it (dolt merge --abort) before pulling; nothing was done") {
+			t.Fatalf("output missing the refusal:\n%s", out)
+		}
+		if got := cliSQL(ej, "SELECT is_merging FROM dolt_merge_status"); !strings.HasSuffix(got, "\ntrue") {
+			t.Fatalf("the existing merge was aborted: %q", got)
+		}
+		if got := cliSQL(ej, "SELECT COUNT(*) FROM dolt_conflicts"); got != conflictsBefore {
+			t.Fatalf("the existing merge's conflicts changed: %q -> %q", conflictsBefore, got)
 		}
 	})
 }

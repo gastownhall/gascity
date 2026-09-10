@@ -398,6 +398,21 @@ pull_database_cli() {
     return 1
   fi
 
+  # A merge already in progress belongs to whoever started it (possibly
+  # with resolutions half done); the pull must neither build on it nor
+  # abort it. Read the state first — a failed read is a failure, never "no
+  # merge" — and touch nothing when a merge is found.
+  if ! pre_status=$(run_db_sql "$name" "$d" "SELECT is_merging FROM dolt_merge_status" 2>&1); then
+    echo "  $name: ERROR: the merge state could not be read before pulling ($(printf '%s\n' "$pre_status" | head -1)); nothing was done" >&2
+    return 1
+  fi
+  case "$(printf '%s\n' "$pre_status" | awk 'NR == 2 {print $1}')" in
+    true|1)
+      echo "  $name: ERROR: a merge is already in progress; resolve it or abort it (dolt merge --abort) before pulling; nothing was done" >&2
+      return 1
+      ;;
+  esac
+
   if (cd "$d" && dolt pull "$remote_name" main 2>&1); then
     echo "  $name: pulled from $remote_url"
     return 0
