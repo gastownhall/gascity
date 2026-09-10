@@ -6740,6 +6740,47 @@ func TestReconcileSessionBeads_SuspendedSessionDrained(t *testing.T) {
 	}
 }
 
+// TestReconcileSessionBeads_SuspendedNamedSessionInsideDesiredStateDrainsAsSuspended
+// probes ga-pmafyc step 1: discoverSessionBeadsWithRoots backfills a
+// configured named session into desiredState even when the primary
+// cfg-driven build is empty because the city is suspended (fix spec step 2,
+// covered separately by
+// TestDiscoverSessionBeadsBackfillsConfiguredNamedIdentityOutsideDesiredState
+// in build_desired_state_test.go). That backfilled entry routes the session
+// through the WAKE arm (desired == true), not the orphan arm -- unlike the
+// sibling TestReconcileSessionBeads_SuspendedSessionDrained above, which
+// covers the orphan arm's pre-existing "suspended" labeling for a session
+// that is NOT in desiredState. Before this fix, the wake arm's reason-switch
+// had no case for "configured named session, city suspended, no other wake
+// reason", so it fell through to the default "no-wake-reason" label --
+// which drainReasonCancelable treats as a plain non-cancelable close
+// instead of a revertible suspend-class drain, and (combined with the
+// step-2 identity-clearing bug) meant `gc resume` could not revive the
+// session. This asserts the wake arm now labels the drain "suspended".
+func TestReconcileSessionBeads_SuspendedNamedSessionInsideDesiredStateDrainsAsSuspended(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{SuspendedOnStart: true},
+		Agents:        []config.Agent{{Name: "worker"}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "always"}},
+	}
+	// Simulate discoverSessionBeadsWithRoots's unconditional backfill: "worker"
+	// is present in desiredState (and running) even though the city is
+	// suspended -- the exact shape the wake arm sees in production.
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+
+	env.reconcile([]beads.Bead{session})
+
+	ds := env.dt.get(session.ID)
+	if ds == nil {
+		t.Fatal("expected drain for suspended session present in desiredState")
+	}
+	if ds.reason != "suspended" {
+		t.Errorf("drain reason = %q, want %q (must not fall through to no-wake-reason)", ds.reason, "suspended")
+	}
+}
+
 func TestReconcileSessionBeads_SuspendedNotRunningClosed(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
@@ -6812,6 +6853,66 @@ func TestReconcileSessionBeads_PreservesConfiguredNamedSessionOutsideDesiredStat
 	}
 	if ds := env.dt.get(session.ID); ds != nil {
 		t.Fatalf("unexpected drain for configured named session: %+v", ds)
+	}
+}
+
+// TestReconcileSessionBeads_PoolFreeableIgnoresNamedAlwaysOutsideDesiredState
+// probes ga-pmafyc: a dual-registered session (both pool-managed AND a
+// mode="always" configured named session, matching citysus's shape) that has
+// already been drained (state="drained", target not alive) while its backing
+// agent is suspended must NOT be freed via the poolFreeable path. The
+// poolFreeable gate (session_reconciler.go) checks isPoolManagedSessionInfo
+// and isPoolSessionSlotFreeableInfo but never isNamedSessionInfo, despite the
+// comment above it claiming "singleton/named controller-managed identities
+// must keep the same bead."
+//
+// Agents[0].Suspended=true (rather than desiredState exclusion alone) is what
+// actually drives ComputeAwakeSet's ShouldWake=false for this session, via
+// AwakeAgent.Suspended (isAgentEffectivelySuspendedWith) — the reconciler
+// test harness never calls the real buildDesiredStateWithSessionBeadsAt (it
+// injects env.desiredState directly), so desiredState exclusion alone does
+// not simulate gc suspend for this decision. state="drained" stages the
+// post-drain condition directly (isDrainedSessionInfo triggers purely on
+// state=="drained", independent of which reason produced the drain), rather
+// than simulating the full alive-to-drained multi-tick sequence.
+func TestReconcileSessionBeads_PoolFreeableIgnoresNamedAlwaysOutsideDesiredState(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(1),
+			Suspended:         true,
+		}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	session := env.createSessionBead(sessionName, "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "always",
+		poolManagedMetadataKey:       "true",
+		"state":                      "drained",
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	b, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	t.Logf("post-reconcile bead: status=%q metadata=%#v", b.Status, b.Metadata)
+	if b.Status != "open" {
+		t.Errorf("status = %q, want open (named always-mode session must survive suspend, not be freed as a pool slot)", b.Status)
+	}
+	if got := b.Metadata[namedSessionMetadataKey]; got != "true" {
+		t.Errorf("configured_named_session = %q, want true (must survive)", got)
+	}
+	if got := b.Metadata[namedSessionIdentityMetadata]; got != "worker" {
+		t.Errorf("configured_named_identity = %q, want worker (must survive)", got)
 	}
 }
 
