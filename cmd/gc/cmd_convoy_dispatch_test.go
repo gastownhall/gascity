@@ -817,6 +817,108 @@ func TestDecorateDrainItemRecipeDoesNotFallbackToControllerAssignee(t *testing.T
 	}
 }
 
+// TestDecorateDrainItemRecipeSharedContinuationGroupFollowsPoolLifecycle pins
+// the interaction between a shared drain and pool routing. stampDrainItemRecipe
+// stamps gc.continuation_group + gc.session_affinity on executable steps of a
+// context = "shared" drain item before decoration runs; routing to a one-shot
+// pool then drops both, because a runtime that exits after each bounded
+// invocation cannot hold the single shared session the drain asked for. A
+// persistent pool keeps the pair. This override is intentional, not emergent.
+func TestDecorateDrainItemRecipeSharedContinuationGroupFollowsPoolLifecycle(t *testing.T) {
+	zero := 0
+	three := 3
+	tests := []struct {
+		name         string
+		lifecycle    string
+		wantGroup    string
+		wantAffinity string
+	}{
+		{
+			name:         "one-shot pool drops the shared drain group",
+			lifecycle:    config.AgentLifecycleOneShot,
+			wantGroup:    "",
+			wantAffinity: "",
+		},
+		{
+			name:         "persistent pool keeps the shared drain group",
+			lifecycle:    "",
+			wantGroup:    "drain:gc-ctl",
+			wantAffinity: "require",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test"},
+				Daemon:    config.DaemonConfig{FormulaV2: boolPtr(true)},
+				Agents: []config.Agent{{
+					Name:              "worker",
+					Lifecycle:         tt.lifecycle,
+					MinActiveSessions: &zero,
+					MaxActiveSessions: &three,
+				}},
+			}
+			config.InjectImplicitAgents(cfg)
+			addTestControlDispatcherAgents(cfg, "")
+
+			// The shape stampDrainItemRecipe produces for a shared drain: the
+			// executable step already carries the shared continuation pair.
+			recipe := &formula.Recipe{
+				Name: "item",
+				Steps: []formula.RecipeStep{
+					{
+						ID:     "item",
+						IsRoot: true,
+						Type:   "task",
+						Metadata: map[string]string{
+							beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+							beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+						},
+					},
+					{
+						ID:    "item.work",
+						Title: "Work",
+						Type:  "task",
+						Metadata: map[string]string{
+							beadmeta.ContinuationGroupMetadataKey: "drain:gc-ctl",
+							beadmeta.SessionAffinityMetadataKey:   "require",
+						},
+					},
+				},
+			}
+			source := beads.Bead{
+				ID: "gc-ctl-item",
+				Metadata: map[string]string{
+					beadmeta.KindMetadataKey:              beadmeta.KindDrain,
+					graphroute.GraphExecutionRouteMetaKey: "worker",
+				},
+			}
+
+			if err := decorateDrainItemRecipe(recipe, source, store, "city:test", "test", t.TempDir(), cfg); err != nil {
+				t.Fatalf("decorateDrainItemRecipe: %v", err)
+			}
+
+			work := recipe.StepByID("item.work")
+			if work == nil {
+				t.Fatal("missing item.work")
+			}
+			if got := work.Metadata[beadmeta.RoutedToMetadataKey]; got != "worker" {
+				t.Fatalf("gc.routed_to = %q, want worker", got)
+			}
+			if got := work.Metadata[beadmeta.ContinuationGroupMetadataKey]; got != tt.wantGroup {
+				t.Errorf("gc.continuation_group = %q, want %q", got, tt.wantGroup)
+			}
+			if got := work.Metadata[beadmeta.SessionAffinityMetadataKey]; got != tt.wantAffinity {
+				t.Errorf("gc.session_affinity = %q, want %q", got, tt.wantAffinity)
+			}
+			if work.Assignee != "" {
+				t.Errorf("Assignee = %q, want empty for a metadata-only pool route", work.Assignee)
+			}
+		})
+	}
+}
+
 func TestFindWorkflowBeadsIncludesClosedDescendants(t *testing.T) {
 	store := beads.NewMemStore()
 	root, err := store.Create(beads.Bead{

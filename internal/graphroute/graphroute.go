@@ -61,8 +61,8 @@ type GraphRouteBinding struct {
 	// re-decorated step's stale group is cleared rather than preserved.
 	ContinuationGroup string
 	// IndependentSteps keeps a metadata-only route claimable by any fresh
-	// pool session instead of pinning the workflow to the first claiming
-	// session. One-shot agent lifecycles use this because their runtime exits
+	// pool session instead of honoring a formula-declared continuation
+	// group. One-shot agent lifecycles use this because their runtime exits
 	// after each bounded invocation and cannot own cross-step continuation,
 	// so it overrides any formula-declared ContinuationGroup.
 	IndependentSteps bool
