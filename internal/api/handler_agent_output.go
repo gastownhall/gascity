@@ -16,6 +16,10 @@ import (
 
 // outputTurn is a single conversation turn in the unified output response.
 type outputTurn struct {
+	// ID is the provider transcript entry ID. It is the same identifier the
+	// before/after pagination cursors match on, so a client that renders a
+	// turn can page from it without a second lookup.
+	ID        string `json:"id,omitempty"`
 	Role      string `json:"role"`
 	Text      string `json:"text"`
 	Timestamp string `json:"timestamp,omitempty"`

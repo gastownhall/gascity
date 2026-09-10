@@ -64,3 +64,52 @@ describe('SessionPeekContent — terminal control stripping', () => {
     expect(container.textContent).toContain('red-text');
   });
 });
+
+// A turn list that pages backwards prepends older turns. Keyed by array index,
+// React rebinds every existing turn to a different DOM node when that happens,
+// so per-node state (scroll position, selection) follows the wrong turn. Now
+// that the API reports a stable entry id, the list keys on it.
+describe('SessionPeekContent — turn identity across backward paging', () => {
+  function viewWithTurns(turns: { id: string; text: string }[]): SessionTranscriptView {
+    return {
+      turns: turns.map((t) => ({ id: t.id, role: 'assistant', text: t.text })),
+      total_chars: 0,
+      captured_at: '2026-06-03T00:00:00Z',
+      truncated: false,
+    } as SessionTranscriptView;
+  }
+
+  it('keeps a turn bound to its own DOM node when an older turn is prepended', () => {
+    const { container, rerender } = render(
+      <SessionPeekContent
+        loading={false}
+        error={null}
+        result={viewWithTurns([
+          { id: 'a', text: 'alpha' },
+          { id: 'b', text: 'beta' },
+        ])}
+      />,
+    );
+
+    const betaNode = Array.from(container.querySelectorAll('li')).find((li) =>
+      li.textContent?.includes('beta'),
+    );
+    expect(betaNode).toBeDefined();
+
+    rerender(
+      <SessionPeekContent
+        loading={false}
+        error={null}
+        result={viewWithTurns([
+          { id: 'older', text: 'older' },
+          { id: 'a', text: 'alpha' },
+          { id: 'b', text: 'beta' },
+        ])}
+      />,
+    );
+
+    expect(container.querySelectorAll('li')).toHaveLength(3);
+    // Keyed by id this node still holds beta; keyed by index it would now hold alpha.
+    expect(betaNode?.textContent).toContain('beta');
+  });
+});
