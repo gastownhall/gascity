@@ -309,23 +309,27 @@ func newerSemverCompatibleBD(bdVersion, libraryVersion string) bool {
 // MAJOR.MINOR.PATCH release — v1.3.0-rc.1 and v1.3.0-rc.2, in either order.
 //
 // newerSemverCompatibleBD deliberately refuses an OLDER bd, because an older bd
-// may not understand a newer library's schema. Within one prerelease series that
-// reasoning does not apply: an RC series converges on a single release, so its
-// candidates carry no schema-skew signal relative to each other — v1.3.0-rc.1
-// and v1.3.0-rc.2 embed a byte-identical internal/storage/schema, both computing
-// LatestVersion() == 66.
+// may not understand a newer library's schema. For the pairing this widening
+// was written for, that risk was checked rather than assumed: v1.3.0-rc.1 and
+// v1.3.0-rc.2 embed a byte-identical internal/storage/schema, both computing
+// LatestVersion() == 66, so neither can carry schema skew against the other.
+// That is a verified property of THAT pair, not a law of RC series: nothing
+// stops an rc.N from being cut precisely to land a schema change, and this
+// predicate compares version strings only, never schema versions. A future
+// same-series pin move must re-prove the schema premise for its own pair.
 //
 // gascity's own pins do not currently produce that pairing (BD_VERSION and
 // BD_CURRENT_VERSION are both v1.3.0-rc.2), so this widening is not load-bearing
-// for the current bump. It is kept because it is correct on its own terms: any
-// operator running a bd from elsewhere in the same RC series should not be
-// refused for a skew that cannot exist.
+// for the current bump. It is kept so that an operator running a bd from
+// elsewhere in a series whose schema identity has been checked is not refused
+// a native store for a skew that pair does not carry.
 //
 // Kept deliberately narrow: BOTH sides must be prereleases and the release they
 // are candidates for must be identical, so every cross-release skew, and an RC
 // paired with its own final release, still fails. semver.Compare's prerelease
-// ordering is intentionally not consulted — within a series, direction carries
-// no compatibility information.
+// ordering is intentionally not consulted: ordering rc.1 before rc.2 says
+// nothing about which of them embeds which schema, so it is no substitute
+// for the by-hand check recorded above.
 func samePrereleaseSeries(bdVersion, libraryVersion string) bool {
 	bd := "v" + strings.TrimPrefix(strings.TrimSpace(bdVersion), "v")
 	lib := "v" + strings.TrimPrefix(strings.TrimSpace(libraryVersion), "v")

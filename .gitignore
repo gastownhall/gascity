@@ -29,8 +29,9 @@ internal/api/dashboardspa/web/frontend/.playwright/
 !**/.beads/identity.toml
 # bd's workspace gate sits BESIDE .beads, not inside it (`<dir>/.beads.gate.lock`),
 # so the pattern above never covered it. These flock files are never deleted, so
-# every scope root accumulates one and shows up dirty -- which `git status
-# --porcelain --ignored` then feeds to pack-source hashing and review quorum as a
+# every scope root accumulates one as an untracked stray -- which the plain `git
+# status --porcelain` run by pack-source hashing (internal/config/pack_include.go)
+# and by review quorum (internal/reviewquorum/mutations.go) then reports as a
 # spurious mutation. Same pattern `bd doctor --fix` writes.
 *.gate.lock*
 .claude/
