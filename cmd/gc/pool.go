@@ -257,6 +257,13 @@ type SessionSetupContext struct {
 	CityName  string // workspace name
 	WorkDir   string // agent working directory
 	ConfigDir string // source directory where agent config was defined
+	// DefaultBranch mirrors workdir.PathContext.DefaultBranch: the rig's
+	// configured mainline branch, empty for city-scoped agents and for rigs
+	// with no default_branch. Configured value only — prompts'
+	// {{.DefaultBranch}} additionally falls back to a live origin/HEAD probe,
+	// but setup-command expansion runs on reconciler hot paths and must not
+	// spawn git. Setup scripts should keep their own probe fallback.
+	DefaultBranch string
 }
 
 // expandSessionSetup expands Go text/template strings in session_setup commands.

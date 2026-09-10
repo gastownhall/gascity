@@ -93,6 +93,22 @@ const (
 	RoleFederationTail
 )
 
+// ownedByCallersWorkAxis reports whether a by-id plan carries this leg on
+// behalf of the CALLER's work axis rather than as part of the resolver's
+// binding half. Both roles are produced only by the by-id planner, so the
+// question is meaningless on any other plan shape and no other plan shape
+// spells either role.
+//
+// ResolveBindingOwner is the reader: it answers about bindings and hands the
+// work axis back untouched. "Untouched" has to mean every leg of that axis, not
+// just the residual — the residual is followed by the shadows of any rig whose
+// configured prefix covers the id, and dedupeLegs can remove the residual
+// outright when the binding resolved back to the work store, leaving shadows
+// with nothing in front of them.
+func (r Role) ownedByCallersWorkAxis() bool {
+	return r == RoleWorkFallback || r == RoleShadow
+}
+
 // String renders the role as it appears in a corpus row.
 func (r Role) String() string {
 	switch r {

@@ -263,12 +263,16 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(&doctor.BeadsRoleCheck{})
 	}
 
-	// Controller check + supervisor HTTP check + session checks (gated by controller state).
+	// Controller check + supervisor HTTP check + session checks. Session
+	// checks are read-only reporting and register regardless of controller
+	// state (GH#5742); only their Fix() remediation defers to a running
+	// controller, guarded inside ZombieSessionsCheck.Fix and
+	// OrphanSessionsCheck.Fix via doctor.IsControllerRunning.
 	controllerRunning := opts.ControllerRunning
 	register(doctor.NewControllerCheck(cityPath, controllerRunning))
 	register(doctor.NewSupervisorHTTPCheck(opts.SupervisorRunning))
 
-	if cfgErr == nil && cfg != nil && !controllerRunning {
+	if cfgErr == nil && cfg != nil {
 		cityName := loadedCityName(cfg, cityPath)
 		st := cfg.Workspace.SessionTemplate
 		sp, err := newSessionProvider()
@@ -318,6 +322,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		if storeOK {
 			register(doctor.NewBeadsStoreCheck(cityPath, openStoreResultForCity(cityPath)))
 			register(newV2RoutedToNamespaceCheck(cfg, cityPath, storeFactory))
+			register(newExecutorIdentityResidueCheck(cfg, cityPath, storeFactory))
 			register(newCensusOwnerLivenessCheck(cfg, cityPath, storeFactory))
 			register(newRunTargetRoutedToBackfillCheck(cfg, cityPath, storeFactory))
 			register(newRouteRecoveryQuarantineCheck(cfg, cityPath, storeFactory))
@@ -327,6 +332,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			register(newBacklogDepthCheck(cityPath, storeFactory))
 			register(newOrderTrackingRetentionCheck(cityPath, storeFactory))
 			register(&sessionModelDoctorCheck{cfg: cfg, cityPath: cityPath, newStore: storeFactory})
+			register(newStartupHealthEpisodesCheck(cfg, cityPath, storeFactory))
 		}
 	}
 	register(newDoctorDoltServerCheck(cityPath, opts.SkipCityDoltCheck))

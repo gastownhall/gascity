@@ -191,6 +191,39 @@ enforced by the conformance suite in `internal/beads/beadstest/conformance.go`.
     file first, then `os.Rename` to the target path -- never partial
     writes.
 
+16. **A namespace-fenced store refuses a pinned id outside the namespaces
+    it serves.** Minting settles the ids a store *generates*, not the ids a
+    caller *pins*, and Create honors a pinned id verbatim -- so a binding
+    that claims a namespace stops holding that claim the moment anything
+    pins a foreign id into it. A fenced store refuses one, wrapping
+    `beads.ErrPinnedIDOutsideNamespace` (the contract is the sentinel; an
+    out-of-tree store cannot be held to error prose). The refusal writes
+    nothing and runs before normalization and before any read, so it neither
+    advances the mint sequence nor reveals whether the store holds the row.
+    Membership covers every namespace the binding holds, not just the mint
+    one, is tested on the separator and on the id exactly as it will be
+    stored, and folds case without rewriting the id. Mints,
+    `CreateWithForeignID` (the `gc storage migrate` copy path) and the ids a
+    bead *refers* to are all outside the fence. A store configured with no
+    namespaces is unfenced, which is how a binding serving the work class is
+    opened -- work beads carry the operator's configured prefix.
+    The fence covers `Store.Tx`'s create as well as the standalone one -- a
+    transaction is not an exemption, since the bead it commits is just as
+    resident and just as unreachable. `CreateWithForeignID` has no
+    transactional variant for that reason: the migration copy runs on the
+    store, not inside a caller's transaction.
+    `beadstest.RunPinnedIDFenceConformance` is the executable form, and its
+    `OverRestrictionControls` rows pass unfenced by design: without them,
+    refusing every pinned id would conform.
+
+    Fencing is a property of the binding provider, not of every Store. Both
+    shipped providers fence: `internal/storebinding/sqlite` and
+    `internal/storebinding/beadsworkspace`. Which namespaces a binding claims
+    follows from the classes it was *assigned*, so the derivation lives above
+    both in `storebinding.EngineReservedPrefixes` -- one function, so two
+    providers cannot answer it differently for the same assignment, and a
+    third inherits the rule by calling it.
+
 ## Metadata vocabulary (gc.*)
 
 `bead.Metadata` is a `map[string]string`, and the `gc.` prefix is the

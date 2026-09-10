@@ -74,19 +74,20 @@ func conditionalReleaseUnprovable(t *testing.T, format string, args ...any) {
 // holds it" on every release.
 //
 // It runs on the contract matrix's "current" cell, whose bd is built from
-// deps.env BD_CURRENT_REF. That is not a preference: no PUBLISHED beads release
-// carries the flags, so on every shard that installs BD_VERSION this row can
-// only skip. There the cell sets requireConditionalReleaseEnv and every exit
-// short of a full run is a failure (conditionalReleaseUnprovable).
+// deps.env BD_CURRENT_REF. That is not a preference: the only release carrying
+// the flags is the v1.2.1 PRERELEASE, below the published bar BD_VERSION holds,
+// so on every shard that installs BD_VERSION this row can only skip. There the
+// cell sets requireConditionalReleaseEnv and every exit short of a full run is a
+// failure (conditionalReleaseUnprovable).
 func TestBdStoreReleaseIfCurrentAgainstRealBd(t *testing.T) {
 	store, scope := newConditionalIntegrationBdStore(t)
 	if !bdParsesConditionalReleaseFlags(t, scope) {
 		conditionalReleaseUnprovable(t, "installed bd does not advertise --if-assignee/--if-status "+
 			"(pre-beads#5008): the store latches to the raw-SQL fallback, which embedded mode rejects "+
 			"outright, so this row cannot exercise the verb at all. deps.env BD_VERSION is a published "+
-			"release that predates the flags and none has shipped with them yet, so this row runs on the "+
-			"source-built BD_CURRENT_REF cell (make test-bd-conditional-release-contract), not on the "+
-			"shards that install BD_VERSION.")
+			"release that predates the flags, and the only release carrying them is a prerelease "+
+			"(v1.2.1), so this row runs on the source-built BD_CURRENT_REF cell "+
+			"(make test-bd-conditional-release-contract), not on the shards that install BD_VERSION.")
 	}
 
 	created, err := store.Create(beads.Bead{Title: "conditional release row", Type: "task"})

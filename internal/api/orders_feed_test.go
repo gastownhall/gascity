@@ -100,6 +100,48 @@ func TestParseMonitorTimestampAcceptsRFC3339AndNano(t *testing.T) {
 	}
 }
 
+// TestBuildWorkflowRunProjectionsScopesRigRootedRootByRootStoreRef is the feed
+// half of ga-dezas: a rig-rooted root that physically lives on the graph class
+// binding (a city-scoped leg) belongs to the rig scope its root ref names, so
+// the rig-scoped feed lists it.
+func TestBuildWorkflowRunProjectionsScopesRigRootedRootByRootStoreRef(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "test-city"
+	state.cityBeadStore = beads.NewMemStore()
+	graphStore := beads.NewMemStore()
+	state.graphBeadStore = graphStore
+	state.stores = map[string]beads.Store{}
+
+	root, err := graphStore.Create(beads.Bead{
+		Title: "Sling-launched workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.workflow_id":      "wf_rig_rooted",
+			"gc.root_store_ref":   "rig:beads",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+
+	got, err := buildWorkflowRunProjections(state, "rig", "beads", "")
+	if err != nil {
+		t.Fatalf("buildWorkflowRunProjections: %v", err)
+	}
+	if len(got.Items) != 1 {
+		t.Fatalf("items = %d, want 1", len(got.Items))
+	}
+	item := got.Items[0]
+	if item.RootBeadID != root.ID {
+		t.Fatalf("root_bead_id = %q, want %q", item.RootBeadID, root.ID)
+	}
+	if item.ScopeKind != "rig" || item.ScopeRef != "beads" {
+		t.Fatalf("scope = %s:%s, want rig:beads", item.ScopeKind, item.ScopeRef)
+	}
+}
+
 func TestBuildWorkflowRunProjectionsKeepsInProgressChildrenOnHistoryFailure(t *testing.T) {
 	state := newFakeState(t)
 	mem := beads.NewMemStore()

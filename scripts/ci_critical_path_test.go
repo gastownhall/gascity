@@ -87,7 +87,7 @@ func TestWorkerCorePhase2SharesBuildsWithoutChangingCoverage(t *testing.T) {
 
 	wf := readCriticalPathWorkflow(t, "ci.yml")
 	const aggregateCommand = `GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2-all PROFILE="$PROFILE"`
-	for _, jobName := range []string{"worker-core-phase2-claude", "worker-core-phase2-codex", "worker-core-phase2-gemini"} {
+	for _, jobName := range []string{"worker-core-phase2-claude", "worker-core-phase2-codex", "worker-core-phase2-cursor", "worker-core-phase2-gemini"} {
 		job, ok := wf.Jobs[jobName]
 		if !ok {
 			t.Errorf("CI workflow has no %s job", jobName)

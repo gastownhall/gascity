@@ -379,6 +379,11 @@ func processNameSet(names []string) map[string]struct{} {
 	for _, name := range names {
 		if name = strings.TrimSpace(name); name != "" {
 			set[name] = struct{}{}
+			// The kimi entry point now sets COMM and argv[0] to kimi-code.
+			// Keep existing provider process_names valid for both CLIs.
+			if name == "kimi" {
+				set["kimi-code"] = struct{}{}
+			}
 		}
 	}
 	return set

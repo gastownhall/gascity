@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init","cwd":"/tmp/gascity/phase1/cursor","session_id":"cursor-phase1"}
+{"id":"cursor-u1","type":"user","timestamp":"2026-04-04T09:00:00Z","message":{"role":"user","content":"Summarize the Cursor transcript contract."},"session_id":"cursor-phase1"}
+{"id":"cursor-a1","type":"assistant","timestamp":"2026-04-04T09:00:10Z","message":{"role":"assistant","content":"Cursor phase 1 validates the captured JSONL transcript contract."},"session_id":"cursor-phase1"}
+{"id":"cursor-u2","type":"user","timestamp":"2026-04-04T09:01:00Z","message":{"role":"user","content":"Repeat the exact Cursor phase-1 summary from earlier before answering. What does continuation require?"},"session_id":"cursor-phase1"}
+{"id":"cursor-a2","type":"assistant","timestamp":"2026-04-04T09:01:12Z","message":{"role":"assistant","content":"Cursor phase 1 validates the captured JSONL transcript contract. Continuation must preserve the captured conversation identity and normalized history across restart."},"session_id":"cursor-phase1"}

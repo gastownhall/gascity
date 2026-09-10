@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -1336,5 +1338,523 @@ func TestGcBdSQLIsUnchangedOnASingleStoreCity(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "gcg-abc123") {
 		t.Fatalf("bd received %q, want the unmodified query", data)
+	}
+}
+
+// TestBdCreateRefusesInfraShapedCreateOnSplitCity is the stranded mint, caught
+// from the only evidence the passthrough has: the shape argv states.
+//
+// `gc bd create` hands its arguments to bd, and bd writes one ledger — the work
+// one. On a city that serves a coordination class from a storage binding, a
+// create whose shape belongs to that class lands the bead in the ledger the
+// class is no longer read from, and nothing reports it, because bd did exactly
+// what it was asked and exited 0. Placement is impossible on this seam (only
+// argv crosses it), so the create is refused at the boundary instead.
+//
+// Every row asserts the same three facts an operator needs to act: the class,
+// where its beads actually live, and the gc-native command that mints one
+// correctly. Each row also runs against a city that relocates nothing, where
+// the identical argv must pass through untouched — the single-store
+// compatibility claim, checked per row rather than once.
+func TestBdCreateRefusesInfraShapedCreateOnSplitCity(t *testing.T) {
+	messaging := []string{"messaging-class", `"gcm-"`, `"infra" storage binding`, "gc mail send"}
+	for name, tc := range map[string]struct {
+		args []string
+		want []string
+	}{
+		"mail by type":            {[]string{"create", "--type", "message", "hello"}, messaging},
+		"mail by type shorthand":  {[]string{"create", "-t", "message", "hello"}, messaging},
+		"mail by inline type":     {[]string{"create", "--type=message", "hello"}, messaging},
+		"mail by attached type":   {[]string{"create", "-tmessage", "hello"}, messaging},
+		"mail behind a root flag": {[]string{"--json", "create", "--type", "message", "hello"}, messaging},
+		"mail through the alias":  {[]string{"new", "--type", "message", "hello"}, messaging},
+		// The title is not the shape. A bead titled "message" is a work bead.
+		"mail type beside a title flag": {[]string{"create", "--title", "ship it", "--type", "message"}, messaging},
+		// The reason the classifier has to be the runtime one: an extmsg record
+		// is a type=task bead, indistinguishable from work by type alone.
+		"extmsg by label":               {[]string{"create", "--type", "task", "--labels", "gc:extmsg-binding", "x"}, messaging},
+		"extmsg in a label list":        {[]string{"create", "-l", "triage,gc:extmsg-delivery", "x"}, messaging},
+		"session by type":               {[]string{"create", "--type", "session", "x"}, []string{"sessions-class", `"gcs-"`, "gc session new"}},
+		"session by label":              {[]string{"create", "--label", "gc:session", "x"}, []string{"sessions-class", "gc session new"}},
+		"session through quick capture": {[]string{"q", "-t", "session", "x"}, []string{"sessions-class", "gc session new"}},
+		"nudge by label":                {[]string{"create", "--type", "chore", "-l", "gc:nudge", "x"}, []string{"nudges-class", `"gcn-"`, "gc nudge"}},
+		"order tracking by label":       {[]string{"create", "--type", "task", "-l", "order-tracking", "x"}, []string{"orders-class", `"gco-"`, "gc order run"}},
+		"wisp by metadata":              {[]string{"create", "--metadata", `{"gc.kind":"wisp"}`, "x"}, []string{"graph-class", `"gcg-"`, "gc sling"}},
+		"graph node by metadata":        {[]string{"create", "--metadata", `{"gc.root_bead_id":"gcg-abc123"}`, "x"}, []string{"graph-class", "gc sling"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			msg, refused := bdRelocatedClassCreateRefusal(splitCityConfig(), "", tc.args)
+			if !refused {
+				t.Fatalf("`gc bd %s` was forwarded to bd on a split city; bd writes the work ledger only, so that mint is stranded", strings.Join(tc.args, " "))
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(msg, want) {
+					t.Errorf("refusal is missing %q; msg=%q", want, msg)
+				}
+			}
+			for cityName, cfg := range map[string]*config.City{
+				"no storage section":  nil,
+				"every class on work": allWorkCityConfig(),
+			} {
+				if msg, refused := bdRelocatedClassCreateRefusal(cfg, "", tc.args); refused {
+					t.Errorf("a city with %s relocates nothing, so this create is not stranded, but it was refused: %q", cityName, msg)
+				}
+			}
+		})
+	}
+}
+
+// TestBdCreateForwardsAWorkShapedCreateOnASplitCity is the false-positive proof.
+//
+// A split city still mints work beads through this passthrough — that is what
+// the work ledger is for — so the guard must fire on the SHAPE and on nothing
+// else. A title that reads like a class, a label that is merely near one, and
+// an id-valued flag naming a relocated bead are all left alone here: the last
+// belongs to the by-id ownership door in cmd_bd_by_id.go, which names the bead
+// rather than the class, and a second refusal on this seam would shadow it with
+// a vaguer message while adding no coverage.
+func TestBdCreateForwardsAWorkShapedCreateOnASplitCity(t *testing.T) {
+	for name, args := range map[string][]string{
+		"bare create":                {"create", "plain work"},
+		"explicit task":              {"create", "-t", "task", "plain work"},
+		"task with labels":           {"create", "--type", "task", "--labels", "triage,p1", "x"},
+		"title that reads as a type": {"create", "--title", "message", "-t", "task"},
+		"label near but not a class": {"create", "-l", "gc:nudged", "x"},
+		"epic":                       {"create", "--type", "epic", "roll up"},
+		"convoy":                     {"create", "--type", "convoy", "batch"},
+		"id-valued flag":             {"create", "--type", "task", "--parent", "gcg-abc123", "x"},
+		"not a create verb":          {"list", "--type", "message", "--json"},
+		"show is not a create verb":  {"show", "gcm-abc123"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if msg, refused := bdRelocatedClassCreateRefusal(splitCityConfig(), "", args); refused {
+				t.Fatalf("`gc bd %s` mints a work bead into the work ledger, which is where it belongs, but it was refused: %q", strings.Join(args, " "), msg)
+			}
+		})
+	}
+}
+
+// TestGcBdCreateRefusesAnInfraShapedCreateOnASplitCity drives the refusal
+// through the real command: the exit code is non-zero and bd is never spawned,
+// so nothing is written anywhere.
+func TestGcBdCreateRefusesAnInfraShapedCreateOnASplitCity(t *testing.T) {
+	capture := bdSQLRefusalCity(t, bdSQLRefusalSplitStorage)
+
+	var stdout, stderr bytes.Buffer
+	if code := doBd([]string{"create", "--type", "message", "hello"}, &stdout, &stderr); code == 0 {
+		t.Fatalf("doBd exited 0 on a stranded mint; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	for _, want := range []string{"messaging-class", `"infra" storage binding`, "gc mail send"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("refusal is missing %q; stderr=%q", want, stderr.String())
+		}
+	}
+	if _, err := os.Stat(capture); err == nil {
+		data, _ := os.ReadFile(capture) //nolint:errcheck // diagnostic only
+		t.Fatalf("bd was invoked despite the refusal: %q", data)
+	}
+}
+
+// TestGcBdCreateRefusalIsNotLiftedByTheReadOverride pins the one thing the
+// existing escape hatch must not reach.
+//
+// GC_BD_ALLOW_RELOCATED_CLASS_READ exists because the READ scan classifies
+// text, and text is not always decidable — an operator holding a false positive
+// needs a way to run the query anyway. A refused create is not that: it is a
+// WRITE that would leave a row in the wrong ledger, where no later read can
+// find it and no migration will move it. Honoring the read knob here would turn
+// an escape hatch into a data-loss switch.
+func TestGcBdCreateRefusalIsNotLiftedByTheReadOverride(t *testing.T) {
+	capture := bdSQLRefusalCity(t, bdSQLRefusalSplitStorage)
+	t.Setenv(bdRelocatedClassOverrideEnvVar, "1")
+
+	var stdout, stderr bytes.Buffer
+	if code := doBd([]string{"create", "--type", "message", "hello"}, &stdout, &stderr); code == 0 {
+		t.Fatalf("the read override let a stranded mint through; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(capture); err == nil {
+		data, _ := os.ReadFile(capture) //nolint:errcheck // diagnostic only
+		t.Fatalf("bd was invoked with the read override set: %q", data)
+	}
+}
+
+// TestGcBdCreateIsUnchangedOnASingleStoreCity is the compatibility proof end to
+// end: the exact invocation a split city refuses reaches bd verbatim, and
+// succeeds, on a city that relocates nothing.
+func TestGcBdCreateIsUnchangedOnASingleStoreCity(t *testing.T) {
+	for name, tc := range map[string]struct {
+		storage string
+		args    []string
+	}{
+		"infra shape, no split": {"", []string{"create", "--type", "message", "hello"}},
+		"work shape, split":     {bdSQLRefusalSplitStorage, []string{"create", "--type", "task", "hello"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			capture := bdSQLRefusalCity(t, tc.storage)
+			t.Setenv("BD_STUB_STDOUT", `{"id":"demo-1"}`)
+
+			var stdout, stderr bytes.Buffer
+			if code := doBd(tc.args, &stdout, &stderr); code != 0 {
+				t.Fatalf("doBd = %d; stderr=%q", code, stderr.String())
+			}
+			data, err := os.ReadFile(capture)
+			if err != nil {
+				t.Fatalf("bd was not invoked: %v", err)
+			}
+			if !strings.Contains(string(data), strings.Join(tc.args, " ")) {
+				t.Fatalf("bd received %q, want the create forwarded verbatim", data)
+			}
+		})
+	}
+}
+
+// TestBdRelocatedClassCreateNamesAMintPathForEveryRelocatableClass is the
+// anti-drift pin on the one part of the refusal an operator acts on.
+//
+// A refusal that names no alternative leaves the operator with a command that
+// does not work and no command that does, and the failure mode of a hand-kept
+// table is that a class grows without one. So the table is checked against the
+// same class list the migration uses, and each command it names is resolved in
+// the real cobra tree rather than trusted as a string.
+func TestBdRelocatedClassCreateNamesAMintPathForEveryRelocatableClass(t *testing.T) {
+	root := newRootCmdWithOptions(io.Discard, io.Discard, rootCommandOptions{})
+	for _, class := range infraMigrationClasses {
+		path, named := bdRelocatedClassMintPaths[string(class)]
+		if !named {
+			t.Errorf("class %q can be relocated but the refusal names no gc-native command that mints one", class)
+			continue
+		}
+		words := strings.Fields(path)
+		if len(words) < 2 || words[0] != "gc" {
+			t.Errorf("class %q names mint path %q, which is not a `gc ...` command", class, path)
+			continue
+		}
+		cmd, _, err := root.Find(words[1:])
+		if err != nil {
+			t.Errorf("class %q names mint path %q, which does not resolve: %v", class, path, err)
+			continue
+		}
+		if cmd.Name() != words[len(words)-1] {
+			t.Errorf("class %q names mint path %q, which resolved to `gc %s` instead", class, path, cmd.CommandPath())
+		}
+	}
+}
+
+// writeGraphPlanFile marshals a plan to the exact JSON wire shape bd's
+// `create --graph <file>` consumes — internal/beads.ApplyGraphPlanWithStorage
+// json.Marshals this same struct before handing the path to bd — and returns the
+// file path. Building it from the struct rather than a string literal is what
+// makes the test's plan and bd's plan provably the same format.
+func writeGraphPlanFile(t *testing.T, plan beads.GraphApplyPlan) string {
+	t.Helper()
+	data, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatalf("marshaling graph plan: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "plan.json")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("writing graph plan: %v", err)
+	}
+	return path
+}
+
+// graphMarkedPlan is a minimal plan whose root node carries a graph marker
+// (gc.root_bead_id), so coordclass.ClassifyGraphPlan routes the whole plan to
+// ClassGraph — the shape a formula pour applies through `create --graph`.
+func graphMarkedPlan() beads.GraphApplyPlan {
+	return beads.GraphApplyPlan{Nodes: []beads.GraphApplyNode{{
+		Key:      "root",
+		Title:    "workflow root",
+		Type:     "task",
+		Metadata: map[string]string{"gc.root_bead_id": "gcg-abc123"},
+	}}}
+}
+
+// workOnlyPlan is a plan of plain work nodes with no graph markers, so
+// ClassifyGraphPlan falls to its root node and classifies ClassWork: a graph
+// create that belongs in the work ledger even on a split city.
+func workOnlyPlan() beads.GraphApplyPlan {
+	return beads.GraphApplyPlan{Nodes: []beads.GraphApplyNode{{
+		Key:   "root",
+		Title: "plain work",
+		Type:  "task",
+	}}}
+}
+
+// TestBdCreateClassifiesAGraphPlanCreateOnASplitCity is the graph-door fix. A
+// `create --graph <plan>` carries its beads inside a file the argv-shape walk
+// never sees, so before this the highest-value infra shape — a graph-apply plan
+// — classified as work and forwarded, stranding a graph-class bead in the work
+// ledger. The plan is JSON in the beads.GraphApplyPlan shape bd consumes, so it
+// is classified with the production coordclass.ClassifyGraphPlan and refused
+// when it names a relocated class, across every spelling of the flag.
+func TestBdCreateClassifiesAGraphPlanCreateOnASplitCity(t *testing.T) {
+	for name, spell := range map[string]func(path string) []string{
+		"separated":   func(p string) []string { return []string{"create", "--graph", p, "--json"} },
+		"inline":      func(p string) []string { return []string{"create", "--graph=" + p} },
+		"alias":       func(p string) []string { return []string{"new", "--graph", p} },
+		"after title": func(p string) []string { return []string{"create", "--title", "roll up", "--graph", p} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			args := spell(writeGraphPlanFile(t, graphMarkedPlan()))
+			msg, refused := bdRelocatedClassCreateRefusal(splitCityConfig(), "", args)
+			if !refused {
+				t.Fatalf("`gc bd %s` forwards a graph-apply plan to bd on a split city, stranding a graph-class bead", strings.Join(args, " "))
+			}
+			for _, want := range []string{"graph-class", `"gcg-"`, "gc sling"} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("refusal is missing %q; msg=%q", want, msg)
+				}
+			}
+			for cityName, cfg := range map[string]*config.City{
+				"no storage section":  nil,
+				"every class on work": allWorkCityConfig(),
+			} {
+				if msg, refused := bdRelocatedClassCreateRefusal(cfg, "", args); refused {
+					t.Errorf("a city with %s relocates nothing, but the graph create was refused: %q", cityName, msg)
+				}
+			}
+		})
+	}
+}
+
+// TestBdCreateForwardsAWorkOnlyGraphPlanOnASplitCity is the graph-door
+// false-positive proof: the guard fires on the plan's CLASS, not on the mere
+// presence of `--graph`, so a plan of plain work nodes still mints into the work
+// ledger where it belongs.
+func TestBdCreateForwardsAWorkOnlyGraphPlanOnASplitCity(t *testing.T) {
+	args := []string{"create", "--graph", writeGraphPlanFile(t, workOnlyPlan()), "--json"}
+	if msg, refused := bdRelocatedClassCreateRefusal(splitCityConfig(), "", args); refused {
+		t.Fatalf("a work-only graph plan belongs in the work ledger, but it was refused: %q", msg)
+	}
+}
+
+// TestBdCreateFailsClosedOnAFileBackedBulkCreateOnASplitCity pins the -f/--file
+// decision. bd's multi-issue markdown states per-issue type and labels that CAN
+// name a relocated class, and reparsing that format here would drift from bd, so
+// on a split city these create forms fail closed rather than forward a payload
+// the guard cannot classify. A city that relocates nothing forwards them.
+func TestBdCreateFailsClosedOnAFileBackedBulkCreateOnASplitCity(t *testing.T) {
+	for name, args := range map[string][]string{
+		"-f separated":      {"create", "-f", "issues.md", "x"},
+		"--file separated":  {"create", "--file", "issues.md"},
+		"--file inline":     {"create", "--file=issues.md"},
+		"-f attached":       {"create", "-fissues.md"},
+		"through the alias": {"new", "-f", "issues.md"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			msg, refused := bdRelocatedClassCreateRefusal(splitCityConfig(), "", args)
+			if !refused {
+				t.Fatalf("`gc bd %s` reads beads from a file this guard cannot classify, but it was forwarded on a split city", strings.Join(args, " "))
+			}
+			// The message must explain the file-backed limit and leave the
+			// operator a classified door, not just say no.
+			for _, want := range []string{"file", "gc sling", "gc mail send"} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("fail-closed refusal is missing %q; msg=%q", want, msg)
+				}
+			}
+			for cityName, cfg := range map[string]*config.City{
+				"no storage section":  nil,
+				"every class on work": allWorkCityConfig(),
+			} {
+				if msg, refused := bdRelocatedClassCreateRefusal(cfg, "", args); refused {
+					t.Errorf("a city with %s relocates nothing, so a file-backed create strands nothing, but it was refused: %q", cityName, msg)
+				}
+			}
+		})
+	}
+}
+
+// TestGcBdCreateRefusesAGraphPlanCreateOnASplitCity drives the graph-door fix
+// through the real command: a graph-apply plan on a split city exits non-zero
+// and bd is never spawned, so nothing is written anywhere.
+func TestGcBdCreateRefusesAGraphPlanCreateOnASplitCity(t *testing.T) {
+	capture := bdSQLRefusalCity(t, bdSQLRefusalSplitStorage)
+	planPath := writeGraphPlanFile(t, graphMarkedPlan())
+
+	var stdout, stderr bytes.Buffer
+	if code := doBd([]string{"create", "--graph", planPath, "--json"}, &stdout, &stderr); code == 0 {
+		t.Fatalf("doBd exited 0 on a stranded graph mint; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	for _, want := range []string{"graph-class", "gc sling"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("refusal is missing %q; stderr=%q", want, stderr.String())
+		}
+	}
+	if _, err := os.Stat(capture); err == nil {
+		data, _ := os.ReadFile(capture) //nolint:errcheck // diagnostic only
+		t.Fatalf("bd was invoked despite the refusal: %q", data)
+	}
+}
+
+// TestGcBdCreateFailsClosedOnAFileBackedBulkCreateOnASplitCity drives the
+// -f/--file decision through the real command: even a work-only markdown file is
+// refused on a split city — the guard classifies from argv and will not reparse
+// bd's file format, so it cannot prove the file mints no relocated bead — and bd
+// is never spawned.
+func TestGcBdCreateFailsClosedOnAFileBackedBulkCreateOnASplitCity(t *testing.T) {
+	capture := bdSQLRefusalCity(t, bdSQLRefusalSplitStorage)
+	mdPath := filepath.Join(t.TempDir(), "issues.md")
+	if err := os.WriteFile(mdPath, []byte("## plain work\nType: task\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doBd([]string{"create", "-f", mdPath}, &stdout, &stderr); code == 0 {
+		t.Fatalf("doBd exited 0 on a file-backed create; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "file") {
+		t.Errorf("fail-closed refusal does not explain the file-backed limit; stderr=%q", stderr.String())
+	}
+	if _, err := os.Stat(capture); err == nil {
+		data, _ := os.ReadFile(capture) //nolint:errcheck // diagnostic only
+		t.Fatalf("bd was invoked despite the fail-closed refusal: %q", data)
+	}
+}
+
+// TestBdCreateRefusesAnInfraShapedCreateBehindABdRootFlag pins the guard
+// against the flags that used to switch it off.
+//
+// bd accepts its root flags BEFORE the subcommand, and four of them consume the
+// next argument as a value (`--profile`, `--database`, `--server-url`,
+// `--mem-profile`). A global manifest that filed `--profile` as a bool and did
+// not know the other three left bdRelocatedClassVerb reading a flag's VALUE as
+// the verb (`--profile default create …` resolves to "default") or reporting the
+// argv undecidable — and both answers forward the create. bd accepts every one
+// of these flags and goes on to mint, so the disarmed guard was the only thing
+// between an ordinary invocation and a stranded bead.
+func TestBdCreateRefusesAnInfraShapedCreateBehindABdRootFlag(t *testing.T) {
+	for name, prefix := range map[string][]string{
+		"--profile":              {"--profile", "default"},
+		"--profile inline":       {"--profile=default"},
+		"--database":             {"--database", "beads_other"},
+		"--server-url":           {"--server-url", "http://127.0.0.1:8080"},
+		"--mem-profile":          {"--mem-profile", "/tmp/heap.out"},
+		"--no-color":             {"--no-color"},
+		"--cpu-profile":          {"--cpu-profile"},
+		"stacked with the known": {"--json", "--mem-profile", "/tmp/heap.out", "-C", "/d"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			args := append(append([]string{}, prefix...), "create", "--type", "message", "hello")
+			msg, refused := bdRelocatedClassCreateRefusal(splitCityConfig(), "", args)
+			if !refused {
+				t.Fatalf("`gc bd %s` reached bd unguarded on a split city; the root flag disarmed the create guard", strings.Join(args, " "))
+			}
+			if !strings.Contains(msg, "messaging-class") || !strings.Contains(msg, "gc mail send") {
+				t.Errorf("refusal does not name the class and its mint path; msg=%q", msg)
+			}
+			// The same prefix in front of a work-shaped create must still pass
+			// through: completing the manifest resolves the verb, it does not
+			// turn a root flag into a refusal of its own.
+			work := append(append([]string{}, prefix...), "create", "--type", "task", "hello")
+			if msg, refused := bdRelocatedClassCreateRefusal(splitCityConfig(), "", work); refused {
+				t.Errorf("`gc bd %s` mints a work bead into the work ledger, but it was refused: %q", strings.Join(work, " "), msg)
+			}
+		})
+	}
+}
+
+// TestBdCreateClassifiesARelativeGraphPlanAgainstTheScopeRoot pins the root a
+// `--graph` path is resolved against.
+//
+// doBd runs the bd subprocess with cmd.Dir = target.ScopeRoot, so bd reads a
+// relative plan path from THERE while this guard reads it in the wrapper's own
+// cwd. When those differ, the guard's read fails, the plan classifies as
+// nothing, and the create is forwarded — after which bd finds the plan and mints
+// the relocated-class bead the guard exists to stop.
+func TestBdCreateClassifiesARelativeGraphPlanAgainstTheScopeRoot(t *testing.T) {
+	scopeRoot := t.TempDir()
+	data, err := json.Marshal(graphMarkedPlan())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scopeRoot, "plan.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Stand somewhere the plan is NOT, which is the whole point: an operator or
+	// agent naming a scope-root-relative path from a subdirectory.
+	t.Chdir(t.TempDir())
+
+	msg, refused := bdRelocatedClassCreateRefusal(splitCityConfig(), scopeRoot, []string{"create", "--graph", "plan.json"})
+	if !refused {
+		t.Fatalf("a scope-root-relative graph plan was forwarded to bd, which reads it from the scope root and mints it; msg=%q", msg)
+	}
+	if !strings.Contains(msg, "graph-class") || !strings.Contains(msg, "gc sling") {
+		t.Errorf("refusal does not name the class and its mint path; msg=%q", msg)
+	}
+
+	// An absolute path is already unambiguous and must not be re-rooted.
+	absolute := []string{"create", "--graph", writeGraphPlanFile(t, graphMarkedPlan())}
+	if _, refused := bdRelocatedClassCreateRefusal(splitCityConfig(), scopeRoot, absolute); !refused {
+		t.Error("an absolute graph plan path was re-rooted against the scope root and lost")
+	}
+
+	// The class still decides: a work-only plan at the same relative path is
+	// forwarded, so resolving the path did not turn `--graph` into a refusal.
+	workData, err := json.Marshal(workOnlyPlan())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scopeRoot, "work.json"), workData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if msg, refused := bdRelocatedClassCreateRefusal(splitCityConfig(), scopeRoot, []string{"create", "--graph", "work.json"}); refused {
+		t.Errorf("a work-only graph plan belongs in the work ledger, but it was refused: %q", msg)
+	}
+}
+
+// TestGcBdCreateRefusesARelativeGraphPlanFromAnotherDirectory drives the
+// scope-root resolution through the real command: `gc bd` invoked from outside
+// the store root, naming the plan the way bd itself will read it, still exits
+// non-zero without spawning bd.
+//
+// The second invocation pins the same refusal behind bd's own `-C/--directory`.
+// bd's help text reads like a cwd change ("like git -C"), but `-C` selects the
+// beads PROJECT bd opens, not the base for a relative path argument, so the
+// scope root remains the only root either side resolves against. That is the
+// claim the guard's doc comment makes, and without this row it rests on observed
+// bd behavior with nothing in the build behind it.
+func TestGcBdCreateRefusesARelativeGraphPlanFromAnotherDirectory(t *testing.T) {
+	capture := bdSQLRefusalCity(t, bdSQLRefusalSplitStorage)
+	scopeRoot := os.Getenv("GC_CITY_PATH")
+	data, err := json.Marshal(graphMarkedPlan())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scopeRoot, "plan.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	if code := doBd([]string{"create", "--graph", "plan.json"}, &stdout, &stderr); code == 0 {
+		t.Fatalf("doBd exited 0 on a stranded graph mint named relative to the scope root; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "graph-class") {
+		t.Errorf("refusal is missing the class; stderr=%q", stderr.String())
+	}
+	if _, err := os.Stat(capture); err == nil {
+		body, _ := os.ReadFile(capture) //nolint:errcheck // diagnostic only
+		t.Fatalf("bd was invoked despite the refusal: %q", body)
+	}
+
+	// A `-C` directory that is neither the cwd nor the scope root, and that no
+	// rig claims: resolveRigForDir finds no match and leaves the scope root
+	// unchanged, so the guard reads the same plan and refuses the same way. The
+	// refusal fires before bd is invoked, so no subprocess runs and no mint is
+	// possible regardless of how bd would have read the path.
+	otherDir := t.TempDir()
+	stdout.Reset()
+	stderr.Reset()
+	if code := doBd([]string{"create", "-C", otherDir, "--graph", "plan.json"}, &stdout, &stderr); code == 0 {
+		t.Fatalf("doBd exited 0 on the same stranded graph mint behind `-C`; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "graph-class") {
+		t.Errorf("refusal behind `-C` is missing the class; stderr=%q", stderr.String())
+	}
+	if _, err := os.Stat(capture); err == nil {
+		body, _ := os.ReadFile(capture) //nolint:errcheck // diagnostic only
+		t.Fatalf("bd was invoked despite the refusal behind `-C`: %q", body)
 	}
 }

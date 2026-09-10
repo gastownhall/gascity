@@ -420,10 +420,13 @@ ensure_database_registered() {
 }
 
 # seed_fresh_managed_bd_version_witness records the bd version that is about
-# to initialize a database created by this invocation. bd 1.2+ uses this
-# bounded witness to distinguish current server-mode workspaces from legacy
-# .beads/dolt layouts. Never create or replace it for a pre-existing database:
-# doing so would bypass bd's explicit cross-era migration guard.
+# to initialize a database created by this invocation. It probes the same
+# "${BD_BIN:-bd}" that run_bd_pinned runs, so the witness names the binary that
+# actually initializes the workspace rather than whichever bd happens to be on
+# PATH. bd 1.2+ uses this bounded witness to distinguish current server-mode
+# workspaces from legacy .beads/dolt layouts. Never create or replace it for a
+# pre-existing database: doing so would bypass bd's explicit cross-era
+# migration guard.
 seed_fresh_managed_bd_version_witness() {
     local dir="$1"
     local marker="$dir/.beads/.local_version"
@@ -431,7 +434,7 @@ seed_fresh_managed_bd_version_witness() {
 
     [ ! -e "$marker" ] || return 0
 
-    if ! raw=$(bd version 2>/dev/null); then
+    if ! raw=$("${BD_BIN:-bd}" version 2>/dev/null); then
         die "failed to read bd version while initializing fresh managed Dolt workspace at $dir"
     fi
     version=$(printf '%s\n' "$raw" | sed -nE 's/^[Bb][Dd] [Vv]ersion v?([0-9]+(\.[0-9]+)+).*/\1/p' | head -n 1)
@@ -2583,7 +2586,7 @@ run_bd_pinned() {
         export GC_DOLT_PASSWORD="$DOLT_PASSWORD"
         export BEADS_DOLT_SERVER_USER="$DOLT_USER"
         export BEADS_DOLT_PASSWORD="$DOLT_PASSWORD"
-        bd "$@"
+        "${BD_BIN:-bd}" "$@"
     )
 }
 

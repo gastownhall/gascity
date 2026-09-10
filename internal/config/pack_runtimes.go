@@ -39,7 +39,10 @@ const supportedRuntimeProtocol = 0
 // PackRuntimeEntry.PromptDelivery / DiscoveredRuntime.PromptDelivery
 // accepts. It asserts the declaring runtime has a working post-start Nudge
 // path that an oversized prompt can reroute through — consulted by cmd/gc's
-// promptDeliverySupportFor, not verified against the runtime executable.
+// promptDeliverySupportFor, and trusted as-is at that point (not
+// re-verified on every launch). Pack authors can self-verify the claim
+// ahead of production with `gc runtime check`, which smoke-tests it by
+// invoking the runtime's nudge op (FR5, ga-s5y62b.2).
 const PromptDeliveryNudgeFallback = "nudge-fallback"
 
 // packLocalRuntimes validates and resolves a pack's own [runtimes.<name>]

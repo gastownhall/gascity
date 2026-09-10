@@ -13,17 +13,21 @@ import (
 // from Go — the CLI and the HTTP API layer both import them — so the paths
 // they return MUST mirror the SPA routes declared in App.tsx.
 
-// cityNameRE matches a managed city name: alphanumeric with internal hyphens,
-// no path separators and no leading/trailing hyphen.
-var cityNameRE = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$`)
+// cityNameRE matches a managed city name: must start with an alphanumeric
+// character, followed by any number of alphanumerics, hyphens, underscores,
+// or dots. This mirrors the registry's own grammar
+// (internal/supervisor/registry.go's validCityName) so any name the
+// supervisor can register is also dashboard-reachable.
+var cityNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 // ValidCityName reports whether name is a city name the dashboard serves:
-// alphanumeric with internal hyphens, no leading/trailing hyphen, at most 64
-// characters. This is the exact grammar the /api plane checks before any
-// resolver lookup (resolveCityPath) as a defensive measure — the
-// authoritative path always comes from the resolver, never from joining the
-// name — so a name this rejects is dashboard-unreachable and callers should
-// not emit dashboard links for it.
+// starts with an alphanumeric character, at most 64 characters. This is the
+// exact grammar the /api plane checks before any resolver lookup
+// (resolveCityPath) as a defensive measure — the authoritative path always
+// comes from the resolver, never from joining the name — so a name this
+// rejects is dashboard-unreachable and callers should not emit dashboard
+// links for it. Requiring an alphanumeric first character means a widened
+// grammar can never produce a bare "." or ".." path segment.
 func ValidCityName(name string) bool {
 	return name != "" && len(name) <= 64 && cityNameRE.MatchString(name)
 }
