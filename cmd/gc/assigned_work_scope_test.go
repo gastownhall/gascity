@@ -558,9 +558,12 @@ func TestSessionAssignedWorkGuardsFederateForCityScopedSession(t *testing.T) {
 		t.Fatal("city-scoped session's in-progress rig-store work must keep it awake (recycle guard)")
 	}
 
-	bead, found, err := firstOpenAssignedWorkBeadForReachableStore(cityPath, cfg, cityStore, rigStores, sessiontest.SeedBead(t, session))
+	// The stranded in_progress walk resolves the same cross-store reachability; with
+	// no other live incarnation carrying the session's identity, the rig-store row is
+	// a genuine strand it must find.
+	bead, found, err := firstStrandedInProgressAssignedWorkBeadForReachableStore(cityPath, cfg, cityStore, rigStores, sessiontest.SeedBead(t, session), buildLiveSessionOwnerSet(nil, cfg, nil))
 	if err != nil {
-		t.Fatalf("firstOpenAssignedWorkBeadForReachableStore: %v", err)
+		t.Fatalf("firstStrandedInProgressAssignedWorkBeadForReachableStore: %v", err)
 	}
 	if !found || bead.ID != rigWork.ID {
 		t.Fatalf("stranded-bead lookup must find rig-store work for a city-scoped session; found=%v bead=%q want=%q", found, bead.ID, rigWork.ID)
@@ -575,13 +578,12 @@ func TestSessionAssignedWorkGuardsFederateForCityScopedSession(t *testing.T) {
 	}
 }
 
-// TestFirstStrandedInProgressWalkDoesNotMaskLaterLegStrand pins finding #2: the
-// in_progress owner-liveness walk must run across EVERY reachable leg so a benign
-// in_progress row a live sibling owns in an earlier leg cannot mask a genuine
-// strand in a later leg. The single-result finder (firstOpenAssignedWorkBeadFor-
-// ReachableStore) stops at the first leg with any match, so the classifier that
-// inspected its one result would see the benign row and miss the strand. The
-// dedicated walk skips owner-live rows and keeps going.
+// TestFirstStrandedInProgressWalkDoesNotMaskLaterLegStrand pins the cross-leg
+// masking guard: the in_progress owner-liveness walk must run across EVERY
+// reachable leg so a benign in_progress row a runtime-alive sibling owns in an
+// earlier leg cannot mask a genuine strand in a later leg. The per-leg probe
+// returns found=false for a leg holding only owned rows, so the walk skips the
+// benign city row and keeps going to find the strand in the rig leg.
 func TestFirstStrandedInProgressWalkDoesNotMaskLaterLegStrand(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "riga")
@@ -619,9 +621,12 @@ func TestFirstStrandedInProgressWalkDoesNotMaskLaterLegStrand(t *testing.T) {
 	}
 	draining := sessiontest.SeedBead(t, drainingBead)
 	sibling := sessiontest.SeedBead(t, siblingBead)
-	// The draining seat AND a distinctly-named LIVE sibling both carry the pool
-	// alias; only the draining seat carries its own bead ID.
-	liveOwners := buildLiveSessionOwnerSet([]sessionpkg.Info{draining, sibling}, cfg)
+	// The draining seat AND a distinctly-named sibling both carry the pool alias;
+	// only the draining seat carries its own bead ID. The runtime probe reports the
+	// sibling positively alive, so the benign city row it owns is skipped.
+	liveOwners := buildLiveSessionOwnerSet([]sessionpkg.Info{draining, sibling}, cfg, func(info sessionpkg.Info) bool {
+		return info.ID == sibling.ID
+	})
 
 	// City leg: an in_progress row on the shared pool alias — a LIVE sibling owns
 	// it, so it is benign and must be walked past.
@@ -643,17 +648,8 @@ func TestFirstStrandedInProgressWalkDoesNotMaskLaterLegStrand(t *testing.T) {
 		t.Fatalf("mark strand in_progress: %v", err)
 	}
 
-	// The single-result finder stops at the first leg with any match: it returns
-	// the benign city row and would let it mask the strand.
-	first, foundFirst, err := firstOpenAssignedWorkBeadForReachableStore(cityPath, cfg, cityStore, rigStores, draining)
-	if err != nil {
-		t.Fatalf("firstOpenAssignedWorkBeadForReachableStore: %v", err)
-	}
-	if !foundFirst || first.ID != benign.ID {
-		t.Fatalf("single-result finder = (%v, %q), want the benign city row %q first (leg ordering assumption for this masking test)", foundFirst, first.ID, benign.ID)
-	}
-
-	// The dedicated owner-liveness walk skips the benign row and finds the strand.
+	// The owner-liveness walk skips the benign runtime-alive-sibling row in the
+	// city leg and finds the genuine strand in the rig leg.
 	got, found, err := firstStrandedInProgressAssignedWorkBeadForReachableStore(cityPath, cfg, cityStore, rigStores, draining, liveOwners)
 	if err != nil {
 		t.Fatalf("firstStrandedInProgressAssignedWorkBeadForReachableStore: %v", err)
@@ -887,7 +883,7 @@ func TestSessionHasOpenAssignedWorkIncludesReachableAssignedWisp(t *testing.T) {
 	}
 }
 
-func TestFirstOpenAssignedWorkBeadIncludesAssignedWisp(t *testing.T) {
+func TestFirstStrandedInProgressAssignedWorkBeadIncludesAssignedWisp(t *testing.T) {
 	store := beads.NewMemStore()
 	wisp, err := store.Create(beads.Bead{
 		Title:     "active workflow step",
@@ -903,9 +899,11 @@ func TestFirstOpenAssignedWorkBeadIncludesAssignedWisp(t *testing.T) {
 		t.Fatalf("mark wisp in progress: %v", err)
 	}
 
-	got, found, err := firstOpenAssignedWorkBeadInStoreByIdentifiers(store, []string{"worker-session"})
+	// No live incarnation carries "worker-session", so the in_progress wisp is a
+	// genuine strand the finder must surface for session diagnostics.
+	got, found, err := firstStrandedInProgressAssignedWorkBeadInStoreByIdentifiers(store, []string{"worker-session"}, "session-self", buildLiveSessionOwnerSet(nil, nil, nil))
 	if err != nil {
-		t.Fatalf("firstOpenAssignedWorkBeadInStoreByIdentifiers: %v", err)
+		t.Fatalf("firstStrandedInProgressAssignedWorkBeadInStoreByIdentifiers: %v", err)
 	}
 	if !found {
 		t.Fatal("assigned wisp work should be found for session diagnostics")

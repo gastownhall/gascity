@@ -605,42 +605,89 @@ func recordDrainAckAssignedWorkEvent(
 	})
 }
 
-// liveSessionOwnerSet maps every assignment identifier carried by a currently
-// live (non-closed) session to the set of session bead IDs that carry it. The
-// drain-ack anomaly classifier keys on it to decide whether an in_progress
-// bead's assignee is still owned by a LIVE sibling incarnation — the surplus-
-// seat / pool-recycle case that must NOT alarm — versus no live owner besides
-// the draining seat itself, which is a genuine strand that must alarm. The
-// decision is owner-LIVENESS, never assignee identity shape: a hook claim
+// liveSessionOwnerSet answers, for a drain-acked seat's in_progress row, the one
+// question that can positively excuse the strand alarm: is the row's assignee
+// still carried by some OTHER session whose RUNTIME is positively observed alive
+// this pass? Only a genuinely running sibling incarnation (the surplus-seat /
+// pool-recycle case) may suppress the alarm.
+//
+// The default is FIRE. Suppression demands a positively-confirmed benign cause,
+// so a candidate owner counts ONLY when its runtime is observed running/alive —
+// never merely because its session bead is not closed. Keying on bead-not-closed
+// was the silencing bug: it counted (a) a same-pass-draining sibling whose
+// runtime was just observed dead and (b) a drained-open ZOMBIE seat kept open by
+// the very row it stranded, letting two same-alias seats mutually suppress and a
+// zombie permanently silence a recurring cap-hit strand. Excluded from the owner
+// set up front: the draining seat itself (selfID), any closed seat, and any
+// drain-ack-stop-pending seat (on its way out, never a live replacement). Every
+// surviving candidate is then gated on a POSITIVE runtime observation.
+//
+// The decision is owner-LIVENESS, never assignee identity shape: a hook claim
 // stamps the alias/agent identity (hookClaimAssigneeIdentity), not the durable
-// bead ID, so keying on "assignee == this session's own bead ID" silences the
-// exact cap-hit strand the event exists to emit for.
-type liveSessionOwnerSet map[string]map[string]struct{}
+// bead ID, so keying on "assignee == this session's own bead ID" would silence
+// the exact gastownhall/gascity#2293 cap-hit strand the event exists to emit for.
+//
+// Runtime observation is lazy and memoized per session bead ID: the hot reconcile
+// path observes a candidate's runtime only when an in_progress strand is actually
+// being classified (rare), never once-per-session-per-tick. An observation error
+// or absent runtime resolves to "not alive" so an unconfirmable seat can never
+// suppress a strand — fail toward FIRE.
+type liveSessionOwnerSet struct {
+	// carriersByIdentifier maps each assignment identifier to the candidate
+	// session bead IDs that carry it (closed and drain-pending seats already
+	// excluded at build time).
+	carriersByIdentifier map[string]map[string]struct{}
+	// candidateByID recovers a candidate's Info (session name, template) so the
+	// lazy probe can observe its runtime.
+	candidateByID map[string]sessionpkg.Info
+	// runtimeAlive positively observes a candidate owner's runtime this pass. A
+	// nil probe means nothing can be confirmed alive, so no candidate suppresses
+	// (every strand fires).
+	runtimeAlive func(sessionpkg.Info) bool
+	// aliveByID memoizes runtimeAlive per candidate within the pass. The map is a
+	// reference type, so the value-receiver methods below share one memo table.
+	aliveByID map[string]bool
+}
 
-// buildLiveSessionOwnerSet indexes the assignment identifiers of every live
-// (non-closed) session Info by the session bead ID that carries them, so
-// ownedByLiveSessionOtherThan can answer sibling-liveness without re-walking
-// the tick's session snapshot per candidate. It reads the same identifier set
-// the assigned-work finders query by (sessionAssignmentIdentifiersForConfigInfo),
-// so an assignee that matched a draining seat's identifiers is looked up under
-// the identity it was actually stamped with.
-func buildLiveSessionOwnerSet(infos []sessionpkg.Info, cfg *config.City) liveSessionOwnerSet {
-	owners := make(liveSessionOwnerSet)
+// buildLiveSessionOwnerSet indexes the assignment identifiers of every candidate
+// owner session by the session bead ID that carries them, pairing the index with
+// a lazy runtime-liveness probe. A candidate is any session Info that is neither
+// closed nor drain-ack-stop-pending: a closed or draining seat is never a live
+// replacement, so excluding both up front makes same-pass-drain mutual
+// suppression impossible by construction. It reads the same identifier set the
+// assigned-work finders query by (sessionAssignmentIdentifiersForConfigInfo), so
+// an assignee that matched a draining seat's identifiers is looked up under the
+// identity it was actually stamped with. runtimeAlive is the positive runtime
+// observation ownedByLiveSessionOtherThan gates every surviving candidate on.
+func buildLiveSessionOwnerSet(infos []sessionpkg.Info, cfg *config.City, runtimeAlive func(sessionpkg.Info) bool) liveSessionOwnerSet {
+	owners := liveSessionOwnerSet{
+		carriersByIdentifier: make(map[string]map[string]struct{}),
+		candidateByID:        make(map[string]sessionpkg.Info),
+		runtimeAlive:         runtimeAlive,
+		aliveByID:            make(map[string]bool),
+	}
 	for i := range infos {
 		info := infos[i]
 		id := strings.TrimSpace(info.ID)
 		if id == "" || info.Closed {
 			continue
 		}
+		// A drain-ack-stop-pending seat is already leaving; counting it as a live
+		// owner is how a same-pass-draining sibling would silence a peer's strand.
+		// Exclude it here, before the runtime probe would even be consulted.
+		if isDrainAckStopPendingInfo(info) {
+			continue
+		}
+		owners.candidateByID[id] = info
 		for _, identifier := range sessionAssignmentIdentifiersForConfigInfo(info, cfg) {
 			identifier = strings.TrimSpace(identifier)
 			if identifier == "" {
 				continue
 			}
-			carriers := owners[identifier]
+			carriers := owners.carriersByIdentifier[identifier]
 			if carriers == nil {
 				carriers = make(map[string]struct{})
-				owners[identifier] = carriers
+				owners.carriersByIdentifier[identifier] = carriers
 			}
 			carriers[id] = struct{}{}
 		}
@@ -648,23 +695,67 @@ func buildLiveSessionOwnerSet(infos []sessionpkg.Info, cfg *config.City) liveSes
 	return owners
 }
 
-// ownedByLiveSessionOtherThan reports whether some live session OTHER than
-// selfID carries assignee in its identifier set — i.e. another live incarnation
-// is genuinely handling a bead stamped with that assignee. selfID is the
+// ownedByLiveSessionOtherThan reports whether some session OTHER than selfID
+// carries assignee AND has its runtime positively observed alive this pass — the
+// only positively-benign reason to suppress the strand alarm. selfID is the
 // draining seat's own bead ID, excluded so a seat is never counted as its own
-// live replacement.
+// live replacement. A candidate whose runtime cannot be confirmed alive (observed
+// dead, absent, or unobservable) does NOT suppress: the strand fires.
 func (o liveSessionOwnerSet) ownedByLiveSessionOtherThan(assignee, selfID string) bool {
 	assignee = strings.TrimSpace(assignee)
 	if assignee == "" {
 		return false
 	}
 	selfID = strings.TrimSpace(selfID)
-	for ownerID := range o[assignee] {
-		if ownerID != selfID {
+	for ownerID := range o.carriersByIdentifier[assignee] {
+		if ownerID == selfID {
+			continue
+		}
+		if o.runtimeAliveThisPass(ownerID) {
 			return true
 		}
 	}
 	return false
+}
+
+// runtimeAliveThisPass reports whether the candidate owner id is positively
+// observed runtime-alive this pass, memoizing the probe result per id. A nil
+// probe or an unknown id is "not alive" — the fail-toward-fire default.
+func (o liveSessionOwnerSet) runtimeAliveThisPass(id string) bool {
+	if o.runtimeAlive == nil {
+		return false
+	}
+	if alive, ok := o.aliveByID[id]; ok {
+		return alive
+	}
+	info, ok := o.candidateByID[id]
+	if !ok {
+		return false
+	}
+	alive := o.runtimeAlive(info)
+	o.aliveByID[id] = alive
+	return alive
+}
+
+// sessionRuntimeAliveProbe returns the positive runtime-liveness observation
+// buildLiveSessionOwnerSet gates candidate owners on. It observes the session's
+// provider runtime with the same liveness call the reconciler's forward pass and
+// drain-ack finalize use, and reports alive ONLY when the runtime is observed
+// running or its agent process is alive. A nil provider, an empty session name,
+// or an observation error reports NOT alive, so an unconfirmable seat can never
+// suppress a strand (default = fire).
+func sessionRuntimeAliveProbe(sp runtime.Provider, cfg *config.City) func(sessionpkg.Info) bool {
+	return func(info sessionpkg.Info) bool {
+		name := strings.TrimSpace(info.SessionNameMetadata)
+		if sp == nil || name == "" {
+			return false
+		}
+		running, alive, err := observeRuntimeProviderLiveness(sp, name, drainAckStopPendingProcessNames(cfg, info))
+		if err != nil {
+			return false
+		}
+		return running || alive
+	}
 }
 
 // drainAckClaimableAnomalyBead returns the work bead that makes a drain-acked
@@ -679,20 +770,25 @@ func (o liveSessionOwnerSet) ownedByLiveSessionOtherThan(assignee, selfID string
 //   - An OPEN bead parked on an unmet dependency (routed to the seat's target
 //     but not yet ready). No worker can claim a blocked row, so a seat that
 //     drained past it drained correctly.
-//   - An IN_PROGRESS bead a LIVE sibling incarnation of the same pool is
-//     working, matched only because it carries a pool-shared assignee identity.
-//     A surplus seat draining while a sibling holds the row is normal.
+//   - An IN_PROGRESS bead a sibling incarnation of the same pool whose RUNTIME is
+//     positively observed alive this pass is working, matched only because it
+//     carries a pool-shared assignee identity. A surplus seat draining while a
+//     genuinely-running sibling holds the row is normal.
 //
 // A bead is a true anomaly when it is either open AND ready (claimable right
-// now) or in_progress with NO live owner other than the draining seat itself
-// (dead sibling, or a named/pool seat with no live replacement — the
-// gastownhall/gascity#2293 cap-hit self-strand). The key is owner-LIVENESS
-// against the reconciler's running-session inventory (liveOwners), NOT the
-// assignee's identity shape: production hook claims stamp the alias/agent
-// identity rather than the durable bead ID, so a "assignee == own bead ID" test
-// would silence the strict superset of genuine alias-claimed strands. The
-// open+ready candidate is resolved first and independently, and the in_progress
-// walk continues past benign live-sibling rows across every reachable leg
+// now) or in_progress with NO runtime-alive owner other than the draining seat
+// itself (dead sibling, same-pass-draining sibling, drained-open zombie, or a
+// named/pool seat with no live replacement — the gastownhall/gascity#2293 cap-hit
+// self-strand). The key is owner RUNTIME-LIVENESS (liveOwners positively observes
+// each candidate's runtime), NOT the assignee's identity shape and NOT mere
+// bead-not-closed: production hook claims stamp the alias/agent identity rather
+// than the durable bead ID, so a "assignee == own bead ID" test would silence the
+// strict superset of genuine alias-claimed strands, and counting a non-closed but
+// runtime-dead seat as a live owner would let a zombie or a same-pass-draining
+// sibling silence a genuine strand. The default is FIRE; suppression demands a
+// positively-confirmed runtime-alive owner. The open+ready candidate is resolved
+// first and independently, and the in_progress walk continues past benign
+// runtime-alive-sibling rows across every reachable leg
 // (firstStrandedInProgressAssignedWorkBeadForReachableStore) so neither can mask
 // the other. It fails CLOSED: a read error yields (found=false), so a flaky
 // store never manufactures the alarm this classifier exists to keep honest.
@@ -996,10 +1092,12 @@ func finalizeDrainAckStopPendingSessions(
 	if store == nil || sp == nil || len(infos) == 0 {
 		return 0
 	}
-	// The caller-fed snapshot IS this pass's live-session inventory, so the
-	// drain-ack anomaly classifier can tell an in_progress bead a live sibling
-	// owns from a genuine strand without a re-query.
-	liveOwners := buildLiveSessionOwnerSet(infos, cfg)
+	// The caller-fed snapshot IS this pass's candidate-owner inventory (closed and
+	// drain-pending seats excluded at build), and the runtime probe positively
+	// confirms a candidate is still running before it may suppress a strand, so
+	// the classifier tells an in_progress bead a genuinely-live sibling owns from a
+	// genuine strand — never letting a same-pass-draining or zombie seat silence it.
+	liveOwners := buildLiveSessionOwnerSet(infos, cfg, sessionRuntimeAliveProbe(sp, cfg))
 	finalized := 0
 	for _, info := range infos {
 		if !isDrainAckStopPendingInfo(info) {
@@ -1750,14 +1848,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	infoByID := tick.infoByID
 	orderedIDs := tick.orderedIDs
 
-	// The tick's running-session inventory, indexed by assignment identifier, is
-	// built once from the tick-start snapshot so the drain-ack anomaly classifier
-	// can tell an in_progress bead a live sibling incarnation owns (correct
-	// surplus-seat / pool-recycle drain, suppress) from one with no live owner but
-	// the draining seat itself (a genuine strand, fire). Built before the forward
-	// pass so a session closed mid-tick is still counted as the live owner it was
-	// at tick start, matching the reconciler's coherent snapshot view.
-	liveOwners := buildLiveSessionOwnerSet(orderedInfos, cfg)
+	// The tick's candidate-owner inventory, indexed by assignment identifier, is
+	// built once from the tick-start snapshot (closed and drain-pending seats
+	// excluded) and paired with a lazy runtime probe, so the drain-ack anomaly
+	// classifier can tell an in_progress bead a genuinely RUNTIME-ALIVE sibling
+	// incarnation owns (correct surplus-seat / pool-recycle drain, suppress) from
+	// one with no live owner but the draining seat itself (a genuine strand, fire).
+	// The probe observes each candidate's runtime lazily at classification time, so
+	// a seat whose runtime died mid-tick or a drained-open zombie is excluded on a
+	// positive dead observation rather than trusted because its bead is still open.
+	liveOwners := buildLiveSessionOwnerSet(orderedInfos, cfg, sessionRuntimeAliveProbe(sp, cfg))
 
 	phaseStart = time.Now()
 	cbNow := clk.Now().UTC()
@@ -4726,27 +4826,24 @@ func sessionHasAwakeAssignedWorkForReachableStore(
 	})
 }
 
-// firstOpenAssignedWorkBeadForReachableStore returns the first open or
-// in-progress work bead still assigned to the given session in the store the
-// session's configured agent can query, plus whether one was found. Uses the
-// same reachability resolution as sessionHasOpenAssignedWorkForReachableStore
-// (configured agent's store, with cross-store fallback when the agent
-// template isn't resolvable); emission sites that need the stranded bead's
-// ID (e.g., for the SessionDrainAckedWithAssignedWork event payload per
-// gastownhall/gascity#2293) call this instead of the bool-only helper.
-// Status iteration prefers "in_progress" over "open" so the bead returned is
-// the most-urgent stranded candidate — this is intentional and asymmetric
-// with the bool helpers, which short-circuit on any match and so iterate
-// in the historical "open" / "in_progress" order.
-// Returns (zero-bead, false, nil) when nothing matches.
-func firstOpenAssignedWorkBeadForReachableStore(
+// firstAssignedWorkBeadForSession walks the session's reachable work-store legs
+// in plan order and returns the first bead a per-leg probe reports, plus whether
+// one was found. It is the bead-returning peer of assignedWorkExistsForSession:
+// the probe answers a single leg, and the walk stops at the first leg whose probe
+// returns found=true. A probe that must skip benign rows (the stranded in_progress
+// finder) simply returns found=false for a leg holding only benign matches, so
+// the walk continues to later legs — a benign earlier-leg row can never mask a
+// genuine match in a later leg. Fails CLOSED: a leg read error aborts, and an
+// incomplete scan with no match is surfaced through assignedWorkScanComplete so a
+// dark rig is never reported as "no work".
+func firstAssignedWorkBeadForSession(
 	cityPath string,
 	cfg *config.City,
 	store beads.Store,
 	rigStores map[string]beads.Store,
 	info sessionpkg.Info,
+	probe func(beads.Store) (beads.Bead, bool, error),
 ) (beads.Bead, bool, error) {
-	identifiers := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
 	plan, err := assignedWorkPlanForSessionInfo(cityPath, cfg, store, rigStores, info)
 	if err != nil {
 		return beads.Bead{}, false, err
@@ -4756,7 +4853,7 @@ func firstOpenAssignedWorkBeadForReachableStore(
 		found bool
 	)
 	res, err := storeref.Walk(plan, func(leg storeref.Leg) (bool, error) {
-		b, ok, err := firstOpenAssignedWorkBeadInStoreByIdentifiers(leg.Store, identifiers)
+		b, ok, err := probe(leg.Store)
 		if err != nil {
 			return false, err
 		}
@@ -4774,45 +4871,13 @@ func firstOpenAssignedWorkBeadForReachableStore(
 	return bead, found, nil
 }
 
-func firstOpenAssignedWorkBeadInStoreByIdentifiers(store beads.Store, identifiers []string) (beads.Bead, bool, error) {
-	if store == nil {
-		return beads.Bead{}, false, nil
-	}
-	wa := workAssignmentForStore(beads.WorkStore{Store: store})
-	seen := make(map[string]struct{}, len(identifiers))
-	for _, status := range []string{"in_progress", "open"} {
-		for _, assignee := range identifiers {
-			if assignee == "" {
-				continue
-			}
-			key := status + "\x00" + assignee
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			items, err := wa.OpenAssignedTo(assignee, status, beads.TierBoth, true)
-			if err != nil {
-				return beads.Bead{}, false, err
-			}
-			for _, item := range items {
-				if sessionpkg.IsSessionBeadOrRepairable(item) {
-					continue
-				}
-				return item, true, nil
-			}
-		}
-	}
-	return beads.Bead{}, false, nil
-}
-
 // firstReadyAssignedWorkBeadForReachableStore returns the first READY (open and
 // unblocked) work bead still assigned to the given session in the store the
-// session's configured agent can query, plus whether one was found. It mirrors
-// firstOpenAssignedWorkBeadForReachableStore's reachability/identifier
-// resolution but keys on readiness so the drain-ack anomaly classifier
-// (drainAckClaimableAnomalyBead) can tell a genuinely claimable strand from an
-// open bead parked on an unmet dependency, which no worker could have claimed.
-// Returns (zero-bead, false, nil) when nothing matches.
+// session's configured agent can query, plus whether one was found. It keys on
+// readiness so the drain-ack anomaly classifier (drainAckClaimableAnomalyBead)
+// can tell a genuinely claimable strand from an open bead parked on an unmet
+// dependency, which no worker could have claimed. Returns (zero-bead, false, nil)
+// when nothing matches.
 func firstReadyAssignedWorkBeadForReachableStore(
 	cityPath string,
 	cfg *config.City,
@@ -4821,56 +4886,27 @@ func firstReadyAssignedWorkBeadForReachableStore(
 	info sessionpkg.Info,
 ) (beads.Bead, bool, error) {
 	identifiers := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
-	plan, err := assignedWorkPlanForSessionInfo(cityPath, cfg, store, rigStores, info)
-	if err != nil {
-		return beads.Bead{}, false, err
-	}
-	var (
-		bead  beads.Bead
-		found bool
-	)
-	res, err := storeref.Walk(plan, func(leg storeref.Leg) (bool, error) {
-		b, ok, err := firstReadyAssignedWorkBeadInStoreByIdentifiers(leg.Store, identifiers)
-		if err != nil {
-			return false, err
-		}
-		bead, found = b, ok
-		return ok, nil
+	return firstAssignedWorkBeadForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (beads.Bead, bool, error) {
+		return firstReadyAssignedWorkBeadInStoreByIdentifiers(s, identifiers)
 	})
-	if err != nil {
-		return beads.Bead{}, false, err
-	}
-	if !found {
-		if err := assignedWorkScanComplete(res); err != nil {
-			return beads.Bead{}, false, err
-		}
-	}
-	return bead, found, nil
 }
 
 // firstReadyAssignedWorkBeadInStoreByIdentifiers returns the first ready (open,
 // unblocked) non-session, non-mail work bead in store assigned to any of the
-// given identifiers. It is the ready-keyed sibling of
-// firstOpenAssignedWorkBeadInStoreByIdentifiers: ReadyAssignedTo already
-// excludes in_progress and dependency-blocked rows, so this returns only rows a
-// worker for this session could claim right now. It also skips the seat's own
-// mol-do-work drain step (isSessionOwnDrainStepBead), mirroring the close gate's
+// given identifiers. ReadyAssignedTo already excludes in_progress and
+// dependency-blocked rows, so this returns only rows a worker for this session
+// could claim right now. It also skips the seat's own mol-do-work drain step
+// (isSessionOwnDrainStepBead), mirroring the close gate's
 // hasNonSessionNonOwnDrainStepWork so a session's own open drain step is never
-// reported as a claimable strand.
+// reported as a claimable strand. identifiers are pre-compacted (deduped, no
+// empties) by sessionAssignmentIdentifiersForConfigInfo, so no extra dedupe is
+// needed here.
 func firstReadyAssignedWorkBeadInStoreByIdentifiers(store beads.Store, identifiers []string) (beads.Bead, bool, error) {
 	if store == nil {
 		return beads.Bead{}, false, nil
 	}
 	wa := workAssignmentForStore(beads.WorkStore{Store: store})
-	seen := make(map[string]struct{}, len(identifiers))
 	for _, assignee := range identifiers {
-		if assignee == "" {
-			continue
-		}
-		if _, ok := seen[assignee]; ok {
-			continue
-		}
-		seen[assignee] = struct{}{}
 		items, err := wa.ReadyAssignedTo(assignee, beads.TierBoth)
 		if err != nil {
 			return beads.Bead{}, false, err
@@ -4890,13 +4926,12 @@ func firstReadyAssignedWorkBeadInStoreByIdentifiers(store beads.Store, identifie
 
 // firstStrandedInProgressAssignedWorkBeadForReachableStore walks EVERY reachable
 // leg for an in_progress work bead assigned to the draining session whose
-// assignee has no live owner other than the session itself — a genuine strand.
-// Unlike firstOpenAssignedWorkBeadForReachableStore (which stops at the first
-// leg with any match), it must not let a benign in_progress row a live sibling
-// is working in an earlier leg mask a genuine strand in a later leg, so it keeps
-// walking until it finds an unowned in_progress row or exhausts the plan. This
-// mirrors the independence of the ready walk. Returns (zero-bead, false, nil)
-// when every in_progress match is owned by a live sibling incarnation.
+// assignee has no RUNTIME-ALIVE owner other than the session itself — a genuine
+// strand. A benign in_progress row a live sibling is working in an earlier leg
+// must not mask a genuine strand in a later leg, so the per-leg probe returns
+// found=false for a leg holding only owned rows and firstAssignedWorkBeadForSession
+// keeps walking. Returns (zero-bead, false, nil) when every in_progress match is
+// owned by a runtime-alive sibling incarnation.
 func firstStrandedInProgressAssignedWorkBeadForReachableStore(
 	cityPath string,
 	cfg *config.City,
@@ -4906,54 +4941,26 @@ func firstStrandedInProgressAssignedWorkBeadForReachableStore(
 	liveOwners liveSessionOwnerSet,
 ) (beads.Bead, bool, error) {
 	identifiers := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
-	plan, err := assignedWorkPlanForSessionInfo(cityPath, cfg, store, rigStores, info)
-	if err != nil {
-		return beads.Bead{}, false, err
-	}
-	var (
-		bead  beads.Bead
-		found bool
-	)
-	res, err := storeref.Walk(plan, func(leg storeref.Leg) (bool, error) {
-		b, ok, err := firstStrandedInProgressAssignedWorkBeadInStoreByIdentifiers(leg.Store, identifiers, info.ID, liveOwners)
-		if err != nil {
-			return false, err
-		}
-		bead, found = b, ok
-		return ok, nil
+	return firstAssignedWorkBeadForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (beads.Bead, bool, error) {
+		return firstStrandedInProgressAssignedWorkBeadInStoreByIdentifiers(s, identifiers, info.ID, liveOwners)
 	})
-	if err != nil {
-		return beads.Bead{}, false, err
-	}
-	if !found {
-		if err := assignedWorkScanComplete(res); err != nil {
-			return beads.Bead{}, false, err
-		}
-	}
-	return bead, found, nil
 }
 
 // firstStrandedInProgressAssignedWorkBeadInStoreByIdentifiers returns the first
 // in_progress non-session, non-mail work bead in store assigned to one of the
-// given identifiers whose assignee is not owned by a live session other than
-// selfID — i.e. a genuine strand. In_progress rows a live sibling incarnation is
-// working (owner-liveness true) are skipped so a surplus-seat / pool-recycle
-// drain does not alarm, and the seat's own mol-do-work drain step is skipped for
-// parity with the ready finder and the close gate.
+// given identifiers whose assignee is not owned by a runtime-alive session other
+// than selfID — i.e. a genuine strand. In_progress rows a runtime-alive sibling
+// incarnation is working (ownedByLiveSessionOtherThan true) are skipped so a
+// surplus-seat / pool-recycle drain does not alarm, and the seat's own mol-do-work
+// drain step is skipped for parity with the ready finder and the close gate.
+// identifiers are pre-compacted (deduped, no empties) by
+// sessionAssignmentIdentifiersForConfigInfo.
 func firstStrandedInProgressAssignedWorkBeadInStoreByIdentifiers(store beads.Store, identifiers []string, selfID string, liveOwners liveSessionOwnerSet) (beads.Bead, bool, error) {
 	if store == nil {
 		return beads.Bead{}, false, nil
 	}
 	wa := workAssignmentForStore(beads.WorkStore{Store: store})
-	seen := make(map[string]struct{}, len(identifiers))
 	for _, assignee := range identifiers {
-		if assignee == "" {
-			continue
-		}
-		if _, ok := seen[assignee]; ok {
-			continue
-		}
-		seen[assignee] = struct{}{}
 		items, err := wa.OpenAssignedTo(assignee, "in_progress", beads.TierBoth, true)
 		if err != nil {
 			return beads.Bead{}, false, err

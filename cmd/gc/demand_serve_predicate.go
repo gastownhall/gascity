@@ -113,18 +113,15 @@ func demandRowServable(b beads.Bead) bool {
 // claimable), NOT a demand/claim divergence — the dominant false-positive class
 // the divergence classifier was over-counting.
 //
-// The blocked signal mirrors the wake side (bindNamedSessionTriggerBead): bd's
-// denormalized is_blocked projection is trusted when the store provides it, and
-// the raw "blocked" status is honored for stores that surface it; defer_until
-// (and bd's indefinite deferral) gate the time-bound half via beads.IsDeferred.
-// A nil is_blocked projection (native DoltLite snapshots, pre-1.0.5 bd) reads as
-// unblocked here, exactly as the ready query's dependency-derived fallback would
-// on the same row, so the classifier neither invents nor suppresses a divergence
-// beyond what a worker's own query could see.
+// The blocked signal reads bd's denormalized is_blocked projection when the store
+// provides it; defer_until (and bd's indefinite deferral) gate the time-bound
+// half via beads.IsDeferred. A nil is_blocked projection (native DoltLite
+// snapshots, pre-1.0.5 bd) reads as unblocked here, exactly as the ready query's
+// dependency-derived fallback would on the same row, so the classifier neither
+// invents nor suppresses a divergence beyond what a worker's own query could see.
+// The sole caller (classifyDemandTrigger) gates on status=="open" before calling
+// this, so a raw "blocked" status string never reaches here.
 func demandRowReady(b beads.Bead, now time.Time) bool {
-	if strings.EqualFold(strings.TrimSpace(b.Status), "blocked") {
-		return false
-	}
 	if b.IsBlocked != nil && *b.IsBlocked {
 		return false
 	}
