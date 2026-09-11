@@ -380,7 +380,11 @@ remote_op_sessions_sql() {
 # remote_op_sessions_sql; stdout: one `Id Time` line per session attributed to
 # DB (case-insensitively) or to no database, every session when DB is empty.
 # Every row is checked for shape BEFORE the filter, so a malformed row for
-# another database still refuses the whole answer. Returns 1 when the first line is not
+# another database still refuses the whole answer; the db column must be
+# exactly ONE CSV field — unquoted without a comma or a quote, or quoted with
+# doubled inner quotes — so a row with an extra column (`42,60,app,extra`) or
+# a stray quote is refused rather than read as "another database" (codex r7).
+# Returns 1 when the first line is not
 # the `Id,Time,db` header (an empty stdout, a banner or an error text is NOT a
 # processlist answer), 2 when a non-blank row does not START with an unquoted
 # all-digit Id and Time (`12,34,…`): a NULL, a truncated line, a wrapper's
@@ -402,7 +406,10 @@ remote_op_sessions_parse() {
       if ($0 !~ /^[0-9]+,[0-9]+,/) { bad = 1; exit 2 }
       have = $0
       sub(/^[0-9]+,[0-9]+,/, "", have)
-      gsub(/^"|"$/, "", have)
+      if (have ~ /^"([^"]|"")*"$/) {
+        have = substr(have, 2, length(have) - 2)
+        gsub(/""/, "\"", have)
+      } else if (have !~ /^[^",]*$/) { bad = 1; exit 2 }
       if (want != "" && have != "" && tolower(have) != want) next
       print $1, $2
     }
@@ -427,7 +434,7 @@ remote_op_sessions() {
   _rs_rows=$(printf '%s\n' "$_rs_csv" | remote_op_sessions_parse "$_rs_db") || {
     _rs_prc=$?
     if [ "$_rs_prc" -eq 2 ]; then
-      printf 'malformed processlist row (Id or Time not all-digit) — refusing the whole answer\n' >>"$_rs_errf"
+      printf 'malformed processlist row (Id or Time not all-digit, or the db column not one CSV field) — refusing the whole answer\n' >>"$_rs_errf"
     else
       printf 'not a processlist answer (no Id,Time,db header)\n' >>"$_rs_errf"
     fi

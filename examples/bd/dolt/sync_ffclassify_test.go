@@ -780,6 +780,47 @@ func TestSyncFetchTimeoutKillNotConfirmedReportsStillInFlight(t *testing.T) {
 	}
 }
 
+// The configured fetch bound is what the fetch runs under, proven by the
+// recorded gtimeout arguments (codex r7 found the pull side unproven; the sync
+// side had the same gap): a script that hardcoded the default would fail this.
+func TestSyncFetchBoundReachesTheFetch(t *testing.T) {
+	binDir := t.TempDir()
+	tlogPath := writeRecordingGtimeout(t, binDir)
+	logPath := writeSyncFakeDoltFetchTimeoutKill(t, binDir, "77", []string{"77,60,app"}, false)
+	outB, _ := ffSyncCmd(t, binDir, []string{"GC_DOLT_SYNC_FETCH_TIMEOUT_SECS=9"}, "--db", "app").CombinedOutput()
+	out := string(outB)
+	if !strings.Contains(out, "app: fetch timed out after 9s") {
+		t.Fatalf("expected the timeout line naming the configured bound.\nout:\n%s", out)
+	}
+	if !strings.Contains(readLog(t, logPath), "KILL 77") {
+		t.Fatalf("KILL must be issued.\nout:\n%s", out)
+	}
+	assertBounded(t, readLog(t, tlogPath), "9", "CALL DOLT_FETCH(")
+}
+
+// The verdict after KILL is a processlist read too: an answer with a malformed
+// row (here a fourth column, which an earlier parser dropped as "another
+// database" — codex r7) must refuse to confirm the kill, never report the
+// session gone.
+func TestSyncFetchTimeoutKillVerdictRefusesMalformedAnswer(t *testing.T) {
+	binDir := t.TempDir()
+	logPath := writeSyncFakeDoltFetchTimeoutKill(t, binDir, "77", []string{"77,60,app,extra"}, true)
+	out := runFFSync(t, binDir, "--db", "app")
+	log := readLog(t, logPath)
+	if pushed(log) {
+		t.Fatalf("a fetch timeout must NEVER push.\nout:\n%s", out)
+	}
+	if !strings.Contains(log, "KILL 77") {
+		t.Fatalf("KILL must be issued.\nlog:\n%s", log)
+	}
+	if strings.Contains(out, "no longer in flight") {
+		t.Fatalf("a malformed processlist answer after KILL must not confirm the kill.\nout:\n%s", out)
+	}
+	if !strings.Contains(out, "kill NOT confirmed: the processlist query failed after KILL") || !strings.Contains(out, "malformed processlist row") {
+		t.Fatalf("expected the kill-not-confirmed line with the malformed-row reason.\nout:\n%s", out)
+	}
+}
+
 // No connection id captured (the client died before the server answered):
 // nothing is KILLed. Absence from the earlier processlist read does not prove
 // that a session listed now is ours (an operator's unattributed pull for
@@ -864,12 +905,16 @@ func assertGateBeforeCall(t *testing.T, line, db, call string) {
 // refused and the fetch skipped, fail closed — never "nothing in flight".
 func TestSyncProcesslistMalformedRowSkips(t *testing.T) {
 	for _, row := range []string{
-		`42,NULL,app`,    // a NULL Time
-		`"12,34",60,app`, // a quoted field that field-splitting would read as Id 12, Time 34
-		`"4""2",60,app`,  // a quoted, escaped Id
-		`42`,             // a truncated line
-		`abc,60,app`,     // a non-numeric Id
-		` 42,60,app`,     // leading whitespace
+		`42,NULL,app`,     // a NULL Time
+		`"12,34",60,app`,  // a quoted field that field-splitting would read as Id 12, Time 34
+		`"4""2",60,app`,   // a quoted, escaped Id
+		`42`,              // a truncated line
+		`abc,60,app`,      // a non-numeric Id
+		` 42,60,app`,      // leading whitespace
+		`42,60,app,extra`, // an extra column: the db field is not ONE CSV field (codex r7 — was read as "another database" and dropped)
+		`42,60,"app`,      // an unterminated quote
+		`42,60,ap"p`,      // a stray quote in an unquoted field
+		`42,60,"app"x`,    // text after the closing quote
 	} {
 		binDir := t.TempDir()
 		logPath := writeSyncFakeDoltProcesslist(t, binDir, "printf 'Id,Time,db\\n"+strings.ReplaceAll(row, `"`, `\"`)+"\\n' ; exit 0")

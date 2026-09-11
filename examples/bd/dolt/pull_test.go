@@ -217,8 +217,34 @@ func TestPullInFlightOtherDatabaseDoesNotCount(t *testing.T) {
 	}
 }
 
+// writeRecordingGtimeout installs a fake `gtimeout` first on PATH (runtime.sh
+// prefers it) that logs its arguments (`--kill-after=2 SECS cmd…`) and then
+// runs the command, so a test can prove WHICH bound reached WHICH call.
+func writeRecordingGtimeout(t *testing.T, dir string) string {
+	t.Helper()
+	logPath := filepath.Join(dir, "gtimeout.log")
+	body := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"" + logPath + "\"\nshift 2\nexec \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "gtimeout"), []byte(body), 0o755); err != nil {
+		t.Fatalf("write fake gtimeout: %v", err)
+	}
+	return logPath
+}
+
+// assertBounded pins that some bounded invocation ran under `secs` seconds and
+// carried `needle` in its command line.
+func assertBounded(t *testing.T, tlog, secs, needle string) {
+	t.Helper()
+	for _, line := range strings.Split(tlog, "\n") {
+		if strings.HasPrefix(line, "--kill-after=2 "+secs+" ") && strings.Contains(line, needle) {
+			return
+		}
+	}
+	t.Fatalf("no bounded call under %ss carrying %q.\ngtimeout log:\n%s", secs, needle, tlog)
+}
+
 func TestPullTimeoutKillsItsServerSideSession(t *testing.T) {
 	binDir := t.TempDir()
+	tlogPath := writeRecordingGtimeout(t, binDir)
 	started := filepath.Join(binDir, "pull-started")
 	killed := filepath.Join(binDir, "killed")
 	processlist := "if [ -f \"" + killed + "\" ]; then printf 'Id,Time,db\\n'; " +
@@ -245,6 +271,12 @@ func TestPullTimeoutKillsItsServerSideSession(t *testing.T) {
 	if strings.Contains(out, "pulled from") {
 		t.Fatalf("a timed-out pull must not be reported as pulled.\nout:\n%s", out)
 	}
+	// The configured bound is what the pull ran under (not the 120 s the
+	// metadata queries use), proven by the recorded gtimeout arguments
+	// (codex r7: a fake that exits 124 on its own satisfied the line alone).
+	tlog := readLog(t, tlogPath)
+	assertBounded(t, tlog, "7", "CALL DOLT_PULL(")
+	assertBounded(t, tlog, "120", "information_schema.processlist")
 }
 
 func TestPullIsAttributedAndSelfIdentifying(t *testing.T) {
@@ -320,6 +352,7 @@ func TestPullClientExit137StillKillsServerSideSession(t *testing.T) {
 // A bound with leading zeros is accepted as the integer it is, and reported so.
 func TestPullTimeoutLeadingZerosAreCanonical(t *testing.T) {
 	binDir := t.TempDir()
+	tlogPath := writeRecordingGtimeout(t, binDir)
 	logPath := writePullFakeDolt(t, binDir, "printf 'Id,Time,db\\n' ; exit 0", "printf 'id\\n80\\n' ; exit 124")
 	out, err := runPull(t, binDir, []string{"GC_DOLT_PULL_TIMEOUT_SECS=0007"}, "--db", "app")
 	if err == nil {
@@ -337,6 +370,8 @@ func TestPullTimeoutLeadingZerosAreCanonical(t *testing.T) {
 	if pullLine == "" {
 		t.Fatalf("no pull issued.\nout:\n%s", out)
 	}
+	// The canonical value (7, not 0007) is the bound the pull ran under.
+	assertBounded(t, readLog(t, tlogPath), "7", "CALL DOLT_PULL(")
 }
 
 // The server refused the pull's gate (another session holds the database's
