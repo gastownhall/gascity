@@ -35,16 +35,22 @@ for this run (`gc_remote_op_run:<db>:<16 random hex digits>`), and the CALL's ow
 argument re-checks that the session still holds it — Dolt evaluates expressions
 in CALL arguments — so a client that reconnected between the gate and the CALL
 fails before the procedure runs instead of fetching on a lockless session. The
-statement also prints its own connection id first and runs with `--use-db`, so
-when the client bound expires (exit 124, or 137 when GNU timeout had to escalate
-to SIGKILL) the script `KILL`s exactly that server-side session — in one batch
-that prepares the `KILL`, checks that the id still holds this run's lock, and
-only then executes the prepared handle, so a server that restarted and handed
-the number to someone else is never asked to kill them, and a client that
-reconnected between the check and the kill has no handle to execute — and proves
-it gone with a second processlist read (a session still listed is reported as
-NOT killed; a client that never learned its id kills nothing and names the
-sessions for the operator). Database names are locked case-insensitively.
+gate statement itself answers with the session's own connection id when it has
+taken both locks — one statement, so the recorded id is the lock holder by
+construction, never a session a separate statement saw before a reconnect — and
+the batch runs with `--use-db`, so when the client bound expires (exit 124, or
+137 when GNU timeout had to escalate to SIGKILL) the script `KILL`s exactly that
+server-side session — in one batch that prepares the `KILL`, checks that the id
+still holds this run's lock, and only then executes the prepared handle, so a
+server that restarted and handed the number to someone else is never asked to
+kill them, and a client that reconnected between the check and the kill has no
+handle to execute — and proves it gone with a second processlist read (a session
+still listed is reported as NOT killed; a client that never learned its id kills
+nothing and names the sessions for the operator). After the kill attempt the
+script also reads who holds this run's lock (`IS_USED_LOCK`) and never reports
+success while any session holds it: a live holder other than the recorded id is
+reported NOT killed and named for the operator. Database names are locked
+case-insensitively.
 `gc dolt health` adds one `WARN` line, and a `fetch_sessions` block in its
 JSON report, when more than `GC_DOLT_HEALTH_MAX_FETCH_SESSIONS` (default 2)
 such sessions are in flight server-wide; leftovers from runs older than this

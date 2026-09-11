@@ -241,16 +241,19 @@ pull_database_sql() {
     rm -f "$pull_err_tmp"
     return 1
   }
-  # The statement prints its OWN connection id before the procedure starts;
-  # --use-db attributes the session to this database. The id is the KILL
-  # operand when the bound expires.
   pull_rc=0
-  # Then the server-side gate (remote_op_gate_sql): the session takes this
-  # database's lock and this run's lock or the batch stops here, before the
-  # CALL; the CALL's own first argument re-proves that THIS session still holds
-  # the run lock (remote_op_owned_arg), so a reconnected client never pulls on
-  # a lockless session.
-  dolt_sql "USE \`$name\`; SELECT CONNECTION_ID() AS id; $(remote_op_gate_sql "$name"); CALL DOLT_PULL($(remote_op_owned_arg "$name" "$remote_name"), 'main')" "$pull_timeout" "$name" \
+  # The server-side gate (remote_op_gate_sql) is the batch's first statement
+  # after USE: the session takes this database's lock and this run's lock and
+  # prints its OWN connection id in that same statement, or the batch stops
+  # here, before the CALL. The id and the locks are one statement, so the id
+  # the KILL targets when the bound expires is the lock holder by construction
+  # (a separate id statement before the gate could record a session that a
+  # pooled-client reconnect left lockless while the reconnected one pulled on
+  # — the mayor's gate r1); --use-db attributes the session to this database.
+  # The CALL's own first argument re-proves that THIS session still holds the
+  # run lock (remote_op_owned_arg), so a reconnected client never pulls on a
+  # lockless session.
+  dolt_sql "USE \`$name\`; $(remote_op_gate_sql "$name"); CALL DOLT_PULL($(remote_op_owned_arg "$name" "$remote_name"), 'main')" "$pull_timeout" "$name" \
     >"$pull_out_tmp" 2>"$pull_err_tmp" || pull_rc=$?
   pull_session_id=$(remote_op_session_id "$pull_out_tmp")
   rm -f "$pull_out_tmp"

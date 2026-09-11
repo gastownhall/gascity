@@ -299,9 +299,10 @@ PY
 #     statement text). A session whose client died stays listed.
 #   - The DB column is the connection's database as set by the CLI's
 #     --use-db; a `USE` statement inside the query does NOT set it.
-#   - The CLI prints each statement's result before running the next, so a
-#     `SELECT CONNECTION_ID()` issued just before the procedure lands on
-#     stdout before the fetch starts and survives the client's death.
+#   - The CLI prints each statement's result before running the next, so the
+#     gate statement's answer — the session's own CONNECTION_ID(), printed by
+#     the statement that took the locks — lands on stdout before the fetch
+#     starts and survives the client's death.
 #   - `KILL <id>` exits 0 with no text whether or not <id> exists, so the
 #     proof that a session ended is the processlist read AFTER the KILL.
 
@@ -453,9 +454,10 @@ remote_op_sessions_oldest() {
   awk 'NF == 2 && ($2 + 0) >= (m + 0) { m = $2; l = $0 } END { if (l != "") print l }'
 }
 
-# remote_op_session_id FILE — the connection id that a `SELECT CONNECTION_ID()
-# AS id` printed into FILE (the all-digit line right after the `id` header);
-# nothing when the client died before the server answered.
+# remote_op_session_id FILE — the connection id that the gate statement
+# (remote_op_gate_sql, `… CONNECTION_ID() … AS id`) printed into FILE when it
+# took both locks (the all-digit line right after the `id` header); nothing
+# when the gate refused or the client died before the server answered.
 remote_op_session_id() {
   [ -f "$1" ] || return 0
   awk '{ gsub(/\r/, "") } prev == "id" && $0 ~ /^[0-9]+$/ { print; exit } { prev = $0 }' "$1"
@@ -463,18 +465,26 @@ remote_op_session_id() {
 
 # kill_remote_op_session LABEL DB SESSION_ID [TIMEOUT_SECS] — end the
 # server-side DOLT_FETCH / DOLT_PULL this client abandoned when its bound
-# expired, and PROVE it ended. SESSION_ID is the connection id the statement
-# printed about itself before the procedure started: the session is ours by
-# construction. An empty SESSION_ID (the client died before the server
-# answered) kills NOTHING: absence from the earlier processlist read does not
-# prove that a session listed now is ours (an operator's pull can appear in
-# the same window), so the in-flight remote operations on the server are
-# reported for the operator and 1 is returned;
-# a session of ours that does exist holds the database's lock, so every later
-# run is refused by the server gate until it ends or is KILLed by hand, and
-# gc dolt health names it. The verdict for a known id is the processlist read
-# AFTER the KILL, never KILL's own exit code: a session still listed is
-# reported as NOT killed and returns 1. LABEL names the operation in the
+# expired, and PROVE it ended. SESSION_ID is the connection id the gate
+# statement printed about itself in the SAME statement that took this
+# database's lock and this run's lock: the session is ours, and the lock
+# holder, by construction. An empty SESSION_ID (the client died before the
+# server answered the gate) kills NOTHING: absence from the earlier
+# processlist read does not prove that a session listed now is ours (an
+# operator's pull can appear in the same window), so the in-flight remote
+# operations on the server are reported for the operator and 1 is returned.
+# The verdict for a known id is the processlist read AFTER the KILL, never
+# KILL's own exit code: a session still listed is reported as NOT killed and
+# returns 1. Then, on every path, who holds THIS run's lock is read
+# (remote_op_run_lock_holder) and the helper never returns 0 while any
+# session holds it: a guarded id that is gone means the session ended on its
+# own ONLY when the lock is free; a live holder other than the recorded id
+# (a record from before the id came from the gate statement, a server that
+# restarted and reused the number) is reported NOT killed and named for the
+# operator — that session holds the database's lock, so every later run is
+# refused by the server gate until it ends or is KILLed by hand, and gc dolt
+# health names it. A holder answer that cannot be read refuses to confirm
+# (1): an unknown holder is never "free". LABEL names the operation in the
 # lines ("fetch" / "pull"); every line goes to stderr next to the timeout
 # line it resolves.
 kill_remote_op_session() {
@@ -490,22 +500,6 @@ kill_remote_op_session() {
     echo "  $_kr_db: server-side $_kr_label NOT killed: cannot create temp file for processlist diagnostics" >&2
     return 1
   }
-  if [ -z "$_kr_ids" ]; then
-    _kr_rows=$(remote_op_sessions "$_kr_db" "$_kr_tmo" "$_kr_errf") || {
-      echo "  $_kr_db: server-side $_kr_label NOT killed: session id unknown and the processlist query failed" >&2
-      remote_op_replay_stderr "$_kr_db" "$_kr_errf"
-      rm -f "$_kr_errf"
-      return 1
-    }
-    _kr_listed=$(printf '%s\n' "$_kr_rows" | awk '{ printf "%s%s", sep, $1; sep = " " }')
-    rm -f "$_kr_errf"
-    if [ -z "$_kr_listed" ]; then
-      echo "  $_kr_db: server-side $_kr_label already ended (nothing in flight to kill)" >&2
-      return 0
-    fi
-    echo "  $_kr_db: server-side $_kr_label NOT killed: this client never learned its session id, and ownership of the in-flight remote operation(s) on the server (Id $_kr_listed) cannot be proven — left for the operator (KILL <Id>); gc dolt health names them" >&2
-    return 1
-  fi
   _kr_runlock=$(remote_op_run_lock_name "$_kr_db")
   _kr_guarded=""
   for _kr_one in $_kr_ids; do
@@ -524,37 +518,60 @@ kill_remote_op_session() {
     fi
   done
   _kr_left=$(remote_op_sessions "$_kr_db" "$_kr_tmo" "$_kr_errf") || {
-    echo "  $_kr_db: server-side $_kr_label kill NOT confirmed: the processlist query failed after KILL" >&2
+    if [ -z "$_kr_ids" ]; then
+      echo "  $_kr_db: server-side $_kr_label NOT killed: session id unknown and the processlist query failed" >&2
+    else
+      echo "  $_kr_db: server-side $_kr_label kill NOT confirmed: the processlist query failed after KILL" >&2
+    fi
+    remote_op_replay_stderr "$_kr_db" "$_kr_errf"
+    rm -f "$_kr_errf"
+    return 1
+  }
+  _kr_holder=$(remote_op_run_lock_holder "$_kr_db" "$_kr_tmo" "$_kr_errf") || {
+    echo "  $_kr_db: server-side $_kr_label kill NOT confirmed: the run-lock holder query failed ($_kr_runlock)" >&2
     remote_op_replay_stderr "$_kr_db" "$_kr_errf"
     rm -f "$_kr_errf"
     return 1
   }
   rm -f "$_kr_errf"
+  if [ -z "$_kr_ids" ]; then
+    _kr_listed=$(printf '%s\n' "$_kr_left" | awk '{ printf "%s%s", sep, $1; sep = " " }')
+    if [ "$_kr_holder" != 0 ]; then
+      echo "  $_kr_db: server-side $_kr_label NOT killed: this client never learned its session id, and session $_kr_holder holds this run's lock ($_kr_runlock) — the session that passed this run's gate, its answer lost with the client — left for the operator (KILL $_kr_holder); gc dolt health names it" >&2
+      return 1
+    fi
+    if [ -z "$_kr_listed" ]; then
+      echo "  $_kr_db: server-side $_kr_label already ended (nothing in flight to kill)" >&2
+      return 0
+    fi
+    echo "  $_kr_db: server-side $_kr_label NOT killed: this client never learned its session id, and ownership of the in-flight remote operation(s) on the server (Id $_kr_listed) cannot be proven — left for the operator (KILL <Id>); gc dolt health names them" >&2
+    return 1
+  fi
   _kr_left_ids=" $(printf '%s\n' "$_kr_left" | awk '{ printf "%s ", $1 }')"
   _kr_rc=0
   for _kr_one in $_kr_ids; do
     case "$_kr_guarded" in
+      *" $_kr_one "*) _kr_was_guarded=1 ;;
+      *) _kr_was_guarded=0 ;;
+    esac
+    case "$_kr_left_ids" in
       *" $_kr_one "*)
-        case "$_kr_left_ids" in
-          *" $_kr_one "*)
-            echo "  $_kr_db: server-side $_kr_label NOT killed: session $_kr_one does not hold this run's lock ($_kr_runlock) — the server restarted and reused the id, or it is another runner's — left for the operator (KILL <Id>)" >&2
-            _kr_rc=1
-            ;;
-          *)
-            echo "  $_kr_db: server-side $_kr_label already ended (session $_kr_one is gone; nothing killed)" >&2
-            ;;
-        esac
+        if [ "$_kr_was_guarded" -eq 1 ]; then
+          echo "  $_kr_db: server-side $_kr_label NOT killed: session $_kr_one does not hold this run's lock ($_kr_runlock) — the server restarted and reused the id, or it is another runner's — left for the operator (KILL <Id>)" >&2
+        else
+          echo "  $_kr_db: server-side $_kr_label NOT killed (session $_kr_one still in flight after KILL)" >&2
+        fi
+        _kr_rc=1
         ;;
       *)
-        case "$_kr_left_ids" in
-          *" $_kr_one "*)
-            echo "  $_kr_db: server-side $_kr_label NOT killed (session $_kr_one still in flight after KILL)" >&2
-            _kr_rc=1
-            ;;
-          *)
-            echo "  $_kr_db: server-side $_kr_label killed (session $_kr_one no longer in flight)" >&2
-            ;;
-        esac
+        if [ "$_kr_holder" != 0 ]; then
+          echo "  $_kr_db: server-side $_kr_label NOT killed: session $_kr_one is gone but session $_kr_holder holds this run's lock ($_kr_runlock) — the recorded id was not the lock holder (a record from before the id came from the gate statement, or a server that restarted and reused the number) — left for the operator (KILL $_kr_holder); gc dolt health names it" >&2
+          _kr_rc=1
+        elif [ "$_kr_was_guarded" -eq 1 ]; then
+          echo "  $_kr_db: server-side $_kr_label already ended (session $_kr_one is gone; nothing killed)" >&2
+        else
+          echo "  $_kr_db: server-side $_kr_label killed (session $_kr_one no longer in flight)" >&2
+        fi
         ;;
     esac
   done
@@ -604,8 +621,11 @@ bound_expired() {
 #
 # Ownership is re-proven INSIDE the statements that matter (codex r12,
 # evidence 04i). The gate takes a second, per-run lock,
-# `gc_remote_op_run:<db>:<nonce>` (REMOTE_OP_RUN_NONCE = pid-epoch of this
-# script run), and:
+# `gc_remote_op_run:<db>:<nonce>` (REMOTE_OP_RUN_NONCE = 16 random hex digits
+# per script run), answers with the session's own CONNECTION_ID() in that
+# same statement when both locks are taken (the mayor's gate r1: the id the
+# bound's KILL targets is the lock holder by construction, never a session a
+# separate statement saw before a reconnect), and:
 #   - the CALL's first argument is `IF(IS_USED_LOCK('<run lock>') =
 #     CONNECTION_ID(), '<remote>', JSON_EXTRACT('gc-remote-op-lost', '$'))`:
 #     Dolt evaluates expressions in CALL arguments (04i a), so a session that
@@ -616,13 +636,17 @@ bound_expired() {
 #   - the KILL is ONE batch: `PREPARE gc_kill FROM 'KILL <id>'; SELECT
 #     IF(IS_USED_LOCK('<run lock>') = <id>, 1, JSON_EXTRACT(
 #     'gc-remote-op-not-owner', '$')) AS own; EXECUTE gc_kill; DEALLOCATE
-#     PREPARE gc_kill`. The id printed by our statement proves ownership only
+#     PREPARE gc_kill`. The id printed by our gate proves ownership only
 #     within the server lifetime that issued it (a restarted server hands the
 #     same numbers out again), so the KILL runs only while that id still
 #     holds this run's lock; otherwise the batch stops at the guard (04i e1,
 #     e3; 04k2 b) and the processlist read after says whether the session is
-#     gone (already ended) or someone else's (NOT killed, left for the
-#     operator). KILL takes only a literal (04k a–c), so the check cannot sit
+#     still listed (NOT killed, left for the operator) or gone — and gone is
+#     "already ended" only when a read of IS_USED_LOCK on this run's lock,
+#     after the KILL attempt, answers free: a live holder other than the
+#     recorded id is NOT killed and named for the operator (the mayor's gate
+#     r1; the helper never returns 0 while any session holds this run's
+#     lock). KILL takes only a literal (04k a–c), so the check cannot sit
 #     inside it; the prepared handle closes the window between the check and
 #     the KILL instead (codex r13): it is session-local, so a client that
 #     reconnected in between lands on a session with no handle and EXECUTE
@@ -675,9 +699,43 @@ remote_op_run_lock_name() {
 
 # remote_op_gate_sql DB — the gate statement for DB (DB already validated by
 # the caller before it is interpolated): the database lock AND this run's
-# lock, both session-scoped, or the marked error.
+# lock, both session-scoped, or the marked error. When both locks are taken
+# the statement answers with the session's OWN connection id (`id` column):
+# the id the bound's KILL targets and the locks are ONE statement, so the
+# recorded id is the lock holder by construction — a separate `SELECT
+# CONNECTION_ID()` before the gate recorded whatever session the pooled
+# client had at that moment, and a reconnect between the two statements left
+# the timeout path killing (and reporting gone) a session that never held the
+# locks while the reconnected one fetched on with both (the mayor's codex
+# gate r1 on aphexcx/gascity#16).
 remote_op_gate_sql() {
-  printf "SELECT IF(GET_LOCK(CONCAT('gc_remote_op:', LOWER('%s')), 0) = 1 AND GET_LOCK('%s', 0) = 1, 1, JSON_EXTRACT('%s', '\$')) AS gate" "$1" "$(remote_op_run_lock_name "$1")" "$REMOTE_OP_GATE_MARK"
+  printf "SELECT IF(GET_LOCK(CONCAT('gc_remote_op:', LOWER('%s')), 0) = 1 AND GET_LOCK('%s', 0) = 1, CONNECTION_ID(), JSON_EXTRACT('%s', '\$')) AS id" "$1" "$(remote_op_run_lock_name "$1")" "$REMOTE_OP_GATE_MARK"
+}
+
+# remote_op_run_lock_holder_sql DB — who holds this run's lock for DB: the
+# holder's connection id, or 0 when the lock is free (IS_USED_LOCK answers
+# NULL for a free lock, which the CSV prints as an empty field; 0 is never a
+# connection id, so the answer is always one all-digit row).
+remote_op_run_lock_holder_sql() {
+  printf "SELECT COALESCE(IS_USED_LOCK('%s'), 0) AS holder" "$(remote_op_run_lock_name "$1")"
+}
+
+# remote_op_run_lock_holder DB TIMEOUT_SECS STDERR_FILE — stdout: the
+# connection id holding this run's lock for DB, or 0 when it is free. Returns
+# the query's exit code, or 1 when the answer is not a holder answer (no
+# `holder` header, or not exactly one all-digit row after it), with the reason
+# appended to STDERR_FILE for the caller to replay. Fail closed on every
+# non-zero return: an unknown holder is never "free".
+remote_op_run_lock_holder() {
+  _rh_rc=0
+  _rh_csv=$(dolt_sql_csv "$2" "" "$(remote_op_run_lock_holder_sql "$1")" 2>>"$3") || _rh_rc=$?
+  [ "$_rh_rc" -eq 0 ] || return "$_rh_rc"
+  _rh_val=$(printf '%s\n' "$_rh_csv" | awk '{ gsub(/\r/, "") } NR == 1 && $0 == "holder" { ok = 1; next } NR == 2 && ok && $0 ~ /^[0-9]+$/ { v = $0; next } { bad = 1 } END { if (ok && !bad && v != "") print v }')
+  if [ -z "$_rh_val" ]; then
+    printf 'not a run-lock holder answer (expected a holder header and one all-digit row)\n' >>"$3"
+    return 1
+  fi
+  printf '%s\n' "$_rh_val"
 }
 
 # remote_op_owned_arg DB VALUE — VALUE as the CALL's argument, but only while

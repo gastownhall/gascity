@@ -142,8 +142,18 @@ func runPull(t *testing.T, binDir string, env []string, args ...string) (string,
 // `pullArm` (complete case arm bodies), KILLs logged and marked.
 func writePullFakeDolt(t *testing.T, dir, processlistArm, pullArm string) string {
 	t.Helper()
-	logPath := filepath.Join(dir, "dolt.log")
 	killedPrefix := filepath.Join(dir, "killed-") // KILL marks only the addressed session (codex r10)
+	killArm := "k=$(printf '%s' \"$*\" | sed -n 's/.*KILL \\([0-9][0-9]*\\).*/\\1/p') ; : > \"" + killedPrefix + "${k}\" ; exit 0"
+	// The run-lock holder query (gp-f2yq round 2) answers "free" unless a test
+	// says otherwise: the helper refuses to confirm a kill without an answer.
+	return writePullFakeDoltArms(t, dir, processlistArm, pullArm, killArm, "printf 'holder\\n0\\n' ; exit 0")
+}
+
+// writePullFakeDoltArms is writePullFakeDolt with the KILL batch and the
+// run-lock holder query answered by the given arms too.
+func writePullFakeDoltArms(t *testing.T, dir, processlistArm, pullArm, killArm, holderArm string) string {
+	t.Helper()
+	logPath := filepath.Join(dir, "dolt.log")
 	body := "#!/bin/sh\n" +
 		"printf '%s\\n' \"$*\" >> \"" + logPath + "\"\n" +
 		"case \"$*\" in\n" +
@@ -151,7 +161,8 @@ func writePullFakeDolt(t *testing.T, dir, processlistArm, pullArm string) string
 		"    printf 'name,url\\norigin,https://example.invalid/repo\\n' ; exit 0 ;;\n" +
 		"  *\"information_schema.processlist\"*) " + processlistArm + " ;;\n" +
 		"  *\"CALL DOLT_PULL(\"*) " + pullArm + " ;;\n" +
-		"  *\"KILL \"*) k=$(printf '%s' \"$*\" | sed -n 's/.*KILL \\([0-9][0-9]*\\).*/\\1/p') ; : > \"" + killedPrefix + "${k}\" ; exit 0 ;;\n" +
+		"  *\"KILL \"*) " + killArm + " ;;\n" +
+		"  *\"COALESCE(IS_USED_LOCK(\"*) " + holderArm + " ;;\n" +
 		"esac\nexit 0\n"
 	if err := os.WriteFile(filepath.Join(dir, "dolt"), []byte(body), 0o755); err != nil {
 		t.Fatalf("write fake dolt: %v", err)
@@ -337,8 +348,8 @@ func TestPullIsAttributedAndSelfIdentifying(t *testing.T) {
 	if pullLine == "" {
 		t.Fatalf("no pull issued.\nout:\n%s", out)
 	}
-	if !strings.Contains(pullLine, "--use-db app") || !strings.Contains(pullLine, "SELECT CONNECTION_ID() AS id;") {
-		t.Fatalf("the pull must run with --use-db app and print its own connection id first.\nline: %s", pullLine)
+	if !strings.Contains(pullLine, "--use-db app") {
+		t.Fatalf("the pull must run with --use-db app so the server attributes the session.\nline: %s", pullLine)
 	}
 	assertGateBeforeCall(t, pullLine, "app", "CALL DOLT_PULL(")
 	if !strings.Contains(out, "app: pulled from https://example.invalid/repo") {
@@ -454,4 +465,39 @@ func TestPullTimeoutOutranksGateText(t *testing.T) {
 		t.Fatalf("the timeout must outrank the gate text.\nout:\n%s", out)
 	}
 	assertGuardedKill(t, readLog(t, logPath), "81")
+}
+
+// gp-f2yq round 2: the pull's id is the gate statement's own answer (no
+// standalone SELECT CONNECTION_ID() before the locks are taken).
+func TestPullIDIsTheGateStatement(t *testing.T) {
+	binDir := t.TempDir()
+	logPath := writePullFakeDolt(t, binDir, "printf 'Id,Time,db\\n' ; exit 0", "exit 0")
+	out, err := runPull(t, binDir, nil, "--db", "app")
+	if err != nil {
+		t.Fatalf("gc dolt pull failed: %v\n%s", err, out)
+	}
+	line := fetchLineOf(t, readLog(t, logPath), "CALL DOLT_PULL(")
+	if line == "" {
+		t.Fatalf("no pull issued.\nout:\n%s", out)
+	}
+	assertIDIsTheGate(t, line, "app", "CALL DOLT_PULL(")
+}
+
+// The pull's timeout path: the recorded id is gone but another live session
+// holds this run's lock — NOT killed, named, never "already ended".
+func TestPullTimeoutKillRefusesWhenAnotherSessionHoldsTheRunLock(t *testing.T) {
+	binDir := t.TempDir()
+	notOwner := "printf 'error on line 1 for query SELECT IF(IS_USED_LOCK(...)) AS own: Error 3141 (HY000): Invalid JSON text in argument 1 to function json_extract: \"gc-remote-op-not-owner\"\\n' >&2 ; exit 1"
+	logPath := writePullFakeDoltArms(t, binDir, "printf 'Id,Time,db\\n' ; exit 0",
+		"printf 'id\\n78\\n' ; printf 'context deadline exceeded\\n' >&2 ; exit 124",
+		notOwner, "printf 'holder\\n92\\n' ; exit 0")
+	out, err := runPull(t, binDir, nil, "--db", "app")
+	if err == nil {
+		t.Fatalf("a timed-out pull must exit non-zero.\nout:\n%s", out)
+	}
+	assertGuardedKill(t, readLog(t, logPath), "78")
+	want := "app: server-side pull NOT killed: session 78 is gone but session 92 holds this run's lock (gc_remote_op_run:app:"
+	if !strings.Contains(out, want) || strings.Contains(out, "already ended") || strings.Contains(out, "no longer in flight") || strings.Contains(out, "pulled from") {
+		t.Fatalf("expected %q and never an ended/killed/pulled line.\nout:\n%s", want, out)
+	}
 }

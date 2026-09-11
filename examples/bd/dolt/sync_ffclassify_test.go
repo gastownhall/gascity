@@ -639,9 +639,16 @@ func writeSyncFakeDoltFetchTimeoutKill(t *testing.T, dir, sessionID string, list
 		"    exit 0 ;;\n" +
 		"  *\"CALL DOLT_FETCH(\"*) : > \"" + started + "\" ; " + idEmit + "printf 'context deadline exceeded\\n' >&2 ; exit 124 ;;\n" +
 		"  *\"KILL \"*) k=$(printf '%s' \"$*\" | sed -n 's/.*KILL \\([0-9][0-9]*\\).*/\\1/p') ; : > \"" + killedPrefix + "${k}\" ; exit 0 ;;\n" +
+		fakeDoltRunLockFreeArm +
 		"esac\nexit 0\n"
 	return installFFFakeDolt(t, dir, body)
 }
+
+// fakeDoltRunLockFreeArm answers the kill helper's run-lock holder query
+// (gp-f2yq round 2) with "free" (0): the helper never confirms a kill, or an
+// ended session, without that answer — a test that wants a live holder
+// writes its own arm.
+const fakeDoltRunLockFreeArm = "  *\"COALESCE(IS_USED_LOCK(\"*) printf 'holder\\n0\\n' ; exit 0 ;;\n"
 
 // fetched reports whether the fake dolt was asked to run the fetch procedure.
 // It matches the CALL itself, not the bare procedure name: the single-flight
@@ -963,6 +970,7 @@ func TestSyncFetchTimeoutKillGuardedByRunLock(t *testing.T) {
 			"    exit 0 ;;\n" +
 			"  *\"CALL DOLT_FETCH(\"*) : > \"" + started + "\" ; printf 'id\\n77\\n' ; printf 'context deadline exceeded\\n' >&2 ; exit 124 ;;\n" +
 			"  *\"KILL \"*) " + notOwner +
+			fakeDoltRunLockFreeArm +
 			"esac\nexit 0\n"
 		installFFFakeDolt(t, binDir, body)
 		out := runFFSyncFails(t, binDir, "--db", "app")
@@ -1053,12 +1061,10 @@ func TestSyncFetchIsAttributedAndSelfIdentifying(t *testing.T) {
 	if !strings.Contains(fetchLine, "--use-db app") {
 		t.Fatalf("the fetch must run with --use-db app so the server attributes the session.\nline: %s", fetchLine)
 	}
-	if !strings.Contains(fetchLine, "SELECT CONNECTION_ID() AS id;") {
-		t.Fatalf("the fetch statement must print its own connection id first.\nline: %s", fetchLine)
-	}
-	// The server-side gate sits between the id and the CALL in the SAME batch:
-	// this session takes the database's lock (timeout 0) or the batch stops
-	// before the CALL is sent (verified on Dolt 2.1.10).
+	// The server-side gate is the id: this session takes the database's lock
+	// and this run's lock (timeout 0) and prints its own connection id in the
+	// same statement, or the batch stops before the CALL is sent (verified on
+	// Dolt 2.1.10).
 	assertGateBeforeCall(t, fetchLine, "app", "CALL DOLT_FETCH(")
 }
 
@@ -1094,24 +1100,30 @@ func assertGuardedKill(t *testing.T, log, id string) {
 	}
 }
 
-// assertGateBeforeCall pins the batch shape `… CONNECTION_ID() … GET_LOCK('gc_remote_op:<db>', 0) … CALL …`.
+// assertGateBeforeCall pins the batch shape `… GET_LOCK('gc_remote_op:<db>', 0) … CONNECTION_ID() … AS id; CALL …`.
 func assertGateBeforeCall(t *testing.T, line, db, call string) {
 	t.Helper()
 	// The COMPLETE gate expression is the spec (codex r9: a check on the
 	// GET_LOCK substring alone accepted `>= 0`, which lets the CALL through
 	// while another session holds the lock): the lock name lowercased on the
 	// server (`app` and `APP` are one database and must be one lock), timeout
-	// 0, this run's own lock (`gc_remote_op_run:<db>:<pid>-<epoch>`), the
-	// `= 1` tests, the 1 branch, and the marked JSON error branch. The CALL's
-	// FIRST ARGUMENT re-proves that the session still holds the same run lock
-	// (codex r12: a pooled client that reconnected between the gate and the
-	// CALL would otherwise fetch on a lockless session).
-	gateRe := regexp.MustCompile(regexp.QuoteMeta("SELECT IF(GET_LOCK(CONCAT('gc_remote_op:', LOWER('"+db+"')), 0) = 1 AND GET_LOCK('gc_remote_op_run:"+db+":") + runNonceRe + regexp.QuoteMeta("', 0) = 1, 1, JSON_EXTRACT('gc-remote-op-lock-held', '$')) AS gate;"))
+	// 0, this run's own lock (`gc_remote_op_run:<db>:<16 hex>`), the `= 1`
+	// tests, CONNECTION_ID() as the true branch — the gate statement IS the
+	// id the KILL targets, so the recorded id held the locks by construction
+	// (the mayor's gate r1: a separate id statement before the gate recorded
+	// a session that a reconnect could leave lockless) — and the marked JSON
+	// error branch. The CALL's FIRST ARGUMENT re-proves that the session
+	// still holds the same run lock (codex r12: a pooled client that
+	// reconnected between the gate and the CALL would otherwise fetch on a
+	// lockless session).
+	gateRe := regexp.MustCompile(regexp.QuoteMeta("SELECT IF(GET_LOCK(CONCAT('gc_remote_op:', LOWER('"+db+"')), 0) = 1 AND GET_LOCK('gc_remote_op_run:"+db+":") + runNonceRe + regexp.QuoteMeta("', 0) = 1, CONNECTION_ID(), JSON_EXTRACT('gc-remote-op-lock-held', '$')) AS id;"))
 	callRe := regexp.MustCompile(regexp.QuoteMeta(call+"IF(IS_USED_LOCK('gc_remote_op_run:"+db+":") + runNonceRe + regexp.QuoteMeta("') = CONNECTION_ID(), '") + `[^']+` + regexp.QuoteMeta("', JSON_EXTRACT('gc-remote-op-lost', '$')), "))
 	gateM, callM := gateRe.FindStringSubmatchIndex(line), callRe.FindStringSubmatchIndex(line)
-	idAt := strings.Index(line, "SELECT CONNECTION_ID() AS id;")
-	if idAt < 0 || gateM == nil || callM == nil || idAt >= gateM[0] || gateM[0] >= callM[0] {
-		t.Fatalf("the batch must be id, then the complete gate %s, then the CALL whose first argument is the ownership check %s.\nline: %s", gateRe, callRe, line)
+	if strings.Contains(line, "SELECT CONNECTION_ID()") {
+		t.Fatalf("no standalone SELECT CONNECTION_ID() may precede the gate: the id is the gate statement's own answer.\nline: %s", line)
+	}
+	if gateM == nil || callM == nil || gateM[0] >= callM[0] {
+		t.Fatalf("the batch must be the complete gate returning the id %s, then the CALL whose first argument is the ownership check %s.\nline: %s", gateRe, callRe, line)
 	}
 	if line[gateM[2]:gateM[3]] != line[callM[2]:callM[3]] {
 		t.Fatalf("the CALL must re-check the SAME run lock the gate took (%q vs %q).\nline: %s", line[gateM[2]:gateM[3]], line[callM[2]:callM[3]], line)
@@ -1167,6 +1179,7 @@ func TestSyncFetchClientExit137StillKillsServerSideSession(t *testing.T) {
 		"    exit 0 ;;\n" +
 		"  *\"CALL DOLT_FETCH(\"*) : > \"" + started + "\" ; printf 'id\\n91\\n' ; exit 137 ;;\n" +
 		"  *\"KILL \"*) k=$(printf '%s' \"$*\" | sed -n 's/.*KILL \\([0-9][0-9]*\\).*/\\1/p') ; : > \"" + killedPrefix + "${k}\" ; exit 0 ;;\n" +
+		fakeDoltRunLockFreeArm +
 		"esac\nexit 0\n"
 	installFFFakeDolt(t, binDir, body)
 	out := runFFSync(t, binDir, "--db", "app")
@@ -1237,6 +1250,7 @@ func TestSyncFetchTimeoutOutranksFirstPushText(t *testing.T) {
 			"    exit 0 ;;\n" +
 			"  *\"CALL DOLT_FETCH(\"*) : > \"" + started + "\" ; printf 'id\\n93\\n' ; printf '" + tc.text + "\\n' >&2 ; exit " + fmt.Sprint(tc.code) + " ;;\n" +
 			"  *\"KILL \"*) k=$(printf '%s' \"$*\" | sed -n 's/.*KILL \\([0-9][0-9]*\\).*/\\1/p') ; : > \"" + killedPrefix + "${k}\" ; exit 0 ;;\n" +
+			fakeDoltRunLockFreeArm +
 			"esac\nexit 0\n"
 		installFFFakeDolt(t, binDir, body)
 		out := runFFSyncFails(t, binDir, "--db", "app")
@@ -1250,5 +1264,190 @@ func TestSyncFetchTimeoutOutranksFirstPushText(t *testing.T) {
 		if guardedKillAt(t, log, "93") < 0 || !strings.Contains(out, "server-side fetch killed (session 93 no longer in flight)") {
 			t.Fatalf("exit %d with %q: the recorded session must be KILLed.\nout:\n%s\nlog:\n%s", tc.code, tc.text, out, log)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// gp-f2yq round 2 (the mayor's codex gate r1): the session id the bound's
+// KILL targets comes from the SAME statement that takes the two locks, and the
+// kill helper never returns 0 while any session holds this run's lock.
+// ---------------------------------------------------------------------------
+
+// The gate statement is the id: `SELECT IF(GET_LOCK(db) = 1 AND GET_LOCK(run)
+// = 1, CONNECTION_ID(), <marked error>) AS id` is the FIRST statement after
+// USE, and no standalone `SELECT CONNECTION_ID()` precedes it — a pooled
+// client that reconnected between a separate id statement and the gate would
+// otherwise record an id that never held the locks, and the timeout path
+// would report "already ended" while the reconnected session fetched on with
+// both locks (the mayor's codex gate r1 on 1b4b4964d).
+func TestSyncFetchIDIsTheGateStatement(t *testing.T) {
+	binDir := t.TempDir()
+	logPath := writeSyncFakeDoltClassify(t, binDir, 1, 0)
+	out := runFFSync(t, binDir, "--db", "app")
+	line := fetchLineOf(t, readLog(t, logPath), "CALL DOLT_FETCH(")
+	if line == "" {
+		t.Fatalf("no fetch issued.\nout:\n%s", out)
+	}
+	assertIDIsTheGate(t, line, "app", "CALL DOLT_FETCH(")
+}
+
+// fetchLineOf returns the first fake-dolt log line carrying call, or "".
+func fetchLineOf(t *testing.T, log, call string) string {
+	t.Helper()
+	for _, line := range strings.Split(log, "\n") {
+		if strings.Contains(line, call) {
+			return line
+		}
+	}
+	return ""
+}
+
+// assertIDIsTheGate pins the round-2 batch shape: `USE \`<db>\`; <the complete
+// gate returning CONNECTION_ID() AS id>; CALL …` with NO standalone
+// `SELECT CONNECTION_ID()` anywhere in the batch. The id and the locks are one
+// statement, so the recorded id is the lock holder by construction.
+func assertIDIsTheGate(t *testing.T, line, db, call string) {
+	t.Helper()
+	if strings.Contains(line, "SELECT CONNECTION_ID()") {
+		t.Fatalf("no standalone SELECT CONNECTION_ID() may precede the gate: the id must come from the gate statement itself.\nline: %s", line)
+	}
+	gateRe := regexp.MustCompile(regexp.QuoteMeta("USE `"+db+"`; SELECT IF(GET_LOCK(CONCAT('gc_remote_op:', LOWER('"+db+"')), 0) = 1 AND GET_LOCK('gc_remote_op_run:"+db+":") + runNonceRe + regexp.QuoteMeta("', 0) = 1, CONNECTION_ID(), JSON_EXTRACT('gc-remote-op-lock-held', '$')) AS id; "+call))
+	if !gateRe.MatchString(line) {
+		t.Fatalf("the batch must be USE, then the gate returning CONNECTION_ID() AS id when both locks are taken, then the CALL: %s\nline: %s", gateRe, line)
+	}
+}
+
+// killHelperEnv runs kill_remote_op_session alone (runtime.sh sourced, the
+// fake dolt in binDir first on PATH, this run's nonce fixed) and returns the
+// helper's stderr and exit code — the return code IS the rule under test.
+func runKillHelper(t *testing.T, binDir, label, db, id string) (string, int) {
+	t.Helper()
+	root := repoRoot(t)
+	cmd := exec.Command("sh", "-c", `. "$GC_PACK_DIR/assets/scripts/runtime.sh"; REMOTE_OP_RUN_NONCE=0123456789abcdef; kill_remote_op_session "$1" "$2" "$3"`, "sh", label, db, id)
+	cmd.Env = append(filteredEnv("PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_CITY_PATH", "GC_PACK_DIR"),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"GC_CITY_PATH="+t.TempDir(),
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_PORT=1",
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+	)
+	out, err := cmd.CombinedOutput()
+	rc := 0
+	if err != nil {
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) {
+			t.Fatalf("kill helper: %v\n%s", err, out)
+		}
+		rc = ee.ExitCode()
+	}
+	return string(out), rc
+}
+
+// writeKillHelperFakeDolt installs a fake dolt for the helper alone: the
+// processlist answered by processlistArm, every KILL batch by killArm, the
+// run-lock holder query by holderArm (complete case arm bodies).
+func writeKillHelperFakeDolt(t *testing.T, dir, processlistArm, killArm, holderArm string) string {
+	t.Helper()
+	logPath := filepath.Join(dir, "dolt.log")
+	body := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> \"" + logPath + "\"\n" +
+		"case \"$*\" in\n" +
+		"  *\"information_schema.processlist\"*) " + processlistArm + " ;;\n" +
+		"  *\"KILL \"*) " + killArm + " ;;\n" +
+		"  *\"COALESCE(IS_USED_LOCK(\"*) " + holderArm + " ;;\n" +
+		"esac\nexit 0\n"
+	return installFFFakeDolt(t, dir, body)
+}
+
+// The kill helper's verdict, as a table (the mayor's codex gate r1): the
+// helper reads who holds THIS run's lock after the KILL attempt and never
+// returns 0 while any session holds it — a guarded id that is gone means the
+// session ended on its own ONLY when the lock is free; a live holder other
+// than the recorded id (a record from before the id came from the gate
+// statement, a server that restarted and reused the number) is reported NOT
+// killed, named for the operator, exit 1. The holder answer is parsed
+// strictly (`holder` header, one all-digit row; 0 = free): anything else
+// refuses to confirm, exit 1.
+func TestKillRemoteOpSessionNeverReturnsZeroWhileTheRunLockIsHeld(t *testing.T) {
+	const runLock = "gc_remote_op_run:app:0123456789abcdef"
+	killed := "exit 0"
+	notOwner := "printf 'error on line 1 for query SELECT IF(IS_USED_LOCK(...)) AS own: Error 3141 (HY000): Invalid JSON text in argument 1 to function json_extract: \"gc-remote-op-not-owner\"\\n' >&2 ; exit 1"
+	none := "printf 'Id,Time,db\\n' ; exit 0"
+	listed77 := "printf 'Id,Time,db\\n77,60,app\\n' ; exit 0"
+	holder := func(v string) string { return "printf 'holder\\n" + v + "\\n' ; exit 0" }
+	for _, tc := range []struct {
+		name, id, processlist, kill, holder string
+		wantRC                              int
+		want, never                         string
+	}{
+		{"killed, gone, lock free", "77", none, killed, holder("0"), 0, "app: server-side fetch killed (session 77 no longer in flight)", "NOT killed"},
+		{"guarded, gone, lock free (the server restarted)", "77", none, notOwner, holder("0"), 0, "app: server-side fetch already ended (session 77 is gone; nothing killed)", "NOT killed"},
+		{"guarded, gone, another session holds this run's lock", "77", none, notOwner, holder("91"), 1, "app: server-side fetch NOT killed: session 77 is gone but session 91 holds this run's lock (" + runLock + ")", "already ended"},
+		{"killed, gone, another session holds this run's lock", "77", none, killed, holder("91"), 1, "app: server-side fetch NOT killed: session 77 is gone but session 91 holds this run's lock (" + runLock + ")", "no longer in flight"},
+		{"guarded, still listed", "77", listed77, notOwner, holder("77"), 1, "app: server-side fetch NOT killed: session 77 does not hold this run's lock (" + runLock + ")", "already ended"},
+		{"holder query fails", "77", none, killed, "printf 'holder: boom\\n' >&2 ; exit 1", 1, "app: server-side fetch kill NOT confirmed: the run-lock holder query failed", "no longer in flight"},
+		{"holder answer is not a holder answer", "77", none, killed, "printf 'nothing here\\n' ; exit 0", 1, "app: server-side fetch kill NOT confirmed: the run-lock holder query failed", "no longer in flight"},
+		{"holder answer is empty", "77", none, killed, "exit 0", 1, "app: server-side fetch kill NOT confirmed: the run-lock holder query failed", "no longer in flight"},
+		{"no id, nothing listed, lock free", "", none, killed, holder("0"), 0, "app: server-side fetch already ended (nothing in flight to kill)", "NOT killed"},
+		{"no id, nothing listed, a session holds this run's lock", "", none, killed, holder("91"), 1, "app: server-side fetch NOT killed: this client never learned its session id, and session 91 holds this run's lock (" + runLock + ")", "already ended"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			binDir := t.TempDir()
+			logPath := writeKillHelperFakeDolt(t, binDir, tc.processlist, tc.kill, tc.holder)
+			out, rc := runKillHelper(t, binDir, "fetch", "app", tc.id)
+			if rc != tc.wantRC {
+				t.Fatalf("exit %d, want %d.\nout:\n%s", rc, tc.wantRC, out)
+			}
+			if !strings.Contains(out, tc.want) || strings.Contains(out, tc.never) {
+				t.Fatalf("expected %q and never %q.\nout:\n%s", tc.want, tc.never, out)
+			}
+			log := readLog(t, logPath)
+			holderQ := "SELECT COALESCE(IS_USED_LOCK('" + runLock + "'), 0) AS holder\n"
+			holderAt := strings.Index(log, holderQ)
+			if holderAt < 0 {
+				t.Fatalf("the helper must ask who holds this run's lock with exactly %q.\nlog:\n%s", strings.TrimSpace(holderQ), log)
+			}
+			if tc.id != "" {
+				// The helper alone issues no gate, so the complete guarded batch is
+				// spelled out with the fixed nonce (guardedKillAt reads it from a
+				// gate line).
+				batch := "PREPARE gc_kill FROM 'KILL " + tc.id + "'; SELECT IF(IS_USED_LOCK('" + runLock + "') = " + tc.id + ", 1, JSON_EXTRACT('gc-remote-op-not-owner', '$')) AS own; EXECUTE gc_kill; DEALLOCATE PREPARE gc_kill\n"
+				if killAt := strings.Index(log, batch); killAt < 0 || holderAt < killAt {
+					t.Fatalf("the complete guarded KILL batch must run, and the holder is read AFTER it.\nlog:\n%s", log)
+				}
+			}
+			if tc.id == "" && strings.Contains(log, "KILL ") {
+				t.Fatalf("without an id nothing may be KILLed.\nlog:\n%s", log)
+			}
+		})
+	}
+}
+
+// The runner path of the same rule: the fetch's recorded id is gone (the KILL
+// batch stopped at its guard) but a live session other than the recorded id
+// holds this run's lock — the reconnected client's session, fetching on with
+// both locks. The run must say NOT killed, name that session, and never
+// "already ended" (RED on 1b4b4964d, which printed already ended).
+func TestSyncFetchTimeoutKillRefusesWhenAnotherSessionHoldsTheRunLock(t *testing.T) {
+	binDir := t.TempDir()
+	logPath := filepath.Join(binDir, "dolt.log")
+	started := filepath.Join(binDir, "fetch-started")
+	body := fakeDoltPreamble(logPath, "main") +
+		"  *\"information_schema.processlist\"*) printf 'Id,Time,db\\n' ; exit 0 ;;\n" +
+		"  *\"CALL DOLT_FETCH(\"*) : > \"" + started + "\" ; printf 'id\\n77\\n' ; printf 'context deadline exceeded\\n' >&2 ; exit 124 ;;\n" +
+		"  *\"KILL \"*) printf 'error on line 1 for query SELECT IF(IS_USED_LOCK(...)) AS own: Error 3141 (HY000): Invalid JSON text in argument 1 to function json_extract: \"gc-remote-op-not-owner\"\\n' >&2 ; exit 1 ;;\n" +
+		"  *\"COALESCE(IS_USED_LOCK(\"*) printf 'holder\\n91\\n' ; exit 0 ;;\n" +
+		"esac\nexit 0\n"
+	installFFFakeDolt(t, binDir, body)
+	out := runFFSyncFails(t, binDir, "--db", "app")
+	log := readLog(t, logPath)
+	if pushed(log) {
+		t.Fatalf("a fetch timeout must NEVER push.\nout:\n%s", out)
+	}
+	assertGuardedKill(t, log, "77")
+	want := "app: server-side fetch NOT killed: session 77 is gone but session 91 holds this run's lock (gc_remote_op_run:app:"
+	if !strings.Contains(out, want) || strings.Contains(out, "already ended") || strings.Contains(out, "no longer in flight") {
+		t.Fatalf("expected %q and never an ended/killed line.\nout:\n%s", want, out)
 	}
 }

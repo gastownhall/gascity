@@ -537,17 +537,21 @@ sync_database_sql() {
       return 1
     }
     fetch_rc=0
-    # The statement prints its OWN connection id before the procedure starts
-    # (the CLI flushes each statement's result before running the next, so
-    # the id is on disk before the fetch begins and survives the client's
-    # death); --use-db attributes the session to this database. The id is the
-    # KILL operand when the bound expires.
-    # Then the server-side gate (remote_op_gate_sql): the session takes this
-    # database's lock and this run's lock or the batch stops here, before the
-    # CALL; and the CALL's own first argument re-proves that THIS session still
-    # holds the run lock (remote_op_owned_arg), so a client that reconnected in
-    # between never fetches on a lockless session.
-    dolt_sql "USE \`$name\`; SELECT CONNECTION_ID() AS id; $(remote_op_gate_sql "$name"); CALL DOLT_FETCH($(remote_op_owned_arg "$name" "$remote_name"), '$remote_branch')" "$fetch_timeout" "$name" \
+    # The server-side gate (remote_op_gate_sql) is the batch's first statement
+    # after USE: the session takes this database's lock and this run's lock
+    # and prints its OWN connection id in that same statement, or the batch
+    # stops here, before the CALL. The id and the locks are one statement, so
+    # the id the KILL targets when the bound expires is the lock holder by
+    # construction (a separate id statement before the gate could record a
+    # session that a pooled-client reconnect left lockless while the
+    # reconnected one fetched on — the mayor's gate r1). The CLI flushes each
+    # statement's result before running the next, so the id is on disk before
+    # the fetch begins and survives the client's death; --use-db attributes the
+    # session to this database. The CALL's own first argument re-proves that
+    # THIS session still holds the run lock (remote_op_owned_arg), so a client
+    # that reconnected between the gate and the CALL never fetches on a
+    # lockless session.
+    dolt_sql "USE \`$name\`; $(remote_op_gate_sql "$name"); CALL DOLT_FETCH($(remote_op_owned_arg "$name" "$remote_name"), '$remote_branch')" "$fetch_timeout" "$name" \
       >"$fetch_out_tmp" 2>"$fetch_err_tmp" || fetch_rc=$?
     fetch_session_id=$(remote_op_session_id "$fetch_out_tmp")
     rm -f "$fetch_out_tmp"
