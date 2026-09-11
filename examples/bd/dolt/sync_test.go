@@ -94,6 +94,10 @@ func writeSyncFakeDolt(t *testing.T, dir string) string {
 	body := `#!/bin/sh
 printf '%s\n' "$*" >> "` + logPath + `"
 case "$*" in
+  *"information_schema.processlist"*)
+    printf 'Id,Time,db\n'
+    exit 0
+    ;;
   *"SELECT name, url FROM dolt_remotes"*)
     printf 'name,url\norigin,file:///example.invalid/repo\n'
     ;;
@@ -121,6 +125,10 @@ func writeSyncFakeDoltActiveBranch(t *testing.T, dir, activeBranch string) strin
 	body := `#!/bin/sh
 printf '%s\n' "$*" >> "` + logPath + `"
 case "$*" in
+  *"information_schema.processlist"*)
+    printf 'Id,Time,db\n'
+    exit 0
+    ;;
   *"SELECT name, url FROM dolt_remotes ORDER BY name"*)
     printf 'name,url\norigin,file:///example.invalid/repo\n'
     ;;
@@ -151,6 +159,10 @@ func writeSyncFakeDoltInvalidActiveBranch(t *testing.T, dir string) string {
 	body := `#!/bin/sh
 printf '%s\n' "$*" >> "` + logPath + `"
 case "$*" in
+  *"information_schema.processlist"*)
+    printf 'Id,Time,db\n'
+    exit 0
+    ;;
   *"SELECT name, url FROM dolt_remotes ORDER BY name"*)
     printf 'name,url\norigin,file:///example.invalid/repo\n'
     ;;
@@ -183,6 +195,10 @@ func writeSyncFakeDoltRemoteLookupFailure(t *testing.T, dir string) string {
 	body := `#!/bin/sh
 printf '%s\n' "$*" >> "` + logPath + `"
 case "$*" in
+  *"information_schema.processlist"*)
+    printf 'Id,Time,db\n'
+    exit 0
+    ;;
   *"SELECT name, url FROM dolt_remotes"*)
     printf 'sql lookup failed\n' >&2
     exit 7
@@ -216,6 +232,10 @@ func writeSyncFakeDoltPushFails(t *testing.T, dir string, exitCode int, stderr s
 	body := `#!/bin/sh
 printf '%s\n' "$*" >> "` + logPath + `"
 case "$*" in
+  *"information_schema.processlist"*)
+    printf 'Id,Time,db\n'
+    exit 0
+    ;;
   *"SELECT name, url FROM dolt_remotes ORDER BY name"*)
     printf 'name,url\norigin,file:///example.invalid/repo\n'
     exit 0
@@ -258,6 +278,10 @@ func writeSyncFakeDoltPushFailsNoTrailingNewline(t *testing.T, dir string, exitC
 	body := `#!/bin/sh
 printf '%s\n' "$*" >> "` + logPath + `"
 case "$*" in
+  *"information_schema.processlist"*)
+    printf 'Id,Time,db\n'
+    exit 0
+    ;;
   *"SELECT name, url FROM dolt_remotes ORDER BY name"*)
     printf 'name,url\norigin,file:///example.invalid/repo\n'
     exit 0
@@ -298,6 +322,10 @@ func writeSyncFakeDoltCLIPushFails(t *testing.T, dir string, exitCode int) {
 	body := `#!/bin/sh
 printf '%s\n' "$*" >> "` + logPath + `"
 case "$*" in
+  *"information_schema.processlist"*)
+    printf 'Id,Time,db\n'
+    exit 0
+    ;;
   *"push "*)
     printf 'remote rejected push\n' >&2
     exit ` + strconv.Itoa(exitCode) + `
@@ -349,6 +377,10 @@ func writeSyncFakeDoltPushEchoesArgs(t *testing.T, dir string) {
 	body := `#!/bin/sh
 printf '%s\n' "$*" >> "` + logPath + `"
 case "$*" in
+  *"information_schema.processlist"*)
+    printf 'Id,Time,db\n'
+    exit 0
+    ;;
   *"SELECT name, url FROM dolt_remotes ORDER BY name"*)
     printf 'name,url\norigin,file:///example.invalid/repo\n'
     exit 0

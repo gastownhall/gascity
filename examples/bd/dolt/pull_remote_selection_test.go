@@ -36,6 +36,9 @@ func writePullFakeDoltMultiRemote(t *testing.T, dir string) string {
 	body := `#!/bin/sh
 printf '%s\n' "$*" >> "` + logPath + `"
 case "$*" in
+  *"information_schema.processlist"*)
+    printf 'Id,Time,db\n'
+    ;;
   *"SELECT name, url FROM dolt_remotes"*)
     printf 'name,url\nalpha,file:///data/remotes/alpha\ninternal,file:///data/remotes/internal\npublic,https://public.example.invalid/repo\n'
     ;;
@@ -469,6 +472,9 @@ func writePullFakeDoltSoleRemote(t *testing.T, dir string, url string) string {
 	body := `#!/bin/sh
 printf '%s\n' "$*" >> "` + logPath + `"
 case "$*" in
+  *"information_schema.processlist"*)
+    printf 'Id,Time,db\n'
+    ;;
   *"SELECT name, url FROM dolt_remotes"*)
     printf 'name,url\norigin,` + url + `\n'
     ;;

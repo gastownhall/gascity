@@ -826,6 +826,14 @@ exec %q "$@"
 // sql-server.
 func reachableServerEnv(t *testing.T, root, cityPath string) []string {
 	t.Helper()
+	return reachableServerEnvWithDolt(t, root, cityPath, "#!/bin/sh\nexit 0\n")
+}
+
+// reachableServerEnvWithDolt is reachableServerEnv with a caller-supplied fake
+// dolt body (every query the caller does not answer must still exit 0 so the
+// SELECT 1 ping reads the server as reachable).
+func reachableServerEnvWithDolt(t *testing.T, root, cityPath, doltBody string) []string {
+	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -843,7 +851,7 @@ if [ "$1" = "-z" ] && [ "$host" = "127.0.0.1" ] && [ "$probe_port" = "`+port+`" 
 fi
 exit 1
 `)
-	writeExecutable(t, filepath.Join(fakeBin, "dolt"), "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), doltBody)
 
 	return append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
 		"GC_CITY_PATH="+cityPath,
@@ -2210,4 +2218,145 @@ func TestHealthScriptQuarantineHumanExitCode(t *testing.T) {
 			t.Errorf("transient compact siblings reported as quarantine:\n%s", out)
 		}
 	})
+}
+
+// ---------------------------------------------------------------------------
+// gp-f2yq: one WARN line (and a JSON block) when server-side DOLT_FETCH /
+// DOLT_PULL sessions pile up — the "fetch herd" that boomtown found by hand
+// (169 of 178 sessions in CALL DOLT_FETCH, one per patrol run for two days).
+// The probe is read-only and server-wide; the threshold is "more than N"
+// (N = 2 by default, GC_DOLT_HEALTH_MAX_FETCH_SESSIONS).
+// ---------------------------------------------------------------------------
+
+// fakeDoltAnsweringProcesslist: every query succeeds with no rows except the
+// fetch-session probe, which answers the given `Id,Time,db` rows; `arm` set
+// replaces the probe's arm body wholesale (a failing probe, for instance).
+func fakeDoltAnsweringProcesslist(rows []string, arm string) string {
+	if arm == "" {
+		body := "Id,Time,db\\n"
+		for _, r := range rows {
+			body += r + "\\n"
+		}
+		arm = "printf '" + body + "' ; exit 0"
+	}
+	return "#!/bin/sh\ncase \"$*\" in\n  *\"information_schema.processlist\"*) " + arm + " ;;\nesac\nexit 0\n"
+}
+
+type fetchSessionsReport struct {
+	FetchSessions struct {
+		Probed       bool `json:"probed"`
+		Count        int  `json:"count"`
+		OldestAgeSec int  `json:"oldest_age_sec"`
+		WarnAbove    int  `json:"warn_above"`
+		Warn         bool `json:"warn"`
+	} `json:"fetch_sessions"`
+}
+
+func healthJSONFetchSessions(t *testing.T, env []string) (fetchSessionsReport, []byte) {
+	t.Helper()
+	root := repoRoot(t)
+	out, err := newHealthScriptCmd(root, env, "--json").Output()
+	if err != nil {
+		t.Fatalf("health.sh --json failed: %v\n%s", err, out)
+	}
+	var report fetchSessionsReport
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("parse health JSON: %v\n%s", err, out)
+	}
+	return report, out
+}
+
+func TestHealthScriptReportsFetchSessionsInJSON(t *testing.T) {
+	cityPath := t.TempDir()
+	root := repoRoot(t)
+	env := reachableServerEnvWithDolt(t, root, cityPath,
+		fakeDoltAnsweringProcesslist([]string{"11,7200,hw", "12,3600,hw", "13,19,"}, ""))
+	report, out := healthJSONFetchSessions(t, env)
+	fs := report.FetchSessions
+	if !fs.Probed || fs.Count != 3 || fs.OldestAgeSec != 7200 || fs.WarnAbove != 2 || !fs.Warn {
+		t.Fatalf("fetch_sessions = %+v; want probed, count 3, oldest 7200, warn_above 2, warn true\n%s", fs, out)
+	}
+}
+
+func TestHealthScriptFetchSessionsBelowThresholdDoesNotWarn(t *testing.T) {
+	cityPath := t.TempDir()
+	root := repoRoot(t)
+	env := reachableServerEnvWithDolt(t, root, cityPath,
+		fakeDoltAnsweringProcesslist([]string{"11,7200,hw", "12,3600,hw"}, ""))
+	report, out := healthJSONFetchSessions(t, env)
+	fs := report.FetchSessions
+	if !fs.Probed || fs.Count != 2 || fs.Warn {
+		t.Fatalf("fetch_sessions = %+v; want probed, count 2, warn false (2 is not more than 2)\n%s", fs, out)
+	}
+	human, err := newHealthScriptCmd(root, env).CombinedOutput()
+	if err != nil {
+		t.Fatalf("health.sh failed: %v\n%s", err, human)
+	}
+	if strings.Contains(string(human), "DOLT_FETCH/DOLT_PULL sessions") {
+		t.Fatalf("no WARN line below the threshold.\n%s", human)
+	}
+}
+
+func TestHealthScriptFetchSessionsWarnLineHumanMode(t *testing.T) {
+	cityPath := t.TempDir()
+	root := repoRoot(t)
+	env := reachableServerEnvWithDolt(t, root, cityPath,
+		fakeDoltAnsweringProcesslist([]string{"11,7200,hw", "12,3600,hw", "13,19,hq"}, ""))
+	human, err := newHealthScriptCmd(root, env).CombinedOutput()
+	if err != nil {
+		t.Fatalf("health.sh failed (the line is informational, exit code must stay 0): %v\n%s", err, human)
+	}
+	want := "WARN: 3 server-side DOLT_FETCH/DOLT_PULL sessions in flight (oldest 2h0m, more than 2)"
+	if !strings.Contains(string(human), want) {
+		t.Fatalf("expected %q\n%s", want, human)
+	}
+	if strings.Count(string(human), "DOLT_FETCH/DOLT_PULL sessions") != 1 {
+		t.Fatalf("exactly one line.\n%s", human)
+	}
+}
+
+func TestHealthScriptFetchSessionsThresholdOverride(t *testing.T) {
+	cityPath := t.TempDir()
+	root := repoRoot(t)
+	env := append(reachableServerEnvWithDolt(t, root, cityPath,
+		fakeDoltAnsweringProcesslist([]string{"11,7200,hw", "12,3600,hw", "13,19,hq"}, "")),
+		"GC_DOLT_HEALTH_MAX_FETCH_SESSIONS=5")
+	report, out := healthJSONFetchSessions(t, env)
+	fs := report.FetchSessions
+	if fs.Count != 3 || fs.WarnAbove != 5 || fs.Warn {
+		t.Fatalf("fetch_sessions = %+v; want count 3, warn_above 5, warn false\n%s", fs, out)
+	}
+}
+
+func TestHealthScriptRejectsInvalidFetchSessionsThreshold(t *testing.T) {
+	cityPath := t.TempDir()
+	root := repoRoot(t)
+	for _, bad := range []string{"abc", "", "0", "00", "-5"} {
+		env := append(reachableServerEnv(t, root, cityPath), "GC_DOLT_HEALTH_MAX_FETCH_SESSIONS="+bad)
+		out, err := newHealthScriptCmd(root, env, "--json").CombinedOutput()
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) || ee.ExitCode() != 2 {
+			t.Errorf("threshold %q: want exit 2, got err=%v\nout: %s", bad, err, out)
+		}
+		if !strings.Contains(string(out), "invalid GC_DOLT_HEALTH_MAX_FETCH_SESSIONS") {
+			t.Errorf("threshold %q: want validation message\nout: %s", bad, out)
+		}
+	}
+}
+
+// A probe that fails (or answers with something that is not a processlist)
+// reports probed=false and count 0 rather than a fabricated "0 in flight".
+func TestHealthScriptFetchSessionsProbeFailureIsReported(t *testing.T) {
+	cityPath := t.TempDir()
+	root := repoRoot(t)
+	env := reachableServerEnvWithDolt(t, root, cityPath,
+		fakeDoltAnsweringProcesslist(nil, "printf 'boom\\n' >&2 ; exit 1"))
+	report, out := healthJSONFetchSessions(t, env)
+	if !strings.Contains(string(out), `"fetch_sessions"`) {
+		t.Fatalf("the report must carry fetch_sessions even when the probe failed\n%s", out)
+	}
+	fs := report.FetchSessions
+	if fs.Probed || fs.Count != 0 || fs.Warn {
+		t.Fatalf("fetch_sessions = %+v; want probed false, count 0, warn false\n%s", fs, out)
+	}
 }

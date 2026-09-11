@@ -7,6 +7,16 @@
 #
 # Environment: GC_CITY_PATH, GC_DOLT_PORT, GC_DOLT_USER, GC_DOLT_PASSWORD,
 # GC_DOLT_REMOTE_<DB> (select among multiple remotes), GC_DOLT_PULL_ALLOW_REMOTE_<DB>=1 (permit a non-file:// pull)
+#   GC_DOLT_PULL_TIMEOUT_SECS (default: 120) — wall-clock bound for the
+#   SQL-mode DOLT_PULL; increase for a slow link or a large first pull.
+#
+# One server-side pull per database at a time (gp-f2yq): a CALL DOLT_PULL
+# runs inside the sql-server (it fetches first) and outlives a client the
+# bound killed, so before issuing one the script asks the server whether a
+# DOLT_PULL / DOLT_FETCH is already in flight for the database (skipped when
+# one is), and when the bound expires it KILLs the server-side session the
+# pull printed about itself and proves it gone from the processlist. See the
+# "Server-side remote operations" helpers in assets/scripts/runtime.sh.
 set -e
 
 : "${GC_DOLT_USER:=root}"
@@ -30,6 +40,7 @@ while [ $# -gt 0 ]; do
       echo "Environment:"
       echo "  GC_DOLT_REMOTE_<DB>                Select which remote to pull from when a database has several"
       echo "  GC_DOLT_PULL_ALLOW_REMOTE_<DB>=1   Permit pulling from a non-file:// remote"
+      echo "  GC_DOLT_PULL_TIMEOUT_SECS  SQL-mode pull bound (default 120)"
       exit 0
       ;;
     *) echo "gc dolt pull: unknown flag: $1" >&2; exit 1 ;;
@@ -42,6 +53,23 @@ case "$(printf '%s' "$db_filter" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | t
   exit 1
   ;;
 esac
+
+# Wall-clock bound for the SQL-mode DOLT_PULL (seconds). Defaults to 120s (the
+# prior fixed ceiling). Validated the way the sync bounds are: an empty /
+# non-numeric / all-zero value is rejected before any database is touched —
+# GNU `timeout 0` disables the timeout, i.e. an unbounded pull, the exact
+# anti-hang outcome this bound exists to prevent.
+pull_timeout="${GC_DOLT_PULL_TIMEOUT_SECS-120}"
+case "$pull_timeout" in
+  ''|*[!0-9]*) pull_timeout_valid=false ;;
+  *[1-9]*)     pull_timeout_valid=true ;;
+  *)           pull_timeout_valid=false ;;
+esac
+if [ "$pull_timeout_valid" != true ]; then
+  printf 'gc dolt pull: invalid GC_DOLT_PULL_TIMEOUT_SECS=%s (must be a positive integer)\n' \
+    "$pull_timeout" >&2
+  exit 2
+fi
 
 is_running() {
   managed_runtime_tcp_reachable "$GC_DOLT_PORT"
@@ -131,12 +159,12 @@ select_remote() {
   printf '%s\n' "$sel_match"; return 0
 }
 
+# dolt_sql QUERY [TIMEOUT_SECS] [USE_DB] — run a SQL query against the live
+# server under a wall-clock bound (dolt_sql_csv, runtime.sh); 120s by default,
+# sized for metadata queries. The pull passes its own bound and its database
+# (--use-db, so the server attributes the session in its processlist).
 dolt_sql() {
-  query="$1"
-  host="${GC_DOLT_HOST:-127.0.0.1}"
-  export DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}"
-  run_bounded 120 dolt --host "$host" --port "$GC_DOLT_PORT" --user "$GC_DOLT_USER" --no-tls \
-    sql --result-format csv -q "$query"
+  dolt_sql_csv "${2:-120}" "${3:-}" "$1"
 }
 
 find_remote_sql() {
@@ -172,12 +200,58 @@ pull_database_sql() {
     return 1
   fi
 
-  if dolt_sql "USE \`$name\`; CALL DOLT_PULL('$remote_name', 'main')" >/dev/null 2>&1; then
+  pull_err_tmp=$(mktemp) || {
+    echo "  $name: ERROR: cannot create temp file for pull diagnostics" >&2
+    return 1
+  }
+  # gp-f2yq: ONE server-side remote operation per database at a time. A CALL
+  # DOLT_PULL runs inside the sql-server and outlives a client the bound
+  # killed, so ask the server first and skip when a pull or fetch is already
+  # in flight for this database. Fail closed: a processlist query that fails,
+  # or answers with anything but a processlist, skips too.
+  inflight_rc=0
+  inflight=$(remote_op_sessions "$name" 120 "$pull_err_tmp") || inflight_rc=$?
+  if [ "$inflight_rc" -ne 0 ]; then
+    echo "  $name: ERROR: processlist query failed (exit $inflight_rc) — skipped" >&2
+    remote_op_replay_stderr "$name" "$pull_err_tmp"
+    rm -f "$pull_err_tmp"
+    return 1
+  fi
+  inflight_oldest=$(printf '%s\n' "$inflight" | remote_op_sessions_oldest)
+  if [ -n "$inflight_oldest" ]; then
+    rm -f "$pull_err_tmp"
+    echo "  $name: pull already in flight for ${inflight_oldest#* }s (session ${inflight_oldest%% *}) — skipped" >&2
+    return 1
+  fi
+  pull_out_tmp=$(mktemp) || {
+    echo "  $name: ERROR: cannot create temp file for the pull session id" >&2
+    rm -f "$pull_err_tmp"
+    return 1
+  }
+  # The statement prints its OWN connection id before the procedure starts;
+  # --use-db attributes the session to this database. The id is the KILL
+  # operand when the bound expires.
+  pull_rc=0
+  dolt_sql "USE \`$name\`; SELECT CONNECTION_ID() AS id; CALL DOLT_PULL('$remote_name', 'main')" "$pull_timeout" "$name" \
+    >"$pull_out_tmp" 2>"$pull_err_tmp" || pull_rc=$?
+  pull_session_id=$(remote_op_session_id "$pull_out_tmp")
+  rm -f "$pull_out_tmp"
+  if [ "$pull_rc" -eq 0 ]; then
+    rm -f "$pull_err_tmp"
     echo "  $name: pulled from $remote_url"
     return 0
   fi
 
-  echo "  $name: ERROR: pull failed" >&2
+  if [ "$pull_rc" -eq 124 ]; then
+    echo "  $name: pull timed out after ${pull_timeout}s (GC_DOLT_PULL_TIMEOUT_SECS)" >&2
+    # The client is dead; the server-side pull is not. End it and prove it
+    # ended (the outcome is reported on its own line).
+    kill_remote_op_session pull "$name" "$pull_session_id" || true
+  else
+    echo "  $name: ERROR: pull failed (exit $pull_rc)" >&2
+  fi
+  remote_op_replay_stderr "$name" "$pull_err_tmp"
+  rm -f "$pull_err_tmp"
   return 1
 }
 

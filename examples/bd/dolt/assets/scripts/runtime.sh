@@ -281,3 +281,195 @@ PY
     return 124
   fi
 }
+
+# --- Server-side remote operations (gp-f2yq) ---------------------------------
+#
+# A `CALL DOLT_FETCH` / `CALL DOLT_PULL` issued through the dolt CLI runs
+# INSIDE the sql-server. When the client's wall-clock bound expires only the
+# client dies; the server-side procedure keeps running, and a patrol that
+# re-issues the call every cooldown stacks one more on top each run (boomtown
+# 2026-09-11: 169 of 178 sql-server connections in DOLT_FETCH, one per
+# 15-minute run for two days, dolt at 180% CPU, that store's sync dead for
+# weeks). sync, pull and health share the helpers below so all three agree on
+# what "a remote operation is in flight" means and how one is ended.
+#
+# Contract (verified on Dolt 2.1.10):
+#   - information_schema.processlist lists every server-side session with
+#     Id, Time (seconds the current statement has run), DB and Info (the
+#     statement text). A session whose client died stays listed.
+#   - The DB column is the connection's database as set by the CLI's
+#     --use-db; a `USE` statement inside the query does NOT set it.
+#   - The CLI prints each statement's result before running the next, so a
+#     `SELECT CONNECTION_ID()` issued just before the procedure lands on
+#     stdout before the fetch starts and survives the client's death.
+#   - `KILL <id>` exits 0 with no text whether or not <id> exists, so the
+#     proof that a session ended is the processlist read AFTER the KILL.
+
+# dolt_sql_csv TIMEOUT_SECS USE_DB QUERY — run QUERY against the managed
+# server through the dolt CLI under a wall-clock bound, CSV result. USE_DB,
+# when non-empty, is passed as --use-db so the server attributes the session
+# to that database (the processlist DB column). The password reaches dolt via
+# DOLT_CLI_PASSWORD, never as an argv flag.
+dolt_sql_csv() {
+  _dsc_tmo="$1"
+  _dsc_db="$2"
+  _dsc_q="$3"
+  export DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}"
+  if [ -n "$_dsc_db" ]; then
+    run_bounded "$_dsc_tmo" dolt --host "${GC_DOLT_HOST:-127.0.0.1}" --port "$GC_DOLT_PORT" \
+      --user "${GC_DOLT_USER:-root}" --no-tls --use-db "$_dsc_db" \
+      sql --result-format csv -q "$_dsc_q"
+  else
+    run_bounded "$_dsc_tmo" dolt --host "${GC_DOLT_HOST:-127.0.0.1}" --port "$GC_DOLT_PORT" \
+      --user "${GC_DOLT_USER:-root}" --no-tls \
+      sql --result-format csv -q "$_dsc_q"
+  fi
+}
+
+# remote_op_sessions_sql [DB] — the SQL that lists the live sessions running
+# CALL DOLT_FETCH or CALL DOLT_PULL as `Id,Time,db` rows. With DB (already
+# validated by the caller before it is interpolated): the sessions attributed
+# to that database PLUS the sessions attributed to no database at all — an
+# unattributed fetch (issued without --use-db: an older gc dolt sync, or an
+# operator) may be this database's, so it counts, fail closed. Without DB:
+# every such session on the server (the health probe).
+remote_op_sessions_sql() {
+  _ros_q="SELECT Id, Time, COALESCE(db, '') AS db FROM information_schema.processlist WHERE (UPPER(Info) LIKE 'CALL DOLT_FETCH%' OR UPPER(Info) LIKE 'CALL DOLT_PULL%')"
+  if [ -n "${1:-}" ]; then
+    _ros_q="$_ros_q AND (db = '$1' OR db = '' OR db IS NULL)"
+  fi
+  printf '%s ORDER BY Time DESC, Id ASC' "$_ros_q"
+}
+
+# remote_op_sessions_parse — stdin: the CSV answer to remote_op_sessions_sql;
+# stdout: one `Id Time` line per session. Returns 1 when the first line is not
+# the `Id,Time,db` header: an empty stdout, a banner or an error text is NOT a
+# processlist answer and must never be read as "nothing in flight". Rows whose
+# Id and Time are not both all-digit are dropped.
+remote_op_sessions_parse() {
+  awk -F, '
+    NR == 1 {
+      hdr = $0
+      gsub(/"|\r/, "", hdr)
+      if (tolower(hdr) != "id,time,db") exit 1
+      next
+    }
+    {
+      gsub(/"|\r/, "", $1)
+      gsub(/"|\r/, "", $2)
+      if ($1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/) print $1, $2
+    }
+    END { if (NR == 0) exit 1 }
+  '
+}
+
+# remote_op_sessions DB TIMEOUT_SECS STDERR_FILE — list the in-flight remote
+# operations (remote_op_sessions_sql DB; DB may be empty for server-wide) as
+# `Id Time` lines on stdout. Returns 0 on a processlist answer (possibly with
+# no rows); otherwise the query's exit code (124 = the bound expired), or 1
+# when the answer was not a processlist, with the reason appended to
+# STDERR_FILE for the caller to replay. Fail closed on every non-zero return.
+remote_op_sessions() {
+  _rs_db="$1"
+  _rs_tmo="$2"
+  _rs_errf="$3"
+  _rs_rc=0
+  _rs_csv=$(dolt_sql_csv "$_rs_tmo" "" "$(remote_op_sessions_sql "$_rs_db")" 2>>"$_rs_errf") || _rs_rc=$?
+  [ "$_rs_rc" -eq 0 ] || return "$_rs_rc"
+  _rs_rows=$(printf '%s\n' "$_rs_csv" | remote_op_sessions_parse) || {
+    printf 'not a processlist answer (no Id,Time,db header)\n' >>"$_rs_errf"
+    return 1
+  }
+  printf '%s\n' "$_rs_rows"
+}
+
+# remote_op_sessions_oldest — stdin: `Id Time` lines; stdout: the line with
+# the largest Time (the oldest session); nothing on empty input.
+remote_op_sessions_oldest() {
+  awk 'NF == 2 && ($2 + 0) >= (m + 0) { m = $2; l = $0 } END { if (l != "") print l }'
+}
+
+# remote_op_session_id FILE — the connection id that a `SELECT CONNECTION_ID()
+# AS id` printed into FILE (the all-digit line right after the `id` header);
+# nothing when the client died before the server answered.
+remote_op_session_id() {
+  [ -f "$1" ] || return 0
+  awk '{ gsub(/\r/, "") } prev == "id" && $0 ~ /^[0-9]+$/ { print; exit } { prev = $0 }' "$1"
+}
+
+# kill_remote_op_session LABEL DB SESSION_ID [TIMEOUT_SECS] — end the
+# server-side DOLT_FETCH / DOLT_PULL this client abandoned when its bound
+# expired, and PROVE it ended. SESSION_ID is the connection id the statement
+# printed about itself before the procedure started: the session is ours by
+# construction. An empty SESSION_ID (the client died before the server
+# answered) falls back to every in-flight remote operation attributed to DB:
+# the single-flight check found none before ours started, so each one is ours
+# or a concurrent runner's that raced the same window, and none may survive.
+# The verdict is the processlist read AFTER the KILL, never KILL's own exit
+# code: a session still listed is reported as NOT killed and returns 1. LABEL
+# names the operation in the lines ("fetch" / "pull"); every line goes to
+# stderr next to the timeout line it resolves.
+kill_remote_op_session() {
+  _kr_label="$1"
+  _kr_db="$2"
+  _kr_id="$3"
+  _kr_tmo="${4:-120}"
+  case "$_kr_id" in
+    ''|*[!0-9]*) _kr_ids="" ;;
+    *) _kr_ids="$_kr_id" ;;
+  esac
+  _kr_errf=$(mktemp) || {
+    echo "  $_kr_db: server-side $_kr_label NOT killed: cannot create temp file for processlist diagnostics" >&2
+    return 1
+  }
+  if [ -z "$_kr_ids" ]; then
+    _kr_rows=$(remote_op_sessions "$_kr_db" "$_kr_tmo" "$_kr_errf") || {
+      echo "  $_kr_db: server-side $_kr_label NOT killed: session id unknown and the processlist query failed" >&2
+      remote_op_replay_stderr "$_kr_db" "$_kr_errf"
+      rm -f "$_kr_errf"
+      return 1
+    }
+    _kr_ids=$(printf '%s\n' "$_kr_rows" | awk '{ print $1 }')
+    if [ -z "$_kr_ids" ]; then
+      rm -f "$_kr_errf"
+      echo "  $_kr_db: server-side $_kr_label already ended (nothing in flight to kill)" >&2
+      return 0
+    fi
+  fi
+  for _kr_one in $_kr_ids; do
+    _kr_krc=0
+    _kr_kerr=$(dolt_sql_csv "$_kr_tmo" "" "KILL $_kr_one" 2>&1 >/dev/null) || _kr_krc=$?
+    [ "$_kr_krc" -eq 0 ] || echo "  $_kr_db: KILL $_kr_one failed (exit $_kr_krc): $_kr_kerr" >&2
+  done
+  _kr_left=$(remote_op_sessions "$_kr_db" "$_kr_tmo" "$_kr_errf") || {
+    echo "  $_kr_db: server-side $_kr_label kill NOT confirmed: the processlist query failed after KILL" >&2
+    remote_op_replay_stderr "$_kr_db" "$_kr_errf"
+    rm -f "$_kr_errf"
+    return 1
+  }
+  rm -f "$_kr_errf"
+  _kr_left_ids=" $(printf '%s\n' "$_kr_left" | awk '{ printf "%s ", $1 }')"
+  _kr_rc=0
+  for _kr_one in $_kr_ids; do
+    case "$_kr_left_ids" in
+      *" $_kr_one "*)
+        echo "  $_kr_db: server-side $_kr_label NOT killed (session $_kr_one still in flight after KILL)" >&2
+        _kr_rc=1
+        ;;
+      *)
+        echo "  $_kr_db: server-side $_kr_label killed (session $_kr_one no longer in flight)" >&2
+        ;;
+    esac
+  done
+  return "$_kr_rc"
+}
+
+# remote_op_replay_stderr DB FILE — replay a captured dolt stderr, one line
+# per line prefixed with the db name (scannable multi-db output); a final line
+# without a trailing newline is flushed too. Nothing on an empty capture.
+remote_op_replay_stderr() {
+  [ -s "$2" ] || return 0
+  while IFS= read -r _rr_line || [ -n "$_rr_line" ]; do
+    printf '  %s: %s\n' "$1" "$_rr_line" >&2
+  done < "$2"
+}

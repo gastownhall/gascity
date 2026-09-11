@@ -66,9 +66,23 @@ func runFFSync(t *testing.T, binDir string, args ...string) string {
 	return out
 }
 
-// fakeDoltHeader is the shared preamble: log argv and answer the remote-lookup
-// + active_branch metadata queries the sync path issues before classification.
+// fakeDoltHeader is the shared preamble for an IDLE server: log argv, answer
+// the remote-lookup + active_branch metadata queries the sync path issues
+// before classification, and answer the single-flight processlist query with
+// its header only (nothing in flight, so the fetch proceeds).
 func fakeDoltHeader(logPath, branch string) string {
+	return fakeDoltPreamble(logPath, branch) + fakeDoltProcesslistIdleArm
+}
+
+// fakeDoltProcesslistIdleArm answers the single-flight processlist query with
+// the `Id,Time,db` header and no rows. The header is load-bearing: the parser
+// (remote_op_sessions_parse, runtime.sh) treats an answer without it as "not a
+// processlist answer" and the fetch is skipped, fail closed.
+const fakeDoltProcesslistIdleArm = "  *\"information_schema.processlist\"*) printf 'Id,Time,db\\n' ; exit 0 ;;\n"
+
+// fakeDoltPreamble logs argv and answers the remote-lookup + active_branch
+// metadata queries; the caller appends the processlist / fetch / push arms.
+func fakeDoltPreamble(logPath, branch string) string {
 	return "#!/bin/sh\n" +
 		"printf '%s\\n' \"$*\" >> \"" + logPath + "\"\n" +
 		"case \"$*\" in\n" +
@@ -533,5 +547,233 @@ func TestSyncRejectsInvalidFetchTimeout(t *testing.T) {
 		if !strings.Contains(string(out), "invalid GC_DOLT_SYNC_FETCH_TIMEOUT_SECS") {
 			t.Errorf("fetch timeout %q: want validation message\nout: %s", bad, out)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// gp-f2yq: ONE server-side DOLT_FETCH per database at a time, and the
+// server-side call dies with the client bound.
+//
+// A `CALL DOLT_FETCH` runs INSIDE the sql-server. When the client's wall-clock
+// bound expired only the client died; the server-side fetch kept running, and
+// the 15-minute patrol stacked one more on every run (boomtown 2026-09-11: 169
+// of 178 sql-server sessions in DOLT_FETCH, one per run for two days). The
+// fakes below answer the single-flight processlist query, print the fetch's
+// own connection id the way the real CLI does before the procedure starts,
+// and log KILLs; marker files in binDir let the processlist answer change as
+// the fetch starts and as it is killed, the way the live server's does.
+// ---------------------------------------------------------------------------
+
+// writeSyncFakeDoltProcesslist installs a fake dolt whose single-flight
+// processlist answer is `arm` (a complete case arm body: printf/exit); a fetch,
+// if one is ever issued, succeeds silently and is logged.
+func writeSyncFakeDoltProcesslist(t *testing.T, dir, arm string) string {
+	t.Helper()
+	logPath := filepath.Join(dir, "dolt.log")
+	body := fakeDoltPreamble(logPath, "main") +
+		"  *\"information_schema.processlist\"*) " + arm + " ;;\n" +
+		"  *\"CALL DOLT_FETCH(\"*) exit 0 ;;\n" +
+		"esac\nexit 0\n"
+	return installFFFakeDolt(t, dir, body)
+}
+
+// writeSyncFakeDoltFetchTimeoutKill models the live sequence: the processlist
+// is empty before the fetch; the fetch prints its connection id (sessionID;
+// nothing when empty) and then hits the bound (exit 124), after which the
+// processlist lists `listedAfterFetch` (Id,Time,db rows); every KILL is logged
+// and afterwards the processlist is empty again — unless stayAlive, in which
+// case the rows keep being listed after the KILL (a KILL that did not take).
+func writeSyncFakeDoltFetchTimeoutKill(t *testing.T, dir, sessionID string, listedAfterFetch []string, stayAlive bool) string {
+	t.Helper()
+	logPath := filepath.Join(dir, "dolt.log")
+	started := filepath.Join(dir, "fetch-started")
+	killed := filepath.Join(dir, "killed")
+	idEmit := ""
+	if sessionID != "" {
+		idEmit = "printf 'id\\n" + sessionID + "\\n' ; "
+	}
+	rows := ""
+	for _, r := range listedAfterFetch {
+		rows += r + "\\n"
+	}
+	afterKill := "printf 'Id,Time,db\\n'"
+	if stayAlive {
+		afterKill = "printf 'Id,Time,db\\n" + rows + "'"
+	}
+	body := fakeDoltPreamble(logPath, "main") +
+		"  *\"information_schema.processlist\"*)\n" +
+		"    if [ -f \"" + killed + "\" ]; then " + afterKill + "\n" +
+		"    elif [ -f \"" + started + "\" ]; then printf 'Id,Time,db\\n" + rows + "'\n" +
+		"    else printf 'Id,Time,db\\n'; fi\n" +
+		"    exit 0 ;;\n" +
+		"  *\"CALL DOLT_FETCH(\"*) : > \"" + started + "\" ; " + idEmit + "printf 'context deadline exceeded\\n' >&2 ; exit 124 ;;\n" +
+		"  *\"KILL \"*) : > \"" + killed + "\" ; exit 0 ;;\n" +
+		"esac\nexit 0\n"
+	return installFFFakeDolt(t, dir, body)
+}
+
+// fetched reports whether the fake dolt was asked to run the fetch procedure.
+// It matches the CALL itself, not the bare procedure name: the single-flight
+// processlist query names DOLT_FETCH inside its LIKE pattern too.
+func fetched(log string) bool { return strings.Contains(log, "CALL DOLT_FETCH(") }
+
+func TestSyncFetchInFlightSkipsNeverFetches(t *testing.T) {
+	binDir := t.TempDir()
+	logPath := writeSyncFakeDoltProcesslist(t, binDir, "printf 'Id,Time,db\\n42,7200,app\\n' ; exit 0")
+	out := runFFSync(t, binDir, "--db", "app")
+	log := readLog(t, logPath)
+	if fetched(log) {
+		t.Fatalf("a fetch already in flight for the db must NOT start another.\nout:\n%s\nlog:\n%s", out, log)
+	}
+	if pushed(log) {
+		t.Fatalf("a fetch already in flight must NEVER push.\nout:\n%s", out)
+	}
+	if !strings.Contains(out, "app: fetch already in flight for 7200s (session 42)") || !strings.Contains(out, "NOT pushed") {
+		t.Fatalf("expected the in-flight skip line naming the oldest session's age and id.\nout:\n%s", out)
+	}
+	if !strings.Contains(log, "db = 'app'") {
+		t.Fatalf("the single-flight check must be scoped to this database.\nlog:\n%s", log)
+	}
+}
+
+// An in-flight DOLT_FETCH with no database attribution (an older gc dolt sync
+// issued it, or an operator did, without --use-db) may be this database's:
+// it counts, fail closed.
+func TestSyncFetchInFlightUnattributedSkips(t *testing.T) {
+	binDir := t.TempDir()
+	logPath := writeSyncFakeDoltProcesslist(t, binDir, "printf 'Id,Time,db\\n43,30,\\n' ; exit 0")
+	out := runFFSync(t, binDir, "--db", "app")
+	if fetched(readLog(t, logPath)) {
+		t.Fatalf("an unattributed in-flight fetch must block this db's fetch.\nout:\n%s", out)
+	}
+	if !strings.Contains(out, "fetch already in flight for 30s (session 43)") {
+		t.Fatalf("expected the in-flight skip line.\nout:\n%s", out)
+	}
+}
+
+func TestSyncProcesslistQueryFailureSkipsNeverFetches(t *testing.T) {
+	binDir := t.TempDir()
+	logPath := writeSyncFakeDoltProcesslist(t, binDir, "printf 'processlist: boom\\n' >&2 ; exit 1")
+	out := runFFSync(t, binDir, "--db", "app")
+	log := readLog(t, logPath)
+	if fetched(log) || pushed(log) {
+		t.Fatalf("a failed processlist query must skip without fetching or pushing (fail closed).\nout:\n%s\nlog:\n%s", out, log)
+	}
+	if !strings.Contains(out, "app: ERROR: processlist query failed (exit 1)") || !strings.Contains(out, "app: processlist: boom") {
+		t.Fatalf("expected the processlist failure line with dolt's stderr replayed.\nout:\n%s", out)
+	}
+}
+
+// An answer without the `Id,Time,db` header is not a processlist answer (an
+// empty stdout, a banner, a wrapper that swallowed the result): it must not
+// be read as "nothing in flight".
+func TestSyncProcesslistAnswerWithoutHeaderSkips(t *testing.T) {
+	binDir := t.TempDir()
+	logPath := writeSyncFakeDoltProcesslist(t, binDir, "exit 0")
+	out := runFFSync(t, binDir, "--db", "app")
+	if fetched(readLog(t, logPath)) {
+		t.Fatalf("a header-less processlist answer must skip the fetch (fail closed).\nout:\n%s", out)
+	}
+	if !strings.Contains(out, "processlist query failed") || !strings.Contains(out, "not a processlist answer") {
+		t.Fatalf("expected the unrecognized-answer skip line.\nout:\n%s", out)
+	}
+}
+
+func TestSyncFetchTimeoutKillsItsServerSideSession(t *testing.T) {
+	binDir := t.TempDir()
+	logPath := writeSyncFakeDoltFetchTimeoutKill(t, binDir, "77", []string{"77,60,app"}, false)
+	out := runFFSync(t, binDir, "--db", "app")
+	log := readLog(t, logPath)
+	if pushed(log) {
+		t.Fatalf("a fetch timeout must NEVER push.\nout:\n%s", out)
+	}
+	if !strings.Contains(out, "fetch timed out") {
+		t.Fatalf("expected the 'fetch timed out' status.\nout:\n%s", out)
+	}
+	fetchAt := strings.Index(log, "CALL DOLT_FETCH(")
+	killAt := strings.Index(log, "KILL 77")
+	if fetchAt < 0 || killAt < 0 || killAt < fetchAt {
+		t.Fatalf("the session the fetch printed about itself must be KILLed after the fetch times out.\nlog:\n%s", log)
+	}
+	if !strings.Contains(out, "app: server-side fetch killed (session 77 no longer in flight)") {
+		t.Fatalf("expected the kill line proven by the processlist after KILL.\nout:\n%s", out)
+	}
+}
+
+// The verdict is the processlist AFTER the KILL, not KILL's exit code (Dolt
+// 2.1.10 answers KILL of any id, gone or not, with exit 0 and no text).
+func TestSyncFetchTimeoutKillNotConfirmedReportsStillInFlight(t *testing.T) {
+	binDir := t.TempDir()
+	logPath := writeSyncFakeDoltFetchTimeoutKill(t, binDir, "77", []string{"77,60,app"}, true)
+	out := runFFSync(t, binDir, "--db", "app")
+	log := readLog(t, logPath)
+	if pushed(log) {
+		t.Fatalf("a fetch timeout must NEVER push.\nout:\n%s", out)
+	}
+	if !strings.Contains(log, "KILL 77") {
+		t.Fatalf("KILL must be issued.\nlog:\n%s", log)
+	}
+	if !strings.Contains(out, "app: server-side fetch NOT killed (session 77 still in flight after KILL)") {
+		t.Fatalf("a session still listed after KILL must be reported as NOT killed.\nout:\n%s", out)
+	}
+}
+
+// No connection id captured (the client died before the server answered):
+// every in-flight remote operation attributed to the db is ended — the
+// single-flight check found none before ours started, so each is ours or a
+// concurrent runner's that raced the same window, and none may survive.
+func TestSyncFetchTimeoutWithoutIDKillsEveryAttributedSession(t *testing.T) {
+	binDir := t.TempDir()
+	logPath := writeSyncFakeDoltFetchTimeoutKill(t, binDir, "", []string{"88,61,app", "89,5,"}, false)
+	out := runFFSync(t, binDir, "--db", "app")
+	log := readLog(t, logPath)
+	if pushed(log) {
+		t.Fatalf("a fetch timeout must NEVER push.\nout:\n%s", out)
+	}
+	for _, id := range []string{"88", "89"} {
+		if !strings.Contains(log, "KILL "+id) {
+			t.Fatalf("session %s must be KILLed.\nlog:\n%s", id, log)
+		}
+		if !strings.Contains(out, "server-side fetch killed (session "+id+" no longer in flight)") {
+			t.Fatalf("expected the kill line for session %s.\nout:\n%s", id, out)
+		}
+	}
+}
+
+func TestSyncFetchTimeoutWithoutIDAndNothingListedKillsNothing(t *testing.T) {
+	binDir := t.TempDir()
+	logPath := writeSyncFakeDoltFetchTimeoutKill(t, binDir, "", nil, false)
+	out := runFFSync(t, binDir, "--db", "app")
+	log := readLog(t, logPath)
+	if strings.Contains(log, "KILL ") {
+		t.Fatalf("nothing in flight after the timeout: nothing to KILL.\nlog:\n%s", log)
+	}
+	if !strings.Contains(out, "app: server-side fetch already ended (nothing in flight to kill)") {
+		t.Fatalf("expected the already-ended line.\nout:\n%s", out)
+	}
+}
+
+// The fetch statement attributes its session to the database (--use-db fills
+// the processlist DB column; a `USE` inside the query does not) and prints its
+// own connection id first, so the KILL operand is the session's own word.
+func TestSyncFetchIsAttributedAndSelfIdentifying(t *testing.T) {
+	binDir := t.TempDir()
+	logPath := writeSyncFakeDoltClassify(t, binDir, 1, 0)
+	out := runFFSync(t, binDir, "--db", "app")
+	var fetchLine string
+	for _, line := range strings.Split(readLog(t, logPath), "\n") {
+		if strings.Contains(line, "CALL DOLT_FETCH(") {
+			fetchLine = line
+			break
+		}
+	}
+	if fetchLine == "" {
+		t.Fatalf("no fetch issued.\nout:\n%s", out)
+	}
+	if !strings.Contains(fetchLine, "--use-db app") {
+		t.Fatalf("the fetch must run with --use-db app so the server attributes the session.\nline: %s", fetchLine)
+	}
+	if !strings.Contains(fetchLine, "SELECT CONNECTION_ID() AS id;") {
+		t.Fatalf("the fetch statement must print its own connection id first.\nline: %s", fetchLine)
 	}
 }

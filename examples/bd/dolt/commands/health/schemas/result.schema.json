@@ -102,6 +102,28 @@
         "additionalProperties": true
       }
     },
+    "fetch_sessions": {
+      "type": "object",
+      "required": ["probed", "count", "oldest_age_sec", "warn_above", "warn"],
+      "properties": {
+        "probed": {
+          "type": "boolean"
+        },
+        "count": {
+          "type": "integer"
+        },
+        "oldest_age_sec": {
+          "type": "integer"
+        },
+        "warn_above": {
+          "type": "integer"
+        },
+        "warn": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": true
+    },
     "processes": {
       "type": "object",
       "required": ["zombie_count", "zombie_pids"],
