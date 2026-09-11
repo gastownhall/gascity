@@ -2263,8 +2263,8 @@ gc init --template gascity --default-provider claude \
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--beads-target` | string |  | beads target selector: local or external |
-| `--beads-transport` | string |  | beads transport selector: direct or proxied |
+| `--beads-target` | string |  | beads target selector: local or external (or GC_BEADS_TARGET); give with --beads-transport. Default local. external requires --dolt-host/--dolt-port (or GC_DOLT_HOST/GC_DOLT_PORT) |
+| `--beads-transport` | string |  | beads transport selector: direct or proxied (or GC_BEADS_TRANSPORT); give with --beads-target. Default on bd &gt;= 1.3.0 is proxied: bd owns the Dolt process, any bd read restarts it, and gc stop stops it. Use direct for the legacy gc-managed Dolt server |
 | `--bootstrap-profile` | string |  | bootstrap profile to apply for hosted/container defaults |
 | `--default-provider` | string |  | default readiness-aware provider to select from --providers |
 | `--dolt-database` | string |  | hosted beads project database, e.g. bd_prj_… (or GC_DOLT_DATABASE); required with --dolt-host |
