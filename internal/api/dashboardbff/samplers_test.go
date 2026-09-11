@@ -146,21 +146,9 @@ func TestExecBdPingHonorsCancellation(t *testing.T) {
 }
 
 func TestProbeRigReportsPingFailureAsDown(t *testing.T) {
-	root := t.TempDir()
-	rig := filepath.Join(root, "rig")
-	beadsPath := filepath.Join(rig, ".beads")
-	if err := os.MkdirAll(beadsPath, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	bin := filepath.Join(root, "bin")
-	if err := os.Mkdir(bin, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(bin, "bd"), []byte("#!/bin/sh\nprintf '%s' '{\"status\":\"error\",\"error\":\"proxy unavailable\"}'\nexit 1\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", bin)
-	t.Setenv("ADMIN_PATH", bin)
+	rig, bin := newProbeRigFixture(t)
+	writeFakeBd(t, bin, "#!/bin/sh\nprintf '%s' '{\"status\":\"error\",\"error\":\"proxy unavailable\"}'\nexit 1\n")
+
 	rep := newSamplerManager(Deps{}, newExecRunner()).probeRig(context.Background(), "r1", rig)
 	if rep.Rollup != "down" || !rep.Reachable || len(rep.Problems) != 1 || rep.Problems[0].Status != "error" {
 		t.Fatalf("probeRig() = %+v, want reachable/down with one error", rep)
@@ -247,6 +235,41 @@ func TestProbeRigPingHealthOmitsLegacyIssueCount(t *testing.T) {
 	}
 	if strings.Contains(string(wire), `"issueCount"`) {
 		t.Fatalf("probeRig wire payload = %s, contains removed issueCount field", wire)
+	}
+}
+
+// TestProbeRigSkipsUnconfiguredStore pins the one case where the probe must
+// not run bd at all. `bd ping` is read-only of the store but is a full
+// provider open, so on a .beads directory with no beads configuration it
+// CREATES an embedded store there and answers status=ok (verified on bd
+// v1.3.0-rc.2); `bd doctor --readonly`, the probe this replaced, could not.
+// Skip the ping for an unconfigured store rather than conjure one and report
+// it healthy. A configured scope is still warmed by the probe, by design.
+func TestProbeRigSkipsUnconfiguredStore(t *testing.T) {
+	rig, bin := newProbeRigFixture(t)
+	if err := os.Remove(filepath.Join(rig, ".beads", "embeddeddolt")); err != nil {
+		t.Fatal(err)
+	}
+	// The fixture PATH holds only the fake bd, so the sentinel is written with a
+	// shell redirect rather than an external command.
+	sentinel := filepath.Join(t.TempDir(), "bd-was-invoked")
+	writeFakeBd(t, bin, "#!/bin/sh\n: > \""+sentinel+"\"\nprintf '%s' '{\"status\":\"ok\"}'\n")
+
+	rep := newSamplerManager(Deps{}, newExecRunner()).probeRig(context.Background(), "r1", rig)
+	if _, err := os.Stat(sentinel); err == nil {
+		t.Fatal("probeRig invoked bd against an unconfigured .beads store")
+	}
+	if rep.Rollup != "down" || !rep.Reachable {
+		t.Fatalf("probeRig() = %+v, want reachable/down", rep)
+	}
+	if len(rep.Problems) != 1 || rep.Problems[0].Status != "error" || rep.Problems[0].Name != pingConnectivityCheck {
+		t.Fatalf("probeRig problems = %+v, want one error connectivity check", rep.Problems)
+	}
+	if rep.DoltEndpoint != nil || rep.DoltConnected != nil {
+		t.Fatalf("probeRig endpoint/connected = %v/%v, want both nil", rep.DoltEndpoint, rep.DoltConnected)
+	}
+	if entries, err := os.ReadDir(filepath.Join(rig, ".beads")); err != nil || len(entries) != 0 {
+		t.Fatalf("ReadDir(.beads) = %v, %v; want an untouched empty store dir", entries, err)
 	}
 }
 
@@ -411,13 +434,16 @@ func TestProbeRigOnlyPersistedServerModeAuthorizesTCPProbe(t *testing.T) {
 	}
 }
 
-// newProbeRigFixture builds a rig directory with an empty .beads store and a
-// PATH containing only a fake bd, so a probeRig test never reaches a real one.
+// newProbeRigFixture builds a rig directory with a .beads store carrying an
+// inert store marker (an embedded-dolt data directory, which readDoltMode
+// ignores) and a PATH containing only a fake bd, so a probeRig test never
+// reaches a real one. The marker is what lets the probe get as far as bd; the
+// unmarked case is its own test.
 func newProbeRigFixture(t *testing.T) (rigPath, binDir string) {
 	t.Helper()
 	root := t.TempDir()
 	rigPath = filepath.Join(root, "rig")
-	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads", "embeddeddolt"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	binDir = filepath.Join(root, "bin")

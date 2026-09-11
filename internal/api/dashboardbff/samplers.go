@@ -408,6 +408,27 @@ func (m *samplerManager) probeRig(ctx context.Context, rigName, rigPath string) 
 		}
 	}
 
+	// bd ping is read-only of the store, but it is a full provider open (bd
+	// v1.3.0-rc.2 cmd/bd/main.go:1758-1791): it starts a stopped proxy, and on
+	// a `.beads` directory that carries no beads configuration it CREATES a
+	// store — `bd ping --db <dir>/.beads --json` there writes
+	// .beads/embeddeddolt/ and answers status=ok. `bd doctor --readonly`, the
+	// probe this replaced, could not. Warming a configured scope is fine (the
+	// sampler dies with the supervisor); conjuring a store in an unconfigured
+	// one is not, and reporting it healthy is worse. So a `.beads` directory
+	// with no store marker is skipped before bd is invoked at all.
+	if !hasBeadsStoreMarker(beadsPath) {
+		return rigStoreHealth{
+			Rig: rigName, BeadsPath: beadsPath, Rollup: "down", Reachable: true,
+			Problems: []rigStoreCheck{{
+				Category: "Beads",
+				Name:     pingConnectivityCheck,
+				Status:   "error",
+				Message:  "no beads store in .beads (no metadata.json, config.yaml, redirect, or database)",
+			}},
+		}
+	}
+
 	var doltEndpoint *string
 	// A proxied-server store owns transport selection inside Beads. In
 	// particular, proxied-local may leave a stale dolt-server.port artifact
@@ -554,6 +575,29 @@ func rollupFor(reachable bool, doltConnected *bool, problems []rigStoreCheck, in
 func isDir(p string) bool {
 	st, err := os.Stat(p)
 	return err == nil && st.IsDir()
+}
+
+// hasBeadsStoreMarker reports whether beadsPath holds a beads store bd would
+// recognize, mirroring bd's own workspace predicate (config files, a redirect
+// to another workspace, a dolt data directory, or a database file). It is the
+// gate that keeps a store-creating `bd ping` off an unconfigured directory.
+func hasBeadsStoreMarker(beadsPath string) bool {
+	for _, name := range []string{"metadata.json", "config.yaml", "redirect"} {
+		if _, err := os.Stat(filepath.Join(beadsPath, name)); err == nil {
+			return true
+		}
+	}
+	if isDir(filepath.Join(beadsPath, "dolt")) || isDir(filepath.Join(beadsPath, "embeddeddolt")) {
+		return true
+	}
+	matches, _ := filepath.Glob(filepath.Join(beadsPath, "*.db"))
+	for _, m := range matches {
+		base := filepath.Base(m)
+		if base != "vc.db" && !strings.Contains(base, ".backup") {
+			return true
+		}
+	}
+	return false
 }
 
 func readDoltServerPort(beadsPath string) int {
