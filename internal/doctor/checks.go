@@ -689,6 +689,9 @@ func (c *BeadsStoreCheck) Name() string { return "beads-store" }
 // native-store city.
 func (c *BeadsStoreCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
+	if pending := pendingScopeInitResult(c.Name(), c.cityPath, c.cityPath); pending != nil {
+		return pending
+	}
 	target, fixHint, active, err := validateBDStoreTarget(c.cityPath, c.cityPath)
 	if err != nil {
 		r.Status = StatusError
@@ -719,6 +722,13 @@ func (c *BeadsStoreCheck) Run(_ *CheckContext) *CheckResult {
 	if err := result.Store.Ping(); err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("store ping failed: %v", err)
+		return r
+	}
+	if result.Diagnostic.Store == beads.BeadsStoreNameBdStore && result.Diagnostic.PreflightGate == proxiedProviderGate {
+		// Not a degraded fallback: bd owns the Dolt topology for proxied
+		// scopes and the CLI front door is the only supported store.
+		r.Status = StatusOK
+		r.Message = proxiedProviderStoreMessage
 		return r
 	}
 	if result.Diagnostic.Store == beads.BeadsStoreNameBdStore {
@@ -1245,6 +1255,9 @@ func (c *DoltServerCheck) Run(_ *CheckContext) *CheckResult {
 		r.Message = "not required (bd backend=doltlite)"
 		return r
 	}
+	if pending := pendingScopeInitResult(c.Name(), c.cityPath, c.cityPath); pending != nil {
+		return pending
+	}
 
 	target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, c.cityPath, c.cityPath)
 	if err != nil {
@@ -1310,6 +1323,9 @@ func (c *RigDoltServerCheck) Run(_ *CheckContext) *CheckResult {
 		r.Status = StatusOK
 		r.Message = "not required (bd backend=doltlite)"
 		return r
+	}
+	if pending := pendingScopeInitResult(c.Name(), c.cityPath, rigPath); pending != nil {
+		return pending
 	}
 	if err := contract.ValidateInheritedCityEndpointMirror(fsys.OSFS{}, c.cityPath, rigPath); err != nil {
 		r.Status = StatusError
@@ -1561,6 +1577,9 @@ func (c *RigBeadsCheck) Run(_ *CheckContext) *CheckResult {
 	if !filepath.IsAbs(rigPath) {
 		rigPath = filepath.Join(c.cityPath, rigPath)
 	}
+	if pending := pendingScopeInitResult(c.Name(), c.cityPath, rigPath); pending != nil {
+		return pending
+	}
 	target, fixHint, active, err := validateBDStoreTarget(c.cityPath, rigPath)
 	if err != nil {
 		r.Status = StatusError
@@ -1570,17 +1589,16 @@ func (c *RigBeadsCheck) Run(_ *CheckContext) *CheckResult {
 		}
 		return r
 	}
-	if active {
-		if !strings.EqualFold(target.DoltMode, "proxied-server") || target.External {
-			addr, conn, err := dialDoltTarget(target)
-			if err != nil {
-				r.Status = StatusError
-				r.Message = fmt.Sprintf("dolt server not reachable at %s", addr)
-				r.FixHint = doltServerFixHint(target)
-				return r
-			}
-			conn.Close() //nolint:errcheck // best-effort close
+	proxied := active && targetIsProviderOwnedProxied(target)
+	if active && !proxied {
+		addr, conn, err := dialDoltTarget(target)
+		if err != nil {
+			r.Status = StatusError
+			r.Message = fmt.Sprintf("dolt server not reachable at %s", addr)
+			r.FixHint = doltServerFixHint(target)
+			return r
 		}
+		conn.Close() //nolint:errcheck // best-effort close
 	}
 	store, err := c.newStore(rigPath)
 	if err != nil {
@@ -1595,6 +1613,9 @@ func (c *RigBeadsCheck) Run(_ *CheckContext) *CheckResult {
 	}
 	r.Status = StatusOK
 	r.Message = "store accessible"
+	if proxied {
+		r.Message = proxiedProviderStoreMessage
+	}
 	return r
 }
 
