@@ -1386,6 +1386,12 @@ func TestKillRemoteOpSessionNeverReturnsZeroWhileTheRunLockIsHeld(t *testing.T) 
 		{"guarded, gone, another session holds this run's lock", "77", none, notOwner, holder("91"), 1, "app: server-side fetch NOT killed: session 77 is gone but session 91 holds this run's lock (" + runLock + ")", "already ended"},
 		{"killed, gone, another session holds this run's lock", "77", none, killed, holder("91"), 1, "app: server-side fetch NOT killed: session 77 is gone but session 91 holds this run's lock (" + runLock + ")", "no longer in flight"},
 		{"guarded, still listed", "77", listed77, notOwner, holder("77"), 1, "app: server-side fetch NOT killed: session 77 does not hold this run's lock (" + runLock + ")", "already ended"},
+		// The recorded id still holds the lock but runs no DOLT_FETCH/DOLT_PULL
+		// statement (the bound expired between the gate and the CALL), so the
+		// remote-op-filtered processlist does not list it and the KILL did not
+		// take: it is not "gone", it still holds the lock (codex round-2 r1).
+		{"killed, not listed, the recorded id still holds this run's lock", "77", none, killed, holder("77"), 1, "app: server-side fetch NOT killed: session 77 still holds this run's lock (" + runLock + ") after the KILL", "is gone"},
+		{"guarded, not listed, the recorded id still holds this run's lock", "77", none, notOwner, holder("77"), 1, "app: server-side fetch NOT killed: session 77 still holds this run's lock (" + runLock + ") after the KILL", "is gone"},
 		{"holder query fails", "77", none, killed, "printf 'holder: boom\\n' >&2 ; exit 1", 1, "app: server-side fetch kill NOT confirmed: the run-lock holder query failed", "no longer in flight"},
 		{"holder answer is not a holder answer", "77", none, killed, "printf 'nothing here\\n' ; exit 0", 1, "app: server-side fetch kill NOT confirmed: the run-lock holder query failed", "no longer in flight"},
 		{"holder answer is empty", "77", none, killed, "exit 0", 1, "app: server-side fetch kill NOT confirmed: the run-lock holder query failed", "no longer in flight"},

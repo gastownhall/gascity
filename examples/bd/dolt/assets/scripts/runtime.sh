@@ -564,7 +564,15 @@ kill_remote_op_session() {
         _kr_rc=1
         ;;
       *)
-        if [ "$_kr_holder" != 0 ]; then
+        # Not listed as a remote operation. That is "gone" only when this
+        # run's lock is free: the recorded id may still hold it while running
+        # no DOLT_FETCH/DOLT_PULL statement (the bound expired between the
+        # gate and the CALL, and the KILL did not take — codex round-2 r1), or
+        # another session may hold it (see the helper comment).
+        if [ "$_kr_holder" = "$_kr_one" ]; then
+          echo "  $_kr_db: server-side $_kr_label NOT killed: session $_kr_one still holds this run's lock ($_kr_runlock) after the KILL — not listed as a remote operation (idle, or between the gate and the CALL), so gc dolt health does not name it — left for the operator (KILL $_kr_one)" >&2
+          _kr_rc=1
+        elif [ "$_kr_holder" != 0 ]; then
           echo "  $_kr_db: server-side $_kr_label NOT killed: session $_kr_one is gone but session $_kr_holder holds this run's lock ($_kr_runlock) — the recorded id was not the lock holder (a record from before the id came from the gate statement, or a server that restarted and reused the number) — left for the operator (KILL $_kr_holder); gc dolt health names it" >&2
           _kr_rc=1
         elif [ "$_kr_was_guarded" -eq 1 ]; then
