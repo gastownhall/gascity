@@ -41,6 +41,32 @@ func TestHandoffStartTimeTicksRejectsSignedOverflow(t *testing.T) {
 	}
 }
 
+// TestHandoffPhysicalExistingPathRetainsEvalSymlinksSpelling pins the one
+// place handoff identity must not use normalizePathForCompare: that helper
+// collapses host aliases, and bd validates the identity paths against its own
+// strict request root, which is the physical spelling.
+func TestHandoffPhysicalExistingPathRetainsEvalSymlinksSpelling(t *testing.T) {
+	physical := t.TempDir()
+	link := filepath.Join(t.TempDir(), "city")
+	if err := os.Symlink(physical, link); err != nil {
+		t.Fatal(err)
+	}
+	got, err := handoffPhysicalExistingPath(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.EvalSymlinks(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != filepath.Clean(want) {
+		t.Fatalf("physical handoff path = %q, want EvalSymlinks spelling %q", got, want)
+	}
+	if _, err := handoffPhysicalExistingPath(filepath.Join(physical, "absent")); err == nil {
+		t.Fatal("missing path resolved; want an error so identity never names a path that is not there")
+	}
+}
+
 func handoffTestArgs(operation, city string) []string {
 	return []string{
 		"dolt-state", operation, "--json", "--city", city, "--scope-root", city,

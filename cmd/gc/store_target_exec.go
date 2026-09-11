@@ -83,7 +83,7 @@ func gcExecStoreEnv(cityPath string, target execStoreTarget, provider string) (m
 	if execProviderUsesCanonicalBdScopeFiles(provider) {
 		gcBin, err := resolveProviderLifecycleGCBinary()
 		if err != nil {
-			return nil, fmt.Errorf("resolve invoking gc executable: %w", err)
+			return nil, err
 		}
 		if gcBin != "" {
 			env["GC_BIN"] = gcBin

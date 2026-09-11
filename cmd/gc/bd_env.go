@@ -1035,7 +1035,7 @@ var recoverManagedBDCommand = func(cityPath string) error {
 	overrides := cityRuntimeEnvMapForCity(cityPath)
 	gcBin, err := resolveProviderLifecycleGCBinary()
 	if err != nil {
-		return fmt.Errorf("resolve invoking gc executable: %w", err)
+		return err
 	}
 	if gcBin != "" {
 		overrides["GC_BIN"] = gcBin

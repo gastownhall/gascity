@@ -144,7 +144,7 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 	// those callbacks to this exact executable so an ambient GC_BIN cannot
 	// cross the city boundary or select a different gc installation.
 	if err := pinBdGCEnvironment(env); err != nil {
-		return fmt.Errorf("resolve invoking gc executable: %w", err)
+		return err
 	}
 	store := beads.NewBdStore(dir, beads.ExecCommandRunnerWithEnv(env))
 	switch op {
