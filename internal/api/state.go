@@ -172,9 +172,10 @@ type State interface {
 	OrdersBeadStore() beads.OrdersStore
 
 	// ClassBindingHasLegacyResidents reports whether store — one of the
-	// per-class stores above — still holds an open bead under an id outside the
-	// namespaces its classes declare: a row `gc storage migrate` carried across
-	// under its original work-shaped id, reachable only by probing the binding.
+	// per-class stores above — still holds a bead, open or closed, under an id
+	// outside the namespaces its classes declare: a row `gc storage migrate`
+	// carried across under its original work-shaped id, reachable only by
+	// probing the binding.
 	//
 	// The API never opens a binding and cannot take that census itself, so the
 	// verdict crosses this surface from the boot that did. It exists because

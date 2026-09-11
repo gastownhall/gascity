@@ -11,12 +11,14 @@ package api
 // whatever still answers.
 //
 // Two things are this plane's own, and neither belongs in the shared package.
-// The first is the repository the reachability clause is asked about: the CLI
-// knows it from the caller's work scope, while here the owning store names it,
-// through the same residency resolution that decides which row the close writes.
-// The second is the refusal, which is the already-registered wrong-state 409 —
-// the state being wrong is precisely that the bead is not closable yet — so
-// gating these routes adds no status to the OpenAPI surface.
+// The first is the CHECKOUT TABLE the repository rule reads — the city
+// directory and the rig paths, which this plane holds in its live State and the
+// CLI holds in the config the invocation loaded. Which repository a given bead
+// answers to is not this plane's own: workrecord.RepoDirFor decides it from the
+// bead's owner, so both doors judge one bead against one repository. The second
+// is the refusal, which is the already-registered wrong-state 409 — the state
+// being wrong is precisely that the bead is not closable yet — so gating these
+// routes adds no status to the OpenAPI surface.
 
 import (
 	"context"
@@ -24,8 +26,8 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
-	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/workrecord"
 )
 
@@ -95,11 +97,8 @@ func (s *Server) gateWorkRecordClose(ctx context.Context, id string, store beads
 			// The scope that owns this bead names no checkout (see
 			// workRecordRepoDir for which shapes produce that, and why the
 			// current State implementations do not), so there is no repository to
-			// ask. Refusing here would block closes on a question this plane
-			// cannot pose; the clause degrades to a warning and says so. Only this
-			// clause degrades — a bead with no outcome at all is still refused,
-			// because "the commit could not be checked" is not a reason to accept
-			// a close that recorded nothing.
+			// ask. The clause degrades to a warning and says so; see
+			// workrecord.ReachabilityUnverifiedNote for why only this one does.
 			unverified = true
 			return true
 		}
@@ -112,7 +111,7 @@ func (s *Server) gateWorkRecordClose(ctx context.Context, id string, store beads
 		mode = "enforced"
 	}
 	if unverified {
-		workRecordGateLogf("work-record gate (%s): close of %s: reachability unverified: the scope that holds this bead names no checkout", mode, id)
+		workRecordGateLogf("work-record gate (%s): close of %s: %s", mode, id, workrecord.ReachabilityUnverifiedNote)
 	}
 	for _, violation := range violations {
 		workRecordGateLogf("work-record gate (%s): close of %s: %s", mode, id, violation)
@@ -148,56 +147,116 @@ func projectSubmittedWorkRecord(stored beads.Bead, submitted map[string]string) 
 	return stored
 }
 
-// workRecordRepoDir names the repository a shipped bead's commit must be
-// reachable in: the bead's own gc.work_dir if it recorded one, else the checkout
-// of whichever scope holds it — the rig's path for a rig-resident bead, the city
-// directory for a city-resident one and for one a relocated class binding owns.
+// workRecordScopeDirs is this plane's checkout table: the city directory the
+// server was constructed with, and the rig paths the live config declares. A rig
+// path may be written relative to the city, so it is resolved the same way every
+// other scope root on this plane is.
+type workRecordScopeDirs struct {
+	cityPath string
+	rigs     []config.Rig
+}
+
+// CityDir returns the city checkout's directory.
+func (d workRecordScopeDirs) CityDir() string { return strings.TrimSpace(d.cityPath) }
+
+// RigDir returns the named rig's checkout and whether the config declares that
+// rig at all. A declared rig that names no checkout answers ("", true), which
+// the rule reads as unknown rather than as the city.
 //
-// A binding is a store rather than a checkout, but that does not make its beads
-// unaskable: the city it lives under is a checkout, and it is the same directory
-// the CLI class door hands its own gate (serveBdByIDResolved passes cityPath as
-// the repoFallback that reaches evaluateWorkRecordCloseGate). Naming it here is
-// what keeps a binding-owned bead answering to one repository through both
-// doors, which is the whole point of gating this plane.
+// The name is matched case-insensitively, deliberately more forgiving than the
+// exact-match lookups this answer feeds (workdir.RigRootForName, sling's
+// rigSuspended). Refs are stamped by storeref.RigRef from the configured rig
+// name, so only a hand-stamped or historically-buggy ref differs by case;
+// matching it judges the close against that rig's checkout instead of degrading
+// to unverified. Both doors spell this matcher the same way, so whichever way it
+// resolves, one bead is still judged against one repository.
+func (d workRecordScopeDirs) RigDir(name string) (string, bool) {
+	for _, rig := range d.rigs {
+		if !strings.EqualFold(strings.TrimSpace(rig.Name), name) {
+			continue
+		}
+		if strings.TrimSpace(rig.Path) == "" {
+			return "", true
+		}
+		return resolveScopeRoot(d.cityPath, rig.Path), true
+	}
+	return "", false
+}
+
+// workRecordScopeDirs builds the checkout table from the server's live State.
+func (s *Server) workRecordScopeDirs() workRecordScopeDirs {
+	dirs := workRecordScopeDirs{cityPath: s.state.CityPath()}
+	if cfg := s.state.Config(); cfg != nil {
+		dirs.rigs = cfg.Rigs
+	}
+	return dirs
+}
+
+// workRecordRepoDir names the repository a shipped bead's commit must be
+// reachable in. The rule is workrecord.RepoDirFor's — gc.work_dir, else the
+// bead's OWNER — so this door and the CLI's judge one bead against one
+// repository; all this plane supplies is the checkout table and, for a bead that
+// names no owner, the answer it gave before owners were recorded.
 //
 // An empty result means "unknown" and must stay distinguishable from a path,
 // because falling back to a default would run git in whatever directory the
 // server happens to occupy and answer the reachability question about the wrong
-// repository. Two shapes produce it: a configured rig that names no checkout,
-// and a city that has no path at all. Both are defensive against a State
-// implementation the current ones do not produce. buildStores skips a rig with
-// an empty path outright, so BeadStore answers nil for one and the identity
-// match below — against a store a residency resolution handed back — never
-// selects it; and cityPath is set once at construction from an already-resolved
-// directory and never reassigned, so an empty one is not a state a city boots
-// into. State is an interface and the branches are cheap, so they stay — but
-// they are a contract for a future implementation, not a description of a
-// population this server observes. A refactor that changes either of those two
-// facts is what makes them live, and should update this note rather than find it
-// silently wrong. The path-less rig returns rather than continuing on purpose:
-// letting it fall through to the city checkout would ask about a repository that
-// is not the bead's, and under enforcement that is a false refusal rather than a
-// degraded clause.
+// repository.
+func (s *Server) workRecordRepoDir(store beads.Store, bead beads.Bead) string {
+	dirs := s.workRecordScopeDirs()
+	dir, kind := workrecord.RepoDirFor(bead, dirs)
+	if kind == workrecord.ScopeUnrooted {
+		return s.workRecordLegacyRepoDir(store, dirs)
+	}
+	return dir
+}
+
+// workRecordLegacyRepoDir is the answer this plane gave before a bead could name
+// its owner: the checkout of the scope the row was READ through — the rig's path
+// when a configured rig's store answered, the city directory otherwise. It stays
+// for the beads that record no gc.root_store_ref, which is every city that
+// predates the residency census, so their closes are unchanged.
 //
 // The store is matched by asking each CONFIGURED rig whether it is the one that
 // answered, rather than by enumerating the loaded stores: an enumeration is a
 // list of work stores, which is blind to a binding by construction, and the
-// question here is not "which stores exist" but "does the resolved owner have a
-// checkout to name".
-func (s *Server) workRecordRepoDir(store beads.Store, bead beads.Bead) string {
-	if dir := strings.TrimSpace(bead.Metadata[beadmeta.WorkDirMetadataKey]); dir != "" {
-		return dir
-	}
-	if cfg := s.state.Config(); cfg != nil {
-		for _, rig := range cfg.Rigs {
-			if s.state.BeadStore(rig.Name) != store {
-				continue
-			}
-			if strings.TrimSpace(rig.Path) == "" {
-				return ""
-			}
-			return resolveScopeRoot(s.state.CityPath(), rig.Path)
+// question is not "which stores exist" but "does the store that answered belong
+// to a rig with a checkout".
+//
+// A store no configured rig claims is the city store or a class binding, and
+// both answered to the city checkout before this rule existed. buildStores keys
+// only from cfg.Rigs and swaps the config and the store map under one lock, so
+// there is no third population to mistake for one.
+//
+// The converse population is real and this answer is a guess for it: in legacy
+// shared-file mode buildStores aliases every rig backed by that store to one
+// handle, so MANY rigs claim it and the identity match selects whichever is
+// configured first — an ownerless bead whose work happened on a different rig
+// is judged against that first rig's checkout. The loop predates this rule and
+// RepoDirFor strictly narrows it, since a bead that names an owner no longer
+// reaches here; what is left is the pre-census population, where no answer is
+// better than a guess because the bead records nothing to resolve.
+//
+// Two shapes still produce "unknown" here: a configured rig that names no
+// checkout, and a city with no path at all. Both are defensive against a State
+// implementation the current ones do not produce — buildStores skips a rig with
+// an empty path outright, so BeadStore answers nil for one and the identity
+// match never selects it, and cityPath is set once at construction from an
+// already-resolved directory and never reassigned. State is an interface and the
+// branches are cheap, so they stay; a refactor that changes either fact should
+// update this note rather than find it silently wrong.
+func (s *Server) workRecordLegacyRepoDir(store beads.Store, dirs workRecordScopeDirs) string {
+	for _, rig := range dirs.rigs {
+		if s.state.BeadStore(rig.Name) != store {
+			continue
 		}
+		// The path comes off the rig that MATCHED, not from a second lookup by
+		// name: the match here is store identity, and re-deriving it from a name
+		// would answer for whichever rig the name resolves to instead.
+		if strings.TrimSpace(rig.Path) == "" {
+			return ""
+		}
+		return resolveScopeRoot(dirs.cityPath, rig.Path)
 	}
-	return strings.TrimSpace(s.state.CityPath())
+	return dirs.CityDir()
 }

@@ -108,3 +108,89 @@ func TestShardTestEnvsIgnoreUserGitConfiguration(t *testing.T) {
 		})
 	}
 }
+
+// TestFanOutWorkerReceivesExportedGitConfigGlobal exercises the real
+// run_fan_out xargs/bash -c dispatch end to end instead of asserting on
+// source text: it extracts the live gc_test_gitconfig preamble and the
+// run_fan_out function body from the current file content and runs them
+// under a minimal synthetic harness. This catches an unexported
+// gc_test_gitconfig (ga-9t7vpl) by the worker actually failing, a class of
+// regression TestShardTestEnvsIgnoreUserGitConfiguration above cannot
+// detect since it only counts a string, not the variable's export scope.
+func TestFanOutWorkerReceivesExportedGitConfigGlobal(t *testing.T) {
+	repoRoot := repoRoot(t)
+	scriptPath := filepath.Join(repoRoot, "scripts", "test-local-parallel")
+	data, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", scriptPath, err)
+	}
+	content := string(data)
+
+	const assignLine = `gc_test_gitconfig="$("$repo_root/scripts/test-gitconfig-path")"`
+	if !strings.Contains(content, assignLine) {
+		t.Fatalf("%s: gc_test_gitconfig assignment line not found (expected exact text %q)", scriptPath, assignLine)
+	}
+	preamble := assignLine
+	if strings.Contains(content, "\nexport gc_test_gitconfig\n") {
+		preamble += "\nexport gc_test_gitconfig"
+	}
+
+	const fanOutOpen = "run_fan_out() {\n"
+	startIdx := strings.Index(content, fanOutOpen)
+	if startIdx == -1 {
+		t.Fatalf("%s: run_fan_out() function not found", scriptPath)
+	}
+	bodyStart := startIdx + len(fanOutOpen)
+	endIdx := strings.Index(content[bodyStart:], "\n}\n")
+	if endIdx == -1 {
+		t.Fatalf("%s: run_fan_out() closing brace not found", scriptPath)
+	}
+	fanOutBody := content[bodyStart : bodyStart+endIdx]
+
+	logDir := t.TempDir()
+	probeCmd := `if [ -n "${GIT_CONFIG_GLOBAL:-}" ] && [ -f "$GIT_CONFIG_GLOBAL" ] && [ -w "$GIT_CONFIG_GLOBAL" ]; then printf "GIT_CONFIG_GLOBAL_OK=%s\n" "$GIT_CONFIG_GLOBAL"; else printf "GIT_CONFIG_GLOBAL_MISSING\n"; exit 1; fi`
+
+	lines := []string{
+		"#!/usr/bin/env bash",
+		"set -euo pipefail",
+		"repo_root=" + shellQuote(repoRoot),
+		preamble,
+		"run_fan_out() {",
+		fanOutBody,
+		"}",
+		`gate_fd=""`,
+		"local_jobs=1",
+		"jobspecs=('probe::" + probeCmd + "')",
+		"export LOCAL_TEST_LOG_DIR=" + shellQuote(logDir),
+		`export TEST_LOCAL_NICE=""`,
+		"export TEST_LOCAL_GOPATH=" + shellQuote(goEnvValue(t, "GOPATH")),
+		"export TEST_LOCAL_GOCACHE=" + shellQuote(goEnvValue(t, "GOCACHE")),
+		"export TEST_LOCAL_GOMODCACHE=" + shellQuote(goEnvValue(t, "GOMODCACHE")),
+		"export TEST_LOCAL_GOTMPDIR=" + shellQuote(goEnvValue(t, "GOTMPDIR")),
+		"export TEST_LOCAL_GOROOT=" + shellQuote(goEnvValue(t, "GOROOT")),
+		"set +e",
+		"run_fan_out",
+		"status=$?",
+		"set -e",
+		`exit "$status"`,
+	}
+	harnessPath := filepath.Join(t.TempDir(), "run_fan_out_harness.sh")
+	if err := os.WriteFile(harnessPath, []byte(strings.Join(lines, "\n")+"\n"), 0o755); err != nil {
+		t.Fatalf("write harness script: %v", err)
+	}
+
+	out, runErr := testCommand("bash", harnessPath).CombinedOutput()
+	probeLog := filepath.Join(logDir, "probe.log")
+	probeOut, readErr := os.ReadFile(probeLog)
+
+	if runErr != nil {
+		t.Fatalf("run_fan_out worker did not receive a usable GIT_CONFIG_GLOBAL: %v\nharness output:\n%s\nprobe log (err=%v):\n%s",
+			runErr, out, readErr, probeOut)
+	}
+	if readErr != nil {
+		t.Fatalf("read probe log %s: %v\nharness output:\n%s", probeLog, readErr, out)
+	}
+	if !strings.Contains(string(probeOut), "GIT_CONFIG_GLOBAL_OK=") {
+		t.Fatalf("probe job did not confirm GIT_CONFIG_GLOBAL; probe log:\n%s\nharness output:\n%s", probeOut, out)
+	}
+}

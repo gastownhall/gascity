@@ -835,9 +835,9 @@ func TestBuildAwakeInputFromReconcilerCarriesNamedSessionDemand(t *testing.T) {
 		[]session.Info{sessiontest.SeedBead(t, sessionBead)},
 		map[string]int{"worker": 1},
 		map[string]bool{"primary": true},
+		map[string]bool{"routed": true},
 		nil,
-		nil,
-		nil,
+		map[string]bool{"waiter": true},
 		nil,
 		nil,
 		nil,
@@ -847,6 +847,12 @@ func TestBuildAwakeInputFromReconcilerCarriesNamedSessionDemand(t *testing.T) {
 
 	if !input.NamedSessionDemand["primary"] {
 		t.Fatalf("NamedSessionDemand[primary] = false, want true")
+	}
+	if !input.NamedSessionRoutedDemand["routed"] {
+		t.Fatal("NamedSessionRoutedDemand[routed] = false, want true")
+	}
+	if !input.ReadyWaitSet["waiter"] {
+		t.Fatal("ReadyWaitSet[waiter] = false, want true")
 	}
 	decisions := ComputeAwakeSet(input)
 	got := decisions["primary"]

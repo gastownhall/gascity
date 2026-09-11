@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-// ReadKimiFile reads a Kimi Code context JSONL transcript and converts it to
+// ReadKimiFile reads a legacy Kimi context or native Kimi Code wire journal into
 // the standard Session format used by gc session logs.
 func ReadKimiFile(path string, tailCompactions int) (*Session, error) {
 	sess, err := readKimiFile(path)
@@ -29,8 +29,9 @@ func ReadKimiFile(path string, tailCompactions int) (*Session, error) {
 	return sess, nil
 }
 
-// ReadKimiFilePage reads a Kimi Code context transcript and applies message-ID
-// pagination using the stable content-derived IDs emitted by the reader.
+// ReadKimiFilePage reads a legacy Kimi context or native Kimi Code wire journal
+// and applies message-ID pagination using the stable content-derived IDs
+// emitted by the reader.
 func ReadKimiFilePage(path string, tailCompactions int, beforeMessageID, afterMessageID string) (*Session, error) {
 	sess, err := readKimiFile(path)
 	if err != nil {
@@ -40,6 +41,9 @@ func ReadKimiFilePage(path string, tailCompactions int, beforeMessageID, afterMe
 }
 
 func readKimiFile(path string) (*Session, error) {
+	if filepath.Base(path) == "wire.jsonl" {
+		return readKimiCodeWire(path)
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -99,9 +103,8 @@ func readKimiFile(path string) (*Session, error) {
 	return sess, nil
 }
 
-// FindKimiSessionFile searches Kimi's session directory
-// (~/.kimi/sessions/<work-dir-md5>/<session-id>/context.jsonl) for the most
-// recently modified session matching workDir. Symlinked account roots under a
+// FindKimiSessionFile searches legacy Kimi context and native Kimi Code wire
+// journals for the most recently modified session matching workDir. Symlinked account roots under a
 // sessions directory are traversed so aimux-managed roots behave like sibling
 // provider transcript discovery.
 func FindKimiSessionFile(searchPaths []string, workDir string) string {
@@ -110,29 +113,22 @@ func FindKimiSessionFile(searchPaths []string, workDir string) string {
 		return ""
 	}
 
-	var (
-		bestPath string
-		bestTime time.Time
-	)
-	for _, root := range mergeKimiSearchPaths(searchPaths) {
-		path := findKimiSessionFileIn(root, workHash)
-		if path == "" {
-			continue
+	var bestPath string
+	var bestTime time.Time
+	for _, candidate := range kimiSessionCandidates(searchPaths, workDir) {
+		if bestPath == "" || candidate.modTime.After(bestTime) {
+			bestPath, bestTime = candidate.path, candidate.modTime
 		}
-		info, err := os.Stat(path)
-		if err != nil {
-			continue
-		}
-		if bestPath == "" || info.ModTime().After(bestTime) {
-			bestPath = path
-			bestTime = info.ModTime()
-		}
+	}
+	if bestPath == "" {
+		logKimiMissingWorkDir(searchPaths, workDir)
 	}
 	return bestPath
 }
 
-// FindKimiSessionFileIfUnambiguous searches Kimi's session directory and
-// returns a transcript only when exactly one session exists for the workdir.
+// FindKimiSessionFileIfUnambiguous searches the legacy Kimi and native Kimi Code
+// session layouts and returns a transcript only when exactly one session exists
+// for the workdir across both.
 func FindKimiSessionFileIfUnambiguous(searchPaths []string, workDir string) string {
 	workHash := kimiWorkDirHash(workDir)
 	if workHash == "" {
@@ -140,22 +136,23 @@ func FindKimiSessionFileIfUnambiguous(searchPaths []string, workDir string) stri
 	}
 
 	seen := make(map[string]kimiContextCandidate)
-	for _, root := range mergeKimiSearchPaths(searchPaths) {
-		for _, candidate := range findKimiSessionFilesIn(root, workHash) {
-			seen[candidate.path] = candidate
-		}
+	for _, candidate := range kimiSessionCandidates(searchPaths, workDir) {
+		seen[canonicalKimiSessionRoot(candidate.path)] = candidate
+	}
+	if len(seen) == 0 {
+		logKimiMissingWorkDir(searchPaths, workDir)
 	}
 	if len(seen) != 1 {
 		return ""
 	}
-	for path := range seen {
-		return path
+	for _, candidate := range seen {
+		return candidate.path
 	}
 	return ""
 }
 
-// FindKimiSessionFileByID searches Kimi's session directory for the exact
-// session ID under the workdir hash.
+// FindKimiSessionFileByID searches for the exact session ID under both workdir
+// keys: the legacy Kimi hash and the native Kimi Code key.
 func FindKimiSessionFileByID(searchPaths []string, workDir, sessionID string) string {
 	workHash := kimiWorkDirHash(workDir)
 	sessionID = safeKimiSessionDirName(sessionID)
@@ -163,54 +160,18 @@ func FindKimiSessionFileByID(searchPaths []string, workDir, sessionID string) st
 		return ""
 	}
 	for _, root := range mergeKimiSearchPaths(searchPaths) {
-		if path := findKimiSessionFileByIDIn(root, workHash, sessionID); path != "" {
-			return path
+		for _, key := range []string{workHash, kimiCodeWorkDirKey(workDir)} {
+			if path := findKimiSessionFileByIDIn(root, key, sessionID); path != "" {
+				return path
+			}
 		}
 	}
+	logKimiMissingWorkDir(searchPaths, workDir)
 	return ""
-}
-
-func findKimiSessionFileIn(root, workHash string) string {
-	return findKimiSessionFileInVisited(root, workHash, make(map[string]bool))
 }
 
 func findKimiSessionFilesIn(root, workHash string) []kimiContextCandidate {
 	return findKimiSessionFilesInVisited(root, workHash, make(map[string]bool))
-}
-
-func findKimiSessionFileInVisited(root, workHash string, visited map[string]bool) string {
-	root = canonicalKimiSessionRoot(root)
-	if root == "" || visited[root] {
-		return ""
-	}
-	visited[root] = true
-
-	workRoot := filepath.Join(root, workHash)
-	workRootExists := kimiDirectoryExists(workRoot)
-	if path := newestKimiContextFile(workRoot); path != "" {
-		return path
-	}
-
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return ""
-	}
-	for _, entry := range entries {
-		if entry.Type()&os.ModeSymlink == 0 {
-			continue
-		}
-		resolved, err := filepath.EvalSymlinks(filepath.Join(root, entry.Name()))
-		if err != nil {
-			continue
-		}
-		if path := findKimiSessionFileInVisited(resolved, workHash, visited); path != "" {
-			return path
-		}
-	}
-	if !workRootExists && hasKimiSessionRootEntries(entries) {
-		logKimiMissingWorkHash(root, workHash)
-	}
-	return ""
 }
 
 func findKimiSessionFilesInVisited(root, workHash string, visited map[string]bool) []kimiContextCandidate {
@@ -221,7 +182,6 @@ func findKimiSessionFilesInVisited(root, workHash string, visited map[string]boo
 	visited[root] = true
 
 	workRoot := filepath.Join(root, workHash)
-	workRootExists := kimiDirectoryExists(workRoot)
 	files := kimiContextFiles(workRoot)
 
 	entries, err := os.ReadDir(root)
@@ -238,9 +198,6 @@ func findKimiSessionFilesInVisited(root, workHash string, visited map[string]boo
 		}
 		files = append(files, findKimiSessionFilesInVisited(resolved, workHash, visited)...)
 	}
-	if !workRootExists && hasKimiSessionRootEntries(entries) {
-		logKimiMissingWorkHash(root, workHash)
-	}
 	return files
 }
 
@@ -255,8 +212,7 @@ func findKimiSessionFileByIDInVisited(root, workHash, sessionID string, visited 
 	}
 	visited[root] = true
 
-	path := filepath.Join(root, workHash, sessionID, "context.jsonl")
-	workRootExists := kimiDirectoryExists(filepath.Join(root, workHash))
+	path := kimiTranscriptPath(filepath.Join(root, workHash), sessionID)
 	info, err := os.Stat(path)
 	if err == nil && !info.IsDir() {
 		return path
@@ -278,9 +234,6 @@ func findKimiSessionFileByIDInVisited(root, workHash, sessionID string, visited 
 			return path
 		}
 	}
-	if !workRootExists && hasKimiSessionRootEntries(entries) {
-		logKimiMissingWorkHash(root, workHash)
-	}
 	return ""
 }
 
@@ -294,14 +247,6 @@ type kimiContextCandidate struct {
 	modTime time.Time
 }
 
-func newestKimiContextFile(workRoot string) string {
-	files := kimiContextFiles(workRoot)
-	if len(files) == 0 {
-		return ""
-	}
-	return files[0].path
-}
-
 func kimiContextFiles(workRoot string) []kimiContextCandidate {
 	entries, err := os.ReadDir(workRoot)
 	if err != nil {
@@ -312,7 +257,7 @@ func kimiContextFiles(workRoot string) []kimiContextCandidate {
 		if !entry.IsDir() {
 			continue
 		}
-		path := filepath.Join(workRoot, entry.Name(), "context.jsonl")
+		path := kimiTranscriptPath(workRoot, entry.Name())
 		info, err := os.Stat(path)
 		if err != nil || info.IsDir() {
 			continue
@@ -337,9 +282,12 @@ func canonicalKimiSessionRoot(root string) string {
 	return filepath.Clean(root)
 }
 
-func hasKimiSessionRootEntries(entries []os.DirEntry) bool {
+func hasKimiSessionRootEntries(entries []os.DirEntry, workKey string) bool {
 	for _, entry := range entries {
 		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
+			if strings.HasPrefix(entry.Name(), "wd_") != strings.HasPrefix(workKey, "wd_") {
+				continue
+			}
 			return true
 		}
 	}
@@ -569,6 +517,9 @@ func kimiNeutralToolKey(key string) string {
 }
 
 func kimiSessionID(path string) string {
+	if filepath.Base(path) == "wire.jsonl" && filepath.Base(filepath.Dir(path)) == "main" && filepath.Base(filepath.Dir(filepath.Dir(path))) == "agents" {
+		return filepath.Base(filepath.Dir(filepath.Dir(filepath.Dir(path))))
+	}
 	dir := filepath.Base(filepath.Dir(path))
 	if strings.TrimSpace(dir) != "" && dir != "." {
 		return dir
@@ -609,6 +560,14 @@ func mergeKimiSearchPaths(searchPaths []string) []string {
 		}
 	}
 	return mergePaths(DefaultKimiSearchPaths(), candidates)
+}
+
+// ExtractKimiTailMetaFromSearchPaths reads Kimi tail metadata only after
+// verifying path resolves under one of the merged Kimi session roots (the
+// legacy and native defaults plus searchPaths). Merging here rather than in the
+// caller keeps validation accepting exactly the roots Kimi discovery searches.
+func ExtractKimiTailMetaFromSearchPaths(searchPaths []string, path string) (*TailMeta, error) {
+	return ExtractTailMetaFromSearchPaths(mergeKimiSearchPaths(searchPaths), path)
 }
 
 type kimiContextEntry struct {

@@ -77,7 +77,7 @@ func TestBuildRunDetailFromSnapshotMatchesGolden(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SnapshotForRun: %v", err)
 	}
-	fromSnap, err := BuildRunDetailFromSnapshot(snap, nil, nil, FormulaDetailUpstreamError)
+	fromSnap, err := BuildRunDetailFromSnapshot(snap, RunSessions{}, nil, FormulaDetailUpstreamError)
 	if err != nil {
 		t.Fatalf("BuildRunDetailFromSnapshot: %v", err)
 	}

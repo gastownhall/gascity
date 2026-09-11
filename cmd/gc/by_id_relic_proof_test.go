@@ -101,6 +101,39 @@ func TestRefusedCityDeniesTheRelicItsLiveCensusProves(t *testing.T) {
 	}
 }
 
+// TestRefusedCityDeniesADRAINEDRelicToo is the row above with the relic CLOSED,
+// and it is the case the symptom outlives.
+//
+// Draining a relic does not move it. The binding still holds the only live row
+// for that id, and `gc bd show`, `reopen` and `claim` all still ask for it by
+// id — while the work store still holds the copy `gc storage migrate` preserved
+// and never deleted, which reads OPEN with pre-migration fields. So a proof
+// that counted only OPEN residents handed the operator the worst arrangement of
+// the two: the probe survives the last close (HasLegacyResidents counts closed
+// relics since ga-qdt5y.19) but nothing is allowed to enforce it, and the read
+// falls through to the frozen copy exactly as it did before the fix — on the
+// city that has done the draining it was asked to do.
+//
+// The empty-binding control lives in the row above; what is added here is the
+// CLOSE, so a failure names the census rather than the plumbing.
+func TestRefusedCityDeniesADRAINEDRelicToo(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	relic, classStore := classResidentWorkShapedBead(t, cityPath, "gc-relic1", "carried across, then drained")
+	if err := classStore.Close(relic.ID); err != nil {
+		t.Fatalf("draining the relic: %v", err)
+	}
+
+	refuseTheseCities(t, theRefusalARefusedCityCarries(), cityPath)
+
+	_, ok, err := cliByIDBindingOwner(cityPath, relic.ID)
+	if err == nil {
+		t.Fatalf("a refused city whose binding holds %s CLOSED resolved to ok=%v with no error; the caller falls through to its scan and serves the copy the migration retained in the work store, which still reads open", relic.ID, ok)
+	}
+	if !errors.Is(err, storeref.ErrProvenRelicRefusal) {
+		t.Errorf("the denial reads %q and does not carry the proven-relic sentinel; closing a relic must change the drain count, not the proof", err)
+	}
+}
+
 // TestRefusedCityThatCannotOpenItsBindingFallsThrough is the proof's absent
 // case, and it is deliberately the tolerant one.
 //
