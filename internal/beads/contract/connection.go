@@ -185,13 +185,19 @@ func ResolveDoltConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string) (DoltCo
 		}
 		port, err := readManagedRuntimePort(fs, cityRoot)
 		if err != nil {
-			// No runtime state of gc's own. A scope whose server bd owns never
-			// has one: bd records that server in the scope itself, and reading
-			// it is the difference between the documented direct escape hatch
-			// working and every command on it reporting the store as down.
+			// No runtime state of gc's own. A scope whose store bd owns never
+			// has one: bd records the server it started, or the upstream it was
+			// pointed at, in the scope itself. Reading those records is the
+			// difference between the documented direct topologies working and
+			// every command on them reporting the store as down.
 			if IsManagedRuntimeUnavailable(err) {
 				if bdPort, ok := readProviderOwnedServerPort(fs, scopeRoot); ok {
 					return localServerTarget(target, bdPort), nil
+				}
+				if resolved, ok, bindErr := bdExternalBindingTarget(fs, cityRoot, scopeRoot, target); bindErr != nil {
+					return DoltConnectionTarget{}, bindErr
+				} else if ok {
+					return resolved, nil
 				}
 			}
 			return DoltConnectionTarget{}, err
@@ -625,11 +631,16 @@ func deriveLegacyConnectionConfig(fs fsys.FS, cityRoot, scopeRoot string, cfg Co
 }
 
 func resolveInheritedCityConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string, target DoltConnectionTarget, rigCfg ConfigState) (DoltConnectionTarget, error) {
-	// A rig whose server bd owns runs its own, so its own record outranks
-	// anything inherited. Without this a bd-owned direct rig resolves to the
-	// city's server, where its database does not exist.
+	// A rig whose store bd owns carries its own binding, so that binding
+	// outranks anything inherited. Without this a bd-owned direct rig resolves
+	// to the city's server, where its database does not exist.
 	if port, ok := readProviderOwnedServerPort(fs, scopeRoot); ok {
 		return localServerTarget(target, port), nil
+	}
+	if resolved, ok, err := bdExternalBindingTarget(fs, cityRoot, scopeRoot, target); err != nil {
+		return DoltConnectionTarget{}, err
+	} else if ok {
+		return resolved, nil
 	}
 	cityState, err := resolveCityTopologyState(fs, cityRoot)
 	if err != nil {
@@ -816,6 +827,66 @@ func validateSocketTarget(socket, host, port string) error {
 		return fmt.Errorf("invalid dolt socket path %q", socket)
 	}
 	return nil
+}
+
+// bdExternalBindingTarget resolves the external upstream bd persisted for a
+// scope, if it recorded one.
+//
+// `bd init --server --external --server-host <h> --server-port <p>` writes
+// dolt_server_host/dolt_server_port (or dolt_server_socket) into the scope's
+// metadata.json, and that is the only place the endpoint lives. gc deliberately
+// leaves a provider-owned scope's config.yaml alone, so a direct-external city
+// carries no gc endpoint keys at all and used to resolve as a managed city with
+// no runtime state.
+//
+// It ranks below a live local server for the same reason the sidecar ranks
+// above config: a record naming a process that exists here and now beats a
+// marker pointing somewhere else.
+func bdExternalBindingTarget(fs fsys.FS, cityRoot, scopeRoot string, target DoltConnectionTarget) (DoltConnectionTarget, bool, error) {
+	binding, ok, err := readBdExternalBinding(fs, filepath.Join(scopeRoot, ".beads", "metadata.json"))
+	if err != nil || !ok {
+		return DoltConnectionTarget{}, false, err
+	}
+	if sameScope(scopeRoot, cityRoot) {
+		target.EndpointOrigin = EndpointOriginCityCanonical
+	} else {
+		target.EndpointOrigin = EndpointOriginExplicit
+	}
+	target.EndpointStatus = EndpointStatusVerified
+	resolved, err := populateExternalTarget(target, binding)
+	if err != nil {
+		return DoltConnectionTarget{}, false, err
+	}
+	return resolved, true, nil
+}
+
+// readBdExternalBinding reads bd's persisted server endpoint out of
+// metadata.json. Absent or malformed metadata reports no binding: this is a
+// discovery step, and the metadata contract's own loader owns rejection.
+func readBdExternalBinding(fs fsys.FS, path string) (ConfigState, bool, error) {
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ConfigState{}, false, nil
+		}
+		return ConfigState{}, false, err
+	}
+	var meta struct {
+		Host   string `json:"dolt_server_host"`
+		Port   int    `json:"dolt_server_port"`
+		Socket string `json:"dolt_server_socket"`
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return ConfigState{}, false, nil
+	}
+	if socket := strings.TrimSpace(meta.Socket); socket != "" {
+		return ConfigState{DoltSocket: socket}, true, nil
+	}
+	host := strings.TrimSpace(meta.Host)
+	if host == "" || meta.Port <= 0 {
+		return ConfigState{}, false, nil
+	}
+	return ConfigState{DoltHost: host, DoltPort: strconv.Itoa(meta.Port)}, true, nil
 }
 
 // localServerTarget pins a target to a loopback server this host runs.

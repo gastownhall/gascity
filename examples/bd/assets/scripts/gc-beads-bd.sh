@@ -3459,7 +3459,7 @@ provider_owned_transport() {
 # initialization is being completed; ready scopes derive ownership from the
 # binding bd wrote in the scope itself.
 provider_owned_scope_is_local() {
-    local dir="$1" config sidecar
+    local dir="$1" config sidecar metadata
     case "${GC_BEADS_TARGET:-}" in
         local) return 0 ;;
         external) return 1 ;;
@@ -3473,6 +3473,16 @@ provider_owned_scope_is_local() {
         sidecar="$dir/.beads/proxied_server_client_info.json"
         [ -f "$sidecar" ] && grep -Eq '"external"[[:space:]]*:' "$sidecar" && return 1
         return 0
+    fi
+
+    # A direct scope bd initialized against someone else's server records that
+    # upstream in its own metadata. That binding is the authority here, the
+    # same way the sidecar is for a proxied one: without it a direct-external
+    # scope read as local and `gc stop` issued a lifecycle command for a Dolt
+    # nobody here started.
+    metadata="$dir/.beads/metadata.json"
+    if [ -f "$metadata" ] && grep -Eq '"dolt_server_(host|socket)"[[:space:]]*:[[:space:]]*"[^"]' "$metadata"; then
+        return 1
     fi
 
     # Legacy GC-managed direct scopes deliberately disable bd auto-start to
@@ -3528,7 +3538,23 @@ op_provider_owned_init() {
     case "${GC_BEADS_TRANSPORT:-}:${GC_BEADS_TARGET:-}" in
         direct:local|direct:external)
             set -- init --init-if-missing --quiet --server
-            [ "${GC_BEADS_TARGET:-}" = "external" ] && set -- "$@" --external
+            if [ "${GC_BEADS_TARGET:-}" = "external" ]; then
+                # bd persists the endpoint it is given at init and nowhere
+                # else: --server-host/--server-port land in metadata.json as
+                # dolt_server_host/dolt_server_port, which is the whole
+                # binding. Handing bd only --external left it on its own
+                # default, starting a local sql-server beside the city and
+                # writing a binding that named no upstream — so every later
+                # command talked to that local server while the operator had
+                # asked for someone else's.
+                set -- "$@" --external
+                if [ -n "${BEADS_DOLT_SERVER_SOCKET:-}" ]; then
+                    set -- "$@" --server-socket "$BEADS_DOLT_SERVER_SOCKET"
+                else
+                    [ -n "${GC_DOLT_HOST:-}" ] && [ -n "${GC_DOLT_PORT:-}" ] || die "direct-external init requires GC_DOLT_HOST and GC_DOLT_PORT"
+                    set -- "$@" --server-host "$GC_DOLT_HOST" --server-port "$GC_DOLT_PORT"
+                fi
+            fi
             ;;
         proxied:local|proxied:external)
             # Both targets own a LOCAL proxy and its Dolt child; only the data
