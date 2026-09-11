@@ -97,7 +97,7 @@ type doctorOpts struct {
 // The flag is a string array rather than pflag's stringSlice, which does the
 // comma splitting itself but reads an empty value as no values at all: that
 // would turn `gc doctor --check "$NAME"` with an unset NAME into the full
-// sweep, and gate its exit code on 91 checks the caller never asked about.
+// sweep, and gate its exit code on every registered check the caller never asked about.
 // Splitting here keeps the comma form working while an empty element survives
 // to fail the run.
 func splitDoctorCheckNames(values []string) []string {
@@ -620,7 +620,8 @@ func unknownDoctorChecksMessage(unmatched, registered []string) string {
 	// every possible check name: a skipped check registers no name at all, so
 	// a correct name and a typo are indistinguishable from here.
 	fmt.Fprintf(&b, ". This workspace registers %d checks; a check it skips —"+
-		" Dolt checks on a file-backed store, or any check belonging to a suspended rig —"+
+		" Dolt checks on a file-backed store, any check belonging to a suspended rig, or"+
+		" every store-dependent check when bead-store-preflight reports the store unreachable —"+
 		" registers no name to match", len(registered))
 	return b.String()
 }

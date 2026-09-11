@@ -102,7 +102,7 @@ func TestSelectChecksTrimsSurroundingWhitespace(t *testing.T) {
 
 func TestSelectChecksBlankNameIsUnmatchedNotSelectEverything(t *testing.T) {
 	// `--check ""` reaches here as a one-element slice. Treating it as "no
-	// selection" would run all 91 checks under a flag that asked for one.
+	// selection" would run every registered check under a flag that asked for one.
 	selected, unmatched := SelectChecks(selectorFixture(), []string{""})
 	if !reflect.DeepEqual(unmatched, []string{""}) {
 		t.Errorf("unmatched = %#v, want [\"\"]", unmatched)
