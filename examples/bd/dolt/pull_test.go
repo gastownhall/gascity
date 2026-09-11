@@ -198,19 +198,22 @@ func TestPullInFlightSkipsNeverPulls(t *testing.T) {
 	}
 }
 
-// The same per-database filter on the answer for pull: another database's
-// in-flight session does not block this one, and the query text carries no
-// database name (constant text; codex r6).
-func TestPullInFlightOtherDatabaseDoesNotCount(t *testing.T) {
+// The same rule for pull: a session attributed to another database blocks
+// too (attribution is not proof of the target — codex r9), and the query text
+// carries no database name (constant text; codex r6).
+func TestPullInFlightOtherDatabaseCountsToo(t *testing.T) {
 	binDir := t.TempDir()
 	logPath := writePullFakeDolt(t, binDir, "printf 'Id,Time,db\\n52,300,other\\n' ; exit 0", "exit 0")
 	out, err := runPull(t, binDir, nil, "--db", "app")
 	log := readLog(t, logPath)
-	if err != nil {
-		t.Fatalf("another database's session must not block this pull: %v\nout:\n%s\nlog:\n%s", err, out, log)
+	if err == nil {
+		t.Fatalf("a pull skipped for an in-flight session must exit non-zero.\nout:\n%s", out)
 	}
-	if !strings.Contains(log, "CALL DOLT_PULL(") {
-		t.Fatalf("expected the pull to run.\nout:\n%s\nlog:\n%s", out, log)
+	if strings.Contains(log, "CALL DOLT_PULL(") {
+		t.Fatalf("a remote operation in flight anywhere on the server must block this pull.\nout:\n%s\nlog:\n%s", out, log)
+	}
+	if !strings.Contains(out, "app: pull already in flight for 300s (session 52) — skipped") {
+		t.Fatalf("expected the in-flight skip line.\nout:\n%s", out)
 	}
 	if q := processlistQuery(t, log); strings.Contains(q, "app") || strings.Contains(q, "LOWER(db)") {
 		t.Fatalf("the processlist query must carry no database literal.\nquery:\n%s", q)

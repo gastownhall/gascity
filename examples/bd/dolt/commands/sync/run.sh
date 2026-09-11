@@ -56,7 +56,7 @@
 # One server-side fetch per database at a time (gp-f2yq): a CALL DOLT_FETCH
 # runs inside the sql-server and outlives a client the bound killed, so before
 # issuing one the script asks the server whether a DOLT_FETCH / DOLT_PULL is
-# already in flight for the database (skipped, NOT pushed, when one is), and
+# already in flight on the server (skipped, NOT pushed, when one is), and
 # when the fetch bound expires it KILLs the server-side session the fetch
 # printed about itself and proves it gone from the processlist. The fetch
 # statement also takes the server's session lock for the database (GET_LOCK,

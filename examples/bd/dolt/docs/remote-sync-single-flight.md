@@ -6,10 +6,11 @@ wall-clock bound expires leaves the server-side procedure running. Before this
 guard, a 15-minute patrol re-issuing `gc dolt sync` stacked one more fetch per
 run on top of the abandoned ones (boomtown, 2026-09-11: 169 of 178 sql-server
 connections in `CALL DOLT_FETCH`, the oldest two days, dolt at 180% CPU, that
-store's sync dead for weeks). Both scripts now hold to one rule per database:
-before issuing a fetch or pull they read `information_schema.processlist` and,
-when a `DOLT_FETCH` / `DOLT_PULL` session is already in flight for the database
-(or attributed to no database at all, which may be this one's), they print one
+store's sync dead for weeks). Both scripts now hold to one rule: before
+issuing a fetch or pull they read `information_schema.processlist` and, when a
+`DOLT_FETCH` / `DOLT_PULL` session is already in flight anywhere on the server
+— the processlist `DB` column is the connection's `--use-db`, not the
+statement's target, so no per-database filter is applied to it — they print one
 line naming the oldest session's age and id and skip — sync skips without
 pushing. A processlist read that fails, answers with anything that is not a
 processlist, or carries a row that is not `digits,digits,…`, also skips (fail
@@ -18,8 +19,7 @@ or `DOLT_PULL` as an identifier, however the call was spelled; a statement
 that merely mentions the name in a literal or comment costs one skipped run
 while it executes, which is the safe side. The processlist query itself is
 constant text — no database name is interpolated into it — so a store named,
-say, `dolt_fetch` cannot make the query match its own text; the per-database
-filter is applied to the answer. One limit, by design: the processlist shows
+say, `dolt_fetch` cannot make the query match its own text. One limit, by design: the processlist shows
 the statement text a session submitted, so a fetch run *indirectly* — through
 a text-protocol prepared statement (`EXECUTE s`), a user stored procedure that
 wraps the call, or an event — is invisible to the pre-check and to the health
@@ -36,7 +36,7 @@ connection id first and runs with `--use-db`, so when the client bound expires
 `KILL`s exactly that server-side session and proves it gone with a second
 processlist read (a session still listed is reported as NOT killed; a client
 that never learned its id kills nothing and names the sessions for the
-operator). Database names are compared and locked case-insensitively, and a session attributed to a branch- or commit-qualified name (`app/main`, `app/<hash>`) counts as the database's.
+operator). Database names are locked case-insensitively.
 `gc dolt health` adds one `WARN` line, and a `fetch_sessions` block in its
 JSON report, when more than `GC_DOLT_HEALTH_MAX_FETCH_SESSIONS` (default 2)
 such sessions are in flight server-wide; leftovers from runs older than this

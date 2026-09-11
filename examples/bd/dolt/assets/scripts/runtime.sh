@@ -333,15 +333,19 @@ dolt_sql_csv() {
 # (`dolt_fetch` and `team-dolt_pull-prod` are valid names; the previous shape
 # interpolated LOWER('<db>') and would have listed itself on every run of such
 # a store — codex r6, evidence 04g), and two probes running at once cannot
-# count each other. The per-database filter is applied on the ANSWER by
-# remote_op_sessions_parse: the sessions attributed to that database PLUS the
-# sessions attributed to no database at all — an unattributed fetch (issued
-# without --use-db: an older gc dolt sync, or an operator) may be this
-# database's, so it counts, fail closed. Database names compare
-# case-insensitively (Dolt resolves `app` and `APP` to one database; the
-# processlist shows whichever spelling the client used; the pack's own names
-# are ASCII by valid_database_name). Without a DB filter: every such session
-# on the server (the health probe).
+# count each other. There is NO per-database filter: the processlist DB column
+# is the connection's --use-db, not the statement's target — a client on
+# `--use-db other` running `USE app; CALL DOLT_FETCH(...)` is attributed to
+# `other` (codex r9; a USE inside the batch does not change the column,
+# evidence 04h b) — so attribution proves nothing about which database a
+# fetch touches, and an operand the adversary can move is not one to filter
+# on. Every DOLT_FETCH / DOLT_PULL in flight anywhere on the server blocks
+# every database's fetch and pull for that run, fail closed; the cost is one
+# skipped run for a database while another's remote operation runs on the
+# same server (the pack's own runs are sequential within a run and serialized
+# across runs by the per-database server lock, so this bites only a
+# concurrent operator or an abandoned session, which health names). The db
+# column is still selected, validated as one CSV field, and not used.
 # REMOTE_OP_INFO_REGEXP — the SQL REGEXP (applied to UPPER(Info)) that decides
 # "a remote operation is in flight": ANY statement that names DOLT_FETCH or
 # DOLT_PULL as a whole identifier (a non-identifier character or the string's
@@ -376,19 +380,12 @@ remote_op_sessions_sql() {
   printf "SELECT Id, Time, COALESCE(db, '') AS db FROM information_schema.processlist WHERE UPPER(Info) REGEXP '%s' ORDER BY Time DESC, Id ASC" "$REMOTE_OP_INFO_REGEXP"
 }
 
-# remote_op_sessions_parse [DB] — stdin: the CSV answer to
-# remote_op_sessions_sql; stdout: one `Id Time` line per session attributed to
-# DB (case-insensitively) or to no database, every session when DB is empty.
-# Every row is checked for shape BEFORE the filter, so a malformed row for
-# another database still refuses the whole answer; the db column must be
+# remote_op_sessions_parse — stdin: the CSV answer to remote_op_sessions_sql;
+# stdout: one `Id Time` line per session — every session, no filter (above).
+# Every row is checked for shape: Id and Time all-digit, and the db column
 # exactly ONE CSV field — unquoted without a comma or a quote, or quoted with
 # doubled inner quotes — so a row with an extra column (`42,60,app,extra`) or
-# a stray quote is refused rather than read as "another database" (codex r7).
-# A revision-qualified attribution (`app/main`, `app/<commit>`: a client that
-# connected with --use-db app/main or ran USE app/main — Dolt's branch-qualified
-# database name, which no plain database can carry since Dolt reserves `/`)
-# is this database's: the `/revision` suffix is stripped before the compare
-# (codex r8, evidence 04h). Returns 1 when the first line is not
+# a stray quote refuses the whole answer (codex r7). Returns 1 when the first line is not
 # the `Id,Time,db` header (an empty stdout, a banner or an error text is NOT a
 # processlist answer), 2 when a non-blank row does not START with an unquoted
 # all-digit Id and Time (`12,34,…`): a NULL, a truncated line, a wrapper's
@@ -397,7 +394,7 @@ remote_op_sessions_sql() {
 # malformed row is a session whose state is unknown, so the whole answer is
 # refused, fail closed.
 remote_op_sessions_parse() {
-  awk -F, -v want="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" '
+  awk -F, '
     NR == 1 {
       hdr = $0
       gsub(/"|\r/, "", hdr)
@@ -414,8 +411,6 @@ remote_op_sessions_parse() {
         have = substr(have, 2, length(have) - 2)
         gsub(/""/, "\"", have)
       } else if (have !~ /^[^",]*$/) { bad = 1; exit 2 }
-      sub(/\/.*$/, "", have)
-      if (want != "" && have != "" && tolower(have) != want) next
       print $1, $2
     }
     END { if (NR == 0) exit 1; if (bad) exit 2 }
@@ -423,8 +418,9 @@ remote_op_sessions_parse() {
 }
 
 # remote_op_sessions DB TIMEOUT_SECS STDERR_FILE — list the in-flight remote
-# operations (the constant remote_op_sessions_sql, filtered to DB by
-# remote_op_sessions_parse; DB may be empty for server-wide) as
+# operations (the constant remote_op_sessions_sql; DB is kept for the callers'
+# symmetry and NOT used — every in-flight remote operation on the server is
+# listed, see remote_op_sessions_sql) as
 # `Id Time` lines on stdout. Returns 0 on a processlist answer (possibly with
 # no rows); otherwise the query's exit code (124 = the bound expired), or 1
 # when the answer was not a processlist, with the reason appended to
@@ -436,7 +432,7 @@ remote_op_sessions() {
   _rs_rc=0
   _rs_csv=$(dolt_sql_csv "$_rs_tmo" "" "$(remote_op_sessions_sql)" 2>>"$_rs_errf") || _rs_rc=$?
   [ "$_rs_rc" -eq 0 ] || return "$_rs_rc"
-  _rs_rows=$(printf '%s\n' "$_rs_csv" | remote_op_sessions_parse "$_rs_db") || {
+  _rs_rows=$(printf '%s\n' "$_rs_csv" | remote_op_sessions_parse) || {
     _rs_prc=$?
     if [ "$_rs_prc" -eq 2 ]; then
       printf 'malformed processlist row (Id or Time not all-digit, or the db column not one CSV field) — refusing the whole answer\n' >>"$_rs_errf"
@@ -468,9 +464,9 @@ remote_op_session_id() {
 # printed about itself before the procedure started: the session is ours by
 # construction. An empty SESSION_ID (the client died before the server
 # answered) kills NOTHING: absence from the earlier processlist read does not
-# prove that a session listed now is ours (an operator's unattributed pull
-# for another database can appear in the same window), so the in-flight
-# sessions attributed to DB are reported for the operator and 1 is returned;
+# prove that a session listed now is ours (an operator's pull can appear in
+# the same window), so the in-flight remote operations on the server are
+# reported for the operator and 1 is returned;
 # a session of ours that does exist holds the database's lock, so every later
 # run is refused by the server gate until it ends or is KILLed by hand, and
 # gc dolt health names it. The verdict for a known id is the processlist read
@@ -504,7 +500,7 @@ kill_remote_op_session() {
       echo "  $_kr_db: server-side $_kr_label already ended (nothing in flight to kill)" >&2
       return 0
     fi
-    echo "  $_kr_db: server-side $_kr_label NOT killed: this client never learned its session id, and ownership of the in-flight session(s) attributed to $_kr_db (Id $_kr_listed) cannot be proven — left for the operator (KILL <Id>); gc dolt health names them" >&2
+    echo "  $_kr_db: server-side $_kr_label NOT killed: this client never learned its session id, and ownership of the in-flight remote operation(s) on the server (Id $_kr_listed) cannot be proven — left for the operator (KILL <Id>); gc dolt health names them" >&2
     return 1
   fi
   for _kr_one in $_kr_ids; do

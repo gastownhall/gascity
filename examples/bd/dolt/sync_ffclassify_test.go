@@ -639,8 +639,8 @@ func TestSyncFetchInFlightSkipsNeverFetches(t *testing.T) {
 	// The processlist query is CONSTANT text: no database name is interpolated
 	// into it. A store named `dolt_fetch` (a valid name) would otherwise make
 	// the query match its own text and skip on every run (codex r6, evidence
-	// 04g). The per-database filter is applied on the answer instead
-	// (TestSyncFetchInFlightOtherDatabaseDoesNotCount, …CaseInsensitiveDatabase).
+	// 04g). There is no per-database filter at all: attribution is not proof
+	// of a statement's target (TestSyncFetchInFlightOtherDatabaseCountsToo).
 	if q := processlistQuery(t, log); strings.Contains(q, "app") || strings.Contains(q, "LOWER(db)") {
 		t.Fatalf("the processlist query must carry no database literal.\nquery:\n%s", q)
 	}
@@ -666,26 +666,27 @@ func processlistQuery(t *testing.T, log string) string {
 	return ""
 }
 
-// A session in flight for ANOTHER database does not block this one: the
-// per-database filter is applied on the answer (attributed to this db, or to
-// none), so the query text never carries a database name. A quoted db column
-// is read the way the CSV means it.
-func TestSyncFetchInFlightOtherDatabaseDoesNotCount(t *testing.T) {
+// A session attributed to ANOTHER database blocks this one too: the processlist
+// DB column is the connection's --use-db, not the statement's target (a client
+// on --use-db other running `USE app; CALL DOLT_FETCH` is attributed to other —
+// codex r9; evidence 04h b), so attribution proves nothing and every in-flight
+// remote operation on the server counts, fail closed. A quoted db column is
+// still validated as one CSV field.
+func TestSyncFetchInFlightOtherDatabaseCountsToo(t *testing.T) {
 	binDir := t.TempDir()
 	logPath := writeSyncFakeDoltProcesslist(t, binDir, "printf 'Id,Time,db\\n44,500,other\\n45,10,\"other-two\"\\n' ; exit 0")
 	out := runFFSync(t, binDir, "--db", "app")
 	log := readLog(t, logPath)
-	if !fetched(log) {
-		t.Fatalf("a remote operation in flight for another database must not block this one's fetch.\nout:\n%s\nlog:\n%s", out, log)
+	if fetched(log) {
+		t.Fatalf("a remote operation in flight anywhere on the server must block this fetch (attribution is not proof of its target).\nout:\n%s\nlog:\n%s", out, log)
 	}
-	if strings.Contains(out, "already in flight") {
-		t.Fatalf("no in-flight line for another database's session.\nout:\n%s", out)
+	if !strings.Contains(out, "fetch already in flight for 500s (session 44)") {
+		t.Fatalf("expected the in-flight skip line naming the oldest session.\nout:\n%s", out)
 	}
 }
 
-// Database names compare case-insensitively on the answer: Dolt resolves
-// `app` and `APP` to one database and the processlist shows the client's
-// spelling.
+// A session attributed in another spelling (APP) blocks too — every attribution
+// does; the processlist shows the client's spelling.
 func TestSyncFetchInFlightCaseInsensitiveDatabase(t *testing.T) {
 	binDir := t.TempDir()
 	logPath := writeSyncFakeDoltProcesslist(t, binDir, "printf 'Id,Time,db\\n46,20,APP\\n' ; exit 0")
@@ -699,9 +700,9 @@ func TestSyncFetchInFlightCaseInsensitiveDatabase(t *testing.T) {
 }
 
 // A session attributed to a revision-qualified name (`app/main`: the client
-// connected with --use-db app/main or ran USE app/main — Dolt's branch-qualified
-// database) is this database's and counts; another database's revision does
-// not (codex r8, evidence 04h).
+// connected with --use-db app/main — Dolt's branch-qualified database) counts,
+// and so does another database's revision: attribution is not proof of the
+// target (codex r8, r9; evidence 04h).
 func TestSyncFetchInFlightRevisionQualifiedDatabaseCounts(t *testing.T) {
 	binDir := t.TempDir()
 	logPath := writeSyncFakeDoltProcesslist(t, binDir, "printf 'Id,Time,db\\n47,40,APP/feature/x\\n' ; exit 0")
@@ -715,8 +716,8 @@ func TestSyncFetchInFlightRevisionQualifiedDatabaseCounts(t *testing.T) {
 	binDir = t.TempDir()
 	logPath = writeSyncFakeDoltProcesslist(t, binDir, "printf 'Id,Time,db\\n48,5,other/main\\n' ; exit 0")
 	out = runFFSync(t, binDir, "--db", "app")
-	if !fetched(readLog(t, logPath)) {
-		t.Fatalf("another database's revision (other/main) must not block this one.\nout:\n%s", out)
+	if fetched(readLog(t, logPath)) {
+		t.Fatalf("another database's revision (other/main) blocks too: attribution is not proof of the target.\nout:\n%s", out)
 	}
 }
 
@@ -869,9 +870,9 @@ func TestSyncFetchTimeoutKillVerdictRefusesMalformedAnswer(t *testing.T) {
 
 // No connection id captured (the client died before the server answered):
 // nothing is KILLed. Absence from the earlier processlist read does not prove
-// that a session listed now is ours (an operator's unattributed pull for
-// another database can appear in the same window), so the in-flight sessions
-// attributed to the db are reported for the operator and the run fails.
+// that a session listed now is ours (an operator's pull can appear in the
+// same window), so the in-flight remote operations on the server are
+// reported for the operator and the run fails.
 func TestSyncFetchTimeoutWithoutIDKillsNothingAndReportsUnproven(t *testing.T) {
 	binDir := t.TempDir()
 	logPath := writeSyncFakeDoltFetchTimeoutKill(t, binDir, "", []string{"88,61,app", "89,5,"}, false)
@@ -883,7 +884,7 @@ func TestSyncFetchTimeoutWithoutIDKillsNothingAndReportsUnproven(t *testing.T) {
 	if strings.Contains(log, "KILL ") {
 		t.Fatalf("without a session id, ownership is unproven: nothing may be KILLed.\nlog:\n%s", log)
 	}
-	want := "app: server-side fetch NOT killed: this client never learned its session id, and ownership of the in-flight session(s) attributed to app (Id 88 89) cannot be proven"
+	want := "app: server-side fetch NOT killed: this client never learned its session id, and ownership of the in-flight remote operation(s) on the server (Id 88 89) cannot be proven"
 	if !strings.Contains(out, want) {
 		t.Fatalf("expected %q\nout:\n%s", want, out)
 	}
@@ -934,12 +935,15 @@ func TestSyncFetchIsAttributedAndSelfIdentifying(t *testing.T) {
 // assertGateBeforeCall pins the batch shape `… CONNECTION_ID() … GET_LOCK('gc_remote_op:<db>', 0) … CALL …`.
 func assertGateBeforeCall(t *testing.T, line, db, call string) {
 	t.Helper()
-	// The lock name is lowercased on the server: `app` and `APP` are one
-	// database and must be one lock.
-	gate := "GET_LOCK(CONCAT('gc_remote_op:', LOWER('" + db + "')), 0)"
+	// The COMPLETE gate expression is the spec (codex r9: a check on the
+	// GET_LOCK substring alone accepted `>= 0`, which lets the CALL through
+	// while another session holds the lock): the lock name lowercased on the
+	// server (`app` and `APP` are one database and must be one lock), timeout
+	// 0, the `= 1` test, the 1 branch, and the marked JSON error branch.
+	gate := "SELECT IF(GET_LOCK(CONCAT('gc_remote_op:', LOWER('" + db + "')), 0) = 1, 1, JSON_EXTRACT('gc-remote-op-lock-held', '$')) AS gate;"
 	idAt, gateAt, callAt := strings.Index(line, "SELECT CONNECTION_ID() AS id;"), strings.Index(line, gate), strings.Index(line, call)
 	if idAt < 0 || gateAt < 0 || callAt < 0 || (idAt >= gateAt || gateAt >= callAt) {
-		t.Fatalf("the batch must be id, then the GET_LOCK gate, then the CALL.\nline: %s", line)
+		t.Fatalf("the batch must be id, then the complete GET_LOCK gate %q, then the CALL.\nline: %s", gate, line)
 	}
 	if !strings.Contains(line, "JSON_EXTRACT('gc-remote-op-lock-held', '$')") {
 		t.Fatalf("the gate's else branch must raise the marked error.\nline: %s", line)
