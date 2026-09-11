@@ -687,6 +687,16 @@ ensure_bd_runtime_issue_prefix() {
     ensure_bd_runtime_config_value "$db" "issue_prefix" "$prefix"
 }
 
+# gc_custom_types prints the bd custom bead types Gas City requires, as the CSV
+# bd's types.custom config takes. Custom bead types were extracted from beads
+# core in v0.46.0. "convergence" is required because gc's convergence handler
+# creates beads with that type; "step" is required for non-root formula step
+# beads (#1039). Must match doctor.RequiredCustomTypes.
+# GC_BEADS_CUSTOM_TYPES overrides the default SDK set.
+gc_custom_types() {
+    printf '%s\n' "${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step,startup-health-episode}"
+}
+
 valid_custom_types_value() {
     local types="$1" old_ifs typ
     [ -n "$types" ] || return 1
@@ -2922,12 +2932,8 @@ op_init() {
         die "reserved dolt database name: $dolt_database (used internally by gc)"
     fi
 
-    # Custom bead types for bd (extracted from beads core in v0.46.0).
-    # GC_BEADS_CUSTOM_TYPES overrides the default SDK set.
-    # "convergence" is required because gc's convergence handler creates
-    # beads with that type. "step" is required for non-root formula step
-    # beads (#1039). Must match doctor.RequiredCustomTypes.
-    local custom_types="${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step}"
+    local custom_types
+    custom_types=$(gc_custom_types)
 
     # Fresh managed-local scopes use direct/server mode by default. Beads
     # metadata/config and a pending provider intent are the topology authority;
@@ -3540,6 +3546,11 @@ op_provider_owned_init() {
     set -- "$@" -p "$prefix" --skip-hooks --skip-agents
     [ -n "$database" ] && set -- "$@" --database "$database"
     set -- "$@" "$dir"
+    # Registering gc's bead vocabulary with the new store is deliberately NOT
+    # done here. ga-5mym bans `bd config set` from this script because it runs
+    # under the provider op timeout; cmd/gc owns that step (see
+    # registerProviderOwnedScopeCustomTypes) alongside the canonical config it
+    # writes for the same scope.
     GC_BEADS_PROVIDER_INIT=1 run_provider_owned_bd "$dir" "$@"
 }
 

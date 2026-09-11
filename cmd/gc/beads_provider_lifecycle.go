@@ -580,6 +580,64 @@ func desiredScopeDoltConfigStateForInit(cityPath, dir, prefix string) (contract.
 	return rigState, true, nil
 }
 
+// registerProviderOwnedScopeCustomTypes registers Gas City's bead vocabulary
+// with a scope bd has just created. bd init writes its own generic config,
+// whose types.custom is unset, and bd validates bead types on create and on
+// list — so without this every gc type (session, molecule, convoy, and the
+// rest) comes back "invalid issue type", which takes out `gc status`, the
+// session model, the startup-health scan and doctor's custom-types check on a
+// city that has just been initialized. `bd config set` is also what keeps bd's
+// normalized custom_types table in step, the same call
+// doctor.CustomTypesCheck.Fix makes.
+//
+// Nothing else in the scope's .beads is gc's to write: bd owns that config for
+// a scope whose Dolt topology it owns. The vocabulary goes in through bd's own
+// front door rather than by editing its file.
+//
+// It lives here rather than in gc-beads-bd.sh on purpose: ga-5mym bans
+// `bd config set` from that script because it runs inside the provider op
+// timeout, where bd's auto-migrate can cost tens of seconds on a populated
+// store. This runs once, after init, outside that budget, against a store bd
+// has just created and is therefore empty.
+//
+// Only an unset value is written. A scope that already carries types is an
+// operator's extension or a retried init, and narrowing that list would delete
+// types whose beads exist; `gc doctor --fix` owns reconciling a partial one.
+//
+// Best-effort by design. The canonical config gc just wrote is what bd
+// validates bead types against, so a scope whose table sync did not happen
+// still works; `gc doctor` reports the drift and `--fix` reconciles it with
+// this same call. Failing the whole init over a cache that doctor owns would
+// destroy a city that is otherwise complete.
+func registerProviderOwnedScopeCustomTypes(dir string) {
+	env := map[string]string{"BEADS_DIR": filepath.Join(dir, ".beads")}
+	if err := pinBdGCEnvironment(env); err != nil {
+		log.Printf("gc: custom bead types not registered for %s: %v", dir, err)
+		return
+	}
+	applyExportSuppressionEnv(env)
+	run := beads.ExecCommandRunnerWithEnv(env)
+
+	out, err := run(dir, "bd", "config", "get", "--json", "types.custom")
+	if err != nil {
+		log.Printf("gc: custom bead types not registered for %s: read: %v", dir, err)
+		return
+	}
+	var current struct {
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(out, &current); err != nil {
+		log.Printf("gc: custom bead types not registered for %s: parse: %v", dir, err)
+		return
+	}
+	if strings.TrimSpace(current.Value) != "" {
+		return
+	}
+	if _, err := run(dir, "bd", "config", "set", "types.custom", strings.Join(doctor.RequiredCustomTypes, ",")); err != nil {
+		log.Printf("gc: custom bead types not registered for %s: %v; run `gc doctor --fix`", dir, err)
+	}
+}
+
 //nolint:unparam // keep fs seam for future testable FS injection
 func ensureCanonicalScopeConfigState(fs fsys.FS, dir string, state contract.ConfigState) error {
 	beadsDir := filepath.Join(dir, ".beads")
@@ -744,6 +802,7 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 		if err != nil {
 			return err
 		}
+		registerProviderOwnedScopeCustomTypes(dir)
 		if err := installBeadHooks(dir, cityPath); err != nil {
 			return fmt.Errorf("install hooks at %s: %w", dir, err)
 		}
