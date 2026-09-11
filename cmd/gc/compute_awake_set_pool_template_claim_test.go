@@ -343,3 +343,47 @@ func TestAwakeSetPoolTemplateAssignmentFillsScaleSlotPerMember(t *testing.T) {
 		}
 	}
 }
+
+// TestAwakeSetPoolTemplateClaimCollapsesFanOutToHolder pins the post-claim
+// state. While the work is open the bare template wakes every eligible member
+// (the fan-out above), but once one member claims the bead the assignee is that
+// member's concrete identity and the status is in_progress — so the
+// serviceability branch no longer applies and only the holder sees assigned
+// work. The members that lost the claim race must report no assigned work
+// rather than staying awake on a bead they do not own.
+func TestAwakeSetPoolTemplateClaimCollapsesFanOutToHolder(t *testing.T) {
+	members := poolManagedAwakeSessionMembers()
+	const holder = "fixture--build-slot-a"
+	got := ComputeAwakeSet(AwakeInput{
+		Agents:       []AwakeAgent{{QualifiedName: poolTemplate}},
+		SessionBeads: members,
+		WorkBeads: []AwakeWorkBead{{
+			ID:       "work-claimed",
+			Assignee: holder,
+			Status:   "in_progress",
+		}},
+		Now: now,
+	})
+
+	assertAwake(t, got, holder)
+	assertReason(t, got, holder, "assigned-work")
+	if decision := got[holder]; !decision.HasAssignedWork {
+		t.Error("holder HasAssignedWork = false, want true for the claimed bead")
+	}
+
+	for _, member := range members {
+		if member.SessionName == holder {
+			continue
+		}
+		t.Run(member.SessionName, func(t *testing.T) {
+			decision := got[member.SessionName]
+			if decision.HasAssignedWork {
+				t.Errorf("HasAssignedWork = true, want false after %q claimed the bead", holder)
+			}
+			if decision.AssignedWorkBeadID != "" {
+				t.Errorf("AssignedWorkBeadID = %q, want empty for a member that lost the claim", decision.AssignedWorkBeadID)
+			}
+			assertAsleep(t, got, member.SessionName)
+		})
+	}
+}
