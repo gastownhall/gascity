@@ -111,10 +111,14 @@ func classifyDemandTrigger(triggerID, dir string, opts hookClaimOptions, ops hoo
 	}
 	status = strings.ToLower(strings.TrimSpace(bead.Status))
 	// The invariant is about a row that is STILL claimable by a worker for this
-	// template: open, unassigned, route-matching, and not excluded by the shared
-	// serving rules. Anything else means the row moved on — which is what a
-	// sibling claim looks like, and is correct pull.
-	if status == "open" && demandRowServable(bead) && hookClaimMatchesRoute(bead, opts.RouteTargets) {
+	// template: open, unassigned, route-matching, READY (no unmet blocking
+	// dependency and not deferred), and not excluded by the shared serving rules.
+	// Anything else means the row moved on or was never claimable — which is what
+	// a sibling claim OR a routed-but-blocked row looks like, and is correct pull.
+	// demandRowServable checks only the assignee/type/label exclusions, so the
+	// readiness gate (demandRowReady) is what keeps the routed-blocked family off
+	// the divergence counter.
+	if status == "open" && demandRowServable(bead) && demandRowReady(bead, ops.nowOrWallClock()) && hookClaimMatchesRoute(bead, opts.RouteTargets) {
 		return status, events.DemandClaimDivergence
 	}
 	return status, events.DemandClaimBenign

@@ -1952,6 +1952,86 @@ func drainAckAssignedWorkEventCount(t *testing.T, seedWork func(t *testing.T, st
 	return count
 }
 
+// drainAckPoolAliasInProgressEventCount runs a "worker" seat through the drain-ack
+// finalize lifecycle while it holds an IN_PROGRESS row stamped with a pool alias
+// (configured_named_identity) rather than its own durable bead ID — the way a
+// production hook claim stamps an aliased/pool seat (hookClaimAssigneeIdentity).
+// When addLiveSibling is true a SECOND seat with a distinct session name but the
+// SAME pool alias is present and alive in the reconciler's running-session
+// inventory for both ticks, so it is a genuine live owner of the row. Returns how
+// many SessionDrainAckedWithAssignedWork events fired: zero when a live sibling
+// owns the row (correct surplus-seat drain), one when no live incarnation but the
+// draining seat itself carries the alias (a genuine strand).
+func drainAckPoolAliasInProgressEventCount(t *testing.T, addLiveSibling bool) int {
+	t.Helper()
+	const poolAlias = "gc__worker-pool"
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	fake := events.NewFake()
+	env.rec = fake
+
+	draining := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&draining, map[string]string{namedSessionIdentityMetadata: poolAlias})
+	env.markSessionActive(&draining)
+
+	work, err := env.store.Create(beads.Bead{Title: "aliased task", Type: "task", Assignee: poolAlias})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+	inProgress := "in_progress"
+	if err := env.store.Update(work.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("mark in progress: %v", err)
+	}
+
+	cfgNames := map[string]bool{"worker": true}
+	inventory := []beads.Bead{draining}
+	if addLiveSibling {
+		env.addDesired("worker-sib", "worker", true)
+		cfgNames["worker-sib"] = true
+		sibling := env.createSessionBead("worker-sib", "worker")
+		env.setSessionMetadata(&sibling, map[string]string{namedSessionIdentityMetadata: poolAlias})
+		env.markSessionActive(&sibling)
+		inventory = append(inventory, sibling)
+	}
+
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+	reconcileSessionBeads(
+		context.Background(), inventory, env.desiredState, cfgNames, env.cfg, env.sp,
+		env.store, dops, nil, nil, env.dt, nil, false, nil, "",
+		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	// Finalize tick: the draining seat's runtime is now stopped, so reload the whole
+	// inventory (draining seat is stop-pending; the sibling stays alive on its own
+	// distinct runtime) and reconcile again to drive the finalize + event decision.
+	waitForProviderStopped(t, env.sp, "worker")
+	reloaded := make([]beads.Bead, 0, len(inventory))
+	for _, b := range inventory {
+		got, err := env.store.Get(b.ID)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", b.ID, err)
+		}
+		reloaded = append(reloaded, got)
+	}
+	reconcileSessionBeads(
+		context.Background(), reloaded, env.desiredState, cfgNames, env.cfg, env.sp,
+		env.store, dops, nil, nil, env.dt, nil, false, nil, "",
+		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	count := 0
+	for i := range fake.Events {
+		if fake.Events[i].Type == events.SessionDrainAckedWithAssignedWork {
+			count++
+		}
+	}
+	return count
+}
+
 // TestReconcileSessionBeads_DrainAckBlockedAssignedWorkSuppressesEvent pins that
 // a session drain-acking while its only assigned bead is OPEN but parked on an
 // unmet dependency must NOT emit SessionDrainAckedWithAssignedWork. This is the
@@ -1980,28 +2060,35 @@ func TestReconcileSessionBeads_DrainAckBlockedAssignedWorkSuppressesEvent(t *tes
 	}
 }
 
-// TestReconcileSessionBeads_DrainAckLiveSiblingInProgressSuppressesEvent pins
-// that a session drain-acking while an IN_PROGRESS row carries a pool-shared
-// assignee identity (its session_name, not its own durable bead ID) must NOT
-// emit SessionDrainAckedWithAssignedWork. This is the second false-positive
-// class from live data (~17%): the row is being worked by a LIVE sibling
-// incarnation of the same pool, so a surplus seat draining past it is normal
-// pull, not a strand. Only a #2293 Shape A self-strand (assignee == this
-// session's own bead ID) keeps alarming — pinned by
-// TestReconcileSessionBeads_DrainAckMidPhaseEmitsAssignedWorkEvent.
+// TestReconcileSessionBeads_DrainAckLiveSiblingInProgressSuppressesEvent pins the
+// owner-liveness suppression: a seat drain-acking while an IN_PROGRESS row is
+// owned by ANOTHER LIVE incarnation of the same pool (a distinctly-named sibling
+// that shares the row's pool alias and is up in the reconciler's running-session
+// inventory) must NOT emit SessionDrainAckedWithAssignedWork. This is the ~17%
+// false-positive class from live data: a surplus seat draining past a row a live
+// sibling is actively working is normal pull, not a strand. The sibling here
+// genuinely owns the row (shared configured_named_identity), which is the
+// distinction the fix keys on — not the assignee's identity shape.
 func TestReconcileSessionBeads_DrainAckLiveSiblingInProgressSuppressesEvent(t *testing.T) {
-	count := drainAckAssignedWorkEventCount(t, func(t *testing.T, store beads.Store, _, sessionName string) {
-		work, err := store.Create(beads.Bead{Title: "sibling task", Type: "task", Assignee: sessionName})
-		if err != nil {
-			t.Fatalf("Create(work): %v", err)
-		}
-		inProgress := "in_progress"
-		if err := store.Update(work.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
-			t.Fatalf("mark in progress: %v", err)
-		}
-	})
+	count := drainAckPoolAliasInProgressEventCount(t, true)
 	if count != 0 {
-		t.Fatalf("%s events = %d, want 0 — in_progress work on a pool-shared identity is a live sibling's surplus-seat drain, not a strand",
+		t.Fatalf("%s events = %d, want 0 — an in_progress row a LIVE sibling incarnation owns is a surplus-seat drain, not a strand",
+			events.SessionDrainAckedWithAssignedWork, count)
+	}
+}
+
+// TestReconcileSessionBeads_DrainAckAliasClaimedNoLiveOwnerEmitsEvent is the
+// genuine-strand RED test the owner-liveness fix exists for. A named/pool seat
+// claims a row under its ALIAS (configured_named_identity, as production hook
+// claims stamp — not the durable bead ID), hits its turn cap, and drain-acks
+// mid-task with NO live replacement: no other live incarnation carries the alias.
+// That is the #2293 cap-hit strand the event MUST emit for. The prior
+// "assignee == this session's own bead ID" gate silenced it (the alias is not the
+// bead ID), so this fails on that state; keying on owner-liveness fires it.
+func TestReconcileSessionBeads_DrainAckAliasClaimedNoLiveOwnerEmitsEvent(t *testing.T) {
+	count := drainAckPoolAliasInProgressEventCount(t, false)
+	if count != 1 {
+		t.Fatalf("%s events = %d, want 1 — an alias-claimed in_progress row with NO live owner but the draining seat is a genuine cap-hit strand",
 			events.SessionDrainAckedWithAssignedWork, count)
 	}
 }
@@ -3743,7 +3830,7 @@ func TestFinalizeDrainAckStoppedSessionDoesNotEmitEventsWhenFinalMetadataFails(t
 
 	failingStore := &failSetMetadataBatchStore{Store: env.store, err: errors.New("metadata write failed")}
 	finalizeDrainAckStoppedSession(
-		"", env.cfg, failingStore, nil, env.sessionInfo(session.ID), "worker", false,
+		"", env.cfg, failingStore, nil, env.sessionInfo(session.ID), nil, "worker", false,
 		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
 	)
 
@@ -3770,7 +3857,7 @@ func TestFinalizeDrainAckStoppedSessionFallsThroughWhenCloseGateRacesWithAssignm
 
 	racingStore := &assignOnListStore{Store: env.store, sessionID: session.ID}
 	finalizeDrainAckStoppedSession(
-		"", env.cfg, racingStore, nil, env.sessionInfo(session.ID), "worker", true,
+		"", env.cfg, racingStore, nil, env.sessionInfo(session.ID), nil, "worker", true,
 		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
 	)
 

@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -103,6 +104,31 @@ func demandRowServable(b beads.Bead) bool {
 		}
 	}
 	return true
+}
+
+// demandRowReady reports whether a trigger row a demand-spawned seat failed to
+// claim is still READY to be claimed — not parked on an unmet blocking
+// dependency and not deferred. A worker's Tier-3 ready query excludes both, so a
+// routed-but-blocked row that drained a seat is correct pull (nothing was
+// claimable), NOT a demand/claim divergence — the dominant false-positive class
+// the divergence classifier was over-counting.
+//
+// The blocked signal mirrors the wake side (bindNamedSessionTriggerBead): bd's
+// denormalized is_blocked projection is trusted when the store provides it, and
+// the raw "blocked" status is honored for stores that surface it; defer_until
+// (and bd's indefinite deferral) gate the time-bound half via beads.IsDeferred.
+// A nil is_blocked projection (native DoltLite snapshots, pre-1.0.5 bd) reads as
+// unblocked here, exactly as the ready query's dependency-derived fallback would
+// on the same row, so the classifier neither invents nor suppresses a divergence
+// beyond what a worker's own query could see.
+func demandRowReady(b beads.Bead, now time.Time) bool {
+	if strings.EqualFold(strings.TrimSpace(b.Status), "blocked") {
+		return false
+	}
+	if b.IsBlocked != nil && *b.IsBlocked {
+		return false
+	}
+	return !beads.IsDeferred(b, now)
 }
 
 // routeCollapseRewriteTarget returns the canonical base route a slot-suffixed

@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -110,6 +111,8 @@ func TestDivergenceIsNotRecordedForAClaimsErroredDrain(t *testing.T) {
 // claimable counts as divergence; everything else is pull working.
 func TestDivergenceClassification(t *testing.T) {
 	routed := map[string]string{beadmeta.RoutedToMetadataKey: "rig/worker"}
+	blockedTrue := true
+	future := time.Now().Add(time.Hour)
 	for _, tt := range []struct {
 		name      string
 		bead      beads.Bead
@@ -122,6 +125,23 @@ func TestDivergenceClassification(t *testing.T) {
 			name: "still open and claimable", triggerID: "wb-1",
 			bead:      beads.Bead{ID: "wb-1", Status: "open", Type: "task", Metadata: routed},
 			wantClass: events.DemandClaimDivergence, wantStat: "open",
+		},
+		{
+			// Open, unassigned, route-matching — but parked on an unmet blocking
+			// dependency (bd's is_blocked projection). A worker's ready query
+			// excludes it, so the seat drained past a row it could not claim:
+			// correct pull, NOT divergence. This is the routed-blocked family the
+			// readiness gate keeps off the counter.
+			name: "open but dependency-blocked", triggerID: "wb-1",
+			bead:      beads.Bead{ID: "wb-1", Status: "open", Type: "task", Metadata: routed, IsBlocked: &blockedTrue},
+			wantClass: events.DemandClaimBenign, wantStat: "open",
+		},
+		{
+			// Open and route-matching but deferred into the future: also excluded
+			// by the ready query, so also not a divergence.
+			name: "open but deferred", triggerID: "wb-1",
+			bead:      beads.Bead{ID: "wb-1", Status: "open", Type: "task", Metadata: routed, DeferUntil: &future},
+			wantClass: events.DemandClaimBenign, wantStat: "open",
 		},
 		{
 			name: "claimed by a sibling", triggerID: "wb-1",

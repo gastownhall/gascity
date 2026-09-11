@@ -572,6 +572,7 @@ func recordDrainAckAssignedWorkEvent(
 	store beads.Store,
 	rigStores map[string]beads.Store,
 	info sessionpkg.Info,
+	liveOwners liveSessionOwnerSet,
 	subject string,
 	template string,
 	name string,
@@ -581,7 +582,7 @@ func recordDrainAckAssignedWorkEvent(
 	if rec == nil {
 		return
 	}
-	strandedBead, found, beadLookupErr := drainAckClaimableAnomalyBead(cityPath, cfg, store, rigStores, info)
+	strandedBead, found, beadLookupErr := drainAckClaimableAnomalyBead(cityPath, cfg, store, rigStores, info, liveOwners)
 	if beadLookupErr != nil {
 		fmt.Fprintf(stderr, "session reconciler: classifying drain-acked work for %s: %v\n", name, beadLookupErr) //nolint:errcheck
 	}
@@ -604,6 +605,68 @@ func recordDrainAckAssignedWorkEvent(
 	})
 }
 
+// liveSessionOwnerSet maps every assignment identifier carried by a currently
+// live (non-closed) session to the set of session bead IDs that carry it. The
+// drain-ack anomaly classifier keys on it to decide whether an in_progress
+// bead's assignee is still owned by a LIVE sibling incarnation — the surplus-
+// seat / pool-recycle case that must NOT alarm — versus no live owner besides
+// the draining seat itself, which is a genuine strand that must alarm. The
+// decision is owner-LIVENESS, never assignee identity shape: a hook claim
+// stamps the alias/agent identity (hookClaimAssigneeIdentity), not the durable
+// bead ID, so keying on "assignee == this session's own bead ID" silences the
+// exact cap-hit strand the event exists to emit for.
+type liveSessionOwnerSet map[string]map[string]struct{}
+
+// buildLiveSessionOwnerSet indexes the assignment identifiers of every live
+// (non-closed) session Info by the session bead ID that carries them, so
+// ownedByLiveSessionOtherThan can answer sibling-liveness without re-walking
+// the tick's session snapshot per candidate. It reads the same identifier set
+// the assigned-work finders query by (sessionAssignmentIdentifiersForConfigInfo),
+// so an assignee that matched a draining seat's identifiers is looked up under
+// the identity it was actually stamped with.
+func buildLiveSessionOwnerSet(infos []sessionpkg.Info, cfg *config.City) liveSessionOwnerSet {
+	owners := make(liveSessionOwnerSet)
+	for i := range infos {
+		info := infos[i]
+		id := strings.TrimSpace(info.ID)
+		if id == "" || info.Closed {
+			continue
+		}
+		for _, identifier := range sessionAssignmentIdentifiersForConfigInfo(info, cfg) {
+			identifier = strings.TrimSpace(identifier)
+			if identifier == "" {
+				continue
+			}
+			carriers := owners[identifier]
+			if carriers == nil {
+				carriers = make(map[string]struct{})
+				owners[identifier] = carriers
+			}
+			carriers[id] = struct{}{}
+		}
+	}
+	return owners
+}
+
+// ownedByLiveSessionOtherThan reports whether some live session OTHER than
+// selfID carries assignee in its identifier set — i.e. another live incarnation
+// is genuinely handling a bead stamped with that assignee. selfID is the
+// draining seat's own bead ID, excluded so a seat is never counted as its own
+// live replacement.
+func (o liveSessionOwnerSet) ownedByLiveSessionOtherThan(assignee, selfID string) bool {
+	assignee = strings.TrimSpace(assignee)
+	if assignee == "" {
+		return false
+	}
+	selfID = strings.TrimSpace(selfID)
+	for ownerID := range o[assignee] {
+		if ownerID != selfID {
+			return true
+		}
+	}
+	return false
+}
+
 // drainAckClaimableAnomalyBead returns the work bead that makes a drain-acked
 // session a GENUINE drain-with-assigned-work anomaly worth alarming on, plus
 // whether one was found.
@@ -621,12 +684,17 @@ func recordDrainAckAssignedWorkEvent(
 //     A surplus seat draining while a sibling holds the row is normal.
 //
 // A bead is a true anomaly when it is either open AND ready (claimable right
-// now) or in_progress AND assigned to THIS session's own durable bead ID — the
-// gastownhall/gascity#2293 "Shape A" self-strand where a worker exited mid-task
-// without nulling its assignee. The open+ready candidate is resolved first and
-// independently so a self-strand test on a single finder result cannot mask a
-// genuinely claimable row behind a benign in_progress match the finder returned
-// ahead of it. It fails CLOSED: a read error yields (found=false), so a flaky
+// now) or in_progress with NO live owner other than the draining seat itself
+// (dead sibling, or a named/pool seat with no live replacement — the
+// gastownhall/gascity#2293 cap-hit self-strand). The key is owner-LIVENESS
+// against the reconciler's running-session inventory (liveOwners), NOT the
+// assignee's identity shape: production hook claims stamp the alias/agent
+// identity rather than the durable bead ID, so a "assignee == own bead ID" test
+// would silence the strict superset of genuine alias-claimed strands. The
+// open+ready candidate is resolved first and independently, and the in_progress
+// walk continues past benign live-sibling rows across every reachable leg
+// (firstStrandedInProgressAssignedWorkBeadForReachableStore) so neither can mask
+// the other. It fails CLOSED: a read error yields (found=false), so a flaky
 // store never manufactures the alarm this classifier exists to keep honest.
 func drainAckClaimableAnomalyBead(
 	cityPath string,
@@ -634,6 +702,7 @@ func drainAckClaimableAnomalyBead(
 	store beads.Store,
 	rigStores map[string]beads.Store,
 	info sessionpkg.Info,
+	liveOwners liveSessionOwnerSet,
 ) (beads.Bead, bool, error) {
 	readyBead, readyFound, err := firstReadyAssignedWorkBeadForReachableStore(cityPath, cfg, store, rigStores, info)
 	if err != nil {
@@ -642,16 +711,7 @@ func drainAckClaimableAnomalyBead(
 	if readyFound {
 		return readyBead, true, nil
 	}
-	strandedBead, found, err := firstOpenAssignedWorkBeadForReachableStore(cityPath, cfg, store, rigStores, info)
-	if err != nil {
-		return beads.Bead{}, false, err
-	}
-	if found &&
-		strings.EqualFold(strings.TrimSpace(strandedBead.Status), "in_progress") &&
-		strings.TrimSpace(strandedBead.Assignee) == strings.TrimSpace(info.ID) {
-		return strandedBead, true, nil
-	}
-	return beads.Bead{}, false, nil
+	return firstStrandedInProgressAssignedWorkBeadForReachableStore(cityPath, cfg, store, rigStores, info, liveOwners)
 }
 
 // drainAckFinalizeResult captures the Info-snapshot effect of a
@@ -715,6 +775,7 @@ func finalizeDrainAckStoppedSession(
 	store beads.Store,
 	rigStores map[string]beads.Store,
 	info sessionpkg.Info,
+	liveOwners liveSessionOwnerSet,
 	template string,
 	closeIfUnassigned bool,
 	dops drainOps,
@@ -852,7 +913,7 @@ func finalizeDrainAckStoppedSession(
 	}
 	recordStopped(true)
 	if hasAssignedWork {
-		recordDrainAckAssignedWorkEvent(cityPath, cfg, store, rigStores, info, template, template, name, rec, stderr)
+		recordDrainAckAssignedWorkEvent(cityPath, cfg, store, rigStores, info, liveOwners, template, template, name, rec, stderr)
 	}
 	// Non-close drain-ack: the snapshot fold is the ApplyPatchInfo result above.
 	return drainAckFinalizeResult{folded: &foldedInfo}
@@ -865,6 +926,7 @@ func reconcileDrainAckStopPending(
 	store beads.Store,
 	rigStores map[string]beads.Store,
 	info sessionpkg.Info,
+	liveOwners liveSessionOwnerSet,
 	tp TemplateParams,
 	desired bool,
 	dops drainOps,
@@ -888,7 +950,7 @@ func reconcileDrainAckStopPending(
 		return true, drainAckFinalizeResult{}
 	}
 	return true, finalizeDrainAckStoppedSession(
-		cityPath, cfg, store, rigStores, info, tp.TemplateName,
+		cityPath, cfg, store, rigStores, info, liveOwners, tp.TemplateName,
 		!desired || isPoolManagedSessionInfo(info),
 		dops, dt, clk, rec, stderr,
 	)
@@ -934,6 +996,10 @@ func finalizeDrainAckStopPendingSessions(
 	if store == nil || sp == nil || len(infos) == 0 {
 		return 0
 	}
+	// The caller-fed snapshot IS this pass's live-session inventory, so the
+	// drain-ack anomaly classifier can tell an in_progress bead a live sibling
+	// owns from a genuine strand without a re-query.
+	liveOwners := buildLiveSessionOwnerSet(infos, cfg)
 	finalized := 0
 	for _, info := range infos {
 		if !isDrainAckStopPendingInfo(info) {
@@ -971,7 +1037,7 @@ func finalizeDrainAckStopPendingSessions(
 		// state=drained: open pool session beads occupy slots in the next demand
 		// calculation, while closed beads remain only as lifecycle history.
 		finalizeDrainAckStoppedSession(
-			cityPath, cfg, store, rigStores, info,
+			cityPath, cfg, store, rigStores, info, liveOwners,
 			normalizedSessionTemplateInfo(info, cfg),
 			isPoolManagedSessionInfo(info),
 			dops, dt, clk, rec, stderr,
@@ -1684,6 +1750,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	infoByID := tick.infoByID
 	orderedIDs := tick.orderedIDs
 
+	// The tick's running-session inventory, indexed by assignment identifier, is
+	// built once from the tick-start snapshot so the drain-ack anomaly classifier
+	// can tell an in_progress bead a live sibling incarnation owns (correct
+	// surplus-seat / pool-recycle drain, suppress) from one with no live owner but
+	// the draining seat itself (a genuine strand, fire). Built before the forward
+	// pass so a session closed mid-tick is still counted as the live owner it was
+	// at tick start, matching the reconciler's coherent snapshot view.
+	liveOwners := buildLiveSessionOwnerSet(orderedInfos, cfg)
+
 	phaseStart = time.Now()
 	cbNow := clk.Now().UTC()
 	cbCfg, cbEnabled := sessionCircuitBreakerConfigFromCity(cfg)
@@ -1847,7 +1922,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			dt.clearSuspendDeferral(id)
 		}
 
-		if handled, result := reconcileDrainAckStopPending(cityPath, cfg, sp, store, rigStores, info, tp, desired, dops, dt, asyncStopTracker, clk, rec, stderr); handled {
+		if handled, result := reconcileDrainAckStopPending(cityPath, cfg, sp, store, rigStores, info, liveOwners, tp, desired, dops, dt, asyncStopTracker, clk, rec, stderr); handled {
 			// finalizeDrainAckStoppedSession (inside reconcileDrainAckStopPending)
 			// may close the bead in memory (Status=closed) on this true/continue
 			// path; fold that close onto the snapshot so the cross-session min-floor
@@ -2305,7 +2380,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							continue
 						}
 						result := finalizeDrainAckStoppedSession(
-							cityPath, cfg, store, rigStores, infoByID[id], template,
+							cityPath, cfg, store, rigStores, infoByID[id], liveOwners, template,
 							true, dops, dt, clk, rec, stderr,
 						)
 						// finalizeDrainAckStoppedSession may close the bead in memory; fold
@@ -2759,7 +2834,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						finalizeDT = nil
 					}
 					result := finalizeDrainAckStoppedSession(
-						cityPath, cfg, store, rigStores, infoByID[id], tp.TemplateName,
+						cityPath, cfg, store, rigStores, infoByID[id], liveOwners, tp.TemplateName,
 						isPoolManagedSessionInfo(infoByID[id]),
 						dops, finalizeDT,
 						clk, rec, stderr,
@@ -4778,7 +4853,10 @@ func firstReadyAssignedWorkBeadForReachableStore(
 // given identifiers. It is the ready-keyed sibling of
 // firstOpenAssignedWorkBeadInStoreByIdentifiers: ReadyAssignedTo already
 // excludes in_progress and dependency-blocked rows, so this returns only rows a
-// worker for this session could claim right now.
+// worker for this session could claim right now. It also skips the seat's own
+// mol-do-work drain step (isSessionOwnDrainStepBead), mirroring the close gate's
+// hasNonSessionNonOwnDrainStepWork so a session's own open drain step is never
+// reported as a claimable strand.
 func firstReadyAssignedWorkBeadInStoreByIdentifiers(store beads.Store, identifiers []string) (beads.Bead, bool, error) {
 	if store == nil {
 		return beads.Bead{}, false, nil
@@ -4799,6 +4877,95 @@ func firstReadyAssignedWorkBeadInStoreByIdentifiers(store beads.Store, identifie
 		}
 		for _, item := range excludeMailMessageBeads(items) {
 			if sessionpkg.IsSessionBeadOrRepairable(item) {
+				continue
+			}
+			if isSessionOwnDrainStepBead(store, item) {
+				continue
+			}
+			return item, true, nil
+		}
+	}
+	return beads.Bead{}, false, nil
+}
+
+// firstStrandedInProgressAssignedWorkBeadForReachableStore walks EVERY reachable
+// leg for an in_progress work bead assigned to the draining session whose
+// assignee has no live owner other than the session itself — a genuine strand.
+// Unlike firstOpenAssignedWorkBeadForReachableStore (which stops at the first
+// leg with any match), it must not let a benign in_progress row a live sibling
+// is working in an earlier leg mask a genuine strand in a later leg, so it keeps
+// walking until it finds an unowned in_progress row or exhausts the plan. This
+// mirrors the independence of the ready walk. Returns (zero-bead, false, nil)
+// when every in_progress match is owned by a live sibling incarnation.
+func firstStrandedInProgressAssignedWorkBeadForReachableStore(
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	info sessionpkg.Info,
+	liveOwners liveSessionOwnerSet,
+) (beads.Bead, bool, error) {
+	identifiers := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
+	plan, err := assignedWorkPlanForSessionInfo(cityPath, cfg, store, rigStores, info)
+	if err != nil {
+		return beads.Bead{}, false, err
+	}
+	var (
+		bead  beads.Bead
+		found bool
+	)
+	res, err := storeref.Walk(plan, func(leg storeref.Leg) (bool, error) {
+		b, ok, err := firstStrandedInProgressAssignedWorkBeadInStoreByIdentifiers(leg.Store, identifiers, info.ID, liveOwners)
+		if err != nil {
+			return false, err
+		}
+		bead, found = b, ok
+		return ok, nil
+	})
+	if err != nil {
+		return beads.Bead{}, false, err
+	}
+	if !found {
+		if err := assignedWorkScanComplete(res); err != nil {
+			return beads.Bead{}, false, err
+		}
+	}
+	return bead, found, nil
+}
+
+// firstStrandedInProgressAssignedWorkBeadInStoreByIdentifiers returns the first
+// in_progress non-session, non-mail work bead in store assigned to one of the
+// given identifiers whose assignee is not owned by a live session other than
+// selfID — i.e. a genuine strand. In_progress rows a live sibling incarnation is
+// working (owner-liveness true) are skipped so a surplus-seat / pool-recycle
+// drain does not alarm, and the seat's own mol-do-work drain step is skipped for
+// parity with the ready finder and the close gate.
+func firstStrandedInProgressAssignedWorkBeadInStoreByIdentifiers(store beads.Store, identifiers []string, selfID string, liveOwners liveSessionOwnerSet) (beads.Bead, bool, error) {
+	if store == nil {
+		return beads.Bead{}, false, nil
+	}
+	wa := workAssignmentForStore(beads.WorkStore{Store: store})
+	seen := make(map[string]struct{}, len(identifiers))
+	for _, assignee := range identifiers {
+		if assignee == "" {
+			continue
+		}
+		if _, ok := seen[assignee]; ok {
+			continue
+		}
+		seen[assignee] = struct{}{}
+		items, err := wa.OpenAssignedTo(assignee, "in_progress", beads.TierBoth, true)
+		if err != nil {
+			return beads.Bead{}, false, err
+		}
+		for _, item := range items {
+			if sessionpkg.IsSessionBeadOrRepairable(item) {
+				continue
+			}
+			if isSessionOwnDrainStepBead(store, item) {
+				continue
+			}
+			if liveOwners.ownedByLiveSessionOtherThan(item.Assignee, selfID) {
 				continue
 			}
 			return item, true, nil

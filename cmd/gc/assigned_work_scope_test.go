@@ -575,6 +575,94 @@ func TestSessionAssignedWorkGuardsFederateForCityScopedSession(t *testing.T) {
 	}
 }
 
+// TestFirstStrandedInProgressWalkDoesNotMaskLaterLegStrand pins finding #2: the
+// in_progress owner-liveness walk must run across EVERY reachable leg so a benign
+// in_progress row a live sibling owns in an earlier leg cannot mask a genuine
+// strand in a later leg. The single-result finder (firstOpenAssignedWorkBeadFor-
+// ReachableStore) stops at the first leg with any match, so the classifier that
+// inspected its one result would see the benign row and miss the strand. The
+// dedicated walk skips owner-live rows and keeps going.
+func TestFirstStrandedInProgressWalkDoesNotMaskLaterLegStrand(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "riga")
+	const poolAlias = "riga/worker"
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "riga", Path: rigPath}},
+		Agents: []config.Agent{{
+			Name:  "worker",
+			Scope: "city",
+		}},
+	}
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	rigStores := map[string]beads.Store{"riga": rigStore}
+
+	drainingBead := beads.Bead{
+		ID:     "session-draining",
+		Type:   sessionBeadType,
+		Status: "open",
+		Metadata: map[string]string{
+			"template":                   "worker",
+			"session_name":               "worker-1",
+			namedSessionIdentityMetadata: poolAlias,
+		},
+	}
+	siblingBead := beads.Bead{
+		ID:     "session-sibling",
+		Type:   sessionBeadType,
+		Status: "open",
+		Metadata: map[string]string{
+			"template":                   "worker",
+			"session_name":               "worker-2",
+			namedSessionIdentityMetadata: poolAlias,
+		},
+	}
+	draining := sessiontest.SeedBead(t, drainingBead)
+	sibling := sessiontest.SeedBead(t, siblingBead)
+	// The draining seat AND a distinctly-named LIVE sibling both carry the pool
+	// alias; only the draining seat carries its own bead ID.
+	liveOwners := buildLiveSessionOwnerSet([]sessionpkg.Info{draining, sibling}, cfg)
+
+	// City leg: an in_progress row on the shared pool alias — a LIVE sibling owns
+	// it, so it is benign and must be walked past.
+	benign, err := cityStore.Create(beads.Bead{Type: "task", Assignee: poolAlias})
+	if err != nil {
+		t.Fatalf("Create(benign): %v", err)
+	}
+	inProgress := "in_progress"
+	if err := cityStore.Update(benign.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("mark benign in_progress: %v", err)
+	}
+	// Rig leg: an in_progress row on the draining seat's OWN bead ID — no live
+	// incarnation but the draining seat itself owns it, so it is a genuine strand.
+	strand, err := rigStore.Create(beads.Bead{Type: "task", Assignee: drainingBead.ID})
+	if err != nil {
+		t.Fatalf("Create(strand): %v", err)
+	}
+	if err := rigStore.Update(strand.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("mark strand in_progress: %v", err)
+	}
+
+	// The single-result finder stops at the first leg with any match: it returns
+	// the benign city row and would let it mask the strand.
+	first, foundFirst, err := firstOpenAssignedWorkBeadForReachableStore(cityPath, cfg, cityStore, rigStores, draining)
+	if err != nil {
+		t.Fatalf("firstOpenAssignedWorkBeadForReachableStore: %v", err)
+	}
+	if !foundFirst || first.ID != benign.ID {
+		t.Fatalf("single-result finder = (%v, %q), want the benign city row %q first (leg ordering assumption for this masking test)", foundFirst, first.ID, benign.ID)
+	}
+
+	// The dedicated owner-liveness walk skips the benign row and finds the strand.
+	got, found, err := firstStrandedInProgressAssignedWorkBeadForReachableStore(cityPath, cfg, cityStore, rigStores, draining, liveOwners)
+	if err != nil {
+		t.Fatalf("firstStrandedInProgressAssignedWorkBeadForReachableStore: %v", err)
+	}
+	if !found || got.ID != strand.ID {
+		t.Fatalf("stranded walk = (%v, %q), want the genuine later-leg strand %q — a benign live-sibling row must not mask it", found, got.ID, strand.ID)
+	}
+}
+
 func TestSessionHasOpenAssignedWorkMatchesConfiguredNamedSessionRuntimeFallback(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
