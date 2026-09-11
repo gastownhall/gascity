@@ -372,7 +372,8 @@ Each scope is migrated with bd's own `bd migrate from-server-to-proxied-server`,
 city first. The command is idempotent — an already-proxied scope reports
 "already migrated" — so a partially failed run can simply be rerun.
 
-This is the interim rc.2 path. The journaled ownership handoff supersedes it.
+This is the interim rc.2 path; the journaled ownership handoff supersedes it.
+Procedure, refusals and recovery: engdocs/runbooks/beads-migrate-proxied.md.
 
 ```
 gc beads city migrate-proxied [flags]
