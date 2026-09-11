@@ -1953,12 +1953,6 @@ const (
 // DoltConfig holds optional dolt server overrides.
 // When present in city.toml, these override the defaults.
 type DoltConfig struct {
-	// Mode selects the Dolt transport for Beads scopes. The empty value uses
-	// the managed local proxied-server default. Set "server" to opt into the
-	// direct SQL-server path, or "proxied-server" to select the proxy path
-	// explicitly. Host/port may identify a remote Dolt upstream for either
-	// server mode or proxied-server mode.
-	Mode string `toml:"mode,omitempty" jsonschema:"enum=server,enum=proxied-server"`
 	// Port is the dolt server port. 0 means use ephemeral port allocation
 	// (hashed from city path). Set explicitly to override.
 	Port int `toml:"port,omitempty" jsonschema:"default=0"`
@@ -4665,6 +4659,13 @@ func Parse(data []byte) (*City, error) {
 	cfg := City{}
 	md, err := toml.Decode(string(data), &cfg)
 	if err != nil {
+		return nil, fmt.Errorf("parsing config: %w", err)
+	}
+	// Parse intentionally preserves non-storage legacy authoring surfaces for
+	// the migration reader. The removed Dolt mode is topology authority, never
+	// migration input, so reject it at decode time without broadening that
+	// tolerance.
+	if err := validateDoltModeAuthoringSurface(md); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 	if err := validateStorageAuthoringSurface(md); err != nil {

@@ -952,15 +952,15 @@ func managedBdWaitTestTemplate(t *testing.T, bdPath, doltPath string) string {
 			managedBdWaitTemplateErr = fmt.Errorf("write template scaffold: %w", err)
 			return
 		}
-		// This template is exclusively for direct-server rebind coverage.
-		cityConfigPath := filepath.Join(cityPath, "city.toml")
-		cityConfig, readErr := os.ReadFile(cityConfigPath)
-		if readErr != nil {
-			managedBdWaitTemplateErr = fmt.Errorf("read template city config: %w", readErr)
+		// This template is exclusively for direct-server rebind coverage. The
+		// initialized Beads scope, rather than city.toml, owns that transport.
+		beadsDir := filepath.Join(cityPath, ".beads")
+		if mkdirErr := os.MkdirAll(beadsDir, 0o755); mkdirErr != nil {
+			managedBdWaitTemplateErr = fmt.Errorf("make template beads directory: %w", mkdirErr)
 			return
 		}
-		if writeErr := os.WriteFile(cityConfigPath, append(cityConfig, []byte("\n[dolt]\nmode = \"server\"\n")...), 0o644); writeErr != nil {
-			managedBdWaitTemplateErr = fmt.Errorf("write direct template mode: %w", writeErr)
+		if writeErr := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt.mode: server\n"), 0o644); writeErr != nil {
+			managedBdWaitTemplateErr = fmt.Errorf("write direct template binding: %w", writeErr)
 			return
 		}
 		if err := EnsureBuiltinRuntimeAssets(cityPath, io.Discard); err != nil {

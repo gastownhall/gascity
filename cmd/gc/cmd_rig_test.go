@@ -2948,7 +2948,11 @@ func TestDoRigAdd_AdoptWithBdContractInvokesInitAndHook(t *testing.T) {
 func TestDoRigAdd_AdoptWithBdContractProvider_NonAdoptControlInvokesInit(t *testing.T) {
 	cityPath := t.TempDir()
 	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
-	t.Setenv("GC_BEADS", "exec:"+filepath.Join(cityPath, "gc-beads-bd"))
+	provider := filepath.Join(cityPath, "gc-beads-bd")
+	if err := os.WriteFile(provider, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "exec:"+provider)
 	t.Setenv("GC_DOLT", "")
 
 	origEnsure := initDirIfReadyEnsureBeadsProvider
@@ -2965,6 +2969,10 @@ func TestDoRigAdd_AdoptWithBdContractProvider_NonAdoptControlInvokesInit(t *test
 	var initCalls []string
 	initDirIfReadyInitAndHookDir = func(_, dir, _ string) error {
 		initCalls = append(initCalls, dir)
+		entry, owned, err := providerScopeOwnership(cityPath, dir)
+		if err != nil || !owned || entry.State != providerScopeInitializing || entry.Intent != (providerScopeIntent{Transport: "proxied", Target: "local"}) {
+			t.Fatalf("new rig ownership before provider init = (%+v, %t, %v)", entry, owned, err)
+		}
 		return nil
 	}
 
@@ -2974,7 +2982,9 @@ func TestDoRigAdd_AdoptWithBdContractProvider_NonAdoptControlInvokesInit(t *test
 	}
 
 	var stdout, stderr bytes.Buffer
-	doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "fr", "", false, false, &stdout, &stderr)
+	if code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "fr", "", false, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("doRigAdd = %d, stderr=%s", code, stderr.String())
+	}
 	if len(initCalls) == 0 {
 		t.Fatalf("control: non-adopt rig add invoked initAndHookDir 0 times; stub not wired in? stderr=%s", stderr.String())
 	}

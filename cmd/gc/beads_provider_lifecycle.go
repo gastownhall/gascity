@@ -184,6 +184,12 @@ func isRetryableManagedDoltLifecycleError(err error) bool {
 // Called by gc start and controller config reload. Rigs must have absolute
 // paths before calling (resolve relative paths first).
 func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer) error {
+	if err := ensureFreshRigProviderOwnership(cityPath, cfg); err != nil {
+		return err
+	}
+	if err := validateProviderScopeOwnership(cityPath, cfg); err != nil {
+		return err
+	}
 	if err := validateCanonicalCompatDoltDrift(cityPath, cfg); err != nil {
 		return err
 	}
@@ -192,10 +198,20 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 	// registration point — supervisor, standalone, and reload all flow
 	// through here. Always write (or clear) to handle config reload:
 	// removing [dolt] after a reload must not leave stale entries.
-	if cityDoltConfigHasLifecycleFields(cfg.Dolt) {
-		registerCityDoltConfig(cityPath, cfg.Dolt)
-	} else {
-		clearCityDoltConfig(cityPath)
+	entry, providerOwned, ownershipErr := providerScopeOwnership(cityPath, cityPath)
+	if ownershipErr != nil {
+		return ownershipErr
+	}
+	// A generic external selector has supplied its endpoint only for this init
+	// process. Do not erase that ephemeral input by reloading an intentionally
+	// endpoint-free city.toml before bd gets to persist its own binding.
+	keepPendingExternalSelector := providerOwned && entry.State == providerScopeInitializing && entry.Intent.Target == "external" && hasSelectorExternalInitOptions(cityPath)
+	if !keepPendingExternalSelector {
+		if cityDoltConfigHasLifecycleFields(cfg.Dolt) {
+			registerCityDoltConfig(cityPath, cfg.Dolt)
+		} else {
+			clearCityDoltConfig(cityPath)
+		}
 	}
 	// Proxied-server scopes own their Dolt child and proxy through beads' UOW.
 	// Gas City must not start or publish a second direct sql-server for them.
@@ -224,7 +240,16 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 	case cityUsesDoltliteBeadsBackend(cityPath):
 		skipLocalDolt = true
 	}
-	if !skipLocalDolt {
+	if owned, err := cityScopeProviderOwned(cityPath); err != nil {
+		return err
+	} else if owned {
+		entry, _, _ := providerScopeOwnership(cityPath, cityPath)
+		if entry.State == providerScopeReady {
+			if err := ensureBeadsProvider(cityPath); err != nil {
+				return fmt.Errorf("provider-owned bead store: %w", err)
+			}
+		}
+	} else if !skipLocalDolt {
 		if err := ensureBeadsProvider(cityPath); err != nil {
 			return fmt.Errorf("bead store: %w", err)
 		}
@@ -266,6 +291,43 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 // Returns (deferred bool, err). deferred=true means the bd provider
 // skipped init — the caller should tell the user it's deferred to gc start.
 func initDirIfReady(cityPath, dir, prefix string) (deferred bool, err error) {
+	if gcDoltSkip() {
+		scopeOwned, ownershipErr := scopeProviderOwned(cityPath, dir)
+		if ownershipErr != nil {
+			return false, ownershipErr
+		}
+		if scopeOwned {
+			return true, nil
+		}
+		// A legacy skip keeps its historical deferred scaffold. Once the city
+		// has delegated its lifecycle, however, the new scope needs a durable
+		// intent before any deferred artifact can be written.
+		cityOwned, ownershipErr := cityScopeProviderOwned(cityPath)
+		if ownershipErr != nil {
+			return false, ownershipErr
+		}
+		if cityOwned {
+			if err := ensureProviderScopeOwnershipBeforeInit(cityPath, dir); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
+	} else {
+		if err := ensureProviderScopeOwnershipBeforeInit(cityPath, dir); err != nil {
+			return false, err
+		}
+	}
+	if owned, ownershipErr := scopeProviderOwned(cityPath, dir); ownershipErr != nil {
+		return false, ownershipErr
+	} else if owned {
+		if err := initDirIfReadyInitAndHookDir(cityPath, dir, prefix); err != nil {
+			return false, err
+		}
+		if err := runProviderOwnedScopeLifecycleOpContext(context.Background(), cityPath, dir, "health"); err != nil {
+			return false, fmt.Errorf("provider-owned bead store readiness: %w", err)
+		}
+		return false, nil
+	}
 	provider := beadsProvider(cityPath)
 	if scopeUsesProxiedDoltMode(cityPath, dir) || (!scopeOverridesCityBackend(cityPath, dir) && scopeUsesProxiedDoltMode(cityPath, cityPath)) {
 		if err := initDirIfReadyInitAndHookDir(cityPath, dir, prefix); err != nil {
@@ -348,6 +410,9 @@ func initDirIfReadyManagedDolt(cityPath, dir, prefix, _ string) error {
 // scope is brand new, derive the mode from the desired managed-local state so
 // startup can skip direct-Dolt lifecycle before the first bd init.
 func scopeUsesProxiedDoltMode(cityPath, scopeRoot string) bool {
+	if entry, owned, err := providerScopeOwnership(cityPath, scopeRoot); err == nil && owned && entry.State == providerScopeInitializing {
+		return entry.Intent.Transport == "proxied"
+	}
 	// A complete storage binding is owned by the linked beads backend. It must
 	// never be reclassified as a fresh managed-local scope merely because a
 	// config selector requests proxy mode; doing so would replace the binding's
@@ -361,8 +426,10 @@ func scopeUsesProxiedDoltMode(cityPath, scopeRoot string) bool {
 	// Resolve the effective configured backend before considering either mode
 	// marker or the fresh-scope default.
 	effectiveBackend := strings.TrimSpace(beadsBackend(cityPath))
+	hasDoltMetadata := false
 	if backend, ok, err := contract.ReadMetadataBackend(fsys.OSFS{}, scopeMetadataJSONPath(scopeRoot)); err == nil && ok {
 		effectiveBackend = strings.TrimSpace(backend)
+		hasDoltMetadata = contract.IsDoltBackend(effectiveBackend)
 	}
 	if !contract.IsDoltBackend(effectiveBackend) {
 		return false
@@ -386,6 +453,12 @@ func scopeUsesProxiedDoltMode(cityPath, scopeRoot string) bool {
 			return false
 		}
 	}
+	// An initialized Dolt scope from before dolt_mode was persisted is a
+	// legacy direct server. Only scopes without a persisted Dolt identity may
+	// receive the fresh proxied-local default below.
+	if hasDoltMetadata {
+		return false
+	}
 	// A process-local external endpoint remains an explicit direct-server
 	// selection for this invocation. It is deliberately not persisted into the
 	// canonical scope files, but it must take precedence over config selection
@@ -402,6 +475,13 @@ func scopeUsesProxiedDoltMode(cityPath, scopeRoot string) bool {
 		if _, err := os.Stat(runtimePath); err == nil {
 			return false
 		}
+	}
+	// Absence of ownership is legacy for the city scope. Fresh provider init
+	// records its pending intent before it reaches this classifier; a valid
+	// existing city with no journal or Beads identity must retain the direct
+	// lifecycle rather than acquire the fresh proxied default.
+	if samePath(cityPath, scopeRoot) {
+		return false
 	}
 	// Only bd-contract scopes can use the proxied Dolt UOW path. A rig whose
 	// city provider is file/sqlite still gets the default bd-backed rig store,
@@ -650,6 +730,28 @@ func normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, doltDatabase s
 // wipe existing hooks. installBeadHooks only removes gc-stamped hooks and
 // is always safe to run regardless of event_hooks config.
 func initAndHookDir(cityPath, dir, prefix string) error {
+	if owned, err := scopeProviderOwned(cityPath, dir); err != nil {
+		return err
+	} else if owned {
+		provider := beadsProvider(cityPath)
+		if !strings.HasPrefix(provider, "exec:") {
+			return fmt.Errorf("provider-owned scope %q requires an exec beads provider", dir)
+		}
+		pending, err := runProviderOwnedScopeInit(cityPath, dir, prefix, strings.TrimPrefix(provider, "exec:"))
+		if err != nil {
+			return err
+		}
+		if err := installBeadHooks(dir, cityPath); err != nil {
+			return fmt.Errorf("install hooks at %s: %w", dir, err)
+		}
+		if err := runProviderOwnedScopeLifecycleOpContext(context.Background(), cityPath, dir, "health"); err != nil {
+			return fmt.Errorf("provider-owned scope readiness: %w", err)
+		}
+		if pending {
+			return markProviderScopeOwnershipReady(cityPath, dir)
+		}
+		return nil
+	}
 	if skipsManagedDolt, err := scopeSkipsManagedDoltForInit(cityPath, dir); err != nil {
 		return err
 	} else if skipsManagedDolt {
@@ -942,7 +1044,303 @@ func resolveRigPaths(cityPath string, rigs []config.Rig) {
 // For exec providers, fires "start". For file providers, always available.
 // Acquires a per-city semaphore to prevent concurrent start operations
 // from causing spawn storms.
+func runProviderOwnedLifecycleOp(cityPath, op string) error {
+	return runProviderOwnedLifecycleOpContext(context.Background(), cityPath, op)
+}
+
+func runProviderOwnedLifecycleOpContext(parent context.Context, cityPath, op string) error {
+	return runProviderOwnedScopeLifecycleOpContext(parent, cityPath, cityPath, op)
+}
+
+func runProviderOwnedScopeLifecycleOpContext(parent context.Context, cityPath, scopeRoot, op string) error {
+	provider := beadsProvider(cityPath)
+	if !strings.HasPrefix(provider, "exec:") {
+		return fmt.Errorf("provider-owned scope requires an exec beads provider")
+	}
+	release, err := acquireProviderSemaphoreForOpContext(parent, cityPath, op)
+	if err != nil {
+		return err
+	}
+	defer release()
+	env, err := providerLifecycleProcessEnvForScopeInitWithError(cityPath, scopeRoot, provider)
+	if err != nil {
+		return err
+	}
+	// Transport and target selectors are one-shot init input. A ready or
+	// transferred scope must derive its topology from bd's persisted binding,
+	// never from an ambient process environment left by another city.
+	for _, key := range []string{"GC_BEADS_TRANSPORT", "GC_BEADS_TARGET", "BEADS_DOLT_PROXIED_SERVER"} {
+		env = removeEnvKey(env, key)
+	}
+	if entry, owned, err := providerScopeOwnership(cityPath, scopeRoot); err != nil {
+		return err
+	} else if owned && entry.State == providerScopeInitializing {
+		env = overlayEnvEntries(env, map[string]string{
+			"GC_BEADS_TRANSPORT": entry.Intent.Transport,
+			"GC_BEADS_TARGET":    entry.Intent.Target,
+		})
+		if entry.Intent.Transport == "proxied" {
+			env = overlayEnvEntries(env, map[string]string{"BEADS_DOLT_PROXIED_SERVER": "1"})
+		}
+	}
+	env = overlayEnvEntries(env, map[string]string{
+		"BEADS_DIR":               filepath.Join(scopeRoot, ".beads"),
+		"GC_BEADS_PROVIDER_OWNED": "1",
+	})
+	return runProviderOwnedOpStrict(parent, strings.TrimPrefix(provider, "exec:"), env, op)
+}
+
+func runProviderOwnedScopesLifecycleOp(cityPath, op string) error {
+	return runProviderOwnedScopesLifecycleOpContext(context.Background(), cityPath, op)
+}
+
+func runProviderOwnedScopesLifecycleOpContext(parent context.Context, cityPath, op string) error {
+	scopes := []string{cityPath}
+	if cfg, err := loadCityConfig(cityPath, io.Discard); err != nil {
+		return err
+	} else if cfg != nil {
+		resolveRigPaths(cityPath, cfg.Rigs)
+		for _, rig := range cfg.Rigs {
+			if strings.TrimSpace(rig.Path) != "" {
+				scopes = append(scopes, rig.Path)
+			}
+		}
+	}
+	for _, scopeRoot := range scopes {
+		owned, err := scopeProviderOwned(cityPath, scopeRoot)
+		if err != nil {
+			return err
+		}
+		if !owned {
+			continue
+		}
+		if err := runProviderOwnedScopeLifecycleOpContext(parent, cityPath, scopeRoot, op); err != nil {
+			return fmt.Errorf("provider-owned scope %q %s: %w", scopeRoot, op, err)
+		}
+	}
+	return nil
+}
+
+func hasProviderOwnedRigScope(cityPath string) (bool, error) {
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil || cfg == nil {
+		return false, err
+	}
+	resolveRigPaths(cityPath, cfg.Rigs)
+	for _, rig := range cfg.Rigs {
+		if strings.TrimSpace(rig.Path) == "" {
+			continue
+		}
+		owned, err := scopeProviderOwned(cityPath, rig.Path)
+		if err != nil {
+			return false, err
+		}
+		if owned {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// runProviderOwnedScopeInit initializes a pending GC-owned scope. Ready and
+// explicitly transferred scopes already have durable bd state, so reopening
+// their provider is sufficient and must not require erased selector intent.
+// The bool reports whether this invocation may commit the pending GC journal.
+func runProviderOwnedScopeInit(cityPath, dir, prefix, script string) (bool, error) {
+	entry, owned, err := providerScopeOwnership(cityPath, dir)
+	if err != nil {
+		return false, err
+	}
+	if !owned {
+		transferred, err := committedBeadsHandoffOwnsScope(dir)
+		if err != nil {
+			return false, err
+		}
+		if !transferred {
+			return false, fmt.Errorf("provider-owned scope %q has no initialization intent", dir)
+		}
+		return false, runProviderOwnedScopeLifecycleOpContext(context.Background(), cityPath, dir, "start")
+	}
+	if entry.State == providerScopeReady {
+		return false, runProviderOwnedScopeLifecycleOpContext(context.Background(), cityPath, dir, "start")
+	}
+	env, err := providerLifecycleProcessEnvForScopeInitWithError(cityPath, dir, "exec:"+script)
+	if err != nil {
+		return false, err
+	}
+	if entry.Intent.Target == "local" {
+		// A fresh local provider scope owns its listener. Do not pass legacy
+		// GC managed-server coordinates, auto-start policy, or runtime paths to
+		// bd: those turn a new owned server into a client of a stale endpoint.
+		for _, key := range []string{
+			"GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER", "GC_DOLT_PASSWORD",
+			"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_SERVER_SOCKET",
+			"BEADS_DOLT_AUTO_START", "GC_DOLT_DATA_DIR", "GC_DOLT_LOG_FILE",
+			"GC_DOLT_STATE_FILE", "GC_DOLT_PID_FILE", "GC_DOLT_LOCK_FILE", "GC_DOLT_CONFIG_FILE",
+		} {
+			env = removeEnvKey(env, key)
+		}
+	}
+	if entry.Intent.Target == "external" && !samePath(cityPath, dir) {
+		overrides, err := inheritedProviderExternalEndpointEnv(cityPath, entry.Intent)
+		if err != nil {
+			return false, err
+		}
+		env = overlayEnvEntries(env, overrides)
+	}
+	if err := validatePendingProviderEndpoint(cityPath, dir, entry.Intent, env); err != nil {
+		return false, err
+	}
+	overrides := map[string]string{
+		"BEADS_DIR":               filepath.Join(dir, ".beads"),
+		"GC_BEADS_PROVIDER_OWNED": "1",
+	}
+	if entry.State == providerScopeInitializing {
+		overrides["GC_BEADS_TRANSPORT"] = entry.Intent.Transport
+		overrides["GC_BEADS_TARGET"] = entry.Intent.Target
+	}
+	env = overlayEnvEntries(env, overrides)
+	if entry.State == providerScopeInitializing && entry.Intent.Transport == "proxied" {
+		env = overlayEnvEntries(env, map[string]string{"BEADS_DOLT_PROXIED_SERVER": "1"})
+	}
+	args := []string{"init", dir, prefix}
+	database := ""
+	if entry.Intent.Target == "external" && !samePath(cityPath, dir) {
+		// A fresh rig must never inherit the city's external database from a
+		// caller environment. Its scope identity determines its own database.
+		database = canonicalScopeDoltDatabase(cityPath, dir, prefix)
+	} else {
+		database = selectorExternalInitDatabase(cityPath, dir)
+		if database == "" && entry.Intent.Target == "external" {
+			database = strings.TrimSpace(os.Getenv(envDoltDatabase))
+		}
+	}
+	if database != "" {
+		args = append(args, database)
+	}
+	if err := runProviderOwnedOpStrict(context.Background(), script, env, args...); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// inheritedProviderExternalEndpointEnv projects the ready city's durable bd
+// binding into a freshly-owned rig. The selector environment is intentionally
+// not required here: it belongs only to a city whose first init never
+// completed. A rig gets a distinct database from its own scope prefix.
+func inheritedProviderExternalEndpointEnv(cityPath string, intent providerScopeIntent) (map[string]string, error) {
+	if intent.Transport == "proxied" {
+		data, err := os.ReadFile(filepath.Join(cityPath, ".beads", "proxied_server_client_info.json"))
+		if err != nil {
+			return nil, fmt.Errorf("read city proxied server binding: %w", err)
+		}
+		var sidecar struct {
+			External *struct {
+				Host   string `json:"host"`
+				Port   int    `json:"port"`
+				Socket string `json:"socket"`
+			} `json:"external"`
+		}
+		if err := json.Unmarshal(data, &sidecar); err != nil {
+			return nil, fmt.Errorf("parse city proxied server binding: %w", err)
+		}
+		if sidecar.External == nil {
+			return nil, fmt.Errorf("city proxied server binding has no external upstream")
+		}
+		if socket := strings.TrimSpace(sidecar.External.Socket); socket != "" {
+			return map[string]string{"GC_BEADS_PROXY_EXTERNAL_SOCKET": socket}, nil
+		}
+		if strings.TrimSpace(sidecar.External.Host) == "" || sidecar.External.Port < 1 || sidecar.External.Port > 65535 {
+			return nil, fmt.Errorf("city proxied server binding has an invalid external upstream")
+		}
+		return map[string]string{
+			"GC_BEADS_PROXY_EXTERNAL_HOST": strings.TrimSpace(sidecar.External.Host),
+			"GC_BEADS_PROXY_EXTERNAL_PORT": strconv.Itoa(sidecar.External.Port),
+		}, nil
+	}
+	state, ok, err := contract.ResolveAuthoritativeConfigState(fsys.OSFS{}, cityPath, cityPath, "")
+	if err != nil {
+		return nil, fmt.Errorf("read city external binding: %w", err)
+	}
+	if !ok || state.EndpointOrigin != contract.EndpointOriginCityCanonical {
+		return nil, fmt.Errorf("city has no durable direct external binding")
+	}
+	if socket := strings.TrimSpace(state.DoltSocket); socket != "" {
+		return map[string]string{"BEADS_DOLT_SERVER_SOCKET": socket}, nil
+	}
+	if strings.TrimSpace(state.DoltHost) == "" || strings.TrimSpace(state.DoltPort) == "" {
+		return nil, fmt.Errorf("city direct external binding has no endpoint")
+	}
+	host, port := strings.TrimSpace(state.DoltHost), strings.TrimSpace(state.DoltPort)
+	return map[string]string{
+		"GC_DOLT_HOST": host, "GC_DOLT_PORT": port,
+		"BEADS_DOLT_SERVER_HOST": host, "BEADS_DOLT_SERVER_PORT": port,
+	}, nil
+}
+
+func validatePendingProviderEndpoint(cityPath, scopeRoot string, intent providerScopeIntent, environ []string) error {
+	if intent.Target != "external" {
+		return nil
+	}
+	env := runtimeEnvEntriesToMap(environ)
+	host, port := env["BEADS_DOLT_SERVER_HOST"], env["BEADS_DOLT_SERVER_PORT"]
+	if intent.Transport == "direct" && strings.TrimSpace(env["BEADS_DOLT_SERVER_SOCKET"]) != "" {
+		host, port = "socket", "socket"
+	} else if intent.Transport == "proxied" {
+		if strings.TrimSpace(env["GC_BEADS_PROXY_EXTERNAL_SOCKET"]) != "" {
+			host, port = "socket", "socket"
+		} else {
+			host, port = env["GC_BEADS_PROXY_EXTERNAL_HOST"], env["GC_BEADS_PROXY_EXTERNAL_PORT"]
+		}
+	}
+	if strings.TrimSpace(host) == "" || strings.TrimSpace(port) == "" {
+		return fmt.Errorf("provider-owned external scope is pending initialization but its endpoint is unavailable; rerun gc start with GC_DOLT_HOST, GC_DOLT_PORT, and GC_DOLT_DATABASE set")
+	}
+	// A new rig inherits a ready city's durable endpoint and receives its own
+	// canonical database name below. Only an incomplete city has no durable
+	// binding to recover from, so it still requires the one-shot selector or
+	// explicit retry environment.
+	if samePath(cityPath, scopeRoot) && selectorExternalInitDatabase(cityPath, scopeRoot) == "" && strings.TrimSpace(os.Getenv(envDoltDatabase)) == "" {
+		return fmt.Errorf("provider-owned external scope is pending initialization but its database is unavailable; rerun gc start with GC_DOLT_HOST, GC_DOLT_PORT, and GC_DOLT_DATABASE set")
+	}
+	return nil
+}
+
+// runProviderOwnedOpStrict differs from the legacy generic provider runner:
+// an exit status of 2 is a provider failure for a scope GC has explicitly
+// handed to the provider, never an invitation to fall back to GC lifecycle.
+func runProviderOwnedOpStrict(parent context.Context, script string, environ []string, args ...string) error {
+	op := "provider operation"
+	if len(args) > 0 {
+		op = args[0]
+	}
+	ctx, cancel := providerLifecycleContext(parent, providerOpTimeout(op))
+	defer cancel()
+	cmd := exec.CommandContext(ctx, script, args...)
+	cmd.WaitDelay = 2 * time.Second
+	prepareProviderOpCommand(cmd)
+	cmd.Env = environ
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("provider-owned beads %s: %w", op, ctxErr)
+		}
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return fmt.Errorf("provider-owned beads %s: %s", op, msg)
+	}
+	return nil
+}
+
 func ensureBeadsProvider(cityPath string) error {
+	if owned, err := cityScopeProviderOwned(cityPath); err != nil {
+		return err
+	} else if owned {
+		return runProviderOwnedLifecycleOp(cityPath, "start")
+	}
 	if cityUsesBdStoreContract(cityPath) && gcDoltSkip() {
 		return nil
 	}
@@ -1003,6 +1401,18 @@ func ensureBeadsProvider(cityPath string) error {
 // Called by gc stop after agents have been terminated.
 // For exec providers, fires "stop". For file providers, always available.
 func shutdownBeadsProvider(cityPath string) error {
+	if owned, err := cityScopeProviderOwned(cityPath); err != nil {
+		return err
+	} else if owned {
+		return runProviderOwnedScopesLifecycleOp(cityPath, "stop")
+	}
+	if ownedRig, err := hasProviderOwnedRigScope(cityPath); err != nil {
+		return err
+	} else if ownedRig {
+		if err := runProviderOwnedScopesLifecycleOp(cityPath, "stop"); err != nil {
+			return err
+		}
+	}
 	if cityUsesBdStoreContract(cityPath) && gcDoltSkip() {
 		return clearManagedDoltRuntimeStateUnlessBound(cityPath)
 	}
@@ -1413,6 +1823,31 @@ func healthBeadsProviderContext(ctx context.Context, cityPath string, waitForSco
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if owned, err := cityScopeProviderOwned(cityPath); err != nil {
+		return err
+	} else if owned {
+		if err := runProviderOwnedScopesLifecycleOpContext(ctx, cityPath, "health"); err == nil {
+			return nil
+		} else if recoverErr := runProviderOwnedScopesLifecycleOpContext(ctx, cityPath, "recover"); recoverErr != nil {
+			return fmt.Errorf("provider-owned scope unhealthy (%w) and recovery failed: %w", err, recoverErr)
+		}
+		if err := runProviderOwnedScopesLifecycleOpContext(ctx, cityPath, "health"); err != nil {
+			return fmt.Errorf("provider-owned scope unhealthy after recovery: %w", err)
+		}
+		return nil
+	}
+	if ownedRig, err := hasProviderOwnedRigScope(cityPath); err != nil {
+		return err
+	} else if ownedRig {
+		if err := runProviderOwnedScopesLifecycleOpContext(ctx, cityPath, "health"); err != nil {
+			if recoverErr := runProviderOwnedScopesLifecycleOpContext(ctx, cityPath, "recover"); recoverErr != nil {
+				return fmt.Errorf("provider-owned rig scope unhealthy (%w) and recovery failed: %w", err, recoverErr)
+			}
+			if err := runProviderOwnedScopesLifecycleOpContext(ctx, cityPath, "health"); err != nil {
+				return fmt.Errorf("provider-owned rig scope unhealthy after recovery: %w", err)
+			}
+		}
+	}
 	if cityUsesBdStoreContract(cityPath) && gcDoltSkip() {
 		return nil
 	}
@@ -1524,6 +1959,11 @@ func waitForAllBeadsScopesReadyAfterRecovery(cityPath string, timeout time.Durat
 }
 
 func waitForBeadsScopeReadyAfterRecovery(scopeRoot, cityPath string, deadline time.Time) error {
+	if owned, err := scopeProviderOwned(cityPath, scopeRoot); err != nil {
+		return err
+	} else if owned {
+		return runProviderOwnedScopeLifecycleOpContext(context.Background(), cityPath, scopeRoot, "health")
+	}
 	if scopeUsesProxiedDoltMode(cityPath, scopeRoot) || (!scopeOverridesCityBackend(cityPath, scopeRoot) && scopeUsesProxiedDoltMode(cityPath, cityPath)) {
 		return nil
 	}
@@ -2091,7 +2531,11 @@ func normalizeCanonicalBdScopeFiles(cityPath string, cfg *config.City, warns ...
 		warn = io.Discard
 	}
 	resolveRigPaths(cityPath, cfg.Rigs)
-	if scopeUsesManagedBdStoreContract(cityPath, cityPath) {
+	cityProviderOwned, err := scopeProviderOwned(cityPath, cityPath)
+	if err != nil {
+		return fmt.Errorf("classifying city provider ownership: %w", err)
+	}
+	if !cityProviderOwned && scopeUsesManagedBdStoreContract(cityPath, cityPath) {
 		if skipsManagedDolt, err := scopeSkipsManagedDoltForInit(cityPath, cityPath); err != nil {
 			return fmt.Errorf("classifying city backend: %w", err)
 		} else if !skipsManagedDolt {
@@ -2106,6 +2550,13 @@ func normalizeCanonicalBdScopeFiles(cityPath string, cfg *config.City, warns ...
 		}
 	}
 	for i := range cfg.Rigs {
+		providerOwned, err := scopeProviderOwned(cityPath, cfg.Rigs[i].Path)
+		if err != nil {
+			return fmt.Errorf("classifying rig %q provider ownership: %w", cfg.Rigs[i].Name, err)
+		}
+		if providerOwned {
+			continue
+		}
 		if !rigUsesManagedBdStoreContract(cityPath, cfg.Rigs[i]) {
 			continue
 		}
@@ -2138,7 +2589,11 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 		warn = io.Discard
 	}
 	resolveRigPaths(cityPath, rigs)
-	cityUsesBd := scopeUsesManagedBdStoreContract(cityPath, cityPath)
+	cityProviderOwned, err := scopeProviderOwned(cityPath, cityPath)
+	if err != nil {
+		return fmt.Errorf("classifying city provider ownership: %w", err)
+	}
+	cityUsesBd := !cityProviderOwned && scopeUsesManagedBdStoreContract(cityPath, cityPath)
 	cityHasCompleteStorageBinding := false
 	if cityUsesBd {
 		completeBinding, err := scopeHasCompleteStorageBinding(scopeMetadataJSONPath(cityPath))
@@ -2149,7 +2604,14 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 	}
 	anyRigUsesBd := false
 	for _, rig := range rigs {
-		if rigUsesManagedBdStoreContract(cityPath, rig) {
+		if strings.TrimSpace(rig.Path) == "" {
+			continue
+		}
+		rigProviderOwned, err := scopeProviderOwned(cityPath, rig.Path)
+		if err != nil {
+			return fmt.Errorf("classifying rig %q provider ownership: %w", rig.Name, err)
+		}
+		if !rigProviderOwned && rigUsesManagedBdStoreContract(cityPath, rig) {
 			anyRigUsesBd = true
 			break
 		}
@@ -2172,7 +2634,7 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 	// resolve a managed port, so it must not be asked about a city whose store
 	// gc does not serve: there is no managed port to find and the mirror is not
 	// gc's to delete.
-	if cityState.EndpointOrigin == contract.EndpointOriginManagedCity && !cityHasCompleteStorageBinding && !strings.EqualFold(strings.TrimSpace(cityState.DoltMode), "proxied-server") {
+	if !cityProviderOwned && cityState.EndpointOrigin == contract.EndpointOriginManagedCity && !cityHasCompleteStorageBinding && !strings.EqualFold(strings.TrimSpace(cityState.DoltMode), "proxied-server") {
 		managedPort = currentDoltPort(cityPath)
 	}
 	if cityUsesBd && !cityHasCompleteStorageBinding {
@@ -2184,13 +2646,20 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 		} else {
 			removeDoltPortFile(cityPath)
 		}
-	} else if !cityUsesBd {
+	} else if !cityUsesBd && !cityProviderOwned {
 		removeDoltPortFile(cityPath)
 	}
 
 	for i := range rigs {
 		rig := normalizedRigConfig(cityPath, rigs[i])
 		if strings.TrimSpace(rig.Path) == "" {
+			continue
+		}
+		rigProviderOwned, err := scopeProviderOwned(cityPath, rig.Path)
+		if err != nil {
+			return fmt.Errorf("classifying rig %q provider ownership: %w", rig.Name, err)
+		}
+		if rigProviderOwned {
 			continue
 		}
 		if !rigUsesManagedBdStoreContract(cityPath, rig) {
@@ -2257,16 +2726,12 @@ func normalizedRigConfig(cityPath string, rig config.Rig) config.Rig {
 func desiredCityDoltConfigState(cityPath string, cityDolt config.DoltConfig, cityPrefix string) contract.ConfigState {
 	cityHost, cityPort := configuredExternalDoltTargetForCity(cityDolt)
 	if cityHost != "" || cityPort != "" {
-		doltMode := "server"
-		if strings.EqualFold(strings.TrimSpace(cityDolt.Mode), "proxied-server") {
-			doltMode = "proxied-server"
-		}
 		state := contract.ConfigState{
 			IssuePrefix:    cityPrefix,
 			EndpointOrigin: contract.EndpointOriginCityCanonical,
 			DoltHost:       cityHost,
 			DoltPort:       cityPort,
-			DoltMode:       doltMode,
+			DoltMode:       "server",
 		}
 		state.DoltUser = preservedDoltUser(cityPath, state)
 		state.EndpointStatus = preservedEndpointStatus(cityPath, state, contract.EndpointStatusUnverified)
@@ -2275,17 +2740,13 @@ func desiredCityDoltConfigState(cityPath string, cityDolt config.DoltConfig, cit
 	if mode := persistedScopeDoltMode(cityPath); mode != "" {
 		return contract.ConfigState{IssuePrefix: cityPrefix, EndpointOrigin: contract.EndpointOriginManagedCity, EndpointStatus: contract.EndpointStatusVerified, DoltMode: mode}
 	}
-	// Fresh bd/Dolt scopes default to Beads' proxied-local UOW path. Explicit
-	// config mode remains respected, and persisted metadata above wins.
-	doltMode := "proxied-server"
-	if strings.EqualFold(strings.TrimSpace(cityDolt.Mode), "server") {
-		doltMode = "server"
-	}
+	// Fresh bd/Dolt scopes default to Beads' proxied-local UOW path. A
+	// provider-owned initialized scope above remains authoritative.
 	return contract.ConfigState{
 		IssuePrefix:    cityPrefix,
 		EndpointOrigin: contract.EndpointOriginManagedCity,
 		EndpointStatus: contract.EndpointStatusVerified,
-		DoltMode:       doltMode,
+		DoltMode:       "proxied-server",
 	}
 }
 
@@ -2526,6 +2987,9 @@ func providerLifecycleProcessEnvWithError(cityPath, provider string) ([]string, 
 		return nil, nil
 	}
 	cityPath = normalizePathForCompare(cityPath)
+	if _, _, err := providerScopeOwnership(cityPath, cityPath); err != nil {
+		return nil, err
+	}
 	env, err := cityRuntimeProcessEnvWithError(cityPath)
 	if err != nil {
 		return nil, err
@@ -2586,20 +3050,40 @@ func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string
 	if !providerUsesBdStoreContract(provider) {
 		return env, nil
 	}
+	gcBin, err := resolveProviderLifecycleGCBinary()
+	if err != nil {
+		return nil, fmt.Errorf("resolve invoking gc executable: %w", err)
+	}
+	if gcBin != "" {
+		env = pinInvokingGCBinary(env, gcBin)
+	}
+	if entry, owned, err := providerScopeOwnership(cityPath, cityPath); err == nil && owned && entry.State == providerScopeInitializing {
+		envMap := runtimeEnvEntriesToMap(env)
+		envMap["GC_BEADS_TRANSPORT"] = entry.Intent.Transport
+		envMap["GC_BEADS_TARGET"] = entry.Intent.Target
+		if entry.Intent.Target == "external" {
+			applyPendingProviderExternalEndpoint(cityPath, entry.Intent, envMap)
+		}
+		if entry.Intent.Transport == "proxied" {
+			applyProxiedDoltEnv(envMap)
+		}
+		return mergeRuntimeEnv(nil, envMap), nil
+	}
 	if scopeUsesProxiedDoltMode(cityPath, cityPath) {
 		envMap := runtimeEnvEntriesToMap(env)
 		applyProxiedDoltEnv(envMap)
-		// A proxied-external scope still has a provider-owned local proxy, but
-		// bd must know the upstream Dolt endpoint during init. Keep this
-		// endpoint in a dedicated adapter-only variable so it cannot be
-		// mistaken for Gas City's direct server lifecycle target.
-		if cfg, err := loadCityConfig(cityPath, io.Discard); err == nil && cfg != nil && strings.EqualFold(strings.TrimSpace(cfg.Dolt.Mode), "proxied-server") && strings.TrimSpace(cfg.Dolt.Host) != "" {
-			envMap["GC_BEADS_PROXY_EXTERNAL_HOST"] = strings.TrimSpace(cfg.Dolt.Host)
-			if cfg.Dolt.Port > 0 {
-				envMap["GC_BEADS_PROXY_EXTERNAL_PORT"] = strconv.Itoa(cfg.Dolt.Port)
+		if external, err := proxiedScopeHasExternalUpstream(cityPath); err != nil {
+			return nil, err
+		} else if external {
+			overrides, err := inheritedProviderExternalEndpointEnv(cityPath, providerScopeIntent{Transport: "proxied", Target: "external"})
+			if err != nil {
+				return nil, err
+			}
+			for key, value := range overrides {
+				envMap[key] = value
 			}
 		}
-		return mergeRuntimeEnv(nil, envMap)
+		return mergeRuntimeEnv(nil, envMap), nil
 	}
 	if target, ok := externalDoltEnvOverrideTarget(); ok {
 		envMap := runtimeEnvEntriesToMap(env)
@@ -2620,7 +3104,7 @@ func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string
 			envMap["BEADS_DOLT_SERVER_HOST"] = target.Host
 			envMap["BEADS_DOLT_SERVER_PORT"] = target.Port
 		}
-		return mergeRuntimeEnv(nil, envMap)
+		return mergeRuntimeEnv(nil, envMap), nil
 	}
 	if cityUsesDoltliteBeadsBackend(cityPath) {
 		env = removeEnvKey(env, "GC_BEADS_BACKEND")
@@ -2660,13 +3144,6 @@ func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string
 		env = removeEnvKey(env, "GC_DOLT_HOST")
 		env = removeEnvKey(env, "GC_DOLT_PORT")
 		env = append(env, "BEADS_DOLT_SERVER_SOCKET="+target.Socket)
-	}
-	gcBin, err := resolveProviderLifecycleGCBinary()
-	if err != nil {
-		return nil, fmt.Errorf("resolve invoking gc executable: %w", err)
-	}
-	if gcBin != "" {
-		env = pinInvokingGCBinary(env, gcBin)
 	}
 	// Strip any inherited test-mode env unconditionally so a stray
 	// GC_MANAGED_DOLT_TEST_MODE=1 in a production parent shell can never
@@ -2738,6 +3215,91 @@ func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string
 		}
 	}
 	return env, nil
+}
+
+// applyPendingProviderExternalEndpoint supplies the selector endpoint for a
+// pending provider-owned scope. The in-process registration serves the first
+// init; a later process may explicitly provide the same endpoint through the
+// existing GC_DOLT_HOST/PORT environment integration. Neither path writes
+// endpoint state to city.toml.
+func applyPendingProviderExternalEndpoint(cityPath string, intent providerScopeIntent, env map[string]string) {
+	host, port := "", ""
+	socket := ""
+	// A selector registration is the active init process's one-shot binding.
+	// It predates any provider metadata, so it must outrank the legacy city
+	// config cache which can still contain a prior [dolt] endpoint.
+	if value, ok := selectorExternalInitOptions.Load(normalizePathForCompare(cityPath)); ok {
+		if opts, ok := value.(hostedDoltInitOptions); ok && strings.EqualFold(strings.TrimSpace(opts.Target), "external") {
+			host = strings.TrimSpace(opts.Host)
+			port = strings.TrimSpace(opts.Port)
+		}
+	}
+	if host == "" || port == "" {
+		// GC_DOLT_HOST/PORT and BEADS_DOLT_SERVER_SOCKET are the established
+		// explicit gc start retry inputs. A pending selector has no durable
+		// city endpoint, so they must win a retained legacy cache entry.
+		explicitHost := strings.TrimSpace(os.Getenv(envDoltHost))
+		explicitPort := strings.TrimSpace(os.Getenv(envDoltPort))
+		if explicitHost != "" && explicitPort != "" {
+			host, port = explicitHost, explicitPort
+		} else {
+			socket = strings.TrimSpace(os.Getenv("BEADS_DOLT_SERVER_SOCKET"))
+		}
+	}
+	if socket == "" && (host == "" || port == "") {
+		// The city cache remains a compatibility fallback only when this
+		// process supplied no retry endpoint.
+		if value, ok := cityDoltConfigs.Load(normalizePathForCompare(cityPath)); ok {
+			if cfg, ok := value.(config.DoltConfig); ok {
+				host = strings.TrimSpace(cfg.Host)
+				if cfg.Port > 0 {
+					port = strconv.Itoa(cfg.Port)
+				}
+			}
+		}
+	}
+	if socket == "" && (host == "" || port == "") {
+		if target, ok := externalDoltEnvOverrideTarget(); ok {
+			socket = strings.TrimSpace(target.Socket)
+			if socket == "" {
+				host, port = strings.TrimSpace(target.Host), strings.TrimSpace(target.Port)
+			}
+		}
+	}
+	// A pending external binding is the only endpoint authority for this child.
+	// Clear both direct and proxy forms before projecting the selected transport,
+	// so a stale parent selector cannot turn a direct scope into a proxy (or the
+	// reverse).
+	for _, key := range []string{
+		"GC_DOLT_HOST", "GC_DOLT_PORT", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT",
+		"BEADS_DOLT_SERVER_SOCKET", "BEADS_DOLT_AUTO_START",
+		"GC_BEADS_PROXY_EXTERNAL_HOST", "GC_BEADS_PROXY_EXTERNAL_PORT", "GC_BEADS_PROXY_EXTERNAL_SOCKET",
+		"GC_DOLT_DATA_DIR", "GC_DOLT_LOG_FILE", "GC_DOLT_STATE_FILE",
+		"GC_DOLT_PID_FILE", "GC_DOLT_LOCK_FILE", "GC_DOLT_CONFIG_FILE",
+	} {
+		delete(env, key)
+	}
+	proxied := intent.Transport == "proxied"
+	if socket != "" && (host == "" || port == "") {
+		if proxied {
+			env["GC_BEADS_PROXY_EXTERNAL_SOCKET"] = socket
+		} else {
+			env["BEADS_DOLT_SERVER_SOCKET"] = socket
+		}
+		return
+	}
+	if host == "" || port == "" {
+		return
+	}
+	if proxied {
+		env["GC_BEADS_PROXY_EXTERNAL_HOST"] = host
+		env["GC_BEADS_PROXY_EXTERNAL_PORT"] = port
+		return
+	}
+	env["GC_DOLT_HOST"] = host
+	env["GC_DOLT_PORT"] = port
+	env["BEADS_DOLT_SERVER_HOST"] = host
+	env["BEADS_DOLT_SERVER_PORT"] = port
 }
 
 func runtimeEnvEntriesToMap(environ []string) map[string]string {

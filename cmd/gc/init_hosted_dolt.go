@@ -1,15 +1,24 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
+
+// selectorExternalInitOptions retains the one-shot external database identity
+// only until bd has written its own metadata. Generic selectors deliberately
+// do not make city.toml a second endpoint or database store.
+var selectorExternalInitOptions sync.Map // canonical city path -> hostedDoltInitOptions
 
 // Environment fallbacks for the hosted-dolt init flags. These mirror the
 // variables the create-city controller already exports, so a controller
@@ -97,7 +106,8 @@ func (o hostedDoltInitOptions) applySelectorToCityConfig(cfg *config.City) error
 	if err != nil {
 		return err
 	}
-	transport, target = resolved.Intent.Transport, resolved.Intent.Target
+	target = resolved.Intent.Target
+	selectorRequested := strings.TrimSpace(o.Transport) != "" || strings.TrimSpace(o.Target) != ""
 	if target == "external" {
 		if !o.enabled() {
 			return fmt.Errorf("--beads-target external requires --dolt-host (or %s)", envDoltHost)
@@ -105,47 +115,250 @@ func (o hostedDoltInitOptions) applySelectorToCityConfig(cfg *config.City) error
 		if err := o.validate(); err != nil {
 			return err
 		}
-		if err := o.applyToCityConfig(cfg); err != nil {
-			return err
+		if !selectorRequested {
+			if err := o.applyToCityConfig(cfg); err != nil {
+				return err
+			}
 		}
 	} else {
 		if o.enabled() {
 			return fmt.Errorf("local beads target cannot be combined with --dolt-host or endpoint flags")
 		}
-		// Explicit local intent clears stale compatibility endpoint values on a
-		// fresh config. Persisted initialized scopes are handled before this
-		// function and never reach this mutation path.
-		cfg.Dolt.Host = ""
-		cfg.Dolt.Port = 0
-	}
-	if transport == "proxied" {
-		cfg.Dolt.Mode = "proxied-server"
-	} else {
-		cfg.Dolt.Mode = "server"
+		if !selectorRequested {
+			// Legacy endpoint flags retain their existing compatibility behavior.
+			cfg.Dolt.Host = ""
+			cfg.Dolt.Port = 0
+		}
 	}
 	return nil
 }
 
+func (o hostedDoltInitOptions) selectorRequested() bool {
+	return strings.TrimSpace(o.Transport) != "" || strings.TrimSpace(o.Target) != ""
+}
+
+// registerSelectorEndpointForInit keeps a generic external selector's
+// endpoint in the current process only. bd receives it during pending init
+// and persists its own binding; city.toml never becomes a second topology
+// store. A later retry without that binding must supply the endpoint again.
+func (o hostedDoltInitOptions) registerSelectorEndpointForInit(cityPath string) error {
+	if !o.selectorRequested() || strings.ToLower(strings.TrimSpace(o.Target)) != "external" {
+		return nil
+	}
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil {
+		return fmt.Errorf("load city config for selector authority: %w", err)
+	}
+	if _, initialized, err := o.persistedSelectorAuthority(cityPath, *cfg); err != nil {
+		return err
+	} else if initialized {
+		// The canonical Beads binding already supplies this endpoint. Keep the
+		// one-shot selector out of process state so it cannot shadow it.
+		return nil
+	}
+	if err := o.validate(); err != nil {
+		return err
+	}
+	port, err := strconv.Atoi(strings.TrimSpace(o.Port))
+	if err != nil {
+		return fmt.Errorf("invalid selector endpoint port: %w", err)
+	}
+	registerCityDoltConfig(cityPath, config.DoltConfig{Host: strings.TrimSpace(o.Host), Port: port})
+	selectorExternalInitOptions.Store(normalizePathForCompare(cityPath), o)
+	return nil
+}
+
+func selectorExternalInitDatabase(cityPath, scopeRoot string) string {
+	if !samePath(cityPath, scopeRoot) {
+		return ""
+	}
+	value, ok := selectorExternalInitOptions.Load(normalizePathForCompare(cityPath))
+	if !ok {
+		return ""
+	}
+	opts, ok := value.(hostedDoltInitOptions)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(opts.Database)
+}
+
+func hasSelectorExternalInitOptions(cityPath string) bool {
+	_, ok := selectorExternalInitOptions.Load(normalizePathForCompare(cityPath))
+	return ok
+}
+
+func clearSelectorExternalInitOptions(cityPath, scopeRoot string) {
+	if samePath(cityPath, scopeRoot) {
+		selectorExternalInitOptions.Delete(normalizePathForCompare(cityPath))
+	}
+}
+
+// persistedSelectorAuthority validates a generic selector against an already
+// initialized city binding. The selector is one-shot input for a fresh scope;
+// it must not override or be silently ignored by an existing provider-owned
+// (or legacy) binding.
+func (o hostedDoltInitOptions) persistedSelectorAuthority(cityPath string, cfg config.City) (providerScopeIntent, bool, error) {
+	if !o.selectorRequested() {
+		return providerScopeIntent{}, false, nil
+	}
+	if entry, owned, err := providerScopeOwnership(cityPath, cityPath); err != nil {
+		return providerScopeIntent{}, false, err
+	} else if owned && entry.State == providerScopeInitializing {
+		requested, err := o.providerOwnershipIntent(cfg)
+		if err != nil {
+			return providerScopeIntent{}, false, err
+		}
+		if entry.Intent != requested {
+			return providerScopeIntent{}, false, fmt.Errorf("conflicting provider initialization intent for scope %q", cityPath)
+		}
+		// A durable pending record predates any partial provider artifacts. It
+		// remains the authority until bd commits metadata, so a matching retry
+		// can re-register its one-shot external endpoint.
+		return entry.Intent, false, nil
+	}
+	initialized, err := scopeHasPersistedBeadsIdentity(cityPath)
+	if err != nil {
+		return providerScopeIntent{}, false, err
+	}
+	if !initialized {
+		return providerScopeIntent{}, false, nil
+	}
+	metadata, ok, err := contract.LoadMetadataState(fsys.OSFS{}, scopeMetadataJSONPath(cityPath))
+	if err != nil {
+		return providerScopeIntent{}, false, fmt.Errorf("load initialized beads metadata for selector: %w", err)
+	}
+	if !ok {
+		return providerScopeIntent{}, false, fmt.Errorf("cannot apply beads selector to initialized scope without canonical beads metadata")
+	}
+	if !contract.IsDoltBackend(strings.TrimSpace(metadata.Backend)) || strings.EqualFold(strings.TrimSpace(metadata.DoltMode), "embedded") {
+		return providerScopeIntent{}, false, fmt.Errorf("cannot apply beads selector to initialized backend %q", metadata.Backend)
+	}
+	persisted, err := providerOwnershipIntentFromPersistedCity(cityPath)
+	if err != nil {
+		return providerScopeIntent{}, false, err
+	}
+	requested, err := o.providerOwnershipIntent(cfg)
+	if err != nil {
+		return providerScopeIntent{}, false, err
+	}
+	if persisted != requested {
+		return providerScopeIntent{}, false, fmt.Errorf("conflicting provider initialization intent for scope %q", cityPath)
+	}
+	return persisted, true, nil
+}
+
+// providerOwnershipIntent resolves the one-shot selector for a fresh scope.
+// The selector is never written to city.toml: the provider receives it during
+// initialization and owns the resulting backend metadata.
+func (o hostedDoltInitOptions) providerOwnershipIntent(city config.City) (providerScopeIntent, error) {
+	if err := o.validateSelectors(); err != nil {
+		return providerScopeIntent{}, err
+	}
+	transport := strings.ToLower(strings.TrimSpace(o.Transport))
+	target := strings.ToLower(strings.TrimSpace(o.Target))
+	if transport == "" && target == "" && o.enabled() {
+		transport, target = "direct", "external"
+	}
+	resolved, err := contract.ResolveInitIntent(contract.InitScopeState{}, contract.InitIntent{Transport: transport, Target: target}, contract.InitIntent{}, configDoltInitIntent(city), contract.InitIntent{Transport: "proxied", Target: "local"})
+	if err != nil {
+		return providerScopeIntent{}, err
+	}
+	return normalizeProviderScopeIntent(providerScopeIntent{Transport: resolved.Intent.Transport, Target: resolved.Intent.Target})
+}
+
+func persistFreshProviderOwnership(cityPath string, opts hostedDoltInitOptions) error {
+	// Legacy --dolt-host initialization retains its established canonical
+	// endpoint path. Generic selectors are the new provider-owned contract.
+	if opts.enabled() && !opts.selectorRequested() {
+		return nil
+	}
+	if err := selectorBackendError(cityPath, opts); err != nil {
+		return err
+	}
+	if !cityUsesManagedDoltBeadsLifecycle(cityPath) {
+		return nil
+	}
+	// Initialization may precede installation of remote imports. Use the same
+	// narrow raw-config fallback as provider preflight so ownership is durable
+	// before that recoverable import boundary.
+	cfg, err := loadInitProviderPreflightConfig(cityPath)
+	if err != nil {
+		// The filesystem-backed scaffold tests intentionally stop before the
+		// real lifecycle boundary. They must not cause an OS ownership write
+		// for their synthetic city path.
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("load configured rig scopes for provider ownership: %w", err)
+	}
+	intent, err := opts.providerOwnershipIntent(*cfg)
+	if err != nil {
+		return err
+	}
+	if persisted, initialized, err := opts.persistedSelectorAuthority(cityPath, *cfg); err != nil {
+		return err
+	} else if initialized {
+		intent = persisted
+	}
+	if existing, owned, ownershipErr := providerScopeOwnership(cityPath, cityPath); ownershipErr != nil {
+		return ownershipErr
+	} else if owned && existing.State == providerScopeInitializing {
+		if !opts.selectorRequested() && !opts.enabled() {
+			// A resume path has no one-shot selector input. Its durable pending
+			// record is the only topology authority until bd writes metadata.
+			intent = existing.Intent
+		} else if existing.Intent != intent {
+			return fmt.Errorf("conflicting provider initialization intent for scope %q", cityPath)
+		}
+	}
+	cityInitialized, err := scopeHasPersistedBeadsIdentity(cityPath)
+	if err != nil {
+		return err
+	}
+	if !cityInitialized {
+		if err := persistProviderScopeOwnership(cityPath, cityPath, intent); err != nil {
+			return err
+		}
+	}
+	resolveRigPaths(cityPath, cfg.Rigs)
+	for _, rig := range cfg.Rigs {
+		if strings.TrimSpace(rig.Path) == "" {
+			continue
+		}
+		initialized, err := scopeHasPersistedBeadsIdentity(rig.Path)
+		if err != nil {
+			return fmt.Errorf("inspect rig %q beads identity: %w", rig.Name, err)
+		}
+		if initialized {
+			continue
+		}
+		if err := persistProviderScopeOwnership(cityPath, rig.Path, intent); err != nil {
+			return fmt.Errorf("record provider ownership for rig %q: %w", rig.Name, err)
+		}
+	}
+	return nil
+}
+
+func scopeHasPersistedBeadsIdentity(scopeRoot string) (bool, error) {
+	for _, name := range []string{"metadata.json", "config.yaml"} {
+		if _, err := os.Stat(filepath.Join(scopeRoot, ".beads", name)); err == nil {
+			return true, nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return false, fmt.Errorf("inspect %s: %w", filepath.Join(scopeRoot, ".beads", name), err)
+		}
+	}
+	return false, nil
+}
+
 func configDoltInitIntent(cfg config.City) contract.InitIntent {
-	mode := strings.ToLower(strings.TrimSpace(cfg.Dolt.Mode))
-	transport := ""
-	switch mode {
-	case "server":
-		transport = "direct"
-	case "proxied-server":
-		transport = "proxied"
-	}
-	target := ""
 	if strings.TrimSpace(cfg.Dolt.Host) != "" || cfg.Dolt.Port != 0 {
-		target = "external"
+		// Existing city endpoints predate provider-owned metadata. Keep their
+		// established direct external interpretation; transport for initialized
+		// provider scopes is read from Beads' canonical binding instead.
+		return contract.InitIntent{Transport: "direct", Target: "external"}
 	}
-	if transport == "" && target == "" {
-		return contract.InitIntent{}
-	}
-	if target == "" {
-		target = "local"
-	}
-	return contract.InitIntent{Transport: transport, Target: target}
+	return contract.InitIntent{}
 }
 
 // resolveHostedDoltInitOptions merges explicit flag values with environment
@@ -301,6 +514,47 @@ func cityExternalDoltEndpointUnverified(cityPath string) bool {
 //
 // Both incompatibilities must be rejected before any canonical hosted-Dolt
 // files are written so a rejected init leaves no mixed ledger state behind.
+// selectorBackendError applies the generic transport/target contract before
+// the selected provider can create a ledger. These selectors belong to bd's
+// server/proxy lifecycle; file and DoltLite providers have no compatible
+// topology to honor.
+func selectorBackendError(cityPath string, opts hostedDoltInitOptions) error {
+	if !opts.selectorRequested() {
+		return nil
+	}
+	if !cityUsesBdStoreContract(cityPath) {
+		return fmt.Errorf("--beads-transport and --beads-target require a bd-backed beads provider")
+	}
+	if cityUsesDoltliteBeadsBackend(cityPath) {
+		return fmt.Errorf("--beads-transport and --beads-target are incompatible with the doltlite beads backend")
+	}
+	return nil
+}
+
+// selectorBackendErrorForFileConfig applies the generic selector contract to
+// a --file source's effective config. That source controls the file bootstrap,
+// so ambient GC_BEADS for another city must not admit a selector that the
+// copied file provider cannot honor.
+func selectorBackendErrorForFileConfig(cfg *config.City, opts hostedDoltInitOptions) error {
+	if !opts.selectorRequested() {
+		return nil
+	}
+	if cfg == nil {
+		return fmt.Errorf("cannot validate beads selector without file config")
+	}
+	provider := strings.TrimSpace(cfg.Beads.Provider)
+	if provider == "" {
+		provider = "bd"
+	}
+	if !providerUsesBdStoreContract(provider) {
+		return fmt.Errorf("--beads-transport and --beads-target require a bd-backed beads provider")
+	}
+	if strings.EqualFold(strings.TrimSpace(cfg.Beads.Backend), "doltlite") {
+		return fmt.Errorf("--beads-transport and --beads-target are incompatible with the doltlite beads backend")
+	}
+	return nil
+}
+
 func hostedDoltBackendError(cityPath string) error {
 	if !cityUsesBdStoreContract(cityPath) {
 		return fmt.Errorf("--dolt-host requires a bd-backed beads provider (use the gascity or gastown template)")

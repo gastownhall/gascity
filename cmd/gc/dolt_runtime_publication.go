@@ -67,6 +67,13 @@ func readPublishedDoltRuntimeStateHint(cityPath string) (doltRuntimeState, bool,
 }
 
 func managedDoltLifecycleOwned(cityPath string) (bool, error) {
+	_, providerOwned, err := providerScopeOwnership(cityPath, cityPath)
+	if err != nil {
+		return false, fmt.Errorf("read provider scope ownership journal: %w", err)
+	}
+	if providerOwned {
+		return false, nil
+	}
 	if cityUsesBdStoreContract(cityPath) {
 		if cityUsesDoltliteBeadsBackend(cityPath) {
 			return false, nil

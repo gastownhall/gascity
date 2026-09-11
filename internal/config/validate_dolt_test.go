@@ -9,18 +9,15 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
-func TestValidateDoltConfigMode(t *testing.T) {
+func TestValidateDoltConfigRejectsNegativeLimits(t *testing.T) {
 	tests := []struct {
 		name    string
 		cfg     DoltConfig
 		wantErr string
 	}{
-		{name: "omitted defaults direct", cfg: DoltConfig{}},
-		{name: "server", cfg: DoltConfig{Mode: "server"}},
-		{name: "proxied server", cfg: DoltConfig{Mode: "proxied-server"}},
-		{name: "unknown mode", cfg: DoltConfig{Mode: "proxy"}, wantErr: "mode must be"},
-		{name: "proxied external host", cfg: DoltConfig{Mode: "proxied-server", Host: "db.example"}},
-		{name: "proxied external port", cfg: DoltConfig{Mode: "proxied-server", Port: 3306}},
+		{name: "omitted", cfg: DoltConfig{}},
+		{name: "legacy endpoint", cfg: DoltConfig{Host: "db.example", Port: 3306}},
+		{name: "negative max connections", cfg: DoltConfig{MaxConnections: -1}, wantErr: "max_connections"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -39,12 +36,12 @@ func TestValidateDoltConfigMode(t *testing.T) {
 	}
 }
 
-func TestLoadDoltConfigModeValidation(t *testing.T) {
+func TestLoadDoltConfigRejectsRemovedMode(t *testing.T) {
 	for _, tc := range []struct {
 		name, body, want string
 	}{
-		{"unknown", "[workspace]\nname=\"x\"\n[dolt]\nmode=\"bogus\"\n", "mode must be"},
-		{"proxied external", "[workspace]\nname=\"x\"\n[dolt]\nmode=\"proxied-server\"\nhost=\"db\"\n", ""},
+		{"removed mode", "[workspace]\nname=\"x\"\n[dolt]\nmode=\"proxied-server\"\n", "[dolt].mode is not supported"},
+		{"legacy endpoint remains valid", "[workspace]\nname=\"x\"\n[dolt]\nhost=\"db\"\nport=3306\n", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()

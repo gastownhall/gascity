@@ -167,15 +167,14 @@ func TestHostedDoltInitOptionsApplySelector(t *testing.T) {
 	tests := []struct {
 		name       string
 		opts       hostedDoltInitOptions
-		wantMode   string
 		wantHost   string
 		wantPort   int
 		wantErrSub string
 	}{
-		{name: "direct local", opts: hostedDoltInitOptions{Transport: "direct", Target: "local"}, wantMode: "server"},
-		{name: "proxied local", opts: hostedDoltInitOptions{Transport: "proxied", Target: "local"}, wantMode: "proxied-server"},
-		{name: "direct external", opts: hostedDoltInitOptions{Transport: "direct", Target: "external", Host: "db.example", Port: "4406", Database: "bd_x", ProjectID: "x"}, wantMode: "server", wantHost: "db.example", wantPort: 4406},
-		{name: "proxied external", opts: hostedDoltInitOptions{Transport: "proxied", Target: "external", Host: "db.example", Port: "4406", Database: "bd_x", ProjectID: "x"}, wantMode: "proxied-server", wantHost: "db.example", wantPort: 4406},
+		{name: "direct local", opts: hostedDoltInitOptions{Transport: "direct", Target: "local"}},
+		{name: "proxied local", opts: hostedDoltInitOptions{Transport: "proxied", Target: "local"}},
+		{name: "direct external", opts: hostedDoltInitOptions{Transport: "direct", Target: "external", Host: "db.example", Port: "4406", Database: "bd_x", ProjectID: "x"}},
+		{name: "proxied external", opts: hostedDoltInitOptions{Transport: "proxied", Target: "external", Host: "db.example", Port: "4406", Database: "bd_x", ProjectID: "x"}},
 		{name: "external requires host", opts: hostedDoltInitOptions{Transport: "proxied", Target: "external"}, wantErrSub: "--dolt-host"},
 		{name: "local rejects host", opts: hostedDoltInitOptions{Transport: "direct", Target: "local", Host: "db.example", Port: "4406"}, wantErrSub: "local"},
 	}
@@ -192,8 +191,8 @@ func TestHostedDoltInitOptionsApplySelector(t *testing.T) {
 			if err != nil {
 				t.Fatalf("applySelectorToCityConfig() error = %v", err)
 			}
-			if cfg.Dolt.Mode != tt.wantMode || cfg.Dolt.Host != tt.wantHost || cfg.Dolt.Port != tt.wantPort {
-				t.Fatalf("Dolt config = %+v, want mode=%q host=%q port=%d", cfg.Dolt, tt.wantMode, tt.wantHost, tt.wantPort)
+			if cfg.Dolt.Host != tt.wantHost || cfg.Dolt.Port != tt.wantPort {
+				t.Fatalf("Dolt config = %+v, want generic selector to leave city config unchanged", cfg.Dolt)
 			}
 		})
 	}
@@ -641,13 +640,225 @@ func TestGcInitCommandBeadsSelectorMatrix(t *testing.T) {
 			args = append(args, cityPath)
 			cmd.SetArgs(args)
 			err := cmd.Execute()
+			if err == nil {
+				t.Fatal("gc init unexpectedly succeeded with incompatible file backend")
+			}
+			if !strings.Contains(stderr.String(), "bd-backed") {
+				t.Fatalf("gc init selector error = %q, want bd-backed provider refusal", stderr.String())
+			}
+			assertNoHostedDoltStoreArtifacts(t, cityPath)
+		})
+	}
+}
+
+// TestGcInitFileBeadsSelectorMatrixRejectsFileBackendWithoutLedgerMutation
+// covers the --file front door. Its source config selects the file provider,
+// so every explicit bd transport/target selector must fail before the file
+// bootstrap can create .gc/beads.json.
+func TestGcInitFileBeadsSelectorMatrixRejectsFileBackendWithoutLedgerMutation(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "file-provider.toml")
+	if err := os.WriteFile(source, []byte("[workspace]\nname = \"file-source\"\n\n[beads]\nprovider = \"file\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, transport, target string
+	}{
+		{name: "direct local", transport: "direct", target: "local"},
+		{name: "direct external", transport: "direct", target: "external"},
+		{name: "proxied local", transport: "proxied", target: "local"},
+		{name: "proxied external", transport: "proxied", target: "external"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearGCEnv(t)
+			// --file's source config is authoritative even when the invoking
+			// shell selects bd for another city.
+			t.Setenv("GC_BEADS", "bd")
+			cityPath := filepath.Join(t.TempDir(), "file-selector-city")
+			var stdout, stderr bytes.Buffer
+			cmd := newInitCmd(&stdout, &stderr)
+			cmd.SilenceUsage = true
+			cmd.SilenceErrors = true
+			args := []string{"--file", source, "--skip-provider-readiness", "--no-start", "--beads-transport", tc.transport, "--beads-target", tc.target}
 			if tc.target == "external" {
-				if err == nil {
-					t.Fatal("gc init unexpectedly succeeded with incompatible file backend")
-				}
-				assertNoHostedDoltStoreArtifacts(t, cityPath)
-			} else if err != nil {
-				t.Fatalf("gc init local selector: %v; stderr=%s", err, stderr.String())
+				// --file owns the complete city TOML, so --dolt-* flags are
+				// intentionally exclusive with it. The selector's ephemeral
+				// external endpoint therefore arrives through the documented
+				// environment fallback.
+				t.Setenv(envDoltHost, "gateway.example.com")
+				t.Setenv(envDoltPort, "4406")
+				t.Setenv(envDoltDatabase, "bd_file")
+				t.Setenv(envBeadsProjectID, "file")
+			}
+			args = append(args, cityPath)
+			cmd.SetArgs(args)
+			if err := cmd.Execute(); err == nil {
+				t.Fatal("gc init --file unexpectedly succeeded with incompatible file backend")
+			}
+			if !strings.Contains(stderr.String(), "bd-backed") {
+				t.Fatalf("gc init --file selector error = %q, want bd-backed provider refusal", stderr.String())
+			}
+			assertNoHostedDoltStoreArtifacts(t, cityPath)
+		})
+	}
+}
+
+// TestGcInitFileBeadsSelectorMatrixRejectsEffectiveBackendOverrides covers
+// the inverse --file mismatch: bootstrap honors the effective GC_BEADS and
+// GC_BEADS_BACKEND settings, so selector admission must reject either before
+// it creates a file store.
+func TestGcInitFileBeadsSelectorMatrixRejectsEffectiveBackendOverrides(t *testing.T) {
+	for _, backend := range []struct {
+		name, provider, environment, backend, wantError string
+	}{
+		{name: "file provider override", provider: "bd", environment: "file", wantError: "bd-backed"},
+		{name: "doltlite backend override", provider: "bd", environment: "bd", backend: "doltlite", wantError: "incompatible with the doltlite"},
+	} {
+		t.Run(backend.name, func(t *testing.T) {
+			source := filepath.Join(t.TempDir(), "bd-provider.toml")
+			if err := os.WriteFile(source, []byte("[workspace]\nname = \"bd-source\"\n\n[beads]\nprovider = \""+backend.provider+"\"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			for _, tc := range []struct {
+				name, transport, target string
+			}{
+				{name: "direct local", transport: "direct", target: "local"},
+				{name: "direct external", transport: "direct", target: "external"},
+				{name: "proxied local", transport: "proxied", target: "local"},
+				{name: "proxied external", transport: "proxied", target: "external"},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					clearGCEnv(t)
+					t.Setenv("GC_BEADS", backend.environment)
+					t.Setenv("GC_BEADS_BACKEND", backend.backend)
+					if tc.target == "external" {
+						t.Setenv(envDoltHost, "gateway.example.com")
+						t.Setenv(envDoltPort, "4406")
+						t.Setenv(envDoltDatabase, "bd_file")
+						t.Setenv(envBeadsProjectID, "file")
+					}
+					cityPath := filepath.Join(t.TempDir(), "file-selector-city")
+					var stdout, stderr bytes.Buffer
+					cmd := newInitCmd(&stdout, &stderr)
+					cmd.SilenceUsage = true
+					cmd.SilenceErrors = true
+					cmd.SetArgs([]string{"--file", source, "--skip-provider-readiness", "--no-start", "--beads-transport", tc.transport, "--beads-target", tc.target, cityPath})
+					if err := cmd.Execute(); err == nil {
+						t.Fatalf("gc init --file unexpectedly succeeded with %s", backend.name)
+					}
+					if !strings.Contains(stderr.String(), backend.wantError) {
+						t.Fatalf("gc init --file error = %q, want %q", stderr.String(), backend.wantError)
+					}
+					assertNoHostedDoltStoreArtifacts(t, cityPath)
+				})
+			}
+		})
+	}
+}
+
+// TestGcInitCommandGenericSelectorRecordsOwnershipBeforeProviderInit drives
+// the real command path through a bd-contract wrapper. The wrapper observes
+// the durable pending journal before it creates Beads files, which keeps a
+// generic selector from being reclassified as a legacy store on retry.
+func TestGcInitCommandGenericSelectorRecordsOwnershipBeforeProviderInit(t *testing.T) {
+	for _, tc := range []struct {
+		name, transport, target, wantMode string
+	}{
+		{name: "direct local", transport: "direct", target: "local", wantMode: "server"},
+		{name: "proxied local", transport: "proxied", target: "local", wantMode: "proxied-server"},
+		{name: "direct external", transport: "direct", target: "external", wantMode: "server"},
+		{name: "proxied external", transport: "proxied", target: "external", wantMode: "proxied-server"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearGCEnv(t)
+			stubInitDependencyChecks(t)
+			stubInitDoltAuthorIdentity(t, map[string]string{"user.name": "test", "user.email": "test@example.com"})
+			stubInitRemoteImports(t)
+			disableBootstrapForTests(t)
+
+			cityPath := filepath.Join(t.TempDir(), "selector-city")
+			providerLog := filepath.Join(t.TempDir(), "provider.log")
+			script := filepath.Join(t.TempDir(), "gc-beads-bd.sh")
+			const scriptBody = `#!/bin/sh
+set -eu
+op="$1"
+if [ "$op" = init ]; then
+  scope="$2"
+  test -f "$GC_CITY_PATH/.gc/scope-ownership.json"
+  test ! -e "$scope/.beads/metadata.json"
+  printf 'init|%s|%s|%s|%s\n' "${GC_BEADS_TRANSPORT:-}" "${GC_BEADS_TARGET:-}" "${BEADS_DOLT_SERVER_HOST:-}" "${GC_BEADS_PROXY_EXTERNAL_HOST:-}" >> "$GC_TEST_PROVIDER_LOG"
+  mkdir -p "$scope/.beads"
+  if [ "${GC_BEADS_TRANSPORT:-}" = proxied ]; then mode=proxied-server; else mode=server; fi
+  printf '{"backend":"dolt","dolt_mode":"%s","dolt_database":"%s"}\n' "$mode" "${GC_DOLT_DATABASE:-hq}" > "$scope/.beads/metadata.json"
+  if [ "${GC_BEADS_TARGET:-}" = external ] && [ "${GC_BEADS_TRANSPORT:-}" = direct ]; then
+    printf 'issue_prefix: gc\ngc.endpoint_origin: city_canonical\ngc.endpoint_status: verified\ndolt.host: %s\ndolt.port: %s\ndolt.auto-start: false\ndolt.mode: server\n' "${BEADS_DOLT_SERVER_HOST:-}" "${BEADS_DOLT_SERVER_PORT:-}" > "$scope/.beads/config.yaml"
+  else
+    printf 'issue_prefix: gc\ndolt.mode: %s\n' "$mode" > "$scope/.beads/config.yaml"
+  fi
+  if [ "${GC_BEADS_TARGET:-}" = external ] && [ "${GC_BEADS_TRANSPORT:-}" = proxied ]; then
+    printf '{"external":{"host":"gateway.example.com","port":4406}}\n' > "$scope/.beads/proxied_server_client_info.json"
+  fi
+  exit 0
+fi
+printf '%s\n' "$op" >> "$GC_TEST_PROVIDER_LOG"
+`
+			if err := os.WriteFile(script, []byte(scriptBody), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("GC_BEADS", "exec:"+script)
+			t.Setenv("GC_TEST_PROVIDER_LOG", providerLog)
+			t.Setenv("GC_DOLT", "")
+
+			args := []string{"--template", "gascity", "--default-provider", "claude", "--skip-provider-readiness", "--no-start", "--beads-transport", tc.transport, "--beads-target", tc.target}
+			if tc.target == "external" {
+				args = append(args, "--dolt-host", "gateway.example.com", "--dolt-port", "4406", "--dolt-database", "bd_selector", "--dolt-project-id", "selector")
+			}
+			args = append(args, cityPath)
+			run := func() (string, string, error) {
+				var stdout, stderr bytes.Buffer
+				cmd := newInitCmd(&stdout, &stderr)
+				cmd.SilenceUsage = true
+				cmd.SilenceErrors = true
+				cmd.SetArgs(args)
+				return stdout.String(), stderr.String(), cmd.Execute()
+			}
+			if stdout, stderr, err := run(); err != nil {
+				data, _ := os.ReadFile(providerLog)
+				t.Fatalf("gc init %s: %v; stdout=%s; stderr=%s; provider=%s", tc.name, err, stdout, stderr, data)
+			}
+
+			entry, owned, err := providerScopeOwnership(cityPath, cityPath)
+			if err != nil || !owned || entry.State != providerScopeReady {
+				t.Fatalf("ownership after init = (%+v, %t, %v), want ready provider scope", entry, owned, err)
+			}
+			data, err := os.ReadFile(providerLog)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+			if len(lines) == 0 || lines[0] != "init|"+tc.transport+"|"+tc.target+"|"+map[bool]string{true: "gateway.example.com", false: ""}[tc.target == "external" && tc.transport == "direct"]+"|"+map[bool]string{true: "gateway.example.com", false: ""}[tc.target == "external" && tc.transport == "proxied"] {
+				t.Fatalf("provider init observation = %q, want pending selector intent and only its applicable endpoint", string(data))
+			}
+			mode, ok, err := contract.ReadDoltMode(fsys.OSFS{}, filepath.Join(cityPath, ".beads", "metadata.json"))
+			if err != nil || !ok || mode != tc.wantMode {
+				t.Fatalf("provider metadata mode = (%q, %v, %v), want %q", mode, ok, err, tc.wantMode)
+			}
+			cityTOML, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(cityTOML), "gateway.example.com") || strings.Contains(string(cityTOML), "bd_selector") {
+				t.Fatalf("generic selector persisted endpoint identity in city.toml:\n%s", cityTOML)
+			}
+
+			if _, stderr, err := run(); err != nil {
+				t.Fatalf("gc init resume %s: %v; stderr=%s", tc.name, err, stderr)
+			}
+			data, err = os.ReadFile(providerLog)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Count(string(data), "init|") != 1 {
+				t.Fatalf("resume reinitialized provider scope:\n%s", data)
 			}
 		})
 	}
@@ -672,5 +883,205 @@ func assertNoHostedDoltStoreArtifacts(t *testing.T, cityPath string) {
 		case !os.IsNotExist(err):
 			t.Fatalf("stat %s: %v", rel, err)
 		}
+	}
+}
+
+func TestPersistFreshProviderOwnershipPrecedesUninstalledRemoteImport(t *testing.T) {
+	city := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(city, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(`[workspace]
+name = "remote-pending"
+[beads]
+provider = "bd"
+[imports.tools]
+source = "https://example.com/tools.git"
+version = "^1.4"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := persistFreshProviderOwnership(city, hostedDoltInitOptions{}); err != nil {
+		t.Fatalf("persistFreshProviderOwnership: %v", err)
+	}
+	entry, owned, err := providerScopeOwnership(city, city)
+	if err != nil || !owned || entry.State != providerScopeInitializing || entry.Intent != (providerScopeIntent{Transport: "proxied", Target: "local"}) {
+		t.Fatalf("ownership = (%+v, %t, %v), want pending proxied/local", entry, owned, err)
+	}
+	for _, name := range []string{"metadata.json", "config.yaml"} {
+		if _, err := os.Stat(filepath.Join(city, ".beads", name)); !os.IsNotExist(err) {
+			t.Fatalf("ownership persistence seeded legacy %s: %v", name, err)
+		}
+	}
+}
+
+func TestGenericExternalSelectorRejectsFileBackendWithoutBeadsMutation(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	city := filepath.Join(t.TempDir(), "file-city")
+	var stdout, stderr bytes.Buffer
+	code := doInit(fsys.OSFS{}, city, wizardConfig{
+		configName: "minimal",
+		provider:   "claude",
+		hostedDolt: hostedDoltInitOptions{Transport: "direct", Target: "external", Host: "db.example", Port: "3306", Database: "bd_file", ProjectID: "file"},
+	}, "", &stdout, &stderr, false)
+	if code != 1 || !strings.Contains(stderr.String(), "bd-backed beads provider") {
+		t.Fatalf("generic external file init = %d, stderr=%q", code, stderr.String())
+	}
+	for _, name := range []string{"metadata.json", "config.yaml"} {
+		if _, err := os.Stat(filepath.Join(city, ".beads", name)); !os.IsNotExist(err) {
+			t.Fatalf("generic external selector wrote .beads/%s for file backend: %v", name, err)
+		}
+	}
+}
+
+func TestPersistedSelectorAuthorityHonorsInitializedBeadsBinding(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		metadata     string
+		beadsConfig  string
+		sidecar      string
+		opts         hostedDoltInitOptions
+		wantIntent   providerScopeIntent
+		wantErr      string
+		checkNoLease bool
+	}{
+		{
+			name:        "legacy direct local identical",
+			metadata:    `{"backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`,
+			beadsConfig: "issue_prefix: gc\ndolt.mode: server\n",
+			opts:        hostedDoltInitOptions{Transport: "direct", Target: "local"},
+			wantIntent:  providerScopeIntent{Transport: "direct", Target: "local"},
+		},
+		{
+			name:        "proxied local identical",
+			metadata:    `{"backend":"dolt","dolt_mode":"proxied-server","dolt_database":"hq"}`,
+			beadsConfig: "issue_prefix: gc\ndolt.mode: proxied-server\n",
+			opts:        hostedDoltInitOptions{Transport: "proxied", Target: "local"},
+			wantIntent:  providerScopeIntent{Transport: "proxied", Target: "local"},
+		},
+		{
+			name:         "direct external identical has no endpoint lease",
+			metadata:     `{"backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`,
+			beadsConfig:  "issue_prefix: gc\ngc.endpoint_origin: city_canonical\ngc.endpoint_status: verified\ndolt.host: db.example.test\ndolt.port: 4406\ndolt.auto-start: false\ndolt.mode: server\n",
+			opts:         hostedDoltInitOptions{Transport: "direct", Target: "external", Host: "other.example.test", Port: "4407", Database: "bd_other", ProjectID: "other"},
+			wantIntent:   providerScopeIntent{Transport: "direct", Target: "external"},
+			checkNoLease: true,
+		},
+		{
+			name:         "proxied external identical has no endpoint lease",
+			metadata:     `{"backend":"dolt","dolt_mode":"proxied-server","dolt_database":"hq"}`,
+			beadsConfig:  "issue_prefix: gc\ndolt.mode: proxied-server\n",
+			sidecar:      `{"external":{"host":"db.example.test","port":4406}}`,
+			opts:         hostedDoltInitOptions{Transport: "proxied", Target: "external", Host: "other.example.test", Port: "4407", Database: "bd_other", ProjectID: "other"},
+			wantIntent:   providerScopeIntent{Transport: "proxied", Target: "external"},
+			checkNoLease: true,
+		},
+		{
+			name:        "direct conflict refuses",
+			metadata:    `{"backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`,
+			beadsConfig: "issue_prefix: gc\ndolt.mode: server\n",
+			opts:        hostedDoltInitOptions{Transport: "proxied", Target: "local"},
+			wantErr:     "conflicting provider initialization intent",
+		},
+		{
+			name:     "embedded refuses",
+			metadata: `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"hq"}`,
+			opts:     hostedDoltInitOptions{Transport: "proxied", Target: "local"},
+			wantErr:  "cannot apply beads selector",
+		},
+		{
+			name:     "non dolt refuses",
+			metadata: `{"backend":"postgres","dolt_mode":"server"}`,
+			opts:     hostedDoltInitOptions{Transport: "direct", Target: "local"},
+			wantErr:  "unsupported backend",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			city := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(city, ".beads"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[workspace]\nname = \"authority\"\n[beads]\nprovider = \"bd\"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(scopeMetadataJSONPath(city), []byte(tc.metadata), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if tc.beadsConfig != "" {
+				if err := os.WriteFile(filepath.Join(city, ".beads", "config.yaml"), []byte(tc.beadsConfig), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.sidecar != "" {
+				if err := os.WriteFile(filepath.Join(city, ".beads", "proxied_server_client_info.json"), []byte(tc.sidecar), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cfg, err := loadCityConfig(city, io.Discard)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, initialized, err := tc.opts.persistedSelectorAuthority(city, *cfg)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("persistedSelectorAuthority error = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || !initialized || got != tc.wantIntent {
+				t.Fatalf("persistedSelectorAuthority = (%+v, %t, %v), want (%+v, true, nil)", got, initialized, err, tc.wantIntent)
+			}
+			if tc.checkNoLease {
+				if err := tc.opts.registerSelectorEndpointForInit(city); err != nil {
+					t.Fatal(err)
+				}
+				if hasSelectorExternalInitOptions(city) {
+					t.Fatal("ready selector retained a one-shot external endpoint lease")
+				}
+			}
+		})
+	}
+}
+
+func TestPersistedSelectorAuthorityUsesPendingIntentOverPartialProviderFiles(t *testing.T) {
+	city := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(city, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[workspace]\nname = \"pending\"\n[beads]\nprovider = \"bd\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// bd may write config.yaml before metadata.json. A durable pending journal
+	// must still make the matching selector retryable.
+	if err := os.WriteFile(filepath.Join(city, ".beads", "config.yaml"), []byte("issue_prefix: gc\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pending := providerScopeIntent{Transport: "direct", Target: "external"}
+	if err := persistProviderScopeOwnership(city, city, pending); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadCityConfig(city, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	matching := hostedDoltInitOptions{Transport: "direct", Target: "external", Host: "db.retry.example", Port: "4406", Database: "bd_retry", ProjectID: "retry"}
+	got, initialized, err := matching.persistedSelectorAuthority(city, *cfg)
+	if err != nil || initialized || got != pending {
+		t.Fatalf("matching partial retry authority = (%+v, %t, %v), want (%+v, false, nil)", got, initialized, err, pending)
+	}
+	if err := matching.registerSelectorEndpointForInit(city); err != nil {
+		t.Fatalf("register matching partial retry endpoint: %v", err)
+	}
+	if !hasSelectorExternalInitOptions(city) {
+		t.Fatal("matching partial retry did not retain its one-shot endpoint")
+	}
+	t.Cleanup(func() {
+		clearSelectorExternalInitOptions(city, city)
+		clearCityDoltConfig(city)
+	})
+	conflicting := matching
+	conflicting.Transport = "proxied"
+	if _, _, err := conflicting.persistedSelectorAuthority(city, *cfg); err == nil || !strings.Contains(err.Error(), "conflicting provider initialization intent") {
+		t.Fatalf("conflicting partial retry = %v, want intent conflict", err)
 	}
 }

@@ -11,11 +11,10 @@ import (
 )
 
 // TestConfigStateConstructorsSelectDoltModes verifies that fresh managed
-// scopes use the proxied-server path by default. Explicit mode=server selects
-// the direct path, while host/port endpoints remain direct unless paired with
-// an explicit proxied mode. Existing authoritative scope state is resolved by
-// resolveDesired*EndpointState before these constructors are used, so changing
-// the default does not migrate an already initialized scope implicitly.
+// scopes use the proxied-server path by default while legacy city host/port
+// endpoints retain their direct interpretation. Existing authoritative scope
+// state is resolved before these constructors run, so changing the default
+// does not migrate an initialized scope.
 func TestConfigStateConstructorsSelectDoltModes(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "rig")
@@ -25,11 +24,6 @@ func TestConfigStateConstructorsSelectDoltModes(t *testing.T) {
 	if managedCity.DoltMode != "proxied-server" {
 		t.Errorf("desiredCityDoltConfigState (managed city): DoltMode = %q, want %q", managedCity.DoltMode, "proxied-server")
 	}
-	proxyCity := desiredCityDoltConfigState(cityPath, config.DoltConfig{Mode: "proxied-server"}, "gc")
-	if proxyCity.DoltMode != "proxied-server" {
-		t.Errorf("desiredCityDoltConfigState (explicit proxy): DoltMode = %q, want %q", proxyCity.DoltMode, "proxied-server")
-	}
-
 	// External city (explicit host/port endpoint).
 	externalCity := desiredCityDoltConfigState(cityPath, config.DoltConfig{Host: "db.example.com", Port: 3306}, "gc")
 	if externalCity.DoltMode != "server" {
@@ -105,33 +99,24 @@ func TestResolveDesiredCityEndpointStatePreservesAuthoritativeDoltMode(t *testin
 	}
 }
 
-func TestCanonicalBdScopeInitPersistsConfiguredDoltMode(t *testing.T) {
-	for _, tc := range []struct {
-		name, doltSection, mode, want string
-	}{
-		{name: "proxied default", want: "proxied-server"},
-		{name: "explicit proxy", doltSection: "[dolt]\nmode = \"proxied-server\"\n", mode: "proxied-server", want: "proxied-server"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			cityPath := t.TempDir()
-			if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"+tc.doltSection), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			state := desiredCityDoltConfigState(cityPath, config.DoltConfig{Mode: tc.mode}, "gc")
-			if err := ensureCanonicalScopeConfigState(fsys.OSFS{}, cityPath, state); err != nil {
-				t.Fatalf("ensureCanonicalScopeConfigState: %v", err)
-			}
-			if err := ensureCanonicalScopeMetadata(fsys.OSFS{}, cityPath, "hq", false); err != nil {
-				t.Fatalf("ensureCanonicalScopeMetadata: %v", err)
-			}
-			mode, ok, err := contract.ReadDoltMode(fsys.OSFS{}, filepath.Join(cityPath, ".beads", "metadata.json"))
-			if err != nil || !ok {
-				t.Fatalf("ReadDoltMode: mode=%q ok=%v err=%v", mode, ok, err)
-			}
-			if mode != tc.want {
-				t.Fatalf("metadata dolt_mode = %q, want %q", mode, tc.want)
-			}
-		})
+func TestCanonicalBdScopeInitPersistsDefaultDoltMode(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	state := desiredCityDoltConfigState(cityPath, config.DoltConfig{}, "gc")
+	if err := ensureCanonicalScopeConfigState(fsys.OSFS{}, cityPath, state); err != nil {
+		t.Fatalf("ensureCanonicalScopeConfigState: %v", err)
+	}
+	if err := ensureCanonicalScopeMetadata(fsys.OSFS{}, cityPath, "hq", false); err != nil {
+		t.Fatalf("ensureCanonicalScopeMetadata: %v", err)
+	}
+	mode, ok, err := contract.ReadDoltMode(fsys.OSFS{}, filepath.Join(cityPath, ".beads", "metadata.json"))
+	if err != nil || !ok {
+		t.Fatalf("ReadDoltMode: mode=%q ok=%v err=%v", mode, ok, err)
+	}
+	if mode != "proxied-server" {
+		t.Fatalf("metadata dolt_mode = %q, want proxied-server", mode)
 	}
 }
 

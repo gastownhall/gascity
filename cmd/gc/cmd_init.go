@@ -534,7 +534,7 @@ func cmdInitWithPreparedWizardInternal(args []string, prepared wizardConfig, pre
 			return 1
 		}
 	}
-	if handled, code := resumeExistingInitIfPossibleInternal(fsys.OSFS{}, cityPath, stdout, stderr, "gc init", true, skipProviderReadiness, noStart); handled {
+	if handled, code := resumeExistingInitIfPossibleInternal(fsys.OSFS{}, cityPath, stdout, stderr, "gc init", true, skipProviderReadiness, noStart, prepared.hostedDolt); handled {
 		return code
 	}
 	var wiz wizardConfig
@@ -565,10 +565,11 @@ func cmdInitWithPreparedWizardInternal(args []string, prepared wizardConfig, pre
 		showProgress:          true,
 		commandName:           "gc init",
 		noStart:               noStart,
+		hostedDolt:            wiz.hostedDolt,
 	})
 }
 
-func resumeExistingInitIfPossibleInternal(fs fsys.FS, cityPath string, stdout, stderr io.Writer, commandName string, showProgress bool, skipProviderReadiness bool, noStart bool) (bool, int) {
+func resumeExistingInitIfPossibleInternal(fs fsys.FS, cityPath string, stdout, stderr io.Writer, commandName string, showProgress bool, skipProviderReadiness bool, noStart bool, hostedDolt hostedDoltInitOptions) (bool, int) {
 	if !cityCanResumeInitFS(fs, cityPath) {
 		return false, 0
 	}
@@ -580,6 +581,7 @@ func resumeExistingInitIfPossibleInternal(fs fsys.FS, cityPath string, stdout, s
 		showProgress:          showProgress,
 		commandName:           commandName,
 		noStart:               noStart,
+		hostedDolt:            hostedDolt,
 	})
 }
 
@@ -1288,6 +1290,18 @@ func cmdInitFromTOMLFileWithOptionsInternal(fs fsys.FS, tomlSrc, cityPath, nameO
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// Generic transport/target selectors are a bd-provider contract. Check
+	// the effective file config before the file-store bootstrap can write its
+	// ledger, while leaving the newly scaffolded city configuration available
+	// for a corrected retry.
+	if err := selectorBackendErrorForFileConfig(cfg, hosted); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := selectorBackendError(cityPath, hosted); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	// Write .gitignore entries for city-managed directories.
 	if err := ensureGitignoreEntries(fs, cityPath, cityGitignoreEntries); err != nil {
@@ -1307,6 +1321,7 @@ func cmdInitFromTOMLFileWithOptionsInternal(fs fsys.FS, tomlSrc, cityPath, nameO
 		skipProviderReadiness: skipProviderReadiness,
 		commandName:           "gc init",
 		noStart:               noStart,
+		hostedDolt:            hosted,
 	})
 }
 
@@ -1475,7 +1490,12 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 		return 1
 	}
 
-	// When a hosted/external Dolt endpoint was supplied, write the full
+	if err := selectorBackendError(cityPath, wiz.hostedDolt); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	// A legacy --dolt-* endpoint writes the full
 	// canonical external config now (R2/R3/R4/R5) so the unconditional
 	// initDirIfReady that follows resolves the city as external and skips the
 	// managed-local Dolt bootstrap. Reject incompatible effective backends
@@ -1486,9 +1506,11 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		if err := applyInitHostedDoltCanonicalConfig(fs, cityPath, cityPrefix, wiz.hostedDolt); err != nil {
-			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
+		if !wiz.hostedDolt.selectorRequested() {
+			if err := applyInitHostedDoltCanonicalConfig(fs, cityPath, cityPrefix, wiz.hostedDolt); err != nil {
+				fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
 		}
 	}
 
@@ -1829,6 +1851,10 @@ func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverri
 		}
 	}
 	selectorRequested := strings.TrimSpace(hosted.Transport) != "" || strings.TrimSpace(hosted.Target) != ""
+	if err := selectorBackendError(cityPath, hosted); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if selectorRequested {
 		if err := hosted.applySelectorToCityConfig(cfg); err != nil {
 			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1844,7 +1870,7 @@ func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverri
 		}
 	}
 
-	// Pin an external/hosted Dolt endpoint supplied via --dolt-* flags or the
+	// Pin a legacy external/hosted Dolt endpoint supplied via --dolt-* flags.
 	// GC_DOLT_* environment, the same as the default/wizard init modes. Without
 	// this, --from silently ignored the endpoint and the copied template's
 	// managed-local Dolt assumption won. Precedence (explicit flag > env >
@@ -1855,25 +1881,27 @@ func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverri
 			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		if err := hosted.applyToCityConfig(cfg); err != nil {
-			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		// Re-supply the rig paths stripped by the identity rewrite: the write
-		// path treats a rig with an empty path as "no binding" and would erase
-		// the .gc/site.toml entries just persisted. MarshalForWrite strips the
-		// paths from city.toml either way, so this only preserves site.toml.
-		writeCfg := *cfg
-		if len(rigSiteBindings) > 0 {
-			writeCfg.Rigs = append([]config.Rig(nil), rigSiteBindings...)
-		}
-		if err := writeCityConfigForEditFS(fs, copiedToml, &writeCfg); err != nil {
-			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		if err := applyInitHostedDoltCanonicalConfig(fs, cityPath, cityPrefix, hosted); err != nil {
-			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
+		if !hosted.selectorRequested() {
+			if err := hosted.applyToCityConfig(cfg); err != nil {
+				fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+			// Re-supply the rig paths stripped by the identity rewrite: the write
+			// path treats a rig with an empty path as "no binding" and would erase
+			// the .gc/site.toml entries just persisted. MarshalForWrite strips the
+			// paths from city.toml either way, so this only preserves site.toml.
+			writeCfg := *cfg
+			if len(rigSiteBindings) > 0 {
+				writeCfg.Rigs = append([]config.Rig(nil), rigSiteBindings...)
+			}
+			if err := writeCityConfigForEditFS(fs, copiedToml, &writeCfg); err != nil {
+				fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+			if err := applyInitHostedDoltCanonicalConfig(fs, cityPath, cityPrefix, hosted); err != nil {
+				fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
 		}
 	}
 
@@ -1923,6 +1951,7 @@ func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverri
 		skipProviderReadiness: skipProviderReadiness,
 		commandName:           "gc init",
 		noStart:               noStart,
+		hostedDolt:            hosted,
 	})
 }
 

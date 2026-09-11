@@ -10,7 +10,7 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 659
+baseline_calls = 665
 baseline_files = 190
 reported_calls = 495
 reported_files = 135
@@ -51,7 +51,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 446
+baseline_calls = 452
 baseline_files = 128
 reported_calls = 380
 reported_files = 98
@@ -103,7 +103,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "cmd/gc+untagged"
 resource = "slow_process_gate"
-baseline_calls = 58
+baseline_calls = 59
 baseline_files = 24
 reported_calls = 78
 reported_files = 27
@@ -250,6 +250,28 @@ owner_bead = "ga-80po0c.2.1"
 invariant = "the controller-token withholding proof is a checked Medium subprocess owner"
 resource_owner = "the one /bin/sh subprocess is confined to TestPassthroughEnvWithholdsControllerTokenFromChildProcess, which exists to read a credential back out of a real child process: the session env is an overlay, so only a real child can prove GC_CONTROLLER_TOKEN is absent rather than merely missing from a map"
 migration_target = "P0.4b"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "cmd/gc"
+package_name = "main"
+owner = "TestGcBeadsBdProviderOwnedLifecycleUsesBdBoundary"
+resources = ["subprocess"]
+owner_bead = "ga-p9iuv.30"
+invariant = "the provider-owned script boundary proof is a checked Medium subprocess owner"
+resource_owner = "the test executes the copied provider script only with a test-owned BD executable and verifies its lifecycle delegation without a host service"
+migration_target = "GC6011"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "cmd/gc"
+package_name = "main"
+owner = "TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses"
+resources = ["slow_process_gate", "subprocess"]
+owner_bead = "ga-p9iuv.30"
+invariant = "the provider-owned BD lifecycle proof is a checked Medium process owner"
+resource_owner = "the test runs the pinned real bd direct and proxied lifecycles under deadlines, records only provider-published identities, and stops its own scope before asserting those children are absent"
+migration_target = "GC6011"
 expires = "2026-10-01"
 
 [[medium]]
