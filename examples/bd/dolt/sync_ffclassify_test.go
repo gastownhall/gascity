@@ -641,12 +641,12 @@ func TestSyncFetchInFlightSkipsNeverFetches(t *testing.T) {
 	if !strings.Contains(log, "LOWER(db) = LOWER('app')") {
 		t.Fatalf("the single-flight check must be scoped to this database, case-insensitively.\nlog:\n%s", log)
 	}
-	// The predicate is a REGEXP on the statement text (whitespace, comments,
-	// case, backticks, a db qualifier), not a LIKE prefix: `CALL  DOLT_FETCH`,
-	// `/* x */ CALL DOLT_PULL(`, `call dolt_fetch(`, `CALL \`dolt_fetch\`(` and
-	// `CALL app.DOLT_FETCH(` are all in flight (verified on Dolt 2.1.10).
-	if !strings.Contains(log, "UPPER(Info) REGEXP '") || !strings.Contains(log, "`?DOLT_(FETCH|PULL)`?") {
-		t.Fatalf("the in-flight predicate must be the REGEXP on UPPER(Info).\nlog:\n%s", log)
+	// The predicate is the whole-identifier token test on the statement text,
+	// not a LIKE prefix and not a grammar of spellings: any statement naming
+	// DOLT_FETCH or DOLT_PULL counts — bare `CALL DOLT_FETCH`, `CALL\`dolt_fetch\`()`,
+	// comments, qualifiers, any case (verified on Dolt 2.1.10, evidence 04f).
+	if !strings.Contains(log, "UPPER(Info) REGEXP '(^|[^A-Z0-9_])DOLT_(FETCH|PULL)([^A-Z0-9_]|$)'") {
+		t.Fatalf("the in-flight predicate must be the whole-identifier REGEXP on UPPER(Info).\nlog:\n%s", log)
 	}
 }
 

@@ -13,8 +13,10 @@ when a `DOLT_FETCH` / `DOLT_PULL` session is already in flight for the database
 line naming the oldest session's age and id and skip — sync skips without
 pushing. A processlist read that fails, answers with anything that is not a
 processlist, or carries a row that is not `digits,digits,…`, also skips (fail
-closed). "In flight" is decided by a `REGEXP` on the statement text, so
-`call dolt_fetch(`, `CALL  DOLT_PULL(` and a call behind a comment all count.
+closed). "In flight" means any server-side statement that names `DOLT_FETCH`
+or `DOLT_PULL` as an identifier, however the call was spelled; a statement
+that merely mentions the name in a literal or comment costs one skipped run
+while it executes, which is the safe side.
 The statement they do issue takes the server's own session lock for the
 database (`GET_LOCK('gc_remote_op:<db>', 0)`) in the same batch as the CALL:
 two runners that both read "nothing in flight" cannot both fetch, because the

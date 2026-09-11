@@ -335,22 +335,22 @@ dolt_sql_csv() {
 # compare case-insensitively (Dolt resolves `app` and `APP` to one database;
 # the processlist shows whichever spelling the client used). Without DB:
 # every such session on the server (the health probe).
-# REMOTE_OP_INFO_REGEXP — the SQL REGEXP (ICU, applied to UPPER(Info)) that
-# recognizes a running CALL DOLT_FETCH / CALL DOLT_PULL however it was typed:
-# whitespace or comments (block `/* … */` including `/***/`, line `-- …` and
-# `# …`) before CALL, between CALL and the procedure, and before the paren;
-# the procedure name bare, backticked, or qualified by one database name,
-# which may carry a hyphen (`CALL app.DOLT_FETCH(`, `CALL \`app-prod\`.DOLT_FETCH(`,
-# `CALL \`dolt_fetch\`(` — all valid Dolt syntax; valid_database_name allows
-# the hyphen).
-# DOLT_PUSH, DOLT_FETCHX, CALLDOLT_FETCH and the text inside a string literal
-# or a comment do not match. Backslashes are doubled for the SQL string
-# literal. The exact string composed below was run on Dolt 2.1.10 (evidence
-# 04e): 13 spellings hit, 7 decoys miss (a qualifier with a space is one of
-# them; valid_database_name forbids spaces).
-_ws='(\\s|/\\*([^*]|\\*+[^*/])*\\*+/|--[^\\n]*\\n|#[^\\n]*\\n)'
-REMOTE_OP_INFO_REGEXP='^'"$_ws"'*CALL'"$_ws"'+(`?[A-Z0-9_-]+`?'"$_ws"'*\\.'"$_ws"'*)?`?DOLT_(FETCH|PULL)`?'"$_ws"'*\\('
-unset _ws
+# REMOTE_OP_INFO_REGEXP — the SQL REGEXP (applied to UPPER(Info)) that decides
+# "a remote operation is in flight": ANY statement that names DOLT_FETCH or
+# DOLT_PULL as a whole identifier (a non-identifier character or the string's
+# edge on both sides). Deliberately over-inclusive: the guard fails closed, so
+# a statement that merely mentions the procedure in a string literal or a
+# comment costs one skipped run while it executes, whereas a spelling this
+# predicate missed would let a second fetch start next to an operator's (the
+# herd's shape). Every way Dolt lets the call be written — bare `CALL
+# DOLT_FETCH`, `CALL\`dolt_fetch\`()`, comments or whitespace between tokens,
+# a backticked or qualified name — carries the identifier, and DOLT_PUSH,
+# DOLT_FETCHX, CALLDOLT_FETCH, dolt_fetch_log, my_dolt_fetch do not. The
+# pre-check and health queries carry `DOLT_(FETCH|PULL)` in their own text
+# and do not match themselves. Verified on Dolt 2.1.10 (evidence 04f): 15
+# spellings hit, 6 decoys miss, 2 mentions-in-text hit by design, no
+# self-match, and a live bare `CALL DOLT_FETCH` is listed and killable.
+REMOTE_OP_INFO_REGEXP='(^|[^A-Z0-9_])DOLT_(FETCH|PULL)([^A-Z0-9_]|$)'
 
 remote_op_sessions_sql() {
   _ros_q="SELECT Id, Time, COALESCE(db, '') AS db FROM information_schema.processlist WHERE UPPER(Info) REGEXP '$REMOTE_OP_INFO_REGEXP'"
