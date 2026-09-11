@@ -2884,8 +2884,18 @@ func canonicalConfigDoltMode(mode string) string {
 // dolt_mode resolves to: server for an existing Dolt workspace (the
 // pre-dolt_mode legacy shape), the fresh proxied-local default otherwise. It
 // mirrors the hasDoltMetadata rule in scopeUsesProxiedDoltMode.
-func freshScopeCanonicalDoltMode(scopeRoot string) string {
-	if backend, ok, err := contract.ReadMetadataBackend(fsys.OSFS{}, scopeMetadataJSONPath(scopeRoot)); err == nil && ok && contract.IsDoltBackend(backend) {
+func freshScopeCanonicalDoltMode(cityPath string) string {
+	if backend, ok, err := contract.ReadMetadataBackend(fsys.OSFS{}, scopeMetadataJSONPath(cityPath)); err == nil && ok && contract.IsDoltBackend(backend) {
+		return "server"
+	}
+	// A doltlite city has no Dolt server and no proxy — its store is the
+	// embedded engine under .beads/embeddeddolt. The proxied-local default is a
+	// decision about a Dolt process bd manages, and applying it here handed a
+	// doltlite city the one binding the ownership classifier reads as a bd-owned
+	// proxied scope: bd raised a proxy and a Dolt child over a workspace that is
+	// supposed to have neither. doltlite keeps the mode it had before the
+	// default flipped.
+	if cityUsesDoltliteBeadsBackend(cityPath) {
 		return "server"
 	}
 	return "proxied-server"
