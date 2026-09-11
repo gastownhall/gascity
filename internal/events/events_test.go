@@ -1557,7 +1557,7 @@ func TestFileRecorderFlockTimeoutFiresWithinBudget(t *testing.T) {
 	}
 	defer rec.Close() //nolint:errcheck // test cleanup
 
-	sib := mustOpenSiblingLock(t, path)
+	sib := mustOpenSiblingLock(t, recorderLockPath(path))
 	defer func() {
 		_ = syscall.Flock(int(sib.Fd()), syscall.LOCK_UN)
 		_ = sib.Close()
@@ -1595,7 +1595,7 @@ func TestFileRecorderFlockSucceedsAfterShortContention(t *testing.T) {
 	}
 	defer rec.Close() //nolint:errcheck // test cleanup
 
-	sib := mustOpenSiblingLock(t, path)
+	sib := mustOpenSiblingLock(t, recorderLockPath(path))
 	time.AfterFunc(50*time.Millisecond, func() {
 		_ = syscall.Flock(int(sib.Fd()), syscall.LOCK_UN)
 		_ = sib.Close()
