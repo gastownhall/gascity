@@ -658,8 +658,12 @@ func TestSyncFetchInFlightSkipsNeverFetches(t *testing.T) {
 	// the query match its own text and skip on every run (codex r6, evidence
 	// 04g). There is no per-database filter at all: attribution is not proof
 	// of a statement's target (TestSyncFetchInFlightOtherDatabaseCountsToo).
-	if q := processlistQuery(t, log); strings.Contains(q, "app") || strings.Contains(q, "LOWER(db)") {
-		t.Fatalf("the processlist query must carry no database literal.\nquery:\n%s", q)
+	// The COMPLETE constant query is the spec (codex r14: a `NOT` slipped
+	// into the WHERE clause passed a substring check — the fake answers the
+	// same rows either way, the server would not).
+	const processlistSQL = "SELECT Id, Time, COALESCE(db, '') AS db FROM information_schema.processlist WHERE UPPER(Info) REGEXP '(^|[^A-Z0-9_])DOLT_(FETCH|PULL)([^A-Z0-9_]|$)' ORDER BY Time DESC, Id ASC"
+	if q := processlistQuery(t, log); !strings.HasSuffix(q, " -q "+processlistSQL) || strings.Contains(q, "app") {
+		t.Fatalf("the processlist query must be exactly the constant text %q (no database literal).\nquery:\n%s", processlistSQL, q)
 	}
 	// The predicate is the whole-identifier token test on the statement text,
 	// not a LIKE prefix and not a grammar of spellings: any statement naming
@@ -884,6 +888,29 @@ func TestSyncFetchBoundReachesTheFetch(t *testing.T) {
 	}
 	assertGuardedKill(t, readLog(t, logPath), "77")
 	assertBounded(t, readLog(t, tlogPath), "9", "CALL DOLT_FETCH(")
+}
+
+// No random bytes, no run: with an `od` that fails, sync stops before any
+// dolt call with exit 2 — a nonce that could repeat (pid-epoch) would let a
+// restarted server's reused id pass the ownership check (codex r14).
+func TestSyncRefusesToRunWithoutARandomNonce(t *testing.T) {
+	binDir := t.TempDir()
+	logPath := writeSyncFakeDoltProcesslist(t, binDir, "printf 'Id,Time,db\\n' ; exit 0")
+	if err := os.WriteFile(filepath.Join(binDir, "od"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("write fake od: %v", err)
+	}
+	outB, err := ffSyncCmd(t, binDir, nil, "--db", "app").CombinedOutput()
+	out := string(outB)
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || ee.ExitCode() != 2 {
+		t.Fatalf("want exit 2 before any database is touched, got err=%v\nout:\n%s", err, out)
+	}
+	if !strings.Contains(out, "cannot read 8 random bytes") || !strings.Contains(out, "gc dolt sync: no run nonce") {
+		t.Fatalf("expected the nonce refusal lines.\nout:\n%s", out)
+	}
+	if readLog(t, logPath) != "" {
+		t.Fatalf("no dolt call may run without a nonce.\nlog:\n%s", readLog(t, logPath))
+	}
 }
 
 // The CALL refused itself: the session that sent it no longer held this run's

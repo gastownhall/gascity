@@ -630,8 +630,9 @@ bound_expired() {
 #     runs on a session that did not pass the check (04k2 a: the true path).
 #   - the run nonce is 64 random bits from /dev/urandom (16 hex), never the
 #     pid or the clock: two hosts starting a runner in the same second with
-#     the same pid must not share a run lock (codex r13). Without
-#     /dev/urandom the nonce falls back to pid-epoch.
+#     the same pid must not share a run lock (codex r13). Without random
+#     bytes there is NO nonce and the script refuses to run before any CALL
+#     (codex r14: a silent pid-epoch fallback reopened the collision).
 REMOTE_OP_GATE_MARK='gc-remote-op-lock-held'
 REMOTE_OP_LOST_MARK='gc-remote-op-lost'
 REMOTE_OP_NOT_OWNER_MARK='gc-remote-op-not-owner'
@@ -642,12 +643,17 @@ REMOTE_OP_NOT_OWNER_MARK='gc-remote-op-not-owner'
 REMOTE_OP_RUN_NONCE="${REMOTE_OP_RUN_NONCE:-}"
 
 # remote_op_new_run_nonce — a fresh run nonce: 16 hex digits from
-# /dev/urandom, or pid-epoch when the device is unavailable.
+# /dev/urandom. Returns 1 with a line on stderr when no such bytes could be
+# read (no device, no od): the caller must stop before any CALL — a nonce
+# that could repeat is worse than no run.
 remote_op_new_run_nonce() {
   _rn=$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
   case "$_rn" in
     ????????????????) printf '%s' "$_rn" ;;
-    *) printf '%s-%s' "$$" "$(date +%s)" ;;
+    *)
+      printf 'dolt runtime: cannot read 8 random bytes from /dev/urandom for the run nonce (od output: %s)\n' "$_rn" >&2
+      return 1
+      ;;
   esac
 }
 

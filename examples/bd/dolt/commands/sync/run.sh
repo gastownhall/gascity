@@ -119,8 +119,12 @@ esac
 PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)}"
 . "$PACK_DIR/assets/scripts/runtime.sh"
 # This run's lock nonce (see runtime.sh, "Server-side single-flight gate"):
-# one random value per script run, computed here and not at source time.
-REMOTE_OP_RUN_NONCE=$(remote_op_new_run_nonce)
+# one random value per script run, computed here and not at source time; no
+# random bytes = no run (before any database is touched).
+REMOTE_OP_RUN_NONCE=$(remote_op_new_run_nonce) || {
+  echo "gc dolt sync: no run nonce — refusing to run (see the line above)" >&2
+  exit 2
+}
 
 beads_bd="$GC_BEADS_BD_SCRIPT"
 data_dir="$DOLT_DATA_DIR"
