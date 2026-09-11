@@ -67,11 +67,17 @@ func (c *DoltBackupCheck) Run(_ *CheckContext) *CheckResult {
 	// grow them: its Dolt repository lives under bd's proxy root, gc never
 	// writes <city>/.dolt-backup for it, and rc.2 refuses `bd backup` on the
 	// proxied path outright. The fix hint would hand the operator a `dolt
-	// backup` invocation against a server gc does not own. Report not-required
-	// rather than warning every healthy proxied rig forever.
+	// backup` invocation against a server gc does not own, and warning every
+	// healthy proxied rig forever is a line nobody can clear.
+	//
+	// So this stays OK — but it must not read as coverage. There is no backup,
+	// by anyone, and no other check says so: bd-backup-freshness skips a scope
+	// with no backup_state.json and delegates "no backup at all" to this check
+	// by name. Say it here, and say it once per city in
+	// ProxiedBackupCoverageCheck.
 	if scopeBindingIsProviderOwnedProxied(rigPath) {
 		r.Status = StatusOK
-		r.Message = fmt.Sprintf("rig %q: bd-owned proxied store — Dolt backups are not gc's to register here", c.rig.Name)
+		r.Message = fmt.Sprintf("rig %q: bd-owned proxied store — no gc or bd backup exists for it (bd v1.3.0-rc.2 refuses backup on proxied scopes); not gc's to register", c.rig.Name)
 		return r
 	}
 

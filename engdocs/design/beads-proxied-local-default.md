@@ -206,3 +206,13 @@ Proxied mode is `[EXPERIMENTAL]` in rc.2 and refuses a list of verbs —
 beads `cmd/bd/proxy_capability.go`; packs and orders that call those verbs
 against a proxied scope fail typed. The dashboard and doctor use `bd ping`
 rather than `bd doctor --readonly` for exactly this reason.
+
+`backup*` is on that list, and it is the one refusal with a data consequence:
+on rc.2 a proxied scope has no backup, by anyone. gc cannot register a Dolt
+backup against a proxy root it does not own, `mol-dog-backup` talks to the
+managed server a proxied scope does not have, and bd refuses its own verb. The
+per-scope doctor checks therefore go quiet — correctly, since there is nothing
+to register and a permanent warning is a line nobody can clear — so doctor says
+it instead in `rig:<name>:dolt-backup`'s message and once per city in the
+`proxied-backup-coverage` advisory. Until beads lifts the refusal, the store
+under the proxy root is the only copy; copy it out of band.

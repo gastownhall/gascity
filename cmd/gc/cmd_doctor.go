@@ -379,6 +379,15 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// looks healthy to every other backup check while its recovery point ages
 	// out — the only surviving backup can be weeks stale before anyone notices.
 	register(doctor.NewBdBackupFreshnessCheckForConfig(cityPath, cfg, cfgErr))
+	// Backup coverage on the proxied default. Every per-scope backup check
+	// goes quiet on a bd-owned proxy root — correctly, since neither gc nor
+	// rc.2's bd can register anything there — which leaves a default-topology
+	// city reading as covered while its store is the only copy. One advisory
+	// line per city says so; registered only when the city actually has a
+	// proxied scope, so nothing changes for a direct or external city.
+	if c := doctor.NewProxiedBackupCoverageCheckForConfig(cityPath, cfg, cfgErr); c != nil {
+		register(c)
+	}
 	// Worktree checks deliberately run even when cfgErr != nil — they
 	// only need the city path, and a broken city.toml is exactly when
 	// silent disk-fill is most likely. The zero-value DoctorConfig
