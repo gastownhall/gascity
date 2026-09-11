@@ -251,6 +251,9 @@ func (r *FileRecorder) Record(e Event) {
 // write failure such as ENOSPC, or a closed recorder. It is the acknowledged
 // form Record swallows, for the rare caller that must not take a durable action
 // on the strength of an append that may have been lost (see events.AckRecorder).
+//
+// The write is not fsynced, so a nil error does not promise stable storage: an
+// OS crash can lose an acknowledged append.
 func (r *FileRecorder) RecordAck(e Event) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

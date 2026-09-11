@@ -478,9 +478,10 @@ func TestEmitCurrentEmitsStepDefinedOncePerStep(t *testing.T) {
 // the mark lands only once the emit is acknowledged durable; an unacknowledged
 // tick leaves the step unmarked and it re-emits on the next healthy tick.
 //
-// RED on d39c76e61f: that revision marks unconditionally once graphStore.Store
-// is non-nil, regardless of the recorder, so the first assertion (still unmarked
-// after a Discard tick) fails there.
+// RED on this PR's first commit, before the confirm-before-mark change: that
+// revision marks unconditionally once graphStore.Store is non-nil, regardless
+// of the recorder, so the first assertion (still unmarked after a Discard tick)
+// fails there.
 func TestEmitCurrentDoesNotMarkOnDroppedOrDiscardEmit(t *testing.T) {
 	graph := beads.NewMemStore()
 	root := mustCreateProjectionRoot(t, graph, "")

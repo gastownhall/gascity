@@ -9241,8 +9241,9 @@ func TestClearRetryEphemeraPreservesRoutingAndClearsFanoutState(t *testing.T) {
 // EmitCurrent forever and never get its own execution.step_defined — a
 // deterministic, non-self-healing loss on every retry iteration >= 2.
 //
-// RED on d39c76e61f: clearRetryEphemera there does not strip the marker, so both
-// the direct-strip and the retryAttemptBead-clone assertions fail.
+// RED on this PR's first commit, before the clone-marker strip:
+// clearRetryEphemera there does not strip the marker, so both the direct-strip
+// and the retryAttemptBead-clone assertions fail.
 func TestRetryClonedStepGetsItsOwnStepDefined(t *testing.T) {
 	t.Parallel()
 

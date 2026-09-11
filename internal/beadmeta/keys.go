@@ -265,6 +265,12 @@ const (
 	// see it. The offline full restate ('gc events reemit-execution') is the
 	// reemit path — it drives Projection.Events, which ignores this marker and
 	// re-states every step, so it re-materializes any aged-out definition.
+	//
+	// A host crash is the second way the two can diverge: the acknowledged
+	// append is not fsynced, so an OS crash can lose the JSONL line while this
+	// marker — written to a separate store with its own commit durability —
+	// survives. The same reemit path ('gc events reemit-execution')
+	// re-materializes the lost definition.
 	StepDefinedEmittedMetadataKey = "gc.step_defined_emitted"
 	StepIDMetadataKey             = "gc.step_id"
 	StepRefMetadataKey            = "gc.step_ref"

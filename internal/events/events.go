@@ -485,6 +485,9 @@ type Recorder interface {
 // (Discard, exec scripts) as "never acknowledged". A nil error means the event
 // reached the log and is therefore readable back by any List/Watch consumer; a
 // non-nil error means it was dropped.
+//
+// The append is not fsynced, so the acknowledgement covers reachability, not
+// stable storage: an OS crash can still lose an acknowledged event.
 type AckRecorder interface {
 	Recorder
 	RecordAck(e Event) error
