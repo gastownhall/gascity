@@ -59,6 +59,8 @@ func bdContextCommandRunnerForCity(cityPath string) beads.CommandRunner {
 		env["BEADS_DIR"] = filepath.Join(dir, ".beads")
 		env["GC_RIG"] = ""
 		env["GC_RIG_ROOT"] = ""
+		// Direct-path guard only; inert on bd's proxied path (see
+		// applyProxiedDoltEnv and beads cmd/bd/main.go:1758).
 		env["BEADS_DOLT_AUTO_START"] = "0"
 		env["BD_EXPORT_AUTO"] = "false"
 		hosted, err := citySelectsHostedBeadsCredentialProvider(cityPath)
@@ -1089,6 +1091,17 @@ func clearManagedDoltLifecycleEnv(env map[string]string) {
 	}
 }
 
+// applyProxiedDoltEnv projects the environment a child bd process needs when
+// beads owns the scope through its proxied-server UOW path.
+//
+// clearManagedDoltLifecycleEnv deliberately drops BEADS_DOLT_AUTO_START here,
+// and that removal is the honest state of the world rather than a policy: on
+// bd v1.3.0-rc.2 the variable is INERT on the proxied path. Every ordinary
+// command short-circuits into the proxied UOW provider (beads
+// cmd/bd/main.go:1758) before the Dolt auto-start policy is consulted, so any
+// bd read — a dashboard sample, gc doctor, a straggler agent — restarts the
+// proxy and its Dolt child. Retiring them is `gc stop`'s job (see
+// shutdownBeadsProvider and cmdStopBodyWithoutSuccess), not an env var's.
 func applyProxiedDoltEnv(env map[string]string) {
 	clearProjectedDoltEnv(env)
 	clearManagedDoltLifecycleEnv(env)
@@ -1767,6 +1780,13 @@ func bdRuntimeEnvWithErrorRecoveryContext(ctx context.Context, cityPath string, 
 	// Dolt server lifecycle via gc-beads-bd; bd's CLI auto-start ignores the
 	// dolt.auto-start:false config (beads resolveAutoStart priority bug) and
 	// starts rogue servers from the agent's cwd with the wrong data_dir.
+	//
+	// This governs the DIRECT server path only. It is inert for a proxied
+	// scope: bd v1.3.0-rc.2 routes every ordinary command into the proxied UOW
+	// provider (beads cmd/bd/main.go:1758) before auto-start policy is read,
+	// so a proxied scope's proxy comes back on the next bd read regardless.
+	// applyProxiedDoltEnv drops the variable for those scopes rather than
+	// projecting a promise bd does not keep.
 	env["BEADS_DOLT_AUTO_START"] = "0"
 	// Suppress bd's auto-export of issues.jsonl on every write. The canonical
 	// config also persists export.auto:false (see internal/beads/contract/files.go),

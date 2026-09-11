@@ -240,11 +240,14 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 	case cityUsesDoltliteBeadsBackend(cityPath):
 		skipLocalDolt = true
 	}
-	if owned, err := cityScopeProviderOwned(cityPath); err != nil {
+	// A city classified from its own bd binding (migrated or cloned) has no
+	// journal entry, so its effective state — ready — comes from the binding.
+	cityState, cityProviderOwned, err := providerOwnedScopeState(cityPath, cityPath)
+	if err != nil {
 		return err
-	} else if owned {
-		entry, _, _ := providerScopeOwnership(cityPath, cityPath)
-		if entry.State == providerScopeReady {
+	}
+	if cityProviderOwned {
+		if cityState.State == providerScopeReady {
 			if err := ensureBeadsProvider(cityPath); err != nil {
 				return fmt.Errorf("provider-owned bead store: %w", err)
 			}
@@ -1057,7 +1060,23 @@ func runProviderOwnedScopeLifecycleOpContext(parent context.Context, cityPath, s
 	if !strings.HasPrefix(provider, "exec:") {
 		return fmt.Errorf("provider-owned scope requires an exec beads provider")
 	}
-	release, err := acquireProviderSemaphoreForOpContext(parent, cityPath, op)
+	if !providerOwnedOpRetires(op) {
+		// Refuse before the semaphore and before any bd invocation so the
+		// refusal cannot leave a half-created store behind.
+		if err := validateProviderOwnedProxiedScopeStore(cityPath, scopeRoot); err != nil {
+			return err
+		}
+	}
+	entry, _, err := providerScopeOwnership(cityPath, scopeRoot)
+	if err != nil {
+		return err
+	}
+	proxied, err := providerOwnedScopeIsProxied(scopeRoot, entry)
+	if err != nil {
+		return err
+	}
+	timeout := providerOwnedOpTimeout(op, proxied)
+	release, err := acquireProviderSemaphoreForOpTimeout(parent, cityPath, timeout)
 	if err != nil {
 		return err
 	}
@@ -1072,9 +1091,7 @@ func runProviderOwnedScopeLifecycleOpContext(parent context.Context, cityPath, s
 	for _, key := range []string{"GC_BEADS_TRANSPORT", "GC_BEADS_TARGET", "BEADS_DOLT_PROXIED_SERVER"} {
 		env = removeEnvKey(env, key)
 	}
-	if entry, owned, err := providerScopeOwnership(cityPath, scopeRoot); err != nil {
-		return err
-	} else if owned && entry.State == providerScopeInitializing {
+	if entry.State == providerScopeInitializing {
 		env = overlayEnvEntries(env, map[string]string{
 			"GC_BEADS_TRANSPORT": entry.Intent.Transport,
 			"GC_BEADS_TARGET":    entry.Intent.Target,
@@ -1087,7 +1104,7 @@ func runProviderOwnedScopeLifecycleOpContext(parent context.Context, cityPath, s
 		"BEADS_DIR":               filepath.Join(scopeRoot, ".beads"),
 		"GC_BEADS_PROVIDER_OWNED": "1",
 	})
-	return runProviderOwnedOpStrict(parent, strings.TrimPrefix(provider, "exec:"), env, op)
+	return runProviderOwnedOpStrict(parent, timeout, strings.TrimPrefix(provider, "exec:"), env, op)
 }
 
 func runProviderOwnedScopesLifecycleOp(cityPath, op string) error {
@@ -1095,16 +1112,9 @@ func runProviderOwnedScopesLifecycleOp(cityPath, op string) error {
 }
 
 func runProviderOwnedScopesLifecycleOpContext(parent context.Context, cityPath, op string) error {
-	scopes := []string{cityPath}
-	if cfg, err := loadCityConfig(cityPath, io.Discard); err != nil {
+	scopes, err := providerOwnedLifecycleScopeRoots(cityPath, op)
+	if err != nil {
 		return err
-	} else if cfg != nil {
-		resolveRigPaths(cityPath, cfg.Rigs)
-		for _, rig := range cfg.Rigs {
-			if strings.TrimSpace(rig.Path) != "" {
-				scopes = append(scopes, rig.Path)
-			}
-		}
 	}
 	for _, scopeRoot := range scopes {
 		owned, err := scopeProviderOwned(cityPath, scopeRoot)
@@ -1121,17 +1131,18 @@ func runProviderOwnedScopesLifecycleOpContext(parent context.Context, cityPath, 
 	return nil
 }
 
+// hasProviderOwnedRigScope reports whether any non-city scope this city would
+// retire on stop is provider-owned, including a rig detached from city.toml.
 func hasProviderOwnedRigScope(cityPath string) (bool, error) {
-	cfg, err := loadCityConfig(cityPath, io.Discard)
-	if err != nil || cfg == nil {
+	roots, err := providerOwnedLifecycleScopeRoots(cityPath, "stop")
+	if err != nil {
 		return false, err
 	}
-	resolveRigPaths(cityPath, cfg.Rigs)
-	for _, rig := range cfg.Rigs {
-		if strings.TrimSpace(rig.Path) == "" {
+	for _, root := range roots {
+		if samePath(root, cityPath) {
 			continue
 		}
-		owned, err := scopeProviderOwned(cityPath, rig.Path)
+		owned, err := scopeProviderOwned(cityPath, root)
 		if err != nil {
 			return false, err
 		}
@@ -1147,19 +1158,15 @@ func hasProviderOwnedRigScope(cityPath string) (bool, error) {
 // their provider is sufficient and must not require erased selector intent.
 // The bool reports whether this invocation may commit the pending GC journal.
 func runProviderOwnedScopeInit(cityPath, dir, prefix, script string) (bool, error) {
-	entry, owned, err := providerScopeOwnership(cityPath, dir)
+	if err := validateProviderOwnedProxiedScopeStore(cityPath, dir); err != nil {
+		return false, err
+	}
+	entry, owned, err := providerOwnedScopeState(cityPath, dir)
 	if err != nil {
 		return false, err
 	}
 	if !owned {
-		transferred, err := committedBeadsHandoffOwnsScope(dir)
-		if err != nil {
-			return false, err
-		}
-		if !transferred {
-			return false, fmt.Errorf("provider-owned scope %q has no initialization intent", dir)
-		}
-		return false, runProviderOwnedScopeLifecycleOpContext(context.Background(), cityPath, dir, "start")
+		return false, fmt.Errorf("provider-owned scope %q has no initialization intent", dir)
 	}
 	if entry.State == providerScopeReady {
 		return false, runProviderOwnedScopeLifecycleOpContext(context.Background(), cityPath, dir, "start")
@@ -1218,7 +1225,11 @@ func runProviderOwnedScopeInit(cityPath, dir, prefix, script string) (bool, erro
 	if database != "" {
 		args = append(args, database)
 	}
-	if err := runProviderOwnedOpStrict(context.Background(), script, env, args...); err != nil {
+	proxied, err := providerOwnedScopeIsProxied(dir, entry)
+	if err != nil {
+		return false, err
+	}
+	if err := runProviderOwnedOpStrict(context.Background(), providerOwnedOpTimeout("init", proxied), script, env, args...); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -1309,12 +1320,12 @@ func validatePendingProviderEndpoint(cityPath, scopeRoot string, intent provider
 // runProviderOwnedOpStrict differs from the legacy generic provider runner:
 // an exit status of 2 is a provider failure for a scope GC has explicitly
 // handed to the provider, never an invitation to fall back to GC lifecycle.
-func runProviderOwnedOpStrict(parent context.Context, script string, environ []string, args ...string) error {
+func runProviderOwnedOpStrict(parent context.Context, timeout time.Duration, script string, environ []string, args ...string) error {
 	op := "provider operation"
 	if len(args) > 0 {
 		op = args[0]
 	}
-	ctx, cancel := providerLifecycleContext(parent, providerOpTimeout(op))
+	ctx, cancel := providerLifecycleContext(parent, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, script, args...)
 	cmd.WaitDelay = 2 * time.Second
@@ -1400,6 +1411,11 @@ func ensureBeadsProvider(cityPath string) error {
 // shutdownBeadsProvider stops the bead store's backing service.
 // Called by gc stop after agents have been terminated.
 // For exec providers, fires "stop". For file providers, always available.
+//
+// For provider-owned scopes this fires `bd dolt stop` per scope, which is
+// idempotent on bd v1.3.0-rc.2, so a repeated gc stop is a clean no-op. It
+// must remain the LAST teardown step: bd restarts a proxied scope's proxy and
+// Dolt child on any read, so a reader that outlives this call undoes it.
 func shutdownBeadsProvider(cityPath string) error {
 	if owned, err := cityScopeProviderOwned(cityPath); err != nil {
 		return err
@@ -3247,6 +3263,14 @@ func applyPendingProviderExternalEndpoint(cityPath string, intent providerScopeI
 		}
 	}
 	if socket == "" && (host == "" || port == "") {
+		// The pending record's own endpoint. It ranks below an explicit retry
+		// input so an operator can still correct a wrong upstream, and above
+		// the legacy city cache because it names this scope specifically.
+		if journaled := pendingProviderScopeEndpoint(cityPath, cityPath); journaled.Host != "" && journaled.Port != "" {
+			host, port = journaled.Host, journaled.Port
+		}
+	}
+	if socket == "" && (host == "" || port == "") {
 		// The city cache remains a compatibility fallback only when this
 		// process supplied no retry endpoint.
 		if value, ok := cityDoltConfigs.Load(normalizePathForCompare(cityPath)); ok {
@@ -3340,7 +3364,14 @@ func acquireProviderSemaphoreForOp(cityPath, op string) (func(), error) {
 }
 
 func acquireProviderSemaphoreForOpContext(parent context.Context, cityPath, op string) (func(), error) {
-	ctx, cancel := providerLifecycleContext(parent, providerOpTimeout(op))
+	return acquireProviderSemaphoreForOpTimeout(parent, cityPath, providerOpTimeout(op))
+}
+
+// acquireProviderSemaphoreForOpTimeout bounds the wait for a city's lifecycle
+// slot by the same budget the operation itself gets, so a proxied scope's
+// wider readiness budget is not clipped by a narrower queueing deadline.
+func acquireProviderSemaphoreForOpTimeout(parent context.Context, cityPath string, timeout time.Duration) (func(), error) {
+	ctx, cancel := providerLifecycleContext(parent, timeout)
 	release, err := acquireProviderSemaphore(ctx, cityPath)
 	if err != nil {
 		cancel()
@@ -3367,6 +3398,31 @@ var providerOpTimeout = func(op string) time.Duration {
 	default:
 		return 30 * time.Second
 	}
+}
+
+// providerOwnedProxiedOpMinTimeout floors the readiness budget for a bd-owned
+// proxied scope. The single `bd ping` that serves as readiness opens beads'
+// UOW provider, which waits up to 15s for the proxy endpoint and then up to
+// 30s for the Dolt child to report ready — about 45s on a cold start. The
+// generic 30s budget SIGKILLs that wait partway through and reports a failure
+// for a store that was about to come up.
+const providerOwnedProxiedOpMinTimeout = 60 * time.Second
+
+// providerOwnedOpTimeout returns the context timeout for a provider-owned
+// lifecycle operation. Direct scopes keep the generic budget; a proxied scope
+// raises the readiness operations to providerOwnedProxiedOpMinTimeout.
+func providerOwnedOpTimeout(op string, proxied bool) time.Duration {
+	timeout := providerOpTimeout(op)
+	if !proxied {
+		return timeout
+	}
+	switch op {
+	case "start", "ensure-ready", "health", "probe", "recover":
+		if timeout < providerOwnedProxiedOpMinTimeout {
+			return providerOwnedProxiedOpMinTimeout
+		}
+	}
+	return timeout
 }
 
 // runProviderOp runs a lifecycle operation against an exec beads script.

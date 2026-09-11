@@ -342,7 +342,9 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 			fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		// Controller handled the shutdown — still stop bead store below.
+		// Controller handled the shutdown — still stop the bead store, and
+		// only after waiting for the controller to be gone: a live reader
+		// restarts a provider-owned proxy the moment it is retired.
 		if err := shutdownBeadsProviderForStop(cityPath); err != nil {
 			fmt.Fprintf(stderr, "gc stop: bead store: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
@@ -408,7 +410,21 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 
 	teardownServerForStop(sp, stderr, "gc stop")
 
-	// Stop bead store's backing service after agents.
+	// Stop the bead store's backing service LAST, and only here. The order
+	// this function runs in is load-bearing for a provider-owned proxied city:
+	//
+	//   controller (agents drain with it) -> sessions -> orphan sessions ->
+	//   runtime server teardown -> bd dolt stop per provider-owned scope
+	//
+	// bd restarts a proxied scope's proxy and Dolt child on ANY read (beads
+	// cmd/bd/main.go:1758 — BEADS_DOLT_AUTO_START does not reach that path),
+	// so a single surviving reader after this point resurrects the processes
+	// this call just retired. Retiring first and stopping readers afterwards
+	// would leave the city up with a live proxy every time.
+	//
+	// The call is re-runnable: `bd dolt stop` is idempotent on rc.2 (exit 0,
+	// stopped/verified true, with or without a live proxy), so a second
+	// `gc stop` finds nothing to do and still exits 0.
 	if err := shutdownBeadsProviderForStop(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc stop: bead store: %v\n", err) //nolint:errcheck // best-effort stderr
 		// Non-fatal warning.
@@ -468,11 +484,24 @@ func stopCityManagedBeadsProviderAfterSuccessfulStop(cityPath string, stderr io.
 	return true
 }
 
+// stopCityManagedBeadsProvider retires the city's bead-store backend on the
+// stop paths that do not run the full stop body (supervisor-unregistered, and
+// a city whose config will not load).
+//
+// A provider-owned scope is not gated on a managed Dolt port. bd owns the
+// process for those scopes and publishes no GC-managed port, so the port probe
+// — which is the right question for the legacy managed-Dolt lifecycle — would
+// answer "nothing to stop" for every proxied city and leave its proxy and Dolt
+// child resident.
 func stopCityManagedBeadsProvider(cityPath string) (bool, error) {
 	if rawBeadsProvider(cityPath) != "bd" {
 		return false, nil
 	}
-	if currentResolvableManagedDoltPort(cityPath) == "" {
+	providerOwned, err := cityHasProviderOwnedScope(cityPath)
+	if err != nil {
+		return false, err
+	}
+	if !providerOwned && currentResolvableManagedDoltPort(cityPath) == "" {
 		return false, nil
 	}
 	return true, shutdownBeadsProviderForStop(cityPath)

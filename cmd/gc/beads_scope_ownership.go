@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 
@@ -32,11 +33,28 @@ type providerScopeIntent struct {
 	Target    string `json:"target,omitempty"`
 }
 
+// providerScopeEndpoint is the upstream a pending external scope must
+// initialize against. It is journaled because the endpoint used to live only
+// in a process-local registration: a `gc init` that died after journaling its
+// pending record left no way to recover the endpoint, and every retry failed
+// inside the provider adapter for want of it. A local scope owns its own
+// listener and records nothing here.
+type providerScopeEndpoint struct {
+	Host     string `json:"host,omitempty"`
+	Port     string `json:"port,omitempty"`
+	Database string `json:"database,omitempty"`
+}
+
 type providerScopeOwnershipEntry struct {
 	ScopePath      string              `json:"scope_path"`
 	LifecycleOwner string              `json:"lifecycle_owner"`
 	State          string              `json:"state"`
 	Intent         providerScopeIntent `json:"intent,omitempty"`
+	// Endpoint stays out of providerScopeIntent on purpose: intent equality is
+	// how a retry is checked against its durable record, and an operator who
+	// corrects a wrong endpoint is retrying the same topology, not requesting
+	// a conflicting one.
+	Endpoint providerScopeEndpoint `json:"endpoint,omitzero"`
 }
 
 type providerScopeOwnershipJournal struct {
@@ -80,6 +98,29 @@ func normalizeProviderScopeIntent(intent providerScopeIntent) (providerScopeInte
 	return intent, nil
 }
 
+// normalizeProviderScopeEndpoint trims a journaled endpoint and drops a
+// partial one. Half an endpoint is worse than none: it would satisfy the
+// pending-endpoint check and then fail inside bd.
+func normalizeProviderScopeEndpoint(endpoint providerScopeEndpoint) providerScopeEndpoint {
+	endpoint.Host = strings.TrimSpace(endpoint.Host)
+	endpoint.Port = strings.TrimSpace(endpoint.Port)
+	endpoint.Database = strings.TrimSpace(endpoint.Database)
+	if endpoint.Host == "" || endpoint.Port == "" {
+		endpoint.Host, endpoint.Port = "", ""
+	}
+	return endpoint
+}
+
+// pendingProviderScopeEndpoint returns the endpoint journaled for a scope that
+// is still initializing. Ready scopes have bd's own binding to read instead.
+func pendingProviderScopeEndpoint(cityPath, scopeRoot string) providerScopeEndpoint {
+	entry, owned, err := providerScopeOwnership(cityPath, scopeRoot)
+	if err != nil || !owned || entry.State != providerScopeInitializing {
+		return providerScopeEndpoint{}
+	}
+	return entry.Endpoint
+}
+
 func loadProviderScopeOwnershipJournal(cityPath string) (providerScopeOwnershipJournal, bool, error) {
 	path := providerScopeOwnershipPath(cityPath)
 	data, err := os.ReadFile(path)
@@ -115,12 +156,19 @@ func loadProviderScopeOwnershipJournal(cityPath string) (providerScopeOwnershipJ
 		}
 		switch entry.State {
 		case providerScopeInitializing:
-			if _, err := normalizeProviderScopeIntent(entry.Intent); err != nil {
+			intent, err := normalizeProviderScopeIntent(entry.Intent)
+			if err != nil {
 				return providerScopeOwnershipJournal{}, false, fmt.Errorf("invalid initializing scope ownership for %q: %w", key, err)
+			}
+			if intent.Target != "external" && entry.Endpoint != (providerScopeEndpoint{}) {
+				return providerScopeOwnershipJournal{}, false, fmt.Errorf("local scope ownership for %q records an external endpoint", key)
 			}
 		case providerScopeReady:
 			if entry.Intent != (providerScopeIntent{}) {
 				return providerScopeOwnershipJournal{}, false, fmt.Errorf("ready scope ownership for %q retains initialization intent", key)
+			}
+			if entry.Endpoint != (providerScopeEndpoint{}) {
+				return providerScopeOwnershipJournal{}, false, fmt.Errorf("ready scope ownership for %q retains its initialization endpoint", key)
 			}
 		default:
 			return providerScopeOwnershipJournal{}, false, fmt.Errorf("invalid scope ownership state for %q", key)
@@ -170,12 +218,236 @@ func providerScopeOwnershipRecord(cityPath, scopeRoot string) (string, providerS
 	return providerScopeOwnershipRecordFromJournal(journal, cityPath, scopeRoot)
 }
 
-func scopeProviderOwned(cityPath, scopeRoot string) (bool, error) {
-	_, owned, err := providerScopeOwnership(cityPath, scopeRoot)
-	if err != nil || owned {
-		return owned, err
+// scopeBindingIsProviderOwnedProxied reports whether bd's durable metadata in
+// this scope binds it to the proxied-server path. bd owns the proxy and its
+// child Dolt process for such a scope whether or not Gas City ever journaled
+// an initialization: a workspace migrated in place with
+// `bd migrate from-server-to-proxied-server`, or cloned from a proxied city
+// (bd git-commits .beads/metadata.json), carries the mode with no journal
+// record. Malformed metadata is an error rather than a legacy classification;
+// guessing who owns a live Dolt process is how a scope ends up with two.
+func scopeBindingIsProviderOwnedProxied(scopeRoot string) (bool, error) {
+	metadata, ok, err := contract.LoadMetadataState(fsys.OSFS{}, scopeMetadataJSONPath(scopeRoot))
+	if err != nil {
+		return false, fmt.Errorf("load beads metadata for scope %q: %w", scopeRoot, err)
 	}
-	return committedBeadsHandoffOwnsScope(scopeRoot)
+	if !ok {
+		return false, nil
+	}
+	return contract.IsProxiedDoltMode(metadata.Backend, metadata.DoltMode), nil
+}
+
+// providerOwnedScopeIntentFromBinding derives a provider-owned scope's
+// transport and target from bd's durable binding rather than from the
+// ownership journal. The journal clears its intent at ready, and a scope
+// classified from metadata alone never carried one, so the binding is the
+// only remaining authority. The proxied sidecar — not the proxy's loopback
+// listener — decides whether the upstream is external.
+func providerOwnedScopeIntentFromBinding(scopeRoot string) (providerScopeIntent, bool, error) {
+	proxied, err := scopeBindingIsProviderOwnedProxied(scopeRoot)
+	if err != nil || !proxied {
+		return providerScopeIntent{}, false, err
+	}
+	external, err := proxiedScopeHasExternalUpstream(scopeRoot)
+	if err != nil {
+		return providerScopeIntent{}, false, err
+	}
+	target := "local"
+	if external {
+		target = "external"
+	}
+	return providerScopeIntent{Transport: "proxied", Target: target}, true, nil
+}
+
+// providerOwnedScopeIsProxied reports whether a provider-owned scope's bd
+// lifecycle runs through beads' proxied-server path. A scope still being
+// initialized has no binding to read yet, so its journaled intent answers;
+// every other scope answers from bd's own metadata.
+func providerOwnedScopeIsProxied(scopeRoot string, entry providerScopeOwnershipEntry) (bool, error) {
+	if entry.State == providerScopeInitializing {
+		return entry.Intent.Transport == "proxied", nil
+	}
+	return scopeBindingIsProviderOwnedProxied(scopeRoot)
+}
+
+// providerOwnedScopeState resolves the effective ownership record for a scope:
+// the journal entry when Gas City recorded the initialization, otherwise a
+// synthesized ready record for a scope whose committed handoff or persisted
+// proxied binding already puts the lifecycle in bd's hands. Both synthesized
+// forms are ready by construction — the durable artifact exists only because
+// bd finished writing it — so their topology comes from the binding.
+func providerOwnedScopeState(cityPath, scopeRoot string) (providerScopeOwnershipEntry, bool, error) {
+	entry, owned, err := providerScopeOwnership(cityPath, scopeRoot)
+	if err != nil || owned {
+		return entry, owned, err
+	}
+	transferred, err := committedBeadsHandoffOwnsScope(scopeRoot)
+	if err != nil {
+		return providerScopeOwnershipEntry{}, false, err
+	}
+	if !transferred {
+		proxied, bindingErr := scopeBindingIsProviderOwnedProxied(scopeRoot)
+		if bindingErr != nil || !proxied {
+			return providerScopeOwnershipEntry{}, false, bindingErr
+		}
+	}
+	return providerScopeOwnershipEntry{
+		ScopePath:      normalizePathForCompare(scopeRoot),
+		LifecycleOwner: providerScopeLifecycleOwner,
+		State:          providerScopeReady,
+	}, true, nil
+}
+
+func scopeProviderOwned(cityPath, scopeRoot string) (bool, error) {
+	_, owned, err := providerOwnedScopeState(cityPath, scopeRoot)
+	return owned, err
+}
+
+// providerOwnedOpRetires reports whether a lifecycle operation only retires
+// provider processes. Retiring operations reach further than starting ones —
+// see providerOwnedLifecycleScopeRoots.
+func providerOwnedOpRetires(op string) bool {
+	return op == "stop" || op == "shutdown"
+}
+
+// providerOwnedLifecycleScopeRoots lists the scope roots a city-wide provider
+// lifecycle operation visits: the city plus every configured rig. A retiring
+// operation additionally visits every detached `path:` record in the ownership
+// journal — a rig that left city.toml by removal, rename, or an interrupted
+// add. Those scopes must not be revived by start or health, but their bd
+// processes are still this city's to stop, and for the same reason a city.toml
+// that no longer parses must not strand them either.
+func providerOwnedLifecycleScopeRoots(cityPath, op string) ([]string, error) {
+	roots := make([]string, 0, 4)
+	seen := make(map[string]struct{}, 4)
+	add := func(root string) {
+		root = normalizePathForCompare(root)
+		if root == "" {
+			return
+		}
+		if _, duplicate := seen[root]; duplicate {
+			return
+		}
+		seen[root] = struct{}{}
+		roots = append(roots, root)
+	}
+	add(cityPath)
+	cfg, cfgErr := loadCityConfig(cityPath, io.Discard)
+	if cfgErr == nil && cfg != nil {
+		resolveRigPaths(cityPath, cfg.Rigs)
+		for _, rig := range cfg.Rigs {
+			if strings.TrimSpace(rig.Path) != "" {
+				add(rig.Path)
+			}
+		}
+	}
+	if !providerOwnedOpRetires(op) {
+		if cfgErr != nil {
+			return nil, cfgErr
+		}
+		return roots, nil
+	}
+	journal, exists, err := loadProviderScopeOwnershipJournal(cityPath)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return roots, nil
+	}
+	detached := make([]string, 0, len(journal.Scopes))
+	for key, entry := range journal.Scopes {
+		if strings.HasPrefix(key, "path:") {
+			detached = append(detached, entry.ScopePath)
+		}
+	}
+	sort.Strings(detached)
+	for _, root := range detached {
+		add(root)
+	}
+	return roots, nil
+}
+
+// cityHasProviderOwnedScope reports whether stopping this city has any
+// provider-owned bd process to retire. Proxied cities publish no GC-managed
+// Dolt port, so a port probe is not an answer to this question.
+func cityHasProviderOwnedScope(cityPath string) (bool, error) {
+	roots, err := providerOwnedLifecycleScopeRoots(cityPath, "stop")
+	if err != nil {
+		return false, err
+	}
+	for _, root := range roots {
+		owned, err := scopeProviderOwned(cityPath, root)
+		if err != nil {
+			return false, err
+		}
+		if owned {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// proxiedScopeProviderRoot resolves the directory bd roots a proxied scope's
+// proxy and Dolt child at: the sidecar's root_path when bd wrote one, else the
+// documented default .beads/dolt.
+func proxiedScopeProviderRoot(scopeRoot string) (string, error) {
+	beadsDir := filepath.Join(normalizePathForCompare(scopeRoot), ".beads")
+	data, err := os.ReadFile(filepath.Join(beadsDir, "proxied_server_client_info.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return filepath.Join(beadsDir, "dolt"), nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read proxied server binding: %w", err)
+	}
+	var sidecar struct {
+		RootPath string `json:"root_path"`
+	}
+	if err := json.Unmarshal(data, &sidecar); err != nil {
+		return "", fmt.Errorf("parse proxied server binding: %w", err)
+	}
+	root := strings.TrimSpace(sidecar.RootPath)
+	if root == "" {
+		return filepath.Join(beadsDir, "dolt"), nil
+	}
+	if !filepath.IsAbs(root) {
+		root = filepath.Join(beadsDir, root)
+	}
+	return filepath.Clean(root), nil
+}
+
+// validateProviderOwnedProxiedScopeStore refuses to serve a scope that claims
+// bd's proxied-server mode but has no store behind it. bd commits
+// metadata.json and gitignores the store, so a clone of a proxied workspace
+// carries the mode without the data; the first bd command against it would
+// silently create an empty store and the scope would read as an empty tracker.
+// Journaled scopes are exempt: their record means Gas City is driving the
+// initialization, and a pending one legitimately has no store yet.
+func validateProviderOwnedProxiedScopeStore(cityPath, scopeRoot string) error {
+	if _, journaled, err := providerScopeOwnership(cityPath, scopeRoot); err != nil || journaled {
+		return err
+	}
+	intent, proxied, err := providerOwnedScopeIntentFromBinding(scopeRoot)
+	if err != nil || !proxied {
+		return err
+	}
+	if intent.Target == "external" {
+		// An external upstream holds the data. The local proxy root is
+		// scaffolding bd recreates on demand.
+		return nil
+	}
+	root, err := proxiedScopeProviderRoot(scopeRoot)
+	if err != nil {
+		return err
+	}
+	_, statErr := os.Stat(root)
+	switch {
+	case statErr == nil:
+		return nil
+	case errors.Is(statErr, os.ErrNotExist):
+		return fmt.Errorf("beads scope %q declares bd proxied-server mode but its provider store %s does not exist; bd commits .beads/metadata.json and ignores the store itself, so a clone carries the mode without the data. Refusing to create an empty store: initialize it explicitly with --beads-transport proxied --beads-target local, or restore %s", scopeRoot, root, root)
+	default:
+		return fmt.Errorf("inspect proxied provider store %s: %w", root, statErr)
+	}
 }
 
 func cityScopeProviderOwned(cityPath string) (bool, error) {
@@ -512,9 +784,22 @@ func proxiedScopeHasExternalUpstream(cityPath string) (bool, error) {
 }
 
 func persistProviderScopeOwnership(cityPath, scopeRoot string, intent providerScopeIntent) error {
+	return persistProviderScopeOwnershipWithEndpoint(cityPath, scopeRoot, intent, providerScopeEndpoint{})
+}
+
+// persistProviderScopeOwnershipWithEndpoint records a pending scope together
+// with the external upstream it must initialize against, so a retry in a new
+// process can recover the endpoint from the journal instead of dying for want
+// of it. A zero endpoint never clears one already recorded: a resume path
+// legitimately has no selector input.
+func persistProviderScopeOwnershipWithEndpoint(cityPath, scopeRoot string, intent providerScopeIntent, endpoint providerScopeEndpoint) error {
 	intent, err := normalizeProviderScopeIntent(intent)
 	if err != nil {
 		return err
+	}
+	endpoint = normalizeProviderScopeEndpoint(endpoint)
+	if intent.Target != "external" && endpoint != (providerScopeEndpoint{}) {
+		return fmt.Errorf("provider scope target %q owns its own endpoint", intent.Target)
 	}
 	cityPath = normalizePathForCompare(cityPath)
 	scopeRoot = normalizePathForCompare(scopeRoot)
@@ -552,11 +837,18 @@ func persistProviderScopeOwnership(cityPath, scopeRoot string, intent providerSc
 			if current.Intent != intent {
 				return fmt.Errorf("conflicting provider initialization intent for scope %q", scopeRoot)
 			}
-			return nil
+			if endpoint == (providerScopeEndpoint{}) || endpoint == current.Endpoint {
+				return nil
+			}
+			// A retry that supplies an endpoint is still the same topology; it
+			// is repairing the one input the journal could not recover.
+			current.Endpoint = endpoint
+			journal.Scopes[key] = current
+			return writeProviderScopeOwnershipJournal(cityPath, journal)
 		}
 		journal.Scopes[key] = providerScopeOwnershipEntry{
 			ScopePath: scopeRoot, LifecycleOwner: providerScopeLifecycleOwner,
-			State: providerScopeInitializing, Intent: intent,
+			State: providerScopeInitializing, Intent: intent, Endpoint: endpoint,
 		}
 		return writeProviderScopeOwnershipJournal(cityPath, journal)
 	})
@@ -593,6 +885,7 @@ func markProviderScopeOwnershipReady(cityPath, scopeRoot string) error {
 		}
 		entry.State = providerScopeReady
 		entry.Intent = providerScopeIntent{}
+		entry.Endpoint = providerScopeEndpoint{}
 		journal.Scopes[key] = entry
 		if err := writeProviderScopeOwnershipJournal(cityPath, journal); err != nil {
 			return err
