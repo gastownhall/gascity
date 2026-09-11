@@ -614,25 +614,35 @@ func recordDrainAckAssignedWorkEvent(
 // ONLY provably-non-claimable work — cases where no worker for this seat could
 // have claimed the row, so draining past it was correct pull:
 //
-//   - An OPEN bead parked on an unmet dependency, deferred, or otherwise not
-//     ready. No worker can claim a blocked/deferred row, so a seat that drained
-//     past it drained correctly (firstReadyAssignedWorkBeadForReachableStore
-//     keys on readiness, and demandRowReady mirrors it on the divergence half).
+//   - An OPEN bead that is blocked on an unmet dependency or deferred. No worker
+//     can claim a blocked/deferred row, so a seat that drained past it drained
+//     correctly. The open/claimable arm
+//     (firstOpenClaimableAssignedWorkBeadForReachableStore) walks the seat's
+//     OpenAssignedTo rows (status=open) and suppresses a row ONLY when it is
+//     provably blocked or deferred (demandRowReady, the same predicate the
+//     divergence half uses). It does NOT borrow the beads.Ready projection, whose
+//     type/label exclusions (step, molecule, gate, gc:order-tracking, …) encode
+//     "not pull-claimable", not "not stranded" — so an OPEN step or other
+//     excluded-type row assigned straight to a seat at dispatch still FIRES,
+//     which is the exact strand #2293 is about.
 //   - A bead assigned to no identifier this seat carries (assignee-empty relative
 //     to the seat): the finders query by the seat's own identifiers, so an
 //     unassigned or foreign row is never returned.
 //   - The seat's own mol-do-work "drain" step (isSessionOwnDrainStepBead),
 //     excluded for parity with the close gate.
 //
-// An IN_PROGRESS bead assigned to one of the seat's identifiers ALWAYS fires.
-// Distinguishing a genuine cap-hit strand (gastownhall/gascity#2293) from a
-// benign live-sibling claim cannot be done safely at finalize: every liveness
-// signal available here (tmux Running without Alive on a zombie pane, a stale
-// 30s liveness cache with no error channel, name-only keying that borrows a
-// duplicate-named seat's liveness, cross-tick memoization) has a hole that would
-// silence a real strand. Rather than risk that false negative, the in_progress
-// arm accepts the residual benign-live-sibling noise and fires unconditionally.
-// It fails CLOSED: a read error yields (found=false), so a flaky store never
+// An IN_PROGRESS bead assigned to one of the seat's identifiers ALWAYS fires, and
+// is probed FIRST so a graph/deps read error in the open arm can never silence it
+// (and so the payload prefers the most-urgent in_progress candidate, as
+// origin/main did). Distinguishing a genuine cap-hit strand
+// (gastownhall/gascity#2293) from a benign live-sibling claim cannot be done
+// safely at finalize: every liveness signal available here (tmux Running without
+// Alive on a zombie pane, a stale 30s liveness cache with no error channel,
+// name-only keying that borrows a duplicate-named seat's liveness, cross-tick
+// memoization) has a hole that would silence a real strand. Rather than risk that
+// false negative, the in_progress arm accepts the residual benign-live-sibling
+// noise and fires unconditionally. It fails CLOSED: an error is surfaced (to be
+// logged) only when BOTH arms fail without finding a bead, so a flaky store never
 // manufactures the alarm this classifier exists to keep honest.
 func drainAckClaimableAnomalyBead(
 	cityPath string,
@@ -641,14 +651,21 @@ func drainAckClaimableAnomalyBead(
 	rigStores map[string]beads.Store,
 	info sessionpkg.Info,
 ) (beads.Bead, bool, error) {
-	readyBead, readyFound, err := firstReadyAssignedWorkBeadForReachableStore(cityPath, cfg, store, rigStores, info)
-	if err != nil {
-		return beads.Bead{}, false, err
+	inProgressBead, inProgressFound, inProgressErr := firstInProgressAssignedWorkBeadForReachableStore(cityPath, cfg, store, rigStores, info)
+	if inProgressFound {
+		return inProgressBead, true, nil
 	}
-	if readyFound {
-		return readyBead, true, nil
+	openBead, openFound, openErr := firstOpenClaimableAssignedWorkBeadForReachableStore(cityPath, cfg, store, rigStores, info)
+	if openFound {
+		return openBead, true, nil
 	}
-	return firstInProgressAssignedWorkBeadForReachableStore(cityPath, cfg, store, rigStores, info)
+	// Neither arm found a bead. Surface an error only when BOTH probes failed: a
+	// single-arm read error with the other arm cleanly empty is not enough signal
+	// to manufacture the alarm (fail closed), but a total read failure is logged.
+	if inProgressErr != nil && openErr != nil {
+		return beads.Bead{}, false, errors.Join(inProgressErr, openErr)
+	}
+	return beads.Bead{}, false, nil
 }
 
 // drainAckFinalizeResult captures the Info-snapshot effect of a
@@ -4693,14 +4710,14 @@ func firstAssignedWorkBeadForSession(
 	return bead, found, nil
 }
 
-// firstReadyAssignedWorkBeadForReachableStore returns the first READY (open and
-// unblocked) work bead still assigned to the given session in the store the
-// session's configured agent can query, plus whether one was found. It keys on
-// readiness so the drain-ack anomaly classifier (drainAckClaimableAnomalyBead)
-// can tell a genuinely claimable strand from an open bead parked on an unmet
-// dependency, which no worker could have claimed. Returns (zero-bead, false, nil)
-// when nothing matches.
-func firstReadyAssignedWorkBeadForReachableStore(
+// firstOpenClaimableAssignedWorkBeadForReachableStore returns the first OPEN,
+// claimable-now work bead still assigned to the given session in the store the
+// session's configured agent can query, plus whether one was found. "Claimable"
+// here means open and neither blocked nor deferred — the open arm of the
+// drain-ack anomaly classifier (drainAckClaimableAnomalyBead), which suppresses
+// only provably-non-claimable rows. Returns (zero-bead, false, nil) when nothing
+// matches.
+func firstOpenClaimableAssignedWorkBeadForReachableStore(
 	cityPath string,
 	cfg *config.City,
 	store beads.Store,
@@ -4709,35 +4726,51 @@ func firstReadyAssignedWorkBeadForReachableStore(
 ) (beads.Bead, bool, error) {
 	identifiers := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
 	return firstAssignedWorkBeadForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (beads.Bead, bool, error) {
-		return firstReadyAssignedWorkBeadInStoreByIdentifiers(s, identifiers)
+		return firstOpenClaimableAssignedWorkBeadInStoreByIdentifiers(s, identifiers)
 	})
 }
 
-// firstReadyAssignedWorkBeadInStoreByIdentifiers returns the first ready (open,
-// unblocked) non-session, non-mail work bead in store assigned to any of the
-// given identifiers. ReadyAssignedTo already excludes in_progress and
-// dependency-blocked rows, so this returns only rows a worker for this session
-// could claim right now. It also skips the seat's own mol-do-work drain step
+// firstOpenClaimableAssignedWorkBeadInStoreByIdentifiers returns the first OPEN
+// non-session, non-mail work bead in store assigned to any of the given
+// identifiers that a worker could claim right now, plus whether one was found.
+//
+// It walks the raw OpenAssignedTo list (status=open) and suppresses a row ONLY
+// when it is provably non-claimable — blocked on an unmet dependency or deferred
+// (demandRowReady, the same predicate the demand/claim-divergence half uses).
+// Every other open assigned row FIRES regardless of type. This deliberately does
+// NOT reuse the beads.Ready projection: Ready's type exclusions (step, molecule,
+// gate, merge-request, …) and label exclusions (gc:order-tracking, gc:session)
+// encode "not pull-claimable", not "not stranded", so an OPEN step bead assigned
+// straight to a seat at dispatch — sitting open before the agent claims it —
+// would be silenced by Ready even though it is a genuine strand
+// (gastownhall/gascity#2293). It also skips the seat's own mol-do-work drain step
 // (isSessionOwnDrainStepBead), mirroring the close gate's
 // hasNonSessionNonOwnDrainStepWork so a session's own open drain step is never
 // reported as a claimable strand. identifiers are pre-compacted (deduped, no
 // empties) by sessionAssignmentIdentifiersForConfigInfo, so no extra dedupe is
 // needed here.
-func firstReadyAssignedWorkBeadInStoreByIdentifiers(store beads.Store, identifiers []string) (beads.Bead, bool, error) {
+func firstOpenClaimableAssignedWorkBeadInStoreByIdentifiers(store beads.Store, identifiers []string) (beads.Bead, bool, error) {
 	if store == nil {
 		return beads.Bead{}, false, nil
 	}
+	now := time.Now()
 	wa := workAssignmentForStore(beads.WorkStore{Store: store})
 	for _, assignee := range identifiers {
-		items, err := wa.ReadyAssignedTo(assignee, beads.TierBoth)
+		items, err := wa.OpenAssignedTo(assignee, "open", beads.TierBoth, true)
 		if err != nil {
 			return beads.Bead{}, false, err
 		}
-		for _, item := range excludeMailMessageBeads(items) {
+		for _, item := range items {
 			if sessionpkg.IsSessionBeadOrRepairable(item) {
 				continue
 			}
 			if isSessionOwnDrainStepBead(store, item) {
+				continue
+			}
+			if !demandRowReady(item, now) {
+				// Provably non-claimable: blocked on an unmet dependency or
+				// deferred. No worker could have claimed it, so draining past it
+				// was correct pull — the only open rows this arm suppresses.
 				continue
 			}
 			return item, true, nil

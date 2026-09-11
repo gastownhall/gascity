@@ -1896,9 +1896,9 @@ func TestReconcileSessionBeads_DrainAckMidPhaseEmitsAssignedWorkEvent(t *testing
 // drainAckAssignedWorkEventCount runs a worker session through the drain-ack
 // finalize lifecycle with work already seeded and returns how many
 // SessionDrainAckedWithAssignedWork events were emitted. seedWork receives the
-// session's durable bead ID and its session_name identity so a case can assign
-// work to the session itself, to a pool-shared identity, and wire dependencies.
-func drainAckAssignedWorkEventCount(t *testing.T, seedWork func(t *testing.T, store beads.Store, sessionID, sessionName string)) int {
+// session's durable bead ID so a case can assign work to the session and wire
+// dependencies.
+func drainAckAssignedWorkEventCount(t *testing.T, seedWork func(t *testing.T, store beads.Store, sessionID string)) int {
 	t.Helper()
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
@@ -1908,7 +1908,7 @@ func drainAckAssignedWorkEventCount(t *testing.T, seedWork func(t *testing.T, st
 
 	session := env.createSessionBead("worker", "worker")
 	env.markSessionActive(&session)
-	seedWork(t, env.store, session.ID, session.Metadata["session_name"])
+	seedWork(t, env.store, session.ID)
 
 	dops := newFakeDrainOps()
 	if err := dops.setDrainAck("worker"); err != nil {
@@ -2040,13 +2040,19 @@ func drainAckPoolAliasInProgressEventCount(t *testing.T, addLiveSibling bool) in
 // could have claimed it and the seat drained correctly. Before the anomaly
 // classifier the emitter fired on any open/in_progress assigned row, blocked or
 // not.
+//
+// The open/claimable arm keys on the denormalized is_blocked projection (the same
+// predicate demandRowReady uses), which MemStore.List does not derive from deps,
+// so the row is stamped is_blocked=true to model bd's production projection; the
+// live "blocks" dep is wired too so the row is genuinely blocked by every reader.
 func TestReconcileSessionBeads_DrainAckBlockedAssignedWorkSuppressesEvent(t *testing.T) {
-	count := drainAckAssignedWorkEventCount(t, func(t *testing.T, store beads.Store, sessionID, _ string) {
+	blockedTrue := true
+	count := drainAckAssignedWorkEventCount(t, func(t *testing.T, store beads.Store, sessionID string) {
 		blocker, err := store.Create(beads.Bead{Title: "upstream gate", Type: "task", Status: "open"})
 		if err != nil {
 			t.Fatalf("Create(blocker): %v", err)
 		}
-		work, err := store.Create(beads.Bead{Title: "downstream phase", Type: "task", Status: "open", Assignee: sessionID})
+		work, err := store.Create(beads.Bead{Title: "downstream phase", Type: "task", Status: "open", Assignee: sessionID, IsBlocked: &blockedTrue})
 		if err != nil {
 			t.Fatalf("Create(work): %v", err)
 		}
@@ -2056,6 +2062,45 @@ func TestReconcileSessionBeads_DrainAckBlockedAssignedWorkSuppressesEvent(t *tes
 	})
 	if count != 0 {
 		t.Fatalf("%s events = %d, want 0 — an open bead blocked on an unmet dependency is not claimable, so the seat drained correctly",
+			events.SessionDrainAckedWithAssignedWork, count)
+	}
+}
+
+// TestReconcileSessionBeads_DrainAckDeferredAssignedWorkSuppressesEvent pins the
+// deferred half of the provably-non-claimable suppression: an OPEN bead assigned
+// to the seat but deferred into the future is not claimable by any worker, so the
+// seat drained correctly and the event must NOT fire. defer_until is a fresh,
+// bead-local field, so both the pre-fix ready projection and the post-fix
+// demandRowReady predicate agree on it.
+func TestReconcileSessionBeads_DrainAckDeferredAssignedWorkSuppressesEvent(t *testing.T) {
+	deferUntil := time.Now().Add(time.Hour)
+	count := drainAckAssignedWorkEventCount(t, func(t *testing.T, store beads.Store, sessionID string) {
+		if _, err := store.Create(beads.Bead{Title: "deferred phase", Type: "task", Status: "open", Assignee: sessionID, DeferUntil: &deferUntil}); err != nil {
+			t.Fatalf("Create(work): %v", err)
+		}
+	})
+	if count != 0 {
+		t.Fatalf("%s events = %d, want 0 — an open bead deferred into the future is not claimable, so the seat drained correctly",
+			events.SessionDrainAckedWithAssignedWork, count)
+	}
+}
+
+// TestReconcileSessionBeads_DrainAckOpenStepAssignedWorkEmitsEvent is the MAJOR
+// regression guard. An execution STEP bead can be assigned straight to a seat at
+// dispatch (control.go stamps step.Assignee) and sit OPEN before the agent claims
+// it — a genuine strand if the seat drains past it. beads.Ready TYPE-excludes
+// "step" (it is not pull-claimable Ready work), so an anomaly classifier that
+// keyed the open arm on the Ready projection SILENCED this strand. The open arm
+// now walks OpenAssignedTo and suppresses only provably blocked/deferred rows, so
+// an open step FIRES regardless of type.
+func TestReconcileSessionBeads_DrainAckOpenStepAssignedWorkEmitsEvent(t *testing.T) {
+	count := drainAckAssignedWorkEventCount(t, func(t *testing.T, store beads.Store, sessionID string) {
+		if _, err := store.Create(beads.Bead{Title: "dispatched step", Type: "step", Status: "open", Assignee: sessionID}); err != nil {
+			t.Fatalf("Create(work): %v", err)
+		}
+	})
+	if count != 1 {
+		t.Fatalf("%s events = %d, want 1 — an OPEN step assigned straight to the seat is a genuine strand; the open arm must not borrow beads.Ready's type exclusions",
 			events.SessionDrainAckedWithAssignedWork, count)
 	}
 }
@@ -2097,13 +2142,70 @@ func TestReconcileSessionBeads_DrainAckAliasClaimedNoLiveOwnerEmitsEvent(t *test
 // genuinely claimable right now, so the anomaly classifier must still emit
 // SessionDrainAckedWithAssignedWork for it.
 func TestReconcileSessionBeads_DrainAckReadyAssignedWorkEmitsEvent(t *testing.T) {
-	count := drainAckAssignedWorkEventCount(t, func(t *testing.T, store beads.Store, sessionID, _ string) {
+	count := drainAckAssignedWorkEventCount(t, func(t *testing.T, store beads.Store, sessionID string) {
 		if _, err := store.Create(beads.Bead{Title: "ready phase", Type: "task", Status: "open", Assignee: sessionID}); err != nil {
 			t.Fatalf("Create(work): %v", err)
 		}
 	})
 	if count != 1 {
 		t.Fatalf("%s events = %d, want 1 — an open, unblocked bead assigned to the draining session is genuinely claimable and must still alarm",
+			events.SessionDrainAckedWithAssignedWork, count)
+	}
+}
+
+// readyOpenErrStore fails the open/ready read path — both the pre-fix beads.Ready
+// projection (via Ready) and the post-fix OpenAssignedTo status=open List — while
+// serving the in_progress List unchanged. It models a graph/deps read error
+// landing on the open/claimable arm of the drain-ack classifier.
+type readyOpenErrStore struct {
+	beads.Store
+	err error
+}
+
+func (s readyOpenErrStore) Ready(_ ...beads.ReadyQuery) ([]beads.Bead, error) {
+	return nil, s.err
+}
+
+func (s readyOpenErrStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Status == "open" {
+		return nil, s.err
+	}
+	return s.Store.List(query)
+}
+
+// TestReconcileSessionBeads_DrainAckOpenArmReadErrorStillEmitsInProgressStrand is
+// the MINOR-1 regression guard. An in_progress cap-hit strand (#2293) must still
+// fire even when the open/claimable arm's store read errors: the classifier probes
+// the in_progress arm FIRST, so a graph/deps read failure in the open arm can no
+// longer return early and silence a genuine strand. Before the fix the open arm
+// ran first and its error short-circuited the whole classifier.
+func TestReconcileSessionBeads_DrainAckOpenArmReadErrorStillEmitsInProgressStrand(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	fake := events.NewFake()
+
+	info := env.createSessionInfo("worker", "worker")
+	work, err := env.store.Create(beads.Bead{Title: "cap-hit task", Type: "task", Assignee: info.ID})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+	inProgress := "in_progress"
+	if err := env.store.Update(work.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("mark in progress: %v", err)
+	}
+
+	store := readyOpenErrStore{Store: env.store, err: errors.New("graph readiness read failed")}
+	var stderr bytes.Buffer
+	recordDrainAckAssignedWorkEvent("", env.cfg, store, nil, info, "worker", "worker", "worker", fake, &stderr)
+
+	count := 0
+	for i := range fake.Events {
+		if fake.Events[i].Type == events.SessionDrainAckedWithAssignedWork {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("%s events = %d, want 1 — an in_progress strand must still fire when the open/claimable arm's read errors (probe in_progress first)",
 			events.SessionDrainAckedWithAssignedWork, count)
 	}
 }
@@ -2201,7 +2303,7 @@ func drainAckAliasSiblingEventCount(t *testing.T, siblingName string, siblingDra
 // fires on the in_progress row unconditionally, so the strand is never silenced
 // by a same-pass-draining sibling.
 func TestReconcileSessionBeads_DrainAckTwoSeatSamePassDrainEmitsEvent(t *testing.T) {
-	count := drainAckAliasSiblingEventCount(t, "worker-twin", true, func(t *testing.T, env *reconcilerTestEnv, sibling *beads.Bead) {
+	count := drainAckAliasSiblingEventCount(t, "worker-twin", true, func(_ *testing.T, env *reconcilerTestEnv, sibling *beads.Bead) {
 		env.markSessionActive(sibling)
 		env.addDesired("worker-twin", "worker", true)
 	})
@@ -2220,7 +2322,7 @@ func TestReconcileSessionBeads_DrainAckTwoSeatSamePassDrainEmitsEvent(t *testing
 // classifier fires on the in_progress row unconditionally, so a zombie sibling
 // never silences the strand.
 func TestReconcileSessionBeads_DrainAckZombieOpenSiblingEmitsEvent(t *testing.T) {
-	count := drainAckAliasSiblingEventCount(t, "worker-zombie", false, func(t *testing.T, env *reconcilerTestEnv, sibling *beads.Bead) {
+	count := drainAckAliasSiblingEventCount(t, "worker-zombie", false, func(_ *testing.T, _ *reconcilerTestEnv, sibling *beads.Bead) {
 		// Leave the zombie asleep (createSessionBead's default), never started in
 		// the provider (runtime dead), and NOT in the desired set — it stays an
 		// open, dead-runtime sibling that an owner-liveness classifier would have

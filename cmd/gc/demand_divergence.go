@@ -111,15 +111,27 @@ func classifyDemandTrigger(triggerID, dir string, opts hookClaimOptions, ops hoo
 	}
 	status = strings.ToLower(strings.TrimSpace(bead.Status))
 	// The invariant is about a row that is STILL claimable by a worker for this
-	// template: open, unassigned, route-matching, READY (no unmet blocking
-	// dependency and not deferred), and not excluded by the shared serving rules.
-	// Anything else means the row moved on or was never claimable — which is what
-	// a sibling claim OR a routed-but-blocked row looks like, and is correct pull.
-	// demandRowServable checks only the assignee/type/label exclusions, so the
-	// readiness gate (demandRowReady) is what keeps the routed-blocked family off
-	// the divergence counter.
-	if status == "open" && demandRowServable(bead) && demandRowReady(bead, ops.nowOrWallClock()) && hookClaimMatchesRoute(bead, opts.RouteTargets) {
+	// template: open, unassigned, route-matching, and not excluded by the shared
+	// serving rules. Anything else — a row that moved on, a sibling claim — is
+	// correct pull.
+	if status != "open" || !demandRowServable(bead) || !hookClaimMatchesRoute(bead, opts.RouteTargets) {
+		return status, events.DemandClaimBenign
+	}
+	now := ops.nowOrWallClock()
+	if demandRowReady(bead, now) {
+		// Open, servable, route-matching, and claimable right now — the agreement
+		// invariant breaking.
 		return status, events.DemandClaimDivergence
+	}
+	// Not ready. A deferred row is gated by defer_until, a fresh bead-local field,
+	// so deferring past it is correct pull → benign. But the is_blocked signal is
+	// bd's DENORMALIZED projection, which can lag a just-closed blocker; a
+	// stale-true reading would wrongly bury a genuinely-servable divergence in
+	// benign. This single-bead read cannot cheaply re-derive blockedness from live
+	// deps (the way a worker's ready query does), so a projection-blocked row is
+	// surfaced in its own bucket rather than silently suppressed.
+	if !beads.IsDeferred(bead, now) && bead.IsBlocked != nil && *bead.IsBlocked {
+		return status, events.DemandClaimProjectionBlocked
 	}
 	return status, events.DemandClaimBenign
 }

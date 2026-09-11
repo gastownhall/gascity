@@ -163,6 +163,16 @@ const (
 	// route-matching. The controller counted work the worker's own read did not
 	// serve; this is the agreement invariant breaking.
 	DemandClaimDivergence = "divergence"
+	// DemandClaimProjectionBlocked: the trigger row is still open, unassigned and
+	// route-matching, and the only thing marking it non-claimable is bd's
+	// denormalized is_blocked projection — which can lag a just-closed blocker. A
+	// stale-true projection would hide a genuinely-servable divergence, and this
+	// single-bead read cannot cheaply re-derive blockedness from live deps the way
+	// a worker's ready query does, so a projection-blocked row is surfaced in its
+	// own bucket rather than silently folded into benign. It is NOT counted as a
+	// clean divergence (that metric must stay the agreement signal), but it is not
+	// hidden either.
+	DemandClaimProjectionBlocked = "projection_blocked"
 	// DemandClaimUnknown: the classification read could not be made (no trigger
 	// recorded, or the row could not be read). Never counted as either.
 	DemandClaimUnknown = "unknown"

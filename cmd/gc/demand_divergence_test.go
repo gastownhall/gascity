@@ -127,14 +127,15 @@ func TestDivergenceClassification(t *testing.T) {
 			wantClass: events.DemandClaimDivergence, wantStat: "open",
 		},
 		{
-			// Open, unassigned, route-matching — but parked on an unmet blocking
-			// dependency (bd's is_blocked projection). A worker's ready query
-			// excludes it, so the seat drained past a row it could not claim:
-			// correct pull, NOT divergence. This is the routed-blocked family the
-			// readiness gate keeps off the counter.
-			name: "open but dependency-blocked", triggerID: "wb-1",
+			// Open, unassigned, route-matching, and marked blocked ONLY by bd's
+			// denormalized is_blocked projection. That projection can lag a
+			// just-closed blocker, so rather than fold a potentially-stale-true
+			// reading into benign (which would hide a genuinely-servable
+			// divergence), it is surfaced in its own projection-blocked bucket —
+			// not the clean divergence counter, not silently suppressed.
+			name: "open but is_blocked projection true", triggerID: "wb-1",
 			bead:      beads.Bead{ID: "wb-1", Status: "open", Type: "task", Metadata: routed, IsBlocked: &blockedTrue},
-			wantClass: events.DemandClaimBenign, wantStat: "open",
+			wantClass: events.DemandClaimProjectionBlocked, wantStat: "open",
 		},
 		{
 			// Open and route-matching but deferred into the future: also excluded
