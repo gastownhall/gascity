@@ -415,8 +415,8 @@ var controlReadyCacheRegistry = struct {
 }{byDir: make(map[string]*controlReadyCacheEntry)}
 
 // controlReadyCacheEntry holds a primed snapshot per leg for one scope dir.
-// Its backing stores are closed the instant PrimeActive returns (see
-// controlReadyCachesFor), so an entry is a set of CLOSED-backing snapshots: it
+// Its backing stores are closed when controlReadyCachesFor returns, once every
+// leg has primed, so an entry is a set of CLOSED-backing snapshots: it
 // may only be read through CachingStore.CachedReady, which answers entirely from
 // the in-memory snapshot. Any read that would need to touch the backing must
 // decline to controlReadyFallbackReady instead of consulting a closed handle.
@@ -526,6 +526,13 @@ func controlReadyCachesFor(dir, cityPath string, cfg *config.City) []*beads.Cach
 // in the process with ErrStoreClosed. Only the scoped leg
 // (openControlStoreAtForCity) is freshly constructed per call, so only it is
 // returned as owned.
+//
+// An error return must not hand back opened stores. controlReadyCachesFor
+// registers its closing defer only after this call succeeds, so a store opened
+// before an error return would have nothing to close it. Today the sole error
+// return IS the failed open, so nothing is open on that path; an arm added
+// later that can fail after a successful open must close what it opened before
+// returning. The same obligation binds any controlReadyCacheSourcesFn seam.
 func controlReadyCacheSources(dir, cityPath string, cfg *config.City) (sources, owned []beads.Store, err error) {
 	// A relocated CITY scope does not open its scope store at all — that would
 	// be a bd process this scan never reads. The binding is process-shared, so
