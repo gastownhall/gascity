@@ -26,11 +26,30 @@ func fakeGCBin(t *testing.T, body string) (binDir, logPath string) {
 	return binDir, logPath
 }
 
+// escalationEnvKeys are the escalate.sh settings each test supplies itself. A
+// live Gas City session exports GC_ESCALATION_RECIPIENT, so an inherited copy
+// makes the default-recipient assertion read the host's routing rather than
+// the script's own default.
+var escalationEnvKeys = map[string]struct{}{
+	"GC_ESCALATION_RECIPIENT":       {},
+	"GC_ESCALATE_SEND_TIMEOUT_SECS": {},
+}
+
 func runEscalate(t *testing.T, binDir string, extraEnv ...string) (string, error) {
 	t.Helper()
 	cmd := exec.Command("bash", escalateScriptPath, "--subject", "Dolt backup: 1/2 databases failed to sync [MEDIUM]", "--message", "Failed databases: hq(sync failed)")
-	cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	cmd.Env = append(cmd.Env, extraEnv...)
+	inherited := os.Environ()
+	env := make([]string, 0, len(inherited)+1+len(extraEnv))
+	for _, entry := range inherited {
+		if key, _, ok := strings.Cut(entry, "="); ok {
+			if _, skip := escalationEnvKeys[key]; skip {
+				continue
+			}
+		}
+		env = append(env, entry)
+	}
+	env = append(env, "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cmd.Env = append(env, extraEnv...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
