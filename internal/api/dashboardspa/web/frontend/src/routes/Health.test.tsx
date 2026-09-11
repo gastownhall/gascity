@@ -736,7 +736,6 @@ function baseRigStores(): RigStoreHealthReport {
         reachable: true,
         doltEndpoint: '127.0.0.1:29620',
         doltConnected: true,
-        issueCount: 129,
         problems: [],
       },
       {
@@ -746,7 +745,6 @@ function baseRigStores(): RigStoreHealthReport {
         reachable: true,
         doltEndpoint: '127.0.0.1:29620',
         doltConnected: false,
-        issueCount: null,
         problems: [],
       },
     ],
