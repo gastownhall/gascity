@@ -2914,11 +2914,17 @@ func desiredRigDoltConfigState(cityPath string, rig config.Rig, cityState contra
 		state.EndpointStatus = preservedEndpointStatus(rig.Path, state, contract.EndpointStatusUnverified)
 		return state
 	}
+	state := inheritedRigDoltConfigState(rig.Path, rig.EffectivePrefix(), cityState)
+	// A rig that already carries a dolt_mode keeps it — that is what the
+	// embedded and legacy shapes need — but keeping the mode is not a reason to
+	// drop the endpoint it inherits. Under a city bound to a Dolt server
+	// somebody else runs, an inherited rig config with no dolt.host and no
+	// dolt.port is invalid by the canonical contract's own rule, and `gc rig
+	// add` wrote exactly that: from then on the whole city refused to start.
 	if mode := persistedScopeDoltMode(rig.Path); mode != "" {
-		return contract.ConfigState{IssuePrefix: rig.EffectivePrefix(), EndpointOrigin: contract.EndpointOriginInheritedCity, EndpointStatus: contract.EndpointStatusVerified, DoltMode: mode}
+		state.DoltMode = mode
 	}
-
-	return inheritedRigDoltConfigState(rig.Path, rig.EffectivePrefix(), cityState)
+	return state
 }
 
 func persistedScopeDoltMode(scopeRoot string) string {
