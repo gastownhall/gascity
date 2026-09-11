@@ -12315,7 +12315,7 @@ provider = "bd"
 		return alreadyErr
 	}
 
-	// doltDatabase is deliberately overridden to a beads_test-prefixed name
+	// doltDatabase is deliberately overridden to a beads_test_-prefixed name
 	// (rather than the "gsp" a real gascity-packs rig would use) because
 	// this test exercises the real finalizeCanonicalBdScopeInit success path
 	// (it opens a real store — see initBeadsForDirWithExecutor's

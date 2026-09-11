@@ -192,7 +192,9 @@ func TestPlanDoltDrops_RecognizesGCSideTestScopeOverrideMarker(t *testing.T) {
 	// Confirm the planner actually treats that literal name as stale, and
 	// that it never collides with a name a real prefix-named rig (or the
 	// beads_t protocol-test negative fixtures) could plausibly use.
-	all := []string{"beads_test_gsp", "gsp", "beads_team", "beads_tenant", "beads_tmp_prod"}
+	// beads_testing/beads_testprod pin the trailing-underscore boundary: an
+	// open "beads_test" prefix would sweep them.
+	all := []string{"beads_test_gsp", "gsp", "beads_team", "beads_tenant", "beads_tmp_prod", "beads_testing", "beads_testprod"}
 
 	plan := planDoltDrops(all, defaultStaleDatabasePrefixes, nil)
 
@@ -209,13 +211,13 @@ func TestDefaultStaleDatabasePrefixes_MirrorsBeadsCleanDatabases(t *testing.T) {
 	// be-hjj-3 is the beads-side bead that converges these prefixes; until
 	// then we mirror beads/cmd/bd/dolt.go:staleDatabasePrefixes.
 	//
-	// "beads_test" is a gc-side-only addition (ga-szv0ge) with no beads-side
+	// "beads_test_" is a gc-side-only addition (ga-szv0ge) with no beads-side
 	// counterpart: it marks a gc test's explicit doltDatabase scope override
 	// rather than a beads-generated name, so it is not part of the mirror
 	// and be-hjj-3 convergence does not need to add it upstream.
 	want := []string{
 		"testdb_", "test_guard_", "test_federation_",
-		"doctest_", "doctortest_", "beads_pt", "beads_vr", "beads_t", "beads_test_bench_", "beads_test",
+		"doctest_", "doctortest_", "beads_pt", "beads_vr", "beads_t", "beads_test_bench_", "beads_test_",
 	}
 	if !equalStringSlice(defaultStaleDatabasePrefixes, want) {
 		t.Errorf("defaultStaleDatabasePrefixes = %v, want %v", defaultStaleDatabasePrefixes, want)

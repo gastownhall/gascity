@@ -107,3 +107,11 @@ deploy-only addition on the isolated `deploy/ga-8r8aky-gate` branch, push the
 exact gated head, open an internal pull request, publish
 `release-gate/deploy-clearance=success` on that exact PR head, and route merge
 authority to the mayor. The deployer does not merge.
+
+## Maintainer addendum (post-gate)
+
+Merged with one maintainer-side narrowing: the stale-database marker is
+`beads_test_` (delimited), not the open `beads_test` recorded above, so
+names such as `beads_testing` cannot be classified disposable. The gated
+name `beads_test_gsp` is unaffected. Boundary fixtures added in
+`TestPlanDoltDrops_RecognizesGCSideTestScopeOverrideMarker`.
