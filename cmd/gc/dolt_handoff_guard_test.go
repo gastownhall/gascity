@@ -1,9 +1,7 @@
 package main
 
 import (
-	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,9 +112,28 @@ func TestHandoffJournalAllowsOnlyExactRestoredLegacyControls(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	legacy := base64.StdEncoding.EncodeToString([]byte(`{"schema_version":1,"operation":"handoff-inspect","result":"eligible","owner":"legacy-gc","identity_token":"token"}`))
-	journal := fmt.Sprintf(`{"request":{"city_root":%q,"root":%q,"database":"beads","workspace":"test","endpoint":{"host":"127.0.0.1","port":3307},"owner":"legacy-gc"},"phase":"legacy_config_restored","owner":"legacy-gc","snapshot_captured":true,"mutation_occurred":true,"snapshot":{"metadata":%q,"workspace_metadata":"eyJiYWNrZW5kIjoiZG9sdCIsImRvbHRfZGF0YWJhc2UiOiJiZWFkcyJ9","workspace_config":"Z2MuZW5kcG9pbnRfb3JpZ2luOiBtYW5hZ2VkX2NpdHkKZG9sdC5hdXRvLXN0YXJ0OiBmYWxzZQo=","workspace_port":"MzMwNw==","workspace_metadata_present":true,"workspace_config_present":true,"workspace_port_present":true,"workspace_metadata_mode":384,"workspace_config_mode":384,"workspace_port_mode":384}}`, city, city, legacy)
-	if err := os.WriteFile(filepath.Join(beadsDir, "ownership-handoff.json"), []byte(journal), 0o600); err != nil {
+	var journal handoffProjectionJournal
+	journal.Request.CityRoot, journal.Request.Root = city, city
+	journal.Request.Database, journal.Request.Workspace = "beads", "test"
+	journal.Request.Endpoint.Host, journal.Request.Endpoint.Port = "127.0.0.1", 3307
+	journal.Request.Owner = "legacy-gc"
+	journal.Phase, journal.Owner = "legacy_config_restored", "legacy-gc"
+	journal.SnapshotCaptured, journal.MutationOccurred = true, true
+	setProjectionEligibleSnapshot(t, &journal)
+	journal.Snapshot.WorkspaceMetadata = metadata
+	journal.Snapshot.WorkspaceConfig = config
+	journal.Snapshot.WorkspacePort = port
+	journal.Snapshot.WorkspaceMetadataPresent = true
+	journal.Snapshot.WorkspaceConfigPresent = true
+	journal.Snapshot.WorkspacePortPresent = true
+	journal.Snapshot.WorkspaceMetadataMode = 0o600
+	journal.Snapshot.WorkspaceConfigMode = 0o600
+	journal.Snapshot.WorkspacePortMode = 0o600
+	body, err := json.Marshal(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "ownership-handoff.json"), body, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := handoffJournalBlocksManagedDoltStart(city); err != nil {
