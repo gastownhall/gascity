@@ -1,3 +1,7 @@
+// This file is Linux-only by its filename, which is the honest constraint: it
+// executes the POSIX provider script, and 07-design scopes the proxied
+// lifecycle to Linux (rc.2 calls the Windows/macOS lanes "defined, not
+// implemented").
 package main
 
 import (
