@@ -2105,6 +2105,48 @@ func TestReconcileSessionBeads_DrainAckOpenStepAssignedWorkEmitsEvent(t *testing
 	}
 }
 
+// TestReconcileSessionBeads_DrainAckStaleIsBlockedAssignedWorkEmitsEvent is the
+// MAJOR regression guard for the last silencing hole. bd's is_blocked field is a
+// DENORMALIZED projection that can lag a just-closed blocker (stale-true;
+// issueops.countStaleIsBlockedSQL / `bd recompute-blocked` exist to repair it).
+// An OPEN row assigned to the seat whose blocking dep has CLOSED — deps genuinely
+// MET — but whose is_blocked flag still reads true is a real strand: the seat
+// drained past claimable work. The open arm must confirm real blockedness against
+// live deps before suppressing, so a stale-true flag with met deps FIRES. Before
+// the fix the arm suppressed on the projection alone (demandRowReady) and silenced
+// it — no event, seat stopped, alarm never fires.
+//
+// Contrast TestReconcileSessionBeads_DrainAckBlockedAssignedWorkSuppressesEvent,
+// which keeps its blocker OPEN so the dep is genuinely unmet and suppression is
+// correct; here the same wiring closes the blocker to leave only the stale flag.
+func TestReconcileSessionBeads_DrainAckStaleIsBlockedAssignedWorkEmitsEvent(t *testing.T) {
+	blockedTrue := true
+	count := drainAckAssignedWorkEventCount(t, func(t *testing.T, store beads.Store, sessionID string) {
+		blocker, err := store.Create(beads.Bead{Title: "upstream gate", Type: "task", Status: "open"})
+		if err != nil {
+			t.Fatalf("Create(blocker): %v", err)
+		}
+		work, err := store.Create(beads.Bead{Title: "downstream phase", Type: "task", Status: "open", Assignee: sessionID, IsBlocked: &blockedTrue})
+		if err != nil {
+			t.Fatalf("Create(work): %v", err)
+		}
+		if err := store.DepAdd(work.ID, blocker.ID, "blocks"); err != nil {
+			t.Fatalf("DepAdd: %v", err)
+		}
+		// Close the blocker but leave the work row's denormalized is_blocked flag
+		// stale-true — the exact state bd's projection lag produces. MemStore does
+		// not recompute is_blocked on a dependency's close, so the flag stays true
+		// while the live dep is now met.
+		if err := store.Close(blocker.ID); err != nil {
+			t.Fatalf("Close(blocker): %v", err)
+		}
+	})
+	if count != 1 {
+		t.Fatalf("%s events = %d, want 1 — an open row with a STALE is_blocked=true flag whose blocking dep has closed is a genuine strand; the open arm must confirm blockedness against live deps before suppressing",
+			events.SessionDrainAckedWithAssignedWork, count)
+	}
+}
+
 // TestReconcileSessionBeads_DrainAckLiveSiblingInProgressStillEmitsEvent pins the
 // deliberate safe-partial choice: an IN_PROGRESS row shared with ANOTHER LIVE
 // incarnation of the same pool STILL emits SessionDrainAckedWithAssignedWork. We
@@ -2207,6 +2249,40 @@ func TestReconcileSessionBeads_DrainAckOpenArmReadErrorStillEmitsInProgressStran
 	if count != 1 {
 		t.Fatalf("%s events = %d, want 1 — an in_progress strand must still fire when the open/claimable arm's read errors (probe in_progress first)",
 			events.SessionDrainAckedWithAssignedWork, count)
+	}
+}
+
+// TestReconcileSessionBeads_DrainAckOpenArmReadErrorWithNoInProgressLogsError is
+// the MINOR-1 regression guard. When the open/claimable arm's store read errors
+// and the in_progress arm is cleanly empty, the classifier finds no bead — so it
+// must NOT fire, but it MUST surface the read error for logging rather than
+// swallow it. Before the fix a single-arm error with the other arm cleanly empty
+// returned (found=false, nil) and the diagnostic vanished, a regression vs
+// origin/main which logged every finder error. errors.Join now carries the lone
+// error up while still eliding the nil arm.
+func TestReconcileSessionBeads_DrainAckOpenArmReadErrorWithNoInProgressLogsError(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	fake := events.NewFake()
+
+	info := env.createSessionInfo("worker", "worker")
+
+	store := readyOpenErrStore{Store: env.store, err: errors.New("graph readiness read failed")}
+	var stderr bytes.Buffer
+	recordDrainAckAssignedWorkEvent("", env.cfg, store, nil, info, "worker", "worker", "worker", fake, &stderr)
+
+	count := 0
+	for i := range fake.Events {
+		if fake.Events[i].Type == events.SessionDrainAckedWithAssignedWork {
+			count++
+		}
+	}
+	if count != 0 {
+		t.Fatalf("%s events = %d, want 0 — no bead was found, so a read error alone must never manufacture the alarm",
+			events.SessionDrainAckedWithAssignedWork, count)
+	}
+	if !strings.Contains(stderr.String(), "graph readiness read failed") {
+		t.Fatalf("stderr = %q, want it to surface the open-arm read error for logging (Don't-Swallow-Errors); a single-arm error with the other arm cleanly empty must not vanish", stderr.String())
 	}
 }
 

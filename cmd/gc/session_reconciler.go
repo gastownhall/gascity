@@ -614,13 +614,15 @@ func recordDrainAckAssignedWorkEvent(
 // ONLY provably-non-claimable work — cases where no worker for this seat could
 // have claimed the row, so draining past it was correct pull:
 //
-//   - An OPEN bead that is blocked on an unmet dependency or deferred. No worker
-//     can claim a blocked/deferred row, so a seat that drained past it drained
-//     correctly. The open/claimable arm
+//   - An OPEN bead that is deferred or blocked on a genuinely unmet dependency.
+//     No worker can claim a deferred/blocked row, so a seat that drained past it
+//     drained correctly. The open/claimable arm
 //     (firstOpenClaimableAssignedWorkBeadForReachableStore) walks the seat's
 //     OpenAssignedTo rows (status=open) and suppresses a row ONLY when it is
-//     provably blocked or deferred (demandRowReady, the same predicate the
-//     divergence half uses). It does NOT borrow the beads.Ready projection, whose
+//     provably non-claimable: deferred (fresh bead-local defer_until), or blocked
+//     confirmed against LIVE deps — not on bd's denormalized is_blocked projection
+//     alone, which can read stale-true and would otherwise silence a strand whose
+//     deps are actually met. It does NOT borrow the beads.Ready projection, whose
 //     type/label exclusions (step, molecule, gate, gc:order-tracking, …) encode
 //     "not pull-claimable", not "not stranded" — so an OPEN step or other
 //     excluded-type row assigned straight to a seat at dispatch still FIRES,
@@ -641,9 +643,9 @@ func recordDrainAckAssignedWorkEvent(
 // name-only keying that borrows a duplicate-named seat's liveness, cross-tick
 // memoization) has a hole that would silence a real strand. Rather than risk that
 // false negative, the in_progress arm accepts the residual benign-live-sibling
-// noise and fires unconditionally. It fails CLOSED: an error is surfaced (to be
-// logged) only when BOTH arms fail without finding a bead, so a flaky store never
-// manufactures the alarm this classifier exists to keep honest.
+// noise and fires unconditionally. It fails CLOSED: when neither arm finds a bead
+// any arm's read error is surfaced (to be logged, never counted), so a flaky
+// store never manufactures the alarm this classifier exists to keep honest.
 func drainAckClaimableAnomalyBead(
 	cityPath string,
 	cfg *config.City,
@@ -659,13 +661,13 @@ func drainAckClaimableAnomalyBead(
 	if openFound {
 		return openBead, true, nil
 	}
-	// Neither arm found a bead. Surface an error only when BOTH probes failed: a
-	// single-arm read error with the other arm cleanly empty is not enough signal
-	// to manufacture the alarm (fail closed), but a total read failure is logged.
-	if inProgressErr != nil && openErr != nil {
-		return beads.Bead{}, false, errors.Join(inProgressErr, openErr)
-	}
-	return beads.Bead{}, false, nil
+	// Neither arm found a bead. Surface any arm's read error (errors.Join elides
+	// nils, so a clean pass returns nil) so the caller logs it — swallowing a
+	// single-arm error with the other arm cleanly empty is a diagnostics blind
+	// spot vs origin/main, which logged every finder error. This cannot manufacture
+	// the alarm: recordDrainAckAssignedWorkEvent only logs the error and fires
+	// solely on found=true, so a flaky store still fails closed.
+	return beads.Bead{}, false, errors.Join(inProgressErr, openErr)
 }
 
 // drainAckFinalizeResult captures the Info-snapshot effect of a
@@ -4735,8 +4737,15 @@ func firstOpenClaimableAssignedWorkBeadForReachableStore(
 // identifiers that a worker could claim right now, plus whether one was found.
 //
 // It walks the raw OpenAssignedTo list (status=open) and suppresses a row ONLY
-// when it is provably non-claimable — blocked on an unmet dependency or deferred
-// (demandRowReady, the same predicate the demand/claim-divergence half uses).
+// when it is provably non-claimable — deferred (defer_until / indefinite
+// deferral, fresh bead-local fields) or blocked on a genuinely unmet dependency.
+// demandRowReady is the cheap first gate (the same predicate the demand/claim-
+// divergence half uses), but its blocked half reads bd's DENORMALIZED is_blocked
+// projection, which can be stale-true; so a row this predicate rejects on the
+// is_blocked signal alone is re-confirmed against live deps
+// (openAssignedBeadHasUnmetBlockingDep) before it is suppressed, exactly as the
+// divergence half refuses to trust the projection blind. A row whose flag is
+// stale-true but whose deps are met is a genuine strand and FIRES.
 // Every other open assigned row FIRES regardless of type. This deliberately does
 // NOT reuse the beads.Ready projection: Ready's type exclusions (step, molecule,
 // gate, merge-request, …) and label exclusions (gc:order-tracking, gc:session)
@@ -4768,15 +4777,71 @@ func firstOpenClaimableAssignedWorkBeadInStoreByIdentifiers(store beads.Store, i
 				continue
 			}
 			if !demandRowReady(item, now) {
-				// Provably non-claimable: blocked on an unmet dependency or
-				// deferred. No worker could have claimed it, so draining past it
-				// was correct pull — the only open rows this arm suppresses.
-				continue
+				// Not claimable per the cheap bead-local predicate. A deferred row
+				// is gated by defer_until / indefinite deferral — fresh bead-local
+				// fields, never stale — so no worker could have claimed it and
+				// draining past it was correct pull.
+				if beads.IsDeferred(item, now) {
+					continue
+				}
+				// The only remaining reason demandRowReady rejected an open,
+				// non-deferred row is bd's DENORMALIZED is_blocked projection, which
+				// can read STALE-TRUE: a just-closed blocker whose flag has not been
+				// recomputed (issueops.countStaleIsBlockedSQL / `bd recompute-blocked`
+				// exist precisely to repair it). Suppressing on that signal alone
+				// would silence a genuine strand whose deps are actually met — the
+				// last silencing hole. The divergence half (classifyDemandTrigger)
+				// already refuses to trust the projection blind; this arm must be
+				// equally rigorous, so confirm real blockedness against live deps
+				// before suppressing. Suppress only when a genuine unmet blocking
+				// dependency exists; if the deps are met the flag is stale and the
+				// row is a real strand that must FIRE.
+				blocked, err := openAssignedBeadHasUnmetBlockingDep(store, item.ID)
+				if err != nil {
+					return beads.Bead{}, false, err
+				}
+				if blocked {
+					continue
+				}
 			}
 			return item, true, nil
 		}
 	}
 	return beads.Bead{}, false, nil
+}
+
+// openAssignedBeadHasUnmetBlockingDep re-derives whether an open assigned row is
+// actually blocked, from its live dependencies rather than bd's denormalized
+// is_blocked projection. The drain-ack open arm calls it only when that
+// projection reads true (demandRowReady rejected an open, non-deferred row), to
+// confirm the flag is not stale before suppressing a possible strand.
+//
+// It mirrors the canonical DepList → IsReadyBlockingDependencyType →
+// DependencySatisfied derivation used by cmd_ready.go's blocked_by enrichment and
+// the caching store's ready scan: a row is blocked when any ready-blocking edge
+// points at a target that has not closed satisfactorily. A dep or blocker read
+// that FAILS is returned, not swallowed — the open arm fails closed on it (the
+// classifier surfaces the error to be logged and never manufactures the alarm
+// from an unreadable store), matching how a gate-blocked step is treated as a
+// real fault rather than "no blocker" elsewhere.
+func openAssignedBeadHasUnmetBlockingDep(store beads.Store, id string) (bool, error) {
+	deps, err := store.DepList(id, "down")
+	if err != nil {
+		return false, err
+	}
+	for _, dep := range deps {
+		if !beads.IsReadyBlockingDependencyType(dep.Type) {
+			continue
+		}
+		blocker, err := store.Get(dep.DependsOnID)
+		if err != nil {
+			return false, err
+		}
+		if !beads.DependencySatisfied(blocker.Status, blocker.Metadata[beadmeta.WorkOutcomeMetadataKey]) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // firstInProgressAssignedWorkBeadForReachableStore walks EVERY reachable leg for

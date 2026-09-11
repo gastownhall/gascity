@@ -199,9 +199,9 @@ type SessionDemandClaimDivergencePayload struct {
 	// ("open"/"in_progress"/"closed"), "unreadable" when the classification read
 	// failed, or empty when there was no row to read.
 	TriggerStatusAtDrain string `json:"trigger_status_at_drain,omitempty"`
-	// Classification is the verdict: benign, divergence, or unknown. It is
-	// carried rather than left to be re-derived, because the divergence count IS
-	// the rollout metric for the agreement fix.
+	// Classification is the verdict: benign, divergence, projection_blocked, or
+	// unknown. It is carried rather than left to be re-derived, because the
+	// divergence count IS the rollout metric for the agreement fix.
 	Classification string `json:"classification"`
 }
 

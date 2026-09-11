@@ -119,8 +119,13 @@ func demandRowServable(b beads.Bead) bool {
 // snapshots, pre-1.0.5 bd) reads as unblocked here, exactly as the ready query's
 // dependency-derived fallback would on the same row, so the classifier neither
 // invents nor suppresses a divergence beyond what a worker's own query could see.
-// The sole caller (classifyDemandTrigger) gates on status=="open" before calling
-// this, so a raw "blocked" status string never reaches here.
+// Both callers — classifyDemandTrigger and the drain-ack open arm
+// (firstOpenClaimableAssignedWorkBeadInStoreByIdentifiers) — pass a row already
+// constrained to status=="open", so a raw "blocked" status string never reaches
+// here. Both also treat the is_blocked half as advisory only: because it reads
+// the denormalized projection, each re-derives real blockedness from live deps
+// (its own bucket in classifyDemandTrigger, a dep confirmation in the drain-ack
+// arm) rather than suppressing on a possibly-stale-true flag.
 func demandRowReady(b beads.Bead, now time.Time) bool {
 	if b.IsBlocked != nil && *b.IsBlocked {
 		return false
