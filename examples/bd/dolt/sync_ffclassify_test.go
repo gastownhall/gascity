@@ -804,6 +804,31 @@ func TestSyncProcesslistAnswerWithoutHeaderSkips(t *testing.T) {
 	}
 }
 
+// A header that is not exactly `Id,Time,db` (three fields, each bare or
+// quoted as a whole) is not a processlist answer either: `"Id,Time,db"` is
+// ONE quoted field and `Id",Time,db` a broken one (codex r11 — stripping every
+// quote before the compare accepted both as an empty processlist).
+func TestSyncProcesslistMalformedHeaderSkips(t *testing.T) {
+	for _, hdr := range []string{`"Id,Time,db"`, `Id",Time,db`, `Id,Time`, `Id,Time,db,Info`} {
+		binDir := t.TempDir()
+		logPath := writeSyncFakeDoltProcesslist(t, binDir, "printf '"+strings.ReplaceAll(hdr, `"`, `\"`)+"\\n' ; exit 0")
+		out := runFFSyncFails(t, binDir, "--db", "app")
+		if fetched(readLog(t, logPath)) {
+			t.Fatalf("header %q: not a processlist answer, the fetch must be skipped.\nout:\n%s", hdr, out)
+		}
+		if !strings.Contains(out, "not a processlist answer") {
+			t.Fatalf("header %q: expected the unrecognized-answer skip line.\nout:\n%s", hdr, out)
+		}
+	}
+	// A header quoted field by field is fine.
+	binDir := t.TempDir()
+	logPath := writeSyncFakeDoltProcesslist(t, binDir, "printf '\"Id\",\"Time\",\"db\"\\n' ; exit 0")
+	out := runFFSync(t, binDir, "--db", "app")
+	if !fetched(readLog(t, logPath)) {
+		t.Fatalf("a header with each field quoted is a processlist answer with no rows: the fetch must run.\nout:\n%s", out)
+	}
+}
+
 func TestSyncFetchTimeoutKillsItsServerSideSession(t *testing.T) {
 	binDir := t.TempDir()
 	logPath := writeSyncFakeDoltFetchTimeoutKill(t, binDir, "77", []string{"77,60,app"}, false)

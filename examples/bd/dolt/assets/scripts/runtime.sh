@@ -397,8 +397,11 @@ remote_op_sessions_parse() {
   awk -F, '
     NR == 1 {
       hdr = $0
-      gsub(/"|\r/, "", hdr)
-      if (tolower(hdr) != "id,time,db") exit 1
+      sub(/\r$/, "", hdr)
+      # Exactly the three header fields, each bare or quoted as a whole:
+      # stripping every quote first read `"Id,Time,db"` (ONE quoted field) or
+      # `Id",Time,db` as the header, i.e. as a processlist (codex r11).
+      if (tolower(hdr) !~ /^("id"|id),("time"|time),("db"|db)$/) exit 1
       next
     }
     /^[[:space:]]*$/ { next }

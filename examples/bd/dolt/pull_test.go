@@ -198,6 +198,31 @@ func TestPullInFlightSkipsNeverPulls(t *testing.T) {
 	}
 }
 
+// A processlist probe that fails (exit 1 with stderr, the bound expiring with
+// 124, or an answer without the header) skips the pull, fail closed, with a
+// non-zero exit and the reason replayed (codex r11: the pull side had no such
+// case, so `-ne 0` mutated to `-lt 0` passed).
+func TestPullProcesslistFailureSkipsNeverPulls(t *testing.T) {
+	for _, tc := range []struct{ arm, want string }{
+		{"printf 'processlist: boom\\n' >&2 ; exit 1", "app: processlist: boom"},
+		{"exit 124", "processlist query failed (exit 124)"},
+		{"printf 'nothing here\\n' ; exit 0", "not a processlist answer"},
+	} {
+		binDir := t.TempDir()
+		logPath := writePullFakeDolt(t, binDir, tc.arm, "exit 0")
+		out, err := runPull(t, binDir, nil, "--db", "app")
+		if err == nil {
+			t.Fatalf("arm %q: a failed processlist probe must exit non-zero.\nout:\n%s", tc.arm, out)
+		}
+		if strings.Contains(readLog(t, logPath), "CALL DOLT_PULL(") {
+			t.Fatalf("arm %q: a failed processlist probe must never pull.\nout:\n%s", tc.arm, out)
+		}
+		if !strings.Contains(out, "app: ERROR: processlist query failed") || !strings.Contains(out, tc.want) {
+			t.Fatalf("arm %q: expected the failure line with %q.\nout:\n%s", tc.arm, tc.want, out)
+		}
+	}
+}
+
 // The same rule for pull: a session attributed to another database blocks
 // too (attribution is not proof of the target — codex r9), and the query text
 // carries no database name (constant text; codex r6).
