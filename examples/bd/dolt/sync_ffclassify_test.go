@@ -629,7 +629,7 @@ func writeSyncFakeDoltFetchTimeoutKill(t *testing.T, dir, sessionID string, list
 		"    else printf 'Id,Time,db\\n'; fi\n" +
 		"    exit 0 ;;\n" +
 		"  *\"CALL DOLT_FETCH(\"*) : > \"" + started + "\" ; " + idEmit + "printf 'context deadline exceeded\\n' >&2 ; exit 124 ;;\n" +
-		"  *\"KILL \"*) k=\"$*\" ; : > \"" + killedPrefix + "${k##* }\" ; exit 0 ;;\n" +
+		"  *\"KILL \"*) k=$(printf '%s' \"$*\" | sed -n 's/.*KILL \\([0-9][0-9]*\\).*/\\1/p') ; : > \"" + killedPrefix + "${k}\" ; exit 0 ;;\n" +
 		"esac\nexit 0\n"
 	return installFFFakeDolt(t, dir, body)
 }
@@ -842,7 +842,7 @@ func TestSyncFetchTimeoutKillsItsServerSideSession(t *testing.T) {
 		t.Fatalf("expected the 'fetch timed out' status.\nout:\n%s", out)
 	}
 	fetchAt := strings.Index(log, "CALL DOLT_FETCH(")
-	killAt := strings.Index(log, "KILL 77\n")
+	killAt := guardedKillAt(t, log, "77")
 	if fetchAt < 0 || killAt < 0 || killAt < fetchAt {
 		t.Fatalf("the session the fetch printed about itself must be KILLed after the fetch times out.\nlog:\n%s", log)
 	}
@@ -861,9 +861,7 @@ func TestSyncFetchTimeoutKillNotConfirmedReportsStillInFlight(t *testing.T) {
 	if pushed(log) {
 		t.Fatalf("a fetch timeout must NEVER push.\nout:\n%s", out)
 	}
-	if !strings.Contains(log, "KILL 77\n") {
-		t.Fatalf("KILL must be issued.\nlog:\n%s", log)
-	}
+	assertGuardedKill(t, log, "77")
 	if !strings.Contains(out, "app: server-side fetch NOT killed (session 77 still in flight after KILL)") {
 		t.Fatalf("a session still listed after KILL must be reported as NOT killed.\nout:\n%s", out)
 	}
@@ -884,9 +882,7 @@ func TestSyncFetchBoundReachesTheFetch(t *testing.T) {
 	if !strings.Contains(out, "app: fetch timed out after 9s") {
 		t.Fatalf("expected the timeout line naming the configured bound.\nout:\n%s", out)
 	}
-	if !strings.Contains(readLog(t, logPath), "KILL 77\n") {
-		t.Fatalf("KILL must be issued.\nout:\n%s", out)
-	}
+	assertGuardedKill(t, readLog(t, logPath), "77")
 	assertBounded(t, readLog(t, tlogPath), "9", "CALL DOLT_FETCH(")
 }
 
@@ -938,9 +934,7 @@ func TestSyncFetchTimeoutKillGuardedByRunLock(t *testing.T) {
 		if pushed(log) {
 			t.Fatalf("%s: a fetch timeout must NEVER push.\nout:\n%s", tc.name, out)
 		}
-		if !strings.Contains(log, "IS_USED_LOCK('gc_remote_op_run:app:") || !strings.Contains(log, "JSON_EXTRACT('gc-remote-op-not-owner', '$')) AS own; KILL 77\n") {
-			t.Fatalf("%s: the KILL must be guarded by this run's lock in the same batch.\nlog:\n%s", tc.name, log)
-		}
+		assertGuardedKill(t, log, "77")
 		if !strings.Contains(out, tc.want) || strings.Contains(out, "no longer in flight") {
 			t.Fatalf("%s: expected %q and never a kill confirmation.\nout:\n%s", tc.name, tc.want, out)
 		}
@@ -959,9 +953,7 @@ func TestSyncFetchTimeoutKillVerdictRefusesMalformedAnswer(t *testing.T) {
 	if pushed(log) {
 		t.Fatalf("a fetch timeout must NEVER push.\nout:\n%s", out)
 	}
-	if !strings.Contains(log, "KILL 77\n") {
-		t.Fatalf("KILL must be issued.\nlog:\n%s", log)
-	}
+	assertGuardedKill(t, log, "77")
 	if strings.Contains(out, "no longer in flight") {
 		t.Fatalf("a malformed processlist answer after KILL must not confirm the kill.\nout:\n%s", out)
 	}
@@ -1034,6 +1026,38 @@ func TestSyncFetchIsAttributedAndSelfIdentifying(t *testing.T) {
 	assertGateBeforeCall(t, fetchLine, "app", "CALL DOLT_FETCH(")
 }
 
+// runNonceRe is the run nonce's shape: 16 hex digits from /dev/urandom, or
+// pid-epoch when the device is unavailable.
+const runNonceRe = `([0-9a-f]{16}|[0-9]+-[0-9]+)`
+
+// guardedKillAt returns the index in the fake dolt log of the COMPLETE guarded
+// KILL batch for id (the fixtures' database is always `app`) — `PREPARE gc_kill FROM 'KILL <id>'; SELECT
+// IF(IS_USED_LOCK('<this run's lock for db>') = <id>, 1, JSON_EXTRACT(
+// 'gc-remote-op-not-owner', '$')) AS own; EXECUTE gc_kill; DEALLOCATE PREPARE
+// gc_kill` — where the run lock is the one the fetch/pull gate took (its nonce
+// is read from the gate line), or -1. A KILL of another id, an unguarded KILL,
+// a guard on another lock or a guard that is not a comparison to the id do
+// not count (codex r10, r13).
+func guardedKillAt(t *testing.T, log, id string) int {
+	t.Helper()
+	const db = "app"
+	gate := regexp.MustCompile(regexp.QuoteMeta("GET_LOCK('gc_remote_op_run:"+db+":") + runNonceRe + regexp.QuoteMeta("', 0)"))
+	m := gate.FindStringSubmatch(log)
+	if m == nil {
+		t.Fatalf("no gate with a run lock for %s in the log.\nlog:\n%s", db, log)
+	}
+	batch := "PREPARE gc_kill FROM 'KILL " + id + "'; SELECT IF(IS_USED_LOCK('gc_remote_op_run:" + db + ":" + m[1] + "') = " + id + ", 1, JSON_EXTRACT('gc-remote-op-not-owner', '$')) AS own; EXECUTE gc_kill; DEALLOCATE PREPARE gc_kill\n"
+	return strings.Index(log, batch)
+}
+
+// assertGuardedKill requires the complete guarded KILL batch for id in the log.
+func assertGuardedKill(t *testing.T, log, id string) {
+	t.Helper()
+	if guardedKillAt(t, log, id) < 0 {
+		t.Fatalf("expected the complete guarded KILL batch for session %s (prepared KILL, ownership check on this run's lock, EXECUTE, DEALLOCATE).\nlog:\n%s", id, log)
+	}
+}
+
 // assertGateBeforeCall pins the batch shape `… CONNECTION_ID() … GET_LOCK('gc_remote_op:<db>', 0) … CALL …`.
 func assertGateBeforeCall(t *testing.T, line, db, call string) {
 	t.Helper()
@@ -1046,8 +1070,8 @@ func assertGateBeforeCall(t *testing.T, line, db, call string) {
 	// FIRST ARGUMENT re-proves that the session still holds the same run lock
 	// (codex r12: a pooled client that reconnected between the gate and the
 	// CALL would otherwise fetch on a lockless session).
-	gateRe := regexp.MustCompile(regexp.QuoteMeta("SELECT IF(GET_LOCK(CONCAT('gc_remote_op:', LOWER('"+db+"')), 0) = 1 AND GET_LOCK('gc_remote_op_run:"+db+":") + `([0-9]+-[0-9]+)` + regexp.QuoteMeta("', 0) = 1, 1, JSON_EXTRACT('gc-remote-op-lock-held', '$')) AS gate;"))
-	callRe := regexp.MustCompile(regexp.QuoteMeta(call+"IF(IS_USED_LOCK('gc_remote_op_run:"+db+":") + `([0-9]+-[0-9]+)` + regexp.QuoteMeta("') = CONNECTION_ID(), '") + `[^']+` + regexp.QuoteMeta("', JSON_EXTRACT('gc-remote-op-lost', '$')), "))
+	gateRe := regexp.MustCompile(regexp.QuoteMeta("SELECT IF(GET_LOCK(CONCAT('gc_remote_op:', LOWER('"+db+"')), 0) = 1 AND GET_LOCK('gc_remote_op_run:"+db+":") + runNonceRe + regexp.QuoteMeta("', 0) = 1, 1, JSON_EXTRACT('gc-remote-op-lock-held', '$')) AS gate;"))
+	callRe := regexp.MustCompile(regexp.QuoteMeta(call+"IF(IS_USED_LOCK('gc_remote_op_run:"+db+":") + runNonceRe + regexp.QuoteMeta("') = CONNECTION_ID(), '") + `[^']+` + regexp.QuoteMeta("', JSON_EXTRACT('gc-remote-op-lost', '$')), "))
 	gateM, callM := gateRe.FindStringSubmatchIndex(line), callRe.FindStringSubmatchIndex(line)
 	idAt := strings.Index(line, "SELECT CONNECTION_ID() AS id;")
 	if idAt < 0 || gateM == nil || callM == nil || idAt >= gateM[0] || gateM[0] >= callM[0] {
@@ -1106,7 +1130,7 @@ func TestSyncFetchClientExit137StillKillsServerSideSession(t *testing.T) {
 		"    else printf 'Id,Time,db\\n'; fi\n" +
 		"    exit 0 ;;\n" +
 		"  *\"CALL DOLT_FETCH(\"*) : > \"" + started + "\" ; printf 'id\\n91\\n' ; exit 137 ;;\n" +
-		"  *\"KILL \"*) k=\"$*\" ; : > \"" + killedPrefix + "${k##* }\" ; exit 0 ;;\n" +
+		"  *\"KILL \"*) k=$(printf '%s' \"$*\" | sed -n 's/.*KILL \\([0-9][0-9]*\\).*/\\1/p') ; : > \"" + killedPrefix + "${k}\" ; exit 0 ;;\n" +
 		"esac\nexit 0\n"
 	installFFFakeDolt(t, binDir, body)
 	out := runFFSync(t, binDir, "--db", "app")
@@ -1117,7 +1141,7 @@ func TestSyncFetchClientExit137StillKillsServerSideSession(t *testing.T) {
 	if !strings.Contains(out, "fetch timed out") || !strings.Contains(out, "client exit 137") {
 		t.Fatalf("exit 137 is the bound's SIGKILL escalation and must be reported as a timeout.\nout:\n%s", out)
 	}
-	if !strings.Contains(log, "KILL 91\n") || !strings.Contains(out, "server-side fetch killed (session 91 no longer in flight)") {
+	if guardedKillAt(t, log, "91") < 0 || !strings.Contains(out, "server-side fetch killed (session 91 no longer in flight)") {
 		t.Fatalf("the recorded session must be KILLed after exit 137.\nout:\n%s\nlog:\n%s", out, log)
 	}
 }
@@ -1176,7 +1200,7 @@ func TestSyncFetchTimeoutOutranksFirstPushText(t *testing.T) {
 			"    else printf 'Id,Time,db\\n'; fi\n" +
 			"    exit 0 ;;\n" +
 			"  *\"CALL DOLT_FETCH(\"*) : > \"" + started + "\" ; printf 'id\\n93\\n' ; printf '" + tc.text + "\\n' >&2 ; exit " + fmt.Sprint(tc.code) + " ;;\n" +
-			"  *\"KILL \"*) k=\"$*\" ; : > \"" + killedPrefix + "${k##* }\" ; exit 0 ;;\n" +
+			"  *\"KILL \"*) k=$(printf '%s' \"$*\" | sed -n 's/.*KILL \\([0-9][0-9]*\\).*/\\1/p') ; : > \"" + killedPrefix + "${k}\" ; exit 0 ;;\n" +
 			"esac\nexit 0\n"
 		installFFFakeDolt(t, binDir, body)
 		out := runFFSyncFails(t, binDir, "--db", "app")
@@ -1187,7 +1211,7 @@ func TestSyncFetchTimeoutOutranksFirstPushText(t *testing.T) {
 		if !strings.Contains(out, "fetch timed out") || strings.Contains(out, "first push") {
 			t.Fatalf("exit %d with %q: the timeout must outrank the first-push text.\nout:\n%s", tc.code, tc.text, out)
 		}
-		if !strings.Contains(log, "KILL 93\n") || !strings.Contains(out, "server-side fetch killed (session 93 no longer in flight)") {
+		if guardedKillAt(t, log, "93") < 0 || !strings.Contains(out, "server-side fetch killed (session 93 no longer in flight)") {
 			t.Fatalf("exit %d with %q: the recorded session must be KILLed.\nout:\n%s\nlog:\n%s", tc.code, tc.text, out, log)
 		}
 	}

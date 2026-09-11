@@ -174,7 +174,7 @@ func writePullFakeDolt(t *testing.T, dir, processlistArm, pullArm string) string
 		"    printf 'name,url\\norigin,https://example.invalid/repo\\n' ; exit 0 ;;\n" +
 		"  *\"information_schema.processlist\"*) " + processlistArm + " ;;\n" +
 		"  *\"CALL DOLT_PULL(\"*) " + pullArm + " ;;\n" +
-		"  *\"KILL \"*) k=\"$*\" ; : > \"" + killedPrefix + "${k##* }\" ; exit 0 ;;\n" +
+		"  *\"KILL \"*) k=$(printf '%s' \"$*\" | sed -n 's/.*KILL \\([0-9][0-9]*\\).*/\\1/p') ; : > \"" + killedPrefix + "${k}\" ; exit 0 ;;\n" +
 		"esac\nexit 0\n"
 	if err := os.WriteFile(filepath.Join(dir, "dolt"), []byte(body), 0o755); err != nil {
 		t.Fatalf("write fake dolt: %v", err)
@@ -322,7 +322,7 @@ func TestPullTimeoutKillsItsServerSideSession(t *testing.T) {
 	}
 	log := readLog(t, logPath)
 	pullAt := strings.Index(log, "CALL DOLT_PULL(")
-	killAt := strings.Index(log, "KILL 78\n")
+	killAt := guardedKillAt(t, log, "78")
 	if pullAt < 0 || killAt < 0 || killAt < pullAt {
 		t.Fatalf("the session the pull printed about itself must be KILLed after the bound expires.\nlog:\n%s", log)
 	}
@@ -408,7 +408,7 @@ func TestPullClientExit137StillKillsServerSideSession(t *testing.T) {
 	if !strings.Contains(out, "pull timed out after 120s") || !strings.Contains(out, "client exit 137") {
 		t.Fatalf("exit 137 must be reported as the bound expiring.\nout:\n%s", out)
 	}
-	if !strings.Contains(readLog(t, logPath), "KILL 79\n") || !strings.Contains(out, "app: server-side pull killed (session 79 no longer in flight)") {
+	if guardedKillAt(t, readLog(t, logPath), "79") < 0 || !strings.Contains(out, "app: server-side pull killed (session 79 no longer in flight)") {
 		t.Fatalf("the recorded session must be KILLed after exit 137.\nout:\n%s\nlog:\n%s", out, readLog(t, logPath))
 	}
 }
@@ -476,7 +476,5 @@ func TestPullTimeoutOutranksGateText(t *testing.T) {
 	if !strings.Contains(out, "pull timed out after 120s") || strings.Contains(out, "server refused") {
 		t.Fatalf("the timeout must outrank the gate text.\nout:\n%s", out)
 	}
-	if !strings.Contains(readLog(t, logPath), "KILL 81\n") {
-		t.Fatalf("the recorded session must be KILLed.\nlog:\n%s", readLog(t, logPath))
-	}
+	assertGuardedKill(t, readLog(t, logPath), "81")
 }

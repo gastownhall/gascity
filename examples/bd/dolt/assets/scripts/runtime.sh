@@ -510,10 +510,12 @@ kill_remote_op_session() {
   _kr_guarded=""
   for _kr_one in $_kr_ids; do
     _kr_krc=0
-    # One batch: the KILL runs only while <id> still holds THIS run's lock;
-    # otherwise the batch stops before it (a restarted server may have handed
-    # the number to someone else — see the gate comment above).
-    _kr_kerr=$(dolt_sql_csv "$_kr_tmo" "" "SELECT IF(IS_USED_LOCK('$_kr_runlock') = $_kr_one, 1, JSON_EXTRACT('$REMOTE_OP_NOT_OWNER_MARK', '\$')) AS own; KILL $_kr_one" 2>&1 >/dev/null) || _kr_krc=$?
+    # One batch: the KILL is prepared first (a session-local handle), then
+    # runs only while <id> still holds THIS run's lock; otherwise the batch
+    # stops at the guard (a restarted server may have handed the number to
+    # someone else), and a client that reconnected between the guard and the
+    # EXECUTE has no handle to execute — see the gate comment above.
+    _kr_kerr=$(dolt_sql_csv "$_kr_tmo" "" "PREPARE gc_kill FROM 'KILL $_kr_one'; SELECT IF(IS_USED_LOCK('$_kr_runlock') = $_kr_one, 1, JSON_EXTRACT('$REMOTE_OP_NOT_OWNER_MARK', '\$')) AS own; EXECUTE gc_kill; DEALLOCATE PREPARE gc_kill" 2>&1 >/dev/null) || _kr_krc=$?
     if [ "$_kr_krc" -ne 0 ]; then
       case "$_kr_kerr" in
         *"Error 3141 "*"\"$REMOTE_OP_NOT_OWNER_MARK\""*) _kr_guarded="$_kr_guarded $_kr_one " ;;
@@ -611,22 +613,43 @@ bound_expired() {
 #     reconnected between the gate and the CALL, and the fresh session took
 #     no lock — raises Error 3141 with "gc-remote-op-lost" BEFORE the
 #     procedure runs (04i b) and a session that holds it fetches (04i c);
-#   - the KILL is `SELECT IF(IS_USED_LOCK('<run lock>') = <id>, 1,
-#     JSON_EXTRACT('gc-remote-op-not-owner', '$')) AS own; KILL <id>` in ONE
-#     batch: the id printed by our statement proves ownership only within the
-#     server lifetime that issued it (a restarted server hands the same
-#     numbers out again), so the KILL runs only while that id still holds
-#     this run's lock; otherwise the batch stops before the KILL (04i e1, e3)
-#     and the processlist read after says whether the session is gone
-#     (already ended) or someone else's (NOT killed, left for the operator).
+#   - the KILL is ONE batch: `PREPARE gc_kill FROM 'KILL <id>'; SELECT
+#     IF(IS_USED_LOCK('<run lock>') = <id>, 1, JSON_EXTRACT(
+#     'gc-remote-op-not-owner', '$')) AS own; EXECUTE gc_kill; DEALLOCATE
+#     PREPARE gc_kill`. The id printed by our statement proves ownership only
+#     within the server lifetime that issued it (a restarted server hands the
+#     same numbers out again), so the KILL runs only while that id still
+#     holds this run's lock; otherwise the batch stops at the guard (04i e1,
+#     e3; 04k2 b) and the processlist read after says whether the session is
+#     gone (already ended) or someone else's (NOT killed, left for the
+#     operator). KILL takes only a literal (04k a–c), so the check cannot sit
+#     inside it; the prepared handle closes the window between the check and
+#     the KILL instead (codex r13): it is session-local, so a client that
+#     reconnected in between lands on a session with no handle and EXECUTE
+#     fails ("Unknown prepared statement handler", 04k d2) — the KILL never
+#     runs on a session that did not pass the check (04k2 a: the true path).
+#   - the run nonce is 64 random bits from /dev/urandom (16 hex), never the
+#     pid or the clock: two hosts starting a runner in the same second with
+#     the same pid must not share a run lock (codex r13). Without
+#     /dev/urandom the nonce falls back to pid-epoch.
 REMOTE_OP_GATE_MARK='gc-remote-op-lock-held'
 REMOTE_OP_LOST_MARK='gc-remote-op-lost'
 REMOTE_OP_NOT_OWNER_MARK='gc-remote-op-not-owner'
 # REMOTE_OP_RUN_NONCE is set by the scripts that take locks (sync, pull) once
-# per run, after sourcing this file: `REMOTE_OP_RUN_NONCE="$$-$(date +%s)"`.
+# per run, after sourcing this file: `REMOTE_OP_RUN_NONCE=$(remote_op_new_run_nonce)`.
 # Not computed here: health sources this file too and must not spend a `date`
 # call at source time (its tests script the date sequence).
 REMOTE_OP_RUN_NONCE="${REMOTE_OP_RUN_NONCE:-}"
+
+# remote_op_new_run_nonce — a fresh run nonce: 16 hex digits from
+# /dev/urandom, or pid-epoch when the device is unavailable.
+remote_op_new_run_nonce() {
+  _rn=$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
+  case "$_rn" in
+    ????????????????) printf '%s' "$_rn" ;;
+    *) printf '%s-%s' "$$" "$(date +%s)" ;;
+  esac
+}
 
 # remote_op_lock_name DB — the user-level lock name for DB, `gc_remote_op:<db>`
 # with the name lowercased: Dolt resolves `app` and `APP` to one database, and

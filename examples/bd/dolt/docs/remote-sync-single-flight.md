@@ -31,15 +31,17 @@ database (`GET_LOCK('gc_remote_op:<db>', 0)`) in the same batch as the CALL:
 two runners that both read "nothing in flight" cannot both fetch, because the
 server stops the second batch before its CALL, and a session whose client died
 keeps the lock until it finishes or is killed. The gate also takes a lock named
-for this run (`gc_remote_op_run:<db>:<pid>-<epoch>`), and the CALL's own first
+for this run (`gc_remote_op_run:<db>:<16 random hex digits>`), and the CALL's own first
 argument re-checks that the session still holds it — Dolt evaluates expressions
 in CALL arguments — so a client that reconnected between the gate and the CALL
 fails before the procedure runs instead of fetching on a lockless session. The
 statement also prints its own connection id first and runs with `--use-db`, so
 when the client bound expires (exit 124, or 137 when GNU timeout had to escalate
 to SIGKILL) the script `KILL`s exactly that server-side session — in one batch
-that first checks the id still holds this run's lock, so a server that restarted
-and handed the number to someone else is never asked to kill them — and proves
+that prepares the `KILL`, checks that the id still holds this run's lock, and
+only then executes the prepared handle, so a server that restarted and handed
+the number to someone else is never asked to kill them, and a client that
+reconnected between the check and the kill has no handle to execute — and proves
 it gone with a second processlist read (a session still listed is reported as
 NOT killed; a client that never learned its id kills nothing and names the
 sessions for the operator). Database names are locked case-insensitively.
