@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 684
-baseline_files = 194
+baseline_calls = 685
+baseline_files = 195
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-80po0c.2"
@@ -51,8 +51,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 464
-baseline_files = 130
+baseline_calls = 465
+baseline_files = 131
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-80po0c.2"
@@ -260,6 +260,17 @@ resources = ["subprocess"]
 owner_bead = "ga-p9iuv.30"
 invariant = "the provider-owned script boundary proof is a checked Medium subprocess owner"
 resource_owner = "the test executes the copied provider script only with a test-owned BD executable and verifies its lifecycle delegation without a host service"
+migration_target = "GC6011"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "cmd/gc"
+package_name = "main"
+owner = "TestGcBeadsBdReadyScopeLifecycleReadsItsPersistedTopology"
+resources = ["subprocess"]
+owner_bead = "ga-p9iuv.30"
+invariant = "the ready-scope topology boundary proof is a checked Medium subprocess owner"
+resource_owner = "the test executes the shipped provider script once per init shape with a test-owned BD executable and a scope built from files alone, so no Dolt, no bd and no host service are involved"
 migration_target = "GC6011"
 expires = "2026-10-01"
 

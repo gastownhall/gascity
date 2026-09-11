@@ -2,7 +2,6 @@ package contract
 
 import (
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -27,13 +26,7 @@ import (
 //nolint:unparam // helper keeps FS explicit for symmetry with related helpers
 func writeBdOwnedServerRecord(t *testing.T, fs fsys.FS, scopeRoot string, pid int) string {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = listener.Close() })
-	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
-
+	port := listenReachablePort(t, "127.0.0.1")
 	beadsDir := filepath.Join(scopeRoot, ".beads")
 	if err := fs.MkdirAll(beadsDir, 0o700); err != nil {
 		t.Fatal(err)

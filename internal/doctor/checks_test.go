@@ -2531,6 +2531,7 @@ func writeDoctorSidecar(t *testing.T, dir, body string) {
 	}
 }
 
+//nolint:unparam // helper keeps FS explicit in tests
 func writeDoctorRuntimeState(t *testing.T, fs fsys.FS, dir, port string) {
 	t.Helper()
 	runtimeDir := filepath.Join(dir, ".gc", "runtime", "packs", "dolt")

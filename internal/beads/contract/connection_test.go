@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1116,6 +1117,17 @@ func writeReachableRuntimeStateOnHostWithPID(t *testing.T, fs fsys.FS, city, hos
 
 func writeReachableRuntimeStateOnHostWithPIDAndDataDir(t *testing.T, fs fsys.FS, city, host string, pid int, dataDir string) string {
 	t.Helper()
+	port := listenReachablePort(t, host)
+	writeRuntimeState(t, fs, city, fmt.Sprintf(`{"running":true,"pid":%s,"port":%s,"data_dir":%q}`, strconv.Itoa(pid), port, dataDir))
+	return port
+}
+
+// listenReachablePort opens a listener on host and returns its port, keeping
+// the listener alive for the test. Resolution probes reachability before it
+// trusts any record of a running server, so a fixture that wants to be believed
+// needs something actually accepting connections on that port.
+func listenReachablePort(t *testing.T, host string) string {
+	t.Helper()
 	listener, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
 	if err != nil {
 		// Some hosts aren't bindable on every OS — notably, darwin doesn't
@@ -1132,9 +1144,7 @@ func writeReachableRuntimeStateOnHostWithPIDAndDataDir(t *testing.T, fs fsys.FS,
 		t.Skipf("cannot bind %s: %v (typical on darwin where 127.0.0.0/8 secondary loopback aliases aren't installed by default)", net.JoinHostPort(host, "0"), err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
-	port := listener.Addr().(*net.TCPAddr).Port
-	writeRuntimeState(t, fs, city, fmt.Sprintf(`{"running":true,"pid":%d,"port":%d,"data_dir":%q}`, pid, port, dataDir))
-	return fmt.Sprintf("%d", port)
+	return strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
 }
 
 func reachableNonLoopbackHost(t *testing.T) string {
