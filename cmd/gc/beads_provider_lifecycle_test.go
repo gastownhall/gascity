@@ -12718,6 +12718,58 @@ func TestGcBeadsBdProviderOwnedLifecycleUsesBdBoundary(t *testing.T) {
 			}
 		})
 	}
+
+	// Init is the one place GC states an idle policy. Both proxied targets own
+	// a local proxy plus its Dolt child, so both are initialized with bd's
+	// never-idle timeout; direct targets have no proxy to keep resident.
+	for _, tt := range []struct {
+		name      string
+		transport string
+		target    string
+		wantIdle  bool
+		wantArgs  []string
+	}{
+		{name: "proxied local init pins the proxy resident", transport: "proxied", target: "local", wantIdle: true},
+		{name: "proxied external init pins its local proxy resident", transport: "proxied", target: "external", wantIdle: true},
+		{name: "direct local init has no proxy to pin", transport: "direct", target: "local"},
+		{name: "direct external init has no proxy to pin", transport: "direct", target: "external"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			logPath := filepath.Join(t.TempDir(), "bd.log")
+			bdPath := filepath.Join(t.TempDir(), "bd")
+			if err := os.WriteFile(bdPath, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> "+strconv.Quote(logPath)+"\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(scriptPath, "init", scopeDir, "prov")
+			cmd.Env = sanitizedBaseEnv(
+				"GC_CITY_PATH="+cityDir,
+				"BEADS_DIR="+filepath.Join(scopeDir, ".beads"),
+				"BD_BIN="+bdPath,
+				"GC_BEADS_PROVIDER_OWNED=1",
+				"GC_BEADS_TRANSPORT="+tt.transport,
+				"GC_BEADS_TARGET="+tt.target,
+				"GC_BEADS_PROXY_EXTERNAL_HOST=upstream.example.invalid",
+				"GC_BEADS_PROXY_EXTERNAL_PORT=3306",
+				"GC_DOLT_HOST=upstream.example.invalid",
+				"GC_DOLT_PORT=3306",
+			)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("gc-beads-bd init: %v\n%s", err, out)
+			}
+			data, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := strings.TrimSpace(string(data))
+			if !strings.HasPrefix(got, "init --init-if-missing --quiet") {
+				t.Fatalf("bd init command = %q", got)
+			}
+			hasIdle := strings.Contains(got, "--proxied-server-idle-timeout 0")
+			if hasIdle != tt.wantIdle {
+				t.Fatalf("bd init command = %q, idle-never pin = %v, want %v", got, hasIdle, tt.wantIdle)
+			}
+		})
+	}
 }
 
 func TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses(t *testing.T) {
@@ -12832,6 +12884,26 @@ func TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses(t *testing.T) {
 		}
 		return pids, nil
 	}
+	// doltProcessArgsUnderScopeRoot returns the command lines of any live
+	// `bd db-proxy-child` or `dolt sql-server` process that still names
+	// scopeRoot. It reads the process table rather than a PID file because the
+	// leak it exists to catch is exactly a process whose record went away.
+	doltProcessArgsUnderScopeRoot := func(scopeRoot string) []string {
+		out, err := exec.Command("ps", "-eo", "args=").Output()
+		if err != nil {
+			t.Fatalf("read process table: %v", err)
+		}
+		var leaked []string
+		for _, line := range strings.Split(string(out), "\n") {
+			if !strings.Contains(line, scopeRoot) {
+				continue
+			}
+			if strings.Contains(line, "db-proxy-child") || strings.Contains(line, "sql-server") {
+				leaked = append(leaked, strings.TrimSpace(line))
+			}
+		}
+		return leaked
+	}
 	runLifecycleCommand := func(ctx context.Context, dir, home, transport, op string) error {
 		cmd := exec.CommandContext(ctx, script, op)
 		cmd.Env = sanitizedBaseEnv("HOME="+home, "GC_CITY_PATH="+dir, "BEADS_DIR="+filepath.Join(dir, ".beads"), "BD_BIN="+bdPath, "GC_BEADS_PROVIDER_OWNED=1", "GC_BEADS_TRANSPORT="+transport, "GC_BEADS_TARGET=local")
@@ -12879,10 +12951,31 @@ func TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses(t *testing.T) {
 					t.Errorf("reap provider-owned lifecycle processes: %v", errs)
 				}
 			})
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			// 30s covers a direct scope; a proxied init pays a real proxy plus
+			// Dolt cold start on top of a first-run `dolt init`.
+			ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 			defer cancel()
 			run(ctx, "init", dir, "demo", "demo")
 			run(ctx, "health")
+			if transport == "proxied" {
+				// GC asks bd to keep the proxy resident for the city's
+				// lifetime. bd records that as IdleTimeoutNever (-1) in the
+				// client-info sidecar it writes only when a tuning flag was
+				// supplied — its presence is itself the proof the flag landed.
+				data, err := os.ReadFile(filepath.Join(dir, ".beads", "proxied_server_client_info.json"))
+				if err != nil {
+					t.Fatalf("read proxied server client info: %v", err)
+				}
+				var sidecar struct {
+					IdleTimeout *int `json:"idle_timeout"`
+				}
+				if err := json.Unmarshal(data, &sidecar); err != nil {
+					t.Fatalf("parse proxied server client info %s: %v", data, err)
+				}
+				if sidecar.IdleTimeout == nil || *sidecar.IdleTimeout != -1 {
+					t.Fatalf("proxied server client info = %s, want idle_timeout -1 (never)", data)
+				}
+			}
 			var inspectErr error
 			pids, inspectErr = publishedPIDs(ctx, dir, transport)
 			if inspectErr != nil {
@@ -12896,6 +12989,18 @@ func TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses(t *testing.T) {
 				if processStillAlive(pid) {
 					t.Fatalf("provider-owned process %d remained alive after stop", pid)
 				}
+			}
+			// The PID records above prove bd's own children are gone. Sweep the
+			// process table too: a proxy or Dolt child that lost its record
+			// would still be holding this scope's data directory.
+			if leaked := doltProcessArgsUnderScopeRoot(dir); len(leaked) != 0 {
+				t.Fatalf("provider-owned processes still reference %s after stop:\n%s", dir, strings.Join(leaked, "\n"))
+			}
+			// Stop is re-runnable: bd dolt stop is idempotent, so a repeated
+			// gc stop must not turn a clean shutdown into an error.
+			run(ctx, "stop")
+			if leaked := doltProcessArgsUnderScopeRoot(dir); len(leaked) != 0 {
+				t.Fatalf("second stop left processes referencing %s:\n%s", dir, strings.Join(leaked, "\n"))
 			}
 		})
 	}

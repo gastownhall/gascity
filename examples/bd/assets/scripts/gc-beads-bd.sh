@@ -3517,7 +3517,15 @@ op_provider_owned_init() {
             [ "${GC_BEADS_TARGET:-}" = "external" ] && set -- "$@" --external
             ;;
         proxied:local|proxied:external)
-            set -- init --init-if-missing --quiet --proxied-server
+            # Both targets own a LOCAL proxy and its Dolt child; only the data
+            # upstream differs. bd's default 30s idle timeout retires that pair
+            # after every quiet period, so each later bd command would pay a
+            # proxy plus Dolt cold start (~0.6-6s measured on rc.2). GC keeps
+            # the proxy resident for the city's lifetime instead and retires it
+            # explicitly in the stop op. Idle timeout 0 is bd's
+            # IdleTimeoutNever; it lands in the client-info sidecar as
+            # "idle_timeout": -1.
+            set -- init --init-if-missing --quiet --proxied-server --proxied-server-idle-timeout 0
             if [ "${GC_BEADS_TARGET:-}" = "external" ]; then
                 if [ -n "${GC_BEADS_PROXY_EXTERNAL_SOCKET:-}" ]; then
                     set -- "$@" --proxied-server-external-socket-path "$GC_BEADS_PROXY_EXTERNAL_SOCKET"
@@ -3535,6 +3543,30 @@ op_provider_owned_init() {
     GC_BEADS_PROVIDER_INIT=1 run_provider_owned_bd "$dir" "$@"
 }
 
+# provider_owned_retire_local_dolt retires the local Dolt lifecycle bd owns for
+# a scope. gc stop must be re-runnable, so "there was nothing to stop" is
+# success: bd's proxied path already reports that as exit 0, but the direct
+# path exits 1 with "dolt server is not running". Any other failure still
+# surfaces with bd's own diagnostics.
+provider_owned_retire_local_dolt() {
+    local dir="$1" out status
+    set +e
+    out=$(run_provider_owned_bd "$dir" dolt stop 2>&1)
+    status=$?
+    set -e
+    if [ "$status" -eq 0 ]; then
+        if [ -n "$out" ]; then
+            printf '%s\n' "$out"
+        fi
+        return 0
+    fi
+    case "$out" in
+        *"not running"*|*"no server"*) return 0 ;;
+    esac
+    printf '%s\n' "$out" >&2
+    return "$status"
+}
+
 op_provider_owned_lifecycle() {
     local op="$1" dir transport local_scope=false
     dir=$(provider_owned_scope_dir)
@@ -3548,19 +3580,24 @@ op_provider_owned_lifecycle() {
             case "$op" in
                 start|ensure-ready) run_provider_owned_bd "$dir" ping ;;
                 health|probe) run_provider_owned_bd "$dir" ping ;;
-                recover) [ "$local_scope" != true ] || run_provider_owned_bd "$dir" dolt stop; run_provider_owned_bd "$dir" ping ;;
-                stop|shutdown) [ "$local_scope" != true ] || run_provider_owned_bd "$dir" dolt stop ;;
+                recover) [ "$local_scope" != true ] || provider_owned_retire_local_dolt "$dir"; run_provider_owned_bd "$dir" ping ;;
+                stop|shutdown) [ "$local_scope" != true ] || provider_owned_retire_local_dolt "$dir" ;;
                 *) exit 2 ;;
             esac
             ;;
         proxied)
             case "$op" in
+                # One ping is the whole readiness wait: bd's provider open
+                # already blocks for the proxy endpoint and then for the Dolt
+                # child to report ready (~45s worst case on a cold start). An
+                # outer retry loop would only stack another wait on top of it,
+                # so GC widens the op budget instead (providerOwnedOpTimeout).
                 start|ensure-ready|health|probe) run_provider_owned_bd "$dir" ping ;;
                 # A proxied external scope still owns its local proxy child.
                 # bd dolt stop retires that proxy without issuing a lifecycle
                 # command to the upstream external Dolt server.
-                recover) run_provider_owned_bd "$dir" dolt stop; run_provider_owned_bd "$dir" ping ;;
-                stop|shutdown) run_provider_owned_bd "$dir" dolt stop ;;
+                recover) provider_owned_retire_local_dolt "$dir"; run_provider_owned_bd "$dir" ping ;;
+                stop|shutdown) provider_owned_retire_local_dolt "$dir" ;;
                 *) exit 2 ;;
             esac
             ;;

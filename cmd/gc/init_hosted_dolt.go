@@ -168,19 +168,22 @@ func (o hostedDoltInitOptions) registerSelectorEndpointForInit(cityPath string) 
 	return nil
 }
 
+// selectorExternalInitDatabase resolves the external database a pending city
+// init must create. The in-process selector serves the first attempt; the
+// pending journal record serves every later retry, which would otherwise have
+// nothing to pass to bd.
 func selectorExternalInitDatabase(cityPath, scopeRoot string) string {
 	if !samePath(cityPath, scopeRoot) {
 		return ""
 	}
-	value, ok := selectorExternalInitOptions.Load(normalizePathForCompare(cityPath))
-	if !ok {
-		return ""
+	if value, ok := selectorExternalInitOptions.Load(normalizePathForCompare(cityPath)); ok {
+		if opts, ok := value.(hostedDoltInitOptions); ok {
+			if database := strings.TrimSpace(opts.Database); database != "" {
+				return database
+			}
+		}
 	}
-	opts, ok := value.(hostedDoltInitOptions)
-	if !ok {
-		return ""
-	}
-	return strings.TrimSpace(opts.Database)
+	return pendingProviderScopeEndpoint(cityPath, scopeRoot).Database
 }
 
 func hasSelectorExternalInitOptions(cityPath string) bool {
@@ -267,6 +270,21 @@ func (o hostedDoltInitOptions) providerOwnershipIntent(city config.City) (provid
 	return normalizeProviderScopeIntent(providerScopeIntent{Transport: resolved.Intent.Transport, Target: resolved.Intent.Target})
 }
 
+// providerScopeEndpoint projects the one-shot external endpoint this init
+// supplied into the durable form the ownership journal keeps. Without it the
+// endpoint lived only in this process, so a `gc init` interrupted after the
+// pending record was written left every retry unable to reach its upstream.
+func (o hostedDoltInitOptions) providerScopeEndpoint(intent providerScopeIntent) providerScopeEndpoint {
+	if intent.Target != "external" {
+		return providerScopeEndpoint{}
+	}
+	return providerScopeEndpoint{
+		Host:     strings.TrimSpace(o.Host),
+		Port:     strings.TrimSpace(o.Port),
+		Database: strings.TrimSpace(o.Database),
+	}
+}
+
 func persistFreshProviderOwnership(cityPath string, opts hostedDoltInitOptions) error {
 	// Legacy --dolt-host initialization retains its established canonical
 	// endpoint path. Generic selectors are the new provider-owned contract.
@@ -317,7 +335,7 @@ func persistFreshProviderOwnership(cityPath string, opts hostedDoltInitOptions) 
 		return err
 	}
 	if !cityInitialized {
-		if err := persistProviderScopeOwnership(cityPath, cityPath, intent); err != nil {
+		if err := persistProviderScopeOwnershipWithEndpoint(cityPath, cityPath, intent, opts.providerScopeEndpoint(intent)); err != nil {
 			return err
 		}
 	}
