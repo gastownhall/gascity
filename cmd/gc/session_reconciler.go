@@ -581,9 +581,9 @@ func recordDrainAckAssignedWorkEvent(
 	if rec == nil {
 		return
 	}
-	strandedBead, found, beadLookupErr := firstOpenAssignedWorkBeadForReachableStore(cityPath, cfg, store, rigStores, info)
+	strandedBead, found, beadLookupErr := drainAckClaimableAnomalyBead(cityPath, cfg, store, rigStores, info)
 	if beadLookupErr != nil {
-		fmt.Fprintf(stderr, "session reconciler: locating stranded bead for drain-acked %s: %v\n", name, beadLookupErr) //nolint:errcheck
+		fmt.Fprintf(stderr, "session reconciler: classifying drain-acked work for %s: %v\n", name, beadLookupErr) //nolint:errcheck
 	}
 	if !found {
 		return
@@ -602,6 +602,56 @@ func recordDrainAckAssignedWorkEvent(
 			"drain_acked_with_assigned_work",
 		),
 	})
+}
+
+// drainAckClaimableAnomalyBead returns the work bead that makes a drain-acked
+// session a GENUINE drain-with-assigned-work anomaly worth alarming on, plus
+// whether one was found.
+//
+// SessionDrainAckedWithAssignedWork must fire ONLY for a row the draining seat
+// could actually have claimed and did not — never for correct pull draining.
+// Two large classes of "assigned work" are correct pull, and both are
+// suppressed here:
+//
+//   - An OPEN bead parked on an unmet dependency (routed to the seat's target
+//     but not yet ready). No worker can claim a blocked row, so a seat that
+//     drained past it drained correctly.
+//   - An IN_PROGRESS bead a LIVE sibling incarnation of the same pool is
+//     working, matched only because it carries a pool-shared assignee identity.
+//     A surplus seat draining while a sibling holds the row is normal.
+//
+// A bead is a true anomaly when it is either open AND ready (claimable right
+// now) or in_progress AND assigned to THIS session's own durable bead ID — the
+// gastownhall/gascity#2293 "Shape A" self-strand where a worker exited mid-task
+// without nulling its assignee. The open+ready candidate is resolved first and
+// independently so a self-strand test on a single finder result cannot mask a
+// genuinely claimable row behind a benign in_progress match the finder returned
+// ahead of it. It fails CLOSED: a read error yields (found=false), so a flaky
+// store never manufactures the alarm this classifier exists to keep honest.
+func drainAckClaimableAnomalyBead(
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	info sessionpkg.Info,
+) (beads.Bead, bool, error) {
+	readyBead, readyFound, err := firstReadyAssignedWorkBeadForReachableStore(cityPath, cfg, store, rigStores, info)
+	if err != nil {
+		return beads.Bead{}, false, err
+	}
+	if readyFound {
+		return readyBead, true, nil
+	}
+	strandedBead, found, err := firstOpenAssignedWorkBeadForReachableStore(cityPath, cfg, store, rigStores, info)
+	if err != nil {
+		return beads.Bead{}, false, err
+	}
+	if found &&
+		strings.EqualFold(strings.TrimSpace(strandedBead.Status), "in_progress") &&
+		strings.TrimSpace(strandedBead.Assignee) == strings.TrimSpace(info.ID) {
+		return strandedBead, true, nil
+	}
+	return beads.Bead{}, false, nil
 }
 
 // drainAckFinalizeResult captures the Info-snapshot effect of a
@@ -4675,6 +4725,83 @@ func firstOpenAssignedWorkBeadInStoreByIdentifiers(store beads.Store, identifier
 				}
 				return item, true, nil
 			}
+		}
+	}
+	return beads.Bead{}, false, nil
+}
+
+// firstReadyAssignedWorkBeadForReachableStore returns the first READY (open and
+// unblocked) work bead still assigned to the given session in the store the
+// session's configured agent can query, plus whether one was found. It mirrors
+// firstOpenAssignedWorkBeadForReachableStore's reachability/identifier
+// resolution but keys on readiness so the drain-ack anomaly classifier
+// (drainAckClaimableAnomalyBead) can tell a genuinely claimable strand from an
+// open bead parked on an unmet dependency, which no worker could have claimed.
+// Returns (zero-bead, false, nil) when nothing matches.
+func firstReadyAssignedWorkBeadForReachableStore(
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	info sessionpkg.Info,
+) (beads.Bead, bool, error) {
+	identifiers := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
+	plan, err := assignedWorkPlanForSessionInfo(cityPath, cfg, store, rigStores, info)
+	if err != nil {
+		return beads.Bead{}, false, err
+	}
+	var (
+		bead  beads.Bead
+		found bool
+	)
+	res, err := storeref.Walk(plan, func(leg storeref.Leg) (bool, error) {
+		b, ok, err := firstReadyAssignedWorkBeadInStoreByIdentifiers(leg.Store, identifiers)
+		if err != nil {
+			return false, err
+		}
+		bead, found = b, ok
+		return ok, nil
+	})
+	if err != nil {
+		return beads.Bead{}, false, err
+	}
+	if !found {
+		if err := assignedWorkScanComplete(res); err != nil {
+			return beads.Bead{}, false, err
+		}
+	}
+	return bead, found, nil
+}
+
+// firstReadyAssignedWorkBeadInStoreByIdentifiers returns the first ready (open,
+// unblocked) non-session, non-mail work bead in store assigned to any of the
+// given identifiers. It is the ready-keyed sibling of
+// firstOpenAssignedWorkBeadInStoreByIdentifiers: ReadyAssignedTo already
+// excludes in_progress and dependency-blocked rows, so this returns only rows a
+// worker for this session could claim right now.
+func firstReadyAssignedWorkBeadInStoreByIdentifiers(store beads.Store, identifiers []string) (beads.Bead, bool, error) {
+	if store == nil {
+		return beads.Bead{}, false, nil
+	}
+	wa := workAssignmentForStore(beads.WorkStore{Store: store})
+	seen := make(map[string]struct{}, len(identifiers))
+	for _, assignee := range identifiers {
+		if assignee == "" {
+			continue
+		}
+		if _, ok := seen[assignee]; ok {
+			continue
+		}
+		seen[assignee] = struct{}{}
+		items, err := wa.ReadyAssignedTo(assignee, beads.TierBoth)
+		if err != nil {
+			return beads.Bead{}, false, err
+		}
+		for _, item := range excludeMailMessageBeads(items) {
+			if sessionpkg.IsSessionBeadOrRepairable(item) {
+				continue
+			}
+			return item, true, nil
 		}
 	}
 	return beads.Bead{}, false, nil

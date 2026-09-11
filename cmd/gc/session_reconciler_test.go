@@ -1893,6 +1893,135 @@ func TestReconcileSessionBeads_DrainAckMidPhaseEmitsAssignedWorkEvent(t *testing
 	}
 }
 
+// drainAckAssignedWorkEventCount runs a worker session through the drain-ack
+// finalize lifecycle with work already seeded and returns how many
+// SessionDrainAckedWithAssignedWork events were emitted. seedWork receives the
+// session's durable bead ID and its session_name identity so a case can assign
+// work to the session itself, to a pool-shared identity, and wire dependencies.
+func drainAckAssignedWorkEventCount(t *testing.T, seedWork func(t *testing.T, store beads.Store, sessionID, sessionName string)) int {
+	t.Helper()
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	fake := events.NewFake()
+	env.rec = fake
+
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	seedWork(t, env.store, session.ID, session.Metadata["session_name"])
+
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+	woken := reconcileSessionBeads(
+		context.Background(),
+		[]beads.Bead{session},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		env.store,
+		dops,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+	env.reconcileStopPendingToTerminal(t, env.sp, session, dops, map[string]bool{"worker": true})
+
+	count := 0
+	for i := range fake.Events {
+		if fake.Events[i].Type == events.SessionDrainAckedWithAssignedWork {
+			count++
+		}
+	}
+	return count
+}
+
+// TestReconcileSessionBeads_DrainAckBlockedAssignedWorkSuppressesEvent pins that
+// a session drain-acking while its only assigned bead is OPEN but parked on an
+// unmet dependency must NOT emit SessionDrainAckedWithAssignedWork. This is the
+// dominant false-positive class the operator classified from live data (~83% of
+// firings): the row is routed to the seat's target but blocked, so no worker
+// could have claimed it and the seat drained correctly. Before the anomaly
+// classifier the emitter fired on any open/in_progress assigned row, blocked or
+// not.
+func TestReconcileSessionBeads_DrainAckBlockedAssignedWorkSuppressesEvent(t *testing.T) {
+	count := drainAckAssignedWorkEventCount(t, func(t *testing.T, store beads.Store, sessionID, _ string) {
+		blocker, err := store.Create(beads.Bead{Title: "upstream gate", Type: "task", Status: "open"})
+		if err != nil {
+			t.Fatalf("Create(blocker): %v", err)
+		}
+		work, err := store.Create(beads.Bead{Title: "downstream phase", Type: "task", Status: "open", Assignee: sessionID})
+		if err != nil {
+			t.Fatalf("Create(work): %v", err)
+		}
+		if err := store.DepAdd(work.ID, blocker.ID, "blocks"); err != nil {
+			t.Fatalf("DepAdd: %v", err)
+		}
+	})
+	if count != 0 {
+		t.Fatalf("%s events = %d, want 0 — an open bead blocked on an unmet dependency is not claimable, so the seat drained correctly",
+			events.SessionDrainAckedWithAssignedWork, count)
+	}
+}
+
+// TestReconcileSessionBeads_DrainAckLiveSiblingInProgressSuppressesEvent pins
+// that a session drain-acking while an IN_PROGRESS row carries a pool-shared
+// assignee identity (its session_name, not its own durable bead ID) must NOT
+// emit SessionDrainAckedWithAssignedWork. This is the second false-positive
+// class from live data (~17%): the row is being worked by a LIVE sibling
+// incarnation of the same pool, so a surplus seat draining past it is normal
+// pull, not a strand. Only a #2293 Shape A self-strand (assignee == this
+// session's own bead ID) keeps alarming — pinned by
+// TestReconcileSessionBeads_DrainAckMidPhaseEmitsAssignedWorkEvent.
+func TestReconcileSessionBeads_DrainAckLiveSiblingInProgressSuppressesEvent(t *testing.T) {
+	count := drainAckAssignedWorkEventCount(t, func(t *testing.T, store beads.Store, _, sessionName string) {
+		work, err := store.Create(beads.Bead{Title: "sibling task", Type: "task", Assignee: sessionName})
+		if err != nil {
+			t.Fatalf("Create(work): %v", err)
+		}
+		inProgress := "in_progress"
+		if err := store.Update(work.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+			t.Fatalf("mark in progress: %v", err)
+		}
+	})
+	if count != 0 {
+		t.Fatalf("%s events = %d, want 0 — in_progress work on a pool-shared identity is a live sibling's surplus-seat drain, not a strand",
+			events.SessionDrainAckedWithAssignedWork, count)
+	}
+}
+
+// TestReconcileSessionBeads_DrainAckReadyAssignedWorkEmitsEvent guards against
+// over-suppression: an OPEN, unblocked bead assigned to the draining session is
+// genuinely claimable right now, so the anomaly classifier must still emit
+// SessionDrainAckedWithAssignedWork for it.
+func TestReconcileSessionBeads_DrainAckReadyAssignedWorkEmitsEvent(t *testing.T) {
+	count := drainAckAssignedWorkEventCount(t, func(t *testing.T, store beads.Store, sessionID, _ string) {
+		if _, err := store.Create(beads.Bead{Title: "ready phase", Type: "task", Status: "open", Assignee: sessionID}); err != nil {
+			t.Fatalf("Create(work): %v", err)
+		}
+	})
+	if count != 1 {
+		t.Fatalf("%s events = %d, want 1 — an open, unblocked bead assigned to the draining session is genuinely claimable and must still alarm",
+			events.SessionDrainAckedWithAssignedWork, count)
+	}
+}
+
 // TestReconcileSessionBeads_DrainAckOwnDrainStepClosesWithoutEvent pins that
 // a session whose ONLY assigned work is its own mol-do-work "drain" step
 // must actually close on drain-ack (no pool respawn) and must NOT emit
