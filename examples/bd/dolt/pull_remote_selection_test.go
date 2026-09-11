@@ -151,7 +151,7 @@ func TestPullSQLMultipleRemotesOverrideSelectsFileRemote(t *testing.T) {
 	}
 
 	log := readLog(t, doltLog)
-	want := "CALL DOLT_PULL('internal', 'main')"
+	want := "= CONNECTION_ID(), 'internal', JSON_EXTRACT('gc-remote-op-lost', '$')), 'main')" // the remote is the CALL's ownership-checked first argument (gp-f2yq)
 	if !strings.Contains(log, want) {
 		t.Fatalf("expected pull from the overridden 'internal' remote.\nwant %q\nlog:\n%s\noutput:\n%s", want, log, out)
 	}
@@ -250,7 +250,7 @@ func TestPullSQLMultipleRemotesNonFileOverrideWithAllowFlagProceeds(t *testing.T
 	}
 
 	log := readLog(t, doltLog)
-	want := "CALL DOLT_PULL('public', 'main')"
+	want := "= CONNECTION_ID(), 'public', JSON_EXTRACT('gc-remote-op-lost', '$')), 'main')" // the remote is the CALL's ownership-checked first argument (gp-f2yq)
 	if !strings.Contains(log, want) {
 		t.Fatalf("expected pull from the overridden 'public' remote.\nwant %q\nlog:\n%s\noutput:\n%s", want, log, out)
 	}
@@ -588,7 +588,7 @@ func TestPullSQLSoleNonLocalRemoteWithAllowFlagProceeds(t *testing.T) {
 	}
 
 	log := readLog(t, doltLog)
-	want := "CALL DOLT_PULL('origin', 'main')"
+	want := "= CONNECTION_ID(), 'origin', JSON_EXTRACT('gc-remote-op-lost', '$')), 'main')" // the remote is the CALL's ownership-checked first argument (gp-f2yq)
 	if !strings.Contains(log, want) {
 		t.Fatalf("expected pull from the sole 'origin' remote.\nwant %q\nlog:\n%s\noutput:\n%s", want, log, out)
 	}
@@ -635,7 +635,7 @@ func TestPullSQLSoleFileRemoteProceedsWithoutOverride(t *testing.T) {
 	}
 
 	log := readLog(t, doltLog)
-	want := "CALL DOLT_PULL('origin', 'main')"
+	want := "= CONNECTION_ID(), 'origin', JSON_EXTRACT('gc-remote-op-lost', '$')), 'main')" // the remote is the CALL's ownership-checked first argument (gp-f2yq)
 	if !strings.Contains(log, want) {
 		t.Fatalf("expected pull from the sole 'origin' remote.\nwant %q\nlog:\n%s\noutput:\n%s", want, log, out)
 	}
