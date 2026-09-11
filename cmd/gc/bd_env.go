@@ -1642,6 +1642,9 @@ func bdRuntimeEnvForRigWithErrorRecovery(cityPath string, cfg *config.City, rigP
 }
 
 func bdRuntimeEnvForRigWithErrorRecoveryContext(ctx context.Context, cityPath string, cfg *config.City, rigPath string, allowRecovery bool) (map[string]string, error) {
+	if cached, ok := cachedProxiedScopeRuntimeEnv(cityPath, rigPath); ok {
+		return cached, nil
+	}
 	env, cityErr := bdRuntimeEnvWithErrorRecoveryContext(ctx, cityPath, allowRecovery)
 	rigPath = normalizePathForCompare(rigPath)
 	// Pin the rig store explicitly. The gc-beads-bd provider derives its Dolt
@@ -1664,6 +1667,17 @@ func bdRuntimeEnvForRigWithErrorRecoveryContext(ctx context.Context, cityPath st
 		env["BEADS_BACKEND"] = "doltlite"
 		mirrorBeadsDoltEnv(env)
 		return env, nil
+	}
+	// Each proxied workspace has its own proxy root, so a rig answers from its
+	// own binding rather than inheriting the city's endpoint.
+	if scopeUsesProxiedDoltMode(cityPath, rigPath) {
+		if err := applyProxiedScopeRuntimeEnv(env, rigPath); err != nil {
+			return env, err
+		}
+		if cityErr != nil {
+			return env, cityErr
+		}
+		return rememberProxiedScopeRuntimeEnv(cityPath, rigPath, env), nil
 	}
 	if err := applyResolvedRigDoltEnvContext(ctx, env, cityPath, rigPath, explicitRig, allowRecovery); err != nil {
 		clearProjectedDoltEnv(env)
@@ -1769,6 +1783,9 @@ func bdRuntimeEnvWithErrorRecovery(cityPath string, allowRecovery bool) (map[str
 }
 
 func bdRuntimeEnvWithErrorRecoveryContext(ctx context.Context, cityPath string, allowRecovery bool) (map[string]string, error) {
+	if cached, ok := cachedProxiedScopeRuntimeEnv(cityPath, cityPath); ok {
+		return cached, nil
+	}
 	env := cityRuntimeEnvMapForCity(cityPath)
 	if err := applyWorkspacePinnedBdBinary(env, cityPath); err != nil {
 		return env, err
@@ -1824,6 +1841,17 @@ func bdRuntimeEnvWithErrorRecoveryContext(ctx context.Context, cityPath string, 
 		env["BEADS_BACKEND"] = "doltlite"
 		mirrorBeadsDoltEnv(env)
 		return env, nil
+	}
+	// bd owns a proxied scope's listener and its readiness. Answer from the
+	// persisted binding and stop: the managed-Dolt ladder below can only fail
+	// to find a port that does not exist, and its last rung is a city-wide
+	// health fan-out that would run one `bd ping` per provider-owned scope for
+	// every bd command gc makes. See bd_env_proxied.go.
+	if scopeUsesProxiedDoltMode(cityPath, cityPath) {
+		if err := applyProxiedScopeRuntimeEnv(env, cityPath); err != nil {
+			return env, err
+		}
+		return rememberProxiedScopeRuntimeEnv(cityPath, cityPath, env), nil
 	}
 	if bound, err := applyCityStorageBindingEnv(env, cityPath); err != nil {
 		clearProjectedDoltEnv(env)
