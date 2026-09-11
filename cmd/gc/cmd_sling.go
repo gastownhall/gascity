@@ -2243,18 +2243,8 @@ func rigPrefixForAgent(a config.Agent, cfg *config.City) string {
 // checkCrossRig returns a non-empty error message if a bead's rig prefix
 // doesn't match the target agent's rig prefix. Returns "" when the check
 // passes or can't be performed (missing prefix, city-wide agent, no rig).
+// Delegates to sling.CheckCrossRig so the dry-run preview and the real
+// enforcement path can never disagree on the wording again.
 func checkCrossRig(beadID string, a config.Agent, cfg *config.City) string {
-	bp := sling.BeadPrefixForCity(cfg, beadID)
-	if bp == "" {
-		return ""
-	}
-	rp := rigPrefixForAgent(a, cfg)
-	if rp == "" {
-		return ""
-	}
-	if bp == rp {
-		return ""
-	}
-	return fmt.Sprintf("gc sling: cross-rig routing blocked — bead %s (prefix %q) targets %s (rig prefix %q); use --force to override",
-		beadID, bp, a.QualifiedName(), rp)
+	return sling.CheckCrossRig(beadID, a, cfg)
 }

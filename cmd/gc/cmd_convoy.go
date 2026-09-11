@@ -1742,26 +1742,11 @@ type explicitReasonCloser interface {
 	CloseWithReason(id, reason string) error
 }
 
-// closeConvoyWithReason stamps a close_reason metadata key on the
-// convoy bead before closing it. BdStore can receive the same reason
-// directly as `bd close --reason ...`, which lets cities
-// running with validation.on-close=error accept system-driven
-// auto-closes (whose default reason "Closed" would otherwise be
-// rejected as terse). For stores whose Close path does not consult
-// the metadata, the field still serves as a permanent audit trail of
-// why the convoy was closed.
+// closeConvoyWithReason closes a convoy bead with an auditable reason. The
+// behavior lives in the convoy domain package so the sling reap path and this
+// CLI projection share one implementation.
 func closeConvoyWithReason(store beads.Store, id, reason string) error {
-	reason = strings.TrimSpace(reason)
-	if reason == "" {
-		return store.Close(id)
-	}
-	if err := store.SetMetadata(id, "close_reason", reason); err != nil {
-		return fmt.Errorf("stamping convoy %s close reason: %w", id, err)
-	}
-	if closer, ok := store.(explicitReasonCloser); ok {
-		return closer.CloseWithReason(id, reason)
-	}
-	return store.Close(id)
+	return convoycore.CloseWithReason(store, id, reason)
 }
 
 // doConvoyCheck auto-closes convoys where all children are closed.

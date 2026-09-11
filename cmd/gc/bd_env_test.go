@@ -2788,6 +2788,67 @@ dolt.port: 4407
 	}
 }
 
+// The one-shot CLI pool cap belongs to the one-shot wrapper, not to the
+// shared projection: nativeDoltOpenEnvForScopeContext also serves the
+// controller's long-lived stores, which keep the beads library's daemon-sized
+// project pool. These pin both halves on both branches of the projection (the
+// city scope and a rig scope) so a refactor cannot silently widen the cap onto
+// the controller or drop it from the CLI.
+func TestNativeDoltOneShotOpenEnvForScopeCapsPoolOnBothScopes(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.host: city-db.example.com
+dolt.port: 3307
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigDir := filepath.Join(t.TempDir(), "my-rig")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: myrig
+gc.endpoint_origin: explicit
+gc.endpoint_status: verified
+dolt.host: rig-db.example.com
+dolt.port: 4407
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Rigs: []config.Rig{{Name: "my-rig", Path: rigDir}}}
+
+	for _, tc := range []struct {
+		name      string
+		scopeRoot string
+	}{
+		{name: "city scope", scopeRoot: cityDir},
+		{name: "rig scope", scopeRoot: rigDir},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capped, err := nativeDoltOneShotOpenEnvForScope(cityDir, cfg, tc.scopeRoot)
+			if err != nil {
+				t.Fatalf("nativeDoltOneShotOpenEnvForScope: %v", err)
+			}
+			if got := capped["BEADS_DOLT_MAX_CONNS"]; got != "1" {
+				t.Fatalf("one-shot BEADS_DOLT_MAX_CONNS = %q, want 1: a one-shot CLI open must cap the project pool", got)
+			}
+
+			base, err := nativeDoltOpenEnvForScope(cityDir, cfg, tc.scopeRoot)
+			if err != nil {
+				t.Fatalf("nativeDoltOpenEnvForScope: %v", err)
+			}
+			if got, ok := base["BEADS_DOLT_MAX_CONNS"]; ok {
+				t.Fatalf("base BEADS_DOLT_MAX_CONNS = %q (present), want absent: the controller's long-lived stores keep the daemon-sized pool", got)
+			}
+		})
+	}
+}
+
 func TestBdRuntimeEnvForRigUsesCanonicalManagedRigTarget(t *testing.T) {
 	t.Setenv("GC_DOLT_HOST", "")
 	_ = os.Unsetenv("GC_DOLT_HOST")

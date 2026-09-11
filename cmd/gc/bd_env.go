@@ -1632,6 +1632,55 @@ func nativeDoltOpenEnvForScopeContext(ctx context.Context, cityPath string, cfg 
 	return bdRuntimeEnvForRigWithErrorRecoveryContext(ctx, cityPath, cfg, scopeRoot, true)
 }
 
+// nativeDoltOneShotOpenEnvForScope is nativeDoltOpenEnvForScope for a
+// one-shot CLI store open: the same projected env with the single-connection
+// project-pool cap applied. Long-lived opens (the controller's city and rig
+// stores) call the uncapped form, which keeps the upstream daemon-sized pool.
+func nativeDoltOneShotOpenEnvForScope(cityPath string, cfg *config.City, scopeRoot string) (map[string]string, error) {
+	env, err := nativeDoltOpenEnvForScope(cityPath, cfg, scopeRoot)
+	return nativeDoltCliPoolCap(env), err
+}
+
+// nativeDoltOneShotOpenEnvForScopeContext is
+// nativeDoltOneShotOpenEnvForScope under a caller-supplied context, for the
+// native read-path reopen hook.
+func nativeDoltOneShotOpenEnvForScopeContext(ctx context.Context, cityPath string, cfg *config.City, scopeRoot string) (map[string]string, error) {
+	env, err := nativeDoltOpenEnvForScopeContext(ctx, cityPath, cfg, scopeRoot)
+	return nativeDoltCliPoolCap(env), err
+}
+
+// nativeDoltCliPoolCap pins the native-Dolt project pool ceiling for
+// in-process store opens to a single connection. gc opens the store fresh on
+// every one-shot CLI invocation (gc ready, gc convoy status, gc hook
+// --claim, orders' scale_check probes): each open pays a fail-fast probe
+// dial, a no-database initDB check, and one project-pool connection in the
+// beads library's openServerConnection path. The upstream pool defaults
+// (MaxOpenConns=10 / MaxIdleConns=5, "deliberately oriented at long-lived
+// daemons") are sized for the wrong program: at the measured ~10 store opens
+// per second the city makes, a 10-wide pool ceiling lets churn reach ~40 new
+// connections per second against the dolt server although a serial one-shot
+// never holds more than one pool connection at a time. Capping MaxOpenConns
+// at 1 via the documented BEADS_DOLT_MAX_CONNS knob makes the pool ceiling
+// match the one connection a serial CLI actually uses: zero behavior change
+// for the serial CLI today, and a hard ceiling if a concurrent-query path is
+// ever added to a one-shot command. The fail-fast probe and initDB
+// connections are separate sql.DB opens outside this pool; eliminating them
+// is a separate, larger change (see #5539, the gc-side connection-churn issue
+// that this pin accompanies).
+//
+// The key is load-bearing only while it stays in
+// beads.nativeDoltOpenEnvKeys: withNativeDoltOpenEnv projects exactly that
+// allowlist into the process environment for the duration of an open, so a
+// key absent from it never reaches the library's os.Getenv and this cap
+// silently becomes a no-op.
+func nativeDoltCliPoolCap(env map[string]string) map[string]string {
+	if env == nil {
+		return env
+	}
+	env["BEADS_DOLT_MAX_CONNS"] = "1"
+	return env
+}
+
 func bdRuntimeEnvWithError(cityPath string) (map[string]string, error) {
 	return bdRuntimeEnvWithErrorRecovery(cityPath, true)
 }

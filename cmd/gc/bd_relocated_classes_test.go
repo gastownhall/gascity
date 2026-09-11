@@ -1716,20 +1716,28 @@ func TestGcBdCreateFailsClosedOnAFileBackedBulkCreateOnASplitCity(t *testing.T) 
 // TestBdCreateRefusesAnInfraShapedCreateBehindABdRootFlag pins the guard
 // against the flags that used to switch it off.
 //
-// bd accepts its root flags BEFORE the subcommand, and four of them consume the
-// next argument as a value (`--profile`, `--database`, `--server-url`,
-// `--mem-profile`). A global manifest that filed `--profile` as a bool and did
-// not know the other three left bdRelocatedClassVerb reading a flag's VALUE as
-// the verb (`--profile default create …` resolves to "default") or reporting the
+// bd accepts its root flags BEFORE the subcommand, and seven of them consume the
+// next argument as a value (`--actor`, `--database`, `--db`, `-C`/`--directory`,
+// `--dolt-auto-commit`, `--format`, `--mem-profile`). A global manifest that
+// filed one of them as a bool, or did not know it at all, left
+// bdRelocatedClassVerb reading a flag's VALUE as the verb
+// (`--database beads_other create …` resolves to "beads_other") or reporting the
 // argv undecidable — and both answers forward the create. bd accepts every one
 // of these flags and goes on to mint, so the disarmed guard was the only thing
 // between an ordinary invocation and a stranded bead.
+//
+// Only flags the PINNED bd actually registers belong here. `--profile` (renamed
+// `--cpu-profile`, now a bool) and `--server-url` (gone entirely) were dropped
+// with the v1.3.0-rc.2 bump: bd rejects both outright now, so they exercise the
+// undecidable-verb arm, whose premise — an unknown flag is one bd also rejects,
+// so nothing is minted — is documented on bdRelocatedClassCreateRefusal.
 func TestBdCreateRefusesAnInfraShapedCreateBehindABdRootFlag(t *testing.T) {
 	for name, prefix := range map[string][]string{
-		"--profile":              {"--profile", "default"},
-		"--profile inline":       {"--profile=default"},
 		"--database":             {"--database", "beads_other"},
-		"--server-url":           {"--server-url", "http://127.0.0.1:8080"},
+		"--database inline":      {"--database=beads_other"},
+		"--actor":                {"--actor", "gastown/mayor"},
+		"--dolt-auto-commit":     {"--dolt-auto-commit", "off"},
+		"--format":               {"--format", "json"},
 		"--mem-profile":          {"--mem-profile", "/tmp/heap.out"},
 		"--no-color":             {"--no-color"},
 		"--cpu-profile":          {"--cpu-profile"},

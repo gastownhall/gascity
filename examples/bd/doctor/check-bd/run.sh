@@ -5,7 +5,12 @@
 
 if ! command -v bd >/dev/null 2>&1; then
     echo "bd not found in PATH"
-    echo "Install: go install github.com/gastownhall/beads/cmd/bd@latest"
+    # The Go module path is steveyegge/beads even though releases live under
+    # gastownhall/beads, and @latest resolves past prereleases -- so it would
+    # install something older than the pin when the pin is an RC. Install the
+    # version deps.env pins, which is what CI and the devcontainer get.
+    echo "Install: .github/scripts/install-bd-archive.sh \"\$BD_VERSION\"  # BD_VERSION from deps.env"
+    echo "     or: go install github.com/steveyegge/beads/cmd/bd@\$BD_VERSION"
     exit 2
 fi
 
