@@ -5,13 +5,13 @@
 - Reviewed commit: `ad8bb5128cb5db3b229902a3e14369aae3a9c3c8`
 - Current base: `origin/main@21eca31d1c18e57e3bf83a968d64fd80db589ba5`
 - Isolated branch: `deploy/ga-rcy5fd-gate`
-- Gate state: **HOLD** — local evidence is complete, but the CI-config change has not yet received its first real GitHub Actions run.
+- Gate state: **PASS**
 
 | # | Criterion | Result | Evidence |
 |---|---|---|---|
 | 1 | Review PASS present | PASS | `ga-9sqq1b` records `verdict: pass` for the exact reviewed commit. |
 | 2 | Acceptance criteria met | PASS | The workflow now includes `preflight-unit-cover-noncmdgc` and `preflight-unit-cover-cmdgc` in both `ci-required.needs` and `allow_skipped`; `TestCIRequiredCoversEveryRealJob`, `TestCIRequiredSkipsPushOnlyCoverageJobs`, and the CI policy hash checks all pass. |
-| 3 | Tests pass | **HOLD** | Full local suite and policy evidence passes after attribution, with every diff-owned test green. Criterion 3c remains undecidable until the modified CI graph completes its first real PR run; see details below. |
+| 3 | Tests pass | PASS | Full local suite and policy evidence passes after attribution, with every diff-owned test green. The modified CI graph's first current-main PR run also completed successfully; see details below. |
 | 4 | No unresolved HIGH review findings | PASS | Reviewer recorded no blockers or high-severity findings. One grammar nit was explicitly non-blocking. |
 | 5 | Final branch clean | PASS | Candidate was clean at the reviewed SHA before branch creation; `git diff --check origin/main...HEAD` and changed-file formatting both pass. |
 | 6 | Branch diverges cleanly from main | PASS | Re-evaluated after main advanced: `git merge-tree --write-tree origin/main ad8bb5128cb5db3b229902a3e14369aae3a9c3c8` exited 0 and produced tree `fa0b8659a0ef47869cb32eb28c5a9d7eeab818e8`; no self-rebase was needed. |
@@ -54,6 +54,6 @@ Tracker sightings were appended and read back for this run. Because each attribu
 
 ### CI-config lane evidence
 
-`ci_lane_run: not-yet-run`
+`ci_lane_run: https://github.com/gastownhall/gascity/actions/runs/34635169817 — PASS`
 
-This diff modifies `.github/workflows/ci.yml` and the `ci-required` dependency list. Draft PR #6286's first pull-request run recorded both push-only coverage jobs as expected `skipped`; the modified `ci-required` roll-up has not yet completed. The gate remains HOLD until a synchronized run against current main proves that the roll-up consumes those expected skips and finishes successfully. Do not publish `release-gate/deploy-clearance` or route a merge request while this gate remains HOLD.
+This diff modifies `.github/workflows/ci.yml` and the `ci-required` dependency list. Draft PR #6286's synchronized run against current main completed successfully at head `74340bd923780359a1ea70092dc8e50e9118c5ff`. The real graph recorded both push-only coverage jobs as expected `skipped`, then completed [`CI / preflight`](https://github.com/gastownhall/gascity/actions/runs/34635169817/job/103382798382), [`CI / integration`](https://github.com/gastownhall/gascity/actions/runs/34635169817/job/103383151968), and the modified final [`CI / required`](https://github.com/gastownhall/gascity/actions/runs/34635169817/job/103383259962) roll-up with `success`.
