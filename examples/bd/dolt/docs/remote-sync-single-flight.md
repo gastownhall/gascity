@@ -23,7 +23,9 @@ keeps the lock until it finishes or is killed. The statement also prints its own
 connection id first and runs with `--use-db`, so when the client bound expires
 (exit 124, or 137 when GNU timeout had to escalate to SIGKILL) the script
 `KILL`s exactly that server-side session and proves it gone with a second
-processlist read (a session still listed is reported as NOT killed).
+processlist read (a session still listed is reported as NOT killed; a client
+that never learned its id kills nothing and names the sessions for the
+operator). Database names are compared and locked case-insensitively.
 `gc dolt health` adds one `WARN` line, and a `fetch_sessions` block in its
 JSON report, when more than `GC_DOLT_HEALTH_MAX_FETCH_SESSIONS` (default 2)
 such sessions are in flight server-wide; leftovers from runs older than this

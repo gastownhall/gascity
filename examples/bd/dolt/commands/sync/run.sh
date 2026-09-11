@@ -547,7 +547,7 @@ sync_database_sql() {
       # client died and whose session still runs. The server refused ours
       # before the CALL; nothing to kill.
       rm -f "$fetch_err_tmp"
-      echo "  $name: fetch already in flight — the server refused a second one (session lock gc_remote_op:$name held) — skipped (NOT pushed)" >&2
+      echo "  $name: fetch already in flight — the server refused a second one (session lock $(remote_op_lock_name "$name") held) — skipped (NOT pushed)" >&2
       return 1
     elif [ "$fetch_rc" -ne 0 ] && { grep -q "no branches found in remote" "$fetch_err_tmp" 2>/dev/null || grep -q "invalid ref spec" "$fetch_err_tmp" 2>/dev/null; }; then
       # The remote has no such branch: an empty remote ("no branches found in

@@ -636,13 +636,16 @@ func TestSyncFetchInFlightSkipsNeverFetches(t *testing.T) {
 	if !strings.Contains(out, "app: fetch already in flight for 7200s (session 42)") || !strings.Contains(out, "NOT pushed") {
 		t.Fatalf("expected the in-flight skip line naming the oldest session's age and id.\nout:\n%s", out)
 	}
-	if !strings.Contains(log, "db = 'app'") {
-		t.Fatalf("the single-flight check must be scoped to this database.\nlog:\n%s", log)
+	// Scoped to this database, case-insensitively: Dolt resolves `app` and
+	// `APP` to one database and the processlist shows the client's spelling.
+	if !strings.Contains(log, "LOWER(db) = LOWER('app')") {
+		t.Fatalf("the single-flight check must be scoped to this database, case-insensitively.\nlog:\n%s", log)
 	}
 	// The predicate is a REGEXP on the statement text (whitespace, comments,
-	// case), not a LIKE prefix: `CALL  DOLT_FETCH`, `/* x */ CALL DOLT_PULL(`
-	// and `call dolt_fetch(` are all in flight (verified on Dolt 2.1.10).
-	if !strings.Contains(log, "UPPER(Info) REGEXP '") || !strings.Contains(log, `CALL\\s+DOLT_(FETCH|PULL)\\s*\\(`) {
+	// case, backticks, a db qualifier), not a LIKE prefix: `CALL  DOLT_FETCH`,
+	// `/* x */ CALL DOLT_PULL(`, `call dolt_fetch(`, `CALL \`dolt_fetch\`(` and
+	// `CALL app.DOLT_FETCH(` are all in flight (verified on Dolt 2.1.10).
+	if !strings.Contains(log, "UPPER(Info) REGEXP '") || !strings.Contains(log, "`?DOLT_(FETCH|PULL)`?") {
 		t.Fatalf("the in-flight predicate must be the REGEXP on UPPER(Info).\nlog:\n%s", log)
 	}
 }
@@ -730,10 +733,11 @@ func TestSyncFetchTimeoutKillNotConfirmedReportsStillInFlight(t *testing.T) {
 }
 
 // No connection id captured (the client died before the server answered):
-// every in-flight remote operation attributed to the db is ended — the
-// single-flight check found none before ours started, so each is ours or a
-// concurrent runner's that raced the same window, and none may survive.
-func TestSyncFetchTimeoutWithoutIDKillsEveryAttributedSession(t *testing.T) {
+// nothing is KILLed. Absence from the earlier processlist read does not prove
+// that a session listed now is ours (an operator's unattributed pull for
+// another database can appear in the same window), so the in-flight sessions
+// attributed to the db are reported for the operator and the run fails.
+func TestSyncFetchTimeoutWithoutIDKillsNothingAndReportsUnproven(t *testing.T) {
 	binDir := t.TempDir()
 	logPath := writeSyncFakeDoltFetchTimeoutKill(t, binDir, "", []string{"88,61,app", "89,5,"}, false)
 	out := runFFSync(t, binDir, "--db", "app")
@@ -741,13 +745,12 @@ func TestSyncFetchTimeoutWithoutIDKillsEveryAttributedSession(t *testing.T) {
 	if pushed(log) {
 		t.Fatalf("a fetch timeout must NEVER push.\nout:\n%s", out)
 	}
-	for _, id := range []string{"88", "89"} {
-		if !strings.Contains(log, "KILL "+id) {
-			t.Fatalf("session %s must be KILLed.\nlog:\n%s", id, log)
-		}
-		if !strings.Contains(out, "server-side fetch killed (session "+id+" no longer in flight)") {
-			t.Fatalf("expected the kill line for session %s.\nout:\n%s", id, out)
-		}
+	if strings.Contains(log, "KILL ") {
+		t.Fatalf("without a session id, ownership is unproven: nothing may be KILLed.\nlog:\n%s", log)
+	}
+	want := "app: server-side fetch NOT killed: this client never learned its session id, and ownership of the in-flight session(s) attributed to app (Id 88 89) cannot be proven"
+	if !strings.Contains(out, want) {
+		t.Fatalf("expected %q\nout:\n%s", want, out)
 	}
 }
 
@@ -796,7 +799,9 @@ func TestSyncFetchIsAttributedAndSelfIdentifying(t *testing.T) {
 // assertGateBeforeCall pins the batch shape `… CONNECTION_ID() … GET_LOCK('gc_remote_op:<db>', 0) … CALL …`.
 func assertGateBeforeCall(t *testing.T, line, db, call string) {
 	t.Helper()
-	gate := "GET_LOCK('gc_remote_op:" + db + "', 0)"
+	// The lock name is lowercased on the server: `app` and `APP` are one
+	// database and must be one lock.
+	gate := "GET_LOCK(CONCAT('gc_remote_op:', LOWER('" + db + "')), 0)"
 	idAt, gateAt, callAt := strings.Index(line, "SELECT CONNECTION_ID() AS id;"), strings.Index(line, gate), strings.Index(line, call)
 	if idAt < 0 || gateAt < 0 || callAt < 0 || (idAt >= gateAt || gateAt >= callAt) {
 		t.Fatalf("the batch must be id, then the GET_LOCK gate, then the CALL.\nline: %s", line)
@@ -810,15 +815,24 @@ func assertGateBeforeCall(t *testing.T, line, db, call string) {
 // a truncated line) is a session whose state is unknown: the whole answer is
 // refused and the fetch skipped, fail closed — never "nothing in flight".
 func TestSyncProcesslistMalformedRowSkips(t *testing.T) {
-	binDir := t.TempDir()
-	logPath := writeSyncFakeDoltProcesslist(t, binDir, "printf 'Id,Time,db\\n42,NULL,app\\n' ; exit 0")
-	out := runFFSync(t, binDir, "--db", "app")
-	log := readLog(t, logPath)
-	if fetched(log) || pushed(log) {
-		t.Fatalf("a malformed processlist row must skip without fetching or pushing.\nout:\n%s\nlog:\n%s", out, log)
-	}
-	if !strings.Contains(out, "processlist query failed") || !strings.Contains(out, "malformed processlist row") {
-		t.Fatalf("expected the malformed-row skip line.\nout:\n%s", out)
+	for _, row := range []string{
+		`42,NULL,app`,    // a NULL Time
+		`"12,34",60,app`, // a quoted field that field-splitting would read as Id 12, Time 34
+		`"4""2",60,app`,  // a quoted, escaped Id
+		`42`,             // a truncated line
+		`abc,60,app`,     // a non-numeric Id
+		` 42,60,app`,     // leading whitespace
+	} {
+		binDir := t.TempDir()
+		logPath := writeSyncFakeDoltProcesslist(t, binDir, "printf 'Id,Time,db\\n"+strings.ReplaceAll(row, `"`, `\"`)+"\\n' ; exit 0")
+		out := runFFSync(t, binDir, "--db", "app")
+		log := readLog(t, logPath)
+		if fetched(log) || pushed(log) {
+			t.Fatalf("row %q: a malformed processlist row must skip without fetching or pushing.\nout:\n%s\nlog:\n%s", row, out, log)
+		}
+		if !strings.Contains(out, "processlist query failed") || !strings.Contains(out, "malformed processlist row") {
+			t.Fatalf("row %q: expected the malformed-row skip line.\nout:\n%s", row, out)
+		}
 	}
 }
 

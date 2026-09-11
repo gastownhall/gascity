@@ -251,7 +251,7 @@ pull_database_sql() {
   fi
   if remote_op_gate_refused "$pull_err_tmp"; then
     rm -f "$pull_err_tmp"
-    echo "  $name: pull already in flight — the server refused a second one (session lock gc_remote_op:$name held) — skipped" >&2
+    echo "  $name: pull already in flight — the server refused a second one (session lock $(remote_op_lock_name "$name") held) — skipped" >&2
     return 1
   fi
 

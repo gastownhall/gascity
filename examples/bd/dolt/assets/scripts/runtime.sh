@@ -331,22 +331,28 @@ dolt_sql_csv() {
 # validated by the caller before it is interpolated): the sessions attributed
 # to that database PLUS the sessions attributed to no database at all — an
 # unattributed fetch (issued without --use-db: an older gc dolt sync, or an
-# operator) may be this database's, so it counts, fail closed. Without DB:
+# operator) may be this database's, so it counts, fail closed. Database names
+# compare case-insensitively (Dolt resolves `app` and `APP` to one database;
+# the processlist shows whichever spelling the client used). Without DB:
 # every such session on the server (the health probe).
 # REMOTE_OP_INFO_REGEXP — the SQL REGEXP (ICU, applied to UPPER(Info)) that
 # recognizes a running CALL DOLT_FETCH / CALL DOLT_PULL however it was typed:
-# leading whitespace, block or line comments, any whitespace between CALL and
-# the procedure name and before the paren. DOLT_PUSH, DOLT_FETCHX and the text
-# inside a string literal do not match. Backslashes are doubled for the SQL
-# string literal. The block-comment form `/\*([^*]|\*+[^*/])*\*+/` accepts
-# `/***/`, `/* **/` and `/* a * b */`. Verified on Dolt 2.1.10 (evidence 04b
-# and 04c-G: 7 + 9 variants hit, 5 + 4 decoys miss).
-REMOTE_OP_INFO_REGEXP='^\\s*((/\\*([^*]|\\*+[^*/])*\\*+/|--[^\\n]*\\n)\\s*)*CALL\\s+DOLT_(FETCH|PULL)\\s*\\('
+# whitespace or comments (block `/* … */` including `/***/`, line `-- …`)
+# before CALL, between CALL and the procedure, and before the paren; the
+# procedure name bare, backticked, or qualified by one database name
+# (`CALL app.DOLT_FETCH(`, `CALL \`dolt_fetch\`(` — both valid Dolt syntax).
+# DOLT_PUSH, DOLT_FETCHX, CALLDOLT_FETCH and the text inside a string literal
+# or a comment do not match. Backslashes are doubled for the SQL string
+# literal. Verified on Dolt 2.1.10 (evidence 04b, 04c-G, 04d: 9 spellings hit,
+# 6 decoys miss).
+_ws='(\\s|/\\*([^*]|\\*+[^*/])*\\*+/|--[^\\n]*\\n)'
+REMOTE_OP_INFO_REGEXP='^'"$_ws"'*CALL'"$_ws"'+(`?[A-Z0-9_]+`?'"$_ws"'*\\.'"$_ws"'*)?`?DOLT_(FETCH|PULL)`?'"$_ws"'*\\('
+unset _ws
 
 remote_op_sessions_sql() {
   _ros_q="SELECT Id, Time, COALESCE(db, '') AS db FROM information_schema.processlist WHERE UPPER(Info) REGEXP '$REMOTE_OP_INFO_REGEXP'"
   if [ -n "${1:-}" ]; then
-    _ros_q="$_ros_q AND (db = '$1' OR db = '' OR db IS NULL)"
+    _ros_q="$_ros_q AND (LOWER(db) = LOWER('$1') OR db = '' OR db IS NULL)"
   fi
   printf '%s ORDER BY Time DESC, Id ASC' "$_ros_q"
 }
@@ -354,10 +360,12 @@ remote_op_sessions_sql() {
 # remote_op_sessions_parse — stdin: the CSV answer to remote_op_sessions_sql;
 # stdout: one `Id Time` line per session. Returns 1 when the first line is not
 # the `Id,Time,db` header (an empty stdout, a banner or an error text is NOT a
-# processlist answer), 2 when a non-blank row does not carry an all-digit Id
-# and Time (a NULL, a truncated line, a wrapper's noise). Neither may ever be
-# read as "nothing in flight": a malformed row is a session whose state is
-# unknown, so the whole answer is refused, fail closed.
+# processlist answer), 2 when a non-blank row does not START with an unquoted
+# all-digit Id and Time (`12,34,…`): a NULL, a truncated line, a wrapper's
+# noise, or a quoted field (`"12,34",60,app`) that field-splitting would read
+# as two numbers. Neither may ever be read as "nothing in flight": a
+# malformed row is a session whose state is unknown, so the whole answer is
+# refused, fail closed.
 remote_op_sessions_parse() {
   awk -F, '
     NR == 1 {
@@ -368,9 +376,8 @@ remote_op_sessions_parse() {
     }
     /^[[:space:]]*$/ { next }
     {
-      gsub(/"|\r/, "", $1)
-      gsub(/"|\r/, "", $2)
-      if ($1 !~ /^[0-9]+$/ || $2 !~ /^[0-9]+$/) { bad = 1; exit 2 }
+      sub(/\r$/, "")
+      if ($0 !~ /^[0-9]+,[0-9]+,/) { bad = 1; exit 2 }
       print $1, $2
     }
     END { if (NR == 0) exit 1; if (bad) exit 2 }
@@ -421,13 +428,17 @@ remote_op_session_id() {
 # expired, and PROVE it ended. SESSION_ID is the connection id the statement
 # printed about itself before the procedure started: the session is ours by
 # construction. An empty SESSION_ID (the client died before the server
-# answered) falls back to every in-flight remote operation attributed to DB:
-# the single-flight check found none before ours started, so each one is ours
-# or a concurrent runner's that raced the same window, and none may survive.
-# The verdict is the processlist read AFTER the KILL, never KILL's own exit
-# code: a session still listed is reported as NOT killed and returns 1. LABEL
-# names the operation in the lines ("fetch" / "pull"); every line goes to
-# stderr next to the timeout line it resolves.
+# answered) kills NOTHING: absence from the earlier processlist read does not
+# prove that a session listed now is ours (an operator's unattributed pull
+# for another database can appear in the same window), so the in-flight
+# sessions attributed to DB are reported for the operator and 1 is returned;
+# a session of ours that does exist holds the database's lock, so every later
+# run is refused by the server gate until it ends or is KILLed by hand, and
+# gc dolt health names it. The verdict for a known id is the processlist read
+# AFTER the KILL, never KILL's own exit code: a session still listed is
+# reported as NOT killed and returns 1. LABEL names the operation in the
+# lines ("fetch" / "pull"); every line goes to stderr next to the timeout
+# line it resolves.
 kill_remote_op_session() {
   _kr_label="$1"
   _kr_db="$2"
@@ -448,12 +459,14 @@ kill_remote_op_session() {
       rm -f "$_kr_errf"
       return 1
     }
-    _kr_ids=$(printf '%s\n' "$_kr_rows" | awk '{ print $1 }')
-    if [ -z "$_kr_ids" ]; then
-      rm -f "$_kr_errf"
+    _kr_listed=$(printf '%s\n' "$_kr_rows" | awk '{ printf "%s%s", sep, $1; sep = " " }')
+    rm -f "$_kr_errf"
+    if [ -z "$_kr_listed" ]; then
       echo "  $_kr_db: server-side $_kr_label already ended (nothing in flight to kill)" >&2
       return 0
     fi
+    echo "  $_kr_db: server-side $_kr_label NOT killed: this client never learned its session id, and ownership of the in-flight session(s) attributed to $_kr_db (Id $_kr_listed) cannot be proven — left for the operator (KILL <Id>); gc dolt health names them" >&2
+    return 1
   fi
   for _kr_one in $_kr_ids; do
     _kr_krc=0
@@ -525,10 +538,19 @@ bound_expired() {
 # the gate passes again; an 80-character lock name is accepted.
 REMOTE_OP_GATE_MARK='gc-remote-op-lock-held'
 
+# remote_op_lock_name DB — the user-level lock name for DB, `gc_remote_op:<db>`
+# with the name lowercased: Dolt resolves `app` and `APP` to one database, and
+# a named lock is a literal key, so two spellings must map to one lock. The
+# gate lowercases on the server (LOWER) and this helper does the same for the
+# lines the scripts print.
+remote_op_lock_name() {
+  printf 'gc_remote_op:%s' "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+}
+
 # remote_op_gate_sql DB — the gate statement for DB (DB already validated by
 # the caller before it is interpolated).
 remote_op_gate_sql() {
-  printf "SELECT IF(GET_LOCK('gc_remote_op:%s', 0) = 1, 1, JSON_EXTRACT('%s', '\$')) AS gate" "$1" "$REMOTE_OP_GATE_MARK"
+  printf "SELECT IF(GET_LOCK(CONCAT('gc_remote_op:', LOWER('%s')), 0) = 1, 1, JSON_EXTRACT('%s', '\$')) AS gate" "$1" "$REMOTE_OP_GATE_MARK"
 }
 
 # remote_op_gate_refused STDERR_FILE — true when the captured dolt stderr says
