@@ -145,6 +145,12 @@ func runControlDispatcher(beadID string, stdout, stderr io.Writer) error {
 	return runControlDispatcherWithStore(cityPath, storePath, store, beadID, stdout, stderr)
 }
 
+// openControlStoreForDispatch is the test seam for the scope-store open in
+// runControlDispatcherInStore, following the package's var-seam idiom (cf.
+// controlDispatcherServe, dispatch_runtime.go). Production always uses
+// openControlStoreAtForCity.
+var openControlStoreForDispatch = openControlStoreAtForCity
+
 func runControlDispatcherInStore(cityPath, storePath, beadID string, stdout, stderr io.Writer) error {
 	if cityPath == "" {
 		var err error
@@ -162,10 +168,23 @@ func runControlDispatcherInStore(cityPath, storePath, beadID string, stdout, std
 		return err
 	}
 	resolveRigPaths(cityPath, cfg.Rigs)
-	store, err := openControlStoreAtForCity(storePath, cityPath, cfg)
+	store, err := openControlStoreForDispatch(storePath, cityPath, cfg)
 	if err != nil {
 		return fmt.Errorf("opening scoped control store %q: %w", storePath, err)
 	}
+	// The whole dispatch below is synchronous — ProcessControl's closures
+	// (RecycleSession, MemberStores, EmitCurrent) all run before it returns and
+	// nothing retains store past this call — so releasing the scope handle we
+	// just opened at return is safe and stops leaking one bd/Dolt store (and its
+	// connections) per control bead processed by the serve loop. When the graph
+	// class relocated, the graph store is a different, process-shared value that
+	// controlBeadLedger resolves separately; we close only store, the work leg we
+	// opened here.
+	defer func() {
+		if cerr := closeBeadStoreHandle(store); cerr != nil {
+			fmt.Fprintf(stderr, "warning: control dispatch: closing scope store %q: %v\n", storePath, cerr) //nolint:errcheck // dispatch outcome is preserved
+		}
+	}()
 
 	return runControlDispatcherWithStoreAndConfig(cityPath, storePath, store, beadID, cfg, stdout, stderr)
 }

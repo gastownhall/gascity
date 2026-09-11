@@ -414,6 +414,12 @@ var controlReadyCacheRegistry = struct {
 	byDir map[string]*controlReadyCacheEntry
 }{byDir: make(map[string]*controlReadyCacheEntry)}
 
+// controlReadyCacheEntry holds a primed snapshot per leg for one scope dir.
+// Its backing stores are closed the instant PrimeActive returns (see
+// controlReadyCachesFor), so an entry is a set of CLOSED-backing snapshots: it
+// may only be read through CachingStore.CachedReady, which answers entirely from
+// the in-memory snapshot. Any read that would need to touch the backing must
+// decline to controlReadyFallbackReady instead of consulting a closed handle.
 type controlReadyCacheEntry struct {
 	caches   []*beads.CachingStore
 	primedAt time.Time
@@ -453,7 +459,11 @@ type controlReadyCacheEntry struct {
 // common (e.g. a restart handoff window), but the control-dispatcher serve
 // loop's typical call pattern is sequential-per-tick per dir. Note the entries
 // are keyed by scope dir, so on a split city every rig dispatcher primes the
-// shared city binding independently (ga-n6gnr).
+// shared city binding independently (ga-n6gnr). That race stays safe under the
+// per-prime close below: each caller closes only the scoped backing IT opened,
+// and the registry loser's CachingStores are pure in-memory snapshots
+// (CachedReady never touches a backing), so an overwritten entry is never a
+// use-after-close.
 func controlReadyCachesFor(dir, cityPath string, cfg *config.City) []*beads.CachingStore {
 	controlReadyCacheRegistry.mu.Lock()
 	entry, ok := controlReadyCacheRegistry.byDir[dir]
@@ -463,10 +473,29 @@ func controlReadyCachesFor(dir, cityPath string, cfg *config.City) []*beads.Cach
 		return entry.caches
 	}
 
-	sources, err := controlReadyCacheSources(dir, cityPath, cfg)
+	sources, owned, err := controlReadyCacheSourcesFn(dir, cityPath, cfg)
 	if err != nil {
 		return nil
 	}
+	// Release the scoped backing handles the instant the snapshot is fully in
+	// memory. NewCachingStore is passive here (nil onChange, StartReconciler is
+	// never called) and CachedReady serves entirely from the primed in-memory
+	// snapshot without touching the backing, so the backing only has to be open
+	// for the PrimeActive scan itself. Closing it per prime keeps each prime's
+	// read mark on the shared graph binding's WAL short-lived instead of held by
+	// a leaked handle until *sql.DB GC-finalize -- the leak that let the WAL grow
+	// unbounded because a passive checkpoint can never truncate past a live read
+	// mark. This defer fires on BOTH the prime-failure early return and the
+	// success path, so a prime that fails partway still closes whatever it
+	// opened. Only owned legs are closed; the graph binding is process-shared
+	// (see controlReadyCacheSources).
+	defer func() {
+		for _, s := range owned {
+			if err := closeBeadStoreHandle(s); err != nil {
+				log.Printf("control-ready cache: closing primed scope store for %s: %v", dir, err)
+			}
+		}
+	}()
 	caches := make([]*beads.CachingStore, 0, len(sources))
 	for _, source := range sources {
 		cs := beads.NewCachingStore(source, nil)
@@ -486,21 +515,38 @@ func controlReadyCachesFor(dir, cityPath string, cfg *config.City) []*beads.Cach
 // controlReadyCacheSources returns the ordered ledgers to snapshot, applying the
 // same routing rule as controlReadyFallbackReady so the cached answer and the
 // fallback answer cannot disagree about which stores hold this scope's queue.
-func controlReadyCacheSources(dir, cityPath string, cfg *config.City) ([]beads.Store, error) {
+//
+// owned is the subset of sources this call constructed and is therefore
+// responsible for closing once the snapshot has been primed into memory. It is
+// deliberately NOT every source. The graph-class binding legs
+// (controlGraphBinding / controlGraphExtraLeg) resolve through the per-city
+// cliStorageRoutes memo, so the binding store is process-shared and closed only
+// by closeCLIStorageRoutes at process exit; CloseStore is a one-way latch, so
+// closing a binding leg here would poison every later graph-class read and write
+// in the process with ErrStoreClosed. Only the scoped leg
+// (openControlStoreAtForCity) is freshly constructed per call, so only it is
+// returned as owned.
+func controlReadyCacheSources(dir, cityPath string, cfg *config.City) (sources, owned []beads.Store, err error) {
 	// A relocated CITY scope does not open its scope store at all — that would
-	// be a bd process this scan never reads.
+	// be a bd process this scan never reads. The binding is process-shared, so
+	// nothing here owns it.
 	if binding, relocated := controlGraphBinding(cityPath, dir); relocated {
-		return []beads.Store{binding}, nil
+		return []beads.Store{binding}, nil, nil
 	}
 	scoped, err := openControlStoreAtForCity(dir, cityPath, cfg)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if binding, federated := controlGraphExtraLeg(cityPath, dir); federated {
-		return []beads.Store{scoped, binding}, nil
+		return []beads.Store{scoped, binding}, []beads.Store{scoped}, nil
 	}
-	return []beads.Store{scoped}, nil
+	return []beads.Store{scoped}, []beads.Store{scoped}, nil
 }
+
+// controlReadyCacheSourcesFn is the test seam for controlReadyCacheSources,
+// following the package's own var-seam idiom (cf. controlDispatcherServe,
+// dispatch_runtime.go). Production always uses controlReadyCacheSources.
+var controlReadyCacheSourcesFn = controlReadyCacheSources
 
 // cachedControlReadyUnion merges the cached ready sets, requiring EVERY leg to
 // answer from cache. A leg that is dirty or still priming sends the whole scan
