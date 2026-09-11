@@ -297,6 +297,12 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		"GC_ALIAS":            qualifiedName,
 		"GC_DIR":              workDir,
 		"GC_BEADS_SCOPE_ROOT": p.cityPath,
+		// Demand markers are session-specific. Pin them empty for ordinary
+		// sessions so a reused process or tmux server cannot make a no-trigger
+		// seat look demand-spawned; resolveTemplateForSessionBeadInfo writes
+		// the real values afterward for an actual demand trigger.
+		"GC_SPAWN_ORIGIN":         "",
+		"GC_TRIGGER_WORK_BEAD_ID": "",
 		// Explicit empty values matter here. tmux session creation uses `env -u`
 		// only for keys present with empty strings, which prevents stale rig
 		// scope from leaking out of the tmux server's inherited environment.
