@@ -557,12 +557,7 @@ func TestCatalogBindsFakeAndBothSubprocessConstructors(t *testing.T) {
 				}
 				subprocessDefaultProof = claim.Proof
 			}
-			// internal/runtime/acp.NewSeamBacked is deliberately owned by
-			// ga-uz5t3a, not the shared runtimeContractWaiverOwner — see
-			// TestCatalogBindsACPWithDirAndDefersDefaultConstructor.
-			isACPDefaultDirWaiver := entry.ID == "runtime.builtin.acp" &&
-				claim.Constructor == repoSymbol("internal/runtime/acp", "NewSeamBacked")
-			if claim.Waiver != nil && !isACPDefaultDirWaiver && claim.Waiver.Owner != runtimeContractWaiverOwner {
+			if claim.Waiver != nil && claim.Waiver.Owner != runtimeContractWaiverOwner {
 				t.Errorf("waiver owner drifted from runtimeContractWaiverOwner: got %q on %s", claim.Waiver.Owner, renderSymbolRef(claim.Constructor))
 			}
 		}
@@ -629,15 +624,8 @@ func TestCatalogBindsACPWithDirAndDefersDefaultConstructor(t *testing.T) {
 	if defaultWaiver == nil {
 		t.Fatal("acp.NewSeamBacked waiver is missing")
 	}
-	// Owned by ga-uz5t3a (successor to the lost ga-80po0c.3), not the shared
-	// runtimeContractWaiverOwner: this gap has its own tracking bead.
-	const wantOwner = "ga-uz5t3a"
-	if defaultWaiver.Owner != wantOwner {
-		t.Errorf("ACP default waiver owner = %q, want %q", defaultWaiver.Owner, wantOwner)
-	}
-	wantExpires := time.Date(2026, time.September, 11, 0, 0, 0, 0, time.UTC)
-	if !defaultWaiver.Expires.Equal(wantExpires) {
-		t.Errorf("ACP default waiver expires = %v, want %v", defaultWaiver.Expires, wantExpires)
+	if defaultWaiver.Owner != runtimeContractWaiverOwner {
+		t.Errorf("ACP default waiver = %+v, want %s ownership", defaultWaiver, runtimeContractWaiverOwner)
 	}
 	// The default constructor now has its own direct proof attempt
 	// (TestACPDefaultDirConformance); the reason must point to that gap
@@ -1704,7 +1692,7 @@ func TestCatalogReturnsIndependentEntries(t *testing.T) {
 	if got := second[0].Claims[0].Proof.AllowedCalls[0].Name; got != "Sprintf" {
 		t.Errorf("Catalog() proof allowed call leaked mutation: %q", got)
 	}
-	if second[3].Claims[0].Waiver.Owner != "ga-uz5t3a" {
+	if second[3].Claims[0].Waiver.Owner != runtimeContractWaiverOwner {
 		t.Errorf("Catalog() waiver leaked mutation: %q", second[3].Claims[0].Waiver.Owner)
 	}
 	if second[len(second)-1].Source.Function != "resolveSessionTransportProvider" {

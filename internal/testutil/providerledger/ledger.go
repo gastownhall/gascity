@@ -184,29 +184,19 @@ func Catalog() []Entry {
 		),
 		builtin(
 			"acp", "exact:acp", nil,
-			// Hand-built rather than waivedRuntime(...): this gap is owned by
-			// ga-uz5t3a (successor to the lost ga-80po0c.3), not the shared
-			// runtimeContractWaiverOwner — TestEveryWaiverNamesAnOwner only
-			// requires a well-formed bead id per claim, not a uniform one.
-			ContractClaim{
-				Constructor: repoSymbol("internal/runtime/acp", "NewSeamBacked"),
-				Contract:    ContractRuntimeProvider,
-				Disposition: DispositionWaived,
-				Waiver: &Waiver{
-					Owner:   "ga-uz5t3a",
-					Expires: time.Date(2026, time.September, 11, 0, 0, 0, 0, time.UTC),
-					Reason: "TestACPDefaultDirConformance (internal/runtime/acp/conformance_test.go) now calls " +
-						"NewSeamBacked directly through runtimetest.RunProviderTests with no dir injection, reusing " +
-						"the fakeacp fixture; verified clean on Linux as of 2026-08-27 (single run, count=3 repeated, " +
-						"-race, and two concurrent OS-process runs against the shared default euid-scoped directory). " +
-						"The one remaining proof capability is a clean Darwin-lane run: ga-csh74h (Mac CI fleet-wide " +
-						"broken — setup-gascity-macos's go-version default is stale against go.mod's `go 1.26.6` " +
-						"requirement, failing mac-quality and skipping every downstream job including the " +
-						"packages-core shard this test would run in) currently blocks that evidence. Promote to " +
-						"proved once ga-csh74h is fixed and a clean Darwin run of TestACPDefaultDirConformance is " +
-						"recorded.",
-				},
-			},
+			waivedRuntime(
+				repoSymbol("internal/runtime/acp", "NewSeamBacked"),
+				time.Date(2026, time.October, 8, 0, 0, 0, 0, time.UTC),
+				"TestACPDefaultDirConformance (internal/runtime/acp/conformance_test.go) calls "+
+					"NewSeamBacked directly through runtimetest.RunProviderTests with no dir injection, reusing "+
+					"the fakeacp fixture; verified clean on Linux (single run, -count=3 repeated, -race, and two "+
+					"concurrent OS-process runs against the shared default euid-scoped directory). The one "+
+					"remaining proof capability is a clean Darwin-lane run: ga-csh74h (Mac CI fleet-wide broken — "+
+					"setup-gascity-macos's go-version default is stale against go.mod's `go 1.26.6` requirement, "+
+					"failing mac-quality and skipping every downstream job including the packages-core shard "+
+					"this test would run in) currently blocks that evidence. Promote to proved once ga-csh74h "+
+					"is fixed and a clean Darwin run of TestACPDefaultDirConformance is recorded.",
+			),
 			provedRuntime(
 				repoSymbol("internal/runtime/acp", "NewSeamBackedWithDir"),
 				"internal/runtime/acp/conformance_test.go",
