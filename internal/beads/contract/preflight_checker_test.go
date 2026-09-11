@@ -648,6 +648,127 @@ func TestPreflightBlocksOnRealVersionSkew(t *testing.T) {
 	}
 }
 
+// TestCheckVersionCompatSemverCompatibleNewerBD verifies that a bd release
+// newer than the linked beads library — but semver-compatible with it (same
+// major version, not older) — passes instead of failing an exact-string
+// compare. This is the common Homebrew case: gascity's go.mod pins one beads
+// release, but the `gascity` formula's unversioned `depends_on "beads"`
+// installs whatever is current, which drifts ahead over time
+// (gastownhall/gascity#5164). A differing major version, or an older bd, is
+// still not assumed compatible.
+func TestCheckVersionCompatSemverCompatibleNewerBD(t *testing.T) {
+	validCtx := func(bdVersion string) PreflightBDContext {
+		return PreflightBDContext{Backend: "dolt", DoltMode: "server", BDVersion: bdVersion, SchemaVersion: 50}
+	}
+	tests := []struct {
+		name       string
+		libVersion string
+		ctx        PreflightBDContext
+		want       PreflightCheckState
+	}{
+		{"newer patch, same major.minor — pass", "1.1.0", validCtx("1.1.2"), PreflightCheckPass},
+		{"newer minor, same major — pass", "1.1.0", validCtx("1.2.0"), PreflightCheckPass},
+		{"newer major — still fails, majors are not semver-compatible", "1.1.0", validCtx("2.0.0"), PreflightCheckFail},
+		{"older patch — still fails", "1.1.2", validCtx("1.1.0"), PreflightCheckFail},
+		{"older major — still fails", "2.0.0", validCtx("1.9.9"), PreflightCheckFail},
+		{"v-prefixed newer patch — pass", "v1.1.0", validCtx("v1.1.2"), PreflightCheckPass},
+		{"non-semver bd version — falls back to exact match, fails", "1.1.0", validCtx("not-a-version"), PreflightCheckFail},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := PreflightChecker{BeadsLibraryVersion: tt.libVersion}
+			got := c.checkVersionCompat(tt.ctx, nil)
+			if got.State != tt.want {
+				t.Fatalf("state = %q, want %q (summary: %q)", got.State, tt.want, got.Summary)
+			}
+		})
+	}
+}
+
+// TestCheckVersionCompatSamePrereleaseSeries pins the second widening, added
+// during the beads v1.3.0-rc.2 pin bump. gascity's own anchors are not split --
+// go.mod and deps.env BD_VERSION are both rc.2 -- so this does not gate the
+// shipped pairing. It gates the general case: an OLDER bd against a NEWER
+// library, which newerSemverCompatibleBD refuses by design.
+//
+// For the pair this was written for that refusal is wrong: rc.1 and rc.2 embed
+// a byte-identical internal/storage/schema (LatestVersion() == 66 on both), so
+// there is no skew to catch -- a checked property of that pair, not a law of
+// RC series (see samePrereleaseSeries). Where such a pairing does occur, the
+// check would FAIL, the verdict would go BLOCKED, and every scope would
+// silently fall off the native Dolt store onto the fork-per-op BdStore -- the
+// exact degradation #5164 was fixed to prevent.
+//
+// The widening stays narrow, and the negative cases below are the point: a
+// different release's prerelease, and an RC against its own final release, must
+// still fail.
+func TestCheckVersionCompatSamePrereleaseSeries(t *testing.T) {
+	validCtx := func(bdVersion string) PreflightBDContext {
+		return PreflightBDContext{Backend: "dolt", DoltMode: "server", BDVersion: bdVersion, SchemaVersion: 66}
+	}
+	tests := []struct {
+		name       string
+		libVersion string
+		ctx        PreflightBDContext
+		want       PreflightCheckState
+	}{
+		{"older RC against newer RC of the same release — pass", "v1.3.0-rc.2", validCtx("1.3.0-rc.1"), PreflightCheckPass},
+		{"newer RC against older RC of the same release — pass", "v1.3.0-rc.1", validCtx("1.3.0-rc.2"), PreflightCheckPass},
+		{"RC against the final release it precedes — still fails", "v1.3.0", validCtx("1.3.0-rc.1"), PreflightCheckFail},
+		{"prereleases of different releases — still fails", "v1.4.0-rc.1", validCtx("1.3.0-rc.1"), PreflightCheckFail},
+		{"prereleases across majors — still fails", "v2.0.0-rc.1", validCtx("1.3.0-rc.1"), PreflightCheckFail},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := PreflightChecker{BeadsLibraryVersion: tt.libVersion}
+			got := c.checkVersionCompat(tt.ctx, nil)
+			if got.State != tt.want {
+				t.Fatalf("state = %q, want %q (summary: %q)", got.State, tt.want, got.Summary)
+			}
+		})
+	}
+}
+
+// TestPreflightEligibleOnSemverCompatibleNewerBD is the live shape from
+// gastownhall/gascity#5164: Homebrew's unversioned beads dependency installs
+// a newer bd release than gc's pinned go.mod version. Before this fix the
+// version compare was the only FAIL, dropping a healthy scope to the slow
+// per-op BdStore fallback (fork-per-op, degrading order-firing-current and
+// fork-rate) for a difference that was never actually incompatible.
+func TestPreflightEligibleOnSemverCompatibleNewerBD(t *testing.T) {
+	scope := "/city/rigs/gascity"
+	fs := fsys.NewFake()
+	fs.Dirs[filepath.Join(scope, ".beads")] = true
+	fs.Files[filepath.Join(scope, ".beads", "metadata.json")] = []byte(`{
+		"backend": "dolt",
+		"dolt_mode": "server",
+		"dolt_database": "gascity",
+		"project_id": "gc-local"
+	}`)
+	checker := PreflightChecker{
+		FS:                  fs,
+		Provider:            "bd",
+		BeadsLibraryVersion: "1.1.0",
+		BDContext: func(string) (PreflightBDContext, error) {
+			return PreflightBDContext{Backend: "dolt", DoltMode: "server", BDVersion: "1.1.2", SchemaVersion: 1}, nil
+		},
+		DatabaseProjectID: func(string) (string, bool, error) {
+			return "gc-local", true, nil
+		},
+	}
+
+	result, err := checker.Check(scope)
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+
+	assertPreflightVerdict(t, result, PreflightVerdictEligible, true)
+	assertCheckState(t, result, PreflightCheckVersionCompat, PreflightCheckPass)
+	if result.Fallback != "" {
+		t.Errorf("Fallback = %q, want empty for an eligible scope", result.Fallback)
+	}
+}
+
 // TestLinkedBeadsLibraryFromBuildInfo covers the build-info reader that feeds
 // checkVersionCompat in production. A replace directive — of either form — means
 // the recorded version does not describe the code that is actually linked.

@@ -46,7 +46,7 @@ func (s *atomicCloseMemStore) CloseWithMetadataIfMatch(id string, expectedRevisi
 	for key, value := range metadata {
 		m.beads[i].Metadata[key] = value
 	}
-	m.beads[i].Status = "closed"
+	setBeadStatus(&m.beads[i], "closed")
 	m.beads[i].UpdatedAt = time.Now()
 	m.beads[i].Revision++
 	return cloneBead(m.beads[i]), nil

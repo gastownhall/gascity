@@ -625,7 +625,7 @@ func (s *Server) humaHandleOrdersFeed(_ context.Context, input *OrdersFeedInput)
 	if err != nil {
 		return nil, apierr.Internal.Msg("workflow feed failed")
 	}
-	orderRuns, err := buildOrderRunFeedItems(s.state, scopeKind, scopeRef)
+	orderRuns, err := buildOrderRunFeedItems(s.state, scopeKind, scopeRef, limit)
 	if err != nil {
 		return nil, apierr.Internal.Msg("order feed failed")
 	}

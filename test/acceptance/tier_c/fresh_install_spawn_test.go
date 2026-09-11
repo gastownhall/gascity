@@ -263,7 +263,7 @@ func configureFreshInitClaudePool(t *testing.T, c *helpers.City) {
 		`min_active_sessions = 0`,
 		`max_active_sessions = 1`,
 	)
-	promptPath := filepath.Join(helpers.FindModuleRoot(), "internal", "bootstrap", "packs", "core", "assets", "prompts", "pool-worker.md")
+	promptPath := filepath.Join(helpers.FindModuleRoot(), "internal", "bootstrap", "packs", "core", "assets", "prompts", "pool-worker.template.md")
 	prompt, err := os.ReadFile(promptPath)
 	require.NoError(t, err, "read canonical pool-worker prompt")
 	prompt = append(prompt, []byte("\n## Acceptance Fixture\n\n"+

@@ -37,11 +37,13 @@ var instanceTokenReader = rand.Reader
 var (
 	_ runtime.Provider                      = (*Provider)(nil)
 	_ runtime.DeadRuntimeSessionChecker     = (*Provider)(nil)
+	_ runtime.EnvironmentBatchProvider      = (*Provider)(nil)
 	_ runtime.ImmediateNudgeProvider        = (*Provider)(nil)
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
 	_ runtime.ProcessTableScanner           = (*Provider)(nil)
 	_ runtime.ServerLifecycleProvider       = (*Provider)(nil)
+	_ runtime.SessionRosterProvider         = (*Provider)(nil)
 )
 
 // NewProvider returns a [Provider] backed by a real tmux installation
@@ -633,11 +635,16 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 // sessions. It mirrors the multi-backend degraded-but-usable signal that
 // [runtime.MergeBackendListResults] produces for composite providers, and is
 // the ListRunning-side analog of the StateCache liveness fix in #4082.
+//
+// The error also sets [runtime.PartialListError.ServerAbsent] so callers
+// holding independent proof of death (for example a session bead created
+// before the host booted) can distinguish "no server at all" from a server
+// that answered partially, without weakening the fail-safe for either.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	all, err := p.tm.listSessionNames()
 	if err != nil {
 		if errors.Is(err, ErrNoServer) {
-			return nil, &runtime.PartialListError{Err: fmt.Errorf("tmux server unreachable: %w", err)}
+			return nil, &runtime.PartialListError{Err: fmt.Errorf("tmux server unreachable: %w", err), ServerAbsent: true}
 		}
 		return nil, err
 	}
@@ -654,6 +661,20 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 // session. Delegates to [Tmux.GetSessionActivity].
 func (p *Provider) GetLastActivity(name string) (time.Time, error) {
 	return p.tm.GetSessionActivity(name)
+}
+
+// GetAllEnvironment returns all environment variables for a session,
+// satisfying [runtime.EnvironmentBatchProvider]. Delegates to
+// [Tmux.GetAllEnvironment].
+func (p *Provider) GetAllEnvironment(name string) (map[string]string, error) {
+	return p.tm.GetAllEnvironment(name)
+}
+
+// SessionRoster returns attributes for every session currently known to
+// tmux, satisfying [runtime.SessionRosterProvider]. Delegates to
+// [Tmux.SessionRoster].
+func (p *Provider) SessionRoster() (map[string]runtime.SessionRosterEntry, error) {
+	return p.tm.SessionRoster()
 }
 
 // ClearScrollback clears the scrollback history of the named session.

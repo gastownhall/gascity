@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/pathutil"
 	zcodeadapter "github.com/gastownhall/gascity/internal/worker/adapters/zcode"
 )
 
@@ -298,7 +299,11 @@ func (s *session) sendRaw(text string) {
 func (s *session) signal(sig syscall.Signal) {
 	s.t.Helper()
 	if err := syscall.Kill(-s.cmd.Process.Pid, sig); err != nil {
-		s.t.Fatalf("signal %v: %v", sig, err)
+		// An adapter that already died leaves a zombie process group, and
+		// signaling one reports EPERM on macOS rather than ESRCH — which reads
+		// as a permissions problem and hides the real story. Print what the
+		// adapter said before it went, which is where the cause actually is.
+		s.t.Fatalf("signal %v: %v\nadapter output so far:\n%s", sig, err, s.output())
 	}
 }
 
@@ -445,10 +450,20 @@ func (h *harness) sidPath(key string) string {
 	return filepath.Join(h.home, ".local", "state", "gascity", "zcode", "sids", key+"#"+epoch)
 }
 
-// sid reads the persisted provider session id for the harness's session key.
+// seatKey mirrors the adapter's seat key: the session name, plus the session
+// bead id when gc exported one.
+func (h *harness) seatKey() string {
+	key := h.env["GC_SESSION"]
+	if id := h.env["GC_SESSION_ID"]; id != "" {
+		key += "@" + id
+	}
+	return key
+}
+
+// sid reads the persisted provider session id for the harness's seat.
 func (h *harness) sid() string {
 	h.t.Helper()
-	data, err := os.ReadFile(h.sidPath("test-session"))
+	data, err := os.ReadFile(h.sidPath(h.seatKey()))
 	if err != nil {
 		h.t.Fatalf("read sid: %v", err)
 	}
@@ -482,7 +497,7 @@ func TestIdleSeparatedPromptsStaySeparate(t *testing.T) {
 	s.send("first prompt")
 	time.Sleep(2500 * time.Millisecond)
 	s.send("second prompt")
-	time.Sleep(2500 * time.Millisecond)
+	s.waitForTurns(2)
 	if _, code := s.closeAndWait(); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
@@ -633,7 +648,11 @@ func TestBracketedPasteWrappersAreStripped(t *testing.T) {
 }
 
 // A drain read that times out still holds whatever partial line arrived; losing
-// it silently truncates the prompt's last line.
+// it silently truncates the prompt's last line. This held only on bash >= 4
+// until the drain stopped timing a line read: bash 3.2 consumed the fragment
+// off the fd and discarded it before the script regained control. Now the
+// timer guards a one-byte read that has consumed nothing when it fires, so the
+// fragment survives on every shell and the assertion is unconditional.
 func TestDrainKeepsPartialTrailingLine(t *testing.T) {
 	t.Parallel()
 
@@ -644,7 +663,11 @@ func TestDrainKeepsPartialTrailingLine(t *testing.T) {
 	s.sendRaw("trailing line without a newline")
 	time.Sleep(2500 * time.Millisecond)
 	s.sendRaw("\n")
-	time.Sleep(2500 * time.Millisecond)
+	s.waitForTurns(1)
+	// Surviving the drain is the assertion that must hold on every platform: an
+	// unbound drain variable here killed the adapter under `set -u` on bash
+	// 3.2, which is exactly the regression this test's own shape provokes. The
+	// drain still clears its variables before every read for that reason.
 	if _, code := s.closeAndWait(); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
@@ -652,6 +675,67 @@ func TestDrainKeepsPartialTrailingLine(t *testing.T) {
 	joined := strings.Join(h.prompts(), "|")
 	if !strings.Contains(joined, "trailing line without a newline") {
 		t.Fatalf("partial trailing line was dropped; prompts = %q", h.prompts())
+	}
+}
+
+// A line whose bytes straddle the drain window must still reach the CLI whole.
+// The idle timer that closes a burst used to guard a whole-line read, and
+// `read -t` throws away everything it has already consumed when it fires: bash
+// >= 4 hands the fragment back and the loop appended it and ran the prompt
+// without its tail, bash 3.2 (stock macOS /bin/bash, and the Mac CI lane) had
+// already eaten those bytes off the fd and ran the prompt with them simply
+// gone. Both are the same defect — a prompt executed with bytes missing — and
+// this is a production defect, not a test artifact: the GLM 5.3 review arm runs
+// its prompts through this adapter (ga-fasb8).
+func TestALineSplitAcrossTheDrainWindowStaysOnePrompt(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, nil)
+	s := h.start()
+	s.sendRaw("first line\n")
+	s.sendRaw("second line, part one - ")
+	// Longer than the adapter's drain window, so the idle timer expires with
+	// the second line half delivered.
+	time.Sleep(2500 * time.Millisecond)
+	s.sendRaw("part two\n")
+	s.waitForTurns(1)
+	if _, code := s.closeAndWait(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+
+	want := "first line\nsecond line, part one - part two"
+	if got := h.prompts(); !equalStrings(got, []string{want}) {
+		t.Fatalf("prompts = %q, want %q", got, []string{want})
+	}
+}
+
+// An interrupt that lands with a half-delivered line in the adapter's hands
+// must DROP it, not run it. The signal here is followed by a stdin close, and
+// that end-of-input is what ends the read: it returns rc=1 with the partial
+// input assigned, which by status alone is indistinguishable from the
+// unterminated last line the adapter deliberately runs — so the loop has to
+// consult the INT trap, or a canceled prompt is executed with its tail
+// missing. A trapped INT on its own does not necessarily end the read: on bash
+// 5.2, if the rest of the line arrives the read resumes and completes with
+// rc=0, so this pins the end-of-input shape, which is the one that would
+// otherwise run the fragment.
+func TestInterruptWithAPartialLineInHandRunsNoPrompt(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, nil)
+	s := h.start()
+	s.waitForOutput("zcode-repl ready", adapterWaitBudget)
+	s.sendRaw("half a prompt, interrupted here")
+	// The adapter is silent while reading, so there is no lifecycle signal for
+	// "the bytes are in hand"; this gap is what puts them there.
+	time.Sleep(2500 * time.Millisecond)
+	s.signal(syscall.SIGINT)
+
+	if _, code := s.closeAndWait(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if got := h.prompts(); len(got) != 0 {
+		t.Fatalf("an interrupt-truncated fragment was executed as a prompt: %q", got)
 	}
 }
 
@@ -1017,7 +1101,12 @@ func TestExportMirrorAccumulatesTurns(t *testing.T) {
 	if export.Info.ID != "sess_mirror" {
 		t.Fatalf("info.id = %q, want sess_mirror", export.Info.ID)
 	}
-	if export.Info.Directory != h.workDir {
+	// The adapter reports the shell's $PWD, which bash derives from getcwd()
+	// because the harness hands it an env with no PWD to inherit — so it is the
+	// physical path. h.workDir is whatever t.TempDir() handed out, which on
+	// macOS is the /var symlink to the same directory. Same directory, two
+	// spellings: compare by path identity, not by string.
+	if !pathutil.SamePath(export.Info.Directory, h.workDir) {
 		t.Fatalf("info.directory = %q, want %q", export.Info.Directory, h.workDir)
 	}
 	if len(export.Messages) != 2 {
@@ -1396,14 +1485,15 @@ func (h *harness) pendingSessionID() string {
 	return "pending-" + regexp.MustCompile(`[^A-Za-z0-9._-]`).ReplaceAllString(h.epochScope(), "_")
 }
 
-// epochScope mirrors the adapter's per-epoch mirror directory, which is how a
-// conversation reset orphans the prior conversation's plaintext.
+// epochScope mirrors the adapter's per-seat, per-epoch mirror directory, which
+// is how a conversation reset orphans the prior conversation's plaintext and
+// how two seats of one session name stay apart.
 func (h *harness) epochScope() string {
 	epoch := h.env["GC_CONTINUATION_EPOCH"]
 	if epoch == "" {
 		epoch = "1"
 	}
-	return h.env["GC_SESSION"] + "#" + epoch
+	return h.seatKey() + "#" + epoch
 }
 
 func (h *harness) readExport(sessionID string) mirrorExport {
@@ -1438,4 +1528,234 @@ func equalStrings(got, want []string) bool {
 		}
 	}
 	return true
+}
+
+// extractPyFunc slices a top-level function definition out of the embedded
+// adapter script so a test can exercise it in isolation, without the script's
+// argv dispatch running. Top-level defs are separated by blank lines.
+func extractPyFunc(t *testing.T, name string) string {
+	t.Helper()
+	src := string(zcodeadapter.Script())
+	start := strings.Index(src, "\ndef "+name+"(")
+	if start < 0 {
+		t.Fatalf("function %q not found in adapter script", name)
+	}
+	start++ // step past the newline onto the def
+	body := src[start:]
+	end := strings.Index(body, "\n\ndef ")
+	if end < 0 {
+		t.Fatalf("could not bound function %q in adapter script", name)
+	}
+	return body[:end]
+}
+
+// TestLastUserTextScansBackwardForTheLastUserMessage pins the helper's
+// documented contract: it returns the text of the LAST user message anywhere in
+// the history, not only when the final message happens to be the user's. The
+// dedup guard in mode_reply relies on that backward scan to avoid re-publishing
+// a user turn mode_prompt already wrote; a version that inspects only the final
+// message returns None the moment an assistant reply sits at the tail.
+func TestLastUserTextScansBackwardForTheLastUserMessage(t *testing.T) {
+	t.Parallel()
+
+	driver := extractPyFunc(t, "last_user_text") + "\n\n" +
+		"import json, sys\n" +
+		"val = last_user_text(json.load(open(sys.argv[1])))\n" +
+		"sys.stdout.write('NONE' if val is None else val)\n"
+	driverPath := filepath.Join(t.TempDir(), "driver.py")
+	if err := os.WriteFile(driverPath, []byte(driver), 0o644); err != nil {
+		t.Fatalf("write driver: %v", err)
+	}
+
+	cases := []struct {
+		name     string
+		messages string
+		want     string
+	}{
+		{
+			name:     "user before assistant tail",
+			messages: `[{"info":{"role":"user"},"parts":[{"text":"hello"}]},{"info":{"role":"assistant"},"parts":[{"text":"hi"}]}]`,
+			want:     "hello",
+		},
+		{
+			name:     "most recent of several user turns",
+			messages: `[{"info":{"role":"user"},"parts":[{"text":"first"}]},{"info":{"role":"assistant"},"parts":[{"text":"a"}]},{"info":{"role":"user"},"parts":[{"text":"second"}]},{"info":{"role":"assistant"},"parts":[{"text":"b"}]}]`,
+			want:     "second",
+		},
+		{
+			name:     "no user message",
+			messages: `[{"info":{"role":"assistant"},"parts":[{"text":"only"}]}]`,
+			want:     "NONE",
+		},
+		{
+			name:     "empty history",
+			messages: `[]`,
+			want:     "NONE",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			exportPath := filepath.Join(t.TempDir(), "export.json")
+			if err := os.WriteFile(exportPath, []byte(`{"info":{"id":"s"},"messages":`+tc.messages+`}`), 0o644); err != nil {
+				t.Fatalf("write export: %v", err)
+			}
+			out, err := exec.Command("python3", driverPath, exportPath).Output()
+			if err != nil {
+				t.Fatalf("run driver: %v", err)
+			}
+			if got := string(out); got != tc.want {
+				t.Fatalf("last_user_text = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestUnparsableResponseClosesTheMirrorEntry is the rc=0 twin of
+// TestFailedTurnClosesTheMirrorEntry. An unparsable reply still finishes the
+// turn, so the user message mode_prompt published when the turn started must be
+// closed out — a trailing user tail reads as "still in flight" to every
+// consumer of the mirror even though the pane is idle at its marker.
+func TestUnparsableResponseClosesTheMirrorEntry(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, map[string]string{"STUB_SID": "sess_unparsable"})
+	h.run("establish the session\n")
+
+	h.env["STUB_BAD_JSON"] = "1"
+	out, code := h.run("go dark\n")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if !strings.Contains(out, "zcode-repl error rc=0 (unparsable response)") {
+		t.Fatalf("missing unparsable-response report:\n%s", out)
+	}
+
+	export := h.readExport("sess_unparsable")
+	if len(export.Messages) != 4 {
+		t.Fatalf("messages = %d, want 4 (turn 1 pair + published + closed-out unparsable turn):\n%+v", len(export.Messages), export.Messages)
+	}
+	if third := export.Messages[2]; third.Info.Role != "user" || third.Parts[0].Text != "go dark" {
+		t.Fatalf("third message = %+v, want the published user turn", third)
+	}
+	last := export.Messages[3]
+	if last.Info.Role != "assistant" {
+		t.Fatalf("tail role = %q, want assistant so the turn reads as finished", last.Info.Role)
+	}
+	if !strings.Contains(last.Parts[0].Text, "unparsable response") {
+		t.Fatalf("tail note = %q, want the unparsable-response outcome", last.Parts[0].Text)
+	}
+}
+
+// Two seats can share a session name and continuation epoch — a pool slot
+// re-seated within one run does exactly that — and keyed by name alone they
+// resumed each other's conversation and wrote one mirror between them, so one
+// seat's transcript showed for both. gc exports the session bead id to the
+// pane as GC_SESSION_ID; that is the seat, and every piece of per-conversation
+// state is keyed by it.
+func TestSeatsSharingASessionNameKeepSeparateConversations(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, map[string]string{"STUB_SID": "sess_seat_a"})
+	h.env["GC_SESSION_ID"] = "gcg-session-575a839d"
+	h.run("seat a speaks\n")
+	if got := h.sid(); got != "sess_seat_a" {
+		t.Fatalf("seat a sid = %q, want sess_seat_a", got)
+	}
+	seatASid := h.sidPath(h.seatKey())
+	seatAMirror := filepath.Join(h.mirrorDir, h.epochScope(), "sess_seat_a.json")
+	if _, err := os.Stat(seatAMirror); err != nil {
+		t.Fatalf("seat a mirror missing: %v", err)
+	}
+	seatAHome := filepath.Join(h.home, ".local", "state", "gascity", "zcode", "homes", h.epochScope())
+	if _, err := os.Stat(seatAHome); err != nil {
+		t.Fatalf("seat a CLI home missing: %v", err)
+	}
+
+	// A second seat of the same name starts its own conversation: it must
+	// neither resume seat a's session nor sweep seat a's state as superseded.
+	h.resetLog()
+	h.env["GC_SESSION_ID"] = "gcg-session-b2f5746a"
+	h.env["STUB_SID"] = "sess_seat_b"
+	h.run("seat b speaks\n")
+	for _, arg := range h.calls()[0] {
+		if strings.HasPrefix(arg, "--resume=") {
+			t.Fatalf("seat b resumed a sibling seat's conversation: %q", arg)
+		}
+	}
+	if got := h.sid(); got != "sess_seat_b" {
+		t.Fatalf("seat b sid = %q, want sess_seat_b", got)
+	}
+	if _, err := os.Stat(filepath.Join(h.mirrorDir, h.epochScope(), "sess_seat_b.json")); err != nil {
+		t.Fatalf("seat b mirror missing: %v", err)
+	}
+	for _, kept := range []string{seatASid, seatAMirror, seatAHome} {
+		if _, err := os.Stat(kept); err != nil {
+			t.Fatalf("seat b's start swept seat a's state %s: %v", kept, err)
+		}
+	}
+	// Nothing lands under the name-only scope once a seat is known.
+	if _, err := os.Stat(h.sidPath("test-session")); !os.IsNotExist(err) {
+		t.Fatalf("name-only sid still written alongside the seat's: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(h.mirrorDir, "test-session#1")); !os.IsNotExist(err) {
+		t.Fatalf("name-only mirror scope still written alongside the seat's: %v", err)
+	}
+}
+
+// State persisted before the scope carried the seat belongs to the one seat
+// that then had the name — or, in the collision this fix removes, to both. The
+// first start under the seat scope takes it over, so the conversation resumes
+// across the adapter upgrade and the adopted copy stops sitting adjacent to
+// the live one for the model to read.
+func TestSeatAdoptsStateLeftUnderTheNameOnlyScope(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, map[string]string{"STUB_SID": "sess_before_upgrade"})
+	h.run("before the upgrade\n")
+	stateRoot := filepath.Join(h.home, ".local", "state", "gascity", "zcode")
+	legacy := []string{
+		h.sidPath("test-session"),
+		filepath.Join(h.mirrorDir, "test-session#1"),
+		filepath.Join(stateRoot, "homes", "test-session#1"),
+	}
+	for _, path := range legacy {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("name-only state missing before the upgrade: %v", err)
+		}
+	}
+
+	h.resetLog()
+	h.env["GC_SESSION_ID"] = "gcg-session-575a839d"
+	h.run("after the upgrade\n")
+	if call := h.calls()[0]; !containsString(call, "--resume=sess_before_upgrade") {
+		t.Fatalf("seat did not resume the conversation it inherited: %q", call)
+	}
+	if got := h.sid(); got != "sess_before_upgrade" {
+		t.Fatalf("seat sid = %q, want the inherited sess_before_upgrade", got)
+	}
+	export := h.readExport("sess_before_upgrade")
+	var prompts []string
+	for _, message := range export.Messages {
+		if message.Info.Role == "user" {
+			prompts = append(prompts, message.Parts[0].Text)
+		}
+	}
+	if want := []string{"before the upgrade", "after the upgrade"}; !equalStrings(prompts, want) {
+		t.Fatalf("seat mirror prompts = %q, want the inherited history continued: %q", prompts, want)
+	}
+	// The CLI child's HOME followed too — its session database is what
+	// --resume actually reattaches to.
+	seatHome := filepath.Join(stateRoot, "homes", h.epochScope())
+	data, err := os.ReadFile(filepath.Join(seatHome, "child-home"))
+	if err != nil {
+		t.Fatalf("CLI child did not run with the seat's HOME: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != seatHome {
+		t.Fatalf("child HOME = %q, want %q", got, seatHome)
+	}
+	for _, path := range legacy {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("name-only state left behind after adoption: %s (%v)", path, err)
+		}
+	}
 }

@@ -16,6 +16,7 @@ NPM_PACKAGE_BY_PROVIDER = {
 }
 # Providers whose installed binary name differs from the provider name.
 BINARY_BY_PROVIDER = {
+    "cursor": "cursor-agent",
     "mimocode": "mimo",
     "zcode": "zcode-repl",
 }
@@ -71,8 +72,17 @@ def main() -> int:
     if args.command != "install":
         raise SystemExit(f"unsupported command: {args.command}")
     provider = args.profile.split("/", 1)[0].strip().lower()
-    if provider not in {"claude", "kimi", "antigravity", "zcode", *NPM_PACKAGE_BY_PROVIDER}:
+    if provider not in {"claude", "cursor", "kimi", "antigravity", "zcode", *NPM_PACKAGE_BY_PROVIDER}:
         raise SystemExit(f"unsupported worker-inference profile: {args.profile!r}")
+    if provider == "cursor":
+        binary = BINARY_BY_PROVIDER[provider]
+        if not shutil.which(binary):
+            raise SystemExit(
+                f"{binary} was not found in PATH; install Cursor Agent CLI before running "
+                f"{args.profile} worker inference"
+            )
+        print(f"{binary} already present in PATH; skipping install")
+        return 0
     if provider == "antigravity":
         if not shutil.which("agy"):
             raise SystemExit("agy was not found in PATH; install Antigravity CLI before running antigravity/tmux-cli worker inference")

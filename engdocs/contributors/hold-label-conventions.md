@@ -73,7 +73,7 @@ worth a bug report, not a pattern to follow.
 |---|---|---|
 | `blocked-by-operator` | `hold:mayor` | "Operator" meant the human operator/mayor seat. |
 | `blocked-on-upstream` | `hold:mayor` | Means "next step in our own merge pipeline," not an external repo — despite the name, this is not a `hold:external` synonym. |
-| `human-hold`, bare `human` | `hold:mayor` | Both named the same "next actor is mayor" state as a bare label. Caution: a bare `human` label can also appear alone for an unrelated reason (a human merge/PR action needed) that is not a hold state at all — check the bead's own context before assuming `human` implies a hold. |
+| `human-hold` | `hold:mayor` | Named the "next actor is mayor" state as a bare label. Bare `human` is not a hold label — see the out-of-scope list. |
 | `blocked-on-external` | `hold:external` | Direct predecessor of `hold:external`; carry forward any `blocker_scope`/`external_blocker`/`external_pr`/`pr`/`repo` metadata unchanged. |
 | `blocked` | none — use native `status=blocked` | Redundant with the bead's own `Status` field; keeping both invites drift between them. |
 | `arch-hold` | none — owned by the `maintainer-pr-review` pack | Not a generic bd hold; it's that pack's own gate, cleared via `gc maintainer-pr-review clear-hold`. It only looked like one of ours because it lacks the `mpr-` prefix its sibling `mpr-human-hold` carries. |
@@ -83,6 +83,9 @@ worth a bug report, not a pattern to follow.
 **Explicitly out of scope — do not migrate these, they mean something
 different:**
 
+- `human` — answers "who executes this" (a human merge/PR action needed),
+  not "what is this bead waiting on." It is not a hold state. Keep
+  `human-hold` retired; that one named the hold.
 - `mpr-human-hold` and other `mpr-*` labels — owned end-to-end by the
   `maintainer-pr-review` pack, with its own metadata namespace and its own
   clearing tool. Not a generic bd hold label.

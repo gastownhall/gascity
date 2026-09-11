@@ -47,6 +47,7 @@ func TestDoltConfigWriteManagedCmd(t *testing.T) {
 		`dolt_stats_memory_only: "ON"`,
 		`dolt_stats_paused: "ON"`,
 		`wait_timeout: "30"`,
+		"read_timeout_millis: 120000",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("config missing %q:\n%s", want, text)
@@ -102,6 +103,40 @@ func TestWriteManagedDoltConfigFile_UsesCityDoltListenerOverrides(t *testing.T) 
 		if !strings.Contains(text, want) {
 			t.Fatalf("config missing %q:\n%s", want, text)
 		}
+	}
+}
+
+// TestWriteManagedDoltConfigFile_ReadTimeoutCommentAttributesIdleReapToReadTimeout
+// is the ga-lfcx72 golden-file guard: the emitted listener comment must
+// correctly attribute idle/abandoned-connection reaping to read_timeout, not
+// wait_timeout -- wait_timeout is accepted, stored, and reported by the
+// server but reaps nothing on dolt 2.2.3 (measured for #5383). An earlier
+// revision of this fix had the attribution backwards (wait_timeout does the
+// reaping); this guards against that regressing, and against silently
+// drifting apart from the constant again the way comment and behavior did
+// before this fix.
+func TestWriteManagedDoltConfigFile_ReadTimeoutCommentAttributesIdleReapToReadTimeout(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "packs", "dolt", "dolt-config.yaml")
+	if err := writeManagedDoltConfigFile(configPath, "127.0.0.1", "3311", "/tmp/dolt-data", "warning", config.DoltConfig{}); err != nil {
+		t.Fatalf("writeManagedDoltConfigFile: %v", err)
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	text := string(data)
+
+	if !strings.Contains(text, "read_timeout_millis: 120000") {
+		t.Fatalf("config default read_timeout_millis not raised to 120000:\n%s", text)
+	}
+	if !strings.Contains(text, "ONLY idle-connection reaper") {
+		t.Fatalf("listener comment no longer attributes idle-connection reaping to read_timeout:\n%s", text)
+	}
+	if strings.Contains(text, "The managed default reaps idle sockets promptly") {
+		t.Fatalf("listener comment still contains the stale pre-#5383 claim that read_timeout alone reaps sockets promptly at the old 15s bound:\n%s", text)
+	}
+	if strings.Contains(text, "reaped by wait_timeout") {
+		t.Fatalf("listener comment still contains the corrected-then-reintroduced false claim that wait_timeout reaps idle connections:\n%s", text)
 	}
 }
 
@@ -242,7 +277,7 @@ func TestWriteManagedDoltConfigFile_WaitTimeoutCanBeDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	if strings.Contains(string(data), "wait_timeout") {
+	if strings.Contains(string(data), "wait_timeout:") {
 		t.Fatalf("negative GC_DOLT_WAIT_TIMEOUT should disable wait_timeout override:\n%s", data)
 	}
 }

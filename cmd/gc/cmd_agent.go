@@ -186,6 +186,9 @@ func isNonFatalLoadConfigWarning(warning string) bool {
 	if config.IsDisabledNamedSessionWarning(warning) {
 		return true
 	}
+	if config.IsSessionSetupTimeoutAdvisory(warning) {
+		return true
+	}
 	if config.IsAlwaysFreshWakeModeWarning(warning) {
 		return true
 	}
@@ -975,13 +978,7 @@ func doAgentSuspendOrResume(fs fsys.FS, cityPath, name string, suspended bool, s
 	// Try to find agent in raw config.
 	if resolved, ok := resolveAgentIdentity(cfg, name, currentRigContext(cfg)); ok {
 		resolvedQN := resolved.QualifiedName()
-		for i := range cfg.Agents {
-			if cfg.Agents[i].QualifiedName() == resolvedQN {
-				cfg.Agents[i].Suspended = suspended
-				break
-			}
-		}
-		if err := writeCityConfigForEditFS(fs, tomlPath, cfg); err != nil {
+		if err := config.WriteCityAgentSuspendedForEdit(fs, tomlPath, cfg, resolvedQN, suspended); err != nil {
 			fmt.Fprintf(stderr, "gc agent %s: %v\n", verb, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}

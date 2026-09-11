@@ -4929,6 +4929,83 @@ func TestSyncSessionBeads_RefreshesResolvedProviderMetadataOnProviderSwitch(t *t
 	}
 }
 
+// TestSyncSessionBeads_ProjectsSessionIDFlag closes Finding 2 of the PR #5396
+// post-merge review. syncSessionBeads backfills session_key for pre-fix keyless
+// claude beads but historically did not persist session_id_flag, while the
+// reactive startup-death strip (stripSessionIDFlag via
+// retryFreshStartAfterStaleKey) reads the flag from persisted bead metadata. An
+// upgraded bead carrying a backfilled session_key but no session_id_flag would
+// replay a rejected first-start `--session-id <key>` command and crash-loop until
+// quarantine. The flag must project from the resolved provider exactly like
+// resume_flag — both at create and, diff-gated, on the observe/backfill path —
+// without churning an unchanged sync (#1205).
+func TestSyncSessionBeads_ProjectsSessionIDFlag(t *testing.T) {
+	store := beads.NewMemStore()
+	// countingStore lets the churn tick assert that an unchanged sync writes
+	// nothing (diff-gated), the load-bearing property for #1205.
+	cs := &countingStore{Store: store}
+	clk := &clock.Fake{Time: time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	_ = sp.Start(context.TODO(), "worker", runtime.Config{Command: "claude --dangerously-skip-permissions"})
+
+	claudeCmd := "claude --dangerously-skip-permissions"
+	ds := map[string]TemplateParams{
+		"worker": {
+			TemplateName: "worker",
+			Command:      claudeCmd,
+			ResolvedProvider: &config.ResolvedProvider{
+				Name: "claude", BuiltinAncestor: "claude",
+				ResumeFlag: "--resume", ResumeStyle: "flag", ResumeCommand: "claude --resume",
+				SessionIDFlag: "--session-id",
+			},
+		},
+	}
+	var stderr bytes.Buffer
+
+	// Tick 1 (create path): a keyed provider stamps session_id_flag at creation,
+	// alongside the generated session_key.
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	beads1 := allSessionBeads(t, cs)
+	if len(beads1) != 1 {
+		t.Fatalf("expected 1 bead after tick 1, got %d", len(beads1))
+	}
+	id := beads1[0].ID
+	if got := beads1[0].Metadata["session_id_flag"]; got != "--session-id" {
+		t.Fatalf("tick 1 (create): session_id_flag = %q, want --session-id", got)
+	}
+	if got := beads1[0].Metadata["session_key"]; got == "" {
+		t.Fatalf("tick 1 (create): session_key was not generated for a keyed provider")
+	}
+
+	// Simulate a legacy pre-fix bead: session_key present, session_id_flag absent.
+	// This is the exact Finding 2 state the pre-fix backfill produced.
+	if err := cs.SetMetadata(id, "session_id_flag", ""); err != nil {
+		t.Fatalf("SetMetadata(clear session_id_flag): %v", err)
+	}
+
+	// Tick 2 (observe/backfill path): the projection re-stamps session_id_flag from
+	// the resolved provider so the upgraded bead can no longer replay a rejected
+	// first-start --session-id command during startup-death recovery.
+	clk.Advance(time.Minute)
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	if got := allSessionBeads(t, cs)[0].Metadata["session_id_flag"]; got != "--session-id" {
+		t.Fatalf("tick 2 (backfill): session_id_flag = %q, want --session-id re-projected", got)
+	}
+
+	// Tick 3 (churn guard): an unchanged sync must queue nothing — the projection
+	// is diff-gated, like the other resolved-provider fields (#1205).
+	writesBefore := cs.writes
+	clk.Advance(time.Minute)
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	if cs.writes != writesBefore {
+		t.Errorf("tick 3: unchanged sync wrote metadata (%d -> %d writes); the projection must be diff-gated (#1205)", writesBefore, cs.writes)
+	}
+
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+}
+
 func TestSyncSessionBeadsWithSnapshot_RefreshesMissingNamedSessionFromStore(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -9042,4 +9119,282 @@ func TestDeferredSingletonAliasRetryBackoff(t *testing.T) {
 			t.Fatalf("future timestamp should be treated as due, not stall until the clock catches up")
 		}
 	})
+}
+
+// withHostBootTime pins the host boot instant for a test.
+func withHostBootTime(t *testing.T, boot time.Time, err error) {
+	t.Helper()
+	prev := hostBootTime
+	hostBootTime = func() (time.Time, error) { return boot, err }
+	t.Cleanup(func() { hostBootTime = prev })
+}
+
+// serverAbsentListErr mimics the tmux adapter's ListRunning failure when no
+// tmux server is running at all.
+func serverAbsentListErr() error {
+	return &runtime.PartialListError{Err: errors.New("tmux server unreachable: no server running"), ServerAbsent: true}
+}
+
+// preBootReapFixture seeds a store and snapshot sharing one bead set.
+func preBootReapFixture(bs []beads.Bead) (*beads.MemStore, *sessionBeadSnapshot) {
+	return beads.NewMemStoreFrom(len(bs), bs, nil), newSessionBeadSnapshot(bs)
+}
+
+func TestCleanupDeadRuntimeSessionCorpsesReapsPreBootBeadsWhenServerAbsent(t *testing.T) {
+	boot := time.Now().Add(-10 * time.Minute)
+	withHostBootTime(t, boot, nil)
+
+	sp := newDeadRuntimeArtifactProvider()
+	sp.listErr = serverAbsentListErr() // nothing visible: the server is gone
+
+	store, snapshot := preBootReapFixture([]beads.Bead{
+		{
+			ID: "s-preboot", Status: "open", Type: sessionBeadType,
+			CreatedAt: boot.Add(-time.Hour), // predates the reboot => provably dead
+			Metadata:  map[string]string{"session_name": "qwen38-1", "template": "worker", "state": "active"},
+		},
+		{
+			ID: "s-postboot", Status: "open", Type: sessionBeadType,
+			CreatedAt: boot.Add(time.Minute), // started after boot => unproven
+			Metadata:  map[string]string{"session_name": "qwen38-2", "template": "worker", "state": "active"},
+		},
+		// A bead outlives its runtime: the reboot put these to sleep and the
+		// reconciler woke them again under the SAME bead, so their pre-boot
+		// CreatedAt names a session that is alive right now. Each carries a
+		// different post-boot start marker; all three must survive.
+		{
+			ID: "s-rewoken", Status: "open", Type: sessionBeadType,
+			CreatedAt: boot.Add(-time.Hour),
+			Metadata: map[string]string{
+				"session_name": "qwen38-3", "template": "worker", "state": "active",
+				"last_woke_at": boot.Add(time.Minute).UTC().Format(time.RFC3339),
+			},
+		},
+		{
+			ID: "s-recreated", Status: "open", Type: sessionBeadType,
+			CreatedAt: boot.Add(-time.Hour),
+			Metadata: map[string]string{
+				"session_name": "qwen38-4", "template": "worker", "state": "active",
+				"creation_complete_at": boot.Add(time.Minute).UTC().Format(time.RFC3339),
+			},
+		},
+		{
+			ID: "s-reawake", Status: "open", Type: sessionBeadType,
+			CreatedAt: boot.Add(-time.Hour),
+			Metadata: map[string]string{
+				"session_name": "qwen38-5", "template": "worker", "state": "awake",
+				"awake_started_at": boot.Add(time.Minute).UTC().Format(time.RFC3339),
+			},
+		},
+	})
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, &stderr)
+	if got != 1 {
+		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "reaped pre-boot session bead s-preboot") {
+		t.Fatalf("missing pre-boot reap diagnostic; stderr=%q", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "s-postboot") {
+		t.Fatalf("reaped a post-boot bead; stderr=%q", stderr.String())
+	}
+	if b, err := store.Get("s-preboot"); err != nil || b.Status != "closed" {
+		t.Fatalf("pre-boot bead not closed: status=%q err=%v", b.Status, err)
+	}
+	if b, err := store.Get("s-postboot"); err != nil || b.Status != "open" {
+		t.Fatalf("post-boot bead should stay open: status=%q err=%v", b.Status, err)
+	}
+	for _, id := range []string{"s-rewoken", "s-recreated", "s-reawake"} {
+		if b, err := store.Get(id); err != nil || b.Status != "open" {
+			t.Fatalf("%s was restarted after boot and should stay open: status=%q err=%v", id, b.Status, err)
+		}
+	}
+}
+
+func TestCleanupDeadRuntimeSessionCorpsesFailSafesOnPartialListingWithLiveServer(t *testing.T) {
+	boot := time.Now().Add(-10 * time.Minute)
+	withHostBootTime(t, boot, nil)
+
+	sp := newDeadRuntimeArtifactProvider()
+	// Server is up but answered incompletely: no absence sentinel.
+	sp.listErr = &runtime.PartialListError{Err: errors.New("one backend failed")}
+
+	store, snapshot := preBootReapFixture([]beads.Bead{{
+		ID: "s-preboot", Status: "open", Type: sessionBeadType,
+		CreatedAt: boot.Add(-time.Hour),
+		Metadata:  map[string]string{"session_name": "qwen38-1", "template": "worker", "state": "active"},
+	}})
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, &stderr)
+	if got != 0 {
+		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 0 (fail-safe); stderr=%q", got, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "reaped pre-boot session bead") {
+		t.Fatalf("reaped on a partial listing from a live server; stderr=%q", stderr.String())
+	}
+	if b, err := store.Get("s-preboot"); err != nil || b.Status != "open" {
+		t.Fatalf("bead should stay open under fail-safe: status=%q err=%v", b.Status, err)
+	}
+}
+
+func TestCleanupDeadRuntimeSessionCorpsesFailSafesWhenBootTimeUnavailable(t *testing.T) {
+	withHostBootTime(t, time.Time{}, errors.New("unsupported platform"))
+
+	sp := newDeadRuntimeArtifactProvider()
+	sp.listErr = serverAbsentListErr()
+
+	store, snapshot := preBootReapFixture([]beads.Bead{{
+		ID: "s-preboot", Status: "open", Type: sessionBeadType,
+		CreatedAt: time.Now().Add(-time.Hour),
+		Metadata:  map[string]string{"session_name": "qwen38-1", "template": "worker", "state": "active"},
+	}})
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, &stderr)
+	if got != 0 {
+		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 0 when boot time is unknown", got)
+	}
+	if !strings.Contains(stderr.String(), "host boot time unavailable") {
+		t.Fatalf("missing boot-time-unavailable diagnostic; stderr=%q", stderr.String())
+	}
+}
+
+// A merged multi-backend failure must never claim absence: one absent backend
+// says nothing about a healthy sibling that may still hold live sessions.
+func TestMergedBackendListErrorNeverReportsServerAbsent(t *testing.T) {
+	absent := &runtime.PartialListError{Err: errors.New("tmux server unreachable"), ServerAbsent: true}
+	if !runtime.IsRuntimeServerAbsent(absent) {
+		t.Fatalf("single-backend absence should report absent")
+	}
+	merged, err := runtime.MergeBackendListResults(
+		runtime.BackendListResult{Label: "local", Names: nil, Err: absent},
+		runtime.BackendListResult{Label: "remote", Names: []string{"live-remote-session"}, Err: nil},
+	)
+	if len(merged) != 1 {
+		t.Fatalf("merged names = %v, want the healthy backend's session", merged)
+	}
+	if !runtime.IsPartialListError(err) {
+		t.Fatalf("merged error should still be a partial listing: %v", err)
+	}
+	if runtime.IsRuntimeServerAbsent(err) {
+		t.Fatalf("merged error must NOT report absence; a healthy backend has live sessions: %v", err)
+	}
+}
+
+func TestCleanupDeadRuntimeSessionCorpsesSkipsUnreapableStatesAndTransports(t *testing.T) {
+	boot := time.Now().Add(-10 * time.Minute)
+	withHostBootTime(t, boot, nil)
+	created := boot.Add(-time.Hour)
+
+	sp := newDeadRuntimeArtifactProvider()
+	sp.listErr = serverAbsentListErr()
+
+	store, snapshot := preBootReapFixture([]beads.Bead{
+		{
+			ID: "s-draining", Status: "open", Type: sessionBeadType, CreatedAt: created,
+			Metadata: map[string]string{"session_name": "w-draining", "template": "worker", "state": "draining"},
+		},
+		{
+			ID: "s-manual", Status: "open", Type: sessionBeadType, CreatedAt: created,
+			Metadata: map[string]string{"session_name": "w-manual", "template": "worker", "state": "active", "manual_session": "true"},
+		},
+		{
+			ID: "s-acp", Status: "open", Type: sessionBeadType, CreatedAt: created,
+			Metadata: map[string]string{"session_name": "w-acp", "template": "worker", "state": "active", "transport": "acp"},
+		},
+		{
+			// Raw "drained" normalizes to StateAsleep, so the predicate must
+			// read the raw metadata state or it would reap a drained session.
+			ID: "s-drained", Status: "open", Type: sessionBeadType, CreatedAt: created,
+			Metadata: map[string]string{"session_name": "w-drained", "template": "worker", "state": "drained"},
+		},
+		{
+			ID: "s-nostate", Status: "open", Type: sessionBeadType, CreatedAt: created,
+			Metadata: map[string]string{"session_name": "w-nostate", "template": "worker"},
+		},
+		{
+			// A clean `gc stop` parks pool beads asleep with this reason and
+			// cityStopPoolBeads revives them on the next start. Reaping one
+			// here would recreate the pool instead of reviving it.
+			ID: "s-city-stop", Status: "open", Type: sessionBeadType, CreatedAt: created,
+			Metadata: map[string]string{"session_name": "w-city-stop", "template": "worker", "state": "asleep", "sleep_reason": "city-stop"},
+		},
+	})
+
+	var stderr bytes.Buffer
+	if got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, &stderr); got != 0 {
+		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 0; stderr=%q", got, stderr.String())
+	}
+	for _, id := range []string{"s-draining", "s-manual", "s-acp", "s-drained", "s-nostate", "s-city-stop"} {
+		b, err := store.Get(id)
+		if err != nil || b.Status != "open" {
+			t.Fatalf("%s should stay open: status=%q err=%v", id, b.Status, err)
+		}
+	}
+}
+
+// A bare errors.Join from a total multi-backend failure must not assert
+// absence either: one backend being absent says nothing about a sibling that
+// failed for an unrelated reason and may still hold live sessions.
+func TestTotalBackendFailureNeverReportsServerAbsent(t *testing.T) {
+	absent := &runtime.PartialListError{Err: errors.New("tmux server unreachable"), ServerAbsent: true}
+	_, err := runtime.MergeBackendListResults(
+		runtime.BackendListResult{Label: "local", Names: nil, Err: absent},
+		runtime.BackendListResult{Label: "remote", Names: nil, Err: errors.New("ssh dial timeout")},
+	)
+	if err == nil {
+		t.Fatalf("expected an error when every backend fails")
+	}
+	if runtime.IsRuntimeServerAbsent(err) {
+		t.Fatalf("a total-failure join must not assert absence: %v", err)
+	}
+}
+
+// A non-empty but unparsable start marker is not proof that the session last
+// started before the boot — it is no evidence at all. On a destructive path
+// that must read as unproven, so the bead stays open.
+func TestCleanupDeadRuntimeSessionCorpsesSkipsBeadsWithMalformedStartMarkers(t *testing.T) {
+	for _, marker := range []string{"last_woke_at", "creation_complete_at", "awake_started_at"} {
+		t.Run(marker, func(t *testing.T) {
+			boot := time.Now().Add(-10 * time.Minute)
+			withHostBootTime(t, boot, nil)
+			created := boot.Add(-time.Hour)
+
+			sp := newDeadRuntimeArtifactProvider()
+			sp.listErr = serverAbsentListErr()
+
+			store, snapshot := preBootReapFixture([]beads.Bead{
+				{
+					ID: "s-malformed", Status: "open", Type: sessionBeadType, CreatedAt: created,
+					Metadata: map[string]string{
+						"session_name": "w-malformed", "template": "worker", "state": "active",
+						marker: "not-a-timestamp",
+					},
+				},
+				{
+					// Same shape with a readable pre-boot marker: proves the
+					// fixture is otherwise reapable, so the assertion above is
+					// not passing vacuously.
+					ID: "s-control", Status: "open", Type: sessionBeadType, CreatedAt: created,
+					Metadata: map[string]string{
+						"session_name": "w-control", "template": "worker", "state": "active",
+						marker: created.UTC().Format(time.RFC3339),
+					},
+				},
+			})
+
+			var stderr bytes.Buffer
+			if got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, &stderr); got != 1 {
+				t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1 (control only); stderr=%q", got, stderr.String())
+			}
+			if b, err := store.Get("s-malformed"); err != nil || b.Status != "open" {
+				t.Fatalf("bead with malformed %s should stay open: status=%q err=%v", marker, b.Status, err)
+			}
+			if b, err := store.Get("s-control"); err != nil || b.Status != "closed" {
+				t.Fatalf("control bead with a readable pre-boot %s should be reaped: status=%q err=%v", marker, b.Status, err)
+			}
+		})
+	}
 }

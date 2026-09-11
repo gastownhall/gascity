@@ -90,6 +90,59 @@ func TestNudgeStalledPoolClaims_NudgesAfterGrace(t *testing.T) {
 	}
 }
 
+func TestNudgeStalledPoolClaims_UsesClaimFallbackWhenNudgeIsBlank(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		nudge string
+	}{
+		{name: "empty", nudge: ""},
+		{name: "whitespace", nudge: " \t "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := runningIdleClaimFake(t, "session-a")
+			cfg := idleClaimTestCfg()
+			cfg.Agents[0].Nudge = tc.nudge
+			session := idleClaimPoolSession()
+			work := []beads.Bead{{ID: "work-a", Status: "open"}}
+			store := beads.NewMemStoreFrom(0, []beads.Bead{session}, nil)
+			base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+			var out bytes.Buffer
+
+			nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, base, &out)
+			nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, base.Add(idleClaimNudgeGrace+time.Second), &out)
+
+			for _, call := range sp.SnapshotCalls() {
+				if call.Method == "Nudge" && call.Name == "session-a" {
+					if got, want := call.Message, defaultPoolClaimNudge; got != want {
+						t.Fatalf("fallback nudge = %q, want %q", got, want)
+					}
+					return
+				}
+			}
+			t.Fatal("fallback nudge was not delivered")
+		})
+	}
+}
+
+func TestPoolClaimBackstopContent_PreservesExplicitNudge(t *testing.T) {
+	cfg := idleClaimTestCfg()
+	cfg.Agents[0].Nudge = "  Use the configured wake text exactly.  "
+
+	if got, want := (poolClaimBackstop{cfg: cfg}).content(idleClaimPoolSession()), "Use the configured wake text exactly."; got != want {
+		t.Fatalf("claim nudge = %q, want normalized configured value %q", got, want)
+	}
+}
+
+func TestPoolClaimBackstopContent_FailsClosedForUnknownTemplate(t *testing.T) {
+	cfg := idleClaimTestCfg()
+	session := idleClaimPoolSession()
+	session.Metadata["template"] = "unknown-agent"
+
+	if got := (poolClaimBackstop{cfg: cfg}).content(session); got != "" {
+		t.Fatalf("claim nudge for unknown template = %q, want empty", got)
+	}
+}
+
 // Two stores can hold beads with the same ID, so the backstop must resolve the
 // slot's trigger through the store ref it was bound to. Here the rig-scoped
 // copy is still open (nudge-worthy) while the city-scoped copy of the same ID
