@@ -930,7 +930,9 @@ func TestTurnHeartbeatRedrawsTheBusyLineInPlaceOnATTY(t *testing.T) {
 		ready = "zcode-repl ready"
 		busy  = "zcode-repl turn in flight (C-c to interrupt)"
 	)
+	reply := strings.Repeat("x", 60) // proves autowrap is restored for replies
 	h := newHarness(t, map[string]string{
+		"STUB_RESPONSE":             reply,
 		"STUB_SLEEP":                "20", // a ceiling only: the turn is released below
 		"ZCODE_REPL_HEARTBEAT_SECS": "1",
 	})
@@ -940,39 +942,125 @@ func TestTurnHeartbeatRedrawsTheBusyLineInPlaceOnATTY(t *testing.T) {
 	s := h.startOnTTY()
 	// The CRLF is the line discipline's, so this also proves stdout is a tty.
 	s.waitForOutput(ready+"\r\n", adapterWaitBudget)
+	readyOffset := strings.Index(s.output(), ready+"\r\n")
 	s.send("a turn longer than the heartbeat")
 
-	// A heartbeat is the busy line redrawn directly over itself: carriage
-	// return and erase, no newline, nothing in between.
-	redraw := busy + "\r\x1b[2K" + busy
+	// Observe two redraws; disabling autowrap must keep the announcement on
+	// one physical row, including panes narrower than the message.
+	draw := "\x1b[?7l" + busy + "\x1b[?7h"
+	redraw := draw + strings.Repeat("\r\x1b[2K"+draw, 2)
 	s.waitForOutput(redraw, adapterWaitBudget)
-	pane := renderPane(t, through(s.output(), redraw))
-	if last := pane[len(pane)-1]; last != busy {
-		t.Fatalf("pane tail mid-turn = %q, want the busy line:\n%q", last, pane)
-	}
-	if n := strings.Count(strings.Join(pane, "\n"), busy); n != 1 {
-		t.Fatalf("busy line drawn %d times mid-turn, want exactly one (redraws must not stack):\n%q", n, pane)
-	}
-	if containsString(pane, ready) {
-		t.Fatalf("ready marker visible while a turn is in flight:\n%q", pane)
-	}
+	midTurn := through(t, s.output()[readyOffset:], redraw)
 
 	if err := os.WriteFile(release, nil, 0o644); err != nil {
 		t.Fatalf("release turn: %v", err)
 	}
-	finished := "ok\r\n" + ready + "\r\n"
+	finished := reply + "\r\n" + ready + "\r\n"
 	s.waitForOutput(finished, adapterWaitBudget)
-	pane = renderPane(t, through(s.output(), finished))
-	if last := pane[len(pane)-1]; last != ready {
-		t.Fatalf("pane tail after the turn = %q, want the ready marker:\n%q", last, pane)
-	}
-	if containsString(pane, busy) {
-		t.Fatalf("busy line survived the turn:\n%q", pane)
+	afterTurn := through(t, s.output()[readyOffset:], finished)
+
+	for _, width := range []int{80, 30, len(busy)} {
+		t.Run(fmt.Sprintf("width=%d", width), func(t *testing.T) {
+			pane := renderPane(t, midTurn, width)
+			if len(pane) != 1 || !strings.HasPrefix(pane[0], "zcode-repl turn in flight") {
+				t.Fatalf("want one busy row mid-turn, got:\n%q", pane)
+			}
+			if width >= len(busy) && pane[0] != busy {
+				t.Fatalf("busy line = %q, want %q", pane[0], busy)
+			}
+			pane = renderPane(t, afterTurn, width)
+			if want := renderPane(t, finished, width); !equalStrings(pane, want) {
+				t.Fatalf("completion must clear busy text and restore reply wrapping:\ngot: %q\nwant: %q", pane, want)
+			}
+		})
 	}
 
 	s.signal(syscall.SIGTERM)
 	if _, code := s.wait(); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
+	}
+}
+
+// The heartbeat is tty-only, and that guard is the whole reason every piped
+// consumer of this adapter is unaffected by it. Nothing else pins the guard:
+// no other piped test runs a turn longer than a beat, so a regression would
+// stack redraw bytes into every piped reader unnoticed.
+func TestTurnHeartbeatIsSuppressedOffATTY(t *testing.T) {
+	t.Parallel()
+
+	const busy = "zcode-repl turn in flight (C-c to interrupt)"
+	// The stub holds the turn open for several beat periods: had the guard
+	// regressed, the redraws would have landed before the turn completes.
+	h := newHarness(t, map[string]string{
+		"STUB_SLEEP":                "3",
+		"ZCODE_REPL_HEARTBEAT_SECS": "1",
+	})
+
+	s := h.start()
+	s.waitForOutput("zcode-repl ready\n", adapterWaitBudget)
+	s.send("a turn longer than the heartbeat")
+	s.waitForOutput(busy+"\n", adapterWaitBudget)
+	s.waitForOutput("ok\n", adapterWaitBudget)
+
+	out := s.output()
+	if strings.Contains(out, "\r\x1b[2K") {
+		t.Fatalf("heartbeat redraw bytes reached a piped consumer:\n%q", out)
+	}
+	if n := strings.Count(out, busy); n != 1 {
+		t.Fatalf("busy line printed %d times off a tty, want exactly one:\n%q", n, out)
+	}
+
+	s.signal(syscall.SIGTERM)
+	if _, code := s.wait(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+}
+
+// A non-completing child must not mask inactivity beyond the configured
+// heartbeat lifetime. The child outlives the one-second budget; it still
+// completes normally, but no beat may land at or after the deadline.
+func TestTurnHeartbeatExpiresBeforeTheChildCompletes(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, map[string]string{
+		"STUB_SLEEP":                    "3",
+		"ZCODE_REPL_HEARTBEAT_SECS":     "1",
+		"ZCODE_REPL_HEARTBEAT_MAX_SECS": "1",
+	})
+	s := h.startOnTTY()
+	s.waitForOutput("zcode-repl ready\r\n", adapterWaitBudget)
+	s.send("outlive the heartbeat budget")
+	s.waitForOutput("ok\r\nzcode-repl ready\r\n", adapterWaitBudget)
+	if n := strings.Count(s.output(), "zcode-repl turn in flight"); n != 1 {
+		t.Fatalf("busy announcement appeared %d times, want only the initial announcement after heartbeat expiry:\n%q", n, s.output())
+	}
+	s.signal(syscall.SIGTERM)
+	if _, code := s.wait(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+}
+
+// Malformed heartbeat settings are config errors like the adapter's other
+// preconditions: exit 78 naming the variable, rather than reaching sleep with
+// a value it cannot use.
+func TestMalformedHeartbeatConfigurationIsAConfigError(t *testing.T) {
+	t.Parallel()
+
+	// An empty value is deliberately absent: ${ZCODE_REPL_HEARTBEAT_SECS:-30}
+	// treats unset and empty alike, so both take the default rather than dying.
+	for _, key := range []string{"ZCODE_REPL_HEARTBEAT_SECS", "ZCODE_REPL_HEARTBEAT_MAX_SECS"} {
+		for _, value := range []string{"0", "-1", "30s", "abc", "9999999999999999999999"} {
+			t.Run(key+"="+value, func(t *testing.T) {
+				t.Parallel()
+
+				h := newHarness(t, map[string]string{key: value})
+				if _, code := h.run("hello\n"); code != 78 {
+					t.Fatalf("%s=%q exit code = %d, want 78 (EX_CONFIG)", key, value, code)
+				}
+				if !strings.Contains(h.stderr, key) {
+					t.Fatalf("exit 78 did not name the rejected variable; stderr = %q", h.stderr)
+				}
+			})
+		}
 	}
 }
 
@@ -1709,19 +1797,28 @@ func equalStrings(got, want []string) bool {
 
 // through returns raw up to and including its last occurrence of needle, so a
 // pane rendered from it is the pane the instant that output landed rather than
-// whatever a later chunk had half-delivered.
-func through(raw, needle string) string {
-	return raw[:strings.LastIndex(raw, needle)+len(needle)]
+// whatever a later chunk had half-delivered. An absent needle fails the test
+// rather than returning a silently truncated prefix, the same way renderPane
+// refuses to misrender input it does not understand.
+func through(t *testing.T, raw, needle string) string {
+	t.Helper()
+	i := strings.LastIndex(raw, needle)
+	if i < 0 {
+		t.Fatalf("needle %q never arrived in the output:\n%q", needle, raw)
+	}
+	return raw[:i+len(needle)]
 }
 
-// renderPane replays a tty byte stream the way a terminal would, for the
-// controls the adapter emits: CR, LF, erase-line (ESC[2K) and cursor-up
-// (ESC[1A). Any other escape fails the test rather than misrendering. Trailing
-// empty rows are dropped, as tmux capture-pane drops them.
-func renderPane(t *testing.T, raw string) []string {
+// renderPane replays a tty byte stream at a bounded terminal width, for the
+// controls the adapter emits: CR, LF, erase-line (ESC[2K), cursor-up
+// (ESC[1A), and autowrap (ESC[?7l/h). Any other escape fails the test rather
+// than misrendering. Trailing empty rows are dropped, as tmux capture-pane
+// drops them.
+func renderPane(t *testing.T, raw string, width int) []string {
 	t.Helper()
 	rows := []string{""}
 	row, col := 0, 0
+	autowrap := true
 	for i := 0; i < len(raw); i++ {
 		switch c := raw[i]; c {
 		case '\r':
@@ -1733,6 +1830,10 @@ func renderPane(t *testing.T, raw string) []string {
 			}
 		case 0x1b:
 			switch {
+			case strings.HasPrefix(raw[i:], "\x1b[?7l"), strings.HasPrefix(raw[i:], "\x1b[?7h"):
+				autowrap = raw[i+4] == 'h'
+				i += 4
+				continue
 			case strings.HasPrefix(raw[i:], "\x1b[2K"):
 				rows[row] = ""
 			case strings.HasPrefix(raw[i:], "\x1b[1A"):
@@ -1745,6 +1846,17 @@ func renderPane(t *testing.T, raw string) []string {
 			}
 			i += 3
 		default:
+			if width > 0 && col >= width {
+				if !autowrap {
+					col = width - 1
+				} else {
+					row++
+					col = 0
+					if row == len(rows) {
+						rows = append(rows, "")
+					}
+				}
+			}
 			line := rows[row]
 			for len(line) < col {
 				line += " "
