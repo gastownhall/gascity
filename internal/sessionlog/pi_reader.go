@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -137,19 +138,90 @@ type piSessionCandidate struct {
 	modTime   time.Time
 }
 
+// piSessionDirName mirrors pi's own session-directory encoding
+// (getSessionDir in pi-coding-agent): "--" + cwd with one leading path
+// separator stripped and every "/", "\\" and ":" replaced by "-" + "--". Pi
+// writes every transcript for a cwd under exactly this directory of the
+// sessions root, so a lookup can read that one directory instead of walking
+// the whole root.
+func piSessionDirName(workDir string) string {
+	trimmed := workDir
+	if trimmed != "" && (trimmed[0] == '/' || trimmed[0] == '\\') {
+		trimmed = trimmed[1:]
+	}
+	replacer := strings.NewReplacer("/", "-", "\\", "-", ":", "-")
+	return "--" + replacer.Replace(trimmed) + "--"
+}
+
+// piLegacyWalkExcludedRoots lists roots the legacy full-tree walk must never
+// descend into. The generic transcript search paths (the Claude projects tree
+// by default) are merged into the pi roots by mergePiSearchPaths, and that tree
+// can hold tens of thousands of .jsonl files that can never be pi transcripts:
+// walking it cost one readdir+lstat per file, per pi session row, per
+// /sessions request (gascity sys-by2243.75). Overridable for tests.
+var piLegacyWalkExcludedRoots = DefaultSearchPaths
+
 func findPiSessionCandidates(searchPaths []string, workDir string) []piSessionCandidate {
 	workDir = cleanPiWorkDir(workDir)
 	if workDir == "" {
 		return nil
 	}
 
+	roots := mergePiSearchPaths(searchPaths)
+	dirName := piSessionDirName(workDir)
 	var candidates []piSessionCandidate
-	for _, root := range mergePiSearchPaths(searchPaths) {
-		candidates = append(candidates, findPiSessionCandidatesIn(root, workDir)...)
+	encodedDirFound := false
+	for _, root := range roots {
+		dir := filepath.Join(root, dirName)
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		encodedDirFound = true
+		candidates = append(candidates, piSessionCandidatesFromDir(dir, entries, workDir)...)
+	}
+	if !encodedDirFound {
+		// Legacy layout (transcripts not under the cwd-encoded directory):
+		// walk the pi roots, never the excluded generic roots.
+		excluded := make(map[string]bool)
+		for _, p := range piLegacyWalkExcludedRoots() {
+			excluded[filepath.Clean(p)] = true
+		}
+		for _, root := range roots {
+			if excluded[filepath.Clean(root)] {
+				continue
+			}
+			candidates = append(candidates, findPiSessionCandidatesIn(root, workDir)...)
+		}
 	}
 	sort.Slice(candidates, func(i, j int) bool {
 		return candidates[i].modTime.After(candidates[j].modTime)
 	})
+	return candidates
+}
+
+// piSessionCandidatesFromDir applies the same header check as the walk to the
+// .jsonl files of one directory, without descending.
+func piSessionCandidatesFromDir(dir string, entries []os.DirEntry, workDir string) []piSessionCandidate {
+	var candidates []piSessionCandidate
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".jsonl") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		sessionID, cwd := cachedPiSessionHeader(path, info)
+		if cleanPiWorkDir(cwd) != workDir {
+			continue
+		}
+		if sessionID == "" {
+			sessionID = piSessionID(path)
+		}
+		candidates = append(candidates, piSessionCandidate{path: path, sessionID: sessionID, modTime: info.ModTime()})
+	}
 	return candidates
 }
 
@@ -167,12 +239,12 @@ func findPiSessionCandidatesIn(root, workDir string) []piSessionCandidate {
 		if !strings.HasSuffix(strings.ToLower(entry.Name()), ".jsonl") {
 			return nil
 		}
-		sessionID, cwd := piSessionHeader(path)
-		if cleanPiWorkDir(cwd) != workDir {
-			return nil
-		}
 		info, err := entry.Info()
 		if err != nil {
+			return nil
+		}
+		sessionID, cwd := cachedPiSessionHeader(path, info)
+		if cleanPiWorkDir(cwd) != workDir {
 			return nil
 		}
 		if sessionID == "" {
@@ -185,6 +257,48 @@ func findPiSessionCandidatesIn(root, workDir string) []piSessionCandidate {
 		return nil
 	}
 	return candidates
+}
+
+// piHeaderCacheEntry memoizes the parsed first-line header of a pi session
+// file. size+modTime form the stat signature: a rewritten transcript gets a new
+// signature and re-parses, while list/enrichment sweeps that revisit an
+// unchanged tree skip the per-file open+parse entirely.
+type piHeaderCacheEntry struct {
+	size      int64
+	modTimeNS int64
+	sessionID string
+	cwd       string
+}
+
+var (
+	piHeaderCacheMu sync.Mutex
+	piHeaderCache   = make(map[string]piHeaderCacheEntry)
+)
+
+// piHeaderCacheMaxEntries bounds the cache; deleted transcripts leave stale
+// keys behind, so past this size the map resets rather than growing forever.
+const piHeaderCacheMaxEntries = 16384
+
+func cachedPiSessionHeader(path string, info os.FileInfo) (string, string) {
+	size := info.Size()
+	modTimeNS := info.ModTime().UnixNano()
+
+	piHeaderCacheMu.Lock()
+	entry, ok := piHeaderCache[path]
+	piHeaderCacheMu.Unlock()
+	if ok && entry.size == size && entry.modTimeNS == modTimeNS {
+		return entry.sessionID, entry.cwd
+	}
+
+	sessionID, cwd := piSessionHeader(path)
+
+	piHeaderCacheMu.Lock()
+	if len(piHeaderCache) >= piHeaderCacheMaxEntries {
+		piHeaderCache = make(map[string]piHeaderCacheEntry)
+	}
+	piHeaderCache[path] = piHeaderCacheEntry{size: size, modTimeNS: modTimeNS, sessionID: sessionID, cwd: cwd}
+	piHeaderCacheMu.Unlock()
+	return sessionID, cwd
 }
 
 func parsePiFileDetailed(path string) ([]piEntry, string, SessionDiagnostics, error) {

@@ -438,3 +438,155 @@ func TestFindPiSessionFileFailsClosedOnAmbiguousCWD(t *testing.T) {
 		t.Fatalf("FindPiSessionFileByID(first) = %q, want %q", got, firstPath)
 	}
 }
+
+func writePiSessionHeaderFile(t *testing.T, path, workDir string) {
+	t.Helper()
+	body := `{"type":"session","version":3,"id":"sess-1","cwd":"` + filepath.ToSlash(workDir) + `"}`
+	if err := os.WriteFile(path, []byte(body+"\n"), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func TestFindPiSessionFileByIDSkipsRereadWhenStatSignatureUnchanged(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "project-aa")
+	otherDir := filepath.Join(filepath.Dir(workDir), "project-bb")
+	path := filepath.Join(root, "session.jsonl")
+	writePiSessionHeaderFile(t, path, workDir)
+
+	if got := FindPiSessionFileByID([]string{root}, workDir, "sess-1"); got != path {
+		t.Fatalf("FindPiSessionFileByID() = %q, want %q", got, path)
+	}
+
+	// Rewrite the header to a different cwd of the same byte length and restore
+	// the original mtime, so the (size, mtime) stat signature is unchanged. The
+	// candidate scan must serve the cached header without re-reading the file.
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	writePiSessionHeaderFile(t, path, otherDir)
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat rewritten: %v", err)
+	}
+	if after.Size() != info.Size() {
+		t.Fatalf("rewrite changed size %d -> %d; test needs an identical signature", info.Size(), after.Size())
+	}
+	if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	if got := FindPiSessionFileByID([]string{root}, workDir, "sess-1"); got != path {
+		t.Fatalf("FindPiSessionFileByID() after same-signature rewrite = %q, want cached %q", got, path)
+	}
+}
+
+func TestFindPiSessionFileByIDInvalidatesCacheOnChangedSignature(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "project")
+	movedDir := workDir + "-moved"
+	path := filepath.Join(root, "session.jsonl")
+	writePiSessionHeaderFile(t, path, workDir)
+
+	if got := FindPiSessionFileByID([]string{root}, workDir, "sess-1"); got != path {
+		t.Fatalf("FindPiSessionFileByID() = %q, want %q", got, path)
+	}
+
+	writePiSessionHeaderFile(t, path, movedDir)
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(path, future, future); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	if got := FindPiSessionFileByID([]string{root}, workDir, "sess-1"); got != "" {
+		t.Fatalf("FindPiSessionFileByID(old cwd) = %q, want empty after header rewrite", got)
+	}
+	if got := FindPiSessionFileByID([]string{root}, movedDir, "sess-1"); got != path {
+		t.Fatalf("FindPiSessionFileByID(new cwd) = %q, want %q", got, path)
+	}
+}
+
+func TestFindPiSessionFileByIDDropsDeletedFileDespiteCache(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "project")
+	path := filepath.Join(root, "session.jsonl")
+	writePiSessionHeaderFile(t, path, workDir)
+
+	if got := FindPiSessionFileByID([]string{root}, workDir, "sess-1"); got != path {
+		t.Fatalf("FindPiSessionFileByID() = %q, want %q", got, path)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if got := FindPiSessionFileByID([]string{root}, workDir, "sess-1"); got != "" {
+		t.Fatalf("FindPiSessionFileByID() after delete = %q, want empty", got)
+	}
+}
+
+func TestPiSessionDirNameMatchesPiEncoding(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"/Users/jonesy", "--Users-jonesy--"},
+		{"/Users/jonesy/Developer/gc/.gc/worktrees/sysadmin/polecats/hudson-3", "--Users-jonesy-Developer-gc-.gc-worktrees-sysadmin-polecats-hudson-3--"},
+		{"/private/tmp/claude-501/-Users-jonesy-scratchpad", "--private-tmp-claude-501--Users-jonesy-scratchpad--"},
+		{"/a/b:c", "--a-b-c--"},
+		{`C:\work\repo`, "--C--work-repo--"},
+	} {
+		if got := piSessionDirName(tc.in); got != tc.want {
+			t.Errorf("piSessionDirName(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestFindPiSessionFileByIDReadsEncodedCwdDirWithoutWalking(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "project")
+	encoded := filepath.Join(root, piSessionDirName(filepath.Clean(workDir)))
+	if err := os.MkdirAll(encoded, 0o755); err != nil {
+		t.Fatalf("mkdir encoded pi dir: %v", err)
+	}
+	target := filepath.Join(encoded, "2026-01-01T00-00-00-000Z_in-dir.jsonl")
+	decoy := filepath.Join(root, "decoy.jsonl")
+	for _, item := range []struct{ path, id string }{{target, "in-dir"}, {decoy, "walk-only"}} {
+		body := `{"type":"session","version":3,"id":"` + item.id + `","cwd":"` + filepath.ToSlash(workDir) + `"}`
+		if err := os.WriteFile(item.path, []byte(body+"\n"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", item.path, err)
+		}
+	}
+
+	if got := FindPiSessionFileByID([]string{root}, workDir, "in-dir"); got != target {
+		t.Fatalf("FindPiSessionFileByID(in-dir) = %q, want %q", got, target)
+	}
+	// The encoded directory exists, so the lookup must not fall back to the
+	// tree walk: a matching transcript outside that directory stays invisible.
+	if got := FindPiSessionFileByID([]string{root}, workDir, "walk-only"); got != "" {
+		t.Fatalf("FindPiSessionFileByID(walk-only) = %q, want empty (no walk when encoded dir exists)", got)
+	}
+}
+
+func TestFindPiSessionCandidatesLegacyWalkSkipsExcludedRoots(t *testing.T) {
+	piRoot := t.TempDir()
+	excludedRoot := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "project")
+	legacy := filepath.Join(piRoot, "legacy.jsonl")
+	inExcluded := filepath.Join(excludedRoot, "nested", "claude-looking.jsonl")
+	if err := os.MkdirAll(filepath.Dir(inExcluded), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	for _, item := range []struct{ path, id string }{{legacy, "legacy"}, {inExcluded, "excluded"}} {
+		body := `{"type":"session","version":3,"id":"` + item.id + `","cwd":"` + filepath.ToSlash(workDir) + `"}`
+		if err := os.WriteFile(item.path, []byte(body+"\n"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", item.path, err)
+		}
+	}
+	prev := piLegacyWalkExcludedRoots
+	piLegacyWalkExcludedRoots = func() []string { return []string{excludedRoot} }
+	t.Cleanup(func() { piLegacyWalkExcludedRoots = prev })
+
+	if got := FindPiSessionFileByID([]string{piRoot, excludedRoot}, workDir, "legacy"); got != legacy {
+		t.Fatalf("FindPiSessionFileByID(legacy) = %q, want %q", got, legacy)
+	}
+	if got := FindPiSessionFileByID([]string{piRoot, excludedRoot}, workDir, "excluded"); got != "" {
+		t.Fatalf("FindPiSessionFileByID(excluded) = %q, want empty (excluded root must not be walked)", got)
+	}
+}
