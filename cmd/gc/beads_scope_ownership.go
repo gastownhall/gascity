@@ -124,7 +124,7 @@ func pendingProviderScopeEndpoint(cityPath, scopeRoot string) providerScopeEndpo
 func loadProviderScopeOwnershipJournal(cityPath string) (providerScopeOwnershipJournal, bool, error) {
 	path := providerScopeOwnershipPath(cityPath)
 	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
+	if scopeArtifactAbsent(err) {
 		return providerScopeOwnershipJournal{}, false, nil
 	}
 	if err != nil {
@@ -229,7 +229,7 @@ func providerScopeOwnershipRecord(cityPath, scopeRoot string) (string, providerS
 func scopeBindingIsProviderOwnedProxied(scopeRoot string) (bool, error) {
 	path := scopeMetadataJSONPath(scopeRoot)
 	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
+	if scopeArtifactAbsent(err) {
 		return false, nil
 	}
 	if err != nil {
@@ -345,7 +345,11 @@ func providerOwnedLifecycleScopeRoots(cityPath, op string) ([]string, error) {
 		roots = append(roots, root)
 	}
 	add(cityPath)
-	cfg, cfgErr := loadCityConfig(cityPath, io.Discard)
+	// Take the packs as they are on disk. Enumerating the scopes an op visits
+	// is a question, not a repair: loadCityConfig would materialize builtin
+	// packs as a side effect, and a lifecycle probe has no business rewriting
+	// the city's pack tree to answer it.
+	cfg, cfgErr := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	if cfgErr == nil && cfg != nil {
 		resolveRigPaths(cityPath, cfg.Rigs)
 		for _, rig := range cfg.Rigs {
@@ -355,7 +359,15 @@ func providerOwnedLifecycleScopeRoots(cityPath, op string) ([]string, error) {
 		}
 	}
 	if !providerOwnedOpRetires(op) {
-		if cfgErr != nil {
+		// A city.toml that is not there is not a config gc failed to read: a
+		// directory with no city config declares no rigs, and that is a
+		// complete answer rather than a guess. Callers reach this with bare
+		// scope directories — a file-provider city, a GC_DOLT=skip city, a
+		// fixture that only ever had a .beads dir — and refusing them would
+		// fail lifecycle operations that have nothing to do with rigs. A
+		// city.toml that exists and will not parse is the other thing: a
+		// starting op must not guess past it.
+		if cfgErr != nil && cityConfigFilePresent(cityPath) {
 			return nil, cfgErr
 		}
 		return roots, nil
@@ -378,6 +390,24 @@ func providerOwnedLifecycleScopeRoots(cityPath, op string) ([]string, error) {
 		add(root)
 	}
 	return roots, nil
+}
+
+// scopeArtifactAbsent reports whether err says a scope artifact simply is not
+// there. ENOTDIR belongs with ENOENT: when .beads is a regular file — a broken
+// scope a caller is usually already in the middle of diagnosing — nothing under
+// it exists, and answering "the file is malformed" buries the real failure
+// under an ownership error it did not cause.
+func scopeArtifactAbsent(err error) bool {
+	return errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
+}
+
+// cityConfigFilePresent reports whether the city declares a config at all.
+// It separates "there is no city.toml" from "city.toml will not load", which
+// are the same error value out of loadCityConfig and very different answers to
+// "which scopes does this op visit".
+func cityConfigFilePresent(cityPath string) bool {
+	_, err := os.Stat(filepath.Join(normalizePathForCompare(cityPath), "city.toml"))
+	return err == nil
 }
 
 // cityHasProviderOwnedScope reports whether stopping this city has any
@@ -406,7 +436,7 @@ func cityHasProviderOwnedScope(cityPath string) (bool, error) {
 func proxiedScopeProviderRoot(scopeRoot string) (string, error) {
 	beadsDir := filepath.Join(normalizePathForCompare(scopeRoot), ".beads")
 	data, err := os.ReadFile(filepath.Join(beadsDir, "proxied_server_client_info.json"))
-	if errors.Is(err, os.ErrNotExist) {
+	if scopeArtifactAbsent(err) {
 		return filepath.Join(beadsDir, "dolt"), nil
 	}
 	if err != nil {
@@ -516,7 +546,7 @@ func validateProviderScopeOwnership(cityPath string, cfg *config.City) error {
 			} else if recorded {
 				continue
 			}
-			if _, err := os.Stat(filepath.Join(root, ".beads", "metadata.json")); errors.Is(err, os.ErrNotExist) {
+			if _, err := os.Stat(filepath.Join(root, ".beads", "metadata.json")); scopeArtifactAbsent(err) {
 				return fmt.Errorf("fresh scope %q has no provider ownership record", key)
 			} else if err != nil {
 				return fmt.Errorf("inspect scope %q ownership marker: %w", key, err)
@@ -645,6 +675,15 @@ func ensureProviderScopeOwnershipBeforeInit(cityPath, scopeRoot string) error {
 	if initialized {
 		return nil
 	}
+	if !cityConfigFilePresent(cityPath) {
+		// The transport and target of a fresh provider-owned scope are read
+		// from the city config. With no city.toml there is nothing to read and
+		// nothing to infer: recording an intent here would pin a topology gc
+		// invented. Leave the scope unjournaled so it keeps the legacy
+		// lifecycle, which is what a directory with no city config had before
+		// provider ownership existed.
+		return nil
+	}
 	cfg, err := loadCityConfigForEditFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		return fmt.Errorf("load city config for provider ownership: %w", err)
@@ -768,7 +807,7 @@ func persistedProviderTransport(doltMode string) (string, error) {
 func proxiedScopeHasExternalUpstream(cityPath string) (bool, error) {
 	path := filepath.Join(cityPath, ".beads", "proxied_server_client_info.json")
 	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
+	if scopeArtifactAbsent(err) {
 		return false, nil
 	}
 	if err != nil {

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 type handoffProjectionJournal struct {
@@ -60,7 +61,11 @@ func committedBeadsHandoffOwnsScope(scopeRoot string) (bool, error) {
 	// requirements on a fresh scope until there is a handoff record to admit.
 	path := filepath.Join(scopeRoot, ".beads", "ownership-handoff.json")
 	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
+	// ENOTDIR is the same answer as ENOENT here: a .beads that is not a
+	// directory cannot hold a journal, so there is no handoff record to admit.
+	// Reporting it as a malformed journal buries whatever really went wrong
+	// with the scope under an ownership error it did not cause.
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
 		return false, nil
 	}
 	if err != nil {
