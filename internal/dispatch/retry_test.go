@@ -1851,6 +1851,49 @@ func TestResolveRetrySubjectOutcomeStopsRetryWhenContextCanceled(t *testing.T) {
 	}
 }
 
+// failingGetStore fails every direct Get of subjectID, standing in for a bd
+// read failure during the bounded outcome re-resolution window.
+type failingGetStore struct {
+	*beads.MemStore
+	subjectID string
+}
+
+func (s *failingGetStore) Get(id string) (beads.Bead, error) {
+	if id == s.subjectID {
+		return beads.Bead{}, beads.ErrNotFound
+	}
+	return s.MemStore.Get(id)
+}
+
+func TestResolveRetrySubjectOutcomeDegradesOnReadError(t *testing.T) {
+	t.Parallel()
+
+	mem := beads.NewMemStore()
+	subject := mustCreateWorkflowBead(t, mem, beads.Bead{
+		Title:    "gemini review attempt 3",
+		Type:     "task",
+		Status:   "closed",
+		Metadata: map[string]string{"gc.kind": "retry-run"},
+	})
+	store := &failingGetStore{MemStore: mem, subjectID: subject.ID}
+
+	var trace bytes.Buffer
+	got, err := resolveRetrySubjectOutcome(store, subject, "eval3", ProcessOptions{
+		Tracef: func(format string, args ...any) {
+			fmt.Fprintf(&trace, format+"\n", args...) //nolint:errcheck // test buffer
+		},
+	})
+	if err != nil {
+		t.Fatalf("resolveRetrySubjectOutcome error = %v, want nil (degrade to last-known subject)", err)
+	}
+	if got.ID != subject.ID {
+		t.Fatalf("subject = %q, want the last-known subject %q", got.ID, subject.ID)
+	}
+	if !strings.Contains(trace.String(), "result=read-error") {
+		t.Fatalf("trace = %q, want a read-error observation", trace.String())
+	}
+}
+
 func TestProcessRetryEvalStaleAttemptFinalizesNoop(t *testing.T) {
 	t.Parallel()
 

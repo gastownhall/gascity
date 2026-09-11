@@ -316,7 +316,15 @@ func resolveRetrySubjectOutcome(store beads.Store, subject beads.Bead, traceID s
 		if attempt > 1 {
 			next, err := store.Get(current.ID)
 			if err != nil {
-				return beads.Bead{}, err
+				// Best-effort refinement: a failed re-read degrades to the
+				// subject we already hold, which is exactly the pre-retry
+				// behavior. Returning the error instead lets an unclassified
+				// bd read failure (ErrNotFound, a JSON parse error) reach
+				// TierNone in handleControlDispatchError and quarantine the
+				// eval bead — a failure mode this path could not have before
+				// the re-read existed.
+				opts.tracef("retry-eval bead=%s resolve-outcome attempt=%d subject=%s result=read-error err=%v", traceID, attempt, subject.ID, err)
+				return current, nil
 			}
 			current = next
 		}
