@@ -3315,6 +3315,16 @@ func bdReadyArgs(q ReadyQuery, includeEphemeral bool) []string {
 // dependsOnID carry different, well-formed bead-ID prefixes -- i.e. they
 // belong to different stores. gc bd dep add has no cross-store dependency
 // model: such a pair must fail loudly instead of silently no-oping.
+//
+// The parent-child short-circuit immediately below in DepAdd must stay ABOVE
+// this guard: internal/molecule/molecule.go sets a step bead's ParentID to the
+// foreign parent at create time, so the cross-store attaches in that file
+// short-circuit on an already-matching ParentID and never reach here.
+// Reordering the two blocks would refuse every cross-store molecule attach.
+//
+// This guard covers the DepAdd path only. Create still forwards b.Needs to
+// bd create --deps without a prefix check, so the same logical cross-prefix
+// edge is refused on one path and accepted on the other.
 func (s *BdStore) crossStoreDependencyError(issueID, dependsOnID string) error {
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(dependsOnID)), "external:") {
 		return nil
