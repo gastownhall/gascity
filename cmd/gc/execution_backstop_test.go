@@ -134,6 +134,19 @@ func (f *executionBackstopFixture) nudgeCount() int {
 	return strings.Count(f.stdout.String(), "execution-claim-nudge: nudged")
 }
 
+// lastNudge returns the text of the most recent nudge the fake delivered to the
+// seat under test, or "" if none was delivered.
+func (f *executionBackstopFixture) lastNudge(t *testing.T) string {
+	t.Helper()
+	msg := ""
+	for _, call := range f.sp.SnapshotCalls() {
+		if call.Method == "Nudge" && call.Name == f.sessName {
+			msg = call.Message
+		}
+	}
+	return msg
+}
+
 // TestExecutionBackstopNudgesAnIdleClaimHolderExactlyOnce is the core row: the
 // slot holds an in-progress claim, the provider reports no activity past the
 // grace, and the configured claim nudge is re-delivered once with the attempt
@@ -303,21 +316,23 @@ func TestExecutionStepStalledStaysOffTheExportAllowlist(t *testing.T) {
 	}
 }
 
-// TestExecutionBackstopEscalatesWhenTheAgentHasNoNudgeConfigured is the
+// TestExecutionBackstopFallsBackToTheDefaultNudgeThenEscalates is the
 // production row this backstop was missing. `agent.Nudge` is optional, and in a
 // real city every workflow pool template leaves it unset — maintainer-city had
-// it on 18 of 260 agents and on none of its four pool roles. The shared engine
-// skipped empty content with a bare `continue`, so the state machine parked on
-// its observe marker forever: it never reserved an attempt, never reached the
-// attempt cap, and so never ran the drain that is the ONLY thing that releases
-// the claim. A seat holding an in-progress bead still satisfies poolDesired, so
-// no replacement spawns and the whole pool starves behind it. Observed: 20 of 21
-// live markers frozen at count=0, the oldest claim held 3.5 days.
+// it on 18 of 260 agents and on none of its four pool roles — as do the named
+// seats ga-lez12 rescues. Before the fallback, the shared engine skipped empty
+// content with a bare `continue`, so the state machine parked on its observe
+// marker forever: never an attempt, never the cap, never the drain that is the
+// ONLY thing that releases the claim. A seat holding an in-progress bead still
+// satisfies poolDesired, so no replacement spawns and the whole pool starves
+// behind it. Observed: 20 of 21 live markers frozen at count=0, the oldest claim
+// held 3.5 days.
 //
-// With nothing to deliver there is nothing to wait for — the bounded attempts
-// exist to give the agent a chance to ANSWER a nudge. The grace window still
-// applies, and then it escalates.
-func TestExecutionBackstopEscalatesWhenTheAgentHasNoNudgeConfigured(t *testing.T) {
+// The fix is the default-nudge fallback the claim lane already carries: an agent
+// that is KNOWN but configures no nudge is still nudged with defaultPoolClaimNudge
+// through the bounded attempts, and only then — the seat having had its chance to
+// answer — does it escalate to the drain.
+func TestExecutionBackstopFallsBackToTheDefaultNudgeThenEscalates(t *testing.T) {
 	f := newExecutionBackstopFixture(t)
 	f.cfg.Agents[0].Nudge = "" // the maintainer-city pool templates, verbatim
 	f.idleFor(t, 10*time.Minute)
@@ -330,12 +345,71 @@ func TestExecutionBackstopEscalatesWhenTheAgentHasNoNudgeConfigured(t *testing.T
 		t.Fatalf("drain requests inside the grace window = %v, want none", f.drained)
 	}
 
+	// The bounded nudge phase delivers the DEFAULT claim nudge, not silence.
+	for i := 0; i < idleClaimNudgeMaxAttempts; i++ {
+		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t)
+	}
+	if got := f.nudgeCount(); got != idleClaimNudgeMaxAttempts {
+		t.Fatalf("default-nudge deliveries = %d, want the attempt cap %d; stdout=%s", got, idleClaimNudgeMaxAttempts, f.stdout.String())
+	}
+	if msg := f.lastNudge(t); msg != defaultPoolClaimNudge {
+		t.Fatalf("delivered nudge text = %q, want the default %q", msg, defaultPoolClaimNudge)
+	}
+	if len(f.drained) != 0 {
+		t.Fatalf("drain requests before the attempts were spent = %v, want none", f.drained)
+	}
+
+	// Only after the bounded attempts are spent does it escalate to the drain.
+	for i := 0; i < 3; i++ {
+		f.now = f.now.Add(idleClaimNudgeBackoff)
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t)
+	}
+	if len(f.drained) != 1 || f.drained[0] != f.sessName {
+		t.Fatalf("drain requests = %v, want exactly one for %s; stdout=%s", f.drained, f.sessName, f.stdout.String())
+	}
+	if f.sessionMeta(t, executionClaimNudgeStalledKey) == "" {
+		t.Fatal("escalation was not latched; a later tick would drain the session all over again")
+	}
+	stalled := 0
+	for _, e := range f.rec.Events {
+		if e.Type == events.ExecutionStepStalled {
+			stalled++
+		}
+	}
+	if stalled != 1 {
+		t.Fatalf("execution.step_stalled events = %d, want exactly 1", stalled)
+	}
+}
+
+// TestExecutionBackstopDrainsColdWhenNoNudgeIsResolvable pins the one case the
+// default-nudge fallback deliberately does NOT rescue: a seat whose template
+// resolves to no agent at all, so there is genuinely no nudge to send. Parking
+// on the observe marker forever would hold the seat's close gate open and starve
+// the pool, so with nothing deliverable the engine's empty-content path escalates
+// to the drain straight out of the grace window — no nudge, exactly one drain.
+func TestExecutionBackstopDrainsColdWhenNoNudgeIsResolvable(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	// Point the seat at a template with no matching [agent], so both the
+	// configured nudge and the default fallback resolve to nothing.
+	if err := f.store.SetMetadataBatch(f.session.ID, map[string]string{"template": "ghost-template"}); err != nil {
+		t.Fatalf("re-stamping the session template: %v", err)
+	}
+	f.idleFor(t, 10*time.Minute)
+
+	f.tick(t) // first sighting: start the grace clock, escalate nothing yet
+	if len(f.drained) != 0 {
+		t.Fatalf("drain requests inside the grace window = %v, want none", f.drained)
+	}
+
 	f.now = f.now.Add(idleClaimNudgeGrace + time.Second)
 	f.idleFor(t, 10*time.Minute)
 	f.tick(t)
 
 	if got := f.nudgeCount(); got != 0 {
-		t.Fatalf("delivered nudges with no configured nudge = %d, want 0", got)
+		t.Fatalf("delivered nudges with no resolvable nudge = %d, want 0", got)
 	}
 	if len(f.drained) != 1 || f.drained[0] != f.sessName {
 		t.Fatalf("drain requests = %v, want exactly one for %s; stdout=%s", f.drained, f.sessName, f.stdout.String())
@@ -434,5 +508,131 @@ func TestExecutionBackstopRecoversAStalledNamedInteractiveSeat(t *testing.T) {
 	}
 	if stalled != 1 {
 		t.Fatalf("execution.step_stalled events = %d, want exactly 1", stalled)
+	}
+}
+
+// TestExecutionBackstopHoldsWhileAHumanIsAttached is the never-act-under-a-
+// human's-hands guard (ga-lez12). A named interactive seat is exactly the kind
+// of session an operator attaches to and drives by hand; the run-operator and
+// the reviewers are attended for long stretches. While a terminal is attached
+// the seat can hold an in-progress claim and report no I/O activity for many
+// minutes — a human reading, thinking, or typing slowly — yet nudging it would
+// inject keystrokes into the operator's session and draining it would rip the
+// session out from under them. The backstop must HOLD (never nudge, never drain,
+// and write no pacing state) for as long as the attach lasts, then resume its
+// ordinary cadence once the human detaches.
+func TestExecutionBackstopHoldsWhileAHumanIsAttached(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.asNamedSeat(t)
+	f.sp.SetAttached(f.sessName, true) // a human is driving this seat by hand
+
+	// Drive well past the grace window AND the full attempt budget AND the
+	// exhaustion that would otherwise drain: an attached seat sees none of it.
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	for i := 0; i < idleClaimNudgeMaxAttempts+3; i++ {
+		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t)
+	}
+
+	if got := f.nudgeCount(); got != 0 {
+		t.Fatalf("nudges to an attached seat = %d, want 0 (never act under a human's hands); stdout=%s", got, f.stdout.String())
+	}
+	if len(f.drained) != 0 {
+		t.Fatalf("drain requests for an attached seat = %v, want none", f.drained)
+	}
+	if got := f.sessionMeta(t, executionClaimNudgeWorkKey); got != "" {
+		t.Fatalf("persisted work marker = %q, want no pacing write while attached", got)
+	}
+}
+
+// TestExecutionBackstopDoesNotDrainAnIntermittentlyWorkingSeat is the
+// activity-decay row (ga-lez12). A human-paced interactive seat works in bursts:
+// it answers a nudge, runs for a bit, then pauses to read or think. Each pause
+// can exceed the grace window, so a bounded nudge->backoff->drain machine that
+// only clears its attempt count when the claim LEAVES in_progress will march a
+// legitimately-working seat to the drain on cumulative quiet alone. The fix
+// re-arms the window whenever the runtime reports fresh activity SINCE the last
+// attempt: a seat that keeps doing work between nudges is alive and must not be
+// force-drained. A genuinely dead seat shows no such activity and still drains.
+func TestExecutionBackstopDoesNotDrainAnIntermittentlyWorkingSeat(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.asNamedSeat(t)
+
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t) // first sighting: start the grace clock
+
+	// Far more cycles than the attempt cap. Each cycle the seat is quiet right
+	// now (past the grace) but showed activity since the last attempt — the
+	// signature of a seat working in bursts. Without decay the attempt count
+	// reaches the cap within maxAttempts cycles and the seat is drained.
+	for i := 0; i < idleClaimNudgeMaxAttempts+4; i++ {
+		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+		f.sp.SetActivity(f.sessName, f.now.Add(-(idleClaimNudgeGrace + time.Second)))
+		f.tick(t)
+	}
+
+	if len(f.drained) != 0 {
+		t.Fatalf("drain requests for an intermittently-working seat = %v, want none (renewed activity re-arms the window); stdout=%s", f.drained, f.stdout.String())
+	}
+	stalled := 0
+	for _, e := range f.rec.Events {
+		if e.Type == events.ExecutionStepStalled {
+			stalled++
+		}
+	}
+	if stalled != 0 {
+		t.Fatalf("execution.step_stalled events = %d, want 0 for a working seat; stdout=%s", stalled, f.stdout.String())
+	}
+}
+
+// TestExecutionBackstopFallsBackToTheDefaultNudgeForANamedSeatThenResumes is the
+// stall -> nudge -> resume row (ga-lez12). The named seats that stalled the
+// pilot (run-operator, olivia, the reviewers) configure NO [agent] nudge, and
+// the execution lane read the raw configured nudge with no default fallback — so
+// widening the backstop to cover named seats would have drained them COLD, never
+// delivering the one keystroke the confirmed cause says resumes them. This row
+// pins the fallback: with no configured nudge the lane still delivers the default
+// claim nudge, the seat answers and completes its claim, and it is never drained.
+func TestExecutionBackstopFallsBackToTheDefaultNudgeForANamedSeatThenResumes(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.asNamedSeat(t)
+	f.cfg.Agents[0].Nudge = "" // the real named seats configure no nudge
+
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t) // observe
+	if len(f.drained) != 0 {
+		t.Fatalf("drain requests inside the grace window = %v, want none", f.drained)
+	}
+
+	f.now = f.now.Add(idleClaimNudgeGrace + time.Second)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+
+	if got := f.nudgeCount(); got != 1 {
+		t.Fatalf("default-nudge deliveries = %d, want exactly 1 (nudge before drain); stdout=%s", got, f.stdout.String())
+	}
+	if len(f.drained) != 0 {
+		t.Fatalf("drain requests after the first default nudge = %v, want none yet", f.drained)
+	}
+	if msg := f.lastNudge(t); msg != defaultPoolClaimNudge {
+		t.Fatalf("delivered nudge text = %q, want the default %q", msg, defaultPoolClaimNudge)
+	}
+
+	// The seat answers: it executes and completes the claim. The backstop clears
+	// and never drains.
+	if err := f.store.Close(f.work.ID); err != nil {
+		t.Fatalf("completing the claimed work: %v", err)
+	}
+	f.now = f.now.Add(idleClaimNudgeBackoff + time.Second)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+
+	if len(f.drained) != 0 {
+		t.Fatalf("drain requests after the seat resumed and completed = %v, want none", f.drained)
+	}
+	if got := f.sessionMeta(t, executionClaimNudgeWorkKey); got != "" {
+		t.Fatalf("persisted work marker = %q, want cleared after completion", got)
 	}
 }

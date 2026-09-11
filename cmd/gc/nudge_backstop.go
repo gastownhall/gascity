@@ -55,6 +55,22 @@ type backstopPredicate interface {
 	clear(store beads.Store, s *beads.Bead, stdout io.Writer)
 }
 
+// activityDecayingBackstop is an optional backstopPredicate extension. A
+// predicate whose outstanding condition LOOKS like a working agent — an
+// in-progress claim, which a busy seat holds by design — implements it to
+// re-arm its pacing when the runtime reports fresh activity since the last
+// attempt. A human-paced interactive seat answers a nudge, works in a burst,
+// and pauses again; without this the accumulated quiet marches it to the
+// terminal drain even though it is plainly alive. The open-bead predicates do
+// NOT implement it: their condition vanishes the instant the agent acts, so
+// they never need to tell "working" from "stalled" by activity.
+type activityDecayingBackstop interface {
+	// renewedSince reports whether sessName showed runtime activity after last,
+	// the persisted time of the predicate's last observation or attempt. Keyed
+	// only on the runtime's activity signal, never on who the session is.
+	renewedSince(sessName string, last time.Time) bool
+}
+
 // backstopTarget is the durable identity of one outstanding delivery target.
 // ID is the human-facing work bead. RootID, StoreRef, and Generation are
 // optional persisted provenance fields: the initial pool-claim predicate needs
@@ -169,6 +185,19 @@ func runNudgeBackstop(
 			// lands within the grace window.
 			pred.observe(store, s, target, now, stdout)
 			continue
+		}
+
+		// Re-arm before deciding when a predicate that tracks a working-looking
+		// seat reports fresh activity since its last attempt: the seat answered
+		// the previous nudge and paused again on its own cadence, so it has
+		// earned a fresh grace window rather than another step toward the drain.
+		// Gated on attempts>0 — at attempts==0 the grace check below already
+		// gives the first free pass, and there is no accumulated budget to shed.
+		if attempts > 0 {
+			if decayer, ok := pred.(activityDecayingBackstop); ok && decayer.renewedSince(sessName, last) {
+				pred.observe(store, s, target, now, stdout)
+				continue
+			}
 		}
 
 		switch decideBackstopAction(attempts, last, now) {

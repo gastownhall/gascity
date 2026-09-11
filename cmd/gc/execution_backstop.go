@@ -206,7 +206,17 @@ type poolExecutionBackstop struct {
 // open so it is never reaped. Everything below this predicate resolves by the
 // session's OWN identities and re-checks ownership before acting, so widening
 // the scope adds coverage without loosening any guard.
+//
+// Manual and dependency-only seats are excluded from BOTH arms. A manual seat
+// is a human's own session (never an orchestration slot), and a dependency-only
+// seat is kept awake to satisfy someone else's dependency rather than to execute
+// a claim of its own — draining either would act against a session this backstop
+// has no business recovering. Pool slots are never manual or dependency-only, so
+// the exclusion only narrows the widened named arm.
 func (p poolExecutionBackstop) governs(s beads.Bead) bool {
+	if isManualSessionBead(s) || strings.TrimSpace(s.Metadata["dependency_only"]) == "true" {
+		return false
+	}
 	return strings.TrimSpace(s.Metadata["pool_managed"]) == "true" || isNamedSessionBead(s)
 }
 
@@ -219,6 +229,15 @@ func (p poolExecutionBackstop) governs(s beads.Bead) bool {
 // nudge about would make the persisted marker a lie. Ambiguity holds rather than
 // clears, so a transient multi-claim tick cannot reset a window already running.
 func (p poolExecutionBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, sessName string) (backstopTarget, backstopResolution) {
+	// Never act under a human's hands. A named interactive seat is exactly the
+	// session an operator attaches to and drives directly; while a terminal is
+	// attached, a nudge would inject keystrokes into that session and a drain
+	// would tear it out from under them. HOLD rather than clear so a grace
+	// window already running survives the human detaching and resumes its
+	// ordinary cadence — a quiet attached seat is "we cannot tell", not "idle".
+	if p.sp.IsAttached(sessName) {
+		return backstopTarget{}, backstopResolutionHold
+	}
 	claims := p.claims.forIdentities(currentSessionAssigneeIdentities(s))
 	switch len(claims) {
 	case 0:
@@ -259,8 +278,37 @@ func (p poolExecutionBackstop) state(s beads.Bead, target backstopTarget) (same 
 	return same, atoiOr0(s.Metadata[executionClaimNudgeCountKey]), parseRFC3339OrZero(s.Metadata[executionClaimNudgeAtKey])
 }
 
+// content resolves the seat's claim nudge, falling back to defaultPoolClaimNudge
+// when the agent is known but configures no nudge — the same fallback the
+// stalled-pool-claim lane already uses (stalledPoolClaimNudgeFor). The named
+// seats this backstop rescues configure no [agent] nudge, so without the
+// fallback the engine's empty-content path would drain them COLD; the confirmed
+// ga-lez12 cause is that these seats RESUME once nudged, so the SDK must deliver
+// a nudge before the drain regardless of pack config. An unknown template or
+// agent still yields "" and goes straight to the drain, since there is genuinely
+// nothing to send and parking on the observe marker forever would starve the
+// seat's close gate.
 func (p poolExecutionBackstop) content(s beads.Bead) string {
-	return claimNudgeFor(p.cfg, s)
+	return stalledPoolClaimNudgeFor(p.cfg, s)
+}
+
+// renewedSince implements activityDecayingBackstop. An in-progress claim is what
+// a working agent looks like, so this predicate cannot tell "working slowly"
+// from "stalled" by bead state alone. Fresh runtime activity after the last
+// attempt is that discriminator: a human-paced seat that answered the previous
+// nudge and worked in a burst has advanced its activity clock, and re-arming its
+// window keeps cumulative quiet pauses from marching it to the drain. A genuinely
+// dead seat reports no such advance and still converges. Activity-only, never
+// keyed on who the session is.
+func (p poolExecutionBackstop) renewedSince(sessName string, last time.Time) bool {
+	if last.IsZero() {
+		return false
+	}
+	activity, err := p.sp.GetLastActivity(sessName)
+	if err != nil || activity.IsZero() {
+		return false
+	}
+	return activity.After(last)
 }
 
 // revalidate re-reads the claim through the owning store's authoritative live
