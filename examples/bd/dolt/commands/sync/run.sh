@@ -536,8 +536,11 @@ sync_database_sql() {
     # death); --use-db attributes the session to this database. The id is the
     # KILL operand when the bound expires.
     # Then the server-side gate (remote_op_gate_sql): the session takes this
-    # database's lock or the batch stops here, before the CALL.
-    dolt_sql "USE \`$name\`; SELECT CONNECTION_ID() AS id; $(remote_op_gate_sql "$name"); CALL DOLT_FETCH('$remote_name', '$remote_branch')" "$fetch_timeout" "$name" \
+    # database's lock and this run's lock or the batch stops here, before the
+    # CALL; and the CALL's own first argument re-proves that THIS session still
+    # holds the run lock (remote_op_owned_arg), so a client that reconnected in
+    # between never fetches on a lockless session.
+    dolt_sql "USE \`$name\`; SELECT CONNECTION_ID() AS id; $(remote_op_gate_sql "$name"); CALL DOLT_FETCH($(remote_op_owned_arg "$name" "$remote_name"), '$remote_branch')" "$fetch_timeout" "$name" \
       >"$fetch_out_tmp" 2>"$fetch_err_tmp" || fetch_rc=$?
     fetch_session_id=$(remote_op_session_id "$fetch_out_tmp")
     rm -f "$fetch_out_tmp"
@@ -561,6 +564,14 @@ sync_database_sql() {
       # before the CALL; nothing to kill.
       rm -f "$fetch_err_tmp"
       echo "  $name: fetch already in flight — the server refused a second one (session lock $(remote_op_lock_name "$name") held) — skipped (NOT pushed)" >&2
+      return 1
+    elif [ "$fetch_rc" -ne 0 ] && remote_op_gate_lost "$fetch_err_tmp"; then
+      # The session that passed the gate is not the one that sent the CALL
+      # (the client reconnected in between): the CALL refused itself before
+      # the procedure ran. Nothing to kill; the lockless session ends with
+      # the client.
+      rm -f "$fetch_err_tmp"
+      echo "  $name: fetch not sent — this session lost the run lock between the gate and the CALL (client reconnected) — skipped (NOT pushed)" >&2
       return 1
     elif [ "$fetch_rc" -ne 0 ] && { grep -q "no branches found in remote" "$fetch_err_tmp" 2>/dev/null || grep -q "invalid ref spec" "$fetch_err_tmp" 2>/dev/null; }; then
       # The remote has no such branch: an empty remote ("no branches found in

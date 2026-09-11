@@ -223,6 +223,24 @@ func TestPullProcesslistFailureSkipsNeverPulls(t *testing.T) {
 	}
 }
 
+// The pull's CALL refused itself (the session lost this run's lock before
+// the CALL — codex r12): its own line, nothing KILLed, non-zero exit.
+func TestPullLostRunLockBeforeCallSkipsKillsNothing(t *testing.T) {
+	binDir := t.TempDir()
+	logPath := writePullFakeDolt(t, binDir, "printf 'Id,Time,db\\n' ; exit 0",
+		"printf 'id\\n66\\n' ; printf 'error on line 1 for query CALL DOLT_PULL(IF(...)): Error 3141 (HY000): Invalid JSON text in argument 1 to function json_extract: \"gc-remote-op-lost\"\\n' >&2 ; exit 1")
+	out, err := runPull(t, binDir, nil, "--db", "app")
+	if err == nil {
+		t.Fatalf("a pull whose CALL refused itself must exit non-zero.\nout:\n%s", out)
+	}
+	if strings.Contains(readLog(t, logPath), "KILL ") || strings.Contains(out, "pulled from") {
+		t.Fatalf("nothing to kill, nothing pulled.\nout:\n%s", out)
+	}
+	if !strings.Contains(out, "app: pull not sent — this session lost the run lock between the gate and the CALL") {
+		t.Fatalf("expected the lost-lock line.\nout:\n%s", out)
+	}
+}
+
 // The same rule for pull: a session attributed to another database blocks
 // too (attribution is not proof of the target — codex r9), and the query text
 // carries no database name (constant text; codex r6).

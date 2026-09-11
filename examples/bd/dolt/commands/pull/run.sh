@@ -239,8 +239,11 @@ pull_database_sql() {
   # operand when the bound expires.
   pull_rc=0
   # Then the server-side gate (remote_op_gate_sql): the session takes this
-  # database's lock or the batch stops here, before the CALL.
-  dolt_sql "USE \`$name\`; SELECT CONNECTION_ID() AS id; $(remote_op_gate_sql "$name"); CALL DOLT_PULL('$remote_name', 'main')" "$pull_timeout" "$name" \
+  # database's lock and this run's lock or the batch stops here, before the
+  # CALL; the CALL's own first argument re-proves that THIS session still holds
+  # the run lock (remote_op_owned_arg), so a reconnected client never pulls on
+  # a lockless session.
+  dolt_sql "USE \`$name\`; SELECT CONNECTION_ID() AS id; $(remote_op_gate_sql "$name"); CALL DOLT_PULL($(remote_op_owned_arg "$name" "$remote_name"), 'main')" "$pull_timeout" "$name" \
     >"$pull_out_tmp" 2>"$pull_err_tmp" || pull_rc=$?
   pull_session_id=$(remote_op_session_id "$pull_out_tmp")
   rm -f "$pull_out_tmp"
@@ -259,6 +262,10 @@ pull_database_sql() {
   elif remote_op_gate_refused "$pull_err_tmp"; then
     rm -f "$pull_err_tmp"
     echo "  $name: pull already in flight — the server refused a second one (session lock $(remote_op_lock_name "$name") held) — skipped" >&2
+    return 1
+  elif remote_op_gate_lost "$pull_err_tmp"; then
+    rm -f "$pull_err_tmp"
+    echo "  $name: pull not sent — this session lost the run lock between the gate and the CALL (client reconnected) — skipped" >&2
     return 1
   else
     echo "  $name: ERROR: pull failed (exit $pull_rc)" >&2

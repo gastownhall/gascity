@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -889,6 +890,63 @@ func TestSyncFetchBoundReachesTheFetch(t *testing.T) {
 	assertBounded(t, readLog(t, tlogPath), "9", "CALL DOLT_FETCH(")
 }
 
+// The CALL refused itself: the session that sent it no longer held this run's
+// lock (the client reconnected between the gate and the CALL — codex r12).
+// Reported on its own line, nothing KILLed, nothing pushed, non-zero exit.
+func TestSyncFetchLostRunLockBeforeCallSkipsKillsNothing(t *testing.T) {
+	binDir := t.TempDir()
+	logPath := filepath.Join(binDir, "dolt.log")
+	body := fakeDoltHeader(logPath, "main") +
+		"  *\"CALL DOLT_FETCH(\"*) printf 'id\\n65\\n' ; printf 'error on line 1 for query CALL DOLT_FETCH(IF(...)): Error 3141 (HY000): Invalid JSON text in argument 1 to function json_extract: \"gc-remote-op-lost\"\\n' >&2 ; exit 1 ;;\n" +
+		"  *\"KILL \"*) : > \"" + filepath.Join(binDir, "killed") + "\" ; exit 0 ;;\n" +
+		"esac\nexit 0\n"
+	installFFFakeDolt(t, binDir, body)
+	out := runFFSyncFails(t, binDir, "--db", "app")
+	log := readLog(t, logPath)
+	if pushed(log) || strings.Contains(log, "KILL ") {
+		t.Fatalf("a CALL that refused itself ran no procedure: nothing to kill, nothing to push.\nout:\n%s\nlog:\n%s", out, log)
+	}
+	if !strings.Contains(out, "app: fetch not sent — this session lost the run lock between the gate and the CALL") || !strings.Contains(out, "NOT pushed") {
+		t.Fatalf("expected the lost-lock line.\nout:\n%s", out)
+	}
+}
+
+// The KILL is guarded by this run's lock in its own batch: when the id no
+// longer holds it — a restarted server reused the number for someone else —
+// the batch stops before the KILL and a session still listed is reported as
+// NOT ours; a session already gone is reported as ended (codex r12).
+func TestSyncFetchTimeoutKillGuardedByRunLock(t *testing.T) {
+	notOwner := "printf 'error on line 1 for query SELECT IF(IS_USED_LOCK(...)) AS own: Error 3141 (HY000): Invalid JSON text in argument 1 to function json_extract: \"gc-remote-op-not-owner\"\\n' >&2 ; exit 1 ;;\n"
+	for _, tc := range []struct{ name, rowsAfter, want string }{
+		{"reused id still listed", "77,60,app\\n", "app: server-side fetch NOT killed: session 77 does not hold this run's lock (gc_remote_op_run:app:"},
+		{"session already gone", "", "app: server-side fetch already ended (session 77 is gone; nothing killed)"},
+	} {
+		binDir := t.TempDir()
+		logPath := filepath.Join(binDir, "dolt.log")
+		started := filepath.Join(binDir, "fetch-started")
+		body := fakeDoltPreamble(logPath, "main") +
+			"  *\"information_schema.processlist\"*)\n" +
+			"    if [ -f \"" + started + "\" ]; then printf 'Id,Time,db\\n" + tc.rowsAfter + "'\n" +
+			"    else printf 'Id,Time,db\\n'; fi\n" +
+			"    exit 0 ;;\n" +
+			"  *\"CALL DOLT_FETCH(\"*) : > \"" + started + "\" ; printf 'id\\n77\\n' ; printf 'context deadline exceeded\\n' >&2 ; exit 124 ;;\n" +
+			"  *\"KILL \"*) " + notOwner +
+			"esac\nexit 0\n"
+		installFFFakeDolt(t, binDir, body)
+		out := runFFSyncFails(t, binDir, "--db", "app")
+		log := readLog(t, logPath)
+		if pushed(log) {
+			t.Fatalf("%s: a fetch timeout must NEVER push.\nout:\n%s", tc.name, out)
+		}
+		if !strings.Contains(log, "IS_USED_LOCK('gc_remote_op_run:app:") || !strings.Contains(log, "JSON_EXTRACT('gc-remote-op-not-owner', '$')) AS own; KILL 77\n") {
+			t.Fatalf("%s: the KILL must be guarded by this run's lock in the same batch.\nlog:\n%s", tc.name, log)
+		}
+		if !strings.Contains(out, tc.want) || strings.Contains(out, "no longer in flight") {
+			t.Fatalf("%s: expected %q and never a kill confirmation.\nout:\n%s", tc.name, tc.want, out)
+		}
+	}
+}
+
 // The verdict after KILL is a processlist read too: an answer with a malformed
 // row (here a fourth column, which an earlier parser dropped as "another
 // database" — codex r7) must refuse to confirm the kill, never report the
@@ -983,11 +1041,20 @@ func assertGateBeforeCall(t *testing.T, line, db, call string) {
 	// GET_LOCK substring alone accepted `>= 0`, which lets the CALL through
 	// while another session holds the lock): the lock name lowercased on the
 	// server (`app` and `APP` are one database and must be one lock), timeout
-	// 0, the `= 1` test, the 1 branch, and the marked JSON error branch.
-	gate := "SELECT IF(GET_LOCK(CONCAT('gc_remote_op:', LOWER('" + db + "')), 0) = 1, 1, JSON_EXTRACT('gc-remote-op-lock-held', '$')) AS gate;"
-	idAt, gateAt, callAt := strings.Index(line, "SELECT CONNECTION_ID() AS id;"), strings.Index(line, gate), strings.Index(line, call)
-	if idAt < 0 || gateAt < 0 || callAt < 0 || (idAt >= gateAt || gateAt >= callAt) {
-		t.Fatalf("the batch must be id, then the complete GET_LOCK gate %q, then the CALL.\nline: %s", gate, line)
+	// 0, this run's own lock (`gc_remote_op_run:<db>:<pid>-<epoch>`), the
+	// `= 1` tests, the 1 branch, and the marked JSON error branch. The CALL's
+	// FIRST ARGUMENT re-proves that the session still holds the same run lock
+	// (codex r12: a pooled client that reconnected between the gate and the
+	// CALL would otherwise fetch on a lockless session).
+	gateRe := regexp.MustCompile(regexp.QuoteMeta("SELECT IF(GET_LOCK(CONCAT('gc_remote_op:', LOWER('"+db+"')), 0) = 1 AND GET_LOCK('gc_remote_op_run:"+db+":") + `([0-9]+-[0-9]+)` + regexp.QuoteMeta("', 0) = 1, 1, JSON_EXTRACT('gc-remote-op-lock-held', '$')) AS gate;"))
+	callRe := regexp.MustCompile(regexp.QuoteMeta(call+"IF(IS_USED_LOCK('gc_remote_op_run:"+db+":") + `([0-9]+-[0-9]+)` + regexp.QuoteMeta("') = CONNECTION_ID(), '") + `[^']+` + regexp.QuoteMeta("', JSON_EXTRACT('gc-remote-op-lost', '$')), "))
+	gateM, callM := gateRe.FindStringSubmatchIndex(line), callRe.FindStringSubmatchIndex(line)
+	idAt := strings.Index(line, "SELECT CONNECTION_ID() AS id;")
+	if idAt < 0 || gateM == nil || callM == nil || idAt >= gateM[0] || gateM[0] >= callM[0] {
+		t.Fatalf("the batch must be id, then the complete gate %s, then the CALL whose first argument is the ownership check %s.\nline: %s", gateRe, callRe, line)
+	}
+	if line[gateM[2]:gateM[3]] != line[callM[2]:callM[3]] {
+		t.Fatalf("the CALL must re-check the SAME run lock the gate took (%q vs %q).\nline: %s", line[gateM[2]:gateM[3]], line[callM[2]:callM[3]], line)
 	}
 	if !strings.Contains(line, "JSON_EXTRACT('gc-remote-op-lock-held', '$')") {
 		t.Fatalf("the gate's else branch must raise the marked error.\nline: %s", line)

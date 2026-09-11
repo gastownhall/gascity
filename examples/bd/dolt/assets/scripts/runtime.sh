@@ -506,10 +506,20 @@ kill_remote_op_session() {
     echo "  $_kr_db: server-side $_kr_label NOT killed: this client never learned its session id, and ownership of the in-flight remote operation(s) on the server (Id $_kr_listed) cannot be proven — left for the operator (KILL <Id>); gc dolt health names them" >&2
     return 1
   fi
+  _kr_runlock=$(remote_op_run_lock_name "$_kr_db")
+  _kr_guarded=""
   for _kr_one in $_kr_ids; do
     _kr_krc=0
-    _kr_kerr=$(dolt_sql_csv "$_kr_tmo" "" "KILL $_kr_one" 2>&1 >/dev/null) || _kr_krc=$?
-    [ "$_kr_krc" -eq 0 ] || echo "  $_kr_db: KILL $_kr_one failed (exit $_kr_krc): $_kr_kerr" >&2
+    # One batch: the KILL runs only while <id> still holds THIS run's lock;
+    # otherwise the batch stops before it (a restarted server may have handed
+    # the number to someone else — see the gate comment above).
+    _kr_kerr=$(dolt_sql_csv "$_kr_tmo" "" "SELECT IF(IS_USED_LOCK('$_kr_runlock') = $_kr_one, 1, JSON_EXTRACT('$REMOTE_OP_NOT_OWNER_MARK', '\$')) AS own; KILL $_kr_one" 2>&1 >/dev/null) || _kr_krc=$?
+    if [ "$_kr_krc" -ne 0 ]; then
+      case "$_kr_kerr" in
+        *"Error 3141 "*"\"$REMOTE_OP_NOT_OWNER_MARK\""*) _kr_guarded="$_kr_guarded $_kr_one " ;;
+        *) echo "  $_kr_db: KILL $_kr_one failed (exit $_kr_krc): $_kr_kerr" >&2 ;;
+      esac
+    fi
   done
   _kr_left=$(remote_op_sessions "$_kr_db" "$_kr_tmo" "$_kr_errf") || {
     echo "  $_kr_db: server-side $_kr_label kill NOT confirmed: the processlist query failed after KILL" >&2
@@ -521,13 +531,28 @@ kill_remote_op_session() {
   _kr_left_ids=" $(printf '%s\n' "$_kr_left" | awk '{ printf "%s ", $1 }')"
   _kr_rc=0
   for _kr_one in $_kr_ids; do
-    case "$_kr_left_ids" in
+    case "$_kr_guarded" in
       *" $_kr_one "*)
-        echo "  $_kr_db: server-side $_kr_label NOT killed (session $_kr_one still in flight after KILL)" >&2
-        _kr_rc=1
+        case "$_kr_left_ids" in
+          *" $_kr_one "*)
+            echo "  $_kr_db: server-side $_kr_label NOT killed: session $_kr_one does not hold this run's lock ($_kr_runlock) — the server restarted and reused the id, or it is another runner's — left for the operator (KILL <Id>)" >&2
+            _kr_rc=1
+            ;;
+          *)
+            echo "  $_kr_db: server-side $_kr_label already ended (session $_kr_one is gone; nothing killed)" >&2
+            ;;
+        esac
         ;;
       *)
-        echo "  $_kr_db: server-side $_kr_label killed (session $_kr_one no longer in flight)" >&2
+        case "$_kr_left_ids" in
+          *" $_kr_one "*)
+            echo "  $_kr_db: server-side $_kr_label NOT killed (session $_kr_one still in flight after KILL)" >&2
+            _kr_rc=1
+            ;;
+          *)
+            echo "  $_kr_db: server-side $_kr_label killed (session $_kr_one no longer in flight)" >&2
+            ;;
+        esac
         ;;
     esac
   done
@@ -574,7 +599,30 @@ bound_expired() {
 # `Error 3141 … Invalid JSON text … "gc-remote-op-lock-held"` and its
 # following statement never runs; IS_USED_LOCK names the holder; after KILL
 # the gate passes again; an 80-character lock name is accepted.
+#
+# Ownership is re-proven INSIDE the statements that matter (codex r12,
+# evidence 04i). The gate takes a second, per-run lock,
+# `gc_remote_op_run:<db>:<nonce>` (REMOTE_OP_RUN_NONCE = pid-epoch of this
+# script run), and:
+#   - the CALL's first argument is `IF(IS_USED_LOCK('<run lock>') =
+#     CONNECTION_ID(), '<remote>', JSON_EXTRACT('gc-remote-op-lost', '$'))`:
+#     Dolt evaluates expressions in CALL arguments (04i a), so a session that
+#     no longer holds this run's lock — the dolt CLI's pooled client
+#     reconnected between the gate and the CALL, and the fresh session took
+#     no lock — raises Error 3141 with "gc-remote-op-lost" BEFORE the
+#     procedure runs (04i b) and a session that holds it fetches (04i c);
+#   - the KILL is `SELECT IF(IS_USED_LOCK('<run lock>') = <id>, 1,
+#     JSON_EXTRACT('gc-remote-op-not-owner', '$')) AS own; KILL <id>` in ONE
+#     batch: the id printed by our statement proves ownership only within the
+#     server lifetime that issued it (a restarted server hands the same
+#     numbers out again), so the KILL runs only while that id still holds
+#     this run's lock; otherwise the batch stops before the KILL (04i e1, e3)
+#     and the processlist read after says whether the session is gone
+#     (already ended) or someone else's (NOT killed, left for the operator).
 REMOTE_OP_GATE_MARK='gc-remote-op-lock-held'
+REMOTE_OP_LOST_MARK='gc-remote-op-lost'
+REMOTE_OP_NOT_OWNER_MARK='gc-remote-op-not-owner'
+REMOTE_OP_RUN_NONCE="$$-$(date +%s)"
 
 # remote_op_lock_name DB — the user-level lock name for DB, `gc_remote_op:<db>`
 # with the name lowercased: Dolt resolves `app` and `APP` to one database, and
@@ -585,10 +633,34 @@ remote_op_lock_name() {
   printf 'gc_remote_op:%s' "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
 }
 
+# remote_op_run_lock_name DB — this run's own lock for DB,
+# `gc_remote_op_run:<db>:<pid>-<epoch>` (db lowercased like the database lock;
+# the nonce carries no caller data).
+remote_op_run_lock_name() {
+  printf 'gc_remote_op_run:%s:%s' "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" "$REMOTE_OP_RUN_NONCE"
+}
+
 # remote_op_gate_sql DB — the gate statement for DB (DB already validated by
-# the caller before it is interpolated).
+# the caller before it is interpolated): the database lock AND this run's
+# lock, both session-scoped, or the marked error.
 remote_op_gate_sql() {
-  printf "SELECT IF(GET_LOCK(CONCAT('gc_remote_op:', LOWER('%s')), 0) = 1, 1, JSON_EXTRACT('%s', '\$')) AS gate" "$1" "$REMOTE_OP_GATE_MARK"
+  printf "SELECT IF(GET_LOCK(CONCAT('gc_remote_op:', LOWER('%s')), 0) = 1 AND GET_LOCK('%s', 0) = 1, 1, JSON_EXTRACT('%s', '\$')) AS gate" "$1" "$(remote_op_run_lock_name "$1")" "$REMOTE_OP_GATE_MARK"
+}
+
+# remote_op_owned_arg DB VALUE — VALUE as the CALL's argument, but only while
+# this session still holds this run's lock for DB: otherwise the marked error
+# is raised and the procedure never runs (VALUE already validated by the
+# caller before it is interpolated).
+remote_op_owned_arg() {
+  printf "IF(IS_USED_LOCK('%s') = CONNECTION_ID(), '%s', JSON_EXTRACT('%s', '\$'))" "$(remote_op_run_lock_name "$1")" "$2" "$REMOTE_OP_LOST_MARK"
+}
+
+# remote_op_gate_lost STDERR_FILE — true when the captured dolt stderr says the
+# CALL's own ownership check failed: this session no longer held this run's
+# lock when the CALL was sent (the client reconnected); the procedure did not
+# run and there is nothing to kill.
+remote_op_gate_lost() {
+  grep -Eq "Error 3141 .*\"$REMOTE_OP_LOST_MARK\"" "$1" 2>/dev/null
 }
 
 # remote_op_gate_refused STDERR_FILE — true when the captured dolt stderr says
