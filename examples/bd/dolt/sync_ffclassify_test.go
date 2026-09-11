@@ -71,6 +71,19 @@ func runFFSync(t *testing.T, binDir string, args ...string) string {
 	return out
 }
 
+// runFFSyncFails runs sync and requires a NON-ZERO exit: every skip (in
+// flight, gate refused, processlist failure, timeout, malformed answer) is a
+// database that did not sync, and the script's exit code says so (codex r10:
+// a `return 0` on a failure path passed the output-only assertions).
+func runFFSyncFails(t *testing.T, binDir string, args ...string) string {
+	t.Helper()
+	out, err := ffSyncCmd(t, binDir, nil, args...).CombinedOutput()
+	if err == nil {
+		t.Fatalf("a run that skipped or failed a database must exit non-zero.\nout:\n%s", out)
+	}
+	return string(out)
+}
+
 // fakeDoltHeader is the shared preamble for an IDLE server: log argv, answer
 // the remote-lookup + active_branch metadata queries the sync path issues
 // before classification, and answer the single-flight processlist query with
@@ -209,7 +222,7 @@ func TestSyncUpToDateSkipsPush(t *testing.T) {
 func TestSyncFetchTimeoutSkipsNeverPushes(t *testing.T) {
 	binDir := t.TempDir()
 	logPath := writeSyncFakeDoltFetchTimeout(t, binDir, "main")
-	out := runFFSync(t, binDir, "--db", "app")
+	out := runFFSyncFails(t, binDir, "--db", "app")
 	if pushed(readLog(t, logPath)) {
 		t.Fatalf("a fetch timeout must NEVER push.\nout:\n%s", out)
 	}
@@ -592,7 +605,10 @@ func writeSyncFakeDoltFetchTimeoutKill(t *testing.T, dir, sessionID string, list
 	t.Helper()
 	logPath := filepath.Join(dir, "dolt.log")
 	started := filepath.Join(dir, "fetch-started")
-	killed := filepath.Join(dir, "killed")
+	// KILL marks only the ADDRESSED session (`killed-<id>`), so a KILL of the
+	// wrong id never reads as a successful cleanup (codex r10).
+	killedPrefix := filepath.Join(dir, "killed-")
+	killed := killedPrefix + sessionID
 	idEmit := ""
 	if sessionID != "" {
 		idEmit = "printf 'id\\n" + sessionID + "\\n' ; "
@@ -612,7 +628,7 @@ func writeSyncFakeDoltFetchTimeoutKill(t *testing.T, dir, sessionID string, list
 		"    else printf 'Id,Time,db\\n'; fi\n" +
 		"    exit 0 ;;\n" +
 		"  *\"CALL DOLT_FETCH(\"*) : > \"" + started + "\" ; " + idEmit + "printf 'context deadline exceeded\\n' >&2 ; exit 124 ;;\n" +
-		"  *\"KILL \"*) : > \"" + killed + "\" ; exit 0 ;;\n" +
+		"  *\"KILL \"*) k=\"$*\" ; : > \"" + killedPrefix + "${k##* }\" ; exit 0 ;;\n" +
 		"esac\nexit 0\n"
 	return installFFFakeDolt(t, dir, body)
 }
@@ -625,7 +641,7 @@ func fetched(log string) bool { return strings.Contains(log, "CALL DOLT_FETCH(")
 func TestSyncFetchInFlightSkipsNeverFetches(t *testing.T) {
 	binDir := t.TempDir()
 	logPath := writeSyncFakeDoltProcesslist(t, binDir, "printf 'Id,Time,db\\n42,7200,app\\n' ; exit 0")
-	out := runFFSync(t, binDir, "--db", "app")
+	out := runFFSyncFails(t, binDir, "--db", "app")
 	log := readLog(t, logPath)
 	if fetched(log) {
 		t.Fatalf("a fetch already in flight for the db must NOT start another.\nout:\n%s\nlog:\n%s", out, log)
@@ -675,7 +691,7 @@ func processlistQuery(t *testing.T, log string) string {
 func TestSyncFetchInFlightOtherDatabaseCountsToo(t *testing.T) {
 	binDir := t.TempDir()
 	logPath := writeSyncFakeDoltProcesslist(t, binDir, "printf 'Id,Time,db\\n44,500,other\\n45,10,\"other-two\"\\n' ; exit 0")
-	out := runFFSync(t, binDir, "--db", "app")
+	out := runFFSyncFails(t, binDir, "--db", "app")
 	log := readLog(t, logPath)
 	if fetched(log) {
 		t.Fatalf("a remote operation in flight anywhere on the server must block this fetch (attribution is not proof of its target).\nout:\n%s\nlog:\n%s", out, log)
@@ -690,7 +706,7 @@ func TestSyncFetchInFlightOtherDatabaseCountsToo(t *testing.T) {
 func TestSyncFetchInFlightCaseInsensitiveDatabase(t *testing.T) {
 	binDir := t.TempDir()
 	logPath := writeSyncFakeDoltProcesslist(t, binDir, "printf 'Id,Time,db\\n46,20,APP\\n' ; exit 0")
-	out := runFFSync(t, binDir, "--db", "app")
+	out := runFFSyncFails(t, binDir, "--db", "app")
 	if fetched(readLog(t, logPath)) {
 		t.Fatalf("a session attributed to APP is this database's (app): it must block the fetch.\nout:\n%s", out)
 	}
@@ -706,7 +722,7 @@ func TestSyncFetchInFlightCaseInsensitiveDatabase(t *testing.T) {
 func TestSyncFetchInFlightRevisionQualifiedDatabaseCounts(t *testing.T) {
 	binDir := t.TempDir()
 	logPath := writeSyncFakeDoltProcesslist(t, binDir, "printf 'Id,Time,db\\n47,40,APP/feature/x\\n' ; exit 0")
-	out := runFFSync(t, binDir, "--db", "app")
+	out := runFFSyncFails(t, binDir, "--db", "app")
 	if fetched(readLog(t, logPath)) {
 		t.Fatalf("a session attributed to APP/feature/x is this database's: it must block the fetch.\nout:\n%s", out)
 	}
@@ -715,7 +731,7 @@ func TestSyncFetchInFlightRevisionQualifiedDatabaseCounts(t *testing.T) {
 	}
 	binDir = t.TempDir()
 	logPath = writeSyncFakeDoltProcesslist(t, binDir, "printf 'Id,Time,db\\n48,5,other/main\\n' ; exit 0")
-	out = runFFSync(t, binDir, "--db", "app")
+	out = runFFSyncFails(t, binDir, "--db", "app")
 	if fetched(readLog(t, logPath)) {
 		t.Fatalf("another database's revision (other/main) blocks too: attribution is not proof of the target.\nout:\n%s", out)
 	}
@@ -733,7 +749,7 @@ func TestSyncGateMarkerInOrdinaryErrorIsNotRefusal(t *testing.T) {
 		"  *\"CALL DOLT_FETCH(\"*) printf 'id\\n63\\n' ; printf 'error on line 1 for query CALL DOLT_FETCH(''gc-remote-op-lock-held'', ''main''): Error 1105 (HY000): remote not found\\n' >&2 ; exit 1 ;;\n" +
 		"esac\nexit 0\n"
 	installFFFakeDolt(t, binDir, body)
-	out := runFFSync(t, binDir, "--db", "app")
+	out := runFFSyncFails(t, binDir, "--db", "app")
 	if strings.Contains(out, "already in flight") {
 		t.Fatalf("an ordinary error echoing the marker must not read as a gate refusal.\nout:\n%s", out)
 	}
@@ -751,7 +767,7 @@ func TestSyncGateMarkerInOrdinaryErrorIsNotRefusal(t *testing.T) {
 func TestSyncFetchInFlightUnattributedSkips(t *testing.T) {
 	binDir := t.TempDir()
 	logPath := writeSyncFakeDoltProcesslist(t, binDir, "printf 'Id,Time,db\\n43,30,\\n' ; exit 0")
-	out := runFFSync(t, binDir, "--db", "app")
+	out := runFFSyncFails(t, binDir, "--db", "app")
 	if fetched(readLog(t, logPath)) {
 		t.Fatalf("an unattributed in-flight fetch must block this db's fetch.\nout:\n%s", out)
 	}
@@ -763,7 +779,7 @@ func TestSyncFetchInFlightUnattributedSkips(t *testing.T) {
 func TestSyncProcesslistQueryFailureSkipsNeverFetches(t *testing.T) {
 	binDir := t.TempDir()
 	logPath := writeSyncFakeDoltProcesslist(t, binDir, "printf 'processlist: boom\\n' >&2 ; exit 1")
-	out := runFFSync(t, binDir, "--db", "app")
+	out := runFFSyncFails(t, binDir, "--db", "app")
 	log := readLog(t, logPath)
 	if fetched(log) || pushed(log) {
 		t.Fatalf("a failed processlist query must skip without fetching or pushing (fail closed).\nout:\n%s\nlog:\n%s", out, log)
@@ -779,7 +795,7 @@ func TestSyncProcesslistQueryFailureSkipsNeverFetches(t *testing.T) {
 func TestSyncProcesslistAnswerWithoutHeaderSkips(t *testing.T) {
 	binDir := t.TempDir()
 	logPath := writeSyncFakeDoltProcesslist(t, binDir, "exit 0")
-	out := runFFSync(t, binDir, "--db", "app")
+	out := runFFSyncFails(t, binDir, "--db", "app")
 	if fetched(readLog(t, logPath)) {
 		t.Fatalf("a header-less processlist answer must skip the fetch (fail closed).\nout:\n%s", out)
 	}
@@ -791,7 +807,7 @@ func TestSyncProcesslistAnswerWithoutHeaderSkips(t *testing.T) {
 func TestSyncFetchTimeoutKillsItsServerSideSession(t *testing.T) {
 	binDir := t.TempDir()
 	logPath := writeSyncFakeDoltFetchTimeoutKill(t, binDir, "77", []string{"77,60,app"}, false)
-	out := runFFSync(t, binDir, "--db", "app")
+	out := runFFSyncFails(t, binDir, "--db", "app")
 	log := readLog(t, logPath)
 	if pushed(log) {
 		t.Fatalf("a fetch timeout must NEVER push.\nout:\n%s", out)
@@ -800,7 +816,7 @@ func TestSyncFetchTimeoutKillsItsServerSideSession(t *testing.T) {
 		t.Fatalf("expected the 'fetch timed out' status.\nout:\n%s", out)
 	}
 	fetchAt := strings.Index(log, "CALL DOLT_FETCH(")
-	killAt := strings.Index(log, "KILL 77")
+	killAt := strings.Index(log, "KILL 77\n")
 	if fetchAt < 0 || killAt < 0 || killAt < fetchAt {
 		t.Fatalf("the session the fetch printed about itself must be KILLed after the fetch times out.\nlog:\n%s", log)
 	}
@@ -814,12 +830,12 @@ func TestSyncFetchTimeoutKillsItsServerSideSession(t *testing.T) {
 func TestSyncFetchTimeoutKillNotConfirmedReportsStillInFlight(t *testing.T) {
 	binDir := t.TempDir()
 	logPath := writeSyncFakeDoltFetchTimeoutKill(t, binDir, "77", []string{"77,60,app"}, true)
-	out := runFFSync(t, binDir, "--db", "app")
+	out := runFFSyncFails(t, binDir, "--db", "app")
 	log := readLog(t, logPath)
 	if pushed(log) {
 		t.Fatalf("a fetch timeout must NEVER push.\nout:\n%s", out)
 	}
-	if !strings.Contains(log, "KILL 77") {
+	if !strings.Contains(log, "KILL 77\n") {
 		t.Fatalf("KILL must be issued.\nlog:\n%s", log)
 	}
 	if !strings.Contains(out, "app: server-side fetch NOT killed (session 77 still in flight after KILL)") {
@@ -834,12 +850,15 @@ func TestSyncFetchBoundReachesTheFetch(t *testing.T) {
 	binDir := t.TempDir()
 	tlogPath := writeRecordingGtimeout(t, binDir)
 	logPath := writeSyncFakeDoltFetchTimeoutKill(t, binDir, "77", []string{"77,60,app"}, false)
-	outB, _ := ffSyncCmd(t, binDir, []string{"GC_DOLT_SYNC_FETCH_TIMEOUT_SECS=9"}, "--db", "app").CombinedOutput()
+	outB, err := ffSyncCmd(t, binDir, []string{"GC_DOLT_SYNC_FETCH_TIMEOUT_SECS=9"}, "--db", "app").CombinedOutput()
 	out := string(outB)
+	if err == nil {
+		t.Fatalf("a timed-out fetch must exit non-zero.\nout:\n%s", out)
+	}
 	if !strings.Contains(out, "app: fetch timed out after 9s") {
 		t.Fatalf("expected the timeout line naming the configured bound.\nout:\n%s", out)
 	}
-	if !strings.Contains(readLog(t, logPath), "KILL 77") {
+	if !strings.Contains(readLog(t, logPath), "KILL 77\n") {
 		t.Fatalf("KILL must be issued.\nout:\n%s", out)
 	}
 	assertBounded(t, readLog(t, tlogPath), "9", "CALL DOLT_FETCH(")
@@ -852,12 +871,12 @@ func TestSyncFetchBoundReachesTheFetch(t *testing.T) {
 func TestSyncFetchTimeoutKillVerdictRefusesMalformedAnswer(t *testing.T) {
 	binDir := t.TempDir()
 	logPath := writeSyncFakeDoltFetchTimeoutKill(t, binDir, "77", []string{"77,60,app,extra"}, true)
-	out := runFFSync(t, binDir, "--db", "app")
+	out := runFFSyncFails(t, binDir, "--db", "app")
 	log := readLog(t, logPath)
 	if pushed(log) {
 		t.Fatalf("a fetch timeout must NEVER push.\nout:\n%s", out)
 	}
-	if !strings.Contains(log, "KILL 77") {
+	if !strings.Contains(log, "KILL 77\n") {
 		t.Fatalf("KILL must be issued.\nlog:\n%s", log)
 	}
 	if strings.Contains(out, "no longer in flight") {
@@ -876,7 +895,7 @@ func TestSyncFetchTimeoutKillVerdictRefusesMalformedAnswer(t *testing.T) {
 func TestSyncFetchTimeoutWithoutIDKillsNothingAndReportsUnproven(t *testing.T) {
 	binDir := t.TempDir()
 	logPath := writeSyncFakeDoltFetchTimeoutKill(t, binDir, "", []string{"88,61,app", "89,5,"}, false)
-	out := runFFSync(t, binDir, "--db", "app")
+	out := runFFSyncFails(t, binDir, "--db", "app")
 	log := readLog(t, logPath)
 	if pushed(log) {
 		t.Fatalf("a fetch timeout must NEVER push.\nout:\n%s", out)
@@ -893,7 +912,7 @@ func TestSyncFetchTimeoutWithoutIDKillsNothingAndReportsUnproven(t *testing.T) {
 func TestSyncFetchTimeoutWithoutIDAndNothingListedKillsNothing(t *testing.T) {
 	binDir := t.TempDir()
 	logPath := writeSyncFakeDoltFetchTimeoutKill(t, binDir, "", nil, false)
-	out := runFFSync(t, binDir, "--db", "app")
+	out := runFFSyncFails(t, binDir, "--db", "app")
 	log := readLog(t, logPath)
 	if strings.Contains(log, "KILL ") {
 		t.Fatalf("nothing in flight after the timeout: nothing to KILL.\nlog:\n%s", log)
@@ -968,7 +987,7 @@ func TestSyncProcesslistMalformedRowSkips(t *testing.T) {
 	} {
 		binDir := t.TempDir()
 		logPath := writeSyncFakeDoltProcesslist(t, binDir, "printf 'Id,Time,db\\n"+strings.ReplaceAll(row, `"`, `\"`)+"\\n' ; exit 0")
-		out := runFFSync(t, binDir, "--db", "app")
+		out := runFFSyncFails(t, binDir, "--db", "app")
 		log := readLog(t, logPath)
 		if fetched(log) || pushed(log) {
 			t.Fatalf("row %q: a malformed processlist row must skip without fetching or pushing.\nout:\n%s\nlog:\n%s", row, out, log)
@@ -986,7 +1005,8 @@ func TestSyncFetchClientExit137StillKillsServerSideSession(t *testing.T) {
 	binDir := t.TempDir()
 	logPath := filepath.Join(binDir, "dolt.log")
 	started := filepath.Join(binDir, "fetch-started")
-	killed := filepath.Join(binDir, "killed")
+	killedPrefix := filepath.Join(binDir, "killed-")
+	killed := killedPrefix + "91"
 	body := fakeDoltPreamble(logPath, "main") +
 		"  *\"information_schema.processlist\"*)\n" +
 		"    if [ -f \"" + killed + "\" ]; then printf 'Id,Time,db\\n'\n" +
@@ -994,7 +1014,7 @@ func TestSyncFetchClientExit137StillKillsServerSideSession(t *testing.T) {
 		"    else printf 'Id,Time,db\\n'; fi\n" +
 		"    exit 0 ;;\n" +
 		"  *\"CALL DOLT_FETCH(\"*) : > \"" + started + "\" ; printf 'id\\n91\\n' ; exit 137 ;;\n" +
-		"  *\"KILL \"*) : > \"" + killed + "\" ; exit 0 ;;\n" +
+		"  *\"KILL \"*) k=\"$*\" ; : > \"" + killedPrefix + "${k##* }\" ; exit 0 ;;\n" +
 		"esac\nexit 0\n"
 	installFFFakeDolt(t, binDir, body)
 	out := runFFSync(t, binDir, "--db", "app")
@@ -1005,7 +1025,7 @@ func TestSyncFetchClientExit137StillKillsServerSideSession(t *testing.T) {
 	if !strings.Contains(out, "fetch timed out") || !strings.Contains(out, "client exit 137") {
 		t.Fatalf("exit 137 is the bound's SIGKILL escalation and must be reported as a timeout.\nout:\n%s", out)
 	}
-	if !strings.Contains(log, "KILL 91") || !strings.Contains(out, "server-side fetch killed (session 91 no longer in flight)") {
+	if !strings.Contains(log, "KILL 91\n") || !strings.Contains(out, "server-side fetch killed (session 91 no longer in flight)") {
 		t.Fatalf("the recorded session must be KILLed after exit 137.\nout:\n%s\nlog:\n%s", out, log)
 	}
 }
@@ -1022,7 +1042,7 @@ func TestSyncFetchGateRefusedSkipsNeverPushes(t *testing.T) {
 		"  *\"CALL DOLT_FETCH(\"*) printf 'id\\n61\\n' ; printf 'error on line 1 for query SELECT IF(GET_LOCK(...)) AS gate: Error 3141 (HY000): Invalid JSON text in argument 1 to function json_extract: \"gc-remote-op-lock-held\"\\n' >&2 ; exit 1 ;;\n" +
 		"esac\nexit 0\n"
 	installFFFakeDolt(t, binDir, body)
-	out := runFFSync(t, binDir, "--db", "app")
+	out := runFFSyncFails(t, binDir, "--db", "app")
 	log := readLog(t, logPath)
 	if pushed(log) {
 		t.Fatalf("a refused gate must NEVER push.\nout:\n%s", out)
@@ -1055,7 +1075,8 @@ func TestSyncFetchTimeoutOutranksFirstPushText(t *testing.T) {
 		binDir := t.TempDir()
 		logPath := filepath.Join(binDir, "dolt.log")
 		started := filepath.Join(binDir, "fetch-started")
-		killed := filepath.Join(binDir, "killed")
+		killedPrefix := filepath.Join(binDir, "killed-")
+		killed := killedPrefix + "93"
 		body := fakeDoltPreamble(logPath, "main") +
 			"  *\"information_schema.processlist\"*)\n" +
 			"    if [ -f \"" + killed + "\" ]; then printf 'Id,Time,db\\n'\n" +
@@ -1063,10 +1084,10 @@ func TestSyncFetchTimeoutOutranksFirstPushText(t *testing.T) {
 			"    else printf 'Id,Time,db\\n'; fi\n" +
 			"    exit 0 ;;\n" +
 			"  *\"CALL DOLT_FETCH(\"*) : > \"" + started + "\" ; printf 'id\\n93\\n' ; printf '" + tc.text + "\\n' >&2 ; exit " + fmt.Sprint(tc.code) + " ;;\n" +
-			"  *\"KILL \"*) : > \"" + killed + "\" ; exit 0 ;;\n" +
+			"  *\"KILL \"*) k=\"$*\" ; : > \"" + killedPrefix + "${k##* }\" ; exit 0 ;;\n" +
 			"esac\nexit 0\n"
 		installFFFakeDolt(t, binDir, body)
-		out := runFFSync(t, binDir, "--db", "app")
+		out := runFFSyncFails(t, binDir, "--db", "app")
 		log := readLog(t, logPath)
 		if pushed(log) {
 			t.Fatalf("exit %d with %q: a dead client must NEVER push.\nout:\n%s\nlog:\n%s", tc.code, tc.text, out, log)
@@ -1074,7 +1095,7 @@ func TestSyncFetchTimeoutOutranksFirstPushText(t *testing.T) {
 		if !strings.Contains(out, "fetch timed out") || strings.Contains(out, "first push") {
 			t.Fatalf("exit %d with %q: the timeout must outrank the first-push text.\nout:\n%s", tc.code, tc.text, out)
 		}
-		if !strings.Contains(log, "KILL 93") || !strings.Contains(out, "server-side fetch killed (session 93 no longer in flight)") {
+		if !strings.Contains(log, "KILL 93\n") || !strings.Contains(out, "server-side fetch killed (session 93 no longer in flight)") {
 			t.Fatalf("exit %d with %q: the recorded session must be KILLed.\nout:\n%s\nlog:\n%s", tc.code, tc.text, out, log)
 		}
 	}
