@@ -636,10 +636,13 @@ func TestSyncFetchInFlightSkipsNeverFetches(t *testing.T) {
 	if !strings.Contains(out, "app: fetch already in flight for 7200s (session 42)") || !strings.Contains(out, "NOT pushed") {
 		t.Fatalf("expected the in-flight skip line naming the oldest session's age and id.\nout:\n%s", out)
 	}
-	// Scoped to this database, case-insensitively: Dolt resolves `app` and
-	// `APP` to one database and the processlist shows the client's spelling.
-	if !strings.Contains(log, "LOWER(db) = LOWER('app')") {
-		t.Fatalf("the single-flight check must be scoped to this database, case-insensitively.\nlog:\n%s", log)
+	// The processlist query is CONSTANT text: no database name is interpolated
+	// into it. A store named `dolt_fetch` (a valid name) would otherwise make
+	// the query match its own text and skip on every run (codex r6, evidence
+	// 04g). The per-database filter is applied on the answer instead
+	// (TestSyncFetchInFlightOtherDatabaseDoesNotCount, …CaseInsensitiveDatabase).
+	if q := processlistQuery(t, log); strings.Contains(q, "app") || strings.Contains(q, "LOWER(db)") {
+		t.Fatalf("the processlist query must carry no database literal.\nquery:\n%s", q)
 	}
 	// The predicate is the whole-identifier token test on the statement text,
 	// not a LIKE prefix and not a grammar of spellings: any statement naming
@@ -647,6 +650,51 @@ func TestSyncFetchInFlightSkipsNeverFetches(t *testing.T) {
 	// comments, qualifiers, any case (verified on Dolt 2.1.10, evidence 04f).
 	if !strings.Contains(log, "UPPER(Info) REGEXP '(^|[^A-Z0-9_])DOLT_(FETCH|PULL)([^A-Z0-9_]|$)'") {
 		t.Fatalf("the in-flight predicate must be the whole-identifier REGEXP on UPPER(Info).\nlog:\n%s", log)
+	}
+}
+
+// processlistQuery returns the single-flight processlist invocation the fake
+// dolt logged (one `$*` line per invocation).
+func processlistQuery(t *testing.T, log string) string {
+	t.Helper()
+	for _, line := range strings.Split(log, "\n") {
+		if strings.Contains(line, "information_schema.processlist") {
+			return line
+		}
+	}
+	t.Fatalf("no processlist query in the log:\n%s", log)
+	return ""
+}
+
+// A session in flight for ANOTHER database does not block this one: the
+// per-database filter is applied on the answer (attributed to this db, or to
+// none), so the query text never carries a database name. A quoted db column
+// is read the way the CSV means it.
+func TestSyncFetchInFlightOtherDatabaseDoesNotCount(t *testing.T) {
+	binDir := t.TempDir()
+	logPath := writeSyncFakeDoltProcesslist(t, binDir, "printf 'Id,Time,db\\n44,500,other\\n45,10,\"other-two\"\\n' ; exit 0")
+	out := runFFSync(t, binDir, "--db", "app")
+	log := readLog(t, logPath)
+	if !fetched(log) {
+		t.Fatalf("a remote operation in flight for another database must not block this one's fetch.\nout:\n%s\nlog:\n%s", out, log)
+	}
+	if strings.Contains(out, "already in flight") {
+		t.Fatalf("no in-flight line for another database's session.\nout:\n%s", out)
+	}
+}
+
+// Database names compare case-insensitively on the answer: Dolt resolves
+// `app` and `APP` to one database and the processlist shows the client's
+// spelling.
+func TestSyncFetchInFlightCaseInsensitiveDatabase(t *testing.T) {
+	binDir := t.TempDir()
+	logPath := writeSyncFakeDoltProcesslist(t, binDir, "printf 'Id,Time,db\\n46,20,APP\\n' ; exit 0")
+	out := runFFSync(t, binDir, "--db", "app")
+	if fetched(readLog(t, logPath)) {
+		t.Fatalf("a session attributed to APP is this database's (app): it must block the fetch.\nout:\n%s", out)
+	}
+	if !strings.Contains(out, "fetch already in flight for 20s (session 46)") {
+		t.Fatalf("expected the in-flight skip line.\nout:\n%s", out)
 	}
 }
 

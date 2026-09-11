@@ -198,6 +198,25 @@ func TestPullInFlightSkipsNeverPulls(t *testing.T) {
 	}
 }
 
+// The same per-database filter on the answer for pull: another database's
+// in-flight session does not block this one, and the query text carries no
+// database name (constant text; codex r6).
+func TestPullInFlightOtherDatabaseDoesNotCount(t *testing.T) {
+	binDir := t.TempDir()
+	logPath := writePullFakeDolt(t, binDir, "printf 'Id,Time,db\\n52,300,other\\n' ; exit 0", "exit 0")
+	out, err := runPull(t, binDir, nil, "--db", "app")
+	log := readLog(t, logPath)
+	if err != nil {
+		t.Fatalf("another database's session must not block this pull: %v\nout:\n%s\nlog:\n%s", err, out, log)
+	}
+	if !strings.Contains(log, "CALL DOLT_PULL(") {
+		t.Fatalf("expected the pull to run.\nout:\n%s\nlog:\n%s", out, log)
+	}
+	if q := processlistQuery(t, log); strings.Contains(q, "app") || strings.Contains(q, "LOWER(db)") {
+		t.Fatalf("the processlist query must carry no database literal.\nquery:\n%s", q)
+	}
+}
+
 func TestPullTimeoutKillsItsServerSideSession(t *testing.T) {
 	binDir := t.TempDir()
 	started := filepath.Join(binDir, "pull-started")

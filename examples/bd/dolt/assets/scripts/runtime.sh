@@ -326,15 +326,22 @@ dolt_sql_csv() {
   fi
 }
 
-# remote_op_sessions_sql [DB] — the SQL that lists the live sessions running
-# CALL DOLT_FETCH or CALL DOLT_PULL as `Id,Time,db` rows. With DB (already
-# validated by the caller before it is interpolated): the sessions attributed
-# to that database PLUS the sessions attributed to no database at all — an
-# unattributed fetch (issued without --use-db: an older gc dolt sync, or an
-# operator) may be this database's, so it counts, fail closed. Database names
-# compare case-insensitively (Dolt resolves `app` and `APP` to one database;
-# the processlist shows whichever spelling the client used). Without DB:
-# every such session on the server (the health probe).
+# remote_op_sessions_sql — the SQL that lists the live sessions running
+# DOLT_FETCH or DOLT_PULL as `Id,Time,db` rows, server-wide. The text is
+# CONSTANT: it carries no database name and nothing else from the caller, so
+# no database an operator can create can make the query match its own text
+# (`dolt_fetch` and `team-dolt_pull-prod` are valid names; the previous shape
+# interpolated LOWER('<db>') and would have listed itself on every run of such
+# a store — codex r6, evidence 04g), and two probes running at once cannot
+# count each other. The per-database filter is applied on the ANSWER by
+# remote_op_sessions_parse: the sessions attributed to that database PLUS the
+# sessions attributed to no database at all — an unattributed fetch (issued
+# without --use-db: an older gc dolt sync, or an operator) may be this
+# database's, so it counts, fail closed. Database names compare
+# case-insensitively (Dolt resolves `app` and `APP` to one database; the
+# processlist shows whichever spelling the client used; the pack's own names
+# are ASCII by valid_database_name). Without a DB filter: every such session
+# on the server (the health probe).
 # REMOTE_OP_INFO_REGEXP — the SQL REGEXP (applied to UPPER(Info)) that decides
 # "a remote operation is in flight": ANY statement that names DOLT_FETCH or
 # DOLT_PULL as a whole identifier (a non-identifier character or the string's
@@ -350,18 +357,30 @@ dolt_sql_csv() {
 # and do not match themselves. Verified on Dolt 2.1.10 (evidence 04f): 15
 # spellings hit, 6 decoys miss, 2 mentions-in-text hit by design, no
 # self-match, and a live bare `CALL DOLT_FETCH` is listed and killable.
+# LIMIT, by decision (codex r6, evidence 04g): the processlist shows the
+# statement text a session SUBMITTED, so a fetch run indirectly — a
+# text-protocol prepared statement (`PREPARE s FROM 'CALL DOLT_FETCH()';
+# EXECUTE s` shows `EXECUTE s`), a user stored procedure that wraps the call
+# (`CALL fetch_wrapper()`), an event — is invisible to this predicate, to the
+# pre-check line and to the health count, and such a session holds no pack
+# lock. No text predicate can see it: the only wider ones (any `EXECUTE`, any
+# `CALL` not naming a DOLT_ procedure) either reintroduce a grammar the
+# reviewer can keep moving or make sync skip whenever bd is inside a
+# `CALL DOLT_COMMIT`. The pack's own runs never need it — they are serialized
+# by the server lock (remote_op_gate_sql) — and the herd's shape was direct
+# CALLs; an operator's indirect fetch is out of this guard's reach and
+# stays the operator's to KILL by hand.
 REMOTE_OP_INFO_REGEXP='(^|[^A-Z0-9_])DOLT_(FETCH|PULL)([^A-Z0-9_]|$)'
 
 remote_op_sessions_sql() {
-  _ros_q="SELECT Id, Time, COALESCE(db, '') AS db FROM information_schema.processlist WHERE UPPER(Info) REGEXP '$REMOTE_OP_INFO_REGEXP'"
-  if [ -n "${1:-}" ]; then
-    _ros_q="$_ros_q AND (LOWER(db) = LOWER('$1') OR db = '' OR db IS NULL)"
-  fi
-  printf '%s ORDER BY Time DESC, Id ASC' "$_ros_q"
+  printf "SELECT Id, Time, COALESCE(db, '') AS db FROM information_schema.processlist WHERE UPPER(Info) REGEXP '%s' ORDER BY Time DESC, Id ASC" "$REMOTE_OP_INFO_REGEXP"
 }
 
-# remote_op_sessions_parse — stdin: the CSV answer to remote_op_sessions_sql;
-# stdout: one `Id Time` line per session. Returns 1 when the first line is not
+# remote_op_sessions_parse [DB] — stdin: the CSV answer to
+# remote_op_sessions_sql; stdout: one `Id Time` line per session attributed to
+# DB (case-insensitively) or to no database, every session when DB is empty.
+# Every row is checked for shape BEFORE the filter, so a malformed row for
+# another database still refuses the whole answer. Returns 1 when the first line is not
 # the `Id,Time,db` header (an empty stdout, a banner or an error text is NOT a
 # processlist answer), 2 when a non-blank row does not START with an unquoted
 # all-digit Id and Time (`12,34,…`): a NULL, a truncated line, a wrapper's
@@ -370,7 +389,7 @@ remote_op_sessions_sql() {
 # malformed row is a session whose state is unknown, so the whole answer is
 # refused, fail closed.
 remote_op_sessions_parse() {
-  awk -F, '
+  awk -F, -v want="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" '
     NR == 1 {
       hdr = $0
       gsub(/"|\r/, "", hdr)
@@ -381,6 +400,10 @@ remote_op_sessions_parse() {
     {
       sub(/\r$/, "")
       if ($0 !~ /^[0-9]+,[0-9]+,/) { bad = 1; exit 2 }
+      have = $0
+      sub(/^[0-9]+,[0-9]+,/, "", have)
+      gsub(/^"|"$/, "", have)
+      if (want != "" && have != "" && tolower(have) != want) next
       print $1, $2
     }
     END { if (NR == 0) exit 1; if (bad) exit 2 }
@@ -388,7 +411,8 @@ remote_op_sessions_parse() {
 }
 
 # remote_op_sessions DB TIMEOUT_SECS STDERR_FILE — list the in-flight remote
-# operations (remote_op_sessions_sql DB; DB may be empty for server-wide) as
+# operations (the constant remote_op_sessions_sql, filtered to DB by
+# remote_op_sessions_parse; DB may be empty for server-wide) as
 # `Id Time` lines on stdout. Returns 0 on a processlist answer (possibly with
 # no rows); otherwise the query's exit code (124 = the bound expired), or 1
 # when the answer was not a processlist, with the reason appended to
@@ -398,9 +422,9 @@ remote_op_sessions() {
   _rs_tmo="$2"
   _rs_errf="$3"
   _rs_rc=0
-  _rs_csv=$(dolt_sql_csv "$_rs_tmo" "" "$(remote_op_sessions_sql "$_rs_db")" 2>>"$_rs_errf") || _rs_rc=$?
+  _rs_csv=$(dolt_sql_csv "$_rs_tmo" "" "$(remote_op_sessions_sql)" 2>>"$_rs_errf") || _rs_rc=$?
   [ "$_rs_rc" -eq 0 ] || return "$_rs_rc"
-  _rs_rows=$(printf '%s\n' "$_rs_csv" | remote_op_sessions_parse) || {
+  _rs_rows=$(printf '%s\n' "$_rs_csv" | remote_op_sessions_parse "$_rs_db") || {
     _rs_prc=$?
     if [ "$_rs_prc" -eq 2 ]; then
       printf 'malformed processlist row (Id or Time not all-digit) — refusing the whole answer\n' >>"$_rs_errf"

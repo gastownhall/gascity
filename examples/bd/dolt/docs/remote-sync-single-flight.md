@@ -16,7 +16,16 @@ processlist, or carries a row that is not `digits,digits,…`, also skips (fail
 closed). "In flight" means any server-side statement that names `DOLT_FETCH`
 or `DOLT_PULL` as an identifier, however the call was spelled; a statement
 that merely mentions the name in a literal or comment costs one skipped run
-while it executes, which is the safe side.
+while it executes, which is the safe side. The processlist query itself is
+constant text — no database name is interpolated into it — so a store named,
+say, `dolt_fetch` cannot make the query match its own text; the per-database
+filter is applied to the answer. One limit, by design: the processlist shows
+the statement text a session submitted, so a fetch run *indirectly* — through
+a text-protocol prepared statement (`EXECUTE s`), a user stored procedure that
+wraps the call, or an event — is invisible to the pre-check and to the health
+count, and holds no pack lock. The pack's own runs never need that visibility
+(they are serialized by the server lock below); an operator's indirect fetch is
+theirs to `KILL` by hand.
 The statement they do issue takes the server's own session lock for the
 database (`GET_LOCK('gc_remote_op:<db>', 0)`) in the same batch as the CALL:
 two runners that both read "nothing in flight" cannot both fetch, because the
