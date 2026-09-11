@@ -2098,6 +2098,7 @@ func TestNativeDoltStoreUsesBoundedOperationContext(t *testing.T) {
 func TestOpenNativeDoltStoreAtProjectsScopedEnvDuringOpen(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient.example.com")
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
+	t.Setenv("BEADS_DOLT_MAX_CONNS", "10")
 	oldOpen := nativeDoltOpenBestAvailable
 	t.Cleanup(func() {
 		nativeDoltOpenBestAvailable = oldOpen
@@ -2112,6 +2113,13 @@ func TestOpenNativeDoltStoreAtProjectsScopedEnvDuringOpen(t *testing.T) {
 		if got := os.Getenv("BEADS_DOLT_SERVER_PORT"); got != "4407" {
 			t.Fatalf("BEADS_DOLT_SERVER_PORT during open = %q, want 4407", got)
 		}
+		// The library reads the project-pool ceiling with a plain os.Getenv
+		// inside the open. A key the caller passes but nativeDoltOpenEnvKeys
+		// omits is never placed in the environment, so the knob silently
+		// falls back to the daemon-sized default with the whole suite green.
+		if got := os.Getenv("BEADS_DOLT_MAX_CONNS"); got != "1" {
+			t.Fatalf("BEADS_DOLT_MAX_CONNS during open = %q, want 1: the key must be in nativeDoltOpenEnvKeys to reach the library", got)
+		}
 		if !strings.HasSuffix(beadsDir, filepath.Join("scope", ".beads")) {
 			t.Fatalf("beadsDir = %q, want scope .beads path", beadsDir)
 		}
@@ -2125,6 +2133,7 @@ func TestOpenNativeDoltStoreAtProjectsScopedEnvDuringOpen(t *testing.T) {
 	store, err := OpenNativeDoltStoreAt(context.Background(), filepath.Join(t.TempDir(), "scope"), map[string]string{
 		"BEADS_DOLT_SERVER_HOST": "scoped.example.com",
 		"BEADS_DOLT_SERVER_PORT": "4407",
+		"BEADS_DOLT_MAX_CONNS":   "1",
 	})
 	if err != nil {
 		t.Fatalf("OpenNativeDoltStoreAt: %v", err)
@@ -2137,6 +2146,9 @@ func TestOpenNativeDoltStoreAtProjectsScopedEnvDuringOpen(t *testing.T) {
 	}
 	if got := os.Getenv("BEADS_DOLT_SERVER_PORT"); got != "9999" {
 		t.Fatalf("BEADS_DOLT_SERVER_PORT after open = %q, want ambient restored", got)
+	}
+	if got := os.Getenv("BEADS_DOLT_MAX_CONNS"); got != "10" {
+		t.Fatalf("BEADS_DOLT_MAX_CONNS after open = %q, want ambient restored", got)
 	}
 }
 
@@ -3397,5 +3409,90 @@ func TestScopedNativeDoltOpenEnvIgnoresKeysOutsideItsList(t *testing.T) {
 	restore()
 	if got != "/poison/credential-command" {
 		t.Fatalf("BEADS_DOLT_CREDENTIAL_COMMAND during a scoped projection = %q; if the projection now honors unlisted keys, the hermetic open's reason to exist has changed", got)
+	}
+}
+
+// nativeReadyGateBlocker builds one GetDependenciesWithMetadata row: the
+// blocker's own Issue (IssueWithDependencyMetadata embeds Issue, so Status and
+// Metadata are the blocker's) plus the edge type joining it to the dependent.
+func nativeReadyGateBlocker(id string, status beadslib.Status, depType beadslib.DependencyType, metadata string) *beadslib.IssueWithDependencyMetadata {
+	issue := beadslib.Issue{ID: id, Title: id, Status: status, IssueType: beadslib.TypeTask, Priority: 2}
+	if metadata != "" {
+		issue.Metadata = json.RawMessage(metadata)
+	}
+	return &beadslib.IssueWithDependencyMetadata{Issue: issue, DependencyType: depType}
+}
+
+// TestNativeDoltStoreReadyWorkOutcomeFilterToleratesOpenGates pins that the
+// gc.work_outcome post-filter is a NARROW veto layered on GetReadyWork's
+// verdict, not a from-scratch recompute of blocking status.
+//
+// The backing store's gating is richer than "the blocker is closed": a pinned
+// blocker satisfies a blocks edge, and a waits-for edge gates on the spawner's
+// children rather than on the spawner's own status. GetReadyWork already
+// cleared both when it offered the candidate. Applying the full
+// DependencySatisfied predicate here would re-block them, silently overriding
+// an answer this filter cannot reproduce. Only the closed-and-blocked case —
+// which the backing store's own check cannot see — may veto.
+func TestNativeDoltStoreReadyWorkOutcomeFilterToleratesOpenGates(t *testing.T) {
+	tests := []struct {
+		name    string
+		blocker *beadslib.IssueWithDependencyMetadata
+		want    bool
+	}{
+		{
+			name:    "pinned blocks blocker satisfies (beadslib treats pinned as satisfying)",
+			blocker: nativeReadyGateBlocker("gc-pinned", beadslib.Status("pinned"), beadslib.DependencyType("blocks"), ""),
+			want:    true,
+		},
+		{
+			name:    "open waits-for spawner satisfies (the gate opens on its children)",
+			blocker: nativeReadyGateBlocker("gc-spawner", beadslib.StatusOpen, beadslib.DependencyType("waits-for"), ""),
+			want:    true,
+		},
+		{
+			name:    "closed blocker with no work outcome satisfies",
+			blocker: nativeReadyGateBlocker("gc-done", beadslib.StatusClosed, beadslib.DependencyType("blocks"), ""),
+			want:    true,
+		},
+		{
+			name:    "closed blocker with a non-blocked work outcome satisfies",
+			blocker: nativeReadyGateBlocker("gc-shipped", beadslib.StatusClosed, beadslib.DependencyType("blocks"), `{"gc.work_outcome":"shipped"}`),
+			want:    true,
+		},
+		{
+			name:    "closed blocker recorded gc.work_outcome=blocked vetoes",
+			blocker: nativeReadyGateBlocker("gc-gaveup", beadslib.StatusClosed, beadslib.DependencyType("blocks"), `{"gc.work_outcome":"blocked"}`),
+			want:    false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			storage := &nativeDoltStorageSpy{
+				getReadyWork: func(_ context.Context, _ beadslib.WorkFilter) ([]*beadslib.Issue, error) {
+					return []*beadslib.Issue{
+						{ID: "gc-candidate", Title: "candidate", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2},
+					}, nil
+				},
+				getDependenciesWithMetadata: func(_ context.Context, id string) ([]*beadslib.IssueWithDependencyMetadata, error) {
+					if id != "gc-candidate" {
+						return nil, nil
+					}
+					return []*beadslib.IssueWithDependencyMetadata{tt.blocker}, nil
+				},
+			}
+			store := newNativeDoltStoreForTest(storage)
+
+			got, err := store.Ready(ReadyQuery{TierMode: TierBoth})
+			if err != nil {
+				t.Fatalf("Ready: %v", err)
+			}
+			if tt.want && (len(got) != 1 || got[0].ID != "gc-candidate") {
+				t.Fatalf("Ready = %+v, want [gc-candidate]: GetReadyWork already cleared this gate, so the work-outcome filter must not re-block it", got)
+			}
+			if !tt.want && len(got) != 0 {
+				t.Fatalf("Ready = %+v, want empty: a blocker closed with gc.work_outcome=blocked must veto its dependent", got)
+			}
+		})
 	}
 }

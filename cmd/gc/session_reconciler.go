@@ -202,6 +202,88 @@ func clearDrainTrackerForStopPending(id string, dt *drainTracker) {
 	dt.remove(id)
 }
 
+// cancelSelfInitiatedDrainAckAtMinFloor cancels a SELF-INITIATED drain-ack when
+// honoring it would strand the template's min_active_sessions floor empty, and
+// reports whether it did. It is the floor-aware twin of the assigned-work cancel
+// (cancelSessionDrainForAssignedWorkInfo) at the same two drain-ack sites.
+//
+// THE LOOP IT CURES (sc-j27j0d, measured live on dip/refinery.refinery
+// 2026-08-21 17:44-18:06Z, 8 sessions in 29 minutes at a 75-170s period):
+// min_active_sessions=1 guarantees a session unconditionally; the seat boots,
+// its selector correctly finds zero ready work, and the pool-worker protocol
+// makes it run `gc runtime drain-ack`. The reconciler honored the ack, stopped
+// the process and closed the session; the pool was then below its floor, so
+// min_fill booted a fresh session that repeated the cycle for as long as the
+// ready queue stayed empty. Two contracts, neither yielding. Deleting the floor
+// is NOT the cure — the floor is what cured the orphan-flap (dip-ep6me2).
+//
+// The cure keeps the floor session WARM: cancel the ack, let it idle under
+// idle_timeout (where isMinFloorExemptIdleSession already exempts exactly this
+// session), and let the next wake deliver work to the live seat instead of
+// destroying and cold-recreating one every couple of minutes.
+//
+// SELF-INITIATED IS THE WHOLE GATE, and it is what keeps this from swallowing
+// drains that must be honored. Every precondition fails CLOSED — on any doubt
+// the function returns false and the caller stops the session exactly as before:
+//
+//   - only an ack whose GC_DRAIN_ACK_SOURCE is exactly "agent" qualifies. A
+//     RECONCILER-OWNED ack (orphaned, no-wake-reason, config-drift) was minted
+//     from the desired-state view rather than chosen by the agent, and its own
+//     cancel/stop rules live at the call sites. Reading the SOURCE rather than
+//     reconcilerDrainAckMatchesSessionInfo is deliberate: that helper also
+//     matches the generation, so a reconciler ack gone STALE would come back
+//     "not reconciler-owned" and slip through this gate. An unreadable or
+//     absent source is refused for the same reason.
+//   - an OUTSTANDING DRAIN REQUEST is refused, whether it is visible as GC_DRAIN
+//     on the runtime (an operator `gc agents drain`, a config-drift drain) or as
+//     a live drainTracker entry. Somebody asked this session to stop; the floor
+//     is not a veto over that order. An UNREADABLE GC_DRAIN is refused too.
+//   - a session that is not a deterministic floor member is refused, so elastic
+//     sessions above the floor retire on their own ack as they always have.
+//
+// The clear is the last act and its failure is refused as well: leaving the ack
+// set while returning true would park the session and re-enter this branch every
+// tick, so a failed clear falls through to the ordinary stop.
+func cancelSelfInitiatedDrainAckAtMinFloor(
+	infoByID map[string]sessionpkg.Info,
+	cfg *config.City,
+	dops drainOps,
+	sp runtime.Provider,
+	dt *drainTracker,
+	template, name, id string,
+	stderr io.Writer,
+) bool {
+	if dops == nil || cfg == nil || sp == nil || name == "" || id == "" {
+		return false
+	}
+	if _, ok := infoByID[id]; !ok {
+		return false
+	}
+	// Agent-sourced acks only; anything else keeps its existing semantics.
+	source, sourceErr := sp.GetMeta(name, reconcilerDrainAckSourceKey)
+	if sourceErr != nil || strings.TrimSpace(source) != drainAckSourceAgentValue {
+		return false
+	}
+	// An outstanding drain request outranks the floor — and an unreadable one
+	// is treated as outstanding.
+	draining, drainErr := dops.isDraining(name)
+	if drainErr != nil || draining {
+		return false
+	}
+	if dt != nil && dt.get(id) != nil {
+		return false
+	}
+	if !isMinFloorProtectedDrainAckSession(infoByID, cfg, template, id) {
+		return false
+	}
+	if err := dops.clearDrain(name); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: clearing min-floor drain-ack for '%s': %v\n", name, err) //nolint:errcheck
+		return false
+	}
+	telemetry.RecordDrainTransition(context.Background(), name, "min-floor", "cancel")
+	return true
+}
+
 func assignedWorkDrainCancelReason(session beads.Bead, sp runtime.Provider, dt *drainTracker, name string) string {
 	if dt != nil {
 		if ds := dt.get(session.ID); ds != nil && assignedWorkDrainReasonCancelable(ds.reason) {
@@ -450,7 +532,11 @@ func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provi
 func confirmDrainAckRuntimeDead(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, name, expectedToken string, processNames []string, stderr io.Writer) bool {
 	deadline := time.Now().Add(drainAckStopConfirmDeadTimeout)
 	for {
-		running, alive := observeRuntimeProviderLiveness(sp, name, processNames)
+		running, alive, livenessErr := observeRuntimeProviderLiveness(sp, name, processNames)
+		if livenessErr != nil {
+			fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s: deferring confirm-dead because liveness observation failed: %v\n", name, livenessErr) //nolint:errcheck
+			return false
+		}
 		if !running && !alive {
 			return true
 		}
@@ -1775,7 +1861,21 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// 3a: capture the !desired path's OWN probe result (presence only,
 				// by bead ID). alive is unknown on this path; probe target is left
 				// empty because this path probes by ID, not name (no name to skew).
-				shadowTick.captureRuntime(id, "workerSessionTargetRunningWithConfig", "", triFromBool(providerAlive), convergeTriUnknown)
+				present := triFromBool(providerAlive)
+				if livenessErr != nil {
+					present = convergeTriUnknown
+				}
+				shadowTick.captureRuntime(id, "workerSessionTargetRunningWithConfig", "", present, convergeTriUnknown)
+			}
+			if livenessErr != nil {
+				// A configured named spec is positive control-plane evidence even
+				// while runtime state is unknown. Reset its consecutive-absence
+				// window, but leave persisted lifecycle state untouched.
+				if preserveConfiguredNamedSessionBeadInfo(info, cfg, cityName) {
+					dt.clearSuspendDeferral(id)
+				}
+				fmt.Fprintf(stderr, "session reconciler: skipping close of '%s': liveness observation failed: %v\n", name, livenessErr) //nolint:errcheck
+				continue
 			}
 			// Run this before configured named-session preservation. A stale
 			// state=creating bead with an expired pending-create lease would
@@ -1879,9 +1979,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				info = tick.set(id, preservedInfo)
 				if preserveErr == nil {
 					obs, obsErr := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, id, preservedTP.Hints.ProcessNames)
-					rateLimitAlive := rateLimitAliveFromObservation(obs.Alive, obsErr)
+					if obsErr != nil {
+						fmt.Fprintf(stderr, "session reconciler: skipping preserved named lifecycle reconciliation of '%s': liveness observation failed: %v\n", name, obsErr) //nolint:errcheck
+						continue
+					}
 					peek := cachedSessionPeek(cityPath, store, sp, cfg, id, preservedTP.Hints.ProcessNames)
-					rlNextNamed, rateLimitHit, rateLimitErr = checkRateLimitStability(info, cfg, rateLimitAlive, dt, sessFront, clk, peek)
+					rlNextNamed, rateLimitHit, rateLimitErr = checkRateLimitStability(info, cfg, obs.Alive, dt, sessFront, clk, peek)
 				}
 			}
 			if rateLimitHit || rateLimitErr != nil {
@@ -2104,6 +2207,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							if template == "" {
 								template = infoPostHeal.Template
 							}
+							// Min-floor twin of the assigned-work cancel above (sc-j27j0d):
+							// honoring a self-initiated ack here would drop the template
+							// below min_active_sessions, and min_fill would immediately boot
+							// a replacement that acks again. Keep the floor seat warm instead.
+							if cancelSelfInitiatedDrainAckAtMinFloor(infoByID, cfg, dops, sp, dt, template, name, id, stderr) {
+								fmt.Fprintf(stdout, "Canceled drain-acked session '%s' (min_active_sessions floor)\n", name) //nolint:errcheck
+								if trace != nil {
+									trace.RecordDecision(TraceSiteDrainCancel, TraceReasonMinFloorIdleWorker, TraceOutcomeCancelMinFloor, template, name, nil)
+								}
+								continue
+							}
 							if updated, ok := markDrainAckStopPending(infoByID[id], sessFront, clk, stderr); ok {
 								// markDrainAckStopPending persisted the stop-pending transition and
 								// returned the folded snapshot Info (write-returns-Info, Step 6d) —
@@ -2324,11 +2438,19 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// the expected child process is alive (when ProcessNames configured).
 		// The desired-session fast path only needs running/alive; attachment
 		// and activity are probed by the narrower branches that use them.
-		running, alive := observeRuntimeProviderLiveness(sp, name, tp.Hints.ProcessNames)
+		running, alive, livenessErr := observeRuntimeProviderLiveness(sp, name, tp.Hints.ProcessNames)
 		if shadowTick != nil {
 			// 3a: capture the desired fast path's OWN two-bit probe (present +
 			// alive) by name, enabling zombie (present && !alive) expression.
-			shadowTick.captureRuntime(id, "observeRuntimeProviderLiveness", name, triFromBool(running), triFromBool(alive))
+			if livenessErr != nil {
+				shadowTick.captureRuntime(id, "observeRuntimeProviderLiveness", name, convergeTriUnknown, convergeTriUnknown)
+			} else {
+				shadowTick.captureRuntime(id, "observeRuntimeProviderLiveness", name, triFromBool(running), triFromBool(alive))
+			}
+		}
+		if livenessErr != nil {
+			fmt.Fprintf(stderr, "session reconciler: skipping lifecycle reconciliation of '%s': liveness observation failed: %v\n", name, livenessErr) //nolint:errcheck
+			continue
 		}
 		peek := cachedSessionPeek(cityPath, store, sp, cfg, id, tp.Hints.ProcessNames)
 		if running && !alive {
@@ -2497,6 +2619,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						attached, attachErr := sessionAttachedForConfigDrift(id, sp, cityPath, store, cfg, name)
 						if attachErr != nil {
 							fmt.Fprintf(stderr, "session reconciler: observing config-drift attachment for %s: %v\n", name, attachErr) //nolint:errcheck
+							if errors.Is(attachErr, runtime.ErrRuntimeUnavailable) {
+								if trace != nil {
+									trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonConfigDriftAttachmentError, TraceOutcomeSkippedLivenessError, tp.TemplateName, name, traceRecordPayload{
+										"error": attachErr.Error(),
+									})
+								}
+								continue
+							}
 							drainCancelled := cancelSessionConfigDriftDrainInfo(infoByID[id], sp, dt)
 							if !drainCancelled {
 								_ = clearReconcilerDrainAckMetadata(sp, name)
@@ -2543,6 +2673,18 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						(cancelReconcilerAckedDrainInfo(infoByID[id], sp, dt) || cancelRecoveredReconcilerAckedDrainInfo(infoByID[id], sp, name)) {
 						if trace != nil {
 							trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonPending, TraceOutcomeCancelReconcilerAck, tp.TemplateName, name, nil)
+						}
+						continue
+					}
+					// Min-floor twin of the assigned-work cancel above (sc-j27j0d). This
+					// is the arm the measured refinery loop ran through: reason
+					// "acknowledged", outcome stop_pending, once per boot. It sits after
+					// the config-drift and pending-interaction arms so a drain that must
+					// be honored has already been handled and returned.
+					if alive && cancelSelfInitiatedDrainAckAtMinFloor(infoByID, cfg, dops, sp, dt, tp.TemplateName, name, id, stderr) {
+						fmt.Fprintf(stdout, "Canceled drain-acked session '%s' (min_active_sessions floor)\n", name) //nolint:errcheck
+						if trace != nil {
+							trace.RecordDecision(TraceSiteDrainCancel, TraceReasonMinFloorIdleWorker, TraceOutcomeCancelMinFloor, tp.TemplateName, name, nil)
 						}
 						continue
 					}
@@ -2849,7 +2991,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// Fold detached_at change onto the snapshot (Step 6d write-returns-Info).
 		// reconcileDetachedAt returns the {"detached_at": <value>} batch it mirrored,
 		// or nil on no-op. Pre-pass-masked (STEP6-PREPASS-AUDIT group 6).
-		tick.apply(id, reconcileDetachedAtInfo(infoByID[id], store, policy, alive, sp, clk))
+		detachedPatch, detachedErr := reconcileDetachedAtInfo(infoByID[id], store, policy, alive, sp, clk)
+		if detachedErr != nil {
+			fmt.Fprintf(stderr, "session reconciler: deferring lifecycle for %s after attachment observation failure: %v\n", name, detachedErr) //nolint:errcheck
+			continue
+		}
+		tick.apply(id, detachedPatch)
 
 		// Stability check: detect rapid crash after state healing. Rate-limit
 		// detection intentionally ran above before healState.
@@ -3035,6 +3182,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							activeReason, active, deferErr := shouldDeferNamedSessionConfigDrift(infoByID[id], sessFront, sp, name, clk, driftKey)
 							if deferErr != nil {
 								fmt.Fprintf(stderr, "session reconciler: recording config-drift deferral for %s: %v\n", name, deferErr) //nolint:errcheck
+								if errors.Is(deferErr, runtime.ErrRuntimeUnavailable) {
+									continue
+								}
 							}
 							if active {
 								if trace != nil {
@@ -3068,7 +3218,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							// write-returns-Info). The alive lane falls through to the
 							// aggregating refresh @~2710 today, but folding here future-proofs
 							// that refresh's retirement (STEP6-PREPASS-AUDIT group 10).
-							tick.apply(id, resetConfiguredNamedSessionForConfigDriftInfo(infoByID[id], store, sp, name, alive, string(sessionpkg.StateStartPending), clk.Now().UTC(), stderr))
+							tick.apply(id, resetConfiguredNamedSessionForConfigDriftInfo(infoByID[id], tp, store, sp, name, alive, string(sessionpkg.StateStartPending), clk.Now().UTC(), stderr))
 							if trace != nil {
 								trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, TraceOutcomeRestartInPlace, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, nil))
 							}
@@ -3288,7 +3438,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// write-returns-Info); this asleep lane `continue`s, so the fold must
 						// run before the continue. Clears restart_requested on the snapshot
 						// (#2574). Pre-pass-masked (STEP6-PREPASS-AUDIT group 10).
-						tick.apply(id, resetConfiguredNamedSessionForConfigDriftInfo(infoByID[id], store, sp, name, false, "asleep", clk.Now().UTC(), stderr))
+						tick.apply(id, resetConfiguredNamedSessionForConfigDriftInfo(infoByID[id], tp, store, sp, name, false, "asleep", clk.Now().UTC(), stderr))
 						if trace != nil {
 							trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, TraceOutcomeRepairInPlace, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, nil))
 						}
@@ -3588,7 +3738,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	for i := range orderedIDs {
 		sessionInfos[i] = infoByID[orderedIDs[i]]
 	}
-	awakeInput := buildAwakeInputFromReconciler(
+	awakeInput, runtimeObservationErrors := buildAwakeInputFromReconcilerWithObservationErrors(
 		cfg, cityPath, sessionInfos, poolDesired, namedSessionDemand, namedRoutedDemand, workSet, readyWaitSet,
 		assignedWorkBeads, reconcileOpts.readyAssignedFlags, wakeTargets, sp, clk.Now(),
 	)
@@ -3614,8 +3764,22 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		policy := resolveSessionSleepPolicyInfo(info, cfg, sp)
 		eval.Policy = policy
 		name := info.SessionNameMetadata
+		if _, deferred := runtimeObservationErrors[name]; deferred {
+			wakeEvals[target.info.ID] = eval
+			continue
+		}
 		decision := awakeDecisions[name]
-		if decision.ShouldWake && !pendingInteractionReady(sp, name) && info.PinAwake != "true" && configWakeSuppressedInfo(info, policy, sp, clk) {
+		if decision.ShouldWake && !pendingInteractionReady(sp, name) && info.PinAwake != "true" {
+			configSuppressed, observationErr := configWakeSuppressedInfoWithError(info, policy, sp, clk)
+			if observationErr != nil {
+				runtimeObservationErrors[name] = observationErr
+				wakeEvals[target.info.ID] = eval
+				continue
+			}
+			if !configSuppressed {
+				wakeEvals[target.info.ID] = eval
+				continue
+			}
 			// Direct assigned work overrides sleep suppression for every
 			// sleep class — the assignment is session-specific, so a pool
 			// sibling cannot serve it. Pool-scale demand (poolDesired > 0)
@@ -3641,6 +3805,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	}
 
 	idleProbeTargets := selectIdleProbeTargets(wakeTargets, wakeEvals, dt, infoByID)
+	for _, target := range wakeTargets {
+		if _, deferred := runtimeObservationErrors[infoByID[target.info.ID].SessionNameMetadata]; deferred {
+			delete(idleProbeTargets, target.info.ID)
+		}
+	}
 	launchIdleProbes(ctx, idleProbeTargets, wakeTargets, dt, sp, clk, infoByID)
 	recordPhase(TraceSiteSessionReconcileAwakeSet, "session_reconcile.compute_awake_set_and_idle_probes", phaseStart, map[string]any{
 		"wake_target_count":      len(wakeTargets),
@@ -3665,6 +3834,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// by design.
 		info := infoByID[target.info.ID]
 		name := info.SessionNameMetadata
+		if observationErr, deferred := runtimeObservationErrors[name]; deferred {
+			fmt.Fprintf(stderr, "session reconciler: deferring lifecycle for %s after runtime observation failure: %v\n", name, observationErr) //nolint:errcheck
+			continue
+		}
 		decision, hasDec := awakeDecisions[name]
 		shouldWake := hasDec && decision.ShouldWake
 
@@ -3916,8 +4089,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				clearCompletedIdleProbe(target.info.ID, dt)
 			}
 			if reason == "idle" && dt.get(target.info.ID) == nil {
-				if intent != "idle-stop-pending" && !shouldBeginIdleDrainInfo(info, eval, dt, sp) {
-					continue
+				if intent != "idle-stop-pending" {
+					shouldBegin, observationErr := shouldBeginIdleDrainInfo(info, eval, dt, sp)
+					if observationErr != nil {
+						fmt.Fprintf(stderr, "session reconciler: deferring idle drain for %s after activity observation failure: %v\n", name, observationErr) //nolint:errcheck
+						continue
+					}
+					if !shouldBegin {
+						continue
+					}
 				}
 				if intent != "idle-stop-pending" {
 					if fold := markIdleSleepPendingInfo(info, sessFront); fold != nil {
@@ -5216,7 +5396,10 @@ const (
 // treats the live named session as active because config-drift cannot prove the
 // session is idle.
 func namedSessionActivelyInUseInfo(info sessionpkg.Info, sp runtime.Provider, name string, clk clock.Clock) bool {
-	_, active := namedSessionActiveUseReasonInfo(info, sp, name, clk)
+	_, active, err := namedSessionActiveUseReasonInfo(info, sp, name, clk)
+	if err != nil {
+		return true
+	}
 	return active
 }
 
@@ -5246,7 +5429,10 @@ func shouldDeferNamedSessionConfigDrift(info sessionpkg.Info, sessFront *session
 		}
 		return "pinned", true, nil
 	}
-	reason, active := namedSessionActiveUseReasonInfo(info, sp, name, clk)
+	reason, active, observationErr := namedSessionActiveUseReasonInfo(info, sp, name, clk)
+	if observationErr != nil {
+		return "", false, observationErr
+	}
 	if !active {
 		return "", false, nil
 	}
@@ -5568,31 +5754,35 @@ func applyTemplateOverridesToConfigInfo(agentCfg *runtime.Config, info sessionpk
 // deferral, which threads through pendingInteractionKeepsAwakeInfo (wait_hold +
 // held/quarantine timers off Info); every other check is a live runtime probe
 // (sp.IsAttached, sessionActivityReportable, sp.GetLastActivity) and stays raw.
-func namedSessionActiveUseReasonInfo(info sessionpkg.Info, sp runtime.Provider, name string, clk clock.Clock) (string, bool) {
+func namedSessionActiveUseReasonInfo(info sessionpkg.Info, sp runtime.Provider, name string, clk clock.Clock) (string, bool, error) {
 	if sp == nil || name == "" {
-		return "", false
+		return "", false, nil
 	}
 	// Pending interaction means a user is actively waiting.
 	if pendingInteractionKeepsAwakeInfo(info, sp, name, clk) {
-		return "pending_interaction", true
+		return "pending_interaction", true, nil
 	}
 	// Tmux attachment means a user is watching.
 	if sp.IsAttached(name) {
-		return "attached", true
+		return "attached", true, nil
 	}
 	// Providers that cannot report activity for this routed session cannot
 	// prove a live named session is idle. Defer config-drift rather than
 	// stopping a potentially working headless agent mid-task.
 	if !sessionActivityReportable(sp, name) {
-		return "activity_unknown", true
+		return "activity_unknown", true, nil
 	}
 	// Recent activity means the agent may still be in active use.
 	if clk != nil {
-		if lastActivity, err := sp.GetLastActivity(name); err == nil && !lastActivity.IsZero() && clk.Now().Sub(lastActivity) < namedSessionActivityThreshold {
-			return "recent_activity", true
+		lastActivity, err := sp.GetLastActivity(name)
+		if errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			return "", false, fmt.Errorf("observe last activity for %q: %w", name, err)
+		}
+		if err == nil && !lastActivity.IsZero() && clk.Now().Sub(lastActivity) < namedSessionActivityThreshold {
+			return "recent_activity", true, nil
 		}
 	}
-	return "", false
+	return "", false, nil
 }
 
 // resetConfiguredNamedSessionForConfigDriftInfo repairs a configured-named
@@ -5601,7 +5791,9 @@ func namedSessionActiveUseReasonInfo(info sessionpkg.Info, sp runtime.Provider, 
 // It preserves resume-eligible prior conversation metadata (session_key +
 // started_config_hash, via Info.SessionKey / Info.StartedConfigHash) when
 // transitioning straight back into creating, so the next wake builds
-// `--resume <prior-key>` instead of `--session-id <new-uuid>`. Preservation is
+// `--resume <prior-key>` instead of rotating the key. When the key cannot be
+// preserved, the rotation follows the provider's capability rather than
+// minting unconditionally: see the rotation block below. Preservation is
 // gated on StateStartPending/StateCreating because the asleep repair path must
 // still clear started_config_hash — an asleep-bound reset that preserved the stale
 // hash would re-trigger drift every tick. It reads the current per-session
@@ -5614,6 +5806,7 @@ func namedSessionActiveUseReasonInfo(info sessionpkg.Info, sp runtime.Provider, 
 // restart_requested stays off the snapshot (#2574).
 func resetConfiguredNamedSessionForConfigDriftInfo(
 	info sessionpkg.Info,
+	tp TemplateParams,
 	store beads.Store,
 	sp runtime.Provider,
 	sessionName string,
@@ -5639,13 +5832,29 @@ func resetConfiguredNamedSessionForConfigDriftInfo(
 	preserveResume := (nextSessionState == sessionpkg.StateStartPending || nextSessionState == sessionpkg.StateCreating) &&
 		priorSessionKey != "" && priorStartedConfigHash != ""
 
+	// Rotation is a provider capability, not an unconditional mint. Only a
+	// provider with session_id_flag can be told "create a conversation with
+	// this ID"; for a resume-only provider (opencode/codex/gemini)
+	// resolveSessionCommand routes any non-empty session_key onto the resume
+	// path, so a minted key becomes a resume of a conversation that was never
+	// created and the next start dies on an invalid session ID. Clearing
+	// instead lets the start launch bare and the provider mint its own key.
 	rotatedSessionKey := ""
+	clearSessionKey := false
 	if preserveResume {
 		rotatedSessionKey = priorSessionKey
-	} else if newKey, err := sessionpkg.GenerateSessionKey(); err == nil {
+	} else {
+		newKey, hasCapability := freshRestartSessionKeyInfo(tp, info)
 		rotatedSessionKey = newKey
+		clearSessionKey = hasCapability && newKey == ""
 	}
 	batch := sessionpkg.ConfigDriftResetPatch(nextSessionState, rotatedSessionKey, now)
+	if clearSessionKey {
+		// ConfigDriftResetPatch only writes session_key when non-empty, so an
+		// intentional clear must be stated explicitly — the same contract the
+		// restart-request and fresh-cycle handoffs use.
+		batch["session_key"] = ""
+	}
 	if preserveResume {
 		batch["started_config_hash"] = priorStartedConfigHash
 	}
@@ -5669,26 +5878,30 @@ func shouldBeginIdleDrainInfo(
 	eval wakeEvaluation,
 	dt *drainTracker,
 	sp runtime.Provider,
-) bool {
+) (bool, error) {
 	if eval.Policy.Class == config.SessionSleepNonInteractive {
-		return true
+		return true, nil
 	}
 	if eval.Policy.Capability != runtime.SessionSleepCapabilityFull || sp == nil {
-		return false
+		return false, nil
 	}
 	probe, ok := dt.idleProbe(info.ID)
 	if !ok || !probe.ready {
-		return false
+		return false, nil
 	}
-	defer dt.clearIdleProbe(info.ID)
 	if !probe.success {
-		return false
+		dt.clearIdleProbe(info.ID)
+		return false, nil
 	}
 	lastActivity, err := workerSessionTargetLastActivityWithConfig("", nil, sp, nil, info.SessionNameMetadata)
-	if err != nil {
-		return false
+	if errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		return false, fmt.Errorf("observe last activity for %q: %w", info.SessionNameMetadata, err)
 	}
-	return lastActivity.IsZero() || !lastActivity.After(probe.completedAt)
+	dt.clearIdleProbe(info.ID)
+	if err != nil {
+		return false, nil
+	}
+	return lastActivity.IsZero() || !lastActivity.After(probe.completedAt), nil
 }
 
 func selectIdleProbeTargets(

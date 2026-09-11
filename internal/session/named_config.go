@@ -537,10 +537,14 @@ func beadMatchesNamedSessionResolutionFilter(b beads.Bead, identity, sessionName
 	return false
 }
 
-// FindNamedSessionConflict finds the first live session bead that blocks a configured named session.
+// FindNamedSessionConflict finds the first live session bead that blocks a
+// configured named session. It uses the same continuity gate as canonical
+// detection (NamedSessionContinuityEligible), so a bead that cannot own a
+// name cannot block it either.
 func FindNamedSessionConflict(candidates []beads.Bead, spec NamedSessionSpec) (beads.Bead, bool) {
 	for _, b := range candidates {
-		if !IsSessionBeadOrRepairable(b) || b.Status == "closed" {
+		if !IsSessionBeadOrRepairable(b) || b.Status == "closed" ||
+			!NamedSessionContinuityEligible(b) {
 			continue
 		}
 		if BeadConflictsWithNamedSession(b, spec) {
@@ -552,10 +556,13 @@ func FindNamedSessionConflict(candidates []beads.Bead, spec NamedSessionSpec) (b
 
 // FindNamedSessionConflictInfo is the session.Info mirror of
 // FindNamedSessionConflict: it finds the first live session Info that blocks a
-// configured named session.
+// configured named session, using the same continuity gate as canonical
+// detection (NamedSessionInfoContinuityEligible), so a bead that cannot own a
+// name cannot block it either.
 func FindNamedSessionConflictInfo(candidates []Info, spec NamedSessionSpec) (Info, bool) {
 	for _, i := range candidates {
-		if !IsSessionBeadOrRepairableInfo(i) || i.Closed {
+		if !IsSessionBeadOrRepairableInfo(i) || i.Closed ||
+			!NamedSessionInfoContinuityEligible(i) {
 			continue
 		}
 		if InfoConflictsWithNamedSession(i, spec) {

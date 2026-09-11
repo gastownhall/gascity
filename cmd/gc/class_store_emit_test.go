@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -22,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // The three gates this seam has to hold, and the control that keeps the second
@@ -593,6 +595,91 @@ func TestEmittingClassStoreKeepsEveryEngineCapability(t *testing.T) {
 			t.Errorf("the emitting class store drops %v from %s; every one is a capability assertion that stops matching", missing, engine)
 		}
 	}
+}
+
+// The relic census is the one capability where carrying the method is WORSE
+// than dropping it, so TestEmittingClassStoreKeepsEveryEngineCapability forcing
+// HasResidentOutside to exist needs this row underneath it.
+//
+// Dropping the method costs a scan that returns the same verdict. Carrying it
+// as a plain forward makes a bare assertion succeed over a backing that has no
+// census — the mem store here, the native Dolt engine in production — and the
+// caller then retires the binding's by-id probe on an answer nobody computed,
+// stranding every bead the class migration carried across under its original
+// id. Both halves are pinned: discovery must refuse a backing that cannot
+// answer, and it must find one that can and agree with the scan.
+func TestTheEmittingClassStoreOnlyAdvertisesACensusItCanAnswer(t *testing.T) {
+	const graphPrefix = "gcg"
+
+	t.Run("a backing with no census is not advertised as one", func(t *testing.T) {
+		cityPath := t.TempDir()
+		wrapped := splitClassRoutes(beads.NewMemStore()).withCLIEmission(cityPath).stores[coordclass.ClassGraph]
+
+		direct, carried := wrapped.(beads.NamespaceCensus)
+		if !carried {
+			t.Fatal("the wrapper does not carry HasResidentOutside at all; this row models the hazard of carrying it and has nothing to say")
+		}
+		if census, ok := beads.NamespaceCensusFor(wrapped); ok {
+			t.Fatalf("a wrapper over a backing with no census was discovered as one (%T); the boot verdict would take its word and retire the binding's probe", census)
+		}
+		got, err := direct.HasResidentOutside([]string{graphPrefix})
+		if !errors.Is(err, beads.ErrNamespaceCensusUnsupported) {
+			t.Fatalf("asking the wrapper directly returned (%v, %v), want beads.ErrNamespaceCensusUnsupported: a structural method with nothing behind it must not answer a verdict", got, err)
+		}
+		if got {
+			t.Error("the refusal came back with a TRUE verdict; a store that cannot answer answers nothing")
+		}
+	})
+
+	t.Run("a sqlite backing is reached and agrees with the scan", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			seed []string
+			want bool
+		}{
+			{name: "binding holding a relic", seed: []string{"gcg-1", "ga-relic"}, want: true},
+			{name: "clean binding", seed: []string{"gcg-1", "gcg-2"}, want: false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				cityPath := t.TempDir()
+				leaf, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix(graphPrefix))
+				if err != nil {
+					t.Fatalf("opening the leaf store: %v", err)
+				}
+				t.Cleanup(func() { _ = closeBeadStoreHandle(leaf) })
+				for _, id := range tc.seed {
+					if _, err := leaf.Create(beads.Bead{ID: id, Title: id, Type: "task"}); err != nil {
+						t.Fatalf("seeding %q: %v", id, err)
+					}
+				}
+
+				wrapped := splitClassRoutes(leaf).withCLIEmission(cityPath).stores[coordclass.ClassGraph]
+				census, ok := beads.NamespaceCensusFor(wrapped)
+				if !ok {
+					t.Fatalf("the wrapper hid the sqlite leaf's census; every one-shot command on this city goes back to scanning the whole binding")
+				}
+				predicate, err := census.HasResidentOutside([]string{graphPrefix})
+				if err != nil {
+					t.Fatalf("predicate: %v", err)
+				}
+
+				relics, err := storeref.LegacyResidents(leaf, []string{graphPrefix})
+				if err != nil {
+					t.Fatalf("scan: %v", err)
+				}
+				scanned := len(relics) > 0
+				if scanned != tc.want {
+					t.Fatalf("the scan answered %v, want %v (relics %v); the fixture does not model what it claims to", scanned, tc.want, relics)
+				}
+				if predicate != scanned {
+					t.Fatalf("the census through the wrapper answered %v and the scan answered %v (relics %v)", predicate, scanned, relics)
+				}
+				if got := beadEvents(readCityJournal(t, cityPath)); len(got) != 0 {
+					t.Errorf("censusing the binding appended %d bead event(s); a verdict reads and mutates nothing: %s", len(got), eventSummary(got))
+				}
+			})
+		}
+	})
 }
 
 // TestEmittingClassStoreCarriesAnEdgePayloadAndEmitsForIt covers the wrapper's

@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // classRoutedStoreForID returns the store that actually holds id: the relocated
@@ -67,29 +68,11 @@ func cityGraphClassBinding(cityPath string) beads.Store {
 	return store
 }
 
-// classBindingForID is the class leg of classRoutedStoreForID, for callers whose
-// work answer is a leg list rather than one store. A nil work leg makes the
-// residual answer nil, so ok=false means "no named leg answered".
-func classBindingForID(cityPath, id string) (beads.Store, bool, error) {
-	class := cityGraphClassBinding(cityPath)
-	if class == nil {
-		return nil, false, nil
-	}
-	store, err := classRoutedStoreForIDIn(class, id, nil)
-	if err != nil {
-		return nil, false, err
-	}
-	if store == nil {
-		return nil, false, nil
-	}
-	return class, true, nil
-}
-
 // classRoutedStoreForIDIn is classRoutedStoreForID with the binding already in
 // hand, for the callers that resolve it once per request and hold no cityPath to
 // hand cliByIDOwner: gc graph's per-id resolver (graphStores.storeFor), which
-// also needs the raw binding for convoycore.MemberClasses, and classBindingForID
-// itself. Nil class means no relocation.
+// also needs the raw binding for convoycore.MemberClasses. Nil class means no
+// relocation.
 //
 // It applies the resolver's rule directly against the opened binding. The class
 // store leads because it MINTS the reserved namespace, but minting is not
@@ -102,7 +85,7 @@ func classBindingForID(cityPath, id string) (beads.Store, bool, error) {
 // An error is a read that FAILED, never absence: reading "the binding could not
 // answer" as "the bead is not there" is the root-loss shape this lane exists to
 // prevent. The one error that is not a fault is the one-shot funnel's standing
-// refusal (isStandingStorageRefusal) — a verdict about the CITY's storage
+// refusal (storeref.IsStandingRefusal) — a verdict about the CITY's storage
 // configuration that says nothing about a bead, and a refused city still serves
 // WORK from its work ledger. So for a work-shaped id the refusal establishes
 // nothing and work answers; for an id inside a reserved namespace the refusal IS
@@ -115,7 +98,7 @@ func classRoutedStoreForIDIn(class beads.Store, id string, work beads.Store) (be
 		switch {
 		case errors.Is(err, beads.ErrNotFound):
 			return work, nil
-		case isStandingStorageRefusal(err) && !bdIDIsClassReserved(id):
+		case storeref.IsStandingRefusal(err) && !bdIDIsClassReserved(id):
 			return work, nil
 		default:
 			return nil, fmt.Errorf("reading %q from the relocated class binding: %w", id, err)

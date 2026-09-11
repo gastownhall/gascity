@@ -203,6 +203,21 @@ const (
 	// could also observe expiry and emit; consumers should tolerate a duplicate
 	// rather than assume a globally exactly-once signal.
 	ControlStalled = "control.stalled"
+	// ControlRootSettleFailed fires when a workflow-finalize control bead is
+	// quarantined but the store then refuses the follow-up close of the
+	// workflow root the finalizer was gating (e.g. a "blocked by" edge the
+	// store has not yet reconciled against the finalizer's own quarantine).
+	// quarantineControlFailureBead always returns nil in this case -- the
+	// finalizer's quarantine is the load-bearing action and must stand -- but
+	// an unclosed root left with no signal reintroduces the dead-root/
+	// hook-claim-leak bug (#2763) the finalizer-quarantine path exists to
+	// close. This event, together with the gc.root_settle_failed* metadata
+	// stamped on the root and a created follow-up bead, is the durable
+	// visibility that replaces the silently-assumed "retried by a later
+	// pass" that never actually existed. Edge-triggered, once per failed
+	// settle attempt; a duplicate is possible under a misconfigured second
+	// dispatcher, same as ControlStalled.
+	ControlRootSettleFailed = "control.root_settle_failed"
 	// SupervisorStarted fires once per supervisor startup, after the
 	// instance lock is acquired. Its payload classifies how the previous
 	// supervisor instance exited (clean, crash, or unknown), derived from
@@ -399,6 +414,7 @@ var KnownEventTypes = []string{
 	ConvoyCreated, ConvoyClosed,
 	ControllerStarted, ControllerStopped,
 	ControlStalled,
+	ControlRootSettleFailed,
 	CitySuspended, CityResumed,
 	RequestResultCityCreate, RequestResultCityUnregister,
 	RequestResultSessionCreate, RequestResultSessionMessage,

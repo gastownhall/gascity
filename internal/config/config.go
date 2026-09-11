@@ -13,6 +13,7 @@ import (
 	"unicode"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
@@ -1172,16 +1173,17 @@ func (r *Rig) EffectivePrefix() string {
 	return DeriveBeadsPrefix(r.Name)
 }
 
-// Coordination class names, mirroring coordclass.Class.String(). They are part of
-// the [beads.classes.<name>] config contract and must not change without a
-// migration.
+// Coordination class names. They are part of the [beads.classes.<name>] config
+// contract and must not change without a migration. They no longer MIRROR
+// coordclass.Class.String() — both spell the same beadmeta constants, so the
+// two vocabularies cannot drift apart.
 const (
-	BeadClassWork      = "work"
-	BeadClassGraph     = "graph"
-	BeadClassMessaging = "messaging"
-	BeadClassSessions  = "sessions"
-	BeadClassOrders    = "orders"
-	BeadClassNudges    = "nudges"
+	BeadClassWork      = beadmeta.ClassNameWork
+	BeadClassGraph     = beadmeta.ClassNameGraph
+	BeadClassMessaging = beadmeta.ClassNameMessaging
+	BeadClassSessions  = beadmeta.ClassNameSessions
+	BeadClassOrders    = beadmeta.ClassNameOrders
+	BeadClassNudges    = beadmeta.ClassNameNudges
 )
 
 // EffectiveDefaultBranch returns the rig's recorded default branch, or the

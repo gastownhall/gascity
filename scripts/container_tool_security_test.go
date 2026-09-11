@@ -65,17 +65,30 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 
 func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	const (
-		bdSourceRef    = "bf97b73749ac3ef2fca2365b54537ac041ad4293"
-		bdSourceSHA256 = "a8b1d8dd85b2c008093615cb85937067a9597e760e8d39f93fe55f5c1cbb4d37"
-		bdBuild        = "bf97b73749"
+		bdSourceRef    = "c185735c38e25569277eae798ce363ecba9859e8"
+		bdSourceSHA256 = "3e256519a683b413f7baa9f4d1071084bb2646478faabad9bf3ac7bd05952f43"
+		bdBuild        = "c185735c38"
 		bdBranch       = "HEAD"
-		grpcVersion    = "1.82.1"
+		grpcVersion    = "1.83.0"
 	)
 
 	root := repoRoot(t)
-	bdVersion := readDotenv(t, root+"/deps.env")["BD_VERSION"]
-	if bdVersion != "v1.1.0" {
-		t.Fatalf("deps.env BD_VERSION = %q, want v1.1.0 for the pinned source build", bdVersion)
+	env := readDotenv(t, root+"/deps.env")
+	// The image stamps -X main.Version=${BD_VERSION} onto source fetched at
+	// BD_SOURCE_REF, and the Dockerfile's own `grep Version = "${bd_version}"
+	// cmd/bd/version.go` fails the build if those two name different releases.
+	// Assert it here rather than discovering it in a docker build CI may not run.
+	//
+	// The anchor is BD_CURRENT_VERSION, not BD_VERSION: BD_SOURCE_REF tracks
+	// BD_CURRENT_REF (TestBDVersionPins), so the version that source declares is
+	// BD_CURRENT_VERSION. deps.env BD_VERSION is a different role -- the
+	// published tarball CI installs -- and it legitimately lags whenever the
+	// current cell is pinned to a commit upstream never cut a release for, which
+	// is the normal state of a bleeding-edge cell. Tying this to BD_VERSION
+	// would forbid that lag and collapse two anchors the matrix keeps distinct.
+	bdVersion := env["BD_CURRENT_VERSION"]
+	if bdVersion == "" {
+		t.Fatal("deps.env missing BD_CURRENT_VERSION")
 	}
 
 	dockerfile := readFile(t, root, "contrib/k8s/Dockerfile.agent")

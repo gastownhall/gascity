@@ -63,12 +63,14 @@ func FormulaTargetFromSnapshot(snap RunSnapshot) (name, target, scopeKind, scope
 
 // BuildRunDetailFromSnapshot projects an already-computed snapshot into the
 // run-detail DTO, layering the optional request-time sessions and compiled
-// formula detail (both nil on the golden path). It is the single-scan analog of
+// formula detail (both zero on the golden path). It is the single-scan analog of
 // BuildRunDetailWithSessionsAndFormula: same inputs, same output, but off a
-// snapshot the caller already folded. fetchFailure records why a live
-// formula-detail fetch failed when formulaDetail is nil (empty defaults to
-// upstream_error).
-func BuildRunDetailFromSnapshot(snap RunSnapshot, sessions []DashboardSession, formulaDetail *FormulaOrderingDetail, fetchFailure RunFormulaDetailFetchFailure) (FormulaRunDetail, error) {
+// snapshot the caller already folded — and the one entry point that also takes
+// the run's retired by-id session resolutions (RunSessions.Retired), which the
+// dashboard BFF looks up per SessionIDsForSnapshot id. fetchFailure records why
+// a live formula-detail fetch failed when formulaDetail is nil (empty defaults
+// to upstream_error).
+func BuildRunDetailFromSnapshot(snap RunSnapshot, sessions RunSessions, formulaDetail *FormulaOrderingDetail, fetchFailure RunFormulaDetailFetchFailure) (FormulaRunDetail, error) {
 	return enrichFormulaRun(snap.raw, sessions, formulaDetail.toInput(), fetchFailure)
 }
 
@@ -95,7 +97,7 @@ func BuildRunDetailForRun(beadList []beads.Bead, runID string, version int, even
 		return FormulaRunDetail{}, "", "", "", "", false, err
 	}
 	name, target, scopeKind, scopeRef, targetOK = FormulaTargetFromSnapshot(snap)
-	detail, err = BuildRunDetailFromSnapshot(snap, sessions, formulaDetail, fetchFailure)
+	detail, err = BuildRunDetailFromSnapshot(snap, RunSessions{Live: sessions}, formulaDetail, fetchFailure)
 	return detail, name, target, scopeKind, scopeRef, targetOK, err
 }
 
@@ -168,7 +170,7 @@ func BuildRunDetailWithSessionsAndFormula(beadList []beads.Bead, runID string, s
 	if err != nil {
 		return FormulaRunDetail{}, err
 	}
-	return enrichFormulaRun(snap, sessions, formulaDetail.toInput(), fetchFailure)
+	return enrichFormulaRun(snap, RunSessions{Live: sessions}, formulaDetail.toInput(), fetchFailure)
 }
 
 // RunFormulaTargetForRun resolves the compiled-formula name, preview target, and
@@ -360,7 +362,7 @@ type runningFormulaRunInput struct {
 	root                 *runSnapshotBead
 	beads                []runSnapshotBead
 	rigRoot              string
-	sessions             []DashboardSession
+	sessions             RunSessions
 	formulaDetail        *formulaDetailInput
 	formulaDetailFailure RunFormulaDetailFetchFailure
 }
@@ -385,7 +387,7 @@ type runningFormulaRun struct {
 // request-time enrichment (both nil on the golden path). fetchFailure records why
 // a live formula-detail fetch failed when formulaDetail is nil (empty on the
 // golden path, defaulting to upstream_error).
-func enrichFormulaRun(raw runSnapshot, sessions []DashboardSession, formulaDetail *formulaDetailInput, fetchFailure RunFormulaDetailFetchFailure) (FormulaRunDetail, error) {
+func enrichFormulaRun(raw runSnapshot, sessions RunSessions, formulaDetail *formulaDetailInput, fetchFailure RunFormulaDetailFetchFailure) (FormulaRunDetail, error) {
 	if !isGraphV2(raw) {
 		return FormulaRunDetail{}, unsupportedRun("run is not a graph.v2 run", ReasonNotRunView)
 	}
