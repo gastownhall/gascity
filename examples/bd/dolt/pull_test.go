@@ -338,3 +338,27 @@ func TestPullGateRefusedSkips(t *testing.T) {
 		t.Fatalf("expected %q and no success/failure line.\nout:\n%s", want, out)
 	}
 }
+
+// The bound's verdict outranks the gate marker too: a client that printed the
+// refusal and then stalled until the bound killed it is a dead client whose
+// session (ours by the id it printed) is KILLed, not a quiet skip.
+func TestPullTimeoutOutranksGateText(t *testing.T) {
+	binDir := t.TempDir()
+	started := filepath.Join(binDir, "pull-started")
+	killed := filepath.Join(binDir, "killed")
+	processlist := "if [ -f \"" + killed + "\" ]; then printf 'Id,Time,db\\n'; " +
+		"elif [ -f \"" + started + "\" ]; then printf 'Id,Time,db\\n81,9,app\\n'; " +
+		"else printf 'Id,Time,db\\n'; fi ; exit 0"
+	pull := ": > \"" + started + "\" ; printf 'id\\n81\\n' ; printf 'Error 3141 (HY000): Invalid JSON text in argument 1 to function json_extract: \"gc-remote-op-lock-held\"\\n' >&2 ; exit 124"
+	logPath := writePullFakeDolt(t, binDir, processlist, pull)
+	out, err := runPull(t, binDir, nil, "--db", "app")
+	if err == nil {
+		t.Fatalf("a timed-out pull must exit non-zero.\nout:\n%s", out)
+	}
+	if !strings.Contains(out, "pull timed out after 120s") || strings.Contains(out, "server refused") {
+		t.Fatalf("the timeout must outrank the gate text.\nout:\n%s", out)
+	}
+	if !strings.Contains(readLog(t, logPath), "KILL 81") {
+		t.Fatalf("the recorded session must be KILLed.\nlog:\n%s", readLog(t, logPath))
+	}
+}

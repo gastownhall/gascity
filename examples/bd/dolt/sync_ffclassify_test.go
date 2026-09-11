@@ -895,3 +895,44 @@ func TestSyncFetchGateRefusedSkipsNeverPushes(t *testing.T) {
 		t.Fatalf("a gate refusal is a skip, not a fetch failure.\nout:\n%s", out)
 	}
 }
+
+// The bound's verdict outranks anything the client printed: a client the
+// bound killed may have written the first-push signal ("no branches found in
+// remote" / "invalid ref spec") before stalling. Exit 124 or 137 with that
+// text is a timeout — the recorded session is KILLed and nothing is pushed —
+// never a first push.
+func TestSyncFetchTimeoutOutranksFirstPushText(t *testing.T) {
+	for _, tc := range []struct {
+		code int
+		text string
+	}{
+		{124, "no branches found in remote"},
+		{137, "fetch failed: invalid ref spec"},
+	} {
+		binDir := t.TempDir()
+		logPath := filepath.Join(binDir, "dolt.log")
+		started := filepath.Join(binDir, "fetch-started")
+		killed := filepath.Join(binDir, "killed")
+		body := fakeDoltPreamble(logPath, "main") +
+			"  *\"information_schema.processlist\"*)\n" +
+			"    if [ -f \"" + killed + "\" ]; then printf 'Id,Time,db\\n'\n" +
+			"    elif [ -f \"" + started + "\" ]; then printf 'Id,Time,db\\n93,61,app\\n'\n" +
+			"    else printf 'Id,Time,db\\n'; fi\n" +
+			"    exit 0 ;;\n" +
+			"  *\"CALL DOLT_FETCH(\"*) : > \"" + started + "\" ; printf 'id\\n93\\n' ; printf '" + tc.text + "\\n' >&2 ; exit " + fmt.Sprint(tc.code) + " ;;\n" +
+			"  *\"KILL \"*) : > \"" + killed + "\" ; exit 0 ;;\n" +
+			"esac\nexit 0\n"
+		installFFFakeDolt(t, binDir, body)
+		out := runFFSync(t, binDir, "--db", "app")
+		log := readLog(t, logPath)
+		if pushed(log) {
+			t.Fatalf("exit %d with %q: a dead client must NEVER push.\nout:\n%s\nlog:\n%s", tc.code, tc.text, out, log)
+		}
+		if !strings.Contains(out, "fetch timed out") || strings.Contains(out, "first push") {
+			t.Fatalf("exit %d with %q: the timeout must outrank the first-push text.\nout:\n%s", tc.code, tc.text, out)
+		}
+		if !strings.Contains(log, "KILL 93") || !strings.Contains(out, "server-side fetch killed (session 93 no longer in flight)") {
+			t.Fatalf("exit %d with %q: the recorded session must be KILLed.\nout:\n%s\nlog:\n%s", tc.code, tc.text, out, log)
+		}
+	}
+}

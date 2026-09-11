@@ -541,7 +541,20 @@ sync_database_sql() {
       >"$fetch_out_tmp" 2>"$fetch_err_tmp" || fetch_rc=$?
     fetch_session_id=$(remote_op_session_id "$fetch_out_tmp")
     rm -f "$fetch_out_tmp"
-    if [ "$fetch_rc" -ne 0 ] && remote_op_gate_refused "$fetch_err_tmp"; then
+    # The bound's verdict outranks anything the client printed: a client the
+    # bound killed may have written a first-push signal ("no branches found"
+    # / "invalid ref spec") before stalling, and that text must never turn a
+    # dead client into a push.
+    if bound_expired "$fetch_rc"; then
+      rm -f "$fetch_err_tmp"
+      echo "  $name: fetch timed out after ${fetch_timeout}s (client exit $fetch_rc) — skipped (NOT pushed)" >&2
+      last_fail_reason="fetch timed out after ${fetch_timeout}s (client exit $fetch_rc)"
+      # The client is dead (124: the bound; 137: the bound's SIGKILL escalation);
+      # the server-side fetch is not. End it and prove it ended (the outcome is
+      # reported on its own line; either way, skipped).
+      kill_remote_op_session fetch "$name" "$fetch_session_id" || true
+      return 1
+    elif [ "$fetch_rc" -ne 0 ] && remote_op_gate_refused "$fetch_err_tmp"; then
       # Another session holds this database's lock: a fetch or pull that the
       # processlist read did not show yet (it raced this one), or one whose
       # client died and whose session still runs. The server refused ours
@@ -556,15 +569,6 @@ sync_database_sql() {
       # and is necessarily a fast-forward.
       ff_status="first-push"
       rm -f "$fetch_err_tmp"
-    elif bound_expired "$fetch_rc"; then
-      rm -f "$fetch_err_tmp"
-      echo "  $name: fetch timed out after ${fetch_timeout}s (client exit $fetch_rc) — skipped (NOT pushed)" >&2
-      last_fail_reason="fetch timed out after ${fetch_timeout}s (client exit $fetch_rc)"
-      # The client is dead (124: the bound; 137: the bound's SIGKILL escalation);
-      # the server-side fetch is not. End it and prove it ended (the outcome is
-      # reported on its own line; either way, skipped).
-      kill_remote_op_session fetch "$name" "$fetch_session_id" || true
-      return 1
     elif [ "$fetch_rc" -ne 0 ]; then
       echo "  $name: fetch failed (exit $fetch_rc) — skipped (NOT pushed)" >&2
       if [ -s "$fetch_err_tmp" ]; then

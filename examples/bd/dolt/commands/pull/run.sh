@@ -249,18 +249,17 @@ pull_database_sql() {
     echo "  $name: pulled from $remote_url"
     return 0
   fi
-  if remote_op_gate_refused "$pull_err_tmp"; then
-    rm -f "$pull_err_tmp"
-    echo "  $name: pull already in flight — the server refused a second one (session lock $(remote_op_lock_name "$name") held) — skipped" >&2
-    return 1
-  fi
-
+  # The bound's verdict outranks anything the client printed.
   if bound_expired "$pull_rc"; then
     echo "  $name: pull timed out after ${pull_timeout}s (GC_DOLT_PULL_TIMEOUT_SECS; client exit $pull_rc)" >&2
     # The client is dead (124: the bound; 137: the bound's SIGKILL escalation);
     # the server-side pull is not. End it and prove it ended (the outcome is
     # reported on its own line).
     kill_remote_op_session pull "$name" "$pull_session_id" || true
+  elif remote_op_gate_refused "$pull_err_tmp"; then
+    rm -f "$pull_err_tmp"
+    echo "  $name: pull already in flight — the server refused a second one (session lock $(remote_op_lock_name "$name") held) — skipped" >&2
+    return 1
   else
     echo "  $name: ERROR: pull failed (exit $pull_rc)" >&2
   fi

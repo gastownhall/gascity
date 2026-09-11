@@ -337,16 +337,19 @@ dolt_sql_csv() {
 # every such session on the server (the health probe).
 # REMOTE_OP_INFO_REGEXP — the SQL REGEXP (ICU, applied to UPPER(Info)) that
 # recognizes a running CALL DOLT_FETCH / CALL DOLT_PULL however it was typed:
-# whitespace or comments (block `/* … */` including `/***/`, line `-- …`)
-# before CALL, between CALL and the procedure, and before the paren; the
-# procedure name bare, backticked, or qualified by one database name
-# (`CALL app.DOLT_FETCH(`, `CALL \`dolt_fetch\`(` — both valid Dolt syntax).
+# whitespace or comments (block `/* … */` including `/***/`, line `-- …` and
+# `# …`) before CALL, between CALL and the procedure, and before the paren;
+# the procedure name bare, backticked, or qualified by one database name,
+# which may carry a hyphen (`CALL app.DOLT_FETCH(`, `CALL \`app-prod\`.DOLT_FETCH(`,
+# `CALL \`dolt_fetch\`(` — all valid Dolt syntax; valid_database_name allows
+# the hyphen).
 # DOLT_PUSH, DOLT_FETCHX, CALLDOLT_FETCH and the text inside a string literal
 # or a comment do not match. Backslashes are doubled for the SQL string
-# literal. Verified on Dolt 2.1.10 (evidence 04b, 04c-G, 04d: 9 spellings hit,
-# 6 decoys miss).
-_ws='(\\s|/\\*([^*]|\\*+[^*/])*\\*+/|--[^\\n]*\\n)'
-REMOTE_OP_INFO_REGEXP='^'"$_ws"'*CALL'"$_ws"'+(`?[A-Z0-9_]+`?'"$_ws"'*\\.'"$_ws"'*)?`?DOLT_(FETCH|PULL)`?'"$_ws"'*\\('
+# literal. The exact string composed below was run on Dolt 2.1.10 (evidence
+# 04e): 13 spellings hit, 7 decoys miss (a qualifier with a space is one of
+# them; valid_database_name forbids spaces).
+_ws='(\\s|/\\*([^*]|\\*+[^*/])*\\*+/|--[^\\n]*\\n|#[^\\n]*\\n)'
+REMOTE_OP_INFO_REGEXP='^'"$_ws"'*CALL'"$_ws"'+(`?[A-Z0-9_-]+`?'"$_ws"'*\\.'"$_ws"'*)?`?DOLT_(FETCH|PULL)`?'"$_ws"'*\\('
 unset _ws
 
 remote_op_sessions_sql() {
