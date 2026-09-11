@@ -345,7 +345,7 @@ dolt_sql_csv() {
 # skipped run for a database while another's remote operation runs on the
 # same server (the pack's own runs are sequential within a run and serialized
 # across runs by the per-database server lock, so this bites only a
-# concurrent operator or an abandoned session, which health names). The db
+# concurrent operator or an abandoned session, which health counts). The db
 # column is still selected, validated as one CSV field, and not used.
 # REMOTE_OP_INFO_REGEXP — the SQL REGEXP (applied to UPPER(Info)) that decides
 # "a remote operation is in flight": ANY statement that names DOLT_FETCH or
@@ -486,8 +486,9 @@ remote_op_session_id() {
 # (a record from before the id came from the gate statement, a server that
 # restarted and reused the number) is reported NOT killed and named for the
 # operator — that session holds the database's lock, so every later run is
-# refused by the server gate until it ends or is KILLed by hand, and gc dolt
-# health names it. A holder answer that cannot be read refuses to confirm
+# refused by the server gate until it ends or is KILLed by hand (gc dolt
+# health counts remote-operation sessions and their age, never ids — codex
+# round-2 r4 — so the lines carry the id). A holder answer that cannot be read refuses to confirm
 # (1): an unknown holder is never "free". LABEL names the operation in the
 # lines ("fetch" / "pull"); every line goes to stderr next to the timeout
 # line it resolves.
@@ -541,7 +542,7 @@ kill_remote_op_session() {
   if [ -z "$_kr_ids" ]; then
     _kr_listed=$(printf '%s\n' "$_kr_left" | awk '{ printf "%s%s", sep, $1; sep = " " }')
     if [ "$_kr_holder" != 0 ]; then
-      echo "  $_kr_db: server-side $_kr_label NOT killed: this client never learned its session id, and session $_kr_holder holds this run's lock ($_kr_runlock) — the session that passed this run's gate, its answer lost with the client; it runs no remote operation, so gc dolt health does not name it — left for the operator (KILL $_kr_holder)" >&2
+      echo "  $_kr_db: server-side $_kr_label NOT killed: this client never learned its session id, and session $_kr_holder holds this run's lock ($_kr_runlock) — the session that passed this run's gate, its answer lost with the client; it runs no remote operation — left for the operator (KILL $_kr_holder)" >&2
       return 1
     fi
     if [ -z "$_kr_listed" ]; then
@@ -554,7 +555,7 @@ kill_remote_op_session() {
       echo "  $_kr_db: server-side $_kr_label cleanup NOT confirmed: this client never learned its session id (the gate's answer never arrived) and this run's lock ($_kr_runlock) reads free — the gate never reached the server, or is still pending and could take the lock after this read; nothing killed — a later run the gate refuses names the lock to KILL the holder of" >&2
       return 1
     fi
-    echo "  $_kr_db: server-side $_kr_label NOT killed: this client never learned its session id, and ownership of the in-flight remote operation(s) on the server (Id $_kr_listed) cannot be proven — left for the operator (KILL <Id>); gc dolt health names them" >&2
+    echo "  $_kr_db: server-side $_kr_label NOT killed: this client never learned its session id, and ownership of the in-flight remote operation(s) on the server (Id $_kr_listed) cannot be proven — left for the operator (KILL <Id>); gc dolt health counts them" >&2
     return 1
   fi
   _kr_left_ids=" $(printf '%s\n' "$_kr_left" | awk '{ printf "%s ", $1 }')"
@@ -580,10 +581,10 @@ kill_remote_op_session() {
         # gate and the CALL, and the KILL did not take — codex round-2 r1), or
         # another session may hold it (see the helper comment).
         if [ "$_kr_holder" = "$_kr_one" ]; then
-          echo "  $_kr_db: server-side $_kr_label NOT killed: session $_kr_one still holds this run's lock ($_kr_runlock) after the KILL — not listed as a remote operation (idle, or between the gate and the CALL), so gc dolt health does not name it — left for the operator (KILL $_kr_one)" >&2
+          echo "  $_kr_db: server-side $_kr_label NOT killed: session $_kr_one still holds this run's lock ($_kr_runlock) after the KILL — not listed as a remote operation (idle, or between the gate and the CALL) — left for the operator (KILL $_kr_one)" >&2
           _kr_rc=1
         elif [ "$_kr_holder" != 0 ]; then
-          echo "  $_kr_db: server-side $_kr_label NOT killed: session $_kr_one is gone but session $_kr_holder holds this run's lock ($_kr_runlock) — the recorded id was not the lock holder (a record from before the id came from the gate statement, or a server that restarted and reused the number); gc dolt health names it only while it runs a remote operation — left for the operator (KILL $_kr_holder)" >&2
+          echo "  $_kr_db: server-side $_kr_label NOT killed: session $_kr_one is gone but session $_kr_holder holds this run's lock ($_kr_runlock) — the recorded id was not the lock holder (a record from before the id came from the gate statement, or a server that restarted and reused the number) — left for the operator (KILL $_kr_holder)" >&2
           _kr_rc=1
         elif [ "$_kr_was_guarded" -eq 1 ]; then
           echo "  $_kr_db: server-side $_kr_label already ended (session $_kr_one is gone; nothing killed)" >&2

@@ -1385,17 +1385,18 @@ func TestKillRemoteOpSessionNeverReturnsZeroWhileTheRunLockIsHeld(t *testing.T) 
 	}{
 		{"killed, gone, lock free", "77", none, killed, holder("0"), 0, "app: server-side fetch killed (session 77 no longer in flight)", "NOT killed"},
 		{"guarded, gone, lock free (the server restarted)", "77", none, notOwner, holder("0"), 0, "app: server-side fetch already ended (session 77 is gone; nothing killed)", "NOT killed"},
-		// The complete diagnostic is asserted (codex round-2 r3): the holder may
-		// be idle, so the line must not promise that health names it.
-		{"guarded, gone, another session holds this run's lock", "77", none, notOwner, holder("91"), 1, "app: server-side fetch NOT killed: session 77 is gone but session 91 holds this run's lock (" + runLock + ") — the recorded id was not the lock holder (a record from before the id came from the gate statement, or a server that restarted and reused the number); gc dolt health names it only while it runs a remote operation — left for the operator (KILL 91)", "already ended"},
-		{"killed, gone, another session holds this run's lock", "77", none, killed, holder("91"), 1, "app: server-side fetch NOT killed: session 77 is gone but session 91 holds this run's lock (" + runLock + ") — the recorded id was not the lock holder (a record from before the id came from the gate statement, or a server that restarted and reused the number); gc dolt health names it only while it runs a remote operation — left for the operator (KILL 91)", "no longer in flight"},
+		// The complete diagnostic is asserted (codex round-2 r3, r4): health
+		// reports counts and ages, never session ids, so no line may promise
+		// that health names a session.
+		{"guarded, gone, another session holds this run's lock", "77", none, notOwner, holder("91"), 1, "app: server-side fetch NOT killed: session 77 is gone but session 91 holds this run's lock (" + runLock + ") — the recorded id was not the lock holder (a record from before the id came from the gate statement, or a server that restarted and reused the number) — left for the operator (KILL 91)", "health"},
+		{"killed, gone, another session holds this run's lock", "77", none, killed, holder("91"), 1, "app: server-side fetch NOT killed: session 77 is gone but session 91 holds this run's lock (" + runLock + ") — the recorded id was not the lock holder (a record from before the id came from the gate statement, or a server that restarted and reused the number) — left for the operator (KILL 91)", "health"},
 		{"guarded, still listed", "77", listed77, notOwner, holder("77"), 1, "app: server-side fetch NOT killed: session 77 does not hold this run's lock (" + runLock + ")", "already ended"},
 		// The recorded id still holds the lock but runs no DOLT_FETCH/DOLT_PULL
 		// statement (the bound expired between the gate and the CALL), so the
 		// remote-op-filtered processlist does not list it and the KILL did not
 		// take: it is not "gone", it still holds the lock (codex round-2 r1).
-		{"killed, not listed, the recorded id still holds this run's lock", "77", none, killed, holder("77"), 1, "app: server-side fetch NOT killed: session 77 still holds this run's lock (" + runLock + ") after the KILL", "is gone"},
-		{"guarded, not listed, the recorded id still holds this run's lock", "77", none, notOwner, holder("77"), 1, "app: server-side fetch NOT killed: session 77 still holds this run's lock (" + runLock + ") after the KILL", "is gone"},
+		{"killed, not listed, the recorded id still holds this run's lock", "77", none, killed, holder("77"), 1, "app: server-side fetch NOT killed: session 77 still holds this run's lock (" + runLock + ") after the KILL — not listed as a remote operation (idle, or between the gate and the CALL) — left for the operator (KILL 77)", "health"},
+		{"guarded, not listed, the recorded id still holds this run's lock", "77", none, notOwner, holder("77"), 1, "app: server-side fetch NOT killed: session 77 still holds this run's lock (" + runLock + ") after the KILL — not listed as a remote operation (idle, or between the gate and the CALL) — left for the operator (KILL 77)", "health"},
 		{"holder query fails", "77", none, killed, "printf 'holder: boom\\n' >&2 ; exit 1", 1, "app: server-side fetch kill NOT confirmed: the run-lock holder query failed", "no longer in flight"},
 		{"holder answer is not a holder answer", "77", none, killed, "printf 'nothing here\\n' ; exit 0", 1, "app: server-side fetch kill NOT confirmed: the run-lock holder query failed", "no longer in flight"},
 		{"holder answer is empty", "77", none, killed, "exit 0", 1, "app: server-side fetch kill NOT confirmed: the run-lock holder query failed", "no longer in flight"},
@@ -1407,7 +1408,7 @@ func TestKillRemoteOpSessionNeverReturnsZeroWhileTheRunLockIsHeld(t *testing.T) 
 		// The holder passed this run's gate and its answer died with the client;
 		// it runs no remote operation, so health cannot name it (codex round-2
 		// r2: the line must not promise that it does).
-		{"no id, nothing listed, a session holds this run's lock", "", none, killed, holder("91"), 1, "app: server-side fetch NOT killed: this client never learned its session id, and session 91 holds this run's lock (" + runLock + ") — the session that passed this run's gate, its answer lost with the client; it runs no remote operation, so gc dolt health does not name it — left for the operator (KILL 91)", "health names it"},
+		{"no id, nothing listed, a session holds this run's lock", "", none, killed, holder("91"), 1, "app: server-side fetch NOT killed: this client never learned its session id, and session 91 holds this run's lock (" + runLock + ") — the session that passed this run's gate, its answer lost with the client; it runs no remote operation — left for the operator (KILL 91)", "health"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			binDir := t.TempDir()
