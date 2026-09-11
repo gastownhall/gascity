@@ -46,11 +46,13 @@ server that restarted and handed the number to someone else is never asked to
 kill them, and a client that reconnected between the check and the kill has no
 handle to execute — and proves it gone with a second processlist read (a session
 still listed is reported as NOT killed; a client that never learned its id kills
-nothing and names the sessions for the operator). After the kill attempt the
-script also reads who holds this run's lock (`IS_USED_LOCK`) and never reports
-success while any session holds it: a live holder other than the recorded id is
-reported NOT killed and named for the operator. Database names are locked
-case-insensitively.
+nothing, names any listed session for the operator, and never confirms the
+cleanup — the gate's answer never arrived, so a gate still pending on the server
+could take this run's lock after any read). After the kill attempt the script
+also reads who holds this run's lock (`IS_USED_LOCK`) and never reports success
+while any session holds it: a holder other than the recorded id, or the recorded
+id itself when it is not listed as a remote operation, is reported NOT killed and
+named for the operator. Database names are locked case-insensitively.
 `gc dolt health` adds one `WARN` line, and a `fetch_sessions` block in its
 JSON report, when more than `GC_DOLT_HEALTH_MAX_FETCH_SESSIONS` (default 2)
 such sessions are in flight server-wide; leftovers from runs older than this

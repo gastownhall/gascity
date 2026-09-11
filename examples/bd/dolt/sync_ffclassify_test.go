@@ -1036,8 +1036,10 @@ func TestSyncFetchTimeoutWithoutIDAndNothingListedKillsNothing(t *testing.T) {
 	if strings.Contains(log, "KILL ") {
 		t.Fatalf("nothing in flight after the timeout: nothing to KILL.\nlog:\n%s", log)
 	}
-	if !strings.Contains(out, "app: server-side fetch already ended (nothing in flight to kill)") {
-		t.Fatalf("expected the already-ended line.\nout:\n%s", out)
+	// The no-id path never confirms a cleanup (codex round-2 r3): the gate's
+	// answer never arrived, so a gate may still be pending on the server.
+	if !strings.Contains(out, "app: server-side fetch cleanup NOT confirmed: this client never learned its session id") || strings.Contains(out, "already ended") {
+		t.Fatalf("expected the cleanup-not-confirmed line and never already ended.\nout:\n%s", out)
 	}
 }
 
@@ -1383,8 +1385,10 @@ func TestKillRemoteOpSessionNeverReturnsZeroWhileTheRunLockIsHeld(t *testing.T) 
 	}{
 		{"killed, gone, lock free", "77", none, killed, holder("0"), 0, "app: server-side fetch killed (session 77 no longer in flight)", "NOT killed"},
 		{"guarded, gone, lock free (the server restarted)", "77", none, notOwner, holder("0"), 0, "app: server-side fetch already ended (session 77 is gone; nothing killed)", "NOT killed"},
-		{"guarded, gone, another session holds this run's lock", "77", none, notOwner, holder("91"), 1, "app: server-side fetch NOT killed: session 77 is gone but session 91 holds this run's lock (" + runLock + ")", "already ended"},
-		{"killed, gone, another session holds this run's lock", "77", none, killed, holder("91"), 1, "app: server-side fetch NOT killed: session 77 is gone but session 91 holds this run's lock (" + runLock + ")", "no longer in flight"},
+		// The complete diagnostic is asserted (codex round-2 r3): the holder may
+		// be idle, so the line must not promise that health names it.
+		{"guarded, gone, another session holds this run's lock", "77", none, notOwner, holder("91"), 1, "app: server-side fetch NOT killed: session 77 is gone but session 91 holds this run's lock (" + runLock + ") — the recorded id was not the lock holder (a record from before the id came from the gate statement, or a server that restarted and reused the number); gc dolt health names it only while it runs a remote operation — left for the operator (KILL 91)", "already ended"},
+		{"killed, gone, another session holds this run's lock", "77", none, killed, holder("91"), 1, "app: server-side fetch NOT killed: session 77 is gone but session 91 holds this run's lock (" + runLock + ") — the recorded id was not the lock holder (a record from before the id came from the gate statement, or a server that restarted and reused the number); gc dolt health names it only while it runs a remote operation — left for the operator (KILL 91)", "no longer in flight"},
 		{"guarded, still listed", "77", listed77, notOwner, holder("77"), 1, "app: server-side fetch NOT killed: session 77 does not hold this run's lock (" + runLock + ")", "already ended"},
 		// The recorded id still holds the lock but runs no DOLT_FETCH/DOLT_PULL
 		// statement (the bound expired between the gate and the CALL), so the
@@ -1395,7 +1399,11 @@ func TestKillRemoteOpSessionNeverReturnsZeroWhileTheRunLockIsHeld(t *testing.T) 
 		{"holder query fails", "77", none, killed, "printf 'holder: boom\\n' >&2 ; exit 1", 1, "app: server-side fetch kill NOT confirmed: the run-lock holder query failed", "no longer in flight"},
 		{"holder answer is not a holder answer", "77", none, killed, "printf 'nothing here\\n' ; exit 0", 1, "app: server-side fetch kill NOT confirmed: the run-lock holder query failed", "no longer in flight"},
 		{"holder answer is empty", "77", none, killed, "exit 0", 1, "app: server-side fetch kill NOT confirmed: the run-lock holder query failed", "no longer in flight"},
-		{"no id, nothing listed, lock free", "", none, killed, holder("0"), 0, "app: server-side fetch already ended (nothing in flight to kill)", "NOT killed"},
+		// No id: the gate's answer never arrived. With the id inside the gate
+		// that no longer proves the gate never ran — a gate still pending on
+		// the server can take this run's lock AFTER a "free" read (codex
+		// round-2 r3) — so the no-id path never confirms a cleanup: exit 1.
+		{"no id, nothing listed, lock free", "", none, killed, holder("0"), 1, "app: server-side fetch cleanup NOT confirmed: this client never learned its session id (the gate's answer never arrived) and this run's lock (" + runLock + ") reads free — the gate never reached the server, or is still pending and could take the lock after this read; nothing killed", "already ended"},
 		// The holder passed this run's gate and its answer died with the client;
 		// it runs no remote operation, so health cannot name it (codex round-2
 		// r2: the line must not promise that it does).
