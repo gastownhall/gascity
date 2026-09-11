@@ -456,13 +456,24 @@ func (o hostedDoltInitOptions) validate() error {
 	if value, err := strconv.Atoi(port); err != nil || value <= 0 {
 		return fmt.Errorf("invalid --dolt-port %q", port)
 	}
+	// The database names WHICH database on a server somebody else operates.
+	// Omitting it would let bd derive one from the issue prefix and attach to,
+	// or create, the wrong database on a shared server, so it stays required on
+	// both paths.
 	if strings.TrimSpace(o.Database) == "" {
-		return fmt.Errorf("--dolt-database (or %s) is required with --dolt-host", envDoltDatabase)
+		return fmt.Errorf("--dolt-database (or %s) is required for an external beads target", envDoltDatabase)
 	}
 	if isReservedManagedDoltDatabase(o.Database) {
 		return fmt.Errorf("invalid --dolt-database %q: reserved internally by managed Dolt; choose the provisioner-created project database", o.Database)
 	}
-	if strings.TrimSpace(o.ProjectID) == "" {
+	// The project id is consumed only on the legacy --dolt-host path, by
+	// contract.WriteProjectIdentity. A selector-driven init skips that write
+	// (cmd_init.go gates it on !selectorRequested), journals host/port/database
+	// only, and hands bd just --database; bd resolves project_id itself,
+	// adopting the hosted database's _project_id or minting one. Requiring it
+	// there made the new front door refuse its own documented invocation, and
+	// honoring it is not something gc can promise.
+	if strings.TrimSpace(o.ProjectID) == "" && !o.selectorRequested() {
 		return fmt.Errorf("--dolt-project-id (or %s) is required with --dolt-host: the beads project_id is needed for the identity handshake (or pass a bd_<id> --dolt-database to derive it)", envBeadsProjectID)
 	}
 	return nil

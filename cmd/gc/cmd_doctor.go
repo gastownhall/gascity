@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -154,18 +155,67 @@ type buildDoctorChecksOpts struct {
 	RolloutResolveErr error
 }
 
+// doctorOrderFiringCurrentLastRunFunc answers "when did this order last run"
+// for the order-firing check.
+//
+// The check asks it for every cron and cooldown order the event log cannot
+// answer on its own, and the per-order read is a labeled List on each leg —
+// which on a bd-backed store is two subprocesses (`bd list` plus the ephemeral
+// `bd query`). On a default city that is one fork pair per order before doctor
+// has looked at anything else, and on a fresh city, where no order has ever
+// fired, it is one fork pair per order to learn nothing.
+//
+// So the first order to arrive pulls the city's whole last-run index in one
+// read per leg and every later order is served from it, absence included: an
+// order missing from a complete index has never run, which is the same zero
+// time the per-order read would return. A leg that fails makes the index
+// incomplete, and then every order falls back to its own read.
 func doctorOrderFiringCurrentLastRunFunc(cityPath string, cfg *config.City, stderr io.Writer) doctor.OrderFiringCurrentLastRunFunc {
 	if stderr == nil {
 		stderr = io.Discard
 	}
 	resolveStores := cachedOrderHistoryStoresResolver(cityPath, cfg, stderr)
+	type lastRunIndex struct {
+		runs     map[string]time.Time
+		complete bool
+	}
+	var mu sync.Mutex
+	indexes := map[string]lastRunIndex{}
 	return func(order orders.Order) (time.Time, error) {
 		stores, err := resolveStores(order)
 		if err != nil {
 			return time.Time{}, err
 		}
+		key := orderStoreSetKey(stores)
+		mu.Lock()
+		index, cached := indexes[key]
+		if !cached {
+			index.runs, index.complete = orders.LastRunAllAcross(orderFrontDoorsForTypedStores(stores))
+			indexes[key] = index
+		}
+		mu.Unlock()
+		if index.complete {
+			return index.runs[order.ScopedName()], nil
+		}
 		return orders.LastRunAcross(orderFrontDoorsForTypedStores(stores))(order.ScopedName())
 	}
+}
+
+// orderStoreSetKey identifies a federation by the bead stores in it, so two
+// orders resolving to the same stores share one last-run index.
+//
+// It keys on the stores rather than on the *orders.Store front doors:
+// orderFrontDoorsForTypedStores allocates a fresh wrapper per call, so keying
+// on those would mint a new key — and a new whole-city index read — for every
+// single order, which is the cost this cache exists to remove. The resolver
+// behind it caches the underlying stores per scope, so their identity is
+// stable for the run.
+func orderStoreSetKey(stores []beads.OrdersStore) string {
+	parts := make([]string, 0, len(stores))
+	for _, s := range stores {
+		parts = append(parts, fmt.Sprintf("%p", s.Store))
+	}
+	return strings.Join(parts, "|")
 }
 
 func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts buildDoctorChecksOpts) []doctor.Check {
@@ -285,7 +335,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		}
 	}
 
-	storeFactory := openStoreForCity(cityPath)
+	storeFactory := perRunStoreFactory(openStoreForCity(cityPath))
 
 	// One preflight gates all store-dependent checks so outages are not re-probed (#5064).
 	storeOK := true
@@ -696,6 +746,40 @@ func collectPackDirs(cfg *config.City) []string {
 func openStoreForCity(cityPath string) func(string) (beads.Store, error) {
 	return func(dirPath string) (beads.Store, error) {
 		return openStoreAtForCity(dirPath, cityPath)
+	}
+}
+
+// perRunStoreFactory memoizes a store factory for the length of one doctor
+// run, so the dozen-odd store-backed checks share one store per scope instead
+// of each opening its own.
+//
+// A doctor run is a read-only snapshot of a city that is not being mutated
+// underneath it, and no check closes the store it is handed, so reusing the
+// handle is the same object lifetime the checks already assume. What it saves
+// is the open: on a bd-backed scope that is a version probe, a config read and
+// a custom-types read per check, all of them subprocesses.
+//
+// Failures are memoized too. A store that could not be opened will not open on
+// the next check either, and re-attempting it once per check is how one
+// unreachable scope turned into a doctor run that spent its whole budget
+// failing the same way.
+func perRunStoreFactory(open func(string) (beads.Store, error)) func(string) (beads.Store, error) {
+	type opened struct {
+		store beads.Store
+		err   error
+	}
+	var mu sync.Mutex
+	cache := map[string]opened{}
+	return func(dirPath string) (beads.Store, error) {
+		key := normalizePathForCompare(dirPath)
+		mu.Lock()
+		defer mu.Unlock()
+		if got, ok := cache[key]; ok {
+			return got.store, got.err
+		}
+		store, err := open(dirPath)
+		cache[key] = opened{store: store, err: err}
+		return store, err
 	}
 }
 

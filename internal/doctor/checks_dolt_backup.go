@@ -63,6 +63,18 @@ func (c *DoltBackupCheck) Run(_ *CheckContext) *CheckResult {
 
 	rigPath := c.normalizedRigPath()
 
+	// A bd-owned proxied scope has neither of the two signals below and cannot
+	// grow them: its Dolt repository lives under bd's proxy root, gc never
+	// writes <city>/.dolt-backup for it, and rc.2 refuses `bd backup` on the
+	// proxied path outright. The fix hint would hand the operator a `dolt
+	// backup` invocation against a server gc does not own. Report not-required
+	// rather than warning every healthy proxied rig forever.
+	if scopeBindingIsProviderOwnedProxied(rigPath) {
+		r.Status = StatusOK
+		r.Message = fmt.Sprintf("rig %q: bd-owned proxied store — Dolt backups are not gc's to register here", c.rig.Name)
+		return r
+	}
+
 	// An external (non-managed) Dolt endpoint owns its own backups; gc does not
 	// manage them, so the local .dolt-backup directory and managed-Dolt
 	// repo_state.json signals never apply, and the localhost fix hint below is

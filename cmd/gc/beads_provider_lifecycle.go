@@ -1745,7 +1745,12 @@ func initDefaultRigBdStore(cityPath, dir, prefix, doltDatabase string) error {
 	args := []string{"init", "-p", prefix, "--skip-hooks"}
 	if scopeUsesProxiedDoltMode(cityPath, dir) || (!scopeOverridesCityBackend(cityPath, dir) && scopeUsesProxiedDoltMode(cityPath, cityPath)) {
 		env["BEADS_DOLT_PROXIED_SERVER"] = "1"
-		args = append(args[:1], "--proxied-server", "-p", prefix, "--skip-hooks")
+		// Idle-never is not an optimization, it is D3: without it bd retires
+		// the proxy and its Dolt child after 30s quiet and every later command
+		// pays a cold start. It also has to be passed for bd to write the
+		// client-info sidecar at all, which is what the lifecycle then reads
+		// to find the proxy root.
+		args = append(args[:1], "--proxied-server", "--proxied-server-idle-timeout", "0", "-p", prefix, "--skip-hooks")
 	} else {
 		args = append(args[:1], "--server", "-p", prefix, "--skip-hooks")
 	}

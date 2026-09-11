@@ -173,6 +173,23 @@ func TestBDVersionPins(t *testing.T) {
 	// so it sat at v1.0.4 through the promotion to v1.1.0. A doc anchor nothing
 	// asserts is how the next bump goes half-applied.
 	assertDocPinAnchor(t, root, ".devcontainer/README.md", "BD_VERSION", bdVersion)
+
+	// The fresh-init floor is the one an operator meets as a typed refusal from
+	// `gc init`, so the design note that explains it is an anchor too. It went
+	// stale once already -- the note said proxied was the default "on bd >=
+	// 1.3.0" while the code refused outright below it.
+	assertDocStatesVersion(t, root, "engdocs/design/beads-proxied-local-default.md",
+		"bd ≥ "+freshProviderFloor, "the fresh provider-owned init floor")
+}
+
+// assertDocStatesVersion fails when a doc no longer restates a version floor in
+// prose. Unlike assertDocPinAnchor it matches a literal phrase rather than a
+// deps.env restatement, because this floor is a Go const, not a deps.env key.
+func assertDocStatesVersion(t *testing.T, root, rel, phrase, what string) {
+	t.Helper()
+	if !strings.Contains(readFile(t, root, rel), phrase) {
+		t.Errorf("%s no longer states %s as %q; update the doc or move this assertion with it", rel, what, phrase)
+	}
 }
 
 // assertDocPinAnchor fails when a doc restates a deps.env pin as

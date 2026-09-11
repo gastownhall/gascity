@@ -25,6 +25,28 @@ func targetIsProviderOwnedProxied(target contract.DoltConnectionTarget) bool {
 	return strings.EqualFold(strings.TrimSpace(target.DoltMode), "proxied-server") && !target.External
 }
 
+// scopeBindingIsProviderOwnedProxied reports whether bd's committed metadata
+// binds scopeRoot to the proxied-server path. It reads metadata.json directly
+// and decodes only the two fields the question needs: contract's loader also
+// rejects any backend this build does not register, which is the right answer
+// when opening a store and the wrong one when asking who owns a process.
+// Unreadable or malformed metadata is "not proxied" — doctor reports what it
+// can prove, and every caller's fallback is the ordinary lens.
+func scopeBindingIsProviderOwnedProxied(scopeRoot string) bool {
+	data, err := os.ReadFile(filepath.Join(pathutil.NormalizePathForCompare(scopeRoot), ".beads", "metadata.json"))
+	if err != nil {
+		return false
+	}
+	var metadata struct {
+		Backend  string `json:"backend"`
+		DoltMode string `json:"dolt_mode"`
+	}
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return false
+	}
+	return contract.IsProxiedDoltMode(metadata.Backend, metadata.DoltMode)
+}
+
 // scopeOwnershipJournal mirrors the fields doctor needs from
 // .gc/scope-ownership.json. cmd/gc owns the schema and its validation; doctor
 // reads the file directly because the journal lives in package main.

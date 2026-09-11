@@ -2698,7 +2698,12 @@ run_bd_init_proxied() {
         unset GC_DOLT_DATA_DIR GC_DOLT_LOG_FILE GC_DOLT_STATE_FILE GC_DOLT_PID_FILE GC_DOLT_LOCK_FILE GC_DOLT_CONFIG_FILE
         unset BEADS_DOLT_SERVER_MODE BEADS_DOLT_SERVER_DATABASE BEADS_DOLT_SERVER_HOST BEADS_DOLT_SERVER_PORT BEADS_DOLT_SERVER_SOCKET BEADS_DOLT_SERVER_USER BEADS_DOLT_PASSWORD
         bd_bin="${BD_BIN:-bd}"
-        set -- init --quiet --proxied-server
+        # Idle-never is D3, and it applies to every proxied scope GC owns, not
+        # only the ones that arrive through the provider-owned front door:
+        # without it bd retires the proxy and its Dolt child after 30s quiet and
+        # every later command pays a cold start. It is also what makes bd write
+        # the client-info sidecar the lifecycle reads to find the proxy root.
+        set -- init --quiet --proxied-server --proxied-server-idle-timeout 0
         if [ -n "$external_host" ] || [ -n "$external_port" ]; then
             [ -n "$external_host" ] && [ -n "$external_port" ] || die "proxied-external init requires both GC_BEADS_PROXY_EXTERNAL_HOST and GC_BEADS_PROXY_EXTERNAL_PORT"
             set -- "$@" --proxied-server-external-host "$external_host" --proxied-server-external-port "$external_port"

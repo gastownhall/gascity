@@ -10,15 +10,49 @@ description: How a Gas City scope becomes a bd-owned proxied-server store, who o
 > contract this specialises), `docs/reference/exec-beads-provider.md` (the exec
 > lifecycle protocol the adapter speaks).
 
-On bd ≥ 1.3.0 a fresh `gc init` produces a **bd-owned proxied-server** store:
-bd runs a detached `bd db-proxy-child`, which runs `dolt sql-server` rooted at
+A fresh `gc init` produces a **bd-owned proxied-server** store: bd runs a
+detached `bd db-proxy-child`, which runs `dolt sql-server` rooted at
 `<scope>/.beads/dolt`. Gas City never spawns Dolt for such a scope. Existing
 direct/server, embedded, DoltLite and external scopes are untouched.
 
 The escape hatch is explicit: `gc init --beads-transport direct --beads-target
-local` (or `GC_BEADS_TRANSPORT`/`GC_BEADS_TARGET`) keeps the legacy
-gc-managed server. `gc rig add` has no selectors — a rig inherits the city's
-topology.
+local` (or `GC_BEADS_TRANSPORT`/`GC_BEADS_TARGET`) yields a **bd-owned
+server-mode** store — `bd init --server`, with bd's own
+`.beads/dolt-server.pid`/`.port`, started and stopped by `bd dolt start`/`bd
+dolt stop`. It is not the legacy gc-managed server. The gc-managed server is
+reached only by a scope that already has one: an existing city whose metadata
+says `dolt_mode: server`, or the legacy `--dolt-host` alias used without a
+selector. `gc rig add` has no selectors — a rig inherits the city's topology,
+and only from a city that is itself provider-owned (see below).
+
+### bd version floor
+
+Every **fresh** provider-owned init needs bd ≥ 1.3.0 — the default one as much
+as a selector-driven one, because both journal a pending ownership record and
+`checkHardDependencies` raises the floor whenever one exists
+(`bdFreshProviderMinVersion`). On an older bd, `gc init` refuses typed before
+touching the store: `missing required dependencies: bd (found vX, need
+v1.3.0+)`. There is no silent fallback to the legacy path. The only fresh init
+that stays on the 1.0.4 floor is the legacy `--dolt-host` alias used without
+`--beads-transport`/`--beads-target`, which is a client-only external
+binding. `beads.bd_compatibility` in `city.toml` is a different knob: it
+selects which bd CLI *semantics* gc relies on at runtime and does not lower or
+raise this init floor.
+
+### External targets
+
+`--beads-target external` requires `--dolt-host`, `--dolt-port` and
+`--dolt-database` (or `GC_DOLT_HOST`/`GC_DOLT_PORT`/`GC_DOLT_DATABASE`). The
+database is required because it names *which* database on a server somebody
+else operates; letting bd derive one from the issue prefix would attach to, or
+create, the wrong database there.
+
+`--dolt-project-id` is **not** required with a selector, and is not honoured on
+that path: gc journals host/port/database only and hands bd just `--database`,
+and bd resolves `project_id` itself (adopting the hosted database's
+`_project_id` or minting one). It stays required for the legacy `--dolt-host`
+alias, which is the one path that writes the identity
+(`contract.WriteProjectIdentity`).
 
 ## Topology authority is bd
 
@@ -64,6 +98,19 @@ transport/target come from the binding (metadata plus the
 Malformed metadata is an error, not a legacy classification. Guessing who owns
 a live Dolt process is how a scope ends up with two.
 
+The same classification is the fence on gc's own managed-Dolt verbs: `gc
+dolt-state start-managed`/`stop-managed`/`probe-managed` refuse a scope it
+answers yes for, so an un-journaled proxied city cannot get a second,
+gc-managed `sql-server` raised over bd's proxy root.
+
+**Inheritance is downward only.** A fresh rig becomes provider-owned only when
+the *city* already is. A rig added to a grandfathered GC-managed direct city
+stays on the legacy inherited-city path — a database on the city's one managed
+server — because journaling it would run a bare `bd init --server` in the rig
+and give the city a second Dolt lifecycle owner that the dolt pack's orders and
+backups do not cover. Converting an existing city is `bd migrate`'s job, not a
+side effect of `gc rig add` or a re-run of `gc init`.
+
 **Refusal.** bd commits `metadata.json` and gitignores the store itself, so a
 clone of a proxied workspace carries `dolt_mode: proxied-server` without any
 data. Serving it would silently create an empty store that reads as an empty
@@ -95,11 +142,20 @@ a second `gc stop` is a clean no-op.
 
 The fan-out covers the city, every configured rig (each workspace gets its own
 proxy root, so each needs its own stop), and — for retiring operations only —
-every `path:` record in the journal. Start and health deliberately do *not*
+every record in the journal, whatever its key. Start deliberately does *not*
 reach detached records: reviving a rig the operator removed is worse than
 leaving it alone. A `city.toml` that no longer parses does not block the stop
-fan-out either; stranding bd's processes behind a config error is the same
-leak by another route.
+fan-out either; stranding bd's processes behind a config error is the same leak
+by another route, and that is precisely the case where the journal's
+`rig:<name>` records are the only remaining list of what this city owns.
+
+A retiring op attempts **every** scope before it reports anything. One rig whose
+`bd dolt stop` refuses — bd declines an unverifiable proxy record without
+`--force` — must not leave the rest resident, so failures are collected and
+returned together. gc does not escalate to `--force`: rc.2 exposes the
+force-eligible condition only as message text, and signalling a PID bd could not
+identify is irreversible. Health reports the same way, so one bad scope cannot
+hide the state of the others.
 
 ## Idle policy
 

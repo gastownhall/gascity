@@ -423,6 +423,61 @@ func (s *Store) LastRun(name string) (time.Time, error) {
 	return latest, nil
 }
 
+// LastRunAll reports the most recent run time for EVERY order at once — one
+// read per leg instead of the one read per order LastRun costs — and reports
+// whether the index is complete enough to answer on its own.
+//
+// It is the fold the dispatcher's cooldown history index already performs
+// (RecentRunsAll): every dispatch writes a tracking bead carrying both
+// `order-run:<scoped>` and `order-tracking`, so listing by the latter and
+// bucketing by the former answers "when did each order last run" for the whole
+// city in one pass.
+//
+// An order with no entry in a complete index has never run. The wisp/molecule
+// root a dispatch also stamps with the run label carries no `order-tracking`
+// label and so is invisible here, but it is never the ONLY evidence: the same
+// dispatch creates the tracking bead first (order_dispatch.go stamps the root
+// after CreateRun), so a root exists only where a tracking bead does, and the
+// two are milliseconds apart — immaterial to a staleness question measured in
+// cron intervals. LastRun remains the exact per-order read for callers that
+// want the union.
+//
+// ok is false when a leg failed outright, which is the caller's signal to fall
+// back rather than treat an empty index as "nothing has ever run".
+func (s *Store) LastRunAll() (map[string]time.Time, bool) {
+	out := map[string]time.Time{}
+	complete := true
+	for _, store := range s.mixedLegStores() {
+		results, err := store.List(beads.ListQuery{
+			Label:         labelOrderTracking,
+			IncludeClosed: true,
+			Sort:          beads.SortCreatedDesc,
+			TierMode:      beads.TierBoth,
+			// Aggregate read: reduces to max(CreatedAt) per order, so the
+			// backing tie-break at the limit boundary is irrelevant.
+			AllowBackingCreatedLimit: true,
+		})
+		if err != nil {
+			runtimeHelpersLogf("orders: bulk last-run lookup failed: %v", err)
+			if len(results) == 0 {
+				complete = false
+				continue
+			}
+			complete = false
+		}
+		for _, b := range results {
+			scoped, ok := NameFromOrderRunLabel(b)
+			if !ok || b.CreatedAt.IsZero() {
+				continue
+			}
+			if b.CreatedAt.After(out[scoped]) {
+				out[scoped] = b.CreatedAt
+			}
+		}
+	}
+	return out, complete
+}
+
 // Cursor reports the max event seq (the order's event-bus high-water mark) for
 // the named order, unioning across the orders leg and the graph leg. Like
 // LastRun it is a MIXED orders+graph read (the seq labels ride both tracking
