@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -181,12 +180,13 @@ func doBeadsCityMigrateProxied(cityPath string, opts migrateProxiedOptions, stdo
 	}
 
 	if opts.JSON {
-		encoded, err := json.MarshalIndent(report, "", "  ")
-		if err != nil {
-			fmt.Fprintf(stderr, "%s: %v\n", name, err) //nolint:errcheck
-			return 1
+		// ok:true says the report itself is complete, exactly as `gc doctor
+		// --json` does with failing checks. Per-scope outcomes live in
+		// scopes[].status and the count in failed; the process exit code
+		// carries the overall verdict.
+		if code := writeCLIJSONLineOrExit(stdout, stderr, name, report); code != 0 {
+			return code
 		}
-		fmt.Fprintln(stdout, string(encoded)) //nolint:errcheck
 	} else {
 		printMigrateProxiedReport(stdout, report)
 	}
@@ -546,6 +546,13 @@ func sharedCityRootForRig(cityPath, rigPath string) (string, error) {
 // proxy, because Dolt still holds the exclusive data-dir lock — the workspace
 // is unusable until the old server dies (20-migrate-spike.md §4). gc has to be
 // the one that refuses.
+//
+// The question is who owns the Dolt process, not whether one exists. Once the
+// city itself is migrated, bd's proxy holds the data-dir lock and serves every
+// database in it — including the rigs still waiting their turn — so a bare
+// "something holds the lock" test would fence the command out of its own
+// second step. A live `bd db-proxy-child` for this root is therefore an
+// answer, not an obstacle; a published gc runtime state never is.
 func requireNoManagedDoltServer(cityPath string) error {
 	statePath := managedDoltStatePath(cityPath)
 	if _, err := os.Stat(statePath); err == nil {
@@ -554,6 +561,9 @@ func requireNoManagedDoltServer(cityPath string) error {
 		return fmt.Errorf("probe managed dolt runtime state %s: %w", statePath, err)
 	}
 	dataDir := filepath.Join(normalizePathForCompare(cityPath), ".beads", "dolt")
+	if _, bdOwned := bdOwnedProxyDoltConfig(filepath.Join(dataDir, bdProxyConfigFileName)); bdOwned {
+		return nil
+	}
 	if holder := managedDoltDataDirLockHolder(dataDir); holder != "" {
 		return fmt.Errorf("a live process holds the Dolt store lock %s; run gc stop first", holder)
 	}

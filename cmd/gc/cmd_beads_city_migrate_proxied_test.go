@@ -326,6 +326,36 @@ func TestSetMetadataDoltDataDirRefusesAbsolutePath(t *testing.T) {
 	}
 }
 
+// Once the city is migrated, bd's own proxy holds the city data dir's Dolt
+// lock and serves every database in it — including the rigs still queued
+// behind it. A fence that only asked "is the lock held?" would refuse the
+// command's own second step.
+func TestRequireNoManagedDoltServerAcceptsABdOwnedProxyRoot(t *testing.T) {
+	city, _ := newLegacyManagedCityFixture(t)
+	dataDir := filepath.Join(city, ".beads", "dolt")
+	configPath := writeBdProxyRootAt(t, dataDir, 4242)
+	stubBdProxyProcesses(t, map[int][]string{4242: bdProxyChildArgv(configPath)})
+
+	if err := requireNoManagedDoltServer(city); err != nil {
+		t.Fatalf("requireNoManagedDoltServer() = %v, want nil for a bd-owned proxy root", err)
+	}
+}
+
+// A published gc runtime state is never excused, proxy record or not: gc and bd
+// both believing they own the server is the conflict, not the evidence.
+func TestRequireNoManagedDoltServerStillRefusesPublishedGCState(t *testing.T) {
+	city, _ := newLegacyManagedCityFixture(t)
+	dataDir := filepath.Join(city, ".beads", "dolt")
+	configPath := writeBdProxyRootAt(t, dataDir, 4243)
+	stubBdProxyProcesses(t, map[int][]string{4243: bdProxyChildArgv(configPath)})
+	writeManagedDoltStateFile(t, city)
+
+	err := requireNoManagedDoltServer(city)
+	if err == nil || !strings.Contains(err.Error(), "run gc stop first") {
+		t.Fatalf("requireNoManagedDoltServer() = %v, want a gc stop refusal", err)
+	}
+}
+
 func TestRequireNoManagedDoltServerAcceptsAStoppedCity(t *testing.T) {
 	city, _ := newLegacyManagedCityFixture(t)
 	if err := requireNoManagedDoltServer(city); err != nil {
