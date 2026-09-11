@@ -8788,6 +8788,7 @@ func TestSyncSessionBeadsWithSnapshotAndRigStoresLeavesOrphanedSessionBeadOpenWh
 		&stderr,
 		false,
 		nil,
+		nil,
 	)
 
 	got, err := store.Get(sessionBead.ID)
@@ -8796,6 +8797,124 @@ func TestSyncSessionBeadsWithSnapshotAndRigStoresLeavesOrphanedSessionBeadOpenWh
 	}
 	if got.Status != "open" {
 		t.Fatalf("session bead status = %q, want open because rig-store work still owns it", got.Status)
+	}
+}
+
+// capturedTracePhase is a test spy record for a single recordPhase call.
+type capturedTracePhase struct {
+	site   TraceSiteCode
+	name   string
+	fields map[string]any
+}
+
+// TestSyncSessionBeadsWithSnapshotAndRigStoresRecordsLoadExistingPhase covers
+// ga-ihbl3e.1 work package 1: the unconditional existing-beads scan (Scan 1)
+// must report its own duration and row count as a distinct child phase of
+// TraceSiteSessionSync, not be folded silently into the caller's outer
+// "sync_beads_and_update_index" span. With an empty desired state the loop
+// never runs, so the second (memoized) scan must NOT fire.
+func TestSyncSessionBeadsWithSnapshotAndRigStoresRecordsLoadExistingPhase(t *testing.T) {
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker-1",
+			"state":        "active",
+		},
+	}); err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	sp := runtime.NewFake()
+	clk := &clock.Fake{Time: time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)}
+
+	var captured []capturedTracePhase
+	recordPhase := func(site TraceSiteCode, name string, start time.Time, fields map[string]any) {
+		if start.IsZero() {
+			t.Fatalf("recordPhase %s: start time is zero", name)
+		}
+		captured = append(captured, capturedTracePhase{site: site, name: name, fields: fields})
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeadsWithSnapshotAndRigStores(
+		"", beads.SessionStore{Store: store}, nil, nil, sp, map[string]bool{}, nil, clk, &stderr, false, nil,
+		recordPhase,
+	)
+
+	var loadExisting *capturedTracePhase
+	for i := range captured {
+		switch captured[i].name {
+		case "sync_beads_and_update_index.load_existing":
+			loadExisting = &captured[i]
+		case "sync_beads_and_update_index.load_visible_by_session_name":
+			t.Fatalf("load_visible_by_session_name phase recorded with an empty desired state; nothing should trigger the second scan")
+		}
+	}
+	if loadExisting == nil {
+		t.Fatalf("no sync_beads_and_update_index.load_existing phase recorded; captured=%+v", captured)
+	}
+	if loadExisting.site != TraceSiteSessionSync {
+		t.Fatalf("load_existing site = %q, want %q", loadExisting.site, TraceSiteSessionSync)
+	}
+	if got := loadExisting.fields["existing_count"]; got != 1 {
+		t.Fatalf("load_existing existing_count = %v, want 1", got)
+	}
+}
+
+// TestSyncSessionBeadsWithSnapshotAndRigStoresRecordsLoadVisibleBySessionNamePhase
+// covers ga-ihbl3e.1 work package 1's second scan: loadVisibleBySessionName
+// only re-lists the store when a desired pool instance has no matching bead
+// yet (the stale-snapshot recovery lane). That lane is a second full store
+// scan folded into the same outer phase, so it must report its own duration
+// too — otherwise the two scans are indistinguishable in the trace.
+func TestSyncSessionBeadsWithSnapshotAndRigStoresRecordsLoadVisibleBySessionNamePhase(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	clk := &clock.Fake{Time: time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)}
+	desired := map[string]TemplateParams{
+		"pool-session": {
+			TemplateName: "pack/worker",
+			InstanceName: "pack/worker-1",
+			PoolSlot:     1,
+		},
+	}
+
+	var captured []capturedTracePhase
+	recordPhase := func(site TraceSiteCode, name string, start time.Time, fields map[string]any) {
+		if start.IsZero() {
+			t.Fatalf("recordPhase %s: start time is zero", name)
+		}
+		captured = append(captured, capturedTracePhase{site: site, name: name, fields: fields})
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeadsWithSnapshotAndRigStores(
+		"", beads.SessionStore{Store: store}, nil, desired, sp, allConfiguredDS(desired), nil, clk, &stderr, false, nil,
+		recordPhase,
+	)
+
+	var loadExisting, loadVisible *capturedTracePhase
+	for i := range captured {
+		switch captured[i].name {
+		case "sync_beads_and_update_index.load_existing":
+			loadExisting = &captured[i]
+		case "sync_beads_and_update_index.load_visible_by_session_name":
+			loadVisible = &captured[i]
+		}
+	}
+	if loadExisting == nil {
+		t.Fatalf("no sync_beads_and_update_index.load_existing phase recorded; captured=%+v", captured)
+	}
+	if loadVisible == nil {
+		t.Fatalf("no sync_beads_and_update_index.load_visible_by_session_name phase recorded; a new pool instance with no existing bead must trigger the recovery scan; captured=%+v", captured)
+	}
+	if loadVisible.site != TraceSiteSessionSync {
+		t.Fatalf("load_visible_by_session_name site = %q, want %q", loadVisible.site, TraceSiteSessionSync)
+	}
+	if got := loadVisible.fields["visible_count"]; got != 0 {
+		t.Fatalf("load_visible_by_session_name visible_count = %v, want 0", got)
 	}
 }
 
