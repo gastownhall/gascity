@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
@@ -73,6 +75,100 @@ func TestSuspendResume(t *testing.T) {
 	}
 	if v, ok := suspensionstate.ExplicitCity(st); !ok || v {
 		t.Errorf("runtime state should record explicit resume after doSuspendCity(false); got (%v, %v)", v, ok)
+	}
+}
+
+// TestDoSuspendCityExplicitPathDoesNotMutateAmbientCity pins the fallback
+// isolation contract: the explicit cityPath owns the runtime state, event,
+// and generated provider shim even when the process context resolves to a
+// different city. The working directory is nested beneath the ambient city;
+// GC_CITY_PATH makes that production discovery result explicit because test
+// binaries intentionally refuse unpinned upward city discovery.
+func TestDoSuspendCityExplicitPathDoesNotMutateAmbientCity(t *testing.T) {
+	clearGCEnv(t)
+
+	root := t.TempDir()
+	gcHome := filepath.Join(root, "gc-home")
+	ambientCity := filepath.Join(root, "ambient-city")
+	ambientWorkDir := filepath.Join(ambientCity, "nested", "worktree")
+	explicitCity := filepath.Join(root, "explicit-city")
+	for _, dir := range []string{gcHome, ambientWorkDir, explicitCity} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	writeMinimalCityToml(t, ambientCity)
+	writeMinimalCityToml(t, explicitCity)
+	ambientEventPath := filepath.Join(ambientCity, ".gc", "events.jsonl")
+	ambientShimPath := filepath.Join(ambientCity, ".gc", "scripts", "gc-beads-bd.sh")
+	ambientEventSentinel := []byte("{\"seq\":1,\"type\":\"test.ambient-sentinel\",\"ts\":\"2026-08-27T00:00:00Z\"}\n")
+	ambientShimSentinel := []byte("#!/bin/sh\n# ambient sentinel\nexit 99\n")
+	for _, dir := range []string{filepath.Dir(ambientEventPath), filepath.Dir(ambientShimPath)} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir ambient runtime dir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(ambientEventPath, ambientEventSentinel, 0o644); err != nil {
+		t.Fatalf("write ambient event sentinel: %v", err)
+	}
+	if err := os.WriteFile(ambientShimPath, ambientShimSentinel, 0o755); err != nil {
+		t.Fatalf("write ambient shim sentinel: %v", err)
+	}
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv("GC_CITY_PATH", ambientCity)
+	t.Setenv("GC_CEILING_DIRECTORIES", root)
+	setCwd(t, ambientWorkDir)
+
+	var stdout, stderr bytes.Buffer
+	if code := doSuspendCity(fsys.OSFS{}, explicitCity, true, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("suspend code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	st, err := suspensionstate.Load(fsys.OSFS{}, explicitCity)
+	if err != nil {
+		t.Fatalf("load explicit suspension state: %v", err)
+	}
+	if !suspensionstate.IsCitySuspended(st) {
+		t.Fatal("explicit city did not receive suspended runtime state")
+	}
+
+	explicitEvents := filepath.Join(explicitCity, ".gc", "events.jsonl")
+	recorded, err := events.ReadFiltered(explicitEvents, events.Filter{Type: events.CitySuspended})
+	if err != nil {
+		t.Fatalf("read explicit city events: %v", err)
+	}
+	if len(recorded) != 1 {
+		t.Fatalf("explicit city suspended events = %d, want 1", len(recorded))
+	}
+
+	explicitShim := filepath.Join(explicitCity, ".gc", "scripts", "gc-beads-bd.sh")
+	shimData, err := os.ReadFile(explicitShim)
+	if err != nil {
+		t.Fatalf("read explicit city provider shim: %v", err)
+	}
+	wantTarget, err := bundledGcBeadsBdScriptTarget()
+	if err != nil {
+		t.Fatalf("resolve expected provider shim target: %v", err)
+	}
+	if !strings.Contains(string(shimData), wantTarget) {
+		t.Fatalf("explicit city provider shim does not target isolated cache %q:\n%s", wantTarget, shimData)
+	}
+
+	for path, want := range map[string][]byte{
+		ambientEventPath: ambientEventSentinel,
+		ambientShimPath:  ambientShimSentinel,
+	} {
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read ambient sentinel %s: %v", path, err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("ambient city artifact %s was mutated:\n got: %q\nwant: %q", path, got, want)
+		}
+	}
+	ambientState := filepath.Join(ambientCity, ".gc", "runtime", "suspension-state.json")
+	if _, err := os.Stat(ambientState); !os.IsNotExist(err) {
+		t.Fatalf("ambient suspension state exists or cannot be safely classified: %v", err)
 	}
 }
 

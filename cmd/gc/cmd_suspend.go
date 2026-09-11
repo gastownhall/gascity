@@ -75,7 +75,11 @@ func cmdSuspend(args []string, jsonOut bool, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if c := apiClient(cityPath); c != nil {
+	// A supervisor-managed city has a live controller socket but normally no
+	// standalone [api] port. Route through the supervisor API in that common
+	// case so the mutation also pokes reconciliation immediately; a direct file
+	// fallback cannot provide that wake-up handshake.
+	if c, _ := supervisorFallthroughAPIClient(cityPath); c != nil {
 		err := c.SuspendCity()
 		if err == nil {
 			return writeCitySuspensionSuccess(stdout, stderr, cityPath, true, jsonOut)
@@ -96,7 +100,9 @@ func cmdResume(args []string, jsonOut bool, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc resume: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if c := apiClient(cityPath); c != nil {
+	// See cmdSuspend: supervisor routing couples the durable runtime-state write
+	// with an immediate reconciler poke.
+	if c, _ := supervisorFallthroughAPIClient(cityPath); c != nil {
 		err := c.ResumeCity()
 		if err == nil {
 			return writeCitySuspensionSuccess(stdout, stderr, cityPath, false, jsonOut)
@@ -139,7 +145,7 @@ func doSuspendCity(fs fsys.FS, cityPath string, suspend bool, jsonOut bool, stdo
 		return 1
 	}
 
-	rec := openCityRecorder(stderr)
+	rec := openCityRecorderAt(cityPath, stderr)
 	if suspend {
 		rec.Record(events.Event{
 			Type:  events.CitySuspended,

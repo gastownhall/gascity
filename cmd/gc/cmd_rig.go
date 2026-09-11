@@ -957,7 +957,7 @@ func cmdRigSuspend(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	cityPath := ctx.CityPath
-	if c := apiClient(cityPath); c != nil {
+	if c, _ := supervisorFallthroughAPIClient(cityPath); c != nil {
 		err := c.SuspendRig(rigName)
 		if err == nil {
 			fmt.Fprintf(stdout, "Suspended rig '%s'\n", rigName) //nolint:errcheck // best-effort stdout
@@ -1071,7 +1071,7 @@ func cmdRigResume(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	cityPath := ctx.CityPath
-	if c := apiClient(cityPath); c != nil {
+	if c, _ := supervisorFallthroughAPIClient(cityPath); c != nil {
 		err := c.ResumeRig(rigName)
 		if err == nil {
 			fmt.Fprintf(stdout, "Resumed rig '%s'\n", rigName) //nolint:errcheck // best-effort stdout
