@@ -47,6 +47,29 @@ func scopeBindingIsProviderOwnedProxied(scopeRoot string) bool {
 	return contract.IsProxiedDoltMode(metadata.Backend, metadata.DoltMode)
 }
 
+// bdOwnedStoreNoun names a bd-owned scope's topology for an operator-facing
+// message, so the reason a check does not apply says which shape it is.
+func bdOwnedStoreNoun(scopeRoot string) string {
+	if scopeBindingIsProviderOwnedProxied(scopeRoot) {
+		return "bd-owned proxied store"
+	}
+	return "bd-owned store"
+}
+
+// scopeIsProviderOwned reports whether bd owns this scope's Dolt lifecycle.
+//
+// Two signals, the same ones cmd/gc classifies on: the city's ownership journal
+// names the scope, or bd's committed metadata binds it to the proxied path — an
+// arm that matters on its own because a workspace migrated in place, or cloned
+// from a proxied city, arrives with no journal entry at all.
+//
+// The transport is not part of the question. A bd-owned direct scope runs its
+// Dolt under bd's root exactly as a proxied one does; only the process in front
+// of it differs.
+func scopeIsProviderOwned(cityPath, scopeRoot string) bool {
+	return scopeJournaledToProvider(cityPath, scopeRoot) || scopeBindingIsProviderOwnedProxied(scopeRoot)
+}
+
 // scopeOwnershipJournal mirrors the fields doctor needs from
 // .gc/scope-ownership.json. cmd/gc owns the schema and its validation; doctor
 // reads the file directly because the journal lives in package main.
@@ -63,6 +86,22 @@ type scopeOwnershipJournal struct {
 // records scopeRoot as still initializing. An unreadable or malformed journal
 // is not a pending signal: doctor reports what it can prove.
 func scopeInitializationPending(cityPath, scopeRoot string) bool {
+	return scopeJournalStateIs(cityPath, scopeRoot, "provider_initializing")
+}
+
+// scopeJournaledToProvider reports whether the journal records scopeRoot at all,
+// in any state. Ownership is recorded on the first write and cleared only when
+// the scope is detached, so state answers "how far did init get", not "whose
+// lifecycle is this".
+func scopeJournaledToProvider(cityPath, scopeRoot string) bool {
+	return scopeJournalStateIs(cityPath, scopeRoot, "")
+}
+
+// scopeJournalStateIs reads gc's ownership journal and reports whether it holds
+// a provider record for scopeRoot, optionally narrowed to one state. An
+// unreadable or malformed journal is not a signal: doctor reports what it can
+// prove.
+func scopeJournalStateIs(cityPath, scopeRoot, state string) bool {
 	data, err := os.ReadFile(filepath.Join(pathutil.NormalizePathForCompare(cityPath), ".gc", "scope-ownership.json"))
 	if err != nil {
 		return false
@@ -72,7 +111,10 @@ func scopeInitializationPending(cityPath, scopeRoot string) bool {
 		return false
 	}
 	for _, entry := range journal.Scopes {
-		if entry.State != "provider_initializing" || entry.ScopePath == "" {
+		if entry.ScopePath == "" || entry.LifecycleOwner != "provider" {
+			continue
+		}
+		if state != "" && entry.State != state {
 			continue
 		}
 		if pathutil.SamePath(entry.ScopePath, scopeRoot) {

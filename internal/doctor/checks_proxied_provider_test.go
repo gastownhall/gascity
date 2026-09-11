@@ -23,6 +23,15 @@ func writeDoctorOwnershipJournal(t *testing.T, cityPath, body string) {
 	}
 }
 
+// readyOwnershipJournal is the record a scope carries once provider-owned
+// initialisation has completed: bd owns its Dolt lifecycle, and there is no
+// intent left to finish.
+func readyOwnershipJournal(t *testing.T, key, scopePath string) string {
+	t.Helper()
+	return `{"version":1,"scopes":{"` + key + `":{"scope_path":"` + scopePath +
+		`","lifecycle_owner":"provider","state":"ready"}}}`
+}
+
 func pendingOwnershipJournal(t *testing.T, key, scopePath string) string {
 	t.Helper()
 	return `{"version":1,"scopes":{"` + key + `":{"scope_path":"` + scopePath +

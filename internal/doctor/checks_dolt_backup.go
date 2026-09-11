@@ -63,15 +63,19 @@ func (c *DoltBackupCheck) Run(_ *CheckContext) *CheckResult {
 
 	rigPath := c.normalizedRigPath()
 
-	// A bd-owned proxied scope has neither of the two signals below and cannot
-	// grow them: its Dolt repository lives under bd's proxy root, gc never
-	// writes <city>/.dolt-backup for it, and rc.2 refuses `bd backup` on the
-	// proxied path outright. The fix hint would hand the operator a `dolt
-	// backup` invocation against a server gc does not own. Report not-required
-	// rather than warning every healthy proxied rig forever.
-	if scopeBindingIsProviderOwnedProxied(rigPath) {
+	// A bd-owned scope has neither of the two signals below and cannot grow
+	// them: its Dolt repository lives under bd's root, gc never writes
+	// <city>/.dolt-backup for it, and rc.2 refuses `bd backup` on the proxied
+	// path outright. The fix hint would hand the operator a `dolt backup`
+	// invocation against a server gc does not own. Report not-required rather
+	// than warning every healthy bd-owned rig forever.
+	//
+	// Both transports, because the transport is not what the check is about:
+	// a direct bd-owned rig keeps its Dolt under bd's root exactly as a proxied
+	// one does.
+	if scopeIsProviderOwned(c.cityPath, rigPath) {
 		r.Status = StatusOK
-		r.Message = fmt.Sprintf("rig %q: bd-owned proxied store — Dolt backups are not gc's to register here", c.rig.Name)
+		r.Message = fmt.Sprintf("rig %q: %s — Dolt backups are not gc's to register here", c.rig.Name, bdOwnedStoreNoun(rigPath))
 		return r
 	}
 

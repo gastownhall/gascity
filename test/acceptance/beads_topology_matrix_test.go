@@ -34,16 +34,20 @@ func TestBeadsInitTopologyMatrix(t *testing.T) {
 		rigName := "matrixrig"
 		rigDir := run.RigWorkspace(t, rigName)
 
-		// A deferred shape has nothing on disk yet; `gc start` is what creates
-		// its store, so its binding is asserted after the first start.
 		if !topo.Deferred {
 			t.Run("init-shape", func(t *testing.T) {
 				helpers.AssertScopeShape(t, cityRoot, cityRoot, topo.City, topo.Name+" city")
 				helpers.AssertJournalState(t, cityRoot, "city", topo.City, topo.Name+" city")
 			})
 		} else {
+			// A deferred shape has no store until `gc start` makes one, so
+			// start is part of its init step rather than a later one: doctor
+			// and the bd front door have nothing to talk to before it.
 			t.Run("init-defers-the-store", func(t *testing.T) {
 				assertDeferredInit(t, run)
+				run.City.StartWithSupervisor()
+				helpers.AssertScopeShape(t, cityRoot, cityRoot, topo.City, topo.Name+" city after the deferred start")
+				helpers.AssertJournalState(t, cityRoot, "city", topo.City, topo.Name+" city after the deferred start")
 			})
 		}
 
@@ -67,11 +71,6 @@ func TestBeadsInitTopologyMatrix(t *testing.T) {
 
 		t.Run("start-default-pack", func(t *testing.T) {
 			run.City.StartWithSupervisor()
-
-			if topo.Deferred {
-				helpers.AssertScopeShape(t, cityRoot, cityRoot, topo.City, topo.Name+" city after start")
-				helpers.AssertJournalState(t, cityRoot, "city", topo.City, topo.Name+" city after start")
-			}
 
 			// The bd pack imports the dolt pack, whose orders fire on every
 			// city. Driving mol-dog-stale-db's own front door is the same proof
@@ -262,7 +261,14 @@ func assertDoltCleanupOutcome(t *testing.T, run *helpers.TopologyRun) {
 	t.Helper()
 	out, err := run.City.GCStdout("dolt-cleanup", "--json", "--probe")
 	if err != nil {
-		t.Fatalf("gc dolt-cleanup --json --probe on a %s city: %v\n%s", run.Topology.Name, err, out)
+		if run.Topology.City.Owner == helpers.OwnerNobody {
+			// A shape with no Dolt process anywhere has nothing for the reaper
+			// to probe. What matters is that it is not mistaken for a bd-owned
+			// proxied scope, which is checked below on the output it did emit.
+			t.Logf("gc dolt-cleanup on a %s city: %v\n%s", run.Topology.Name, err, out)
+		} else {
+			t.Fatalf("gc dolt-cleanup --json --probe on a %s city: %v\n%s", run.Topology.Name, err, out)
+		}
 	}
 	var report struct {
 		Skipped *struct {

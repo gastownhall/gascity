@@ -2,7 +2,6 @@ package acceptancehelpers
 
 import (
 	"encoding/json"
-	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -150,7 +149,6 @@ type ExternalDolt struct {
 	ProjectID string
 
 	cmd     *exec.Cmd
-	logPath string
 	stopped bool
 }
 
@@ -202,7 +200,7 @@ func StartExternalDolt(t *testing.T, env *Env, dataDir, database string) *Extern
 		_ = logFile.Close()
 		t.Fatalf("start external dolt: %v", err)
 	}
-	up := &ExternalDolt{Host: "127.0.0.1", Port: strconv.Itoa(port), DataDir: dataDir, Database: database, cmd: cmd, logPath: logPath}
+	up := &ExternalDolt{Host: "127.0.0.1", Port: strconv.Itoa(port), DataDir: dataDir, Database: database, cmd: cmd}
 	t.Cleanup(func() {
 		up.Stop()
 		_ = logFile.Close()
@@ -421,8 +419,6 @@ type TopologyRun struct {
 	Root string
 	// Upstream is the external Dolt server the fixture started, or nil.
 	Upstream *ExternalDolt
-	// BDPath and DoltPath are the binaries this run was given.
-	BDPath, DoltPath string
 	// LegacyGCPath is the old gc binary, empty unless the shape needs one.
 	LegacyGCPath string
 }
@@ -515,7 +511,7 @@ func StartTopology(t *testing.T, base *Env, topo BeadsTopology, bdPath, doltPath
 		env.With(k, v)
 	}
 
-	run := &TopologyRun{Topology: topo, Env: env, Root: root, BDPath: bdPath, DoltPath: doltPath}
+	run := &TopologyRun{Topology: topo, Env: env, Root: root}
 	if topo.LegacyInit {
 		run.LegacyGCPath = LegacyGCBinary()
 		if run.LegacyGCPath == "" {
@@ -543,15 +539,6 @@ func topologyDatabaseName(topo BeadsTopology) string {
 	return name + "_db"
 }
 
-// GCBinaryForInit is the binary that creates this shape's scopes. Everything
-// after init runs through the gc under test.
-func (r *TopologyRun) GCBinaryForInit() string {
-	if r.LegacyGCPath != "" {
-		return r.LegacyGCPath
-	}
-	return ""
-}
-
 func (r *TopologyRun) initCity(t *testing.T) {
 	t.Helper()
 	args := []string{"init", "--skip-provider-readiness", "--no-start", "--provider", "claude"}
@@ -562,7 +549,8 @@ func (r *TopologyRun) initCity(t *testing.T) {
 
 	var out string
 	var err error
-	if legacy := r.GCBinaryForInit(); legacy != "" {
+	// The legacy shape is the one scope the gc under test cannot create.
+	if legacy := r.LegacyGCPath; legacy != "" {
 		out, err = r.runBinary(legacy, "", args...)
 	} else {
 		out, err = RunGC(r.Env, "", args...)
@@ -726,7 +714,6 @@ func WaitForNoDoltProcesses(t *testing.T, root string, timeout time.Duration) []
 // ScopeArtifacts is the on-disk binding of one scope, read through the files bd
 // and gc actually persist.
 type ScopeArtifacts struct {
-	Root     string
 	Metadata BeadsMetadata
 	// HasMetadata is false for a scope with no .beads/metadata.json: doltlite
 	// cities and a deferred scope before `gc start`.
@@ -785,7 +772,7 @@ type ScopeOwnershipRow struct {
 // ReadScopeArtifacts reads everything the matrix asserts about one scope.
 func ReadScopeArtifacts(t *testing.T, cityRoot, scopeRoot string) ScopeArtifacts {
 	t.Helper()
-	a := ScopeArtifacts{Root: scopeRoot}
+	var a ScopeArtifacts
 	if data, err := os.ReadFile(filepath.Join(scopeRoot, ".beads", "metadata.json")); err == nil {
 		if err := json.Unmarshal(data, &a.Metadata); err != nil {
 			t.Fatalf("parse %s metadata.json: %v\n%s", scopeRoot, err, data)
@@ -930,9 +917,4 @@ func syscallKill(pid int) error {
 		return err
 	}
 	return proc.Kill()
-}
-
-// FormatTopologyResult renders one row of the matrix result table for the log.
-func FormatTopologyResult(name, outcome, detail string) string {
-	return fmt.Sprintf("| %s | %s | %s |", name, outcome, detail)
 }
