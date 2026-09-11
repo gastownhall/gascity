@@ -1,5 +1,5 @@
 ---
-title: gc events Formats
+title: gc events Output Formats
 description: Exact output formats emitted by `gc events`.
 ---
 
@@ -28,7 +28,7 @@ The underlying DTOs come from the published OpenAPI document:
 - `HeartbeatEvent`
 
 Download the canonical supervisor spec and the `gc events` JSONL line schema
-from [Schemas](/schema), or read the broader event-bus notes in the
+from [Schemas](/reference/schema), or read the broader event-bus notes in the
 [Supervisor REST API](/reference/api).
 
 ## Output Modes
@@ -151,12 +151,25 @@ the JSON shape:
 The same rule applies to both list mode and stream mode.
 
 `--payload-match` accepts top-level fields and dotted paths into nested
-payload objects. For example, use
-`--payload-match bead.issue_type=task` to match bead events by issue type.
+payload objects. Which form matches depends on the payload's shape on the
+path you are reading, and the two paths differ for `bead.*` events:
+
+- Against a running city, `gc events` reads through the API, which re-projects
+  a registered payload into its typed variant. `bead.*` decodes to
+  `BeadEventPayload`, whose single field is `bead`, so use
+  `--payload-match bead.issue_type=task` there.
+- Against a stopped city, `gc events` falls back to reading the local event
+  journal and passes each stored payload through verbatim. `bead.*` payloads
+  are stored as a raw bead snapshot, so their fields are top level: use
+  `--payload-match issue_type=task` there.
+
+A path that does not resolve is not an error — the record simply does not
+match — so the wrong form for the path returns nothing rather than reporting
+a problem.
 
 ## Machine-Readable Schema
 
-The <a href="https://raw.githubusercontent.com/gastownhall/gascity/main/docs/schema/events.json" target="_blank" rel="noopener">events.json</a>
+The <a href="https://raw.githubusercontent.com/gastownhall/gascity/main/docs/reference/schema/events.json" target="_blank" rel="noopener">events.json</a>
 schema validates one JSON object line from list, watch, or follow mode. It
 contains only framing metadata and `$ref`s into `openapi.json`:
 

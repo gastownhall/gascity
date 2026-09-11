@@ -748,6 +748,9 @@ func runAgentScriptCommandInStore(stdout, stderr io.Writer, dir string, env []st
 	if env != nil {
 		cmd.Env = workQueryEnvForDir(env, dir)
 	}
+	if name == "gc" {
+		disableProductMetricsForChild(cmd)
+	}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {
@@ -813,7 +816,7 @@ func agentScriptHookExitIsNoWork(output, stderr string) bool {
 }
 
 func agentScriptClaimActor() string {
-	for _, key := range []string{"GC_SESSION_NAME", "GC_AGENT", "GC_ALIAS", "BEADS_ACTOR"} {
+	for _, key := range []string{"GC_ALIAS", "BEADS_ACTOR", "GC_AGENT", "GC_SESSION_NAME"} {
 		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
 			return value
 		}
@@ -835,7 +838,7 @@ func agentScriptRig() string {
 }
 
 func agentScriptAlias() string {
-	for _, key := range []string{"GC_ALIAS", "GC_SESSION_NAME", "GC_AGENT"} {
+	for _, key := range []string{"GC_ALIAS", "BEADS_ACTOR", "GC_AGENT", "GC_SESSION_NAME"} {
 		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
 			return value
 		}

@@ -1,5 +1,0 @@
-scope = "city"
-wake_mode = "fresh"
-work_dir = ".gc/agents/mayor"
-idle_timeout = "1h"
-max_active_sessions = 1

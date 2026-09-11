@@ -25,12 +25,16 @@ import (
 // bdDoltInRig runs the bd binary in rigDir using the managed Dolt endpoint
 // from cityDir. The rig and the city share the same Dolt server; the database
 // name is read from the rig's .beads/metadata.json by bd.
+//
+// Uses runCommandStdout, not runCommand: callers parse the returned string as
+// a value (an issue prefix, a bead ID), and bd's own stderr diagnostics must
+// not be able to corrupt that value (ga-rsktma).
 func bdDoltInRig(cityDir, rigDir string, args ...string) (string, error) {
 	env := commandEnvForDir(cityDir, true)
 	if port, ok := ensureManagedDoltPortForTest(cityDir); ok {
 		env = appendManagedDoltEndpointEnv(env, port)
 	}
-	return runCommand(rigDir, env, integrationBDCommandTimeout, bdBinary, args...)
+	return runCommandStdout(rigDir, env, integrationBDCommandTimeout, bdBinary, args...)
 }
 
 func TestCleanInstallTutorialPath(t *testing.T) {
@@ -42,12 +46,19 @@ func TestCleanInstallTutorialPath(t *testing.T) {
 	registerIntegrationDoltSQLServerCleanup(t, cityDir)
 
 	// --- Step 1: gc init (clean install, no --file) ---
-	out, err := runGCDoltWithEnv(env, "", "init",
-		"--skip-provider-readiness",
-		"--providers", "codex",
-		"--default-provider", "codex",
-		cityDir,
-	)
+	// Wrapped in retryOnDoltDirtyTableMigrationRace: under the full parallel
+	// sweep, bd's schema-migration bootstrap can transiently race a
+	// still-settling prior schema state (gastownhall/beads#4566, ga-38xsx4).
+	// The retry is narrowly scoped to that one known signature — see the
+	// predicate's doc comment — so it never masks a real gc-init failure.
+	out, err := retryOnDoltDirtyTableMigrationRace(func() (string, error) {
+		return runGCDoltWithEnv(env, "", "init",
+			"--skip-provider-readiness",
+			"--providers", "codex",
+			"--default-provider", "codex",
+			cityDir,
+		)
+	})
 	if err != nil {
 		t.Fatalf("gc init failed: %v\noutput: %s", err, out)
 	}
@@ -58,18 +69,24 @@ func TestCleanInstallTutorialPath(t *testing.T) {
 		runGCDoltWithEnv(env, "", "supervisor", "stop", "--wait") //nolint:errcheck // best-effort cleanup
 	})
 
-	// --- Step 2: gc rig add (simulate `gc rig add ~/my-project`) ---
-	rigName := "my-project"
+	// --- Step 2: gc rig add (simulate `gc rig add ~/tutorial-rig-alpha`) ---
+	// Three-part name so DeriveBeadsPrefix produces a 3-char prefix ("tra") that
+	// can never equal the 2-char prefix derived from the random city name.
+	rigName := "tutorial-rig-alpha"
 	rigDir := filepath.Join(t.TempDir(), rigName)
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatalf("creating rig dir: %v", err)
 	}
-	out, err = gcDolt(cityDir, "rig", "add", rigDir)
+	// Same beads#4566 exposure as Step 1: gc rig add seeds a second, separate
+	// Dolt DB (the rig's own) and can hit the identical transient race.
+	out, err = retryOnDoltDirtyTableMigrationRace(func() (string, error) {
+		return gcDolt(cityDir, "rig", "add", rigDir)
+	})
 	if err != nil {
 		t.Fatalf("gc rig add failed: %v\noutput: %s", err, out)
 	}
 
-	wantPrefix := config.DeriveBeadsPrefix(rigName) // "mp"
+	wantPrefix := config.DeriveBeadsPrefix(rigName) // "tra"
 
 	// --- Assertion 1: bd config get issue_prefix returns the derived prefix ---
 	// Regression: rig Dolt DB was never seeded so this returned "" before the fix.

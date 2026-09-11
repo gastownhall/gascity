@@ -1,13 +1,11 @@
 ---
-title: Runbook — Managed-city Dolt endpoints
+title: Operate Managed-City Dolt Endpoints
 description: Mental model, forbidden edits, sanctioned escape hatches, and recovery recipe for the city-level Dolt endpoint architecture.
 ---
 
-# Runbook: Managed-city Dolt endpoints
-
 This runbook is for mayors and operators. It covers the endpoint
 architecture introduced in the
-[beads-and-Dolt contract redesign](../../engdocs/design/beads-dolt-contract-redesign.md)
+[beads-and-Dolt contract redesign](https://github.com/gastownhall/gascity/blob/main/engdocs/design/beads-dolt-contract-redesign.md)
 — specifically the case where rigs **inherit** their Dolt endpoint
 from a single city-managed server. If you came here because `gc sling`
 is dropping work, `supervisor.log` shows `rigStores=0`, or your port
@@ -190,6 +188,48 @@ line on stderr for each rig whose `.beads/dolt-server.port` it is
 rewriting back to the managed port — that is your early warning
 that a prior edit or orphan server made the mirror drift.
 
+### Storage-mode drift: a scope pointed at the wrong database
+
+`.beads/metadata.json` names *which* bead database `bd` opens.
+`dolt_mode=server` reads the managed city's `.beads/dolt`;
+`dolt_mode=embedded` reads the scope's own
+`.beads/embeddeddolt/<dolt_database>`. Nothing copies rows between
+them.
+
+`gc rig add`, `gc start`, `gc supervisor run`, `gc rig set-endpoint`
+and `gc beads city use-managed|use-external` all canonicalize a
+managed scope to `server` mode, because a Dolt directory opened
+in-process cannot be shared by the controller, every agent's `bd`
+and the dashboard at once. On a workspace you had initialized in
+embedded mode, that flip re-points the ledger and leaves the old
+database on disk, unread — and `bd` does not fail, it answers `[]`
+with exit 0. This is not split-store specific: it bites a city with
+exactly one store just as hard.
+
+Three things now tell you:
+
+1. The flip prints the scope, both modes and the exact directory it
+   is about to stop reading, before it happens.
+2. `gc doctor`'s `bd-split-store` check enumerates both databases.
+3. An empty **whole-ledger** read (`gc ready`'s city leg, an
+   unfiltered `List`) from a scope that has not returned a row in
+   that process prints **one notice per `gc` process**, naming the
+   unread database. It is a notice, never a refusal, and it spends
+   no `bd` subprocess of its own — a workspace `bd init` created and
+   never filed a bead into is the same shape on disk, an idle ledger
+   reads the same way, and separating them would mean either opening
+   the database you were told to preserve or asking `bd` a second
+   question on the caller's read deadline. Expect it on any scope
+   that still has two bead databases, including healthy ones; that
+   is the price of a notice that cannot cost a read.
+
+Recovery is `gc doctor`'s: export from a copy of the unread
+database, review with `bd import --dry-run`, import into the active
+one, and keep both directories until reconciled. Editing
+`dolt_mode` back does not hold — the next `gc start` re-canonicalizes
+it. While you reconcile, `GC_BD_ALLOW_UNREAD_STORE_READ=1` silences
+the read-time notice without changing any answer.
+
 ## Recovery recipe — slung beads not reaching agents
 
 If you see `gc sling` accepting work but agents not processing it,
@@ -264,7 +304,7 @@ the `supervisor.log` slice covering the last sling attempt.
 
 ## References
 
-- Design: [Beads-and-Dolt contract redesign](../../engdocs/design/beads-dolt-contract-redesign.md)
+- Design: [Beads-and-Dolt contract redesign](https://github.com/gastownhall/gascity/blob/main/engdocs/design/beads-dolt-contract-redesign.md)
   — the authoritative architecture document.
 - Code: [`cmd/gc/cmd_doctor_drift.go`](https://github.com/gastownhall/gascity/blob/main/cmd/gc/cmd_doctor_drift.go)
   — drift detector.

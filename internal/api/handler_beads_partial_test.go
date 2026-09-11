@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http/httptest"
@@ -46,6 +47,13 @@ func (f *failingBeadStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error
 	return f.Store.Ready(query...)
 }
 
+func (f *failingBeadStore) ReadyContext(ctx context.Context, query ...beads.ReadyQuery) ([]beads.Bead, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return f.Ready(query...)
+}
+
 func (f *failingBeadStore) Update(id string, opts beads.UpdateOpts) error {
 	if f.updateCallback != nil {
 		f.updateCallback(id)
@@ -69,13 +77,13 @@ func newPartialListState(t *testing.T, listErr, readyErr error) *fakeState {
 
 	// Add a second rig "bad" whose store fails.
 	bad := beads.NewMemStore()
-	_, _ = bad.Create(beads.Bead{Type: "task", Title: "would-be-lost", Status: "active"})
+	_, _ = bad.Create(beads.Bead{Type: "task", Title: "would-be-lost", Status: "open"})
 	wrapped := &failingBeadStore{Store: bad, listErr: listErr, readyErr: readyErr}
 	fs.stores["bad"] = wrapped
 	fs.cfg.Rigs = append(fs.cfg.Rigs, config.Rig{Name: "bad", Path: t.TempDir()})
 
 	// Seed "myrig" with a real bead so the good-rig path has something.
-	_, _ = fs.stores["myrig"].Create(beads.Bead{Type: "task", Title: "ok-rig-task", Status: "active"})
+	_, _ = fs.stores["myrig"].Create(beads.Bead{Type: "task", Title: "ok-rig-task", Status: "open"})
 	return fs
 }
 

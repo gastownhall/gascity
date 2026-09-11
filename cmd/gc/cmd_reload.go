@@ -88,7 +88,7 @@ func newReloadCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonOut bool
 	var timeoutValue string
 	cmd := &cobra.Command{
-		Use:   "reload [path]",
+		Use:   "reload [path|name]",
 		Short: "Reload the current city's config without restarting the city/controller",
 		Long: `Force the current city controller to re-read effective config and
 process one reload tick without restarting the city/controller.
@@ -107,7 +107,8 @@ drains fire. Useful when editing a running city's .gc/settings.json
 without disrupting in-flight work. Sessions whose template no longer
 maps to a configured agent are NOT updated; normal orphan/suspended
 drain handles them on the next tick.`,
-		Args: cobra.MaximumNArgs(1),
+		Args:              cobra.MaximumNArgs(1),
+		ValidArgsFunction: completeCityNames,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			timeoutChanged := cmd.Flags().Changed("timeout")
 			if cmdReload(args, async, soft, jsonOut, timeoutValue, timeoutChanged, stdout, stderr) != 0 {

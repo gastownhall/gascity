@@ -1,0 +1,19 @@
+=== exit ===
+0
+=== stdout ===
+ID    TITLE         PROGRESS
+BEAD-1  Alpha convoy  0/0 closed
+=== stderr ===
+cmd=convoy list route=api
+=== json_exit ===
+0
+=== json ===
+{"convoys":[{"id":"BEAD-1","title":"Alpha convoy","status":"open","progress":{"closed":0,"total":0},"owned":false,"fields":{}}],"ok":true,"schema_version":"1","summary":{"total":1}}
+=== json_stderr ===
+cmd=convoy list route=api
+=== events ===
+=== store ===
+BEAD-1 type=convoy status=open title="Alpha convoy"
+=== counts ===
+api_requests_human=2
+api_requests_json=2

@@ -2,6 +2,7 @@ package beads_test
 
 import (
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +17,34 @@ func TestMemStore(t *testing.T) {
 	beadstest.RunCreationOrderTests(t, factory)
 	beadstest.RunDepTests(t, factory)
 	beadstest.RunMetadataTests(t, factory)
+	beadstest.RunFenceConformance(t, factory)
+}
+
+func TestMemStoreCreateUsesSerializableTimestamp(t *testing.T) {
+	store := beads.NewMemStore()
+	created, err := store.Create(beads.Bead{Title: "serializable timestamp"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if created.CreatedAt != created.CreatedAt.Round(0) {
+		t.Fatalf("CreatedAt retained a process-local monotonic clock: %v", created.CreatedAt)
+	}
+}
+
+func TestMemStoreConditionalWriterConformance(t *testing.T) {
+	beadstest.RunConditionalWriterConformanceWithOptions(t, "MemStore",
+		func(_ *testing.T) beads.Store { return beads.NewMemStore() },
+		beadstest.ConditionalWriterOptions{
+			RowBackedMutationFlavors: true,
+			RestrictedUpdateFields:   true,
+			SuppliesCurrent:          true,
+			OpenDisabled: func(_ *testing.T) beads.Store {
+				s := beads.NewMemStore()
+				s.DisableConditionalWrites = true
+				return s
+			},
+		},
+	)
 }
 
 func TestMemStoreSetMetadata(t *testing.T) {
@@ -37,6 +66,131 @@ func TestMemStoreSetMetadataNotFound(t *testing.T) {
 	}
 	if !errors.Is(err, beads.ErrNotFound) {
 		t.Errorf("error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestMemStoreReleaseIfCurrent(t *testing.T) {
+	s := beads.NewMemStore()
+	b, err := s.Create(beads.Bead{Title: "work", Assignee: "worker-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Update(b.ID, beads.UpdateOpts{Status: strPtr("in_progress")}); err != nil {
+		t.Fatal(err)
+	}
+
+	released, err := s.ReleaseIfCurrent(b.ID, "worker-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if released {
+		t.Fatal("ReleaseIfCurrent released a bead with the wrong assignee")
+	}
+	got, err := s.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "worker-1" {
+		t.Fatalf("wrong-assignee release mutated bead: %+v", got)
+	}
+	if got.ClaimFence != 0 {
+		t.Errorf("no-op release bumped ClaimFence to %d, want 0", got.ClaimFence)
+	}
+
+	released, err = s.ReleaseIfCurrent(b.ID, "worker-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !released {
+		t.Fatal("ReleaseIfCurrent did not release matching in-progress assignment")
+	}
+	got, err = s.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "open" || got.Assignee != "" {
+		t.Fatalf("released bead = %+v, want open and unassigned", got)
+	}
+	if got.ClaimFence != 1 {
+		t.Errorf("ReleaseIfCurrent did not bump ClaimFence: got %d, want 1 (release is an ownership transition)", got.ClaimFence)
+	}
+}
+
+func TestMemStoreReleaseIfCurrentSkipsMissingAndWrongStatus(t *testing.T) {
+	s := beads.NewMemStore()
+
+	released, err := s.ReleaseIfCurrent("missing", "worker-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if released {
+		t.Fatal("ReleaseIfCurrent released missing bead")
+	}
+
+	b, err := s.Create(beads.Bead{Title: "open work", Assignee: "worker-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	released, err = s.ReleaseIfCurrent(b.ID, "worker-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if released {
+		t.Fatal("ReleaseIfCurrent released non-in-progress bead")
+	}
+	got, err := s.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "open" || got.Assignee != "worker-1" {
+		t.Fatalf("wrong-status release mutated bead: %+v", got)
+	}
+}
+
+func TestMemStoreReleaseIfCurrentDoesNotClobberConcurrentClaim(t *testing.T) {
+	for i := 0; i < 100; i++ {
+		s := beads.NewMemStore()
+		b, err := s.Create(beads.Bead{Title: "work", Assignee: "worker-1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Update(b.ID, beads.UpdateOpts{Status: strPtr("in_progress")}); err != nil {
+			t.Fatal(err)
+		}
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		var releaseErr error
+		var updateErr error
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, releaseErr = s.ReleaseIfCurrent(b.ID, "worker-1")
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			updateErr = s.Update(b.ID, beads.UpdateOpts{
+				Status:   strPtr("in_progress"),
+				Assignee: strPtr("worker-2"),
+			})
+		}()
+		close(start)
+		wg.Wait()
+		if releaseErr != nil {
+			t.Fatalf("ReleaseIfCurrent: %v", releaseErr)
+		}
+		if updateErr != nil {
+			t.Fatalf("Update fresh claim: %v", updateErr)
+		}
+		got, err := s.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != "in_progress" || got.Assignee != "worker-2" {
+			t.Fatalf("concurrent release clobbered fresh claim: %+v", got)
+		}
 	}
 }
 

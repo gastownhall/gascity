@@ -4,7 +4,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
 // These tests cover the min_active_sessions-aware wake path added for #2739:
@@ -154,7 +157,7 @@ func TestBuildAwakeInputPropagatesMinActiveSessions(t *testing.T) {
 	input := buildAwakeInputFromReconciler(
 		&config.City{Agents: []config.Agent{{Name: "pl", MinActiveSessions: &minSess}}},
 		"", // cityPath: empty exercises zero suspension state
-		nil, nil, nil, nil, nil, nil, nil, nil,
+		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
 		time.Now().UTC(),
 	)
 	var found bool
@@ -169,6 +172,39 @@ func TestBuildAwakeInputPropagatesMinActiveSessions(t *testing.T) {
 	if !found {
 		t.Fatalf("agent %q not present in AwakeInput.Agents", "pl")
 	}
+}
+
+// TestMinActive_LegacyBoundTemplateRevivedThroughBridge verifies an adopted
+// session bead persisted under a removed binding ("rig/gc.pl") still counts
+// for — and is revived by — the current unbound agent's min_active_sessions
+// guarantee. The bridge must canonicalize the stored template; with the raw
+// value the min-active pass would neither count nor wake the adopted bead and
+// the pool would stay cold after gc stop && gc start.
+func TestMinActive_LegacyBoundTemplateRevivedThroughBridge(t *testing.T) {
+	minSess := 1
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "pl", Dir: "rig", MinActiveSessions: &minSess}},
+	}
+	input := buildAwakeInputFromReconciler(
+		cfg,
+		"", // cityPath: empty exercises zero suspension state
+		[]session.Info{sessiontest.SeedBead(t, beads.Bead{
+			ID:     "s-1",
+			Status: "open",
+			Type:   "session",
+			Metadata: map[string]string{
+				"state":        "stopped",
+				"sleep_reason": "city-stop",
+				"session_name": "rig--pl-legacy",
+				"template":     "rig/gc.pl",
+			},
+		})},
+		nil, nil, nil, nil, nil, nil, nil, nil, nil,
+		time.Now().UTC(),
+	)
+	result := ComputeAwakeSet(input)
+	assertAwake(t, result, "rig--pl-legacy")
+	assertReason(t, result, "rig--pl-legacy", "min-active")
 }
 
 // TestMinActive_HeldBeadNotWoken verifies hold suppression still wins: a

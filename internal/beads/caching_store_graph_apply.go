@@ -89,17 +89,19 @@ func (c *CachingStore) refreshGraphAppliedBeads(result *GraphApplyResult) {
 	for _, item := range refreshed {
 		if item.found {
 			fresh := cloneBead(item.bead)
-			c.beads[item.id] = fresh
-			c.deps[item.id] = cloneDeps(item.bead.Dependencies)
-			delete(c.dirty, item.id)
-			delete(c.deletedSeq, item.id)
+			c.absorbFreshLocked(item.id, item.bead, now, absorbOpts{
+				depsMode:   depsExplicit,
+				deps:       item.bead.Dependencies,
+				seqMode:    seqKeep,
+				clearDirty: true,
+			})
 			notifications = append(notifications, cacheNotification{
 				eventType: "bead.created",
 				bead:      fresh,
 			})
 			continue
 		}
-		c.dirty[item.id] = struct{}{}
+		c.markDirtyLocked(item.id)
 	}
 	c.markFreshLocked(now)
 	c.updateStatsLocked()

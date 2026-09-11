@@ -143,6 +143,19 @@ func (e *Editor) EditExpanded(fn func(raw, expanded *config.City) error) error {
 	return e.write(raw)
 }
 
+// Do runs fn while holding the Editor's mutation lock, serializing it against
+// every other Editor mutation of this city. Use it for city-config writes that
+// do not fit the load → mutate → validate → write callback shape — for example
+// a multi-file pack import that writes pack.toml, packs.lock, and sometimes
+// city.toml — so they still pass through the single per-city serialization
+// boundary the [Editor] provides. The Editor does not load, validate, or write
+// city.toml for a Do call; fn owns its own I/O.
+func (e *Editor) Do(fn func() error) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return fn()
+}
+
 func validateCityForEdit(cfg *config.City) error {
 	if err := config.ValidateAgents(cfg.Agents); err != nil {
 		return fmt.Errorf("%w: agents: %w", ErrValidation, err)
@@ -152,6 +165,9 @@ func validateCityForEdit(cfg *config.City) error {
 	}
 	if err := config.ValidateServices(cfg.Services); err != nil {
 		return fmt.Errorf("%w: services: %w", ErrValidation, err)
+	}
+	if err := config.ValidateWebhooks(cfg.Webhooks); err != nil {
+		return fmt.Errorf("%w: webhooks: %w", ErrValidation, err)
 	}
 	if err := workspacesvc.ValidateRuntimeSupport(cfg.Services); err != nil {
 		return fmt.Errorf("%w: services: %w", ErrValidation, err)
@@ -171,6 +187,17 @@ func (e *Editor) loadForEdit() (*config.City, error) {
 		return nil, fmt.Errorf("loading site binding: %w", err)
 	}
 	return cfg, nil
+}
+
+// LoadRaw returns the raw (pre-expansion, site-bound) city config — the exact
+// basis the mutation gate uses for provenance. UpdateAgent/DeleteAgent decide
+// pack-derived-ness via AgentOrigin(raw, expanded, name) where raw comes from
+// loadForEdit; read paths that surface provenance (e.g. pack_derived on
+// GET /agents) call this so the read agrees with the 409 gate instead of
+// re-parsing city.toml independently. The returned config is a fresh snapshot
+// the caller owns; it carries no pack-expanded agents.
+func (e *Editor) LoadRaw() (*config.City, error) {
+	return e.loadForEdit()
 }
 
 // write persists city.toml first, then .gc/site.toml. A crash between the
@@ -253,8 +280,12 @@ func SetRigSuspendedOnStart(cfg *config.City, name string, suspended bool) error
 // exists, fn is called on it. Otherwise a new patch is created.
 func AddOrUpdateAgentPatch(cfg *config.City, name string, fn func(p *config.AgentPatch)) error {
 	dir, base := config.ParseQualifiedName(name)
+	// Match on the canonical target identity so an existing rig-keyed patch
+	// (Rig set, Dir empty) is updated in place rather than shadowed by a new
+	// Dir-keyed duplicate. Creation stays on the legacy Dir key, the shape the
+	// suspend/resume path has always produced.
 	for i := range cfg.Patches.Agents {
-		if cfg.Patches.Agents[i].Dir == dir && cfg.Patches.Agents[i].Name == base {
+		if cfg.Patches.Agents[i].TargetQualifiedName() == name {
 			fn(&cfg.Patches.Agents[i])
 			return nil
 		}
@@ -289,31 +320,41 @@ func boolPtr(b bool) *bool { return &b }
 // to durable config (not ephemeral session metadata).
 func (e *Editor) SuspendAgent(name string) error {
 	return e.EditExpanded(func(raw, expanded *config.City) error {
-		return mutateAgentSuspended(e.fs, filepath.Dir(e.tomlPath), raw, expanded, name, true)
+		return mutateAgentSuspended(e.fs, e.tomlPath, raw, expanded, name, true)
 	})
 }
 
 // ResumeAgent resumes a suspended agent, mirroring [Editor.SuspendAgent].
 func (e *Editor) ResumeAgent(name string) error {
 	return e.EditExpanded(func(raw, expanded *config.City) error {
-		return mutateAgentSuspended(e.fs, filepath.Dir(e.tomlPath), raw, expanded, name, false)
+		return mutateAgentSuspended(e.fs, e.tomlPath, raw, expanded, name, false)
 	})
 }
 
 // mutateAgentSuspended is the shared dispatch for SuspendAgent and
 // ResumeAgent. Branches on agent provenance:
-//   - OriginInline (city.toml [[agent]]): edit the raw struct.
+//   - OriginInline (city.toml [[agent]]): surgically toggle the on-disk
+//     suspended key so the generic EditExpanded writeback (a lossy
+//     full-struct marshal) never runs.
 //   - OriginDerived + convention-discovered (agents/<name>/): write
 //     agents/<name>/agent.toml; also strip any legacy [[patches.agent]]
-//     suspended override so it can't shadow the new value.
-//   - OriginDerived + pack-declared: add or update [[patches.agent]].
+//     suspended override (in memory and, when unambiguous, surgically on
+//     disk too) so it can't shadow the new value.
+//   - OriginDerived + pack-declared: surgically append a [[patches.agent]]
+//     block on disk, falling back to the in-memory patch (and the generic
+//     lossy writeback) only when the surgical append refuses.
 //
-// Returns [ErrUnmodified] when the change lives entirely in agent.toml
-// and raw was not touched, so EditExpanded skips the city.toml writeback.
-func mutateAgentSuspended(fs fsys.FS, cityRoot string, raw, expanded *config.City, name string, suspended bool) error {
+// Returns [ErrUnmodified] whenever the on-disk city.toml was already
+// written surgically (or the change lives entirely in agent.toml), so
+// EditExpanded skips its own city.toml writeback.
+func mutateAgentSuspended(fs fsys.FS, tomlPath string, raw, expanded *config.City, name string, suspended bool) error {
+	cityRoot := filepath.Dir(tomlPath)
 	switch AgentOrigin(raw, expanded, name) {
 	case OriginInline:
-		return SetAgentSuspended(raw, name, suspended)
+		if err := config.WriteCityAgentSuspendedForEdit(fs, tomlPath, raw, name, suspended); err != nil {
+			return err
+		}
+		return ErrUnmodified
 	case OriginDerived:
 		agent, ok, err := findLocalDiscoveredAgent(fs, expanded, cityRoot, name)
 		if err != nil {
@@ -330,13 +371,34 @@ func mutateAgentSuspended(fs fsys.FS, cityRoot string, raw, expanded *config.Cit
 			// only strip the matching patch, not a same-named entry
 			// targeting a different rig.
 			if StripAgentPatchSuspended(raw, agent.QualifiedName()) {
-				return nil
+				// raw now reflects the stripped patch in memory. Also
+				// strip it surgically on disk so EditExpanded's lossy
+				// full-struct writeback (which drops every comment)
+				// doesn't run for what is otherwise a no-op city.toml
+				// change. Refuse instead of falling back to the lossy
+				// writeback when the on-disk block can't be
+				// unambiguously located -- silently accepting comment
+				// loss here would defeat the point of the surgical edit.
+				dir, base := config.ParseQualifiedName(agent.QualifiedName())
+				if err := config.StripAgentPatchSuspendedForEdit(fs, tomlPath, raw, dir, base); err != nil {
+					if !errors.Is(err, config.ErrSurgicalAgentEditUnsupported) {
+						return err
+					}
+					return fmt.Errorf("agent %q: legacy [[patches.agent]] suspended override could not be surgically stripped: %w", name, err)
+				}
 			}
 			return ErrUnmodified
 		}
-		return AddOrUpdateAgentPatch(raw, name, func(p *config.AgentPatch) {
-			p.Suspended = boolPtr(suspended)
-		})
+		dir, base := config.ParseQualifiedName(name)
+		if err := config.AppendAgentPatchSuspendedForEdit(fs, tomlPath, raw, dir, base, suspended); err != nil {
+			if !errors.Is(err, config.ErrSurgicalAgentEditUnsupported) {
+				return err
+			}
+			return AddOrUpdateAgentPatch(raw, name, func(p *config.AgentPatch) {
+				p.Suspended = boolPtr(suspended)
+			})
+		}
+		return ErrUnmodified
 	case OriginNotFound:
 		return fmt.Errorf("%w: agent %q", ErrNotFound, name)
 	}
@@ -454,11 +516,10 @@ func agentDeclaredInCityPack(fs fsys.FS, cityRoot, dir, name string) (bool, erro
 // leaving an identity-only [[patches.agent]] block in city.toml.
 // Returns true if any patch was modified.
 func StripAgentPatchSuspended(cfg *config.City, name string) bool {
-	dir, base := config.ParseQualifiedName(name)
 	modified := false
 	kept := cfg.Patches.Agents[:0:0]
 	for _, p := range cfg.Patches.Agents {
-		if p.Dir == dir && p.Name == base && p.Suspended != nil {
+		if p.TargetQualifiedName() == name && p.Suspended != nil {
 			p.Suspended = nil
 			modified = true
 			if isAgentPatchOnlyIdentity(p) {
@@ -474,12 +535,11 @@ func StripAgentPatchSuspended(cfg *config.City, name string) bool {
 }
 
 func stripAgentPatchUpdate(cfg *config.City, name string, patch AgentUpdate) bool {
-	dir, base := config.ParseQualifiedName(name)
 	modified := false
 	kept := cfg.Patches.Agents[:0:0]
 	for _, p := range cfg.Patches.Agents {
 		patchModified := false
-		if p.Dir == dir && p.Name == base {
+		if p.TargetQualifiedName() == name {
 			if patch.Provider != "" && p.Provider != nil {
 				p.Provider = nil
 				patchModified = true
@@ -508,11 +568,10 @@ func stripAgentPatchUpdate(cfg *config.City, name string, patch AgentUpdate) boo
 }
 
 func removeAgentPatch(cfg *config.City, name string) bool {
-	dir, base := config.ParseQualifiedName(name)
 	modified := false
 	kept := cfg.Patches.Agents[:0:0]
 	for _, p := range cfg.Patches.Agents {
-		if p.Dir == dir && p.Name == base {
+		if p.TargetQualifiedName() == name {
 			modified = true
 			continue
 		}
@@ -525,14 +584,15 @@ func removeAgentPatch(cfg *config.City, name string) bool {
 }
 
 // isAgentPatchOnlyIdentity reports whether every field of p other than
-// Dir and Name is the zero value — i.e., the patch carries no overrides.
-// Reflection avoids drift as new fields are added to AgentPatch.
+// the targeting keys (Dir, Rig, Name) is the zero value — i.e., the patch
+// carries no overrides. Reflection avoids drift as new fields are added to
+// AgentPatch.
 func isAgentPatchOnlyIdentity(p config.AgentPatch) bool {
 	v := reflect.ValueOf(p)
 	t := v.Type()
 	for i := 0; i < v.NumField(); i++ {
 		switch t.Field(i).Name {
-		case "Dir", "Name":
+		case "Dir", "Rig", "Name":
 			continue
 		}
 		if !v.Field(i).IsZero() {
@@ -542,15 +602,48 @@ func isAgentPatchOnlyIdentity(p config.AgentPatch) bool {
 	return true
 }
 
+// resolveAgentTomlTarget resolves a convention agent.toml path through any
+// symlink so atomic rewrites land on the checked-in target instead of replacing
+// the link entry. A non-symlink path is returned cleaned; a missing or dangling
+// link resolves to its would-be target so a suspend can still create it.
+func resolveAgentTomlTarget(fs fsys.FS, agentTomlPath, name string) (string, error) {
+	target, err := fsys.ResolveSymlinks(fs, agentTomlPath)
+	if err != nil {
+		return "", fmt.Errorf("resolving agents/%s/agent.toml: %w", name, err)
+	}
+	return target, nil
+}
+
+// removeAgentTomlConvention clears the durable agent.toml convention content.
+// When agent.toml is a symlink into a checked-in target, the resolved target is
+// removed so the durable content is cleared at its real location; the operator's
+// link is intentionally left in place (edits act on the target, not the link).
+// A now-dangling link is treated as "no durable config" by every reader and is
+// rewritten through on the next suspend. Missing files are not an error.
+func removeAgentTomlConvention(fs fsys.FS, agentTomlPath, name string) error {
+	target, err := resolveAgentTomlTarget(fs, agentTomlPath, name)
+	if err != nil {
+		return err
+	}
+	if err := fs.Remove(target); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("removing agents/%s/agent.toml: %w", name, err)
+	}
+	return nil
+}
+
 // WriteLocalDiscoveredAgentSuspended writes the suspended state to
 // agents/<name>/agent.toml using an atomic temp-file rename. When
 // suspended is false and the file would become empty (no other fields),
-// it is removed instead.
+// the durable content is cleared instead.
 //
 // Decoding into map[string]any (rather than a typed struct) preserves
 // any user-set fields the caller didn't ask about. TOML comments and
 // key ordering are not preserved — that is a limitation of the
 // underlying decode/encode round trip, not this helper.
+//
+// Writes and removals resolve a symlinked agent.toml to its checked-in target
+// first, so a linked config is updated/cleared at the target rather than having
+// the link replaced by a regular file (the ga-lurp5d symlink-clobber class).
 func WriteLocalDiscoveredAgentSuspended(fs fsys.FS, cityRoot string, agent config.Agent, suspended bool) error {
 	agentTomlPath := filepath.Join(cityRoot, "agents", agent.Name, "agent.toml")
 
@@ -576,17 +669,18 @@ func WriteLocalDiscoveredAgentSuspended(fs fsys.FS, cityRoot string, agent confi
 	}
 
 	if len(values) == 0 {
-		if err := fs.Remove(agentTomlPath); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("removing agents/%s/agent.toml: %w", agent.Name, err)
-		}
-		return nil
+		return removeAgentTomlConvention(fs, agentTomlPath, agent.Name)
 	}
 
 	var buf bytes.Buffer
 	if err := toml.NewEncoder(&buf).Encode(values); err != nil {
 		return fmt.Errorf("encoding agents/%s/agent.toml: %w", agent.Name, err)
 	}
-	if err := fsys.WriteFileAtomic(fs, agentTomlPath, buf.Bytes(), 0o644); err != nil {
+	writePath, err := resolveAgentTomlTarget(fs, agentTomlPath, agent.Name)
+	if err != nil {
+		return err
+	}
+	if err := fsys.WriteFileAtomic(fs, writePath, buf.Bytes(), 0o644); err != nil {
 		return fmt.Errorf("writing agents/%s/agent.toml: %w", agent.Name, err)
 	}
 	return nil
@@ -770,7 +864,11 @@ func WriteLocalDiscoveredAgentConfig(fs fsys.FS, cityRoot string, agent config.A
 	if err := toml.NewEncoder(&buf).Encode(values); err != nil {
 		return cleanupFreshScaffold(fmt.Errorf("encoding agents/%s/agent.toml: %w", agent.Name, err))
 	}
-	if err := fsys.WriteFileAtomic(fs, filepath.Join(agentDir, "agent.toml"), buf.Bytes(), 0o644); err != nil {
+	writePath, err := resolveAgentTomlTarget(fs, filepath.Join(agentDir, "agent.toml"), agent.Name)
+	if err != nil {
+		return cleanupFreshScaffold(err)
+	}
+	if err := fsys.WriteFileAtomic(fs, writePath, buf.Bytes(), 0o644); err != nil {
 		return cleanupFreshScaffold(fmt.Errorf("writing agents/%s/agent.toml: %w", agent.Name, err))
 	}
 	return nil
@@ -849,17 +947,18 @@ func writeLocalDiscoveredAgentUpdate(fs fsys.FS, cityRoot string, agent config.A
 	// An empty merged convention config means there is no durable agent.toml
 	// content to preserve; the prompt scaffold still defines the agent.
 	if len(values) == 0 {
-		if err := fs.Remove(agentTomlPath); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("removing agents/%s/agent.toml: %w", agent.Name, err)
-		}
-		return nil
+		return removeAgentTomlConvention(fs, agentTomlPath, agent.Name)
 	}
 
 	var buf bytes.Buffer
 	if err := toml.NewEncoder(&buf).Encode(values); err != nil {
 		return fmt.Errorf("encoding agents/%s/agent.toml: %w", agent.Name, err)
 	}
-	if err := fsys.WriteFileAtomic(fs, agentTomlPath, buf.Bytes(), 0o644); err != nil {
+	writePath, err := resolveAgentTomlTarget(fs, agentTomlPath, agent.Name)
+	if err != nil {
+		return err
+	}
+	if err := fsys.WriteFileAtomic(fs, writePath, buf.Bytes(), 0o644); err != nil {
 		return fmt.Errorf("writing agents/%s/agent.toml: %w", agent.Name, err)
 	}
 	return nil
@@ -1078,20 +1177,6 @@ func (e *Editor) DeleteAgent(name string) error {
 	return fmt.Errorf("%w: agent %q", ErrNotFound, name)
 }
 
-// CreateRig adds a new rig to the config. Returns an error if a rig with
-// the same name already exists.
-func (e *Editor) CreateRig(r config.Rig) error {
-	return e.Edit(func(cfg *config.City) error {
-		for _, existing := range cfg.Rigs {
-			if existing.Name == r.Name {
-				return fmt.Errorf("%w: rig %q", ErrAlreadyExists, r.Name)
-			}
-		}
-		cfg.Rigs = append(cfg.Rigs, r)
-		return nil
-	})
-}
-
 // RigUpdate holds optional fields for a partial rig update. Pointer fields
 // distinguish "not set" from "set to zero value" to avoid the PATCH
 // zero-value trap (e.g., omitting suspended must not reset it to false).
@@ -1201,6 +1286,7 @@ type ProviderUpdate struct {
 	Env                map[string]string // nil = not set, non-nil = additive merge
 	OptionsSchemaMerge *string
 	OptionsSchema      []config.ProviderOption // nil = not set, non-nil = replace
+	OptionDefaults     map[string]string       // nil = not set, non-nil = additive merge
 }
 
 // CreateProvider adds a new city-level provider to the config.
@@ -1216,6 +1302,23 @@ func (e *Editor) CreateProvider(name string, spec config.ProviderSpec) error {
 		cfg.Providers[name] = spec
 		return nil
 	})
+}
+
+// mergeStringMapInto additively merges src into dst, lazily allocating dst
+// when it is nil. Keys present in src overwrite those in dst; an empty src
+// leaves dst unchanged. It returns the (possibly newly allocated) destination
+// so callers can assign it back onto the target field.
+func mergeStringMapInto(dst, src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return dst
+	}
+	if dst == nil {
+		dst = make(map[string]string, len(src))
+	}
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
 }
 
 // UpdateProvider partially updates an existing city-level provider.
@@ -1266,20 +1369,14 @@ func (e *Editor) UpdateProvider(name string, patch ProviderUpdate) error {
 		if patch.ReadyDelayMs != nil {
 			spec.ReadyDelayMs = *patch.ReadyDelayMs
 		}
-		if len(patch.Env) > 0 {
-			if spec.Env == nil {
-				spec.Env = make(map[string]string, len(patch.Env))
-			}
-			for k, v := range patch.Env {
-				spec.Env[k] = v
-			}
-		}
+		spec.Env = mergeStringMapInto(spec.Env, patch.Env)
 		if patch.OptionsSchemaMerge != nil {
 			spec.OptionsSchemaMerge = *patch.OptionsSchemaMerge
 		}
 		if patch.OptionsSchema != nil {
 			spec.OptionsSchema = append([]config.ProviderOption(nil), patch.OptionsSchema...)
 		}
+		spec.OptionDefaults = mergeStringMapInto(spec.OptionDefaults, patch.OptionDefaults)
 		cfg.Providers[name] = spec
 		return nil
 	})
@@ -1305,11 +1402,12 @@ func (e *Editor) DeleteProvider(name string) error {
 // SetAgentPatch creates or replaces an agent patch in [[patches.agent]].
 func (e *Editor) SetAgentPatch(patch config.AgentPatch) error {
 	return e.Edit(func(cfg *config.City) error {
-		if patch.Name == "" {
-			return fmt.Errorf("agent patch: name is required")
+		if err := patch.Validate(); err != nil {
+			return err
 		}
+		target := patch.TargetQualifiedName()
 		for i := range cfg.Patches.Agents {
-			if cfg.Patches.Agents[i].Dir == patch.Dir && cfg.Patches.Agents[i].Name == patch.Name {
+			if cfg.Patches.Agents[i].TargetQualifiedName() == target {
 				cfg.Patches.Agents[i] = patch
 				return nil
 			}
@@ -1319,12 +1417,13 @@ func (e *Editor) SetAgentPatch(patch config.AgentPatch) error {
 	})
 }
 
-// DeleteAgentPatch removes an agent patch from [[patches.agent]].
+// DeleteAgentPatch removes an agent patch from [[patches.agent]]. The name is
+// the patch's qualified target identity ("name", "rig/name", or "*/name"), the
+// same form SetAgentPatch and the HTTP API resolve patches by.
 func (e *Editor) DeleteAgentPatch(name string) error {
 	return e.Edit(func(cfg *config.City) error {
-		dir, base := config.ParseQualifiedName(name)
 		for i := range cfg.Patches.Agents {
-			if cfg.Patches.Agents[i].Dir == dir && cfg.Patches.Agents[i].Name == base {
+			if cfg.Patches.Agents[i].TargetQualifiedName() == name {
 				cfg.Patches.Agents = append(cfg.Patches.Agents[:i], cfg.Patches.Agents[i+1:]...)
 				return nil
 			}
@@ -1464,6 +1563,9 @@ func mergeOrderOverride(dst *config.OrderOverride, src config.OrderOverride) {
 	}
 	if src.Timeout != nil {
 		dst.Timeout = src.Timeout
+	}
+	if src.CheckTimeout != nil {
+		dst.CheckTimeout = src.CheckTimeout
 	}
 	if src.Idempotent != nil {
 		dst.Idempotent = src.Idempotent

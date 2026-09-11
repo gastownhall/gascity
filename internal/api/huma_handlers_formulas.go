@@ -6,8 +6,10 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
-	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/api/apierr"
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 // FormulaListBody is the response body for GET /v0/formulas.
@@ -26,23 +28,23 @@ type FormulaListOutput struct {
 func (s *Server) humaHandleFormulaList(_ context.Context, input *FormulaListInput) (*FormulaListOutput, error) {
 	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(input.ScopeKind, input.ScopeRef)
 	if scopeErr != "" {
-		return nil, huma.Error400BadRequest(scopeErr)
+		return nil, apierr.InvalidRequest.Msg(scopeErr)
 	}
 
 	paths, status, msg := s.formulaSearchPaths(scopeKind, scopeRef)
 	if status != 200 {
 		if status == 404 {
-			return nil, huma.Error404NotFound(msg)
+			return nil, apierr.ScopeNotFound.Msg(msg)
 		}
 		if status == 503 {
-			return nil, huma.Error503ServiceUnavailable(msg)
+			return nil, apierr.ServiceUnavailable.Msg(msg)
 		}
-		return nil, huma.Error400BadRequest(msg)
+		return nil, apierr.InvalidRequest.Msg(msg)
 	}
 
 	items, err := buildFormulaCatalog(paths)
 	if err != nil {
-		return nil, huma.Error500InternalServerError("formula catalog failed")
+		return nil, apierr.Internal.Msg("formula catalog failed")
 	}
 
 	out := &FormulaListOutput{}
@@ -62,16 +64,16 @@ func (s *Server) humaHandleFormulaRuns(_ context.Context, input *FormulaRunsInpu
 
 	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(input.ScopeKind, input.ScopeRef)
 	if scopeErr != "" {
-		return nil, huma.Error400BadRequest(scopeErr)
+		return nil, apierr.InvalidRequest.Msg(scopeErr)
 	}
 	if _, status, msg := s.formulaSearchPaths(scopeKind, scopeRef); status != 200 {
 		if status == 404 {
-			return nil, huma.Error404NotFound(msg)
+			return nil, apierr.ScopeNotFound.Msg(msg)
 		}
 		if status == 503 {
-			return nil, huma.Error503ServiceUnavailable(msg)
+			return nil, apierr.ServiceUnavailable.Msg(msg)
 		}
-		return nil, huma.Error400BadRequest(msg)
+		return nil, apierr.InvalidRequest.Msg(msg)
 	}
 
 	limit := defaultFormulaRunsLimit
@@ -81,7 +83,7 @@ func (s *Server) humaHandleFormulaRuns(_ context.Context, input *FormulaRunsInpu
 
 	resp, err := buildFormulaRuns(s.state, name, scopeKind, scopeRef, limit)
 	if err != nil {
-		return nil, huma.Error500InternalServerError("formula runs failed")
+		return nil, apierr.Internal.Msg("formula runs failed")
 	}
 
 	return &struct {
@@ -128,39 +130,57 @@ func (s *Server) formulaDetail(ctx context.Context, rawName, rawScopeKind, rawSc
 ) {
 	name := strings.TrimSpace(rawName)
 	if name == "" {
-		return nil, huma.Error400BadRequest("formula name is required")
+		return nil, apierr.InvalidRequest.Msg("formula name is required")
 	}
 
 	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(rawScopeKind, rawScopeRef)
 	if scopeErr != "" {
-		return nil, huma.Error400BadRequest(scopeErr)
+		return nil, apierr.InvalidRequest.Msg(scopeErr)
 	}
 	target := strings.TrimSpace(rawTarget)
 	if target == "" {
-		return nil, huma.Error400BadRequest("target is required")
+		return nil, apierr.InvalidRequest.Msg("target is required")
 	}
 
 	paths, status, msg := s.formulaSearchPaths(scopeKind, scopeRef)
 	if status != 200 {
 		if status == 404 {
-			return nil, huma.Error404NotFound(msg)
+			return nil, apierr.ScopeNotFound.Msg(msg)
 		}
 		if status == 503 {
-			return nil, huma.Error503ServiceUnavailable(msg)
+			return nil, apierr.ServiceUnavailable.Msg(msg)
 		}
-		return nil, huma.Error400BadRequest(msg)
+		return nil, apierr.InvalidRequest.Msg(msg)
 	}
+
+	// Workflow roots persist the routed agent identity as gc.routed_to
+	// (ga-eld2x / #2763), and run-detail clients echo that identity back as
+	// the preview target. A configured agent identity has no bead-store
+	// entry, so resolve it against the city config and let the graph.v2
+	// preview substitute a synthetic input convoy instead of failing the
+	// bead lookup. Targets that match neither a bead nor a configured agent
+	// keep the existing not-found error. Resolved only after
+	// formulaSearchPaths succeeds so the config-unavailable state keeps
+	// returning the typed 503 above.
+	_, targetIsRoutingIdentity := findAgentByQualifiedTemplate(s.state.Config(), target)
 
 	store := s.state.CityBeadStore()
 	if scopeKind == "rig" {
 		store = s.state.BeadStore(scopeRef)
 	}
-	detail, err := buildFormulaDetail(ctx, store, name, paths, target, vars, validateRuntimeVars)
+	detail, err := buildFormulaDetail(ctx, store, name, paths, target, targetIsRoutingIdentity, vars, validateRuntimeVars)
 	if err != nil {
 		if errors.Is(err, errFormulaNotWorkflow) || errors.Is(err, errFormulaNotFound) {
-			return nil, huma.Error404NotFound(err.Error())
+			return nil, apierr.FormulaNotFound.Msg(err.Error())
 		}
-		return nil, huma.Error400BadRequest(err.Error())
+		errMsg := err.Error()
+		// A not-found target already failed the configured-agent identity
+		// match above, so say so: without this context a stale or mistyped
+		// agent identity reads as a bead-store problem.
+		if !targetIsRoutingIdentity && errors.Is(err, beads.ErrNotFound) {
+			errMsg += "; target matches neither a bead/convoy nor a configured agent identity"
+		}
+		return nil, apierr.InvalidRequest.Msg(errMsg)
 	}
 
 	return &struct {
@@ -182,23 +202,30 @@ func (s *Server) humaHandleFormulaFeed(_ context.Context, input *FormulaFeedInpu
 ) {
 	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(input.ScopeKind, input.ScopeRef)
 	if scopeErr != "" {
-		return nil, huma.Error400BadRequest(scopeErr)
+		return nil, apierr.InvalidRequest.Msg(scopeErr)
 	}
 	if _, status, msg := s.formulaSearchPaths(scopeKind, scopeRef); status != http.StatusOK {
 		if status == http.StatusNotFound {
-			return nil, huma.Error404NotFound(msg)
+			return nil, apierr.ScopeNotFound.Msg(msg)
 		}
 		if status == http.StatusServiceUnavailable {
-			return nil, huma.Error503ServiceUnavailable(msg)
+			return nil, apierr.ServiceUnavailable.Msg(msg)
 		}
-		return nil, huma.Error400BadRequest(msg)
+		return nil, apierr.InvalidRequest.Msg(msg)
 	}
 
 	limit := normalizeFeedLimit(input.Limit)
-	index := s.latestIndex()
 
+	// The feed body is O(store history) to build (a full active scan plus a
+	// closed-history workflow-roots scan per rig). Key its cache entry on a
+	// time bucket, not the event index: on a busy city the index advances
+	// every tick, so the index-keyed entry missed on nearly every poll and
+	// the slow body was rebuilt per request — the #3208 feed latency. The
+	// endpoint has no blocking variant, so there is no strict-freshness
+	// caller to bypass for (same lever as /status in gascity#3186).
 	cacheKey := "formula-feed?" + scopeKind + "|" + scopeRef + "|" + strconv.Itoa(input.Limit)
-	if body, ok := cachedResponseAs[formulaFeedBody](s, cacheKey, index); ok {
+	bucket := responseCacheTimeBucket(time.Now())
+	if body, ok := cachedResponseAs[formulaFeedBody](s, cacheKey, bucket); ok {
 		return &struct {
 			Body formulaFeedBody
 		}{Body: body}, nil
@@ -206,7 +233,7 @@ func (s *Server) humaHandleFormulaFeed(_ context.Context, input *FormulaFeedInpu
 
 	projections, err := buildWorkflowRunProjectionsRootOnly(s.state, scopeKind, scopeRef)
 	if err != nil {
-		return nil, huma.Error500InternalServerError("formula feed failed")
+		return nil, apierr.Internal.Msg("formula feed failed")
 	}
 
 	items := make([]monitorFeedItemResponse, 0, len(projections.Items))
@@ -225,7 +252,7 @@ func (s *Server) humaHandleFormulaFeed(_ context.Context, input *FormulaFeedInpu
 		body.PartialErrors = projections.PartialErrors
 	}
 
-	s.storeResponse(cacheKey, index, body)
+	s.storeResponse(cacheKey, bucket, body)
 
 	return &struct {
 		Body formulaFeedBody

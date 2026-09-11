@@ -32,7 +32,7 @@ one that motivated this design — is aimux-wrapped providers:
 ```toml
 [providers.codex-mini]
 command = "aimux"
-args = ["run", "codex", "--", "-m", "gpt-5.3-codex-spark",
+args = ["run", "codex", "--", "-m", "gpt-5.3-codex",
         "-c", "model_reasoning_effort=\"medium\""]
 ```
 
@@ -388,9 +388,9 @@ base = "builtin:codex"
 command = "aimux"
 args = ["run", "codex", "--",
   "--dangerously-bypass-approvals-and-sandbox",
-  "-m", "gpt-5.3-codex-spark",
+  "-m", "gpt-5.3-codex",
   "-c", "model_reasoning_effort=\"medium\""]
-resume_command = "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex-spark resume {{.SessionKey}}"
+resume_command = "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex resume {{.SessionKey}}"
 process_names = ["aimux", "codex"]
 ```
 

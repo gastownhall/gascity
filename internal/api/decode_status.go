@@ -24,6 +24,12 @@ func statusViewFromGen(body *genclient.StatusBody) StatusView {
 			RunningAgents: int(body.Agents.Running),
 		},
 	}
+	if body.Partial != nil {
+		out.Partial = *body.Partial
+	}
+	if body.PartialErrors != nil {
+		out.PartialErrors = append([]string(nil), (*body.PartialErrors)...)
+	}
 	if body.Version != nil {
 		out.Version = *body.Version
 	}
@@ -84,6 +90,58 @@ func statusViewFromGen(body *genclient.StatusBody) StatusView {
 	}
 	if body.Beads != nil {
 		out.Beads = statusBeadsDiagnosticFromGen(body.Beads)
+	}
+	if body.ConditionalWrites != nil {
+		out.ConditionalWrites = statusConditionalWritesFromGen(body.ConditionalWrites)
+	}
+	return out
+}
+
+// statusConditionalWritesFromGen translates the generated conditional-writes
+// block back onto the wire struct the server serialized (the CLI renders the
+// same shape the dashboard reads).
+func statusConditionalWritesFromGen(g *genclient.StatusConditionalWrites) *StatusConditionalWrites {
+	if g == nil {
+		return nil
+	}
+	out := &StatusConditionalWrites{
+		Mode:      string(g.Mode),
+		Origin:    string(g.Origin),
+		Effective: string(g.Effective),
+	}
+	if g.Stores != nil {
+		for _, v := range *g.Stores {
+			row := StatusConditionalWriteStoreVerdict{
+				StoreID: v.StoreId,
+				Kind:    v.Kind,
+				Probe:   string(v.Probe),
+				Latch:   string(v.Latch),
+				Capable: v.Capable,
+			}
+			if v.Reason != nil {
+				row.Reason = *v.Reason
+			}
+			out.Stores = append(out.Stores, row)
+		}
+	}
+	if g.Notices != nil {
+		for _, n := range *g.Notices {
+			notice := StatusRolloutNotice{
+				Kind:    n.Kind,
+				FlagKey: n.FlagKey,
+				Message: n.Message,
+			}
+			if n.EnvVar != nil {
+				notice.EnvVar = *n.EnvVar
+			}
+			if n.ConfigValue != nil {
+				notice.ConfigValue = *n.ConfigValue
+			}
+			if n.EnvValue != nil {
+				notice.EnvValue = *n.EnvValue
+			}
+			out.Notices = append(out.Notices, notice)
+		}
 	}
 	return out
 }

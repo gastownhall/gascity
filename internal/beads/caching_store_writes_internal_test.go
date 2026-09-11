@@ -3,7 +3,9 @@ package beads
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
+	"time"
 )
 
 // countingBackingStore wraps a Store and counts SetMetadata /
@@ -15,6 +17,7 @@ type countingBackingStore struct {
 	setMetadataBatchCalls int
 	updateCalls           int
 	closeCalls            int
+	releaseIfCurrentCalls int
 }
 
 func (c *countingBackingStore) SetMetadata(id, key, value string) error {
@@ -37,6 +40,15 @@ func (c *countingBackingStore) Close(id string) error {
 	return c.Store.Close(id)
 }
 
+func (c *countingBackingStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
+	c.releaseIfCurrentCalls++
+	releaser, ok := c.Store.(ConditionalAssignmentReleaser)
+	if !ok {
+		return false, ErrConditionalReleaseUnsupported
+	}
+	return releaser.ReleaseIfCurrent(id, expectedAssignee)
+}
+
 type txPreservingBackingStore struct {
 	Store
 	txCalls     int
@@ -47,6 +59,50 @@ type cacheWriteNotification struct {
 	eventType string
 	beadID    string
 	payload   json.RawMessage
+}
+
+type releaseRefreshFailOnceStore struct {
+	Store
+	failNextGet bool
+}
+
+type ambiguousMetadataBatchStore struct {
+	Store
+	err        error
+	commitKeys []string
+}
+
+func (s *ambiguousMetadataBatchStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	committed := make(map[string]string, len(s.commitKeys))
+	for _, key := range s.commitKeys {
+		committed[key] = kvs[key]
+	}
+	if len(committed) > 0 {
+		if err := s.Store.SetMetadataBatch(id, committed); err != nil {
+			return err
+		}
+	}
+	return s.err
+}
+
+func (s *releaseRefreshFailOnceStore) Get(id string) (Bead, error) {
+	if s.failNextGet {
+		s.failNextGet = false
+		return Bead{}, errors.New("injected refresh failure")
+	}
+	return s.Store.Get(id)
+}
+
+func (s *releaseRefreshFailOnceStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
+	releaser, ok := s.Store.(ConditionalAssignmentReleaser)
+	if !ok {
+		return false, ErrConditionalReleaseUnsupported
+	}
+	released, err := releaser.ReleaseIfCurrent(id, expectedAssignee)
+	if released && err == nil {
+		s.failNextGet = true
+	}
+	return released, err
 }
 
 func (s *txPreservingBackingStore) Update(id string, opts UpdateOpts) error {
@@ -122,6 +178,62 @@ func TestCachingStoreTxDelegatesToBackingTxAndRefreshesCache(t *testing.T) {
 	assertTxPreservedBead(t, cached)
 }
 
+func TestCachingStoreTxCloseClearsDependentProjectedIsBlocked(t *testing.T) {
+	t.Parallel()
+
+	blockedProjection := true
+	backing := NewMemStore()
+	blocker, err := backing.Create(Bead{
+		Title:  "blocker",
+		Status: "open",
+		Type:   "task",
+	})
+	if err != nil {
+		t.Fatalf("Create blocker: %v", err)
+	}
+	blocked, err := backing.Create(Bead{
+		Title:     "blocked",
+		Status:    "open",
+		Type:      "task",
+		Needs:     []string{blocker.ID},
+		IsBlocked: &blockedProjection,
+	})
+	if err != nil {
+		t.Fatalf("Create blocked: %v", err)
+	}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	if err := cache.Tx("close blocker", func(tx Tx) error {
+		return tx.Close(blocker.ID)
+	}); err != nil {
+		t.Fatalf("Tx close blocker: %v", err)
+	}
+
+	ready, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable after tx close")
+	}
+	readyByID := make(map[string]bool, len(ready))
+	for _, bead := range ready {
+		readyByID[bead.ID] = true
+	}
+	if !readyByID[blocked.ID] {
+		t.Fatalf("CachedReady after tx close ids = %v, want dependent unblocked by closed blocker", readyByID)
+	}
+
+	got, err := cache.Get(blocked.ID)
+	if err != nil {
+		t.Fatalf("Get blocked after tx close: %v", err)
+	}
+	if got.IsBlocked != nil {
+		t.Fatalf("dependent IsBlocked after tx close = %v, want nil fallback to cached deps", got.IsBlocked)
+	}
+}
+
 func assertTxPreservedBead(t *testing.T, got Bead) {
 	t.Helper()
 	if got.Title != "preserve title" {
@@ -173,6 +285,165 @@ func TestCachingStoreSetMetadataBatchNotifiesBeadUpdated(t *testing.T) {
 	}
 	if updated.Metadata["review"] != "fixed" {
 		t.Fatalf("notification metadata = %#v, want review=fixed", updated.Metadata)
+	}
+}
+
+func TestCachingStoreSetMetadataBatchErrorFencesStaleRow(t *testing.T) {
+	patch := map[string]string{"state": "asleep", "reason": "healed"}
+	for _, tc := range []struct {
+		name       string
+		commitKeys []string
+		wantState  string
+		wantReason string
+	}{
+		{name: "rejected", wantState: "active", wantReason: "old"},
+		{name: "partially committed", commitKeys: []string{"state"}, wantState: "asleep", wantReason: "old"},
+		{name: "fully committed", commitKeys: []string{"state", "reason"}, wantState: "asleep", wantReason: "healed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := NewMemStore()
+			bead, err := mem.Create(Bead{
+				Title:    "worker",
+				Type:     "session",
+				Metadata: map[string]string{"state": "active", "reason": "old"},
+			})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			writeErr := errors.New("ambiguous metadata batch")
+			backing := &ambiguousMetadataBatchStore{
+				Store:      mem,
+				err:        writeErr,
+				commitKeys: tc.commitKeys,
+			}
+			notifications := 0
+			cache := NewCachingStoreForTest(backing, func(string, string, json.RawMessage) {
+				notifications++
+			})
+			if err := cache.Prime(context.Background()); err != nil {
+				t.Fatalf("Prime: %v", err)
+			}
+			cache.mu.RLock()
+			startSeq := cache.mutationSeq
+			cache.mu.RUnlock()
+
+			if err := cache.SetMetadataBatch(bead.ID, patch); !errors.Is(err, writeErr) {
+				t.Fatalf("SetMetadataBatch error = %v, want %v", err, writeErr)
+			}
+
+			cache.mu.RLock()
+			fence := cache.beadSeq[bead.ID]
+			_, dirty := cache.dirty[bead.ID]
+			_, local := cache.localBeadAt[bead.ID]
+			cache.mu.RUnlock()
+			if fence <= startSeq || !dirty || local {
+				t.Fatalf("ambiguity fence = seq:%d start:%d dirty:%v local:%v", fence, startSeq, dirty, local)
+			}
+			if notifications != 0 {
+				t.Fatalf("notifications = %d, want 0 for an unconfirmed write", notifications)
+			}
+			query := ListQuery{Type: "session"}
+			if _, ok := cache.CachedList(query); ok {
+				t.Fatal("CachedList served a row whose backing write outcome is unknown")
+			}
+
+			rows, err := cache.List(query)
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			if len(rows) != 1 || rows[0].Metadata["state"] != tc.wantState || rows[0].Metadata["reason"] != tc.wantReason {
+				t.Fatalf("List metadata = %#v, want state=%q reason=%q", rows, tc.wantState, tc.wantReason)
+			}
+			if rows, ok := cache.CachedList(query); !ok || len(rows) != 1 ||
+				rows[0].Metadata["state"] != tc.wantState || rows[0].Metadata["reason"] != tc.wantReason {
+				t.Fatalf("CachedList after reread = %#v, ok=%v", rows, ok)
+			}
+		})
+	}
+}
+
+func TestCachingStoreReleaseIfCurrentDelegatesAndRefreshesCache(t *testing.T) {
+	t.Parallel()
+
+	status := "in_progress"
+	backing := &countingBackingStore{Store: NewMemStore()}
+	bead, err := backing.Create(Bead{Title: "task", Assignee: "worker-1"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := backing.Update(bead.ID, UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("Update status: %v", err)
+	}
+
+	var events []string
+	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, _ json.RawMessage) {
+		events = append(events, eventType+":"+beadID)
+	})
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	events = nil
+
+	released, err := cache.ReleaseIfCurrent(bead.ID, "worker-1")
+	if err != nil {
+		t.Fatalf("ReleaseIfCurrent: %v", err)
+	}
+	if !released {
+		t.Fatal("ReleaseIfCurrent released = false, want true")
+	}
+	if backing.releaseIfCurrentCalls != 1 {
+		t.Fatalf("backing ReleaseIfCurrent calls = %d, want 1", backing.releaseIfCurrentCalls)
+	}
+	got, err := cache.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("cache Get: %v", err)
+	}
+	if got.Status != "open" || got.Assignee != "" {
+		t.Fatalf("cached bead = %+v, want open and unassigned", got)
+	}
+	if !stringSliceContains(events, "bead.updated:"+bead.ID) {
+		t.Fatalf("events = %v, want bead.updated for released bead", events)
+	}
+}
+
+func TestCachingStoreReleaseIfCurrentKeepsDirtyWhenRefreshFails(t *testing.T) {
+	t.Parallel()
+
+	status := "in_progress"
+	backing := &releaseRefreshFailOnceStore{Store: NewMemStore()}
+	bead, err := backing.Create(Bead{Title: "task", Assignee: "worker-1"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := backing.Update(bead.ID, UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("Update status: %v", err)
+	}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	released, err := cache.ReleaseIfCurrent(bead.ID, "worker-1")
+	if err != nil {
+		t.Fatalf("ReleaseIfCurrent: %v", err)
+	}
+	if !released {
+		t.Fatal("ReleaseIfCurrent released = false, want true")
+	}
+	cache.mu.Lock()
+	_, dirty := cache.dirty[bead.ID]
+	cache.mu.Unlock()
+	if !dirty {
+		t.Fatal("released bead was not kept dirty after refresh failure")
+	}
+
+	got, err := cache.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("cache Get after dirty refresh: %v", err)
+	}
+	if got.Status != "open" || got.Assignee != "" {
+		t.Fatalf("cached bead after dirty refresh = %+v, want open and unassigned", got)
 	}
 }
 
@@ -905,5 +1176,158 @@ func TestCachingStoreUpdateFallsThroughPerFieldMismatch(t *testing.T) {
 					backing.updateCalls, tc.name)
 			}
 		})
+	}
+}
+
+func TestCachingStoreCloseAdoptsFreshBackingRead(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	b, err := cache.Create(Bead{Title: "close-adopt"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := cache.Close(b.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	fresh, err := backing.Get(b.ID)
+	if err != nil {
+		t.Fatalf("backing Get after close: %v", err)
+	}
+	got, err := cache.Get(b.ID)
+	if err != nil {
+		t.Fatalf("cache Get after close: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("cached status after Close = %q, want %q", got.Status, "closed")
+	}
+	if got.Revision != fresh.Revision {
+		t.Fatalf("cached revision after Close = %d, backing = %d; the successful refresh read must be adopted, "+
+			"or a Get→conditional-write consumer fences against a revision that no longer exists",
+			got.Revision, fresh.Revision)
+	}
+}
+
+func TestCachingStoreReopenAdoptsFreshBackingRead(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	b, err := cache.Create(Bead{Title: "reopen-adopt"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := cache.Close(b.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if err := cache.Reopen(b.ID); err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+
+	fresh, err := backing.Get(b.ID)
+	if err != nil {
+		t.Fatalf("backing Get after reopen: %v", err)
+	}
+	got, err := cache.Get(b.ID)
+	if err != nil {
+		t.Fatalf("cache Get after reopen: %v", err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("cached status after Reopen = %q, want %q", got.Status, "open")
+	}
+	if got.Revision != fresh.Revision {
+		t.Fatalf("cached revision after Reopen = %d, backing = %d; the successful refresh read must be adopted",
+			got.Revision, fresh.Revision)
+	}
+}
+
+func TestCachingStoreReopenClearsStatusBasedDeferralWhenRefreshFails(t *testing.T) {
+	t.Parallel()
+
+	backing := &releaseRefreshFailOnceStore{Store: NewMemStore()}
+	created, err := backing.Create(Bead{
+		Title:                "deferred",
+		Status:               "open",
+		IndefinitelyDeferred: true,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	// The fixture reaches the cache deferred only because MemStore.Create
+	// seeds Status directly instead of taking an explicit transition, which
+	// clears the marker. Pin that here: without it, a Create that started
+	// clearing the marker would leave this test asserting !IsDeferred against
+	// a bead that was never deferred, and it would pass vacuously.
+	primed, err := cache.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get before reopen: %v", err)
+	}
+	if !IsDeferred(primed, time.Now()) {
+		t.Fatalf("fixture is not deferred before the reopen, so the assertion below would be vacuous: %+v", primed)
+	}
+
+	backing.failNextGet = true
+	if err := cache.Reopen(created.ID); err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	reopened, err := cache.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if IsDeferred(reopened, time.Now()) {
+		t.Fatalf("failed refresh fallback retained status-based deferral: %+v", reopened)
+	}
+}
+
+func TestCachingStoreCloseKeepsCachedSynthesisWhenRefreshFails(t *testing.T) {
+	t.Parallel()
+
+	// When the post-close refresh Get fails, Close must still fall back to the
+	// cached-status synthesis (today's behavior) rather than dropping the entry.
+	backing := &releaseRefreshFailOnceStore{Store: NewMemStore()}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	b, err := cache.Create(Bead{Title: "close-refresh-fails"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	backing.failNextGet = true
+	if err := cache.Close(b.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// The synthesis keeps the entry cached (distinguishing it from an evict,
+	// whose follow-up Get would fall through to the backing and also report
+	// closed).
+	cache.mu.RLock()
+	_, inBeads := cache.beads[b.ID]
+	cache.mu.RUnlock()
+	if !inBeads {
+		t.Fatal("entry missing from the cache after Close with failed refresh; want the cached-status synthesis, not an evict")
+	}
+
+	got, err := cache.Get(b.ID)
+	if err != nil {
+		t.Fatalf("cache Get after close with failed refresh: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("cached status after Close with failed refresh = %q, want %q (synthesis fallback)", got.Status, "closed")
 	}
 }

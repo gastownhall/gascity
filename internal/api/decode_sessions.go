@@ -14,6 +14,7 @@ type SessionView struct {
 	Title       string `json:"title"`
 	Alias       string `json:"alias"`
 	SessionName string `json:"session_name"`
+	WorkDir     string `json:"work_dir"`
 	CreatedAt   string `json:"created_at"`
 	LastActive  string `json:"last_active"`
 	Attached    bool   `json:"attached"`
@@ -33,6 +34,9 @@ func sessionViewFromGen(g genclient.SessionResponse) SessionView {
 		CreatedAt:   g.CreatedAt,
 		Attached:    g.Attached,
 		Running:     g.Running,
+	}
+	if g.WorkDir != nil {
+		out.WorkDir = *g.WorkDir
 	}
 	if g.Reason != nil {
 		out.Reason = *g.Reason

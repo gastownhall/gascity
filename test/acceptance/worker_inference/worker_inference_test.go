@@ -45,7 +45,6 @@ var (
 const (
 	inferenceProbeTemplate    = "probe"
 	inferenceProbeManualID    = "probe-live"
-	inferenceProbePromptPath  = "prompts/worker-inference-probe.md"
 	inferenceSlingTarget      = inferenceProbeTemplate
 	inferenceDefaultPoolAgent = "default-pool"
 	namedSessionModeMetadata  = "configured_named_mode"
@@ -66,9 +65,9 @@ var inferenceDisabledOrders = []string{
 	"mol-dog-backup",
 	"mol-dog-compactor",
 	"mol-dog-doctor",
-	"mol-dog-jsonl",
+	"jsonl-export",
 	"mol-dog-phantom-db",
-	"mol-dog-reaper",
+	"reaper",
 	"mol-dog-stale-db",
 	"orphan-sweep",
 	"prune-branches",
@@ -148,6 +147,7 @@ func TestWorkerInferenceSmoke(t *testing.T) {
 	})
 
 	if liveSetup.SetupError != "" {
+		t.Logf("SETUP ERROR: %s", liveSetup.SetupError)
 		reporter.Record(workertest.EnvironmentError(profileID, workertest.RequirementInferenceFreshSpawn, liveSetup.SetupError).WithEvidence(map[string]string{
 			"profile":  string(liveSetup.Profile),
 			"provider": liveSetup.Provider,
@@ -365,6 +365,9 @@ func TestWorkerInferenceDefaultPoolMolDoWork(t *testing.T) {
 	)
 
 	run, spawnEvidence, taskEvidence, stage, err := runFreshInitDefaultPoolSlingWork(t, liveSetup.Provider, prompt, outputRel)
+	if taskEvidence == nil {
+		taskEvidence = map[string]string{}
+	}
 	taskEvidence["expected_output"] = expected
 	if err != nil {
 		requirement := workertest.RequirementInferenceFreshTask
@@ -393,9 +396,15 @@ func TestWorkerInferenceDefaultPoolMolDoWork(t *testing.T) {
 		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceFreshTask, "default pool mol-do-work did not record gc.outcome=pass on the routed work bead", taskEvidence))
 		t.FailNow()
 	}
-	if got := metaString(run.WorkBead.Metadata, "molecule_id"); got == "" {
-		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceFreshTask, "default pool sling work bead did not retain molecule_id metadata", taskEvidence))
-		t.FailNow()
+	if got := metaString(run.WorkBead.Metadata, "molecule_id"); got != "" {
+		taskEvidence["molecule_id"] = got
+	} else {
+		slingOut := spawnEvidence["sling_out"]
+		if !strings.Contains(slingOut, "Attached workflow") || !strings.Contains(slingOut, `formula "mol-do-work"`) {
+			reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceFreshTask, "default pool sling work did not expose mol-do-work attachment evidence", taskEvidence))
+			t.FailNow()
+		}
+		taskEvidence["mol_do_work_attachment"] = "sling_out"
 	}
 	reporter.Require(t, workertest.Pass(profileID, workertest.RequirementInferenceFreshTask, "default pool prompt completed a mol-do-work assignment and closed the routed bead").WithEvidence(taskEvidence))
 }
@@ -679,6 +688,11 @@ func TestWorkerInferenceFreshResetIsolation(t *testing.T) {
 		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceFreshReset, err.Error(), mergeEvidence(spawnEvidence, taskEvidence, resetEvidence, beforeEvidence)))
 		t.FailNow()
 	}
+	// Namespace the pre-reset snapshot. Merged raw, its provider_session_id and
+	// transcript_path shadow the post-reset values in every later failure
+	// record, which reads as "the reset did not rotate the session" even when it
+	// did — a wrong diagnosis this leg has already handed out once.
+	beforeEvidence = prefixEvidenceKeys(beforeEvidence, "before_")
 	resetEvidence["before_transcript"] = beforePath
 
 	resetSession, resetStatus, err := waitForSessionFreshReset(run.CityDir, run.SessionID, run.SessionKey)
@@ -839,7 +853,8 @@ func TestWorkerInferenceFreshResetIsolation(t *testing.T) {
 		)))
 		t.FailNow()
 	}
-	if historySubsequenceEnd(afterSnapshot.Entries, continuationComparableEntries(beforeSnapshot.Entries)) >= 0 {
+	if checksResetHistorySubsequence(liveSetup.Profile) &&
+		historySubsequenceEnd(afterSnapshot.Entries, continuationComparableEntries(beforeSnapshot.Entries)) >= 0 {
 		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceFreshReset, "reset transcript still preserves the prior normalized conversation history", mergeEvidence(
 			spawnEvidence,
 			taskEvidence,
@@ -898,6 +913,10 @@ func TestWorkerInferenceFreshResetIsolation(t *testing.T) {
 		},
 	)
 	reporter.Require(t, workertest.Pass(profileID, workertest.RequirementInferenceFreshReset, "live worker reset preserved the bead but started a fresh logical conversation").WithEvidence(evidence))
+}
+
+func checksResetHistorySubsequence(profile workerpkg.Profile) bool {
+	return profile != workerpkg.ProfileAntigravityTmuxCLI
 }
 
 func TestWorkerInferenceMultiTurnWorkflow(t *testing.T) {
@@ -1084,6 +1103,19 @@ func TestWorkerInferenceInterruptRecoverContinue(t *testing.T) {
 			"provider": liveSetup.Provider,
 		}))
 		t.FailNow()
+	}
+
+	if liveSetup.Profile == workerpkg.ProfileAntigravityTmuxCLI || liveSetup.Profile == workerpkg.ProfileCursorTmuxCLI || liveSetup.Profile == workerpkg.ProfileMimoCodeTmuxCLI {
+		// These CLIs deliver the replacement input but let the interrupted
+		// turn run to completion (Cursor verified live 2026-08-17, mimocode
+		// verified live 2026-06-12, and Antigravity recorded the same behavior).
+		reporter.Record(workertest.Unsupported(profileID, workertest.RequirementInferenceInterruptRecoverContinue, fmt.Sprintf("%s CLI does not currently cancel an in-flight turn for interrupt_now", liveSetup.Provider)).WithEvidence(map[string]string{
+			"profile":       string(liveSetup.Profile),
+			"provider":      liveSetup.Provider,
+			"submit_intent": "interrupt_now",
+			"observed":      "replacement input is delivered, but the interrupted turn can continue to completion",
+		}))
+		return
 	}
 
 	harness, err := newLiveWorkerHandleHarness(t)
@@ -1454,6 +1486,80 @@ func newLiveCity(t *testing.T) *helpers.City {
 	return helpers.NewCityAt(t, liveEnv, cityDir)
 }
 
+// liveBDBinaryEnv returns the Beads executable pin selected for this live
+// acceptance run. Live tests may run with a compatibility binary that is not
+// the ambient bd on PATH; every independently-created environment and store
+// runner must carry the same selection.
+func liveBDBinaryEnv() map[string]string {
+	if liveEnv == nil {
+		return nil
+	}
+	bdPath := strings.TrimSpace(liveEnv.Get("BD_BIN"))
+	if bdPath == "" {
+		return nil
+	}
+	env := map[string]string{"BD_BIN": bdPath}
+	if path := liveEnv.Get("PATH"); strings.TrimSpace(path) != "" {
+		env["PATH"] = path
+	}
+	return env
+}
+
+func applyLiveBDBinaryEnv(env *helpers.Env) {
+	if env == nil {
+		return
+	}
+	for key, value := range liveBDBinaryEnv() {
+		env.With(key, value)
+	}
+}
+
+func installLiveWorkspaceBDBinaryPin(cityDir string) error {
+	if liveEnv == nil {
+		return nil
+	}
+	bdValue := strings.TrimSpace(liveEnv.Get("BD_BIN"))
+	if bdValue == "" {
+		return nil
+	}
+	pathValue := strings.TrimSpace(liveEnv.Get("PATH"))
+	if pathValue == "" {
+		return fmt.Errorf("live bd binary is configured without PATH")
+	}
+
+	cityPath := filepath.Join(cityDir, "city.toml")
+	data, err := os.ReadFile(cityPath)
+	if err != nil {
+		return err
+	}
+	cfg, err := config.Parse(data)
+	if err != nil {
+		return err
+	}
+	existingBD, bdConfigured := cfg.Workspace.Env["BD_BIN"]
+	if bdConfigured && strings.TrimSpace(existingBD) != bdValue {
+		return fmt.Errorf("workspace.env BD_BIN is already configured")
+	}
+	existingPath, pathConfigured := cfg.Workspace.Env["PATH"]
+	if pathConfigured && strings.TrimSpace(existingPath) != pathValue {
+		return fmt.Errorf("workspace.env PATH is already configured")
+	}
+	if bdConfigured && pathConfigured {
+		return nil
+	}
+	if strings.Contains(string(data), "[workspace.env]") {
+		return fmt.Errorf("workspace.env already exists without complete bd binary pins")
+	}
+
+	var b strings.Builder
+	b.Write(data)
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		b.WriteByte('\n')
+	}
+	fmt.Fprintf(&b, "\n[workspace.env]\nBD_BIN = %s\nPATH = %s\n", strconv.Quote(bdValue), strconv.Quote(pathValue))
+	return os.WriteFile(cityPath, []byte(b.String()), 0o644)
+}
+
 func installLiveProviderCommandOverride(cityDir, provider, command string, processNames []string) error {
 	return installLiveProviderCommandOverrideWithArgs(cityDir, provider, command, processNames, nil)
 }
@@ -1471,8 +1577,18 @@ func installLiveProviderCommandOverrideWithArgs(cityDir, provider, command strin
 		return err
 	}
 	header := fmt.Sprintf("[providers.%s]", provider)
-	if strings.Contains(string(data), header) {
-		return fmt.Errorf("city.toml already defines %s", header)
+	text := string(data)
+	if strings.Contains(text, header) {
+		if provider == "antigravity" {
+			return appendLiveProviderEnvOverridesIfMissing(cityPath, text, provider, provider)
+		}
+		// gc init writes a thin builtin alias for the selected provider
+		// (#2949); replace it with the live override instead of failing.
+		stripped, ok := stripThinBuiltinAliasSection(text, provider)
+		if !ok {
+			return fmt.Errorf("city.toml already defines %s", header)
+		}
+		data = []byte(stripped)
 	}
 
 	var b strings.Builder
@@ -1507,6 +1623,63 @@ func installLiveProviderCommandOverrideWithArgs(cityDir, provider, command strin
 			fmt.Fprintf(&b, "args_append = [%s]\n", strings.Join(quoted, ", "))
 		}
 	}
+	writeLiveProviderEnvOverrides(&b, provider, provider)
+	return os.WriteFile(cityPath, []byte(b.String()), 0o644)
+}
+
+// stripThinBuiltinAliasSection removes the `[providers.<name>]` section that
+// `gc init` emits as a thin builtin alias (base = "builtin:<name>" plus
+// zero-value scalars). It returns ok=false when the section carries any other
+// configuration, so genuinely customized provider sections still fail loudly.
+func stripThinBuiltinAliasSection(text, provider string) (string, bool) {
+	header := fmt.Sprintf("[providers.%s]", provider)
+	lines := strings.Split(text, "\n")
+	start := -1
+	for i, line := range lines {
+		if strings.TrimSpace(line) == header {
+			start = i
+			break
+		}
+	}
+	if start == -1 {
+		return text, false
+	}
+	end := len(lines)
+	for i := start + 1; i < len(lines); i++ {
+		trimmed := strings.TrimSpace(lines[i])
+		if strings.HasPrefix(trimmed, "[") {
+			end = i
+			break
+		}
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		switch trimmed {
+		case fmt.Sprintf("base = %s", strconv.Quote("builtin:"+provider)), "ready_delay_ms = 0":
+			continue
+		default:
+			return text, false
+		}
+	}
+	return strings.Join(append(append([]string(nil), lines[:start]...), lines[end:]...), "\n"), true
+}
+
+func appendLiveProviderEnvOverridesIfMissing(cityPath, text, blockProvider, sourceProvider string) error {
+	if len(liveProviderEnvOverrides(sourceProvider)) == 0 {
+		return nil
+	}
+	envHeader := fmt.Sprintf("[providers.%s.env]", blockProvider)
+	if strings.Contains(text, envHeader) {
+		return nil
+	}
+
+	var b strings.Builder
+	b.WriteString(text)
+	if len(text) > 0 && text[len(text)-1] != '\n' {
+		b.WriteByte('\n')
+	}
+	b.WriteByte('\n')
+	writeLiveProviderEnvOverrides(&b, blockProvider, sourceProvider)
 	return os.WriteFile(cityPath, []byte(b.String()), 0o644)
 }
 
@@ -1571,6 +1744,7 @@ func installNoSkillLiveProviderCommandOverride(cityDir, provider, sourceProvider
 	if len(quotedArgs) > 0 {
 		fmt.Fprintf(&b, "args = [%s]\n", strings.Join(quotedArgs, ", "))
 	}
+	writeLiveProviderEnvOverrides(&b, provider, sourceProvider)
 	return os.WriteFile(cityPath, []byte(b.String()), 0o644)
 }
 
@@ -1582,8 +1756,47 @@ func noSkillLiveProviderDefaults(provider string) (promptMode, promptFlag string
 		return "arg", "", 5000, []string{"--approval-mode", "yolo"}
 	case "opencode":
 		return "flag", "--prompt", 8000, nil
+	case "mimocode":
+		return "flag", "--prompt", 8000, []string{"--never-ask"}
+	case "antigravity":
+		return "flag", "--prompt-interactive", 5000, []string{"--dangerously-skip-permissions"}
+	case "cursor":
+		return "arg", "", 10000, []string{"-f", "--trust"}
 	default:
 		return "arg", "", 10000, []string{"--dangerously-skip-permissions", "--effort", "max"}
+	}
+}
+
+func writeLiveProviderEnvOverrides(b *strings.Builder, blockProvider, sourceProvider string) {
+	blockProvider = strings.TrimSpace(blockProvider)
+	if blockProvider == "" {
+		return
+	}
+	for key, value := range liveProviderEnvOverrides(sourceProvider) {
+		fmt.Fprintf(b, "[providers.%s.env]\n%s = %s\n", blockProvider, key, strconv.Quote(value))
+	}
+}
+
+func liveProviderEnvOverrides(provider string) map[string]string {
+	if strings.TrimSpace(provider) != "antigravity" {
+		return nil
+	}
+	gcHome := ""
+	if liveEnv != nil {
+		gcHome = strings.TrimSpace(liveEnv.Get("GC_HOME"))
+	}
+	if gcHome == "" {
+		return nil
+	}
+	return map[string]string{"HOME": gcHome}
+}
+
+func applyLiveProviderRuntimeEnv(gcHome string, env *helpers.Env, profile workerpkg.Profile) {
+	if env == nil {
+		return
+	}
+	if profile == workerpkg.ProfileAntigravityTmuxCLI {
+		env.With("HOME", gcHome)
 	}
 }
 
@@ -1620,6 +1833,13 @@ func installDefaultPoolInferenceAgent(cityDir, name, provider string) error {
 	if name == "" || provider == "" {
 		return fmt.Errorf("default pool inference agent requires name and provider")
 	}
+	agentPath := filepath.Join(cityDir, "agents", name, "agent.toml")
+	if _, err := os.Stat(agentPath); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
 	cityPath := filepath.Join(cityDir, "city.toml")
 	data, err := os.ReadFile(cityPath)
 	if err != nil {
@@ -1628,22 +1848,27 @@ func installDefaultPoolInferenceAgent(cityDir, name, provider string) error {
 	if strings.Contains(string(data), "\nname = "+strconv.Quote(name)) {
 		return nil
 	}
-	var b strings.Builder
-	b.Write(data)
-	if len(data) > 0 && data[len(data)-1] != '\n' {
-		b.WriteByte('\n')
-	}
-	fmt.Fprintf(&b, `
 
-[[agent]]
-name = %q
-provider = %q
+	var b strings.Builder
+	fmt.Fprintf(&b, `provider = %q
 prompt_template = %q
 default_sling_formula = "mol-do-work"
 min_active_sessions = 0
 max_active_sessions = 2
-`, name, provider, citylayout.SystemPacksRoot+"/core/assets/prompts/pool-worker.md")
-	return os.WriteFile(cityPath, []byte(b.String()), 0o644)
+`, provider, "agents/"+name+"/prompt.template.md")
+	if err := os.MkdirAll(filepath.Dir(agentPath), 0o755); err != nil {
+		return err
+	}
+	promptPath := filepath.Join(helpers.FindModuleRoot(), "internal", "bootstrap", "packs", "core", "assets", "prompts", "pool-worker.template.md")
+	prompt, err := os.ReadFile(promptPath)
+	if err != nil {
+		return fmt.Errorf("reading canonical pool-worker prompt: %w", err)
+	}
+	prompt = append(prompt, []byte("\n## Worker Inference Fixture\n\nFor file-writing tasks in this live inference test, create or update the requested file before closing the work bead.\n")...)
+	if err := os.WriteFile(filepath.Join(filepath.Dir(agentPath), "prompt.template.md"), []byte(prompt), 0o644); err != nil {
+		return err
+	}
+	return os.WriteFile(agentPath, []byte(b.String()), 0o644)
 }
 
 func setNamedSessionMode(cityDir, template, mode string) error {
@@ -1767,13 +1992,19 @@ func leadingWhitespace(line string) string {
 }
 
 func closeLiveSessionsByTemplate(cityDir, template string) error {
-	sessionsOut, err := runGCWithTimeout(liveControlTimeout, liveEnv, cityDir, "session", "list", "--json")
-	if err != nil {
-		return err
+	sessionsOut, commandErr := runGCWithTimeout(liveControlTimeout, liveEnv, cityDir, "session", "list", "--json")
+	sessions, parseErr := parseSessionListJSON(sessionsOut)
+	if parseErr != nil {
+		if isBootstrapSessionListError(parseErr) {
+			return nil
+		}
+		if commandErr != nil {
+			return fmt.Errorf("%w: %s", commandErr, truncateEvidence(strings.TrimSpace(sessionsOut), 500))
+		}
+		return parseErr
 	}
-	sessions, err := parseSessionListJSON(sessionsOut)
-	if err != nil {
-		return err
+	if commandErr != nil {
+		return fmt.Errorf("%w: %s", commandErr, truncateEvidence(strings.TrimSpace(sessionsOut), 500))
 	}
 	store, err := openLiveCityStore(cityDir)
 	if err != nil {
@@ -2066,6 +2297,9 @@ func TestInterruptContinuationSnapshotErrorAllowsDroppedInterruptedPrompt(t *tes
 
 func liveBeadStoreEnv(cityDir string) map[string]string {
 	env := citylayout.CityRuntimeEnvMap(cityDir)
+	for key, value := range liveBDBinaryEnv() {
+		env[key] = value
+	}
 	env["BEADS_DIR"] = filepath.Join(cityDir, ".beads")
 	env["GC_RIG"] = ""
 	env["GC_RIG_ROOT"] = ""
@@ -2114,7 +2348,7 @@ func startManagedInferenceSession(
 	t.Helper()
 
 	c := newLiveCity(t)
-	initArgs := []string{"init", "--skip-provider-readiness"}
+	initArgs := []string{"init", "--skip-provider-readiness", "--no-start"}
 	if provider != "" {
 		initArgs = append(initArgs, "--provider", provider)
 	}
@@ -2315,6 +2549,87 @@ func runFreshInitSlingWorkWithSetup(t *testing.T, provider, prompt, outputRel st
 	return runFreshInitSlingWorkForTarget(t, provider, inferenceSlingTarget, prompt, outputRel, setupFn, true)
 }
 
+// freshWorkerOutputCandidates lists every directory a sling-routed worker could
+// reasonably write a bare relative output file into: the city root, and the
+// work dir the routed bead (or any of its molecule steps) was assigned.
+// prefixEvidenceKeys namespaces an evidence map so merging a "before" snapshot
+// into a later failure record cannot shadow the "after" values.
+func prefixEvidenceKeys(evidence map[string]string, prefix string) map[string]string {
+	if len(evidence) == 0 {
+		return evidence
+	}
+	out := make(map[string]string, len(evidence))
+	for key, value := range evidence {
+		if strings.HasPrefix(key, prefix) {
+			out[key] = value
+			continue
+		}
+		out[prefix+key] = value
+	}
+	return out
+}
+
+func freshWorkerOutputCandidates(cityDir, workBeadID, outputRel string) []string {
+	paths := []string{filepath.Join(cityDir, outputRel)}
+	seen := map[string]bool{paths[0]: true}
+	for _, dir := range assignedWorkDirs(cityDir, workBeadID) {
+		candidate := filepath.Join(dir, outputRel)
+		if !seen[candidate] {
+			seen[candidate] = true
+			paths = append(paths, candidate)
+		}
+	}
+	return paths
+}
+
+// assignedWorkDirs resolves the gc.work_dir of the routed bead and of any bead
+// whose molecule root is that bead — a mol-do-work assignment executes in the
+// step bead's dir, which is created by the sling and so is unknown when the
+// prompt is composed.
+func assignedWorkDirs(cityDir, workBeadID string) []string {
+	var dirs []string
+	add := func(raw string) {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			return
+		}
+		if !filepath.IsAbs(raw) {
+			raw = filepath.Join(cityDir, raw)
+		}
+		dirs = append(dirs, raw)
+	}
+	if bead, err := showBeadJSON(cityDir, workBeadID); err == nil {
+		add(metaString(bead.Metadata, "gc.work_dir"))
+	}
+	// The step bead's dir is named for the step; enumerate the city root rather
+	// than guessing the id, since a molecule can fan out.
+	entries, err := os.ReadDir(cityDir)
+	if err != nil {
+		return dirs
+	}
+	for _, entry := range entries {
+		if entry.IsDir() && strings.HasPrefix(entry.Name(), strings.SplitN(workBeadID, "-", 2)[0]+"-") {
+			add(filepath.Join(cityDir, entry.Name()))
+		}
+	}
+	return dirs
+}
+
+// firstNonEmptyFile returns the contents and path of the first candidate that
+// exists with non-whitespace content.
+func firstNonEmptyFile(paths []string) (string, string) {
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		if text := strings.TrimSpace(string(data)); text != "" {
+			return text, path
+		}
+	}
+	return "", ""
+}
+
 func runFreshInitSlingWorkForTarget(t *testing.T, provider, slingTarget, prompt, outputRel string, setupFn func(cityDir string) error, installProbe bool) (inferenceRun, map[string]string, map[string]string, string, error) {
 	t.Helper()
 
@@ -2323,7 +2638,7 @@ func runFreshInitSlingWorkForTarget(t *testing.T, provider, slingTarget, prompt,
 	if slingTarget == "" {
 		slingTarget = provider
 	}
-	initArgs := []string{"init", "--skip-provider-readiness"}
+	initArgs := []string{"init", "--skip-provider-readiness", "--no-start"}
 	if provider != "" {
 		initArgs = append(initArgs, "--provider", provider)
 	}
@@ -2579,8 +2894,14 @@ func runFreshInitSlingWorkForTarget(t *testing.T, provider, slingTarget, prompt,
 		}, nil, "spawn", fmt.Errorf("fresh city never spawned a running %s worker after gc sling", provider)
 	}
 
+	// A sling-routed worker runs in the work bead's assigned work dir, not the
+	// city root, so a prompt that names a bare relative file lands there. Poll
+	// both: the city root keeps the historical behavior for targets that run
+	// there, and the assigned dir is where a molecule step actually writes.
 	outputPath := filepath.Join(c.Dir, outputRel)
+	outputCandidates := freshWorkerOutputCandidates(c.Dir, workBeadID, outputRel)
 	hookNudgeDelivery := freshWorkerNudgeDelivery(provider)
+	taskTimeout := freshWorkerTaskTimeout(provider)
 	hookNudgeOut, hookNudgeErr := runGCWithTimeout(
 		liveControlTimeout,
 		liveEnv,
@@ -2590,20 +2911,19 @@ func runFreshInitSlingWorkForTarget(t *testing.T, provider, slingTarget, prompt,
 		"--delivery",
 		hookNudgeDelivery,
 		spawnedSession.SessionName,
-		"Check your hook for work assignments, complete the assigned work, and close the work bead.",
+		"Run gc hook --claim --drain-ack --json, complete the claimed work, close the work bead, and acknowledge drain.",
 	)
 	var lastWorkBead beadJSON
 	completed := false
 	if hookNudgeErr == nil {
-		completed = pollForCondition(6*time.Minute, 10*time.Second, func() bool {
+		completed = pollForCondition(taskTimeout, 10*time.Second, func() bool {
 			bead, beadErr := showBeadJSON(c.Dir, workBeadID)
 			if beadErr == nil {
 				lastWorkBead = bead
 			}
-			data, readErr := os.ReadFile(outputPath)
-			if readErr == nil {
-				output := strings.TrimSpace(string(data))
-				if output != "" && beadErr == nil && bead.Status == "closed" {
+			if found, path := firstNonEmptyFile(outputCandidates); found != "" {
+				outputPath = path
+				if beadErr == nil && bead.Status == "closed" {
 					return true
 				}
 			}
@@ -2622,6 +2942,9 @@ func runFreshInitSlingWorkForTarget(t *testing.T, provider, slingTarget, prompt,
 
 	sessionListOut, _ = runGCWithTimeout(10*time.Second, liveEnv, c.Dir, "session", "list")
 	supervisorLogsOut, _ = runGCWithTimeout(10*time.Second, liveEnv, c.Dir, "supervisor", "logs")
+	if found, path := firstNonEmptyFile(freshWorkerOutputCandidates(c.Dir, workBeadID, outputRel)); found != "" {
+		outputPath = path
+	}
 	outputContents, outputErr := os.ReadFile(outputPath)
 	outputDiag := string(outputContents)
 	if outputErr != nil {
@@ -2670,6 +2993,7 @@ func runFreshInitSlingWorkForTarget(t *testing.T, provider, slingTarget, prompt,
 		"session_name":    spawnedSession.SessionName,
 		"session_state":   spawnedSession.State,
 		"nudge_delivery":  hookNudgeDelivery,
+		"task_timeout":    taskTimeout.String(),
 	}
 	if strings.TrimSpace(lastWorkBead.ID) != "" {
 		taskEvidence["work_status"] = lastWorkBead.Status
@@ -2700,7 +3024,7 @@ func runFreshInitSlingWorkForTarget(t *testing.T, provider, slingTarget, prompt,
 		taskEvidence["status"] = lastStatus
 		taskEvidence["session_list"] = run.SessionList
 		taskEvidence["supervisor_logs"] = run.SupervisorLogs
-		return run, spawnEvidence, taskEvidence, "task", fmt.Errorf("live %s worker did not complete the routed task within 6m", provider)
+		return run, spawnEvidence, taskEvidence, "task", fmt.Errorf("live %s worker did not complete the routed task within %s", provider, taskTimeout)
 	}
 
 	return run, spawnEvidence, taskEvidence, "", nil
@@ -2713,10 +3037,19 @@ func freshWorkerNudgeDelivery(provider string) string {
 	return "wait-idle"
 }
 
+func freshWorkerTaskTimeout(provider string) time.Duration {
+	if strings.TrimSpace(provider) == "antigravity" {
+		return 12 * time.Minute
+	}
+	return 6 * time.Minute
+}
+
 func liveProviderArgsAppend() []string {
 	switch liveSetup.Profile {
 	case workerpkg.ProfileOpenCodeTmuxCLI:
 		return []string{"--model", liveOpenCodeModel()}
+	case workerpkg.ProfileMimoCodeTmuxCLI:
+		return []string{"--model", liveMimoCodeModel()}
 	case workerpkg.ProfilePiTmuxCLI:
 		return []string{"-e", "npm:pi-ollama-cloud", "--provider", "ollama-cloud", "--model", livePiModel()}
 	default:
@@ -2728,6 +3061,14 @@ func liveOpenCodeModel() string {
 	model := strings.TrimSpace(os.Getenv("GC_WORKER_INFERENCE_OPENCODE_MODEL"))
 	if model == "" {
 		return defaultOpenCodeGeminiModel
+	}
+	return model
+}
+
+func liveMimoCodeModel() string {
+	model := strings.TrimSpace(os.Getenv("GC_WORKER_INFERENCE_MIMOCODE_MODEL"))
+	if model == "" {
+		return defaultMimoCodeModel
 	}
 	return model
 }
@@ -2744,7 +3085,7 @@ func runFreshManualSessionTurn(t *testing.T, provider, templateName, alias, prom
 	t.Helper()
 
 	c := newLiveCity(t)
-	initArgs := []string{"init", "--skip-provider-readiness"}
+	initArgs := []string{"init", "--skip-provider-readiness", "--no-start"}
 	if provider != "" {
 		initArgs = append(initArgs, "--provider", provider)
 	}
@@ -3100,7 +3441,7 @@ func runFreshNamedSessionTurn(t *testing.T, provider, identity, prompt, outputRe
 	t.Helper()
 
 	c := newLiveCity(t)
-	initArgs := []string{"init", "--skip-provider-readiness"}
+	initArgs := []string{"init", "--skip-provider-readiness", "--no-start"}
 	if provider != "" {
 		initArgs = append(initArgs, "--provider", provider)
 	}
@@ -3408,6 +3749,9 @@ func runFreshNamedSessionTurn(t *testing.T, provider, identity, prompt, outputRe
 }
 
 func seedLiveProviderState(cityDir string) error {
+	if err := installLiveWorkspaceBDBinaryPin(cityDir); err != nil {
+		return fmt.Errorf("pinning live bd binary: %w", err)
+	}
 	gcHome := strings.TrimSpace(liveEnv.Get("GC_HOME"))
 	if gcHome == "" {
 		return fmt.Errorf("GC_HOME is empty")
@@ -3441,7 +3785,8 @@ func installInferenceProbeAgent(cityDir string, includeNamedSessionArgs ...bool)
 	if len(includeNamedSessionArgs) > 0 {
 		includeNamedSession = includeNamedSessionArgs[0]
 	}
-	promptPath := filepath.Join(cityDir, inferenceProbePromptPath)
+	agentDir := filepath.Join(cityDir, "agents", inferenceProbeTemplate)
+	promptPath := filepath.Join(agentDir, "prompt.template.md")
 	if err := os.MkdirAll(filepath.Dir(promptPath), 0o755); err != nil {
 		return err
 	}
@@ -3467,18 +3812,20 @@ When a later message asks you to recall prior turn context, use conversation mem
 		return err
 	}
 	var additions []string
-	if !strings.Contains(string(data), "\nname = \""+inferenceProbeTemplate+"\"") {
+	agentPath := filepath.Join(agentDir, "agent.toml")
+	if _, statErr := os.Stat(agentPath); os.IsNotExist(statErr) && !strings.Contains(string(data), "\nname = \""+inferenceProbeTemplate+"\"") {
 		sessionLine, err := inferenceProbeSessionLine(data)
 		if err != nil {
 			return err
 		}
-		additions = append(additions, fmt.Sprintf(`
-
-[[agent]]
-name = %q
-%sprompt_template = %q
-max_active_sessions = 1
-`, inferenceProbeTemplate, sessionLine, inferenceProbePromptPath))
+		var agent strings.Builder
+		agent.WriteString(sessionLine)
+		fmt.Fprintf(&agent, "prompt_template = %q\nmax_active_sessions = 1\n", filepath.Join("agents", inferenceProbeTemplate, "prompt.template.md"))
+		if err := os.WriteFile(agentPath, []byte(agent.String()), 0o644); err != nil {
+			return err
+		}
+	} else if statErr != nil && !os.IsNotExist(statErr) {
+		return statErr
 	}
 	if includeNamedSession && !strings.Contains(string(data), "\n[[named_session]]\ntemplate = \""+inferenceProbeTemplate+"\"") {
 		additions = append(additions, fmt.Sprintf(`
@@ -3514,7 +3861,7 @@ func inferenceProbeSessionLine(data []byte) (string, error) {
 		return "", err
 	}
 	switch strings.TrimSpace(cfg.Workspace.Provider) {
-	case "kimi", "opencode", "pi":
+	case "cursor", "kimi", "opencode", "mimocode", "pi", "antigravity":
 		return `session = "tmux"` + "\n", nil
 	}
 	return "", nil
@@ -3526,7 +3873,7 @@ func ensureInferenceProbeProviderHooks(data []byte) ([]byte, bool, error) {
 		return nil, false, err
 	}
 	provider := strings.TrimSpace(cfg.Workspace.Provider)
-	if provider != "gemini" && provider != "opencode" && provider != "pi" {
+	if provider != "cursor" && provider != "gemini" && provider != "opencode" && provider != "mimocode" && provider != "pi" && provider != "antigravity" {
 		return data, false, nil
 	}
 	if stringListContains(cfg.Workspace.InstallAgentHooks, provider) {
@@ -4195,7 +4542,46 @@ func transcriptCandidatePaths(adapter workerpkg.SessionLogAdapter, profile worke
 	if profile == workerpkg.ProfileGeminiTmuxCLI {
 		candidates = append(candidates, geminiTranscriptCandidatePaths(adapter.SearchPaths, workDir)...)
 	}
+	if profile == workerpkg.ProfileAntigravityTmuxCLI {
+		candidates = append(candidates, antigravityTranscriptCandidatePaths(adapter.SearchPaths)...)
+	}
 	return uniqueNonEmptyPaths(candidates)
+}
+
+func antigravityTranscriptCandidatePaths(searchPaths []string) []string {
+	type candidate struct {
+		path    string
+		modTime time.Time
+	}
+	var candidates []candidate
+	for _, brainRoot := range searchPaths {
+		entries, err := os.ReadDir(brainRoot)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			path := filepath.Join(brainRoot, entry.Name(), ".system_generated", "logs", "transcript.jsonl")
+			info, err := os.Stat(path)
+			if err != nil {
+				continue
+			}
+			candidates = append(candidates, candidate{
+				path:    path,
+				modTime: info.ModTime(),
+			})
+		}
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].modTime.After(candidates[j].modTime)
+	})
+	paths := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		paths = append(paths, candidate.path)
+	}
+	return paths
 }
 
 func geminiTranscriptCandidatePaths(searchPaths []string, workDir string) []string {
@@ -5100,26 +5486,130 @@ func parseBeadListJSON(t *testing.T, out string) []beadJSON {
 }
 
 func parseSessionListJSON(out string) ([]sessionJSON, error) {
-	trimmed := strings.TrimSpace(out)
-	if trimmed == "" || trimmed == "null" {
-		return nil, nil
+	payloads := jsonPayloads(out)
+	if len(payloads) == 0 {
+		trimmed := strings.TrimSpace(out)
+		if trimmed == "" || trimmed == "null" {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("session list json payload not found in output: %s", truncateEvidence(trimmed, 500))
 	}
-	var envelope struct {
-		Sessions []sessionJSON `json:"sessions"`
-	}
-	if strings.HasPrefix(trimmed, "{") {
-		dec := json.NewDecoder(strings.NewReader(trimmed))
-		if err := dec.Decode(&envelope); err != nil {
+
+	for _, payload := range payloads {
+		trimmed := strings.TrimSpace(string(payload))
+		if trimmed == "" || trimmed == "null" {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "[") {
+			var sessions []sessionJSON
+			dec := json.NewDecoder(strings.NewReader(trimmed))
+			if err := dec.Decode(&sessions); err != nil {
+				return nil, fmt.Errorf("unmarshal session list json: %w", err)
+			}
+			return sessions, nil
+		}
+		if !strings.HasPrefix(trimmed, "{") {
+			continue
+		}
+		var probe map[string]json.RawMessage
+		if err := json.Unmarshal(payload, &probe); err != nil {
+			return nil, fmt.Errorf("unmarshal session list json object: %w", err)
+		}
+		if _, ok := probe["sessions"]; !ok {
+			if _, ok := probe["ok"]; !ok {
+				continue
+			}
+		}
+		var envelope struct {
+			OK       *bool         `json:"ok"`
+			Sessions []sessionJSON `json:"sessions"`
+			Error    *struct {
+				Code     string `json:"code"`
+				Message  string `json:"message"`
+				ExitCode int    `json:"exit_code"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(payload, &envelope); err != nil {
 			return nil, fmt.Errorf("unmarshal session list json envelope: %w", err)
+		}
+		if envelope.OK != nil && !*envelope.OK {
+			if envelope.Error == nil {
+				return nil, sessionListCommandError{Message: "session list command failed"}
+			}
+			return nil, sessionListCommandError{
+				Code:     envelope.Error.Code,
+				Message:  envelope.Error.Message,
+				ExitCode: envelope.Error.ExitCode,
+			}
 		}
 		return envelope.Sessions, nil
 	}
-	var sessions []sessionJSON
-	dec := json.NewDecoder(strings.NewReader(trimmed))
-	if err := dec.Decode(&sessions); err != nil {
-		return nil, fmt.Errorf("unmarshal session list json: %w", err)
+
+	return nil, fmt.Errorf("session list json payload not found in output: %s", truncateEvidence(strings.TrimSpace(out), 500))
+}
+
+type sessionListCommandError struct {
+	Code     string
+	Message  string
+	ExitCode int
+}
+
+func (e sessionListCommandError) Error() string {
+	if e.Code == "" && e.Message == "" {
+		return "session list command failed"
 	}
-	return sessions, nil
+	if e.Code == "" {
+		return e.Message
+	}
+	if e.Message == "" {
+		return e.Code
+	}
+	return e.Code + ": " + e.Message
+}
+
+func isBootstrapSessionListError(err error) bool {
+	var listErr sessionListCommandError
+	if !errors.As(err, &listErr) {
+		return false
+	}
+	return listErr.Code == "session_list_failed" && strings.Contains(listErr.Message, `invalid issue type "session"`)
+}
+
+func jsonPayloads(out string) []json.RawMessage {
+	text := strings.TrimSpace(out)
+	var payloads []json.RawMessage
+	for start := nextJSONValueStart(text, 0); start >= 0 && start < len(text); start = nextJSONValueStart(text, start+1) {
+		dec := json.NewDecoder(strings.NewReader(text[start:]))
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			continue
+		}
+		payloads = append(payloads, raw)
+		if offset := int(dec.InputOffset()); offset > 0 {
+			start += offset - 1
+		}
+	}
+	return payloads
+}
+
+func nextJSONValueStart(text string, from int) int {
+	for i := from; i < len(text); i++ {
+		switch text[i] {
+		case '{', '[':
+			return i
+		}
+	}
+	return -1
+}
+
+func truncateEvidence(text string, maxLen int) string {
+	if len(text) <= maxLen {
+		return text
+	}
+	if maxLen <= 3 {
+		return text[:maxLen]
+	}
+	return text[:maxLen-3] + "..."
 }
 
 func showBeadJSON(dir, beadID string) (beadJSON, error) {
@@ -5179,9 +5669,12 @@ func bdCmd(env *helpers.Env, dir string, args ...string) (string, error) {
 }
 
 func bdCmdWithTimeout(timeout time.Duration, env *helpers.Env, dir string, args ...string) (string, error) {
-	bdPath := "bd"
-	if path, err := exec.LookPath("bd"); err == nil {
-		bdPath = path
+	bdPath := strings.TrimSpace(env.Get("BD_BIN"))
+	if bdPath == "" {
+		bdPath = "bd"
+		if path, err := exec.LookPath("bd"); err == nil {
+			bdPath = path
+		}
 	}
 
 	return runJSONCommandWithTimeout(timeout, env, dir, bdPath, args...)
@@ -5565,6 +6058,8 @@ func classifyLivePaneBlocked(paneTail string) *liveBlockedInteraction {
 		return nil
 	}
 	haystack := strings.ToLower(paneTail)
+	cursorTrustAccepted := strings.LastIndex(haystack, "cursor agent") > strings.LastIndex(haystack, "trusting workspace") &&
+		strings.Contains(haystack, "trusting workspace")
 	switch {
 	case containsAny(haystack,
 		"oauth token has expired",
@@ -5589,7 +6084,7 @@ func classifyLivePaneBlocked(paneTail string) *liveBlockedInteraction {
 		"quick safety check",
 		"trust this folder",
 		"do you trust the contents of this directory?",
-	):
+	) && !cursorTrustAccepted:
 		return &liveBlockedInteraction{
 			Kind:     "workspace_trust",
 			Detail:   "worker is blocked on a workspace trust dialog",

@@ -3,545 +3,150 @@ package main
 import (
 	"bytes"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
-	"time"
 )
 
-func TestHookScriptsContainStamp(t *testing.T) {
-	oldDate, oldCommit := date, commit
-	t.Cleanup(func() { date, commit = oldDate, oldCommit })
-
-	date = "2026-04-29T10:00:00Z"
-	commit = "abc1234"
-
-	for name, eventType := range beadHooks {
-		t.Run(name, func(t *testing.T) {
-			var content string
-			if name == "on_close" {
-				content = closeHookScript("")
-			} else {
-				content = hookScript(eventType, "")
-			}
-			if !strings.Contains(content, "# gc-hook-stamp: 2026-04-29T10:00:00Z abc1234") {
-				t.Errorf("hook %s missing stamp line:\n%s", name, content)
-			}
-		})
-	}
-}
-
-func TestParseHookStampDate(t *testing.T) {
-	tests := []struct {
-		name    string
-		content string
-		want    string
-	}{
-		{"with stamp", "#!/bin/sh\n# gc-hook-stamp: 2026-04-29T10:00:00Z abc1234\n", "2026-04-29T10:00:00Z"},
-		{"no stamp", "#!/bin/sh\n# Installed by gc\n", ""},
-		{"empty", "", ""},
-		{"unknown date", "#!/bin/sh\n# gc-hook-stamp: unknown unknown\n", "unknown"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := parseHookStampDate([]byte(tt.content))
-			if got != tt.want {
-				t.Errorf("parseHookStampDate() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-// TestHookScriptEmbedsCityPath verifies that hook scripts generated with an
-// explicit cityPath embed CITY_PATH and pass --city "$CITY_PATH" to
-// gc event emit. This is the fix for sibling-rig topologies where the
-// bd write's cwd is not a descendant of the city: findCity walks up and
-// fails, so gc event emit silently drops the event unless --city is set.
-func TestHookScriptEmbedsCityPath(t *testing.T) {
-	const cityPath = "/some/city"
-	for name, eventType := range beadHooks {
-		t.Run(name, func(t *testing.T) {
-			var content string
-			if name == "on_close" {
-				content = closeHookScript(cityPath)
-			} else {
-				content = hookScript(eventType, cityPath)
-			}
-			if !strings.Contains(content, `CITY_PATH='/some/city'`) {
-				t.Errorf("hook %s missing CITY_PATH definition:\n%s", name, content)
-			}
-			if !strings.Contains(content, `--city "$CITY_PATH"`) {
-				t.Errorf("hook %s does not pass --city \"$CITY_PATH\" to gc event emit:\n%s", name, content)
-			}
-			if !strings.Contains(content, `--bead-payload "$1"`) {
-				t.Errorf("hook %s missing bead payload fallback with cityPath:\n%s", name, content)
-			}
-		})
-	}
-}
-
-// TestHookScriptOmitsCityFlagWhenEmpty verifies that an empty cityPath
-// produces a hook script without the --city flag — preserving the
-// original "walk up from cwd" behavior for callers that have not yet
-// been updated to thread the city path.
-func TestHookScriptOmitsCityFlagWhenEmpty(t *testing.T) {
-	for name, eventType := range beadHooks {
-		t.Run(name, func(t *testing.T) {
-			var content string
-			if name == "on_close" {
-				content = closeHookScript("")
-			} else {
-				content = hookScript(eventType, "")
-			}
-			if strings.Contains(content, "--city") {
-				t.Errorf("hook %s emitted --city flag with empty cityPath:\n%s", name, content)
-			}
-			if strings.Contains(content, "CITY_PATH=") {
-				t.Errorf("hook %s emitted CITY_PATH= with empty cityPath:\n%s", name, content)
-			}
-		})
-	}
-}
-
-// TestInstallBeadHooksThreadsCityPath verifies that installBeadHooks
-// passes the cityPath argument through to the generated hook scripts.
-func TestInstallBeadHooksThreadsCityPath(t *testing.T) {
+// TestInstallBeadHooksRemovesExistingHooks verifies that installBeadHooks
+// removes any existing on_create/on_update/on_close hooks, cleaning up
+// deployments that were installed by an older gc binary.
+func TestInstallBeadHooksRemovesExistingHooks(t *testing.T) {
 	dir := t.TempDir()
-	cityPath := filepath.Join(dir, "city")
-	if err := installBeadHooks(dir, cityPath); err != nil {
-		t.Fatalf("installBeadHooks: %v", err)
-	}
-
-	for _, filename := range []string{"on_create", "on_close", "on_update"} {
-		t.Run(filename, func(t *testing.T) {
-			path := filepath.Join(dir, ".beads", "hooks", filename)
-			data, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatalf("ReadFile: %v", err)
-			}
-			content := string(data)
-			wantDef := "CITY_PATH='" + cityPath + "'"
-			if !strings.Contains(content, wantDef) {
-				t.Errorf("hook %s missing %q:\n%s", filename, wantDef, content)
-			}
-			if !strings.Contains(content, `--city "$CITY_PATH"`) {
-				t.Errorf("hook %s does not pass --city \"$CITY_PATH\":\n%s", filename, content)
-			}
-			if !strings.Contains(content, `--bead-payload "$1"`) {
-				t.Errorf("hook %s missing bead payload fallback:\n%s", filename, content)
-			}
-		})
-	}
-}
-
-// TestInstallBeadHooksDisabledByConfig verifies that with
-// [beads] event_hooks = false, installBeadHooks removes the per-write
-// event-forwarding hooks (leaving git hooks) and does not reinstall them —
-// so a deployment whose controller cache-events already observe bead changes
-// avoids the `gc event emit` churn and clears the native-store bd_hooks gate.
-func TestInstallBeadHooksDisabledByConfig(t *testing.T) {
-	cityPath := t.TempDir()
-	writeSchema2RigCity(t, cityPath, "test-city",
-		"[workspace]\nname = \"test-city\"\n\n[beads]\nevent_hooks = false\n", "")
-
-	hooksDir := filepath.Join(cityPath, ".beads", "hooks")
+	hooksDir := filepath.Join(dir, ".beads", "hooks")
 	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	eventHook := filepath.Join(hooksDir, "on_create")
-	gitHook := filepath.Join(hooksDir, "pre-commit")
-	for _, p := range []string{eventHook, gitHook} {
-		if err := os.WriteFile(p, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+	for _, name := range beadEventHookNames {
+		p := filepath.Join(hooksDir, name)
+		gcContent := []byte("#!/bin/sh\n" + hookStampLine() + "\nexit 0\n")
+		if err := os.WriteFile(p, gcContent, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	if err := installBeadHooks(cityPath, cityPath); err != nil {
-		t.Fatalf("installBeadHooks: %v", err)
-	}
-
-	if _, err := os.Stat(eventHook); !os.IsNotExist(err) {
-		t.Errorf("on_create event hook should be removed when event_hooks=false (stat err=%v)", err)
-	}
-	if _, err := os.Stat(gitHook); err != nil {
-		t.Errorf("git hook pre-commit must be left untouched: %v", err)
-	}
-}
-
-// TestInstallBeadHooksEnabledByDefault verifies that without the opt-out, the
-// event hooks install exactly as before (default true).
-func TestInstallBeadHooksEnabledByDefault(t *testing.T) {
-	cityPath := t.TempDir()
-	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\nname = \"test-city\"\n", "")
-	if err := installBeadHooks(cityPath, cityPath); err != nil {
-		t.Fatalf("installBeadHooks: %v", err)
-	}
-	for _, fn := range []string{"on_create", "on_update", "on_close"} {
-		if _, err := os.Stat(filepath.Join(cityPath, ".beads", "hooks", fn)); err != nil {
-			t.Errorf("default install should write %s: %v", fn, err)
-		}
-	}
-}
-
-func TestGeneratedHookPassesLiteralCityPath(t *testing.T) {
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("sh not available")
-	}
-
-	parent := t.TempDir()
-	runDir := filepath.Join(parent, "external-rig")
-	if err := os.MkdirAll(runDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	cityPath := filepath.Join(parent, "city with spaces $HOME $(touch shell-expansion-marker) `touch backtick-expansion-marker` and ' quote")
-	if err := os.MkdirAll(cityPath, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	recordPath := filepath.Join(parent, "gc-argv.txt")
-	mockGC := writeNamedTestScript(t, "mock-gc.sh", `#!/bin/sh
-{
-  i=0
-  for arg do
-    i=$((i + 1))
-    printf 'arg%d=%s\n' "$i" "$arg"
-  done
-} >> "$GC_ARG_RECORD"
-`)
-
-	if err := installBeadHooks(runDir, cityPath); err != nil {
-		t.Fatalf("installBeadHooks: %v", err)
-	}
-	hookPath := filepath.Join(runDir, ".beads", "hooks", "on_create")
-
-	cmd := exec.Command("sh", hookPath, "bead-1", "bead.created")
-	cmd.Dir = runDir
-	cmd.Stdin = strings.NewReader(`{"title":"hook argv test"}`)
-	cmd.Env = sanitizedBaseEnv(
-		"BEADS_DIR="+filepath.Join(runDir, ".beads"),
-		"GC_ARG_RECORD="+recordPath,
-		"GC_BIN="+mockGC,
-		"HOME=/expanded-home",
-	)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("hook exec failed: %v\nout: %s", err, out)
-	}
-
-	var content string
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		data, err := os.ReadFile(recordPath)
-		if err == nil && len(data) > 0 {
-			content = string(data)
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if content == "" {
-		t.Fatalf("mock gc did not record argv at %s", recordPath)
-	}
-
-	if !strings.Contains(content, "arg1=--city\n") || !strings.Contains(content, "arg2="+cityPath+"\n") {
-		t.Fatalf("hook did not pass literal city path.\nwant arg2=%q\nrecorded:\n%s", cityPath, content)
-	}
-	for _, marker := range []string{"shell-expansion-marker", "backtick-expansion-marker"} {
-		if _, err := os.Stat(filepath.Join(runDir, marker)); err == nil {
-			t.Fatalf("hook executed shell expansion command and created %s", marker)
-		} else if !os.IsNotExist(err) {
-			t.Fatalf("stat marker %s: %v", marker, err)
-		}
-	}
-}
-
-func TestInstallBeadHooksForwardOnly(t *testing.T) {
-	oldDate, oldCommit := date, commit
-	t.Cleanup(func() { date, commit = oldDate, oldCommit })
-
-	dir := t.TempDir()
-
-	// Install with a "newer" binary.
-	date = "2026-06-01T00:00:00Z"
-	commit = "new1111"
 	if err := installBeadHooks(dir, ""); err != nil {
-		t.Fatalf("newer install: %v", err)
+		t.Fatalf("installBeadHooks: %v", err)
 	}
 
-	path := filepath.Join(dir, ".beads", "hooks", "on_create")
-	newerContent, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
-	if !strings.Contains(string(newerContent), "2026-06-01") {
-		t.Fatalf("newer hook missing expected stamp")
-	}
-
-	// Now run with an "older" binary — should NOT overwrite.
-	date = "2025-01-01T00:00:00Z"
-	commit = "old2222"
-	if err := installBeadHooks(dir, ""); err != nil {
-		t.Fatalf("older install: %v", err)
-	}
-
-	afterContent, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
-	if !bytes.Equal(newerContent, afterContent) {
-		t.Errorf("stale binary overwrote newer hook.\nwant stamp from 2026-06-01, got:\n%s", afterContent)
+	for _, name := range beadEventHookNames {
+		if _, err := os.Stat(filepath.Join(hooksDir, name)); !os.IsNotExist(err) {
+			t.Errorf("hook %s should be removed after installBeadHooks (stat err=%v)", name, err)
+		}
 	}
 }
 
-func TestInstallBeadHooksUpgradesLegacyHooks(t *testing.T) {
-	oldDate, oldCommit := date, commit
-	t.Cleanup(func() { date, commit = oldDate, oldCommit })
-
+// TestInstallBeadHooksLeavesNonGCHooks verifies that non-gc hooks (e.g., git
+// pre-commit) are not removed when installBeadHooks runs.
+func TestInstallBeadHooksLeavesNonGCHooks(t *testing.T) {
 	dir := t.TempDir()
 	hooksDir := filepath.Join(dir, ".beads", "hooks")
 	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-
-	// Write a legacy hook (no stamp).
-	legacy := "#!/bin/sh\n# Installed by gc — old version\necho old\n"
-	if err := os.WriteFile(filepath.Join(hooksDir, "on_create"), []byte(legacy), 0o755); err != nil {
+	gitHook := filepath.Join(hooksDir, "pre-commit")
+	if err := os.WriteFile(gitHook, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	date = "2026-01-01T00:00:00Z"
-	commit = "aaa1111"
 	if err := installBeadHooks(dir, ""); err != nil {
 		t.Fatalf("installBeadHooks: %v", err)
 	}
 
-	data, err := os.ReadFile(filepath.Join(hooksDir, "on_create"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(data), "gc-hook-stamp") {
-		t.Errorf("legacy hook was not upgraded to stamped version:\n%s", data)
+	if _, err := os.Stat(gitHook); err != nil {
+		t.Errorf("non-gc hook pre-commit must be left untouched: %v", err)
 	}
 }
 
-func TestInstallBeadHooksDevBuildAlwaysWrites(t *testing.T) {
-	oldDate, oldCommit := date, commit
-	t.Cleanup(func() { date, commit = oldDate, oldCommit })
-
+// TestInstallBeadHooksIdempotentNoHooks verifies that installBeadHooks
+// succeeds when no hooks exist (no directory, no files).
+func TestInstallBeadHooksIdempotentNoHooks(t *testing.T) {
 	dir := t.TempDir()
-
-	// Install with a stamped binary.
-	date = "2099-01-01T00:00:00Z"
-	commit = "future1"
 	if err := installBeadHooks(dir, ""); err != nil {
-		t.Fatalf("stamped install: %v", err)
+		t.Fatalf("installBeadHooks on empty dir: %v", err)
 	}
-
-	// Dev build (unknown date) should still overwrite — dev builds always win.
-	date = "unknown"
-	commit = "unknown"
 	if err := installBeadHooks(dir, ""); err != nil {
-		t.Fatalf("dev install: %v", err)
-	}
-
-	path := filepath.Join(dir, ".beads", "hooks", "on_create")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(data), "gc-hook-stamp: unknown unknown") {
-		t.Errorf("dev build did not overwrite stamped hook:\n%s", data)
+		t.Fatalf("second installBeadHooks: %v", err)
 	}
 }
 
-func TestInstallBeadHooksCreatesScripts(t *testing.T) {
+// TestInstallBeadHooksPreservesUserOwnedSameNameHook verifies that a hook file
+// with a standard bd hook name (e.g. on_create) but no gc-hook-stamp is not
+// removed by installBeadHooks — only gc-installed hooks are cleaned up.
+func TestInstallBeadHooksPreservesUserOwnedSameNameHook(t *testing.T) {
 	dir := t.TempDir()
-	if err := installBeadHooks(dir, ""); err != nil {
-		t.Fatalf("installBeadHooks: %v", err)
-	}
-
 	hooksDir := filepath.Join(dir, ".beads", "hooks")
-
-	for _, tc := range []struct {
-		filename  string
-		eventType string
-	}{
-		{"on_create", "bead.created"},
-		{"on_close", "bead.closed"},
-		{"on_update", "bead.updated"},
-	} {
-		t.Run(tc.filename, func(t *testing.T) {
-			path := filepath.Join(hooksDir, tc.filename)
-			fi, err := os.Stat(path)
-			if err != nil {
-				t.Fatalf("hook %s not created: %v", tc.filename, err)
-			}
-			// Check executable permission.
-			if fi.Mode()&0o111 == 0 {
-				t.Errorf("hook %s not executable: %v", tc.filename, fi.Mode())
-			}
-
-			data, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatalf("reading hook %s: %v", tc.filename, err)
-			}
-			content := string(data)
-
-			// Starts with shebang.
-			if !strings.HasPrefix(content, "#!/bin/sh") {
-				t.Errorf("hook %s missing shebang: %q", tc.filename, content[:min(len(content), 20)])
-			}
-			// Contains the correct event type.
-			if !strings.Contains(content, tc.eventType) {
-				t.Errorf("hook %s missing event type %q:\n%s", tc.filename, tc.eventType, content)
-			}
-			// Contains gc event emit.
-			if !strings.Contains(content, `GC_BIN="${GC_BIN:-gc}"`) {
-				t.Errorf("hook %s missing GC_BIN fallback:\n%s", tc.filename, content)
-			}
-			if !strings.Contains(content, `"$GC_BIN" event emit`) {
-				t.Errorf("hook %s missing '\"$GC_BIN\" event emit':\n%s", tc.filename, content)
-			}
-			if !strings.Contains(content, `PAYLOAD=$(printf '{"bead":%s}' "$DATA")`) {
-				t.Errorf("hook %s does not wrap bd JSON as BeadEventPayload:\n%s", tc.filename, content)
-			}
-			if !strings.Contains(content, `--payload "$PAYLOAD"`) {
-				t.Errorf("hook %s emits raw DATA instead of wrapped PAYLOAD:\n%s", tc.filename, content)
-			}
-			if !strings.Contains(content, `--bead-payload "$1"`) {
-				t.Errorf("hook %s missing bead payload fallback for empty hook stdin:\n%s", tc.filename, content)
-			}
-			// Best-effort: stderr redirected, || true.
-			if !strings.Contains(content, "|| true") {
-				t.Errorf("hook %s missing '|| true' (best-effort):\n%s", tc.filename, content)
-			}
-			if !strings.Contains(content, `) </dev/null >/dev/null 2>&1 &`) {
-				t.Errorf("hook %s missing detached background redirect:\n%s", tc.filename, content)
-			}
-			// Failure diagnostics: stderr captured to a log file, and
-			// non-zero exit produces a dated diagnostic line.
-			if !strings.Contains(content, `HOOK_LOG="${BEADS_DIR:-.beads}/hooks.log"`) {
-				t.Errorf("hook %s missing HOOK_LOG definition:\n%s", tc.filename, content)
-			}
-			if !strings.Contains(content, `2>>"$HOOK_LOG"`) {
-				t.Errorf("hook %s does not capture gc stderr to HOOK_LOG:\n%s", tc.filename, content)
-			}
-			if !strings.Contains(content, `>>"$HOOK_LOG" 2>/dev/null`) {
-				t.Errorf("hook %s missing failure-diagnostic echo into HOOK_LOG:\n%s", tc.filename, content)
-			}
-			// on_close hook must also trigger convoy autoclose and wisp autoclose.
-			if tc.filename == "on_close" {
-				if !strings.Contains(content, `"$GC_BIN" convoy autoclose`) {
-					t.Errorf("on_close hook missing '\"$GC_BIN\" convoy autoclose':\n%s", content)
-				}
-				if !strings.Contains(content, `"$GC_BIN" wisp autoclose`) {
-					t.Errorf("on_close hook missing '\"$GC_BIN\" wisp autoclose':\n%s", content)
-				}
-			}
-		})
-	}
-}
-
-func TestInstallBeadHooksIdempotent(t *testing.T) {
-	dir := t.TempDir()
-
-	// Install twice — should not error.
-	if err := installBeadHooks(dir, ""); err != nil {
-		t.Fatalf("first install: %v", err)
-	}
-	if err := installBeadHooks(dir, ""); err != nil {
-		t.Fatalf("second install: %v", err)
-	}
-
-	// Verify hooks still correct after second install.
-	path := filepath.Join(dir, ".beads", "hooks", "on_create")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("reading hook: %v", err)
-	}
-	if !strings.Contains(string(data), "bead.created") {
-		t.Errorf("hook content wrong after idempotent install")
-	}
-}
-
-func TestInstallBeadHooksDoesNotRewriteUnchangedHooks(t *testing.T) {
-	dir := t.TempDir()
-
-	if err := installBeadHooks(dir, ""); err != nil {
-		t.Fatalf("first install: %v", err)
-	}
-
-	path := filepath.Join(dir, ".beads", "hooks", "on_create")
-	past := time.Unix(123456789, 0)
-	if err := os.Chtimes(path, past, past); err != nil {
-		t.Fatalf("Chtimes: %v", err)
-	}
-
-	if err := installBeadHooks(dir, ""); err != nil {
-		t.Fatalf("second install: %v", err)
-	}
-
-	info, err := os.Stat(path)
-	if err != nil {
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if !info.ModTime().Equal(past) {
-		t.Fatalf("unchanged hook was rewritten: modtime = %s, want %s", info.ModTime(), past)
-	}
-}
-
-func TestInstallBeadHooksReplacesMatchingSymlink(t *testing.T) {
-	dir := t.TempDir()
-
-	if err := installBeadHooks(dir, ""); err != nil {
-		t.Fatalf("first install: %v", err)
+	userHook := filepath.Join(hooksDir, "on_create")
+	userContent := []byte("#!/bin/sh\n# user-authored lifecycle hook\nexit 0\n")
+	if err := os.WriteFile(userHook, userContent, 0o755); err != nil {
+		t.Fatal(err)
 	}
 
-	path := filepath.Join(dir, ".beads", "hooks", "on_create")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile(%s): %v", path, err)
-	}
-	target := filepath.Join(dir, "outside-hook")
-	if err := os.WriteFile(target, data, 0o755); err != nil {
-		t.Fatalf("WriteFile(%s): %v", target, err)
-	}
-	if err := os.Remove(path); err != nil {
-		t.Fatalf("Remove(%s): %v", path, err)
-	}
-	if err := os.Symlink(target, path); err != nil {
-		t.Skipf("Symlink: %v", err)
-	}
-
-	if err := installBeadHooks(dir, ""); err != nil {
-		t.Fatalf("second install: %v", err)
-	}
-
-	info, err := os.Lstat(path)
-	if err != nil {
-		t.Fatalf("Lstat(%s): %v", path, err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		t.Fatalf("matching symlink was preserved, want regular file")
-	}
-}
-
-func TestInstallBeadHooksCreatesDirectories(t *testing.T) {
-	dir := t.TempDir()
-	// No pre-existing .beads/ directory.
 	if err := installBeadHooks(dir, ""); err != nil {
 		t.Fatalf("installBeadHooks: %v", err)
 	}
 
-	fi, err := os.Stat(filepath.Join(dir, ".beads", "hooks"))
+	got, err := os.ReadFile(userHook)
 	if err != nil {
-		t.Fatalf(".beads/hooks not created: %v", err)
+		t.Fatalf("user-authored on_create hook was deleted: %v", err)
 	}
-	if !fi.IsDir() {
-		t.Error(".beads/hooks is not a directory")
+	if string(got) != string(userContent) {
+		t.Errorf("user-authored on_create hook was modified; want %q got %q", userContent, got)
 	}
 }
 
+// TestInstallBeadHooksRemovesLegacyUnstampedHook verifies that hooks written
+// by older gc versions (using "# Installed by gc" without a gc-hook-stamp)
+// are also removed by installBeadHooks, so pre-stamp deployments converge.
+func TestInstallBeadHooksRemovesLegacyUnstampedHook(t *testing.T) {
+	dir := t.TempDir()
+	hooksDir := filepath.Join(dir, ".beads", "hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	legacyContent := []byte("#!/bin/sh\n# Installed by gc\n\"$GC_BIN\" event emit --bead \"$BEADS_BEAD_ID\" on_close\n")
+	hookPath := filepath.Join(hooksDir, "on_close")
+	if err := os.WriteFile(hookPath, legacyContent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := installBeadHooks(dir, ""); err != nil {
+		t.Fatalf("installBeadHooks: %v", err)
+	}
+
+	if _, err := os.Stat(hookPath); !os.IsNotExist(err) {
+		t.Errorf("legacy unstamped gc hook should be removed (stat err=%v)", err)
+	}
+}
+
+// TestInstallBeadHooksPreservesUserOwnedLegacyNamedHook verifies that a
+// user-authored hook that happens to mention "gc" in its body but does NOT
+// carry the legacy gc pattern is left untouched.
+func TestInstallBeadHooksPreservesUserOwnedLegacyNamedHook(t *testing.T) {
+	dir := t.TempDir()
+	hooksDir := filepath.Join(dir, ".beads", "hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	userContent := []byte("#!/bin/sh\n# Installed by gc\n# user-extended hook, not the old forwarder pattern\nmy-tool notify\n")
+	hookPath := filepath.Join(hooksDir, "on_create")
+	if err := os.WriteFile(hookPath, userContent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := installBeadHooks(dir, ""); err != nil {
+		t.Fatalf("installBeadHooks: %v", err)
+	}
+
+	if _, err := os.Stat(hookPath); err != nil {
+		t.Errorf("user hook with only the marker comment (no forwarder body) must be preserved: %v", err)
+	}
+}
+
+// TestInstallBeadHooksInitIntegration verifies that gc init does NOT install
+// bd event-forwarding hooks; autoclose now runs in the controller.
 func TestInstallBeadHooksInitIntegration(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
@@ -560,74 +165,16 @@ func TestInstallBeadHooksInitIntegration(t *testing.T) {
 		t.Fatalf("gc init = %d; stderr: %s", code, stderr.String())
 	}
 
-	// Verify hooks were installed at city root.
-	hookPath := filepath.Join(cityPath, ".beads", "hooks", "on_create")
-	if _, err := os.Stat(hookPath); err != nil {
-		t.Errorf("gc init did not install bd hooks: %v", err)
-	}
-}
-
-// TestCloseHookLogsFailureDiagnostic runs the installed on_close hook
-// under sh with a deliberately broken GC_BIN and asserts that a dated
-// diagnostic line lands in BEADS_DIR/hooks.log for each of the three
-// gc invocations the hook is supposed to make. This is the visibility
-// gap the script's `>/dev/null 2>&1 || true` pattern hid.
-func TestCloseHookLogsFailureDiagnostic(t *testing.T) {
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("sh not available")
-	}
-
-	dir := t.TempDir()
-	if err := installBeadHooks(dir, ""); err != nil {
-		t.Fatalf("installBeadHooks: %v", err)
-	}
-	hookPath := filepath.Join(dir, ".beads", "hooks", "on_close")
-	beadsDir := filepath.Join(dir, ".beads")
-
-	cmd := exec.Command("sh", hookPath, "test-bead-id", "bead.closed")
-	cmd.Stdin = strings.NewReader(`{"title":"hook diagnostic test"}`)
-	cmd.Env = append(os.Environ(),
-		"GC_BIN=/nonexistent/gc-bin-for-test",
-		"BEADS_DIR="+beadsDir,
-	)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("hook exec failed: %v\nout: %s", err, out)
-	}
-
-	// Hook detaches into background; poll briefly for the log to be flushed.
-	logPath := filepath.Join(beadsDir, "hooks.log")
-	deadline := time.Now().Add(3 * time.Second)
-	var content string
-	for time.Now().Before(deadline) {
-		data, err := os.ReadFile(logPath)
-		if err == nil && len(data) > 0 {
-			content = string(data)
-			// Wait until all three failure markers have been emitted, since
-			// the three gc calls run sequentially.
-			if strings.Contains(content, "gc event emit") &&
-				strings.Contains(content, "gc convoy autoclose") &&
-				strings.Contains(content, "gc wisp autoclose") {
-				break
-			}
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if content == "" {
-		t.Fatalf("hooks.log not written or empty under %s", beadsDir)
-	}
-	for _, want := range []string{
-		"test-bead-id",
-		"/nonexistent/gc-bin-for-test",
-		"gc event emit bead.closed failed",
-		"gc convoy autoclose failed",
-		"gc wisp autoclose failed",
-	} {
-		if !strings.Contains(content, want) {
-			t.Errorf("hooks.log missing %q:\n%s", want, content)
+	for _, name := range beadEventHookNames {
+		hookPath := filepath.Join(cityPath, ".beads", "hooks", name)
+		if _, err := os.Stat(hookPath); !os.IsNotExist(err) {
+			t.Errorf("gc init must not install bd event hook %s (stat err=%v)", name, err)
 		}
 	}
 }
 
+// TestInstallBeadHooksRigAddIntegration verifies that gc rig add does NOT
+// install bd event-forwarding hooks.
 func TestInstallBeadHooksRigAddIntegration(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
@@ -652,9 +199,10 @@ func TestInstallBeadHooksRigAddIntegration(t *testing.T) {
 		t.Fatalf("gc rig add = %d; stderr: %s", code, stderr.String())
 	}
 
-	// Verify hooks were installed at rig path.
-	hookPath := filepath.Join(rigPath, ".beads", "hooks", "on_create")
-	if _, err := os.Stat(hookPath); err != nil {
-		t.Errorf("gc rig add did not install bd hooks: %v", err)
+	for _, name := range beadEventHookNames {
+		hookPath := filepath.Join(rigPath, ".beads", "hooks", name)
+		if _, err := os.Stat(hookPath); !os.IsNotExist(err) {
+			t.Errorf("gc rig add must not install bd event hook %s (stat err=%v)", name, err)
+		}
 	}
 }

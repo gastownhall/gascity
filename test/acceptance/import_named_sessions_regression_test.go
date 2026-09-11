@@ -24,7 +24,7 @@ type namedSessionListEnvelope struct {
 
 func TestImportedNamedSessionsUseSafeRuntimeNames(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.Init("claude")
+	c.InitNoStart("claude")
 
 	rigDir := filepath.Join(c.Dir, "repo")
 	mustWriteTestFile(t, filepath.Join(c.Dir, "pack.toml"), `
@@ -76,10 +76,6 @@ mode = "always"
 	mustWriteTestFile(t, filepath.Join(c.Dir, "assets", "sidecar", "agents", "watcher", "prompt.md"), "You are the imported watcher.\n")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatalf("creating rig dir: %v", err)
-	}
-
-	if out, err := c.GC("unregister", c.Dir); err != nil {
-		t.Fatalf("gc unregister: %v\n%s", err, out)
 	}
 
 	c.StartForeground()

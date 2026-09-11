@@ -25,6 +25,7 @@ can be pinned to specific git refs.`,
 		},
 	}
 	cmd.AddCommand(newPackRegistryCmd(stdout, stderr))
+	cmd.AddCommand(newPackReleaseCmd(stdout, stderr))
 	cmd.AddCommand(newPackFetchCmd(stdout, stderr))
 	cmd.AddCommand(newPackListCmd(stdout, stderr))
 	return cmd

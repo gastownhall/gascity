@@ -26,3 +26,29 @@ func PollerKeyFromBead(b beads.Bead) string {
 	}
 	return ""
 }
+
+// PollerKeyFromInfo is the session.Info twin of PollerKeyFromBead: it returns the
+// same nudge-poller ownership key off an already-projected session.Info instead
+// of a raw bead, using the identical ID-first preference and metadata fallback
+// order (alias → agent_name → template → session_name → title).
+// SessionNameMetadata is the RAW session_name mirror (matching
+// PollerKeyFromBead's Metadata["session_name"], not the sessionNameFor-filled
+// SessionName). For any info == infoFromPersistedBead(b) it equals
+// PollerKeyFromBead(b); TestPollerKeyFromInfoMatchesBead pins that.
+func PollerKeyFromInfo(info Info) string {
+	if id := strings.TrimSpace(info.ID); id != "" {
+		return id
+	}
+	for _, value := range []string{
+		info.Alias,
+		info.AgentName,
+		info.Template,
+		info.SessionNameMetadata,
+		info.Title,
+	} {
+		if key := strings.TrimSpace(value); key != "" {
+			return key
+		}
+	}
+	return ""
+}

@@ -19,6 +19,9 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
+// mailPartialReadTestDeadline is load-tolerant (2s vs 5ms); 5ms fails under CI CPU saturation (ga-97aayp).
+const mailPartialReadTestDeadline = 2 * time.Second
+
 type exactRecipientMailProvider struct {
 	messages map[string][]mail.Message
 }
@@ -556,7 +559,7 @@ func TestMailListAllRigsStoreSlowReturnsPartial(t *testing.T) {
 		},
 	}
 	oldDeadline := mailReadDeadline
-	mailReadDeadline = 5 * time.Millisecond
+	mailReadDeadline = mailPartialReadTestDeadline
 	t.Cleanup(func() {
 		mailReadDeadline = oldDeadline
 		close(release)
@@ -582,7 +585,7 @@ func TestMailListAllStatusStoreSlowReturnsPartial(t *testing.T) {
 		},
 	}
 	oldDeadline := mailReadDeadline
-	mailReadDeadline = 5 * time.Millisecond
+	mailReadDeadline = mailPartialReadTestDeadline
 	t.Cleanup(func() {
 		mailReadDeadline = oldDeadline
 		close(release)
@@ -608,7 +611,7 @@ func TestMailCountAllRigsStoreSlowReturnsPartial(t *testing.T) {
 		},
 	}
 	oldDeadline := mailReadDeadline
-	mailReadDeadline = 5 * time.Millisecond
+	mailReadDeadline = mailPartialReadTestDeadline
 	t.Cleanup(func() {
 		mailReadDeadline = oldDeadline
 		close(release)
@@ -744,7 +747,7 @@ func TestMailThreadAllRigsStoreSlowReturnsPartial(t *testing.T) {
 		},
 	}
 	oldDeadline := mailReadDeadline
-	mailReadDeadline = 5 * time.Millisecond
+	mailReadDeadline = mailPartialReadTestDeadline
 	t.Cleanup(func() {
 		mailReadDeadline = oldDeadline
 		close(release)
@@ -815,7 +818,7 @@ func TestClientMailListAllRigsMultipleStoreSlowReturnsTyped503BeforeClientTimeou
 	if !IsStoreSlowError(err) {
 		t.Fatalf("ListMailInbox error = %v, want typed store_slow before client timeout", err)
 	}
-	if ShouldFallbackForRead(err) {
+	if ShouldFallbackForRead(nil, err) {
 		t.Fatalf("ShouldFallbackForRead = true for typed store_slow error: %v", err)
 	}
 }

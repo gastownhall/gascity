@@ -1,5 +1,11 @@
 # Spec vs. Implementation Skew Analysis — Current Pack/City v2 Desired State
 
+> **Historical PackV2 design note.** This page preserves design history and
+> rollout rationale. For current pack authoring guidance, use
+> `docs/reference/specs/pack-spec.md`, `docs/guides/understanding-packs.md`,
+> and `docs/guides/shareable-packs.md`. When this note disagrees with shipped
+> behavior, prefer the current docs, generated reference, code, and tests.
+
 > Generated 2026-04-12 by comparing `docs/reference/config.md` (as-built
 > from the release branch Go structs) against the reconciled pack v2 specs.
 > Revised through field-by-field walkthrough to reflect the **current

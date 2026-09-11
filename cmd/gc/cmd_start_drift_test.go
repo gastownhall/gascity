@@ -225,6 +225,13 @@ func TestPrintSupervisorIdentity_EmptyBuildID(t *testing.T) {
 	}
 }
 
+func TestPIDGoneReturnsFalseForCurrentProcess(t *testing.T) {
+	pid := os.Getpid()
+	if pidGone(pid) {
+		t.Fatalf("pidGone(%d) = true for current live process", pid)
+	}
+}
+
 // driftCheckEnv stands up the shared seams runStartDriftCheck needs:
 // an httptest server serving /health with the chosen build_id, a
 // GC_HOME pointed at a temp dir, and stubbed supervisorAliveHook /
@@ -279,6 +286,18 @@ func driftCheckEnv(t *testing.T, supervisorBuildID string) (cityPath string, res
 
 	cityPath = t.TempDir()
 	return cityPath, restoreCommit
+}
+
+// shrinkDriftReadyTimeout shortens the post-restart verification budget to
+// 300ms so delegated drift tests whose restart never lands (or whose probe
+// never verifies) fail fast instead of waiting the full production
+// driftReadyTimeout — pollDelegatedRestartVerified polls until that budget
+// expires before reporting the last obstacle.
+func shrinkDriftReadyTimeout(t *testing.T) {
+	t.Helper()
+	old := driftReadyTimeout
+	driftReadyTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { driftReadyTimeout = old })
 }
 
 // TestRunStartDriftCheck_RestartReturnsContinue pins the load-bearing

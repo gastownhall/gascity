@@ -7,84 +7,113 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/gastownhall/gascity/cmd/gc/dashboard"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/spf13/cobra"
 )
 
-var dashboardServeHook = dashboard.Serve
+// openDashboardURLHook opens the resolved dashboard URL in the user's browser.
+// It is a package variable so tests can stub the browser launch.
+var openDashboardURLHook = openURL
 
 // newDashboardCmd creates the "gc dashboard" command group.
+//
+// The dashboard is no longer a standalone cross-origin static server. The
+// compiled SPA is embedded into the gc binary and served same-origin by the
+// supervisor, so this command resolves where it is served and opens the user's
+// browser there (or prints how to start the supervisor).
 func newDashboardCmd(stdout, stderr io.Writer) *cobra.Command {
-	var port int
 	var apiURL string
+	var noOpen bool
 	cmd := &cobra.Command{
 		Use:   "dashboard",
-		Short: "Web dashboard for monitoring the supervisor and managed cities",
-		Long: `Open the static GC dashboard against the machine-wide supervisor API.
+		Short: "Open the web dashboard in your browser",
+		Long: `Open the GC dashboard in your browser.
 
-Without a city in scope, the dashboard shows supervisor-level state and managed
-city tabs. From a city directory or with --city, city-specific panels and action
-forms are enabled for that city.`,
+The dashboard SPA is embedded in the gc binary and served same-origin by the
+supervisor; it is no longer a separate static server. This command resolves the
+supervisor URL, opens it in your default browser, and prints it too (or tells
+you how to start the supervisor). Use --no-open to print the URL without
+launching a browser.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if runDashboardServe("gc dashboard", port, apiURL, stderr) != nil {
-				return errExit
-			}
-			return nil
+			return runDashboardNotice(apiURL, noOpen, stdout, stderr)
 		},
 	}
-	bindDashboardServeFlags(cmd, &port, &apiURL)
+	bindDashboardFlags(cmd, &apiURL, &noOpen)
 	cmd.AddCommand(newDashboardServeCmd(stdout, stderr))
 	return cmd
 }
 
 // newDashboardServeCmd creates the "gc dashboard serve" subcommand.
-func newDashboardServeCmd(_, stderr io.Writer) *cobra.Command {
-	var port int
+//
+// Retained for backwards compatibility: the dashboard is served by the
+// supervisor, so this resolves and prints the supervisor URL rather than
+// starting a server. It does not open a browser.
+func newDashboardServeCmd(stdout, stderr io.Writer) *cobra.Command {
 	var apiURL string
+	var noOpen bool
 	cmd := &cobra.Command{
 		Use:   "serve",
-		Short: "Start the web dashboard",
-		Long: `Start the static GC dashboard against the machine-wide supervisor API.
+		Short: "Print where the web dashboard is served",
+		Long: `Report the URL where the GC dashboard is served.
 
-Without a city in scope, the dashboard shows supervisor-level state and managed
-city tabs. From a city directory or with --city, city-specific panels and action
-forms are enabled for that city.`,
+The dashboard SPA is embedded in the gc binary and served same-origin by the
+supervisor; "gc dashboard serve" no longer starts a static server. It resolves
+and prints the supervisor URL (or tells you how to start the supervisor).`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if runDashboardServe("gc dashboard serve", port, apiURL, stderr) != nil {
-				return errExit
-			}
-			return nil
+			// "serve" is the legacy print-only entry point: never open a browser.
+			return runDashboardNotice(apiURL, true, stdout, stderr)
 		},
 	}
-	bindDashboardServeFlags(cmd, &port, &apiURL)
+	bindDashboardFlags(cmd, &apiURL, &noOpen)
 	return cmd
 }
 
-func bindDashboardServeFlags(cmd *cobra.Command, port *int, apiURL *string) {
-	cmd.Flags().IntVar(port, "port", 8080, "HTTP port")
+func bindDashboardFlags(cmd *cobra.Command, apiURL *string, noOpen *bool) {
 	cmd.Flags().StringVar(apiURL, "api", "", "GC API server URL override (auto-discovered by default)")
+	cmd.Flags().BoolVar(noOpen, "no-open", false, "print the dashboard URL instead of opening a browser")
 }
 
-func runDashboardServe(commandName string, port int, apiURLOverride string, stderr io.Writer) error {
+// runDashboardNotice resolves where the supervisor serves the dashboard SPA,
+// opens it in the user's browser, and prints the URL. It is purely
+// informational and always exits 0: city/config resolution only feeds the
+// standalone-controller fallback, so a failure there is non-fatal — the command
+// falls back to live supervisor discovery and still prints a useful answer (the
+// supervisor URL, or how to start it).
+//
+// Browser-open is best-effort and only happens on the served path: when noOpen
+// is false and the URL actually resolves, it launches the browser via
+// openDashboardURLHook; a launch failure just falls back to the printed URL and
+// never errors the command. The not-running path (URL unresolvable) prints the
+// start hint and never opens a (dead) URL.
+func runDashboardNotice(apiURLOverride string, noOpen bool, stdout, stderr io.Writer) error {
+	// A city-resolution error (not in a city, or an unreadable city.toml) must
+	// not abort: the supervisor may be running regardless of the current dir.
 	cityPath, cfg, err := resolveDashboardContext(stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
-		return err
+		cityPath, cfg = "", nil
 	}
 
 	apiURL, err := resolveDashboardAPI(cityPath, cfg, apiURLOverride)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
-		return err
+		fmt.Fprintf(stdout, "The dashboard is served by the gc supervisor; start it with %q, then open the printed URL.\n", "gc supervisor start") //nolint:errcheck // best-effort stdout
+		return nil
 	}
 
-	if err := dashboardServeHook(port, apiURL); err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
-		return err
+	// The URL is live (supervisor/standalone/override resolved): open it in the
+	// browser unless --no-open was passed, then always print it so it stays
+	// copyable when the browser does not open.
+	if !noOpen {
+		if openErr := openDashboardURLHook(apiURL); openErr != nil {
+			fmt.Fprintf(stdout, "Could not open a browser automatically; open this URL:\n%s\n", apiURL) //nolint:errcheck // best-effort stdout
+			return nil
+		}
+		fmt.Fprintf(stdout, "Opened the dashboard in your browser: %s\n", apiURL) //nolint:errcheck // best-effort stdout
+		return nil
 	}
+
+	fmt.Fprintf(stdout, "The dashboard is served by the gc supervisor at %s\n", apiURL) //nolint:errcheck // best-effort stdout
 	return nil
 }
 

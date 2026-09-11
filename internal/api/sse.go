@@ -40,6 +40,31 @@ func cancelOnSendError(send sse.Sender, cancel context.CancelFunc) sse.Sender {
 	}
 }
 
+func cancelOnStringIDSendError(send StringIDSender, cancel context.CancelFunc) StringIDSender {
+	var firstErr error
+	return func(msg StringIDMessage) error {
+		if firstErr != nil {
+			return firstErr
+		}
+		if err := send(msg); err != nil {
+			firstErr = err
+			cancel()
+			return err
+		}
+		return nil
+	}
+}
+
+func integerSSESender(send StringIDSender) sse.Sender {
+	return func(msg sse.Message) error {
+		id := ""
+		if msg.ID > 0 {
+			id = fmt.Sprintf("%d", msg.ID)
+		}
+		return send(StringIDMessage{ID: id, Data: msg.Data})
+	}
+}
+
 // StreamFunc is the callback signature for SSE streaming handlers
 // registered via registerSSE. It receives the huma context (for setting
 // custom response headers before streaming starts), the parsed input,
@@ -130,6 +155,13 @@ func writeSSE(w http.ResponseWriter, eventType string, id any, data []byte) {
 	}
 }
 
+func writeSSEWithoutID(w http.ResponseWriter, eventType string, data []byte) {
+	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, data) //nolint:errcheck
+	if err := http.NewResponseController(w).Flush(); err != nil {
+		_ = err
+	}
+}
+
 // writeSSEComment emits a keepalive comment frame and flushes.
 func writeSSEComment(w http.ResponseWriter) {
 	fmt.Fprintf(w, ": keepalive\n\n") //nolint:errcheck
@@ -155,7 +187,7 @@ func registerSSEStringID[I any](
 	stream StringIDStreamFunc[I],
 ) {
 	normalizeSSEResponseHeaders(&op)
-	typeToEvent := attachSSEResponseSchema(api, &op, eventTypeMap, huma.TypeString, "The event ID (composite cursor).")
+	typeToEvent := attachSSEResponseSchema(api, &op, eventTypeMap, huma.TypeString, "The event resume cursor.")
 
 	huma.Register(api, op, func(ctx context.Context, input *I) (*huma.StreamResponse, error) {
 		if precheck != nil {

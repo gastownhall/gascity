@@ -1,12 +1,14 @@
 package api
 
 import (
+	"fmt"
 	"log"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/orders"
 )
@@ -68,7 +70,7 @@ func buildWorkflowRunProjections(state State, requestedScopeKind, requestedScope
 	projections := make([]workflowRunProjection, 0)
 	partialErrors := make([]string, 0)
 	cityScopeRef := workflowCityScopeRef(state.CityName())
-	includeAllForCity := requestedScopeKind == "city" && requestedScopeRef == cityScopeRef
+	includeAllForCity := requestedScopeKind == beadmeta.ScopeKindCity && requestedScopeRef == cityScopeRef
 	var requestedScopeErr error
 
 	for _, info := range stores {
@@ -90,7 +92,7 @@ func buildWorkflowRunProjections(state State, requestedScopeKind, requestedScope
 
 		openChildrenByRoot := make(map[string][]beads.Bead)
 		for _, bead := range openBeads {
-			rootID := strings.TrimSpace(bead.Metadata["gc.root_bead_id"])
+			rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 			if rootID == "" {
 				continue
 			}
@@ -99,8 +101,8 @@ func buildWorkflowRunProjections(state State, requestedScopeKind, requestedScope
 
 		roots, err := info.store.List(beads.ListQuery{
 			Metadata: map[string]string{
-				"gc.kind":             "workflow",
-				"gc.formula_contract": "graph.v2",
+				beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+				beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
 			},
 			IncludeClosed: true,
 		})
@@ -108,7 +110,7 @@ func buildWorkflowRunProjections(state State, requestedScopeKind, requestedScope
 			log.Printf("api: workflow run projection closed-root list failed for %s: %v", info.ref, err)
 			roots = nil
 			for _, bead := range openBeads {
-				if isWorkflowRoot(bead) && strings.TrimSpace(bead.Metadata["gc.formula_contract"]) == "graph.v2" {
+				if isWorkflowRoot(bead) && strings.TrimSpace(bead.Metadata[beadmeta.FormulaContractMetadataKey]) == beadmeta.FormulaContractGraphV2 {
 					roots = append(roots, bead)
 				}
 			}
@@ -132,7 +134,7 @@ func buildWorkflowRunProjections(state State, requestedScopeKind, requestedScope
 
 			runBeads := append([]beads.Bead{bead}, openChildrenByRoot[bead.ID]...)
 			children, childErr := info.store.List(beads.ListQuery{
-				Metadata:      map[string]string{"gc.root_bead_id": bead.ID},
+				Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: bead.ID},
 				IncludeClosed: true,
 			})
 			if childErr != nil {
@@ -162,7 +164,7 @@ func buildWorkflowRunProjections(state State, requestedScopeKind, requestedScope
 				ScopeRef:       scopeRef,
 				RootBeadID:     bead.ID,
 				RootStoreRef:   info.ref,
-				AttachedBeadID: strings.TrimSpace(bead.Metadata["gc.source_bead_id"]),
+				AttachedBeadID: strings.TrimSpace(bead.Metadata[beadmeta.SourceBeadIDMetadataKey]),
 			}
 			projections = append(projections, projection)
 		}
@@ -191,7 +193,7 @@ func buildWorkflowRunProjectionsRootOnly(state State, requestedScopeKind, reques
 	projections := make([]workflowRunProjection, 0)
 	partialErrors := make([]string, 0)
 	cityScopeRef := workflowCityScopeRef(state.CityName())
-	includeAllForCity := requestedScopeKind == "city" && requestedScopeRef == cityScopeRef
+	includeAllForCity := requestedScopeKind == beadmeta.ScopeKindCity && requestedScopeRef == cityScopeRef
 	var requestedScopeErr error
 
 	for _, info := range stores {
@@ -213,7 +215,7 @@ func buildWorkflowRunProjectionsRootOnly(state State, requestedScopeKind, reques
 
 		openChildrenByRoot := make(map[string][]beads.Bead)
 		for _, bead := range openBeads {
-			rootID := strings.TrimSpace(bead.Metadata["gc.root_bead_id"])
+			rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 			if rootID == "" {
 				continue
 			}
@@ -222,10 +224,16 @@ func buildWorkflowRunProjectionsRootOnly(state State, requestedScopeKind, reques
 
 		roots, err := info.store.List(beads.ListQuery{
 			Metadata: map[string]string{
-				"gc.kind":             "workflow",
-				"gc.formula_contract": "graph.v2",
+				beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+				beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
 			},
 			IncludeClosed: true,
+			// The root-only projection reads only id/status/created/metadata,
+			// never labels, so skip the per-root label hydration on this
+			// closed-history scan — same rows and order, less work per root
+			// (gascity#3253). Bounding this scan further is not contract-safe
+			// because the feed orders by computed status rank, not created_at.
+			SkipLabels: true,
 		})
 		if err != nil {
 			if requestedScopeErr == nil && info.scopeKind == requestedScopeKind && info.scopeRef == requestedScopeRef {
@@ -234,7 +242,7 @@ func buildWorkflowRunProjectionsRootOnly(state State, requestedScopeKind, reques
 			log.Printf("api: workflow root projection closed-root list failed for %s: %v", info.ref, err)
 			roots = nil
 			for _, bead := range openBeads {
-				if isWorkflowRoot(bead) && strings.TrimSpace(bead.Metadata["gc.formula_contract"]) == "graph.v2" {
+				if isWorkflowRoot(bead) && strings.TrimSpace(bead.Metadata[beadmeta.FormulaContractMetadataKey]) == beadmeta.FormulaContractGraphV2 {
 					roots = append(roots, bead)
 				}
 			}
@@ -264,7 +272,7 @@ func buildWorkflowRunProjectionsRootOnly(state State, requestedScopeKind, reques
 				ScopeRef:       scopeRef,
 				RootBeadID:     root.ID,
 				RootStoreRef:   info.ref,
-				AttachedBeadID: strings.TrimSpace(root.Metadata["gc.source_bead_id"]),
+				AttachedBeadID: strings.TrimSpace(root.Metadata[beadmeta.SourceBeadIDMetadataKey]),
 			})
 		}
 	}
@@ -282,16 +290,59 @@ func buildWorkflowRunProjectionsRootOnly(state State, requestedScopeKind, reques
 	}, nil
 }
 
+// activeWorkflowProjectionStatuses are the bead statuses that count as active
+// work for workflow projection and spawn selection, in read order. It is an
+// allowlist, so a status this fork does not recognize is treated as inactive
+// rather than spawned against.
+//
+// in_progress is read before open on purpose. The two reads are not a single
+// snapshot, so a bead that changes status between them can fall through both;
+// in this order the only flip that can be missed is open->in_progress, a bead
+// that was just claimed and so must not be spawned anyway. An in_progress->open
+// release is always caught by one of the two reads, and anything missed
+// reappears on the next patrol.
+var activeWorkflowProjectionStatuses = []string{"in_progress", "open"}
+
 func listActiveWorkflowProjectionBeads(store beads.Store) ([]beads.Bead, error) {
-	// Preserve the old ListOpen() semantics as a single active snapshot. A
-	// union of separate open/in_progress queries can miss beads that change
-	// status between reads, so this is one of the intentional raw scans until
-	// ListQuery grows a multi-status selector.
-	return store.List(beads.ListQuery{AllowScan: true})
+	// One Live, status-scoped read per active status, unioned by ID.
+	//
+	// The old raw scan could not gate status at all (gc-4zb): mapBdStatus folds
+	// bd's blocked/deferred/review/testing into Gas City's three statuses, so a
+	// scanned blocked root arrives with Status "open" and is indistinguishable
+	// from ready work. Filtering the snapshot on b.Status keeps every one of
+	// them for the same reason. Only the backing store filters on the raw
+	// status, by passing --status to bd, and only a Live query reaches it — a
+	// cached read matches on the collapsed status.
+	//
+	// This matters because the workflow-root spawn path selects on gc.routed_to
+	// without re-checking status: a blocked root that still carries a route is
+	// spawned against and burns a polecat slot on a no-op drain (gc-nz5i).
+	seen := make(map[string]struct{})
+	var active []beads.Bead
+	for _, status := range activeWorkflowProjectionStatuses {
+		items, err := store.List(beads.ListQuery{Status: status, AllowScan: true, Live: true})
+		if err != nil {
+			return nil, fmt.Errorf("listing %s workflow projection beads: %w", status, err)
+		}
+		for _, b := range items {
+			if _, dup := seen[b.ID]; dup {
+				continue
+			}
+			seen[b.ID] = struct{}{}
+			active = append(active, b)
+		}
+	}
+	return active, nil
 }
 
-func buildOrderRunFeedItems(state State, requestedScopeKind, requestedScopeRef string) (orderRunFeedResult, error) {
-	stores := workflowStores(state)
+func buildOrderRunFeedItems(state State, requestedScopeKind, requestedScopeRef string, limit int) (orderRunFeedResult, error) {
+	// The feed lists order-tracking beads, which are orders class and live in
+	// the orders binding on a split city. workflowStores leads with the GRAPH
+	// binding (its own callers scan workflow roots), so on a city that relocates
+	// only graph the tracking beads would still be missed; the orders leg is
+	// appended here and deduplicated, so a city that serves both classes from
+	// one binding — the shape this build supports — reads it once.
+	stores := appendOrdersClassStoreInfo(workflowStores(state), state, workflowCityScopeRef(state.CityName()))
 	allOrders := state.OrdersAll()
 	orderByScopedName := make(map[string]orders.Order, len(allOrders))
 	for _, order := range allOrders {
@@ -299,7 +350,7 @@ func buildOrderRunFeedItems(state State, requestedScopeKind, requestedScopeRef s
 	}
 
 	cityScopeRef := workflowCityScopeRef(state.CityName())
-	includeAllForCity := requestedScopeKind == "city" && requestedScopeRef == cityScopeRef
+	includeAllForCity := requestedScopeKind == beadmeta.ScopeKindCity && requestedScopeRef == cityScopeRef
 	items := make([]monitorFeedItemResponse, 0)
 	partialErrors := make([]string, 0)
 	var requestedScopeErr error
@@ -307,11 +358,8 @@ func buildOrderRunFeedItems(state State, requestedScopeKind, requestedScopeRef s
 		if info.store == nil {
 			continue
 		}
-		results, err := info.store.List(beads.ListQuery{
-			Label:    "order-tracking",
-			Sort:     beads.SortCreatedDesc,
-			TierMode: beads.TierBoth,
-		})
+		front := orders.NewStore(beads.OrdersStore{Store: info.store})
+		runs, err := front.ListTracking(limit)
 		if err != nil {
 			if requestedScopeErr == nil && info.scopeKind == requestedScopeKind && info.scopeRef == requestedScopeRef {
 				requestedScopeErr = err
@@ -324,32 +372,33 @@ func buildOrderRunFeedItems(state State, requestedScopeKind, requestedScopeRef s
 			continue
 		}
 
-		for _, bead := range results {
-			scopedName := orderTrackingScopedName(bead)
-			if scopedName == "" {
-				continue
-			}
-			scopeKind, scopeRef := orderTrackingScope(scopedName, cityScopeRef)
+		// Scoped to this store's front: LatestOpenRun is a per-store lookup, so
+		// a cache keyed only by run.Scoped must not be reused across stores.
+		// Runs sharing a scoped name within this store's result (repeat runs of
+		// the same order) cost one backing lookup instead of one per run.
+		latestOpenCache := make(map[string]latestOpenRunLookup, len(runs))
+		for _, run := range runs {
+			scopeKind, scopeRef := orderTrackingScope(run.Scoped, cityScopeRef)
 			if !includeAllForCity && (scopeKind != requestedScopeKind || scopeRef != requestedScopeRef) {
 				continue
 			}
 
-			updatedAt := orderTrackingUpdatedAt(info.store, bead, scopedName)
-			orderDef, ok := orderByScopedName[scopedName]
-			title := orderTrackingTitle(scopedName, orderDef, ok)
-			target := orderTrackingTarget(orderDef, ok, bead)
-			itemType := orderTrackingType(orderDef, ok, bead)
+			updatedAt := orderTrackingUpdatedAt(front, run, latestOpenCache)
+			orderDef, ok := orderByScopedName[run.Scoped]
+			title := orderTrackingTitle(run.Scoped, orderDef, ok)
+			target := orderTrackingTarget(orderDef, ok, run)
+			itemType := orderTrackingType(orderDef, ok, run)
 			item := monitorFeedItemResponse{
-				ID:                 "order:" + info.ref + ":" + bead.ID,
+				ID:                 "order:" + info.ref + ":" + run.ID,
 				Type:               itemType,
-				Status:             normalizeMonitorStatus(orderTrackingStatus(bead)),
+				Status:             normalizeMonitorStatus(run.State()),
 				Title:              title,
 				ScopeKind:          scopeKind,
 				ScopeRef:           scopeRef,
 				Target:             target,
-				StartedAt:          bead.CreatedAt.Format(time.RFC3339Nano),
+				StartedAt:          run.CreatedAt.Format(time.RFC3339Nano),
 				UpdatedAt:          updatedAt.Format(time.RFC3339Nano),
-				BeadID:             bead.ID,
+				BeadID:             run.ID,
 				StoreRef:           info.ref,
 				DetailAvailable:    ok && orderDef.IsExec(),
 				RunDetailAvailable: ok && orderDef.IsExec(),
@@ -369,27 +418,31 @@ func buildOrderRunFeedItems(state State, requestedScopeKind, requestedScopeRef s
 	}, nil
 }
 
-func orderTrackingUpdatedAt(store beads.Store, tracking beads.Bead, scopedName string) time.Time {
-	updatedAt := tracking.CreatedAt
-	if store == nil || strings.TrimSpace(scopedName) == "" {
-		return updatedAt
-	}
+// latestOpenRunLookup caches one front.LatestOpenRun result so repeat runs of
+// the same scoped order pay one backing lookup, not one per run.
+type latestOpenRunLookup struct {
+	run   orders.OrderRun
+	found bool
+	err   error
+}
 
-	runs, err := store.List(beads.ListQuery{
-		Label:    "order-run:" + scopedName,
-		Limit:    1,
-		Sort:     beads.SortCreatedDesc,
-		TierMode: beads.TierBoth,
-	})
-	if err != nil && len(runs) == 0 {
-		orderFeedLogf("api: order feed update lookup failed for %s bead %s: %v", scopedName, tracking.ID, err)
+func orderTrackingUpdatedAt(front *orders.Store, run orders.OrderRun, cache map[string]latestOpenRunLookup) time.Time {
+	updatedAt := run.CreatedAt
+	lookup, cached := cache[run.Scoped]
+	if !cached {
+		latest, found, err := front.LatestOpenRun(run.Scoped)
+		lookup = latestOpenRunLookup{run: latest, found: found, err: err}
+		cache[run.Scoped] = lookup
+	}
+	if lookup.err != nil && !lookup.found {
+		orderFeedLogf("api: order feed update lookup failed for %s bead %s: %v", run.Scoped, run.ID, lookup.err)
 		return updatedAt
 	}
-	if err != nil {
-		orderFeedLogf("api: order feed update lookup partially failed for %s bead %s: %v", scopedName, tracking.ID, err)
+	if lookup.err != nil {
+		orderFeedLogf("api: order feed update lookup partially failed for %s bead %s: %v", run.Scoped, run.ID, lookup.err)
 	}
-	if len(runs) > 0 && runs[0].CreatedAt.After(updatedAt) {
-		updatedAt = runs[0].CreatedAt
+	if lookup.found && lookup.run.CreatedAt.After(updatedAt) {
+		updatedAt = lookup.run.CreatedAt
 	}
 	return updatedAt
 }
@@ -408,7 +461,7 @@ func workflowFormulaName(root beads.Bead) string {
 	if name := strings.TrimSpace(root.Ref); name != "" {
 		return name
 	}
-	if name := strings.TrimSpace(root.Metadata["gc.formula_name"]); name != "" {
+	if name := strings.TrimSpace(root.Metadata[beadmeta.FormulaNameMetadataKey]); name != "" {
 		return name
 	}
 	return root.ID
@@ -422,7 +475,7 @@ func workflowProjectionTitle(root beads.Bead) string {
 }
 
 func workflowProjectionTarget(root beads.Bead) string {
-	for _, key := range []string{"gc.execution_routed_to", "gc.routed_to", "gc.run_target"} {
+	for _, key := range []string{beadmeta.ExecutionRoutedToMetadataKey, beadmeta.RoutedToMetadataKey, beadmeta.RunTargetMetadataKey} {
 		if value := strings.TrimSpace(root.Metadata[key]); value != "" {
 			return value
 		}
@@ -461,15 +514,6 @@ func aggregateWorkflowRunStatus(root beads.Bead, beadsForRun []beads.Bead) strin
 	return best
 }
 
-func orderTrackingScopedName(bead beads.Bead) string {
-	for _, label := range bead.Labels {
-		if scopedName, ok := strings.CutPrefix(label, "order-run:"); ok && strings.TrimSpace(scopedName) != "" {
-			return strings.TrimSpace(scopedName)
-		}
-	}
-	return ""
-}
-
 func orderTrackingScope(scopedName, cityScopeRef string) (string, string) {
 	if idx := strings.LastIndex(scopedName, ":rig:"); idx >= 0 {
 		return "rig", scopedName[idx+5:]
@@ -487,7 +531,7 @@ func orderTrackingTitle(scopedName string, orderDef orders.Order, found bool) st
 	return scopedName
 }
 
-func orderTrackingTarget(orderDef orders.Order, found bool, bead beads.Bead) string {
+func orderTrackingTarget(orderDef orders.Order, found bool, run orders.OrderRun) string {
 	if found {
 		if orderDef.IsExec() {
 			return "exec"
@@ -499,7 +543,7 @@ func orderTrackingTarget(orderDef orders.Order, found bool, bead beads.Bead) str
 			return orderDef.Formula
 		}
 	}
-	if orderLabelsContainExec(bead.Labels) {
+	if run.Outcome.IsExec() {
 		return "exec"
 	}
 	return "formula"
@@ -512,45 +556,17 @@ func qualifyOrderFeedTarget(pool, rig string) string {
 	return rig + "/" + pool
 }
 
-func orderTrackingType(orderDef orders.Order, found bool, bead beads.Bead) string {
+func orderTrackingType(orderDef orders.Order, found bool, run orders.OrderRun) string {
 	if found {
 		if orderDef.IsExec() {
 			return "exec"
 		}
 		return "formula"
 	}
-	if orderLabelsContainExec(bead.Labels) {
+	if run.Outcome.IsExec() {
 		return "exec"
 	}
 	return "formula"
-}
-
-func orderTrackingStatus(bead beads.Bead) string {
-	if orderLabelsContainExecFailure(bead.Labels) ||
-		orderLabelsContainTriggerEnvFailure(bead.Labels) ||
-		containsString(bead.Labels, "wisp-canceled") ||
-		containsString(bead.Labels, "wisp-failed") {
-		return "failed"
-	}
-	if strings.TrimSpace(bead.Status) != "closed" {
-		return "active"
-	}
-	return "completed"
-}
-
-func orderLabelsContainExec(labels []string) bool {
-	return containsString(labels, "exec") ||
-		containsString(labels, "exec-failed") ||
-		containsString(labels, "exec-env-failed")
-}
-
-func orderLabelsContainExecFailure(labels []string) bool {
-	return containsString(labels, "exec-failed") ||
-		containsString(labels, "exec-env-failed")
-}
-
-func orderLabelsContainTriggerEnvFailure(labels []string) bool {
-	return containsString(labels, "trigger-env-failed")
 }
 
 // normalizeFeedLimit clamps a caller-supplied feed limit to a sensible

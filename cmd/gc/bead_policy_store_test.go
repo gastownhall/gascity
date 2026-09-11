@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -40,6 +41,38 @@ type captureGraphStore struct {
 func underlyingPolicyStoreForTest(store beads.Store) beads.Store {
 	base, _, _ := unwrapBeadPolicyStore(store)
 	return base
+}
+
+func TestBeadPolicyStorePreservesConditionalAssignmentReleaser(t *testing.T) {
+	backing := beads.NewMemStore()
+	wrapped := wrapStoreWithBeadPolicies(backing, nil)
+	releaser, ok := wrapped.(beads.ConditionalAssignmentReleaser)
+	if !ok {
+		t.Fatalf("wrapped store implements ConditionalAssignmentReleaser = false")
+	}
+	bead, err := wrapped.Create(beads.Bead{Title: "work", Assignee: "worker-1"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	status := "in_progress"
+	if err := wrapped.Update(bead.ID, beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("Update status: %v", err)
+	}
+
+	released, err := releaser.ReleaseIfCurrent(bead.ID, "worker-1")
+	if err != nil {
+		t.Fatalf("ReleaseIfCurrent: %v", err)
+	}
+	if !released {
+		t.Fatal("ReleaseIfCurrent released = false, want true")
+	}
+	got, err := wrapped.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != "open" || got.Assignee != "" {
+		t.Fatalf("released bead = %+v, want open and unassigned", got)
+	}
 }
 
 func (s *captureGraphStore) ApplyGraphPlan(_ context.Context, plan *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) {
@@ -536,77 +569,49 @@ func TestPolicyReadPathsIncludeHistoryAndNoHistoryRows(t *testing.T) {
 		t.Fatalf("new session row = %+v, want no_history parsed", sessions[1])
 	}
 
-	waits, err := loadWaitBeads(store)
+	// loadWaits returns session.WaitInfo, which deliberately omits the NoHistory
+	// storage detail (mirroring session.Info). The no-history row still flows
+	// through the retyped policy read path, so assert both wait IDs are present;
+	// the no_history parse assertion remains covered by the loadSessionBeads half
+	// above and by the bdstore tests.
+	waits, err := sessionFrontDoor(store).ListWaits("", "")
 	if err != nil {
-		t.Fatalf("loadWaitBeads: %v", err)
+		t.Fatalf("loadWaits: %v", err)
 	}
 	if len(waits) != 2 {
 		t.Fatalf("waits = %+v, want history and no-history rows", waits)
 	}
-	foundNoHistoryWait := false
+	waitIDs := map[string]bool{}
 	for _, wait := range waits {
-		if wait.ID == "bd-new-wait" {
-			foundNoHistoryWait = wait.NoHistory
-			break
-		}
+		waitIDs[wait.ID] = true
 	}
-	if !foundNoHistoryWait {
-		t.Fatalf("waits = %+v, want bd-new-wait with no_history parsed", waits)
+	for _, id := range []string{"bd-old-wait", "bd-new-wait"} {
+		if !waitIDs[id] {
+			t.Fatalf("waits = %+v, want both history and no-history rows (missing %s)", waits, id)
+		}
 	}
 }
 
-func TestOpenStoreResultAtForCityWrapsSQLiteWithBeadPolicies(t *testing.T) {
-	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
-name = "sqlite-policy-city"
-prefix = "ga"
+func TestOpenStoreResultAtForCityRejectsRemovedSQLiteProvider(t *testing.T) {
+	for _, provider := range []string{"sqlite", "sqlite-cgo", "coordstore"} {
+		t.Run(provider, func(t *testing.T) {
+			cityDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"removed-provider-city\"\nprefix = \"ga\"\n\n[beads]\nprovider = \""+provider+"\"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
 
-[beads]
-provider = "sqlite"
-bd_compatibility = "bd-1.0.5"
-`), 0o644); err != nil {
-		t.Fatal(err)
+			_, err := openStoreResultAtForCity(cityDir, cityDir)
+			if err == nil {
+				t.Fatalf("openStoreResultAtForCity(%q) = nil error, want hard error for removed provider", provider)
+			}
+			if !strings.Contains(err.Error(), "no longer supported") {
+				t.Errorf("openStoreResultAtForCity(%q) error = %q, want message containing %q", provider, err.Error(), "no longer supported")
+			}
+			if !strings.Contains(err.Error(), "doltlite") {
+				t.Errorf("openStoreResultAtForCity(%q) error = %q, want migration hint mentioning %q", provider, err.Error(), "doltlite")
+			}
+		})
 	}
-
-	result, err := openStoreResultAtForCity(cityDir, cityDir)
-	if err != nil {
-		t.Fatalf("openStoreResultAtForCity: %v", err)
-	}
-	base, _, wrapped := unwrapBeadPolicyStore(result.Store)
-	if !wrapped {
-		t.Fatalf("openStoreResultAtForCity(sqlite) returned %T, want bead policy wrapper", result.Store)
-	}
-	defer func() {
-		if c, ok := base.(interface{ CloseStore() error }); ok {
-			c.CloseStore() //nolint:errcheck
-		}
-	}()
-
-	created, err := result.Store.Create(beads.Bead{
-		Title: "workflow root",
-		Type:  "task",
-		Metadata: map[string]string{
-			"gc.kind":             "workflow",
-			"gc.formula_contract": "graph.v2",
-		},
-	})
-	if err != nil {
-		t.Fatalf("Create(workflow): %v", err)
-	}
-	if !created.NoHistory {
-		t.Fatalf("created workflow = %+v, want policy-applied no_history storage", created)
-	}
-
-	ready, err := result.Store.Ready()
-	if err != nil {
-		t.Fatalf("Ready: %v", err)
-	}
-	for _, bead := range ready {
-		if bead.ID == created.ID {
-			return
-		}
-	}
-	t.Fatalf("Ready() = %+v, missing policy-created SQLite workflow %s", ready, created.ID)
 }
 
 func assertStorageClass(t *testing.T, got beads.StorageClass, want string) {
@@ -624,5 +629,53 @@ func assertStorageClass(t *testing.T, got beads.StorageClass, want string) {
 	}
 	if got != wantClass {
 		t.Fatalf("storage = %q, want %q", got, wantClass)
+	}
+}
+
+type countCaptureStore struct {
+	beads.Store
+	countErr    error
+	gotQuery    beads.ListQuery
+	gotExcludes []string
+}
+
+func (s *countCaptureStore) Count(_ context.Context, query beads.ListQuery, excludeTypes ...string) (int, error) {
+	s.gotQuery = query
+	s.gotExcludes = excludeTypes
+	return 4, s.countErr
+}
+
+func TestBeadPolicyStoreCountExpandsReadTier(t *testing.T) {
+	inner := &countCaptureStore{Store: beads.NewMemStore()}
+	store := wrapStoreWithBeadPolicies(inner, &config.City{})
+
+	counter, ok := store.(beads.Counter)
+	if !ok {
+		t.Fatal("policy store does not implement beads.Counter")
+	}
+	got, err := counter.Count(context.Background(), beads.ListQuery{Status: "open", AllowScan: true}, "message")
+	if err != nil {
+		t.Fatalf("Count: %v", err)
+	}
+	if got != 4 {
+		t.Fatalf("Count = %d, want 4", got)
+	}
+	if inner.gotQuery.TierMode != beads.TierBoth {
+		t.Fatalf("TierMode = %v, want TierBoth (policy reads span both tiers)", inner.gotQuery.TierMode)
+	}
+	if len(inner.gotExcludes) != 1 || inner.gotExcludes[0] != "message" {
+		t.Fatalf("excludeTypes = %v, want [message]", inner.gotExcludes)
+	}
+}
+
+func TestBeadPolicyStoreCountUnsupportedWithoutInnerCounter(t *testing.T) {
+	store := wrapStoreWithBeadPolicies(beads.NewMemStore(), &config.City{})
+
+	counter, ok := store.(beads.Counter)
+	if !ok {
+		t.Fatal("policy store does not implement beads.Counter")
+	}
+	if _, err := counter.Count(context.Background(), beads.ListQuery{AllowScan: true}); !errors.Is(err, beads.ErrCountUnsupported) {
+		t.Fatalf("Count error = %v, want ErrCountUnsupported", err)
 	}
 }

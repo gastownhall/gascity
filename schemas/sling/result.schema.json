@@ -65,6 +65,10 @@
       "type": "boolean",
       "description": "Whether the command ran without mutating dispatch state."
     },
+    "dashboard_url": {
+      "type": "string",
+      "description": "Absolute dashboard deep link for the slung work, present only when the supervisor dashboard is reachable."
+    },
     "warnings": {
       "type": "array",
       "description": "Non-fatal warnings from dispatch.",

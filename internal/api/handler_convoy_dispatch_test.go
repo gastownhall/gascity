@@ -11,9 +11,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -125,6 +127,65 @@ func TestWorkflowGetPreservesRequestedScopeForUniqueCrossStoreWorkflow(t *testin
 	}
 }
 
+// TestWorkflowGetRejectsCityScopeForRigRootedWorkflow pins the intended answer
+// for the shape the preserve path above no longer covers: the same unique
+// rig-stored workflow, but with a root that names rig:alpha itself. The root
+// ref is the scope the workflow belongs to, so the city-scoped read is a miss
+// (404) and the rig-scoped read is the hit — the deliberate ga-dezas
+// consequence, not a regression to restore. graphroute stamps
+// gc.root_store_ref on every launched step, so this is the shape current
+// graph.v2 workflows actually take.
+func TestWorkflowGetRejectsCityScopeForRigRootedWorkflow(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "gascity"
+	rigStore := beads.NewMemStore()
+	state.cityBeadStore = beads.NewMemStore()
+	state.stores = map[string]beads.Store{"alpha": rigStore}
+
+	root, err := rigStore.Create(beads.Bead{
+		Title: "Rig-rooted workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.workflow_id":      "wf_rig_rooted_scope",
+			"gc.root_store_ref":   "rig:alpha",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/workflow/wf_rig_rooted_scope?scope_kind=city&scope_ref=gascity"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("city-scoped status = %d, want 404: %s", rec.Code, rec.Body.String())
+	}
+
+	// The 404 must be the scope answer, not the workflow being unreachable.
+	req = httptest.NewRequest(http.MethodGet, cityURL(state, "/workflow/wf_rig_rooted_scope?scope_kind=rig&scope_ref=alpha"), nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rig-scoped status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	var snapshot workflowSnapshotResponse
+	if err := json.NewDecoder(rec.Body).Decode(&snapshot); err != nil {
+		t.Fatalf("Decode(snapshot): %v", err)
+	}
+	if snapshot.RootBeadID != root.ID {
+		t.Fatalf("root_bead_id = %q, want %q", snapshot.RootBeadID, root.ID)
+	}
+	if snapshot.ScopeKind != "rig" || snapshot.ScopeRef != "alpha" {
+		t.Fatalf("scope = %s:%s, want rig:alpha", snapshot.ScopeKind, snapshot.ScopeRef)
+	}
+}
+
 func TestWorkflowGetRejectsMismatchedCityScopeForUniqueCrossStoreWorkflow(t *testing.T) {
 	state := newFakeState(t)
 	state.cityName = "gascity"
@@ -207,6 +268,142 @@ func TestWorkflowGetRejectsMismatchedRigScopeForUniqueCrossStoreWorkflow(t *test
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestWorkflowRootScopeFallsBackToRootStoreRef pins the root-ref fallback
+// (ga-dezas): sling-launch roots stamp only gc.root_store_ref, so the scope a
+// workflow is presented in comes from the ref its root names, not from the
+// store leg the root happened to be read through. Mirrors runproj's
+// ScopeFromRootStoreRef, which already resolves the run projection this way.
+func TestWorkflowRootScopeFallsBackToRootStoreRef(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata map[string]string
+		wantKind string
+		wantRef  string
+	}{
+		{
+			name: "explicit stamps win over the root store ref",
+			metadata: map[string]string{
+				"gc.scope_kind":     "rig",
+				"gc.scope_ref":      "alpha",
+				"gc.root_store_ref": "city:test-city",
+			},
+			wantKind: "rig",
+			wantRef:  "alpha",
+		},
+		{
+			name:     "rig root store ref",
+			metadata: map[string]string{"gc.root_store_ref": "rig:beads"},
+			wantKind: "rig",
+			wantRef:  "beads",
+		},
+		{
+			name:     "city root store ref",
+			metadata: map[string]string{"gc.root_store_ref": "city:test-city"},
+			wantKind: "city",
+			wantRef:  "test-city",
+		},
+		{
+			name:     "class root store ref is not a scope",
+			metadata: map[string]string{"gc.root_store_ref": "class:gmnos"},
+		},
+		{
+			name:     "empty root store ref",
+			metadata: map[string]string{"gc.root_store_ref": ""},
+		},
+		{
+			name: "no metadata at all",
+		},
+		{
+			name:     "malformed root store ref",
+			metadata: map[string]string{"gc.root_store_ref": "rig:"},
+		},
+		{
+			name:     "kindless root store ref",
+			metadata: map[string]string{"gc.root_store_ref": ":beads"},
+		},
+		{
+			name:     "half-stamped root falls through",
+			metadata: map[string]string{"gc.scope_kind": "rig"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotKind, gotRef := workflowRootScope(beads.Bead{Metadata: tc.metadata})
+			if gotKind != tc.wantKind || gotRef != tc.wantRef {
+				t.Fatalf("workflowRootScope = %q:%q, want %q:%q", gotKind, gotRef, tc.wantKind, tc.wantRef)
+			}
+		})
+	}
+}
+
+// TestWorkflowScopeMatchesBindingLegRigRootedRoot covers the maintainer-city
+// shape behind ga-dezas: a rig-rooted graph.v2 root served through the graph
+// class binding, whose leg carries the city scope. The request scope the root
+// ref names must match; the leg's scope must not.
+func TestWorkflowScopeMatchesBindingLegRigRootedRoot(t *testing.T) {
+	info := workflowStoreInfo{ref: "graph:test-city", scopeKind: "city", scopeRef: "test-city"}
+	root := beads.Bead{Metadata: map[string]string{"gc.root_store_ref": "rig:beads"}}
+
+	if !workflowScopeMatches(info, root, "rig", "beads") {
+		t.Fatal("workflowScopeMatches(rig, beads) = false, want true for a rig-rooted root read through the binding leg")
+	}
+	if workflowScopeMatches(info, root, "city", "test-city") {
+		t.Fatal("workflowScopeMatches(city, test-city) = true, want false: the binding leg is where the root lives, not the scope it belongs to")
+	}
+}
+
+// TestWorkflowGetResolvesRigScopeFromRootStoreRefOnBindingLeg is the
+// handler-level half of ga-dezas: GET /v0/city/{city}/workflow/{id} with the
+// rig scope resolves a rig-rooted root that physically lives on the graph
+// class binding, and reports that rig scope while root_store_ref still names
+// the physical leg.
+func TestWorkflowGetResolvesRigScopeFromRootStoreRefOnBindingLeg(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "test-city"
+	state.cityBeadStore = beads.NewMemStore()
+	graphStore := beads.NewMemStore()
+	state.graphBeadStore = graphStore
+	state.stores = map[string]beads.Store{}
+
+	root, err := graphStore.Create(beads.Bead{
+		Title: "Sling-launched workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.workflow_id":      "wf_rig_rooted",
+			"gc.root_store_ref":   "rig:beads",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/workflow/wf_rig_rooted?scope_kind=rig&scope_ref=beads"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	var snapshot workflowSnapshotResponse
+	if err := json.NewDecoder(rec.Body).Decode(&snapshot); err != nil {
+		t.Fatalf("Decode(snapshot): %v", err)
+	}
+	if snapshot.RootBeadID != root.ID {
+		t.Fatalf("root_bead_id = %q, want %q", snapshot.RootBeadID, root.ID)
+	}
+	if snapshot.ScopeKind != "rig" || snapshot.ScopeRef != "beads" {
+		t.Fatalf("scope = %s:%s, want rig:beads", snapshot.ScopeKind, snapshot.ScopeRef)
+	}
+	if snapshot.RootStoreRef != "graph:test-city" {
+		t.Fatalf("root_store_ref = %q, want graph:test-city (the physical leg)", snapshot.RootStoreRef)
 	}
 }
 
@@ -645,6 +842,64 @@ func TestWorkflowStoreByRef(t *testing.T) {
 	if _, ok := workflowStoreByRef(state, "rig:missing"); ok {
 		t.Fatal("workflowStoreByRef(rig:missing) = true, want false")
 	}
+
+	// A city that relocates nothing has no orders binding to name: OrdersBeadStore()
+	// is the city store, and an orders: ref there would be a second name for a store
+	// the city: ref already resolves.
+	if _, ok := workflowStoreByRef(state, "orders:city"); ok {
+		t.Fatal("workflowStoreByRef(orders:city) on a single-store city = true, want false")
+	}
+}
+
+// TestWorkflowStoreByRefResolvesTheOrdersBinding covers the class ref the order
+// history list mints. A ref one endpoint publishes and its sibling cannot resolve
+// is a 404 on a bead that exists.
+func TestWorkflowStoreByRefResolvesTheOrdersBinding(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "bright-lights"
+	state.cityBeadStore = beads.NewMemStore()
+	binding := beads.NewMemStore()
+	state.ordersBeadStore = binding
+	state.stores = nil
+	state.cfg.Rigs = nil
+
+	info, ok := workflowStoreByRef(state, "orders:bright-lights")
+	if !ok {
+		t.Fatal("workflowStoreByRef(orders:bright-lights) = false, want true")
+	}
+	if info.ref != "orders:bright-lights" || info.scopeKind != "city" || info.scopeRef != "bright-lights" {
+		t.Fatalf("orders info = %+v, want orders:bright-lights", info)
+	}
+	if info.store != beads.Store(binding) {
+		t.Fatal("orders store mismatch")
+	}
+
+	if _, ok := workflowStoreByRef(state, "orders:other-city"); ok {
+		t.Fatal("workflowStoreByRef(orders:other-city) = true, want false")
+	}
+}
+
+// TestWorkflowStorePathSkipsClassRefs pins that a class ref — one naming a
+// binding rather than a scope root — yields no rig/city path to run SQL against.
+// Answering the city path for the orders binding would point the workflow SQL
+// fast path at the wrong database.
+func TestWorkflowStorePathSkipsClassRefs(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "bright-lights"
+	state.cityPath = t.TempDir()
+	state.cityBeadStore = beads.NewMemStore()
+
+	for _, ref := range []string{"graph:bright-lights", "orders:bright-lights"} {
+		info := workflowStoreInfo{
+			ref:       ref,
+			scopeKind: beadmeta.ScopeKindCity,
+			scopeRef:  "bright-lights",
+			store:     beads.NewMemStore(),
+		}
+		if path, ok := workflowStorePath(state, info); ok {
+			t.Fatalf("workflowStorePath(%q) = %q, true; want no path", ref, path)
+		}
+	}
 }
 
 func TestWorkflowStoresSkipsCityStoreEntriesFromBeadStoreMap(t *testing.T) {
@@ -1039,6 +1294,94 @@ func TestWorkflowStatusTreatsSkippedAsSkipped(t *testing.T) {
 
 	if got := workflowStatus(bead); got != "skipped" {
 		t.Fatalf("workflowStatus(closed skipped) = %q, want skipped", got)
+	}
+}
+
+// oldInlineWorkflowBeadResponse reproduces the pre-refactor inline
+// struct-literal construction that the three build loops used, so
+// TestWorkflowBeadResponseFromBeadEquivalence can pin the new codec-backed
+// mapper against it field-for-field.
+func oldInlineWorkflowBeadResponse(bead beads.Bead) workflowBeadResponse {
+	return workflowBeadResponse{
+		ID:            bead.ID,
+		Title:         bead.Title,
+		Status:        workflowStatus(bead),
+		Kind:          workflowKind(bead),
+		StepRef:       strings.TrimSpace(bead.Metadata[beadmeta.StepRefMetadataKey]),
+		Attempt:       workflowAttempt(bead),
+		LogicalBeadID: strings.TrimSpace(bead.Metadata[beadmeta.LogicalBeadIDMetadataKey]),
+		ScopeRef:      strings.TrimSpace(bead.Metadata[beadmeta.ScopeRefMetadataKey]),
+		Assignee:      strings.TrimSpace(bead.Assignee),
+		Metadata:      cloneStringMap(bead.Metadata),
+	}
+}
+
+func TestWorkflowBeadResponseFromBeadEquivalence(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		bead beads.Bead
+	}{
+		{
+			name: "fully populated with padded metadata",
+			bead: beads.Bead{
+				ID:       "step-1",
+				Title:    "Do the thing",
+				Status:   "in_progress",
+				Assignee: "  worker-1  ",
+				Type:     "task",
+				Metadata: map[string]string{
+					beadmeta.KindMetadataKey:          "  run  ",
+					beadmeta.OutcomeMetadataKey:       "",
+					beadmeta.AttemptMetadataKey:       "  2  ",
+					beadmeta.StepRefMetadataKey:       "  iteration.1.review  ",
+					beadmeta.LogicalBeadIDMetadataKey: "  logical-9  ",
+					beadmeta.ScopeRefMetadataKey:      "  gascity  ",
+				},
+			},
+		},
+		{
+			name: "minimal bead with nil metadata",
+			bead: beads.Bead{ID: "root-2", Title: "bare"},
+		},
+		{
+			name: "closed with fail outcome",
+			bead: beads.Bead{
+				ID:       "step-3",
+				Title:    "failed step",
+				Status:   "closed",
+				Metadata: map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := workflowBeadResponseFromBead(tc.bead)
+			want := oldInlineWorkflowBeadResponse(tc.bead)
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("workflowBeadResponseFromBead mismatch:\n got=%#v\nwant=%#v", got, want)
+			}
+			// Attempt pointer semantics: nil when unset, non-nil when > 0.
+			if (got.Attempt == nil) != (want.Attempt == nil) {
+				t.Fatalf("attempt pointer nilness mismatch: got=%v want=%v", got.Attempt, want.Attempt)
+			}
+			// nil source metadata must stay nil so the wire keeps "metadata": null.
+			if tc.bead.Metadata == nil && got.Metadata != nil {
+				t.Fatalf("nil metadata projected to non-nil: %#v", got.Metadata)
+			}
+		})
+	}
+
+	// Clone independence: mutating the source metadata after projection must
+	// not change the response map.
+	src := map[string]string{beadmeta.KindMetadataKey: "workflow"}
+	resp := workflowBeadResponseFromBead(beads.Bead{ID: "root-1", Metadata: src})
+	src[beadmeta.KindMetadataKey] = "mutated"
+	if resp.Metadata[beadmeta.KindMetadataKey] != "workflow" {
+		t.Fatalf("response metadata not independent of source: %q", resp.Metadata[beadmeta.KindMetadataKey])
 	}
 }
 

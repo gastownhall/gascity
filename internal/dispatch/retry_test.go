@@ -4,9 +4,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -86,6 +88,125 @@ func TestProcessRetryEvalPassClosesLogical(t *testing.T) {
 	}
 	if logicalAfter.Metadata["gc.output_json"] != `{"ok":true}` {
 		t.Fatalf("logical gc.output_json = %q, want propagated output", logicalAfter.Metadata["gc.output_json"])
+	}
+}
+
+// newRetryEvalOrderingFixture builds the shape every terminal retry-eval branch
+// closes through: a logical bead blocked by its own eval. The eval must close
+// before the logical bead or bd refuses the second close, so each branch that
+// closes both is only correct by ordering — nothing structural enforces it.
+// Returns the logical and eval beads on a store that enforces bd's refusal.
+func newRetryEvalOrderingFixture(t *testing.T, runOutcome map[string]string) (*strictCloseStore, beads.Bead, beads.Bead) {
+	t.Helper()
+
+	store := newStrictCloseStore()
+	root := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	logical := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "review",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "retry",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "demo.review",
+			"gc.max_attempts": "3",
+			"gc.on_exhausted": "hard_fail",
+		},
+	})
+	runMeta := map[string]string{
+		"gc.kind":            "retry-run",
+		"gc.root_bead_id":    root.ID,
+		"gc.step_ref":        "demo.review.run.1",
+		"gc.logical_bead_id": logical.ID,
+		"gc.attempt":         "1",
+		"gc.max_attempts":    "3",
+		"gc.on_exhausted":    "hard_fail",
+	}
+	for k, v := range runOutcome {
+		runMeta[k] = v
+	}
+	run1 := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:    "review attempt 1",
+		Type:     "task",
+		Status:   "closed",
+		Metadata: runMeta,
+	})
+	eval1 := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "review eval 1",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":            "retry-eval",
+			"gc.root_bead_id":    root.ID,
+			"gc.step_ref":        "demo.review.eval.1",
+			"gc.logical_bead_id": logical.ID,
+			"gc.attempt":         "1",
+			"gc.max_attempts":    "3",
+			"gc.on_exhausted":    "hard_fail",
+		},
+	})
+	mustDepAdd(t, store, logical.ID, eval1.ID, "blocks")
+	mustDepAdd(t, store, eval1.ID, run1.ID, "blocks")
+	return store, logical, eval1
+}
+
+func TestProcessRetryEvalHardFailClosesEvalBeforeLogical(t *testing.T) {
+	t.Parallel()
+
+	store, logical, eval1 := newRetryEvalOrderingFixture(t, map[string]string{
+		"gc.outcome":        "fail",
+		"gc.failure_class":  "hard",
+		"gc.failure_reason": "boom",
+	})
+
+	result, err := ProcessControl(store, eval1, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(retry-eval hard): %v", err)
+	}
+	if !result.Processed || result.Action != "hard-fail" {
+		t.Fatalf("result = %+v, want processed hard-fail", result)
+	}
+
+	evalAfter := mustGetBead(t, store, eval1.ID)
+	if evalAfter.Status != "closed" || evalAfter.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("eval = status %q outcome %q, want closed/fail", evalAfter.Status, evalAfter.Metadata["gc.outcome"])
+	}
+	logicalAfter := mustGetBead(t, store, logical.ID)
+	if logicalAfter.Status != "closed" || logicalAfter.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("logical = status %q outcome %q, want closed/fail", logicalAfter.Status, logicalAfter.Metadata["gc.outcome"])
+	}
+	if got := logicalAfter.Metadata["gc.final_disposition"]; got != beadmeta.DispositionHardFail {
+		t.Fatalf("logical gc.final_disposition = %q, want %q", got, beadmeta.DispositionHardFail)
+	}
+}
+
+func TestProcessRetryEvalCanceledClosesEvalBeforeLogical(t *testing.T) {
+	t.Parallel()
+
+	store, logical, eval1 := newRetryEvalOrderingFixture(t, map[string]string{
+		"gc.outcome": "canceled",
+	})
+
+	result, err := ProcessControl(store, eval1, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(retry-eval canceled): %v", err)
+	}
+	if !result.Processed || result.Action != "canceled" {
+		t.Fatalf("result = %+v, want processed canceled", result)
+	}
+
+	evalAfter := mustGetBead(t, store, eval1.ID)
+	if evalAfter.Status != "closed" || evalAfter.Metadata["gc.outcome"] != "canceled" {
+		t.Fatalf("eval = status %q outcome %q, want closed/canceled", evalAfter.Status, evalAfter.Metadata["gc.outcome"])
+	}
+	logicalAfter := mustGetBead(t, store, logical.ID)
+	if logicalAfter.Status != "closed" || logicalAfter.Metadata["gc.outcome"] != "canceled" {
+		t.Fatalf("logical = status %q outcome %q, want closed/canceled", logicalAfter.Status, logicalAfter.Metadata["gc.outcome"])
 	}
 }
 
@@ -198,6 +319,189 @@ func TestClassifyRetryAttemptRetriesInvalidRequiredOutputJSON(t *testing.T) {
 	want := retryEvalResult{Outcome: "transient", Reason: "invalid_required_output_json"}
 	if got != want {
 		t.Fatalf("classifyRetryAttempt() = %+v, want %+v", got, want)
+	}
+}
+
+// TestClassifyRetryAttemptCanceledIsTerminalNonRetry pins that a canceled attempt
+// subject (its run was canceled via the API) is a terminal non-failure and is not
+// retried — before the fix it fell through to the invalid_outcome_value transient
+// branch and would have scheduled another attempt.
+func TestClassifyRetryAttemptCanceledIsTerminalNonRetry(t *testing.T) {
+	t.Parallel()
+
+	got := classifyRetryAttempt(beads.Bead{
+		Metadata: map[string]string{"gc.outcome": "canceled"},
+	})
+	want := retryEvalResult{Outcome: "canceled"}
+	if got != want {
+		t.Fatalf("classifyRetryAttempt(canceled) = %+v, want %+v", got, want)
+	}
+}
+
+// TestClassifyRetryAttemptConsumesTypedCoordinatorOutcome pins strict validation
+// of the typed close that reproduces gc-e2xqk.
+func TestClassifyRetryAttemptConsumesTypedCoordinatorOutcome(t *testing.T) {
+	t.Parallel()
+
+	const attemptID = "gc-attempt1"
+	const validDeliverable = `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"formula-step"}`
+
+	tests := []struct {
+		name     string
+		metadata map[string]string
+		want     retryEvalResult
+	}{
+		{
+			name: "valid deliverable close folds as pass",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": validDeliverable,
+				"gc.outcome.producer":                         "formula-step",
+			},
+			want: retryEvalResult{Outcome: "pass"},
+		},
+		{
+			name: "valid deliverable close with passing verdict folds as pass",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"formula-step","passing_verdict":"evidence.reviewer_verdict"}`,
+				"gc.review_gate":            "consumed",
+				"evidence.reviewer_verdict": "pass",
+			},
+			want: retryEvalResult{Outcome: "pass"},
+		},
+		{
+			name: "passing verdict requires consumed review gate",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"formula-step","passing_verdict":"evidence.reviewer_verdict"}`,
+				"gc.review_gate":            "pass",
+				"evidence.reviewer_verdict": "pass",
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "passing verdict requires published pass",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"formula-step","passing_verdict":"review_verdict"}`,
+				"gc.review_gate": "consumed",
+				"review_verdict": "reject",
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "unsupported passing verdict stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"formula-step","passing_verdict":"surprise"}`,
+				"gc.review_gate": "consumed",
+				"surprise":       "pass",
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "explicit gc.outcome takes precedence over typed close",
+			metadata: map[string]string{
+				"gc.outcome": "pass",
+				"gc.coordinator_outcome.producer_disposition": validDeliverable,
+			},
+			want: retryEvalResult{Outcome: "pass"},
+		},
+		{
+			name: "non-deliverable close stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"non-deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"obsolete"}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "deliverable with arbitrary producer folds as pass",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"novel-writer-42"}`,
+			},
+			want: retryEvalResult{Outcome: "pass"},
+		},
+		{
+			name: "deliverable absent producer stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped"}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "deliverable empty producer stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":""}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "deliverable empty recorded_by stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"","reason":"shipped","producer":"formula-step"}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "deliverable empty reason stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"","producer":"formula-step"}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "unknown envelope field stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"formula-step","surprise":"x"}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "deliverable with trailing data stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"formula-step"} {"junk":1}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "malformed json stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": "{not json",
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "wrong contract_version stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":2,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"formula-step"}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "foreign work_id stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-someone-else","recorded_by":"tester","reason":"shipped","producer":"formula-step"}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "unknown disposition stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"mystery","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped"}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name:     "no typed outcome stays missing_outcome",
+			metadata: map[string]string{},
+			want:     retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := classifyRetryAttempt(beads.Bead{ID: attemptID, Metadata: tt.metadata})
+			if got != tt.want {
+				t.Fatalf("classifyRetryAttempt() = %+v, want %+v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -394,6 +698,96 @@ func TestClassifyRetryAttemptWithPostconditionsMissingRequiredArtifactContextSta
 	}
 }
 
+func TestClassifyRetryAttemptWithPostconditionsResolvesWorktreeFromRootWhenSourceIsCrossStore(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	worktree := t.TempDir()
+	root := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			// Cross-store shape (vp-kvp delivery): the root lives in the
+			// subject's store, but its source convoy lives in another store
+			// entirely, so a same-store Get on the source id returns
+			// ErrNotFound. The rebase gate stamps work_dir on the root too;
+			// the validator must use it instead of failing the latch with
+			// missing_required_artifact_context after the attempt passed.
+			"gc.input_convoy_id": "ga-cross-store-source",
+			"work_dir":           worktree,
+		},
+	})
+	if err := os.WriteFile(filepath.Join(worktree, "codex-review.md"), []byte("review"), 0o644); err != nil {
+		t.Fatalf("writing artifact: %v", err)
+	}
+
+	got, err := classifyRetryAttemptWithPostconditions(store, beads.Bead{
+		Metadata: map[string]string{
+			"gc.outcome":           "pass",
+			"gc.root_bead_id":      root.ID,
+			"gc.required_artifact": "codex-review.md",
+		},
+	}, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("classifyRetryAttemptWithPostconditions error = %v, want nil", err)
+	}
+	if got.Outcome != "pass" {
+		t.Fatalf("classifyRetryAttemptWithPostconditions() = %+v, want pass (worktree must resolve from the root bead when the source is cross-store)", got)
+	}
+}
+
+func TestClassifyRetryAttemptWithPostconditionsPrefersRootWorktreeOverResolvableSource(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	rootWorktree := t.TempDir()
+	sourceWorktree := t.TempDir()
+	// Both the root and its source resolve, but each carries a *distinct*
+	// work_dir. The root is the rebase-gate-stamped review worktree and must
+	// win: a future source-first reorder would still pass every cross-store /
+	// source-fallback test above yet silently resolve the source's (possibly
+	// stale) dir here, reintroducing the "passing attempt fails its latch"
+	// failure this fix removes. This case pins the root-over-source precedence.
+	source := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "source",
+		Type:  "convoy",
+		Metadata: map[string]string{
+			"work_dir": sourceWorktree,
+		},
+	})
+	root := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.input_convoy_id": source.ID,
+			"work_dir":           rootWorktree,
+		},
+	})
+
+	var statPath string
+	got, err := classifyRetryAttemptWithPostconditions(store, beads.Bead{
+		Metadata: map[string]string{
+			"gc.outcome":           "pass",
+			"gc.root_bead_id":      root.ID,
+			"gc.required_artifact": "codex-review.md",
+		},
+	}, ProcessOptions{
+		RequiredArtifactStat: func(path string) (os.FileInfo, error) {
+			statPath = path
+			return fakeFileInfo{size: 10}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("classifyRetryAttemptWithPostconditions error = %v, want nil", err)
+	}
+	if got != (retryEvalResult{Outcome: "pass"}) {
+		t.Fatalf("classifyRetryAttemptWithPostconditions() = %+v, want pass", got)
+	}
+	if want := filepath.Join(rootWorktree, "codex-review.md"); statPath != want {
+		t.Fatalf("required artifact resolved under %q, want the root worktree %q (root work_dir must win over a resolvable source carrying a different work_dir)", statPath, want)
+	}
+}
+
 func TestClassifyRetryAttemptWithPostconditionsRejectsArtifactOutsideWorktreeBeforeStat(t *testing.T) {
 	t.Parallel()
 
@@ -567,6 +961,83 @@ func TestRequiredArtifactTemplatesTreatsSingularAsOnePath(t *testing.T) {
 	}
 }
 
+// TestRequiredArtifactTargetInWorktree regression-pins the
+// existence/resolvability checks in requiredArtifactTargetInWorktree's two
+// bare EvalSymlinks calls (refs ga-iawy13.4): a missing target is treated
+// as contained (the caller's earlier os.Stat already classifies
+// missing/unreadable paths, so this function only needs to gate symlink
+// escapes for targets that exist), a symlinked worktree root resolves
+// correctly for a contained target, and a target that escapes via symlink
+// is rejected. These sites are deliberate existence/resolvability
+// checking, not comparison preparation, and must keep behaving identically
+// after the canonical-path-at-ingest migration.
+func TestRequiredArtifactTargetInWorktree(t *testing.T) {
+	t.Parallel()
+
+	t.Run("missing target treated as contained", func(t *testing.T) {
+		t.Parallel()
+		worktree := t.TempDir()
+		missing := filepath.Join(worktree, "does-not-exist.md")
+
+		got, err := requiredArtifactTargetInWorktree(worktree, missing)
+		if err != nil {
+			t.Fatalf("requiredArtifactTargetInWorktree: %v", err)
+		}
+		if !got {
+			t.Fatal("expected missing target to be treated as contained (true)")
+		}
+	})
+
+	t.Run("symlinked worktree root with contained target resolves", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("symlink semantics differ on Windows")
+		}
+		t.Parallel()
+		realDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(realDir, "review.md"), []byte("ok"), 0o644); err != nil {
+			t.Fatalf("write artifact: %v", err)
+		}
+		aliasParent := t.TempDir()
+		alias := filepath.Join(aliasParent, "worktree-alias")
+		if err := os.Symlink(realDir, alias); err != nil {
+			t.Skipf("symlinks not supported: %v", err)
+		}
+
+		got, err := requiredArtifactTargetInWorktree(alias, filepath.Join(alias, "review.md"))
+		if err != nil {
+			t.Fatalf("requiredArtifactTargetInWorktree: %v", err)
+		}
+		if !got {
+			t.Fatal("expected symlinked worktree root with contained target to resolve as contained")
+		}
+	})
+
+	t.Run("target escaping via symlink is rejected", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("symlink semantics differ on Windows")
+		}
+		t.Parallel()
+		worktree := t.TempDir()
+		outside := t.TempDir()
+		outsideFile := filepath.Join(outside, "secret.md")
+		if err := os.WriteFile(outsideFile, []byte("secret"), 0o644); err != nil {
+			t.Fatalf("write outside file: %v", err)
+		}
+		link := filepath.Join(worktree, "review.md")
+		if err := os.Symlink(outsideFile, link); err != nil {
+			t.Skipf("symlinks not supported: %v", err)
+		}
+
+		got, err := requiredArtifactTargetInWorktree(worktree, link)
+		if err != nil {
+			t.Fatalf("requiredArtifactTargetInWorktree: %v", err)
+		}
+		if got {
+			t.Fatal("expected target escaping worktree via symlink to be rejected (false)")
+		}
+	})
+}
+
 type fakeFileInfo struct {
 	size  int64
 	isDir bool
@@ -620,16 +1091,19 @@ func TestProcessRetryEvalTransientAppendErrorStaysOpenForRetry(t *testing.T) {
 		Type:   "task",
 		Status: "closed",
 		Metadata: map[string]string{
-			"gc.kind":            "retry-run",
-			"gc.root_bead_id":    root.ID,
-			"gc.step_ref":        "demo.review.run.1",
-			"gc.logical_bead_id": logical.ID,
-			"gc.attempt":         "1",
-			"gc.max_attempts":    "3",
-			"gc.on_exhausted":    "hard_fail",
-			"gc.outcome":         "fail",
-			"gc.failure_class":   "transient",
-			"gc.failure_reason":  "rate_limited",
+			"gc.kind":               "retry-run",
+			"gc.root_bead_id":       root.ID,
+			"gc.step_ref":           "demo.review.run.1",
+			"gc.logical_bead_id":    logical.ID,
+			"gc.attempt":            "1",
+			"gc.max_attempts":       "3",
+			"gc.on_exhausted":       "hard_fail",
+			"gc.outcome":            "fail",
+			"gc.failure_class":      "transient",
+			"gc.failure_reason":     "rate_limited",
+			"gc.routed_to":          "polecat",
+			"gc.session_affinity":   "require",
+			"gc.continuation_group": "main",
 		},
 	})
 	eval1 := mustCreateWorkflowBead(t, base, beads.Bead{
@@ -1001,6 +1475,12 @@ func TestProcessRetryEvalTransientRetriesAndRecyclesPoolSession(t *testing.T) {
 	if run2.Assignee != "" {
 		t.Fatalf("run2 assignee = %q, want empty for pooled retry", run2.Assignee)
 	}
+	if run2.Metadata["gc.session_affinity"] != "" {
+		t.Fatalf("run2 gc.session_affinity = %q, want cleared with pooled retry assignee", run2.Metadata["gc.session_affinity"])
+	}
+	if run2.Metadata["gc.continuation_group"] != "" {
+		t.Fatalf("run2 gc.continuation_group = %q, want cleared with pooled retry assignee", run2.Metadata["gc.continuation_group"])
+	}
 	if got := run2.Metadata["gc.retry_from"]; got != run1.ID {
 		t.Fatalf("run2 gc.retry_from = %q, want %s", got, run1.ID)
 	}
@@ -1013,6 +1493,116 @@ func TestProcessRetryEvalTransientRetriesAndRecyclesPoolSession(t *testing.T) {
 	}
 	if len(logicalDeps) != 1 || logicalDeps[0].DependsOnID != eval2.ID {
 		t.Fatalf("logical deps = %+v, want only current retry eval %s", logicalDeps, eval2.ID)
+	}
+}
+
+// TestProcessRetryEvalTransientPreservesPinnedSessionAffinity covers the
+// preserve half of the clear/preserve rule: a retry whose previous attempt has
+// a concrete non-pool (pinned) assignee must keep both the assignee and the
+// session-affinity metadata, so shared-drain co-location survives the retry.
+// The pooled counterpart that clears affinity is
+// TestProcessRetryEvalTransientRetriesAndRecyclesPoolSession.
+func TestProcessRetryEvalTransientPreservesPinnedSessionAffinity(t *testing.T) {
+	t.Parallel()
+
+	store := newStrictCloseStore()
+	root := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	logical := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "review",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "retry",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "demo.review",
+			"gc.max_attempts": "3",
+			"gc.on_exhausted": "hard_fail",
+		},
+	})
+	run1 := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:    "review attempt 1",
+		Type:     "task",
+		Status:   "closed",
+		Assignee: "reviewer-mc-7",
+		Metadata: map[string]string{
+			"gc.kind":               "retry-run",
+			"gc.root_bead_id":       root.ID,
+			"gc.step_ref":           "demo.review.run.1",
+			"gc.logical_bead_id":    logical.ID,
+			"gc.attempt":            "1",
+			"gc.max_attempts":       "3",
+			"gc.on_exhausted":       "hard_fail",
+			"gc.outcome":            "fail",
+			"gc.failure_class":      "transient",
+			"gc.failure_reason":     "rate_limited",
+			"gc.continuation_group": "review-fixes",
+			"gc.session_affinity":   "require",
+		},
+	})
+	eval1 := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "review eval 1",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":            "retry-eval",
+			"gc.root_bead_id":    root.ID,
+			"gc.step_ref":        "demo.review.eval.1",
+			"gc.logical_bead_id": logical.ID,
+			"gc.attempt":         "1",
+			"gc.max_attempts":    "3",
+			"gc.on_exhausted":    "hard_fail",
+		},
+	})
+	mustDepAdd(t, store, logical.ID, eval1.ID, "blocks")
+	mustDepAdd(t, store, eval1.ID, run1.ID, "blocks")
+
+	var recycled []string
+	result, err := ProcessControl(store, eval1, ProcessOptions{
+		RecycleSession: func(subject beads.Bead) error {
+			recycled = append(recycled, subject.Assignee)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("ProcessControl(retry-eval transient pinned): %v", err)
+	}
+	if !result.Processed || result.Action != "retry" {
+		t.Fatalf("result = %+v, want processed retry", result)
+	}
+	// A pinned (non-pool) retry stays on its named session, so no recycle fires.
+	if len(recycled) != 0 {
+		t.Fatalf("recycled = %v, want none for pinned retry", recycled)
+	}
+
+	var run2 beads.Bead
+	all, err := store.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen(): %v", err)
+	}
+	for _, bead := range all {
+		if bead.Metadata["gc.step_ref"] == "demo.review.run.2" {
+			run2 = bead
+		}
+	}
+	if run2.ID == "" {
+		t.Fatalf("missing retry attempt bead run2")
+	}
+	if run2.Assignee != "reviewer-mc-7" {
+		t.Fatalf("run2 assignee = %q, want preserved reviewer-mc-7", run2.Assignee)
+	}
+	if run2.Metadata["gc.session_affinity"] != "require" {
+		t.Fatalf("run2 gc.session_affinity = %q, want preserved require for pinned retry", run2.Metadata["gc.session_affinity"])
+	}
+	if run2.Metadata["gc.continuation_group"] != "review-fixes" {
+		t.Fatalf("run2 gc.continuation_group = %q, want preserved review-fixes for pinned retry", run2.Metadata["gc.continuation_group"])
+	}
+	if got := run2.Metadata["gc.retry_from"]; got != run1.ID {
+		t.Fatalf("run2 gc.retry_from = %q, want %s", got, run1.ID)
 	}
 }
 
@@ -1434,7 +2024,7 @@ func TestProcessScopeCheckSkipsOpenRetryDescendantsOnAbort(t *testing.T) {
 			"gc.formula_contract": "graph.v2",
 		},
 	})
-	body := mustCreateWorkflowBead(t, store, beads.Bead{
+	mustCreateWorkflowBead(t, store, beads.Bead{
 		Title: "body",
 		Type:  "task",
 		Metadata: map[string]string{
@@ -1495,7 +2085,6 @@ func TestProcessScopeCheckSkipsOpenRetryDescendantsOnAbort(t *testing.T) {
 		},
 	})
 	mustDepAdd(t, store, control.ID, failed.ID, "blocks")
-	mustDepAdd(t, store, body.ID, control.ID, "blocks")
 	mustDepAdd(t, store, logical.ID, eval1.ID, "blocks")
 	mustDepAdd(t, store, eval1.ID, run1.ID, "blocks")
 
@@ -1530,7 +2119,7 @@ func TestProcessScopeCheckSkipsOpenRalphIterationDescendantsOnAbort(t *testing.T
 			"gc.formula_contract": "graph.v2",
 		},
 	})
-	body := mustCreateWorkflowBead(t, store, beads.Bead{
+	mustCreateWorkflowBead(t, store, beads.Bead{
 		Title: "body",
 		Type:  "task",
 		Metadata: map[string]string{
@@ -1600,7 +2189,6 @@ func TestProcessScopeCheckSkipsOpenRalphIterationDescendantsOnAbort(t *testing.T
 		},
 	})
 	mustDepAdd(t, store, control.ID, failed.ID, "blocks")
-	mustDepAdd(t, store, body.ID, control.ID, "blocks")
 	mustDepAdd(t, store, logical.ID, iterationControl.ID, "blocks")
 	mustDepAdd(t, store, iterationControl.ID, iterationChild.ID, "blocks")
 

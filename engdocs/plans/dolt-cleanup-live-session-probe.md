@@ -163,7 +163,8 @@ this slice:
 - Typed wire: no `map[string]any` or `json.RawMessage` introduced
   on wire types (the `map[string]int` is internal to the probe
   return; it never crosses an HTTP/SSE boundary).
-- ZFC: no role names in the diff.
+- Keep judgment out of Go (the framework moves work, it does not
+  reason): no role names in the diff.
 
 ## Risks and unknowns
 

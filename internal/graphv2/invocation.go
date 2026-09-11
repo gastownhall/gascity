@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -38,9 +39,9 @@ const (
 
 	// RuntimeVarsMetadataKey stores the caller/runtime vars a graph.v2 workflow
 	// root received, excluding graph.v2 reserved variables injected by runtime.
-	RuntimeVarsMetadataKey = "gc.graphv2_vars.v1"
+	RuntimeVarsMetadataKey = beadmeta.RuntimeVarsMetadataKey
 
-	syntheticMetadataKey     = "gc.synthetic"
+	syntheticMetadataKey     = beadmeta.SyntheticMetadataKey
 	previewInputConvoyPrefix = "preview-input-convoy:"
 )
 
@@ -129,13 +130,13 @@ func PrepareInvocation(ctx context.Context, store beads.Store, formulaName strin
 			if err := formula.ValidateGraphV2ReservedSymbolsTransitively(resolved, parser, false); err != nil {
 				return Invocation{}, err
 			}
-			return Invocation{}, fmt.Errorf("graph.v2 formula %q requires a target convoy", formulaName)
+			return Invocation{}, fmt.Errorf("v2 formula %q requires a target convoy", formulaName)
 		}
 		if recipeRequiresTarget {
 			if err := formula.ValidateGraphV2RecipeReservedSymbols(recipe, false); err != nil {
 				return Invocation{}, err
 			}
-			return Invocation{}, fmt.Errorf("graph.v2 formula %q requires a target convoy", formulaName)
+			return Invocation{}, fmt.Errorf("v2 formula %q requires a target convoy", formulaName)
 		}
 		if err := formula.ValidateGraphV2RecipeReservedSymbols(recipe, false); err != nil {
 			return Invocation{}, err
@@ -152,7 +153,7 @@ func PrepareInvocation(ctx context.Context, store beads.Store, formulaName strin
 		return Invocation{}, err
 	}
 	if store == nil {
-		return Invocation{}, fmt.Errorf("graph.v2 formula %q requires a bead store to normalize target %s", formulaName, targetID)
+		return Invocation{}, fmt.Errorf("v2 formula %q requires a bead store to normalize target %s", formulaName, targetID)
 	}
 	convoyID, err := NormalizeInputConvoy(store, targetID)
 	if err != nil {
@@ -163,11 +164,44 @@ func PrepareInvocation(ctx context.Context, store beads.Store, formulaName strin
 	if len(legacyRefs) > 0 {
 		memberID, err := ResolveLegacyIssueAlias(store, convoyID)
 		if err != nil {
-			return Invocation{}, fmt.Errorf("resolving deprecated issue alias for graph.v2 formula %q: %w", formulaName, err)
+			// NormalizeInputConvoy may have just minted a synthetic input
+			// convoy for targetID; this alias-resolution failure discards the
+			// invocation, so close that freshly-minted artifact before
+			// returning. Leaving it open strands a claim-attracting bead — the
+			// exact leak this guards against — when a cross-store membership
+			// read makes ResolveLegacyIssueAlias fail. A caller-provided convoy
+			// target (convoyID == targetID) is never touched.
+			CloseSyntheticInputConvoy(store, convoyID, targetID)
+			return Invocation{}, fmt.Errorf("resolving deprecated issue alias for v2 formula %q: %w", formulaName, err)
 		}
 		inv.Vars[LegacyIssueVar] = memberID
 	}
 	return inv, nil
+}
+
+// CloseSyntheticInputConvoy best-effort-closes the synthetic input convoy that
+// PrepareInvocation minted for targetID when a later failure discards the
+// invocation, so an aborted pour does not strand an open claim-attracting bead
+// (the accumulating "input convoy for <bead>" debris this guards against). It is
+// the single guarded cleanup primitive shared by every graph-v2 pour surface —
+// PrepareInvocation itself, the sling auto-pour path, and the CLI
+// `gc formula cook --attach` path. Only the pour's own artifact is closed: a
+// caller-provided convoy target (convoyID == targetID), an empty id, a bead that
+// is not a synthetic convoy, or an already-terminal convoy is left untouched.
+// The pour's original error is the failure to surface, so close errors are
+// ignored.
+func CloseSyntheticInputConvoy(store beads.Store, convoyID, targetID string) {
+	if store == nil || convoyID == "" || convoyID == targetID {
+		return
+	}
+	b, err := store.Get(convoyID)
+	if err != nil || b.Type != "convoy" || b.Metadata[syntheticMetadataKey] != "true" {
+		return
+	}
+	if convoycore.IsTerminalStatus(b.Status) {
+		return
+	}
+	_ = store.Close(convoyID) //nolint:errcheck // best-effort cleanup of this invocation's own artifact
 }
 
 // legacyIssueDeprecations formats deprecation warnings for legacy issue and
@@ -179,7 +213,7 @@ func legacyIssueDeprecations(formulaName string, refs []string) []string {
 	out := make([]string, 0, len(refs))
 	for _, ref := range refs {
 		out = append(out, fmt.Sprintf(
-			"formula %q: %s — deprecated in graph.v2 and removed next release; migrate to the convoy_id work-bead derivation (gastownhall/gascity#2941)",
+			"formula %q: %s — deprecated in formulas v2 and removed next release; migrate to the convoy_id work-bead derivation (gastownhall/gascity#2941)",
 			formulaName, ref))
 	}
 	return out
@@ -248,14 +282,14 @@ func validateDrainItemFormulas(parentName string, searchPaths []string, recipe *
 		vars := varsWithConvoyPlaceholder(nonReservedRuntimeVars(parentVars))
 		recipe, err := formula.CompileWithoutRuntimeVarValidation(context.Background(), itemFormula, searchPaths, vars)
 		if err != nil {
-			return fmt.Errorf("validating drain item formula %q for graph.v2 formula %q: %w", itemFormula, parentName, err)
+			return fmt.Errorf("validating drain item formula %q for v2 formula %q: %w", itemFormula, parentName, err)
 		}
 		root := recipe.RootStep()
-		if root == nil || root.Metadata["gc.kind"] != "workflow" || !strings.EqualFold(root.Metadata["gc.formula_contract"], "graph.v2") {
-			return fmt.Errorf("drain item formula %q for graph.v2 formula %q must declare contract = \"graph.v2\"", itemFormula, parentName)
+		if root == nil || root.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindWorkflow || !strings.EqualFold(root.Metadata[beadmeta.FormulaContractMetadataKey], beadmeta.FormulaContractGraphV2) {
+			return fmt.Errorf("drain item formula %q for v2 formula %q must declare the formulas v2 contract ([requires] formula_compiler = \">=2.0.0\")", itemFormula, parentName)
 		}
 		if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{Vars: vars}); err != nil {
-			return fmt.Errorf("validating drain item formula %q runtime vars for graph.v2 formula %q: %w", itemFormula, parentName, err)
+			return fmt.Errorf("validating drain item formula %q runtime vars for v2 formula %q: %w", itemFormula, parentName, err)
 		}
 	}
 	return nil
@@ -318,10 +352,10 @@ func drainItemFormulaNames(recipe *formula.Recipe) []string {
 	seen := make(map[string]struct{})
 	var out []string
 	for _, step := range recipe.Steps {
-		if strings.TrimSpace(step.Metadata["gc.kind"]) != "drain" {
+		if strings.TrimSpace(step.Metadata[beadmeta.KindMetadataKey]) != beadmeta.KindDrain {
 			continue
 		}
-		name := strings.TrimSpace(step.Metadata["gc.drain_formula"])
+		name := strings.TrimSpace(step.Metadata[beadmeta.DrainFormulaMetadataKey])
 		if name == "" {
 			continue
 		}
@@ -340,7 +374,7 @@ func ValidateNoReservedUserVars(vars map[string]string) error {
 	for key := range vars {
 		switch strings.TrimSpace(key) {
 		case ConvoyIDVar, LegacyIssueVar, legacyBeadIDVar:
-			return fmt.Errorf("graph.v2 reserved variable %q cannot be supplied by the caller", key)
+			return fmt.Errorf("formulas v2 reserved variable %q cannot be supplied by the caller", key)
 		}
 	}
 	return nil
@@ -351,20 +385,20 @@ func ValidateNoReservedUserVars(vars map[string]string) error {
 func NormalizeInputConvoy(store beads.Store, targetID string) (string, error) {
 	targetID = strings.TrimSpace(targetID)
 	if store == nil {
-		return "", fmt.Errorf("graph.v2 invocation requires a bead store")
+		return "", fmt.Errorf("formulas v2 invocation requires a bead store")
 	}
 	if targetID == "" {
-		return "", fmt.Errorf("graph.v2 target is required")
+		return "", fmt.Errorf("formulas v2 target is required")
 	}
 	target, err := store.Get(targetID)
 	if err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
-			return "", fmt.Errorf("graph.v2 target %s not found: %w", targetID, err)
+			return "", fmt.Errorf("formulas v2 target %s not found: %w", targetID, err)
 		}
-		return "", fmt.Errorf("loading graph.v2 target %s: %w", targetID, err)
+		return "", fmt.Errorf("loading formulas v2 target %s: %w", targetID, err)
 	}
 	if convoycore.IsTerminalStatus(target.Status) {
-		return "", fmt.Errorf("graph.v2 target %s is %s", target.ID, target.Status)
+		return "", fmt.Errorf("formulas v2 target %s is %s", target.ID, target.Status)
 	}
 	if target.Type == "convoy" {
 		return target.ID, nil
@@ -378,12 +412,23 @@ func NormalizeInputConvoy(store beads.Store, targetID string) (string, error) {
 
 // CreateSingleItemInputConvoy creates a system-created one-item convoy for a
 // graph.v2 invocation target.
+//
+// store is the store the TARGET was resolved from, and that is the only store
+// this convoy can be minted in. A synthetic input convoy is a WORK bead
+// (coordclass.Classify) for the same reason the mechanics require it: its whole
+// content is one `tracks` edge to the target, and convoycore.TrackItemIn refuses
+// an edge whose member is owned by another class store, because a dep row cannot
+// reference an id its own store cannot resolve. Every caller reaches this through
+// NormalizeInputConvoy, which Gets the target from the same handle it passes
+// here, so co-residence is structural rather than a convention a caller has to
+// remember: routing this at a graph binding would fail to find the target long
+// before it could mint a convoy in the wrong ledger.
 func CreateSingleItemInputConvoy(store beads.Store, target beads.Bead) (beads.Bead, error) {
 	if store == nil {
-		return beads.Bead{}, fmt.Errorf("graph.v2 invocation requires a bead store")
+		return beads.Bead{}, fmt.Errorf("formulas v2 invocation requires a bead store")
 	}
 	if convoycore.IsTerminalStatus(target.Status) {
-		return beads.Bead{}, fmt.Errorf("graph.v2 target %s is %s", target.ID, target.Status)
+		return beads.Bead{}, fmt.Errorf("formulas v2 target %s is %s", target.ID, target.Status)
 	}
 	if strings.TrimSpace(target.ID) == "" {
 		return beads.Bead{}, fmt.Errorf("input convoy target id is empty")
@@ -401,14 +446,23 @@ func CreateSingleItemInputConvoy(store beads.Store, target beads.Bead) (beads.Be
 		return beads.Bead{}, fmt.Errorf("creating input convoy for %s: %w", target.ID, err)
 	}
 	if err := convoycore.TrackItem(store, created.ID, target.ID); err != nil {
+		// The convoy was minted for this pour and tracks nothing; leaving it
+		// open would strand a synthetic claim-attracting bead every time a
+		// pour fails here (cross-store dep-adds are the observed trigger).
+		// Best-effort close: the tracking error is the failure to surface.
+		_ = store.Close(created.ID) //nolint:errcheck // best-effort cleanup of this pour's own artifact
 		return beads.Bead{}, fmt.Errorf("tracking %s from input convoy %s: %w", target.ID, created.ID, err)
 	}
 	return created, nil
 }
 
 // PreparePreviewInvocation validates graph.v2 preview inputs without creating
-// input convoys or workflow roots.
-func PreparePreviewInvocation(ctx context.Context, store beads.Store, formulaName string, searchPaths []string, targetID string, userVars map[string]string) (Invocation, error) {
+// input convoys or workflow roots. targetIsRoutingIdentity marks targetID as
+// a configured agent identity (for example a workflow root's gc.routed_to
+// value) rather than a bead or convoy ID; routing identities have no
+// bead-store entry, so the preview substitutes a synthetic input convoy
+// instead of resolving the target through the store.
+func PreparePreviewInvocation(ctx context.Context, store beads.Store, formulaName string, searchPaths []string, targetID string, targetIsRoutingIdentity bool, userVars map[string]string) (Invocation, error) {
 	resolved, parser, err := loadFormulaWithParser(formulaName, searchPaths)
 	if err != nil {
 		return Invocation{}, fmt.Errorf("loading formula %q: %w", formulaName, err)
@@ -452,14 +506,19 @@ func PreparePreviewInvocation(ctx context.Context, store beads.Store, formulaNam
 				return Invocation{}, err
 			}
 		}
-		return Invocation{}, fmt.Errorf("graph.v2 target is required")
+		return Invocation{}, fmt.Errorf("formulas v2 target is required")
 	}
 	if err := formula.ValidateGraphV2RecipeReservedSymbols(recipe, true); err != nil {
 		return Invocation{}, err
 	}
-	inputConvoyID, err := PreviewInputConvoyID(store, targetID)
-	if err != nil {
-		return Invocation{}, err
+	var inputConvoyID string
+	if targetIsRoutingIdentity {
+		inputConvoyID = PreviewInputConvoyIDForRoutingIdentity(targetID)
+	} else {
+		inputConvoyID, err = PreviewInputConvoyID(store, targetID)
+		if err != nil {
+			return Invocation{}, err
+		}
 	}
 	inv.Targeted = true
 	inv.InputConvoy = inputConvoyID
@@ -475,7 +534,7 @@ func PreparePreviewInvocation(ctx context.Context, store beads.Store, formulaNam
 	if len(legacyRefs) > 0 {
 		memberID, err := previewLegacyIssueAlias(store, targetID, inputConvoyID)
 		if err != nil {
-			return Invocation{}, fmt.Errorf("resolving deprecated issue alias for graph.v2 formula %q: %w", formulaName, err)
+			return Invocation{}, fmt.Errorf("resolving deprecated issue alias for v2 formula %q: %w", formulaName, err)
 		}
 		inv.Vars[LegacyIssueVar] = memberID
 	}
@@ -500,22 +559,33 @@ func previewLegacyIssueAlias(store beads.Store, targetID, inputConvoyID string) 
 func PreviewInputConvoyID(store beads.Store, targetID string) (string, error) {
 	targetID = strings.TrimSpace(targetID)
 	if store == nil {
-		return "", fmt.Errorf("graph.v2 preview requires a bead store")
+		return "", fmt.Errorf("formulas v2 preview requires a bead store")
 	}
 	target, err := store.Get(targetID)
 	if err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
-			return "", fmt.Errorf("graph.v2 target %s not found: %w", targetID, err)
+			return "", fmt.Errorf("formulas v2 target %s not found: %w", targetID, err)
 		}
-		return "", fmt.Errorf("loading graph.v2 target %s: %w", targetID, err)
+		return "", fmt.Errorf("loading formulas v2 target %s: %w", targetID, err)
 	}
 	if convoycore.IsTerminalStatus(target.Status) {
-		return "", fmt.Errorf("graph.v2 target %s is %s", target.ID, target.Status)
+		return "", fmt.Errorf("formulas v2 target %s is %s", target.ID, target.Status)
 	}
 	if target.Type == "convoy" {
 		return target.ID, nil
 	}
 	return previewInputConvoyPrefix + target.ID, nil
+}
+
+// PreviewInputConvoyIDForRoutingIdentity returns the synthetic read-only
+// input convoy ID a graph.v2 preview should use when the preview target is a
+// routing identity (a configured agent identity, for example a workflow
+// root's gc.routed_to value) rather than a bead or convoy ID. Routing
+// identities have no bead-store entry, so the preview substitutes the same
+// synthetic preview-input-convoy value a non-convoy bead target receives,
+// without a store lookup.
+func PreviewInputConvoyIDForRoutingIdentity(targetID string) string {
+	return previewInputConvoyPrefix + strings.TrimSpace(targetID)
 }
 
 // LockKey serializes process-local graph.v2 materialization for a deterministic

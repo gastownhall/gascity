@@ -110,7 +110,7 @@ func TestMaybeGenerateTitleAsync_ExplicitTitle(t *testing.T) {
 	}
 
 	// When userTitle is set, no generation should happen.
-	done := MaybeGenerateTitleAsync(store, b.ID, "my explicit title", "hello world", provider, "", func(string, ...any) {})
+	done := MaybeGenerateTitleAsync(beads.SessionStore{Store: store}, b.ID, "my explicit title", "hello world", provider, "", func(string, ...any) {})
 	<-done
 
 	got, _ := store.Get(b.ID)
@@ -123,7 +123,7 @@ func TestMaybeGenerateTitleAsync_EmptyMessage(t *testing.T) {
 	store := beads.NewMemStore()
 	b, _ := store.Create(beads.Bead{Title: "template-name"})
 
-	done := MaybeGenerateTitleAsync(store, b.ID, "", "", nil, "", func(string, ...any) {})
+	done := MaybeGenerateTitleAsync(beads.SessionStore{Store: store}, b.ID, "", "", nil, "", func(string, ...any) {})
 	<-done
 
 	got, _ := store.Get(b.ID)
@@ -151,7 +151,7 @@ func TestMaybeGenerateTitleAsync_MockProvider(t *testing.T) {
 		PrintArgs: []string{"--print"},
 	}
 
-	done := MaybeGenerateTitleAsync(store, b.ID, "", "fix the login redirect loop", provider, "", func(string, ...any) {})
+	done := MaybeGenerateTitleAsync(beads.SessionStore{Store: store}, b.ID, "", "fix the login redirect loop", provider, "", func(string, ...any) {})
 	<-done
 
 	got, err := store.Get(b.ID)

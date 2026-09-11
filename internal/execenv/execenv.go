@@ -4,6 +4,7 @@ package execenv
 
 import (
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 )
@@ -11,7 +12,41 @@ import (
 // Redacted is the replacement marker used when removing secrets from text.
 const Redacted = "[redacted]"
 
+// UsageMetricsDisableEnv is the process-level Gas City usage-metrics opt-out.
+const UsageMetricsDisableEnv = "GC_DISABLE_USAGE_METRICS"
+
+// UsageMetricsDisableValue is the canonical disabled value.
+const UsageMetricsDisableValue = "1"
+
+// UsageMetricsDisabledEntry is the canonical child-environment assignment.
+const UsageMetricsDisabledEntry = UsageMetricsDisableEnv + "=" + UsageMetricsDisableValue
+
 var sensitiveAssignmentRE = regexp.MustCompile(`(?i)((?:[A-Z0-9_.-]*(?:TOKEN|SECRET|PASSWORD|PRIVATE[_-]?KEY|API[_-]?KEY|ACCESS[_-]?KEY|CREDENTIALS?|OAUTH|AUTH[_-]?JSON)[A-Z0-9_.-]*|--?[A-Z0-9_.-]*(?:token|secret|password|private-key|api-key|access-key|credential|oauth)[A-Z0-9_.-]*)\s*(?:=|:|\s)\s*)([^ \t\r\n,;]+)`)
+
+// WithUsageMetricsDisabled returns a copy of environ with every existing usage
+// metrics opt-out entry replaced by one canonical disabled value. All unrelated
+// entries retain their original order and multiplicity.
+func WithUsageMetricsDisabled(environ []string) []string {
+	return withUsageMetricsDisabledForGOOS(environ, runtime.GOOS)
+}
+
+func withUsageMetricsDisabledForGOOS(environ []string, goos string) []string {
+	out := make([]string, 0, len(environ)+1)
+	for _, entry := range environ {
+		key, _, _ := strings.Cut(entry, "=")
+		if !usageMetricsDisableKeyEqual(key, goos) {
+			out = append(out, entry)
+		}
+	}
+	return append(out, UsageMetricsDisabledEntry)
+}
+
+func usageMetricsDisableKeyEqual(key, goos string) bool {
+	if goos == "windows" {
+		return strings.EqualFold(key, UsageMetricsDisableEnv)
+	}
+	return key == UsageMetricsDisableEnv
+}
 
 // IsSensitiveKey reports whether an environment key is likely to contain a
 // secret. Callers should strip inherited values for these keys and require

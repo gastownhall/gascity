@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -434,8 +435,10 @@ func ParseCursor(s string) map[string]uint64 {
 		if !ok || city == "" {
 			continue
 		}
-		var seq uint64
-		fmt.Sscanf(seqStr, "%d", &seq) //nolint:errcheck // best-effort parse
+		seq, err := strconv.ParseUint(seqStr, 10, 64)
+		if err != nil {
+			continue
+		}
 		m[city] = seq
 	}
 	return m

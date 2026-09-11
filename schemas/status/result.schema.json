@@ -229,12 +229,27 @@
         "running_agents": {
           "type": "integer"
         },
+        "unknown_agents": {
+          "type": "integer",
+          "description": "How many of total_agents the runtime probe never answered for. Omitted unless the result is partial. running_agents counts only agents observed running, so during a partial result total_agents minus running_agents is not a count of stopped agents, and this is the part of that difference nothing was learned about."
+        },
         "active_sessions": {
           "type": "integer"
         },
         "suspended_sessions": {
           "type": "integer"
         }
+      }
+    },
+    "partial": {
+      "type": "boolean",
+      "description": "True when the result is intentionally degraded because one or more live status probes timed out or otherwise failed."
+    },
+    "partial_errors": {
+      "type": "array",
+      "description": "Human-readable diagnostics explaining omitted or unknown portions of a partial status result.",
+      "items": {
+        "type": "string"
       }
     }
   }

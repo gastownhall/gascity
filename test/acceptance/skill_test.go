@@ -31,7 +31,7 @@ import (
 // lookup path through the real binary.
 func TestSkillMaterializeCLI(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.Init("claude")
+	c.InitNoStart("claude")
 
 	// Add a skill to the city pack's skills directory.
 	skillDir := filepath.Join(c.Dir, "skills", "plan")
@@ -84,7 +84,7 @@ func TestSkillMaterializeCLI(t *testing.T) {
 // convention-discovered agents (see internal/config/agent_discovery.go).
 func TestSkillDoctorFlagsCollision(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.Init("claude")
+	c.InitNoStart("claude")
 
 	// Two convention-discovered agents with agent.toml so their
 	// Provider + SkillsDir both populate at config load.
@@ -133,7 +133,7 @@ func TestSkillDoctorFlagsCollision(t *testing.T) {
 // skills alongside city-pack skills.
 func TestSkillListIncludesBootstrap(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.Init("claude")
+	c.InitNoStart("claude")
 
 	// Add a city-pack skill.
 	cityPlan := filepath.Join(c.Dir, "skills", "plan")

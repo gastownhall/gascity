@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -88,7 +89,7 @@ func ResolveOptions(schema []ProviderOption, options map[string]string, effectiv
 		if value, ok := options[opt.Key]; ok {
 			choice := findChoice(opt.Choices, value)
 			extraArgs = append(extraArgs, choice.FlagArgs...)
-			metadata["opt_"+opt.Key] = value
+			metadata[beadmeta.OptionMetadataPrefix+opt.Key] = value
 		} else {
 			// Use effective default, falling back to schema default.
 			defValue := effectiveDefaults[opt.Key]

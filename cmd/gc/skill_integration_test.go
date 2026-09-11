@@ -22,6 +22,10 @@ func TestIsStage2EligibleSession(t *testing.T) {
 	}{
 		{"default empty → tmux (eligible)", "", "", true},
 		{"tmux eligible", "tmux", "", true},
+		// herdr executes PreStart via the herdr provider's runPreStart
+		// before the agent is created (internal/runtime/herdr/provider.go).
+		{"herdr eligible (executes PreStart)", "herdr", "", true},
+		{"herdr + acp agent → ineligible", "herdr", "acp", false},
 		// subprocess runtime does not execute PreStart in v0.15.1 —
 		// ineligible per Phase 3 pass-1 review.
 		{"subprocess ineligible (no PreStart execution)", "subprocess", "", false},

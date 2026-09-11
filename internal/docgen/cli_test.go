@@ -52,9 +52,13 @@ func TestRenderCLIMarkdown_BasicTree(t *testing.T) {
 
 	md := buf.String()
 
-	// Check header.
-	if !strings.Contains(md, "# CLI Reference") {
-		t.Error("missing CLI Reference header")
+	// Check frontmatter title (Mintlify renders it as the page header;
+	// a body H1 would duplicate it).
+	if !strings.Contains(md, `title: "CLI Reference"`) {
+		t.Error("missing CLI Reference frontmatter title")
+	}
+	if strings.Contains(md, "# CLI Reference") {
+		t.Error("body H1 duplicates the frontmatter title")
 	}
 	if !strings.Contains(md, "Auto-generated") {
 		t.Error("missing auto-generated note")
@@ -164,6 +168,23 @@ func TestRenderCLIMarkdown_ExampleField(t *testing.T) {
 	}
 	if !strings.Contains(md, "myapp deploy staging") {
 		t.Error("Example content missing")
+	}
+}
+
+func TestRenderCLIMarkdown_ExampleDedented(t *testing.T) {
+	root := testTree()
+	var buf bytes.Buffer
+	if err := RenderCLIMarkdown(&buf, root); err != nil {
+		t.Fatalf("RenderCLIMarkdown: %v", err)
+	}
+
+	md := buf.String()
+	// Cobra Example strings indent every line for terminal help; the
+	// rendered code fence must strip that common indent from all lines,
+	// not just the first.
+	want := "```\nmyapp deploy staging\nmyapp deploy production --force\n```"
+	if !strings.Contains(md, want) {
+		t.Errorf("Example block not dedented; want %q in output", want)
 	}
 }
 

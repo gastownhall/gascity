@@ -67,7 +67,7 @@ scope = "city"
 		t.Fatal(err)
 	}
 
-	agents, _, _, _, _, _, _, err := loadPack(
+	agents, _, _, _, _, _, _, _, err := loadPack(
 		fsys.OSFS{},
 		filepath.Join(packDir, "pack.toml"),
 		packDir,
@@ -115,7 +115,7 @@ scope = "city"
 		t.Fatal(err)
 	}
 
-	agents, _, _, _, _, _, _, err := loadPack(
+	agents, _, _, _, _, _, _, _, err := loadPack(
 		fsys.OSFS{},
 		filepath.Join(packDir, "pack.toml"),
 		packDir,

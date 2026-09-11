@@ -6,7 +6,8 @@
 # T3 bridge provider against a Gas-Town-shaped roster (mayor + witness,
 # refinery, polecat), not to mirror the full-featured pack.
 #
-# For the complete Gas Town pack, see examples/gastown/packs/gastown.
+# For the complete Gas Town pack, see the gastown pack in gascity-packs
+# (github.com/gastownhall/gascity-packs).
 
 [pack]
 name = "t3demo"

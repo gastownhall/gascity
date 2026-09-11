@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/pathutil"
@@ -56,7 +57,7 @@ func (c *FormulaRequirementsCheck) Run(_ *CheckContext) *CheckResult {
 		r.Status = StatusWarning
 		r.Message = fmt.Sprintf("%d formula requirement warning(s)", warnings)
 	}
-	r.FixHint = `replace legacy contract = "graph.v2" with [requires] formula_compiler = ">=2.0.0"; enable [daemon] formula_v2 or lower requirements; fix invalid requirements and parent/child conflicts`
+	r.FixHint = `replace deprecated contract = "graph.v2" with [requires] formula_compiler = ">=2.0.0"; enable [daemon] formula_v2 or lower requirements; fix invalid requirements and parent/child conflicts`
 	return r
 }
 
@@ -99,7 +100,7 @@ func (c *FormulaRequirementsCheck) collectIssues() []formulaRequirementIssue {
 				})
 				continue
 			}
-			if strings.EqualFold(strings.TrimSpace(f.Contract), "graph.v2") {
+			if strings.EqualFold(strings.TrimSpace(f.Contract), beadmeta.FormulaContractGraphV2) {
 				addIssue(formulaRequirementIssue{
 					severity: StatusWarning,
 					scope:    scope.name,
@@ -128,7 +129,7 @@ func (c *FormulaRequirementsCheck) collectIssues() []formulaRequirementIssue {
 					message:  err.Error(),
 				})
 			}
-			if err := formula.ValidateHostRequirements(resolved, c.cfg.Daemon.FormulaV2); err != nil {
+			if err := formula.ValidateHostRequirements(resolved, c.cfg.Daemon.FormulaV2Enabled()); err != nil {
 				addIssue(formulaRequirementIssue{
 					severity: StatusError,
 					scope:    scope.name,

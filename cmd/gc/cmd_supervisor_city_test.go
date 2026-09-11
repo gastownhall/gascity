@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -15,12 +17,104 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
+
+// withControllerAlive overrides the standalone-controller probe so the
+// registration-rejection tests exercise the reject path deterministically,
+// without depending on a real socket-accept handshake winning a race against
+// controllerAlive's read deadline under parallel/high-load runs (#3847). The
+// real probe mechanics stay covered by controller_test.go.
+func withControllerAlive(t *testing.T, pid int) {
+	t.Helper()
+	withControllerHosting(t, pid, controllerHostingStandalone)
+}
+
+func withControllerHosting(t *testing.T, pid int, hostingMode controllerHostingMode) {
+	t.Helper()
+	prev := controllerIdentityHook
+	controllerIdentityHook = func(string) controllerIdentityReply {
+		return controllerIdentityReply{PID: pid, HostingMode: hostingMode}
+	}
+	t.Cleanup(func() { controllerIdentityHook = prev })
+}
+
+func TestEnsureNoStandaloneControllerAcceptsSupervisorHostedController(t *testing.T) {
+	withControllerHosting(t, 4242, controllerHostingSupervisor)
+
+	pid, err := ensureNoStandaloneController(t.TempDir())
+	if err != nil {
+		t.Fatalf("ensureNoStandaloneController: %v", err)
+	}
+	if pid != 0 {
+		t.Fatalf("ensureNoStandaloneController pid = %d, want 0", pid)
+	}
+}
+
+func TestEnsureNoStandaloneControllerRecognizesLegacySupervisorPID(t *testing.T) {
+	withControllerHosting(t, 4242, controllerHostingUnknown)
+	oldSupervisorAlive := supervisorAliveHook
+	supervisorAliveHook = func() int { return 4242 }
+	t.Cleanup(func() { supervisorAliveHook = oldSupervisorAlive })
+
+	pid, err := ensureNoStandaloneController(t.TempDir())
+	if err != nil {
+		t.Fatalf("ensureNoStandaloneController: %v", err)
+	}
+	if pid != 0 {
+		t.Fatalf("ensureNoStandaloneController pid = %d, want 0", pid)
+	}
+}
+
+func TestEnsureNoStandaloneControllerLeavesHeldLockHostingUnknown(t *testing.T) {
+	cityPath := t.TempDir()
+	gcDir := filepath.Join(cityPath, ".gc")
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := acquireControllerLock(cityPath)
+	if err != nil {
+		t.Fatalf("acquire controller lock: %v", err)
+	}
+	defer lock.Close() //nolint:errcheck // test cleanup
+	withControllerHosting(t, 0, controllerHostingUnknown)
+
+	pid, err := ensureNoStandaloneController(cityPath)
+	if !errors.Is(err, errControllerHostingUnknown) {
+		t.Fatalf("ensureNoStandaloneController error = %v, want unknown hosting", err)
+	}
+	if pid != 0 {
+		t.Fatalf("ensureNoStandaloneController pid = %d, want 0 without a responding controller", pid)
+	}
+}
+
+func TestRegisterCityWithSupervisorDoesNotMislabelLegacyController(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	withControllerHosting(t, 4242, controllerHostingUnknown)
+
+	var stdout, stderr bytes.Buffer
+	if code := registerCityWithSupervisor(cityPath, &stdout, &stderr, "gc start", true); code != 1 {
+		t.Fatalf("registerCityWithSupervisor code = %d, want 1", code)
+	}
+	got := stderr.String()
+	if !strings.Contains(got, "hosting mode is unavailable") || strings.Contains(got, "standalone controller already running") {
+		t.Fatalf("stderr = %q, want unknown-hosting diagnostic without standalone label", got)
+	}
+	if !strings.Contains(got, "gc stop ") {
+		t.Fatalf("stderr = %q, want an actionable 'gc stop' remedy", got)
+	}
+	if want := supervisorRetryCommand("gc start", cityPath); !strings.Contains(got, want) {
+		t.Fatalf("stderr = %q, want retry command %q", got, want)
+	}
+}
 
 //nolint:unparam // tests override hook behavior but keep fixed timeout/poll values for determinism
 func withSupervisorTestHooks(t *testing.T, ensure func(stdout, stderr io.Writer) int, reload func(stdout, stderr io.Writer) int, alive func() int, running func(string) (bool, string, bool), timeout, poll time.Duration) {
@@ -42,7 +136,7 @@ func withSupervisorTestHooks(t *testing.T, ensure func(stdout, stderr io.Writer)
 	supervisorAliveHook = alive
 	supervisorCityRunningHook = running
 	supervisorCityErrorHook = supervisorCityError
-	waitForSupervisorControllerStopHook = waitForStandaloneControllerStop
+	waitForSupervisorControllerStopHook = waitForSupervisorControllerStop
 	waitForSupervisorCityHook = waitForSupervisorCity
 	registerCityWithSupervisorTestHook = nil
 	supervisorCityReadyTimeout = timeout
@@ -240,7 +334,7 @@ func TestRegisterCityWithSupervisorKeepsRegistrationWhenReloadFails(t *testing.T
 			reloads++
 			return 1
 		},
-		func() int { return 4242 },
+		func() int { return 0 },
 		func(string) (bool, string, bool) { return false, "", true },
 		20*time.Millisecond,
 		time.Millisecond,
@@ -321,7 +415,7 @@ func TestRegisterCityWithSupervisorFailsFastWhenSupervisorStopsDuringWait(t *tes
 	// 5s startup_timeout but well above the wait-loop's logical exit time).
 	// waitStarted is captured inside the first alive-hook callback, so the
 	// elapsed window measures everything from that point onward: the
-	// remaining ensureLegacyNamedPacksCached / MaterializeBuiltinPacks work,
+	// remaining ensureLegacyNamedPacksCached / EnsureBuiltinRuntimeAssets work,
 	// the wait-loop's first iteration, the error formatting, the
 	// keepRegisteredCity stderr writes, and the assertion itself. Under CPU
 	// contention or a GC pause these can balloon to several hundred ms on
@@ -464,11 +558,11 @@ func TestEffectiveCityNameUsesWorkspaceSiteBinding(t *testing.T) {
 	}
 }
 
-func writeCityWithUnmaterializedGastownImport(t *testing.T) string {
+func writeCityWithLockedPublicGastownImport(t *testing.T) string {
 	t.Helper()
 
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")
-	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"bright-lights\"\n"), 0o644); err != nil {
@@ -479,16 +573,43 @@ name = "bright-lights"
 schema = 2
 
 [imports.gastown]
-source = ".gc/system/packs/gastown"
+source = "` + config.PublicGastownPackSource + `"
+version = "` + config.PublicGastownPackVersion + `"
 `
 	if err := os.WriteFile(filepath.Join(cityPath, "pack.toml"), []byte(packToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	commit := strings.TrimPrefix(config.PublicGastownPackVersion, "sha:")
+	lockToml := strings.Join([]string{
+		"schema = 1",
+		"",
+		`[packs."` + config.PublicGastownPackSource + `"]`,
+		`version = "` + config.PublicGastownPackVersion + `"`,
+		`commit = "` + commit + `"`,
+		`fetched = "2026-01-01T00:00:00Z"`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(cityPath, packman.LockfileName), []byte(lockToml), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return cityPath
 }
 
-func TestEffectiveCityNameMaterializesBuiltinPackImportsBeforeLoad(t *testing.T) {
-	cityPath := writeCityWithUnmaterializedGastownImport(t)
+func assertPublicGastownSyntheticCache(t *testing.T, gcHome string) {
+	t.Helper()
+
+	commit := strings.TrimPrefix(config.PublicGastownPackVersion, "sha:")
+	cacheDir := filepath.Join(gcHome, "cache", "repos", packman.RepoCacheKey(config.PublicGastownPackSource, commit), "gastown")
+	if _, err := os.Stat(filepath.Join(cacheDir, "pack.toml")); err != nil {
+		t.Fatalf("expected public gastown synthetic cache at %s: %v", cacheDir, err)
+	}
+}
+
+func TestEffectiveCityNameHydratesLockedImportCacheBeforeLoad(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	gcHome := filepath.Join(t.TempDir(), "gc-home")
+	t.Setenv("GC_HOME", gcHome)
+	cityPath := writeCityWithLockedPublicGastownImport(t)
 
 	name, err := effectiveCityName(cityPath)
 	if err != nil {
@@ -497,13 +618,14 @@ func TestEffectiveCityNameMaterializesBuiltinPackImportsBeforeLoad(t *testing.T)
 	if name != "bright-lights" {
 		t.Fatalf("effectiveCityName = %q, want %q", name, "bright-lights")
 	}
-	if _, err := os.Stat(filepath.Join(cityPath, citylayout.SystemPacksRoot, "gastown", "pack.toml")); err != nil {
-		t.Fatalf("expected gastown builtin pack to be materialized before config load: %v", err)
-	}
+	assertPublicGastownSyntheticCache(t, gcHome)
 }
 
-func TestLoadSupervisorCityConfigMaterializesBuiltinPackImportsBeforeLoad(t *testing.T) {
-	cityPath := writeCityWithUnmaterializedGastownImport(t)
+func TestLoadSupervisorCityConfigHydratesLockedImportCacheBeforeLoad(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	gcHome := filepath.Join(t.TempDir(), "gc-home")
+	t.Setenv("GC_HOME", gcHome)
+	cityPath := writeCityWithLockedPublicGastownImport(t)
 
 	cfg, _, err := loadSupervisorCityConfig(cityPath)
 	if err != nil {
@@ -512,13 +634,14 @@ func TestLoadSupervisorCityConfigMaterializesBuiltinPackImportsBeforeLoad(t *tes
 	if cfg.Workspace.Name != "bright-lights" {
 		t.Fatalf("workspace name = %q, want %q", cfg.Workspace.Name, "bright-lights")
 	}
-	if _, err := os.Stat(filepath.Join(cityPath, citylayout.SystemPacksRoot, "gastown", "pack.toml")); err != nil {
-		t.Fatalf("expected gastown builtin pack to be materialized before supervisor config load: %v", err)
-	}
+	assertPublicGastownSyntheticCache(t, gcHome)
 }
 
-func TestLoadStartCityConfigMaterializesBuiltinPackImportsBeforeLoad(t *testing.T) {
-	cityPath := writeCityWithUnmaterializedGastownImport(t)
+func TestLoadStartCityConfigInstallsLockedBundledRemoteImportBeforeLoad(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	gcHome := filepath.Join(t.TempDir(), "gc-home")
+	t.Setenv("GC_HOME", gcHome)
+	cityPath := writeCityWithLockedPublicGastownImport(t)
 
 	cfg, _, err := loadStartCityConfig(cityPath)
 	if err != nil {
@@ -527,13 +650,30 @@ func TestLoadStartCityConfigMaterializesBuiltinPackImportsBeforeLoad(t *testing.
 	if cfg.Workspace.Name != "bright-lights" {
 		t.Fatalf("workspace name = %q, want %q", cfg.Workspace.Name, "bright-lights")
 	}
-	if _, err := os.Stat(filepath.Join(cityPath, citylayout.SystemPacksRoot, "gastown", "pack.toml")); err != nil {
-		t.Fatalf("expected gastown builtin pack to be materialized before start config load: %v", err)
+	assertPublicGastownSyntheticCache(t, gcHome)
+}
+
+func TestLoadCityConfigInstallsLockedBundledRemoteImportBeforeLoad(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	gcHome := filepath.Join(t.TempDir(), "gc-home")
+	t.Setenv("GC_HOME", gcHome)
+	cityPath := writeCityWithLockedPublicGastownImport(t)
+
+	cfg, err := loadCityConfig(cityPath)
+	if err != nil {
+		t.Fatalf("loadCityConfig returned error: %v", err)
 	}
+	if cfg.Workspace.Name != "bright-lights" {
+		t.Fatalf("workspace name = %q, want %q", cfg.Workspace.Name, "bright-lights")
+	}
+	assertPublicGastownSyntheticCache(t, gcHome)
 }
 
 func TestLoadStartCityConfigBuiltinGastownMayorHasNoStartupNudge(t *testing.T) {
-	cityPath := writeCityWithUnmaterializedGastownImport(t)
+	t.Setenv("HOME", t.TempDir())
+	gcHome := filepath.Join(t.TempDir(), "gc-home")
+	t.Setenv("GC_HOME", gcHome)
+	cityPath := writeCityWithLockedPublicGastownImport(t)
 
 	cfg, _, err := loadStartCityConfig(cityPath)
 	if err != nil {
@@ -554,17 +694,22 @@ func TestLoadStartCityConfigBuiltinGastownMayorHasNoStartupNudge(t *testing.T) {
 		t.Fatalf("builtin gastown mayor nudge = %q, want empty for always-on resident coordinator", mayor.Nudge)
 	}
 
-	data, err := os.ReadFile(filepath.Join(cityPath, citylayout.SystemPacksRoot, "gastown", "agents", "mayor", "agent.toml"))
+	commit := strings.TrimPrefix(config.PublicGastownPackVersion, "sha:")
+	cacheDir := filepath.Join(gcHome, "cache", "repos", packman.RepoCacheKey(config.PublicGastownPackSource, commit), "gastown")
+	data, err := os.ReadFile(filepath.Join(cacheDir, "agents", "mayor", "agent.toml"))
 	if err != nil {
-		t.Fatalf("read materialized mayor agent.toml: %v", err)
+		t.Fatalf("read bundled mayor agent.toml: %v", err)
 	}
 	if strings.Contains(string(data), "nudge =") {
-		t.Fatalf("materialized builtin mayor agent.toml should not contain a startup nudge:\n%s", string(data))
+		t.Fatalf("bundled mayor agent.toml should not contain a startup nudge:\n%s", string(data))
 	}
 }
 
-func TestLoadSlingCityConfigMaterializesBuiltinPackImportsBeforeLoad(t *testing.T) {
-	cityPath := writeCityWithUnmaterializedGastownImport(t)
+func TestLoadSlingCityConfigHydratesLockedImportCacheBeforeLoad(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	gcHome := filepath.Join(t.TempDir(), "gc-home")
+	t.Setenv("GC_HOME", gcHome)
+	cityPath := writeCityWithLockedPublicGastownImport(t)
 
 	cfg, _, err := loadSlingCityConfig(cityPath)
 	if err != nil {
@@ -573,13 +718,14 @@ func TestLoadSlingCityConfigMaterializesBuiltinPackImportsBeforeLoad(t *testing.
 	if cfg.Workspace.Name != "bright-lights" {
 		t.Fatalf("workspace name = %q, want %q", cfg.Workspace.Name, "bright-lights")
 	}
-	if _, err := os.Stat(filepath.Join(cityPath, citylayout.SystemPacksRoot, "gastown", "pack.toml")); err != nil {
-		t.Fatalf("expected gastown builtin pack to be materialized before sling config load: %v", err)
-	}
+	assertPublicGastownSyntheticCache(t, gcHome)
 }
 
-func TestLoadConfigCommandCityConfigMaterializesBuiltinPackImportsBeforeLoad(t *testing.T) {
-	cityPath := writeCityWithUnmaterializedGastownImport(t)
+func TestLoadConfigCommandCityConfigHydratesLockedImportCacheBeforeLoad(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	gcHome := filepath.Join(t.TempDir(), "gc-home")
+	t.Setenv("GC_HOME", gcHome)
+	cityPath := writeCityWithLockedPublicGastownImport(t)
 
 	cfg, _, err := loadConfigCommandCityConfig(cityPath)
 	if err != nil {
@@ -588,15 +734,38 @@ func TestLoadConfigCommandCityConfigMaterializesBuiltinPackImportsBeforeLoad(t *
 	if cfg.Workspace.Name != "bright-lights" {
 		t.Fatalf("workspace name = %q, want %q", cfg.Workspace.Name, "bright-lights")
 	}
-	if _, err := os.Stat(filepath.Join(cityPath, citylayout.SystemPacksRoot, "gastown", "pack.toml")); err != nil {
-		t.Fatalf("expected gastown builtin pack to be materialized before config command load: %v", err)
-	}
+	assertPublicGastownSyntheticCache(t, gcHome)
 }
 
-func TestRegisterCityWithSupervisorNameOverrideMaterializesBuiltinPackImports(t *testing.T) {
-	gcHome := t.TempDir()
+func TestRegisterCityWithSupervisorInstallsLockedBundledRemoteImportBeforeNameLoad(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	gcHome := filepath.Join(t.TempDir(), "gc-home")
 	t.Setenv("GC_HOME", gcHome)
-	cityPath := writeCityWithUnmaterializedGastownImport(t)
+	cityPath := writeCityWithLockedPublicGastownImport(t)
+
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int { return 0 },
+		func() int { return 0 },
+		func(string) (bool, string, bool) { return false, "", false },
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+
+	var stdout, stderr bytes.Buffer
+	code := registerCityWithSupervisor(cityPath, &stdout, &stderr, "gc register", true)
+	if code != 0 {
+		t.Fatalf("registerCityWithSupervisor code = %d, want 0: %s", code, stderr.String())
+	}
+	assertPublicGastownSyntheticCache(t, gcHome)
+}
+
+func TestRegisterCityWithSupervisorNameOverrideHydratesLockedImportCache(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	gcHome := filepath.Join(t.TempDir(), "gc-home")
+	t.Setenv("GC_HOME", gcHome)
+	cityPath := writeCityWithLockedPublicGastownImport(t)
 
 	withSupervisorTestHooks(
 		t,
@@ -613,9 +782,7 @@ func TestRegisterCityWithSupervisorNameOverrideMaterializesBuiltinPackImports(t 
 	if code != 0 {
 		t.Fatalf("registerCityWithSupervisorNamed code = %d, want 0: %s", code, stderr.String())
 	}
-	if _, err := os.Stat(filepath.Join(cityPath, citylayout.SystemPacksRoot, "gastown", "pack.toml")); err != nil {
-		t.Fatalf("expected gastown builtin pack to be materialized before alias registration: %v", err)
-	}
+	assertPublicGastownSyntheticCache(t, gcHome)
 }
 
 func TestRegisterCityWithSupervisorRejectsStandaloneController(t *testing.T) {
@@ -632,25 +799,8 @@ func TestRegisterCityWithSupervisorRejectsStandaloneController(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sockPath := filepath.Join(cityPath, ".gc", "controller.sock")
-	lis, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer lis.Close() //nolint:errcheck // test cleanup
-
-	go func() {
-		conn, acceptErr := lis.Accept()
-		if acceptErr != nil {
-			return
-		}
-		defer conn.Close() //nolint:errcheck // test cleanup
-		buf := make([]byte, 32)
-		n, _ := conn.Read(buf)
-		if strings.Contains(string(buf[:n]), "ping") {
-			conn.Write([]byte("4242\n")) //nolint:errcheck // best-effort reply
-		}
-	}()
+	// Inject the standalone-controller probe (PID 4242) — no live socket (#3847).
+	withControllerAlive(t, 4242)
 
 	var stdout, stderr bytes.Buffer
 	code := registerCityWithSupervisor(cityPath, &stdout, &stderr, "gc start", true)
@@ -794,25 +944,8 @@ func TestRegisterCityWithSupervisorRejectsStandaloneControllerForStoppedManagedC
 		t.Fatal(err)
 	}
 
-	sockPath := filepath.Join(cityPath, ".gc", "controller.sock")
-	lis, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer lis.Close() //nolint:errcheck // test cleanup
-
-	go func() {
-		conn, acceptErr := lis.Accept()
-		if acceptErr != nil {
-			return
-		}
-		defer conn.Close() //nolint:errcheck // test cleanup
-		buf := make([]byte, 32)
-		n, _ := conn.Read(buf)
-		if strings.Contains(string(buf[:n]), "ping") {
-			conn.Write([]byte("4242\n")) //nolint:errcheck // best-effort reply
-		}
-	}()
+	// Inject the standalone-controller probe (PID 4242) — no live socket (#3847).
+	withControllerAlive(t, 4242)
 
 	withSupervisorTestHooks(
 		t,
@@ -912,25 +1045,8 @@ func TestRegisterCityWithSupervisorRejectsStandaloneControllerDuringSupervisorSt
 		t.Fatal(err)
 	}
 
-	sockPath := filepath.Join(cityPath, ".gc", "controller.sock")
-	lis, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer lis.Close() //nolint:errcheck // test cleanup
-
-	go func() {
-		conn, acceptErr := lis.Accept()
-		if acceptErr != nil {
-			return
-		}
-		defer conn.Close() //nolint:errcheck // test cleanup
-		buf := make([]byte, 32)
-		n, _ := conn.Read(buf)
-		if strings.Contains(string(buf[:n]), "ping") {
-			conn.Write([]byte("4242\n")) //nolint:errcheck // best-effort reply
-		}
-	}()
+	// Inject the standalone-controller probe (PID 4242) — no live socket (#3847).
+	withControllerAlive(t, 4242)
 
 	withSupervisorTestHooks(
 		t,
@@ -1002,6 +1118,187 @@ func TestUnregisterCityFromSupervisorRestoresRegistrationOnReloadFailure(t *test
 	resolvedCityPath := canonicalTestPath(cityPath)
 	if len(entries) != 1 || entries[0].Path != resolvedCityPath {
 		t.Fatalf("expected restored registry entry for %s, got %v", resolvedCityPath, entries)
+	}
+}
+
+type supervisorUnregisterTransactionRegistry struct {
+	entries         []supervisor.CityEntry
+	registerErr     error
+	registerCalls   int
+	unregisterCalls int
+}
+
+func (r *supervisorUnregisterTransactionRegistry) List() ([]supervisor.CityEntry, error) {
+	return append([]supervisor.CityEntry(nil), r.entries...), nil
+}
+
+func (r *supervisorUnregisterTransactionRegistry) Register(cityPath, effectiveName string) error {
+	r.registerCalls++
+	if r.registerErr != nil {
+		return r.registerErr
+	}
+	for _, entry := range r.entries {
+		if entry.Path == cityPath && entry.EffectiveName() == effectiveName {
+			return nil
+		}
+	}
+	r.entries = append(r.entries, supervisor.CityEntry{Path: cityPath, Name: effectiveName})
+	return nil
+}
+
+func (r *supervisorUnregisterTransactionRegistry) Unregister(cityPath string) error {
+	r.unregisterCalls++
+	for i, entry := range r.entries {
+		if entry.Path == cityPath {
+			r.entries = append(r.entries[:i], r.entries[i+1:]...)
+			return nil
+		}
+	}
+	return fmt.Errorf("city at %s is not registered", cityPath)
+}
+
+func newSupervisorUnregisterTransactionFixture(t *testing.T) (*supervisorUnregisterTransaction, *supervisorUnregisterTransactionRegistry, supervisor.CityEntry, *bytes.Buffer) {
+	t.Helper()
+	entry := supervisor.CityEntry{Path: t.TempDir(), Name: "registered-alias"}
+	reg := &supervisorUnregisterTransactionRegistry{entries: []supervisor.CityEntry{entry}}
+	return newSupervisorUnregisterTransaction(), reg, entry, &bytes.Buffer{}
+}
+
+func TestSupervisorUnregisterTransactionAbortBeforeRemoveFencesLateRemoval(t *testing.T) {
+	tx, reg, entry, stdout := newSupervisorUnregisterTransactionFixture(t)
+	if rollback := tx.rollback(); rollback.performed {
+		t.Fatalf("rollback before removal = %+v, want no registry mutation", rollback)
+	}
+
+	if _, err := tx.unregister(reg, entry, entry.Path, stdout); !errors.Is(err, errSupervisorUnregisterAborted) {
+		t.Fatalf("unregister after abort error = %v, want %v", err, errSupervisorUnregisterAborted)
+	}
+	tx.commit()
+	if reg.unregisterCalls != 0 {
+		t.Fatalf("Unregister calls = %d, want 0 after abort", reg.unregisterCalls)
+	}
+	if len(reg.entries) != 1 || reg.entries[0] != entry {
+		t.Fatalf("registry after abort-before-remove = %v, want exact original entry %+v", reg.entries, entry)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("late commit output = %q, want no unregister success", stdout.String())
+	}
+}
+
+func TestSupervisorUnregisterTransactionAbortAfterRemoveRestoresExactEntry(t *testing.T) {
+	tx, reg, entry, stdout := newSupervisorUnregisterTransactionFixture(t)
+	cityMissing, err := tx.unregister(reg, entry, entry.Path, stdout)
+	if err != nil || cityMissing {
+		t.Fatalf("unregister = (missing=%t, err=%v), want (false, nil)", cityMissing, err)
+	}
+	if len(reg.entries) != 0 {
+		t.Fatalf("registry after removal = %v, want empty", reg.entries)
+	}
+
+	rollback := tx.rollback()
+	if !rollback.performed || rollback.err != nil {
+		t.Fatalf("rollback = %+v, want successful restoration", rollback)
+	}
+	tx.commit()
+	if len(reg.entries) != 1 || reg.entries[0] != entry {
+		t.Fatalf("registry after rollback = %v, want exact original entry %+v", reg.entries, entry)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("late commit output = %q, want no unregister success", stdout.String())
+	}
+}
+
+func TestSupervisorUnregisterTransactionSuccessfulCommitKeepsEntryRemoved(t *testing.T) {
+	tx, reg, entry, stdout := newSupervisorUnregisterTransactionFixture(t)
+	if cityMissing, err := tx.unregister(reg, entry, entry.Path, stdout); err != nil || cityMissing {
+		t.Fatalf("unregister = (missing=%t, err=%v), want (false, nil)", cityMissing, err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("output before commit = %q, want no unregister success", stdout.String())
+	}
+	tx.commit()
+	tx.commit()
+	if rollback := tx.rollback(); rollback.performed {
+		t.Fatalf("rollback after commit = %+v, want no registry mutation", rollback)
+	}
+	if len(reg.entries) != 0 {
+		t.Fatalf("registry after commit = %v, want empty", reg.entries)
+	}
+	if got, want := strings.Count(stdout.String(), "Unregistered city 'registered-alias'"), 1; got != want {
+		t.Fatalf("commit output = %q, want one unregister success line", stdout.String())
+	}
+}
+
+func TestSupervisorUnregisterTransactionMissingCityCommitsPermanentRemoval(t *testing.T) {
+	missingPath := filepath.Join(t.TempDir(), "missing-city")
+	entry := supervisor.CityEntry{Path: missingPath, Name: "stale-alias"}
+	reg := &supervisorUnregisterTransactionRegistry{entries: []supervisor.CityEntry{entry}}
+	tx := newSupervisorUnregisterTransaction()
+	var stdout bytes.Buffer
+
+	cityMissing, err := tx.unregister(reg, entry, missingPath, &stdout)
+	if err != nil || !cityMissing {
+		t.Fatalf("unregister = (missing=%t, err=%v), want (true, nil)", cityMissing, err)
+	}
+	if rollback := tx.rollback(); rollback.performed {
+		t.Fatalf("rollback after stale removal = %+v, want permanent removal", rollback)
+	}
+	if len(reg.entries) != 0 {
+		t.Fatalf("registry after stale removal = %v, want empty", reg.entries)
+	}
+}
+
+func TestSupervisorUnregisterTransactionRollbackIsIdempotent(t *testing.T) {
+	tx, reg, entry, stdout := newSupervisorUnregisterTransactionFixture(t)
+	if _, err := tx.unregister(reg, entry, entry.Path, stdout); err != nil {
+		t.Fatal(err)
+	}
+	if rollback := tx.rollback(); !rollback.performed || rollback.err != nil {
+		t.Fatalf("first rollback = %+v, want successful restoration", rollback)
+	}
+	if rollback := tx.rollback(); rollback.performed {
+		t.Fatalf("second rollback = %+v, want no repeated restoration", rollback)
+	}
+	if reg.registerCalls != 1 {
+		t.Fatalf("Register calls = %d, want 1", reg.registerCalls)
+	}
+}
+
+func TestSupervisorUnregisterTransactionTimeoutReportsRestorationFailure(t *testing.T) {
+	tx, reg, entry, stdout := newSupervisorUnregisterTransactionFixture(t)
+	reg.registerErr = errors.New("registry is read-only")
+	if _, err := tx.unregister(reg, entry, entry.Path, stdout); err != nil {
+		t.Fatal(err)
+	}
+
+	releaseWorker := make(chan struct{})
+	oldHook := stopBodyLifecycleHook
+	var bodyDone <-chan struct{}
+	stopBodyLifecycleHook = func(done <-chan struct{}) { bodyDone = done }
+	t.Cleanup(func() { stopBodyLifecycleHook = oldHook })
+
+	var stderr bytes.Buffer
+	out := runStopWithWallClockCap(time.Nanosecond, &stderr, tx, func() stopCommandOutcome {
+		<-releaseWorker
+		return stopCommandOutcome{}
+	})
+	close(releaseWorker)
+	awaitClose(t, bodyDone, "late stop worker after restoration failure")
+
+	if out.code != 1 {
+		t.Fatalf("timeout outcome = %+v, want nonzero", out)
+	}
+	if got := stderr.String(); !strings.Contains(got, "timed out after") || !strings.Contains(got, "restore failed for 'registered-alias': registry is read-only") {
+		t.Fatalf("stderr = %q, want timeout and restoration failure", got)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("late worker output = %q, want no unregister success", stdout.String())
+	}
+	if second := tx.rollback(); second.performed {
+		t.Fatalf("second rollback = %+v, want no repeated restoration", second)
+	}
+	if reg.registerCalls != 1 {
+		t.Fatalf("Register calls = %d, want 1", reg.registerCalls)
 	}
 }
 
@@ -1113,8 +1410,7 @@ name = "bright-lights"
 }
 
 func TestUnregisterCityFromSupervisorWithForceSendsForceStop(t *testing.T) {
-	gcHome := t.TempDir()
-	t.Setenv("GC_HOME", gcHome)
+	useTempSupervisorCityHome(t)
 
 	cityPath := filepath.Join(t.TempDir(), "force-city")
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
@@ -1177,7 +1473,7 @@ func TestUnregisterCityFromSupervisorWithForceSendsForceStop(t *testing.T) {
 	waitForSupervisorControllerStopHook = func(string, time.Duration) error { return nil }
 
 	var stdout, stderr bytes.Buffer
-	handled, code := unregisterCityFromSupervisorWithForce(cityPath, &stdout, &stderr, "gc stop", true)
+	handled, code := unregisterCityFromSupervisorWithForce(cityPath, &stdout, &stderr, "gc stop", true, nil)
 	if !handled || code != 0 {
 		t.Fatalf("unregisterCityFromSupervisorWithForce = (%t, %d), want (true, 0); stderr=%q", handled, code, stderr.String())
 	}
@@ -1193,6 +1489,59 @@ func TestUnregisterCityFromSupervisorWithForceSendsForceStop(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for force controller command")
 	}
+}
+
+func TestUnregisterCityFromSupervisorWithForceKeepsRegistrationAfterAmbiguousStop(t *testing.T) {
+	useTempSupervisorCityHome(t)
+
+	cityPath := filepath.Join(t.TempDir(), "force-city")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"force-city\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "force-city"); err != nil {
+		t.Fatal(err)
+	}
+	commands := startStandaloneControllerWithReply(t, cityPath, nil)
+
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int { return 0 },
+		func() int { return 4242 },
+		func(string) (bool, string, bool) { return false, "", false },
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+
+	var stdout, stderr bytes.Buffer
+	handled, code := unregisterCityFromSupervisorWithForce(cityPath, &stdout, &stderr, "gc stop", true, nil)
+	if !handled || code != 1 {
+		t.Fatalf("unregisterCityFromSupervisorWithForce = (%t, %d), want (true, 1); stderr=%q", handled, code, stderr.String())
+	}
+	select {
+	case command := <-commands:
+		if command != "stop-force" {
+			t.Fatalf("controller command = %q, want stop-force", command)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for force controller command")
+	}
+	_, registered, err := registeredCityEntry(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !registered {
+		t.Fatal("city was unregistered after ambiguous controller stop")
+	}
+}
+
+func useTempSupervisorCityHome(t *testing.T) {
+	t.Helper()
+	t.Setenv("GC_HOME", t.TempDir())
 }
 
 func TestUnregisterCityFromSupervisorSkipsProbesWhenCityDirMissing(t *testing.T) {
@@ -1356,7 +1705,7 @@ func TestReconcileCitiesUnregisterEventUsesManagedCityName(t *testing.T) {
 
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
 	var stdout, stderr bytes.Buffer
-	reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
+	reconcileCities(context.Background(), reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
 
 	recorded := supRec.Events
 	if len(recorded) != 1 {
@@ -1437,7 +1786,7 @@ func TestReconcileCitiesEmitsCityCreateFailureForPendingConfigLoadError(t *testi
 	}
 
 	var stdout, stderr bytes.Buffer
-	reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
+	reconcileCities(context.Background(), reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
 
 	recorded := supRec.Events
 	if len(recorded) != 1 {
@@ -1492,7 +1841,7 @@ func TestReconcileCitiesUnregisterSkipsRequestResultWithoutPendingRequestID(t *t
 
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
 	var stdout, stderr bytes.Buffer
-	reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
+	reconcileCities(context.Background(), reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
 
 	if len(supRec.Events) != 0 {
 		t.Fatalf("recorded %d supervisor events without pending request_id, want 0: %#v", len(supRec.Events), supRec.Events)
@@ -1742,7 +2091,7 @@ func TestReconcileCitiesNameDriftStopsBeadsProvider(t *testing.T) {
 	})
 	var stdout, stderr bytes.Buffer
 
-	reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
+	reconcileCities(context.Background(), reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
 
 	ops := readOpLog(t, logFile)
 	assertSingleStopWithBenignNoise(t, ops)
@@ -1761,7 +2110,7 @@ func TestSupervisorCreatesControllerSocketForManagedCity(t *testing.T) {
 name = "test-city"
 
 [orders]
-skip = ["beads-health", "cross-rig-deps", "gate-sweep", "mol-dog-jsonl", "mol-dog-reaper", "order-tracking-sweep", "orphan-sweep", "prune-branches", "spawn-storm-detect", "wisp-compact"]
+skip = ["beads-health", "cross-rig-deps", "gate-sweep", "jsonl-export", "reaper", "order-tracking-sweep", "orphan-sweep", "prune-branches", "spawn-storm-detect", "wisp-compact"]
 
 [session]
 provider = "fake"
@@ -1785,7 +2134,7 @@ shutdown_timeout = "100ms"
 
 	cr := newCityRegistry()
 	var stdout, stderr bytes.Buffer
-	reconcileCities(reg, cr, supervisor.PublicationConfig{}, &stdout, &stderr)
+	reconcileCities(context.Background(), reg, cr, supervisor.PublicationConfig{}, &stdout, &stderr)
 
 	sockPath := filepath.Join(canonicalTestPath(cityPath), ".gc", "controller.sock")
 	if _, err := os.Stat(sockPath); err != nil {
@@ -1794,6 +2143,10 @@ shutdown_timeout = "100ms"
 
 	if pid := controllerAlive(canonicalTestPath(cityPath)); pid == 0 {
 		t.Fatal("controller socket exists but does not respond to ping")
+	}
+	identity := probeControllerIdentity(canonicalTestPath(cityPath))
+	if identity.PID != os.Getpid() || identity.HostingMode != controllerHostingSupervisor {
+		t.Fatalf("controller identity = %+v, want PID %d hosted by supervisor", identity, os.Getpid())
 	}
 
 	// Verify convergence commands are routed through the event loop.
@@ -1998,7 +2351,7 @@ func TestReconcileCitiesSkipsCityAlreadyInitializing(t *testing.T) {
 	})
 
 	var stdout, stderr bytes.Buffer
-	reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
+	reconcileCities(context.Background(), reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
 
 	registry.ReadCallback(func(
 		_ map[string]*managedCity,
@@ -2029,7 +2382,7 @@ func TestReconcileCitiesAutoUnregistersAbsentDirectory(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 
 	for i := 0; i < staleCityDirAbsentThreshold; i++ {
-		reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
+		reconcileCities(context.Background(), reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
 	}
 
 	entries, err := reg.List()
@@ -2060,7 +2413,7 @@ func TestReconcileCitiesDoesNotUnregisterBeforeThreshold(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 
 	for i := 0; i < staleCityDirAbsentThreshold-1; i++ {
-		reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
+		reconcileCities(context.Background(), reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
 	}
 
 	entries, err := reg.List()
@@ -2092,13 +2445,13 @@ func TestReconcileCitiesResetsAbsentCounterWhenDirectoryReappears(t *testing.T) 
 	var stdout, stderr bytes.Buffer
 
 	for i := 0; i < staleCityDirAbsentThreshold-1; i++ {
-		reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
+		reconcileCities(context.Background(), reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
 	}
 
 	if err := os.MkdirAll(cityPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
+	reconcileCities(context.Background(), reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
 
 	var dirAbsent int
 	registry.ReadCallback(func(
@@ -2718,5 +3071,73 @@ func TestConfirmCrossCitySupervisorImpactRegistryReadErrorFailsOpenWithWarning(t
 	}
 	if !strings.Contains(stderr.String(), "simulated registry I/O fault") {
 		t.Errorf("registry read error should include the underlying error message; stderr=%q", stderr.String())
+	}
+}
+
+func TestNormalizeRegisteredCityPathResolvesSymlinks(t *testing.T) {
+	root := t.TempDir()
+	realCity := filepath.Join(root, "real-city")
+	if err := os.MkdirAll(realCity, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link-city")
+	if err := os.Symlink(realCity, link); err != nil {
+		t.Skip("symlinks not supported")
+	}
+
+	got, err := normalizeRegisteredCityPath(link)
+	if err != nil {
+		t.Fatalf("normalizeRegisteredCityPath(%q): %v", link, err)
+	}
+	want := normalizePathForCompare(realCity)
+	if got != want {
+		t.Fatalf("normalizeRegisteredCityPath(%q) = %q, want %q", link, got, want)
+	}
+}
+
+// TestIsStructuralInitFailureMessageDetectsSchemaVersionGate pins #4484:
+// a bd schema-version gate ("database is at vN, binary knows up to vM")
+// is a structural failure -- no retry, and no city.toml edit, can ever
+// resolve it, since the fix is an out-of-band bd binary upgrade. Ordinary
+// transient failures (a lock held, a socket busy) must not match.
+func TestIsStructuralInitFailureMessageDetectsSchemaVersionGate(t *testing.T) {
+	structural := `init: beads lifecycle: init city beads: bd list: exit status 1: { "error": "schema version mismatch: database is at v53, binary knows up to v49 (4 migrations ahead)", "schema_skew": {"current_version":53,"delta":4,"required_version":49}, "schema_version": 1 }`
+	if !isStructuralInitFailureMessage(structural) {
+		t.Errorf("isStructuralInitFailureMessage(%q) = false, want true", structural)
+	}
+
+	transient := "controller lock: lock held by another process"
+	if isStructuralInitFailureMessage(transient) {
+		t.Errorf("isStructuralInitFailureMessage(%q) = true, want false", transient)
+	}
+}
+
+// TestInitFailureBackoffDelayEscalatesStructuralFailuresBeyondTransientCeiling
+// pins #4484: gc supervisor previously applied the same capped exponential
+// backoff (10s doubling to a 5-minute ceiling) to every init failure,
+// including a structural schema-version gate that retrying can never
+// resolve -- observed live retrying at the 5-minute ceiling for ~6 days
+// straight. A structural failure must back off to a far longer interval
+// immediately (not escalate gradually like a transient one), while
+// ordinary transient failures keep their existing behavior unchanged.
+func TestInitFailureBackoffDelayEscalatesStructuralFailuresBeyondTransientCeiling(t *testing.T) {
+	structuralMsg := `init: bd list: exit status 1: schema version mismatch: database is at v53, binary knows up to v49 (4 migrations ahead)`
+
+	if got := initFailureBackoffDelay(1, structuralMsg); got != structuralInitFailureBackoff {
+		t.Errorf("initFailureBackoffDelay(1, structural) = %s, want %s (should not use the transient ceiling even on the first failure)", got, structuralInitFailureBackoff)
+	}
+	if got := initFailureBackoffDelay(27, structuralMsg); got != structuralInitFailureBackoff {
+		t.Errorf("initFailureBackoffDelay(27, structural) = %s, want %s", got, structuralInitFailureBackoff)
+	}
+
+	transientMsg := "controller lock: lock held by another process"
+	if got, want := initFailureBackoffDelay(1, transientMsg), 10*time.Second; got != want {
+		t.Errorf("initFailureBackoffDelay(1, transient) = %s, want %s (unchanged transient behavior)", got, want)
+	}
+	if got, want := initFailureBackoffDelay(7, transientMsg), 5*time.Minute; got != want {
+		t.Errorf("initFailureBackoffDelay(7, transient) = %s, want %s (transient ceiling unchanged)", got, want)
+	}
+	if got := initFailureBackoffDelay(7, transientMsg); got == structuralInitFailureBackoff {
+		t.Errorf("initFailureBackoffDelay(7, transient) = %s, must not equal the structural backoff by coincidence", got)
 	}
 }

@@ -22,9 +22,9 @@ func TestAllAndSourceAreDeterministic(t *testing.T) {
 	want := []string{
 		"core=internal/bootstrap/packs/core",
 		"bd=examples/bd",
-		"dolt=examples/dolt",
-		"maintenance=examples/gastown/packs/maintenance",
+		"dolt=examples/bd/dolt",
 		"gastown=examples/gastown/packs/gastown",
+		"gascity=",
 	}
 	if strings.Join(first, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("All = %v, want %v", first, want)
@@ -35,8 +35,68 @@ func TestAllAndSourceAreDeterministic(t *testing.T) {
 		if !ok {
 			t.Fatalf("Source(%q) ok = false, want true", pack.Name)
 		}
-		if source != Repository+"//"+pack.Subpath {
-			t.Fatalf("Source(%q) = %q, want canonical source", pack.Name, source)
+		wantSource := Repository + "//" + pack.Subpath
+		if pack.Subpath == "" {
+			// Public-registry-only packs are addressed by the public source.
+			wantSource = PublicRepository + "//" + pack.Name
+		}
+		if source != wantSource {
+			t.Fatalf("Source(%q) = %q, want %q", pack.Name, source, wantSource)
+		}
+	}
+}
+
+// TestCanonicalImportSourceAuthorsResolvableTreeURLs locks in the rule from
+// issue #3644: the source spelling gc generates into pack.toml must be a
+// dereferenceable GitHub tree URL (the form imports.gascity already uses),
+// never the legacy .git//subpath form that does not resolve in a browser.
+// Recognition still accepts both spellings (TestSourceRecognitionVariants);
+// only generation is constrained here.
+func TestCanonicalImportSourceAuthorsResolvableTreeURLs(t *testing.T) {
+	for _, pack := range All() {
+		source, ok := CanonicalImportSource(pack.Name)
+		if !ok {
+			t.Fatalf("CanonicalImportSource(%q) ok = false, want true", pack.Name)
+		}
+		if !strings.Contains(source, "/tree/") {
+			t.Errorf("CanonicalImportSource(%q) = %q, want a dereferenceable GitHub tree URL", pack.Name, source)
+		}
+		if strings.Contains(source, ".git//") || strings.Contains(source, ".git/tree/") {
+			t.Errorf("CanonicalImportSource(%q) = %q, must not author the legacy non-resolvable .git//subpath form", pack.Name, source)
+		}
+		// The generated spelling must round-trip through recognition so
+		// resolution, cache keying, and the doctor checks still see it as a
+		// bundled source.
+		if !IsSource(source) {
+			t.Errorf("IsSource(%q) = false, generated source must be recognized as bundled", source)
+		}
+	}
+}
+
+// TestGascityBundledSubpathsExistInWorkingTree guards the browse ref choice
+// for issue #3644: CanonicalImportSource authors gascity.git tree URLs at the
+// "main" browse ref while the real pin lives in the version field. That URL is
+// only dereferenceable if the pack subpath still exists at main. This test
+// fails fast if a gascity.git-hosted bundled pack is moved or renamed without
+// updating All(), which would otherwise ship a 404 browse URL into pack.toml.
+// (Public packs live in gascity-packs, not this repo, so they are excluded.)
+func TestGascityBundledSubpathsExistInWorkingTree(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed; cannot locate repo root")
+	}
+	repoRoot := filepath.Join(filepath.Dir(thisFile), "..", "..")
+	for _, pack := range All() {
+		if pack.Subpath == "" {
+			continue
+		}
+		if _, public := publicSubpathForPack(pack.Name); public {
+			continue
+		}
+		packToml := filepath.Join(repoRoot, filepath.FromSlash(pack.Subpath), "pack.toml")
+		if _, err := os.Stat(packToml); err != nil {
+			t.Errorf("bundled pack %q subpath %q has no pack.toml at %s (%v); the generated /tree/main/%s URL would 404 — update builtinpacks.All() or move the pack back",
+				pack.Name, pack.Subpath, packToml, err, pack.Subpath)
 		}
 	}
 }
@@ -55,6 +115,7 @@ func TestSourceRecognitionVariants(t *testing.T) {
 		{name: "with ref", src: coreSource + "#main", want: true},
 		{name: "github tree form", src: "https://github.com/gastownhall/gascity/tree/main/internal/bootstrap/packs/core", want: true},
 		{name: "github blob form", src: "https://github.com/gastownhall/gascity/blob/main/internal/bootstrap/packs/core/pack.toml", want: true},
+		{name: "legacy dolt subpath", src: Repository + "//examples/dolt", want: true},
 		{name: "different repo", src: "https://github.com/example/gascity.git//internal/bootstrap/packs/core", want: false},
 		{name: "unknown subpath", src: Repository + "//internal/bootstrap/packs/missing", want: false},
 	}
@@ -89,7 +150,7 @@ func TestMaterializeSyntheticRepoRoundTripReplacesDestination(t *testing.T) {
 	dst := filepath.Join(t.TempDir(), "cache")
 	writeFile(t, filepath.Join(dst, "stale.txt"), "stale")
 
-	if err := MaterializeSyntheticRepo(dst, testCommit); err != nil {
+	if err := MaterializeSyntheticRepo(dst, Repository, testCommit); err != nil {
 		t.Fatalf("MaterializeSyntheticRepo: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dst, "stale.txt")); !os.IsNotExist(err) {
@@ -98,13 +159,13 @@ func TestMaterializeSyntheticRepoRoundTripReplacesDestination(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dst, syntheticMarkerFile)); err != nil {
 		t.Fatalf("marker stat: %v", err)
 	}
-	if err := ValidateSyntheticRepo(dst, testCommit); err != nil {
+	if err := ValidateSyntheticRepo(dst, Repository, testCommit); err != nil {
 		t.Fatalf("ValidateSyntheticRepo: %v", err)
 	}
 }
 
 func TestMaterializeSyntheticRepoRejectsEmptyCommit(t *testing.T) {
-	err := MaterializeSyntheticRepo(filepath.Join(t.TempDir(), "cache"), " \t\n")
+	err := MaterializeSyntheticRepo(filepath.Join(t.TempDir(), "cache"), Repository, " \t\n")
 	if err == nil {
 		t.Fatal("MaterializeSyntheticRepo accepted empty commit")
 	}
@@ -116,7 +177,7 @@ func TestMaterializeSyntheticRepoRejectsEmptyCommit(t *testing.T) {
 func TestMaterializeSyntheticRepoRejectsUnsafeDestination(t *testing.T) {
 	for _, dst := range []string{"", string(filepath.Separator)} {
 		t.Run(dst, func(t *testing.T) {
-			err := MaterializeSyntheticRepo(dst, testCommit)
+			err := MaterializeSyntheticRepo(dst, Repository, testCommit)
 			if err == nil {
 				t.Fatalf("MaterializeSyntheticRepo(%q) succeeded, want unsafe-path error", dst)
 			}
@@ -127,10 +188,15 @@ func TestMaterializeSyntheticRepoRejectsUnsafeDestination(t *testing.T) {
 	}
 }
 
-func TestMaterializeSyntheticRepoProductionCallersStayInPackman(t *testing.T) {
+func TestMaterializeSyntheticRepoProductionCallersStayAllowlisted(t *testing.T) {
 	repoRoot := testRepoRoot(t)
 	allowed := map[string]bool{
+		// packman owns locked cache hydration for pack installs.
 		"internal/packman/cache.go": true,
+		// config's composition self-heal re-materializes the canonical
+		// bundled pin under the repo-cache write lock when packs.lock has
+		// no entry yet; config cannot route through packman (import cycle).
+		"internal/config/pack_include.go": true,
 	}
 	var offenders []string
 	if err := filepath.WalkDir(repoRoot, func(path string, entry fs.DirEntry, err error) error {
@@ -142,9 +208,16 @@ func TestMaterializeSyntheticRepoProductionCallersStayInPackman(t *testing.T) {
 			case ".git", ".gc", "node_modules", "worktrees":
 				return filepath.SkipDir
 			}
-			// Skip git worktrees embedded in the repo (have a .git file, not dir).
-			if fi, serr := os.Stat(filepath.Join(path, ".git")); serr == nil && !fi.IsDir() {
-				return filepath.SkipDir
+			// Skip git worktrees embedded in the repo (have a .git file, not
+			// dir) — but never apply this to repoRoot itself. gc agent
+			// sessions run from inside a worktree, so repoRoot legitimately
+			// has a .git file rather than a .git directory; skipping on that
+			// condition here would SkipDir the walk's very first entry and
+			// silently visit zero files.
+			if path != repoRoot {
+				if fi, serr := os.Stat(filepath.Join(path, ".git")); serr == nil && !fi.IsDir() {
+					return filepath.SkipDir
+				}
 			}
 			return nil
 		}
@@ -171,13 +244,13 @@ func TestMaterializeSyntheticRepoProductionCallersStayInPackman(t *testing.T) {
 		t.Fatalf("WalkDir(%q): %v", repoRoot, err)
 	}
 	if len(offenders) > 0 {
-		t.Fatalf("MaterializeSyntheticRepo production callers = %v, want only internal/packman/cache.go", offenders)
+		t.Fatalf("MaterializeSyntheticRepo production callers = %v, want only the allowlisted callers (packman cache hydration, config bundled self-heal)", offenders)
 	}
 }
 
 func TestValidateSyntheticRepoAcceptsEquivalentCommit(t *testing.T) {
 	dst := materializeTestRepo(t)
-	if err := ValidateSyntheticRepo(dst, "ABCDEF1"); err != nil {
+	if err := ValidateSyntheticRepo(dst, Repository, "ABCDEF1"); err != nil {
 		t.Fatalf("ValidateSyntheticRepo with abbreviated uppercase commit: %v", err)
 	}
 }
@@ -203,7 +276,7 @@ name = "tampered"
 schema = 1
 `)
 
-	err := ValidateSyntheticRepo(dst, testCommit)
+	err := ValidateSyntheticRepo(dst, Repository, testCommit)
 	if err == nil {
 		t.Fatal("ValidateSyntheticRepo accepted tampered content")
 	}
@@ -219,7 +292,7 @@ func TestValidateSyntheticRepoRejectsTamperedMode(t *testing.T) {
 		t.Fatalf("Chmod(%q): %v", target, err)
 	}
 
-	err := ValidateSyntheticRepo(dst, testCommit)
+	err := ValidateSyntheticRepo(dst, Repository, testCommit)
 	if err == nil {
 		t.Fatal("ValidateSyntheticRepo accepted tampered file mode")
 	}
@@ -241,7 +314,7 @@ func TestValidateSyntheticRepoRejectsSymlinkAncestor(t *testing.T) {
 		t.Fatalf("Symlink(internal): %v", err)
 	}
 
-	err := ValidateSyntheticRepo(dst, testCommit)
+	err := ValidateSyntheticRepo(dst, Repository, testCommit)
 	if err == nil {
 		t.Fatal("ValidateSyntheticRepo accepted symlink ancestor")
 	}
@@ -257,7 +330,7 @@ func TestValidateSyntheticRepoRejectsSymlinkRoot(t *testing.T) {
 		t.Fatalf("Symlink(cache-link): %v", err)
 	}
 
-	err := ValidateSyntheticRepo(link, testCommit)
+	err := ValidateSyntheticRepo(link, Repository, testCommit)
 	if err == nil {
 		t.Fatal("ValidateSyntheticRepo accepted symlink root")
 	}
@@ -270,7 +343,7 @@ func TestValidateSyntheticRepoRejectsNonDirectoryRoot(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "cache")
 	writeFile(t, root, "not a directory")
 
-	err := ValidateSyntheticRepo(root, testCommit)
+	err := ValidateSyntheticRepo(root, Repository, testCommit)
 	if err == nil {
 		t.Fatal("ValidateSyntheticRepo accepted non-directory root")
 	}
@@ -283,7 +356,7 @@ func TestValidateSyntheticRepoRejectsUnexpectedFiles(t *testing.T) {
 	dst := materializeTestRepo(t)
 	writeFile(t, filepath.Join(dst, "internal/bootstrap/packs/core/agents/injected/prompt.md"), "malicious")
 
-	err := ValidateSyntheticRepo(dst, testCommit)
+	err := ValidateSyntheticRepo(dst, Repository, testCommit)
 	if err == nil {
 		t.Fatal("ValidateSyntheticRepo accepted unexpected file")
 	}
@@ -296,7 +369,7 @@ func TestValidateSyntheticRepoRejectsUnexpectedRootSibling(t *testing.T) {
 	dst := materializeTestRepo(t)
 	writeFile(t, filepath.Join(dst, "scratch.txt"), "malicious")
 
-	err := ValidateSyntheticRepo(dst, testCommit)
+	err := ValidateSyntheticRepo(dst, Repository, testCommit)
 	if err == nil {
 		t.Fatal("ValidateSyntheticRepo accepted unexpected root sibling")
 	}
@@ -308,7 +381,7 @@ func TestValidateSyntheticRepoRejectsUnexpectedRootSibling(t *testing.T) {
 func materializeTestRepo(t *testing.T) string {
 	t.Helper()
 	dst := filepath.Join(t.TempDir(), "cache")
-	if err := MaterializeSyntheticRepo(dst, testCommit); err != nil {
+	if err := MaterializeSyntheticRepo(dst, Repository, testCommit); err != nil {
 		t.Fatalf("MaterializeSyntheticRepo: %v", err)
 	}
 	return dst
@@ -344,4 +417,253 @@ func testRepoRoot(t *testing.T) string {
 		t.Fatalf("repo root %q missing go.mod: %v", root, err)
 	}
 	return root
+}
+
+// Fast-path tests for ValidateSyntheticRepoFast. The fast path checks root
+// existence, type, symlink status, marker read/parse/schema/repository/commit,
+// and marker content hash against the memoized binary hash. It does not walk
+// the materialized file set. Tampered file content, tampered file mode, and
+// unexpected-file cases are intentionally full-validator-only checks; see
+// TestValidateSyntheticRepoRejectsTamperedContent,
+// TestValidateSyntheticRepoRejectsTamperedMode, and
+// TestValidateSyntheticRepoRejectsUnexpectedFiles.
+
+func TestValidateSyntheticRepoFastAcceptsValidRepo(t *testing.T) {
+	dst := materializeTestRepo(t)
+	if err := ValidateSyntheticRepoFast(dst, Repository, testCommit); err != nil {
+		t.Fatalf("ValidateSyntheticRepoFast: %v", err)
+	}
+}
+
+func TestValidateSyntheticRepoFastAcceptsEquivalentCommit(t *testing.T) {
+	dst := materializeTestRepo(t)
+	if err := ValidateSyntheticRepoFast(dst, Repository, "ABCDEF1"); err != nil {
+		t.Fatalf("ValidateSyntheticRepoFast with abbreviated uppercase commit: %v", err)
+	}
+}
+
+func TestValidateSyntheticRepoFastRejectsSymlinkRoot(t *testing.T) {
+	dst := materializeTestRepo(t)
+	link := filepath.Join(t.TempDir(), "cache-link")
+	if err := os.Symlink(dst, link); err != nil {
+		t.Fatalf("Symlink(cache-link): %v", err)
+	}
+	err := ValidateSyntheticRepoFast(link, Repository, testCommit)
+	if err == nil {
+		t.Fatal("ValidateSyntheticRepoFast accepted symlink root")
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("error = %v, want symlink detail", err)
+	}
+}
+
+func TestValidateSyntheticRepoFastRejectsNonDirectoryRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "cache")
+	writeFile(t, root, "not a directory")
+	err := ValidateSyntheticRepoFast(root, Repository, testCommit)
+	if err == nil {
+		t.Fatal("ValidateSyntheticRepoFast accepted non-directory root")
+	}
+	if !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("error = %v, want not-a-directory detail", err)
+	}
+}
+
+func TestValidateSyntheticRepoFastRejectsMissingMarker(t *testing.T) {
+	dst := materializeTestRepo(t)
+	if err := os.Remove(filepath.Join(dst, syntheticMarkerFile)); err != nil {
+		t.Fatalf("Remove(marker): %v", err)
+	}
+	err := ValidateSyntheticRepoFast(dst, Repository, testCommit)
+	if err == nil {
+		t.Fatal("ValidateSyntheticRepoFast accepted missing marker")
+	}
+	if !strings.Contains(err.Error(), "missing bundled pack cache marker") {
+		t.Fatalf("error = %v, want missing marker detail", err)
+	}
+}
+
+func TestValidateSyntheticRepoFastRejectsWrongCommit(t *testing.T) {
+	dst := materializeTestRepo(t)
+	err := ValidateSyntheticRepoFast(dst, Repository, "0000000000000000000000000000000000000000")
+	if err == nil {
+		t.Fatal("ValidateSyntheticRepoFast accepted wrong commit")
+	}
+	if !strings.Contains(err.Error(), "commit") {
+		t.Fatalf("error = %v, want commit detail", err)
+	}
+}
+
+func TestValidateSyntheticRepoFastRejectsWrongContentHash(t *testing.T) {
+	dst := materializeTestRepo(t)
+	markerPath := filepath.Join(dst, syntheticMarkerFile)
+	data, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatalf("ReadFile(marker): %v", err)
+	}
+	tampered := strings.Replace(string(data), "sha256:", "sha256:tampered", 1)
+	if err := os.WriteFile(markerPath, []byte(tampered), 0o644); err != nil {
+		t.Fatalf("WriteFile(marker): %v", err)
+	}
+	err = ValidateSyntheticRepoFast(dst, Repository, testCommit)
+	if err == nil {
+		t.Fatal("ValidateSyntheticRepoFast accepted wrong content hash")
+	}
+	if !strings.Contains(err.Error(), "content hash") {
+		t.Fatalf("error = %v, want content hash detail", err)
+	}
+}
+
+// TestSyntheticCacheKeyComponentMatchesContentHash pins that the cache key stays
+// bound to the embedded pack content, which is what stops two binaries with
+// different packs sharing one cache directory.
+//
+// The component is no longer the bare content hash: the marker schema is folded
+// in alongside it, because a schema change alters the on-disk layout a binary
+// expects WITHOUT altering the content that produced it. See
+// TestSyntheticCacheKeyComponentBindsToMarkerSchema. The content hash must still
+// be present and the value must still be stable.
+func TestSyntheticCacheKeyComponentMatchesContentHash(t *testing.T) {
+	want, err := SyntheticContentHash()
+	if err != nil {
+		t.Fatalf("SyntheticContentHash: %v", err)
+	}
+	got := SyntheticCacheKeyComponent()
+	if got == "" {
+		t.Fatal("SyntheticCacheKeyComponent returned empty for a valid binary")
+	}
+	if !strings.Contains(got, want) {
+		t.Fatalf("SyntheticCacheKeyComponent = %q, want it to contain the content hash %q", got, want)
+	}
+	if !strings.HasPrefix(got, "sha256:") {
+		t.Fatalf("SyntheticCacheKeyComponent = %q, want sha256 prefix", got)
+	}
+	if second := SyntheticCacheKeyComponent(); second != got {
+		t.Fatalf("SyntheticCacheKeyComponent not stable across calls: %q != %q", got, second)
+	}
+}
+
+// TestValidateSyntheticRepoRejectsStrayFilesAnywhere pins the coverage that
+// justifies validatePackFiles no longer walking its own directory, and that
+// scoping the allowed set to the cache's own repository does not weaken it.
+//
+// validateSyntheticRepoFileSet walks the whole tree once and checks every path
+// against the union of the manifests of that repository's layouts. That union
+// check strictly subsumes a per-pack one: ValidateSyntheticRepo calls
+// validatePackFiles for exactly the layouts the union is built from, so a file
+// unexpected for its own pack is absent from the union too. Scoping only removes
+// paths from that union, so nothing a stray could previously land on has become
+// allowed.
+//
+// Nested layouts (examples/bd contains examples/bd/dolt) are covered explicitly:
+// flattening several manifests into one allowed set is where a per-pack and a
+// union check could conceivably disagree, and both the nested directory and its
+// parent are exercised.
+func TestValidateSyntheticRepoRejectsStrayFilesAnywhere(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rel  string
+	}{
+		{"pack root", "internal/bootstrap/packs/core/STRAY.txt"},
+		{"deep inside a pack", "internal/bootstrap/packs/core/assets/STRAY.txt"},
+		{"inside a nested pack", "examples/bd/dolt/STRAY.txt"},
+		{"in the parent of a nested pack", "examples/bd/STRAY.txt"},
+		{"cache root", "STRAY.txt"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dst := materializeTestRepo(t)
+			stray := filepath.Join(dst, filepath.FromSlash(tc.rel))
+			if err := os.MkdirAll(filepath.Dir(stray), 0o755); err != nil {
+				t.Fatalf("MkdirAll: %v", err)
+			}
+			if err := os.WriteFile(stray, []byte("stray"), 0o644); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+			if err := ValidateSyntheticRepo(dst, Repository, testCommit); err == nil {
+				t.Fatalf("ValidateSyntheticRepo accepted a stray file at %s", tc.rel)
+			}
+		})
+	}
+}
+
+// TestSyntheticRepoAllowedPathsIsStable pins that memoizing the allowed-path sets
+// does not change what they contain across calls, and — now that the memo is
+// keyed by repository — that each repository gets its own set rather than
+// whichever one was computed first.
+func TestSyntheticRepoAllowedPathsIsStable(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		repository string
+	}{
+		{"gascity.git", Repository},
+		{"public packs", PublicRepository},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repository := tc.repository
+			files1, dirs1, err := syntheticRepoAllowedPaths(repository)
+			if err != nil {
+				t.Fatalf("syntheticRepoAllowedPaths: %v", err)
+			}
+			files2, dirs2, err := syntheticRepoAllowedPaths(repository)
+			if err != nil {
+				t.Fatalf("syntheticRepoAllowedPaths (second call): %v", err)
+			}
+			if len(files1) != len(files2) || len(dirs1) != len(dirs2) {
+				t.Fatalf("allowed paths changed between calls: files %d/%d dirs %d/%d",
+					len(files1), len(files2), len(dirs1), len(dirs2))
+			}
+			if len(files1) == 0 {
+				t.Fatal("allowed file set is empty")
+			}
+			freshFiles, freshDirs, err := computeSyntheticRepoAllowedPaths(repository)
+			if err != nil {
+				t.Fatalf("computeSyntheticRepoAllowedPaths: %v", err)
+			}
+			assertPathSetsEqual(t, "files", files1, freshFiles)
+			assertPathSetsEqual(t, "dirs", dirs1, freshDirs)
+		})
+	}
+}
+
+// assertPathSetsEqual reports every difference between a memoized path set and a
+// freshly computed one, so a mis-keyed memo names the paths it got wrong.
+func assertPathSetsEqual(t *testing.T, kind string, cached, fresh map[string]struct{}) {
+	t.Helper()
+	for rel := range fresh {
+		if _, ok := cached[rel]; !ok {
+			t.Errorf("memoized %s set missing %s", kind, rel)
+		}
+	}
+	for rel := range cached {
+		if _, ok := fresh[rel]; !ok {
+			t.Errorf("memoized %s set has extra %s", kind, rel)
+		}
+	}
+}
+
+// TestManifestForPackMatchesUncached pins that the memoized per-pack manifest is
+// identical to a freshly built one.
+func TestManifestForPackMatchesUncached(t *testing.T) {
+	for _, pack := range All() {
+		cached, err := manifestForPack(pack)
+		if err != nil {
+			t.Fatalf("manifestForPack(%s): %v", pack.Name, err)
+		}
+		fresh, err := manifestForFS(pack.FS)
+		if err != nil {
+			t.Fatalf("manifestForFS(%s): %v", pack.Name, err)
+		}
+		if len(cached) != len(fresh) {
+			t.Fatalf("pack %s: memoized manifest has %d entries, fresh has %d", pack.Name, len(cached), len(fresh))
+		}
+		for rel, want := range fresh {
+			got, ok := cached[rel]
+			if !ok {
+				t.Fatalf("pack %s: memoized manifest missing %s", pack.Name, rel)
+			}
+			if got.perm != want.perm || !bytes.Equal(got.data, want.data) {
+				t.Fatalf("pack %s: memoized manifest differs for %s", pack.Name, rel)
+			}
+		}
+	}
 }

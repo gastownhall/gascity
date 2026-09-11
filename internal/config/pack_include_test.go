@@ -1,10 +1,14 @@
 package config
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/builtinpacks"
 )
 
 func TestIsRemoteInclude(t *testing.T) {
@@ -282,7 +286,7 @@ func TestValidateInstalledRemoteCacheLockedMemoizesSuccess(t *testing.T) {
 	t.Cleanup(func() { runRepoCacheGit = orig })
 
 	const source = "git@github.com:example/pack"
-	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit); err != nil {
+	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit, false); err != nil {
 		t.Fatalf("first validate: %v", err)
 	}
 	first := calls
@@ -290,21 +294,253 @@ func TestValidateInstalledRemoteCacheLockedMemoizesSuccess(t *testing.T) {
 		t.Fatal("first validation should run git (rev-parse + status)")
 	}
 
-	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit); err != nil {
+	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit, false); err != nil {
 		t.Fatalf("second validate: %v", err)
 	}
 	if calls != first {
 		t.Fatalf("second validation re-ran git (%d→%d); want cached (no new git)", first, calls)
 	}
 
+	// A bare .git-dir mtime bump must NOT invalidate the memo: git status
+	// --porcelain creates/removes a lock file under .git/ on every run, so
+	// including .git dir in the fingerprint would defeat the memo. Writing a
+	// file under .git/ bumps the dir mtime but leaves cacheDir root and
+	// .git/index untouched, so validation must stay cached.
+	if err := os.WriteFile(filepath.Join(cacheDir, ".git", "index.lock"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit, false); err != nil {
+		t.Fatalf("post-.git-touch validate: %v", err)
+	}
+	if calls != first {
+		t.Fatalf(".git-dir touch busted the memo (%d→%d); want cached (no new git)", first, calls)
+	}
+	if err := os.Remove(filepath.Join(cacheDir, ".git", "index.lock")); err != nil {
+		t.Fatal(err)
+	}
+
 	// Touching the checkout invalidates the fingerprint → revalidate.
+	// Simulate a gc import install / git checkout by updating .git/index (a
+	// checkout rewrites the index to reflect the new tree). The .git directory
+	// itself is excluded from the fingerprint because git status --porcelain
+	// creates/removes a lock file inside .git/, updating .git dir mtime on every
+	// run and defeating the memo; .git/index mtime is stable across status runs.
 	if err := os.WriteFile(filepath.Join(cacheDir, ".git", "index"), []byte("idx2-longer"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit); err != nil {
+	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit, false); err != nil {
 		t.Fatalf("third validate: %v", err)
 	}
 	if calls == first {
 		t.Fatalf("changed checkout should re-run git; calls stayed %d", calls)
 	}
+}
+
+// lockedPackRefCommit is the stubbed HEAD every setupLockedPackRefTest city
+// pins. Its value is arbitrary; only that the lock file, the cache key and the
+// stubbed rev-parse all agree on it matters.
+const lockedPackRefCommit = "abcdef1234567890abcdef1234567890abcdef12"
+
+// setupLockedPackRefTest fabricates a city with a packs.lock entry for ref and
+// a valid installed repo cache for it under a temp HOME, with git stubbed out.
+func setupLockedPackRefTest(t *testing.T, ref string) (cityDir, cacheDir string) {
+	t.Helper()
+	const commit = lockedPackRefCommit
+	ResetRemoteCacheValidationCache()
+	t.Cleanup(ResetRemoteCacheValidationCache)
+
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	cityDir = filepath.Join(dir, "city")
+	mustMkdirAll(t, cityDir, 0o755)
+	writeTestFile(t, cityDir, "packs.lock", fmt.Sprintf(`
+schema = 1
+
+[packs.%q]
+version = "sha:%s"
+commit = %q
+fetched = "2026-06-06T00:00:00Z"
+`, ref, commit, commit))
+
+	cacheDir = filepath.Join(home, ".gc", "cache", "repos", RepoCacheKey(ref, commit))
+	mustMkdirAll(t, filepath.Join(cacheDir, ".git"), 0o755)
+	if err := os.WriteFile(filepath.Join(cacheDir, ".git", "index"), []byte("idx"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := runRepoCacheGit
+	runRepoCacheGit = func(_ string, args ...string) (string, error) {
+		if len(args) > 0 && args[0] == "rev-parse" {
+			return commit + "\n", nil
+		}
+		return "", nil // status --porcelain: clean
+	}
+	t.Cleanup(func() { runRepoCacheGit = orig })
+	return cityDir, cacheDir
+}
+
+func TestResolvePackRefUsesLockedImportForGitHubTreeURL(t *testing.T) {
+	const ref = "https://github.com/example/packs/tree/main/gastown"
+	cityDir, cacheDir := setupLockedPackRefTest(t, ref)
+
+	got, err := resolvePackRef(ref, cityDir, cityDir, false)
+	if err != nil {
+		t.Fatalf("resolvePackRef: %v", err)
+	}
+	want := filepath.Join(cacheDir, "gastown")
+	if got != want {
+		t.Fatalf("resolvePackRef = %q, want %q", got, want)
+	}
+}
+
+func TestResolvePackRefUsesLockedImportForRefRemoteInclude(t *testing.T) {
+	const ref = "git@github.com:example/packs//gastown#main"
+	cityDir, cacheDir := setupLockedPackRefTest(t, ref)
+
+	got, err := resolvePackRef(ref, cityDir, cityDir, false)
+	if err != nil {
+		t.Fatalf("resolvePackRef: %v", err)
+	}
+	want := filepath.Join(cacheDir, "gastown")
+	if got != want {
+		t.Fatalf("resolvePackRef = %q, want %q", got, want)
+	}
+}
+
+func TestResolvePackRefFallsBackToIncludeCacheWhenUnlocked(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	cityDir := filepath.Join(dir, "city")
+	mustMkdirAll(t, cityDir, 0o755)
+
+	const ref = "https://github.com/example/packs/tree/main/gastown"
+	_, err := resolvePackRef(ref, cityDir, cityDir, false)
+	if err == nil {
+		t.Fatal("expected uncached include error for unlocked remote ref")
+	}
+	if !strings.Contains(err.Error(), "is not cached") {
+		t.Fatalf("error = %v, want legacy include-cache miss", err)
+	}
+}
+
+// TestRepoCacheKeyIncludesSyntheticContentComponent pins the durable fix for
+// the citywide pack-cache wedge (ga-s9p): two gc binaries with different
+// embedded pack content must resolve to different synthetic cache directories,
+// so a binary built from one revision cannot re-materialize the cache out from
+// under a binary built from another. The synthetic cache key therefore folds in
+// the running binary's content hash; the legacy namespace+source+commit key did
+// not, so both binaries collided on one directory and ping-ponged its marker.
+// The synthetic derivation applies only at the source's canonical pin: any
+// other commit on a bundled source is an ordinary remote import and keeps the
+// plain source+commit key.
+// TestResolveBundledSourceWithoutLockHitsFastPathOnPreMaterializedCache demonstrates
+// that the read-lock pre-check in resolveBundledSourceWithoutLock uses the fast
+// (marker-only) validator and returns the cache dir without acquiring the write lock.
+func TestResolveBundledSourceWithoutLockHitsFastPathOnPreMaterializedCache(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+
+	source := builtinpacks.MustSource("core")
+	commit := strings.TrimPrefix(BundledSourcePinnedVersion(source), "sha:")
+	cacheRoot, err := GlobalRepoCacheRoot()
+	if err != nil {
+		t.Fatalf("GlobalRepoCacheRoot: %v", err)
+	}
+	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, commit))
+	if err := os.MkdirAll(filepath.Dir(cacheDir), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, builtinpacks.Repository, commit); err != nil {
+		t.Fatalf("MaterializeSyntheticRepo: %v", err)
+	}
+
+	got, ok, err := resolveBundledSourceWithoutLock(source, "", false)
+	if err != nil {
+		t.Fatalf("resolveBundledSourceWithoutLock: %v", err)
+	}
+	if !ok {
+		t.Fatal("resolveBundledSourceWithoutLock returned ok=false for a known bundled source")
+	}
+	if got != cacheDir {
+		t.Fatalf("resolveBundledSourceWithoutLock = %q, want %q", got, cacheDir)
+	}
+}
+
+// TestValidateInstalledRemoteCacheAcceptsBundledCanonicalPinFast demonstrates
+// that validateInstalledRemoteCache routes bundled sources at the canonical pin
+// through the fast (marker-only) validator.
+func TestValidateInstalledRemoteCacheAcceptsBundledCanonicalPinFast(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+
+	source := builtinpacks.MustSource("core")
+	commit := strings.TrimPrefix(BundledSourcePinnedVersion(source), "sha:")
+	cacheRoot, err := GlobalRepoCacheRoot()
+	if err != nil {
+		t.Fatalf("GlobalRepoCacheRoot: %v", err)
+	}
+	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, commit))
+	if err := os.MkdirAll(filepath.Dir(cacheDir), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, builtinpacks.Repository, commit); err != nil {
+		t.Fatalf("MaterializeSyntheticRepo: %v", err)
+	}
+
+	if err := validateInstalledRemoteCache(source, cacheDir, commit); err != nil {
+		t.Fatalf("validateInstalledRemoteCache: %v", err)
+	}
+}
+
+func TestRepoCacheKeyIncludesSyntheticContentComponent(t *testing.T) {
+	source := builtinpacks.MustSource("core")
+	commit := strings.TrimPrefix(BundledSourcePinnedVersion(source), "sha:")
+
+	component := builtinpacks.SyntheticCacheKeyComponent()
+	if component == "" {
+		t.Fatal("expected non-empty synthetic cache key component for a valid binary")
+	}
+
+	normalized := NormalizeRemoteSource(source)
+	withComponent := repoCacheKeyTestSum(builtinpacks.SyntheticCacheNamespace + "\x00" + normalized + "\x00" + commit + "\x00" + component)
+	legacy := repoCacheKeyTestSum(builtinpacks.SyntheticCacheNamespace + "\x00" + normalized + "\x00" + commit)
+
+	got := RepoCacheKey(source, commit)
+	if got != withComponent {
+		t.Fatalf("RepoCacheKey(synthetic) = %q, want content-component key %q", got, withComponent)
+	}
+	if got == legacy {
+		t.Fatalf("RepoCacheKey(synthetic) %q must differ from legacy namespace-only key %q", got, legacy)
+	}
+
+	const otherCommit = "abc123def456abc123def456abc123def456abc123de"
+	plain := repoCacheKeyTestSum(normalized + otherCommit)
+	if got := RepoCacheKey(source, otherCommit); got != plain {
+		t.Fatalf("RepoCacheKey(non-canonical bundled pin) = %q, want plain remote key %q", got, plain)
+	}
+}
+
+// TestRepoCacheKeyUnchangedForNonSyntheticSources guards that the fix is scoped
+// to bundled synthetic sources: real git-checkout caches keep their existing
+// source+commit key so deployed caches are not relocated.
+func TestRepoCacheKeyUnchangedForNonSyntheticSources(t *testing.T) {
+	const source = "https://github.com/org/repo.git"
+	const commit = "def456"
+	want := repoCacheKeyTestSum(NormalizeRemoteSource(source) + commit)
+	if got := RepoCacheKey(source, commit); got != want {
+		t.Fatalf("RepoCacheKey(non-synthetic) = %q, want %q", got, want)
+	}
+}
+
+func repoCacheKeyTestSum(identity string) string {
+	sum := sha256.Sum256([]byte(identity))
+	return fmt.Sprintf("%x", sum[:])
 }

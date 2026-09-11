@@ -67,6 +67,11 @@ case "${1:-}" in
 {"id":"BD-1","title":"captured","status":"open","issue_type":"task","created_at":"2026-02-27T10:00:00Z"}
 JSON
     ;;
+  show)
+    cat <<'JSON'
+[{"id":"BD-1","title":"captured","status":"open","issue_type":"task","created_at":"2026-02-27T10:00:00Z"}]
+JSON
+    ;;
   list)
     cat <<'JSON'
 [{"id":"BD-1","title":"captured","status":"open","issue_type":"message","assignee":"mayor","created_at":"2026-02-27T10:00:00Z"}]
@@ -172,6 +177,47 @@ func TestBdStoreBridgeCreateCmdProjectsCanonicalEnvAndClearsAmbientAuthority(t *
 		if !strings.Contains(string(argsText), want) {
 			t.Fatalf("bd args missing %q: %s", want, string(argsText))
 		}
+	}
+}
+
+func TestBdStoreBridgeGetCmdReturnsBead(t *testing.T) {
+	scopeDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(scopeDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	envFile := filepath.Join(t.TempDir(), "bridge.env")
+	argsFile := filepath.Join(t.TempDir(), "bridge.args")
+	writeFakeBdBridgeScript(t, binDir, envFile, argsFile)
+
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"bd-store-bridge",
+		"--dir", scopeDir,
+		"--host", "db.example.internal",
+		"--port", "3317",
+		"get",
+		"BD-1",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
+	}
+
+	var bead bdStoreBridgeBead
+	if err := json.Unmarshal(stdout.Bytes(), &bead); err != nil {
+		t.Fatalf("stdout JSON: %v\n%s", err, stdout.String())
+	}
+	if bead.ID != "BD-1" || bead.Title != "captured" || bead.Type != "task" {
+		t.Fatalf("unexpected bead payload: %#v", bead)
+	}
+
+	argsText, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("ReadFile(args): %v", err)
+	}
+	if got := strings.TrimSpace(string(argsText)); got != "show --json BD-1" {
+		t.Fatalf("get args = %q, want %q", got, "show --json BD-1")
 	}
 }
 
@@ -324,10 +370,9 @@ func TestBdStoreBridgeListCommandForwardsFilters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(args): %v", err)
 	}
-	// BdStore may need to merge and filter policy tiers client-side, so it
-	// requests all server-side candidates and applies the requested limit after
-	// parsing.
-	for _, want := range []string{"list", "--json", "--status=open", "--assignee=mayor", "--type=message", "--include-infra", "--include-gates", "--limit", "0"} {
+	// TierIssues + a single assignee has no Go-side-only residual filter, so
+	// BdStore pushes the caller's real limit straight to bd list (gc-i4j3y).
+	for _, want := range []string{"list", "--json", "--status=open", "--assignee=mayor", "--type=message", "--include-infra", "--include-gates", "--limit", "7"} {
 		if !strings.Contains(string(argsText), want) {
 			t.Fatalf("list args missing %q: %s", want, string(argsText))
 		}

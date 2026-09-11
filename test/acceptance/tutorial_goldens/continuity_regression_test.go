@@ -86,7 +86,7 @@ func TestTutorialContinuity_FormulasIntroducesWorkerBeforeUse(t *testing.T) {
 			t.Fatalf("tutorial 05 is missing the worker setup step %q", want)
 		}
 	}
-	if !strings.Contains(page05Text, `gc sling worker mp-2wx`) {
+	if !strings.Contains(page05Text, `gc sling worker mc-79s`) {
 		t.Fatal("tutorial 05 slings work to worker without first establishing that agent in the prose")
 	}
 }

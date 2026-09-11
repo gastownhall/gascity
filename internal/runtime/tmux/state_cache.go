@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/runtime"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -62,6 +63,13 @@ type processSnapshot struct {
 type runtimeStateSnapshot struct {
 	Sessions  map[string]sessionRuntimeState
 	Processes processSnapshot
+	// ProcessesAvailable reports whether the OS process-table snapshot was
+	// fetched successfully. tmux list-panes establishes session liveness on its
+	// own; the process snapshot is only a secondary refinement (matching pane
+	// PIDs to processNames). When the full-OS ps scan loses the CPU race to a
+	// busy fleet it is marked unavailable rather than discarding the
+	// authoritative tmux liveness, and processAlive degrades optimistically.
+	ProcessesAvailable bool
 }
 
 // StateCache caches tmux runtime state to avoid spawning N subprocess calls per
@@ -184,8 +192,29 @@ func (c *StateCache) refresh() {
 			log.Printf("tmux state cache: refresh failed in %v: %v", elapsed, err)
 			c.mu.Lock()
 			c.lastError = err
+			// Two distinct failure regimes, keyed on whether the cache was ever
+			// primed (fetchedAt set by a prior success):
+			//
+			//   UNPRIMED + genuine no-server (a fresh city with no tmux server
+			//   yet): initialize to an EMPTY snapshot so the cache is primed.
+			//   Without this, currentState() sees a nil Sessions map and forces
+			//   a fresh list-panes spawn plus a failure log on EVERY IsRunning()
+			//   call — a re-spawn/log storm in the exact steady state (no server)
+			//   where nothing will change until one is started. An empty primed
+			//   snapshot correctly reports all sessions not-running and holds as
+			//   a cache hit until the TTL lapses.
+			//
+			//   PRIMED then now-unreachable: preserve last-known-good (do NOT
+			//   touch fetchedAt or sessions) until the staleTTL cliff. A server
+			//   that was up then briefly vanished (supervisor restart, socket
+			//   stall) must not wipe a good snapshot and drain healthy pool slots
+			//   — that is #4082's intent.
+			if c.fetchedAt.IsZero() && isNoServerError(err) {
+				c.state = runtimeStateSnapshot{Sessions: make(map[string]sessionRuntimeState)}
+				c.fetchedAt = time.Now()
+				c.dirty = false
+			}
 			c.mu.Unlock()
-			// Preserve last-known-good — do NOT update fetchedAt or sessions.
 			return nil, err
 		}
 
@@ -223,8 +252,37 @@ type tmuxFetcher struct {
 func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, error) {
 	out, err := f.tm.runCtx(ctx, "list-panes", "-a", "-F", "#{session_name}\t#{pane_dead}\t#{pane_current_command}\t#{pane_pid}")
 	if err != nil {
+		if errors.Is(err, ErrNoCurrentTarget) {
+			// The server ANSWERED and holds zero sessions. gc configures
+			// exit-empty off, so an empty-but-alive server is a normal steady
+			// state for any city between agents, and tmux replies to a
+			// target-taking command like list-panes with "no current target"
+			// rather than empty output. That is a successful observation of an
+			// empty fleet — identical to the out == "" case below — so it must
+			// prime the cache. Treating it as ErrNoServer (which it wraps, for
+			// the idempotent-teardown callers) left the supervisor's cache
+			// permanently unprimed: a tmux subprocess and a "refresh failed"
+			// log line on EVERY IsRunning, plus a staleTTL cliff that reported
+			// the whole city not-running. See ga-jnavd.
+			return runtimeStateSnapshot{Sessions: make(map[string]sessionRuntimeState)}, nil
+		}
 		if isNoServerError(err) {
-			return runtimeStateSnapshot{Sessions: map[string]sessionRuntimeState{}}, nil // No server = no sessions
+			// An unreachable tmux server is an observation FAILURE, not the
+			// fact "no sessions exist". Returning an empty *success* here let
+			// refresh() overwrite the cache's last-known-good and instantly
+			// report every session as not-running, so a brief server blip (a
+			// supervisor restart, a transient socket stall) drove the
+			// reconciler to drain/close healthy pool slots. Surface it as
+			// runtime.ErrRuntimeUnavailable instead: refresh() then preserves
+			// last-known-good until the existing staleTTL cliff, bounding the
+			// trust window. Genuine session ends evict from the cache via
+			// Stop()/EvictSession, so they are not masked by this preservation
+			// (the only residual is an externally-killed LAST session, whose
+			// cleanup is delayed by at most staleTTL — the intended trade).
+			// isNoServerError still matches the wrapped error (it contains the
+			// original "no server running" cause), so downstream absorbers are
+			// unaffected.
+			return runtimeStateSnapshot{}, fmt.Errorf("%w: %w", runtime.ErrRuntimeUnavailable, err)
 		}
 		return runtimeStateSnapshot{}, err
 	}
@@ -260,9 +318,19 @@ func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, err
 	}
 	processes, err := fetchProcessSnapshot(ctx)
 	if err != nil {
-		return runtimeStateSnapshot{}, err
+		// Degrade, do NOT discard: tmux list-panes above already established
+		// session liveness. The process snapshot is a secondary refinement
+		// (matching pane PIDs to processNames). A full-OS ps scan that loses the
+		// CPU race to a busy/KO fleet must never throw away authoritative tmux
+		// liveness — that is what was starving the controller's reconcile and
+		// cold-pool-spawner. Keep the sessions; mark process detail unavailable
+		// so processAlive degrades optimistically instead of reporting dead.
+		log.Printf("tmux state cache: process snapshot degraded, retaining tmux session liveness: %v", err)
+		state.ProcessesAvailable = false
+		return state, nil
 	}
 	state.Processes = processes
+	state.ProcessesAvailable = true
 	return state, nil
 }
 
@@ -274,6 +342,13 @@ func (s runtimeStateSnapshot) processAlive(sessionName string, processNames []st
 	names := processNameSet(processNames)
 	if len(names) == 0 {
 		return false
+	}
+	if !s.ProcessesAvailable {
+		// The OS process snapshot failed (e.g. the ps scan timed out under
+		// fleet load). tmux confirms the session/pane is alive; we cannot verify
+		// the inner process, so degrade optimistically rather than report it
+		// dead. A failed secondary probe must never trigger a reap/respawn.
+		return true
 	}
 	for _, pane := range session.Panes {
 		if pane.processAlive(names, s.Processes) {
@@ -304,6 +379,11 @@ func processNameSet(names []string) map[string]struct{} {
 	for _, name := range names {
 		if name = strings.TrimSpace(name); name != "" {
 			set[name] = struct{}{}
+			// The kimi entry point now sets COMM and argv[0] to kimi-code.
+			// Keep existing provider process_names valid for both CLIs.
+			if name == "kimi" {
+				set["kimi-code"] = struct{}{}
+			}
 		}
 	}
 	return set

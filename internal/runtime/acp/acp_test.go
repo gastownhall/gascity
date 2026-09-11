@@ -17,18 +17,14 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // shortTempDir returns a temp directory short enough for Unix socket paths
 // (macOS limit is 104 bytes). t.TempDir() paths often exceed this.
 func shortTempDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "gc-t-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	return dir
+	return testutil.ShortTempDir(t, "gc-t-")
 }
 
 // newTestProvider creates an ACP provider with an isolated temp directory.
@@ -118,6 +114,40 @@ func TestStart_HandshakeSuccess(t *testing.T) {
 
 	if !p.IsRunning(name) {
 		t.Error("IsRunning = false after Start, want true")
+	}
+}
+
+func TestStart_EmptyEnvOverrideIsAbsentFromAgent(t *testing.T) {
+	t.Setenv("BEADS_DB", "ambient-database")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient.example")
+	marker := filepath.Join(t.TempDir(), "env.txt")
+	command := `env | sort > "$GC_ENV_MARKER"; ` + fakeACPShellCommand()
+	p := newTestProvider(t)
+	name := testName()
+	if err := p.Start(context.Background(), name, runtime.Config{
+		Command: command,
+		WorkDir: t.TempDir(),
+		Env: map[string]string{
+			"BEADS_DB":               "",
+			"BEADS_DOLT_SERVER_HOST": "",
+			"BEADS_DIR":              "/selected/.beads",
+			"GC_ENV_MARKER":          marker,
+		},
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Stop(name) })
+
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if strings.Contains(got, "BEADS_DB=") || strings.Contains(got, "BEADS_DOLT_SERVER_HOST=") {
+		t.Fatalf("withheld variables reached agent: %q", got)
+	}
+	if !strings.Contains(got, "BEADS_DIR=/selected/.beads\n") {
+		t.Fatalf("explicit environment did not reach agent: %q", got)
 	}
 }
 

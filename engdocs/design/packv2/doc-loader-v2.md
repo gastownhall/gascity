@@ -439,18 +439,22 @@ The actual fetch / cache mechanism is owned by `gc import`
 imports have already been resolved into local directories under the
 hidden cache (`~/.gc/cache/repos/<cache-key>/`) and reads the lock file
 (`packs.lock`) to know which commit to use. Ordinary remote imports use a
-normalized clone URL plus commit cache key. Bundled Gas City pack imports use a
-separate synthetic-cache namespace for the same source and commit so embedded
-current-binary content never collides with an ordinary git checkout from the
-same repository.
+normalized clone URL plus commit cache key. Bundled Gas City pack imports
+locked at their CANONICAL pin (`config.IsBundledSourceAtCanonicalPin`) use a
+separate synthetic-cache namespace (folding the binary's embedded-content
+hash) so embedded current-binary content never collides with an ordinary git
+checkout from the same repository. A bundled source pinned at any other
+commit is an ordinary remote import: plain cache key, real git clone via
+`gc import install`, git-checkout validation — editing a pin always does
+what it says.
 
 Bundled synthetic caches are repo-shaped because relative imports between
-bundled pack subpaths should resolve like a real checkout. Their marker records
-the requested lock/cache commit and a hash of the bundled pack content embedded
-in the running `gc` binary. The commit is the lock identity; the content hash is
-the cache integrity proof. If the binary's bundled content changes, validation
-rejects the old synthetic cache and `gc import install` refreshes it from the
-current binary.
+bundled pack subpaths should resolve like a real checkout. Their marker
+records the canonical pin commit and a hash of the bundled pack content
+embedded in the running `gc` binary. The commit is the lock identity; the
+content hash is the cache integrity proof. If the binary's bundled content
+changes, the new binary derives a different cache key and re-seeds its own
+slot from embedded content.
 
 This is a significant separation-of-concerns change. In V1, the loader
 itself clones git repos. In V2, that responsibility moves to

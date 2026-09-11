@@ -454,7 +454,7 @@ func TestPhase0HandleSessionWake_NamedIdentityReassignsHistoricalStateToFreshCan
 	if updatedWait.Status != "closed" || updatedWait.Metadata["state"] != "canceled" {
 		t.Fatalf("wait status/state = %q/%q, want closed/canceled after wake cleanup", updatedWait.Status, updatedWait.Metadata["state"])
 	}
-	if nudges, err := session.WaitNudgeIDs(fs.cityBeadStore, historicalID); err != nil {
+	if nudges, err := session.NewStore(beads.SessionStore{Store: fs.cityBeadStore}).WaitNudgeIDs(historicalID); err != nil {
 		t.Fatalf("WaitNudgeIDs(historical): %v", err)
 	} else if len(nudges) != 0 {
 		t.Fatalf("historical wait nudges = %#v, want none after reassignment", nudges)

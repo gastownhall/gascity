@@ -16,8 +16,8 @@ already-computed filter result (a boolean string) and these functions only do
 arithmetic and string matching:
 
   * ``classify_mode`` — label a run ``full`` or ``filtered``.
-  * ``paths_match`` — dorny-compatible glob matching, used by the wiring test
-    to simulate which filters a changed-file set triggers.
+  * ``paths_match`` — dorny-compatible glob matching for deterministic policy
+    fixtures and offline changed-file simulation.
   * ``aggregate`` — compute the share of runs that took each path.
 
 Usage:

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 )
 
 // partialAggregator collects errors from per-rig/per-backend operations
@@ -76,5 +76,5 @@ func (p *partialAggregator) outageError() error {
 	if msgs := p.messages(); len(msgs) > 0 {
 		detail = detail + ": " + strings.Join(msgs, "; ")
 	}
-	return huma.Error503ServiceUnavailable(detail)
+	return apierr.ServiceUnavailable.Msg(detail)
 }

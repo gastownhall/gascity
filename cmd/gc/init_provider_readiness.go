@@ -30,6 +30,7 @@ type initFinalizeOptions struct {
 	skipProviderReadiness bool
 	showProgress          bool
 	commandName           string
+	noStart               bool
 }
 
 type initProviderTarget struct {
@@ -39,7 +40,7 @@ type initProviderTarget struct {
 }
 
 func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOptions) int {
-	MaterializeBuiltinPacks(cityPath) //nolint:errcheck // best-effort; needed before dependency and provider checks
+	EnsureBuiltinRuntimeAssets(cityPath, os.Stderr) //nolint:errcheck // best-effort; needed before dependency and provider checks
 
 	// Check hard binary dependencies before handing off to the supervisor.
 	// Without this, missing deps (tmux, git, dolt, bd) cause the supervisor
@@ -108,6 +109,17 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 		fmt.Fprintf(stderr, "%s: %v\n", opts.commandName, err)        //nolint:errcheck // best-effort stderr
 		fmt.Fprintln(stderr, `hint: run "gc doctor" for diagnostics`) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	if opts.noStart {
+		if opts.showProgress {
+			logInitProgress(stdout, 7, "Skipping supervisor startup")
+		} else if stdout != nil {
+			fmt.Fprintln(stdout, "Skipping supervisor startup.") //nolint:errcheck // best-effort stdout
+		}
+		if stdout != nil {
+			fmt.Fprintf(stdout, "Next: cd %s && gc start\n", shellQuotePath(cityPath)) //nolint:errcheck // best-effort stdout
+		}
+		return 0
 	}
 	if opts.showProgress {
 		logInitProgress(stdout, 7, "Registering city with supervisor")
@@ -226,7 +238,7 @@ func runInitProviderPreflightForConfig(cityPath string, cfg *config.City, stdout
 }
 
 func initHasRemoteImports(cityPath string) (bool, error) {
-	allImports, err := collectAllImportsFS(fsys.OSFS{}, cityPath)
+	allImports, err := collectAllImportsFS(cityPath)
 	if err != nil {
 		return false, err
 	}
@@ -419,6 +431,15 @@ func providerStatusFixHint(probeName, status string) string {
 			return "use Gemini CLI personal OAuth; API-key and ADC modes are not supported here"
 		case api.ProbeStatusProbeError:
 			return "check ~/.gemini/settings.json and oauth_creds.json"
+		}
+	case "pi":
+		switch status {
+		case api.ProbeStatusNeedsAuth:
+			return "authenticate pi so it writes ~/.pi/agent/auth.json"
+		case api.ProbeStatusNotInstalled:
+			return "install the pi coding agent"
+		case api.ProbeStatusProbeError:
+			return "check ~/.pi/agent/auth.json and the local pi installation"
 		}
 	}
 	return ""
@@ -716,11 +737,11 @@ func initNeedsLocalDoltIdentity(cityPath string) bool {
 }
 
 func initScopeNeedsLocalDoltIdentity(cityPath, scopeRoot string, cfg *config.City) bool {
-	_, usesPostgres, err := postgresMetadataForScope(cityPath, scopeRoot)
+	bound, err := scopeStoreIsExternallyBound(cityPath, scopeRoot)
 	if err != nil {
 		return true
 	}
-	if usesPostgres {
+	if bound {
 		return false
 	}
 	return !initScopeUsesExternalDolt(cityPath, scopeRoot, cfg)

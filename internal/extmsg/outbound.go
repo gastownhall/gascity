@@ -36,10 +36,17 @@ type OutboundResult struct {
 }
 
 // OutboundDeps bundles the dependencies for outbound processing.
+//
+// ResolveSessionSelector resolves a session selector — a configured agent
+// identity, session name, alias, or concrete session bead ID — to the
+// concrete ID of a live session. The API layer supplies its session target
+// resolution; extmsg stays free of session-layer imports. It is required
+// only to publish on agent-bound conversations.
 type OutboundDeps struct {
-	Services  Services
-	Registry  *AdapterRegistry
-	EmitEvent func(eventType, subject string, payload events.Payload)
+	Services               Services
+	Registry               *AdapterRegistry
+	EmitEvent              func(eventType, subject string, payload events.Payload)
+	ResolveSessionSelector func(ctx context.Context, selector string) (string, error)
 }
 
 // HandleOutbound publishes a message from a session to an external conversation.
@@ -79,9 +86,46 @@ func HandleOutbound(ctx context.Context, deps OutboundDeps, caller Caller, req O
 	// session. bindingGeneration is non-zero only on the binding path.
 	var publishingSession string
 	var bindingGeneration int64
+	agentBound := binding != nil && binding.AgentName != ""
 	switch {
+	case agentBound:
+		// Agent-bound conversations defer session identity to delivery
+		// time: the publish is authorized when the caller's session is
+		// the one the bound agent currently resolves to.
+		if deps.ResolveSessionSelector == nil {
+			return nil, fmt.Errorf("conversation %s/%s is bound to agent %s but no session selector resolution is available",
+				req.Conversation.Provider, req.Conversation.ConversationID, binding.AgentName)
+		}
+		agentSessionID, err := deps.ResolveSessionSelector(ctx, binding.AgentName)
+		if err != nil {
+			return nil, fmt.Errorf("resolving bound agent %q session: %w", binding.AgentName, err)
+		}
+		if req.SessionID != "" {
+			callerSessionID, err := deps.ResolveSessionSelector(ctx, req.SessionID)
+			if err != nil {
+				return nil, fmt.Errorf("resolving publishing session %q: %w", req.SessionID, err)
+			}
+			if callerSessionID != agentSessionID {
+				return nil, fmt.Errorf("session %q does not own binding for conversation %s/%s (bound to agent %s, currently session %s)",
+					req.SessionID, req.Conversation.Provider, req.Conversation.ConversationID, binding.AgentName, agentSessionID)
+			}
+		}
+		publishingSession = agentSessionID
+		bindingGeneration = binding.BindingGeneration
 	case binding != nil:
 		if req.SessionID != "" && binding.SessionID != req.SessionID {
+			// Cross-wire: the caller is trying to post into a channel owned
+			// by another session. Surface it as a structured warning before
+			// rejecting, so the otherwise-silent misroute is observable
+			// (RCA gc-5aie6). The error contract below is unchanged.
+			if deps.EmitEvent != nil {
+				deps.EmitEvent(events.ExtMsgOutboundChannelMismatch, req.SessionID, OutboundChannelMismatchPayload{
+					Provider:       req.Conversation.Provider,
+					ConversationID: req.Conversation.ConversationID,
+					PostingSession: req.SessionID,
+					OwnerSession:   binding.SessionID,
+				})
+			}
 			return nil, fmt.Errorf("session %q does not own binding for conversation %s/%s (bound to %s)",
 				req.SessionID, req.Conversation.Provider, req.Conversation.ConversationID, binding.SessionID)
 		}
@@ -139,15 +183,19 @@ func HandleOutbound(ctx context.Context, deps OutboundDeps, caller Caller, req O
 		return result, nil
 	}
 
-	// Step 5: Record delivery context (binding path only).
+	// Step 5: Record delivery context (session-binding path only).
 	//
 	// Delivery context tracks per-binding publish state and requires a
 	// non-zero BindingGeneration tied to an active binding — neither
 	// applies on the group fallback path. Recording is intentionally
 	// skipped there; transcript append below still runs and remains the
-	// authoritative outbound record for group flows.
+	// authoritative outbound record for group flows. The agent-binding
+	// path is skipped for the same reason: the delivery service
+	// revalidates ownership against the binding's session ID, which an
+	// agent binding does not pin, so the transcript is the authoritative
+	// outbound record there too.
 	now := time.Now()
-	if binding != nil {
+	if binding != nil && !agentBound {
 		dc := DeliveryContextRecord{
 			SessionID:         publishingSession,
 			Conversation:      req.Conversation,

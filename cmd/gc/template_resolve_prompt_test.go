@@ -203,6 +203,9 @@ func TestResolveTemplateControlDispatcherSuppressesStartupPrompt(t *testing.T) {
 	cityPath := t.TempDir()
 	fakeFS := fsys.NewFake()
 	promptPath := filepath.Join(cityPath, "prompts", "control-dispatcher.template.md")
+	if err := fakeFS.MkdirAll(filepath.Dir(promptPath), 0o755); err != nil {
+		t.Fatalf("create prompt directory: %v", err)
+	}
 	if err := fakeFS.WriteFile(promptPath, []byte("startup prompt for {{.AgentName}}"), 0o644); err != nil {
 		t.Fatalf("write prompt template: %v", err)
 	}
@@ -254,6 +257,9 @@ func TestResolveTemplateExplicitControlDispatcherKeepsStartupPrompt(t *testing.T
 	cityPath := t.TempDir()
 	fakeFS := fsys.NewFake()
 	promptPath := filepath.Join(cityPath, "prompts", "control-dispatcher.template.md")
+	if err := fakeFS.MkdirAll(filepath.Dir(promptPath), 0o755); err != nil {
+		t.Fatalf("create prompt directory: %v", err)
+	}
 	if err := fakeFS.WriteFile(promptPath, []byte("startup prompt for {{.AgentName}}"), 0o644); err != nil {
 		t.Fatalf("write prompt template: %v", err)
 	}
@@ -757,6 +763,79 @@ func TestResolveTemplateHookEnabledOpencodeOmitsPrimeInstruction(t *testing.T) {
 	}
 	if strings.Contains(tp.Prompt, "Run `gc prime`") {
 		t.Fatalf("hook-enabled prompt should omit manual gc prime instruction: %q", tp.Prompt)
+	}
+}
+
+// A non-hook agent whose rendered prompt is inlined below the beacon already
+// holds the exact bytes `gc prime` would return, so instructing it to run
+// `gc prime` costs a turn and duplicates its context.
+func TestResolveTemplateInlinedPromptOmitsPrimeInstruction(t *testing.T) {
+	cityPath := t.TempDir()
+	fs := fsys.NewFake()
+	fs.Files[cityPath+"/prompts/mayor.md"] = []byte("mayor prompt body")
+
+	params := &agentBuildParams{
+		fs:              fs,
+		cityName:        "bright-lights",
+		cityPath:        cityPath,
+		workspace:       &config.Workspace{Name: "bright-lights", Provider: "opencode"},
+		providers:       config.BuiltinProviders(),
+		lookPath:        func(string) (string, error) { return "/usr/bin/opencode", nil },
+		beaconTime:      testBeaconTime,
+		sessionTemplate: "",
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+	agent := &config.Agent{
+		Name:           "mayor",
+		PromptTemplate: "prompts/mayor.md",
+		Provider:       "opencode",
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if tp.HookEnabled {
+		t.Fatal("HookEnabled = true, want false for this fixture")
+	}
+	if !strings.Contains(tp.Prompt, "mayor prompt body") {
+		t.Fatalf("Prompt missing rendered template body: %q", tp.Prompt)
+	}
+	if strings.Contains(tp.Prompt, "Run `gc prime`") {
+		t.Fatalf("prompt inlined below the beacon should omit the gc prime instruction: %q", tp.Prompt)
+	}
+}
+
+// The instruction is still the only way a non-hook agent gets its context when
+// the beacon ships alone, so that path must keep it.
+func TestResolveTemplateBeaconOnlyKeepsPrimeInstruction(t *testing.T) {
+	cityPath := t.TempDir()
+	fs := fsys.NewFake()
+
+	params := &agentBuildParams{
+		fs:              fs,
+		cityName:        "bright-lights",
+		cityPath:        cityPath,
+		workspace:       &config.Workspace{Name: "bright-lights", Provider: "opencode"},
+		providers:       config.BuiltinProviders(),
+		lookPath:        func(string) (string, error) { return "/usr/bin/opencode", nil },
+		beaconTime:      testBeaconTime,
+		sessionTemplate: "",
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+	agent := &config.Agent{
+		Name:     "mayor",
+		Provider: "opencode",
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if !strings.Contains(tp.Prompt, "Run `gc prime`") {
+		t.Fatalf("beacon-only prompt must keep the gc prime instruction: %q", tp.Prompt)
 	}
 }
 

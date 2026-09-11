@@ -21,14 +21,21 @@ func TestE2E_Pool_InstanceNaming(t *testing.T) {
 	}
 	cityDir := setupE2ECity(t, nil, city)
 
-	r1 := waitForReport(t, cityDir, "worker-1", e2eDefaultTimeout())
-	r2 := waitForReport(t, cityDir, "worker-2", e2eDefaultTimeout())
-
-	if !r1.has("GC_AGENT", "worker-1") {
-		t.Errorf("worker-1 GC_AGENT: got %v, want [worker-1]", r1.getAll("GC_AGENT"))
-	}
-	if !r2.has("GC_AGENT", "worker-2") {
-		t.Errorf("worker-2 GC_AGENT: got %v, want [worker-2]", r2.getAll("GC_AGENT"))
+	// The slot names are real and still stamped on the session bead (agent_name),
+	// which is how the members are discovered here. What they are NOT is public
+	// identity: an expanding-pool slot rebinds to a fresh session whenever a
+	// holder dies, so each member owns work under its own session name and its
+	// GC_AGENT is that name, not "worker-N".
+	reports := waitForPoolMemberReports(t, cityDir, "worker", []string{"worker-1", "worker-2"}, e2eDefaultTimeout())
+	for _, slot := range []string{"worker-1", "worker-2"} {
+		if agent := reports[slot].get("GC_AGENT"); agent == slot {
+			t.Errorf("%s GC_AGENT = %q: an expanding-pool member must not claim under its rebinding slot", slot, agent)
+		} else if agent == "" {
+			t.Errorf("%s has no GC_AGENT", slot)
+		}
+		if got := reports[slot].get("GC_ALIAS"); got != "" {
+			t.Errorf("%s GC_ALIAS = %q, want empty for an unaliased pool slot", slot, got)
+		}
 	}
 }
 
@@ -51,6 +58,11 @@ func TestE2E_Pool_MaxOneUsesCanonicalIdentity(t *testing.T) {
 	if !report.has("GC_AGENT", "singleton") {
 		t.Errorf("singleton GC_AGENT: got %v, want [singleton]", report.getAll("GC_AGENT"))
 	}
+	// The canonical singleton identity never rebinds, so unlike an expanding
+	// pool slot it stays a public alias and keeps answering to its own name.
+	if got := report.get("GC_ALIAS"); got != "singleton" {
+		t.Errorf("singleton GC_ALIAS = %q, want \"singleton\": a non-rebinding identity keeps its alias", got)
+	}
 }
 
 // TestE2E_Pool_WithDir verifies that pool agents with a dir get the
@@ -68,18 +80,19 @@ func TestE2E_Pool_WithDir(t *testing.T) {
 	}
 	cityDir := setupE2ECity(t, nil, city)
 
-	// Pool instances with dir: qualified names include dir prefix.
-	r1 := waitForReport(t, cityDir, "workdir/dirpool-1", e2eDefaultTimeout())
-	r2 := waitForReport(t, cityDir, "workdir/dirpool-2", e2eDefaultTimeout())
+	// Pool instances with a dir: the qualified SLOT names include the dir prefix,
+	// and remain the discovery key even though they are not the members' public
+	// identity.
+	reports := waitForPoolMemberReports(t, cityDir, "workdir/dirpool",
+		[]string{"workdir/dirpool-1", "workdir/dirpool-2"}, e2eDefaultTimeout())
 
 	wantDir := filepath.Join(cityDir, "workdir")
 
 	// Both instances share the same workdir (no template expansion).
-	if cwd := r1.get("CWD"); !sameE2EPath(t, cwd, wantDir) {
-		t.Errorf("dirpool-1 CWD = %q, want %q", cwd, wantDir)
-	}
-	if cwd := r2.get("CWD"); !sameE2EPath(t, cwd, wantDir) {
-		t.Errorf("dirpool-2 CWD = %q, want %q", cwd, wantDir)
+	for _, slot := range []string{"workdir/dirpool-1", "workdir/dirpool-2"} {
+		if cwd := reports[slot].get("CWD"); !sameE2EPath(t, cwd, wantDir) {
+			t.Errorf("%s CWD = %q, want %q", slot, cwd, wantDir)
+		}
 	}
 }
 
@@ -97,11 +110,10 @@ func TestE2E_Pool_SharedDir(t *testing.T) {
 	}
 	cityDir := setupE2ECity(t, nil, city)
 
-	r1 := waitForReport(t, cityDir, "shared-1", e2eDefaultTimeout())
-	r2 := waitForReport(t, cityDir, "shared-2", e2eDefaultTimeout())
+	reports := waitForPoolMemberReports(t, cityDir, "shared", []string{"shared-1", "shared-2"}, e2eDefaultTimeout())
 
-	cwd1 := r1.get("CWD")
-	cwd2 := r2.get("CWD")
+	cwd1 := reports["shared-1"].get("CWD")
+	cwd2 := reports["shared-2"].get("CWD")
 
 	if cwd1 != cwd2 {
 		t.Errorf("shared pool instances have different CWDs: %q vs %q", cwd1, cwd2)
@@ -123,15 +135,21 @@ func TestE2E_Pool_EnvPerInstance(t *testing.T) {
 	}
 	cityDir := setupE2ECity(t, nil, city)
 
-	r1 := waitForReport(t, cityDir, "envpool-1", e2eDefaultTimeout())
-	r2 := waitForReport(t, cityDir, "envpool-2", e2eDefaultTimeout())
+	reports := waitForPoolMemberReports(t, cityDir, "envpool", []string{"envpool-1", "envpool-2"}, e2eDefaultTimeout())
+	r1, r2 := reports["envpool-1"], reports["envpool-2"]
 
-	// Each instance gets unique GC_AGENT.
-	if !r1.has("GC_AGENT", "envpool-1") {
-		t.Errorf("envpool-1 GC_AGENT: got %v", r1.getAll("GC_AGENT"))
+	// Each instance still gets a UNIQUE GC_AGENT — it is now the member's own
+	// session name rather than its slot, which is the whole point: the identity
+	// a pool member claims under has to be one that dies with it.
+	a1, a2 := r1.get("GC_AGENT"), r2.get("GC_AGENT")
+	if a1 == "" || a2 == "" {
+		t.Errorf("pool members missing GC_AGENT: %q / %q", a1, a2)
 	}
-	if !r2.has("GC_AGENT", "envpool-2") {
-		t.Errorf("envpool-2 GC_AGENT: got %v", r2.getAll("GC_AGENT"))
+	if a1 == a2 {
+		t.Errorf("pool members share GC_AGENT %q, want distinct per-session identities", a1)
+	}
+	if a1 == "envpool-1" || a2 == "envpool-2" {
+		t.Errorf("pool members claim under their rebinding slots: %q / %q", a1, a2)
 	}
 
 	// Both share custom env.

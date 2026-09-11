@@ -85,9 +85,9 @@ func TestLiveClaudeInterruptNow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openCityStoreAt(%q): %v", cityPath, err)
 	}
-	sp, err := newSessionProviderByName(cfg.Session.Provider, cfg.Session, cfg.Workspace.Name, cityPath)
+	sp, err := newSessionProviderForCityByName(cfg, cfg.Session.Provider, cfg.Session, cfg.Workspace.Name, cityPath)
 	if err != nil {
-		t.Fatalf("newSessionProviderByName: %v", err)
+		t.Fatalf("newSessionProviderForCityByName: %v", err)
 	}
 	mgr := newSessionManagerWithConfig(cityPath, store, sp, cfg)
 	id, err := resolveLiveProbeSessionID(cityPath, cfg, store, target, sessionID)
@@ -161,9 +161,9 @@ func TestLiveGeminiSubmitIntents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openCityStoreAt(%q): %v", cityPath, err)
 	}
-	sp, err := newSessionProviderByName(cfg.Session.Provider, cfg.Session, cfg.Workspace.Name, cityPath)
+	sp, err := newSessionProviderForCityByName(cfg, cfg.Session.Provider, cfg.Session, cfg.Workspace.Name, cityPath)
 	if err != nil {
-		t.Fatalf("newSessionProviderByName: %v", err)
+		t.Fatalf("newSessionProviderForCityByName: %v", err)
 	}
 	mgr := newSessionManagerWithConfig(cityPath, store, sp, cfg)
 	id, err := resolveLiveProbeSessionID(cityPath, cfg, store, target, sessionID)

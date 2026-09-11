@@ -2,9 +2,15 @@ package doctor
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
+	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 func TestCustomTypesCheck_NoBeadsDir(t *testing.T) {
@@ -17,20 +23,33 @@ func TestCustomTypesCheck_NoBeadsDir(t *testing.T) {
 }
 
 func TestCustomTypesCheck_MissingTypes(t *testing.T) {
-	// Scrub inherited beads env (BEADS_DIR / BEADS_ACTOR /
-	// GC_BEADS_SCOPE_ROOT) so the `bd config get` subprocess below
-	// resolves to the empty .beads/ in the temp dir instead of an
-	// outer gc city's beads database that a polecat/refinery worktree
-	// passes down via the environment. Without this, bd finds the
-	// outer city's store, reports all required types as present, and
-	// the check returns StatusOK — defeating the test's assertion.
-	// Same root cause class as ga-10qg / ga-766q; leak vector here is
-	// BEADS_DIR into a bd subprocess.
-	for _, key := range []string{"BEADS_DIR", "BEADS_ACTOR", "GC_BEADS_SCOPE_ROOT"} {
+	// Scrub inherited beads env so the `bd config get` subprocess below
+	// resolves to the empty .beads/ in the temp dir instead of an outer
+	// gc city's beads database. Without this, bd can reach a live dolt
+	// server (via GC_BEADS=bd + BEADS_DOLT_SERVER_PORT), reports all
+	// required types as present, and the check returns StatusOK —
+	// defeating the assertion. Clearing GC_BEADS and the dolt connection
+	// vars prevents bd from connecting even if testenv.init() has not
+	// yet added them to its LeakVectorVars scrub list.
+	for _, key := range []string{
+		"BEADS_DIR", "BEADS_ACTOR", "GC_BEADS_SCOPE_ROOT",
+		"GC_BEADS", "BEADS_DOLT_SERVER_PORT", "GC_DOLT_HOST", "GC_DOLT_PORT",
+		"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SHARED_SERVER",
+		"BEADS_DOLT_SERVER_MODE", "BEADS_SHARED_SERVER_DIR",
+	} {
 		t.Setenv(key, "")
 	}
 
-	dir := t.TempDir()
+	// Scrubbing env vars alone is not enough: bd's config precedence falls
+	// through to $HOME/.beads/config.yaml as a last resort, so a machine
+	// HOME with dolt.shared-server: true still routes bd to the shared
+	// server — which answers with every required type present and turns
+	// this check StatusOK, defeating the assertion below. Pin a test-owned
+	// HOME so that fallback file doesn't exist. See ga-zxpfic and
+	// TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext.
+	testOwnedHome(t)
+
+	dir := guardedTempDir(t)
 	beadsDir := filepath.Join(dir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -45,6 +64,185 @@ func TestCustomTypesCheck_MissingTypes(t *testing.T) {
 	}
 	if !c.CanFix() {
 		t.Fatal("CanFix should return true")
+	}
+}
+
+// TestCustomTypesCheck_TableDrift proves detect+heal of the bug this bead
+// fixes: config.yaml's types.custom CSV can list a type (e.g. "step") that
+// the normalized custom_types TABLE doesn't have a row for. bd's create
+// validation reads the TABLE, not the CSV, so a store in this state rejects
+// `bd create --type step ...` with "invalid issue type: step" even though
+// `bd config get types.custom` reports the type present. This drift happens
+// on stores an older bd wrote (or where the table row was dropped some
+// other way) — bd itself keeps CSV and table in sync on `bd config set`,
+// but nothing previously re-ran that set for existing stores.
+//
+// The test manufactures the drift directly (delete the table row via the
+// dolt CLI) rather than depending on an old bd binary, then asserts Run
+// catches it — even though the CSV alone is complete — and Fix heals it by
+// re-running `bd config set types.custom <merged>`, which reinserts the
+// missing table row as a side effect of bd's own set-path.
+func TestCustomTypesCheck_TableDrift(t *testing.T) {
+	if _, err := exec.LookPath("bd"); err != nil {
+		t.Skip("bd binary not on PATH")
+	}
+	if _, err := exec.LookPath("dolt"); err != nil {
+		t.Skip("dolt binary not on PATH")
+	}
+
+	// Scrub inherited beads env so the bd subprocesses below resolve to the
+	// throwaway store in the temp dir instead of an outer gc city's beads
+	// database. See TestCustomTypesCheck_MissingTypes for why each var
+	// matters.
+	for _, key := range []string{
+		"BEADS_DIR", "BEADS_ACTOR", "GC_BEADS_SCOPE_ROOT",
+		"GC_BEADS", "BEADS_DOLT_SERVER_PORT", "GC_DOLT_HOST", "GC_DOLT_PORT",
+		"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SHARED_SERVER",
+		"BEADS_DOLT_SERVER_MODE", "BEADS_SHARED_SERVER_DIR",
+	} {
+		t.Setenv(key, "")
+	}
+
+	// Scrubbing env vars alone is not enough: bd's config precedence falls
+	// through to $HOME/.beads/config.yaml as a last resort, so on a fleet
+	// agent HOME with dolt.shared-server: true set there, bd still routes
+	// to the shared server regardless of the vars above. Pin a test-owned
+	// HOME so that fallback file doesn't exist. See ga-zxpfic and
+	// TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext.
+	testOwnedHome(t)
+
+	dir := guardedTempDir(t)
+
+	runBD := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("bd", args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("bd %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+		return string(out)
+	}
+
+	runBD("init", "--non-interactive", "-p", "tst", "--skip-hooks", "--skip-agents")
+	runBD("config", "set", "types.custom", strings.Join(RequiredCustomTypes, ","))
+
+	// Locate the embedded dolt DB directory the same way production code
+	// does (internal/beads.(*BdStore).embeddedDoltDir), rather than
+	// hand-deriving the sanitized database name from the prefix.
+	metadataPath := filepath.Join(dir, ".beads", "metadata.json")
+	dbName, ok, err := contract.ReadDoltDatabase(fsys.OSFS{}, metadataPath)
+	if err != nil || !ok {
+		t.Fatalf("ReadDoltDatabase(%s): ok=%v err=%v", metadataPath, ok, err)
+	}
+	doltDir := filepath.Join(dir, ".beads", "embeddeddolt", dbName)
+
+	// Manufacture table drift: delete the "step" row directly from the
+	// custom_types table while leaving config.yaml's CSV untouched.
+	deleteCmd := exec.Command("dolt", "sql", "-q", "delete from custom_types where name='step'")
+	deleteCmd.Dir = doltDir
+	if out, err := deleteCmd.CombinedOutput(); err != nil {
+		t.Fatalf("dolt sql delete: %v\n%s", err, out)
+	}
+
+	c := NewCustomTypesCheck(dir, "test")
+	r := c.Run(&CheckContext{CityPath: dir})
+	if r.Status != StatusError {
+		t.Fatalf("Run status = %v, want StatusError (table drift); message=%q", r.Status, r.Message)
+	}
+	if len(c.missing) != 0 {
+		t.Fatalf("c.missing = %v, want empty — the CSV is complete, only the table is drifted", c.missing)
+	}
+	if !slices.Contains(c.tableMissing, "step") {
+		t.Fatalf("c.tableMissing = %v, want it to contain %q", c.tableMissing, "step")
+	}
+
+	if err := c.Fix(&CheckContext{CityPath: dir}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+
+	c2 := NewCustomTypesCheck(dir, "test")
+	r2 := c2.Run(&CheckContext{CityPath: dir})
+	if r2.Status != StatusOK {
+		t.Fatalf("after Fix, Run status = %v, want StatusOK; message=%q", r2.Status, r2.Message)
+	}
+
+	out := runBD("create", "--type", "step", "drift healed check")
+	if !strings.Contains(out, "Created issue") {
+		t.Fatalf("bd create --type step failed after Fix, table still drifted: %s", out)
+	}
+}
+
+// TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext is a regression
+// test for ga-zxpfic: env-var scrubbing alone does not stop a machine-level
+// dolt.shared-server config from leaking into the bd subprocesses this
+// package's tests spawn. bd's config precedence falls through, as a last
+// resort, to $HOME/.beads/config.yaml — so on any HOME that has
+// dolt.shared-server: true set there (as fleet agent HOMEs do), scrubbing
+// BEADS_DOLT_SERVER_PORT and friends changes nothing: bd still discovers the
+// shared server via that config file, not an env var. Pinning a test-owned
+// HOME via t.TempDir() removes the fallback file entirely, which is the only
+// complete fix — this test asserts that isolation actually holds, not just
+// that the drift check's Run/Fix behavior happens to look right.
+func TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext(t *testing.T) {
+	if _, err := exec.LookPath("bd"); err != nil {
+		t.Skip("bd binary not on PATH")
+	}
+	if _, err := exec.LookPath("dolt"); err != nil {
+		t.Skip("dolt binary not on PATH")
+	}
+
+	for _, key := range []string{
+		"BEADS_DIR", "BEADS_ACTOR", "GC_BEADS_SCOPE_ROOT",
+		"GC_BEADS", "BEADS_DOLT_SERVER_PORT", "GC_DOLT_HOST", "GC_DOLT_PORT",
+		"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SHARED_SERVER",
+		"BEADS_DOLT_SERVER_MODE", "BEADS_SHARED_SERVER_DIR",
+	} {
+		t.Setenv(key, "")
+	}
+
+	home := testOwnedHome(t)
+
+	dir := guardedTempDir(t)
+
+	runBD := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("bd", args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("bd %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+		return string(out)
+	}
+
+	initOut := runBD("init", "--non-interactive", "-p", "tst2", "--skip-hooks", "--skip-agents")
+	setOut := runBD("config", "set", "types.custom", strings.Join(RequiredCustomTypes, ","))
+
+	homeConfigPath := filepath.Join(home, ".beads", "config.yaml")
+	if _, err := os.Stat(homeConfigPath); !os.IsNotExist(err) {
+		t.Fatalf("expected no config.yaml under test-owned HOME %s, but Stat returned err=%v", homeConfigPath, err)
+	}
+
+	metadataPath := filepath.Join(dir, ".beads", "metadata.json")
+	meta, ok, err := contract.LoadMetadataState(fsys.OSFS{}, metadataPath)
+	if err != nil || !ok {
+		t.Fatalf("LoadMetadataState(%s): ok=%v err=%v", metadataPath, ok, err)
+	}
+	if meta.DoltMode != "embedded" {
+		t.Fatalf("metadata.json dolt_mode = %q, want %q", meta.DoltMode, "embedded")
+	}
+	if meta.DoltDatabase == "" {
+		t.Fatal("metadata.json dolt_database is empty, want it to match the embedded store")
+	}
+
+	for _, out := range []string{initOut, setOut} {
+		if strings.Contains(out, "Dolt server at") {
+			t.Fatalf("bd output leaked a shared-server connection: %s", out)
+		}
+		if strings.Contains(out, "shared-server mode is enabled") {
+			t.Fatalf("bd output leaked shared-server mode: %s", out)
+		}
 	}
 }
 
@@ -136,9 +334,9 @@ func TestMergeCustomTypes(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := mergeCustomTypes(tc.current, tc.required)
+			got := contract.MergeCustomTypes(tc.current, tc.required)
 			if !reflect.DeepEqual(got, tc.want) {
-				t.Errorf("mergeCustomTypes(%v, %v) = %v, want %v",
+				t.Errorf("contract.MergeCustomTypes(%v, %v) = %v, want %v",
 					tc.current, tc.required, got, tc.want)
 			}
 		})
@@ -192,6 +390,56 @@ func TestParseCustomTypesJSON(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("parseCustomTypesJSON(%q) = %v, want %v", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestTypesNotIn exercises the set-difference helper shared by the CSV
+// completeness check and the custom_types table drift check.
+func TestTypesNotIn(t *testing.T) {
+	cases := []struct {
+		name string
+		want []string
+		have []string
+		out  []string
+	}{
+		{
+			name: "nothing missing",
+			want: []string{"a", "b"},
+			have: []string{"a", "b", "c"},
+			out:  nil,
+		},
+		{
+			name: "some missing, preserves want order",
+			want: []string{"a", "b", "c"},
+			have: []string{"b"},
+			out:  []string{"a", "c"},
+		},
+		{
+			name: "everything missing when have is empty",
+			want: []string{"a", "b"},
+			have: nil,
+			out:  []string{"a", "b"},
+		},
+		{
+			name: "trims whitespace before comparing",
+			want: []string{"a"},
+			have: []string{" a "},
+			out:  nil,
+		},
+		{
+			name: "empty want yields nil regardless of have",
+			want: nil,
+			have: []string{"a"},
+			out:  nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := typesNotIn(tc.want, tc.have)
+			if !reflect.DeepEqual(got, tc.out) {
+				t.Errorf("typesNotIn(%v, %v) = %v, want %v", tc.want, tc.have, got, tc.out)
 			}
 		})
 	}

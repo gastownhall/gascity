@@ -65,6 +65,7 @@ path = %q
 		toml += "suspended_on_start = true\n"
 	}
 	writeRigAnywhereCityToml(t, cityPath, toml)
+	writeBuiltinImportsFixture(t, cityPath, "core")
 
 	reg := registryAt(t, os.Getenv("GC_HOME"))
 	if err := reg.Register(cityPath, "demo-city"); err != nil {

@@ -361,7 +361,7 @@ func historyDiagnosticsResult(profile ProfileID, transcriptPath string, history 
 	evidence := historyDiagnosticsEvidence(transcriptPath, history)
 	if loadErr != nil {
 		evidence["load_error"] = loadErr.Error()
-		if profile == ProfileGeminiTmuxCLI || profile == ProfileOpenCodeTmuxCLI {
+		if profile == ProfileGeminiTmuxCLI || profile == ProfileOpenCodeTmuxCLI || profile == ProfileMimoCodeTmuxCLI || profile == ProfileZCodeTmuxCLI {
 			return Pass(profile, RequirementTranscriptDiagnostics, "malformed single-file transcript failed closed").WithEvidence(evidence)
 		}
 		return Fail(profile, RequirementTranscriptDiagnostics, fmt.Sprintf("LoadHistory: %v", loadErr)).WithEvidence(evidence)
@@ -426,13 +426,14 @@ func historyHasDiagnosticCode(history *worker.HistorySnapshot, code string) bool
 
 func expectedHistoryDiagnosticCode(profile ProfileID) string {
 	switch profile {
-	case ProfileClaudeTmuxCLI, ProfilePiTmuxCLI, ProfileAntigravityTmuxCLI:
+	case ProfileClaudeTmuxCLI, ProfileCursorTmuxCLI, ProfilePiTmuxCLI, ProfileAntigravityTmuxCLI:
 		return "malformed_tail"
 	case ProfileCodexTmuxCLI:
 		return "malformed_jsonl"
 	default:
-		// Gemini and OpenCode store one JSON document, so malformed/truncated
-		// transcript input fails closed before a diagnostic code exists.
+		// Gemini, OpenCode, MiMo Code, and ZCode store one JSON document,
+		// so malformed/truncated transcript input fails closed before a
+		// diagnostic code exists.
 		return ""
 	}
 }

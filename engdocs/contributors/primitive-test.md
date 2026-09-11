@@ -31,12 +31,13 @@ agents can call it directly.
 - Two agents hooking the same bead → needs atomic CAS → Gas City's
   `beads.Store.Claim()` provides this when the underlying store doesn't
 
-### 2. Bitter Lesson — does it become MORE useful as models improve?
+### 2. Does it become MORE useful as models improve?
 
-If a smarter model would do it better from the prompt, it fails the
-Bitter Lesson test and belongs in the consumer layer. If it's pure
-plumbing that models will always delegate to (and never improve upon),
-it's a primitive.
+If a smarter model would do it better from the prompt, this condition
+fails and the capability belongs in the consumer layer. A primitive must
+become MORE useful as models improve, not less. If it's pure plumbing
+that models will always delegate to (and never improve upon), it's a
+primitive.
 
 **The test:** Imagine a model 10x more capable. Does this capability
 become less necessary (→ consumer layer) or exactly as necessary
@@ -52,10 +53,11 @@ become less necessary (→ consumer layer) or exactly as necessary
 - "`gc done` command" → encodes judgment about when/how to finish →
   consumer layer (the agent decides its own done flow)
 
-### 3. ZFC — is it transport or cognition?
+### 3. Is it transport or cognition?
 
 If implementing it in Go requires a judgment call (`if stuck then X`),
-it's cognition and belongs in the prompt. If it's pure data movement,
+it's cognition and belongs in the prompt — keep judgment out of Go; the
+framework moves work, it doesn't reason. If it's pure data movement,
 process management, or filesystem operations, it's transport and belongs
 in the SDK.
 
@@ -73,7 +75,7 @@ decision belongs in the prompt, not the code.
 
 ### Decision table template
 
-| Capability | Atomicity needed? | Bitter Lesson pass? | ZFC pass? | Verdict |
+| Capability | Atomicity needed? | More useful as models improve? | Transport, not cognition? | Verdict |
 |---|---|---|---|---|
 | ... | Does the underlying tool race? | Does a smarter model still need this? | Is it pure transport? | All three → primitive |
 
@@ -87,8 +89,8 @@ decision belongs in the prompt, not the code.
 - Config parse/validate
 
 **Consumer layer (at least one fails):**
-- Done flow orchestration (fails Bitter Lesson — model decides)
-- Stale hook recovery strategy (fails ZFC — judgment)
+- Done flow orchestration (fails "more useful as models improve" — model decides)
+- Stale hook recovery strategy (fails "transport, not cognition" — judgment)
 - Bidirectional hook tracking (fails Atomicity — two `bd` calls suffice)
 - Agent bead creation (fails Atomicity — `bd create` works)
 - Label management (fails Atomicity — `bd label` is safe)

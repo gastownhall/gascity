@@ -41,6 +41,19 @@ else
     info "index $STATUS_INDEX_NAME is absent"
 fi
 
+indexes=$(show_wisps_indexes)
+rows=$(defer_until_index_rows "$indexes")
+if [ "$rows" -gt 0 ]; then
+    verify_defer_until_index_definition "$indexes"
+    dolt_sql -q "
+        USE \`$DOLT_DB\`;
+        DROP INDEX $DEFER_UNTIL_INDEX_NAME ON wisps;
+    " >/dev/null
+    changed=true
+else
+    info "index $DEFER_UNTIL_INDEX_NAME is absent"
+fi
+
 if [ "$changed" = false ]; then
     info "no rollback changes needed"
     exit 0
@@ -55,6 +68,11 @@ fi
 rows=$(status_index_rows "$indexes")
 if [ "$rows" -ne 0 ]; then
     die "rollback failed; index $STATUS_INDEX_NAME is still present"
+fi
+
+rows=$(defer_until_index_rows "$indexes")
+if [ "$rows" -ne 0 ]; then
+    die "rollback failed; index $DEFER_UNTIL_INDEX_NAME is still present"
 fi
 
 commit_schema_change "schema: drop wisps planner indexes" >/dev/null

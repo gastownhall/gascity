@@ -14,12 +14,20 @@ import (
 // RenderMarkdown writes a markdown reference document from a JSON Schema.
 // It walks the $defs, rendering one section per type with a table of fields.
 func RenderMarkdown(w io.Writer, s *jsonschema.Schema) error {
-	// Write header.
+	// Write Mintlify frontmatter (title + description, no body H1).
 	title := s.Title
 	if title == "" {
 		title = "Configuration Reference"
 	}
-	if _, err := fmt.Fprintf(w, "# %s\n\n", title); err != nil {
+	if _, err := fmt.Fprintf(w, "---\ntitle: %q\n", title); err != nil {
+		return err
+	}
+	if desc := firstSentence(s.Description); desc != "" {
+		if _, err := fmt.Fprintf(w, "description: %q\n", desc); err != nil {
+			return err
+		}
+	}
+	if _, err := fmt.Fprintf(w, "---\n\n"); err != nil {
 		return err
 	}
 	if s.Description != "" {
@@ -72,6 +80,13 @@ func RenderMarkdown(w io.Writer, s *jsonschema.Schema) error {
 			}
 		}
 
+		// Skip the field table entirely when no schema-visible fields
+		// exist (e.g. legacy types whose fields are all hidden); the
+		// heading and description still render.
+		if def.Properties.Oldest() == nil {
+			continue
+		}
+
 		// Build required set.
 		reqSet := make(map[string]bool)
 		for _, r := range def.Required {
@@ -110,6 +125,16 @@ func RenderMarkdown(w io.Writer, s *jsonschema.Schema) error {
 	}
 
 	return nil
+}
+
+// firstSentence returns the first sentence of s, for use as the
+// frontmatter description. The full text still renders in the body.
+func firstSentence(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.Index(s, ". "); i >= 0 {
+		return s[:i+1]
+	}
+	return s
 }
 
 // cleanupTempFile removes a temporary file, ignoring errors (best-effort cleanup).

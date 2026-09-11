@@ -461,6 +461,160 @@ func TestAgentListFilterByRunning(t *testing.T) {
 	}
 }
 
+// TestAgentListSuspendedCheckGatedByRunning guards against a regression
+// where the suspended-flag GetMeta lookup ran unconditionally, even for
+// agents with no session at all. A non-running agent has no session to
+// query, so the handler must not issue any GetMeta call for it.
+func TestAgentListSuspendedCheckGatedByRunning(t *testing.T) {
+	state := newFakeState(t)
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	if n := state.sp.CountCalls("GetMeta", "myrig--worker"); n != 0 {
+		t.Errorf("GetMeta calls for non-running agent = %d, want 0 (suspended check must be gated behind running)", n)
+	}
+}
+
+// rosterFake augments runtime.Fake with the optional batch-read interfaces
+// ([runtime.SessionRosterProvider], [runtime.EnvironmentBatchProvider]) so
+// tests can assert the handler prefers them over per-session-name calls.
+type rosterFake struct {
+	*runtime.Fake
+	roster map[string]runtime.SessionRosterEntry
+	env    map[string]map[string]string
+}
+
+func (r *rosterFake) SessionRoster() (map[string]runtime.SessionRosterEntry, error) {
+	return r.roster, nil
+}
+
+func (r *rosterFake) GetAllEnvironment(name string) (map[string]string, error) {
+	return r.env[name], nil
+}
+
+// TestAgentListPrefersBatchSessionRosterAndEnvironment verifies that when
+// the session provider implements the optional batch-read interfaces, the
+// handler sources running/attached/last-activity/suspended/session-id from
+// the single batched calls instead of falling back to the per-session-name
+// IsRunning/IsAttached/GetLastActivity/GetMeta path.
+func TestAgentListPrefersBatchSessionRosterAndEnvironment(t *testing.T) {
+	state := newFakeState(t)
+	lastActivity := time.Unix(1700000000, 0)
+	fake := &rosterFake{
+		Fake: runtime.NewFake(),
+		roster: map[string]runtime.SessionRosterEntry{
+			"myrig--worker": {Attached: true, LastActivity: lastActivity},
+		},
+		env: map[string]map[string]string{
+			"myrig--worker": {"suspended": "true", "GC_SESSION_ID": "sess-xyz"},
+		},
+	}
+	// Liveness still comes from IsRunning, so the session must actually be
+	// started; the roster only supplies attributes for it.
+	fake.Start(context.Background(), "myrig--worker", runtime.Config{}) //nolint:errcheck
+	state.sessionProvider = fake
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var resp struct {
+		Items []agentResponse `json:"items"`
+		Total int             `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 1 {
+		t.Fatalf("Total = %d, want 1", resp.Total)
+	}
+
+	item := resp.Items[0]
+	if !item.Running {
+		t.Error("Running = false, want true")
+	}
+	if !item.Suspended {
+		t.Error("Suspended = false, want true (from batched GetAllEnvironment)")
+	}
+	if item.Session == nil || !item.Session.Attached {
+		t.Errorf("Session.Attached = %+v, want Attached=true (from roster)", item.Session)
+	}
+	if item.Session == nil || item.Session.LastActivity == nil || !item.Session.LastActivity.Equal(lastActivity) {
+		t.Errorf("Session.LastActivity = %+v, want %v (from roster)", item.Session, lastActivity)
+	}
+
+	// IsRunning is deliberately absent: it is the liveness source and is
+	// already a single cached fleet-wide read, so batching does not replace
+	// it. The reads below are the ones the batch path subsumes.
+	for _, method := range []string{"IsAttached", "GetLastActivity", "GetMeta"} {
+		if n := fake.CountCalls(method, "myrig--worker"); n != 0 {
+			t.Errorf("%s calls = %d, want 0 (batch path should bypass per-session-name methods)", method, n)
+		}
+	}
+}
+
+// TestAgentListRosterPresenceIsNotLiveness guards the invariant that the
+// batched session roster is an attributes source, not a liveness source.
+// The runtime's session listing still reports a session whose pane has
+// exited (tmux keeps such a corpse listed under remain-on-exit), while
+// IsRunning excludes it. A name present in the roster but not running must
+// therefore report running=false, or a crashed agent surfaces as idle.
+func TestAgentListRosterPresenceIsNotLiveness(t *testing.T) {
+	state := newFakeState(t)
+	fake := &rosterFake{
+		Fake: runtime.NewFake(),
+		roster: map[string]runtime.SessionRosterEntry{
+			// Present in the roster, but never started: the corpse case.
+			"myrig--worker": {Attached: true, LastActivity: time.Unix(1700000000, 0)},
+		},
+		env: map[string]map[string]string{},
+	}
+	state.sessionProvider = fake
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var resp struct {
+		Items []agentResponse `json:"items"`
+		Total int             `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 1 {
+		t.Fatalf("Total = %d, want 1", resp.Total)
+	}
+
+	item := resp.Items[0]
+	if item.Running {
+		t.Error("Running = true, want false (roster presence must not imply liveness)")
+	}
+	if item.Session != nil {
+		t.Errorf("Session = %+v, want nil for a non-running agent", item.Session)
+	}
+}
+
 func TestAgentGet(t *testing.T) {
 	state := newFakeState(t)
 	srv := New(state)
@@ -1195,6 +1349,21 @@ func TestProviderPathCheck_FallsBackToRawWhenNoCache(t *testing.T) {
 	}
 }
 
+// TestProviderPathCheck_StripsCommandArgs mirrors the config-side
+// pathCheckBinary behavior: an unset PathCheck with an args-bearing
+// Command must resolve to the bare executable token, so PATH detection
+// checks "my-agent" rather than the whole "my-agent --agent coder" string.
+func TestProviderPathCheck_StripsCommandArgs(t *testing.T) {
+	cfg := &config.City{
+		Providers: map[string]config.ProviderSpec{
+			"custom": {Command: "my-agent --agent coder"},
+		},
+	}
+	if got := providerPathCheck("custom", cfg); got != "my-agent" {
+		t.Errorf("providerPathCheck = %q, want my-agent", got)
+	}
+}
+
 // TestWaitForAgentVisibilityIn_ReturnsImmediatelyOnHit covers the happy
 // path: the freshly created agent is already visible in the snapshot
 // and the wait returns without sleeping.
@@ -1257,5 +1426,224 @@ func TestWaitForAgentVisibilityIn_RespectsContext(t *testing.T) {
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("error = %v, want wrapped DeadlineExceeded", err)
+	}
+}
+
+// TestAgentListProvenanceCityNative verifies that an agent declared inline in
+// city.toml (present in both raw and expanded config) reports pack_derived=false
+// with an empty pack binding. A UI uses this to route an edit to the direct
+// PATCH /agent/{name} route rather than the patch overlay.
+func TestAgentListProvenanceCityNative(t *testing.T) {
+	state := newFakeState(t)
+	// Default fake: "worker" in "myrig" is inline (raw == expanded), so it
+	// is city-native, not pack-derived.
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var resp struct {
+		Items []agentResponse `json:"items"`
+		Total int             `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 1 {
+		t.Fatalf("Total = %d, want 1", resp.Total)
+	}
+	if resp.Items[0].PackDerived {
+		t.Errorf("PackDerived = true, want false for city-native agent")
+	}
+	if resp.Items[0].Pack != "" {
+		t.Errorf("Pack = %q, want empty for city-native agent", resp.Items[0].Pack)
+	}
+}
+
+// TestAgentListProvenancePackDerived verifies that an agent originating from an
+// imported pack (present in expanded config but absent from raw) reports
+// pack_derived=true and pack = its import binding name. A UI uses this to route
+// an edit through the patch overlay (PUT /patches/agents) instead of attempting
+// a direct mutation that would return ErrPackDerived / 409.
+func TestAgentListProvenancePackDerived(t *testing.T) {
+	state := newFakeState(t)
+	// Expanded agent carries the import binding name that brought it into
+	// scope. Mirrors config-explain's TestHandleConfigExplain_PackDerivedAgent:
+	// pack-derived means present in expanded (cfg) but absent from raw.
+	state.cfg.Agents = []config.Agent{
+		{
+			Name:              "worker",
+			Dir:               "myrig",
+			Provider:          "test-agent",
+			BindingName:       "gastown",
+			MaxActiveSessions: intPtr(1),
+		},
+	}
+	state.cfg.NamedSessions = nil
+	state.rawCfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		// No agents in raw — worker comes from pack expansion.
+		Rigs: []config.Rig{
+			{Name: "myrig", Path: "/tmp/myrig"},
+		},
+	}
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var resp struct {
+		Items []agentResponse `json:"items"`
+		Total int             `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 1 {
+		t.Fatalf("Total = %d, want 1", resp.Total)
+	}
+	if !resp.Items[0].PackDerived {
+		t.Errorf("PackDerived = false, want true for pack-derived agent")
+	}
+	if resp.Items[0].Pack != "gastown" {
+		t.Errorf("Pack = %q, want %q (the import binding name)", resp.Items[0].Pack, "gastown")
+	}
+}
+
+// TestAgentGetProvenanceCityNative verifies the single-agent GET carries the
+// same provenance as the list: a city-native agent reports pack_derived=false
+// with an empty pack. (The non-omitempty pack_derived bool would otherwise
+// read as a confident false on this surface.)
+func TestAgentGetProvenanceCityNative(t *testing.T) {
+	state := newFakeState(t)
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var resp agentResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.PackDerived {
+		t.Errorf("PackDerived = true, want false for city-native agent")
+	}
+	if resp.Pack != "" {
+		t.Errorf("Pack = %q, want empty for city-native agent", resp.Pack)
+	}
+}
+
+// TestAgentGetProvenancePackDerived verifies the single-agent GET reports
+// pack_derived=true and the import binding name for a pack-derived agent,
+// matching the list surface so a UI gets the same routing signal either way.
+func TestAgentGetProvenancePackDerived(t *testing.T) {
+	state := newFakeState(t)
+	state.cfg.Agents = []config.Agent{
+		{
+			Name:              "worker",
+			Dir:               "myrig",
+			Provider:          "test-agent",
+			BindingName:       "gastown",
+			MaxActiveSessions: intPtr(1),
+		},
+	}
+	state.cfg.NamedSessions = nil
+	state.rawCfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "myrig", Path: "/tmp/myrig"},
+		},
+	}
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	// Binding-stamped agents are addressed by their qualified name
+	// (dir/binding.base), matching AgentMatchesIdentity.
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/gastown.worker"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var resp agentResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !resp.PackDerived {
+		t.Errorf("PackDerived = false, want true for pack-derived agent")
+	}
+	if resp.Pack != "gastown" {
+		t.Errorf("Pack = %q, want %q (the import binding name)", resp.Pack, "gastown")
+	}
+}
+
+// TestAgentListProvenancePoolInheritance verifies that every instance of a
+// bounded multi-session (pool) agent inherits the declared agent's provenance.
+// Provenance is a property of the declared agent, so all expanded members of a
+// pack-derived pool must report pack_derived=true with the same binding name.
+func TestAgentListProvenancePoolInheritance(t *testing.T) {
+	state := newFakeState(t)
+	state.cfg.Agents = []config.Agent{
+		{
+			Name:              "polecat",
+			Dir:               "myrig",
+			BindingName:       "gastown",
+			MinActiveSessions: intPtr(1),
+			MaxActiveSessions: intPtr(3),
+			ScaleCheck:        "echo 3",
+		},
+	}
+	state.cfg.NamedSessions = nil
+	state.rawCfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "myrig", Path: "/tmp/myrig"},
+		},
+	}
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var resp struct {
+		Items []agentResponse `json:"items"`
+		Total int             `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 3 {
+		t.Fatalf("Total = %d, want 3 (bounded pool members)", resp.Total)
+	}
+	for i, item := range resp.Items {
+		if !item.PackDerived {
+			t.Errorf("Items[%d] (%s) PackDerived = false, want true", i, item.Name)
+		}
+		if item.Pack != "gastown" {
+			t.Errorf("Items[%d] (%s) Pack = %q, want %q", i, item.Name, item.Pack, "gastown")
+		}
 	}
 }

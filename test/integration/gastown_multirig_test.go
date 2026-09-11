@@ -83,8 +83,7 @@ func setupMultiRigCity(t *testing.T, rigCount int) (cityDir string, rigDirs []st
 	fmt.Fprintf(&source, "[workspace]\nname = %s\n", quote(cityName))
 	fmt.Fprintf(&source, "\n[beads]\nprovider = \"file\"\n")
 	require.NoError(t, os.WriteFile(filepath.Join(sourceDir, "city.toml"), []byte(source.String()), 0o644))
-	pack := fmt.Sprintf("[pack]\nname = %s\nschema = 2\n", quote(cityName))
-	require.NoError(t, os.WriteFile(filepath.Join(sourceDir, "pack.toml"), []byte(pack), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(sourceDir, "pack.toml"), []byte(packTomlWithCoreImport(t, cityName)), 0o644))
 
 	// Create the city scaffold inside an isolated supervisor env so
 	// multi-rig tests do not contend with the suite-global supervisor.

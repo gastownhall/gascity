@@ -1,6 +1,0 @@
-[order]
-description = "Flatten Dolt commit history to reduce storage"
-trigger = "cooldown"
-interval = "24h"
-exec = "gc dolt compact"
-timeout = "24h"

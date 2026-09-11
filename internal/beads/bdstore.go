@@ -3,18 +3,24 @@ package beads
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
@@ -30,13 +36,21 @@ type CommandRunner func(dir, name string, args ...string) ([]byte, error)
 var (
 	bdCommandTimeout = 120 * time.Second
 	// bdReadCommandTimeout bounds bd read-only subcommands (count, list,
-	// ready, show, stats). Default matches bdCommandTimeout to preserve
+	// ready, show, sql, stats, version). Default matches bdCommandTimeout to preserve
 	// pre-bounded behavior; lowered in follow-up work after slow read
 	// paths are identified.
 	bdReadCommandTimeout = 120 * time.Second
 	// bdGraphApplyCommandTimeout bounds atomic graph creation below callers'
 	// outer command budgets so transient Dolt stalls can retry or fall back.
 	bdGraphApplyCommandTimeout = 45 * time.Second
+	// bdQueryCommandTimeout bounds the `bd query` subcommand, which reads the
+	// ephemeral (wisp) tier. gc reload and gc doctor run a sequence of these
+	// ephemeral/order-run reads; under the 120s general timeout an
+	// intermittently slow child blocked those commands for minutes (#3191).
+	// A bound well below that lets the runner kill the slow child quickly so
+	// the tier-merge degrades to the durable tier and the lookups continue
+	// instead of blocking. Normal ephemeral reads return in ~2s.
+	bdQueryCommandTimeout = 30 * time.Second
 	// bdSlowTelemetryThreshold is fixed in production via telemetry.BDSlowThreshold:
 	// high enough to avoid normal bd list calls, but below the wrapper timeout.
 	bdSlowTelemetryThreshold = telemetry.BDSlowThreshold
@@ -53,104 +67,283 @@ func ExecCommandRunner() CommandRunner {
 // applies the provided environment overrides. Explicit keys replace any
 // inherited values from the parent process.
 func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
+	return execCommandRunnerWithEnv(context.Background(), env, false)
+}
+
+// ExecCommandRunnerWithEnvWithoutAmbientBeads returns a CommandRunner whose
+// inherited environment excludes the complete BEADS_* namespace before the
+// explicit overrides are applied. Hosted workspace bindings use this so a
+// parent-shell variable added by a newer beads release cannot repoint the
+// selected workspace or replace its credential command.
+func ExecCommandRunnerWithEnvWithoutAmbientBeads(env map[string]string) CommandRunner {
+	return execCommandRunnerWithEnv(context.Background(), env, true)
+}
+
+// ExecCommandRunnerWithEnvContext is like ExecCommandRunnerWithEnv but binds
+// every command it runs to ctx, so each command exits at the sooner of ctx's
+// deadline and the per-command bd timeout. Callers with a short best-effort
+// budget (for example the claim-time gc.current_run_id decoration) use this so a
+// slow or stuck bd child cannot outlast that budget.
+func ExecCommandRunnerWithEnvContext(ctx context.Context, env map[string]string) CommandRunner {
+	return execCommandRunnerWithEnv(ctx, env, false)
+}
+
+// ExecCommandRunnerWithEnvContextWithoutAmbientBeads is the context-bound
+// form of ExecCommandRunnerWithEnvWithoutAmbientBeads.
+func ExecCommandRunnerWithEnvContextWithoutAmbientBeads(ctx context.Context, env map[string]string) CommandRunner {
+	return execCommandRunnerWithEnv(ctx, env, true)
+}
+
+func execCommandRunnerWithEnv(parent context.Context, env map[string]string, withoutAmbientBeads bool) CommandRunner {
+	return execCommandRunner(parent, env, withoutAmbientBeads, processEnvSnapshotExcludingNativeDoltOpen)
+}
+
+// ExecCommandRunnerWithExactEnvContext is like ExecCommandRunnerWithEnvContext,
+// but replaces the child environment instead of layering overrides onto the
+// parent process. Use it when env is a complete, already-scrubbed projection
+// (e.g. the hook-claim query env from mergeRuntimeEnv). This is a stronger
+// invariant than the WithoutAmbientBeads pair, which strips only BEADS_*:
+// here the mutation runs in exactly the environment the query ran in.
+func ExecCommandRunnerWithExactEnvContext(ctx context.Context, env map[string]string) CommandRunner {
+	return execCommandRunner(ctx, env, false, func() []string { return nil })
+}
+
+func execCommandRunner(parent context.Context, env map[string]string, withoutAmbientBeads bool, baseEnvFn func() []string) CommandRunner {
 	return func(dir, name string, args ...string) ([]byte, error) {
-		start := time.Now()
-		trace := func(status string, err error) {
-			// GC_BD_TRACE_JSON wins: when the structured JSONL trace
-			// (via TraceBDCall in bdtrace.go) is enabled, suppress the
-			// legacy line-format trace so the two don't interleave
-			// incompatible records in the same file when an operator
-			// points both env vars at the same path.
-			if strings.TrimSpace(os.Getenv("GC_BD_TRACE_JSON")) != "" {
-				return
+		baseEnv := baseEnvFn()
+		execName := name
+		if name == "bd" {
+			pinned, _ := effectiveEnvValue(baseEnv, env, "BD_BIN")
+			if pinned = strings.TrimSpace(pinned); filepath.IsAbs(pinned) {
+				execName = pinned
 			}
-			path := strings.TrimSpace(os.Getenv("GC_BD_TRACE"))
-			if path == "" {
-				return
-			}
-			f, openErr := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-			if openErr != nil {
-				return
-			}
-			defer f.Close() //nolint:errcheck // best-effort trace log
-			msg := ""
-			if err != nil {
-				msg = err.Error()
-			}
-			fmt.Fprintf(f, "%s status=%s dur=%s dir=%s cmd=%s args=%q err=%q\n", //nolint:errcheck // best-effort trace log
-				time.Now().UTC().Format(time.RFC3339Nano), status, time.Since(start), dir, name, args, msg)
 		}
+		start := time.Now()
+		trace := newBDExecTrace(start, dir, name, args)
 		trace("start", nil)
+
 		timeout := bdCommandTimeoutFor(name, args)
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		ctx, cancel := context.WithTimeout(parent, timeout)
 		defer cancel()
-		var slowTimer *time.Timer
+
 		if name == "bd" {
 			bdArgs := append([]string(nil), args...)
 			agentID := bdTelemetryAgentID(env)
-			slowTimer = time.AfterFunc(bdSlowTelemetryThreshold, func() {
+			slowTimer := time.AfterFunc(bdSlowTelemetryThreshold, func() {
 				telemetry.RecordBDSlow(ctx, bdArgs, dir, agentID)
 			})
 			defer slowTimer.Stop()
 		}
-		cmd := exec.CommandContext(ctx, name, args...)
+
+		cmd := exec.CommandContext(ctx, execName, args...)
 		cmd.WaitDelay = 2 * time.Second
 		prepareCommandForTimeout(cmd)
 		cmd.Dir = dir
 		cmd.Cancel = func() error {
 			return killCommandTree(cmd)
 		}
-		baseEnv := processEnvSnapshotExcludingNativeDoltOpen()
-		if len(env) > 0 {
-			cmd.Env = mergeEnv(baseEnv, env)
-		} else {
-			cmd.Env = baseEnv
+		overrides := env
+		if withoutAmbientBeads {
+			baseEnv = envWithoutPrefix(baseEnv, beadsEnvPrefix)
+			overrides = maps.Clone(env)
+			for key, value := range overrides {
+				if strings.HasPrefix(key, beadsEnvPrefix) && value == "" {
+					delete(overrides, key)
+				}
+			}
 		}
+		cmd.Env = execEnvFor(name, baseEnv, overrides)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		out, err := cmd.Output()
-		if name == "bd" {
-			// Structured JSONL trace — independent of the legacy line-format
-			// trace above (gated by GC_BD_TRACE_JSON, not GC_BD_TRACE).
-			traceExit := 0
-			if err != nil {
-				var exitErr *exec.ExitError
-				if errors.As(err, &exitErr) {
-					traceExit = exitErr.ExitCode()
-				} else {
-					traceExit = -1
-				}
-			}
-			TraceBDCall("go:bdstore.runner", dir, args, start, traceExit, err)
-			telemetry.RecordBDCall(context.Background(),
-				args, float64(time.Since(start).Milliseconds()),
-				err, out, stderr.String())
-		}
-		if ctx.Err() == context.DeadlineExceeded {
-			timeoutErr := fmt.Errorf("timed out after %s", timeout)
-			trace("timeout", timeoutErr)
-			if stderr.Len() > 0 {
-				return out, fmt.Errorf("%w: %s", timeoutErr, stderr.String())
-			}
-			return out, timeoutErr
-		}
-		if err != nil {
-			// bd writes structured errors to stdout (JSON envelope) when
-			// invoked with --json, while stderr is often empty. Surface
-			// whichever stream has content so supervisor logs become
-			// actionable instead of bare "exit status 1".
-			detail := strings.TrimSpace(stderr.String())
-			if detail == "" && name == "bd" {
-				detail = bdStdoutErrorDetail(out)
-			}
-			if detail != "" {
-				trace("error", err)
-				return out, fmt.Errorf("%w: %s", err, detail)
-			}
-		}
-		trace("done", err)
-		return out, err
+
+		recordBDExecTelemetry(name, dir, args, start, out, stderr.String(), err)
+
+		status, traceErr, resultErr := classifyBDExecResult(
+			parent, ctx, name, timeout, start, out, stderr.String(), err)
+		trace(status, traceErr)
+		return out, resultErr
 	}
+}
+
+// effectiveEnvValue returns the value a child process receives after explicit
+// runner overrides replace the inherited process environment. Reading BD_BIN
+// through the same merge contract keeps executable selection aligned with the
+// environment passed to bd itself.
+func effectiveEnvValue(baseEnv []string, overrides map[string]string, key string) (string, bool) {
+	if value, ok := overrides[key]; ok {
+		return value, true
+	}
+	prefix := key + "="
+	for i := len(baseEnv) - 1; i >= 0; i-- {
+		if strings.HasPrefix(baseEnv[i], prefix) {
+			return strings.TrimPrefix(baseEnv[i], prefix), true
+		}
+	}
+	return "", false
+}
+
+// newBDExecTrace returns the legacy line-format trace callback for one command
+// invocation. It is a no-op when GC_BD_TRACE is unset, or when GC_BD_TRACE_JSON
+// has claimed tracing (the structured JSONL trace in bdtrace.go) so the two
+// formats never interleave incompatible records when an operator points both
+// env vars at the same file. The returned callback appends one
+// "status=… dur=… cmd=… err=…" line per call.
+func newBDExecTrace(start time.Time, dir, name string, args []string) func(status string, err error) {
+	if strings.TrimSpace(os.Getenv("GC_BD_TRACE_JSON")) != "" {
+		return func(string, error) {}
+	}
+	path := strings.TrimSpace(os.Getenv("GC_BD_TRACE"))
+	if path == "" {
+		return func(string, error) {}
+	}
+	return func(status string, err error) {
+		f, openErr := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if openErr != nil {
+			return
+		}
+		defer f.Close() //nolint:errcheck // best-effort trace log
+		msg := ""
+		if err != nil {
+			msg = err.Error()
+		}
+		fmt.Fprintf(f, "%s status=%s dur=%s dir=%s cmd=%s args=%q err=%q\n", //nolint:errcheck // best-effort trace log
+			time.Now().UTC().Format(time.RFC3339Nano), status, time.Since(start), dir, name, args, msg)
+	}
+}
+
+// recordBDExecTelemetry emits the structured JSONL trace (bdtrace.go) and the
+// telemetry RecordBDCall for a completed "bd" invocation; it is a no-op for any
+// other command. The trace exit code is the child's exit status, or -1 when the
+// failure was not an *exec.ExitError (for example a context kill or a spawn
+// failure). It is independent of the legacy line-format trace (gated by
+// GC_BD_TRACE_JSON, not GC_BD_TRACE).
+func recordBDExecTelemetry(name, dir string, args []string, start time.Time, out []byte, stderr string, err error) {
+	if name != "bd" {
+		return
+	}
+	traceExit := 0
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			traceExit = exitErr.ExitCode()
+		} else {
+			traceExit = -1
+		}
+	}
+	TraceBDCall("go:bdstore.runner", dir, args, start, traceExit, err)
+	telemetry.RecordBDCall(context.Background(),
+		args, float64(time.Since(start).Milliseconds()),
+		err, out, stderr)
+}
+
+// classifyBDExecResult maps a finished invocation to its legacy trace status,
+// the error to trace, and the error to return to the caller. The trace error
+// and the returned error differ only where the returned error is enriched with
+// stderr/stdout detail that the historical status-level trace line omits, so
+// the line-format trace stays compatible with prior releases. bd writes
+// structured errors to stdout (JSON envelope) under --json while stderr is
+// often empty, so the generic-error path surfaces whichever stream has content
+// rather than a bare "exit status 1".
+func classifyBDExecResult(parent, ctx context.Context, name string, timeout time.Duration, start time.Time, out []byte, stderr string, runErr error) (status string, traceErr, resultErr error) {
+	if runErr == nil && name == "bd" && bdOutputIndicatesSilentFallback(stderr) {
+		fallbackErr := fmt.Errorf("%w: %s", ErrBDSilentFallback, strings.TrimSpace(stderr))
+		return "error", fallbackErr, fallbackErr
+	}
+	if ctx.Err() == context.DeadlineExceeded {
+		timeoutErr := bdExecTimeoutError(parent, timeout, start)
+		if stderr != "" {
+			return "timeout", timeoutErr, fmt.Errorf("%w: %s", timeoutErr, stderr)
+		}
+		return "timeout", timeoutErr, timeoutErr
+	}
+	if runErr != nil {
+		if detail := bdFailureDetail(name, out, stderr); detail != "" {
+			return "error", runErr, fmt.Errorf("%w: %s", runErr, detail)
+		}
+	}
+	return "done", runErr, runErr
+}
+
+// bdFailureDetail composes the operator-facing detail for a failed invocation
+// out of the two streams bd splits its output across.
+//
+// bd writes unrelated startup notices to stderr BEFORE the command runs — the
+// BD_OTEL_* deprecation warning is the live example — so on a bd that both nags
+// and fails, stderr's FIRST line is the nag and the line saying what actually
+// broke sits below it. Every single-line render of the wrapped error (the cache
+// problem tile, `gc status`, a journal grep) then shows the nag. That is how a
+// permanently failing `bd sql ready projection` on maintainer-city read as a
+// telemetry warning for a night while the controller starved.
+//
+// So the detail leads with bd's own Error:/Hint: lines (cmd/bd/errors.go) and
+// keeps everything else verbatim, in order, after them. NOTHING is dropped, and
+// every other shape — a single line, stderr that already leads with the error,
+// stderr with no bd error line, empty stderr, a non-bd command — composes
+// byte-for-byte what it composed before.
+func bdFailureDetail(name string, out []byte, stderr string) string {
+	detail := strings.TrimSpace(stderr)
+	if name != "bd" {
+		return detail
+	}
+	if detail == "" {
+		// bd writes structured errors to stdout under --json while stderr is
+		// often empty.
+		return bdStdoutErrorDetail(out)
+	}
+	return hoistBdErrorLines(detail)
+}
+
+// bdErrorLinePrefixes are the prefixes bd stamps on the lines that say what
+// failed (cmd/bd/errors.go: HandleError, HandleErrorWithHint).
+var bdErrorLinePrefixes = []string{"Error:", "Fatal:", "Hint:"}
+
+func hoistBdErrorLines(detail string) string {
+	lines := strings.Split(detail, "\n")
+	if len(lines) < 2 || isBdErrorLine(lines[0]) {
+		return detail
+	}
+	leading := make([]string, 0, len(lines))
+	trailing := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if isBdErrorLine(line) {
+			leading = append(leading, line)
+			continue
+		}
+		trailing = append(trailing, line)
+	}
+	if len(leading) == 0 {
+		return detail
+	}
+	return strings.Join(append(leading, trailing...), "\n")
+}
+
+func isBdErrorLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	for _, prefix := range bdErrorLinePrefixes {
+		if strings.HasPrefix(trimmed, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// bdExecTimeoutError formats the deadline error after the per-command context
+// expired, attributed to whichever budget actually won the race. ctx's
+// effective deadline is min(parent deadline, start+timeout): when the caller's
+// parent deadline is the binding one (for example the short claim-time
+// gc.current_run_id write budget), it reports that effective budget so the
+// failure is not misreported as the much larger per-command bd timeout; when
+// the per-command timer wins, it reports that timeout unchanged.
+func bdExecTimeoutError(parent context.Context, timeout time.Duration, start time.Time) error {
+	if deadline, ok := parent.Deadline(); ok && deadline.Before(start.Add(timeout)) {
+		budget := deadline.Sub(start)
+		if budget < 0 {
+			budget = 0
+		}
+		return fmt.Errorf("timed out after %s (caller deadline)", budget.Round(time.Millisecond))
+	}
+	return fmt.Errorf("timed out after %s", timeout)
 }
 
 func bdTelemetryAgentID(env map[string]string) string {
@@ -175,8 +368,10 @@ func bdCommandTimeoutFor(name string, args []string) time.Duration {
 		return bdGraphApplyCommandTimeout
 	}
 	switch args[0] {
-	case "count", "list", "ready", "show", "stats":
+	case "count", "list", "ready", "show", "sql", "stats", "version":
 		return bdReadCommandTimeout
+	case "query":
+		return bdQueryCommandTimeout
 	default:
 		return bdCommandTimeout
 	}
@@ -201,6 +396,17 @@ func bdStdoutErrorDetail(out []byte) string {
 	return strings.TrimSpace(env.Error)
 }
 
+const (
+	bdSilentFallbackMarkerImport  = "auto-importing"
+	bdSilentFallbackMarkerEmptyDB = "into empty database"
+)
+
+func bdOutputIndicatesSilentFallback(s string) bool {
+	lower := strings.ToLower(s)
+	return strings.Contains(lower, bdSilentFallbackMarkerImport) &&
+		strings.Contains(lower, bdSilentFallbackMarkerEmptyDB)
+}
+
 // PurgeRunnerFunc executes a bd purge command with custom dir and env.
 // Unlike CommandRunner, this supports environment variable manipulation
 // needed by bd purge (BEADS_DIR override).
@@ -220,9 +426,79 @@ type BdStore struct {
 	idPrefix    string          // bead ID prefix owned by this store, without trailing "-"
 
 	listSkipLabelsEnabled bool // whether bd list may receive --skip-labels
+
+	// relocatedClasses names the coordination classes this ledger does not
+	// serve. Empty on every city that keeps all classes on one store, which is
+	// what makes the SQL guard inert there. See bdsql_relocation.go.
+	relocatedClasses []RelocatedClass
+
+	readyProjectionMu      sync.Mutex
+	readyProjectionChecked bool
+	readyProjectionEnabled bool
+	// readyProjectionDoorValue names which bd verb fills this scope's
+	// is_blocked column: `bd sql` where the backend implements it, `bd blocked`
+	// where it does not. See bdstore_ready_projection.go.
+	readyProjectionDoorValue readyProjectionDoor
+	// readyProjectionVersionErr memoizes the ErrReadyProjectionUnsupported this
+	// store owes every later caller when the bd on PATH predates the is_blocked
+	// projection. Store-local rather than scope-latched: the bd binary is a
+	// property of the process, not of the ledger. See bdstore_ready_projection.go.
+	readyProjectionVersionErr error
+	// readyProjectionScope memoizes, per SCOPE PATH, the verdict that this
+	// ledger cannot serve the ready projection at all. Shared with every other
+	// store rooted at the same directory, because cmd/gc rebuilds a store per
+	// request and the control dispatcher rebuilds one every few seconds. See
+	// bdstore_ready_projection.go.
+	readyProjectionScope *readyProjectionScopeGuard
+
+	// condReleaseLatchedUnsupported records that this bd rejected the
+	// conditional-release flags, pinning ReleaseIfCurrent to the raw-SQL
+	// fallback for the rest of the process (bdstore_conditional_release.go).
+	condReleaseMu                 sync.Mutex
+	condReleaseLatchedUnsupported bool
+
+	// Conditional-write (ConditionalWriter) capability state, populated lazily on
+	// the first conditional write (bdstore_conditional.go). condWriteProbed/
+	// condWriteCapable memoize the four-verb --if-revision probe; condWriteLatched
+	// records a runtime unsupported response and is authoritative over the probe.
+	condWriteMu      sync.Mutex
+	condWriteProbed  bool
+	condWriteCapable bool
+	condWriteLatched bool
+	// condWriteProbeErr memoizes a probe SUBPROCESS failure (bd missing or
+	// broken) so incapable-because-broken stays distinguishable from
+	// incapable-because-old on every later capability answer.
+	condWriteProbeErr error
+
+	// condWritesStamp carries the factory-stamped beads.conditional_writes
+	// mode plus the once-per-store degrade latch, under its own mutex
+	// (disjoint from condWriteMu's capability state; no nesting).
+	condWritesStamp
+
+	// unreadStore memoizes, per SCOPE PATH, whether an empty whole-ledger read
+	// from this scope can be believed while a second bead database sits unread
+	// in its .beads/. Shared with every other store rooted at the same
+	// directory, because the API builds a throwaway store per request. See
+	// unread_store_notice.go.
+	unreadStore *unreadStoreGuard
+	// noticeSink redirects operator notices away from stderr; nil is stderr.
+	noticeSink io.Writer
+
+	// inlineDeps records whether bd's list JSON has been seen to carry each
+	// row's dependency edges beside it, which is what lets a CachingStore over
+	// this store serve down-deps and complete-ready reads from the snapshot.
+	// See bdstore_inline_deps.go.
+	inlineDeps inlineDependencyProjection
+
+	localStrings *localSidecar // clone-local data; see Store.SetLocalString
 }
 
-const bdTransientWriteAttempts = 3
+const (
+	bdTransientWriteAttempts = 3
+	bdTransientReadAttempts  = 3
+)
+
+var _ ConditionalAssignmentReleaser = (*BdStore)(nil)
 
 // BdStoreOption configures optional bd CLI behavior for a BdStore.
 type BdStoreOption func(*BdStore)
@@ -236,6 +512,41 @@ func WithBdStoreListSkipLabels(enabled bool) BdStoreOption {
 	}
 }
 
+// WithBdStoreRelocatedClasses declares the coordination classes this store's bd
+// ledger no longer serves, so its SQL-backed reads stop believing the empty
+// result bd hands back for beads it cannot see: a read scoped to one bead
+// refuses, and a read over a set of them drops the ones that moved and answers
+// about the rest. See bdsql_relocation.go for why bd cannot detect this itself.
+//
+// A city that relocates nothing passes no classes and the guard cannot fire.
+func WithBdStoreRelocatedClasses(classes ...RelocatedClass) BdStoreOption {
+	return func(s *BdStore) {
+		s.relocatedClasses = append(s.relocatedClasses, classes...)
+	}
+}
+
+// guardRelocatedClassIDs returns a refusal when any of ids belongs to a class
+// this store's ledger does not serve. It is the precondition of every
+// id-scoped, SQL-backed BdStore read and write whose answer is ABOUT the ids it
+// was given — a CAS on one bead, say. A read that answers about a SET of ids
+// partitions instead (see fetchReadyProjection): refusing a whole batch because
+// one member moved would throw away a correct answer about all the others.
+func (s *BdStore) guardRelocatedClassIDs(op string, ids ...string) error {
+	if s == nil || len(s.relocatedClasses) == 0 {
+		return nil
+	}
+	return RelocatedClassRefusal(op, relocatedClassesForIDs(s.relocatedClasses, ids...))
+}
+
+// relocatedClassesForID reports the relocated classes owning a single id, for
+// the callers that partition a batch rather than refuse it.
+func (s *BdStore) relocatedClassesForID(id string) []RelocatedClass {
+	if s == nil || len(s.relocatedClasses) == 0 {
+		return nil
+	}
+	return relocatedClassesForIDs(s.relocatedClasses, id)
+}
+
 // NewBdStore creates a BdStore rooted at dir using the given runner.
 func NewBdStore(dir string, runner CommandRunner, opts ...BdStoreOption) *BdStore {
 	return NewBdStoreWithPrefix(dir, runner, "", opts...)
@@ -243,13 +554,29 @@ func NewBdStore(dir string, runner CommandRunner, opts ...BdStoreOption) *BdStor
 
 // NewBdStoreWithPrefix creates a BdStore with an explicit owned bead ID prefix.
 func NewBdStoreWithPrefix(dir string, runner CommandRunner, idPrefix string, opts ...BdStoreOption) *BdStore {
-	s := &BdStore{dir: dir, runner: runner, idPrefix: normalizeIDPrefix(idPrefix)}
+	s := &BdStore{
+		dir:                  dir,
+		runner:               runner,
+		idPrefix:             normalizeIDPrefix(idPrefix),
+		unreadStore:          guardForScope(dir),
+		readyProjectionScope: readyProjectionGuardForScope(dir),
+		localStrings:         newLocalSidecar(bdLocalSidecarPath(dir)),
+	}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(s)
 		}
 	}
 	return s
+}
+
+// bdLocalSidecarPath returns the path of the clone-local sidecar file for a
+// BdStore rooted at dir, or "" (in-memory-only) if dir is unset.
+func bdLocalSidecarPath(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, ".beads", "local-strings.json")
 }
 
 // IDPrefix returns the bead ID prefix owned by this store, without trailing "-".
@@ -260,14 +587,21 @@ func (s *BdStore) IDPrefix() string {
 	return s.idPrefix
 }
 
+// Dir returns the root directory this store was constructed with (where
+// .beads/ lives). Callers that need to build an equivalent throwaway store
+// bound to a different context (e.g. a per-request scoped clone) use this
+// to target the same backend without a second, parallel way to track it.
+func (s *BdStore) Dir() string {
+	if s == nil {
+		return ""
+	}
+	return s.dir
+}
+
 // ListSkipLabelsEnabled reports whether this store may ask bd list to skip
 // label hydration.
 func (s *BdStore) ListSkipLabelsEnabled() bool {
 	return s != nil && s.listSkipLabelsEnabled
-}
-
-func (s *BdStore) listIncludesCompleteDependencies() bool {
-	return false
 }
 
 // Init initializes a beads database via bd init --server. This is an admin
@@ -414,6 +748,29 @@ func truncateRawOutput(data []byte, maxBytes int) string {
 	return string(trimmed[:maxBytes]) + "...(truncated)"
 }
 
+// bdAutoBackupOptOutEnvKey disables bd's PersistentPostRun auto-backup (the
+// hardcoded "backup_export" Dolt remote synced into <root>/.beads/backup on
+// nearly every bd invocation, with no retention). A stuck-looping
+// backup_export sync was the root cause of the 2026-06-08 town-wide wedge
+// (ga-0eq), and the unrotated archives reached 210GB on one dev store
+// (ga-yfbs28). gc's projected envs already opt out (cmd/gc applyBdAutoBackupOptOut);
+// injecting it here covers every other runner-spawned bd call — hook claim,
+// store bridge, t3bridge, libstore, provider lifecycle — current and future.
+const bdAutoBackupOptOutEnvKey = "BD_BACKUP_ENABLED"
+
+// execEnvFor assembles the child environment for a runner exec. For bd
+// commands the auto-backup opt-out is injected as a baseline, replacing any
+// value inherited from the parent process (matching the unconditional
+// projected-env opt-out policy); an explicit per-call override still wins
+// because mergeEnv applies overrides last. Non-bd commands (e.g. direct dolt
+// queries) pass through untouched.
+func execEnvFor(name string, baseEnv []string, overrides map[string]string) []string {
+	if name == "bd" {
+		baseEnv = append(envWithout(baseEnv, bdAutoBackupOptOutEnvKey), bdAutoBackupOptOutEnvKey+"=false")
+	}
+	return mergeEnv(baseEnv, overrides)
+}
+
 // envWithout returns a copy of environ with all entries for the given key removed.
 func envWithout(environ []string, key string) []string {
 	prefix := key + "="
@@ -422,6 +779,21 @@ func envWithout(environ []string, key string) []string {
 		if !strings.HasPrefix(e, prefix) {
 			out = append(out, e)
 		}
+	}
+	return out
+}
+
+// envWithoutPrefix returns a copy of environ without variables whose names
+// begin with prefix. Matching stops at the first '=' so a value containing the
+// prefix is never mistaken for a variable name.
+func envWithoutPrefix(environ []string, prefix string) []string {
+	out := make([]string, 0, len(environ))
+	for _, entry := range environ {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok && strings.HasPrefix(key, prefix) {
+			continue
+		}
+		out = append(out, entry)
 	}
 	return out
 }
@@ -470,6 +842,40 @@ func (m *StringMap) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// bdRevision is bd's signed optimistic-concurrency token at the JSON edge.
+// Current bd emits a decimal string; older supported versions emitted a JSON
+// integer. Both forms parse directly to int64 without passing through float64.
+type bdRevision int64
+
+// UnmarshalJSON accepts current decimal-string and legacy integer revisions.
+func (r *bdRevision) UnmarshalJSON(data []byte) error {
+	token := bytes.TrimSpace(data)
+	if len(token) == 0 {
+		return errors.New("bd revision is empty")
+	}
+	// A JSON null revision means the row has no recorded token yet (legacy rows,
+	// or a backend that has not minted one). Decode it as the zero token — the
+	// same "no revision" sentinel a never-mutated bead carries — rather than
+	// failing the whole issue decode on strconv.ParseInt("null").
+	if string(token) == "null" {
+		*r = 0
+		return nil
+	}
+
+	decimal := string(token)
+	if token[0] == '"' {
+		if err := json.Unmarshal(token, &decimal); err != nil {
+			return fmt.Errorf("decoding bd revision string: %w", err)
+		}
+	}
+	value, err := strconv.ParseInt(decimal, 10, 64)
+	if err != nil {
+		return fmt.Errorf("decoding bd revision %q: %w", decimal, err)
+	}
+	*r = bdRevision(value)
+	return nil
+}
+
 // bdIssue is the JSON shape returned by bd CLI commands. We decode only the
 // fields Gas City cares about; all others are silently ignored.
 type bdIssue struct {
@@ -489,9 +895,20 @@ type bdIssue struct {
 	Labels       []string     `json:"labels"`
 	Metadata     StringMap    `json:"metadata,omitempty"`
 	Dependencies []bdIssueDep `json:"dependencies,omitempty"`
-	Ephemeral    bool         `json:"ephemeral,omitempty"`
-	NoHistory    bool         `json:"no_history,omitempty"`
-	DeferUntil   *time.Time   `json:"defer_until,omitempty"`
+	// DependencyCount is bd's own count of this row's BLOCKING edges,
+	// projected from the same dependency table and the same query as
+	// Dependencies. It is the control that turns "bd carried edges inline"
+	// into a falsifiable claim — see bdstore_inline_deps.go. A pointer so a bd
+	// that omits the field stays distinguishable from one reporting zero.
+	DependencyCount *int         `json:"dependency_count,omitempty"`
+	Ephemeral       bool         `json:"ephemeral,omitempty"`
+	NoHistory       bool         `json:"no_history,omitempty"`
+	DeferUntil      *time.Time   `json:"defer_until,omitempty"`
+	IsBlocked       optionalBool `json:"is_blocked,omitempty"`
+	// Revision carries bd's optimistic-concurrency token for ConditionalWriter.
+	// Older bd versions omit it, so it decodes to 0; toBead stamps it onto the
+	// otherwise json:"-" Bead.Revision field.
+	Revision bdRevision `json:"revision,omitempty"`
 }
 
 type bdIssueDep struct {
@@ -537,6 +954,59 @@ func (e *PartialResultError) Unwrap() error {
 func IsPartialResult(err error) bool {
 	var partial *PartialResultError
 	return errors.As(err, &partial)
+}
+
+// IsTimeoutError reports whether err was caused by a store/bd query exceeding
+// its time budget — a per-command bd exec timeout (bdExecTimeoutError, "timed
+// out after ...") or a context deadline. It deliberately excludes cancellation
+// (context.Canceled) and genuine store-read failures (parse errors, connection
+// resets, "read failed"): those are not contention signals. Callers use it to
+// tell a query that merely ran out of time under store contention — safe to
+// relax for idempotent work — apart from an error that must be treated as a
+// hard failure. Message matching is required because bd exec timeouts are
+// formatted strings that do not wrap the context.DeadlineExceeded sentinel
+// (bdExecTimeoutError, and the second formatter in execPurge).
+//
+// SCOPE WARNING — substring-based, and safe only where a false positive is
+// harmless. The current caller (isGateContentionTimeout) relaxes a gate for
+// orders whose re-run is a no-op by contract, so a wrong "yes" costs a
+// duplicate dispatch and nothing more. On any path where timeout-versus-hard-
+// failure carries real weight, do not use this: a genuine outage whose message
+// happens to embed "deadline exceeded" would be misread as contention, and a
+// parse failure carries up to 200 bytes of raw bd output (bead titles) that the
+// caller does not control.
+//
+// It also matches on the flattened text of an errors.Join, so a chain mixing a
+// timeout with a hard failure reports true. That is deliberate for this caller:
+// the only join that reaches the gate carrying a timeout leaf is
+// mergeListTierResults, which fires only when BOTH list tiers fail — maximal
+// contention, where relaxing an idempotent gate is exactly the intended
+// behavior. Do not generalize that reasoning to another call site. Tightening
+// this to "every leaf must be timeout-shaped" would fail an idempotent gate
+// CLOSED under the worst contention there is, restoring the vp-gprv starvation;
+// TestIsTimeoutError and TestGateFailClosed pin the mixed-chain outcome in both
+// directions so that regression cannot land silently.
+//
+// This is the fourth transient-error classifier in the tree, each with an
+// overlapping but deliberately different needle set. Keep them in sync only
+// where the semantics genuinely match:
+//   - isBdAmbiguousWriteError (this file) — write-path ambiguity; a broader
+//     connection-error set, because a half-applied write must be retried on
+//     transport faults this function ignores.
+//   - isTransientWorkQueryFailure (internal/dispatch/control.go) and
+//     isTransientGraphApplyError (internal/molecule/graph_apply.go) — both gate
+//     on an operation marker before matching needles, which bounds the text
+//     they can misread. This function has no such gate.
+func IsTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "timed out after") ||
+		strings.Contains(msg, "deadline exceeded")
 }
 
 // parseIssuesTolerant unmarshals bd list output, skipping any entries that
@@ -623,26 +1093,30 @@ func (b *bdIssue) toBead() Bead {
 			}
 		}
 	}
+	status, indefinitelyDeferred := normalizedBdReadState(b.Status, b.DeferUntil)
 	return Bead{
-		ID:           b.ID,
-		Title:        b.Title,
-		Status:       mapBdStatus(b.Status),
-		Type:         b.IssueType,
-		Priority:     cloneIntPtr(b.Priority),
-		CreatedAt:    b.CreatedAt.Truncate(time.Second),
-		UpdatedAt:    b.UpdatedAt.Truncate(time.Second),
-		Assignee:     b.Assignee,
-		From:         from,
-		ParentID:     parentID,
-		Ref:          b.Ref,
-		Needs:        b.Needs,
-		Description:  b.Description,
-		Labels:       b.Labels,
-		Metadata:     b.Metadata,
-		Dependencies: deps,
-		Ephemeral:    b.Ephemeral,
-		NoHistory:    b.NoHistory,
-		DeferUntil:   cloneTimePtr(b.DeferUntil),
+		ID:                   b.ID,
+		Title:                b.Title,
+		Status:               status,
+		Type:                 b.IssueType,
+		Priority:             cloneIntPtr(b.Priority),
+		CreatedAt:            b.CreatedAt.Truncate(time.Second),
+		UpdatedAt:            b.UpdatedAt.Truncate(time.Second),
+		Assignee:             b.Assignee,
+		From:                 from,
+		ParentID:             parentID,
+		Ref:                  b.Ref,
+		Needs:                b.Needs,
+		Description:          b.Description,
+		Labels:               b.Labels,
+		Metadata:             b.Metadata,
+		Dependencies:         deps,
+		Ephemeral:            b.Ephemeral,
+		NoHistory:            b.NoHistory,
+		DeferUntil:           cloneTimePtr(b.DeferUntil),
+		IsBlocked:            b.IsBlocked.ptr(),
+		IndefinitelyDeferred: indefinitelyDeferred,
+		Revision:             int64(b.Revision),
 	}
 }
 
@@ -680,13 +1154,33 @@ func (b *bdIssue) normalizedDependencies() []Dep {
 }
 
 // isBdNotFound returns true if the error from bd CLI indicates a "not found" condition.
-// bd uses several phrasings: "no issue found", "issue not found", "not found".
+// bd uses several phrasings: "no issue found", "issue not found", "not found" on
+// stderr, and the plural "no issues found matching the provided IDs" in its
+// stdout --json error envelope. The plural form matters because
+// classifyBDExecResult falls back to the stdout envelope when stderr is empty,
+// which bd's --json error path increasingly is (see classifyBDExecResult); the
+// contract corpus pins this exact phrasing.
 func isBdNotFound(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "not found") || strings.Contains(msg, "no issue found")
+	return strings.Contains(msg, "not found") ||
+		strings.Contains(msg, "no issue found") ||
+		strings.Contains(msg, "no issues found")
+}
+
+// isBdOperationUnsupported reports whether err is bd telling us a backend
+// does not implement the attempted operation at all (e.g. the Postgres
+// backend's "IssueRelations" gap behind `bd dep list`, ga-7i7ts) as opposed
+// to a transient or data-shaped failure. Callers with a same-information
+// fallback, or for whom "no answer" safely means "no evidence", should
+// degrade instead of failing outright.
+func isBdOperationUnsupported(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "not supported")
 }
 
 func isBdClaimConflictMessage(msg string) bool {
@@ -709,6 +1203,59 @@ func mapBdStatus(s string) string {
 	default:
 		return "open"
 	}
+}
+
+// normalizedBdReadState preserves bd's status-based indefinite deferral after
+// richer bd statuses collapse to Gas City's three-state model. A time-bound
+// deferral remains governed by DeferUntil so it can become ready after expiry.
+func normalizedBdReadState(status string, deferUntil *time.Time) (string, bool) {
+	return mapBdStatus(status), status == "deferred" && deferUntil == nil
+}
+
+type optionalBool struct {
+	set   bool
+	value bool
+}
+
+func (b *optionalBool) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || bytes.Equal(data, []byte("null")) {
+		*b = optionalBool{}
+		return nil
+	}
+	var boolValue bool
+	if err := json.Unmarshal(data, &boolValue); err == nil {
+		b.set = true
+		b.value = boolValue
+		return nil
+	}
+	var intValue int
+	if err := json.Unmarshal(data, &intValue); err == nil {
+		b.set = true
+		b.value = intValue != 0
+		return nil
+	}
+	var stringValue string
+	if err := json.Unmarshal(data, &stringValue); err == nil {
+		switch strings.ToLower(strings.TrimSpace(stringValue)) {
+		case "1", "t", "true", "y", "yes":
+			b.set = true
+			b.value = true
+			return nil
+		case "0", "f", "false", "n", "no":
+			b.set = true
+			b.value = false
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid bool value %q", string(data))
+}
+
+func (b optionalBool) ptr() *bool {
+	if !b.set {
+		return nil
+	}
+	return cloneBoolPtr(&b.value)
 }
 
 // Create persists a new bead via bd create.
@@ -828,12 +1375,35 @@ func effectiveStorageFlags(b Bead, storage StorageClass) (ephemeral bool, noHist
 
 // Get retrieves a bead by ID via bd show.
 func (s *BdStore) Get(id string) (Bead, error) {
-	out, err := s.runner(s.dir, "bd", "show", "--json", id)
+	// Read via the transient-retry wrapper so a Get that races a managed-Dolt
+	// restart (SIGKILL + port rebind) recovers instead of surfacing a one-shot
+	// "invalid connection"/"i/o timeout" transport error. The runner performs a
+	// single recover-and-retry per call; the wrapper's outer attempts give the
+	// rebind enough total time to complete under CI load, matching every other
+	// BdStore read/write path (ga-gellq1).
+	out, err := s.runBDTransientRead("show", "--json", id)
 	if err != nil {
-		if isBdNotFound(err) {
-			return Bead{}, fmt.Errorf("getting bead %q: %w", id, ErrNotFound)
+		if !isBdNotFound(err) {
+			return Bead{}, fmt.Errorf("getting bead %q: %w", id, err)
 		}
-		return Bead{}, fmt.Errorf("getting bead %q: %w", id, err)
+		// bd show only queries the issues table; ephemeral beads live in the
+		// wisps table and are invisible to it. Fall back to bd query with
+		// ephemeral=true and id=<id> so Get succeeds for wisp-tier beads
+		// (e.g. auto-handoff mail created by gc handoff --auto). Only IDs
+		// that look like bead IDs are eligible: callers also pass through
+		// non-bead names (e.g. slash-qualified session recipients), which
+		// must not leak into a supplemental wisp query.
+		if isWispQueryableID(id) {
+			wisps, queryErr := s.getEphemeralByID(id)
+			if queryErr == nil {
+				for _, b := range wisps {
+					if b.ID == id {
+						return b, nil
+					}
+				}
+			}
+		}
+		return Bead{}, fmt.Errorf("getting bead %q: %w", id, ErrNotFound)
 	}
 	var issues []bdIssue
 	if err := json.Unmarshal(extractJSON(out), &issues); err != nil {
@@ -842,11 +1412,30 @@ func (s *BdStore) Get(id string) (Bead, error) {
 	if len(issues) == 0 {
 		return Bead{}, fmt.Errorf("getting bead %q: %w", id, ErrNotFound)
 	}
-	return issues[0].toBead(), nil
+	bead := issues[0].toBead()
+	// Guard against bd's fuzzy/substring ID resolution silently returning a
+	// different bead than requested (gascity#gcy-g4o). bd may resolve a short
+	// ID like "gcy-dv7" to an unrelated bead whose ID contains "dv7" as a
+	// substring (e.g. "gcy-wisp-dv78"). Since gc always passes full bead IDs,
+	// a mismatch means the requested bead does not exist in this store.
+	if bead.ID != id {
+		// bd resolved a DIFFERENT bead (substring collision): the requested ID
+		// does not exist in this store but bd silently matched another one.
+		// Return ErrIDCollision so mutation guards can distinguish this from a
+		// plain absent bead. ErrIDCollision wraps ErrNotFound so existing
+		// errors.Is(err, ErrNotFound) callers remain unaffected.
+		return Bead{}, fmt.Errorf("getting bead %q (resolved to %q): %w", id, bead.ID, ErrIDCollision)
+	}
+	return bead, nil
 }
 
-// Update modifies fields of an existing bead via bd update.
-func (s *BdStore) Update(id string, opts UpdateOpts) error {
+// bdUpdateArgs builds the `bd update` argv for opts, fanning each set field to
+// its flag. The result always begins with the three-element prefix
+// {"update","--json",id}; a return of exactly that prefix means no fields were
+// set (the empty-update no-op that bd itself rejects). It is shared by the
+// unconditional Update and the fenced UpdateIfMatch so a new UpdateOpts field is
+// wired into both paths from one place.
+func bdUpdateArgs(id string, opts UpdateOpts) []string {
 	args := []string{"update", "--json", id}
 	if opts.Title != nil {
 		args = append(args, "--title", *opts.Title)
@@ -885,10 +1474,19 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 	for _, l := range opts.RemoveLabels {
 		args = append(args, "--remove-label", l)
 	}
+	return args
+}
+
+// Update modifies fields of an existing bead via bd update.
+func (s *BdStore) Update(id string, opts UpdateOpts) error {
+	args := bdUpdateArgs(id, opts)
 	// No fields to update — no-op (bd errors on empty update).
 	if len(args) == 3 {
 		return nil
 	}
+	// Internal store callers supply canonical full IDs; the exact-ID collision
+	// guard lives at the CLI/API entry points (cmd_bd.go, huma_handlers_beads.go)
+	// where user-typed short IDs originate (gcy-g4o).
 	err := s.runBDTransientWrite(args...)
 	if err != nil {
 		if isBdNotFound(err) {
@@ -897,6 +1495,294 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 		return fmt.Errorf("updating bead %q: %w", id, err)
 	}
 	return nil
+}
+
+// ReleaseIfCurrent clears an in-progress assignment only when the bead still
+// has the expected assignee.
+//
+// It prefers bd's native conditional-release verb, which evaluates both
+// preconditions server-side and reports a failed one as exit 13 having written
+// nothing (bdstore_conditional_release.go). The raw `bd sql` path below is the
+// fallback for any bd predating the flags (beads#5008) — which means the
+// contract-tested minimum, deps.env BD_PREV_VERSION (1.0.4), and not the
+// installable default: deps.env BD_VERSION is v1.3.0-rc.2, cut past
+// beads#5008, so a stock install takes the verb. This path is the floor's, not
+// the live one, and it stays reachable only because deps.env holds
+// BD_PREV_VERSION below beads#5008. On that path the sqlite backend refuses
+// raw DB access, so that
+// rejection — and embedded dolt WITHOUT a configured dolt directory — surface
+// ErrConditionalReleaseUnsupported (the latter via the
+// releaseIfCurrentViaEmbeddedDoltSQL fallback), while embedded dolt WITH a
+// configured directory services the CAS through that fallback directly. Callers
+// treat ErrConditionalReleaseUnsupported as "take a conditional recheck
+// fallback" (see cmd/gc releasePoolAssignmentIfCurrent), which is why the verb
+// path never returns it for a precondition miss.
+//
+// id must be a canonical full bead ID, the same requirement Update documents.
+// bd's resolver prefix/substring-matches an id with no exact hit, and the
+// preconditions are then evaluated against whatever it resolved, so the verb
+// path verifies the id names exactly one existing bead before it mutates
+// anything and returns an error wrapping ErrIDCollision when bd resolved a
+// different one (gcy-g4o). The raw-SQL fallback matches id literally and needs
+// no such check.
+//
+// On a city that relocated a coordination class off this ledger, an id in that
+// class is refused outright before either path runs (bdsql_relocation.go); a
+// city that relocated nothing cannot reach that branch.
+func (s *BdStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
+	// Precondition of BOTH paths below, so it runs before either. A bead this
+	// ledger does not hold reaches a false "not held" verdict twice over: the
+	// SQL CAS matches zero rows, and the verb path resolves nothing and reports
+	// the same. Every caller reads that as "someone else holds it" and backs
+	// off. Worse on the verb path, bd's resolver prefix-matches an id with no
+	// exact hit, so a blind ledger can answer with a DIFFERENT bead's row
+	// instead of nothing at all. Refuse before either path touches bd.
+	if err := s.guardRelocatedClassIDs("release-if-current "+id, id); err != nil {
+		return false, err
+	}
+	if !s.conditionalReleaseUnsupported() {
+		released, handled, err := s.releaseIfCurrentViaBdVerb(id, expectedAssignee)
+		if handled {
+			if err != nil {
+				return false, fmt.Errorf("bd release-if-current: %w", err)
+			}
+			return released, nil
+		}
+		s.latchConditionalReleaseUnsupported()
+	}
+	// The raw-SQL fallback writes the row itself, so it also has to mint the
+	// fresh revision bd's verb path mints for us: a release that left the
+	// pre-release token in place would keep a stale fence current.
+	revision, err := newRevisionToken()
+	if err != nil {
+		return false, fmt.Errorf("bd release-if-current: minting revision: %w", err)
+	}
+	legacyQuery := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP" +
+		" WHERE id = " + bdSQLStringLiteral(id) +
+		" AND status = 'in_progress'" +
+		" AND assignee = " + bdSQLStringLiteral(expectedAssignee)
+	query := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP, revision = " +
+		strconv.FormatInt(revision, 10) +
+		" WHERE id = " + bdSQLStringLiteral(id) +
+		" AND status = 'in_progress'" +
+		" AND assignee = " + bdSQLStringLiteral(expectedAssignee)
+	// Retry ordinary serialization conflicts, but never replay an ambiguous
+	// write: a revision-aware release mints a fresh token and matches on
+	// status+assignee, so replaying one that may already have committed could
+	// stomp a same-assignee reclaim that landed in between — reinstating the
+	// release token over the reclaim's. runBDTransientReleaseOutput draws that
+	// line; a single-attempt raw runner would instead surface every transient
+	// blip as a spurious release failure.
+	out, err := s.runBDTransientReleaseOutput("sql", "--json", query)
+	if err != nil {
+		if isBdSQLUnsupportedInEmbeddedMode(err) {
+			return s.releaseIfCurrentViaEmbeddedDoltSQL(id, expectedAssignee, revision)
+		}
+		if isMissingRevisionColumn(err) {
+			out, err = s.runBDTransientReleaseOutput("sql", "--json", legacyQuery)
+		}
+	}
+	if err != nil {
+		return false, fmt.Errorf("bd release-if-current: %w", err)
+	}
+	var result struct {
+		RowsAffected int `json:"rows_affected"`
+	}
+	if err := json.Unmarshal(extractJSON(out), &result); err != nil {
+		return false, fmt.Errorf("bd release-if-current: parsing SQL result: %w", err)
+	}
+	return result.RowsAffected > 0, nil
+}
+
+func (s *BdStore) releaseIfCurrentViaEmbeddedDoltSQL(id, expectedAssignee string, revision int64) (bool, error) {
+	doltDir, ok, err := s.embeddedDoltDir()
+	if err != nil {
+		return false, fmt.Errorf("bd release-if-current embedded fallback: %w", err)
+	}
+	if !ok {
+		return false, fmt.Errorf("bd release-if-current embedded fallback: %w", ErrConditionalReleaseUnsupported)
+	}
+	legacyQuery := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP" +
+		" WHERE id = " + bdSQLStringLiteral(id) +
+		" AND status = 'in_progress'" +
+		" AND assignee = " + bdSQLStringLiteral(expectedAssignee) +
+		"; SELECT ROW_COUNT() AS rows_affected"
+	query := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP, revision = " +
+		strconv.FormatInt(revision, 10) +
+		" WHERE id = " + bdSQLStringLiteral(id) +
+		" AND status = 'in_progress'" +
+		" AND assignee = " + bdSQLStringLiteral(expectedAssignee) +
+		"; SELECT ROW_COUNT() AS rows_affected"
+	out, err := s.runner(doltDir, "dolt", "sql", "-r", "json", "-q", query)
+	if err != nil {
+		if isBdTransientWriteError(err) || !isMissingRevisionColumn(err) {
+			return false, fmt.Errorf("bd release-if-current embedded fallback: dolt sql: %w", err)
+		}
+		out, err = s.runner(doltDir, "dolt", "sql", "-r", "json", "-q", legacyQuery)
+		if err != nil {
+			return false, fmt.Errorf("bd release-if-current embedded fallback: dolt sql: %w", err)
+		}
+	}
+	rowsAffected, err := parseDoltRowsAffected(out)
+	if err != nil {
+		return false, fmt.Errorf("bd release-if-current embedded fallback: parsing SQL result: %w", err)
+	}
+	return rowsAffected > 0, nil
+}
+
+func newRevisionToken() (int64, error) {
+	for {
+		var data [8]byte
+		if _, err := rand.Read(data[:]); err != nil {
+			return 0, err
+		}
+		revision := int64(binary.BigEndian.Uint64(data[:]) & math.MaxInt64)
+		if revision != 0 {
+			return revision, nil
+		}
+	}
+}
+
+func isMissingRevisionColumn(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "unknown column 'revision'") ||
+		strings.Contains(message, "unknown column `revision`") ||
+		strings.Contains(message, `unknown column "revision"`) ||
+		strings.Contains(message, "no such column: revision") ||
+		strings.Contains(message, `column "revision" not found`) ||
+		strings.Contains(message, "column 'revision' not found") ||
+		strings.Contains(message, "column `revision` not found") ||
+		strings.Contains(message, "column not found: revision")
+}
+
+func (s *BdStore) embeddedDoltDir() (string, bool, error) {
+	metaPath := filepath.Join(s.dir, ".beads", "metadata.json")
+	data, err := os.ReadFile(metaPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	var meta struct {
+		Backend      string `json:"backend"`
+		Database     string `json:"database"`
+		DoltMode     string `json:"dolt_mode"`
+		DoltDatabase string `json:"dolt_database"`
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return "", false, fmt.Errorf("parsing metadata.json: %w", err)
+	}
+	if !strings.EqualFold(strings.TrimSpace(meta.Backend), "dolt") &&
+		!strings.EqualFold(strings.TrimSpace(meta.Database), "dolt") {
+		return "", false, nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(meta.DoltMode), "embedded") {
+		return "", false, nil
+	}
+	database := strings.TrimSpace(meta.DoltDatabase)
+	if database == "" {
+		return "", false, errors.New("metadata.json missing dolt_database")
+	}
+	if database != filepath.Base(database) {
+		return "", false, fmt.Errorf("metadata.json dolt_database %q must be a database name, not a path", database)
+	}
+	return filepath.Join(s.dir, ".beads", "embeddeddolt", database), true, nil
+}
+
+func parseDoltRowsAffected(out []byte) (int, error) {
+	data := bytes.TrimSpace(extractJSON(out))
+	found := false
+	rowsAffected := 0
+	for len(data) > 0 {
+		start := bytes.IndexAny(data, "{[")
+		if start < 0 {
+			break
+		}
+		data = data[start:]
+		decoder := json.NewDecoder(bytes.NewReader(data))
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil {
+			return 0, err
+		}
+		if got, ok, err := doltRowsAffectedFromJSON(raw); err != nil {
+			return 0, err
+		} else if ok {
+			rowsAffected = got
+			found = true
+		}
+		consumed := decoder.InputOffset()
+		if consumed <= 0 || int(consumed) > len(data) {
+			return 0, errors.New("could not advance through dolt JSON output")
+		}
+		data = data[consumed:]
+	}
+	if !found {
+		return 0, errors.New("missing rows_affected row")
+	}
+	return rowsAffected, nil
+}
+
+func doltRowsAffectedFromJSON(raw json.RawMessage) (int, bool, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return 0, false, nil
+	}
+	if trimmed[0] == '[' {
+		var results []doltRowsAffectedResult
+		if err := json.Unmarshal(trimmed, &results); err != nil {
+			return 0, false, err
+		}
+		found := false
+		rowsAffected := 0
+		for _, result := range results {
+			if got, ok := result.rowsAffected(); ok {
+				rowsAffected = got
+				found = true
+			}
+		}
+		return rowsAffected, found, nil
+	}
+	var result doltRowsAffectedResult
+	if err := json.Unmarshal(trimmed, &result); err != nil {
+		return 0, false, err
+	}
+	rowsAffected, ok := result.rowsAffected()
+	return rowsAffected, ok, nil
+}
+
+type doltRowsAffectedResult struct {
+	Rows []struct {
+		RowsAffected *int `json:"rows_affected"`
+	} `json:"rows"`
+}
+
+func (r doltRowsAffectedResult) rowsAffected() (int, bool) {
+	for _, row := range r.Rows {
+		if row.RowsAffected != nil {
+			return *row.RowsAffected, true
+		}
+	}
+	return 0, false
+}
+
+func isBdSQLUnsupportedInEmbeddedMode(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "bd sql") &&
+		strings.Contains(msg, "not yet supported") &&
+		strings.Contains(msg, "embedded mode")
+}
+
+func bdSQLStringLiteral(value string) string {
+	// bd sql runs against Dolt/MySQL string-literal semantics.
+	value = strings.ReplaceAll(value, "\\", "\\\\")
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
 // Claim atomically claims an open bead through bd update --claim.
@@ -1109,6 +1995,29 @@ func (s *BdStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	return nil
 }
 
+// SetLocalString sets a clone-local string value for a bead. See
+// Store.SetLocalString. Persisted to a sidecar JSON file under this store's
+// .beads/ directory rather than routed through the bd subprocess: unlike
+// SetMetadata, this never invokes bd and so never touches Dolt sync or bd's
+// on_update hook. Does not validate that id refers to an existing bead — see
+// the interface doc comment for why.
+func (s *BdStore) SetLocalString(id, key, value string) error {
+	if err := s.localStrings.Set(id, key, value); err != nil {
+		return fmt.Errorf("setting local string on %q: %w", id, err)
+	}
+	return nil
+}
+
+// GetLocalString returns the clone-local string value for a bead. See
+// Store.GetLocalString.
+func (s *BdStore) GetLocalString(id, key string) (string, error) {
+	value, err := s.localStrings.Get(id, key)
+	if err != nil {
+		return "", fmt.Errorf("getting local string on %q: %w", id, err)
+	}
+	return value, nil
+}
+
 // Tx executes fn against a staged BdStore transaction. BdStore reads each bead
 // on first touch, applies callback writes to that snapshot, and reasserts the
 // staged fields when fn returns; concurrent edits to the same bead fields made
@@ -1172,6 +2081,14 @@ func (tx *bdStoreTx) item(id string) (*bdStoreTxItem, error) {
 	return item, nil
 }
 
+// Create persists a bead immediately. The bd CLI has no multi-statement
+// transaction, so a create cannot be staged: subsequent staged writes in the
+// same Tx may reference the new bead's ID, which only exists after creation.
+// This matches the Store.Tx contract for stores without native transactions.
+func (tx *bdStoreTx) Create(b Bead) (Bead, error) {
+	return tx.store.Create(b)
+}
+
 func (tx *bdStoreTx) Update(id string, opts UpdateOpts) error {
 	if !hasUpdateOpts(opts) {
 		return nil
@@ -1198,7 +2115,7 @@ func (tx *bdStoreTx) Close(id string) error {
 	if err != nil {
 		return err
 	}
-	item.current.Status = "closed"
+	setBeadStatus(&item.current, "closed")
 	item.closed = true
 	return nil
 }
@@ -1424,6 +2341,19 @@ func (s *BdStore) runBDTransientCreateOutput(hasStableID bool, args ...string) (
 	}, args...)
 }
 
+// runBDTransientReleaseOutput runs a revision-aware release UPDATE, retrying
+// ordinary serialization conflicts but never replaying an ambiguous write.
+// Unlike a create there is no stable id to make the write idempotent: the
+// release matches on status+assignee and installs a fresh token, so replaying
+// one that may already have committed could stomp a same-assignee reclaim that
+// landed in between. Same ambiguity guard as an id-less create, named for the
+// release path it protects.
+func (s *BdStore) runBDTransientReleaseOutput(args ...string) ([]byte, error) {
+	return s.runBDTransientWriteOutputWhen(func(err error) bool {
+		return isBdTransientWriteError(err) && !isBdAmbiguousWriteError(err)
+	}, args...)
+}
+
 func (s *BdStore) runBDTransientWriteOutputWhen(shouldRetry func(error) bool, args ...string) ([]byte, error) {
 	var err error
 	var out []byte
@@ -1434,6 +2364,25 @@ func (s *BdStore) runBDTransientWriteOutputWhen(shouldRetry func(error) bool, ar
 			return out, err
 		}
 		time.Sleep(time.Duration(attempt) * 25 * time.Millisecond)
+	}
+	return out, err
+}
+
+// runBDTransientRead runs a read-only bd command, retrying on transient Dolt
+// connection errors (invalid connection, broken pipe, etc.). Reads are
+// idempotent so retry is unconditional on isBdAmbiguousWriteError, with no
+// stable-ID guard needed.
+func (s *BdStore) runBDTransientRead(args ...string) ([]byte, error) {
+	var (
+		out []byte
+		err error
+	)
+	for attempt := 1; attempt <= bdTransientReadAttempts; attempt++ {
+		out, err = s.runner(s.dir, "bd", args...)
+		if err == nil || !isBdAmbiguousWriteError(err) || attempt == bdTransientReadAttempts {
+			return out, err
+		}
+		time.Sleep(time.Duration(attempt) * 50 * time.Millisecond)
 	}
 	return out, err
 }
@@ -1484,7 +2433,24 @@ func isBdTransientWriteError(err error) bool {
 	return strings.Contains(msg, "Error 1213 (40001): serialization failure") ||
 		strings.Contains(msg, "this transaction conflicts with a committed transaction") ||
 		strings.Contains(msg, "failed to prepare catalog") ||
+		isBdSqliteBusyError(msg) ||
 		isBdAmbiguousWriteError(err)
+}
+
+// isBdSqliteBusyError reports whether msg carries an explicit sqlite
+// busy/locked result-code marker ("database is locked (5) (SQLITE_BUSY)"
+// and friends) — the sqlite analog of a Dolt serialization failure: the
+// write lost a lock race without applying, so it is safe to retry. Only
+// the unambiguous SQLITE_BUSY / SQLITE_LOCKED code markers match. bd's
+// sqlite driver (modernc.org/sqlite) always appends the code marker, so
+// this loses no real coverage, while bare "database is locked" phrasings
+// stay excluded on purpose: Dolt's embedded mode emits "database is
+// locked by another dolt process" for a persistent lock-file condition
+// that a bounded retry cannot clear and must keep failing fast.
+func isBdSqliteBusyError(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "sqlite_busy") ||
+		strings.Contains(lower, "sqlite_locked")
 }
 
 func isBdAmbiguousWriteError(err error) bool {
@@ -1530,11 +2496,9 @@ func (s *BdStore) CloseAll(ids []string, metadata map[string]string) (int, error
 
 	// Set metadata on all beads first (before closing, since some stores
 	// prevent metadata writes on closed beads).
-	for _, id := range ids {
-		if len(metadata) > 0 {
-			if err := s.SetMetadataBatch(id, metadata); err != nil {
-				return 0, err
-			}
+	if len(metadata) > 0 {
+		if err := s.setMetadataBatchAll(ids, metadata); err != nil {
+			return 0, err
 		}
 	}
 
@@ -1559,6 +2523,36 @@ func (s *BdStore) CloseAll(ids []string, metadata map[string]string) (int, error
 		return closed, nil
 	}
 	return len(ids), nil
+}
+
+func (s *BdStore) setMetadataBatchAll(ids []string, kvs map[string]string) error {
+	if len(ids) == 0 || len(kvs) == 0 {
+		return nil
+	}
+	args := []string{"update", "--json"}
+	args = append(args, ids...)
+	keys := make([]string, 0, len(kvs))
+	for k := range kvs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		args = append(args, "--set-metadata", k+"="+kvs[k])
+	}
+	err := s.runBDTransientWrite(args...)
+	if err == nil {
+		return nil
+	}
+	if isBdNotFound(err) {
+		if len(ids) == 1 {
+			return fmt.Errorf("setting metadata on %q: %w", ids[0], ErrNotFound)
+		}
+		return fmt.Errorf("setting metadata on %d beads: %w", len(ids), ErrNotFound)
+	}
+	if len(ids) == 1 {
+		return fmt.Errorf("setting metadata on %q: %w", ids[0], err)
+	}
+	return fmt.Errorf("setting metadata on %d beads: %w", len(ids), err)
 }
 
 // CloseAllWithReason closes multiple beads with one reasoned bd close command
@@ -1627,6 +2621,8 @@ func bdCloseArgs(reason string, ids ...string) []string {
 }
 
 func (s *BdStore) close(id, reason string) error {
+	// Internal callers supply canonical full IDs; exact-ID guard lives at the
+	// CLI/API entry points (gcy-g4o).
 	err := s.runBDTransientWrite(bdCloseArgs(reason, id)...)
 	if err != nil {
 		// Some bd error paths collapse to a bare exit status without a helpful
@@ -1665,12 +2661,59 @@ func (s *BdStore) Reopen(id string) error {
 
 // Delete permanently removes a bead from the store via bd delete.
 func (s *BdStore) Delete(id string) error {
+	// Internal callers supply canonical full IDs; exact-ID guard lives at the
+	// CLI/API entry points (gcy-g4o).
 	err := s.runBDTransientWrite("delete", "--force", "--json", id)
 	if err != nil {
 		if isBdNotFound(err) {
 			return fmt.Errorf("deleting bead %q: %w", id, ErrNotFound)
 		}
 		return fmt.Errorf("deleting bead %q: %w", id, err)
+	}
+	if sidecarErr := s.localStrings.DeleteBead(id); sidecarErr != nil {
+		return fmt.Errorf("deleting bead %q: cleaning up local strings: %w", id, sidecarErr)
+	}
+	return nil
+}
+
+// bdDeleteBatchChunk bounds how many ids ride on a single `bd delete`
+// invocation so a large closure stays within command-line argument limits.
+const bdDeleteBatchChunk = 256
+
+// DeleteBatch removes exactly the given beads with batched `bd delete … --force`
+// calls. `--force` deletes the listed ids and orphans external dependents — it
+// removes every dependency link touching each deleted bead (any type, both
+// directions) and leaves beads that merely depend on them alive, matching the
+// per-bead Delete path (BdStore.Delete also uses `--force`). It is
+// deliberately NOT `--cascade`, which would recursively delete dependent issues
+// outside the collected closure. --force tolerates ids that are already gone,
+// and ids are chunked to respect command-line limits. DeleteBatch is the
+// batched counterpart to Delete that lets the wisp GC tear down a molecule
+// closure with a handful of subprocesses instead of one per bead and edge. It
+// satisfies BatchDeleter.
+//
+// Each chunk is a separate committed `bd delete` subprocess, so a later chunk
+// can fail after earlier chunks are durably gone. On such a partial failure it
+// returns a *BatchDeleteError carrying the ids from the fully-committed earlier
+// chunks, letting a caching layer reconcile exactly those instead of treating
+// the whole batch as untouched.
+func (s *BdStore) DeleteBatch(ids []string) error {
+	for start := 0; start < len(ids); start += bdDeleteBatchChunk {
+		end := start + bdDeleteBatchChunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunk := ids[start:end]
+		args := make([]string, 0, len(chunk)+2)
+		args = append(args, "delete")
+		args = append(args, chunk...)
+		args = append(args, "--force")
+		if err := s.runBDTransientWrite(args...); err != nil {
+			return &BatchDeleteError{
+				Committed: append([]string(nil), ids[:start]...),
+				Err:       fmt.Errorf("batch delete of %d bead(s): %w", len(chunk), err),
+			}
+		}
 	}
 	return nil
 }
@@ -1681,6 +2724,21 @@ func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 		return nil, fmt.Errorf("bd list: %w", ErrQueryRequiresScan)
 	}
 
+	found, err := s.listByTier(query)
+	// An unfiltered scan that came back empty is the one List shape whose
+	// emptiness is a claim about the STORE rather than about a predicate, so it
+	// is the only one that can reach the unread-store notice. The result is
+	// returned unchanged either way — see unread_store_notice.go for why this
+	// never becomes a refusal.
+	if err == nil && len(found) == 0 && listReadIsWholeLedger(query) {
+		s.noticeIfStoreCannotSeeItsLedger("bd list")
+	}
+	return found, err
+}
+
+// listByTier runs the query against bd. It is the body List wraps, so the
+// empty-result notice has exactly one place to sit across all three tier modes.
+func (s *BdStore) listByTier(query ListQuery) ([]Bead, error) {
 	switch query.TierMode {
 	case TierWisps:
 		return s.listWispsTier(query)
@@ -1737,15 +2795,20 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 		args = append(args, "--skip-labels")
 	}
 
-	out, err := s.runner(s.dir, "bd", args...)
+	out, err := s.runBDTransientRead(args...)
 	if err != nil {
 		return nil, fmt.Errorf("bd list: %w", err)
 	}
 	issues, parseErr := parseIssuesTolerant(extractJSON(out))
+	// Latched from what bd RETURNED, before applyListQuery: a store that
+	// answered with rows is the populated one, whatever this query's filters
+	// then reduce that to.
+	s.noteServerRows(len(issues))
 	result := make([]Bead, len(issues))
 	for i := range issues {
 		result[i] = issues[i].toBead()
 	}
+	s.noteInlineDependencyProjection(issues, result)
 	filtered := applyListQuery(result, query)
 	if parseErr != nil {
 		if len(filtered) == 0 {
@@ -1762,13 +2825,31 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 }
 
 func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssignees bool) bool {
-	if query.TierMode == TierIssues || query.TierMode == TierWisps {
+	// TierWisps always merges two independently-fetched legs (this bd-list
+	// leg plus the ephemeral leg in listWispsTier) and needs full candidates
+	// from both to union/dedupe/sort/limit correctly; TierIssues is the only
+	// tier reaching this function that reads a single, self-contained result
+	// set, so only it is eligible for a bd-side limit below.
+	if query.TierMode == TierWisps {
 		return true
 	}
 	if serverQuery.Sort == SortCreatedAsc || clientFilteredAssignees {
 		return true
 	}
 	if len(serverQuery.Metadata) > 0 || !serverQuery.CreatedBefore.IsZero() || !serverQuery.UpdatedBefore.IsZero() {
+		return true
+	}
+	// bd list exposes no compound (created_at, id) seek flag; the boundary is
+	// resolved Go-side (identical tie-break to the in-memory sort), so a
+	// bd-side limit would cut rows before that filter runs — fetch unbounded
+	// and let applyListQuery filter then limit.
+	if serverQuery.SeekAfter != nil {
+		return true
+	}
+	// IDs is a Go-side-only residual filter (see ListQuery.Matches): bd list
+	// has no --id flag, so a bd-side limit could truncate before the
+	// matching IDs are even fetched.
+	if len(serverQuery.IDs) > 0 {
 		return true
 	}
 	return false
@@ -1832,7 +2913,11 @@ func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
 	}
 	args = append(args, "--limit", strconv.Itoa(wispsLimit))
 
-	out, err := s.runner(s.dir, "bd", args...)
+	// #3288: route the wisp `bd query` through the retried/deadline-bounded
+	// transient-read path (as listViaBDList already does) so BOTH subprocesses
+	// inside listWispsTier are bounded — a bare s.runner call here would be the
+	// one unretried read on the hot tier-merge path.
+	out, err := s.runBDTransientRead(args...)
 	if err != nil {
 		if isBdQueryUnsupported(err) {
 			return nil, nil
@@ -1840,12 +2925,14 @@ func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
 		return nil, fmt.Errorf("bd query (wisps): %w", err)
 	}
 	issues, parseErr := parseIssuesTolerant(extractJSON(out))
+	s.noteServerRows(len(issues))
 	result := make([]Bead, len(issues))
 	for i := range issues {
 		result[i] = issues[i].toBead()
 		result[i].Ephemeral = true
 		result[i].NoHistory = false
 	}
+	s.noteInlineDependencyProjection(issues, result)
 	filtered := applyListQuery(result, query)
 	if parseErr != nil {
 		if len(filtered) > 0 {
@@ -1854,6 +2941,48 @@ func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
 		return filtered, fmt.Errorf("bd query: %w", parseErr)
 	}
 	return filtered, nil
+}
+
+// getEphemeralByID looks up a single wisp-tier bead by exact ID using bd query.
+// bd show does not expose the wisps table, so this is the fallback for Get.
+// isWispQueryableID reports whether id is safe to interpolate into a bd query
+// clause as a bead ID: non-empty, ASCII letters/digits/hyphens only. Session
+// names ("rig/agent.name") and other non-bead identifiers are excluded so the
+// wisp-tier Get fallback never issues supplemental queries for them.
+func isWispQueryableID(id string) bool {
+	if id == "" {
+		return false
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func (s *BdStore) getEphemeralByID(id string) ([]Bead, error) {
+	clause := "ephemeral=true AND id=" + id
+	args := []string{"query", "--json", clause, "--all", "--limit", "1"}
+	out, err := s.runner(s.dir, "bd", args...)
+	if err != nil {
+		if isBdQueryUnsupported(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("bd query (wisp by id): %w", err)
+	}
+	issues, parseErr := parseIssuesTolerant(extractJSON(out))
+	result := make([]Bead, len(issues))
+	for i := range issues {
+		result[i] = issues[i].toBead()
+		result[i].Ephemeral = true
+	}
+	if parseErr != nil {
+		return result, fmt.Errorf("bd query (wisp by id): %w", parseErr)
+	}
+	return result, nil
 }
 
 func isBdQueryUnsupported(err error) bool {
@@ -1868,10 +2997,15 @@ func isBdQueryUnsupported(err error) bool {
 }
 
 func canApplyWispsServerLimit(query ListQuery) bool {
+	// SeekAfter: the compound (created_at, id) boundary is resolved Go-side
+	// (identical tie-break to the in-memory sort), not via a bd query flag, so
+	// a bd-side limit would cut rows before that filter runs — same class as
+	// CreatedBefore.
 	return (query.Sort == SortDefault || query.Sort == SortCreatedDesc) &&
 		query.CreatedBefore.IsZero() &&
 		query.UpdatedBefore.IsZero() &&
-		len(query.Metadata) == 0
+		len(query.Metadata) == 0 &&
+		query.SeekAfter == nil
 }
 
 func appendBdQueryClause(clauses []string, serverFilteredOnly bool, field, value string) ([]string, bool) {
@@ -2020,31 +3154,147 @@ func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	q := readyQueryFromArgs(query)
 	includeEphemeral := q.TierMode == TierBoth || q.TierMode == TierWisps
 	args := bdReadyArgs(q, includeEphemeral)
-	out, err := s.runner(s.dir, "bd", args...)
+	out, err := s.runBDTransientRead(args...)
 	if err != nil {
 		return nil, fmt.Errorf("bd ready: %w", err)
 	}
 	issues, parseErr := parseIssuesTolerant(extractJSON(out))
-	result := make([]Bead, 0, len(issues))
-	now := time.Now().UTC()
+	// Same latch as List, and for the same reason: the tier, assignee and limit
+	// filters below can empty a frontier bd answered with rows, and that says
+	// nothing about which database answered.
+	s.noteServerRows(len(issues))
+	allBeads := make([]Bead, len(issues))
 	for i := range issues {
-		bead := issues[i].toBead()
+		allBeads[i] = issues[i].toBead()
+	}
+	// Witness dependency-inlining from this store's own unfiltered rows too,
+	// not just List()'s — filterReadyByWorkOutcome relies on the same latch
+	// to decide whether candidates' own Dependencies field is trustworthy.
+	s.noteInlineDependencyProjection(issues, allBeads)
+	candidates := make([]Bead, 0, len(issues))
+	now := time.Now().UTC()
+	for _, bead := range allBeads {
 		if !IsReadyCandidateForTier(bead, now, q.TierMode) {
 			continue
 		}
 		if q.Assignee != "" && bead.Assignee != q.Assignee {
 			continue
 		}
-		result = append(result, bead)
-		if q.Limit > 0 && len(result) >= q.Limit {
-			break
-		}
+		candidates = append(candidates, bead)
+	}
+	filtered, filterErr := s.filterReadyByWorkOutcome(candidates)
+	if filterErr != nil {
+		return nil, fmt.Errorf("bd ready: %w", filterErr)
+	}
+	result := filtered
+	if q.Limit > 0 && len(result) > q.Limit {
+		result = result[:q.Limit]
 	}
 	if parseErr != nil {
 		if len(result) == 0 {
 			return nil, fmt.Errorf("bd ready: %w", parseErr)
 		}
 		return result, &PartialResultError{Op: "bd ready", Err: parseErr}
+	}
+	if len(result) == 0 && readyReadIsWholeFrontier(q) {
+		s.noticeIfStoreCannotSeeItsLedger("bd ready")
+	}
+	return result, nil
+}
+
+// filterReadyByWorkOutcome removes candidates whose blocking dependencies are
+// closed but recorded gc.work_outcome=blocked. bd's own "bd ready" answer only
+// checks status==closed, so it does not know that a blocked-outcome close
+// should not satisfy a blocking dependency.
+//
+// This is a NARROW override on top of an already-authoritative verdict, not
+// a from-scratch recompute of blocking status: candidates arrived here
+// because bd's own "bd ready" already decided they are not blocked, and bd's
+// gating can be more nuanced than a flat "target must be closed" check (e.g.
+// a waits-for gate that opens through bd-native state independent of the
+// target's status — see bdReadyDisagreementLedger's bd-gate-open). So this
+// only vetoes a candidate when a blocking dependency IS closed (satisfying
+// bd's own check) yet recorded gc.work_outcome=blocked, a signal bd's binary
+// cannot see. It never re-blocks on a dependency bd already looked at and
+// offered the candidate despite — that would silently override bd's answer
+// instead of narrowly extending it. DependencySatisfied (the canonical rule)
+// is for stores with no prior bd verdict to layer onto; it is deliberately
+// NOT reused here for that reason.
+//
+// Dependency edges come from whichever source is trustworthy. When this
+// store has witnessed bd projecting complete dependency data inline onto
+// list/ready rows (listIncludesCompleteDependencies), each candidate's own
+// Dependencies field — already fetched by the very "bd ready" call that
+// produced candidates — is used directly, at zero extra subprocess cost.
+// Otherwise this check is skipped entirely: candidates pass through
+// unfiltered rather than paying for an extra "bd dep list" subprocess call
+// just to find out. listIncludesCompleteDependencies exists specifically so
+// this narrow override never has to fetch its own dependency data — a
+// ledger with no dependencies at all (a common case) can never become
+// witnessed, and forcing a live fetch in that case would defeat the whole
+// point of the witnessing mechanism (see bdstore_inline_deps.go's "adds
+// ZERO subprocesses" design note and TestCachingStoreBdPrimeAndReconcileSkipFullDepScan,
+// which pins the zero-dep-scan invariant this fallback used to violate).
+// This mirrors the "unsupported backend degrades to no evidence of
+// blocking" reasoning already used for DepListBatch callers elsewhere
+// (e.g. the Postgres backend's IssueRelations gap, ga-7i7ts), just applied
+// before spending the subprocess call instead of after.
+func (s *BdStore) filterReadyByWorkOutcome(candidates []Bead) ([]Bead, error) {
+	if len(candidates) == 0 {
+		return candidates, nil
+	}
+	if !s.listIncludesCompleteDependencies() {
+		return candidates, nil
+	}
+	depsByID := make(map[string][]Dep, len(candidates))
+	for _, c := range candidates {
+		depsByID[c.ID] = c.Dependencies
+	}
+	blockerIDSet := make(map[string]bool)
+	for _, deps := range depsByID {
+		for _, d := range deps {
+			if IsReadyBlockingDependencyType(d.Type) {
+				blockerIDSet[d.DependsOnID] = true
+			}
+		}
+	}
+	if len(blockerIDSet) == 0 {
+		return candidates, nil
+	}
+	blockerIDs := make([]string, 0, len(blockerIDSet))
+	for id := range blockerIDSet {
+		blockerIDs = append(blockerIDs, id)
+	}
+	// Status "closed" is what makes this lookup closed-inclusive: it adds
+	// --all server-side and keeps closed rows through ListQuery.Matches. A
+	// default query drops every closed row on both sides, and a closed
+	// blocker is the ONLY kind this veto can ever fire on, so without it the
+	// statusByID lookup below is empty and the whole check is dead code.
+	blockers, err := s.List(ListQuery{IDs: blockerIDs, TierMode: TierBoth, Status: "closed"})
+	if err != nil {
+		return nil, fmt.Errorf("checking blocking dependency outcomes: fetching blockers: %w", err)
+	}
+	statusByID := make(map[string]string, len(blockers))
+	workOutcomeByID := make(map[string]string, len(blockers))
+	for _, b := range blockers {
+		statusByID[b.ID] = b.Status
+		workOutcomeByID[b.ID] = b.Metadata[beadmeta.WorkOutcomeMetadataKey]
+	}
+	result := make([]Bead, 0, len(candidates))
+	for _, c := range candidates {
+		blocked := false
+		for _, d := range depsByID[c.ID] {
+			if !IsReadyBlockingDependencyType(d.Type) {
+				continue
+			}
+			if statusByID[d.DependsOnID] == "closed" && workOutcomeByID[d.DependsOnID] == beadmeta.WorkOutcomeBlocked {
+				blocked = true
+				break
+			}
+		}
+		if !blocked {
+			result = append(result, c)
+		}
 	}
 	return result, nil
 }
@@ -2061,6 +3311,35 @@ func bdReadyArgs(q ReadyQuery, includeEphemeral bool) []string {
 	return args
 }
 
+// crossStoreDependencyError reports a non-nil error when issueID and
+// dependsOnID carry different, well-formed bead-ID prefixes -- i.e. they
+// belong to different stores. gc bd dep add has no cross-store dependency
+// model: such a pair must fail loudly instead of silently no-oping.
+//
+// The parent-child short-circuit immediately below in DepAdd must stay ABOVE
+// this guard: internal/molecule/molecule.go sets a step bead's ParentID to the
+// foreign parent at create time, so the cross-store attaches in that file
+// short-circuit on an already-matching ParentID and never reach here.
+// Reordering the two blocks would refuse every cross-store molecule attach.
+//
+// This guard covers the DepAdd path only. Create still forwards b.Needs to
+// bd create --deps without a prefix check, so the same logical cross-prefix
+// edge is refused on one path and accepted on the other.
+func (s *BdStore) crossStoreDependencyError(issueID, dependsOnID string) error {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(dependsOnID)), "external:") {
+		return nil
+	}
+	sourcePrefix := beadIDPrefix(issueID)
+	if sourcePrefix == "" {
+		sourcePrefix = normalizeIDPrefix(s.idPrefix)
+	}
+	targetPrefix := beadIDPrefix(dependsOnID)
+	if sourcePrefix == "" || targetPrefix == "" || sourcePrefix == targetPrefix {
+		return nil
+	}
+	return fmt.Errorf("cross-store dependency: %s (store %q) cannot depend on %s (store %q): cross-store dependencies are not supported", issueID, sourcePrefix, dependsOnID, targetPrefix)
+}
+
 // DepAdd records a dependency via bd dep add.
 func (s *BdStore) DepAdd(issueID, dependsOnID, depType string) error {
 	if depType == "parent-child" {
@@ -2068,6 +3347,9 @@ func (s *BdStore) DepAdd(issueID, dependsOnID, depType string) error {
 		if err == nil && bead.ParentID == dependsOnID {
 			return nil
 		}
+	}
+	if err := s.crossStoreDependencyError(issueID, dependsOnID); err != nil {
+		return err
 	}
 	err := s.runBDTransientWrite("dep", "add", issueID, dependsOnID, "--type", depType)
 	if err != nil {
@@ -2098,7 +3380,7 @@ func (s *BdStore) DepList(id, direction string) ([]Dep, error) {
 	if direction == "up" {
 		args = append(args, "--direction=up")
 	}
-	out, err := s.runner(s.dir, "bd", args...)
+	out, err := s.runBDTransientRead(args...)
 	if err != nil {
 		// Empty dep list may return error on some bd versions.
 		if isBdNotFound(err) {
@@ -2140,9 +3422,19 @@ func (s *BdStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 	}
 	args := append([]string{"dep", "list"}, ids...)
 	args = append(args, "--json")
-	out, err := s.runner(s.dir, "bd", args...)
+	out, err := s.runBDTransientRead(args...)
 	if err != nil {
 		if isBdNotFound(err) {
+			return make(map[string][]Dep), nil
+		}
+		if isBdOperationUnsupported(err) {
+			// Some backends don't implement this at all — e.g. the Postgres
+			// backend answers `operation "IssueRelations" not supported by
+			// the postgres backend` (measured on maintainer-city, ga-7i7ts).
+			// Callers use this as a post-filter over an already-correct bd
+			// answer, so "no evidence of blocking" is the safe degrade:
+			// today's (pre-gc.work_outcome-filter) behavior, not a hard
+			// failure of the read that got them here.
 			return make(map[string][]Dep), nil
 		}
 		return nil, fmt.Errorf("batch dep list: %w", err)

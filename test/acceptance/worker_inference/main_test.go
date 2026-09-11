@@ -13,7 +13,9 @@ import (
 	"time"
 
 	workerpkg "github.com/gastownhall/gascity/internal/worker"
+	zcodeadapter "github.com/gastownhall/gascity/internal/worker/adapters/zcode"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
+	"github.com/gastownhall/gascity/test/dolttest"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
@@ -24,7 +26,10 @@ var (
 
 const (
 	defaultOpenCodeGeminiModel = "google/gemini-2.5-flash"
-	defaultPiOllamaCloudModel  = "gpt-oss:20b"
+	// Our XIAOMI_API_KEY is a token-plan SGP key; the plain xiaomi/* and
+	// token-plan-{cn,ams}/* providers reject it.
+	defaultMimoCodeModel      = "xiaomi-token-plan-sgp/mimo-v2.5-pro"
+	defaultPiOllamaCloudModel = "gpt-oss:20b"
 )
 
 type providerSetup struct {
@@ -45,7 +50,7 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv("TMPDIR", tmpRoot); err != nil {
 		panic("worker-inference: setting TMPDIR: " + err.Error())
 	}
-	tmpDir, err := os.MkdirTemp(tmpRoot, "gcwi-*")
+	tmpDir, err := os.MkdirTemp(tmpRoot, fmt.Sprintf("gcwi-%d-*", os.Getpid()))
 	if err != nil {
 		panic("worker-inference: creating temp dir: " + err.Error())
 	}
@@ -60,6 +65,9 @@ func TestMain(m *testing.M) {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			panic("worker-inference: " + err.Error())
 		}
+	}
+	if err := os.Setenv("GC_HOME", gcHome); err != nil {
+		panic("worker-inference: setting GC_HOME: " + err.Error())
 	}
 	if err := tmuxtest.ConfigureProcessEnv(filepath.Join(runtimeDir, "tmux")); err != nil {
 		panic("worker-inference: configuring tmux test env: " + err.Error())
@@ -82,12 +90,29 @@ func TestMain(m *testing.M) {
 		Without("GC_BEADS").
 		Without("GC_DOLT").
 		With("DOLT_ROOT_PATH", gcHome)
+	if bdPath := helpers.FindBD(); bdPath != "" {
+		bdShimDir := filepath.Join(tmpDir, "bd-bin")
+		if err := os.MkdirAll(bdShimDir, 0o755); err != nil {
+			panic("worker-inference: creating bd shim dir: " + err.Error())
+		}
+		if err := os.Symlink(bdPath, filepath.Join(bdShimDir, "bd")); err != nil {
+			panic("worker-inference: staging bd shim: " + err.Error())
+		}
+		liveEnv.With("BD_BIN", bdPath)
+		liveEnv.With("PATH", bdShimDir+string(os.PathListSeparator)+liveEnv.Get("PATH"))
+	}
 	liveSetup = prepareProviderSetup(gcHome, liveEnv)
+
+	// Reap dolt orphans left by prior crashed runs, then guard this run so an
+	// interrupt / timeout / OOM does not leak a dolt sql-server (issue #3640).
+	dolttest.SweepStale(tmpRoot, "gcwi-")
+	stopGuard := dolttest.Guard(tmpDir)
 
 	code := m.Run()
 	if liveEnv != nil {
 		helpers.RunGC(liveEnv, "", "supervisor", "stop") //nolint:errcheck
 	}
+	stopGuard()
 	os.Exit(code)
 }
 
@@ -105,13 +130,14 @@ func prepareProviderSetup(gcHome string, env *helpers.Env) providerSetup {
 		setup.SetupError = "tmux not found in PATH"
 		return setup
 	}
-	if _, err := exec.LookPath("bd"); err != nil {
+	if helpers.FindBD() == "" {
 		setup.SetupError = "bd not found in PATH"
 		return setup
 	}
-	binaryPath, err := exec.LookPath(setup.Provider)
+	binaryName := profileExecutable(setup.Profile, setup.Provider)
+	binaryPath, err := exec.LookPath(binaryName)
 	if err != nil {
-		setup.SetupError = fmt.Sprintf("%s CLI not found in PATH", setup.Provider)
+		setup.SetupError = fmt.Sprintf("%s CLI not found in PATH", binaryName)
 		return setup
 	}
 	setup.BinaryPath = binaryPath
@@ -130,14 +156,22 @@ func resolveProfile(raw string) workerpkg.Profile {
 		return workerpkg.ProfileClaudeTmuxCLI
 	case string(workerpkg.ProfileCodexTmuxCLI):
 		return workerpkg.ProfileCodexTmuxCLI
+	case string(workerpkg.ProfileCursorTmuxCLI):
+		return workerpkg.ProfileCursorTmuxCLI
 	case string(workerpkg.ProfileGeminiTmuxCLI):
 		return workerpkg.ProfileGeminiTmuxCLI
 	case string(workerpkg.ProfileKimiTmuxCLI):
 		return workerpkg.ProfileKimiTmuxCLI
 	case string(workerpkg.ProfileOpenCodeTmuxCLI):
 		return workerpkg.ProfileOpenCodeTmuxCLI
+	case string(workerpkg.ProfileMimoCodeTmuxCLI):
+		return workerpkg.ProfileMimoCodeTmuxCLI
+	case string(workerpkg.ProfileZCodeTmuxCLI):
+		return workerpkg.ProfileZCodeTmuxCLI
 	case string(workerpkg.ProfilePiTmuxCLI):
 		return workerpkg.ProfilePiTmuxCLI
+	case string(workerpkg.ProfileAntigravityTmuxCLI):
+		return workerpkg.ProfileAntigravityTmuxCLI
 	default:
 		return workerpkg.Profile(strings.TrimSpace(raw))
 	}
@@ -149,16 +183,42 @@ func profileProvider(profile workerpkg.Profile) string {
 		return "claude"
 	case workerpkg.ProfileCodexTmuxCLI:
 		return "codex"
+	case workerpkg.ProfileCursorTmuxCLI:
+		return "cursor"
 	case workerpkg.ProfileGeminiTmuxCLI:
 		return "gemini"
 	case workerpkg.ProfileKimiTmuxCLI:
 		return "kimi"
 	case workerpkg.ProfileOpenCodeTmuxCLI:
 		return "opencode"
+	case workerpkg.ProfileMimoCodeTmuxCLI:
+		return "mimocode"
+	case workerpkg.ProfileZCodeTmuxCLI:
+		return "zcode"
 	case workerpkg.ProfilePiTmuxCLI:
 		return "pi"
+	case workerpkg.ProfileAntigravityTmuxCLI:
+		return "antigravity"
 	default:
 		return ""
+	}
+}
+
+func profileExecutable(profile workerpkg.Profile, provider string) string {
+	switch profile {
+	case workerpkg.ProfileAntigravityTmuxCLI:
+		return "agy"
+	case workerpkg.ProfileCursorTmuxCLI:
+		return "cursor-agent"
+	case workerpkg.ProfileMimoCodeTmuxCLI:
+		return "mimo"
+	case workerpkg.ProfileZCodeTmuxCLI:
+		// ZCode has no CLI of its own to launch; the engine's adapter is the
+		// executable (internal/worker/adapters/zcode), installed onto PATH by
+		// scripts/worker_inference_setup.py.
+		return zcodeadapter.ExecutableName
+	default:
+		return provider
 	}
 }
 
@@ -166,14 +226,22 @@ func profileSearchPaths(gcHome string, profile workerpkg.Profile) []string {
 	switch profile {
 	case workerpkg.ProfileCodexTmuxCLI:
 		return []string{filepath.Join(gcHome, ".codex", "sessions")}
+	case workerpkg.ProfileCursorTmuxCLI:
+		return []string{filepath.Join(gcHome, ".local", "share", "gascity", "cursor-transcripts")}
 	case workerpkg.ProfileGeminiTmuxCLI:
 		return []string{filepath.Join(gcHome, ".gemini", "tmp")}
 	case workerpkg.ProfileKimiTmuxCLI:
 		return []string{filepath.Join(gcHome, ".kimi", "sessions")}
 	case workerpkg.ProfileOpenCodeTmuxCLI:
 		return []string{filepath.Join(gcHome, ".local", "share", "gascity", "opencode-transcripts")}
+	case workerpkg.ProfileMimoCodeTmuxCLI:
+		return []string{filepath.Join(gcHome, ".local", "share", "gascity", "mimocode-transcripts")}
+	case workerpkg.ProfileZCodeTmuxCLI:
+		return []string{filepath.Join(gcHome, ".local", "share", "gascity", "zcode-transcripts")}
 	case workerpkg.ProfilePiTmuxCLI:
 		return []string{filepath.Join(gcHome, ".pi", "agent", "sessions")}
+	case workerpkg.ProfileAntigravityTmuxCLI:
+		return []string{filepath.Join(gcHome, ".gemini", "antigravity-cli", "brain")}
 	default:
 		return []string{filepath.Join(gcHome, ".claude", "projects")}
 	}
@@ -185,17 +253,138 @@ func stageProviderAuth(gcHome string, env *helpers.Env, profile workerpkg.Profil
 		return stageClaudeAuth(gcHome, env)
 	case workerpkg.ProfileCodexTmuxCLI:
 		return stageCodexAuth(gcHome, env)
+	case workerpkg.ProfileCursorTmuxCLI:
+		return stageCursorAuth(gcHome, env)
 	case workerpkg.ProfileGeminiTmuxCLI:
 		return stageGeminiAuth(gcHome, env)
 	case workerpkg.ProfileKimiTmuxCLI:
 		return stageKimiAuth(gcHome, env)
 	case workerpkg.ProfileOpenCodeTmuxCLI:
 		return stageOpenCodeGeminiAuth(gcHome, env)
+	case workerpkg.ProfileMimoCodeTmuxCLI:
+		return stageMimoCodeAuth(gcHome, env)
+	case workerpkg.ProfileZCodeTmuxCLI:
+		return stageZCodeAuth(gcHome, env)
 	case workerpkg.ProfilePiTmuxCLI:
 		return stagePiOllamaCloudAuth(gcHome, env)
+	case workerpkg.ProfileAntigravityTmuxCLI:
+		return stageAntigravityAuth(gcHome, env)
 	default:
 		return "", fmt.Errorf("unsupported worker-inference profile %q", profile)
 	}
+}
+
+func stageCursorAuth(gcHome string, env *helpers.Env) (string, error) {
+	transcriptDir := filepath.Join(gcHome, ".local", "share", "gascity", "cursor-transcripts")
+	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
+		return "", err
+	}
+
+	stagedKey, keyFromFile, err := stagedValue(
+		"GC_WORKER_INFERENCE_CURSOR_API_KEY",
+		"GC_WORKER_INFERENCE_CURSOR_API_KEY_FILE",
+	)
+	if err != nil {
+		return "", fmt.Errorf("cursor auth unavailable: %w", err)
+	}
+	if apiKey := strings.TrimSpace(stagedKey); apiKey != "" {
+		env.With("CURSOR_API_KEY", apiKey)
+		return stagedSecretSource("cursor", keyFromFile), nil
+	}
+	if apiKey := strings.TrimSpace(os.Getenv("CURSOR_API_KEY")); apiKey != "" {
+		env.With("CURSOR_API_KEY", apiKey)
+		return "env:CURSOR_API_KEY", nil
+	}
+	return "", fmt.Errorf("cursor auth unavailable: set CURSOR_API_KEY or GC_WORKER_INFERENCE_CURSOR_API_KEY")
+}
+
+func stageAntigravityAuth(gcHome string, env *helpers.Env) (string, error) {
+	_ = env
+
+	cliDir := filepath.Join(gcHome, ".gemini", "antigravity-cli")
+	if err := os.MkdirAll(filepath.Join(cliDir, "brain"), 0o755); err != nil {
+		return "", err
+	}
+
+	token, tokenFromFile, err := stagedValue(
+		"GC_WORKER_INFERENCE_ANTIGRAVITY_OAUTH_TOKEN",
+		"GC_WORKER_INFERENCE_ANTIGRAVITY_OAUTH_TOKEN_FILE",
+	)
+	if err != nil {
+		return "", fmt.Errorf("antigravity auth unavailable: %w", err)
+	}
+	if strings.TrimSpace(token) != "" {
+		if err := os.WriteFile(filepath.Join(cliDir, "antigravity-oauth-token"), []byte(token), 0o600); err != nil {
+			return "", err
+		}
+		if err := stageAntigravityOnboarding("", gcHome); err != nil {
+			return "", err
+		}
+		return stagedSecretSource("antigravity", tokenFromFile), nil
+	}
+
+	if sourceHome := strings.TrimSpace(os.Getenv("GC_WORKER_INFERENCE_ANTIGRAVITY_HOME")); sourceHome != "" {
+		if err := stageAntigravityHomeSource(sourceHome, gcHome); err != nil {
+			return "", fmt.Errorf("antigravity auth unavailable: %w", err)
+		}
+		return "env:GC_WORKER_INFERENCE_ANTIGRAVITY_HOME", nil
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("antigravity auth unavailable: %w", err)
+	}
+	if err := stageAntigravityHomeSource(home, gcHome); err == nil {
+		return "host-home:antigravity", nil
+	}
+	return "", fmt.Errorf("antigravity auth unavailable: set GC_WORKER_INFERENCE_ANTIGRAVITY_HOME or GC_WORKER_INFERENCE_ANTIGRAVITY_OAUTH_TOKEN")
+}
+
+func stageAntigravityHomeSource(sourceHome, gcHome string) error {
+	sourceHome = strings.TrimSpace(sourceHome)
+	if sourceHome == "" {
+		return fmt.Errorf("source home is empty")
+	}
+	srcCLI := filepath.Join(sourceHome, ".gemini", "antigravity-cli")
+	dstCLI := filepath.Join(gcHome, ".gemini", "antigravity-cli")
+	for _, name := range []string{"antigravity-oauth-token", "settings.json", "installation_id", "keybindings.json"} {
+		if err := copyFileIfExists(filepath.Join(srcCLI, name), filepath.Join(dstCLI, name), 0o600); err != nil {
+			return err
+		}
+	}
+	srcConfig := filepath.Join(sourceHome, ".gemini", "config")
+	dstConfig := filepath.Join(gcHome, ".gemini", "config")
+	for _, name := range []string{".migrated", "import_manifest.json", "mcp_config.json"} {
+		if err := copyFileIfExists(filepath.Join(srcConfig, name), filepath.Join(dstConfig, name), 0o600); err != nil {
+			return err
+		}
+	}
+	if err := stageAntigravityOnboarding(srcCLI, gcHome); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(dstCLI, "brain"), 0o755); err != nil {
+		return err
+	}
+	if !fileExists(filepath.Join(dstCLI, "antigravity-oauth-token")) {
+		return fmt.Errorf("missing %s", filepath.Join(srcCLI, "antigravity-oauth-token"))
+	}
+	return nil
+}
+
+func stageAntigravityOnboarding(srcCLI, gcHome string) error {
+	dst := filepath.Join(gcHome, ".gemini", "antigravity-cli", "cache", "onboarding.json")
+	if strings.TrimSpace(srcCLI) != "" {
+		if err := copyFileIfExists(filepath.Join(srcCLI, "cache", "onboarding.json"), dst, 0o600); err != nil {
+			return err
+		}
+		if fileExists(dst) {
+			return nil
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(dst, []byte("{\n  \"consumerOnboardingComplete\": true,\n  \"enterpriseOnboardingComplete\": true,\n  \"onboardingComplete\": true\n}\n"), 0o600)
 }
 
 func stageKimiAuth(gcHome string, env *helpers.Env) (string, error) {
@@ -546,6 +735,75 @@ func stageOpenCodeGeminiAuth(gcHome string, env *helpers.Env) (string, error) {
 		return "env:OPENCODE_AUTH_CONTENT", nil
 	}
 	return "", fmt.Errorf("opencode gemini auth unavailable: set GOOGLE_GENERATIVE_AI_API_KEY/GEMINI_API_KEY/GOOGLE_API_KEY or OPENCODE_AUTH_CONTENT")
+}
+
+func stageMimoCodeAuth(gcHome string, env *helpers.Env) (string, error) {
+	xdgData := filepath.Join(gcHome, ".local", "share")
+	xdgConfig := filepath.Join(gcHome, ".config")
+	xdgCache := filepath.Join(gcHome, ".cache")
+	xdgState := filepath.Join(gcHome, ".local", "state")
+	transcriptDir := filepath.Join(xdgData, "gascity", "mimocode-transcripts")
+	for _, dir := range []string{xdgData, xdgConfig, xdgCache, xdgState, transcriptDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return "", err
+		}
+	}
+	env.With("XDG_DATA_HOME", xdgData).
+		With("XDG_CONFIG_HOME", xdgConfig).
+		With("XDG_CACHE_HOME", xdgCache).
+		With("XDG_STATE_HOME", xdgState).
+		With("GC_MIMOCODE_TRANSCRIPT_DIR", transcriptDir)
+
+	if apiKey := strings.TrimSpace(os.Getenv("XIAOMI_API_KEY")); apiKey != "" {
+		env.With("XIAOMI_API_KEY", apiKey)
+		return "env:XIAOMI_API_KEY", nil
+	}
+	return "", fmt.Errorf("mimocode auth unavailable: set XIAOMI_API_KEY")
+}
+
+// stageZCodeAuth isolates the ZCode adapter's state under the test gc home and
+// forwards the harness configuration the adapter and the CLI bundle read.
+//
+// The credential is passed through as an env var and never written to a file or
+// echoed: ZCODE_API_KEY reaches the pane via the ZCODE_ provider-credential
+// passthrough. ZCODE_CJS must point at a readable ZCode bundle; without it (or
+// without the key) the profile reports an environment error rather than
+// pretending to certify, matching every other credential-gated profile.
+func stageZCodeAuth(gcHome string, env *helpers.Env) (string, error) {
+	xdgData := filepath.Join(gcHome, ".local", "share")
+	xdgConfig := filepath.Join(gcHome, ".config")
+	xdgCache := filepath.Join(gcHome, ".cache")
+	xdgState := filepath.Join(gcHome, ".local", "state")
+	transcriptDir := filepath.Join(xdgData, "gascity", "zcode-transcripts")
+	for _, dir := range []string{xdgData, xdgConfig, xdgCache, xdgState, transcriptDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return "", err
+		}
+	}
+	env.With("XDG_DATA_HOME", xdgData).
+		With("XDG_CONFIG_HOME", xdgConfig).
+		With("XDG_CACHE_HOME", xdgCache).
+		With("XDG_STATE_HOME", xdgState).
+		With("GC_ZCODE_TRANSCRIPT_DIR", transcriptDir)
+
+	bundle := strings.TrimSpace(os.Getenv("ZCODE_CJS"))
+	if bundle == "" {
+		return "", fmt.Errorf("zcode harness unavailable: set ZCODE_CJS to the ZCode CLI bundle")
+	}
+	if _, err := os.Stat(bundle); err != nil {
+		return "", fmt.Errorf("zcode harness unavailable: ZCODE_CJS %q is not readable: %w", bundle, err)
+	}
+	apiKey := strings.TrimSpace(os.Getenv("ZCODE_API_KEY"))
+	if apiKey == "" {
+		return "", fmt.Errorf("zcode auth unavailable: set ZCODE_API_KEY")
+	}
+	env.With("ZCODE_CJS", bundle).With("ZCODE_API_KEY", apiKey)
+	for _, key := range []string{"ZCODE_MODEL", "ZCODE_BASE_URL", "ZCODE_NODE_BIN"} {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			env.With(key, value)
+		}
+	}
+	return "env:ZCODE_API_KEY", nil
 }
 
 func stagePiOllamaCloudAuth(gcHome string, env *helpers.Env) (string, error) {

@@ -1,5 +1,6 @@
 // Package bootstrap reconciles legacy user-global implicit-import state for
-// compatibility tooling. Launch-time system packs now come from .gc/system/packs.
+// compatibility tooling. Builtin packs now compose via pinned imports served
+// from the user-global pack cache.
 package bootstrap
 
 import (
@@ -33,9 +34,9 @@ type Entry struct {
 }
 
 // BootstrapPacks is the currently-supported compatibility set. It is empty for
-// the gc import launch path: cities rely on .gc/system/packs and explicit
-// [imports], not user-global implicit imports. Tests may override this list to
-// exercise the compatibility materialization path.
+// the gc import launch path: cities rely on explicit pinned [imports], not
+// user-global implicit imports. Tests may override this list to exercise the
+// compatibility materialization path.
 var BootstrapPacks []Entry
 
 // RetiredBootstrapPacks are legacy implicit imports that older gc releases
@@ -159,11 +160,22 @@ func defaultGCHome() string {
 	if strings.HasSuffix(os.Args[0], ".test") {
 		return ""
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(os.TempDir(), ".gc")
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".gc")
 	}
-	return filepath.Join(home, ".gc")
+	// Home unresolved. Never fall back to a fixed os.TempDir()/.gc: that path
+	// is shared and world-writable, so concurrent processes clobber each
+	// other's state and unrelated city scans pick it up as a real city
+	// (#3506). Hand out a process-unique directory instead.
+	if dir, err := os.MkdirTemp("", "gc-home-*"); err == nil {
+		return dir
+	}
+	// MkdirTemp failed, so the temp directory itself is unusable. Return a
+	// process-unique path under it rather than "" (which callers would join
+	// into a CWD-relative path, silently writing state to the wrong place) or
+	// the shared os.TempDir()/.gc that #3506 is about. The caller then fails
+	// loudly when it cannot create or write this path.
+	return filepath.Join(os.TempDir(), fmt.Sprintf("gc-home-%d", os.Getpid()))
 }
 
 func bootstrapPackRevision(entry Entry) (string, error) {

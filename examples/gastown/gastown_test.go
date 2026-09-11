@@ -34,7 +34,7 @@ func exampleDir() string {
 func gastownFormulaSearchPaths() []string {
 	dir := exampleDir()
 	return []string{
-		filepath.Join(dir, "packs", "gastown", "formulas"),
+		filepath.Join(packRoot(), "packs", "gastown", "formulas"),
 		filepath.Clean(filepath.Join(dir, "..", "..", "internal", "bootstrap", "packs", "core", "formulas")),
 	}
 }
@@ -67,6 +67,15 @@ func assertContainsInOrder(t *testing.T, body string, wants ...string) {
 	}
 }
 
+func containsAny(body string, wants ...string) bool {
+	for _, want := range wants {
+		if strings.Contains(body, want) {
+			return true
+		}
+	}
+	return false
+}
+
 func assertCurrentWispBurnsGuarded(t *testing.T, name, body string) {
 	t.Helper()
 	lines := strings.Split(body, "\n")
@@ -90,7 +99,7 @@ func assertCurrentWispBurnsGuarded(t *testing.T, name, body string) {
 func refineryMergePushDescription(t *testing.T) string {
 	t.Helper()
 	parser := formula.NewParser(gastownFormulaSearchPaths()...)
-	f, err := parser.ParseFile(filepath.Join(exampleDir(), "packs", "gastown", "formulas", "mol-refinery-patrol.toml"))
+	f, err := parser.ParseFile(filepath.Join(packRoot(), "packs", "gastown", "formulas", "mol-refinery-patrol.toml"))
 	if err != nil {
 		t.Fatalf("parsing refinery formula: %v", err)
 	}
@@ -188,7 +197,6 @@ func sectionBetween(t *testing.T, body, start, end string) string {
 
 func renderGastownPromptForPack(t *testing.T, rel, agentName, templateName, rigName, bindingName, bindingPrefix string) string {
 	t.Helper()
-	dir := exampleDir()
 	tmpl := template.New(filepath.Base(rel)).
 		Funcs(template.FuncMap{
 			"basename": func(qualifiedName string) string {
@@ -204,7 +212,7 @@ func renderGastownPromptForPack(t *testing.T, rel, agentName, templateName, rigN
 		}).
 		Option("missingkey=zero")
 
-	fragmentPaths, err := filepath.Glob(filepath.Join(dir, "packs", "gastown", "template-fragments", "*.template.md"))
+	fragmentPaths, err := filepath.Glob(filepath.Join(packRoot(), "packs", "gastown", "template-fragments", "*.template.md"))
 	if err != nil {
 		t.Fatalf("glob template fragments: %v", err)
 	}
@@ -218,7 +226,7 @@ func renderGastownPromptForPack(t *testing.T, rel, agentName, templateName, rigN
 		}
 	}
 
-	data, err := os.ReadFile(filepath.Join(dir, rel))
+	data, err := os.ReadFile(gastownRel(rel))
 	if err != nil {
 		t.Fatalf("reading %s: %v", rel, err)
 	}
@@ -250,9 +258,13 @@ func renderGastownPromptForPack(t *testing.T, rel, agentName, templateName, rigN
 	return buf.String()
 }
 
-// loadExpanded loads city.toml with full pack expansion.
+// loadExpanded loads city.toml with full pack expansion. The gastown
+// import is a pinned public source resolved from a hermetic repo cache
+// primed with the binary's embedded bytes, so composition runs offline
+// against exactly what gc ships.
 func loadExpanded(t *testing.T) *config.City {
 	t.Helper()
+	primeBundledGastownCache(t)
 	dir := exampleDir()
 	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
 	if err != nil {
@@ -275,8 +287,8 @@ func TestCityTomlParses(t *testing.T) {
 	if cfg.Workspace.Name != "gastown" {
 		t.Errorf("Workspace.Name = %q, want %q", cfg.Workspace.Name, "gastown")
 	}
-	if len(cfg.Workspace.LegacyIncludes()) != 0 {
-		t.Errorf("Workspace.Includes = %v, want empty (migrated to pack.toml)", cfg.Workspace.LegacyIncludes())
+	if gotIncludes := cfg.Workspace.LegacyIncludes(); len(gotIncludes) != 0 {
+		t.Errorf("Workspace.Includes = %v, want none (builtin packs compose via pack.toml imports)", gotIncludes)
 	}
 	if len(cfg.Imports) != 0 {
 		t.Errorf("cfg.Imports = %v, want empty (imports migrated to pack.toml)", cfg.Imports)
@@ -305,8 +317,11 @@ func TestCityPackTomlParses(t *testing.T) {
 	if !ok {
 		t.Fatalf("pack.toml imports = %v, want entry for \"gastown\"", tc.Imports)
 	}
-	if gastownImp.Source != "packs/gastown" {
-		t.Errorf("pack.toml imports[\"gastown\"].Source = %q, want %q", gastownImp.Source, "packs/gastown")
+	if gastownImp.Source != config.PublicGastownPackSource {
+		t.Errorf("pack.toml imports[\"gastown\"].Source = %q, want the pinned public source %q", gastownImp.Source, config.PublicGastownPackSource)
+	}
+	if gastownImp.Version != config.PublicGastownPackVersion {
+		t.Errorf("pack.toml imports[\"gastown\"].Version = %q, want %q", gastownImp.Version, config.PublicGastownPackVersion)
 	}
 	cityData, err := os.ReadFile(filepath.Join(dir, "city.toml"))
 	if err != nil {
@@ -320,8 +335,11 @@ func TestCityPackTomlParses(t *testing.T) {
 	if !ok {
 		t.Fatalf("city.toml defaults.rig.imports = %v, want entry for \"gastown\"", cityCfg.Defaults.Rig.Imports)
 	}
-	if gastownDefault.Source != "packs/gastown" {
-		t.Errorf("city.toml defaults.rig.imports[\"gastown\"].Source = %q, want %q", gastownDefault.Source, "packs/gastown")
+	if gastownDefault.Source != config.PublicGastownPackSource {
+		t.Errorf("city.toml defaults.rig.imports[\"gastown\"].Source = %q, want the pinned public source %q", gastownDefault.Source, config.PublicGastownPackSource)
+	}
+	if gastownDefault.Version != config.PublicGastownPackVersion {
+		t.Errorf("city.toml defaults.rig.imports[\"gastown\"].Version = %q, want %q", gastownDefault.Version, config.PublicGastownPackVersion)
 	}
 }
 
@@ -329,6 +347,58 @@ func TestCityTomlValidates(t *testing.T) {
 	cfg := loadExpanded(t)
 	if err := config.ValidateAgents(cfg.Agents); err != nil {
 		t.Errorf("ValidateAgents: %v", err)
+	}
+}
+
+// TestHeartbeatAgentsCarryMaxSessionAge pins the resolved values of the
+// pack.toml [[patches.agent]] wall-clock restart backstop (ga-13yy0). The
+// patches match by name against the expanded composition, so a pack refactor
+// could leave them silently ineffective without any load-time error; this
+// test asserts the post-expansion values instead of the literal TOML. Only
+// city-scoped agents are checked — witness is rig-scoped and absent from a
+// composition with no rigs registered.
+func TestHeartbeatAgentsCarryMaxSessionAge(t *testing.T) {
+	cfg := loadExpanded(t)
+
+	const (
+		wantAge    = "6h"
+		wantJitter = "15m"
+	)
+	// dog is an unpatched city agent: it proves the patches are targeted
+	// rather than a blanket default applied to every agent.
+	patched := map[string]bool{"mayor": true, "deacon": true, "boot": true}
+	unpatched := map[string]bool{"dog": true}
+
+	seen := make(map[string]bool, len(patched)+len(unpatched))
+	for _, a := range cfg.Agents {
+		switch {
+		case patched[a.Name]:
+			seen[a.Name] = true
+			if a.MaxSessionAge != wantAge {
+				t.Errorf("agent %q: MaxSessionAge = %q, want %q", a.Name, a.MaxSessionAge, wantAge)
+			}
+			if a.MaxSessionAgeJitter != wantJitter {
+				t.Errorf("agent %q: MaxSessionAgeJitter = %q, want %q", a.Name, a.MaxSessionAgeJitter, wantJitter)
+			}
+		case unpatched[a.Name]:
+			seen[a.Name] = true
+			if a.MaxSessionAge != "" {
+				t.Errorf("agent %q: MaxSessionAge = %q, want unset (no patch targets it)", a.Name, a.MaxSessionAge)
+			}
+		}
+	}
+
+	// A rename in the gastown pack would drop the agent from the composition
+	// entirely; without this the loop above would pass vacuously.
+	for name := range patched {
+		if !seen[name] {
+			t.Errorf("agent %q missing from expanded config; the pack.toml patch has no target", name)
+		}
+	}
+	for name := range unpatched {
+		if !seen[name] {
+			t.Errorf("agent %q missing from expanded config; the unpatched control is gone", name)
+		}
 	}
 }
 
@@ -353,8 +423,7 @@ func TestPromptFilesExist(t *testing.T) {
 // client-attached set-hook stopgap (acceptance #5) — the interactive MouseOn
 // default in internal/api (sessionCreateHints) replaces it.
 func TestTmuxKeybindingsScrollWheel(t *testing.T) {
-	dir := exampleDir()
-	path := filepath.Join(dir, "packs", "gastown", "assets", "scripts", "tmux-keybindings.sh")
+	path := filepath.Join(packRoot(), "packs", "gastown", "assets", "scripts", "tmux-keybindings.sh")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading tmux-keybindings.sh: %v", err)
@@ -367,6 +436,29 @@ func TestTmuxKeybindingsScrollWheel(t *testing.T) {
 	}
 	if strings.Contains(script, "client-attached") {
 		t.Error("tmux-keybindings.sh contains the po-vtg2 client-attached set-hook stopgap; the interactive MouseOn default replaces it (ga-c4w acceptance #5)")
+	}
+}
+
+// TestTmuxKeybindingsAlternateScreenPassthrough locks the fix for the ga-c4w
+// alternate-screen regression: WheelUpPane must pass the wheel through to
+// full-screen apps (Claude Code, pagers) rather than forcing copy-mode over an
+// empty scrollback buffer (alternate-screen content never lands in the tmux
+// scrollback). Depends on gastownhall/gascity-packs#136; skips until go.mod is
+// bumped to a version that includes that change.
+func TestTmuxKeybindingsAlternateScreenPassthrough(t *testing.T) {
+	path := filepath.Join(packRoot(), "packs", "gastown", "assets", "scripts", "tmux-keybindings.sh")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading tmux-keybindings.sh: %v", err)
+	}
+	script := string(data)
+	if !strings.Contains(script, "alternate_on") {
+		t.Skip("embedded gascity-packs does not yet include #{alternate_on} in WheelUpPane " +
+			"(gastownhall/gascity-packs#136); test activates once go.mod is bumped to that release")
+	}
+	if !strings.Contains(script, "#{||:#{alternate_on},#{pane_in_mode},#{mouse_any_flag}}") {
+		t.Error("WheelUpPane binding has #{alternate_on} but not the full passthrough condition " +
+			"#{||:#{alternate_on},#{pane_in_mode},#{mouse_any_flag}}")
 	}
 }
 
@@ -387,8 +479,7 @@ func TestOverlayDirsExist(t *testing.T) {
 }
 
 func TestRefineryPromptSeedsTargetBranchVar(t *testing.T) {
-	dir := exampleDir()
-	path := filepath.Join(dir, "packs", "gastown", "agents", "refinery", "prompt.template.md")
+	path := filepath.Join(packRoot(), "packs", "gastown", "agents", "refinery", "prompt.template.md")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading refinery prompt: %v", err)
@@ -399,8 +490,7 @@ func TestRefineryPromptSeedsTargetBranchVar(t *testing.T) {
 }
 
 func TestRefineryFormulaSupportsMergeStrategies(t *testing.T) {
-	dir := exampleDir()
-	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
+	path := filepath.Join(packRoot(), "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading refinery formula: %v", err)
@@ -434,8 +524,7 @@ func TestRefineryFormulaSupportsMergeStrategies(t *testing.T) {
 // write. Both the direct-merge path and the mr/pr handoff path use
 // the same chained shape.
 func TestRefineryFormulaChainsMergeMetadataWithClose(t *testing.T) {
-	dir := exampleDir()
-	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
+	path := filepath.Join(packRoot(), "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading refinery formula: %v", err)
@@ -452,10 +541,10 @@ func TestRefineryFormulaChainsMergeMetadataWithClose(t *testing.T) {
 	// that gates gc bd close must appear after --unset-metadata.
 	assertContainsInOrder(t, body,
 		"--set-metadata merge_result=merged",
-		"--set-metadata merged_sha=$MERGED_SHA",
-		"--set-metadata merged_target=$TARGET",
+		`--set-metadata merged_sha="$MERGED_SHA"`,
+		`--set-metadata merged_target="$TARGET"`,
 		"--unset-metadata rejection_reason &&",
-		`gc bd close $WORK --reason "Merged to $TARGET at $MERGED_SHORT"`,
+		`gc bd close "$WORK" --reason "Merged to $TARGET at $MERGED_SHORT"`,
 	)
 
 	// mr/pr handoff path: same chained shape, different metadata fields.
@@ -466,6 +555,46 @@ func TestRefineryFormulaChainsMergeMetadataWithClose(t *testing.T) {
 		`--set-metadata merged_target="$TARGET"`,
 		"--unset-metadata rejection_reason &&",
 		`gc bd close $WORK --reason "Pull request ready: $PR_URL"`,
+	)
+}
+
+// TestRefineryFormulaDirectMergeUsesDetachedWorktree guards the RC-blocking
+// regression where the refinery tried `git checkout $TARGET` in its active
+// worktree while the target branch was already checked out by the rig's main
+// worktree. That checkout failed, but the agent still wrote merged metadata
+// and closed the bead. Direct merges must use a temporary detached worktree,
+// verify origin/<target> reaches the merged SHA, and only then mutate bead
+// state.
+func TestRefineryFormulaDirectMergeUsesDetachedWorktree(t *testing.T) {
+	body := refineryMergePushDescription(t)
+	direct := sectionBetween(t, body,
+		`**If MERGE_STRATEGY = "direct" (default):**`,
+		`**If MERGE_STRATEGY = "mr":**`,
+	)
+
+	for _, line := range strings.Split(direct, "\n") {
+		if strings.TrimSpace(line) == `git checkout $TARGET` {
+			t.Fatalf("direct refinery merge checks out target branch in active worktree:\n%s", direct)
+		}
+	}
+
+	assertContainsInOrder(t, direct,
+		`branch_has_real_change "origin/$TARGET" temp ||`,
+		"set -e",
+		`MERGE_PARENT=$(mktemp -d "${TMPDIR:-/tmp}/gascity-refinery-merge.XXXXXX")`,
+		`git fetch origin "+refs/heads/${TARGET}:refs/remotes/origin/${TARGET}"`,
+		`TEMP_SHA=$(git rev-parse temp)`,
+		`git worktree add --detach "$MERGE_WT" "origin/$TARGET"`,
+		`git -C "$MERGE_WT" merge --ff-only "$TEMP_SHA"`,
+		`MERGED_SHA=$(git -C "$MERGE_WT" rev-parse HEAD)`,
+		`git -C "$MERGE_WT" push origin "HEAD:$TARGET"`,
+		`REMOTE=$(git rev-parse "origin/$TARGET")`,
+		`if [ "$MERGED_SHA" != "$REMOTE" ]; then`,
+		"STOP. Do not mutate bead state.",
+		"gc runtime drain-ack",
+		"exit 1",
+		"--set-metadata merge_result=merged",
+		`gc bd close "$WORK" --reason "Merged to $TARGET at $MERGED_SHORT"`,
 	)
 }
 
@@ -482,8 +611,7 @@ func TestRefineryFormulaChainsMergeMetadataWithClose(t *testing.T) {
 // The guard must run BEFORE each handoff's bead-closing command, so a
 // regression that drops or reorders it can never close an empty branch.
 func TestRefineryFormulaRefusesZeroDiffMerge(t *testing.T) {
-	dir := exampleDir()
-	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
+	path := filepath.Join(packRoot(), "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading refinery formula: %v", err)
@@ -526,8 +654,8 @@ func TestRefineryFormulaRefusesZeroDiffMerge(t *testing.T) {
 	assertContainsInOrder(t, body,
 		`**If MERGE_STRATEGY = "direct" (default):**`,
 		`branch_has_real_change "origin/$TARGET" temp ||`,
-		"git merge --ff-only temp",
-		`gc bd close $WORK --reason "Merged to $TARGET at $MERGED_SHORT"`,
+		`git -C "$MERGE_WT" merge --ff-only "$TEMP_SHA"`,
+		`gc bd close "$WORK" --reason "Merged to $TARGET at $MERGED_SHORT"`,
 	)
 
 	// mr/pr publication path: guard precedes the push and the close.
@@ -635,8 +763,7 @@ func TestRefineryBranchHasRealChangeExec(t *testing.T) {
 // naming the obligation: on merging a previously-rejected bead, clear
 // `rejection_reason` before `gc bd close`.
 func TestRefineryPromptRejectionFlowEnforcesClearOnMerge(t *testing.T) {
-	dir := exampleDir()
-	path := filepath.Join(dir, "packs", "gastown", "agents", "refinery", "prompt.template.md")
+	path := filepath.Join(packRoot(), "packs", "gastown", "agents", "refinery", "prompt.template.md")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading refinery prompt: %v", err)
@@ -651,8 +778,7 @@ func TestRefineryPromptRejectionFlowEnforcesClearOnMerge(t *testing.T) {
 }
 
 func TestPolecatFormulaTreatsMetadataBranchAsAuthoritative(t *testing.T) {
-	dir := exampleDir()
-	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-polecat-work.toml")
+	path := filepath.Join(packRoot(), "packs", "gastown", "formulas", "mol-polecat-work.toml")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading polecat formula: %v", err)
@@ -676,8 +802,7 @@ func TestPolecatFormulaTreatsMetadataBranchAsAuthoritative(t *testing.T) {
 }
 
 func TestPolecatFormulaRecordsExistingPRMetadataOnSubmit(t *testing.T) {
-	dir := exampleDir()
-	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-polecat-work.toml")
+	path := filepath.Join(packRoot(), "packs", "gastown", "formulas", "mol-polecat-work.toml")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading polecat formula: %v", err)
@@ -699,8 +824,7 @@ func TestPolecatFormulaRecordsExistingPRMetadataOnSubmit(t *testing.T) {
 }
 
 func TestPolecatFormulaSignalsRefineryAfterReassign(t *testing.T) {
-	dir := exampleDir()
-	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-polecat-work.toml")
+	path := filepath.Join(packRoot(), "packs", "gastown", "formulas", "mol-polecat-work.toml")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading polecat formula: %v", err)
@@ -743,8 +867,7 @@ func TestPolecatFormulaSignalsRefineryAfterReassign(t *testing.T) {
 // never points at a valid polecat/<bead-id> merge target, so the
 // refinery's bead-driven handoff finds nothing to merge.
 func TestPolecatFormulaSubmitHasBranchShapeGate(t *testing.T) {
-	dir := exampleDir()
-	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-polecat-work.toml")
+	path := filepath.Join(packRoot(), "packs", "gastown", "formulas", "mol-polecat-work.toml")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading polecat formula: %v", err)
@@ -781,8 +904,7 @@ func TestPolecatFormulaSubmitHasBranchShapeGate(t *testing.T) {
 // CRITICAL section, so a provider that skips reading the formula
 // (observed with codex on #2082) still sees the rule inline.
 func TestPolecatPromptInlinesBranchConvention(t *testing.T) {
-	dir := exampleDir()
-	path := filepath.Join(dir, "packs", "gastown", "agents", "polecat", "prompt.template.md")
+	path := filepath.Join(packRoot(), "packs", "gastown", "agents", "polecat", "prompt.template.md")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading polecat prompt: %v", err)
@@ -852,8 +974,7 @@ func cookPolecatSelfReviewDescription(t *testing.T, vars map[string]string) stri
 }
 
 func TestPolecatPromptDoneSequenceSignalsRefinery(t *testing.T) {
-	dir := exampleDir()
-	path := filepath.Join(dir, "packs", "gastown", "agents", "polecat", "prompt.template.md")
+	path := filepath.Join(packRoot(), "packs", "gastown", "agents", "polecat", "prompt.template.md")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading polecat prompt: %v", err)
@@ -883,8 +1004,7 @@ func TestPolecatPromptDoneSequenceSignalsRefinery(t *testing.T) {
 // prompt's done sequence was structurally overriding the formula's
 // auto_push gate (BYPASS rate hit 75%).
 func TestPolecatPromptHaltsOnAutoPushFalse(t *testing.T) {
-	dir := exampleDir()
-	path := filepath.Join(dir, "packs", "gastown", "agents", "polecat", "prompt.template.md")
+	path := filepath.Join(packRoot(), "packs", "gastown", "agents", "polecat", "prompt.template.md")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading polecat prompt: %v", err)
@@ -907,6 +1027,12 @@ func TestPolecatPromptHaltsOnAutoPushFalse(t *testing.T) {
 		"exit 0",
 		"fi",
 		"git push origin HEAD",
+		`REMOTE_REF=$(git ls-remote origin "refs/heads/$BRANCH" 2>/dev/null | awk '{print $1}')`,
+		`LOCAL_HEAD=$(git rev-parse HEAD)`,
+		`PUSH VERIFICATION FAILED`,
+		`gc runtime drain-ack`,
+		"exit 1",
+		`gc bd update <work-bead> \`,
 	)
 }
 
@@ -936,12 +1062,17 @@ func TestPolecatRenderedApprovalFallacyHaltsOnAutoPushFalse(t *testing.T) {
 		"exit 0",
 		"fi",
 		"git push origin HEAD",
+		`REMOTE_REF=$(git ls-remote origin "refs/heads/$BRANCH" 2>/dev/null | awk '{print $1}')`,
+		`LOCAL_HEAD=$(git rev-parse HEAD)`,
+		`PUSH VERIFICATION FAILED`,
+		`gc runtime drain-ack`,
+		"exit 1",
+		`gc bd update <work-bead> \`,
 	)
 }
 
 func TestPolecatFormulaHaltsOnAutoPushFalse(t *testing.T) {
-	dir := exampleDir()
-	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-polecat-work.toml")
+	path := filepath.Join(packRoot(), "packs", "gastown", "formulas", "mol-polecat-work.toml")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading polecat formula: %v", err)
@@ -965,12 +1096,18 @@ func TestPolecatFormulaHaltsOnAutoPushFalse(t *testing.T) {
 		"exit 0",
 		"fi",
 		"git push origin HEAD",
+		"PUSH_EXIT=$?",
+		`REMOTE_REF=$(git ls-remote origin "refs/heads/$CURRENT_BRANCH" 2>/dev/null | awk '{print $1}')`,
+		`LOCAL_HEAD=$(git rev-parse HEAD)`,
+		`PUSH VERIFICATION FAILED`,
+		`gc runtime drain-ack`,
+		"exit 1",
+		"```",
 	)
 }
 
 func TestRefineryFormulaRespectsExistingPRMetadata(t *testing.T) {
-	dir := exampleDir()
-	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
+	path := filepath.Join(packRoot(), "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading refinery formula: %v", err)
@@ -1051,8 +1188,7 @@ func TestRefineryFormulaRespectsExistingPRMetadata(t *testing.T) {
 }
 
 func TestRefineryFormulaExistingPRNoGhUsesSharedRESTLookup(t *testing.T) {
-	dir := exampleDir()
-	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
+	path := filepath.Join(packRoot(), "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading refinery formula: %v", err)
@@ -1370,7 +1506,7 @@ func TestWorktreeSetupKeepsIgnoresLocal(t *testing.T) {
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	city := filepath.Join(tmp, "city")
-	script := filepath.Join(exampleDir(), "packs", "gastown", "assets", "scripts", "worktree-setup.sh")
+	script := filepath.Join(packRoot(), "packs", "gastown", "assets", "scripts", "worktree-setup.sh")
 
 	runCmd(t, tmp, "git", "init", repo)
 	runCmd(t, repo, "git", "config", "user.email", "test@example.com")
@@ -1466,7 +1602,7 @@ func TestWorktreeSetupBootstrapsPrepopulatedTargetDir(t *testing.T) {
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	city := filepath.Join(tmp, "city")
-	script := filepath.Join(exampleDir(), "packs", "gastown", "assets", "scripts", "worktree-setup.sh")
+	script := filepath.Join(packRoot(), "packs", "gastown", "assets", "scripts", "worktree-setup.sh")
 
 	runCmd(t, tmp, "git", "init", repo)
 	runCmd(t, repo, "git", "config", "user.email", "test@example.com")
@@ -1500,7 +1636,7 @@ func TestWorktreeSetupBootstrapsPrepopulatedNestedRuntimeTree(t *testing.T) {
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	city := filepath.Join(tmp, "city")
-	script := filepath.Join(exampleDir(), "packs", "gastown", "assets", "scripts", "worktree-setup.sh")
+	script := filepath.Join(packRoot(), "packs", "gastown", "assets", "scripts", "worktree-setup.sh")
 
 	runCmd(t, tmp, "git", "init", repo)
 	runCmd(t, repo, "git", "config", "user.email", "test@example.com")
@@ -1549,7 +1685,7 @@ func TestWorktreeSetupPreservesTrackedFilesInPrepopulatedTargetDir(t *testing.T)
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	city := filepath.Join(tmp, "city")
-	script := filepath.Join(exampleDir(), "packs", "gastown", "assets", "scripts", "worktree-setup.sh")
+	script := filepath.Join(packRoot(), "packs", "gastown", "assets", "scripts", "worktree-setup.sh")
 
 	runCmd(t, tmp, "git", "init", repo)
 	runCmd(t, repo, "git", "config", "user.email", "test@example.com")
@@ -1596,7 +1732,7 @@ func TestWorktreeSetupSupportsLegacySignature(t *testing.T) {
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	city := filepath.Join(tmp, "city")
-	script := filepath.Join(exampleDir(), "packs", "gastown", "assets", "scripts", "worktree-setup.sh")
+	script := filepath.Join(packRoot(), "packs", "gastown", "assets", "scripts", "worktree-setup.sh")
 
 	runCmd(t, tmp, "git", "init", repo)
 	runCmd(t, repo, "git", "config", "user.email", "test@example.com")
@@ -1619,7 +1755,7 @@ func TestWorktreeSetupReusesExistingAgentBranch(t *testing.T) {
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	city := filepath.Join(tmp, "city")
-	script := filepath.Join(exampleDir(), "packs", "gastown", "assets", "scripts", "worktree-setup.sh")
+	script := filepath.Join(packRoot(), "packs", "gastown", "assets", "scripts", "worktree-setup.sh")
 
 	runCmd(t, tmp, "git", "init", repo)
 	runCmd(t, repo, "git", "config", "user.email", "test@example.com")
@@ -1646,7 +1782,7 @@ func TestWorktreeSetupNamespacesAgentBranchesByWorktreePath(t *testing.T) {
 	repo := filepath.Join(tmp, "repo")
 	cityA := filepath.Join(tmp, "city-a")
 	cityB := filepath.Join(tmp, "city-b")
-	script := filepath.Join(exampleDir(), "packs", "gastown", "assets", "scripts", "worktree-setup.sh")
+	script := filepath.Join(packRoot(), "packs", "gastown", "assets", "scripts", "worktree-setup.sh")
 
 	runCmd(t, tmp, "git", "init", repo)
 	runCmd(t, repo, "git", "config", "user.email", "test@example.com")
@@ -1680,7 +1816,7 @@ func TestWorktreeSetupSyncSkipsMissingOrigin(t *testing.T) {
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	city := filepath.Join(tmp, "city")
-	script := filepath.Join(exampleDir(), "packs", "gastown", "assets", "scripts", "worktree-setup.sh")
+	script := filepath.Join(packRoot(), "packs", "gastown", "assets", "scripts", "worktree-setup.sh")
 
 	runCmd(t, tmp, "git", "init", repo)
 	runCmd(t, repo, "git", "config", "user.email", "test@example.com")
@@ -1701,9 +1837,7 @@ func TestWorktreeSetupSyncSkipsMissingOrigin(t *testing.T) {
 }
 
 func TestPromptGuidanceUsesConfiguredRigRootsAndNamespacedWorktrees(t *testing.T) {
-	dir := exampleDir()
-
-	mayorPrompt, err := os.ReadFile(filepath.Join(dir, "packs", "gastown", "agents", "mayor", "prompt.template.md"))
+	mayorPrompt, err := os.ReadFile(filepath.Join(packRoot(), "packs", "gastown", "agents", "mayor", "prompt.template.md"))
 	if err != nil {
 		t.Fatalf("reading mayor prompt: %v", err)
 	}
@@ -1714,7 +1848,7 @@ func TestPromptGuidanceUsesConfiguredRigRootsAndNamespacedWorktrees(t *testing.T
 		t.Fatalf("mayor prompt missing rig-status guidance:\n%s", mayorPrompt)
 	}
 
-	crewPrompt, err := os.ReadFile(filepath.Join(dir, "packs", "gastown", "assets", "prompts", "crew.template.md"))
+	crewPrompt, err := os.ReadFile(filepath.Join(packRoot(), "packs", "gastown", "assets", "prompts", "crew.template.md"))
 	if err != nil {
 		t.Fatalf("reading crew prompt: %v", err)
 	}
@@ -1722,7 +1856,7 @@ func TestPromptGuidanceUsesConfiguredRigRootsAndNamespacedWorktrees(t *testing.T
 		t.Fatalf("crew prompt missing namespaced worktree path:\n%s", crewPrompt)
 	}
 
-	polecatPrompt, err := os.ReadFile(filepath.Join(dir, "packs", "gastown", "agents", "polecat", "prompt.template.md"))
+	polecatPrompt, err := os.ReadFile(filepath.Join(packRoot(), "packs", "gastown", "agents", "polecat", "prompt.template.md"))
 	if err != nil {
 		t.Fatalf("reading polecat prompt: %v", err)
 	}
@@ -1732,7 +1866,6 @@ func TestPromptGuidanceUsesConfiguredRigRootsAndNamespacedWorktrees(t *testing.T
 }
 
 func TestGastownRoutedToTargetsUseBindingPrefix(t *testing.T) {
-	dir := exampleDir()
 	checks := []struct {
 		rel  string
 		want string
@@ -1751,7 +1884,7 @@ func TestGastownRoutedToTargetsUseBindingPrefix(t *testing.T) {
 		{"packs/gastown/template-fragments/approval-fallacy.template.md", `${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery`},
 	}
 	for _, check := range checks {
-		data, err := os.ReadFile(filepath.Join(dir, check.rel))
+		data, err := os.ReadFile(gastownRel(check.rel))
 		if err != nil {
 			t.Fatalf("reading %s: %v", check.rel, err)
 		}
@@ -1777,17 +1910,16 @@ func TestGastownRoutedToTargetsUseBindingPrefix(t *testing.T) {
 }
 
 func TestGastownWarrantCreateCommandsUseCreateMetadata(t *testing.T) {
-	dir := exampleDir()
 	files := []string{
 		"packs/gastown/agents/boot/prompt.template.md",
 		"packs/gastown/agents/deacon/prompt.template.md",
 		"packs/gastown/agents/witness/prompt.template.md",
 		"packs/gastown/formulas/mol-deacon-patrol.toml",
 		"packs/gastown/formulas/mol-witness-patrol.toml",
-		"packs/maintenance/formulas/mol-shutdown-dance.toml",
+		"packs/gastown/formulas/mol-shutdown-dance.toml",
 	}
 	for _, rel := range files {
-		data, err := os.ReadFile(filepath.Join(dir, rel))
+		data, err := os.ReadFile(gastownRel(rel))
 		if err != nil {
 			t.Fatalf("reading %s: %v", rel, err)
 		}
@@ -1809,23 +1941,51 @@ func TestGastownWarrantCreateCommandsUseCreateMetadata(t *testing.T) {
 	}
 }
 
+func TestShutdownDanceUsesClaimedWarrantModel(t *testing.T) {
+	// Release 0.1.2 of the gastown pack moved mol-shutdown-dance off the
+	// vapor-wisp shape: dogs read warrant metadata from the claimed bead
+	// via $GC_BEAD_ID instead of poured template vars.
+	path := gastownRel("packs/gastown/formulas/mol-shutdown-dance.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading mol-shutdown-dance.toml: %v", err)
+	}
+	body := string(data)
+	var decoded struct {
+		Formula string                       `toml:"formula"`
+		Phase   string                       `toml:"phase"`
+		Vars    map[string]map[string]string `toml:"vars"`
+	}
+	if _, err := toml.Decode(body, &decoded); err != nil {
+		t.Fatalf("decoding mol-shutdown-dance.toml: %v", err)
+	}
+	if decoded.Formula != "mol-shutdown-dance" {
+		t.Errorf("formula = %q, want mol-shutdown-dance", decoded.Formula)
+	}
+	if decoded.Phase == "vapor" {
+		t.Error("mol-shutdown-dance must not be a vapor formula (claimed-warrant model)")
+	}
+	if _, ok := decoded.Vars["warrant_id"]; ok {
+		t.Error("mol-shutdown-dance must not declare a warrant_id var; the claimed bead is the warrant")
+	}
+	if !strings.Contains(body, "$GC_BEAD_ID") {
+		t.Error("mol-shutdown-dance must read warrant metadata from the claimed bead via $GC_BEAD_ID")
+	}
+	if strings.Contains(body, "formula_compiler") {
+		t.Error("mol-shutdown-dance must not require formula_compiler")
+	}
+}
+
 func TestDogAndDigestVaporFormulasHaveNoCompilerRequirement(t *testing.T) {
-	dir := exampleDir()
 	checks := []struct {
 		rel     string
 		formula string
 	}{
-		{"../dolt/formulas/mol-dog-backup.toml", "mol-dog-backup"},
-		{"../dolt/formulas/mol-dog-doctor.toml", "mol-dog-doctor"},
-		{"../dolt/formulas/mol-dog-phantom-db.toml", "mol-dog-phantom-db"},
-		{"../dolt/formulas/mol-dog-stale-db.toml", "mol-dog-stale-db"},
-		{"packs/maintenance/formulas/mol-dog-jsonl.toml", "mol-dog-jsonl"},
-		{"packs/maintenance/formulas/mol-dog-reaper.toml", "mol-dog-reaper"},
-		{"packs/maintenance/formulas/mol-shutdown-dance.toml", "mol-shutdown-dance"},
+		{"../bd/dolt/formulas/mol-dog-stale-db.toml", "mol-dog-stale-db"},
 		{"packs/gastown/formulas/mol-digest-generate.toml", "mol-digest-generate"},
 	}
 	for _, check := range checks {
-		path := filepath.Join(dir, check.rel)
+		path := gastownRel(check.rel)
 		data, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("reading %s: %v", check.rel, err)
@@ -1876,14 +2036,11 @@ func TestDogAndDigestVaporFormulasHaveNoCompilerRequirement(t *testing.T) {
 }
 
 func TestDogStartupPromptUsesSplitClaimFirstQueries(t *testing.T) {
-	dir := exampleDir()
 	checks := []string{
-		"packs/maintenance/agents/dog/prompt.template.md",
-		"packs/maintenance/template-fragments/propulsion.template.md",
 		"packs/gastown/template-fragments/propulsion.template.md",
 	}
 	for _, rel := range checks {
-		data, err := os.ReadFile(filepath.Join(dir, rel))
+		data, err := os.ReadFile(gastownRel(rel))
 		if err != nil {
 			t.Fatalf("reading %s: %v", rel, err)
 		}
@@ -1918,38 +2075,37 @@ func TestDogStartupPromptUsesSplitClaimFirstQueries(t *testing.T) {
 		}
 	}
 
-	dogPrompt, err := os.ReadFile(filepath.Join(dir, "packs/maintenance/agents/dog/prompt.template.md"))
+	// The dog prompt stays thin: the claim-first startup protocol renders
+	// through the propulsion-dog fragment asserted above.
+	dogPrompt, err := os.ReadFile(filepath.Join(packRoot(), "packs/gastown/agents/dog/prompt.template.md"))
 	if err != nil {
 		t.Fatalf("reading dog prompt: %v", err)
 	}
 	assertContainsInOrder(t, string(dogPrompt),
-		"## Startup Protocol",
-		"CLAIM-FIRST INVARIANT",
-		"{{ .AssignedInProgressQuery }}",
-		"{{ .AssignedReadyQuery }}",
-		"{{ .RoutedPoolQuery }}",
+		`{{ template "propulsion-dog" . }}`,
+		"{{ .WorkQuery }}",
 		"gc bd update <id> --claim",
 		"gc bd show <id> --json",
 	)
 
 	renderedDogPrompt := renderGastownPromptForPack(t,
-		"packs/maintenance/agents/dog/prompt.template.md",
-		"maintenance/dog",
+		"packs/gastown/agents/dog/prompt.template.md",
+		"gastown/dog",
 		"dog",
 		"demo",
-		"maintenance",
-		"maintenance.",
+		"gastown",
+		"gastown.",
 	)
+	// The claim-first startup behavior renders through the propulsion-dog
+	// fragment: split queries expand, claim precedes inspection, and the
+	// source-aware verification guidance survives rendering.
 	assertContainsInOrder(t, renderedDogPrompt,
-		"CLAIM-FIRST INVARIANT",
-		"# Step 1a: Check for assigned in-progress work",
 		`bd list --include-ephemeral --status in_progress --assignee="$GC_SESSION_ID"`,
 		`bd list --include-ephemeral --status in_progress --assignee="$GC_SESSION_NAME"`,
 		`bd list --include-ephemeral --status in_progress --assignee="$GC_ALIAS"`,
-		"# Step 1b: If none, check for assigned ready work",
 		"bd ready --include-ephemeral --assignee=<session>",
-		"# Step 1c: If none, find routed pool work",
 		"bd ready --metadata-field gc.routed_to=<canonical> --unassigned",
+		"gc bd update <id> --claim",
 		"For Step 1a/1b candidates",
 		"Assigned work may have no",
 		"For Step 1c candidates",
@@ -1966,121 +2122,129 @@ func TestDogStartupPromptUsesSplitClaimFirstQueries(t *testing.T) {
 	}
 }
 
-func TestNonDogStartupPromptsUseAssignedInProgressQuery(t *testing.T) {
-	dir := exampleDir()
+func TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup(t *testing.T) {
+	const (
+		assignedInProgressTemplate = "{{ .AssignedInProgressQuery }}"
+		assignedInProgressRendered = `bd list --include-ephemeral --status in_progress --assignee="$GC_SESSION_ID"`
+		hookClaimJSON              = "gc hook --claim --json"
+	)
 	checks := []struct {
-		rel     string
-		start   string
-		end     string
-		want    string
-		forbid  []string
-		render  bool
-		agent   string
-		tmpl    string
-		rig     string
-		binding string
+		rel            string
+		start          string
+		end            string
+		want           string
+		alternateWants []string
+		forbid         []string
+		render         bool
+		renderedWants  []string
+		agent          string
+		tmpl           string
+		rig            string
+		binding        string
 	}{
 		{
 			rel:    "packs/gastown/template-fragments/propulsion.template.md",
 			start:  `{{ define "propulsion-mayor" }}`,
 			end:    `{{ define "propulsion-crew" }}`,
-			want:   "{{ .AssignedInProgressQuery }}",
+			want:   assignedInProgressTemplate,
 			forbid: []string{`gc bd list --assignee="$GC_ALIAS" --status=in_progress`},
 		},
 		{
 			rel:    "packs/gastown/template-fragments/propulsion.template.md",
 			start:  `{{ define "propulsion-crew" }}`,
 			end:    `{{ define "propulsion-deacon" }}`,
-			want:   "{{ .AssignedInProgressQuery }}",
+			want:   assignedInProgressTemplate,
 			forbid: []string{`gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress`},
 		},
 		{
 			rel:    "packs/gastown/template-fragments/propulsion.template.md",
 			start:  `{{ define "propulsion-deacon" }}`,
 			end:    `{{ define "propulsion-witness" }}`,
-			want:   "{{ .AssignedInProgressQuery }}",
+			want:   assignedInProgressTemplate,
 			forbid: []string{`gc bd list --assignee="$GC_ALIAS" --status=in_progress`},
 		},
 		{
 			rel:    "packs/gastown/template-fragments/propulsion.template.md",
 			start:  `{{ define "propulsion-witness" }}`,
 			end:    `{{ define "propulsion-polecat" }}`,
-			want:   "{{ .AssignedInProgressQuery }}",
+			want:   assignedInProgressTemplate,
 			forbid: []string{`gc bd list --assignee="$GC_ALIAS" --status=in_progress`},
 		},
 		{
 			rel:    "packs/gastown/template-fragments/propulsion.template.md",
 			start:  `{{ define "propulsion-polecat" }}`,
 			end:    `{{ define "propulsion-refinery" }}`,
-			want:   "{{ .AssignedInProgressQuery }}",
+			want:   assignedInProgressTemplate,
 			forbid: []string{`gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress`},
 		},
 		{
 			rel:    "packs/gastown/template-fragments/propulsion.template.md",
 			start:  `{{ define "propulsion-refinery" }}`,
 			end:    `{{ define "propulsion-dog" }}`,
-			want:   "{{ .AssignedInProgressQuery }}",
+			want:   assignedInProgressTemplate,
 			forbid: []string{`gc bd list --assignee="$GC_ALIAS" --status=in_progress`},
 		},
 		{
-			rel:    "packs/maintenance/template-fragments/propulsion.template.md",
+			rel:    "packs/gastown/template-fragments/propulsion.template.md",
 			start:  `{{ define "propulsion-mayor" }}`,
 			end:    `{{ define "propulsion-crew" }}`,
-			want:   "{{ .AssignedInProgressQuery }}",
+			want:   assignedInProgressTemplate,
 			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
 		},
 		{
-			rel:    "packs/maintenance/template-fragments/propulsion.template.md",
+			rel:    "packs/gastown/template-fragments/propulsion.template.md",
 			start:  `{{ define "propulsion-crew" }}`,
 			end:    `{{ define "propulsion-deacon" }}`,
-			want:   "{{ .AssignedInProgressQuery }}",
+			want:   assignedInProgressTemplate,
 			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
 		},
 		{
-			rel:    "packs/maintenance/template-fragments/propulsion.template.md",
+			rel:    "packs/gastown/template-fragments/propulsion.template.md",
 			start:  `{{ define "propulsion-deacon" }}`,
 			end:    `{{ define "propulsion-witness" }}`,
-			want:   "{{ .AssignedInProgressQuery }}",
+			want:   assignedInProgressTemplate,
 			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
 		},
 		{
-			rel:    "packs/maintenance/template-fragments/propulsion.template.md",
+			rel:    "packs/gastown/template-fragments/propulsion.template.md",
 			start:  `{{ define "propulsion-witness" }}`,
 			end:    `{{ define "propulsion-polecat" }}`,
-			want:   "{{ .AssignedInProgressQuery }}",
+			want:   assignedInProgressTemplate,
 			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
 		},
 		{
-			rel:    "packs/maintenance/template-fragments/propulsion.template.md",
+			rel:    "packs/gastown/template-fragments/propulsion.template.md",
 			start:  `{{ define "propulsion-polecat" }}`,
 			end:    `{{ define "propulsion-refinery" }}`,
-			want:   "{{ .AssignedInProgressQuery }}",
+			want:   assignedInProgressTemplate,
 			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
 		},
 		{
-			rel:    "packs/maintenance/template-fragments/propulsion.template.md",
+			rel:    "packs/gastown/template-fragments/propulsion.template.md",
 			start:  `{{ define "propulsion-refinery" }}`,
 			end:    `{{ define "propulsion-dog" }}`,
-			want:   "{{ .AssignedInProgressQuery }}",
+			want:   assignedInProgressTemplate,
 			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
 		},
 		{
-			rel:     "packs/gastown/agents/polecat/prompt.template.md",
-			start:   "## Startup Protocol",
-			end:     "## Context Exhaustion",
-			want:    "{{ .AssignedInProgressQuery }}",
-			forbid:  []string{`gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress`},
-			render:  true,
-			agent:   "gastown/polecat",
-			tmpl:    "polecat",
-			rig:     "gastown",
-			binding: "gastown.",
+			rel:            "packs/gastown/agents/polecat/prompt.template.md",
+			start:          "## Startup Protocol",
+			end:            "## Context Exhaustion",
+			want:           assignedInProgressTemplate,
+			alternateWants: []string{hookClaimJSON},
+			forbid:         []string{`gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress`},
+			render:         true,
+			renderedWants:  []string{assignedInProgressRendered, hookClaimJSON},
+			agent:          "gastown/polecat",
+			tmpl:           "polecat",
+			rig:            "gastown",
+			binding:        "gastown.",
 		},
 		{
 			rel:     "packs/gastown/agents/deacon/prompt.template.md",
 			start:   "## Startup Protocol",
 			end:     "**Hook ->",
-			want:    "{{ .AssignedInProgressQuery }}",
+			want:    assignedInProgressTemplate,
 			forbid:  []string{`gc bd list --assignee="$GC_ALIAS" --status=in_progress`},
 			render:  true,
 			agent:   "gastown/deacon",
@@ -2088,23 +2252,16 @@ func TestNonDogStartupPromptsUseAssignedInProgressQuery(t *testing.T) {
 			rig:     "gastown",
 			binding: "gastown.",
 		},
-		{
-			rel:     "packs/gastown/agents/witness/prompt.template.md",
-			start:   "## Startup Protocol",
-			end:     "**Hook ->",
-			want:    "{{ .AssignedInProgressQuery }}",
-			forbid:  []string{`gc bd list --assignee="$GC_ALIAS" --status=in_progress`},
-			render:  true,
-			agent:   "gastown/witness",
-			tmpl:    "witness",
-			rig:     "gastown",
-			binding: "gastown.",
-		},
+		// The witness Startup Protocol deliberately does NOT use the shared
+		// AssignedInProgressQuery: its patrol wisps live on the town ledger
+		// and must be found with `gc bd`, not the bare-bd shared query that
+		// resolves to the rig ledger. Its startup/no-idle wisp reconciliation
+		// is covered by TestWitnessStartupAndNoIdleReconcileWisps.
 		{
 			rel:     "packs/gastown/agents/refinery/prompt.template.md",
 			start:   "# Step 1: Check for an in-progress patrol wisp",
 			end:     "Then follow the formula.",
-			want:    "{{ .AssignedInProgressQuery }}",
+			want:    assignedInProgressTemplate,
 			forbid:  []string{`gc bd list --assignee="$GC_AGENT" --status=in_progress`},
 			render:  true,
 			agent:   "gastown/refinery",
@@ -2115,13 +2272,14 @@ func TestNonDogStartupPromptsUseAssignedInProgressQuery(t *testing.T) {
 	}
 	for _, check := range checks {
 		t.Run(check.rel+"/"+check.start, func(t *testing.T) {
-			data, err := os.ReadFile(filepath.Join(dir, check.rel))
+			data, err := os.ReadFile(gastownRel(check.rel))
 			if err != nil {
 				t.Fatalf("reading %s: %v", check.rel, err)
 			}
 			body := sectionBetween(t, string(data), check.start, check.end)
-			if !strings.Contains(body, check.want) {
-				t.Fatalf("%s section %q missing %q", check.rel, check.start, check.want)
+			acceptedWants := append([]string{check.want}, check.alternateWants...)
+			if !containsAny(body, acceptedWants...) {
+				t.Fatalf("%s section %q missing one of %q", check.rel, check.start, acceptedWants)
 			}
 			for _, forbidden := range check.forbid {
 				if strings.Contains(body, forbidden) {
@@ -2132,13 +2290,112 @@ func TestNonDogStartupPromptsUseAssignedInProgressQuery(t *testing.T) {
 				return
 			}
 			rendered := renderGastownPromptForPack(t, check.rel, check.agent, check.tmpl, "demo", check.rig, check.binding)
-			if strings.Contains(rendered, check.want) {
+			if strings.HasPrefix(check.want, "{{") && strings.Contains(rendered, check.want) {
 				t.Fatalf("%s rendered prompt still contains %q", check.rel, check.want)
 			}
-			if !strings.Contains(rendered, `bd list --include-ephemeral --status in_progress --assignee="$GC_SESSION_ID"`) {
-				t.Fatalf("%s rendered prompt missing compatibility-aware in-progress query: %q", check.rel, rendered)
+			renderedWants := check.renderedWants
+			if len(renderedWants) == 0 {
+				renderedWants = []string{assignedInProgressRendered}
+			}
+			if !containsAny(rendered, renderedWants...) {
+				t.Fatalf("%s rendered prompt missing compatibility-aware in-progress query; want one of %q: %q", check.rel, renderedWants, rendered)
 			}
 		})
+	}
+}
+
+func TestPolecatStartupUsesHookClaim(t *testing.T) {
+	rel := "packs/gastown/agents/polecat/prompt.template.md"
+	data, err := os.ReadFile(gastownRel(rel))
+	if err != nil {
+		t.Fatalf("reading %s: %v", rel, err)
+	}
+	body := sectionBetween(t, string(data), "## Startup Protocol", "## Context Exhaustion")
+	for _, want := range []string{
+		"gc hook --claim --json",
+		"checks assigned work first",
+		"performs the atomic",
+		"claim before you inspect the bead",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("%s Startup Protocol missing %q", rel, want)
+		}
+	}
+	for _, forbidden := range []string{
+		"{{ .AssignedInProgressQuery }}",
+		"{{ .WorkQuery }}",
+		`gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress`,
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("%s Startup Protocol still contains stale direct query/claim %q", rel, forbidden)
+		}
+	}
+
+	rendered := renderGastownPromptForPack(t, rel, "gastown/polecat", "polecat", "demo", "gastown", "gastown.")
+	if strings.Contains(rendered, "{{ .") {
+		t.Fatalf("%s rendered prompt still contains template placeholders: %q", rel, rendered)
+	}
+	if !strings.Contains(rendered, "gc hook --claim --json") {
+		t.Fatalf("%s rendered prompt missing hook claim: %q", rel, rendered)
+	}
+}
+
+// TestWitnessStartupAndNoIdleReconcileWisps is the regression guard for the
+// town-wide witness wisp leak (ga-7c6). The witness's patrol wisps are
+// ephemeral molecules on the town ledger, poured/assigned with `gc bd`. Its
+// startup work-check and no-idle guard must therefore (1) look them up with
+// `gc bd`, not the bare-bd shared query that resolves to the rig ledger and
+// never sees them; (2) filter `--type=molecule`, never the invalid
+// `--type=wisp` (not a valid bd issue type — the query errors and matches
+// nothing); and (3) reconcile duplicates to exactly one by burning the
+// surplus, so restarts never accumulate wisps.
+func TestWitnessStartupAndNoIdleReconcileWisps(t *testing.T) {
+	rendered := renderGastownPromptForPack(t,
+		"packs/gastown/agents/witness/prompt.template.md",
+		"gastown/witness", "witness", "demo", "gastown", "gastown.")
+
+	// Bug 2: no `gc bd` command may filter --type=wisp — it is not a valid bd
+	// issue type, so the query errors and matches nothing (prose warning
+	// against it is fine; an actual command is the bug).
+	for _, line := range strings.Split(rendered, "\n") {
+		if strings.Contains(line, "gc bd") && strings.Contains(line, "--type=wisp") {
+			t.Errorf("witness prompt runs a gc bd command with invalid --type=wisp (matches nothing -> duplicate wisps): %q", line)
+		}
+	}
+
+	// Startup work-check: between "## Startup Protocol" and "**Hook ->".
+	startup := sectionBetween(t, rendered, "## Startup Protocol", "**Hook ->")
+	// Bug 1: must not run the bare-bd shared query (rig ledger) in startup.
+	for _, bare := range []string{
+		`bd list --include-ephemeral --status in_progress --assignee="$GC_SESSION_ID"`,
+		"{{ .AssignedInProgressQuery }}",
+	} {
+		if strings.Contains(startup, bare) {
+			t.Errorf("witness startup must not use the bare-bd shared query %q; patrol wisps live on the town ledger via gc bd", bare)
+		}
+	}
+	// Must look up its own wisps on the town ledger with gc bd + --type=molecule,
+	// then reconcile to one by burning surplus.
+	for _, want := range []string{
+		`gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule`,
+		`gc bd list --assignee="$GC_AGENT" --status=open --type=molecule`,
+		"gc bd mol burn",
+	} {
+		if !strings.Contains(startup, want) {
+			t.Errorf("witness startup missing %q", want)
+		}
+	}
+
+	// No-idle guard: between its heading and "## Context Exhaustion".
+	noIdle := sectionBetween(t, rendered, "## CRITICAL: No Idle State Between Cycles", "## Context Exhaustion")
+	for _, want := range []string{
+		`gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule`,
+		`gc bd list --assignee="$GC_AGENT" --status=open --type=molecule`,
+		"gc bd mol burn",
+	} {
+		if !strings.Contains(noIdle, want) {
+			t.Errorf("witness no-idle guard missing %q", want)
+		}
 	}
 }
 
@@ -2214,7 +2471,7 @@ func TestGastownRigTargetShellExpressionsRenderForRigAndHQ(t *testing.T) {
 }
 
 func TestGastownRefineryPatrolRejectionCommandsReturnWorkToPolecatPool(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join(exampleDir(), "packs/gastown/formulas/mol-refinery-patrol.toml"))
+	data, err := os.ReadFile(gastownRel("packs/gastown/formulas/mol-refinery-patrol.toml"))
 	if err != nil {
 		t.Fatalf("reading mol-refinery-patrol.toml: %v", err)
 	}
@@ -2532,7 +2789,6 @@ func TestGastownPromptPeerAddressesUseBindingPrefix(t *testing.T) {
 }
 
 func TestGastownPatrolWispCommandsPropagateRoutingNamespace(t *testing.T) {
-	dir := exampleDir()
 	checks := []struct {
 		rel     string
 		formula string
@@ -2570,7 +2826,7 @@ func TestGastownPatrolWispCommandsPropagateRoutingNamespace(t *testing.T) {
 		},
 	}
 	for _, check := range checks {
-		data, err := os.ReadFile(filepath.Join(dir, check.rel))
+		data, err := os.ReadFile(gastownRel(check.rel))
 		if err != nil {
 			t.Fatalf("reading %s: %v", check.rel, err)
 		}
@@ -2596,7 +2852,7 @@ func TestGastownPatrolWispCommandsPropagateRoutingNamespace(t *testing.T) {
 		"packs/gastown/formulas/mol-refinery-patrol.toml",
 		"packs/gastown/formulas/mol-witness-patrol.toml",
 	} {
-		data, err := os.ReadFile(filepath.Join(dir, rel))
+		data, err := os.ReadFile(gastownRel(rel))
 		if err != nil {
 			t.Fatalf("reading %s: %v", rel, err)
 		}
@@ -2635,46 +2891,69 @@ func TestGastownPatrolPromptFallbackPreservesLifecycle(t *testing.T) {
 		agentName string
 		template  string
 		formula   string
-		pourLine  string
+		wantOrder []string
 	}{
 		{
 			rel:       "packs/gastown/agents/deacon/prompt.template.md",
 			agentName: "gascity/gastown.deacon",
 			template:  "deacon",
 			formula:   "mol-deacon-patrol",
-			pourLine:  `NEXT=$(gc bd mol wisp mol-deacon-patrol --root-only --var binding_prefix=gastown. --json | jq -r '.new_epic_id // empty')`,
+			wantOrder: []string{
+				`run ` + "`gc hook`" + ` immediately`,
+				`CURRENT_WISP=${GC_BEAD_ID:-}`,
+				`if [ -z "$CURRENT_WISP" ]; then`,
+				`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
+				`ASSIGNED_WISP=$(gc bd list --assignee="$GC_AGENT" --status=open --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
+				`if [ -n "$CURRENT_WISP" ] && [ -z "$ASSIGNED_WISP" ]; then`,
+				`NEXT=$(gc bd mol wisp mol-deacon-patrol --root-only --var binding_prefix=gastown. --json | jq -r '.new_epic_id // empty')`,
+				`if [ -z "$NEXT" ]; then`,
+				`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,
+				`gc bd mol burn "$CURRENT_WISP" --force`,
+				`elif [ -n "$CURRENT_WISP" ]; then`,
+				`gc bd mol burn "$CURRENT_WISP" --force`,
+				`elif [ -z "$ASSIGNED_WISP" ]; then`,
+				`NEXT=$(gc bd mol wisp mol-deacon-patrol --root-only --var binding_prefix=gastown. --json | jq -r '.new_epic_id // empty')`,
+				`if [ -z "$NEXT" ]; then`,
+				`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,
+				`gc hook`,
+			},
 		},
 		{
 			rel:       "packs/gastown/agents/witness/prompt.template.md",
 			agentName: "gascity/gastown.witness",
 			template:  "witness",
 			formula:   "mol-witness-patrol",
-			pourLine:  `NEXT=$(gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='gastown.' --json | jq -r '.new_epic_id // empty')`,
+			// The witness no-idle guard finds its own patrol wisps with
+			// --type=molecule (never the invalid --type=wisp) and reconciles
+			// surplus open wisps to exactly one by burning extras (ga-7c6).
+			wantOrder: []string{
+				`run ` + "`gc hook`" + ` immediately`,
+				`CURRENT_WISP=${GC_BEAD_ID:-}`,
+				`if [ -z "$CURRENT_WISP" ]; then`,
+				`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --limit=1 --json | jq -r '.[0].id // empty')`,
+				`OPEN_WISPS=$(gc bd list --assignee="$GC_AGENT" --status=open --type=molecule --limit=0 --json | jq -r '.[].id')`,
+				`ASSIGNED_WISP=$(printf '%s\n' $OPEN_WISPS | sed -n '1p')`,
+				`gc bd mol burn "$extra" --force`,
+				`if [ -n "$CURRENT_WISP" ] && [ -z "$ASSIGNED_WISP" ]; then`,
+				`NEXT=$(gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='gastown.' --json | jq -r '.new_epic_id // empty')`,
+				`if [ -z "$NEXT" ]; then`,
+				`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,
+				`gc bd mol burn "$CURRENT_WISP" --force`,
+				`elif [ -n "$CURRENT_WISP" ]; then`,
+				`gc bd mol burn "$CURRENT_WISP" --force`,
+				`elif [ -z "$ASSIGNED_WISP" ]; then`,
+				`NEXT=$(gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='gastown.' --json | jq -r '.new_epic_id // empty')`,
+				`if [ -z "$NEXT" ]; then`,
+				`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,
+				`gc hook`,
+			},
 		},
 	}
 
 	for _, check := range checks {
 		body := renderGastownPromptForPack(t, check.rel, check.agentName, check.template, "gascity", "gastown", "gastown.")
 		section := sectionBetween(t, body, "## CRITICAL: No Idle State Between Cycles", "## Context Exhaustion")
-		assertContainsInOrder(t, section,
-			`run `+"`gc hook`"+` immediately`,
-			`CURRENT_WISP=${GC_BEAD_ID:-}`,
-			`if [ -z "$CURRENT_WISP" ]; then`,
-			`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
-			`ASSIGNED_WISP=$(gc bd list --assignee="$GC_AGENT" --status=open --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
-			`if [ -n "$CURRENT_WISP" ] && [ -z "$ASSIGNED_WISP" ]; then`,
-			check.pourLine,
-			`if [ -z "$NEXT" ]; then`,
-			`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,
-			`gc bd mol burn "$CURRENT_WISP" --force`,
-			`elif [ -n "$CURRENT_WISP" ]; then`,
-			`gc bd mol burn "$CURRENT_WISP" --force`,
-			`elif [ -z "$ASSIGNED_WISP" ]; then`,
-			check.pourLine,
-			`if [ -z "$NEXT" ]; then`,
-			`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,
-			`gc hook`,
-		)
+		assertContainsInOrder(t, section, check.wantOrder...)
 		for _, bad := range []string{`--assignee="$GC_ALIAS"`, "sleep 5"} {
 			if strings.Contains(section, bad) {
 				t.Fatalf("%s no-idle fallback still contains %q", check.rel, bad)
@@ -2687,13 +2966,12 @@ func TestGastownPatrolPromptFallbackPreservesLifecycle(t *testing.T) {
 }
 
 func TestRefineryPatrolRestartGuidanceAssignsSuccessor(t *testing.T) {
-	dir := exampleDir()
-	promptPath := filepath.Join(dir, "packs", "gastown", "agents", "refinery", "prompt.template.md")
+	promptPath := filepath.Join(packRoot(), "packs", "gastown", "agents", "refinery", "prompt.template.md")
 	promptData, err := os.ReadFile(promptPath)
 	if err != nil {
 		t.Fatalf("reading refinery prompt: %v", err)
 	}
-	formulaPath := filepath.Join(dir, "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
+	formulaPath := filepath.Join(packRoot(), "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
 	formulaData, err := os.ReadFile(formulaPath)
 	if err != nil {
 		t.Fatalf("reading refinery formula: %v", err)
@@ -2909,8 +3187,7 @@ func TestGastownPromptRoutedToHandoffIsFullyQualifiedUnderBinding(t *testing.T) 
 }
 
 func TestGastownFormulasUsingBindingPrefixDefaultToUnbound(t *testing.T) {
-	dir := exampleDir()
-	paths, err := filepath.Glob(filepath.Join(dir, "packs", "gastown", "formulas", "*.toml"))
+	paths, err := filepath.Glob(filepath.Join(packRoot(), "packs", "gastown", "formulas", "*.toml"))
 	if err != nil {
 		t.Fatalf("glob gastown formulas: %v", err)
 	}
@@ -2959,8 +3236,7 @@ func TestBootPromptMatchesNamedSessionLifecycle(t *testing.T) {
 		t.Fatalf("boot agent wake_mode = %q, want %q because prompt documents fresh provider context", got, "fresh")
 	}
 
-	dir := exampleDir()
-	path := filepath.Join(dir, "packs", "gastown", "agents", "boot", "prompt.template.md")
+	path := filepath.Join(packRoot(), "packs", "gastown", "agents", "boot", "prompt.template.md")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading boot prompt: %v", err)
@@ -2999,8 +3275,7 @@ func TestBootPromptMatchesNamedSessionLifecycle(t *testing.T) {
 }
 
 func TestIdeaToPlanFormulaUsesSupportedPrimitives(t *testing.T) {
-	dir := exampleDir()
-	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-idea-to-plan.toml")
+	path := filepath.Join(packRoot(), "packs", "gastown", "formulas", "mol-idea-to-plan.toml")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading idea-to-plan formula: %v", err)
@@ -3022,8 +3297,7 @@ func TestIdeaToPlanFormulaUsesSupportedPrimitives(t *testing.T) {
 }
 
 func TestReviewLegFormulaPersistsReportAndNotifiesCoordinator(t *testing.T) {
-	dir := exampleDir()
-	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-review-leg.toml")
+	path := filepath.Join(packRoot(), "packs", "gastown", "formulas", "mol-review-leg.toml")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading review-leg formula: %v", err)
@@ -3105,8 +3379,7 @@ func witnessStateIsOrphanedForTest(state string) (bool, bool) {
 }
 
 func TestWitnessPatrolLivenessProcedureUsesExactSessionIdentity(t *testing.T) {
-	dir := exampleDir()
-	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-witness-patrol.toml")
+	path := filepath.Join(packRoot(), "packs", "gastown", "formulas", "mol-witness-patrol.toml")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading witness patrol formula: %v", err)
@@ -3173,8 +3446,7 @@ func TestWitnessPatrolLivenessProcedureUsesExactSessionIdentity(t *testing.T) {
 }
 
 func TestWitnessPatrolStateClassificationCoversSessionStates(t *testing.T) {
-	dir := exampleDir()
-	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-witness-patrol.toml")
+	path := filepath.Join(packRoot(), "packs", "gastown", "formulas", "mol-witness-patrol.toml")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading witness patrol formula: %v", err)
@@ -3221,8 +3493,7 @@ func TestWitnessPatrolStateClassificationCoversSessionStates(t *testing.T) {
 // terminal ("Exit criteria: no orphans found.") leaks wisps when an LLM
 // treats the early-exit as a terminal instruction.
 func TestWitnessPatrolAllStepsContinueNotExit(t *testing.T) {
-	dir := exampleDir()
-	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-witness-patrol.toml")
+	path := filepath.Join(packRoot(), "packs", "gastown", "formulas", "mol-witness-patrol.toml")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading witness patrol formula: %v", err)
@@ -3269,8 +3540,7 @@ func TestWitnessPatrolAllStepsContinueNotExit(t *testing.T) {
 }
 
 func TestAllFormulasExist(t *testing.T) {
-	dir := exampleDir()
-	formulaDir := filepath.Join(dir, "packs", "gastown", "formulas")
+	formulaDir := filepath.Join(packRoot(), "packs", "gastown", "formulas")
 
 	entries, err := os.ReadDir(formulaDir)
 	if err != nil {
@@ -3305,8 +3575,7 @@ func TestAllFormulasExist(t *testing.T) {
 // grammar, and we want any new TOML file added under packs/ to be
 // covered automatically without remembering to update this test.
 func TestAllPackTomlsParse(t *testing.T) {
-	dir := exampleDir()
-	packsRoot := filepath.Join(dir, "packs")
+	packsRoot := filepath.Join(packRoot(), "packs")
 
 	var count int
 	err := filepath.Walk(packsRoot, func(path string, info os.FileInfo, err error) error {
@@ -3352,8 +3621,8 @@ func TestAllPromptTemplatesExist(t *testing.T) {
 		}
 	}
 
-	if count != 6 {
-		t.Errorf("found %d prompt templates, want 6", count)
+	if count != 7 {
+		t.Errorf("found %d prompt templates, want 7", count)
 	}
 }
 
@@ -3382,8 +3651,7 @@ func TestFormulasDir(t *testing.T) {
 		t.Fatal("FormulaLayers.City is empty, want pack formulas layers")
 	}
 	wantSuffixes := []string{
-		filepath.Join("packs", "maintenance", "formulas"),
-		filepath.Join("packs", "gastown", "formulas"),
+		filepath.Join("gastown", "formulas"),
 	}
 	for _, suffix := range wantSuffixes {
 		found := false
@@ -3397,6 +3665,11 @@ func TestFormulasDir(t *testing.T) {
 			t.Errorf("FormulaLayers.City = %v, want entry ending with %s", cfg.FormulaLayers.City, suffix)
 		}
 	}
+	for _, d := range cfg.FormulaLayers.City {
+		if strings.HasSuffix(d, filepath.Join("maintenance", "formulas")) {
+			t.Errorf("FormulaLayers.City = %v, want no retired maintenance formula layer", cfg.FormulaLayers.City)
+		}
+	}
 }
 
 func TestPackDirsPopulated(t *testing.T) {
@@ -3404,20 +3677,17 @@ func TestPackDirsPopulated(t *testing.T) {
 	if len(cfg.PackDirs) == 0 {
 		t.Fatal("PackDirs is empty after expansion")
 	}
-	// Should have pack dirs from maintenance and gastown packs.
-	// Note: bd/dolt packs are auto-included at runtime by builtinPackIncludes,
-	// not via pack.toml includes, so they won't appear in static expansion.
-	var hasMaintenance, hasGastown bool
+	// Should have the gastown pack dir. Note: builtin packs (core, bd, dolt)
+	// compose via the explicit city.toml includes that gc init writes, so
+	// they won't appear in this example's static expansion.
+	var hasGastown bool
 	for _, d := range cfg.PackDirs {
-		if strings.HasSuffix(d, filepath.Join("packs", "maintenance")) {
-			hasMaintenance = true
+		if filepath.Base(d) == "maintenance" {
+			t.Errorf("PackDirs = %v, want no retired maintenance pack dir", cfg.PackDirs)
 		}
-		if strings.HasSuffix(d, filepath.Join("packs", "gastown")) {
+		if filepath.Base(d) == "gastown" {
 			hasGastown = true
 		}
-	}
-	if !hasMaintenance {
-		t.Errorf("PackDirs missing maintenance: %v", cfg.PackDirs)
 	}
 	if !hasGastown {
 		t.Errorf("PackDirs missing gastown: %v", cfg.PackDirs)
@@ -3478,7 +3748,7 @@ type packFileConfig struct {
 
 func discoverPackAgents(t *testing.T, rel string) []config.Agent {
 	t.Helper()
-	packDir := filepath.Join(exampleDir(), rel)
+	packDir := filepath.Join(packRoot(), rel)
 	agents, err := config.DiscoverPackAgents(fsys.OSFS{}, packDir, filepath.Base(rel), nil)
 	if err != nil {
 		t.Fatalf("DiscoverPackAgents(%s): %v", rel, err)
@@ -3494,8 +3764,7 @@ func resolveExamplePath(base, candidate string) string {
 }
 
 func TestCombinedPackParses(t *testing.T) {
-	dir := exampleDir()
-	topoPath := filepath.Join(dir, "packs", "gastown", "pack.toml")
+	topoPath := filepath.Join(packRoot(), "packs", "gastown", "pack.toml")
 
 	data, err := os.ReadFile(topoPath)
 	if err != nil {
@@ -3514,22 +3783,19 @@ func TestCombinedPackParses(t *testing.T) {
 		t.Errorf("[pack] schema = %d, want 2", tc.Pack.Schema)
 	}
 	if len(tc.Pack.Includes) != 0 {
-		t.Fatalf("pack includes = %v, want empty (migrated to [imports.maintenance])", tc.Pack.Includes)
+		t.Fatalf("pack includes = %v, want empty", tc.Pack.Includes)
 	}
-	maintImp, ok := tc.Imports["maintenance"]
-	if !ok {
-		t.Fatalf("pack imports = %v, want entry for \"maintenance\"", tc.Imports)
-	}
-	if maintImp.Source != "../maintenance" {
-		t.Errorf("pack imports[\"maintenance\"].Source = %q, want %q", maintImp.Source, "../maintenance")
+	if len(tc.Imports) != 0 {
+		t.Fatalf("pack imports = %v, want none (gastown owns its agents; core housekeeping is builtin)", tc.Imports)
 	}
 
-	// Expect 6 locally-discovered agents. Dog comes from the maintenance import
-	// and is themed via a pack patch, not a local agent file.
+	// Expect 7 locally-discovered agents. The dog utility pool is owned by
+	// this pack — the maintenance fallback dog was removed.
 	agents := discoverPackAgents(t, filepath.Join("packs", "gastown"))
 	want := map[string]bool{
 		"mayor": false, "deacon": false, "boot": false,
 		"witness": false, "refinery": false, "polecat": false,
+		"dog": false,
 	}
 	for _, a := range agents {
 		if _, ok := want[a.Name]; ok {
@@ -3543,8 +3809,8 @@ func TestCombinedPackParses(t *testing.T) {
 			t.Errorf("missing pack agent %q", name)
 		}
 	}
-	if len(agents) != 6 {
-		t.Errorf("pack has %d locally-discovered agents, want 6", len(agents))
+	if len(agents) != 7 {
+		t.Errorf("pack has %d locally-discovered agents, want 7", len(agents))
 	}
 
 	// Verify city-scoped agents have scope = "city".
@@ -3562,6 +3828,7 @@ func TestPackUsesIsolatedWorkDirs(t *testing.T) {
 		"mayor":    ".gc/agents/mayor",
 		"deacon":   ".gc/agents/deacon",
 		"boot":     ".gc/agents/boot",
+		"dog":      ".gc/agents/dogs/{{.AgentBase}}",
 		"witness":  ".gc/agents/{{.Rig}}/witness",
 		"refinery": ".gc/worktrees/{{.Rig}}/refinery",
 		"polecat":  ".gc/worktrees/{{.Rig}}/polecats/{{.AgentBase}}",
@@ -3586,11 +3853,14 @@ func TestPackPromptFilesExist(t *testing.T) {
 
 func TestCityAgentsFilter(t *testing.T) {
 	// Verify config.LoadWithIncludes with both packs produces
-	// only city-scoped agents when no rigs are registered.
-	// Effective dog from gastown override + mayor/deacon/boot = 4.
+	// only city-scoped agents when no rigs are registered:
+	// mayor/deacon/boot + the gastown dog pool + the dolt maintenance dog
+	// contributed by the composed builtin bd pack + the core control dispatcher
+	// = 6. The two dogs keep distinct binding-qualified identities
+	// (gastown.dog vs bd.dog).
 	cfg := loadExpanded(t)
 
-	cityAgents := map[string]bool{"mayor": true, "deacon": true, "boot": true, "dog": true}
+	cityAgents := map[string]bool{"mayor": true, "deacon": true, "boot": true, "dog": true, "control-dispatcher": true}
 	var explicit int
 	for _, a := range cfg.Agents {
 		if a.Implicit {
@@ -3604,34 +3874,33 @@ func TestCityAgentsFilter(t *testing.T) {
 			t.Errorf("city agent %q: dir = %q, want empty", a.Name, a.Dir)
 		}
 	}
-	if explicit != 4 {
-		t.Errorf("got %d explicit agents, want 4 city-scoped agents", explicit)
+	if explicit != 6 {
+		t.Errorf("got %d explicit agents, want 6 city-scoped agents (incl. both dogs and control-dispatcher)", explicit)
 	}
 }
 
-func TestExpandedCityUsesGastownDogOverride(t *testing.T) {
+func TestExpandedCityUsesGastownDog(t *testing.T) {
 	cfg := loadExpanded(t)
 
 	var dog *config.Agent
 	for i := range cfg.Agents {
-		if cfg.Agents[i].Name == "dog" && !cfg.Agents[i].Implicit {
+		if cfg.Agents[i].Name == "dog" && !cfg.Agents[i].Implicit && cfg.Agents[i].BindingName == "gastown" {
 			dog = &cfg.Agents[i]
 			break
 		}
 	}
 	if dog == nil {
-		t.Fatal("expected explicit dog agent in expanded gastown config")
+		t.Fatal("expected explicit gastown-bound dog agent in expanded gastown config")
 	}
 	if dog.WorkDir != ".gc/agents/dogs/{{.AgentBase}}" {
 		t.Errorf("dog work_dir = %q, want gastown themed work dir", dog.WorkDir)
 	}
-	wantPromptSuffix := filepath.Join("packs", "maintenance", "agents", "dog", "prompt.template.md")
+	wantPromptSuffix := filepath.Join("gastown", "agents", "dog", "prompt.template.md")
 	if !strings.HasSuffix(dog.PromptTemplate, wantPromptSuffix) {
 		t.Errorf("dog prompt_template = %q, want suffix %q", dog.PromptTemplate, wantPromptSuffix)
 	}
-	wantOverlaySuffix := filepath.Join("packs", "maintenance", "agents", "dog", "overlay")
-	if !strings.HasSuffix(dog.OverlayDir, wantOverlaySuffix) {
-		t.Errorf("dog overlay_dir = %q, want suffix %q", dog.OverlayDir, wantOverlaySuffix)
+	if dog.OverlayDir != "" {
+		t.Errorf("dog overlay_dir = %q, want empty (pack-local dog ships no overlay)", dog.OverlayDir)
 	}
 	if len(dog.SessionLive) != 2 {
 		t.Fatalf("dog session_live has %d entries, want 2 gastown theming commands", len(dog.SessionLive))
@@ -3644,78 +3913,9 @@ func TestExpandedCityUsesGastownDogOverride(t *testing.T) {
 	}
 }
 
-func TestMaintenancePackParses(t *testing.T) {
-	dir := exampleDir()
-	topoPath := filepath.Join(dir, "packs", "maintenance", "pack.toml")
-
-	data, err := os.ReadFile(topoPath)
-	if err != nil {
-		t.Fatalf("reading pack.toml: %v", err)
-	}
-
-	var tc packFileConfig
-	if _, err := toml.Decode(string(data), &tc); err != nil {
-		t.Fatalf("parsing pack.toml: %v", err)
-	}
-
-	if tc.Pack.Name != "maintenance" {
-		t.Errorf("[pack] name = %q, want %q", tc.Pack.Name, "maintenance")
-	}
-	if tc.Pack.Schema != 2 {
-		t.Errorf("[pack] schema = %d, want 2", tc.Pack.Schema)
-	}
-
-	agents := discoverPackAgents(t, filepath.Join("packs", "maintenance"))
-	// Maintenance has 1 agent: dog.
-	if len(agents) != 1 {
-		t.Errorf("pack has %d agents, want 1", len(agents))
-	}
-	if len(agents) > 0 && agents[0].Name != "dog" {
-		t.Errorf("agent name = %q, want %q", agents[0].Name, "dog")
-	}
-
-	// Verify dog agent has scope = "city".
-	if len(agents) > 0 && agents[0].Scope != "city" {
-		t.Errorf("dog scope = %q, want %q", agents[0].Scope, "city")
-	}
-
-	// Verify prompt file exists.
-	for _, a := range agents {
-		if a.PromptTemplate == "" {
-			continue
-		}
-		if _, err := os.Stat(a.PromptTemplate); err != nil {
-			t.Errorf("agent %q: prompt_template %q: %v", a.Name, a.PromptTemplate, err)
-		}
-	}
-}
-
-func TestMaintenanceFormulasExist(t *testing.T) {
-	dir := exampleDir()
-	formulaDir := filepath.Join(dir, "packs", "maintenance", "formulas")
-
-	entries, err := os.ReadDir(formulaDir)
-	if err != nil {
-		t.Fatalf("reading formulas dir: %v", err)
-	}
-
-	var count int
-	for _, e := range entries {
-		if e.IsDir() || !formula.IsTOMLFilename(e.Name()) {
-			continue
-		}
-		count++
-	}
-
-	// 3 formulas: mol-shutdown-dance + mol-dog-jsonl + mol-dog-reaper
-	if count != 3 {
-		t.Errorf("found %d formula files, want 3", count)
-	}
-}
-
 func TestDoltHealthFormulasExist(t *testing.T) {
 	dir := exampleDir()
-	formulaDir := filepath.Join(dir, "..", "dolt", "formulas")
+	formulaDir := filepath.Join(dir, "..", "bd", "dolt", "formulas")
 
 	entries, err := os.ReadDir(formulaDir)
 	if err != nil {
@@ -3740,8 +3940,7 @@ func TestDoltHealthFormulasExist(t *testing.T) {
 // stuck self-polling refinery is flagged even when its patrol wisp is
 // cycling fresh. See upstream #1833.
 func TestDeaconPatrolDetectsQueueStarvation(t *testing.T) {
-	dir := exampleDir()
-	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-deacon-patrol.toml")
+	path := filepath.Join(packRoot(), "packs", "gastown", "formulas", "mol-deacon-patrol.toml")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading deacon formula: %v", err)
@@ -3774,9 +3973,8 @@ func TestDeaconPatrolDetectsQueueStarvation(t *testing.T) {
 	)
 }
 
-func TestDeaconPatrolNextIterationBurnsCurrentBeforeBackoff(t *testing.T) {
-	dir := exampleDir()
-	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-deacon-patrol.toml")
+func TestDeaconPatrolNextIterationBurnsCurrentBeforeIdleExit(t *testing.T) {
+	path := filepath.Join(packRoot(), "packs", "gastown", "formulas", "mol-deacon-patrol.toml")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading deacon formula: %v", err)
@@ -3793,11 +3991,16 @@ func TestDeaconPatrolNextIterationBurnsCurrentBeforeBackoff(t *testing.T) {
 		`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,
 		`if [ -n "$CURRENT_WISP" ]; then`,
 		`gc bd mol burn "$CURRENT_WISP" --force`,
-		`sleep {{event_timeout}}`,
-		`gc hook`,
+		`IDLE: no work, exiting turn.`,
 	)
 	if strings.Contains(section, "<this-wisp-id>") {
 		t.Fatal("next-iteration still uses placeholder burn target")
+	}
+	if strings.Contains(section, "sleep {{event_timeout}}") {
+		t.Fatal("next-iteration still contains sleep backoff — should use clean idle exit")
+	}
+	if strings.Contains(section, "gc hook") {
+		t.Fatal("next-iteration still calls gc hook — should use clean idle exit")
 	}
 }
 
@@ -3807,8 +4010,7 @@ func TestDeaconPatrolNextIterationBurnsCurrentBeforeBackoff(t *testing.T) {
 // can be empty or stale, which was the root cause of the stuck self-poll
 // reported in upstream #1833.
 func TestRefineryPromptUsesCanonicalAgentIdentity(t *testing.T) {
-	dir := exampleDir()
-	path := filepath.Join(dir, "packs", "gastown", "agents", "refinery", "prompt.template.md")
+	path := filepath.Join(packRoot(), "packs", "gastown", "agents", "refinery", "prompt.template.md")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading refinery prompt: %v", err)
@@ -3835,15 +4037,14 @@ func TestRefineryPromptUsesCanonicalAgentIdentity(t *testing.T) {
 // TestRefineryAssignedWorkQueriesUsePortableRigScope verifies every refinery
 // work-bead lookup added for rig scope uses an attached --rig=value token.
 func TestRefineryAssignedWorkQueriesUsePortableRigScope(t *testing.T) {
-	dir := exampleDir()
-	promptPath := filepath.Join(dir, "packs", "gastown", "agents", "refinery", "prompt.template.md")
+	promptPath := filepath.Join(packRoot(), "packs", "gastown", "agents", "refinery", "prompt.template.md")
 	promptData, err := os.ReadFile(promptPath)
 	if err != nil {
 		t.Fatalf("reading refinery prompt: %v", err)
 	}
 	prompt := string(promptData)
 
-	formulaPath := filepath.Join(dir, "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
+	formulaPath := filepath.Join(packRoot(), "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
 	formulaData, err := os.ReadFile(formulaPath)
 	if err != nil {
 		t.Fatalf("reading refinery formula: %v", err)
@@ -3930,8 +4131,7 @@ func TestAttachedRigScopeShellToken(t *testing.T) {
 // refinery formula fails fast when $GC_AGENT is unset or empty, instead
 // of silently returning no results and looking healthy-idle.
 func TestRefineryFormulaValidatesAgentIdentityAtStartup(t *testing.T) {
-	dir := exampleDir()
-	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
+	path := filepath.Join(packRoot(), "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading refinery formula: %v", err)

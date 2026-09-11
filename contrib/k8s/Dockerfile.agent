@@ -12,19 +12,62 @@
 #   make docker-base docker-agent
 #
 # The gc binary should be built first and placed in the build context root:
-#   go build -o gc ./cmd/gc
+#   CGO_ENABLED=0 go build -o gc ./cmd/gc
 
 # Local build-layer image produced by Dockerfile.base, not a registry pull.
 ARG BASE_IMAGE=gc-agent-base:latest
+
+FROM golang:1.26.6-bookworm@sha256:433f9dc4f8ea3a1ce4e28f9f15d0f7c056b10475307f886d6f1ac1ccc4abd976 AS bd-builder
+
+# BD_VERSION here is the version the source at BD_SOURCE_REF declares, i.e.
+# deps.env BD_CURRENT_VERSION -- not deps.env BD_VERSION, which is the published
+# tarball CI installs and may lag. The `grep Version = "${bd_version}"` below
+# fails the build if this drifts from the fetched source.
+ARG BD_VERSION=v1.3.0-rc.2
+ARG BD_SOURCE_REF=c185735c38e25569277eae798ce363ecba9859e8
+ARG BD_SOURCE_SHA256=3e256519a683b413f7baa9f4d1071084bb2646478faabad9bf3ac7bd05952f43
+ARG BD_BUILD=c185735c38
+ARG BD_BRANCH=HEAD
+ARG GRPC_VERSION=1.83.0
+
+# Rebuild the exact released source with its production CGO/pure-Go-regex
+# configuration and release identity. GRPC_VERSION was an override when the
+# published binary embedded vulnerable grpc-go 1.80.0; beads v1.3.0-rc.2 already
+# requires v1.83.0, so it is now a floor assertion rather than a patch. Keep the
+# `go get` and the trailing `go version -m` check: together they fail the build
+# if a future beads release regresses below this grpc, instead of silently
+# shipping it. Raise GRPC_VERSION with the upstream requirement -- never leave it
+# behind, or the `go get` downgrades the release while the check still passes.
+RUN mkdir -p /src/bd /out \
+    && curl -fsSL --retry 3 \
+       "https://github.com/gastownhall/beads/archive/${BD_SOURCE_REF}.tar.gz" \
+       -o /tmp/bd-source.tar.gz \
+    && echo "${BD_SOURCE_SHA256}  /tmp/bd-source.tar.gz" | sha256sum --check --strict \
+    && tar -xzf /tmp/bd-source.tar.gz --strip-components=1 -C /src/bd \
+    && rm -f /tmp/bd-source.tar.gz
+
+WORKDIR /src/bd
+RUN bd_version="${BD_VERSION#v}" \
+    && grep -Fq "Version = \"${bd_version}\"" cmd/bd/version.go \
+    && go get "google.golang.org/grpc@v${GRPC_VERSION}" \
+    && CGO_ENABLED=1 go build \
+       -tags="gms_pure_go" \
+       -trimpath \
+       -ldflags="-s -w -X main.Version=${bd_version} -X main.Build=${BD_BUILD} -X main.Commit=${BD_SOURCE_REF} -X main.Branch=${BD_BRANCH}" \
+       -o /out/bd \
+       ./cmd/bd \
+    && /out/bd --version | grep -Fq "bd version ${bd_version} (${BD_BUILD})" \
+    && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep google.golang.org/grpc v${GRPC_VERSION} "
+
 FROM ${BASE_IMAGE}
 
 # Build-time copies and ownership fixes require root; the final image drops
 # back to gcagent below.
 USER root
 
-# bd (beads) CLI — copied from build context.
-# Build with: cp $(which bd) . && docker build ...
-COPY bd /usr/local/bin/bd
+# bd (beads) CLI, rebuilt above from checksum-pinned release source.
+COPY --from=bd-builder /out/bd /usr/local/bin/bd
+RUN BD_DISABLE_METRICS=1 BD_DISABLE_EVENT_FLUSH=1 bd --version
 
 # br (beads_rust) CLI — copied from build context.
 # Build with: cp $(which br) . && docker build ...
@@ -32,6 +75,7 @@ COPY br /usr/local/bin/br
 
 # gc binary — copied from build context.
 COPY gc /usr/local/bin/gc
+RUN gc version
 
 # gc-beads-br script for the exec:beads protocol.
 COPY contrib/beads-scripts/gc-beads-br /usr/local/bin/gc-beads-br

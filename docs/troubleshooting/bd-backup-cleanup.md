@@ -1,5 +1,5 @@
 ---
-title: bd Auto-Backup Cleanup
+title: Clean Up bd Auto-Backups
 description: Reclaim space when bd's `.beads/backup/` directory grows large enough to threaten disk pressure.
 ---
 
@@ -15,7 +15,7 @@ or garbage-collection logic in the bd auto-backup path today; the
 architectural redesign for snapshot collections is tracked at
 [gastownhall/beads#2993](https://github.com/gastownhall/beads/issues/2993).
 Over weeks of normal use the directory grows monotonically — and in busy
-multi-agent cities (where every controller, agent, and order touches
+multi-agent cities (where every orchestrator, agent, and order touches
 bd), the growth is fast enough to fill the disk in days.
 
 `gc doctor` emits a `bd-backup-size` warning at 5 GB and an error at

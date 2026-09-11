@@ -299,7 +299,7 @@ func TestWatch(t *testing.T) {
 	script := writeScript(t, dir, allOpsScript())
 	p := NewProvider(script, os.Stderr)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	w, err := p.Watch(ctx, 0)
@@ -519,8 +519,10 @@ case "$op" in
     if [ "$last_lines" -gt 0 ]; then
       head -n "$last_lines" "$DATAFILE" | jq -c "select(.seq > $after_seq)"
     fi
-    # Poll for new events (up to 3 seconds for tests).
-    end=$(($(date +%s) + 3))
+    # Poll for new events. The window must outlive the conformance
+    # suite's watch deadlines; tests kill the subprocess on cleanup, so
+    # this only bounds runaway processes if cleanup never runs.
+    end=$(($(date +%s) + 60))
     while [ "$(date +%s)" -lt "$end" ]; do
       cur_lines=$(wc -l < "$DATAFILE" 2>/dev/null || echo 0)
       if [ "$cur_lines" -gt "$last_lines" ]; then

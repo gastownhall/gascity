@@ -35,7 +35,7 @@ func TestCORSPreflightFromLocalhostDashboard(t *testing.T) {
 			req := httptest.NewRequest(http.MethodOptions, tc.path, nil)
 			req.Header.Set("Origin", tc.origin)
 			req.Header.Set("Access-Control-Request-Method", tc.method)
-			req.Header.Set("Access-Control-Request-Headers", "Content-Type,X-GC-Request,Last-Event-ID")
+			req.Header.Set("Access-Control-Request-Headers", "Content-Type,X-GC-Request,X-GC-City-Write,Last-Event-ID")
 			rec := httptest.NewRecorder()
 
 			h.ServeHTTP(rec, req)
@@ -47,7 +47,7 @@ func TestCORSPreflightFromLocalhostDashboard(t *testing.T) {
 				t.Errorf("Allow-Origin = %q, want %q", got, tc.origin)
 			}
 			allowedHeaders := rec.Header().Get("Access-Control-Allow-Headers")
-			for _, want := range []string{"X-GC-Request", "Last-Event-ID", "Content-Type"} {
+			for _, want := range []string{"X-GC-Request", "X-GC-City-Write", "Last-Event-ID", "Content-Type"} {
 				if !strings.Contains(allowedHeaders, want) {
 					t.Errorf("Allow-Headers %q missing %q", allowedHeaders, want)
 				}

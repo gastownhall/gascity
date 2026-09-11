@@ -1,54 +1,267 @@
 package main
 
 import (
-	"encoding/json"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doltauth"
-	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/fsys"
-	"github.com/gastownhall/gascity/internal/pgauth"
 )
 
 const defaultManagedDoltHost = "127.0.0.1"
-
-var postgresCredentialResolvedSeen sync.Map // map[string]struct{}
-
-func postgresCredentialResolvedKey(cityPath string, payload pgauth.PostgresCredentialResolvedPayload) string {
-	return strings.Join([]string{
-		cityPath,
-		payload.ScopeKind,
-		payload.ScopeName,
-		payload.Source,
-		payload.Host,
-		payload.Port,
-		payload.User,
-	}, "\x00")
-}
 
 // bdCommandRunnerForCity centralizes bd subprocess env construction so all
 // GC-managed bd calls resolve Dolt against the same city-scoped runtime.
 // Env is rebuilt on each call so GC_DOLT_PORT reflects the current managed
 // dolt port (which can change across city restarts).
 func bdCommandRunnerForCity(cityPath string) beads.CommandRunner {
+	completeBinding, err := scopeHasCompleteStorageBinding(scopeMetadataJSONPath(cityPath))
+	if err != nil {
+		return func(_, _ string, _ ...string) ([]byte, error) { return nil, err }
+	}
+	if completeBinding {
+		return bdContextCommandRunnerForCity(cityPath)
+	}
 	return bdCommandRunnerWithManagedRetryErr(cityPath, func(dir string) (map[string]string, error) {
 		env, err := bdRuntimeEnvWithError(cityPath)
 		env["BEADS_DIR"] = filepath.Join(dir, ".beads")
 		return env, err
 	})
+}
+
+// bdContextCommandRunnerForCity delegates complete external bindings to the
+// workspace-pinned bd without projecting or recovering a managed backend.
+func bdContextCommandRunnerForCity(cityPath string) beads.CommandRunner {
+	return func(dir, name string, args ...string) ([]byte, error) {
+		env := cityRuntimeEnvMapForCity(cityPath)
+		bdBin, err := workspacePinnedBdBinary(cityPath)
+		if err != nil {
+			return nil, err
+		}
+		env["BD_BIN"] = bdBin
+		env["BEADS_DIR"] = filepath.Join(dir, ".beads")
+		env["GC_RIG"] = ""
+		env["GC_RIG_ROOT"] = ""
+		env["BEADS_DOLT_AUTO_START"] = "0"
+		env["BD_EXPORT_AUTO"] = "false"
+		hosted, err := citySelectsHostedBeadsCredentialProvider(cityPath)
+		if err != nil {
+			return nil, err
+		}
+		credentialsFile := strings.TrimSpace(env["BEADS_CREDENTIALS_FILE"])
+		if credentialsFile == "" && !hosted {
+			credentialsFile = strings.TrimSpace(ambientNativeDoltOpenEnv("BEADS_CREDENTIALS_FILE"))
+		}
+		setExecProjectedBackendEnvEmpty(env)
+		if credentialsFile != "" {
+			env["BEADS_CREDENTIALS_FILE"] = credentialsFile
+		}
+		if err := applyHostedBeadsCredentialEnv(env, cityPath); err != nil {
+			return nil, err
+		}
+		runner, err := beadsCommandRunnerForHostedCity(cityPath, env)
+		if err != nil {
+			return nil, err
+		}
+		return runner(dir, name, args...)
+	}
+}
+
+// workspacePinnedBdBinary resolves the pinned bd executable in the order
+// workspace.env BD_BIN, then workspace.env PATH, then an ambient BD_BIN. It
+// adds one strictness to workspacePinnedBdBinaryOptional: a workspace PATH
+// that resolves no bd is a configuration error rather than an empty pin.
+// Returning "" means no pin was configured anywhere, and the caller keeps its
+// own ambient executable lookup.
+func workspacePinnedBdBinary(cityPath string) (string, error) {
+	pinned, err := workspacePinnedBdBinaryOptional(cityPath)
+	if err != nil {
+		return "", err
+	}
+	if pinned != "" {
+		return pinned, nil
+	}
+	// This re-stats and re-parses the city.toml that
+	// workspacePinnedBdBinaryOptional already read, solely to re-answer whether
+	// workspace.env configured a PATH at all. The duplicate is deliberate: it
+	// keeps the optional resolver's contract to a single answer ("which bd is
+	// pinned") rather than returning an intermediate signal that exists only
+	// for this one strict caller. Both loads use the no-refresh loader, which
+	// omits the managed-provider-shim rewrite the full loader performs, so what
+	// repeats here is a parse and not a side effect.
+	if _, err := os.Stat(filepath.Join(cityPath, "city.toml")); errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	} else if err != nil {
+		return "", err
+	}
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	if err != nil {
+		return "", err
+	}
+	if _, configured := cfg.Workspace.Env["PATH"]; configured {
+		return "", fmt.Errorf("workspace.env PATH is configured but contains no executable bd at an absolute path")
+	}
+	return "", nil
+}
+
+// workspacePinnedBdBinaryOptional resolves an explicitly configured bd
+// executable without requiring every workspace PATH customization to contain
+// bd. The strict workspacePinnedBdBinary wrapper uses the same resolution for
+// externally bound stores, while managed-city process environments use this
+// optional form to carry a valid pin when one exists.
+//
+// A BD_BIN that is set but not an absolute executable is an error here, in
+// both the workspace.env and the ambient branch. This layer answers "which bd
+// did the operator pin", so a value that cannot be a pin is a configuration
+// fault to report, not a value to quietly drop — reporting it names the stale
+// pin instead of running a different bd against a Dolt store. That is a
+// deliberately narrower contract than execCommandRunner in
+// internal/beads/bdstore.go, which reads BD_BIN off an already-resolved child
+// environment as a last-mile executable override and treats a non-absolute
+// value as "no override" so it falls back to PATH. Keep both sides in mind
+// when changing either: this function decides whether a pin exists, that one
+// only applies a pin already decided here.
+func workspacePinnedBdBinaryOptional(cityPath string) (string, error) {
+	if _, err := os.Stat(filepath.Join(cityPath, "city.toml")); errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	} else if err != nil {
+		return "", err
+	}
+	// Resolving an executable is an environment-only operation. Use the
+	// no-refresh loader here: the full loader rewrites the generated managed
+	// provider shim as a config-load side effect, which can race an in-flight
+	// lifecycle operation and replace a caller's already-selected provider
+	// entrypoint.
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	if err != nil {
+		return "", err
+	}
+	env := expandEnvMap(cfg.Workspace.Env)
+	if raw := strings.TrimSpace(env["BD_BIN"]); raw != "" {
+		if !filepath.IsAbs(raw) {
+			return "", fmt.Errorf("workspace.env BD_BIN must be an absolute executable path")
+		}
+		candidate, err := exec.LookPath(raw)
+		if err != nil {
+			return "", fmt.Errorf("workspace.env BD_BIN %q is not executable: %w", raw, err)
+		}
+		return candidate, nil
+	}
+	pathValue, configured := env["PATH"]
+	if configured {
+		for _, dir := range filepath.SplitList(pathValue) {
+			dir = strings.TrimSpace(dir)
+			if !filepath.IsAbs(dir) {
+				continue
+			}
+			candidate, err := exec.LookPath(filepath.Join(dir, "bd"))
+			if err == nil && filepath.IsAbs(candidate) {
+				return candidate, nil
+			}
+		}
+		// An explicit workspace PATH is authoritative. Do not silently
+		// substitute the controller's ambient BD_BIN when that PATH does not
+		// contain bd; the strict caller reports the configuration error.
+		return "", nil
+	}
+	// Fresh `gc init` runs before the generated city.toml can carry a
+	// workspace.env pin. An explicitly inherited BD_BIN is still an operator
+	// choice, so carry it through managed lifecycle subprocesses for that
+	// first initialization (and for callers that intentionally keep the pin
+	// process-scoped). Once workspace.env has a PATH or BD_BIN, the branches
+	// above remain authoritative.
+	if raw := strings.TrimSpace(os.Getenv("BD_BIN")); raw != "" {
+		if !filepath.IsAbs(raw) {
+			return "", fmt.Errorf("ambient BD_BIN %q must be an absolute executable path", raw)
+		}
+		candidate, err := exec.LookPath(raw)
+		if err != nil {
+			return "", fmt.Errorf("ambient BD_BIN %q is not executable: %w", raw, err)
+		}
+		return candidate, nil
+	}
+	return "", nil
+}
+
+// errBdNotOnPath reports that neither the workspace pin nor the ambient
+// lookup produced a bd executable. Callers phrase their own remediation.
+var errBdNotOnPath = errors.New("bd not found in PATH")
+
+// resolveBdBinaryForScope resolves the bd executable a scope's commands run.
+// The city scope and rigs that inherit its backend use the workspace pin so
+// every command speaks the same schema as the managed runtime. A rig that
+// explicitly overrides the city backend keeps the ambient lookup unless it
+// carries a complete storage binding of its own. An ambient miss is
+// errBdNotOnPath so callers can phrase their own remediation; a configured
+// but unresolvable pin is returned verbatim rather than masked as a missing
+// binary.
+func resolveBdBinaryForScope(cityPath, scopeRoot string) (string, error) {
+	bound, err := scopeStoreIsExternallyBound(cityPath, scopeRoot)
+	if err != nil {
+		return "", err
+	}
+	usesCityBackend := samePath(cityPath, scopeRoot) || !scopeOverridesCityBackend(cityPath, scopeRoot)
+	if bound || usesCityBackend {
+		pinned, err := workspacePinnedBdBinary(cityPath)
+		if err != nil {
+			return "", err
+		}
+		if pinned = strings.TrimSpace(pinned); filepath.IsAbs(pinned) {
+			return pinned, nil
+		}
+	}
+	bdPath, err := exec.LookPath("bd")
+	if err != nil {
+		return "", errBdNotOnPath
+	}
+	return bdPath, nil
+}
+
+// scopeStoreIsExternallyBound reports whether a scope's bead store is served by
+// a storage binding gc does not manage: the scope carries a complete binding of
+// its own, or it inherits the city's the way applyCanonicalScopeBackendEnv
+// does. A scope that overrides the city backend never reads the city binding,
+// so a fault in it is not that scope's fault and answers false rather than
+// taking the scope offline. Only the scope's own binding surfaces an error.
+//
+// This is the single predicate for "gc does not own this store": whether to
+// project a Dolt environment, whether to manage or recover a Dolt runtime, and
+// whether the scope needs a local Dolt identity are all the same question asked
+// from different places. A site that answers it some other way is how the store
+// gc does not serve acquires a Dolt server.
+func scopeStoreIsExternallyBound(cityPath, scopeRoot string) (bool, error) {
+	completeBinding, err := scopeHasCompleteStorageBinding(scopeMetadataJSONPath(scopeRoot))
+	if err != nil || completeBinding {
+		return completeBinding, err
+	}
+	if samePath(cityPath, scopeRoot) || scopeOverridesCityBackend(cityPath, scopeRoot) {
+		return false, nil
+	}
+	inherited, err := scopeHasCompleteStorageBinding(scopeMetadataJSONPath(cityPath))
+	return err == nil && inherited, nil
+}
+
+// scopeStoreIsExternallyBoundBestEffort answers scopeStoreIsExternallyBound for
+// callers that have no way to report a read failure. A scope whose binding
+// cannot be read is treated as gc's own, which is the conservative answer: the
+// paths that would then run all fail loudly on their own metadata read.
+func scopeStoreIsExternallyBoundBestEffort(cityPath, scopeRoot string) bool {
+	bound, err := scopeStoreIsExternallyBound(cityPath, scopeRoot)
+	return err == nil && bound
 }
 
 func bdStoreForCity(dir, cityPath string) *beads.BdStore {
@@ -88,10 +301,18 @@ func bdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix ...str
 }
 
 func bdStoreOptionsForConfig(cfg *config.City) []beads.BdStoreOption {
+	var opts []beads.BdStoreOption
 	if cfg != nil && cfg.Beads.UsesBD105CLISemantics() {
-		return []beads.BdStoreOption{beads.WithBdStoreListSkipLabels(true)}
+		opts = append(opts, beads.WithBdStoreListSkipLabels(true))
 	}
-	return nil
+	// Every bd-backed store this binary opens is a work ledger, so the classes
+	// a split city serves elsewhere are exactly the classes its SQL reads must
+	// refuse. Nil on a city that relocates nothing, which leaves the option
+	// list byte-identical to what it was.
+	if relocated := relocatedBeadClasses(cfg); len(relocated) > 0 {
+		opts = append(opts, beads.WithBdStoreRelocatedClasses(relocated...))
+	}
+	return opts
 }
 
 // reapStaleBdExportJSONL removes .beads/issues.jsonl best-effort when the
@@ -280,6 +501,28 @@ func canonicalScopeDoltTarget(cityPath, scopeRoot string) (contract.DoltConnecti
 	return target, true, nil
 }
 
+// canonicalScopeDoltProjectionAuthoritative reports whether canonical
+// Dolt projection would resolve auth for the city scope: the city's store
+// is gc's to project, and the scope config resolves authoritative — the
+// same ResolveScopeConfigState gate applyOrderExecCanonicalDoltEnv and its
+// managed fallback apply before calling applyCanonicalDoltAuthEnv.
+// Callers that feed ambient environments into the projection use this
+// to strip untrusted password mirrors from the resolution input without
+// breaking the strict no-op pass-through for non-authoritative scopes.
+// A city served by a storage binding gets no projection at all, so
+// stripping its operator-set password mirrors would remove auth nothing
+// downstream restores.
+func canonicalScopeDoltProjectionAuthoritative(cityPath string) bool {
+	if scopeStoreIsExternallyBoundBestEffort(cityPath, cityPath) {
+		return false
+	}
+	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, cityPath, "")
+	if err != nil {
+		return false
+	}
+	return resolved.Kind == contract.ScopeConfigAuthoritative
+}
+
 func applyCanonicalDoltTargetEnv(env map[string]string, target contract.DoltConnectionTarget) {
 	if env == nil {
 		return
@@ -321,6 +564,173 @@ func applyCanonicalDoltAuthEnv(env map[string]string, cityPath, scopeRoot string
 	applyResolvedDoltAuthEnv(env, authScopeRoot, strings.TrimSpace(target.User))
 }
 
+// applyCompleteNonDoltStorageBindingEnv is the whole of gc's support for a
+// backend it does not implement, and the reason no other support is needed.
+//
+// A scope carrying a complete storage binding is served by the linked beads
+// library reading the workspace's own configuration. So gc withholds the
+// entire projected backend namespace rather than a list of keys — the set of
+// variables that library reads is the library's to grow — sets only the bd
+// binary to run, and preserves a credentials file the operator pointed at. The
+// library's credential ladder does the rest. Nothing here branches on which
+// backend the binding names, which is why no name has to be registered, no
+// connection shape parsed, and no credential resolved on this side.
+func applyCompleteNonDoltStorageBindingEnv(env map[string]string, cityPath, scopeRoot string) (bool, error) {
+	completeBinding, err := scopeHasCompleteStorageBinding(scopeMetadataJSONPath(scopeRoot))
+	if err != nil || !completeBinding {
+		return completeBinding, err
+	}
+	hosted, err := citySelectsHostedBeadsCredentialProvider(cityPath)
+	if err != nil {
+		return true, err
+	}
+	credentialsFile := strings.TrimSpace(env["BEADS_CREDENTIALS_FILE"])
+	if credentialsFile == "" && !hosted {
+		credentialsFile = strings.TrimSpace(ambientNativeDoltOpenEnv("BEADS_CREDENTIALS_FILE"))
+	}
+	setExecProjectedBackendEnvEmpty(env)
+	if credentialsFile != "" {
+		env["BEADS_CREDENTIALS_FILE"] = credentialsFile
+	}
+	if err := applyHostedBeadsCredentialEnv(env, cityPath); err != nil {
+		return true, err
+	}
+	bdBin, err := workspacePinnedBdBinary(cityPath)
+	if err != nil {
+		return true, err
+	}
+	env["BD_BIN"] = bdBin
+	return true, nil
+}
+
+// applyHostedBeadsCredentialEnv selects the credential command for bd
+// subprocesses. Existing legacy helpers always win. Otherwise, and only for
+// the exact hosted beads-workspace storage selector, gc installs its fixed
+// bridge to the credential-provider protocol.
+func applyHostedBeadsCredentialEnv(env map[string]string, cityPath string) error {
+	if env == nil {
+		return nil
+	}
+	selected, err := citySelectsHostedBeadsCredentialProvider(cityPath)
+	if err != nil {
+		return err
+	}
+	if selected {
+		// Exact hosted bindings must not inherit any part of the BEADS_*
+		// namespace. Explicit compatibility values below are projected into the
+		// map before the command runner applies it; ambient BEADS_* values are
+		// never treated as authorization for this binding.
+		withholdAmbientHostedBeadsEnv(env)
+	}
+	if command := strings.TrimSpace(env["GC_DOLT_CRED_CMD"]); command != "" {
+		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = command
+		return nil
+	}
+	if strings.TrimSpace(env["BEADS_DOLT_CREDENTIAL_COMMAND"]) != "" {
+		return nil
+	}
+	if command := strings.TrimSpace(os.Getenv("GC_DOLT_CRED_CMD")); command != "" {
+		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = command
+		return nil
+	}
+	// The ambient BEADS_* namespace is untrusted for the exact hosted
+	// workspace selector. In particular, an inherited credential command must
+	// not replace the bridge selected below. Non-hosted/legacy paths retain the
+	// historical ambient fallback for compatibility.
+	if !selected {
+		if command := strings.TrimSpace(os.Getenv("BEADS_DOLT_CREDENTIAL_COMMAND")); command != "" {
+			env["BEADS_DOLT_CREDENTIAL_COMMAND"] = command
+			return nil
+		}
+		return nil
+	}
+	command, err := hostedBeadsCredentialCommand()
+	if err != nil {
+		return err
+	}
+	projectCredentialProviderEnv(env)
+	env["BEADS_DOLT_CREDENTIAL_COMMAND"] = command
+	return nil
+}
+
+// beadsCommandRunnerForHostedCity chooses the hermetic runner only for the
+// exact hosted Beads workspace binding. Explicit values in env remain valid
+// overrides; only the inherited BEADS_* namespace is withheld by the variant.
+func beadsCommandRunnerForHostedCity(cityPath string, env map[string]string) (beads.CommandRunner, error) {
+	selected, err := citySelectsHostedBeadsCredentialProvider(cityPath)
+	if err != nil {
+		return nil, err
+	}
+	if selected {
+		return beadsExecCommandRunnerWithEnvWithoutAmbientBeads(env), nil
+	}
+	return beadsExecCommandRunnerWithEnv(env), nil
+}
+
+// withholdAmbientHostedBeadsEnv pins every ambient BEADS_* key absent from an
+// explicit projection to an empty value. Runtime adapters interpret empty
+// values as removal, so unknown variables cannot flow into an agent session.
+func withholdAmbientHostedBeadsEnv(env map[string]string) {
+	if env == nil {
+		return
+	}
+	for _, entry := range processEnvSnapshotExcludingNativeDoltOpen() {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok || !strings.HasPrefix(key, "BEADS_") {
+			continue
+		}
+		if _, explicit := env[key]; !explicit {
+			env[key] = ""
+		}
+	}
+}
+
+// projectCredentialProviderEnv carries the provider argv configuration into
+// subprocess and session maps. LookupEnv is intentional: an explicitly empty
+// override is invalid configuration and must reach the bridge so invocation
+// fails closed instead of silently using the default provider.
+func projectCredentialProviderEnv(env map[string]string) {
+	if env == nil {
+		return
+	}
+	if _, exists := env[registryCredentialProviderEnv]; exists {
+		return
+	}
+	if raw, configured := os.LookupEnv(registryCredentialProviderEnv); configured {
+		env[registryCredentialProviderEnv] = raw
+	}
+}
+
+func citySelectsHostedBeadsCredentialProvider(cityPath string) (bool, error) {
+	cityConfigPath := filepath.Join(cityPath, "city.toml")
+	if _, err := os.Stat(cityConfigPath); errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	} else if err != nil {
+		return false, fmt.Errorf("read hosted Beads credential configuration: %w", err)
+	}
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, cityConfigPath)
+	if err != nil {
+		return false, fmt.Errorf("load hosted Beads credential configuration: %w", err)
+	}
+	return configSelectsHostedBeadsCredentialProvider(cfg), nil
+}
+
+func configSelectsHostedBeadsCredentialProvider(cfg *config.City) bool {
+	if cfg == nil {
+		return false
+	}
+	storage := cfg.EffectiveStorage()
+	shape, bindingName := storageSplitShapeOf(storage)
+	if shape != storageSplitWhole {
+		return false
+	}
+	binding, ok := storage.Bindings[bindingName]
+	return ok &&
+		binding.Provider == config.StorageProviderBeadsWorkspace &&
+		strings.TrimSpace(binding.URL) != "" &&
+		binding.Auth == config.StorageAuthCredentialProvider
+}
+
 // applyCanonicalScopeBackendEnv dispatches to the appropriate backend
 // helper based on the scope's MetadataState.Backend.
 //
@@ -337,14 +747,19 @@ func applyCanonicalScopeBackendEnv(env map[string]string, cityPath, scopeRoot st
 	if resolved.Kind != contract.ScopeConfigAuthoritative {
 		return false, nil
 	}
+	if completeBinding, err := applyCompleteNonDoltStorageBindingEnv(env, cityPath, scopeRoot); err != nil {
+		return true, err
+	} else if completeBinding {
+		return true, nil
+	}
 	meta, _, metaErr := contract.LoadMetadataState(fsys.OSFS{}, scopeMetadataJSONPath(scopeRoot))
 	if metaErr != nil {
 		return true, metaErr
 	}
 	if resolved.State.EndpointOrigin == contract.EndpointOriginInheritedCity && meta.Backend == "" {
-		if usedPostgres, err := applyCityPostgresBackendEnv(env, cityPath); err != nil {
+		if inherited, err := applyCityStorageBindingEnv(env, cityPath); err != nil {
 			return true, err
-		} else if usedPostgres {
+		} else if inherited {
 			return true, nil
 		}
 	}
@@ -352,7 +767,6 @@ func applyCanonicalScopeBackendEnv(env map[string]string, cityPath, scopeRoot st
 		(meta.Backend == "" || meta.Backend == "doltlite") &&
 		cityUsesDoltliteBeadsBackend(cityPath) {
 		clearProjectedDoltEnv(env)
-		clearProjectedPostgresEnv(env)
 		env["GC_BEADS_BACKEND"] = "doltlite"
 		env["BEADS_BACKEND"] = "doltlite"
 		mirrorBeadsDoltEnv(env)
@@ -361,33 +775,60 @@ func applyCanonicalScopeBackendEnv(env map[string]string, cityPath, scopeRoot st
 	switch meta.Backend {
 	case "", "dolt":
 		clearProjectedBeadsBackendEnv(env)
-		clearProjectedPostgresEnv(env)
 		target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, cityPath, scopeRoot)
 		if err != nil {
 			return true, err
 		}
 		applyCanonicalDoltTargetEnv(env, target)
 		applyCanonicalDoltAuthEnv(env, cityPath, scopeRoot, target)
-		mirrorBeadsDoltEnv(env)
+		mirrorBeadsDoltScopeEnv(env, target)
 		return true, nil
 	case "doltlite":
 		clearProjectedDoltEnv(env)
-		clearProjectedPostgresEnv(env)
 		env["GC_BEADS_BACKEND"] = "doltlite"
 		env["BEADS_BACKEND"] = "doltlite"
 		mirrorBeadsDoltEnv(env)
 		return true, nil
-	case "postgres":
-		if err := applyResolvedScopePostgresEnv(env, cityPath, scopeRoot, meta); err != nil {
-			return true, err
-		}
-		return true, nil
 	default:
-		return true, fmt.Errorf("unsupported backend %q for scope %s", meta.Backend, scopeRoot)
+		return true, unprojectableBackendError(meta.Backend, scopeRoot)
 	}
 }
 
-func applyCityPostgresBackendEnv(env map[string]string, cityPath string) (bool, error) {
+// unprojectableBackendError refuses a backend this projector has no arm for.
+//
+// It reports the same four facts the metadata loader reports — the name, where
+// it was found, what this build registers, and that nothing was opened —
+// because an operator who meets one backend refusal must not have to learn a
+// second vocabulary to read the next one. This is the last guard before a bd
+// subprocess would inherit the ambient environment, so it never returns nil.
+//
+// A registered backend arriving here is a composition defect rather than bad
+// metadata (a registrar added a name without an env-projection arm), and the
+// message says so instead of telling the operator their metadata is wrong.
+func unprojectableBackendError(backend, scopeRoot string) error {
+	if err := contract.RecognizeBackend(backend); err != nil {
+		return fmt.Errorf("%w (scope %s)", err, scopeRoot)
+	}
+	supported, err := contract.RegisteredBackends()
+	if err != nil {
+		return fmt.Errorf("backend %q for scope %s cannot be projected: %w; %s", backend, scopeRoot, err, contract.BackendNotOpenedGuarantee)
+	}
+	return fmt.Errorf("backend %q for scope %s is registered by this build but has no environment projection (registered: %s); %s",
+		backend, scopeRoot, strings.Join(supported, ", "), contract.BackendNotOpenedGuarantee)
+}
+
+// applyCityStorageBindingEnv covers the two city-scope shapes the caller's
+// Dolt projection does not: a complete storage binding, which withholds the
+// whole projected namespace, and a backend this build cannot project, which is
+// refused by name before any bd subprocess could inherit an ambient
+// environment. Returns (false, nil) when the city names a backend the caller's
+// Dolt path handles.
+func applyCityStorageBindingEnv(env map[string]string, cityPath string) (bool, error) {
+	if completeBinding, err := applyCompleteNonDoltStorageBindingEnv(env, cityPath, cityPath); err != nil {
+		return true, err
+	} else if completeBinding {
+		return true, nil
+	}
 	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, cityPath, "")
 	if err != nil {
 		return false, err
@@ -400,15 +841,10 @@ func applyCityPostgresBackendEnv(env map[string]string, cityPath string) (bool, 
 		return true, metaErr
 	}
 	switch meta.Backend {
-	case "postgres":
-		if err := applyResolvedScopePostgresEnv(env, cityPath, cityPath, meta); err != nil {
-			return true, err
-		}
-		return true, nil
 	case "", "dolt", "doltlite":
 		return false, nil
 	default:
-		return true, fmt.Errorf("unsupported backend %q for scope %s", meta.Backend, cityPath)
+		return true, unprojectableBackendError(meta.Backend, cityPath)
 	}
 }
 
@@ -450,182 +886,6 @@ func scopeMetadataJSONPath(scopeRoot string) string {
 	return filepath.Join(scopeRoot, ".beads", "metadata.json")
 }
 
-// applyResolvedScopePostgresEnv projects PG credentials and connection
-// info into env. Caller guarantees meta.Backend == "postgres". The
-// resolver chain in internal/pgauth supplies the password; the host,
-// port, user, and database come straight from MetadataState.
-//
-// On resolver exhaustion returns an error wrapping
-// pgauth.ErrNoPasswordResolvable; callers can match with errors.Is.
-//
-// On success emits a pg.credential_resolved event identifying the scope
-// and the resolution tier that supplied the value (best-effort; recorder
-// failures do not propagate).
-func applyResolvedScopePostgresEnv(env map[string]string, cityPath, scopeRoot string, meta contract.MetadataState) error {
-	if env == nil {
-		return nil
-	}
-	clearProjectedBeadsBackendEnv(env)
-	clearProjectedDoltEnv(env)
-	mirrorBeadsDoltEnv(env)
-	clearProjectedPostgresEnv(env)
-	endpoint := pgauth.Endpoint{
-		Host: meta.PostgresHost,
-		Port: meta.PostgresPort,
-		User: meta.PostgresUser,
-	}
-	// Scope projection clears inherited PG keys first, so credential
-	// resolution intentionally starts at process and file-backed sources.
-	resolved, err := pgauth.ResolveFromEnv(nil, scopeRoot, endpoint)
-	if err != nil {
-		return fmt.Errorf("resolving postgres credentials for %s: %w", scopeRoot, err)
-	}
-	env["GC_POSTGRES_PASSWORD"] = resolved.Password
-	env["BEADS_POSTGRES_PASSWORD"] = resolved.Password
-	env["BEADS_POSTGRES_HOST"] = meta.PostgresHost
-	env["BEADS_POSTGRES_PORT"] = meta.PostgresPort
-	env["BEADS_POSTGRES_USER"] = meta.PostgresUser
-	env["BEADS_POSTGRES_DATABASE"] = meta.PostgresDatabase
-	mirrorBeadsPostgresEnv(env)
-	emitPostgresCredentialResolved(cityPath, scopeRoot, meta, resolved.Source)
-	return nil
-}
-
-// emitPostgresCredentialResolved records a pg.credential_resolved event
-// describing the scope and the resolution tier that supplied the password.
-// Best-effort: recorder failures (file unreachable, JSONL write error) do
-// not propagate to the caller. The payload deliberately omits the password
-// value (asserted by TestPostgresEventOmitsPassword).
-func emitPostgresCredentialResolved(cityPath, scopeRoot string, meta contract.MetadataState, source pgauth.Source) {
-	scopeKind, scopeName := scopeKindAndName(cityPath, scopeRoot)
-	subject := "city/" + scopeName
-	if scopeKind == "rig" {
-		subject = "rigs/" + scopeName
-	}
-	payload := pgauth.PostgresCredentialResolvedPayload{
-		ScopeKind: scopeKind,
-		ScopeName: scopeName,
-		Source:    source.String(),
-		Host:      meta.PostgresHost,
-		Port:      meta.PostgresPort,
-		User:      meta.PostgresUser,
-	}
-	if _, loaded := postgresCredentialResolvedSeen.LoadOrStore(postgresCredentialResolvedKey(cityPath, payload), struct{}{}); loaded {
-		return
-	}
-	payloadBytes, err := json.Marshal(payload)
-	if err != nil {
-		// Marshal of a flat-string struct should never fail; if it
-		// does, there is no useful payload to record.
-		return
-	}
-	rec, err := events.NewFileRecorder(filepath.Join(cityPath, ".gc", "events.jsonl"), io.Discard)
-	if err != nil {
-		return
-	}
-	defer rec.Close() //nolint:errcheck // best-effort: emission must not surface I/O errors
-	rec.Record(events.Event{
-		Type:    events.PostgresCredentialResolved,
-		Actor:   eventActor(),
-		Subject: subject,
-		Payload: payloadBytes,
-	})
-}
-
-// scopeKindAndName returns ("city", <city-name>) when scopeRoot is the
-// city itself, or ("rig", <rig-name>) when scopeRoot is a rig under or
-// outside the city. Path comparison is best-effort lexical equality after
-// filepath.Clean; callers tolerate ambiguity (the recorded event remains
-// useful even if a non-canonical path snaps to the rig branch).
-func scopeKindAndName(cityPath, scopeRoot string) (string, string) {
-	if filepath.Clean(scopeRoot) == filepath.Clean(cityPath) {
-		return "city", filepath.Base(filepath.Clean(cityPath))
-	}
-	return "rig", filepath.Base(filepath.Clean(scopeRoot))
-}
-
-// mirrorBeadsPostgresEnv copies canonical (GC_*) PG env keys to their
-// bd-expected (BEADS_POSTGRES_*) names. Today only the password has a
-// canonical-vs-bd split; the function exists so future bd-side
-// renames become a one-line change.
-func mirrorBeadsPostgresEnv(env map[string]string) {
-	if env == nil {
-		return
-	}
-	if pass := env["GC_POSTGRES_PASSWORD"]; pass != "" {
-		env["BEADS_POSTGRES_PASSWORD"] = pass
-	} else {
-		delete(env, "BEADS_POSTGRES_PASSWORD")
-	}
-	// HOST/PORT/USER/DATABASE: applyResolvedScopePostgresEnv populates
-	// BEADS_POSTGRES_* directly from MetadataState; no GC_-side canonical
-	// exists for those today. If a future refactor introduces GC_POSTGRES_HOST
-	// etc., add the mirror copies here in the same shape as the password.
-}
-
-// projectedPostgresEnvKeys mirrors projectedDoltEnvKeys: the canonical
-// list of env keys gc projects when a scope's backend is "postgres".
-// The list MUST match exactly the PG-keys segment added to
-// mergeRuntimeEnv's keys slice; TestProjectedKeysCoverage asserts the
-// symmetry so a key added here without a matching strip-list entry
-// fails CI.
-var projectedPostgresEnvKeys = []string{
-	"GC_POSTGRES_PASSWORD",
-	"BEADS_POSTGRES_PASSWORD",
-	"BEADS_POSTGRES_HOST",
-	"BEADS_POSTGRES_PORT",
-	"BEADS_POSTGRES_USER",
-	"BEADS_POSTGRES_DATABASE",
-}
-
-func postgresMetadataForScope(cityPath, scopeRoot string) (contract.MetadataState, bool, error) {
-	if scopeRoot == "" {
-		scopeRoot = cityPath
-	}
-	meta, ok, err := contract.LoadMetadataState(fsys.OSFS{}, scopeMetadataJSONPath(scopeRoot))
-	if err != nil {
-		return contract.MetadataState{}, false, fmt.Errorf("loading metadata for scope %s: %w", scopeRoot, err)
-	}
-	if ok {
-		switch meta.Backend {
-		case "postgres":
-			return meta, true, nil
-		case "dolt":
-			return contract.MetadataState{}, false, nil
-		}
-	}
-	if samePath(scopeRoot, cityPath) {
-		return contract.MetadataState{}, false, nil
-	}
-	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, scopeRoot, "")
-	if err != nil {
-		return contract.MetadataState{}, false, fmt.Errorf("resolving config for scope %s: %w", scopeRoot, err)
-	}
-	if resolved.Kind != contract.ScopeConfigAuthoritative || resolved.State.EndpointOrigin != contract.EndpointOriginInheritedCity {
-		return contract.MetadataState{}, false, nil
-	}
-	cityMeta, cityOK, cityErr := contract.LoadMetadataState(fsys.OSFS{}, scopeMetadataJSONPath(cityPath))
-	if cityErr != nil {
-		return contract.MetadataState{}, false, fmt.Errorf("loading city metadata for inherited scope %s: %w", scopeRoot, cityErr)
-	}
-	if !cityOK || cityMeta.Backend != "postgres" {
-		return contract.MetadataState{}, false, nil
-	}
-	return cityMeta, true, nil
-}
-
-// scopeBackendIsPostgres returns true when the scope's MetadataState
-// has Backend == "postgres" or when the scope inherits a city-level
-// Postgres backend. On any read error returns false for best-effort callers
-// that do not need to make recovery decisions.
-func scopeBackendIsPostgres(cityPath, scopeRoot string) bool {
-	_, ok, err := postgresMetadataForScope(cityPath, scopeRoot)
-	if err != nil {
-		return false
-	}
-	return ok
-}
-
 func applyCanonicalConfigStateDoltEnv(env map[string]string, cityPath, scopeRoot string, state contract.ConfigState) {
 	target := contract.DoltConnectionTarget{
 		Host:           strings.TrimSpace(state.DoltHost),
@@ -637,7 +897,7 @@ func applyCanonicalConfigStateDoltEnv(env map[string]string, cityPath, scopeRoot
 	}
 	applyCanonicalDoltTargetEnv(env, target)
 	applyCanonicalDoltAuthEnv(env, cityPath, scopeRoot, target)
-	mirrorBeadsDoltEnv(env)
+	mirrorBeadsDoltScopeEnv(env, target)
 }
 
 func applyCanonicalScopeInitDoltEnv(env map[string]string, cityPath, scopeRoot string) error {
@@ -678,6 +938,12 @@ var projectedDoltEnvKeys = []string{
 	"BEADS_DOLT_SERVER_PORT",
 	"BEADS_DOLT_SERVER_USER",
 	"BEADS_DOLT_PASSWORD",
+	// BEADS_DOLT_SERVER_TLS is intentionally NOT a projected key: it is an
+	// ambient hosted-gateway credential passthrough (see
+	// hostedBeadsCredentialPassthroughKeys) with no per-scope source, so
+	// mergeRuntimeEnv must not strip it. mirrorBeadsDoltEnv clears it (non-external
+	// scopes) and mirrorBeadsDoltScopeEnv carries it (external endpoints) into the
+	// native-open env instead.
 }
 
 var bdCLIRemoteSyncOptOutEnvKeys = [...]string{
@@ -695,16 +961,72 @@ func appendBdCLIRemoteSyncOptOutEnvKeys(keys []string) []string {
 	return keys
 }
 
+// bdAutoBackupOptOutEnvKeys disables bd's PersistentPostRun auto-backup —
+// the hardcoded "backup_export" Dolt remote bd syncs on (almost) every
+// invocation. A stuck-looping backup_export sync was the root cause of the
+// 2026-06-08 town-wide Dolt wedge (ga-0eq): it saturated the commit path
+// while oscillating not-found/already-exists. gc never relies on this path
+// (managed backups run through mol-dog-backup), so it is pure downside here.
+// BD_BACKUP_ENABLED is the key bd's BD-prefixed Viper env binding consumes
+// today; keep BEADS_BACKUP_ENABLED as a compatibility alias only.
+var bdAutoBackupOptOutEnvKeys = [...]string{
+	"BD_BACKUP_ENABLED",
+	"BEADS_BACKUP_ENABLED",
+}
+
+func appendBdAutoBackupOptOutEnvKeys(keys []string) []string {
+	for _, key := range bdAutoBackupOptOutEnvKeys {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+// bdContributorRoutingOptOutEnvKeys disables bd's fork/contributor
+// auto-routing for gc-managed bd invocations. When a gcy-style store has
+// routing.mode=auto and routing.contributor=~/.beads-planning persisted in
+// its .beads config, upstream bd silently routes `create`/`list`/`update`
+// to that out-of-band "planning" store while `show` (prefix-routed) and gc's
+// in-process dispatch (sling/scale-check/hook pickup, which open the scope
+// store directly via openCityStoreAt) keep reading the scope store. The
+// result is a three-way split brain: a bead that `bd list --rig` shows is
+// invisible to `bd show` and unresolvable by `gc sling`. gc owns scope→store
+// resolution itself (BEADS_DIR + the rig registry), so contributor routing is
+// pure downside here. Forcing routing.mode=off via the env override (which
+// beadslib's getRoutingConfigValue / resolveRoutingConfigValue honor ahead of
+// the persisted DB value) makes every gc-managed bd subcommand operate on the
+// scope's own store — the same store sling and show already use.
+//
+// BD_ROUTING_MODE is the key bd's BD-prefixed Viper env binding consumes;
+// BEADS_ROUTING_MODE is kept as a compatibility alias only.
+var bdContributorRoutingOptOutEnvKeys = [...]string{
+	"BD_ROUTING_MODE",
+	"BEADS_ROUTING_MODE",
+}
+
+func appendBdContributorRoutingOptOutEnvKeys(keys []string) []string {
+	for _, key := range bdContributorRoutingOptOutEnvKeys {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
 var (
-	beadsExecCommandRunnerWithEnv             = beads.ExecCommandRunnerWithEnv
-	processEnvSnapshotExcludingNativeDoltOpen = beads.ProcessEnvSnapshotExcludingNativeDoltOpen
+	beadsExecCommandRunnerWithEnv                    = beads.ExecCommandRunnerWithEnv
+	beadsExecCommandRunnerWithEnvWithoutAmbientBeads = beads.ExecCommandRunnerWithEnvWithoutAmbientBeads
+	processEnvSnapshotExcludingNativeDoltOpen        = beads.ProcessEnvSnapshotExcludingNativeDoltOpen
+	ambientNativeDoltOpenEnv                         = beads.AmbientNativeDoltOpenEnv
 )
 
 var recoverManagedBDCommand = func(cityPath string) error {
 	script := gcBeadsBdScriptPath(cityPath)
 	overrides := cityRuntimeEnvMapForCity(cityPath)
+	if err := applyWorkspacePinnedBdBinary(overrides, cityPath); err != nil {
+		return err
+	}
 	setProjectedDoltEnvEmpty(overrides)
 	applyBdCLIRemoteSyncOptOut(overrides)
+	applyBdAutoBackupOptOut(overrides)
+	applyBdContributorRoutingOptOut(overrides)
 	environ := mergeRuntimeEnv(processEnvSnapshotExcludingNativeDoltOpen(), overrides)
 	environ = append(environ, providerLifecycleDoltPathEnv(cityPath)...)
 	if gcBin := resolveProviderLifecycleGCBinary(); gcBin != "" {
@@ -742,20 +1064,6 @@ var projectedBeadsBackendEnvKeys = []string{
 func clearProjectedBeadsBackendEnv(env map[string]string) {
 	for _, key := range projectedBeadsBackendEnvKeys {
 		delete(env, key)
-	}
-}
-
-func clearProjectedPostgresEnv(env map[string]string) {
-	for _, key := range projectedPostgresEnvKeys {
-		delete(env, key)
-	}
-}
-
-func ensureProjectedPostgresEnvExplicit(env map[string]string) {
-	for _, key := range projectedPostgresEnvKeys {
-		if _, ok := env[key]; !ok {
-			env[key] = ""
-		}
 	}
 }
 
@@ -838,6 +1146,13 @@ func currentPublishedOrRecoveredManagedDoltPort(cityPath string, allowRecovery b
 }
 
 func resolvedRuntimeCityDoltTarget(cityPath string, allowRecovery bool) (contract.DoltConnectionTarget, bool, error) {
+	return resolvedRuntimeCityDoltTargetContext(context.Background(), cityPath, allowRecovery)
+}
+
+func resolvedRuntimeCityDoltTargetContext(ctx context.Context, cityPath string, allowRecovery bool) (contract.DoltConnectionTarget, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return contract.DoltConnectionTarget{}, false, err
+	}
 	var managedRuntimeErr error
 	var recoveryErr error
 	recoveryChecked := false
@@ -884,11 +1199,13 @@ func resolvedRuntimeCityDoltTarget(cityPath string, allowRecovery bool) (contrac
 		return contract.DoltConnectionTarget{Host: defaultManagedDoltHost, Port: port}, true, nil
 	}
 	if allowRecovery {
-		if err := healthBeadsProvider(cityPath); err == nil {
+		if err := healthBeadsProviderContext(ctx, cityPath, false); err == nil {
 			resetRecoveryCache()
 			if port := recoveredManagedDoltPort(); port != "" {
 				return contract.DoltConnectionTarget{Host: defaultManagedDoltHost, Port: port}, true, nil
 			}
+		} else if ctxErr := ctx.Err(); ctxErr != nil {
+			return contract.DoltConnectionTarget{}, false, ctxErr
 		}
 	}
 	// Last-resort: when all other recovery paths have been exhausted but the
@@ -917,9 +1234,23 @@ func managedLocalDoltEnv(env map[string]string) bool {
 	return managedLocalDoltHost(env["GC_DOLT_HOST"])
 }
 
+// managedBDRecoveryAllowed is the one place that answers "may gc recover this
+// scope's store?" — both the retry and the recovery classifier ask it.
+//
+// A scope served by a storage binding is answered first and unconditionally.
+// The projection for such a scope withholds the whole backend namespace, so
+// GC_DOLT_HOST arrives empty and every question below it reads a withheld
+// projection as managed-local Dolt: canonicalScopeDoltTarget reports no managed
+// runtime, and managedLocalDoltEnv agrees with an empty host. Recovering on
+// that answer would start a managed Dolt server for a store gc does not serve.
+// A binding that cannot be read is answered the same way, because a scope whose
+// ownership is unknown is not a scope to start servers for.
 func managedBDRecoveryAllowed(cityPath, scopeRoot string, env map[string]string) bool {
 	if scopeRoot == "" {
 		scopeRoot = cityPath
+	}
+	if bound, err := scopeStoreIsExternallyBound(cityPath, scopeRoot); err != nil || bound {
+		return false
 	}
 	if target, ok, err := canonicalScopeDoltTarget(cityPath, scopeRoot); err != nil {
 		return contract.IsManagedRuntimeUnavailable(err) && managedLocalDoltEnv(env)
@@ -953,7 +1284,11 @@ func bdTransportErrorMatches(cityPath, scopeRoot string, env map[string]string, 
 const (
 	bdSilentFallbackMarkerImport  = "auto-importing"
 	bdSilentFallbackMarkerEmptyDB = "into empty database"
+
+	bdCommandRetryBaseDelay = 500 * time.Millisecond
 )
+
+var bdCommandRetrySleep = time.Sleep
 
 func bdTransportRetryableError(cityPath, scopeRoot string, env map[string]string, err error) bool {
 	return bdTransportErrorMatches(cityPath, scopeRoot, env, err, []string{
@@ -1004,6 +1339,54 @@ func bdOutputIndicatesSilentFallback(s string) bool {
 		strings.Contains(lower, bdSilentFallbackMarkerEmptyDB)
 }
 
+// bdDoltStartSuggestionMarkerAutoStart and bdDoltStartSuggestionMarkerCommand
+// are the substring pair bd emits when the managed Dolt server is
+// unreachable and dolt.auto-start is disabled: bd suggests running
+// `bd dolt start` to recover. In a gc-managed city (gc always sets
+// dolt.auto-start: false) that suggestion is actively harmful — it starts a
+// second, unmanaged Dolt server that fights gc's own server for the same
+// data directory (gastownhall/gascity#1374). Load-bearing only in
+// bdOutputSuggestsConflictingDoltStart; if bd's banner wording ever
+// changes, this is the only edit site.
+const (
+	bdDoltStartSuggestionMarkerAutoStart = "auto-start is disabled"
+	bdDoltStartSuggestionMarkerCommand   = "bd dolt start"
+)
+
+// bdOutputSuggestsConflictingDoltStart reports whether the given bd output
+// (typically captured stderr) contains the marker pair bd emits when it
+// tells the operator to run `bd dolt start` because managed auto-start is
+// disabled. Requiring both markers (rather than the command substring
+// alone) avoids a false positive on unrelated mentions of "bd dolt start",
+// e.g. in bd's own --help text.
+func bdOutputSuggestsConflictingDoltStart(s string) bool {
+	lower := strings.ToLower(s)
+	return strings.Contains(lower, bdDoltStartSuggestionMarkerAutoStart) &&
+		strings.Contains(lower, bdDoltStartSuggestionMarkerCommand)
+}
+
+// bdScopeDoltIsGcManaged reports whether the corrective `gc start` /
+// `gc dolt restart` hint applies to this scope. gc owns the Dolt
+// lifecycle only for a managed, local endpoint: an externally-bound
+// store, or an explicit/city-canonical endpoint (which resolves
+// External even on 127.0.0.1), is not gc's to restart, and pointing the
+// operator at gc lifecycle commands there sends them at the wrong
+// remedy. Mirrors the ownership predicate managedBDRecoveryAllowed
+// applies. Fails closed — no hint — when ownership cannot be resolved.
+func bdScopeDoltIsGcManaged(cityPath, scopeRoot string) bool {
+	if scopeRoot == "" {
+		scopeRoot = cityPath
+	}
+	if bound, err := scopeStoreIsExternallyBound(cityPath, scopeRoot); err != nil || bound {
+		return false
+	}
+	target, ok, err := canonicalScopeDoltTarget(cityPath, scopeRoot)
+	if err != nil || !ok {
+		return false
+	}
+	return !target.External && managedLocalDoltHost(target.Host)
+}
+
 func bdCommandRunnerWithManagedRetry(cityPath string, envFn func(dir string) map[string]string) beads.CommandRunner {
 	return bdCommandRunnerWithManagedRetryErr(cityPath, func(dir string) (map[string]string, error) {
 		return envFn(dir), nil
@@ -1020,25 +1403,12 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 			env = map[string]string{}
 		}
 		ensureProjectedDoltEnvExplicit(env)
-		ensureProjectedPostgresEnvExplicit(env)
-		runner := beadsExecCommandRunnerWithEnv(env)
+		runner, runnerErr := beadsCommandRunnerForHostedCity(cityPath, env)
+		if runnerErr != nil {
+			return nil, runnerErr
+		}
 		out, err := runner(dir, name, args...)
 		if name != "bd" {
-			return out, err
-		}
-		// PG-backed scopes never invoke managed-Dolt recovery. A transport
-		// error gets wrapped with an operator-facing hint and surfaced; gc
-		// does not manage external PG endpoints.
-		if err != nil {
-			meta, ok, classifyErr := postgresMetadataForScope(cityPath, dir)
-			if classifyErr != nil {
-				return out, fmt.Errorf("classifying scope backend (bd error: %w): %w", err, classifyErr)
-			}
-			if ok {
-				return out, fmt.Errorf("postgres at %s:%s: gc does not manage external PG endpoints (no managed recovery attempted): %w", meta.PostgresHost, meta.PostgresPort, err)
-			}
-		}
-		if err == nil && scopeBackendIsPostgres(cityPath, dir) {
 			return out, err
 		}
 		if !bdTransportRetryableError(cityPath, dir, env, err) {
@@ -1049,19 +1419,26 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 				return out, err
 			}
 		}
+		bdCommandRetrySleep(bdCommandRetryBaseDelay)
 		retryEnv, retryEnvErr := envFn(dir)
 		if retryEnvErr != nil {
 			return nil, retryEnvErr
 		}
 		ensureProjectedDoltEnvExplicit(retryEnv)
-		ensureProjectedPostgresEnvExplicit(retryEnv)
-		retryRunner := beadsExecCommandRunnerWithEnv(retryEnv)
+		retryRunner, runnerErr := beadsCommandRunnerForHostedCity(cityPath, retryEnv)
+		if runnerErr != nil {
+			return nil, runnerErr
+		}
 		return retryRunner(dir, name, args...)
 	}
 }
 
 func applyResolvedCityDoltEnv(env map[string]string, cityPath string, allowRecovery bool) error {
-	target, ok, err := resolvedRuntimeCityDoltTarget(cityPath, allowRecovery)
+	return applyResolvedCityDoltEnvContext(context.Background(), env, cityPath, allowRecovery)
+}
+
+func applyResolvedCityDoltEnvContext(ctx context.Context, env map[string]string, cityPath string, allowRecovery bool) error {
+	target, ok, err := resolvedRuntimeCityDoltTargetContext(ctx, cityPath, allowRecovery)
 	if err != nil {
 		return err
 	}
@@ -1071,7 +1448,7 @@ func applyResolvedCityDoltEnv(env map[string]string, cityPath string, allowRecov
 		fallbackUser = strings.TrimSpace(target.User)
 	}
 	applyResolvedDoltAuthEnv(env, cityPath, fallbackUser)
-	mirrorBeadsDoltEnv(env)
+	mirrorBeadsDoltScopeEnv(env, target)
 	return nil
 }
 
@@ -1114,38 +1491,54 @@ func rigAllowsResolvedCityTargetFallback(cityPath, rigPath string) bool {
 }
 
 func applyResolvedRigDoltEnv(env map[string]string, cityPath, rigPath string, explicitRig *config.Rig, allowRecovery bool) error {
+	return applyResolvedRigDoltEnvContext(context.Background(), env, cityPath, rigPath, explicitRig, allowRecovery)
+}
+
+func applyResolvedRigDoltEnvContext(ctx context.Context, env map[string]string, cityPath, rigPath string, explicitRig *config.Rig, allowRecovery bool) error {
 	if usedCanonical, err := applyCanonicalScopeBackendEnv(env, cityPath, rigPath); err != nil {
 		var invalid *contract.InvalidCanonicalConfigError
 		if errors.As(err, &invalid) {
 			fallback, fallbackErr := contract.AllowsInvalidInheritedCityFallback(fsys.OSFS{}, cityPath, rigPath)
 			if fallbackErr == nil && fallback {
-				return applyResolvedCityDoltEnv(env, cityPath, allowRecovery)
+				return applyResolvedCityDoltEnvContext(ctx, env, cityPath, allowRecovery)
 			}
 		}
 		if rigAllowsResolvedCityTargetFallback(cityPath, rigPath) {
-			return applyResolvedCityDoltEnv(env, cityPath, allowRecovery)
+			return applyResolvedCityDoltEnvContext(ctx, env, cityPath, allowRecovery)
 		}
 		if allowRecovery && contract.IsManagedRuntimeUnavailable(err) && rigAllowsManagedCityRuntimeRecovery(cityPath, rigPath) {
-			return applyResolvedCityDoltEnv(env, cityPath, true)
+			return applyResolvedCityDoltEnvContext(ctx, env, cityPath, true)
 		}
 		return err
 	} else if usedCanonical {
 		return nil
 	}
 	if explicitRig != nil && (explicitRig.DoltHost != "" || explicitRig.DoltPort != "") {
-		clearProjectedPostgresEnv(env)
-		applyLegacyRigExternalTarget(env, *explicitRig)
+		target := applyLegacyRigExternalTarget(env, *explicitRig)
 		clearProjectedDoltPasswordEnv(env)
 		applyResolvedDoltAuthEnv(env, rigPath, "")
-		mirrorBeadsDoltEnv(env)
+		mirrorBeadsDoltScopeEnv(env, target)
 		return nil
 	}
 	// Rigs without local endpoint authority inherit the resolved city target.
 	// A minimal local .beads/config.yaml must not suppress valid city compat fallback.
-	return applyResolvedCityDoltEnv(env, cityPath, allowRecovery)
+	return applyResolvedCityDoltEnvContext(ctx, env, cityPath, allowRecovery)
 }
 
-func applyLegacyRigExternalTarget(env map[string]string, rig config.Rig) {
+// applyLegacyRigExternalTarget projects a legacy config.Rig{DoltHost,DoltPort}
+// external endpoint onto env and returns the resolved external
+// DoltConnectionTarget. A rig that sets an explicit Dolt host/port is an
+// external endpoint by construction — the same way applyCanonicalConfigStateDoltEnv
+// treats an explicit canonical endpoint as External — so callers mirror the
+// returned target through mirrorBeadsDoltScopeEnv. That helper carries the
+// hosted-gateway BEADS_DOLT_SERVER_TLS requirement into the native-open env only
+// for a non-local endpoint (targetCarriesHostedGatewayTLS): a legacy rig that
+// points at a hosted gateway connects with TLS, while an explicit or port-only
+// 127.0.0.1 rig stays plaintext instead of inheriting a controller's ambient
+// TLS=1. Using the non-scoped mirrorBeadsDoltEnv here would clear TLS for the
+// gateway case too and force a TLS-required gateway rig configured through this
+// compatibility path to attempt plaintext.
+func applyLegacyRigExternalTarget(env map[string]string, rig config.Rig) contract.DoltConnectionTarget {
 	host, port := configuredExternalDoltTargetForRig(rig)
 	if host != "" {
 		env["GC_DOLT_HOST"] = host
@@ -1153,6 +1546,7 @@ func applyLegacyRigExternalTarget(env map[string]string, rig config.Rig) {
 	if port != "" {
 		env["GC_DOLT_PORT"] = port
 	}
+	return contract.DoltConnectionTarget{Host: host, Port: port, External: true}
 }
 
 func rigRuntimeEnvIndependentOfCityProjection(cityPath, rigPath string, explicitRig *config.Rig) bool {
@@ -1166,17 +1560,24 @@ func rigRuntimeEnvIndependentOfCityProjection(cityPath, rigPath string, explicit
 	return resolved.Kind == contract.ScopeConfigAuthoritative && resolved.State.EndpointOrigin != contract.EndpointOriginInheritedCity
 }
 
-func cityPostgresProjectionErrorCanBeBypassed(cityPath string, err error) bool {
-	if err == nil || !errors.Is(err, pgauth.ErrNoPasswordResolvable) {
-		return false
-	}
-	_, ok, metaErr := postgresMetadataForScope(cityPath, cityPath)
-	return metaErr == nil && ok
+func bdRuntimeEnvForRigWithError(cityPath string, cfg *config.City, rigPath string) (map[string]string, error) {
+	return bdRuntimeEnvForRigWithErrorRecovery(cityPath, cfg, rigPath, true)
 }
 
-func bdRuntimeEnvForRigWithError(cityPath string, cfg *config.City, rigPath string) (map[string]string, error) {
-	env, cityErr := bdRuntimeEnvWithError(cityPath)
-	rigPath = filepath.Clean(rigPath)
+// bdRuntimeEnvForRigWithErrorNoRecovery is bdRuntimeEnvForRigWithError
+// without the managed-dolt recovery side effects; see
+// bdRuntimeEnvWithErrorNoRecovery for why (gascity ga-cdmx6x).
+func bdRuntimeEnvForRigWithErrorNoRecovery(cityPath string, cfg *config.City, rigPath string) (map[string]string, error) {
+	return bdRuntimeEnvForRigWithErrorRecovery(cityPath, cfg, rigPath, false)
+}
+
+func bdRuntimeEnvForRigWithErrorRecovery(cityPath string, cfg *config.City, rigPath string, allowRecovery bool) (map[string]string, error) {
+	return bdRuntimeEnvForRigWithErrorRecoveryContext(context.Background(), cityPath, cfg, rigPath, allowRecovery)
+}
+
+func bdRuntimeEnvForRigWithErrorRecoveryContext(ctx context.Context, cityPath string, cfg *config.City, rigPath string, allowRecovery bool) (map[string]string, error) {
+	env, cityErr := bdRuntimeEnvWithErrorRecoveryContext(ctx, cityPath, allowRecovery)
+	rigPath = normalizePathForCompare(rigPath)
 	// Pin the rig store explicitly. The gc-beads-bd provider derives its Dolt
 	// data root from GC_CITY_PATH unless BEADS_DIR is set, so cwd-based
 	// discovery is not sufficient for rig-scoped operations.
@@ -1193,31 +1594,33 @@ func bdRuntimeEnvForRigWithError(cityPath string, cfg *config.City, rigPath stri
 	cityDoltlite := scopeBackendIsDoltlite(cityPath, cityPath)
 	if rigDoltlite || (cityDoltlite && !scopeOverridesCityBackend(cityPath, rigPath)) {
 		clearProjectedDoltEnv(env)
-		clearProjectedPostgresEnv(env)
 		env["GC_BEADS_BACKEND"] = "doltlite"
 		env["BEADS_BACKEND"] = "doltlite"
 		mirrorBeadsDoltEnv(env)
 		return env, nil
 	}
-	if err := applyResolvedRigDoltEnv(env, cityPath, rigPath, explicitRig, true); err != nil {
+	if err := applyResolvedRigDoltEnvContext(ctx, env, cityPath, rigPath, explicitRig, allowRecovery); err != nil {
 		clearProjectedDoltEnv(env)
-		clearProjectedPostgresEnv(env)
 		mirrorBeadsDoltEnv(env)
 		if isRecoverableManagedDoltEnvError(err) {
 			return env, nil
 		}
 		return env, err
 	}
-	if cityErr != nil && (!cityPostgresProjectionErrorCanBeBypassed(cityPath, cityErr) || !rigRuntimeEnvIndependentOfCityProjection(cityPath, rigPath, explicitRig)) {
+	if cityErr != nil {
 		return env, cityErr
 	}
 	return env, nil
 }
 
 func nativeDoltOpenEnvForScope(cityPath string, cfg *config.City, scopeRoot string) (map[string]string, error) {
+	return nativeDoltOpenEnvForScopeContext(context.Background(), cityPath, cfg, scopeRoot)
+}
+
+func nativeDoltOpenEnvForScopeContext(ctx context.Context, cityPath string, cfg *config.City, scopeRoot string) (map[string]string, error) {
 	scopeRoot = resolveStoreScopeRoot(cityPath, scopeRoot)
 	if samePath(scopeRoot, cityPath) {
-		return bdRuntimeEnvWithError(cityPath)
+		return bdRuntimeEnvWithErrorRecoveryContext(ctx, cityPath, true)
 	}
 	if cfg == nil {
 		loaded, err := loadCityConfig(cityPath, io.Discard)
@@ -1226,11 +1629,84 @@ func nativeDoltOpenEnvForScope(cityPath string, cfg *config.City, scopeRoot stri
 		}
 		cfg = loaded
 	}
-	return bdRuntimeEnvForRigWithError(cityPath, cfg, scopeRoot)
+	return bdRuntimeEnvForRigWithErrorRecoveryContext(ctx, cityPath, cfg, scopeRoot, true)
+}
+
+// nativeDoltOneShotOpenEnvForScope is nativeDoltOpenEnvForScope for a
+// one-shot CLI store open: the same projected env with the single-connection
+// project-pool cap applied. Long-lived opens (the controller's city and rig
+// stores) call the uncapped form, which keeps the upstream daemon-sized pool.
+func nativeDoltOneShotOpenEnvForScope(cityPath string, cfg *config.City, scopeRoot string) (map[string]string, error) {
+	env, err := nativeDoltOpenEnvForScope(cityPath, cfg, scopeRoot)
+	return nativeDoltCliPoolCap(env), err
+}
+
+// nativeDoltOneShotOpenEnvForScopeContext is
+// nativeDoltOneShotOpenEnvForScope under a caller-supplied context, for the
+// native read-path reopen hook.
+func nativeDoltOneShotOpenEnvForScopeContext(ctx context.Context, cityPath string, cfg *config.City, scopeRoot string) (map[string]string, error) {
+	env, err := nativeDoltOpenEnvForScopeContext(ctx, cityPath, cfg, scopeRoot)
+	return nativeDoltCliPoolCap(env), err
+}
+
+// nativeDoltCliPoolCap pins the native-Dolt project pool ceiling for
+// in-process store opens to a single connection. gc opens the store fresh on
+// every one-shot CLI invocation (gc ready, gc convoy status, gc hook
+// --claim, orders' scale_check probes): each open pays a fail-fast probe
+// dial, a no-database initDB check, and one project-pool connection in the
+// beads library's openServerConnection path. The upstream pool defaults
+// (MaxOpenConns=10 / MaxIdleConns=5, "deliberately oriented at long-lived
+// daemons") are sized for the wrong program: at the measured ~10 store opens
+// per second the city makes, a 10-wide pool ceiling lets churn reach ~40 new
+// connections per second against the dolt server although a serial one-shot
+// never holds more than one pool connection at a time. Capping MaxOpenConns
+// at 1 via the documented BEADS_DOLT_MAX_CONNS knob makes the pool ceiling
+// match the one connection a serial CLI actually uses: zero behavior change
+// for the serial CLI today, and a hard ceiling if a concurrent-query path is
+// ever added to a one-shot command. The fail-fast probe and initDB
+// connections are separate sql.DB opens outside this pool; eliminating them
+// is a separate, larger change (see #5539, the gc-side connection-churn issue
+// that this pin accompanies).
+//
+// The key is load-bearing only while it stays in
+// beads.nativeDoltOpenEnvKeys: withNativeDoltOpenEnv projects exactly that
+// allowlist into the process environment for the duration of an open, so a
+// key absent from it never reaches the library's os.Getenv and this cap
+// silently becomes a no-op.
+func nativeDoltCliPoolCap(env map[string]string) map[string]string {
+	if env == nil {
+		return env
+	}
+	env["BEADS_DOLT_MAX_CONNS"] = "1"
+	return env
 }
 
 func bdRuntimeEnvWithError(cityPath string) (map[string]string, error) {
+	return bdRuntimeEnvWithErrorRecovery(cityPath, true)
+}
+
+// bdRuntimeEnvWithErrorNoRecovery is bdRuntimeEnvWithError without the
+// managed-dolt recovery/health-check/autostart side effects: it reads
+// existing published or configured connection state only, and fails fast
+// (env still gets the non-Dolt opt-out vars set) when no managed server is
+// currently reachable. Recovering a managed dolt server is legitimate
+// work, but doing it from every concurrent, short-budget scoped-store
+// construction would multiply exactly the load a read-storm mitigation
+// exists to bound (gascity ga-cdmx6x) — those callers use this instead of
+// bdRuntimeEnvWithError.
+func bdRuntimeEnvWithErrorNoRecovery(cityPath string) (map[string]string, error) {
+	return bdRuntimeEnvWithErrorRecovery(cityPath, false)
+}
+
+func bdRuntimeEnvWithErrorRecovery(cityPath string, allowRecovery bool) (map[string]string, error) {
+	return bdRuntimeEnvWithErrorRecoveryContext(context.Background(), cityPath, allowRecovery)
+}
+
+func bdRuntimeEnvWithErrorRecoveryContext(ctx context.Context, cityPath string, allowRecovery bool) (map[string]string, error) {
 	env := cityRuntimeEnvMapForCity(cityPath)
+	if err := applyWorkspacePinnedBdBinary(env, cityPath); err != nil {
+		return env, err
+	}
 	env["BEADS_DIR"] = filepath.Join(cityPath, ".beads")
 	env["GC_RIG"] = ""
 	env["GC_RIG_ROOT"] = ""
@@ -1249,27 +1725,41 @@ func bdRuntimeEnvWithError(cityPath string) (map[string]string, error) {
 	// stall bd create / gc mail send for the full 2m subprocess timeout on
 	// large datasets.
 	env["BD_EXPORT_AUTO"] = "false"
+	// Disable bd's fork/contributor auto-routing. Without this, a store with
+	// routing.mode=auto + routing.contributor (gcy's ~/.beads-planning) sends
+	// bd create/list/update to that out-of-band store while gc's in-process
+	// dispatch (sling) and bd show read the scope store — a three-way split
+	// brain. See bdContributorRoutingOptOutEnvKeys.
+	applyBdContributorRoutingOptOut(env)
 	applyBdCLIRemoteSyncOptOut(env)
+	// Suppress bd's PersistentPostRun auto-backup (the "backup_export" Dolt
+	// remote). Like BD_EXPORT_AUTO above, the env var is the bulletproof
+	// per-invocation guard: it covers fresh rig scopes whose config has not
+	// been canonicalized and overrides any drifted backup.enabled:true. A
+	// stuck-looping backup_export sync wedged the whole town on 2026-06-08
+	// (ga-0eq); managed backups run through mol-dog-backup, not this path.
+	applyBdAutoBackupOptOut(env)
 	if !cityUsesBdStoreContract(cityPath) {
 		return env, nil
 	}
+	if err := applyHostedBeadsCredentialEnv(env, cityPath); err != nil {
+		return env, err
+	}
 	if scopeBackendIsDoltlite(cityPath, cityPath) {
 		clearProjectedDoltEnv(env)
-		clearProjectedPostgresEnv(env)
 		env["GC_BEADS_BACKEND"] = "doltlite"
 		env["BEADS_BACKEND"] = "doltlite"
 		mirrorBeadsDoltEnv(env)
 		return env, nil
 	}
-	if usedPostgres, err := applyCityPostgresBackendEnv(env, cityPath); err != nil {
+	if bound, err := applyCityStorageBindingEnv(env, cityPath); err != nil {
 		clearProjectedDoltEnv(env)
-		clearProjectedPostgresEnv(env)
 		mirrorBeadsDoltEnv(env)
 		return env, err
-	} else if usedPostgres {
+	} else if bound {
 		return env, nil
 	}
-	if err := applyResolvedCityDoltEnv(env, cityPath, true); err != nil {
+	if err := applyResolvedCityDoltEnvContext(ctx, env, cityPath, allowRecovery); err != nil {
 		clearProjectedDoltEnv(env)
 		mirrorBeadsDoltEnv(env)
 		if isRecoverableManagedDoltEnvError(err) {
@@ -1302,30 +1792,82 @@ func cityIdentityAnchorsForCity(cityPath string) map[string]string {
 func cityRuntimeProcessEnvWithError(cityPath string) ([]string, error) {
 	cityPath = normalizePathForCompare(cityPath)
 	overrides := cityRuntimeEnvMapForCity(cityPath)
+	if err := applyWorkspacePinnedBdBinary(overrides, cityPath); err != nil {
+		return nil, err
+	}
 	var projectionErr error
+	var hostedBeads bool
 	if cityUsesBdStoreContract(cityPath) {
+		var err error
+		hostedBeads, err = citySelectsHostedBeadsCredentialProvider(cityPath)
+		if err != nil {
+			projectionErr = err
+		}
 		source := map[string]string{"BEADS_DOLT_AUTO_START": "0"}
+		applyBdContributorRoutingOptOut(source)
 		applyBdCLIRemoteSyncOptOut(source)
-		if usedPostgres, err := applyCityPostgresBackendEnv(source, cityPath); err != nil {
+		applyBdAutoBackupOptOut(source)
+		if err := applyHostedBeadsCredentialEnv(source, cityPath); err != nil {
+			projectionErr = err
+		}
+		if bound, err := applyCityStorageBindingEnv(source, cityPath); err != nil {
 			clearProjectedDoltEnv(source)
-			clearProjectedPostgresEnv(source)
 			mirrorBeadsDoltEnv(source)
 			projectionErr = err
-		} else if !usedPostgres {
+		} else if !bound {
 			err := applyResolvedCityDoltEnv(source, cityPath, false)
 			if err != nil {
+				// Mirror the storage-binding error branch: clearing the projected Dolt
+				// keys alone leaves BEADS_DOLT_SERVER_TLS unset in source, so it
+				// never reaches overrides and preserveHostedBeadsCredentialEnv
+				// re-injects the ambient hosted-gateway TLS=1 onto this
+				// local/plaintext fallback. mirrorBeadsDoltEnv stamps the
+				// non-external TLS="" clear so the fallback stays plaintext.
 				clearProjectedDoltEnv(source)
+				mirrorBeadsDoltEnv(source)
 			}
 		}
-		keys := execProjectedBackendEnvKeys()
-		keys = append(keys, "BEADS_DOLT_AUTO_START")
+		keys := execProjectedBackendCopyKeys()
+		// BEADS_DOLT_AUTO_START and BEADS_DOLT_SERVER_TLS are carried explicitly:
+		// neither is in execProjectedBackendCopyKeys. TLS is deliberately kept out
+		// of projectedDoltEnvKeys because it is a hosted-gateway credential
+		// passthrough (preserveHostedBeadsCredentialEnv must be able to keep an
+		// ambient value), but the scope mirror sets source[BEADS_DOLT_SERVER_TLS]=""
+		// for a non-external/local city. That cleared value has to reach overrides —
+		// present including empty — or preserveHostedBeadsCredentialEnv re-injects
+		// the ambient hosted-gateway TLS=1 and forces TLS against a plaintext local
+		// Dolt server.
+		keys = append(keys, "BEADS_DOLT_AUTO_START", "BEADS_DOLT_SERVER_TLS")
 		for _, key := range keys {
 			if value, ok := source[key]; ok {
 				overrides[key] = value
 			}
 		}
 	}
-	return mergeRuntimeEnv(processEnvSnapshotExcludingNativeDoltOpen(), overrides), projectionErr
+	environ := processEnvSnapshotExcludingNativeDoltOpen()
+	if hostedBeads {
+		environ = removeEnvKeyPrefix(environ, "BEADS_")
+	}
+	return mergeRuntimeEnv(environ, overrides), projectionErr
+}
+
+// applyWorkspacePinnedBdBinary carries a valid workspace bd pin into
+// controller and provider subprocess environments. Workspace.env is otherwise
+// session-scoped configuration; BD_BIN is special because managed lifecycle
+// scripts must use the same schema-compatible executable before any worker
+// session exists.
+func applyWorkspacePinnedBdBinary(env map[string]string, cityPath string) error {
+	if env == nil {
+		return nil
+	}
+	pinned, err := workspacePinnedBdBinaryOptional(cityPath)
+	if err != nil {
+		return err
+	}
+	if pinned != "" {
+		env["BD_BIN"] = pinned
+	}
+	return nil
 }
 
 func applyBdCLIRemoteSyncOptOut(env map[string]string) {
@@ -1337,7 +1879,77 @@ func applyBdCLIRemoteSyncOptOut(env map[string]string) {
 	}
 }
 
+// applyBdAutoBackupOptOut forces bd's PersistentPostRun auto-backup off for
+// gc-managed bd invocations. It overrides any ambient or per-scope config
+// value so a fresh or drifted rig store cannot re-enable the destructive
+// backup_export sync (ga-0eq). See bdAutoBackupOptOutEnvKeys.
+func applyBdAutoBackupOptOut(env map[string]string) {
+	if env == nil {
+		return
+	}
+	for _, key := range bdAutoBackupOptOutEnvKeys {
+		env[key] = "false"
+	}
+}
+
+// applyBdContributorRoutingOptOut forces bd's fork/contributor auto-routing
+// off for gc-managed bd invocations. It overrides any ambient or per-scope
+// routing.mode=auto config so a gcy-style store cannot siphon create/list/
+// update to ~/.beads-planning while sling/show read the scope store — the
+// three-way split brain documented on bdContributorRoutingOptOutEnvKeys.
+func applyBdContributorRoutingOptOut(env map[string]string) {
+	if env == nil {
+		return
+	}
+	for _, key := range bdContributorRoutingOptOutEnvKeys {
+		env[key] = "off"
+	}
+}
+
+// mirrorBeadsDoltEnv projects the GC_DOLT_* connection values onto the
+// BEADS_DOLT_SERVER_* names beadslib's in-process native store reads, and clears
+// the native-open TLS requirement. Clearing TLS is the safe default for every
+// non-external scope (doltlite, managed-local dolt, cleared/error
+// fallbacks): such a scope must never negotiate TLS, including a requirement
+// inherited from a hosted-gateway city env this scope's map was cloned from (rig
+// runtime env is built on top of the city env). A scope that resolves to an
+// external endpoint uses mirrorBeadsDoltScopeEnv instead, which carries TLS only
+// for a non-local hosted-gateway endpoint.
 func mirrorBeadsDoltEnv(env map[string]string) {
+	mirrorBeadsDoltServerEnv(env, false)
+}
+
+// mirrorBeadsDoltScopeEnv is mirrorBeadsDoltEnv keyed on a resolved Dolt target:
+// it carries the hosted-gateway BEADS_DOLT_SERVER_TLS requirement into the
+// native-open env only for a target that actually speaks hosted-gateway TLS — an
+// external endpoint with a non-local host (targetCarriesHostedGatewayTLS).
+// Callers that already hold the resolved DoltConnectionTarget use this so ambient
+// TLS reaches only genuine hosted gateways and never bleeds into a local/plaintext
+// scope, including an explicit or port-only 127.0.0.1 endpoint that resolves
+// External by topology but connects in the clear.
+func mirrorBeadsDoltScopeEnv(env map[string]string, target contract.DoltConnectionTarget) {
+	mirrorBeadsDoltServerEnv(env, targetCarriesHostedGatewayTLS(target))
+}
+
+// targetCarriesHostedGatewayTLS reports whether ambient BEADS_DOLT_SERVER_TLS
+// should be carried into target's native-open env. TLS is transport policy, not
+// endpoint topology: DoltConnectionTarget.External marks every non-managed
+// explicit/city-canonical endpoint — including a plaintext 127.0.0.1 or a
+// port-only legacy rig that populateExternalTarget/canonicalExternalHost default
+// to loopback — so gating the carry on External alone forces TLS onto plaintext
+// local endpoints and breaks them under a controller running with ambient
+// BEADS_DOLT_SERVER_TLS=1 (PR #4008 review finding). A hosted beads-gateway, the
+// only endpoint that terminates client TLS, is remote by construction, so the
+// carry is gated on an external endpoint with a non-local host. This is
+// deliberately narrower than the identity-deferral gate (which stays keyed on
+// External): deferral only Pass-marks and relies on beadslib's open-time identity
+// check, so it is safe for a local endpoint the plaintext probe can already
+// authenticate, whereas forcing TLS onto that same endpoint is not.
+func targetCarriesHostedGatewayTLS(target contract.DoltConnectionTarget) bool {
+	return target.External && !contract.DoltHostIsLocal(target.Host)
+}
+
+func mirrorBeadsDoltServerEnv(env map[string]string, carryAmbientTLS bool) {
 	if env == nil {
 		return
 	}
@@ -1365,6 +1977,87 @@ func mirrorBeadsDoltEnv(env map[string]string) {
 		env["BEADS_DOLT_PASSWORD"] = pass
 	} else {
 		delete(env, "BEADS_DOLT_PASSWORD")
+	}
+	// Carry the hosted beads-gateway credential command into the projected env.
+	// bd authenticates to the gateway by running the helper named in
+	// BEADS_DOLT_CREDENTIAL_COMMAND; without it bd falls back to the static/root
+	// user and the gateway rejects the connection (MySQL Error 1045). That key
+	// contains "CREDENTIAL", so execenv.FilterInherited strips it from every
+	// gc-spawned bd subprocess and agent session. preserveHostedBeadsCredentialEnv
+	// re-adds it on the slice-merge paths (overlayEnvEntries / mergeRuntimeEnv),
+	// but only when it is already present in the pre-filter environ and only on
+	// those paths — the agent session env is built from this projected map, which
+	// does not carry the ambient value, and a controller that exports the helper
+	// under only the non-sensitive GC_DOLT_CRED_CMD (which survives filtering) has
+	// nothing for that pass to preserve. Mirror GC_DOLT_CRED_CMD into
+	// BEADS_DOLT_CREDENTIAL_COMMAND here (map value wins, else the ambient value
+	// of either key) so bd authenticates the same way the in-process native store
+	// does.
+	//
+	// Two intentional asymmetries with the sibling BEADS_DOLT_* branches above,
+	// kept deliberately (do not "normalize" them into the map->map convention):
+	//  1. Ambient fallback via a bare os.Getenv: the external-endpoint TLS branch
+	//     (mirrorNativeDoltTLSEnv) also reads ambient env, but through the
+	//     ambientNativeDoltOpenEnv guard; this credential branch is the only one
+	//     that reads the ambient process env with a bare os.Getenv, because a
+	//     controller commonly exports only the helper and never seeds it into the
+	//     projected map.
+	//  2. Preserve-not-clear: when no source exists this branch leaves any
+	//     existing target value untouched instead of deleting/emptying it. The
+	//     siblings clear their target to defeat stale tmux inheritance; the
+	//     credential key is instead preserved from ambient by
+	//     preserveHostedBeadsCredentialEnv on the slice-merge paths, so clearing
+	//     it here would fight that pass.
+	if cred := strings.TrimSpace(env["GC_DOLT_CRED_CMD"]); cred != "" {
+		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = cred
+	} else if cred := strings.TrimSpace(env["BEADS_DOLT_CREDENTIAL_COMMAND"]); cred != "" {
+		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = cred
+	} else if ambient := strings.TrimSpace(os.Getenv("GC_DOLT_CRED_CMD")); ambient != "" {
+		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = ambient
+	} else if ambient := strings.TrimSpace(os.Getenv("BEADS_DOLT_CREDENTIAL_COMMAND")); ambient != "" {
+		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = ambient
+	}
+	mirrorNativeDoltTLSEnv(env, carryAmbientTLS)
+}
+
+// mirrorNativeDoltTLSEnv scopes the BEADS_DOLT_SERVER_TLS native-open requirement
+// to the resolved target, keeping the GC_DOLT_*->BEADS_DOLT_* projection in
+// mirrorBeadsDoltServerEnv flat and the TLS gate readable as one unit. Only a
+// hosted-gateway target (carryAmbientTLS, computed by targetCarriesHostedGatewayTLS)
+// negotiates TLS; every non-carry scope — non-external, and an external-but-local
+// plaintext endpoint — clears it.
+func mirrorNativeDoltTLSEnv(env map[string]string, carryAmbientTLS bool) {
+	if !carryAmbientTLS {
+		// Non-carry scope (non-external, or an external endpoint with a local host
+		// such as an explicit or port-only 127.0.0.1 rig): clear any TLS
+		// requirement — including one inherited from a hosted-gateway city env this
+		// map was cloned from, or a stale ambient value — so the native store, and
+		// the bd fallback built from the same map, connect with the scope's real
+		// (plaintext) transport instead of forcing TLS against a non-TLS server.
+		// Key kept present but empty (like the PORT projection in
+		// mirrorBeadsDoltServerEnv) so a child bd or reused map cannot resurrect it.
+		// TLS is not a DoltConnectionTarget field, so there is no GC_DOLT_* source
+		// to project.
+		env["BEADS_DOLT_SERVER_TLS"] = ""
+		return
+	}
+	// Hosted-gateway endpoint: carry the TLS requirement to the in-process native
+	// store. A hosted beads-gateway terminates client TLS and rejects plaintext
+	// ("TLS required"); the shell-out bd inherits BEADS_DOLT_SERVER_TLS from the
+	// ambient controller env, but the native store opens beadslib against this
+	// projected map, which CityRuntimeEnvMapForRuntimeDir builds fresh without the
+	// ambient value. An explicit scoped value wins; otherwise mirror it from the
+	// ambient process env — the same signal bd reads. Read the ambient value
+	// through the native-open env guard, not a bare os.Getenv: withNativeDoltOpenEnv
+	// mutates BEADS_DOLT_SERVER_TLS under nativeDoltOpenEnvMu, so an unguarded read
+	// here could observe a concurrent cross-scope open's transient TLS rather than
+	// the true ambient value.
+	if tls := strings.TrimSpace(env["BEADS_DOLT_SERVER_TLS"]); tls != "" {
+		env["BEADS_DOLT_SERVER_TLS"] = tls
+	} else if ambient := strings.TrimSpace(ambientNativeDoltOpenEnv("BEADS_DOLT_SERVER_TLS")); ambient != "" {
+		env["BEADS_DOLT_SERVER_TLS"] = ambient
+	} else {
+		env["BEADS_DOLT_SERVER_TLS"] = ""
 	}
 }
 
@@ -1395,6 +2088,7 @@ func overlayEnvEntries(environ []string, overrides map[string]string) []string {
 		out = removeEnvKey(out, key)
 		out = append(out, key+"="+overrides[key])
 	}
+	out = preserveHostedBeadsCredentialEnv(out, environ, overrides)
 	return out
 }
 
@@ -1408,11 +2102,6 @@ func mergeRuntimeEnv(environ []string, overrides map[string]string) []string {
 		"BEADS_DOLT_SERVER_HOST",
 		"BEADS_DOLT_SERVER_PORT",
 		"BEADS_DOLT_SERVER_USER",
-		"BEADS_POSTGRES_DATABASE",
-		"BEADS_POSTGRES_HOST",
-		"BEADS_POSTGRES_PASSWORD",
-		"BEADS_POSTGRES_PORT",
-		"BEADS_POSTGRES_USER",
 		"GC_CITY",
 		"GC_CITY_ROOT", // kept for stripping: no code emits this anymore, but inherited values must be cleaned
 		"GC_CITY_PATH",
@@ -1431,11 +2120,12 @@ func mergeRuntimeEnv(environ []string, overrides map[string]string) []string {
 		"GC_DOLT_STATE_FILE",
 		"GC_DOLT_USER",
 		"GC_PACK_STATE_DIR",
-		"GC_POSTGRES_PASSWORD",
 		"GC_RIG",
 		"GC_RIG_ROOT",
 	}
 	keys = appendBdCLIRemoteSyncOptOutEnvKeys(keys)
+	keys = appendBdAutoBackupOptOutEnvKeys(keys)
+	keys = appendBdContributorRoutingOptOutEnvKeys(keys)
 	if len(overrides) > 0 {
 		for key := range overrides {
 			if !containsString(keys, key) {
@@ -1455,6 +2145,82 @@ func mergeRuntimeEnv(environ []string, overrides map[string]string) []string {
 	sort.Strings(overrideKeys)
 	for _, key := range overrideKeys {
 		out = append(out, key+"="+overrides[key])
+	}
+	out = preserveHostedBeadsCredentialEnv(out, environ, overrides)
+	return out
+}
+
+// hostedBeadsCredentialPassthroughKeys are env vars the bd provider needs to
+// authenticate to a hosted beads-gateway: the credential command and the inputs
+// its helper (e.g. eia-helper) reads. Several contain execenv.IsSensitiveKey
+// markers (CREDENTIAL / TOKEN) and would otherwise be stripped by
+// FilterInherited, but they carry command/URL/path references — not secret
+// values (the orchestrator key itself stays in a file mount) — so they are
+// preserved explicitly for gc-spawned bd subprocesses.
+var hostedBeadsCredentialPassthroughKeys = []string{
+	"BEADS_DOLT_CREDENTIAL_COMMAND",
+	"BEADS_DOLT_SERVER_TLS",
+	registryCredentialProviderEnv,
+	"ORCHESTRATOR_KEY_FILE",
+	"EIA_AUDIENCE",
+	"EIA_SCOPES",
+	"STS_MACHINE_URL",
+	"STS_TOKEN_URL",
+}
+
+// githubTokenExecEnvKeys are the GitHub CLI auth env vars an exec order needs
+// to run `gh`. Merge orders (and other PR housekeeping) shell out to `gh`,
+// which authenticates from GH_TOKEN (preferred) or GITHUB_TOKEN. Both keys
+// contain the substring TOKEN, so execenv.IsSensitiveKey reports them sensitive
+// and the curated order-exec env — built from a map, then merged through
+// FilterInherited — never carries the controller's ambient token into the child
+// process. Every `gh` call the order runs then fails auth even though the
+// controller holds a valid token. GH_TOKEN wins over GITHUB_TOKEN in `gh`'s own
+// precedence, but both are projected independently when present.
+var githubTokenExecEnvKeys = []string{
+	"GH_TOKEN",
+	"GITHUB_TOKEN",
+}
+
+// projectGitHubTokenExecEnv copies the controller's ambient GitHub CLI auth
+// tokens into an exec-order env map so shelled-out `gh` invocations
+// authenticate. It mirrors the ambient value the same way mirrorBeadsDoltEnv
+// carries the hosted-gateway credential command, rather than weakening
+// execenv.IsSensitiveKey: keeping these keys sensitive means execenv.RedactText
+// still masks their values in captured exec output and logs. A value already in
+// the map (an explicit [order.env] entry) is left untouched so an order can
+// scope its own credential, and only non-empty ambient values are projected.
+func projectGitHubTokenExecEnv(env map[string]string) {
+	if env == nil {
+		return
+	}
+	for _, key := range githubTokenExecEnvKeys {
+		if strings.TrimSpace(env[key]) != "" {
+			continue
+		}
+		if ambient := strings.TrimSpace(os.Getenv(key)); ambient != "" {
+			env[key] = ambient
+		}
+	}
+}
+
+// preserveHostedBeadsCredentialEnv re-adds the hosted-gateway credential env
+// from the original (pre-filter) environ, unless an override already set the
+// key. Without this, FilterInherited drops the credential command (and the
+// STS token URL) and gc-spawned bd cannot reach a hosted beads-gateway.
+func preserveHostedBeadsCredentialEnv(out, environ []string, overrides map[string]string) []string {
+	for _, key := range hostedBeadsCredentialPassthroughKeys {
+		if _, ok := overrides[key]; ok {
+			continue
+		}
+		prefix := key + "="
+		for _, entry := range environ {
+			if strings.HasPrefix(entry, prefix) {
+				out = removeEnvKey(out, key)
+				out = append(out, entry)
+				break
+			}
+		}
 	}
 	return out
 }

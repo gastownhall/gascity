@@ -17,19 +17,24 @@ import (
 // records the (path, force) of every WorktreeRemove invocation so tests
 // can assert which directory the removal targeted.
 type fakeGitProbe struct {
-	isRepo         bool
-	hasUncommitted bool
-	hasUnpushed    bool
-	unpushedErr    error
-	hasStashes     bool
-	stashesErr     error
-	worktreeRemove func(path string, force bool) error
-	removedPath    string
-	removedForce   bool
-	removeInvoked  bool
+	isRepo           bool
+	currentBranch    string
+	currentBranchErr error
+	hasUncommitted   bool
+	hasUnpushed      bool
+	unpushedErr      error
+	hasStashes       bool
+	stashesErr       error
+	worktreeRemove   func(path string, force bool) error
+	removedPath      string
+	removedForce     bool
+	removeInvoked    bool
 }
 
-func (f *fakeGitProbe) IsRepo() bool             { return f.isRepo }
+func (f *fakeGitProbe) IsRepo() bool { return f.isRepo }
+func (f *fakeGitProbe) CurrentBranch() (string, error) {
+	return f.currentBranch, f.currentBranchErr
+}
 func (f *fakeGitProbe) HasUncommittedWork() bool { return f.hasUncommitted }
 func (f *fakeGitProbe) HasUnpushedCommitsResult() (bool, error) {
 	return f.hasUnpushed, f.unpushedErr
@@ -43,6 +48,35 @@ func (f *fakeGitProbe) WorktreeRemove(path string, force bool) error {
 		return f.worktreeRemove(path, force)
 	}
 	return nil
+}
+
+// assertWorktreeStaleMarker fails the test unless workerDir contains a
+// .worktree-stale marker recording the given branch and reason. Shared by
+// both the raw and session.Info test forms.
+func assertWorktreeStaleMarker(t *testing.T, workerDir, wantBranch, wantReason string) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(workerDir, worktreeStaleFileName))
+	if err != nil {
+		t.Fatalf("reading %s marker: %v", worktreeStaleFileName, err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "branch="+wantBranch) {
+		t.Errorf("marker content = %q, want to contain %q", content, "branch="+wantBranch)
+	}
+	if !strings.Contains(content, "reason="+wantReason) {
+		t.Errorf("marker content = %q, want to contain %q", content, "reason="+wantReason)
+	}
+}
+
+// assertNoWorktreeStaleMarker fails the test if workerDir contains a
+// .worktree-stale marker.
+func assertNoWorktreeStaleMarker(t *testing.T, workerDir string) {
+	t.Helper()
+	if _, err := os.ReadFile(filepath.Join(workerDir, worktreeStaleFileName)); err == nil {
+		t.Errorf("%s marker unexpectedly present in %s", worktreeStaleFileName, workerDir)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("checking %s marker: %v", worktreeStaleFileName, err)
+	}
 }
 
 // pruneTestFixture wires a temp city directory, a writable worker_dir
@@ -166,6 +200,7 @@ func TestPruneAgentHomeWorktreeIfSafe_LegacyWorkDirKey(t *testing.T) {
 		t.Fatalf("expected WorktreeRemove(%q, true) on rig root; got invoked=%v path=%q force=%v",
 			fx.workerDir, rigProbe.removeInvoked, rigProbe.removedPath, rigProbe.removedForce)
 	}
+	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }
 
 func TestPruneAgentHomeWorktreeIfSafe_OutsideWorktreesTree(t *testing.T) {
@@ -232,11 +267,12 @@ func TestPruneAgentHomeWorktreeIfSafe_NotARepo(t *testing.T) {
 	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
 		t.Fatal("prune returned true when IsRepo=false")
 	}
+	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }
 
 func TestPruneAgentHomeWorktreeIfSafe_HasUncommitted(t *testing.T) {
 	fx := newPruneFixture(t)
-	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, hasUncommitted: true})
+	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, hasUncommitted: true, currentBranch: "builder/ga-abc123"})
 
 	var stderr bytes.Buffer
 	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
@@ -245,11 +281,12 @@ func TestPruneAgentHomeWorktreeIfSafe_HasUncommitted(t *testing.T) {
 	if !strings.Contains(stderr.String(), "uncommitted changes") {
 		t.Errorf("expected uncommitted-reason log; got %q", stderr.String())
 	}
+	assertWorktreeStaleMarker(t, fx.workerDir, "builder/ga-abc123", "uncommitted-work")
 }
 
 func TestPruneAgentHomeWorktreeIfSafe_HasUnpushed(t *testing.T) {
 	fx := newPruneFixture(t)
-	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, hasUnpushed: true})
+	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, hasUnpushed: true, currentBranch: "builder/ga-def456"})
 
 	var stderr bytes.Buffer
 	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
@@ -258,6 +295,7 @@ func TestPruneAgentHomeWorktreeIfSafe_HasUnpushed(t *testing.T) {
 	if !strings.Contains(stderr.String(), "unpushed commits") {
 		t.Errorf("expected unpushed-reason log; got %q", stderr.String())
 	}
+	assertWorktreeStaleMarker(t, fx.workerDir, "builder/ga-def456", "unpushed-commits")
 }
 
 func TestPruneAgentHomeWorktreeIfSafe_UnpushedProbeError(t *testing.T) {
@@ -271,11 +309,12 @@ func TestPruneAgentHomeWorktreeIfSafe_UnpushedProbeError(t *testing.T) {
 	if !strings.Contains(stderr.String(), "unpushed probe failed") {
 		t.Errorf("expected unpushed-error log; got %q", stderr.String())
 	}
+	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }
 
 func TestPruneAgentHomeWorktreeIfSafe_HasStashes(t *testing.T) {
 	fx := newPruneFixture(t)
-	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, hasStashes: true})
+	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, hasStashes: true, currentBranch: "builder/ga-ghi789"})
 
 	var stderr bytes.Buffer
 	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
@@ -284,6 +323,7 @@ func TestPruneAgentHomeWorktreeIfSafe_HasStashes(t *testing.T) {
 	if !strings.Contains(stderr.String(), "stashed work") {
 		t.Errorf("expected stashes-reason log; got %q", stderr.String())
 	}
+	assertWorktreeStaleMarker(t, fx.workerDir, "builder/ga-ghi789", "stashed-work")
 }
 
 func TestPruneAgentHomeWorktreeIfSafe_StashProbeError(t *testing.T) {
@@ -297,6 +337,7 @@ func TestPruneAgentHomeWorktreeIfSafe_StashProbeError(t *testing.T) {
 	if !strings.Contains(stderr.String(), "stash probe failed") {
 		t.Errorf("expected stash-error log; got %q", stderr.String())
 	}
+	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }
 
 func TestPruneAgentHomeWorktreeIfSafe_RigPathUnresolved(t *testing.T) {
@@ -311,6 +352,7 @@ func TestPruneAgentHomeWorktreeIfSafe_RigPathUnresolved(t *testing.T) {
 	if !strings.Contains(stderr.String(), "rig path unresolved") {
 		t.Errorf("expected rig-unresolved log; got %q", stderr.String())
 	}
+	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }
 
 func TestPruneAgentHomeWorktreeIfSafe_RigPathEmpty(t *testing.T) {
@@ -325,6 +367,7 @@ func TestPruneAgentHomeWorktreeIfSafe_RigPathEmpty(t *testing.T) {
 	if !strings.Contains(stderr.String(), "rig path unresolved") {
 		t.Errorf("expected rig-unresolved log; got %q", stderr.String())
 	}
+	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }
 
 func TestPruneAgentHomeWorktreeIfSafe_RemoveFails(t *testing.T) {
@@ -342,6 +385,7 @@ func TestPruneAgentHomeWorktreeIfSafe_RemoveFails(t *testing.T) {
 	if !strings.Contains(stderr.String(), "pruning worker_dir") || !strings.Contains(stderr.String(), "locked") {
 		t.Errorf("expected removal-error log; got %q", stderr.String())
 	}
+	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }
 
 func TestPruneAgentHomeWorktreeIfSafe_HappyPath(t *testing.T) {
@@ -370,6 +414,7 @@ func TestPruneAgentHomeWorktreeIfSafe_HappyPath(t *testing.T) {
 	if !strings.Contains(stderr.String(), "pruned worker_dir") {
 		t.Errorf("expected success log; got %q", stderr.String())
 	}
+	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }
 
 func TestPruneAgentHomeWorktreeIfSafe_NilConfig(t *testing.T) {

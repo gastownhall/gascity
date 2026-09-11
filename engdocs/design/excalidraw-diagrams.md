@@ -2,6 +2,12 @@
 title: "Adopt Excalidraw as Standard Diagramming Tool"
 ---
 
+> This is the **tool** decision (which diagramming tool, and why). For the
+> editorial policy — *when* and *why* a docs page should carry a diagram at
+> all, and the prose/code/image balance — see
+> [Docs Organization § Media](../contributors/docs-organization.md#media-prose-code-and-images).
+> For the end-to-end mechanics see [Excalidraw Setup](../contributors/excalidraw-setup.md).
+
 ## Context
 
 The project has no established standard for diagrams. Three tools were evaluated side-by-side across four representative diagram types to pick one. The evaluation covered:

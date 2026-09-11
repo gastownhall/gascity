@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
@@ -152,9 +153,22 @@ func TestGraphWorkflowFailureRunsCleanup(t *testing.T) {
 func assertControlDispatcherLane(t *testing.T, cityDir string) {
 	t.Helper()
 
-	workflowTrace := readOptionalFile(filepath.Join(cityDir, ".gc", "runtime", "control-dispatcher-trace.log"))
-	if !strings.Contains(workflowTrace, "serve process bead=") {
-		t.Fatalf("control-dispatcher trace missing processed control bead evidence:\n%s", workflowTrace)
+	tracePaths := []string{
+		citylayout.ControlDispatcherTraceDefaultPath(cityDir),
+		citylayout.ControlDispatcherTraceDefaultPathFor(cityDir, "core.control-dispatcher"),
+	}
+	var traces []string
+	foundControlTrace := false
+	for _, path := range tracePaths {
+		trace := readOptionalFile(path)
+		if strings.Contains(trace, "serve process bead=") {
+			foundControlTrace = true
+			break
+		}
+		traces = append(traces, fmt.Sprintf("%s:\n%s", path, trace))
+	}
+	if !foundControlTrace {
+		t.Fatalf("control-dispatcher trace missing processed control bead evidence:\n%s", strings.Join(traces, "\n\n"))
 	}
 
 	workerTrace := readOptionalFile(filepath.Join(cityDir, "graph-workflow-trace.log"))
@@ -343,10 +357,22 @@ func waitForBeadClosed(t *testing.T, cityDir, beadID string, timeout time.Durati
 		sessionPeekOut = fmt.Sprintf("gc session peek worker failed: %v\noutput: %s", sessionPeekErr, sessionPeekOut)
 	}
 	traceOut := readOptionalFile(filepath.Join(cityDir, "graph-workflow-trace.log"))
-	workflowTraceOut := readOptionalFile(filepath.Join(cityDir, ".gc", "runtime", "control-dispatcher-trace.log"))
+	workflowTraceOut := readGraphWorkflowTraceFiles(cityDir)
 	t.Fatalf("waiting for bead %s to close failed: %v\nready:\n%s\nready worker:\n%s\nsessions:\n%s\nworker peek:\n%s\ntrace:\n%s\nworkflow trace:\n%s\nbeads:\n%s",
 		beadID, waitErr, readyOut, readyAssigneeOut, sessionListOut, sessionPeekOut, traceOut, workflowTraceOut, out)
 	return graphBead{}
+}
+
+func readGraphWorkflowTraceFiles(cityDir string) string {
+	tracePaths := []string{
+		citylayout.ControlDispatcherTraceDefaultPath(cityDir),
+		citylayout.ControlDispatcherTraceDefaultPathFor(cityDir, "core.control-dispatcher"),
+	}
+	var traces []string
+	for _, path := range tracePaths {
+		traces = append(traces, fmt.Sprintf("%s:\n%s", path, readOptionalFile(path)))
+	}
+	return strings.Join(traces, "\n\n")
 }
 
 func readOptionalFile(path string) string {

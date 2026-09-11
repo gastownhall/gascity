@@ -73,19 +73,20 @@ them under one application controller -- the same pattern as Erlang's
 
 ### Design principles alignment
 
-- **NDI (Nondeterministic Idempotence):** A machine-wide supervisor
-  converges all cities to their desired state on every tick, regardless
-  of which cities were added, removed, or crashed since the last tick.
-  The registry file is the desired state; running city supervisors are
-  the actual state.
+- **The system converges because work persists:** A machine-wide
+  supervisor converges all cities to their desired state on every tick,
+  regardless of which cities were added, removed, or crashed since the
+  last tick. The registry file is the desired state; running city
+  supervisors are the actual state.
 
 - **SDK self-sufficiency:** The machine supervisor is pure
   infrastructure. It does not require any user-configured agent role to
   function.
 
-- **Bitter Lesson:** A unified API surface gets MORE useful as models
-  improve -- agents can query cross-city state, external tools can
-  monitor all cities, dashboards can show a fleet view.
+- **A primitive must become more useful as models improve:** A unified
+  API surface gets MORE useful as models improve -- agents can query
+  cross-city state, external tools can monitor all cities, dashboards can
+  show a fleet view.
 
 ## Guide-Level Explanation
 

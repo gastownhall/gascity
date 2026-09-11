@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -72,12 +73,12 @@ func TestPhase0WorkflowRouting_TemplateAssigneeRejected(t *testing.T) {
 		},
 	}
 
-	err = decorateGraphWorkflowRecipe(recipe, graphWorkflowRouteVars(recipe, nil), "frontend/claude", claudeBead.Metadata["session_name"], store, cfg.Workspace.Name, "", cfg)
+	err = graphroute.DecorateGraphWorkflowRecipe(recipe, graphroute.GraphWorkflowRouteVars(recipe, nil), "", "", "", "", "frontend/claude", claudeBead.Metadata["session_name"], store, cfg.Workspace.Name, cfg, cliGraphrouteDeps(""))
 	if err == nil {
-		t.Fatal("decorateGraphWorkflowRecipe unexpectedly succeeded for template assignee")
+		t.Fatal("graphroute.DecorateGraphWorkflowRecipe unexpectedly succeeded for template assignee")
 	}
 	if got := err.Error(); got == "" || !strings.Contains(got, "use gc.run_target for config routing") {
-		t.Fatalf("decorateGraphWorkflowRecipe error = %q, want gc.run_target guidance", got)
+		t.Fatalf("graphroute.DecorateGraphWorkflowRecipe error = %q, want gc.run_target guidance", got)
 	}
 }
 
@@ -124,8 +125,8 @@ func TestPhase0WorkflowRouting_DirectNamedSessionAssigneeMaterializesToConcreteB
 		},
 	}
 
-	if err := decorateGraphWorkflowRecipe(recipe, graphWorkflowRouteVars(recipe, nil), "frontend/worker", "s-test-city-frontend-worker", store, cfg.Workspace.Name, cityPath, cfg); err != nil {
-		t.Fatalf("decorateGraphWorkflowRecipe: %v", err)
+	if err := graphroute.DecorateGraphWorkflowRecipe(recipe, graphroute.GraphWorkflowRouteVars(recipe, nil), "", "", "", "", "frontend/worker", "s-test-city-frontend-worker", store, cfg.Workspace.Name, cfg, cliGraphrouteDeps(cityPath)); err != nil {
+		t.Fatalf("graphroute.DecorateGraphWorkflowRecipe: %v", err)
 	}
 
 	review := recipe.StepByID("demo.review")
@@ -223,21 +224,21 @@ func TestPhase0WorkflowRouting_ControlStepPreservesExecutionConfigLane(t *testin
 		},
 	}
 
-	if err := decorateGraphWorkflowRecipe(recipe, graphWorkflowRouteVars(recipe, nil), "frontend/claude", claudeBead.Metadata["session_name"], store, cfg.Workspace.Name, "", cfg); err != nil {
-		t.Fatalf("decorateGraphWorkflowRecipe: %v", err)
+	if err := graphroute.DecorateGraphWorkflowRecipe(recipe, graphroute.GraphWorkflowRouteVars(recipe, nil), "", "", "", "", "frontend/claude", claudeBead.Metadata["session_name"], store, cfg.Workspace.Name, cfg, cliGraphrouteDeps("")); err != nil {
+		t.Fatalf("graphroute.DecorateGraphWorkflowRecipe: %v", err)
 	}
 
 	check := recipe.StepByID("demo.run-scope-check")
 	if check == nil {
 		t.Fatal("scope-check step missing after decorate")
 	}
-	if got := check.Assignee; got != "frontend--control-dispatcher" {
-		t.Fatalf("scope-check assignee = %q, want frontend--control-dispatcher", got)
+	if got := check.Assignee; got != "" {
+		t.Fatalf("scope-check assignee = %q, want empty routed control-dispatcher queue", got)
 	}
-	if got := check.Metadata["gc.routed_to"]; got != "" {
-		t.Fatalf("scope-check gc.routed_to = %q, want empty direct dispatcher assignee", got)
+	if got := check.Metadata["gc.routed_to"]; got != "frontend/control-dispatcher" {
+		t.Fatalf("scope-check gc.routed_to = %q, want frontend/control-dispatcher", got)
 	}
-	if got := check.Metadata[graphExecutionRouteMetaKey]; got != "frontend/codex" {
+	if got := check.Metadata[graphroute.GraphExecutionRouteMetaKey]; got != "frontend/codex" {
 		t.Fatalf("scope-check execution route = %q, want frontend/codex", got)
 	}
 }

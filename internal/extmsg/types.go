@@ -96,12 +96,25 @@ const (
 	BindingEnded BindingStatus = "ended"
 )
 
-// SessionBindingRecord links a conversation to a session.
+// SessionBindingRecord links a conversation to a session or to a configured
+// agent identity. A binding is either a session binding (SessionID + SessionName)
+// or an agent binding (AgentName); exactly one target form is set.
+//
+// SessionID is the session bead ID a session binding currently resolves to. It
+// is volatile: a session that crashes and respawns under the same name gets a
+// fresh bead ID. SessionName is the stable identity the binding was created
+// under; it survives respawn and lets ResolveByConversation and the binding
+// reaper re-point the binding at the session's current live bead.
+//
+// AgentName defers session resolution to delivery time so the conversation
+// survives session retirement (delivery-time cold-wake).
 type SessionBindingRecord struct {
 	ID                string
 	SchemaVersion     int
 	Conversation      ConversationRef
 	SessionID         string
+	SessionName       string
+	AgentName         string
 	Status            BindingStatus
 	BoundAt           time.Time
 	ExpiresAt         *time.Time
@@ -339,13 +352,19 @@ type ConversationGroupRecord struct {
 }
 
 // ConversationGroupParticipant represents a participant in a conversation group.
+//
+// SessionID is the volatile session bead ID this participant currently resolves
+// to. SessionName is the stable identity the participant was registered under;
+// it survives session respawn and lets ResolveInbound/ResolveOutbound re-point
+// at the current live bead via resolveLiveSession.
 type ConversationGroupParticipant struct {
-	ID        string
-	GroupID   string
-	Handle    string
-	SessionID string
-	Public    bool
-	Metadata  map[string]string
+	ID          string
+	GroupID     string
+	Handle      string
+	SessionID   string
+	SessionName string
+	Public      bool
+	Metadata    map[string]string
 }
 
 // GroupRouteMatch classifies how a message was routed within a group.
@@ -358,8 +377,15 @@ const (
 	GroupRouteLastAddressed GroupRouteMatch = "last_addressed"
 	// GroupRouteDefault means the message was routed to the default participant.
 	GroupRouteDefault GroupRouteMatch = "default"
-	// GroupRouteNoMatch means no routing match was found.
+	// GroupRouteNoMatch means a group exists for the conversation but the
+	// message matched no routable participant (an explicit target that is not a
+	// participant, or no default/last-addressed handle). The conversation is
+	// still grouped, so callers must not fall back to a non-group route.
 	GroupRouteNoMatch GroupRouteMatch = "no_match"
+	// GroupRouteNoGroup means no group exists for the conversation, so group
+	// routing did not apply. Unlike GroupRouteNoMatch, the conversation is
+	// ungrouped and is eligible for a configured default route.
+	GroupRouteNoGroup GroupRouteMatch = "no_group"
 	// GroupRouteParticipantMatch means an outbound publish was authorized
 	// because the publishing session is a participant of the group bound
 	// to the conversation.
@@ -385,19 +411,29 @@ type GroupOutboundDecision struct {
 	Participant ConversationGroupParticipant
 }
 
-// BindInput is the input for creating a session binding.
+// BindInput is the input for creating a session binding. Exactly one of
+// SessionID (bind to a concrete session) or AgentName (bind to a configured
+// agent identity whose live session is resolved at delivery time) must be
+// set. Replace rebinds a conversation whose active binding targets someone
+// else (a handoff): the active binding is ended and the new one created
+// under the same conversation lock. Without Replace such a bind conflicts.
 type BindInput struct {
 	Conversation ConversationRef
 	SessionID    string
+	AgentName    string
+	Replace      bool
 	ExpiresAt    *time.Time
 	Metadata     map[string]string
 	Now          time.Time
 }
 
-// UnbindInput is the input for removing a session binding.
+// UnbindInput is the input for removing a session binding. SessionID and
+// AgentName filter which active bindings are removed; with a nil
+// Conversation, at least one of them selects the bindings to close.
 type UnbindInput struct {
 	Conversation *ConversationRef
 	SessionID    string
+	AgentName    string
 	Now          time.Time
 }
 

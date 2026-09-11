@@ -9,7 +9,7 @@
 | **Homebrew tap** (`gastownhall/gascity`) | `release.yml` writes an asset-based formula after archives upload | Yes |
 | **Homebrew core** (`Homebrew/homebrew-core`) | BrewTestBot autobump, once listed | Yes (~3h delay) |
 
-The homebrew-core submission is [in progress](https://github.com/Homebrew/homebrew-core). Until it lands and is added to the autobump list, users install via `brew install gastownhall/gascity/gascity`.
+The homebrew-core submission is [in progress](https://github.com/Homebrew/homebrew-core). Until it lands and is added to the autobump list, users install via `brew install gascity`.
 
 ## How to Release
 
@@ -38,6 +38,25 @@ The workflow creates the annotated RC tag if needed, builds GoReleaser
 archives for linux/darwin × amd64/arm64, and creates a GitHub **draft
 prerelease** with generated GoReleaser notes and downloadable assets. It does
 not update the Homebrew tap, create attestations, or mark the release latest.
+
+Tag creation on the dispatch path uses the **gastownhall-release-tagger**
+GitHub App (an `Integration` bypass actor on the "Protect release tags"
+ruleset), minted per-run from the `RELEASE_TAGGER_APP_ID` /
+`RELEASE_TAGGER_APP_PRIVATE_KEY` repository secrets — the workflow's default
+`GITHUB_TOKEN` is deliberately NOT a bypass actor, so arbitrary workflows
+cannot create, move, or delete `v*` tags. The tagger token is minted **only
+when the dispatch must create a new tag**; re-dispatching an already-existing
+RC tag re-drafts it without the tagger secrets. If the app secrets are missing
+on a create dispatch, the workflow fails with instructions instead of a bare
+`GH013`; the manual-tag path below always works for members of the
+release-maintainers bypass team.
+
+Because the tagger App token is a bypass actor, pushing the newly created tag
+re-fires `rc-release.yml` on that tag push. To avoid drafting the same RC
+twice, a dispatch that creates the tag stops after pushing it, and the
+resulting tag-push run is the one that builds the GoReleaser draft. A dispatch
+for a tag that already exists — and every direct tag push — goes straight to
+the draft build.
 
 You can also push an existing RC tag manually:
 
@@ -97,7 +116,7 @@ The release workflow automatically overwrites `Formula/gascity.rb` in the `gasto
 The tap formula installs prebuilt release assets, so users do not need Go or a source build:
 
 ```bash
-brew install gastownhall/gascity/gascity
+brew install gascity
 ```
 
 The intended long-term user-facing Homebrew path is homebrew-core:

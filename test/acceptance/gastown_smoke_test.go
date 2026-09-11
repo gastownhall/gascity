@@ -30,7 +30,7 @@ import (
 // initialized city, reducing redundant gc init calls.
 func TestGastownSmoke(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "gastown"))
 
 	t.Run("ConfigLoads", func(t *testing.T) {
 		cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(c.Dir, "city.toml"))
@@ -56,6 +56,15 @@ func TestGastownSmoke(t *testing.T) {
 			}
 		}
 
+		// The bundled gastown pack currently runs mayor, deacon, and boot as
+		// always+fresh, which the named-configured-sessions design says should
+		// warn. When the pack pin moves per that design, shrink this list.
+		expectedWarningConditions := []string{
+			`named_session "gastown.mayor"`,
+			`named_session "gastown.deacon"`,
+			`named_session "gastown.boot"`,
+		}
+		foundExpectedWarnings := make(map[string]bool, len(expectedWarningConditions))
 		var unexpectedWarnings []string
 		var foundGlobalFragmentsWarning bool
 		for _, warning := range prov.Warnings {
@@ -64,11 +73,28 @@ func TestGastownSmoke(t *testing.T) {
 					foundGlobalFragmentsWarning = true
 				}
 			} else {
-				unexpectedWarnings = append(unexpectedWarnings, warning)
+				foundExpected := false
+				for _, condition := range expectedWarningConditions {
+					if strings.Contains(warning, condition) &&
+						config.IsAlwaysFreshWakeModeWarning(warning) &&
+						!foundExpectedWarnings[condition] {
+						foundExpectedWarnings[condition] = true
+						foundExpected = true
+						break
+					}
+				}
+				if !foundExpected {
+					unexpectedWarnings = append(unexpectedWarnings, warning)
+				}
 			}
 		}
 		if len(unexpectedWarnings) > 0 {
 			t.Errorf("unexpected provenance warnings: %v", unexpectedWarnings)
+		}
+		for _, condition := range expectedWarningConditions {
+			if !foundExpectedWarnings[condition] {
+				t.Errorf("expected provenance warning containing %q", condition)
+			}
 		}
 		if !foundGlobalFragmentsWarning {
 			t.Error("expected gastown workspace.global_fragments deprecation warning")
@@ -76,10 +102,10 @@ func TestGastownSmoke(t *testing.T) {
 	})
 
 	t.Run("AllPromptTemplatesRender", func(t *testing.T) {
-		packsDir := filepath.Join(c.Dir, "packs")
+		packDir := gastownCachePackDir(t, c)
 		count := 0
 
-		err := filepath.Walk(packsDir, func(path string, info os.FileInfo, err error) error {
+		err := filepath.Walk(packDir, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				return err
 			}
@@ -87,7 +113,7 @@ func TestGastownSmoke(t *testing.T) {
 				return nil
 			}
 
-			rel, _ := filepath.Rel(c.Dir, path)
+			rel, _ := filepath.Rel(packDir, path)
 			t.Run(rel, func(t *testing.T) {
 				data, err := os.ReadFile(path)
 				if err != nil {
@@ -111,15 +137,15 @@ func TestGastownSmoke(t *testing.T) {
 			return nil
 		})
 		if err != nil {
-			t.Fatalf("walking packs dir: %v", err)
+			t.Fatalf("walking gastown pack cache dir: %v", err)
 		}
 		if count == 0 {
-			t.Fatal("no .template.md files found in packs/")
+			t.Fatal("no .template.md files found in the cached gastown pack")
 		}
 	})
 
 	t.Run("AllFormulasParse", func(t *testing.T) {
-		packsDir := filepath.Join(c.Dir, "packs")
+		packDir := gastownCachePackDir(t, c)
 		count := 0
 
 		type formulaStep struct {
@@ -132,7 +158,7 @@ func TestGastownSmoke(t *testing.T) {
 			Steps       []formulaStep `toml:"steps"`
 		}
 
-		err := filepath.Walk(packsDir, func(path string, info os.FileInfo, err error) error {
+		err := filepath.Walk(packDir, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				return err
 			}
@@ -140,7 +166,7 @@ func TestGastownSmoke(t *testing.T) {
 				return nil
 			}
 
-			// Only consider formulas under a packs/<pack>/formulas/ tree.
+			// Only consider formulas under the pack's formulas/ tree.
 			// Other TOML siblings (pack.toml, agents/*/agent.toml,
 			// commands/*/command.toml, doctor/*/doctor.toml, orders/*)
 			// must not be treated as formulas.
@@ -152,7 +178,7 @@ func TestGastownSmoke(t *testing.T) {
 				return nil
 			}
 
-			rel, _ := filepath.Rel(c.Dir, path)
+			rel, _ := filepath.Rel(packDir, path)
 			t.Run(rel, func(t *testing.T) {
 				data, err := os.ReadFile(path)
 				if err != nil {
@@ -171,18 +197,18 @@ func TestGastownSmoke(t *testing.T) {
 			return nil
 		})
 		if err != nil {
-			t.Fatalf("walking packs dir: %v", err)
+			t.Fatalf("walking gastown pack cache dir: %v", err)
 		}
 		if count == 0 {
-			t.Fatal("no formula .toml files found in packs/")
+			t.Fatal("no formula .toml files found in the cached gastown pack")
 		}
 	})
 
 	t.Run("AllScriptsExecutable", func(t *testing.T) {
-		packsDir := filepath.Join(c.Dir, "packs")
+		packDir := gastownCachePackDir(t, c)
 		count := 0
 
-		err := filepath.Walk(packsDir, func(path string, info os.FileInfo, err error) error {
+		err := filepath.Walk(packDir, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				return err
 			}
@@ -190,7 +216,7 @@ func TestGastownSmoke(t *testing.T) {
 				return nil
 			}
 
-			rel, _ := filepath.Rel(c.Dir, path)
+			rel, _ := filepath.Rel(packDir, path)
 			t.Run(rel, func(t *testing.T) {
 				if info.Mode()&0o111 == 0 {
 					t.Errorf("script %s is not executable (mode %o)", rel, info.Mode())
@@ -200,10 +226,10 @@ func TestGastownSmoke(t *testing.T) {
 			return nil
 		})
 		if err != nil {
-			t.Fatalf("walking packs dir: %v", err)
+			t.Fatalf("walking gastown pack cache dir: %v", err)
 		}
 		if count == 0 {
-			t.Fatal("no .sh scripts found in packs/")
+			t.Fatal("no .sh scripts found in the cached gastown pack")
 		}
 	})
 
@@ -261,7 +287,7 @@ func TestGastownSmoke_InitStatusStop(t *testing.T) {
 // rig-scoped agents appear in the expanded config.
 func TestGastownSmoke_WithRig(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "gastown"))
 
 	// Create a minimal git repo to serve as a rig.
 	rigDir := filepath.Join(helpers.TempDir(t), "myrig")

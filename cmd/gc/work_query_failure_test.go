@@ -87,16 +87,25 @@ func TestEmitWorkQueryFailureSkipsEmptySessionID(t *testing.T) {
 	}
 }
 
-func TestEmitWorkQueryFailureIgnoresOrdinaryErrors(t *testing.T) {
+// TestEmitWorkQueryFailureRecordsOrdinaryErrors: an ordinary non-zero exit used
+// to be classified un-recordable on the reasoning that it "already surfaces on
+// the caller's stderr path". Nothing supervises a worker's stderr, and `gc ready`
+// aborts the whole federated read when ANY leg errors — so a storage refusal or
+// a contended leg at the spawn instant was indistinguishable from a quiet city.
+// Every failed read is now a lifecycle fact; only a nil error is not.
+func TestEmitWorkQueryFailureRecordsOrdinaryErrors(t *testing.T) {
 	rec := &memRecorder{}
 	if emitWorkQueryFailure(rec, "gm-abc", "t", "cmd", nil) {
 		t.Fatal("nil error must not emit an event")
 	}
-	if emitWorkQueryFailure(rec, "gm-abc", "t", "cmd", errors.New("exit status 1")) {
-		t.Fatal("ordinary command error must not emit an event")
-	}
 	if len(rec.events) != 0 {
-		t.Fatalf("expected no events recorded, got %+v", rec.events)
+		t.Fatalf("expected no events recorded for a nil error, got %+v", rec.events)
+	}
+	if !emitWorkQueryFailure(rec, "gm-abc", "t", "cmd", errors.New("exit status 1")) {
+		t.Fatal("an ordinary command error must be recorded: a failed read is not an idle store")
+	}
+	if len(rec.events) != 1 {
+		t.Fatalf("expected exactly one event, got %+v", rec.events)
 	}
 }
 

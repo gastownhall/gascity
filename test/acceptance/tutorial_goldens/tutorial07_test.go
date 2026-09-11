@@ -43,6 +43,9 @@ title = "Check open PRs that need review"
 `, 0o644)
 	writeFile(t, filepath.Join(myCity, "formulas", "release-notes.toml"), `formula = "release-notes"
 
+[requires]
+formula_compiler = ">=2.0.0"
+
 [[steps]]
 id = "gather"
 title = "Gather merged PRs from the last week"
@@ -173,6 +176,9 @@ pool = "worker"
 		}
 		if !strings.Contains(out, "test-suite") {
 			t.Fatalf("order list should include test-suite:\n%s", out)
+		}
+		if !strings.Contains(out, "RIG") || !strings.Contains(out, "my-api") {
+			t.Fatalf("order list with a rig order should show the RIG column and owning rig:\n%s", out)
 		}
 	})
 

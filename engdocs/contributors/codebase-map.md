@@ -39,6 +39,6 @@ description: Key packages, ownership boundaries, and the fastest routes through 
 
 ### Changing docs or onboarding
 
-1. Update the Mintlify nav in `docs/docs.json` if the IA changed.
-2. Run `make check-docs`.
-3. Keep tutorials and landing pages aligned with real commands and real files.
+See [Docs Organization](docs-organization.md) for the full guide: section
+taxonomy, naming, registration, generated pages, and gates. Short version:
+register new or moved pages in `docs/docs.json`, then run `make check-docs`.

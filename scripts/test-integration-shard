@@ -3,13 +3,21 @@
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
-  echo "usage: $0 <packages|packages-core-N-of-M|packages-cmd-gc-N-of-M|packages-runtime-tmux-N-of-M|review-formulas|review-formulas-basic[-N-of-M]|review-formulas-retries[-N-of-M]|review-formulas-recovery|bdstore|rest|rest-smoke[-N-of-M]|rest-full[-N-of-M]|all>" >&2
+  echo "usage: $0 <packages|packages-core-N-of-M|packages-cmd-gc-integration|packages-cmd-gc-N-of-M|packages-runtime-tmux-N-of-M|review-formulas|review-formulas-basic[-N-of-M]|review-formulas-retries[-N-of-M]|review-formulas-recovery|bdstore|rest|rest-smoke[-N-of-M]|rest-full[-N-of-M]|all>" >&2
   exit 1
 fi
 
 shard="$1"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+
+# One shared seeded gitconfig for every nested test env; resolved once so the
+# env -i block below cannot drift from the Makefile (scripts/test-gitconfig-path).
+gc_test_gitconfig="$("$repo_root/scripts/test-gitconfig-path")"
+source "$repo_root/scripts/lib/common.sh"
+# shellcheck source=lib/test-slice.sh
+source "$repo_root/scripts/lib/test-slice.sh"
+gc_test_slice_reexec "$repo_root/scripts/test-integration-shard" "$@"
 
 timeout="${GO_TEST_TIMEOUT:-30m}"
 pkg="./test/integration"
@@ -20,32 +28,26 @@ gomodcache_val="$(go env GOMODCACHE)"
 gotmpdir_val="$(go env GOTMPDIR)"
 goroot_val="$(go env GOROOT)"
 
-# macOS: icu4c (a transitive go-icu-regex/Dolt CGO dependency) is keg-only
-# under Homebrew, so its headers/libs are not on the default CGO search path.
-# Mirror the Makefile's detection here so tests run via this script see the
-# same CGO paths as `make`. No-op on Linux and when icu4c is not installed.
+# Mirror the Makefile's CGO path detection here so tests run via this script
+# see the same system dependency paths as `make`.
 cgo_cppflags="${CGO_CPPFLAGS:-}"
 cgo_ldflags="${CGO_LDFLAGS:-}"
-if [[ "$(uname)" == "Darwin" ]]; then
-  icu_prefix="$(brew --prefix icu4c 2>/dev/null || true)"
-  if [[ -n "$icu_prefix" && "$cgo_cppflags" != *"-I${icu_prefix}/include"* ]]; then
-    cgo_cppflags="${cgo_cppflags:+$cgo_cppflags }-I${icu_prefix}/include"
-    cgo_ldflags="${cgo_ldflags:+$cgo_ldflags }-L${icu_prefix}/lib"
-  fi
-fi
+configure_cgo_platform_paths
 # Export so child scripts (e.g. test-go-test-shard) inherit the detected paths.
 export CGO_CPPFLAGS="${cgo_cppflags}"
 export CGO_LDFLAGS="${cgo_ldflags}"
 
-run_go_test() {
+run_go() {
   env -i \
     PATH="${PATH}" \
     HOME="${HOME:-}" \
     USER="${USER:-}" \
     LOGNAME="${LOGNAME:-}" \
     SHELL="${SHELL:-/bin/sh}" \
+    GIT_CONFIG_NOSYSTEM=1 \
+    GIT_CONFIG_GLOBAL="$gc_test_gitconfig" \
     LANG="${LANG:-C.UTF-8}" \
-    TMPDIR="${TMPDIR:-/tmp}" \
+    TMPDIR="${TMPDIR:-/var/tmp}" \
     XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
     GOPATH="${gopath_val}" \
     GOCACHE="${gocache_val}" \
@@ -68,7 +70,11 @@ run_go_test() {
     GC_FAST_UNIT=0 \
     CGO_CPPFLAGS="${cgo_cppflags}" \
     CGO_LDFLAGS="${cgo_ldflags}" \
-    go test "$@"
+    go "$@"
+}
+
+run_go_test() {
+  run_go test "$@"
 }
 
 formula_tests=(
@@ -98,11 +104,24 @@ review_formulas_recovery_tests=(
 rest_smoke_tests=(
   TestE2E_WorkspaceDefaults
   TestE2E_Hook_WithWork
-  TestE2E_MailCheck
   TestE2E_MultiAgent_PoolAndFixed
   TestGastown_ControllerStartStop
   TestGastown_PipelineHumanToWorker
   TestGraphWorkflowSuccessPath
+  TestIntegrationEnvForPinsRealHome
+  TestStandaloneBDEnvForDirIsolatesHome
+)
+
+# These are the top-level tests contributed only when cmd/gc is built with the
+# integration tag. Keep this manifest exact; scripts tests compare it with the
+# canonical linux/amd64 shard's tagged source declarations.
+cmd_gc_integration_tests=(
+  TestCapstoneIntegrationRealMinter
+  TestControllerDiscoversAddedCronOrderWithoutRestart
+  TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind
+  TestPhase2WorkerCoreRealTransportProof
+  TestRigAddIncludeResolvesScopedRegistryPackName
+  TestStorageGateServesACityFromItsBeadsWorkspace
 )
 
 join_regex() {
@@ -166,7 +185,21 @@ validate_modulo_shard() {
 }
 
 list_integration_tests() {
-  run_go_test -tags integration -list '^Test' "$pkg" | grep '^Test'
+  # Discovery is a network-and-compile step: module downloads happen inside
+  # the -list invocation, so a transient failure here must not masquerade as
+  # an empty test set — that is exactly how a runner hiccup turned into
+  # "no tests selected for shard rest-full-N-of-16" on whichever matrix jobs
+  # the hiccup hit. Capture with the status intact and retry once for the
+  # transient class; a second failure aborts the shard with the real reason.
+  local out
+  if ! out="$(run_go_test -tags integration -list '^Test' "$pkg")"; then
+    echo "listing integration tests failed; retrying once" >&2
+    if ! out="$(run_go_test -tags integration -list '^Test' "$pkg")"; then
+      echo "listing integration tests failed twice; refusing to shard an unknown test set" >&2
+      return 1
+    fi
+  fi
+  printf '%s\n' "$out" | grep '^Test' || true
 }
 
 validate_selected_tests() {
@@ -255,8 +288,19 @@ run_packages_cmd_gc_shard() {
 run_packages_runtime_tmux_shard() {
   local shard_index="$1"
   local shard_total="$2"
+  local goos_val
+  local goarch_val
   validate_modulo_shard "$shard_index" "$shard_total"
-  GO_TEST_TAGS=integration GO_TEST_TIMEOUT="$timeout" "$repo_root/scripts/test-go-test-shard" ./internal/runtime/tmux "$shard_index" "$shard_total"
+  goos_val="$(run_go env GOOS)"
+  goarch_val="$(run_go env GOARCH)"
+  if [[ "$goos_val" == "linux" && "$goarch_val" == "amd64" ]]; then
+    GO_TEST_MANIFEST="$repo_root/scripts/runtime-tmux-tests.manifest" GO_TEST_TAGS=integration GO_TEST_TIMEOUT="$timeout" "$repo_root/scripts/test-go-test-shard" ./internal/runtime/tmux "$shard_index" "$shard_total"
+  else
+    (
+      unset GO_TEST_MANIFEST
+      GO_TEST_TAGS=integration GO_TEST_TIMEOUT="$timeout" "$repo_root/scripts/test-go-test-shard" ./internal/runtime/tmux "$shard_index" "$shard_total"
+    )
+  fi
 }
 
 run_rest_smoke_shard() {
@@ -284,13 +328,19 @@ run_rest_full_shard_modulo() {
   local excluded excluded_name test_name
 
   excluded=""
-  for excluded_name in "${formula_tests[@]}" "${rest_smoke_tests[@]}" TestBdStoreConformance; do
+  for excluded_name in "${formula_tests[@]}" "${rest_smoke_tests[@]}" TestBdStoreConformance TestBdStoreMailWispInsert; do
     excluded+="${excluded_name}"$'\n'
   done
 
+  # Command substitution rather than process substitution: a process
+  # substitution's exit status is invisible to the parent even under
+  # `set -e`, so a failed discovery would silently yield an empty list and
+  # fail the shard with the wrong diagnosis.
+  local listed
+  listed="$(list_integration_tests)"
   while IFS= read -r test_name; do
-    all_tests+=("$test_name")
-  done < <(list_integration_tests)
+    [[ -n "$test_name" ]] && all_tests+=("$test_name")
+  done <<< "$listed"
 
   for test_name in "${all_tests[@]}"; do
     if ! printf '%s' "$excluded" | grep -Fxq -- "$test_name"; then
@@ -344,6 +394,9 @@ case "$shard" in
   packages)
     run_packages_shard
     ;;
+  packages-cmd-gc-integration)
+    run_pkg_tests ./cmd/gc "${cmd_gc_integration_tests[@]}"
+    ;;
   review-formulas)
     run_review_formulas_all
     ;;
@@ -360,7 +413,7 @@ case "$shard" in
     run_pkg_tests "$pkg" "${review_formulas_recovery_tests[@]}"
     ;;
   bdstore)
-    run_pkg_tests "$pkg" TestBdStoreConformance
+    run_pkg_tests "$pkg" TestBdStoreConformance TestBdStoreMailWispInsert
     ;;
   rest-smoke)
     run_rest_smoke_shard

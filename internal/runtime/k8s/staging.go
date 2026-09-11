@@ -83,7 +83,7 @@ func stageProviderOverlaysToPod(ctx context.Context, ops k8sOps, podName string,
 	defer os.RemoveAll(stageDir) //nolint:errcheck
 
 	seedExistingInstructions(cfg.WorkDir, stageDir, warn)
-	providers := runtime.OverlayProviderNames(cfg)
+	providers := runtime.EffectiveOverlayProviderNames(cfg)
 	for _, od := range cfg.PackOverlayDirs {
 		if err := stageProviderOverlay(od, stageDir, providers, "pack overlay", warn); err != nil {
 			return err

@@ -6,7 +6,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
@@ -15,7 +15,7 @@ import (
 // maintenance_disabled lets the CLI surface a targeted error instead of
 // collapsing it into the generic cache-not-live fallback bucket.
 func maintenanceDisabled() error {
-	return huma.Error503ServiceUnavailable("maintenance_disabled: [maintenance.dolt] enabled=false in city.toml")
+	return apierr.ServiceUnavailable.Msg("maintenance_disabled: [maintenance.dolt] enabled=false in city.toml")
 }
 
 // humaHandleMaintenanceStatus is the GET /v0/city/{city}/maintenance/status
@@ -192,9 +192,9 @@ func maintenanceConflictFromError(err error) error {
 		if encErr != nil {
 			enc = []byte(`{"type":"maintenance-in-progress"}`)
 		}
-		return huma.Error409Conflict("maintenance-in-progress: " + string(enc))
+		return apierr.OperationInProgress.Msg("maintenance-in-progress: " + string(enc))
 	}
-	return huma.Error500InternalServerError(err.Error())
+	return apierr.Internal.Msg(err.Error())
 }
 
 // maintenanceRunBodyFromRun converts a supervisor.MaintenanceRun into the

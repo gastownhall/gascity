@@ -32,7 +32,8 @@ type EventEmitRequest struct {
 // EventEmitInput is the Huma input for POST /v0/city/{cityName}/events.
 type EventEmitInput struct {
 	CityScope
-	Body EventEmitRequest
+	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
+	Body           EventEmitRequest
 }
 
 // EventEmitOutput is the response body for POST /v0/events.
@@ -96,6 +97,12 @@ type HeartbeatEvent struct {
 // Emitted whenever the session transitions between idle and in-turn states.
 type SessionActivityEvent struct {
 	Activity string `json:"activity" doc:"Session activity state: 'idle' or 'in-turn'." example:"idle"`
+}
+
+// SessionPendingClearedEvent reports that a previously pending interaction is
+// no longer awaiting a response.
+type SessionPendingClearedEvent struct {
+	RequestID string `json:"request_id" doc:"Request ID of the interaction that was cleared."`
 }
 
 // resolveAfterSeq returns the reconnect position from Last-Event-ID or after_seq.

@@ -6,6 +6,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -54,8 +55,8 @@ func TestPhase0WorkflowRouting_ConcreteSessionAssigneeBeatsTemplateCollision(t *
 		},
 	}
 
-	if err := decorateGraphWorkflowRecipe(recipe, graphWorkflowRouteVars(recipe, nil), "frontend/origin", "s-origin", store, cfg.Workspace.Name, "", cfg); err != nil {
-		t.Fatalf("decorateGraphWorkflowRecipe: %v", err)
+	if err := graphroute.DecorateGraphWorkflowRecipe(recipe, graphroute.GraphWorkflowRouteVars(recipe, nil), "", "", "", "", "frontend/origin", "s-origin", store, cfg.Workspace.Name, cfg, cliGraphrouteDeps("")); err != nil {
+		t.Fatalf("graphroute.DecorateGraphWorkflowRecipe: %v", err)
 	}
 
 	review := recipe.StepByID("demo.review")

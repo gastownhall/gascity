@@ -8,7 +8,6 @@ package gastown_test
 
 import (
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -52,7 +51,7 @@ func stripShellComments(s string) string {
 // non-fatal in-process diagnostic as an active step, and (3) not carry
 // the original "safe — does not kill the process" claim.
 func TestOperationalAwarenessFragmentNonFatalDiagnostic(t *testing.T) {
-	path := filepath.Join(exampleDir(), operationalAwarenessFragment)
+	path := gastownRel(operationalAwarenessFragment)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read %s: %v", operationalAwarenessFragment, err)

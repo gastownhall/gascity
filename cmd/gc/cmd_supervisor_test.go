@@ -6,8 +6,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"os/user"
@@ -29,6 +32,7 @@ import (
 	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
+	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
@@ -201,12 +205,7 @@ func startTestSupervisorSocket(t *testing.T, sockPath string, handler func(strin
 
 func shortTempDir(t *testing.T, prefix string) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", prefix)
-	if err != nil {
-		t.Fatalf("MkdirTemp(/tmp, %q): %v", prefix, err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) }) //nolint:errcheck
-	return dir
+	return testutil.ShortTempDir(t, prefix)
 }
 
 func installFakeSystemctl(t *testing.T) string {
@@ -480,6 +479,65 @@ func TestBuildSupervisorServiceDataTreatsPreserveSignalEnvAsFixed(t *testing.T) 
 	}
 	if count := strings.Count(systemdContent, supervisorPreserveSessionsOnSignalEnv); count != 1 {
 		t.Fatalf("systemd preserve env occurrences = %d, want 1:\n%s", count, systemdContent)
+	}
+}
+
+// TestBuildSupervisorServiceDataDoesNotPersistLogTeeByDefault pins the
+// install contract for GC_SUPERVISOR_LOG_TEE: gc-generated service files
+// redirect supervisor output into supervisor.log themselves, so the file is
+// already the single sink there and the tee opt-out is for hand-managed
+// units. The variable is not captured from the shell automatically.
+func TestBuildSupervisorServiceDataDoesNotPersistLogTeeByDefault(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("GC_SUPERVISOR_ENV", "")
+	t.Setenv(supervisorLogTeeEnv, "0")
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+	if got := supervisorServiceEnvMap(data.ExtraEnv); got[supervisorLogTeeEnv] != "" {
+		t.Fatalf("ExtraEnv[%s] = %q, want omitted without explicit opt-in (all env: %#v)", supervisorLogTeeEnv, got[supervisorLogTeeEnv], got)
+	}
+}
+
+// TestBuildSupervisorServiceDataPersistsLogTeeViaSupervisorEnvOptIn pins the
+// documented persistence escape hatch: GC_SUPERVISOR_ENV=GC_SUPERVISOR_LOG_TEE
+// carries the tee opt-out into generated launchd and systemd service files,
+// for operators who hand-edit the generated unit's output redirection.
+func TestBuildSupervisorServiceDataPersistsLogTeeViaSupervisorEnvOptIn(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("GC_SUPERVISOR_ENV", supervisorLogTeeEnv)
+	t.Setenv(supervisorLogTeeEnv, "0")
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+	if got := supervisorServiceEnvMap(data.ExtraEnv); got[supervisorLogTeeEnv] != "0" {
+		t.Fatalf("ExtraEnv[%s] = %q, want %q (all env: %#v)", supervisorLogTeeEnv, got[supervisorLogTeeEnv], "0", got)
+	}
+
+	launchdContent, err := renderSupervisorTemplate(supervisorLaunchdTemplate, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(launchdContent, "<key>"+supervisorLogTeeEnv+"</key>") {
+		t.Fatalf("launchd plist missing %s env:\n%s", supervisorLogTeeEnv, launchdContent)
+	}
+
+	systemdContent, err := renderSupervisorTemplate(supervisorSystemdTemplate, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(systemdContent, "Environment="+supervisorLogTeeEnv+`="0"`) {
+		t.Fatalf("systemd unit missing %s env:\n%s", supervisorLogTeeEnv, systemdContent)
 	}
 }
 
@@ -1705,9 +1763,21 @@ func TestInstallSupervisorSystemdWarmRefreshLeavesUnregisteredWorkspaceServices(
 
 	oldRun := supervisorSystemctlRun
 	oldActive := supervisorSystemctlActive
-	supervisorSystemctlRun = func(_ ...string) error { return nil }
+	var calls []string
+	supervisorSystemctlRun = func(args ...string) error {
+		calls = append(calls, strings.Join(args, " "))
+		return nil
+	}
 	supervisorSystemctlActive = func(service string) bool {
-		return service == unitName
+		if service != unitName {
+			return false
+		}
+		for _, call := range calls {
+			if call == "--user kill --kill-who=main --signal=SIGTERM "+unitName {
+				return false
+			}
+		}
+		return true
 	}
 	stubSupervisorRunningPreserveSignalReady(t, true)
 	t.Cleanup(func() {
@@ -1801,6 +1871,7 @@ func TestFindSupervisorWorkspaceServiceProcessesFiltersOwnershipAndRequiredEnv(t
 		"GC_CITY_PATH":              cityPath,
 		"GC_SERVICE_NAME":           "bridge",
 		"GC_SERVICE_STATE_ROOT":     serviceRoot,
+		"GC_SERVICE_SECRETS_DIR":    filepath.Join(serviceRoot, "secrets"),
 		"GC_SERVICE_SOCKET":         filepath.Join(t.TempDir(), "bridge.sock"),
 		"GC_CITY_RUNTIME_DIR":       filepath.Join(cityPath, ".gc", "runtime"),
 		"GC_SERVICE_RUN_ROOT":       filepath.Join(serviceRoot, "run"),
@@ -3999,10 +4070,29 @@ func TestWaitForSupervisorReadySucceedsWhenAlreadyReadyEvenWithZeroTimeout(t *te
 	}
 }
 
-func TestDoSupervisorStartAlreadyRunning(t *testing.T) {
-	if lu, err := user.LookupId(strconv.Itoa(os.Getuid())); err == nil && strings.TrimSpace(lu.HomeDir) != "" {
-		t.Setenv("HOME", lu.HomeDir) // prevent HOME-override guard from firing before the already-running check
+// pinRealHome points HOME at the invoking user's passwd home for the duration
+// of the test.
+//
+// A non-delegated `gc supervisor start` deliberately refuses to run when HOME
+// is overridden (platformSupervisorHomeOverrideError) because the platform
+// supervisor requires the real HOME. That guard is production behavior and must
+// not be weakened. Any test that drives a non-delegated start therefore has to
+// present the real HOME, or it trips the guard instead of exercising the
+// behavior under test — deterministically, in every harness that isolates
+// itself with a custom HOME (CI sandboxes, agent worktrees).
+//
+// Isolate supervisor state with GC_HOME, never by overriding HOME.
+func pinRealHome(t *testing.T) {
+	t.Helper()
+	lu, err := user.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil || strings.TrimSpace(lu.HomeDir) == "" {
+		return
 	}
+	t.Setenv("HOME", lu.HomeDir)
+}
+
+func TestDoSupervisorStartAlreadyRunning(t *testing.T) {
+	pinRealHome(t) // before the already-running check
 	t.Setenv("GC_HOME", t.TempDir())
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 
@@ -4023,9 +4113,7 @@ func TestDoSupervisorStartAlreadyRunning(t *testing.T) {
 }
 
 func TestDoSupervisorStartDetectsSupervisorOnFallbackSocket(t *testing.T) {
-	if lu, err := user.LookupId(strconv.Itoa(os.Getuid())); err == nil && strings.TrimSpace(lu.HomeDir) != "" {
-		t.Setenv("HOME", lu.HomeDir) // prevent HOME-override guard from firing before the already-running check
-	}
+	pinRealHome(t) // before the already-running check
 	gcHome := shortTempDir(t, "gc-home-")
 	runtimeDir := shortTempDir(t, "gc-run-")
 	t.Setenv("GC_HOME", gcHome)
@@ -4115,10 +4203,10 @@ func TestRunSupervisorSIGTERMPreservesSessionsEndToEnd(t *testing.T) {
 	var sigCh chan<- os.Signal
 	select {
 	case sigCh = <-sigChReady:
-	case <-time.After(2 * time.Second):
+	case <-time.After(hangBudget):
 		t.Fatalf("timed out waiting for supervisor signal hook; stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(hangBudget)
 	for time.Now().Before(deadline) && !strings.Contains(stdout.String(), "Launching city 'bright-lights'") {
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -4173,6 +4261,78 @@ func TestRunSupervisorFailsWhenAPIPortUnavailable(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "api: listen") {
 		t.Fatalf("stderr = %q, want API listen failure", stderr.String())
+	}
+}
+
+// TestRunSupervisorPortCollisionWithForeignHTTPBinderFallsThroughToExit1
+// covers the /health gate's discrimination case that the bare-listener test
+// above cannot: a binder that DOES speak HTTP on the shared port but is not
+// a gc supervisor (no {"status":"ok"} payload). EADDRINUSE alone must not be
+// treated as proof of a duplicate gc supervisor — only a positive /health
+// identification does (gc-r0k40, MAJOR-B).
+func TestRunSupervisorPortCollisionWithForeignHTTPBinderFallsThroughToExit1(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"hello":"world"}`) //nolint:errcheck
+	}))
+	defer foreign.Close()
+
+	_, port, err := net.SplitHostPort(strings.TrimPrefix(foreign.URL, "http://"))
+	if err != nil {
+		t.Fatalf("split foreign server addr: %v", err)
+	}
+	cfg := []byte("[supervisor]\nport = " + port + "\n")
+	if err := os.WriteFile(supervisor.ConfigPath(), cfg, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runSupervisor(&stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("runSupervisor code = %d, want 1 (foreign binder, not a duplicate); stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "api: listen") {
+		t.Fatalf("stderr = %q, want API listen failure", stderr.String())
+	}
+}
+
+// TestRunSupervisorPortCollisionWithRespondingGCSupervisorExitsDuplicate
+// covers the true-duplicate case: the binder on the shared port answers
+// /health like a gc supervisor, so runSupervisor must take the exit-3
+// duplicate path (gc-r0k40, MAJOR-B).
+func TestRunSupervisorPortCollisionWithRespondingGCSupervisorExitsDuplicate(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"status":"ok","version":"1.2.3","build_id":"deadbeef"}`) //nolint:errcheck
+	}))
+	defer other.Close()
+
+	_, port, err := net.SplitHostPort(strings.TrimPrefix(other.URL, "http://"))
+	if err != nil {
+		t.Fatalf("split other server addr: %v", err)
+	}
+	cfg := []byte("[supervisor]\nport = " + port + "\n")
+	if err := os.WriteFile(supervisor.ConfigPath(), cfg, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runSupervisor(&stdout, &stderr)
+	if code != supervisorExitCodePortInUse {
+		t.Fatalf("runSupervisor code = %d, want %d (duplicate gc supervisor); stderr=%q", code, supervisorExitCodePortInUse, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "already in use") {
+		t.Fatalf("stderr = %q, want port-in-use message", stderr.String())
 	}
 }
 
@@ -6083,6 +6243,152 @@ func TestCurrentUsernameForSystemdHintFallback(t *testing.T) {
 	})
 }
 
+// ensureSupervisorLinger: regression coverage for gascity#3683. Installing
+// the --user supervisor unit must enable systemd lingering so the supervisor
+// survives logout, with a loud warning (not a failed install) when linger
+// cannot be enabled.
+func TestEnsureSupervisorLinger(t *testing.T) {
+	oldUser := currentUserForSystemdHint
+	oldRun := supervisorLoginctlRun
+	oldEnabled := supervisorLingerEnabled
+	t.Cleanup(func() {
+		currentUserForSystemdHint = oldUser
+		supervisorLoginctlRun = oldRun
+		supervisorLingerEnabled = oldEnabled
+	})
+
+	t.Run("enables_when_disabled", func(t *testing.T) {
+		currentUserForSystemdHint = func() (*user.User, error) {
+			return &user.User{Username: "alice"}, nil
+		}
+		supervisorLingerEnabled = func(string) bool { return false }
+		var got []string
+		supervisorLoginctlRun = func(args ...string) error {
+			got = args
+			return nil
+		}
+		var stdout, stderr bytes.Buffer
+		ensureSupervisorLinger(&stdout, &stderr)
+		if want := []string{"enable-linger", "alice"}; !slices.Equal(got, want) {
+			t.Fatalf("loginctl args = %v, want %v", got, want)
+		}
+		if !strings.Contains(stdout.String(), "Enabled systemd lingering for alice") {
+			t.Fatalf("stdout = %q, want linger-enabled confirmation", stdout.String())
+		}
+		if stderr.Len() != 0 {
+			t.Fatalf("stderr = %q, want empty on success", stderr.String())
+		}
+	})
+
+	t.Run("skips_when_already_enabled", func(t *testing.T) {
+		currentUserForSystemdHint = func() (*user.User, error) {
+			return &user.User{Username: "alice"}, nil
+		}
+		supervisorLingerEnabled = func(string) bool { return true }
+		called := false
+		supervisorLoginctlRun = func(...string) error {
+			called = true
+			return nil
+		}
+		var stdout, stderr bytes.Buffer
+		ensureSupervisorLinger(&stdout, &stderr)
+		if called {
+			t.Fatalf("loginctl enable-linger must not run when linger is already enabled")
+		}
+		if stdout.Len() != 0 || stderr.Len() != 0 {
+			t.Fatalf("expected no output when already enabled; stdout=%q stderr=%q", stdout.String(), stderr.String())
+		}
+	})
+
+	t.Run("warns_when_enable_fails", func(t *testing.T) {
+		currentUserForSystemdHint = func() (*user.User, error) {
+			return &user.User{Username: "alice"}, nil
+		}
+		supervisorLingerEnabled = func(string) bool { return false }
+		supervisorLoginctlRun = func(...string) error { return errors.New("polkit denied") }
+		var stdout, stderr bytes.Buffer
+		ensureSupervisorLinger(&stdout, &stderr)
+		msg := stderr.String()
+		if !strings.Contains(msg, "could not enable systemd lingering for alice") ||
+			!strings.Contains(msg, "polkit denied") ||
+			!strings.Contains(msg, "sudo loginctl enable-linger alice") {
+			t.Fatalf("stderr = %q, want loud warning with cause and sudo remediation", msg)
+		}
+	})
+
+	t.Run("warns_when_user_unresolved", func(t *testing.T) {
+		currentUserForSystemdHint = func() (*user.User, error) {
+			return nil, errors.New("no current user")
+		}
+		supervisorLingerEnabled = func(string) bool {
+			t.Fatalf("must not query linger when the user is unresolved")
+			return false
+		}
+		supervisorLoginctlRun = func(...string) error {
+			t.Fatalf("must not run loginctl when the user is unresolved")
+			return nil
+		}
+		var stdout, stderr bytes.Buffer
+		ensureSupervisorLinger(&stdout, &stderr)
+		if !strings.Contains(stderr.String(), "could not resolve the current user") ||
+			!strings.Contains(stderr.String(), "sudo loginctl enable-linger <your-user>") {
+			t.Fatalf("stderr = %q, want unresolved-user warning with placeholder remediation", stderr.String())
+		}
+	})
+}
+
+// TestInstallSupervisorSystemdEnablesLinger pins that the normal install
+// path (not just the no-user-manager error path) enables lingering, the
+// regression in gascity#3683.
+func TestInstallSupervisorSystemdEnablesLinger(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("systemd path only applies on linux")
+	}
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+
+	data := &supervisorServiceData{
+		GCPath:        "/tmp/gc-new",
+		LogPath:       "/tmp/gc-home/supervisor.log",
+		GCHome:        "/tmp/gc-home",
+		XDGRuntimeDir: "/tmp/gc-run",
+		Path:          "/usr/local/bin:/usr/bin:/bin",
+	}
+
+	oldRun := supervisorSystemctlRun
+	oldActive := supervisorSystemctlActive
+	oldUser := currentUserForSystemdHint
+	oldEnabled := supervisorLingerEnabled
+	oldLoginctl := supervisorLoginctlRun
+	supervisorSystemctlRun = func(...string) error { return nil }
+	supervisorSystemctlActive = func(string) bool { return false }
+	currentUserForSystemdHint = func() (*user.User, error) {
+		return &user.User{Username: "alice"}, nil
+	}
+	supervisorLingerEnabled = func(string) bool { return false }
+	var lingerArgs []string
+	supervisorLoginctlRun = func(args ...string) error {
+		lingerArgs = args
+		return nil
+	}
+	t.Cleanup(func() {
+		supervisorSystemctlRun = oldRun
+		supervisorSystemctlActive = oldActive
+		currentUserForSystemdHint = oldUser
+		supervisorLingerEnabled = oldEnabled
+		supervisorLoginctlRun = oldLoginctl
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := installSupervisorSystemd(data, &stdout, &stderr); code != 0 {
+		t.Fatalf("installSupervisorSystemd code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if want := []string{"enable-linger", "alice"}; !slices.Equal(lingerArgs, want) {
+		t.Fatalf("loginctl args = %v, want %v (install must enable linger on the normal path)", lingerArgs, want)
+	}
+}
+
 // TestRunSupervisorEnsuresHomeDirAndWritesLog confirms the fix for the
 // "Supervisor logs: log file not found" symptom seen on first start under
 // systemd/launchd/container — where the original `gc supervisor start`
@@ -6156,6 +6462,173 @@ func TestRunSupervisorWarnsWhenLogTeeOpenFails(t *testing.T) {
 	}
 	if !strings.Contains(got, "stop after log setup") {
 		t.Fatalf("stderr = %q, want stubbed config failure", got)
+	}
+}
+
+// TestRunSupervisorLogTeeDisabledSkipsTeeFile confirms GC_SUPERVISOR_LOG_TEE=0
+// opts `gc supervisor run` out of teeing output into ~/.gc/supervisor.log so
+// the service manager's log (e.g. journald under systemd) is the single sink.
+func TestRunSupervisorLogTeeDisabledSkipsTeeFile(t *testing.T) {
+	gcHome := filepath.Join(t.TempDir(), "fresh-home")
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv(supervisorLogTeeEnv, "0")
+
+	oldLoadConfig := supervisorLoadConfig
+	supervisorLoadConfig = func(string) (supervisor.Config, error) {
+		return supervisor.Config{}, errors.New("stop after log setup")
+	}
+	t.Cleanup(func() { supervisorLoadConfig = oldLoadConfig })
+
+	var stdout, stderr bytes.Buffer
+	code := runSupervisor(&stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("runSupervisor code = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "stop after log setup") {
+		t.Fatalf("stderr = %q, want stubbed config failure", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "log tee disabled") {
+		t.Fatalf("stderr = %q, want explicit log-tee-disabled notice", stderr.String())
+	}
+
+	// The tee file must NOT have been created or written.
+	logPath := filepath.Join(gcHome, "supervisor.log")
+	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+		t.Fatalf("after runSupervisor with %s=0, %s must not exist; err=%v", supervisorLogTeeEnv, logPath, err)
+	}
+}
+
+// TestRunSupervisorLogTeeNonZeroValueKeepsTee confirms only the exact value
+// "0" disables the tee; any other value keeps the default behavior.
+func TestRunSupervisorLogTeeNonZeroValueKeepsTee(t *testing.T) {
+	gcHome := filepath.Join(t.TempDir(), "fresh-home")
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv(supervisorLogTeeEnv, "1")
+
+	oldLoadConfig := supervisorLoadConfig
+	supervisorLoadConfig = func(string) (supervisor.Config, error) {
+		return supervisor.Config{}, errors.New("stop after log setup")
+	}
+	t.Cleanup(func() { supervisorLoadConfig = oldLoadConfig })
+
+	var stdout, stderr bytes.Buffer
+	if code := runSupervisor(&stdout, &stderr); code != 1 {
+		t.Fatalf("runSupervisor code = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+
+	logPath := filepath.Join(gcHome, "supervisor.log")
+	logContent, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read supervisor log: %v", err)
+	}
+	if !strings.Contains(string(logContent), "stop after log setup") {
+		t.Fatalf("supervisor log = %q, want stubbed config failure", string(logContent))
+	}
+}
+
+// TestDoSupervisorLogsTeeDisabledWarnsAndTailsExistingFile confirms
+// `gc supervisor logs` still tails an existing log file when
+// GC_SUPERVISOR_LOG_TEE=0: most deployment shapes write the file via fd/unit
+// redirection regardless of the env, so refusing on env alone would misdirect
+// incident debugging away from live logs. A staleness warning goes to stderr.
+func TestDoSupervisorLogsTeeDisabledWarnsAndTailsExistingFile(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv(supervisorLogTeeEnv, "0")
+	if err := os.WriteFile(filepath.Join(gcHome, "supervisor.log"), []byte("redirected tee content\n"), 0o644); err != nil {
+		t.Fatalf("seed log: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doSupervisorLogs(50, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doSupervisorLogs code = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "redirected tee content") {
+		t.Fatalf("stdout = %q, want existing log file tailed", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), supervisorLogTeeEnv+"=0") {
+		t.Fatalf("stderr = %q, want %s=0 staleness warning", stderr.String(), supervisorLogTeeEnv)
+	}
+}
+
+// TestDoSupervisorLogsTeeDisabledRefusesWhenFileAbsent confirms the refusal
+// plus service-manager pointer is reserved for the case where the tee is
+// disabled and no log file exists: there is nothing to tail.
+func TestDoSupervisorLogsTeeDisabledRefusesWhenFileAbsent(t *testing.T) {
+	gcHome := filepath.Join(t.TempDir(), "fresh-home")
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv(supervisorLogTeeEnv, "0")
+
+	var stdout, stderr bytes.Buffer
+	code := doSupervisorLogs(50, false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doSupervisorLogs code = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty (nothing to tail)", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), supervisorLogTeeEnv+"=0") {
+		t.Fatalf("stderr = %q, want %s=0 mention", stderr.String(), supervisorLogTeeEnv)
+	}
+	if !strings.Contains(stderr.String(), "service manager log") {
+		t.Fatalf("stderr = %q, want service manager log pointer", stderr.String())
+	}
+}
+
+// TestSupervisorLogsTeeDisabledHint pins the operator-facing pointer:
+// journalctl on linux (with the unit name and the requested -n/-f flags),
+// no journalctl reference elsewhere.
+func TestSupervisorLogsTeeDisabledHint(t *testing.T) {
+	linuxHint := supervisorLogsTeeDisabledHint("linux", 50, false)
+	wantCmd := "journalctl --user -u " + supervisorSystemdServiceName() + " -n 50"
+	if !strings.Contains(linuxHint, wantCmd) {
+		t.Fatalf("linux hint = %q, want journalctl pointer %q", linuxHint, wantCmd)
+	}
+	if strings.Contains(linuxHint, "-n 50 -f") {
+		t.Fatalf("linux hint = %q, must not include -f without --follow", linuxHint)
+	}
+
+	followHint := supervisorLogsTeeDisabledHint("linux", 10, true)
+	if !strings.Contains(followHint, "-n 10 -f") {
+		t.Fatalf("follow hint = %q, want -f for --follow", followHint)
+	}
+
+	darwinHint := supervisorLogsTeeDisabledHint("darwin", 50, false)
+	if strings.Contains(darwinHint, "journalctl") {
+		t.Fatalf("darwin hint = %q, must not point at journalctl", darwinHint)
+	}
+	if !strings.Contains(darwinHint, supervisorLogTeeEnv) {
+		t.Fatalf("darwin hint = %q, want %s mention", darwinHint, supervisorLogTeeEnv)
+	}
+}
+
+// TestSupervisorLogsTeeDisabledWarning pins the warn-and-tail message printed
+// when the tee is disabled in the CLI's environment but the log file exists:
+// it names the env, the possibly-stale file, and (on linux) the journalctl
+// command with the requested -n/-f flags.
+func TestSupervisorLogsTeeDisabledWarning(t *testing.T) {
+	logPath := "/home/user/.gc/supervisor.log"
+	linuxWarning := supervisorLogsTeeDisabledWarning("linux", logPath, 50, false)
+	if !strings.Contains(linuxWarning, supervisorLogTeeEnv+"=0") {
+		t.Fatalf("linux warning = %q, want %s=0 mention", linuxWarning, supervisorLogTeeEnv)
+	}
+	if !strings.Contains(linuxWarning, logPath) {
+		t.Fatalf("linux warning = %q, want log path %q", linuxWarning, logPath)
+	}
+	wantCmd := "journalctl --user -u " + supervisorSystemdServiceName() + " -n 50"
+	if !strings.Contains(linuxWarning, wantCmd) {
+		t.Fatalf("linux warning = %q, want journalctl pointer %q", linuxWarning, wantCmd)
+	}
+
+	followWarning := supervisorLogsTeeDisabledWarning("linux", logPath, 10, true)
+	if !strings.Contains(followWarning, "-n 10 -f") {
+		t.Fatalf("follow warning = %q, want -f for --follow", followWarning)
+	}
+
+	darwinWarning := supervisorLogsTeeDisabledWarning("darwin", logPath, 50, false)
+	if strings.Contains(darwinWarning, "journalctl") {
+		t.Fatalf("darwin warning = %q, must not point at journalctl", darwinWarning)
 	}
 }
 

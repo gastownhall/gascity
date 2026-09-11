@@ -5,6 +5,14 @@ import (
 	"strings"
 )
 
+const idleSleepMaskedByIdleTimeoutWarningFragment = "idle_timeout and sleep_after_idle are both set; idle_timeout takes precedence"
+
+// IsIdleSleepMaskedByIdleTimeoutWarning reports whether warning describes the
+// supported idle-timeout precedence case where sleep_after_idle is masked.
+func IsIdleSleepMaskedByIdleTimeoutWarning(warning string) bool {
+	return strings.Contains(warning, idleSleepMaskedByIdleTimeoutWarningFragment)
+}
+
 // ValidateSemantics checks cross-entity semantic constraints in the config
 // and returns warnings for issues that cannot be caught by individual struct
 // validation. Unlike ValidateAgents (which returns hard errors), semantic
@@ -72,8 +80,8 @@ func ValidateSemantics(cfg *City, source string) []string {
 	for _, a := range cfg.Agents {
 		if a.IdleTimeout != "" && a.SleepAfterIdle != "" {
 			warnings = append(warnings, fmt.Sprintf(
-				"%s: agent %q: idle_timeout and sleep_after_idle are both set; idle_timeout takes precedence and sleep_after_idle only applies when the session survives the idle_timeout check",
-				source, a.QualifiedName()))
+				"%s: agent %q: %s and sleep_after_idle only applies when the session survives the idle_timeout check",
+				source, a.QualifiedName(), idleSleepMaskedByIdleTimeoutWarningFragment))
 		}
 	}
 

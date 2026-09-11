@@ -183,6 +183,9 @@ func (s *Server) humaHandleConfigValidate(_ context.Context, _ *ConfigValidateIn
 	if err := config.ValidateRigs(cfg.Rigs, config.EffectiveHQPrefix(cfg)); err != nil {
 		errors = append(errors, err.Error())
 	}
+	if err := config.ValidateWebhooks(cfg.Webhooks); err != nil {
+		errors = append(errors, err.Error())
+	}
 	if err := config.ValidateServices(cfg.Services); err != nil {
 		errors = append(errors, err.Error())
 	} else if err := workspacesvc.ValidateRuntimeSupport(cfg.Services); err != nil {

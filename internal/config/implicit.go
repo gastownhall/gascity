@@ -80,11 +80,35 @@ func ImplicitGCHome() string {
 	if strings.HasSuffix(os.Args[0], ".test") {
 		return ""
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(os.TempDir(), ".gc")
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".gc")
 	}
-	return filepath.Join(home, ".gc")
+	// Home unresolved. Never fall back to a fixed os.TempDir()/.gc: that path
+	// is shared and world-writable, so concurrent processes clobber each
+	// other's state and unrelated city scans pick it up as a real city
+	// (#3506). Hand out a process-unique directory instead.
+	if dir, err := os.MkdirTemp("", "gc-home-*"); err == nil {
+		return dir
+	}
+	// MkdirTemp failed, so the temp directory itself is unusable. Return a
+	// process-unique path under it rather than "" (which callers would join
+	// into a CWD-relative path, silently writing state to the wrong place) or
+	// the shared os.TempDir()/.gc that #3506 is about. The caller then fails
+	// loudly when it cannot create or write this path.
+	return filepath.Join(os.TempDir(), fmt.Sprintf("gc-home-%d", os.Getpid()))
+}
+
+// GlobalRepoCacheRoot returns the user-global repo cache root
+// (<GC_HOME>/cache/repos), honoring the GC_HOME override the same way
+// every other user-global path does. It errors when no GC_HOME is
+// resolvable (hermetic test binaries without GC_HOME set) instead of
+// silently touching the developer's real cache.
+func GlobalRepoCacheRoot() (string, error) {
+	gcHome := ImplicitGCHome()
+	if gcHome == "" {
+		return "", fmt.Errorf("no GC_HOME available to resolve the repo cache; set GC_HOME")
+	}
+	return filepath.Join(gcHome, "cache", "repos"), nil
 }
 
 // GlobalRepoCachePath returns the user-global cache path for a source+commit pair.

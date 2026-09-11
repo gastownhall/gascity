@@ -2,10 +2,14 @@ package genclient_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/api/genclient"
 )
 
 // TestGeneratedClientInSync regenerates client_gen.go from the live spec
@@ -51,6 +55,50 @@ func TestGeneratedClientInSync(t *testing.T) {
 		t.Errorf("generated client differs from committed file at %s", committedPath)
 		t.Errorf("regenerate via `go generate ./internal/api/genclient` and commit the result")
 	}
+}
+
+func TestEventStreamEnvelopePreservesTopologyPresence(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		deps        *[]string
+		wantPresent bool
+	}{
+		{name: "unknown"},
+		{name: "root", deps: ptrToStrings([]string{}), wantPresent: true},
+		{name: "dependent", deps: ptrToStrings([]string{"build"}), wantPresent: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			encoded, err := json.Marshal(genclient.EventStreamEnvelope{DependsOnStepIds: tc.deps})
+			if err != nil {
+				t.Fatalf("marshal envelope: %v", err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(encoded, &fields); err != nil {
+				t.Fatalf("unmarshal fields: %v", err)
+			}
+			_, present := fields["depends_on_step_ids"]
+			if present != tc.wantPresent {
+				t.Fatalf("topology field present = %v, want %v; JSON = %s", present, tc.wantPresent, encoded)
+			}
+
+			var decoded genclient.EventStreamEnvelope
+			if err := json.Unmarshal(encoded, &decoded); err != nil {
+				t.Fatalf("unmarshal envelope: %v", err)
+			}
+			if !sameStepDependencies(decoded.DependsOnStepIds, tc.deps) {
+				t.Fatalf("round-trip dependencies = %#v, want %#v", decoded.DependsOnStepIds, tc.deps)
+			}
+		})
+	}
+}
+
+func ptrToStrings(values []string) *[]string { return &values }
+
+func sameStepDependencies(got, want *[]string) bool {
+	if got == nil || want == nil {
+		return got == nil && want == nil
+	}
+	return slices.Equal(*got, *want)
 }
 
 // findRepoRoot walks up from the current working directory until it

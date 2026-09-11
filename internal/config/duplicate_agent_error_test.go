@@ -402,78 +402,10 @@ scope = "city"
 	}
 }
 
-// TestValidateAgents_FallbackSuppressesV1V2Migration asserts that when
-// one side of the v1/v2 pair carries fallback=true, the fallback agent
-// is removed by resolveFallbackAgents BEFORE ValidateAgents runs, so
-// no migration error fires. Pinned via the full LoadWithIncludes path
-// because resolveFallbackAgents is composition-layer machinery.
-func TestValidateAgents_FallbackSuppressesV1V2Migration(t *testing.T) {
-	t.Setenv("GC_HOME", t.TempDir())
-	cityDir := t.TempDir()
-
-	// User pack: v1 [[agent]] mayor with fallback=true.
-	userPack := filepath.Join(cityDir, "packs", "user")
-	if err := os.MkdirAll(userPack, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(userPack, "pack.toml"), []byte(`
-[pack]
-name = "user"
-schema = 1
-
-[[agent]]
-name = "mayor"
-scope = "city"
-fallback = true
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	// System pack: v2 agents/mayor/agent.toml.
-	sysPack := filepath.Join(cityDir, "packs", "sys")
-	mayorDir := filepath.Join(sysPack, "agents", "mayor")
-	if err := os.MkdirAll(mayorDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(sysPack, "pack.toml"), []byte(`
-[pack]
-name = "sys"
-schema = 1
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(mayorDir, "agent.toml"), []byte(`
-scope = "city"
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
-[workspace]
-name = "test"
-
-[pack]
-name = "city"
-schema = 1
-includes = ["packs/user", "packs/sys"]
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
-	if err != nil {
-		t.Fatalf("LoadWithIncludes: %v — fallback should suppress the v1/v2 collision", err)
-	}
-	if err := ValidateAgents(cfg.Agents); err != nil {
-		t.Fatalf("ValidateAgents: %v — fallback should suppress the v1/v2 collision", err)
-	}
-}
-
 // TestValidateAgents_NoEmptyQuotesAcrossAllSourceCombos sweeps over all
 // source-enum × SourceDir-empty/present combinations and asserts that no
 // duplicate-agent error rendered by ValidateAgents contains an empty quoted
-// "" path. This is the fallback-suppression invariant the architecture
-// pins.
+// "" path.
 func TestValidateAgents_NoEmptyQuotesAcrossAllSourceCombos(t *testing.T) {
 	sources := []agentSource{sourceUnknown, sourceInline, sourcePack, sourceAutoImport}
 	srcDirs := []string{"", "packs/base"}

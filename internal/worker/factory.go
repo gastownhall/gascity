@@ -7,8 +7,10 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/pricing"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/usage"
 )
 
 // SessionRuntimeResolver resolves provider/runtime details for an existing
@@ -23,8 +25,16 @@ type FactoryConfig struct {
 	CityPath              string
 	SearchPaths           []string
 	Recorder              events.Recorder
+	UsageSink             usage.Sink
 	ResolveTransport      func(template, provider string) string
 	ResolveSessionRuntime SessionRuntimeResolver
+	// StaleKeyDetectionWaiter supplies the session lifecycle signal used before
+	// a keyed start is probed for stale resume-key failure. Nil preserves the
+	// session package production timer.
+	StaleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter
+	// Pricing estimates per-invocation cost for telemetry. Nil falls back
+	// to the registry built from shipped defaults.
+	Pricing *pricing.Registry
 }
 
 // Factory centralizes worker-boundary object construction for callers such as
@@ -35,38 +45,40 @@ type Factory struct {
 	provider              runtime.Provider
 	searchPaths           []string
 	recorder              events.Recorder
+	usageSink             usage.Sink
 	resolveSessionRuntime SessionRuntimeResolver
+	pricing               *pricing.Registry
 }
 
 // NewFactory constructs a Factory backed by a session.Manager configured for
 // the caller's city/runtime context.
 func NewFactory(cfg FactoryConfig) (*Factory, error) {
-	var manager *sessionpkg.Manager
-	switch {
-	case cfg.ResolveTransport != nil:
-		manager = sessionpkg.NewManagerWithTransportResolverAndCityPath(
-			cfg.Store,
-			cfg.Provider,
-			cfg.CityPath,
-			cfg.ResolveTransport,
-		)
-	case cfg.CityPath != "":
-		manager = sessionpkg.NewManagerWithCityPath(cfg.Store, cfg.Provider, cfg.CityPath)
-	default:
-		manager = sessionpkg.NewManager(cfg.Store, cfg.Provider)
+	opts := make([]sessionpkg.ManagerOption, 0, 3)
+	if cfg.CityPath != "" || cfg.ResolveTransport != nil {
+		opts = append(opts, sessionpkg.WithCityPath(cfg.CityPath))
 	}
-	return newFactory(manager, cfg.Store, cfg.Provider, cfg.SearchPaths, cfg.Recorder, cfg.ResolveSessionRuntime)
+	if cfg.ResolveTransport != nil {
+		opts = append(opts, sessionpkg.WithTransportResolver(cfg.ResolveTransport))
+	}
+	if cfg.StaleKeyDetectionWaiter != nil {
+		opts = append(opts, sessionpkg.WithStaleKeyDetectionWaiter(cfg.StaleKeyDetectionWaiter))
+	}
+	manager := sessionpkg.NewManagerWithOptions(cfg.Store, cfg.Provider, opts...)
+	return newFactory(manager, cfg.Store, cfg.Provider, cfg.SearchPaths, cfg.Recorder, cfg.UsageSink, cfg.ResolveSessionRuntime, cfg.Pricing)
 }
 
 // NewFactoryFromManager wraps an already-constructed session manager behind the
 // worker boundary. Primarily useful in tests.
 func NewFactoryFromManager(manager *sessionpkg.Manager, searchPaths []string) (*Factory, error) {
-	return newFactory(manager, nil, nil, searchPaths, nil, nil)
+	return newFactory(manager, nil, nil, searchPaths, nil, nil, nil, nil)
 }
 
-func newFactory(manager *sessionpkg.Manager, store beads.Store, provider runtime.Provider, searchPaths []string, recorder events.Recorder, resolveRuntime SessionRuntimeResolver) (*Factory, error) {
+func newFactory(manager *sessionpkg.Manager, store beads.Store, provider runtime.Provider, searchPaths []string, recorder events.Recorder, usageSink usage.Sink, resolveRuntime SessionRuntimeResolver, registry *pricing.Registry) (*Factory, error) {
 	if manager == nil {
 		return nil, fmt.Errorf("%w: manager is required", ErrHandleConfig)
+	}
+	if usageSink == nil {
+		usageSink = usage.Discard
 	}
 	return &Factory{
 		manager:               manager,
@@ -74,7 +86,9 @@ func newFactory(manager *sessionpkg.Manager, store beads.Store, provider runtime
 		provider:              provider,
 		searchPaths:           append([]string(nil), searchPaths...),
 		recorder:              recorder,
+		usageSink:             usageSink,
 		resolveSessionRuntime: resolveRuntime,
+		pricing:               registry,
 	}, nil
 }
 
@@ -84,6 +98,15 @@ func (f *Factory) Catalog() (*SessionCatalog, error) {
 	return NewSessionCatalog(f.manager)
 }
 
+// UsageSink returns the usage-fact sink the factory threads into every handle it
+// constructs. Never nil: usage.Discard when usage is disabled or unset.
+func (f *Factory) UsageSink() usage.Sink {
+	if f.usageSink == nil {
+		return usage.Discard
+	}
+	return f.usageSink
+}
+
 // Session returns a worker-owned session handle backed by the factory's
 // session manager and transcript search paths.
 func (f *Factory) Session(spec SessionSpec) (*SessionHandle, error) {
@@ -91,28 +114,51 @@ func (f *Factory) Session(spec SessionSpec) (*SessionHandle, error) {
 		Manager:     f.manager,
 		SearchPaths: append([]string(nil), f.searchPaths...),
 		Recorder:    f.recorder,
+		UsageSink:   f.usageSink,
 		Session:     spec,
+		Pricing:     f.pricing,
 	})
 }
 
 // SessionByID rebuilds a session-backed worker handle from persisted session
-// metadata and the factory's optional resolved-runtime hook.
+// metadata and the factory's optional resolved-runtime hook. It is retained as
+// the established API name; the construction lives in SessionByHandle.
 func (f *Factory) SessionByID(id string) (Handle, error) {
-	info, bead, err := f.manager.GetWithBead(id)
+	return f.SessionByHandle(id)
+}
+
+// SessionByHandle rebuilds a session-backed worker handle from a bead-id handle:
+// one session.Store.GetPersistedResponse fetch (the same single-fetch cost as
+// the retired Manager.GetWithBead) for the persisted Info + PersistedResponse,
+// the read-path empty-type heal, and the runtime overlay (EnrichInfo), then the
+// spec build off (Info, PersistedResponse). No raw beads.Bead crosses the
+// boundary.
+func (f *Factory) SessionByHandle(id string) (Handle, error) {
+	info, pr, err := sessionRecordViaManager(f.manager, id)
 	if err != nil {
 		return nil, err
 	}
-	return f.sessionFromInfoAndBead(info, bead)
+	return f.sessionFromRecord(info, pr)
 }
 
-// SessionByLoadedBead is like SessionByID but uses an already-loaded bead,
-// avoiding a redundant store.Get for callers that just resolved it (e.g.
-// via session.ResolveSessionBeadByExactID).
-func (f *Factory) SessionByLoadedBead(bead beads.Bead) (Handle, error) {
-	return f.sessionFromInfoAndBead(f.manager.SessionInfoFromBead(bead), bead)
+// SessionByRecord builds a session-backed worker handle from an already-resolved
+// session record (Info + PersistedResponse), avoiding a redundant store.Get for
+// callers that just resolved it (e.g. via session.ResolveSessionRecordByExactID).
+// It applies the runtime overlay (EnrichInfo) to the persisted Info so the
+// resolved-runtime hook sees the same enriched Info the retired
+// SessionByLoadedBead path produced (which enriched via Manager.SessionInfoFromBead).
+//
+// This deliberately deviates from the work-items' SessionByInfo(info): the spec
+// build passes the FULL persisted metadata map (via PersistedResponse.Metadata)
+// into the SessionRuntimeResolver hook — the t3bridge fork boundary whose
+// signature must not change. A bare SessionByInfo could not reconstruct that map
+// and would force a hidden re-Get; PersistedResponse.Metadata is the documented
+// typed envelope for exactly this.
+func (f *Factory) SessionByRecord(info sessionpkg.Info, pr sessionpkg.PersistedResponse) (Handle, error) {
+	return f.sessionFromRecord(f.manager.EnrichInfo(info), pr)
 }
 
-func (f *Factory) sessionFromInfoAndBead(info sessionpkg.Info, bead beads.Bead) (Handle, error) {
+func (f *Factory) sessionFromRecord(info sessionpkg.Info, pr sessionpkg.PersistedResponse) (Handle, error) {
 	spec := SessionSpec{
 		ID:       info.ID,
 		Template: info.Template,
@@ -127,11 +173,11 @@ func (f *Factory) sessionFromInfoAndBead(info sessionpkg.Info, bead beads.Bead) 
 			ResumeCommand: info.ResumeCommand,
 		},
 	}
-	sessionKind := strings.TrimSpace(bead.Metadata["real_world_app_session_kind"])
-	if profile := strings.TrimSpace(bead.Metadata["worker_profile"]); profile != "" {
+	sessionKind := strings.TrimSpace(pr.Metadata["real_world_app_session_kind"])
+	if profile := strings.TrimSpace(pr.Metadata["worker_profile"]); profile != "" {
 		spec.Profile = Profile(profile)
 	}
-	metadata := cloneStringMap(bead.Metadata)
+	metadata := cloneStringMap(pr.Metadata)
 	if f.resolveSessionRuntime != nil {
 		resolved, err := f.resolveSessionRuntime(info, sessionKind, metadata)
 		if err != nil {
@@ -212,6 +258,12 @@ func (f *Factory) DiscoverWorkDirTranscript(provider, workDir string) string {
 // TailMeta reads model/context metadata from a discovered transcript path.
 func (f *Factory) TailMeta(path string) (*TranscriptTailMeta, error) {
 	return f.Adapter().TailMeta(path)
+}
+
+// TailMetaForProvider reads model/context metadata using the provider's
+// transcript schema while preserving TailMeta as the compatibility path.
+func (f *Factory) TailMetaForProvider(provider, path string) (*TranscriptTailMeta, error) {
+	return f.Adapter().TailMetaForProvider(provider, path)
 }
 
 // AgentMappings lists subagent transcript mappings for a parent transcript.

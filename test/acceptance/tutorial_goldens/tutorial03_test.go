@@ -4,6 +4,7 @@ package tutorialgoldens
 
 import (
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +36,7 @@ func TestTutorial03Sessions(t *testing.T) {
 		t.Fatalf("seed reviewer scaffold: %v\n%s", err, out)
 	}
 	writeFile(t, filepath.Join(myCity, "agents", "reviewer", "agent.toml"), "dir = \"my-project\"\nprovider = \""+tutorialReviewerProvider()+"\"\n", 0o644)
+	registerTutorialReviewerProvider(t, myCity)
 	writeFile(t, filepath.Join(myCity, "agents", "reviewer", "prompt.template.md"), "# Reviewer\nReview code.\n", 0o644)
 	writeFile(t, filepath.Join(myProject, "hello.py"), "print(\"Hello, World!\")\n", 0o644)
 	ws.noteWarning("TODO(issue #632): once bare agent/template names reliably resolve to the enclosing rig in acceptance-style paths, simplify tutorial 03 back to bare `reviewer` references from inside ~/my-project")
@@ -219,14 +221,34 @@ func TestTutorial03Sessions(t *testing.T) {
 	})
 
 	t.Run("gc session peek mc-8sfd", func(t *testing.T) {
+		reviewerIdentityPeekLines := 200
+		peekIdentifiesReviewer := func(out string) bool {
+			lower := strings.ToLower(out)
+			return strings.Contains(lower, "reviewer") || strings.Contains(lower, "codex")
+		}
 		out, err := ws.runShell("gc session peek "+reviewerSessionID, "")
 		if err != nil {
 			t.Fatalf("gc session peek %s: %v\n%s", reviewerSessionID, err, out)
 		}
-		lower := strings.ToLower(out)
-		if strings.TrimSpace(out) == "" || (!strings.Contains(lower, "reviewer") && !strings.Contains(lower, "codex")) {
-			t.Fatalf("peek reviewer output mismatch:\n%s", out)
+		if strings.TrimSpace(out) == "" {
+			t.Fatal("peek reviewer output is empty")
 		}
+		if peekIdentifiesReviewer(out) {
+			return
+		}
+		// The identifying "You are `reviewer`" prompt text sits above the
+		// session's skills appendix and review transcript, so provider chrome
+		// (e.g. a Claude CLI footer banner) can slide it out of the default
+		// 50-line window (#3877). The session is still the right one; only
+		// the window position moved.
+		deepOut, deepErr := ws.runShell("gc session peek "+reviewerSessionID+" --lines "+strconv.Itoa(reviewerIdentityPeekLines), "")
+		if deepErr != nil {
+			t.Fatalf("gc session peek %s --lines %d: %v\n%s", reviewerSessionID, reviewerIdentityPeekLines, deepErr, deepOut)
+		}
+		if !peekIdentifiesReviewer(deepOut) {
+			t.Fatalf("peek reviewer output mismatch; default window:\n%s\n\nhidden %d-line window:\n%s", out, reviewerIdentityPeekLines, deepOut)
+		}
+		ws.noteWarning("tutorial 03 runtime workaround: the default peek window slid past the reviewer-identifying prompt text (provider footer chrome can shift the visible window, issue #3877), so the page driver confirmed the same session identity in a wider hidden %d-line peek window", reviewerIdentityPeekLines)
 	})
 
 	t.Run("gc session list", func(t *testing.T) {
@@ -317,12 +339,18 @@ func TestTutorial03Sessions(t *testing.T) {
 	}
 
 	t.Run("gc session logs mayor --tail 2", func(t *testing.T) {
-		out, err := ws.runShell("gc session logs mayor --tail 2", "")
-		if err != nil {
-			t.Fatalf("gc session logs mayor --tail 2: %v\n%s", err, out)
-		}
-		if strings.TrimSpace(out) == "" {
-			t.Fatal("session logs --tail 2 output is empty")
+		// Re-probe rather than assert once: the transcript tail can still be
+		// momentarily unwritten right after readiness. The render path itself
+		// is now guaranteed non-empty per tail slot (see cmd_session_logs.go),
+		// so this only absorbs write-timing, not the old render gap.
+		var lastOut string
+		ok := waitForCondition(t, 30*time.Second, 1*time.Second, func() bool {
+			out, err := ws.runShell("gc session logs mayor --tail 2", "")
+			lastOut = out
+			return err == nil && strings.TrimSpace(out) != ""
+		})
+		if !ok {
+			t.Fatalf("session logs --tail 2 stayed empty within 30s; last output:\n%s", lastOut)
 		}
 	})
 

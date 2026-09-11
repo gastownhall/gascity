@@ -27,7 +27,7 @@ func repoRoot() string {
 var (
 	markdownLinkRE    = regexp.MustCompile(`\[[^][]+\]\(([^)]+)\)`)
 	schemaHrefRE      = regexp.MustCompile(`href="[^"]*?/schema/([^"#?]+)"`)
-	schemaGitHubRawRE = regexp.MustCompile(`href="https://raw\.githubusercontent\.com/gastownhall/gascity/main/docs/schema/([^"#?]+)"`)
+	schemaGitHubRawRE = regexp.MustCompile(`href="https://raw\.githubusercontent\.com/gastownhall/gascity/main/docs/reference/schema/([^"#?]+)"`)
 )
 
 // docTreeDirs lists the top-level directories that are documentation trees
@@ -39,7 +39,44 @@ var docTreeDirs = []string{"contrib", "docs", "engdocs", "release-gates", "specs
 // docTreeIgnored lists directories that contain markdown but are not
 // documentation trees (e.g., embedded prompt templates, test fixtures,
 // gitignored scratch space for local work).
-var docTreeIgnored = []string{"cmd", "examples", "internal", "plans", "scripts", "test", "tmp"}
+var docTreeIgnored = []string{"cmd", "examples", "internal", "plans", "scripts", "test", "tmp", "worktrees"}
+
+// beadScratchPrefixes are the bead-id prefixes agents name their top-level
+// scratch directories after. An explicit list, not a shape match: a doc tree
+// may legitimately be hyphenated (release-gates), and silently exempting one
+// would defeat the coverage this file exists to enforce.
+var beadScratchPrefixes = []string{"ga-", "gcg-", "mc-"}
+
+func isBeadScratchRoot(name string) bool {
+	for _, p := range beadScratchPrefixes {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// isNestedWorktreeRoot reports whether path is the root of a linked git
+// worktree checked out inside this tree. Linked worktrees have a .git FILE
+// (a "gitdir: ..." pointer) rather than a .git directory, so this catches
+// worktrees regardless of naming convention — unlike docTreeIgnored's
+// "worktrees" entry above, which only catches that exact name.
+func isNestedWorktreeRoot(path string) bool {
+	info, err := os.Lstat(filepath.Join(path, ".git"))
+	return err == nil && !info.IsDir()
+}
+
+// isSessionScaffoldRoot reports whether path is a per-session scaffold
+// directory created by the outer gc orchestration (e.g. a bead-specific
+// agent session directory holding .claude/.codex/.gc state) rather than a
+// source or doc tree. These are untracked, gitignored-in-spirit working
+// directories that can be checked out as siblings of the repo's own
+// top-level directories; a .gc marker directory identifies them the same
+// way a .git file identifies a linked worktree above.
+func isSessionScaffoldRoot(path string) bool {
+	info, err := os.Stat(filepath.Join(path, ".gc"))
+	return err == nil && info.IsDir()
+}
 
 // knownBrokenLinks lists links to docs that do not exist yet. These are
 // excluded from TestLocalMarkdownLinks failures but still logged. Remove
@@ -55,7 +92,7 @@ func TestSchemaDownloadLinksUseGitHubRaw(t *testing.T) {
 	docs := []string{
 		"docs/reference/api.md",
 		"docs/reference/events.md",
-		"docs/schema/index.md",
+		"docs/reference/schema/index.md",
 	}
 
 	for _, rel := range docs {
@@ -75,7 +112,7 @@ func TestSchemaDownloadLinksUseGitHubRaw(t *testing.T) {
 				t.Errorf("%s links /schema/%s via relative path; use GitHub raw URL so downloads work in both local preview and production", rel, target)
 				continue
 			}
-			artifact := filepath.Join(root, "docs", "schema", filepath.FromSlash(target))
+			artifact := filepath.Join(root, "docs", "reference", "schema", filepath.FromSlash(target))
 			if _, err := os.Stat(artifact); err != nil {
 				t.Errorf("%s links /schema/%s but %s is not committed: %v", rel, target, artifact, err)
 			}
@@ -109,6 +146,10 @@ func allDocsMarkdownFiles(root string) ([]string, error) {
 				return err
 			}
 			if d.IsDir() {
+				name := d.Name()
+				if path != dirRoot && (strings.HasPrefix(name, ".") || name == "vendor" || name == "node_modules") {
+					return filepath.SkipDir
+				}
 				return nil
 			}
 			ext := filepath.Ext(path)
@@ -440,7 +481,7 @@ func TestSchemaFreshness(t *testing.T) {
 				}
 				return append(data, '\n'), nil
 			},
-			path: filepath.Join(root, "docs", "schema", "city-schema.json"),
+			path: filepath.Join(root, "docs", "reference", "schema", "city-schema.json"),
 		},
 		{
 			name: "config.md",
@@ -478,6 +519,23 @@ func TestSchemaFreshness(t *testing.T) {
 	}
 }
 
+// hasMdSuffix reports whether the path portion of a link target (before any
+// anchor or query) has a .md or .mdx extension. Used to catch "GitHub-friendly"
+// edits that add .md suffixes to Mintlify page links — the deployed site serves
+// extensionless routes, so the suffix breaks navigation even though the file
+// exists on disk.
+func hasMdSuffix(target string) bool {
+	path := target
+	if idx := strings.Index(path, "#"); idx >= 0 {
+		path = path[:idx]
+	}
+	if idx := strings.Index(path, "?"); idx >= 0 {
+		path = path[:idx]
+	}
+	ext := filepath.Ext(path)
+	return ext == ".md" || ext == ".mdx"
+}
+
 // isMintlifySource returns true if path belongs to a doc tree that has a
 // Mintlify config (docs.json). In Mintlify trees, extensionless root-relative
 // links like /tutorials/01-beads are the expected convention. Other trees are
@@ -505,6 +563,10 @@ func TestLocalMarkdownLinks(t *testing.T) {
 			t.Fatalf("reading %s: %v", path, err)
 		}
 		mintlify := isMintlifySource(root, path)
+		docsRoot := filepath.Join(root, "docs")
+		relToDocsRoot, _ := filepath.Rel(docsRoot, path)
+		relToDocsRoot = filepath.ToSlash(relToDocsRoot)
+		publishedMintlifyPage := mintlify && !docsPublishExemptions[relToDocsRoot]
 		for _, target := range extractMarkdownLinks(string(data)) {
 			if isExternalLink(target) {
 				continue
@@ -514,9 +576,16 @@ func TestLocalMarkdownLinks(t *testing.T) {
 				continue
 			}
 			if mintlify {
-				// Mintlify docs: extensionless links are OK (deployed
-				// site uses route-based URLs without .md).
-				if !localLinkExists(resolved) {
+				// Mintlify docs: extensionless links are the correct convention
+				// (deployed site uses route-based URLs without extensions).
+				// A .md/.mdx suffix on an internal page link breaks Mintlify
+				// navigation even though the file exists on disk.
+				// Only enforce for published pages — workspace meta files
+				// (docsPublishExemptions) may legitimately reference raw filenames.
+				if publishedMintlifyPage && hasMdSuffix(target) {
+					relPath, _ := filepath.Rel(root, path)
+					broken = append(broken, relPath+" -> "+target)
+				} else if !localLinkExists(resolved) {
 					relPath, _ := filepath.Rel(root, path)
 					broken = append(broken, relPath+" -> "+target)
 				}
@@ -539,7 +608,18 @@ func TestLocalMarkdownLinks(t *testing.T) {
 		}
 	}
 	if len(unexpected) > 0 {
-		t.Errorf("broken local markdown links:")
+		t.Errorf(`broken local markdown links (%d):
+
+docs/ is authored for the Mintlify site (https://docs.gascityhall.com), NOT for
+direct GitHub viewing. Internal page links in docs/ are extensionless by
+convention — use /tutorials/01-beads, not /tutorials/01-beads.md. A .md/.mdx
+suffix breaks Mintlify navigation even though the file exists on disk, so please
+don't reformat docs/ links to be "GitHub-friendly". (engdocs/ and root .md files
+ARE GitHub-only and DO require explicit .md paths.) See CONTRIBUTING.md ->
+"Docs link conventions". If a link is genuinely broken on the live site, say so
+in the PR and we'll fix it Mintlify-side rather than changing the path here.
+
+Offending links:`, len(unexpected))
 		for _, item := range unexpected {
 			t.Errorf("  %s", item)
 		}
@@ -754,14 +834,20 @@ func TestDocDirCoverage(t *testing.T) {
 			continue
 		}
 		name := e.Name()
-		if strings.HasPrefix(name, ".") || name == "vendor" || name == "node_modules" {
+		if strings.HasPrefix(name, ".") || isBeadScratchRoot(name) || name == "vendor" || name == "node_modules" {
 			continue
 		}
 		if known[name] {
 			continue
 		}
-		// Check if this directory contains any markdown.
 		dirPath := filepath.Join(root, name)
+		if isNestedWorktreeRoot(dirPath) {
+			continue
+		}
+		if isSessionScaffoldRoot(dirPath) {
+			continue
+		}
+		// Check if this directory contains any markdown.
 		hasMarkdown := false
 		_ = filepath.WalkDir(dirPath, func(path string, d fs.DirEntry, err error) error {
 			if err != nil || hasMarkdown {

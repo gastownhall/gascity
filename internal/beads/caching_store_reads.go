@@ -1,9 +1,13 @@
 package beads
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // List returns beads matching the query. Active-bead queries are served from
@@ -26,29 +30,26 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 		return items, err
 	}
 
-	c.mu.RLock()
-	state := c.state
-	if state == cacheLive || state == cachePartial {
-		primePartialErr := c.primePartialErr
-		if len(c.dirty) > 0 {
-			c.mu.RUnlock()
-			return c.backing.List(liveListQuery(query))
-		}
-		if primePartialErr != nil {
-			c.mu.RUnlock()
-			return c.backing.List(liveListQuery(query))
-		}
-		// PrimeActive loads the full active set (open + in_progress), so
-		// active-only queries are complete even before the history prime finishes.
-		cached := make([]Bead, 0, len(c.beads))
+	// Active-bead path: serve from cache after a bounded per-ID refresh of any
+	// dirty rows. PrimeActive loads the open + in_progress subset, so queries
+	// explicitly filtered to either status are complete before the full prime;
+	// broader nonclosed queries require cacheLive. On overlay error the read
+	// takes the old full-scan fallback.
+	var cached []Bead
+	if err := c.readCacheWithOverlay(func() bool {
+		return c.cacheServableForListQueryLocked(query)
+	}, func(suppressed map[string]struct{}) {
+		cached = make([]Bead, 0, len(c.beads))
 		for _, b := range c.beads {
+			if _, gone := suppressed[b.ID]; gone {
+				continue
+			}
 			if !query.Matches(b) {
 				continue
 			}
 			cached = append(cached, cloneBead(b))
 		}
-		c.mu.RUnlock()
-
+	}); err == nil {
 		finish := func(items []Bead, err error) ([]Bead, error) {
 			sortBeadsForQuery(items, query.Sort)
 			if query.Limit > 0 && len(items) > query.Limit {
@@ -91,7 +92,6 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 		}
 		return finish(cached, err)
 	}
-	c.mu.RUnlock()
 	return c.backing.List(liveListQuery(query))
 }
 
@@ -100,21 +100,156 @@ func liveListQuery(query ListQuery) ListQuery {
 	return query
 }
 
+// Count returns the number of beads List would return for query, minus
+// beads whose Type is in excludeTypes. Active-bead queries are answered
+// from the in-memory cache when it is live and clean; everything else
+// (Live queries, ParentID lookups, closed history, dirty/unprimed cache)
+// delegates to the backing store's Counter. Backing stores without a
+// Counter return ErrCountUnsupported so callers can fall back to List. Limited
+// queries are unsupported because Count must match List cardinality, including
+// List's post-sort limit cap.
+func (c *CachingStore) Count(ctx context.Context, query ListQuery, excludeTypes ...string) (int, error) {
+	if !query.HasFilter() && !query.AllowScan {
+		return 0, fmt.Errorf("counting beads: %w", ErrQueryRequiresScan)
+	}
+	if query.Limit > 0 {
+		return 0, fmt.Errorf("counting beads: %w", ErrCountUnsupported)
+	}
+	if !query.Live && query.ParentID == "" && !query.IncludesClosed() {
+		n, ok, err := c.cachedCountContext(ctx, query, excludeTypes)
+		if err != nil {
+			return 0, err
+		}
+		if ok {
+			return n, nil
+		}
+	}
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+	}
+	counter, ok := c.backing.(Counter)
+	if !ok {
+		return 0, fmt.Errorf("counting beads: backing store: %w", ErrCountUnsupported)
+	}
+	return counter.Count(ctx, liveListQuery(query), excludeTypes...)
+}
+
+// cachedCountContext serves only a clean active snapshot. Dirty overlays use
+// context-blind Store.Get calls, so a deadline-sensitive Count delegates those
+// cases to the backing Counter instead. Lock acquisition and the scan both
+// observe ctx, ensuring a cache writer cannot strand the caller's goroutine.
+func (c *CachingStore) cachedCountContext(ctx context.Context, query ListQuery, excludeTypes []string) (int, bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, false, err
+	}
+	if !c.mu.TryRLock() {
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+		for !c.mu.TryRLock() {
+			select {
+			case <-ctx.Done():
+				return 0, false, ctx.Err()
+			case <-ticker.C:
+			}
+		}
+	}
+	defer c.mu.RUnlock()
+
+	if !c.cacheServableForListQueryLocked(query) || len(c.dirty) > 0 {
+		return 0, false, nil
+	}
+	var n int
+	for _, b := range c.beads {
+		if err := ctx.Err(); err != nil {
+			return 0, false, err
+		}
+		if query.Matches(b) && !slices.Contains(excludeTypes, b.Type) {
+			n++
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, false, err
+	}
+	return n, true, nil
+}
+
 // CachedList returns query results from the in-memory cache only. The boolean
 // reports whether the cache was initialized and clean enough to answer without
 // touching the backing store.
+//
+// This strict cache-only handle intentionally keeps the conservative
+// "dirty ⇒ decline" contract: it must answer without any backing I/O and
+// without serving a row it is not certain matches the backing. The bounded
+// per-ID dirty overlay (readCacheWithOverlay) applies only to the read paths
+// that already fall back to the backing store (List/Count/Ready), where a
+// refresh-and-serve is invisible to callers.
 func (c *CachingStore) CachedList(query ListQuery) ([]Bead, bool) {
 	if query.IncludesClosed() {
 		return nil, false
 	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	if c.state != cacheLive && c.state != cachePartial {
+	if !c.cacheServableForListQueryLocked(query) || len(c.dirty) > 0 {
 		return nil, false
 	}
-	if c.primePartialErr != nil || len(c.dirty) > 0 {
-		return nil, false
+	return c.collectCachedListLocked(query), true
+}
+
+// ObservedList returns a detached active-only cache census and an opaque stamp
+// that may be conditionally consumed with WithCurrentObservation. It never
+// performs backing-store I/O. The stamp fences only this process's cache
+// projection; it does not certify durable-store lineage or event delivery.
+func (c *CachingStore) ObservedList(query ListQuery) ([]Bead, CacheObservation, bool) {
+	if query.Validate() != nil ||
+		(!query.HasFilter() && !query.AllowScan) ||
+		query.Live ||
+		query.IncludesClosed() ||
+		query.ParentID != "" ||
+		len(query.ParentIDs) > 0 {
+		return nil, CacheObservation{}, false
 	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if !c.observationAdmissibleLocked() {
+		return nil, CacheObservation{}, false
+	}
+	return c.collectCachedListLocked(query), CacheObservation{owner: c, revision: c.observationRevision}, true
+}
+
+// WithCurrentObservation runs publish while holding the originating cache's
+// read lock only when observation still describes a clean active cache. The
+// callback must perform bounded in-memory work and must not call the cache,
+// backing store, or wait for other work.
+func (c *CachingStore) WithCurrentObservation(observation CacheObservation, publish func() error) (bool, error) {
+	if publish == nil {
+		return false, fmt.Errorf("using cache observation: nil callback")
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if observation.owner != c || observation.revision == 0 || observation.revision != c.observationRevision ||
+		!c.observationAdmissibleLocked() {
+		return false, nil
+	}
+	return true, publish()
+}
+
+// observationAdmissibleLocked reports whether an active-only cache census can
+// be observed and conditionally used. Caller must hold c.mu.
+func (c *CachingStore) observationAdmissibleLocked() bool {
+	return (c.state == cacheLive || c.state == cachePartial) &&
+		c.primePartialErr == nil &&
+		len(c.dirty) == 0 &&
+		c.observationRevision != 0
+}
+
+// collectCachedListLocked materializes CachedList and ObservedList results.
+// Caller must hold c.mu for reading or writing.
+func (c *CachingStore) collectCachedListLocked(query ListQuery) []Bead {
 	cached := make([]Bead, 0, len(c.beads))
 	for _, b := range c.beads {
 		if !query.Matches(b) {
@@ -126,7 +261,21 @@ func (c *CachingStore) CachedList(query ListQuery) ([]Bead, bool) {
 	if query.Limit > 0 && len(cached) > query.Limit {
 		cached = cached[:query.Limit]
 	}
-	return cached, true
+	return cached
+}
+
+// cacheServableForListQueryLocked refuses to treat PrimeActive's open and
+// in-progress subset as a complete answer to a broader nonclosed query. A full
+// prime may answer every nonclosed status; a partial prime may answer only the
+// two status filters it actually loaded. Caller must hold c.mu.
+func (c *CachingStore) cacheServableForListQueryLocked(query ListQuery) bool {
+	if !c.cacheServableLocked() {
+		return false
+	}
+	if c.state == cacheLive {
+		return true
+	}
+	return slices.Contains(partialPrimeStatuses, query.Status)
 }
 
 func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, items []Bead) []Bead {
@@ -190,16 +339,11 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 				continue
 			}
 		}
-		c.beads[item.ID] = cloneBead(item)
-		if beadCarriesDependencyFields(item) {
-			c.deps[item.ID] = depsFromBeadFields(item)
-		}
-		delete(c.dirty, item.ID)
-		delete(c.deletedSeq, item.ID)
-		if !recentLocalMutation(c.localBeadAt[item.ID], now) {
-			delete(c.beadSeq, item.ID)
-			delete(c.localBeadAt, item.ID)
-		}
+		c.absorbFreshLocked(item.ID, item, now, absorbOpts{
+			depsMode:   depsFromFieldsIfCarried,
+			seqMode:    seqClearGuarded,
+			clearDirty: true,
+		})
 		if query.Matches(item) {
 			refreshed = append(refreshed, cloneBead(item))
 		}
@@ -211,16 +355,11 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		if _, keep := c.recentLocalBeadConflictLocked(id, bead, now, false); keep {
 			continue
 		}
-		c.beads[id] = bead
-		if beadCarriesDependencyFields(bead) {
-			c.deps[id] = depsFromBeadFields(bead)
-		}
-		delete(c.dirty, id)
-		delete(c.deletedSeq, id)
-		if !recentLocalMutation(c.localBeadAt[id], now) {
-			delete(c.beadSeq, id)
-			delete(c.localBeadAt, id)
-		}
+		c.absorbFreshLocked(id, bead, now, absorbOpts{
+			depsMode:   depsFromFieldsIfCarried,
+			seqMode:    seqClearGuarded,
+			clearDirty: true,
+		})
 	}
 	for id := range removedParents {
 		if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
@@ -229,12 +368,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		if current, ok := c.beads[id]; ok && current.Status != "closed" && recentLocalMutation(c.localBeadAt[id], now) {
 			continue
 		}
-		delete(c.beads, id)
-		delete(c.deps, id)
-		delete(c.dirty, id)
-		delete(c.deletedSeq, id)
-		delete(c.beadSeq, id)
-		delete(c.localBeadAt, id)
+		c.evictLocked(id)
 	}
 	for id, bead := range refreshedLiveMissing {
 		if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
@@ -243,16 +377,11 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		if _, keep := c.recentLocalBeadConflictLocked(id, bead, now, false); keep {
 			continue
 		}
-		c.beads[id] = bead
-		if beadCarriesDependencyFields(bead) {
-			c.deps[id] = depsFromBeadFields(bead)
-		}
-		delete(c.dirty, id)
-		delete(c.deletedSeq, id)
-		if !recentLocalMutation(c.localBeadAt[id], now) {
-			delete(c.beadSeq, id)
-			delete(c.localBeadAt, id)
-		}
+		c.absorbFreshLocked(id, bead, now, absorbOpts{
+			depsMode:   depsFromFieldsIfCarried,
+			seqMode:    seqClearGuarded,
+			clearDirty: true,
+		})
 	}
 	for id := range removedLiveMissing {
 		if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
@@ -261,12 +390,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		if current, ok := c.beads[id]; ok && current.Status != "closed" && recentLocalMutation(c.localBeadAt[id], now) {
 			continue
 		}
-		delete(c.beads, id)
-		delete(c.deps, id)
-		delete(c.dirty, id)
-		delete(c.deletedSeq, id)
-		delete(c.beadSeq, id)
-		delete(c.localBeadAt, id)
+		c.evictLocked(id)
 	}
 	c.markFreshLocked(time.Now())
 	c.updateStatsLocked()
@@ -384,11 +508,11 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 				c.mu.Unlock()
 				return Bead{}, ErrNotFound
 			}
-			c.beads[id] = cloneBead(fresh)
-			c.deps[id] = depsFromBeadFields(fresh)
-			delete(c.dirty, id)
-			delete(c.deletedSeq, id)
-			delete(c.beadSeq, id)
+			c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
+				depsMode:   depsFromFields,
+				seqMode:    seqClearBeadSeqOnly,
+				clearDirty: true,
+			})
 			c.markFreshLocked(time.Now())
 			c.updateStatsLocked()
 			c.mu.Unlock()
@@ -410,64 +534,115 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	if readyQueryFromArgs(query) != (ReadyQuery{}) {
 		return c.backing.Ready(query...)
 	}
-	c.mu.RLock()
-	if c.state == cacheLive && c.depsComplete {
-		if len(c.dirty) > 0 {
-			c.mu.RUnlock()
-			return c.backing.Ready(query...)
-		}
-		if c.primePartialErr != nil {
-			c.mu.RUnlock()
-			return c.backing.Ready(query...)
-		}
-		statusByID := make(map[string]string, len(c.beads))
-		depsByID := make(map[string][]Dep, len(c.deps))
-		openBeads := make([]Bead, 0, len(c.beads))
-		now := time.Now().UTC()
-		for _, b := range c.beads {
-			statusByID[b.ID] = b.Status
-			if IsReadyCandidate(b, now) {
-				openBeads = append(openBeads, cloneBead(b))
+	var (
+		statusByID      map[string]string
+		workOutcomeByID map[string]string
+		depsByID        map[string][]Dep
+		openBeads       []Bead
+		unanswerable    bool
+	)
+	// Ready requires a fully live cache with complete dependency coverage and a
+	// ready projection the backing store can actually serve; the overlay
+	// refreshes any dirty rows first, then computes readiness from the cache.
+	// On overlay error the read takes the old full backing.Ready scan.
+	if err := c.readCacheWithOverlay(
+		func() bool {
+			return c.state == cacheLive && c.depsComplete && c.primePartialErr == nil &&
+				!c.readyReadsMustGoLive()
+		},
+		func(suppressed map[string]struct{}) {
+			statusByID = make(map[string]string, len(c.beads))
+			workOutcomeByID = make(map[string]string, len(c.beads))
+			openBeads = make([]Bead, 0, len(c.beads))
+			now := time.Now().UTC()
+			for _, b := range c.beads {
+				if _, gone := suppressed[b.ID]; gone {
+					continue
+				}
+				statusByID[b.ID] = b.Status
+				workOutcomeByID[b.ID] = b.Metadata[beadmeta.WorkOutcomeMetadataKey]
+				if IsReadyCandidate(b, now) {
+					if c.readyProjectionUnknownLocked(b.ID) {
+						unanswerable = true
+						return
+					}
+					openBeads = append(openBeads, cloneBead(b))
+				}
 			}
-		}
-		for _, b := range openBeads {
-			deps := cloneDeps(c.deps[b.ID])
-			depsByID[b.ID] = deps
-		}
-		c.mu.RUnlock()
-
-		var result []Bead
-		for _, b := range openBeads {
-			if cachedBeadReady(statusByID, depsByID[b.ID]) {
-				result = append(result, cloneBead(b))
+			depsByID = make(map[string][]Dep, len(openBeads))
+			for _, b := range openBeads {
+				depsByID[b.ID] = cloneDeps(c.deps[b.ID])
 			}
-		}
-		return result, nil
+		},
+	); err != nil {
+		return c.backing.Ready(query...)
 	}
-	c.mu.RUnlock()
-	return c.backing.Ready(query...)
+	if unanswerable {
+		// One candidate whose verdict the cache cannot vouch for costs this
+		// read the cache, not correctness: the live scan is slower and right.
+		return c.backing.Ready(query...)
+	}
+
+	var result []Bead
+	for _, b := range openBeads {
+		if cachedBeadReady(b, statusByID, workOutcomeByID, depsByID[b.ID]) {
+			result = append(result, cloneBead(b))
+		}
+	}
+	// c.beads is a map, so the scan above yields a different order per
+	// call; impose the canonical ready order so cache-served results
+	// match the SQL-backed ready readers (#3208).
+	sortBeadsReadyOrder(result)
+	return result, nil
+}
+
+// ReadyContext answers only from the dependency-complete active cache. It
+// deliberately does not fall back to the context-blind backing Ready method:
+// deadline-sensitive callers must receive ErrCacheUnavailable instead of
+// abandoning database work after their context expires.
+func (c *CachingStore) ReadyContext(ctx context.Context, query ...ReadyQuery) ([]Bead, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	rows, err := c.cachedReadyCompleteOnly(ctx, readyQueryFromArgs(query))
+	if err != nil {
+		return rows, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 // CachedReady returns ready beads from the in-memory active read model.
 // The boolean reports whether the cache was initialized enough to answer
 // without touching the backing store. Unlike Ready, this can answer from a
 // partial active cache only when each open bead has known dependency coverage.
+//
+// Like CachedList, this strict cache-only handle keeps the conservative
+// "dirty ⇒ decline" contract so a caller relying on cache-only semantics never
+// observes a row refreshed behind its back or a stale ready candidate (#2210).
 func (c *CachingStore) CachedReady() ([]Bead, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	if c.state != cacheLive && c.state != cachePartial {
 		return nil, false
 	}
-	if c.primePartialErr != nil || len(c.dirty) > 0 {
+	if c.primePartialErr != nil || len(c.dirty) > 0 || c.readyReadsMustGoLive() {
 		return nil, false
 	}
 
 	statusByID := make(map[string]string, len(c.beads))
+	workOutcomeByID := make(map[string]string, len(c.beads))
 	openBeads := make([]Bead, 0, len(c.beads))
 	now := time.Now().UTC()
 	for _, b := range c.beads {
 		statusByID[b.ID] = b.Status
+		workOutcomeByID[b.ID] = b.Metadata[beadmeta.WorkOutcomeMetadataKey]
 		if IsReadyCandidate(b, now) {
+			if c.readyProjectionUnknownLocked(b.ID) {
+				return nil, false
+			}
 			openBeads = append(openBeads, cloneBead(b))
 		}
 	}
@@ -482,19 +657,86 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 		default:
 			return nil, false
 		}
-		if cachedBeadReady(statusByID, deps) {
+		if c.state == cachePartial && !cachedReadyDependencyStatusesKnown(b, statusByID, deps) {
+			return nil, false
+		}
+		if cachedBeadReady(b, statusByID, workOutcomeByID, deps) {
 			result = append(result, cloneBead(b))
 		}
 	}
+	// Map-scan order is nondeterministic; match the canonical ready order of
+	// the SQL-backed ready readers (#3208).
+	sortBeadsReadyOrder(result)
 	return result, true
 }
 
-func cachedBeadReady(statusByID map[string]string, deps []Dep) bool {
+func cachedReadyDependencyStatusesKnown(b Bead, statusByID map[string]string, deps []Dep) bool {
+	if b.IsBlocked != nil {
+		// bd's own projection (true or false) is trusted outright and needs
+		// no per-dependency status data to back it up — see cachedBeadReady.
+		// The narrow gc.work_outcome override layered on a false verdict
+		// there degrades safely when a dependency is absent from a partial
+		// cache snapshot (it simply can't add an override for that one), the
+		// same eventual-consistency gap already accepted by trusting a true
+		// verdict without re-checking dependency completeness.
+		return true
+	}
+	missing := false
 	for _, dep := range deps {
 		if !isReadyBlockingDependencyType(dep.Type) {
 			continue
 		}
-		if status, ok := statusByID[dep.DependsOnID]; ok && status != "closed" {
+		status, ok := statusByID[dep.DependsOnID]
+		if ok && status != "closed" {
+			// One observed live blocker settles the verdict even if another
+			// dependency target is outside the partial status snapshot.
+			return true
+		}
+		if !ok {
+			missing = true
+		}
+	}
+	return !missing
+}
+
+func cachedBeadReady(b Bead, statusByID, workOutcomeByID map[string]string, deps []Dep) bool {
+	if b.IsBlocked != nil {
+		if *b.IsBlocked {
+			return false
+		}
+		// bd's own false verdict already reflects its richer native gating
+		// semantics (e.g. a waits-for gate opened through bd-native state,
+		// not just a closed target) and is trusted outright — falling
+		// through to the naive per-dependency scan below would second-guess
+		// a verdict this cache cannot reproduce (see the bdReadyDisagreementLedger
+		// fixture). The one gap a false verdict can still hide is
+		// gc.work_outcome, which predates bd entirely: a blocking dependency
+		// that closed with an unsatisfying outcome. Layer just that one
+		// narrow check on top of the trusted false rather than reopening the
+		// whole scan.
+		for _, dep := range deps {
+			if !isReadyBlockingDependencyType(dep.Type) {
+				continue
+			}
+			status, ok := statusByID[dep.DependsOnID]
+			if !ok {
+				continue
+			}
+			if status == "closed" && workOutcomeByID[dep.DependsOnID] == beadmeta.WorkOutcomeBlocked {
+				return false
+			}
+		}
+		return true
+	}
+	for _, dep := range deps {
+		if !isReadyBlockingDependencyType(dep.Type) {
+			continue
+		}
+		status, ok := statusByID[dep.DependsOnID]
+		if !ok {
+			continue
+		}
+		if !DependencySatisfied(status, workOutcomeByID[dep.DependsOnID]) {
 			return false
 		}
 	}
@@ -586,6 +828,24 @@ func (c *CachingStore) DepList(id, direction string) ([]Dep, error) {
 	}
 	c.mu.RUnlock()
 	return c.backing.DepList(id, direction)
+}
+
+// DepMetadata reads the edge payload straight from the backing store. The
+// cache holds Dep values, which carry the pair and the type alone, so there is
+// no cached form of this answer to serve and nothing to invalidate.
+//
+// Forwarded explicitly because the capability is discovered by type-assertion
+// and this wrapper is not an interface embed: a caller that refuses on
+// uncertainty — the infra-class migration is one — would read the cache as
+// UNABLE TO ANSWER and refuse a city whose backing store answers fine. A
+// backing store without the read gets an error rather than ("", false, nil),
+// because "cannot be asked" and "carries nothing" are different answers.
+func (c *CachingStore) DepMetadata(issueID, dependsOnID string) (string, bool, error) {
+	reader, ok := c.backing.(DepMetadataReader)
+	if !ok {
+		return "", false, fmt.Errorf("reading dependency metadata %s -> %s: backing store %T exposes no edge-payload read", issueID, dependsOnID, c.backing)
+	}
+	return reader.DepMetadata(issueID, dependsOnID)
 }
 
 // Ping delegates to the backing store.

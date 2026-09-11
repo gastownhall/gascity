@@ -18,23 +18,24 @@ func loadConfigCommandCityConfig(cityPath string) (*config.City, *config.Provena
 	return loadCityConfigWithBuiltinPacks(cityPath, extraConfigFiles...)
 }
 
+// loadCityConfigWithBuiltinPacks loads the city config after refreshing the
+// materialized builtin packs. The includes are caller-supplied extras (e.g.
+// --config files); builtin packs themselves compose only through the explicit
+// city.toml includes written by gc init and repaired by gc doctor --fix.
 func loadCityConfigWithBuiltinPacks(cityPath string, includes ...string) (*config.City, *config.Provenance, error) {
-	allIncludes, err := cityConfigIncludesWithBuiltinPacks(cityPath, includes...)
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	if err := ensureBuiltinPacksForConfigLoad(fsys.OSFS{}, tomlPath, resolveLoadCityConfigWarningWriter()); err != nil {
+		return nil, nil, err
+	}
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath, includes...)
 	if err != nil {
 		return nil, nil, err
 	}
-	return config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), allIncludes...)
-}
-
-func cityConfigIncludesWithBuiltinPacks(cityPath string, includes ...string) ([]string, error) {
-	if err := MaterializeBuiltinPacks(cityPath); err != nil {
-		return nil, fmt.Errorf("materializing builtin packs: %w", err)
+	warnMissingRequiredBuiltinImports(fsys.OSFS{}, cfg, tomlPath, resolveLoadCityConfigWarningWriter())
+	if err := validatePackRuntimeRegistrations(cfg); err != nil {
+		return nil, nil, err
 	}
-	builtinIncludes := builtinPackIncludes(cityPath)
-	allIncludes := make([]string, 0, len(includes)+len(builtinIncludes))
-	allIncludes = append(allIncludes, includes...)
-	allIncludes = append(allIncludes, builtinIncludes...)
-	return allIncludes, nil
+	return cfg, prov, nil
 }
 
 func newConfigCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -123,6 +124,9 @@ func doConfigShow(validate, showProvenance, asJSON bool, stdout, stderr io.Write
 		validationErrors = append(validationErrors, err.Error())
 	}
 	if err := config.ValidateRigs(cfg.Rigs, config.EffectiveHQPrefix(cfg)); err != nil {
+		validationErrors = append(validationErrors, err.Error())
+	}
+	if err := config.ValidateWebhooks(cfg.Webhooks); err != nil {
 		validationErrors = append(validationErrors, err.Error())
 	}
 	if err := config.ValidateServices(cfg.Services); err != nil {
@@ -622,6 +626,24 @@ func explainAgent(w io.Writer, a *config.Agent, prov *config.Provenance) {
 		if a.DrainTimeout != "" {
 			explainField(w, "drain_timeout", a.DrainTimeout, source)
 		}
+	}
+
+	// Lifecycle timeouts. These resolved keys drive idle-suspend and
+	// session-age recycling but were previously omitted from explain output,
+	// forcing operators to read their provenance from the pack agent.toml
+	// directly (#3965). Only render keys that are set, matching the
+	// conditional pattern used for the fields above.
+	if a.IdleTimeout != "" {
+		explainField(w, "idle_timeout", a.IdleTimeout, source)
+	}
+	if a.SleepAfterIdle != "" {
+		explainField(w, "sleep_after_idle", a.SleepAfterIdle, source)
+	}
+	if a.MaxSessionAge != "" {
+		explainField(w, "max_session_age", a.MaxSessionAge, source)
+	}
+	if a.MaxSessionAgeJitter != "" {
+		explainField(w, "max_session_age_jitter", a.MaxSessionAgeJitter, source)
 	}
 }
 

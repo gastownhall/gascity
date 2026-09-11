@@ -10,11 +10,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/searchpath"
+	zcodeadapter "github.com/gastownhall/gascity/internal/worker/adapters/zcode"
 	"gopkg.in/yaml.v3"
 )
 
@@ -51,15 +54,23 @@ var (
 	defaultProviderReadinessItems = []string{"claude", "codex", "gemini"}
 	defaultReadinessItems         = []string{"claude", "codex", "gemini", "github_cli"}
 	supportedProviderReadiness    = readinessItemSet{
-		"claude": {},
-		"codex":  {},
-		"gemini": {},
+		"antigravity": {},
+		"claude":      {},
+		"codex":       {},
+		"gemini":      {},
+		"mimocode":    {},
+		"pi":          {},
+		"zcode":       {},
 	}
 	supportedReadiness = readinessItemSet{
-		"claude":     {},
-		"codex":      {},
-		"gemini":     {},
-		"github_cli": {},
+		"antigravity": {},
+		"claude":      {},
+		"codex":       {},
+		"gemini":      {},
+		"github_cli":  {},
+		"mimocode":    {},
+		"pi":          {},
+		"zcode":       {},
 	}
 	readinessProbeSpecs = map[string]readinessProbeSpec{
 		"claude": {
@@ -79,6 +90,34 @@ var (
 			kind:        probeKindProvider,
 			probe: func(_ context.Context, homeDir string) providerProbeResult {
 				return probeGemini(homeDir)
+			},
+		},
+		"antigravity": {
+			displayName: "Antigravity",
+			kind:        probeKindProvider,
+			probe: func(_ context.Context, homeDir string) providerProbeResult {
+				return probeAntigravity(homeDir)
+			},
+		},
+		"mimocode": {
+			displayName: "MiMo Code",
+			kind:        probeKindProvider,
+			probe: func(_ context.Context, homeDir string) providerProbeResult {
+				return probeMimoCode(homeDir)
+			},
+		},
+		"pi": {
+			displayName: "Pi Coding Agent",
+			kind:        probeKindProvider,
+			probe: func(_ context.Context, homeDir string) providerProbeResult {
+				return probePi(homeDir)
+			},
+		},
+		"zcode": {
+			displayName: "ZCode (Z.ai GLM harness)",
+			kind:        probeKindProvider,
+			probe: func(_ context.Context, homeDir string) providerProbeResult {
+				return probeZCode(homeDir)
 			},
 		},
 		"github_cli": {
@@ -171,7 +210,13 @@ func SupportsProviderReadiness(name string) bool {
 // ProviderReadinessNames returns the readiness-aware provider names in
 // canonical onboarding order.
 func ProviderReadinessNames() []string {
-	return append([]string(nil), defaultProviderReadinessItems...)
+	names := make([]string, 0, len(supportedProviderReadiness))
+	for _, name := range config.BuiltinProviderOrder() {
+		if _, ok := supportedProviderReadiness[name]; ok {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 // ProbeProviders returns readiness results for the requested provider names.
@@ -449,6 +494,168 @@ func probeGemini(homeDir string) providerProbeResult {
 	default:
 		return providerProbeResult{status: probeStatusInvalidConfiguration, detail: fmt.Sprintf("unknown Gemini auth type %q", selectedType)}
 	}
+}
+
+func probeAntigravity(homeDir string) providerProbeResult {
+	if _, ok := findProbeBinary("agy", homeDir); !ok {
+		return providerProbeResult{status: probeStatusNotInstalled, detail: "agy executable not found in probe PATH"}
+	}
+
+	data, err := os.ReadFile(filepath.Join(homeDir, ".gemini", "antigravity-cli", "antigravity-oauth-token"))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return providerProbeResult{status: probeStatusNeedsAuth, detail: "missing ~/.gemini/antigravity-cli/antigravity-oauth-token"}
+		}
+		return providerProbeResult{status: probeStatusProbeError, detail: "failed to read Antigravity OAuth token"}
+	}
+	if strings.TrimSpace(string(data)) == "" {
+		return providerProbeResult{status: probeStatusNeedsAuth, detail: "Antigravity OAuth token is empty"}
+	}
+	return providerProbeResult{status: probeStatusConfigured}
+}
+
+func probeMimoCode(homeDir string) providerProbeResult {
+	if _, ok := findProbeBinary("mimo", homeDir); !ok {
+		return providerProbeResult{status: probeStatusNotInstalled, detail: "mimo executable not found in probe PATH"}
+	}
+
+	// XIAOMI_API_KEY is the headless auth path (mirrors the GitHub CLI
+	// token-env precedent); the auth.json credential store is the
+	// `mimo providers login` path.
+	if strings.TrimSpace(os.Getenv("XIAOMI_API_KEY")) != "" {
+		return providerProbeResult{status: probeStatusConfigured}
+	}
+
+	authPath := mimoCodeAuthPath(homeDir)
+	data, err := os.ReadFile(authPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return providerProbeResult{status: probeStatusNeedsAuth, detail: fmt.Sprintf("set XIAOMI_API_KEY or run `mimo providers login` (missing %s)", authPath)}
+		}
+		return providerProbeResult{status: probeStatusProbeError, detail: fmt.Sprintf("failed to read %s", authPath)}
+	}
+	var credentials map[string]json.RawMessage
+	if err := json.Unmarshal(data, &credentials); err != nil {
+		return providerProbeResult{status: probeStatusProbeError, detail: fmt.Sprintf("invalid JSON in %s", authPath)}
+	}
+	if len(credentials) == 0 {
+		return providerProbeResult{status: probeStatusNeedsAuth, detail: fmt.Sprintf("no credentials in %s; set XIAOMI_API_KEY or run `mimo providers login`", authPath)}
+	}
+	return providerProbeResult{status: probeStatusConfigured}
+}
+
+// probePi recognizes the pi coding agent by the presence of its auth
+// credential store at ~/.pi/agent/auth.json. pi writes that file on a
+// successful login, so its existence is the single configured/not-ready
+// signal — the probe deliberately does not parse the contents, to avoid
+// coupling to pi's evolving auth.json schema.
+func probePi(homeDir string) providerProbeResult {
+	if _, ok := findProbeBinary("pi", homeDir); !ok {
+		return providerProbeResult{status: probeStatusNotInstalled, detail: "pi executable not found in probe PATH"}
+	}
+
+	authPath := filepath.Join(homeDir, ".pi", "agent", "auth.json")
+	if _, err := os.Stat(authPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return providerProbeResult{status: probeStatusNeedsAuth, detail: "missing ~/.pi/agent/auth.json"}
+		}
+		return providerProbeResult{status: probeStatusProbeError, detail: fmt.Sprintf("failed to stat %s", authPath)}
+	}
+	return providerProbeResult{status: probeStatusConfigured}
+}
+
+// probeZCode reports readiness for the ZCode harness. ZCode ships no
+// launchable CLI of its own, so "installed" means the engine's adapter is on
+// the probe path (see internal/worker/adapters/zcode) and the adapter's two
+// hard preconditions are satisfied: a readable CLI bundle at ZCODE_CJS, and a
+// credential in ZCODE_API_KEY. There is no on-disk credential store to fall
+// back to — ZCode reads its key from the environment.
+func probeZCode(homeDir string) providerProbeResult {
+	if _, ok := findProbeBinary(zcodeadapter.ExecutableName, homeDir); !ok {
+		return providerProbeResult{
+			status: probeStatusNotInstalled,
+			detail: fmt.Sprintf("%s adapter not found in probe PATH", zcodeadapter.ExecutableName),
+		}
+	}
+
+	bundle := strings.TrimSpace(os.Getenv("ZCODE_CJS"))
+	if bundle == "" {
+		return providerProbeResult{status: probeStatusInvalidConfiguration, detail: "set ZCODE_CJS to the ZCode CLI bundle"}
+	}
+	if _, err := os.Stat(bundle); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return providerProbeResult{status: probeStatusInvalidConfiguration, detail: fmt.Sprintf("ZCODE_CJS %s does not exist", bundle)}
+		}
+		return providerProbeResult{status: probeStatusProbeError, detail: fmt.Sprintf("failed to read ZCODE_CJS %s", bundle)}
+	}
+	// Same order the adapter checks in, so readiness and a real launch fail on
+	// the same thing first.
+	if strings.TrimSpace(os.Getenv("ZCODE_API_KEY")) == "" {
+		return providerProbeResult{status: probeStatusNeedsAuth, detail: "set ZCODE_API_KEY"}
+	}
+	if detail := zcodeNodeFloorDetail(homeDir); detail != "" {
+		return providerProbeResult{status: probeStatusInvalidConfiguration, detail: detail}
+	}
+	return providerProbeResult{status: probeStatusConfigured}
+}
+
+// zcodeNodeFloorDetail reports why node is unusable for the ZCode bundle, or ""
+// when it is fine. The bundle imports node:sqlite, so the floor is 22.5 — a
+// distro node 18 on PATH dies with a bare "No such built-in module:
+// node:sqlite" at the first turn. The adapter enforces the same floor at
+// launch; checking it here turns a mid-run pane death into a readiness answer.
+func zcodeNodeFloorDetail(homeDir string) string {
+	const guidance = "the ZCode bundle needs node >= 22.5 (it imports node:sqlite) — set ZCODE_NODE_BIN"
+	node := strings.TrimSpace(os.Getenv("ZCODE_NODE_BIN"))
+	if node == "" {
+		found, ok := findProbeBinary("node", homeDir)
+		if !ok {
+			return "no node found in probe PATH; " + guidance
+		}
+		node = found
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := providerProbeCommandContext(ctx, node, "--version").Output()
+	if err != nil {
+		return fmt.Sprintf("%s could not report a version; %s", node, guidance)
+	}
+	major, minor, ok := parseNodeVersion(string(out))
+	if !ok {
+		return fmt.Sprintf("%s reported an unparsable version; %s", node, guidance)
+	}
+	if major > 22 || (major == 22 && minor >= 5) {
+		return ""
+	}
+	return fmt.Sprintf("%s is v%d.%d; %s", node, major, minor, guidance)
+}
+
+func parseNodeVersion(raw string) (major, minor int, ok bool) {
+	fields := strings.SplitN(strings.TrimPrefix(strings.TrimSpace(raw), "v"), ".", 3)
+	if len(fields) < 2 {
+		return 0, 0, false
+	}
+	major, err := strconv.Atoi(fields[0])
+	if err != nil {
+		return 0, 0, false
+	}
+	minor, err = strconv.Atoi(fields[1])
+	if err != nil {
+		return 0, 0, false
+	}
+	return major, minor, true
+}
+
+// mimoCodeAuthPath resolves the credential store written by
+// `mimo providers login`. mimo (an OpenCode fork) places it under the XDG
+// data root: $XDG_DATA_HOME when set to an absolute path, otherwise
+// ~/.local/share.
+func mimoCodeAuthPath(homeDir string) string {
+	dataRoot := filepath.Join(homeDir, ".local", "share")
+	if xdg := strings.TrimSpace(os.Getenv("XDG_DATA_HOME")); xdg != "" && filepath.IsAbs(xdg) {
+		dataRoot = xdg
+	}
+	return filepath.Join(dataRoot, "mimocode", "auth.json")
 }
 
 func probeGitHubCLI(ctx context.Context, homeDir string) providerProbeResult {

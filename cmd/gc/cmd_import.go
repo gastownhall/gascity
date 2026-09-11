@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,9 +13,14 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/gitcred"
+	"github.com/gastownhall/gascity/internal/importsvc"
 	"github.com/gastownhall/gascity/internal/packman"
+	"github.com/gastownhall/gascity/internal/pricing"
 	"github.com/spf13/cobra"
 )
 
@@ -30,7 +34,23 @@ var (
 	resolveImportVersion    = packman.ResolveVersion
 	defaultImportConstraint = packman.DefaultConstraint
 	resolveImportHeadCommit = defaultImportHeadCommit
+
+	// validateComposedConfigAfterInstall loads the composed city config after
+	// install, so `gc import install` fails on the same load errors gc
+	// doctor's expanded-config-load check would report, instead of reporting
+	// success on a config the loader will refuse to load on a later reload.
+	// A var so command tests that stub syncImports/installLockedImports
+	// (and so have no real cache content on disk for the loader to expand)
+	// can stub this too. See #5382.
+	validateComposedConfigAfterInstall = func(cityPath string) error {
+		_, err := loadCityConfig(cityPath, io.Discard)
+		return err
+	}
 )
+
+// resolveImportVersion and resolveImportHeadCommit carry a leading cityRoot so
+// the network ls-remote can resolve per-city pack credentials. Command tests
+// stub these vars; the importsvc.Deps mapping in importSvcDeps threads them.
 
 const cityPackSchema = 1
 
@@ -38,17 +58,20 @@ type cityPackManifest struct {
 	Pack                  config.PackMeta                `toml:"pack"`
 	Imports               map[string]config.Import       `toml:"imports,omitempty"`
 	AgentDefaults         config.AgentDefaults           `toml:"agent_defaults,omitempty"`
+	AgentsDefaults        config.AgentDefaults           `toml:"agents,omitempty" jsonschema:"-"`
 	Defaults              cityPackDefaults               `toml:"defaults,omitempty"`
 	DefaultRigImportOrder []string                       `toml:"-"`
 	Agents                []config.Agent                 `toml:"agent,omitempty"`
 	NamedSessions         []config.NamedSession          `toml:"named_session,omitempty"`
 	Services              []config.Service               `toml:"service,omitempty"`
 	Providers             map[string]config.ProviderSpec `toml:"providers,omitempty"`
+	Upstreams             map[string]config.UpstreamSpec `toml:"upstreams,omitempty"`
 	Formulas              config.FormulasConfig          `toml:"formulas,omitempty"`
 	Patches               config.Patches                 `toml:"patches,omitempty"`
 	Doctor                []config.PackDoctorEntry       `toml:"doctor,omitempty"`
 	Commands              []config.PackCommandEntry      `toml:"commands,omitempty"`
 	Global                config.PackGlobal              `toml:"global,omitempty"`
+	Pricing               []pricing.ModelPricing         `toml:"pricing,omitempty"`
 }
 
 type cityPackDefaults struct {
@@ -67,11 +90,13 @@ type cityPackManifestBody struct {
 	NamedSessions []config.NamedSession          `toml:"named_session,omitempty"`
 	Services      []config.Service               `toml:"service,omitempty"`
 	Providers     map[string]config.ProviderSpec `toml:"providers,omitempty"`
+	Upstreams     map[string]config.UpstreamSpec `toml:"upstreams,omitempty"`
 	Formulas      config.FormulasConfig          `toml:"formulas,omitempty"`
 	Patches       config.Patches                 `toml:"patches,omitempty"`
 	Doctor        []config.PackDoctorEntry       `toml:"doctor,omitempty"`
 	Commands      []config.PackCommandEntry      `toml:"commands,omitempty"`
 	Global        config.PackGlobal              `toml:"global,omitempty"`
+	Pricing       []pricing.ModelPricing         `toml:"pricing,omitempty"`
 }
 
 func newImportCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -90,10 +115,30 @@ func newImportCmd(stdout, stderr io.Writer) *cobra.Command {
 		newImportInstallCmd(stdout, stderr),
 		newImportUpgradeCmd(stdout, stderr),
 		newImportListCmd(stdout, stderr),
+		newImportStatusCmd(stdout, stderr),
 		newImportWhyCmd(stdout, stderr),
 		newImportMigrateCmd(stdout, stderr),
+		newImportPruneCmd(stdout, stderr),
+		newImportCredentialCmd(stdout, stderr),
 	)
 	return cmd
+}
+
+// printCredentialHint appends the pack-credential remediation hint when err
+// carries an auth classification from a network git run. It is deliberately
+// separate from importAddErrorLine's framing (pinned by exact-match tests).
+func printCredentialHint(stderr io.Writer, err error) {
+	var authErr *gitcred.AuthError
+	if !errors.As(err, &authErr) {
+		return
+	}
+	if authErr.Matched {
+		fmt.Fprintf(stderr, "hint: credential rule from %s matched but the remote rejected it; check the token is valid and has contents:read on this repository (gc import credential list)\n", authErr.RuleOrigin) //nolint:errcheck
+		return
+	}
+	fmt.Fprintf(stderr, "hint: this source requires authentication; register a pack credential and retry:\n")                                            //nolint:errcheck
+	fmt.Fprintf(stderr, "  gc import credential add %s --helper 'gh auth token'\n", authErr.OrgPrefix)                                                   //nolint:errcheck
+	fmt.Fprintf(stderr, "  (--token-file, --token-env, and --ssh-key-file are the non-interactive alternatives; see gc import credential add --help)\n") //nolint:errcheck
 }
 
 func newImportAddCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -116,7 +161,10 @@ entry using source plus optional version. Supported sources are:
 
 Registry catalog handles are lookup shortcuts in this wave, not durable
 [imports.*] field values. After lookup, authored TOML stores the resolved
-source and optional version.`,
+source and optional version.
+
+The [imports.<name>] table key is the local binding name. Imported package
+names are display/advisory metadata and never become registry identity.`,
 		Example: `gc import add ./packs/review
 gc import add https://github.com/org/repo/tree/main/packs/review --version '^1.2.0'
 
@@ -269,14 +317,40 @@ func resolveImportRoot() (string, error) {
 	if raw, ok := resolveExplicitImportPathEnv(); ok {
 		return validateImportRootPath(raw)
 	}
-	if cityPath, err := resolveCity(); err == nil {
-		return cityPath, nil
-	}
 	cwd, err := os.Getwd()
 	if err != nil {
 		return "", err
 	}
+	cwd = normalizePathForCompare(cwd)
+	// Explicit rig/dir signals carry user intent and outrank cwd inference:
+	// route them through the registered-city machinery first, exactly as
+	// --city does above. Only pure cwd inference may use the nearest-marker
+	// walk below.
+	if hasExplicitRigOrDirSignal() {
+		if cityPath, err := resolveCity(); err == nil {
+			return cityPath, nil
+		}
+		return findPackRoot(cwd)
+	}
+	if root, ok, err := findNearestImportRoot(cwd); ok || err != nil {
+		return root, err
+	}
+	if cityPath, err := resolveCity(); err == nil {
+		return cityPath, nil
+	}
 	return findPackRoot(cwd)
+}
+
+func hasExplicitRigOrDirSignal() bool {
+	if strings.TrimSpace(rigFlag) != "" {
+		return true
+	}
+	for _, key := range []string{"GC_RIG", "GC_DIR"} {
+		if strings.TrimSpace(os.Getenv(key)) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func resolveExplicitImportPathEnv() (string, bool) {
@@ -320,14 +394,45 @@ func findPackRoot(dir string) (string, error) {
 	return "", fmt.Errorf("could not find city or pack root from %s", dir)
 }
 
+// findNearestImportRoot walks dir upward to the nearest directory holding an
+// explicit config marker: pack.toml or city.toml. Bare .gc/ runtime
+// directories are deliberately not markers — stale rig worktrees and the
+// supervisor's global runtime root must fall through to resolveCity(), whose
+// registered-rig guards and legacy-runtime rules know how to resolve them.
+// The walk is bounded by the same ceilings as implicit city discovery.
+func findNearestImportRoot(dir string) (string, bool, error) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", false, err
+	}
+	ceilings := implicitCityDiscoveryCeilings()
+	for {
+		if packExists(abs) || citylayout.HasCityConfig(abs) {
+			return abs, true, nil
+		}
+		if isCityDiscoveryCeiling(abs, ceilings) {
+			return "", false, nil
+		}
+		parent := filepath.Dir(abs)
+		if parent == abs {
+			return "", false, nil
+		}
+		abs = parent
+	}
+}
+
+// KNOWN DUPLICATION (follow-up to converge): importScopeState plus the manifest
+// helpers below (loadImportScopeFS, collectAllImportsFS, loadCityPackManifestFS,
+// writeCityPackManifest, ...) are mirrored in internal/importsvc, which the
+// add/remove path now delegates to. The other gc import subcommands (install /
+// check / upgrade / list / why) still use these package-main copies. Keep the
+// two copies behavior-equivalent: any change to the pack.toml round-trip rules
+// here must be mirrored in internal/importsvc/manifest.go (and vice versa) until
+// those subcommands are migrated to delegate as well.
 type importScopeState struct {
 	imports      map[string]config.Import
 	syntheticTag string
 	save         func() error
-}
-
-func (s *importScopeState) syntheticKey(name string) string {
-	return s.syntheticTag + name
 }
 
 func (s *importScopeState) isRootPackScope() bool {
@@ -380,14 +485,19 @@ func loadImportScopeFS(fs fsys.FS, cityPath string) (*importScopeState, error) {
 	}, nil
 }
 
-func collectAllImportsFS(fs fsys.FS, cityPath string) (map[string]config.Import, error) {
+func collectAllImportsFS(cityPath string) (map[string]config.Import, error) {
+	fs := fsys.OSFS{}
 	all := make(map[string]config.Import)
 
 	packManifest, err := loadCityPackManifestFS(fs, cityPath)
 	if err != nil {
 		return nil, err
 	}
-	for name, imp := range packManifest.Imports {
+	rootImports := copyImports(packManifest.Imports)
+	if err := applyCityRootImportOverridesFS(fs, cityPath, rootImports); err != nil {
+		return nil, err
+	}
+	for name, imp := range rootImports {
 		all["pack:"+name] = imp
 	}
 	defaults, err := config.LoadRootPackDefaultRigImports(fs, cityPath)
@@ -418,12 +528,12 @@ func collectAllImportsFS(fs fsys.FS, cityPath string) (map[string]config.Import,
 }
 
 func collectInspectableImportsFS(fs fsys.FS, cityPath string, scope *importScopeState) (map[string]config.Import, error) {
-	imports := make(map[string]config.Import, len(scope.imports))
-	for name, imp := range scope.imports {
-		imports[name] = imp
-	}
+	imports := copyImports(scope.imports)
 	if !scope.isRootPackScope() {
 		return imports, nil
+	}
+	if err := applyCityRootImportOverridesFS(fs, cityPath, imports); err != nil {
+		return nil, err
 	}
 	defaults, err := config.LoadRootPackDefaultRigImports(fs, cityPath)
 	if err != nil {
@@ -437,6 +547,41 @@ func collectInspectableImportsFS(fs fsys.FS, cityPath string, scope *importScope
 		imports[key] = bound.Import
 	}
 	return imports, nil
+}
+
+func copyImports(imports map[string]config.Import) map[string]config.Import {
+	out := make(map[string]config.Import, len(imports))
+	for name, imp := range imports {
+		out[name] = imp
+	}
+	return out
+}
+
+func applyCityRootImportOverridesFS(fs fsys.FS, cityPath string, imports map[string]config.Import) error {
+	overrides, err := loadCityRootImportsFS(fs, cityPath)
+	if err != nil {
+		return err
+	}
+	for name, imp := range overrides {
+		imports[name] = imp
+	}
+	return nil
+}
+
+// loadCityRootImportsFS returns the root-level [imports] entries from
+// city.toml, or nil when no city.toml exists.
+func loadCityRootImportsFS(fs fsys.FS, cityPath string) (map[string]config.Import, error) {
+	if _, err := fs.Stat(filepath.Join(cityPath, "city.toml")); err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	cfg, err := loadCityImportManifestFS(fs, cityPath)
+	if err != nil {
+		return nil, err
+	}
+	return cfg.Imports, nil
 }
 
 func lookupInspectableImport(target string, imports map[string]config.Import) (config.Import, bool) {
@@ -487,166 +632,103 @@ func findImportRigIndex(cityPath string, rigs []config.Rig, target string) (int,
 	return -1, "", fmt.Errorf("rig %q not found", target)
 }
 
+// importSvcDeps builds the importsvc dependency seam from the CLI's package
+// vars and the active rig flag. Routing through main's stubbable vars keeps the
+// existing command tests (which override syncImports/resolveImportVersion/...)
+// driving the shared add/remove code path.
+func importSvcDeps() importsvc.Deps {
+	return importsvc.Deps{
+		Rig:               strings.TrimSpace(rigFlag),
+		SyncLock:          syncImports,
+		WriteLockfile:     writeImportLockfile,
+		ResolveVersion:    resolveImportVersion,
+		DefaultConstraint: defaultImportConstraint,
+		ResolveHeadCommit: resolveImportHeadCommit,
+	}
+}
+
 //nolint:unparam // keep fs injectable for parity with the other import helpers and direct tests.
 func doImportAdd(fs fsys.FS, cityPath, source, nameOverride, versionFlag string, stdout, stderr io.Writer) int {
-	scope, err := loadImportScopeFS(fs, cityPath)
+	res, err := importsvc.AddImportWith(fs, cityPath, source, nameOverride, versionFlag, importSvcDeps())
 	if err != nil {
-		fmt.Fprintf(stderr, "gc import add: %v\n", err) //nolint:errcheck
+		fmt.Fprintln(stderr, importAddErrorLine(source, nameOverride, err)) //nolint:errcheck
+		printCredentialHint(stderr, err)
 		return 1
 	}
-
-	source, gitBacked, err := normalizeImportAddSource(fs, cityPath, source)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc import add %q: %v\n", source, err) //nolint:errcheck
-		return 1
-	}
-
-	name := nameOverride
-	if name == "" {
-		name = deriveImportName(source)
-	}
-	if name == "" {
-		fmt.Fprintln(stderr, "gc import add: could not derive import name; use --name") //nolint:errcheck
-		return 1
-	}
-	if strings.HasPrefix(name, "default-rig:") {
-		fmt.Fprintf(stderr, "gc import add: import name %q uses reserved prefix \"default-rig:\"\n", name) //nolint:errcheck
-		return 1
-	}
-	if _, exists := scope.imports[name]; exists {
-		fmt.Fprintf(stderr, "gc import add: import %q already exists\n", name) //nolint:errcheck
-		return 1
-	}
-
-	version := versionFlag
-	if gitBacked {
-		if hasRepositoryRefInSource(source) {
-			fmt.Fprintf(stderr, "gc import add %q: embed refs in --version, not in the source URL\n", source) //nolint:errcheck
-			return 1
-		}
-		if version == "" {
-			version, err = defaultImportVersionForSource(source)
-			if err != nil {
-				fmt.Fprintf(stderr, "gc import add %q: %v\n", source, err) //nolint:errcheck
-				return 1
-			}
-		}
-	} else if version != "" {
-		fmt.Fprintf(stderr, "gc import add %q: --version is only valid for git-backed imports\n", source) //nolint:errcheck
-		return 1
-	}
-
-	scope.imports[name] = config.Import{
-		Source:  source,
-		Version: version,
-	}
-	allImports, err := collectAllImportsFS(fs, cityPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc import add %q: %v\n", source, err) //nolint:errcheck
-		return 1
-	}
-	allImports[scope.syntheticKey(name)] = scope.imports[name]
-	lock, err := syncImports(cityPath, allImports, packman.InstallResolveIfNeeded)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc import add %q: %v\n", source, err) //nolint:errcheck
-		return 1
-	}
-	if err := scope.save(); err != nil {
-		fmt.Fprintf(stderr, "gc import add %q: %v\n", source, err) //nolint:errcheck
-		return 1
-	}
-	if err := writeImportLockfile(fs, cityPath, lock); err != nil {
-		fmt.Fprintf(stderr, "gc import add %q: %v\n", source, err) //nolint:errcheck
-		return 1
-	}
-	fmt.Fprintf(stdout, "Added import %q from %s\n", name, source) //nolint:errcheck
+	fmt.Fprintf(stdout, "Added import %q from %s\n", res.Name, res.Source) //nolint:errcheck
 	return 0
+}
+
+// importAddErrorLine frames the `gc import add` exit-1 stderr line. The
+// name-resolution arms (underivable name, reserved prefix) are byte-identical
+// to the historical CLI: they print bare, with no source and no sentinel
+// wrapper. The scope/ownership and default arms print importsvc's typed error
+// verbatim, which now carries the sentinel prefix it wraps (for example
+// `import already exists: import "x" already exists` or `invalid import
+// source: ...`); this is the intended, clearer post-extraction contract, not
+// byte-identical to the pre-extraction line. The exact-match tests in
+// cmd_import_test.go pin each arm so the contract cannot drift silently.
+func importAddErrorLine(source, nameOverride string, err error) string {
+	switch {
+	case errors.Is(err, importsvc.ErrNameDerive):
+		return "gc import add: could not derive import name; use --name"
+	case errors.Is(err, importsvc.ErrReservedPrefix):
+		return fmt.Sprintf("gc import add: import name %q uses reserved prefix \"default-rig:\"", nameOverride)
+	case errors.Is(err, importsvc.ErrScopeLoad), errors.Is(err, importsvc.ErrImportExists):
+		return fmt.Sprintf("gc import add: %v", err)
+	default:
+		// Redact any userinfo in the source so a credential-bearing URL never
+		// reaches the error line. RedactUserinfo is the identity on clean URLs, so
+		// every pinned public-source test stays byte-identical.
+		return fmt.Sprintf("gc import add %q: %v", gitcred.RedactUserinfo(source), err)
+	}
 }
 
 //nolint:unparam // FS seam is intentional for command tests and symmetry with doImportAdd.
 func doImportRemove(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer) int {
-	scope, err := loadImportScopeFS(fs, cityPath)
+	res, err := importsvc.RemoveImportWith(fs, cityPath, name, importSvcDeps())
 	if err != nil {
-		fmt.Fprintf(stderr, "gc import remove: %v\n", err) //nolint:errcheck
-		return 1
-	}
-	if _, exists := scope.imports[name]; !exists {
-		removed, err := removeRootDefaultRigImportFS(fs, cityPath, scope, name)
-		if err != nil {
+		// Failures during the lock-sync/save tail carry the name; earlier scope
+		// and ownership failures keep the bare prefix, mirroring the old CLI.
+		if errors.Is(err, importsvc.ErrInstallFailed) {
+			fmt.Fprintf(stderr, "gc import remove %q: %v\n", name, err) //nolint:errcheck
+		} else {
 			fmt.Fprintf(stderr, "gc import remove: %v\n", err) //nolint:errcheck
-			return 1
 		}
-		if !removed {
-			fmt.Fprintf(stderr, "gc import remove: import %q not found\n", name) //nolint:errcheck
-			return 1
-		}
-	} else {
-		delete(scope.imports, name)
-	}
-
-	allImports, err := collectAllImportsFS(fs, cityPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc import remove %q: %v\n", name, err) //nolint:errcheck
 		return 1
 	}
-	delete(allImports, scope.syntheticKey(name))
-	delete(allImports, "default-rig:"+strings.TrimPrefix(name, "default-rig:"))
-	lock, err := syncImports(cityPath, allImports, packman.InstallResolveIfNeeded)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc import remove %q: %v\n", name, err) //nolint:errcheck
-		return 1
-	}
-	if err := scope.save(); err != nil {
-		fmt.Fprintf(stderr, "gc import remove %q: %v\n", name, err) //nolint:errcheck
-		return 1
-	}
-	if err := writeImportLockfile(fs, cityPath, lock); err != nil {
-		fmt.Fprintf(stderr, "gc import remove %q: %v\n", name, err) //nolint:errcheck
-		return 1
-	}
-	fmt.Fprintf(stdout, "Removed import %q\n", name) //nolint:errcheck
+	fmt.Fprintf(stdout, "Removed import %q\n", res.Name) //nolint:errcheck
 	return 0
 }
 
-func removeRootDefaultRigImportFS(fs fsys.FS, cityPath string, scope *importScopeState, name string) (bool, error) {
-	if !scope.isRootPackScope() {
-		return false, nil
-	}
-	defaultName := strings.TrimPrefix(name, "default-rig:")
-	cfg, err := loadCityImportManifestFS(fs, cityPath)
-	if err != nil {
-		return false, err
-	}
-	if _, ok := cfg.Defaults.Rig.Imports[defaultName]; !ok {
-		manifest, err := loadCityPackManifestFS(fs, cityPath)
-		if err != nil {
-			return false, err
-		}
-		if _, ok := manifest.Defaults.Rig.Imports[defaultName]; !ok {
-			return false, nil
-		}
-		delete(manifest.Defaults.Rig.Imports, defaultName)
-		scope.save = func() error {
-			return writeCityPackManifest(fs, cityPath, manifest)
-		}
-		return true, nil
-	}
-	delete(cfg.Defaults.Rig.Imports, defaultName)
-	scope.save = func() error {
-		return writeCityImportManifestFS(fs, cityPath, cfg)
-	}
-	return true, nil
+// intoRepoCacheRoot is the success-line suffix naming the repo cache root a
+// `gc import install` or `gc import upgrade` wrote into. Both commands clone
+// through packman.EnsureRepoInCache into the root this process resolves from
+// GC_HOME, and the read side already names the directory it searched
+// ("locked but not cached at <dir>"), so the two lines together turn a
+// GC_HOME that differs between the shell that ran the write and the process
+// that resolves the config into a one-line diagnosis instead of a mystery.
+func intoRepoCacheRoot(root string) string {
+	return " into " + root
 }
 
 func doImportInstall(cityPath string, stdout, stderr io.Writer) int {
-	allImports, err := collectAllImportsFS(fsys.OSFS{}, cityPath)
+	allImports, err := collectAllImportsFS(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc import install: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	// Resolve the repo cache root the clones below land in, so the success
+	// line can name it (see intoRepoCacheRoot).
+	cacheRoot, err := packman.RepoCacheRoot()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc import install: resolving repo cache root: %v\n", err) //nolint:errcheck
 		return 1
 	}
 	lock, err := syncImports(cityPath, allImports, packman.InstallResolveIfNeeded)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc import install: %v\n", err) //nolint:errcheck
+		printCredentialHint(stderr, err)
 		return 1
 	}
 	if err := writeImportLockfile(fsys.OSFS{}, cityPath, lock); err != nil {
@@ -657,14 +739,35 @@ func doImportInstall(cityPath string, stdout, stderr io.Writer) int {
 	lock, err = installLockedImports(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc import install: %v\n", err) //nolint:errcheck
+		printCredentialHint(stderr, err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "Installed %d remote import(s)\n", len(lock.Packs)) //nolint:errcheck
+
+	// Installing the locked imports can still leave the city with a composed
+	// config the loader will refuse: install resolves and fetches packs, but
+	// never runs the same expansion/validation `gc doctor`'s
+	// expanded-config-load check applies. Validate here so install fails
+	// closed on the same errors doctor would later catch, instead of
+	// succeeding while every subsequent config reload aborts. See #5382.
+	// Nothing rolls back: the packs are in the cache and packs.lock is
+	// written by the time this runs, and the load error may predate this
+	// command. Say so, or a non-zero exit reads as "nothing was installed"
+	// and the operator re-runs instead of fixing the config. No count here:
+	// the success line's len(lock.Packs) is the lock closure by source, not
+	// a count of import bindings, and it is 0 for a local-path-only city
+	// whose config is nonetheless on disk.
+	if cfgErr := validateComposedConfigAfterInstall(cityPath); cfgErr != nil {
+		fmt.Fprintf(stderr, "gc import install: composed config failed to load after install: %v\n", cfgErr)                                                                  //nolint:errcheck
+		fmt.Fprintln(stderr, "This is not rolled back: packs.lock is written and any fetched packs remain in the cache. Fix the config, then re-run `gc doctor` to confirm.") //nolint:errcheck
+		return 1
+	}
+
+	fmt.Fprintf(stdout, "Installed %d remote import(s)%s\n", len(lock.Packs), intoRepoCacheRoot(cacheRoot)) //nolint:errcheck
 	return 0
 }
 
 func doImportCheck(cityPath string, stdout, stderr io.Writer) int {
-	allImports, err := collectAllImportsFS(fsys.OSFS{}, cityPath)
+	allImports, err := collectAllImportsFS(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc import check: %v\n", err) //nolint:errcheck
 		return 1
@@ -716,13 +819,32 @@ func doImportUpgrade(cityPath, target string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	allImports, collectErr := collectAllImportsFS(fsys.OSFS{}, cityPath)
+	// Read the pre-upgrade lock so the summary below can report which pins
+	// actually moved, rather than just the size of the resolved closure. A
+	// sha-pinned import always resolves back to itself, so a raw entry count
+	// can't distinguish "moved" from "already at its pinned version".
+	prevLock, err := readImportLockfile(fsys.OSFS{}, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc import upgrade: %v\n", err) //nolint:errcheck
+		return 1
+	}
+
+	allImports, collectErr := collectAllImportsFS(cityPath)
 	if collectErr != nil {
 		fmt.Fprintf(stderr, "gc import upgrade: %v\n", collectErr) //nolint:errcheck
 		return 1
 	}
 
+	// Resolve the repo cache root the clones below land in, so the success
+	// line can name it (see intoRepoCacheRoot).
+	cacheRoot, err := packman.RepoCacheRoot()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc import upgrade: resolving repo cache root: %v\n", err) //nolint:errcheck
+		return 1
+	}
+
 	var lock *packman.Lockfile
+	var targetSource string
 	if target == "" {
 		lock, err = syncImports(cityPath, allImports, packman.InstallUpgrade)
 	} else {
@@ -740,16 +862,19 @@ func doImportUpgrade(cityPath, target string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "gc import upgrade: import %q is a path import and cannot be upgraded\n", target) //nolint:errcheck
 			return 1
 		}
+		targetSource = targetImp.Source
 		lock, err = syncImportsSelective(cityPath, allImports, map[string]struct{}{
 			targetImp.Source: {},
 		})
 		if err != nil {
 			fmt.Fprintf(stderr, "gc import upgrade %q: %v\n", target, err) //nolint:errcheck
+			printCredentialHint(stderr, err)
 			return 1
 		}
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "gc import upgrade: %v\n", err) //nolint:errcheck
+		printCredentialHint(stderr, err)
 		return 1
 	}
 	if err := writeImportLockfile(fsys.OSFS{}, cityPath, lock); err != nil {
@@ -757,9 +882,27 @@ func doImportUpgrade(cityPath, target string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if target == "" {
-		fmt.Fprintf(stdout, "Upgraded %d remote import(s)\n", len(lock.Packs)) //nolint:errcheck
+		total := len(lock.Packs)
+		moved := 0
+		for source, pack := range lock.Packs {
+			if prev, ok := prevLock.Packs[source]; !ok || prev.Commit != pack.Commit {
+				moved++
+			}
+		}
+		if moved == 0 {
+			fmt.Fprintf(stdout, "No import moved; %d already up to date\n", total) //nolint:errcheck
+		} else {
+			fmt.Fprintf(stdout, "Upgraded %d of %d remote import(s)%s; %d already up to date\n", moved, total, intoRepoCacheRoot(cacheRoot), total-moved) //nolint:errcheck
+		}
 	} else {
-		fmt.Fprintf(stdout, "Upgraded import %q\n", target) //nolint:errcheck
+		pack, ok := lock.Packs[targetSource]
+		if !ok {
+			fmt.Fprintf(stdout, "Upgraded import %q%s\n", target, intoRepoCacheRoot(cacheRoot)) //nolint:errcheck
+		} else if prev, hadPrev := prevLock.Packs[targetSource]; hadPrev && prev.Commit == pack.Commit {
+			fmt.Fprintf(stdout, "Import %q already at %s\n", target, pack.Commit) //nolint:errcheck
+		} else {
+			fmt.Fprintf(stdout, "Upgraded import %q (%s)%s\n", target, pack.Commit, intoRepoCacheRoot(cacheRoot)) //nolint:errcheck
+		}
 	}
 	return 0
 }
@@ -793,7 +936,7 @@ func doImportList(cityPath string, tree bool, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	allImports, err := collectAllImportsFS(fsys.OSFS{}, cityPath)
+	allImports, err := collectAllImportsFS(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc import list: %v\n", err) //nolint:errcheck
 		return 1
@@ -1166,9 +1309,17 @@ func loadCityPackManifestFS(fs fsys.FS, cityPath string) (*cityPackManifest, err
 	}
 
 	var manifest cityPackManifest
-	if _, err := toml.Decode(string(data), &manifest); err != nil {
+	md, err := toml.Decode(string(data), &manifest)
+	if err != nil {
 		return nil, fmt.Errorf("parsing pack.toml: %w", err)
 	}
+	// Fold the legacy [agents] alias into [agent_defaults] before any rewrite:
+	// the manifest body emits only [agent_defaults], so without this the
+	// import-manifest rewrite would silently drop an [agents] table even though
+	// the key-loss guard recognizes it. Mirrors parse-time normalization and the
+	// gc agent suspend/resume edit path.
+	config.FoldAgentDefaultsAlias(&manifest.AgentDefaults, manifest.AgentsDefaults, md)
+	manifest.AgentsDefaults = config.AgentDefaults{}
 	if manifest.Pack.Name == "" {
 		manifest.Pack.Name = defaultCityPackName(fs, cityPath)
 	}
@@ -1214,11 +1365,13 @@ func writeCityPackManifest(fs fsys.FS, cityPath string, manifest *cityPackManife
 		NamedSessions: manifest.NamedSessions,
 		Services:      manifest.Services,
 		Providers:     manifest.Providers,
+		Upstreams:     manifest.Upstreams,
 		Formulas:      manifest.Formulas,
 		Patches:       manifest.Patches,
 		Doctor:        manifest.Doctor,
 		Commands:      manifest.Commands,
 		Global:        manifest.Global,
+		Pricing:       manifest.Pricing,
 	}
 	if err := toml.NewEncoder(&buf).Encode(body); err != nil {
 		return fmt.Errorf("encoding pack.toml: %w", err)
@@ -1226,7 +1379,21 @@ func writeCityPackManifest(fs fsys.FS, cityPath string, manifest *cityPackManife
 	if err := writeOrderedDefaultRigImports(&buf, manifest); err != nil {
 		return err
 	}
-	return fsys.WriteFileAtomic(fs, filepath.Join(cityPath, "pack.toml"), buf.Bytes(), 0o644)
+	// Resolve before the rename: pack.toml may be a symlink into a
+	// checked-out repo, and renaming over the unresolved path would
+	// replace the link with a regular file and strand the stale manifest
+	// in the checked-in target.
+	writePath, err := fsys.ResolveSymlinks(fs, filepath.Join(cityPath, "pack.toml"))
+	if err != nil {
+		return err
+	}
+	// Refuse the rewrite when the on-disk pack.toml carries keys this binary
+	// does not recognize: the manifest round-trip would silently drop newer
+	// or manual keys at the checked-in target.
+	if err := config.GuardRewriteKeyLoss[cityPackManifest](fs, writePath); err != nil {
+		return err
+	}
+	return fsys.WriteFileAtomic(fs, writePath, buf.Bytes(), 0o644)
 }
 
 func writeOrderedDefaultRigImports(buf *bytes.Buffer, manifest *cityPackManifest) error {
@@ -1296,42 +1463,19 @@ func hasRepositoryRefInSource(source string) bool {
 	return strings.Contains(source, "#")
 }
 
-func defaultImportVersionForSource(source string) (string, error) {
-	resolved, err := resolveImportVersion(source, "")
+func defaultImportVersionForSource(cityRoot, source string) (string, error) {
+	resolved, err := resolveImportVersion(cityRoot, source, "")
 	if err == nil {
 		return defaultImportConstraint(resolved.Version)
 	}
 	if !errors.Is(err, packman.ErrNoSemverTags) {
 		return "", err
 	}
-	commit, err := resolveImportHeadCommit(source)
+	commit, err := resolveImportHeadCommit(cityRoot, source)
 	if err != nil {
 		return "", err
 	}
 	return "sha:" + commit, nil
-}
-
-func normalizeImportAddSource(fs fsys.FS, cityPath, source string) (string, bool, error) {
-	if isRemoteImportSource(source) {
-		return source, true, nil
-	}
-
-	targetDir, err := resolveImportAddPath(cityPath, source)
-	if err != nil {
-		return "", false, err
-	}
-	if err := validateImportPackTarget(fs, targetDir); err != nil {
-		return "", false, err
-	}
-
-	canonical, ok, err := canonicalizeLocalGitImportSource(targetDir)
-	if err != nil {
-		return "", false, err
-	}
-	if ok {
-		return canonical, true, nil
-	}
-	return source, false, nil
 }
 
 func resolveImportAddPath(cityPath, source string) (string, error) {
@@ -1351,47 +1495,12 @@ func resolveImportAddPath(cityPath, source string) (string, error) {
 	}
 }
 
-func validateImportPackTarget(fs fsys.FS, targetDir string) error {
-	info, err := fs.Stat(targetDir)
-	if err != nil {
-		return fmt.Errorf("resolving source: %w", err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("source is not a directory")
-	}
-	packPath := filepath.Join(targetDir, "pack.toml")
-	if _, err := fs.Stat(packPath); err != nil {
-		return fmt.Errorf("invalid pack target: missing pack.toml")
-	}
-	if _, err := config.Load(fs, packPath); err != nil {
-		return fmt.Errorf("invalid pack target: %w", err)
-	}
-	return nil
-}
-
-func canonicalizeLocalGitImportSource(targetDir string) (string, bool, error) {
-	repoRoot, ok, err := localGitRepoRoot(targetDir)
-	if err != nil || !ok {
-		return "", ok, err
-	}
-	resolvedTarget, err := filepath.EvalSymlinks(targetDir)
-	if err != nil {
-		resolvedTarget = targetDir
-	}
-	rel, err := filepath.Rel(repoRoot, resolvedTarget)
-	if err != nil {
-		return "", false, fmt.Errorf("computing import subpath: %w", err)
-	}
-	u := url.URL{Scheme: "file", Path: filepath.ToSlash(repoRoot)}
-	canonical := u.String()
-	if rel != "." {
-		canonical += "//" + filepath.ToSlash(rel)
-	}
-	return canonical, true, nil
-}
-
 func localGitRepoRoot(targetDir string) (string, bool, error) {
 	cmd := exec.Command("git", "-C", targetDir, "rev-parse", "--show-toplevel")
+	// Strip git-locating env vars (GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, ...)
+	// so the toplevel resolves from targetDir, not a parent repo leaked through
+	// a pre-commit hook or nested worktree tooling.
+	cmd.Env = git.SanitizedEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		text := string(out)
@@ -1407,16 +1516,31 @@ func localGitRepoRoot(targetDir string) (string, bool, error) {
 	return strings.TrimSpace(string(out)), true, nil
 }
 
-func defaultImportHeadCommit(source string) (string, error) {
+func defaultImportHeadCommit(cityRoot, source string) (string, error) {
 	cloneURL := config.NormalizeRemoteSource(source)
-	cmd := exec.Command("git", "ls-remote", cloneURL, "HEAD")
+	inj, err := gitcred.CredentialedNetworkArgs("", cityRoot, cloneURL)
+	if err != nil {
+		return "", fmt.Errorf("loading git credentials for %s: %w", gitcred.RedactUserinfo(cloneURL), err)
+	}
+	// inj.CfgArgs go before the subcommand. This site keeps its SanitizedEnv base
+	// and does NOT add the UntrustedRemoteGitConfigArgs hardening that the
+	// importsvc HEAD probe (site 3) carries — a pre-existing asymmetry preserved
+	// here for byte-identical behavior and flagged for a later unify.
+	cmd := exec.Command("git", append(inj.CfgArgs, "ls-remote", cloneURL, "HEAD")...)
+	// Strip git-locating env vars so a leaked GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE
+	// (or config injection) from a parent pre-commit hook or worktree tooling
+	// cannot perturb how this remote HEAD probe runs.
+	cmd.Env = append(git.SanitizedEnv(), inj.Env...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("resolving HEAD for %q: %w", source, err)
+		if authErr := gitcred.ClassifyAuthError(cloneURL, inj, string(out), err); authErr != nil {
+			return "", authErr
+		}
+		return "", fmt.Errorf("resolving HEAD for %q: %w", gitcred.RedactUserinfo(source), err)
 	}
 	fields := strings.Fields(string(out))
 	if len(fields) == 0 {
-		return "", fmt.Errorf("resolving HEAD for %q: empty response", source)
+		return "", fmt.Errorf("resolving HEAD for %q: empty response", gitcred.RedactUserinfo(source))
 	}
 	return fields[0], nil
 }

@@ -2,8 +2,31 @@ package config
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
+
+const (
+	setupTimeoutMaskedByStartupWarningFragment   = "setup_timeout can never fire because startup_timeout bounds the whole session Start() call first"
+	setupTimeoutBecomesIdleBudgetWarningFragment = "setup_timeout now bounds idle/silence time between output, not total setup runtime"
+)
+
+// IsSessionSetupTimeoutAdvisory reports whether warning is one of the
+// [session] setup-timeout advisories. They describe how the timeout knobs
+// reinterpret each other rather than a config the loader cannot honor: the
+// setup_max_timeout advisory fires on every config that sets the field,
+// including a deliberately correct one. Callers that promote warnings to
+// errors must keep these advisory, or setting a documented field would stop a
+// city from starting.
+// The fragments are matched as a suffix rather than anywhere in the string:
+// the unparseable-duration warnings in this file quote the operator's raw
+// value verbatim and then append the parse error, so a value that happens to
+// contain an advisory sentence must not be mistaken for the advisory itself
+// and downgraded out of strict-fatal handling.
+func IsSessionSetupTimeoutAdvisory(warning string) bool {
+	return strings.HasSuffix(warning, setupTimeoutMaskedByStartupWarningFragment) ||
+		strings.HasSuffix(warning, setupTimeoutBecomesIdleBudgetWarningFragment)
+}
 
 // ValidateDurations checks all duration string fields in the config and returns
 // warnings for any values that cannot be parsed by time.ParseDuration. This
@@ -48,14 +71,59 @@ func ValidateDurations(cfg *City, source string) []string {
 				source, context, field, value, SessionSleepOff, err))
 		}
 	}
+	// checkPositive warns on both unparseable and non-positive values. Used for
+	// knobs where a zero or negative duration silently reverts to a default at
+	// runtime instead of failing loudly (e.g. an order override's
+	// check_timeout).
+	checkPositive := func(context, field, value string) {
+		if value == "" {
+			return
+		}
+		dur, err := time.ParseDuration(value)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s: %s %s = %q is not a valid duration: %v",
+				source, context, field, value, err))
+			return
+		}
+		if dur <= 0 {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s: %s %s = %q must be a positive duration",
+				source, context, field, value))
+		}
+	}
 
 	// Session config durations.
 	check("[session]", "setup_timeout", cfg.Session.SetupTimeout)
+	check("[session]", "setup_max_timeout", cfg.Session.SetupMaxTimeout)
 	check("[session]", "nudge_ready_timeout", cfg.Session.NudgeReadyTimeout)
 	check("[session]", "nudge_retry_interval", cfg.Session.NudgeRetryInterval)
+	check("[session]", "nudge_poll_interval", cfg.Session.NudgePollInterval)
 	check("[session]", "nudge_lock_timeout", cfg.Session.NudgeLockTimeout)
 	check("[session]", "startup_timeout", cfg.Session.StartupTimeout)
 	check("[session]", "progress_stall_timeout", cfg.Session.ProgressStallTimeout)
+	check("[session]", "claim_holder_stall_timeout", cfg.Session.ClaimHolderStallTimeout)
+
+	// Cross-field: startup_timeout wraps the whole Start() call (pre_start and
+	// setup included), so a setup_timeout that is >= startup_timeout can never
+	// actually fire — startup_timeout kills Start() first. Compared as
+	// effective (defaulted) durations so an unset field that inherits a
+	// conflicting default is still caught (gastownhall/gascity#5279).
+	if setupDur, startupDur := cfg.Session.SetupTimeoutDuration(), cfg.Session.StartupTimeoutDuration(); setupDur >= startupDur {
+		warnings = append(warnings, fmt.Sprintf(
+			"%s: [session] setup_timeout (%s) >= startup_timeout (%s): %s",
+			source, setupDur, startupDur, setupTimeoutMaskedByStartupWarningFragment))
+	}
+
+	// setup_max_timeout > 0 silently reinterprets setup_timeout from a
+	// total-runtime budget into an idle/silence budget (see runSetupCommand in
+	// internal/runtime/tmux/adapter.go) — easy to miss when only setup_timeout
+	// is being tuned (gastownhall/gascity#5279).
+	if maxDur := cfg.Session.SetupMaxTimeoutDuration(); maxDur > 0 {
+		warnings = append(warnings, fmt.Sprintf(
+			"%s: [session] setup_max_timeout (%s) is set: %s",
+			source, maxDur, setupTimeoutBecomesIdleBudgetWarningFragment))
+	}
 
 	// Daemon config durations.
 	check("[daemon]", "patrol_interval", cfg.Daemon.PatrolInterval)
@@ -69,9 +137,21 @@ func ValidateDurations(cfg *City, source string) []string {
 	check("[daemon]", "start_ready_timeout", cfg.Daemon.StartReadyTimeout)
 	check("[daemon]", "dolt_stop_timeout", cfg.Daemon.DoltStopTimeout)
 	check("[daemon]", "dolt_start_address_in_use_retry_window", cfg.Daemon.DoltStartAddressInUseRetryWindow)
+	check("[dolt]", "dolt_lock_release_timeout", cfg.Dolt.DoltLockReleaseTimeout)
 
 	// Orders config durations.
 	check("[orders]", "max_timeout", cfg.Orders.MaxTimeout)
+	for i := range cfg.Orders.Overrides {
+		ov := cfg.Orders.Overrides[i]
+		if ov.CheckTimeout != nil {
+			// A non-positive check_timeout override parses cleanly but reverts
+			// the condition probe to the 10s default at dispatch, so surface it
+			// at config load like an unparseable typo.
+			checkPositive(
+				fmt.Sprintf("[[orders.overrides]] %q", ov.Name),
+				"check_timeout", *ov.CheckTimeout)
+		}
+	}
 
 	// Mail config durations.
 	check("[mail]", "retention_ttl", cfg.Mail.RetentionTTL)
@@ -90,6 +170,7 @@ func ValidateDurations(cfg *City, source string) []string {
 
 	// Chat sessions config durations.
 	check("[chat_sessions]", "idle_timeout", cfg.ChatSessions.IdleTimeout)
+	check("[chat_sessions]", "grace_period", cfg.ChatSessions.GracePeriod)
 
 	// Maintenance (dolt) config durations.
 	check("[maintenance.dolt]", "interval", cfg.Maintenance.Dolt.Interval)
@@ -173,6 +254,9 @@ func ValidateNonNegativeDurations(cfg *City, source string) error {
 		return err
 	}
 	if err := checkNonNegative("[daemon]", "dolt_start_address_in_use_retry_window", cfg.Daemon.DoltStartAddressInUseRetryWindow); err != nil {
+		return err
+	}
+	if err := checkNonNegative("[dolt]", "dolt_lock_release_timeout", cfg.Dolt.DoltLockReleaseTimeout); err != nil {
 		return err
 	}
 	for name, policy := range cfg.Beads.Policies {

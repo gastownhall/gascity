@@ -7,11 +7,14 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
+	goruntime "runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -74,7 +77,7 @@ func TestHandoffSuccess(t *testing.T) {
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
 
-	code := doHandoff(store, rec, dops, nil, "mayor", "mayor",
+	code := doHandoff(store, store, rec, dops, nil, "mayor", "mayor",
 		[]string{"HANDOFF: context full"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
@@ -140,7 +143,7 @@ func TestWaitForControllerRestartHandoffFlagCleared(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	code := waitForControllerRestart(context.Background(), dops, "worker", "gc handoff",
+	code := waitForControllerRestart(context.Background(), dops, runtime.NewFake(), "worker", "gc handoff",
 		10*time.Millisecond, 5*time.Second, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0 when flag cleared; stderr: %s", code, stderr.String())
@@ -153,6 +156,33 @@ func TestWaitForControllerRestartHandoffFlagCleared(t *testing.T) {
 	}
 }
 
+// TestWaitForControllerRestartHandoffFlagClearedButSessionStillRunning covers
+// Fix 2: the reconciler's pinned-session collateral-skip clears
+// GC_RESTART_REQUESTED without stopping the session (see
+// pinnedConfiguredNamedSessionKillProtected in session_reconciler.go), so a
+// cleared flag alone must not be reported as success while the session is
+// still running.
+func TestWaitForControllerRestartHandoffFlagClearedButSessionStillRunning(t *testing.T) {
+	dops := &drainOpsWithCountdown{fakeDrainOps: newFakeDrainOps(), remaining: 2}
+	if err := dops.setRestartRequested("worker"); err != nil {
+		t.Fatalf("setRestartRequested: %v", err)
+	}
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	code := waitForControllerRestart(context.Background(), dops, sp, "worker", "gc handoff",
+		10*time.Millisecond, 50*time.Millisecond, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 (flag cleared but session still running is not success); stderr: %s", code, stderr.String())
+	}
+	if got := stderr.String(); !strings.Contains(got, "gc handoff: controller did not act within") {
+		t.Errorf("stderr = %q, want handoff timeout diagnostic", got)
+	}
+}
+
 func TestWaitForControllerRestartHandoffTimeout(t *testing.T) {
 	dops := newFakeDrainOps()
 	if err := dops.setRestartRequested("worker"); err != nil {
@@ -160,7 +190,7 @@ func TestWaitForControllerRestartHandoffTimeout(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	code := waitForControllerRestart(context.Background(), dops, "worker", "gc handoff",
+	code := waitForControllerRestart(context.Background(), dops, runtime.NewFake(), "worker", "gc handoff",
 		10*time.Millisecond, 25*time.Millisecond, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1 on timeout", code)
@@ -181,7 +211,7 @@ func TestWaitForControllerRestartHandoffTimeoutReportsLastPollError(t *testing.T
 	dops.restartReadErr = errors.New("metadata read failed")
 
 	var stderr bytes.Buffer
-	code := waitForControllerRestart(context.Background(), dops, "worker", "gc handoff",
+	code := waitForControllerRestart(context.Background(), dops, runtime.NewFake(), "worker", "gc handoff",
 		10*time.Millisecond, 25*time.Millisecond, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1 on timeout", code)
@@ -202,7 +232,7 @@ func TestWaitForControllerRestartHandoffContextCancel(t *testing.T) {
 
 	done := make(chan int, 1)
 	go func() {
-		done <- waitForControllerRestart(ctx, dops, "worker", "gc handoff",
+		done <- waitForControllerRestart(ctx, dops, runtime.NewFake(), "worker", "gc handoff",
 			10*time.Millisecond, 30*time.Second, &stderr)
 	}()
 
@@ -327,7 +357,7 @@ func TestDoHandoffAutoReportsHookOutputWriteError(t *testing.T) {
 	rec := events.NewFake()
 	var stderr bytes.Buffer
 
-	code := doHandoffAuto(store, rec, "mayor", []string{"context cycle"}, "codex", errWriter{}, &stderr)
+	code := doHandoffAuto(store, store, rec, "mayor", []string{"context cycle"}, "codex", errWriter{}, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
@@ -428,7 +458,7 @@ func TestDoHandoff_Regression744_NamedSessionSkipsRestart(t *testing.T) {
 	dops.restartRequested["mayor"] = true
 
 	persistCalled := false
-	outcome := doHandoffWithOutcome(store, rec, dops, func() error {
+	outcome := doHandoffWithOutcome(store, store, rec, dops, func() error {
 		persistCalled = true
 		return nil
 	}, "mayor", "mayor", []string{"HANDOFF: context full"}, &stdout, &stderr)
@@ -501,7 +531,7 @@ func TestDoHandoff_NamedSessionClearRestartFailureReturnsError(t *testing.T) {
 		t.Fatalf("set configured_named_mode: %v", err)
 	}
 
-	outcome := doHandoffWithOutcome(store, rec, dops, nil, "mayor", "mayor",
+	outcome := doHandoffWithOutcome(store, store, rec, dops, nil, "mayor", "mayor",
 		[]string{"HANDOFF: context full"}, &stdout, &stderr)
 	if outcome.code != 1 {
 		t.Fatalf("code = %d, want 1", outcome.code)
@@ -541,7 +571,7 @@ func TestDoHandoff_NamedAlwaysSessionRequestsRestart(t *testing.T) {
 	}
 
 	persistCalled := false
-	outcome := doHandoffWithOutcome(store, rec, dops, func() error {
+	outcome := doHandoffWithOutcome(store, store, rec, dops, func() error {
 		persistCalled = true
 		return nil
 	}, "mayor", "mayor", []string{"HANDOFF: context full"}, &stdout, &stderr)
@@ -565,13 +595,74 @@ func TestDoHandoff_NamedAlwaysSessionRequestsRestart(t *testing.T) {
 	}
 }
 
+// TestDoHandoff_PinnedAlwaysSessionRequiresPersistRestart covers Fix 1: a
+// pinned named session (pin_awake == "true") is kill-protected by the
+// reconciler unless an explicit controller reset is persisted, so
+// persistRestart is mandatory rather than best-effort for pinned sessions.
+// When it is unavailable or fails, doHandoffWithOutcome must report failure
+// and must not promise a restart it cannot guarantee.
+func TestDoHandoff_PinnedAlwaysSessionRequiresPersistRestart(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		persistRestart func() error
+	}{
+		{name: "nil persistRestart"},
+		{name: "persistRestart error", persistRestart: func() error { return errors.New("worker boundary unavailable") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			rec := events.NewFake()
+			dops := newFakeDrainOps()
+			var stdout, stderr bytes.Buffer
+
+			b, err := store.Create(beads.Bead{
+				Type:   sessionBeadType,
+				Labels: []string{"gc:session"},
+			})
+			if err != nil {
+				t.Fatalf("seeding session bead: %v", err)
+			}
+			if err := store.SetMetadata(b.ID, "session_name", "mayor"); err != nil {
+				t.Fatalf("set session_name: %v", err)
+			}
+			if err := store.SetMetadata(b.ID, "configured_named_session", "true"); err != nil {
+				t.Fatalf("set configured_named_session: %v", err)
+			}
+			if err := store.SetMetadata(b.ID, "configured_named_mode", "always"); err != nil {
+				t.Fatalf("set configured_named_mode: %v", err)
+			}
+			if err := store.SetMetadata(b.ID, "pin_awake", "true"); err != nil {
+				t.Fatalf("set pin_awake: %v", err)
+			}
+
+			outcome := doHandoffWithOutcome(store, store, rec, dops, tc.persistRestart, "mayor", "mayor",
+				[]string{"HANDOFF: context full"}, &stdout, &stderr)
+			if outcome.code != 1 {
+				t.Fatalf("code = %d, want 1; stderr: %s", outcome.code, stderr.String())
+			}
+			if outcome.restartRequested {
+				t.Fatal("restartRequested = true, want false when persistRestart is unavailable for a pinned session")
+			}
+			if strings.Contains(stdout.String(), "requesting restart") {
+				t.Errorf("stdout = %q, must not promise a restart when persistRestart is unavailable for a pinned session", stdout.String())
+			}
+			if len(rec.Events) != 1 {
+				t.Fatalf("got %d events, want 1 (mail only, no SessionDraining); events=%v", len(rec.Events), rec.Events)
+			}
+			if rec.Events[0].Type != events.MailSent {
+				t.Fatalf("event[0].Type = %q, want %q", rec.Events[0].Type, events.MailSent)
+			}
+		})
+	}
+}
+
 func TestHandoffWithMessage(t *testing.T) {
 	store := beads.NewMemStore()
 	rec := events.NewFake()
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
 
-	code := doHandoff(store, rec, dops, nil, "polecat-1", "gc-city-polecat-1",
+	code := doHandoff(store, store, rec, dops, nil, "polecat-1", "gc-city-polecat-1",
 		[]string{"HANDOFF: PR review needed", "PR #42 is open, tests passing, needs review from refinery"},
 		&stdout, &stderr)
 	if code != 0 {
@@ -697,7 +788,7 @@ func TestHandoffRemoteRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	code := doHandoffRemote(store, rec, sp, "deacon", "deacon", "mayor",
+	code := doHandoffRemote(store, store, rec, sp, "deacon", "deacon", "mayor",
 		[]string{"Context refresh", "Check beads for current state"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
@@ -775,7 +866,7 @@ func TestHandoffRemoteNamedOnDemandSkipsKill(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doHandoffRemote(store, rec, sp, "mayor", "mayor", "deacon",
+	code := doHandoffRemote(store, store, rec, sp, "mayor", "mayor", "deacon",
 		[]string{"Context refresh", "Please pick this up manually"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
@@ -815,7 +906,7 @@ func TestHandoffRemoteNotRunning(t *testing.T) {
 	rec := events.NewFake()
 	sp := runtime.NewFake()
 	var stdout, stderr bytes.Buffer
-	code := doHandoffRemote(store, rec, sp, "deacon", "deacon", "human",
+	code := doHandoffRemote(store, store, rec, sp, "deacon", "deacon", "human",
 		[]string{"Please check on PR #42"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
@@ -914,4 +1005,263 @@ func TestCmdHandoffRemoteDefaultSenderFallsBackToGCAliasWhenSessionIDMissing(t *
 	if msg.Assignee != "recipient" {
 		t.Fatalf("message Assignee = %q, want recipient", msg.Assignee)
 	}
+}
+
+var handoffMailIDPattern = regexp.MustCompile(`sent auto mail (\S+)`)
+
+// TestHandoffMailWritesTheBindingOnAMigratedCity pins that the handoff message
+// bead follows the messaging class. It drives cmdHandoff rather than
+// createHandoffMail because the defect is at the ROOT — which store the command
+// derives — and a test that hands a routed store in would pass unrouted.
+func TestHandoffMailWritesTheBindingOnAMigratedCity(t *testing.T) {
+	cityPath, cfg := migratedOneShotCLICity(t)
+	captureCLIStorageStderr(t)
+	t.Setenv("GC_ALIAS", "worker")
+	t.Setenv("GC_SESSION_NAME", "gc-worker")
+
+	var stdout, stderr bytes.Buffer
+	// --auto: the send without the restart request, so the assertion is about
+	// the message bead and nothing else.
+	if code := cmdHandoff([]string{"context cycle"}, "", true, "", &stdout, &stderr); code != 0 {
+		t.Fatalf("gc handoff --auto exited %d: %s", code, stderr.String())
+	}
+	match := handoffMailIDPattern.FindStringSubmatch(stdout.String())
+	if match == nil {
+		t.Fatalf("could not find the handoff mail id in %q", stdout.String())
+	}
+	msgID := match[1]
+
+	// Close the funnel's handle first, so the assertions read durable bytes.
+	if err := closeCLIStorageRoutes(); err != nil {
+		t.Fatalf("closing the one-shot routes: %v", err)
+	}
+	binding := openMigratedDestination(t, mustResolveInfraTarget(t, cityPath, cfg))
+	if _, err := binding.Get(msgID); err != nil {
+		t.Errorf("the handoff message did not land in the binding: %v", err)
+	}
+	work, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("opening the retained work store: %v", err)
+	}
+	t.Cleanup(func() { _ = closeBeadStoreHandle(work) })
+	if _, err := work.Get(msgID); err == nil {
+		t.Errorf("the handoff message also landed in the work store as %s; a relocated class must be served from its binding only", msgID)
+	} else if !errors.Is(err, beads.ErrNotFound) {
+		t.Errorf("reading the work store for %s: %v", msgID, err)
+	}
+}
+
+// TestHandoffLocalArmMailLandsInTheBindingOnAMigratedCity is the same defect on
+// the arm the --auto row above cannot reach. cmdHandoff derives ONE msgStore and
+// hands it to either doHandoffAuto or doHandoffWithOutcome, so today the two arms
+// cannot disagree — but "today" is a property of one line of cmdHandoff, and the
+// routed store is a parameter to both, which is exactly the shape that lets a
+// later edit route one arm and not the other.
+//
+// A named on-demand session is the drivable shape: restartable is false, so the
+// command sends the mail and returns without waiting on a controller.
+func TestHandoffLocalArmMailLandsInTheBindingOnAMigratedCity(t *testing.T) {
+	cityPath, cfg := migratedOneShotCLICity(t)
+	captureCLIStorageStderr(t)
+	t.Setenv("GC_ALIAS", "mayor")
+	t.Setenv("GC_SESSION_NAME", "mayor")
+	seedNamedOnDemandSession(t, cityPath, cfg, "mayor")
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdHandoff([]string{"context cycle"}, "", false, "", &stdout, &stderr); code != 0 {
+		t.Fatalf("gc handoff exited %d: %s", code, stderr.String())
+	}
+	id := handoffMailIDFromOutput(t, stdout.String(), "sent mail ")
+
+	assertHandoffMailResidesInTheBinding(t, cityPath, cfg, id)
+}
+
+// TestHandoffRemoteArmMailLandsInTheBindingOnAMigratedCity covers the second
+// derivation point. cmdHandoffRemote opens its own store and loads its own cfg,
+// so its routing is genuinely independent of cmdHandoff's — nothing but this row
+// stands between it and the same defect.
+func TestHandoffRemoteArmMailLandsInTheBindingOnAMigratedCity(t *testing.T) {
+	cityPath, cfg := migratedOneShotCLICity(t)
+	captureCLIStorageStderr(t)
+	t.Setenv("GC_MAIL", "")
+	t.Setenv("GC_SESSION_ID", "")
+	t.Setenv("GC_ALIAS", "sender")
+	seedNamedOnDemandSession(t, cityPath, cfg, "sender")
+	seedNamedOnDemandSession(t, cityPath, cfg, "recipient")
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdHandoffRemote([]string{"context cycle"}, "recipient", &stdout, &stderr); code != 0 {
+		t.Fatalf("gc handoff --target exited %d: %s %s", code, stdout.String(), stderr.String())
+	}
+	id := handoffMailIDFromOutput(t, stdout.String(), "sent mail ")
+
+	assertHandoffMailResidesInTheBinding(t, cityPath, cfg, id)
+}
+
+// seedNamedOnDemandSession plants the session bead the handoff arms resolve
+// through, in the SESSION-class store rather than the work store — on a migrated
+// city those are different ledgers, and a bead seeded in the wrong one makes the
+// command fail for a reason that has nothing to do with what is being asserted.
+func seedNamedOnDemandSession(t *testing.T, cityPath string, cfg *config.City, alias string) {
+	t.Helper()
+	work, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("opening the city work store: %v", err)
+	}
+	t.Cleanup(func() { _ = closeBeadStoreHandle(work) })
+
+	sess := cliSessionStore(work, cfg, cityPath)
+	b, err := sess.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":                    alias,
+			"session_name":             alias,
+			"configured_named_session": "true",
+			"configured_named_mode":    "on_demand",
+		},
+	})
+	if err != nil {
+		t.Fatalf("seeding the %q session bead: %v", alias, err)
+	}
+	if b.ID == "" {
+		t.Fatalf("the %q session bead was created with no id", alias)
+	}
+}
+
+// assertHandoffMailResidesInTheBinding is the identity assertion the two rows
+// above share: the message bead is in the store the messaging class was migrated
+// onto, and is NOT in the work store the migration retained. Both halves are
+// needed — "it is in the binding" alone passes on a co-resident write, which is
+// the shape a handoff that routes its read but not its write produces.
+func assertHandoffMailResidesInTheBinding(t *testing.T, cityPath string, cfg *config.City, id string) {
+	t.Helper()
+	// The funnel's own handle goes first, so what follows reads durable bytes
+	// rather than state an open connection is holding.
+	if err := closeCLIStorageRoutes(); err != nil {
+		t.Fatalf("closing the one-shot routes: %v", err)
+	}
+	binding := openMigratedDestination(t, mustResolveInfraTarget(t, cityPath, cfg))
+	if _, err := binding.Get(id); err != nil {
+		t.Errorf("the handoff mail did not land in the binding: %v", err)
+	}
+
+	retained, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("opening the retained work store: %v", err)
+	}
+	t.Cleanup(func() { _ = closeBeadStoreHandle(retained) })
+	if _, err := retained.Get(id); err == nil {
+		t.Errorf("the handoff mail also landed in the work store as %s; a relocated class must be served from its binding only", id)
+	} else if !errors.Is(err, beads.ErrNotFound) {
+		t.Errorf("reading the retained work store for %s: %v", id, err)
+	}
+}
+
+// handoffMailIDFromOutput pulls the mail id out of an arm's confirmation line,
+// which is the only place the command reports what it wrote.
+func handoffMailIDFromOutput(t *testing.T, out, marker string) string {
+	t.Helper()
+	i := strings.Index(out, marker)
+	if i < 0 {
+		t.Fatalf("gc handoff printed no mail id (marker %q): %q", marker, out)
+	}
+	id, _, _ := strings.Cut(strings.TrimSpace(out[i+len(marker):]), " ")
+	if id == "" {
+		t.Fatalf("gc handoff printed an empty mail id: %q", out)
+	}
+	return id
+}
+
+// handoffMessagingForbidden are the call shapes that hand a doHandoff* arm the
+// raw city work store as its message-persistence leg. Each one is the defect
+// written out: the first parameter of all three arms feeds nothing but
+// createHandoffMail, so passing `store` there is passing an unrouted store to a
+// messaging-class write.
+var handoffMessagingForbidden = []string{
+	"doHandoffAuto(store,",
+	"doHandoffWithOutcome(store,",
+	"doHandoffRemote(store,",
+	"beadmail.NewWithStores(store,",
+}
+
+// TestHandoffRootsRouteMailThroughTheMessagingClassStore is the TRIPWIRE, not the
+// pin. What each existing root actually writes is asserted by store identity on a
+// migrated city (TestHandoffMailWritesTheBindingOnAMigratedCity for the --auto arm
+// and the local/remote rows above), and those rows are what would go red if a root
+// stopped routing. This scan covers the one thing they structurally cannot: a root
+// that does not exist yet. A fourth arm added with the raw store passed straight
+// through gets no behavioral row until someone writes one, so the source shape is
+// guarded here.
+//
+// Mirrors TestSessionRelocationRootsRouteThroughSessionClassStore.
+func TestHandoffRootsRouteMailThroughTheMessagingClassStore(t *testing.T) {
+	content := handoffCommandSource(t)
+	for _, needle := range handoffMessagingForbidden {
+		if strings.Contains(content, needle) {
+			t.Errorf("cmd_handoff.go contains unrouted messaging-class write %q — the handoff roots must derive their message store through cliMailStore(store, cfg, cityPath) so a [beads.classes.messaging] relocation reaches them", needle)
+		}
+	}
+	calls := strings.Count(content, "cliMailStore(")
+	if calls != 2 {
+		t.Errorf("cmd_handoff.go calls cliMailStore( %d time(s), want 2 — one per command root (cmdHandoff, cmdHandoffRemote); a third root needs its own store-identity row beside the two above, not just this scan", calls)
+	}
+	// Every one of those calls must unwrap. beads.MailStore embeds beads.Store,
+	// so handing the wrapper to doHandoff* compiles and delivers mail correctly
+	// — and moves every optional-capability assertion downstream onto the
+	// wrapper, which answers no to all of them. Nothing else in the tree fails
+	// on that, so the shape is pinned here.
+	if unwrapped := len(mailStoreUnwrapCall.FindAllString(content, -1)); unwrapped != calls {
+		t.Errorf("cmd_handoff.go unwraps %d of its %d cliMailStore( call(s); the messaging leg of beadmail.NewWithStores is a beads.Store and must be the embedded store, not the typed wrapper around it", unwrapped, calls)
+	}
+}
+
+// mailStoreUnwrapCall matches a cliMailStore call that reads its embedded store.
+// The argument list is matched without nested parens because both roots pass
+// three plain identifiers; a call that grew a nested expression would stop
+// matching and fail the count above, which is the direction that wants a human.
+//
+// It is scoped to cmd_handoff.go on purpose. `gc order` holds the wrapper
+// deliberately (cmd_order.go), and a tree-wide scan would call that a defect.
+var mailStoreUnwrapCall = regexp.MustCompile(`cliMailStore\([^()]*\)\.Store`)
+
+// TestHandoffMessagingScanDetectsTheDefectItGuards is the control the scan above
+// cannot supply for itself. A source scan over a clean file passes identically
+// whether the needles describe the defect or describe nothing at all — a typo in
+// any one of them, or a rename in cmd_handoff.go that leaves the needle behind,
+// turns the guard into decoration with no test going red. Running the same scan
+// over source that DOES contain the defect proves it can still fire.
+func TestHandoffMessagingScanDetectsTheDefectItGuards(t *testing.T) {
+	content := handoffCommandSource(t)
+	for _, needle := range handoffMessagingForbidden {
+		// The needle must name a call shape the file actually has, differing only
+		// in the store argument. Otherwise it guards a spelling nothing would ever
+		// produce.
+		routed := strings.Replace(needle, "(store,", "(msgStore,", 1)
+		if routed == needle {
+			t.Errorf("forbidden needle %q does not name a store argument, so it cannot be the unrouted spelling of anything", needle)
+			continue
+		}
+		if !strings.Contains(content, routed) {
+			t.Errorf("cmd_handoff.go contains no %q, so the forbidden needle %q guards a call shape that does not exist — the scan would stay green through the defect", routed, needle)
+		}
+		if !strings.Contains(strings.Replace(content, routed, needle, 1), needle) {
+			t.Errorf("planting %q in the source did not make the scan match it", needle)
+		}
+	}
+}
+
+// handoffCommandSource reads cmd_handoff.go beside this test file.
+func handoffCommandSource(t *testing.T) string {
+	t.Helper()
+	_, currentFile, _, ok := goruntime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	path := filepath.Join(filepath.Dir(currentFile), "cmd_handoff.go")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", path, err)
+	}
+	return string(data)
 }

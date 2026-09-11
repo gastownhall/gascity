@@ -33,7 +33,11 @@ func TestDecodeBeadEventPayloadWrapped(t *testing.T) {
 	}
 }
 
-func TestDecodeBeadEventPayloadLegacyRawBead(t *testing.T) {
+// TestDecodeBeadEventPayloadCanonicalRawBead covers the CANONICAL producer
+// shape: the raw bead snapshot json.Marshal(b) emits (what notifyChange writes
+// and every events.jsonl row holds). The wrapped {"bead":...} form
+// (TestDecodeBeadEventPayloadWrapped) is the tolerant fallback, not the reverse.
+func TestDecodeBeadEventPayloadCanonicalRawBead(t *testing.T) {
 	raw := json.RawMessage(`{"id":"bd-123","title":"test bead","status":"open","issue_type":"task","created_at":"2026-04-26T21:37:46Z","metadata":{"state":"awake"}}`)
 
 	got, registered, err := events.DecodePayload(events.BeadUpdated, raw)

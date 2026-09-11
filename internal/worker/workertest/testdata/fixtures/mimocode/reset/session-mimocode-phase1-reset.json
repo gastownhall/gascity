@@ -1,0 +1,31 @@
+{
+  "info": {
+    "id": "ses_mimocode_phase1_reset",
+    "directory": "/tmp/gascity/phase1/mimocode"
+  },
+  "messages": [
+    {
+      "info": {
+        "id": "msg_reset_user_1",
+        "sessionID": "ses_mimocode_phase1_reset",
+        "role": "user",
+        "time": {"created": 1770000100000}
+      },
+      "parts": [
+        {"id": "part_reset_user_1", "type": "text", "text": "Repeat the exact MiMo Code phase-1 summary from earlier before answering."}
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_reset_assistant_1",
+        "sessionID": "ses_mimocode_phase1_reset",
+        "role": "assistant",
+        "parentID": "msg_reset_user_1",
+        "time": {"created": 1770000101000}
+      },
+      "parts": [
+        {"id": "part_reset_assistant_1", "type": "text", "text": "I cannot repeat the earlier MiMo Code summary because this session started fresh."}
+      ]
+    }
+  ]
+}

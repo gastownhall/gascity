@@ -41,7 +41,7 @@ func TestComputePoolDesiredStates_WakeKnownIdentityForClosedSession(t *testing.T
 	}
 	closed := closedPoolSessionBead("sess-1", "rig/claude")
 
-	result := ComputePoolDesiredStates(cfg, work, []beads.Bead{closed}, nil)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads([]beads.Bead{closed}), nil)
 
 	wakeCount := 0
 	for _, ds := range result {
@@ -92,7 +92,7 @@ func TestComputePoolDesiredStates_WakeKnownIdentityDedupsMultipleBeadsForSameSes
 	}
 	closed := closedPoolSessionBead("sess-1", "rig/claude")
 
-	result := ComputePoolDesiredStates(cfg, work, []beads.Bead{closed}, nil)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads([]beads.Bead{closed}), nil)
 
 	wakeCount := 0
 	for _, ds := range result {
@@ -119,7 +119,7 @@ func TestComputePoolDesiredStates_LiveSessionContinuesAsResumeTier(t *testing.T)
 	}
 	sessions := []beads.Bead{sessionBead("sess-live", "open")}
 
-	result := ComputePoolDesiredStates(cfg, work, sessions, nil)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
 
 	if len(result) != 1 || len(result[0].Requests) != 1 {
 		t.Fatalf("expected 1 request, got %#v", result)
@@ -149,7 +149,7 @@ func TestApplyNestedCaps_WakeKnownIdentityRanksBeforeNew(t *testing.T) {
 		{Template: "claude", Tier: "wake-known-identity", SessionBeadID: "sess-closed", BeadPriority: 5},
 	}
 
-	result := applyNestedCaps(cfg, requests, nil)
+	result := applyNestedCaps(cfg, requests, nil, nil)
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))

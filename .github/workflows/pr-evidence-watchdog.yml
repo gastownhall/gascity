@@ -1,0 +1,48 @@
+name: PR evidence watchdog
+
+# Fails closed when a PR's head commit never produces complete CI evidence.
+# Runs via pull_request_target so it still executes even when the head
+# workflow itself never triggered for that head commit; it only reads the
+# Checks API for the PR's explicit head SHA and never checks out or
+# executes PR-head content.
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+
+permissions:
+  checks: read
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: pr-evidence-watchdog-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  evidence:
+    name: Evidence / critical-path suites
+    runs-on: ubuntu-latest
+    # Slightly above the watchdog's own 25-minute observation deadline, to
+    # leave room for checkout/setup either side of the polling loop.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+      - name: Observe required CI evidence for the PR head commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          NEEDS_MAC_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'needs-mac') }}
+          NEEDS_REVIEW_FORMULAS_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'needs-review-formulas') }}
+        run: go run ./scripts/prwatchdog/cmd/watchdog

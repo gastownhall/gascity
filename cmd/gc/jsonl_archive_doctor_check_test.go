@@ -108,6 +108,38 @@ func TestJsonlArchiveDoctorCheck_LocalOnlyWarning(t *testing.T) {
 	}
 }
 
+// TestJsonlArchiveDoctorCheck_ArchiveHasOriginIgnoresPoisonedGitEnv proves the
+// archive remote query resolves from the archive repo passed via -C even when
+// git-locating environment variables point at an unrelated repository. Running
+// gc doctor inside a pre-commit hook or nested worktree exports
+// GIT_DIR/GIT_WORK_TREE for the parent repo; without git.SanitizedEnv() the
+// leaked GIT_DIR redirects `git -C <archive> remote -v` to the poisoned repo, so
+// the check would report push-mode health for the wrong repository.
+func TestJsonlArchiveDoctorCheck_ArchiveHasOriginIgnoresPoisonedGitEnv(t *testing.T) {
+	cityDir := t.TempDir()
+	archiveDir := filepath.Join(cityDir, "archive")
+	// Archive repo has an origin remote → push mode.
+	initBareArchiveRepo(t, archiveDir, true)
+
+	// Unrelated repo with no origin whose git-locating env vars would make
+	// archiveHasOrigin read its (empty) remote list if inherited.
+	poison := t.TempDir()
+	initBareArchiveRepo(t, poison, false)
+	t.Setenv("GIT_DIR", filepath.Join(poison, ".git"))
+	t.Setenv("GIT_WORK_TREE", poison)
+	t.Setenv("GIT_INDEX_FILE", filepath.Join(poison, ".git", "index"))
+
+	// Real git path (no runGit stub) exercises cmd.Env = git.SanitizedEnv().
+	check := newJsonlArchiveDoctorCheck(cityDir)
+	hasOrigin, err := check.archiveHasOrigin(archiveDir)
+	if err != nil {
+		t.Fatalf("archiveHasOrigin with poisoned git env: %v", err)
+	}
+	if !hasOrigin {
+		t.Fatalf("archiveHasOrigin = false, want true (must query archive repo via -C, not poisoned GIT_DIR)")
+	}
+}
+
 func TestJsonlArchiveDoctorCheck_PushModeHealthyWithTimestamp(t *testing.T) {
 	cityDir := t.TempDir()
 	stateDir := t.TempDir()
@@ -244,6 +276,117 @@ func TestJsonlArchiveDoctorCheck_StateInLegacyLocation(t *testing.T) {
 	}
 }
 
+func TestJsonlArchiveDoctorCheck_StateInCoreRuntimePackLocation(t *testing.T) {
+	cityDir := t.TempDir()
+	archiveDir := filepath.Join(cityDir, "archive")
+	initBareArchiveRepo(t, archiveDir, true)
+	writeArchiveState(t, filepath.Join(cityDir, ".gc", "runtime", "packs", "core"), `{"last_push_at":"2026-06-09T00:00:00Z"}`)
+
+	env := map[string]string{
+		"GC_JSONL_ARCHIVE_REPO": archiveDir,
+	}
+	result := runJsonlArchiveCheck(t, cityDir, env)
+	if result.Status != doctor.StatusOK {
+		t.Fatalf("status = %v, want OK; result=%#v", result.Status, result)
+	}
+	if !strings.Contains(result.Message, "2026-06-09T00:00:00Z") {
+		t.Fatalf("message = %q (core state path ignored?)", result.Message)
+	}
+}
+
+func TestJsonlArchiveDoctorCheck_StateInLegacyMaintenancePackLocation(t *testing.T) {
+	cityDir := t.TempDir()
+	archiveDir := filepath.Join(cityDir, "archive")
+	initBareArchiveRepo(t, archiveDir, true)
+	writeArchiveState(t, filepath.Join(cityDir, ".gc", "runtime", "packs", "maintenance"), `{"last_push_at":"2026-05-30T00:00:00Z"}`)
+
+	env := map[string]string{
+		"GC_JSONL_ARCHIVE_REPO": archiveDir,
+	}
+	result := runJsonlArchiveCheck(t, cityDir, env)
+	if result.Status != doctor.StatusOK {
+		t.Fatalf("status = %v, want OK; result=%#v", result.Status, result)
+	}
+	if !strings.Contains(result.Message, "2026-05-30T00:00:00Z") {
+		t.Fatalf("message = %q (legacy maintenance state path ignored?)", result.Message)
+	}
+}
+
+func TestJsonlArchiveDoctorCheck_StateEnvOverridesRuntimePackLocations(t *testing.T) {
+	cityDir := t.TempDir()
+	stateDir := t.TempDir()
+	archiveDir := filepath.Join(cityDir, "archive")
+	initBareArchiveRepo(t, archiveDir, true)
+	writeArchiveState(t, stateDir, `{"last_push_at":"2026-06-09T12:00:00Z"}`)
+	writeArchiveState(t, filepath.Join(cityDir, ".gc", "runtime", "packs", "core"), `{"last_push_at":"2026-06-09T00:00:00Z"}`)
+
+	env := map[string]string{
+		"GC_PACK_STATE_DIR":     stateDir,
+		"GC_JSONL_ARCHIVE_REPO": archiveDir,
+	}
+	result := runJsonlArchiveCheck(t, cityDir, env)
+	if result.Status != doctor.StatusOK {
+		t.Fatalf("status = %v, want OK; result=%#v", result.Status, result)
+	}
+	if !strings.Contains(result.Message, "2026-06-09T12:00:00Z") {
+		t.Fatalf("message = %q (GC_PACK_STATE_DIR did not win?)", result.Message)
+	}
+}
+
+func TestJsonlArchiveDoctorCheck_ArchiveRepoRuntimePackPrecedence(t *testing.T) {
+	for _, tt := range []struct {
+		name              string
+		coreExists        bool
+		maintenanceExists bool
+		legacyExists      bool
+		want              string
+	}{
+		{
+			name:       "core wins",
+			coreExists: true,
+			want:       "core",
+		},
+		{
+			name:              "maintenance fallback",
+			maintenanceExists: true,
+			legacyExists:      true,
+			want:              "maintenance",
+		},
+		{
+			name:         "pre-pack fallback",
+			legacyExists: true,
+			want:         "legacy",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			runtimeDir := filepath.Join(cityDir, ".gc", "runtime")
+			paths := map[string]string{
+				"core":        filepath.Join(runtimeDir, "packs", "core", "jsonl-archive"),
+				"maintenance": filepath.Join(runtimeDir, "packs", "maintenance", "jsonl-archive"),
+				"legacy":      filepath.Join(cityDir, ".gc", "jsonl-archive"),
+			}
+			if tt.coreExists {
+				initBareArchiveRepo(t, paths["core"], true)
+			}
+			if tt.maintenanceExists {
+				initBareArchiveRepo(t, paths["maintenance"], true)
+			}
+			if tt.legacyExists {
+				initBareArchiveRepo(t, paths["legacy"], true)
+			}
+
+			check := newJsonlArchiveDoctorCheck(cityDir)
+			check.getenv = stubArchiveEnv{vars: map[string]string{
+				"GC_CITY_RUNTIME_DIR": runtimeDir,
+			}}.get
+			if got := check.resolveArchiveRepo(); got != paths[tt.want] {
+				t.Fatalf("resolveArchiveRepo() = %q, want %q", got, paths[tt.want])
+			}
+		})
+	}
+}
+
 func TestDoDoctorRegistersJsonlArchiveCheck(t *testing.T) {
 	clearGCEnv(t)
 	cityDir := t.TempDir()
@@ -281,7 +424,7 @@ schema = 1
 	}
 
 	var stdout, stderr strings.Builder
-	_ = doDoctor(false, true, false, false, &stdout, &stderr)
+	_ = doDoctor(false, true, false, 0, &stdout, &stderr)
 	out := stdout.String() + stderr.String()
 	if !strings.Contains(out, "jsonl-archive") {
 		t.Fatalf("doctor output missing jsonl-archive check:\n%s", out)
@@ -328,7 +471,7 @@ schema = 1
 	}
 
 	var stdout, stderr strings.Builder
-	_ = doDoctor(false, false, true, false, &stdout, &stderr)
+	_ = doDoctor(false, false, true, 0, &stdout, &stderr)
 
 	out := stdout.String()
 	if !strings.HasPrefix(strings.TrimSpace(out), "{") {

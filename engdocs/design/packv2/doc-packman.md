@@ -1,5 +1,11 @@
 # City/Pack Import Management
 
+> **Historical PackV2 design note.** This page preserves design history and
+> rollout rationale. For current pack authoring guidance, use
+> `docs/reference/specs/pack-spec.md`, `docs/guides/understanding-packs.md`,
+> and `docs/guides/shareable-packs.md`. When this note disagrees with shipped
+> behavior, prefer the current docs, generated reference, code, and tests.
+
 **GitHub Issue:** TBD
 
 Title: `feat: gc import — import management for schema-2 Gas City packs`

@@ -3,8 +3,11 @@ package doctor
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // mockCheck is a configurable Check for testing the runner.
@@ -15,11 +18,16 @@ type mockCheck struct {
 	msg      string
 	canFix   bool
 	fixErr   error
-	fixed    bool // set by Fix
+	fixed    bool          // set by Fix
+	block    chan struct{} // if non-nil, Run blocks on it until closed (models a wedge abandoned on timeout)
+	fixCalls int           // incremented by Fix
 }
 
 func (m *mockCheck) Name() string { return m.name }
 func (m *mockCheck) Run(_ *CheckContext) *CheckResult {
+	if m.block != nil {
+		<-m.block
+	}
 	st := m.status
 	if m.fixed {
 		st = StatusOK
@@ -33,6 +41,7 @@ func (m *mockCheck) Run(_ *CheckContext) *CheckResult {
 }
 func (m *mockCheck) CanFix() bool { return m.canFix }
 func (m *mockCheck) Fix(_ *CheckContext) error {
+	m.fixCalls++
 	if m.fixErr != nil {
 		return m.fixErr
 	}
@@ -72,6 +81,7 @@ func TestCheckWarmupEligibleDefaultsFalse(t *testing.T) {
 		&NestedWorktreePruneCheck{},
 		&OrphanSessionsCheck{},
 		&OrderFiringCurrentCheck{},
+		&OrderOutcomeHealthyCheck{},
 		&PackCacheCheck{},
 		&PreStartScriptsCheck{},
 		&ProviderParityCheck{},
@@ -470,6 +480,54 @@ func TestDoctor_BlockingFailedSeverityAccounting(t *testing.T) {
 	}
 }
 
+// TestDoctor_AdvisoryPerCheckLine verifies the per-check output line includes
+// "(advisory)" when the result has SeverityAdvisory and StatusWarning/Error,
+// and that the suffix is absent for OK results and for blocking failures.
+func TestDoctor_AdvisoryPerCheckLine(t *testing.T) {
+	tests := []struct {
+		name       string
+		check      *mockCheck
+		wantLabel  string
+		wantAbsent string
+	}{
+		{
+			name:      "advisory-warning-has-suffix",
+			check:     &mockCheck{name: "check-a", status: StatusWarning, severity: SeverityAdvisory, msg: "heads up"},
+			wantLabel: "(advisory)",
+		},
+		{
+			name:      "advisory-error-has-suffix",
+			check:     &mockCheck{name: "check-b", status: StatusError, severity: SeverityAdvisory, msg: "note"},
+			wantLabel: "(advisory)",
+		},
+		{
+			name:       "advisory-ok-no-suffix",
+			check:      &mockCheck{name: "check-c", status: StatusOK, severity: SeverityAdvisory, msg: "fine"},
+			wantAbsent: "(advisory)",
+		},
+		{
+			name:       "blocking-warning-no-suffix",
+			check:      &mockCheck{name: "check-d", status: StatusWarning, severity: SeverityBlocking, msg: "bad"},
+			wantAbsent: "(advisory)",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := &Doctor{}
+			d.Register(tt.check)
+			var buf bytes.Buffer
+			d.Run(&CheckContext{CityPath: "/tmp"}, &buf, false)
+			out := buf.String()
+			if tt.wantLabel != "" && !strings.Contains(out, tt.wantLabel) {
+				t.Errorf("output = %q, want %q in line", out, tt.wantLabel)
+			}
+			if tt.wantAbsent != "" && strings.Contains(out, tt.wantAbsent) {
+				t.Errorf("output = %q, must not contain %q", out, tt.wantAbsent)
+			}
+		})
+	}
+}
+
 // TestPrintSummary_AdvisoryRenderedSeparately confirms advisory failures get
 // their own component in the summary line so operators can tell at a glance
 // that a doctor pass had non-blocking findings.
@@ -490,3 +548,508 @@ func TestPrintSummary_AdvisoryRenderedSeparately(t *testing.T) {
 		t.Errorf("summary = %q, must not include 'advisory' when all failures are blocking", got)
 	}
 }
+
+// TestRunCheckTimeoutAbandonsWedgedCheck guards the per-check timeout: one
+// wedged check must not stall the run — it reports as a timed-out advisory
+// error and every check registered after it still executes.
+func TestRunCheckTimeoutAbandonsWedgedCheck(t *testing.T) {
+	d := &Doctor{CheckTimeout: 25 * time.Millisecond}
+	wedged := &mockCheck{name: "wedged", status: StatusOK, block: make(chan struct{})}
+	t.Cleanup(func() { close(wedged.block) }) // abandon the wedge once the run has returned
+	after := &mockCheck{name: "after", status: StatusOK, msg: "ran"}
+	d.Register(wedged)
+	d.Register(after)
+
+	var buf bytes.Buffer
+	start := time.Now()
+	report := d.Run(&CheckContext{}, &buf, false)
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("run took %s; the wedged check was not abandoned", elapsed)
+	}
+
+	if len(report.Results) != 2 {
+		t.Fatalf("Results = %d, want 2 (check after the wedge must still run)", len(report.Results))
+	}
+	got := report.Results[0]
+	if !got.TimedOut || got.Status != StatusError || got.Severity != SeverityAdvisory {
+		t.Fatalf("wedged result = %+v, want TimedOut StatusError SeverityAdvisory", got)
+	}
+	if !strings.Contains(got.Message, "timed out") {
+		t.Fatalf("wedged message = %q, want a timeout explanation", got.Message)
+	}
+	if report.Results[1].Name != "after" || report.Results[1].Status != StatusOK {
+		t.Fatalf("after result = %+v, want it to have run normally", report.Results[1])
+	}
+	if report.Failed != 1 || report.BlockingFailed != 0 || report.Passed != 1 {
+		t.Fatalf("report = %+v, want 1 advisory failure + 1 pass", report)
+	}
+	if out := buf.String(); !strings.Contains(out, "wedged") || !strings.Contains(out, "after") {
+		t.Fatalf("output = %q, want both check lines", out)
+	}
+}
+
+// TestRunCheckTimeoutZeroIsUnbounded pins the default: CheckTimeout zero runs
+// checks inline with no bound, preserving historical behavior for embedders
+// that never set the field.
+func TestRunCheckTimeoutZeroIsUnbounded(t *testing.T) {
+	d := &Doctor{}
+	check := &mockCheck{name: "unbounded", status: StatusOK}
+	d.Register(check)
+
+	var buf bytes.Buffer
+	report := d.Run(&CheckContext{}, &buf, false)
+	if report.Passed != 1 || len(report.Results) != 1 || report.Results[0].TimedOut {
+		t.Fatalf("report = %+v, want the check to run inline and complete unbounded (never TimedOut)", report)
+	}
+}
+
+// TestRunCheckTimeoutSkipsFixForTimedOutCheck: a timed-out check's failure
+// state is unknown, so --fix must not attempt remediation (whose verifying
+// re-run could wedge the loop the same way the check did).
+func TestRunCheckTimeoutSkipsFixForTimedOutCheck(t *testing.T) {
+	d := &Doctor{CheckTimeout: 25 * time.Millisecond}
+	wedged := &mockCheck{name: "wedged", status: StatusError, block: make(chan struct{}), canFix: true}
+	t.Cleanup(func() { close(wedged.block) }) // abandon the wedge once the run has returned
+	d.Register(wedged)
+
+	var buf bytes.Buffer
+	report := d.Run(&CheckContext{}, &buf, true)
+	if wedged.fixCalls != 0 {
+		t.Fatalf("fixCalls = %d, want 0 (no fix for a timed-out check)", wedged.fixCalls)
+	}
+	if report.Fixed != 0 {
+		t.Fatalf("report.Fixed = %d, want 0", report.Fixed)
+	}
+}
+
+// TestRunCheckTimeoutFlushesCompletedCheckOutput: a check that completes
+// within the bound and wrote to ctx.Output must have that output reach the
+// real writer (the private abandonment buffer is an implementation detail).
+func TestRunCheckTimeoutFlushesCompletedCheckOutput(t *testing.T) {
+	d := &Doctor{CheckTimeout: time.Second}
+	d.Register(&outputWritingCheck{mockCheck{name: "writer", status: StatusOK}})
+
+	var buf bytes.Buffer
+	d.Run(&CheckContext{}, &buf, false)
+	if out := buf.String(); !strings.Contains(out, "incidental diagnostic") {
+		t.Fatalf("output = %q, want the check's incidental ctx.Output write flushed", out)
+	}
+}
+
+func TestRunCheckPanicBecomesReportedError(t *testing.T) {
+	for _, timeout := range []time.Duration{0, time.Second} {
+		t.Run(timeout.String(), func(t *testing.T) {
+			d := &Doctor{CheckTimeout: timeout}
+			d.Register(&panickingCheck{name: "panicking"})
+
+			report := d.RunCollect(&CheckContext{}, false)
+
+			if len(report.Results) != 1 {
+				t.Fatalf("Results = %d, want 1", len(report.Results))
+			}
+			result := report.Results[0]
+			if result.Name != "panicking" || result.Status != StatusError || result.Severity != SeverityBlocking {
+				t.Fatalf("panic result = %+v, want named blocking error", result)
+			}
+			if !strings.Contains(result.Message, "panic: check exploded") {
+				t.Fatalf("panic message = %q, want recovered panic detail", result.Message)
+			}
+			if report.Failed != 1 || report.BlockingFailed != 1 {
+				t.Fatalf("report = %+v, want one blocking failure", report)
+			}
+		})
+	}
+}
+
+type panickingCheck struct {
+	name string
+}
+
+func (c *panickingCheck) Name() string { return c.name }
+func (c *panickingCheck) Run(_ *CheckContext) *CheckResult {
+	panic("check exploded")
+}
+func (c *panickingCheck) CanFix() bool              { return false }
+func (c *panickingCheck) Fix(_ *CheckContext) error { return nil }
+func (c *panickingCheck) WarmupEligible() bool      { return false }
+
+// outputWritingCheck writes to ctx.Output during Run, like checks that
+// surface fix-time diagnostics.
+type outputWritingCheck struct{ mockCheck }
+
+func (o *outputWritingCheck) Run(ctx *CheckContext) *CheckResult {
+	if ctx.Output != nil {
+		fmt.Fprintln(ctx.Output, "incidental diagnostic") //nolint:errcheck // test writer
+	}
+	return o.mockCheck.Run(ctx)
+}
+
+// TestRunCheckTimeoutBoundsPostFixVerification guards the post-fix
+// verification rerun: a check that fails fast, fixes fast, then wedges on the
+// verifying re-run must not hang gc doctor --fix. Without bounding that rerun,
+// the per-check timeout only covers the initial Run and this exact interaction
+// re-opens the wedge the feature exists to close.
+func TestRunCheckTimeoutBoundsPostFixVerification(t *testing.T) {
+	d := &Doctor{CheckTimeout: 25 * time.Millisecond}
+	check := &wedgeOnVerifyCheck{name: "wedge-on-verify", release: make(chan struct{})}
+	t.Cleanup(func() { close(check.release) }) // release the abandoned verification goroutine
+	d.Register(check)
+
+	var buf bytes.Buffer
+	start := time.Now()
+	report := d.Run(&CheckContext{}, &buf, true)
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("run took %s; the post-fix verification rerun was not bounded", elapsed)
+	}
+
+	// Fix ran once (the initial fast failure is fixable and not timed out),
+	// proving we exercised the post-fix path rather than skipping it.
+	if check.fixCalls != 1 {
+		t.Fatalf("fixCalls = %d, want 1 (fix runs once for the fast initial failure)", check.fixCalls)
+	}
+	if len(report.Results) != 1 {
+		t.Fatalf("Results = %d, want 1", len(report.Results))
+	}
+	got := report.Results[0]
+	// The only path to TimedOut here is the verification boundedRun timing
+	// out: the initial run failed fast, so it did not time out.
+	if !got.TimedOut || got.Status != StatusError || got.Severity != SeverityAdvisory {
+		t.Fatalf("verification result = %+v, want a timed-out advisory error", got)
+	}
+	if !got.FixAttempted {
+		t.Fatalf("result.FixAttempted = false, want true; the fix ran but verification never confirmed it")
+	}
+	if got.Fixed || report.Fixed != 0 {
+		t.Fatalf("result.Fixed=%v report.Fixed=%d, want the fix unconfirmed (0)", got.Fixed, report.Fixed)
+	}
+}
+
+// wedgeOnVerifyCheck fails fast on its first Run, its Fix succeeds, then its
+// post-fix verification Run wedges (blocks on release until the test abandons
+// it). fixCalls is written only by Fix on the main goroutine before the
+// verification goroutine is spawned, so the abandoned goroutine only ever reads
+// it — no data race.
+type wedgeOnVerifyCheck struct {
+	name     string
+	fixCalls int
+	release  chan struct{} // closed by the test to release the abandoned verification goroutine
+}
+
+func (c *wedgeOnVerifyCheck) Name() string { return c.name }
+func (c *wedgeOnVerifyCheck) Run(_ *CheckContext) *CheckResult {
+	if c.fixCalls > 0 {
+		<-c.release // verification wedges; abandoned on timeout, released at cleanup
+		return &CheckResult{Name: c.name, Status: StatusOK}
+	}
+	return &CheckResult{Name: c.name, Status: StatusError, Severity: SeverityBlocking, Message: "needs fix"}
+}
+func (c *wedgeOnVerifyCheck) CanFix() bool { return true }
+func (c *wedgeOnVerifyCheck) Fix(_ *CheckContext) error {
+	c.fixCalls++
+	return nil
+}
+func (c *wedgeOnVerifyCheck) WarmupEligible() bool { return false }
+
+// TestRunCheckTimeoutBoundsFix guards fix execution itself: a check that fails
+// fast then wedges inside Fix must not hang gc doctor --fix. The fix is
+// abandoned at the per-check bound (not killed — it finishes in the
+// background), the run returns promptly, and the result reports an unconfirmed
+// remediation while preserving the check's original failing status.
+func TestRunCheckTimeoutBoundsFix(t *testing.T) {
+	d := &Doctor{CheckTimeout: 25 * time.Millisecond}
+	check := &wedgeOnFixCheck{name: "wedge-on-fix", release: make(chan struct{})}
+	t.Cleanup(func() { close(check.release) }) // release the abandoned fix goroutine
+	d.Register(check)
+
+	var buf bytes.Buffer
+	start := time.Now()
+	report := d.Run(&CheckContext{}, &buf, true)
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("run took %s; the wedged fix was not bounded", elapsed)
+	}
+
+	// Fix ran once (the initial fast failure is fixable and not timed out),
+	// proving we exercised the fix path rather than skipping it.
+	if got := check.fixCalls.Load(); got != 1 {
+		t.Fatalf("fixCalls = %d, want 1 (fix runs once for the fast initial failure)", got)
+	}
+	if len(report.Results) != 1 {
+		t.Fatalf("Results = %d, want 1", len(report.Results))
+	}
+	got := report.Results[0]
+	// The initial Run failed fast (not timed out); the FIX is what got
+	// abandoned, so the result is an unconfirmed remediation, never Fixed.
+	if got.Fixed || report.Fixed != 0 {
+		t.Fatalf("result.Fixed=%v report.Fixed=%d, want the fix unconfirmed (0)", got.Fixed, report.Fixed)
+	}
+	if !got.FixAttempted {
+		t.Fatalf("result.FixAttempted = false, want true; the fix ran but never confirmed")
+	}
+	if !strings.Contains(got.FixError, "timed out") {
+		t.Fatalf("result.FixError = %q, want a fix-timeout explanation", got.FixError)
+	}
+	// The check still fails at its original severity: a wedged fix leaves the
+	// problem unremediated, so it must still gate (unlike a timed-out Run,
+	// which is advisory because its outcome is unknown).
+	if got.Status != StatusError || got.Severity != SeverityBlocking {
+		t.Fatalf("result = %+v, want the original blocking failure preserved", got)
+	}
+	if report.Failed != 1 || report.BlockingFailed != 1 {
+		t.Fatalf("report = %+v, want the unfixed check counted as a blocking failure", report)
+	}
+}
+
+// wedgeOnFixCheck fails fast on Run, then wedges inside Fix (blocks on release
+// until the test abandons it) — modeling a remediation that hangs (e.g. a pack
+// fix script blocked on I/O). Fix runs in the abandoned goroutine, so fixCalls
+// is atomic: the goroutine writes it while the test reads it after the fix is
+// abandoned.
+type wedgeOnFixCheck struct {
+	name     string
+	fixCalls atomic.Int32
+	release  chan struct{} // closed by the test to release the abandoned fix goroutine
+}
+
+func (c *wedgeOnFixCheck) Name() string { return c.name }
+func (c *wedgeOnFixCheck) Run(_ *CheckContext) *CheckResult {
+	return &CheckResult{Name: c.name, Status: StatusError, Severity: SeverityBlocking, Message: "needs fix"}
+}
+func (c *wedgeOnFixCheck) CanFix() bool { return true }
+func (c *wedgeOnFixCheck) Fix(_ *CheckContext) error {
+	c.fixCalls.Add(1)
+	<-c.release // wedged remediation; abandoned on timeout, released at cleanup
+	return nil
+}
+func (c *wedgeOnFixCheck) WarmupEligible() bool { return false }
+
+// TestRunCheckTimeoutIsolatesLateOutputAndSkipsRenderExtras proves the two
+// safety guards the timeout path adds: an abandoned check's late writes land
+// in its private buffer (never the real writer), and RenderExtras is not
+// invoked for a timed-out check. Coordination is via channels so the
+// assertions are deterministic rather than timing-based.
+func TestRunCheckTimeoutIsolatesLateOutputAndSkipsRenderExtras(t *testing.T) {
+	d := &Doctor{CheckTimeout: 25 * time.Millisecond}
+	check := &lateWritingCheck{
+		name:      "late-writer",
+		started:   make(chan struct{}),
+		release:   make(chan struct{}),
+		wroteLate: make(chan struct{}),
+	}
+	d.Register(check)
+
+	var buf bytes.Buffer
+	done := make(chan *Report, 1)
+	go func() { done <- d.Run(&CheckContext{}, &buf, false) }()
+
+	// Wait until the check is running, then let the 25ms bound fire and
+	// abandon it (the check stays blocked on release, so it cannot complete).
+	<-check.started
+	report := <-done
+
+	if len(report.Results) != 1 || !report.Results[0].TimedOut {
+		t.Fatalf("Results = %+v, want one timed-out result", report.Results)
+	}
+
+	// Release the abandoned check so it performs its late ctx.Output write,
+	// then wait for that write to finish before asserting.
+	outputBeforeLateWrite := buf.String()
+	close(check.release)
+	<-check.wroteLate
+
+	if got := buf.String(); got != outputBeforeLateWrite {
+		t.Fatalf("real writer received abandoned late output: before=%q after=%q", outputBeforeLateWrite, got)
+	}
+	if check.renderExtrasCalled.Load() {
+		t.Fatalf("RenderExtras was invoked for a timed-out check; it must be skipped")
+	}
+}
+
+func TestDoctorWaitKeepsTimedOutCheckOwnedUntilCompletion(t *testing.T) {
+	d := &Doctor{CheckTimeout: 25 * time.Millisecond}
+	check := &lateWritingCheck{
+		name:      "owned-after-timeout",
+		started:   make(chan struct{}),
+		release:   make(chan struct{}),
+		wroteLate: make(chan struct{}),
+	}
+	d.Register(check)
+
+	runDone := make(chan *Report, 1)
+	go func() { runDone <- d.RunCollect(&CheckContext{}, false) }()
+	<-check.started
+	report := <-runDone
+	if len(report.Results) != 1 || !report.Results[0].TimedOut {
+		t.Fatalf("Results = %+v, want one timed-out result", report.Results)
+	}
+
+	waitStarted := make(chan struct{})
+	waitDone := make(chan struct{})
+	go func() {
+		close(waitStarted)
+		d.Wait()
+		close(waitDone)
+	}()
+	<-waitStarted
+	select {
+	case <-waitDone:
+		t.Fatal("Wait returned while the timed-out check was still running")
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	close(check.release)
+	<-check.wroteLate
+	<-waitDone
+}
+
+// lateWritingCheck blocks inside Run until released, then writes to
+// ctx.Output — modeling an abandoned check whose goroutine keeps running and
+// emits output after the doctor timeout fired. It implements Renderer so the
+// test can prove RenderExtras is skipped for a timed-out check.
+type lateWritingCheck struct {
+	name               string
+	started            chan struct{}
+	release            chan struct{}
+	wroteLate          chan struct{}
+	renderExtrasCalled atomic.Bool
+}
+
+func (c *lateWritingCheck) Name() string { return c.name }
+func (c *lateWritingCheck) Run(ctx *CheckContext) *CheckResult {
+	close(c.started)
+	<-c.release
+	// The doctor timeout has fired by now; this write must land in the
+	// abandoned private buffer, never the real writer.
+	if ctx.Output != nil {
+		fmt.Fprintln(ctx.Output, "late abandoned output") //nolint:errcheck // test writer
+	}
+	close(c.wroteLate)
+	return &CheckResult{Name: c.name, Status: StatusOK}
+}
+func (c *lateWritingCheck) CanFix() bool              { return false }
+func (c *lateWritingCheck) Fix(_ *CheckContext) error { return nil }
+func (c *lateWritingCheck) WarmupEligible() bool      { return false }
+func (c *lateWritingCheck) RenderExtras(_ *CheckContext, _ io.Writer) {
+	c.renderExtrasCalled.Store(true)
+}
+
+// TestRunCheckTimeoutIsolatesLateFixOutput proves the fix path gets the same
+// output isolation as the Run path: when a wedged Fix is abandoned at the
+// per-check bound, its late writes to ctx.Output must land in the private
+// abandonment buffer, never the real writer. Without isolation the abandoned
+// fix goroutine races the main run's writer (garbled output on a stream, slice
+// corruption on a buffer-backed writer). Coordination is via channels so the
+// assertion is deterministic rather than timing-based and holds under -race.
+func TestRunCheckTimeoutIsolatesLateFixOutput(t *testing.T) {
+	d := &Doctor{CheckTimeout: 25 * time.Millisecond}
+	check := &lateWritingOnFixCheck{
+		name:      "late-fix-writer",
+		fixStart:  make(chan struct{}),
+		release:   make(chan struct{}),
+		wroteLate: make(chan struct{}),
+	}
+	d.Register(check)
+
+	var buf bytes.Buffer
+	done := make(chan *Report, 1)
+	go func() { done <- d.Run(&CheckContext{}, &buf, true) }()
+
+	// Wait until Fix is running, then let the 25ms bound fire and abandon it
+	// (Fix stays blocked on release, so it cannot complete within the bound).
+	<-check.fixStart
+	report := <-done
+
+	// The initial Run failed fast; the FIX was abandoned, so the result is an
+	// unconfirmed remediation — proving we exercised the fix-timeout path.
+	if len(report.Results) != 1 {
+		t.Fatalf("Results = %d, want 1", len(report.Results))
+	}
+	if got := report.Results[0]; got.Fixed || !got.FixAttempted || !strings.Contains(got.FixError, "timed out") {
+		t.Fatalf("result = %+v, want an unconfirmed fix-timeout", got)
+	}
+
+	// Release the abandoned fix so it performs its late ctx.Output write, then
+	// wait for that write to finish before asserting nothing reached the real
+	// writer.
+	outputBeforeLateWrite := buf.String()
+	close(check.release)
+	<-check.wroteLate
+
+	if got := buf.String(); got != outputBeforeLateWrite {
+		t.Fatalf("real writer received abandoned late fix output: before=%q after=%q", outputBeforeLateWrite, got)
+	}
+}
+
+// lateWritingOnFixCheck fails fast on Run, then blocks inside Fix until
+// released and writes to ctx.Output afterward — modeling an abandoned fix
+// goroutine (e.g. the dolt-drift or v2-migration fixes, which write ctx.Output)
+// that keeps running and emits diagnostics after the doctor timeout fired. The
+// late write must land in the fix path's private buffer, never the real writer.
+type lateWritingOnFixCheck struct {
+	name      string
+	fixStart  chan struct{}
+	release   chan struct{}
+	wroteLate chan struct{}
+}
+
+func (c *lateWritingOnFixCheck) Name() string { return c.name }
+func (c *lateWritingOnFixCheck) Run(_ *CheckContext) *CheckResult {
+	return &CheckResult{Name: c.name, Status: StatusError, Severity: SeverityBlocking, Message: "needs fix"}
+}
+func (c *lateWritingOnFixCheck) CanFix() bool { return true }
+func (c *lateWritingOnFixCheck) Fix(ctx *CheckContext) error {
+	close(c.fixStart)
+	<-c.release
+	// The doctor timeout has fired by now; this write must land in the
+	// abandoned private buffer, never the real writer.
+	if ctx.Output != nil {
+		fmt.Fprintln(ctx.Output, "late abandoned fix output") //nolint:errcheck // test writer
+	}
+	close(c.wroteLate)
+	return nil
+}
+func (c *lateWritingOnFixCheck) WarmupEligible() bool { return false }
+
+// panickingFixCheck fails its Run and panics inside Fix, modeling a
+// pack-authored remediation that blows up mid-run.
+type panickingFixCheck struct{}
+
+func (panickingFixCheck) Name() string { return "panicking-fix" }
+func (panickingFixCheck) CanFix() bool { return true }
+func (panickingFixCheck) Fix(*CheckContext) error {
+	panic("fix exploded")
+}
+
+func (panickingFixCheck) Run(*CheckContext) *CheckResult {
+	return &CheckResult{
+		Name:     "panicking-fix",
+		Status:   StatusError,
+		Severity: SeverityBlocking,
+		Message:  "needs fixing",
+	}
+}
+
+// A panicking Fix must fail its own check, not crash the doctor process. Run
+// once unbounded and once timed, because boundedFix takes a different path for
+// each and only one of them was recovered before.
+func TestPanickingFixDoesNotCrashTheRun(t *testing.T) {
+	for _, timeout := range []time.Duration{0, time.Minute} {
+		d := &Doctor{CheckTimeout: timeout}
+		d.Register(panickingFixCheck{})
+		report := d.RunCollect(&CheckContext{}, true)
+		d.Wait()
+		if len(report.Results) != 1 {
+			t.Fatalf("CheckTimeout=%s: Results = %+v, want one result", timeout, report.Results)
+		}
+		if report.Results[0].Status != StatusError {
+			t.Errorf("CheckTimeout=%s: Status = %v, want StatusError", timeout, report.Results[0].Status)
+		}
+		if !report.Results[0].FixAttempted {
+			t.Errorf("CheckTimeout=%s: FixAttempted = false, want the panicking fix recorded as attempted", timeout)
+		}
+		if !strings.Contains(report.Results[0].FixError, "panicked") {
+			t.Errorf("CheckTimeout=%s: FixError = %q, want it to report the panic", timeout, report.Results[0].FixError)
+		}
+	}
+}
+
+func (panickingFixCheck) WarmupEligible() bool { return false }

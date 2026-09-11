@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 var (
@@ -30,7 +32,7 @@ func ValidateGraphV2ReservedSymbols(f *Formula, allowConvoyReference bool) error
 		return nil
 	}
 	sort.Strings(errs)
-	return fmt.Errorf("graph.v2 reserved variable validation failed:\n  - %s", strings.Join(errs, "\n  - "))
+	return fmt.Errorf("formulas v2 reserved variable validation failed:\n  - %s", strings.Join(errs, "\n  - "))
 }
 
 // ValidateGraphV2ReservedSymbolsTransitively enforces graph.v2 reserved input
@@ -49,7 +51,7 @@ func ValidateGraphV2ReservedSymbolsTransitively(f *Formula, parser *Parser, allo
 		return nil
 	}
 	sort.Strings(scanner.errs)
-	return fmt.Errorf("graph.v2 reserved variable validation failed:\n  - %s", strings.Join(scanner.errs, "\n  - "))
+	return fmt.Errorf("formulas v2 reserved variable validation failed:\n  - %s", strings.Join(scanner.errs, "\n  - "))
 }
 
 // ValidateGraphV2ExpandedFormula enforces graph.v2-only constraints after
@@ -67,7 +69,7 @@ func ValidateGraphV2ExpandedFormula(f *Formula, allowConvoyReference bool) error
 		return nil
 	}
 	sort.Strings(errs)
-	return fmt.Errorf("graph.v2 expanded formula validation failed:\n  - %s", strings.Join(errs, "\n  - "))
+	return fmt.Errorf("formulas v2 expanded formula validation failed:\n  - %s", strings.Join(errs, "\n  - "))
 }
 
 // ValidateGraphV2RecipeReservedSymbols validates reserved references after a
@@ -78,7 +80,7 @@ func ValidateGraphV2RecipeReservedSymbols(recipe *Recipe, allowConvoyReference b
 		return nil
 	}
 	sort.Strings(errs)
-	return fmt.Errorf("graph.v2 reserved variable validation failed:\n  - %s", strings.Join(errs, "\n  - "))
+	return fmt.Errorf("formulas v2 reserved variable validation failed:\n  - %s", strings.Join(errs, "\n  - "))
 }
 
 // GraphV2FormulaReferencesInputConvoy reports whether a formula requires a
@@ -205,7 +207,7 @@ func GraphV2RecipeHasDrain(recipe *Recipe) bool {
 		return false
 	}
 	for _, step := range recipe.Steps {
-		if strings.TrimSpace(step.Metadata["gc.kind"]) == "drain" {
+		if strings.TrimSpace(step.Metadata[beadmeta.KindMetadataKey]) == beadmeta.KindDrain {
 			return true
 		}
 	}
@@ -287,7 +289,7 @@ func ValidateGraphV2ReservedSymbolsWithVisitor(f *Formula, allowConvoyReference 
 		return nil
 	}
 	sort.Strings(errs)
-	return fmt.Errorf("graph.v2 reserved variable validation failed:\n  - %s", strings.Join(errs, "\n  - "))
+	return fmt.Errorf("formulas v2 reserved variable validation failed:\n  - %s", strings.Join(errs, "\n  - "))
 }
 
 func collectGraphV2ReservedRefsInFormula(prefix string, f *Formula, allowConvoyReference bool, errs *[]string, visit func(path, name string), checkVarNames bool) {
@@ -309,7 +311,7 @@ func collectGraphV2ReservedRefsInFormula(prefix string, f *Formula, allowConvoyR
 				// tracked member of the input convoy.
 				continue
 			}
-			*errs = append(*errs, fmt.Sprintf("%s: graph.v2 reserved variable cannot be declared", declPath))
+			*errs = append(*errs, fmt.Sprintf("%s: formulas v2 reserved variable cannot be declared", declPath))
 		}
 	}
 	collectGraphV2ReservedRefsInStringWithVisitor(graphV2Path(prefix, "description"), f.Description, allowConvoyReference, errs, visit)
@@ -360,7 +362,7 @@ func graphV2RecipeReservedSymbolErrors(recipe *Recipe, allowConvoyReference bool
 				visit("vars."+name, strings.TrimSpace(name))
 			}
 			if strings.TrimSpace(name) != "issue" {
-				errs = append(errs, fmt.Sprintf("vars.%s: graph.v2 reserved variable cannot be declared", name))
+				errs = append(errs, fmt.Sprintf("vars.%s: formulas v2 reserved variable cannot be declared", name))
 			}
 		}
 		if def == nil {
@@ -389,7 +391,7 @@ func graphV2RecipeReservedSymbolErrors(recipe *Recipe, allowConvoyReference bool
 			collectGraphV2ReservedRefsInStringWithVisitor(stepPrefix+".gate.id", step.Gate.ID, allowConvoyReference, &errs, visit)
 			collectGraphV2ReservedRefsInStringWithVisitor(stepPrefix+".gate.timeout", step.Gate.Timeout, allowConvoyReference, &errs, visit)
 		}
-		if strings.TrimSpace(step.Metadata["gc.kind"]) == "drain" {
+		if strings.TrimSpace(step.Metadata[beadmeta.KindMetadataKey]) == beadmeta.KindDrain {
 			validateGraphV2RecipeDrainStep(stepPrefix, step, &errs)
 		}
 	}
@@ -398,32 +400,32 @@ func graphV2RecipeReservedSymbolErrors(recipe *Recipe, allowConvoyReference bool
 
 func recipeDeclaresGraphV2Contract(recipe *Recipe) bool {
 	root := recipe.RootStep()
-	return root != nil && strings.EqualFold(strings.TrimSpace(root.Metadata["gc.formula_contract"]), "graph.v2")
+	return root != nil && strings.EqualFold(strings.TrimSpace(root.Metadata[beadmeta.FormulaContractMetadataKey]), beadmeta.FormulaContractGraphV2)
 }
 
 func validateGraphV2RecipeDrainStep(prefix string, step RecipeStep, errs *[]string) {
-	context := strings.TrimSpace(step.Metadata["gc.drain_context"])
+	context := strings.TrimSpace(step.Metadata[beadmeta.DrainContextMetadataKey])
 	switch context {
-	case "", "separate":
-	case "shared":
+	case "", beadmeta.DrainContextSeparate:
+	case beadmeta.DrainContextShared:
 	default:
 		*errs = append(*errs, fmt.Sprintf("%s.drain: context must be separate or shared", prefix))
 	}
-	formulaName := strings.TrimSpace(step.Metadata["gc.drain_formula"])
+	formulaName := strings.TrimSpace(step.Metadata[beadmeta.DrainFormulaMetadataKey])
 	if formulaName == "" {
 		*errs = append(*errs, fmt.Sprintf("%s.drain: formula is required", prefix))
 	}
 	if strings.Contains(formulaName, "{{") {
 		*errs = append(*errs, fmt.Sprintf("%s.drain: templated item formula names are not supported in v0", prefix))
 	}
-	memberAccess := strings.TrimSpace(step.Metadata["gc.drain_member_access"])
+	memberAccess := strings.TrimSpace(step.Metadata[beadmeta.DrainMemberAccessMetadataKey])
 	switch memberAccess {
-	case "", "read":
-	case "exclusive":
+	case "", beadmeta.DrainMemberAccessRead:
+	case beadmeta.DrainMemberAccessExclusive:
 	default:
 		*errs = append(*errs, fmt.Sprintf("%s.drain: member_access must be read or exclusive", prefix))
 	}
-	if raw := strings.TrimSpace(step.Metadata["gc.drain_max_units"]); raw != "" {
+	if raw := strings.TrimSpace(step.Metadata[beadmeta.DrainMaxUnitsMetadataKey]); raw != "" {
 		maxUnits, err := strconv.Atoi(raw)
 		switch {
 		case err != nil:
@@ -434,15 +436,15 @@ func validateGraphV2RecipeDrainStep(prefix string, step RecipeStep, errs *[]stri
 			*errs = append(*errs, fmt.Sprintf("%s.drain: max_units must be <= 100 in v0", prefix))
 		}
 	}
-	switch strings.TrimSpace(step.Metadata["gc.drain_on_item_failure"]) {
-	case "", "skip_remaining", "continue":
+	switch strings.TrimSpace(step.Metadata[beadmeta.DrainOnItemFailureMetadataKey]) {
+	case "", beadmeta.DrainOnItemFailureSkipRemaining, beadmeta.DrainOnItemFailureContinue:
 	default:
 		*errs = append(*errs, fmt.Sprintf("%s.drain: on_item_failure must be skip_remaining or continue", prefix))
 	}
-	if strings.TrimSpace(step.Metadata["gc.drain_continuation_group"]) != "" && context != "shared" {
+	if strings.TrimSpace(step.Metadata[beadmeta.DrainContinuationGroupMetadataKey]) != "" && context != "shared" {
 		*errs = append(*errs, fmt.Sprintf("%s.drain: continuation_group is valid only with context = \"shared\"", prefix))
 	}
-	if context == "shared" && strings.TrimSpace(step.Metadata["gc.drain_item_single_lane"]) != "true" {
+	if context == beadmeta.DrainContextShared && strings.TrimSpace(step.Metadata[beadmeta.DrainItemSingleLaneMetadataKey]) != "true" {
 		*errs = append(*errs, fmt.Sprintf("%s.drain.item: shared drains require single_lane = true", prefix))
 	}
 	if strings.TrimSpace(step.Assignee) != "" {
@@ -768,14 +770,14 @@ func collectGraphV2ReservedRefsInStringWithVisitor(path, value string, allowConv
 			}
 			switch name {
 			case "convoy_id":
-				*errs = append(*errs, fmt.Sprintf("%s: convoy_id requires a targeted graph.v2 invocation", path))
+				*errs = append(*errs, fmt.Sprintf("%s: convoy_id requires a targeted formulas v2 invocation", path))
 			case "issue":
 				// Deprecated one-release compat alias (#2941): {{issue}}
 				// resolves to the single tracked member of the input convoy.
 				// GraphV2LegacyIssueRefs surfaces these for deprecation
 				// warnings.
 			case "bead_id":
-				*errs = append(*errs, fmt.Sprintf("%s: %s is not available in graph.v2 formulas; use convoy_id", path, name))
+				*errs = append(*errs, fmt.Sprintf("%s: %s is not available in v2 formulas; use convoy_id", path, name))
 			}
 		}
 	}
@@ -784,4 +786,32 @@ func collectGraphV2ReservedRefsInStringWithVisitor(path, value string, allowConv
 func isGraphV2ReservedVarName(name string) bool {
 	_, ok := graphV2ReservedVarNames[strings.TrimSpace(name)]
 	return ok
+}
+
+// GraphV2OutputJSONWarnings returns one warning string per step in a graph.v2
+// formula that sets gc.output_json_required without using drain. graph.v1
+// formulas and steps that use drain are not flagged — drain is the graph.v2
+// canonical fan-out primitive.
+func GraphV2OutputJSONWarnings(f *Formula) []string {
+	if !UsesGraphCompiler(f) {
+		return nil
+	}
+	var warnings []string
+	collectOutputJSONWarnings(f.Steps, f.Formula, &warnings)
+	return warnings
+}
+
+func collectOutputJSONWarnings(steps []*Step, formulaName string, out *[]string) {
+	for _, step := range steps {
+		if step.Drain == nil && strings.TrimSpace(step.Metadata[beadmeta.OutputJSONRequiredMetadataKey]) == "true" {
+			*out = append(*out, fmt.Sprintf(
+				"formula %s step %s: gc.output_json is deprecated; use drain in v2 formulas (see: engdocs/drain-fanout.md)",
+				formulaName, step.ID,
+			))
+		}
+		collectOutputJSONWarnings(step.Children, formulaName, out)
+		if step.Loop != nil {
+			collectOutputJSONWarnings(step.Loop.Body, formulaName, out)
+		}
+	}
 }

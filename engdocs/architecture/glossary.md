@@ -153,16 +153,18 @@ other source should be updated.
 
 ## Design Principles
 
-- **Bitter Lesson**: Every primitive must become MORE useful as models
-  improve, not less. Don't build heuristics or decision trees.
+- **Primitives must improve with the models**: Every primitive must
+  become MORE useful as models improve, not less. Don't build
+  heuristics or decision trees.
 
-- **GUPP**: "If you find work on your hook, YOU RUN IT." No
-  confirmation, no waiting. The hook having work IS the assignment.
+- **Work on your hook is yours to run**: "If you find work on your
+  hook, YOU RUN IT." No confirmation, no waiting. The hook having work
+  IS the assignment.
 
-- **NDI (Nondeterministic Idempotence)**: The system converges to
-  correct outcomes because work (beads), hooks, and molecules are all
-  persistent. Sessions come and go; the work survives.
+- **The system converges because work persists**: The system converges
+  to correct outcomes because work (beads), hooks, and molecules are
+  all persistent. Sessions come and go; the work survives.
 
-- **ZFC (Zero Framework Cognition)**: Go handles transport, not
-  reasoning. If a line of Go contains a judgment call, it's a
-  violation.
+- **Keep judgment out of Go**: Go handles transport, not reasoning. The
+  framework moves work; it doesn't reason. If a line of Go contains a
+  judgment call, it's a violation.

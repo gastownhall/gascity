@@ -35,7 +35,7 @@ title = "Run tests"
 needs = ["analyze"]
 ```
 
-For the file format itself, see [Formula Files](../../docs/reference/formula.md).
+For the file format itself, see [the v1 formula spec](../../docs/reference/specs/formula-spec-v1.md).
 
 ## Phase 2: Resolution
 

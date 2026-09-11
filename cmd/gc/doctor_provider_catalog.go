@@ -132,15 +132,13 @@ func (c *providerCatalogReadinessAdvisoryCheck) WarmupEligible() bool { return f
 
 func loadCityConfigAllowMissingProviderReferences(cityPath string) (*config.City, error) {
 	tomlPath := filepath.Join(cityPath, citylayout.CityConfigFile)
-	extras, err := builtinPackIncludesForConfigLoad(fsys.OSFS{}, tomlPath, io.Discard)
-	if err != nil {
+	if err := ensureBuiltinPacksForConfigLoad(fsys.OSFS{}, tomlPath, io.Discard); err != nil {
 		return nil, err
 	}
 	cfg, _, err := config.LoadWithIncludesOptions(
 		fsys.OSFS{},
 		tomlPath,
 		config.LoadOptions{AllowMissingProviderReferences: true},
-		extras...,
 	)
 	if err != nil {
 		return nil, err
@@ -182,6 +180,10 @@ func missingBuiltinProviderRefs(refs []config.ProviderReference) []string {
 	return out
 }
 
+// appendBuiltinProviderAliases is exempt from config.ResolveCityRewritePath:
+// os.WriteFile truncates through a symlinked city.toml and the append keeps
+// every existing byte, so neither link identity nor unknown keys are at
+// risk. Switching this to a temp-file + rename write revokes the exemption.
 func appendBuiltinProviderAliases(cityPath string, providers []string) error {
 	if len(providers) == 0 {
 		return nil

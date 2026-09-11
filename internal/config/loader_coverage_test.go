@@ -54,6 +54,39 @@ mode = "on_demand"
 	}
 }
 
+func TestLoadWithIncludes_AppendExtMsgDefaultRoutes(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["extra.toml"]
+
+[workspace]
+name = "test"
+
+[[extmsg.default_route]]
+provider = "telegram"
+agent = "myrig/frontdesk"
+`)
+	fs.Files["/city/extra.toml"] = []byte(`
+[[extmsg.default_route]]
+provider = "telegram"
+account_id = "ops"
+agent = "myrig/operator"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if len(cfg.ExtMsg.DefaultRoutes) != 2 {
+		t.Fatalf("len(DefaultRoutes) = %d, want 2", len(cfg.ExtMsg.DefaultRoutes))
+	}
+	if got := cfg.ExtMsgDefaultRouteAgent("telegram", "ops"); got != "myrig/operator" {
+		t.Fatalf("ExtMsgDefaultRouteAgent(telegram, ops) = %q, want myrig/operator", got)
+	}
+	if got := cfg.ExtMsgDefaultRouteAgent("telegram", "default"); got != "myrig/frontdesk" {
+		t.Fatalf("ExtMsgDefaultRouteAgent(telegram, default) = %q, want myrig/frontdesk", got)
+	}
+}
+
 func TestLoadWithIncludesLocalOnlyDoesNotRequireHome(t *testing.T) {
 	t.Setenv("HOME", "")
 	t.Setenv("USERPROFILE", "")

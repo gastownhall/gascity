@@ -13,7 +13,55 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
+
+// Every writer of started_config_hash must stamp the partition sub-hashes
+// (started_provision_hash/started_launch_hash) from the SAME config, or a later
+// launch-only drift check (B2.3) would compare against a stale baseline and
+// mis-route a restart. This pins both rebaseline writers to that invariant.
+func TestStartedHashWriters_StampPartitionSubHashes(t *testing.T) {
+	cfg := runtime.Config{
+		Command:      "claude --model opus",
+		PreStart:     []string{"echo provisioning"},
+		SessionSetup: []string{"echo launching"},
+	}
+	wantProvision := runtime.ProvisionFingerprint(cfg)
+	wantLaunch := runtime.LaunchFingerprint(cfg)
+	wantCore := runtime.CoreFingerprint(cfg)
+
+	t.Run("softReloadAcceptedHashMetadata", func(t *testing.T) {
+		meta, err := softReloadAcceptedHashMetadata(cfg, wantCore)
+		if err != nil {
+			t.Fatalf("softReloadAcceptedHashMetadata: %v", err)
+		}
+		if meta["started_config_hash"] != wantCore {
+			t.Errorf("started_config_hash = %q, want %q", meta["started_config_hash"], wantCore)
+		}
+		if meta["started_provision_hash"] != wantProvision {
+			t.Errorf("started_provision_hash = %q, want %q", meta["started_provision_hash"], wantProvision)
+		}
+		if meta["started_launch_hash"] != wantLaunch {
+			t.Errorf("started_launch_hash = %q, want %q", meta["started_launch_hash"], wantLaunch)
+		}
+	})
+
+	t.Run("sessionHashRebaselineMetadata", func(t *testing.T) {
+		meta, err := sessionHashRebaselineMetadata(cfg)
+		if err != nil {
+			t.Fatalf("sessionHashRebaselineMetadata: %v", err)
+		}
+		if meta["started_config_hash"] != wantCore {
+			t.Errorf("started_config_hash = %q, want %q", meta["started_config_hash"], wantCore)
+		}
+		if meta["started_provision_hash"] != wantProvision {
+			t.Errorf("started_provision_hash = %q, want %q", meta["started_provision_hash"], wantProvision)
+		}
+		if meta["started_launch_hash"] != wantLaunch {
+			t.Errorf("started_launch_hash = %q, want %q", meta["started_launch_hash"], wantLaunch)
+		}
+	})
+}
 
 func TestAcceptConfigDriftAcrossSessions_UpdatesStaleHash(t *testing.T) {
 	store := beads.NewMemStore()
@@ -44,7 +92,7 @@ func TestAcceptConfigDriftAcrossSessions_UpdatesStaleHash(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	got := acceptConfigDriftAcrossSessions(store, desired, nil, nil, nil, &stderr)
+	got := acceptConfigDriftAcrossSessions(sessionFrontDoor(store), desired, nil, nil, nil, &stderr)
 	if got.Updated != 1 {
 		t.Fatalf("updated = %d, want 1 (stderr=%s)", got.Updated, stderr.String())
 	}
@@ -92,7 +140,7 @@ func TestAcceptConfigDriftAcrossSessions_SkipsUnstartedSessions(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	got := acceptConfigDriftAcrossSessions(store, desired, nil, nil, nil, &stderr)
+	got := acceptConfigDriftAcrossSessions(sessionFrontDoor(store), desired, nil, nil, nil, &stderr)
 	if got.Updated != 0 {
 		t.Fatalf("updated = %d, want 0 for unstarted session (stderr=%s)", got.Updated, stderr.String())
 	}
@@ -135,7 +183,7 @@ func TestAcceptConfigDriftAcrossSessions_SkipsOrphanedSessions(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	got := acceptConfigDriftAcrossSessions(store, desired, nil, nil, nil, &stderr)
+	got := acceptConfigDriftAcrossSessions(sessionFrontDoor(store), desired, nil, nil, nil, &stderr)
 	if got.Updated != 0 {
 		t.Fatalf("updated = %d, want 0 for orphaned session (stderr=%s)", got.Updated, stderr.String())
 	}
@@ -175,7 +223,7 @@ func TestAcceptConfigDriftAcrossSessions_LeavesNonDriftingSessionsAlone(t *testi
 	}
 
 	var stderr bytes.Buffer
-	got := acceptConfigDriftAcrossSessions(store, desired, nil, nil, nil, &stderr)
+	got := acceptConfigDriftAcrossSessions(sessionFrontDoor(store), desired, nil, nil, nil, &stderr)
 	if got.Updated != 0 {
 		t.Fatalf("updated = %d, want 0 (no drift) — stderr=%s", got.Updated, stderr.String())
 	}
@@ -210,15 +258,15 @@ func TestAcceptConfigDriftAcrossSessions_CancelsExistingConfigDriftDrain(t *test
 	sp := runtime.NewFake()
 	dt := newDrainTracker()
 	clk := &clock.Fake{Time: time.Unix(100, 0)}
-	if !beginSessionDrain(sessionBead, sp, dt, "config-drift", clk, time.Minute) {
-		t.Fatal("beginSessionDrain returned false")
+	if !beginSessionDrainInfo(sessiontest.SeedBead(t, sessionBead), sp, dt, "config-drift", clk, time.Minute) {
+		t.Fatal("beginSessionDrainInfo returned false")
 	}
 
 	desired := map[string]TemplateParams{
 		"worker": {Command: "new-cmd", SessionName: "worker", TemplateName: "worker"},
 	}
 	var stderr bytes.Buffer
-	got := acceptConfigDriftAcrossSessions(store, desired, nil, sp, dt, &stderr)
+	got := acceptConfigDriftAcrossSessions(sessionFrontDoor(store), desired, nil, sp, dt, &stderr)
 	if got.Updated != 1 {
 		t.Fatalf("updated = %d, want 1 (stderr=%s)", got.Updated, stderr.String())
 	}
@@ -259,7 +307,7 @@ func TestAcceptConfigDriftAcrossSessions_FailsAckedDrainWithoutProviderBeforeMet
 	}
 
 	var stderr bytes.Buffer
-	got := acceptConfigDriftAcrossSessions(store, desired, nil, nil, dt, &stderr)
+	got := acceptConfigDriftAcrossSessions(sessionFrontDoor(store), desired, nil, nil, dt, &stderr)
 	if got.Updated != 0 || got.Failed != 1 {
 		t.Fatalf("result = %+v, want updated=0 failed=1 (stderr=%s)", got, stderr.String())
 	}
@@ -315,7 +363,7 @@ func TestAcceptConfigDriftAcrossSessions_FailsWhenAckMetadataClearFails(t *testi
 	}
 
 	var stderr bytes.Buffer
-	got := acceptConfigDriftAcrossSessions(store, desired, nil, sp, dt, &stderr)
+	got := acceptConfigDriftAcrossSessions(sessionFrontDoor(store), desired, nil, sp, dt, &stderr)
 	if got.Updated != 0 || got.Failed != 1 || got.CanceledDrains != 0 {
 		t.Fatalf("result = %+v, want updated=0 failed=1 canceled=0 (stderr=%s)", got, stderr.String())
 	}
@@ -377,7 +425,7 @@ func TestAcceptConfigDriftAcrossSessions_AppliesTemplateOverridesToHash(t *testi
 	}
 
 	var stderr bytes.Buffer
-	got := acceptConfigDriftAcrossSessions(store, desired, nil, nil, nil, &stderr)
+	got := acceptConfigDriftAcrossSessions(sessionFrontDoor(store), desired, nil, nil, nil, &stderr)
 	if got.Updated != 1 {
 		t.Fatalf("updated = %d, want 1 (stderr=%s)", got.Updated, stderr.String())
 	}
@@ -427,7 +475,7 @@ func TestAcceptConfigDriftAcrossSessions_MetadataFailureReportsAndContinues(t *t
 	}
 
 	var stderr bytes.Buffer
-	got := acceptConfigDriftAcrossSessions(store, desired, nil, nil, nil, &stderr)
+	got := acceptConfigDriftAcrossSessions(sessionFrontDoor(store), desired, nil, nil, nil, &stderr)
 	if got.Updated != 1 || got.Failed != 1 {
 		t.Fatalf("result = %+v, want updated=1 failed=1 (stderr=%s)", got, stderr.String())
 	}
@@ -465,7 +513,7 @@ func TestAcceptConfigDriftAcrossSessions_EmptyDesiredReportsOpenSessions(t *test
 	}
 
 	var stderr bytes.Buffer
-	got := acceptConfigDriftAcrossSessions(store, map[string]TemplateParams{}, nil, nil, nil, &stderr)
+	got := acceptConfigDriftAcrossSessions(sessionFrontDoor(store), map[string]TemplateParams{}, nil, nil, nil, &stderr)
 	if !got.DesiredEmpty || got.OpenSessions != 1 {
 		t.Fatalf("result = %+v, want DesiredEmpty with one open session", got)
 	}

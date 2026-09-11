@@ -1,3 +1,5 @@
 {"timestamp":"2026-04-04T09:00:00Z","type":"session_meta","payload":{"cwd":"/tmp/gascity/phase1/codex"}}
 {"timestamp":"2026-04-04T09:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"Review the transcript adapter."}]}}
 {"timestamp":"2026-04-04T09:00:10Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"The adapter reads provider transcripts into a canonical history."}]}}
+{"timestamp":"2026-04-04T09:00:11Z","type":"turn_context","payload":{"model":"gpt-5-codex"}}
+{"timestamp":"2026-04-04T09:00:12Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":110,"cached_input_tokens":10,"output_tokens":40,"reasoning_output_tokens":0,"total_tokens":150},"last_token_usage":{"input_tokens":110,"cached_input_tokens":10,"output_tokens":40,"reasoning_output_tokens":0,"total_tokens":150}}}}

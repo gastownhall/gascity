@@ -50,6 +50,7 @@ func TestProviderProcessPassthroughEnvIncludesProviderAndRuntimeBaseline(t *test
 	t.Setenv("XDG_STATE_HOME", "")
 	t.Setenv("ANTHROPIC_AUTH_TOKEN", "test-anthropic-token")
 	t.Setenv("OLLAMA_API_KEY", "test-ollama-token")
+	t.Setenv("XIAOMI_API_KEY", "test-xiaomi-key")
 	t.Setenv("AWS_ACCESS_KEY_ID", "test-aws-key")
 	t.Setenv("AWS_PAGER", "less")
 	t.Setenv("CLAUDECODE", "1")
@@ -69,6 +70,7 @@ func TestProviderProcessPassthroughEnvIncludesProviderAndRuntimeBaseline(t *test
 		"XDG_STATE_HOME":         filepath.Join(homeDir, ".local", "state"),
 		"ANTHROPIC_AUTH_TOKEN":   "test-anthropic-token",
 		"OLLAMA_API_KEY":         "test-ollama-token",
+		"XIAOMI_API_KEY":         "test-xiaomi-key",
 		"AWS_ACCESS_KEY_ID":      "test-aws-key",
 		"CLAUDECODE":             "",
 		"CLAUDE_CODE_ENTRYPOINT": "",
@@ -105,5 +107,68 @@ func TestProviderProcessPassthroughEnvKeepsExplicitLocaleAndXDG(t *testing.T) {
 		if got[key] != want {
 			t.Errorf("ProviderProcessPassthroughEnv()[%s] = %q, want %q", key, got[key], want)
 		}
+	}
+}
+
+// The controller token is controller scope. Every session-env builder starts
+// from this map, and the map is an OVERLAY on an environment the child already
+// inherits — the tmux server's global env, or os.Environ() on the
+// subprocess/ACP paths — so an omitted key is an inherited key.
+// Present-and-empty is the only value that withholds it.
+func TestProviderProcessPassthroughEnvPinsControllerOnlyKeysEmpty(t *testing.T) {
+	for _, key := range ControllerOnlyEnvKeys {
+		t.Setenv(key, "controller-scope-value")
+	}
+
+	got := ProviderProcessPassthroughEnv()
+
+	for _, key := range ControllerOnlyEnvKeys {
+		val, ok := got[key]
+		if !ok {
+			t.Errorf("ProviderProcessPassthroughEnv() omits %s; want present and empty so it overrides the inherited value", key)
+			continue
+		}
+		if val != "" {
+			t.Errorf("ProviderProcessPassthroughEnv()[%s] = %q, want empty", key, val)
+		}
+	}
+}
+
+// Pinning the keys is not enough on its own: config-authored values are expanded
+// against the controller process, so "$GC_CONTROLLER_TOKEN" would copy the token
+// into a session variable no key-level guard is watching.
+func TestExpandSessionEnvValueMasksControllerOnlyKeys(t *testing.T) {
+	t.Setenv("GC_CONTROLLER_TOKEN", "super-secret-controller-token")
+	t.Setenv("GC_CONTROLLER_TRACE", "on")
+
+	for _, tc := range []struct{ in, want string }{
+		{"$GC_CONTROLLER_TOKEN", ""},
+		{"${GC_CONTROLLER_TOKEN}", ""},
+		{"Bearer $GC_CONTROLLER_TOKEN", "Bearer "},
+		{"$GC_CONTROLLER_TRACE", "on"},
+		{"trace=${GC_CONTROLLER_TRACE}", "trace=on"},
+	} {
+		if got := ExpandSessionEnvValue(tc.in); got != tc.want {
+			t.Errorf("ExpandSessionEnvValue(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TZ passes through to spawned provider sessions so in-session time
+// reasoning (e.g. `gc order check`) agrees with the supervisor's wall clock
+// instead of defaulting to UTC in the constructed env.
+func TestProviderProcessPassthroughEnvIncludesTZ(t *testing.T) {
+	t.Setenv("TZ", "America/New_York")
+	m := ProviderProcessPassthroughEnv()
+	if m["TZ"] != "America/New_York" {
+		t.Errorf(`m["TZ"] = %q, want "America/New_York"`, m["TZ"])
+	}
+}
+
+func TestProviderProcessPassthroughEnvOmitsUnsetTZ(t *testing.T) {
+	t.Setenv("TZ", "")
+	m := ProviderProcessPassthroughEnv()
+	if v, ok := m["TZ"]; ok {
+		t.Errorf(`m["TZ"] = %q present, want absent when host TZ is unset`, v)
 	}
 }

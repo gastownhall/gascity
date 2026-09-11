@@ -1,8 +1,11 @@
 package session_test
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"log"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -48,7 +51,7 @@ func TestResolveSessionIDByExactID_OnlyAcceptsSessionBeads(t *testing.T) {
 	}
 }
 
-func TestResolveSessionIDByExactID_RepairsEmptyTypeSessionBead(t *testing.T) {
+func TestResolveSessionIDByExactID_ResolvesEmptyTypeWithoutPersisting(t *testing.T) {
 	store := beads.NewMemStore()
 	b, _ := store.Create(beads.Bead{
 		Type:   session.BeadType,
@@ -66,9 +69,10 @@ func TestResolveSessionIDByExactID_RepairsEmptyTypeSessionBead(t *testing.T) {
 	if id != b.ID {
 		t.Fatalf("ResolveSessionIDByExactID() = %q, want %q", id, b.ID)
 	}
+	// Read-only resolution must not persist the type repair.
 	stored, _ := store.Get(b.ID)
-	if stored.Type != session.BeadType {
-		t.Fatalf("stored type = %q, want %q", stored.Type, session.BeadType)
+	if stored.Type != "" {
+		t.Fatalf("stored type = %q, want empty (read path must not write)", stored.Type)
 	}
 }
 
@@ -646,7 +650,7 @@ func TestResolveSessionID_Ambiguous(t *testing.T) {
 	}
 }
 
-func TestResolveSessionID_RepairsEmptyTypeDirectLookup(t *testing.T) {
+func TestResolveSessionID_ResolvesEmptyTypeDirectLookup(t *testing.T) {
 	store := beads.NewMemStore()
 	// Create a session bead then corrupt its type to empty.
 	b, _ := store.Create(beads.Bead{
@@ -661,7 +665,7 @@ func TestResolveSessionID_RepairsEmptyTypeDirectLookup(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Direct lookup by bead ID should repair and resolve.
+	// Direct lookup by bead ID should resolve despite the empty type.
 	id, err := session.ResolveSessionID(store, b.ID)
 	if err != nil {
 		t.Fatalf("expected resolution to succeed, got: %v", err)
@@ -670,14 +674,14 @@ func TestResolveSessionID_RepairsEmptyTypeDirectLookup(t *testing.T) {
 		t.Errorf("got %q, want %q", id, b.ID)
 	}
 
-	// Verify the store was repaired.
+	// Read-only resolution must not persist the type repair.
 	stored, _ := store.Get(b.ID)
-	if stored.Type != session.BeadType {
-		t.Errorf("stored type = %q, want %q", stored.Type, session.BeadType)
+	if stored.Type != "" {
+		t.Errorf("stored type = %q, want empty (read path must not write)", stored.Type)
 	}
 }
 
-func TestResolveSessionID_RepairsEmptyTypeAliasLookup(t *testing.T) {
+func TestResolveSessionID_ResolvesEmptyTypeAliasLookup(t *testing.T) {
 	store := beads.NewMemStore()
 	b, _ := store.Create(beads.Bead{
 		Type:   session.BeadType,
@@ -700,10 +704,10 @@ func TestResolveSessionID_RepairsEmptyTypeAliasLookup(t *testing.T) {
 		t.Errorf("got %q, want %q", id, b.ID)
 	}
 
-	// Verify the store was repaired.
+	// Read-only resolution must not persist the type repair.
 	stored, _ := store.Get(b.ID)
-	if stored.Type != session.BeadType {
-		t.Errorf("stored type = %q, want %q", stored.Type, session.BeadType)
+	if stored.Type != "" {
+		t.Errorf("stored type = %q, want empty (read path must not write)", stored.Type)
 	}
 }
 
@@ -864,5 +868,192 @@ func TestResolveSessionID_SkipsClosedBeads(t *testing.T) {
 	}
 	if !errors.Is(err, session.ErrSessionNotFound) {
 		t.Errorf("expected ErrSessionNotFound, got: %v", err)
+	}
+}
+
+// mutationRecordingStore wraps a Store and records every write so tests can
+// assert that read-only resolution paths never mutate the store.
+type mutationRecordingStore struct {
+	beads.Store
+	writes []string
+}
+
+func (s *mutationRecordingStore) Create(b beads.Bead) (beads.Bead, error) {
+	s.writes = append(s.writes, "Create")
+	return s.Store.Create(b)
+}
+
+func (s *mutationRecordingStore) Update(id string, opts beads.UpdateOpts) error {
+	s.writes = append(s.writes, "Update "+id)
+	return s.Store.Update(id, opts)
+}
+
+func (s *mutationRecordingStore) Close(id string) error {
+	s.writes = append(s.writes, "Close "+id)
+	return s.Store.Close(id)
+}
+
+func (s *mutationRecordingStore) Reopen(id string) error {
+	s.writes = append(s.writes, "Reopen "+id)
+	return s.Store.Reopen(id)
+}
+
+func (s *mutationRecordingStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	s.writes = append(s.writes, "CloseAll")
+	return s.Store.CloseAll(ids, metadata)
+}
+
+func (s *mutationRecordingStore) SetMetadata(id, key, value string) error {
+	s.writes = append(s.writes, "SetMetadata "+id)
+	return s.Store.SetMetadata(id, key, value)
+}
+
+func (s *mutationRecordingStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	s.writes = append(s.writes, "SetMetadataBatch "+id)
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+func (s *mutationRecordingStore) Delete(id string) error {
+	s.writes = append(s.writes, "Delete "+id)
+	return s.Store.Delete(id)
+}
+
+func (s *mutationRecordingStore) Tx(commitMsg string, fn func(tx beads.Tx) error) error {
+	s.writes = append(s.writes, "Tx "+commitMsg)
+	return s.Store.Tx(commitMsg, fn)
+}
+
+// newEmptyTypeSessionBead creates a session bead and corrupts its type to
+// empty, simulating the partially-written records left by crashes or schema
+// migrations.
+func newEmptyTypeSessionBead(t *testing.T, store beads.Store, metadata map[string]string) beads.Bead {
+	t.Helper()
+	b, err := store.Create(beads.Bead{
+		Type:     session.BeadType,
+		Labels:   []string{session.LabelSession},
+		Metadata: metadata,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	emptyType := ""
+	if err := store.Update(b.ID, beads.UpdateOpts{Type: &emptyType}); err != nil {
+		t.Fatalf("Update(empty type): %v", err)
+	}
+	b, err = store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	return b
+}
+
+func TestResolveSessionIDByExactID_ReadPathDoesNotWriteStore(t *testing.T) {
+	inner := beads.NewMemStore()
+	b := newEmptyTypeSessionBead(t, inner, nil)
+	store := &mutationRecordingStore{Store: inner}
+
+	id, err := session.ResolveSessionIDByExactID(store, b.ID)
+	if err != nil {
+		t.Fatalf("ResolveSessionIDByExactID() error = %v", err)
+	}
+	if id != b.ID {
+		t.Fatalf("ResolveSessionIDByExactID() = %q, want %q", id, b.ID)
+	}
+	if len(store.writes) != 0 {
+		t.Fatalf("read-only exact-ID resolution wrote to the store: %v", store.writes)
+	}
+}
+
+func TestResolveSessionID_MetadataReadPathDoesNotWriteStore(t *testing.T) {
+	inner := beads.NewMemStore()
+	b := newEmptyTypeSessionBead(t, inner, map[string]string{"session_name": "mayor"})
+	store := &mutationRecordingStore{Store: inner}
+
+	id, err := session.ResolveSessionID(store, "mayor")
+	if err != nil {
+		t.Fatalf("ResolveSessionID() error = %v", err)
+	}
+	if id != b.ID {
+		t.Fatalf("ResolveSessionID() = %q, want %q", id, b.ID)
+	}
+	if len(store.writes) != 0 {
+		t.Fatalf("read-only metadata resolution wrote to the store: %v", store.writes)
+	}
+}
+
+func TestResolveSessionIDAllowClosed_ReadPathDoesNotWriteStore(t *testing.T) {
+	inner := beads.NewMemStore()
+	b := newEmptyTypeSessionBead(t, inner, map[string]string{"alias": "overseer"})
+	if err := inner.Close(b.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	store := &mutationRecordingStore{Store: inner}
+
+	id, err := session.ResolveSessionIDAllowClosed(store, "overseer")
+	if err != nil {
+		t.Fatalf("ResolveSessionIDAllowClosed() error = %v", err)
+	}
+	if id != b.ID {
+		t.Fatalf("ResolveSessionIDAllowClosed() = %q, want %q", id, b.ID)
+	}
+	if len(store.writes) != 0 {
+		t.Fatalf("read-only closed-session resolution wrote to the store: %v", store.writes)
+	}
+}
+
+func TestResolveSessionBeadByExactID_NormalizesEmptyTypeInMemory(t *testing.T) {
+	store := beads.NewMemStore()
+	b := newEmptyTypeSessionBead(t, store, nil)
+
+	got, id, err := session.ResolveSessionBeadByExactID(store, b.ID)
+	if err != nil {
+		t.Fatalf("ResolveSessionBeadByExactID() error = %v", err)
+	}
+	if id != b.ID {
+		t.Fatalf("ResolveSessionBeadByExactID() id = %q, want %q", id, b.ID)
+	}
+	// Selection sees the normalized view...
+	if got.Type != session.BeadType {
+		t.Errorf("returned type = %q, want %q", got.Type, session.BeadType)
+	}
+	// ...but the read path must not persist the repair.
+	stored, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if stored.Type != "" {
+		t.Errorf("read path persisted type repair: stored type = %q, want empty", stored.Type)
+	}
+}
+
+// failingUpdateStore rejects all Update calls so tests can exercise the
+// persistence-failure path of RepairEmptyType.
+type failingUpdateStore struct {
+	beads.Store
+	updateErr error
+}
+
+func (s *failingUpdateStore) Update(string, beads.UpdateOpts) error {
+	return s.updateErr
+}
+
+func TestRepairEmptyType_StoreFailureIsLoggedAndPatchesInMemory(t *testing.T) {
+	inner := beads.NewMemStore()
+	b := newEmptyTypeSessionBead(t, inner, nil)
+	store := &failingUpdateStore{Store: inner, updateErr: errors.New("update rejected")}
+
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(prev)
+
+	session.RepairEmptyType(store, &b)
+
+	if b.Type != session.BeadType {
+		t.Errorf("in-memory type = %q, want %q", b.Type, session.BeadType)
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, b.ID) || !strings.Contains(logged, "update rejected") {
+		t.Errorf("expected repair failure log mentioning %q and the error, got %q", b.ID, logged)
 	}
 }

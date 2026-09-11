@@ -15,11 +15,13 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -34,7 +36,10 @@ var (
 	cachedBridgeWSTokenExpiresAt time.Time
 )
 
-var _ runtime.Provider = (*Provider)(nil)
+var (
+	_ runtime.Provider                  = (*Provider)(nil)
+	_ runtime.LivenessObserverWithError = (*Provider)(nil)
+)
 
 var defaultWSURLCandidates = []string{
 	"ws://127.0.0.1:3773/ws",
@@ -48,6 +53,7 @@ const (
 	bridgeHTTPTimeout        = 12 * time.Second
 	bridgeWSTimeout          = 3 * time.Second
 	snapshotCacheTTL         = 10 * time.Second
+	recentStartGracePeriod   = 30 * time.Second
 )
 
 // Provider wraps an exec.Provider, moving the T3-specific lifecycle and turn
@@ -474,8 +480,14 @@ func resolveNativeStateDir() string {
 	return filepath.Join(home, ".t3", "gc-bridge-native")
 }
 
+// ensureNativeStateDir creates the bridge state directory owner-only.
+//
+// It holds session meta sidecars and the cached auth bearer session token that
+// [readCachedBearerSessionToken] reads back. Gas City is often the process that
+// creates the directory, so the mode chosen here is the one the token lands in
+// even though T3 writes the token itself.
 func ensureNativeStateDir() error {
-	return os.MkdirAll(resolveNativeStateDir(), 0o755)
+	return runtime.EnsurePrivateDir(resolveNativeStateDir())
 }
 
 func safeMetaPathComponent(value string) string {
@@ -531,7 +543,7 @@ func writeMetaValue(name, key, value string) error {
 	if err := ensureNativeStateDir(); err != nil {
 		return err
 	}
-	return os.WriteFile(metaFilePath(name, key), []byte(value), 0o644)
+	return runtime.WritePrivateFile(metaFilePath(name, key), []byte(value))
 }
 
 func readMetaValue(name, key string) (string, error) {
@@ -723,27 +735,80 @@ func SessionNameFromMetadata(meta map[string]string) string {
 
 func snapshotThreadBySessionName(snapshot map[string]interface{}, name string) map[string]interface{} {
 	var best map[string]interface{}
-	bestUpdatedAt := ""
 	for _, thread := range snapshotThreads(snapshot) {
-		if deletedAt, ok := thread["deletedAt"]; ok && deletedAt != nil {
+		if !snapshotThreadEligible(thread) {
 			continue
 		}
 		meta := threadCustomMetadata(thread)
 		if SessionNameFromMetadata(meta) != name {
 			continue
 		}
-		updatedAt, _ := thread["updatedAt"].(string)
-		createdAt, _ := thread["createdAt"].(string)
-		candidate := updatedAt
-		if candidate == "" {
-			candidate = createdAt
-		}
-		if best == nil || candidate > bestUpdatedAt {
+		if snapshotThreadNewerThan(thread, best) {
 			best = thread
-			bestUpdatedAt = candidate
 		}
 	}
 	return best
+}
+
+func snapshotThreadEligible(thread map[string]interface{}) bool {
+	if thread == nil {
+		return false
+	}
+	if deletedAt, ok := thread["deletedAt"]; ok && deletedAt != nil {
+		return false
+	}
+	return threadCustomMetadata(thread)["gc.state"] != "archived"
+}
+
+func snapshotThreadRecency(thread map[string]interface{}) string {
+	if thread == nil {
+		return ""
+	}
+	updatedAt, _ := thread["updatedAt"].(string)
+	if updatedAt != "" {
+		return updatedAt
+	}
+	createdAt, _ := thread["createdAt"].(string)
+	return createdAt
+}
+
+func snapshotThreadNewerThan(candidate, current map[string]interface{}) bool {
+	return current == nil || snapshotThreadRecency(candidate) > snapshotThreadRecency(current)
+}
+
+type t3SessionStatusClass uint8
+
+const (
+	t3SessionStatusUnknown t3SessionStatusClass = iota
+	t3SessionStatusLive
+	t3SessionStatusAbsent
+)
+
+func snapshotThreadSessionStatus(thread map[string]interface{}) string {
+	if thread == nil {
+		return ""
+	}
+	session, _ := thread["session"].(map[string]interface{})
+	if session == nil {
+		return ""
+	}
+	status, _ := session["status"].(string)
+	return strings.ToLower(strings.TrimSpace(status))
+}
+
+func classifyT3SessionStatus(status string) t3SessionStatusClass {
+	switch status {
+	case "idle", "starting", "running", "ready":
+		return t3SessionStatusLive
+	case "interrupted", "stopped", "error", "none", "gone":
+		return t3SessionStatusAbsent
+	default:
+		return t3SessionStatusUnknown
+	}
+}
+
+func isLegacyPreSessionStatus(status string) bool {
+	return status == "none" || status == "gone"
 }
 
 func snapshotThreadBinding(thread map[string]interface{}) *threadBinding {
@@ -854,11 +919,30 @@ func (p *Provider) withinRecentStart(name string) bool {
 	if !ok {
 		return false
 	}
-	if time.Since(startedAt) >= 30*time.Second {
+	if time.Since(startedAt) >= recentStartGracePeriod {
 		delete(p.recentStarts, name)
 		return false
 	}
 	return true
+}
+
+func (p *Provider) recentStartNames(prefix string) []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	now := time.Now()
+	names := make([]string, 0, len(p.recentStarts))
+	for name, startedAt := range p.recentStarts {
+		if now.Sub(startedAt) >= recentStartGracePeriod {
+			delete(p.recentStarts, name)
+			continue
+		}
+		if prefix == "" || strings.HasPrefix(name, prefix) {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 // rpcCall makes a generic WebSocket RPC call and returns the result map.
@@ -1397,6 +1481,15 @@ func buildThreadEnv(env map[string]string) map[string]string {
 			threadEnv[key] = value
 		}
 	}
+	// Realign BEADS_HOLDER_TOKEN to the surviving GC_INSTANCE_TOKEN. The GC_
+	// allowlist above strips the BEADS_-prefixed holder token that RuntimeEnv
+	// wired in, which would leave the visible T3 thread carrying an instance
+	// token but no matching holder token — the silent actor-only downgrade the
+	// tmux backstop also guards against. Placed before the doltlite branch so it
+	// applies to both return paths.
+	if tok := threadEnv["GC_INSTANCE_TOKEN"]; tok != "" {
+		threadEnv["BEADS_HOLDER_TOKEN"] = tok
+	}
 	if strings.EqualFold(threadEnv["GC_BEADS_BACKEND"], "doltlite") || strings.EqualFold(env["BEADS_BACKEND"], "doltlite") {
 		for _, key := range []string{
 			"GC_DOLT_HOST",
@@ -1731,7 +1824,7 @@ func activityFromBeadEvent(ev events.Event, bead beads.Bead) (string, string, ma
 			"beadStatus": bead.Status,
 			"assignee":   bead.Assignee,
 			"formula":    bead.Ref,
-			"moleculeId": bead.Metadata["molecule_id"],
+			"moleculeId": bead.Metadata[beadmeta.MoleculeIDMetadataKey],
 			"eventType":  ev.Type,
 		}
 	case ev.Type == events.BeadUpdated:
@@ -1745,7 +1838,7 @@ func activityFromBeadEvent(ev events.Event, bead beads.Bead) (string, string, ma
 			"beadStatus": bead.Status,
 			"assignee":   bead.Assignee,
 			"formula":    bead.Ref,
-			"moleculeId": bead.Metadata["molecule_id"],
+			"moleculeId": bead.Metadata[beadmeta.MoleculeIDMetadataKey],
 			"eventType":  ev.Type,
 		}
 	default:
@@ -1755,7 +1848,7 @@ func activityFromBeadEvent(ev events.Event, bead beads.Bead) (string, string, ma
 			"beadStatus": bead.Status,
 			"assignee":   bead.Assignee,
 			"formula":    bead.Ref,
-			"moleculeId": bead.Metadata["molecule_id"],
+			"moleculeId": bead.Metadata[beadmeta.MoleculeIDMetadataKey],
 			"eventType":  ev.Type,
 		}
 	}
@@ -1796,9 +1889,43 @@ func (p *Provider) refreshAssignmentProjection(threadID string, envelope Startup
 	next.Assignment.ConvoyTotalCount = convoyTotalCount
 	next.Assignment.Formula = bead.Ref
 	if next.Assignment.MoleculeID == "" {
-		next.Assignment.MoleculeID = bead.Metadata["molecule_id"]
+		next.Assignment.MoleculeID = bead.Metadata[beadmeta.MoleculeIDMetadataKey]
 	}
 	_ = p.dispatchThreadMeta(threadID, buildGCMetadata(next, providerName, nil))
+}
+
+// latestSeqRetryInitialBackoff is the first wait between LatestSeq retries; it
+// doubles each attempt. A package var so tests can shrink it.
+var latestSeqRetryInitialBackoff = 100 * time.Millisecond
+
+// latestSeqWithBackoff resolves the current head sequence, retrying a transient
+// read failure with context-aware exponential backoff before giving up. Watch
+// treats afterSeq=0 as "replay the entire retained history", so the head must be
+// resolved before watching; returning on the first hiccup would permanently
+// disable the session's only event-projection goroutine. It returns the context
+// error if canceled while waiting, or the last read error after exhausting the
+// attempt budget.
+func latestSeqWithBackoff(ctx context.Context, latest func() (uint64, error)) (uint64, error) {
+	const maxAttempts = 5
+	backoff := latestSeqRetryInitialBackoff
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		seq, err := latest()
+		if err == nil {
+			return seq, nil
+		}
+		lastErr = err
+		if attempt == maxAttempts-1 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+	}
+	return 0, lastErr
 }
 
 func (p *Provider) runEventWatcher(ctx context.Context, _ string, cfg runtime.Config, binding threadBinding, envelope StartupEnvelope, providerName string) {
@@ -1820,9 +1947,17 @@ func (p *Provider) runEventWatcher(ctx context.Context, _ string, cfg runtime.Co
 	cache := beadStoreForWatcher(cfg.WorkDir, cfg.Env)
 	_ = cache.Prime(ctx)
 
-	afterSeq, err := recorder.LatestSeq()
+	// Resolve the head before watching: Watch now treats afterSeq=0 as "replay
+	// the entire retained history" (across archives), so defaulting to 0 here
+	// would flood the bead cache with the whole log. A transient LatestSeq error
+	// must not permanently kill this watcher — it is the session's only
+	// event-projection goroutine — so retry with context-aware backoff and log
+	// the terminal give-up so operators can tell a dead watcher from a healthy
+	// idle one.
+	afterSeq, err := latestSeqWithBackoff(ctx, recorder.LatestSeq)
 	if err != nil {
-		afterSeq = 0
+		fmt.Fprintf(os.Stderr, "t3bridge: event watcher for %q exiting — could not resolve latest seq: %v\n", providerName, err) //nolint:errcheck // best-effort debug logging
+		return
 	}
 	watcher, err := recorder.Watch(ctx, afterSeq)
 	if err != nil {
@@ -1915,35 +2050,82 @@ func (p *Provider) IsRunning(name string) bool {
 		return false
 	}
 	thread := snapshotThreadBySessionName(snapshot, name)
+	if thread == nil {
+		return p.withinRecentStart(name)
+	}
 	binding := snapshotThreadBinding(thread)
 	if binding == nil {
-		t3bridgeDebugf("t3bridge: IsRunning(%s) — no snapshot binding\n", name)
+		t3bridgeDebugf("t3bridge: IsRunning(%s) — malformed snapshot binding\n", name)
 		return false
 	}
-	status := p.threadSessionStatus(binding.ThreadID)
-	if (status == "none" || status == "gone") && p.withinRecentStart(name) {
+	status := snapshotThreadSessionStatus(thread)
+	if isLegacyPreSessionStatus(status) && p.withinRecentStart(name) {
 		fmt.Fprintf(os.Stderr, "t3bridge: IsRunning(%s) threadID=%s — startup grace period → true\n", name, binding.ThreadID)
 		return true
 	}
-	result := status == "running" || status == "ready"
+	result := classifyT3SessionStatus(status) == t3SessionStatusLive
 	t3bridgeDebugf("t3bridge: IsRunning(%s) threadID=%s status=%q → %v\n", name, binding.ThreadID, status, result)
 	return result
 }
 
+// ObserveLivenessWithError preserves snapshot uncertainty for lifecycle
+// callers while the legacy IsRunning(bool) and ProcessAlive(bool) surface keeps
+// its historical fail-closed behavior. A recent start remains provisionally
+// live while T3 is materializing the session.
+func (p *Provider) ObserveLivenessWithError(name string, _ []string) (runtime.Liveness, error) {
+	snapshot, err := p.rpcSnapshot()
+	if err != nil {
+		if p.withinRecentStart(name) {
+			return runtime.Liveness{Running: true, Alive: true}, nil
+		}
+		return runtime.Liveness{}, fmt.Errorf("%w: t3bridge snapshot unavailable for %q: %w", runtime.ErrRuntimeUnavailable, name, err)
+	}
+	thread := snapshotThreadBySessionName(snapshot, name)
+	if thread == nil {
+		if p.withinRecentStart(name) {
+			return runtime.Liveness{Running: true, Alive: true}, nil
+		}
+		return runtime.Liveness{}, nil
+	}
+	binding := snapshotThreadBinding(thread)
+	if binding == nil {
+		return runtime.Liveness{}, fmt.Errorf("%w: t3bridge snapshot has incomplete binding for %q", runtime.ErrRuntimeUnavailable, name)
+	}
+	status := snapshotThreadSessionStatus(thread)
+	if isLegacyPreSessionStatus(status) && p.withinRecentStart(name) {
+		return runtime.Liveness{Running: true, Alive: true}, nil
+	}
+	switch classifyT3SessionStatus(status) {
+	case t3SessionStatusLive:
+		return runtime.Liveness{Running: true, Alive: true}, nil
+	case t3SessionStatusAbsent:
+		return runtime.Liveness{}, nil
+	default:
+		return runtime.Liveness{}, fmt.Errorf("%w: t3bridge snapshot has unknown session status %q for %q", runtime.ErrRuntimeUnavailable, status, name)
+	}
+}
+
 // ListRunning enumerates live GC-managed session names from the T3 snapshot.
+//
+// A soft-unavailable snapshot is a total observation failure, not proof that
+// no sessions are running. Report ErrRuntimeUnavailable so absence-consuming
+// callers defer instead of treating a transient bridge outage (or an
+// initializing session) as an authoritative empty list.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	snapshot, err := p.rpcSnapshot()
 	if err != nil {
 		if isSoftBridgeUnavailable(err) {
 			fmt.Fprintf(os.Stderr, "t3bridge: ListRunning(%s) — soft-unavailable: %v\n", prefix, err)
-			return nil, nil
+			return nil, fmt.Errorf("%w: t3bridge snapshot unavailable: %w", runtime.ErrRuntimeUnavailable, err)
 		}
 		return nil, err
 	}
 	names := make([]string, 0)
 	seen := make(map[string]struct{})
+	uncertain := make([]error, 0)
+	threadsByName := make(map[string]map[string]interface{})
 	for _, thread := range snapshotThreads(snapshot) {
-		if deletedAt, ok := thread["deletedAt"]; ok && deletedAt != nil {
+		if !snapshotThreadEligible(thread) {
 			continue
 		}
 		meta := threadCustomMetadata(thread)
@@ -1951,17 +2133,51 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 		if name == "" {
 			continue
 		}
-		if meta["gc.state"] == "archived" {
-			continue
-		}
 		if prefix != "" && !strings.HasPrefix(name, prefix) {
 			continue
 		}
+		if snapshotThreadNewerThan(thread, threadsByName[name]) {
+			threadsByName[name] = thread
+		}
+	}
+	orderedNames := make([]string, 0, len(threadsByName))
+	for name := range threadsByName {
+		orderedNames = append(orderedNames, name)
+	}
+	sort.Strings(orderedNames)
+	for _, name := range orderedNames {
+		thread := threadsByName[name]
+		seen[name] = struct{}{}
+		binding := snapshotThreadBinding(thread)
+		if binding == nil {
+			uncertain = append(uncertain, fmt.Errorf("%w: t3bridge snapshot has incomplete binding for %q", runtime.ErrRuntimeUnavailable, name))
+			continue
+		}
+		status := snapshotThreadSessionStatus(thread)
+		if isLegacyPreSessionStatus(status) && p.withinRecentStart(name) {
+			names = append(names, name)
+			continue
+		}
+		switch classifyT3SessionStatus(status) {
+		case t3SessionStatusLive:
+			names = append(names, name)
+		case t3SessionStatusUnknown:
+			uncertain = append(uncertain, fmt.Errorf("%w: t3bridge snapshot has unknown session status %q for %q", runtime.ErrRuntimeUnavailable, status, name))
+		}
+	}
+	for _, name := range p.recentStartNames(prefix) {
 		if _, ok := seen[name]; ok {
 			continue
 		}
 		seen[name] = struct{}{}
 		names = append(names, name)
+	}
+	if len(uncertain) > 0 {
+		err := errors.Join(uncertain...)
+		if len(names) > 0 {
+			return names, &runtime.PartialListError{Err: err}
+		}
+		return nil, err
 	}
 	return names, nil
 }
@@ -2334,12 +2550,19 @@ func (p *Provider) ProcessAlive(name string, _ []string) bool {
 	if err != nil {
 		return p.withinRecentStart(name)
 	}
-	binding := snapshotThreadBinding(snapshotThreadBySessionName(snapshot, name))
+	thread := snapshotThreadBySessionName(snapshot, name)
+	if thread == nil {
+		return p.withinRecentStart(name)
+	}
+	binding := snapshotThreadBinding(thread)
 	if binding == nil {
 		return false
 	}
-	status := p.threadSessionStatus(binding.ThreadID)
-	return status == "running" || status == "ready"
+	status := snapshotThreadSessionStatus(thread)
+	if isLegacyPreSessionStatus(status) && p.withinRecentStart(name) {
+		return true
+	}
+	return classifyT3SessionStatus(status) == t3SessionStatusLive
 }
 
 // Nudge delivers content to the session as a new user turn.
@@ -2518,10 +2741,7 @@ func (p *Provider) GetLastActivity(name string) (time.Time, error) {
 			defer p.mu.Unlock()
 			return p.recentStarts[name], nil
 		}
-		if isSoftBridgeUnavailable(err) {
-			return time.Time{}, nil
-		}
-		return time.Time{}, err
+		return time.Time{}, fmt.Errorf("%w: t3bridge activity snapshot unavailable for %q: %w", runtime.ErrRuntimeUnavailable, name, err)
 	}
 	thread := snapshotThreadBySessionName(snapshot, name)
 	if thread == nil {

@@ -13,8 +13,9 @@ agent liveness, detects configuration drift, enforces crash loop
 quarantine, kills idle agents, and dispatches orders on a periodic
 tick. Health Patrol follows the Erlang/OTP supervision model: the
 controller is the supervisor, agents are workers, `[[agent]]` entries
-are child specs, and "let it crash" is realized through GUPP + beads
-(agents die, hooks persist, fresh sessions resume the work).
+are child specs, and "let it crash" is realized through persistent work
+plus the rule that any agent finding work on its hook runs it (agents
+die, hooks persist, fresh sessions resume the work).
 
 ## Key Concepts
 
@@ -289,8 +290,9 @@ Health Patrol follows Erlang/OTP patterns mapped to Gas City:
 | one_for_one restart      | Restart dead agent only (no cascade)      |
 | max_restarts/max_seconds | `max_restarts` / `restart_window`         |
 | Links (death propagates) | Not implemented (no `depends_on` yet)     |
-| "Let it crash"           | GUPP + beads: agent dies, hook persists,  |
-|                          | fresh session picks up persisted work     |
+| "Let it crash"           | Persistent work + run-what's-on-your-hook: |
+|                          | agent dies, hook persists, fresh session  |
+|                          | picks up persisted work                    |
 | Process mailbox          | Mail inbox (beads with type=message)      |
 | GenServer loop           | Agent loop: check hook -> run -> repeat   |
 

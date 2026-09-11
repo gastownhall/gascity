@@ -106,7 +106,7 @@ schema = 2
 	prependDoctorJSONStubBinaries(t, "tmux", "git", "jq", "pgrep", "lsof")
 
 	var stdout, stderr bytes.Buffer
-	code := doDoctor(true, false, false, false, &stdout, &stderr)
+	code := doDoctor(true, false, false, 0, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("gc doctor --fix = %d, want 0; stdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
 	}
@@ -148,7 +148,7 @@ dir = "formulas"
 	prependDoctorJSONStubBinaries(t, "tmux", "git", "jq", "pgrep", "lsof")
 
 	var stdout, stderr bytes.Buffer
-	code := doDoctor(true, false, false, false, &stdout, &stderr)
+	code := doDoctor(true, false, false, 0, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("gc doctor --fix = %d, want 0; stdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
 	}
@@ -195,7 +195,7 @@ dir = "custom-formulas"
 	prependDoctorJSONStubBinaries(t, "tmux", "git", "jq", "pgrep", "lsof")
 
 	var stdout, stderr bytes.Buffer
-	code := doDoctor(true, false, false, false, &stdout, &stderr)
+	code := doDoctor(true, false, false, 0, &stdout, &stderr)
 	if code == 0 {
 		t.Fatalf("gc doctor --fix unexpectedly passed with custom formulas dir; stdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
 	}
@@ -442,6 +442,7 @@ trigger = "manual"
 func TestV2LegacyOrderLayoutReportsRemoteImportedPackEvaluatedByLoader(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
 
 	cityDir := t.TempDir()
 	source := "https://github.com/example/orders-pack.git"
@@ -1148,7 +1149,7 @@ prompt_template = "prompts/helper.md"
 	prependDoctorJSONStubBinaries(t, "tmux", "git", "jq", "pgrep", "lsof")
 
 	var stdout, stderr bytes.Buffer
-	code := doDoctor(true, false, false, false, &stdout, &stderr)
+	code := doDoctor(true, false, false, 0, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("gc doctor --fix = %d, want 0; stdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
 	}
@@ -1449,6 +1450,86 @@ prefix = "lc"
 	}
 }
 
+// Regression test for ga-lurp5d: the workspace-identity fix rewrites
+// city.toml; when city.toml is a symlink (e.g., into a checked-out repo)
+// the rewrite must write through the link instead of replacing it with a
+// regular file.
+func TestV2WorkspaceNameFixWritesThroughCityTomlSymlink(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	checkoutDir := filepath.Join(cityDir, "checkout")
+	if err := os.MkdirAll(checkoutDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(checkoutDir, "city.toml")
+	if err := os.WriteFile(target, []byte("[workspace]\nname = \"legacy-city\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(cityDir, "city.toml")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	d := &doctor.Doctor{}
+	registerV2DeprecationChecks(d)
+	d.Run(&doctor.CheckContext{CityPath: cityDir, Verbose: true}, &buf, true)
+
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("Lstat link: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("city.toml symlink was replaced by a %v entry; fix must write through the link", info.Mode())
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile target: %v", err)
+	}
+	if strings.Contains(string(data), "legacy-city") {
+		t.Fatalf("workspace identity should be migrated out of the symlink target:\n%s", data)
+	}
+}
+
+func TestV2FormulasDirFixWritesThroughCityTomlSymlink(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	checkoutDir := filepath.Join(cityDir, "checkout")
+	if err := os.MkdirAll(checkoutDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(checkoutDir, "city.toml")
+	if err := os.WriteFile(target, []byte("[formulas]\ndir = \"formulas\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(cityDir, "city.toml")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	d := &doctor.Doctor{}
+	registerV2DeprecationChecks(d)
+	d.Run(&doctor.CheckContext{CityPath: cityDir, Verbose: true}, &buf, true)
+
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("Lstat link: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("city.toml symlink was replaced by a %v entry; fix must write through the link", info.Mode())
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile target: %v", err)
+	}
+	if strings.Contains(string(data), `dir = "formulas"`) {
+		t.Fatalf("default formulas dir declaration should be stripped from the symlink target:\n%s", data)
+	}
+}
+
 func TestV2DeprecationChecksWarnOnLegacyTemplateSuffix(t *testing.T) {
 	t.Parallel()
 
@@ -1548,10 +1629,10 @@ prompt_template = "prompts/mayor.md"
 
 // TestV2DeprecationFixSurfacesMigrateWarnings guards the codex review
 // finding on PR #1880: when migrate.Apply emits warnings about
-// behavior-affecting fields it had to drop (e.g. legacy [[agent]] entries
-// with fallback = true), doctor --fix must surface them. Without this,
-// the next gc doctor run sees a green check and the manual follow-up is
-// lost forever.
+// behavior-affecting fields it had to drop (e.g. a legacy [formulas].dir
+// override), doctor --fix must surface them. Without this, the next
+// gc doctor run sees a green check and the manual follow-up is lost
+// forever.
 func TestV2DeprecationFixSurfacesMigrateWarnings(t *testing.T) {
 	t.Parallel()
 
@@ -1560,10 +1641,12 @@ func TestV2DeprecationFixSurfacesMigrateWarnings(t *testing.T) {
 [workspace]
 name = "legacy-city"
 
+[formulas]
+dir = "my-formulas"
+
 [[agent]]
 name = "mayor"
 prompt_template = "prompts/mayor.md"
-fallback = true
 `)
 	writeDoctorFile(t, cityDir, "prompts/mayor.md", "Hello {{.Agent}}\n")
 
@@ -1573,11 +1656,11 @@ fallback = true
 	}
 
 	got := sink.String()
-	if !strings.Contains(got, "fallback") {
-		t.Fatalf("expected migrate warnings about dropped fallback field to be surfaced; got:\n%s", got)
+	if !strings.Contains(got, "formulas.dir") {
+		t.Fatalf("expected migrate warnings about dropped formulas.dir to be surfaced; got:\n%s", got)
 	}
-	if !strings.Contains(got, "mayor") {
-		t.Fatalf("expected the agent name to appear in the warning; got:\n%s", got)
+	if !strings.Contains(got, "my-formulas") {
+		t.Fatalf("expected the dropped value to appear in the warning; got:\n%s", got)
 	}
 }
 
@@ -1589,10 +1672,12 @@ func TestV2DeprecationDoctorFixSurfacesMigrateWarningsInOutput(t *testing.T) {
 [workspace]
 name = "legacy-city"
 
+[formulas]
+dir = "my-formulas"
+
 [[agent]]
 name = "mayor"
 prompt_template = "prompts/mayor.md"
-fallback = true
 `)
 	writeDoctorFile(t, cityDir, "prompts/mayor.md", "Hello {{.Agent}}\n")
 
@@ -1602,7 +1687,7 @@ fallback = true
 	d.Run(&doctor.CheckContext{CityPath: cityDir, Verbose: true}, &buf, true)
 
 	got := buf.String()
-	if !strings.Contains(got, "fallback") {
+	if !strings.Contains(got, "formulas.dir") {
 		t.Fatalf("expected doctor --fix output to include migrate warning; got:\n%s", got)
 	}
 	if !strings.Contains(got, "✓ v2-agent-format") {
@@ -1737,6 +1822,37 @@ scope = "city"
 		if !strings.Contains(out, line) {
 			t.Fatalf("post-fix doctor output missing %q:\n%s", line, out)
 		}
+	}
+}
+
+// doctorPathWithinCity must be fail-closed: a candidate path that is
+// lexically nested under cityPath but actually escapes it through a
+// symlink must be reported as outside the city, even when the leaf of
+// the candidate does not exist yet (e.g. a path doctor is about to
+// create). Resolving only fully-existing paths is not enough — the
+// escape has to be detected from the nearest existing ancestor, so a
+// missing leaf can never downgrade the check to a lexical-only pass.
+func TestDoctorPathWithinCityDetectsSymlinkEscapeWithMissingLeaf(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	cityPath := filepath.Join(root, "city")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(root, "outside")
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	escape := filepath.Join(cityPath, "escape")
+	if err := os.Symlink(outside, escape); err != nil {
+		t.Skip("symlinks not supported")
+	}
+
+	candidate := filepath.Join(escape, "not-yet-created", "leaf")
+
+	if doctorPathWithinCity(cityPath, candidate) {
+		t.Fatalf("doctorPathWithinCity(%q, %q) = true, want false: candidate escapes cityPath through the %q symlink even though its leaf does not exist yet", cityPath, candidate, escape)
 	}
 }
 

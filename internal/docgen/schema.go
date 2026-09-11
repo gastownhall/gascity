@@ -5,9 +5,12 @@ package docgen
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/git"
 	"github.com/invopop/jsonschema"
 )
 
@@ -30,12 +33,76 @@ func ModuleRoot() (string, error) {
 	}
 }
 
+// gitTrackedTopLevelDirs returns the set of top-level directory names known
+// to git at HEAD, scoped to root via cmd.Dir. The bool result reports
+// whether the lookup was usable at all; it is false when root is not a git
+// repository or the lookup otherwise fails, in which case callers should
+// fall back to walking every non-hidden directory instead of filtering.
+func gitTrackedTopLevelDirs(root string) (map[string]bool, bool) {
+	if !git.New(root).IsRepo() {
+		return nil, false
+	}
+	cmd := exec.Command("git", "ls-tree", "-d", "--name-only", "HEAD")
+	cmd.Dir = root
+	cmd.Env = git.SanitizedEnv()
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, false
+	}
+	tracked := make(map[string]bool)
+	for _, name := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if name != "" {
+			tracked[name] = true
+		}
+	}
+	return tracked, true
+}
+
+// addGoCommentsFiltered calls r.AddGoComments for each visible (non-hidden),
+// git-tracked top-level directory under root, skipping any directory whose
+// name begins with ".". CWD must already be set to root before calling.
+//
+// This avoids the TOCTOU failure where .gc/*/pr-checkout/ dirs are deleted by
+// mpr cleanup while filepath.Walk is in progress: r.AddGoComments("module",
+// ".") walks the entire tree including .gc/; if a directory disappears
+// mid-scan the walk surfaces an I/O error that propagates up and fails schema
+// generation. By enumerating only visible top-level dirs, we never enter .gc/.
+//
+// It also bounds the walk to directories git actually tracks at root (see
+// ga-vfurlv): stray untracked directories accumulating at the module root —
+// leaked worktree-stage dirs, abandoned PR-checkout dirs, and the like — are
+// each a full nested checkout that AddGoComments would otherwise recursively
+// go/parser.ParseDir in its entirety, multiplying the walk cost by however
+// many have piled up. When root is not a git repository (or the tracked-dir
+// lookup otherwise fails), this filter is skipped and every non-hidden
+// top-level directory is walked, matching the prior behavior.
+func addGoCommentsFiltered(r *jsonschema.Reflector, module, root string) error {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", root, err)
+	}
+	tracked, filterByGit := gitTrackedTopLevelDirs(root)
+	for _, entry := range entries {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		if filterByGit && !tracked[entry.Name()] {
+			continue
+		}
+		if err := r.AddGoComments(module, entry.Name()); err != nil {
+			return fmt.Errorf("extracting Go comments from %s: %w", entry.Name(), err)
+		}
+	}
+	return nil
+}
+
 // newReflector creates a jsonschema.Reflector configured for TOML field
 // names with Go doc comments extracted from the source tree.
 //
-// AddGoComments requires the path parameter to be "." with the working
-// directory set to the module root, so that filepath.Walk produces paths
-// like "internal/config" which gopath.Join maps to the correct import path.
+// AddGoComments requires CWD to be set to the module root so that
+// filepath.Walk produces paths like "internal/config" which map to the
+// correct import paths. Hidden directories (names beginning with ".") are
+// excluded via addGoCommentsFiltered.
 func newReflector() (*jsonschema.Reflector, error) {
 	root, err := ModuleRoot()
 	if err != nil {
@@ -55,7 +122,7 @@ func newReflector() (*jsonschema.Reflector, error) {
 	r := &jsonschema.Reflector{
 		FieldNameTag: "toml",
 	}
-	if err := r.AddGoComments("github.com/gastownhall/gascity", "."); err != nil {
+	if err := addGoCommentsFiltered(r, "github.com/gastownhall/gascity", "."); err != nil {
 		return nil, fmt.Errorf("extracting Go comments: %w", err)
 	}
 	return r, nil
@@ -71,18 +138,18 @@ func GenerateCitySchema() (*jsonschema.Schema, error) {
 	}
 	s := r.Reflect(&config.City{})
 	s.Title = "Gas City Configuration"
-	s.Description = "Schema for city.toml — the PackV2 deployment file for a Gas City instance. " +
+	s.Description = "Schema for city.toml — the deployment file for a Gas City instance. " +
 		"Pack definitions live in pack.toml and conventional pack directories such as agents/, formulas/, orders/, and commands/. " +
-		"Use [imports.*] for PackV2 composition; legacy includes and [[agent]] fields remain visible for migration compatibility. " +
+		"Use [imports.*] for pack composition; legacy includes and [[agent]] fields remain visible for migration compatibility. " +
 		"Legacy [packs.*] entries are still accepted by the runtime for migration/fetch compatibility but are intentionally omitted from this public schema.\n\n" +
-		"> **PackV2 format source of truth:** The public PackV2 format and loader semantics are specified in [Gas City Pack Specification (2.0)](/specs/pack-spec)."
+		"> **Pack format source of truth:** Public pack format and loader semantics are specified in [Gas City Pack Specification](/reference/specs/pack-spec)."
 	removeRequiredField(s, "DaemonConfig", "formula_v2")
 	return s, nil
 }
 
-// GeneratePackSchema produces a JSON Schema for the pack.toml manifest
-// format (PackV2). It reflects the config.PackConfig struct using TOML
-// field names and extracts doc comments as descriptions.
+// GeneratePackSchema produces a JSON Schema for the pack.toml manifest format.
+// It reflects the config.PackConfig struct using TOML field names and extracts
+// doc comments as descriptions.
 func GeneratePackSchema() (*jsonschema.Schema, error) {
 	r, err := newReflector()
 	if err != nil {
@@ -90,9 +157,9 @@ func GeneratePackSchema() (*jsonschema.Schema, error) {
 	}
 	s := r.Reflect(&config.PackConfig{})
 	s.Title = "Gas City Pack Manifest"
-	s.Description = "Schema for pack.toml — the PackV2 manifest that declares " +
+	s.Description = "Schema for pack.toml — the manifest that declares " +
 		"a pack's metadata, providers, services, commands, and import surface. " +
-		"PackV2 agent authoring uses agents/<name>/agent.toml; inline [[agent]] " +
+		"Current agent authoring uses agents/<name>/agent.toml; inline [[agent]] " +
 		"tables remain schema-visible for migration compatibility. Cities and rigs " +
 		"compose packs via [imports.*]."
 	return s, nil

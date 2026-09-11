@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/formula"
 )
@@ -83,7 +84,7 @@ func isTransientGraphApplyError(err error) bool {
 		return false
 	}
 	text := strings.ToLower(err.Error())
-	if !strings.Contains(text, "bd create --graph") {
+	if !isGraphApplyErrorText(text) {
 		return false
 	}
 	return strings.Contains(text, "i/o timeout") ||
@@ -93,6 +94,14 @@ func isTransientGraphApplyError(err error) bool {
 		strings.Contains(text, "bad connection") ||
 		strings.Contains(text, "connection reset") ||
 		strings.Contains(text, "broken pipe")
+}
+
+func isGraphApplyErrorText(text string) bool {
+	return strings.Contains(text, "bd create --graph") ||
+		strings.Contains(text, "native graph apply") ||
+		strings.Contains(text, "failed to check for dependency cycle") ||
+		strings.Contains(text, "graph create: adding edge") ||
+		strings.Contains(text, "adding edge ")
 }
 
 func instantiateFragmentViaGraphApply(ctx context.Context, store beads.Store, applier beads.GraphApplyStore, recipe *formula.FragmentRecipe, opts FragmentOptions) (*FragmentResult, error) {
@@ -118,6 +127,28 @@ func instantiateFragmentViaGraphApply(ctx context.Context, store beads.Store, ap
 	}, nil
 }
 
+// Routing fields the title-only guard below (#618) never covered — #5060.
+var residualVarRoutingMetadataKeys = []string{
+	beadmeta.RunTargetMetadataKey,
+	beadmeta.RoutedToMetadataKey,
+	beadmeta.ExecutionRoutedToMetadataKey,
+	DeferredRoutedToMetadataKey,
+	DeferredExecutionRoutedToMetadataKey,
+}
+
+func validateResidualRoutingVars(stepID string, metadata map[string]string) error {
+	for _, key := range residualVarRoutingMetadataKeys {
+		value := metadata[key]
+		if !strings.Contains(value, "{{") {
+			continue
+		}
+		if residual := formula.CheckResidualVars(value); len(residual) > 0 {
+			return fmt.Errorf("step %q: metadata %s contains unresolved variable(s) %s — missing or misspelled --var(s)?", stepID, key, strings.Join(residual, ", "))
+		}
+	}
+	return nil
+}
+
 func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApplyPlan, bool, string, error) {
 	if recipe == nil {
 		return nil, false, "", fmt.Errorf("recipe is nil")
@@ -125,17 +156,26 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 	if len(recipe.Steps) == 0 {
 		return nil, false, "", fmt.Errorf("recipe %q has no steps", recipe.Name)
 	}
+	if !opts.nativeStepTopologyPrepared {
+		recipe = recipeWithNativeStepDependencies(recipe)
+		opts.nativeStepTopologyPrepared = true
+	}
 
 	vars := applyVarDefaults(opts.Vars, recipe.Vars)
 	priorityOverride := clonePriority(opts.PriorityOverride)
 	graphWorkflow := preservesGraphActionTypes(recipe)
 	rootKey := recipe.Steps[0].ID
 	rootIncluded := false
+	externalDepsByStep, err := groupExternalDeps(opts.ExternalDeps)
+	if err != nil {
+		return nil, false, "", err
+	}
+	recipeParentByStep := recipeParentDeps(recipe.Deps)
 
 	plan := &beads.GraphApplyPlan{
 		CommitMessage: fmt.Sprintf("gc: instantiate %s", recipe.Name),
 		Nodes:         make([]beads.GraphApplyNode, 0, len(recipe.Steps)),
-		Edges:         make([]beads.GraphApplyEdge, 0, len(recipe.Deps)),
+		Edges:         make([]beads.GraphApplyEdge, 0, len(recipe.Deps)+len(opts.ExternalDeps)),
 	}
 
 	for i, step := range recipe.Steps {
@@ -157,7 +197,7 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 			if opts.Title != "" {
 				node.Title = formula.Substitute(opts.Title, vars)
 			}
-			if opts.ParentID != "" && step.Metadata["gc.kind"] != "workflow" {
+			if opts.ParentID != "" && step.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindWorkflow {
 				node.ParentID = opts.ParentID
 			}
 			if opts.IdempotencyKey != "" {
@@ -176,6 +216,18 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 					}
 				}
 			}
+			if recipe.ContentHash != "" {
+				if node.Metadata == nil {
+					node.Metadata = make(map[string]string, 2)
+				}
+				node.Metadata[beadmeta.FormulaHashMetadataKey] = recipe.ContentHash
+			}
+			if recipe.FormulaSource != "" {
+				if node.Metadata == nil {
+					node.Metadata = make(map[string]string, 1)
+				}
+				node.Metadata[beadmeta.FormulaSourceMetadataKey] = recipe.FormulaSource
+			}
 		} else {
 			// graph.v2 workflows and their retry/Ralph attempt sub-recipes
 			// use step beads as independently routable actionable work, not
@@ -187,30 +239,47 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 			if node.Metadata == nil {
 				node.Metadata = make(map[string]string, 1)
 			}
-			if node.Metadata["gc.step_ref"] == "" {
-				node.Metadata["gc.step_ref"] = step.ID
+			if node.Metadata[beadmeta.StepRefMetadataKey] == "" {
+				node.Metadata[beadmeta.StepRefMetadataKey] = step.ID
 			}
-			if (graphWorkflow || step.Metadata["gc.kind"] != "") && node.Metadata["gc.root_bead_id"] == "" {
+			if (graphWorkflow || step.Metadata[beadmeta.KindMetadataKey] != "") && node.Metadata[beadmeta.RootBeadIDMetadataKey] == "" {
 				if node.MetadataRefs == nil {
 					node.MetadataRefs = make(map[string]string, 1)
 				}
-				node.MetadataRefs["gc.root_bead_id"] = rootKey
+				node.MetadataRefs[beadmeta.RootBeadIDMetadataKey] = rootKey
 			}
 			if logicalStepID, ok := logicalRecipeStepID(step); ok {
 				if node.MetadataRefs == nil {
 					node.MetadataRefs = make(map[string]string, 1)
 				}
-				node.MetadataRefs["gc.logical_bead_id"] = logicalStepID
+				node.MetadataRefs[beadmeta.LogicalBeadIDMetadataKey] = logicalStepID
 			}
 			if node.Assignee != "" {
 				node.AssignAfterCreate = true
 			}
+		}
+		for _, dep := range externalDepsByStep[step.ID] {
+			if dep.Type == "parent-child" && recipeParentByStep[step.ID] != "" {
+				continue
+			}
+			if dep.Type == "parent-child" {
+				node.ParentID = dep.DependsOnID
+			}
+			plan.Edges = append(plan.Edges, beads.GraphApplyEdge{
+				FromKey: step.ID,
+				ToID:    dep.DependsOnID,
+				Type:    dep.Type,
+			})
 		}
 		// Same residual-var guard as Instantiate — see #618.
 		if strings.Contains(node.Title, "{{") {
 			if residual := formula.CheckResidualVars(node.Title); len(residual) > 0 {
 				return nil, false, "", fmt.Errorf("step %q: bead title contains unresolved variable(s) %s — missing or misspelled --var(s)?", step.ID, strings.Join(residual, ", "))
 			}
+		}
+		// Same guard, extended to routing metadata — see #5060.
+		if err := validateResidualRoutingVars(step.ID, node.Metadata); err != nil {
+			return nil, false, "", err
 		}
 		if err := validateTimeoutMetadataVars(step.ID, node.Metadata); err != nil {
 			return nil, false, "", err
@@ -247,8 +316,21 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 	// through the dependency graph without making the workflow root a
 	// readiness blocker for finalizers and teardown work.
 	if graphWorkflow && rootKey != "" {
+		singleStep := graphWorkflowIsSingleStep(plan.Nodes, rootKey)
 		for _, node := range plan.Nodes {
 			if node.Key == rootKey {
+				continue
+			}
+			// Single-step workflows deadlocked when the generated
+			// workflow-finalize gained a "tracks" edge back to the root on top
+			// of the compiler's own root -> workflow-finalize edge
+			// (addWorkflowRootDeps): the pair closed a mutual finalize <-> root
+			// cycle that neither controller-managed bead could break — both
+			// stayed open forever (su-mla5h). The root already reaches the
+			// finalizer through that edge and the finalizer carries
+			// gc.root_bead_id, so the ownership tracks edge is redundant here.
+			// Multi-step workflows keep the tracks edge unchanged.
+			if singleStep && node.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflowFinalize {
 				continue
 			}
 			if graphApplyPlanHasEdgeFromKeyToTarget(plan.Edges, node.Key, rootKey, "") {
@@ -272,8 +354,8 @@ func deferGraphNodeRouting(node *beads.GraphApplyNode) {
 		node.Assignee = ""
 		node.AssignAfterCreate = false
 	}
-	deferGraphNodeMetadataValue(node, "gc.routed_to", DeferredRoutedToMetadataKey)
-	deferGraphNodeMetadataValue(node, "gc.execution_routed_to", DeferredExecutionRoutedToMetadataKey)
+	deferGraphNodeMetadataValue(node, beadmeta.RoutedToMetadataKey, DeferredRoutedToMetadataKey)
+	deferGraphNodeMetadataValue(node, beadmeta.ExecutionRoutedToMetadataKey, DeferredExecutionRoutedToMetadataKey)
 }
 
 func deferGraphNodeMetadataValue(node *beads.GraphApplyNode, sourceKey, deferredKey string) {
@@ -290,6 +372,30 @@ func ensureGraphNodeMetadata(node *beads.GraphApplyNode) {
 	if node.Metadata == nil {
 		node.Metadata = make(map[string]string, 1)
 	}
+}
+
+// graphWorkflowIsSingleStep reports whether a graph workflow plan carries a
+// single worker-executed step. Control beads (workflow-finalize, scope-check,
+// fanout, ...) and spec sidecars are compiler-generated scaffolding, not
+// authored work, so they are excluded from the count. A single-step workflow
+// is the shape that deadlocks on the generated finalize <-> root edge pair
+// (su-mla5h).
+func graphWorkflowIsSingleStep(nodes []beads.GraphApplyNode, rootKey string) bool {
+	workSteps := 0
+	for _, node := range nodes {
+		if node.Key == rootKey {
+			continue
+		}
+		kind := node.Metadata[beadmeta.KindMetadataKey]
+		if beadmeta.IsControlKind(kind) || kind == beadmeta.KindSpec {
+			continue
+		}
+		workSteps++
+		if workSteps > 1 {
+			return false
+		}
+	}
+	return workSteps == 1
 }
 
 func graphApplyPlanHasEdgeFromKeyToTarget(edges []beads.GraphApplyEdge, fromKey, toKey, toID string) bool {
@@ -316,6 +422,13 @@ func buildFragmentApplyPlan(store beads.Store, recipe *formula.FragmentRecipe, o
 	}
 	if len(recipe.Steps) == 0 {
 		return &beads.GraphApplyPlan{}, nil
+	}
+	if !opts.nativeStepTopologyPrepared {
+		recipe = fragmentRecipeWithNativeStepDependencies(recipe)
+		if err := applyExternalNativeStepDependencies(store, opts.RootID, recipe.Steps, opts.ExternalDeps); err != nil {
+			return nil, err
+		}
+		opts.nativeStepTopologyPrepared = true
 	}
 
 	existingLogicalBeadIDs, err := existingLogicalBeadIDIndex(store, opts.RootID)
@@ -355,18 +468,18 @@ func buildFragmentApplyPlan(store beads.Store, recipe *formula.FragmentRecipe, o
 		if node.Metadata == nil {
 			node.Metadata = make(map[string]string, 2)
 		}
-		if node.Metadata["gc.step_ref"] == "" {
-			node.Metadata["gc.step_ref"] = step.ID
+		if node.Metadata[beadmeta.StepRefMetadataKey] == "" {
+			node.Metadata[beadmeta.StepRefMetadataKey] = step.ID
 		}
-		node.Metadata["gc.root_bead_id"] = opts.RootID
+		node.Metadata[beadmeta.RootBeadIDMetadataKey] = opts.RootID
 		if logicalStepID, ok := logicalRecipeStepID(step); ok {
 			if existingLogicalBeadID := existingLogicalBeadIDs[logicalStepID]; existingLogicalBeadID != "" {
-				node.Metadata["gc.logical_bead_id"] = existingLogicalBeadID
+				node.Metadata[beadmeta.LogicalBeadIDMetadataKey] = existingLogicalBeadID
 			} else {
 				if node.MetadataRefs == nil {
 					node.MetadataRefs = make(map[string]string, 1)
 				}
-				node.MetadataRefs["gc.logical_bead_id"] = logicalStepID
+				node.MetadataRefs[beadmeta.LogicalBeadIDMetadataKey] = logicalStepID
 			}
 		}
 		if node.Assignee != "" {
@@ -390,6 +503,10 @@ func buildFragmentApplyPlan(store beads.Store, recipe *formula.FragmentRecipe, o
 			if residual := formula.CheckResidualVars(node.Title); len(residual) > 0 {
 				return nil, fmt.Errorf("step %q: bead title contains unresolved variable(s) %s — missing or misspelled --var(s)?", step.ID, strings.Join(residual, ", "))
 			}
+		}
+		// Same guard, extended to routing metadata — see #5060.
+		if err := validateResidualRoutingVars(step.ID, node.Metadata); err != nil {
+			return nil, err
 		}
 		if err := validateTimeoutMetadataVars(step.ID, node.Metadata); err != nil {
 			return nil, err

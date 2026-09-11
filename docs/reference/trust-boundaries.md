@@ -15,13 +15,13 @@ expectations as shell scripts committed to the repository.
 | Imported packs and rig configs | Trusted dependency code | Pin/review packs before importing into a privileged city. |
 | Bead titles, descriptions, mail, formula vars, PR text, and API request fields | Untrusted data | Do not concatenate into shell commands. Pass as env, JSON, stdin, or argv. |
 | GitHub Actions `pull_request_target` payloads | Untrusted data in a privileged workflow | Do not checkout or execute contributor code. Use metadata-only operations. |
-| Ambient process environment | Untrusted for secret propagation | Controller-side shell helpers strip inherited secret-looking env keys by default. |
+| Ambient process environment | Untrusted for secret propagation | Orchestrator-side shell helpers strip inherited secret-looking env keys by default. |
 
 ## Execution Surfaces
 
 | Surface | Command source | Actor | Working directory | Env behavior | Log behavior |
 |---------|----------------|-------|-------------------|--------------|--------------|
-| `work_query` via `gc hook` and controller probes | Agent config | Trusted operator or pack | Agent's canonical city or rig repo | Inherited secrets are stripped; Gas City projects explicit store/session env. | Errors are diagnostic only. Avoid placing secrets in command literals. |
+| `work_query` via `gc hook` and orchestrator probes | Agent config | Trusted operator or pack | Agent's canonical city or rig repo | Inherited secrets are stripped; Gas City projects explicit store/session env. | Errors are diagnostic only. Avoid placing secrets in command literals. |
 | `scale_check` | Agent config | Trusted operator or pack | Agent's canonical city or rig repo | Inherited secrets are stripped; Gas City projects explicit store env. | Parse failures include command context; command literals must not contain secrets. |
 | `on_boot` and `on_death` | Agent pool config | Trusted operator or pack | City or rig repo | Inherited secrets are stripped; explicit store env may be provided when needed. | Hook failures are logged; output should not include secrets. |
 | Order `check` triggers | Order config | Trusted operator or pack | Order target scope | Inherited secrets are stripped; explicit condition env may be provided. | Failure reason records exit status, not command output. |
@@ -36,7 +36,7 @@ expectations as shell scripts committed to the repository.
 
 ## Secret Propagation
 
-Controller-side shell helpers remove inherited environment variables whose keys
+Orchestrator-side shell helpers remove inherited environment variables whose keys
 look secret-bearing, including names containing `TOKEN`, `PASSWORD`, `SECRET`,
 `PRIVATE_KEY`, `API_KEY`, `ACCESS_KEY`, `CREDENTIAL`, `OAUTH`, or `AUTH_JSON`.
 This prevents ambient CI or maintainer shell secrets from reaching `work_query`,

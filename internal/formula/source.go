@@ -7,6 +7,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // Source abstracts how formula files are located and read. The default
@@ -125,6 +128,10 @@ func (g *GitRefSource) repoTopAndRelPath(path string) (string, string, bool) {
 	if !cached {
 		cmd := exec.Command("git", "rev-parse", "--show-toplevel")
 		cmd.Dir = queryDir
+		// Sanitize the environment so a leaked GIT_DIR/GIT_WORK_TREE from a
+		// parent repo or pre-commit hook cannot redirect resolution away from
+		// queryDir's own repository.
+		cmd.Env = git.SanitizedEnv()
 		out, runErr := cmd.Output()
 		if runErr != nil {
 			g.toplevelCache[cacheKey] = ""
@@ -144,15 +151,7 @@ func (g *GitRefSource) repoTopAndRelPath(path string) (string, string, bool) {
 }
 
 func canonicalExistingPath(path string) string {
-	path = filepath.Clean(path)
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		return filepath.Clean(resolved)
-	}
-	dir := filepath.Dir(path)
-	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
-		return filepath.Join(filepath.Clean(resolved), filepath.Base(path))
-	}
-	return path
+	return pathutil.NormalizePathForCompare(path)
 }
 
 // Stat reports whether a regular blob exists at the configured ref
@@ -171,6 +170,7 @@ func (g *GitRefSource) Stat(path string) bool {
 	// '-' being parsed as an option.
 	cmd := exec.Command("git", "cat-file", "-t", "--end-of-options", g.ref+":"+rel)
 	cmd.Dir = top
+	cmd.Env = git.SanitizedEnv()
 	out, err := cmd.Output()
 	if err != nil {
 		return false
@@ -188,6 +188,7 @@ func (g *GitRefSource) ReadFile(path string) ([]byte, error) {
 	// '-' being parsed as an option.
 	cmd := exec.Command("git", "cat-file", "blob", "--end-of-options", g.ref+":"+rel)
 	cmd.Dir = top
+	cmd.Env = git.SanitizedEnv()
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -219,6 +220,7 @@ func (g *GitRefSource) ListDir(dir string) ([]string, error) {
 	// GC_FORMULA_REF that begins with '-'.
 	cmd := exec.Command("git", "ls-tree", "-z", "--end-of-options", tree)
 	cmd.Dir = top
+	cmd.Env = git.SanitizedEnv()
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	if err := cmd.Run(); err != nil {

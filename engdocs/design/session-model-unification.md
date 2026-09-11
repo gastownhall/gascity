@@ -632,6 +632,14 @@ The synthesized default remains, but becomes origin-aware at runtime:
 - all sessions check assigned ready work
 - only `origin=ephemeral` checks unassigned `gc.routed_to=$GC_TEMPLATE`
 
+The assigned `in_progress` check (Tier 1) is an ownership read and must key
+off `${GC_ALIAS:-$GC_TEMPLATE}`, not the bare template — see "Claim Identity
+Convention" in `engdocs/architecture/prompt-templates.md` and the
+`ga-i1d0tr` decision for why a bare-template Tier 1 query lets one session
+cross-adopt another live session's in-progress claim on templates with more
+than one concurrent identity (a `[[named_session]]` paired with a
+multi-slot pool).
+
 Named and manual sessions stop at explicit ownership.
 
 Custom `work_query` and `scale_check` remain escape hatches.
@@ -647,6 +655,7 @@ matches the unified model:
 - `GC_TEMPLATE` = qualified backing agent-config identity
 - `GC_SESSION_ORIGIN` = `named`, `ephemeral`, or `manual`
 - `GC_AGENT` = temporary compatibility alias for the public handle only
+- `BEADS_ACTOR` = exact ownership string the running session presents to `bd`
 
 New prompt and hook logic should key config semantics off `GC_TEMPLATE`
 and lifecycle semantics off `GC_SESSION_ORIGIN`, not off `GC_AGENT`.
@@ -656,8 +665,8 @@ and lifecycle semantics off `GC_SESSION_ORIGIN`, not off `GC_AGENT`.
 | Origin | `configured_named_identity` | `alias` | `session_name` | `GC_ALIAS` | `GC_AGENT` |
 |---|---|---|---|---|---|
 | `named` | present; immutable fully qualified named identity | always equals `configured_named_identity` while config-managed | deterministic runtime handle derived from the named identity and workspace naming policy | same as `alias` | same as `alias` |
-| `ephemeral` | absent | optional, mutable if non-conflicting | opaque runtime handle | alias if present | alias if present, otherwise `session_name` |
-| `manual` | absent | optional, mutable if non-conflicting | opaque runtime handle | alias if present | alias if present, otherwise `session_name` |
+| `ephemeral` | absent | optional, mutable if non-conflicting | opaque runtime handle | alias if present | alias if present; otherwise raw `session_name`, or bead ID when name metadata is absent |
+| `manual` | absent | optional, mutable if non-conflicting | opaque runtime handle | alias if present | alias if present; otherwise raw `session_name`, or bead ID when name metadata is absent |
 
 Configured named sessions do not carry a second mutable runtime alias
 separate from their configured identity.
@@ -677,11 +686,36 @@ Phase 1 `GC_AGENT` contract is exact:
 
 - `named`: identical to `GC_ALIAS`, which is the configured named
   identity
-- `ephemeral` and `manual`: `GC_ALIAS` if present, otherwise
-  `GC_SESSION_NAME`
+- `ephemeral` and `manual`: `GC_ALIAS` if present, otherwise raw persisted
+  `session_name`, falling back to the session bead ID when name metadata is absent
 
 No Phase 1 path may interpret `GC_AGENT` as backing config identity,
 factory target, or durable ownership token.
+
+### Transitional ownership projection
+
+The canonical persistence target remains `assignee=<session-bead-id>` as
+specified in [Ownership and Routing](#ownership-and-routing). Until that
+migration reaches every ownership writer and prompt, GC-owned compatibility
+paths must keep the stored assignee and the runtime actor byte-identical. They
+select the current ownership string in this order:
+
+1. current `alias`
+2. `configured_named_identity` for a recovered named session whose alias is
+   temporarily absent
+3. raw persisted `session_name`
+4. session bead ID when no name metadata exists
+
+`BEADS_ACTOR`, API assignment normalization, hook claims, and scripted claims
+must all use that selector. `GC_AGENT` mirrors the selected value only for
+compatibility; new ownership logic reads `BEADS_ACTOR` or the typed session
+projection rather than treating `GC_AGENT` as a durable field.
+
+Runtime metadata updates do not rewrite the environment of an already-running
+agent process. Deploying a change to this projection therefore requires those
+sessions to restart before direct `bd` commands inherit the new actor. Metadata
+synchronization keeps provider state coherent for subsequent launches; it is
+not a live-process migration.
 
 ## Materialization Rules
 

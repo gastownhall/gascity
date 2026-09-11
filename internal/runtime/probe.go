@@ -20,6 +20,20 @@ type ProviderCapabilities struct {
 	CanReportAttachment bool
 	// CanReportActivity is true if GetLastActivity returns meaningful results.
 	CanReportActivity bool
+	// CanStream is true if the provider exposes the persistent `stream`
+	// connection op (declared via the proc.stream protocol capability).
+	CanStream bool
+	// CanAttachTTY is true if the provider exposes an interactive PTY `attach`
+	// connection op (declared via the tty.attach protocol capability).
+	CanAttachTTY bool
+	// NeedsClaimBackstop is true when the provider's startup claim nudge is
+	// delivered as a runtime paste that can be lost with no relaunch/respawn
+	// path to re-deliver it (herdr: Relaunch is deliberately unimplemented).
+	// The reconciler keeps the stalled-claim nudge backstop
+	// (nudgeStalledPoolClaims) active for such providers even when they
+	// report activity — reporting activity restores idle visibility, not
+	// startup-prompt redelivery.
+	NeedsClaimBackstop bool
 }
 
 // SessionSleepCapability describes how safely a runtime can participate in

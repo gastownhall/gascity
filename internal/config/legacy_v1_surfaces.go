@@ -3,8 +3,44 @@ package config
 import (
 	"errors"
 	"fmt"
+	"path"
+	"path/filepath"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/citylayout"
 )
+
+// IsBuiltinSystemPackInclude reports whether a workspace include entry is a
+// canonical builtin system-pack include (".gc/system/packs/<name>"). This is
+// a retired transitional surface: older gc binaries wrote these includes into
+// city.toml to compose the bundled packs, but the supported V2 form is now a
+// pinned [imports.<name>] entry. They remain exempt from PackV1
+// workspace.includes deprecation and enforcement, and migration tooling
+// preserves them, so a city authored by an older binary keeps composing until
+// `gc doctor --fix` converts each one to a pinned [imports] entry and prunes
+// the .gc/system/packs tree.
+func IsBuiltinSystemPackInclude(entry string) bool {
+	cleaned := path.Clean(filepath.ToSlash(strings.TrimSpace(entry)))
+	rest, ok := strings.CutPrefix(cleaned, citylayout.SystemPacksRoot+"/")
+	if !ok {
+		return false
+	}
+	return rest != "" && !strings.Contains(rest, "/")
+}
+
+// NonBuiltinWorkspaceIncludes filters out canonical builtin system-pack
+// includes, returning only the legacy PackV1 entries that deprecation and
+// enforcement should flag.
+func NonBuiltinWorkspaceIncludes(includes []string) []string {
+	var legacy []string
+	for _, inc := range includes {
+		if IsBuiltinSystemPackInclude(inc) {
+			continue
+		}
+		legacy = append(legacy, inc)
+	}
+	return legacy
+}
 
 // legacyV1SurfaceMarkers are stable substrings that uniquely identify
 // each warning produced by DetectLegacyV1Surfaces. Callers (e.g. the
@@ -67,7 +103,10 @@ func DetectLegacyV1Surfaces(cfg *City, source string) []string {
 	}
 	// Direct raw-field access is intentional here: detection runs before pack
 	// expansion, and the accessors are used by post-parse migration paths.
-	if len(cfg.Workspace.Includes) > 0 {
+	// Canonical builtin system-pack includes are a retired transitional
+	// surface that `gc doctor --fix` converts to [imports]; they stay
+	// non-fatal here so an older-binary city keeps composing until then.
+	if len(NonBuiltinWorkspaceIncludes(cfg.Workspace.Includes)) > 0 {
 		warnings = append(warnings, fmt.Sprintf(
 			"%s: workspace.includes is deprecated in v2; use [imports]. "+
 				"Run `gc doctor` to inspect; `gc doctor --fix` handles the safe mechanical rewrites available in this wave.",
@@ -105,7 +144,7 @@ func LegacyV1SurfaceErrors(cfg *City, source string, data ...[]byte) []string {
 			"%s: unsupported PackV1 [packs] entries; replace them with [imports] and regenerate packs.lock",
 			sourceWithDiagnosticLine(source, locator.lineForPacksTable())))
 	}
-	if len(cfg.Workspace.Includes) > 0 {
+	if len(NonBuiltinWorkspaceIncludes(cfg.Workspace.Includes)) > 0 {
 		errors = append(errors, fmt.Sprintf(
 			"%s: unsupported PackV1 workspace.includes; replace it with [imports.<binding>] entries",
 			sourceWithDiagnosticLine(source, locator.lineForKey("workspace", "includes"))))

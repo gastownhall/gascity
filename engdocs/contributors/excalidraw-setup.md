@@ -72,7 +72,7 @@ diagrams-excalidraw:
 	  out="$$out_dir/$$base.svg"; \
 	  if [ ! -e "$$out" ] || [ "$$f" -nt "$$out" ]; then \
 	    echo "excalidraw -> $$out"; \
-	    npx -y @swiftlysingh/excalidraw-cli convert "$$f" --format svg --output "$$out"; \
+	    npx -y @swiftlysingh/excalidraw-cli convert "$$f" --format svg --padding 16 --output "$$out"; \
 	    rendered=$$((rendered+1)); \
 	  fi; \
 	done; \
@@ -183,7 +183,7 @@ diagrams-excalidraw:
 	  out="$$out_dir/$$base.svg"; \
 	  if [ ! -e "$$out" ] || [ "$$f" -nt "$$out" ]; then \
 	    echo "excalidraw -> $$out"; \
-	    npx -y @swiftlysingh/excalidraw-cli convert "$$f" --format svg --output "$$out"; \
+	    npx -y @swiftlysingh/excalidraw-cli convert "$$f" --format svg --padding 16 --output "$$out"; \
 	    rendered=$$((rendered+1)); \
 	  fi; \
 	done; \

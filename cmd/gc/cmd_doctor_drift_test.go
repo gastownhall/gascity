@@ -210,7 +210,8 @@ func TestDoltDriftCheckDetectsPortFileDrift(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := newDoltDriftCheck(cityDir, cfg).Run(&doctor.CheckContext{CityPath: cityDir})
+	check := newDoltDriftCheck(cityDir, cfg)
+	r := check.Run(&doctor.CheckContext{CityPath: cityDir})
 	if r.Status != doctor.StatusError {
 		t.Fatalf("Run() status = %v, want StatusError; message=%q details=%v", r.Status, r.Message, r.Details)
 	}
@@ -220,6 +221,29 @@ func TestDoltDriftCheckDetectsPortFileDrift(t *testing.T) {
 	}
 	if !strings.Contains(joined, stalePort) || !strings.Contains(joined, managedPort) {
 		t.Errorf("want both stale %s and managed %s ports in result, got:\n%s", stalePort, managedPort, joined)
+	}
+	// Pure port-file drift (no live rig-local server) is re-pinnable, so the
+	// doctor offers `--fix`.
+	if !check.CanFix() {
+		t.Errorf("CanFix() = false after pure port-file drift, want true (re-pin is safe)")
+	}
+}
+
+// TestDoltDriftCheckCanFixGating pins the fix-eligibility decision: re-pinning
+// is offered only for port-file drift (Case B) and is suppressed when a live
+// rig-local Dolt (Case A) would make re-pinning point at the wrong server.
+func TestDoltDriftCheckCanFixGating(t *testing.T) {
+	c := &doltDriftCheck{}
+	if c.CanFix() {
+		t.Error("CanFix() = true with no drift recorded, want false")
+	}
+	c.repinnablePortDrift = true
+	if !c.CanFix() {
+		t.Error("CanFix() = false with re-pinnable port drift and no live rig-local, want true")
+	}
+	c.liveRigLocalBlocking = true
+	if c.CanFix() {
+		t.Error("CanFix() = true with a live rig-local Dolt present, want false (re-pin unsafe)")
 	}
 }
 

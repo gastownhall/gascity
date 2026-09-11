@@ -70,6 +70,9 @@ func TestResolveSessionIDWithConfig_RejectsOrphanedNamedSessionBead(t *testing.T
 	if !errors.Is(err, session.ErrSessionNotFound) {
 		t.Fatalf("resolveSessionIDWithConfig(myrig/worker) = %v, want ErrSessionNotFound", err)
 	}
+	if !errors.Is(err, errSessionTargetRejectedByConfig) {
+		t.Fatalf("resolveSessionIDWithConfig(myrig/worker) = %v, want config rejection marker at the resolver surface", err)
+	}
 	handle, err := srv.workerHandleForSessionTarget(fs.cityBeadStore, "myrig/worker")
 	if !errors.Is(err, session.ErrSessionNotFound) {
 		t.Fatalf("workerHandleForSessionTarget(myrig/worker) error = %v, want ErrSessionNotFound", err)

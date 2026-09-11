@@ -6,11 +6,14 @@ import (
 	"os/exec"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/materialize"
+	"github.com/gastownhall/gascity/internal/poolplan"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
@@ -45,6 +48,27 @@ type agentBuildParams struct {
 	// desired-state build so per-agent resolution does not rescan the store.
 	sessionBeads *sessionBeadSnapshot
 
+	// sessionSnapshotComplete is the controller's explicit verdict that the
+	// session census used by this desired-state build is complete. Fresh pool
+	// materialization is unsafe without that proof: a missing holder can make an
+	// occupied concrete slot look free. sessionSnapshotCompletenessKnown
+	// distinguishes production's explicit verdict from focused unit fixtures;
+	// legacy fixtures infer completeness from a present, error-free snapshot.
+	sessionSnapshotComplete          bool
+	sessionSnapshotCompletenessKnown bool
+	// sessionOccupancyInfos is the complete cross-store open-session census
+	// used only for fresh concrete-slot reservation. Production sets it from
+	// collectAllOpenSessionInfos; focused fixtures fall back to sessionBeads.
+	sessionOccupancyInfos []session.Info
+	// sessionCensusRigStores and sessionCensusSuspendedRigPaths retain the
+	// immutable topology inputs used to produce sessionOccupancyInfos. A fresh
+	// pool create re-runs that complete census while holding every derived
+	// session-identifier lock; the initial snapshot alone cannot exclude a
+	// foreign-store holder created after planning. Successful creates still
+	// write back only to sessionBeads, the primary mutable snapshot.
+	sessionCensusRigStores         map[string]beads.Store
+	sessionCensusSuspendedRigPaths map[string]bool
+
 	// assignedWorkBeads is the actionable assigned-work snapshot for this
 	// build. Pool new-tier materialization uses it to avoid treating sessions
 	// that already own work as available generic capacity.
@@ -53,7 +77,23 @@ type agentBuildParams struct {
 	// poolSessionCreateBudget caps ordinary fresh pool session bead
 	// materialization in a single desired-state build. Existing session beads
 	// may still be reused, and dependency-floor prerequisites are exempt.
-	poolSessionCreateBudget *poolSessionCreateBudget
+	poolSessionCreateBudget *poolplan.CreateBudget
+
+	// poolScaleCheckPartialTemplates holds pool templates whose scale_check
+	// returned a partial result this build cycle. selectOrPlanPoolSessionBead
+	// refuses new creates for these templates; existing-session reuse is
+	// unaffected. This field is assigned in buildDesiredState after
+	// evaluatePendingPoolsMap runs; newAgentBuildParams does not set it.
+	poolScaleCheckPartialTemplates map[string]bool
+
+	// providerHealthSnapshot is the per-build provider-health registry view.
+	// Loaded once at the start of buildDesiredState via loadProviderHealthSnapshot,
+	// which always returns a non-nil snapshot. When the registry file is absent,
+	// unreadable, or empty the snapshot has present=false and check() fails-open
+	// (healthy=true, registryPresent=false). This field is assigned in
+	// buildDesiredState before the pool realization loop; newAgentBuildParams
+	// does not set it.
+	providerHealthSnapshot *providerHealthSnapshot
 
 	// beadNames caches qualifiedName → session_name mappings resolved
 	// during this build cycle. Populated lazily by resolveSessionName.
@@ -89,6 +129,24 @@ type agentBuildParams struct {
 	sessionProvider string
 }
 
+// hasCompleteSessionSnapshot reports whether a store-backed build has a
+// complete session census. Storeless legacy builds do not allocate persistent
+// session rows and therefore do not require the bead snapshot. The inference
+// lane keeps focused unit fixtures concise; production always sets the explicit
+// verdict after both the primary snapshot load and the cross-store census.
+func (p *agentBuildParams) hasCompleteSessionSnapshot() bool {
+	if p == nil {
+		return false
+	}
+	if p.beadStore == nil {
+		return true
+	}
+	if p.sessionSnapshotCompletenessKnown {
+		return p.sessionSnapshotComplete
+	}
+	return p.sessionBeads != nil && p.sessionBeads.LoadError() == nil
+}
+
 // newAgentBuildParams constructs agentBuildParams from the common startup values.
 func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime.Provider, beaconTime time.Time, store beads.Store, stderr io.Writer) *agentBuildParams {
 	params := &agentBuildParams{
@@ -115,7 +173,7 @@ func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime
 		sessionProvider: cfg.Session.Provider,
 	}
 	if store != nil {
-		params.poolSessionCreateBudget = newPoolSessionCreateBudget(cfg.Daemon.MaxWakesPerTickOrDefault())
+		params.poolSessionCreateBudget = poolplan.NewCreateBudget(cfg.Daemon.MaxWakesPerTickOrDefault())
 	}
 	// Load the shared skill catalog once per build cycle. Transient load
 	// failures (filesystem race during dolt sync / heavy I/O) used to
@@ -238,10 +296,7 @@ func effectiveOverlayDirs(cityDirs []string, rigDirs map[string][]string, rigNam
 // back to the template, so `gc internal materialize-skills` exits 1.
 // For regular agents, qualifiedName already equals the template name.
 func templateNameFor(cfgAgent *config.Agent, qualifiedName string) string {
-	if cfgAgent.PoolName != "" {
-		return cfgAgent.PoolName
-	}
-	if t := cfgAgent.QualifiedName(); t != "" && t != qualifiedName {
+	if t := agentutil.RoutedToIdentity(cfgAgent); t != "" && t != qualifiedName {
 		return t
 	}
 	return qualifiedName

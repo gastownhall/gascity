@@ -59,6 +59,29 @@ func managedDoltStopPollInterval(gracePeriod time.Duration) time.Duration {
 	return pollInterval
 }
 
+const managedDoltProcessExitPollInterval = 20 * time.Millisecond
+
+// waitForManagedDoltProcessExit observes process liveness for at most timeout.
+// It probes immediately, then sleeps in bounded increments so a caller returns
+// as soon as the process exits without overshooting the requested maximum.
+func waitForManagedDoltProcessExit(pid int, timeout time.Duration, alive func(int) bool) {
+	if !alive(pid) || timeout <= 0 {
+		return
+	}
+
+	deadline := time.Now().Add(timeout)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return
+		}
+		time.Sleep(min(managedDoltProcessExitPollInterval, remaining))
+		if !alive(pid) {
+			return
+		}
+	}
+}
+
 func stopManagedDoltProcessWithOptions(cityPath, port string, clearPublishedState bool) (managedDoltStopReport, error) {
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -76,7 +99,16 @@ func stopManagedDoltProcessWithOptions(cityPath, port string, clearPublishedStat
 	case info.PortHolderPID > 0 && info.PortHolderOwned && managedDoltProcessControllable(info.PortHolderPID, layout):
 		targetPID = info.PortHolderPID
 	}
+	lockWindow := managedDoltLockReleaseTimeoutFn(cityPath)
 	if targetPID <= 0 {
+		// No controllable server process, but a crashed server's flushing
+		// descendant can still hold the store lock. The stop contract says
+		// success means the data dir is released — fail closed instead of
+		// green-lighting a mid-flush data-dir consumer (backup, move,
+		// delete) keyed on stop's success (gastownhall/gascity#3174).
+		if err := waitForManagedDoltDataDirLockFree(layout.DataDir, lockWindow); err != nil {
+			return report, fmt.Errorf("no controllable dolt process, but the data dir is not yet released: %w", err)
+		}
 		if err := clearManagedDoltRuntime(layout, port); err != nil {
 			return report, err
 		}
@@ -101,14 +133,40 @@ func stopManagedDoltProcessWithOptions(cityPath, port string, clearPublishedStat
 		time.Sleep(pollInterval)
 	}
 	if managedStopPIDAlive(targetPID) {
-		report.Forced = true
-		if err := syscall.Kill(targetPID, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
-			return report, fmt.Errorf("signal %d with SIGKILL: %w", targetPID, err)
+		// The process outlived the SIGTERM grace. SIGKILL is only safe when
+		// the dolt exclusive store lock is free — a holder is mid-flush, and
+		// killing it tears the noms journal (gastownhall/gascity#3174).
+		if err := waitManagedDoltSIGKILLLockGate(targetPID, layout.DataDir, managedStopPIDAlive, gracePeriod, lockWindow, pollInterval); err != nil {
+			return report, err
 		}
-		time.Sleep(time.Second)
+		// Re-verify the PID still belongs to our managed dolt server before the
+		// forced kill. It outlived the SIGTERM grace, but if it actually exited
+		// during the grace and the numeric PID was reused, managedStopPIDAlive now
+		// reports that unrelated process as alive and a bare-PID SIGKILL would hit
+		// it. managedDoltProcessControllable re-runs the ownership inspection
+		// (cmdline/data-dir/cwd), which a reused unrelated PID fails.
+		if managedDoltProcessControllable(targetPID, layout) {
+			report.Forced = true
+			if err := syscall.Kill(targetPID, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+				return report, fmt.Errorf("signal %d with SIGKILL: %w", targetPID, err)
+			}
+			waitForManagedDoltProcessExit(targetPID, time.Second, managedStopPIDAlive)
+		} else {
+			managedDoltCleanupLogf("skipping SIGKILL of pid %d: no longer an owned managed dolt process (PID reused)", targetPID)
+		}
 	}
-	if managedStopPIDAlive(targetPID) {
+	// Fail only when OUR server is still alive AND still owned. A live-but-unowned
+	// PID here means our server exited during the grace and the number was reused:
+	// the stop succeeded (our server is gone), and the data-dir lock wait below
+	// still guarantees the dir is released before we report success.
+	if managedDoltProcessControllable(targetPID, layout) {
 		return report, fmt.Errorf("pid %d still alive after forced stop", targetPID)
+	}
+	// The server process is gone, but descendants (e.g. dolt gc workers) can
+	// still hold the store lock while finishing a write. Block until release
+	// so a follow-up start cannot bind the data_dir mid-flush.
+	if err := waitForManagedDoltDataDirLockFree(layout.DataDir, lockWindow); err != nil {
+		return report, fmt.Errorf("dolt process %d exited but the data dir is not yet released: %w", targetPID, err)
 	}
 	if err := clearManagedDoltRuntime(layout, port); err != nil {
 		return report, err

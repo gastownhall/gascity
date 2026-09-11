@@ -7,7 +7,8 @@ title: "Two-Minute CI With Blacksmith"
 | Status | Proposed |
 | Date | 2026-04-29 |
 | Author(s) | Codex |
-| Issue | ga-nakct |
+| Program | ga-80po0c |
+| Timing/planner milestone | ga-80po0c.4 |
 | Supersedes | N/A |
 
 ## Summary
@@ -775,7 +776,7 @@ disables PR path gating and runs the full deterministic Linux suite:
 - `scripts/test-integration-shard`
 - CI image build files
 - `internal/api/openapi.json`
-- `docs/schema/openapi.*`
+- `docs/reference/schema/openapi.*`
 - `internal/api/genclient/**`
 - `cmd/gc/dashboard/**`
 - `internal/**`

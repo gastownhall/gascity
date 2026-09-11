@@ -66,7 +66,7 @@ case "$1" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 case "$1 $2" in
   "session prune")
     printf '{"count":0}\n'
@@ -85,7 +85,7 @@ exit 0
 		"GC_DOLT_PASSWORD": "",
 		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	runScript(t, coreScriptPath("reaper.sh"), env)
 
 	bdData, err := os.ReadFile(bdLog)
 	if err != nil {
@@ -163,12 +163,16 @@ CREATE TABLE issues (
 );
 CREATE TABLE dependencies (
   issue_id VARCHAR(64),
-  depends_on_id VARCHAR(64),
+  depends_on_issue_id VARCHAR(64),
+  depends_on_wisp_id VARCHAR(64),
+  depends_on_external VARCHAR(64),
   type VARCHAR(32)
 );
 CREATE TABLE wisp_dependencies (
   issue_id VARCHAR(64),
-  depends_on_id VARCHAR(64),
+  depends_on_issue_id VARCHAR(64),
+  depends_on_wisp_id VARCHAR(64),
+  depends_on_external VARCHAR(64),
   type VARCHAR(32)
 );
 CREATE TABLE labels (
@@ -195,7 +199,7 @@ INSERT INTO wisps (id, title, status, issue_type, priority, created_at, updated_
   ('wisp-nested-root', 'nested root', 'open', 'task', 2, '2026-01-01 00:00:00', '2026-01-01 00:00:00', '', '{"gc.kind":"workflow"}'),
   ('wisp-subroot', 'nested subroot', 'closed', 'task', 2, '2026-01-01 00:00:00', '2026-01-01 00:00:00', '', '{"gc.root_bead_id":"wisp-nested-root"}'),
   ('wisp-live-grandchild', 'live nested child', 'in_progress', 'task', 2, '2026-01-01 00:00:00', '2026-01-01 00:00:00', '', '{}');
-INSERT INTO wisp_dependencies (issue_id, depends_on_id, type) VALUES
+INSERT INTO wisp_dependencies (issue_id, depends_on_wisp_id, type) VALUES
   ('wisp-subroot', 'wisp-nested-root', 'tracks'),
   ('wisp-live-grandchild', 'wisp-subroot', 'tracks');
 INSERT INTO issues (id, title, status, issue_type, priority, created_at, updated_at, assignee, metadata) VALUES
@@ -206,7 +210,7 @@ INSERT INTO issues (id, title, status, issue_type, priority, created_at, updated
   ('issue-non-root-workflow', 'non-root issue topology bead preserved', 'open', 'task', 1, '2026-01-01 00:00:00', '2026-01-01 00:00:00', '', '{"gc.kind":"workflow","gc.root_bead_id":"issue-dep-root"}'),
   ('issue-dep-root', 'dependency-protected issue root', 'open', 'task', 2, '2026-01-01 00:00:00', '2026-01-01 00:00:00', '', '{"gc.kind":"workflow"}'),
   ('issue-dep-live', 'live issue dependency child', 'in_progress', 'task', 2, '2026-01-01 00:00:00', '2026-01-01 00:00:00', '', '{}');
-INSERT INTO dependencies (issue_id, depends_on_id, type) VALUES
+INSERT INTO dependencies (issue_id, depends_on_issue_id, type) VALUES
   ('issue-dep-live', 'issue-dep-root', 'blocks');
 `
 }

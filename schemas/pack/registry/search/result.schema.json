@@ -50,7 +50,7 @@
       "items": {
         "type": "object",
         "description": "One matching pack entry from a registry catalog.",
-        "required": ["registry", "name", "description", "source", "source_kind", "latest"],
+        "required": ["registry", "name", "tier", "publisher", "description", "source", "source_kind", "latest"],
         "properties": {
           "registry": {
             "type": "string",
@@ -62,6 +62,15 @@
             "type": "string",
             "pattern": "^[a-z0-9][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)?$",
             "description": "Pack name as published in the registry catalog."
+          },
+          "tier": {
+            "enum": ["maintained", "community"],
+            "description": "Effective pack trust tier after safe attribution normalization."
+          },
+          "publisher": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Effective publisher name, or Unknown publisher when attribution is unavailable."
           },
           "description": {
             "type": "string",

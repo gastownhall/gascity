@@ -96,18 +96,6 @@ func TestHandleStatusPreservesPartialWorkCountSurvivors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create(open): %v", err)
 	}
-	ready, err := store.Create(beads.Bead{Type: "task", Title: "ready survivor", Status: "ready"})
-	if err != nil {
-		t.Fatalf("Create(ready): %v", err)
-	}
-	readyStatus := "ready"
-	if err := store.Update(ready.ID, beads.UpdateOpts{Status: &readyStatus}); err != nil {
-		t.Fatalf("Update(ready): %v", err)
-	}
-	ready, err = store.Get(ready.ID)
-	if err != nil {
-		t.Fatalf("Get(ready): %v", err)
-	}
 	inProgress, err := store.Create(beads.Bead{Type: "task", Title: "claimed survivor", Status: "in_progress"})
 	if err != nil {
 		t.Fatalf("Create(in_progress): %v", err)
@@ -121,10 +109,15 @@ func TestHandleStatusPreservesPartialWorkCountSurvivors(t *testing.T) {
 		t.Fatalf("Get(in_progress): %v", err)
 	}
 	state.stores["myrig"] = &failingBeadStore{
-		Store:      store,
-		listResult: []beads.Bead{open, ready, inProgress},
+		Store:       store,
+		listResult:  []beads.Bead{open, inProgress},
+		readyResult: []beads.Bead{open},
 		listErr: &beads.PartialResultError{
 			Op:  "bd list",
+			Err: errors.New("skipped 1 corrupt bead"),
+		},
+		readyErr: &beads.PartialResultError{
+			Op:  "bd ready",
 			Err: errors.New("skipped 1 corrupt bead"),
 		},
 	}
@@ -149,6 +142,68 @@ func TestHandleStatusPreservesPartialWorkCountSurvivors(t *testing.T) {
 	}
 	if len(resp.PartialErrors) == 0 {
 		t.Fatalf("PartialErrors empty")
+	}
+}
+
+func TestHandleStatusPreservesStoredCountsWhenReadyFails(t *testing.T) {
+	state := newFakeState(t)
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{Type: "task", Title: "open survivor", Status: "open"}); err != nil {
+		t.Fatalf("Create(open): %v", err)
+	}
+	claimed, err := store.Create(beads.Bead{Type: "task", Title: "claimed survivor", Status: "in_progress"})
+	if err != nil {
+		t.Fatalf("Create(in_progress): %v", err)
+	}
+	inProgress := "in_progress"
+	if err := store.Update(claimed.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("Update(in_progress): %v", err)
+	}
+	state.stores["myrig"] = &failingBeadStore{
+		Store:    store,
+		readyErr: errors.New("ready projection unavailable"),
+	}
+
+	resp := getStatus(t, state)
+
+	if resp.Work.Open != 1 || resp.Work.Ready != 0 || resp.Work.InProgress != 1 {
+		t.Fatalf("Work = %+v, want stored-count survivors open=1 in_progress=1", resp.Work)
+	}
+	if !resp.Partial {
+		t.Fatal("Partial = false, want true for Ready failure")
+	}
+	if joined := strings.Join(resp.PartialErrors, "; "); !strings.Contains(joined, "ready projection unavailable") {
+		t.Fatalf("PartialErrors = %v, want Ready failure", resp.PartialErrors)
+	}
+}
+
+type partialStatusRuntimeProvider struct {
+	runtime.Provider
+}
+
+func (partialStatusRuntimeProvider) StatusPartial() bool { return true }
+
+func TestHandleStatusMarksRuntimeProbePartial(t *testing.T) {
+	state := newFakeState(t)
+	state.sessionProvider = partialStatusRuntimeProvider{Provider: state.sp}
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/status"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var resp statusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !resp.Partial {
+		t.Fatalf("Partial = false, want true when runtime provider reports partial status")
+	}
+	if !statusPartialErrorsContain(resp.PartialErrors, "runtime status probe incomplete") {
+		t.Fatalf("PartialErrors = %#v, want runtime partial diagnostic", resp.PartialErrors)
 	}
 }
 
@@ -303,24 +358,27 @@ func TestHandleStatusDegradesWhenReadModelStoreStalls(t *testing.T) {
 	statusStoreReadTimeout = 20 * time.Millisecond
 	t.Cleanup(func() { statusStoreReadTimeout = oldTimeout })
 
+	// The store stays blocked for the whole assertion, so the handler can only
+	// produce a response by honoring its degrade timeout — proven by Partial +
+	// the timeout diagnostic, with no fragile wall-clock bound (#3204).
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
 	state := newFakeState(t)
-	stallingStore := &delayedListStore{
-		Store: beads.NewMemStore(),
-		delay: 750 * time.Millisecond,
-	}
+	stallingStore := &blockingListStore{Store: beads.NewMemStore(), release: release}
 	state.cityBeadStore = stallingStore
 	state.stores["myrig"] = stallingStore
 	h := newTestCityHandler(t, state)
 
 	req := httptest.NewRequest("GET", cityURL(state, "/status"), nil)
 	rec := httptest.NewRecorder()
-	start := time.Now()
-	h.ServeHTTP(rec, req)
-	elapsed := time.Since(start)
-
-	if elapsed > 500*time.Millisecond {
-		t.Fatalf("status handler took %s, want bounded degraded response", elapsed)
+	served := make(chan struct{})
+	go func() { h.ServeHTTP(rec, req); close(served) }()
+	select {
+	case <-served:
+	case <-time.After(10 * time.Second): // hang guard (~500x the degrade timeout), not a timing bound
+		t.Fatal("status handler did not return while the read model was stalled; degrade timeout not honored")
 	}
+
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
@@ -341,22 +399,25 @@ func TestHandleStatusDegradesWhenMailCountStalls(t *testing.T) {
 	statusStoreReadTimeout = 20 * time.Millisecond
 	t.Cleanup(func() { statusStoreReadTimeout = oldTimeout })
 
+	// The provider stays blocked for the whole assertion, so the handler can
+	// only produce a response by honoring its degrade timeout — proven by
+	// Partial + the timeout diagnostic, with no fragile wall-clock bound (#3204).
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
 	state := newFakeState(t)
-	state.cityMailProv = &delayedMailCountProvider{
-		Provider: state.cityMailProv,
-		delay:    750 * time.Millisecond,
-	}
+	state.cityMailProv = &blockingMailCountProvider{Provider: state.cityMailProv, release: release}
 	h := newTestCityHandler(t, state)
 
 	req := httptest.NewRequest("GET", cityURL(state, "/status"), nil)
 	rec := httptest.NewRecorder()
-	start := time.Now()
-	h.ServeHTTP(rec, req)
-	elapsed := time.Since(start)
-
-	if elapsed > 500*time.Millisecond {
-		t.Fatalf("status handler took %s, want bounded degraded response", elapsed)
+	served := make(chan struct{})
+	go func() { h.ServeHTTP(rec, req); close(served) }()
+	select {
+	case <-served:
+	case <-time.After(10 * time.Second): // hang guard (~500x the degrade timeout), not a timing bound
+		t.Fatal("status handler did not return while the mail count was stalled; degrade timeout not honored")
 	}
+
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
@@ -574,23 +635,165 @@ func TestHandleStatusOnlyUsesProviderLiveness(t *testing.T) {
 	}
 }
 
-type delayedListStore struct {
-	beads.Store
-	delay time.Duration
+// seedStatusBodyState returns a fakeState with one open work bead in the rig
+// store and one active session bead in the city store, so the full /status
+// body populates Work, SessionCountsDetail, and StoreHealth — letting the lite
+// variant be asserted against a non-empty full body.
+func seedStatusBodyState(t *testing.T) *fakeState {
+	t.Helper()
+	state := newFakeState(t)
+	rigStore := beads.NewMemStore()
+	if _, err := rigStore.Create(beads.Bead{Type: "task", Title: "open work", Status: "open"}); err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	state.stores["myrig"] = rigStore
+
+	cityStore := beads.NewMemStore()
+	if _, err := cityStore.Create(beads.Bead{
+		Type:   session.BeadType,
+		Status: "open",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"state":        string(session.StateActive),
+			"template":     "myrig/worker",
+			"session_name": "myrig--worker",
+		},
+	}); err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+	state.cityBeadStore = cityStore
+	return state
 }
 
-func (s *delayedListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	time.Sleep(s.delay)
+// TestBuildStatusBodyFullIncludesExpensiveBlocks pins the unchanged default
+// body: StoreHealth, SessionCountsDetail, and Work counts are all present
+// (gascity#3186 Fix B must not regress the full body `gc status` renders).
+func TestBuildStatusBodyFullIncludesExpensiveBlocks(t *testing.T) {
+	state := seedStatusBodyState(t)
+	s := &Server{state: state}
+
+	body := s.buildStatusBody(context.Background(), false)
+	if body.StoreHealth == nil {
+		t.Error("full body StoreHealth = nil, want populated")
+	}
+	if body.SessionCountsDetail == nil {
+		t.Error("full body SessionCountsDetail = nil, want populated")
+	} else if body.SessionCountsDetail.Active != 1 {
+		t.Errorf("full body SessionCountsDetail.Active = %d, want 1", body.SessionCountsDetail.Active)
+	}
+	if body.Work.Open != 1 {
+		t.Errorf("full body Work.Open = %d, want 1", body.Work.Open)
+	}
+}
+
+// TestBuildStatusBodyLiteOmitsExpensiveBlocks verifies the lite variant drops
+// the three expensive per-request blocks while keeping the cheap fleet
+// overview (agent/rig counts) intact.
+func TestBuildStatusBodyLiteOmitsExpensiveBlocks(t *testing.T) {
+	state := seedStatusBodyState(t)
+	s := &Server{state: state}
+
+	body := s.buildStatusBody(context.Background(), true)
+	if body.StoreHealth != nil {
+		t.Errorf("lite body StoreHealth = %+v, want nil (omitted)", body.StoreHealth)
+	}
+	if body.SessionCountsDetail != nil {
+		t.Errorf("lite body SessionCountsDetail = %+v, want nil (omitted)", body.SessionCountsDetail)
+	}
+	if body.Work != (workCounts{}) {
+		t.Errorf("lite body Work = %+v, want zero (work loop skipped)", body.Work)
+	}
+	// Cheap overview fields are still computed.
+	if body.Name != "test-city" {
+		t.Errorf("lite body Name = %q, want test-city", body.Name)
+	}
+	if body.Agents.Total != 1 {
+		t.Errorf("lite body Agents.Total = %d, want 1", body.Agents.Total)
+	}
+	if body.Rigs.Total != 1 {
+		t.Errorf("lite body Rigs.Total = %d, want 1", body.Rigs.Total)
+	}
+}
+
+// TestHandleStatusLiteSkipsWorkScanAndCachesSeparately drives both variants
+// through the HTTP handler: ?lite=true must skip the rig-store work scan, and
+// the lite and full bodies must cache under distinct keys (a lite request must
+// not be served a cached full body, nor vice versa).
+func TestHandleStatusLiteSkipsWorkScanAndCachesSeparately(t *testing.T) {
+	// Pin a wide TTL so every request lands in the same time bucket; this test
+	// asserts cache-key separation, not TTL expiry.
+	oldTTL := timeBucketResponseCacheTTL
+	timeBucketResponseCacheTTL = time.Hour
+	t.Cleanup(func() { timeBucketResponseCacheTTL = oldTTL })
+
+	state := newFakeState(t)
+	store := &countingStore{Store: beads.NewMemStore()}
+	state.stores["myrig"] = store
+	h := newTestCityHandler(t, state)
+
+	// Lite request: work loop skipped → no AllowScan List on the rig store.
+	liteReq := httptest.NewRequest(http.MethodGet, cityURL(state, "/status?lite=true"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, liteReq)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("lite status = %d, want 200", rec.Code)
+	}
+	if store.listCalls != 0 {
+		t.Fatalf("rig List calls for lite request = %d, want 0 (work loop must be skipped)", store.listCalls)
+	}
+	var liteResp statusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&liteResp); err != nil {
+		t.Fatalf("decode lite: %v", err)
+	}
+	if liteResp.StoreHealth != nil {
+		t.Errorf("lite StoreHealth = %+v, want omitted", liteResp.StoreHealth)
+	}
+
+	// Full request under the same cache generation: must NOT be served the
+	// cached lite body — it has its own key, so it rebuilds and runs the scan.
+	fullReq := httptest.NewRequest(http.MethodGet, cityURL(state, "/status"), nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, fullReq)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("full status = %d, want 200", rec.Code)
+	}
+	if store.listCalls != 1 {
+		t.Fatalf("rig List calls after full request = %d, want 1 (full body must not reuse lite cache)", store.listCalls)
+	}
+
+	// Repeat lite: served from the lite cache, still no further scan.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, liteReq)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second lite status = %d, want 200", rec.Code)
+	}
+	if store.listCalls != 1 {
+		t.Fatalf("rig List calls after repeat lite = %d, want 1 (lite must reuse its own cache)", store.listCalls)
+	}
+}
+
+// blockingListStore blocks List until release is closed, then delegates. Used
+// to hold a read "stalled" for the entire degrade assertion via a
+// synchronization signal instead of a fragile wall-clock sleep (#3204).
+type blockingListStore struct {
+	beads.Store
+	release <-chan struct{}
+}
+
+func (s *blockingListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	<-s.release
 	return s.Store.List(query)
 }
 
-type delayedMailCountProvider struct {
+// blockingMailCountProvider blocks Count until release is closed, then
+// delegates (#3204).
+type blockingMailCountProvider struct {
 	mail.Provider
-	delay time.Duration
+	release <-chan struct{}
 }
 
-func (p *delayedMailCountProvider) Count(recipient string) (int, int, error) {
-	time.Sleep(p.delay)
+func (p *blockingMailCountProvider) Count(recipient string) (int, int, error) {
+	<-p.release
 	return p.Provider.Count(recipient)
 }
 

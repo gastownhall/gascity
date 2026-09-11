@@ -1,19 +1,18 @@
 # Gas Town — expressed as a Gas City configuration.
 #
 # This proves the Gas City thesis: any orchestration pack is pure config.
-# Three composable packs:
-#   maintenance  — generic infrastructure: dog pool, shutdown dance, exec
-#                  orders (gate-sweep, orphan-sweep, prune-branches,
-#                  wisp-compact)
-#   dolt         — reusable Dolt database management (dog formulas + exec
-#                  orders + CLI commands), requires a dog pool from
-#                  maintenance
-#   gastown      — domain-specific coding workflow: mayor, deacon, boot,
-#                  witness, refinery, polecat, crew + digest orders
+# Composable packs:
+#   core (builtin) — gc skills, default prompts, core formulas, mechanical
+#                    housekeeping orders (gate/orphan/wisp sweeps, branch
+#                    pruning, nudge relays); included explicitly below
+#   bd (builtin)   — Dolt-backed beads provider; pulls in the dolt pack
+#                    (server lifecycle, dog formulas + exec orders + CLI
+#                    commands, with its own dolt dog pool)
+#   gastown        — domain-specific coding workflow: mayor, deacon, boot,
+#                    dog utility pool, witness, refinery, polecat, crew +
+#                    digest orders
 #
-# City-scoped agents come from both packs: mayor, deacon, boot, plus the
-# effective dog definition from gastown. Maintenance still supplies the
-# fallback dog shape and shared dog formulas/prompts that gastown reuses.
+# City-scoped agents: mayor, deacon, boot, and the gastown-owned dog.
 # Rig-scoped agents (witness, refinery, polecat) are stamped per-rig.
 #
 # The sibling pack.toml owns the Gastown import. This city owns the default
@@ -31,7 +30,8 @@ global_fragments = ["command-glossary", "operational-awareness"]
 base = "builtin:claude"
 
 [defaults.rig.imports.gastown]
-source = "packs/gastown"
+source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
+version = "sha:33d3a430a67d1782ad364556cb566bdb01d0afe3"
 
 [daemon]
 patrol_interval = "30s"
@@ -60,8 +60,12 @@ formula_v2 = true
 #        nudge = "Check your hook and mail, then act accordingly."
 #        work_dir = ".gc/worktrees/myproject/crew/wolf"
 #        idle_timeout = "4h"
-#        prompt_template = "packs/gastown/assets/prompts/crew.template.md"
-#        pre_start = ["{{.CityRoot}}/packs/gastown/assets/scripts/worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"]
+#        prompt_template = "prompts/crew.template.md"
+#        pre_start = ["{{.CityRoot}}/scripts/worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"]
+#
+#      Copy assets/prompts/crew.template.md and assets/scripts/worktree-setup.sh
+#      out of the imported gastown pack into city-local prompts/ and scripts/
+#      first — the pack itself lives in the import cache, not the city tree.
 #
 #      tmux theming comes from the gastown pack's [global] session_live hooks,
 #      so crew members need no session_setup wiring of their own.

@@ -3,6 +3,7 @@ package session
 import (
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -53,13 +54,37 @@ func ResolveSessionBeadByExactID(store beads.Store, identifier string) (beads.Be
 	}
 	b, err := store.Get(identifier)
 	if err == nil && IsSessionBeadOrRepairable(b) {
-		RepairEmptyType(store, &b)
+		normalizeEmptyType(&b)
 		return b, b.ID, nil
 	}
 	if err != nil && !errors.Is(err, beads.ErrNotFound) {
 		return beads.Bead{}, "", fmt.Errorf("looking up session %q: %w", identifier, err)
 	}
 	return beads.Bead{}, "", fmt.Errorf("%w: %q", ErrSessionNotFound, identifier)
+}
+
+// ResolveSessionRecordByExactID is the domain-object twin of
+// ResolveSessionBeadByExactID: it performs the SAME single store.Get, the same
+// IsSessionBeadOrRepairable acceptance, the same in-memory empty-type normalize,
+// and the same error contract (wrapped "looking up session %q" for a hard store
+// error, ErrSessionNotFound for an absent or non-session id) — but projects the
+// resolved bead onto the typed session record (Info + PersistedResponse) instead
+// of returning a raw beads.Bead. It keeps the worker-boundary resolve+construct
+// path (cmd/gc/worker_handle.go) at a single store Get while removing the raw
+// bead from the interior. Pair it with worker.Factory.SessionByRecord.
+func ResolveSessionRecordByExactID(store beads.Store, identifier string) (Info, PersistedResponse, error) {
+	if store == nil {
+		return Info{}, PersistedResponse{}, fmt.Errorf("session store unavailable")
+	}
+	b, err := store.Get(identifier)
+	if err == nil && IsSessionBeadOrRepairable(b) {
+		normalizeEmptyType(&b)
+		return infoFromPersistedBead(b), PersistedResponseFromBead(b), nil
+	}
+	if err != nil && !errors.Is(err, beads.ErrNotFound) {
+		return Info{}, PersistedResponse{}, fmt.Errorf("looking up session %q: %w", identifier, err)
+	}
+	return Info{}, PersistedResponse{}, fmt.Errorf("%w: %q", ErrSessionNotFound, identifier)
 }
 
 func resolveSessionID(store beads.Store, identifier string, allowClosed bool) (string, error) {
@@ -127,10 +152,16 @@ func listSessionBeadsByMetadata(store beads.Store, key, value string, allowClose
 	if key == "" || value == "" {
 		return nil, nil
 	}
-	raw, err := store.List(beads.ListQuery{
+	query := beads.ListQuery{
 		Metadata:      map[string]string{key: value},
 		IncludeClosed: allowClosed,
-	})
+	}
+	if !allowClosed {
+		// Session bead status is open/closed; richer lifecycle states live in
+		// metadata. Treat any other raw status as invalid for live resolution.
+		query.Status = "open"
+	}
+	raw, err := store.List(query)
 	if err != nil {
 		return nil, err
 	}
@@ -139,7 +170,7 @@ func listSessionBeadsByMetadata(store beads.Store, key, value string, allowClose
 		if !IsSessionBeadOrRepairable(b) {
 			continue
 		}
-		RepairEmptyType(store, &b)
+		normalizeEmptyType(&b)
 		out = append(out, b)
 	}
 	return out, nil
@@ -215,17 +246,53 @@ func IsSessionBeadOrRepairable(b beads.Bead) bool {
 	return b.Type == "" && hasSessionLabel(b)
 }
 
+// hasSessionLabelInfo is the Info mirror of hasSessionLabel: it reports whether
+// the projected labels carry the gc:session marker.
+func hasSessionLabelInfo(i Info) bool {
+	for _, l := range i.Labels {
+		if l == LabelSession {
+			return true
+		}
+	}
+	return false
+}
+
+// IsSessionBeadOrRepairableInfo is the session.Info mirror of
+// IsSessionBeadOrRepairable: a proper session bead (Type == BeadType) or a
+// crash/migration-damaged bead (empty Type carrying the gc:session label).
+// Info.Type and Info.Labels project both inputs verbatim, so the two agree.
+func IsSessionBeadOrRepairableInfo(i Info) bool {
+	if i.Type == BeadType {
+		return true
+	}
+	return i.Type == "" && hasSessionLabelInfo(i)
+}
+
 // RepairEmptyType fixes a session bead with an empty type field by
-// setting it to "session". This is a best-effort repair — if the store
-// update fails, the in-memory bead is still patched so the current
-// operation can proceed.
+// setting it to "session". Only call it from paths that already mutate
+// or materialize the bead; read-only resolution normalizes in memory
+// instead. This is a best-effort repair — if the store update fails,
+// the failure is logged and the in-memory bead is still patched so the
+// current operation can proceed.
 func RepairEmptyType(store beads.Store, b *beads.Bead) {
 	if b.Type != "" {
 		return
 	}
 	t := BeadType
-	_ = store.Update(b.ID, beads.UpdateOpts{Type: &t})
+	if err := store.Update(b.ID, beads.UpdateOpts{Type: &t}); err != nil {
+		log.Printf("session %s: repairing empty bead type: %v", b.ID, err)
+	}
 	b.Type = BeadType
+}
+
+// normalizeEmptyType patches an empty session bead type in memory only,
+// so read-only resolution paths can select repairable beads exactly as
+// before without writing to the store. Persisting the repair is the job
+// of RepairEmptyType, called from explicitly-mutating paths.
+func normalizeEmptyType(b *beads.Bead) {
+	if b.Type == "" {
+		b.Type = BeadType
+	}
 }
 
 func sessionIdentifierLabel(b beads.Bead) string {

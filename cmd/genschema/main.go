@@ -5,10 +5,10 @@
 //
 // Output:
 //
-//	docs/schema/city-schema.json
-//	docs/schema/city-schema.txt
-//	docs/schema/pack-schema.json
-//	docs/schema/pack-schema.txt
+//	docs/reference/schema/city-schema.json
+//	docs/reference/schema/city-schema.txt
+//	docs/reference/schema/pack-schema.json
+//	docs/reference/schema/pack-schema.txt
 //	docs/reference/config.md
 //	docs/reference/cli.md
 package main
@@ -38,7 +38,7 @@ func run() error {
 	}
 
 	// Ensure output directories exist.
-	for _, dir := range []string{"docs/schema", "docs/reference"} {
+	for _, dir := range []string{"docs/reference/schema", "docs/reference"} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("creating %s: %w", dir, err)
 		}
@@ -49,10 +49,10 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("generating city schema: %w", err)
 	}
-	if err := writeSchema("docs/schema/city-schema.json", citySchema); err != nil {
+	if err := writeSchema("docs/reference/schema/city-schema.json", citySchema); err != nil {
 		return err
 	}
-	if err := writeSchema("docs/schema/city-schema.txt", citySchema); err != nil {
+	if err := writeSchema("docs/reference/schema/city-schema.txt", citySchema); err != nil {
 		return err
 	}
 
@@ -60,10 +60,10 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("generating pack schema: %w", err)
 	}
-	if err := writeSchema("docs/schema/pack-schema.json", packSchema); err != nil {
+	if err := writeSchema("docs/reference/schema/pack-schema.json", packSchema); err != nil {
 		return err
 	}
-	if err := writeSchema("docs/schema/pack-schema.txt", packSchema); err != nil {
+	if err := writeSchema("docs/reference/schema/pack-schema.txt", packSchema); err != nil {
 		return err
 	}
 
@@ -81,10 +81,10 @@ func run() error {
 	}
 
 	files := []string{
-		"docs/schema/city-schema.json",
-		"docs/schema/city-schema.txt",
-		"docs/schema/pack-schema.json",
-		"docs/schema/pack-schema.txt",
+		"docs/reference/schema/city-schema.json",
+		"docs/reference/schema/city-schema.txt",
+		"docs/reference/schema/pack-schema.json",
+		"docs/reference/schema/pack-schema.txt",
 		"docs/reference/config.md",
 		"docs/reference/cli.md",
 	}

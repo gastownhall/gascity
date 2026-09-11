@@ -38,6 +38,10 @@ type fakeStore struct {
 	// enabling tests to verify write ordering contracts.
 	WriteLog []string
 
+	// SetMetadataErrFunc, when non-nil, is consulted before each SetMetadata
+	// write; a non-nil return fails the write (nothing is recorded or stored).
+	SetMetadataErrFunc func(key string) error
+
 	ActivatedWispIDs []string
 }
 
@@ -99,6 +103,11 @@ func (s *fakeStore) GetMetadata(id string) (map[string]string, error) {
 }
 
 func (s *fakeStore) SetMetadata(id, key, value string) error {
+	if s.SetMetadataErrFunc != nil {
+		if err := s.SetMetadataErrFunc(key); err != nil {
+			return err
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rec, ok := s.beads[id]
@@ -947,6 +956,128 @@ func TestHandleWispClosed_WriteOrdering_WaitingManualLastProcessedWispLast(t *te
 	lastKey := store.WriteLog[len(store.WriteLog)-1]
 	if lastKey != FieldLastProcessedWisp {
 		t.Errorf("last write = %q, want %q (dedup marker must be last)", lastKey, FieldLastProcessedWisp)
+	}
+}
+
+func TestCommit_MarkerWrittenLast(t *testing.T) {
+	writes := []metaWrite{
+		{FieldActiveWisp, "", "clearing active wisp"},
+		{FieldState, StateWaitingManual, "setting state"},
+	}
+
+	tests := []struct {
+		name      string
+		marker    metaWrite
+		preMarker func(recorded *[]string) func() error
+		wantOrder []string
+	}{
+		{
+			name:      "marker after writes",
+			marker:    metaWrite{FieldLastProcessedWisp, "wisp-iter-1", "setting last processed wisp"},
+			wantOrder: []string{FieldActiveWisp, FieldState, FieldLastProcessedWisp},
+		},
+		{
+			name:      "empty marker is skipped",
+			marker:    metaWrite{FieldLastProcessedWisp, "", "setting last processed wisp"},
+			wantOrder: []string{FieldActiveWisp, FieldState},
+		},
+		{
+			name:   "preMarker runs after writes and before marker",
+			marker: metaWrite{FieldLastProcessedWisp, "wisp-iter-1", "setting last processed wisp"},
+			preMarker: func(recorded *[]string) func() error {
+				return func() error {
+					*recorded = append(*recorded, "pre-marker")
+					return nil
+				}
+			},
+			wantOrder: []string{FieldActiveWisp, FieldState, "pre-marker", FieldLastProcessedWisp},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newFakeStore()
+			store.addBead("root-1", "in_progress", "", "", nil)
+			h := &Handler{Store: store}
+
+			var recorded []string
+			var pre func() error
+			if tt.preMarker != nil {
+				// Bridge WriteLog and the pre-marker sentinel into one order slice.
+				pre = func() error {
+					recorded = append(recorded, store.WriteLog...)
+					store.WriteLog = nil
+					return tt.preMarker(&recorded)()
+				}
+			}
+
+			if err := h.commit("root-1", writes, pre, tt.marker); err != nil {
+				t.Fatalf("commit returned error: %v", err)
+			}
+			recorded = append(recorded, store.WriteLog...)
+
+			if len(recorded) != len(tt.wantOrder) {
+				t.Fatalf("write order = %v, want %v", recorded, tt.wantOrder)
+			}
+			for i := range tt.wantOrder {
+				if recorded[i] != tt.wantOrder[i] {
+					t.Errorf("write order = %v, want %v", recorded, tt.wantOrder)
+					break
+				}
+			}
+		})
+	}
+}
+
+func TestCommit_WriteErrorShortCircuitsMarker(t *testing.T) {
+	store := newFakeStore()
+	store.addBead("root-1", "in_progress", "", "", nil)
+	store.SetMetadataErrFunc = func(key string) error {
+		if key == FieldState {
+			return fmt.Errorf("boom")
+		}
+		return nil
+	}
+	h := &Handler{Store: store}
+
+	err := h.commit("root-1",
+		[]metaWrite{
+			{FieldActiveWisp, "", "clearing active wisp"},
+			{FieldState, StateWaitingManual, "setting state"},
+		},
+		nil,
+		metaWrite{FieldLastProcessedWisp, "wisp-iter-1", "setting last processed wisp"},
+	)
+	if err == nil {
+		t.Fatal("commit should return an error when a write fails")
+	}
+	if !contains(err.Error(), "setting state") {
+		t.Errorf("error %q should carry the failing write's desc", err.Error())
+	}
+	for _, key := range store.WriteLog {
+		if key == FieldLastProcessedWisp {
+			t.Fatal("dedup marker must not be written after an earlier write fails")
+		}
+	}
+}
+
+func TestCommit_PreMarkerErrorShortCircuitsMarker(t *testing.T) {
+	store := newFakeStore()
+	store.addBead("root-1", "in_progress", "", "", nil)
+	h := &Handler{Store: store}
+
+	err := h.commit("root-1",
+		[]metaWrite{{FieldState, StateTerminated, "setting state"}},
+		func() error { return fmt.Errorf("close failed") },
+		metaWrite{FieldLastProcessedWisp, "wisp-iter-1", "setting last processed wisp"},
+	)
+	if err == nil {
+		t.Fatal("commit should propagate a preMarker error")
+	}
+	for _, key := range store.WriteLog {
+		if key == FieldLastProcessedWisp {
+			t.Fatal("dedup marker must not be written when preMarker fails")
+		}
 	}
 }
 

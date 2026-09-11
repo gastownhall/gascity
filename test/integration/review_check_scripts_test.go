@@ -5,11 +5,16 @@ package integration
 import (
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	gascitypacks "github.com/gastownhall/gascity-packs"
+
+	"github.com/gastownhall/gascity/internal/builtinpacks"
 )
 
 type reviewCheckCase struct {
@@ -60,6 +65,39 @@ func (c reviewCheckCase) attemptStepRef(attempt int) string {
 
 func (c reviewCheckCase) checkStepRef(attempt int) string {
 	return fmt.Sprintf("%s.%s.check.%d", c.formula, c.ralphStepID, attempt)
+}
+
+// gastownPackChecksDir materializes the embedded gastown pack's
+// assets/scripts/checks directory into a temp dir and returns it. The
+// checked-in example no longer carries a pack copy; the gc binary embeds the
+// pack from the gascity-packs module, so these tests run against the exact
+// embedded bytes.
+func gastownPackChecksDir(t *testing.T) string {
+	t.Helper()
+	const checksRel = "assets/scripts/checks"
+	src := gascitypacks.Gastown()
+	dst := filepath.Join(t.TempDir(), "checks")
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		t.Fatalf("mkdir embedded checks dir: %v", err)
+	}
+	entries, err := fs.ReadDir(src, checksRel)
+	if err != nil {
+		t.Fatalf("reading embedded gastown %s: %v", checksRel, err)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		rel := checksRel + "/" + e.Name()
+		data, err := fs.ReadFile(src, rel)
+		if err != nil {
+			t.Fatalf("reading embedded gastown %s: %v", rel, err)
+		}
+		if err := os.WriteFile(filepath.Join(dst, e.Name()), data, builtinpacks.MaterializedFileMode(rel)); err != nil {
+			t.Fatalf("materializing %s: %v", rel, err)
+		}
+	}
+	return dst
 }
 
 // Each subtest below calls setupReviewCheckScriptCity inside t.Run so
@@ -170,7 +208,7 @@ func TestReviewCheckScriptsPreferNewestVerdictWhenListOrderIsStale(t *testing.T)
 			)
 			env = append(env, "GC_BEAD_ID=check-1")
 
-			scriptPath := filepath.Join(repoRoot(t), "examples", "gastown", "packs", "gastown", "assets", "scripts", "checks", tc.script)
+			scriptPath := filepath.Join(gastownPackChecksDir(t), tc.script)
 			out, err := runCommand(repoRoot(t), env, 30*time.Second, "bash", scriptPath)
 			if err != nil {
 				t.Fatalf("%s failed: %v\noutput: %s", tc.script, err, out)
@@ -198,7 +236,7 @@ func setupReviewCheckScriptCity(t *testing.T) string {
 	if err := os.MkdirAll(checksDir, 0o755); err != nil {
 		t.Fatalf("mkdir checks: %v", err)
 	}
-	packChecks := filepath.Join(repoRoot(t), "examples", "gastown", "packs", "gastown", "assets", "scripts", "checks")
+	packChecks := gastownPackChecksDir(t)
 	checkEntries, err := os.ReadDir(packChecks)
 	if err != nil {
 		t.Fatalf("reading pack checks: %v", err)
@@ -365,7 +403,7 @@ func TestReviewCheckScriptsStripBeadsRoleWarningFromStdout(t *testing.T) {
 			)
 			env = append(env, "GC_BEAD_ID=check-1")
 
-			scriptPath := filepath.Join(repoRoot(t), "examples", "gastown", "packs", "gastown", "assets", "scripts", "checks", tc.script)
+			scriptPath := filepath.Join(gastownPackChecksDir(t), tc.script)
 			out, err := runCommand(repoRoot(t), env, 30*time.Second, "bash", scriptPath)
 			if err != nil {
 				t.Fatalf("%s failed with bd warning-prefixed output: %v\noutput: %s", tc.script, err, out)
@@ -395,7 +433,7 @@ func TestReviewCheckScriptsRetryTransientBeadShowFailure(t *testing.T) {
 			)
 			env = append(env, "GC_BEAD_ID=check-1")
 
-			scriptPath := filepath.Join(repoRoot(t), "examples", "gastown", "packs", "gastown", "assets", "scripts", "checks", tc.script)
+			scriptPath := filepath.Join(gastownPackChecksDir(t), tc.script)
 			out, err := runCommand(repoRoot(t), env, 30*time.Second, "bash", scriptPath)
 			if err != nil {
 				t.Fatalf("%s failed after transient bd show failure: %v\noutput: %s", tc.script, err, out)
@@ -425,7 +463,7 @@ func TestReviewCheckScriptsSurfaceVerdictOutage(t *testing.T) {
 			)
 			env = append(env, "GC_BEAD_ID=check-1")
 
-			scriptPath := filepath.Join(repoRoot(t), "examples", "gastown", "packs", "gastown", "assets", "scripts", "checks", tc.script)
+			scriptPath := filepath.Join(gastownPackChecksDir(t), tc.script)
 			out, err := runCommand(repoRoot(t), env, 30*time.Second, "bash", scriptPath)
 			if err == nil {
 				t.Fatalf("%s unexpectedly succeeded during bd outage\noutput: %s", tc.script, out)

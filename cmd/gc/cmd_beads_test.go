@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -12,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 func TestDoBeadsHealth_FileProvider(t *testing.T) {
@@ -405,6 +407,49 @@ func TestRouteBeadsShow_SixRowMatrix(t *testing.T) {
 	}
 }
 
+// TestCmdBeadsShow_MissingID_DoesNotProbeAPIClient locks the ordering that a
+// Fable red-team caught (2026-07-08): the missing-id guard must fire BEFORE the
+// local beadsShowAPIClient seam. That seam's apiClient() call has observable
+// side effects — a GC_NO_API-unrecognized warning to os.Stderr, a
+// controller-liveness probe, and a config.Load — none of which the old
+// hand-written cmdBeadsShow performed on the no-id path. Folding the guard into
+// routeReadCmd's route closure ran the seam first (routeReadCmd calls localSeam
+// before the closure), reintroducing a warning line ahead of the missing-id
+// error. This asserts the structural invariant directly: no bead id => the seam
+// is never consulted, and stderr is exactly the missing-id line.
+func TestCmdBeadsShow_MissingID_DoesNotProbeAPIClient(t *testing.T) {
+	clearGCEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeCityToml(t, cityDir, "[workspace]\nname = \"beads-show-order\"\n")
+
+	prev := beadsShowAPIClient
+	t.Cleanup(func() { beadsShowAPIClient = prev })
+	seamConsulted := false
+	beadsShowAPIClient = func(string) (*api.Client, string) {
+		seamConsulted = true
+		return nil, "seam-should-not-run"
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdBeadsShow("", "text", &stdout, &stderr) // no bead id
+
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; stderr=%q", code, stderr.String())
+	}
+	if seamConsulted {
+		t.Fatal("beadsShowAPIClient ran before the missing-id guard — ordering regression: " +
+			"the guard must precede the local seam so its side effects stay off the no-id path")
+	}
+	if got := stderr.String(); got != "gc beads show: missing bead id\n" {
+		t.Fatalf("stderr = %q, want exactly \"gc beads show: missing bead id\\n\"", got)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+}
+
 func TestRouteBeadsList_APIJSONIncludesCacheAge(t *testing.T) {
 	t.Setenv("GC_DEBUG", "0")
 	cityPath := writeBeadsTestCity(t)
@@ -534,7 +579,7 @@ func TestDoBeadsHealth_BdSkip(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	MaterializeBuiltinPacks(dir) //nolint:errcheck
+	materializeBuiltinPacksForTest(t, dir)
 	cityFlag = dir
 	defer func() { cityFlag = "" }()
 	t.Setenv("GC_BEADS", "bd")
@@ -547,5 +592,330 @@ func TestDoBeadsHealth_BdSkip(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Beads provider: healthy") {
 		t.Errorf("GC_DOLT=skip should pass: %s", stdout.String())
+	}
+}
+
+// The tests below drive the REAL cobra entry point via run() with argv flags,
+// exercising the flag-PARSING path. The earlier remote test
+// (TestCmdBeadsList_RemoteRoutesToServerNoFallback) sets contextFlag/cityURLFlag
+// package vars directly, so it never proved cobra parses --city-url on a beads
+// command — which it did NOT, because `beads list`/`show` set
+// DisableFlagParsing: the persistent remote flags were silently dropped and the
+// command fell back to a LOCAL read. These lock the fix (real cobra flags): the
+// persistent remote flags now reach the resolver AND the bead-specific flags
+// still parse.
+
+// TestRun_BeadsListCityURLFlagRoutesRemote proves `gc --city-url <loopback>
+// --city-name mc beads list --status open --label X --all` parses the persistent
+// --city-url (routing REMOTE, not the silent local fallback of the
+// DisableFlagParsing era) AND parses every bead filter flag, each of which must
+// land on the request query. Asserting all three (label/status/all) — not just
+// one — catches a wiring drop or a label<->status swap in the RunE beadFilters
+// literal that a single-flag assertion would miss.
+func TestRun_BeadsListCityURLFlagRoutesRemote(t *testing.T) {
+	clearGCEnv(t)
+
+	var gotPath, gotStatus, gotLabel, gotAll string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotStatus = r.URL.Query().Get("status")
+		gotLabel = r.URL.Query().Get("label")
+		gotAll = r.URL.Query().Get("all")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	prev := beadsListAPIClient
+	beadsListAPIClient = func(string) (*api.Client, string) {
+		t.Fatal("local beadsListAPIClient must not run under --city-url — the flag was unparsed and it fell back to local")
+		return nil, ""
+	}
+	t.Cleanup(func() { beadsListAPIClient = prev })
+
+	var out, errb bytes.Buffer
+	code := run([]string{
+		"--city-url", srv.URL, "--city-name", "mc", "beads", "list",
+		"--status", "open", "--label", "ready-to-build", "--all",
+	}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr = %q", code, errb.String())
+	}
+	if !strings.Contains(gotPath, "/v0/city/mc/beads") {
+		t.Fatalf("remote path = %q, want it to include /v0/city/mc/beads", gotPath)
+	}
+	if gotStatus != "open" {
+		t.Fatalf("--status did not reach the request query: status = %q, want open", gotStatus)
+	}
+	if gotLabel != "ready-to-build" {
+		t.Fatalf("--label did not reach the request query: label = %q, want ready-to-build", gotLabel)
+	}
+	if gotAll != "true" {
+		t.Fatalf("--all did not reach the request query: all = %q, want true", gotAll)
+	}
+}
+
+// TestRun_BeadsShowCityURLFlagRoutesRemote is the show-side sibling: the bead-id
+// positional and the persistent --city-url both parse, routing the single-bead
+// read to the remote city (never the local seam).
+func TestRun_BeadsShowCityURLFlagRoutesRemote(t *testing.T) {
+	clearGCEnv(t)
+
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	prev := beadsShowAPIClient
+	beadsShowAPIClient = func(string) (*api.Client, string) {
+		t.Fatal("local beadsShowAPIClient must not run under --city-url")
+		return nil, ""
+	}
+	t.Cleanup(func() { beadsShowAPIClient = prev })
+
+	var out, errb bytes.Buffer
+	code := run([]string{"--city-url", srv.URL, "--city-name", "mc", "beads", "show", "ga-abc"}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr = %q", code, errb.String())
+	}
+	if !strings.Contains(gotPath, "ga-abc") {
+		t.Fatalf("remote path = %q, want it to include the bead id ga-abc", gotPath)
+	}
+}
+
+// TestRun_BeadsListRejectsUnknownFlag locks the fail-loud upgrade: with real
+// cobra parsing an unknown flag is a hard error routed through the root
+// FlagErrorFunc (the DisableFlagParsing era silently swallowed it).
+func TestRun_BeadsListRejectsUnknownFlag(t *testing.T) {
+	clearGCEnv(t)
+	var out, errb bytes.Buffer
+	code := run([]string{"beads", "list", "--no-such-flag"}, &out, &errb)
+	if code == 0 {
+		t.Fatalf("exit = 0, want non-zero for an unknown flag; stderr = %q", errb.String())
+	}
+	if !strings.Contains(errb.String(), "unknown flag") {
+		t.Fatalf("stderr = %q, want it to mention 'unknown flag'", errb.String())
+	}
+}
+
+// TestRun_UsageErrorsPrintShortPointerNotFullUsage locks issue #5359: every
+// flag/arg/command error path funnels through printCommandUsage, which used
+// to dump cmd.UsageString() in full (30+ lines, burying the actual error).
+// It now prints a single `Run "<path> --help" for usage.` pointer instead.
+func TestRun_UsageErrorsPrintShortPointerNotFullUsage(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		wantStderr  []string
+		notWantSubs []string
+	}{
+		{
+			name:       "unknown flag",
+			args:       []string{"mail", "list", "--definitely-invalid"},
+			wantStderr: []string{"gc: unknown flag: --definitely-invalid", `Run "gc mail --help" for usage.`},
+		},
+		{
+			name:       "unknown command",
+			args:       []string{"totally-bogus-command"},
+			wantStderr: []string{`gc: unknown command "totally-bogus-command"`, `Run "gc --help" for usage.`},
+		},
+		{
+			name:       "flag group validation error",
+			args:       []string{"mail", "send", "--to", "mayor", "--all", "hi"},
+			wantStderr: []string{"if any flags in the group", `Run "gc mail send --help" for usage.`},
+		},
+		{
+			name:       "--city empty value",
+			args:       []string{"--city="},
+			wantStderr: []string{"gc: --city and --rig require non-empty values", `Run "gc --help" for usage.`},
+		},
+		{
+			name:       "--rig empty value",
+			args:       []string{"--rig="},
+			wantStderr: []string{"gc: --city and --rig require non-empty values", `Run "gc --help" for usage.`},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			clearGCEnv(t)
+			var out, errb bytes.Buffer
+			code := run(test.args, &out, &errb)
+			if code == 0 {
+				t.Fatalf("exit = 0, want non-zero; stderr = %q", errb.String())
+			}
+			for _, want := range test.wantStderr {
+				if !strings.Contains(errb.String(), want) {
+					t.Fatalf("stderr = %q, want it to contain %q", errb.String(), want)
+				}
+			}
+			// The full cobra usage block (flag listings, "Available Commands:",
+			// child command names) must no longer appear on error paths.
+			for _, notWant := range append([]string{"Available Commands:", "Flags:"}, test.notWantSubs...) {
+				if strings.Contains(errb.String(), notWant) {
+					t.Fatalf("stderr = %q, want it to NOT contain %q (full usage leaked)", errb.String(), notWant)
+				}
+			}
+		})
+	}
+}
+
+// TestRun_HelpStillPrintsFullUsage locks that --help (unlike error paths) is
+// untouched by #5359: it calls cmd.Help() directly and must keep showing the
+// full usage block, including the command's available flags and children.
+func TestRun_HelpStillPrintsFullUsage(t *testing.T) {
+	clearGCEnv(t)
+	var out, errb bytes.Buffer
+	code := run([]string{"mail", "--help"}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("--help exit = %d, want 0; stderr = %q", code, errb.String())
+	}
+	combined := out.String() + errb.String()
+	for _, want := range []string{"Usage:", "Available Commands:", "gc mail"} {
+		if !strings.Contains(combined, want) {
+			t.Fatalf("--help output = %q, want it to still contain %q", combined, want)
+		}
+	}
+}
+
+// TestRun_BeadsListHelpNotSwallowed locks that `gc beads list --help` now prints
+// help. DisableFlagParsing used to swallow --help (and `beads show --help` even
+// tried to resolve a bead literally named "--help").
+func TestRun_BeadsListHelpNotSwallowed(t *testing.T) {
+	clearGCEnv(t)
+	var out, errb bytes.Buffer
+	code := run([]string{"beads", "list", "--help"}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("--help exit = %d, want 0; stderr = %q", code, errb.String())
+	}
+	if combined := out.String() + errb.String(); !strings.Contains(combined, "--status") {
+		t.Fatalf("help output missing the --status flag listing; got %q", combined)
+	}
+}
+
+// TestRun_BeadsShowMissingIDReachesGuard pins Args:MaximumNArgs(1) (not
+// ExactArgs(1)) together with the resolve-before-guard ordering: with a RESOLVED
+// remote target, a zero-arg `beads show` must reach the internal missing-id guard
+// (printing "missing bead id") and NEVER dispatch to the server. ExactArgs(1)
+// would make cobra reject the zero-arg case before the resolver, changing the
+// message and inverting the documented ordering — this test would then fail.
+func TestRun_BeadsShowMissingIDReachesGuard(t *testing.T) {
+	clearGCEnv(t)
+
+	hit := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hit = true
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	var out, errb bytes.Buffer
+	code := run([]string{"--city-url", srv.URL, "--city-name", "mc", "beads", "show"}, &out, &errb)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 (missing-id guard); stderr = %q", code, errb.String())
+	}
+	if !strings.Contains(errb.String(), "missing bead id") {
+		t.Fatalf("stderr = %q, want the missing-id guard message", errb.String())
+	}
+	if hit {
+		t.Fatal("server was dispatched despite a missing bead id — guard did not fire before dispatch")
+	}
+}
+
+// TestRun_BeadsShowRejectsExtraArgs locks that a second positional is a loud
+// error (MaximumNArgs(1)); the DisableFlagParsing era silently ignored extras
+// and showed the first.
+func TestRun_BeadsShowRejectsExtraArgs(t *testing.T) {
+	clearGCEnv(t)
+	var out, errb bytes.Buffer
+	code := run([]string{"beads", "show", "ga-abc", "ga-def"}, &out, &errb)
+	if code == 0 {
+		t.Fatalf("exit = 0, want non-zero for two positionals; stderr = %q", errb.String())
+	}
+	if !strings.Contains(errb.String(), "accepts at most 1 arg") {
+		t.Fatalf("stderr = %q, want an at-most-1-arg error", errb.String())
+	}
+}
+
+// TestBeadsListFallbackReadsTheRelocatedBinding is the ga-efyq4 regression on
+// the beads-list arm.
+//
+// The fan-out enumerates the city's DIRECTORIES, and a relocated class binding
+// is not one of them. On a migrated city that makes the list doubly wrong: the
+// binding's live rows are absent, and the copies `gc storage migrate` retained
+// in the work ledger — frozen at cutover, never mutated again — are printed in
+// their place. The reader cannot tell the two apart, because the migration
+// preserves ids and only the titles here differ.
+func TestBeadsListFallbackReadsTheRelocatedBinding(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	work := workStoreFor(t, cityPath)
+	frozen, err := work.Create(beads.Bead{Title: "the retained frozen copy", Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the retained copy in the work store: %v", err)
+	}
+	_, classStore := classResidentWorkShapedBead(t, cityPath, frozen.ID, "the binding's live row")
+	mustCreateClassBead(t, classStore, beads.Bead{Title: "minted in the binding after the migration", Type: "task"})
+	if _, err := work.Create(beads.Bead{Title: "a work bead the binding never held", Type: "task"}); err != nil {
+		t.Fatalf("seeding the work-only control: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doBeadsListFallback(cityPath, "", beadFilters{}, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc beads list exited %d: %s", code, stderr.String())
+	}
+
+	out := stdout.String()
+	if got := strings.Count(out, "the binding's live row"); got != 1 {
+		t.Errorf("the binding's row appears %d times, want exactly 1:\n%s", got, out)
+	}
+	if strings.Contains(out, "the retained frozen copy") {
+		t.Errorf("the list printed the frozen work copy of %s; the binding is the truth for reads:\n%s", frozen.ID, out)
+	}
+	if !strings.Contains(out, "a work bead the binding never held") {
+		t.Errorf("a work-only bead vanished from the list; the merge dropped rows the binding never claimed:\n%s", out)
+	}
+	// The discriminator between the two ways this can be broken. A bead the
+	// binding minted after the migration has no retained copy anywhere, so it
+	// survives a merge that picks the wrong winner and disappears only when the
+	// binding is not read at all.
+	if !strings.Contains(out, "minted in the binding after the migration") {
+		t.Errorf("a bead that exists only in the binding is missing; the fan-out never read it:\n%s", out)
+	}
+}
+
+// TestBeadsListFallbackWarnsEveryRunOnARefusedBinding pins the list surface's
+// half of the refusal policy.
+//
+// A list is a read, and a refused city still serves work from its work ledger,
+// so failing the whole command would take `gc beads list` away from every city
+// whose storage config is mid-repair. The rows the binding holds are missing
+// from that output, though, and a listing that silently omits them is the
+// stale-answer failure this lane exists to close — so the omission is said out
+// loud EVERY run. Not once per process: each `gc beads list` is a fresh answer
+// and has to carry its own caveat.
+func TestBeadsListFallbackWarnsEveryRunOnARefusedBinding(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	work := workStoreFor(t, cityPath)
+	if _, err := work.Create(beads.Bead{Title: "a work bead the binding never held", Type: "task"}); err != nil {
+		t.Fatalf("seeding the work-only control: %v", err)
+	}
+	failClassBindingReads(t, cityPath, errors.New("the class binding is having a bad day"))
+
+	for run := 1; run <= 2; run++ {
+		var stdout, stderr bytes.Buffer
+		if code := doBeadsListFallback(cityPath, "", beadFilters{}, &stdout, &stderr); code != 0 {
+			t.Fatalf("run %d: a refused binding failed the whole list (exit %d); a refused city still serves work: %s", run, code, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "a work bead the binding never held") {
+			t.Errorf("run %d: the work ledger's own rows went missing:\n%s", run, stdout.String())
+		}
+		if !strings.Contains(stderr.String(), "bad day") {
+			t.Errorf("run %d: the refusal was not announced with its own cause: %q", run, stderr.String())
+		}
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/graphv2"
@@ -170,7 +171,7 @@ func buildFormulaRuns(state State, formulaName, requestedScopeKind, requestedSco
 	}, nil
 }
 
-func buildFormulaDetail(ctx context.Context, store beads.Store, name string, paths []string, target string, vars map[string]string, validateRuntimeVars bool) (*formulaDetailResponse, error) {
+func buildFormulaDetail(ctx context.Context, store beads.Store, name string, paths []string, target string, targetIsRoutingIdentity bool, vars map[string]string, validateRuntimeVars bool) (*formulaDetailResponse, error) {
 	if len(paths) == 0 {
 		return nil, fmt.Errorf("%w: %q not in search paths", errFormulaNotFound, name)
 	}
@@ -179,7 +180,7 @@ func buildFormulaDetail(ctx context.Context, store beads.Store, name string, pat
 	if err != nil {
 		return nil, err
 	}
-	compileVars, err := formulaDetailPreviewVars(ctx, store, name, paths, resolved, target, vars, validateRuntimeVars)
+	compileVars, err := formulaDetailPreviewVars(ctx, store, name, paths, resolved, target, targetIsRoutingIdentity, vars, validateRuntimeVars)
 	if err != nil {
 		return nil, err
 	}
@@ -228,7 +229,7 @@ func buildFormulaDetail(ctx context.Context, store beads.Store, name string, pat
 			Title: title,
 			Kind:  kind,
 		}
-		if scopeRef := strings.TrimSpace(step.Metadata["gc.scope_ref"]); scopeRef != "" {
+		if scopeRef := strings.TrimSpace(step.Metadata[beadmeta.ScopeRefMetadataKey]); scopeRef != "" {
 			node.ScopeRef = scopeRef
 		}
 		nodes = append(nodes, node)
@@ -261,7 +262,7 @@ func buildFormulaDetail(ctx context.Context, store beads.Store, name string, pat
 	return resp, nil
 }
 
-func formulaDetailPreviewVars(ctx context.Context, store beads.Store, name string, paths []string, resolved *formula.Formula, target string, vars map[string]string, validateRuntimeVars bool) (map[string]string, error) {
+func formulaDetailPreviewVars(ctx context.Context, store beads.Store, name string, paths []string, resolved *formula.Formula, target string, targetIsRoutingIdentity bool, vars map[string]string, validateRuntimeVars bool) (map[string]string, error) {
 	if resolved == nil || !formula.UsesGraphCompiler(resolved) {
 		return vars, nil
 	}
@@ -297,14 +298,19 @@ func formulaDetailPreviewVars(ctx context.Context, store beads.Store, name strin
 					return nil, err
 				}
 			}
-			return nil, fmt.Errorf("graph.v2 target is required")
+			return nil, fmt.Errorf("formulas v2 target is required")
 		}
 		if err := formula.ValidateGraphV2RecipeReservedSymbols(recipe, true); err != nil {
 			return nil, err
 		}
-		inputConvoyID, err := graphv2.PreviewInputConvoyID(store, target)
-		if err != nil {
-			return nil, err
+		var inputConvoyID string
+		if targetIsRoutingIdentity {
+			inputConvoyID = graphv2.PreviewInputConvoyIDForRoutingIdentity(target)
+		} else {
+			inputConvoyID, err = graphv2.PreviewInputConvoyID(store, target)
+			if err != nil {
+				return nil, err
+			}
 		}
 		if out == nil {
 			out = make(map[string]string, 1)
@@ -312,7 +318,7 @@ func formulaDetailPreviewVars(ctx context.Context, store beads.Store, name strin
 		out[graphv2.ConvoyIDVar] = inputConvoyID
 		return out, nil
 	}
-	inv, err := graphv2.PreparePreviewInvocation(ctx, store, name, paths, target, vars)
+	inv, err := graphv2.PreparePreviewInvocation(ctx, store, name, paths, target, targetIsRoutingIdentity, vars)
 	if err != nil {
 		return nil, err
 	}
@@ -352,12 +358,25 @@ func discoverFormulaNamesFromSource(src formula.Source, paths []string) []string
 	return names
 }
 
-func loadResolvedWorkflowFormula(parser *formula.Parser, name string) (*formula.Formula, error) {
+// loadResolvedFormula loads a formula by name and resolves its extends chain
+// without constraining its type, so callers that accept any authorable formula
+// (workflow, expansion, or aspect) can reuse the parser's load+resolve to catch
+// missing parents and other resolution errors. It returns only resolution
+// failures, never a type mismatch.
+func loadResolvedFormula(parser *formula.Parser, name string) (*formula.Formula, error) {
 	loaded, err := parser.LoadByName(name)
 	if err != nil {
 		return nil, err
 	}
-	resolved, err := parser.Resolve(loaded)
+	return parser.Resolve(loaded)
+}
+
+// loadResolvedWorkflowFormula resolves a formula and additionally requires it to
+// be a workflow. The catalog and detail readers use the workflow gate to skip
+// non-workflow building blocks; authoring paths that accept those building
+// blocks call loadResolvedFormula instead.
+func loadResolvedWorkflowFormula(parser *formula.Parser, name string) (*formula.Formula, error) {
+	resolved, err := loadResolvedFormula(parser, name)
 	if err != nil {
 		return nil, err
 	}
@@ -403,7 +422,7 @@ func formulaVarDefs(vars map[string]*formula.VarDef) []formulaVarDefResponse {
 }
 
 func recipeStepKind(step formula.RecipeStep) string {
-	if kind := strings.TrimSpace(step.Metadata["gc.kind"]); kind != "" {
+	if kind := strings.TrimSpace(step.Metadata[beadmeta.KindMetadataKey]); kind != "" {
 		return kind
 	}
 	if step.Type != "" {
@@ -416,7 +435,13 @@ func includeFormulaPreviewStep(step formula.RecipeStep, rootID string) bool {
 	if step.ID == rootID {
 		return false
 	}
-	switch strings.TrimSpace(step.Metadata["gc.kind"]) {
+	// This is a preview-projection filter, not a control-kind membership
+	// predicate, so it intentionally lists literals instead of deriving from
+	// the beadmeta control-kind taxonomy. The hidden set is the structural
+	// bookkeeping steps that should not surface in a formula preview; it
+	// includes "spec" (not a control kind) and omits control kinds that are
+	// meant to remain previewable, so no existing beadmeta set matches it.
+	switch strings.TrimSpace(step.Metadata[beadmeta.KindMetadataKey]) {
 	case "scope-check", "workflow-finalize", "spec":
 		return false
 	default:

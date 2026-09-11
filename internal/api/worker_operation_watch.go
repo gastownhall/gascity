@@ -24,7 +24,7 @@ func (s *Server) resolveAgentSessionSubjects(name string, cfg *config.City) (str
 	}
 
 	sessionID := ""
-	if store := s.state.CityBeadStore(); store != nil {
+	if store := s.state.SessionsBeadStore().Store; store != nil {
 		if id, err := s.resolveSessionIDWithConfig(store, sessionName); err == nil {
 			sessionID = strings.TrimSpace(id)
 		}

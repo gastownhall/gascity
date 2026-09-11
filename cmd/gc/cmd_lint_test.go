@@ -156,6 +156,143 @@ func TestLintEmitsLoaderWarnings(t *testing.T) {
 	}
 }
 
+func TestLintRejectsNamedSessionBackedByPoolControlledAgent(t *testing.T) {
+	packDir := t.TempDir()
+	writeLintFile(t, filepath.Join(packDir, "pack.toml"), `[pack]
+name = "bad-pool-named"
+version = "0.1.0"
+schema = 2
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.template.md"
+min_active_sessions = 0
+max_active_sessions = 3
+
+[[named_session]]
+template = "worker"
+scope = "rig"
+mode = "on_demand"
+`)
+	writeLintFile(t, filepath.Join(packDir, "prompts", "worker.template.md"), "hello {{.AgentName}}\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("gc lint succeeded, want named-session pool conflict\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+	errText := stderr.String()
+	if !strings.Contains(errText, `named_session "worker" targets pool-controlled agent "worker"`) {
+		t.Fatalf("stderr missing named-session pool conflict:\n%s", errText)
+	}
+}
+
+// TestLintAllowsNamedSessionOnExplicitlyDisabledPoolAgent is a regression
+// guard for #4184 problem 2: min_active_sessions=0 + max_active_sessions=0
+// is documented (TestValidateAgentsPoolMaxZeroIsValid) as the intentional
+// way to disable an agent's pool — it is not a pool. The lint rule must not
+// re-flag it as "pool-controlled" the same way it flags a real pool
+// (e.g. min=0/max=3 in TestLintRejectsNamedSessionBackedByPoolControlledAgent
+// above).
+func TestLintAllowsNamedSessionOnExplicitlyDisabledPoolAgent(t *testing.T) {
+	packDir := t.TempDir()
+	writeLintFile(t, filepath.Join(packDir, "pack.toml"), `[pack]
+name = "disabled-pool-named"
+version = "0.1.0"
+schema = 2
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.template.md"
+min_active_sessions = 0
+max_active_sessions = 0
+
+[[named_session]]
+template = "worker"
+scope = "rig"
+mode = "on_demand"
+`)
+	writeLintFile(t, filepath.Join(packDir, "prompts", "worker.template.md"), "hello {{.AgentName}}\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc lint failed on an explicitly disabled pool agent, want pass\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), "pool-controlled agent") {
+		t.Fatalf("stderr wrongly flagged the documented max=0 disable form as pool-controlled:\n%s", stderr.String())
+	}
+}
+
+// TestLintAllowsNamedSessionSingletonAgent is a regression guard for the
+// max_active_sessions=1 named-session flavor documented by
+// (*config.Agent).SupportsInstanceExpansion: max=1 with no min/scale_check/
+// namepool is a singleton with a stable canonical identity, not a pool.
+// A [[named_session]] targeting that shape is the supported way to declare a
+// persistent seat and must lint clean.
+func TestLintAllowsNamedSessionSingletonAgent(t *testing.T) {
+	packDir := t.TempDir()
+	writeLintFile(t, filepath.Join(packDir, "pack.toml"), `[pack]
+name = "singleton-named"
+version = "0.1.0"
+schema = 2
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.template.md"
+max_active_sessions = 1
+
+[[named_session]]
+template = "worker"
+scope = "rig"
+mode = "on_demand"
+`)
+	writeLintFile(t, filepath.Join(packDir, "prompts", "worker.template.md"), "hello {{.AgentName}}\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc lint failed on a named-session singleton agent, want pass\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), "pool-controlled agent") {
+		t.Fatalf("stderr wrongly flagged the max=1 named-session flavor as pool-controlled:\n%s", stderr.String())
+	}
+}
+
+// TestLintStillRejectsSingletonPoolWithMin pins the boundary of the max=1
+// exemption: an explicit min_active_sessions keeps pool semantics
+// (SupportsInstanceExpansion's pool flavor), so a named_session targeting
+// min=1/max=1 remains a conflict.
+func TestLintStillRejectsSingletonPoolWithMin(t *testing.T) {
+	packDir := t.TempDir()
+	writeLintFile(t, filepath.Join(packDir, "pack.toml"), `[pack]
+name = "singleton-pool-named"
+version = "0.1.0"
+schema = 2
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.template.md"
+min_active_sessions = 1
+max_active_sessions = 1
+
+[[named_session]]
+template = "worker"
+scope = "rig"
+mode = "on_demand"
+`)
+	writeLintFile(t, filepath.Join(packDir, "prompts", "worker.template.md"), "hello {{.AgentName}}\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("gc lint succeeded, want pool conflict for min=1/max=1\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `named_session "worker" targets pool-controlled agent "worker"`) {
+		t.Fatalf("stderr missing named-session pool conflict:\n%s", stderr.String())
+	}
+}
+
 func TestLintPromptDiscoverySkipsIgnoredDirs(t *testing.T) {
 	packDir := t.TempDir()
 	writeLintPack(t, packDir, "skip-dirs", "worker", "prompts/worker.template.md")
@@ -191,6 +328,55 @@ inject_fragments = ["missing-footer"]
 	}
 	if !strings.Contains(stderr.String(), `inject_fragment "missing-footer"`) {
 		t.Fatalf("stderr missing inject fragment diagnostic:\n%s", stderr.String())
+	}
+}
+
+func TestLintCleanBdInvocationsProduceNoFindings(t *testing.T) {
+	packDir := t.TempDir()
+	writeLintPack(t, packDir, "bd-flag-clean", "worker", "prompts/worker.template.md")
+	writeLintFile(t, filepath.Join(packDir, "prompts", "worker.template.md"),
+		"Agent {{.AgentName}}\n`gc bd update <id> --claim`\n`gc bd ready --unassigned --json`\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc lint = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestLintReportsUnknownBdFlag(t *testing.T) {
+	packDir := t.TempDir()
+	writeLintPack(t, packDir, "bd-flag-typo", "worker", "prompts/worker.template.md")
+	writeLintFile(t, filepath.Join(packDir, "prompts", "worker.template.md"),
+		"Agent {{.AgentName}}\n`gc bd update <id> --asignee bob`\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("gc lint succeeded; stdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+	errText := stderr.String()
+	if !strings.Contains(errText, "bd-unknown-flag") || !strings.Contains(errText, `"--asignee"`) {
+		t.Fatalf("stderr missing bd-unknown-flag diagnostic:\n%s", errText)
+	}
+	if !strings.Contains(errText, "worker.template.md:2:") {
+		t.Fatalf("stderr missing correct line number for bd-unknown-flag diagnostic:\n%s", errText)
+	}
+}
+
+func TestLintSkipsOutOfScopeBdSubcommand(t *testing.T) {
+	packDir := t.TempDir()
+	writeLintPack(t, packDir, "bd-flag-out-of-scope", "worker", "prompts/worker.template.md")
+	writeLintFile(t, filepath.Join(packDir, "prompts", "worker.template.md"),
+		"Agent {{.AgentName}}\n`gc bd formula show some-formula --made-up-flag`\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc lint = %d, want 0 (out-of-scope subcommand silently skipped)\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
 	}
 }
 
@@ -323,6 +509,88 @@ func appendLintFile(t *testing.T, path, content string) {
 	}
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestLintFormulaOutputJSONWarning(t *testing.T) {
+	packDir := t.TempDir()
+	writeLintPack(t, packDir, "mypack", "worker", "prompts/worker.template.md")
+	writeLintFile(t, filepath.Join(packDir, "prompts", "worker.template.md"), "hello {{.AgentName}}\n")
+
+	formulaDir := filepath.Join(packDir, "formulas")
+	writeLintFile(t, filepath.Join(formulaDir, "legacy.formula.toml"), strings.TrimSpace(`
+formula = "legacy-fanout"
+version = 1
+contract = "graph.v2"
+[[steps]]
+id = "worker"
+prompt = "do work"
+[steps.metadata]
+"gc.output_json_required" = "true"
+`)+"\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc lint = %d, want 0 (warnings-only exits 0)\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "gc.output_json is deprecated; use drain in v2 formulas") {
+		t.Errorf("stderr = %q, want gc.output_json warning", stderr.String())
+	}
+}
+
+func TestLintFormulaNoWarningForDrain(t *testing.T) {
+	packDir := t.TempDir()
+	writeLintPack(t, packDir, "mypack", "worker", "prompts/worker.template.md")
+	writeLintFile(t, filepath.Join(packDir, "prompts", "worker.template.md"), "hello {{.AgentName}}\n")
+
+	formulaDir := filepath.Join(packDir, "formulas")
+	writeLintFile(t, filepath.Join(formulaDir, "drain.formula.toml"), strings.TrimSpace(`
+formula = "drain-fanout"
+version = 1
+contract = "graph.v2"
+[[steps]]
+id = "worker"
+prompt = "do work"
+[steps.drain]
+context = "separate"
+formula = "mol-do-work"
+member_access = "exclusive"
+`)+"\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc lint = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), "gc.output_json") {
+		t.Errorf("stderr = %q, must not warn about gc.output_json for drain formula", stderr.String())
+	}
+}
+
+func TestLintFormulaNoWarningForGraphV1(t *testing.T) {
+	packDir := t.TempDir()
+	writeLintPack(t, packDir, "mypack", "worker", "prompts/worker.template.md")
+	writeLintFile(t, filepath.Join(packDir, "prompts", "worker.template.md"), "hello {{.AgentName}}\n")
+
+	formulaDir := filepath.Join(packDir, "formulas")
+	writeLintFile(t, filepath.Join(formulaDir, "v1.formula.toml"), strings.TrimSpace(`
+formula = "v1-fanout"
+version = 1
+[[steps]]
+id = "worker"
+prompt = "do work"
+[steps.metadata]
+"gc.output_json_required" = "true"
+`)+"\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc lint = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), "gc.output_json") {
+		t.Errorf("stderr = %q, must not warn about gc.output_json for graph.v1 formula", stderr.String())
 	}
 }
 

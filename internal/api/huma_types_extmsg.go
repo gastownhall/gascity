@@ -56,11 +56,17 @@ type ExtMsgBindingListInput struct {
 }
 
 // ExtMsgBindInput is the Huma input for POST /v0/city/{cityName}/extmsg/bind.
+//
+// Exactly one of SessionID and AgentName must be set. The schema cannot
+// express required-exactly-one-of-siblings, so both stay optional here and
+// the handler enforces the rule (same pattern as ExtMsgInboundInput).
 type ExtMsgBindInput struct {
 	CityScope
 	Body struct {
 		Conversation extmsg.ConversationRef `json:"conversation,omitempty" doc:"Conversation to bind."`
-		SessionID    string                 `json:"session_id" minLength:"1" doc:"Session ID to bind."`
+		SessionID    string                 `json:"session_id,omitempty" doc:"Session ID to bind (mutually exclusive with agent_name)."`
+		AgentName    string                 `json:"agent_name,omitempty" doc:"Configured agent identity to bind; its live session is resolved at delivery time, cold-waking one when none is live (mutually exclusive with session_id)."`
+		Replace      bool                   `json:"replace,omitempty" doc:"Rebind (handoff) a conversation whose active binding targets someone else instead of returning a conflict."`
 		Metadata     map[string]string      `json:"metadata,omitempty" doc:"Optional binding metadata."`
 	}
 }
@@ -71,11 +77,15 @@ type ExtMsgBindOutput struct {
 }
 
 // ExtMsgUnbindInput is the Huma input for POST /v0/city/{cityName}/extmsg/unbind.
+//
+// At least one of Conversation, SessionID, and AgentName must be set; the
+// handler enforces the rule (the schema cannot).
 type ExtMsgUnbindInput struct {
 	CityScope
 	Body struct {
-		Conversation *extmsg.ConversationRef `json:"conversation,omitempty" doc:"Conversation to unbind (nil = all)."`
-		SessionID    string                  `json:"session_id" minLength:"1" doc:"Session ID to unbind."`
+		Conversation *extmsg.ConversationRef `json:"conversation,omitempty" doc:"Conversation to unbind (nil = filter by session_id/agent_name)."`
+		SessionID    string                  `json:"session_id,omitempty" doc:"Session ID to unbind."`
+		AgentName    string                  `json:"agent_name,omitempty" doc:"Configured agent identity to unbind."`
 	}
 }
 
@@ -178,7 +188,8 @@ type ExtMsgAdapterListInput struct {
 // ExtMsgAdapterRegisterInput is the Huma input for POST /v0/city/{cityName}/extmsg/adapters.
 type ExtMsgAdapterRegisterInput struct {
 	CityScope
-	Body struct {
+	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
+	Body           struct {
 		Provider     string                     `json:"provider" minLength:"1" doc:"Provider name."`
 		AccountID    string                     `json:"account_id" minLength:"1" doc:"Account ID."`
 		Name         string                     `json:"name,omitempty" doc:"Adapter display name."`

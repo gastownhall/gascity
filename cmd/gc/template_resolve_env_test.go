@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -236,5 +237,80 @@ func TestResolveTemplateInjectsPerDispatcherTraceDefault(t *testing.T) {
 				t.Fatalf("GC_CONTROL_DISPATCHER_TRACE_DEFAULT = %q, want %q", got, wantPath)
 			}
 		})
+	}
+}
+
+// The controller token is controller scope, and every layer resolveTemplate
+// merges after the passthrough is config-authored. Two exfiltration shapes
+// exist, so both are driven here: a literal entry that overwrites the empty pin,
+// and a "$GC_CONTROLLER_TOKEN" reference, which expandEnvMap resolves against
+// the controller process and would land under a name no key-level guard
+// watches. The upstream block is the same merge one layer later and writes
+// AFTER the ScrubTokenEnv call, so it gets both shapes too.
+func TestResolveTemplateWithholdsControllerTokenFromConfigAuthoredEnv(t *testing.T) {
+	const token = "super-secret-controller-token"
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+	t.Setenv(convergence.TokenEnvVar, token)
+
+	params := &agentBuildParams{
+		cityName: "city",
+		cityPath: cityPath,
+		city: &config.City{Upstreams: map[string]config.UpstreamSpec{
+			"gateway": {
+				// Abstract serving field, rendered onto the name the upstream
+				// picks — a second expansion site, and one that writes after
+				// the ScrubTokenEnv call.
+				APIKey:    "$" + convergence.TokenEnvVar,
+				APIKeyEnv: "UPSTREAM_SERVING_COPY",
+				Env: map[string]string{
+					convergence.TokenEnvVar: "upstream-literal",
+					"UPSTREAM_COPY":         "$" + convergence.TokenEnvVar,
+				},
+			},
+		}},
+		workspace: &config.Workspace{
+			Provider: "test",
+			Env: map[string]string{
+				convergence.TokenEnvVar: "workspace-literal",
+				"WORKSPACE_COPY":        "$" + convergence.TokenEnvVar,
+			},
+		},
+		providers:  map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+		lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+		fs:         fsys.OSFS{},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+	agent := &config.Agent{
+		Name:     "mayor",
+		Upstream: "gateway",
+		Env: map[string]string{
+			convergence.TokenEnvVar: "agent-literal",
+			"AGENT_COPY":            "${" + convergence.TokenEnvVar + "}",
+		},
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+
+	val, ok := tp.Env[convergence.TokenEnvVar]
+	if !ok {
+		t.Errorf("Env omits %s; want present and empty so the session cannot inherit the controller's value", convergence.TokenEnvVar)
+	} else if val != "" {
+		t.Errorf("Env[%s] = %q, want empty (a config-authored literal must not overwrite the pin)", convergence.TokenEnvVar, val)
+	}
+	for _, key := range []string{"WORKSPACE_COPY", "AGENT_COPY", "UPSTREAM_COPY", "UPSTREAM_SERVING_COPY"} {
+		if got := tp.Env[key]; got != "" {
+			t.Errorf("Env[%s] = %q, want empty ($VAR expansion must not copy the controller token into another name)", key, got)
+		}
+	}
+	for key, val := range tp.Env {
+		if strings.Contains(val, token) {
+			t.Errorf("Env[%s] = %q carries the controller token", key, val)
+		}
 	}
 }

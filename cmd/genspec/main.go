@@ -10,10 +10,10 @@
 // root when invoked via `go run ./cmd/genspec`):
 //
 //	internal/api/openapi.json   — drift-check source of truth
-//	docs/schema/openapi.json    — committed docs copy
-//	docs/schema/openapi.txt     — compatibility mirror kept in sync
-//	docs/schema/events.json     — gc events JSONL line schema
-//	docs/schema/events.txt      — compatibility mirror kept in sync
+//	docs/reference/schema/openapi.json    — committed docs copy
+//	docs/reference/schema/openapi.txt     — compatibility mirror kept in sync
+//	docs/reference/schema/events.json     — gc events JSONL line schema
+//	docs/reference/schema/events.txt      — compatibility mirror kept in sync
 //
 // Pass -out <path> to write a single file instead, or -stdout to
 // emit to stdout (useful for ad-hoc inspection or legacy tooling).
@@ -78,23 +78,23 @@ func main() {
 		writeSpec(outFlag, out.Bytes())
 	default:
 		writeSpec(filepath.Join("internal", "api", "openapi.json"), out.Bytes())
-		writeSpec(filepath.Join("docs", "schema", "openapi.json"), out.Bytes())
-		writeSpec(filepath.Join("docs", "schema", "openapi.txt"), out.Bytes())
+		writeSpec(filepath.Join("docs", "reference", "schema", "openapi.json"), out.Bytes())
+		writeSpec(filepath.Join("docs", "reference", "schema", "openapi.txt"), out.Bytes())
 
 		events, err := eventsSpec()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "generate events schema: %v\n", err)
 			os.Exit(1)
 		}
-		writeSpec(filepath.Join("docs", "schema", "events.json"), events)
-		writeSpec(filepath.Join("docs", "schema", "events.txt"), events)
+		writeSpec(filepath.Join("docs", "reference", "schema", "events.json"), events)
+		writeSpec(filepath.Join("docs", "reference", "schema", "events.txt"), events)
 	}
 }
 
 func eventsSpec() ([]byte, error) {
 	schema := map[string]any{
 		"$schema": "https://json-schema.org/draft/2020-12/schema",
-		"$id":     "https://docs.gascityhall.com/schema/events.json",
+		"$id":     "https://docs.gascityhall.com/reference/schema/events.json",
 		"title":   "gc events JSONL line schema",
 		"description": "Validates one JSON object line emitted by `gc events`, `gc events --watch`, or `gc events --follow`. " +
 			"The referenced DTO schemas live in the supervisor OpenAPI document; the API remains the source of truth. " +

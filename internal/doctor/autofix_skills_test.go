@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -274,6 +275,95 @@ func TestDeprecatedAttachmentFieldsCheckEndToEnd(t *testing.T) {
 	want := "[[agent]]\nname = \"mayor\"\nprovider = \"claude\"\n"
 	if string(got) != want {
 		t.Fatalf("post-fix file:\n%s\nwant:\n%s", string(got), want)
+	}
+}
+
+// Regression for the ga-lurp5d follow-up review: the attachment-fields
+// autofix must rewrite through symlinked city.toml and pack.toml,
+// preserving each link and updating the checkout target instead of
+// replacing the link with a divorced regular file that strands the
+// stale deprecated content.
+func TestDeprecatedAttachmentFieldsFixWritesThroughSymlinks(t *testing.T) {
+	t.Parallel()
+	city := t.TempDir()
+	checkout := filepath.Join(city, "checkout")
+	if err := os.MkdirAll(checkout, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sources := map[string]string{
+		"city.toml": "[[agent]]\nname = \"mayor\"\nprovider = \"claude\"\nskills = [\"foo\"]\n",
+		"pack.toml": "[pack]\nname = \"demo\"\nmcp = []\n",
+	}
+	targets := map[string]string{}
+	for name, src := range sources {
+		target := filepath.Join(checkout, name)
+		if err := os.WriteFile(target, []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, filepath.Join(city, name)); err != nil {
+			t.Fatal(err)
+		}
+		targets[name] = target
+	}
+
+	check := &DeprecatedAttachmentFieldsCheck{}
+	if err := check.Fix(&CheckContext{CityPath: city}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+
+	for name, target := range targets {
+		link := filepath.Join(city, name)
+		info, err := os.Lstat(link)
+		if err != nil {
+			t.Fatalf("Lstat %s: %v", link, err)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("%s symlink was replaced by a %v entry; fix must write through the link", name, info.Mode())
+		}
+		data, err := os.ReadFile(target)
+		if err != nil {
+			t.Fatalf("ReadFile %s: %v", target, err)
+		}
+		got := string(data)
+		if strings.Contains(got, "skills =") || strings.Contains(got, "mcp =") {
+			t.Fatalf("%s symlink target still carries deprecated fields:\n%s", name, got)
+		}
+	}
+}
+
+// Regression for the ga-lurp5d follow-up review: the rewrite's temp file
+// is created 0600 by os.CreateTemp, so an applied fix must not let that
+// mode survive the rename and silently narrow the config's permissions.
+// The rewrite preserves the original file mode.
+func TestDeprecatedAttachmentFieldsFixPreservesFileMode(t *testing.T) {
+	t.Parallel()
+	for _, perm := range []os.FileMode{0o644, 0o600} {
+		perm := perm
+		t.Run(fmt.Sprintf("%04o", perm), func(t *testing.T) {
+			t.Parallel()
+			city := t.TempDir()
+			path := filepath.Join(city, "city.toml")
+			src := "[[agent]]\nname = \"x\"\nprovider = \"claude\"\nskills = []\n"
+			if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(path, perm); err != nil {
+				t.Fatal(err)
+			}
+
+			check := &DeprecatedAttachmentFieldsCheck{}
+			if err := check.Fix(&CheckContext{CityPath: city}); err != nil {
+				t.Fatalf("Fix: %v", err)
+			}
+
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := info.Mode().Perm(); got != perm {
+				t.Fatalf("post-fix mode = %04o, want %04o", got, perm)
+			}
+		})
 	}
 }
 

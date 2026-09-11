@@ -5,9 +5,12 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/events"
@@ -66,12 +69,26 @@ func doMoleculeAutoclose(beadID string, stdout, stderr io.Writer) {
 	}
 	storeRoot := convoyAutocloseStoreRoot(cwd)
 	cityPath := autocloseCityPathForStoreRoot(storeRoot)
+	rec := openCityRecorderAt(cityPath, stderr)
+
+	// See doConvoyAutoclose: the bd on_close hook inherits the supervisor's
+	// (city) cwd/env, so resolve the store that actually owns the bead across
+	// the city and every rig, and derive the store-ref from that store, so
+	// rig-store closes autoclose their molecule roots instead of silently
+	// no-op'ing (#3411).
+	// The root is ClassGraph wherever the just-closed bead lives, so the graph
+	// leg routes off the owning store rather than following it.
+	routeCfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	if store, dir, ok := autocloseOwningStore(beadID, cityPath); ok {
+		doMoleculeAutocloseWith(store, autocloseStoreRef(dir, cityPath), rec, beadID, stdout, cliGraphStore(store, routeCfg, cityPath))
+		return
+	}
+
 	store, err := openStoreAtForCity(storeRoot, cityPath)
 	if err != nil {
 		return
 	}
-	rec := openCityRecorderAt(cityPath, stderr)
-	doMoleculeAutocloseWith(store, autocloseStoreRef(storeRoot, cityPath), rec, beadID, stdout)
+	doMoleculeAutocloseWith(store, autocloseStoreRef(storeRoot, cityPath), rec, beadID, stdout, cliGraphStore(store, routeCfg, cityPath))
 }
 
 // autocloseStoreRef resolves the store-ref label ("city:<name>" / "rig:<name>")
@@ -98,7 +115,18 @@ func autocloseStoreRef(storeRoot, cityPath string) string {
 // predate the metadata convention. All errors are silently swallowed;
 // this is called from a bd hook script and must not fail loudly. See
 // gastownhall/gascity#1039.
-func doMoleculeAutocloseWith(store beads.Store, storeRef string, rec events.Recorder, beadID string, stdout io.Writer) {
+// doMoleculeAutocloseWith reads the just-closed bead from store (the store that
+// owns it) and resolves/closes its molecule or graph-workflow root through the
+// graph-class store. A closed bead can be a work/source bead in a rig store
+// while the molecule root it belongs to lives in the graph store, so the
+// source-bead reverse scan and the root walk run on the graph store. It is a
+// required parameter for the reason given on doWispAutocloseWith.
+func doMoleculeAutocloseWith(store beads.Store, storeRef string, rec events.Recorder, beadID string, stdout io.Writer, graphClassStore beads.GraphStore) {
+	// Unwrapped for internal use; see doWispAutocloseWith.
+	graphStore := graphClassStore.Store
+	if graphStore == nil {
+		graphStore = store
+	}
 	bead, err := store.Get(beadID)
 	if err != nil {
 		return
@@ -113,9 +141,9 @@ func doMoleculeAutocloseWith(store beads.Store, storeRef string, rec events.Reco
 	// orphans and is re-routed to a fresh worker indefinitely. Reverse-
 	// resolve any live workflow roots whose source bead is this bead and
 	// close them once their own subtree is terminal.
-	autocloseRootsForSourceBead(store, storeRef, rec, beadID, stdout)
+	autocloseRootsForSourceBead(graphStore, storeRef, rec, beadID, stdout)
 
-	rootID := strings.TrimSpace(bead.Metadata["gc.root_bead_id"])
+	rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 	if rootID == "" {
 		// Legacy fallback for pre-metadata beads: react only to typed
 		// "step" closes with a direct molecule parent. Mirrors prior
@@ -125,18 +153,18 @@ func doMoleculeAutocloseWith(store beads.Store, storeRef string, rec events.Reco
 		if bead.Type != "step" || bead.ParentID == "" {
 			return
 		}
-		parent, err := store.Get(bead.ParentID)
+		parent, err := graphStore.Get(bead.ParentID)
 		if err != nil {
 			return
 		}
-		autocloseMoleculeIfComplete(store, rec, parent, stdout)
+		autocloseMoleculeIfComplete(graphStore, rec, parent, stdout)
 		return
 	}
-	root, err := store.Get(rootID)
+	root, err := graphStore.Get(rootID)
 	if err != nil {
 		return
 	}
-	autocloseMoleculeIfComplete(store, rec, root, stdout)
+	autocloseMoleculeIfComplete(graphStore, rec, root, stdout)
 }
 
 func autocloseMoleculeIfComplete(store beads.Store, rec events.Recorder, mol beads.Bead, stdout io.Writer) {
@@ -223,6 +251,9 @@ func subtreeTerminalExcludingRoot(store beads.Store, rootID string) (terminal bo
 // by the step-terminal and source-bead-close triggers. Best-effort: a close
 // failure aborts silently without recording or announcing.
 func announceClosedMolecule(store beads.Store, rec events.Recorder, mol beads.Bead, reason string, stdout io.Writer) bool {
+	// Capture the pre-close status before closeMoleculeWithReason transitions
+	// the root to closed — it is the from_status of the resolution record.
+	fromStatus := mol.Status
 	if err := closeMoleculeWithReason(store, mol.ID, reason); err != nil {
 		return false
 	}
@@ -231,6 +262,29 @@ func announceClosedMolecule(store beads.Store, rec events.Recorder, mol beads.Be
 		Type:    events.BeadClosed,
 		Actor:   eventActor(),
 		Subject: mol.ID,
+	})
+
+	// Additive attribution record: join the resolved molecule to the session
+	// that produced it, read from the identity the reconciler stamped onto the
+	// root (gc.session_* / gc.work_dir). A root closed before any reconcile
+	// stamped it — or hand-closed by a human — degrades to empty session
+	// fields rather than failing. Honesty-gate C.0 backbone for C.1/C.2/C.3.
+	actor := eventActor()
+	rec.Record(events.Event{
+		Type:    events.MoleculeResolved,
+		Actor:   actor,
+		Subject: mol.ID,
+		Payload: api.MoleculeResolvedPayloadJSON(api.MoleculeResolvedPayload{
+			IssueID:     mol.ID,
+			FromStatus:  fromStatus,
+			ToStatus:    "closed",
+			Actor:       actor,
+			SessionName: mol.Metadata[beadmeta.SessionNameMetadataKey],
+			SessionID:   mol.Metadata[beadmeta.SessionIDMetadataKey],
+			WorkDir:     mol.Metadata[beadmeta.WorkDirMetadataKey],
+			CloseReason: reason,
+			Ts:          time.Now().UTC(),
+		}),
 	})
 
 	fmt.Fprintf(stdout, "Auto-closed molecule %s %q\n", mol.ID, mol.Title) //nolint:errcheck // best-effort stdout

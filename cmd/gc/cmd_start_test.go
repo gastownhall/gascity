@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
@@ -13,7 +14,9 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/bootstrap"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/materialize"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -70,6 +73,33 @@ func TestPassthroughEnvOmitsUnset(t *testing.T) {
 	got := passthroughEnv()
 	if _, ok := got["GC_DOLT"]; ok {
 		t.Error("passthroughEnv() should omit empty GC_DOLT")
+	}
+}
+
+// The controller token is GC_-prefixed, so the sweep above would otherwise read
+// the controller's real token out of os.Environ() and write it straight back
+// over the empty value providerProcessPassthroughEnv() pinned.
+//
+// Withholding means PRESENT AND EMPTY, not absent: this map is an overlay on an
+// environment the session already inherits, so an absent key leaves the
+// controller's value showing through from the tmux server env or from
+// os.Environ() on the subprocess/ACP paths. The neighboring GC_ key proves the
+// exclusion is by exact name — a prefix match would strand the identity anchors
+// and the Dolt vars agents need.
+func TestPassthroughEnvPinsControllerTokenEmpty(t *testing.T) {
+	t.Setenv(convergence.TokenEnvVar, "super-secret-controller-token")
+	t.Setenv("GC_BEADS", "file")
+
+	got := passthroughEnv()
+
+	val, ok := got[convergence.TokenEnvVar]
+	if !ok {
+		t.Errorf("passthroughEnv() omits %s; want present and empty so the session cannot inherit the controller's value", convergence.TokenEnvVar)
+	} else if val != "" {
+		t.Errorf("passthroughEnv()[%s] = %q, want empty", convergence.TokenEnvVar, val)
+	}
+	if got["GC_BEADS"] != "file" {
+		t.Errorf("passthroughEnv()[GC_BEADS] = %q, want %q (the exclusion must be by exact name)", got["GC_BEADS"], "file")
 	}
 }
 
@@ -626,6 +656,7 @@ func TestReleaseOrphanedPoolAssignmentsWhenSnapshotsComplete_PartialSkipsComplet
 
 	released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 		store,
+		beads.SessionStore{Store: store},
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}}},
 		"",
 		nil,
@@ -634,6 +665,8 @@ func TestReleaseOrphanedPoolAssignmentsWhenSnapshotsComplete_PartialSkipsComplet
 			AssignedWorkStores: []beads.Store{store},
 			StoreQueryPartial:  true,
 		},
+		nil,
+		nil,
 		nil,
 	)
 	if len(released) != 0 {
@@ -649,6 +682,7 @@ func TestReleaseOrphanedPoolAssignmentsWhenSnapshotsComplete_PartialSkipsComplet
 
 	released = releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 		store,
+		beads.SessionStore{Store: store},
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}}},
 		"",
 		nil,
@@ -657,6 +691,8 @@ func TestReleaseOrphanedPoolAssignmentsWhenSnapshotsComplete_PartialSkipsComplet
 			AssignedWorkStores:  []beads.Store{store},
 			SessionQueryPartial: true,
 		},
+		nil,
+		nil,
 		nil,
 	)
 	if len(released) != 0 {
@@ -672,6 +708,7 @@ func TestReleaseOrphanedPoolAssignmentsWhenSnapshotsComplete_PartialSkipsComplet
 
 	released = releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 		store,
+		beads.SessionStore{Store: store},
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}}},
 		"",
 		nil,
@@ -679,6 +716,8 @@ func TestReleaseOrphanedPoolAssignmentsWhenSnapshotsComplete_PartialSkipsComplet
 			AssignedWorkBeads:  []beads.Bead{work},
 			AssignedWorkStores: []beads.Store{store},
 		},
+		nil,
+		nil,
 		nil,
 	)
 	if len(released) != 1 {
@@ -1001,11 +1040,13 @@ func TestStageHookFilesIncludesCanonicalClaudeHook(t *testing.T) {
 			if entry.Src != settingsPath {
 				t.Fatalf("stageHookFiles() staged %q, want %q", entry.Src, settingsPath)
 			}
-			if !entry.Probed {
-				t.Fatal("stageHookFiles() .gc/settings.json not marked Probed")
+			// .gc/settings.json must NOT be probed: binary-upgrade rewrites of the
+			// managed settings file must not cascade stale-session drains. (ga-zfm)
+			if entry.Probed {
+				t.Fatal("stageHookFiles() .gc/settings.json must not be marked Probed; content changes are ambient")
 			}
-			if entry.ContentHash == "" {
-				t.Fatal("stageHookFiles() .gc/settings.json has empty ContentHash")
+			if entry.ContentHash != "" {
+				t.Fatal("stageHookFiles() .gc/settings.json must have empty ContentHash when not probed")
 			}
 			return
 		}
@@ -1040,6 +1081,57 @@ func TestStageHookFilesFallsBackToLegacyClaudeHook(t *testing.T) {
 		}
 	}
 	t.Fatal("stageHookFiles() did not stage hooks/claude.json")
+}
+
+// TestRuntimeSettingsContentChangeDoesNotCascadeStaleSession is a regression
+// test for ga-zfm: a gc binary upgrade rewrites .gc/settings.json, which must
+// not produce a different CopyFiles fingerprint for previously-started sessions.
+// The fix marks .gc/settings.json as Probed:false so only the path is hashed.
+func TestRuntimeSettingsContentChangeDoesNotCascadeStaleSession(t *testing.T) {
+	cityDir := filepath.Join(t.TempDir(), "city")
+	workDir := filepath.Join(cityDir, "worker")
+	settingsPath := filepath.Join(cityDir, ".gc", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	// Write settings with "v1" content (before binary upgrade).
+	if err := os.WriteFile(settingsPath, []byte(`{"hooks":{"v1":true}}`), 0o644); err != nil {
+		t.Fatalf("WriteFile v1: %v", err)
+	}
+	before := stageHookFiles(nil, cityDir, workDir, []string{"claude"})
+
+	// Simulate binary upgrade: rewrite settings with new embedded defaults.
+	if err := os.WriteFile(settingsPath, []byte(`{"hooks":{"v2":true}}`), 0o644); err != nil {
+		t.Fatalf("WriteFile v2: %v", err)
+	}
+	after := stageHookFiles(nil, cityDir, workDir, []string{"claude"})
+
+	// Locate the settings entry in both results.
+	settingsRel := path.Join(".gc", "settings.json")
+	find := func(entries []runtime.CopyEntry) runtime.CopyEntry {
+		for _, e := range entries {
+			if e.RelDst == settingsRel {
+				return e
+			}
+		}
+		t.Fatalf("stageHookFiles: .gc/settings.json not staged")
+		return runtime.CopyEntry{}
+	}
+	eBefore := find(before)
+	eAfter := find(after)
+
+	// Content hash must be empty (not probed) and must be identical before/after
+	// so that CoreFingerprint produces the same hash regardless of file content.
+	if eBefore.Probed || eAfter.Probed {
+		t.Error(".gc/settings.json must not be marked Probed; content changes are ambient")
+	}
+	if eBefore.ContentHash != "" || eAfter.ContentHash != "" {
+		t.Error(".gc/settings.json ContentHash must be empty when not probed")
+	}
+	if eBefore.Src != eAfter.Src || eBefore.RelDst != eAfter.RelDst {
+		t.Errorf("Src/RelDst changed: before={%q %q} after={%q %q}", eBefore.Src, eBefore.RelDst, eAfter.Src, eAfter.RelDst)
+	}
 }
 
 func TestStageHookFilesDoesNotStageClaudeSkillsDir(t *testing.T) {
@@ -1079,6 +1171,207 @@ func TestStageHookFilesSkipsUnrequestedWorkDirHooks(t *testing.T) {
 		if entry.RelDst == path.Join("worker", ".gemini", "settings.json") {
 			t.Fatalf("stageHookFiles() staged unrequested hook %q", entry.Src)
 		}
+	}
+}
+
+func TestStageHookFilesIncludesAntigravityHooks(t *testing.T) {
+	cityDir := filepath.Join(t.TempDir(), "city")
+	workDir := filepath.Join(cityDir, "worker")
+	hookPath := filepath.Join(workDir, ".agents", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", hookPath, err)
+	}
+	if err := os.WriteFile(hookPath, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", hookPath, err)
+	}
+
+	got := stageHookFiles(nil, cityDir, workDir, []string{"antigravity"})
+	for _, entry := range got {
+		if entry.RelDst == path.Join("worker", ".agents", "hooks.json") {
+			if entry.Src != hookPath {
+				t.Fatalf("stageHookFiles() staged %q, want %q", entry.Src, hookPath)
+			}
+			if !entry.Probed {
+				t.Fatal("stageHookFiles() .agents/hooks.json not marked Probed")
+			}
+			if entry.ContentHash == "" {
+				t.Fatal("stageHookFiles() .agents/hooks.json has empty ContentHash")
+			}
+			return
+		}
+	}
+	t.Fatal("stageHookFiles() did not stage Antigravity .agents/hooks.json")
+}
+
+func TestStageHookFilesIncludesMimoCodeHooks(t *testing.T) {
+	cityDir := filepath.Join(t.TempDir(), "city")
+	workDir := filepath.Join(cityDir, "worker")
+	hookPath := filepath.Join(workDir, ".mimocode", "plugin", "gascity.js")
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", hookPath, err)
+	}
+	if err := os.WriteFile(hookPath, []byte("// plugin"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", hookPath, err)
+	}
+
+	got := stageHookFiles(nil, cityDir, workDir, []string{"mimocode"})
+	for _, entry := range got {
+		if entry.RelDst == path.Join("worker", ".mimocode", "plugin", "gascity.js") {
+			if entry.Src != hookPath {
+				t.Fatalf("stageHookFiles() staged %q, want %q", entry.Src, hookPath)
+			}
+			if !entry.Probed {
+				t.Fatal("stageHookFiles() .mimocode/plugin/gascity.js not marked Probed")
+			}
+			if entry.ContentHash == "" {
+				t.Fatal("stageHookFiles() .mimocode/plugin/gascity.js has empty ContentHash")
+			}
+			return
+		}
+	}
+	t.Fatal("stageHookFiles() did not stage MiMo Code .mimocode/plugin/gascity.js")
+}
+
+func TestStageHookFilesIncludesKimiHooks(t *testing.T) {
+	cityDir := filepath.Join(t.TempDir(), "city")
+	workDir := filepath.Join(cityDir, "worker")
+	configPath := filepath.Join(workDir, ".kimi", "config.toml")
+	scriptPath := filepath.Join(workDir, ".kimi", "hooks", "gascity-session-start.py")
+	for _, item := range []string{configPath, scriptPath} {
+		if err := os.MkdirAll(filepath.Dir(item), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q): %v", item, err)
+		}
+		if err := os.WriteFile(item, []byte("hook"), 0o644); err != nil {
+			t.Fatalf("WriteFile(%q): %v", item, err)
+		}
+	}
+
+	got := stageHookFiles(nil, cityDir, workDir, []string{"kimi"})
+	want := map[string]string{
+		path.Join("worker", ".kimi", "config.toml"):                       configPath,
+		path.Join("worker", ".kimi", "hooks", "gascity-session-start.py"): scriptPath,
+	}
+	for _, entry := range got {
+		wantSrc, ok := want[entry.RelDst]
+		if !ok {
+			continue
+		}
+		if entry.Src != wantSrc {
+			t.Fatalf("stageHookFiles() staged %q, want %q", entry.Src, wantSrc)
+		}
+		if !entry.Probed {
+			t.Fatalf("stageHookFiles() %s not marked Probed", entry.RelDst)
+		}
+		if entry.ContentHash == "" {
+			t.Fatalf("stageHookFiles() %s has empty ContentHash", entry.RelDst)
+		}
+		delete(want, entry.RelDst)
+	}
+	if len(want) > 0 {
+		t.Fatalf("stageHookFiles() missing Kimi hook entries: %v", want)
+	}
+}
+
+func TestResolveTemplateAddsKimiHookConfigArgWhenHooksInstalled(t *testing.T) {
+	tests := []struct {
+		name           string
+		session        string
+		optionDefaults map[string]string
+		wantCommand    string
+	}{
+		{
+			name:        "tmux without provider option",
+			session:     config.SessionTransportTmux,
+			wantCommand: "kimi --yolo --no-thinking --config-file .kimi/config.toml",
+		},
+		{
+			name:           "tmux with provider option",
+			session:        config.SessionTransportTmux,
+			optionDefaults: map[string]string{"model": "kimi-k2-thinking-turbo"},
+			wantCommand:    "kimi --yolo --no-thinking --config-file .kimi/config.toml --model kimi-k2-thinking-turbo",
+		},
+		{
+			name:        "acp without provider option",
+			session:     config.SessionTransportACP,
+			wantCommand: "kimi --yolo --no-thinking --config-file .kimi/config.toml acp",
+		},
+		{
+			name:           "acp with provider option",
+			session:        config.SessionTransportACP,
+			optionDefaults: map[string]string{"model": "kimi-k2-thinking-turbo"},
+			wantCommand:    "kimi --yolo --no-thinking --config-file .kimi/config.toml acp --model kimi-k2-thinking-turbo",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			cfgAgent := &config.Agent{
+				Name:              "worker",
+				Provider:          "kimi",
+				InstallAgentHooks: []string{"kimi"},
+				Session:           tt.session,
+				OptionDefaults:    tt.optionDefaults,
+			}
+			bp := &agentBuildParams{
+				cityName:   "city",
+				cityPath:   cityDir,
+				workspace:  &config.Workspace{Provider: "kimi"},
+				providers:  config.BuiltinProviders(),
+				lookPath:   func(name string) (string, error) { return "/bin/" + name, nil },
+				fs:         fsys.OSFS{},
+				rigs:       []config.Rig{},
+				beaconTime: time.Unix(0, 0),
+				beadNames:  make(map[string]string),
+				stderr:     io.Discard,
+			}
+
+			tp, err := resolveTemplate(bp, cfgAgent, "worker", nil)
+			if err != nil {
+				t.Fatalf("resolveTemplate: %v", err)
+			}
+
+			if tp.Command != tt.wantCommand {
+				t.Fatalf("Command = %q, want %q", tp.Command, tt.wantCommand)
+			}
+		})
+	}
+}
+
+// TestResolveTemplateExpandsDefaultBranchInPreStart pins the pre_start
+// carrier end to end through resolveTemplate: the setupCtx literal in
+// template_resolve.go must copy DefaultBranch from the path context, or the
+// GC_DEFAULT_BRANCH='{{.DefaultBranch}}' handoff the example packs rely on
+// silently renders empty. The unit tests on expandSessionSetup and
+// sessionSetupContextForAgent cannot catch a dropped field at THIS call site.
+func TestResolveTemplateExpandsDefaultBranchInPreStart(t *testing.T) {
+	cityDir := t.TempDir()
+	rigRoot := filepath.Join(cityDir, "repos", "demo")
+	cfgAgent := &config.Agent{
+		Name:     "worker",
+		Provider: "kimi",
+		Dir:      "demo",
+		PreStart: []string{`GC_DEFAULT_BRANCH='{{.DefaultBranch}}' setup.sh`},
+	}
+	bp := &agentBuildParams{
+		cityName:   "city",
+		cityPath:   cityDir,
+		workspace:  &config.Workspace{Provider: "kimi"},
+		providers:  config.BuiltinProviders(),
+		lookPath:   func(name string) (string, error) { return "/bin/" + name, nil },
+		fs:         fsys.OSFS{},
+		rigs:       []config.Rig{{Name: "demo", Path: rigRoot, DefaultBranch: "release/v2"}},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+
+	tp, err := resolveTemplate(bp, cfgAgent, "demo/worker", nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	want := `GC_DEFAULT_BRANCH='release/v2' setup.sh`
+	if len(tp.Hints.PreStart) == 0 || tp.Hints.PreStart[0] != want {
+		t.Fatalf("Hints.PreStart = %#v, want first entry %q", tp.Hints.PreStart, want)
 	}
 }
 
@@ -1784,5 +2077,108 @@ func TestDoStart_FlagValidationRunsBeforeDriftCheck(t *testing.T) {
 	}
 	if strings.Contains(stdout.String(), "Restarting supervisor") {
 		t.Errorf("supervisor restart attempted despite flag rejection:\n%s", stdout.String())
+	}
+}
+
+// The map-level guards above are necessary but were never sufficient: the
+// session env is an OVERLAY, and every runtime lays it over an environment the
+// child already has. internal/runtime/subprocess and internal/runtime/acp build
+// exactly this — os.Environ() with the overlay appended — so this test spawns a
+// real child that way and asks it what it actually sees. Deleting the key
+// instead of pinning it empty passes every assertion on the map and fails here,
+// which is how the leak shipped.
+func TestPassthroughEnvWithholdsControllerTokenFromChildProcess(t *testing.T) {
+	const token = "super-secret-controller-token"
+	t.Setenv(convergence.TokenEnvVar, token)
+
+	overlay := passthroughEnv()
+	env := os.Environ()
+	for k, v := range overlay {
+		env = append(env, k+"="+v)
+	}
+
+	cmd := exec.Command("/bin/sh", "-c", `printf %s "[${`+convergence.TokenEnvVar+`-ABSENT}]"`)
+	cmd.Env = env
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("running child: %v", err)
+	}
+
+	if got := string(out); got != "[]" {
+		t.Errorf("child process saw %s = %s, want [] (present and empty); it inherited the controller's value", convergence.TokenEnvVar, got)
+	}
+	if strings.Contains(string(out), token) {
+		t.Errorf("child process received the controller token: %s", out)
+	}
+}
+
+// TestStartStandaloneBuildsSessionProviderFromResolvedCityConfig pins the
+// wiring at cmd_start.go's provider-construction site: the provider must be
+// built from the config and path gc start already resolved, not from a second,
+// independent city rediscovery.
+//
+// The regression it guards is silent. The rediscovery path
+// (newSessionProvider → loadSessionProviderContext) swallows both
+// resolveCity() and loadCityConfig() errors and returns a cfg-less context, so
+// tmuxConfigFromSession falls back through sc.Socket → cityName → "" and lands
+// on the default tmux socket. Every socket-scoped operation then targets the
+// wrong server while start still reports success.
+//
+// cwd is pointed at an empty directory so rediscovery cannot accidentally
+// resolve this city: with the fix the captured socket is the configured label,
+// and without it the capture is empty.
+func TestStartStandaloneBuildsSessionProviderFromResolvedCityConfig(t *testing.T) {
+	const (
+		socketLabel = "bright-lights"
+		cityName    = "socket-wiring-city"
+	)
+
+	cityPath := t.TempDir()
+	clearInheritedBeadsEnv(t)
+	requireNoLeakedDoltAfterForPaths(t, cityPath)
+	t.Chdir(t.TempDir())
+
+	if err := os.MkdirAll(filepath.Join(cityPath, citylayout.RuntimeRoot), 0o755); err != nil {
+		t.Fatalf("scaffold runtime root: %v", err)
+	}
+	cityTOML := "[workspace]\nname = \"" + cityName + "\"\n\n" +
+		"[beads]\nprovider = \"file\"\n\n" +
+		"[session]\nsocket = \"" + socketLabel + "\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	var (
+		calls       int
+		gotSocket   string
+		gotCityName string
+		gotCityPath string
+	)
+	oldBuild := buildSessionProviderByName
+	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+	buildSessionProviderByName = func(_ *config.City, _ string, sc config.SessionConfig, resolvedName, resolvedPath string) (runtime.Provider, error) {
+		calls++
+		gotSocket, gotCityName, gotCityPath = sc.Socket, resolvedName, resolvedPath
+		return runtime.NewFake(), nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doStartStandalone([]string{cityPath}, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("doStartStandalone exit = %d, want 0\nstdout:\n%s\nstderr:\n%s",
+			code, stdout.String(), stderr.String())
+	}
+
+	if calls == 0 {
+		t.Fatal("buildSessionProviderByName never called; the seam no longer covers gc start's provider construction")
+	}
+	if gotSocket != socketLabel {
+		t.Errorf("session socket = %q, want %q; gc start built its provider from a rediscovered city instead of the resolved config",
+			gotSocket, socketLabel)
+	}
+	if gotCityName != cityName {
+		t.Errorf("city name = %q, want %q", gotCityName, cityName)
+	}
+	if gotCityPath != cityPath {
+		t.Errorf("city path = %q, want %q", gotCityPath, cityPath)
 	}
 }

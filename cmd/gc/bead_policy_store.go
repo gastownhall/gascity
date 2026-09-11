@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
-	"slices"
+	"fmt"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -32,6 +34,28 @@ type beadPolicyGraphStore struct {
 	*beadPolicyStore
 	applier beads.GraphApplyStore
 }
+
+var (
+	_ beads.ConditionalAssignmentReleaser    = (*beadPolicyStore)(nil)
+	_ beads.ConditionalWritesResolveTargeter = (*beadPolicyStore)(nil)
+)
+
+// ConditionalWritesResolveTarget declares the wrapped store as the
+// conditional-writes resolution target. The policy layer shapes creation and
+// reads; it does not intercept metadata writes (SetMetadata promotes from the
+// embedded store), so fenced writes resolve against the inner store — without
+// this declaration, interface embedding would hide the factory stamp and a
+// require deployment would silently collapse to legacy writes through the
+// wrapper. beadPolicyGraphStore inherits this via its embedded
+// *beadPolicyStore.
+func (s *beadPolicyStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
+
+var (
+	_ beads.BatchDeleter      = (*beadPolicyStore)(nil)
+	_ beads.BatchDeleter      = (*beadPolicyGraphStore)(nil)
+	_ beads.DepMetadataReader = (*beadPolicyStore)(nil)
+	_ beads.DepMetadataReader = (*beadPolicyGraphStore)(nil)
+)
 
 func wrapStoreWithBeadPolicies(store beads.Store, cfg *config.City) beads.Store {
 	if store == nil {
@@ -63,7 +87,7 @@ func unwrapBeadPolicyStore(store beads.Store) (beads.Store, *beadPolicyStore, bo
 
 func (s *beadPolicyStore) Create(b beads.Bead) (beads.Bead, error) {
 	_, storage := s.policyForCreate(b)
-	return createWithStoragePolicy(s.Store, b, storage)
+	return createWithStoragePolicy(s.createTarget(coordclass.Classify(b)), b, storage)
 }
 
 func (s *beadPolicyStore) List(query beads.ListQuery) ([]beads.Bead, error) {
@@ -73,6 +97,65 @@ func (s *beadPolicyStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 
 func (s *beadPolicyStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
 	return s.Store.Ready(expandPolicyReadyQuery(query...))
+}
+
+// ReadyContext preserves the policy-expanded read tier for deadline-sensitive
+// Ready projections. Optional capabilities are hidden by the embedded Store
+// interface, so forward explicitly just like Count.
+func (s *beadPolicyStore) ReadyContext(ctx context.Context, query ...beads.ReadyQuery) ([]beads.Bead, error) {
+	reader, ok := s.Store.(beads.ContextReadyReader)
+	if !ok {
+		return nil, fmt.Errorf("reading ready beads through policy store: %w", beads.ErrReadyContextUnsupported)
+	}
+	return reader.ReadyContext(ctx, expandPolicyReadyQuery(query...))
+}
+
+// DepMetadata forwards the inner store's edge-payload read. The policy layer
+// shapes creation and reads by tier; it has nothing to say about what an edge
+// carries, so the answer passes through untouched.
+//
+// Forwarded explicitly for the same reason as Count and ReadyContext — the
+// embedded Store interface strips optional capabilities — but the stakes here
+// are higher than a fallback: a caller that refuses on uncertainty, as the
+// infra-class migration does, would read the wrapper as UNABLE TO ANSWER and
+// refuse a city whose leaf store answers fine. An inner store without the read
+// gets an error rather than ("", false, nil), because "cannot be asked" and
+// "carries nothing" are different answers and collapsing them is what let the
+// migration drop edge payloads silently.
+func (s *beadPolicyStore) DepMetadata(issueID, dependsOnID string) (string, bool, error) {
+	reader, ok := s.Store.(beads.DepMetadataReader)
+	if !ok {
+		return "", false, fmt.Errorf("reading dependency metadata %s -> %s: policy-wrapped store %T exposes no edge-payload read", issueID, dependsOnID, s.Store)
+	}
+	return reader.DepMetadata(issueID, dependsOnID)
+}
+
+// Count implements beads.Counter with the same read-tier expansion as List.
+// The embedded Store interface does not promote optional capabilities, so
+// the delegation must be explicit. Inner stores without a Counter report
+// ErrCountUnsupported, signaling callers to fall back to List.
+func (s *beadPolicyStore) Count(ctx context.Context, query beads.ListQuery, excludeTypes ...string) (int, error) {
+	counter, ok := s.Store.(beads.Counter)
+	if !ok {
+		return 0, fmt.Errorf("counting beads: policy-wrapped store: %w", beads.ErrCountUnsupported)
+	}
+	return counter.Count(ctx, expandPolicyReadTier(query), excludeTypes...)
+}
+
+// DeleteBatch implements beads.BatchDeleter by forwarding to the wrapped store
+// when it supports batched deletion. Like Count, this delegation must be
+// explicit: the embedded Store interface does not promote optional
+// capabilities, so a policy-wrapped caching/bd store would otherwise hide
+// BatchDeleter and force the wisp-GC closure teardown back onto the per-bead
+// subprocess path. Inner stores without BatchDeleter report
+// ErrBatchDeleteUnsupported, signaling callers to fall back to per-bead delete.
+// beadPolicyGraphStore embeds *beadPolicyStore, so it forwards through this too.
+func (s *beadPolicyStore) DeleteBatch(ids []string) error {
+	deleter, ok := s.Store.(beads.BatchDeleter)
+	if !ok {
+		return beads.ErrBatchDeleteUnsupported
+	}
+	return deleter.DeleteBatch(ids)
 }
 
 func (s *beadPolicyStore) Handles() beads.StoreHandles {
@@ -155,9 +238,17 @@ func (s *beadPolicyStore) ListOpen(status ...string) ([]beads.Bead, error) {
 	})
 }
 
+func (s *beadPolicyStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
+	releaser, ok := s.Store.(beads.ConditionalAssignmentReleaser)
+	if !ok {
+		return false, beads.ErrConditionalReleaseUnsupported
+	}
+	return releaser.ReleaseIfCurrent(id, expectedAssignee)
+}
+
 func (s *beadPolicyStore) policyForCreate(b beads.Bead) (string, string) {
-	if rootID := strings.TrimSpace(b.Metadata["gc.root_bead_id"]); rootID != "" {
-		root, err := s.Get(rootID)
+	if rootID := strings.TrimSpace(b.Metadata[beadmeta.RootBeadIDMetadataKey]); rootID != "" {
+		root, err := s.createTarget(coordclass.ClassGraph).Get(rootID)
 		if err == nil && policyNameForBead(root) == beadPolicyWisp {
 			return beadPolicyWisp, storageFromPersistedWispRoot(root)
 		}
@@ -182,19 +273,25 @@ func storageFromPersistedWispRoot(root beads.Bead) string {
 
 func (s *beadPolicyGraphStore) ApplyGraphPlan(ctx context.Context, plan *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) {
 	if plan == nil {
-		return s.applier.ApplyGraphPlan(ctx, plan)
+		return s.graphApplierFor(coordclass.ClassWork).ApplyGraphPlan(ctx, plan)
 	}
+	applier := s.graphApplierFor(coordclass.ClassifyGraphPlan(plan))
 	policyName := policyNameForGraphPlan(plan)
 	if policyName == "" {
-		return s.applier.ApplyGraphPlan(ctx, plan)
+		return applier.ApplyGraphPlan(ctx, plan)
 	}
 	storage := effectiveBeadStorage(s.cfg, policyName)
-	if storageApplier, ok := s.applier.(beads.StorageGraphApplyStore); ok {
+	if storageApplier, ok := applier.(beads.StorageGraphApplyStore); ok {
 		return storageApplier.ApplyGraphPlanWithStorage(ctx, plan, beadStorageClass(storage))
 	}
-	return s.applier.ApplyGraphPlan(ctx, plan)
+	return applier.ApplyGraphPlan(ctx, plan)
 }
 
+// policyNameForGraphPlan returns the storage-tier policy name for a graph-apply
+// plan: wisp if any node looks like a wisp, then workflow if any node looks like
+// a workflow, else "" (default work, no storage policy). This is the fine-grained
+// tier classifier, kept local to cmd/gc and distinct from coordclass.Classify,
+// which decides only store routing. It is the verbatim pre-lift classifier.
 func policyNameForGraphPlan(plan *beads.GraphApplyPlan) string {
 	for _, node := range plan.Nodes {
 		if isWispPolicyMetadata(node.Metadata) || hasBeadLabel(node.Labels, "gc:wisp") || hasBeadLabel(node.Labels, "wisp") {
@@ -209,6 +306,12 @@ func policyNameForGraphPlan(plan *beads.GraphApplyPlan) string {
 	return ""
 }
 
+// policyNameForBead returns the storage-tier policy name for a bead, in the same
+// precedence the pre-lift classifier used (wisp -> order_tracking -> session ->
+// wait -> nudge -> workflow -> ""). This is the fine-grained tier classifier,
+// kept local to cmd/gc and distinct from coordclass.Classify, which decides only
+// store routing: the tier mapping (effectiveBeadStorage / defaultBeadStorage) is
+// keyed on these names, not on the coordination class.
 func policyNameForBead(b beads.Bead) string {
 	switch {
 	case isWispPolicyMetadata(b.Metadata) || b.Type == "wisp" || hasBeadLabel(b.Labels, "gc:wisp") || hasBeadLabel(b.Labels, "wisp"):
@@ -229,16 +332,25 @@ func policyNameForBead(b beads.Bead) string {
 }
 
 func isWispPolicyMetadata(metadata map[string]string) bool {
-	return metadata["gc.kind"] == "wisp"
+	return metadata[beadmeta.KindMetadataKey] == beadmeta.KindWisp
 }
 
 func isWorkflowPolicyMetadata(metadata map[string]string) bool {
 	if metadata == nil {
 		return false
 	}
-	return metadata["gc.kind"] == "workflow" ||
-		metadata["gc.formula_contract"] == "graph.v2" ||
-		strings.TrimSpace(metadata["gc.root_bead_id"]) != ""
+	return metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow ||
+		metadata[beadmeta.FormulaContractMetadataKey] == beadmeta.FormulaContractGraphV2 ||
+		strings.TrimSpace(metadata[beadmeta.RootBeadIDMetadataKey]) != ""
+}
+
+func hasBeadLabel(labels []string, label string) bool {
+	for _, l := range labels {
+		if l == label {
+			return true
+		}
+	}
+	return false
 }
 
 func effectiveBeadStorage(cfg *config.City, policyName string) string {
@@ -368,8 +480,4 @@ func policyTierFromOpts(opts []beads.QueryOpt) beads.TierMode {
 		return beads.TierBoth
 	}
 	return tier
-}
-
-func hasBeadLabel(labels []string, label string) bool {
-	return slices.Contains(labels, label)
 }

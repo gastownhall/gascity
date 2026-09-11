@@ -8,9 +8,9 @@ cd $WORK/legacy-city
 
 ! exec gc import migrate --dry-run
 stderr 'gc import migrate has been deprecated\.'
-stderr 'Use "gc doctor" to inspect legacy PackV1 surfaces\.'
+stderr 'Use "gc doctor" to inspect legacy pack surfaces\.'
 stderr 'Use "gc doctor --fix" for the safe mechanical cases that currently have automatic rewrites'
-stderr 'no longer performs in-place PackV1-to-PackV2 rewrites'
+stderr 'no longer performs in-place legacy-to-current pack rewrites'
 stderr 'docs/guides/shareable-packs.md'
 ! exists $WORK/legacy-city/pack.toml
 exec grep '\[\[agent\]\]' $WORK/legacy-city/city.toml
@@ -18,7 +18,7 @@ exec grep '\[\[agent\]\]' $WORK/legacy-city/city.toml
 ! exec gc import migrate
 stderr 'gc import migrate has been deprecated\.'
 stderr 'gc doctor --fix'
-stderr 'no longer performs in-place PackV1-to-PackV2 rewrites'
+stderr 'no longer performs in-place legacy-to-current pack rewrites'
 ! exists $WORK/legacy-city/pack.toml
 exec grep '^includes = ' $WORK/legacy-city/city.toml
 exec grep 'default_rig_includes = \["../packs/default rig"\]' $WORK/legacy-city/city.toml

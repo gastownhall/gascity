@@ -71,16 +71,14 @@ func ReadAntigravityFile(path string, tailCompactions int) (*Session, error) {
 }
 
 // ReadAntigravityFilePage parses an agy trajectory JSONL log and applies
-// message-ID pagination using the stable agy-N entry IDs emitted by the reader.
+// message-ID pagination using the stable content-derived IDs emitted by the
+// reader.
 func ReadAntigravityFilePage(path string, tailCompactions int, beforeMessageID, afterMessageID string) (*Session, error) {
 	sess, err := readAntigravityFile(path, false)
 	if err != nil {
 		return nil, err
 	}
-	paginated, info := sliceAtCompactBoundaries(sess.Messages, tailCompactions, beforeMessageID, afterMessageID)
-	sess.Messages = paginated
-	sess.Pagination = info
-	return sess, nil
+	return paginateSession(sess, tailCompactions, beforeMessageID, afterMessageID)
 }
 
 // ReadAntigravityFileRaw parses an agy trajectory JSONL log without display type filtering.
@@ -104,10 +102,7 @@ func ReadAntigravityFileRawPage(path string, tailCompactions int, beforeMessageI
 	if err != nil {
 		return nil, err
 	}
-	paginated, info := sliceAtCompactBoundaries(sess.Messages, tailCompactions, beforeMessageID, afterMessageID)
-	sess.Messages = paginated
-	sess.Pagination = info
-	return sess, nil
+	return paginateSession(sess, tailCompactions, beforeMessageID, afterMessageID)
 }
 
 func readAntigravityFile(path string, rawMode bool) (*Session, error) {
@@ -126,6 +121,7 @@ func readAntigravityFile(path string, rawMode bool) (*Session, error) {
 	var lastNonEmptyLineMalformed bool
 	var lastUUID string
 	var pendingCallIDs []string
+	syntheticIDs := newStableSyntheticEntryIDSequence("agy")
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -140,7 +136,7 @@ func readAntigravityFile(path string, rawMode bool) (*Session, error) {
 		}
 		lastNonEmptyLineMalformed = false
 
-		entry := convertAgyEntry(raw, line, &pendingCallIDs)
+		entry := convertAgyEntry(raw, line, &pendingCallIDs, syntheticIDs.ForRecord(line))
 		if entry == nil {
 			continue
 		}
@@ -173,9 +169,9 @@ func readAntigravityFile(path string, rawMode bool) (*Session, error) {
 	}, nil
 }
 
-func convertAgyEntry(raw agyLogEntry, rawLine []byte, pendingCallIDs *[]string) *Entry {
+func convertAgyEntry(raw agyLogEntry, rawLine []byte, pendingCallIDs *[]string, syntheticID stableSyntheticEntryIDSource) *Entry {
 	ts, _ := time.Parse(time.RFC3339, raw.CreatedAt)
-	uuid := fmt.Sprintf("agy-%d", raw.StepIndex)
+	uuid := syntheticID.ID(raw.Type)
 
 	switch raw.Type {
 	case "USER_INPUT":
@@ -223,7 +219,7 @@ func convertAgyEntry(raw agyLogEntry, rawLine []byte, pendingCallIDs *[]string) 
 				Type:  "tool_use",
 				ID:    callID,
 				Name:  tc.Name,
-				Input: tc.Args,
+				Input: agyToolInputContent(tc.Args),
 			})
 		}
 		blocks = append(blocks, agyInteractionBlocks(raw.Interactions)...)
@@ -246,7 +242,8 @@ func convertAgyEntry(raw agyLogEntry, rawLine []byte, pendingCallIDs *[]string) 
 		block := ContentBlock{
 			Type:      "tool_result",
 			ToolUseID: callID,
-			Content:   mustMarshal(raw.Content),
+			Content:   agyToolResultContent(raw.Content),
+			IsError:   antigravityStatusIsError(raw.Status),
 		}
 		return &Entry{
 			UUID:      uuid,
@@ -283,6 +280,93 @@ func agyToolCallID(tc agyToolCall, fallback string) string {
 
 func agyResultCallID(raw agyLogEntry) string {
 	return firstTrimmedNonEmpty(raw.ToolCallID, raw.ToolCallIDJS, raw.CallID)
+}
+
+func agyToolInputContent(raw json.RawMessage) json.RawMessage {
+	return agyNeutralToolObject(raw)
+}
+
+func agyToolResultContent(content string) json.RawMessage {
+	if content == "" {
+		return mustMarshal("")
+	}
+	if !json.Valid([]byte(content)) {
+		return mustMarshal(content)
+	}
+	return agyNeutralToolObject(json.RawMessage(content))
+}
+
+func agyNeutralToolObject(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var encoded string
+	if err := json.Unmarshal(raw, &encoded); err == nil {
+		encoded = strings.TrimSpace(encoded)
+		if encoded != "" && json.Valid([]byte(encoded)) {
+			return agyNeutralToolObject(json.RawMessage(encoded))
+		}
+		return mustMarshal(encoded)
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil || len(object) == 0 {
+		return cloneRawJSON(raw)
+	}
+	neutral := make(map[string]json.RawMessage, len(object))
+	for key, value := range object {
+		neutral[agyNeutralToolKey(key)] = cloneRawJSON(value)
+	}
+	return mustMarshal(neutral)
+}
+
+func agyNeutralToolKey(key string) string {
+	switch strings.TrimSpace(key) {
+	case "filePath", "filepath", "path", "file":
+		return "file_path"
+	case "oldString", "oldStr":
+		return "old_string"
+	case "newString", "newStr":
+		return "new_string"
+	case "diff", "fileDiff":
+		return "patch"
+	case "exitCode":
+		return "exit_code"
+	case "statusCode", "code":
+		return "status_code"
+	case "codeText", "statusText":
+		return "status_text"
+	case "durationMs":
+		return "duration_ms"
+	case "numFiles":
+		return "num_files"
+	case "numResults":
+		return "num_results"
+	case "isImage":
+		return "is_image"
+	case "taskId", "backgroundTaskId", "bashId", "agentId":
+		return "task_id"
+	case "taskType", "taskKind", "subagentType", "agentType":
+		return "task_type"
+	case "taskStatus":
+		return "task_status"
+	case "oldTodos":
+		return "old_todos"
+	case "newTodos":
+		return "new_todos"
+	case "answerMap":
+		return "answer_map"
+	default:
+		return key
+	}
+}
+
+func antigravityStatusIsError(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "error", "failed", "failure", "canceled", "interrupted", "rejected", "denied":
+		return true
+	default:
+		return false
+	}
 }
 
 func consumeAgyPendingCallID(pendingCallIDs *[]string, preferred string) string {
@@ -395,8 +479,7 @@ func FindAntigravitySessionFileByID(searchPaths []string, workDir, sessionID str
 
 	// Check standard search bases (defaults to ~/.gemini/antigravity-cli/brain)
 	for _, root := range mergeAntigravitySearchPaths(searchPaths) {
-		path := filepath.Join(root, sessionID, ".system_generated", "logs", "transcript.jsonl")
-		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+		if path := findAntigravitySessionFileByIDInRoot(root, sessionID); path != "" {
 			return path
 		}
 	}
@@ -411,33 +494,116 @@ func FindAntigravitySessionFile(searchPaths []string, workDir string) string {
 		return ""
 	}
 
+	for _, brainRoot := range mergeAntigravitySearchPaths(searchPaths) {
+		cachePath := filepath.Join(filepath.Dir(brainRoot), "cache", "last_conversations.json")
+		if id := scanAntigravityLastConversation(cachePath, workDir); id != "" {
+			if path := findAntigravitySessionFileByIDInRoot(brainRoot, id); path != "" {
+				return path
+			}
+		}
+	}
+
 	var bestID string
 	var bestTime int64
+	var fallbackRoots []string
 
 	// The history index lives alongside the brain directory
 	// (~/.gemini/antigravity-cli/history.jsonl next to .../brain). Honor any
 	// configured search paths so discovery is hermetic, while the default path
 	// still resolves the real home-directory index.
 	for _, brainRoot := range mergeAntigravitySearchPaths(searchPaths) {
-		bestID, bestTime = scanAntigravityHistory(filepath.Join(filepath.Dir(brainRoot), "history.jsonl"), workDir, bestID, bestTime)
+		var matchedWorkDir bool
+		bestID, bestTime, matchedWorkDir = scanAntigravityHistory(filepath.Join(filepath.Dir(brainRoot), "history.jsonl"), workDir, bestID, bestTime)
+		if matchedWorkDir {
+			fallbackRoots = append(fallbackRoots, brainRoot)
+		}
 	}
 
 	if bestID == "" {
-		return ""
+		return findUnambiguousAntigravitySessionFile(fallbackRoots)
 	}
 	return FindAntigravitySessionFileByID(searchPaths, workDir, bestID)
+}
+
+func findAntigravitySessionFileByIDInRoot(root, sessionID string) string {
+	sessionID = safeAntigravitySessionDirName(sessionID)
+	if sessionID == "" {
+		return ""
+	}
+	path := filepath.Join(root, sessionID, ".system_generated", "logs", "transcript.jsonl")
+	if info, err := os.Stat(path); err == nil && !info.IsDir() {
+		return path
+	}
+	return ""
+}
+
+func scanAntigravityLastConversation(cachePath, workDir string) string {
+	data, err := os.ReadFile(cachePath)
+	if err != nil {
+		return ""
+	}
+	var conversations map[string]string
+	if err := json.Unmarshal(data, &conversations); err != nil {
+		return ""
+	}
+	if id := strings.TrimSpace(conversations[workDir]); id != "" {
+		return id
+	}
+	cleanWorkDir := filepath.Clean(workDir)
+	for workspace, id := range conversations {
+		if filepath.Clean(strings.TrimSpace(workspace)) == cleanWorkDir && strings.TrimSpace(id) != "" {
+			return id
+		}
+	}
+	return ""
+}
+
+func findUnambiguousAntigravitySessionFile(searchPaths []string) string {
+	if len(searchPaths) == 0 {
+		return ""
+	}
+	var match string
+	matches := 0
+	for _, root := range mergePaths(nil, searchPaths) {
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			path := filepath.Join(root, entry.Name(), ".system_generated", "logs", "transcript.jsonl")
+			if info, err := os.Stat(path); err != nil || info.IsDir() {
+				continue
+			}
+			matches++
+			if matches > 1 {
+				return ""
+			}
+			match = path
+		}
+		if matches > 1 {
+			return ""
+		}
+	}
+	if matches == 1 {
+		return match
+	}
+	return ""
 }
 
 // scanAntigravityHistory reads one history index file and returns the
 // conversation id with the newest timestamp matching workDir, preserving any
 // better match already found in a prior index.
-func scanAntigravityHistory(historyPath, workDir, bestID string, bestTime int64) (string, int64) {
+func scanAntigravityHistory(historyPath, workDir, bestID string, bestTime int64) (string, int64, bool) {
 	f, err := os.Open(historyPath)
 	if err != nil {
-		return bestID, bestTime
+		return bestID, bestTime, false
 	}
 	defer f.Close() //nolint:errcheck // read-only file
 
+	matchedWorkDir := false
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 256*1024), 50*1024*1024)
 	for scanner.Scan() {
@@ -445,7 +611,14 @@ func scanAntigravityHistory(historyPath, workDir, bestID string, bestTime int64)
 		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
 			continue
 		}
-		if filepath.Clean(entry.Workspace) == workDir && entry.Timestamp > bestTime {
+		if filepath.Clean(entry.Workspace) != workDir {
+			continue
+		}
+		matchedWorkDir = true
+		if strings.TrimSpace(entry.ConversationID) == "" {
+			continue
+		}
+		if entry.Timestamp > bestTime {
 			bestTime = entry.Timestamp
 			bestID = entry.ConversationID
 		}
@@ -453,7 +626,7 @@ func scanAntigravityHistory(historyPath, workDir, bestID string, bestTime int64)
 	if err := scanner.Err(); err != nil {
 		log.Printf("sessionlog: antigravity history scan failed path=%q err=%v", historyPath, err)
 	}
-	return bestID, bestTime
+	return bestID, bestTime, matchedWorkDir
 }
 
 func safeAntigravitySessionDirName(sessionID string) string {

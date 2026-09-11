@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,7 +9,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
-	"github.com/gastownhall/gascity/internal/pgauth"
 )
 
 func TestPrefixedWorkQueryForProbe_UsesNamedSessionRuntimeName(t *testing.T) {
@@ -73,12 +71,11 @@ func TestControllerQueryRuntimeEnvInheritedRigUsesCityStorePassword(t *testing.T
 	}
 }
 
-func TestControllerQueryRuntimeEnvSurfacesPostgresProjectionError(t *testing.T) {
-	clearAmbientPostgresEnv(t)
+func TestControllerQueryRuntimeEnvRefusesAnUnregisteredBackend(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 
 	cityPath := t.TempDir()
-	writePGScopeFixture(t, cityPath, "")
+	writeUnregisteredBackendMetadata(t, cityPath)
 	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: city
 gc.endpoint_origin: managed_city
 gc.endpoint_status: verified
@@ -89,12 +86,7 @@ dolt.auto-start: false
 	cfg := &config.City{Agents: []config.Agent{{Name: "agent"}}}
 
 	_, err := controllerQueryRuntimeEnv(cityPath, cfg, &cfg.Agents[0])
-	if err == nil {
-		t.Fatal("controllerQueryRuntimeEnv() error = nil, want postgres projection error")
-	}
-	if !errors.Is(err, pgauth.ErrNoPasswordResolvable) {
-		t.Fatalf("errors.Is(err, ErrNoPasswordResolvable) = false, want true; err=%v", err)
-	}
+	assertRefusesUnregisteredBackend(t, err)
 }
 
 func TestControllerQueryRuntimeEnvExplicitRigUsesRigStorePassword(t *testing.T) {

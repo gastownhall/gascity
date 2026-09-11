@@ -104,7 +104,7 @@ func TestSessionReconcilerTraceLifecycleRecordsTick(t *testing.T) {
 		},
 		ScaleCheckCounts: map[string]int{"repo/polecat": 1},
 	}
-	cr.beadReconcileTick(context.Background(), result, sessionBeads, cycle)
+	cr.beadReconcileTick(context.Background(), result, sessionBeads, cycle, false)
 	if err := cycle.End(TraceCompletionCompleted, traceRecordPayload{"phase": "tick"}); err != nil {
 		t.Fatalf("cycle.End: %v", err)
 	}
@@ -326,8 +326,12 @@ func TestSessionReconcilerTraceStartAndDrainSubOps(t *testing.T) {
 	cycle.configRevision = "rev-trace-2"
 	cycle.syncArms(armNow, cfg)
 
+	startInfo, err := sessionFrontDoor(store).Get(startBead.ID)
+	if err != nil {
+		t.Fatalf("load start session info: %v", err)
+	}
 	startCand := startCandidate{
-		session: &startBead,
+		info: startInfo,
 		tp: TemplateParams{
 			TemplateName: "repo/worker",
 			SessionName:  "worker-1",
@@ -383,13 +387,9 @@ func TestSessionReconcilerTraceStartAndDrainSubOps(t *testing.T) {
 		drainTracker,
 		sp,
 		store,
-		drainLookup,
-		[]beads.Bead{drainBead},
+		infoLookupFromBeadLookup(drainLookup),
 		wakeEvals,
 		cfg,
-		map[string]int{},
-		nil,
-		nil,
 		clock.Real{},
 		cycle,
 	)
@@ -522,8 +522,11 @@ func TestSessionReconcilerTraceGH1654WorkRequestedStartCandidates(t *testing.T) 
 					t.Fatalf("Create named session: %v", err)
 				}
 				dsResult := buildDesiredState("trace-town", cityDir, now, cfg, sp, store, io.Discard)
-				if !dsResult.NamedSessionDemand["dispatcher"] {
-					t.Fatal("NamedSessionDemand[dispatcher] = false, want true")
+				if dsResult.NamedSessionDemand["dispatcher"] {
+					t.Fatal("NamedSessionDemand[dispatcher] = true for routed_to=dispatcher, want false because routed_to targets pools")
+				}
+				if got := dsResult.ScaleCheckCounts["dispatcher"]; got != 1 {
+					t.Fatalf("ScaleCheckCounts[dispatcher] = %d, want 1", got)
 				}
 				snapshot, err := loadSessionBeadSnapshot(store)
 				if err != nil {
@@ -649,7 +652,7 @@ func TestSessionReconcilerTraceGH1654WorkRequestedStartCandidates(t *testing.T) 
 				stdout:              io.Discard,
 				stderr:              io.Discard,
 			}
-			cr.beadReconcileTick(context.Background(), dsResult, sessionBeads, cycle)
+			cr.beadReconcileTick(context.Background(), dsResult, sessionBeads, cycle, false)
 			if !cr.waitForAsyncStarts() {
 				t.Fatal("async starts did not finish")
 			}
@@ -712,7 +715,7 @@ func createRoutedReadyWork(t *testing.T, store beads.Store, template string, cou
 func createCanonicalPoolSession(t *testing.T, store beads.Store, cfgAgent *config.Agent, now time.Time, slot int) beads.Bead {
 	t.Helper()
 	_, qualifiedInstance := poolInstanceIdentity(cfgAgent, slot, io.Discard)
-	session, err := createPoolSessionBead(store, cfgAgent.QualifiedName(), now, poolSessionCreateIdentity{
+	session, err := createPoolSessionBead(sessionFrontDoor(store), cfgAgent.QualifiedName(), now, poolSessionCreateIdentity{
 		AgentName: qualifiedInstance,
 		Alias:     qualifiedInstance,
 		Slot:      slot,
@@ -720,7 +723,11 @@ func createCanonicalPoolSession(t *testing.T, store beads.Store, cfgAgent *confi
 	if err != nil {
 		t.Fatalf("create pool session: %v", err)
 	}
-	return session
+	stored, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("get pool session bead: %v", err)
+	}
+	return stored
 }
 
 func traceFieldInt(v any) int {

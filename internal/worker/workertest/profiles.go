@@ -8,9 +8,12 @@ const ( //nolint:revive // exported profile IDs are documented by the enclosing 
 	// Profile* identify the canonical worker profiles used by conformance tests.
 	ProfileClaudeTmuxCLI      ProfileID = "claude/tmux-cli"
 	ProfileCodexTmuxCLI       ProfileID = "codex/tmux-cli"
+	ProfileCursorTmuxCLI      ProfileID = "cursor/tmux-cli"
 	ProfileGeminiTmuxCLI      ProfileID = "gemini/tmux-cli"
 	ProfileKimiTmuxCLI        ProfileID = "kimi/tmux-cli"
 	ProfileOpenCodeTmuxCLI    ProfileID = "opencode/tmux-cli"
+	ProfileMimoCodeTmuxCLI    ProfileID = "mimocode/tmux-cli"
+	ProfileZCodeTmuxCLI       ProfileID = "zcode/tmux-cli"
 	ProfilePiTmuxCLI          ProfileID = "pi/tmux-cli"
 	ProfileAntigravityTmuxCLI ProfileID = "antigravity/tmux-cli"
 )
@@ -32,6 +35,28 @@ type ContinuationOracle struct {
 	ResetResponseContains  string
 }
 
+// UsageExpectation is the per-invocation token-usage contract a profile's
+// fresh fixture must satisfy. Supported mirrors whether the worker registers
+// an invocation-usage extractor for the profile's family
+// (worker.InvocationUsageFamily); the token fields are the aggregate the
+// matching extractor must yield across the fresh fixture's usage-bearing
+// invocations. Unsupported families leave Supported false and the totals zero.
+type UsageExpectation struct {
+	Supported       bool
+	Invocations     int
+	InputTokens     int
+	OutputTokens    int
+	CacheReadTokens int
+	// Model is the model identifier every usage-bearing invocation must carry
+	// (the pricing lookup key). Empty for unsupported families.
+	Model string
+	// DefaultCostPriced reports whether pricing.DefaultPricings() has a rate
+	// for (family, Model) — true for families with shipped default rates
+	// (claude), false for families priced only by operator config
+	// (codex).
+	DefaultCostPriced bool
+}
+
 // Profile identifies the worker profile and its phase-1 fixture bundle.
 type Profile struct {
 	ID           ProfileID
@@ -39,6 +64,7 @@ type Profile struct {
 	WorkDir      string
 	Fixtures     ProfileFixtureSet
 	Continuation ContinuationOracle
+	Usage        UsageExpectation
 }
 
 // Phase1Profiles returns the canonical phase-1 worker-core profiles.
@@ -59,7 +85,19 @@ func Phase1Profiles() []Profile {
 				RecallResponseContains: "Phase 1 covers transcript normalization and continuation semantics.",
 				ResetResponseContains:  "I cannot repeat the earlier summary because this is a fresh session.",
 			},
+			Usage: UsageExpectation{
+				Supported:         true,
+				Invocations:       1,
+				InputTokens:       100,
+				OutputTokens:      40,
+				CacheReadTokens:   10,
+				Model:             "claude-sonnet-4-6",
+				DefaultCostPriced: true,
+			},
 		},
+		// codex, cursor, and gemini below are covered by the Phase 1 transcript/
+		// continuation requirements and by the WC-STRUCT-* structured family
+		// (see structured_conformance_test.go).
 		{
 			ID:       ProfileCodexTmuxCLI,
 			Provider: "codex/tmux-cli",
@@ -74,6 +112,31 @@ func Phase1Profiles() []Profile {
 				RecallPromptContains:   "Repeat the exact adapter summary from earlier before answering.",
 				RecallResponseContains: "The adapter reads provider transcripts into a canonical history.",
 				ResetResponseContains:  "I cannot repeat the earlier adapter summary because this session started fresh.",
+			},
+			Usage: UsageExpectation{
+				Supported:         true,
+				Invocations:       1,
+				InputTokens:       100,
+				OutputTokens:      40,
+				CacheReadTokens:   10,
+				Model:             "gpt-5-codex",
+				DefaultCostPriced: false,
+			},
+		},
+		{
+			ID:       ProfileCursorTmuxCLI,
+			Provider: "cursor/tmux-cli",
+			WorkDir:  "/tmp/gascity/phase1/cursor",
+			Fixtures: ProfileFixtureSet{
+				FreshRoot:        "testdata/fixtures/cursor/fresh",
+				ContinuationRoot: "testdata/fixtures/cursor/continuation",
+				ResetRoot:        "testdata/fixtures/cursor/reset",
+			},
+			Continuation: ContinuationOracle{
+				AnchorText:             "Cursor phase 1 validates the captured JSONL transcript contract.",
+				RecallPromptContains:   "Repeat the exact Cursor phase-1 summary from earlier before answering.",
+				RecallResponseContains: "Cursor phase 1 validates the captured JSONL transcript contract.",
+				ResetResponseContains:  "I cannot repeat the earlier Cursor summary because this session started fresh.",
 			},
 		},
 		{
@@ -91,6 +154,10 @@ func Phase1Profiles() []Profile {
 				RecallResponseContains: "The fixture models normalized transcript history.",
 				ResetResponseContains:  "I cannot repeat the earlier fixture summary because this chat is fresh.",
 			},
+			// gemini is deprecated and its invocation-usage extractor was
+			// dropped (PR #3485): no Usage expectation, so WC-TX-USAGE-001 /
+			// WC-USAGE-COST-001 report it Unsupported (out of scope), matching
+			// worker.InvocationUsageFamily.
 		},
 		{
 			ID:       ProfileKimiTmuxCLI,
@@ -123,6 +190,42 @@ func Phase1Profiles() []Profile {
 				RecallResponseContains: "OpenCode phase 1 validates the tmux CLI transcript contract.",
 				ResetResponseContains:  "I cannot repeat the earlier OpenCode summary because this session started fresh.",
 			},
+		},
+		{
+			ID:       ProfileMimoCodeTmuxCLI,
+			Provider: "mimocode/tmux-cli",
+			WorkDir:  "/tmp/gascity/phase1/mimocode",
+			Fixtures: ProfileFixtureSet{
+				FreshRoot:        "testdata/fixtures/mimocode/fresh",
+				ContinuationRoot: "testdata/fixtures/mimocode/continuation",
+				ResetRoot:        "testdata/fixtures/mimocode/reset",
+			},
+			Continuation: ContinuationOracle{
+				AnchorText:             "MiMo Code phase 1 validates the tmux CLI transcript contract.",
+				RecallPromptContains:   "Repeat the exact MiMo Code phase-1 summary from earlier before answering.",
+				RecallResponseContains: "MiMo Code phase 1 validates the tmux CLI transcript contract.",
+				ResetResponseContains:  "I cannot repeat the earlier MiMo Code summary because this session started fresh.",
+			},
+		},
+		{
+			ID:       ProfileZCodeTmuxCLI,
+			Provider: "zcode/tmux-cli",
+			WorkDir:  "/tmp/gascity/phase1/zcode",
+			Fixtures: ProfileFixtureSet{
+				FreshRoot:        "testdata/fixtures/zcode/fresh",
+				ContinuationRoot: "testdata/fixtures/zcode/continuation",
+				ResetRoot:        "testdata/fixtures/zcode/reset",
+			},
+			Continuation: ContinuationOracle{
+				AnchorText:             "ZCode phase 1 validates the tmux CLI transcript contract.",
+				RecallPromptContains:   "Repeat the exact ZCode phase-1 summary from earlier before answering.",
+				RecallResponseContains: "ZCode phase 1 validates the tmux CLI transcript contract.",
+				ResetResponseContains:  "I cannot repeat the earlier ZCode summary because this session started fresh.",
+			},
+			// No Usage expectation: the worker registers no invocation-usage
+			// extractor for the zcode family, so WC-TX-USAGE-001 /
+			// WC-USAGE-COST-001 report Unsupported. The export mirror does
+			// carry the CLI's usage block for provenance.
 		},
 		{
 			ID:       ProfilePiTmuxCLI,

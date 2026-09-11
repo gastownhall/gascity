@@ -22,14 +22,15 @@ func TestConfigureServerSendsSetOptionExitEmptyOff(t *testing.T) {
 	t.Fatalf("ConfigureServer did not issue set-option -g exit-empty off; calls = %v", fe.calls)
 }
 
-// TestConfigureServerIsIdempotentViaSyncOnce verifies that calling ConfigureServer
-// multiple times on the same *Tmux issues set-option -g exit-empty off exactly once.
-// The configureOnce sync.Once field must enforce this property.
-func TestConfigureServerIsIdempotentViaSyncOnce(t *testing.T) {
+// TestConfigureServerReappliesExitEmptyForReplacementServer verifies that
+// server configuration is applied on every call. A Tmux wrapper can outlive
+// the server bound to its socket; per-instance sync.Once would leave a
+// replacement server at tmux's unsafe exit-empty=on default.
+func TestConfigureServerReappliesExitEmptyForReplacementServer(t *testing.T) {
 	fe := &fakeExecutor{}
 	tm := &Tmux{cfg: DefaultConfig(), exec: fe}
 
-	for i := 0; i < 5; i++ {
+	for i := range 2 {
 		if err := tm.ConfigureServer(); err != nil {
 			t.Fatalf("ConfigureServer() call %d error = %v", i, err)
 		}
@@ -41,8 +42,8 @@ func TestConfigureServerIsIdempotentViaSyncOnce(t *testing.T) {
 			count++
 		}
 	}
-	if count != 1 {
-		t.Fatalf("set-option -g exit-empty off issued %d times across 5 ConfigureServer calls, want exactly 1", count)
+	if count != 2 {
+		t.Fatalf("set-option -g exit-empty off issued %d times across 2 ConfigureServer calls, want 2", count)
 	}
 }
 

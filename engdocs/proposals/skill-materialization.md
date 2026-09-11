@@ -199,7 +199,7 @@ workdir, or a sidecar init step).
 | Provider   | Skill sink           | v0.15.1 status    |
 |------------|----------------------|-------------------|
 | `claude`   | `.claude/skills/`    | materialize       |
-| `codex`    | `.codex/skills/`     | materialize       |
+| `codex`    | `.agents/skills/`    | materialize       |
 | `gemini`   | `.gemini/skills/`    | materialize       |
 | `opencode` | `.opencode/skills/`  | materialize       |
 | `copilot`  | —                    | skip (no sink)    |
@@ -260,7 +260,7 @@ are removed outright. The full deletion surface:
 | `cmd/gc/pool.go:264-279` (deep-copy)       | Pool deep-copy entries for the four fields                  |
 | `cmd/gc/cmd_skill.go:97-107`               | `attachmentSet` / `filterEntriesByName` filter path         |
 | `cmd/gc/cmd_mcp.go` (equivalent filter)    | MCP filter path                                             |
-| `docs/schema/city-schema.json`             | Schema entries for `skills`, `mcp`, `skills_append`, `mcp_append` |
+| `docs/reference/schema/city-schema.json`             | Schema entries for `skills`, `mcp`, `skills_append`, `mcp_append` |
 | `docs/reference/config.md:162-200`         | Reference-doc entries for the removed fields                |
 | `internal/config/compose_test.go:242-246`  | Attachment-defaults compose test                            |
 | `internal/config/config_test.go:118-139`   | `TestParseAgentSkillsAndMCP` — delete test entirely         |
@@ -463,7 +463,7 @@ scope root:
   .claude/skills/           # materialized for claude agents
     gc-work/ -> ...
     plan/ -> ...
-  .codex/skills/            # materialized for codex agents
+  .agents/skills/           # materialized for codex agents
     gc-work/ -> ...
     plan/ -> ...
 ```

@@ -18,7 +18,7 @@ import (
 func newSuspendCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonOut bool
 	cmd := &cobra.Command{
-		Use:   "suspend [path]",
+		Use:   "suspend [path|name]",
 		Short: "Suspend the city (all agents effectively suspended)",
 		Long: `Suspends the city by recording an explicit "suspended" preference
 in .gc/runtime/suspension-state.json (per-clone runtime state, not
@@ -29,7 +29,8 @@ effectively suspended regardless of their individual suspended fields.
 The reconciler won't spawn agents, gc hook/prime return empty.
 
 Use "gc resume" to restore.`,
-		Args: cobra.MaximumNArgs(1),
+		Args:              cobra.MaximumNArgs(1),
+		ValidArgsFunction: completeCityNames,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdSuspend(args, jsonOut, stdout, stderr) != 0 {
 				return errExit
@@ -45,7 +46,7 @@ Use "gc resume" to restore.`,
 func newResumeCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonOut bool
 	cmd := &cobra.Command{
-		Use:   "resume [path]",
+		Use:   "resume [path|name]",
 		Short: "Resume a suspended city",
 		Long: `Resume a suspended city by recording an explicit "resumed" preference
 in .gc/runtime/suspension-state.json. The override sticks across city
@@ -54,7 +55,8 @@ restarts even when [workspace] declares suspended_on_start = true.
 Restores normal operation: the reconciler will spawn agents again and
 gc hook/prime will return work. Use "gc agent resume" to resume
 individual agents, or "gc rig resume" for rigs.`,
-		Args: cobra.MaximumNArgs(1),
+		Args:              cobra.MaximumNArgs(1),
+		ValidArgsFunction: completeCityNames,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdResume(args, jsonOut, stdout, stderr) != 0 {
 				return errExit
@@ -78,7 +80,7 @@ func cmdSuspend(args []string, jsonOut bool, stdout, stderr io.Writer) int {
 		if err == nil {
 			return writeCitySuspensionSuccess(stdout, stderr, cityPath, true, jsonOut)
 		}
-		if !api.ShouldFallback(err) {
+		if !api.ShouldFallback(c, err) {
 			fmt.Fprintf(stderr, "gc suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
@@ -99,7 +101,7 @@ func cmdResume(args []string, jsonOut bool, stdout, stderr io.Writer) int {
 		if err == nil {
 			return writeCitySuspensionSuccess(stdout, stderr, cityPath, false, jsonOut)
 		}
-		if !api.ShouldFallback(err) {
+		if !api.ShouldFallback(c, err) {
 			fmt.Fprintf(stderr, "gc resume: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
@@ -137,7 +139,13 @@ func doSuspendCity(fs fsys.FS, cityPath string, suspend bool, jsonOut bool, stdo
 		return 1
 	}
 
-	rec := openCityRecorder(stderr)
+	// Record against the city whose state actually changed, not the
+	// ambient one. openCityRecorder re-resolves the city from cwd/env,
+	// which is not cityPath whenever the target was named explicitly
+	// (`gc suspend <dir>`) from inside a different, live city — that
+	// leaked city.suspended/city.resumed into an unrelated event log
+	// (ga-41g9gr).
+	rec := openCityRecorderAt(cityPath, stderr)
 	if suspend {
 		rec.Record(events.Event{
 			Type:  events.CitySuspended,
@@ -222,30 +230,37 @@ func effectiveCitySuspended(cfg *config.City, st suspensionstate.State) bool {
 // [isAgentEffectivelySuspendedWith] to avoid the per-call disk read.
 func isAgentEffectivelySuspended(cfg *config.City, a *config.Agent) bool {
 	cityPath, _ := resolveCity()
-	return isAgentEffectivelySuspendedWith(cfg, a, loadSuspensionStateBestEffort(cityPath))
+	return isAgentEffectivelySuspendedWith(cfg, cityPath, a, loadSuspensionStateBestEffort(cityPath))
 }
 
 // isAgentEffectivelySuspendedWith is like isAgentEffectivelySuspended
 // but takes a pre-loaded runtime state so callers in hot paths don't
 // re-read the file.
-func isAgentEffectivelySuspendedWith(cfg *config.City, a *config.Agent, st suspensionstate.State) bool {
+//
+// The agent's rig is resolved path-aware via configuredRigName — the same
+// resolver the desired-state build uses (agentInSuspendedRig). Matching the
+// rig by name only (a.Dir == rig.Name) missed rig-bound agents whose Dir is a
+// filesystem path rather than the bare rig name — notably third-party-pack
+// agents bound through a dir override. For those, the desired-state build
+// (path-aware) dropped the session while this gate (name-only) reported the
+// agent awake, so a suspended rig never quiesced them: it drained and re-woke
+// each tick. Keeping the two gates on the same resolver closes that gap.
+func isAgentEffectivelySuspendedWith(cfg *config.City, cityPath string, a *config.Agent, st suspensionstate.State) bool {
 	if effectiveCitySuspended(cfg, st) {
 		return true
 	}
 	if a.Suspended {
 		return true
 	}
-	if a.Dir == "" {
+	rigName := configuredRigName(cityPath, a, cfg.Rigs)
+	if rigName == "" {
 		return false
 	}
 	for i := range cfg.Rigs {
-		if cfg.Rigs[i].Name != a.Dir {
+		if cfg.Rigs[i].Name != rigName {
 			continue
 		}
-		if suspensionstate.EffectiveRigSuspended(st, cfg.Rigs[i].Name, cfg.Rigs[i].EffectiveSuspendedOnStart()) {
-			return true
-		}
-		break
+		return suspensionstate.EffectiveRigSuspended(st, cfg.Rigs[i].Name, cfg.Rigs[i].EffectiveSuspendedOnStart())
 	}
 	return false
 }

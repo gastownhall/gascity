@@ -24,7 +24,7 @@ title = "Review"
 `)
 
 	check := NewFormulaRequirementsCheck(&config.City{
-		Daemon: config.DaemonConfig{FormulaV2: true},
+		Daemon: config.DaemonConfig{FormulaV2: boolPtr(true)},
 		FormulaLayers: config.FormulaLayers{
 			City: []string{dir},
 		},
@@ -115,7 +115,7 @@ title = "Work"
 `)
 
 	check := NewFormulaRequirementsCheck(&config.City{
-		Daemon: config.DaemonConfig{FormulaV2: false},
+		Daemon: config.DaemonConfig{FormulaV2: boolPtr(false)},
 		FormulaLayers: config.FormulaLayers{
 			City: []string{cityDir},
 			Rigs: map[string][]string{"proj": {rigDir}},
@@ -168,7 +168,7 @@ title = "Work"
 `)
 
 	check := NewFormulaRequirementsCheck(&config.City{
-		Daemon: config.DaemonConfig{FormulaV2: true},
+		Daemon: config.DaemonConfig{FormulaV2: boolPtr(true)},
 		FormulaLayers: config.FormulaLayers{
 			City: []string{cityDir},
 			Rigs: map[string][]string{"proj": {cityDir, rigDir}},
@@ -202,7 +202,7 @@ max_attempts = 2
 `)
 
 	check := NewFormulaRequirementsCheck(&config.City{
-		Daemon: config.DaemonConfig{FormulaV2: true},
+		Daemon: config.DaemonConfig{FormulaV2: boolPtr(true)},
 		FormulaLayers: config.FormulaLayers{
 			City: []string{dir},
 		},
@@ -241,7 +241,7 @@ title = "Work"
 `)
 
 	check := NewFormulaRequirementsCheck(&config.City{
-		Daemon: config.DaemonConfig{FormulaV2: true},
+		Daemon: config.DaemonConfig{FormulaV2: boolPtr(true)},
 		FormulaLayers: config.FormulaLayers{
 			City: []string{dir},
 		},
@@ -293,7 +293,7 @@ metadata = { "gc.on_fail" = "abort_scope" }
 
 	t.Setenv("GC_FORMULA_REF", "main")
 	check := NewFormulaRequirementsCheck(&config.City{
-		Daemon: config.DaemonConfig{FormulaV2: true},
+		Daemon: config.DaemonConfig{FormulaV2: boolPtr(true)},
 		FormulaLayers: config.FormulaLayers{
 			City: []string{formulaDir},
 		},

@@ -12,10 +12,10 @@ You can build Gas Town in Gas City, or Ralph, or Claude Code Agent Teams,
 or any other orchestration pack — via specific configurations.
 
 **Why Gas City exists:** Gas Town proved multi-agent orchestration works,
-but all its roles are hardwired in Go code. Steve realized the MEOW stack
-(Molecular Expression of Work) was powerful enough to abstract roles into
-configuration. Gas City extracts that insight into an SDK where Gas Town
-becomes one configuration among many.
+but all its roles are hardwired in Go code. Steve realized the way work is
+expressed — as beads composed into formulas — was powerful enough to abstract
+roles into configuration. Gas City extracts that insight into an SDK where Gas
+Town becomes one configuration among many.
 
 ## Current integration mission
 
@@ -88,18 +88,49 @@ conflicts with the docs, DX wins. We update the docs to match.
 
 ## Architecture
 
-**Work is the primitive, not orchestration.** Gas City's orchestration
-is a thin layer atop the MEOW stack (beads → molecules → formulas).
-The work definition and tracking infrastructure is what matters; the
-orchestration shape is configurable on top.
+**Orchestration is the value.** A formula is a method for how a job gets
+done, and the controller (`engdocs/architecture/controller.md`) runs it as a
+graph — decomposing the job into beads, fanning the ready ones out to many
+agents at once, gating each step on its dependencies, retrying failures, and
+draining convoys in parallel, driving the work to completion outside the
+user's session. The control dispatcher (`internal/dispatch`) executes control
+beads — check, retry, fan-out, tally, drain, scope-check, workflow-finalize
+(`docs/reference/specs/formula-spec-v2.md` sec 0) — and that dispatcher is
+the engine. Orders trigger formulas on a schedule or event; health patrol
+keeps the fleet alive.
 
-### The nine concepts
+**This orchestration is composed from primitives, with ZERO hardcoded
+roles.** Beads are the universal persistence substrate — work survives
+sessions — and every orchestration mechanism is provably composable from the
+five primitives. That composability is what lets the same SDK be configured
+as Gas Town, Ralph, or any other pack; no role name appears in Go. (A single
+agent running a formula's steps in sequence in the user's own session —
+formula v1 — is still supported as a peer shape, but graph orchestration is
+why Gas City exists.)
 
-Gas City has five irreducible primitives and four derived mechanisms.
-Removing any primitive makes it impossible to rebuild Gas Town. Every
-mechanism is provably composable from the primitives.
+### Code-layering view (implements the six primitives)
 
-**Five primitives (Layer 0-1):**
+> **Authoritative user model:** `docs/getting-started/how-gas-city-works.md` defines the
+> six primitives (**Agent** = WHO, **Bead** = WHAT, **Formula** = HOW,
+> **Rig** = WHERE, **Pack** = CONFIGURES, **Event** = OBSERVE). That is the
+> canonical conceptual model. The view below is the *code-layering lens*: it
+> decomposes the Go substrate by layer so contributors can reason about
+> imports, side-effect confinement, and the CI invariants below. It is a
+> finer-grained projection of the same six primitives, not a competing
+> taxonomy.
+
+How the code substrate maps onto the six user-facing primitives:
+
+| Code substrate (this view)                          | User-facing primitive |
+| --------------------------------------------------- | --------------------- |
+| Session + Prompt Templates                          | **Agent** (WHO)       |
+| Task Store (Beads)                                  | **Bead** (WHAT)       |
+| Formulas + Molecules + Dispatch (Sling) + Orders + Health Patrol | **Formula** (HOW) |
+| Rigs (project/repo registered with the city)        | **Rig** (WHERE)       |
+| Config (`pack.toml` / `city.toml`; the City is the local (root) pack — it imports shared packs) | **Pack** (CONFIGURES) |
+| Event Bus                                            | **Event** (OBSERVE)   |
+
+**Layer 0-1 substrate:**
 
 1. **Session** — start/stop/prompt/observe sessions regardless of
    provider. Identity (via `agent.SessionNameFor`), pools, sandboxes,
@@ -107,36 +138,52 @@ mechanism is provably composable from the primitives.
    (`internal/session/lifecycle_projection.go`). Runtime providers
    (tmux, subprocess, exec, k8s, fake) plus routing layers (acp,
    auto, hybrid) live under `internal/runtime/` and plug in behind
-   the Session surface.
+   the Session surface. (Under the **Agent** primitive.)
 2. **Task Store (Beads)** — CRUD + Hook + Dependencies + Labels + Query
-   over work units. Everything is a bead: tasks, mail, molecules, convoys.
+   over work units. Everything is a bead: tasks, mail, convoy members.
+   (The **Bead** primitive.)
 3. **Event Bus** — append-only pub/sub log of all system activity. Two
    tiers: critical (bounded queue) and optional (fire-and-forget).
+   Events are fired by activity as outbound notifications so humans and
+   agents can watch; the bus is the delivery machinery. (Under the
+   **Event** primitive.)
 4. **Config** — TOML parsing with progressive activation (Levels 0-8 from
-   section presence) and multi-layer override resolution.
+   section presence) and multi-layer override resolution. This is the
+   machinery beneath the **Pack** primitive: `pack.toml`/`city.toml`
+   declare agents, formulas, and orders, and the City is the local (root)
+   pack that imports shared packs.
 5. **Prompt Templates** — Go `text/template` in Markdown defining what
-   each role does. The behavioral specification.
+   each role does. The behavioral specification, supplied by a Pack and
+   rendered into a running Agent.
 
-**Four derived mechanisms (Layer 2-4):**
+**Layer 2-4 substrate:**
 
 6. **Messaging** — Mail = `TaskStore.Create(bead{type:"message"})`.
    Nudge = a session-layer operation implemented via
    `runtime.Provider.Nudge()` (and exposed through
    `worker.Handle.Nudge()` at the worker boundary). No new
    primitive needed.
-7. **Formulas & Molecules** — Formula = TOML parsed by Config. Molecule =
-   root bead + child step beads in Task Store. Wisps = ephemeral molecules.
-   Orders = formulas with gate conditions on Event Bus.
+7. **Formulas** — a Formula is the reusable method (TOML parsed by
+   Config) applied *over* a convoy of beads, looping/fanning each to an
+   Agent. (When a formula runs, it materializes as a molecule — a root
+   bead plus child step beads in the Task Store; wisps are the ephemeral
+   variant. That materialization is a v1 implementation detail, not part
+   of what a formula *is*.) Orders = formulas with gate conditions on the
+   Event Bus that automate *when* a formula runs (Health Patrol is one
+   kind of order). All of this is the **Formula** primitive.
 8. **Dispatch (Sling)** — composed: find/spawn agent → select formula →
-   create molecule → hook to agent → nudge → create convoy → log event.
+   materialize work as beads → hook to agent → nudge → create convoy →
+   fire event. (Under the **Formula** primitive.)
 9. **Health Patrol** — probe sessions (Session), compare thresholds
-   (Config), publish stalls (Event Bus), restart with backoff.
+   (Config), publish stalls (Event Bus), restart with backoff. (One kind
+   of order, under the **Formula** primitive.)
 
 ### Layering invariants
 
 1. **No upward dependencies.** Layer N never imports Layer N+1.
 2. **Beads is the universal persistence substrate** for domain state.
-3. **Event Bus is the universal observation substrate.**
+3. **Events are the universal outbound-notification mechanism** — fired by
+   activity so humans and agents can watch; the bus is delivery machinery.
 4. **Config is the universal activation mechanism.**
 5. **Side effects (I/O, process spawning) are confined to Layer 0.**
 6. **The controller drives all SDK infrastructure operations.**
@@ -152,7 +199,7 @@ Capabilities activate progressively via config presence.
 | 2     | Task loop              |
 | 3     | Multiple agents + pool |
 | 4     | Messaging              |
-| 5     | Formulas & molecules   |
+| 5     | Formulas               |
 | 6     | Health monitoring      |
 | 7     | Orders                 |
 | 8     | Full orchestration     |
@@ -169,8 +216,8 @@ Read **`engdocs/architecture/api-control-plane.md`** and
 - `internal/events/` (event bus, registry)
 - `internal/extmsg/` (external-messaging emitters)
 - Anything that affects `internal/api/openapi.json`,
-  `docs/schema/openapi.json`, or the generated TS types under
-  `cmd/gc/dashboard/web/src/generated/`
+  `docs/reference/schema/openapi.json`, or the generated TS types under
+  `internal/api/dashboardspa/web/shared/src/generated/`
 
 Load-bearing invariants enforced by CI (violating any fails the
 build; full rationale is in the architecture docs):
@@ -192,6 +239,19 @@ build; full rationale is in the architecture docs):
   `events.NoPayload` for events whose envelope fields alone
   capture the semantics. Enforced by
   `TestEveryKnownEventTypeHasRegisteredPayload`.
+- **Vendor-neutral hosted-service wire.** The OSS client of a hosted
+  Gas City service (`internal/cliauth`, `internal/serviceproto`, the
+  `gc login`/`gc whoami` commands) speaks a generic, published protocol
+  (`docs/reference/specs/service-protocol-v0.md`) and holds an **opaque
+  bearer** it never parses. Account/commercial policy — trial, billing,
+  credit, plan, quota, org/tenant identity — must **never** be a wire
+  field; it travels only in the opaque server-authored `message`/`links`
+  fields the CLI prints verbatim (spec §5). Default endpoint URLs (e.g.
+  `defaultServiceURL = "https://gascity.com"`) are **configuration data,
+  not commercial code** — sanctioned exactly like the pack-registry
+  default. Enforced by `scripts/check-core-boundary.sh` check (f) and the
+  `internal/cliauth` wire golden test; all provisioning/billing/trial
+  logic lives server-side in the private hosted repos.
 
 ## Active migrations
 
@@ -204,18 +264,24 @@ the canonical route, not the legacy route.
   must route through `worker.Handle` — enforced by
   `TestGCNonTestFilesStayOnWorkerBoundary` in
   `cmd/gc/worker_boundary_import_test.go`, which forbids non-test
-  files from importing `session.NewManager(`, `worker.SessionHandle`,
-  `sessionlog`, and similar bypass paths in `cmd/gc`. The remaining
-  manager-construction/direct-create bypasses are split by category:
-  `internal/api/session_manager.go` constructs `session.Manager` values
-  for API handlers, and `internal/api/session_resolution.go` still calls
-  `mgr.CreateAliasedNamedWithTransportAndMetadata(...)` directly. This
+  files from importing `session.NewManagerWithOptions(`,
+  `worker.SessionHandle`, `sessionlog`, and similar bypass paths in
+  `cmd/gc`. The remaining manager-construction/direct-create bypasses
+  are split by category: `internal/api/session_manager.go` constructs
+  `session.Manager` values for API handlers.
+  (`internal/api/session_resolution.go`'s named-session create was
+  converted to the worker boundary — it now routes through
+  `worker.Handle.Create(ctx, worker.CreateModeStarted)` via
+  `newResolvedWorkerSessionHandle`, no longer calling
+  `mgr.CreateSession(...)` directly.) Session creation goes through the
+  single `Manager.CreateSession(ctx, session.CreateOptions{...})` entry
+  point (`NewManagerWithOptions` is the sole Manager constructor). This
   list is not a sessionlog read-site inventory; stream and transcript
   readers in `internal/api/` and `internal/session/` still read
   session logs directly. Package-internal helpers in `internal/session/`
   may construct and use `session.Manager`; tests may construct it
-  directly. Do not add new non-test direct `session.Manager.Create*` call
-  sites outside the worker boundary.
+  directly. Do not add new non-test direct `session.Manager.CreateSession`
+  call sites outside the worker boundary.
 - **Session-first (completed `dd90ac0a` on Mar 8 2026).** The former
   Agent Protocol primitive was removed; responsibilities moved to
   `internal/session/` (lifecycle) and `internal/runtime/` (providers).
@@ -243,27 +309,33 @@ These decisions are final. Do not revisit them.
 ## Decision frameworks
 
 - **`engdocs/contributors/primitive-test.md`** — The Primitive Test: three necessary
-  conditions (Atomicity + Bitter Lesson + ZFC) for whether a capability
-  belongs in the SDK vs the consumer layer. Apply this before adding any
-  new primitive.
+  conditions (Atomicity + becomes more useful as models improve + keeps
+  judgment out of Go) for whether a capability belongs in the SDK vs the
+  consumer layer. Apply this before adding any new primitive.
 - **`engdocs/archive/backlogs/worktree-roadmap.md`** — Worktree isolation roadmap, polecat
   lifecycle analysis, and Gas Town cleanup bug lessons.
+- **`engdocs/contributors/release-gate-criteria-conventions.md`** — What the
+  "Tests pass" criterion in a `release-gates/*.md` file must cite. Apply this
+  before signing off that criterion on any deploy gate.
 
 ## Key design principles
 
-- **Zero Framework Cognition (ZFC)** — Go handles transport, not reasoning.
-  If a line of Go contains a judgment call, it's a violation. **The ZFC
-  test:** does any line of Go contain a judgment call? An `if stuck then
-restart` is framework intelligence. Move the decision to the prompt.
-- **Bitter Lesson** — every primitive must become MORE useful as models
-  improve, not less. Don't build heuristics or decision trees.
-- **GUPP** — "If you find work on your hook, YOU RUN IT." No confirmation,
-  no waiting. The hook having work IS the assignment. This is rendered into
-  agent prompts via templates, not enforced by Go code.
-- **Nondeterministic Idempotence (NDI)** — the system converges to correct
-  outcomes because work (beads), hooks, and molecules are all persistent.
-  Sessions come and go; the work survives. Multiple independent observers
-  check the same state idempotently. Redundancy is the reliability mechanism.
+- **Keep judgment out of Go.** Go handles transport, not reasoning. The
+  framework moves work; it doesn't reason about it. If a line of Go contains
+  a judgment call, it's a violation. **The test:** does any line of Go contain
+  a judgment call? An `if stuck then restart` is framework intelligence. Move
+  the decision to the prompt.
+- **A primitive must become more useful as models improve.** Every primitive
+  should grow MORE useful as models improve, not less. Don't build heuristics
+  or decision trees.
+- **If you find work on your hook, you run it.** No confirmation, no waiting.
+  The hook having work IS the assignment. This is rendered into agent prompts
+  via templates, not enforced by Go code.
+- **The system converges because work persists.** The system converges to
+  correct outcomes because work (beads), hooks, and molecules are all
+  persistent. Sessions come and go; the work survives. Multiple independent
+  observers check the same state idempotently and converge on it. Redundancy
+  is the reliability mechanism.
 - **No status files — query live state.** Never write PID files, lock files,
   or state files to track running processes. Always discover state by querying
   the system directly (process table, port scans, `ps`, `lsof`). Status files
@@ -279,8 +351,8 @@ restart` is framework intelligence. Move the decision to the prompt.
 
 ## What Gas City does NOT contain
 
-These are permanent exclusions, not "not yet." Each fails the Bitter
-Lesson test — it becomes LESS useful as models improve.
+These are permanent exclusions, not "not yet." Each fails the test of
+becoming more useful as models improve — it becomes LESS useful instead.
 
 - **No skills system** — the model IS the skill system
 - **No capability flags** — a sentence in the prompt is sufficient
@@ -303,12 +375,26 @@ Lesson test — it becomes LESS useful as models improve.
   default tmux server. If tmux cleanup is required, target only the known
   city/test socket explicitly with `tmux -L <socket> ...`, or prefer `gc stop`
   for city shutdown. Treat personal tmux servers as out of bounds.
+- **Git safety:** Never run `git checkout <ref> -- .` (or any pathspec
+  checkout) in a worktree you do not own — above all the shared rig root
+  (`$GC_RIG_ROOT`). Unlike `git checkout <ref>`, the pathspec form overwrites
+  the index and worktree for every tracked path, moves no HEAD (so no reflog
+  entry) and stages nothing (so no dangling blob): overwritten uncommitted
+  work is unrecoverable. To read a file at a ref use `git show <ref>:<path>`.
+  To check something out, use your own worktree or a disposable
+  `git worktree add`.
 - **Adding agent config fields:** When adding a field to `config.Agent`,
-  also add it to `AgentPatch`, `AgentOverride`, their apply functions
-  (`applyAgentPatch`, `applyAgentOverride`), and the `poolAgents` deep-copy
-  in `cmd/gc/pool.go`. `TestAgentFieldSync` enforces this for the struct
-  definitions; the apply functions and pool deep-copy must be checked
-  manually.
+  also add it to `AgentPatch` and `AgentOverride`, wire it into the shared
+  merge body `applyAgentMutation` (in `internal/config/patch.go`) — and, for
+  the rig-override path, copy it in `AgentOverride.toAgentPatch` — and, if the
+  field is a slice/map/pointer, deep-copy it in `Agent.Clone`
+  (`internal/config/config.go`). All four are test-guarded, so a missed field
+  fails the build: `TestAgentFieldSync` (struct field sets),
+  `TestApplyAgentPatchCoversAllFields` / `TestApplyAgentOverrideCoversAllFields`
+  (merge + `toAgentPatch` completeness), and `TestAgentCloneIsDeep` (clone
+  deepness). Both patch and rig override share `applyAgentMutation`, and both
+  the pack-load cache (`deepCopyAgents`) and pool expansion
+  (`cmd/gc/pool.go` `deepCopyAgent`) share `Agent.Clone`.
 - **Adding rig config fields:** When adding a field to `config.Rig`, also
   add the corresponding optional field to `RigPatch` and wire the merge
   into `applyRigPatch` so layered configs (fragments, patches) can
@@ -321,6 +407,54 @@ Lesson test — it becomes LESS useful as models improve.
   `make test-cmd-gc-process-parallel`, `make test-integration-shards-parallel`,
   `make test-local-full-parallel`) over raw `go test`.
 
+## Build Cache Conventions
+
+**Hard ban: never run `go clean -cache`** in any script, hook, or agent session.
+
+Running `go clean -cache` against a shared `GOCACHE` (the default when
+`$GOCACHE` is not overridden) corrupts the fleet-wide build cache for every
+concurrent executor. Each executor that hits a missing cache entry then runs a
+full rebuild, and any that calls `go clean -cache` mid-flight invalidates all
+the others' in-progress caches. The incident (vp-g96b, 2026-06-13) produced
+~10 cascading cache-miss errors across the executor pool.
+
+**Just run `go build` / `make` — do NOT set `GOCACHE` yourself.** The host `go`
+shim already routes the default `GOCACHE` to a shared **on-disk** cache
+(`~/.cache/go-build`) and pins compile/link temp to disk
+(`GOTMPDIR=/var/tmp/gotmp`). A warm shared cache is faster and is never
+corrupted by a normal build.
+
+**Never point `GOCACHE` (or `TMPDIR`) at `/tmp`.** `/tmp` is a size-capped
+RAM-backed tmpfs (61G) shared by the whole fleet — including the harness's
+tool-output capture dir. A bare `mktemp -d` (no `-p` dir) resolves against the
+unset `$TMPDIR`, which defaults to `/tmp` — one cold cache built there is
+2-3GB, and a concurrent build wave fills tmpfs and ENOSPCs every agent
+on the host (incident gm-tkz1r / ga-x9k9b9, 2026-07). The shim deliberately
+does **not** relocate a `GOCACHE` you set explicitly, so an explicit `/tmp` path
+defeats it.
+
+**If you truly need an isolated cold build** (a from-scratch compile without
+`go clean -cache`), put the throwaway cache **on disk** and remove it
+unconditionally with a `trap`, and redirect `TMPDIR` to the same dir so the
+linker's own scratch also stays off tmpfs:
+
+```bash
+tmp=$(mktemp -d -p /var/tmp) && trap 'rm -rf "$tmp"' EXIT
+GOCACHE="$tmp" TMPDIR="$tmp" go build ./cmd/gc/
+```
+
+**Exception:** `go clean -testcache` is explicitly allowed. It clears only the
+test-result cache, not the compiled-object cache, and does not corrupt
+concurrent builds.
+
+**Hermetic Git test config is mirrored.** `Makefile`'s `TEST_ENV` and the
+nested `env -i` wrappers in `scripts/test-local-parallel`,
+`scripts/test-go-test-shard`, and `scripts/test-integration-shard` must all pin
+`GIT_CONFIG_NOSYSTEM=1` and `GIT_CONFIG_GLOBAL=/dev/null`. Updating only the
+Makefile is insufficient because each nested runner rebuilds the environment
+and would otherwise restore user Git configuration through the preserved
+`HOME`.
+
 ## Code quality gates
 
 Before considering any task complete:
@@ -332,12 +466,12 @@ Before considering any task complete:
 - `go vet ./...` clean
 - `.githooks/pre-commit` is active locally (`git config core.hooksPath`
   prints `.githooks`) and has run for the staged change
-- `make dashboard-check` passes for any change touching `internal/api/`,
-  `internal/api/openapi.json`, `docs/schema/openapi.*`,
-  `cmd/gc/dashboard/`, or generated dashboard types
+- `make dashboard-ci` passes for any change touching `internal/api/`,
+  `internal/api/openapi.json`, `docs/reference/schema/openapi.*`,
+  `internal/api/dashboardspa/`, or generated dashboard types
 - The dashboard starts locally and serves the app for dashboard/API-schema
   changes; use `npm run preview -- --host 127.0.0.1 --port <port>` from
-  `cmd/gc/dashboard/web` after `make dashboard-check`
+  `internal/api/dashboardspa/web` after `make dashboard-ci`
 - Every exported function has a doc comment
 - No premature abstractions
 - Tests cover happy path AND edge cases
@@ -389,6 +523,7 @@ bd close <id>         # Complete work
 - Run `bd prime` for detailed command reference and session close protocol
 - Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
 - For controller or session reconciler incidents, use `gc trace` and follow `engdocs/contributors/reconciler-debugging.md` for the artifact collection workflow.
+- When a bead needs to pause on a specific actor or condition, only `hold:mayor` and `hold:external` are canonical (set via `bd set-state <id> hold=mayor|external --reason "..."`) — never invent a new ad hoc hold/blocked label. See `engdocs/contributors/hold-label-conventions.md`.
 
 ## Session Completion
 
@@ -408,6 +543,13 @@ bd close <id>         # Complete work
    NOTE: gascity Dolt is LOCAL-ONLY (no remote). Do NOT run `bd dolt push`,
    `bd dolt pull`, or `bd dolt remote add` here -- they fail and re-introduce
    a doomed `origin` remote (ga-9wsri). Use `git push` only.
+
+   That same no-remote shape is why bd >= 1.3.0 refuses to auto-apply pending
+   schema migrations to gascity's shared Dolt sql-server: migrating would lock
+   out every co-resident bd still on the old schema. If a bd WRITE fails with a
+   refusal naming pending migrations, the sanctioned fix is `bd migrate schema`
+   run once by a designated migrator after every bd client is upgraded -- NOT
+   `bd dolt pull`, and not an ad-hoc `BD_ALLOW_REMOTE_MIGRATE=1`.
 5. **Clean up** - Clear stashes, prune remote branches
 6. **Verify** - All changes committed AND pushed
 7. **Hand off** - Provide context for next session

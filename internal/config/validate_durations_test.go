@@ -39,6 +39,65 @@ func TestValidateDurationsEmptyFieldsOK(t *testing.T) {
 	}
 }
 
+func TestValidateDurationsBadOrderOverrideCheckTimeout(t *testing.T) {
+	bad := "60" // missing unit
+	cfg := &City{
+		Orders: OrdersConfig{
+			Overrides: []OrderOverride{
+				{Name: "pr-merge-queue", CheckTimeout: &bad},
+			},
+		},
+	}
+	warnings := ValidateDurations(cfg, "city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], "pr-merge-queue") {
+		t.Errorf("warning should mention override name: %s", warnings[0])
+	}
+	if !strings.Contains(warnings[0], "check_timeout") {
+		t.Errorf("warning should mention field name: %s", warnings[0])
+	}
+	if !strings.Contains(warnings[0], "60") {
+		t.Errorf("warning should mention bad value: %s", warnings[0])
+	}
+}
+
+func TestValidateDurationsNonPositiveOrderOverrideCheckTimeout(t *testing.T) {
+	// A zero/negative override check_timeout parses but silently reverts the
+	// condition probe to the 10s default at dispatch, so it must warn.
+	zero := "0s"
+	cfg := &City{
+		Orders: OrdersConfig{
+			Overrides: []OrderOverride{
+				{Name: "pr-merge-queue", CheckTimeout: &zero},
+			},
+		},
+	}
+	warnings := ValidateDurations(cfg, "city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], "must be a positive duration") {
+		t.Errorf("warning should flag non-positive duration: %s", warnings[0])
+	}
+}
+
+func TestValidateDurationsValidOrderOverrideCheckTimeout(t *testing.T) {
+	good := "60s"
+	cfg := &City{
+		Orders: OrdersConfig{
+			Overrides: []OrderOverride{
+				{Name: "pr-merge-queue", CheckTimeout: &good},
+			},
+		},
+	}
+	warnings := ValidateDurations(cfg, "city.toml")
+	if len(warnings) != 0 {
+		t.Errorf("expected no warnings for valid override check_timeout, got: %v", warnings)
+	}
+}
+
 func TestValidateDurationsBadAgentIdleTimeout(t *testing.T) {
 	cfg := &City{
 		Agents: []Agent{
@@ -73,6 +132,17 @@ func TestValidateDurationsBadSessionTimeout(t *testing.T) {
 	}
 	if !strings.Contains(warnings[0], "setup_timeout") {
 		t.Errorf("warning should mention field: %s", warnings[0])
+	}
+}
+
+func TestValidateDurationsBadClaimHolderStallTimeout(t *testing.T) {
+	cfg := &City{Session: SessionConfig{ClaimHolderStallTimeout: "not-a-duration"}}
+	warnings := ValidateDurations(cfg, "city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("warnings = %d, want 1: %v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], "claim_holder_stall_timeout") {
+		t.Fatalf("warning = %q, want claim_holder_stall_timeout", warnings[0])
 	}
 }
 
@@ -371,5 +441,107 @@ func TestValidateDurationsIncludesSource(t *testing.T) {
 	}
 	if !strings.Contains(warnings[0], "/path/to/city.toml") {
 		t.Errorf("warning should include source path: %s", warnings[0])
+	}
+}
+
+func TestValidateDurationsSetupTimeoutExceedsStartupTimeout(t *testing.T) {
+	cfg := &City{
+		Session: SessionConfig{
+			SetupTimeout:   "90s",
+			StartupTimeout: "60s",
+		},
+	}
+	warnings := ValidateDurations(cfg, "city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], "setup_timeout") || !strings.Contains(warnings[0], "startup_timeout") {
+		t.Errorf("warning should mention both fields: %s", warnings[0])
+	}
+	if !strings.Contains(warnings[0], "can never fire") {
+		t.Errorf("warning should explain the footgun: %s", warnings[0])
+	}
+}
+
+func TestValidateDurationsSetupTimeoutEqualsStartupTimeout(t *testing.T) {
+	// Equal values are also a footgun: startup_timeout's context deadline
+	// fires at (or before, given scheduling jitter) the same instant as
+	// setup_timeout, so setup_timeout still never gets to act on its own.
+	cfg := &City{
+		Session: SessionConfig{
+			SetupTimeout:   "60s",
+			StartupTimeout: "60s",
+		},
+	}
+	warnings := ValidateDurations(cfg, "city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+}
+
+func TestValidateDurationsSetupTimeoutExceedsDefaultStartupTimeout(t *testing.T) {
+	// startup_timeout left unset still defaults to 60s at runtime, so an
+	// explicit setup_timeout above that default must still warn.
+	cfg := &City{
+		Session: SessionConfig{
+			SetupTimeout: "90s",
+		},
+	}
+	warnings := ValidateDurations(cfg, "city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], "startup_timeout") {
+		t.Errorf("warning should mention startup_timeout: %s", warnings[0])
+	}
+}
+
+func TestValidateDurationsSetupMaxTimeoutChangesSetupTimeoutMeaning(t *testing.T) {
+	cfg := &City{
+		Session: SessionConfig{
+			SetupTimeout:    "10s",
+			SetupMaxTimeout: "10m",
+			StartupTimeout:  "60s",
+		},
+	}
+	warnings := ValidateDurations(cfg, "city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], "setup_max_timeout") {
+		t.Errorf("warning should mention setup_max_timeout: %s", warnings[0])
+	}
+	if !strings.Contains(warnings[0], "idle/silence") {
+		t.Errorf("warning should explain the meaning shift: %s", warnings[0])
+	}
+}
+
+func TestValidateDurationsSaneSessionSetupConfigNoWarnings(t *testing.T) {
+	cfg := &City{
+		Session: SessionConfig{
+			SetupTimeout:    "10s",
+			SetupMaxTimeout: "",
+			StartupTimeout:  "60s",
+		},
+	}
+	warnings := ValidateDurations(cfg, "city.toml")
+	if len(warnings) != 0 {
+		t.Errorf("expected no warnings for sane session setup config, got: %v", warnings)
+	}
+}
+
+func TestValidateDurationsBadChatSessionsGracePeriod(t *testing.T) {
+	cfg := &City{
+		ChatSessions: ChatSessionsConfig{GracePeriod: "bogus"},
+	}
+	warnings := ValidateDurations(cfg, "city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], "grace_period") {
+		t.Errorf("warning should mention field name: %s", warnings[0])
+	}
+	if !strings.Contains(warnings[0], "bogus") {
+		t.Errorf("warning should mention bad value: %s", warnings[0])
 	}
 }

@@ -112,6 +112,7 @@ func TestFormulaVersionCheck_MatchExitsZero(t *testing.T) {
 	cityDir, diskHash := writeVersionCheckCity(t)
 	beadID := createVersionCheckBead(t, cityDir, "deploy", diskHash)
 	t.Chdir(cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
 
 	var stdout, stderr bytes.Buffer
 	cmd := newFormulaVersionCheckCmd(&stdout, &stderr)
@@ -135,6 +136,7 @@ func TestFormulaVersionCheck_DivergeReturnsErrExit(t *testing.T) {
 	cityDir, _ := writeVersionCheckCity(t)
 	beadID := createVersionCheckBead(t, cityDir, "deploy", "deadbeefdeadbeefdeadbeefdeadbeef")
 	t.Chdir(cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
 
 	var stdout, stderr bytes.Buffer
 	cmd := newFormulaVersionCheckCmd(&stdout, &stderr)
@@ -160,6 +162,7 @@ func TestFormulaVersionCheck_DivergeShowsFormulaPath(t *testing.T) {
 	cityDir, _ := writeVersionCheckCity(t)
 	beadID := createVersionCheckBead(t, cityDir, "deploy", "deadbeefdeadbeefdeadbeefdeadbeef")
 	t.Chdir(cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
 
 	var stdout, stderr bytes.Buffer
 	cmd := newFormulaVersionCheckCmd(&stdout, &stderr)
@@ -180,6 +183,7 @@ func TestFormulaVersionCheck_JSONOutput(t *testing.T) {
 	cityDir, diskHash := writeVersionCheckCity(t)
 	beadID := createVersionCheckBead(t, cityDir, "deploy", diskHash)
 	t.Chdir(cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
 
 	var stdout, stderr bytes.Buffer
 	cmd := newFormulaVersionCheckCmd(&stdout, &stderr)
@@ -218,6 +222,7 @@ func TestFormulaVersionCheck_MissingFormulaHashErrors(t *testing.T) {
 	// hash="" → don't set gc.formula_hash metadata.
 	beadID := createVersionCheckBead(t, cityDir, "deploy", "")
 	t.Chdir(cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
 
 	var stdout, stderr bytes.Buffer
 	cmd := newFormulaVersionCheckCmd(&stdout, &stderr)
@@ -254,6 +259,7 @@ func TestFormulaVersionCheck_MissingRefErrors(t *testing.T) {
 		t.Fatalf("SetMetadata: %v", err)
 	}
 	t.Chdir(cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
 
 	var stdout, stderr bytes.Buffer
 	cmd := newFormulaVersionCheckCmd(&stdout, &stderr)
@@ -273,6 +279,7 @@ func TestFormulaVersionCheck_MissingRefErrors(t *testing.T) {
 func TestFormulaVersionCheck_BeadNotFoundErrors(t *testing.T) {
 	cityDir, _ := writeVersionCheckCity(t)
 	t.Chdir(cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
 
 	var stdout, stderr bytes.Buffer
 	cmd := newFormulaVersionCheckCmd(&stdout, &stderr)
@@ -294,6 +301,7 @@ func TestFormulaVersionCheck_FormulaNotOnDiskErrors(t *testing.T) {
 	cityDir, _ := writeVersionCheckCity(t)
 	beadID := createVersionCheckBead(t, cityDir, "ghost-formula", "abc123")
 	t.Chdir(cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
 
 	var stdout, stderr bytes.Buffer
 	cmd := newFormulaVersionCheckCmd(&stdout, &stderr)

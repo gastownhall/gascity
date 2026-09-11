@@ -16,6 +16,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/testutil"
+	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
 
 // TestHumaBinary_SupervisorBootsAndServesSpec builds `gc`, starts the
@@ -256,11 +259,7 @@ func writeSupervisorConfig(t *testing.T, gcHome string, port int) {
 // ~104 chars.
 func shortTempDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "gcit-")
-	if err != nil {
-		t.Fatalf("short tmp dir: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	dir := testutil.ShortTempDir(t, "gcit-")
 	registerIntegrationDoltSQLServerCleanup(t, dir)
 	return dir
 }
@@ -761,6 +760,10 @@ func TestHumaBinary_SessionMessageAsync(t *testing.T) {
 	bin := buildGCBinary(t)
 
 	root := shortTempDir(t)
+	providerBinDir := filepath.Join(root, "bin")
+	if err := helpers.StageIdleProviderBinary(providerBinDir, "claude"); err != nil {
+		t.Fatalf("stage Claude provider double: %v", err)
+	}
 	gcHome := filepath.Join(root, "home")
 	runtimeDir := filepath.Join(root, "run")
 	for _, dir := range []string{gcHome, runtimeDir} {
@@ -776,7 +779,9 @@ func TestHumaBinary_SessionMessageAsync(t *testing.T) {
 
 	baseURL := "http://127.0.0.1:" + strconv.Itoa(port)
 	env := integrationEnvFor(gcHome, runtimeDir, true)
-	env = append(env, "GC_SESSION=fake")
+	envMap := parseEnvList(env)
+	env = replaceEnv(env, "PATH", prependPath(providerBinDir, envMap["PATH"]))
+	env = replaceEnv(env, "GC_SESSION", "fake")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -891,16 +896,39 @@ func TestHumaBinary_SessionMessageAsync(t *testing.T) {
 	}
 	t.Logf("created session %q", sessionID)
 
-	// 4. Suspend the session.
-	suspReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, cityBase+"/session/"+sessionID+"/suspend", nil)
-	suspReq.Header.Set("X-GC-Request", "true")
-	suspResp, err := http.DefaultClient.Do(suspReq)
-	if err != nil {
-		t.Fatalf("POST /suspend: %v", err)
-	}
-	_ = suspResp.Body.Close()
-	if suspResp.StatusCode != http.StatusOK {
-		t.Fatalf("POST /suspend status = %d, want 200", suspResp.StatusCode)
+	// 4. Suspend the session. A retry-exhausted Dolt serialization conflict on
+	// the suspension-state write now surfaces as a declared, retryable 503
+	// (ga-4q87pe) instead of an undeclared 500; tolerate a bounded run of
+	// those before failing, honoring Retry-After when the server sends one.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		suspReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, cityBase+"/session/"+sessionID+"/suspend", nil)
+		suspReq.Header.Set("X-GC-Request", "true")
+		suspResp, err := http.DefaultClient.Do(suspReq)
+		if err != nil {
+			t.Fatalf("POST /suspend: %v", err)
+		}
+		// Read the body before asserting: a bare status number is not diagnosable
+		// from a CI log, and this assertion has failed in CI with a 500 whose cause
+		// was unrecoverable afterwards.
+		suspBody, _ := io.ReadAll(io.LimitReader(suspResp.Body, 4096))
+		_ = suspResp.Body.Close()
+		if suspResp.StatusCode == http.StatusOK {
+			break
+		}
+		if suspResp.StatusCode != http.StatusServiceUnavailable || time.Now().After(deadline) {
+			t.Fatalf("POST /suspend status = %d, want 200; body=%s", suspResp.StatusCode, strings.TrimSpace(string(suspBody)))
+		}
+		delay := 250 * time.Millisecond
+		if ra := suspResp.Header.Get("Retry-After"); ra != "" {
+			if secs, err := strconv.Atoi(ra); err == nil && secs >= 0 {
+				delay = time.Duration(secs) * time.Second
+			}
+		}
+		if remaining := time.Until(deadline); delay > remaining {
+			delay = remaining
+		}
+		time.Sleep(delay)
 	}
 	t.Logf("suspended session %q", sessionID)
 

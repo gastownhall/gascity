@@ -19,6 +19,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/execenv"
 )
 
 const (
@@ -190,6 +191,12 @@ func (p *proxyProcessInstance) Close() error {
 }
 
 func (p *proxyProcessInstance) start(now time.Time) error {
+	// Survivors of a previous supervisor hard exit keep running re-parented
+	// to init; spawning next to them accumulates duplicates (ga-mukg0s).
+	// Best-effort sweep before every spawn, scoped to this instance's state
+	// root so sibling cities' orphans are untouched; see orphan_reap.go.
+	reapOrphanedServiceProcesses(newOrphanIdentity(p.svc.Name, p.absStateRoot, p.svc.Process.Command))
+
 	logFile, err := os.OpenFile(filepath.Join(p.absStateRoot, "logs", "service.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o640)
 	if err != nil {
 		return fmt.Errorf("open service log: %w", err)
@@ -202,6 +209,9 @@ func (p *proxyProcessInstance) start(now time.Time) error {
 	cmd.Env = append(cmd.Env,
 		"GC_SERVICE_NAME="+p.svc.Name,
 		"GC_SERVICE_STATE_ROOT="+p.absStateRoot,
+		// Scaffolded at 0700 by ensureStateRoot; the sanctioned home for
+		// pack-managed credentials (bot tokens etc.).
+		"GC_SERVICE_SECRETS_DIR="+filepath.Join(p.absStateRoot, "secrets"),
 		"GC_SERVICE_RUN_ROOT="+filepath.Join(p.absStateRoot, "run"),
 		"GC_SERVICE_SOCKET="+p.socketPath,
 		"GC_SERVICE_URL_PREFIX="+citylayout.PublicServiceMountPath(p.rt.CityName(), p.svc.Name),
@@ -210,9 +220,10 @@ func (p *proxyProcessInstance) start(now time.Time) error {
 		"GC_PUBLISHED_SERVICES_DIR="+citylayout.PublishedServicesDir(p.rt.CityPath()),
 	)
 	cmd.Env = append(cmd.Env, extraHelperEnv...)
+	cmd.Env = execenv.WithUsageMetricsDisabled(cmd.Env)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = proxyProcessSysProcAttr()
 	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()
 		return fmt.Errorf("start process: %w", err)

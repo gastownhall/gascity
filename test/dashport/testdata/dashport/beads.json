@@ -1,0 +1,140 @@
+{
+  "seq": 200,
+  "beads": [
+    {
+      "id": "run-anchor",
+      "title": "mol-adopt-pr-v2",
+      "status": "open",
+      "issue_type": "molecule",
+      "ref": "mol-adopt-pr-v2",
+      "created_at": "2026-06-01T10:00:00Z",
+      "updated_at": "2026-06-01T12:00:00Z",
+      "metadata": {
+        "gc.formula_contract": "graph.v2",
+        "gc.kind": "workflow",
+        "gc.formula": "mol-adopt-pr-v2",
+        "gc.run_target": "rig:demo",
+        "gc.root_store_ref": "city:dashport-city",
+        "gc.scope_kind": "city",
+        "gc.scope_ref": "dashport-city"
+      }
+    },
+    {
+      "id": "run-anchor.preflight",
+      "title": "preflight",
+      "status": "in_progress",
+      "issue_type": "task",
+      "parent": "run-anchor",
+      "assignee": "builder",
+      "ref": "mol-adopt-pr-v2.preflight",
+      "created_at": "2026-06-01T10:01:00Z",
+      "updated_at": "2026-06-01T10:05:00Z",
+      "needs": ["run-anchor"],
+      "metadata": {
+        "gc.kind": "step",
+        "gc.root_bead_id": "run-anchor",
+        "gc.step_id": "preflight",
+        "gc.step_ref": "mol-adopt-pr-v2.preflight",
+        "gc.scope_ref": "dashport-city"
+      }
+    },
+    {
+      "id": "run-anchor.review",
+      "title": "review",
+      "status": "open",
+      "issue_type": "task",
+      "parent": "run-anchor",
+      "ref": "mol-adopt-pr-v2.review",
+      "created_at": "2026-06-01T10:02:00Z",
+      "updated_at": "2026-06-01T10:02:00Z",
+      "needs": ["run-anchor.preflight"],
+      "metadata": {
+        "gc.kind": "step",
+        "gc.root_bead_id": "run-anchor",
+        "gc.step_id": "review",
+        "gc.step_ref": "mol-adopt-pr-v2.review",
+        "gc.scope_ref": "dashport-city"
+      }
+    },
+    {
+      "id": "work-1",
+      "title": "Wire the seeded dashboard corpus",
+      "status": "open",
+      "issue_type": "task",
+      "created_at": "2026-06-01T09:00:00Z",
+      "updated_at": "2026-06-01T09:00:00Z"
+    },
+    {
+      "id": "src-review-1",
+      "title": "Review PR #42 for the seeded corpus",
+      "status": "closed",
+      "issue_type": "task",
+      "created_at": "2026-06-01T08:00:00Z",
+      "updated_at": "2026-06-01T08:29:00Z"
+    },
+    {
+      "id": "run-done",
+      "title": "mol-review-pr-v2",
+      "status": "closed",
+      "issue_type": "molecule",
+      "ref": "mol-review-pr-v2",
+      "created_at": "2026-06-01T08:30:00Z",
+      "updated_at": "2026-06-01T09:15:00Z",
+      "metadata": {
+        "gc.formula_contract": "graph.v2",
+        "gc.kind": "workflow",
+        "gc.formula": "mol-review-pr-v2",
+        "gc.run_target": "rig:demo",
+        "gc.root_store_ref": "city:dashport-city",
+        "gc.scope_kind": "city",
+        "gc.scope_ref": "dashport-city",
+        "gc.source_bead_id": "src-review-1",
+        "gc.molecule_lifecycle_completed": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+        "gc.session_name": "reviewer",
+        "gc.session_id": "reviewer"
+      }
+    },
+    {
+      "id": "run-done.analyze",
+      "title": "analyze",
+      "status": "closed",
+      "issue_type": "task",
+      "parent": "run-done",
+      "assignee": "reviewer",
+      "ref": "mol-review-pr-v2.analyze",
+      "created_at": "2026-06-01T08:31:00Z",
+      "updated_at": "2026-06-01T08:50:00Z",
+      "needs": ["run-done"],
+      "metadata": {
+        "gc.kind": "step",
+        "gc.root_bead_id": "run-done",
+        "gc.step_id": "analyze",
+        "gc.step_ref": "mol-review-pr-v2.analyze",
+        "gc.scope_ref": "dashport-city",
+        "gc.session_name": "reviewer",
+        "gc.session_id": "reviewer"
+      }
+    },
+    {
+      "id": "run-done.approve",
+      "title": "approve",
+      "status": "closed",
+      "issue_type": "task",
+      "parent": "run-done",
+      "assignee": "reviewer",
+      "ref": "mol-review-pr-v2.approve",
+      "created_at": "2026-06-01T08:51:00Z",
+      "updated_at": "2026-06-01T09:14:00Z",
+      "needs": ["run-done.analyze"],
+      "metadata": {
+        "gc.kind": "step",
+        "gc.root_bead_id": "run-done",
+        "gc.step_id": "approve",
+        "gc.step_ref": "mol-review-pr-v2.approve",
+        "gc.scope_ref": "dashport-city",
+        "gc.session_name": "reviewer",
+        "gc.session_id": "reviewer"
+      }
+    }
+  ]
+}

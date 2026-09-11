@@ -1,0 +1,1081 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/credentialprovider"
+	"github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/packregistry"
+	"github.com/spf13/cobra"
+)
+
+const (
+	defaultRegistryPublishURL     = "https://registry.gascity.com"
+	registryGitHubActionsAudience = "gascity-registry"
+	registryCredentialProviderEnv = "GC_CREDENTIAL_PROVIDER"
+	registryCredentialAudience    = "registry"
+	registryPublishScope          = "registry:publish"
+)
+
+var (
+	registryPublishHTTPClient     = &http.Client{Timeout: 30 * time.Second}
+	registryCredentialCache       = credentialprovider.NewCache()
+	errRegistryCredentialRedirect = errors.New("registry credential requests do not follow redirects")
+)
+
+type registryCredentialSource func(context.Context, bool) (string, error)
+
+var registryNewCredentialSource = func(argv []string, request credentialprovider.Request) (registryCredentialSource, error) {
+	provider, err := credentialprovider.New(argv)
+	if err != nil {
+		return nil, err
+	}
+	request.RequiredScopes = append([]string(nil), request.RequiredScopes...)
+	return func(ctx context.Context, forceRefresh bool) (string, error) {
+		mintRequest := request
+		mintRequest.RequiredScopes = append([]string(nil), request.RequiredScopes...)
+		mintRequest.ForceRefresh = forceRefresh
+		credential, err := registryCredentialCache.Mint(ctx, provider, mintRequest)
+		if err != nil {
+			return "", err
+		}
+		return credential.AccessToken, nil
+	}, nil
+}
+
+func registryCredentialProviderArgv() ([]string, error) {
+	raw, configured := os.LookupEnv(registryCredentialProviderEnv)
+	return parseRegistryCredentialProviderArgv(raw, configured)
+}
+
+func parseRegistryCredentialProviderArgv(raw string, configured bool) ([]string, error) {
+	if !configured {
+		return []string{"gasworks", "credential-provider"}, nil
+	}
+	if strings.TrimSpace(raw) == "" {
+		return nil, fmt.Errorf("%s must be a non-empty JSON argv array", registryCredentialProviderEnv)
+	}
+	var argv []string
+	if err := json.Unmarshal([]byte(raw), &argv); err != nil {
+		return nil, fmt.Errorf("%s must be a JSON argv array: %w", registryCredentialProviderEnv, err)
+	}
+	if _, err := credentialprovider.New(argv); err != nil {
+		return nil, fmt.Errorf("invalid %s: %w", registryCredentialProviderEnv, err)
+	}
+	return append([]string(nil), argv...), nil
+}
+
+func registryGasworksCredentialOriginAllowed(baseURL string) bool {
+	u, err := url.Parse(baseURL)
+	if err != nil || u.Scheme != "https" || u.User != nil || u.Path != "" ||
+		u.RawPath != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" {
+		return false
+	}
+	return strings.EqualFold(u.Host, "registry.gascity.com") ||
+		strings.EqualFold(u.Host, "registry.gascity.com:443")
+}
+
+func newRegistryGasworksCredentialSource(baseURL string) (registryCredentialSource, error) {
+	if !registryGasworksCredentialOriginAllowed(baseURL) {
+		return nil, fmt.Errorf("gasworks credentials are sent only to %s; configure a native registry credential for any other registry", defaultRegistryPublishURL)
+	}
+	argv, err := registryCredentialProviderArgv()
+	if err != nil {
+		return nil, err
+	}
+	return registryNewCredentialSource(argv, credentialprovider.Request{
+		Audience:       registryCredentialAudience,
+		RequiredScopes: []string{registryPublishScope},
+	})
+}
+
+type registryPublishOptions struct {
+	RegistryURL       string
+	Name              string
+	AllowUnscopedName bool
+	Version           string
+	Ref               string
+	Description       string
+	Token             string
+	SessionCookie     string
+	CSRFToken         string
+	DryRun            bool
+	Validate          bool
+	DevAuth           bool
+	DevAuthHandle     string
+}
+
+func newRegistryPublishCmd(stdout, stderr io.Writer) *cobra.Command {
+	opts := registryPublishOptions{
+		Validate:      true,
+		DevAuthHandle: "local-cli",
+	}
+	cmd := &cobra.Command{
+		Use:   "publish <path-to-pack-root>",
+		Short: "Submit a pack publish request",
+		Long: `Submit a pack publish request to Gas City Registry.
+
+The command requires a clean Git checkout whose current HEAD matches its
+configured upstream branch, then submits the GitHub repository, commit, pack
+path, pack name, and version to the registry API.
+
+Registry pack names are scoped as <github-owner>/<pack>, where <github-owner>
+is the lowercased GitHub owner of the source repository. [pack].name must
+already carry that scoped name: the registry compares it byte-for-byte with the
+requested name, and reserves unscoped names for packs it already holds a claim
+for. --allow-unscoped-name submits such a legacy unscoped name anyway.
+
+--dev-auth (localhost only) replaces all other credentials. Otherwise,
+authentication precedence is --token, GC_REGISTRY_TOKEN, a complete session
+cookie and CSRF-token pair from flags or the environment, a stored native
+Registry token, GitHub Actions OIDC, then the existing Gasworks login for the
+canonical hosted Registry. Run "gasworks login" once before using the provider,
+or use "gc pack registry login" to create a separate native Registry token.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if doRegistryPublish(cmd.Context(), args[0], opts, stdout, stderr) != 0 {
+				return errExit
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&opts.RegistryURL, "registry-url", "", "registry app base URL; defaults to GC_REGISTRY_URL, the stored login default, then "+defaultRegistryPublishURL)
+	cmd.Flags().StringVar(&opts.Name, "name", "", "registry pack name; must equal [pack].name (the registry rejects a mismatch)")
+	cmd.Flags().BoolVar(&opts.AllowUnscopedName, "allow-unscoped-name", false, "submit an unscoped (bare) pack name; the registry accepts these only for names it already holds a claim for")
+	cmd.Flags().StringVar(&opts.Version, "version", "", "release version; defaults to [pack].version")
+	cmd.Flags().StringVar(&opts.Ref, "ref", "", "release ref label; defaults to the upstream branch name")
+	cmd.Flags().StringVar(&opts.Description, "description", "", "release description; defaults to [pack].description")
+	cmd.Flags().StringVar(&opts.Token, "token", "", "registry API token; defaults to GC_REGISTRY_TOKEN")
+	cmd.Flags().StringVar(&opts.SessionCookie, "session-cookie", "", "registry_session cookie value or Cookie header; defaults to GC_REGISTRY_SESSION")
+	cmd.Flags().StringVar(&opts.CSRFToken, "csrf-token", "", "registry CSRF token; defaults to GC_REGISTRY_CSRF_TOKEN")
+	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "print the publish request without submitting")
+	cmd.Flags().BoolVar(&opts.Validate, "validate", opts.Validate, "ask the registry to validate the request immediately; a rejected validation exits non-zero")
+	cmd.Flags().BoolVar(&opts.DevAuth, "dev-auth", false, "create a local dev-auth session before submitting; localhost only")
+	cmd.Flags().StringVar(&opts.DevAuthHandle, "dev-auth-handle", opts.DevAuthHandle, "dev-auth handle when --dev-auth is used")
+	return cmd
+}
+
+func doRegistryPublish(ctx context.Context, packRoot string, opts registryPublishOptions, stdout, stderr io.Writer) int {
+	// Secrets resolve at execution time, never as flag defaults, so help
+	// output cannot render credential values from the environment.
+	opts.Token = registryFirstNonEmpty(opts.Token, os.Getenv("GC_REGISTRY_TOKEN"))
+	opts.SessionCookie = registryFirstNonEmpty(opts.SessionCookie, os.Getenv("GC_REGISTRY_SESSION"))
+	opts.CSRFToken = registryFirstNonEmpty(opts.CSRFToken, os.Getenv("GC_REGISTRY_CSRF_TOKEN"))
+
+	baseURL, err := resolveRegistryPublishBaseURL(opts.RegistryURL)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc pack registry publish: %v\n", err) //nolint:errcheck
+		return 1
+	}
+
+	// Resolve the publish auth mode before building the request. The GitHub
+	// Actions repo/ref fallback lets a detached or upstream-less CI checkout skip
+	// the local pushed-HEAD proof, but that is only sound when this publish
+	// actually authenticates through the GitHub Actions OIDC mint path: the mint
+	// exchange is what proves the run really executed in GitHub Actions for this
+	// repository and commit. Any pre-supplied credential (--token, env token,
+	// stored login token, --session-cookie/--csrf-token, or --dev-auth) skips the
+	// OIDC mint, so it must keep proving HEAD is pushed to its upstream and must
+	// not trust spoofable GITHUB_*/ACTIONS_* environment variables.
+	auth := registryPublishAuth{
+		Token:         strings.TrimSpace(opts.Token),
+		SessionCookie: strings.TrimSpace(opts.SessionCookie),
+		CSRFToken:     strings.TrimSpace(opts.CSRFToken),
+	}
+	if !auth.hasCredentials() && !opts.DevAuth {
+		configuredToken, err := readRegistryConfiguredToken(baseURL)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc pack registry publish: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		auth.Token = strings.TrimSpace(configuredToken)
+	}
+	useGitHubActionsOIDC := !auth.hasCredentials() && !opts.DevAuth && registryGitHubActionsOIDCAvailable()
+
+	request, err := buildRegistryPublishRequest(ctx, packRoot, opts, useGitHubActionsOIDC)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc pack registry publish: %v\n", err) //nolint:errcheck
+		return 1
+	}
+
+	// Warn before the dry-run early return: a dry run is exactly where a
+	// publisher checks what --allow-unscoped-name is about to do, and the flag
+	// only holds if the registry already holds a claim for the bare name.
+	if opts.AllowUnscopedName && !strings.Contains(request.RequestedName, "/") {
+		fmt.Fprintf(stderr, "gc pack registry publish: warning: submitting unscoped name %q; the registry accepts it only when it already holds a claim for that name\n", request.RequestedName) //nolint:errcheck
+	}
+
+	if opts.DryRun {
+		writeRegistryPublishDryRun(stdout, baseURL, request)
+		return 0
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	var providerSource registryCredentialSource
+	if opts.DevAuth {
+		var err error
+		auth, err = registryPublishDevAuth(ctx, registryPublishHTTPClient, baseURL, opts.DevAuthHandle)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc pack registry publish: %v\n", err) //nolint:errcheck
+			return 1
+		}
+	}
+	if useGitHubActionsOIDC {
+		oidcToken, err := registryRequestGitHubActionsOIDCToken(ctx, registryPublishHTTPClient, registryGitHubActionsAudience)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc pack registry publish: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		publishToken, err := registryMintGitHubActionsPublishToken(ctx, registryPublishHTTPClient, baseURL, request, oidcToken)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc pack registry publish: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		auth.Token = publishToken
+	}
+	if !auth.hasCredentials() {
+		providerSource, err = newRegistryGasworksCredentialSource(baseURL)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc pack registry publish: configuring credential provider: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		token, err := providerSource(ctx, false)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc pack registry publish: minting credential: %v; run `gasworks login` or `gc pack registry login`\n", err) //nolint:errcheck
+			return 1
+		}
+		auth.Token = token
+	}
+	if !auth.hasCredentials() {
+		fmt.Fprintln(stderr, "gc pack registry publish: authentication required; run `gc pack registry login`, set GC_REGISTRY_TOKEN, pass --token, or run `gasworks login`") //nolint:errcheck
+		return 1
+	}
+
+	submitClient := registryPublishHTTPClient
+	if providerSource != nil {
+		submitClient = registryHTTPClientWithCredentialRefresh(submitClient, providerSource)
+	}
+	submitted, err := submitRegistryPublishRequest(ctx, submitClient, baseURL, request, auth, opts.Validate)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc pack registry publish: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	writeRegistryPublishSubmitted(stdout, baseURL, submitted)
+	if opts.Validate {
+		if failure := registryPublishValidationFailure(submitted); failure != "" {
+			fmt.Fprintf(stderr, "gc pack registry publish: validation failed: %s\n", failure) //nolint:errcheck
+			return 1
+		}
+	}
+	return 0
+}
+
+type registryPublishRequest struct {
+	RepoURL              string `json:"repoUrl"`
+	Commit               string `json:"commit"`
+	PackPath             string `json:"packPath"`
+	RequestedName        string `json:"requestedName"`
+	RequestedVersion     string `json:"requestedVersion"`
+	RequestedRef         string `json:"requestedRef,omitempty"`
+	RequestedDescription string `json:"requestedDescription,omitempty"`
+}
+
+type registryPublishSubmitted struct {
+	ID               string
+	Status           string
+	RequestedName    string
+	RequestedVersion string
+	Repository       string
+	StatusReason     string
+	ValidationError  string
+	Hash             string
+}
+
+type registryPackManifest struct {
+	Pack struct {
+		Name        string `toml:"name"`
+		Version     string `toml:"version"`
+		Description string `toml:"description"`
+	} `toml:"pack"`
+}
+
+func buildRegistryPublishRequest(ctx context.Context, packRoot string, opts registryPublishOptions, allowGitHubActionsFallback bool) (registryPublishRequest, error) {
+	absPackRoot, err := filepath.Abs(packRoot)
+	if err != nil {
+		return registryPublishRequest{}, fmt.Errorf("resolving pack root: %w", err)
+	}
+	absPackRoot = normalizePathForCompare(absPackRoot)
+	manifest, err := readRegistryPackManifest(absPackRoot)
+	if err != nil {
+		return registryPublishRequest{}, err
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	repoRoot, err := gitOutput(ctx, absPackRoot, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return registryPublishRequest{}, fmt.Errorf("pack root must be inside a Git repository: %w", err)
+	}
+	repoRoot = normalizePathForCompare(repoRoot)
+	status, err := gitOutput(ctx, repoRoot, "status", "--porcelain=v1", "--untracked-files=all")
+	if err != nil {
+		return registryPublishRequest{}, fmt.Errorf("checking Git status: %w", err)
+	}
+	if strings.TrimSpace(status) != "" {
+		return registryPublishRequest{}, errors.New("working tree has uncommitted or untracked changes; commit, stash, or remove them before publishing")
+	}
+	commit, err := gitOutput(ctx, repoRoot, "rev-parse", "HEAD")
+	if err != nil {
+		return registryPublishRequest{}, fmt.Errorf("resolving HEAD: %w", err)
+	}
+	if !fullGitSHARE.MatchString(commit) {
+		return registryPublishRequest{}, fmt.Errorf("HEAD resolved to %q, not a full lowercase Git SHA", commit)
+	}
+	repoRef, err := resolveRegistryPublishRepoRef(ctx, repoRoot, commit, opts, allowGitHubActionsFallback)
+	if err != nil {
+		return registryPublishRequest{}, err
+	}
+	packPath, err := registryPublishPackPath(repoRoot, absPackRoot)
+	if err != nil {
+		return registryPublishRequest{}, err
+	}
+
+	version := strings.TrimSpace(registryFirstNonEmpty(opts.Version, manifest.Pack.Version))
+	if version == "" {
+		return registryPublishRequest{}, errors.New("release version is required; set [pack].version or pass --version")
+	}
+	name := strings.TrimSpace(registryFirstNonEmpty(opts.Name, manifest.Pack.Name))
+	if name == "" {
+		return registryPublishRequest{}, errors.New("pack name is required; set [pack].name in pack.toml")
+	}
+	if err := validateRegistryPublishName(name, manifest.Pack.Name, repoRef.RepoURL, opts.AllowUnscopedName); err != nil {
+		return registryPublishRequest{}, err
+	}
+	ref := repoRef.Ref
+	description := strings.TrimSpace(registryFirstNonEmpty(opts.Description, manifest.Pack.Description))
+	return registryPublishRequest{
+		RepoURL:              repoRef.RepoURL,
+		Commit:               commit,
+		PackPath:             packPath,
+		RequestedName:        name,
+		RequestedVersion:     version,
+		RequestedRef:         ref,
+		RequestedDescription: description,
+	}, nil
+}
+
+// validateRegistryPublishName refuses locally what the registry refuses
+// remotely, so a doomed publish never burns a request slot or parks a dead row
+// in the review queue. It is the local twin of packNamePolicyViolation in the
+// registry's server/publish.ts, which enforces the same two namespace rules
+// first at validation and again at approve: unscoped names are reserved, and a
+// scoped name's scope must equal the lowercased GitHub owner of the source
+// repository. Only the reserved rule gets an escape hatch here, because the
+// registry does accept an unscoped name it already holds a claim for and a
+// local preflight cannot see the claim table; the scope rule has no
+// server-side override, so it has none here either.
+//
+// The checks are ordered so the first error a publisher sees leads to the one
+// correct fix, and each message is shaped by which half of the pair is wrong: a
+// bare --name against an already correctly scoped pack.toml prescribes fixing
+// the flag, every other mismatch prescribes the pack.toml edit. A pack.toml
+// declaring "mathcity" published as "tdupu/mathcity" reports the mismatch and
+// prescribes the pack.toml edit; dropping the scope to satisfy that message
+// instead reports the reserved name and prescribes the same edit. Both roads
+// end at [pack].name carrying the scoped name.
+func validateRegistryPublishName(name, manifestName, repoURL string, allowUnscoped bool) error {
+	if err := packregistry.ValidatePackName(name); err != nil {
+		return fmt.Errorf("%w; registry names are lowercase [a-z0-9-] segments in <github-owner>/<pack> form", err)
+	}
+	owner, err := registryGitHubRepoOwner(repoURL)
+	if err != nil {
+		return err
+	}
+	ownerLower := strings.ToLower(owner)
+	if manifestName == "" {
+		// --name can no longer stand in for a missing [pack].name: the registry
+		// rejects a nameless pack.toml outright, before it compares anything, so
+		// accepting the flag here would only build a request doomed on arrival.
+		// The suggestion is always rescoped to the repository owner rather than
+		// echoing --name back, because a foreign scope repeated verbatim names a
+		// pack.toml edit the very next run's scope check refuses.
+		bare := name
+		if _, rest, scoped := strings.Cut(name, "/"); scoped {
+			bare = rest
+		}
+		return fmt.Errorf("pack.toml does not declare [pack].name; the registry rejects such publishes, so set [pack].name = %q and push before publishing", ownerLower+"/"+bare)
+	}
+	if name != manifestName {
+		// A bare --name against an already correctly scoped pack.toml means the
+		// flag is the stale half, typically a CI workflow still passing the
+		// pre-scope name. Prescribing the pack.toml edit there would tell the
+		// publisher to drop the scope, and the next run would refuse the result as
+		// a reserved unscoped name.
+		manifestScope, _, manifestScoped := strings.Cut(manifestName, "/")
+		manifestIsPublishable := manifestScoped && manifestScope == ownerLower && packregistry.ValidatePackName(manifestName) == nil
+		if !strings.Contains(name, "/") && manifestIsPublishable {
+			return fmt.Errorf("--name %q does not match pack.toml [pack].name %q; the registry compares them byte-for-byte, and pack.toml already carries the correctly scoped name, so drop --name or pass --name %q", name, manifestName, manifestName)
+		}
+		return fmt.Errorf("--name %q does not match pack.toml [pack].name %q; the registry compares them byte-for-byte, so set [pack].name = %q and push before publishing", name, manifestName, name)
+	}
+	scope, rest, scoped := strings.Cut(name, "/")
+	if !scoped {
+		if allowUnscoped {
+			return nil
+		}
+		return fmt.Errorf("unscoped pack name %q is reserved by the registry; set [pack].name = %q and push before publishing, or pass --allow-unscoped-name if the registry already holds a claim for %q", name, ownerLower+"/"+name, name)
+	}
+	if scope != ownerLower {
+		return fmt.Errorf("pack name scope %q does not match the source repository owner %q; set [pack].name = %q and push before publishing", scope, owner, ownerLower+"/"+rest)
+	}
+	return nil
+}
+
+// registryPublishRepoRef carries the GitHub repository URL and release ref
+// label for a publish request. They come from the local upstream tracking
+// branch, or from GitHub Actions runner metadata when a detached or
+// upstream-less CI checkout has no `@{u}` but a trusted OIDC environment.
+type registryPublishRepoRef struct {
+	RepoURL string
+	Ref     string
+}
+
+// resolveRegistryPublishRepoRef resolves the GitHub repository URL and release
+// ref for a publish request. It prefers the local upstream tracking branch and
+// verifies HEAD is pushed there. When the branch has no upstream, it falls back
+// to GitHub Actions runner metadata only if allowGitHubActionsFallback is set,
+// which the caller enables exclusively for the GitHub Actions OIDC mint path.
+// A publish carrying any other (non-OIDC) credential keeps requiring a pushed
+// upstream, so spoofable GITHUB_*/ACTIONS_* environment variables cannot skip
+// the pushed-HEAD proof.
+func resolveRegistryPublishRepoRef(ctx context.Context, repoRoot, commit string, opts registryPublishOptions, allowGitHubActionsFallback bool) (registryPublishRepoRef, error) {
+	upstream, err := gitOutput(ctx, repoRoot, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+	if err != nil {
+		if allowGitHubActionsFallback {
+			if ghRef, ok := registryGitHubActionsRepoRef(commit, opts); ok {
+				return ghRef, nil
+			}
+		}
+		return registryPublishRepoRef{}, errors.New("current branch has no upstream; run `git push -u` before publishing")
+	}
+	upstreamCommit, err := gitOutput(ctx, repoRoot, "rev-parse", "@{u}")
+	if err != nil {
+		return registryPublishRepoRef{}, fmt.Errorf("resolving upstream %s: %w", upstream, err)
+	}
+	if upstreamCommit != commit {
+		return registryPublishRepoRef{}, fmt.Errorf("HEAD %s is not pushed to upstream %s (%s)", shortCommit(commit), upstream, shortCommit(upstreamCommit))
+	}
+	remoteName, upstreamBranch, err := splitGitUpstream(upstream)
+	if err != nil {
+		return registryPublishRepoRef{}, err
+	}
+	remoteURL, err := gitOutput(ctx, repoRoot, "remote", "get-url", remoteName)
+	if err != nil {
+		return registryPublishRepoRef{}, fmt.Errorf("reading remote %q URL: %w", remoteName, err)
+	}
+	repoURL, err := normalizeGitHubRemoteURL(remoteURL)
+	if err != nil {
+		return registryPublishRepoRef{}, err
+	}
+	return registryPublishRepoRef{
+		RepoURL: repoURL,
+		Ref:     strings.TrimSpace(registryFirstNonEmpty(opts.Ref, upstreamBranch)),
+	}, nil
+}
+
+// registryGitHubActionsRepoRef derives the publish repository URL and ref from
+// GitHub Actions runner metadata. It returns ok=false unless the OIDC request
+// environment is present, the runner identifies the repository, and the
+// runner's commit SHA matches the local HEAD, so stale or spoofed metadata
+// cannot redirect a publish to the wrong repository or commit. Environment
+// presence alone is not a trust signal: callers must restrict this fallback to
+// the GitHub Actions OIDC mint path, where the minted token is exchanged with
+// the registry and proves the run actually executed in GitHub Actions. Callers
+// fall back to the upstream requirement when ok is false.
+func registryGitHubActionsRepoRef(commit string, opts registryPublishOptions) (registryPublishRepoRef, bool) {
+	if !registryGitHubActionsOIDCAvailable() {
+		return registryPublishRepoRef{}, false
+	}
+	repoSlug := strings.TrimSpace(os.Getenv("GITHUB_REPOSITORY"))
+	if repoSlug == "" {
+		return registryPublishRepoRef{}, false
+	}
+	// The runner's commit must be present and match the checked-out HEAD so
+	// publish records the exact tree the workflow built, never an unrelated or
+	// unverified commit. An absent GITHUB_SHA falls back to the upstream
+	// requirement rather than trusting unconfirmed runner metadata.
+	sha := strings.TrimSpace(os.Getenv("GITHUB_SHA"))
+	if sha == "" || !strings.EqualFold(sha, commit) {
+		return registryPublishRepoRef{}, false
+	}
+	serverURL := strings.TrimSpace(os.Getenv("GITHUB_SERVER_URL"))
+	if serverURL == "" {
+		serverURL = "https://github.com"
+	}
+	repoURL, err := normalizeGitHubRemoteURL(strings.TrimRight(serverURL, "/") + "/" + repoSlug)
+	if err != nil {
+		return registryPublishRepoRef{}, false
+	}
+	return registryPublishRepoRef{
+		RepoURL: repoURL,
+		Ref:     strings.TrimSpace(registryFirstNonEmpty(opts.Ref, os.Getenv("GITHUB_REF_NAME"))),
+	}, true
+}
+
+// readRegistryPackManifest loads pack.toml from packRoot. It does not require
+// [pack].name; buildRegistryPublishRequest reports that, because the registry
+// rejects a pack.toml declaring no name at all and the resulting error can then
+// name the exact [pack].name edit that fixes the publish.
+func readRegistryPackManifest(packRoot string) (registryPackManifest, error) {
+	packToml := filepath.Join(packRoot, "pack.toml")
+	data, err := os.ReadFile(packToml)
+	if err != nil {
+		return registryPackManifest{}, fmt.Errorf("reading %s: %w", packToml, err)
+	}
+	var manifest registryPackManifest
+	if err := toml.Unmarshal(data, &manifest); err != nil {
+		return registryPackManifest{}, fmt.Errorf("parsing %s: %w", packToml, err)
+	}
+	manifest.Pack.Name = strings.TrimSpace(manifest.Pack.Name)
+	return manifest, nil
+}
+
+func gitOutput(ctx context.Context, dir string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	// Strip git-locating env vars (GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, ...)
+	// so publish introspection resolves dir, not a parent repo leaked through a
+	// pre-commit hook or nested worktree tooling.
+	cmd.Env = git.SanitizedEnv()
+	out, err := cmd.Output()
+	if err != nil {
+		if exitErr := new(exec.ExitError); errors.As(err, &exitErr) {
+			msg := strings.TrimSpace(string(exitErr.Stderr))
+			if msg != "" {
+				return "", errors.New(msg)
+			}
+		}
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+var fullGitSHARE = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
+func splitGitUpstream(upstream string) (remote, branch string, err error) {
+	parts := strings.SplitN(strings.TrimSpace(upstream), "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", fmt.Errorf("unsupported upstream %q", upstream)
+	}
+	return parts[0], parts[1], nil
+}
+
+func normalizeGitHubRemoteURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	raw = strings.TrimSuffix(raw, ".git")
+	switch {
+	case strings.HasPrefix(raw, "git@github.com:"):
+		path := strings.TrimPrefix(raw, "git@github.com:")
+		return normalizeGitHubOwnerRepo(path)
+	case strings.HasPrefix(raw, "ssh://"):
+		u, err := url.Parse(raw)
+		if err != nil {
+			return "", fmt.Errorf("parsing Git remote URL: %w", err)
+		}
+		if strings.EqualFold(u.Hostname(), "github.com") {
+			return normalizeGitHubOwnerRepo(strings.TrimPrefix(u.Path, "/"))
+		}
+	case strings.HasPrefix(raw, "https://") || strings.HasPrefix(raw, "http://"):
+		u, err := url.Parse(raw)
+		if err != nil {
+			return "", fmt.Errorf("parsing Git remote URL: %w", err)
+		}
+		if strings.EqualFold(u.Hostname(), "github.com") {
+			return normalizeGitHubOwnerRepo(strings.TrimPrefix(u.Path, "/"))
+		}
+	}
+	return "", fmt.Errorf("publish requires a GitHub remote, got %q", raw)
+}
+
+var githubOwnerRepoRE = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
+
+func normalizeGitHubOwnerRepo(path string) (string, error) {
+	path = strings.Trim(strings.TrimSuffix(path, ".git"), "/")
+	if !githubOwnerRepoRE.MatchString(path) {
+		return "", fmt.Errorf("invalid GitHub owner/repo path %q", path)
+	}
+	return "https://github.com/" + path, nil
+}
+
+// registryGitHubRepoOwner cuts the owner login out of a publish request's
+// repository URL. Every such URL passes through normalizeGitHubOwnerRepo above,
+// on the upstream-remote path and the GitHub Actions fallback path alike, so
+// the https://github.com/<owner>/<repo> shape is guaranteed here. The error
+// exists so a future change to that normalization surfaces as a refused publish
+// rather than as a silently skipped namespace check.
+func registryGitHubRepoOwner(repoURL string) (string, error) {
+	if path, ok := strings.CutPrefix(strings.TrimSpace(repoURL), "https://github.com/"); ok {
+		if owner, _, cut := strings.Cut(path, "/"); cut && owner != "" {
+			return owner, nil
+		}
+	}
+	return "", fmt.Errorf("cannot derive the GitHub owner from repository URL %q", repoURL)
+}
+
+func registryPublishPackPath(repoRoot, packRoot string) (string, error) {
+	rel, err := filepath.Rel(repoRoot, packRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolving pack path relative to repository: %w", err)
+	}
+	if rel == "." {
+		return ".", nil
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", errors.New("pack root is not inside the Git repository")
+	}
+	return filepath.ToSlash(rel), nil
+}
+
+// resolveRegistryPublishBaseURL resolves the registry base URL from the
+// explicit flag value, the GC_REGISTRY_URL environment variable, the stored
+// login default, then defaultRegistryPublishURL, and normalizes the winner.
+func resolveRegistryPublishBaseURL(explicit string) (string, error) {
+	raw := registryFirstNonEmpty(explicit, os.Getenv("GC_REGISTRY_URL"))
+	if raw == "" {
+		cfg, err := loadRegistryCLIConfig(registryCLIConfigPath())
+		if err != nil {
+			return "", err
+		}
+		raw = cfg.DefaultRegistryURL
+	}
+	return normalizeRegistryPublishBaseURL(raw)
+}
+
+func normalizeRegistryPublishBaseURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		raw = defaultRegistryPublishURL
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("invalid registry URL %q", raw)
+	}
+	switch u.Scheme {
+	case "https":
+	case "http":
+		// publish, login, and whoami carry bearer tokens, session cookies, and
+		// CSRF tokens. Cleartext http only stays off the wire for a loopback
+		// host, so reject http for any non-local registry.
+		if !isLocalRegistryHost(u.Hostname()) {
+			return "", fmt.Errorf("registry URL must use https for non-local hosts: %q", raw)
+		}
+	default:
+		return "", fmt.Errorf("registry URL must use http or https: %q", raw)
+	}
+	u.Path = strings.TrimRight(u.Path, "/")
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String(), nil
+}
+
+type registryPublishAuth struct {
+	Token         string
+	SessionCookie string
+	CSRFToken     string
+}
+
+func registryHTTPClientWithCredentialRefresh(client *http.Client, refresh registryCredentialSource) *http.Client {
+	copyClient := *client
+	copyClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return errRegistryCredentialRedirect
+	}
+	base := copyClient.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	copyClient.Transport = &registryProviderReauthRoundTripper{base: base, refresh: refresh}
+	return &copyClient
+}
+
+type registryProviderReauthRoundTripper struct {
+	base    http.RoundTripper
+	refresh registryCredentialSource
+}
+
+func (rt *registryProviderReauthRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := rt.base.RoundTrip(req)
+	if err != nil || resp == nil || resp.StatusCode != http.StatusUnauthorized || rt.refresh == nil {
+		return resp, err
+	}
+	if !isRegistryRetrySafeMethod(req.Method) ||
+		!registryHasBearerAuthorization(req.Header.Get("Authorization")) ||
+		(req.Body != nil && req.Body != http.NoBody && req.GetBody == nil) {
+		return resp, nil
+	}
+
+	token, err := rt.refresh(req.Context(), true)
+	if err != nil {
+		_ = resp.Body.Close()
+		if ctxErr := req.Context().Err(); ctxErr != nil {
+			return nil, fmt.Errorf("refreshing registry credential after 401: %w", ctxErr)
+		}
+		if errors.Is(err, context.Canceled) {
+			return nil, fmt.Errorf("refreshing registry credential after 401: %w", context.Canceled)
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("refreshing registry credential after 401: %w", context.DeadlineExceeded)
+		}
+		return nil, errors.New("refreshing registry credential after 401: credential refresh failed")
+	}
+	token = strings.TrimSpace(token)
+	if token == "" {
+		_ = resp.Body.Close()
+		return nil, errors.New("refreshing registry credential after 401: credential provider returned an empty token")
+	}
+
+	retry := req.Clone(req.Context())
+	if req.GetBody != nil {
+		retry.Body, err = req.GetBody()
+		if err != nil {
+			_ = resp.Body.Close()
+			return nil, errors.New("replaying registry request after credential refresh: request body recreation failed")
+		}
+	}
+	retry.Header.Set("Authorization", "Bearer "+token)
+	_ = resp.Body.Close()
+	return rt.base.RoundTrip(retry)
+}
+
+func registryHasBearerAuthorization(value string) bool {
+	fields := strings.Fields(value)
+	return len(fields) == 2 && strings.EqualFold(fields[0], "Bearer") && fields[1] != ""
+}
+
+func isRegistryRetrySafeMethod(method string) bool {
+	switch strings.ToUpper(method) {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	default:
+		return false
+	}
+}
+
+func (a registryPublishAuth) hasCredentials() bool {
+	return strings.TrimSpace(a.Token) != "" ||
+		(strings.TrimSpace(a.SessionCookie) != "" && strings.TrimSpace(a.CSRFToken) != "")
+}
+
+func registryPublishDevAuth(ctx context.Context, client *http.Client, baseURL, handle string) (registryPublishAuth, error) {
+	if !isLocalRegistryURL(baseURL) {
+		return registryPublishAuth{}, errors.New("--dev-auth is only allowed for localhost registry URLs")
+	}
+	handle = strings.TrimSpace(handle)
+	if handle == "" {
+		handle = "local-cli"
+	}
+	loginURL := baseURL + "/api/dev/sign-in?handle=" + url.QueryEscape(handle) + "&redirect=/api/me"
+	devClient := *client
+	devClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, loginURL, nil)
+	if err != nil {
+		return registryPublishAuth{}, err
+	}
+	resp, err := devClient.Do(req)
+	if err != nil {
+		return registryPublishAuth{}, fmt.Errorf("creating dev auth session: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var sessionCookie string
+	for _, cookie := range resp.Cookies() {
+		if cookie.Name == "registry_session" {
+			sessionCookie = cookie.Value
+			break
+		}
+	}
+	if sessionCookie == "" {
+		return registryPublishAuth{}, fmt.Errorf("creating dev auth session: registry returned HTTP %d without registry_session cookie", resp.StatusCode)
+	}
+	csrf, err := registryPublishFetchCSRF(ctx, client, baseURL, sessionCookie)
+	if err != nil {
+		return registryPublishAuth{}, err
+	}
+	return registryPublishAuth{SessionCookie: sessionCookie, CSRFToken: csrf}, nil
+}
+
+func registryPublishFetchCSRF(ctx context.Context, client *http.Client, baseURL, sessionCookie string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/me", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Cookie", registryPublishCookieHeader(sessionCookie))
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("fetching registry session: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var payload struct {
+		CSRFToken string `json:"csrfToken"`
+	}
+	if err := registryDecodeJSONResponse(resp, &payload); err != nil {
+		return "", fmt.Errorf("fetching registry session: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("fetching registry session: HTTP %d", resp.StatusCode)
+	}
+	if strings.TrimSpace(payload.CSRFToken) == "" {
+		return "", errors.New("registry session did not include a CSRF token")
+	}
+	return payload.CSRFToken, nil
+}
+
+func isLocalRegistryURL(baseURL string) bool {
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return false
+	}
+	return isLocalRegistryHost(u.Hostname())
+}
+
+// isLocalRegistryHost reports whether host is a loopback host that may exchange
+// registry credentials over cleartext http.
+func isLocalRegistryHost(host string) bool {
+	switch strings.ToLower(host) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	default:
+		return false
+	}
+}
+
+func submitRegistryPublishRequest(ctx context.Context, client *http.Client, baseURL string, payload registryPublishRequest, auth registryPublishAuth, validate bool) (registryPublishSubmitted, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return registryPublishSubmitted{}, err
+	}
+	endpoint := baseURL + "/api/publish-requests"
+	if validate {
+		endpoint += "?validate=1"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return registryPublishSubmitted{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	if strings.TrimSpace(auth.Token) != "" {
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(auth.Token))
+	} else {
+		req.Header.Set("X-CSRF-Token", auth.CSRFToken)
+		req.Header.Set("Cookie", registryPublishCookieHeader(auth.SessionCookie))
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return registryPublishSubmitted{}, fmt.Errorf("submitting publish request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var raw registryPublishAPIResponse
+	if err := registryDecodeJSONResponse(resp, &raw); err != nil {
+		return registryPublishSubmitted{}, fmt.Errorf("submitting publish request: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if raw.Error.Message != "" {
+			return registryPublishSubmitted{}, fmt.Errorf("registry rejected publish request (%s): %s", raw.Error.Code, raw.Error.Message)
+		}
+		return registryPublishSubmitted{}, fmt.Errorf("registry rejected publish request: HTTP %d", resp.StatusCode)
+	}
+	request := raw.PublishRequest
+	if request.ID == "" && raw.Direct.ID != "" {
+		request = raw.Direct
+	}
+	if request.ID == "" {
+		return registryPublishSubmitted{}, errors.New("registry response did not include a publish request")
+	}
+	return registryPublishSubmitted{
+		ID:               request.ID,
+		Status:           request.Status,
+		RequestedName:    registryFirstNonEmpty(request.RequestedName, payload.RequestedName),
+		RequestedVersion: registryFirstNonEmpty(request.RequestedVersion, payload.RequestedVersion),
+		Repository:       request.Repository.FullName,
+		StatusReason:     request.StatusReason,
+		ValidationError:  request.ValidationError,
+		Hash:             request.RegistryEntry.Release.Hash,
+	}, nil
+}
+
+type registryPublishAPIResponse struct {
+	PublishRequest registryPublishAPIRequest `json:"publishRequest"`
+	Direct         registryPublishAPIRequest `json:"-"`
+	Error          struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+type registryPublishAPIRequest struct {
+	ID               string `json:"id"`
+	Status           string `json:"status"`
+	RequestedName    string `json:"requestedName"`
+	RequestedVersion string `json:"requestedVersion"`
+	StatusReason     string `json:"statusReason"`
+	ValidationError  string `json:"validationError"`
+	Repository       struct {
+		FullName string `json:"fullName"`
+	} `json:"repository"`
+	RegistryEntry struct {
+		Release struct {
+			Hash string `json:"hash"`
+		} `json:"release"`
+	} `json:"registryEntry"`
+}
+
+func (r *registryPublishAPIResponse) UnmarshalJSON(data []byte) error {
+	type alias registryPublishAPIResponse
+	var wrapped alias
+	if err := json.Unmarshal(data, &wrapped); err != nil {
+		return err
+	}
+	*r = registryPublishAPIResponse(wrapped)
+	var direct registryPublishAPIRequest
+	if err := json.Unmarshal(data, &direct); err == nil && direct.ID != "" {
+		r.Direct = direct
+	}
+	return nil
+}
+
+// registryPublishCookieHeader renders the Cookie header for a --session-cookie
+// input. Only explicitly header-shaped values pass through verbatim; bare
+// session values are wrapped unescaped so legal cookie characters such as
+// base64 `=` padding survive the round trip back to the registry.
+func registryPublishCookieHeader(value string) string {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, "registry_session=") || strings.Contains(value, ";") {
+		return value
+	}
+	return "registry_session=" + value
+}
+
+// registryDecodeJSONResponse decodes a bounded registry response body into
+// out. Registries sit behind proxies and CDNs that answer with HTML or empty
+// bodies, so a non-2xx response that fails to decode reports the HTTP status
+// instead of a JSON syntax error.
+func registryDecodeJSONResponse(resp *http.Response, out any) error {
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return fmt.Errorf("reading registry response: %w", err)
+	}
+	decodeErr := json.Unmarshal(body, out)
+	if decodeErr == nil {
+		return nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if snippet := registryResponseSnippet(body); snippet != "" {
+			return fmt.Errorf("registry returned HTTP %d: %s", resp.StatusCode, snippet)
+		}
+		return fmt.Errorf("registry returned HTTP %d", resp.StatusCode)
+	}
+	return fmt.Errorf("decoding registry response (HTTP %d): %w", resp.StatusCode, decodeErr)
+}
+
+// registryResponseSnippet condenses a non-JSON response body for error text.
+func registryResponseSnippet(body []byte) string {
+	s := strings.Join(strings.Fields(string(body)), " ")
+	const maxRunes = 200
+	if runes := []rune(s); len(runes) > maxRunes {
+		s = string(runes[:maxRunes]) + "..."
+	}
+	return s
+}
+
+func writeRegistryPublishDryRun(stdout io.Writer, baseURL string, request registryPublishRequest) {
+	fmt.Fprintf(stdout, "Registry: %s\n", baseURL)                                        //nolint:errcheck
+	fmt.Fprintf(stdout, "Repository: %s\n", request.RepoURL)                              //nolint:errcheck
+	fmt.Fprintf(stdout, "Commit: %s\n", request.Commit)                                   //nolint:errcheck
+	fmt.Fprintf(stdout, "Pack path: %s\n", request.PackPath)                              //nolint:errcheck
+	fmt.Fprintf(stdout, "Pack: %s %s\n", request.RequestedName, request.RequestedVersion) //nolint:errcheck
+	if request.RequestedRef != "" {
+		fmt.Fprintf(stdout, "Ref: %s\n", request.RequestedRef) //nolint:errcheck
+	}
+	if request.RequestedDescription != "" {
+		fmt.Fprintf(stdout, "Description: %s\n", request.RequestedDescription) //nolint:errcheck
+	}
+	fmt.Fprintln(stdout, "Dry run: publish request was not submitted.") //nolint:errcheck
+}
+
+func writeRegistryPublishSubmitted(stdout io.Writer, baseURL string, result registryPublishSubmitted) {
+	fmt.Fprintf(stdout, "Submitted publish request %s to %s\n", result.ID, baseURL)     //nolint:errcheck
+	fmt.Fprintf(stdout, "Pack: %s %s\n", result.RequestedName, result.RequestedVersion) //nolint:errcheck
+	if result.Repository != "" {
+		fmt.Fprintf(stdout, "Repository: %s\n", result.Repository) //nolint:errcheck
+	}
+	fmt.Fprintf(stdout, "Status: %s\n", result.Status) //nolint:errcheck
+	if result.Hash != "" {
+		fmt.Fprintf(stdout, "Hash: %s\n", result.Hash) //nolint:errcheck
+	}
+	if result.StatusReason != "" {
+		fmt.Fprintf(stdout, "Message: %s\n", result.StatusReason) //nolint:errcheck
+	} else if result.ValidationError != "" {
+		fmt.Fprintf(stdout, "Message: %s\n", result.ValidationError) //nolint:errcheck
+	}
+	// Pin the effective publish base URL: the requests command resolves its
+	// registry independently (flag/env/stored default/hosted default), so an
+	// unqualified handoff can query a different Registry than the publish used.
+	fmt.Fprintf(stdout, "Next: gc pack registry requests --registry-url %s %s\n", baseURL, result.ID) //nolint:errcheck
+}
+
+// registryPublishValidationRejectedStatuses lists publish-request statuses that
+// represent a terminal validation rejection. A `gc pack registry publish --validate`
+// run that lands in one of these states failed validation; statuses outside
+// this set (for example queued or pending-review states) are not treated as
+// failures, so a successfully queued request still exits zero.
+var registryPublishValidationRejectedStatuses = map[string]bool{
+	"rejected": true,
+	"invalid":  true,
+	"failed":   true,
+	"error":    true,
+	"denied":   true,
+}
+
+// registryPublishValidationFailure reports a human-readable reason when a
+// validated publish request did not pass registry validation, or "" when it
+// did. A populated ValidationError is always a failure; otherwise a terminal
+// rejected/invalid status is treated as a failure so `gc pack registry publish
+// --validate` exits non-zero instead of masking a pack the registry rejected
+// inside a 2xx response as a successful publish.
+func registryPublishValidationFailure(result registryPublishSubmitted) string {
+	if msg := strings.TrimSpace(result.ValidationError); msg != "" {
+		return msg
+	}
+	if registryPublishValidationRejectedStatuses[strings.ToLower(strings.TrimSpace(result.Status))] {
+		if reason := strings.TrimSpace(result.StatusReason); reason != "" {
+			return fmt.Sprintf("status %q: %s", result.Status, reason)
+		}
+		return fmt.Sprintf("status %q", result.Status)
+	}
+	return ""
+}
+
+func registryFirstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}

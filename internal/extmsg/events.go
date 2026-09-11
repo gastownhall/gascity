@@ -10,12 +10,14 @@ import "github.com/gastownhall/gascity/internal/events"
 
 // InboundEventPayload is emitted on events.ExtMsgInbound ("extmsg.inbound").
 // Actor is the inbound speaker's display name; TargetSession is the
-// resolved recipient session (empty if no routing match).
+// resolved recipient session and TargetAgent the bound agent identity for
+// agent-bound conversations (both empty if no routing match).
 type InboundEventPayload struct {
 	Provider       string `json:"provider"`
 	ConversationID string `json:"conversation_id"`
 	Actor          string `json:"actor"`
 	TargetSession  string `json:"target_session"`
+	TargetAgent    string `json:"target_agent,omitempty"`
 }
 
 // IsEventPayload marks InboundEventPayload as an events.Payload variant.
@@ -32,12 +34,29 @@ type OutboundEventPayload struct {
 // IsEventPayload marks OutboundEventPayload as an events.Payload variant.
 func (OutboundEventPayload) IsEventPayload() {}
 
+// OutboundChannelMismatchPayload is emitted on
+// events.ExtMsgOutboundChannelMismatch when a session tries to publish to a
+// conversation owned by a different session. PostingSession is the caller
+// that attempted the publish; OwnerSession is the session that actually owns
+// the target conversation's binding. The publish is rejected — this payload
+// makes the cross-wire observable rather than silent (RCA gc-5aie6).
+type OutboundChannelMismatchPayload struct {
+	Provider       string `json:"provider"`
+	ConversationID string `json:"conversation_id"`
+	PostingSession string `json:"posting_session"`
+	OwnerSession   string `json:"owner_session"`
+}
+
+// IsEventPayload marks OutboundChannelMismatchPayload as an events.Payload variant.
+func (OutboundChannelMismatchPayload) IsEventPayload() {}
+
 // BoundEventPayload is emitted on events.ExtMsgBound (binding a
-// conversation to a session).
+// conversation to a session or to a configured agent identity).
 type BoundEventPayload struct {
 	Provider       string `json:"provider"`
 	ConversationID string `json:"conversation_id"`
 	SessionID      string `json:"session_id"`
+	AgentName      string `json:"agent_name,omitempty"`
 }
 
 // IsEventPayload marks BoundEventPayload as an events.Payload variant.
@@ -81,4 +100,5 @@ func init() {
 	events.RegisterPayload(events.ExtMsgAdapterRemoved, AdapterEventPayload{})
 	events.RegisterPayload(events.ExtMsgInbound, InboundEventPayload{})
 	events.RegisterPayload(events.ExtMsgOutbound, OutboundEventPayload{})
+	events.RegisterPayload(events.ExtMsgOutboundChannelMismatch, OutboundChannelMismatchPayload{})
 }

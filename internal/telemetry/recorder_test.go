@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"sync"
 	"testing"
+	"time"
 
 	otellog "go.opentelemetry.io/otel/log"
 	otellogglobal "go.opentelemetry.io/otel/log/global"
@@ -16,8 +17,8 @@ import (
 // the current (noop) global MeterProvider during tests.
 func resetInstruments(t *testing.T) {
 	t.Helper()
-	instOnce = sync.Once{}
-	t.Cleanup(func() { instOnce = sync.Once{} })
+	ResetInstrumentsForTest()
+	t.Cleanup(ResetInstrumentsForTest)
 }
 
 // --- helper functions ---
@@ -96,8 +97,8 @@ func TestRecordAgentStop(t *testing.T) {
 	resetInstruments(t)
 	ctx := context.Background()
 
-	RecordAgentStop(ctx, "gc-test-agent1", "orphan", nil)
-	RecordAgentStop(ctx, "gc-test-agent2", "drift", errors.New("stop error"))
+	RecordAgentStop(ctx, "gc-test-session1", "gc-test-agent1", "orphan", nil)
+	RecordAgentStop(ctx, "gc-test-session2", "gc-test-agent2", "drift", errors.New("stop error"))
 }
 
 func TestRecordAgentCrash(t *testing.T) {
@@ -126,8 +127,8 @@ func TestRecordReconcileCycle(t *testing.T) {
 	resetInstruments(t)
 	ctx := context.Background()
 
-	RecordReconcileCycle(ctx, 3, 1, 2)
-	RecordReconcileCycle(ctx, 0, 0, 0)
+	RecordReconcileCycle(ctx, 3)
+	RecordReconcileCycle(ctx, 0)
 }
 
 func TestRecordNudge(t *testing.T) {
@@ -152,6 +153,15 @@ func TestRecordControllerLifecycle(t *testing.T) {
 
 	RecordControllerLifecycle(ctx, "started")
 	RecordControllerLifecycle(ctx, "stopped")
+}
+
+func TestRecordSupervisorStarted(t *testing.T) {
+	resetInstruments(t)
+	ctx := context.Background()
+
+	RecordSupervisorStarted(ctx, "clean")
+	RecordSupervisorStarted(ctx, "crash")
+	RecordSupervisorStarted(ctx, "unknown")
 }
 
 func TestRecordBDCall(t *testing.T) {
@@ -249,6 +259,50 @@ func TestRecordBDSlowEmitsSanitizedWarnEvent(t *testing.T) {
 	}
 	if got := attrs["timestamp"].AsString(); got == "" {
 		t.Fatal("bd.slow timestamp is empty")
+	}
+}
+
+func TestRecordCacheScanLargeEmitsWarnEvent(t *testing.T) {
+	resetInstruments(t)
+	exp := installRecordingLogExporter(t)
+
+	RecordCacheScanLarge(context.Background(), "test-rig", 3272, 2500, 2100*time.Millisecond)
+
+	rec := exp.recordByBody("beads.cache.scan_large")
+	if rec == nil {
+		t.Fatal("RecordCacheScanLarge did not emit beads.cache.scan_large")
+	}
+	if got := rec.Severity(); got != otellog.SeverityWarn {
+		t.Fatalf("beads.cache.scan_large severity = %v, want WARN", got)
+	}
+	attrs := recordAttrs(*rec)
+	if got := attrs["rig"].AsString(); got != "test-rig" {
+		t.Fatalf("beads.cache.scan_large rig = %q, want test-rig", got)
+	}
+	if got := attrs["bead_count"].AsInt64(); got != 3272 {
+		t.Fatalf("beads.cache.scan_large bead_count = %d, want 3272", got)
+	}
+	if got := attrs["threshold"].AsInt64(); got != 2500 {
+		t.Fatalf("beads.cache.scan_large threshold = %d, want 2500", got)
+	}
+	if got := attrs["elapsed_ms"].AsInt64(); got != 2100 {
+		t.Fatalf("beads.cache.scan_large elapsed_ms = %d, want 2100", got)
+	}
+}
+
+func TestRecordCacheScanLargeNormalizesEmptyRig(t *testing.T) {
+	resetInstruments(t)
+	exp := installRecordingLogExporter(t)
+
+	RecordCacheScanLarge(context.Background(), "  ", 2600, 2500, 150*time.Millisecond)
+
+	rec := exp.recordByBody("beads.cache.scan_large")
+	if rec == nil {
+		t.Fatal("RecordCacheScanLarge did not emit beads.cache.scan_large")
+	}
+	attrs := recordAttrs(*rec)
+	if got := attrs["rig"].AsString(); got != "(no-prefix)" {
+		t.Fatalf("beads.cache.scan_large rig = %q, want (no-prefix)", got)
 	}
 }
 

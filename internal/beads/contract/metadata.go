@@ -1,6 +1,10 @@
 package contract
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
+)
 
 // Canonical bead-metadata keys for the worker-path / artifact-path split
 // (gastownhall/gascity#1251 Shift C, phase 1).
@@ -21,13 +25,13 @@ import "strings"
 const (
 	// WorkerDirKey is the canonical session-bead metadata key for the
 	// agent process working directory.
-	WorkerDirKey = "worker_dir"
+	WorkerDirKey = beadmeta.WorkerDirMetadataKey
 
 	// ArtifactDirKey is the canonical task/molecule-bead metadata key
 	// for the work artifact directory. Distinct from WorkerDirKey to
 	// stop conflating "where the agent runs" with "where artifacts
 	// land" (#1101, originally #1094 — already fixed by #1169).
-	ArtifactDirKey = "artifact_dir"
+	ArtifactDirKey = beadmeta.ArtifactDirMetadataKey
 
 	// LegacyWorkDirKey is the deprecated metadata key that overloaded
 	// the worker-cwd and artifact-dir semantics on different bead
@@ -35,7 +39,7 @@ const (
 	// existing session beads keep working during the rollout. New
 	// writes should not use this key — a future CI lint will flag any
 	// new writes outside the alias-shim path.
-	LegacyWorkDirKey = "work_dir"
+	LegacyWorkDirKey = beadmeta.LegacyWorkDirMetadataKey
 )
 
 // WorkerDirFromMetadata returns the agent process working directory

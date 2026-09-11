@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -11,7 +12,9 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 func TestOrderFiringCurrent_NeverFired_BeyondUptime(t *testing.T) {
@@ -194,7 +197,7 @@ func TestOrderFiringCurrent_UsesNewestOrderRunHistory(t *testing.T) {
 	}, nil)
 
 	check := NewOrderFiringCurrentCheck(cfg, cityPath, WithOrderFiringCurrentLastRunFunc(func(order orders.Order) (time.Time, error) {
-		return orders.LastRunFuncForStore(store)(order.ScopedName())
+		return orders.NewStoreWithGraph(beads.OrdersStore{Store: store}, beads.GraphStore{Store: store}).LastRun(order.ScopedName())
 	}))
 	check.clock = func() time.Time { return now }
 	result := check.Run(&CheckContext{CityPath: cityPath})
@@ -232,6 +235,101 @@ func TestOrderFiringCurrent_SkipsSuspendedRigOrders(t *testing.T) {
 	}
 	if strings.Contains(strings.Join(result.Details, "\n"), "parked") {
 		t.Fatalf("details = %v, suspended rig order should be skipped", result.Details)
+	}
+}
+
+func TestOrderFiringCurrent_SkipsSuspendedOnStartRigOrders(t *testing.T) {
+	// Regression for #5268: the legacy Suspended field is deprecated and no
+	// longer written by live suspend/resume. A rig parked the *current* way
+	// (suspended_on_start = true in city.toml) must be skipped exactly like
+	// the legacy field was in TestOrderFiringCurrent_SkipsSuspendedRigOrders.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	rigPath := filepath.Join(cityPath, "rigs", "parked")
+	rigFormulas := filepath.Join(rigPath, "formulas")
+	rigOrders := filepath.Join(rigPath, "orders")
+	if err := os.MkdirAll(rigOrders, 0o755); err != nil {
+		t.Fatalf("creating rig orders dir: %v", err)
+	}
+	cfg.Rigs = []config.Rig{{Name: "parked", Path: rigPath, SuspendedOnStart: true}}
+	cfg.FormulaLayers.Rigs = map[string][]string{"parked": {cfg.FormulaLayers.City[0], rigFormulas}}
+	writeOrderFiringTestOrderInDir(t, rigOrders, "gate-sweep", "cooldown", "1m")
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "gate-sweep:rig:parked", Ts: now.Add(-24 * time.Hour)},
+	)
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusOK {
+		t.Fatalf("status = %v, want OK for suspended_on_start rig; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	if strings.Contains(strings.Join(result.Details, "\n"), "parked") {
+		t.Fatalf("details = %v, suspended_on_start rig order should be skipped", result.Details)
+	}
+}
+
+func TestOrderFiringCurrent_SkipsRuntimeStateSuspendedRigOrders(t *testing.T) {
+	// Regression for #5268: `gc rig suspend` records its preference in
+	// .gc/runtime/suspension-state.json, not in any city.toml field. This is
+	// the more common suspend path (it leaves no trace in city.toml) and the
+	// one #5268 reports as unconditionally missed.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	rigPath := filepath.Join(cityPath, "rigs", "parked")
+	rigFormulas := filepath.Join(rigPath, "formulas")
+	rigOrders := filepath.Join(rigPath, "orders")
+	if err := os.MkdirAll(rigOrders, 0o755); err != nil {
+		t.Fatalf("creating rig orders dir: %v", err)
+	}
+	cfg.Rigs = []config.Rig{{Name: "parked", Path: rigPath}}
+	cfg.FormulaLayers.Rigs = map[string][]string{"parked": {cfg.FormulaLayers.City[0], rigFormulas}}
+	writeOrderFiringTestOrderInDir(t, rigOrders, "gate-sweep", "cooldown", "1m")
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "gate-sweep:rig:parked", Ts: now.Add(-24 * time.Hour)},
+	)
+	suspended := true
+	st := suspensionstate.State{Rigs: map[string]suspensionstate.Override{"parked": {Suspended: &suspended}}}
+	if err := suspensionstate.Save(fsys.OSFS{}, cityPath, st); err != nil {
+		t.Fatalf("saving runtime suspension state: %v", err)
+	}
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusOK {
+		t.Fatalf("status = %v, want OK for runtime-state suspended rig; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	if strings.Contains(strings.Join(result.Details, "\n"), "parked") {
+		t.Fatalf("details = %v, runtime-state suspended rig order should be skipped", result.Details)
+	}
+}
+
+func TestOrderFiringCurrent_RuntimeStateResumeOverridesSuspendedOnStart(t *testing.T) {
+	// The runtime override wins over the authored default in both
+	// directions: `gc rig resume` on a rig whose city.toml still says
+	// suspended_on_start = true must re-enable staleness checking for it.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	rigPath := filepath.Join(cityPath, "rigs", "resumed")
+	rigFormulas := filepath.Join(rigPath, "formulas")
+	rigOrders := filepath.Join(rigPath, "orders")
+	if err := os.MkdirAll(rigOrders, 0o755); err != nil {
+		t.Fatalf("creating rig orders dir: %v", err)
+	}
+	cfg.Rigs = []config.Rig{{Name: "resumed", Path: rigPath, SuspendedOnStart: true}}
+	cfg.FormulaLayers.Rigs = map[string][]string{"resumed": {cfg.FormulaLayers.City[0], rigFormulas}}
+	writeOrderFiringTestOrderInDir(t, rigOrders, "gate-sweep", "cooldown", "1m")
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
+	)
+	resumed := false
+	st := suspensionstate.State{Rigs: map[string]suspensionstate.Override{"resumed": {Suspended: &resumed}}}
+	if err := suspensionstate.Save(fsys.OSFS{}, cityPath, st); err != nil {
+		t.Fatalf("saving runtime suspension state: %v", err)
+	}
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusError {
+		t.Fatalf("status = %v, want error; an explicit runtime resume should re-enable staleness checking; msg = %s; details = %v", result.Status, result.Message, result.Details)
 	}
 }
 
@@ -576,4 +674,102 @@ func runOrderFiringCurrentTest(t *testing.T, cfg *config.City, cityPath string, 
 	check := NewOrderFiringCurrentCheck(cfg, cityPath)
 	check.clock = func() time.Time { return now }
 	return check.Run(&CheckContext{CityPath: cityPath})
+}
+
+func TestLatestOrderFiredAt_RecentEventSkipsLastRun(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	expected := 4 * time.Hour
+	order := orders.Order{Name: "cleanup-cooldown", Trigger: "cooldown"}
+	evts := []events.Event{
+		{Type: events.OrderFired, Subject: order.ScopedName(), Ts: now.Add(-1 * time.Hour)},
+	}
+
+	lastRunCalled := false
+	check := &OrderFiringCurrentCheck{
+		lastRun: func(orders.Order) (time.Time, error) {
+			lastRunCalled = true
+			return time.Time{}, fmt.Errorf("lastRun must not be consulted for a recent event")
+		},
+	}
+
+	got, err := check.latestOrderFiredAt(evts, order, expected, now)
+	if err != nil {
+		t.Fatalf("latestOrderFiredAt returned error: %v", err)
+	}
+	if lastRunCalled {
+		t.Fatalf("lastRun was consulted for an in-band event; want fast path to skip it")
+	}
+	if want := now.Add(-1 * time.Hour); !got.Equal(want) {
+		t.Fatalf("latest = %v, want %v (event timestamp)", got, want)
+	}
+}
+
+func TestLatestOrderFiredAt_StaleEventConsultsLastRun(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	expected := 4 * time.Hour
+	order := orders.Order{Name: "mol-dog-stale-db", Trigger: "cron"}
+	// Event age (13h) exceeds expected*1.5 (6h), so the fast path must not apply.
+	staleEvent := now.Add(-13 * time.Hour)
+	freshRun := now.Add(-1 * time.Hour)
+	evts := []events.Event{
+		{Type: events.OrderFired, Subject: order.ScopedName(), Ts: staleEvent},
+	}
+
+	lastRunCalled := false
+	check := &OrderFiringCurrentCheck{
+		lastRun: func(orders.Order) (time.Time, error) {
+			lastRunCalled = true
+			return freshRun, nil
+		},
+	}
+
+	got, err := check.latestOrderFiredAt(evts, order, expected, now)
+	if err != nil {
+		t.Fatalf("latestOrderFiredAt returned error: %v", err)
+	}
+	if !lastRunCalled {
+		t.Fatalf("lastRun was not consulted for a stale event; want order-run history queried")
+	}
+	if !got.Equal(freshRun) {
+		t.Fatalf("latest = %v, want %v (newer order-run history)", got, freshRun)
+	}
+}
+
+func TestOrderFiringCurrent_TimesOutStalledOrderHistory(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "mol-dog-stalled-history", "cron", "0 */4 * * *")
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "mol-dog-stalled-history", Ts: now.Add(-13 * time.Hour)},
+	)
+
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	check := NewOrderFiringCurrentCheck(cfg, cityPath)
+	check.clock = func() time.Time { return now }
+	check.historyTimeout = 20 * time.Millisecond
+	check.lastRun = func(orders.Order) (time.Time, error) {
+		<-release
+		return time.Time{}, nil
+	}
+
+	result := check.Run(&CheckContext{CityPath: cityPath})
+	if result.Status != StatusError {
+		t.Fatalf("status = %v, want error; msg = %s", result.Status, result.Message)
+	}
+	if !strings.Contains(result.Message, "order history lookup timed out after 20ms") {
+		t.Fatalf("message = %q, want timeout diagnostic", result.Message)
+	}
+	// A slow-but-inconclusive lookup must not gate gc doctor red the same way a
+	// confirmed stale/never-fired order does (#4895): the query timing out proves
+	// nothing about whether orders are actually firing, so it must not report as
+	// SeverityBlocking (the CheckSeverity zero value, which this branch silently
+	// fell into before it explicitly set Severity).
+	if result.Severity != SeverityAdvisory {
+		t.Fatalf("severity = %v, want SeverityAdvisory (a timed-out lookup is inconclusive, not proof of a stale order)", result.Severity)
+	}
+	if !result.TimedOut {
+		t.Fatalf("TimedOut = false, want true so callers (JSON output, doctor summary) can distinguish this from a confirmed failure")
+	}
 }

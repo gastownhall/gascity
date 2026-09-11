@@ -35,7 +35,7 @@ trying to port the entire Town architecture literally.
 ## What You Get
 
 - Declarative city configuration in `city.toml`
-- Multiple runtime providers: tmux, subprocess, exec, ACP, and Kubernetes
+- Multiple runtime providers: tmux, subprocess, exec, ACP, Kubernetes, and herdr
 - Beads-backed work tracking, formulas, molecules, waits, and mail
 - A controller/supervisor loop that reconciles desired state to running state
 - Packs, overrides, and rig-scoped orchestration for multi-project setups
@@ -62,6 +62,12 @@ Gas City requires the following tools on your system. `gc init` and
 | gh | Optional GitHub gates | — | `brew install gh` | [cli.github.com](https://cli.github.com/) |
 | claude / codex / gemini | Per provider | — | See provider docs | See provider docs |
 
+tmux is the default session backend **and** the fallback, so it stays required
+even if you run agents on another backend. [herdr](https://herdr.dev) is an
+optional alternative backend — see
+[herdr Session Provider](docs/reference/herdr-provider.md) to enable it
+per-agent, per-rig, or city-wide.
+
 The `bd` (beads) provider is the default. To use a file-based store instead
 (no dolt/bd/flock needed), set `GC_BEADS=file` or add `[beads] provider = "file"`
 to your `city.toml`.
@@ -75,11 +81,11 @@ heavy write load.
 Install from Homebrew:
 
 ```bash
-brew install gastownhall/gascity/gascity
+brew install gascity
 gc version
 ```
 
-Or build from source (requires `make`, Go 1.25+, and ICU for a transitive Dolt
+Or build from source (requires `make`, Go 1.26.4+, and ICU for a transitive Dolt
 CGO dependency — `brew install icu4c` on macOS, `apt install libicu-dev` on
 Linux; on macOS the Makefile auto-detects the keg-only `icu4c` paths):
 
@@ -99,6 +105,32 @@ bd create "Create a script that prints hello world"
 gc session attach mayor
 ```
 
+### Nix/Flox machines (ICU not on the default CGO path)
+
+On NixOS / Flox-managed Linux toolchains, system include/lib dirs are not
+searched, so the build fails with `fatal error: unicode/uregex.h: No such file
+or directory`. Point CGO at the Nix-store ICU dev headers + matching runtime
+lib (pick the dev output whose propagated lib matches your `gc`/`dolt` link, to
+avoid ICU version skew), and disable the Makefile's `/usr/lib` fallback so the
+Nix and system toolchains don't get mixed:
+
+```bash
+# Re-resolve the dev header path if the store path changes:
+#   find /nix/store -maxdepth 3 -path '*icu4c*-dev/include/unicode/uregex.h'
+# Match the lib to what your installed binary links: ldd $(which gc) | grep icu
+ICU_DEV=/nix/store/dvhx24q4icrig4q1v1lp7kzi3izd5jmb-icu4c-76.1-dev
+ICU_LIB=/nix/store/i4lj3w4yd9x9jbi7a1xhjqsr7bg8jq7p-icu4c-76.1
+
+CGO_ENABLED=1 \
+CGO_CPPFLAGS="-I$ICU_DEV/include" \
+CGO_LDFLAGS="-L$ICU_LIB/lib" \
+SYS_USR_CGO_FALLBACK=0 \
+  make build      # or: go build -o bin/gc ./cmd/gc
+```
+
+CGO-backed tests (e.g. `go test ./internal/beads`) take the same three CGO_*
+vars — no `CGO_ENABLED=0` workaround needed once ICU is pointed at correctly.
+
 For the longer walkthrough, start with
 [Tutorial 01](docs/tutorials/01-cities-and-rigs.md).
 
@@ -111,7 +143,7 @@ The docs now use a Mintlify structure rooted in [`docs/`](docs/README.md).
 - [Docs Home](docs/index.mdx)
 - [Installation](docs/getting-started/installation.md)
 - [Quickstart](docs/getting-started/quickstart.md)
-- [Repository Map](docs/getting-started/repository-map.md)
+- [How Gas City Works](docs/getting-started/how-gas-city-works.md)
 - [Contributors](engdocs/contributors/index.md)
 - [Reference](docs/reference/index.md)
 - [Architecture](engdocs/architecture/index.md)
@@ -129,16 +161,34 @@ make docs-dev
 
 ## Repository Map
 
-- `cmd/gc/`: CLI commands, controller wiring, and supervisor integration
-- `internal/runtime/`: runtime provider abstraction and implementations
-- `internal/config/`: `city.toml` schema, pack composition, and validation
-- `internal/beads/`: store abstraction and provider implementations
-- `internal/session/`: session bead metadata and wait helpers
-- `internal/orders/`: periodic formula and exec dispatch
-- `internal/convergence/`: bounded iterative refinement loops
-- `examples/`: sample cities, packs, formulas, and configs
-- `contrib/`: helper scripts and deployment assets
-- `test/`: integration and support test packages
+| Path | What it contains |
+|---|---|
+| `cmd/gc/` | CLI entrypoints, controller wiring, runtime assembly, and command handlers |
+| `internal/runtime/` | Runtime provider abstraction plus tmux, subprocess, exec, ACP, K8s, hybrid, and herdr implementations |
+| `internal/config/` | `city.toml` schema, validation, composition, packs, patches, and override resolution |
+| `internal/beads/` | Store abstraction and provider implementations for beads (work, mail, convoys) and waits |
+| `internal/session/` | Session bead metadata, wait lifecycle helpers, and session identity utilities |
+| `internal/orders/` | Order parsing and scanning for periodic dispatch |
+| `internal/convergence/` | Bounded iterative refinement loops and gate handling |
+| `internal/api/` | HTTP API handlers and resource views |
+| `docs/` | Mintlify docs site (tutorials, guides, reference) |
+| `engdocs/` | Contributor-facing architecture, design docs, proposals, and archive |
+| `examples/` | Example cities, packs, formulas, and reference topologies |
+| `contrib/` | Helper scripts, Dockerfiles, and integration support assets |
+| `test/` | Integration and support test packages |
+
+### Where to start
+
+- **CLI behavior** — `cmd/gc/`, then the command-specific helper it calls.
+- **Runtime/provider work** — `internal/runtime/runtime.go` and the provider package you're changing.
+- **Config and pack behavior** — `internal/config/config.go`, `compose.go`, and `pack.go`.
+- **Work dispatch (sling)** — `cmd/gc/cmd_sling.go` and `internal/beads/`.
+- **Supervisor, sessions, wake/sleep** — `cmd/gc/`, `internal/session/`, and `internal/runtime/`.
+
+For the concepts these packages implement, see
+[How Gas City Works](docs/getting-started/how-gas-city-works.md). For a deeper
+package walkthrough, see
+[`engdocs/contributors/codebase-map.md`](engdocs/contributors/codebase-map.md).
 
 ## Contributing
 

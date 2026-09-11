@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // TestFSSourceMatchesLegacyBehavior asserts FSSource is a faithful
@@ -451,6 +453,55 @@ func TestResolveWithSourcePrecedence(t *testing.T) {
 	}
 }
 
+// TestGitRefSourceIgnoresPoisonedGitEnv proves the GitRefSource subprocesses
+// resolve against the repository that contains the queried path even when the
+// process environment leaks GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE from a parent
+// repo or a pre-commit hook. Without git.SanitizedEnv() assigned to each
+// subprocess, the leaked GIT_DIR redirects git away from the intended repo and
+// every lookup misses. Regression guard for gastownhall/gascity#3343 (review
+// attempt-8 blocker on unsanitized formula git subprocesses).
+func TestGitRefSourceIgnoresPoisonedGitEnv(t *testing.T) {
+	gitOK(t)
+	root := initRepo(t)
+	commitFile(t, root, "formulas/demo.toml", "formula = \"demo\"\n")
+	commitOnBranch(t, root, "main", "add demo formula")
+
+	// Poison the environment the way a pre-commit hook or nested worktree
+	// would. These all point away from the repo that holds the formula, so an
+	// unsanitized subprocess would resolve the wrong (or no) repository. Set
+	// them only after repo setup so the setup commands stay clean.
+	t.Setenv("GIT_DIR", filepath.Join(t.TempDir(), "poison.git"))
+	t.Setenv("GIT_WORK_TREE", t.TempDir())
+	t.Setenv("GIT_INDEX_FILE", filepath.Join(t.TempDir(), "poison.index"))
+
+	src := NewGitRefSource("HEAD")
+	target := filepath.Join(root, "formulas", "demo.toml")
+
+	if !src.Stat(target) {
+		t.Fatal("Stat reported the committed formula as absent under poisoned GIT_* env")
+	}
+	data, err := src.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile under poisoned GIT_* env: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != `formula = "demo"` {
+		t.Fatalf("ReadFile = %q, want %q", got, `formula = "demo"`)
+	}
+	names, err := src.ListDir(filepath.Join(root, "formulas"))
+	if err != nil {
+		t.Fatalf("ListDir under poisoned GIT_* env: %v", err)
+	}
+	found := false
+	for _, n := range names {
+		if n == "demo.toml" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("ListDir = %v, want it to contain demo.toml", names)
+	}
+}
+
 // --- helpers ---
 
 func gitOK(t *testing.T) {
@@ -535,4 +586,36 @@ func derefString(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+// TestCanonicalExistingPathResolvesSymlinkedGrandparentWithTwoMissingLevels
+// pins the ga-iawy13.6 canonical-path-at-ingest fix: canonicalExistingPath
+// must walk up past more than one missing path component to find a
+// resolvable symlinked ancestor, matching pathutil.NormalizePathForCompare.
+// Today it only tries the immediate parent, so a path missing at both the
+// leaf and the immediate-parent level resolves through the unresolved
+// symlink instead of its real target.
+func TestCanonicalExistingPathResolvesSymlinkedGrandparentWithTwoMissingLevels(t *testing.T) {
+	root := t.TempDir()
+	realDir := filepath.Join(root, "real")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	aliasDir := filepath.Join(root, "alias")
+	if err := os.Symlink(realDir, aliasDir); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	missing := filepath.Join(aliasDir, "missing-parent", "missing-leaf")
+	got := canonicalExistingPath(missing)
+
+	// Canonicalize the expectation through the production normalizer rather
+	// than bare EvalSymlinks: on macOS the two disagree on whether the temp
+	// root is spelled /var/... or /private/var/..., and only the former is
+	// what canonicalExistingPath returns. The comparison stays exact.
+	resolvedAlias := testutil.CanonicalPath(aliasDir)
+	want := filepath.Join(resolvedAlias, "missing-parent", "missing-leaf")
+	if got != want {
+		t.Errorf("canonicalExistingPath(%q) = %q, want %q (resolved through symlinked grandparent, 2 missing levels)", missing, got, want)
+	}
 }

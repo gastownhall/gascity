@@ -14,13 +14,13 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formulatest"
 )
 
 func TestFormulaListReturnsCatalogSummaries(t *testing.T) {
 	state := newFakeState(t)
 	state.cityBeadStore = beads.NewMemStore()
-	state.cfg.Daemon.FormulaV2 = true
 	formulaDir := t.TempDir()
 	state.cfg.FormulaLayers.City = []string{formulaDir}
 
@@ -561,7 +561,6 @@ func TestFormulaPreviewAcceptsTypedVarsBody(t *testing.T) {
 	// formula_v2 back out of cfg.Daemon and overrides the global set above.
 	// Without this, the server sees v2 as disabled and rejects the v2
 	// formula compile with a 400 "formula_v2 is disabled" error.
-	state.cfg.Daemon.FormulaV2 = true
 	formulaDir := t.TempDir()
 	state.cfg.FormulaLayers.City = []string{formulaDir}
 
@@ -626,7 +625,6 @@ func TestFormulaPreviewGraphV2InjectsTargetConvoy(t *testing.T) {
 
 	state := newFakeState(t)
 	state.cityBeadStore = beads.NewMemStore()
-	state.cfg.Daemon.FormulaV2 = true
 	formulaDir := t.TempDir()
 	state.cfg.FormulaLayers.City = []string{formulaDir}
 
@@ -673,7 +671,6 @@ func TestFormulaPreviewGraphV2UsesPreviewInputConvoyForBeadTarget(t *testing.T) 
 
 	state := newFakeState(t)
 	state.cityBeadStore = beads.NewMemStore()
-	state.cfg.Daemon.FormulaV2 = true
 	formulaDir := t.TempDir()
 	state.cfg.FormulaLayers.City = []string{formulaDir}
 
@@ -728,7 +725,6 @@ func TestFormulaPreviewRequiresGraphCompilerInjectsTargetConvoy(t *testing.T) {
 
 	state := newFakeState(t)
 	state.cityBeadStore = beads.NewMemStore()
-	state.cfg.Daemon.FormulaV2 = true
 	formulaDir := t.TempDir()
 	state.cfg.FormulaLayers.City = []string{formulaDir}
 
@@ -795,7 +791,6 @@ func TestFormulaDetailGraphV2TargetlessAcceptsAgentTarget(t *testing.T) {
 
 	state := newFakeState(t)
 	state.cityBeadStore = beads.NewMemStore()
-	state.cfg.Daemon.FormulaV2 = true
 	formulaDir := t.TempDir()
 	state.cfg.FormulaLayers.City = []string{formulaDir}
 
@@ -830,11 +825,203 @@ title = "Inspect"
 	}
 }
 
+// graphAgentTargetFormulaTOML is a graph.v2 formula that references the
+// input convoy, so the preview compilation requires a target.
+const graphAgentTargetFormulaTOML = `
+description = "Preview {{convoy_id}}"
+formula = "graph-agent-target"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "inspect"
+title = "Inspect {{convoy_id}}"
+`
+
+// Workflow roots persist the routed agent identity as gc.routed_to
+// (ga-eld2x / #2763); run-detail clients echo that identity back as the
+// preview target. A configured agent identity has no bead-store entry, so
+// the detail endpoint must resolve it against config instead of failing the
+// graph.v2 bead lookup (dashboard audit finding M3 follow-up).
+func TestFormulaDetailGraphV2AcceptsConfiguredAgentTarget(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	formulaDir := t.TempDir()
+	state.cfg.FormulaLayers.City = []string{formulaDir}
+
+	writeTestFormula(t, formulaDir, "graph-agent-target", graphAgentTargetFormulaTOML)
+
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/formulas/graph-agent-target?scope_kind=city&scope_ref=test-city&target=myrig/worker"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET detail status = %d, want 200 for configured agent target: %s", rec.Code, rec.Body.String())
+	}
+	var detail formulaDetailResponse
+	if err := json.NewDecoder(rec.Body).Decode(&detail); err != nil {
+		t.Fatalf("Decode(detail): %v", err)
+	}
+	want := "preview-input-convoy:myrig/worker"
+	if detail.Description != "Preview "+want {
+		t.Fatalf("description = %q, want routing-identity preview input convoy", detail.Description)
+	}
+	if len(detail.Steps) != 1 || detail.Steps[0].Title != "Inspect "+want {
+		t.Fatalf("steps = %+v, want routing-identity graph.v2 detail step", detail.Steps)
+	}
+	matches, err := state.cityBeadStore.List(beads.ListQuery{Type: "convoy"})
+	if err != nil {
+		t.Fatalf("List input convoys: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("preview persisted input convoys = %+v, want none", matches)
+	}
+}
+
+func TestFormulaPreviewGraphV2AcceptsConfiguredAgentTarget(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	formulaDir := t.TempDir()
+	state.cfg.FormulaLayers.City = []string{formulaDir}
+
+	writeTestFormula(t, formulaDir, "graph-agent-target", graphAgentTargetFormulaTOML)
+
+	body := bytes.NewBufferString(`{"scope_kind":"city","scope_ref":"test-city","target":"myrig/worker"}`)
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodPost, cityURL(state, "/formulas/graph-agent-target/preview"), body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GC-Request", "true")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST preview status = %d, want 200 for configured agent target: %s", rec.Code, rec.Body.String())
+	}
+	var detail formulaDetailResponse
+	if err := json.NewDecoder(rec.Body).Decode(&detail); err != nil {
+		t.Fatalf("Decode(detail): %v", err)
+	}
+	want := "preview-input-convoy:myrig/worker"
+	if detail.Description != "Preview "+want {
+		t.Fatalf("description = %q, want routing-identity preview input convoy", detail.Description)
+	}
+	if len(detail.Steps) != 1 || detail.Steps[0].Title != "Inspect "+want {
+		t.Fatalf("steps = %+v, want routing-identity graph.v2 preview step", detail.Steps)
+	}
+}
+
+// The live failure that motivated routing-identity acceptance used a V2
+// binding-qualified identity (dir/binding.name) under rig scope, while the
+// fixture agent above exercises only the V1 dir/name fallback branch of
+// AgentMatchesIdentity. Pin the binding-qualified shape at endpoint level so
+// a change to the V2 matching branch cannot silently drop it.
+func TestFormulaDetailGraphV2AcceptsBindingQualifiedAgentTarget(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	state.cfg.Agents = append(state.cfg.Agents, config.Agent{
+		Name:              "operator",
+		Dir:               "myrig",
+		BindingName:       "mypack",
+		Provider:          "test-agent",
+		MaxActiveSessions: intPtr(1),
+	})
+	formulaDir := t.TempDir()
+	state.cfg.FormulaLayers.City = []string{formulaDir}
+
+	writeTestFormula(t, formulaDir, "graph-agent-target", graphAgentTargetFormulaTOML)
+
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/formulas/graph-agent-target?scope_kind=rig&scope_ref=myrig&target=myrig/mypack.operator"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET detail status = %d, want 200 for binding-qualified agent target: %s", rec.Code, rec.Body.String())
+	}
+	var detail formulaDetailResponse
+	if err := json.NewDecoder(rec.Body).Decode(&detail); err != nil {
+		t.Fatalf("Decode(detail): %v", err)
+	}
+	want := "preview-input-convoy:myrig/mypack.operator"
+	if detail.Description != "Preview "+want {
+		t.Fatalf("description = %q, want binding-qualified routing-identity preview input convoy", detail.Description)
+	}
+	if len(detail.Steps) != 1 || detail.Steps[0].Title != "Inspect "+want {
+		t.Fatalf("steps = %+v, want binding-qualified routing-identity graph.v2 detail step", detail.Steps)
+	}
+	matches, err := state.stores["myrig"].List(beads.ListQuery{Type: "convoy"})
+	if err != nil {
+		t.Fatalf("List input convoys: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("preview persisted input convoys = %+v, want none", matches)
+	}
+}
+
+// The routing-identity lookup must not run before the endpoint's existing
+// config-availability guard: with a nil city config the detail and preview
+// endpoints keep returning the typed 503 instead of panicking on a nil
+// config dereference.
+func TestFormulaDetailNilConfigReturns503(t *testing.T) {
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	state.cfg = nil
+
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/formulas/graph-agent-target?scope_kind=city&scope_ref=test-city&target=myrig/worker"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("GET detail status = %d, want 503 when config is unavailable: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "config is unavailable") {
+		t.Fatalf("body = %s, want config-unavailable error", rec.Body.String())
+	}
+}
+
+// A target that is neither a bead nor a configured agent identity must keep
+// failing with the existing not-found error: routing-identity acceptance is
+// config-resolved, not a blanket fallback that would mask mistyped bead IDs.
+// The error must also say that config-identity resolution was attempted, so
+// a stale or mistyped agent identity is not misread as a bead-store problem.
+func TestFormulaDetailGraphV2UnknownTargetStillRejected(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	formulaDir := t.TempDir()
+	state.cfg.FormulaLayers.City = []string{formulaDir}
+
+	writeTestFormula(t, formulaDir, "graph-agent-target", graphAgentTargetFormulaTOML)
+
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/formulas/graph-agent-target?scope_kind=city&scope_ref=test-city&target=ga-nope"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("GET detail status = %d, want 400 for unknown target: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "not found") {
+		t.Fatalf("body = %s, want graph.v2 target not-found error", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "matches neither a bead/convoy nor a configured agent identity") {
+		t.Fatalf("body = %s, want agent-identity resolution context in not-found error", rec.Body.String())
+	}
+}
+
 func TestFormulaPreviewRejectsMissingRequiredVars(t *testing.T) {
 	formulatest.EnableV2ForTest(t)
 
 	state := newFakeState(t)
-	state.cfg.Daemon.FormulaV2 = true
 	formulaDir := t.TempDir()
 	state.cfg.FormulaLayers.City = []string{formulaDir}
 
@@ -879,7 +1066,6 @@ func TestFormulaPreviewRejectsMissingRequiredVarsWithoutVarsBody(t *testing.T) {
 	formulatest.EnableV2ForTest(t)
 
 	state := newFakeState(t)
-	state.cfg.Daemon.FormulaV2 = true
 	formulaDir := t.TempDir()
 	state.cfg.FormulaLayers.City = []string{formulaDir}
 
@@ -925,7 +1111,6 @@ func TestFormulaDetailGraphV2DrainSkipsItemRuntimeValidation(t *testing.T) {
 
 	state := newFakeState(t)
 	state.cityBeadStore = beads.NewMemStore()
-	state.cfg.Daemon.FormulaV2 = true
 	formulaDir := t.TempDir()
 	state.cfg.FormulaLayers.City = []string{formulaDir}
 	target, err := state.cityBeadStore.Create(beads.Bead{Title: "target", Type: "task"})

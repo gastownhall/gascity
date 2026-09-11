@@ -10,8 +10,31 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
+
+func TestCachingStoreReadyContextRejectsIncompleteDependencyProjection(t *testing.T) {
+	cache := NewCachingStoreForTest(NewMemStore(), nil)
+	cache.mu.Lock()
+	cache.state = cacheLive
+	cache.beads = map[string]Bead{
+		"work": {ID: "work", Type: "task", Status: "open", Title: "possibly blocked work"},
+	}
+	cache.deps = map[string][]Dep{
+		"work": {{IssueID: "work", DependsOnID: "missing-blocker", Type: "blocks"}},
+	}
+	cache.depsComplete = false
+	cache.mu.Unlock()
+
+	rows, err := cache.ReadyContext(context.Background())
+	if !errors.Is(err, ErrCacheUnavailable) {
+		t.Fatalf("ReadyContext error = %v, want ErrCacheUnavailable", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("ReadyContext rows = %+v, want no result from incomplete dependency projection", rows)
+	}
+}
 
 func TestCachingStoreRunReconciliationDetectsLabelContentChanges(t *testing.T) {
 	t.Parallel()
@@ -447,51 +470,69 @@ func TestCachingStoreHandlesCachedListUsesActiveSnapshotAfterPrimeActive(t *test
 func TestCachingStoreHandlesCachedReadUsesActiveSnapshotDuringRunningFullPrimeAfterPrimeActive(t *testing.T) {
 	t.Parallel()
 
-	mem := NewMemStore()
-	if _, err := mem.Create(Bead{Title: "cached work"}); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	backing := &blockingPrimeListStore{
-		Store:   mem,
-		started: make(chan struct{}),
-		release: make(chan struct{}),
-	}
-	cache := NewCachingStoreForTest(backing, nil)
-	if err := cache.PrimeActive(); err != nil {
-		t.Fatalf("PrimeActive: %v", err)
-	}
-
-	primeDone := make(chan error, 1)
-	go func() {
-		primeDone <- cache.Prime(context.Background())
-	}()
-	select {
-	case <-backing.started:
-	case <-time.After(time.Second):
-		t.Fatal("full prime did not start")
-	}
-
-	readDone := make(chan error, 1)
-	go func() {
-		_, err := cache.Handles().Cached.List(ListQuery{Status: "open"})
-		readDone <- err
-	}()
-	select {
-	case err := <-readDone:
+	synctest.Test(t, func(t *testing.T) {
+		mem := NewMemStore()
+		cachedBead, err := mem.Create(Bead{Title: "cached work"})
 		if err != nil {
-			t.Fatalf("Cached.List error = %v, want active snapshot result", err)
+			t.Fatalf("Create: %v", err)
 		}
-	case <-time.After(25 * time.Millisecond):
-		t.Fatal("Cached.List waited for the running full prime")
-	}
-	if got := backing.primeListCalls.Load(); got != 1 {
-		t.Fatalf("prime list calls = %d, want only the running full prime", got)
-	}
+		backing := &blockingPrimeListStore{
+			Store:   mem,
+			started: make(chan struct{}),
+			release: make(chan struct{}),
+		}
+		var releaseOnce sync.Once
+		releasePrime := func() {
+			releaseOnce.Do(func() { close(backing.release) })
+		}
+		t.Cleanup(releasePrime)
 
-	close(backing.release)
-	if err := <-primeDone; err != nil {
-		t.Fatalf("Prime: %v", err)
-	}
+		cache := NewCachingStoreForTest(backing, nil)
+		if err := cache.PrimeActive(); err != nil {
+			t.Fatalf("PrimeActive: %v", err)
+		}
+
+		primeDone := make(chan error, 1)
+		go func() {
+			primeDone <- cache.Prime(t.Context())
+		}()
+		synctest.Wait()
+		select {
+		case <-backing.started:
+		default:
+			t.Fatal("full prime did not reach its backing List gate")
+		}
+
+		type listResult struct {
+			rows []Bead
+			err  error
+		}
+		readDone := make(chan listResult, 1)
+		go func() {
+			rows, err := cache.Handles().Cached.List(ListQuery{Status: "open"})
+			readDone <- listResult{rows: rows, err: err}
+		}()
+		synctest.Wait()
+		select {
+		case result := <-readDone:
+			if result.err != nil {
+				t.Fatalf("Cached.List error = %v, want active snapshot result", result.err)
+			}
+			if len(result.rows) != 1 || result.rows[0].ID != cachedBead.ID {
+				t.Fatalf("Cached.List rows = %#v, want active snapshot bead %q", result.rows, cachedBead.ID)
+			}
+		default:
+			t.Fatal("Cached.List remained blocked while the full prime was held at its backing List gate")
+		}
+		if got := backing.primeListCalls.Load(); got != 1 {
+			t.Fatalf("prime list calls = %d, want only the running full prime", got)
+		}
+
+		releasePrime()
+		if err := <-primeDone; err != nil {
+			t.Fatalf("Prime: %v", err)
+		}
+	})
 }
 
 func TestCachingStoreHandlesCachedReadDoesNotPrimeWhenDegraded(t *testing.T) {
@@ -1964,8 +2005,19 @@ func TestCachingStoreRunReconciliationSuppressesDuplicateProblemLogs(t *testing.
 	if stats.ProblemCount != int64(maxCacheSyncFailures) {
 		t.Fatalf("ProblemCount = %d, want %d", stats.ProblemCount, maxCacheSyncFailures)
 	}
-	if len(logs) != 1 {
-		t.Fatalf("logged %d problem lines, want 1: %#v", len(logs), logs)
+	// Expect 2 logs: the deduplicated reconcile-cache problem (run 1) and the
+	// one-shot circuit-breaker trip (emitted when syncFailures reaches maxCacheSyncFailures).
+	if len(logs) != 2 {
+		t.Fatalf("logged %d problem lines, want 2 (1 reconcile problem + 1 circuit-breaker trip): %#v", len(logs), logs)
+	}
+	hasTrip := false
+	for _, l := range logs {
+		if strings.Contains(l, "circuit-breaker tripped") {
+			hasTrip = true
+		}
+	}
+	if !hasTrip {
+		t.Fatalf("circuit-breaker trip not found in logs: %#v", logs)
 	}
 	if delay := cache.nextReconcileDelay(time.Now()); delay <= cacheReconcilePollInterval {
 		t.Fatalf("nextReconcileDelay = %v, want sustained-failure backoff above poll interval", delay)
@@ -1978,11 +2030,12 @@ func TestCachingStoreRunReconciliationSuppressesDuplicateProblemLogs(t *testing.
 	cache.mu.Unlock()
 
 	cache.runReconciliation()
-	if len(logs) != 2 {
-		t.Fatalf("logged %d problem lines after window expiry, want 2: %#v", len(logs), logs)
+	// After window expiry: 1 new reconcile-cache problem log (with suppressed count) → total 3.
+	if len(logs) != 3 {
+		t.Fatalf("logged %d problem lines after window expiry, want 3: %#v", len(logs), logs)
 	}
-	if !strings.Contains(logs[1], "suppressed 4 duplicate logs") {
-		t.Fatalf("second problem log = %q, want suppressed duplicate count", logs[1])
+	if !strings.Contains(logs[2], "suppressed 4 duplicate logs") {
+		t.Fatalf("third problem log = %q, want suppressed duplicate count", logs[2])
 	}
 }
 
@@ -2902,6 +2955,12 @@ func TestCachingStoreBdPrimeAndReconcileSkipFullDepScan(t *testing.T) {
 			readyCalls++
 			return issueJSON, nil
 		}
+		if len(args) > 0 && args[0] == "version" {
+			return []byte("bd version 1.0.4\n"), nil
+		}
+		if len(args) > 0 && args[0] == "sql" {
+			t.Fatalf("unexpected ready projection SQL under bd 1.0.4: %v", args)
+		}
 		if len(args) > 0 && args[0] == "list" {
 			return issueJSON, nil
 		}
@@ -2923,7 +2982,16 @@ func TestCachingStoreBdPrimeAndReconcileSkipFullDepScan(t *testing.T) {
 	}
 }
 
-func TestCachingStoreBdPrimeActiveUsesListDependenciesForCachedReady(t *testing.T) {
+// TestCachingStoreBdPrimeActiveUsesListDependenciesFromTheListJSON pins that
+// PrimeActive takes each bead's "down" edges from the dependencies bd carried
+// inline on the list row, spending no `bd dep` fan-out to get them.
+//
+// It asserts the dep map rather than a readiness read. Under a bd with no
+// is_blocked column readiness is not the cache's to answer at all — the
+// dependency-derived predicate is weaker than bd's, so every readiness handle
+// declines and takes the live backing (ErrReadyProjectionUnsupported, #3218) —
+// and pinning this through CachedReady would pin that hole instead of the deps.
+func TestCachingStoreBdPrimeActiveUsesListDependenciesFromTheListJSON(t *testing.T) {
 	t.Parallel()
 
 	var depListCalls int
@@ -2934,6 +3002,12 @@ func TestCachingStoreBdPrimeActiveUsesListDependenciesForCachedReady(t *testing.
 		if len(args) > 0 && args[0] == "dep" {
 			depListCalls++
 			t.Fatalf("unexpected dep scan command: %v", args)
+		}
+		if len(args) > 0 && args[0] == "version" {
+			return []byte("bd version 1.0.4\n"), nil
+		}
+		if len(args) > 0 && args[0] == "sql" {
+			t.Fatalf("unexpected ready projection SQL under bd 1.0.4: %v", args)
 		}
 		if len(args) > 0 && args[0] == "list" {
 			argLine := strings.Join(args, " ")
@@ -2954,19 +3028,1051 @@ func TestCachingStoreBdPrimeActiveUsesListDependenciesForCachedReady(t *testing.
 		t.Fatalf("PrimeActive: %v", err)
 	}
 
+	cache.mu.RLock()
+	blockerDeps := cloneDeps(cache.deps["bd-blocker"])
+	blockedDeps := cloneDeps(cache.deps["bd-blocked"])
+	cache.mu.RUnlock()
+
+	if len(blockerDeps) != 0 {
+		t.Fatalf("cached deps for bd-blocker = %+v, want none", blockerDeps)
+	}
+	want := Dep{IssueID: "bd-blocked", DependsOnID: "bd-blocker", Type: "blocks"}
+	if len(blockedDeps) != 1 || blockedDeps[0] != want {
+		t.Fatalf("cached deps for bd-blocked = %+v, want the inline edge %+v", blockedDeps, want)
+	}
+	if depListCalls != 0 {
+		t.Fatalf("dep list calls = %d, want 0", depListCalls)
+	}
+	if _, ok := cache.CachedReady(); ok {
+		t.Fatal("CachedReady answered from a cache with no is_blocked column; the control dispatcher reads this handle")
+	}
+}
+
+func TestCachingStoreCachedReadyHonorsProjectedIsBlocked(t *testing.T) {
+	t.Parallel()
+
+	blocked := true
+	backing := &completeEmbeddedDepsStore{
+		beads: []Bead{
+			{ID: "bd-ready", Title: "ready", Status: "open", Type: "task"},
+			{ID: "bd-blocked", Title: "blocked", Status: "open", Type: "task", IsBlocked: &blocked},
+		},
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
 	ready, ok := cache.CachedReady()
 	if !ok {
 		t.Fatal("CachedReady reported cache unavailable")
 	}
-	ids := map[string]bool{}
-	for _, b := range ready {
-		ids[b.ID] = true
+	readyByID := make(map[string]bool, len(ready))
+	for _, bead := range ready {
+		readyByID[bead.ID] = true
 	}
-	if !ids["bd-blocker"] || ids["bd-blocked"] {
-		t.Fatalf("CachedReady ids = %v, want blocker ready and blocked excluded", ids)
+	if !readyByID["bd-ready"] || readyByID["bd-blocked"] {
+		t.Fatalf("CachedReady ids = %v, want ready included and projected blocked excluded", readyByID)
 	}
-	if depListCalls != 0 {
-		t.Fatalf("dep list calls = %d, want 0", depListCalls)
+}
+
+func TestCachingStoreApplyEventMergesProjectedIsBlocked(t *testing.T) {
+	t.Parallel()
+
+	unblocked := false
+	backing := &completeEmbeddedDepsStore{
+		beads: []Bead{{
+			ID:        "bd-event",
+			Title:     "event",
+			Status:    "open",
+			Type:      "task",
+			IsBlocked: &unblocked,
+		}},
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	ready, ok := cache.CachedReady()
+	if !ok || len(ready) != 1 || ready[0].ID != "bd-event" {
+		t.Fatalf("CachedReady before event = %+v, ok=%v, want bd-event ready", ready, ok)
+	}
+
+	cache.ApplyEvent("bead.updated", []byte(`{"id":"bd-event","status":"open","is_blocked":true}`))
+
+	ready, ok = cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable after is_blocked event")
+	}
+	if len(ready) != 0 {
+		t.Fatalf("CachedReady after is_blocked event = %+v, want no ready beads", ready)
+	}
+	got, err := cache.Get("bd-event")
+	if err != nil {
+		t.Fatalf("Get after event: %v", err)
+	}
+	if got.IsBlocked == nil || !*got.IsBlocked {
+		t.Fatalf("IsBlocked after event = %v, want true", got.IsBlocked)
+	}
+}
+
+func TestCachingStoreApplyCloseEventClearsDependentProjectedIsBlocked(t *testing.T) {
+	t.Parallel()
+
+	blockedProjection := true
+	backing := NewMemStore()
+	blocker, err := backing.Create(Bead{
+		Title:  "blocker",
+		Status: "open",
+		Type:   "task",
+	})
+	if err != nil {
+		t.Fatalf("Create blocker: %v", err)
+	}
+	blocked, err := backing.Create(Bead{
+		Title:     "blocked",
+		Status:    "open",
+		Type:      "task",
+		Needs:     []string{blocker.ID},
+		IsBlocked: &blockedProjection,
+	})
+	if err != nil {
+		t.Fatalf("Create blocked: %v", err)
+	}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	ready, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable before close event")
+	}
+	readyByID := make(map[string]bool, len(ready))
+	for _, bead := range ready {
+		readyByID[bead.ID] = true
+	}
+	if !readyByID[blocker.ID] || readyByID[blocked.ID] {
+		t.Fatalf("CachedReady before close ids = %v, want blocker ready and dependent blocked", readyByID)
+	}
+
+	if err := backing.Close(blocker.ID); err != nil {
+		t.Fatalf("Close backing blocker: %v", err)
+	}
+	payload, err := json.Marshal(map[string]string{
+		"id":     blocker.ID,
+		"status": "closed",
+	})
+	if err != nil {
+		t.Fatalf("marshal close event: %v", err)
+	}
+	cache.ApplyEvent("bead.closed", payload)
+
+	ready, ok = cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable after close event")
+	}
+	readyByID = make(map[string]bool, len(ready))
+	for _, bead := range ready {
+		readyByID[bead.ID] = true
+	}
+	if !readyByID[blocked.ID] {
+		t.Fatalf("CachedReady after close ids = %v, want dependent unblocked by closed blocker", readyByID)
+	}
+	got, err := cache.Get(blocked.ID)
+	if err != nil {
+		t.Fatalf("Get blocked after close event: %v", err)
+	}
+	if got.IsBlocked != nil {
+		t.Fatalf("dependent IsBlocked after close event = %v, want nil fallback to cached deps", got.IsBlocked)
+	}
+}
+
+func TestCachingStoreApplyCloseEventClearsProjectedIsBlockedWhenDepsIncomplete(t *testing.T) {
+	t.Parallel()
+
+	blockedProjection := true
+	mem := NewMemStore()
+	backing := &incompleteDependencyStore{Store: mem}
+	blocker, err := backing.Create(Bead{
+		Title:  "blocker",
+		Status: "open",
+		Type:   "task",
+	})
+	if err != nil {
+		t.Fatalf("Create blocker: %v", err)
+	}
+	blocked, err := backing.Create(Bead{
+		Title:     "blocked",
+		Status:    "open",
+		Type:      "task",
+		IsBlocked: &blockedProjection,
+	})
+	if err != nil {
+		t.Fatalf("Create blocked: %v", err)
+	}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	ready, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable before close event")
+	}
+	readyByID := make(map[string]bool, len(ready))
+	for _, bead := range ready {
+		readyByID[bead.ID] = true
+	}
+	if !readyByID[blocker.ID] || readyByID[blocked.ID] {
+		t.Fatalf("CachedReady before close ids = %v, want blocker ready and projected dependent blocked", readyByID)
+	}
+
+	if err := backing.Close(blocker.ID); err != nil {
+		t.Fatalf("Close backing blocker: %v", err)
+	}
+	payload, err := json.Marshal(map[string]string{
+		"id":     blocker.ID,
+		"status": "closed",
+	})
+	if err != nil {
+		t.Fatalf("marshal close event: %v", err)
+	}
+	cache.ApplyEvent("bead.closed", payload)
+
+	ready, ok = cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable after close event")
+	}
+	readyByID = make(map[string]bool, len(ready))
+	for _, bead := range ready {
+		readyByID[bead.ID] = true
+	}
+	if !readyByID[blocked.ID] {
+		t.Fatalf("CachedReady after close ids = %v, want projected dependent to fall back to cached deps", readyByID)
+	}
+	got, err := cache.Get(blocked.ID)
+	if err != nil {
+		t.Fatalf("Get blocked after close event: %v", err)
+	}
+	if got.IsBlocked != nil {
+		t.Fatalf("dependent IsBlocked after close event = %v, want nil fallback when dependency coverage is incomplete", got.IsBlocked)
+	}
+}
+
+func TestCachingStoreApplyEventRejectsStaleProjectedIsBlockedConflict(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name           string
+		currentBlocked bool
+		staleBlocked   bool
+	}{
+		{name: "true_to_false", currentBlocked: true, staleBlocked: false},
+		{name: "false_to_true", currentBlocked: false, staleBlocked: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			currentBlocked := tc.currentBlocked
+			backing := NewMemStore()
+			bead, err := backing.Create(Bead{
+				Title:     "before event",
+				Status:    "open",
+				Type:      "task",
+				IsBlocked: &currentBlocked,
+			})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+
+			cache := NewCachingStoreForTest(backing, nil)
+			if err := cache.Prime(context.Background()); err != nil {
+				t.Fatalf("Prime: %v", err)
+			}
+
+			currentTitle := "current event"
+			if err := backing.Update(bead.ID, UpdateOpts{Title: &currentTitle}); err != nil {
+				t.Fatalf("Update backing title: %v", err)
+			}
+			titleEvent, err := json.Marshal(map[string]string{
+				"id":    bead.ID,
+				"title": currentTitle,
+			})
+			if err != nil {
+				t.Fatalf("marshal title event: %v", err)
+			}
+			cache.ApplyEvent("bead.updated", titleEvent)
+
+			cache.mu.RLock()
+			_, locallyMutated := cache.beadSeq[bead.ID]
+			cache.mu.RUnlock()
+			if !locallyMutated {
+				t.Fatal("precondition: prior applied event did not mark bead mutated")
+			}
+
+			staleEvent, err := json.Marshal(struct {
+				ID        string `json:"id"`
+				IsBlocked bool   `json:"is_blocked"`
+			}{
+				ID:        bead.ID,
+				IsBlocked: tc.staleBlocked,
+			})
+			if err != nil {
+				t.Fatalf("marshal stale event: %v", err)
+			}
+			cache.ApplyEvent("bead.updated", staleEvent)
+
+			cache.mu.RLock()
+			cached := cloneBead(cache.beads[bead.ID])
+			cache.mu.RUnlock()
+			if cached.IsBlocked == nil || *cached.IsBlocked != currentBlocked {
+				t.Fatalf("cached IsBlocked after stale event = %v, want %v", cached.IsBlocked, currentBlocked)
+			}
+		})
+	}
+}
+
+func TestCachingStoreCachedReadyFallsBackToLegacyDepsWhenProjectionMissing(t *testing.T) {
+	t.Parallel()
+
+	backing := &completeEmbeddedDepsStore{
+		beads: []Bead{{
+			ID:     "bd-waiting",
+			Title:  "waiting",
+			Status: "open",
+			Type:   "task",
+			Dependencies: []Dep{{
+				IssueID:     "bd-waiting",
+				DependsOnID: "bd-closed-or-missing",
+				Type:        "blocks",
+			}},
+		}},
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	ready, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable")
+	}
+	if len(ready) != 1 || ready[0].ID != "bd-waiting" {
+		t.Fatalf("CachedReady = %+v, want legacy missing/closed blocker treated as non-blocking", ready)
+	}
+}
+
+func TestCachingStoreBdPrimeActiveUsesReadyProjectionForBD105(t *testing.T) {
+	t.Parallel()
+
+	var sqlCalls int
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			t.Fatalf("command name = %q, want bd", name)
+		}
+		if len(args) == 0 {
+			t.Fatal("empty bd command")
+		}
+		switch args[0] {
+		case "version":
+			return []byte("bd version 1.0.5 (test)\n"), nil
+		case "sql":
+			sqlCalls++
+			query := args[1]
+			if strings.Contains(query, " in ('bd-ready'") || strings.Contains(query, " in (\"bd-ready\"") {
+				t.Fatalf("ready projection SQL = %q, must not use per-id IN list", query)
+			}
+			if !strings.Contains(query, "status <> 'closed'") || !strings.Contains(query, "from issues where") || !strings.Contains(query, "from wisps where") {
+				t.Fatalf("ready projection SQL = %q, want active row projection", query)
+			}
+			return []byte(`[
+					{"id":"bd-ready","is_blocked":0},
+					{"id":"bd-blocked","is_blocked":1}
+			]`), nil
+		case "list":
+			argLine := strings.Join(args, " ")
+			if strings.Contains(argLine, "--status=open") {
+				return []byte(`[
+					{"id":"bd-ready","title":"ready","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z","labels":["task"],"metadata":{}},
+					{"id":"bd-blocked","title":"blocked","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:01Z","labels":["task"],"metadata":{}}
+				]`), nil
+			}
+			return []byte(`[]`), nil
+		case "query":
+			return []byte(`[]`), nil
+		case "dep":
+			t.Fatalf("unexpected dep scan command: %v", args)
+		}
+		return []byte(`[]`), nil
+	}
+	cache := NewCachingStoreForTest(NewBdStore("/city", runner), nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	ready, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable")
+	}
+	readyByID := make(map[string]bool, len(ready))
+	for _, bead := range ready {
+		readyByID[bead.ID] = true
+	}
+	if !readyByID["bd-ready"] || readyByID["bd-blocked"] {
+		t.Fatalf("CachedReady ids = %v, want bd-ready only", readyByID)
+	}
+	if sqlCalls != 1 {
+		t.Fatalf("bd sql calls = %d, want 1", sqlCalls)
+	}
+}
+
+func TestCachingStoreBdReconcileAppliesFreshListWhenReadyProjectionErrors(t *testing.T) {
+	t.Parallel()
+
+	var sqlFails bool
+	listTitle := "before reconcile"
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			t.Fatalf("command name = %q, want bd", name)
+		}
+		if len(args) == 0 {
+			t.Fatal("empty bd command")
+		}
+		switch args[0] {
+		case "version":
+			return []byte("bd version 1.0.5 (test)\n"), nil
+		case "sql":
+			if sqlFails {
+				return nil, errors.New("projection unavailable")
+			}
+			return []byte(`[{"id":"bd-1","is_blocked":1}]`), nil
+		case "list":
+			return []byte(fmt.Sprintf(`[
+				{"id":"bd-1","title":%q,"status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z","labels":["task"],"metadata":{}}
+			]`, listTitle)), nil
+		case "query":
+			return []byte(`[]`), nil
+		case "dep":
+			t.Fatalf("unexpected dep scan command: %v", args)
+		}
+		return []byte(`[]`), nil
+	}
+
+	cache := NewCachingStoreForTest(NewBdStore("/city", runner), nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	initial, err := cache.Get("bd-1")
+	if err != nil {
+		t.Fatalf("Get initial: %v", err)
+	}
+	if initial.IsBlocked == nil || !*initial.IsBlocked {
+		t.Fatalf("initial IsBlocked = %v, want true projection", initial.IsBlocked)
+	}
+
+	listTitle = "after reconcile"
+	sqlFails = true
+	cache.runReconciliation()
+
+	got, err := cache.Get("bd-1")
+	if err != nil {
+		t.Fatalf("Get after reconcile: %v", err)
+	}
+	if got.Title != listTitle {
+		t.Fatalf("Title after reconcile = %q, want %q", got.Title, listTitle)
+	}
+	if got.IsBlocked == nil || !*got.IsBlocked {
+		t.Fatalf("IsBlocked after failed projection reconcile = %v, want prior true projection preserved", got.IsBlocked)
+	}
+	stats := cache.Stats()
+	if !strings.Contains(stats.LastProblem, "reconcile ready projection") {
+		t.Fatalf("LastProblem = %q, want reconcile ready projection", stats.LastProblem)
+	}
+}
+
+func TestCachingStoreBdReconcileDropsPreservedReadyProjectionWhenDepsChange(t *testing.T) {
+	t.Parallel()
+
+	var sqlFails bool
+	listNeeds := "[]"
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			t.Fatalf("command name = %q, want bd", name)
+		}
+		if len(args) == 0 {
+			t.Fatal("empty bd command")
+		}
+		switch args[0] {
+		case "version":
+			return []byte("bd version 1.0.5 (test)\n"), nil
+		case "sql":
+			if sqlFails {
+				return nil, errors.New("projection unavailable")
+			}
+			return []byte(`[
+				{"id":"bd-blocked","is_blocked":0},
+				{"id":"bd-blocker","is_blocked":0}
+			]`), nil
+		case "list":
+			return []byte(fmt.Sprintf(`[
+				{"id":"bd-blocked","title":"blocked","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z","labels":["task"],"metadata":{},"needs":%s},
+				{"id":"bd-blocker","title":"blocker","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:01Z","labels":["task"],"metadata":{}}
+			]`, listNeeds)), nil
+		case "query":
+			return []byte(`[]`), nil
+		case "dep":
+			t.Fatalf("unexpected dep scan command: %v", args)
+		}
+		return []byte(`[]`), nil
+	}
+
+	cache := NewCachingStoreForTest(NewBdStore("/city", runner), nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	initial, err := cache.Get("bd-blocked")
+	if err != nil {
+		t.Fatalf("Get initial: %v", err)
+	}
+	if initial.IsBlocked == nil || *initial.IsBlocked {
+		t.Fatalf("initial IsBlocked = %v, want false projection", initial.IsBlocked)
+	}
+
+	listNeeds = `["bd-blocker"]`
+	sqlFails = true
+	cache.runReconciliation()
+
+	got, err := cache.Get("bd-blocked")
+	if err != nil {
+		t.Fatalf("Get after reconcile: %v", err)
+	}
+	if got.IsBlocked != nil {
+		t.Fatalf("IsBlocked after dependency-changing failed projection reconcile = %v, want nil fallback", got.IsBlocked)
+	}
+	ready, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable after reconcile")
+	}
+	readyByID := make(map[string]bool, len(ready))
+	for _, bead := range ready {
+		readyByID[bead.ID] = true
+	}
+	if readyByID["bd-blocked"] || !readyByID["bd-blocker"] {
+		t.Fatalf("CachedReady after reconcile ids = %v, want bd-blocker only", readyByID)
+	}
+}
+
+func TestCachingStoreBdReconcileDropsPreservedReadyProjectionWhenDepTargetStatusChanges(t *testing.T) {
+	t.Parallel()
+
+	var sqlFails bool
+	blockerListed := true
+	blockerStatus := "closed"
+	showBlockerStatus := "closed"
+	projectionBlocked := false
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			t.Fatalf("command name = %q, want bd", name)
+		}
+		if len(args) == 0 {
+			t.Fatal("empty bd command")
+		}
+		switch args[0] {
+		case "version":
+			return []byte("bd version 1.0.5 (test)\n"), nil
+		case "sql":
+			if sqlFails {
+				return nil, errors.New("projection unavailable")
+			}
+			blocked := 0
+			if projectionBlocked {
+				blocked = 1
+			}
+			return []byte(fmt.Sprintf(`[{"id":"bd-blocked","is_blocked":%d}]`, blocked)), nil
+		case "list":
+			blocked := `{"id":"bd-blocked","title":"blocked","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z","labels":["task"],"metadata":{},"needs":["bd-blocker"]}`
+			if blockerListed {
+				return []byte(fmt.Sprintf(`[%s,{"id":"bd-blocker","title":"blocker","status":%q,"issue_type":"task","created_at":"2026-01-01T00:00:01Z","labels":["task"],"metadata":{}}]`, blocked, blockerStatus)), nil
+			}
+			return []byte(fmt.Sprintf(`[%s]`, blocked)), nil
+		case "show":
+			id := args[len(args)-1]
+			if id != "bd-blocker" {
+				return []byte(`[]`), nil
+			}
+			return []byte(fmt.Sprintf(`[{"id":"bd-blocker","title":"blocker","status":%q,"issue_type":"task","created_at":"2026-01-01T00:00:01Z","labels":["task"],"metadata":{}}]`, showBlockerStatus)), nil
+		case "query":
+			return []byte(`[]`), nil
+		case "dep":
+			t.Fatalf("unexpected dep scan command: %v", args)
+		}
+		return []byte(`[]`), nil
+	}
+
+	cache := NewCachingStoreForTest(NewBdStore("/city", runner), nil)
+	blockerStatus = "open"
+	projectionBlocked = true
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	initial, err := cache.Get("bd-blocked")
+	if err != nil {
+		t.Fatalf("Get initial: %v", err)
+	}
+	if initial.IsBlocked == nil || !*initial.IsBlocked {
+		t.Fatalf("initial IsBlocked = %v, want true projection", initial.IsBlocked)
+	}
+
+	blockerListed = false
+	showBlockerStatus = "closed"
+	projectionBlocked = false
+	cache.runReconciliation()
+
+	closedTarget, err := cache.Get("bd-blocker")
+	if err != nil {
+		t.Fatalf("Get closed blocker after reconcile: %v", err)
+	}
+	if closedTarget.Status != "closed" {
+		t.Fatalf("blocker status after close reconcile = %q, want closed", closedTarget.Status)
+	}
+	unblocked, err := cache.Get("bd-blocked")
+	if err != nil {
+		t.Fatalf("Get unblocked after close reconcile: %v", err)
+	}
+	if unblocked.IsBlocked == nil || *unblocked.IsBlocked {
+		t.Fatalf("IsBlocked after close reconcile = %v, want false projection", unblocked.IsBlocked)
+	}
+
+	blockerListed = true
+	blockerStatus = "open"
+	sqlFails = true
+	cache.runReconciliation()
+
+	got, err := cache.Get("bd-blocked")
+	if err != nil {
+		t.Fatalf("Get after reconcile: %v", err)
+	}
+	if got.IsBlocked != nil {
+		t.Fatalf("IsBlocked after dependency target status change = %v, want nil fallback", got.IsBlocked)
+	}
+	ready, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable after reconcile")
+	}
+	readyByID := make(map[string]bool, len(ready))
+	for _, bead := range ready {
+		readyByID[bead.ID] = true
+	}
+	if readyByID["bd-blocked"] || !readyByID["bd-blocker"] {
+		t.Fatalf("CachedReady after reconcile ids = %v, want bd-blocker only", readyByID)
+	}
+}
+
+// TestCachingStoreBdReconcilePreservesReadyProjectionForRacedClosedRowBD105 is
+// the reconcile-level regression for the race the bounded projection cannot see
+// directly: a bead that is still open in the list snapshot but closes before the
+// active-row projection query runs drops out of the projection entirely. The
+// reconciler must preserve its last cached is_blocked rather than flip it to nil
+// and emit a spurious bead.updated.
+func TestCachingStoreBdReconcilePreservesReadyProjectionForRacedClosedRowBD105(t *testing.T) {
+	t.Parallel()
+
+	racedClosed := false
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			t.Fatalf("command name = %q, want bd", name)
+		}
+		if len(args) == 0 {
+			t.Fatal("empty bd command")
+		}
+		switch args[0] {
+		case "version":
+			return []byte("bd version 1.0.5 (test)\n"), nil
+		case "sql":
+			// The bounded active-row projection stops returning the bead once it
+			// closes, exactly as the production status<>'closed' SQL would.
+			if racedClosed {
+				return []byte(`[]`), nil
+			}
+			return []byte(`[{"id":"bd-raced","is_blocked":0}]`), nil
+		case "list":
+			// The list snapshot is taken before the close lands, so the bead is
+			// still reported open on the racing reconcile cycle.
+			return []byte(`[
+				{"id":"bd-raced","title":"raced","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z","labels":["task"],"metadata":{}}
+			]`), nil
+		case "query":
+			return []byte(`[]`), nil
+		case "dep":
+			t.Fatalf("unexpected dep scan command: %v", args)
+		}
+		return []byte(`[]`), nil
+	}
+
+	var events []string
+	cache := NewCachingStoreForTest(NewBdStore("/city", runner), func(eventType, beadID string, _ json.RawMessage) {
+		events = append(events, eventType+":"+beadID)
+	})
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	initial, err := cache.Get("bd-raced")
+	if err != nil {
+		t.Fatalf("Get initial: %v", err)
+	}
+	if initial.IsBlocked == nil || *initial.IsBlocked {
+		t.Fatalf("initial IsBlocked = %v, want false projection", initial.IsBlocked)
+	}
+
+	events = nil
+	racedClosed = true
+	cache.runReconciliation()
+
+	if len(events) != 0 {
+		t.Fatalf("events after raced-closed projection reconcile = %v, want none (cached IsBlocked preserved)", events)
+	}
+	got, err := cache.Get("bd-raced")
+	if err != nil {
+		t.Fatalf("Get after reconcile: %v", err)
+	}
+	if got.IsBlocked == nil || *got.IsBlocked {
+		t.Fatalf("IsBlocked after raced-closed projection reconcile = %v, want preserved false", got.IsBlocked)
+	}
+}
+
+func TestCachingStoreBdPrimeActiveToleratesMissingReadyProjectionRowsBD105(t *testing.T) {
+	t.Parallel()
+
+	var sqlCalls int
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			t.Fatalf("command name = %q, want bd", name)
+		}
+		if len(args) == 0 {
+			t.Fatal("empty bd command")
+		}
+		switch args[0] {
+		case "version":
+			return []byte("bd version 1.0.5 (test)\n"), nil
+		case "sql":
+			sqlCalls++
+			query := args[1]
+			if !strings.Contains(query, "status <> 'closed'") || !strings.Contains(query, "from issues where") || !strings.Contains(query, "from wisps where") {
+				t.Fatalf("ready projection SQL = %q, want active row filter", query)
+			}
+			return []byte(`[
+				{"id":"bd-ready","is_blocked":0}
+			]`), nil
+		case "list":
+			argLine := strings.Join(args, " ")
+			if strings.Contains(argLine, "--status=open") {
+				return []byte(`[
+					{"id":"bd-ready","title":"ready","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z","labels":["task"],"metadata":{}},
+					{"id":"bd-raced-closed","title":"raced closed","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:01Z","labels":["task"],"metadata":{}}
+				]`), nil
+			}
+			return []byte(`[]`), nil
+		case "query":
+			return []byte(`[]`), nil
+		case "dep":
+			t.Fatalf("unexpected dep scan command: %v", args)
+		}
+		return []byte(`[]`), nil
+	}
+	cache := NewCachingStoreForTest(NewBdStore("/city", runner), nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	ready, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable after missing projection row")
+	}
+	readyByID := make(map[string]bool, len(ready))
+	for _, bead := range ready {
+		readyByID[bead.ID] = true
+	}
+	if !readyByID["bd-ready"] || !readyByID["bd-raced-closed"] {
+		t.Fatalf("CachedReady ids = %v, want projected ready and missing-row fallback ready", readyByID)
+	}
+	raced, err := cache.Get("bd-raced-closed")
+	if err != nil {
+		t.Fatalf("Get raced closed: %v", err)
+	}
+	if raced.IsBlocked != nil {
+		t.Fatalf("raced closed IsBlocked = %v, want nil fallback", raced.IsBlocked)
+	}
+	if stats := cache.Stats(); stats.ProblemCount != 0 {
+		t.Fatalf("cache problem count = %d, want 0; last problem %q", stats.ProblemCount, stats.LastProblem)
+	}
+	if sqlCalls != 1 {
+		t.Fatalf("bd sql calls = %d, want 1", sqlCalls)
+	}
+}
+
+func TestCachingStoreBdPrimeProjectsIsBlockedForAllBDRowsBD105(t *testing.T) {
+	t.Parallel()
+
+	var sqlCalls int
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			t.Fatalf("command name = %q, want bd", name)
+		}
+		if len(args) == 0 {
+			t.Fatal("empty bd command")
+		}
+		switch args[0] {
+		case "version":
+			return []byte("bd version 1.0.5 (test)\n"), nil
+		case "sql":
+			sqlCalls++
+			query := args[1]
+			if strings.Contains(query, " in ('bd-ready'") || strings.Contains(query, " in (\"bd-ready\"") {
+				t.Fatalf("ready projection SQL = %q, must not use per-id IN list", query)
+			}
+			if !strings.Contains(query, "status <> 'closed'") || !strings.Contains(query, "from issues where") || !strings.Contains(query, "from wisps where") {
+				t.Fatalf("ready projection SQL = %q, want every active row", query)
+			}
+			return []byte(`[
+					{"id":"bd-ready","is_blocked":0},
+					{"id":"bd-blocked-status","is_blocked":0},
+					{"id":"bd-deferred-status","is_blocked":1}
+			]`), nil
+		case "list":
+			return []byte(`[
+				{"id":"bd-ready","title":"ready","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z","labels":["task"],"metadata":{}},
+				{"id":"bd-blocked-status","title":"blocked status","status":"blocked","issue_type":"task","created_at":"2026-01-01T00:00:01Z","labels":["task"],"metadata":{}},
+				{"id":"bd-deferred-status","title":"deferred status","status":"deferred","issue_type":"task","created_at":"2026-01-01T00:00:02Z","ephemeral":true,"labels":["task"],"metadata":{}}
+			]`), nil
+		case "query":
+			return []byte(`[]`), nil
+		case "dep":
+			t.Fatalf("unexpected dep scan command: %v", args)
+		}
+		return []byte(`[]`), nil
+	}
+
+	cache := NewCachingStoreForTest(NewBdStore("/city", runner), nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if sqlCalls != 1 {
+		t.Fatalf("bd sql calls = %d, want 1", sqlCalls)
+	}
+	if stats := cache.Stats(); stats.ProblemCount != 0 {
+		t.Fatalf("cache problem count = %d, want 0", stats.ProblemCount)
+	}
+	blocked, err := cache.Get("bd-blocked-status")
+	if err != nil {
+		t.Fatalf("Get(blocked status): %v", err)
+	}
+	if blocked.IsBlocked == nil || *blocked.IsBlocked {
+		t.Fatalf("blocked-status IsBlocked = %v, want false projection", blocked.IsBlocked)
+	}
+	deferred, err := cache.Get("bd-deferred-status")
+	if err != nil {
+		t.Fatalf("Get(deferred status): %v", err)
+	}
+	if deferred.IsBlocked == nil || !*deferred.IsBlocked {
+		t.Fatalf("deferred-status IsBlocked = %v, want true projection", deferred.IsBlocked)
+	}
+}
+
+func TestCachingStoreBdPrimeExcludesIndefinitelyDeferredRowsFromReady(t *testing.T) {
+	t.Parallel()
+
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			t.Fatalf("command name = %q, want bd", name)
+		}
+		if len(args) == 0 {
+			t.Fatal("empty bd command")
+		}
+		switch args[0] {
+		case "version":
+			return []byte("bd version 1.0.5 (test)\n"), nil
+		case "sql":
+			return []byte(`[{"id":"bd-deferred","is_blocked":0}]`), nil
+		case "list":
+			return []byte(`[
+				{"id":"bd-deferred","title":"parked","status":"deferred","issue_type":"task","created_at":"2026-01-01T00:00:00Z","labels":["task"],"metadata":{}}
+			]`), nil
+		case "query":
+			return []byte(`[]`), nil
+		case "dep":
+			t.Fatalf("unexpected dep scan command: %v", args)
+		}
+		return []byte(`[]`), nil
+	}
+
+	cache := NewCachingStoreForTest(NewBdStore("/city", runner), nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	got, err := cache.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("Ready() = %+v, want indefinite deferred row excluded", got)
+	}
+	cached, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable")
+	}
+	if len(cached) != 0 {
+		t.Fatalf("CachedReady() = %+v, want indefinite deferred row excluded", cached)
+	}
+
+	stored, err := cache.Get("bd-deferred")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if stored.Status != "open" {
+		t.Fatalf("Status = %q, want normalized open", stored.Status)
+	}
+	if stored.IsBlocked == nil || *stored.IsBlocked {
+		t.Fatalf("IsBlocked = %v, want independent false dependency projection", stored.IsBlocked)
+	}
+	if !IsDeferred(stored, time.Now()) {
+		t.Fatal("status-based indefinite deferral was not preserved")
+	}
+}
+
+func TestCachingStoreStatusBasedDeferralCanReopen(t *testing.T) {
+	for _, reopen := range []string{"event", "local-update"} {
+		t.Run(reopen, func(t *testing.T) {
+			unblocked := false
+			backing := NewMemStore()
+			created, err := backing.Create(Bead{
+				Title:     "temporarily parked",
+				Type:      "task",
+				Status:    "open",
+				IsBlocked: &unblocked,
+			})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			cache := NewCachingStoreForTest(backing, nil)
+			if err := cache.Prime(context.Background()); err != nil {
+				t.Fatalf("Prime: %v", err)
+			}
+
+			cache.ApplyEvent("bead.updated", json.RawMessage(
+				fmt.Sprintf(`{"id":%q,"status":"deferred"}`, created.ID),
+			))
+			deferred, err := cache.Get(created.ID)
+			if err != nil {
+				t.Fatalf("Get after defer event: %v", err)
+			}
+			if !IsDeferred(deferred, time.Now()) {
+				t.Fatal("defer event did not preserve status-based indefinite deferral")
+			}
+
+			switch reopen {
+			case "event":
+				cache.ApplyEvent("bead.updated", json.RawMessage(
+					fmt.Sprintf(`{"id":%q,"status":"open"}`, created.ID),
+				))
+			case "local-update":
+				status := "open"
+				if err := cache.Update(created.ID, UpdateOpts{Status: &status}); err != nil {
+					t.Fatalf("Update(open): %v", err)
+				}
+			}
+
+			opened, err := cache.Get(created.ID)
+			if err != nil {
+				t.Fatalf("Get after reopen: %v", err)
+			}
+			if opened.IsBlocked == nil || *opened.IsBlocked {
+				t.Fatalf("reopened IsBlocked = %v, want authoritative false", opened.IsBlocked)
+			}
+			if IsDeferred(opened, time.Now()) {
+				t.Fatal("explicit reopen retained status-based indefinite deferral")
+			}
+			ready, ok := cache.CachedReady()
+			if !ok {
+				t.Fatal("CachedReady reported cache unavailable")
+			}
+			if len(ready) != 1 || ready[0].ID != created.ID {
+				t.Fatalf("CachedReady = %+v, want reopened bead %s", ready, created.ID)
+			}
+		})
+	}
+}
+
+func TestCachingStoreDependencyInvalidationPreservesStatusBasedDeferral(t *testing.T) {
+	blocked := true
+	backing := NewMemStore()
+	blocker, err := backing.Create(Bead{Title: "blocker", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create blocker: %v", err)
+	}
+	deferred, err := backing.Create(Bead{
+		Title:                "indefinitely parked",
+		Type:                 "task",
+		Status:               "open",
+		IsBlocked:            &blocked,
+		IndefinitelyDeferred: true,
+	})
+	if err != nil {
+		t.Fatalf("Create deferred: %v", err)
+	}
+	if err := backing.DepAdd(deferred.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if err := cache.Close(blocker.ID); err != nil {
+		t.Fatalf("Close blocker: %v", err)
+	}
+
+	stored, err := cache.Get(deferred.ID)
+	if err != nil {
+		t.Fatalf("Get deferred: %v", err)
+	}
+	if !IsDeferred(stored, time.Now()) {
+		t.Fatal("dependency invalidation dropped status-based indefinite deferral")
+	}
+	ready, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable")
+	}
+	if len(ready) != 0 {
+		t.Fatalf("CachedReady = %+v, want deferred bead excluded after blocker closes", ready)
+	}
+}
+
+func TestCachingStoreNotificationPreservesStatusBasedDeferral(t *testing.T) {
+	var payload json.RawMessage
+	cache := NewCachingStore(NewMemStore(), func(_, _, _, _, _ string, _ *[]string, got json.RawMessage) {
+		payload = append(payload[:0], got...)
+	})
+	cache.notifyChange("bead.updated", Bead{
+		ID:                   "gc-deferred",
+		Status:               "open",
+		Type:                 "task",
+		IndefinitelyDeferred: true,
+	})
+
+	var wire struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(payload, &wire); err != nil {
+		t.Fatalf("Unmarshal notification: %v", err)
+	}
+	if wire.Status != "deferred" {
+		t.Fatalf("wire status = %q, want deferred", wire.Status)
+	}
+	decoded, ok := DecodeBeadEventPayload(payload)
+	if !ok || !IsDeferred(decoded, time.Now()) {
+		t.Fatalf("notification round trip = %+v, ok=%v; want indefinite deferral", decoded, ok)
 	}
 }
 
@@ -3009,7 +4115,16 @@ func TestCachingStoreReadySkipsEphemeralOpenTasks(t *testing.T) {
 	}
 }
 
-func TestCachingStoreBdReconcileRefreshesListDependenciesForCachedReady(t *testing.T) {
+// cachedDownDeps reads one bead's cached "down" edges without going through a
+// public reader, so a test can pin the dep map itself rather than a readiness
+// answer that depends on bd's is_blocked column as well.
+func cachedDownDeps(c *CachingStore, id string) []Dep {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return cloneDeps(c.deps[id])
+}
+
+func TestCachingStoreBdReconcileRefreshesListDependencies(t *testing.T) {
 	t.Parallel()
 
 	runner := newCachingStoreBdDepRunner(t)
@@ -3018,30 +4133,29 @@ func TestCachingStoreBdReconcileRefreshesListDependenciesForCachedReady(t *testi
 		t.Fatalf("Prime: %v", err)
 	}
 
-	assertCachedReadyContains := func(wantReady bool) {
+	edge := Dep{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks"}
+	assertCachedDeps := func(want []Dep) {
 		t.Helper()
-		ready, ok := cache.CachedReady()
-		if !ok {
-			t.Fatal("CachedReady reported cache unavailable")
+		got := cachedDownDeps(cache, "bd-1")
+		if len(got) != len(want) {
+			t.Fatalf("cached deps for bd-1 = %+v, want %+v", got, want)
 		}
-		readyByID := make(map[string]bool, len(ready))
-		for _, bead := range ready {
-			readyByID[bead.ID] = true
-		}
-		if readyByID["bd-1"] != wantReady {
-			t.Fatalf("CachedReady includes bd-1 = %v, want %v; ready=%v", readyByID["bd-1"], wantReady, readyByID)
+		for i := range got {
+			if got[i] != want[i] {
+				t.Fatalf("cached deps for bd-1 = %+v, want %+v", got, want)
+			}
 		}
 	}
 
-	assertCachedReadyContains(true)
+	assertCachedDeps(nil)
 
-	runner.deps["bd-1"] = []Dep{{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks"}}
+	runner.deps["bd-1"] = []Dep{edge}
 	cache.runReconciliation()
-	assertCachedReadyContains(false)
+	assertCachedDeps([]Dep{edge})
 
 	runner.deps["bd-1"] = nil
 	cache.runReconciliation()
-	assertCachedReadyContains(true)
+	assertCachedDeps(nil)
 
 	if runner.depScanCalls != 0 {
 		t.Fatalf("dep scan calls = %d, want 0", runner.depScanCalls)
@@ -3061,16 +4175,8 @@ func TestCachingStoreBdReconcileClearsCachedDepsWhenListOmitsDependencies(t *tes
 	runner.deps["bd-1"] = nil
 	cache.runReconciliation()
 
-	ready, ok := cache.CachedReady()
-	if !ok {
-		t.Fatal("CachedReady reported cache unavailable")
-	}
-	readyByID := make(map[string]bool, len(ready))
-	for _, bead := range ready {
-		readyByID[bead.ID] = true
-	}
-	if !readyByID["bd-1"] {
-		t.Fatalf("CachedReady excludes bd-1 after omitted deps, ready=%v", readyByID)
+	if got := cachedDownDeps(cache, "bd-1"); len(got) != 0 {
+		t.Fatalf("cached deps for bd-1 = %+v after the list omitted them, want none", got)
 	}
 }
 
@@ -3225,6 +4331,14 @@ func (s *completeEmbeddedDepsStore) DepList(string, string) ([]Dep, error) {
 	return nil, errors.New("unexpected per-ID DepList")
 }
 
+type incompleteDependencyStore struct {
+	Store
+}
+
+func (s *incompleteDependencyStore) listIncludesCompleteDependencies() bool {
+	return false
+}
+
 type cachingStoreBdDepRunner struct {
 	t            *testing.T
 	deps         map[string][]Dep
@@ -3252,6 +4366,11 @@ func (r *cachingStoreBdDepRunner) run(_, name string, args ...string) ([]byte, e
 		return r.listOutput(), nil
 	case "ready":
 		return []byte(`[]`), nil
+	case "version":
+		return []byte("bd version 1.0.4\n"), nil
+	case "sql":
+		r.t.Fatalf("unexpected ready projection SQL under bd 1.0.4: %v", args)
+		return nil, nil
 	case "dep":
 		return r.runDep(args[1:]...)
 	default:
@@ -3359,4 +4478,64 @@ func hasDep(deps []Dep, dependsOnID string) bool {
 		}
 	}
 	return false
+}
+
+// TestCachingStoreReadyReturnsCanonicalOrder pins the (priority, created_at,
+// id) ascending ready order on the cache-served paths (#3208): c.beads is a
+// map, so without an explicit sort Ready/CachedReady returned a different
+// order on every call and disagreed with the SQL-backed ready readers.
+func TestCachingStoreReadyReturnsCanonicalOrder(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	// Creation order scrambles priorities so neither insertion order nor any
+	// single-key order matches the canonical (priority, created_at, id) one.
+	for i, priority := range []int{3, 0, 2, 1, 4, 2, 0, 1} {
+		p := priority
+		if _, err := cache.Create(Bead{Title: fmt.Sprintf("ready-%d", i), Priority: &p}); err != nil {
+			t.Fatalf("Create ready-%d: %v", i, err)
+		}
+	}
+	// MemStore assigns sequential ids gc-1..gc-8 with non-decreasing
+	// created_at, so canonical order groups by priority, then insertion.
+	want := []string{"gc-2", "gc-7", "gc-4", "gc-8", "gc-3", "gc-6", "gc-1", "gc-5"}
+
+	readyIDs := func(rows []Bead) []string {
+		ids := make([]string, len(rows))
+		for i, b := range rows {
+			ids[i] = b.ID
+		}
+		return ids
+	}
+
+	got, err := cache.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	if ids := readyIDs(got); !reflect.DeepEqual(ids, want) {
+		t.Fatalf("Ready order = %v, want %v", ids, want)
+	}
+
+	cached, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable")
+	}
+	if ids := readyIDs(cached); !reflect.DeepEqual(ids, want) {
+		t.Fatalf("CachedReady order = %v, want %v", ids, want)
+	}
+
+	// A bounded read must cut the canonical prefix, not an arbitrary
+	// map-iteration subset.
+	limited, err := cache.cachedReadyOnly(ReadyQuery{Limit: 3})
+	if err != nil {
+		t.Fatalf("cachedReadyOnly limit 3: %v", err)
+	}
+	if ids := readyIDs(limited); !reflect.DeepEqual(ids, want[:3]) {
+		t.Fatalf("cachedReadyOnly limit-3 order = %v, want %v", ids, want[:3])
+	}
 }

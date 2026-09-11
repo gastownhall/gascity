@@ -40,29 +40,20 @@ func TestTutorial06Beads(t *testing.T) {
 	writeFile(t, filepath.Join(myCity, "agents", "helper", "prompt.template.md"), "# Helper Agent\nHandle supporting work.\n", 0o644)
 	writeFile(t, filepath.Join(myCity, "agents", "worker", "prompt.template.md"), "# Worker Agent\nHandle general work.\n", 0o644)
 	writeFile(t, filepath.Join(myCity, "agents", "reviewer", "agent.toml"), "dir = \"my-project\"\nprovider = \""+tutorialReviewerProvider()+"\"\n", 0o644)
+	registerTutorialReviewerProvider(t, myCity)
 	writeFile(t, filepath.Join(myCity, "agents", "reviewer", "prompt.template.md"), "# Reviewer Agent\nReview code.\n", 0o644)
 	ws.noteDiagnostic("tutorial 06 continuity setup: replaying tutorial 05's documented pancakes formula command before exercising the next page's bead examples")
 	if out, err := ws.runShell(tutorialPancakesFormulaShellCommand(t), ""); err != nil {
 		t.Fatalf("seed tutorial 05 pancakes formula: %v\n%s", err, out)
 	}
 
-	updateAPIOut, err := ws.runShell(`bd create "Update API docs"`, "")
-	if err != nil {
-		t.Fatalf("seed update api docs: %v\n%s", err, updateAPIOut)
-	}
-	updateAPIID := firstBeadID(updateAPIOut)
-	if updateAPIID == "" {
-		t.Fatalf("could not parse update-api-docs bead id:\n%s", updateAPIOut)
-	}
-	if out, err := ws.runShell(fmt.Sprintf("bd label add %s pool:my-project/worker", updateAPIID), ""); err != nil {
-		t.Fatalf("seed pool label: %v\n%s", err, out)
-	}
 	if out, err := ws.runShell("gc formula cook pancakes", ""); err != nil {
 		t.Fatalf("seed pancakes cook: %v\n%s", err, out)
 	}
 
 	var loginBugID string
 	var refactorID string
+	var updateAPIID string
 	var sprintConvoyID string
 	var ownedConvoyID string
 	var deployConvoyID string
@@ -105,7 +96,7 @@ func TestTutorial06Beads(t *testing.T) {
 		if err != nil {
 			t.Fatalf("bd list: %v\n%s", err, out)
 		}
-		for _, want := range []string{"Update API docs", "Status:"} {
+		for _, want := range []string{"pancakes", "Status:", "Finalize workflow"} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("bd list missing %q:\n%s", want, out)
 			}
@@ -131,6 +122,20 @@ func TestTutorial06Beads(t *testing.T) {
 		refactorID = firstBeadID(out)
 		if refactorID == "" {
 			t.Fatalf("could not parse refactor auth module bead id:\n%s", out)
+		}
+	})
+
+	t.Run(`bd create "Update API docs"`, func(t *testing.T) {
+		out, err := ws.runShell(`bd create "Update API docs"`, "")
+		if err != nil {
+			t.Fatalf("bd create Update API docs: %v\n%s", err, out)
+		}
+		updateAPIID = firstBeadID(out)
+		if updateAPIID == "" {
+			t.Fatalf("could not parse update-api-docs bead id:\n%s", out)
+		}
+		if labelOut, labelErr := ws.runShell(fmt.Sprintf("bd label add %s pool:my-project/worker", updateAPIID), ""); labelErr != nil {
+			t.Fatalf("seed pool label: %v\n%s", labelErr, labelOut)
 		}
 	})
 
@@ -234,6 +239,9 @@ func TestTutorial06Beads(t *testing.T) {
 		if err != nil {
 			t.Fatalf("gc convoy create Sprint 42: %v\n%s", err, out)
 		}
+		if !strings.Contains(out, "tracking 3 issue(s)") {
+			t.Fatalf("convoy create should report tracks-based membership:\n%s", out)
+		}
 		sprintConvoyID = firstBeadID(out)
 		if sprintConvoyID == "" {
 			t.Fatalf("could not parse Sprint 42 convoy id:\n%s", out)
@@ -268,8 +276,8 @@ func TestTutorial06Beads(t *testing.T) {
 		if err != nil {
 			t.Fatalf("gc convoy land %s: %v\n%s", ownedConvoyID, err, out)
 		}
-		if !strings.Contains(out, "Landed") {
-			t.Fatalf("convoy land output mismatch:\n%s", out)
+		if !strings.Contains(out, "Landed convoy") || !strings.Contains(out, `"Auth rewrite"`) {
+			t.Fatalf("convoy land should print the quoted title:\n%s", out)
 		}
 	})
 

@@ -3,7 +3,8 @@
 // helper pattern: a single script receives the operation name as its first
 // argument and communicates via stdin/stdout.
 //
-// See examples/session-scripts/README.md for the protocol specification.
+// See docs/reference/exec-session-provider.md for the protocol
+// specification and contrib/session-scripts/ for maintained scripts.
 package exec
 
 import (

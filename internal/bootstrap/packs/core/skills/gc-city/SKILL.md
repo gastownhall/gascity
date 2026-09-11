@@ -61,7 +61,7 @@ gc event emit <type> [data]            # Emit a custom event
 
 ## Dashboard
 
-See `gc skills dashboard` for full dashboard reference.
+See the gc-dashboard skill for full dashboard reference.
 
 ## Packs
 

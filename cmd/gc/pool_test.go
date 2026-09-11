@@ -12,11 +12,13 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
 type partialListPoolProvider struct {
@@ -813,6 +815,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		Nudge:                        "nudge text",
 		Session:                      "acp",
 		Provider:                     "claude",
+		Upstream:                     "anthropic",
 		InheritedProvider:            "codex",
 		StartCommand:                 "claude --dangerously",
 		Lifecycle:                    config.AgentLifecycleOneShot,
@@ -850,7 +853,6 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		AppendFragments:              []string{"agent-footer"},
 		InheritedAppendFragments:     []string{"pack-footer"},
 		Attach:                       &trueVal,
-		Fallback:                     true,
 		PoolName:                     "template/name",
 		ResumeCommand:                "claude --resume {{.SessionKey}} --dangerously",
 		DependsOn:                    []string{"other-agent"},
@@ -866,6 +868,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		OptionDefaults:               map[string]string{"effort": "max"},
 		BindingName:                  "gastown",
 		PackName:                     "gastown",
+		AssignedWorkDeferLimit:       intPtr(3),
 	}
 
 	// Tombstone fields (deprecated in v0.15.1, removed in v0.16) are not
@@ -984,8 +987,13 @@ func TestDeepCopyAgentSetsPoolName(t *testing.T) {
 }
 
 func TestRunPoolOnBoot(t *testing.T) {
+	// on_boot hooks run concurrently, so this double protects its own state as
+	// the ScaleCheckRunner contract requires.
+	var mu sync.Mutex
 	var ran []string
 	runner := func(cmd, _ string, _ map[string]string) (string, error) {
+		mu.Lock()
+		defer mu.Unlock()
 		ran = append(ran, cmd)
 		return "", nil
 	}
@@ -1029,6 +1037,60 @@ func TestRunPoolOnBootError(t *testing.T) {
 	// Error should be logged, not fatal.
 	if !strings.Contains(stderr.String(), "on_boot dog") {
 		t.Errorf("stderr = %q, want on_boot error logged", stderr.String())
+	}
+}
+
+// TestRunPoolOnBootLogsRecoveryOutput proves a hook that returns NO error but
+// emits a gc-recovery diagnostic on stdout (a bd write the loop could not
+// complete, which exits 0) is still surfaced to the controller log.
+func TestRunPoolOnBootLogsRecoveryOutput(t *testing.T) {
+	runner := func(_, _ string, _ map[string]string) (string, error) {
+		return "gc-recovery: on_boot reopen failed for gc-1: boom\n", nil
+	}
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "dog", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), OnBoot: "bd update --unclaim"},
+		},
+	}
+	var stderr bytes.Buffer
+	runPoolOnBoot(cfg, t.TempDir(), runner, &stderr)
+	if !strings.Contains(stderr.String(), "on_boot dog: gc-recovery: on_boot reopen failed for gc-1: boom") {
+		t.Errorf("stderr = %q, want the recovery diagnostic surfaced", stderr.String())
+	}
+}
+
+// TestRunPoolOnBootSilentOnEmptyOutput proves a clean hook (no diagnostic)
+// produces no recovery line, so the controller log is not spammed.
+func TestRunPoolOnBootSilentOnEmptyOutput(t *testing.T) {
+	runner := func(_, _ string, _ map[string]string) (string, error) { return "", nil }
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "dog", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), OnBoot: "bd update --unclaim"},
+		},
+	}
+	var stderr bytes.Buffer
+	runPoolOnBoot(cfg, t.TempDir(), runner, &stderr)
+	if strings.Contains(stderr.String(), "gc-recovery") {
+		t.Errorf("clean hook produced a recovery line: %q", stderr.String())
+	}
+}
+
+// TestRunPoolOnBootIgnoresCustomHookStdout proves a user on_boot override that
+// writes arbitrary stdout (no gc-recovery marker) is NOT surfaced or mislabeled
+// — only the default template's marked diagnostics reach the recovery log.
+func TestRunPoolOnBootIgnoresCustomHookStdout(t *testing.T) {
+	runner := func(_, _ string, _ map[string]string) (string, error) {
+		return "booting up the custom hook\n", nil
+	}
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "dog", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), OnBoot: "echo booting up the custom hook"},
+		},
+	}
+	var stderr bytes.Buffer
+	runPoolOnBoot(cfg, t.TempDir(), runner, &stderr)
+	if strings.Contains(stderr.String(), "booting up the custom hook") {
+		t.Errorf("custom on_boot stdout was surfaced into the recovery log: %q", stderr.String())
 	}
 }
 
@@ -1390,4 +1452,130 @@ func findPreferredBinary(name string, preferred ...string) (string, error) {
 func isTestscriptShim(path string) bool {
 	clean := filepath.Clean(path)
 	return strings.Contains(clean, string(filepath.Separator)+"testscript-")
+}
+
+func TestParseBDProbeTimeout_DefaultWhenUnset(t *testing.T) {
+	t.Setenv("GC_BD_PROBE_TIMEOUT", "")
+	var buf bytes.Buffer
+	got := parseBDProbeTimeout(&buf)
+	if got != 180*1e9 {
+		t.Errorf("parseBDProbeTimeout() = %v, want 180s", got)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("unexpected stderr output: %q", buf.String())
+	}
+}
+
+func TestParseBDProbeTimeout_ValidDuration(t *testing.T) {
+	t.Setenv("GC_BD_PROBE_TIMEOUT", "30s")
+	var buf bytes.Buffer
+	got := parseBDProbeTimeout(&buf)
+	if got != 30*1e9 {
+		t.Errorf("parseBDProbeTimeout() = %v, want 30s", got)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("unexpected stderr output: %q", buf.String())
+	}
+}
+
+func TestParseBDProbeTimeout_BelowFloor(t *testing.T) {
+	t.Setenv("GC_BD_PROBE_TIMEOUT", "1s")
+	var buf bytes.Buffer
+	got := parseBDProbeTimeout(&buf)
+	if got != 5*1e9 {
+		t.Errorf("parseBDProbeTimeout() = %v, want 5s (floor)", got)
+	}
+	if !strings.Contains(buf.String(), "below minimum") {
+		t.Errorf("expected floor warning, got: %q", buf.String())
+	}
+}
+
+func TestParseBDProbeTimeout_InvalidDuration(t *testing.T) {
+	t.Setenv("GC_BD_PROBE_TIMEOUT", "notaduration")
+	var buf bytes.Buffer
+	got := parseBDProbeTimeout(&buf)
+	if got != 180*1e9 {
+		t.Errorf("parseBDProbeTimeout() = %v, want 180s (parse-error default)", got)
+	}
+	if !strings.Contains(buf.String(), "invalid") || !strings.Contains(buf.String(), "GC_BD_PROBE_TIMEOUT") {
+		t.Errorf("expected parse error warning, got: %q", buf.String())
+	}
+}
+
+// TestSessionSetupContextMirrorsPathContext guards the manual mirroring
+// between workdir.PathContext (work_dir expansion) and SessionSetupContext
+// (session_setup / pre_start / session_live expansion). Every PathContext
+// field must have a same-named counterpart here, or a pack template that
+// works in work_dir silently expands to nothing in pre_start.
+func TestSessionSetupContextMirrorsPathContext(t *testing.T) {
+	// WorktreesRoot is a work_dir-only path input: setup commands receive the
+	// already-resolved WorkDir instead, so it has no session_setup counterpart.
+	pathOnly := map[string]bool{"WorktreesRoot": true}
+
+	setup := reflect.TypeOf(SessionSetupContext{})
+	have := make(map[string]bool, setup.NumField())
+	for i := range setup.NumField() {
+		have[setup.Field(i).Name] = true
+	}
+
+	pathCtx := reflect.TypeOf(workdirutil.PathContext{})
+	for i := range pathCtx.NumField() {
+		name := pathCtx.Field(i).Name
+		if pathOnly[name] {
+			continue
+		}
+		if !have[name] {
+			t.Errorf("workdir.PathContext field %q has no SessionSetupContext counterpart; add it and populate every construction site", name)
+		}
+	}
+}
+
+func TestExpandSessionSetup_DefaultBranch(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		branch string
+		want   string
+	}{
+		{name: "configured", branch: "develop", want: "setup.sh 'develop'"},
+		{name: "unset", branch: "", want: "setup.sh ''"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := expandSessionSetup(
+				[]string{"setup.sh '{{.DefaultBranch}}'"},
+				SessionSetupContext{Session: "s", DefaultBranch: tc.branch},
+			)
+			if got[0] != tc.want {
+				t.Errorf("got %q, want %q", got[0], tc.want)
+			}
+		})
+	}
+}
+
+// TestSessionSetupContextForAgentCarriesConfiguredDefaultBranch proves the
+// pre_start expansion context is actually populated from the resolved rig —
+// the plumbing that lets a pack hand GC_DEFAULT_BRANCH to a setup script.
+func TestSessionSetupContextForAgentCarriesConfiguredDefaultBranch(t *testing.T) {
+	cityPath := t.TempDir()
+	rigs := []config.Rig{
+		{Name: "thriva", Path: filepath.Join(cityPath, "rigs", "thriva"), DefaultBranch: "develop"},
+		{Name: "bare", Path: filepath.Join(cityPath, "rigs", "bare")},
+	}
+
+	configured := sessionSetupContextForAgent(cityPath, "city", "thriva/polecat",
+		&config.Agent{Name: "polecat", Dir: "thriva", Scope: "rig"}, rigs)
+	if configured.DefaultBranch != "develop" {
+		t.Errorf("DefaultBranch = %q, want %q", configured.DefaultBranch, "develop")
+	}
+
+	unset := sessionSetupContextForAgent(cityPath, "city", "bare/polecat",
+		&config.Agent{Name: "polecat", Dir: "bare", Scope: "rig"}, rigs)
+	if unset.DefaultBranch != "" {
+		t.Errorf("rig without default_branch: DefaultBranch = %q, want empty", unset.DefaultBranch)
+	}
+
+	cityScoped := sessionSetupContextForAgent(cityPath, "city", "mayor",
+		&config.Agent{Name: "mayor", Scope: "city"}, rigs)
+	if cityScoped.DefaultBranch != "" {
+		t.Errorf("city-scoped agent: DefaultBranch = %q, want empty", cityScoped.DefaultBranch)
+	}
 }

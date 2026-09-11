@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -228,6 +229,12 @@ func (testAgentResolver) ResolveAgent(cfg *config.City, name, _ string) (config.
 	return config.Agent{}, false
 }
 
+type noMatchAgentResolver struct{}
+
+func (noMatchAgentResolver) ResolveAgent(*config.City, string, string) (config.Agent, bool) {
+	return config.Agent{}, false
+}
+
 func TestDecorateGraphWorkflowRecipe_SetsRootMetadata(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{
 		{Name: "mayor", MaxActiveSessions: intPtr(1)},
@@ -270,6 +277,126 @@ func TestDecorateGraphWorkflowRecipe_SetsRootMetadata(t *testing.T) {
 	work := r.Steps[1]
 	if work.Metadata["gc.routed_to"] != "mayor" {
 		t.Errorf("work gc.routed_to = %q, want mayor", work.Metadata["gc.routed_to"])
+	}
+}
+
+func TestDecorateGraphWorkflowRecipe_ControlRouteUsesOwningStoreScope(t *testing.T) {
+	maxActive := 1
+	cfg := &config.City{Agents: []config.Agent{
+		{Name: "city-worker", Scope: "city"},
+		{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxActive,
+		},
+		{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			Dir:               "fixture",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxActive,
+		},
+	}}
+	recipe := &formula.Recipe{
+		Name: "wf-cross-scope",
+		Steps: []formula.RecipeStep{
+			{ID: "wf-cross-scope", IsRoot: true, Metadata: map[string]string{
+				"gc.kind": "workflow", "gc.formula_contract": "graph.v2",
+			}},
+			{ID: "wf-cross-scope.work", Metadata: map[string]string{}},
+			{ID: "wf-cross-scope.finalize", Metadata: map[string]string{"gc.kind": "workflow-finalize"}},
+		},
+	}
+
+	err := DecorateGraphWorkflowRecipe(
+		recipe,
+		nil,
+		"",
+		"rig",
+		"fixture",
+		"rig:fixture",
+		"city-worker",
+		"test-city--city-worker",
+		nil,
+		"test-city",
+		cfg,
+		Deps{Resolver: testAgentResolver{}},
+	)
+	if err != nil {
+		t.Fatalf("DecorateGraphWorkflowRecipe: %v", err)
+	}
+
+	finalize := recipe.Steps[2]
+	if got := finalize.Metadata["gc.routed_to"]; got != "fixture/core.control-dispatcher" {
+		t.Fatalf("finalize gc.routed_to = %q, want owning-store route fixture/core.control-dispatcher", got)
+	}
+	if got := finalize.Metadata[GraphExecutionRouteMetaKey]; got != "city-worker" {
+		t.Fatalf("finalize gc.execution_routed_to = %q, want city-worker", got)
+	}
+}
+
+func TestDecorateGraphWorkflowRecipe_OwningStoreDoesNotRetargetExplicitWorkerStep(t *testing.T) {
+	maxOne, maxTwo := 1, 2
+	cfg := &config.City{Agents: []config.Agent{
+		{Name: "city-worker", MaxActiveSessions: &maxTwo},
+		{Name: "reviewer", MaxActiveSessions: &maxTwo},
+		{Name: "reviewer", Dir: "fixture", MaxActiveSessions: &maxTwo},
+		{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxOne,
+		},
+		{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			Dir:               "fixture",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxOne,
+		},
+	}}
+	recipe := &formula.Recipe{
+		Name: "wf-cross-scope-target",
+		Steps: []formula.RecipeStep{
+			{ID: "wf-cross-scope-target", IsRoot: true, Metadata: map[string]string{
+				beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+				beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+			}},
+			{ID: "wf-cross-scope-target.work", Metadata: map[string]string{
+				beadmeta.RunTargetMetadataKey: "reviewer",
+			}},
+			{ID: "wf-cross-scope-target.finalize", Metadata: map[string]string{
+				beadmeta.KindMetadataKey: beadmeta.KindWorkflowFinalize,
+			}},
+		},
+	}
+
+	err := DecorateGraphWorkflowRecipe(
+		recipe,
+		nil,
+		"",
+		"rig",
+		"fixture",
+		"rig:fixture",
+		"city-worker",
+		"",
+		nil,
+		"test-city",
+		cfg,
+		Deps{Resolver: rigAwareDispatcherResolver{}},
+	)
+	if err != nil {
+		t.Fatalf("DecorateGraphWorkflowRecipe: %v", err)
+	}
+
+	work := recipe.Steps[1]
+	if got := work.Metadata[beadmeta.RoutedToMetadataKey]; got != "reviewer" {
+		t.Fatalf("worker gc.routed_to = %q, want city reviewer from execution context", got)
+	}
+	finalize := recipe.Steps[2]
+	if got := finalize.Metadata[beadmeta.RoutedToMetadataKey]; got != "fixture/core.control-dispatcher" {
+		t.Fatalf("finalize gc.routed_to = %q, want owning rig dispatcher", got)
 	}
 }
 
@@ -394,10 +521,9 @@ on_exhausted = "hard_fail"
 		}
 	}
 
-	// Retry control beads (gc.kind=retry) must route to the control dispatcher
-	// via direct assignee (not gc.routed_to) per ApplyGraphControlRouteBinding:
-	// gc.routed_to means "config queue work" and must not be used for a known
-	// dispatcher session.
+	// Retry control beads (gc.kind=retry) route to the scope-local
+	// control-dispatcher queue. They must not assign a future on-demand
+	// runtime session name before that session exists.
 	controlIDs := []string{
 		"followup-shape.load-context",
 		"followup-shape.apply-fix",
@@ -410,11 +536,11 @@ on_exhausted = "hard_fail"
 		if got := s.Metadata["gc.kind"]; got != "retry" {
 			t.Errorf("control %q gc.kind = %q, want retry", id, got)
 		}
-		if got := s.Metadata["gc.routed_to"]; got != "" {
-			t.Errorf("control %q gc.routed_to = %q, want empty (routed by direct assignee)", id, got)
+		if got := s.Metadata["gc.routed_to"]; got != "control-dispatcher" {
+			t.Errorf("control %q gc.routed_to = %q, want control-dispatcher", id, got)
 		}
-		if s.Assignee == "" {
-			t.Errorf("control %q assignee is empty; want control-dispatcher session", id)
+		if s.Assignee != "" {
+			t.Errorf("control %q assignee = %q, want empty routed control-dispatcher queue", id, s.Assignee)
 		}
 	}
 
@@ -529,6 +655,54 @@ func TestResolveGraphStepBinding_AssigneeTemplateTargetRejected(t *testing.T) {
 	}
 }
 
+func TestResolveGraphStepBinding_AssigneeDirectResolverBeatsTemplateTarget(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MaxActiveSessions: intPtr(1)},
+		},
+	}
+	store := beads.NewMemStoreFrom(1, []beads.Bead{{
+		ID:     "materialized-worker",
+		Type:   session.BeadType,
+		Status: "open",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "s-frontend-worker",
+			"template":     "frontend/worker",
+			"state":        "active",
+		},
+	}}, nil)
+	stepByID := map[string]*formula.RecipeStep{
+		"demo.work": {
+			ID:       "demo.work",
+			Title:    "Work",
+			Assignee: "worker",
+		},
+	}
+	cache := make(map[string]GraphRouteBinding)
+	resolving := make(map[string]bool)
+	called := false
+	direct := func(beads.Store, string, string, *config.City, string, string) (string, bool, error) {
+		called = true
+		return "materialized-worker", true, nil
+	}
+
+	binding, err := ResolveGraphStepBinding("demo.work", stepByID, nil, nil, cache, resolving, GraphRouteBinding{}, "frontend", store, cfg.Workspace.Name, cfg, Deps{
+		Resolver:              testAgentResolver{},
+		DirectSessionResolver: direct,
+	})
+	if err != nil {
+		t.Fatalf("ResolveGraphStepBinding: %v", err)
+	}
+	if !called {
+		t.Fatal("DirectSessionResolver was not called for assignee target")
+	}
+	if binding.DirectSessionID != "materialized-worker" {
+		t.Fatalf("DirectSessionID = %q, want materialized-worker", binding.DirectSessionID)
+	}
+}
+
 func TestResolveGraphStepBinding_AssigneeConcreteSessionBeatsTemplateCollision(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
@@ -570,7 +744,7 @@ func TestResolveGraphStepBinding_AssigneeConcreteSessionBeatsTemplateCollision(t
 	}
 }
 
-func TestResolveGraphStepBinding_CanonicalSingletonPoolUsesConcreteSession(t *testing.T) {
+func TestResolveGraphStepBinding_CanonicalSingletonPoolUsesMetadataOnlyRoute(t *testing.T) {
 	zero := 0
 	one := 1
 	cfg := &config.City{
@@ -596,15 +770,15 @@ func TestResolveGraphStepBinding_CanonicalSingletonPoolUsesConcreteSession(t *te
 	if binding.QualifiedName != "frontend/worker" {
 		t.Fatalf("QualifiedName = %q, want frontend/worker", binding.QualifiedName)
 	}
-	if binding.SessionName != "frontend--worker" {
-		t.Fatalf("SessionName = %q, want frontend--worker", binding.SessionName)
+	if binding.SessionName != "" {
+		t.Fatalf("SessionName = %q, want empty for pool-routed canonical singleton", binding.SessionName)
 	}
-	if binding.MetadataOnly {
-		t.Fatal("MetadataOnly = true, want false for canonical singleton pool")
+	if !binding.MetadataOnly {
+		t.Fatal("MetadataOnly = false, want true for canonical singleton pool")
 	}
 }
 
-func TestResolveGraphStepBinding_CanonicalSingletonPoolReportsMissingSessionName(t *testing.T) {
+func TestResolveGraphStepBinding_CanonicalSingletonPoolIgnoresMissingSessionName(t *testing.T) {
 	zero := 0
 	one := 1
 	cfg := &config.City{
@@ -626,12 +800,15 @@ func TestResolveGraphStepBinding_CanonicalSingletonPoolReportsMissingSessionName
 	cache := make(map[string]GraphRouteBinding)
 	resolving := make(map[string]bool)
 
-	_, err := ResolveGraphStepBinding("demo.work", stepByID, nil, nil, cache, resolving, GraphRouteBinding{}, "frontend", beads.NewMemStore(), cfg.Workspace.Name, cfg, Deps{Resolver: testAgentResolver{}})
-	if err == nil {
-		t.Fatal("ResolveGraphStepBinding succeeded; want missing session-name error")
+	binding, err := ResolveGraphStepBinding("demo.work", stepByID, nil, nil, cache, resolving, GraphRouteBinding{}, "frontend", beads.NewMemStore(), cfg.Workspace.Name, cfg, Deps{Resolver: testAgentResolver{}})
+	if err != nil {
+		t.Fatalf("ResolveGraphStepBinding: %v", err)
 	}
-	if !strings.Contains(err.Error(), `could not resolve session name for "frontend/worker"`) {
-		t.Fatalf("ResolveGraphStepBinding error = %q, want missing session-name guidance", err)
+	if binding.SessionName != "" {
+		t.Fatalf("SessionName = %q, want empty for pool-routed canonical singleton", binding.SessionName)
+	}
+	if !binding.MetadataOnly {
+		t.Fatal("MetadataOnly = false, want true for canonical singleton pool")
 	}
 }
 
@@ -650,7 +827,7 @@ func TestControlDispatcherBinding_NilResolver(t *testing.T) {
 	}
 }
 
-func TestControlDispatcherBinding_ConfiguredDispatcherUsesConcreteSessionName(t *testing.T) {
+func TestControlDispatcherBinding_ConfiguredDispatcherUsesCanonicalQueue(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{{
 		Name: "control-dispatcher",
 		Dir:  "gascity",
@@ -663,15 +840,126 @@ func TestControlDispatcherBinding_ConfiguredDispatcherUsesConcreteSessionName(t 
 	if binding.QualifiedName != "gascity/control-dispatcher" {
 		t.Fatalf("QualifiedName = %q, want gascity/control-dispatcher", binding.QualifiedName)
 	}
-	if binding.SessionName != "gascity--control-dispatcher" {
-		t.Fatalf("SessionName = %q, want gascity--control-dispatcher", binding.SessionName)
+	if binding.SessionName != "" {
+		t.Fatalf("SessionName = %q, want empty for routed control-dispatcher queue", binding.SessionName)
 	}
-	if binding.MetadataOnly {
-		t.Fatalf("MetadataOnly = true, want false")
+	if !binding.MetadataOnly {
+		t.Fatalf("MetadataOnly = false, want true")
 	}
 }
 
-func TestAssignGraphStepRoute_ControlBindingUsesDirectAssigneeWithoutRoutedTo(t *testing.T) {
+// TestControlDispatcherBinding_UsesDispatcherForGraphScope covers the
+// production shape after 9fa6b7fec: a bound city-level dispatcher
+// (core.control-dispatcher, Dir="", max_active_sessions=1) plus a per-rig
+// materialized copy (fixture/core.control-dispatcher). Each graph must bind to
+// the dispatcher whose store scope owns its control beads.
+// The resolver returns no match, exercising the binding-agnostic deterministic
+// lookup directly.
+func TestControlDispatcherBinding_UsesDispatcherForGraphScope(t *testing.T) {
+	maxActive := 1
+	cfg := &config.City{Agents: []config.Agent{
+		{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxActive,
+		},
+		{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			Dir:               "fixture",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxActive,
+		},
+	}}
+
+	for _, tt := range []struct {
+		name       string
+		rigContext string
+		want       string
+	}{
+		{name: "city", want: "core.control-dispatcher"},
+		{name: "rig", rigContext: "fixture", want: "fixture/core.control-dispatcher"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			binding, err := ControlDispatcherBinding(nil, "test-city", cfg, tt.rigContext, Deps{Resolver: noMatchAgentResolver{}})
+			if err != nil {
+				t.Fatalf("ControlDispatcherBinding: %v", err)
+			}
+			if binding.QualifiedName != tt.want {
+				t.Fatalf("QualifiedName = %q, want %q", binding.QualifiedName, tt.want)
+			}
+			if binding.SessionName != "" {
+				t.Fatalf("SessionName = %q, want empty for routed control-dispatcher queue", binding.SessionName)
+			}
+			if !binding.MetadataOnly {
+				t.Fatalf("MetadataOnly = false, want true")
+			}
+		})
+	}
+}
+
+// TestControlDispatcherBinding_CityOnlyBoundDispatcher covers a config with
+// only the bound city dispatcher. It resolves city graphs but fails loudly for
+// rig graphs instead of routing rig-store control work to the city store.
+func TestControlDispatcherBinding_CityOnlyBoundDispatcher(t *testing.T) {
+	maxActive := 1
+	dispatcher := config.Agent{
+		Name:              config.ControlDispatcherAgentName,
+		BindingName:       "core",
+		StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+		MaxActiveSessions: &maxActive,
+	}
+	cfg := &config.City{Agents: []config.Agent{dispatcher}}
+
+	// Regression guard: the bound agent is NOT addressable by the bare name the
+	// old Resolver path used, so resolution must not rely on it.
+	if config.AgentMatchesIdentity(&dispatcher, config.ControlDispatcherAgentName) {
+		t.Fatalf("precondition: bound core.control-dispatcher should NOT match bare %q", config.ControlDispatcherAgentName)
+	}
+
+	binding, err := ControlDispatcherBinding(nil, "test-city", cfg, "", Deps{Resolver: noMatchAgentResolver{}})
+	if err != nil {
+		t.Fatalf("ControlDispatcherBinding(city): %v", err)
+	}
+	if binding.QualifiedName != "core.control-dispatcher" {
+		t.Fatalf("QualifiedName = %q, want core.control-dispatcher", binding.QualifiedName)
+	}
+	if !binding.MetadataOnly {
+		t.Fatalf("MetadataOnly = false, want true")
+	}
+
+	if _, err := ControlDispatcherBinding(nil, "test-city", cfg, "fixture", Deps{Resolver: noMatchAgentResolver{}}); err == nil {
+		t.Fatal("ControlDispatcherBinding(rig) error = nil, want missing rig dispatcher error")
+	}
+}
+
+// TestControlDispatcherBinding_RigScopedDeterministicDispatcher covers a config
+// with only a rig-scoped deterministic dispatcher. It resolves when its Dir
+// matches the graph scope.
+func TestControlDispatcherBinding_RigScopedDeterministicDispatcher(t *testing.T) {
+	maxActive := 1
+	cfg := &config.City{Agents: []config.Agent{{
+		Name:              config.ControlDispatcherAgentName,
+		BindingName:       "core",
+		Dir:               "fixture",
+		StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+		MaxActiveSessions: &maxActive,
+	}}}
+
+	binding, err := ControlDispatcherBinding(nil, "test-city", cfg, "fixture", Deps{Resolver: noMatchAgentResolver{}})
+	if err != nil {
+		t.Fatalf("ControlDispatcherBinding: %v", err)
+	}
+	if binding.QualifiedName != "fixture/core.control-dispatcher" {
+		t.Fatalf("QualifiedName = %q, want fixture/core.control-dispatcher", binding.QualifiedName)
+	}
+	if !binding.MetadataOnly {
+		t.Fatalf("MetadataOnly = false, want true")
+	}
+}
+
+func TestAssignGraphStepRoute_ControlBindingUsesRoutedQueueWithoutAssignee(t *testing.T) {
 	step := &formula.RecipeStep{
 		Metadata: map[string]string{
 			"gc.routed_to": "stale-control-route",
@@ -688,11 +976,11 @@ func TestAssignGraphStepRoute_ControlBindingUsesDirectAssigneeWithoutRoutedTo(t 
 
 	AssignGraphStepRoute(step, execution, &control)
 
-	if step.Assignee != "gascity--control-dispatcher" {
-		t.Fatalf("control assignee = %q, want gascity--control-dispatcher", step.Assignee)
+	if step.Assignee != "" {
+		t.Fatalf("control assignee = %q, want empty routed control-dispatcher queue", step.Assignee)
 	}
-	if got := step.Metadata["gc.routed_to"]; got != "" {
-		t.Fatalf("control gc.routed_to = %q, want empty direct assignee", got)
+	if got := step.Metadata["gc.routed_to"]; got != "gascity/control-dispatcher" {
+		t.Fatalf("control gc.routed_to = %q, want gascity/control-dispatcher", got)
 	}
 	if got := step.Metadata[GraphExecutionRouteMetaKey]; got != "gascity/claude" {
 		t.Fatalf("control execution route = %q, want gascity/claude", got)
@@ -716,11 +1004,11 @@ func TestAssignGraphStepRoute_ControlBindingPreservesDirectExecutionRoute(t *tes
 
 	AssignGraphStepRoute(step, execution, &control)
 
-	if step.Assignee != "gascity--control-dispatcher" {
-		t.Fatalf("control assignee = %q, want gascity--control-dispatcher", step.Assignee)
+	if step.Assignee != "" {
+		t.Fatalf("control assignee = %q, want empty routed control-dispatcher queue", step.Assignee)
 	}
-	if got := step.Metadata["gc.routed_to"]; got != "" {
-		t.Fatalf("control gc.routed_to = %q, want empty direct assignee", got)
+	if got := step.Metadata["gc.routed_to"]; got != "gascity/control-dispatcher" {
+		t.Fatalf("control gc.routed_to = %q, want gascity/control-dispatcher", got)
 	}
 	if got := step.Metadata[GraphExecutionRouteMetaKey]; got != "session-123" {
 		t.Fatalf("control execution route = %q, want direct session id", got)
@@ -784,5 +1072,217 @@ func TestStampLegacyRecipeRouting_RespectsPerStepRunTarget(t *testing.T) {
 	}
 	if got := recipe.Steps[5].Metadata["gc.routed_to"]; got != "reviewer-code" {
 		t.Errorf("step 5 (whitespace target): gc.routed_to = %q, want reviewer-code (trimmed)", got)
+	}
+}
+
+// rigAwareDispatcherResolver mirrors resolveAgentIdentity's rig-context-first
+// resolution for plain, non-deterministic control-dispatcher configs.
+type rigAwareDispatcherResolver struct{}
+
+func (rigAwareDispatcherResolver) ResolveAgent(cfg *config.City, name, rigContext string) (config.Agent, bool) {
+	if rigContext != "" {
+		for _, a := range cfg.Agents {
+			if a.QualifiedName() == rigContext+"/"+name {
+				return a, true
+			}
+		}
+	}
+	for _, a := range cfg.Agents {
+		if a.QualifiedName() == name {
+			return a, true
+		}
+	}
+	return config.Agent{}, false
+}
+
+func TestControlDispatcherBinding_PlainCityDispatcherDoesNotSatisfyRigScope(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{{Name: "control-dispatcher"}}}
+	_, err := ControlDispatcherBinding(nil, "test-city", cfg, "gc-contrib", Deps{Resolver: rigAwareDispatcherResolver{}})
+	if err == nil {
+		t.Fatal("ControlDispatcherBinding error = nil, want missing rig dispatcher error")
+	}
+}
+
+func TestApplyGraphControlRouteBinding_ClearsStaleFallbackMetadata(t *testing.T) {
+	step := &formula.RecipeStep{Metadata: map[string]string{
+		"gc.control_dispatcher_fallback": "stale->value",
+	}}
+	binding := GraphRouteBinding{
+		QualifiedName: "gc-contrib/control-dispatcher",
+		SessionName:   "gc-contrib--control-dispatcher",
+	}
+	ApplyGraphControlRouteBinding(step, binding)
+	if got := step.Metadata["gc.control_dispatcher_fallback"]; got != "" {
+		t.Fatalf("gc.control_dispatcher_fallback = %q, want cleared on re-decoration", got)
+	}
+}
+
+// Pinning a molecule's steps to one pool slot is the formula's decision, so
+// routing only honors a continuation group the formula already declared,
+// threaded through the binding as the immutable source of truth. It must never
+// manufacture one: a blanket group made every pool-routed molecule single-slot,
+// and on multi-agent formulas it pinned steps to a slot whose template could
+// not run them. The opt-in is read from binding.ContinuationGroup, never from
+// the step's own (mutable, possibly re-decorated) metadata.
+func TestApplyGraphRouteBinding_PoolRouted_ContinuationGroupIsFormulaOptIn(t *testing.T) {
+	tests := []struct {
+		name         string
+		stepMetadata map[string]string
+		bindingGroup string
+		wantGroup    string
+		wantAffini   string
+	}{
+		{
+			name:         "no declared group leaves the step unpinned",
+			stepMetadata: map[string]string{},
+		},
+		{
+			name:         "declared group requires slot affinity",
+			bindingGroup: "review-chain",
+			wantGroup:    "review-chain",
+			wantAffini:   "require",
+		},
+		{
+			name: "re-decoration drops affinity when the group is gone",
+			stepMetadata: map[string]string{
+				"gc.session_affinity": "require",
+			},
+		},
+		{
+			// Reachability proof for the finding [1] concern: the opt-in reads
+			// the immutable binding, never the mutable step metadata. A step that
+			// arrives carrying a stale group its current binding did not declare
+			// is cleared (group + affinity together), so
+			// preassignHookContinuationGroup cannot vacuum later pool claims onto
+			// the stale group.
+			name: "stale group from a prior decoration is cleared, not preserved",
+			stepMetadata: map[string]string{
+				"gc.continuation_group": "pool-workflow",
+				"gc.session_affinity":   "require",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			metadata := tt.stepMetadata
+			if metadata == nil {
+				metadata = map[string]string{}
+			}
+			step := &formula.RecipeStep{Metadata: metadata}
+			ApplyGraphRouteBinding(step, GraphRouteBinding{
+				QualifiedName:     "gascity/polecat",
+				MetadataOnly:      true,
+				ContinuationGroup: tt.bindingGroup,
+			})
+
+			if got := step.Metadata["gc.continuation_group"]; got != tt.wantGroup {
+				t.Errorf("gc.continuation_group = %q, want %q", got, tt.wantGroup)
+			}
+			if got := step.Metadata["gc.session_affinity"]; got != tt.wantAffini {
+				t.Errorf("gc.session_affinity = %q, want %q", got, tt.wantAffini)
+			}
+			if got := step.Metadata["gc.routed_to"]; got != "gascity/polecat" {
+				t.Errorf("gc.routed_to = %q, want gascity/polecat", got)
+			}
+			if step.Assignee != "" {
+				t.Errorf("Assignee = %q, want empty (pool slots claim at runtime)", step.Assignee)
+			}
+		})
+	}
+}
+
+// TestDecorateGraphWorkflowRecipe_PoolContinuationGroupOptIn locks the opt-in
+// contract end-to-end through DecorateGraphWorkflowRecipe (the clone → resolve →
+// stamp path a real molecule takes), not just at the leaf. A formula-declared
+// group must survive decoration onto the stamped pool step with slot affinity;
+// a pool step the formula did not opt in must end unpinned. Together with the
+// leaf-level "stale group is cleared" case, this closes the finding [1]
+// re-decoration concern: the group that reaches a step is exactly the one its
+// formula declared, sourced immutably through the binding.
+func TestDecorateGraphWorkflowRecipe_PoolContinuationGroupOptIn(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{
+		{Name: "polecat", MaxActiveSessions: intPtr(2)}, // pool → MetadataOnly binding
+		{Name: "control-dispatcher", MaxActiveSessions: intPtr(1)},
+	}}
+	recipe := &formula.Recipe{
+		Name: "wf-optin",
+		Steps: []formula.RecipeStep{
+			{ID: "wf-optin", IsRoot: true, Metadata: map[string]string{
+				beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+				beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+			}},
+			{ID: "wf-optin.pinned", Metadata: map[string]string{
+				beadmeta.RunTargetMetadataKey:         "polecat",
+				beadmeta.ContinuationGroupMetadataKey: "review-chain",
+			}},
+			{ID: "wf-optin.free", Metadata: map[string]string{
+				beadmeta.RunTargetMetadataKey: "polecat",
+			}},
+		},
+	}
+
+	err := DecorateGraphWorkflowRecipe(
+		recipe, nil, "", "city", "test-city", "city:test",
+		"polecat", "", nil, "test-city", cfg, Deps{Resolver: testAgentResolver{}},
+	)
+	if err != nil {
+		t.Fatalf("DecorateGraphWorkflowRecipe: %v", err)
+	}
+
+	pinned := recipe.Steps[1]
+	if got := pinned.Metadata[beadmeta.ContinuationGroupMetadataKey]; got != "review-chain" {
+		t.Errorf("pinned gc.continuation_group = %q, want review-chain (formula opt-in survives decoration)", got)
+	}
+	if got := pinned.Metadata[beadmeta.SessionAffinityMetadataKey]; got != "require" {
+		t.Errorf("pinned gc.session_affinity = %q, want require", got)
+	}
+
+	free := recipe.Steps[2]
+	if got := free.Metadata[beadmeta.ContinuationGroupMetadataKey]; got != "" {
+		t.Errorf("free gc.continuation_group = %q, want empty (formula did not opt in)", got)
+	}
+	if got := free.Metadata[beadmeta.SessionAffinityMetadataKey]; got != "" {
+		t.Errorf("free gc.session_affinity = %q, want empty", got)
+	}
+}
+
+func TestApplyGraphRouteBinding_SingleSession_NoAffinityKeys(t *testing.T) {
+	step := &formula.RecipeStep{
+		Metadata: map[string]string{},
+	}
+	binding := GraphRouteBinding{
+		QualifiedName: "gascity/architect",
+		SessionName:   "gascity--architect",
+		MetadataOnly:  false,
+	}
+	ApplyGraphRouteBinding(step, binding)
+
+	if got := step.Metadata["gc.continuation_group"]; got != "" {
+		t.Errorf("gc.continuation_group = %q, want empty for single-session step", got)
+	}
+	if got := step.Metadata["gc.session_affinity"]; got != "" {
+		t.Errorf("gc.session_affinity = %q, want empty for single-session step", got)
+	}
+}
+
+func TestApplyGraphRouteBinding_PoolRouted_DoesNotSetSessionName(t *testing.T) {
+	step := &formula.RecipeStep{
+		Metadata: map[string]string{
+			"gc.session_name": "stale-session",
+			"gc.session_id":   "stale-id",
+		},
+	}
+	binding := GraphRouteBinding{
+		QualifiedName: "gascity/polecat",
+		MetadataOnly:  true,
+	}
+	ApplyGraphRouteBinding(step, binding)
+
+	if got := step.Metadata["gc.session_name"]; got != "" {
+		t.Errorf("gc.session_name = %q, want cleared for pool step", got)
+	}
+	if got := step.Metadata["gc.session_id"]; got != "" {
+		t.Errorf("gc.session_id = %q, want cleared for pool step", got)
 	}
 }

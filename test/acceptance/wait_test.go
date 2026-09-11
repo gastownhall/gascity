@@ -18,7 +18,7 @@ import (
 
 func TestWaitCommands(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.Init("claude")
+	c.InitNoStart("claude")
 
 	t.Run("ListEmpty", func(t *testing.T) {
 		out, err := c.GC("wait", "list")

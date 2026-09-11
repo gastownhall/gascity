@@ -6,24 +6,26 @@ package beadstest
 import (
 	"errors"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
 // Options controls optional behavior of the Store conformance suite.
-// Each opt-out should reference an external bead/escalation explaining
-// why a conforming implementation cannot pass the affected subtest.
+//
+// Opt-outs are governed by the conformance-skip ledger (conformance_skips.go):
+// a request to skip a subtest is honored ONLY when a matching, unexpired ledger
+// entry exists, naming a tracking bead and an expiry. Without one the subtest
+// hard-fails, so an opt-out can never silently launder a regression.
 type Options struct {
-	// SkipTxApplyConformance skips the TxRunsCallbackAndAppliesWriteSurface
-	// subtest. Use only when the backing implementation has a known defect
-	// outside the Store contract (e.g., an external CLI bug). The other Tx
-	// subtests still run.
+	// SkipTxApplyConformance requests skipping the
+	// TxRunsCallbackAndAppliesWriteSurface subtest. It is honored only when a
+	// valid, unexpired entry for that subtest exists in the skip ledger;
+	// otherwise the subtest fails loudly.
 	SkipTxApplyConformance bool
-	// SkipTxApplyReason is reported via t.Skipf when SkipTxApplyConformance
-	// is true. Should name the escalation bead or upstream issue.
-	SkipTxApplyReason string
 }
 
 // RunStoreTests runs the full conformance suite against a Store implementation.
@@ -144,6 +146,44 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		}
 		if got.From != "priya" {
 			t.Errorf("From = %q after Get, want %q from Create", got.From, "priya")
+		}
+	})
+
+	t.Run("CreateEchoMatchesGetOnMetadata", func(t *testing.T) {
+		// The Create return value (the "echo") must carry the same id, status, and
+		// metadata a subsequent Get returns. session.CreateSessionInfo projects the
+		// echo instead of issuing a post-create Get, so any backend whose Create echo
+		// diverges from Get on the projection surface would silently corrupt the typed
+		// create front door. This pins the parity across every backend, not just memstore.
+		s := newStore()
+		meta := map[string]string{
+			"session_name": "polecat-1",
+			"state":        "start_pending",
+			"alias":        "pc-1",
+			"pool_slot":    "3",
+			"agent_name":   "tower/polecat",
+		}
+		created, err := s.Create(beads.Bead{Title: "polecat", Type: "gc:session", Labels: []string{"gc:session"}, Metadata: meta})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.Get(created.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.ID != created.ID {
+			t.Errorf("Get ID = %q, create echo ID = %q", got.ID, created.ID)
+		}
+		if got.Status != created.Status {
+			t.Errorf("Get Status = %q, create echo Status = %q", got.Status, created.Status)
+		}
+		for k, v := range meta {
+			if created.Metadata[k] != v {
+				t.Errorf("create echo Metadata[%q] = %q, want %q", k, created.Metadata[k], v)
+			}
+			if got.Metadata[k] != created.Metadata[k] {
+				t.Errorf("Metadata[%q]: Get=%q, create echo=%q — backend must echo created metadata on Create", k, got.Metadata[k], created.Metadata[k])
+			}
 		}
 	})
 
@@ -298,7 +338,7 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 			t.Fatalf("List() returned %d beads, want 2", len(got))
 		}
 		titles := titlesOf(got)
-		if !containsAll(titles, "first", "second") {
+		if !hasExactly(titles, "first", "second") {
 			t.Errorf("List() titles = %v, want [first second]", titles)
 		}
 	})
@@ -329,7 +369,7 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 			t.Fatalf("List() returned %d beads, want 3", len(got))
 		}
 		titles := titlesOf(got)
-		if !containsAll(titles, "alpha", "beta", "gamma") {
+		if !hasExactly(titles, "alpha", "beta", "gamma") {
 			t.Errorf("List() titles = %v, want [alpha beta gamma]", titles)
 		}
 	})
@@ -435,7 +475,7 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 			t.Fatalf("Ready() returned %d beads, want 2", len(got))
 		}
 		titles := titlesOf(got)
-		if !containsAll(titles, "first", "second") {
+		if !hasExactly(titles, "first", "second") {
 			t.Errorf("Ready() titles = %v, want [first second]", titles)
 		}
 	})
@@ -456,6 +496,89 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		}
 		if got.Description != "updated description" {
 			t.Errorf("Description = %q, want %q", got.Description, "updated description")
+		}
+	})
+
+	// UpdateRoundTripsEveryDocumentedField pins the whole update wire, not just
+	// the description. Each field is written on its own so a backend that drops
+	// exactly one of them fails on that field rather than hiding behind the
+	// others. Update{Type} in particular had no coverage anywhere in the suite,
+	// which is how a store could silently ignore it.
+	t.Run("UpdateRoundTripsEveryDocumentedField", func(t *testing.T) {
+		s := newStore()
+		parent, err := s.Create(beads.Bead{Title: "parent"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := s.Create(beads.Bead{Title: "original", Type: "task", Labels: []string{"keep", "drop"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		title, status, typ, desc, assignee := "renamed", "in_progress", "gate", "new description", "worker-1"
+		// Not 2: backends normalize the default priority back to "unset".
+		priority := 1
+		// A slice, not a map: update order is part of what is being pinned, so
+		// a future field whose result depends on a prior one fails
+		// deterministically instead of flaking on map iteration order.
+		for _, u := range []struct {
+			name string
+			opts beads.UpdateOpts
+		}{
+			{"title", beads.UpdateOpts{Title: &title}},
+			{"status", beads.UpdateOpts{Status: &status}},
+			{"type", beads.UpdateOpts{Type: &typ}},
+			{"priority", beads.UpdateOpts{Priority: &priority}},
+			{"description", beads.UpdateOpts{Description: &desc}},
+			{"assignee", beads.UpdateOpts{Assignee: &assignee}},
+			{"parent_id", beads.UpdateOpts{ParentID: &parent.ID}},
+			{"labels", beads.UpdateOpts{Labels: []string{"added"}}},
+			{"metadata", beads.UpdateOpts{Metadata: map[string]string{"note": "x"}}},
+		} {
+			if err := s.Update(b.ID, u.opts); err != nil {
+				t.Fatalf("Update(%s): %v", u.name, err)
+			}
+		}
+
+		got, err := s.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, tc := range []struct{ field, got, want string }{
+			{"Title", got.Title, title},
+			{"Status", got.Status, status},
+			{"Type", got.Type, typ},
+			{"Description", got.Description, desc},
+			{"Assignee", got.Assignee, assignee},
+			{"ParentID", got.ParentID, parent.ID},
+		} {
+			if tc.got != tc.want {
+				t.Errorf("%s = %q, want %q", tc.field, tc.got, tc.want)
+			}
+		}
+		if got.Priority == nil || *got.Priority != priority {
+			t.Errorf("Priority = %v, want %d", got.Priority, priority)
+		}
+		if got.Metadata["note"] != "x" {
+			t.Errorf("Metadata[note] = %q, want %q", got.Metadata["note"], "x")
+		}
+		if !hasLabel(got.Labels, "added") {
+			t.Errorf("Labels = %v, want to contain %q (labels append)", got.Labels, "added")
+		}
+
+		// remove_labels is the one field that needs a second read to observe.
+		if err := s.Update(b.ID, beads.UpdateOpts{RemoveLabels: []string{"drop"}}); err != nil {
+			t.Fatalf("Update(remove_labels): %v", err)
+		}
+		got, err = s.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if hasLabel(got.Labels, "drop") {
+			t.Errorf("Labels = %v, want %q removed", got.Labels, "drop")
+		}
+		if !hasLabel(got.Labels, "keep") {
+			t.Errorf("Labels = %v, want %q preserved", got.Labels, "keep")
 		}
 	})
 
@@ -558,6 +681,92 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		}
 	})
 
+	// ParentID is a WEAK, CITY-SCOPED reference (see beads.Bead.ParentID), and
+	// on a split city the parent routinely lives in another store: a graph-class
+	// molecule in the binding hangs its steps off a work-class bead in a rig
+	// ledger, and vice versa. Every backend has to behave the same way about an
+	// id it cannot see, because the alternatives are silent — a store that
+	// validated would refuse the create with an error that reads like a bad
+	// request, and a store that filtered on resolvability would return an empty
+	// step list for a molecule that exists.
+	t.Run("ParentIDNamesARowThisStoreDoesNotHave", func(t *testing.T) {
+		s := newStore()
+		// Not merely absent: an id in a reserved namespace this store could not
+		// have minted, which is the actual cross-store shape.
+		foreign := "gcg-70b1e5f2-a"
+
+		// The control for the placement assertion below: what an id minted by
+		// this store looks like when no parent is named at all.
+		control, err := s.Create(beads.Bead{Title: "control"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The premise the comment above asserts, asserted. A store that mints
+		// into the foreign id's own namespace turns this row into a
+		// same-namespace dangling-parent test, which the contract says a store
+		// is entitled to refuse — the row would then pass or fail for reasons
+		// that have nothing to do with the cross-store shape it exists to pin.
+		if beadIDNamespace(foreign) == beadIDNamespace(control.ID) {
+			t.Fatalf("this store mints %q-shaped ids, the same namespace as the %q used as the foreign parent; the cross-store shape this row exists to pin is not being exercised", control.ID, foreign)
+		}
+
+		child, err := s.Create(beads.Bead{Title: "step", ParentID: foreign})
+		if err != nil {
+			t.Fatalf("Create with an unresolvable parent was refused: %v — a store must not validate ParentID, and this breaks every cross-store molecule", err)
+		}
+		// Placement is by class, never by parent. A store that minted the child
+		// into the parent's namespace to keep the pair together would satisfy
+		// every other assertion here and still be wrong in the one way that
+		// cannot be undone: an id is fixed at create, so no later copy moves the
+		// bead back to the ledger its class routes to.
+		if beadIDNamespace(control.ID) == "" {
+			t.Fatalf("this store mints ids like %q, with no namespace segment; the placement assertion below would compare nothing", control.ID)
+		}
+		if beadIDNamespace(child.ID) != beadIDNamespace(control.ID) {
+			t.Errorf("a child naming a %q parent was minted as %q, but this store mints %q-shaped ids; placement followed ParentID instead of class", foreign, child.ID, control.ID)
+		}
+
+		got, err := s.Get(child.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.ParentID != foreign {
+			t.Errorf("ParentID round-tripped as %q, want %q verbatim — a store must not rewrite or namespace it", got.ParentID, foreign)
+		}
+
+		children, err := s.Children(foreign)
+		if err != nil {
+			t.Fatalf("Children on an unresolvable parent errored: %v — the match is against this store's rows, not the parent's", err)
+		}
+		if len(children) != 1 || children[0].ID != child.ID {
+			t.Errorf("Children(%q) returned %d beads, want the one child stored here; a molecule's steps would read as missing", foreign, len(children))
+		}
+
+		listed, err := s.List(beads.ListQuery{ParentID: foreign})
+		if err != nil {
+			t.Fatalf("List{ParentID} on an unresolvable parent errored: %v", err)
+		}
+		if len(listed) != 1 || listed[0].ID != child.ID {
+			t.Errorf("List{ParentID: %q} returned %d beads, want 1 — it must agree with Children", foreign, len(listed))
+		}
+
+		// Update has to agree with Create. A store that admits a foreign parent
+		// at create and then refuses to write the same value back fails only on
+		// the reparent — long after the shape was accepted, and on a path
+		// (convoy re-anchor, molecule restore) whose caller has no reason to
+		// expect a not-found for a bead it just read from the other ledger.
+		if err := s.Update(control.ID, beads.UpdateOpts{ParentID: &foreign}); err != nil {
+			t.Fatalf("Update reparenting onto an unresolvable parent was refused: %v — Create admitted the same value", err)
+		}
+		reparented, err := s.Get(control.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if reparented.ParentID != foreign {
+			t.Errorf("after reparenting, ParentID is %q, want %q verbatim", reparented.ParentID, foreign)
+		}
+	})
+
 	t.Run("ReadyEmptyStore", func(t *testing.T) {
 		s := newStore()
 		got, err := s.Ready()
@@ -584,7 +793,7 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 			t.Fatalf("Ready() returned %d beads, want 3", len(got))
 		}
 		titles := titlesOf(got)
-		if !containsAll(titles, "alpha", "beta", "gamma") {
+		if !hasExactly(titles, "alpha", "beta", "gamma") {
 			t.Errorf("Ready() titles = %v, want [alpha beta gamma]", titles)
 		}
 	})
@@ -596,7 +805,7 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 			t.Fatal(err)
 		}
 		// Create beads with types that bd ready excludes.
-		for _, typ := range []string{"molecule", "step", "message", "gate", "merge-request", "session", "agent", "role", "rig"} {
+		for _, typ := range []string{"molecule", "step", "convoy", "message", "gate", "merge-request", "session", "agent", "role", "rig"} {
 			if _, err := s.Create(beads.Bead{Title: typ, Type: typ}); err != nil {
 				t.Fatal(err)
 			}
@@ -610,6 +819,63 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		}
 		if got[0].Title != "task" {
 			t.Errorf("Ready()[0].Title = %q, want %q", got[0].Title, "task")
+		}
+	})
+
+	t.Run("ReadyExcludesDependentWhenBlockerClosedAsWorkOutcomeBlocked", func(t *testing.T) {
+		s := newStore()
+		blocker, err := s.Create(beads.Bead{Title: "blocker", Type: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		dependent, err := s.Create(beads.Bead{Title: "dependent", Type: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.DepAdd(dependent.ID, blocker.ID, "blocks"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Close(blocker.ID); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetMetadataBatch(blocker.ID, map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.Ready()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("Ready() = %v, want empty: a blocker closed with gc.work_outcome=blocked must not satisfy the dependent's blocking dependency", titlesOf(got))
+		}
+	})
+
+	t.Run("ReadyIncludesDependentWhenBlockerClosedWithNoWorkOutcome", func(t *testing.T) {
+		s := newStore()
+		blocker, err := s.Create(beads.Bead{Title: "blocker", Type: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		dependent, err := s.Create(beads.Bead{Title: "dependent", Type: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.DepAdd(dependent.ID, blocker.ID, "blocks"); err != nil {
+			t.Fatal(err)
+		}
+		// Close with no gc.work_outcome metadata at all: the legacy/pre-ADR-0009
+		// shape. This must keep satisfying the dependency — it is the explicit
+		// backward-compat guarantee, not merely an absence of the new behavior.
+		if err := s.Close(blocker.ID); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.Ready()
+		if err != nil {
+			t.Fatal(err)
+		}
+		titles := titlesOf(got)
+		if !hasExactly(titles, "dependent") {
+			t.Fatalf("Ready() titles = %v, want [dependent]: a blocker closed with no gc.work_outcome must still satisfy the dependency (backward-compat)", titles)
 		}
 	})
 
@@ -677,7 +943,8 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 
 	t.Run("TxRunsCallbackAndAppliesWriteSurface", func(t *testing.T) {
 		if opts.SkipTxApplyConformance {
-			t.Skipf("skipping: %s", opts.SkipTxApplyReason)
+			requireLedgeredSkip(t, "TxRunsCallbackAndAppliesWriteSurface")
+			return
 		}
 		s := newStore()
 		b, err := s.Create(beads.Bead{Title: "before"})
@@ -748,6 +1015,169 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		s := newStore()
 		if err := s.Tx("conformance nil tx", nil); err == nil {
 			t.Fatal("Tx(nil) returned nil, want error")
+		}
+	})
+
+	// ListStorageTierContract pins query.go's TierMode row filter (#3045,
+	// #3444): TierIssues keeps history and no-history rows and drops only
+	// ephemeral ones; TierWisps keeps no-history and ephemeral rows; TierBoth
+	// unions all three. Backends must agree on these cardinalities or API list
+	// totals silently shift with backend selection.
+	//
+	// This shared subtest seeds through Store.Create, so it runs only for the
+	// Create-seedable backends wired through RunStoreTests: MemStore,
+	// FileStore, ExecStore, the br exec bridge, and NativeDoltStore. Two
+	// full-Store backends seed differently and pin the same tier contract
+	// through their own tests instead: BdStore via
+	// TestBdStoreListStorageTierConformance, and the DoltLite read store via
+	// TestDoltliteReadStoreTierModesIncludeWisps (its Create routes to the
+	// external bd runner, so it cannot use this Create-based harness and seeds
+	// the snapshot tables directly). Keep those backend-specific tier tests in
+	// sync with this contract.
+	t.Run("ListStorageTierContract", func(t *testing.T) {
+		s := newStore()
+		if _, err := s.Create(beads.Bead{Title: "tier-history", Labels: []string{"tier-contract"}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Create(beads.Bead{Title: "tier-no-history", Labels: []string{"tier-contract"}, NoHistory: true}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Create(beads.Bead{Title: "tier-ephemeral", Labels: []string{"tier-contract"}, Ephemeral: true}); err != nil {
+			t.Fatal(err)
+		}
+
+		issues, err := s.List(beads.ListQuery{Label: "tier-contract"})
+		if err != nil {
+			t.Fatalf("List issues tier: %v", err)
+		}
+		if got := titlesOf(issues); !hasExactly(got, "tier-history", "tier-no-history") {
+			t.Errorf("issues tier titles = %v, want [tier-history tier-no-history]", got)
+		}
+
+		wisps, err := s.List(beads.ListQuery{Label: "tier-contract", TierMode: beads.TierWisps})
+		if err != nil {
+			t.Fatalf("List wisps tier: %v", err)
+		}
+		if got := titlesOf(wisps); !hasExactly(got, "tier-ephemeral", "tier-no-history") {
+			t.Errorf("wisps tier titles = %v, want [tier-ephemeral tier-no-history]", got)
+		}
+
+		both, err := s.List(beads.ListQuery{Label: "tier-contract", TierMode: beads.TierBoth})
+		if err != nil {
+			t.Fatalf("List both tiers: %v", err)
+		}
+		if got := titlesOf(both); !hasExactly(got, "tier-ephemeral", "tier-history", "tier-no-history") {
+			t.Errorf("both tier titles = %v, want [tier-ephemeral tier-history tier-no-history]", got)
+		}
+	})
+
+	// SetLocalString/GetLocalString cover only behavior common to every Store
+	// implementation. Unknown-bead-id handling is deliberately excluded here:
+	// in-process stores validate and return ErrNotFound while external-process
+	// stores (BdStore, NativeDoltStore, exec.Store) do not, by design (see the
+	// Store interface doc comment) — that asymmetry, if tested at all, belongs
+	// in each implementation's own test file, not this shared suite.
+	t.Run("SetLocalStringRoundTrip", func(t *testing.T) {
+		s := newStore()
+		b, err := s.Create(beads.Bead{Title: "local-string"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetLocalString(b.ID, "last_woke_at", "2026-07-14T00:00:00Z"); err != nil {
+			t.Fatalf("SetLocalString: %v", err)
+		}
+		got, err := s.GetLocalString(b.ID, "last_woke_at")
+		if err != nil {
+			t.Fatalf("GetLocalString: %v", err)
+		}
+		if got != "2026-07-14T00:00:00Z" {
+			t.Errorf("GetLocalString = %q, want 2026-07-14T00:00:00Z", got)
+		}
+	})
+
+	t.Run("GetLocalStringUnsetReturnsEmpty", func(t *testing.T) {
+		s := newStore()
+		b, err := s.Create(beads.Bead{Title: "local-string-unset"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.GetLocalString(b.ID, "never_set")
+		if err != nil {
+			t.Fatalf("GetLocalString: %v", err)
+		}
+		if got != "" {
+			t.Errorf("GetLocalString unset = %q, want empty", got)
+		}
+	})
+
+	t.Run("SetLocalStringEmptyClears", func(t *testing.T) {
+		s := newStore()
+		b, err := s.Create(beads.Bead{Title: "local-string-clear"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetLocalString(b.ID, "k", "v"); err != nil {
+			t.Fatalf("SetLocalString: %v", err)
+		}
+		if err := s.SetLocalString(b.ID, "k", ""); err != nil {
+			t.Fatalf("SetLocalString empty: %v", err)
+		}
+		got, err := s.GetLocalString(b.ID, "k")
+		if err != nil {
+			t.Fatalf("GetLocalString: %v", err)
+		}
+		if got != "" {
+			t.Errorf("GetLocalString after clear = %q, want empty", got)
+		}
+	})
+
+	t.Run("SetLocalStringNotInDurableMetadata", func(t *testing.T) {
+		s := newStore()
+		b, err := s.Create(beads.Bead{Title: "local-string-not-durable"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetLocalString(b.ID, "clone_local_key", "v"); err != nil {
+			t.Fatalf("SetLocalString: %v", err)
+		}
+		got, err := s.Get(b.ID)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if _, ok := got.Metadata["clone_local_key"]; ok {
+			t.Error("SetLocalString leaked into durable Metadata, want clone-local key absent from Metadata")
+		}
+	})
+
+	t.Run("SetLocalStringPerBeadIsolation", func(t *testing.T) {
+		s := newStore()
+		a, err := s.Create(beads.Bead{Title: "local-string-bead-a"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := s.Create(beads.Bead{Title: "local-string-bead-b"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetLocalString(a.ID, "k", "a-value"); err != nil {
+			t.Fatalf("SetLocalString a: %v", err)
+		}
+		if err := s.SetLocalString(b.ID, "k", "b-value"); err != nil {
+			t.Fatalf("SetLocalString b: %v", err)
+		}
+		gotA, err := s.GetLocalString(a.ID, "k")
+		if err != nil {
+			t.Fatalf("GetLocalString a: %v", err)
+		}
+		if gotA != "a-value" {
+			t.Errorf("GetLocalString a = %q, want a-value", gotA)
+		}
+		gotB, err := s.GetLocalString(b.ID, "k")
+		if err != nil {
+			t.Fatalf("GetLocalString b: %v", err)
+		}
+		if gotB != "b-value" {
+			t.Errorf("GetLocalString b = %q, want b-value", gotB)
 		}
 	})
 }
@@ -1023,6 +1453,17 @@ func RunDepTests(t *testing.T, newStore func() beads.Store) {
 	})
 }
 
+// beadIDNamespace returns the leading namespace segment of a bead id — what a
+// store's mint prefix looks like from the outside. An id with no separator has
+// no namespace, which compares equal only to another such id.
+func beadIDNamespace(id string) string {
+	before, _, ok := strings.Cut(id, "-")
+	if !ok {
+		return ""
+	}
+	return strings.ToLower(before)
+}
+
 // titlesOf extracts titles from a slice of beads.
 func titlesOf(bs []beads.Bead) []string {
 	titles := make([]string, len(bs))
@@ -1033,8 +1474,12 @@ func titlesOf(bs []beads.Bead) []string {
 	return titles
 }
 
-// containsAll checks that sorted has all the expected values.
-func containsAll(sorted []string, want ...string) bool {
+// hasExactly reports whether sorted holds exactly the want values and no
+// others — set equality (equal length plus an element-wise match after
+// sorting). The tier checks above rely on this to also catch over-inclusion,
+// such as an ephemeral row leaking into TierIssues. It is not a subset check:
+// do not use it where extra elements should be tolerated.
+func hasExactly(sorted []string, want ...string) bool {
 	expected := make([]string, len(want))
 	copy(expected, want)
 	sort.Strings(expected)
@@ -1047,4 +1492,14 @@ func containsAll(sorted []string, want ...string) bool {
 		}
 	}
 	return true
+}
+
+// hasLabel reports whether labels contains want.
+func hasLabel(labels []string, want string) bool {
+	for _, l := range labels {
+		if l == want {
+			return true
+		}
+	}
+	return false
 }

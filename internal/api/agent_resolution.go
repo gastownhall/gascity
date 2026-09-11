@@ -48,7 +48,16 @@ func findUniqueAgentTemplateByBareName(cfg *config.City, input string) (config.A
 	return config.Agent{}, false
 }
 
+// findAgentByQualifiedTemplate returns the configured agent whose identity
+// matches identity, if any. The nil-config guard backstops a concurrent config
+// swap-to-nil between an earlier availability check and this lookup (for
+// example formulaDetail returns a typed 503 via formulaSearchPaths before
+// resolving routing identities here), so the helper stays panic-safe even when
+// called independently of that ordering.
 func findAgentByQualifiedTemplate(cfg *config.City, identity string) (config.Agent, bool) {
+	if cfg == nil {
+		return config.Agent{}, false
+	}
 	for _, a := range cfg.Agents {
 		if config.AgentMatchesIdentity(&a, identity) {
 			return a, true

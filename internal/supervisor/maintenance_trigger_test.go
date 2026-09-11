@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 )
 
 // TestTriggerNow_Success runs one synchronous maintenance cycle and verifies
@@ -200,4 +201,62 @@ func (g *gatedDoltOps) SmokeCount(context.Context) (int, error) {
 
 func (g *gatedDoltOps) Close() error {
 	return nil
+}
+
+// TestExecuteCycle_CriticalDiskSkipsSnapshotAndGC verifies that when the disk
+// pre-flight detects CRITICAL free space, neither the snapshot runner nor the
+// GC ops are invoked. The disk pre-flight must run BEFORE runSnapshot so a
+// critically-low store cannot consume the remaining disk attempting a backup
+// that will fail anyway.
+func TestExecuteCycle_CriticalDiskSkipsSnapshotAndGC(t *testing.T) {
+	t.Parallel()
+	cfg := config.DoltMaintenance{Enabled: true, Interval: "1h", GCTimeout: "1s"}
+	now := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
+
+	var snapshotCalled, gcCalled bool
+	fake := events.NewFake()
+
+	loop := NewStoreMaintenanceLoop(StoreMaintenanceLoopDeps{
+		Cfg:      cfg,
+		CityPath: t.TempDir(),
+		Clock:    func() time.Time { return now },
+		Rand:     func() float64 { return 0.5 },
+		Recorder: fake,
+		OpenDoltBackup: func(context.Context) (DoltBackupRunner, error) {
+			snapshotCalled = true
+			return nil, errors.New("should not be reached")
+		},
+		OpenDoltOps: func(context.Context) (DoltOps, error) {
+			gcCalled = true
+			return nil, errors.New("should not be reached")
+		},
+		// Report disk as critically below the floor.
+		DiskFreeBytes:    func(string) (int64, error) { return 100, nil },
+		DiskMinFreeBytes: 1 << 30, // 1 GiB floor; 100 bytes free → CRITICAL
+	})
+
+	run, err := loop.TriggerNow(context.Background())
+	if err != nil {
+		t.Fatalf("TriggerNow = %v; want nil", err)
+	}
+	if run.Stage != "done" || run.Err != "" {
+		t.Fatalf("run Stage=%q Err=%q; want done with no error", run.Stage, run.Err)
+	}
+	if snapshotCalled {
+		t.Error("snapshot factory was called despite CRITICAL disk; disk pre-flight must run before snapshot")
+	}
+	if gcCalled {
+		t.Error("GC ops factory was called despite CRITICAL disk")
+	}
+
+	// StoreDiskCritical event must have fired exactly once.
+	criticalEvents := 0
+	for _, e := range fake.Events {
+		if e.Type == events.StoreDiskCritical {
+			criticalEvents++
+		}
+	}
+	if criticalEvents != 1 {
+		t.Errorf("got %d StoreDiskCritical events; want 1", criticalEvents)
+	}
 }

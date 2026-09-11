@@ -15,11 +15,18 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 const (
 	podManagedDoltHost = "dolt.gc.svc.cluster.local"
 	podManagedDoltPort = "3307"
+
+	// podWorkspaceRoot is the pod-side projection of the city root. It is the
+	// only directory guaranteed to exist when the container starts — it is the
+	// "ws" EmptyDir mount point for staged pods and the image WORKDIR for
+	// prebaked ones — so it is what the pod spec's WorkingDir may safely name.
+	podWorkspaceRoot = "/workspace"
 )
 
 func controllerCityPath(cfgEnv map[string]string) string {
@@ -45,15 +52,53 @@ func remapControllerPathToPod(val, ctrlCity string) string {
 	return val
 }
 
+// projectedPodWorkDir maps the controller-side WorkDir onto its pod-side path.
+// For a pool or workflow worker this is a per-bead directory
+// (<rig>/<beadID>-<slug>) that does not exist until the entrypoint creates it.
 func projectedPodWorkDir(cfg runtime.Config) string {
-	podWorkDir := "/workspace"
+	podWorkDir := podWorkspaceRoot
 	ctrlCity := controllerCityPath(cfg.Env)
 	if ctrlCity != "" && cfg.WorkDir != "" && cfg.WorkDir != ctrlCity {
 		if rel, ok := strings.CutPrefix(cfg.WorkDir, ctrlCity+"/"); ok {
-			podWorkDir = "/workspace/" + rel
+			podWorkDir = podWorkspaceRoot + "/" + rel
 		}
 	}
 	return podWorkDir
+}
+
+// agentCommandB64 resolves the agent command, remaps controller-side city path
+// references to the pod-side /workspace, and returns its base64 form. Shared by
+// buildPod (the pod entrypoint) and Relaunch (respawn over execInPod) so the
+// entrypoint launch and a relaunch produce a byte-identical command.
+func agentCommandB64(cfg runtime.Config) string {
+	cmd := cfg.Command
+	if cmd == "" {
+		cmd = "/bin/bash"
+	}
+	// The controller expands {{.ConfigDir}} templates using its own city path
+	// (e.g. /city/packs/...) but pods have files at /workspace/....
+	if ctrlCity := controllerCityPath(cfg.Env); ctrlCity != "" {
+		cmd = strings.ReplaceAll(cmd, ctrlCity, "/workspace")
+	}
+	return base64.StdEncoding.EncodeToString([]byte(cmd))
+}
+
+// buildRespawnCommand builds the in-pod shell command that respawns the agent in
+// the existing tmux "main" session (respawn-pane -k), reusing the warm pod. When
+// LINUX_USERNAME is set the entrypoint runs tmux under `su - <user>`, so the
+// respawn is wrapped in the same su to reach that user's tmux socket.
+func buildRespawnCommand(cfg runtime.Config) string {
+	cmdB64 := agentCommandB64(cfg)
+	if user := cfg.Env["LINUX_USERNAME"]; user != "" {
+		return fmt.Sprintf(
+			`CMD=$(echo '%s' | base64 -d) && su - %s -c "cd %s && tmux respawn-pane -k -t %s \"$CMD\""`,
+			cmdB64, user, projectedPodWorkDir(cfg), tmuxSession,
+		)
+	}
+	return fmt.Sprintf(
+		`CMD=$(echo '%s' | base64 -d) && tmux respawn-pane -k -t %s "$CMD"`,
+		cmdB64, tmuxSession,
+	)
 }
 
 func projectedPodStoreRoot(cfg runtime.Config, podWorkDir string) string {
@@ -175,18 +220,9 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 	podWorkDir := projectedPodWorkDir(cfg)
 	ctrlCity := controllerCityPath(cfg.Env)
 
-	// Build the command the agent runs. Base64-encode to avoid quoting issues.
-	agentCmd := cfg.Command
-	if agentCmd == "" {
-		agentCmd = "/bin/bash"
-	}
-	// Remap controller-side city path references to pod-side /workspace.
-	// The controller expands {{.ConfigDir}} templates using its own city path
-	// (e.g. /city/packs/...) but pods have files at /workspace/....
-	if ctrlCity != "" {
-		agentCmd = strings.ReplaceAll(agentCmd, ctrlCity, "/workspace")
-	}
-	cmdB64 := base64.StdEncoding.EncodeToString([]byte(agentCmd))
+	// Build the agent command (base64-encoded to avoid quoting issues) — shared
+	// with the relaunch path so the entrypoint and a respawn launch identically.
+	cmdB64 := agentCommandB64(cfg)
 
 	// Pod entrypoint: wait for workspace ready → pre_start → tmux → keepalive.
 	// Each pre_start command is base64-encoded and decoded at runtime to prevent
@@ -224,19 +260,33 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 		wsWait = `while [ ! -f /workspace/.gc-workspace-ready ]; do sleep 0.5; done; `
 	}
 
+	// The pod spec's WorkingDir names the workspace root, because the kubelet
+	// chdirs into it before this command runs and a per-bead workDir does not
+	// exist yet. Create and enter the real working directory here instead.
+	//
+	// Placement matters twice over. It must come *after* wsWait, because until
+	// staging signals ready the workspace content is still being written and a
+	// shell sitting in a subdirectory of it is standing on shifting ground. And
+	// it must come *before* preStartCmds, because pre_start previously ran in
+	// podWorkDir (the container's WorkingDir) and must keep doing so.
+	enterWorkDir := fmt.Sprintf("mkdir -p %s && cd %s && ",
+		shellquote.Quote(podWorkDir), shellquote.Quote(podWorkDir))
+
 	var tmuxCmd string
 	if linuxUsername != "" {
-		// Run tmux session as the dynamic user via su.
+		// Run tmux session as the dynamic user via su. userSetup already created
+		// and chowned podWorkDir as root; enterWorkDir is idempotent and is what
+		// puts pre_start in the right directory.
 		tmuxCmd = fmt.Sprintf(
-			"%s%s%s%sCMD=$(echo '%s' | base64 -d) && "+
+			"%s%s%s%s%sCMD=$(echo '%s' | base64 -d) && "+
 				`su - %s -c "cd %s && tmux new-session -d -s %s \"$CMD\" && sleep infinity"`,
-			userSetup, credCopy, wsWait, preStartCmds, cmdB64,
+			userSetup, credCopy, wsWait, enterWorkDir, preStartCmds, cmdB64,
 			linuxUsername, podWorkDir, tmuxSession,
 		)
 	} else {
 		tmuxCmd = fmt.Sprintf(
-			"%s%s%sCMD=$(echo '%s' | base64 -d) && tmux new-session -d -s %s \"$CMD\" && sleep infinity",
-			credCopy, wsWait, preStartCmds, cmdB64, tmuxSession,
+			"%s%s%s%sCMD=$(echo '%s' | base64 -d) && tmux new-session -d -s %s \"$CMD\" && sleep infinity",
+			credCopy, wsWait, enterWorkDir, preStartCmds, cmdB64, tmuxSession,
 		)
 	}
 
@@ -309,7 +359,14 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 				Name:            "agent",
 				Image:           p.image,
 				ImagePullPolicy: corev1.PullAlways,
-				WorkingDir:      podWorkDir,
+				// Not podWorkDir: the runtime resolves this before the entrypoint
+				// runs, so naming a per-bead directory that nothing has created
+				// yet is unsafe. containerd creates the whole chain itself as
+				// root:root 0755, leaving the non-root agent unable to write into
+				// its own working directory; other runtimes may refuse to start
+				// the container. The entrypoint creates and enters podWorkDir
+				// itself, as the agent user, so it comes out owned correctly.
+				WorkingDir:      podWorkspaceRoot,
 				Command:         []string{"/bin/sh", "-c"},
 				Args:            []string{tmuxCmd},
 				Env:             env,

@@ -57,14 +57,20 @@ func TestApplyGraphRouteBinding_DirectSession_StampsSessionID(t *testing.T) {
 	}
 }
 
-func TestApplyGraphControlRouteBinding_StampsSessionName(t *testing.T) {
+func TestApplyGraphControlRouteBinding_UsesRoutedQueue(t *testing.T) {
 	step := &formula.RecipeStep{ID: "ctl", Metadata: map[string]string{}}
-	ApplyGraphControlRouteBinding(step, GraphRouteBinding{SessionName: "gascity--control-dispatcher"})
+	ApplyGraphControlRouteBinding(step, GraphRouteBinding{
+		QualifiedName: "gascity/control-dispatcher",
+		SessionName:   "gascity--control-dispatcher",
+	})
 
-	if got := step.Metadata["gc.session_name"]; got != "gascity--control-dispatcher" {
-		t.Errorf("control gc.session_name = %q, want the dispatcher session", got)
+	if got := step.Metadata["gc.session_name"]; got != "" {
+		t.Errorf("control gc.session_name = %q, want empty for routed control-dispatcher queue", got)
 	}
-	if step.Assignee != "gascity--control-dispatcher" {
-		t.Errorf("control Assignee = %q, want the dispatcher session", step.Assignee)
+	if step.Assignee != "" {
+		t.Errorf("control Assignee = %q, want empty routed control-dispatcher queue", step.Assignee)
+	}
+	if got := step.Metadata["gc.routed_to"]; got != "gascity/control-dispatcher" {
+		t.Errorf("control gc.routed_to = %q, want gascity/control-dispatcher", got)
 	}
 }

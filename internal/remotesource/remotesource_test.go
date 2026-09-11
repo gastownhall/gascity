@@ -26,9 +26,9 @@ func TestParseSourceForms(t *testing.T) {
 		},
 		{
 			name:     "no git suffix",
-			source:   "https://github.com/gastownhall/gascity//examples/dolt",
+			source:   "https://github.com/gastownhall/gascity//examples/bd/dolt",
 			cloneURL: "https://github.com/gastownhall/gascity",
-			subpath:  "examples/dolt",
+			subpath:  "examples/bd/dolt",
 		},
 		{
 			name:      "github tree",

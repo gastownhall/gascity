@@ -537,13 +537,13 @@ fi
 # ===========================================================================
 # Shared cleanup.sh fixture — staged into each city's packs/dolt/commands/
 # by the exec cp calls above. Mirrors the logic of
-# examples/dolt/commands/cleanup/run.sh; the only adaptation is sourcing
+# examples/bd/dolt/commands/cleanup/run.sh; the only adaptation is sourcing
 # runtime.sh from the test-pack's scripts/ layout (vs assets/scripts/).
 # ===========================================================================
 
 -- shared/cleanup.sh --
 #!/bin/sh
-# gc dolt cleanup — test fixture mirroring examples/dolt/commands/cleanup/run.sh
+# gc dolt cleanup — test fixture mirroring examples/bd/dolt/commands/cleanup/run.sh
 # (#706, #711, #1549).
 set -e
 
@@ -808,7 +808,7 @@ fi
 
 -- shared/sync.sh --
 #!/bin/sh
-# gc dolt sync — test fixture mirroring examples/dolt/commands/sync/run.sh.
+# gc dolt sync — test fixture mirroring examples/bd/dolt/commands/sync/run.sh.
 # Exercises routes_files() external-rig discovery (#711).
 set -e
 

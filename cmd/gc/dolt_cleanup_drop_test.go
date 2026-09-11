@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/doltauth"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -402,6 +404,10 @@ func TestProbeLiveSessions_TimesOut(t *testing.T) {
 		JSON:              true,
 		DoltClient:        client,
 		DiscoverProcesses: func() ([]DoltProcInfo, error) { return nil, nil },
+		// Non-nil empty slice prevents runReapStage from calling
+		// discoverActiveTestRoots (which invokes ps -ax and can take ~1-2 s on
+		// macOS, blowing past the wall-clock budget this test exercises).
+		ActiveTestRoots: []string{},
 	}
 
 	start := time.Now()
@@ -593,5 +599,59 @@ func TestProbeLiveSessions_RemovesFromToDrop(t *testing.T) {
 
 	if !equalStringSlice(client.dropped, []string{"testdb_b"}) {
 		t.Errorf("DropDatabase called with %v, want [testdb_b]", client.dropped)
+	}
+}
+
+// TestPSEnumerationTimeoutExceedsProcEnumerationTimeout verifies that the
+// ps-wide process list timeout is >= 30 s and strictly greater than
+// procEnumerationTimeout. ps -ax on a busy macOS machine can take 2–5 s;
+// it needs a much larger budget than the per-PID /proc reads that
+// procEnumerationTimeout guards.
+func TestPSEnumerationTimeoutExceedsProcEnumerationTimeout(t *testing.T) {
+	if psEnumerationTimeout < 30*time.Second {
+		t.Errorf("psEnumerationTimeout = %v, want >= 30s", psEnumerationTimeout)
+	}
+	if psEnumerationTimeout <= procEnumerationTimeout {
+		t.Errorf("psEnumerationTimeout = %v must exceed procEnumerationTimeout = %v",
+			psEnumerationTimeout, procEnumerationTimeout)
+	}
+}
+
+// TestOpenSQLCleanupDoltClientUsesResolvedAuth guards gascity#4123 at the
+// connection boundary: the DROP stage must pass the resolved external-Dolt
+// user to its SQL opener instead of hardcoding the managed-local root user.
+func TestOpenSQLCleanupDoltClientUsesResolvedAuth(t *testing.T) {
+	cityDir := t.TempDir()
+	var gotScope, gotFallback, gotResolveHost string
+	var gotResolvePort int
+	resolve := func(scopeRoot, fallbackUser, host string, port int) doltauth.Resolved {
+		gotScope = scopeRoot
+		gotFallback = fallbackUser
+		gotResolveHost = host
+		gotResolvePort = port
+		return doltauth.Resolved{User: "superlzy"}
+	}
+
+	var gotOpenHost, gotOpenPort, gotOpenUser string
+	stopAfterCapture := errors.New("stop after capturing SQL open")
+	open := func(host, port, user string) (*sql.DB, error) {
+		gotOpenHost = host
+		gotOpenPort = port
+		gotOpenUser = user
+		return nil, stopAfterCapture
+	}
+
+	client, err := openSQLCleanupDoltClient(cityDir, "127.0.0.1", "3306", resolve, open)
+	if !errors.Is(err, stopAfterCapture) {
+		t.Fatalf("openSQLCleanupDoltClient error = %v, want %v", err, stopAfterCapture)
+	}
+	if client != nil {
+		t.Fatalf("openSQLCleanupDoltClient client = %#v, want nil after open error", client)
+	}
+	if gotScope != cityDir || gotFallback != "root" || gotResolveHost != "127.0.0.1" || gotResolvePort != 3306 {
+		t.Fatalf("resolve args = (%q, %q, %q, %d), want (%q, root, 127.0.0.1, 3306)", gotScope, gotFallback, gotResolveHost, gotResolvePort, cityDir)
+	}
+	if gotOpenHost != "127.0.0.1" || gotOpenPort != "3306" || gotOpenUser != "superlzy" {
+		t.Fatalf("open args = (%q, %q, %q), want (127.0.0.1, 3306, superlzy)", gotOpenHost, gotOpenPort, gotOpenUser)
 	}
 }

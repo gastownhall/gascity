@@ -64,6 +64,45 @@ func TestApplyLoops_FixedCount(t *testing.T) {
 	}
 }
 
+// TestExpandLoopIterationPreservesOversizedDescriptionFileStubPath guards the
+// same failure class as gastownhall/gascity#4860 in the loop-body expansion
+// path: a body step's Description generated from an oversized
+// description_file (DescriptionFileResolvedPath set) embeds an
+// already-resolved absolute path. Blind loop-var substitution over the full
+// Description text must not touch that path even when the loop variable name
+// collides with placeholder text still present in the resolved path (e.g. an
+// asset shipped under a literal "{i}.md" filename) — mirroring expandStep's
+// identical guard for expansion templates.
+func TestExpandLoopIterationPreservesOversizedDescriptionFileStubPath(t *testing.T) {
+	step := &Step{
+		ID: "process",
+		Loop: &LoopSpec{
+			Body: []*Step{
+				{
+					ID:                          "task",
+					Title:                       "Process item {i}",
+					Description:                 "iteration {i}: stub referencing /assets/{i}.md",
+					DescriptionFileResolvedPath: "/assets/{i}.md",
+				},
+			},
+		},
+	}
+
+	result, err := expandLoopIteration(step, 1, map[string]string{"i": "42"})
+	if err != nil {
+		t.Fatalf("expandLoopIteration: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("expected 1 step, got %d", len(result))
+	}
+	if result[0].Description != "iteration 42: stub referencing /assets/{i}.md" {
+		t.Errorf("Description = %q, want non-path text substituted and only the resolved path preserved (gastownhall/gascity#4860)", result[0].Description)
+	}
+	if result[0].Title != "Process item 42" {
+		t.Errorf("Title = %q, want loop var substituted normally", result[0].Title)
+	}
+}
+
 func TestApplyLoopsPreservesRalphTimeout(t *testing.T) {
 	steps := []*Step{
 		{

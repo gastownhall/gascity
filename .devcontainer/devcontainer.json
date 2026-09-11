@@ -1,0 +1,56 @@
+{
+  "name": "Gas City",
+  "image": "mcr.microsoft.com/devcontainers/go:1.26-ubuntu-24.04",
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:2": {
+      "installZsh": true,
+      "configureZshAsDefaultShell": true,
+      "installOhMyZsh": false
+    },
+    "ghcr.io/devcontainers/features/git:1": {},
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  },
+  "runServices": [],
+  "overrideCommand": false,
+  "containerUser": "vscode",
+  "remoteUser": "vscode",
+  "updateRemoteUserUID": true,
+  "onCreateCommand": {
+    "deps-apt": "sudo apt-get update && sudo apt-get install -y tmux jq libicu-dev",
+    "fix-perms": "sudo mkdir -p /home/vscode/gc-cities && sudo chown vscode:vscode /home/vscode/gc-cities"
+  },
+  "postCreateCommand": {
+    "dolt": "set -a && . ./deps.env && set +a && .github/scripts/install-dolt-archive.sh \"$DOLT_VERSION\" && dolt version",
+    "bd": "set -a && . ./deps.env && set +a && .github/scripts/install-bd-archive.sh \"$BD_VERSION\" && bd version",
+    "gascity": "export PATH=\"$(go env GOPATH)/bin:$PATH\" && make setup && make install && export PATH=\"$(go env GOPATH)/bin:$PATH\" && gc version"
+  },
+  "postStartCommand": {
+    "verify": "command -v gc && command -v dolt && command -v bd && command -v tmux && command -v jq && command -v flock && gc version"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "golang.go",
+        "github.vscode-pull-request-github",
+        "EditorConfig.EditorConfig"
+      ],
+      "settings": {
+        "go.goroot": "/usr/local/go",
+        "go.gopath": "/home/vscode/go",
+        "terminal.integrated.defaultProfile.linux": "bash"
+      }
+    }
+  },
+  "remoteEnv": {
+    "PATH": "${containerEnv:PATH}:/home/vscode/go/bin",
+    "GC_BEADS": "dolt"
+  },
+  "mounts": [
+    "source=gc-cities,target=/home/vscode/gc-cities,type=volume"
+  ],
+  "portsAttributes": {},
+  "otherPortsAttributes": {},
+  "containerEnv": {
+    "DEBIAN_FRONTEND": "noninteractive"
+  }
+}

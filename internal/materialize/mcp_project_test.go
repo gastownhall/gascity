@@ -83,6 +83,14 @@ func TestBuildMCPProjectionTargetsAndStableHash(t *testing.T) {
 		t.Fatalf("opencode target = %q, want %q", got, want)
 	}
 
+	mimocode, err := BuildMCPProjection(MCPProviderMimoCode, "/work", nil)
+	if err != nil {
+		t.Fatalf("BuildMCPProjection(mimocode): %v", err)
+	}
+	if got, want := mimocode.Target, filepath.Join("/work", "mimocode.json"); got != want {
+		t.Fatalf("mimocode target = %q, want %q", got, want)
+	}
+
 	cursor, err := BuildMCPProjection(MCPProviderCursor, "/work", nil)
 	if err != nil {
 		t.Fatalf("BuildMCPProjection(cursor): %v", err)
@@ -608,6 +616,84 @@ func TestApplyMCPProjectionOpenCodePreservesNonMCPConfig(t *testing.T) {
 	}
 
 	empty, err := BuildMCPProjection(MCPProviderOpenCode, dir, nil)
+	if err != nil {
+		t.Fatalf("BuildMCPProjection(empty): %v", err)
+	}
+	if err := empty.Apply(fsys.OSFS{}); err != nil {
+		t.Fatalf("Apply(empty): %v", err)
+	}
+	data, err = os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile after empty apply: %v", err)
+	}
+	var after map[string]any
+	if err := json.Unmarshal(data, &after); err != nil {
+		t.Fatalf("Unmarshal after empty apply: %v", err)
+	}
+	if _, ok := after["mcp"]; ok {
+		t.Fatalf("mcp key remained after empty projection: %s", data)
+	}
+	if got := after["theme"]; got != "system" {
+		t.Fatalf("theme after empty apply = %v, want system", got)
+	}
+}
+
+// TestApplyMCPProjectionMimoCodeWritesOpenCodeShapedConfig verifies the
+// mimocode projection lands in root-level mimocode.json with the OpenCode
+// `mcp` document shape (mimo is an OpenCode fork; root-level mimocode.json
+// was verified live via `mimo mcp list`).
+func TestApplyMCPProjectionMimoCodeWritesOpenCodeShapedConfig(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "mimocode.json")
+	if err := os.WriteFile(target, []byte(`{"theme":"system"}`), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	proj, err := BuildMCPProjection(MCPProviderMimoCode, dir, []MCPServer{
+		{
+			Name:      "alpha",
+			Transport: MCPTransportStdio,
+			Command:   "uvx",
+			Args:      []string{"pkg"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildMCPProjection: %v", err)
+	}
+	if err := proj.Apply(fsys.OSFS{}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	var doc struct {
+		Theme string `json:"theme"`
+		MCP   map[string]struct {
+			Type    string   `json:"type"`
+			Command []string `json:"command"`
+			Enabled bool     `json:"enabled"`
+		} `json:"mcp"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if doc.Theme != "system" {
+		t.Fatalf("theme = %q, want system", doc.Theme)
+	}
+	alpha, ok := doc.MCP["alpha"]
+	if !ok {
+		t.Fatalf("mcp doc missing alpha entry: %s", data)
+	}
+	if alpha.Type != "local" || !alpha.Enabled {
+		t.Fatalf("alpha = %+v, want local/enabled", alpha)
+	}
+	if !reflect.DeepEqual(alpha.Command, []string{"uvx", "pkg"}) {
+		t.Fatalf("alpha.command = %#v, want uvx/pkg", alpha.Command)
+	}
+
+	empty, err := BuildMCPProjection(MCPProviderMimoCode, dir, nil)
 	if err != nil {
 		t.Fatalf("BuildMCPProjection(empty): %v", err)
 	}

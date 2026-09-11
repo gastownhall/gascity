@@ -65,36 +65,95 @@ func (s *convergenceScope) triggerName(prefix string) string {
 	return prefix + "-rig-" + s.rig
 }
 
-// initConvergenceHandler builds one convergence scope per available bead
-// store: the city/HQ store plus every bound rig store. Called once during
-// CityRuntime.run() initialization.
+// buildConvergenceScopes derives one convergence scope per available bead
+// store from the current config: the city/HQ store plus every bound rig
+// store. Returns nil when no city store is available yet, in which case
+// callers leave the existing scopes untouched.
 //
-// TODO(#2403): rigs added by a later config reload are not picked up until
-// the controller restarts — convScopes is not rebuilt on reload.
-func (cr *CityRuntime) initConvergenceHandler() {
+// The CITY scope takes the GRAPH-class store. A convergence root is graph class
+// — coordclass.Classify has an explicit typeConvergence arm — and so are the
+// wisps it pours. Minting them in the work store made the engine self-consistent
+// but left `gc storage migrate` to copy every root into the graph binding while
+// the engine kept reading and writing the retained work-store copies: two
+// divergent convergence ledgers, and every root minted after cutover a strand
+// the per-boot containment re-check names. That re-check is what made
+// maintainer-city boot-fatal at ~42 strands/hour (#5127's bug class).
+//
+// RIG scopes keep their rig WORK store. This is the same city-only rule
+// controlScopeTakesGraphClass (cmd_convoy_dispatch.go) already applies to
+// control beads, which are ClassGraph too, and it is forced: class routing is
+// city-keyed, so there is ONE graph binding per city. Routing rig scopes to it
+// would merge every rig's convergence loops into a single ledger keyed by
+// nothing, and the scopes would stop being scopes.
+func (cr *CityRuntime) buildConvergenceScopes() map[string]*convergenceScope {
 	cityStore := cr.cityBeadStore()
 	if cityStore == nil {
-		return
+		return nil
 	}
+	_, graphRelocated := graphClassBinding(cr.storageRoutes)
 	scopes := map[string]*convergenceScope{
-		"": cr.newConvergenceScope("", cityStore, cr.cityPath, cr.cfg.FormulaLayers.City),
+		"": cr.newConvergenceScope("", cr.graphBeadStore().Store, cr.cityPath, cr.cfg.FormulaLayers.City, graphRelocated),
 	}
 	rigStorePaths := cr.convergenceRigStorePaths()
 	for rigName, store := range cr.rigBeadStores() {
 		if store == nil {
 			continue
 		}
+		// relocated=false: a rig scope's store IS that rig's work ledger, so a
+		// work-class pour belongs there and must not be refused.
 		scopes[rigName] = cr.newConvergenceScope(
-			rigName, store, rigStorePaths[rigName], cr.cfg.FormulaLayers.SearchPaths(rigName))
+			rigName, store, rigStorePaths[rigName], cr.cfg.FormulaLayers.SearchPaths(rigName), false)
 	}
+	return scopes
+}
+
+// initConvergenceHandler builds one convergence scope per available bead
+// store: the city/HQ store plus every bound rig store. Called once during
+// CityRuntime.run() initialization; convergenceStartupReconcile then
+// reconciles and populates each scope's active index.
+func (cr *CityRuntime) initConvergenceHandler() {
+	scopes := cr.buildConvergenceScopes()
+	if scopes == nil {
+		return
+	}
+	cr.convScopesMu.Lock()
 	cr.convScopes = scopes
+	cr.convScopesMu.Unlock()
+}
+
+// rebuildConvergenceHandler re-derives all convergence scopes from the
+// current config after a reload, replacing the in-memory scope map
+// wholesale. Rigs added, removed, or rebound by the reload are honored
+// live instead of divergence being detected and punted to a controller
+// restart (the #2403 bug class). Each rebuilt scope is marked
+// needsStartupReconcile so the existing tick machinery
+// (convergenceTickScope) reconciles interrupted beads and repopulates its
+// active index on the next tick.
+func (cr *CityRuntime) rebuildConvergenceHandler() {
+	scopes := cr.buildConvergenceScopes()
+	if scopes == nil {
+		return
+	}
+	for _, scope := range scopes {
+		scope.needsStartupReconcile = true
+	}
+	cr.convScopesMu.Lock()
+	cr.convScopes = scopes
+	cr.convScopesMu.Unlock()
 }
 
 // newConvergenceScope wires a store adapter and convergence handler for a
 // single bead store. Each rig scope resolves formulas through that rig's
 // formula search paths so rig-local formulas are honored.
-func (cr *CityRuntime) newConvergenceScope(rig string, store beads.Store, storePath string, formulaSearchPaths []string) *convergenceScope {
-	adapter := newConvergenceStoreAdapter(store, formulaSearchPaths)
+//
+// storePath stays the scope's ROOT DIRECTORY (the city path, or the rig path)
+// even when store is a relocated class store: it is what the handler hands to
+// gate commands as their working directory, not a database locator. relocated
+// says whether store is a class binding the scope directory's own `bd` cannot
+// reach; the adapter needs it to refuse pouring work-class molecules into the
+// infrastructure binding.
+func (cr *CityRuntime) newConvergenceScope(rig string, store beads.Store, storePath string, formulaSearchPaths []string, relocated bool) *convergenceScope {
+	adapter := newConvergenceStoreAdapter(store, formulaSearchPaths, relocated)
 	return &convergenceScope{
 		rig:       rig,
 		storePath: storePath,
@@ -165,59 +224,30 @@ func unboundRigConvergenceError(rig string) error {
 }
 
 // convergenceScopeForRig returns the convergence scope for a rig name. An
-// empty rig selects the city/HQ scope. An unknown or unbound rig is an
-// error so a mistyped or unbound --rig fails loudly instead of silently
-// writing the bead to HQ (the defect tracked in issue #2357). The error
-// distinguishes a misspelled rig from a registered-but-unusable one.
+// empty rig selects the city/HQ scope. Config reloads rebuild convScopes
+// (rebuildConvergenceHandler), so a bound rig always has a live scope. An
+// unknown or unbound rig is an error so a mistyped or unbound --rig fails
+// loudly instead of silently writing the bead to HQ (the defect tracked in
+// issue #2357).
 func (cr *CityRuntime) convergenceScopeForRig(rig string) (*convergenceScope, error) {
 	if cr.convScopes == nil {
 		return nil, fmt.Errorf("convergence not available (no bead store)")
 	}
 	if scope, ok := cr.convScopes[rig]; ok {
-		if rig == "" {
-			return scope, nil
-		}
-		for _, candidate := range cr.convergenceRigSnapshot() {
-			if candidate.Name != rig {
-				continue
-			}
-			if strings.TrimSpace(candidate.Path) == "" {
-				return nil, fmt.Errorf("rig %q became unbound after config reload but convergence scopes were not rebuilt; restart the controller (#2403)", rig)
-			}
-			currentPath := resolveStoreScopeRoot(cr.cityPath, candidate.Path)
-			if currentPath != scope.storePath {
-				return nil, fmt.Errorf("rig %q bead store changed after config reload from %q to %q; restart the controller (#2403)", rig, scope.storePath, currentPath)
-			}
-			return scope, nil
-		}
-		return nil, fmt.Errorf("rig %q was removed from city config but convergence scopes were not rebuilt; restart the controller (#2403)", rig)
+		return scope, nil
 	}
+	// No scope for this rig: distinguish an unbound rig (#2357: fail loud
+	// instead of silently writing to HQ) from a misspelled or unregistered
+	// one.
 	for _, candidate := range cr.convergenceRigSnapshot() {
 		if candidate.Name == rig {
 			if strings.TrimSpace(candidate.Path) == "" {
 				return nil, unboundRigConvergenceError(rig)
 			}
-			return nil, fmt.Errorf("rig %q is bound but convergence scopes were not rebuilt after config reload; restart the controller (#2403)", rig)
+			return nil, fmt.Errorf("rig %q is registered but has no convergence scope", rig)
 		}
 	}
 	return nil, fmt.Errorf("rig %q is not registered in this city", rig)
-}
-
-func (cr *CityRuntime) validateConvergenceScopeCurrent(scope *convergenceScope) error {
-	if scope == nil {
-		return fmt.Errorf("convergence scope is nil")
-	}
-	current, err := cr.convergenceScopeForRig(scope.rig)
-	if err != nil {
-		return err
-	}
-	if current != scope {
-		if scope.rig == "" {
-			return fmt.Errorf("city/HQ convergence scope was rebuilt; skipping stale cached scope")
-		}
-		return fmt.Errorf("rig %q convergence scope was rebuilt; skipping stale cached scope", scope.rig)
-	}
-	return nil
 }
 
 // convergenceTick processes active convergence loops in every scope — the
@@ -240,11 +270,6 @@ func (cr *CityRuntime) convergenceTick(ctx context.Context) {
 // instead of O(all beads)).
 func (cr *CityRuntime) convergenceTickScope(ctx context.Context, scope *convergenceScope) {
 	if scope == nil || scope.adapter == nil {
-		return
-	}
-	if err := cr.validateConvergenceScopeCurrent(scope); err != nil {
-		fmt.Fprintf(cr.stderr, "%s: convergence%s: skipping stale scope: %v\n", //nolint:errcheck
-			cr.logPrefix, scope.logSuffix(), err)
 		return
 	}
 	if scope.needsStartupReconcile {
@@ -557,11 +582,6 @@ func (cr *CityRuntime) convergenceStartupReconcile(ctx context.Context) {
 // beads in one scope's store and then populates that scope's active index.
 func (cr *CityRuntime) convergenceStartupReconcileScope(ctx context.Context, scope *convergenceScope) {
 	if scope == nil {
-		return
-	}
-	if err := cr.validateConvergenceScopeCurrent(scope); err != nil {
-		fmt.Fprintf(cr.stderr, "%s: convergence reconcile%s: skipping stale scope: %v\n", //nolint:errcheck
-			cr.logPrefix, scope.logSuffix(), err)
 		return
 	}
 	// List() waits for CachingStore prime if not yet live, then serves

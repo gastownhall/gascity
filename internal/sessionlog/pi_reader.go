@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -167,12 +168,12 @@ func findPiSessionCandidatesIn(root, workDir string) []piSessionCandidate {
 		if !strings.HasSuffix(strings.ToLower(entry.Name()), ".jsonl") {
 			return nil
 		}
-		sessionID, cwd := piSessionHeader(path)
-		if cleanPiWorkDir(cwd) != workDir {
-			return nil
-		}
 		info, err := entry.Info()
 		if err != nil {
+			return nil
+		}
+		sessionID, cwd := cachedPiSessionHeader(path, info)
+		if cleanPiWorkDir(cwd) != workDir {
 			return nil
 		}
 		if sessionID == "" {
@@ -185,6 +186,71 @@ func findPiSessionCandidatesIn(root, workDir string) []piSessionCandidate {
 		return nil
 	}
 	return candidates
+}
+
+// piHeaderCacheEntry memoizes the parsed first-line header of a pi session
+// file. size+modTime form the stat signature: a rewritten transcript gets a new
+// signature and re-parses, while list/enrichment sweeps that revisit an
+// unchanged tree skip the per-file open+parse entirely.
+type piHeaderCacheEntry struct {
+	size      int64
+	modTimeNS int64
+	sessionID string
+	cwd       string
+}
+
+var (
+	piHeaderCacheMu sync.Mutex
+	piHeaderCache   = make(map[string]piHeaderCacheEntry)
+)
+
+// piHeaderCacheMaxEntries bounds the cache; deleted transcripts leave stale
+// keys behind, so past this size the map resets rather than growing forever.
+// The reset is an anti-leak cap, not a working-set-preserving eviction policy:
+// a tree with more live transcripts than this bound wipes mid-sweep and stops
+// caching. Real eviction is out of scope here and tracked in ga-gn1gf.
+const piHeaderCacheMaxEntries = 16384
+
+func cachedPiSessionHeader(path string, info os.FileInfo) (string, string) {
+	size := info.Size()
+	modTimeNS := info.ModTime().UnixNano()
+
+	piHeaderCacheMu.Lock()
+	entry, hit := piHeaderCache[path]
+	piHeaderCacheMu.Unlock()
+	if hit && entry.size == size && entry.modTimeNS == modTimeNS {
+		return entry.sessionID, entry.cwd
+	}
+
+	sessionID, cwd, read := piSessionHeader(path)
+	if !read {
+		// The read failed rather than finding no header. Storing that would
+		// freeze a transient fault into an authoritative "no transcript" answer
+		// until the file's size or mtime changes, which an idle transcript
+		// awaiting resume never does.
+		return sessionID, cwd
+	}
+	storePiHeaderCacheEntry(path, piHeaderCacheEntry{
+		size:      size,
+		modTimeNS: modTimeNS,
+		sessionID: sessionID,
+		cwd:       cwd,
+	}, piHeaderCacheMaxEntries)
+	return sessionID, cwd
+}
+
+// storePiHeaderCacheEntry records entry under path, resetting the cache first
+// when a new key would push it past maxEntries. A signature refresh of a key
+// already present cannot grow the map, so it never triggers the reset.
+// maxEntries is a parameter so tests can exercise the reset without creating
+// piHeaderCacheMaxEntries files.
+func storePiHeaderCacheEntry(path string, entry piHeaderCacheEntry, maxEntries int) {
+	piHeaderCacheMu.Lock()
+	defer piHeaderCacheMu.Unlock()
+	if _, exists := piHeaderCache[path]; !exists && len(piHeaderCache) >= maxEntries {
+		piHeaderCache = make(map[string]piHeaderCacheEntry)
+	}
+	piHeaderCache[path] = entry
 }
 
 func parsePiFileDetailed(path string) ([]piEntry, string, SessionDiagnostics, error) {
@@ -428,7 +494,7 @@ func piEntryTypeForRole(role string) string {
 		return "user"
 	case "toolresult":
 		return "tool_result"
-	case "custom", "bashexecution":
+	case "custom", "bashexecution", "pythonexecution":
 		return "system"
 	default:
 		return "assistant"
@@ -439,7 +505,8 @@ func piMessageRole(role string) string {
 	if strings.EqualFold(strings.TrimSpace(role), "toolResult") {
 		return "user"
 	}
-	if strings.EqualFold(strings.TrimSpace(role), "bashExecution") {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "bashexecution", "pythonexecution":
 		return "system"
 	}
 	return strings.ToLower(strings.TrimSpace(role))
@@ -463,12 +530,19 @@ func normalizePiContent(raw json.RawMessage) json.RawMessage {
 }
 
 func piMessageBlocks(message piMessage) []ContentBlock {
+	switch strings.ToLower(strings.TrimSpace(message.Role)) {
+	case "bashexecution":
+		return []ContentBlock{piExecutionResultBlock("bash", message)}
+	case "pythonexecution":
+		return []ContentBlock{piExecutionResultBlock("python", message)}
+	}
+
 	if strings.EqualFold(strings.TrimSpace(message.Role), "toolResult") {
 		return []ContentBlock{{
 			Type:      "tool_result",
 			ToolUseID: strings.TrimSpace(message.ToolCallID),
 			Name:      strings.TrimSpace(message.ToolName),
-			Content:   cloneRawJSON(message.Content),
+			Content:   piToolResultContent(message.Content),
 			IsError:   message.IsError,
 		}}
 	}
@@ -504,7 +578,7 @@ func piMessageBlocks(message piMessage) []ContentBlock {
 				Type:  "tool_use",
 				ID:    strings.TrimSpace(part.ID),
 				Name:  strings.TrimSpace(part.Name),
-				Input: cloneRawJSON(part.Arguments),
+				Input: piNeutralToolObject(part.Arguments),
 			})
 		case "interaction":
 			blocks = append(blocks, ContentBlock{
@@ -520,10 +594,160 @@ func piMessageBlocks(message piMessage) []ContentBlock {
 				Metadata:  cloneRawJSON(part.Metadata),
 			})
 		case "image":
-			blocks = append(blocks, ContentBlock{Type: "image"})
+			imageURL := strings.TrimSpace(part.ImageURL)
+			if strings.HasPrefix(strings.ToLower(imageURL), "data:") {
+				imageURL = ""
+			}
+			blocks = append(blocks, ContentBlock{
+				Type:     "image",
+				FilePath: strings.TrimSpace(part.FilePath),
+				ImageURL: imageURL,
+				MIMEType: strings.TrimSpace(firstNonEmpty(part.MIMEType, part.MediaType)),
+			})
 		}
 	}
 	return blocks
+}
+
+type piExecutionResultContent struct {
+	Command     string `json:"command,omitempty"`
+	Code        string `json:"code,omitempty"`
+	Output      string `json:"output,omitempty"`
+	ExitCode    *int   `json:"exit_code,omitempty"`
+	Interrupted bool   `json:"interrupted,omitempty"`
+	Canceled    bool   `json:"canceled,omitempty"`
+	Truncated   bool   `json:"truncated,omitempty"`
+}
+
+func piExecutionResultBlock(name string, message piMessage) ContentBlock {
+	content := piExecutionResultContent{
+		Command:     strings.TrimSpace(message.Command),
+		Code:        strings.TrimSpace(message.Code),
+		Output:      strings.TrimSpace(message.Output),
+		ExitCode:    message.ExitCode,
+		Interrupted: message.Canceled || message.Interrupted,
+		Canceled:    message.Canceled,
+		Truncated:   message.Truncated,
+	}
+	if content.Output == "" {
+		content.Output = structuredPiMessageText(message.Content)
+	}
+	isError := content.Interrupted
+	if message.ExitCode != nil && *message.ExitCode != 0 {
+		isError = true
+	}
+	return ContentBlock{
+		Type:    "tool_result",
+		Name:    name,
+		Content: mustMarshal(content),
+		IsError: isError,
+	}
+}
+
+func piToolResultContent(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	var blocks []ContentBlock
+	if err := json.Unmarshal(raw, &blocks); err == nil {
+		return mustMarshal(blocks)
+	}
+	return piNeutralToolObject(raw)
+}
+
+func piNeutralToolObject(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var encoded string
+	if err := json.Unmarshal(raw, &encoded); err == nil {
+		encoded = strings.TrimSpace(encoded)
+		if encoded != "" && json.Valid([]byte(encoded)) {
+			return piNeutralToolObject(json.RawMessage(encoded))
+		}
+		return mustMarshal(encoded)
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil || len(object) == 0 {
+		return cloneRawJSON(raw)
+	}
+	neutral := make(map[string]json.RawMessage, len(object))
+	for key, value := range object {
+		neutral[piNeutralToolKey(key)] = cloneRawJSON(value)
+	}
+	return mustMarshal(neutral)
+}
+
+func piNeutralToolKey(key string) string {
+	switch strings.TrimSpace(key) {
+	case "filePath", "filepath", "path", "file":
+		return "file_path"
+	case "oldString", "oldStr":
+		return "old_string"
+	case "newString", "newStr":
+		return "new_string"
+	case "exitCode":
+		return "exit_code"
+	case "durationMs":
+		return "duration_ms"
+	case "statusCode", "code":
+		return "status_code"
+	case "codeText", "statusText":
+		return "status_text"
+	case "numFiles":
+		return "num_files"
+	case "numResults":
+		return "num_results"
+	case "taskId", "backgroundTaskId", "bashId", "agentId":
+		return "task_id"
+	case "taskType", "taskKind", "subagentType", "agentType":
+		return "task_type"
+	case "taskStatus":
+		return "task_status"
+	case "oldTodos":
+		return "old_todos"
+	case "newTodos":
+		return "new_todos"
+	default:
+		return key
+	}
+}
+
+func structuredPiMessageText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return strings.TrimSpace(text)
+	}
+	var object struct {
+		Output  string `json:"output"`
+		Stdout  string `json:"stdout"`
+		Stderr  string `json:"stderr"`
+		Text    string `json:"text"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &object); err == nil {
+		return strings.Join(nonEmptyPiStrings(
+			object.Output,
+			object.Stdout,
+			object.Stderr,
+			object.Text,
+			object.Content,
+		), "\n")
+	}
+	return ""
+}
+
+func nonEmptyPiStrings(values ...string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func firstPiTimestamp(millis int64, fallback time.Time) time.Time {
@@ -545,17 +769,30 @@ func parsePiTimestamp(raw string) time.Time {
 	return ts
 }
 
-func piSessionHeader(path string) (string, string) {
+// piSessionHeader parses the session ID and cwd from a pi transcript's first
+// line. read reports whether the file was actually read: false means the read
+// failed (the open errored, or the scan errored, which includes a first line
+// past the buffer limit), so the header is simply unknown. true means the file
+// was read, so empty return values are content-derived (an empty file, an
+// unparsable or non-session first record, or a session record carrying no id
+// or cwd) rather than a read failure. Callers that memoize the result must
+// store only read results, so a transient failure is retried instead of frozen
+// as an authoritative absence.
+func piSessionHeader(path string) (sessionID, cwd string, read bool) {
 	f, err := os.Open(path)
 	if err != nil {
-		return "", ""
+		return "", "", false
 	}
 	defer f.Close() //nolint:errcheck // read-only
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	if !scanner.Scan() {
-		return "", ""
+		// Scan reports an empty file and a failed read the same way, so
+		// scanner.Err() is the only thing that separates them. A first line
+		// longer than the buffer above lands here as bufio.ErrTooLong and is
+		// re-parsed every sweep, exactly as it was before the cache existed.
+		return "", "", scanner.Err() == nil
 	}
 	var header struct {
 		Type string `json:"type"`
@@ -563,12 +800,12 @@ func piSessionHeader(path string) (string, string) {
 		CWD  string `json:"cwd"`
 	}
 	if err := json.Unmarshal(scanner.Bytes(), &header); err != nil {
-		return "", ""
+		return "", "", true
 	}
 	if header.Type != "session" {
-		return "", ""
+		return "", "", true
 	}
-	return strings.TrimSpace(header.ID), header.CWD
+	return strings.TrimSpace(header.ID), header.CWD, true
 }
 
 func cleanPiWorkDir(path string) string {
@@ -612,13 +849,20 @@ type piEntry struct {
 }
 
 type piMessage struct {
-	Role       string          `json:"role"`
-	Content    json.RawMessage `json:"content"`
-	Timestamp  int64           `json:"timestamp"`
-	StopReason string          `json:"stopReason"`
-	ToolCallID string          `json:"toolCallId"`
-	ToolName   string          `json:"toolName"`
-	IsError    bool            `json:"isError"`
+	Role        string          `json:"role"`
+	Content     json.RawMessage `json:"content"`
+	Timestamp   int64           `json:"timestamp"`
+	StopReason  string          `json:"stopReason"`
+	ToolCallID  string          `json:"toolCallId"`
+	ToolName    string          `json:"toolName"`
+	IsError     bool            `json:"isError"`
+	Command     string          `json:"command"`
+	Code        string          `json:"code"`
+	Output      string          `json:"output"`
+	ExitCode    *int            `json:"exitCode"`
+	Canceled    bool            `json:"canceled"`
+	Interrupted bool            `json:"interrupted"`
+	Truncated   bool            `json:"truncated"`
 }
 
 type piContentBlock struct {
@@ -635,4 +879,8 @@ type piContentBlock struct {
 	Metadata  json.RawMessage `json:"metadata"`
 	Name      string          `json:"name"`
 	Arguments json.RawMessage `json:"arguments"`
+	FilePath  string          `json:"file_path"`
+	ImageURL  string          `json:"image_url"`
+	MIMEType  string          `json:"mime_type"`
+	MediaType string          `json:"media_type"`
 }

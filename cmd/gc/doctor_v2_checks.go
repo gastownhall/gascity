@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/migrate"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 func registerV2DeprecationChecks(d *doctor.Doctor) {
@@ -283,7 +284,16 @@ func rewriteWithoutDefaultFormulasDir(path string) error {
 	if !changed {
 		return fmt.Errorf("could not locate [formulas].dir assignment")
 	}
-	return fsys.WriteFileIfChangedAtomic(fsys.OSFS{}, path, []byte(rendered), 0o644)
+	// Resolve-only, like the rollback snapshots: the rewrite is a lossless
+	// textual strip of one declaration, so the key-loss guard in
+	// config.ResolveCityRewritePath would falsely refuse it whenever
+	// unrelated unknown keys are present. Writing at the unresolved path
+	// would replace a symlinked config with a regular file.
+	writePath, err := fsys.ResolveSymlinks(fsys.OSFS{}, path)
+	if err != nil {
+		return err
+	}
+	return fsys.WriteFileIfChangedAtomic(fsys.OSFS{}, writePath, []byte(rendered), 0o644)
 }
 
 func stripDefaultFormulasDirDeclaration(source string) (string, bool) {
@@ -429,13 +439,19 @@ func (v2ImportFormatCheck) Fix(ctx *doctor.CheckContext) error {
 func (v2ImportFormatCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 	cityTomlPath := filepath.Join(ctx.CityPath, "city.toml")
 	cfg, ok := parseCityConfig(cityTomlPath)
-	if !ok || len(cfg.Workspace.LegacyIncludes()) == 0 {
+	var legacyIncludes []string
+	if ok {
+		// Canonical builtin system-pack includes are the supported V2 form
+		// (written by gc init); only other entries are legacy PackV1.
+		legacyIncludes = config.NonBuiltinWorkspaceIncludes(cfg.Workspace.LegacyIncludes())
+	}
+	if !ok || len(legacyIncludes) == 0 {
 		return okCheck("v2-import-format", "workspace.includes already migrated")
 	}
 	return errorCheck("v2-import-format",
 		"unsupported PackV1 workspace.includes found; migrate this city to [imports] before gc can load it",
 		"run `gc doctor --fix` to replace workspace.includes with [imports.<binding>] entries",
-		doctorKeyDetails(cityTomlPath, "workspace", "includes", "workspace.includes", cfg.Workspace.LegacyIncludes()))
+		doctorKeyDetails(cityTomlPath, "workspace", "includes", "workspace.includes", legacyIncludes))
 }
 
 type v2DefaultRigImportFormatCheck struct{}
@@ -886,25 +902,7 @@ func absDoctorPathKey(path string) string {
 }
 
 func doctorPathWithinCity(cityPath, path string) bool {
-	cityAbs := absDoctorPathKey(cityPath)
-	pathAbs := absDoctorPathKey(path)
-	if !cleanedPathWithin(cityAbs, pathAbs) {
-		return false
-	}
-	cityReal, cityErr := filepath.EvalSymlinks(cityAbs)
-	pathReal, pathErr := filepath.EvalSymlinks(pathAbs)
-	if cityErr == nil && pathErr == nil {
-		return cleanedPathWithin(filepath.Clean(cityReal), filepath.Clean(pathReal))
-	}
-	return true
-}
-
-func cleanedPathWithin(base, path string) bool {
-	rel, err := filepath.Rel(base, path)
-	if err != nil {
-		return false
-	}
-	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && !filepath.IsAbs(rel))
+	return pathutil.PathWithin(cityPath, path)
 }
 
 func scanLegacyOrderRoot(root legacyOrderRoot) []string {
@@ -1163,6 +1161,14 @@ func (v2WorkspaceNameCheck) Fix(ctx *doctor.CheckContext) error {
 		prefix = rawPrefix
 	}
 
+	// Resolve where the rewrite must land before touching anything:
+	// city.toml may be a symlink that the rename must write through, and
+	// the rewrite is refused outright if it would drop unrecognized keys
+	// (ga-lurp5d).
+	writePath, err := config.ResolveCityRewritePath(fsys.OSFS{}, filepath.Join(ctx.CityPath, "city.toml"))
+	if err != nil {
+		return err
+	}
 	// Write the site binding first. If the city.toml rewrite fails
 	// afterwards, runtime identity remains stable and `gc doctor` will
 	// continue warning about the still-present legacy fields rather than
@@ -1176,7 +1182,7 @@ func (v2WorkspaceNameCheck) Fix(ctx *doctor.CheckContext) error {
 	if err != nil {
 		return err
 	}
-	return fsys.WriteFileIfChangedAtomic(fsys.OSFS{}, filepath.Join(ctx.CityPath, "city.toml"), content, 0o644)
+	return fsys.WriteFileIfChangedAtomic(fsys.OSFS{}, writePath, content, 0o644)
 }
 
 func (v2WorkspaceNameCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
@@ -1250,9 +1256,8 @@ func errorCheck(name, message, hint string, details []string) *doctor.CheckResul
 // city that has already been migrated (it returns an empty change set).
 //
 // migrate.Apply can return warnings about behavior-affecting fields it had
-// to drop (e.g. legacy [[agent]] entries with fallback = true — the
-// fallback field has no v2 counterpart and shadowing must be reviewed by
-// hand). doctor --fix must not silently swallow those, otherwise the next
+// to drop (e.g. a legacy [formulas].dir override that has no v2
+// counterpart). doctor --fix must not silently swallow those, otherwise the next
 // gc doctor run reports a green check and the manual follow-up is lost
 // forever. The warnings are emitted to warnSink so Doctor.Run callers see
 // them in the same captured output stream as the check results.

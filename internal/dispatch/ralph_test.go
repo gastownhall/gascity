@@ -149,6 +149,105 @@ func TestResolveRalphCheckMoleculePaths_UnsafeRootID(t *testing.T) {
 	}
 }
 
+// TestRunRalphCheckPackRelativeCheckPathWorkDirFallback covers
+// gastownhall/gascity#3008: a pack-relative gc.check_path
+// (e.g. assets/<pack>/scripts/check.sh) names a pack-shipped script that lives
+// under the store/city root, not the per-task gc.work_dir worktree. When the
+// control bead carries a work_dir pointing at a worktree that lacks the pack
+// tree, the relative join <work_dir>/assets/... does not exist and the check
+// was control-quarantined. The fallback resolves the relative path against the
+// store root instead, so the gate is evaluated.
+func TestRunRalphCheckPackRelativeCheckPathWorkDirFallback(t *testing.T) {
+	cityPath := t.TempDir()
+	// Pack-shipped check script lives under the city/store root.
+	checkRel := filepath.Join("assets", "demo-pack", "scripts", "check.sh")
+	storeScript := filepath.Join(cityPath, checkRel)
+	if err := os.MkdirAll(filepath.Dir(storeScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(storeScript, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Per-task worktree under the city root that does NOT contain the pack tree.
+	workDir := filepath.Join(cityPath, "worktrees", "task1")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	store := beads.NewMemStore()
+	root := mustCreate(t, store, beads.Bead{Title: "workflow", Metadata: map[string]string{"gc.kind": "workflow"}})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "review loop",
+		Metadata: map[string]string{
+			"gc.kind":         "ralph",
+			"gc.root_bead_id": root.ID,
+			"gc.check_path":   filepath.ToSlash(checkRel),
+			"gc.work_dir":     workDir,
+			"gc.max_attempts": "3",
+		},
+	})
+	subject := mustCreate(t, store, beads.Bead{
+		Title:    "review loop iteration 1",
+		Metadata: map[string]string{"gc.kind": "scope", "gc.root_bead_id": root.ID},
+	})
+
+	result, err := runRalphCheck(store, control, subject, 1, ProcessOptions{CityPath: cityPath})
+	if err != nil {
+		t.Fatalf("runRalphCheck: %v (the pack-relative check_path should fall back to the store root)", err)
+	}
+	if result.Outcome != convergence.GatePass {
+		t.Fatalf("Outcome = %q (stderr=%q), want pass via store-root fallback", result.Outcome, result.Stderr)
+	}
+}
+
+// TestRunRalphCheckWorkDirRelativeCheckPathKeepsPrecedence guards that the
+// #3008 fallback only fires when the work_dir join is missing: a check_path
+// that DOES exist under the worktree must still resolve against the worktree,
+// not the store root.
+func TestRunRalphCheckWorkDirRelativeCheckPathKeepsPrecedence(t *testing.T) {
+	cityPath := t.TempDir()
+	checkRel := "check.sh"
+	// Same relative name exists in both the store root and the worktree; the
+	// worktree copy must win. Distinguish them by exit code.
+	if err := os.WriteFile(filepath.Join(cityPath, checkRel), []byte("#!/bin/sh\nexit 7\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	workDir := filepath.Join(cityPath, "worktrees", "task1")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, checkRel), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	store := beads.NewMemStore()
+	root := mustCreate(t, store, beads.Bead{Title: "workflow", Metadata: map[string]string{"gc.kind": "workflow"}})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "review loop",
+		Metadata: map[string]string{
+			"gc.kind":         "ralph",
+			"gc.root_bead_id": root.ID,
+			"gc.check_path":   checkRel,
+			"gc.work_dir":     workDir,
+			"gc.max_attempts": "3",
+		},
+	})
+	subject := mustCreate(t, store, beads.Bead{
+		Title:    "review loop iteration 1",
+		Metadata: map[string]string{"gc.kind": "scope", "gc.root_bead_id": root.ID},
+	})
+
+	result, err := runRalphCheck(store, control, subject, 1, ProcessOptions{CityPath: cityPath})
+	if err != nil {
+		t.Fatalf("runRalphCheck: %v", err)
+	}
+	// The worktree copy exits 0 (pass); the store copy exits 7 (fail). A pass
+	// proves the worktree script ran, i.e. the fallback did not shadow it.
+	if result.Outcome != convergence.GatePass {
+		t.Fatalf("Outcome = %q (stderr=%q), want pass from the worktree-relative script", result.Outcome, result.Stderr)
+	}
+}
+
 // TestRunRalphCheckEnvTracksSubject pins gastownhall/gascity#2558 review
 // feedback: GC_BEAD_ID and the molecule/artifact dirs must describe the SAME
 // bead. The per-attempt agent runs on the subject (attempt) bead and writes
@@ -200,5 +299,114 @@ func TestRunRalphCheckEnvTracksSubject(t *testing.T) {
 	}
 	if strings.Contains(result.Stdout, "artifacts/"+control.ID) {
 		t.Errorf("artifact dir wrongly keyed by control bead %q; got %q", control.ID, result.Stdout)
+	}
+}
+
+// TestProcessRalphCheckHardSubjectFailureTerminatesWithoutRetry proves FIX 1:
+// when the ralph subject closed with gc.failure_class=hard, the loop stops in a
+// single attempt (Action "hard-fail") instead of cloning attempts up to
+// gc.max_attempts (the treadmill that abort_scope-killed molecules).
+func TestProcessRalphCheckHardSubjectFailureTerminatesWithoutRetry(t *testing.T) {
+	t.Parallel()
+
+	cityPath := t.TempDir()
+	// A passing check script proves termination is driven by the subject's
+	// hard-class failure alone; the check never gets a chance to pass.
+	checkPath := writeCheckScript(t, cityPath, "check.sh", "#!/bin/bash\nexit 0\n")
+	store, logical, run1, check1 := newSimpleRalphLoop(t, "implement", checkPath, 5)
+
+	if err := store.SetMetadataBatch(run1.ID, map[string]string{
+		"gc.outcome":        "fail",
+		"gc.failure_class":  "hard",
+		"gc.failure_reason": "external_live_head_changed",
+	}); err != nil {
+		t.Fatalf("stamp hard subject failure: %v", err)
+	}
+	if err := store.Close(run1.ID); err != nil {
+		t.Fatalf("close run1: %v", err)
+	}
+
+	result, err := ProcessControl(store, check1, ProcessOptions{CityPath: cityPath})
+	if err != nil {
+		t.Fatalf("ProcessControl(check1): %v", err)
+	}
+	if !result.Processed || result.Action != "hard-fail" {
+		t.Fatalf("result = %+v, want processed hard-fail", result)
+	}
+
+	logicalAfter := mustGetBead(t, store, logical.ID)
+	if logicalAfter.Status != "closed" || logicalAfter.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("logical = status %q outcome %q, want closed/fail", logicalAfter.Status, logicalAfter.Metadata["gc.outcome"])
+	}
+	if logicalAfter.Metadata["gc.failure_class"] != "hard" {
+		t.Fatalf("logical gc.failure_class = %q, want hard", logicalAfter.Metadata["gc.failure_class"])
+	}
+	if logicalAfter.Metadata["gc.failure_reason"] != "external_live_head_changed" {
+		t.Fatalf("logical gc.failure_reason = %q, want external_live_head_changed", logicalAfter.Metadata["gc.failure_reason"])
+	}
+
+	checkAfter := mustGetBead(t, store, check1.ID)
+	if checkAfter.Status != "closed" || checkAfter.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("check = status %q outcome %q, want closed/fail", checkAfter.Status, checkAfter.Metadata["gc.outcome"])
+	}
+
+	rootID := run1.Metadata["gc.root_bead_id"]
+	all, err := beads.DirectMembers(store, rootID)
+	if err != nil {
+		t.Fatalf("beads.DirectMembers: %v", err)
+	}
+	for _, bead := range all {
+		if bead.Metadata["gc.attempt"] == "2" {
+			t.Fatalf("hard-fail must not clone another attempt; found %s (kind %q)", bead.ID, bead.Metadata["gc.kind"])
+		}
+	}
+}
+
+// TestProcessRalphCheckSoftSubjectFailureStillRetries is the FIX 1 regression
+// guard: a non-hard (repairable) subject failure must still clone up to
+// gc.max_attempts. Crucially an empty gc.failure_class stays repairable here,
+// unlike retry-eval which maps empty to hard.
+func TestProcessRalphCheckSoftSubjectFailureStillRetries(t *testing.T) {
+	t.Parallel()
+
+	cityPath := t.TempDir()
+	checkPath := writeCheckScript(t, cityPath, "check.sh", "#!/bin/bash\nexit 1\n")
+	store, logical, run1, check1 := newSimpleRalphLoop(t, "implement", checkPath, 5)
+
+	// gc.outcome=fail with no gc.failure_class is the ordinary repairable case.
+	if err := store.SetMetadata(run1.ID, "gc.outcome", "fail"); err != nil {
+		t.Fatalf("stamp soft subject failure: %v", err)
+	}
+	if err := store.Close(run1.ID); err != nil {
+		t.Fatalf("close run1: %v", err)
+	}
+
+	result, err := ProcessControl(store, check1, ProcessOptions{CityPath: cityPath})
+	if err != nil {
+		t.Fatalf("ProcessControl(check1): %v", err)
+	}
+	if !result.Processed || result.Action != "retry" {
+		t.Fatalf("result = %+v, want processed retry", result)
+	}
+
+	logicalAfter := mustGetBead(t, store, logical.ID)
+	if logicalAfter.Status != "open" {
+		t.Fatalf("logical status = %q, want open (loop continues)", logicalAfter.Status)
+	}
+
+	rootID := run1.Metadata["gc.root_bead_id"]
+	all, err := beads.DirectMembers(store, rootID)
+	if err != nil {
+		t.Fatalf("beads.DirectMembers: %v", err)
+	}
+	sawAttempt2 := false
+	for _, bead := range all {
+		if bead.Metadata["gc.attempt"] == "2" {
+			sawAttempt2 = true
+			break
+		}
+	}
+	if !sawAttempt2 {
+		t.Fatalf("soft failure must clone attempt 2; none found under root %s", rootID)
 	}
 }

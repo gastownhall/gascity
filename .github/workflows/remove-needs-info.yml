@@ -43,11 +43,23 @@ jobs:
 
             for (const label of labels) {
               if (!currentNames.includes(label)) continue;
-              await github.rest.issues.removeLabel({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: number,
-                name: label,
-              });
-              console.log(`Removed '${label}' from #${number}`);
+              // Idempotent removal: concurrent triggers can race to remove the
+              // same label, leaving the loser with a 404 "Label does not
+              // exist". Treat an already-absent label as success rather than
+              // failing the job.
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: number,
+                  name: label,
+                });
+                console.log(`Removed '${label}' from #${number}`);
+              } catch (err) {
+                if (err.status === 404) {
+                  console.log(`'${label}' already absent from #${number} (concurrent removal); nothing to do`);
+                  continue;
+                }
+                throw err;
+              }
             }

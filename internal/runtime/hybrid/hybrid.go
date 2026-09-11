@@ -23,6 +23,9 @@ var (
 	_ runtime.InteractionProvider           = (*Provider)(nil)
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
+	_ runtime.RelaunchProvider              = (*Provider)(nil)
+	_ runtime.LivenessObserver              = (*Provider)(nil)
+	_ runtime.LivenessObserverWithError     = (*Provider)(nil)
 )
 
 // New creates a hybrid provider. isRemote returns true for sessions
@@ -83,6 +86,20 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 	return p.route(name).ProcessAlive(name, processNames)
 }
 
+// ObserveLiveness delegates to the routed backend through runtime.ObserveLiveness
+// so the backend's native LivenessObserver fast-path is preserved (e.g. herdr's
+// agent-status liveness) instead of collapsing to the generic
+// IsRunning+ProcessAlive fold.
+func (p *Provider) ObserveLiveness(name string, processNames []string) runtime.Liveness {
+	return runtime.ObserveLiveness(p.route(name), name, processNames)
+}
+
+// ObserveLivenessWithError forwards the optional error-bearing observation to
+// the selected backend without collapsing uncertainty into false.
+func (p *Provider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	return runtime.ObserveLivenessWithError(p.route(name), name, processNames)
+}
+
 // Nudge delegates to the routed backend.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	return p.route(name).Nudge(name, content)
@@ -113,6 +130,16 @@ func (p *Provider) ResetInterruptedTurn(ctx context.Context, name string) error 
 		return rp.ResetInterruptedTurn(ctx, name)
 	}
 	return runtime.ErrInteractionUnsupported
+}
+
+// Relaunch forwards a warm-box agent relaunch to the routed backend when it
+// supports one, so the reconciler's RelaunchProvider type-assert is not masked
+// by the hybrid router.
+func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
+	if rp, ok := p.route(name).(runtime.RelaunchProvider); ok {
+		return rp.Relaunch(ctx, name, cfg)
+	}
+	return runtime.ErrRelaunchUnsupported
 }
 
 // WaitForInterruptBoundary delegates to the routed backend when it can confirm
@@ -200,12 +227,15 @@ func (p *Provider) RunLive(name string, cfg runtime.Config) error {
 
 // Capabilities returns the intersection of both backends' capabilities.
 // A capability is reported only if both local and remote support it.
+// NeedsClaimBackstop is a need, not an ability, so it unions instead: if
+// either backend requires the stalled-claim backstop, the composite does too.
 func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 	lc := p.local.Capabilities()
 	rc := p.remote.Capabilities()
 	return runtime.ProviderCapabilities{
 		CanReportAttachment: lc.CanReportAttachment && rc.CanReportAttachment,
 		CanReportActivity:   lc.CanReportActivity && rc.CanReportActivity,
+		NeedsClaimBackstop:  lc.NeedsClaimBackstop || rc.NeedsClaimBackstop,
 	}
 }
 

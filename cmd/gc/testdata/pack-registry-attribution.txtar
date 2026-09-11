@@ -1,0 +1,56 @@
+# Pack registry attribution is visible through the real CLI entrypoint.
+#
+# Tests:
+# - search text shows effective tier and publisher
+# - show text labels effective tier and publisher
+# - search and show JSON expose the same normalized fields
+# - malformed attribution downgrades one pack without rejecting the catalog
+
+exec gc pack registry add local $WORK/catalog
+stdout 'Added pack registry "local".'
+
+exec gc pack registry search --registry local --all
+stdout 'Tier +Publisher'
+stdout 'maintained.*maintained.*Gas City'
+stdout 'malformed.*community.*Unknown publisher'
+
+exec gc pack registry show local:maintained
+stdout '^Tier:        maintained$'
+stdout '^Publisher:   Gas City$'
+
+exec gc pack registry show local:malformed
+stdout '^Tier:        community$'
+stdout '^Publisher:   Unknown publisher$'
+
+exec gc pack registry search --registry local --all --json
+stdout '"name":"maintained","tier":"maintained","publisher":"Gas City"'
+stdout '"name":"malformed","tier":"community","publisher":"Unknown publisher"'
+
+exec gc pack registry show local:maintained --json
+stdout '"name":"maintained"'
+stdout '"tier":"maintained"'
+stdout '"publisher":"Gas City"'
+
+exec gc pack registry show local:malformed --json
+stdout '"name":"malformed"'
+stdout '"tier":"community"'
+stdout '"publisher":"Unknown publisher"'
+
+-- catalog/registry.toml --
+schema = 1
+
+[[pack]]
+name = "maintained"
+tier = "maintained"
+publisher = "Gas City"
+description = "Maintained pack."
+source = "https://packages.example/maintained.git"
+source_kind = "git"
+
+[[pack]]
+name = "malformed"
+tier = "maintained"
+publisher = 42
+description = "Malformed attribution."
+source = "https://packages.example/malformed.git"
+source_kind = "git"

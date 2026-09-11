@@ -1,6 +1,6 @@
 #!/bin/sh
 # Unit test for gain_drift_is_additive_only (Option A preservation proof, #2846).
-# Lib under test: examples/dolt/assets/scripts/compact-gain-drift-proof.sh
+# Lib under test: examples/bd/dolt/assets/scripts/compact-gain-drift-proof.sh
 #
 # Stubs the run.sh-provided dependencies (query_single_cell, valid_table_name)
 # so the additive-only classification is exercised without a live Dolt server.
@@ -9,7 +9,7 @@
 set -u
 
 HERE=$(unset CDPATH; cd -- "$(dirname "$0")" && pwd)
-LIB="$HERE/../../examples/dolt/assets/scripts/compact-gain-drift-proof.sh"
+LIB="$HERE/../../examples/bd/dolt/assets/scripts/compact-gain-drift-proof.sh"
 [ -f "$LIB" ] || { echo "FAIL: lib not found at $LIB"; exit 1; }
 
 # --- stubs for run.sh-provided helpers --------------------------------------

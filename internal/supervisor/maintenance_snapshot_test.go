@@ -35,6 +35,29 @@ type fakeDoltBackupRunner struct {
 	calls      *[]string
 }
 
+func tempDirWithRetryCleanup(t *testing.T, pattern string) string {
+	t.Helper()
+
+	dir, err := os.MkdirTemp("", pattern)
+	if err != nil {
+		t.Fatalf("MkdirTemp(%q): %v", pattern, err)
+	}
+	t.Cleanup(func() {
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			err := os.RemoveAll(dir)
+			if err == nil || os.IsNotExist(err) {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("cleanup temp dir %s: %v", dir, err)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	})
+	return dir
+}
+
 func (f *fakeDoltBackupRunner) Add(_ context.Context, name, url string) error {
 	f.addCalls++
 	if f.calls != nil {
@@ -413,7 +436,7 @@ func TestRunSnapshot_Integration_RealDoltRoundTrip(t *testing.T) {
 		t.Skip("dolt not installed; skipping")
 	}
 
-	cityPath := t.TempDir()
+	cityPath := tempDirWithRetryCleanup(t, "gc-snapshot-city-*")
 	dbDir := filepath.Join(cityPath, ".beads", "dolt")
 	if err := os.MkdirAll(dbDir, 0o755); err != nil {
 		t.Fatalf("mkdir dbDir: %v", err)
@@ -421,7 +444,7 @@ func TestRunSnapshot_Integration_RealDoltRoundTrip(t *testing.T) {
 
 	// Isolate dolt's global config under a temp DOLT_ROOT_PATH so the
 	// test does not depend on or pollute the developer's identity.
-	doltRoot := t.TempDir()
+	doltRoot := tempDirWithRetryCleanup(t, "gc-snapshot-dolt-root-*")
 	if err := os.MkdirAll(filepath.Join(doltRoot, ".dolt"), 0o755); err != nil {
 		t.Fatalf("mkdir dolt root: %v", err)
 	}
@@ -474,7 +497,7 @@ func TestRunSnapshot_Integration_RealDoltRoundTrip(t *testing.T) {
 
 	// Restore the snapshot to a second throwaway directory and verify
 	// the table survived the round trip.
-	restoreRoot := t.TempDir()
+	restoreRoot := tempDirWithRetryCleanup(t, "gc-snapshot-restore-*")
 	restoredDB := filepath.Join(restoreRoot, "restored")
 	restoreCtx, cancelRestore := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancelRestore()

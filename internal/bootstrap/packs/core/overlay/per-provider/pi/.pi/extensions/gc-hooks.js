@@ -16,18 +16,29 @@ const { execFileSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const GC_PI_HOOK_VERSION = 4;
+const GC_PI_HOOK_VERSION = 9;
 const PATH_PREFIX =
   `/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`;
 let mirrorTempCounter = 0;
+// `gc prime --hook` writes the session's startup context to stdout. pi has no
+// session_start hook surface that can inject into the model's context, so the
+// SessionStart output is parked here and drained into the system prompt by the
+// next before_agent_start. Dropping it would consume auto-handoff mail (gc
+// archives it once the write succeeds) without ever delivering it.
+let pendingPrimeContext = "";
 
-function run(args, cwd) {
+function run(args, cwd, extraEnv = {}) {
   try {
     return execFileSync("gc", args, {
       cwd: cwd || process.cwd(),
       encoding: "utf-8",
       timeout: 30000,
-      env: { ...process.env, PATH: PATH_PREFIX + (process.env.PATH || "") },
+      stdio: ["ignore", "pipe", "inherit"],
+      env: {
+        ...process.env,
+        ...extraEnv,
+        PATH: PATH_PREFIX + (process.env.PATH || ""),
+      },
     }).trim();
   } catch (err) {
     logRunFailure(args, cwd, err);
@@ -78,6 +89,28 @@ function sessionManagerHeader(manager, cwd) {
     id: manager.getSessionId && manager.getSessionId(),
     timestamp: new Date().toISOString(),
     cwd,
+  };
+}
+
+function providerSessionEnv(ctx) {
+  const sessionID = ctx?.sessionManager?.getSessionId?.() || "";
+  const env = { GC_PROVIDER_SESSION_ID_REQUIRED: "pi" };
+  if (!sessionID) {
+    return env;
+  }
+  env.GC_PROVIDER_SESSION_ID = String(sessionID);
+  return env;
+}
+
+// gc identifies a managed hook invocation by GC_MANAGED_SESSION_HOOK and
+// routes on GC_HOOK_EVENT_NAME, exactly as the claude settings.json hook does.
+// Without both, `gc prime --hook` cannot tell that gc already delivered the
+// startup prompt inline and re-emits the entire prompt on top of it.
+function hookEnv(ctx, eventName) {
+  return {
+    ...providerSessionEnv(ctx),
+    GC_MANAGED_SESSION_HOOK: "1",
+    GC_HOOK_EVENT_NAME: eventName,
   };
 }
 
@@ -137,21 +170,23 @@ function appendSystemPrompt(systemPrompt, additions) {
 
 module.exports = function gascityPiExtension(pi) {
   pi.on("session_start", (_event, ctx) => {
-    run(["prime", "--hook"], ctx.cwd);
+    pendingPrimeContext = run(["prime", "--hook"], ctx.cwd, hookEnv(ctx, "SessionStart"));
     mirrorTranscript(ctx);
   });
 
   pi.on("session_compact", (_event, ctx) => {
-    run(["prime", "--hook"], ctx.cwd);
+    run(["prime", "--hook"], ctx.cwd, hookEnv(ctx, "PreCompact"));
     run(["handoff", "--auto", "context cycle"], ctx.cwd);
     mirrorTranscript(ctx);
   });
 
   pi.on("before_agent_start", (event, ctx) => {
+    const prime = pendingPrimeContext;
+    pendingPrimeContext = "";
     const work = run(["hook", "--inject"], ctx.cwd);
     const nudges = run(["nudge", "drain", "--inject"], ctx.cwd);
     const mail = run(["mail", "check", "--inject"], ctx.cwd);
-    const systemPrompt = appendSystemPrompt(event.systemPrompt, [work, nudges, mail]);
+    const systemPrompt = appendSystemPrompt(event.systemPrompt, [prime, work, nudges, mail]);
     if (systemPrompt !== event.systemPrompt) {
       return { systemPrompt };
     }

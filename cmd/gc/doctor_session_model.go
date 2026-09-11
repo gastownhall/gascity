@@ -2,8 +2,10 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
@@ -33,7 +35,7 @@ func (c *sessionModelDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 		r.Message = fmt.Sprintf("session model diagnostics skipped: %v", err)
 		return r
 	}
-	all, err := loadSessionModelDoctorBeads(store)
+	all, err := loadSessionModelDoctorBeads(store, cliSessionStore(store, c.cfg, c.cityPath))
 	if err != nil {
 		r.Status = doctor.StatusWarning
 		r.Message = fmt.Sprintf("session model diagnostics skipped: %v", err)
@@ -93,7 +95,7 @@ func (c *sessionModelDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 				}
 			}
 		}
-		if routedTo := strings.TrimSpace(b.Metadata["gc.routed_to"]); routedTo != "" {
+		if routedTo := strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]); routedTo != "" {
 			cityName := config.EffectiveCityName(c.cfg, "")
 			if config.FindAgent(c.cfg, routedTo) == nil {
 				if _, ok, _ := resolveNamedSessionSpecForConfigTarget(c.cfg, cityName, routedTo, currentRigContext(c.cfg)); !ok {
@@ -122,7 +124,14 @@ func (c *sessionModelDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 	return r
 }
 
-func loadSessionModelDoctorBeads(store beads.Store) ([]beads.Bead, error) {
+// loadSessionModelDoctorBeads reads the two halves of the session-ownership
+// diagnostic from two coordination classes: the session union comes from
+// sessStore (session class) and the open/in-progress work legs from workStore
+// (work class). They are the same store until a [beads.classes.sessions]
+// relocation splits them, at which point reading both from the work store made
+// the session union come back empty and the check report "session ownership is
+// consistent" on a city whose session model was broken.
+func loadSessionModelDoctorBeads(workStore, sessStore beads.Store) ([]beads.Bead, error) {
 	type listStep struct {
 		name  string
 		query beads.ListQuery
@@ -140,27 +149,35 @@ func loadSessionModelDoctorBeads(store beads.Store) ([]beads.Bead, error) {
 
 	seen := make(map[string]bool)
 	var all []beads.Bead
-	// Union of Type=session and Label=gc:session beads, deduped by ID.
-	// Replaces two separate listStep entries that re-implemented the same
-	// union; ListAllSessionBeads is now the single source of truth so a
-	// future shape (e.g. typed but unlabeled production beads) is handled
-	// consistently across the CLI.
-	sessionBeads, err := session.ListAllSessionBeads(store, beads.ListQuery{
-		IncludeClosed: true,
-		Sort:          beads.SortCreatedAsc,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("session beads: %w", err)
-	}
-	for _, item := range sessionBeads {
-		if seen[item.ID] {
-			continue
+	// Doctor's OWN inline copy of the type+label session union (Type=session ∪
+	// Label=gc:session, deduped by ID, narrowed to IsSessionBeadOrRepairable, globally
+	// re-sorted by CreatedAt) — so this diagnostic no longer calls the policed
+	// session.ListAllSessionBeads codec while still holding raw beads (its §5 doctor
+	// exemption covers HOLDING raw beads, not calling the codec). A gc:session bead that
+	// lost its type after a crash still surfaces via the label leg.
+	sessionUnionStart := len(all)
+	for _, q := range []beads.ListQuery{
+		{Type: session.BeadType, IncludeClosed: true, Sort: beads.SortCreatedAsc},
+		{Label: session.LabelSession, IncludeClosed: true, Sort: beads.SortCreatedAsc},
+	} {
+		items, err := sessStore.List(q)
+		if err != nil {
+			return nil, fmt.Errorf("session beads: %w", err)
 		}
-		seen[item.ID] = true
-		all = append(all, item)
+		for _, item := range items {
+			if seen[item.ID] || !session.IsSessionBeadOrRepairable(item) {
+				continue
+			}
+			seen[item.ID] = true
+			all = append(all, item)
+		}
 	}
+	sessionUnion := all[sessionUnionStart:]
+	sort.SliceStable(sessionUnion, func(i, j int) bool {
+		return sessionUnion[i].CreatedAt.Before(sessionUnion[j].CreatedAt)
+	})
 	for _, step := range steps {
-		items, err := store.List(step.query)
+		items, err := workStore.List(step.query)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", step.name, err)
 		}

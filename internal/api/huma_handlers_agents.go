@@ -10,7 +10,9 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/sse"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // humaHandleAgentList is the Huma-typed handler for GET /v0/agents.
@@ -26,6 +28,14 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 	sessTmpl := cfg.Workspace.SessionTemplate
 	wantPeek := input.Peek
 
+	// Raw config drives accurate provenance detection (pack-derived vs.
+	// city-native). Optional capability: when absent, agentOrigin falls
+	// back to the patch-presence heuristic.
+	var rawCfg *config.City
+	if rcp, ok := s.state.(RawConfigProvider); ok {
+		rawCfg = rcp.RawConfig()
+	}
+
 	index := s.latestIndex()
 	cacheKey := ""
 	if !wantPeek {
@@ -40,8 +50,31 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 		}
 	}
 
+	// Active graph-resident work, indexed once per request by agent session
+	// name (nil on a single-store city). Computed after the cache-hit return
+	// so a cached response never pays for the graph-store list.
+	graphWork := s.graphActiveWorkBySession()
+
+	// Optional batch extensions: providers whose per-session attribute reads
+	// are otherwise expensive (e.g. one subprocess fork per call, per agent)
+	// can implement these to collapse the hot loop below to O(1) execs
+	// instead of O(agents). SessionRoster is read once, up front, since it
+	// covers every session in a single call; EnvironmentBatchProvider is
+	// read per running agent (still one call instead of the two GetMeta
+	// calls it replaces).
+	var rosterMap map[string]runtime.SessionRosterEntry
+	if rp, ok := sp.(runtime.SessionRosterProvider); ok {
+		if m, err := rp.SessionRoster(); err == nil {
+			rosterMap = m
+		}
+	}
+	envBatch, _ := sp.(runtime.EnvironmentBatchProvider)
+
 	var agents []agentResponse
 	for _, a := range cfg.Agents {
+		// Provenance is a property of the declared agent, shared by every
+		// pool-expanded instance, so compute it once per source agent.
+		pack, packDerived := agentPackProvenance(a, rawCfg, cfg)
 		expanded := expandAgent(a, cityName, sessTmpl, sp)
 		for _, ea := range expanded {
 			if input.Rig != "" && ea.rig != input.Rig {
@@ -52,18 +85,49 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 			}
 
 			sessionName := agentSessionName(cityName, ea.qualifiedName, sessTmpl)
+			// Liveness stays on IsRunning: it is already a cached,
+			// fleet-wide read that excludes pane_dead corpses, whereas
+			// roster membership comes from list-sessions, which still
+			// lists a session whose pane exited under remain-on-exit.
+			// The roster is an attributes source only.
 			running := sp.IsRunning(sessionName)
+			var rosterEntry runtime.SessionRosterEntry
+			var haveRosterEntry bool
+			if rosterMap != nil {
+				rosterEntry, haveRosterEntry = rosterMap[sessionName]
+			}
+			// Fold active graph-resident (wisp) work into the running signal so
+			// an agent whose work executes under an agent-agnostic wisp session
+			// is reported running even when its named provider session is down.
+			// hasGraphWork is always false on a single-store city.
+			gw, hasGraphWork := graphWork[sessionName]
+			effectiveRunning := running || hasGraphWork
 
-			if input.Running == "true" && !running {
+			if input.Running == "true" && !effectiveRunning {
 				continue
 			}
-			if input.Running == "false" && running {
+			if input.Running == "false" && effectiveRunning {
 				continue
+			}
+
+			// Live per-session env (suspended flag + GC_SESSION_ID) only
+			// exists for a running session — a non-running session has no
+			// tmux environment to query, so both reads below are gated
+			// behind running rather than issued unconditionally.
+			var env map[string]string
+			if running && envBatch != nil {
+				env, _ = envBatch.GetAllEnvironment(sessionName)
 			}
 
 			suspended := ea.suspended
-			if v, err := sp.GetMeta(sessionName, "suspended"); err == nil && v == "true" {
-				suspended = true
+			if running {
+				if env != nil {
+					if env["suspended"] == "true" {
+						suspended = true
+					}
+				} else if v, err := sp.GetMeta(sessionName, "suspended"); err == nil && v == "true" {
+					suspended = true
+				}
 			}
 
 			provider, displayName := resolveProviderInfo(ea.provider, cfg)
@@ -83,7 +147,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 			resp := agentResponse{
 				Name:              ea.qualifiedName,
 				Description:       ea.description,
-				Running:           running,
+				Running:           effectiveRunning,
 				Suspended:         suspended,
 				Rig:               ea.rig,
 				Pool:              ea.pool,
@@ -91,26 +155,52 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 				DisplayName:       displayName,
 				Available:         available,
 				UnavailableReason: unavailableReason,
+				PackDerived:       packDerived,
+				Pack:              pack,
 			}
 
 			var lastActivity *time.Time
 			sessionID := ""
 			if running {
 				si := &sessionInfo{Name: sessionName}
-				if t, err := sp.GetLastActivity(sessionName); err == nil && !t.IsZero() {
-					si.LastActivity = &t
-					lastActivity = &t
+				if haveRosterEntry {
+					if !rosterEntry.LastActivity.IsZero() {
+						t := rosterEntry.LastActivity
+						si.LastActivity = &t
+						lastActivity = &t
+					}
+					si.Attached = rosterEntry.Attached
+				} else {
+					if t, err := sp.GetLastActivity(sessionName); err == nil && !t.IsZero() {
+						si.LastActivity = &t
+						lastActivity = &t
+					}
+					si.Attached = sp.IsAttached(sessionName)
 				}
-				si.Attached = sp.IsAttached(sessionName)
 				resp.Session = si
-				if id, err := sp.GetMeta(sessionName, "GC_SESSION_ID"); err == nil {
+				if env != nil {
+					sessionID = strings.TrimSpace(env["GC_SESSION_ID"])
+				} else if id, err := sp.GetMeta(sessionName, "GC_SESSION_ID"); err == nil {
 					sessionID = strings.TrimSpace(id)
 				}
 			}
 
 			resp.ActiveBead = s.findActiveBeadForAssignees(ea.rig, sessionID, sessionName, ea.qualifiedName)
+			// A relocated-graph wisp names its assignee after the session, not
+			// the work store, so the work-store lookup above misses it. Fall
+			// back to the graph bead and use its timestamp as the activity
+			// signal so the state reads "working", not "stopped".
+			if hasGraphWork {
+				if resp.ActiveBead == "" {
+					resp.ActiveBead = gw.beadID
+				}
+				if lastActivity == nil {
+					la := gw.lastActivity
+					lastActivity = &la
+				}
+			}
 			quarantined := s.state.IsQuarantined(sessionName)
-			resp.State = computeAgentState(suspended, quarantined, running, resp.ActiveBead, lastActivity)
+			resp.State = computeAgentState(suspended, quarantined, effectiveRunning, resp.ActiveBead, lastActivity)
 
 			if wantPeek && running {
 				if output, err := sp.Peek(sessionName, 5); err == nil {
@@ -158,7 +248,7 @@ func (s *Server) humaHandleAgentQualified(_ context.Context, input *AgentGetQual
 // dispatching here.
 func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
 	if name == "" {
-		return nil, huma.Error400BadRequest("agent name required")
+		return nil, apierr.InvalidRequest.Msg("agent name required")
 	}
 
 	cfg := s.state.Config()
@@ -167,11 +257,16 @@ func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
 
 	agentCfg, ok := findAgent(cfg, name)
 	if !ok {
-		return nil, huma.Error404NotFound("agent " + name + " not found")
+		return nil, apierr.AgentNotFound.Msg("agent " + name + " not found")
 	}
 
 	sessionName := agentSessionName(cityName, name, cfg.Workspace.SessionTemplate)
 	running := sp.IsRunning(sessionName)
+	// Fold active graph-resident (wisp) work into the running signal so a
+	// graph-working agent reports running even when its named provider session
+	// is down. hasGraphWork is always false on a single-store city.
+	gw, hasGraphWork := s.graphActiveWorkBySession()[sessionName]
+	effectiveRunning := running || hasGraphWork
 
 	suspended := agentCfg.Suspended
 	if v, err := sp.GetMeta(sessionName, "suspended"); err == nil && v == "true" {
@@ -192,16 +287,24 @@ func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
 		}
 	}
 
+	var rawCfg *config.City
+	if rcp, ok := s.state.(RawConfigProvider); ok {
+		rawCfg = rcp.RawConfig()
+	}
+	pack, packDerived := agentPackProvenance(agentCfg, rawCfg, cfg)
+
 	resp := agentResponse{
 		Name:              name,
 		Description:       agentCfg.Description,
-		Running:           running,
+		Running:           effectiveRunning,
 		Suspended:         suspended,
 		Rig:               agentCfg.Dir,
 		Provider:          provider,
 		DisplayName:       displayName,
 		Available:         available,
 		UnavailableReason: unavailableReason,
+		PackDerived:       packDerived,
+		Pack:              pack,
 	}
 	if isMultiSessionAgent(agentCfg) {
 		resp.Pool = agentCfg.QualifiedName()
@@ -223,8 +326,21 @@ func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
 	}
 
 	resp.ActiveBead = s.findLiveActiveBeadForAssignees(agentCfg.Dir, sessionID, sessionName, name)
+	// A relocated-graph wisp names its assignee after the session, not the work
+	// store, so the work-store lookup above misses it. Fall back to the graph
+	// bead and use its timestamp as the activity signal so the state reads
+	// "working", not "stopped".
+	if hasGraphWork {
+		if resp.ActiveBead == "" {
+			resp.ActiveBead = gw.beadID
+		}
+		if lastActivity == nil {
+			la := gw.lastActivity
+			lastActivity = &la
+		}
+	}
 	quarantined := s.state.IsQuarantined(sessionName)
-	resp.State = computeAgentState(suspended, quarantined, running, resp.ActiveBead, lastActivity)
+	resp.State = computeAgentState(suspended, quarantined, effectiveRunning, resp.ActiveBead, lastActivity)
 
 	if running && provider == "claude" && canAttributeSession(agentCfg, name, cfg, s.state.CityPath()) {
 		s.enrichSessionMeta(&resp, agentCfg, name)
@@ -240,35 +356,49 @@ func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
 // Body validation (Name and Provider required with minLength:"1") is
 // enforced by the framework from AgentCreateInput's struct tags.
 func (s *Server) humaHandleAgentCreate(ctx context.Context, input *AgentCreateInput) (*AgentCreatedOutput, error) {
-	sm, ok := s.state.(StateMutator)
-	if !ok {
-		return nil, errMutationsNotSupported
-	}
+	// Idempotency: create at most once per Idempotency-Key. The cached value is
+	// the qualified agent name (the response body is rebuilt from it), and the
+	// visibility wait stays inside the closure so a cached 201 keeps its strict
+	// read-after-write meaning. A create that fails after the durable config
+	// write (visibility timeout 503/504) releases the reservation, so a
+	// same-key retry re-runs the create and surfaces the conflict — identical
+	// to an unkeyed retry today.
+	qualifiedName, err := withIdempotency(s.idem, "/v0/agents", input.IdempotencyKey, input.Body,
+		func() (string, error) {
+			sm, ok := s.state.(StateMutator)
+			if !ok {
+				return "", errMutationsNotSupported
+			}
 
-	a := config.Agent{
-		Name:     input.Body.Name,
-		Dir:      input.Body.Dir,
-		Provider: input.Body.Provider,
-		Scope:    input.Body.Scope,
-	}
+			a := config.Agent{
+				Name:     input.Body.Name,
+				Dir:      input.Body.Dir,
+				Provider: input.Body.Provider,
+				Scope:    input.Body.Scope,
+			}
 
-	if err := sm.CreateAgent(a); err != nil {
-		return nil, mutationError(err)
-	}
-	// Block until the new agent is reachable through findAgent, so the
-	// 201 response is a strict read-after-write signal: a follow-up
-	// POST /sling against the same target will not race a stale runtime
-	// config snapshot. This is intentionally scoped to agents because sling
-	// target resolution reads the agent projection immediately after create.
-	qualifiedName := a.QualifiedName()
-	if waiter, ok := s.state.(AgentVisibilityWaiter); ok {
-		waitCtx, cancel := context.WithTimeout(ctx, s.agentCreateVisibilityWaitTimeout())
-		err := waiter.WaitForAgentVisibility(waitCtx, qualifiedName)
-		cancel()
-		if err != nil {
-			log.Printf("api: agent %s visibility confirmation failed after create: %v", qualifiedName, err)
-			return nil, agentVisibilityWaitHTTPError(err)
-		}
+			if err := sm.CreateAgent(a); err != nil {
+				return "", mutationError(err)
+			}
+			// Block until the new agent is reachable through findAgent, so the
+			// 201 response is a strict read-after-write signal: a follow-up
+			// POST /sling against the same target will not race a stale runtime
+			// config snapshot. This is intentionally scoped to agents because sling
+			// target resolution reads the agent projection immediately after create.
+			name := a.QualifiedName()
+			if waiter, ok := s.state.(AgentVisibilityWaiter); ok {
+				waitCtx, cancel := context.WithTimeout(ctx, s.agentCreateVisibilityWaitTimeout())
+				err := waiter.WaitForAgentVisibility(waitCtx, name)
+				cancel()
+				if err != nil {
+					log.Printf("api: agent %s visibility confirmation failed after create: %v", name, err)
+					return "", agentVisibilityWaitHTTPError(err)
+				}
+			}
+			return name, nil
+		})
+	if err != nil {
+		return nil, err
 	}
 	resp := &AgentCreatedOutput{}
 	resp.Body.Status = "created"
@@ -279,11 +409,11 @@ func (s *Server) humaHandleAgentCreate(ctx context.Context, input *AgentCreateIn
 func agentVisibilityWaitHTTPError(err error) error {
 	switch {
 	case errors.Is(err, context.Canceled):
-		return agentVisibilityRetryableError(huma.Error503ServiceUnavailable("agent was created, but visibility confirmation was canceled"))
+		return agentVisibilityRetryableError(apierr.ServiceUnavailable.Msg("agent was created, but visibility confirmation was canceled"))
 	case errors.Is(err, context.DeadlineExceeded):
-		return agentVisibilityRetryableError(huma.Error504GatewayTimeout("agent was created, but visibility was not confirmed before timeout"))
+		return agentVisibilityRetryableError(apierr.GatewayTimeout.Msg("agent was created, but visibility was not confirmed before timeout"))
 	default:
-		return huma.Error500InternalServerError("agent was created, but visibility confirmation failed")
+		return apierr.Internal.Msg("agent was created, but visibility confirmation failed")
 	}
 }
 
@@ -361,7 +491,7 @@ func (s *Server) agentActionByName(name, action string) (*OKResponse, error) {
 	}
 	cfg := s.state.Config()
 	if _, ok := findAgent(cfg, name); !ok {
-		return nil, huma.Error404NotFound("agent " + name + " not found")
+		return nil, apierr.AgentNotFound.Msg("agent " + name + " not found")
 	}
 	var err error
 	switch action {
@@ -370,7 +500,7 @@ func (s *Server) agentActionByName(name, action string) (*OKResponse, error) {
 	case "resume":
 		err = sm.ResumeAgent(name)
 	default:
-		return nil, huma.Error400BadRequest("unknown agent action: " + action)
+		return nil, apierr.InvalidRequest.Msg("unknown agent action: " + action)
 	}
 	if err != nil {
 		return nil, mutationError(err)
@@ -413,12 +543,12 @@ func (s *Server) agentOutputByName(name string, tail int, provided bool, before 
 	cfg := s.state.Config()
 	agentCfg, ok := findAgent(cfg, name)
 	if !ok {
-		return nil, huma.Error404NotFound("agent " + name + " not found")
+		return nil, apierr.AgentNotFound.Msg("agent " + name + " not found")
 	}
 
 	resp, err := s.trySessionLogOutputHuma(name, agentCfg, tail, provided, before)
 	if err != nil {
-		return nil, huma.Error500InternalServerError("reading session log: " + err.Error())
+		return nil, apierr.Internal.Msg("reading session log: " + err.Error())
 	}
 	if resp != nil {
 		return &struct {
@@ -430,12 +560,12 @@ func (s *Server) agentOutputByName(name string, tail int, provided bool, before 
 	sp := s.state.SessionProvider()
 	sessionName := agentSessionName(s.state.CityName(), name, cfg.Workspace.SessionTemplate)
 	if !sp.IsRunning(sessionName) {
-		return nil, huma.Error404NotFound("agent " + name + " not running")
+		return nil, apierr.AgentNotFound.Msg("agent " + name + " not running")
 	}
 
 	output, err := sp.Peek(sessionName, 100)
 	if err != nil {
-		return nil, huma.Error500InternalServerError(err.Error())
+		return nil, apierr.Internal.Msg(err.Error())
 	}
 
 	turns := []outputTurn{}
@@ -472,13 +602,13 @@ func (s *Server) resolveAgentStream(name string) (*agentStreamState, error) {
 	cfg := s.state.Config()
 	agentCfg, ok := findAgent(cfg, name)
 	if !ok {
-		return nil, huma.Error404NotFound("agent " + name + " not found")
+		return nil, apierr.AgentNotFound.Msg("agent " + name + " not found")
 	}
 
 	workDir := s.resolveAgentWorkDir(agentCfg, name)
 	transcriptState, err := s.resolveAgentTranscript(name, agentCfg)
 	if err != nil {
-		return nil, huma.Error500InternalServerError(err.Error())
+		return nil, apierr.Internal.Msg(err.Error())
 	}
 	provider := transcriptState.provider
 	logPath := transcriptState.path
@@ -488,7 +618,7 @@ func (s *Server) resolveAgentStream(name string) (*agentStreamState, error) {
 	running := sp.IsRunning(sessionName)
 
 	if logPath == "" && !running {
-		return nil, huma.Error404NotFound("agent " + name + " not running")
+		return nil, apierr.AgentNotFound.Msg("agent " + name + " not running")
 	}
 	return &agentStreamState{
 		name:     name,

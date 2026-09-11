@@ -1,12 +1,13 @@
 # T3 Bridge Gas Town Example
 
-This example shows the smallest Gas City configuration needed to run an
-existing Gas Town pack through the native `t3bridge` session provider.
+This example shows the smallest Gas City configuration needed to run a
+Gas Town-style pack through the native `t3bridge` session provider.
 
-The example does not fork the Gas Town pack. It imports
-`../gastown/packs/gastown` so T3Code sees the same resolved agents, named
-sessions, patches, pool settings, and suspend/on-demand controls that GC would
-use normally.
+The example is self-contained. It imports its own minimal Gas-Town-shaped
+`packs/t3demo` pack (mayor, witness, refinery, polecat) so T3Code sees the
+same resolved agents, named sessions, pool settings, and suspend/on-demand
+controls that GC would use normally. For the complete Gas Town pack, see the
+gastown pack in gascity-packs (github.com/gastownhall/gascity-packs).
 
 ## Sidebar-Relevant Configuration
 
@@ -15,10 +16,10 @@ T3-specific pack copies.
 
 - `[session].provider = "t3bridge"` makes GC create sessions through T3Code.
 - `[workspace].provider = "codex"` remains the default agent runtime provider.
-- `[imports.gastown]` exposes city-scoped pack agents and patches to the
-  workspace section of the sidebar.
+- `[imports.t3demo]` exposes city-scoped pack agents to the workspace section
+  of the sidebar.
 - `[[rigs]]` defines the rig row T3Code should display.
-- `[rigs.imports.gastown]` exposes rig-scoped agents, pools, and named sessions
+- `[rigs.imports.t3demo]` exposes rig-scoped agents, pools, and named sessions
   under that rig.
 - Pack-defined `[[named_session]]`, `[[patches.agent]]`, pool bounds, suspend,
   `always`, and `on_demand` state should flow through GC's resolved config API
@@ -71,5 +72,5 @@ Expected behavior:
 
 - GC creates sessions through T3Code, not tmux.
 - T3Code sidebar groups the workspace and rig from resolved `city.toml`.
-- Sidebar controls reflect the imported Gas Town pack's agents and modes.
+- Sidebar controls reflect the imported `t3demo` pack's agents and modes.
 - T3Code threads receive GC metadata and startup envelope fields.

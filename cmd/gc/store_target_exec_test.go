@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,7 +9,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/pgauth"
 )
 
 func writeExecStoreCityConfig(t *testing.T, cityDir, cityName, cityPrefix string, rigs []config.Rig) {
@@ -115,6 +113,41 @@ func envSliceValue(env []string, key string) string {
 		}
 	}
 	return ""
+}
+
+func TestSetExecProjectedBackendEnvEmptyDisablesAutoBackup(t *testing.T) {
+	// The exec-store projection is the 5th bd env-projection site (alongside
+	// bdRuntimeEnv, cityRuntimeProcessEnv, sessionBackendEnv, and recovery).
+	// It must force bd's PersistentPostRun auto-backup off (ga-0eq), even when
+	// the ambient env tries to enable it.
+	env := map[string]string{
+		"BD_BACKUP_ENABLED":    "true",
+		"BEADS_BACKUP_ENABLED": "true",
+	}
+	setExecProjectedBackendEnvEmpty(env)
+	if got := env["BD_BACKUP_ENABLED"]; got != "false" {
+		t.Fatalf("BD_BACKUP_ENABLED = %q, want false", got)
+	}
+	if got := env["BEADS_BACKUP_ENABLED"]; got != "false" {
+		t.Fatalf("BEADS_BACKUP_ENABLED = %q, want false", got)
+	}
+}
+
+func TestSetExecProjectedBackendEnvEmptyDisablesContributorRouting(t *testing.T) {
+	// The exec-store projection must also force bd's fork/contributor
+	// auto-routing off, mirroring the other bd env-projection sites, so a
+	// gcy-style store cannot siphon create/list/update to ~/.beads-planning.
+	env := map[string]string{
+		"BD_ROUTING_MODE":    "auto",
+		"BEADS_ROUTING_MODE": "auto",
+	}
+	setExecProjectedBackendEnvEmpty(env)
+	if got := env["BD_ROUTING_MODE"]; got != "off" {
+		t.Fatalf("BD_ROUTING_MODE = %q, want off", got)
+	}
+	if got := env["BEADS_ROUTING_MODE"]; got != "off" {
+		t.Fatalf("BEADS_ROUTING_MODE = %q, want off", got)
+	}
 }
 
 func TestProviderUsesBdStoreContract(t *testing.T) {
@@ -518,8 +551,16 @@ func TestOpenStoreAtForCityExecBeadsBdProjectsScopedExternalDoltEnv(t *testing.T
 	}
 }
 
-func TestCopyExecProjectedBackendEnvProjectsScopedPostgresEnv(t *testing.T) {
-	clearAmbientPostgresEnv(t)
+// TestCopyExecProjectedBackendEnvWithholdsEveryKeyForABoundRig proves the
+// exec-provider copy path carries the withholding, not just the projection.
+//
+// A rig bound to a backend gc does not implement has no connection values to
+// copy — the point is that every key gc would otherwise project arrives
+// present-and-empty, so an exec provider's child process cannot inherit a
+// stale endpoint from the controller's own environment. An ambient
+// GC_DOLT_HOST is set here precisely because that is the value a leak would
+// smuggle through.
+func TestCopyExecProjectedBackendEnvWithholdsEveryKeyForABoundRig(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "rigs", "frontend")
 	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
@@ -532,7 +573,7 @@ dolt.auto-start: false
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	writePGScopeFixture(t, rigDir, "pgpw")
+	writeOpaqueBindingScopeFixture(t, rigDir)
 	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: fe
 gc.endpoint_origin: inherited_city
 gc.endpoint_status: verified
@@ -546,7 +587,6 @@ dolt.auto-start: false
 		Prefix: "fe",
 	}})
 	t.Setenv("GC_DOLT_HOST", "ambient-dolt")
-	t.Setenv("BEADS_POSTGRES_PASSWORD", "ambient-pg")
 
 	env := gcExecStoreEnv(cityDir, execStoreTarget{
 		ScopeRoot: rigDir,
@@ -567,23 +607,23 @@ dolt.auto-start: false
 	if got := env["GC_RIG"]; got != "frontend" {
 		t.Fatalf("GC_RIG = %q, want frontend", got)
 	}
-	if got := env["BEADS_POSTGRES_HOST"]; got != "db.example.test" {
-		t.Fatalf("BEADS_POSTGRES_HOST = %q, want db.example.test", got)
-	}
-	if got := env["BEADS_POSTGRES_PORT"]; got != "5432" {
-		t.Fatalf("BEADS_POSTGRES_PORT = %q, want 5432", got)
-	}
-	if got := env["BEADS_POSTGRES_USER"]; got != "bd" {
-		t.Fatalf("BEADS_POSTGRES_USER = %q, want bd", got)
-	}
-	if got := env["BEADS_POSTGRES_DATABASE"]; got != "beads" {
-		t.Fatalf("BEADS_POSTGRES_DATABASE = %q, want beads", got)
-	}
-	if got := env["BEADS_POSTGRES_PASSWORD"]; got != "pgpw" {
-		t.Fatalf("BEADS_POSTGRES_PASSWORD = %q, want pgpw", got)
-	}
-	if got := env["GC_DOLT_HOST"]; got != "" {
-		t.Fatalf("GC_DOLT_HOST = %q, want empty for PG-backed rig", got)
+	for _, key := range execProjectedBackendEnvKeys() {
+		switch key {
+		case "BD_EXPORT_AUTO", "BD_BACKUP_ENABLED", "BEADS_BACKUP_ENABLED",
+			"BD_DOLT_SYNC_CLI_REMOTES", "BEADS_DOLT_SYNC_CLI_REMOTES",
+			"BD_ROUTING_MODE", "BEADS_ROUTING_MODE":
+			// The bd opt-out keys are policy gc always states, not connection
+			// values it withholds.
+			continue
+		}
+		value, ok := env[key]
+		if !ok {
+			t.Errorf("env[%q] absent; a withheld key must be present and empty so the child cannot inherit one", key)
+			continue
+		}
+		if value != "" {
+			t.Errorf("env[%q] = %q, want empty for a rig gc does not serve", key, value)
+		}
 	}
 }
 
@@ -665,8 +705,7 @@ func TestControllerStateOpenRigStoreExecBdProjectsRigDoltEnv(t *testing.T) {
 	}
 }
 
-func TestControllerStateOpenRigStoreExecBdSurfacesPostgresProjectionError(t *testing.T) {
-	clearAmbientPostgresEnv(t)
+func TestControllerStateOpenRigStoreExecBdRefusesAnUnregisteredBackend(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 
 	cityDir := t.TempDir()
@@ -681,7 +720,7 @@ dolt.auto-start: false
 		t.Fatal(err)
 	}
 	rigDir := filepath.Join(cityDir, "rigs", "frontend")
-	writePGScopeFixture(t, rigDir, "")
+	writeUnregisteredBackendMetadata(t, rigDir)
 	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: fe
 gc.endpoint_origin: inherited_city
 gc.endpoint_status: verified
@@ -702,12 +741,7 @@ dolt.auto-start: false
 	store := cs.openRigStore(provider, "frontend", rigDir, "fe", cfg)
 	_, err := store.Create(beads.Bead{Title: "rig"})
 
-	if err == nil {
-		t.Fatal("Create err = nil, want postgres projection error")
-	}
-	if !errors.Is(err, pgauth.ErrNoPasswordResolvable) {
-		t.Fatalf("errors.Is(err, ErrNoPasswordResolvable) = false, want true; err=%v", err)
-	}
+	assertRefusesUnregisteredBackend(t, err)
 	if _, statErr := os.Stat(filepath.Join(captureDir, "frontend.env")); !os.IsNotExist(statErr) {
 		t.Fatalf("capture script ran despite projection failure; stat err=%v", statErr)
 	}

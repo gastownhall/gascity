@@ -16,7 +16,7 @@ import (
 
 func TestHandoffCommands(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.Init("claude")
+	c.InitNoStart("claude")
 
 	t.Run("NoArgs_ReturnsError", func(t *testing.T) {
 		// cobra.RangeArgs(1,2) rejects zero args.
@@ -62,7 +62,7 @@ func TestHandoffCommands(t *testing.T) {
 
 func TestGraphCommands(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.Init("claude")
+	c.InitNoStart("claude")
 
 	t.Run("EmptyCity_Succeeds", func(t *testing.T) {
 		// graph should not crash on an empty city.

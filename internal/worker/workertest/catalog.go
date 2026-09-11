@@ -10,6 +10,9 @@ const ( //nolint:revive // exported requirement IDs are documented by the catalo
 	RequirementTranscriptDiscovery                 RequirementCode = "WC-TX-001"
 	RequirementTranscriptNormalization             RequirementCode = "WC-TX-002"
 	RequirementTranscriptDiagnostics               RequirementCode = "WC-TX-003"
+	RequirementTranscriptUsage                     RequirementCode = "WC-TX-USAGE-001"
+	RequirementInvocationUsageCost                 RequirementCode = "WC-USAGE-COST-001"
+	RequirementInvocationUsageRecording            RequirementCode = "WC-USAGE-RECORD-001"
 	RequirementContinuationContinuity              RequirementCode = "WC-CONT-001"
 	RequirementFreshSessionIsolation               RequirementCode = "WC-CONT-002"
 	RequirementStartupOutcomeBound                 RequirementCode = "WC-BRINGUP-001"
@@ -22,6 +25,9 @@ const ( //nolint:revive // exported requirement IDs are documented by the catalo
 	RequirementInteractionLifecycleHistory         RequirementCode = "WC-INT-006"
 	RequirementToolEventNormalization              RequirementCode = "WC-TOOL-001"
 	RequirementToolEventOpenTail                   RequirementCode = "WC-TOOL-002"
+	RequirementStructuredToolResult                RequirementCode = "WC-STRUCT-001"
+	RequirementStructuredNoNativeLeak              RequirementCode = "WC-STRUCT-002"
+	RequirementStructuredEditEvidence              RequirementCode = "WC-STRUCT-003"
 	RequirementRealTransportProof                  RequirementCode = "WC-TRANSPORT-001"
 	RequirementStartupCommandMaterialization       RequirementCode = "WC-START-001"
 	RequirementStartupRuntimeConfigMaterialization RequirementCode = "WC-START-002"
@@ -64,6 +70,16 @@ func Phase1Catalog() []Requirement {
 			Description: "The profile transcript normalizes into the canonical message shape.",
 		},
 		{
+			Code:        RequirementTranscriptUsage,
+			Group:       "transcript",
+			Description: "The profile transcript yields the expected per-invocation token usage for families with invocation-telemetry support; families without an extractor are explicitly out of scope.",
+		},
+		{
+			Code:        RequirementInvocationUsageCost,
+			Group:       "transcript",
+			Description: "Extracted per-invocation usage is priceable: it carries the model pricing key, default pricing applies only where the family has shipped default rates, and an operator-configured rate yields a positive cost estimate.",
+		},
+		{
 			Code:        RequirementContinuationContinuity,
 			Group:       "continuation",
 			Description: "The continued transcript preserves prior normalized history and logical conversation identity.",
@@ -72,6 +88,47 @@ func Phase1Catalog() []Requirement {
 			Code:        RequirementFreshSessionIsolation,
 			Group:       "continuation",
 			Description: "A fresh session fixture does not alias the prior logical conversation.",
+		},
+	}
+}
+
+// TelemetryHandleCatalog returns worker-handle invocation-telemetry
+// requirements. Unlike the transcript catalog, these are handle-behavior
+// rules (which handle records gc.agent.tokens.* on a prompt op), so they are
+// enforced by worker-package handle tests rather than the fixture-driven
+// profile runner; the catalog registers them as the conformance contract of
+// record.
+func TelemetryHandleCatalog() []Requirement {
+	return []Requirement{
+		{
+			Code:        RequirementInvocationUsageRecording,
+			Group:       "telemetry",
+			Description: "A prompt operation on a transcript-backed SessionHandle records gc.agent.tokens.*; a runtime-only RuntimeHandle is permanently excluded (ga-tkvb31).",
+		},
+	}
+}
+
+// StructuredCatalog returns the structured-transcript conformance requirements.
+// These prove that a profile's provider-native tool calls normalize into the
+// provider-neutral typed structured carriers (StructuredToolInput /
+// StructuredToolResult) without leaking provider-native shapes and without
+// fabricating edit evidence the provider did not report.
+func StructuredCatalog() []Requirement {
+	return []Requirement{
+		{
+			Code:        RequirementStructuredToolResult,
+			Group:       "structured",
+			Description: "Provider-native tool results normalize into typed StructuredToolResult carriers in worker history.",
+		},
+		{
+			Code:        RequirementStructuredNoNativeLeak,
+			Group:       "structured",
+			Description: "The typed structured carriers expose no provider-native keys; provider-native shape stays in the preserved raw frame, not the neutral structured data.",
+		},
+		{
+			Code:        RequirementStructuredEditEvidence,
+			Group:       "structured",
+			Description: "An edit result carries a patch only when the provider result supplied patch evidence; it is never fabricated from tool input.",
 		},
 	}
 }

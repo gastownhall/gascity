@@ -1,8 +1,9 @@
 # Hook Event Vocabulary
 
 Gas City wires per-provider hook configs into a small set of coordination
-commands (`gc prime --hook`, `gc handoff --auto`, `gc nudge drain --inject`,
-`gc mail check --inject`). Each provider names its hook events differently;
+commands (`gc prime --hook`, `gc handoff --auto`, and prompt-submit
+`gc hook run --timeout 15s --timeout-exit-code 0 -- ...` wrappers around
+`gc nudge drain --inject` / `gc mail check --inject`). Each provider names its hook events differently;
 this document maps Gas City's canonical events to the provider's native
 name for each, plus where the wiring lives on disk.
 
@@ -27,12 +28,12 @@ materializing the per-provider files into each agent's working directory.
 ✓ = wired today. — = not wired (either the provider does not expose
 the event, or it does but Gas City has not opted in yet).
 
-| Canonical event | claude | codex | cursor | copilot | gemini | opencode | omp | pi |
-|---|---|---|---|---|---|---|---|---|
-| session start    | `SessionStart` ✓ | `SessionStart` ✓ | `sessionStart` ✓ | `sessionStart` ✓ | `SessionStart` ✓ | `session.created` ✓ | `session_start` ✓ | `session_start` ✓ |
-| pre-compaction   | `PreCompact` ✓   | `PreCompact` ✓   | `preCompact` ✓   | `preCompact` ✓   | `PreCompress` ✓  | `session.compacted` ✓ | `session_compact` ✓ | `session_compact` ✓ |
-| user prompt submit | `UserPromptSubmit` ✓ | `UserPromptSubmit` ✓ | `beforeSubmitPrompt` ✓ | `userPromptSubmitted` ✓ | — | — | — | — |
-| before agent run | —                | —                | —                | —                | `BeforeAgent` ✓  | —                | `before_agent_start` ✓ | `before_agent_start` ✓ |
+| Canonical event | claude | codex | cursor | copilot | gemini | antigravity | opencode | omp | pi | kimi |
+|---|---|---|---|---|---|---|---|---|---|---|
+| session start    | `SessionStart` ✓ | `SessionStart` ✓ | `sessionStart` ✓ | `sessionStart` ✓ | `SessionStart` ✓ | `PreInvocation` ✓ | `session.created` ✓ | `session_start` ✓ | `session_start` ✓ | `SessionStart` ✓ |
+| pre-compaction   | `PreCompact` ✓   | `PreCompact` ✓   | `preCompact` ✓   | `preCompact` ✓   | `PreCompress` ✓  | — | `session.compacted` ✓ | `session_compact` ✓ | `session_compact` ✓ | — |
+| user prompt submit | `UserPromptSubmit` ✓ | `UserPromptSubmit` ✓ | `beforeSubmitPrompt` ✓ | `userPromptSubmitted` ✓ | — | — | — | — | — | — |
+| before agent run | —                | —                | —                | —                | `BeforeAgent` ✓  | `PreInvocation` ✓ | —                | `before_agent_start` ✓ | `before_agent_start` ✓ | — |
 
 ### Gas City command bindings
 
@@ -41,13 +42,19 @@ For each provider where a row above is ✓, the wired command is one of:
 - **session start** → `gc prime --hook` (loads context, drains hooks).
 - **pre-compaction** → `gc handoff --auto "context cycle"` (capture state
   before the provider compacts the conversation).
-- **user prompt submit** / **before agent run** → `gc nudge drain --inject`
-  and/or `gc mail check --inject` (inject pending agent-to-agent messages
-  into the upcoming prompt).
+- **user prompt submit** / **before agent run** → bounded `gc hook run`
+  wrappers around `gc nudge drain --inject` and/or `gc mail check --inject`
+  (inject pending agent-to-agent messages into the upcoming prompt without
+  letting a wedged data-plane command block the provider hook).
 
 Some providers fold both injection commands into a single hook entry;
 others split them. The exact wiring lives in the per-provider config —
 this README only documents the event vocabulary, not the command shape.
+
+Antigravity currently exposes `PreInvocation` for before-model-call
+injection. Gas City wires prime, nudge-drain, and mail-check through
+separate named `PreInvocation` hooks in `.agents/hooks.json`; no
+pre-compaction hook is installed because Antigravity does not expose one.
 
 ## Adding a new provider hook
 

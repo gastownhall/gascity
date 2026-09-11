@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -20,6 +21,27 @@ var (
 type statusProvider struct {
 	base     runtime.Provider
 	warnOnce sync.Once
+	partial  atomic.Bool
+}
+
+var (
+	_ runtime.RelaunchProvider          = (*statusProvider)(nil)
+	_ runtime.LivenessObserverWithError = (*statusProvider)(nil)
+)
+
+func statusProviderPartial(sp any) bool {
+	p, ok := sp.(*statusProvider)
+	return ok && p.partial.Load()
+}
+
+func markStatusProviderPartial(sp any) {
+	if p, ok := sp.(*statusProvider); ok {
+		p.partial.Store(true)
+	}
+}
+
+func (p *statusProvider) StatusPartial() bool {
+	return p.partial.Load()
 }
 
 func newBoundedStatusProvider(base runtime.Provider) runtime.Provider {
@@ -41,6 +63,7 @@ func boundedStatusCall[T any](p *statusProvider, fallback T, fn func() T) T {
 	case result := <-resultCh:
 		return result
 	case <-time.After(statusProviderCallTimeout):
+		p.partial.Store(true)
 		p.warnOnce.Do(statusProviderTimeoutWarning)
 		return fallback
 	}
@@ -84,6 +107,19 @@ func (p *statusProvider) ObserveLiveness(name string, processNames []string) run
 	return boundedStatusCall(p, runtime.Liveness{}, func() runtime.Liveness {
 		return runtime.ObserveLiveness(p.base, name, processNames)
 	})
+}
+
+func (p *statusProvider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	type result struct {
+		observation runtime.Liveness
+		err         error
+	}
+	fallbackErr := fmt.Errorf("%w: status liveness probe timed out", runtime.ErrRuntimeUnavailable)
+	got := boundedStatusCall(p, result{err: fallbackErr}, func() result {
+		observation, err := runtime.ObserveLivenessWithError(p.base, name, processNames)
+		return result{observation: observation, err: err}
+	})
+	return got.observation, got.err
 }
 
 func (p *statusProvider) Nudge(name string, content []runtime.ContentBlock) error {
@@ -186,6 +222,16 @@ func (p *statusProvider) SendKeys(name string, keys ...string) error {
 
 func (p *statusProvider) RunLive(name string, cfg runtime.Config) error {
 	return p.base.RunLive(name, cfg)
+}
+
+// Relaunch forwards a warm-box agent relaunch to the wrapped provider when it
+// supports one, so the reconciler's RelaunchProvider type-assert is not masked
+// by the status wrapper. Not bounded — it is a mutation, not a status probe.
+func (p *statusProvider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
+	if rp, ok := p.base.(runtime.RelaunchProvider); ok {
+		return rp.Relaunch(ctx, name, cfg)
+	}
+	return runtime.ErrRelaunchUnsupported
 }
 
 func (p *statusProvider) Capabilities() runtime.ProviderCapabilities {

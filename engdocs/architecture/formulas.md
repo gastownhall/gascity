@@ -237,7 +237,7 @@ wisp_gc_interval = "5m"
 wisp_ttl = "24h"
 ```
 
-See [Formula Files](../../docs/reference/formula.md) for the file format itself.
+See [the formula specs](../../docs/reference/specs/formula-spec-v2.md) for the file format itself.
 
 ## Testing
 
@@ -261,7 +261,7 @@ See [Formula Files](../../docs/reference/formula.md) for the file format itself.
 
 ## See Also
 
-- [Formula Files](../../docs/reference/formula.md) for the file layout
+- [the formula specs](../../docs/reference/specs/formula-spec-v2.md) for the file layout
 - [Dispatch](dispatch.md) for sling-based formula routing
 - [Orders](orders.md) for formula-backed scheduled work
 - [Bead Store](beads.md) for the `MolCook` interface boundary

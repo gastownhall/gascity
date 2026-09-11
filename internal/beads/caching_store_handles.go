@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // CachedReader is the cache-only eventual-consistency read handle for active
@@ -211,7 +213,7 @@ func (c *CachingStore) cachedListOnly(query ListQuery) ([]Bead, error) {
 	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	if (c.state != cacheLive && c.state != cachePartial) || c.primePartialErr != nil || len(c.dirty) > 0 {
+	if !c.cacheServableForListQueryLocked(query) || len(c.dirty) > 0 {
 		return nil, fmt.Errorf("listing beads from cache: %w", ErrCacheUnavailable)
 	}
 	rows := make([]Bead, 0, len(c.beads))
@@ -231,35 +233,134 @@ func (c *CachingStore) cachedListOnly(query ListQuery) ([]Bead, error) {
 func (c *CachingStore) cachedReadyOnly(query ReadyQuery) ([]Bead, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	if (c.state != cacheLive && c.state != cachePartial) || c.primePartialErr != nil || len(c.dirty) > 0 {
-		return nil, fmt.Errorf("reading ready beads from cache: %w", ErrCacheUnavailable)
+	return c.cachedReadyLocked(query)
+}
+
+func (c *CachingStore) cachedReadyCompleteOnly(ctx context.Context, query ReadyQuery) ([]Bead, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// A cache-only deadline-sensitive read must never wait behind a writer
+	// after its caller has returned. A busy cache is a partial observation,
+	// not a reason to abandon a goroutine on RLock.
+	if !c.mu.TryRLock() {
+		return nil, fmt.Errorf("reading complete ready projection from busy cache: %w", ErrCacheUnavailable)
+	}
+	if c.state != cacheLive || !c.depsComplete || c.primePartialErr != nil || len(c.dirty) > 0 ||
+		c.readyReadsMustGoLive() {
+		c.mu.RUnlock()
+		return nil, fmt.Errorf("reading complete ready projection from cache: %w", ErrCacheUnavailable)
 	}
 
 	statusByID := make(map[string]string, len(c.beads))
+	workOutcomeByID := make(map[string]string, len(c.beads))
 	openBeads := make([]Bead, 0, len(c.beads))
 	now := time.Now().UTC()
 	for _, b := range c.beads {
+		if err := ctx.Err(); err != nil {
+			c.mu.RUnlock()
+			return nil, err
+		}
 		statusByID[b.ID] = b.Status
+		workOutcomeByID[b.ID] = b.Metadata[beadmeta.WorkOutcomeMetadataKey]
 		if !IsReadyCandidateForTier(b, now, query.TierMode) {
 			continue
 		}
 		if query.Assignee != "" && b.Assignee != query.Assignee {
 			continue
 		}
+		if c.readyProjectionUnknownLocked(b.ID) {
+			c.mu.RUnlock()
+			return nil, fmt.Errorf("reading complete ready projection for %s from cache: %w", b.ID, ErrCacheUnavailable)
+		}
 		openBeads = append(openBeads, cloneBead(b))
+	}
+	depsByID := make(map[string][]Dep, len(openBeads))
+	for _, b := range openBeads {
+		if err := ctx.Err(); err != nil {
+			c.mu.RUnlock()
+			return nil, err
+		}
+		depsByID[b.ID] = cloneDeps(c.deps[b.ID])
+	}
+	c.mu.RUnlock()
+
+	// The maps above are a consistent snapshot, so sorting and dependency
+	// evaluation need not hold the cache lock or delay writers.
+	return cachedReadyRows(ctx, query, statusByID, workOutcomeByID, openBeads, depsByID, true, true)
+}
+
+func (c *CachingStore) cachedReadyLocked(query ReadyQuery) ([]Bead, error) {
+	if (c.state != cacheLive && c.state != cachePartial) || c.primePartialErr != nil ||
+		len(c.dirty) > 0 || c.readyReadsMustGoLive() {
+		return nil, fmt.Errorf("reading ready beads from cache: %w", ErrCacheUnavailable)
+	}
+
+	statusByID := make(map[string]string, len(c.beads))
+	workOutcomeByID := make(map[string]string, len(c.beads))
+	openBeads := make([]Bead, 0, len(c.beads))
+	now := time.Now().UTC()
+	for _, b := range c.beads {
+		statusByID[b.ID] = b.Status
+		workOutcomeByID[b.ID] = b.Metadata[beadmeta.WorkOutcomeMetadataKey]
+		if !IsReadyCandidateForTier(b, now, query.TierMode) {
+			continue
+		}
+		if query.Assignee != "" && b.Assignee != query.Assignee {
+			continue
+		}
+		if c.readyProjectionUnknownLocked(b.ID) {
+			return nil, fmt.Errorf("reading ready beads for %s from cache: %w", b.ID, ErrCacheUnavailable)
+		}
+		openBeads = append(openBeads, cloneBead(b))
+	}
+	return cachedReadyRows(
+		context.Background(), query, statusByID, workOutcomeByID, openBeads, c.deps, c.depsComplete, c.state == cacheLive,
+	)
+}
+
+func cachedReadyRows(
+	ctx context.Context,
+	query ReadyQuery,
+	statusByID map[string]string,
+	workOutcomeByID map[string]string,
+	openBeads []Bead,
+	depsByID map[string][]Dep,
+	depsComplete bool,
+	nonclosedStatusesComplete bool,
+) ([]Bead, error) {
+	cancellable := ctx != nil && ctx.Done() != nil
+	// Sort candidates before the limit-bounded loop below: the cache source is
+	// a map, so without this a Limit cuts an arbitrary subset. The context-aware
+	// path remains interruptible throughout this CPU work.
+	if !cancellable {
+		sortBeadsReadyOrder(openBeads)
+	} else if err := sortBeadsReadyOrderContext(ctx, openBeads); err != nil {
+		return nil, err
 	}
 
 	result := make([]Bead, 0, len(openBeads))
 	for _, b := range openBeads {
-		deps, ok := c.deps[b.ID]
+		if cancellable {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		deps, ok := depsByID[b.ID]
 		switch {
 		case ok:
-		case c.depsComplete:
+		case depsComplete:
 			deps = nil
 		default:
 			return nil, fmt.Errorf("reading ready deps from cache: %w", ErrCacheUnavailable)
 		}
-		if !cachedBeadReady(statusByID, deps) {
+		if !nonclosedStatusesComplete && !cachedReadyDependencyStatusesKnown(b, statusByID, deps) {
+			return nil, fmt.Errorf("reading ready dependency statuses from cache: %w", ErrCacheUnavailable)
+		}
+		if !cachedBeadReady(b, statusByID, workOutcomeByID, deps) {
 			continue
 		}
 		result = append(result, cloneBead(b))

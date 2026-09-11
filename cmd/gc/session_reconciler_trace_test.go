@@ -4,17 +4,22 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 func TestTraceDetailScopesIncludesDependencies(t *testing.T) {
@@ -42,16 +47,6 @@ func TestTraceDetailScopesIncludesDependencies(t *testing.T) {
 	}
 	if got := scopes["repo/db"]; got != TraceSourceDerivedDependency {
 		t.Fatalf("dependency scope = %q, want %q", got, TraceSourceDerivedDependency)
-	}
-}
-
-func TestNormalizeTraceOutcomeCodeAcceptsDeferredActive(t *testing.T) {
-	got, raw := normalizeTraceOutcomeCode(string(TraceOutcomeDeferredActive))
-	if got != TraceOutcomeDeferredActive {
-		t.Fatalf("outcome = %q, want %q", got, TraceOutcomeDeferredActive)
-	}
-	if raw != "" {
-		t.Fatalf("raw outcome = %q, want empty", raw)
 	}
 }
 
@@ -556,6 +551,90 @@ func TestRecordControllerOperationIsAlwaysOnBaseline(t *testing.T) {
 	}
 }
 
+// TestReconcileTraceResultsObservePostTickValues pins that the RESULTS trace
+// recorder observes POST-tick values after the row reshape (Blocker 3 drift):
+// the reconciler's WriteBackReconcileInfos folds its post-tick Info snapshot onto
+// the carrier, and recordReconcileTraceResults reads that carrier. A dedup-retired
+// loser must be traced under its retired session_name="" (RetireNamedSessionPatch
+// clears session_name), not its pre-retire name. If the writeback is dropped or the
+// recorder reads the pre-tick input, the loser is traced under its pre-retire name
+// and this pin fails.
+func TestReconcileTraceResultsObservePostTickValues(t *testing.T) {
+	cfg := &config.City{
+		Agents:        []config.Agent{{Name: "mayor"}},
+		NamedSessions: []config.NamedSession{{Template: "mayor"}},
+	}
+	cityName := config.EffectiveCityName(cfg, "")
+	spec, ok := session.FindNamedSessionSpec(cfg, cityName, "mayor")
+	if !ok {
+		t.Fatal("named spec for mayor not resolvable; fixture cfg no longer resolves it")
+	}
+	store := beads.NewMemStore()
+	mk := func(gen, sessName string) string {
+		b, err := store.Create(beads.Bead{
+			Type: session.BeadType, Status: "open", Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template": "mayor", "configured_named_session": "true",
+				"configured_named_identity": "mayor", "generation": gen, "session_name": sessName,
+			},
+		})
+		if err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		return b.ID
+	}
+	_ = mk("5", spec.SessionName) // winner (canonical name + higher gen)
+	loserName := spec.SessionName + "-stale"
+	loserID := mk("3", loserName)
+
+	all, err := session.ListAllSessionBeads(store, beads.ListQuery{})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	snap := newSessionBeadSnapshot(all)
+
+	cityDir := t.TempDir()
+	tracer := newSessionReconcilerTracer(cityDir, cityName, io.Discard)
+	defer tracer.Close() //nolint:errcheck
+	cycle := tracer.BeginCycle(TraceTickTriggerPatrol, "", time.Now().UTC(), cfg)
+
+	reconcileSessionBeadsTracedWithNamedDemand(
+		context.Background(), cityDir, snap.OpenForReconcile(), snap, nil, map[string]bool{},
+		cfg, runtime.NewFake(), beads.SessionStore{Store: store}, nil, nil, nil, nil,
+		newDrainTracker(), nil, nil, nil, nil, false, nil, cityName, nil, clock.Real{},
+		events.Discard, 0, 0, io.Discard, io.Discard, cycle,
+	)
+
+	// Production flow: after the reconciler's writeback, the RESULTS recorder reads
+	// the post-tick carrier (sessionBeads.OpenInfos()).
+	cr := &CityRuntime{cfg: cfg}
+	cr.recordReconcileTraceResults(cycle, snap.OpenInfos(), func(TraceSiteCode, string, time.Time, map[string]any) {})
+
+	// Find the RESULTS record for the loser bead (by id-derived post-tick lookup:
+	// the retired loser's session_name is now "", so assert NO result record still
+	// carries the pre-retire loser name).
+	sawPreRetireName := false
+	for _, rec := range cycle.records {
+		if rec.RecordType != TraceRecordSessionResult {
+			continue
+		}
+		if rec.SessionName == loserName {
+			sawPreRetireName = true
+		}
+	}
+	if sawPreRetireName {
+		t.Fatalf("RESULTS trace recorded the retired loser under its PRE-retire name %q — the post-tick writeback/observation regressed (loser id %s)", loserName, loserID)
+	}
+	// And the store confirms the retire actually happened (so the pin isn't vacuous).
+	got, err := store.Get(loserID)
+	if err != nil {
+		t.Fatalf("get loser: %v", err)
+	}
+	if got.Metadata["session_name"] != "" || got.Metadata["state"] != "archived" {
+		t.Fatalf("loser was not retired (session_name=%q state=%q); fixture no longer exercises the dedup retire", got.Metadata["session_name"], got.Metadata["state"])
+	}
+}
+
 func TestSessionReconcilePhaseTraceUsesDistinctSites(t *testing.T) {
 	cityDir := t.TempDir()
 	tracer := newSessionReconcilerTracer(cityDir, "trace-town", io.Discard)
@@ -568,12 +647,13 @@ func TestSessionReconcilePhaseTraceUsesDistinctSites(t *testing.T) {
 	reconcileSessionBeadsTracedWithNamedDemand(
 		context.Background(),
 		cityDir,
-		nil,
+		nil, // rows []session.ReconcileSession
+		nil, // snapshot *sessionBeadSnapshot
 		nil,
 		nil,
 		&config.City{},
 		nil,
-		nil,
+		beads.SessionStore{},
 		nil,
 		nil,
 		nil,
@@ -582,6 +662,7 @@ func TestSessionReconcilePhaseTraceUsesDistinctSites(t *testing.T) {
 		nil, // gate (*providerHealthGate) — ADR-0013 A1 M3a
 		nil,
 		nil,
+		nil, // namedRoutedDemand
 		false,
 		nil,
 		"trace-town",
@@ -624,6 +705,129 @@ func TestSessionReconcilePhaseTraceUsesDistinctSites(t *testing.T) {
 			t.Fatalf("%s site = %q, want %q; all sites: %#v", name, got[name], site, got)
 		}
 	}
+}
+
+// livenessGetErrStore forces Get(target) to fail so the reconciler's runtime
+// liveness probe returns an observation error (livenessErr != nil) for that one
+// session, without disturbing any other store access. The reconcile loop body
+// never re-reads the session bead through the store (it works off the passed-in
+// slice and the mid-tick snapshot), so this affects only the liveness probe.
+type livenessGetErrStore struct {
+	beads.Store
+	target string
+	err    error
+}
+
+func (s livenessGetErrStore) Get(id string) (beads.Bead, error) {
+	if id == s.target {
+		return beads.Bead{}, s.err
+	}
+	return s.Store.Get(id)
+}
+
+// TestReconcileOrphanCloseFailsClosedOnLivenessError proves the S16 fail-closed
+// gate fires end to end in the running reconciler (F1). A healthy liveness
+// observation closes the undesired, dead orphan (baseline). But when the
+// liveness probe errors — providerAlive=false then means "observation
+// unavailable", not "confirmed dead" — the destructive orphan CLOSE is skipped
+// this tick and the bead is kept open for re-observation, rather than orphaning
+// a session that may still be alive on a transient blip (#3872-family). The
+// runtime-unavailable case also proves absence-derived healing cannot mutate
+// active/resume metadata before the close guard runs.
+func TestReconcileOrphanCloseFailsClosedOnLivenessError(t *testing.T) {
+	run := func(t *testing.T, injectStoreLivenessErr bool, sp runtime.Provider) (got beads.Bead, before map[string]string, stderr string) {
+		t.Helper()
+		env := newReconcilerTestEnv()
+		env.cfg = &config.City{}
+		// An active, resumable, undesired session with a dead runtime is the plain
+		// orphan-close case. Its metadata exposes absence-derived healing that
+		// might otherwise run before the destructive close gate.
+		session := env.createSessionBead("worker", "worker")
+		env.setSessionMetadata(&session, map[string]string{
+			"state":                      "active",
+			"session_key":                "resume-worker",
+			"started_config_hash":        "config-worker",
+			"continuation_reset_pending": "",
+		})
+		before = maps.Clone(session.Metadata)
+
+		store := env.store
+		if injectStoreLivenessErr {
+			// Fail the liveness probe's read of just this session. With sp=nil,
+			// handle construction surfaces the failure as an observation error —
+			// the same class a transient tmux/store blip produces at runtime.
+			store = livenessGetErrStore{
+				Store:  env.store,
+				target: session.ID,
+				err:    errors.New("boom: transient store failure"),
+			}
+		}
+
+		var stderrBuf bytes.Buffer
+		reconcileSessionBeads(
+			context.Background(),
+			[]beads.Bead{session},
+			nil, // desiredState — empty ⇒ orphan
+			nil, // configuredNames
+			env.cfg,
+			sp,    // nil ⇒ dead runtime; injected providers model runtime uncertainty
+			store, // store
+			nil,   // dops
+			nil,   // assignedWorkBeads
+			nil,   // readyWaitSet
+			newDrainTracker(),
+			nil,   // poolDesired
+			false, // storeQueryPartial
+			nil,   // workSet
+			"",    // cityName
+			nil,   // idleTracker
+			env.clk,
+			events.Discard,
+			0, 0,
+			io.Discard, &stderrBuf,
+		)
+
+		stored, err := env.store.Get(session.ID)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", session.ID, err)
+		}
+		got = stored
+		return got, before, stderrBuf.String()
+	}
+
+	t.Run("healthy liveness closes orphan (baseline)", func(t *testing.T) {
+		got, _, _ := run(t, false, nil)
+		if got.Status != "closed" {
+			t.Fatalf("baseline orphan close: status = %q, want closed (the close path must be reachable for the guard to matter)", got.Status)
+		}
+	})
+
+	t.Run("store liveness error skips the close", func(t *testing.T) {
+		got, before, stderr := run(t, true, nil)
+		if got.Status == "closed" {
+			t.Fatalf("orphan bead was closed despite a liveness observation error; want kept open (fail closed)")
+		}
+		if !maps.Equal(got.Metadata, before) {
+			t.Fatalf("metadata mutated while liveness was unavailable:\n before: %#v\n  after: %#v", before, got.Metadata)
+		}
+		if !strings.Contains(stderr, "skipping close of 'worker': liveness observation failed") {
+			t.Fatalf("expected the fail-closed guard's stderr line, got %q", stderr)
+		}
+	})
+
+	t.Run("runtime liveness error skips close and heal", func(t *testing.T) {
+		sp := &startUnavailableLivenessProvider{Fake: runtime.NewFake()}
+		got, before, stderr := run(t, false, sp)
+		if got.Status == "closed" {
+			t.Fatal("orphan bead was closed despite ErrRuntimeUnavailable")
+		}
+		if !maps.Equal(got.Metadata, before) {
+			t.Fatalf("metadata mutated while runtime was unavailable:\n before: %#v\n  after: %#v", before, got.Metadata)
+		}
+		if !strings.Contains(stderr, "liveness observation failed") {
+			t.Fatalf("expected the fail-closed guard's stderr line, got %q", stderr)
+		}
+	})
 }
 
 func TestTraceFlushAfterEndOnlyPersistsPostEndRecords(t *testing.T) {

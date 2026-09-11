@@ -9,10 +9,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/rollout/gate"
+	sqlite "modernc.org/sqlite"
 )
 
 func TestDoltliteReadStoreListsSessionBeads(t *testing.T) {
@@ -705,6 +710,11 @@ func TestDoltliteMetadataFilterPredicatesMatchStringValues(t *testing.T) {
 	}
 }
 
+// TestDoltliteReadStoreTierModesIncludeWisps pins the storage-tier contract
+// from query.go (TierMode) to the same shape TestBdStoreListStorageTierConformance
+// pins for BdStore (#3045, #3444): TierIssues keeps history and no-history
+// rows and drops only ephemeral ones; TierWisps keeps no-history and
+// ephemeral rows; TierBoth unions everything.
 func TestDoltliteReadStoreTierModesIncludeWisps(t *testing.T) {
 	store, closeStore := newTestDoltliteReadStore(t)
 	defer closeStore()
@@ -713,24 +723,70 @@ func TestDoltliteReadStoreTierModesIncludeWisps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List issues tier: %v", err)
 	}
-	if len(issues) != 1 || issues[0].ID != "gc-tier-issue" || issues[0].Ephemeral {
-		t.Fatalf("issues tier rows = %#v, want only non-ephemeral gc-tier-issue", issues)
+	if got := testBeadIDs(issues); !slices.Equal(got, []string{"gc-tier-issue", "gc-tier-nohistory"}) {
+		t.Fatalf("issues tier ids = %v, want [gc-tier-issue gc-tier-nohistory]; rows=%#v", got, issues)
+	}
+	noHistory := findTestBead(t, issues, "gc-tier-nohistory")
+	if noHistory.Ephemeral || !noHistory.NoHistory {
+		t.Fatalf("no-history row flags = %#v, want Ephemeral=false NoHistory=true", noHistory)
+	}
+	durable := findTestBead(t, issues, "gc-tier-issue")
+	if durable.Ephemeral || durable.NoHistory {
+		t.Fatalf("history row flags = %#v, want Ephemeral=false NoHistory=false", durable)
 	}
 
 	wisps, err := store.List(ListQuery{Label: "tier-test", TierMode: TierWisps, Sort: SortCreatedAsc})
 	if err != nil {
 		t.Fatalf("List wisps tier: %v", err)
 	}
-	if len(wisps) != 1 || wisps[0].ID != "gc-tier-wisp" || !wisps[0].Ephemeral {
-		t.Fatalf("wisps tier rows = %#v, want only ephemeral gc-tier-wisp", wisps)
+	if got := testBeadIDs(wisps); !slices.Equal(got, []string{"gc-tier-wisp", "gc-tier-nohistory"}) {
+		t.Fatalf("wisps tier ids = %v, want [gc-tier-wisp gc-tier-nohistory]; rows=%#v", got, wisps)
+	}
+	if ephemeral := findTestBead(t, wisps, "gc-tier-wisp"); !ephemeral.Ephemeral || ephemeral.NoHistory {
+		t.Fatalf("ephemeral row flags = %#v, want Ephemeral=true NoHistory=false", ephemeral)
 	}
 
 	both, err := store.List(ListQuery{Label: "tier-test", TierMode: TierBoth, Sort: SortCreatedAsc})
 	if err != nil {
 		t.Fatalf("List both tiers: %v", err)
 	}
-	if got := testBeadIDs(both); !slices.Equal(got, []string{"gc-tier-issue", "gc-tier-wisp"}) {
-		t.Fatalf("both tier ids = %v, want [gc-tier-issue gc-tier-wisp]; rows=%#v", got, both)
+	if got := testBeadIDs(both); !slices.Equal(got, []string{"gc-tier-issue", "gc-tier-wisp", "gc-tier-nohistory"}) {
+		t.Fatalf("both tier ids = %v, want [gc-tier-issue gc-tier-wisp gc-tier-nohistory]; rows=%#v", got, both)
+	}
+}
+
+// TestDoltliteReadStoreLegacyWispsSchemaStaysEphemeralOnly pins backward
+// compatibility for doltlite snapshots written before the wisps table carried
+// the ephemeral/no_history storage-flag columns (beads migrations 0020/0023):
+// without the discriminator every wisp row is ephemeral, so TierIssues must
+// keep excluding the whole wisps table and TierWisps must surface its rows
+// with Ephemeral=true.
+func TestDoltliteReadStoreLegacyWispsSchemaStaysEphemeralOnly(t *testing.T) {
+	store, closeStore := newLegacyTestDoltliteReadStore(t)
+	defer closeStore()
+
+	issues, err := store.List(ListQuery{Label: "tier-test", Sort: SortCreatedAsc})
+	if err != nil {
+		t.Fatalf("List issues tier: %v", err)
+	}
+	if got := testBeadIDs(issues); !slices.Equal(got, []string{"gc-legacy-issue"}) {
+		t.Fatalf("issues tier ids = %v, want [gc-legacy-issue]; rows=%#v", got, issues)
+	}
+
+	wisps, err := store.List(ListQuery{Label: "tier-test", TierMode: TierWisps, Sort: SortCreatedAsc})
+	if err != nil {
+		t.Fatalf("List wisps tier: %v", err)
+	}
+	if len(wisps) != 1 || wisps[0].ID != "gc-legacy-wisp" || !wisps[0].Ephemeral {
+		t.Fatalf("wisps tier rows = %#v, want only ephemeral gc-legacy-wisp", wisps)
+	}
+
+	both, err := store.List(ListQuery{Label: "tier-test", TierMode: TierBoth, Sort: SortCreatedAsc})
+	if err != nil {
+		t.Fatalf("List both tiers: %v", err)
+	}
+	if got := testBeadIDs(both); !slices.Equal(got, []string{"gc-legacy-issue", "gc-legacy-wisp"}) {
+		t.Fatalf("both tier ids = %v, want [gc-legacy-issue gc-legacy-wisp]; rows=%#v", got, both)
 	}
 }
 
@@ -764,6 +820,484 @@ func TestDoltliteReadStoreFiltersPluralAssigneesAcrossTiers(t *testing.T) {
 	}
 	if !rows[1].Ephemeral {
 		t.Fatalf("wisp row Ephemeral = false: %#v", rows[1])
+	}
+}
+
+// TestDoltliteReadStoreLimitCutsDeterministicPrefixOnCreatedAtTies pins the
+// (created_at, id) total order at the SQL layer (#3208): when rows share a
+// created_at timestamp, a LIMIT-bounded read must cut the same prefix on
+// every call. Without the id tiebreaker in ORDER BY, SQLite resolves ties in
+// unspecified (rowid/insertion) order and the bounded subset is arbitrary.
+func TestDoltliteReadStoreLimitCutsDeterministicPrefixOnCreatedAtTies(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+	writer := openTestDoltliteWriter(t, store.db)
+	defer writer.Close() //nolint:errcheck // test cleanup
+
+	tie := doltliteSQLiteTime(time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC))
+	// Insert in an order (c, a, b) that differs from both id directions so
+	// an insertion-ordered tie-cut cannot accidentally match the contract.
+	for _, id := range []string{"gc-tie-c", "gc-tie-a", "gc-tie-b"} {
+		if _, err := writer.Exec(`INSERT INTO issues (
+			id, title, status, issue_type, priority, created_at, updated_at,
+			assignee, description, design, acceptance_criteria, notes, metadata
+		) VALUES (?, ?, 'open', 'task', 2, ?, ?, 'rig/tie-order', '', '', '', '', '{}')`,
+			id, id, tie, tie); err != nil {
+			t.Fatalf("insert tie issue %s: %v", id, err)
+		}
+	}
+
+	descTop2, err := store.List(ListQuery{
+		Assignee:   "rig/tie-order",
+		Sort:       SortCreatedDesc,
+		Limit:      2,
+		SkipLabels: true,
+	})
+	if err != nil {
+		t.Fatalf("List desc limit 2: %v", err)
+	}
+	if got := testBeadIDs(descTop2); !slices.Equal(got, []string{"gc-tie-c", "gc-tie-b"}) {
+		t.Fatalf("desc limit-2 ids = %v, want [gc-tie-c gc-tie-b]", got)
+	}
+
+	ascAll, err := store.List(ListQuery{
+		Assignee:   "rig/tie-order",
+		Sort:       SortCreatedAsc,
+		SkipLabels: true,
+	})
+	if err != nil {
+		t.Fatalf("List asc: %v", err)
+	}
+	if got := testBeadIDs(ascAll); !slices.Equal(got, []string{"gc-tie-a", "gc-tie-b", "gc-tie-c"}) {
+		t.Fatalf("asc ids = %v, want [gc-tie-a gc-tie-b gc-tie-c]", got)
+	}
+}
+
+// TestDoltliteReadStoreBoundedMultiTableMergeKeepsGlobalTopN pins the
+// cross-table merge contract for bounded TierIssues reads (#3444). TierIssues
+// now spans both the issues and wisps tables, and the merge dedupes by id
+// before the global sort+limit. A per-table SQL LIMIT must therefore not be
+// pushed for multi-table reads: if it were, a table whose limited prefix is
+// entirely cross-table duplicates would never surface a later unique row that
+// belongs in the global top-N. Here gc-dup-a and gc-dup-b are durable issues
+// that outrank their no-history wisp twins, so a pushed per-table LIMIT 2
+// would fetch only the duplicated wisps prefix (a@99, b@98) and never see the
+// unique durable wisp gc-dup-c@97 that sorts into the true top-2.
+func TestDoltliteReadStoreBoundedMultiTableMergeKeepsGlobalTopN(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+	writer := openTestDoltliteWriter(t, store.db)
+	defer writer.Close() //nolint:errcheck // test cleanup
+
+	base := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	for _, issue := range []testDoltliteIssue{
+		{ID: "gc-dup-a", Title: "dup a issue", CreatedAt: base.Add(100 * time.Second), Labels: []string{"dup-prefix"}},
+		{ID: "gc-dup-b", Title: "dup b issue", CreatedAt: base.Add(1 * time.Second), Labels: []string{"dup-prefix"}},
+	} {
+		insertTestDoltliteIssue(t, writer, "issues", "labels", "dependencies", issue)
+	}
+	for _, wisp := range []testDoltliteIssue{
+		{ID: "gc-dup-a", Title: "dup a wisp", CreatedAt: base.Add(99 * time.Second), Labels: []string{"dup-prefix"}, NoHistory: true},
+		{ID: "gc-dup-b", Title: "dup b wisp", CreatedAt: base.Add(98 * time.Second), Labels: []string{"dup-prefix"}, NoHistory: true},
+		{ID: "gc-dup-c", Title: "dup c wisp", CreatedAt: base.Add(97 * time.Second), Labels: []string{"dup-prefix"}, NoHistory: true},
+	} {
+		insertTestDoltliteIssue(t, writer, "wisps", "wisp_labels", "wisp_dependencies", wisp)
+	}
+
+	// Unbounded TierIssues read is the ground truth: the durable issue rows
+	// plus the deduped unique no-history wisp (the a/b wisp twins fold into
+	// their issue rows), sorted created-desc.
+	all, err := store.List(ListQuery{Label: "dup-prefix", Sort: SortCreatedDesc, SkipLabels: true})
+	if err != nil {
+		t.Fatalf("List unbounded: %v", err)
+	}
+	if got := testBeadIDs(all); !slices.Equal(got, []string{"gc-dup-a", "gc-dup-c", "gc-dup-b"}) {
+		t.Fatalf("unbounded ids = %v, want [gc-dup-a gc-dup-c gc-dup-b]", got)
+	}
+
+	// The bounded read must equal the unbounded top-2, not the per-table
+	// limited prefix [gc-dup-a gc-dup-b].
+	top2, err := store.List(ListQuery{Label: "dup-prefix", Sort: SortCreatedDesc, Limit: 2, SkipLabels: true})
+	if err != nil {
+		t.Fatalf("List limit 2: %v", err)
+	}
+	if got := testBeadIDs(top2); !slices.Equal(got, []string{"gc-dup-a", "gc-dup-c"}) {
+		t.Fatalf("bounded top-2 ids = %v, want [gc-dup-a gc-dup-c]", got)
+	}
+}
+
+// TestDoltliteReadStoreBoundedTopNAvoidsFullHistoryHydration pins the bounded
+// multi-table read fix (#3449 review). A limited default-tier read now selects
+// the exact global top-N ids in one SQL statement and hydrates only those ids,
+// instead of reading every matching row from both tables and cutting in Go.
+// The dataset's highest-sorted row is an ephemeral wisp that must stay out of
+// TierIssues, and a no-history wisp twin folds into its durable issue, so the
+// bounded result must equal the unbounded top-N across the issues/wisps
+// boundary while the id selection itself stays O(limit).
+func TestDoltliteReadStoreBoundedTopNAvoidsFullHistoryHydration(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+	writer := openTestDoltliteWriter(t, store.db)
+	defer writer.Close() //nolint:errcheck // test cleanup
+
+	base := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	for _, issue := range []testDoltliteIssue{
+		{ID: "gc-bt-i1", Title: "i1", CreatedAt: base.Add(10 * time.Second), Labels: []string{"bt"}},
+		{ID: "gc-bt-i2", Title: "i2", CreatedAt: base.Add(8 * time.Second), Labels: []string{"bt"}},
+		{ID: "gc-bt-i3", Title: "i3", CreatedAt: base.Add(2 * time.Second), Labels: []string{"bt"}},
+	} {
+		insertTestDoltliteIssue(t, writer, "issues", "labels", "dependencies", issue)
+	}
+	for _, wisp := range []testDoltliteIssue{
+		{ID: "gc-bt-w1", Title: "w1", CreatedAt: base.Add(9 * time.Second), Labels: []string{"bt"}, NoHistory: true},
+		{ID: "gc-bt-i2", Title: "i2 wisp twin", CreatedAt: base.Add(7 * time.Second), Labels: []string{"bt"}, NoHistory: true},
+		{ID: "gc-bt-w2", Title: "w2", CreatedAt: base.Add(5 * time.Second), Labels: []string{"bt"}, NoHistory: true},
+		{ID: "gc-bt-eph", Title: "ephemeral", CreatedAt: base.Add(100 * time.Second), Labels: []string{"bt"}, Ephemeral: true},
+	} {
+		insertTestDoltliteIssue(t, writer, "wisps", "wisp_labels", "wisp_dependencies", wisp)
+	}
+
+	// Ground truth: the ephemeral wisp is excluded from TierIssues, the i2 wisp
+	// twin folds into its durable issue, sorted created-desc.
+	wantUnbounded := []string{"gc-bt-i1", "gc-bt-w1", "gc-bt-i2", "gc-bt-w2", "gc-bt-i3"}
+	all, err := store.List(ListQuery{Label: "bt", Sort: SortCreatedDesc})
+	if err != nil {
+		t.Fatalf("List unbounded: %v", err)
+	}
+	if got := testBeadIDs(all); !slices.Equal(got, wantUnbounded) {
+		t.Fatalf("unbounded ids = %v, want %v", got, wantUnbounded)
+	}
+
+	// The id selection is bounded and exact: it returns exactly the top-3 ids
+	// (not all five matches), proving the SQL LIMIT is applied during selection
+	// rather than after hydrating full matching history.
+	sets := doltliteTableSetsForMode(TierIssues)
+	ids, err := store.selectBoundedTopNIDs(ListQuery{Label: "bt", Sort: SortCreatedDesc}, sets, 3)
+	if err != nil {
+		t.Fatalf("selectBoundedTopNIDs: %v", err)
+	}
+	if !slices.Equal(ids, []string{"gc-bt-i1", "gc-bt-w1", "gc-bt-i2"}) {
+		t.Fatalf("selected top-3 ids = %v, want [gc-bt-i1 gc-bt-w1 gc-bt-i2]", ids)
+	}
+
+	// End to end the bounded List equals the unbounded top-3, and the hydrated
+	// rows carry their labels and storage flags across both tables.
+	top3, err := store.List(ListQuery{Label: "bt", Sort: SortCreatedDesc, Limit: 3})
+	if err != nil {
+		t.Fatalf("List limit 3: %v", err)
+	}
+	if got := testBeadIDs(top3); !slices.Equal(got, []string{"gc-bt-i1", "gc-bt-w1", "gc-bt-i2"}) {
+		t.Fatalf("bounded top-3 ids = %v, want [gc-bt-i1 gc-bt-w1 gc-bt-i2]", got)
+	}
+	w1 := findTestBead(t, top3, "gc-bt-w1")
+	if !slices.Contains(w1.Labels, "bt") {
+		t.Fatalf("hydrated wisp gc-bt-w1 missing label bt: %#v", w1.Labels)
+	}
+	if !w1.NoHistory {
+		t.Fatalf("hydrated wisp gc-bt-w1 should be NoHistory: %#v", w1)
+	}
+
+	// TierBoth takes the same bounded fast path but applies no tier filter, so
+	// the ephemeral wisp (highest created_at) is the bounded top-1 — the
+	// opposite of the TierIssues result above.
+	bothTop1, err := store.List(ListQuery{Label: "bt", Sort: SortCreatedDesc, Limit: 1, TierMode: TierBoth})
+	if err != nil {
+		t.Fatalf("List TierBoth limit 1: %v", err)
+	}
+	if got := testBeadIDs(bothTop1); !slices.Equal(got, []string{"gc-bt-eph"}) {
+		t.Fatalf("TierBoth bounded top-1 ids = %v, want [gc-bt-eph]", got)
+	}
+}
+
+// TestDoltliteReadStoreBoundedSameSecondPrefixMatchesUnbounded pins the #3449
+// review fix for sub-second precision: scanBead truncates CreatedAt to whole
+// seconds, so the Go merge orders same-second rows by id. A bounded read's SQL
+// LIMIT must cut on that same second-granular key, not the raw sub-second
+// created_at text, or it selects a different prefix than the unbounded merge.
+// The sub-second offsets below are the exact reverse of the id order, so a raw
+// ordering would invert the canonical prefix at every limit boundary. Covers
+// both the multi-table bounded path (selectBoundedTopNIDs) and the single-table
+// limited path (queryIssueTable).
+func TestDoltliteReadStoreBoundedSameSecondPrefixMatchesUnbounded(t *testing.T) {
+	base := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+
+	assertPrefixParity := func(t *testing.T, store *DoltliteReadStore, tier TierMode) {
+		t.Helper()
+		for _, sort := range []SortOrder{SortCreatedDesc, SortCreatedAsc} {
+			unbounded, err := store.List(ListQuery{Label: "ss", Sort: sort, TierMode: tier})
+			if err != nil {
+				t.Fatalf("List unbounded (tier=%v sort=%v): %v", tier, sort, err)
+			}
+			if len(unbounded) != 4 {
+				t.Fatalf("unbounded len = %d, want 4 (ids %v)", len(unbounded), testBeadIDs(unbounded))
+			}
+			for k := 1; k <= 4; k++ {
+				bounded, err := store.List(ListQuery{Label: "ss", Sort: sort, TierMode: tier, Limit: k})
+				if err != nil {
+					t.Fatalf("List(tier=%v sort=%v limit=%d): %v", tier, sort, k, err)
+				}
+				got, want := testBeadIDs(bounded), testBeadIDs(unbounded[:k])
+				if !slices.Equal(got, want) {
+					t.Fatalf("bounded prefix (tier=%v sort=%v limit=%d) = %v, want unbounded prefix %v", tier, sort, k, got, want)
+				}
+			}
+		}
+	}
+
+	t.Run("tier_issues_multi_table", func(t *testing.T) {
+		issues := []testDoltliteIssue{
+			{ID: "gc-ss-a", Title: "a", CreatedAt: base.Add(800 * time.Millisecond), Labels: []string{"ss"}},
+			{ID: "gc-ss-c", Title: "c", CreatedAt: base.Add(400 * time.Millisecond), Labels: []string{"ss"}},
+		}
+		wisps := []testDoltliteIssue{
+			{ID: "gc-ss-b", Title: "b", CreatedAt: base.Add(600 * time.Millisecond), Labels: []string{"ss"}, NoHistory: true},
+			{ID: "gc-ss-d", Title: "d", CreatedAt: base.Add(200 * time.Millisecond), Labels: []string{"ss"}, NoHistory: true},
+		}
+		assertPrefixParity(t, newDoltliteStoreWithRows(t, issues, wisps), TierIssues)
+	})
+
+	t.Run("tier_wisps_single_table", func(t *testing.T) {
+		wisps := []testDoltliteIssue{
+			{ID: "gc-ss-a", Title: "a", CreatedAt: base.Add(800 * time.Millisecond), Labels: []string{"ss"}, NoHistory: true},
+			{ID: "gc-ss-b", Title: "b", CreatedAt: base.Add(600 * time.Millisecond), Labels: []string{"ss"}, NoHistory: true},
+			{ID: "gc-ss-c", Title: "c", CreatedAt: base.Add(400 * time.Millisecond), Labels: []string{"ss"}, NoHistory: true},
+			{ID: "gc-ss-d", Title: "d", CreatedAt: base.Add(200 * time.Millisecond), Labels: []string{"ss"}, NoHistory: true},
+		}
+		assertPrefixParity(t, newDoltliteStoreWithRows(t, nil, wisps), TierWisps)
+	})
+}
+
+// TestDoltliteReadStoreBoundedMixedTimestampLayoutPrefixMatchesUnbounded pins the
+// #3449 post-merge review fix for mixed on-disk created_at layouts. parseTimeString
+// accepts both RFC3339 ("...T...") and time.Time.String()'s space-separated form, and
+// scanBead parses every row to a real instant, so the Go merge orders rows
+// chronologically regardless of stored layout. The bounded SQL paths order by
+// substr(created_at, 1, 19), whose 11th char is the layout separator ('T' = 0x54 vs
+// ' ' = 0x20): within one date every space-separated row sorts lexically before every
+// RFC3339 row no matter the actual time, so a raw-substr LIMIT can cut a different
+// top-N than the unbounded merge. The rows below share one date and interleave layouts
+// by instant, so a raw-substr ordering inverts the canonical prefix at the limit=1
+// boundary. Covers the multi-table bounded path (selectBoundedTopNIDs) and the
+// single-table limited path (queryIssueTable).
+func TestDoltliteReadStoreBoundedMixedTimestampLayoutPrefixMatchesUnbounded(t *testing.T) {
+	base := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	// rfc3339 and spaced encode the same instant in the two layouts parseTimeString
+	// accepts; their substr(...,1,19) prefixes differ only at the 'T'/' ' separator.
+	rfc3339 := func(ts time.Time) string { return ts.UTC().Format(time.RFC3339Nano) }
+	spaced := func(ts time.Time) string { return ts.UTC().Format("2006-01-02 15:04:05.999999999 -0700 MST") }
+
+	assertPrefixParity := func(t *testing.T, store *DoltliteReadStore, tier TierMode) {
+		t.Helper()
+		for _, sort := range []SortOrder{SortCreatedDesc, SortCreatedAsc} {
+			unbounded, err := store.List(ListQuery{Label: "ml", Sort: sort, TierMode: tier})
+			if err != nil {
+				t.Fatalf("List unbounded (tier=%v sort=%v): %v", tier, sort, err)
+			}
+			if len(unbounded) != 4 {
+				t.Fatalf("unbounded len = %d, want 4 (ids %v)", len(unbounded), testBeadIDs(unbounded))
+			}
+			for k := 1; k <= 4; k++ {
+				bounded, err := store.List(ListQuery{Label: "ml", Sort: sort, TierMode: tier, Limit: k})
+				if err != nil {
+					t.Fatalf("List(tier=%v sort=%v limit=%d): %v", tier, sort, k, err)
+				}
+				got, want := testBeadIDs(bounded), testBeadIDs(unbounded[:k])
+				if !slices.Equal(got, want) {
+					t.Fatalf("bounded prefix (tier=%v sort=%v limit=%d) = %v, want unbounded prefix %v", tier, sort, k, got, want)
+				}
+			}
+		}
+	}
+
+	t.Run("tier_issues_multi_table", func(t *testing.T) {
+		// Chronological order a<b<c<d; durable issues carry RFC3339 text and durable
+		// wisps carry space-separated text, so stored layout interleaves true instant
+		// order across the two tables the bounded multi-table read unions.
+		issues := []testDoltliteIssue{
+			{ID: "gc-ml-a", Title: "a", CreatedAt: base.Add(1 * time.Second), RawCreatedAt: rfc3339(base.Add(1 * time.Second)), Labels: []string{"ml"}},
+			{ID: "gc-ml-c", Title: "c", CreatedAt: base.Add(3 * time.Second), RawCreatedAt: rfc3339(base.Add(3 * time.Second)), Labels: []string{"ml"}},
+		}
+		wisps := []testDoltliteIssue{
+			{ID: "gc-ml-b", Title: "b", CreatedAt: base.Add(2 * time.Second), RawCreatedAt: spaced(base.Add(2 * time.Second)), Labels: []string{"ml"}, NoHistory: true},
+			{ID: "gc-ml-d", Title: "d", CreatedAt: base.Add(4 * time.Second), RawCreatedAt: spaced(base.Add(4 * time.Second)), Labels: []string{"ml"}, NoHistory: true},
+		}
+		assertPrefixParity(t, newDoltliteStoreWithRows(t, issues, wisps), TierIssues)
+	})
+
+	t.Run("tier_wisps_single_table", func(t *testing.T) {
+		// One table, layouts alternating by instant, so the single-table SQL
+		// ORDER BY ... LIMIT must still cut the chronological prefix.
+		wisps := []testDoltliteIssue{
+			{ID: "gc-ml-a", Title: "a", CreatedAt: base.Add(1 * time.Second), RawCreatedAt: rfc3339(base.Add(1 * time.Second)), Labels: []string{"ml"}, NoHistory: true},
+			{ID: "gc-ml-b", Title: "b", CreatedAt: base.Add(2 * time.Second), RawCreatedAt: spaced(base.Add(2 * time.Second)), Labels: []string{"ml"}, NoHistory: true},
+			{ID: "gc-ml-c", Title: "c", CreatedAt: base.Add(3 * time.Second), RawCreatedAt: rfc3339(base.Add(3 * time.Second)), Labels: []string{"ml"}, NoHistory: true},
+			{ID: "gc-ml-d", Title: "d", CreatedAt: base.Add(4 * time.Second), RawCreatedAt: spaced(base.Add(4 * time.Second)), Labels: []string{"ml"}, NoHistory: true},
+		}
+		assertPrefixParity(t, newDoltliteStoreWithRows(t, nil, wisps), TierWisps)
+	})
+}
+
+// TestDoltliteReadStoreBoundedHydrationChunksLargeIDSet pins the deep-pagination
+// fix for the bounded multi-table read (#3449 review). The bounded path selects
+// up to `limit` ids in one SQL statement and hydrates them with an
+// `i.id IN (?,...)` clause. The native DoltLite driver (modernc.org/sqlite) caps
+// a statement at SQLITE_MAX_VARIABLE_NUMBER = 32766 bound parameters, and the
+// API sets query.Limit to the cursor Offset+Limit with the offset uncapped
+// (internal/api/pagination.go), so a deep cursor walk over a large rig can select
+// more ids than the cap. An unchunked IN clause then overflows with
+// "too many SQL variables" and the read 500s on its last page(s) — a
+// success→error regression on exactly the large-rig hot path this PR optimizes,
+// invisible to first-page reads. Seed more than the cap worth of matching rows
+// and assert a large-limit List succeeds and returns the exact global order.
+func TestDoltliteReadStoreBoundedHydrationChunksLargeIDSet(t *testing.T) {
+	// 32766 is modernc.org/sqlite's SQLITE_MAX_VARIABLE_NUMBER; seed above it so
+	// an unchunked hydrate IN clause would overflow.
+	const rowCount = 33000
+	store := newDoltliteStoreWithBulkIssues(t, rowCount)
+
+	// limit > rowCount so the bounded selection returns every matching id: the
+	// hydrate clause therefore carries all rowCount ids, exceeding the variable
+	// cap unless hydrateBeadsByID chunks it.
+	got, err := store.List(ListQuery{AllowScan: true, Sort: SortCreatedAsc, Limit: rowCount + 1000})
+	if err != nil {
+		t.Fatalf("large-limit bounded List failed (deep-pagination IN overflow regression): %v", err)
+	}
+	if len(got) != rowCount {
+		t.Fatalf("List returned %d rows, want %d", len(got), rowCount)
+	}
+	// Chunked hydration must not change which ids survive the cut or their order:
+	// the rows are id-ordered with strictly increasing created_at, so the asc
+	// result is the seed order from first to last id.
+	if got[0].ID != "gc-bulk-000000" {
+		t.Fatalf("first row = %q, want gc-bulk-000000", got[0].ID)
+	}
+	if last, want := got[len(got)-1].ID, fmt.Sprintf("gc-bulk-%06d", rowCount-1); last != want {
+		t.Fatalf("last row = %q, want %q", last, want)
+	}
+}
+
+// newDoltliteStoreWithBulkIssues seeds a fresh DoltLite snapshot with n minimal
+// durable task issues inside one transaction (autocommit would fsync per row,
+// which is far too slow for the tens of thousands of rows the variable-cap
+// regression needs) and returns a read store over it. Rows are id-ordered
+// gc-bulk-NNNNNN with strictly increasing created_at so the bounded read order
+// is deterministic.
+func newDoltliteStoreWithBulkIssues(t testing.TB, n int) *DoltliteReadStore {
+	t.Helper()
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(filepath.Join(beadsDir, "doltlite"), 0o755); err != nil {
+		t.Fatalf("mkdir doltlite dir: %v", err)
+	}
+	meta := []byte(`{"backend":"doltlite","database":"doltlite","dolt_database":"hq"}`)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), meta, 0o600); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+	dbPath := filepath.Join(beadsDir, "doltlite", "hq.db")
+	db, err := sql.Open("sqlite", dbPath+"?_busy_timeout=10000")
+	if err != nil {
+		t.Fatalf("open doltlite fixture db: %v", err)
+	}
+	defer db.Close() //nolint:errcheck // test cleanup
+	createTestDoltliteSchema(t, db)
+
+	base := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin bulk insert: %v", err)
+	}
+	stmt, err := tx.Prepare(`INSERT INTO issues (
+		id, title, status, issue_type, priority, created_at, updated_at,
+		assignee, description, design, acceptance_criteria, notes, metadata,
+		ephemeral, no_history
+	) VALUES (?, ?, 'open', 'task', 2, ?, ?, '', '', '', '', '', '{}', 0, 0)`)
+	if err != nil {
+		t.Fatalf("prepare bulk insert: %v", err)
+	}
+	for i := 0; i < n; i++ {
+		ts := base.Add(time.Duration(i) * time.Second).Format(time.RFC3339Nano)
+		id := fmt.Sprintf("gc-bulk-%06d", i)
+		if _, err := stmt.Exec(id, id, ts, ts); err != nil {
+			t.Fatalf("bulk insert row %d: %v", i, err)
+		}
+	}
+	if err := stmt.Close(); err != nil {
+		t.Fatalf("close bulk insert stmt: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit bulk insert: %v", err)
+	}
+
+	backing := NewBdStore(dir, func(string, string, ...string) ([]byte, error) {
+		t.Fatal("backing bd runner should not be called by doltlite read tests")
+		return nil, nil
+	})
+	store, err := NewDoltliteReadStore(dir, backing)
+	if err != nil {
+		t.Fatalf("NewDoltliteReadStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.CloseStore() })
+	return store
+}
+
+// TestDoltliteReadStoreCustomOrderByRejectsMultiTableSet pins the invariant that
+// a custom orderBy must target a single table set (#3449 review). The merged
+// read path applies a custom orderBy per table in SQL and skips the cross-table
+// Go re-sort, so a multi-table set would silently concatenate independently
+// ordered tables. The public List path always passes the default (empty)
+// orderBy and Ready passes a single issues-only set, so this guard never fires
+// in production; it converts a latent silent-misordering into an explicit error
+// for any future caller.
+func TestDoltliteReadStoreCustomOrderByRejectsMultiTableSet(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+
+	sets := doltliteTableSetsForMode(TierIssues)
+	if len(sets) < 2 {
+		t.Fatalf("TierIssues table sets = %d, want >= 2 to exercise the guard", len(sets))
+	}
+	const customOrder = "ORDER BY i.created_at ASC, i.id ASC"
+	if _, err := store.queryIssuesOrderedInTables(ListQuery{AllowScan: true}, sets, "", nil, 0, customOrder); err == nil {
+		t.Fatal("custom orderBy with multiple table sets should error, got nil")
+	} else if !strings.Contains(err.Error(), "single table set") {
+		t.Fatalf("error = %q, want it to mention the single-table-set invariant", err)
+	}
+
+	// The same custom orderBy against a single table set is allowed.
+	if _, err := store.queryIssuesOrderedInTables(ListQuery{AllowScan: true}, []doltliteTableSet{doltliteIssueTables}, "", nil, 0, customOrder); err != nil {
+		t.Fatalf("custom orderBy with a single table set should succeed, got %v", err)
+	}
+}
+
+// TestDoltliteReadStoreReadyLimitCutsDeterministicPrefixOnTies pins the same
+// (#3208) tie-cut contract for the Ready path, whose custom ORDER BY
+// (priority, created_at) also needs the id tiebreaker for a deterministic
+// LIMIT prefix when rows share both keys.
+func TestDoltliteReadStoreReadyLimitCutsDeterministicPrefixOnTies(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+	writer := openTestDoltliteWriter(t, store.db)
+	defer writer.Close() //nolint:errcheck // test cleanup
+
+	tie := doltliteSQLiteTime(time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC))
+	// Insert in an order (c, a, b) that differs from both id directions so
+	// an insertion-ordered tie-cut cannot accidentally match the contract.
+	for _, id := range []string{"gc-rtie-c", "gc-rtie-a", "gc-rtie-b"} {
+		if _, err := writer.Exec(`INSERT INTO issues (
+			id, title, status, issue_type, priority, created_at, updated_at,
+			assignee, description, design, acceptance_criteria, notes, metadata
+		) VALUES (?, ?, 'open', 'task', 2, ?, ?, 'rig/rtie-order', '', '', '', '', '{}')`,
+			id, id, tie, tie); err != nil {
+			t.Fatalf("insert ready tie issue %s: %v", id, err)
+		}
+	}
+
+	top2, err := store.Ready(ReadyQuery{Assignee: "rig/rtie-order", Limit: 2})
+	if err != nil {
+		t.Fatalf("Ready limit 2: %v", err)
+	}
+	if got := testBeadIDs(top2); !slices.Equal(got, []string{"gc-rtie-a", "gc-rtie-b"}) {
+		t.Fatalf("ready limit-2 ids = %v, want [gc-rtie-a gc-rtie-b]", got)
 	}
 }
 
@@ -969,6 +1503,18 @@ func newTestDoltliteReadStore(t *testing.T) (*DoltliteReadStore, func()) {
 		Assignee:  "rig/wisp-worker",
 		Labels:    []string{"tier-test"},
 		Metadata:  map[string]string{"kind": "wisp"},
+		Ephemeral: true,
+	})
+	insertTestDoltliteIssue(t, db, "wisps", "wisp_labels", "wisp_dependencies", testDoltliteIssue{
+		ID:        "gc-tier-nohistory",
+		Title:     "tier no-history",
+		Status:    "open",
+		IssueType: "task",
+		CreatedAt: now.Add(5 * time.Second),
+		Assignee:  "rig/nohistory-worker",
+		Labels:    []string{"tier-test"},
+		Metadata:  map[string]string{"kind": "no-history"},
+		NoHistory: true,
 	})
 
 	backing := NewBdStore(dir, func(string, string, ...string) ([]byte, error) {
@@ -991,21 +1537,47 @@ type testDoltliteDependency struct {
 }
 
 type testDoltliteIssue struct {
-	ID           string
-	Title        string
-	Status       string
-	IssueType    string
-	Priority     int
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	ID        string
+	Title     string
+	Status    string
+	IssueType string
+	Priority  int
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	// RawCreatedAt, when set, is written to the created_at column verbatim
+	// instead of CreatedAt.Format(time.RFC3339Nano), so a test can seed a
+	// specific on-disk timestamp layout (e.g. time.Time.String()'s
+	// space-separated form) and exercise mixed-layout read ordering.
+	RawCreatedAt string
 	Assignee     string
 	Description  string
 	Labels       []string
 	Metadata     map[string]string
 	Dependencies []testDoltliteDependency
+	Ephemeral    bool
+	NoHistory    bool
 }
 
-func createTestDoltliteSchema(t *testing.T, db *sql.DB) {
+// createTestDoltliteSchema mirrors the snapshot schema the current DoltLite
+// beads backend writes: the upstream wisps/no-history migrations (0020/0023)
+// give both row tables ephemeral and no_history storage-flag columns.
+// createLegacyTestDoltliteSchema covers snapshots from before those columns.
+func createTestDoltliteSchema(t testing.TB, db *sql.DB) {
+	t.Helper()
+	const storageFlagColumns = `,
+			ephemeral INTEGER DEFAULT 0,
+			no_history INTEGER DEFAULT 0`
+	createTestDoltliteSchemaWithRowColumns(t, db, storageFlagColumns)
+}
+
+// createLegacyTestDoltliteSchema mirrors doltlite snapshots written before
+// the wisps table carried storage-flag columns: every wisps row is ephemeral.
+func createLegacyTestDoltliteSchema(t testing.TB, db *sql.DB) {
+	t.Helper()
+	createTestDoltliteSchemaWithRowColumns(t, db, "")
+}
+
+func createTestDoltliteSchemaWithRowColumns(t testing.TB, db *sql.DB, extraRowColumns string) {
 	t.Helper()
 	for _, stmt := range []string{
 		`CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT)`,
@@ -1022,7 +1594,7 @@ func createTestDoltliteSchema(t *testing.T, db *sql.DB) {
 			design TEXT,
 			acceptance_criteria TEXT,
 			notes TEXT,
-			metadata TEXT
+			metadata TEXT` + extraRowColumns + `
 		)`,
 		`CREATE TABLE wisps (
 			id TEXT PRIMARY KEY,
@@ -1037,7 +1609,7 @@ func createTestDoltliteSchema(t *testing.T, db *sql.DB) {
 			design TEXT,
 			acceptance_criteria TEXT,
 			notes TEXT,
-			metadata TEXT
+			metadata TEXT` + extraRowColumns + `
 		)`,
 		`CREATE TABLE labels (issue_id TEXT, label TEXT)`,
 		`CREATE TABLE wisp_labels (issue_id TEXT, label TEXT)`,
@@ -1066,7 +1638,7 @@ func createTestDoltliteSchema(t *testing.T, db *sql.DB) {
 	}
 }
 
-func insertTestDoltliteIssue(t *testing.T, db *sql.DB, issueTable, labelTable, depTable string, issue testDoltliteIssue) {
+func insertTestDoltliteIssue(t testing.TB, db *sql.DB, issueTable, labelTable, depTable string, issue testDoltliteIssue) {
 	t.Helper()
 	if issue.Status == "" {
 		issue.Status = "open"
@@ -1080,6 +1652,10 @@ func insertTestDoltliteIssue(t *testing.T, db *sql.DB, issueTable, labelTable, d
 	if issue.UpdatedAt.IsZero() {
 		issue.UpdatedAt = issue.CreatedAt
 	}
+	createdAt := issue.CreatedAt.Format(time.RFC3339Nano)
+	if issue.RawCreatedAt != "" {
+		createdAt = issue.RawCreatedAt
+	}
 	metadata := "{}"
 	if len(issue.Metadata) > 0 {
 		raw, err := json.Marshal(issue.Metadata)
@@ -1090,18 +1666,21 @@ func insertTestDoltliteIssue(t *testing.T, db *sql.DB, issueTable, labelTable, d
 	}
 	_, err := db.Exec(`INSERT INTO `+issueTable+` (
 		id, title, status, issue_type, priority, created_at, updated_at,
-		assignee, description, design, acceptance_criteria, notes, metadata
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', '', ?)`,
+		assignee, description, design, acceptance_criteria, notes, metadata,
+		ephemeral, no_history
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', '', ?, ?, ?)`,
 		issue.ID,
 		issue.Title,
 		issue.Status,
 		issue.IssueType,
 		issue.Priority,
-		issue.CreatedAt.Format(time.RFC3339Nano),
+		createdAt,
 		issue.UpdatedAt.Format(time.RFC3339Nano),
 		issue.Assignee,
 		issue.Description,
 		metadata,
+		boolToTestInt(issue.Ephemeral),
+		boolToTestInt(issue.NoHistory),
 	)
 	if err != nil {
 		t.Fatalf("insert %s into %s: %v", issue.ID, issueTable, err)
@@ -1122,6 +1701,77 @@ func insertTestDoltliteIssue(t *testing.T, db *sql.DB, issueTable, labelTable, d
 			t.Fatalf("insert dep %s -> %s: %v", issue.ID, dep.DependsOnID, err)
 		}
 	}
+}
+
+func boolToTestInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
+
+// newLegacyTestDoltliteReadStore builds a read store over a pre-storage-flag
+// snapshot (no ephemeral/no_history columns) seeded with one durable issue
+// and one wisps row, both labeled tier-test.
+func newLegacyTestDoltliteReadStore(t *testing.T) (*DoltliteReadStore, func()) {
+	t.Helper()
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir beads dir: %v", err)
+	}
+	meta := []byte(`{"backend":"doltlite","database":"doltlite","dolt_database":"hq"}`)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), meta, 0o600); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+	dbDir := filepath.Join(beadsDir, "doltlite")
+	if err := os.MkdirAll(dbDir, 0o755); err != nil {
+		t.Fatalf("mkdir doltlite dir: %v", err)
+	}
+	dbPath := filepath.Join(dbDir, "hq.db")
+	db, err := sql.Open("sqlite", dbPath+"?_busy_timeout=10000")
+	if err != nil {
+		t.Fatalf("open legacy doltlite fixture db: %v", err)
+	}
+	defer db.Close() //nolint:errcheck // test cleanup
+	createLegacyTestDoltliteSchema(t, db)
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, stmt := range []struct {
+		sql  string
+		args []any
+	}{
+		{
+			`INSERT INTO issues (
+			id, title, status, issue_type, priority, created_at, updated_at,
+			assignee, description, design, acceptance_criteria, notes, metadata
+		) VALUES (?, ?, 'open', 'task', 2, ?, ?, '', '', '', '', '', '{}')`,
+			[]any{"gc-legacy-issue", "legacy issue", now, now},
+		},
+		{`INSERT INTO labels (issue_id, label) VALUES ('gc-legacy-issue', 'tier-test')`, nil},
+		{
+			`INSERT INTO wisps (
+			id, title, status, issue_type, priority, created_at, updated_at,
+			assignee, description, design, acceptance_criteria, notes, metadata
+		) VALUES (?, ?, 'open', 'task', 2, ?, ?, '', '', '', '', '', '{}')`,
+			[]any{"gc-legacy-wisp", "legacy wisp", now, now},
+		},
+		{`INSERT INTO wisp_labels (issue_id, label) VALUES ('gc-legacy-wisp', 'tier-test')`, nil},
+	} {
+		if _, err := db.Exec(stmt.sql, stmt.args...); err != nil {
+			t.Fatalf("seed legacy doltlite fixture: %v\nstmt: %s", err, stmt.sql)
+		}
+	}
+
+	backing := NewBdStore(dir, func(string, string, ...string) ([]byte, error) {
+		t.Fatal("backing bd runner should not be called by doltlite read tests")
+		return nil, nil
+	})
+	store, err := NewDoltliteReadStore(dir, backing)
+	if err != nil {
+		t.Fatalf("NewDoltliteReadStore: %v", err)
+	}
+	return store, func() { _ = store.CloseStore() }
 }
 
 func testBeadIDs(rows []Bead) []string {
@@ -1184,4 +1834,310 @@ func openTestDoltliteWriter(t *testing.T, readDB *sql.DB) *sql.DB {
 		t.Fatalf("open writable doltlite db: %v", err)
 	}
 	return writer
+}
+
+// TestDoltliteReadStoreConditionalWriterLoudlyDegrades pins the F2 fix
+// (ga-zj78gu): once BdStore implements ConditionalWriter, the methods promote
+// through DoltliteReadStore's embedded *BdStore and ConditionalWriterFor asserts
+// true — but DoltliteReadStore.Get reads via direct SQL and cannot supply a real
+// revision until bd #4682. So the four CAS methods are shadowed to return the
+// typed unsupported veto rather than false-promote a store whose read path and
+// fenced-write path disagree on the revision source. The interface stays
+// SATISFIED (no hiding wrapper); every verb just degrades loudly.
+func TestDoltliteReadStoreConditionalWriterLoudlyDegrades(t *testing.T) {
+	store := newDoltliteStoreWithIssues(t, []testDoltliteIssue{
+		{ID: "ga-1", Title: "target", Status: "open", IssueType: "task"},
+	})
+
+	w, ok := ConditionalWriterFor(store)
+	if !ok {
+		t.Fatal("DoltliteReadStore must still SATISFY ConditionalWriter (degrade is behavioral, not interface-stripping)")
+	}
+
+	if err := w.UpdateIfMatch("ga-1", 1, UpdateOpts{}); !IsConditionalWriteUnsupported(err) {
+		t.Fatalf("UpdateIfMatch: got %v, want ErrConditionalWriteUnsupported", err)
+	}
+	if err := w.CloseIfMatch("ga-1", 1); !IsConditionalWriteUnsupported(err) {
+		t.Fatalf("CloseIfMatch: got %v, want ErrConditionalWriteUnsupported", err)
+	}
+	if err := w.DeleteIfMatch("ga-1", 1); !IsConditionalWriteUnsupported(err) {
+		t.Fatalf("DeleteIfMatch: got %v, want ErrConditionalWriteUnsupported", err)
+	}
+	ok2, err := w.CompareAndSetMetadataKey("ga-1", "k", "", "v")
+	if ok2 || !IsConditionalWriteUnsupported(err) {
+		t.Fatalf("CompareAndSetMetadataKey: got (%v, %v), want (false, ErrConditionalWriteUnsupported)", ok2, err)
+	}
+
+	// Completeness guard: iterate EVERY method on the ConditionalWriter interface
+	// via reflection and assert each degrades to unsupported. A CAS verb added to
+	// the interface later that is not shadowed here would instead promote from the
+	// embedded *BdStore, run the capability probe against the fatal-on-call
+	// backing runner, and fail loudly — closing the F2 false-promote class for
+	// future verbs, not just today's four.
+	cwType := reflect.TypeOf((*ConditionalWriter)(nil)).Elem()
+	wv := reflect.ValueOf(w)
+	for i := 0; i < cwType.NumMethod(); i++ {
+		name := cwType.Method(i).Name
+		method := wv.MethodByName(name)
+		in := make([]reflect.Value, method.Type().NumIn())
+		for j := range in {
+			in[j] = reflect.Zero(method.Type().In(j))
+		}
+		out := method.Call(in)
+		last, _ := out[len(out)-1].Interface().(error)
+		if !IsConditionalWriteUnsupported(last) {
+			t.Fatalf("ConditionalWriter.%s degraded to %v, want ErrConditionalWriteUnsupported (unshadowed promoted verb?)", name, last)
+		}
+	}
+}
+
+// TestDoltliteReadStoreResolveConditionalWriterDegrades pins the seam half of
+// F2: even when the embedded BdStore's capability probe would report capable,
+// DoltliteReadStore's prober shadow keeps ResolveConditionalWriter on the
+// degrade/refuse path — its SQL read path carries no bead revision, so a
+// promoted "capable" verdict would false-promote a store whose reads and
+// fenced writes disagree on the revision source. The fatal-on-call backing
+// runner doubles as the teeth: if the shadow ever disappears, the promoted
+// probe runs four subprocesses through it and the test dies loudly.
+func TestDoltliteReadStoreResolveConditionalWriterDegrades(t *testing.T) {
+	store := newDoltliteStoreWithIssues(t, []testDoltliteIssue{
+		{ID: "ga-1", Title: "target", Status: "open", IssueType: "task"},
+	})
+
+	store.stampConditionalWritesMode(gate.Auto, false)
+	w, diag, err := ResolveConditionalWriter(store)
+	if w != nil || err != nil {
+		t.Fatalf("auto over doltlite = (%v, _, %v), want (nil, diag, nil)", w, err)
+	}
+	if diag == nil || diag.PreflightGate != "conditional_writes" {
+		t.Fatalf("diag = %+v, want the conditional_writes degrade diagnostic", diag)
+	}
+	if !strings.Contains(diag.PreflightReason, "revision") {
+		t.Fatalf("PreflightReason = %q, want the no-revision F2 reason", diag.PreflightReason)
+	}
+
+	store.stampConditionalWritesMode(gate.Require, false)
+	w, diag, err = ResolveConditionalWriter(store)
+	if w != nil || diag == nil || !IsConditionalWritesRequired(err) {
+		t.Fatalf("require over doltlite = (%v, %v, %v), want (nil, diag, typed refusal)", w, diag, err)
+	}
+}
+
+// TestDoltliteReindexStore is the behavioral proof for ga-7hei: the reindex
+// mechanism must execute a real SQLite REINDEX against the physical
+// .beads/doltlite/<db>.db file (the property `bd sql 'REINDEX'` could not
+// satisfy, since it speaks Dolt/MySQL). After the rebuild the store stays a
+// valid SQLite database whose secondary index returns correct results.
+func TestDoltliteReindexStore(t *testing.T) {
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(filepath.Join(beadsDir, "doltlite"), 0o755); err != nil {
+		t.Fatalf("mkdir doltlite dir: %v", err)
+	}
+	meta := []byte(`{"backend":"doltlite","database":"doltlite","dolt_database":"hq"}`)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), meta, 0o600); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+	dbPath := filepath.Join(beadsDir, "doltlite", "hq.db")
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=rwc&_busy_timeout=10000")
+	if err != nil {
+		t.Fatalf("open fixture db: %v", err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE issues (id TEXT PRIMARY KEY, status TEXT)`,
+		`CREATE INDEX idx_issues_status ON issues(status)`,
+		`INSERT INTO issues (id, status) VALUES ('a','open'),('b','open'),('c','closed')`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			_ = db.Close()
+			t.Fatalf("seed fixture: %v\nstmt: %s", err, stmt)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close fixture db: %v", err)
+	}
+
+	if err := ReindexDoltliteStore(dir); err != nil {
+		t.Fatalf("ReindexDoltliteStore: %v", err)
+	}
+
+	check, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro&_busy_timeout=10000")
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer check.Close() //nolint:errcheck // test cleanup
+
+	var integrity string
+	if err := check.QueryRow("PRAGMA integrity_check").Scan(&integrity); err != nil {
+		t.Fatalf("integrity_check: %v", err)
+	}
+	if integrity != "ok" {
+		t.Fatalf("integrity_check = %q, want ok", integrity)
+	}
+
+	var openCount int
+	if err := check.QueryRow("SELECT COUNT(*) FROM issues WHERE status = 'open'").Scan(&openCount); err != nil {
+		t.Fatalf("indexed count: %v", err)
+	}
+	if openCount != 2 {
+		t.Fatalf("open issues via index = %d, want 2", openCount)
+	}
+}
+
+// reindexStaleCollSeq gives each stale-index fixture a unique collation name.
+// modernc.org/sqlite registers collations globally for the whole process, so a
+// reused name would let a prior run's closure (and its flipped ordering) leak
+// into the next, making the fixture non-deterministic under -count>1.
+var reindexStaleCollSeq atomic.Int64
+
+// TestDoltliteReindexStoreHealsStaleIndex is the regression proof ga-7hei
+// actually needs: it fails unless ReindexDoltliteStore executes a real SQLite
+// REINDEX. It builds a genuinely stale secondary index — the exact condition
+// REINDEX exists to repair, per SQLite's docs: an index built under one
+// collation definition goes stale when that definition changes. We register a
+// collation whose ordering flips after the index is populated, so the persisted
+// index is ordered per the old definition while SQLite now compares per the new
+// one. `PRAGMA integrity_check` then reports the index as corrupt, and only a
+// real REINDEX rebuilds it. Had ReindexDoltliteStore opened the database and
+// skipped db.Exec("REINDEX"), the corruption would survive and the final
+// assertion would fail — the gap the previous healthy-fixture test could not
+// catch.
+func TestDoltliteReindexStoreHealsStaleIndex(t *testing.T) {
+	collName := fmt.Sprintf("gasstalecoll%d", reindexStaleCollSeq.Add(1))
+	var reversed atomic.Bool
+	if err := sqlite.RegisterCollationUtf8(collName, func(a, b string) int {
+		c := strings.Compare(a, b)
+		if reversed.Load() {
+			return -c
+		}
+		return c
+	}); err != nil {
+		t.Fatalf("register collation: %v", err)
+	}
+
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(filepath.Join(beadsDir, "doltlite"), 0o755); err != nil {
+		t.Fatalf("mkdir doltlite dir: %v", err)
+	}
+	meta := []byte(`{"backend":"doltlite","database":"doltlite","dolt_database":"hq"}`)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), meta, 0o600); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+	dbPath := filepath.Join(beadsDir, "doltlite", "hq.db")
+
+	// Build the index while the collation sorts ascending.
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=rwc&_busy_timeout=10000")
+	if err != nil {
+		t.Fatalf("open fixture db: %v", err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE issues (id TEXT PRIMARY KEY, status TEXT COLLATE ` + collName + `)`,
+		`CREATE INDEX idx_issues_status ON issues(status COLLATE ` + collName + `)`,
+		`INSERT INTO issues (id, status) VALUES ('a','alpha'),('b','bravo'),('c','charlie'),('d','delta'),('e','echo')`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			_ = db.Close()
+			t.Fatalf("seed fixture: %v\nstmt: %s", err, stmt)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close fixture db: %v", err)
+	}
+
+	// Change the collation's definition. The persisted index is now ordered per
+	// the old ascending definition, but SQLite compares per the new one.
+	reversed.Store(true)
+
+	integrityCheck := func(tag string) string {
+		c, err := sql.Open("sqlite", "file:"+dbPath+"?mode=rw&_busy_timeout=10000")
+		if err != nil {
+			t.Fatalf("%s open: %v", tag, err)
+		}
+		defer c.Close() //nolint:errcheck // test cleanup
+		var result string
+		if err := c.QueryRow("PRAGMA integrity_check").Scan(&result); err != nil {
+			t.Fatalf("%s integrity_check: %v", tag, err)
+		}
+		return result
+	}
+
+	// Precondition: the fixture is genuinely stale. Without this guard, a future
+	// change that stops producing staleness would let the post-reindex "ok"
+	// assertion pass trivially, silently regressing this back to the toothless
+	// healthy-store check it strengthens.
+	if before := integrityCheck("before"); before == "ok" {
+		t.Fatalf("precondition failed: expected a stale index before reindex, got integrity_check=ok")
+	}
+
+	if err := ReindexDoltliteStore(dir); err != nil {
+		t.Fatalf("ReindexDoltliteStore: %v", err)
+	}
+
+	if after := integrityCheck("after"); after != "ok" {
+		t.Fatalf("integrity_check after reindex = %q, want ok (REINDEX must rebuild the stale index)", after)
+	}
+}
+
+// TestDoltliteReindexStoreRejectsNonDoltlite proves the reindex path refuses a
+// store that metadata.json does not identify as DoltLite, rather than silently
+// operating on the wrong backend.
+func TestDoltliteReindexStoreRejectsNonDoltlite(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
+		t.Fatalf("mkdir beads dir: %v", err)
+	}
+	meta := []byte(`{"backend":"dolt","database":"ga"}`)
+	if err := os.WriteFile(filepath.Join(dir, ".beads", "metadata.json"), meta, 0o600); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+	if err := ReindexDoltliteStore(dir); err == nil {
+		t.Fatal("ReindexDoltliteStore accepted a non-doltlite store, want error")
+	}
+}
+
+// TestDoltliteDependencySnapshotCompletenessIsGuarded pins the verdict
+// dependencySnapshotForCache hands the cache. It was previously unguarded:
+// flipping its completeness bool to false left the whole suite green while
+// silently costing every DoltLite scope its cached dependency and readiness
+// reads — every DepList("…","down") would delegate to the backing store again,
+// which for this fixture is a bd runner that must never be called.
+//
+// The bool is a claim about the SNAPSHOT: DepListBatch reads both dependency
+// tables in one pass, so the map it returns is the whole down-edge set for the
+// ids asked about. The assertions below are that claim, not its restatement —
+// the cache latches depsComplete from it, and the cached edges must equal the
+// store's own.
+func TestDoltliteDependencySnapshotCompletenessIsGuarded(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+
+	deps, complete, err := store.dependencySnapshotForCache([]string{"gc-child"})
+	if err != nil {
+		t.Fatalf("dependencySnapshotForCache: %v", err)
+	}
+	if !complete {
+		t.Fatal("DoltLite reported an incomplete dependency snapshot; DepListBatch reads every down edge of the ids it is given")
+	}
+	if len(deps["gc-child"]) != 1 || deps["gc-child"][0].DependsOnID != "gc-parent" {
+		t.Fatalf("snapshot deps = %#v, want gc-child -> gc-parent", deps["gc-child"])
+	}
+
+	cache := NewCachingStoreForTest(store, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	cache.mu.RLock()
+	depsComplete := cache.depsComplete
+	cache.mu.RUnlock()
+	if !depsComplete {
+		t.Fatal("cache depsComplete = false over a DoltLite snapshot that carries every down edge: cached dep and readiness reads would delegate for the life of the process")
+	}
+	cached, err := cache.DepList("gc-child", "down")
+	if err != nil {
+		t.Fatalf("cached DepList: %v", err)
+	}
+	if len(cached) != 1 || cached[0].DependsOnID != "gc-parent" {
+		t.Fatalf("cached DepList = %#v, want the snapshot's gc-child -> gc-parent", cached)
+	}
 }
