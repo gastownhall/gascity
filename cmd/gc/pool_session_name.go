@@ -993,6 +993,13 @@ func liveEphemeralSessionForTemplate(openSessionInfos []session.Info, cfg *confi
 		if strings.TrimSpace(info.Template) != template {
 			continue
 		}
+		// The gate is named for ephemeral pool sessions and must hold to that:
+		// a configured named or manual session sharing this template does not
+		// serve the bare-template claim, and being long-lived it would shield
+		// the bead from reclamation indefinitely.
+		if !isEphemeralSessionInfoForAgent(info, agentCfg) {
+			continue
+		}
 		if !storeRefAware {
 			return true
 		}
