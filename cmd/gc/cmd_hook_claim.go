@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
+	"github.com/gastownhall/gascity/internal/git"
 )
 
 const hookClaimCommandName = "hook"
@@ -202,11 +204,19 @@ type hookClaimOps struct {
 	// EmitClaimRejected publishes a bead.claim_rejected event when a claim is
 	// lost to a different live claimant (ADR-0009). Best-effort.
 	EmitClaimRejected hookEmitClaimRejectedFunc
-	// ResolveWorkBranch returns the git branch of the worker's worktree (dir),
-	// stamped onto the bead as gc.work_branch at claim time. Empty result (no
-	// repo / detached HEAD) omits the branch key — the session back-reference is
-	// still stamped.
+	// ResolveWorkBranch returns the git branch of the worker's worktree, stamped
+	// onto the bead as gc.work_branch at claim time. It is handed a tree that
+	// already carries the repository it resolved to, so the branch comes from the
+	// repository the store exclusion was decided against. Empty result (no repo /
+	// detached HEAD) omits the branch key — the session back-reference is still
+	// stamped.
 	ResolveWorkBranch hookResolveWorkBranchFunc
+	// ResolveSessionWorkDir returns the checkout the CLAIMING session is running
+	// in, used only as the fallback when the bead records no checkout of its own
+	// (gc-2n4c: a pool-routed bead cannot record one, because no slot is chosen
+	// until this claim). Empty result means nothing is knowable and nothing is
+	// stamped.
+	ResolveSessionWorkDir hookResolveSessionWorkDirFunc
 	// StampWorkMeta writes the claim-time execution-identity metadata patch
 	// (gc.work_branch and/or the durable session back-reference gc.session_id /
 	// gc.session_name) onto the claimed bead in ONE update. Best-effort.
@@ -251,17 +261,18 @@ type hookClaimOps struct {
 }
 
 type (
-	hookClaimFunc              func(context.Context, string, []string, string, string) (beads.Bead, bool, error)
-	hookListContinuationFunc   func(context.Context, string, []string, string, string) ([]beads.Bead, error)
-	hookAssignContinuationFunc func(context.Context, string, []string, string, string) error
-	hookDrainAckFunc           func(io.Writer) error
-	hookDrainPendingFunc       func(sessionID string) (bool, error)
-	hookEmitClaimRejectedFunc  func(beadID, existingClaimant, attemptedClaimant string)
-	hookResolveWorkBranchFunc  func(dir string) string
-	hookStampWorkMetaFunc      func(ctx context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error
-	hookStampSessionClaimFunc  func(sessionID, beadID string) error
-	hookPublishRunMapFunc      func(runID, beadID string, sessionKeys ...string) error
-	hookClaimReleaseFunc       func(ctx context.Context, dir string, env []string, beadID, assignee string) (bool, error)
+	hookClaimFunc                 func(context.Context, string, []string, string, string) (beads.Bead, bool, error)
+	hookListContinuationFunc      func(context.Context, string, []string, string, string) ([]beads.Bead, error)
+	hookAssignContinuationFunc    func(context.Context, string, []string, string, string) error
+	hookDrainAckFunc              func(io.Writer) error
+	hookDrainPendingFunc          func(sessionID string) (bool, error)
+	hookEmitClaimRejectedFunc     func(beadID, existingClaimant, attemptedClaimant string)
+	hookResolveWorkBranchFunc     func(tree hookClaimWorkTree) string
+	hookResolveSessionWorkDirFunc func(sessionID string) string
+	hookStampWorkMetaFunc         func(ctx context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error
+	hookStampSessionClaimFunc     func(sessionID, beadID string) error
+	hookPublishRunMapFunc         func(runID, beadID string, sessionKeys ...string) error
+	hookClaimReleaseFunc          func(ctx context.Context, dir string, env []string, beadID, assignee string) (bool, error)
 )
 
 type hookClaimJSONResult struct {
@@ -473,6 +484,9 @@ func (ops *hookClaimOps) applyDefaults() {
 	}
 	if ops.ResolveWorkBranch == nil {
 		ops.ResolveWorkBranch = hookResolveWorkBranch
+	}
+	if ops.ResolveSessionWorkDir == nil {
+		ops.ResolveSessionWorkDir = hookResolveSessionWorkDir
 	}
 	if ops.StampWorkMeta == nil {
 		ops.StampWorkMeta = hookStampWorkMetaWithBdStore
@@ -1386,28 +1400,69 @@ func hookClaimLifecycleCandidate(bead beads.Bead, opts hookClaimOptions) bool {
 // (ApplyGraphControlRouteBinding), even when a control-dispatcher session claims one
 // through this same hook path.
 //
-// gc.claimed_at (OBS-001) is a fourth, differently-shaped entry: unlike the three
-// keys above, it is WRITE-ONCE, stamped only when absent from the bead's current
-// metadata and never touched again. A naive claimed_at = now() would differ from
+// It also carries gc.work_dir, but only for a bead that records no checkout under
+// either key and only from the claiming session's own checkout, which is the one
+// case where the bead has named no workspace for the branch to come from. A bead
+// that records a checkout keeps it, even an unusable one, because overwriting the
+// canonical key while the legacy key disagrees is a state worktreeSpecForBead
+// refuses outright.
+//
+// gc.claimed_at (OBS-001) is differently shaped from all of those: it is
+// WRITE-ONCE, stamped only when absent from the bead's current metadata and never
+// touched again. A naive claimed_at = now() would differ from
 // the stored value on every tick by construction and defeat the compare-and-skip
 // protection the rest of this function relies on (see stampHookClaimIdentity's doc
 // comment on the flood-class risk). It is also unconditional across control and
 // non-control beads alike: a claim timestamp answers "when was this claimed",
 // which is meaningful regardless of session identity, so it is not gated on
 // IsControlKind, GC_SESSION_ID, or a resolvable worktree branch the way the other
-// three keys are.
+// keys are.
 //
 // An empty result means every key is already current, so the caller issues no
 // write.
 func hookClaimIdentityPatch(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string) map[string]string {
 	patch := map[string]string{}
-	if branch := strings.TrimSpace(ops.ResolveWorkBranch(dir)); branch != "" &&
+	sessionID := hookClaimSessionID(opts.Env)
+	isControl := beadmeta.IsControlKind(strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]))
+
+	storeHead := hookClaimResolveStoreHead(dir)
+	trees := hookClaimWorkerTrees(bead, storeHead)
+	// A pool-routed bead records no checkout at all, so fall back to the checkout
+	// of the claiming session (gc-2n4c). Only as a fallback: a recorded value is
+	// the declared intent of the bead and the tree the close gate resolves from,
+	// while the session dir is at best the same tree reached another way. The seam
+	// is nil when a test constructs hookClaimOps directly instead of going through
+	// applyDefaults; like every other identity source here, an unavailable one
+	// stamps nothing rather than guessing a path. The store-dir refusal applies
+	// here too: a rig-scoped session can legitimately be running IN the shared rig
+	// checkout, and that tree is no more the workspace of this bead than it was
+	// when the branch was read from it directly.
+	//
+	// The precondition is hookClaimRecordsNoWorkDir, NOT an empty dirs: those are
+	// different states and only the first one is this fallback's case. A bead whose
+	// recorded checkouts were all EXCLUDED as the store also yields an empty dirs,
+	// and stamping the session dir there would write a canonical gc.work_dir while
+	// the legacy key keeps the store path. worktreeSpecForBead
+	// (pool_desired_state.go) treats a canonical/legacy disagreement as a hard
+	// error, so that write would starve the bead of a session rather than help it;
+	// workDirStampWouldClobberEvidence (pool_slot_workdir.go) refuses the same
+	// manufactured conflict on the reconciler side for the same reason. A bead that
+	// recorded the store under both keys is therefore left alone: it is stamped with
+	// no branch, which is the honest outcome, not repointed at a tree it never named.
+	if hookClaimRecordsNoWorkDir(bead) && sessionID != "" && !isControl && ops.ResolveSessionWorkDir != nil {
+		if sessionDir := strings.TrimSpace(ops.ResolveSessionWorkDir(sessionID)); sessionDir != "" {
+			if tree, admitted := storeHead.Admit(sessionDir); admitted {
+				patch[beadmeta.WorkDirMetadataKey] = sessionDir
+				trees = []hookClaimWorkTree{tree}
+			}
+		}
+	}
+	if branch := hookClaimWorkerBranch(trees, ops.ResolveWorkBranch); branch != "" &&
 		strings.TrimSpace(bead.Metadata[beadmeta.WorkBranchMetadataKey]) != branch &&
 		hookClaimWorktreeEvidenceIsWholeOrAbsent(bead) {
 		patch[beadmeta.WorkBranchMetadataKey] = branch
 	}
-	if sessionID := hookClaimSessionID(opts.Env); sessionID != "" &&
-		!beadmeta.IsControlKind(strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey])) {
+	if sessionID != "" && !isControl {
 		if strings.TrimSpace(bead.Metadata[beadmeta.SessionIDMetadataKey]) != sessionID {
 			patch[beadmeta.SessionIDMetadataKey] = sessionID
 		}
@@ -1420,6 +1475,422 @@ func hookClaimIdentityPatch(bead beads.Bead, opts hookClaimOptions, ops hookClai
 		patch[beadmeta.ClaimedAtMetadataKey] = time.Now().UTC().Format(time.RFC3339)
 	}
 	return patch
+}
+
+// hookClaimRecordsNoWorkDir reports whether bead names no work checkout at all,
+// under either the canonical or the legacy key. This is deliberately the RAW
+// question, asked before the store-dir exclusion: a bead that recorded the store
+// HAS named a checkout, it just named an unusable one, and the session fallback
+// must not treat the two cases alike. Stamping a canonical value over a legacy
+// one that disagrees manufactures the conflict worktreeSpecForBead fails closed
+// on.
+func hookClaimRecordsNoWorkDir(bead beads.Bead) bool {
+	for _, key := range []string{beadmeta.WorkDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey} {
+		if strings.TrimSpace(bead.Metadata[key]) != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// hookClaimProbe is what came back from one git query on the claim path. The
+// distinction that matters is not success versus failure but ANSWERED versus NOT
+// ASKED: git reporting that a directory holds no repository is information the
+// exclusion can act on, while a query that never completed is not, and reading the
+// second as the first admits the shared checkout whenever a probe times out or git
+// cannot be run.
+type hookClaimProbe int
+
+const (
+	// hookClaimProbeAnswered means git ran and returned a value.
+	hookClaimProbeAnswered hookClaimProbe = iota
+	// hookClaimProbeAbsent means git ran and reported there is nothing here, which
+	// for repository discovery means no repository covers the directory.
+	hookClaimProbeAbsent
+	// hookClaimProbeUnavailable means the query did not complete, so nothing was
+	// learned either way.
+	hookClaimProbeUnavailable
+)
+
+// hookClaimStoreHead identifies the repository whose HEAD the store checkout would
+// answer a branch read with. It is resolved once per claim so a candidate list does
+// not re-probe the store for every entry.
+//
+// The branch is read by running git inside a candidate, and git answers that read
+// from the repository it discovers, not from the candidate's own path. So the
+// question the exclusion has to ask is whether the candidate would be answered by
+// the STORE's repository. Every earlier shape of this filter asked something about
+// paths instead, and each one left a different way in: a symlinked, relative or
+// bind-mounted spelling of the store; a ".." folded across a symlink, which Clean
+// resolves wrongly; a plain subdirectory of the checkout, which is a different
+// directory by device and inode and still answers with the checkout's branch; and
+// the checkout's own .git directory, which is not under its worktree at all.
+// hookClaimWorkTree is a checkout a branch can be stamped from, together with the
+// repository that answered for it. The pair travels as one value because the two
+// halves have to be the same observation: the exclusion is decided against RepoDir,
+// and resolving the path a second time at the branch read would let the path be
+// repointed in between and stamp a branch out of a repository the exclusion never
+// saw. RepoDir is empty when nothing identified the tree's repository, and a tree
+// with no repository yields no branch.
+type hookClaimWorkTree struct {
+	Dir     string
+	RepoDir string
+}
+
+type hookClaimStoreHead struct {
+	dir string
+	// repoDir is the absolute git directory the store resolves to, and probe says
+	// whether the query that produced it actually answered.
+	repoDir string
+	probe   hookClaimProbe
+}
+
+// hookClaimResolveStoreHead probes storeDir once and returns its identity.
+func hookClaimResolveStoreHead(storeDir string) hookClaimStoreHead {
+	store := strings.TrimSpace(storeDir)
+	head := hookClaimStoreHead{dir: store, probe: hookClaimProbeAbsent}
+	if store == "" {
+		return head
+	}
+	head.repoDir, head.probe = hookClaimHeadRepoDir(store)
+	return head
+}
+
+// Covers reports whether candidate's branch would be read out of the store's
+// repository, which makes it useless as evidence of where this bead's work happened.
+func (s hookClaimStoreHead) Covers(candidate string) bool {
+	_, admitted := s.Admit(candidate)
+	return !admitted
+}
+
+// Admit resolves candidate to the work tree a branch can be read from, and reports
+// whether it is admissible as evidence of this bead's work. A candidate the store
+// covers is refused; an admitted one carries the repository that answered for it, so
+// the branch read later happens against the identity this decision was made
+// against rather than against a path that is resolved a second time.
+func (s hookClaimStoreHead) Admit(candidate string) (hookClaimWorkTree, bool) {
+	cand := strings.TrimSpace(candidate)
+	if cand == "" {
+		return hookClaimWorkTree{}, false
+	}
+	if s.dir == "" {
+		// No store was named, so there is nothing to exclude. The candidate still
+		// has to be identified, because the branch is read from the repository that
+		// answers for it rather than from the path a second time.
+		repo, probe := hookClaimHeadRepoDir(cand)
+		if probe != hookClaimProbeAnswered {
+			return hookClaimWorkTree{Dir: cand}, true
+		}
+		return hookClaimWorkTree{Dir: cand, RepoDir: repo}, true
+	}
+
+	// Two names that clean alike are the same path, which settles the case without
+	// running anything, and settles it for a recorded path that no longer exists
+	// where git can answer nothing at all. It holds only when neither name folds a
+	// "..": filepath.Clean removes a ".." by folding the element before it away,
+	// which names the same directory only when that element is not a symlink, so
+	// "<root>/link/../shared" cleans to "<root>/shared" while actually naming
+	// whatever sits beside the link's target.
+	foldsDotDot := hookClaimPathFoldsDotDot(cand) || hookClaimPathFoldsDotDot(s.dir)
+	if !foldsDotDot && filepath.Clean(cand) == filepath.Clean(s.dir) {
+		return hookClaimWorkTree{}, false
+	}
+
+	candRepo, candProbe := hookClaimHeadRepoDir(cand)
+	switch candProbe {
+	case hookClaimProbeAbsent:
+		// git ran and reported that no repository covers this candidate. Usually
+		// there is nothing to exclude, because the branch read is the same discovery
+		// and will find none either.
+		//
+		// Usually, not always: git declines some questions with the same exit status
+		// it uses for "no repository here". A shared checkout owned by another user
+		// is refused for dubious ownership, an unreadable config is fatal, and in
+		// both cases the store IS a repository that the claiming session simply
+		// cannot ask about. Refusing a candidate that lies inside the store's own
+		// directory covers that, and it is the one comparison that needs no
+		// cooperation from git. It is a refusal only: a directory that answers for
+		// itself never reaches here, so a nested independent checkout and a linked
+		// worktree keep their own identity.
+		//
+		// Both halves of that refusal have to be positive, because this arm ADMITS on
+		// its own judgement and a stamp it hands out is never checked again. A store
+		// whose own repository was never identified clears nothing: there is no
+		// identity to compare against, and a candidate reached from outside the store
+		// directory can still name the store's repository through a .git file or an
+		// administrative directory, which no comparison of paths can see. And
+		// containment has to be SHOWN, not merely not-disproved, so every name this
+		// cannot decide is refused rather than stamped.
+		if s.probe != hookClaimProbeAnswered && hookClaimDirLooksLikeRepo(s.dir) {
+			return hookClaimWorkTree{}, false
+		}
+		if !hookClaimPathOutside(cand, s.dir) {
+			return hookClaimWorkTree{}, false
+		}
+		return hookClaimWorkTree{Dir: cand}, true
+	case hookClaimProbeUnavailable:
+		// The question could not be asked, so which repository answers for this
+		// candidate is unknown while a later branch read may still succeed. Refuse
+		// it. The premise of this change is that the store's branch is worse than no
+		// branch, and that ordering has to hold when the answer is unknown, not only
+		// when it is known.
+		return hookClaimWorkTree{}, false
+	}
+	if s.probe != hookClaimProbeAnswered {
+		// The store's own repository was never identified, so there is nothing to
+		// compare the candidate against, and the same ordering applies. A store that
+		// genuinely holds no repository hands out no branch, so this costs only the
+		// claim-time convenience stamp; the closer still supplies the branch with its
+		// own metadata.
+		return hookClaimWorkTree{}, false
+	}
+	if hookClaimSameDir(candRepo, s.repoDir) {
+		return hookClaimWorkTree{}, false
+	}
+	return hookClaimWorkTree{Dir: cand, RepoDir: candRepo}, true
+}
+
+// hookClaimDirLooksLikeRepo reports whether dir carries a repository on disk, asked
+// without git. It separates the two readings that share one exit status: a directory
+// that holds no repository at all, and a repository git declined to answer for.
+//
+// Only the second one is dangerous. When the store holds a repository that refused to
+// identify itself -- another user owns it, or its config is unreadable -- then every
+// candidate reaching that same repository refuses identically, whether it sits inside
+// the store directory or outside it behind a .git file or an administrative path, and
+// no comparison of paths separates them. Nothing can be cleared in that state. When
+// the store holds no repository, there is no branch to leak and the path comparison
+// is the whole question.
+//
+// A worktree carries .git as a directory or as a file; a bare repository carries HEAD
+// beside objects/.
+func hookClaimDirLooksLikeRepo(dir string) bool {
+	if strings.TrimSpace(dir) == "" {
+		return false
+	}
+	if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+		return true
+	}
+	if _, err := os.Stat(filepath.Join(dir, "HEAD")); err != nil {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(dir, "objects"))
+	return err == nil && info.IsDir()
+}
+
+// hookClaimPathOutside reports whether child can be SHOWN to name a directory that
+// is neither parent nor inside it. Symlinks are resolved on both sides so an aliased
+// spelling is compared as the directory it reaches; when a name cannot be resolved --
+// a recorded path that no longer exists -- the cleaned names are compared instead.
+//
+// Every reading it cannot establish is false, because the caller admits on true. A
+// relative name is refused because it means nothing without the process directory it
+// was written against, and two names resolved against different directories compare
+// as unrelated, which would read as "outside". A name that folds a ".." is refused
+// because Clean's output does not name the same directory once a symlink precedes
+// the "..", so its comparison would be about a path nobody can reach.
+func hookClaimPathOutside(child, parent string) bool {
+	if !filepath.IsAbs(child) || !filepath.IsAbs(parent) {
+		return false
+	}
+	if hookClaimPathFoldsDotDot(child) || hookClaimPathFoldsDotDot(parent) {
+		return false
+	}
+	resolve := func(path string) string {
+		if resolved, err := filepath.EvalSymlinks(path); err == nil {
+			return resolved
+		}
+		return filepath.Clean(path)
+	}
+	childPath, parentPath := resolve(child), resolve(parent)
+	if childPath == parentPath {
+		return false
+	}
+	rel, err := filepath.Rel(parentPath, childPath)
+	if err != nil {
+		return false
+	}
+	return rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// hookClaimHeadRepoDir returns the absolute git directory whose HEAD a branch read
+// inside dir would report, with the probe outcome that produced it.
+//
+// This is hookResolveWorkBranch's own repository discovery asked directly. git
+// climbs to a repository from any depth, resolves symlinked and bind-mounted
+// spellings on the way, gives a LINKED worktree its own directory under the main
+// repository's worktrees/ (so a per-bead worktree cut from the rig checkout keeps
+// its own identity, which this fork depends on), and resolves a .git directory, or
+// anything inside one, to the repository it belongs to. A bare repository resolves
+// to itself and does report a branch, which is why the question is about the
+// repository rather than about the worktree: a worktree comparison misses both the
+// bare case and the .git directory, neither of which is under any worktree.
+func hookClaimHeadRepoDir(dir string) (string, hookClaimProbe) {
+	return hookClaimRunGit(dir, "rev-parse", "--absolute-git-dir")
+}
+
+// hookClaimGitProbeTimeout bounds each git query the claim path runs. Repository
+// discovery reads the filesystem and can block on an unresponsive mount, and no
+// caller deadline covers it: the claim's delivery window is checked before the
+// identity patch is built, and the metadata-write timeout is created after it. It
+// does not bound the claim as a whole, only each query.
+const hookClaimGitProbeTimeout = 5 * time.Second
+
+// hookClaimRunGit runs one git query in dir and returns its single-line output.
+//
+// Both the branch read and the repository probe go through here so the two cannot
+// drift in the environment they run under or the deadline they respect, and they
+// have to agree: the exclusion compares what this answers for a candidate against
+// what it answers for the store. git.SanitizedEnv is the reason the environment
+// matters. git reads GIT_DIR and GIT_WORK_TREE ahead of its own -C argument, a
+// pre-commit hook or nested worktree tooling exports both, and a leaked pair would
+// otherwise point every query in this file at the leaking repository.
+func hookClaimRunGit(dir string, args ...string) (string, hookClaimProbe) {
+	return hookClaimRunGitArgs(append([]string{"-C", dir}, args...))
+}
+
+// hookClaimRunGitDirAt runs one git query against the repository at repoDir by name,
+// from dir. This is how the branch read reaches the repository the exclusion already
+// identified.
+//
+// Both arguments are load-bearing and they do different jobs. --git-dir pins WHICH
+// repository answers, so the read cannot be redirected to a repository the exclusion
+// never saw. -C supplies the directory git runs FROM, because a relative path in the
+// environment -- GIT_CONFIG_GLOBAL is the one that survives the sanitizer -- is
+// resolved against the process directory, and dropping -C silently moved that
+// resolution from the checkout being read to whatever directory the claiming process
+// happened to sit in. git applies -C first and --git-dir second, so the directory
+// never overrides the pin.
+func hookClaimRunGitDirAt(dir, repoDir string, args ...string) (string, hookClaimProbe) {
+	return hookClaimRunGitArgs(append([]string{"-C", dir, "--git-dir=" + repoDir}, args...))
+}
+
+func hookClaimRunGitArgs(args []string) (string, hookClaimProbe) {
+	ctx, cancel := context.WithTimeout(context.Background(), hookClaimGitProbeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Env = git.SanitizedEnv()
+	out, err := cmd.Output()
+	return hookClaimClassifyGitOutput(ctx.Err(), err, string(out))
+}
+
+// hookClaimClassifyGitOutput decides what one git query actually established, from
+// the deadline state, the run error, and the output.
+//
+// A nonzero EXIT from a git that ran IS an answer for the queries here: "not a git
+// repository" and "cannot change to <dir>" both mean no repository covers the
+// directory. Exiting is the part that makes it an answer, so the status has to be a
+// real exit status: a process killed by a signal also surfaces as an ExitError while
+// having established nothing, and so does one the context killed, which is why the
+// deadline is checked first and on its own. Anything else, a git that could not be
+// started or output that cannot be used, established nothing either.
+func hookClaimClassifyGitOutput(ctxErr, runErr error, out string) (string, hookClaimProbe) {
+	if ctxErr != nil {
+		return "", hookClaimProbeUnavailable
+	}
+	if runErr != nil {
+		var exitErr *exec.ExitError
+		if errors.As(runErr, &exitErr) && exitErr.Exited() {
+			return "", hookClaimProbeAbsent
+		}
+		return "", hookClaimProbeUnavailable
+	}
+	value := strings.TrimSpace(out)
+	if value == "" {
+		return "", hookClaimProbeUnavailable
+	}
+	return value, hookClaimProbeAnswered
+}
+
+// hookClaimSameDir reports whether a and b are one directory. Both are git
+// directories here, so both normally exist and the kernel settles it through device
+// and inode; the name comparison is the answer when one has gone away between
+// resolving it and inspecting it.
+func hookClaimSameDir(a, b string) bool {
+	aInfo, aErr := os.Stat(a)
+	bInfo, bErr := os.Stat(b)
+	if aErr != nil || bErr != nil {
+		return filepath.Clean(a) == filepath.Clean(b)
+	}
+	return os.SameFile(aInfo, bInfo)
+}
+
+// hookClaimPathFoldsDotDot reports whether path contains a ".." element, which is
+// what makes filepath.Clean's output unusable as evidence of identity: Clean
+// removes the element by folding the preceding one away, and the result names the
+// same directory only when that preceding element is not a symlink.
+func hookClaimPathFoldsDotDot(path string) bool {
+	for _, element := range strings.Split(filepath.ToSlash(path), "/") {
+		if element == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+// hookClaimWorkerBranch returns the branch of the first tree in trees that resolves
+// to one, or "" when none does. An unusable tree (missing path, no repo, detached
+// HEAD) is skipped like any other, so the order of trees is the authority order.
+func hookClaimWorkerBranch(trees []hookClaimWorkTree, resolve hookResolveWorkBranchFunc) string {
+	if resolve == nil {
+		return ""
+	}
+	for _, tree := range trees {
+		if branch := strings.TrimSpace(resolve(tree)); branch != "" {
+			return branch
+		}
+	}
+	return ""
+}
+
+// hookClaimWorkerTrees returns the checkouts bead records for its own work, most
+// authoritative first: the canonical gc.work_dir, then the legacy work_dir.
+//
+// These are deliberately NOT storeDir, the directory the work query was answered
+// from. Store and workspace are independent inputs a federated claim routinely
+// disagrees on: for a rig-scoped worker the store is the shared rig checkout, a
+// tree the worker never commits to and which sits on whatever branch someone last
+// left it on.
+//
+// The canonical key comes first because it is the one the work-record close gate
+// resolves its repo from (work_record_gate.go), so the branch stamped at claim
+// time and the branch a commit is validated against at close time name the same
+// tree. The legacy key follows because it is not reliably dead data here: this
+// fork's provisioner writes gc.work_dir as the per-bead worktree path it INTENDS,
+// which may never be created, while work_dir still records the tree the worker
+// actually used.
+//
+// store is passed in only to be EXCLUDED, and that exclusion is the whole reason it
+// stays a parameter. It arrives already resolved so the list costs one probe of the
+// store rather than one per candidate. Resolving a branch proves a candidate is
+// WELL-FORMED, not that it is the right tree: skipping candidates that fail to
+// resolve (missing path, detached HEAD, a legacy value written under the old
+// artifact-dir semantics) cannot reject a candidate that is a perfectly good repo
+// which merely IS the store. That case is not hypothetical -- a bead whose
+// gc.work_dir was itself stamped from the shared checkout carries the store path
+// under the canonical key, and without this filter the chain resolves it happily
+// and re-stamps the shared branch. The refusal compares the REPOSITORY a branch
+// read would be answered by rather than the path, so an alias, a plain subdirectory
+// and the checkout's own .git directory are all refused with it, while an
+// independently nested checkout and a linked worktree cut from the same repository,
+// both of which report a branch of their own, are not.
+func hookClaimWorkerTrees(bead beads.Bead, store hookClaimStoreHead) []hookClaimWorkTree {
+	var trees []hookClaimWorkTree
+	for _, key := range []string{beadmeta.WorkDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey} {
+		candidate := strings.TrimSpace(bead.Metadata[key])
+		if candidate == "" {
+			continue
+		}
+		tree, admitted := store.Admit(candidate)
+		if !admitted {
+			continue
+		}
+		if slices.ContainsFunc(trees, func(have hookClaimWorkTree) bool { return have.Dir == tree.Dir }) {
+			continue
+		}
+		trees = append(trees, tree)
+	}
+	return trees
 }
 
 // worktreeOwnershipEvidenceKeys are the eight worktree-ownership metadata
@@ -2047,18 +2518,25 @@ func hookClaimSessionName(env []string) string {
 	return strings.TrimSpace(sessionName)
 }
 
-// hookResolveWorkBranch returns the current git branch of dir, or "" when dir
-// is not a worktree or HEAD is detached (no meaningful branch to stamp).
-func hookResolveWorkBranch(dir string) string {
-	if strings.TrimSpace(dir) == "" {
+// hookResolveWorkBranch returns the current git branch of the work tree, or "" when
+// no repository was identified for it or HEAD is detached (no meaningful branch to
+// stamp).
+//
+// It reads HEAD out of the repository the tree already resolved to, by name, rather
+// than discovering a repository from the path again. The exclusion that admitted
+// this tree was decided against that repository; rediscovering it here would be a
+// second answer to the same question, and a path repointed between the two answers
+// would stamp a branch out of a repository nothing checked.
+//
+// It shares one runner with the repository probe, which keeps both queries under one
+// environment and one deadline.
+func hookResolveWorkBranch(tree hookClaimWorkTree) string {
+	repoDir := strings.TrimSpace(tree.RepoDir)
+	if repoDir == "" {
 		return ""
 	}
-	out, err := exec.Command("git", "-C", dir, "rev-parse", "--abbrev-ref", "HEAD").Output()
-	if err != nil {
-		return ""
-	}
-	branch := strings.TrimSpace(string(out))
-	if branch == "HEAD" { // detached HEAD
+	branch, probe := hookClaimRunGitDirAt(tree.Dir, repoDir, "rev-parse", "--abbrev-ref", "HEAD")
+	if probe != hookClaimProbeAnswered || branch == "HEAD" { // unresolvable, or detached
 		return ""
 	}
 	return branch

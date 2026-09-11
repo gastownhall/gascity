@@ -722,7 +722,7 @@ func TestDoHookClaimEmitsRejectedOnLostClaim(t *testing.T) {
 		EmitClaimRejected: func(beadID, existing, attempted string) {
 			rejected = append(rejected, rejection{beadID, existing, attempted})
 		},
-		ResolveWorkBranch: func(string) string { return "" }, // suppress stamp noise
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" }, // suppress stamp noise
 	}
 	opts := hookClaimOptions{
 		Assignee:           "worker-1",
@@ -761,9 +761,14 @@ func TestDoHookClaimStampsWorkBranch(t *testing.T) {
 	ops := hookClaimOps{
 		Runner: runner,
 		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
-			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
+			// gc.work_dir is what gc.work_branch is resolved from; the "/tmp/work"
+			// store dir this test passes to doHookClaim is deliberately not it (gc-j4sr).
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{
+				"gc.routed_to": "worker",
+				"gc.work_dir":  "/worktrees/hw-stamp",
+			}}, true, nil
 		},
-		ResolveWorkBranch: func(string) string { return "bd-hw-stamp" },
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "bd-hw-stamp" },
 		StampWorkMeta: func(_ context.Context, _ string, _ []string, beadID, assignee string, patch map[string]string) error {
 			stampedBead, stampedAssignee, stampedBranch = beadID, assignee, patch["gc.work_branch"]
 			return nil
@@ -801,7 +806,7 @@ func TestDoHookClaimSkipsStampWhenBranchUnchanged(t *testing.T) {
 		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
 			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker", "gc.work_branch": "bd-hw-idem", "gc.claimed_at": "2026-01-01T00:00:00Z"}}, true, nil
 		},
-		ResolveWorkBranch: func(string) string { return "bd-hw-idem" },
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "bd-hw-idem" },
 		StampWorkMeta: func(_ context.Context, _ string, _ []string, _, _ string, _ map[string]string) error {
 			stampCalls++
 			return nil
@@ -1079,8 +1084,8 @@ func TestClaimHookWorkRetriesLaterStoreWhenSelectedStoreLosesClaimRace(t *testin
 			claimDir = dir
 			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
 		},
-		EmitClaimRejected: func(string, string, string) {},   // suppress event side effect
-		ResolveWorkBranch: func(string) string { return "" }, // suppress stamp noise
+		EmitClaimRejected: func(string, string, string) {},              // suppress event side effect
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" }, // suppress stamp noise
 	}
 	opts := hookClaimOptions{
 		Assignee:           "worker-1",
@@ -1138,7 +1143,7 @@ func TestClaimHookWorkDrainsWhenPrimaryLosesRaceThenFederatedStoreErrors(t *test
 			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: "worker-2", Metadata: map[string]string{"gc.routed_to": "worker"}}, false, nil
 		},
 		EmitClaimRejected: func(string, string, string) {},
-		ResolveWorkBranch: func(string) string { return "" },
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },
 		DrainAck:          func(io.Writer) error { return nil },
 	}
 	opts := hookClaimOptions{
@@ -1202,7 +1207,7 @@ func TestClaimHookWorkUsesFallbackStoreDirEnvAndOutput(t *testing.T) {
 			claimDir, claimEnv = dir, env
 			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
 		},
-		ResolveWorkBranch: func(string) string { return "" },
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },
 	}
 	opts := hookClaimOptions{
 		Assignee:           "worker-1",
@@ -3088,7 +3093,7 @@ func TestClaimHookWorkDrainsClaimsErroredWhenEveryCandidateErrors(t *testing.T) 
 			return beads.Bead{}, false, fmt.Errorf("claiming %s: store write timeout", beadID)
 		},
 		EmitClaimRejected: func(string, string, string) {},
-		ResolveWorkBranch: func(string) string { return "" },
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },
 		DrainAck:          func(io.Writer) error { return nil },
 	}
 	opts := hookClaimOptions{

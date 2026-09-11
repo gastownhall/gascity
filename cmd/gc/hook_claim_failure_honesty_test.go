@@ -63,7 +63,7 @@ func (h *failureHookHarness) ops() hookClaimOps {
 			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee}, true, nil
 		},
 		DrainAck:                 func(io.Writer) error { h.drained = true; return nil },
-		ResolveWorkBranch:        func(string) string { return "" },
+		ResolveWorkBranch:        func(hookClaimWorkTree) string { return "" },
 		PublishRunMap:            func(string, string, ...string) error { return nil },
 		EmitExecutionStepStarted: func(beads.Bead, string, []string, string) {},
 		EmitClaimRejected:        func(string, string, string) {},

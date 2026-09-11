@@ -73,7 +73,7 @@ func TestClaimHookWorkAssignedTierUnresolvableBeadDoesNotStrandLaterStore(t *tes
 			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
 		},
 		EmitClaimRejected: func(string, string, string) {},
-		ResolveWorkBranch: func(string) string { return "" },
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },
 		DrainAck:          func(io.Writer) error { return nil },
 	}
 
@@ -115,7 +115,7 @@ func TestClaimHookWorkAssignedTierUnresolvableBeadDrainsClaimsErrored(t *testing
 			return beads.Bead{}, false, fmt.Errorf("claiming bead %q: %w", beadID, beads.ErrNotFound)
 		},
 		EmitClaimRejected: func(string, string, string) {},
-		ResolveWorkBranch: func(string) string { return "" },
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },
 		DrainAck: func(io.Writer) error {
 			drained = true
 			return nil
@@ -171,7 +171,7 @@ func TestClaimHookWorkAssignedTierOperationalErrorStaysTerminal(t *testing.T) {
 			return beads.Bead{}, false, fmt.Errorf("claiming bead %q: store write timeout", beadID)
 		},
 		EmitClaimRejected: func(string, string, string) {},
-		ResolveWorkBranch: func(string) string { return "" },
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },
 		DrainAck:          func(io.Writer) error { return nil },
 	}
 
