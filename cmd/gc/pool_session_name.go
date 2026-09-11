@@ -307,10 +307,15 @@ func releaseOrphanedPoolAssignments(
 			if assigneePreservesNamedSessionRoute(cfg, cityPath, template, assignee, workStoreRef, storeRefAware) {
 				continue
 			}
-			if memoizedLiveOpenSessionAssignmentExists(sessionStoreLiveAssignee, assignee, sessionStore.Store, assignee) {
+			// Ordered ahead of the store-listing probe below deliberately: both
+			// are pure skip-gates with no mutation, so the released set is
+			// identical either way, but this one answers from the in-memory
+			// openSessionInfos snapshot while the next one issues a live
+			// per-assignee store listing.
+			if liveEphemeralSessionForTemplate(openSessionInfos, cfg, cityPath, agentCfg, assignee, template, workStoreRef, storeRefAware) {
 				continue
 			}
-			if liveEphemeralSessionForTemplate(openSessionInfos, cfg, cityPath, agentCfg, assignee, template, workStoreRef, storeRefAware) {
+			if memoizedLiveOpenSessionAssignmentExists(sessionStoreLiveAssignee, assignee, sessionStore.Store, assignee) {
 				continue
 			}
 			// The sessions binding is not the only ledger that can hold a session
