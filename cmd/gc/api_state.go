@@ -2046,24 +2046,10 @@ func relWithinCity(base, target string) error {
 // realPathForContainment canonicalizes the nearest EXISTING ancestor of target
 // (a git_url clone destination is absent until the clone runs) so a symlinked
 // ancestor cannot smuggle the path outside the city, then re-appends the
-// not-yet-created tail. It returns target unchanged if nothing along the path
-// resolves.
+// not-yet-created tail. It delegates the walk itself to the shared
+// pathutil.ResolveNearestExistingAncestor helper.
 func realPathForContainment(target string) (string, error) {
-	cur := filepath.Clean(target)
-	tail := ""
-	for {
-		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
-			return filepath.Join(resolved, tail), nil
-		} else if !os.IsNotExist(err) {
-			return "", err
-		}
-		parent := filepath.Dir(cur)
-		if parent == cur {
-			return filepath.Clean(target), nil // reached the root; nothing resolvable
-		}
-		tail = filepath.Join(filepath.Base(cur), tail)
-		cur = parent
-	}
+	return pathutil.ResolveNearestExistingAncestor(target)
 }
 
 // CreateRig provisions a rig through internal/rig.Provision (Decision 7) and

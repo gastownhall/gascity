@@ -708,7 +708,10 @@ type CrossRigError struct {
 
 // Error returns the cross-rig routing diagnostic.
 func (e *CrossRigError) Error() string {
-	return fmt.Sprintf("cross-rig routing — bead %s (prefix %q) → agent %s (rig prefix %q)", e.BeadID, e.BeadPrefix, e.Target, e.RigPrefix)
+	return fmt.Sprintf("gc sling: refusing cross-rig route: bead %s (prefix %q) "+
+		"does not belong to %s (rig prefix %q); nothing was routed. Re-file the "+
+		"bead in that rig, pick a city-scope target, or pass --force to override.",
+		e.BeadID, e.BeadPrefix, e.Target, e.RigPrefix)
 }
 
 // CrossRigRouteError returns a typed cross-rig error when routing is unsafe.

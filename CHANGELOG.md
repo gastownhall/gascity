@@ -130,6 +130,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   positional argument is split into individual IDs before single-versus-batch
   dispatch, so shell variables containing multiple IDs no longer look like one
   already-handled message.
+- **graphv2 retry re-attempts for rig-scoped `lifecycle=one_shot` steps now
+  keep their rig qualifier and drop stale session pinning.** A retry
+  control that is nested/runtime-minted (as opposed to one decorated at
+  compile time by graphroute) never gets `gc.execution_routed_to` stamped,
+  only `gc.execution_rig_context` backfilled. `spawnNextAttempt`'s
+  `qualifyAttemptTargetWithSourceRoute` derived a rig prefix only from
+  `gc.execution_routed_to`, so a re-attempt for a step whose
+  `gc.run_target` was a bare rig-template agent name lost its rig
+  qualifier — `gc.routed_to` landed unscoped and no pool ever claimed the
+  re-attempt. Separately, `applyAttemptStepRoute`'s metadata-only pool
+  branch never cleared `gc.session_affinity`/`gc.continuation_group` the
+  way `graphroute.ApplyGraphRouteBinding`'s pool-branch affinity clear
+  does, so a re-attempt for a one_shot lifecycle agent stayed pinned to
+  session affinity for a runtime that had already exited after its
+  bounded invocation. Both are fixed: the target qualifier now falls back
+  to the step's own execution rig context, and metadata-only pool
+  attempts for one_shot agents now clear the stale continuation/affinity
+  keys, mirroring `graphroute.ApplyGraphRouteBinding`'s pool branch.
+
+- **A `lifecycle=one_shot` pool session that exits into a freeable sleep
+  reason no longer blocks its own runtime name forever.** The session's
+  bounded-work exit lands its bead in `state=asleep` via the generic heal
+  path, same as any other dead session, but `reusablePoolSessionInfo`
+  excluded every asleep session from reuse on the assumption that "the
+  reconciler closes orphaned asleep beads" — no such closing exists. The
+  bead stayed open holding the identity's `session_name`, and the next
+  tick's fresh create failed closed on that same name ("pool session name
+  unavailable ... session name already exists") until an operator ran
+  `gc session close` by hand. The asleep exclusion is now scoped: a
+  `one_shot` session whose sleep reason is already in the freeable
+  allow-list (idle, idle-timeout, city-stop, failed-create, runtime-missing,
+  provider-terminal-error, max-session-age) is reused through the ordinary
+  wake path instead. A `one_shot` exit that still holds an open or
+  in-progress assigned work bead under any of its identities is not treated
+  as a clean exit — it falls through to fresh-identity creation rather than
+  being reused, so the unfinished step is claimed properly instead of being
+  pinned `in_progress` on a dead name. Persistent (non-`one_shot`) pools
+  are unaffected — a genuine crash still gets a fresh identity.
 
 - **`gc import add` of a local in-git pack now locks to HEAD, not the repo's
   latest tag.** Per `gc import add --help`, a local path inside a git
@@ -318,6 +356,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only for gc-managed Dolt endpoints, whose lifecycle gc owns; externally
   bound or explicitly configured endpoints keep bd's own output unchanged
   (gastownhall/gascity#1374).
+
+- **`gc init` provider readiness now finds Nix-installed CLIs.** Provider
+  readiness probes (`gc init --default-provider gemini` and friends) search a
+  deterministic, user-aware set of install directories rather than the
+  ambient `$PATH`, so a CLI installed via Nix (`~/.nix-profile/bin` for
+  classic `nix-env`, `~/.local/state/nix/profiles/profile/bin` for the newer
+  `nix profile install`) was reported as "not installed" even when it was on
+  the shell's `PATH`. Both locations are now included, matching the existing
+  npm/pnpm/yarn/cargo/nvm handling in `internal/searchpath`. Fixes #3962.
 
 - **ACP activity is now available across process boundaries.** ACP
   `session/update` timestamps are published through an atomic, coalesced

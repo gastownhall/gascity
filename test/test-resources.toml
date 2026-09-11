@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 665
-baseline_files = 190
+baseline_calls = 666
+baseline_files = 191
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-80po0c.2"
@@ -23,7 +23,7 @@ expires = "2026-10-01"
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 479
+baseline_calls = 482
 baseline_files = 173
 reported_calls = 447
 reported_files = 157
@@ -51,8 +51,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 452
-baseline_files = 128
+baseline_calls = 453
+baseline_files = 129
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-80po0c.2"
@@ -359,6 +359,17 @@ resources = ["subprocess", "fixed_sleep"]
 owner_bead = "ga-p9iuv.30.1.1.5"
 invariant = "managed Dolt ownership handoff subprocess and lifecycle timing proof is a checked Medium owner"
 resource_owner = "the fixture subprocess and bounded lifecycle sleeps are confined to TestDoltStateHandoffInspectAndStopOwnedProcess"
+migration_target = "P0.4b"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "scripts"
+package_name = "scripts_test"
+owner = "TestAddTestenvImportSkipsNestedGitWorktrees"
+resources = ["subprocess"]
+owner_bead = "ga-t00ejy"
+invariant = "the nested-git-worktree walk-skip regression proof is a checked Medium subprocess owner"
+resource_owner = "the one go run subprocess is confined to TestAddTestenvImportSkipsNestedGitWorktrees, which exists to exercise add-testenv-import.go end to end: the script is package main, so only a real subprocess run can prove its directory walk skips linked git worktrees"
 migration_target = "P0.4b"
 expires = "2026-10-01"
 

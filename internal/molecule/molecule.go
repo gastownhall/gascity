@@ -8,6 +8,7 @@ package molecule
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -1385,7 +1386,7 @@ func stepToBead(step formula.RecipeStep, vars map[string]string, priorityOverrid
 
 	b := beads.Bead{
 		Title:       formula.Substitute(step.Title, vars),
-		Description: formula.Substitute(step.Description, vars),
+		Description: substituteStepDescription(step, vars),
 		Type:        stepType,
 		Priority:    resolveStepPriority(step, priorityOverride),
 		Labels:      substituteLabels(step.Labels, vars),
@@ -1404,6 +1405,22 @@ func stepToBead(step formula.RecipeStep, vars map[string]string, priorityOverrid
 	}
 
 	return b
+}
+
+func substituteStepDescription(step formula.RecipeStep, vars map[string]string) string {
+	if step.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindSpec {
+		return formula.Substitute(step.Description, vars)
+	}
+
+	// A source-spec description is serialized JSON. Runtime values must be
+	// escaped for their JSON string context before placeholder substitution;
+	// otherwise newlines, quotes, or backslashes corrupt the retry snapshot.
+	escaped := make(map[string]string, len(vars))
+	for name, value := range vars {
+		encoded, _ := json.Marshal(value) // strings are always JSON-marshalable
+		escaped[name] = string(encoded[1 : len(encoded)-1])
+	}
+	return formula.Substitute(step.Description, escaped)
 }
 
 func preserveExecutableRootType(step formula.RecipeStep) bool {

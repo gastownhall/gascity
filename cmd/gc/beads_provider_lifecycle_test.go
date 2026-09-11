@@ -12608,6 +12608,7 @@ func TestInitBeadsForDirWithExecutorTreatsAlreadyInitializedRecoveryAsSuccess(t 
 	t.Cleanup(func() { finalizeCanonicalBdScopeInitForProvider = oldFinalize })
 
 	cityDir := t.TempDir()
+	cleanupManagedDoltTestCity(t, cityDir)
 	cityConfig := `[workspace]
 name = "demo"
 
