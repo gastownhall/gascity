@@ -99,11 +99,14 @@ func SortState(state *State) {
 // defaultLockWaitTimeout bounds how long WithState waits to acquire the
 // queue's exclusive flock before giving up with a descriptive error
 // (ga-2kzci3 FR1/FR2). Set to 4x nudgeEnqueueMaintenanceBudget (cmd/gc,
-// 2s), per NFR2 -- comfortably above what a well-behaved holder should ever
-// take (every holder's own critical section is itself bounded to that same
-// budget), so it doesn't false-trigger under normal contention, while still
-// failing fast enough to diagnose in seconds, not the multi-minute hangs
-// this fix replaces.
+// 2s), per NFR2 -- sized against normal uncontended turnaround, so it
+// doesn't false-trigger under ordinary contention while still failing fast
+// enough to diagnose in seconds, not the multi-minute hangs this fix
+// replaces. It is not a bound every holder respects: the supervisor sweep
+// runs against nudgeMaintenanceSweepBudget (cmd/gc, 5m) instead, and the
+// lazy bead-store open in nudgeMaintenanceStore.frontForState runs inside
+// the locked callback, before the first per-item deadline check, with no
+// budget of its own. A waiter can legitimately time out behind either.
 const defaultLockWaitTimeout = 8 * time.Second
 
 // WithState locks, loads, mutates, and atomically rewrites the queue state.
@@ -150,6 +153,9 @@ func withStateBounded(cityPath string, waitTimeout time.Duration, clk clock.Cloc
 		if !clk.Now().Before(deadline) {
 			return fmt.Errorf("locking nudge queue: timed out waiting %s for lock", waitTimeout)
 		}
+		// Deliberately real time while the deadline above is evaluated
+		// against clk: a caller passing a non-advancing clock.Fake against a
+		// held lock would poll here forever, never reaching its deadline.
 		time.Sleep(nudgeQueueLockPollInterval)
 	}
 	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) //nolint:errcheck

@@ -2613,9 +2613,13 @@ const nudgeMaintenanceSweepBudget = 5 * time.Minute
 // nudgeMaintenanceDebounceWindow bounds how close together two
 // runNudgeQueueMaintenanceSweep calls for the same city can be, in terms of
 // their own now, before the second is treated as a redundant same-tick
-// sweep and skipped (ga-2kzci3 FR4). The supervisor dispatch tick calls this
-// once per session per cycle, so a busy city with many sessions can invoke
-// it many times in quick succession for the same queue.
+// sweep and skipped (ga-2kzci3 FR4). The sweep has one production caller,
+// dispatchAllQueuedNudges (nudge_dispatcher.go), which runs it once per
+// dispatch pass, before the per-session loop -- so the bursts come from how
+// often a pass fires, not from the session count. nudgeDispatchTick fires
+// on every wake-socket signal plus once at the end of each patrol tick, so
+// a busy city can invoke this many times in quick succession for the same
+// queue.
 const nudgeMaintenanceDebounceWindow = time.Second
 
 var (
