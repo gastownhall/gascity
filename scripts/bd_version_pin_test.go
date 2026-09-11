@@ -114,6 +114,26 @@ func TestBDVersionPins(t *testing.T) {
 		t.Fatalf("bdReadyProjectionMinVersion (%q) must be strictly newer than bdMinVersion (%q); a feature floor at or below the init floor gates nothing", readyFloor, bdMin)
 	}
 
+	// The fresh provider-owned floor is the third anchor: a scope initialized
+	// through bd's persisted ownership/transport contract needs a bd that has
+	// it. Like the ready-projection floor it must be strictly newer than the
+	// init floor (otherwise it gates nothing), and unlike it, it must also be
+	// reachable -- no supported bd could satisfy a floor above the newest
+	// matrix cell, so a fresh `gc init` would refuse on every cell.
+	// deps.CompareVersions strips prerelease identifiers, so the rc.2 current
+	// cell compares equal to the 1.3.0 floor rather than below it.
+	freshProviderFloor := extractGoStringConst(t, root, "cmd/gc/init_provider_readiness.go", "bdFreshProviderMinVersion")
+	if freshProviderFloor == "" {
+		t.Fatal("cmd/gc/init_provider_readiness.go missing bdFreshProviderMinVersion const")
+	}
+	if deps.CompareVersions(freshProviderFloor, bdMin) <= 0 {
+		t.Fatalf("bdFreshProviderMinVersion (%q) must be strictly newer than bdMinVersion (%q); a feature floor at or below the init floor gates nothing", freshProviderFloor, bdMin)
+	}
+	if deps.CompareVersions(freshProviderFloor, bdCurrent) > 0 {
+		t.Fatalf("bdFreshProviderMinVersion (%q) is newer than deps.env BD_CURRENT_VERSION (%q); no supported bd could initialize a fresh provider-owned scope",
+			freshProviderFloor, bdCurrent)
+	}
+
 	// The bd_compatibility config enum is the operator-facing mirror of the two
 	// floors; both floor values must appear as enum members so they cannot diverge.
 	cfg := readFile(t, root, "internal/config/config.go")
