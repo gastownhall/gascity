@@ -212,6 +212,7 @@
           {
             "group": "Operate",
             "pages": [
+              "runbooks/github-run-red-streak",
               "runbooks/managed-city-endpoints",
               "runbooks/remote-hardened-city",
               "runbooks/split-storage-classes"

@@ -16,4 +16,5 @@ alive.
 
 ## Operate
 
+- [Operate GitHub Actions Red-Streak Monitors](/runbooks/github-run-red-streak) — mental model, enrollment recipe, forbidden assumptions, and investigation playbook for the generic GitHub Actions red-streak episode mechanism.
 - [Operate Managed-City Dolt Endpoints](/runbooks/managed-city-endpoints) — mental model, forbidden edits, sanctioned escape hatches, and recovery recipe for the city-level Dolt endpoint architecture.
