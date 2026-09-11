@@ -6,7 +6,9 @@
 # markers, and zombie Dolt processes.
 #
 # Environment: GC_CITY_PATH, GC_DOLT_PORT, GC_DOLT_HOST, GC_DOLT_USER,
-#              GC_DOLT_PASSWORD, GC_DOLT_RIG_LIST_TIMEOUT_SECS
+#              GC_DOLT_PASSWORD, GC_DOLT_RIG_LIST_TIMEOUT_SECS,
+#              GC_DOLT_HEALTH_PROBE_ATTEMPTS (default 3),
+#              GC_DOLT_HEALTH_PROBE_RETRY_SECS (default 1)
 set -e
 
 : "${GC_DOLT_USER:=root}"
@@ -147,9 +149,56 @@ else
   should_probe_sql=true
 fi
 
+# one_line — squash stdin to a single line of printable ASCII, capped at 300
+# bytes, so a client error can ride in a JSON string or one human-readable
+# line. The cap applies before JSON escaping, so an escape is never split.
+one_line() {
+  LC_ALL=C tr '\n\r\t' '   ' | LC_ALL=C tr -cd ' -~' | LC_ALL=C tr -s ' ' \
+    | sed 's/^ //; s/ $//' | cut -c1-300
+}
+
+# json_escape STRING — escape backslash and double quote for a JSON string
+# body. STRING must already be one_line output (no control characters).
+json_escape() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+# probe_failure_reason RC STDERR_FILE BOUND_SECS — say why a bounded dolt
+# client call failed: the run_bounded timeout when it fired (124, or 137 when
+# --kill-after escalated to SIGKILL), else the exit code, followed by the
+# client's own stderr.
+probe_failure_reason() {
+  case "$1" in
+    124) _why="timed out after ${3}s" ;;
+    137) _why="timed out after ${3}s (killed)" ;;
+    *) _why="exit $1" ;;
+  esac
+  _err=$(one_line < "$2" 2>/dev/null) || _err=""
+  if [ -n "$_err" ]; then
+    printf '%s: %s' "$_why" "$_err"
+  else
+    printf '%s (no client error output)' "$_why"
+  fi
+}
+
+# One failed or slow SELECT 1 is not a downed server. Patrol automation
+# escalates server.reachable=false as CRITICAL and the runbook's next step is a
+# restart, so a single transient client failure on a healthy server used to read
+# as an outage. Retry before concluding, and keep the client's own error: it is
+# the only record of why a probe failed, whether or not a retry recovered.
+probe_attempts_max="${GC_DOLT_HEALTH_PROBE_ATTEMPTS:-3}"
+case "$probe_attempts_max" in ''|*[!0-9]*) probe_attempts_max=3 ;; esac
+[ "$probe_attempts_max" -ge 1 ] || probe_attempts_max=1
+probe_retry_secs="${GC_DOLT_HEALTH_PROBE_RETRY_SECS:-1}"
+case "$probe_retry_secs" in ''|*[!0-9]*) probe_retry_secs=1 ;; esac
+server_probe_attempts=0
+server_probe_error=""
+
+# Client stderr for every SQL probe lands here (one call at a time).
+_probe_stderr=$(mktemp)
+trap 'rm -f "$_probe_stderr"' EXIT
+
 if [ "$should_probe_sql" = true ]; then
-  # Measure query latency.
-  start_ms=$(now_ms)
   conn_args="--host $host --port $GC_DOLT_PORT --user $GC_DOLT_USER --no-tls"
   # Always export DOLT_CLI_PASSWORD (even empty) so the client does not
   # prompt for a password on stdin. Without this, the SELECT 1 probe
@@ -158,14 +207,26 @@ if [ "$should_probe_sql" = true ]; then
   # which then left the health report claiming "server: running" but
   # never reporting per-database detail.
   export DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}"
-  # Bound the ping. A TCP-reachable but unresponsive server (stuck
+  # Bound each ping. A TCP-reachable but unresponsive server (stuck
   # goroutine, saturated pool, migration lock) would otherwise hang.
-  if run_bounded 5 dolt $conn_args sql -q "SELECT 1" >/dev/null 2>&1; then
-    server_reachable=true
-    end_ms=$(now_ms)
-    server_latency=$((end_ms - start_ms))
-    [ "$server_latency" -lt 0 ] && server_latency=0
-  fi
+  while [ "$server_probe_attempts" -lt "$probe_attempts_max" ]; do
+    server_probe_attempts=$((server_probe_attempts + 1))
+    # latency_ms is the round trip of the attempt that answered, not the retries.
+    start_ms=$(now_ms)
+    if run_bounded 5 dolt $conn_args sql -q "SELECT 1" >/dev/null 2>"$_probe_stderr"; then
+      server_reachable=true
+      end_ms=$(now_ms)
+      server_latency=$((end_ms - start_ms))
+      [ "$server_latency" -lt 0 ] && server_latency=0
+      break
+    else
+      _rc=$?
+      server_probe_error=$(probe_failure_reason "$_rc" "$_probe_stderr" 5)
+    fi
+    if [ "$server_probe_attempts" -lt "$probe_attempts_max" ]; then
+      sleep "$probe_retry_secs"
+    fi
+  done
 fi
 
 # Cache metadata file paths once (avoids repeated gc calls and word-splitting).
@@ -176,7 +237,7 @@ _meta_cache=$(mktemp)
 # the parent shell.
 _zombie_scan_out=$(mktemp)
 metadata_files > "$_meta_cache"
-trap 'rm -f "$_meta_cache" "$_zombie_scan_out"' EXIT
+trap 'rm -f "$_meta_cache" "$_zombie_scan_out" "$_probe_stderr"' EXIT
 
 # Collect database info.
 #
@@ -208,28 +269,52 @@ db_name_is_safe() {
   return 0
 }
 
-# db_commit_and_open_counts NAME — emit `NAME|commits|open_beads` by querying the
-# running server for NAME's commit count (dolt_log) and open-bead count (issues
-# WHERE status='open'). Both counts come from SQL against the live server: it is
-# authoritative, never deadlocks with an on-disk dolt client, and is cheap.
-# 0 on timeout, error, or a database without the table (a non-beads DB) — the
-# same fail-soft contract for every database so one bad DB never hangs the
-# report. Under managed Dolt the beads live in the server's `issues` table, not
-# an on-disk beads.jsonl (absent or stale), which the old file grep reported as
-# open_beads=0 for every live database (#3200). Extract the first fully-numeric
-# line rather than a fixed row so a future `USE`/warning banner cannot silently
-# collapse the count to 0.
+# sql_count NAME QUERY — run a COUNT(*) QUERY against database NAME and set
+# _count to the first fully-numeric line of its CSV result, so a future
+# `USE`/warning banner cannot shift it. When the client fails, times out, or
+# returns no number, _count is null and _count_error says why: a missed probe
+# must read as unknown, never as a measured 0.
+sql_count() {
+  _count=null
+  _count_error=""
+  if _csv=$(run_bounded 5 dolt $conn_args sql --result-format csv \
+      -q "USE \`$1\`; $2" 2>"$_probe_stderr"); then
+    _n=$(printf '%s\n' "$_csv" | grep -E '^[0-9]+$' | head -1)
+    if [ -n "$_n" ]; then
+      _count="$_n"
+    else
+      _excerpt=$(printf '%s' "$_csv" | one_line)
+      _count_error="no numeric result${_excerpt:+: $_excerpt}"
+    fi
+  else
+    _rc=$?
+    _count_error=$(probe_failure_reason "$_rc" "$_probe_stderr" 5)
+  fi
+}
+
+# db_commit_and_open_counts NAME — emit `NAME|commits|open_beads|probe_error` by
+# querying the running server for NAME's commit count (dolt_log) and open-bead
+# count (issues WHERE status='open'). Both counts come from SQL against the live
+# server: it is authoritative, never deadlocks with an on-disk dolt client, and
+# is cheap. A count is null on timeout, error, or a database without the table
+# (a non-beads DB), with the reason in probe_error — the same fail-soft
+# contract for every database, so one bad DB never hangs the report and a
+# missed probe never reads as a measured 0. Under managed Dolt the beads live in
+# the server's `issues` table, not an on-disk beads.jsonl (absent or stale),
+# which the old file grep reported as open_beads=0 for every live database
+# (#3200).
 db_commit_and_open_counts() {
   _name="$1"
-  _commits_csv=$(run_bounded 5 dolt $conn_args sql --result-format csv \
-    -q "USE \`$_name\`; SELECT COUNT(*) FROM dolt_log;" 2>/dev/null || true)
-  _commits=$(printf '%s\n' "$_commits_csv" | grep -E '^[0-9]+$' | head -1)
-  case "$_commits" in ''|*[!0-9]*) _commits=0 ;; esac
-  _open_csv=$(run_bounded 5 dolt $conn_args sql --result-format csv \
-    -q "USE \`$_name\`; SELECT COUNT(*) FROM issues WHERE status='open';" 2>/dev/null || true)
-  _open_beads=$(printf '%s\n' "$_open_csv" | grep -E '^[0-9]+$' | head -1)
-  case "$_open_beads" in ''|*[!0-9]*) _open_beads=0 ;; esac
-  printf '%s|%s|%s\n' "$_name" "$_commits" "$_open_beads"
+  sql_count "$_name" "SELECT COUNT(*) FROM dolt_log;"
+  _commits="$_count"
+  _db_error="${_count_error:+commits: $_count_error}"
+  sql_count "$_name" "SELECT COUNT(*) FROM issues WHERE status='open';"
+  _open_beads="$_count"
+  if [ -n "$_count_error" ]; then
+    _db_error="${_db_error:+$_db_error; }open_beads: $_count_error"
+  fi
+  # `|` separates the fields; keep the free-text reason from splitting them.
+  printf '%s|%s|%s|%s\n' "$_name" "$_commits" "$_open_beads" "$(printf '%s' "$_db_error" | tr '|' '/')"
 }
 
 # external_database_names — list user databases on a configured external Dolt
@@ -560,15 +645,18 @@ if [ "$json_output" = true ]; then
     "external": $is_external,
     "pid": $server_pid,
     "port": $GC_DOLT_PORT,
-    "latency_ms": $server_latency
+    "latency_ms": $server_latency,
+    "probe_attempts": $server_probe_attempts,
+    "probe_error": "$(json_escape "$server_probe_error")"
   },
   "databases": [
 JSONEOF
   first=true
-  echo "$db_info" | while IFS='|' read -r name commits open_beads; do
+  echo "$db_info" | while IFS='|' read -r name commits open_beads db_error; do
     [ -z "$name" ] && continue
     if [ "$first" = true ]; then first=false; else echo ","; fi
-    printf '    {"name": "%s", "commits": %s, "open_beads": %s}' "$name" "$commits" "$open_beads"
+    printf '    {"name": "%s", "commits": %s, "open_beads": %s, "probe_error": "%s"}' \
+      "$name" "$commits" "$open_beads" "$(json_escape "$db_error")"
   done
   cat <<JSONEOF
 
@@ -623,22 +711,33 @@ fi
 # process, so report reachability of the remote server rather than the
 # local-process "not running" signal that would misread as a downed server
 # (su-deol8).
-if [ "$server_running" = true ]; then
+if [ "$server_running" = true ] && [ "$server_reachable" = true ]; then
   echo "Server: running (PID $server_pid, port $GC_DOLT_PORT, latency ${server_latency}ms)"
+elif [ "$server_running" = true ]; then
+  echo "Server: running (PID $server_pid, port $GC_DOLT_PORT) but not answering SQL after $server_probe_attempts attempt(s): $server_probe_error"
 elif [ "$is_external" = true ] && [ "$server_reachable" = true ]; then
   echo "Server: external endpoint reachable ($host:$GC_DOLT_PORT, latency ${server_latency}ms)"
 elif [ "$is_external" = true ]; then
-  echo "Server: external endpoint unreachable ($host:$GC_DOLT_PORT)"
+  echo "Server: external endpoint unreachable ($host:$GC_DOLT_PORT) after $server_probe_attempts attempt(s): $server_probe_error"
 else
   echo "Server: not running"
+fi
+if [ "$server_reachable" = true ] && [ "$server_probe_attempts" -gt 1 ]; then
+  echo "  SQL answered on attempt $server_probe_attempts; an earlier attempt failed: $server_probe_error"
 fi
 
 if [ -n "$db_info" ]; then
   echo ""
   echo "Databases:"
-  echo "$db_info" | while IFS='|' read -r name commits open_beads; do
+  echo "$db_info" | while IFS='|' read -r name commits open_beads db_error; do
     [ -z "$name" ] && continue
-    echo "  $name: $commits commits, $open_beads open beads"
+    case "$commits" in null) commits=unknown ;; esac
+    case "$open_beads" in null) open_beads=unknown ;; esac
+    if [ -n "$db_error" ]; then
+      echo "  $name: $commits commits, $open_beads open beads (probe error: $db_error)"
+    else
+      echo "  $name: $commits commits, $open_beads open beads"
+    fi
   done
 fi
 
