@@ -520,6 +520,13 @@ var transientNeedles = []transientNeedle{
 	{needle: "dolt circuit breaker is open", tier: TierAvailability},
 	{needle: "server appears down, failing fast", tier: TierAvailability},
 	{needle: "dolt server unreachable", tier: TierAvailability},
+	// A store read that times out never answered, so it is Tier A wherever it
+	// is raised. isTransientWorkQueryFailure already said so for the drain
+	// work-query path (6d74360fc5); scoping it to that one message prefix left
+	// every other caller quarantining on the first refusal — most visibly
+	// processWorkflowFinalize's outcome read, whose wrapper is "resolving
+	// workflow outcome" (gastownhall/gascity#5729).
+	{needle: "timed out after", tier: TierAvailability},
 }
 
 // ClassifyControllerError is the dispatch/store transient classifier for
@@ -697,7 +704,8 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 		if target == "" {
 			target = executionRoute
 		} else {
-			target = qualifyAttemptTargetWithSourceRoute(target, executionRoute, routeCfg)
+			stepRigContext := strings.TrimSpace(recipe.Steps[i].Metadata[beadmeta.ExecutionRigContextMetadataKey])
+			target = qualifyAttemptTargetWithSourceRoute(target, executionRoute, stepRigContext, routeCfg)
 		}
 		if isAttemptControlKind(recipe.Steps[i].Metadata[beadmeta.KindMetadataKey]) {
 			if err := applyAttemptControlStepRoute(&recipe.Steps[i], target, routeCfg, store); err != nil {
@@ -793,21 +801,98 @@ func failedAttemptAttachRootID(store beads.Store, control beads.Bead, attemptNum
 	return matches[0].ID, nil
 }
 
-func qualifyAttemptTargetWithSourceRoute(target, sourceRoute string, cfg *config.City) string {
+func qualifyAttemptTargetWithSourceRoute(target, sourceRoute, rigContext string, cfg *config.City) string {
 	target = strings.TrimSpace(target)
 	if target == "" || strings.Contains(target, "/") || cfg == nil {
 		return target
 	}
 	sourceRoute = strings.TrimSpace(sourceRoute)
-	slash := strings.IndexByte(sourceRoute, '/')
-	if slash <= 0 {
-		return target
+	if slash := strings.IndexByte(sourceRoute, '/'); slash > 0 {
+		if candidate := qualifyBareTargetWithRigPrefix(target, sourceRoute[:slash], cfg); candidate != "" {
+			return candidate
+		}
 	}
-	candidate := sourceRoute[:slash] + "/" + target
-	if config.FindAgent(cfg, candidate) != nil || config.FindNamedSession(cfg, candidate) != nil {
+	// The source route carried no rig qualifier of its own (for example a
+	// nested/runtime-minted retry control, which never gets
+	// gc.execution_routed_to stamped — only compile-time graphroute
+	// decoration does). Fall back to the step's own execution rig context,
+	// which is always backfilled onto attempt-spawned steps, so a
+	// rig-scoped bare target does not lose its rig qualifier on retry.
+	if candidate := qualifyBareTargetWithRigPrefix(target, rigContext, cfg); candidate != "" {
 		return candidate
 	}
 	return target
+}
+
+// setIterationMetadata records gc.iteration, or removes it when the step has no
+// iteration to speak of. A plain retry outside any loop is the second case, and
+// leaving a stale key there would name a directory that belongs to some other
+// molecule's loop.
+func setIterationMetadata(meta map[string]string, iteration string) {
+	if iteration == "" {
+		delete(meta, beadmeta.IterationMetadataKey)
+		return
+	}
+	meta[beadmeta.IterationMetadataKey] = iteration
+}
+
+// attemptIteration returns which loop iteration an attempt's sub-DAG belongs to,
+// tracked separately from gc.attempt. A ralph step's attempts ARE its
+// iterations, so it defines the value; every other step inherits it from its
+// control, which is the only way a retry nested inside a ralph body learns which
+// iteration it is retrying within. Derived from the live control chain and never
+// from the frozen spec, so a stale copy in step.Metadata cannot survive.
+func attemptIteration(step *formula.Step, control beads.Bead, attemptNum int) string {
+	if step.Ralph != nil {
+		return strconv.Itoa(attemptNum)
+	}
+	return strings.TrimSpace(control.Metadata[beadmeta.IterationMetadataKey])
+}
+
+// applyRalphBodyChildControls rewrites the counters and lineage a ralph body
+// child must take from the live control chain instead of its frozen spec. The
+// iteration is inherited so a retry nested in the body knows which iteration it
+// is retrying within; setIterationMetadata clears it for a non-loop child. A
+// ralph body child additionally resets its retry counter to the child's own
+// spec attempt each iteration (RalphBodyChildAttempt), so an iteration-N child
+// is not born exhausted, and namespaces a bare gc.control_for under this attempt
+// so sibling attempt roots stop colliding on a shared gc.step_id across
+// iterations.
+func applyRalphBodyChildControls(childMeta map[string]string, step, child *formula.Step, attemptNum int, iteration, attemptPrefix string) {
+	setIterationMetadata(childMeta, iteration)
+	if step.Ralph == nil {
+		return
+	}
+	childMeta[beadmeta.AttemptMetadataKey] = formula.RalphBodyChildAttempt(child, attemptNum)
+	// Same S38 rewrite namespaceRalphBodySteps applies at compile time, extended
+	// to the shape it missed. A frozen ralph body arrives already retry-expanded,
+	// so a nested control's attempt root carries gc.control_for as the BARE child
+	// id — identical in every outer iteration. Left bare, each iteration's
+	// control matches all its siblings' attempt roots through the shared
+	// gc.step_id identity member, and only max(gc.attempt) told them apart. That
+	// tiebreak was the iteration index being stamped as an attempt number, so it
+	// disappears with the counter split; the ref has to carry the distinction it
+	// was always supposed to carry. buildNestedControlSeed already yields this
+	// form for nested ralphs, whose synthetic control is keyed by the namespaced
+	// child ref.
+	if cf := strings.TrimSpace(child.Metadata[beadmeta.ControlForMetadataKey]); cf != "" {
+		childMeta[beadmeta.ControlForMetadataKey] = attemptPrefix + "." + cf
+	}
+}
+
+// qualifyBareTargetWithRigPrefix returns rigPrefix+"/"+target when that
+// qualified identity resolves to a configured agent or named session, or ""
+// when rigPrefix is empty or the candidate does not resolve.
+func qualifyBareTargetWithRigPrefix(target, rigPrefix string, cfg *config.City) string {
+	rigPrefix = strings.TrimSpace(rigPrefix)
+	if rigPrefix == "" {
+		return ""
+	}
+	candidate := rigPrefix + "/" + target
+	if config.FindAgent(cfg, candidate) != nil || config.FindNamedSession(cfg, candidate) != nil {
+		return candidate
+	}
+	return ""
 }
 
 // buildAttemptRecipe constructs a minimal formula.Recipe for one attempt
@@ -832,6 +917,8 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 		attemptPrefix = fmt.Sprintf("%s.attempt.%d", stepRef, attemptNum)
 	}
 
+	iteration := attemptIteration(step, control, attemptNum)
+
 	// Root step for the attempt sub-DAG.
 	// For ralph iterations with children, the root is a scope bead.
 	// For simple retries, it's the work bead itself (no wrapper).
@@ -855,6 +942,7 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 	// (buildNestedControlSeed) — both are covered by findLatestAttempt's
 	// identity set.
 	rootMeta[beadmeta.ControlForMetadataKey] = control.ID
+	setIterationMetadata(rootMeta, iteration)
 	if step.OnComplete != nil {
 		rootMeta[beadmeta.OutputJSONRequiredMetadataKey] = "true"
 	}
@@ -922,6 +1010,11 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 					childMeta[k] = v
 				}
 			}
+			// Rewrite the counters and lineage a ralph body child must take from
+			// the live control chain rather than its frozen spec. Applied after
+			// the copy loop, for the same reason gc.control_for is on the root: a
+			// value carried in a frozen spec must not shadow them.
+			applyRalphBodyChildControls(childMeta, step, child, attemptNum, iteration, attemptPrefix)
 			if child.OnComplete != nil {
 				childMeta[beadmeta.OutputJSONRequiredMetadataKey] = "true"
 			}
@@ -973,6 +1066,15 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 			// Validation forbids combining drain with retry/ralph, so this
 			// never overwrites the nested-control kinds above.
 			formula.ApplyDrainControlMetadata(childMeta, child.Drain)
+			// A plain child (none of Retry/Ralph/Drain) reaches here with no
+			// gc.kind at all, unlike the root above which always gets one.
+			// Default it to task, mirroring rootMeta's unconditional stamp,
+			// so isWorkRecordGatedBead's (Type=="task" && gc.kind=="") test
+			// does not wrongly sweep it into the ADR-0009 work-record close
+			// gate. See gastownhall/gascity#5246.
+			if childMeta[beadmeta.KindMetadataKey] == "" {
+				childMeta[beadmeta.KindMetadataKey] = beadmeta.KindTask
+			}
 			childStep := formula.RecipeStep{
 				ID:          childID,
 				Title:       child.Title,
@@ -1216,6 +1318,15 @@ func applyAttemptStepRoute(step *formula.RecipeStep, target string, cfg *config.
 		}
 		step.Labels = removeAttemptPoolLabels(step.Labels)
 		if binding.metadataOnly {
+			if binding.independentSteps {
+				// A one-shot runtime exits after one bounded invocation. Clear the
+				// pinned affinity pair the frozen step spec carried forward — it
+				// names a session that already exited, and a stale group
+				// re-vacuums this re-attempt onto an unrelated claiming session.
+				for _, key := range beadmeta.SessionAffinityMetadataKeys {
+					delete(step.Metadata, key)
+				}
+			}
 			step.Assignee = ""
 			return
 		}
@@ -1310,10 +1421,11 @@ func latestAttemptCandidateIsControlInfrastructure(kind string) bool {
 }
 
 type attemptRouteBinding struct {
-	qualifiedName   string
-	metadataOnly    bool
-	sessionName     string
-	directSessionID string
+	qualifiedName    string
+	metadataOnly     bool
+	independentSteps bool
+	sessionName      string
+	directSessionID  string
 }
 
 func resolveAttemptRouteBinding(target string, cfg *config.City, store beads.Store) (attemptRouteBinding, bool) {
@@ -1341,6 +1453,14 @@ func resolveAttemptRouteBinding(target string, cfg *config.City, store beads.Sto
 			binding := attemptRouteBinding{qualifiedName: agentCfg.QualifiedName()}
 			if isAttemptMultiSessionTarget(agentCfg.QualifiedName(), cfg) {
 				binding.metadataOnly = true
+				// A one-shot runtime exits after a single bounded invocation, so
+				// no session survives between attempts to carry continuation.
+				// The compile-time analog is graphroute.ApplyGraphRouteBinding's
+				// pool branch, which clears the same pinned pair — but keys it on
+				// whether the authored recipe declared a continuation group. The
+				// retry path has no authored binding to read, so it keys on the
+				// target agent's lifecycle instead.
+				binding.independentSteps = agentCfg.Lifecycle == config.AgentLifecycleOneShot
 				return binding, true
 			}
 			binding.sessionName = config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, agentCfg.QualifiedName())
@@ -1626,32 +1746,44 @@ func latestAttemptFromDependencies(store beads.Store, control beads.Bead) (beads
 // candidate carries a matching stamp (in-flight molecules minted before S38),
 // it falls back to the deprecated ref-string cascade.
 func latestAttemptFromCandidates(control beads.Bead, candidates []beads.Bead) beads.Bead {
-	identity := controlIdentitySet(control)
+	precise, bare := controlIdentitySets(control)
 
-	var latest beads.Bead
-	latestAttempt := 0
+	var preciseLatest, bareLatest beads.Bead
+	preciseAttempt, bareAttempt := 0, 0
 	for _, b := range candidates {
 		if isFailedPartialMolecule(b) {
 			continue
 		}
-		// Skip beads that are control infrastructure, not actual work. On the
-		// primary path only this control's own attempt roots carry its identity,
-		// so no scope-unless-ralph skip is needed (see legacy fallback).
+		// Skip beads that are control infrastructure, not actual work. This runs
+		// before the precision ranking below so a scope-check carrying the same
+		// namespaced ref cannot pose as the precise match and starve a real
+		// attempt root of its fallback.
 		if latestAttemptCandidateIsControlInfrastructure(b.Metadata[beadmeta.KindMetadataKey]) {
 			continue
 		}
 		cf := strings.TrimSpace(b.Metadata[beadmeta.ControlForMetadataKey])
-		if cf == "" || !identity[cf] {
+		if cf == "" {
 			continue
 		}
 		attemptNum, _ := strconv.Atoi(b.Metadata[beadmeta.AttemptMetadataKey])
-		if attemptNum > latestAttempt {
-			latestAttempt = attemptNum
-			latest = b
+		switch {
+		case precise[cf]:
+			if attemptNum > preciseAttempt {
+				preciseAttempt = attemptNum
+				preciseLatest = b
+			}
+		case bare[cf]:
+			if attemptNum > bareAttempt {
+				bareAttempt = attemptNum
+				bareLatest = b
+			}
 		}
 	}
-	if latest.ID != "" {
-		return latest
+	if preciseLatest.ID != "" {
+		return preciseLatest
+	}
+	if bareLatest.ID != "" {
+		return bareLatest
 	}
 	return latestAttemptFromCandidatesLegacyRefSurgery(control, candidates)
 }
@@ -1661,18 +1793,38 @@ func latestAttemptFromCandidates(control beads.Bead, candidates []beads.Bead) be
 // gc.control_for stamp equal to any member points at this control (bead-ID
 // stamps come from runtime top-level mints; step-ref/step-id stamps come from
 // compile-time and nested seeds — see S38).
-func controlIdentitySet(control beads.Bead) map[string]bool {
-	identity := make(map[string]bool, 3)
+// controlIdentitySets splits the values an attempt root may carry in
+// gc.control_for by how precisely each one names THIS control.
+//
+// The store bead ID and the namespaced gc.step_ref belong to exactly one
+// control. The bare gc.step_id does not: every outer ralph iteration mints an
+// inner control with the same step id, so a bare stamp names all of them at
+// once. Attempt roots minted before the namespaced stamp existed carry only the
+// bare form, which is why it is still matched — but it has to rank below a
+// precise match, because a molecule that spans a deploy holds both shapes and
+// the older siblings are the ones with the bare stamp.
+//
+// max(gc.attempt) used to paper over the ambiguity: body children were stamped
+// with their outer iteration index, so a later iteration always outscored an
+// earlier one. Splitting the iteration and attempt counters removes that
+// accident — a current iteration's first attempt is now 1, which loses to a
+// stale sibling's 3 — so the precedence has to be stated rather than inferred
+// from a number that no longer means what it did (S38, ga-v7pu5).
+func controlIdentitySets(control beads.Bead) (precise, bare map[string]bool) {
+	precise = make(map[string]bool, 2)
 	for _, v := range []string{
 		control.ID,
 		control.Metadata[beadmeta.StepRefMetadataKey],
-		control.Metadata[beadmeta.StepIDMetadataKey],
 	} {
 		if v = strings.TrimSpace(v); v != "" {
-			identity[v] = true
+			precise[v] = true
 		}
 	}
-	return identity
+	bare = make(map[string]bool, 1)
+	if v := strings.TrimSpace(control.Metadata[beadmeta.StepIDMetadataKey]); v != "" && !precise[v] {
+		bare[v] = true
+	}
+	return precise, bare
 }
 
 // legacyAttemptLineageHits counts attempt-lineage recoveries served by the

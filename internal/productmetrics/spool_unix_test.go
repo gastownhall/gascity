@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/gchome"
-	"github.com/gastownhall/gascity/internal/testutil"
 	"golang.org/x/sys/unix"
 )
 
@@ -8068,7 +8067,7 @@ func TestDualControlCleanupPreemptsDeepTreeStarvation(t *testing.T) {
 func TestSpoolDeepPurgeConvergesUnderLowFileDescriptorLimit(t *testing.T) {
 	const helperEnvironment = "GC_PRODUCTMETRICS_LOW_NOFILE_HELPER"
 	if os.Getenv(helperEnvironment) != "1" {
-		ctx, cancel := context.WithTimeout(context.Background(), 4*testutil.ExecRaceTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), 4*hangBudget)
 		defer cancel()
 		command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSpoolDeepPurgeConvergesUnderLowFileDescriptorLimit$")
 		command.Env = append(os.Environ(), helperEnvironment+"=1")
@@ -8146,7 +8145,7 @@ func TestSpoolDeepPurgeConvergesUnderLowFileDescriptorLimit(t *testing.T) {
 func TestSpoolNestedPurgeConvergesAtMinimumDirectoryBudget(t *testing.T) {
 	const helperEnvironment = "GC_PRODUCTMETRICS_MIN_NOFILE_HELPER"
 	if os.Getenv(helperEnvironment) != "1" {
-		ctx, cancel := context.WithTimeout(context.Background(), 4*testutil.ExecRaceTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), 4*hangBudget)
 		defer cancel()
 		command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSpoolNestedPurgeConvergesAtMinimumDirectoryBudget$")
 		command.Env = append(os.Environ(), helperEnvironment+"=1")

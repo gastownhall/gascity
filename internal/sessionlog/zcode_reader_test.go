@@ -220,26 +220,28 @@ func TestFindZCodeSessionFileByScopeSeparatesSameWorkDirSessions(t *testing.T) {
 	first := write("s-gc-1#1", "sess_first")
 	second := write("s-gc-2#1", "sess_second")
 
-	if got := FindZCodeSessionFileByScope([]string{root}, workDir, "s-gc-1", "1"); got != first {
+	if got := FindZCodeSessionFileByScope([]string{root}, workDir, "s-gc-1", "", "1"); got != first {
 		t.Fatalf("s-gc-1 resolved %q, want %q", got, first)
 	}
-	if got := FindZCodeSessionFileByScope([]string{root}, workDir, "s-gc-2", "1"); got != second {
+	if got := FindZCodeSessionFileByScope([]string{root}, workDir, "s-gc-2", "", "1"); got != second {
 		t.Fatalf("s-gc-2 resolved %q, want %q", got, second)
 	}
 
 	// A dead session's mirror in a reused work dir must not surface for a fresh
 	// session — different epoch, different scope.
-	if got := FindZCodeSessionFileByScope([]string{root}, workDir, "s-gc-1", "2"); got != "" {
+	if got := FindZCodeSessionFileByScope([]string{root}, workDir, "s-gc-1", "", "2"); got != "" {
 		t.Fatalf("fresh conversation resolved a superseded mirror: %q", got)
 	}
-	// The canceled-boot placeholder is never the answer.
-	write("s-gc-3#1", "pending-s-gc-3_1")
-	if got := FindZCodeSessionFileByScope([]string{root}, workDir, "s-gc-3", "1"); got != "" {
-		t.Fatalf("placeholder surfaced as a transcript: %q", got)
+	// A canceled-boot placeholder is the only mirror a first-turn failure
+	// leaves behind (no session id was ever assigned), so when no real mirror
+	// exists it must stay resolvable rather than the scope reading as empty.
+	pending := write("s-gc-3#1", "pending-s-gc-3_1")
+	if got := FindZCodeSessionFileByScope([]string{root}, workDir, "s-gc-3", "", "1"); got != pending {
+		t.Fatalf("first-turn placeholder not surfaced as fallback: got %q, want %q", got, pending)
 	}
 	// A name needing sanitization resolves the same way the adapter wrote it.
 	slashed := write("gascity_gc.worker-9#1", "sess_slashed")
-	if got := FindZCodeSessionFileByScope([]string{root}, workDir, "gascity/gc.worker-9", "1"); got != slashed {
+	if got := FindZCodeSessionFileByScope([]string{root}, workDir, "gascity/gc.worker-9", "", "1"); got != slashed {
 		t.Fatalf("sanitized scope resolved %q, want %q", got, slashed)
 	}
 }
@@ -272,10 +274,10 @@ func TestFindZCodeSessionFileByScopeResolvesArchivedConversations(t *testing.T) 
 	archived := write(archive, "probe#1", "sess_before")
 	current := write(live, "probe#2", "sess_after")
 
-	if got := FindZCodeSessionFileByScope([]string{live}, workDir, "probe", "1"); got != archived {
+	if got := FindZCodeSessionFileByScope([]string{live}, workDir, "probe", "", "1"); got != archived {
 		t.Fatalf("pre-reset scope resolved %q, want the archived %q", got, archived)
 	}
-	if got := FindZCodeSessionFileByScope([]string{live}, workDir, "probe", "2"); got != current {
+	if got := FindZCodeSessionFileByScope([]string{live}, workDir, "probe", "", "2"); got != current {
 		t.Fatalf("post-reset scope resolved %q, want the live %q", got, current)
 	}
 	// The two scopes must not collapse onto one file — that is exactly what
@@ -285,5 +287,160 @@ func TestFindZCodeSessionFileByScopeResolvesArchivedConversations(t *testing.T) 
 	}
 	if !strings.Contains(archived, "archived-transcripts") {
 		t.Fatalf("archived path %q is not under the archive root", archived)
+	}
+}
+
+// TestFindZCodeSessionFileByScopePrefersRealMirrorOverPending pins the
+// placeholder-fallback contract: a first-turn failure leaves only the
+// canceled-boot placeholder (no session id ever existed), so it must stay
+// resolvable as a last resort, while any real mirror in the same scope wins
+// outright because it adopts the placeholder on the first successful turn. The
+// placeholder embeds its work dir just like a real mirror, so the work-dir
+// filter still isolates it.
+func TestFindZCodeSessionFileByScopePrefersRealMirrorOverPending(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "wd")
+	write := func(scope, id, directory string) string {
+		dir := filepath.Join(root, scope)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+		path := filepath.Join(dir, id+".json")
+		body := `{"info":{"id":"` + id + `","directory":"` + filepath.ToSlash(directory) + `"},"messages":[]}`
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+		return path
+	}
+
+	// First-turn failure: only the placeholder exists.
+	pending := write("s-boot#1", "pending-s-boot_1", workDir)
+	if got := FindZCodeSessionFileByScope([]string{root}, workDir, "s-boot", "", "1"); got != pending {
+		t.Fatalf("placeholder-only scope resolved %q, want the placeholder %q", got, pending)
+	}
+
+	// Once a real mirror establishes in the same scope it wins outright.
+	realMirror := write("s-boot#1", "sess_real", workDir)
+	if got := FindZCodeSessionFileByScope([]string{root}, workDir, "s-boot", "", "1"); got != realMirror {
+		t.Fatalf("real mirror not preferred over placeholder: got %q, want %q", got, realMirror)
+	}
+
+	// A placeholder whose embedded directory belongs to another work dir is
+	// filtered out exactly like a real mirror would be.
+	write("s-other#1", "pending-s-other_1", filepath.Join(t.TempDir(), "elsewhere"))
+	if got := FindZCodeSessionFileByScope([]string{root}, workDir, "s-other", "", "1"); got != "" {
+		t.Fatalf("placeholder from another work dir surfaced: %q", got)
+	}
+}
+
+// Two seats can carry the same session name and continuation epoch — a pool
+// slot re-seated within one run does exactly that — so the name-only scope
+// collapsed both onto one mirror and one seat's transcript showed for both.
+// The seat scope carries the session bead id, which a resumed seat keeps.
+func TestZCodeSeatMirrorScope(t *testing.T) {
+	cases := []struct {
+		name, id, epoch, want string
+	}{
+		{"beads--gc__reviewer-1-pool", "gcg-session-575a839d", "1", "beads--gc__reviewer-1-pool@gcg-session-575a839d#1"},
+		{"beads--gc__reviewer-1-pool", "gcg-session-575a839d", "", "beads--gc__reviewer-1-pool@gcg-session-575a839d#1"},
+		{"gascity/gc.worker-9", "gc:session/1", "3", "gascity_gc.worker-9@gc_session_1#3"},
+		// Without a bead id there is no seat scope; the caller falls back to
+		// the name-only scope instead.
+		{"beads--gc__reviewer-1-pool", "", "1", ""},
+		{"", "gcg-session-575a839d", "1", ""},
+		{"beads--gc__reviewer-1-pool", "gcg-session-575a839d", "x", ""},
+	}
+	for _, tc := range cases {
+		if got := ZCodeSeatMirrorScope(tc.name, tc.id, tc.epoch); got != tc.want {
+			t.Errorf("ZCodeSeatMirrorScope(%q, %q, %q) = %q, want %q", tc.name, tc.id, tc.epoch, got, tc.want)
+		}
+	}
+}
+
+func TestFindZCodeSessionFileByScopeSeparatesSeatsSharingASessionName(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "shared-workdir")
+	write := func(scope, id string) string {
+		dir := filepath.Join(root, scope)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+		path := filepath.Join(dir, id+".json")
+		body := `{"info":{"id":"` + id + `","directory":"` + filepath.ToSlash(workDir) + `"},"messages":[]}`
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+		return path
+	}
+	const name = "beads--gc__implementation-reviewer-1-pool"
+	seatA := write(name+"@gcg-session-575a839d#1", "sess_a")
+	seatB := write(name+"@gcg-session-b2f5746a#1", "sess_b")
+
+	// The newer sibling must not win: each seat resolves its own mirror.
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(seatB, future, future); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	if got := FindZCodeSessionFileByScope([]string{root}, workDir, name, "gcg-session-575a839d", "1"); got != seatA {
+		t.Fatalf("seat a resolved %q, want %q", got, seatA)
+	}
+	if got := FindZCodeSessionFileByScope([]string{root}, workDir, name, "gcg-session-b2f5746a", "1"); got != seatB {
+		t.Fatalf("seat b resolved %q, want %q", got, seatB)
+	}
+	// A third seat of the same name has written nothing: it must not borrow a
+	// sibling's transcript.
+	if got := FindZCodeSessionFileByScope([]string{root}, workDir, name, "gcg-session-cafe0000#1", "1"); got != "" {
+		t.Fatalf("seat with no mirror resolved a sibling's: %q", got)
+	}
+}
+
+// Mirrors written before the scope carried the seat — or by an adapter that
+// was not handed a session bead id — live under the name-only scope and must
+// stay readable, but only when the seat scope itself has nothing for this
+// work dir.
+func TestFindZCodeSessionFileByScopeFallsBackToTheNameOnlyScope(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "project")
+	write := func(scope, id string) string {
+		dir := filepath.Join(root, scope)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+		path := filepath.Join(dir, id+".json")
+		body := `{"info":{"id":"` + id + `","directory":"` + filepath.ToSlash(workDir) + `"},"messages":[]}`
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+		return path
+	}
+	legacy := write("worker#1", "sess_legacy")
+
+	if got := FindZCodeSessionFileByScope([]string{root}, workDir, "worker", "gcg-session-1", "1"); got != legacy {
+		t.Fatalf("seat with only a name-only mirror resolved %q, want %q", got, legacy)
+	}
+	// No bead id at all: the name-only scope is the only scope.
+	if got := FindZCodeSessionFileByScope([]string{root}, workDir, "worker", "", "1"); got != legacy {
+		t.Fatalf("name-only lookup resolved %q, want %q", got, legacy)
+	}
+	// The fallback is by the same identity: another epoch still misses.
+	if got := FindZCodeSessionFileByScope([]string{root}, workDir, "worker", "gcg-session-1", "2"); got != "" {
+		t.Fatalf("fallback crossed epochs: %q", got)
+	}
+
+	// Once the seat scope holds anything, the name-only mirror is stale for
+	// this seat even when it is newer — a sibling seat may still be writing it.
+	seat := write("worker@gcg-session-1#1", "sess_seat")
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(legacy, future, future); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	if got := FindZCodeSessionFileByScope([]string{root}, workDir, "worker", "gcg-session-1", "1"); got != seat {
+		t.Fatalf("seat scope not preferred over the name-only scope: got %q, want %q", got, seat)
+	}
+	// A seat that only ever left a canceled-boot placeholder still owns its
+	// scope; the name-only mirror is not consulted behind it.
+	pending := write("worker@gcg-session-2#1", "pending-worker_gcg-session-2_1")
+	if got := FindZCodeSessionFileByScope([]string{root}, workDir, "worker", "gcg-session-2", "1"); got != pending {
+		t.Fatalf("placeholder-only seat resolved %q, want its placeholder %q", got, pending)
 	}
 }

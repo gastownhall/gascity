@@ -1,17 +1,26 @@
 package providerledger
 
 import (
+	"flag"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/testpolicy/waiverclock"
 )
+
+// updateLedgerDoc regenerates the TESTING.md checked runtime provider block
+// from the Go ledger when set. Run:
+//
+//	go test ./internal/testutil/providerledger -run TestCatalogMatchesProductionWiringAndDocumentation -update
+var updateLedgerDoc = flag.Bool("update", false, "regenerate the TESTING.md checked runtime provider ledger block from the Go ledger")
 
 func TestValidateRejectsInvalidContractClaims(t *testing.T) {
 	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
 	validWaiver := &Waiver{
-		Owner:   "ga-80po0c.3",
+		Owner:   "example-owner",
 		Expires: now.Add(30 * 24 * time.Hour),
 		Reason:  "tracked legacy contract gap",
 	}
@@ -50,12 +59,15 @@ func TestValidateRejectsInvalidContractClaims(t *testing.T) {
 				Contract:    ContractRuntimeProvider,
 				Disposition: DispositionWaived,
 				Waiver: &Waiver{
-					Owner:   "ga-80po0c.3",
-					Expires: now.Add(-time.Hour),
+					Owner: "example-owner",
+					// A waiver is valid through the whole UTC day it names, so
+					// this has to be a prior day, not an earlier hour of the
+					// same one. See internal/testpolicy/waiverclock.
+					Expires: now.AddDate(0, 0, -1),
 					Reason:  "expired gap",
 				},
 			},
-			want: "waiver owned by ga-80po0c.3 expired",
+			want: "waiver owned by example-owner expired",
 		},
 		{
 			name: "waiver has no owner",
@@ -75,12 +87,12 @@ func TestValidateRejectsInvalidContractClaims(t *testing.T) {
 				Contract:    ContractRuntimeProvider,
 				Disposition: DispositionWaived,
 				Waiver: &Waiver{
-					Owner:   "ga-80po0c.3",
+					Owner:   "example-owner",
 					Expires: now.Add(maxWaiverHorizon + time.Hour),
 					Reason:  "parked gap",
 				},
 			},
-			want: "waiver owned by ga-80po0c.3 exceeds",
+			want: "waiver owned by example-owner exceeds",
 		},
 		{
 			name: "not applicable has no reason",
@@ -136,7 +148,7 @@ func TestValidateRejectsInvalidContractClaims(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			entry := validRuntimeEntry("runtime.fixture", "exact:fixture", tt.claim)
-			err := Validate([]Entry{entry}, now)
+			_, err := Validate([]Entry{entry}, now, waiverclock.ModeStrict)
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("Validate() error = %v, want containing %q", err, tt.want)
 			}
@@ -322,7 +334,7 @@ func TestValidateRequiresEveryPortContract(t *testing.T) {
 	})
 	entry.Claims = nil
 
-	err := Validate([]Entry{entry}, now)
+	_, err := Validate([]Entry{entry}, now, waiverclock.ModeStrict)
 	if err == nil || !strings.Contains(err.Error(), "missing required contract runtime.Provider") {
 		t.Fatalf("Validate() error = %v, want missing required contract", err)
 	}
@@ -337,7 +349,7 @@ func TestValidateRejectsUnknownCatalogName(t *testing.T) {
 	})
 	entry.Catalog.Name = "runtime.typo"
 
-	err := Validate([]Entry{entry}, now)
+	_, err := Validate([]Entry{entry}, now, waiverclock.ModeStrict)
 	if err == nil || !strings.Contains(err.Error(), "unknown catalog") {
 		t.Fatalf("Validate() error = %v, want unknown-catalog error", err)
 	}
@@ -377,7 +389,7 @@ func TestValidateRequiresProductionRoleForDiscoveryBindings(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := Validate([]Entry{tt.entry}, now)
+			_, err := Validate([]Entry{tt.entry}, now, waiverclock.ModeStrict)
 			if err == nil || !strings.Contains(err.Error(), "discovery binding requires role production_provider") {
 				t.Fatalf("Validate() error = %v, want production-role error", err)
 			}
@@ -391,7 +403,7 @@ func TestValidateRequiresReusableDoubleTypeWithReusableRole(t *testing.T) {
 	t.Run("role without type", func(t *testing.T) {
 		entry := reusableRuntimeEntry("runtime.fake", "exact:fake", "Fake", "NewFake")
 		entry.DoubleType = nil
-		err := Validate([]Entry{entry}, now)
+		_, err := Validate([]Entry{entry}, now, waiverclock.ModeStrict)
 		if err == nil || !strings.Contains(err.Error(), "reusable_double role requires a double type") {
 			t.Fatalf("Validate() error = %v, want missing-double-type error", err)
 		}
@@ -400,7 +412,7 @@ func TestValidateRequiresReusableDoubleTypeWithReusableRole(t *testing.T) {
 	t.Run("role without boundary", func(t *testing.T) {
 		entry := reusableRuntimeEntry("runtime.fake", "exact:fake", "Fake", "NewFake")
 		entry.DoubleBoundary = ""
-		err := Validate([]Entry{entry}, now)
+		_, err := Validate([]Entry{entry}, now, waiverclock.ModeStrict)
 		if err == nil || !strings.Contains(err.Error(), "reusable_double role requires a repository-relative double boundary") {
 			t.Fatalf("Validate() error = %v, want missing-double-boundary error", err)
 		}
@@ -409,7 +421,7 @@ func TestValidateRequiresReusableDoubleTypeWithReusableRole(t *testing.T) {
 	t.Run("type without role", func(t *testing.T) {
 		entry := reusableRuntimeEntry("runtime.fake", "exact:fake", "Fake", "NewFake")
 		entry.Roles = []Role{RoleProductionProvider}
-		err := Validate([]Entry{entry}, now)
+		_, err := Validate([]Entry{entry}, now, waiverclock.ModeStrict)
 		if err == nil || !strings.Contains(err.Error(), "double type requires role reusable_double") {
 			t.Fatalf("Validate() error = %v, want missing-reusable-role error", err)
 		}
@@ -421,7 +433,7 @@ func TestRenderMarkdownShowsReusableOnlyBoundary(t *testing.T) {
 	entry.Roles = []Role{RoleReusableDouble}
 	entry.Catalog = nil
 
-	if err := Validate([]Entry{entry}, time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)); err != nil {
+	if _, err := Validate([]Entry{entry}, time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC), waiverclock.ModeStrict); err != nil {
 		t.Fatalf("Validate(reusable-only entry): %v", err)
 	}
 	got := RenderMarkdown([]Entry{entry})
@@ -444,7 +456,7 @@ func TestValidateRejectsDuplicateSourceBindings(t *testing.T) {
 	second.Catalog = nil
 	second.Source = &SourceRef{File: "cmd/gc/./providers.go", Function: "newFixture", Reason: "same normalized source"}
 
-	err := Validate([]Entry{first, second}, now)
+	_, err := Validate([]Entry{first, second}, now, waiverclock.ModeStrict)
 	if err == nil || !strings.Contains(err.Error(), "source binding cmd/gc/providers.go#newFixture is also owned") {
 		t.Fatalf("Validate() error = %v, want duplicate-source error", err)
 	}
@@ -464,7 +476,7 @@ func TestValidateRejectsContractNotRequiredByPort(t *testing.T) {
 		NotApplicableReason: "fixture",
 	})
 
-	err := Validate([]Entry{entry}, now)
+	_, err := Validate([]Entry{entry}, now, waiverclock.ModeStrict)
 	if err == nil || !strings.Contains(err.Error(), "contract runtime.Unknown is not required by port runtime.Provider") {
 		t.Fatalf("Validate() error = %v, want inapplicable-contract error", err)
 	}
@@ -496,7 +508,7 @@ func TestValidateRequiresExactlyOneClaimPerConstructorContract(t *testing.T) {
 	}
 
 	t.Run("missing pair", func(t *testing.T) {
-		err := Validate([]Entry{entry}, now)
+		_, err := Validate([]Entry{entry}, now, waiverclock.ModeStrict)
 		if err == nil || !strings.Contains(err.Error(), "constructor example.test/provider.NewB is missing required contract runtime.Provider") {
 			t.Fatalf("Validate() error = %v, want missing constructor-contract pair", err)
 		}
@@ -505,7 +517,7 @@ func TestValidateRequiresExactlyOneClaimPerConstructorContract(t *testing.T) {
 	t.Run("duplicate pair", func(t *testing.T) {
 		duplicate := entry
 		duplicate.Claims = []ContractClaim{claim(constructorA), claim(constructorA), claim(constructorB)}
-		err := Validate([]Entry{duplicate}, now)
+		_, err := Validate([]Entry{duplicate}, now, waiverclock.ModeStrict)
 		if err == nil || !strings.Contains(err.Error(), "constructor example.test/provider.NewA contract runtime.Provider is duplicated") {
 			t.Fatalf("Validate() error = %v, want duplicate constructor-contract pair", err)
 		}
@@ -514,7 +526,7 @@ func TestValidateRequiresExactlyOneClaimPerConstructorContract(t *testing.T) {
 	t.Run("undeclared constructor", func(t *testing.T) {
 		undeclared := entry
 		undeclared.Claims = []ContractClaim{claim(constructorA), claim(constructorB), claim(SymbolRef{ImportPath: "example.test/provider", Name: "NewC"})}
-		err := Validate([]Entry{undeclared}, now)
+		_, err := Validate([]Entry{undeclared}, now, waiverclock.ModeStrict)
 		if err == nil || !strings.Contains(err.Error(), "constructor example.test/provider.NewC is not declared by the entry") {
 			t.Fatalf("Validate() error = %v, want undeclared-constructor error", err)
 		}
@@ -545,8 +557,8 @@ func TestCatalogBindsFakeAndBothSubprocessConstructors(t *testing.T) {
 				}
 				subprocessDefaultProof = claim.Proof
 			}
-			if claim.Waiver != nil && claim.Waiver.Owner == "ga-80po0c.1.2" {
-				t.Errorf("obsolete ga-80po0c.1.2 waiver remains on %s", renderSymbolRef(claim.Constructor))
+			if claim.Waiver != nil && claim.Waiver.Owner != runtimeContractWaiverOwner {
+				t.Errorf("waiver owner drifted from runtimeContractWaiverOwner: got %q on %s", claim.Waiver.Owner, renderSymbolRef(claim.Constructor))
 			}
 		}
 	}
@@ -609,8 +621,8 @@ func TestCatalogBindsACPWithDirAndDefersDefaultConstructor(t *testing.T) {
 	if got, want := renderSymbolRefs(withDirProof.AllowedCalls), "fmt.Sprintf, internal/runtime/acp.acpConformanceCommand, internal/runtime/acp.acpConformanceDir, sync/atomic.AddInt64"; got != want {
 		t.Errorf("ACP WithDir allowed calls = %q, want %q", got, want)
 	}
-	if defaultWaiver == nil || defaultWaiver.Owner != "ga-80po0c.3" {
-		t.Errorf("ACP default waiver = %+v, want ga-80po0c.3 ownership", defaultWaiver)
+	if defaultWaiver == nil || defaultWaiver.Owner != runtimeContractWaiverOwner {
+		t.Errorf("ACP default waiver = %+v, want %s ownership", defaultWaiver, runtimeContractWaiverOwner)
 	}
 }
 
@@ -647,8 +659,8 @@ func TestCatalogBindsExecCompositionToSeamBackedContract(t *testing.T) {
 	if got, want := renderSymbolRefs(proof.AllowedCalls), "fmt.Sprintf, internal/runtime/exec.execConformanceScript, sync/atomic.AddInt64"; got != want {
 		t.Errorf("exec.NewSeamBacked allowed calls = %q, want %q", got, want)
 	}
-	if t3Waiver == nil || t3Waiver.Owner != "ga-80po0c.3" {
-		t.Errorf("legacy T3 exec-prefix waiver = %+v, want ga-80po0c.3 ownership", t3Waiver)
+	if t3Waiver == nil || t3Waiver.Owner != runtimeContractWaiverOwner {
+		t.Errorf("legacy T3 exec-prefix waiver = %+v, want %s ownership", t3Waiver, runtimeContractWaiverOwner)
 	}
 }
 
@@ -1544,7 +1556,18 @@ func TestValidateSourceRefsBindsManualCompositionConstructor(t *testing.T) {
 func TestCatalogMatchesProductionWiringAndDocumentation(t *testing.T) {
 	root := repoRoot(t)
 	entries := Catalog()
-	if err := Validate(entries, time.Now().UTC()); err != nil {
+	// This is the one call in the package that reads the wall clock, which makes
+	// it the one call a calendar rollover can turn red with no code change. The
+	// mode decides who pays for that: everyone, or the waiver's owner.
+	mode, err := waiverclock.FromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	warnings, err := Validate(entries, time.Now().UTC(), mode)
+	for _, warning := range warnings {
+		t.Logf("waiver clock: %s", warning)
+	}
+	if err != nil {
 		t.Fatalf("Validate(Catalog): %v", err)
 	}
 
@@ -1572,9 +1595,22 @@ func TestCatalogMatchesProductionWiringAndDocumentation(t *testing.T) {
 	if err := ValidateProofRefs(root, entries); err != nil {
 		t.Fatalf("ValidateProofRefs: %v", err)
 	}
-	doc, err := os.ReadFile(filepath.Join(root, "TESTING.md"))
+	testingMDPath := filepath.Join(root, "TESTING.md")
+	doc, err := os.ReadFile(testingMDPath)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if *updateLedgerDoc {
+		updated, err := ReplaceMarkdownBlock(string(doc), RenderMarkdown(entries))
+		if err != nil {
+			t.Fatalf("replace TESTING.md ledger block: %v", err)
+		}
+		if updated != string(doc) {
+			if err := os.WriteFile(testingMDPath, []byte(updated), 0o644); err != nil {
+				t.Fatalf("write TESTING.md: %v", err)
+			}
+			doc = []byte(updated)
+		}
 	}
 	if err := CheckMarkdown(string(doc), entries); err != nil {
 		t.Fatalf("CheckMarkdown: %v", err)
@@ -1640,7 +1676,7 @@ func TestCatalogReturnsIndependentEntries(t *testing.T) {
 	if got := second[0].Claims[0].Proof.AllowedCalls[0].Name; got != "Sprintf" {
 		t.Errorf("Catalog() proof allowed call leaked mutation: %q", got)
 	}
-	if second[3].Claims[0].Waiver.Owner != "ga-80po0c.3" {
+	if second[3].Claims[0].Waiver.Owner != runtimeContractWaiverOwner {
 		t.Errorf("Catalog() waiver leaked mutation: %q", second[3].Claims[0].Waiver.Owner)
 	}
 	if second[len(second)-1].Source.Function != "resolveSessionTransportProvider" {
@@ -1662,6 +1698,39 @@ func TestCheckMarkdownRejectsDrift(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), RenderMarkdown(entries)) {
 		t.Fatalf("CheckMarkdown() error = %v, want actionable expected block", err)
+	}
+}
+
+func TestReplaceMarkdownBlockRewritesOnlyTheMarkedBlock(t *testing.T) {
+	doc := "before\n" + MarkdownStart + "\nstale\n" + MarkdownEnd + "\nafter\n"
+	replacement := MarkdownStart + "\nfresh\n" + MarkdownEnd
+
+	got, err := ReplaceMarkdownBlock(doc, replacement)
+	if err != nil {
+		t.Fatalf("ReplaceMarkdownBlock: %v", err)
+	}
+	if want := "before\n" + replacement + "\nafter\n"; got != want {
+		t.Fatalf("ReplaceMarkdownBlock() = %q, want %q", got, want)
+	}
+}
+
+func TestReplaceMarkdownBlockRejectsMissingMarkers(t *testing.T) {
+	tests := []struct {
+		name string
+		doc  string
+		want string
+	}{
+		{"no markers", "plain document\n", "exactly one"},
+		{"duplicated start", MarkdownStart + MarkdownStart + MarkdownEnd, "exactly one"},
+		{"out of order", MarkdownEnd + "\nbody\n" + MarkdownStart, "out of order"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ReplaceMarkdownBlock(tt.doc, "replacement")
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("ReplaceMarkdownBlock(%q) error = %v, want containing %q", tt.doc, err, tt.want)
+			}
+		})
 	}
 }
 

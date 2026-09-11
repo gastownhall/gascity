@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 )
 
@@ -728,6 +729,33 @@ func TestNudgeQueueBeadIDNeverEndsInADigit(t *testing.T) {
 	if nudgeQueueBeadID("a") == nudgeQueueBeadID("b") {
 		t.Fatal("nudgeQueueBeadID collided on distinct nudge ids")
 	}
+}
+
+// TestNudgeQueueBeadIDLandsInTheNudgesNamespace closes the loop between the
+// package that MINTS a queue record's id and the package that ROUTES it.
+//
+// Deriving the prefix from config.NudgeQueueIDPrefix removes the second literal
+// but not the second convention: the router matches the segment before the
+// first "-", and the minter is the one that appends it. Moving the separator to
+// the other side of that seam compiles, keeps both sides spelling "gcnq", and
+// silently stops the table matching — queue records land in the work ledger,
+// the queue reads its own binding, finds nothing, and stops draining without an
+// error anywhere.
+func TestNudgeQueueBeadIDLandsInTheNudgesNamespace(t *testing.T) {
+	id := nudgeQueueBeadID("n-1")
+	head, rest, ok := strings.Cut(id, "-")
+	if !ok || rest == "" {
+		t.Fatalf("nudgeQueueBeadID minted %q, want a prefix and a body separated by %q", id, "-")
+	}
+	if !config.IsReservedClassPrefix(head) {
+		t.Errorf("a minted queue id %q carries prefix %q, which config does not reserve — a rig could be configured with it", id, head)
+	}
+	for _, prefix := range config.ReservedClassPrefixesFor(config.BeadClassNudges) {
+		if prefix == head {
+			return
+		}
+	}
+	t.Errorf("a minted queue id %q carries prefix %q, which is reserved for some other class; the nudges binding holds %v", id, head, config.ReservedClassPrefixesFor(config.BeadClassNudges))
 }
 
 // TestBeadsNudgeQueueSweepsTerminalRecordsPastRetention pins the end of a

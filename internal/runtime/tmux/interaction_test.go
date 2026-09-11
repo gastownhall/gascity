@@ -493,6 +493,8 @@ func phase2ReportProfile() workertest.ProfileID {
 	switch strings.TrimSpace(strings.ToLower(os.Getenv("PROFILE"))) {
 	case string(workertest.ProfileCodexTmuxCLI):
 		return workertest.ProfileCodexTmuxCLI
+	case string(workertest.ProfileCursorTmuxCLI):
+		return workertest.ProfileCursorTmuxCLI
 	case string(workertest.ProfileGeminiTmuxCLI):
 		return workertest.ProfileGeminiTmuxCLI
 	default:

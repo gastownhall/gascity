@@ -41,6 +41,21 @@ var docTreeDirs = []string{"contrib", "docs", "engdocs", "release-gates", "specs
 // gitignored scratch space for local work).
 var docTreeIgnored = []string{"cmd", "examples", "internal", "plans", "scripts", "test", "tmp", "worktrees"}
 
+// beadScratchPrefixes are the bead-id prefixes agents name their top-level
+// scratch directories after. An explicit list, not a shape match: a doc tree
+// may legitimately be hyphenated (release-gates), and silently exempting one
+// would defeat the coverage this file exists to enforce.
+var beadScratchPrefixes = []string{"ga-", "gcg-", "mc-"}
+
+func isBeadScratchRoot(name string) bool {
+	for _, p := range beadScratchPrefixes {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // isNestedWorktreeRoot reports whether path is the root of a linked git
 // worktree checked out inside this tree. Linked worktrees have a .git FILE
 // (a "gitdir: ..." pointer) rather than a .git directory, so this catches
@@ -819,7 +834,7 @@ func TestDocDirCoverage(t *testing.T) {
 			continue
 		}
 		name := e.Name()
-		if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "ga-") || name == "vendor" || name == "node_modules" {
+		if strings.HasPrefix(name, ".") || isBeadScratchRoot(name) || name == "vendor" || name == "node_modules" {
 			continue
 		}
 		if known[name] {

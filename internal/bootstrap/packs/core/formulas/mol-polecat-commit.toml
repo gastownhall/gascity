@@ -21,10 +21,10 @@ Push conflicts are handled by fetch + rebase + retry (up to 3 times).
 | Situation | Action |
 |-----------|--------|
 | Tests fail | Fix them. Do not proceed with failures. |
-| Push conflict (3 retries exhausted) | Mail Witness, mark yourself stuck |
-| Blocked on external | Mail Witness, mark yourself stuck |
+| Push conflict (3 retries exhausted) | Mail the escalation target, mark yourself stuck |
+| Blocked on external | Mail the escalation target, mark yourself stuck |
 | Context filling | `gc runtime request-restart` (blocks until controller kills you) |
-| Unsure what to do | Mail Witness, don't guess |"""
+| Unsure what to do | Mail the escalation target, don't guess |"""
 formula = "mol-polecat-commit"
 extends = ["mol-polecat-base"]
 
@@ -73,7 +73,7 @@ WORKTREE_PATH=$(pwd)/worktrees/"$WORK_BEAD_ID"
 git worktree add "$WORKTREE_PATH" --detach origin/{{base_branch}}
 cd "$WORKTREE_PATH"
 ```
-Record immediately so restarts and witness recovery can find it:
+Record immediately so restarts and work-health recovery can find it:
 ```bash
 gc bd update "$WORK_BEAD_ID" --set-metadata work_dir="$WORKTREE_PATH"
 ```
@@ -121,7 +121,7 @@ for attempt in 1 2 3; do
     fi
     if [ "$attempt" -eq 3 ]; then
         echo "Push failed after 3 attempts"
-        gc mail send <rig>/witness -s "HELP: Push conflict after 3 retries" \
+        gc mail send {{escalation_target}} -s "HELP: Push conflict after 3 retries" \
           -m "Issue: $WORK_BEAD_ID. Cannot push to {{base_branch}}."
         gc runtime drain-ack
         exit 1

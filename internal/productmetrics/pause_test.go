@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"fmt"
+	"math"
 	"os"
 	"reflect"
 	"strings"
@@ -60,6 +61,31 @@ func TestCanonicalPauseMessageMatchesRestrictedRFC8785Vector(t *testing.T) {
 	}
 	if want := pauseCanonicalOracle(testPauseRelease, testPauseEpoch, testPauseKeyID); !bytes.Equal(message, want) {
 		t.Fatalf("canonical message mismatch\n got: %q\nwant: %q", message, want)
+	}
+}
+
+// TestCanonicalPauseMessageCapacityMatchesPlainSumForNormalInputs pins the
+// non-overflow path to the same result a plain `prefixLen + encodedLen`
+// addition would produce, so the overflow guard below can't silently change
+// the allocated capacity for real-world inputs.
+func TestCanonicalPauseMessageCapacityMatchesPlainSumForNormalInputs(t *testing.T) {
+	prefixLen, encodedLen := len(pauseDomainPrefix), 128
+	got, err := canonicalPauseMessageCapacity(prefixLen, encodedLen)
+	if err != nil {
+		t.Fatalf("canonicalPauseMessageCapacity: %v", err)
+	}
+	if want := prefixLen + encodedLen; got != want {
+		t.Fatalf("canonicalPauseMessageCapacity = %d, want %d", got, want)
+	}
+}
+
+// TestCanonicalPauseMessageCapacityRejectsOverflow exercises the allocation
+// guard directly with a math.MaxInt-sized operand instead of an actual
+// oversized []byte, so the overflow path is provable without allocating
+// gigabytes of memory in a test.
+func TestCanonicalPauseMessageCapacityRejectsOverflow(t *testing.T) {
+	if _, err := canonicalPauseMessageCapacity(len(pauseDomainPrefix), math.MaxInt); err == nil {
+		t.Fatal("canonicalPauseMessageCapacity: want overflow error for math.MaxInt encoded length, got nil")
 	}
 }
 

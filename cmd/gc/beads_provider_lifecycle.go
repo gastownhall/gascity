@@ -605,6 +605,21 @@ func scopeSkipsManagedDoltForInit(cityPath, dir string) (bool, error) {
 		return false, nil
 	}
 	if !samePath(cityPath, dir) {
+		// A scope carrying no metadata of its own has not chosen a backend, so
+		// it inherits the city's — a fact decidable from the city alone. The
+		// authoritative-scope-config path below cannot answer for it: `gc rig
+		// add` writes the rig's .beads/config.yaml only after this gate runs,
+		// so on a fresh rig directory the resolve finds nothing authoritative
+		// and every new rig on a city bound to someone else's store fell
+		// through to managed Dolt — where the add died reaching a Dolt server
+		// that does not exist (gas-4cu).
+		//
+		// This decides dispatch only. The rig is deliberately left unpinned:
+		// an inherited scope resolves the city's binding on each use rather
+		// than carrying a copy that would go stale when the city moves.
+		if !ok && !scopeHasOwnConfigYAML(dir) {
+			return scopeHasCompleteStorageBinding(scopeMetadataJSONPath(cityPath))
+		}
 		resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, dir, "")
 		if err != nil {
 			return false, err
@@ -618,6 +633,16 @@ func scopeSkipsManagedDoltForInit(cityPath, dir string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// scopeHasOwnConfigYAML reports whether the scope has written its own
+// .beads/config.yaml. A fresh `gc rig add` has not — it writes that file only
+// after this gate runs — so the inheritance shortcut stays scoped to a
+// directory with no config of its own, and a scope that DOES carry one still
+// goes through ResolveScopeConfigState's endpoint-origin validation.
+func scopeHasOwnConfigYAML(dir string) bool {
+	_, err := fsys.OSFS{}.Stat(filepath.Join(dir, ".beads", "config.yaml"))
+	return err == nil
 }
 
 // scopeHasCompleteStorageBinding recognizes the opaque workspace binding
@@ -964,18 +989,34 @@ func initBeadsForDirWithExecutor(cityPath, dir, prefix, doltDatabase string, exe
 				if isBdAlreadyInitializedError(err) {
 					return finalizeCanonicalBdScopeInit(cityPath, dir, prefix, canonicalDoltDatabase)
 				}
+				reinit := func() error { return execute(script, env, args...) }
 				if shouldRetryExecBdInit(err) {
 					for attempt := 0; attempt < 3; attempt++ {
 						time.Sleep(time.Second)
-						retryErr := execute(script, env, args...)
+						retryErr := reinit()
 						if retryErr == nil {
 							return finalizeCanonicalBdScopeInit(cityPath, dir, prefix, canonicalDoltDatabase)
 						}
-						if !shouldRetryExecBdInit(retryErr) {
-							return retryErr
-						}
 						err = retryErr
+						if !shouldRetryExecBdInit(retryErr) {
+							break
+						}
 					}
+				}
+				// beads refuses to migrate tables with an uncommitted working
+				// set and prescribes a remedy that hits the same refusal. We
+				// created this database, so clear it here instead of handing
+				// the operator that circular advice.
+				if isBdInitDirtyTablesError(err) {
+					if recoverErr := recoverBdInitFromDirtyTables(cityPath, canonicalDoltDatabase, err, reinit); recoverErr != nil {
+						// A re-init that reports the scope is already
+						// initialized succeeded, exactly as it does on the
+						// first attempt above.
+						if !isBdAlreadyInitializedError(recoverErr) {
+							return recoverErr
+						}
+					}
+					return finalizeCanonicalBdScopeInit(cityPath, dir, prefix, canonicalDoltDatabase)
 				}
 				return err
 			}

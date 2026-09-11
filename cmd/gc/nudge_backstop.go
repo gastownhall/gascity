@@ -178,10 +178,6 @@ func runNudgeBackstop(
 			pred.exhausted(store, s, stdout)
 			continue
 		case backstopActionNudge:
-			content := pred.content(*s)
-			if content == "" {
-				continue
-			}
 			switch pred.revalidate(target) {
 			case backstopResolutionHold:
 				continue
@@ -189,8 +185,24 @@ func runNudgeBackstop(
 				pred.clear(store, s, stdout)
 				continue
 			case backstopResolutionOutstanding:
-				// Reserve below.
+				// Deliver below.
 			default:
+				continue
+			}
+			content := pred.content(*s)
+			if content == "" {
+				// Nothing is deliverable for this session. `agent.Nudge` is
+				// optional and pool templates routinely leave it unset, so this
+				// is the common case, not the exotic one. Skipping silently
+				// parks the state machine on its observe marker forever: no
+				// attempt is ever reserved, the cap is never reached, and the
+				// predicate's terminal action never runs — which for the
+				// execution backstop is the drain that is the only thing that
+				// releases the claim. The bounded attempts exist to give the
+				// agent a chance to ANSWER a nudge; with no nudge to send there
+				// is nothing to wait for, so go straight to the terminal action
+				// after the same grace window.
+				pred.exhausted(store, s, stdout)
 				continue
 			}
 			// Write ahead of the external delivery. If the process crashes

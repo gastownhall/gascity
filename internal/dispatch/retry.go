@@ -434,10 +434,37 @@ func requiredArtifactTemplates(metadata map[string]string) []string {
 	return result
 }
 
+// requiredArtifactWorkDir reads the worktree recorded on a bead, canonical key
+// first and legacy second. beadmeta documents that contract for this key family
+// and internal/beads/contract implements it for the sibling keys; the artifact
+// gate predates both and read only the legacy spelling, so a bead carrying just
+// gc.work_dir resolved to nothing and its attempts stayed transient forever.
+func requiredArtifactWorkDir(meta map[string]string) string {
+	if v := strings.TrimSpace(meta[beadmeta.WorkDirMetadataKey]); v != "" {
+		return v
+	}
+	return strings.TrimSpace(meta[beadmeta.LegacyWorkDirMetadataKey])
+}
+
+// resolveRequiredArtifactPath expands a gc.required_artifact template against
+// the attempt subject. This is the only place the template vocabulary is
+// defined, so it is also where that vocabulary is documented:
+//
+//	{worktree}          the resolved worktree root (also the implicit base for
+//	                    a relative template)
+//	{root} / {root_id}  the workflow root bead ID
+//	{attempt}           gc.attempt — this step's own retry counter
+//	{iteration}         gc.iteration — the loop iteration the step ran in
+//
+// {attempt} and {iteration} are NOT interchangeable. A directory shared by the
+// steps of one loop iteration is named by {iteration}; only {attempt} advances
+// when a single step retries. Any token left unexpanded fails the template
+// loudly rather than resolving to a partial path.
 func resolveRequiredArtifactPath(store beads.Store, subject beads.Bead, rawPath string) (string, string, string, error) {
 	rootID := strings.TrimSpace(subject.Metadata[beadmeta.RootBeadIDMetadataKey])
 	attempt := strings.TrimSpace(subject.Metadata[beadmeta.AttemptMetadataKey])
-	worktree := strings.TrimSpace(subject.Metadata["work_dir"])
+	iteration := strings.TrimSpace(subject.Metadata[beadmeta.IterationMetadataKey])
+	worktree := requiredArtifactWorkDir(subject.Metadata)
 
 	if worktree == "" {
 		resolvedWorktree, reason, err := resolveRequiredArtifactWorktree(store, rootID)
@@ -458,6 +485,17 @@ func resolveRequiredArtifactPath(store beads.Store, subject beads.Bead, rawPath 
 	path = strings.ReplaceAll(path, "{root}", rootID)
 	path = strings.ReplaceAll(path, "{root_id}", rootID)
 	path = strings.ReplaceAll(path, "{attempt}", attempt)
+	// {iteration} names the loop iteration a whole sub-DAG ran in, which is the
+	// directory a set of sibling steps share. {attempt} names one step's own
+	// retry counter, which only the step that retried advances — so a template
+	// built from it sends a retried reader to a directory its siblings never
+	// wrote. Substituted only when the bead actually carries the value: an empty
+	// replacement would produce a silently wrong path segment and the gate would
+	// then blame the step for the resolver's gap, where falling through to the
+	// unresolved-template check below names the real fault (ga-la0py).
+	if iteration != "" {
+		path = strings.ReplaceAll(path, "{iteration}", iteration)
+	}
 	if strings.Contains(path, "{") || strings.Contains(path, "}") {
 		return "", "", "unresolved_required_artifact_template", nil
 	}
@@ -534,7 +572,7 @@ func resolveRequiredArtifactWorktree(store beads.Store, rootID string) (string, 
 	// bead of a cross-store root (gc.root_store_ref pointing at another rig)
 	// is not resolvable through this store, and dereferencing it used to fail
 	// passing attempts with missing_required_artifact_context.
-	if worktree := strings.TrimSpace(root.Metadata["work_dir"]); worktree != "" {
+	if worktree := requiredArtifactWorkDir(root.Metadata); worktree != "" {
 		return worktree, "", nil
 	}
 	sourceID := strings.TrimSpace(root.Metadata[beadmeta.SourceBeadIDMetadataKey])
@@ -551,7 +589,7 @@ func resolveRequiredArtifactWorktree(store beads.Store, rootID string) (string, 
 	if err != nil {
 		return "", "", fmt.Errorf("loading required artifact source bead %s: %w", sourceID, markTransientControllerBoundaryError(err))
 	}
-	worktree := strings.TrimSpace(source.Metadata["work_dir"])
+	worktree := requiredArtifactWorkDir(source.Metadata)
 	if worktree == "" {
 		return "", "missing_required_artifact_context", nil
 	}

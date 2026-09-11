@@ -1141,6 +1141,60 @@ func TestRouteCityStatus_SixRowMatrix(t *testing.T) {
 	}
 }
 
+// TestCmdCityStatus_SupervisorManagedNoAPIPortUsesSupervisorAPI is the
+// ra-r9hm6v end-to-end regression test, exercising the real `gc status`
+// entry point (cmdCityStatus) rather than routeCityStatus directly. A
+// supervisor-managed city with no [api] section in city.toml — the shape
+// writeCityStatusTestCity produces, and the shape of a default `gc init`'d
+// city — used to make cmdCityStatus's real cityStatusAPIClient resolve nil
+// (apiClient's "alive socket, no standalone port" case), forcing every `gc
+// status` call onto the expensive local snapshot builder even though a
+// supervisor was reachable. It must now resolve the fake supervisor's API
+// client and take route=api end to end.
+func TestCmdCityStatus_SupervisorManagedNoAPIPortUsesSupervisorAPI(t *testing.T) {
+	t.Setenv("GC_DEBUG", "1")
+	cityPath := writeCityStatusTestCity(t)
+
+	srv := httptest.NewServer(okCityStatusHandler(t))
+	defer srv.Close()
+
+	origAlive, origSup := apiRouteControllerAliveHook, apiRouteSupervisorClientHook
+	t.Cleanup(func() {
+		apiRouteControllerAliveHook = origAlive
+		apiRouteSupervisorClientHook = origSup
+	})
+	// Simulates a live per-city controller socket (the supervisor hosts the
+	// controller in-process) answering the "alive" ping, paired with a
+	// supervisor-managed API client — the exact combination apiClient alone
+	// cannot route because city.toml has no [api] port.
+	apiRouteControllerAliveHook = func(string) int { return 4242 }
+	apiRouteSupervisorClientHook = func(cp string) *api.Client {
+		if cp != cityPath {
+			return nil
+		}
+		return api.NewCityScopedClient(srv.URL, "test-city")
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdCityStatus([]string{cityPath}, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdCityStatus exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "route=api") {
+		t.Fatalf("stderr missing route=api (still falling back to the expensive local path): %s", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "route=fallback") {
+		t.Fatalf("stderr shows route=fallback, want route=api only: %s", stderr.String())
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
+		t.Fatalf("unmarshal stdout: %v; stdout=%s", err, stdout.String())
+	}
+	if _, ok := envelope["_cache_age_s"]; !ok {
+		t.Fatalf("stdout missing _cache_age_s (API-path envelope field), got: %s", stdout.String())
+	}
+}
+
 // TestRouteCityStatus_APIJSONIncludesCacheAge verifies the API-path JSON
 // output carries the _cache_age_s envelope field while the fallback path
 // omits it. Enforces D5 from the gc-read-path design doc.
