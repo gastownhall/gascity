@@ -1131,10 +1131,14 @@ func runProviderOwnedScopesLifecycleOpContext(parent context.Context, cityPath, 
 	return nil
 }
 
-// hasProviderOwnedRigScope reports whether any non-city scope this city would
-// retire on stop is provider-owned, including a rig detached from city.toml.
-func hasProviderOwnedRigScope(cityPath string) (bool, error) {
-	roots, err := providerOwnedLifecycleScopeRoots(cityPath, "stop")
+// hasProviderOwnedRigScope reports whether any non-city scope op would visit
+// in this city is provider-owned. The scope set depends on op exactly as
+// providerOwnedLifecycleScopeRoots describes: a retiring op also sees rigs
+// detached from city.toml and survives a city.toml that will not parse, while
+// a starting op sees only configured rigs and refuses to guess past a broken
+// config.
+func hasProviderOwnedRigScope(cityPath, op string) (bool, error) {
+	roots, err := providerOwnedLifecycleScopeRoots(cityPath, op)
 	if err != nil {
 		return false, err
 	}
@@ -1422,7 +1426,7 @@ func shutdownBeadsProvider(cityPath string) error {
 	} else if owned {
 		return runProviderOwnedScopesLifecycleOp(cityPath, "stop")
 	}
-	if ownedRig, err := hasProviderOwnedRigScope(cityPath); err != nil {
+	if ownedRig, err := hasProviderOwnedRigScope(cityPath, "stop"); err != nil {
 		return err
 	} else if ownedRig {
 		if err := runProviderOwnedScopesLifecycleOp(cityPath, "stop"); err != nil {
@@ -1852,7 +1856,7 @@ func healthBeadsProviderContext(ctx context.Context, cityPath string, waitForSco
 		}
 		return nil
 	}
-	if ownedRig, err := hasProviderOwnedRigScope(cityPath); err != nil {
+	if ownedRig, err := hasProviderOwnedRigScope(cityPath, "health"); err != nil {
 		return err
 	} else if ownedRig {
 		if err := runProviderOwnedScopesLifecycleOpContext(ctx, cityPath, "health"); err != nil {
