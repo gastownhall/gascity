@@ -27,9 +27,12 @@ var bdExecAllowedDirs = []string{
 	// work ledger — a box-side capability probe, not a gc-side bd subprocess.
 	filepath.Join("internal", "runtime", "runtimecapability") + string(filepath.Separator),
 	filepath.Join("test", "integration") + string(filepath.Separator),
-	// dashboard BFF runs read-only `bd ping` connectivity probes against
-	// arbitrary per-rig .beads stores (supervisor-reported paths). This is
-	// the same direct-bd usage the retired cmd/gc/dashboard server had.
+	// dashboard BFF runs `bd ping` connectivity probes against arbitrary
+	// per-rig .beads stores (supervisor-reported paths): read-only of the
+	// store, but a full provider open that starts a stopped proxy (bd
+	// v1.3.0-rc.2 cmd/bd/main.go:1758-1791). Bounded because the sampler lives
+	// and dies with the supervisor. This is the same direct-bd usage the
+	// retired cmd/gc/dashboard server had.
 	filepath.Join("internal", "api", "dashboardbff") + string(filepath.Separator),
 }
 

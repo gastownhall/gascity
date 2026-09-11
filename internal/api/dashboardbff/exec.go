@@ -261,9 +261,15 @@ func (r *execRunner) execGitLog(ctx context.Context, view string) (*execResult, 
 
 // execBdPing runs Beads' provider-neutral connectivity probe against a rig
 // store. Ping is supported by embedded, direct-server, and proxied-server
-// stores alike, and is inherently read-only (it resolves the store and
-// executes a bounded query). Do not pass --readonly: the proxied-server
-// provider owns its read-only policy and rejects that flag in the RC.
+// stores alike. It is read-only of the store — it resolves the store and
+// executes one bounded query — but it is not a passive observation: on bd
+// v1.3.0-rc.2 every ordinary command short-circuits to the UOW provider
+// (cmd/bd/main.go:1758-1791), so pinging a proxied scope whose proxy is
+// stopped STARTS that proxy and its Dolt child. That is acceptable here
+// because the sampler runs inside the supervisor and dies with it, and
+// `gc stop` stops the proxies last — the dashboard never outlives the
+// topology it warms. Do not pass --readonly: the proxied-server provider owns
+// its read-only policy and rejects that flag in the RC.
 func (r *execRunner) execBdPing(ctx context.Context, beadsPath string) (*execResult, error) {
 	if !isValidHostPath(beadsPath) || !strings.HasSuffix(beadsPath, "/.beads") {
 		return nil, validationErr("invalid beads store path")
