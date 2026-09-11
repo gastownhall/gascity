@@ -2244,11 +2244,11 @@ func shouldPrevalidateNativeDependency(issueID, targetID, storePrefix string) bo
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(targetID)), "external:") {
 		return false
 	}
-	sourcePrefix := nativeBeadIDPrefix(issueID)
+	sourcePrefix := beadIDPrefix(issueID)
 	if sourcePrefix == "" {
 		sourcePrefix = normalizeIDPrefix(storePrefix)
 	}
-	targetPrefix := nativeBeadIDPrefix(targetID)
+	targetPrefix := beadIDPrefix(targetID)
 	return sourcePrefix == "" || targetPrefix == "" || sourcePrefix == targetPrefix
 }
 
@@ -2261,17 +2261,20 @@ func shouldPrevalidateNativeDependency(issueID, targetID, storePrefix string) bo
 // every id it is handed might be foreign, and the weak reading is the only one
 // that cannot refuse a bead that exists.
 func nativeParentIsLocal(issueID, parentID, storePrefix string) bool {
-	source := nativeBeadIDPrefix(issueID)
+	source := beadIDPrefix(issueID)
 	if source == "" {
 		source = normalizeIDPrefix(storePrefix)
 	}
 	if source == "" {
 		return false
 	}
-	return source == nativeBeadIDPrefix(parentID)
+	return source == beadIDPrefix(parentID)
 }
 
-func nativeBeadIDPrefix(id string) string {
+// beadIDPrefix extracts the prefix segment (before the first "-") from a
+// bead ID, normalized via normalizeIDPrefix. Shared across store backends
+// that need to decide whether two bead IDs belong to the same store.
+func beadIDPrefix(id string) string {
 	before, _, ok := strings.Cut(strings.ToLower(strings.TrimSpace(id)), "-")
 	if !ok {
 		return ""

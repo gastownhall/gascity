@@ -1572,7 +1572,7 @@ func syncSessionBeads(
 	skipClose bool,
 ) map[string]string {
 	openIndex, _ := syncSessionBeadsWithSnapshotAndRigStores(
-		cityPath, beads.SessionStore{Store: store}, nil, desiredState, sp, configuredNames, cfg, clk, stderr, skipClose, nil,
+		cityPath, beads.SessionStore{Store: store}, nil, desiredState, sp, configuredNames, cfg, clk, stderr, skipClose, nil, nil,
 	)
 	return openIndex
 }
@@ -1588,7 +1588,7 @@ func syncSessionBeadsWithSnapshot(
 	sessionBeads *sessionBeadSnapshot,
 ) (map[string]string, *sessionBeadSnapshot) {
 	return syncSessionBeadsWithSnapshotAndRigStores(
-		"", beads.SessionStore{Store: store}, nil, desiredState, sp, configuredNames, cfg, clk, stderr, false, sessionBeads,
+		"", beads.SessionStore{Store: store}, nil, desiredState, sp, configuredNames, cfg, clk, stderr, false, sessionBeads, nil,
 	)
 }
 
@@ -1604,6 +1604,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 	stderr io.Writer,
 	skipClose bool,
 	sessionBeads *sessionBeadSnapshot,
+	recordPhase func(TraceSiteCode, string, time.Time, map[string]any),
 ) (map[string]string, *sessionBeadSnapshot) {
 	// Session class typed at the boundary; the snapshot/repair/close helpers
 	// below take the unwrapped beads.Store. Same underlying store value, behavior
@@ -1628,7 +1629,17 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 	// path; the reload-always delta is the same NDI-tolerated concurrent-writer
 	// visibility the W-pool skew reload already introduced (the retired
 	// snapshotOrLoadSessionBeads only re-listed on a same-cycle create skew).
+	loadExistingStart := time.Now()
 	existing, err := loadSessionBeads(store)
+	// Record before the error return: under store pressure the slow scan is
+	// also the one most likely to fail, so the failing case is the one the
+	// trace most needs. len(existing) is 0 on the error path, which is correct.
+	if recordPhase != nil {
+		recordPhase(TraceSiteSessionSync, "sync_beads_and_update_index.load_existing", loadExistingStart, map[string]any{
+			"existing_count": len(existing),
+			"ok":             err == nil,
+		})
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "session beads: listing existing: %v\n", err) //nolint:errcheck
 		return nil, sessionBeads
@@ -1719,12 +1730,23 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		if visibleLoaded {
 			return visibleBySessionName, nil
 		}
+		loadVisibleStart := time.Now()
 		open, err := loadSessionBeads(store)
+		if err == nil {
+			visibleBySessionName = indexSessionBeadsByName(open)
+			visibleLoaded = true
+		}
+		// Record before the error return, for the same reason as the scan
+		// above: a failing recovery scan is exactly the one worth timing.
+		if recordPhase != nil {
+			recordPhase(TraceSiteSessionSync, "sync_beads_and_update_index.load_visible_by_session_name", loadVisibleStart, map[string]any{
+				"visible_count": len(visibleBySessionName),
+				"ok":            err == nil,
+			})
+		}
 		if err != nil {
 			return nil, err
 		}
-		visibleBySessionName = indexSessionBeadsByName(open)
-		visibleLoaded = true
 		return visibleBySessionName, nil
 	}
 

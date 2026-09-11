@@ -87,6 +87,7 @@ func TestReleaseOrphanedPoolAssignmentsReadsLivenessFromWorkOwnerStore(t *testin
 		nil,
 		nil,
 		nil,
+		nil,
 	)
 
 	if len(released) != 0 {
@@ -136,6 +137,7 @@ func TestReleaseOrphanedPoolAssignmentsReleasesWhenNoStoreHoldsTheSession(t *tes
 		nil,
 		[]beads.Bead{work},
 		[]beads.Store{ownerStore},
+		nil,
 		nil,
 		nil,
 		nil,

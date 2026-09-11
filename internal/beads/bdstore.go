@@ -3311,6 +3311,35 @@ func bdReadyArgs(q ReadyQuery, includeEphemeral bool) []string {
 	return args
 }
 
+// crossStoreDependencyError reports a non-nil error when issueID and
+// dependsOnID carry different, well-formed bead-ID prefixes -- i.e. they
+// belong to different stores. gc bd dep add has no cross-store dependency
+// model: such a pair must fail loudly instead of silently no-oping.
+//
+// The parent-child short-circuit immediately below in DepAdd must stay ABOVE
+// this guard: internal/molecule/molecule.go sets a step bead's ParentID to the
+// foreign parent at create time, so the cross-store attaches in that file
+// short-circuit on an already-matching ParentID and never reach here.
+// Reordering the two blocks would refuse every cross-store molecule attach.
+//
+// This guard covers the DepAdd path only. Create still forwards b.Needs to
+// bd create --deps without a prefix check, so the same logical cross-prefix
+// edge is refused on one path and accepted on the other.
+func (s *BdStore) crossStoreDependencyError(issueID, dependsOnID string) error {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(dependsOnID)), "external:") {
+		return nil
+	}
+	sourcePrefix := beadIDPrefix(issueID)
+	if sourcePrefix == "" {
+		sourcePrefix = normalizeIDPrefix(s.idPrefix)
+	}
+	targetPrefix := beadIDPrefix(dependsOnID)
+	if sourcePrefix == "" || targetPrefix == "" || sourcePrefix == targetPrefix {
+		return nil
+	}
+	return fmt.Errorf("cross-store dependency: %s (store %q) cannot depend on %s (store %q): cross-store dependencies are not supported", issueID, sourcePrefix, dependsOnID, targetPrefix)
+}
+
 // DepAdd records a dependency via bd dep add.
 func (s *BdStore) DepAdd(issueID, dependsOnID, depType string) error {
 	if depType == "parent-child" {
@@ -3318,6 +3347,9 @@ func (s *BdStore) DepAdd(issueID, dependsOnID, depType string) error {
 		if err == nil && bead.ParentID == dependsOnID {
 			return nil
 		}
+	}
+	if err := s.crossStoreDependencyError(issueID, dependsOnID); err != nil {
+		return err
 	}
 	err := s.runBDTransientWrite("dep", "add", issueID, dependsOnID, "--type", depType)
 	if err != nil {

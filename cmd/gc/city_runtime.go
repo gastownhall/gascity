@@ -731,7 +731,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		result := cr.buildDesiredState(sessionBeads, startupTrace)
 		sessionBeads = cr.loadSessionBeadSnapshot()
 		result = cr.refreshDesiredState(result, sessionBeads)
-		sessionBeads = cr.syncBeadsAndUpdateIndex(result.State, sessionBeads)
+		sessionBeads = cr.syncBeadsAndUpdateIndex(result.State, sessionBeads, nil)
 		result = cr.refreshDesiredState(result, sessionBeads)
 		if ctx.Err() != nil {
 			return
@@ -1369,7 +1369,7 @@ func (cr *CityRuntime) tick(
 	result = cr.refreshDesiredState(result, sessionBeads)
 	recordPhase(TraceSiteDesiredStateBuild, "refresh_desired_state.before_sync", phaseStart, traceDesiredStateFields(result))
 	phaseStart = time.Now()
-	_ = cr.syncBeadsAndUpdateIndex(result.State, sessionBeads)
+	_ = cr.syncBeadsAndUpdateIndex(result.State, sessionBeads, recordPhase)
 	recordPhase(TraceSiteSessionSync, "sync_beads_and_update_index", phaseStart, traceDesiredStateFields(result))
 	// Reload snapshot after sync so the reconciler sees metadata written
 	// by syncBeadsAndUpdateIndex (e.g., configured_named_session/mode
@@ -2536,7 +2536,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	// arm of this very tick is about to act on (the release-first ordering plus
 	// snapshot staleness otherwise produces the wake/release/retire treadmill).
 	preWakeCandidates, preWakeCandidateRefs := filterAssignedWorkBeadsForSessionWake(cr.cfg, cr.cityPath, store, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs)
-	released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(store, sessStore, cr.cfg, cr.cityPath, sessionBeads.OpenInfos(), result, rigStores, protectedWakeWorkKeys(preWakeCandidates, preWakeCandidateRefs))
+	released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(store, sessStore, cr.cfg, cr.cityPath, sessionBeads.OpenInfos(), result, rigStores, protectedWakeWorkKeys(preWakeCandidates, preWakeCandidateRefs), recordPhase)
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.release_orphaned_pool_assignments", phaseStart, map[string]any{
 		"released_count": len(released),
 	})
@@ -3452,6 +3452,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		cr.stderr,
 		true,
 		sessionBeads,
+		nil,
 	)
 	// This targeted tick must include dynamically named pool sessions it just
 	// materialized. configuredSessionNamesWithSnapshot intentionally contains
@@ -3557,11 +3558,11 @@ func ensureManagedDoltPublishedForRuntime(
 }
 
 // syncBeadsAndUpdateIndex runs syncSessionBeads.
-func (cr *CityRuntime) syncBeadsAndUpdateIndex(desiredState map[string]TemplateParams, sessionBeads *sessionBeadSnapshot) *sessionBeadSnapshot {
+func (cr *CityRuntime) syncBeadsAndUpdateIndex(desiredState map[string]TemplateParams, sessionBeads *sessionBeadSnapshot, recordPhase func(TraceSiteCode, string, time.Time, map[string]any)) *sessionBeadSnapshot {
 	store := cr.sessionsBeadStore()
 	cfgNames := configuredSessionNamesWithSnapshot(cr.cfg, cr.cityName, sessionBeads)
 	_, updated := syncSessionBeadsWithSnapshotAndRigStores(
-		cr.cityPath, store, cr.rigBeadStores(), desiredState, cr.sp, cfgNames, cr.cfg, clock.Real{}, cr.stderr, cr.sessionDrains != nil, sessionBeads,
+		cr.cityPath, store, cr.rigBeadStores(), desiredState, cr.sp, cfgNames, cr.cfg, clock.Real{}, cr.stderr, cr.sessionDrains != nil, sessionBeads, recordPhase,
 	)
 	return updated
 }
