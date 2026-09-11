@@ -142,19 +142,25 @@ func ResolveDoltConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string) (DoltCo
 		EndpointStatus: cfg.EndpointStatus,
 		Database:       "beads",
 		User:           strings.TrimSpace(cfg.DoltUser),
-		DoltMode:       strings.TrimSpace(cfg.DoltMode),
 	}
 	if db, ok, err := ReadDoltDatabase(fs, filepath.Join(scopeRoot, ".beads", "metadata.json")); err != nil {
 		return DoltConnectionTarget{}, err
 	} else if ok && strings.TrimSpace(db) != "" {
 		target.Database = strings.TrimSpace(db)
 	}
-	if strings.TrimSpace(target.DoltMode) == "" {
-		if mode, ok, err := ReadDoltMode(fs, filepath.Join(scopeRoot, ".beads", "metadata.json")); err != nil {
-			return DoltConnectionTarget{}, err
-		} else if ok {
-			target.DoltMode = strings.TrimSpace(mode)
-		}
+	// metadata.json is the topology authority (D1): bd persists the mode only
+	// there, and it is the file bd rewrites on a mode migration. config.yaml's
+	// dolt.mode is a legacy gc-only mirror that bd never updates, so reading it
+	// first shadows a migrated scope with its pre-migration mode — which routes
+	// a proxied scope down the managed-runtime path and fails on the
+	// dolt-state.json gc no longer publishes. It stays a fallback for scopes
+	// whose metadata predates dolt_mode.
+	if mode, ok, err := ReadDoltMode(fs, filepath.Join(scopeRoot, ".beads", "metadata.json")); err != nil {
+		return DoltConnectionTarget{}, err
+	} else if ok && strings.TrimSpace(mode) != "" {
+		target.DoltMode = strings.TrimSpace(mode)
+	} else {
+		target.DoltMode = strings.TrimSpace(cfg.DoltMode)
 	}
 	// Beads persists externally-owned proxied upstreams in its provider
 	// sidecar. This authority applies to city and inherited rig scopes alike;

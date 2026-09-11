@@ -341,6 +341,10 @@ func ensureCanonicalScopeConfig(fs fsys.FS, scopeRoot string, state contract.Con
 	if err := ensureBeadsDir(fs, beadsDir); err != nil {
 		return err
 	}
+	// Same rule as ensureCanonicalScopeConfigState: the topology belongs in
+	// metadata.json, and EnsureCanonicalConfig now drops the key when the
+	// state does not set it. See canonicalConfigDoltMode.
+	state.DoltMode = canonicalConfigDoltMode(state.DoltMode)
 	_, err := contract.EnsureCanonicalConfig(fs, filepath.Join(beadsDir, "config.yaml"), state)
 	return err
 }

@@ -1957,35 +1957,44 @@ func TestEnsureCanonicalConfigDoltModeIdempotent(t *testing.T) {
 	}
 }
 
-// TestEnsureCanonicalConfigPreservesExistingDoltModeWhenStateOmitsIt verifies
-// that a pre-existing dolt.mode: server in config is not removed or changed
-// when ConfigState.DoltMode is empty ("caller doesn't know the mode").
-func TestEnsureCanonicalConfigPreservesExistingDoltModeWhenStateOmitsIt(t *testing.T) {
+// TestEnsureCanonicalConfigDropsExistingDoltModeWhenStateOmitsIt pins the
+// own-it-or-drop-it rule dolt.mode now shares with dolt.host/port/socket/user.
+// It replaces an earlier test that asserted the opposite (preserve on empty):
+// preserving made the key unclearable, so a scope bd migrated to
+// proxied-server kept gc's pre-migration `dolt.mode: server` and every
+// endpoint resolution read the stale value instead of metadata.json (D1).
+func TestEnsureCanonicalConfigDropsExistingDoltModeWhenStateOmitsIt(t *testing.T) {
 	fs := fsys.OSFS{}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 
-	// Pre-write a config that already has dolt.mode: server.
 	if _, err := EnsureCanonicalConfig(fs, path, ConfigState{DoltMode: "server"}); err != nil {
 		t.Fatalf("setup EnsureCanonicalConfig() error = %v", err)
 	}
 
-	// Now call with DoltMode:"" — existing dolt.mode must be preserved unchanged.
 	changed, err := EnsureCanonicalConfig(fs, path, ConfigState{DoltMode: ""})
 	if err != nil {
 		t.Fatalf("EnsureCanonicalConfig(DoltMode empty) error = %v", err)
 	}
-	if changed {
-		data, _ := fs.ReadFile(path)
-		t.Fatalf("EnsureCanonicalConfig(DoltMode empty) changed = true, want false:\n%s", data)
+	if !changed {
+		t.Fatal("EnsureCanonicalConfig(DoltMode empty) changed = false, want the stale key dropped")
 	}
 
 	data, err := fs.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "dolt.mode: server") {
-		t.Fatalf("config should preserve existing dolt.mode: server when DoltMode is empty:\n%s", data)
+	if strings.Contains(string(data), "dolt.mode") {
+		t.Fatalf("dolt.mode survived a canonical write that does not set it:\n%s", data)
+	}
+
+	// And the drop is idempotent — a second pass must report no change.
+	changed, err = EnsureCanonicalConfig(fs, path, ConfigState{DoltMode: ""})
+	if err != nil {
+		t.Fatalf("second EnsureCanonicalConfig() error = %v", err)
+	}
+	if changed {
+		t.Fatal("second EnsureCanonicalConfig(DoltMode empty) changed = true, want idempotent")
 	}
 }
 

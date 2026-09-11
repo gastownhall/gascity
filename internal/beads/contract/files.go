@@ -45,8 +45,11 @@ type ConfigState struct {
 	DoltSocket     string
 	DoltUser       string
 	// DoltMode is the beads dolt.mode value to write to config.yaml.
-	// When non-empty, EnsureCanonicalConfig writes dolt.mode to the canonical config.
-	// When empty, the existing dolt.mode value is preserved.
+	// When non-empty, EnsureCanonicalConfig writes dolt.mode to the canonical
+	// config. When empty, it deletes the key — the same own-it-or-drop-it rule
+	// the endpoint fields above follow. metadata.json is the topology authority
+	// (D1); a config.yaml mode nobody claims is stale mirror state, and the
+	// only writer that could have cleared it is this one.
 	DoltMode string
 	Dolt     DoltConfig
 	// CustomTypes is a caller-supplied list of bd custom bead types to ensure
@@ -507,6 +510,13 @@ func EnsureCanonicalConfig(fs fsys.FS, path string, state ConfigState) (bool, er
 
 	if mode := strings.TrimSpace(state.DoltMode); mode != "" {
 		changed = setString(root, "dolt.mode", mode) || changed
+	} else {
+		// Same rule as host/port/socket/user: a canonical state that does not
+		// set the mode means the key does not belong in the file. Leaving it
+		// meant a scope bd had migrated to proxied-server kept gc's
+		// pre-migration `dolt.mode: server` forever, with no writer able to
+		// clear it.
+		changed = deleteKeys(root, "dolt.mode") || changed
 	}
 
 	if len(state.CustomTypes) > 0 {
@@ -656,6 +666,8 @@ func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (
 	}
 	if mode := strings.TrimSpace(state.DoltMode); mode != "" {
 		replacements["dolt.mode"] = "dolt.mode: " + mode
+	} else {
+		deletions["dolt.mode"] = struct{}{}
 	}
 	if len(state.CustomTypes) > 0 {
 		// Same never-narrow union as the main path, but sourced from the raw

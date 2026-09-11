@@ -1774,7 +1774,11 @@ func TestDoltServerCheck_ProxiedSidecarUnixReachable(t *testing.T) {
 	dir := t.TempDir()
 	fs := fsys.OSFS{}
 	writeDoctorCanonicalConfig(t, fs, dir, contract.ConfigState{EndpointOrigin: contract.EndpointOriginManagedCity, DoltMode: "proxied-server"})
-	writeDoctorCanonicalMetadata(t, fs, dir, "hq")
+	// metadata.json is the mode authority, so the fixture has to say proxied
+	// there — matching TestDoltServerCheck_ProxiedSidecarTCPReachable. The old
+	// writeDoctorCanonicalMetadata pinned dolt_mode "server" and only passed
+	// while config.yaml could shadow it.
+	writeDoctorProxiedMetadata(t, dir, "hq")
 	sock := filepath.Join(dir, "dolt.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
