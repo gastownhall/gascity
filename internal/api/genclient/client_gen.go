@@ -1952,9 +1952,9 @@ type ExternalActor struct {
 
 // ExternalAttachment defines model for ExternalAttachment.
 type ExternalAttachment struct {
-	MimeType   string `json:"mime_type"`
-	ProviderId string `json:"provider_id"`
-	Url        string `json:"url"`
+	MimeType   *string `json:"mime_type,omitempty"`
+	ProviderId string  `json:"provider_id"`
+	Url        string  `json:"url"`
 }
 
 // ExternalInboundMessage defines model for ExternalInboundMessage.

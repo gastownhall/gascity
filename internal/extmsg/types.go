@@ -67,10 +67,18 @@ type ExternalActor struct {
 }
 
 // ExternalAttachment represents a file attached to an external message.
+//
+// MIMEType is optional: providers do not always know one (a Slack-native
+// voice memo carries no mimetype), and a required mime_type let one
+// unknown file type refuse the whole inbound with a 422 — which an
+// adapter retrying the same batch then repeated every window, holding
+// every later message in the conversation behind it (gp-sgu7,
+// 2026-09-08 → 09-11). An absent value is stored as absent (the JSON
+// key is omitted); consumers treat "" as "type unknown".
 type ExternalAttachment struct {
 	ProviderID string `json:"provider_id"`
 	URL        string `json:"url"`
-	MIMEType   string `json:"mime_type"`
+	MIMEType   string `json:"mime_type,omitempty"`
 }
 
 // ExternalInboundMessage is a normalized inbound message from an external platform.

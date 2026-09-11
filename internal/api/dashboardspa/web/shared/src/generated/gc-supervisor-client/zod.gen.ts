@@ -553,7 +553,7 @@ export const zExternalActor = z.object({
 });
 
 export const zExternalAttachment = z.object({
-    mime_type: z.string(),
+    mime_type: z.string().optional(),
     provider_id: z.string(),
     url: z.string()
 });
