@@ -537,7 +537,7 @@ kill_remote_op_session() {
   if [ -z "$_kr_ids" ]; then
     _kr_listed=$(printf '%s\n' "$_kr_left" | awk '{ printf "%s%s", sep, $1; sep = " " }')
     if [ "$_kr_holder" != 0 ]; then
-      echo "  $_kr_db: server-side $_kr_label NOT killed: this client never learned its session id, and session $_kr_holder holds this run's lock ($_kr_runlock) — the session that passed this run's gate, its answer lost with the client — left for the operator (KILL $_kr_holder); gc dolt health names it" >&2
+      echo "  $_kr_db: server-side $_kr_label NOT killed: this client never learned its session id, and session $_kr_holder holds this run's lock ($_kr_runlock) — the session that passed this run's gate, its answer lost with the client; it runs no remote operation, so gc dolt health does not name it — left for the operator (KILL $_kr_holder)" >&2
       return 1
     fi
     if [ -z "$_kr_listed" ]; then
