@@ -127,7 +127,11 @@ while IFS= read -r blocker; do
         fi
         set_rig_args "$dep_id"
         msg="blocker $blocker closed — your dependent $dep_id may be unblocked"
-        if gc session nudge ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} "$assignee" "$msg" >/dev/null 2>&1; then
+        # --about names the DEPENDENT bead (the subject of the reminder, not
+        # the blocker that triggered it). A nudge queued against a busy
+        # assignee retires instead of interrupting them if that dependent
+        # closes before their next safe boundary.
+        if gc session nudge --about "$dep_id" ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} "$assignee" "$msg" >/dev/null 2>&1; then
             STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
             NUDGED=$((NUDGED + 1))
         fi

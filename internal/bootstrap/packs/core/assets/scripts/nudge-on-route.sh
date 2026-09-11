@@ -61,15 +61,21 @@ duration_to_seconds() {
 # pool's active members by template and nudge each; a target with no members
 # (a single-session agent, or an explicit slot name) is nudged directly.
 # Returns 0 if at least one nudge succeeded, non-zero otherwise.
+#
+# --about names the routed bead as the nudge's subject. A busy worker's nudge
+# is queued until its next safe boundary; if the routed bead closes in the
+# meantime the reminder is purpose-extinct and retires instead of interrupting
+# the worker to look for work that is already done.
 nudge_routed_target() {
     _target="$1"
+    _bead="$2"
     _members="$(gc session list --json --state active --template "$_target" 2>/dev/null \
         | jq -r '(.sessions // [])[] | .name // .id' 2>/dev/null)" || _members=""
     if [ -n "$_members" ]; then
         _any=1
         while IFS= read -r _m; do
             [ -n "$_m" ] || continue
-            if gc session nudge "$_m" "$NUDGE_MESSAGE" >/dev/null 2>&1; then
+            if gc session nudge --about "$_bead" "$_m" "$NUDGE_MESSAGE" >/dev/null 2>&1; then
                 _any=0
             fi
         done <<MEMBERS
@@ -77,7 +83,7 @@ $_members
 MEMBERS
         return "$_any"
     fi
-    gc session nudge "$_target" "$NUDGE_MESSAGE" >/dev/null 2>&1
+    gc session nudge --about "$_bead" "$_target" "$NUDGE_MESSAGE" >/dev/null 2>&1
 }
 
 # Pull recent bead.updated events. Best-effort: a read failure (API down)
@@ -115,7 +121,7 @@ while IFS="$(printf '\t')" read -r bead_id routed_to; do
         STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
         continue
     fi
-    if nudge_routed_target "$routed_to"; then
+    if nudge_routed_target "$routed_to" "$bead_id"; then
         STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
         NUDGED=$((NUDGED + 1))
     fi
