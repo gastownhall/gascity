@@ -55,6 +55,12 @@ type StepDefinition struct {
 	ExecutionRunID   string
 	StepID           string
 	DependsOnStepIDs *[]string
+	// DefinedEmitted reports that this step's step_defined fact has already
+	// been recorded durably (its bead carries StepDefinedEmittedMetadataKey).
+	// EmitCurrent skips re-emitting a marked step so a steady tick restates
+	// nothing; the full-restate Events form ignores it. It is projection state,
+	// not part of the emitted fact.
+	DefinedEmitted bool
 }
 
 // Projection is the deterministic current-store execution projection for one
@@ -67,6 +73,29 @@ type Projection struct {
 
 // EmitCurrent projects and records the current execution snapshot for rootID.
 // A nil recorder disables emission without reading either store.
+//
+// The projection is level-triggered — the whole graph is re-read every call —
+// so a definition missed on a crashed or failed pass self-heals on the next
+// one. Work associations and source anchors are bounded by convoy membership,
+// not by the step graph, and are restated in full each call. step_defined is
+// idempotent instead (ga-rd8le): a step already carrying
+// StepDefinedEmittedMetadataKey is skipped, and an unmarked step is emitted and
+// then marked, so a steady tick restates nothing while every creator and
+// recovery path still self-heals without threading created IDs.
+//
+// The step is marked ONLY once its step_defined is acknowledged durable — the
+// same discipline applyConvergenceStamp uses for completion facts, where a
+// dropped append must never stamp a permanent fact loss. events.Recorder.Record
+// is best-effort and can silently drop the event (a FileRecorder lock timeout or
+// write error, or events.Discard returned on a recorder-open failure), so
+// marking after a dropped emit would skip the step FOREVER — the exact
+// permanent-miss the level-triggered restatement exists to prevent. An emit that
+// is not acknowledged (a drop, or a recorder that cannot promise durability at
+// all, such as events.Discard) leaves the step unmarked and re-emitted next tick
+// — a duplicate step_defined is a tolerated repeatable snapshot fact; a
+// permanent miss is not. The offline full restate ('gc events reemit-execution')
+// calls Events instead, which ignores the marker and re-states every step
+// deliberately.
 func EmitCurrent(recorder events.Recorder, graphStore beads.GraphStore, convoyStore beads.WorkStore, rootID, actor string) error {
 	if recorder == nil {
 		return nil
@@ -75,18 +104,76 @@ func EmitCurrent(recorder events.Recorder, graphStore beads.GraphStore, convoySt
 	if err != nil {
 		return err
 	}
-	for _, event := range projection.Events(actor) {
+	for _, event := range projection.workAndAnchorEvents(actor) {
 		recorder.Record(event)
+	}
+	for _, step := range projection.Steps {
+		if step.DefinedEmitted {
+			continue
+		}
+		if !recordStepDefinedConfirmed(recorder, step.definedEvent(actor)) {
+			// The emit was dropped or the recorder cannot acknowledge durability
+			// (events.Discard). Leave the step unmarked so the next healthy tick
+			// re-emits it: a best-effort append that may have been lost must never
+			// durably mark the step, or a dropped emit becomes a permanent miss.
+			continue
+		}
+		if graphStore.Store != nil {
+			// The fact is durable; record that the step was emitted. A failed mark
+			// leaves the step unmarked, so the next tick re-emits it — the same
+			// at-least-once tolerance the snapshot facts already carry.
+			_ = graphStore.SetMetadata(step.BeadID, beadmeta.StepDefinedEmittedMetadataKey, time.Now().UTC().Format(time.RFC3339))
+		}
 	}
 	return nil
 }
 
-// Events converts the projection to repeatable snapshot facts. Work
-// associations precede source anchors and step definitions, preserving each
-// slice's deterministic order. Topology is copied so later graph reads cannot
-// mutate emitted facts.
+// recordStepDefinedConfirmed records a step's step_defined fact and reports
+// whether the append is durable enough to mark the step as emitted. It records
+// through events.AckRecorder when the recorder offers it — a nil ack means the
+// fact reached the log and is readable back by any consumer, the synchronous
+// equivalent of the journal read-back applyConvergenceStamp relies on, without
+// paying a per-tick journal read on this hot control-dispatch path (the ga-ftgyl
+// burn). A recorder that cannot acknowledge durability — events.Discard returned
+// on a recorder-open failure, or any bare Recorder — is recorded best-effort but
+// is NEVER treated as confirmed, so the step stays unmarked and re-emits next
+// tick rather than being marked on the strength of an emit that may have been
+// dropped.
+func recordStepDefinedConfirmed(recorder events.Recorder, event events.Event) bool {
+	if ack, ok := recorder.(events.AckRecorder); ok {
+		return ack.RecordAck(event) == nil
+	}
+	recorder.Record(event)
+	return false
+}
+
+// Events converts the projection to repeatable snapshot facts — the FULL
+// restatement, emitting every work association, source anchor, and step
+// definition regardless of any per-step emitted marker. Work associations
+// precede source anchors and step definitions, preserving each slice's
+// deterministic order. Topology is copied so later graph reads cannot mutate
+// emitted facts. This is the offline reemit form; the online tick uses
+// EmitCurrent, which emits each step_defined once against its durable marker.
 func (p Projection) Events(actor string) []events.Event {
 	result := make([]events.Event, 0, len(p.WorkAssociations)+len(p.RunAnchors)+len(p.Steps))
+	result = p.appendWorkAndAnchorEvents(result, actor)
+	for _, step := range p.Steps {
+		result = append(result, step.definedEvent(actor))
+	}
+	return result
+}
+
+// workAndAnchorEvents renders the work-association and source-anchor facts, in
+// that order. These are bounded by convoy membership rather than the step
+// graph, so both the online tick and the offline full restate emit them whole.
+func (p Projection) workAndAnchorEvents(actor string) []events.Event {
+	return p.appendWorkAndAnchorEvents(make([]events.Event, 0, len(p.WorkAssociations)+len(p.RunAnchors)), actor)
+}
+
+// appendWorkAndAnchorEvents appends the work-association then source-anchor
+// facts to result, letting Events pre-size one slice for the whole restatement
+// while the online tick allocates only for the bounded work/anchor facts.
+func (p Projection) appendWorkAndAnchorEvents(result []events.Event, actor string) []events.Event {
 	for _, association := range p.WorkAssociations {
 		result = append(result, events.Event{
 			Type:    events.ExecutionWorkAssociated,
@@ -103,17 +190,20 @@ func (p Projection) Events(actor string) []events.Event {
 			RunID:   anchor.ExecutionRunID,
 		})
 	}
-	for _, step := range p.Steps {
-		result = append(result, events.Event{
-			Type:             events.ExecutionStepDefined,
-			Actor:            actor,
-			Subject:          step.BeadID,
-			RunID:            step.ExecutionRunID,
-			StepID:           step.StepID,
-			DependsOnStepIDs: cloneTopology(step.DependsOnStepIDs),
-		})
-	}
 	return result
+}
+
+// definedEvent renders this step's execution.step_defined snapshot fact.
+// Topology is copied so a later graph read cannot mutate an emitted fact.
+func (s StepDefinition) definedEvent(actor string) events.Event {
+	return events.Event{
+		Type:             events.ExecutionStepDefined,
+		Actor:            actor,
+		Subject:          s.BeadID,
+		RunID:            s.ExecutionRunID,
+		StepID:           s.StepID,
+		DependsOnStepIDs: cloneTopology(s.DependsOnStepIDs),
+	}
 }
 
 // ProjectCurrent projects current execution facts for rootID. The graph store
@@ -290,6 +380,7 @@ func currentStepRows(store beads.GraphStore, rootID string) ([]stepRow, error) {
 				ExecutionRunID:   rootID,
 				StepID:           stepID,
 				DependsOnStepIDs: canonicalTopology(row.Metadata[beadmeta.NativeStepDependenciesMetadataKey], stepID),
+				DefinedEmitted:   strings.TrimSpace(row.Metadata[beadmeta.StepDefinedEmittedMetadataKey]) != "",
 			},
 			bead: row,
 		})
