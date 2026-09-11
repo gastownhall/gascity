@@ -28,8 +28,17 @@ import (
 // override earlier ones (Go keeps the last value of a duplicated key).
 func ffSyncCmd(t *testing.T, binDir string, env []string, args ...string) *exec.Cmd {
 	t.Helper()
+	return packScriptCmd(t, syncScript, binDir, syncFilteredEnv(), env, args...)
+}
+
+// packScriptCmd builds `sh <script> <args>` for a one-DB ("app") SQL-mode city
+// against an idle reachable server, with the fake dolt in binDir first on
+// PATH and the fake bd installed: the ONE command-construction site the sync
+// and pull runners share (the repository's resource census counts os/exec
+// call sites and must not grow). Later `env` entries override earlier ones.
+func packScriptCmd(t *testing.T, script, binDir string, baseEnv, env []string, args ...string) *exec.Cmd {
+	t.Helper()
 	root := repoRoot(t)
-	script := filepath.Join(root, syncScript)
 	port, cleanup := startReachableTCPListener(t)
 	t.Cleanup(cleanup)
 
@@ -40,8 +49,8 @@ func ffSyncCmd(t *testing.T, binDir string, env []string, args ...string) *exec.
 	}
 	writeSyncFakeBeadsBD(t, cityPath)
 
-	cmd := exec.Command("sh", append([]string{script}, args...)...)
-	cmd.Env = append(append(syncFilteredEnv(),
+	cmd := exec.Command("sh", append([]string{filepath.Join(root, script)}, args...)...)
+	cmd.Env = append(append(baseEnv,
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
