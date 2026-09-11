@@ -242,6 +242,24 @@ func assertBounded(t *testing.T, tlog, secs, needle string) {
 	t.Fatalf("no bounded call under %ss carrying %q.\ngtimeout log:\n%s", secs, needle, tlog)
 }
 
+// The same marker-collision rule for pull: an ordinary error whose echoed
+// statement carries gc-remote-op-lock-held is a pull failure, not a refusal.
+func TestPullGateMarkerInOrdinaryErrorIsNotRefusal(t *testing.T) {
+	binDir := t.TempDir()
+	logPath := writePullFakeDolt(t, binDir, "printf 'Id,Time,db\\n' ; exit 0",
+		"printf 'id\\n64\\n' ; printf 'error on line 1 for query CALL DOLT_PULL(''gc-remote-op-lock-held'', ''main''): Error 1105 (HY000): remote not found\\n' >&2 ; exit 1")
+	out, err := runPull(t, binDir, nil, "--db", "app")
+	if err == nil {
+		t.Fatalf("a failed pull must exit non-zero.\nout:\n%s", out)
+	}
+	if strings.Contains(out, "already in flight") {
+		t.Fatalf("an ordinary error echoing the marker must not read as a gate refusal.\nout:\n%s", out)
+	}
+	if !strings.Contains(out, "pull failed (exit 1)") || !strings.Contains(out, "remote not found") {
+		t.Fatalf("expected the ordinary pull error with dolt's stderr replayed.\nout:\n%s\nlog:\n%s", out, readLog(t, logPath))
+	}
+}
+
 func TestPullTimeoutKillsItsServerSideSession(t *testing.T) {
 	binDir := t.TempDir()
 	tlogPath := writeRecordingGtimeout(t, binDir)

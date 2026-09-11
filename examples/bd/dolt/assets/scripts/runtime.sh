@@ -384,7 +384,11 @@ remote_op_sessions_sql() {
 # exactly ONE CSV field — unquoted without a comma or a quote, or quoted with
 # doubled inner quotes — so a row with an extra column (`42,60,app,extra`) or
 # a stray quote is refused rather than read as "another database" (codex r7).
-# Returns 1 when the first line is not
+# A revision-qualified attribution (`app/main`, `app/<commit>`: a client that
+# connected with --use-db app/main or ran USE app/main — Dolt's branch-qualified
+# database name, which no plain database can carry since Dolt reserves `/`)
+# is this database's: the `/revision` suffix is stripped before the compare
+# (codex r8, evidence 04h). Returns 1 when the first line is not
 # the `Id,Time,db` header (an empty stdout, a banner or an error text is NOT a
 # processlist answer), 2 when a non-blank row does not START with an unquoted
 # all-digit Id and Time (`12,34,…`): a NULL, a truncated line, a wrapper's
@@ -410,6 +414,7 @@ remote_op_sessions_parse() {
         have = substr(have, 2, length(have) - 2)
         gsub(/""/, "\"", have)
       } else if (have !~ /^[^",]*$/) { bad = 1; exit 2 }
+      sub(/\/.*$/, "", have)
       if (want != "" && have != "" && tolower(have) != want) next
       print $1, $2
     }
@@ -588,7 +593,17 @@ remote_op_gate_sql() {
 }
 
 # remote_op_gate_refused STDERR_FILE — true when the captured dolt stderr says
-# the gate refused: another session holds this database's lock.
+# the gate refused: another session holds this database's lock. The refusal is
+# Dolt's Error 3141 with the marker echoed as json_extract's argument, in
+# double quotes: `… Error 3141 (HY000): Invalid JSON text in argument 1 to
+# function json_extract: "gc-remote-op-lock-held"` (Dolt 2.1.10, evidence 04c).
+# The marker ALONE is not enough: the CLI echoes the failing statement in every
+# batch diagnostic (`error on line 1 for query …`), so an ordinary error on a
+# statement whose text carries the marker — the gate statement itself failing
+# for another reason, or a remote literally named gc-remote-op-lock-held — must
+# not read as "refused" and hide the real error (codex r8). A future Dolt that
+# words 3141 differently falls to the ordinary-error branch: the run still
+# skips with the error replayed and nothing is pushed — the safe side.
 remote_op_gate_refused() {
-  grep -q "$REMOTE_OP_GATE_MARK" "$1" 2>/dev/null
+  grep -Eq "Error 3141 .*\"$REMOTE_OP_GATE_MARK\"" "$1" 2>/dev/null
 }

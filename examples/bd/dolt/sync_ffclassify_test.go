@@ -698,6 +698,52 @@ func TestSyncFetchInFlightCaseInsensitiveDatabase(t *testing.T) {
 	}
 }
 
+// A session attributed to a revision-qualified name (`app/main`: the client
+// connected with --use-db app/main or ran USE app/main — Dolt's branch-qualified
+// database) is this database's and counts; another database's revision does
+// not (codex r8, evidence 04h).
+func TestSyncFetchInFlightRevisionQualifiedDatabaseCounts(t *testing.T) {
+	binDir := t.TempDir()
+	logPath := writeSyncFakeDoltProcesslist(t, binDir, "printf 'Id,Time,db\\n47,40,APP/feature/x\\n' ; exit 0")
+	out := runFFSync(t, binDir, "--db", "app")
+	if fetched(readLog(t, logPath)) {
+		t.Fatalf("a session attributed to APP/feature/x is this database's: it must block the fetch.\nout:\n%s", out)
+	}
+	if !strings.Contains(out, "fetch already in flight for 40s (session 47)") {
+		t.Fatalf("expected the in-flight skip line.\nout:\n%s", out)
+	}
+	binDir = t.TempDir()
+	logPath = writeSyncFakeDoltProcesslist(t, binDir, "printf 'Id,Time,db\\n48,5,other/main\\n' ; exit 0")
+	out = runFFSync(t, binDir, "--db", "app")
+	if !fetched(readLog(t, logPath)) {
+		t.Fatalf("another database's revision (other/main) must not block this one.\nout:\n%s", out)
+	}
+}
+
+// The gate-refusal verdict is Dolt's Error 3141 with the marker echoed as
+// json_extract's argument — not the marker anywhere in stderr: the CLI echoes
+// the failing statement in every batch diagnostic, so an ordinary error on a
+// fetch whose remote is literally named gc-remote-op-lock-held must be
+// reported as the fetch error it is, never as "already in flight" (codex r8).
+func TestSyncGateMarkerInOrdinaryErrorIsNotRefusal(t *testing.T) {
+	binDir := t.TempDir()
+	logPath := filepath.Join(binDir, "dolt.log")
+	body := fakeDoltHeader(logPath, "main") +
+		"  *\"CALL DOLT_FETCH(\"*) printf 'id\\n63\\n' ; printf 'error on line 1 for query CALL DOLT_FETCH(''gc-remote-op-lock-held'', ''main''): Error 1105 (HY000): remote not found\\n' >&2 ; exit 1 ;;\n" +
+		"esac\nexit 0\n"
+	installFFFakeDolt(t, binDir, body)
+	out := runFFSync(t, binDir, "--db", "app")
+	if strings.Contains(out, "already in flight") {
+		t.Fatalf("an ordinary error echoing the marker must not read as a gate refusal.\nout:\n%s", out)
+	}
+	if !strings.Contains(out, "fetch failed (exit 1)") || !strings.Contains(out, "remote not found") {
+		t.Fatalf("expected the ordinary fetch error with dolt's stderr replayed.\nout:\n%s", out)
+	}
+	if pushed(readLog(t, logPath)) {
+		t.Fatalf("a failed fetch must NEVER push.\nout:\n%s", out)
+	}
+}
+
 // An in-flight DOLT_FETCH with no database attribution (an older gc dolt sync
 // issued it, or an operator did, without --use-db) may be this database's:
 // it counts, fail closed.

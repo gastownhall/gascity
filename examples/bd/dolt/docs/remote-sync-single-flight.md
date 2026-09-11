@@ -36,7 +36,7 @@ connection id first and runs with `--use-db`, so when the client bound expires
 `KILL`s exactly that server-side session and proves it gone with a second
 processlist read (a session still listed is reported as NOT killed; a client
 that never learned its id kills nothing and names the sessions for the
-operator). Database names are compared and locked case-insensitively.
+operator). Database names are compared and locked case-insensitively, and a session attributed to a branch- or commit-qualified name (`app/main`, `app/<hash>`) counts as the database's.
 `gc dolt health` adds one `WARN` line, and a `fetch_sessions` block in its
 JSON report, when more than `GC_DOLT_HEALTH_MAX_FETCH_SESSIONS` (default 2)
 such sessions are in flight server-wide; leftovers from runs older than this
