@@ -31,20 +31,6 @@ import (
 // db.example:4406 because doctor's verdict is a dial: a shape can only be
 // asserted healthy against an endpoint that answers.
 
-// listenLoopbackPort opens a loopback listener for the duration of the test
-// and returns its port. Shapes that resolve to a TCP endpoint need one alive:
-// both the bd-owned server record and doctor itself reject a port that does
-// not answer.
-func listenLoopbackPort(t *testing.T) string {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	t.Cleanup(func() { _ = ln.Close() })
-	return strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
-}
-
 // writeBdTemplateConfig writes the .beads/config.yaml bd's own init leaves
 // behind: a prefix and nothing gc wrote. gc does not canonicalize a
 // provider-owned scope, so this is the real on-disk config for every shape

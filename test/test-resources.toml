@@ -142,7 +142,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "net_listen"
-baseline_calls = 102
+baseline_calls = 97
 baseline_files = 37
 reported_calls = 92
 reported_files = 34
@@ -512,7 +512,7 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "net_listen"
-baseline_calls = 100
+baseline_calls = 95
 baseline_files = 36
 reported_calls = 92
 reported_files = 34
