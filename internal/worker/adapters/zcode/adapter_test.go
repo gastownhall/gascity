@@ -946,7 +946,7 @@ func TestTurnHeartbeatRedrawsTheBusyLineInPlaceOnATTY(t *testing.T) {
 	// return and erase, no newline, nothing in between.
 	redraw := busy + "\r\x1b[2K" + busy
 	s.waitForOutput(redraw, adapterWaitBudget)
-	pane := renderPane(t, through(s.output(), redraw))
+	pane := renderPane(t, through(t, s.output(), redraw))
 	if last := pane[len(pane)-1]; last != busy {
 		t.Fatalf("pane tail mid-turn = %q, want the busy line:\n%q", last, pane)
 	}
@@ -962,7 +962,7 @@ func TestTurnHeartbeatRedrawsTheBusyLineInPlaceOnATTY(t *testing.T) {
 	}
 	finished := "ok\r\n" + ready + "\r\n"
 	s.waitForOutput(finished, adapterWaitBudget)
-	pane = renderPane(t, through(s.output(), finished))
+	pane = renderPane(t, through(t, s.output(), finished))
 	if last := pane[len(pane)-1]; last != ready {
 		t.Fatalf("pane tail after the turn = %q, want the ready marker:\n%q", last, pane)
 	}
@@ -973,6 +973,64 @@ func TestTurnHeartbeatRedrawsTheBusyLineInPlaceOnATTY(t *testing.T) {
 	s.signal(syscall.SIGTERM)
 	if _, code := s.wait(); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
+	}
+}
+
+// The heartbeat is tty-only, and that guard is the whole reason every piped
+// consumer of this adapter is unaffected by it. Nothing else pins the guard:
+// no other piped test runs a turn longer than a beat, so a regression would
+// stack redraw bytes into every piped reader unnoticed.
+func TestTurnHeartbeatIsSuppressedOffATTY(t *testing.T) {
+	t.Parallel()
+
+	const busy = "zcode-repl turn in flight (C-c to interrupt)"
+	// The stub holds the turn open for several beat periods: had the guard
+	// regressed, the redraws would have landed before the turn completes.
+	h := newHarness(t, map[string]string{
+		"STUB_SLEEP":                "3",
+		"ZCODE_REPL_HEARTBEAT_SECS": "1",
+	})
+
+	s := h.start()
+	s.waitForOutput("zcode-repl ready\n", adapterWaitBudget)
+	s.send("a turn longer than the heartbeat")
+	s.waitForOutput(busy+"\n", adapterWaitBudget)
+	s.waitForOutput("ok\n", adapterWaitBudget)
+
+	out := s.output()
+	if strings.Contains(out, "\r\x1b[2K") {
+		t.Fatalf("heartbeat redraw bytes reached a piped consumer:\n%q", out)
+	}
+	if n := strings.Count(out, busy); n != 1 {
+		t.Fatalf("busy line printed %d times off a tty, want exactly one:\n%q", n, out)
+	}
+
+	s.signal(syscall.SIGTERM)
+	if _, code := s.wait(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+}
+
+// A malformed heartbeat interval is a config error like the adapter's other
+// preconditions: exit 78 naming the variable, rather than reaching sleep with
+// a value it cannot use.
+func TestMalformedHeartbeatIntervalIsAConfigError(t *testing.T) {
+	t.Parallel()
+
+	// An empty value is deliberately absent: ${ZCODE_REPL_HEARTBEAT_SECS:-30}
+	// treats unset and empty alike, so both take the default rather than dying.
+	for _, value := range []string{"0", "-1", "30s", "abc"} {
+		t.Run("value="+value, func(t *testing.T) {
+			t.Parallel()
+
+			h := newHarness(t, map[string]string{"ZCODE_REPL_HEARTBEAT_SECS": value})
+			if _, code := h.run("hello\n"); code != 78 {
+				t.Fatalf("ZCODE_REPL_HEARTBEAT_SECS=%q exit code = %d, want 78 (EX_CONFIG)", value, code)
+			}
+			if !strings.Contains(h.stderr, "ZCODE_REPL_HEARTBEAT_SECS") {
+				t.Fatalf("exit 78 did not name the rejected variable; stderr = %q", h.stderr)
+			}
+		})
 	}
 }
 
@@ -1653,9 +1711,16 @@ func equalStrings(got, want []string) bool {
 
 // through returns raw up to and including its last occurrence of needle, so a
 // pane rendered from it is the pane the instant that output landed rather than
-// whatever a later chunk had half-delivered.
-func through(raw, needle string) string {
-	return raw[:strings.LastIndex(raw, needle)+len(needle)]
+// whatever a later chunk had half-delivered. An absent needle fails the test
+// rather than returning a silently truncated prefix, the same way renderPane
+// refuses to misrender input it does not understand.
+func through(t *testing.T, raw, needle string) string {
+	t.Helper()
+	i := strings.LastIndex(raw, needle)
+	if i < 0 {
+		t.Fatalf("needle %q never arrived in the output:\n%q", needle, raw)
+	}
+	return raw[:i+len(needle)]
 }
 
 // renderPane replays a tty byte stream the way a terminal would, for the

@@ -798,7 +798,7 @@ func stageZCodeAuth(gcHome string, env *helpers.Env) (string, error) {
 		return "", fmt.Errorf("zcode auth unavailable: set ZCODE_API_KEY")
 	}
 	env.With("ZCODE_CJS", bundle).With("ZCODE_API_KEY", apiKey)
-	for _, key := range []string{"ZCODE_MODEL", "ZCODE_BASE_URL", "ZCODE_NODE_BIN"} {
+	for _, key := range []string{"ZCODE_MODEL", "ZCODE_BASE_URL", "ZCODE_NODE_BIN", "ZCODE_REPL_HEARTBEAT_SECS"} {
 		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
 			env.With(key, value)
 		}
