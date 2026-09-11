@@ -1620,6 +1620,8 @@ jobs:
       - cmd-gc-process
       - cmd-gc-productmetrics-testhook
       - credential-provider-windows
+      - preflight-unit-cover-noncmdgc
+      - preflight-unit-cover-cmdgc
       - worker-core-summary
       - worker-core-phase2-summary
       - pack-gate
@@ -1643,6 +1645,8 @@ jobs:
               "cmd-gc-process",
               "cmd-gc-productmetrics-testhook",
               "credential-provider-windows",
+              "preflight-unit-cover-noncmdgc",
+              "preflight-unit-cover-cmdgc",
               "pack-gate",
               "docker-session",
               "k8s-session",
