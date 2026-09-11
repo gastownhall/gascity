@@ -231,6 +231,24 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 			"usr/local/bin/dolt": true,
 			"usr/local/bin/bd":   true,
 		},
+		"CVE-2026-56864": {
+			"usr/bin/gh": true,
+		},
+		"CVE-2026-56865": {
+			"usr/bin/gh": true,
+		},
+		"CVE-2026-84304": {
+			"usr/bin/gh":         true,
+			"usr/local/bin/dolt": true,
+			"usr/local/bin/bd":   true,
+			"usr/local/bin/gc":   true,
+		},
+		"CVE-2026-84445": {
+			"usr/bin/gh":         true,
+			"usr/local/bin/dolt": true,
+			"usr/local/bin/bd":   true,
+			"usr/local/bin/gc":   true,
+		},
 	}
 	foundAllowed := map[string]map[string]bool{}
 
@@ -386,8 +404,11 @@ func TestTrivyIgnoreDropsGCModuleWaiversPastThreshold(t *testing.T) {
 // moves from the lapsed 2026-08-07 horizon to the short 2026-09-21 bridge, and
 // exactly one new entry waives CVE-2026-46600 (golang.org/x/net dns/dnsmessage,
 // DoS via invalid DNS record parsing, fixed upstream in x/net 0.56.0) on the
-// vendored gh and dolt binaries only. The ruling explicitly forbids trimming or
+// vendored gh and dolt binaries. The ruling explicitly forbids trimming or
 // removing any existing entry, so the total entry count must grow by exactly one.
+// Widened again 2026-09-11 (operator ruling docket E9) to add
+// usr/local/bin/kubectl to this same entry rather than a duplicate — see
+// TestTrivyIgnoreWidensDocketE9WaiverForRemainingHighCriticalFindings.
 func TestTrivyIgnoreRefreshesBridgeHorizonAndWaivesXNetDNSMessageCVE(t *testing.T) {
 	root := repoRoot(t)
 
@@ -406,12 +427,13 @@ func TestTrivyIgnoreRefreshesBridgeHorizonAndWaivesXNetDNSMessageCVE(t *testing.
 	const bridgeHorizon = "2026-09-21"
 	const newCVE = "CVE-2026-46600"
 	wantNewPaths := map[string]bool{
-		"usr/bin/gh":         true,
-		"usr/local/bin/dolt": true,
+		"usr/bin/gh":            true,
+		"usr/local/bin/dolt":    true,
+		"usr/local/bin/kubectl": true,
 	}
 
-	if got, want := len(doc.Vulnerabilities), 47; got != want {
-		t.Errorf(".trivyignore.yaml has %d entries, want %d (46 existing + exactly 1 new); the bridge must not trim, remove, or duplicate entries", got, want)
+	if got, want := len(doc.Vulnerabilities), 64; got != want {
+		t.Errorf(".trivyignore.yaml has %d entries, want %d (63 existing + exactly 1 new); the bridge must not trim, remove, or duplicate entries", got, want)
 	}
 
 	newCVECount := 0
@@ -440,7 +462,7 @@ func TestTrivyIgnoreRefreshesBridgeHorizonAndWaivesXNetDNSMessageCVE(t *testing.
 		}
 		for p := range gotPaths {
 			if !wantNewPaths[p] {
-				t.Errorf("%s waives unexpected path %q; scope is gh and dolt only (no kubectl)", v.ID, p)
+				t.Errorf("%s waives unexpected path %q; scope is gh, dolt, and kubectl only", v.ID, p)
 			}
 		}
 		statement := strings.ToLower(v.Statement)
@@ -490,8 +512,8 @@ func TestTrivyIgnoreWaivesXCryptoSSHCVEForGHDoltBD(t *testing.T) {
 		"usr/local/bin/bd":   true,
 	}
 
-	if got, want := len(doc.Vulnerabilities), 47; got != want {
-		t.Errorf(".trivyignore.yaml has %d entries, want %d (46 existing + exactly 1 new); the widening must not trim, remove, or duplicate entries", got, want)
+	if got, want := len(doc.Vulnerabilities), 64; got != want {
+		t.Errorf(".trivyignore.yaml has %d entries, want %d (63 existing + exactly 1 new); the widening must not trim, remove, or duplicate entries", got, want)
 	}
 
 	newCVECount := 0

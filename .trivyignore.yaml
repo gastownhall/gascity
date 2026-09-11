@@ -99,8 +99,9 @@ vulnerabilities:
     paths:
       - "usr/bin/gh"
       - "usr/local/bin/dolt"
+      - "usr/local/bin/kubectl"
     expired_at: 2026-09-21
-    statement: golang.org/x/net dns/dnsmessage DoS via invalid DNS record parsing; rebuilt gh and Dolt sources still pin x/net v0.53.0, fixed upstream in x/net 0.56.0. Short bridge only; durable fix is the GH_SOURCE_REF/DOLT_SOURCE_REF rebuild tracked in ga-frh27v (see also contributor PR #5353), not this waiver — remove each path once that source bump lands.
+    statement: golang.org/x/net dns/dnsmessage DoS via invalid DNS record parsing; rebuilt gh and Dolt sources still pin x/net v0.53.0, fixed upstream in x/net 0.56.0, and external kubectl pins x/net v0.49.0. Short bridge only; durable fix for gh/dolt is the GH_SOURCE_REF/DOLT_SOURCE_REF rebuild tracked in ga-frh27v (see also contributor PR #5353); kubectl's fix is tracked in ga-rl1l10 — remove each path once its rebuild/bump lands. (docket E9, 2026-09-11 — added kubectl.)
   - id: CVE-2026-25680
     paths:
       - "usr/local/bin/dolt"
@@ -291,3 +292,127 @@ vulnerabilities:
       - "usr/local/bin/bd"
     expired_at: 2026-09-21
     statement: golang.org/x/crypto/ssh CVE (CRITICAL); carried by gh (x/crypto v0.53.0), Dolt (v0.50.0), and bd (v0.53.0) only — kubectl does not bundle these binaries. Short bridge only; durable fix is the gh/Dolt module rebuild tracked in contributor pull request 5353 (active again since 2026-09-08), plus rebuilding bd from beads main, whose go.mod already pins golang.org/x/crypto >= v0.54.0 — remove each path once its rebuild lands.
+  # Operator ruling docket E9 (2026-09-11, "widen #5885's .trivyignore.yaml to
+  # cover every HIGH/CRITICAL finding failing its scan today"): PR #5885's own
+  # Container Scan run (34553600725 / job 103121488224, "Image vulnerabilities")
+  # still failed on the findings below after the docket D6 widening above. Each
+  # entry is scoped to only the images/paths or purls actually reported on that
+  # run; nothing is waived beyond that explicit list. Go-stdlib CVEs are
+  # deliberately NOT waived for gh/dolt/bd (see the file header) since those
+  # three clear stdlib CVEs via the Go 1.26.5 rebuild.
+  - id: CVE-2026-56864
+    paths:
+      - "usr/bin/gh"
+    expired_at: 2026-09-21
+    statement: golang.org/x/mod CVE; rebuilt gh source still pins x/mod v0.37.0, fixed upstream in x/mod v0.40.0. Durable fix is the GH_SOURCE_REF rebuild tracked in contributor pull request 5353 — remove once that source bump lands.
+  - id: CVE-2026-56865
+    paths:
+      - "usr/bin/gh"
+    expired_at: 2026-09-21
+    statement: golang.org/x/mod CVE; rebuilt gh source still pins x/mod v0.37.0, fixed upstream in x/mod v0.40.0. Durable fix is the GH_SOURCE_REF rebuild tracked in contributor pull request 5353 — remove once that source bump lands.
+  - id: CVE-2026-84304
+    paths:
+      - "usr/bin/gh"
+      - "usr/local/bin/dolt"
+      - "usr/local/bin/bd"
+      - "usr/local/bin/gc"
+    expired_at: 2026-09-21
+    statement: google.golang.org/grpc CVE; rebuilt gh and Dolt sources pin grpc v1.82.1, durable fix is the GH_SOURCE_REF/DOLT_SOURCE_REF rebuild tracked in contributor pull request 5353 (fixed upstream in grpc v1.83.1); bd and gc pin grpc v1.83.0, fixed in v1.83.1, tracked in ga-rl1l10. Remove each path once its rebuild/bump lands.
+  - id: CVE-2026-84445
+    paths:
+      - "usr/bin/gh"
+      - "usr/local/bin/dolt"
+      - "usr/local/bin/bd"
+      - "usr/local/bin/gc"
+    expired_at: 2026-09-21
+    statement: google.golang.org/grpc CVE; rebuilt gh and Dolt sources pin grpc v1.82.1, durable fix is the GH_SOURCE_REF/DOLT_SOURCE_REF rebuild tracked in contributor pull request 5353 (fixed upstream in grpc v1.83.1); bd and gc pin grpc v1.83.0, fixed in v1.83.1, tracked in ga-rl1l10. Remove each path once its rebuild/bump lands.
+  - id: CVE-2026-43871
+    paths:
+      - "usr/local/bin/dolt"
+      - "usr/local/bin/bd"
+    expired_at: 2026-09-21
+    statement: github.com/apache/thrift CVE; rebuilt Dolt source still pins thrift v0.13.1-0.20201008052519-daf620915714, durable fix is the DOLT_SOURCE_REF rebuild tracked in contributor pull request 5353; bd pins thrift v0.23.0, fixed in v0.24.0, tracked in ga-rl1l10. Remove each path once its rebuild/bump lands.
+  - id: CVE-2026-33818
+    paths:
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-09-21
+    statement: Go stdlib CVE; external prebuilt kubectl still embeds Go 1.26.2 stdlib, fixed in Go 1.26.6. Remove once kubectl rebuilds against 1.26.6+. Tracked in ga-rl1l10.
+  - id: CVE-2026-56853
+    paths:
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-09-21
+    statement: Go stdlib CVE; external prebuilt kubectl still embeds Go 1.26.2 stdlib, fixed in Go 1.26.6. Remove once kubectl rebuilds against 1.26.6+. Tracked in ga-rl1l10.
+  - id: CVE-2026-56858
+    paths:
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-09-21
+    statement: Go stdlib CVE; external prebuilt kubectl still embeds Go 1.26.2 stdlib, fixed in Go 1.26.6. Remove once kubectl rebuilds against 1.26.6+. Tracked in ga-rl1l10.
+  - id: CVE-2026-56859
+    paths:
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-09-21
+    statement: Go stdlib CVE; external prebuilt kubectl still embeds Go 1.26.2 stdlib, fixed in Go 1.26.6. Remove once kubectl rebuilds against 1.26.6+. Tracked in ga-rl1l10.
+  - id: CVE-2026-56860
+    paths:
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-09-21
+    statement: Go stdlib CVE; external prebuilt kubectl still embeds Go 1.26.2 stdlib, fixed in Go 1.26.6. Remove once kubectl rebuilds against 1.26.6+. Tracked in ga-rl1l10.
+  - id: CVE-2026-56862
+    paths:
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-09-21
+    statement: Go stdlib CVE; external prebuilt kubectl still embeds Go 1.26.2 stdlib, fixed in Go 1.26.6. Remove once kubectl rebuilds against 1.26.6+. Tracked in ga-rl1l10.
+  - id: CVE-2026-53612
+    purls:
+      - "pkg:deb/debian/bsdutils"
+      - "pkg:deb/debian/libblkid1"
+      - "pkg:deb/debian/liblastlog2-2"
+      - "pkg:deb/debian/libmount1"
+      - "pkg:deb/debian/libsmartcols1"
+      - "pkg:deb/debian/libuuid1"
+      - "pkg:deb/debian/login"
+      - "pkg:deb/debian/mount"
+      - "pkg:deb/debian/util-linux"
+    expired_at: 2026-09-21
+    statement: Debian 13.5 util-linux source package CVE across the gc-mcp-mail image's bsdutils/libblkid1/liblastlog2-2/libmount1/libsmartcols1/libuuid1/login/mount/util-linux binary packages, pinned at 2.41-5, fixed in 2.41.5-0+deb13u1. Tracked in ga-dkgeoi; remove once the base image rebuilds against the patched Debian package. These purls appear only in gc-mcp-mail's own package set, which confines the waiver without a paths entry.
+  - id: CVE-2026-53613
+    purls:
+      - "pkg:deb/debian/bsdutils"
+      - "pkg:deb/debian/libblkid1"
+      - "pkg:deb/debian/liblastlog2-2"
+      - "pkg:deb/debian/libmount1"
+      - "pkg:deb/debian/libsmartcols1"
+      - "pkg:deb/debian/libuuid1"
+      - "pkg:deb/debian/login"
+      - "pkg:deb/debian/mount"
+      - "pkg:deb/debian/util-linux"
+    expired_at: 2026-09-21
+    statement: Debian 13.5 util-linux source package CVE across the gc-mcp-mail image's bsdutils/libblkid1/liblastlog2-2/libmount1/libsmartcols1/libuuid1/login/mount/util-linux binary packages, pinned at 2.41-5, fixed in 2.41.5-0+deb13u1. Tracked in ga-dkgeoi; remove once the base image rebuilds against the patched Debian package. These purls appear only in gc-mcp-mail's own package set, which confines the waiver without a paths entry.
+  - id: CVE-2026-53614
+    purls:
+      - "pkg:deb/debian/bsdutils"
+      - "pkg:deb/debian/libblkid1"
+      - "pkg:deb/debian/liblastlog2-2"
+      - "pkg:deb/debian/libmount1"
+      - "pkg:deb/debian/libsmartcols1"
+      - "pkg:deb/debian/libuuid1"
+      - "pkg:deb/debian/login"
+      - "pkg:deb/debian/mount"
+      - "pkg:deb/debian/util-linux"
+    expired_at: 2026-09-21
+    statement: Debian 13.5 util-linux source package CVE across the gc-mcp-mail image's bsdutils/libblkid1/liblastlog2-2/libmount1/libsmartcols1/libuuid1/login/mount/util-linux binary packages, pinned at 2.41-5, fixed in 2.41.5-0+deb13u1. Tracked in ga-dkgeoi; remove once the base image rebuilds against the patched Debian package. These purls appear only in gc-mcp-mail's own package set, which confines the waiver without a paths entry.
+  - id: CVE-2026-78676
+    purls:
+      - "pkg:pypi/gitpython"
+    expired_at: 2026-09-21
+    statement: GitPython CRITICAL remote-code-execution CVE; gc-mcp-mail pins GitPython 3.1.58, fixed in 3.1.59. Tracked in ga-dkgeoi; remove once the image bumps the pinned dependency. This purl appears only in gc-mcp-mail's own package set, which confines the waiver without a paths entry.
+  - id: CVE-2026-78675
+    purls:
+      - "pkg:pypi/gitpython"
+    expired_at: 2026-09-21
+    statement: GitPython CVE; gc-mcp-mail pins GitPython 3.1.58, fixed in 3.1.59. Tracked in ga-dkgeoi; remove once the image bumps the pinned dependency. This purl appears only in gc-mcp-mail's own package set, which confines the waiver without a paths entry.
+  - id: CVE-2026-78677
+    purls:
+      - "pkg:pypi/gitpython"
+    expired_at: 2026-09-21
+    statement: GitPython CVE; gc-mcp-mail pins GitPython 3.1.58, fixed in 3.1.59. Tracked in ga-dkgeoi; remove once the image bumps the pinned dependency. This purl appears only in gc-mcp-mail's own package set, which confines the waiver without a paths entry.

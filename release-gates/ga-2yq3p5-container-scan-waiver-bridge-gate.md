@@ -20,7 +20,7 @@ the normal deploy path applies.
 | # | Criterion | Result | Evidence |
 |---|---|---|---|
 | 1 | Review PASS present | **PASS** | Review bead `ga-56p0rf` is closed `pass` on the exact reviewed source. It records no style, security, specification, or high-severity finding. |
-| 2 | Acceptance criteria met | **PASS** | The executable acceptance test confirms 45 existing entries moved from `2026-08-07` to the time-boxed `2026-09-21` horizon, exactly one `CVE-2026-46600` entry was added for `usr/bin/gh` and `usr/local/bin/dolt`, no waiver was removed, and every entry has a durable-fix statement. The base-to-head diff contains only `.trivyignore.yaml` and its owning test; it does not touch bundled-tool refs, Dockerfiles, or module patches. The live Container Scan rerun is a post-PR confirmation and must be green before the merge request is routed. **Amendment (2026-09-10, operator ruling docket D6, "Widen the waiver"):** a second executable acceptance test, `TestTrivyIgnoreWaivesXCryptoSSHCVEForGHDoltBD`, confirms exactly one further `CVE-2026-56854` entry was added on the same `2026-09-21` horizon, scoped to `usr/bin/gh`, `usr/local/bin/dolt`, and `usr/local/bin/bd` only (not `kubectl`), with no existing entry trimmed, removed, or duplicated. The amended diff still touches only `.trivyignore.yaml` and its owning test. This amendment's own Container Scan rerun on PR #5885 remains pending live acceptance, same as the original widening. |
+| 2 | Acceptance criteria met | **PASS** | The executable acceptance test confirms 45 existing entries moved from `2026-08-07` to the time-boxed `2026-09-21` horizon, exactly one `CVE-2026-46600` entry was added for `usr/bin/gh` and `usr/local/bin/dolt`, no waiver was removed, and every entry has a durable-fix statement. The base-to-head diff contains only `.trivyignore.yaml` and its owning test; it does not touch bundled-tool refs, Dockerfiles, or module patches. The live Container Scan rerun is a post-PR confirmation and must be green before the merge request is routed. **Amendment (2026-09-10, operator ruling docket D6, "Widen the waiver"):** a second executable acceptance test, `TestTrivyIgnoreWaivesXCryptoSSHCVEForGHDoltBD`, confirms exactly one further `CVE-2026-56854` entry was added on the same `2026-09-21` horizon, scoped to `usr/bin/gh`, `usr/local/bin/dolt`, and `usr/local/bin/bd` only (not `kubectl`), with no existing entry trimmed, removed, or duplicated. The amended diff still touches only `.trivyignore.yaml` and its owning test. This amendment's own Container Scan rerun on PR #5885 remains pending live acceptance, same as the original widening. **Amendment (2026-09-11, operator ruling docket E9, "widen #5885's `.trivyignore.yaml` to cover every HIGH/CRITICAL finding failing its scan today"):** a third executable acceptance test, `TestTrivyIgnoreWidensDocketE9WaiverForRemainingHighCriticalFindings`, confirms seventeen further entries were added on the same `2026-09-21` horizon for the exact HIGH/CRITICAL findings still failing PR #5885's own Container Scan run (34553600725, job 103121488224, "Image vulnerabilities") after the D6 widening: `CVE-2026-56864`/`CVE-2026-56865` (x/mod) for `usr/bin/gh`; `CVE-2026-84304`/`CVE-2026-84445` (grpc) across `usr/bin/gh`, `usr/local/bin/dolt`, `usr/local/bin/bd`, and `usr/local/bin/gc`; `CVE-2026-43871` (thrift) across `usr/local/bin/dolt` and `usr/local/bin/bd`; six Go-stdlib CVEs (`CVE-2026-33818`, `CVE-2026-56853`, `CVE-2026-56858`, `CVE-2026-56859`, `CVE-2026-56860`, `CVE-2026-56862`) scoped to `usr/local/bin/kubectl` only; and six purl-scoped entries with no `paths` key (three Debian util-linux CVEs `CVE-2026-53612`/`53613`/`53614` and three Python GitPython CVEs `CVE-2026-78676`/`78675`/`78677`), each confined to the `gc-mcp-mail` image's own package set. The pre-existing `CVE-2026-46600` entry was widened in place to add `usr/local/bin/kubectl` alongside `usr/bin/gh` and `usr/local/bin/dolt` (it was not duplicated). No Go-stdlib waiver was added for the rebuilt `gh`/`dolt`/`bd` binaries, consistent with the file header's prohibition against masking their pending rebuild. This amendment's own Container Scan rerun on the moved PR #5885 head remains pending live acceptance, same as the prior two widenings. |
 | 3 | Tests pass | **PASS with attributed raw failures** | The required CI jobs for this path set are mapped below. Their local equivalents passed, including acceptance A, the minimum-supported `bd` contract, generated artifacts, GoReleaser config, the complete dashboard lane, and the diff-owned integration/security tests. Gas City's documented full local matrix, `make test-local-full-parallel`, scheduled all 40 jobs; its verbose logs contain **48,294 PASS / 4 attributed FAIL / 208 SKIP** top-level test results. The four failures are non-diff-owned and satisfy the attribution protocol below. |
 | 3a | Non-diff-owned failures attributed | **PASS** | `TestBdFlagManifestCurrent` is tracked by `ga-f0uceo`; the two dirty-schema review-formula failures are tracked by `ga-esyijp`; the `citysus.report` timeout is tracked by `ga-dqd7gf`, created under the same-run tracker escape after a structural mechanism proof landed and clauses 1 and 4 were clear. |
 | 3b | Policy/lint lane | **PASS** | CI-policy tests, affected-package lint and format, `go vet ./...`, docs sync, native dependency, open-core, event-export, and native DoltLite checks all passed. |
@@ -28,29 +28,44 @@ the normal deploy path applies.
 | 4 | No high-severity review findings open | **PASS** | The reviewer recorded `style_findings: none`, `security_findings: none`, `uncovered_criteria: none`, and `verdict: pass`. |
 | 5 | Final branch is clean | **PASS** | The detached checkout of the exact reviewed source remained clean after the full matrix and static lanes. This checklist is the deployer's sole addition and is committed separately on the isolated deploy branch. |
 | 6 | Branch diverges cleanly from main | **PASS** | `git merge-tree --write-tree origin/main a774fee25bc0ecfb2e38c9936a53d58eb76e1e34` exited 0 and produced tree `99e5a0cdc4069726489d76e0b34fa4c430e9e3af`. The reviewed source is based directly on the evaluated `origin/main`; no self-rebase was required. |
-| 7 | Single feature theme | **PASS** | Two TDD commits change one security-policy surface: a short-lived waiver-horizon refresh plus the one newly observed vendored-tool CVE, with an owning regression test. **Amendment:** two further TDD commits (RED + GREEN) widen the same `.trivyignore.yaml` surface with the same time-box, for the one further vendored-tool CVE named in the 2026-09-10 operator ruling, each with its own owning regression test. Four TDD commits total, all confined to the one security-policy surface. |
+| 7 | Single feature theme | **PASS** | Two TDD commits change one security-policy surface: a short-lived waiver-horizon refresh plus the one newly observed vendored-tool CVE, with an owning regression test. **Amendment:** two further TDD commits (RED + GREEN) widen the same `.trivyignore.yaml` surface with the same time-box, for the one further vendored-tool CVE named in the 2026-09-10 operator ruling, each with its own owning regression test. Four TDD commits total, all confined to the one security-policy surface. **Amendment (2026-09-11, docket E9):** two further TDD commits (RED + GREEN) widen the same `.trivyignore.yaml` surface with the same time-box, for the seventeen further findings named in the 2026-09-11 operator ruling, with their own owning regression test. Six TDD commits total, all confined to the one security-policy surface. |
 
 ## Acceptance evidence
 
-- `.trivyignore.yaml` contains 47 entries: 46 pre-existing entries (45 original
-  plus the `CVE-2026-46600` entry from the first widening) and one further new
-  `CVE-2026-56854` entry (2026-09-10 operator ruling, docket D6, "Widen the
-  waiver").
+- `.trivyignore.yaml` contains 64 entries: 47 pre-existing entries (45
+  original, plus the `CVE-2026-46600` entry from the first widening, plus the
+  `CVE-2026-56854` entry from the 2026-09-10 docket D6 widening) and 17
+  further new entries (2026-09-11 operator ruling, docket E9, "widen #5885's
+  `.trivyignore.yaml` to cover every HIGH/CRITICAL finding failing its scan
+  today").
 - Every entry expires on `2026-09-21` and has a non-empty statement naming its
   durable fix path.
-- The `CVE-2026-46600` entry is scoped to `usr/bin/gh` and `usr/local/bin/dolt`.
-  The `CVE-2026-56854` entry is scoped to `usr/bin/gh`, `usr/local/bin/dolt`,
-  and `usr/local/bin/bd` (its durable fix: austinborn's PR #5353 for gh/Dolt,
-  plus rebuilding `bd` from beads main, whose `go.mod` already pins
-  `golang.org/x/crypto` >= v0.54.0). Neither entry includes `kubectl` — it does
-  not bundle any of these three binaries.
-- No prior waiver ID was removed by either widening.
-- The cumulative base-to-head diff (through both widenings) is exactly:
+- The `CVE-2026-46600` entry is scoped to `usr/bin/gh`, `usr/local/bin/dolt`,
+  and (as of the docket E9 widening) `usr/local/bin/kubectl`. The
+  `CVE-2026-56854` entry is scoped to `usr/bin/gh`, `usr/local/bin/dolt`, and
+  `usr/local/bin/bd` (its durable fix: austinborn's PR #5353 for gh/Dolt, plus
+  rebuilding `bd` from beads main, whose `go.mod` already pins
+  `golang.org/x/crypto` >= v0.54.0).
+- The 17 docket-E9 entries are scoped to exactly the findings PR #5885's own
+  Container Scan run (34553600725, job 103121488224, "Image vulnerabilities")
+  reported after the D6 widening, and no further: `CVE-2026-56864`/`56865`
+  (x/mod, `usr/bin/gh`); `CVE-2026-84304`/`84445` (grpc, across `usr/bin/gh`,
+  `usr/local/bin/dolt`, `usr/local/bin/bd`, and `usr/local/bin/gc`);
+  `CVE-2026-43871` (thrift, across `usr/local/bin/dolt` and
+  `usr/local/bin/bd`); `CVE-2026-33818`/`56853`/`56858`/`56859`/`56860`/`56862`
+  (Go stdlib, `usr/local/bin/kubectl` only); and `CVE-2026-53612`/`53613`/`53614`
+  (Debian util-linux) plus `CVE-2026-78676`/`78675`/`78677` (Python GitPython),
+  all six purl-scoped with no `paths` key so they confine themselves to the
+  `gc-mcp-mail` image's own package set. No Go-stdlib waiver was added for the
+  rebuilt `gh`/`dolt`/`bd` binaries — their fix route is the Go 1.26.5+
+  rebuild, not a waiver, per the file header's prohibition.
+- No prior waiver ID was removed by any of the three widenings.
+- The cumulative base-to-head diff (through all three widenings) is exactly:
 
   ```text
-  .trivyignore.yaml                       | 103 ++++++++++++++++++++----------
-  scripts/container_tool_security_test.go | 173 ++++++++++++++++++++++++++++++--
-  2 files changed, 225 insertions(+), 51 deletions(-)
+  .trivyignore.yaml                       | 228 ++++++++++++++----
+  scripts/container_tool_security_test.go | 411 +++++++++++++++++++++++++++++++-
+  2 files changed, 588 insertions(+), 51 deletions(-)
   ```
 
 - No `GH_SOURCE_REF`, `DOLT_SOURCE_REF`, Dockerfile, `go.mod`, or module-patch
@@ -78,6 +93,8 @@ Diff-owned tests executed in the full-suite `unit-core` job:
 - `TestRebuiltToolsAssertPatchedGRPCArtifact`: **PASS**
 - `TestTrivyIgnoreWaivesXCryptoSSHCVEForGHDoltBD`: **PASS** (amendment,
   2026-09-10 operator ruling)
+- `TestTrivyIgnoreWidensDocketE9WaiverForRemainingHighCriticalFindings`:
+  **PASS** (amendment, 2026-09-11 operator ruling docket E9)
 
 ### Required CI job mapping
 
