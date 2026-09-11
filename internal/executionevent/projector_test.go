@@ -411,6 +411,72 @@ func TestEmitCurrentNilRecorderIsNoOp(t *testing.T) {
 	}
 }
 
+// TestEmitCurrentEmitsStepDefinedOncePerStep pins the idempotent-restatement
+// contract (ga-rd8le): EmitCurrent keeps re-projecting the full graph every
+// tick, but step_defined is emitted exactly once per step against a durable
+// per-step marker. A steady tick therefore restates nothing, while a step that
+// is still unmarked — one just created, or one whose emit crashed before the
+// marker landed — is re-emitted on the next tick, no matter which creator made
+// it. That is convergence-via-restatement without threading created IDs.
+func TestEmitCurrentEmitsStepDefinedOncePerStep(t *testing.T) {
+	graph := beads.NewMemStore()
+	root := mustCreateProjectionRoot(t, graph, "")
+	stepA := mustCreateProjectionStep(t, graph, "gcg-step-a", root.ID, "build", "[]")
+	stepB := mustCreateProjectionStep(t, graph, "gcg-step-b", root.ID, "test", `["build"]`)
+	recorder := events.NewFake()
+
+	// First tick emits step_defined for both unmarked steps and marks them.
+	if err := EmitCurrent(recorder, beads.GraphStore{Store: graph}, beads.WorkStore{}, root.ID, "control-dispatch"); err != nil {
+		t.Fatalf("EmitCurrent first tick: %v", err)
+	}
+	if got := countStepDefined(recorder.Events, root.ID); got != 2 {
+		t.Fatalf("first tick step_defined = %d, want 2", got)
+	}
+	for _, step := range []beads.Bead{stepA, stepB} {
+		reloaded, err := graph.Get(step.ID)
+		if err != nil {
+			t.Fatalf("reload step %s: %v", step.ID, err)
+		}
+		if reloaded.Metadata[beadmeta.StepDefinedEmittedMetadataKey] == "" {
+			t.Fatalf("step %s was emitted but not durably marked", step.ID)
+		}
+	}
+
+	// Second tick re-projects the same graph and must emit nothing: both steps
+	// are now durably marked. On base (no marker) this re-emits the full graph.
+	recorder.Events = nil
+	if err := EmitCurrent(recorder, beads.GraphStore{Store: graph}, beads.WorkStore{}, root.ID, "control-dispatch"); err != nil {
+		t.Fatalf("EmitCurrent second tick: %v", err)
+	}
+	if got := countStepDefined(recorder.Events, root.ID); got != 0 {
+		t.Fatalf("second tick step_defined = %d, want 0 (idempotent restatement)", got)
+	}
+
+	// A step created after the first pass is unmarked and self-heals: only it
+	// is emitted on the next tick, regardless of the steps already marked.
+	stepC := mustCreateProjectionStep(t, graph, "gcg-step-c", root.ID, "ship", `["test"]`)
+	recorder.Events = nil
+	if err := EmitCurrent(recorder, beads.GraphStore{Store: graph}, beads.WorkStore{}, root.ID, "control-dispatch"); err != nil {
+		t.Fatalf("EmitCurrent third tick: %v", err)
+	}
+	if got := countStepDefined(recorder.Events, root.ID); got != 1 {
+		t.Fatalf("third tick step_defined = %d, want 1 (only the new step)", got)
+	}
+	if recorder.Events[0].Subject != stepC.ID {
+		t.Fatalf("third tick emitted %q, want the new step %q", recorder.Events[0].Subject, stepC.ID)
+	}
+}
+
+func countStepDefined(recorded []events.Event, rootID string) int {
+	count := 0
+	for _, event := range recorded {
+		if event.Type == events.ExecutionStepDefined && event.RunID == rootID {
+			count++
+		}
+	}
+	return count
+}
+
 func mustCreateProjectionRoot(t *testing.T, store beads.Store, convoyID string) beads.Bead {
 	t.Helper()
 	metadata := map[string]string{
