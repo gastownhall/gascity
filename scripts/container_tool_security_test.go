@@ -226,6 +226,11 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 			"usr/bin/gh":         true,
 			"usr/local/bin/dolt": true,
 		},
+		"CVE-2026-56854": {
+			"usr/bin/gh":         true,
+			"usr/local/bin/dolt": true,
+			"usr/local/bin/bd":   true,
+		},
 	}
 	foundAllowed := map[string]map[string]bool{}
 
@@ -405,8 +410,8 @@ func TestTrivyIgnoreRefreshesBridgeHorizonAndWaivesXNetDNSMessageCVE(t *testing.
 		"usr/local/bin/dolt": true,
 	}
 
-	if got, want := len(doc.Vulnerabilities), 46; got != want {
-		t.Errorf(".trivyignore.yaml has %d entries, want %d (45 existing + exactly 1 new); the bridge must not trim, remove, or duplicate entries", got, want)
+	if got, want := len(doc.Vulnerabilities), 47; got != want {
+		t.Errorf(".trivyignore.yaml has %d entries, want %d (46 existing + exactly 1 new); the bridge must not trim, remove, or duplicate entries", got, want)
 	}
 
 	newCVECount := 0

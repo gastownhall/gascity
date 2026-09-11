@@ -284,3 +284,10 @@ vulnerabilities:
       - "usr/local/bin/bd"
     expired_at: 2026-09-21
     statement: golang.org/x/crypto/ssh CVE; present in bd (beads v1.1.0). gc cleared by the golang.org/x/crypto v0.52.0 bump in this change. Remove once bd rebuilds against x/crypto >= 0.52.0.
+  - id: CVE-2026-56854
+    paths:
+      - "usr/bin/gh"
+      - "usr/local/bin/dolt"
+      - "usr/local/bin/bd"
+    expired_at: 2026-09-21
+    statement: golang.org/x/crypto/ssh CVE (CRITICAL); carried by gh (x/crypto v0.53.0), Dolt (v0.50.0), and bd (v0.53.0) only — kubectl does not bundle these binaries. Short bridge only; durable fix is the gh/Dolt module rebuild tracked in contributor pull request 5353 (active again since 2026-09-08), plus rebuilding bd from beads main, whose go.mod already pins golang.org/x/crypto >= v0.54.0 — remove each path once its rebuild lands.
