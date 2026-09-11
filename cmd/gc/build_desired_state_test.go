@@ -5974,8 +5974,10 @@ func TestBuildDesiredState_MinZeroDefaultScaleCheckRoutedWorkCreatesPoolSession(
 	if err != nil {
 		t.Skip("jq not installed")
 	}
+	pinTestOwnedBDHome(t)
 
 	cityPath := t.TempDir()
+	registerRealBDServerStop(t, cityPath)
 	beadsDir := filepath.Join(cityPath, ".beads")
 	t.Setenv("PATH", strings.Join([]string{filepath.Dir(bdPath), filepath.Dir(jqPath), os.Getenv("PATH")}, string(os.PathListSeparator)))
 	t.Setenv("BEADS_DIR", beadsDir)
