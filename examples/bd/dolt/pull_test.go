@@ -59,7 +59,7 @@ func TestPullUsesLiveSQLWhenManagedServerReachable(t *testing.T) {
 	log := string(data)
 	for _, want := range []string{
 		"SELECT name, url FROM dolt_remotes ORDER BY name",
-		"CALL DOLT_PULL('origin', 'main')",
+		"CALL DOLT_PULL(", "= CONNECTION_ID(), 'origin', JSON_EXTRACT('gc-remote-op-lost', '$')), 'main')", // the remote is the CALL's ownership-checked first argument
 	} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("dolt log missing %q\nlog:\n%s\noutput:\n%s", want, log, out)

@@ -118,6 +118,9 @@ esac
 : "${GC_DOLT_USER:=root}"
 PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)}"
 . "$PACK_DIR/assets/scripts/runtime.sh"
+# This run's lock nonce (see runtime.sh, "Server-side single-flight gate"):
+# one value per script run, computed here and not at source time.
+REMOTE_OP_RUN_NONCE="$$-$(date +%s)"
 
 beads_bd="$GC_BEADS_BD_SCRIPT"
 data_dir="$DOLT_DATA_DIR"

@@ -622,7 +622,11 @@ bound_expired() {
 REMOTE_OP_GATE_MARK='gc-remote-op-lock-held'
 REMOTE_OP_LOST_MARK='gc-remote-op-lost'
 REMOTE_OP_NOT_OWNER_MARK='gc-remote-op-not-owner'
-REMOTE_OP_RUN_NONCE="$$-$(date +%s)"
+# REMOTE_OP_RUN_NONCE is set by the scripts that take locks (sync, pull) once
+# per run, after sourcing this file: `REMOTE_OP_RUN_NONCE="$$-$(date +%s)"`.
+# Not computed here: health sources this file too and must not spend a `date`
+# call at source time (its tests script the date sequence).
+REMOTE_OP_RUN_NONCE="${REMOTE_OP_RUN_NONCE:-}"
 
 # remote_op_lock_name DB — the user-level lock name for DB, `gc_remote_op:<db>`
 # with the name lowercased: Dolt resolves `app` and `APP` to one database, and
@@ -637,7 +641,7 @@ remote_op_lock_name() {
 # `gc_remote_op_run:<db>:<pid>-<epoch>` (db lowercased like the database lock;
 # the nonce carries no caller data).
 remote_op_run_lock_name() {
-  printf 'gc_remote_op_run:%s:%s' "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" "$REMOTE_OP_RUN_NONCE"
+  printf 'gc_remote_op_run:%s:%s' "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" "${REMOTE_OP_RUN_NONCE:?remote_op_run_lock_name: REMOTE_OP_RUN_NONCE is unset (the script must set it once per run)}"
 }
 
 # remote_op_gate_sql DB — the gate statement for DB (DB already validated by
