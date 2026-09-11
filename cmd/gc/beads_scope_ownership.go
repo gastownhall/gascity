@@ -631,6 +631,11 @@ func ensureFreshRigProviderOwnership(cityPath string, cfg *config.City) error {
 	if err != nil {
 		return fmt.Errorf("inspect city beads identity: %w", err)
 	}
+	if inherits, err := cityGrantsProviderOwnershipToFreshScopes(cityPath, cityInitialized); err != nil {
+		return err
+	} else if !inherits {
+		return nil
+	}
 	var intent providerScopeIntent
 	if cityInitialized {
 		intent, err = providerOwnershipIntentFromPersistedCity(cityPath)
@@ -732,6 +737,11 @@ func ensureProviderScopeOwnershipBeforeInit(cityPath, scopeRoot string) error {
 		if inspectErr != nil {
 			return fmt.Errorf("inspect city beads identity: %w", inspectErr)
 		}
+		if inherits, inheritErr := cityGrantsProviderOwnershipToFreshScopes(cityPath, cityInitialized); inheritErr != nil {
+			return inheritErr
+		} else if !inherits {
+			return nil
+		}
 		if cityInitialized {
 			intent, err = providerOwnershipIntentFromPersistedCity(cityPath)
 		} else {
@@ -745,6 +755,27 @@ func ensureProviderScopeOwnershipBeforeInit(cityPath, scopeRoot string) error {
 		return fmt.Errorf("record provider ownership before store initialization: %w", err)
 	}
 	return nil
+}
+
+// cityGrantsProviderOwnershipToFreshScopes reports whether a scope added to
+// this city inherits provider ownership. Only a city whose own lifecycle bd
+// already owns — journaled, or bound to bd's proxied-server mode (R1) — hands
+// that ownership on.
+//
+// An existing GC-managed direct city does not. Its rigs are databases on the
+// city's one managed server; journaling a new one as provider-owned direct/
+// local ran a bare `bd init --server` in the rig, which gives it a second Dolt
+// process of its own, split the city between two lifecycle owners, and left
+// the dolt pack's orders and backups covering only the managed half. 07-design
+// §0/§4 keeps those cities working unchanged until the journaled handoff.
+//
+// An uninitialized city is not grandfathered: it has no durable binding yet,
+// and `gc init` records the pending intent that this function's caller reads.
+func cityGrantsProviderOwnershipToFreshScopes(cityPath string, cityInitialized bool) (bool, error) {
+	if !cityInitialized {
+		return true, nil
+	}
+	return cityScopeProviderOwned(cityPath)
 }
 
 // providerOwnershipIntentFromPersistedCity derives the topology a new rig

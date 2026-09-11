@@ -36,13 +36,39 @@ func writeBdProxyRootAt(t *testing.T, root string, pid int) string {
 	return configPath
 }
 
-// stubBdProxyPIDAlive swaps the liveness probe so a fabricated process table
-// can drive the live and dead branches deterministically.
-func stubBdProxyPIDAlive(t *testing.T, alive map[int]bool) {
+// stubBdProxyProcesses swaps both process-table reads the ownership proof
+// makes, so a test can fabricate exactly which process each proxy.pid names.
+// A pid absent from procs is dead.
+func stubBdProxyProcesses(t *testing.T, procs map[int][]string) {
 	t.Helper()
-	prev := bdProxyPIDAlive
-	bdProxyPIDAlive = func(pid int) bool { return alive[pid] }
-	t.Cleanup(func() { bdProxyPIDAlive = prev })
+	prevAlive, prevArgv := bdProxyPIDAlive, bdProxyProcessArgv
+	bdProxyPIDAlive = func(pid int) bool { _, live := procs[pid]; return live }
+	bdProxyProcessArgv = func(pid int) ([]string, error) {
+		argv, live := procs[pid]
+		if !live {
+			return nil, fmt.Errorf("no process %d", pid)
+		}
+		return argv, nil
+	}
+	t.Cleanup(func() { bdProxyPIDAlive, bdProxyProcessArgv = prevAlive, prevArgv })
+}
+
+// bdProxyChildArgv is what bd execs for a proxy rooted at the directory
+// holding configPath.
+func bdProxyChildArgv(configPath string) []string {
+	return []string{"/usr/local/bin/bd", "db-proxy-child", "--root", filepath.Dir(configPath), "--port", "0"}
+}
+
+// stubLiveBdProxy is the ordinary case: one live proxy supervising one root.
+func stubLiveBdProxy(t *testing.T, pid int, configPath string) {
+	t.Helper()
+	stubBdProxyProcesses(t, map[int][]string{pid: bdProxyChildArgv(configPath)})
+}
+
+// stubNoBdProxyProcesses fabricates an empty process table.
+func stubNoBdProxyProcesses(t *testing.T) {
+	t.Helper()
+	stubBdProxyProcesses(t, nil)
 }
 
 // TestClassifyDoltProcess_ProtectsBdOwnedProxyUnderTestTempRoot is the R4
@@ -53,7 +79,7 @@ func stubBdProxyPIDAlive(t *testing.T, alive map[int]bool) {
 func TestClassifyDoltProcess_ProtectsBdOwnedProxyUnderTestTempRoot(t *testing.T) {
 	scope := filepath.Join(t.TempDir(), "city")
 	configPath := writeBdProxyRoot(t, scope, 4242)
-	stubBdProxyPIDAlive(t, map[int]bool{4242: true})
+	stubLiveBdProxy(t, 4242, configPath)
 	if !isTestConfigPath(configPath, "/home/u", os.TempDir()) {
 		t.Fatalf("fixture %q is not on the test-config-path allowlist; the test would pass vacuously", configPath)
 	}
@@ -80,7 +106,7 @@ func TestClassifyDoltProcess_ProtectsBdOwnedProxyUnderTestTempRoot(t *testing.T)
 func TestClassifyDoltProcess_StaleProxyPIDKeepsExistingBehaviour(t *testing.T) {
 	scope := filepath.Join(t.TempDir(), "city")
 	configPath := writeBdProxyRoot(t, scope, 4243)
-	stubBdProxyPIDAlive(t, map[int]bool{4243: false})
+	stubNoBdProxyProcesses(t)
 
 	p := DoltProcInfo{PID: 9002, Argv: []string{"dolt", "sql-server", "--config", configPath}}
 	got := classifyDoltProcess(p, nil, "/home/u", os.TempDir(), nil)
@@ -95,7 +121,7 @@ func TestClassifyDoltProcess_StaleProxyPIDKeepsExistingBehaviour(t *testing.T) {
 func TestClassifyDoltProcess_MissingProxyPIDKeepsExistingBehaviour(t *testing.T) {
 	scope := filepath.Join(t.TempDir(), "city")
 	configPath := writeBdProxyRoot(t, scope, 0)
-	stubBdProxyPIDAlive(t, map[int]bool{})
+	stubNoBdProxyProcesses(t)
 
 	p := DoltProcInfo{PID: 9003, Argv: []string{"dolt", "sql-server", "--config", configPath}}
 	got := classifyDoltProcess(p, nil, "/home/u", os.TempDir(), nil)
@@ -117,7 +143,7 @@ func TestClassifyDoltProcess_ProtectsBdOwnedProxyOutsideTestRoots(t *testing.T) 
 	}
 	t.Cleanup(func() { os.RemoveAll(scope) }) //nolint:errcheck
 	configPath := writeBdProxyRoot(t, scope, 4244)
-	stubBdProxyPIDAlive(t, map[int]bool{4244: true})
+	stubLiveBdProxy(t, 4244, configPath)
 	if isTestConfigPath(configPath, "/home/u", os.TempDir()) {
 		t.Fatalf("fixture %q is on the test-config-path allowlist; the test would not prove the production shape", configPath)
 	}
@@ -140,7 +166,7 @@ func TestClassifyDoltProcess_ProtectsBdOwnedProxyOutsideTestRoots(t *testing.T) 
 func TestClassifyDoltProcess_ProtectsBdOwnedProxyWithOverriddenRoot(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "shared-server", "store")
 	configPath := writeBdProxyRootAt(t, root, 4249)
-	stubBdProxyPIDAlive(t, map[int]bool{4249: true})
+	stubLiveBdProxy(t, 4249, configPath)
 
 	p := DoltProcInfo{PID: 9007, Argv: []string{"dolt", "sql-server", "--config", configPath}}
 	got := classifyDoltProcess(p, nil, "/home/u", os.TempDir(), nil)
@@ -159,7 +185,7 @@ func TestClassifyDoltProcess_ProtectsBdOwnedProxyWithOverriddenRoot(t *testing.T
 func TestClassifyDoltProcess_ProtectsBdOwnedProxyWithDeletedCWD(t *testing.T) {
 	scope := t.TempDir()
 	configPath := writeBdProxyRoot(t, scope, 4245)
-	stubBdProxyPIDAlive(t, map[int]bool{4245: true})
+	stubLiveBdProxy(t, 4245, configPath)
 
 	p := DoltProcInfo{
 		PID:      9005,
@@ -193,7 +219,7 @@ func TestClassifyDoltProcess_ProtectsBdDBProxyChild(t *testing.T) {
 func TestBdOwnedProxyDoltConfigRejectsForeignLayouts(t *testing.T) {
 	scope := t.TempDir()
 	configPath := writeBdProxyRoot(t, scope, 4246)
-	stubBdProxyPIDAlive(t, map[int]bool{4246: true})
+	stubLiveBdProxy(t, 4246, configPath)
 
 	cases := []struct {
 		name string
@@ -220,7 +246,10 @@ func TestBdOwnedProxyDoltConfigRejectsForeignLayouts(t *testing.T) {
 func TestBdOwnedProxyDoltConfigRejectsNonProxyRecords(t *testing.T) {
 	scope := t.TempDir()
 	configPath := writeBdProxyRoot(t, scope, 4247)
-	stubBdProxyPIDAlive(t, map[int]bool{4247: true, 4248: true})
+	stubBdProxyProcesses(t, map[int][]string{
+		4247: bdProxyChildArgv(configPath),
+		4248: bdProxyChildArgv(configPath),
+	})
 	pidPath := filepath.Join(filepath.Dir(configPath), "proxy.pid")
 
 	for _, body := range []string{
@@ -234,6 +263,74 @@ func TestBdOwnedProxyDoltConfigRejectsNonProxyRecords(t *testing.T) {
 		}
 		if _, ok := bdOwnedProxyDoltConfig(configPath); ok {
 			t.Fatalf("bdOwnedProxyDoltConfig accepted proxy.pid %q", body)
+		}
+	}
+}
+
+// A live PID is not an ownership proof. bd leaves proxy.pid behind when its
+// proxy is SIGKILLed and only quarantines the record on its next adoption in
+// that root, which never happens for an abandoned test root — so once the
+// recorded PID is recycled, a liveness-only check protected the orphaned
+// sql-server for as long as the coincidental occupant lived. The forged shape
+// is worse: any writable directory with a config.yaml and a hand-written
+// proxy.pid naming PID 1 made every server started with that --config
+// unreapable, because kill(1, 0) returns EPERM, which reads as alive.
+func TestBdOwnedProxyDoltConfigRejectsRecycledAndForgedPIDs(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		argv []string
+	}{
+		{name: "recycled pid", argv: []string{"/usr/bin/sleep", "infinity"}},
+		{name: "forged init pid", argv: []string{"/sbin/init", "splash"}},
+		{name: "bd but not the proxy", argv: []string{"/usr/local/bin/bd", "list", "--json"}},
+		{name: "unreadable argv", argv: nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			scope := t.TempDir()
+			configPath := writeBdProxyRoot(t, scope, 4250)
+			stubBdProxyProcesses(t, map[int][]string{4250: tt.argv})
+			if _, ok := bdOwnedProxyDoltConfig(configPath); ok {
+				t.Fatal("bdOwnedProxyDoltConfig claimed bd ownership from a live pid alone")
+			}
+			p := DoltProcInfo{PID: 9008, Argv: []string{"dolt", "sql-server", "--config", configPath}}
+			if got := classifyDoltProcess(p, nil, "/home/u", os.TempDir(), nil); got.Action != "reap" {
+				t.Fatalf("Action = %q, want reap; reason = %q", got.Action, got.Reason)
+			}
+		})
+	}
+}
+
+// A live `bd db-proxy-child` rooted somewhere else is somebody else's proxy.
+// Its PID landing in this root's proxy.pid proves nothing about this root.
+func TestBdOwnedProxyDoltConfigRejectsProxyForAnotherRoot(t *testing.T) {
+	scope := t.TempDir()
+	configPath := writeBdProxyRoot(t, scope, 4251)
+	otherRoot := filepath.Join(t.TempDir(), "other", ".beads", "dolt")
+	stubBdProxyProcesses(t, map[int][]string{
+		4251: {"/usr/local/bin/bd", "db-proxy-child", "--root", otherRoot, "--port", "0"},
+	})
+	if _, ok := bdOwnedProxyDoltConfig(configPath); ok {
+		t.Fatal("bdOwnedProxyDoltConfig accepted a proxy rooted at another workspace")
+	}
+}
+
+// bd writes its flags as `--root <value>`; a `--root=<value>` spelling and a
+// symlinked path to the same directory are the same proxy.
+func TestBdOwnedProxyDoltConfigAcceptsEquivalentRootSpellings(t *testing.T) {
+	scope := t.TempDir()
+	configPath := writeBdProxyRoot(t, scope, 4252)
+	root := filepath.Dir(configPath)
+	link := filepath.Join(t.TempDir(), "linked-root")
+	if err := os.Symlink(root, link); err != nil {
+		t.Fatal(err)
+	}
+	for _, argv := range [][]string{
+		{"/usr/local/bin/bd", "db-proxy-child", "--root=" + root},
+		{"/usr/local/bin/bd", "db-proxy-child", "--root", link},
+	} {
+		stubBdProxyProcesses(t, map[int][]string{4252: argv})
+		if _, ok := bdOwnedProxyDoltConfig(configPath); !ok {
+			t.Fatalf("bdOwnedProxyDoltConfig rejected argv %v", argv)
 		}
 	}
 }

@@ -972,18 +972,28 @@ can still return successfully after emitting the report.`,
 			}
 			// bd owns the sql-server for a proxied scope: it starts it, keeps
 			// it resident and stops it. There is no managed-Dolt port to probe
-			// and no orphan of ours to reap, so report the no-op and stop
-			// before any stage touches the scope. Metadata gc cannot parse is
-			// a refusal rather than a fall-through: running the managed-Dolt
-			// stages against a scope whose owner is unknown is how a scope
-			// ends up with two owners.
+			// and nothing of ours to drop or purge, so those stages are
+			// skipped before anything touches the scope — but the host-wide
+			// orphan reap is not about this city at all and still runs.
+			// Metadata gc cannot parse is a refusal rather than a
+			// fall-through: running the managed-Dolt stages against a scope
+			// whose owner is unknown is how a scope ends up with two owners.
 			bdOwned, err := scopeBindingIsProviderOwnedProxied(cityPath)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc dolt-cleanup: %v\n", err) //nolint:errcheck
 				return errExit
 			}
 			if bdOwned {
-				emitProxiedScopeCleanupSkip(jsonOut, stdout)
+				homeDir, _ := os.UserHomeDir()
+				if code := runProxiedScopeDoltCleanup(cleanupOptions{
+					FS:      fsys.OSFS{},
+					JSON:    jsonOut,
+					Force:   force,
+					HomeDir: homeDir,
+					TempDir: os.TempDir(),
+				}, stdout, stderr); code != 0 {
+					return errExit
+				}
 				return nil
 			}
 			cfg, err := loadCityConfig(cityPath, stderr)

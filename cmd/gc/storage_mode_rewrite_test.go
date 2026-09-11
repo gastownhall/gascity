@@ -14,9 +14,24 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
-// This file verifies that canonicalization preserves existing embedded Dolt
-// scopes. New installs may select proxied-server mode, but lifecycle commands
-// must not silently repoint an initialized workspace at another database.
+// This file pins the preservation rule for embedded Dolt scopes and the
+// standing guard around it.
+//
+// ga-qi9km shipped these tests when canonicalization still rewrote an
+// initialized embedded scope to server mode: the rewrite was load-bearing for a
+// city whose bead store has to be a Dolt SERVER many processes open at once,
+// but it re-points the ledger (server databases live in .beads/dolt, embedded
+// ones in .beads/embeddeddolt/<db>) without moving a row, so it had to be
+// announced. The ga-p9iuv architecture contract (2026-09-04) then settled the
+// question the other way -- "existing direct local/remote, embedded, DoltLite,
+// and proxied scopes remain authoritative and are not automatically converted",
+// with "automatic embedded migration" explicitly out of scope -- so the rewrite
+// is gone and an embedded scope keeps its mode through every door.
+//
+// The announcement stays, and so do these tests, in their inverted form: each
+// one drives a door that used to flip the mode and proves the mode survives and
+// nothing is printed. Should any canonicalization ever move a scope's storage
+// mode again, the sink these tests watch is what makes it loud.
 
 // embeddedScopeWithBeads builds a scope whose .beads/ is an embedded-mode bd
 // workspace with a Dolt repository under it — what `bd init -p <prefix>` leaves
@@ -70,9 +85,9 @@ func captureStorageModeChanges(t *testing.T) *bytes.Buffer {
 // emptyBdRunner answers every bd invocation with `[]` and exit 0.
 func emptyBdRunner(_, _ string, _ ...string) ([]byte, error) { return []byte("[]"), nil }
 
-// TestCanonicalizingAScopeAnnouncesAStorageModeChange ensures an existing
+// TestCanonicalizingAnEmbeddedScopeKeepsItsModeAndStaysSilent ensures an existing
 // embedded scope is left untouched and emits no misleading migration notice.
-func TestCanonicalizingAScopeAnnouncesAStorageModeChange(t *testing.T) {
+func TestCanonicalizingAnEmbeddedScopeKeepsItsModeAndStaysSilent(t *testing.T) {
 	scope := embeddedScopeWithBeads(t, "jc")
 	notices := captureStorageModeChanges(t)
 
@@ -88,28 +103,25 @@ func TestCanonicalizingAScopeAnnouncesAStorageModeChange(t *testing.T) {
 	}
 }
 
-// TestTheStorageModeAnnouncementNamesARecoveryThatSURVIVESTheNextBoot is the
-// operator-guidance half of ga-qi9km, and it pins the two ways this message can
-// be worse than useless.
+// TestAPreservedEmbeddedScopeNeedsNoRecoveryGuidance is the operator-guidance
+// half of ga-qi9km, inverted by the ga-p9iuv contract. The guidance existed
+// because canonicalization moved the ledger; nothing moves it now, so the
+// correct amount of guidance is none — and the two ways it used to be worse
+// than useless are the two things this still refuses to emit.
 //
-// The first is advice gc itself undoes. ensureCanonicalScopeMetadata forces
-// dolt_mode=server unconditionally, and `gc start`, `gc rig add`, `gc supervisor
-// run` and the controller's rig-create handler all run it — so "point
-// metadata.json back at the embedded database" works until the next boot and
-// then silently stops, leaving the operator in a loop and, in between, on a
-// mode internal/beads/contract's preflight checker FAILS the native store on.
-// The message must not offer it, and must say the edit does not hold.
+// The first is advice gc itself undoes: "point metadata.json back at the
+// embedded database" works until the next boot of a gc that re-canonicalizes,
+// leaving the operator in a loop.
 //
 // The second is overstating what is on disk. `bd init` creates the embedded
 // repository before a single bead exists, so "holds a Dolt bead database" is
 // all that is knowable — a claim that it holds ROWS is one gc cannot make
-// without opening it, and a message that overstates gets ignored the next time
-// it is right.
+// without opening it.
 //
-// The remediation named is `gc doctor`'s own (splitStoreFixHint), word for
-// word on the load-bearing clause, so the two do not send an operator in
-// different directions about the same two directories.
-func TestTheStorageModeAnnouncementNamesARecoveryThatSURVIVESTheNextBoot(t *testing.T) {
+// `gc doctor`'s bd-split-store check is asserted here rather than restated: it
+// must be quiet about an untouched embedded scope too, or the two would send an
+// operator in different directions about the same two directories.
+func TestAPreservedEmbeddedScopeNeedsNoRecoveryGuidance(t *testing.T) {
 	scope := embeddedScopeWithBeads(t, "jc")
 	notices := captureStorageModeChanges(t)
 	if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, scope, "jc"); err != nil {
@@ -143,18 +155,18 @@ func TestTheStorageModeAnnouncementNamesARecoveryThatSURVIVESTheNextBoot(t *test
 	}
 }
 
-// TestEveryDoorThatFlipsTheStorageModeAnnouncesIt closes the gap a
-// per-command warning always has.
+// TestNoDoorFlipsAnEmbeddedScopesStorageMode closes the gap a per-command rule
+// always has.
 //
 // `gc rig set-endpoint` and `gc beads city use-managed`/`use-external` reach
 // their own canonicalizers (requireCanonicalizedScopeMetadata for the scope the
 // command names, canonicalizeScopeMetadataIfPresent for the inherited rigs a
 // city endpoint change sweeps along, both in cmd_rig_endpoint.go) rather than
-// the init one, and they perform the identical embedded→server rewrite. A
-// warning that depends on which command the operator happened to run — or on
-// which of the two endpoint doors the scope arrived through — is a warning
-// nobody can rely on.
-func TestEveryDoorThatFlipsTheStorageModeAnnouncesIt(t *testing.T) {
+// the init one, and each used to perform the identical embedded→server rewrite.
+// Preservation that depends on which command the operator happened to run — or
+// on which of the two endpoint doors the scope arrived through — is no
+// preservation at all, so every door is driven here.
+func TestNoDoorFlipsAnEmbeddedScopesStorageMode(t *testing.T) {
 	for name, canonicalize := range map[string]func(scope string) error{
 		"init path": func(scope string) error {
 			return ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, scope, "jc")
@@ -205,13 +217,13 @@ func TestCanonicalizingAnAlreadyCanonicalScopeIsSilent(t *testing.T) {
 	}
 }
 
-// TestTheStorageModeRewriteNeverChangesWhatAReadAnswers is the preservation
+// TestPreservingTheStorageModeNeverChangesWhatAReadAnswers is the preservation
 // proof for an existing embedded scope. Canonicalization must not silently
 // migrate it to proxied/direct server mode, and reads remain unchanged.
 //
 // A scope whose metadata already names embedded storage continues answering
 // `[]` with nil on every read shape. Existing installs are never auto-converted.
-func TestTheStorageModeRewriteNeverChangesWhatAReadAnswers(t *testing.T) {
+func TestPreservingTheStorageModeNeverChangesWhatAReadAnswers(t *testing.T) {
 	scope := embeddedScopeWithBeads(t, "jc")
 	captureStorageModeChanges(t)
 	if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, scope, "jc"); err != nil {

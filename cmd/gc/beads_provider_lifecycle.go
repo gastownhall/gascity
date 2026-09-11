@@ -2504,14 +2504,22 @@ var storageModeChangeSink io.Writer = os.Stderr
 // announceStorageModeChange reports a canonicalization that is about to change
 // which bead database a scope reads, before it happens.
 //
-// The rewrite itself is deliberate and load-bearing: gc's managed bead store is
-// a Dolt SERVER that many processes — the controller, every agent's bd, the
-// dashboard — open concurrently, and an embedded scope opens the Dolt directory
-// in-process, which those concurrent readers cannot share. Canonicalising to
-// server mode is what makes a scope usable by a running city at all, so this
-// does not refuse it. What it stops being is SILENT: metadata.json is the only
-// thing that says which database holds a scope's beads, and rewriting it moves
-// the ledger a workspace reads without moving a single row.
+// It is now a standing guard rather than a live path on the Dolt backend.
+// ga-qi9km shipped it because canonicalization used to rewrite an initialized
+// embedded scope to server mode, which re-points the ledger — server databases
+// live in .beads/dolt, embedded ones in .beads/embeddeddolt/<db> — without
+// moving a single row. The ga-p9iuv architecture contract (2026-09-04) then
+// settled the question the other way: "existing direct local/remote, embedded,
+// DoltLite, and proxied scopes remain authoritative and are not automatically
+// converted", and "automatic embedded migration" is explicitly out of scope. So
+// ensureCanonicalScopeMetadata preserves a registered Dolt scope's persisted
+// mode and this announcement stays silent, which is what
+// storage_mode_rewrite_test.go proves door by door.
+//
+// What it keeps is the property that made the old rewrite survivable: should
+// any canonicalization ever change a scope's storage mode again, it does so out
+// loud. metadata.json is the only thing that says which database holds a
+// scope's beads.
 //
 // The consequence is named when it is knowable. If the mode being replaced
 // still has a Dolt repository on disk, that repository is what the scope will
@@ -2530,9 +2538,9 @@ var storageModeChangeSink io.Writer = os.Stderr
 // The remediation is the durable one, and it is `gc doctor`'s own
 // (splitStoreFixHint): export, review with `bd import --dry-run`, import, keep
 // both directories until reconciled. Editing dolt_mode back is deliberately not
-// offered — every lifecycle command re-canonicalizes the scope to server mode,
-// so that edit is undone by the next `gc start`, and a recovery gc itself
-// reverts sends an operator round a loop.
+// offered: a recovery that consists of hand-editing the file gc canonicalizes
+// is only as durable as the next lifecycle command, and one gc might itself
+// revert sends an operator round a loop.
 //
 // Nothing is announced when the mode is unchanged, absent, or unreadable: a
 // scope gc initialized is already canonical and re-canonicalizing it every boot

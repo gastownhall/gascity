@@ -339,6 +339,15 @@ func persistFreshProviderOwnership(cityPath string, opts hostedDoltInitOptions) 
 			return err
 		}
 	}
+	// A rig only becomes provider-owned when the city already is. Re-running
+	// init over a grandfathered GC-managed city must leave its rigs on the
+	// legacy inherited-city path; converting an existing city is `bd migrate`'s
+	// job, not a side effect of `gc init` (D6).
+	if inherits, err := cityGrantsProviderOwnershipToFreshScopes(cityPath, cityInitialized); err != nil {
+		return err
+	} else if !inherits {
+		return nil
+	}
 	resolveRigPaths(cityPath, cfg.Rigs)
 	for _, rig := range cfg.Rigs {
 		if strings.TrimSpace(rig.Path) == "" {

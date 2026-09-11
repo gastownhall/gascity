@@ -9,14 +9,21 @@ import (
 // when a durable provider or handoff record owns the city's Dolt scope.
 // Callers that acquire the managed lifecycle lock recheck after acquisition;
 // recovery also checks before it can probe while waiting for that lock.
+//
+// Ownership is the R1 classification, not the journal alone: a workspace
+// migrated in place with `bd migrate from-server-to-proxied-server`, or cloned
+// from a proxied city, carries bd's binding in committed metadata with no
+// journal record at all. Consulting only the journal let `gc dolt-state
+// start-managed` raise a GC-managed sql-server over bd's proxy root.
 func admitLegacyManagedDoltLifecycle(cityPath string) error {
 	cityPath = normalizePathForCompare(cityPath)
-	_, providerOwned, err := providerScopeOwnership(cityPath, cityPath)
+	providerOwned, err := cityScopeProviderOwned(cityPath)
 	if err != nil {
-		return fmt.Errorf("read provider scope ownership journal: %w", err)
+		return fmt.Errorf("classify provider scope ownership: %w", err)
 	}
 	if providerOwned {
-		return fmt.Errorf("provider scope ownership journal at %s blocks managed Dolt lifecycle", providerScopeOwnershipPath(cityPath))
+		return fmt.Errorf("provider scope ownership blocks the managed Dolt lifecycle for %s: bd owns this scope's Dolt process (ownership journal %s, beads metadata %s)",
+			cityPath, providerScopeOwnershipPath(cityPath), scopeMetadataJSONPath(cityPath))
 	}
 	return handoffJournalBlocksManagedDoltStart(cityPath)
 }

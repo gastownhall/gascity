@@ -442,36 +442,57 @@ func TestInitDirIfReadySkipDefersExistingRigOwnershipWithoutCityOwnership(t *tes
 	}
 }
 
-func TestPersistFreshProviderOwnershipRecordsFreshRigWhenCityAlreadyExists(t *testing.T) {
-	city := t.TempDir()
-	rig := filepath.Join(city, "rigs", "fresh")
-	if err := os.MkdirAll(filepath.Join(city, ".beads"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(city, ".beads", "metadata.json"), []byte(`{"backend":"dolt"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(rig, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[beads]\nprovider = \"bd\"\n[[rigs]]\nname = \"fresh\"\npath = \"rigs/fresh\"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := persistFreshProviderOwnership(city, hostedDoltInitOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	if _, owned, err := providerScopeOwnership(city, city); err != nil || owned {
-		t.Fatalf("existing city ownership = %t, %v; want legacy", owned, err)
-	}
-	entry, owned, err := providerScopeOwnership(city, rig)
-	if err != nil || !owned || entry.State != providerScopeInitializing {
-		t.Fatalf("fresh rig ownership = (%+v, %t, %v), want pending provider owner", entry, owned, err)
+// Re-running init over a city that already exists records a fresh rig only
+// when the city's own lifecycle belongs to bd. A grandfathered GC-managed city
+// keeps its rigs on the legacy inherited-city path: converting an existing city
+// is `bd migrate`'s job, not a side effect of `gc init` (D6).
+func TestPersistFreshProviderOwnershipRecordsFreshRigOnlyUnderAProviderOwnedCity(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		metadata  string
+		wantOwned bool
+	}{
+		{name: "legacy managed city", metadata: `{"backend":"dolt"}`, wantOwned: false},
+		{name: "bd-owned proxied city", metadata: `{"backend":"dolt","dolt_mode":"proxied-server"}`, wantOwned: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			city := t.TempDir()
+			rig := filepath.Join(city, "rigs", "fresh")
+			if err := os.MkdirAll(filepath.Join(city, ".beads", "dolt"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(city, ".beads", "metadata.json"), []byte(tt.metadata), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(rig, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[beads]\nprovider = \"bd\"\n[[rigs]]\nname = \"fresh\"\npath = \"rigs/fresh\"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := persistFreshProviderOwnership(city, hostedDoltInitOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			entry, owned, err := providerScopeOwnership(city, rig)
+			if err != nil {
+				t.Fatalf("fresh rig ownership: %v", err)
+			}
+			if owned != tt.wantOwned {
+				t.Fatalf("fresh rig ownership = (%+v, %t), want owned=%t", entry, owned, tt.wantOwned)
+			}
+			if tt.wantOwned && entry.State != providerScopeInitializing {
+				t.Fatalf("fresh rig state = %q, want pending", entry.State)
+			}
+		})
 	}
 }
 
-// A newly added rig inherits the city binding that bd already persisted. In
-// particular, stale compatibility fields in city.toml must not turn a direct
-// or external city into the new proxied-local default.
+// A newly added rig inherits the city binding that bd already persisted — but
+// only from a city whose lifecycle bd already owns. A direct/server city is
+// grandfathered: its rigs are databases on its one managed server, so they stay
+// on the legacy inherited-city path and are not journaled at all. Stale
+// compatibility fields in city.toml must not turn any of them into the new
+// proxied-local default.
 func TestEnsureFreshRigProviderOwnershipInheritsPersistedCityTopology(t *testing.T) {
 	for _, tt := range []struct {
 		name        string
@@ -479,34 +500,51 @@ func TestEnsureFreshRigProviderOwnershipInheritsPersistedCityTopology(t *testing
 		beadsConfig string
 		sidecar     string
 		staleDolt   string
+		journalCity *providerScopeIntent
+		wantLegacy  bool
 		want        providerScopeIntent
 	}{
 		{
-			name:        "direct local owned canonical endpoint",
+			name:        "legacy direct local owned canonical endpoint",
 			metadata:    `{"backend":"dolt","dolt_mode":"server"}`,
 			beadsConfig: "gc.endpoint_origin: city_canonical\ndolt.host: 127.0.0.1\ndolt.port: 3306\ndolt.auto-start: true\n",
 			staleDolt:   "[dolt]\nhost = \"stale.example\"\nport = 3306\n",
-			want:        providerScopeIntent{Transport: "direct", Target: "local"},
+			wantLegacy:  true,
 		},
 		{
-			name:        "transferred direct local",
+			name:        "legacy transferred direct local",
 			metadata:    `{"backend":"dolt","dolt_mode":"server"}`,
 			beadsConfig: "gc.endpoint_origin: managed_city\ndolt.auto-start: true\n",
 			staleDolt:   "[dolt]\nhost = \"remote.example\"\nport = 3306\n",
-			want:        providerScopeIntent{Transport: "direct", Target: "local"},
+			wantLegacy:  true,
 		},
 		{
 			name:        "legacy GC managed direct local",
 			metadata:    `{"backend":"dolt","dolt_mode":"server"}`,
 			beadsConfig: "gc.endpoint_origin: managed_city\ngc.endpoint_status: verified\ndolt.mode: server\ndolt.auto-start: false\n",
 			staleDolt:   "[dolt]\nhost = \"stale.example\"\nport = 3306\n",
-			want:        providerScopeIntent{Transport: "direct", Target: "local"},
+			wantLegacy:  true,
 		},
 		{
-			name:        "direct external",
+			name:        "legacy direct external",
 			metadata:    `{"backend":"dolt","dolt_mode":"server"}`,
 			beadsConfig: "gc.endpoint_origin: city_canonical\ndolt.host: 127.0.0.1\ndolt.port: 3306\ndolt.auto-start: false\n",
 			staleDolt:   "",
+			wantLegacy:  true,
+		},
+		{
+			name:        "bd-owned direct local escape hatch",
+			metadata:    `{"backend":"dolt","dolt_mode":"server"}`,
+			beadsConfig: "gc.endpoint_origin: managed_city\ngc.endpoint_status: verified\ndolt.auto-start: false\n",
+			staleDolt:   "[dolt]\nhost = \"stale.example\"\nport = 3306\n",
+			journalCity: &providerScopeIntent{Transport: "direct", Target: "local"},
+			want:        providerScopeIntent{Transport: "direct", Target: "local"},
+		},
+		{
+			name:        "bd-owned direct external",
+			metadata:    `{"backend":"dolt","dolt_mode":"server"}`,
+			beadsConfig: "gc.endpoint_origin: city_canonical\ndolt.host: 127.0.0.1\ndolt.port: 3306\ndolt.auto-start: false\n",
+			journalCity: &providerScopeIntent{Transport: "direct", Target: "external"},
 			want:        providerScopeIntent{Transport: "direct", Target: "external"},
 		},
 		{
@@ -557,6 +595,14 @@ func TestEnsureFreshRigProviderOwnershipInheritsPersistedCityTopology(t *testing
 			if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(cityTOML), 0o600); err != nil {
 				t.Fatal(err)
 			}
+			if tt.journalCity != nil {
+				if err := persistProviderScopeOwnership(city, city, *tt.journalCity); err != nil {
+					t.Fatal(err)
+				}
+				if err := markProviderScopeOwnershipReady(city, city); err != nil {
+					t.Fatal(err)
+				}
+			}
 			cfg, err := loadCityConfig(city, io.Discard)
 			if err != nil {
 				t.Fatal(err)
@@ -565,8 +611,17 @@ func TestEnsureFreshRigProviderOwnershipInheritsPersistedCityTopology(t *testing
 				t.Fatal(err)
 			}
 			entry, owned, err := providerScopeOwnership(city, rig)
-			if err != nil || !owned {
-				t.Fatalf("fresh rig ownership = (%+v, %t, %v)", entry, owned, err)
+			if err != nil {
+				t.Fatalf("fresh rig ownership: %v", err)
+			}
+			if tt.wantLegacy {
+				if owned {
+					t.Fatalf("grandfathered city journaled a fresh rig: %+v", entry)
+				}
+				return
+			}
+			if !owned {
+				t.Fatalf("fresh rig ownership = (%+v, %t)", entry, owned)
 			}
 			if entry.Intent != tt.want {
 				t.Fatalf("fresh rig intent = %+v, want %+v", entry.Intent, tt.want)
@@ -601,7 +656,11 @@ func TestEnsureFreshRigProviderOwnershipLeavesEmbeddedCityWithoutFreshRigsUntouc
 	}
 }
 
-func TestEnsureFreshRigProviderOwnershipUsesDefaultForEmbeddedDoltCity(t *testing.T) {
+// An embedded city is not provider-owned, so a fresh rig under it stays on the
+// legacy inherited path and the city's own artifacts are untouched. Embedded
+// scopes remain authoritative and are never automatically converted
+// (ga-p9iuv.30).
+func TestEnsureFreshRigProviderOwnershipLeavesEmbeddedDoltCityOnTheLegacyPath(t *testing.T) {
 	city := t.TempDir()
 	rig := filepath.Join(city, "rigs", "fresh")
 	if err := os.MkdirAll(filepath.Join(city, ".beads"), 0o700); err != nil {
@@ -631,8 +690,8 @@ func TestEnsureFreshRigProviderOwnershipUsesDefaultForEmbeddedDoltCity(t *testin
 		t.Fatalf("ensure fresh rig ownership: %v", err)
 	}
 	entry, owned, err := providerScopeOwnership(city, rig)
-	if err != nil || !owned || entry.State != providerScopeInitializing || entry.Intent != (providerScopeIntent{Transport: "proxied", Target: "local"}) {
-		t.Fatalf("fresh rig ownership = (%+v, %t, %v), want pending proxied/local", entry, owned, err)
+	if err != nil || owned {
+		t.Fatalf("fresh rig ownership = (%+v, %t, %v), want the legacy inherited path", entry, owned, err)
 	}
 	for path, want := range map[string][]byte{metadataPath: metadata, configPath: beadsConfig} {
 		got, err := os.ReadFile(path)
