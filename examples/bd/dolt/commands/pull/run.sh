@@ -15,8 +15,10 @@
 # bound killed, so before issuing one the script asks the server whether a
 # DOLT_PULL / DOLT_FETCH is already in flight for the database (skipped when
 # one is), and when the bound expires it KILLs the server-side session the
-# pull printed about itself and proves it gone from the processlist. See the
-# "Server-side remote operations" helpers in assets/scripts/runtime.sh.
+# pull printed about itself and proves it gone from the processlist. Runners
+# on this host are serialized per database by a mkdir lock (root
+# GC_DOLT_REMOTE_OP_LOCK_ROOT, default ${TMPDIR:-/tmp}/gc-dolt-remote-op). See
+# the "Server-side remote operations" helpers in assets/scripts/runtime.sh.
 set -e
 
 : "${GC_DOLT_USER:=root}"
@@ -70,6 +72,9 @@ if [ "$pull_timeout_valid" != true ]; then
     "$pull_timeout" >&2
   exit 2
 fi
+# Canonical decimal: leading zeros dropped (validated non-zero, so never empty)
+# so the value prints and compares as the integer it is.
+pull_timeout=$(printf '%s' "$pull_timeout" | sed 's/^0*//')
 
 is_running() {
   managed_runtime_tcp_reachable "$GC_DOLT_PORT"
@@ -177,7 +182,28 @@ find_remote_sql() {
   printf '%s\n' "$chosen" | awk -F, '{print $1 "|" $2}'
 }
 
+# pull_database_sql <db> — pull_database_sql_locked under the per-database
+# runner lock (remote_op_lock_acquire, runtime.sh): two runners on this host
+# must not both read "nothing in flight" and both pull. A live holder = this
+# database skipped this run; a lock root that cannot be created = the same skip.
 pull_database_sql() {
+  _pl_name="$1"
+  _pl_lrc=0
+  remote_op_lock_acquire "$_pl_name" || _pl_lrc=$?
+  if [ "$_pl_lrc" -eq 1 ]; then
+    echo "  $_pl_name: another gc dolt sync/pull (pid ${REMOTE_OP_LOCK_HOLDER:-unknown}) holds this database's runner lock — skipped" >&2
+    return 1
+  elif [ "$_pl_lrc" -ne 0 ]; then
+    echo "  $_pl_name: ERROR: cannot create the runner lock under $(remote_op_lock_root) — skipped" >&2
+    return 1
+  fi
+  _pl_rc=0
+  pull_database_sql_locked "$_pl_name" || _pl_rc=$?
+  remote_op_lock_release
+  return "$_pl_rc"
+}
+
+pull_database_sql_locked() {
   name="$1"
   if ! valid_database_name "$name"; then
     echo "  $name: ERROR: invalid database name" >&2
@@ -242,10 +268,11 @@ pull_database_sql() {
     return 0
   fi
 
-  if [ "$pull_rc" -eq 124 ]; then
-    echo "  $name: pull timed out after ${pull_timeout}s (GC_DOLT_PULL_TIMEOUT_SECS)" >&2
-    # The client is dead; the server-side pull is not. End it and prove it
-    # ended (the outcome is reported on its own line).
+  if bound_expired "$pull_rc"; then
+    echo "  $name: pull timed out after ${pull_timeout}s (GC_DOLT_PULL_TIMEOUT_SECS; client exit $pull_rc)" >&2
+    # The client is dead (124: the bound; 137: the bound's SIGKILL escalation);
+    # the server-side pull is not. End it and prove it ended (the outcome is
+    # reported on its own line).
     kill_remote_op_session pull "$name" "$pull_session_id" || true
   else
     echo "  $name: ERROR: pull failed (exit $pull_rc)" >&2

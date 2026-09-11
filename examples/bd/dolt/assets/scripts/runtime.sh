@@ -333,8 +333,17 @@ dolt_sql_csv() {
 # unattributed fetch (issued without --use-db: an older gc dolt sync, or an
 # operator) may be this database's, so it counts, fail closed. Without DB:
 # every such session on the server (the health probe).
+# REMOTE_OP_INFO_REGEXP — the SQL REGEXP (ICU, applied to UPPER(Info)) that
+# recognizes a running CALL DOLT_FETCH / CALL DOLT_PULL however it was typed:
+# leading whitespace, block or line comments, any whitespace between CALL and
+# the procedure name and before the paren. DOLT_PUSH, DOLT_FETCHX and the text
+# inside a string literal do not match. Backslashes are doubled for the SQL
+# string literal. Verified on Dolt 2.1.10 (evidence 04b: 7 variants hit, 5
+# decoys miss).
+REMOTE_OP_INFO_REGEXP='^\\s*((/\\*([^*]|\\*[^/])*\\*/|--[^\\n]*\\n)\\s*)*CALL\\s+DOLT_(FETCH|PULL)\\s*\\('
+
 remote_op_sessions_sql() {
-  _ros_q="SELECT Id, Time, COALESCE(db, '') AS db FROM information_schema.processlist WHERE (UPPER(Info) LIKE 'CALL DOLT_FETCH%' OR UPPER(Info) LIKE 'CALL DOLT_PULL%')"
+  _ros_q="SELECT Id, Time, COALESCE(db, '') AS db FROM information_schema.processlist WHERE UPPER(Info) REGEXP '$REMOTE_OP_INFO_REGEXP'"
   if [ -n "${1:-}" ]; then
     _ros_q="$_ros_q AND (db = '$1' OR db = '' OR db IS NULL)"
   fi
@@ -343,9 +352,11 @@ remote_op_sessions_sql() {
 
 # remote_op_sessions_parse — stdin: the CSV answer to remote_op_sessions_sql;
 # stdout: one `Id Time` line per session. Returns 1 when the first line is not
-# the `Id,Time,db` header: an empty stdout, a banner or an error text is NOT a
-# processlist answer and must never be read as "nothing in flight". Rows whose
-# Id and Time are not both all-digit are dropped.
+# the `Id,Time,db` header (an empty stdout, a banner or an error text is NOT a
+# processlist answer), 2 when a non-blank row does not carry an all-digit Id
+# and Time (a NULL, a truncated line, a wrapper's noise). Neither may ever be
+# read as "nothing in flight": a malformed row is a session whose state is
+# unknown, so the whole answer is refused, fail closed.
 remote_op_sessions_parse() {
   awk -F, '
     NR == 1 {
@@ -354,12 +365,14 @@ remote_op_sessions_parse() {
       if (tolower(hdr) != "id,time,db") exit 1
       next
     }
+    /^[[:space:]]*$/ { next }
     {
       gsub(/"|\r/, "", $1)
       gsub(/"|\r/, "", $2)
-      if ($1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/) print $1, $2
+      if ($1 !~ /^[0-9]+$/ || $2 !~ /^[0-9]+$/) { bad = 1; exit 2 }
+      print $1, $2
     }
-    END { if (NR == 0) exit 1 }
+    END { if (NR == 0) exit 1; if (bad) exit 2 }
   '
 }
 
@@ -377,7 +390,12 @@ remote_op_sessions() {
   _rs_csv=$(dolt_sql_csv "$_rs_tmo" "" "$(remote_op_sessions_sql "$_rs_db")" 2>>"$_rs_errf") || _rs_rc=$?
   [ "$_rs_rc" -eq 0 ] || return "$_rs_rc"
   _rs_rows=$(printf '%s\n' "$_rs_csv" | remote_op_sessions_parse) || {
-    printf 'not a processlist answer (no Id,Time,db header)\n' >>"$_rs_errf"
+    _rs_prc=$?
+    if [ "$_rs_prc" -eq 2 ]; then
+      printf 'malformed processlist row (Id or Time not all-digit) — refusing the whole answer\n' >>"$_rs_errf"
+    else
+      printf 'not a processlist answer (no Id,Time,db header)\n' >>"$_rs_errf"
+    fi
     return 1
   }
   printf '%s\n' "$_rs_rows"
@@ -472,4 +490,101 @@ remote_op_replay_stderr() {
   while IFS= read -r _rr_line || [ -n "$_rr_line" ]; do
     printf '  %s: %s\n' "$1" "$_rr_line" >&2
   done < "$2"
+}
+
+# bound_expired RC — true when a run_bounded exit code means the wall-clock
+# bound expired: 124 (GNU timeout, or the python fallback) or 137 (GNU timeout
+# escalated to SIGKILL after --kill-after because the client ignored TERM).
+# Either way the client is dead and the server-side call is not: both are the
+# cleanup case, never the ordinary-error case.
+bound_expired() {
+  case "$1" in
+    124|137) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# --- Per-database runner lock (gp-f2yq) ---------------------------------------
+#
+# The processlist check and the CALL are two round trips. Two runners on this
+# host (the patrol and an operator's `gc dolt sync`, or sync and pull) can both
+# read "nothing in flight" and both issue a fetch. remote_op_lock_* serialize
+# runners per server + database with a mkdir lock (atomic on every POSIX
+# filesystem; no flock dependency), held from before the check until the
+# operation and its cleanup are done. A holder that died leaves a lock whose
+# pid is gone; the next runner reclaims it. Root: GC_DOLT_REMOTE_OP_LOCK_ROOT
+# (default ${TMPDIR:-/tmp}/gc-dolt-remote-op), one `<host>-<port>-<db>.lock`
+# directory per database, `pid` inside.
+
+remote_op_lock_root() {
+  printf '%s' "${GC_DOLT_REMOTE_OP_LOCK_ROOT:-${TMPDIR:-/tmp}/gc-dolt-remote-op}"
+}
+
+remote_op_lock_dir() {
+  _rl_host=$(printf '%s' "${GC_DOLT_HOST:-127.0.0.1}" | tr '[:upper:]' '[:lower:]')
+  _rl_key=$(printf '%s-%s-%s' "$_rl_host" "${GC_DOLT_PORT:-}" "$1" | tr -c 'A-Za-z0-9_.-' '-')
+  printf '%s/%s.lock' "$(remote_op_lock_root)" "$_rl_key"
+}
+
+# remote_op_lock_acquire DB — take DB's runner lock. Returns 0 holding it (path
+# in REMOTE_OP_LOCK_HELD); 1 when a live runner holds it (its pid, or
+# "unknown", in REMOTE_OP_LOCK_HOLDER); 2 when the lock root cannot be created
+# or the pid cannot be recorded. A lock without a pid file is given one second
+# (the holder is between its mkdir and its pid write) and then treated as
+# stale; a stale lock is reclaimed once.
+# shellcheck disable=SC2034  # REMOTE_OP_LOCK_HOLDER is read by the sync/pull callers
+remote_op_lock_acquire() {
+  _la_dir=$(remote_op_lock_dir "$1")
+  _la_root=$(remote_op_lock_root)
+  if [ ! -d "$_la_root" ]; then
+    _la_umask=$(umask)
+    umask 077
+    mkdir -p "$_la_root" 2>/dev/null || { umask "$_la_umask"; return 2; }
+    umask "$_la_umask"
+  fi
+  REMOTE_OP_LOCK_HOLDER=""
+  _la_waited=0
+  _la_reclaimed=0
+  while :; do
+    if mkdir "$_la_dir" 2>/dev/null; then
+      if ! printf '%s\n' "$$" > "$_la_dir/pid" 2>/dev/null; then
+        rmdir "$_la_dir" 2>/dev/null
+        return 2
+      fi
+      REMOTE_OP_LOCK_HELD="$_la_dir"
+      return 0
+    fi
+    _la_pid=$(cat "$_la_dir/pid" 2>/dev/null || true)
+    case "$_la_pid" in
+      ''|*[!0-9]*)
+        if [ "$_la_waited" -eq 0 ]; then
+          _la_waited=1
+          sleep 1
+          continue
+        fi
+        ;;
+      *)
+        if kill -0 "$_la_pid" 2>/dev/null; then
+          REMOTE_OP_LOCK_HOLDER="$_la_pid"
+          return 1
+        fi
+        ;;
+    esac
+    if [ "$_la_reclaimed" -ne 0 ]; then
+      REMOTE_OP_LOCK_HOLDER="${_la_pid:-unknown}"
+      return 1
+    fi
+    _la_reclaimed=1
+    rm -f "$_la_dir/pid" 2>/dev/null
+    rmdir "$_la_dir" 2>/dev/null
+  done
+}
+
+# remote_op_lock_release — drop the lock remote_op_lock_acquire took (no-op
+# when none is held).
+remote_op_lock_release() {
+  [ -n "${REMOTE_OP_LOCK_HELD:-}" ] || return 0
+  rm -f "$REMOTE_OP_LOCK_HELD/pid" 2>/dev/null
+  rmdir "$REMOTE_OP_LOCK_HELD" 2>/dev/null
+  REMOTE_OP_LOCK_HELD=""
 }

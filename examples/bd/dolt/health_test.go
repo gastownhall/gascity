@@ -2360,3 +2360,25 @@ func TestHealthScriptFetchSessionsProbeFailureIsReported(t *testing.T) {
 		t.Fatalf("fetch_sessions = %+v; want probed false, count 0, warn false\n%s", fs, out)
 	}
 }
+
+// A threshold with leading zeros passes validation; the JSON must still be
+// JSON (`"warn_above": 02` is not) and the comparison must be numeric.
+func TestHealthScriptFetchSessionsThresholdLeadingZerosStayValidJSON(t *testing.T) {
+	cityPath := t.TempDir()
+	root := repoRoot(t)
+	env := append(reachableServerEnvWithDolt(t, root, cityPath,
+		fakeDoltAnsweringProcesslist([]string{"11,7200,hw", "12,3600,hw", "13,19,hq"}, "")),
+		"GC_DOLT_HEALTH_MAX_FETCH_SESSIONS=02")
+	report, out := healthJSONFetchSessions(t, env)
+	fs := report.FetchSessions
+	if fs.Count != 3 || fs.WarnAbove != 2 || !fs.Warn {
+		t.Fatalf("fetch_sessions = %+v; want count 3, warn_above 2, warn true\n%s", fs, out)
+	}
+	human, err := newHealthScriptCmd(root, env).CombinedOutput()
+	if err != nil {
+		t.Fatalf("health.sh failed: %v\n%s", err, human)
+	}
+	if !strings.Contains(string(human), "more than 2)") {
+		t.Fatalf("the WARN line must name the canonical threshold.\n%s", human)
+	}
+}

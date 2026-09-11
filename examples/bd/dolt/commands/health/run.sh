@@ -92,6 +92,9 @@ if [ "$max_fetch_sessions_valid" != true ]; then
     "$max_fetch_sessions" >&2
   exit 2
 fi
+# Canonical decimal: leading zeros dropped (validated non-zero, so never empty)
+# — `"warn_above": 02` would not be JSON.
+max_fetch_sessions=$(printf '%s' "$max_fetch_sessions" | sed 's/^0*//')
 
 # Determine host for probing.
 host="${GC_DOLT_HOST:-127.0.0.1}"

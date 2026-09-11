@@ -11,13 +11,21 @@ before issuing a fetch or pull they read `information_schema.processlist` and,
 when a `DOLT_FETCH` / `DOLT_PULL` session is already in flight for the database
 (or attributed to no database at all, which may be this one's), they print one
 line naming the oldest session's age and id and skip — sync skips without
-pushing. A processlist read that fails, or answers with anything that is not a
-processlist, also skips (fail closed). The statement they do issue prints its
-own connection id first and runs with `--use-db`, so when the client bound
-expires the script `KILL`s exactly that server-side session and proves it gone
-with a second processlist read (a session still listed is reported as NOT
-killed). `gc dolt health` adds one `WARN` line, and a `fetch_sessions` block in
-its JSON report, when more than `GC_DOLT_HEALTH_MAX_FETCH_SESSIONS` (default 2)
+pushing. A processlist read that fails, answers with anything that is not a
+processlist, or carries a row that is not `digits,digits,…`, also skips (fail
+closed). "In flight" is decided by a `REGEXP` on the statement text, so
+`call dolt_fetch(`, `CALL  DOLT_PULL(` and a call behind a comment all count.
+Runners on the same host are serialized per database by a mkdir lock (root
+`GC_DOLT_REMOTE_OP_LOCK_ROOT`, default `${TMPDIR:-/tmp}/gc-dolt-remote-op`),
+held from before the processlist read until the operation and its cleanup are
+done, so two runs cannot both read "nothing in flight"; a lock whose holder
+died is reclaimed by the next run. The statement they do issue prints its own
+connection id first and runs with `--use-db`, so when the client bound expires
+(exit 124, or 137 when GNU timeout had to escalate to SIGKILL) the script
+`KILL`s exactly that server-side session and proves it gone with a second
+processlist read (a session still listed is reported as NOT killed).
+`gc dolt health` adds one `WARN` line, and a `fetch_sessions` block in its
+JSON report, when more than `GC_DOLT_HEALTH_MAX_FETCH_SESSIONS` (default 2)
 such sessions are in flight server-wide; leftovers from runs older than this
 guard need one manual `KILL <Id>` each. Bounds: `GC_DOLT_SYNC_FETCH_TIMEOUT_SECS`
 (sync's pre-push fetch, default 60), `GC_DOLT_PULL_TIMEOUT_SECS` (pull, default

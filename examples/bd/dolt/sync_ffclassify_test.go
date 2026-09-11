@@ -13,6 +13,7 @@ package dolt_test
 // and an absent remote ref yields "branch not found: remotes/...".
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -20,20 +21,20 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
-// runFFSyncEnv sets up a one-DB ("app") SQL-mode city with the fake dolt
-// already installed in binDir, runs `gc dolt sync <args>` with extraEnv
-// appended after the base sync env (so an override such as
-// GC_DOLT_REMOTE_<DB> takes effect), and returns combined output plus the
-// command's error so callers that must assert the sync itself did not fail
-// (as opposed to merely producing unexpected output) can do so.
-func runFFSyncEnv(t *testing.T, binDir string, extraEnv []string, args ...string) (string, error) {
+// ffSyncCmd builds a `gc dolt sync` invocation against an idle reachable
+// server with the fake dolt in binDir first on PATH. The per-database runner
+// lock gets a private root. Later `env` entries override earlier ones (Go
+// keeps the last value of a duplicated key), so a test can pin the port and
+// the lock root two runners must share.
+func ffSyncCmd(t *testing.T, binDir string, env []string, args ...string) *exec.Cmd {
 	t.Helper()
 	root := repoRoot(t)
 	script := filepath.Join(root, syncScript)
 	port, cleanup := startReachableTCPListener(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	cityPath := t.TempDir()
 	dataDir := filepath.Join(cityPath, "data")
@@ -43,7 +44,7 @@ func runFFSyncEnv(t *testing.T, binDir string, extraEnv []string, args ...string
 	writeSyncFakeBeadsBD(t, cityPath)
 
 	cmd := exec.Command("sh", append([]string{script}, args...)...)
-	cmd.Env = append(syncFilteredEnv(),
+	cmd.Env = append(append(syncFilteredEnv(),
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
@@ -51,9 +52,18 @@ func runFFSyncEnv(t *testing.T, binDir string, extraEnv []string, args ...string
 		fmt.Sprintf("GC_DOLT_PORT=%d", port),
 		"GC_DOLT_USER=root",
 		"GC_DOLT_PASSWORD=",
-	)
-	cmd.Env = append(cmd.Env, extraEnv...)
-	out, err := cmd.CombinedOutput()
+		"GC_DOLT_REMOTE_OP_LOCK_ROOT="+t.TempDir(),
+	), env...)
+	return cmd
+}
+
+// runFFSyncEnv runs `gc dolt sync <args>` through ffSyncCmd with extraEnv
+// appended after the base sync env (so an override such as GC_DOLT_REMOTE_<DB>
+// takes effect), and returns combined output plus the command's error so
+// callers that must assert the sync itself did not fail can do so.
+func runFFSyncEnv(t *testing.T, binDir string, extraEnv []string, args ...string) (string, error) {
+	t.Helper()
+	out, err := ffSyncCmd(t, binDir, extraEnv, args...).CombinedOutput()
 	return string(out), err
 }
 
@@ -64,6 +74,26 @@ func runFFSync(t *testing.T, binDir string, args ...string) string {
 	t.Helper()
 	out, _ := runFFSyncEnv(t, binDir, nil, args...)
 	return out
+}
+
+// waitForFile polls until path exists (the fake dolt's "I am mid-operation"
+// marker) or the deadline passes.
+func waitForFile(t *testing.T, path string, within time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("%s did not appear within %s", path, within)
+}
+
+// remoteOpLockDir is the lock directory the scripts use for host 127.0.0.1,
+// the given port and database under lockRoot (remote_op_lock_dir, runtime.sh).
+func remoteOpLockDir(lockRoot string, port int, db string) string {
+	return filepath.Join(lockRoot, fmt.Sprintf("127.0.0.1-%d-%s.lock", port, db))
 }
 
 // fakeDoltHeader is the shared preamble for an IDLE server: log argv, answer
@@ -634,6 +664,12 @@ func TestSyncFetchInFlightSkipsNeverFetches(t *testing.T) {
 	if !strings.Contains(log, "db = 'app'") {
 		t.Fatalf("the single-flight check must be scoped to this database.\nlog:\n%s", log)
 	}
+	// The predicate is a REGEXP on the statement text (whitespace, comments,
+	// case), not a LIKE prefix: `CALL  DOLT_FETCH`, `/* x */ CALL DOLT_PULL(`
+	// and `call dolt_fetch(` are all in flight (verified on Dolt 2.1.10).
+	if !strings.Contains(log, "UPPER(Info) REGEXP '") || !strings.Contains(log, `CALL\\s+DOLT_(FETCH|PULL)\\s*\\(`) {
+		t.Fatalf("the in-flight predicate must be the REGEXP on UPPER(Info).\nlog:\n%s", log)
+	}
 }
 
 // An in-flight DOLT_FETCH with no database attribution (an older gc dolt sync
@@ -775,5 +811,128 @@ func TestSyncFetchIsAttributedAndSelfIdentifying(t *testing.T) {
 	}
 	if !strings.Contains(fetchLine, "SELECT CONNECTION_ID() AS id;") {
 		t.Fatalf("the fetch statement must print its own connection id first.\nline: %s", fetchLine)
+	}
+}
+
+// A processlist answer with a row that is not `digits,digits,…` (a NULL Time,
+// a truncated line) is a session whose state is unknown: the whole answer is
+// refused and the fetch skipped, fail closed — never "nothing in flight".
+func TestSyncProcesslistMalformedRowSkips(t *testing.T) {
+	binDir := t.TempDir()
+	logPath := writeSyncFakeDoltProcesslist(t, binDir, "printf 'Id,Time,db\\n42,NULL,app\\n' ; exit 0")
+	out := runFFSync(t, binDir, "--db", "app")
+	log := readLog(t, logPath)
+	if fetched(log) || pushed(log) {
+		t.Fatalf("a malformed processlist row must skip without fetching or pushing.\nout:\n%s\nlog:\n%s", out, log)
+	}
+	if !strings.Contains(out, "processlist query failed") || !strings.Contains(out, "malformed processlist row") {
+		t.Fatalf("expected the malformed-row skip line.\nout:\n%s", out)
+	}
+}
+
+// GNU timeout escalates to SIGKILL after --kill-after and then exits 137, not
+// 124. The client is just as dead and the server-side fetch just as alive: the
+// recorded session must still be KILLed.
+func TestSyncFetchClientExit137StillKillsServerSideSession(t *testing.T) {
+	binDir := t.TempDir()
+	logPath := filepath.Join(binDir, "dolt.log")
+	started := filepath.Join(binDir, "fetch-started")
+	killed := filepath.Join(binDir, "killed")
+	body := fakeDoltPreamble(logPath, "main") +
+		"  *\"information_schema.processlist\"*)\n" +
+		"    if [ -f \"" + killed + "\" ]; then printf 'Id,Time,db\\n'\n" +
+		"    elif [ -f \"" + started + "\" ]; then printf 'Id,Time,db\\n91,70,app\\n'\n" +
+		"    else printf 'Id,Time,db\\n'; fi\n" +
+		"    exit 0 ;;\n" +
+		"  *\"CALL DOLT_FETCH(\"*) : > \"" + started + "\" ; printf 'id\\n91\\n' ; exit 137 ;;\n" +
+		"  *\"KILL \"*) : > \"" + killed + "\" ; exit 0 ;;\n" +
+		"esac\nexit 0\n"
+	installFFFakeDolt(t, binDir, body)
+	out := runFFSync(t, binDir, "--db", "app")
+	log := readLog(t, logPath)
+	if pushed(log) {
+		t.Fatalf("exit 137 must NEVER push.\nout:\n%s", out)
+	}
+	if !strings.Contains(out, "fetch timed out") || !strings.Contains(out, "client exit 137") {
+		t.Fatalf("exit 137 is the bound's SIGKILL escalation and must be reported as a timeout.\nout:\n%s", out)
+	}
+	if !strings.Contains(log, "KILL 91") || !strings.Contains(out, "server-side fetch killed (session 91 no longer in flight)") {
+		t.Fatalf("the recorded session must be KILLed after exit 137.\nout:\n%s\nlog:\n%s", out, log)
+	}
+}
+
+// Two runners on this host: the second must not read "nothing in flight" and
+// fetch while the first is mid-fetch. The runner lock is held from before the
+// processlist check until the operation is done, so exactly one CALL is issued
+// and the second run says who holds the lock.
+func TestSyncRunnerLockSerializesConcurrentRunners(t *testing.T) {
+	binDir := t.TempDir()
+	logPath := filepath.Join(binDir, "dolt.log")
+	started := filepath.Join(binDir, "fetch-started")
+	release := filepath.Join(binDir, "fetch-release")
+	body := fakeDoltHeader(logPath, "main") +
+		"  *\"CALL DOLT_FETCH(\"*) : > \"" + started + "\" ; while [ ! -f \"" + release + "\" ]; do sleep 0.1; done ; exit 0 ;;\n" +
+		"  *\"dolt_log(\"*) printf 'n\\n0\\n' ; exit 0 ;;\n" +
+		"esac\nexit 0\n"
+	installFFFakeDolt(t, binDir, body)
+	port, cleanup := startReachableTCPListener(t)
+	defer cleanup()
+	shared := []string{fmt.Sprintf("GC_DOLT_PORT=%d", port), "GC_DOLT_REMOTE_OP_LOCK_ROOT=" + t.TempDir()}
+
+	first := ffSyncCmd(t, binDir, shared, "--db", "app")
+	var firstOut bytes.Buffer
+	first.Stdout, first.Stderr = &firstOut, &firstOut
+	if err := first.Start(); err != nil {
+		t.Fatalf("start first runner: %v", err)
+	}
+	waitForFile(t, started, 10*time.Second)
+	secondOut, secondErr := ffSyncCmd(t, binDir, shared, "--db", "app").CombinedOutput()
+	if err := os.WriteFile(release, nil, 0o644); err != nil {
+		t.Fatalf("release the first fetch: %v", err)
+	}
+	if err := first.Wait(); err != nil {
+		t.Fatalf("first runner failed: %v\n%s", err, firstOut.String())
+	}
+	log := readLog(t, logPath)
+	if n := strings.Count(log, "CALL DOLT_FETCH("); n != 1 {
+		t.Fatalf("exactly one fetch may be in flight per database; got %d.\nlog:\n%s\nsecond:\n%s", n, log, secondOut)
+	}
+	if secondErr == nil {
+		t.Fatalf("the second runner must exit non-zero (skipped).\nout:\n%s", secondOut)
+	}
+	want := fmt.Sprintf("app: another gc dolt sync/pull (pid %d) holds this database's runner lock — skipped (NOT pushed)", first.Process.Pid)
+	if !strings.Contains(string(secondOut), want) {
+		t.Fatalf("expected %q\nout:\n%s", want, secondOut)
+	}
+	if pushed(log) {
+		t.Fatalf("neither runner may push here (0 ahead).\nlog:\n%s", log)
+	}
+}
+
+// A lock whose holder died (pid gone) is stale: the next runner reclaims it,
+// runs, and leaves no lock behind.
+func TestSyncStaleRunnerLockIsReclaimed(t *testing.T) {
+	binDir := t.TempDir()
+	logPath := writeSyncFakeDoltClassify(t, binDir, 1, 0)
+	port, cleanup := startReachableTCPListener(t)
+	defer cleanup()
+	lockRoot := t.TempDir()
+	dir := remoteOpLockDir(lockRoot, port, "app")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir stale lock: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pid"), []byte("4194305\n"), 0o600); err != nil {
+		t.Fatalf("write stale pid: %v", err)
+	}
+	out, err := ffSyncCmd(t, binDir, []string{fmt.Sprintf("GC_DOLT_PORT=%d", port), "GC_DOLT_REMOTE_OP_LOCK_ROOT=" + lockRoot}, "--db", "app").CombinedOutput()
+	if err != nil {
+		t.Fatalf("a stale lock (holder gone) must be reclaimed and the sync run: %v\n%s", err, out)
+	}
+	log := readLog(t, logPath)
+	if !fetched(log) || !pushed(log) {
+		t.Fatalf("reclaimed lock: fetch and push must run.\nout:\n%s\nlog:\n%s", out, log)
+	}
+	if _, statErr := os.Stat(dir); !os.IsNotExist(statErr) {
+		t.Fatalf("the lock must be released after the run (stat err = %v)", statErr)
 	}
 }

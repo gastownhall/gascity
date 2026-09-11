@@ -58,8 +58,11 @@
 # issuing one the script asks the server whether a DOLT_FETCH / DOLT_PULL is
 # already in flight for the database (skipped, NOT pushed, when one is), and
 # when the fetch bound expires it KILLs the server-side session the fetch
-# printed about itself and proves it gone from the processlist. See the
-# "Server-side remote operations" helpers in assets/scripts/runtime.sh.
+# printed about itself and proves it gone from the processlist. Runners on
+# this host are serialized per database by a mkdir lock (root
+# GC_DOLT_REMOTE_OP_LOCK_ROOT, default ${TMPDIR:-/tmp}/gc-dolt-remote-op) so
+# two of them cannot both read "nothing in flight". See the "Server-side
+# remote operations" helpers in assets/scripts/runtime.sh.
 set -e
 
 dry_run=false
@@ -446,7 +449,30 @@ resolve_refspec_cli() {
   printf 'main\nmain\n'
 }
 
+# sync_database_sql <db> — sync_database_sql_locked under the per-database
+# runner lock (remote_op_lock_acquire, runtime.sh): two runners on this host
+# must not both read "nothing in flight" and both fetch. A live holder = this
+# database skipped, NOT pushed, this run; a lock root that cannot be created =
+# the same skip. The lock is held through the fetch, the classification, the
+# push and the kill-on-expiry.
 sync_database_sql() {
+  _sl_name="$1"
+  _sl_lrc=0
+  remote_op_lock_acquire "$_sl_name" || _sl_lrc=$?
+  if [ "$_sl_lrc" -eq 1 ]; then
+    echo "  $_sl_name: another gc dolt sync/pull (pid ${REMOTE_OP_LOCK_HOLDER:-unknown}) holds this database's runner lock — skipped (NOT pushed)" >&2
+    return 1
+  elif [ "$_sl_lrc" -ne 0 ]; then
+    echo "  $_sl_name: ERROR: cannot create the runner lock under $(remote_op_lock_root) — skipped (NOT pushed)" >&2
+    return 1
+  fi
+  _sl_rc=0
+  sync_database_sql_locked "$_sl_name" || _sl_rc=$?
+  remote_op_lock_release
+  return "$_sl_rc"
+}
+
+sync_database_sql_locked() {
   name="$1"
   if ! valid_database_name "$name"; then
     echo "  $name: ERROR: invalid database name" >&2
@@ -542,12 +568,13 @@ sync_database_sql() {
       # and is necessarily a fast-forward.
       ff_status="first-push"
       rm -f "$fetch_err_tmp"
-    elif [ "$fetch_rc" -eq 124 ]; then
+    elif bound_expired "$fetch_rc"; then
       rm -f "$fetch_err_tmp"
-      echo "  $name: fetch timed out after ${fetch_timeout}s — skipped (NOT pushed)" >&2
-      last_fail_reason="fetch timed out after ${fetch_timeout}s"
-      # The client is dead; the server-side fetch is not. End it and prove it
-      # ended (the outcome is reported on its own line; either way, skipped).
+      echo "  $name: fetch timed out after ${fetch_timeout}s (client exit $fetch_rc) — skipped (NOT pushed)" >&2
+      last_fail_reason="fetch timed out after ${fetch_timeout}s (client exit $fetch_rc)"
+      # The client is dead (124: the bound; 137: the bound's SIGKILL escalation);
+      # the server-side fetch is not. End it and prove it ended (the outcome is
+      # reported on its own line; either way, skipped).
       kill_remote_op_session fetch "$name" "$fetch_session_id" || true
       return 1
     elif [ "$fetch_rc" -ne 0 ]; then
