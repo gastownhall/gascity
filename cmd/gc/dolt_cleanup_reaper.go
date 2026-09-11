@@ -296,7 +296,7 @@ func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, 
 	}
 
 	cfgPath := extractConfigPath(p.Argv)
-	if looksLikeBdDBProxyChild(p.Argv) {
+	if argvRunsDBProxyChild(p.Argv) {
 		return reapClassification{
 			Action: "protect",
 			Reason: "bd db-proxy-child; bd owns this proxy's lifecycle",

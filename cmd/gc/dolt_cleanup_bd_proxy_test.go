@@ -314,6 +314,97 @@ func TestBdOwnedProxyDoltConfigRejectsProxyForAnotherRoot(t *testing.T) {
 	}
 }
 
+// bd execs its proxy child with os.Executable(), so argv[0] is the operator's
+// bd file — `BD_BIN=/opt/beads/bd-rc2` is a supported pin and produces a proxy
+// whose argv[0] is not named "bd". Ownership must key on the verb and the
+// root, or every versioned install loses the R4 protection: its live,
+// bd-owned sql-server under a test root would classify as reap.
+func TestClassifyDoltProcess_ProtectsBdOwnedProxyFromVersionedBdBinary(t *testing.T) {
+	scope := t.TempDir()
+	configPath := writeBdProxyRoot(t, scope, 4253)
+	stubBdProxyProcesses(t, map[int][]string{
+		4253: {"/opt/beads/bd-rc2", "db-proxy-child", "--root", filepath.Dir(configPath), "--port", "0"},
+	})
+	if !isTestConfigPath(configPath, "/home/u", os.TempDir()) {
+		t.Fatalf("fixture %q is not on the test-config-path allowlist; the test would pass vacuously", configPath)
+	}
+
+	if _, ok := bdOwnedProxyDoltConfig(configPath); !ok {
+		t.Fatal("bdOwnedProxyDoltConfig rejected a live proxy whose binary is not named \"bd\"")
+	}
+
+	p := DoltProcInfo{PID: 9009, Argv: []string{"dolt", "sql-server", "--config", configPath}}
+	got := classifyDoltProcess(p, nil, "/home/u", os.TempDir(), nil)
+	if got.Action != "protect" {
+		t.Fatalf("Action = %q, want protect; reason = %q", got.Action, got.Reason)
+	}
+	if !strings.Contains(got.Reason, "bd-owned proxied dolt server") {
+		t.Errorf("Reason = %q, want the bd-ownership reason", got.Reason)
+	}
+}
+
+// The standing guard for the supervisor itself must not key on the binary
+// name either, for the same reason.
+func TestClassifyDoltProcess_ProtectsVersionedBdDBProxyChild(t *testing.T) {
+	p := DoltProcInfo{
+		PID:  9010,
+		Argv: []string{"/opt/beads/bd-rc2", "db-proxy-child", "--root", "/tmp/TestX/.beads/dolt", "--port", "0"},
+	}
+	got := classifyDoltProcess(p, nil, "/home/u", "", nil)
+	if got.Action != "protect" {
+		t.Fatalf("Action = %q, want protect; reason = %q", got.Action, got.Reason)
+	}
+	// Not the generic "no --config path detected" fallback: the guard must
+	// recognize the supervisor, not merely fail to identify it.
+	if !strings.Contains(got.Reason, "db-proxy-child") {
+		t.Errorf("Reason = %q, want it to name the bd proxy supervisor", got.Reason)
+	}
+}
+
+// A rig migrated by `gc beads city migrate-proxied` shares the CITY's proxy
+// root: its metadata carries a relative dolt_data_dir and it has no
+// .beads/dolt of its own, so the per-scope predicate
+// "<scope>/.beads/dolt/config.yaml + live proxy.pid" does not describe it
+// (B5b §8). It does not have to. The reaper classifies processes from argv
+// alone, and the shared root has exactly one sql-server, launched with
+// --config <city>/.beads/dolt/config.yaml — the city's root, where the live
+// proxy.pid is. Resolving each scope's provider root would add a mapping with
+// no process on the other end of it.
+func TestClassifyDoltProcess_ProtectsSharedRootRigChild(t *testing.T) {
+	city := filepath.Join(t.TempDir(), "city")
+	configPath := writeBdProxyRoot(t, city, 4254)
+	stubLiveBdProxy(t, 4254, configPath)
+
+	// The migrated rig: proxied metadata pointing back at the city's root,
+	// and deliberately no proxy root of its own.
+	rig := filepath.Join(city, "rigs", "app")
+	if err := os.MkdirAll(filepath.Join(rig, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	metadata := `{"backend":"dolt","dolt_mode":"proxied-server","dolt_database":"app","dolt_data_dir":"../../.beads/dolt"}`
+	if err := os.WriteFile(filepath.Join(rig, ".beads", "metadata.json"), []byte(metadata), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(rig, ".beads", "dolt", "proxy.pid")); !os.IsNotExist(err) {
+		t.Fatalf("fixture grew its own proxy root; the shared-root shape is not under test")
+	}
+	if root, err := proxiedScopeProviderRoot(rig); err != nil {
+		t.Fatal(err)
+	} else if _, err := os.Stat(filepath.Join(root, "proxy.pid")); !os.IsNotExist(err) {
+		t.Fatalf("per-scope provider root %q unexpectedly has a proxy.pid", root)
+	}
+
+	// bd runs one child for the shared root, and it names the city's config.
+	p := DoltProcInfo{PID: 9011, Argv: []string{"dolt", "sql-server", "--config", configPath}}
+	got := classifyDoltProcess(p, nil, "/home/u", os.TempDir(), nil)
+	if got.Action != "protect" {
+		t.Fatalf("Action = %q, want protect for a shared-root rig's child; reason = %q", got.Action, got.Reason)
+	}
+	if !strings.Contains(got.Reason, "bd-owned proxied dolt server") {
+		t.Errorf("Reason = %q, want the bd-ownership reason", got.Reason)
+	}
+}
+
 // bd writes its flags as `--root <value>`; a `--root=<value>` spelling and a
 // symlinked path to the same directory are the same proxy.
 func TestBdOwnedProxyDoltConfigAcceptsEquivalentRootSpellings(t *testing.T) {

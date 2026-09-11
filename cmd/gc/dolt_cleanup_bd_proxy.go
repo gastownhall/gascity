@@ -61,12 +61,30 @@ type bdProxyPIDRecord struct {
 // is reused by any other process, a bare liveness probe would protect the
 // orphaned sql-server indefinitely, and a hand-written record naming PID 1
 // would protect any server started with that --config (kill(1,0) returns
-// EPERM, which reads as alive). So gc also requires the PID's argv to be
-// `bd db-proxy-child --root <this root>`, which is what bd actually execs
-// (beads internal/storage/dbproxy/proxy/endpoint.go). Uncovered: a config_path
-// override that puts config.yaml somewhere other than the proxy root — bd
-// allows it, and gc then sees no proxy.pid sibling and falls through to the
-// ordinary rules.
+// EPERM, which reads as alive). So gc also requires the PID's argv to name the
+// `db-proxy-child` verb for THIS root, which is what bd actually execs (beads
+// internal/storage/dbproxy/proxy/endpoint.go).
+//
+// The verb and the root are the whole proof; argv[0]'s filename is not part of
+// it. bd launches the child with os.Executable(), so argv[0] is whatever the
+// operator's bd is called on disk, and a versioned pin
+// (BD_BIN=/opt/beads/bd-1.3.0-rc.2) is a supported shape — bd_env.go accepts
+// any absolute executable. Requiring the basename "bd" would unprotect every
+// live proxy of a versioned install, which is the exact R4 case this helper
+// exists for. A process that runs the db-proxy-child verb and names this root
+// in --root is bd's proxy whatever its file is called.
+//
+// A rig that shares its city's proxy root (the migrate-proxied shape) needs no
+// special handling here. The reaper only ever sees the sql-server's own argv,
+// and that child is launched with --config <shared root>/config.yaml, so the
+// root resolved below is the city's — which is exactly where the live
+// proxy.pid sits. Mapping each scope to its own provider root
+// (proxiedScopeProviderRoot) would answer a question the reaper never asks: it
+// classifies processes, and a shared root has one process, not one per scope.
+//
+// Uncovered: a config_path override that puts config.yaml somewhere other than
+// the proxy root — bd allows it, and gc then sees no proxy.pid sibling and
+// falls through to the ordinary rules.
 func bdOwnedProxyDoltConfig(configPath string) (int, bool) {
 	if configPath == "" || filepath.Base(configPath) != bdProxyConfigFileName {
 		return 0, false
@@ -87,7 +105,7 @@ func bdOwnedProxyDoltConfig(configPath string) (int, bool) {
 		return 0, false
 	}
 	argv, err := bdProxyProcessArgv(record.PID)
-	if err != nil || !looksLikeBdDBProxyChild(argv) || !argvNamesProxyRoot(argv, root) {
+	if err != nil || !argvRunsDBProxyChild(argv) || !argvNamesProxyRoot(argv, root) {
 		return 0, false
 	}
 	return record.PID, true
@@ -117,10 +135,15 @@ func argvNamesProxyRoot(argv []string, root string) bool {
 	return false
 }
 
-// looksLikeBdDBProxyChild reports whether argv is bd's own proxy supervisor.
-// Process discovery only enumerates `dolt sql-server` today, so this is a
-// standing guard rather than a live path: if discovery ever widens, the
-// supervisor must not become a reap candidate.
-func looksLikeBdDBProxyChild(argv []string) bool {
-	return len(argv) >= 2 && filepath.Base(argv[0]) == "bd" && argv[1] == "db-proxy-child"
+// argvRunsDBProxyChild reports whether argv invokes bd's proxy-supervisor
+// verb. It deliberately ignores argv[0]: bd execs the child as
+// os.Executable(), so the filename is the operator's choice, not a contract.
+//
+// Used two ways, both of which only ever protect: as half of the ownership
+// proof above, where the --root match carries the evidence; and as the
+// reaper's standing guard for the supervisor process itself. Process discovery
+// only enumerates `dolt sql-server` today, so the guard is not a live path —
+// but if discovery ever widens, the supervisor must not become a candidate.
+func argvRunsDBProxyChild(argv []string) bool {
+	return len(argv) >= 2 && argv[1] == "db-proxy-child"
 }
