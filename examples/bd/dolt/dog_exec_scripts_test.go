@@ -5401,6 +5401,145 @@ exit 0
 	}
 }
 
+// TestDoctorReadsBackupFreshnessFromTheManifestNotTheNewestChunk asserts the
+// doctor ages a Dolt backup remote by its manifest rather than by whatever file
+// in the directory was touched last.
+//
+// `dolt backup sync` writes chunk data first and adopts it by rewriting the
+// manifest last, so a sync the server kills in between leaves chunk files newer
+// than anything the manifest references. On the city that produced this test an
+// hq remote held a chunk written at 21:04 beside a manifest still reading 15:04,
+// and the manifest did not reference that chunk: the newest restorable backup
+// was six hours old while the directory read as nine minutes old.
+//
+// Both directions are asserted from one fixture. The stale-manifest database
+// has the fresher chunk, so a file-mtime reading calls it fresh; the
+// fresh-manifest database has the older chunk, so a reading that took the
+// oldest file instead would call it stale.
+func TestDoctorReadsBackupFreshnessFromTheManifestNotTheNewestChunk(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	artifactDir := filepath.Join(cityPath, ".dolt-backup")
+	for _, db := range []string{"prod", "archive"} {
+		if err := os.MkdirAll(filepath.Join(dataDir, db, ".dolt"), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", db, err)
+		}
+		if err := os.MkdirAll(filepath.Join(artifactDir, db), 0o755); err != nil {
+			t.Fatalf("mkdir backup remote %s: %v", db, err)
+		}
+	}
+	now := time.Now()
+	old := now.Add(-2 * time.Hour)
+
+	// archive: the incident shape — a half-written sync left a fresh chunk
+	// behind a manifest that never adopted it.
+	writeBackupRemoteFile(t, filepath.Join(artifactDir, "archive", "manifest"), old)
+	writeBackupRemoteFile(t, filepath.Join(artifactDir, "archive", "chunk.darc"), now)
+
+	// prod: a sync that completed. Its chunk is the older file of the two.
+	writeBackupRemoteFile(t, filepath.Join(artifactDir, "prod", "chunk.darc"), old)
+	writeBackupRemoteFile(t, filepath.Join(artifactDir, "prod", "manifest"), now)
+
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	writeDoctorFakeDoltWithBackupRemotes(t, binDir, "prod", "archive")
+
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, doctorBackupStaleEnv)
+	if !strings.Contains(out, "server: ok") {
+		t.Fatalf("unexpected doctor output:\n%s", out)
+	}
+	gcLog, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	if !strings.Contains(string(gcLog), "archive backup is") {
+		t.Fatalf("doctor read the fresh chunk instead of the stale manifest, log:\n%s", gcLog)
+	}
+	if strings.Contains(string(gcLog), "prod backup is") {
+		t.Fatalf("a completed sync with an older chunk was reported stale, log:\n%s", gcLog)
+	}
+}
+
+// TestDoctorReportsBackupRemoteWithNoManifestAsMissing asserts a Dolt remote
+// directory holding chunk data but no manifest reports as missing rather than
+// as a backup as fresh as its newest chunk. Nothing in it is restorable: the
+// manifest is what names the root chunk, so without one there is no backup to
+// restore however recently the chunks were written.
+func TestDoctorReportsBackupRemoteWithNoManifestAsMissing(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	artifactDir := filepath.Join(cityPath, ".dolt-backup")
+	if err := os.MkdirAll(filepath.Join(dataDir, "prod", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir prod: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(artifactDir, "prod"), 0o755); err != nil {
+		t.Fatalf("mkdir backup remote: %v", err)
+	}
+	writeBackupRemoteFile(t, filepath.Join(artifactDir, "prod", "chunk.darc"), time.Now())
+
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	writeDoctorFakeDoltWithBackupRemotes(t, binDir, "prod")
+
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, doctorBackupStaleEnv)
+	if !strings.Contains(out, "server: ok") {
+		t.Fatalf("unexpected doctor output:\n%s", out)
+	}
+	gcLog, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	if !strings.Contains(string(gcLog), "prod backup missing") {
+		t.Fatalf("a remote with chunks but no manifest should report missing, log:\n%s", gcLog)
+	}
+}
+
+// writeBackupRemoteFile creates one file inside a fake Dolt backup remote and
+// stamps it, so a fixture can order a manifest against the chunks around it.
+func writeBackupRemoteFile(t *testing.T, path string, mtime time.Time) {
+	t.Helper()
+	writeTestFile(t, path, "backup")
+	if err := os.Chtimes(path, mtime, mtime); err != nil {
+		t.Fatalf("chtimes %s: %v", path, err)
+	}
+}
+
+// writeDoctorFakeDoltWithBackupRemotes stands in for the dolt CLI the doctor
+// shells out to, reporting every named database as having its <db>-backup
+// remote configured so each one reaches the freshness check.
+func writeDoctorFakeDoltWithBackupRemotes(t *testing.T, binDir string, dbs ...string) {
+	t.Helper()
+	var backupCases strings.Builder
+	var showDatabases strings.Builder
+	showDatabases.WriteString("Database\\n")
+	for _, db := range dbs {
+		fmt.Fprintf(&backupCases, "      %s) printf '%s-backup\\n' ;;\n", db, db)
+		fmt.Fprintf(&showDatabases, "%s\\n", db)
+	}
+	writeExecutable(t, filepath.Join(binDir, "dolt"), fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  backup)
+    case "$(basename "$PWD")" in
+%s
+    esac
+    exit 0
+    ;;
+esac
+case "$*" in
+  *"COUNT(*) FROM information_schema.PROCESSLIST"*)
+    printf 'COUNT(*)\\n1\\n'
+    exit 0
+    ;;
+  *"SHOW DATABASES"*)
+    printf '%s'
+    exit 0
+    ;;
+esac
+exit 0
+`, backupCases.String(), showDatabases.String()))
+}
+
 func TestDoctorScriptIgnoresDocumentedSystemSchemasForBackupFreshness(t *testing.T) {
 	cityPath := t.TempDir()
 	dataDir := filepath.Join(cityPath, "dolt-data")
