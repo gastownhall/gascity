@@ -227,12 +227,25 @@ func providerScopeOwnershipRecord(cityPath, scopeRoot string) (string, providerS
 // record. Malformed metadata is an error rather than a legacy classification;
 // guessing who owns a live Dolt process is how a scope ends up with two.
 func scopeBindingIsProviderOwnedProxied(scopeRoot string) (bool, error) {
-	metadata, ok, err := contract.LoadMetadataState(fsys.OSFS{}, scopeMetadataJSONPath(scopeRoot))
-	if err != nil {
-		return false, fmt.Errorf("load beads metadata for scope %q: %w", scopeRoot, err)
-	}
-	if !ok {
+	path := scopeMetadataJSONPath(scopeRoot)
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read beads metadata for scope %q: %w", scopeRoot, err)
+	}
+	// Decode only the two fields this question needs. contract.LoadMetadataState
+	// additionally rejects any backend this build does not register, which is
+	// the right answer when opening a store and the wrong one when asking who
+	// owns a process: a Postgres or otherwise opaque scope simply is not
+	// proxied, and refusing to classify it would break its lifecycle.
+	var metadata struct {
+		Backend  string `json:"backend"`
+		DoltMode string `json:"dolt_mode"`
+	}
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return false, fmt.Errorf("parse beads metadata for scope %q: %w", scopeRoot, err)
 	}
 	return contract.IsProxiedDoltMode(metadata.Backend, metadata.DoltMode), nil
 }
