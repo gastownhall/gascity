@@ -322,7 +322,17 @@ func normalizeMigratedScopeConfig(cityPath string, scope migrateProxiedScope) er
 	if !strings.EqualFold(strings.TrimSpace(state.DoltMode), "proxied-server") {
 		return fmt.Errorf("refusing to rewrite %s: canonical state resolved dolt mode %q, want proxied-server", scope.Label, state.DoltMode)
 	}
-	return normalizeScopeDoltConfig(scope.Path, state)
+	if err := normalizeScopeDoltConfig(scope.Path, state); err != nil {
+		return err
+	}
+	// This process just changed the city's topology. Everything downstream —
+	// the bd ping below, and the next scope's migration, which reads the city's
+	// projection — must see the migrated binding, not the managed-direct answer
+	// cached before the flip. The stamp catches the file rewrites on its own;
+	// dropping the city outright is one cheap map sweep and does not depend on
+	// every classification input being stamped.
+	forgetProxiedScopeRuntimeEnv(cityPath)
+	return nil
 }
 
 func pingMigratedScope(cityPath string, scope migrateProxiedScope) error {

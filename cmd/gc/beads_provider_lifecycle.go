@@ -1769,6 +1769,12 @@ func initDefaultRigBdStore(cityPath, dir, prefix, doltDatabase string) error {
 }
 
 func finalizeCanonicalBdScopeInit(cityPath, dir, prefix, doltDatabase string) error {
+	// This is where `gc init` and `gc rig add` commit a scope's canonical
+	// binding, so it is where an in-process projection of the OLD topology
+	// stops being true — including a city rebuilt at a path this process has
+	// already read. Deferred because every exit path below may already have
+	// rewritten config.yaml or metadata.json.
+	defer forgetProxiedScopeRuntimeEnv(cityPath)
 	if state, ok, err := forcedScopeDoltConfigStateForInit(cityPath, dir, prefix); err != nil {
 		return err
 	} else if ok {

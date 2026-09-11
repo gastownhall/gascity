@@ -167,6 +167,41 @@ func TestMigrateProxiedMigratesCityAndSharedRootRig(t *testing.T) {
 	}
 }
 
+// migrate-proxied changes a city's topology inside a live process, and the
+// same process then pings the migrated scope and migrates the next one through
+// the bd env builders. A projection cached before the flip describes a
+// managed-direct city that no longer exists, so the command drops the city's
+// entries outright rather than relying on every classification input being
+// stamped. Asserted on the raw cache: a stale stamp only makes an entry miss,
+// it does not remove it, so an absent key is proof the forget call ran.
+func TestMigrateProxiedDropsTheProjectionCache(t *testing.T) {
+	city, rigs := newLegacyManagedCityFixture(t, "spike")
+	rig := rigs["spike"]
+	seedCityDatabaseDir(t, city, "sp")
+	initDoltRootMarker(t, filepath.Join(city, ".beads", "dolt"))
+	stubMigrateProxiedBdFlippingMetadata(t)
+
+	for _, scope := range []string{city, rig} {
+		rememberProxiedScopeRuntimeEnv(city, scope, "pre-migration-stamp",
+			map[string]string{"GC_DOLT_PORT": "3306"})
+		if _, cached := proxiedScopeRuntimeEnvCache.Load(proxiedScopeRuntimeEnvCacheKey(city, scope)); !cached {
+			t.Fatalf("fixture did not seed a cache entry for %s", scope)
+		}
+	}
+	t.Cleanup(func() { forgetProxiedScopeRuntimeEnv(city) })
+
+	var stdout, stderr bytes.Buffer
+	if code := doBeadsCityMigrateProxied(city, migrateProxiedOptions{JSON: true}, &stdout, &stderr); code != 0 {
+		t.Fatalf("doBeadsCityMigrateProxied() = %d, want 0\nstdout=%s\nstderr=%s", code, stdout.String(), stderr.String())
+	}
+
+	for _, scope := range []string{city, rig} {
+		if _, cached := proxiedScopeRuntimeEnvCache.Load(proxiedScopeRuntimeEnvCacheKey(city, scope)); cached {
+			t.Errorf("%s kept a projection cached across the migration", scope)
+		}
+	}
+}
+
 func TestMigrateProxiedIsIdempotent(t *testing.T) {
 	city, _ := newLegacyManagedCityFixture(t)
 	initDoltRootMarker(t, filepath.Join(city, ".beads", "dolt"))

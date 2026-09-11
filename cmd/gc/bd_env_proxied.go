@@ -47,12 +47,16 @@ type proxiedScopeRuntimeEnvEntry struct {
 }
 
 // proxiedScopeRuntimeEnvInputs lists the files whose content decides whether a
-// scope is proxied and what its projection contains.
+// scope is proxied and what its projection contains. config.yaml is on the
+// list because scopeUsesProxiedDoltMode falls back to it for a scope whose
+// metadata predates dolt_mode, so a canonical config rewrite can flip the
+// classification on its own.
 func proxiedScopeRuntimeEnvInputs(cityPath, scopeRoot string) []string {
 	return []string{
 		filepath.Join(cityPath, "city.toml"),
 		filepath.Join(cityPath, ".gc", scopeOwnershipFile),
 		filepath.Join(scopeRoot, ".beads", "metadata.json"),
+		filepath.Join(scopeRoot, ".beads", "config.yaml"),
 		filepath.Join(scopeRoot, ".beads", "proxied_server_client_info.json"),
 	}
 }
@@ -79,32 +83,47 @@ func proxiedScopeRuntimeEnvCacheKey(cityPath, scopeRoot string) proxiedScopeRunt
 
 // cachedProxiedScopeRuntimeEnv returns a private copy of a still-current
 // projection. Callers mutate what they get back.
-func cachedProxiedScopeRuntimeEnv(cityPath, scopeRoot string) (map[string]string, bool) {
+//
+// On a miss it also returns the stamp it just read, which the caller must hand
+// back to rememberProxiedScopeRuntimeEnv. That stamp has to be the PRE-build
+// one: the builder reads city.toml, the ownership journal, metadata.json and
+// the sidecar as it goes, and a rewrite landing between those reads and the
+// Store would otherwise be recorded as already-observed — the projection would
+// hold the old content under the new file identity and serve it until the next
+// unrelated rewrite. Stamping first makes a torn read store an already-stale
+// stamp, so the very next call rebuilds.
+func cachedProxiedScopeRuntimeEnv(cityPath, scopeRoot string) (map[string]string, string, bool) {
+	stamp := proxiedScopeRuntimeEnvStamp(cityPath, scopeRoot)
 	value, ok := proxiedScopeRuntimeEnvCache.Load(proxiedScopeRuntimeEnvCacheKey(cityPath, scopeRoot))
 	if !ok {
-		return nil, false
+		return nil, stamp, false
 	}
 	entry, ok := value.(proxiedScopeRuntimeEnvEntry)
-	if !ok || entry.stamp != proxiedScopeRuntimeEnvStamp(cityPath, scopeRoot) {
-		return nil, false
+	if !ok || entry.stamp != stamp {
+		return nil, stamp, false
 	}
-	return maps.Clone(entry.env), true
+	return maps.Clone(entry.env), stamp, true
 }
 
-// rememberProxiedScopeRuntimeEnv stores env and returns it, so the caller can
+// rememberProxiedScopeRuntimeEnv stores env under the stamp its caller read
+// before building, and returns env so the caller can
 // `return rememberProxiedScopeRuntimeEnv(...), nil` in one line.
-func rememberProxiedScopeRuntimeEnv(cityPath, scopeRoot string, env map[string]string) map[string]string {
+func rememberProxiedScopeRuntimeEnv(cityPath, scopeRoot, stamp string, env map[string]string) map[string]string {
 	proxiedScopeRuntimeEnvBuilds.Add(1)
 	proxiedScopeRuntimeEnvCache.Store(proxiedScopeRuntimeEnvCacheKey(cityPath, scopeRoot), proxiedScopeRuntimeEnvEntry{
-		stamp: proxiedScopeRuntimeEnvStamp(cityPath, scopeRoot),
+		stamp: stamp,
 		env:   maps.Clone(env),
 	})
 	return env
 }
 
 // forgetProxiedScopeRuntimeEnv drops every scope projection cached for a city.
-// The stamp already covers ordinary rewrites; this exists for callers that
-// tear a city down and rebuild it at the same path.
+// The stamp covers ordinary rewrites; this is for the in-process callers that
+// change a city's topology themselves and must not read their own stale
+// answer afterwards — `gc beads city migrate-proxied`, which flips a scope
+// from managed-direct to bd-owned proxied and then pings it through the same
+// env builder, and finalizeCanonicalBdScopeInit, which is where `gc init` and
+// `gc rig add` commit a scope's canonical binding.
 func forgetProxiedScopeRuntimeEnv(cityPath string) {
 	city := normalizePathForCompare(cityPath)
 	proxiedScopeRuntimeEnvCache.Range(func(key, _ any) bool {
@@ -114,6 +133,11 @@ func forgetProxiedScopeRuntimeEnv(cityPath string) {
 		return true
 	})
 }
+
+// applyProxiedScopeRuntimeEnvFn is the last projection step before the cache
+// Store, injected by the test that proves a rewrite landing DURING a build is
+// not swallowed by the stamp. Production always runs the real function.
+var applyProxiedScopeRuntimeEnvFn = applyProxiedScopeRuntimeEnv
 
 // applyProxiedScopeRuntimeEnv completes the projection for a bd-owned proxied
 // scope: the proxy selector plus, for an external upstream, the endpoint bd's

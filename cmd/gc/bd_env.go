@@ -1642,7 +1642,8 @@ func bdRuntimeEnvForRigWithErrorRecovery(cityPath string, cfg *config.City, rigP
 }
 
 func bdRuntimeEnvForRigWithErrorRecoveryContext(ctx context.Context, cityPath string, cfg *config.City, rigPath string, allowRecovery bool) (map[string]string, error) {
-	if cached, ok := cachedProxiedScopeRuntimeEnv(cityPath, rigPath); ok {
+	cached, stamp, ok := cachedProxiedScopeRuntimeEnv(cityPath, rigPath)
+	if ok {
 		return cached, nil
 	}
 	env, cityErr := bdRuntimeEnvWithErrorRecoveryContext(ctx, cityPath, allowRecovery)
@@ -1671,13 +1672,13 @@ func bdRuntimeEnvForRigWithErrorRecoveryContext(ctx context.Context, cityPath st
 	// Each proxied workspace has its own proxy root, so a rig answers from its
 	// own binding rather than inheriting the city's endpoint.
 	if scopeUsesProxiedDoltMode(cityPath, rigPath) {
-		if err := applyProxiedScopeRuntimeEnv(env, rigPath); err != nil {
+		if err := applyProxiedScopeRuntimeEnvFn(env, rigPath); err != nil {
 			return env, err
 		}
 		if cityErr != nil {
 			return env, cityErr
 		}
-		return rememberProxiedScopeRuntimeEnv(cityPath, rigPath, env), nil
+		return rememberProxiedScopeRuntimeEnv(cityPath, rigPath, stamp, env), nil
 	}
 	if err := applyResolvedRigDoltEnvContext(ctx, env, cityPath, rigPath, explicitRig, allowRecovery); err != nil {
 		clearProjectedDoltEnv(env)
@@ -1783,7 +1784,8 @@ func bdRuntimeEnvWithErrorRecovery(cityPath string, allowRecovery bool) (map[str
 }
 
 func bdRuntimeEnvWithErrorRecoveryContext(ctx context.Context, cityPath string, allowRecovery bool) (map[string]string, error) {
-	if cached, ok := cachedProxiedScopeRuntimeEnv(cityPath, cityPath); ok {
+	cached, stamp, ok := cachedProxiedScopeRuntimeEnv(cityPath, cityPath)
+	if ok {
 		return cached, nil
 	}
 	env := cityRuntimeEnvMapForCity(cityPath)
@@ -1848,10 +1850,10 @@ func bdRuntimeEnvWithErrorRecoveryContext(ctx context.Context, cityPath string, 
 	// health fan-out that would run one `bd ping` per provider-owned scope for
 	// every bd command gc makes. See bd_env_proxied.go.
 	if scopeUsesProxiedDoltMode(cityPath, cityPath) {
-		if err := applyProxiedScopeRuntimeEnv(env, cityPath); err != nil {
+		if err := applyProxiedScopeRuntimeEnvFn(env, cityPath); err != nil {
 			return env, err
 		}
-		return rememberProxiedScopeRuntimeEnv(cityPath, cityPath, env), nil
+		return rememberProxiedScopeRuntimeEnv(cityPath, cityPath, stamp, env), nil
 	}
 	if bound, err := applyCityStorageBindingEnv(env, cityPath); err != nil {
 		clearProjectedDoltEnv(env)
