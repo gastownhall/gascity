@@ -40,6 +40,16 @@ type CleanupReport struct {
 	Reaped        CleanupReapedReport    `json:"reaped"`
 	Summary       CleanupSummary         `json:"summary"`
 	Errors        []CleanupError         `json:"errors"`
+	// Skipped is set when the command declined to run any cleanup stage at
+	// all — today only for scopes whose Dolt lifecycle belongs to bd.
+	// Additive optional field; gc.dolt.cleanup.v1 is not bumped.
+	Skipped *CleanupSkipped `json:"skipped,omitempty"`
+}
+
+// CleanupSkipped explains a whole-command no-op.
+type CleanupSkipped struct {
+	Reason  string `json:"reason"`
+	Message string `json:"message"`
 }
 
 // CleanupPortReport is the resolved-port section of the JSON envelope.
@@ -959,6 +969,14 @@ can still return successfully after emitting the report.`,
 			if err != nil {
 				fmt.Fprintf(stderr, "gc dolt-cleanup: %v\n", err) //nolint:errcheck
 				return errExit
+			}
+			// bd owns the sql-server for a proxied scope: it starts it, keeps
+			// it resident and stops it. There is no managed-Dolt port to probe
+			// and no orphan of ours to reap, so report the no-op and stop
+			// before any stage touches the scope.
+			if doltScopeIsBdOwnedProxied(cityPath) {
+				emitProxiedScopeCleanupSkip(jsonOut, stdout)
+				return nil
 			}
 			cfg, err := loadCityConfig(cityPath, stderr)
 			if err != nil {
