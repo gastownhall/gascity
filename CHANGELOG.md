@@ -77,6 +77,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The pool orphan sweep treats a claim it cannot observe as unobservable,
+  not dead.** On a shared store, an assignee in `<rig>/<name>` form that this
+  city's config does not mint — another city's identity, or a binding since
+  REMOVED from local config — used to be judged by local session evidence
+  alone and silently stripped (`in_progress` → `open`, assignee cleared).
+  Both release sites now refuse such claims and log one
+  `protected N foreign/unknown identities` summary per sweep. Migration note
+  for the removed-binding case: decommissioning an agent from config no longer
+  lets the sweep reclaim its outstanding claims — release them explicitly
+  (`gc bd release-if-current <id> <assignee>`/reassign) when retiring a
+  binding, and watch the summary
+  line for claims held back.
+
 - **The work-record close gate asks the repository the bead's OWNER points at,
   not the store it was read through.** A rig's work step that a relocated class
   binding holds has its commits on the rig's checkout, and both close doors
