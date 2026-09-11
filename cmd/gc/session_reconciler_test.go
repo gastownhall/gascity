@@ -1957,11 +1957,11 @@ func drainAckAssignedWorkEventCount(t *testing.T, seedWork func(t *testing.T, st
 // (configured_named_identity) rather than its own durable bead ID — the way a
 // production hook claim stamps an aliased/pool seat (hookClaimAssigneeIdentity).
 // When addLiveSibling is true a SECOND seat with a distinct session name but the
-// SAME pool alias is present and alive in the reconciler's running-session
-// inventory for both ticks, so it is a genuine live owner of the row. Returns how
-// many SessionDrainAckedWithAssignedWork events fired: zero when a live sibling
-// owns the row (correct surplus-seat drain), one when no live incarnation but the
-// draining seat itself carries the alias (a genuine strand).
+// SAME pool alias is present and alive for both ticks. Returns how many
+// SessionDrainAckedWithAssignedWork events fired. The classifier does NOT try to
+// suppress an in_progress row on account of a live sibling (that cannot be done
+// safely at finalize — see drainAckClaimableAnomalyBead), so an in_progress row
+// ALWAYS fires whether or not a live sibling is present.
 func drainAckPoolAliasInProgressEventCount(t *testing.T, addLiveSibling bool) int {
 	t.Helper()
 	const poolAlias = "gc__worker-pool"
@@ -2060,35 +2060,34 @@ func TestReconcileSessionBeads_DrainAckBlockedAssignedWorkSuppressesEvent(t *tes
 	}
 }
 
-// TestReconcileSessionBeads_DrainAckLiveSiblingInProgressSuppressesEvent pins the
-// owner-liveness suppression: a seat drain-acking while an IN_PROGRESS row is
-// owned by ANOTHER LIVE incarnation of the same pool (a distinctly-named sibling
-// that shares the row's pool alias and is up in the reconciler's running-session
-// inventory) must NOT emit SessionDrainAckedWithAssignedWork. This is the ~17%
-// false-positive class from live data: a surplus seat draining past a row a live
-// sibling is actively working is normal pull, not a strand. The sibling here
-// genuinely owns the row (shared configured_named_identity), which is the
-// distinction the fix keys on — not the assignee's identity shape.
-func TestReconcileSessionBeads_DrainAckLiveSiblingInProgressSuppressesEvent(t *testing.T) {
+// TestReconcileSessionBeads_DrainAckLiveSiblingInProgressStillEmitsEvent pins the
+// deliberate safe-partial choice: an IN_PROGRESS row shared with ANOTHER LIVE
+// incarnation of the same pool STILL emits SessionDrainAckedWithAssignedWork. We
+// do NOT suppress on sibling liveness, because no liveness signal available at
+// finalize can distinguish a benign live-sibling claim from a genuine #2293
+// cap-hit strand without a hole that would silence a real strand (zombie tmux
+// pane reads Running, stale 30s liveness cache, duplicate-name keying). A false
+// negative (a stranded row kept quiet) is worse than this residual false
+// positive, so the in_progress arm fires unconditionally and accepts the noise.
+// (Inverted from the prior owner-liveness attempt, which this replaces.)
+func TestReconcileSessionBeads_DrainAckLiveSiblingInProgressStillEmitsEvent(t *testing.T) {
 	count := drainAckPoolAliasInProgressEventCount(t, true)
-	if count != 0 {
-		t.Fatalf("%s events = %d, want 0 — an in_progress row a LIVE sibling incarnation owns is a surplus-seat drain, not a strand",
+	if count < 1 {
+		t.Fatalf("%s events = %d, want >= 1 — an in_progress row fires regardless of sibling liveness (safe-partial: never risk silencing a genuine strand)",
 			events.SessionDrainAckedWithAssignedWork, count)
 	}
 }
 
 // TestReconcileSessionBeads_DrainAckAliasClaimedNoLiveOwnerEmitsEvent is the
-// genuine-strand RED test the owner-liveness fix exists for. A named/pool seat
-// claims a row under its ALIAS (configured_named_identity, as production hook
-// claims stamp — not the durable bead ID), hits its turn cap, and drain-acks
-// mid-task with NO live replacement: no other live incarnation carries the alias.
-// That is the #2293 cap-hit strand the event MUST emit for. The prior
-// "assignee == this session's own bead ID" gate silenced it (the alias is not the
-// bead ID), so this fails on that state; keying on owner-liveness fires it.
+// genuine-strand test the fix exists for. A named/pool seat claims a row under
+// its ALIAS (configured_named_identity, as production hook claims stamp — not the
+// durable bead ID), hits its turn cap, and drain-acks mid-task with NO live
+// replacement. That is the #2293 cap-hit strand the event MUST emit for; the
+// in_progress arm fires it.
 func TestReconcileSessionBeads_DrainAckAliasClaimedNoLiveOwnerEmitsEvent(t *testing.T) {
 	count := drainAckPoolAliasInProgressEventCount(t, false)
 	if count != 1 {
-		t.Fatalf("%s events = %d, want 1 — an alias-claimed in_progress row with NO live owner but the draining seat is a genuine cap-hit strand",
+		t.Fatalf("%s events = %d, want 1 — an alias-claimed in_progress row with no live replacement is a genuine cap-hit strand",
 			events.SessionDrainAckedWithAssignedWork, count)
 	}
 }
@@ -2112,13 +2111,13 @@ func TestReconcileSessionBeads_DrainAckReadyAssignedWorkEmitsEvent(t *testing.T)
 // drainAckAliasSiblingEventCount drives a "worker" seat holding an IN_PROGRESS row
 // stamped with a shared pool alias through the drain-ack finalize lifecycle, with
 // a second seat that also carries the SAME alias. seedSibling configures that
-// second seat's runtime and desired/config posture (via addDesired/provider Start
-// or leaving it dead) so a case can make it a genuinely-live owner or a dead
-// zombie; siblingDrainAck marks the sibling drain-acked in the same pass. It
-// returns how many SessionDrainAckedWithAssignedWork events fired. Everything runs
-// through the signature-stable reconcileSessionBeads entry point so the two new
-// fire-cases below compile and RED on the pre-fix bead-not-closed keying and GREEN
-// on the runtime-liveness keying.
+// second seat's posture (drained-and-dead twin, dead-runtime zombie, etc.);
+// siblingDrainAck marks the sibling drain-acked in the same pass. It returns how
+// many SessionDrainAckedWithAssignedWork events fired. Under the safe-partial
+// classifier the in_progress arm ALWAYS fires, so these cases are regression
+// guards that a same-alias sibling — whatever its liveness — never silences the
+// draining seat's strand (the exact false negative the prior owner-liveness
+// attempts kept re-introducing).
 func drainAckAliasSiblingEventCount(t *testing.T, siblingName string, siblingDrainAck bool, seedSibling func(t *testing.T, env *reconcilerTestEnv, sibling *beads.Bead)) int {
 	t.Helper()
 	const poolAlias = "gc__worker-pool"
@@ -2193,16 +2192,14 @@ func drainAckAliasSiblingEventCount(t *testing.T, siblingName string, siblingDra
 	return count
 }
 
-// TestReconcileSessionBeads_DrainAckTwoSeatSamePassDrainEmitsEvent pins the
-// same-pass-drain half of the owner-liveness fix. Two distinctly-named seats
-// share one pool alias and BOTH drain-ack in the same pass while an in_progress
-// row carries that alias. The pre-fix classifier keyed "live owner" on
-// bead-not-closed, so each draining seat counted the OTHER (still open, mid-drain)
-// as a live owner and they mutually SUPPRESSED — a false negative that silences a
-// genuine strand. Neither seat's runtime survives the drain, so keying on a
-// positive runtime observation (both dead, both drain-ack-stop-pending) leaves no
-// live owner and the strand MUST fire. RED on the pre-fix state (count 0), green
-// after (each unowned finalize fires, so >= 1).
+// TestReconcileSessionBeads_DrainAckTwoSeatSamePassDrainEmitsEvent guards the
+// same-pass-drain case. Two distinctly-named seats share one pool alias and BOTH
+// drain-ack in the same pass while an in_progress row carries that alias. An
+// owner-liveness classifier keyed on bead-not-closed made each draining seat
+// count the OTHER (still open, mid-drain) as a live owner and mutually SUPPRESS —
+// a false negative that silences a genuine strand. The safe-partial classifier
+// fires on the in_progress row unconditionally, so the strand is never silenced
+// by a same-pass-draining sibling.
 func TestReconcileSessionBeads_DrainAckTwoSeatSamePassDrainEmitsEvent(t *testing.T) {
 	count := drainAckAliasSiblingEventCount(t, "worker-twin", true, func(t *testing.T, env *reconcilerTestEnv, sibling *beads.Bead) {
 		env.markSessionActive(sibling)
@@ -2214,24 +2211,20 @@ func TestReconcileSessionBeads_DrainAckTwoSeatSamePassDrainEmitsEvent(t *testing
 	}
 }
 
-// TestReconcileSessionBeads_DrainAckZombieOpenSiblingEmitsEvent pins the
-// zombie-sibling half of the owner-liveness fix. A sibling seat shares the pool
-// alias and its session bead is still OPEN, but its RUNTIME is dead (never
-// started) and it is NOT drain-pending — a drained-open zombie kept open by the
-// very row it stranded. The pre-fix classifier counted it as a live owner because
-// its bead is not closed, permanently SILENCING the recurring cap-hit strand. It
-// is configured-but-not-desired, so the reconciler keeps it open ("suspended")
-// while it holds the shared alias work rather than closing it. Keying on a
-// positive runtime observation excludes the dead zombie, so the strand MUST fire.
-// RED on the pre-fix state (count 0), green after (count 1). The zombie is NOT
-// drain-pending, so this proves the RUNTIME observation — not the drain-pending
-// proxy — is what excludes it.
+// TestReconcileSessionBeads_DrainAckZombieOpenSiblingEmitsEvent guards the
+// zombie-sibling case. A sibling seat shares the pool alias and its session bead
+// is still OPEN, but its runtime is dead (never started) and it is NOT
+// drain-pending — a drained-open zombie kept open by the very row it stranded. An
+// owner-liveness classifier keyed on bead-not-closed counted it as a live owner
+// and permanently SILENCED the recurring cap-hit strand. The safe-partial
+// classifier fires on the in_progress row unconditionally, so a zombie sibling
+// never silences the strand.
 func TestReconcileSessionBeads_DrainAckZombieOpenSiblingEmitsEvent(t *testing.T) {
 	count := drainAckAliasSiblingEventCount(t, "worker-zombie", false, func(t *testing.T, env *reconcilerTestEnv, sibling *beads.Bead) {
 		// Leave the zombie asleep (createSessionBead's default), never started in
-		// the provider (runtime dead), and NOT in the desired set so it is never
-		// woken or restarted — configured but scaled down, held open as "suspended"
-		// because it still carries the shared alias work.
+		// the provider (runtime dead), and NOT in the desired set — it stays an
+		// open, dead-runtime sibling that an owner-liveness classifier would have
+		// mistaken for a live owner.
 		_ = sibling
 	})
 	if count != 1 {
@@ -3961,7 +3954,7 @@ func TestFinalizeDrainAckStoppedSessionDoesNotEmitEventsWhenFinalMetadataFails(t
 
 	failingStore := &failSetMetadataBatchStore{Store: env.store, err: errors.New("metadata write failed")}
 	finalizeDrainAckStoppedSession(
-		"", env.cfg, failingStore, nil, env.sessionInfo(session.ID), liveSessionOwnerSet{}, "worker", false,
+		"", env.cfg, failingStore, nil, env.sessionInfo(session.ID), "worker", false,
 		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
 	)
 
@@ -3988,7 +3981,7 @@ func TestFinalizeDrainAckStoppedSessionFallsThroughWhenCloseGateRacesWithAssignm
 
 	racingStore := &assignOnListStore{Store: env.store, sessionID: session.ID}
 	finalizeDrainAckStoppedSession(
-		"", env.cfg, racingStore, nil, env.sessionInfo(session.ID), liveSessionOwnerSet{}, "worker", true,
+		"", env.cfg, racingStore, nil, env.sessionInfo(session.ID), "worker", true,
 		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
 	)
 
