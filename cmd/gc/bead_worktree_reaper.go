@@ -91,10 +91,16 @@ type reapReport struct {
 // is announced once rather than on every tick; a nil tracker reports every
 // skip. It never changes what is reaped or what the returned report contains —
 // see reapSkipTracker.
+//
+// rigStores is spelled that way on purpose: the obvious `rigBeadStores` is
+// residency-boundary vocabulary (a:rigBeadStores), and ast:vocabulary-alias
+// guards that NAME without type resolution, so an unrelated parameter carrying
+// it counts as a store-enumeration site. See the alias-rule block in
+// scripts/residency-boundary-patterns.txt.
 func reapClosedBeadWorktrees(
 	cityPath string,
 	cfg *config.City,
-	rigBeadStores map[string]beads.Store,
+	rigStores map[string]beads.Store,
 	liveSessionDirs []string,
 	dryRun bool,
 	rec events.Recorder,
@@ -108,7 +114,7 @@ func reapClosedBeadWorktrees(
 	if rec == nil {
 		rec = events.Discard
 	}
-	if cfg == nil || len(rigBeadStores) == 0 {
+	if cfg == nil || len(rigStores) == 0 {
 		return report
 	}
 
@@ -136,7 +142,7 @@ func reapClosedBeadWorktrees(
 
 	wtRoot := filepath.Join(cityPath, ".gc", "worktrees")
 
-	for rigName, store := range rigBeadStores {
+	for rigName, store := range rigStores {
 		if store == nil {
 			continue
 		}

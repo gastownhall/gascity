@@ -2,6 +2,7 @@ package main
 
 import (
 	"io"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -51,4 +52,36 @@ func hookStampSessionCurrentClaim(sessionID, beadID string) error {
 	}
 	_, err = sessFront.SetCurrentClaim(sessionID, beadID)
 	return err
+}
+
+// hookSessionDrainPending reports whether the session identified by sessionID is
+// already draining. It is the production implementation of the
+// hookClaimOps.DrainPending seam — the F-D claim fence's only input.
+//
+// The SESSION ROW is the source, not provider meta. `gc runtime drain-check`
+// reads GC_DRAIN, which reconciler-tracked drains never set, so a provider-meta
+// probe would miss the whole keyed population this fence exists for. It reads
+// through the same routed front door the claim back-channel writes through, so a
+// [beads.classes.sessions] relocation reaches the fence too.
+//
+// Any state OTHER than draining — including a closed row, whose runtime state
+// GetState reports as empty — is not this fence's business. A closed or
+// superseded incarnation is the runtime-identity fence's stale-session lane, and
+// answering false here leaves that lane's verdict intact rather than relabelling
+// it. Errors are returned rather than swallowed: the caller fails OPEN on them,
+// and it can only make that choice if it can see them.
+func hookSessionDrainPending(sessionID string) (bool, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return false, nil
+	}
+	sessFront, err := sessionCurrentClaimFrontDoor()
+	if err != nil {
+		return false, err
+	}
+	state, _, err := sessFront.GetState(sessionID)
+	if err != nil {
+		return false, err
+	}
+	return state == session.StateDraining, nil
 }

@@ -187,7 +187,15 @@ func Catalog() []Entry {
 			waivedRuntime(
 				repoSymbol("internal/runtime/acp", "NewSeamBacked"),
 				time.Date(2026, time.October, 8, 0, 0, 0, 0, time.UTC),
-				"NewSeamBacked always uses shared os.TempDir()/gc-acp-<euid> state; the WithDir proof does not exercise that composition",
+				"TestACPDefaultDirConformance (internal/runtime/acp/conformance_test.go) calls "+
+					"NewSeamBacked directly through runtimetest.RunProviderTests with no dir injection, reusing "+
+					"the fakeacp fixture; verified clean on Linux (single run, -count=3 repeated, -race, and two "+
+					"concurrent OS-process runs against the shared default euid-scoped directory). The one "+
+					"remaining proof capability is a clean Darwin-lane run: ga-csh74h (Mac CI fleet-wide broken — "+
+					"setup-gascity-macos's go-version default is stale against go.mod's `go 1.26.6` requirement, "+
+					"failing mac-quality and skipping every downstream job including the packages-core shard "+
+					"this test would run in) currently blocks that evidence. Promote to proved once ga-csh74h "+
+					"is fixed and a clean Darwin run of TestACPDefaultDirConformance is recorded.",
 			),
 			provedRuntime(
 				repoSymbol("internal/runtime/acp", "NewSeamBackedWithDir"),
@@ -212,7 +220,7 @@ func Catalog() []Entry {
 			waivedRuntime(
 				repoSymbol("internal/runtime/k8s", "NewSeamBacked"),
 				time.Date(2026, time.November, 12, 0, 0, 0, 0, time.UTC),
-				"the actual K8s production composition has no full shared runtime contract",
+				"no runnable harness proves NewSeamBacked() against a live Kubernetes API plus pod exec lifecycle; every k8s package test drives newProviderWithOps(fake) instead of the real constructor, and no kind/integration-tagged harness exists in internal/runtime/k8s",
 			),
 		),
 		builtin(

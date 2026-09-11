@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worktree"
@@ -99,9 +100,12 @@ func worktreeSpecForBead(bead beads.Bead, storeRef string) (*worktree.Spec, erro
 		{beadmeta.WorktreeLifecycleMetadataKey, bead.Metadata[beadmeta.WorktreeLifecycleMetadataKey]},
 	}
 	missing := make([]string, 0, len(values))
+	present := make([]string, 0, len(values))
 	for _, item := range values {
 		if strings.TrimSpace(item.value) == "" {
 			missing = append(missing, item.key)
+		} else {
+			present = append(present, item.key)
 		}
 	}
 	if len(missing) == len(values) {
@@ -115,6 +119,20 @@ func worktreeSpecForBead(bead beads.Bead, storeRef string) (*worktree.Spec, erro
 		if _, dup := legacyWorkDirNoticeSeen.LoadOrStore(bead.ID, struct{}{}); !dup {
 			log.Printf("worktreeSpecForBead: work bead %s has %s=%q with no worktree ownership metadata; treating as unmanaged",
 				bead.ID, pathKey, path)
+		}
+		return nil, nil
+	}
+	if len(present) == 1 && present[0] == beadmeta.WorkBranchMetadataKey {
+		// gc.work_branch alone is not incomplete evidence either -- it is the
+		// shape a hook claim's ambient branch stamp produces on an otherwise
+		// unmanaged bead (hookClaimIdentityPatch stamps gc.work_branch onto
+		// any bead with a resolvable branch, independent of whether the bead
+		// ever published worktree ownership evidence). Treat it the same as
+		// the zero-key case above instead of hard-erroring the seat into
+		// permanent starvation the first time a hook claim touches it.
+		if _, dup := legacyWorkDirNoticeSeen.LoadOrStore(bead.ID, struct{}{}); !dup {
+			log.Printf("worktreeSpecForBead: work bead %s has %s=%q with only %s published; treating as unmanaged",
+				bead.ID, pathKey, path, beadmeta.WorkBranchMetadataKey)
 		}
 		return nil, nil
 	}
@@ -417,6 +435,13 @@ func computePoolDesiredStatesAt(
 		}
 	}
 	protectedNewRequests, inFlightNewRequests := poolNewDemandRequests(cfg, sessionInfos, resumeSessionBeadIDs, decisionTime)
+	sessionInfoByID := make(map[string]sessionpkg.Info, len(sessionInfos))
+	for _, info := range sessionInfos {
+		if info.ID == "" {
+			continue
+		}
+		sessionInfoByID[info.ID] = info
+	}
 	// A wake-known request has assigned work but no surviving concrete session
 	// identity. Freshly completed unassigned pool sessions are valid concrete
 	// capacity for that request. Bind them before calculating residual protected
@@ -454,15 +479,34 @@ func computePoolDesiredStatesAt(
 		scaleCount, hasScaleCount := scaleCheckCounts[template]
 		protected := protectedNewRequests[template]
 		if !hasScaleCount && len(protected) == 0 {
+			// A template with no demand never becomes a key in
+			// scaleCheckCounts, so without this record the skip is silent and
+			// a pool that correctly wants zero sessions reads exactly like a
+			// pool the controller never evaluated. That ambiguity has already
+			// cost days of misdiagnosis; the decision below is the evidence
+			// that the template was reached and found idle on purpose.
+			if trace != nil {
+				trace.RecordDecision(TraceSitePoolDemandCompute, TraceReasonNoDemand, TraceOutcomeSkipped, template, "", traceRecordPayload{
+					"scale_check": scaleCount,
+					"protected":   len(protected),
+					"in_flight":   len(inFlightNewRequests[template]),
+				})
+			}
 			continue
 		}
 		if _, ok := aliasHeldTemplates[template]; ok {
 			continue
 		}
-		effectiveDemand := max(scaleCount, len(protected))
+		inFlight := inFlightNewRequests[template]
+		inFlightFloor := 0
+		for _, req := range inFlight {
+			if info, ok := sessionInfoByID[req.SessionBeadID]; ok && poolSessionWithinPendingCreateLease(info, cfg, decisionTime) {
+				inFlightFloor++
+			}
+		}
+		effectiveDemand := max(scaleCount, len(protected), inFlightFloor)
 		newCount := capNewDemandCount(limits, usage, agent, effectiveDemand)
 		recordNewDemandCapTrace(trace, template, agent, limits, usage, effectiveDemand, newCount)
-		inFlight := inFlightNewRequests[template]
 		protectedCount := minInt(len(protected), newCount)
 		inFlightCount := minInt(len(inFlight), newCount-protectedCount)
 		reusedCount := protectedCount + inFlightCount
@@ -751,6 +795,40 @@ func poolSessionEligibleForProtectedDemand(info sessionpkg.Info, decisionTime ti
 		strings.TrimSpace(info.WaitHold) == "" &&
 		!metadataTimeInFuture(info.HeldUntil, decisionTime) &&
 		!metadataTimeInFuture(info.QuarantinedUntil, decisionTime)
+}
+
+// poolSessionWithinPendingCreateLease reports whether an in-flight
+// pending-create pool session is still within its own lease window and should
+// therefore establish a demand floor of its own, mirroring the protected-
+// session floor above. decisionTime is injected the same way as
+// poolSessionWithinPostCreateProtection so every decision in a tick shares one
+// clock observation; a zero decisionTime fails closed for the same reason.
+//
+// The lease arithmetic itself is not reimplemented here: it delegates to
+// pendingCreateLeaseExpiredForRollbackInfo (session_reconciler.go), the exact
+// predicate the reconciler's own rollback path uses, so a bead genuinely stuck
+// past its lease is never propped up by this floor — it still rolls back on
+// schedule. That function only reasons about beads in a rollback-eligible
+// state (start-pending/creating/asleep, via pendingCreateRollbackState) and
+// returns false (not expired) for any other state as a no-op default, so the
+// state gate is re-checked here first: a pending_create_claim left set on an
+// already-stopped or failed-create session is not a live in-flight attempt
+// and must not establish a floor, regardless of how recently it was created.
+func poolSessionWithinPendingCreateLease(info sessionpkg.Info, cfg *config.City, decisionTime time.Time) bool {
+	if decisionTime.IsZero() {
+		return false
+	}
+	if !info.PendingCreateClaim {
+		return false
+	}
+	if !pendingCreateRollbackState(info.MetadataState) {
+		return false
+	}
+	var startupTimeout time.Duration
+	if cfg != nil {
+		startupTimeout = cfg.Session.StartupTimeoutDuration()
+	}
+	return !pendingCreateLeaseExpiredForRollbackInfo(info, &clock.Fake{Time: decisionTime}, startupTimeout)
 }
 
 // poolSessionConsumesNewDemandInfo reports whether a pool session already

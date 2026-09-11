@@ -2710,3 +2710,171 @@ func TestEnsureDrainUnitConvoyFindsAConvoyMintedBeforeItsMemberVanished(t *testi
 		t.Fatalf("resuming pass created unit convoy %s (created=%v), want the already-minted %s; a lookup re-derived from the member moves stores the moment the member stops resolving", reused.ID, createdAgain, minted.ID)
 	}
 }
+
+// prefixDeclaringStore is a MemStore that DECLARES its mint prefix as a method,
+// which is what storeref.PrefixOwner routes on (storeref.HasIDPrefix).
+// beads.MemStore carries IDPrefix as a FIELD, so every existing drain fixture
+// stands its two stores up as prefix-LESS to storeref and the id-prefix fast
+// path never fires. Production stores all declare it (bdstore, native_dolt,
+// caching, exec), so a divergence that only appears when it fires is invisible
+// to a suite built on bare MemStores.
+type prefixDeclaringStore struct {
+	*beads.MemStore
+}
+
+func (s prefixDeclaringStore) IDPrefix() string { return s.MemStore.IDPrefix }
+
+// seedCoResidentDrainMember builds the shape neither existing fixture has: ONE
+// member id present in BOTH stores, over stores that declare their prefixes.
+//
+// seedSplitClassDrainWorkflow carries a copy of the CONVOY into the binding but
+// never of a member, and its stores are bare MemStores. Both gaps have to close
+// at once for a resolution disagreement about a member to be observable at all.
+func seedCoResidentDrainMember(t *testing.T) (work, graph prefixDeclaringStore, control, member beads.Bead) {
+	t.Helper()
+	workMem := beads.NewMemStore()
+	workMem.IDPrefix = "wrk"
+	work = prefixDeclaringStore{MemStore: workMem}
+
+	member, err := work.Create(beads.Bead{Title: "work copy", Type: "task"})
+	if err != nil {
+		t.Fatalf("create member in the work store: %v", err)
+	}
+
+	// The binding's co-resident copy: same id, its own row. This is what a
+	// migration leaves behind — the row is copied and the original retained.
+	graphMem := beads.NewMemStoreFrom(1000, []beads.Bead{{
+		ID:        member.ID,
+		Title:     "binding copy",
+		Type:      "task",
+		Status:    member.Status,
+		CreatedAt: member.CreatedAt,
+		UpdatedAt: member.UpdatedAt,
+	}}, nil)
+	graphMem.IDPrefix = "gcb"
+	graph = prefixDeclaringStore{MemStore: graphMem}
+
+	control, err = graph.Create(beads.Bead{
+		Title: "drain",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":                "drain",
+			"gc.drain_member_access": beadmeta.DrainMemberAccessExclusive,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create drain control: %v", err)
+	}
+	return work, graph, control, member
+}
+
+// TestClassifyDrainBlockerFaultIsAnErrorNeverAnOmittedEdge is the fault control
+// for the blocker classification's move onto the resolver. classifyDrainBlocker
+// answers a question whose "no" SILENTLY DROPS a dependency edge, so a store it
+// could not read must reach it as an error: an unread leg reported as
+// drainBlockerUnprojectable omits an edge that constrains the workflow, and an
+// unread leg reported as drainBlockerSatisfied omits one on the claim that a
+// blocker it never saw is terminal.
+func TestClassifyDrainBlockerFaultIsAnErrorNeverAnOmittedEdge(t *testing.T) {
+	work, graph, _, _ := seedCoResidentDrainMember(t)
+	hardErr := errors.New("work store unavailable")
+	opts := ProcessOptions{MemberStores: []beads.Store{drainGetErrorStore{Store: work, prefix: "wrk", err: hardErr}}}
+
+	residence, err := classifyDrainBlocker(graph, "wrk-blocker-1", opts)
+	if !errors.Is(err, hardErr) {
+		t.Fatalf("classifyDrainBlocker error = %v, want %v", err, hardErr)
+	}
+	if residence != drainBlockerUnclassified {
+		t.Fatalf("classifyDrainBlocker residence = %v, want drainBlockerUnclassified; a leg that could not be read must never decide an edge", residence)
+	}
+}
+
+// drainGetErrorStore is a leg whose every point read fails, with the id prefix
+// it declares kept intact so the plan still routes to it.
+type drainGetErrorStore struct {
+	beads.Store
+	prefix string
+	err    error
+}
+
+func (s drainGetErrorStore) IDPrefix() string { return s.prefix }
+
+func (s drainGetErrorStore) Get(string) (beads.Bead, error) { return beads.Bead{}, s.err }
+
+func coResidentDrainManifest(memberID string) drainManifest {
+	return drainManifest{
+		Version: 1,
+		Context: "separate",
+		Rows:    []drainManifestRow{{Index: 0, MemberID: memberID, UnitKey: "unit-0"}},
+	}
+}
+
+// TestManifestLoadAndReservationAgreeOnACoResidentMember pins the agreement the
+// two consumers of drainMemberProbeSet do not have: the manifest LOADS a member
+// through storeref.Resolve, which tries the id-prefix owner first, while the
+// reservation WRITES through drainMemberOwningStore, which hand-walks the same
+// list with no such fast path. Same list, different consultation order, so the
+// exclusive reservation can land on a row the manifest never serves — and an
+// exclusive reservation nothing reads is not a lock.
+func TestManifestLoadAndReservationAgreeOnACoResidentMember(t *testing.T) {
+	work, graph, control, member := seedCoResidentDrainMember(t)
+	opts := ProcessOptions{MemberStores: []beads.Store{work}}
+
+	if err := reserveDrainMember(graph, control, member, opts); err != nil {
+		t.Fatalf("reserveDrainMember: %v", err)
+	}
+	loaded, err := loadDrainManifestMembers(graph, control.ID, coResidentDrainManifest(member.ID), opts)
+	if err != nil {
+		t.Fatalf("loadDrainManifestMembers: %v", err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("loaded %d members, want 1", len(loaded))
+	}
+	if got := loaded[0].Metadata[beadmeta.ExclusiveDrainReservationMetadataKey]; got != control.ID {
+		t.Fatalf("manifest member reservation = %q, want %q; the reservation was written to a copy the manifest does not serve", got, control.ID)
+	}
+}
+
+// TestCoResidentDrainMemberAnswersFromTheBinding is the absolute row behind the
+// relative one above. A drain member is a FOREIGN bead of statically unknown
+// class — the drain reads it, it did not mint it — so a binding copy of a member
+// id is the live relocated bead and the work copy is the one the migration
+// retained frozen. Answering from work serves the frozen copy, which is the
+// stale-read half of the shape storereftest's binding-wins clauses forbid.
+//
+// It is deliberately not satisfied by making both surfaces agree: a fix that
+// converged them on work-first would pass the row above and fail this one.
+func TestCoResidentDrainMemberAnswersFromTheBinding(t *testing.T) {
+	work, graph, control, member := seedCoResidentDrainMember(t)
+	opts := ProcessOptions{MemberStores: []beads.Store{work}}
+
+	if err := reserveDrainMember(graph, control, member, opts); err != nil {
+		t.Fatalf("reserveDrainMember: %v", err)
+	}
+	loaded, err := loadDrainManifestMembers(graph, control.ID, coResidentDrainManifest(member.ID), opts)
+	if err != nil {
+		t.Fatalf("loadDrainManifestMembers: %v", err)
+	}
+	if len(loaded) != 1 || loaded[0].Title != "binding copy" {
+		t.Fatalf("manifest served %q, want the binding copy", loaded[0].Title)
+	}
+
+	bindingRow, err := graph.Get(member.ID)
+	if err != nil {
+		t.Fatalf("graph.Get(member): %v", err)
+	}
+	if got := bindingRow.Metadata[beadmeta.ExclusiveDrainReservationMetadataKey]; got != control.ID {
+		t.Fatalf("binding copy reservation = %q, want %q", got, control.ID)
+	}
+
+	workRow, err := work.Get(member.ID)
+	if err != nil {
+		t.Fatalf("work.Get(member): %v", err)
+	}
+	if workRow.Title != "work copy" {
+		t.Fatalf("retained work copy title = %q, want it untouched", workRow.Title)
+	}
+	if got := workRow.Metadata[beadmeta.ExclusiveDrainReservationMetadataKey]; got != "" {
+		t.Fatalf("retained work copy carries reservation %q, want none; the frozen copy must not be written", got)
+	}
+}

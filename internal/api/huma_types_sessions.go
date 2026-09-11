@@ -41,6 +41,7 @@ type SessionGetInput struct {
 	ID        string `path:"id" doc:"Session ID, alias, or runtime session_name."`
 	Peek      bool   `query:"peek" required:"false" doc:"Include last output preview."`
 	PeekLines int    `query:"peek_lines" required:"false" minimum:"0" maximum:"10000" doc:"Number of lines to include in the last output preview when peek=true. Defaults to 5."`
+	ExactID   bool   `query:"exact_id" required:"false" doc:"Resolve {id} as an exact session bead id only: a single point read that also finds closed sessions and answers 404 when no bead has that id. Skips the alias, runtime session_name, configured-name and closed-session name lookups. For callers holding a durable id."`
 }
 
 // sessionCreateBody is the request body for POST /v0/sessions.

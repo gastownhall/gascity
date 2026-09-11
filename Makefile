@@ -406,6 +406,8 @@ TEST_ENV = env -i \
 	USER="$$USER" \
 	LOGNAME="$$LOGNAME" \
 	SHELL="$$SHELL" \
+	GIT_CONFIG_NOSYSTEM=1 \
+	GIT_CONFIG_GLOBAL="$$(scripts/test-gitconfig-path)" \
 	LANG="$$LANG" \
 	TMPDIR="$${TMPDIR:-/var/tmp}" \
 	OBSERVABLE_TEST_LOG="$${OBSERVABLE_TEST_LOG-}" \
@@ -586,7 +588,7 @@ setup-worker-inference:
 ## credential; the isolation this suite relies on flows through the per-run
 ## GC_HOME it hands to the gc subprocesses it spawns.
 test-worker-inference:
-	$(TEST_ENV) PROFILE="$(WORKER_INFERENCE_PROFILE)" GC_WORKER_REPORT_DIR="$(GC_WORKER_REPORT_DIR)" GC_HOME="$${GC_HOME:-$$HOME/.gc}" GC_TESTENV_PASSTHROUGH=GC_HOME go test -count=1 -tags acceptance_c -timeout 45m -v ./test/acceptance/worker_inference
+	$(TEST_ENV) GC_ACCEPTANCE_BD_BIN="$${GC_ACCEPTANCE_BD_BIN-}" GC_WORKER_INFERENCE_CURSOR_API_KEY="$${GC_WORKER_INFERENCE_CURSOR_API_KEY-}" GC_WORKER_INFERENCE_CURSOR_API_KEY_FILE="$${GC_WORKER_INFERENCE_CURSOR_API_KEY_FILE-}" CURSOR_API_KEY="$${CURSOR_API_KEY-}" PROFILE="$(WORKER_INFERENCE_PROFILE)" GC_WORKER_REPORT_DIR="$(GC_WORKER_REPORT_DIR)" GC_HOME="$${GC_HOME:-$$HOME/.gc}" GC_TESTENV_PASSTHROUGH=GC_HOME go test -count=1 -tags acceptance_c -timeout 45m -v ./test/acceptance/worker_inference
 
 ## test-worker-inference-phase3: alias for the live worker inference conformance package
 test-worker-inference-phase3: test-worker-inference
@@ -608,11 +610,15 @@ test-bd-cli-contract:
 		-run '^(TestBdBasicCRUD|TestBdDependencies|TestBdDestructive|TestBdWorkflow)$$' ./test/acceptance
 
 ## test-bd-conditional-release-contract: run the ReleaseIfCurrent CAS contract
-## against the bd on PATH. Split from test-bd-cli-contract because it is the one
-## bd contract the installable default cannot run: deps.env BD_VERSION predates
-## `--if-assignee`/`--if-status`, so it belongs on the source-built
-## BD_CURRENT_REF cell. GC_REQUIRE_BD_CONDITIONAL_RELEASE=1 turns the row's
-## capability skip into a failure, so the cell cannot pass while proving nothing.
+## against the bd on PATH. It was split from test-bd-cli-contract because it was
+## the one bd contract the installable default could not run -- deps.env
+## BD_VERSION predated `--if-assignee`/`--if-status`, so the row only had a home
+## on the source-built BD_CURRENT_REF cell. That is no longer true as of
+## BD_VERSION=v1.3.0-rc.2, which carries the flags, so the row now runs on every
+## cell rather than skipping on most. Kept separate anyway: it is the only
+## contract that needs a real CAS-capable bd, and BD_PREV_VERSION (v1.0.4) still
+## cannot run it. GC_REQUIRE_BD_CONDITIONAL_RELEASE=1 turns the row's capability
+## skip into a failure, so a cell cannot pass while proving nothing.
 ##
 ## The existence preflight closes the other way this cell can pass having proven
 ## nothing: a `-run` selector that matches no test is not an error to `go test`

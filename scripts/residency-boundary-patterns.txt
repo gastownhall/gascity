@@ -14,6 +14,60 @@
 # counted once, under its own name, and not a second time as a substring of
 # BeadStores().
 #
+# EVERY CALL-SHAPED ROW HERE IS ALSO AN ALIAS ROW. The Go half derives, from
+# these same regexes, the set of names it is a violation to take as a VALUE:
+# `g := BeadStores; g()` and `f(routes.storeFor)` call the accessor without
+# writing the call parenthesis these patterns key on. That rule is
+# ast:vocabulary-alias, it needs a parse tree (a value-position grep would fire
+# on `BeadStores` in prose and on the accessor's own declaration), and it reads
+# this file rather than a second list — so adding a row below extends both the
+# call census and the alias ban, and there is no way to extend one alone.
+# Rows with no call parenthesis (the []beads.Store literal, .Leg.Store, the
+# NudgeQueueIDPrefix constant) are deliberately not alias-guarded: a constant
+# taken by value is a copy, not a second derivation.
+#
+# THAT RULE GUARDS A NAME, NOT A BINDING. It has no type resolution, so it
+# cannot tell an alias of a guarded accessor from an unrelated local or
+# parameter that merely SHARES its name: after a:rigBeadStores was added below,
+# every read of a variable spelled `rigBeadStores` counts as a store-enumeration
+# site, whatever it holds. Two parameters in cmd/gc were renamed
+# `rigBeadStores` -> `rigStores` (agent_home_worktree_cleanup.go,
+# bead_worktree_reaper.go) for exactly this reason — those renames are
+# compliance changes, not cosmetics. Firing on a same-named local is the
+# deliberate direction to err in for a boundary guard, because it fails LOUD
+# rather than open; the resolutions are to rename the local or to write
+# `// residency:allow <reason>` on the line.
+#
+# THE SAME ROWS ALSO FEED ast:uncounted-call-spelling, which watches the calls
+# these regexes cannot see. Every method or qualified row here needs a dot, a
+# name and an open parenthesis ADJACENT ON ONE LINE. Three legal spellings break
+# that up and gofmt preserves all of them: `routes.` at the end of a line with
+# `storeFor(c)` at the start of the next; a renamed import so the qualifier a row
+# names never appears (`sr.EachLeg(...)` for storeref.EachLeg); and a
+# parenthesized receiver, which keeps every token on one line and still puts a
+# `)` between the qualifier and the dot (`(routes).storeFor(c)` for
+# routes.storeFor). None is exotic — gofmt writes the first itself on a long
+# chain — so the Go half counts them under their own name rather than letting a
+# line break or a pair of parentheses launder a call. The consequence worth
+# knowing: a method named EachLeg or ClassCandidates on some unrelated receiver
+# will be counted too, because the selector half of a qualified row is guarded
+# on its own. That is the deliberate direction to err in, and
+# `// residency:allow <reason>` is the answer for a real collision.
+#
+# THE RESIDUAL, NAMED HERE SO IT IS NOT REDISCOVERED: the Go half models that
+# ADJACENT requirement by LINE, not by contiguity. residencyGrepCouldNotCount
+# compares the receiver's end line against the selector's line, so a comment
+# between the receiver and the dot, or between the name and the open
+# parenthesis, keeps every token on one line and reads to the Go half as a call
+# grep could have counted — while the regex, which needs the dot, the name and
+# the `(` with nothing between them, cannot see it. So
+# `routes. /* c */ storeFor(c)` and `routes.storeFor /* c */ (c)` are uncounted
+# by BOTH halves; gofmt preserves both, and rewrites
+# `routes /* c */ .storeFor(c)` into the first of them. They escaped before this
+# rule existed too, so this is surface the rule has not closed yet, not surface
+# it opened. Closing the class means comparing byte offsets on both sides of the
+# selector, which needs the *ast.CallExpr that owns the `(`.
+#
 # (a) base-enumerator consumption. None of these ever contains a class binding,
 #     so every list built from one is binding-blind by construction.
 a:BeadStores	(^|[^A-Za-z0-9_])BeadStores\(\)
@@ -32,11 +86,15 @@ a:convoyStoreCandidates	(^|[^A-Za-z0-9_])convoyStoreCandidates\(
 #     reason storeref.EachLeg is: sanctioned is not free. Each call site is a
 #     surface asserting "this city serves all five infrastructure classes from
 #     one binding, and I am about to act on that" — the condition the accessor
-#     checks and refuses a fan-out for. Two are baselined today (the `gc bd`
-#     by-id front door and the claim-time class route). A third is a reviewed
-#     baseline change, because the review that matters is not whether the
-#     accessor was called correctly but whether that surface should be routing
-#     class-reserved ids at all.
+#     checks and refuses a fan-out for. Three are baselined today: the `gc bd`
+#     by-id front door, the claim-time class route, and the CLI fan-out
+#     federation (convoyStoreViewsWithBinding, which is the one place `gc beads
+#     list`, `gc convoy list`, `gc convoy stranded`, `gc convoy check` and the
+#     workflow-delete sweep all get the binding from — the reads through the
+#     tolerant wrapper, the check and the sweep through their own refusals).
+#     A fourth is a reviewed baseline change, because
+#     the review that matters is not whether the accessor was called correctly
+#     but whether that surface should be routing class-reserved ids at all.
 b:graphClassBinding	(^|[^A-Za-z0-9_])graphClassBinding\(
 b:cliSoleClassBinding	(^|[^A-Za-z0-9_])cliSoleClassBinding\(
 b:routes.storeFor	(^|[^A-Za-z0-9_])routes\.storeFor\(
@@ -44,8 +102,12 @@ b:storeref.ClassCandidates	(^|[^A-Za-z0-9_])storeref\.ClassCandidates\(
 # (c) hand-rolled probe lists and plan disassembly. The executor
 #     (ResolveOwner/Union) is the only place leg order and per-leg error policy
 #     are applied; a literal list skips both, and so does a consumer that runs a
-#     resolved plan's legs itself. plan-leg-store-access has zero hits today, so
-#     the first one is a violation.
+#     resolved plan's legs itself.
+#
+#     plan-leg-store-access is a TEXT rule and sees only the chain written on one
+#     line. Its AST twin, ast:plan-leg-store-chain, sees the same access split
+#     across a line break or a parenthesis; the two overlap on purpose, which is
+#     why cliSoleClassBinding carries a row under each.
 #
 #     storeref.EachLeg is the SANCTIONED enumeration seam — it hands over the
 #     order and the policy, which is what a hand-rolled list loses — but it is
@@ -78,6 +140,28 @@ c:storeref.EachLeg	(^|[^A-Za-z0-9_])storeref\.EachLeg\(
 c:WorkAxisRouter	(^|[^A-Za-z0-9_])WorkLegsForID\(
 # (d) bespoke residence probes. The namespace gate is the resolver's, and a site
 #     that re-derives it is one `gc storage migrate` away from ga-axin6.
+#
+#     The reserved-prefix table exports SIX accessors and one constant, and the
+#     family names every one. It named a single accessor once, and the gap was
+#     not theoretical: a site counted here retired by switching from
+#     ReservedClassPrefix( to the plural ReservedClassPrefixesFor(, which asks
+#     the same question about more namespaces. The baseline shrank and nothing
+#     moved. A pattern that sees one spelling of a question does not guard the
+#     question, it guards the spelling — and the spelling is the cheapest thing
+#     in the file to change.
+#
+#     Two of the rows below have no call sites today, which is the point. A
+#     pattern that only ever guards a non-zero count is a pattern that arrives
+#     after the site does; these are the two shapes a new bespoke probe would
+#     most naturally reach for — the whole table (ReservedClassPrefixes) and the
+#     one auxiliary namespace by name (NudgeQueueIDPrefix, which has no call
+#     parenthesis at all, so every other row in this family is blind to it).
 d:IDInNamespace	(^|[^A-Za-z0-9_])IDInNamespace\(
 d:bdIDIsClassReserved	(^|[^A-Za-z0-9_])bdIDIsClassReserved\(
 d:ReservedClassPrefix	(^|[^A-Za-z0-9_])ReservedClassPrefix\(
+d:ReservedClassPrefixes	(^|[^A-Za-z0-9_])ReservedClassPrefixes\(
+d:ReservedClassPrefixesFor	(^|[^A-Za-z0-9_])ReservedClassPrefixesFor\(
+d:AllReservedClassPrefixes	(^|[^A-Za-z0-9_])AllReservedClassPrefixes\(
+d:IsReservedClassPrefix	(^|[^A-Za-z0-9_])IsReservedClassPrefix\(
+d:ReservedPrefixesFor	(^|[^A-Za-z0-9_])ReservedPrefixesFor\(
+d:NudgeQueueIDPrefix	(^|[^A-Za-z0-9_])NudgeQueueIDPrefix($|[^A-Za-z0-9_])

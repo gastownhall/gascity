@@ -2877,6 +2877,60 @@ type falseNegativeRuntimeProvider struct {
 	falseNames map[string]bool
 }
 
+type observationErrorRuntimeProvider struct {
+	*runtime.Fake
+	livenessErr error
+	activityErr error
+}
+
+func (p *observationErrorRuntimeProvider) ObserveLivenessWithError(string, []string) (runtime.Liveness, error) {
+	if p.livenessErr != nil {
+		return runtime.Liveness{}, p.livenessErr
+	}
+	return runtime.Liveness{Running: true, Alive: true}, nil
+}
+
+func (p *observationErrorRuntimeProvider) GetLastActivity(string) (time.Time, error) {
+	return time.Time{}, p.activityErr
+}
+
+func TestObserveRuntimeForInfoPreservesObservationUncertainty(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		livenessErr error
+		activityErr error
+		wantError   bool
+	}{
+		{name: "liveness unavailable", livenessErr: fmt.Errorf("liveness transport: %w", runtime.ErrRuntimeUnavailable), wantError: true},
+		{name: "activity unavailable", activityErr: fmt.Errorf("activity transport: %w", runtime.ErrRuntimeUnavailable), wantError: true},
+		{name: "ordinary activity error stays best effort", activityErr: errors.New("malformed activity"), wantError: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := NewManagerWithOptions(beads.NewMemStore(), &observationErrorRuntimeProvider{
+				Fake:        runtime.NewFake(),
+				livenessErr: tc.livenessErr,
+				activityErr: tc.activityErr,
+			})
+			obs, err := mgr.ObserveRuntimeForInfo(Info{SessionName: "runtime-worker"}, nil)
+			if tc.wantError {
+				if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+					t.Fatalf("ObserveRuntimeForInfo error = %v, want runtime unavailable", err)
+				}
+				if obs != (RuntimeObservation{}) {
+					t.Fatalf("ObserveRuntimeForInfo observation = %#v, want zero with unknown result", obs)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ObserveRuntimeForInfo: %v", err)
+			}
+			if !obs.Running || !obs.Alive || !obs.LastActive.IsZero() {
+				t.Fatalf("ObserveRuntimeForInfo observation = %#v, want live with unknown activity", obs)
+			}
+		})
+	}
+}
+
 func (p *falseNegativeRuntimeProvider) IsRunning(name string) bool {
 	if p.falseNames[name] {
 		return false
@@ -2896,7 +2950,10 @@ func TestObserveRuntime_TreatsLiveProcessAsRunningWhenSessionProbeFalseNegatives
 		t.Fatalf("Create: %v", err)
 	}
 
-	obs := mgr.ObserveRuntimeForInfo(info, []string{"claude"})
+	obs, err := mgr.ObserveRuntimeForInfo(info, []string{"claude"})
+	if err != nil {
+		t.Fatalf("ObserveRuntimeForInfo: %v", err)
+	}
 	if !obs.Running || !obs.Alive {
 		t.Fatalf("ObserveRuntimeForInfo() = %#v, want running+alive true despite IsRunning false-negative", obs)
 	}
@@ -2911,7 +2968,10 @@ func TestObserveRuntime_WithoutProcessNamesTreatsRunningSessionAsAlive(t *testin
 		t.Fatalf("Create: %v", err)
 	}
 
-	obs := mgr.ObserveRuntimeForInfo(info, nil)
+	obs, err := mgr.ObserveRuntimeForInfo(info, nil)
+	if err != nil {
+		t.Fatalf("ObserveRuntimeForInfo: %v", err)
+	}
 	if !obs.Running || !obs.Alive {
 		t.Fatalf("ObserveRuntimeForInfo() = %#v, want running+alive true when no process names are configured", obs)
 	}
@@ -5549,5 +5609,58 @@ func TestPersistInvocationUsageCursor(t *testing.T) {
 	}
 	if got := b.Metadata[MetadataKeyInvocationUsageCursor]; got != "u2" {
 		t.Fatalf("cursor metadata after no-ops = %q, want u2", got)
+	}
+}
+
+// TestTranscriptPathZCodeResolvesEachSeatByBeadID pins the wiring that keys a
+// zcode transcript by the seat. Two seats can share session_name and
+// continuation_epoch (a pool slot re-seated within one run), and the adapter's
+// mirror scope tells them apart only by the session bead id gc exports to it
+// as GC_SESSION_ID — so that is what the lookup must carry, with the name-only
+// scope kept as the fallback for mirrors written before the seat was part of
+// the key.
+func TestTranscriptPathZCodeResolvesEachSeatByBeadID(t *testing.T) {
+	store := beads.NewMemStore()
+	mgr := NewManagerWithOptions(store, runtime.NewFake())
+	workDir := t.TempDir()
+	const sharedName = "beads--gc__implementation-reviewer-1-pool"
+
+	var infos []Info
+	for _, title := range []string{"seat-a", "seat-b", "seat-c"} {
+		info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: title, Command: "zcode-repl", WorkDir: workDir, Provider: "zcode", Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+		if err != nil {
+			t.Fatalf("Create %s: %v", title, err)
+		}
+		if err := store.SetMetadataBatch(info.ID, map[string]string{"session_name": sharedName, "continuation_epoch": "1"}); err != nil {
+			t.Fatalf("SetMetadataBatch %s: %v", title, err)
+		}
+		infos = append(infos, info)
+	}
+
+	searchBase := t.TempDir()
+	write := func(scope, id string) string {
+		dir := filepath.Join(searchBase, scope)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		path := filepath.Join(dir, id+".json")
+		body := `{"info":{"id":"` + id + `","directory":"` + filepath.ToSlash(workDir) + `"},"messages":[]}`
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		return path
+	}
+	seatA := write(sessionlog.ZCodeSeatMirrorScope(sharedName, infos[0].ID, "1"), "sess_a")
+	seatB := write(sessionlog.ZCodeSeatMirrorScope(sharedName, infos[1].ID, "1"), "sess_b")
+	legacy := write(sessionlog.ZCodeMirrorScope(sharedName, "1"), "sess_legacy")
+
+	for i, want := range []string{seatA, seatB, legacy} {
+		got, err := mgr.TranscriptPath(infos[i].ID, []string{searchBase})
+		if err != nil {
+			t.Fatalf("TranscriptPath(%s): %v", infos[i].ID, err)
+		}
+		if got != want {
+			t.Fatalf("TranscriptPath(%s) = %q, want %q", infos[i].ID, got, want)
+		}
 	}
 }

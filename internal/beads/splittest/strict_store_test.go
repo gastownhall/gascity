@@ -16,6 +16,16 @@ import (
 // with exactly this shape.
 const graphWispID = "gcg-wisp-y785sz"
 
+// graphNamespaces is the fence a leaf minting "gcg" has to carry: the
+// namespaces the graph class claims, which is what NewClassStore passes and
+// what newStrict now requires of any SQLiteSemantics leaf minting a reserved
+// class prefix. Reading it from config rather than writing {"gcg"} here keeps
+// these fixtures honest if the class ever gains an auxiliary namespace the way
+// nudges has one.
+func graphNamespaces() []string {
+	return config.ReservedClassPrefixesFor(config.BeadClassGraph)
+}
+
 func mustCreate(t *testing.T, s beads.Store, b beads.Bead) beads.Bead {
 	t.Helper()
 	created, err := s.Create(b)
@@ -167,6 +177,12 @@ func TestStrictStoreCatchesWhatLenientDoublesLetThrough(t *testing.T) {
 // an unroutable row. A kit that hard-failed here would put a test on an error
 // branch production never takes, so it accepts too — and records, so the fixture
 // still cannot walk past it.
+//
+// The dep half is the whole story for a class store. The pinned-id half is not:
+// OpenEngine also FENCES a class binding's store to the namespaces it claims, so
+// the unroutable row is refused before SQLite ever gets the chance to accept it.
+// Both outcomes are real, and which one a leaf gives depends on whether it
+// serves a binding — see pinned_id_fence.go and the two rows below.
 func TestClassStoreModelsSQLitesSilentAcceptance(t *testing.T) {
 	t.Parallel()
 
@@ -198,24 +214,48 @@ func TestClassStoreModelsSQLitesSilentAcceptance(t *testing.T) {
 		assertClaimedViolation(t, graph, "dep-add", workBead.ID)
 	})
 
-	t.Run("foreign-prefix create is accepted verbatim", func(t *testing.T) {
+	// The pinned-id half is the one the fence took back. An UNFENCED SQLite
+	// store still accepts a foreign-prefix row verbatim — normalizeCreate has no
+	// prefix check — so the kit models that outcome for a leaf with no namespace
+	// claim, and this row is what keeps that arm honest. A leaf serving a class
+	// binding is fenced, and the refusal is pinned beside it.
+	//
+	// The leaf mints a WORK-shaped prefix, because an unfenced SQLite store is
+	// exactly the work-serving engine binding: EngineReservedPrefixes returns
+	// nothing for any class set containing work, so that binding is opened with
+	// no namespace claim at all. A SQLite leaf minting a reserved class prefix
+	// and claiming nothing is a store production never opens, and newStrict
+	// refuses to build one.
+	t.Run("foreign-prefix create is accepted verbatim without a fence", func(t *testing.T) {
 		t.Parallel()
-		_, graph := NewSplitStores(t)
+		unfenced := newStrictMemLeaf(t, "hq", SQLiteSemantics)
 
-		created, err := graph.Create(beads.Bead{ID: "gc-123", Title: "work-prefixed row in the class database"})
+		created, err := unfenced.Create(beads.Bead{ID: "gc-123", Title: "another ledger's row in this database"})
 		if err != nil {
-			t.Fatalf("class store rejected a foreign-prefix create SQLite accepts: %v", err)
+			t.Fatalf("unfenced SQLite leaf rejected a foreign-prefix create SQLite accepts: %v", err)
 		}
 		if created.ID != "gc-123" {
 			t.Fatalf("created id = %q, want %q kept verbatim as SQLiteStore.normalizeCreate keeps it", created.ID, "gc-123")
 		}
-		if _, err := graph.Get("gc-123"); err != nil {
+		if _, err := unfenced.Get("gc-123"); err != nil {
 			t.Fatalf("get the foreign-prefix row: %v", err)
 		}
-		if owner := storeref.PrefixOwner("gc-123", []beads.Store{graph}); owner != nil {
-			t.Error("prefix routing found the foreign row in the class store; production's routing looks in the work store and never sees it, which is what makes the row unreachable")
+		if owner := storeref.PrefixOwner("gc-123", []beads.Store{unfenced}); owner != nil {
+			t.Error("prefix routing found the foreign row in this store; production's routing looks in the store that mints gc- and never sees it, which is what makes the row unreachable")
 		}
-		assertClaimedViolation(t, graph, "create", "gc-123")
+		assertClaimedViolation(t, unfenced, "create", "gc-123")
+	})
+
+	t.Run("a class binding's store is fenced, so the same create is refused", func(t *testing.T) {
+		t.Parallel()
+		_, graph := NewSplitStores(t)
+
+		if _, err := graph.Create(beads.Bead{ID: "gc-123", Title: "work-prefixed row in the class database"}); !errors.Is(err, beads.ErrPinnedIDOutsideNamespace) {
+			t.Fatalf("the class store answered %v, want ErrPinnedIDOutsideNamespace: OpenEngine fences a class binding to the namespaces it claims, so the unreachable row above is never written in the first place", err)
+		}
+		if _, err := graph.Get("gc-123"); !errors.Is(err, beads.ErrNotFound) {
+			t.Errorf("after the refusal Get(%q) = %v, want ErrNotFound", "gc-123", err)
+		}
 	})
 }
 
@@ -384,7 +424,7 @@ func TestStrictStoreCreateRejectsAClobberingLeaf(t *testing.T) {
 			t.Parallel()
 			leaf := beads.NewMemStore()
 			leaf.IDPrefix = "gcg" // mints gcg-<n>, but clobbers pinned ids
-			strict := StrictWithPrefix(t, leaf, "gcg", semantics)
+			strict := StrictWithPrefix(t, leaf, "gcg", semantics, graphNamespaces()...)
 
 			_, err := strict.Create(beads.Bead{ID: graphWispID, Title: "wisp"})
 			if err == nil {
@@ -407,7 +447,7 @@ func TestStrictStoreCreateRejectsAWrongPrefixLeaf(t *testing.T) {
 	for _, semantics := range []Semantics{BdSemantics, SQLiteSemantics} {
 		t.Run(semantics.String(), func(t *testing.T) {
 			t.Parallel()
-			strict := StrictWithPrefix(t, beads.NewMemStore(), "gcg", semantics) // leaf mints gc-<n>
+			strict := StrictWithPrefix(t, beads.NewMemStore(), "gcg", semantics, graphNamespaces()...) // leaf mints gc-<n>
 
 			_, err := strict.Create(beads.Bead{Title: "store-minted"})
 			if err == nil {
@@ -553,7 +593,7 @@ func TestStrictStoreForwardsOptionalCapabilities(t *testing.T) {
 		leaf := beads.NewMemStore()
 		leaf.IDPrefix = "gcg"
 		leaf.HonorExplicitIDs = true
-		if got, want := beads.StoreSupportsAtomicTx(StrictWithPrefix(t, leaf, "gcg", SQLiteSemantics)), beads.StoreSupportsAtomicTx(leaf); got != want {
+		if got, want := beads.StoreSupportsAtomicTx(StrictWithPrefix(t, leaf, "gcg", SQLiteSemantics, graphNamespaces()...)), beads.StoreSupportsAtomicTx(leaf); got != want {
 			t.Errorf("AtomicTx through the wrapper = %v, leaf = %v; wrapping must neither add nor remove atomicity", got, want)
 		}
 	})
@@ -684,7 +724,7 @@ func TestNewStrictRejectsAnUndeclaredContract(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store, err := newStrict(tc.leaf, tc.prefix, tc.semantics)
+			store, err := newStrict(tc.leaf, tc.prefix, tc.semantics, nil)
 			if err == nil {
 				t.Fatalf("newStrict returned %T for %s, want an error", store, tc.name)
 			}
@@ -693,6 +733,54 @@ func TestNewStrictRejectsAnUndeclaredContract(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestNewStrictRejectsAnUnfencedClassLeaf pins the guard that catches a
+// forgotten fence. The fence is variadic, so omitting it is silent and yields
+// the store this kit shipped before there was one — right for every leaf except
+// this shape, where the mint prefix says the leaf serves a class binding and
+// storebinding.EngineReservedPrefixes fences every one of those.
+//
+// The two accept rows are the over-restriction controls, and they are what keep
+// the guard from being "reserved prefixes are banned": a BdSemantics leaf is
+// modeling bd, which has no fence to forget, and a SQLiteSemantics leaf that
+// was given its namespaces is the very thing the guard is asking for.
+func TestNewStrictRejectsAnUnfencedClassLeaf(t *testing.T) {
+	t.Parallel()
+	t.Run("SQLiteSemantics, reserved mint prefix, no namespaces", func(t *testing.T) {
+		t.Parallel()
+		store, err := newStrict(beads.NewMemStore(), "gcg", SQLiteSemantics, nil)
+		if err == nil {
+			t.Fatalf("newStrict built %T for an unfenced class leaf; production opens no such store, so every write it accepts is one the binding would have refused", store)
+		}
+		if !strings.Contains(err.Error(), "reserved class prefix") {
+			t.Errorf("error %q does not name the rule it is enforcing", err)
+		}
+	})
+	t.Run("the auxiliary namespace is reserved just as strongly", func(t *testing.T) {
+		t.Parallel()
+		if _, err := newStrict(beads.NewMemStore(), config.NudgeQueueIDPrefix, SQLiteSemantics, nil); err == nil {
+			t.Errorf("newStrict accepted %q unfenced; a prefix a class HOLDS without minting it is as reserved as the mint prefix, and a leaf standing in for one is as fenced", config.NudgeQueueIDPrefix)
+		}
+	})
+	t.Run("fenced is what the guard is asking for", func(t *testing.T) {
+		t.Parallel()
+		if _, err := newStrict(beads.NewMemStore(), "gcg", SQLiteSemantics, graphNamespaces()); err != nil {
+			t.Errorf("newStrict refused a properly fenced class leaf: %v", err)
+		}
+	})
+	t.Run("BdSemantics has no fence to forget", func(t *testing.T) {
+		t.Parallel()
+		if _, err := newStrict(beads.NewMemStore(), "gcg", BdSemantics, nil); err != nil {
+			t.Errorf("newStrict refused an unfenced bd-shaped leaf: %v; bd is not the backend the fence is a property of, and refusing here would make the guard a ban on reserved prefixes", err)
+		}
+	})
+	t.Run("a work-shaped prefix stays open", func(t *testing.T) {
+		t.Parallel()
+		if _, err := newStrict(beads.NewMemStore(), "hq", SQLiteSemantics, nil); err != nil {
+			t.Errorf("newStrict refused an unfenced work-shaped leaf: %v; that leaf IS the work-serving engine binding, which EngineReservedPrefixes opens with no namespace claim at all", err)
+		}
+	})
 }
 
 // TestUnclaimedResidenceViolationsFailTheTest pins the loudness half of
@@ -718,12 +806,16 @@ func TestUnclaimedResidenceViolationsFailTheTest(t *testing.T) {
 // TestClaimingResidenceViolationsClearsThem pins the other half: a fixture that
 // asserts the production corruption claims the violations, and the store must
 // then have nothing left to fail its test with.
+// The leaf is unfenced because a fenced one refuses the create outright and
+// records nothing; the violation this is about is the one an unfenced SQLite
+// store accepts. Unfenced means work-shaped here — the work-serving engine
+// binding is the SQLite store production opens with no namespace claim.
 func TestClaimingResidenceViolationsClearsThem(t *testing.T) {
 	t.Parallel()
-	_, graph := NewSplitStores(t)
+	graph := newStrictMemLeaf(t, "hq", SQLiteSemantics)
 
 	if _, err := graph.Create(beads.Bead{ID: "gc-123", Title: "foreign row"}); err != nil {
-		t.Fatalf("class store rejected a create SQLite accepts: %v", err)
+		t.Fatalf("unfenced SQLite leaf rejected a create SQLite accepts: %v", err)
 	}
 	if claimed := TakeResidenceViolations(graph); len(claimed) != 1 {
 		t.Fatalf("claimed %v, want the one create violation", claimed)

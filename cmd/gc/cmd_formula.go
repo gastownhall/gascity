@@ -983,6 +983,14 @@ store, copy them into the binding with
 			// store that has never held it.
 			rootStore := store
 			if isGraphFormula {
+				// This arm writes molecule.Cook's sequence out rather than
+				// calling molecule.CookChoosingStore, and it needs all three
+				// capabilities that function's doc comment names as absent: the
+				// idempotency key is derived from the compiled recipe
+				// (stampFormulaCookGraphV2Root), the graph lock must stay held
+				// past the instantiate for the --meta stamp below, and the recipe
+				// is decorated through the store that will own it.
+				//
 				// Stamp the run root with its store/scope identity before
 				// instantiating, exactly as the --attach branch does via
 				// decorateFormulaCookGraphV2Recipe. Without it a standalone-cooked
@@ -1028,18 +1036,12 @@ store, copy them into the binding with
 				// compiler ran is what keeps such a wisp out of the work ledger,
 				// where it would read as a stranded infrastructure bead and stop
 				// boot. A v1 POURED molecule classifies as work and stays exactly
-				// where it always was. This is molecule.Cook's body, inlined only
-				// so the store can be chosen from the compiled recipe.
+				// where it always was.
 				opts := molecule.Options{Title: title, Vars: cookVars}
-				recipe, err := formula.CompileWithoutRuntimeVarValidation(cmd.Context(), args[0], scope.searchPaths, cookVars)
-				if err != nil {
-					return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("compiling formula %q: %w", args[0], err))
-				}
-				if err := molecule.ValidateRecipeRuntimeVars(recipe, opts); err != nil {
-					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
-				}
-				rootStore = moleculeClassStore(recipe, store, graphStore)
-				result, err = molecule.Instantiate(cmd.Context(), rootStore, recipe, opts)
+				var err error
+				result, rootStore, err = molecule.CookChoosingStore(cmd.Context(), args[0], scope.searchPaths, opts, func(recipe *formula.Recipe) beads.Store {
+					return moleculeClassStore(recipe, store, graphStore)
+				})
 				if err != nil {
 					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 				}

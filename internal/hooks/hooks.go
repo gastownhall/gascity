@@ -33,7 +33,7 @@ var configFS embed.FS
 var supported = []string{"claude", "codex", "gemini", "antigravity", "kiro", "opencode", "mimocode", "groq", "cerebras", "copilot", "cursor", "pi", "omp", "kimi"}
 
 const (
-	managedPiHookVersion       = 7
+	managedPiHookVersion       = 9
 	managedOpenCodeHookVersion = 6
 	managedMimoCodeHookVersion = 2
 	managedOmpHookVersion      = 2
@@ -203,7 +203,7 @@ func installOverlayManaged(fs fsys.FS, cityDir, workDir, provider string) error 
 				data = normalized
 			}
 		}
-		return writeEmbeddedManaged(fs, dst, data, overlayManagedNeedsUpgrade(provider, rel))
+		return writeEmbeddedManaged(fs, dst, data, overlayManagedNeedsUpgrade(provider, rel, data))
 	})
 }
 
@@ -226,7 +226,7 @@ func writeJSONOverlayManaged(fs fsys.FS, dst string, data []byte) error {
 	return writeManagedData(fs, dst, data)
 }
 
-func overlayManagedNeedsUpgrade(provider, rel string) func([]byte) bool {
+func overlayManagedNeedsUpgrade(provider, rel string, desired []byte) func([]byte) bool {
 	if provider == "pi" && rel == path.Join(".pi", "extensions", "gc-hooks.js") {
 		return piHookNeedsUpgrade
 	}
@@ -239,7 +239,58 @@ func overlayManagedNeedsUpgrade(provider, rel string) func([]byte) bool {
 	if provider == "omp" && rel == path.Join(".omp", "hooks", "gc-hook.ts") {
 		return ompHookNeedsUpgrade
 	}
+	if provider == "cursor" && rel == path.Join(".cursor", "hooks.json") {
+		return func(existing []byte) bool {
+			return cursorHookNeedsUpgrade(existing, desired)
+		}
+	}
 	return nil
+}
+
+func cursorHookNeedsUpgrade(existing, desired []byte) bool {
+	existingCanonical, err := overlay.CanonicalJSON(existing)
+	if err != nil {
+		return false
+	}
+	for _, legacy := range cursorHookLegacyVariants(desired) {
+		legacyCanonical, err := overlay.CanonicalJSON(legacy)
+		if err == nil && bytes.Equal(existingCanonical, legacyCanonical) {
+			return true
+		}
+	}
+	return false
+}
+
+// cursorHookLegacyVariants regenerates the most recently released managed
+// .cursor/hooks.json (#3457), derived from today's desired document so the
+// match stays independent of JSON formatting. Documents released before #3457
+// differ in the command body, not just the PATH prologue, so no transformation
+// of today's document reproduces them; they are intentionally left
+// un-upgraded rather than nonexistent, and adopting one is a deliberate
+// widening decision rather than a correction. Only released shapes belong
+// here: each variant widens the set of on-disk files installOverlayManaged
+// silently overwrites as managed, so a variant no workspace can be holding
+// costs safety and buys nothing.
+func cursorHookLegacyVariants(desired []byte) [][]byte {
+	const (
+		gcAware       = `\"${GC_BIN:-gc}\"`
+		gcBare        = `gc`
+		workspacePath = `export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\"; if [ -n \"${BD_BIN:-}\" ]; then export PATH=\"${BD_BIN%/*}:$PATH\"; fi; `
+		oldPath       = `export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\"`
+	)
+	variants := make([][]byte, 0, 1)
+	// Every managed hooks.json released to date uses a bare gc command and
+	// prepends provider tool paths with &&. The BD_BIN clause and the
+	// GC_BIN-aware commands are introduced by this change, so no released
+	// document carries them and no unreleased intermediate shape needs its
+	// own variant. Pre-#3457 released documents are out of scope here by
+	// choice, not because they do not exist.
+	legacy := bytes.ReplaceAll(desired, []byte(workspacePath), []byte(oldPath+` && `))
+	legacy = bytes.ReplaceAll(legacy, []byte(gcAware), []byte(gcBare))
+	if !bytes.Equal(legacy, desired) {
+		variants = append(variants, legacy)
+	}
+	return variants
 }
 
 func piHookNeedsUpgrade(existing []byte) bool {
@@ -254,6 +305,9 @@ func piHookNeedsUpgrade(existing []byte) bool {
 		!strings.Contains(content, "mirrorTempCounter") ||
 		!strings.Contains(content, "GC_PROVIDER_SESSION_ID") ||
 		!strings.Contains(content, "GC_PROVIDER_SESSION_ID_REQUIRED") ||
+		!strings.Contains(content, "GC_MANAGED_SESSION_HOOK") ||
+		!strings.Contains(content, "GC_HOOK_EVENT_NAME") ||
+		!strings.Contains(content, "pendingPrimeContext") ||
 		!strings.Contains(content, `stdio: ["ignore", "pipe", "inherit"]`) {
 		return true
 	}

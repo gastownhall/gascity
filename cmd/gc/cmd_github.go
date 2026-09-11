@@ -385,6 +385,16 @@ func githubPRRepairMetadata(result githubmonitor.Result) map[string]string {
 //
 // Two stores because the classes differ: the repair bead is work class, while
 // the attached workflow's class comes from the compiled recipe.
+//
+// On a converged city that therefore SPLITS the molecule from its parent: the
+// root lands in the graph binding carrying opts.ParentID, the repair bead it
+// names stays in the scope store, and the two are never in the same ledger.
+// That is the contract working, not a leak — beads.Bead.ParentID is a weak
+// city-scoped reference, so the link needs no lookup and neither store has to
+// see the other's rows. What it costs is that Children(repairBead.ID) against
+// the scope store does not return this molecule; a caller that wants the whole
+// tree asks the residency resolver, which is the one component that holds both
+// legs.
 func defaultAttachGitHubPRRepairWorkflow(store beads.Store, graphStore beads.GraphStore, cfg *config.City, rig config.Rig, monitor config.GitHubPRMonitor, bead beads.Bead, result githubmonitor.Result) error {
 	workflow := monitor.RepairWorkflowOrDefault()
 	if workflow == "" {

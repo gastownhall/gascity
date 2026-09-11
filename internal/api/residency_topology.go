@@ -139,49 +139,18 @@ func containsClass(classes []coordclass.Class, want coordclass.Class) bool {
 
 // apiResidencyBindings groups the relocated classes by the store serving them.
 //
+// The body is storeref.BuildBindings, shared with the CLI plane. What survives
+// here is the only thing that is this plane's own: it observes four of the five
+// infrastructure classes, so it hands the builder completeObservedClasses to
+// round a whole-split binding back up to the class set — and therefore the
+// StoreRef — the other planes name for the same store.
+//
 // relics is the boot census's verdict, read across the State surface. A nil one
 // is the pessimistic answer for every store: a caller with no census to offer
 // has not cleared anything.
 func apiResidencyBindings(order []beads.Store, byStore map[beads.Store][]coordclass.Class, relics func(beads.Store) bool) ([]storeref.ClassBinding, error) {
-	if len(order) == 0 {
-		return nil, nil
-	}
-	var refused error
-	bindings := make([]storeref.ClassBinding, 0, len(order))
-	for _, store := range order {
-		classes := completeObservedClasses(byStore[store])
-		// Every namespace the store HOLDS, not only the one each class mints
-		// under: a namespace the binding does not declare is one the resolver
-		// gives it no authority over, and the id falls through to the work
-		// ledger that never had it.
-		prefixes := make([]string, 0, len(classes))
-		for _, class := range classes {
-			prefixes = append(prefixes, config.ReservedClassPrefixesFor(class.String())...)
-		}
-		bindings = append(bindings, storeref.ClassBinding{
-			Classes:  classes,
-			Prefixes: prefixes,
-			Leg:      storeref.Leg{Ref: storeref.ClassRef(classes), Store: store},
-			// Both bits are observations: the mint bit from the store's own
-			// declaration, the relic bit from the boot that opened this binding
-			// and counted. Neither is ever optimistic by default — see the
-			// ClassBinding docs for why the optimistic pairing is the one shape
-			// that must never ship.
-			MintsReserved:      storeref.MintsInsideNamespace(store, prefixes),
-			HasLegacyResidents: apiHasLegacyResidents(relics, store),
-		})
-		if refusing, ok := store.(storeref.RefusingStore); ok && refused == nil {
-			refused = refusing.StorageRefusal()
-		}
-	}
-	return bindings, refused
-}
-
-// apiHasLegacyResidents applies the census verdict, or the pessimistic default
-// when there is no census to ask.
-func apiHasLegacyResidents(relics func(beads.Store) bool, store beads.Store) bool {
-	if relics == nil {
-		return true
-	}
-	return relics(store)
+	return storeref.BuildBindings(order, byStore, storeref.BindingOptions{
+		Relics:          relics,
+		CompleteClasses: completeObservedClasses,
+	})
 }
