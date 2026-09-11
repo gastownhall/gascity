@@ -389,6 +389,9 @@ func parseStatusBody(raw json.RawMessage) statusBodyParsed {
 
 // ── Per-rig store probe (ported from routes/rig-store-health.ts) ───────────
 
+// benignCheckCategories and rollupFor's "warning" arm are retained
+// forward-compatibly for a future multi-check probe: `bd ping` synthesizes one
+// "Beads" check whose status is only ok or error, so neither matches today.
 var benignCheckCategories = map[string]bool{"Git Integration": true, "Integrations": true}
 
 // pingConnectivityCheck is the name of the single connectivity check
@@ -525,7 +528,7 @@ func parsePingCheck(res *execResult) ([]rigStoreCheck, bool) {
 		Category: "Beads",
 		Name:     pingConnectivityCheck,
 		Status:   status,
-		Message:  sanitizeTerminalOutput(message),
+		Message:  sanitizeTerminalOutput(truncateRunes(message, maxProbeErrorRunes)),
 	}}, true
 }
 

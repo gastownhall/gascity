@@ -35,8 +35,11 @@ export interface RigStoreHealth {
   /** Configured dolt sql-server endpoint (host:port), or null when the store
    *  declares no server endpoint (e.g. embedded / jsonl-only mode). */
   doltEndpoint: string | null;
-  /** Dolt sql-server reachable at its endpoint. `null` when there is no
-   *  endpoint to probe (no outage to report for an embedded store). */
+  /** Dolt connectivity: the TCP probe result at `doltEndpoint` for a store
+   *  that persists `server` mode, and the `bd ping` connectivity check
+   *  otherwise (embedded and proxied-server stores report non-null here).
+   *  `null` only when the probe produced no connectivity signal at all — it
+   *  could not be run, or it exited 0 with no parseable JSON. */
   doltConnected: boolean | null;
   /** Store/dolt checks that are not `ok`. Benign hygiene categories
    *  (git hooks, editor integrations) are excluded — they are not store

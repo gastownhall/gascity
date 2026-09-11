@@ -153,12 +153,12 @@ func (b *cappedBuffer) String() string { return b.buf.String() }
 // environment is inherited; PATH/HOME/LANG are assigned intentionally.
 //
 // GITHUB_TOKEN is deliberately NOT forwarded: none of the dashboard's
-// read-only probes (git log/diff, Beads connectivity, version probes) need it, and
-// leaking it into a git invocation whose cwd is request-influenced would be
-// needless credential exposure (least privilege). The GIT_* settings neutralize
-// attacker-authored repo config in a probed cwd — no transport protocols and no
-// terminal credential prompt — so a hostile repo cannot drive an out-of-band
-// helper that inherits this environment.
+// credential-free probes (git log/diff, Beads connectivity, version probes)
+// need it, and leaking it into a git invocation whose cwd is
+// request-influenced would be needless credential exposure (least privilege).
+// The GIT_* settings neutralize attacker-authored repo config in a probed cwd
+// — no transport protocols and no terminal credential prompt — so a hostile
+// repo cannot drive an out-of-band helper that inherits this environment.
 func cleanEnv() []string {
 	home := os.Getenv("HOME")
 	if home == "" {
@@ -265,11 +265,17 @@ func (r *execRunner) execGitLog(ctx context.Context, view string) (*execResult, 
 // executes one bounded query — but it is not a passive observation: on bd
 // v1.3.0-rc.2 every ordinary command short-circuits to the UOW provider
 // (cmd/bd/main.go:1758-1791), so pinging a proxied scope whose proxy is
-// stopped STARTS that proxy and its Dolt child. That is acceptable here
-// because the sampler runs inside the supervisor and dies with it, and
-// `gc stop` stops the proxies last — the dashboard never outlives the
-// topology it warms. Do not pass --readonly: the proxied-server provider owns
-// its read-only policy and rejects that flag in the RC.
+// stopped STARTS that proxy and its Dolt child. What bounds that is the
+// sampler's own gate, not shutdown ordering: refresh abandons the tick when a
+// city's status read fails, so a city that has been stopped is never reached
+// by the probe fan-out. Do not weaken that early return believing teardown
+// order protects this — the supervisor hosting the sampler serves every
+// registered city and outlives any one city's `gc stop`, and that stop closes
+// workspace-service proxies before it stops sessions rather than last. A ping
+// already in flight while a city's proxies close can re-warm one; that window
+// is bounded by context cancellation and the 5-minute probe cadence. Do not
+// pass --readonly: the proxied-server provider owns its read-only policy and
+// rejects that flag in the RC.
 func (r *execRunner) execBdPing(ctx context.Context, beadsPath string) (*execResult, error) {
 	if !isValidHostPath(beadsPath) || !strings.HasSuffix(beadsPath, "/.beads") {
 		return nil, validationErr("invalid beads store path")

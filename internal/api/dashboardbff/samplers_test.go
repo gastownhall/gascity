@@ -180,6 +180,29 @@ func TestProbeRigReportsPingErrorEnvelopeAsDown(t *testing.T) {
 	}
 }
 
+// TestProbeRigTruncatesPingErrorEnvelopeMessage pins the rune cap on the JSON
+// error-envelope fold path. maxProbeErrorRunes exists so a chatty provider
+// cannot bloat the snapshot the dashboard polls, and the envelope path is the
+// one where the provider is healthy enough to be verbose — so it must truncate
+// exactly like the stderr and note paths do.
+func TestProbeRigTruncatesPingErrorEnvelopeMessage(t *testing.T) {
+	rig, bin := newProbeRigFixture(t)
+	long := strings.Repeat("A", maxProbeErrorRunes+128)
+	writeFakeBd(t, bin, "#!/bin/sh\nprintf '%s' '{\"error\":\""+long+"\",\"schema_version\":1}'\nexit 1\n")
+
+	rep := newSamplerManager(Deps{}, newExecRunner()).probeRig(context.Background(), "r1", rig)
+	if len(rep.Problems) != 1 {
+		t.Fatalf("probeRig() = %+v, want exactly one problem", rep)
+	}
+	got := rep.Problems[0].Message
+	if n := len([]rune(got)); n != maxProbeErrorRunes {
+		t.Fatalf("probeRig problem message rune count = %d, want the %d-rune cap", n, maxProbeErrorRunes)
+	}
+	if got != strings.Repeat("A", maxProbeErrorRunes) {
+		t.Fatalf("probeRig problem message = %q, want the provider error truncated to the cap", got)
+	}
+}
+
 // TestProbeRigReportsPingStderrFailureAsDown covers the failure shape ping
 // actually produces when the store cannot be opened at all: plain text on
 // stderr, empty stdout, non-zero exit. Nothing is parseable, so the probe must
