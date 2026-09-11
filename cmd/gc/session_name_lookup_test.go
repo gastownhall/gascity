@@ -528,7 +528,7 @@ func TestDerivePoolSessionName(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := derivePoolSessionName(nil, nil, tt.template, poolSessionCreateIdentity{AgentName: tt.identity, Slot: tt.slot}, tt.alias, tt.snapshot)
+			got, err := derivePoolSessionName(tt.template, poolSessionCreateIdentity{AgentName: tt.identity, Slot: tt.slot}, tt.alias, tt.snapshot)
 			if err != nil {
 				t.Fatalf("derivePoolSessionName: %v", err)
 			}
@@ -548,7 +548,7 @@ func TestDerivePoolSessionNameFailsClosedOnSnapshotCollision(t *testing.T) {
 		},
 	}})
 
-	_, err := derivePoolSessionName(nil, nil, "claude", poolSessionCreateIdentity{AgentName: "claude-1", Slot: 1}, "", snapshot)
+	_, err := derivePoolSessionName("claude", poolSessionCreateIdentity{AgentName: "claude-1", Slot: 1}, "", snapshot)
 	if !errors.Is(err, errPoolSessionNameUnavailable) {
 		t.Fatalf("derivePoolSessionName error = %v, want errPoolSessionNameUnavailable", err)
 	}
@@ -588,7 +588,7 @@ func TestDerivePoolSessionNameBoundsAliasedSlotSuffix(t *testing.T) {
 		t.Fatalf("precondition: %d-char alias should be a valid explicit name: %v", len(alias), err)
 	}
 
-	slot2, err := derivePoolSessionName(nil, nil, "claude", poolSessionCreateIdentity{AgentName: "claude-2", Slot: 2}, alias, nil)
+	slot2, err := derivePoolSessionName("claude", poolSessionCreateIdentity{AgentName: "claude-2", Slot: 2}, alias, nil)
 	if err != nil {
 		t.Fatalf("derivePoolSessionName(slot 2): %v", err)
 	}
@@ -599,7 +599,7 @@ func TestDerivePoolSessionNameBoundsAliasedSlotSuffix(t *testing.T) {
 		t.Fatalf("slot-2 name %q is not a valid explicit session name: %v", slot2, err)
 	}
 
-	again, err := derivePoolSessionName(nil, nil, "claude", poolSessionCreateIdentity{AgentName: "claude-2", Slot: 2}, alias, nil)
+	again, err := derivePoolSessionName("claude", poolSessionCreateIdentity{AgentName: "claude-2", Slot: 2}, alias, nil)
 	if err != nil {
 		t.Fatalf("derivePoolSessionName(slot 2 again): %v", err)
 	}
@@ -607,7 +607,7 @@ func TestDerivePoolSessionNameBoundsAliasedSlotSuffix(t *testing.T) {
 		t.Fatalf("derivePoolSessionName is not deterministic for a shortened aliased slot: %q vs %q", slot2, again)
 	}
 
-	slot3, err := derivePoolSessionName(nil, nil, "claude", poolSessionCreateIdentity{AgentName: "claude-3", Slot: 3}, alias, nil)
+	slot3, err := derivePoolSessionName("claude", poolSessionCreateIdentity{AgentName: "claude-3", Slot: 3}, alias, nil)
 	if err != nil {
 		t.Fatalf("derivePoolSessionName(slot 3): %v", err)
 	}
@@ -654,7 +654,7 @@ func TestPoolRuntimeSessionNameStepsAsideForTransientSlot(t *testing.T) {
 // TransientSlot flag into poolRuntimeSessionName so the persisted session_name
 // (and therefore GC_AGENT) is never the bare slot.
 func TestDerivePoolSessionNameStepsAsideForTransientSlot(t *testing.T) {
-	got, err := derivePoolSessionName(nil, nil, "pooled", poolSessionCreateIdentity{AgentName: "pooled-1", Slot: 1, TransientSlot: true}, "", nil)
+	got, err := derivePoolSessionName("pooled", poolSessionCreateIdentity{AgentName: "pooled-1", Slot: 1, TransientSlot: true}, "", nil)
 	if err != nil {
 		t.Fatalf("derivePoolSessionName: %v", err)
 	}

@@ -224,9 +224,19 @@ func RoutedToIdentity(agent *config.Agent) string {
 // a configured multi-session pool agent and N is a valid slot (>=1, and within
 // the agent's max when bounded) — the inverse of resolvePoolInstanceQualified.
 // Any other target (base names, non-pool agents, out-of-range or non-numeric
-// suffixes, unknown agents) is returned unchanged.
+// suffixes, unknown agents) is returned unchanged. A target that is itself a
+// configured agent's qualified name is likewise never collapsed.
 func NormalizePoolRouteTarget(cfg *config.City, target string) string {
 	if cfg == nil || target == "" {
+		return target
+	}
+	// Literal-before-slot precedence, mirroring ResolveAgent: a literal
+	// qualified match (step 2) wins over pool-instance synthesis (step 2b).
+	// A target that names a configured agent outright is a real routing
+	// destination, not a load-balancing hint, so it must never collapse into
+	// a same-prefixed pool base — e.g. an agent "myrig/polecat-4090" next to
+	// an unbounded pool "myrig/polecat" would otherwise lose its identity.
+	if _, ok := findAgentByQualified(cfg, target); ok {
 		return target
 	}
 	for i := range cfg.Agents {

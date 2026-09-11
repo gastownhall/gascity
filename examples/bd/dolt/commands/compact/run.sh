@@ -1073,6 +1073,12 @@ preflight_counts() {
   tables_tmp=$(mktemp)
   : > "$out"
   preflight_excluded_tables=""
+  # Reset unconditionally, not inside the dolt_ignore branch below: compaction
+  # walks every database in one shell process, so a database with no
+  # dolt_ignore patterns would otherwise inherit the previous database's list.
+  # db_root_drift_within_verified_tables reads this to admit drift, so a stale
+  # value would admit it for the wrong database.
+  preflight_dolt_ignored_tables=""
   if ! user_tables "$db" > "$tables_tmp"; then
     rm -f "$tables_tmp"
     return 1
@@ -1088,7 +1094,6 @@ preflight_counts() {
   dolt_ignore_patterns "$db" > "$ignored_patterns_tmp" || true
   if [ -s "$ignored_patterns_tmp" ]; then
     filtered_committed_tmp=$(mktemp)
-    preflight_dolt_ignored_tables=""
     while IFS= read -r ct; do
       [ -n "$ct" ] || continue
       ct_matched=0
@@ -1173,6 +1178,7 @@ verify_counts() {
   verify_counts_saw_row_decrease=0
   verify_counts_saw_decrease_hash_drift=0
   verify_counts_saw_same_count_hash_drift=0
+  verify_counts_same_count_drift_tables=""
   verify_counts_saw_table_list_change=0
   verify_counts_saw_probe_failure=0
   verify_counts_failure_reason=""
@@ -1271,6 +1277,7 @@ verify_counts() {
         printf 'compact: db=%s table=%s value hash changed after flatten without row-count increase before=%s after=%s — quarantine and investigate before GC\n' \
           "$db" "$t" "$expected_hash" "$actual_hash" >&2
         verify_counts_saw_same_count_hash_drift=1
+        verify_counts_same_count_drift_tables="$verify_counts_same_count_drift_tables $t"
         if [ "$fail" -ne 1 ]; then
           fail=1
           verify_counts_failure_reason="post-flatten table value hash changed without row-count increase"
@@ -1351,6 +1358,20 @@ verify_counts() {
 #    rewritten, so a first commit only introduced rows, and an
 #    already-committed table keeps every row it held at <from> intact at <to>.
 #
+#    One shape inside category 2 cannot satisfy that proof, and must not be
+#    asked to: a dolt_ignore'd table that a force-healed store inlined into the
+#    committed root. -Am cannot stage a dolt_ignore'd table, so the flatten's
+#    DOLT_RESET('--soft', root) un-tracks it and the flatten commit DROPS it.
+#    The diff is a deletion by construction, on every flatten of an affected
+#    database, for as long as the table stays inlined -- so it never self-heals
+#    and deferring starves GC exactly as a quarantine does. It is admitted on
+#    preflight's own positive identification (preflight_dolt_ignored_tables)
+#    rather than on a content diff. The rows are not lost: they remain in the
+#    working set, which DOLT_GC keeps reachable, and that is already the steady
+#    state for every database whose ignored tables were never force-inlined.
+#    What the flatten drops is the table's presence in the committed root --
+#    which is the same thing a flatten does to all history by design.
+#
 # Any other table (system tables such as dolt_schemas), a first-committed
 # table whose diff is not added-only or whose diff probe fails, an empty
 # DOLT_DIFF_STAT, or a DIFF_STAT probe failure fails closed. Exports the full
@@ -1362,6 +1383,7 @@ db_root_drift_within_verified_tables() {
   preflight_file="$4"
   db_root_drift_proven_tables=""
   db_root_drift_first_committed_tables=""
+  db_root_drift_dropped_ignored_tables=""
   db_root_drift_stat_tables=""
   [ -n "$from" ] && [ -n "$to" ] || return 1
   stat_tmp=$(mktemp)
@@ -1385,6 +1407,7 @@ db_root_drift_within_verified_tables() {
   fi
   drift_verified_tables=""
   drift_first_committed_tables=""
+  drift_dropped_ignored_tables=""
   drift_unproven_tables=""
   for drift_t in $drift_tables; do
     db_root_drift_stat_tables="$db_root_drift_stat_tables $drift_t"
@@ -1398,11 +1421,23 @@ db_root_drift_within_verified_tables() {
     fi
     case " $preflight_excluded_tables " in
       *" $drift_t "*)
-        if diff_is_additive_only "$db" "$from" "$to" "$drift_t"; then
-          drift_first_committed_tables="$drift_first_committed_tables $drift_t"
-        else
-          drift_unproven_tables="$drift_unproven_tables $drift_t (first-commit diff not added-only or diff probe failed)"
-        fi
+        case " $preflight_dolt_ignored_tables " in
+          *" $drift_t "*)
+            # Category 2, drop direction. -Am cannot stage a dolt_ignore'd
+            # table, so the flatten's DOLT_RESET('--soft') un-tracks it and the
+            # flatten commit DROPS it. The diff is a deletion by construction,
+            # so diff_is_additive_only can never admit it -- see the comment on
+            # this function for why that is not evidence of corruption.
+            drift_dropped_ignored_tables="$drift_dropped_ignored_tables $drift_t"
+            ;;
+          *)
+            if diff_is_additive_only "$db" "$from" "$to" "$drift_t"; then
+              drift_first_committed_tables="$drift_first_committed_tables $drift_t"
+            else
+              drift_unproven_tables="$drift_unproven_tables $drift_t (first-commit diff not added-only or diff probe failed)"
+            fi
+            ;;
+        esac
         ;;
       *)
         drift_unproven_tables="$drift_unproven_tables $drift_t (outside verified set)"
@@ -1417,6 +1452,7 @@ db_root_drift_within_verified_tables() {
   fi
   db_root_drift_proven_tables=${drift_verified_tables# }
   db_root_drift_first_committed_tables=${drift_first_committed_tables# }
+  db_root_drift_dropped_ignored_tables=${drift_dropped_ignored_tables# }
   return 0
 }
 
@@ -1508,7 +1544,7 @@ write_compact_marker() {
       if mail_compact_quarantine_alert "$db" "compact-quarantine" "$marker_path" "$reason" "$created_at"; then
         record_marker_notify_state "$quarantine_dir" "$db" "$reason" 1
       else
-        record_marker_notify_state "$quarantine_dir" "$db" "$reason" 0
+        record_marker_notify_state "$quarantine_dir" "$db" "$reason" 0 "$quarantine_notify_error"
       fi
     else
       record_marker_notify_state "$quarantine_dir" "$db" "$reason" 0
@@ -1527,6 +1563,18 @@ emit_compact_quarantine_event() {
   gc event emit dolt.compact.quarantine --actor controller --message "$_ca_msg" || true
 }
 
+# quarantine_notify_error holds why the last alert did not land, for the
+# marker. Empty means delivered; callers reset it before each attempt.
+quarantine_notify_error=""
+
+# mail_compact_quarantine_alert DB TYPE MARKER REASON [CREATED_AT]
+#   Send the quarantine alert; return 0 on delivery, 1 on a failed send with
+#   the reason recorded in quarantine_notify_error. CONTRACT: call this ONLY as
+#   a condition (e.g. `if mail_compact_quarantine_alert ...`), never as a bare
+#   statement. The internal _ca_err=$(gc mail send ...) capture runs under
+#   `set -eu`, so a bare-statement call would abort the whole compaction run on
+#   a failed send -- the exact silent mid-cycle failure this alert exists to
+#   prevent.
 mail_compact_quarantine_alert() {
   _ca_db="$1"
   _ca_type="$2"
@@ -1534,9 +1582,19 @@ mail_compact_quarantine_alert() {
   _ca_reason="$4"
   _ca_created_at="${5:-<unknown>}"
   _ca_msg="db=$_ca_db type=$_ca_type marker=$_ca_path reason=$_ca_reason created_at=$_ca_created_at recipient=$compact_alert_to"
-  if gc mail send "$compact_alert_to" --from controller -s "dolt compact quarantine: $_ca_db $_ca_type" -m "$_ca_msg"; then
+  quarantine_notify_error=""
+  exec 4>&1
+  _ca_err=$(gc mail send "$compact_alert_to" --from controller -s "dolt compact quarantine: $_ca_db $_ca_type" -m "$_ca_msg" 2>&1 1>&4)
+  _ca_status=$?
+  exec 4>&-
+  if [ "$_ca_status" -eq 0 ]; then
     return 0
   fi
+  # A quarantine nobody is told about is a quarantine nobody clears, so an
+  # undelivered alert has to be as loud as the quarantine itself.
+  quarantine_notify_error=$(printf '%s' "$_ca_err" | tr '\n' ' ' | cut -c1-200)
+  printf 'compact: db=%s quarantine alert did not reach recipient %s: %s\n' \
+    "$_ca_db" "$compact_alert_to" "${quarantine_notify_error:-<no error output>}" >&2
   return 1
 }
 
@@ -1583,16 +1641,19 @@ marker_should_notify() {
 
 # record_marker_notify_state DIR DB REASON EMITTED
 #   Patches only the notify-bookkeeping fields (seen_count, notify_count,
-#   last_notified_ts, last_notified_reason) onto DB's existing marker in
-#   DIR, preserving every other field byte-for-byte. EMITTED=1 bumps
-#   notify_count and stamps last_notified_ts/last_notified_reason; EMITTED=0
-#   only bumps seen_count. A missing marker or write failure is a silent
+#   last_notified_ts, last_notified_reason, last_notify_error) onto DB's
+#   existing marker in DIR, preserving every other field byte-for-byte.
+#   EMITTED=1 bumps notify_count, stamps last_notified_ts/last_notified_reason
+#   and clears last_notify_error; EMITTED=0 bumps seen_count and records
+#   ERROR, so a marker stuck at notify_count=0 says why instead of leaving
+#   the operator to guess. A missing marker or write failure is a silent
 #   no-op — bookkeeping must never block or fail compaction.
 record_marker_notify_state() {
   _mn_dir="$1"
   _mn_db="$2"
   _mn_reason="$3"
   _mn_emitted="$4"
+  _mn_error="${5:-}"
 
   _mn_marker=$(compact_marker_path "$_mn_dir" "$_mn_db")
   [ -f "$_mn_marker" ] && [ -r "$_mn_marker" ] || return 0
@@ -1605,10 +1666,12 @@ record_marker_notify_state() {
   case "$_mn_notify_count" in ''|*[!0-9]*) _mn_notify_count=0 ;; esac
   _mn_last_ts=$(compact_marker_value "$_mn_dir" "$_mn_db" last_notified_ts || true)
   _mn_last_reason=$(compact_marker_value "$_mn_dir" "$_mn_db" last_notified_reason || true)
+  _mn_last_error="$_mn_error"
   if [ "$_mn_emitted" = "1" ]; then
     _mn_notify_count=$((_mn_notify_count + 1))
     _mn_last_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     _mn_last_reason="$_mn_reason"
+    _mn_last_error=""
   fi
 
   _mn_old_umask=$(umask)
@@ -1618,7 +1681,7 @@ record_marker_notify_state() {
     return 0
   }
   umask "$_mn_old_umask"
-  if ! awk '!/^(seen_count|notify_count|last_notified_ts|last_notified_reason)=/' "$_mn_marker" > "$_mn_tmp" 2>/dev/null; then
+  if ! awk '!/^(seen_count|notify_count|last_notified_ts|last_notified_reason|last_notify_error)=/' "$_mn_marker" > "$_mn_tmp" 2>/dev/null; then
     rm -f "$_mn_tmp"
     return 0
   fi
@@ -1627,6 +1690,7 @@ record_marker_notify_state() {
     printf 'notify_count=%s\n' "$_mn_notify_count"
     printf 'last_notified_ts=%s\n' "$_mn_last_ts"
     printf 'last_notified_reason=%s\n' "$_mn_last_reason"
+    printf 'last_notify_error=%s\n' "$_mn_last_error"
   } >> "$_mn_tmp" 2>/dev/null; then
     rm -f "$_mn_tmp"
     return 0
@@ -1647,6 +1711,8 @@ record_marker_notify_state() {
 #   elapses, instead of once ever or on every single cycle.
 report_existing_quarantine() {
   db="$1"
+  # One run reports many dbs; a prior db's send failure is not this db's.
+  quarantine_notify_error=""
   quarantine_marker=$(compact_marker_path "$quarantine_dir" "$db")
   quarantine_reason=$(compact_marker_value "$quarantine_dir" "$db" reason || true)
   quarantine_created_at=$(compact_marker_value "$quarantine_dir" "$db" created_at || true)
@@ -1662,7 +1728,7 @@ report_existing_quarantine() {
       quarantine_alert_emitted=1
     fi
   fi
-  record_marker_notify_state "$quarantine_dir" "$db" "${quarantine_reason:-<unknown>}" "$quarantine_alert_emitted"
+  record_marker_notify_state "$quarantine_dir" "$db" "${quarantine_reason:-<unknown>}" "$quarantine_alert_emitted" "$quarantine_notify_error"
 }
 
 ensure_compact_marker_writable() {
@@ -2258,6 +2324,7 @@ flatten_database() {
   verify_counts_saw_row_decrease=0
   verify_counts_saw_decrease_hash_drift=0
   verify_counts_saw_same_count_hash_drift=0
+  verify_counts_same_count_drift_tables=""
   verify_counts_saw_table_list_change=0
   verify_counts_saw_probe_failure=0
   verify_counts_failure_reason=""
@@ -2735,12 +2802,15 @@ flatten_database() {
   if [ "$verify_counts_rc" -ne 0 ]; then
     integrity_reason="${verify_counts_failure_reason:-post-flatten integrity check failed}"
     integrity_guidance="${verify_counts_failure_guidance:-post-flatten integrity check failed; investigate before re-running}"
-    # The blocks below each downgrade a quarantine to a skip-and-retry defer for
-    # one benign concurrent-writer signature — gain+drift, row-count decrease, or
-    # same-count value-hash drift — but only when a concurrent writer is
-    # HEAD-proven (or, for gain+drift, proven additive-only via DOLT_DIFF). A
-    # signature mixed with any other failure category, table-list drift, a probe
-    # failure, or a stable HEAD still quarantines below unchanged.
+    # Downgrade quarantine -> defer for specific integrity-failure categories
+    # where a concurrent writer is proven, rather than assuming corruption.
+    # Three categories get their own proof-gated defer path below: gain+drift
+    # (HEAD-proven writer race, or an absorbed-writer race proven
+    # additive-only via diff), row-count decrease (HEAD-proven concurrent
+    # DELETE), and same-count hash drift (HEAD-proven writer race proven
+    # additive-only via diff — a concurrent UPDATE). Table-list drift, probe
+    # failure, or any case whose specific proof fails still quarantine below
+    # unchanged.
     if [ "$writer_race_detected" = "1" ] && \
        [ "${verify_counts_saw_gain:-0}" = "1" ] && \
        [ "${verify_counts_saw_gain_hash_drift:-0}" = "1" ] && \
@@ -2809,23 +2879,25 @@ flatten_database() {
       return 0
     fi
     # Downgrade quarantine -> defer for concurrent-writer UPDATE. A concurrent
-    # UPDATE during the flatten window changes a committed table's value hash
-    # while leaving its row count unchanged — the net-zero-row-count churn that
-    # dominates the busiest db's workload (ephemeral wisp pour/burn and bead/mail
-    # row updates). The whole-database value-hash drift downgrade below already
-    # defers a same-content change when a concurrent writer is HEAD-proven, so the
-    # per-table check must not be stricter than the database-level check for the
-    # same phenomenon. Safe to defer when a writer is proven and no other anomaly
-    # (row gain+drift, row decrease, table-list change, or probe failure)
-    # prevents safe deferral.
+    # UPDATE during the flatten window changes row values without changing row
+    # counts, which verify_counts cannot distinguish from corruption by count
+    # alone. Prove it directly the same way the absorbed-writer gain+drift case
+    # does: diff the pre-flight snapshot HEAD against the flatten commit for
+    # each drifted table. Purely additive (no removed/modified rows) proves
+    # the flatten itself never touched the table, so the drift is the
+    # concurrent writer's; defer exactly as the other proven-writer-race paths
+    # above do. Any removed/modified row, a diff-probe failure, or an
+    # unproven HEAD movement fails closed and falls through to quarantine.
     if [ "$writer_race_detected" = "1" ] && \
        [ "${verify_counts_saw_same_count_hash_drift:-0}" = "1" ] && \
+       [ "${verify_counts_saw_gain:-0}" != "1" ] && \
        [ "${verify_counts_saw_gain_hash_drift:-0}" != "1" ] && \
        [ "${verify_counts_saw_row_decrease:-0}" != "1" ] && \
        [ "${verify_counts_saw_table_list_change:-0}" != "1" ] && \
-       [ "${verify_counts_saw_probe_failure:-0}" != "1" ]; then
-      printf 'compact: db=%s writer race detected during flatten (snapshot_HEAD=%s pre_reset_HEAD=%s flatten_HEAD=%s post_verify_HEAD=%s) — same-count table value hash drift is concurrent-writer UPDATE data, not corruption; deferring, will retry next run\n' \
-        "$db" "$head" "${head_before_reset:-<empty>}" "$flatten_head" "${post_verify_head:-<empty>}" >&2
+       [ "${verify_counts_saw_probe_failure:-0}" != "1" ] && \
+       gain_drift_is_additive_only "$db" "$head" "$flatten_head" "$verify_counts_same_count_drift_tables"; then
+      printf 'compact: db=%s writer race detected during flatten (snapshot_HEAD=%s pre_reset_HEAD=%s flatten_HEAD=%s post_verify_HEAD=%s) — same-count table value hash drift proven additive-only via DOLT_DIFF(%s..%s) for tables [%s] is concurrent-writer UPDATE, not corruption; deferring, will retry next run\n' \
+        "$db" "$head" "${head_before_reset:-<empty>}" "$flatten_head" "${post_verify_head:-<empty>}" "$head" "$flatten_head" "${verify_counts_same_count_drift_tables# }" >&2
       if ! defer_writer_race_after_flatten "$db" "$flatten_head" \
         "$remote" "$expected_remote_head" "$expected_remote_head_verified" \
         "$compacted_from_head" "$local_branch" "$remote_branch"; then
@@ -2960,8 +3032,8 @@ flatten_database() {
       # belongs to one of those categories; defer exactly as the proven
       # writer-race paths do. Anything else stays quarantined.
       if db_root_drift_within_verified_tables "$db" "$head" "$flatten_head" "$preflight_tmp"; then
-        printf 'compact: db=%s committed-root drift confined to verified table(s) [%s] and first-committed unversioned table(s) [%s] via DOLT_DIFF_STAT(%s..%s) with per-table verification passed — absorbed working-set state committed by the flatten, not corruption; deferring, will retry next run\n' \
-          "$db" "${db_root_drift_proven_tables:-}" "${db_root_drift_first_committed_tables:-}" "$head" "$flatten_head" >&2
+        printf 'compact: db=%s committed-root drift confined to verified table(s) [%s], first-committed unversioned table(s) [%s] and dropped dolt_ignore'"'"'d table(s) [%s] via DOLT_DIFF_STAT(%s..%s) with per-table verification passed — absorbed working-set state committed by the flatten, not corruption; deferring, will retry next run\n' \
+          "$db" "${db_root_drift_proven_tables:-}" "${db_root_drift_first_committed_tables:-}" "${db_root_drift_dropped_ignored_tables:-}" "$head" "$flatten_head" >&2
         if ! defer_writer_race_after_flatten "$db" "$flatten_head" \
           "$remote" "$expected_remote_head" "$expected_remote_head_verified" \
           "$compacted_from_head" "$local_branch" "$remote_branch"; then
@@ -3083,10 +3155,9 @@ gc_only_database() {
   fi
 
   if has_compact_marker "$quarantine_dir" "$db"; then
-    quarantine_marker=$(compact_marker_path "$quarantine_dir" "$db")
-    quarantine_reason=$(compact_marker_value "$quarantine_dir" "$db" reason || true)
-    quarantine_created_at=$(compact_marker_value "$quarantine_dir" "$db" created_at || true)
-    print_existing_quarantine_marker "$db" "$quarantine_marker" "$quarantine_reason" "$quarantine_created_at"
+    # Same operator-visible state as a scheduled refusal, so it reports the
+    # same way: stdout alone leaves the quarantine off the bus entirely.
+    report_existing_quarantine "$db"
     return 1
   fi
 

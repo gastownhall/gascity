@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`gc storage preflight` reports everything the infra-class cutover would
+  refuse, from outside the window.** `gc storage migrate --from-work` runs its
+  refusals with the fleet stopped, so an operator learned that a rig scope
+  holds an infrastructure bead this binary carries no importer for only after
+  spending the window on it. The new verb runs the same checks — every one of
+  them the migration's own function, not a copy — against a LIVE city, while
+  copying nothing, creating nothing, taking no migration guard, and publishing
+  no event. A live controller is reported by PID rather than refused, because
+  it names the window itself rather than something to go and fix.
+
+- **`storage.binding.not_configured` makes "this city has no split" a verdict
+  a subscriber can see.** A city that relocates nothing used to leave the boot
+  gate having published nothing at all, and nothing reads the same as a gate
+  that crashed before deciding or a build too old to have one. The fifth
+  `storage.binding.*` type carries the same `StorageBindingOutcomePayload` as
+  the other four, so a deploy gated on these events can tell an absent split
+  apart from an absent answer.
+
+- **`storage.binding.*` events now carry `proven_beads`, the size of the
+  proven-copy manifest a serving verdict rests on.** "Converged" alone did not
+  distinguish a city serving its whole infrastructure slice from the binding
+  from one whose copy carried nothing, and those are the two situations an
+  operator watching a cutover most needs to tell apart. Every path that
+  reaches a serving verdict has already read the manifest, so the number costs
+  nothing. Every other outcome leaves it zero, and zero there means the copy's
+  size is not something the verdict established — not that the copy is empty.
+
 ### Changed
 
 - **`gc pack registry publish` now refuses an unscoped pack name unless you
@@ -29,7 +58,116 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   publish time: the registry byte-compares it with `[pack].name`, so it can
   only restate the name `pack.toml` already declares.
 
+- **`gc bd` now refuses a `--metadata` body it cannot validate before the
+  write, on `new` as well as `create` and `update`.** `gc bd` validates
+  rig-qualified metadata (`lease_owner`, `routed_to`) ahead of the write so a
+  create naming a rig this city does not configure is stopped before it mints a
+  stranded bead. That guard admitted `create` and `update` but not `new` — the
+  alias `bd` itself registers for `create` — so the same command spelled `gc bd
+  new` skipped validation entirely. It now normalizes the alias and applies the
+  identical check.
+
+  Upgrading: `gc bd new --metadata @file.json` now exits 1, on every city,
+  split or not. The `@file.json` spelling states its object in a file rather
+  than in argv, so `gc bd` cannot read the rig qualification before `bd`
+  resolves the file and mints from it — the one spelling where a refusal is the
+  only fail-closed answer. Pass the JSON inline (`--metadata '{"routed_to":
+  "rig/agent"}'`) instead. A malformed inline body is likewise refused by name
+  rather than forwarded. No in-repo caller uses the `@file.json` spelling.
+
 ### Fixed
+
+- **The work-record close gate asks the repository the bead's OWNER points at,
+  not the store it was read through.** A rig's work step that a relocated class
+  binding holds has its commits on the rig's checkout, and both close doors
+  asked the city's instead — the CLI class door hands its gate the city path,
+  and the HTTP door matched the store that answered against the configured rigs,
+  which a binding is not. With `GC_WORK_RECORD_ENFORCE` on, a compliant
+  `gc.work_outcome=shipped` close of such a bead was refused with "commit is not
+  reachable" against a repository that was never the bead's. Both doors now
+  resolve the repository through one rule (`workrecord.RepoDirFor`): the bead's
+  own `gc.work_dir`, else the scope `gc.root_store_ref` records — a rig owner to
+  that rig's checkout, a city or binding owner to the city's. An owner no
+  checkout is configured for is "unknown" rather than the city, and the
+  reachability clause degrades to a warning there on both doors instead of
+  refusing a close neither can judge; a bead with no outcome at all is still
+  refused. A bead that records no owner keeps the answer its door already gave,
+  so single-store cities are unchanged.
+
+- **The infra-class cutover now carries dependency-edge payloads.** Every
+  within-infra edge the copy re-added went in through a writer that clears the
+  pair's metadata sidecar, so the binding received those edges with their
+  endpoints and type intact and their payloads gone. In production the
+  payload-carrying edges are the `waits_for` fanout gates between formula step
+  beads, whose payload records the gate kind; an absent payload reads as the
+  default, `all-children`, so a gate the formula asked to release on the first
+  child waited for every one of them instead. The copy and the recovery path
+  now share one edge writer, a destination that cannot carry a payload is
+  refused rather than written to without it, and the equality witness compares
+  the payload rather than only the edge.
+
+  **Upgrading:** this does not repair a city that already cut over. Its binding
+  still holds the payloadless edges, and no command yet detects or repairs
+  them. See "If this city cut over before edge payloads were carried" in
+  `docs/runbooks/split-storage-classes.md` for what is affected, what is not
+  lost, and the destructive re-converge procedure.
+
+- **A control bead served by a relocated class binding is routed to the
+  dispatcher its own `gc.root_store_ref` names.** On a split city every rig's
+  control beads live in one class binding. The reconciler dropped rig-rooted
+  rows from control-dispatcher demand entirely, because a binding's ref reads
+  as city scope and the candidate filter required a rig match; and it
+  suppressed city-rooted rows from that same demand, because the route repair
+  read the binding's ref (`class:gmnos`) as a rig name, found no dispatcher
+  for that pseudo-scope, and logged `no configured control-dispatcher for its
+  store scope` once per tick. The binding is now collected for every row it
+  serves, and the repair keys the dispatcher on the row's root scope, so rig
+  rows keep (or are repaired toward) their rig dispatcher and city rows their
+  city dispatcher. The diagnostic names the binding and the owning scope.
+  Supersedes #5548 and #5588; fixes #5547 and #5587.
+
+- **Mail archive and delete now expand whitespace-joined message IDs.** Each
+  positional argument is split into individual IDs before single-versus-batch
+  dispatch, so shell variables containing multiple IDs no longer look like one
+  already-handled message.
+- **graphv2 retry re-attempts for rig-scoped `lifecycle=one_shot` steps now
+  keep their rig qualifier and drop stale session pinning.** A retry
+  control that is nested/runtime-minted (as opposed to one decorated at
+  compile time by graphroute) never gets `gc.execution_routed_to` stamped,
+  only `gc.execution_rig_context` backfilled. `spawnNextAttempt`'s
+  `qualifyAttemptTargetWithSourceRoute` derived a rig prefix only from
+  `gc.execution_routed_to`, so a re-attempt for a step whose
+  `gc.run_target` was a bare rig-template agent name lost its rig
+  qualifier — `gc.routed_to` landed unscoped and no pool ever claimed the
+  re-attempt. Separately, `applyAttemptStepRoute`'s metadata-only pool
+  branch never cleared `gc.session_affinity`/`gc.continuation_group` the
+  way `graphroute.ApplyGraphRouteBinding`'s pool-branch affinity clear
+  does, so a re-attempt for a one_shot lifecycle agent stayed pinned to
+  session affinity for a runtime that had already exited after its
+  bounded invocation. Both are fixed: the target qualifier now falls back
+  to the step's own execution rig context, and metadata-only pool
+  attempts for one_shot agents now clear the stale continuation/affinity
+  keys, mirroring `graphroute.ApplyGraphRouteBinding`'s pool branch.
+
+- **A `lifecycle=one_shot` pool session that exits into a freeable sleep
+  reason no longer blocks its own runtime name forever.** The session's
+  bounded-work exit lands its bead in `state=asleep` via the generic heal
+  path, same as any other dead session, but `reusablePoolSessionInfo`
+  excluded every asleep session from reuse on the assumption that "the
+  reconciler closes orphaned asleep beads" — no such closing exists. The
+  bead stayed open holding the identity's `session_name`, and the next
+  tick's fresh create failed closed on that same name ("pool session name
+  unavailable ... session name already exists") until an operator ran
+  `gc session close` by hand. The asleep exclusion is now scoped: a
+  `one_shot` session whose sleep reason is already in the freeable
+  allow-list (idle, idle-timeout, city-stop, failed-create, runtime-missing,
+  provider-terminal-error, max-session-age) is reused through the ordinary
+  wake path instead. A `one_shot` exit that still holds an open or
+  in-progress assigned work bead under any of its identities is not treated
+  as a clean exit — it falls through to fresh-identity creation rather than
+  being reused, so the unfinished step is claimed properly instead of being
+  pinned `in_progress` on a dead name. Persistent (non-`one_shot`) pools
+  are unaffected — a genuine crash still gets a fresh identity.
 
 - **`gc import add` of a local in-git pack now locks to HEAD, not the repo's
   latest tag.** Per `gc import add --help`, a local path inside a git
@@ -97,6 +235,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   carries the same `kind` as its forward counterpart, and the detail view
   labels it the same way the "Needs" section already labels non-`needs`
   forward edges. (gascity#4365)
+
+- **A named (on-demand) session no longer replays a trigger stamp for a work
+  bead that has since been parked.** The pool session path already clears
+  `gc.trigger_bead_id` when there is no ready work to route
+  (`bindPoolSessionTriggerBead`), but the named path only ever read and
+  replayed whatever was already stamped, with no equivalent check. A
+  singleton tier re-materializing after its dispatched bead was parked kept
+  re-aiming every new seat at the same stale target — one reported case
+  produced 16 seats on a single parked bead over ~19 hours, each re-deriving
+  the same dead-end analysis. The named path now checks the stamped target's
+  live state before resolving its template and clears the stamp (and its
+  dependent `gc.brain_parent_sid`) when the target is no longer workable,
+  mirroring the pool path's clear semantics. "No longer workable" means
+  closed, absent, or dependency-blocked; the blocked case is read off bd's
+  `is_blocked` ready-work projection, because every production store folds
+  bd's raw `blocked` status into `open`. A target in a store that does not
+  publish that projection is left stamped rather than risk a wrong clear, as
+  are cross-store targets this reconciler tick cannot reach. (gascity#4373)
+
+- **The work-record close gate now resolves `gc.work_branch` against its
+  remote-tracking ref, not the local branch alone.** `gitCommitReachableOnBranch`
+  passed the bare branch name (e.g. `main`) straight to
+  `git merge-base --is-ancestor`; gitrevisions precedence resolves a bare name
+  to the local `refs/heads/<branch>` ahead of any remote-tracking ref. In a
+  refinery/polecat topology, merges land via a push from a *different*
+  worktree — advancing `refs/remotes/origin/<branch>` but never the local ref
+  checked out elsewhere — so a genuinely-landed commit read as unreachable
+  until something happened to fast-forward the local branch, which in that
+  topology may be never. The gate now checks `refs/remotes/origin/<branch>`
+  first when it resolves, and still falls back to the bare branch name — so a
+  commit is reachable if it is on either ref. Purely local repos with no
+  `origin` remote are unaffected, and a commit that has been committed locally
+  but not yet pushed continues to satisfy the gate as it did before.
+  (gascity#5037)
 
 - **The dolt pack's `run_bounded` python3 fallback now sends SIGTERM before
   SIGKILL, matching its documented contract.** The fallback (used when
@@ -184,6 +356,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only for gc-managed Dolt endpoints, whose lifecycle gc owns; externally
   bound or explicitly configured endpoints keep bd's own output unchanged
   (gastownhall/gascity#1374).
+
+- **`gc init` provider readiness now finds Nix-installed CLIs.** Provider
+  readiness probes (`gc init --default-provider gemini` and friends) search a
+  deterministic, user-aware set of install directories rather than the
+  ambient `$PATH`, so a CLI installed via Nix (`~/.nix-profile/bin` for
+  classic `nix-env`, `~/.local/state/nix/profiles/profile/bin` for the newer
+  `nix profile install`) was reported as "not installed" even when it was on
+  the shell's `PATH`. Both locations are now included, matching the existing
+  npm/pnpm/yarn/cargo/nvm handling in `internal/searchpath`. Fixes #3962.
 
 - **ACP activity is now available across process boundaries.** ACP
   `session/update` timestamps are published through an atomic, coalesced

@@ -124,20 +124,26 @@ func TestAliveWithCmdline_NilMatchIsFalse(t *testing.T) {
 // safety here. An unreadable process must NOT be reported as matching: the
 // caller then assumes no poller is running and starts one. A duplicate poller is
 // recoverable; a silently absent one is not.
+//
+// PID 1 is the probe target rather than a stubbed ps on PATH: Cmdline reads
+// /proc directly on linux and kern.procargs2 directly on darwin for any live,
+// readable PID, so a ps stub never affected self's argv on either platform —
+// on darwin specifically, #5176 added the sysctl path, which made this
+// untestable there regardless of the stub. PID 1's argv, unlike this
+// process's own, is genuinely unreadable to an unprivileged caller on
+// darwin, which is the real permission boundary this test needs. Skip where
+// it IS readable (e.g. linux, where /proc/1/cmdline is typically
+// world-readable) rather than assert something false.
 func TestCmdline_FailsClosedWhenUnreadable(t *testing.T) {
-	if runtime.GOOS == "linux" {
-		t.Skip("on linux /proc answers directly, so the ps stub cannot make argv unreadable")
+	if _, err := Cmdline(1); err == nil {
+		t.Skip("PID 1 argv is readable in this environment; cannot exercise the fail-closed path this way")
+	}
+	if runtime.GOOS == "darwin" {
+		t.Skip("on darwin kern.procargs2 answers directly, so the ps stub cannot make argv unreadable")
 	}
 
-	binDir := t.TempDir()
-	// A ps that produces nothing, so the non-/proc path has no argv to offer.
-	if err := os.WriteFile(filepath.Join(binDir, "ps"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
-		t.Fatalf("WriteFile(ps): %v", err)
-	}
-	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
-
-	if AliveWithCmdline(os.Getpid(), func([]string) bool { return true }) {
-		t.Fatal("AliveWithCmdline = true with no readable argv; must fail closed so the caller starts its poller")
+	if AliveWithCmdline(1, func([]string) bool { return true }) {
+		t.Fatal("AliveWithCmdline(1, ...) = true with unreadable argv; must fail closed so the caller starts its poller")
 	}
 }
 

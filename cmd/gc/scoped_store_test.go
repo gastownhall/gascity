@@ -105,7 +105,7 @@ func TestRequireBdBinaryForCityAcceptsAbsoluteBDBinForCompleteBinding(t *testing
 	}
 }
 
-func TestRequireBdBinaryForCityRejectsWorkspacePinWithoutCompleteBinding(t *testing.T) {
+func TestRequireBdBinaryForCityAcceptsWorkspacePinForManagedCity(t *testing.T) {
 	pinnedDir := t.TempDir()
 	writeExecutable(t, filepath.Join(pinnedDir, "bd"), "#!/bin/sh\nexit 0\n")
 
@@ -115,8 +115,8 @@ func TestRequireBdBinaryForCityRejectsWorkspacePinWithoutCompleteBinding(t *test
 	}
 	t.Setenv("PATH", t.TempDir())
 
-	if err := requireBdBinaryForCity(cityDir); err == nil {
-		t.Fatal("workspace pin without complete binding passed preflight, want ambient bd failure")
+	if err := requireBdBinaryForCity(cityDir); err != nil {
+		t.Fatalf("managed-city workspace-pinned bd preflight: %v", err)
 	}
 }
 

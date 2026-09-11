@@ -400,6 +400,35 @@ EOF
     printf '%s\n' "$refs"
 }
 
+# rig_name_for_db looks up the rig name bound to a non-city database, using
+# the same RIG_STORE_REFS_BY_DB map discover_rig_store_refs populates from
+# city.toml/site.toml [[rigs]] bindings. Prints the rig name and returns 0 on
+# a match; returns 1 with no output when $db has no rig binding (e.g. it is
+# neither the city store nor a discovered rig store).
+rig_name_for_db() {
+    local db="$1"
+    local entry
+    local entry_db
+    local store_ref
+
+    while IFS= read -r entry; do
+        [ -n "$entry" ] || continue
+        entry_db="${entry%%|*}"
+        store_ref="${entry#*|}"
+        [ "$entry_db" = "$db" ] || continue
+        case "$store_ref" in
+            rig:*)
+                printf '%s\n' "${store_ref#rig:}"
+                return 0
+                ;;
+        esac
+    done <<EOF
+$RIG_STORE_REFS_BY_DB
+EOF
+
+    return 1
+}
+
 workflow_root_store_ref_local_condition() {
     local db="$1"
     local alias="$2"
@@ -728,6 +757,36 @@ close_city_issue() {
     )
 }
 
+# close_rig_issue mirrors close_city_issue but closes an issue in a
+# rig-scoped bead store instead of the city store, via the --city+--rig flag
+# combination (see cmd/gc/cmd_bd.go resolveBdScopeTarget/extractBdScopeFlags).
+# Needed because sling-delivered nudge shadows are enqueued into the sling
+# target's rig store (cmd/gc/cmd_sling.go deliverSlingNudge), not the city
+# store, so the reaper's TTL sweep (Step 4) must be able to close them there
+# too (gastownhall/gascity#5285).
+close_rig_issue() {
+    local issue_id="$1"
+    local reason="$2"
+    local rig_name="$3"
+    # See close_city_issue above for why the reaper closes bare unless the
+    # caller explicitly requests --force.
+    local force="${4:-}"
+
+    if [ ! -d "$CITY_BEADS_DIR" ]; then
+        printf 'city bead store %s is unavailable' "$CITY_BEADS_DIR"
+        return 1
+    fi
+
+    (
+        cd "$CITY_ABS"
+        if [ -n "$force" ]; then
+            gc bd --city "$CITY_ABS" --rig "$rig_name" close "$issue_id" --force --reason "$reason"
+        else
+            gc bd --city "$CITY_ABS" --rig "$rig_name" close "$issue_id" --reason "$reason"
+        fi
+    )
+}
+
 run_sql_change() {
     local db="$1"
     local label="$2"
@@ -1023,10 +1082,7 @@ while IFS= read -r DB; do
             fi
             SKIPPED_COUNT=$(printf '%s\n' "$EXPIRED_IDS" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
             TOTAL_EXPIRED_ISSUES_SKIPPED=$((TOTAL_EXPIRED_ISSUES_SKIPPED + SKIPPED_COUNT))
-        elif [ "$DB" != "$CITY_DB" ]; then
-            SKIPPED_COUNT=$(printf '%s\n' "$EXPIRED_IDS" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
-            TOTAL_EXPIRED_ISSUES_SKIPPED=$((TOTAL_EXPIRED_ISSUES_SKIPPED + SKIPPED_COUNT))
-        else
+        elif [ "$DB" = "$CITY_DB" ]; then
             while IFS= read -r issue_id; do
                 [ -z "$issue_id" ] && continue
                 if CLOSE_OUTPUT=$(close_city_issue "$issue_id" "ttl:expired by reaper" 2>&1); then
@@ -1037,6 +1093,29 @@ while IFS= read -r DB; do
                     record_anomaly "$DB" "closing expired nudge bead $issue_id failed for $DB: $(sanitize_output "$CLOSE_OUTPUT")"
                 fi
             done <<< "$EXPIRED_IDS"
+        elif EXPIRED_RIG_NAME=$(rig_name_for_db "$DB"); then
+            # $DB is a rig-scoped store bound via a [[rigs]] entry in
+            # city.toml/site.toml (see discover_rig_store_refs). Nudge
+            # shadows created by a sling land here — deliverSlingNudge
+            # enqueues into the sling target's rig store, not the city
+            # store — so close them via gc bd --rig instead of only
+            # counting them as skipped (gastownhall/gascity#5285).
+            while IFS= read -r issue_id; do
+                [ -z "$issue_id" ] && continue
+                if CLOSE_OUTPUT=$(close_rig_issue "$issue_id" "ttl:expired by reaper" "$EXPIRED_RIG_NAME" 2>&1); then
+                    DB_EXPIRED_ISSUES_CLOSED=$((DB_EXPIRED_ISSUES_CLOSED + 1))
+                    TOTAL_EXPIRED_ISSUES_CLOSED=$((TOTAL_EXPIRED_ISSUES_CLOSED + 1))
+                    DB_MUTATIONS=$((DB_MUTATIONS + 1))
+                else
+                    record_anomaly "$DB" "closing expired nudge bead $issue_id failed for $DB (rig:$EXPIRED_RIG_NAME): $(sanitize_output "$CLOSE_OUTPUT")"
+                fi
+            done <<< "$EXPIRED_IDS"
+        else
+            # $DB is neither the city store nor a discovered rig store (e.g.
+            # an unbound or undiscoverable scope) — no scoped close path
+            # exists, so fall back to the prior skip+anomaly behavior.
+            SKIPPED_COUNT=$(printf '%s\n' "$EXPIRED_IDS" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
+            TOTAL_EXPIRED_ISSUES_SKIPPED=$((TOTAL_EXPIRED_ISSUES_SKIPPED + SKIPPED_COUNT))
         fi
     fi
 

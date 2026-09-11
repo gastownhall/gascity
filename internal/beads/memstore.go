@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // MemStore is an in-memory Store implementation backed by a slice. It is
@@ -134,6 +136,9 @@ func (m *MemStore) Create(b Bead) (Bead, error) {
 	} else {
 		b.ID = m.mintIDLocked()
 	}
+	// Set directly rather than through setBeadStatus: create is not a status
+	// transition over an existing bead, so a caller-supplied
+	// IndefinitelyDeferred must survive into the store instead of being cleared.
 	b.Status = "open"
 	if b.Type == "" {
 		b.Type = "task"
@@ -230,7 +235,7 @@ func (m *MemStore) applyUpdateLocked(i int, opts UpdateOpts) {
 		m.beads[i].Title = *opts.Title
 	}
 	if opts.Status != nil {
-		m.beads[i].Status = *opts.Status
+		setBeadStatus(&m.beads[i], *opts.Status)
 	}
 	if opts.Description != nil {
 		m.beads[i].Description = *opts.Description
@@ -303,7 +308,7 @@ func (m *MemStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
 		if m.beads[i].Status != "in_progress" || m.beads[i].Assignee != expectedAssignee {
 			return false, nil
 		}
-		m.beads[i].Status = "open"
+		setBeadStatus(&m.beads[i], "open")
 		m.beads[i].Assignee = ""
 		m.beads[i].UpdatedAt = time.Now()
 		m.beads[i].Revision++
@@ -323,7 +328,7 @@ func (m *MemStore) Close(id string) error {
 			if m.beads[i].Status == "closed" {
 				return nil
 			}
-			m.beads[i].Status = "closed"
+			setBeadStatus(&m.beads[i], "closed")
 			m.beads[i].UpdatedAt = time.Now()
 			m.beads[i].Revision++
 			return nil
@@ -339,11 +344,11 @@ func (m *MemStore) Reopen(id string) error {
 	defer m.mu.Unlock()
 	for i := range m.beads {
 		if m.beads[i].ID == id {
-			if m.beads[i].Status == "open" {
+			if m.beads[i].Status == "open" && !m.beads[i].IndefinitelyDeferred {
 				return nil
 			}
 			wasClosed := m.beads[i].Status == "closed"
-			m.beads[i].Status = "open"
+			setBeadStatus(&m.beads[i], "open")
 			m.beads[i].UpdatedAt = time.Now()
 			m.beads[i].Revision++
 			if wasClosed {
@@ -371,7 +376,7 @@ func (m *MemStore) CloseAll(ids []string, metadata map[string]string) (int, erro
 		if !idSet[m.beads[i].ID] || m.beads[i].Status == "closed" {
 			continue
 		}
-		m.beads[i].Status = "closed"
+		setBeadStatus(&m.beads[i], "closed")
 		m.beads[i].UpdatedAt = time.Now()
 		m.beads[i].Revision++
 		if m.beads[i].Metadata == nil {
@@ -459,11 +464,13 @@ func (m *MemStore) readyLocked(ctx context.Context, q ReadyQuery) ([]Bead, error
 	}
 
 	statusByID := make(map[string]string, len(m.beads))
+	workOutcomeByID := make(map[string]string, len(m.beads))
 	for _, bead := range m.beads {
 		if err := contextErr(); err != nil {
 			return nil, err
 		}
 		statusByID[bead.ID] = bead.Status
+		workOutcomeByID[bead.ID] = bead.Metadata[beadmeta.WorkOutcomeMetadataKey]
 	}
 
 	var result []Bead
@@ -491,7 +498,7 @@ func (m *MemStore) readyLocked(ctx context.Context, q ReadyQuery) ([]Bead, error
 			default:
 				continue
 			}
-			if statusByID[dep.DependsOnID] != "closed" {
+			if !DependencySatisfied(statusByID[dep.DependsOnID], workOutcomeByID[dep.DependsOnID]) {
 				blocked = true
 				break
 			}
@@ -730,6 +737,21 @@ func (m *MemStore) DepList(id, direction string) ([]Dep, error) {
 		}
 	}
 	return result, nil
+}
+
+// DepMetadata reports that no edge of this store carries a payload.
+//
+// That is a fact about MemStore, not a stub: its only edge-writing paths are
+// DepAdd and the Needs field, both of which carry the pair and the type alone,
+// and it implements no GraphApply. So there is no way to put a payload in and
+// nothing to lose by saying so.
+//
+// It is implemented rather than omitted because a reader that CANNOT be asked
+// and one that answers "nothing here" mean different things to a caller that
+// refuses on uncertainty — the infra-class migration is one. Anything that
+// teaches MemStore to store an edge payload has to teach this to read it.
+func (m *MemStore) DepMetadata(_, _ string) (string, bool, error) {
+	return "", false, nil
 }
 
 // DepListBatch returns "down" dependencies for multiple beads from memory.

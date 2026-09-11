@@ -525,17 +525,14 @@ func (a *beadsGraphAdapter) DepList(id, direction string) ([]beads.Dep, error) {
 	return a.store.DepList(id, direction)
 }
 
-// beadsGraphEdgeMetadataReader is the optional read side of graph-apply edge
-// metadata, discovered on the resolved store like the other graph
-// capabilities. Stores that never retained the payload report it as
-// unavailable rather than as an edge that carried none.
-type beadsGraphEdgeMetadataReader interface {
-	DepMetadata(issueID, dependsOnID string) (string, bool, error)
-}
-
 // DepMetadata reads the opaque payload retained for one graph edge.
+//
+// The capability is discovered on the resolved store like the other graph
+// capabilities, and a store that never retained the payload reports it as
+// unavailable rather than as an edge that carried none — see
+// beads.DepMetadataReader for why those two answers must stay distinct.
 func (a *beadsGraphAdapter) DepMetadata(id, dependsOnID string) (string, bool, error) {
-	reader, ok := a.store.(beadsGraphEdgeMetadataReader)
+	reader, ok := a.store.(beads.DepMetadataReader)
 	if !ok {
 		return "", false, unsupportedBeadsCapability("dependency metadata")
 	}

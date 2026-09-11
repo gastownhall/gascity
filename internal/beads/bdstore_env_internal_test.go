@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -130,6 +131,48 @@ func TestExecCommandRunnerWithEnv_AbsoluteBDBinKeepsLogicalBdPolicy(t *testing.T
 	}
 }
 
+func TestExecCommandRunnerWithEnv_InheritedAbsoluteBDBin(t *testing.T) {
+	pinned := filepath.Join(t.TempDir(), "workspace-bd")
+	if err := os.WriteFile(pinned, []byte("#!/bin/sh\nprintf 'pinned:%s\\n' \"$BD_BACKUP_ENABLED\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ambientDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(ambientDir, "bd"), []byte("#!/bin/sh\nprintf 'ambient\\n'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BD_BIN", pinned)
+	t.Setenv("PATH", ambientDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	out, err := ExecCommandRunnerWithEnv(nil)(t.TempDir(), "bd")
+	if err != nil {
+		t.Fatalf("run inherited workspace-pinned bd: %v", err)
+	}
+	if got, want := string(out), "pinned:false\n"; got != want {
+		t.Fatalf("inherited workspace-pinned bd output = %q, want %q", got, want)
+	}
+}
+
+func TestExecCommandRunnerWithEnv_ExplicitEmptyBDBinOverridesInheritedPin(t *testing.T) {
+	pinned := filepath.Join(t.TempDir(), "workspace-bd")
+	if err := os.WriteFile(pinned, []byte("#!/bin/sh\nprintf 'pinned\\n'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ambientDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(ambientDir, "bd"), []byte("#!/bin/sh\nprintf 'ambient:%s\\n' \"$BD_BACKUP_ENABLED\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BD_BIN", pinned)
+	t.Setenv("PATH", ambientDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	out, err := ExecCommandRunnerWithEnv(map[string]string{"BD_BIN": ""})(t.TempDir(), "bd")
+	if err != nil {
+		t.Fatalf("run ambient bd after explicit pin clear: %v", err)
+	}
+	if got, want := string(out), "ambient:false\n"; got != want {
+		t.Fatalf("ambient bd output = %q, want %q", got, want)
+	}
+}
+
 func TestExecCommandRunnerWithEnv_RelativeBDBinUsesAmbientBd(t *testing.T) {
 	ambientDir := t.TempDir()
 	ambient := filepath.Join(ambientDir, "bd")
@@ -144,5 +187,27 @@ func TestExecCommandRunnerWithEnv_RelativeBDBinUsesAmbientBd(t *testing.T) {
 	}
 	if got, want := string(out), "ambient:false\n"; got != want {
 		t.Fatalf("ambient bd output = %q, want %q", got, want)
+	}
+}
+
+func TestExecCommandRunnerWithExactEnvContextExcludesParentValues(t *testing.T) {
+	t.Setenv("BEADS_DB", "ambient.db")
+	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "ambient-credential-helper")
+
+	pinned := filepath.Join(t.TempDir(), "workspace-bd")
+	if err := os.WriteFile(pinned, []byte("#!/bin/sh\nprintf '%s|%s|%s\\n' \"${BEADS_DB-unset}\" \"${BEADS_DOLT_CREDENTIAL_COMMAND-unset}\" \"$BEADS_DIR\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := ExecCommandRunnerWithExactEnvContext(context.Background(), map[string]string{
+		"BD_BIN":    pinned,
+		"BEADS_DIR": "/selected/.beads",
+	})
+	out, err := runner(t.TempDir(), "bd")
+	if err != nil {
+		t.Fatalf("run workspace-pinned bd: %v", err)
+	}
+	if got, want := string(out), "unset|unset|/selected/.beads\n"; got != want {
+		t.Fatalf("exact runner output = %q, want %q", got, want)
 	}
 }

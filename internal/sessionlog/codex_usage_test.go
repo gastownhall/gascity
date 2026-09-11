@@ -32,6 +32,57 @@ func codexTurnContextLine(ts, model string) string {
 	return fmt.Sprintf(`{"timestamp":%q,"type":"turn_context","payload":{"turn_id":"019d9845-45f6-70d2-86e8-53d8a44a830f","cwd":"/work/dir","current_date":"2026-04-16","timezone":"Etc/UTC","approval_policy":"never","sandbox_policy":{"type":"danger-full-access"},"model":%q,"personality":"pragmatic"}}`, ts, model)
 }
 
+// codexLineBytes is the on-disk size of one line written by
+// writeCodexUsageLines, including its trailing newline. Byte-exact sizes are
+// what let a test place the tail-window or seed-budget edge on a chosen byte.
+func codexLineBytes(line string) int64 {
+	return int64(len(line)) + 1
+}
+
+// codexLinesBytes is the on-disk size of lines written by writeCodexUsageLines.
+func codexLinesBytes(lines []string) int64 {
+	total := int64(0)
+	for _, line := range lines {
+		total += codexLineBytes(line)
+	}
+	return total
+}
+
+// codexFillerLine returns a response_item line occupying exactly n bytes on
+// disk, newline included. Filler carries no usage and no model, so it only
+// moves the offsets the window and budget edges are measured from.
+func codexFillerLine(t *testing.T, n int64) string {
+	t.Helper()
+	line := func(content string) string {
+		return fmt.Sprintf(
+			`{"timestamp":"2026-04-16T21:50:00.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":%q}}`,
+			content)
+	}
+	pad := n - codexLineBytes(line(""))
+	if pad < 0 {
+		t.Fatalf("filler size %d is smaller than the %d-byte envelope", n, codexLineBytes(line("")))
+	}
+	return line(strings.Repeat("x", int(pad)))
+}
+
+// codexFillerLines returns filler lines occupying exactly total bytes on disk,
+// each short enough for the seed scanner's line buffer so the filler itself
+// never aborts a scan.
+func codexFillerLines(t *testing.T, total int64) []string {
+	t.Helper()
+	const chunk = 16 * 1024
+	var lines []string
+	for total > 0 {
+		n := int64(chunk)
+		if total < 2*chunk {
+			n = total // fold the remainder in rather than emit a sub-envelope line
+		}
+		lines = append(lines, codexFillerLine(t, n))
+		total -= n
+	}
+	return lines
+}
+
 func codexSessionMetaLine(ts, cwd string) string {
 	return fmt.Sprintf(`{"timestamp":%q,"type":"session_meta","payload":{"id":"019d9845-4273-7ee3-a7d7-15b71ec6f096","timestamp":%q,"cwd":%q,"originator":"codex-tui","cli_version":"0.121.0","source":"cli","model_provider":"openai"}}`, ts, ts, cwd)
 }
@@ -201,6 +252,347 @@ func TestExtractCodexTailUsageModelMissing(t *testing.T) {
 	}
 	if usages[0].InputTokens != 15562-10624 {
 		t.Errorf("InputTokens = %d, want %d", usages[0].InputTokens, 15562-10624)
+	}
+}
+
+// TestExtractCodexTailUsageModelBeyondTailWindow pins the long-session fix: the
+// model is announced once in a turn_context near the top, then the session runs
+// long enough that the turn_context scrolls past the tail window before the
+// recent token_count events. A bounded backward scan from the window must still
+// reach that announcement — otherwise mc's long-lived dispatcher/wisp sessions
+// mint model facts with an empty model that the pricing lookup treats as
+// unpriced (the "burn $/hr reads 0" gap).
+func TestExtractCodexTailUsageModelBeyondTailWindow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-2026-04-16T21-49-29-longsession.jsonl")
+	lines := []string{
+		codexSessionMetaLine("2026-04-16T21:49:30.734Z", "/work/dir"),
+		codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-5.6-terra"),
+	}
+	// Filler > tailChunkSize so the turn_context is outside the tail window that
+	// readTail scans; these response_item lines carry no usage and are skipped.
+	filler := strings.Repeat("x", 2048)
+	for i := 0; i < (tailChunkSize/2048)+8; i++ {
+		lines = append(lines, fmt.Sprintf(
+			`{"timestamp":"2026-04-16T21:50:%02d.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":%q}}`,
+			i%60, filler))
+	}
+	// Recent invocations sit in the tail window with no nearby turn_context.
+	lines = append(lines,
+		codexTokenCountLine("2026-04-16T22:10:38.304Z", 15917, 15562, 10624, 355, 166),
+		codexTokenCountLine("2026-04-16T22:10:45.100Z", 34114, 17888, 15232, 309, 28),
+	)
+	writeCodexUsageLines(t, path, lines)
+
+	usages, err := ExtractCodexTailUsage(path)
+	if err != nil {
+		t.Fatalf("ExtractCodexTailUsage: %v", err)
+	}
+	if len(usages) != 2 {
+		t.Fatalf("got %d usages, want 2: %+v", len(usages), usages)
+	}
+	for i, u := range usages {
+		if u.Model != "gpt-5.6-terra" {
+			t.Errorf("usages[%d].Model = %q, want gpt-5.6-terra (recovered by the backward scan from the turn_context preceding the tail window)", i, u.Model)
+		}
+	}
+}
+
+// TestExtractCodexTailUsageSeedsNearestPrecedingModel pins the mid-rollout
+// switch case: two distinct turn_context models are announced before the tail
+// window, so the seed must name the LAST one — the model actually in effect
+// when the tail invocations ran. Seeding the session's first model instead
+// would silently mislabel post-switch tail usage with the pre-switch model,
+// trading an obvious unpriced $0 for a plausible wrong price.
+func TestExtractCodexTailUsageSeedsNearestPrecedingModel(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-2026-04-16T21-49-29-headswitch.jsonl")
+	lines := []string{
+		codexSessionMetaLine("2026-04-16T21:49:30.734Z", "/work/dir"),
+		// Two distinct models announced near the top: a real mid-rollout switch.
+		codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-5.6-terra"),
+		codexTurnContextLine("2026-04-16T21:49:31.901Z", "gpt-5.7-nova"),
+	}
+	// Filler > tailChunkSize so BOTH turn_contexts scroll out of the tail
+	// window; the recent token_counts sit in the tail with no in-window model.
+	filler := strings.Repeat("x", 2048)
+	for i := 0; i < (tailChunkSize/2048)+8; i++ {
+		lines = append(lines, fmt.Sprintf(
+			`{"timestamp":"2026-04-16T21:50:%02d.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":%q}}`,
+			i%60, filler))
+	}
+	lines = append(lines,
+		codexTokenCountLine("2026-04-16T22:10:38.304Z", 15917, 15562, 10624, 355, 166),
+		codexTokenCountLine("2026-04-16T22:10:45.100Z", 34114, 17888, 15232, 309, 28),
+	)
+	writeCodexUsageLines(t, path, lines)
+
+	usages, err := ExtractCodexTailUsage(path)
+	if err != nil {
+		t.Fatalf("ExtractCodexTailUsage: %v", err)
+	}
+	if len(usages) != 2 {
+		t.Fatalf("got %d usages, want 2: %+v", len(usages), usages)
+	}
+	for i, u := range usages {
+		if u.Model != "gpt-5.7-nova" {
+			t.Errorf("usages[%d].Model = %q, want gpt-5.7-nova (the nearest turn_context preceding the tail window, not the session's first)", i, u.Model)
+		}
+	}
+}
+
+// TestExtractCodexTailUsageSwitchBeyondSeedBudget pins the case a head scan
+// gets wrong: the pre-switch model is announced so far back that it falls
+// outside the backward budget entirely, and the post-switch model sits between
+// the budget edge and the tail window. The backward scan must find the nearest
+// preceding turn_context; a scan anchored at the head of the file would never
+// see the switch and would price the tail with the stale model.
+func TestExtractCodexTailUsageSwitchBeyondSeedBudget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-2026-04-16T21-49-29-farswitch.jsonl")
+	lines := []string{
+		codexSessionMetaLine("2026-04-16T21:49:30.734Z", "/work/dir"),
+		codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-5.6-terra"),
+	}
+	filler := strings.Repeat("x", 2048)
+	fillerLine := func(i int) string {
+		return fmt.Sprintf(
+			`{"timestamp":"2026-04-16T21:50:%02d.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":%q}}`,
+			i%60, filler)
+	}
+	// Filler > codexModelSeedScanBudget so the pre-switch turn_context is out of
+	// backward-scan reach.
+	for i := 0; i < (codexModelSeedScanBudget/2048)+8; i++ {
+		lines = append(lines, fillerLine(i))
+	}
+	lines = append(lines, codexTurnContextLine("2026-04-16T22:00:12.000Z", "gpt-5.7-nova"))
+	// Filler > tailChunkSize so the post-switch turn_context is out of the tail
+	// window too — reachable only by the backward scan.
+	for i := 0; i < (tailChunkSize/2048)+8; i++ {
+		lines = append(lines, fillerLine(i))
+	}
+	lines = append(lines,
+		codexTokenCountLine("2026-04-16T22:10:38.304Z", 15917, 15562, 10624, 355, 166),
+		codexTokenCountLine("2026-04-16T22:10:45.100Z", 34114, 17888, 15232, 309, 28),
+	)
+	writeCodexUsageLines(t, path, lines)
+
+	usages, err := ExtractCodexTailUsage(path)
+	if err != nil {
+		t.Fatalf("ExtractCodexTailUsage: %v", err)
+	}
+	if len(usages) != 2 {
+		t.Fatalf("got %d usages, want 2: %+v", len(usages), usages)
+	}
+	for i, u := range usages {
+		if u.Model != "gpt-5.7-nova" {
+			t.Errorf("usages[%d].Model = %q, want gpt-5.7-nova (the model in effect at the tail, switched to beyond the seed budget)", i, u.Model)
+		}
+	}
+}
+
+// TestExtractCodexTailUsageInWindowModelOverridesSeed pins that a turn_context
+// inside the tail window always beats a non-empty backward-scan seed: the seed
+// only stands in for an announcement the window cannot see.
+func TestExtractCodexTailUsageInWindowModelOverridesSeed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-2026-04-16T21-49-29-inwindow.jsonl")
+	lines := []string{
+		codexSessionMetaLine("2026-04-16T21:49:30.734Z", "/work/dir"),
+		codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-5.6-terra"),
+	}
+	// Filler > tailChunkSize so the first turn_context is only reachable by the
+	// backward scan, which seeds gpt-5.6-terra.
+	filler := strings.Repeat("x", 2048)
+	for i := 0; i < (tailChunkSize/2048)+8; i++ {
+		lines = append(lines, fmt.Sprintf(
+			`{"timestamp":"2026-04-16T21:50:%02d.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":%q}}`,
+			i%60, filler))
+	}
+	// A switch announced inside the tail window must override that seed.
+	lines = append(lines,
+		codexTurnContextLine("2026-04-16T22:10:30.000Z", "gpt-5.7-nova"),
+		codexTokenCountLine("2026-04-16T22:10:38.304Z", 15917, 15562, 10624, 355, 166),
+	)
+	writeCodexUsageLines(t, path, lines)
+
+	usages, err := ExtractCodexTailUsage(path)
+	if err != nil {
+		t.Fatalf("ExtractCodexTailUsage: %v", err)
+	}
+	if len(usages) != 1 {
+		t.Fatalf("got %d usages, want 1: %+v", len(usages), usages)
+	}
+	if usages[0].Model != "gpt-5.7-nova" {
+		t.Errorf("usages[0].Model = %q, want gpt-5.7-nova (an in-window turn_context overrides the seed)", usages[0].Model)
+	}
+}
+
+// TestExtractCodexTailUsageSeedsModelStraddlingWindowBoundary pins the line that
+// belongs to neither scan. The backward seed covers [rangeStart, windowStart)
+// and readTail starts at exactly windowStart with no line-boundary snapping, so
+// a turn_context whose bytes span windowStart is a prefix for one scan and a
+// suffix for the other and parses for neither. Dropping it prices the tail with
+// the model the session already switched away from, and because a minted usage
+// fact's idempotency key excludes the model, that wrong price is durable.
+func TestExtractCodexTailUsageSeedsModelStraddlingWindowBoundary(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-2026-04-16T21-49-29-straddle.jsonl")
+	head := []string{
+		codexSessionMetaLine("2026-04-16T21:49:30.734Z", "/work/dir"),
+		codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-5.6-terra"),
+	}
+	straddling := codexTurnContextLine("2026-04-16T22:00:12.000Z", "gpt-5.7-nova")
+	tail := []string{
+		codexTokenCountLine("2026-04-16T22:10:38.304Z", 15917, 15562, 10624, 355, 166),
+		codexTokenCountLine("2026-04-16T22:10:45.100Z", 34114, 17888, 15232, 309, 28),
+	}
+	// windowStart is tailChunkSize bytes before EOF, so sizing everything after
+	// the switch announcement to tailChunkSize minus half that line's length
+	// puts windowStart in the middle of it.
+	straddlingBytes := codexLineBytes(straddling)
+	afterStraddling := int64(tailChunkSize) - straddlingBytes/2
+
+	lines := make([]string, 0, len(head)+2+len(tail))
+	lines = append(lines, head...)
+	lines = append(lines, straddling)
+	lines = append(lines, codexFillerLine(t, afterStraddling-codexLinesBytes(tail)))
+	lines = append(lines, tail...)
+	writeCodexUsageLines(t, path, lines)
+
+	// The case only exists while windowStart lands strictly inside the switch
+	// announcement, so pin the geometry rather than let it drift silently.
+	straddlingStart := codexLinesBytes(head)
+	windowStart := codexLinesBytes(lines) - int64(tailChunkSize)
+	if windowStart <= straddlingStart || windowStart >= straddlingStart+straddlingBytes-1 {
+		t.Fatalf("windowStart %d does not fall strictly inside the straddling turn_context [%d,%d)",
+			windowStart, straddlingStart, straddlingStart+straddlingBytes)
+	}
+
+	usages, err := ExtractCodexTailUsage(path)
+	if err != nil {
+		t.Fatalf("ExtractCodexTailUsage: %v", err)
+	}
+	if len(usages) != 2 {
+		t.Fatalf("got %d usages, want 2: %+v", len(usages), usages)
+	}
+	for i, u := range usages {
+		if u.Model != "gpt-5.7-nova" {
+			t.Errorf("usages[%d].Model = %q, want gpt-5.7-nova (the switch announced on the line straddling the window boundary)", i, u.Model)
+		}
+	}
+}
+
+// TestExtractCodexTailUsageOversizedSeedLineFallsBackToEmpty pins the honest
+// floor when the backward scan cannot finish. Codex rollouts embed whole tool
+// outputs and file reads in a single response_item line, so a line past the seed
+// scanner's buffer is ordinary; it aborts the scan mid-range and leaves any
+// later switch unseen. Reporting the model found before that line replaces an
+// obvious unpriced $0 with a plausible wrong price that no later sweep corrects,
+// and the oversized line stays in range across a long stretch of file growth, so
+// it would mislabel every sweep in that stretch rather than one.
+func TestExtractCodexTailUsageOversizedSeedLineFallsBackToEmpty(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-2026-04-16T21-49-29-oversized.jsonl")
+	writeCodexUsageLines(t, path, []string{
+		codexSessionMetaLine("2026-04-16T21:49:30.734Z", "/work/dir"),
+		codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-5.6-terra"),
+		codexFillerLine(t, codexSeedScanLineMax+1024),
+		codexTurnContextLine("2026-04-16T22:00:12.000Z", "gpt-5.7-nova"),
+		// Push both announcements out of the tail window.
+		codexFillerLine(t, int64(tailChunkSize)+4096),
+		codexTokenCountLine("2026-04-16T22:10:38.304Z", 15917, 15562, 10624, 355, 166),
+	})
+
+	usages, err := ExtractCodexTailUsage(path)
+	if err != nil {
+		t.Fatalf("ExtractCodexTailUsage: %v", err)
+	}
+	if len(usages) != 1 {
+		t.Fatalf("got %d usages, want 1: %+v", len(usages), usages)
+	}
+	if usages[0].Model != "" {
+		t.Errorf("usages[0].Model = %q, want empty: an aborted seed scan never saw the gpt-5.7-nova switch after the oversized line, so the honest unpriced floor is the only correct answer", usages[0].Model)
+	}
+}
+
+// TestExtractCodexTailUsageSeedsModelAtBudgetLineStart pins the budget edge. The
+// seed range is truncated to codexModelSeedScanBudget bytes before the window,
+// and that cut can land exactly on a line boundary — readTailWindow documents
+// the same thing and peeks the preceding byte to tell the two apart. Skipping
+// the first line unconditionally drops a complete turn_context that is the only
+// announcement in reach.
+func TestExtractCodexTailUsageSeedsModelAtBudgetLineStart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-2026-04-16T21-49-29-budgetedge.jsonl")
+	head := []string{codexSessionMetaLine("2026-04-16T21:49:30.734Z", "/work/dir")}
+	announcement := codexTurnContextLine("2026-04-16T22:00:12.000Z", "gpt-5.7-nova")
+	tail := []string{
+		codexTokenCountLine("2026-04-16T22:10:38.304Z", 15917, 15562, 10624, 355, 166),
+		codexTokenCountLine("2026-04-16T22:10:45.100Z", 34114, 17888, 15232, 309, 28),
+	}
+	// rangeStart is codexModelSeedScanBudget+tailChunkSize bytes before EOF, so
+	// sizing the announcement and everything after it to exactly that many bytes
+	// starts the announcement on rangeStart itself.
+	inRange := int64(codexModelSeedScanBudget) + int64(tailChunkSize)
+
+	lines := make([]string, 0, len(head)+8+len(tail))
+	lines = append(lines, head...)
+	lines = append(lines, announcement)
+	lines = append(lines, codexFillerLines(t, inRange-codexLineBytes(announcement)-codexLinesBytes(tail))...)
+	lines = append(lines, tail...)
+	writeCodexUsageLines(t, path, lines)
+
+	announcementStart := codexLinesBytes(head)
+	rangeStart := codexLinesBytes(lines) - inRange
+	if rangeStart != announcementStart {
+		t.Fatalf("rangeStart %d does not land on the announcement's first byte %d", rangeStart, announcementStart)
+	}
+
+	usages, err := ExtractCodexTailUsage(path)
+	if err != nil {
+		t.Fatalf("ExtractCodexTailUsage: %v", err)
+	}
+	if len(usages) != 2 {
+		t.Fatalf("got %d usages, want 2: %+v", len(usages), usages)
+	}
+	for i, u := range usages {
+		if u.Model != "gpt-5.7-nova" {
+			t.Errorf("usages[%d].Model = %q, want gpt-5.7-nova (a complete turn_context starting on the budget edge is not a partial line)", i, u.Model)
+		}
+	}
+}
+
+// TestCodexPrecedingModelUsesCallerWindow pins the seed's window contract: it
+// scans the range ending at the offset the caller passes, and lines starting at
+// or after that offset belong to the in-window scan. ExtractCodexTailUsage takes
+// one Seek(0, io.SeekEnd) and threads it into both reads on that basis, so a
+// rollout appended to mid-extraction cannot grow a gap between them.
+func TestCodexPrecedingModelUsesCallerWindow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-2026-04-16T21-49-29-window.jsonl")
+	head := []string{
+		codexSessionMetaLine("2026-04-16T21:49:30.734Z", "/work/dir"),
+		codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-5.6-terra"),
+	}
+	lines := append(append([]string{}, head...), codexTurnContextLine("2026-04-16T22:00:12.000Z", "gpt-5.7-nova"))
+	writeCodexUsageLines(t, path, lines)
+
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer f.Close() //nolint:errcheck // read-only test file
+
+	// A window starting exactly where the switch is announced excludes it: that
+	// line is the in-window scan's to read.
+	model, err := codexPrecedingModel(f, codexLinesBytes(head))
+	if err != nil {
+		t.Fatalf("codexPrecedingModel: %v", err)
+	}
+	if model != "gpt-5.6-terra" {
+		t.Errorf("model = %q, want gpt-5.6-terra for a window starting at the switch announcement", model)
+	}
+
+	// A window starting after it includes it.
+	model, err = codexPrecedingModel(f, codexLinesBytes(lines))
+	if err != nil {
+		t.Fatalf("codexPrecedingModel: %v", err)
+	}
+	if model != "gpt-5.7-nova" {
+		t.Errorf("model = %q, want gpt-5.7-nova for a window starting past the switch announcement", model)
 	}
 }
 

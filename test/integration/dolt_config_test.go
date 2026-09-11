@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"os"
 	"os/exec"
@@ -77,7 +78,7 @@ func TestDoltConfigWiringExternalHost(t *testing.T) {
 		"GC_DOLT_PORT="+port,
 	)
 
-	runBDInitCompat(t, env, wsDir, "dc", port)
+	runBDInitCompat(t, env, wsDir, "dc", port, "")
 
 	bdCreate := exec.Command(bdBinary, "create", "config-wired-bead", "--json",
 		"--description=Integration test for issue 011", "-t", "task", "-p", "3")
@@ -117,9 +118,16 @@ func TestDoltConfigWiringExternalHost(t *testing.T) {
 		t.Fatalf("git init: %v\n%s", err, out)
 	}
 
-	// Init with same prefix and server — simulates a second machine's
-	// agent sharing the same bead store.
-	runBDInitCompat(t, env, wsDir2, "dc", port)
+	// Init with same prefix and server, naming the database workspace 1
+	// created — simulates a second machine's agent sharing the same bead
+	// store. --database is the documented way to join a database another
+	// tool already created, and the same invocation gascity's own rig init
+	// uses (initDefaultRigBdStore in cmd/gc/beads_provider_lifecycle.go).
+	// Without it bd mints a fresh project ID for this workspace and then
+	// refuses to open the existing database (PROJECT IDENTITY MISMATCH) —
+	// its guard against silently adopting a foreign project's data, not a
+	// cross-workspace sharing failure.
+	runBDInitCompat(t, env, wsDir2, "dc", port, doltDatabaseName(t, wsDir))
 
 	bdList2 := exec.Command(bdBinary, "list", "--json")
 	bdList2.Dir = wsDir2
@@ -137,14 +145,22 @@ func TestDoltConfigWiringExternalHost(t *testing.T) {
 }
 
 // runBDInitCompat initializes beads against a shared server, compatible
-// with bd v0.60.0 (which lacks --skip-agents).
-func runBDInitCompat(t *testing.T, env []string, dir, prefix, port string) {
+// with bd v0.60.0 (which lacks --skip-agents). A non-empty database joins
+// that existing server database instead of letting bd derive a new one
+// from prefix; leave it empty to create the database.
+func runBDInitCompat(t *testing.T, env []string, dir, prefix, port, database string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), bdInitTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, bdBinary, "init", "--server",
+	args := []string{
+		"init", "--server",
 		"--server-host", "127.0.0.1", "--server-port", port,
-		"-p", prefix, "--skip-hooks")
+		"-p", prefix, "--skip-hooks",
+	}
+	if database != "" {
+		args = append(args, "--database", database)
+	}
+	cmd := exec.CommandContext(ctx, bdBinary, args...)
 	cmd.Dir = dir
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()
@@ -154,6 +170,29 @@ func runBDInitCompat(t *testing.T, env []string, dir, prefix, port string) {
 	if err != nil {
 		t.Fatalf("bd init: exit status %v: %s", err, out)
 	}
+}
+
+// doltDatabaseName returns the server-side Dolt database name bd recorded
+// for an already-initialized workspace. Reading it back (rather than
+// assuming bd's prefix-to-database derivation) keeps the sharing assertion
+// honest if that derivation ever changes.
+func doltDatabaseName(t *testing.T, wsDir string) string {
+	t.Helper()
+	path := filepath.Join(wsDir, ".beads", "metadata.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading beads metadata: %v", err)
+	}
+	var meta struct {
+		DoltDatabase string `json:"dolt_database"`
+	}
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		t.Fatalf("parsing %s: %v", path, err)
+	}
+	if meta.DoltDatabase == "" {
+		t.Fatalf("%s records no dolt_database — cannot join it from a second workspace:\n%s", path, raw)
+	}
+	return meta.DoltDatabase
 }
 
 // startDoltServerOnAllInterfaces starts a Dolt server bound to 0.0.0.0
