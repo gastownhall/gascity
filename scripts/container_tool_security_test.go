@@ -450,3 +450,79 @@ func TestTrivyIgnoreRefreshesBridgeHorizonAndWaivesXNetDNSMessageCVE(t *testing.
 		t.Errorf(".trivyignore.yaml has %d entries for %s, want exactly 1", newCVECount, newCVE)
 	}
 }
+
+// TestTrivyIgnoreWaivesXCryptoSSHCVEForGHDoltBD enforces the 2026-09-10
+// operator-ruled widening (docket D6, "Widen the waiver"): exactly one new
+// entry waives CVE-2026-56854 (golang.org/x/crypto/ssh, CRITICAL) scoped to
+// the three bundled binaries that carry it at this bridge's horizon —
+// usr/bin/gh (x/crypto v0.53.0), usr/local/bin/dolt (v0.50.0), and
+// usr/local/bin/bd (v0.53.0) — on the same expiry as the rest of the bridge.
+// kubectl is untouched: it does not bundle these binaries. The durable fix is
+// austinborn's #5353 (gh/dolt rebuild from patched modules) plus rebuilding
+// bd from beads main, whose go.mod already carries golang.org/x/crypto >=
+// v0.54.0. The ruling forbids trimming or removing any existing entry, so the
+// total entry count must grow by exactly one.
+func TestTrivyIgnoreWaivesXCryptoSSHCVEForGHDoltBD(t *testing.T) {
+	root := repoRoot(t)
+
+	var doc struct {
+		Vulnerabilities []struct {
+			ID        string   `yaml:"id"`
+			Paths     []string `yaml:"paths"`
+			ExpiredAt string   `yaml:"expired_at"`
+			Statement string   `yaml:"statement"`
+		} `yaml:"vulnerabilities"`
+	}
+	if err := yaml.Unmarshal([]byte(readFile(t, root, ".trivyignore.yaml")), &doc); err != nil {
+		t.Fatalf("parsing .trivyignore.yaml: %v", err)
+	}
+
+	const bridgeHorizon = "2026-09-21"
+	const newCVE = "CVE-2026-56854"
+	wantPaths := map[string]bool{
+		"usr/bin/gh":         true,
+		"usr/local/bin/dolt": true,
+		"usr/local/bin/bd":   true,
+	}
+
+	if got, want := len(doc.Vulnerabilities), 47; got != want {
+		t.Errorf(".trivyignore.yaml has %d entries, want %d (46 existing + exactly 1 new); the widening must not trim, remove, or duplicate entries", got, want)
+	}
+
+	newCVECount := 0
+	for _, v := range doc.Vulnerabilities {
+		if v.ID != newCVE {
+			continue
+		}
+		newCVECount++
+		if v.ExpiredAt != bridgeHorizon {
+			t.Errorf("%s expired_at = %q, want the same bridge horizon %q as the rest of the waiver", v.ID, v.ExpiredAt, bridgeHorizon)
+		}
+		gotPaths := map[string]bool{}
+		for _, p := range v.Paths {
+			gotPaths[p] = true
+		}
+		if len(gotPaths) != len(wantPaths) {
+			t.Errorf("%s paths = %v, want exactly %v", v.ID, v.Paths, wantPaths)
+		}
+		for p := range wantPaths {
+			if !gotPaths[p] {
+				t.Errorf("%s missing required path %q", v.ID, p)
+			}
+		}
+		for p := range gotPaths {
+			if !wantPaths[p] {
+				t.Errorf("%s waives unexpected path %q; scope is gh, dolt, and bd only (no kubectl)", v.ID, p)
+			}
+		}
+		statement := strings.ToLower(v.Statement)
+		for _, want := range []string{"x/crypto", "ssh", "5353", "0.54.0"} {
+			if !strings.Contains(statement, want) {
+				t.Errorf("%s statement %q does not name %q (durable fix path: PR #5353 and bd rebuilt from beads main with x/crypto >= v0.54.0)", v.ID, v.Statement, want)
+			}
+		}
+	}
+	if newCVECount != 1 {
+		t.Errorf(".trivyignore.yaml has %d entries for %s, want exactly 1", newCVECount, newCVE)
+	}
+}
