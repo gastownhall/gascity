@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/overlay"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/promptmeta"
 	"github.com/spf13/cobra"
 )
@@ -191,41 +192,100 @@ func lintPack(packDir string) lintPackReport {
 	out.Diagnostics = append(out.Diagnostics, lintFormulaFiles(packDir)...)
 	targets, diagnostics := collectLintPromptTargets(packDir, loaded)
 	out.Diagnostics = append(out.Diagnostics, diagnostics...)
-	packDirs := lintFragmentSearchDirs(packDir, loaded.PackDirs)
+	packDirs, cityPackDirs := lintFragmentSearchDirs(packDir, loaded.PackDirs)
 	for _, target := range targets {
-		out.Diagnostics = append(out.Diagnostics, lintPrompt(packDir, packDirs, loaded.Providers, target)...)
+		out.Diagnostics = append(out.Diagnostics, lintPrompt(packDir, packDirs, cityPackDirs, loaded.Providers, target)...)
 	}
 	out.Diagnostics = append(out.Diagnostics, lintClaudeOverlayHookShape(packDir)...)
 	out.OK = lintErrorCount(out.Diagnostics) == 0
 	return out
 }
 
-// lintFragmentSearchDirs widens a pack's own recursively-included PackDirs
-// with whatever pack dirs its hosting city composes in at the rig level
-// (city.toml's per-rig "includes"). A pack can depend on fragments from a
-// sibling pack purely through that city-level composition without declaring
-// the sibling in its own pack.toml — the runtime resolves such fragments
-// fine (resolveTemplate in template_resolve.go calls
-// city.PackDirsForRig(rigName)), but a standalone pack load
-// (config.LoadPackForLint) never reads city.toml, so lint reported those
-// fragments "not found" even though they render correctly.
+// lintFragmentSearchDirs splits the directories a pack's prompts may resolve
+// fragments from into the pack's own recursively-included PackDirs and the
+// extra dirs its hosting city composes in at the rig level (city.toml's
+// per-rig "includes"). A pack can depend on fragments from a sibling pack
+// purely through that city-level composition without declaring the sibling in
+// its own pack.toml — the runtime resolves such fragments fine (resolveTemplate
+// in template_resolve.go calls city.PackDirsForRig(rigName)), but a standalone
+// pack load (config.LoadPackForLint) never reads city.toml, so lint reported
+// those fragments "not found" even though they render correctly.
 //
-// gc lint has no single rig to bind a standalone pack to, so this mirrors
-// the rig-less fallback the runtime already uses for scope=city agents:
-// PackDirsForRig("") returns the union of every rig's composed pack dirs
-// (City.AllPackDirs). When no city is discoverable from packDir, or it
-// fails to load, this falls back to the pack's own dirs unchanged — lint
-// must still work for a pack with no city at all.
-func lintFragmentSearchDirs(packDir string, ownPackDirs []string) []string {
+// Two rules keep that widening from making lint lie or leak:
+//
+//   - City dirs are scoped to the rigs that actually contain this pack. A
+//     fragment that exists only in an unrelated rig's pack is NOT reachable at
+//     runtime for this pack's agents, so unioning every rig (PackDirsForRig(""))
+//     would turn a real missing-fragment error into a false pass. Only rigs
+//     whose composed dirs include packDir contribute. A pack that belongs to no
+//     rig — standalone, or city-root — has no rig to scope to and keeps the
+//     rig-less fallback the runtime uses for scope=city agents:
+//     PackDirsForRig("").
+//   - City dirs contribute fragments, not diagnostics. gc lint <pack> must
+//     report on <pack>; a malformed fragment in a neighboring pack is already
+//     that neighbour's lint failure, so parse failures under these dirs are
+//     recorded at warning severity and do not fail this pack.
+//
+// The city load is deliberately best-effort: it is advisory, so on
+// config.ErrRepoCacheBusy (another gc process holds the machine-wide repo-cache
+// lock through a network clone) lint degrades to the pack's own dirs rather
+// than blocking on that lock. When no city is discoverable from packDir, or it
+// fails to load, the city-only list is empty and lint behaves exactly as it
+// does for a pack with no city at all.
+func lintFragmentSearchDirs(packDir string, ownPackDirs []string) (own []string, cityOnly []string) {
 	cityPath, err := findCity(packDir)
 	if err != nil {
-		return ownPackDirs
+		return ownPackDirs, nil
 	}
 	cfg, err := loadCityConfigAdvisory(cityPath)
 	if err != nil || cfg == nil {
-		return ownPackDirs
+		return ownPackDirs, nil
 	}
-	return appendUniqueStrings(ownPackDirs, cfg.PackDirsForRig("")...)
+	known := make(map[string]struct{}, len(ownPackDirs))
+	for _, dir := range ownPackDirs {
+		known[pathutil.NormalizePathForCompare(dir)] = struct{}{}
+	}
+	for _, dir := range lintCityComposedPackDirs(cfg, packDir) {
+		key := pathutil.NormalizePathForCompare(dir)
+		if _, seen := known[key]; seen {
+			continue
+		}
+		known[key] = struct{}{}
+		cityOnly = append(cityOnly, dir)
+	}
+	return ownPackDirs, cityOnly
+}
+
+// lintCityComposedPackDirs returns the pack dirs cfg composes in for every rig
+// that contains packDir, unioned in sorted rig-name order for determinism.
+// Paths are compared through pathutil.NormalizePathForCompare because findCity
+// canonicalizes the city root the same way, so a symlinked or /private-aliased
+// ancestor cannot cause a rig to miss its own pack. When no rig contains
+// packDir this falls back to cfg.PackDirsForRig(""), the rig-less union.
+func lintCityComposedPackDirs(cfg *config.City, packDir string) []string {
+	target := pathutil.NormalizePathForCompare(packDir)
+	rigNames := make([]string, 0, len(cfg.RigPackDirs))
+	for name := range cfg.RigPackDirs {
+		rigNames = append(rigNames, name)
+	}
+	sort.Strings(rigNames)
+
+	var dirs []string
+	var matched bool
+	for _, rigName := range rigNames {
+		for _, dir := range cfg.RigPackDirs[rigName] {
+			if pathutil.NormalizePathForCompare(dir) != target {
+				continue
+			}
+			matched = true
+			dirs = appendUniqueStrings(dirs, cfg.PackDirsForRig(rigName)...)
+			break
+		}
+	}
+	if !matched {
+		return cfg.PackDirsForRig("")
+	}
+	return dirs
 }
 
 func lintNamedSessionPoolConflicts(packPath string, loaded *config.LintPackLoad) []lintDiagnostic {
@@ -376,7 +436,13 @@ func lintAgentNameFromTemplate(path string) string {
 	return name
 }
 
-func lintPrompt(packDir string, packDirs []string, providers map[string]config.ProviderSpec, target lintPromptTarget) []lintDiagnostic {
+// lintPrompt renders one prompt target and reports what breaks. packDirs are
+// the pack's own fragment sources and report at error severity; cityPackDirs
+// are composed in by the hosting city (see lintFragmentSearchDirs) and supply
+// fragments at warning severity, so a neighboring pack's malformed fragment
+// cannot fail this pack's lint. City dirs are parsed first so the pack's own
+// definitions win on a name collision.
+func lintPrompt(packDir string, packDirs, cityPackDirs []string, providers map[string]config.ProviderSpec, target lintPromptTarget) []lintDiagnostic {
 	sourcePath := target.sourcePath
 	data, err := os.ReadFile(sourcePath)
 	if err != nil {
@@ -399,6 +465,10 @@ func lintPrompt(packDir string, packDirs []string, providers map[string]config.P
 		Funcs(promptFuncMap("lint-city", "", nil, func() *template.Template { return tmpl })).
 		Option("missingkey=zero")
 
+	for _, dir := range cityPackDirs {
+		diagnostics = append(diagnostics, lintLoadAdvisorySharedTemplates(tmpl, filepath.Join(dir, "prompts", "shared"))...)
+		diagnostics = append(diagnostics, lintLoadAdvisorySharedTemplates(tmpl, filepath.Join(dir, "template-fragments"))...)
+	}
 	for _, dir := range packDirs {
 		diagnostics = append(diagnostics, lintLoadSharedTemplates(tmpl, filepath.Join(dir, "prompts", "shared"))...)
 		diagnostics = append(diagnostics, lintLoadSharedTemplates(tmpl, filepath.Join(dir, "template-fragments"))...)
@@ -435,21 +505,46 @@ func lintPrompt(packDir string, packDirs []string, providers map[string]config.P
 	return diagnostics
 }
 
+// lintLoadSharedTemplates parses every shared template under dir into tmpl and
+// reports failures at error severity. Use it for directories the linted pack
+// owns.
 func lintLoadSharedTemplates(tmpl *template.Template, dir string) []lintDiagnostic {
+	return loadLintSharedTemplates(tmpl, dir, false)
+}
+
+// lintLoadAdvisorySharedTemplates parses every shared template under dir into
+// tmpl but reports failures at warning severity, so the fragments are available
+// to the linted pack without a directory it does not own deciding its exit
+// code.
+func lintLoadAdvisorySharedTemplates(tmpl *template.Template, dir string) []lintDiagnostic {
+	return loadLintSharedTemplates(tmpl, dir, true)
+}
+
+func loadLintSharedTemplates(tmpl *template.Template, dir string, advisory bool) []lintDiagnostic {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
+	}
+	report := diagnosticFromError
+	if advisory {
+		report = func(path string, err error) lintDiagnostic {
+			message := "unknown error"
+			if err != nil {
+				message = err.Error()
+			}
+			return diagnosticFromWarning(path, message)
+		}
 	}
 	var diagnostics []lintDiagnostic
 	for _, name := range sharedTemplateFileNames(entries) {
 		path := filepath.Join(dir, name)
 		data, err := os.ReadFile(path)
 		if err != nil {
-			diagnostics = append(diagnostics, diagnosticFromError(path, err))
+			diagnostics = append(diagnostics, report(path, err))
 			continue
 		}
 		if _, err := tmpl.Parse(string(data)); err != nil {
-			diagnostics = append(diagnostics, diagnosticFromError(path, err))
+			diagnostics = append(diagnostics, report(path, err))
 		}
 	}
 	return diagnostics
