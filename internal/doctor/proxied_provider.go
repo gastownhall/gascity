@@ -10,12 +10,6 @@ import (
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
-// proxiedProviderGate is the beads store-factory diagnostic gate that says the
-// bd CLI front door was selected because the scope is a bd-owned proxied
-// workspace. It mirrors the literal written by internal/beads.OpenStore; the
-// factory owns the value, doctor only reads it.
-const proxiedProviderGate = "proxied_provider"
-
 // proxiedProviderStoreMessage is the OK message for a scope whose store is the
 // bd CLI front door by design rather than by degradation.
 const proxiedProviderStoreMessage = "bd-owned proxied store (bd CLI front door)"

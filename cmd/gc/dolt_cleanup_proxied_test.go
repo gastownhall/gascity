@@ -106,43 +106,99 @@ func loudFailingDoltPath(t *testing.T) string {
 	return binDir
 }
 
-func TestDoltScopeIsBdOwnedProxiedReadsPersistedMetadata(t *testing.T) {
+// TestCleanupUsesCanonicalProxiedOwnershipPredicate pins the cleanup command
+// to the one ownership predicate the lifecycle uses
+// (scopeBindingIsProviderOwnedProxied). The pack's shell guard answers the
+// same question in sh; cmd/gc/dolt_cleanup_proxied_test.go and
+// examples/bd/dolt/proxied_scope_test.go must agree case by case.
+func TestCleanupUsesCanonicalProxiedOwnershipPredicate(t *testing.T) {
+	owned := func(t *testing.T, scope string) bool {
+		t.Helper()
+		got, err := scopeBindingIsProviderOwnedProxied(scope)
+		if err != nil {
+			t.Fatalf("classify %s: %v", scope, err)
+		}
+		return got
+	}
+	writeMetadata := func(t *testing.T, scope, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(scope, ".beads"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(scope, ".beads", "metadata.json"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	proxied := t.TempDir()
 	writeProxiedCityFixture(t, proxied, os.Getpid())
-	if !doltScopeIsBdOwnedProxied(proxied) {
+	if !owned(t, proxied) {
 		t.Error("proxied-server metadata not classified as bd-owned")
 	}
 
 	direct := t.TempDir()
 	writeCityTOML(t, direct, "direct")
-	if err := os.MkdirAll(filepath.Join(direct, ".beads"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(direct, ".beads", "metadata.json"),
-		[]byte(`{"backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if doltScopeIsBdOwnedProxied(direct) {
+	writeMetadata(t, direct, `{"backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`)
+	if owned(t, direct) {
 		t.Error("server-mode metadata classified as bd-owned proxied")
 	}
 
 	fresh := t.TempDir()
 	writeCityTOML(t, fresh, "fresh")
-	if doltScopeIsBdOwnedProxied(fresh) {
+	if owned(t, fresh) {
 		t.Error("unbound scope classified as bd-owned proxied; only a persisted binding counts")
 	}
 
 	doltlite := t.TempDir()
 	writeCityTOML(t, doltlite, "doltlite")
-	if err := os.MkdirAll(filepath.Join(doltlite, ".beads"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(doltlite, ".beads", "metadata.json"),
-		[]byte(`{"backend":"doltlite","dolt_mode":"proxied-server"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if doltScopeIsBdOwnedProxied(doltlite) {
+	writeMetadata(t, doltlite, `{"backend":"doltlite","dolt_mode":"proxied-server"}`)
+	if owned(t, doltlite) {
 		t.Error("stale dolt_mode marker on a doltlite scope classified as bd-owned proxied")
+	}
+
+	// bd writes the backend as "dolt", but a workspace initialized through
+	// beads' own defaults can omit it, and older records spell it "bd". Both
+	// are Dolt to Gas City, so both are bd-owned when the mode says proxied.
+	for _, body := range []string{
+		`{"dolt_mode":"proxied-server"}`,
+		`{"backend":"BD","dolt_mode":"Proxied-Server"}`,
+	} {
+		scope := t.TempDir()
+		writeCityTOML(t, scope, "implicit")
+		writeMetadata(t, scope, body)
+		if !owned(t, scope) {
+			t.Errorf("metadata %s not classified as bd-owned proxied", body)
+		}
+	}
+}
+
+// TestCleanupRefusesUnparseableScopeMetadata proves the command fails typed
+// rather than falling through to the managed-Dolt stages when it cannot tell
+// who owns the scope.
+func TestCleanupRefusesUnparseableScopeMetadata(t *testing.T) {
+	dir := t.TempDir()
+	writeCityTOML(t, dir, "broken")
+	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".beads", "metadata.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", loudFailingDoltPath(t))
+	t.Setenv("GC_CITY_PATH", dir)
+	t.Chdir(dir)
+
+	var stdout, stderr bytes.Buffer
+	cmd := newDoltCleanupCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{"--json"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("unparseable beads metadata was not refused")
+	}
+	if !strings.Contains(stderr.String(), "parse beads metadata") {
+		t.Fatalf("stderr = %q, want a typed metadata parse refusal", stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) != "" {
+		t.Fatalf("stdout = %q, want no envelope for a refusal", stdout.String())
 	}
 }
 

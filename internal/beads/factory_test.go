@@ -336,7 +336,7 @@ func TestOpenStoreAtForCityConfigMarkerBlocksNativeStore(t *testing.T) {
 	if result.Store != fallback {
 		t.Fatalf("Store = %T, want fallback store", result.Store)
 	}
-	if result.Diagnostic.PreflightGate != "proxied_provider" {
+	if result.Diagnostic.PreflightGate != BeadsGateProxiedProvider {
 		t.Fatalf("preflight_gate = %q, want proxied_provider", result.Diagnostic.PreflightGate)
 	}
 }

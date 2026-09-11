@@ -9,14 +9,14 @@ import (
 )
 
 // bd's proxy root layout, as written by `bd init --proxied-server`:
-// <scope>/.beads/dolt/{config.yaml,proxy.pid,...}. The sql-server child is
-// launched with --config pointing at that config.yaml, and proxy.pid is the
-// proxy's own liveness record.
+// <root>/{config.yaml,proxy.pid,...}, where root defaults to
+// <scope>/.beads/dolt but follows BEADS_PROXIED_SERVER_ROOT_PATH or the
+// sidecar's root_path when either is set. The sql-server child is launched
+// with --config pointing at that config.yaml, and proxy.pid is the proxy's own
+// liveness record.
 const (
 	bdProxyConfigFileName = "config.yaml"
 	bdProxyPIDFileName    = "proxy.pid"
-	bdProxyRootDirName    = "dolt"
-	bdProxyBeadsDirName   = ".beads"
 	bdProxyRecordKind     = "db-proxy"
 )
 
@@ -40,14 +40,19 @@ type bdProxyPIDRecord struct {
 // test temp directories too: a real-bd lifecycle test running in t.TempDir()
 // produces exactly this shape, and a concurrent cleanup used to reap it
 // through the test-config-path allowlist.
+//
+// Ownership is proven by the live proxy.pid record beside the config, not by
+// where the root sits: bd resolves the root from
+// BEADS_PROXIED_SERVER_ROOT_PATH, then the sidecar's root_path, and only then
+// the default <scope>/.beads/dolt, so a directory-name check would unprotect
+// every scope with an overridden root. Uncovered: a config_path override that
+// puts config.yaml somewhere other than the proxy root — bd allows it, and gc
+// then sees no proxy.pid sibling and falls through to the ordinary rules.
 func bdOwnedProxyDoltConfig(configPath string) (int, bool) {
 	if configPath == "" || filepath.Base(configPath) != bdProxyConfigFileName {
 		return 0, false
 	}
 	root := filepath.Dir(filepath.Clean(configPath))
-	if filepath.Base(root) != bdProxyRootDirName || filepath.Base(filepath.Dir(root)) != bdProxyBeadsDirName {
-		return 0, false
-	}
 	data, err := os.ReadFile(filepath.Join(root, bdProxyPIDFileName))
 	if err != nil {
 		return 0, false

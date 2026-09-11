@@ -42,7 +42,7 @@ func TestBeadsStoreCheck_ProxiedProviderGateIsOK(t *testing.T) {
 			Diagnostic: beads.BeadsDiagnostic{
 				Store:               beads.BeadsStoreNameBdStore,
 				NativeStoreEligible: false,
-				PreflightGate:       "proxied_provider",
+				PreflightGate:       beads.BeadsGateProxiedProvider,
 				PreflightReason:     "proxied-server mode is owned by the bd provider",
 			},
 		}, nil

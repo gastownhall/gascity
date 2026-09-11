@@ -201,6 +201,118 @@ func TestHealthJSONEmitsSkipDocumentOnProxiedScope(t *testing.T) {
 	assertScopeUnchanged(t, before, snapshotScope(t, cityPath))
 }
 
+// TestRuntimeGuardEmitsSkipJSONForJSONCallers pins the machine-readable
+// contract for the commands that do not shape their own output: the guard runs
+// before they parse flags, so a plain sentence on stdout would corrupt a
+// --json consumer's stream.
+func TestRuntimeGuardEmitsSkipJSONForJSONCallers(t *testing.T) {
+	root := repoRoot(t)
+	// compact and sync parse their own flags before sourcing runtime.sh and
+	// reject --json as unknown; the guard neither sees nor loosens that, which
+	// TestProxiedGuardDoesNotLoosenFlagContracts pins.
+	for _, script := range []string{
+		"commands/status/run.sh",
+		"commands/cleanup/run.sh",
+	} {
+		t.Run(script, func(t *testing.T) {
+			cityPath := t.TempDir()
+			writeProxiedScope(t, cityPath)
+			before := snapshotScope(t, cityPath)
+
+			cmd := exec.Command("sh", filepath.Join(root, script), "--json") //nolint:gosec // fixed pack script path
+			cmd.Env = proxiedScopeEnv(t, root, cityPath)
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("%s --json exited non-zero: %v\n%s", script, err, out)
+			}
+			var doc struct {
+				Skipped *struct {
+					Reason  string `json:"reason"`
+					Message string `json:"message"`
+				} `json:"skipped"`
+			}
+			if err := json.Unmarshal(out, &doc); err != nil {
+				t.Fatalf("%s --json is not valid JSON: %v\n%s", script, err, out)
+			}
+			if doc.Skipped == nil || doc.Skipped.Reason != "bd-owned-proxied-scope" {
+				t.Fatalf("%s skip document = %+v, want reason bd-owned-proxied-scope\n%s", script, doc.Skipped, out)
+			}
+			if doc.Skipped.Message != proxiedNoOpMessage {
+				t.Errorf("%s skip message = %q, want %q", script, doc.Skipped.Message, proxiedNoOpMessage)
+			}
+			assertScopeUnchanged(t, before, snapshotScope(t, cityPath))
+		})
+	}
+}
+
+// TestProxiedGuardDoesNotLoosenFlagContracts pins the other half of the --json
+// contract: commands that reject unknown flags do so on a bd-owned scope too.
+// compact and sync parse before sourcing runtime.sh, so their refusal is what
+// the operator sees — the guard must not turn an unsupported flag into a
+// success document.
+func TestProxiedGuardDoesNotLoosenFlagContracts(t *testing.T) {
+	root := repoRoot(t)
+	for _, script := range []string{"commands/compact/run.sh", "commands/sync/run.sh"} {
+		t.Run(script, func(t *testing.T) {
+			cityPath := t.TempDir()
+			writeProxiedScope(t, cityPath)
+
+			cmd := exec.Command("sh", filepath.Join(root, script), "--json") //nolint:gosec // fixed pack script path
+			cmd.Env = proxiedScopeEnv(t, root, cityPath)
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("%s accepted an unsupported --json flag:\n%s", script, out)
+			}
+			if !strings.Contains(string(out), "unknown flag") {
+				t.Fatalf("%s did not report the unknown flag:\n%s", script, out)
+			}
+		})
+	}
+}
+
+// TestProxiedOwnershipPredicateMatchesCanonicalBackends keeps the sh guard in
+// step with cmd/gc's scopeBindingIsProviderOwnedProxied: backend dolt, bd or
+// absent all mean Dolt, case-insensitively, and anything else does not.
+func TestProxiedOwnershipPredicateMatchesCanonicalBackends(t *testing.T) {
+	root := repoRoot(t)
+	cases := []struct {
+		name     string
+		metadata string
+		bdOwned  bool
+	}{
+		{"backend dolt", `{"backend":"dolt","dolt_mode":"proxied-server"}`, true},
+		{"backend bd", `{"backend":"bd","dolt_mode":"proxied-server"}`, true},
+		{"backend absent", `{"dolt_mode":"proxied-server"}`, true},
+		{"mixed case", `{"backend":"BD","dolt_mode":"Proxied-Server"}`, true},
+		{"backend doltlite", `{"backend":"doltlite","dolt_mode":"proxied-server"}`, false},
+		{"backend sqlite", `{"backend":"sqlite","dolt_mode":"proxied-server"}`, false},
+		{"server mode", `{"backend":"dolt","dolt_mode":"server"}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(tc.metadata), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			cmd := exec.Command("sh", "-c", //nolint:gosec // fixed pack script path
+				". "+filepath.Join(root, "assets/scripts/proxied_scope.sh")+"; bd_owns_proxied_scope && echo owned || echo not-owned")
+			cmd.Env = proxiedScopeEnv(t, root, cityPath)
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("predicate probe failed: %v\n%s", err, out)
+			}
+			got := strings.TrimSpace(string(out)) == "owned"
+			if got != tc.bdOwned {
+				t.Fatalf("bd_owns_proxied_scope(%s) = %v, want %v", tc.metadata, got, tc.bdOwned)
+			}
+		})
+	}
+}
+
 // TestHealthCheckAcceptsProxiedSkipDocument covers the second half of the
 // dolt-health order: the parser must not record order.failed for a report
 // that has no server section because bd owns the scope.

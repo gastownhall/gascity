@@ -223,10 +223,17 @@ managed_runtime_port() (
 # and there is no managed runtime port to resolve. A command that shapes its
 # own output (health, cleanup) sets GC_DOLT_PROXIED_HANDLED=1 before sourcing
 # this file and emits its own skip document instead.
+#
+# The guard runs before the commands parse their own flags, so it has to
+# honour --json itself: status, cleanup, compact and sync all have machine
+# consumers, and a plain sentence on stdout would break every one of them.
 if bd_owns_proxied_scope; then
   GC_DOLT_SCOPE_BD_PROXIED=1
   if [ "${GC_DOLT_PROXIED_HANDLED:-0}" != "1" ]; then
-    printf '%s\n' "$GC_DOLT_PROXIED_NOOP_MESSAGE"
+    case " $* " in
+      *" --json "*) print_proxied_skip_json ;;
+      *) printf '%s\n' "$GC_DOLT_PROXIED_NOOP_MESSAGE" ;;
+    esac
     exit 0
   fi
   GC_DOLT_PORT=""

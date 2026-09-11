@@ -25,14 +25,20 @@ proxied_metadata_field() {
 # metadata says bd owns its Dolt topology. Defaults to GC_CITY_PATH. Only the
 # persisted binding counts: a scope with no beads metadata is not yet bound and
 # stays under the managed-Dolt lens.
+#
+# This is the sh twin of cmd/gc's scopeBindingIsProviderOwnedProxied, and the
+# two must answer alike: dolt_mode proxied-server with a backend Gas City
+# treats as Dolt — dolt, bd, or absent — matched case-insensitively.
+# examples/bd/dolt/proxied_scope_test.go pins the shared cases.
 bd_owns_proxied_scope() {
   _proxied_scope="${1:-${GC_CITY_PATH:-}}"
   [ -n "$_proxied_scope" ] || return 1
   _proxied_meta="$_proxied_scope/.beads/metadata.json"
   [ -f "$_proxied_meta" ] || return 1
-  [ "$(proxied_metadata_field "$_proxied_meta" dolt_mode)" = "proxied-server" ] || return 1
-  case "$(proxied_metadata_field "$_proxied_meta" backend)" in
-    dolt) return 0 ;;
+  _proxied_mode=$(proxied_metadata_field "$_proxied_meta" dolt_mode | tr 'A-Z' 'a-z')
+  [ "$_proxied_mode" = "proxied-server" ] || return 1
+  case "$(proxied_metadata_field "$_proxied_meta" backend | tr 'A-Z' 'a-z')" in
+    '' | dolt | bd) return 0 ;;
     *) return 1 ;;
   esac
 }

@@ -9,11 +9,17 @@ import (
 )
 
 // writeBdProxyRoot lays out a bd proxy root the way `bd init --proxied-server`
-// does and returns the sql-server config path the child is launched with.
-// A pid of 0 means "no proxy.pid at all".
+// does at its default location and returns the sql-server config path the
+// child is launched with. A pid of 0 means "no proxy.pid at all".
 func writeBdProxyRoot(t *testing.T, scope string, pid int) string {
 	t.Helper()
-	root := filepath.Join(scope, ".beads", "dolt")
+	return writeBdProxyRootAt(t, filepath.Join(scope, ".beads", "dolt"), pid)
+}
+
+// writeBdProxyRootAt is the same fixture at an arbitrary root, which is what
+// BEADS_PROXIED_SERVER_ROOT_PATH or a sidecar root_path produces.
+func writeBdProxyRootAt(t *testing.T, root string, pid int) string {
+	t.Helper()
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -100,18 +106,47 @@ func TestClassifyDoltProcess_MissingProxyPIDKeepsExistingBehaviour(t *testing.T)
 }
 
 // TestClassifyDoltProcess_ProtectsBdOwnedProxyOutsideTestRoots covers the
-// production shape: a city under /data with a live proxy is protected for the
-// bd-ownership reason, not the generic not-on-allowlist one.
+// production shape: a real city's live proxy is protected for the bd-ownership
+// reason, not the generic not-on-allowlist one. The scope deliberately avoids
+// t.TempDir(), whose "Test"-prefixed name is itself on the allowlist and would
+// make the assertion vacuous.
 func TestClassifyDoltProcess_ProtectsBdOwnedProxyOutsideTestRoots(t *testing.T) {
-	scope := t.TempDir()
+	scope, err := os.MkdirTemp("", "prod-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(scope) }) //nolint:errcheck
 	configPath := writeBdProxyRoot(t, scope, 4244)
 	stubBdProxyPIDAlive(t, map[int]bool{4244: true})
+	if isTestConfigPath(configPath, "/home/u", os.TempDir()) {
+		t.Fatalf("fixture %q is on the test-config-path allowlist; the test would not prove the production shape", configPath)
+	}
 
 	p := DoltProcInfo{PID: 9004, Argv: []string{"dolt", "sql-server", "--config", configPath}}
 	got := classifyDoltProcess(p, nil, "/home/u", "", nil)
 
 	if got.Action != "protect" {
 		t.Fatalf("Action = %q, want protect; reason = %q", got.Action, got.Reason)
+	}
+	if !strings.Contains(got.Reason, "bd-owned proxied dolt server") {
+		t.Errorf("Reason = %q, want the bd-ownership reason", got.Reason)
+	}
+}
+
+// TestClassifyDoltProcess_ProtectsBdOwnedProxyWithOverriddenRoot is the
+// review's MUST-FIX case: bd resolves its proxy root from
+// BEADS_PROXIED_SERVER_ROOT_PATH or the sidecar's root_path, so ownership
+// cannot depend on the root being named <scope>/.beads/dolt.
+func TestClassifyDoltProcess_ProtectsBdOwnedProxyWithOverriddenRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "shared-server", "store")
+	configPath := writeBdProxyRootAt(t, root, 4249)
+	stubBdProxyPIDAlive(t, map[int]bool{4249: true})
+
+	p := DoltProcInfo{PID: 9007, Argv: []string{"dolt", "sql-server", "--config", configPath}}
+	got := classifyDoltProcess(p, nil, "/home/u", os.TempDir(), nil)
+
+	if got.Action != "protect" {
+		t.Fatalf("Action = %q, want protect for an overridden proxy root; reason = %q", got.Action, got.Reason)
 	}
 	if !strings.Contains(got.Reason, "bd-owned proxied dolt server") {
 		t.Errorf("Reason = %q, want the bd-ownership reason", got.Reason)
@@ -166,8 +201,9 @@ func TestBdOwnedProxyDoltConfigRejectsForeignLayouts(t *testing.T) {
 	}{
 		{"empty", ""},
 		{"wrong file name", filepath.Join(filepath.Dir(configPath), "dolt-config.yaml")},
-		{"wrong root dir", filepath.Join(scope, ".beads", "proxieddb", "config.yaml")},
-		{"not under .beads", filepath.Join(scope, "dolt", "config.yaml")},
+		// A config.yaml with no proxy.pid beside it is some other server's
+		// config: the pid record, not the directory name, is the proof.
+		{"no proxy pid sibling", filepath.Join(scope, "unrelated", "config.yaml")},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -724,7 +724,7 @@ func (c *BeadsStoreCheck) Run(_ *CheckContext) *CheckResult {
 		r.Message = fmt.Sprintf("store ping failed: %v", err)
 		return r
 	}
-	if result.Diagnostic.Store == beads.BeadsStoreNameBdStore && result.Diagnostic.PreflightGate == proxiedProviderGate {
+	if result.Diagnostic.Store == beads.BeadsStoreNameBdStore && result.Diagnostic.PreflightGate == beads.BeadsGateProxiedProvider {
 		// Not a degraded fallback: bd owns the Dolt topology for proxied
 		// scopes and the CLI front door is the only supported store.
 		r.Status = StatusOK

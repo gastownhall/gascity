@@ -24,6 +24,14 @@ const (
 	// BeadsStoreNameNativeDoltStore is the diagnostic store name for native Dolt stores.
 	BeadsStoreNameNativeDoltStore = "NativeDoltStore"
 
+	// BeadsGateProxiedProvider is the preflight gate recorded when a scope
+	// falls back to the bd CLI front door because its persisted dolt_mode is
+	// proxied-server. It is an expected, healthy outcome rather than a
+	// degradation: bd owns the proxy and its Dolt child, and rc.2 has no
+	// library open for such a workspace. Diagnostics consumers (doctor) match
+	// on this value, so the factory owns it and they read it.
+	BeadsGateProxiedProvider = "proxied_provider"
+
 	storeNameBdStore         = BeadsStoreNameBdStore
 	storeNameFileStore       = BeadsStoreNameFileStore
 	storeNameExecStore       = BeadsStoreNameExecStore
@@ -31,6 +39,7 @@ const (
 	nativeForceFallbackEnv   = "GC_BEADS_FORCE_FALLBACK"
 	nativeForceFallbackGate  = "force_fallback"
 	nativeHooksGate          = "bd_hooks"
+	proxiedProviderGate      = BeadsGateProxiedProvider
 	nativeUnavailableMessage = "native_store_unavailable"
 
 	// gcHookStampPrefix is the comment prefix gc embeds in every hook script
@@ -156,7 +165,7 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 	if mode, ok, modeErr := contract.ReadDoltMode(fsys.OSFS{}, metadataPath); modeErr == nil && ok && (!backendOK || contract.IsDoltBackend(metadataBackend)) {
 		switch strings.ToLower(strings.TrimSpace(mode)) {
 		case "proxied-server":
-			diag := BeadsDiagnostic{Store: storeNameBdStore, NativeStoreEligible: false, PreflightGate: "proxied_provider", PreflightReason: "proxied-server mode is owned by the bd provider"}
+			diag := BeadsDiagnostic{Store: storeNameBdStore, NativeStoreEligible: false, PreflightGate: proxiedProviderGate, PreflightReason: "proxied-server mode is owned by the bd provider"}
 			return opts.openBdFallback(provider, diag)
 		case "server", "embedded":
 		default:
@@ -174,7 +183,7 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 		switch strings.ToLower(strings.TrimSpace(cfg.DoltMode)) {
 		case "":
 		case "proxied-server":
-			diag := BeadsDiagnostic{Store: storeNameBdStore, NativeStoreEligible: false, PreflightGate: "proxied_provider", PreflightReason: "proxied-server mode is owned by the bd provider"}
+			diag := BeadsDiagnostic{Store: storeNameBdStore, NativeStoreEligible: false, PreflightGate: proxiedProviderGate, PreflightReason: "proxied-server mode is owned by the bd provider"}
 			return opts.openBdFallback(provider, diag)
 		case "server", "embedded":
 		default:
