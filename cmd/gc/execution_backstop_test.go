@@ -363,3 +363,76 @@ func TestExecutionBackstopEscalatesWhenTheAgentHasNoNudgeConfigured(t *testing.T
 		t.Fatalf("execution.step_stalled events = %d, want exactly 1", stalled)
 	}
 }
+
+// asNamedSeat re-stamps the seeded session bead as a configured named
+// interactive seat — the run-operator, an olivia PM, a design reviewer — rather
+// than a pool slot: it clears pool_managed and sets the configured-named
+// markers, exactly as session_beads.go does for an isConfiguredNamed session.
+// The runtime session_name (the claim's assignee here) is unchanged, so
+// resolution still finds the claim by identity.
+func (f *executionBackstopFixture) asNamedSeat(t *testing.T) {
+	t.Helper()
+	if err := f.store.SetMetadataBatch(f.session.ID, map[string]string{
+		"pool_managed":              "",
+		"configured_named_session":  "true",
+		"configured_named_identity": "run-operator",
+	}); err != nil {
+		t.Fatalf("re-stamping the session bead as a named seat: %v", err)
+	}
+	current, err := f.store.Get(f.session.ID)
+	if err != nil {
+		t.Fatalf("re-reading the named-seat session bead: %v", err)
+	}
+	f.session = current
+}
+
+// TestExecutionBackstopRecoversAStalledNamedInteractiveSeat is the pilot-killer
+// row (ga-lez12). The stall that aborted every pilot run happened on an
+// interactive Claude-harness seat — the run-operator holding finalize-work, an
+// olivia PM holding canonicalize-issue — not on a pool slot. Those seats carry
+// configured_named_session, and pool_managed is explicitly cleared for them
+// (session_beads.go), so the pool-only governs scope left them with NO recovery:
+// the seat held the in-progress step, made zero progress, the step's retry
+// exhausted (on_exhausted=hard_fail), and the scope aborted (gc.on_fail=
+// abort_scope). This row proves the same bounded observe -> nudge -> backoff ->
+// drain recovery now covers a stalled named seat, converging it onto the
+// recycle -> dead-assignee reopen -> re-attempt chain instead of hard-failing.
+func TestExecutionBackstopRecoversAStalledNamedInteractiveSeat(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.asNamedSeat(t)
+	f.idleFor(t, 10*time.Minute)
+
+	f.tick(t) // first sighting: start the grace clock, do not nudge yet
+	if got := f.sessionMeta(t, executionClaimNudgeWorkKey); got != f.work.ID {
+		t.Fatalf("named seat grace clock did not start: work marker = %q, want %q", got, f.work.ID)
+	}
+
+	// The bounded nudge phase re-delivers the seat's own claim nudge.
+	for i := 0; i < idleClaimNudgeMaxAttempts; i++ {
+		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t)
+	}
+	if got := f.nudgeCount(); got != idleClaimNudgeMaxAttempts {
+		t.Fatalf("delivered nudges to a stalled named seat = %d, want the attempt cap %d; stdout=%s", got, idleClaimNudgeMaxAttempts, f.stdout.String())
+	}
+
+	// Exhaustion hands the seat to the drain that already converges.
+	for i := 0; i < 3; i++ {
+		f.now = f.now.Add(idleClaimNudgeBackoff)
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t)
+	}
+	if len(f.drained) != 1 || f.drained[0] != f.sessName {
+		t.Fatalf("drain requests for a stalled named seat = %v, want exactly one for %s; stdout=%s", f.drained, f.sessName, f.stdout.String())
+	}
+	stalled := 0
+	for _, e := range f.rec.Events {
+		if e.Type == events.ExecutionStepStalled {
+			stalled++
+		}
+	}
+	if stalled != 1 {
+		t.Fatalf("execution.step_stalled events = %d, want exactly 1", stalled)
+	}
+}

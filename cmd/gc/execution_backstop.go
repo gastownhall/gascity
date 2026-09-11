@@ -74,9 +74,10 @@ const (
 	executionClaimNudgeStalledKey = "execution_claim_nudge_stalled"
 )
 
-// nudgeStalledPoolExecution re-delivers the configured claim nudge to a pool slot
-// that HOLDS an in-progress claim it never started executing, and escalates once
-// the bounded attempts are spent.
+// nudgeStalledPoolExecution re-delivers the configured claim nudge to a seat —
+// a pool slot or a configured named interactive seat (see governs) — that HOLDS
+// an in-progress claim it never started executing, and escalates once the
+// bounded attempts are spent.
 //
 // work/workStores/workStoreRefs are the reconciler's index-aligned assigned-work
 // snapshot; requestDrain is the existing drain request (drainOps.setDrain), taken
@@ -181,8 +182,9 @@ func (s executionClaimSnapshot) forIdentities(identities []string) []executionCl
 	return out
 }
 
-// poolExecutionBackstop is the backstopPredicate for a pool slot that claimed a
-// bead and never executed it.
+// poolExecutionBackstop is the backstopPredicate for a seat — a pool slot or a
+// configured named interactive seat (see governs) — that claimed a bead and
+// never executed it.
 type poolExecutionBackstop struct {
 	cfg          *config.City
 	sp           runtime.Provider
@@ -192,8 +194,20 @@ type poolExecutionBackstop struct {
 	claims       executionClaimSnapshot
 }
 
+// governs covers both pool slots and configured named interactive seats. The
+// pool-only scope was the ga-lez12 gap: the pilot-killer stalls happened on
+// interactive Claude-harness seats — the run-operator holding finalize-work, an
+// olivia PM holding canonicalize-issue, an idle design reviewer — and those
+// seats carry configured_named_session with pool_managed explicitly cleared
+// (session_beads.go), so a pool-only predicate never saw them. A named seat that
+// claims a step and never executes it is stranded exactly like a pool slot: the
+// bead is in_progress so no claim probe wants it, the session is alive so no
+// crash lane touches it, and the in_progress row keeps the seat's close gate
+// open so it is never reaped. Everything below this predicate resolves by the
+// session's OWN identities and re-checks ownership before acting, so widening
+// the scope adds coverage without loosening any guard.
 func (p poolExecutionBackstop) governs(s beads.Bead) bool {
-	return strings.TrimSpace(s.Metadata["pool_managed"]) == "true"
+	return strings.TrimSpace(s.Metadata["pool_managed"]) == "true" || isNamedSessionBead(s)
 }
 
 // resolve reports an outstanding stall only when all of it holds: the session
