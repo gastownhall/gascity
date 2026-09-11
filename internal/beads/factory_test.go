@@ -308,7 +308,12 @@ func TestOpenStoreAtForCityExecutableHooksBlockNativeStore(t *testing.T) {
 	}
 }
 
-func TestOpenStoreAtForCityConfigMarkerBlocksNativeStore(t *testing.T) {
+// The proxied binding lives in .beads/metadata.json. bd commits it there and
+// writes no dolt.mode into config.yaml at all — its own validator accepts only
+// "server"|"embedded" for that key — so a config.yaml carrying
+// "proxied-server" is drift, not a topology decision, and must not decide the
+// store. Preflight answers instead.
+func TestOpenStoreAtForCityConfigMarkerIsNotProxiedAuthority(t *testing.T) {
 	t.Setenv(nativeForceFallbackEnv, "")
 	scope := t.TempDir()
 	beadsDir := filepath.Join(scope, ".beads")
@@ -316,6 +321,42 @@ func TestOpenStoreAtForCityConfigMarkerBlocksNativeStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt.mode: proxied-server\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	native := NewMemStore()
+
+	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+		ScopeRoot:        scope,
+		Provider:         "bd",
+		PreflightChecker: factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
+		OpenBdStore: func() (Store, error) {
+			t.Fatal("a config.yaml marker alone routed the scope to the bd provider")
+			return nil, nil
+		},
+		OpenNativeStore: func() (Store, error) { return native, nil },
+	})
+	if err != nil {
+		t.Fatalf("OpenStoreAtForCity() error = %v", err)
+	}
+	if result.Store != native {
+		t.Fatalf("Store = %T, want the preflight-selected native store", result.Store)
+	}
+	if result.Diagnostic.PreflightGate == BeadsGateProxiedProvider {
+		t.Fatal("config.yaml decided the proxied gate; metadata.json is the authority")
+	}
+}
+
+// Metadata is that authority: the same marker there does route to the bd
+// provider under the proxied gate, without ever opening a native store.
+func TestOpenStoreAtForCityMetadataProxiedModeBlocksNativeStore(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"),
+		[]byte(`{"backend":"dolt","dolt_mode":"proxied-server"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	fallback := NewMemStore()
@@ -326,7 +367,7 @@ func TestOpenStoreAtForCityConfigMarkerBlocksNativeStore(t *testing.T) {
 		PreflightChecker: factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
 		OpenBdStore:      func() (Store, error) { return fallback, nil },
 		OpenNativeStore: func() (Store, error) {
-			t.Fatal("OpenNativeStore called for proxied config marker")
+			t.Fatal("OpenNativeStore called for a proxied metadata binding")
 			return nil, nil
 		},
 	})

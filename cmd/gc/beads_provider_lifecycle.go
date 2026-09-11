@@ -447,12 +447,13 @@ func scopeUsesProxiedDoltMode(cityPath, scopeRoot string) bool {
 		return false
 	}
 	if cfg, ok, err := contract.ReadConfigState(fsys.OSFS{}, filepath.Join(scopeRoot, ".beads", "config.yaml")); err == nil && ok {
-		if strings.EqualFold(strings.TrimSpace(cfg.DoltMode), "proxied-server") {
-			return true
-		}
-		// An endpoint-origin marker is an existing canonical config. Older
-		// versions omitted dolt.mode and meant direct server mode.
-		if strings.TrimSpace(cfg.DoltMode) == "" && strings.TrimSpace(string(cfg.EndpointOrigin)) != "" {
+		// config.yaml answers direct/server only. bd records the proxied
+		// binding in metadata.json and writes no dolt.mode of its own (D1), so
+		// a "proxied-server" here is drift, not authority — treating it as one
+		// is how a legacy direct workspace acquired a second Dolt owner.
+		if canonicalConfigDoltMode(cfg.DoltMode) != "" || strings.TrimSpace(string(cfg.EndpointOrigin)) != "" {
+			// An endpoint-origin marker is an existing canonical config. Older
+			// versions omitted dolt.mode and meant direct server mode.
 			return false
 		}
 	}
@@ -1175,19 +1176,26 @@ func runProviderOwnedScopesLifecycleOpContext(parent context.Context, cityPath, 
 	if err != nil {
 		return err
 	}
+	everyScope := providerOwnedOpVisitsEveryScope(op)
+	var failures []error
 	for _, scopeRoot := range scopes {
 		owned, err := scopeProviderOwned(cityPath, scopeRoot)
-		if err != nil {
-			return err
-		}
-		if !owned {
+		if err == nil && !owned {
 			continue
 		}
-		if err := runProviderOwnedScopeLifecycleOpContext(parent, cityPath, scopeRoot, op); err != nil {
-			return fmt.Errorf("provider-owned scope %q %s: %w", scopeRoot, op, err)
+		if err == nil {
+			err = runProviderOwnedScopeLifecycleOpContext(parent, cityPath, scopeRoot, op)
+			if err == nil {
+				continue
+			}
 		}
+		err = fmt.Errorf("provider-owned scope %q %s: %w", scopeRoot, op, err)
+		if !everyScope {
+			return err
+		}
+		failures = append(failures, err)
 	}
-	return nil
+	return errors.Join(failures...)
 }
 
 // hasProviderOwnedRigScope reports whether any non-city scope op would visit
@@ -2448,7 +2456,12 @@ func ensureCanonicalScopeMetadata(fs fsys.FS, scopeRoot, doltDatabase string, pr
 	if cfg, ok, err := contract.ReadConfigState(fs, filepath.Join(scopeRoot, ".beads", "config.yaml")); err == nil && ok {
 		if !metadataModeAuthoritative && (!metadataExists || metadataBackend == "dolt") && (cfg.EndpointOrigin == contract.EndpointOriginCityCanonical || cfg.EndpointOrigin == contract.EndpointOriginExplicit || strings.TrimSpace(cfg.DoltHost) != "" || strings.TrimSpace(cfg.DoltPort) != "") {
 			doltMode = "server"
-		} else if !metadataModeAuthoritative && strings.TrimSpace(cfg.DoltMode) != "" && (!metadataExists || metadataBackend == "dolt") {
+		} else if !metadataModeAuthoritative && canonicalConfigDoltMode(cfg.DoltMode) != "" && (!metadataExists || metadataBackend == "dolt") {
+			// config.yaml is a legacy compatibility input for direct/server
+			// only. It must never promote a scope onto bd's proxied path:
+			// metadata.json is the authority (D1), and copying a stray
+			// proxied-server from config.yaml into metadata is what turned a
+			// GC-managed direct workspace into one bd would open a proxy over.
 			doltMode = strings.TrimSpace(cfg.DoltMode)
 		}
 	}
@@ -2817,16 +2830,44 @@ func desiredCityDoltConfigState(cityPath string, cityDolt config.DoltConfig, cit
 		return state
 	}
 	if mode := persistedScopeDoltMode(cityPath); mode != "" {
-		return contract.ConfigState{IssuePrefix: cityPrefix, EndpointOrigin: contract.EndpointOriginManagedCity, EndpointStatus: contract.EndpointStatusVerified, DoltMode: mode}
+		return contract.ConfigState{IssuePrefix: cityPrefix, EndpointOrigin: contract.EndpointOriginManagedCity, EndpointStatus: contract.EndpointStatusVerified, DoltMode: canonicalConfigDoltMode(mode)}
 	}
-	// Fresh bd/Dolt scopes default to Beads' proxied-local UOW path. A
-	// provider-owned initialized scope above remains authoritative.
+	// Fresh bd/Dolt scopes default to Beads' proxied-local UOW path, which is
+	// recorded in metadata.json and nowhere else (D1). A Dolt scope whose
+	// metadata predates dolt_mode is a legacy direct server, not a candidate
+	// for the fresh default: stamping proxied-server on it here, and then
+	// copying that back into metadata, moved a GC-managed workspace onto bd's
+	// proxy over the same data dir.
 	return contract.ConfigState{
 		IssuePrefix:    cityPrefix,
 		EndpointOrigin: contract.EndpointOriginManagedCity,
 		EndpointStatus: contract.EndpointStatusVerified,
-		DoltMode:       "proxied-server",
+		DoltMode:       canonicalConfigDoltMode(freshScopeCanonicalDoltMode(cityPath)),
 	}
+}
+
+// canonicalConfigDoltMode maps a persisted topology onto what belongs in
+// .beads/config.yaml. bd writes the mode only into metadata.json and its own
+// validator accepts just "server"|"embedded" for the config.yaml key
+// (beads internal/config/yaml_config.go), so "proxied-server" there would be a
+// second topology store holding a value bd rejects. Emitting nothing keeps
+// metadata the single authority.
+func canonicalConfigDoltMode(mode string) string {
+	if strings.EqualFold(strings.TrimSpace(mode), "proxied-server") {
+		return ""
+	}
+	return mode
+}
+
+// freshScopeCanonicalDoltMode reports the mode a scope with no persisted
+// dolt_mode should be canonicalised to: server for an existing Dolt workspace
+// (the pre-dolt_mode legacy shape), the fresh proxied-local default otherwise.
+// It mirrors the hasDoltMetadata rule in scopeUsesProxiedDoltMode.
+func freshScopeCanonicalDoltMode(scopeRoot string) string {
+	if backend, ok, err := contract.ReadMetadataBackend(fsys.OSFS{}, scopeMetadataJSONPath(scopeRoot)); err == nil && ok && contract.IsDoltBackend(backend) {
+		return "server"
+	}
+	return "proxied-server"
 }
 
 func desiredRigDoltConfigState(cityPath string, rig config.Rig, cityState contract.ConfigState) contract.ConfigState {
@@ -2843,7 +2884,7 @@ func desiredRigDoltConfigState(cityPath string, rig config.Rig, cityState contra
 		return state
 	}
 	if mode := persistedScopeDoltMode(rig.Path); mode != "" {
-		return contract.ConfigState{IssuePrefix: rig.EffectivePrefix(), EndpointOrigin: contract.EndpointOriginInheritedCity, EndpointStatus: contract.EndpointStatusVerified, DoltMode: mode}
+		return contract.ConfigState{IssuePrefix: rig.EffectivePrefix(), EndpointOrigin: contract.EndpointOriginInheritedCity, EndpointStatus: contract.EndpointStatusVerified, DoltMode: canonicalConfigDoltMode(mode)}
 	}
 
 	return inheritedRigDoltConfigState(rig.Path, rig.EffectivePrefix(), cityState)

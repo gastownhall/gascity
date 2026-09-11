@@ -552,11 +552,14 @@ scope_is_proxied() {
         [ "$metadata_mode" = "proxied-server" ] && return 0
         return 1
     fi
+    # config.yaml is a legacy compatibility input for the direct/server shapes
+    # only. bd records the proxied binding in metadata.json and writes no
+    # dolt.mode of its own, so a "proxied-server" here is drift and must not
+    # move a scope onto the proxy path.
     if [ -f "$1/.beads/config.yaml" ]; then
         config_mode=$(sed -n 's/^[[:space:]]*dolt\.mode:[[:space:]]*//p' "$1/.beads/config.yaml" | head -1)
         normalized_mode=$(normalize_dolt_mode "$config_mode")
         if [ -n "$normalized_mode" ]; then
-            [ "$normalized_mode" = "proxied-server" ] && return 0
             return 1
         fi
     fi

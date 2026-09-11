@@ -122,11 +122,13 @@ func persistedDoltModeRefusal(scopeRoot string) (BeadsDiagnostic, bool) {
 	if !cfgOK {
 		return BeadsDiagnostic{}, false
 	}
+	// config.yaml is a legacy compatibility input for the direct/server shapes
+	// only. The proxied binding lives in metadata.json and bd writes no
+	// dolt.mode of its own, so "proxied-server" here is drift rather than a
+	// topology decision; it is not treated as authority and preflight decides.
 	switch strings.ToLower(strings.TrimSpace(cfg.DoltMode)) {
-	case "", "server", "embedded":
+	case "", "server", "embedded", "proxied-server":
 		return BeadsDiagnostic{}, false
-	case "proxied-server":
-		return bdFallback(proxiedProviderGate, "proxied-server mode is owned by the bd provider"), true
 	default:
 		return bdFallback("unsupported_dolt_mode", fmt.Sprintf("unsupported persisted dolt_mode %q", cfg.DoltMode)), true
 	}

@@ -138,9 +138,16 @@ func loadProviderScopeOwnershipJournal(cityPath string) (providerScopeOwnershipJ
 		return providerScopeOwnershipJournal{}, false, fmt.Errorf("invalid scope ownership journal")
 	}
 	for key, entry := range journal.Scopes {
-		canonicalEntryPath := normalizePathForCompare(entry.ScopePath)
-		if key == "" || entry.ScopePath == "" || !filepath.IsAbs(entry.ScopePath) || canonicalEntryPath != entry.ScopePath {
-			return providerScopeOwnershipJournal{}, false, fmt.Errorf("scope ownership journal path drift for %q", key)
+		// The record has to be a path gc can act on — absolute and in cleaned
+		// form — but not the exact string filepath.EvalSymlinks would produce
+		// today. A scope relocated behind a symlink after it was journaled
+		// still resolves to the same directory, and every lookup below already
+		// compares with samePath, which resolves both sides. Requiring the
+		// resolved spelling here rejected the whole journal for one relocated
+		// rig, and every start and stop reads the journal before it does
+		// anything, so that stranded the proxies of every other scope too.
+		if key == "" || entry.ScopePath == "" || !filepath.IsAbs(entry.ScopePath) || filepath.Clean(entry.ScopePath) != entry.ScopePath {
+			return providerScopeOwnershipJournal{}, false, fmt.Errorf("invalid scope ownership journal path for %q", key)
 		}
 		if strings.HasPrefix(key, "path:") && key != "path:"+entry.ScopePath {
 			return providerScopeOwnershipJournal{}, false, fmt.Errorf("scope ownership journal path key mismatch for %q", key)
@@ -174,12 +181,16 @@ func loadProviderScopeOwnershipJournal(cityPath string) (providerScopeOwnershipJ
 			return providerScopeOwnershipJournal{}, false, fmt.Errorf("invalid scope ownership state for %q", key)
 		}
 	}
+	// Two records that name the same directory through different spellings are
+	// still a duplicate: whichever one a lookup reached first would decide the
+	// scope's state. Compare resolved, the way every lookup does.
 	seenPaths := make(map[string]string, len(journal.Scopes))
 	for key, entry := range journal.Scopes {
-		if prior, duplicate := seenPaths[entry.ScopePath]; duplicate {
+		resolved := normalizePathForCompare(entry.ScopePath)
+		if prior, duplicate := seenPaths[resolved]; duplicate {
 			return providerScopeOwnershipJournal{}, false, fmt.Errorf("duplicate scope ownership paths for %q and %q", prior, key)
 		}
-		seenPaths[entry.ScopePath] = key
+		seenPaths[resolved] = key
 	}
 	return journal, true, nil
 }
@@ -323,6 +334,27 @@ func providerOwnedOpRetires(op string) bool {
 	return op == "stop" || op == "shutdown"
 }
 
+// providerOwnedOpVisitsEveryScope reports whether a city-wide lifecycle
+// operation must attempt every provider-owned scope before it reports a
+// failure. Each proxied workspace has its own proxy root, so stopping is
+// per-scope work: returning at the first refusal leaves every later scope's
+// `bd db-proxy-child` and `dolt sql-server` resident, and a rerun repeats the
+// same short-circuit because the refusing scope is still visited first. Health
+// answers for the whole city too — one bad scope must not hide the state of
+// the others. A starting op keeps the opposite contract: bringing up a rig
+// under a city scope that just refused is not a recovery, it is a second owner.
+//
+// bd's `dolt stop` refuses an unverifiable proxy record unless `--force` is
+// passed, and rc.2 exposes that condition (proxy.CanForceStopUnverified) only
+// as unstructured message text — the JSON error envelope carries no code
+// (beads cmd/bd/dolt.go stop RunE, internal/storage/dbproxy/proxy/shutdown.go).
+// Signaling a PID whose identity bd could not confirm is irreversible, so gc
+// surfaces the refusal for that scope and keeps going rather than escalating on
+// a string match.
+func providerOwnedOpVisitsEveryScope(op string) bool {
+	return providerOwnedOpRetires(op) || op == "health"
+}
+
 // providerOwnedLifecycleScopeRoots lists the scope roots a city-wide provider
 // lifecycle operation visits: the city plus every configured rig. A retiring
 // operation additionally visits every detached `path:` record in the ownership
@@ -379,14 +411,18 @@ func providerOwnedLifecycleScopeRoots(cityPath, op string) ([]string, error) {
 	if !exists {
 		return roots, nil
 	}
-	detached := make([]string, 0, len(journal.Scopes))
-	for key, entry := range journal.Scopes {
-		if strings.HasPrefix(key, "path:") {
-			detached = append(detached, entry.ScopePath)
-		}
+	// Every journaled scope, whatever its key. A `rig:`-keyed record is
+	// normally covered by cfg.Rigs above, but cfg.Rigs is empty whenever
+	// city.toml will not parse — and that is precisely the case this branch
+	// exists for. Filtering to `path:` records there left a normally-added
+	// rig's `bd db-proxy-child` and `dolt sql-server` running after gc stop.
+	// add dedupes, so configured rigs keep their configured order.
+	journaled := make([]string, 0, len(journal.Scopes))
+	for _, entry := range journal.Scopes {
+		journaled = append(journaled, entry.ScopePath)
 	}
-	sort.Strings(detached)
-	for _, root := range detached {
+	sort.Strings(journaled)
+	for _, root := range journaled {
 		add(root)
 	}
 	return roots, nil
