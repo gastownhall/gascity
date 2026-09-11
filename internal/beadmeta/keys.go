@@ -244,14 +244,42 @@ const (
 	SpecForRefMetadataKey       = "gc.spec_for_ref"
 	StderrMetadataKey           = "gc.stderr"
 	StdoutMetadataKey           = "gc.stdout"
-	StepIDMetadataKey           = "gc.step_id"
-	StepRefMetadataKey          = "gc.step_ref"
-	StepTimeoutMetadataKey      = "gc.step_timeout"
-	SyntheticKindMetadataKey    = "gc.synthetic_kind"
-	SyntheticMetadataKey        = "gc.synthetic"
-	TemplateMetadataKey         = "gc.template"
-	TerminalMetadataKey         = "gc.terminal"
-	TriggerBeadIDMetadataKey    = "gc.trigger_bead_id"
+	// StepDefinedEmittedMetadataKey records, on a graph.v2 physical step bead,
+	// that its execution.step_defined fact has already been emitted AND
+	// acknowledged durable. The level-triggered projector restates the full
+	// graph every control tick; this per-step marker is what makes that
+	// restatement idempotent, so a step_defined is emitted once and a steady
+	// tick restates nothing (ga-rd8le). A step still lacking the marker —
+	// freshly created, or one whose emit was not acknowledged durable (a dropped
+	// append, or a recorder that cannot promise durability) — is emitted and
+	// marked on the next healthy tick, so every creator and recovery path
+	// self-heals. The mark is written only after the emit is acknowledged, so a
+	// dropped emit never marks the step and is safely re-emitted; presence alone
+	// is significant, and the stamped RFC3339 value is for observability only.
+	//
+	// The marker is durable on the step bead, while the emitted step_defined
+	// lives in the event journal, which retention can trim: with opt-in archive
+	// retention (events.rotation.archive_retain_age) a long-lived run's
+	// once-emitted step_defined can age out of the retained journal while this
+	// marker persists, so a consumer reading only retained events may no longer
+	// see it. The offline full restate ('gc events reemit-execution') is the
+	// reemit path — it drives Projection.Events, which ignores this marker and
+	// re-states every step, so it re-materializes any aged-out definition.
+	//
+	// A host crash is the second way the two can diverge: the acknowledged
+	// append is not fsynced, so an OS crash can lose the JSONL line while this
+	// marker — written to a separate store with its own commit durability —
+	// survives. The same reemit path ('gc events reemit-execution')
+	// re-materializes the lost definition.
+	StepDefinedEmittedMetadataKey = "gc.step_defined_emitted"
+	StepIDMetadataKey             = "gc.step_id"
+	StepRefMetadataKey            = "gc.step_ref"
+	StepTimeoutMetadataKey        = "gc.step_timeout"
+	SyntheticKindMetadataKey      = "gc.synthetic_kind"
+	SyntheticMetadataKey          = "gc.synthetic"
+	TemplateMetadataKey           = "gc.template"
+	TerminalMetadataKey           = "gc.terminal"
+	TriggerBeadIDMetadataKey      = "gc.trigger_bead_id"
 	// InfraMigratedFromMetadataKey stamps a bead the storage-class migration
 	// copied into a binding with the name of the binding it came from, so a
 	// resumed attempt can tell a row it wrote from content the destination
@@ -541,6 +569,7 @@ var KnownMetadataKeys = []string{
 	SpecForRefMetadataKey,
 	StderrMetadataKey,
 	StdoutMetadataKey,
+	StepDefinedEmittedMetadataKey,
 	StepIDMetadataKey,
 	StepRefMetadataKey,
 	StepTimeoutMetadataKey,
