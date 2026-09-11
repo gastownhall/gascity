@@ -577,6 +577,92 @@ func TestSessionAssignedWorkGuardsFederateForCityScopedSession(t *testing.T) {
 	}
 }
 
+// TestFirstOpenClaimableAssignedWorkBeadFederatesAcrossReachableStores is the
+// cross-store regression for the drain-ack classifier's OPEN arm. Like its
+// in_progress peer it must federate across every reachable leg for a city-scoped
+// session (vp-kvp) — and because this arm SUPPRESSES provably-non-claimable rows,
+// a suppressed row on one leg must never mask a genuine strand on another.
+//
+// Each case parks a deferred row on one store and the claimable strand on the
+// other. The resolved plan visits the leading city store (Authority) before the
+// rig federation tail, so the first case is the suppressed-row-first direction
+// and the second is the control that the tail is not preferred; if that order
+// ever flips the two simply swap roles and both assertions still hold.
+//
+// The strand is identified by TITLE, not ID: each MemStore mints its own "gc-N"
+// sequence, so the two stores' first rows share an ID and an ID assertion here
+// would pass no matter which store answered.
+func TestFirstOpenClaimableAssignedWorkBeadFederatesAcrossReachableStores(t *testing.T) {
+	session := beads.Bead{
+		ID:     "session-1",
+		Type:   sessionBeadType,
+		Status: "open",
+		Metadata: map[string]string{
+			"template":     "auditor",
+			"session_name": "auditor-session",
+		},
+	}
+	for _, tc := range []struct {
+		name        string
+		strandInRig bool
+	}{
+		{name: "strand in rig store, deferred row in city store", strandInRig: true},
+		{name: "strand in city store, deferred row in rig store", strandInRig: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			rigPath := filepath.Join(cityPath, "riga")
+			cfg := &config.City{
+				Rigs: []config.Rig{{Name: "riga", Path: rigPath}},
+				Agents: []config.Agent{{
+					Name:  "auditor",
+					Scope: "city",
+				}},
+			}
+			cityStore := beads.NewMemStore()
+			rigStore := beads.NewMemStore()
+			rigStores := map[string]beads.Store{"riga": rigStore}
+
+			strandStore, deferredStore := rigStore, beads.Store(cityStore)
+			if !tc.strandInRig {
+				strandStore, deferredStore = cityStore, rigStore
+			}
+			// A FROZEN instant, threaded into the finder: the open arm's deferral
+			// evaluation takes its `now` from the caller, so the boundary this row
+			// sits on is fixed by the test rather than by whatever wall clock the
+			// suite happens to run at.
+			now := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+			deferUntil := now.Add(time.Hour)
+			if _, err := deferredStore.Create(beads.Bead{
+				Title:      "deferred row",
+				Type:       "task",
+				Status:     "open",
+				Assignee:   session.ID,
+				DeferUntil: &deferUntil,
+			}); err != nil {
+				t.Fatalf("Create deferred work: %v", err)
+			}
+			strand, err := strandStore.Create(beads.Bead{
+				Title:    "claimable strand",
+				Type:     "task",
+				Status:   "open",
+				Assignee: session.ID,
+			})
+			if err != nil {
+				t.Fatalf("Create strand: %v", err)
+			}
+
+			bead, found, err := firstOpenClaimableAssignedWorkBeadForReachableStore(cityPath, cfg, cityStore, rigStores, sessiontest.SeedBead(t, session), now)
+			if err != nil {
+				t.Fatalf("firstOpenClaimableAssignedWorkBeadForReachableStore: %v", err)
+			}
+			if !found || bead.Title != strand.Title {
+				t.Fatalf("open-arm lookup must federate across stores and look past the deferred row; found=%v bead=%q want=%q", found, bead.Title, strand.Title)
+			}
+		})
+	}
+}
+
 func TestSessionHasOpenAssignedWorkMatchesConfiguredNamedSessionRuntimeFallback(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},

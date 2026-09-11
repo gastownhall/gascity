@@ -114,28 +114,52 @@ func TestDivergenceClassification(t *testing.T) {
 	blockedTrue := true
 	future := time.Now().Add(time.Hour)
 	for _, tt := range []struct {
-		name      string
-		bead      beads.Bead
-		readErr   error
-		triggerID string
-		wantClass string
-		wantStat  string
+		name       string
+		bead       beads.Bead
+		readErr    error
+		blocked    bool
+		confirmErr error
+		triggerID  string
+		wantClass  string
+		wantStat   string
 	}{
 		{
+			// The PRODUCTION shape: bd's payloads never carry is_blocked, so the
+			// projection is absent and the live-dep settlement is what decides. No
+			// unmet plain `blocks` edge — the row really is claimable, and this is
+			// the agreement invariant breaking.
 			name: "still open and claimable", triggerID: "wb-1",
 			bead:      beads.Bead{ID: "wb-1", Status: "open", Type: "task", Metadata: routed},
 			wantClass: events.DemandClaimDivergence, wantStat: "open",
 		},
 		{
-			// Open, unassigned, route-matching, and marked blocked ONLY by bd's
-			// denormalized is_blocked projection. That projection can lag a
-			// just-closed blocker, so rather than fold a potentially-stale-true
-			// reading into benign (which would hide a genuinely-servable
-			// divergence), it is surfaced in its own projection-blocked bucket —
-			// not the clean divergence counter, not silently suppressed.
-			name: "open but is_blocked projection true", triggerID: "wb-1",
+			// Same absent projection, but the live-dep settlement finds an unmet
+			// plain `blocks` edge. No worker could have claimed it, so it is not a
+			// divergence — and not folded into benign either. Absent is what
+			// production reads return, so a row can only reach this bucket at all
+			// because the settlement no longer depends on the projection.
+			name: "no projection but dep-confirmed blocked", triggerID: "wb-1",
+			bead:      beads.Bead{ID: "wb-1", Status: "open", Type: "task", Metadata: routed},
+			blocked:   true,
+			wantClass: events.DemandClaimBlocked, wantStat: "open",
+		},
+		{
+			// bd's denormalized projection reads true, but the live deps are MET —
+			// the stale-true reading `bd recompute-blocked` exists to repair. The
+			// row is claimable, so burying it would hide a real divergence: the
+			// settlement, not the flag, has the last word.
+			name: "stale is_blocked projection with met deps", triggerID: "wb-1",
 			bead:      beads.Bead{ID: "wb-1", Status: "open", Type: "task", Metadata: routed, IsBlocked: &blockedTrue},
-			wantClass: events.DemandClaimProjectionBlocked, wantStat: "open",
+			wantClass: events.DemandClaimDivergence, wantStat: "open",
+		},
+		{
+			// The settlement's dependency read failed. An unreadable store is not
+			// evidence either way, and must never be able to manufacture the
+			// divergence metric.
+			name: "blockedness settlement read fails", triggerID: "wb-1",
+			bead:       beads.Bead{ID: "wb-1", Status: "open", Type: "task", Metadata: routed},
+			confirmErr: errors.New("dependency read failed"),
+			wantClass:  events.DemandClaimUnknown, wantStat: "open",
 		},
 		{
 			// Open and route-matching but deferred into the future: also excluded
@@ -173,7 +197,7 @@ func TestDivergenceClassification(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			opts := divergenceOptions()
-			ops := demandDivergenceOpsForBead(tt.bead, tt.readErr)
+			ops := demandDivergenceOpsForBlockedBead(tt.bead, tt.readErr, tt.blocked, tt.confirmErr)
 			status, class := classifyDemandTrigger(tt.triggerID, "/rig", opts, ops)
 			if class != tt.wantClass {
 				t.Errorf("classification = %q, want %q", class, tt.wantClass)

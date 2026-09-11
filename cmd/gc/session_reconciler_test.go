@@ -2041,10 +2041,13 @@ func drainAckPoolAliasInProgressEventCount(t *testing.T, addLiveSibling bool) in
 // classifier the emitter fired on any open/in_progress assigned row, blocked or
 // not.
 //
-// The open/claimable arm keys on the denormalized is_blocked projection (the same
-// predicate demandRowReady uses), which MemStore.List does not derive from deps,
-// so the row is stamped is_blocked=true to model bd's production projection; the
-// live "blocks" dep is wired too so the row is genuinely blocked by every reader.
+// The row is stamped is_blocked=true AND wired with a live "blocks" dep so it is
+// blocked by every reader. The hand-stamped flag does NOT model bd's production
+// projection — bd's JSON payloads omit the column entirely, so production reads
+// leave it nil (that shape is pinned by
+// TestReconcileSessionBeads_DrainAckNoProjectionBlockedAssignedWorkSuppressesEvent).
+// It is here to pin that the flag does not change the verdict: blockedness is
+// settled from the live dep either way.
 func TestReconcileSessionBeads_DrainAckBlockedAssignedWorkSuppressesEvent(t *testing.T) {
 	blockedTrue := true
 	count := drainAckAssignedWorkEventCount(t, func(t *testing.T, store beads.Store, sessionID string) {
@@ -2066,12 +2069,60 @@ func TestReconcileSessionBeads_DrainAckBlockedAssignedWorkSuppressesEvent(t *tes
 	}
 }
 
+// TestReconcileSessionBeads_DrainAckNoProjectionBlockedAssignedWorkSuppressesEvent
+// pins the suppression arm on the shape production actually produces: an OPEN
+// assigned row blocked by an unmet plain `blocks` edge whose is_blocked
+// projection is ABSENT (nil).
+//
+// bd's `list --json` / `show --json` payloads do not carry the is_blocked column,
+// so BdStore.toBead leaves the field nil on every read and beadFromNativeIssue
+// cannot set it; only the CachingStore's ready-projection enrichment populates it,
+// on non-live cached reads the drain-ack finders never take (they force
+// live=true). An arm that suppressed only on a true-reading flag was therefore
+// dead in production — the dominant false-positive class kept firing. The
+// classifier now reads an absent projection as no evidence rather than as
+// "unblocked", settles it against the live dep, and suppresses.
+//
+// Contrast TestReconcileSessionBeads_DrainAckBlockedAssignedWorkSuppressesEvent:
+// identical wiring plus a hand-stamped is_blocked=true, which must reach the same
+// verdict — the flag is not what decides.
+func TestReconcileSessionBeads_DrainAckNoProjectionBlockedAssignedWorkSuppressesEvent(t *testing.T) {
+	count := drainAckAssignedWorkEventCount(t, func(t *testing.T, store beads.Store, sessionID string) {
+		blocker, err := store.Create(beads.Bead{Title: "upstream gate", Type: "task", Status: "open"})
+		if err != nil {
+			t.Fatalf("Create(blocker): %v", err)
+		}
+		work, err := store.Create(beads.Bead{Title: "downstream phase", Type: "task", Status: "open", Assignee: sessionID})
+		if err != nil {
+			t.Fatalf("Create(work): %v", err)
+		}
+		if err := store.DepAdd(work.ID, blocker.ID, "blocks"); err != nil {
+			t.Fatalf("DepAdd: %v", err)
+		}
+		// Guard the premise on a real read, after the dep exists: if the store
+		// ever started deriving is_blocked from deps, this test would quietly
+		// become a duplicate of the stamped-flag one and stop covering the shape
+		// production returns.
+		readBack, err := store.Get(work.ID)
+		if err != nil {
+			t.Fatalf("Get(work): %v", err)
+		}
+		if readBack.IsBlocked != nil {
+			t.Fatalf("work.IsBlocked = %v, want nil — this test is only meaningful on the absent-projection shape production reads return", *readBack.IsBlocked)
+		}
+	})
+	if count != 0 {
+		t.Fatalf("%s events = %d, want 0 — an open row blocked on an unmet plain `blocks` edge is not claimable whether or not bd's is_blocked projection is present, and absent is the only reading production produces",
+			events.SessionDrainAckedWithAssignedWork, count)
+	}
+}
+
 // TestReconcileSessionBeads_DrainAckDeferredAssignedWorkSuppressesEvent pins the
 // deferred half of the provably-non-claimable suppression: an OPEN bead assigned
 // to the seat but deferred into the future is not claimable by any worker, so the
 // seat drained correctly and the event must NOT fire. defer_until is a fresh,
 // bead-local field, so both the pre-fix ready projection and the post-fix
-// demandRowReady predicate agree on it.
+// classifyDemandRowClaimability predicate agree on it.
 func TestReconcileSessionBeads_DrainAckDeferredAssignedWorkSuppressesEvent(t *testing.T) {
 	deferUntil := time.Now().Add(time.Hour)
 	count := drainAckAssignedWorkEventCount(t, func(t *testing.T, store beads.Store, sessionID string) {
@@ -2113,8 +2164,8 @@ func TestReconcileSessionBeads_DrainAckOpenStepAssignedWorkEmitsEvent(t *testing
 // MET — but whose is_blocked flag still reads true is a real strand: the seat
 // drained past claimable work. The open arm must confirm real blockedness against
 // live deps before suppressing, so a stale-true flag with met deps FIRES. Before
-// the fix the arm suppressed on the projection alone (demandRowReady) and silenced
-// it — no event, seat stopped, alarm never fires.
+// the fix the arm suppressed on the projection alone and silenced it — no event,
+// seat stopped, alarm never fires.
 //
 // Contrast TestReconcileSessionBeads_DrainAckBlockedAssignedWorkSuppressesEvent,
 // which keeps its blocker OPEN so the dep is genuinely unmet and suppression is
@@ -2144,6 +2195,96 @@ func TestReconcileSessionBeads_DrainAckStaleIsBlockedAssignedWorkEmitsEvent(t *t
 	if count != 1 {
 		t.Fatalf("%s events = %d, want 1 — an open row with a STALE is_blocked=true flag whose blocking dep has closed is a genuine strand; the open arm must confirm blockedness against live deps before suppressing",
 			events.SessionDrainAckedWithAssignedWork, count)
+	}
+}
+
+// TestReconcileSessionBeads_DrainAckWaitsForGateOpenAssignedWorkEmitsEvent is the
+// MAJOR regression guard for the dep-confirm's edge-type narrowing. bd gates a
+// `waits-for` edge through NATIVE state, independent of the target's own status:
+// internal/formula/compile.go mints exactly this shape (a gate edge onto a step
+// that stays open), native_dolt_store.go's ready filter declines the flat
+// satisfaction rule because "a waits-for edge gates on the spawner's children
+// rather than the spawner's own status", and the `bd-gate-open` fixture pins the
+// consequence — the row reads is_blocked = 0 and bd's ready OFFERS it, while a
+// direct-dep predicate would hide it.
+//
+// So an OPEN row whose only edge is a waits-for onto an OPEN target IS claimable,
+// and a stale-true is_blocked flag on it must not suppress the alarm: confirming
+// on any ready-blocking type would second-guess a bd verdict — in the one
+// situation where the projection is already suspect — and silence a genuine
+// strand. Only a plain `blocks` edge to an unsatisfied target is proof of
+// non-claimability.
+//
+// Contrast TestReconcileSessionBeads_DrainAckBlockedAssignedWorkSuppressesEvent:
+// identical wiring with a `blocks` edge, which correctly suppresses.
+func TestReconcileSessionBeads_DrainAckWaitsForGateOpenAssignedWorkEmitsEvent(t *testing.T) {
+	blockedTrue := true
+	count := drainAckAssignedWorkEventCount(t, func(t *testing.T, store beads.Store, sessionID string) {
+		gate, err := store.Create(beads.Bead{Title: "spawner step", Type: "task", Status: "open"})
+		if err != nil {
+			t.Fatalf("Create(gate): %v", err)
+		}
+		work, err := store.Create(beads.Bead{Title: "gated phase", Type: "task", Status: "open", Assignee: sessionID, IsBlocked: &blockedTrue})
+		if err != nil {
+			t.Fatalf("Create(work): %v", err)
+		}
+		if err := store.DepAdd(work.ID, gate.ID, "waits-for"); err != nil {
+			t.Fatalf("DepAdd: %v", err)
+		}
+	})
+	if count != 1 {
+		t.Fatalf("%s events = %d, want 1 — a waits-for gate onto an OPEN target is not proof of non-claimability (bd opens it natively and offers the row), so the stale-true flag must not suppress a genuine strand",
+			events.SessionDrainAckedWithAssignedWork, count)
+	}
+}
+
+// depListErrStore fails the dependency read the open arm's blockedness confirm
+// makes, serving every other read unchanged. It models a graph/deps read error
+// landing INSIDE beadHasUnmetPlainBlocksDep rather than on the open list that
+// feeds it (readyOpenErrStore covers that outer path).
+type depListErrStore struct {
+	beads.Store
+	err error
+}
+
+func (s depListErrStore) DepList(_, _ string) ([]beads.Dep, error) {
+	return nil, s.err
+}
+
+// TestReconcileSessionBeads_DrainAckDepConfirmReadErrorNoFireAndLogsError pins the
+// confirm's INTERNAL error path, the one the outer-read guards above do not reach.
+// An open assigned row whose is_blocked projection reads true sends the open arm
+// into a live-dep confirmation; when THAT read fails, the classifier must fail
+// CLOSED — an unreadable store is not evidence of a strand, so no event — while
+// still surfacing the error for logging instead of swallowing it into a silent
+// "nothing found" (Don't-Swallow-Errors).
+func TestReconcileSessionBeads_DrainAckDepConfirmReadErrorNoFireAndLogsError(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	fake := events.NewFake()
+
+	info := env.createSessionInfo("worker", "worker")
+	blockedTrue := true
+	if _, err := env.store.Create(beads.Bead{Title: "flagged phase", Type: "task", Status: "open", Assignee: info.ID, IsBlocked: &blockedTrue}); err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+
+	store := depListErrStore{Store: env.store, err: errors.New("dependency read failed")}
+	var stderr bytes.Buffer
+	recordDrainAckAssignedWorkEvent("", env.cfg, store, nil, info, "worker", "worker", "worker", time.Now(), fake, &stderr)
+
+	count := 0
+	for i := range fake.Events {
+		if fake.Events[i].Type == events.SessionDrainAckedWithAssignedWork {
+			count++
+		}
+	}
+	if count != 0 {
+		t.Fatalf("%s events = %d, want 0 — the blockedness confirm could not read the deps, and an unreadable store must never manufacture the alarm",
+			events.SessionDrainAckedWithAssignedWork, count)
+	}
+	if !strings.Contains(stderr.String(), "dependency read failed") {
+		t.Fatalf("stderr = %q, want it to surface the dep-confirm read error for logging; a failed confirmation must not vanish", stderr.String())
 	}
 }
 
@@ -2238,7 +2379,7 @@ func TestReconcileSessionBeads_DrainAckOpenArmReadErrorStillEmitsInProgressStran
 
 	store := readyOpenErrStore{Store: env.store, err: errors.New("graph readiness read failed")}
 	var stderr bytes.Buffer
-	recordDrainAckAssignedWorkEvent("", env.cfg, store, nil, info, "worker", "worker", "worker", fake, &stderr)
+	recordDrainAckAssignedWorkEvent("", env.cfg, store, nil, info, "worker", "worker", "worker", time.Now(), fake, &stderr)
 
 	count := 0
 	for i := range fake.Events {
@@ -2269,7 +2410,7 @@ func TestReconcileSessionBeads_DrainAckOpenArmReadErrorWithNoInProgressLogsError
 
 	store := readyOpenErrStore{Store: env.store, err: errors.New("graph readiness read failed")}
 	var stderr bytes.Buffer
-	recordDrainAckAssignedWorkEvent("", env.cfg, store, nil, info, "worker", "worker", "worker", fake, &stderr)
+	recordDrainAckAssignedWorkEvent("", env.cfg, store, nil, info, "worker", "worker", "worker", time.Now(), fake, &stderr)
 
 	count := 0
 	for i := range fake.Events {

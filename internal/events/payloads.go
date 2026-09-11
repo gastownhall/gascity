@@ -163,16 +163,16 @@ const (
 	// route-matching. The controller counted work the worker's own read did not
 	// serve; this is the agreement invariant breaking.
 	DemandClaimDivergence = "divergence"
-	// DemandClaimProjectionBlocked: the trigger row is still open, unassigned and
-	// route-matching, and the only thing marking it non-claimable is bd's
-	// denormalized is_blocked projection — which can lag a just-closed blocker. A
-	// stale-true projection would hide a genuinely-servable divergence, and this
-	// single-bead read cannot cheaply re-derive blockedness from live deps the way
-	// a worker's ready query does, so a projection-blocked row is surfaced in its
-	// own bucket rather than silently folded into benign. It is NOT counted as a
-	// clean divergence (that metric must stay the agreement signal), but it is not
-	// hidden either.
-	DemandClaimProjectionBlocked = "projection_blocked"
+	// DemandClaimBlocked: the trigger row is still open, unassigned and
+	// route-matching, and the only thing marking it non-claimable is a blocking
+	// dependency — re-derived from the row's LIVE deps, not read off bd's
+	// denormalized is_blocked projection, which can lag a just-closed blocker and
+	// is absent from the payloads these reads actually return. No worker could
+	// have claimed the row, so it is NOT counted as a clean divergence (that
+	// metric must stay the agreement signal) — but it is not folded into benign
+	// either: a routed row the controller keeps counting while nobody can take it
+	// is worth seeing on its own.
+	DemandClaimBlocked = "blocked"
 	// DemandClaimUnknown: the classification read could not be made (no trigger
 	// recorded, or the row could not be read). Never counted as either.
 	DemandClaimUnknown = "unknown"
@@ -199,9 +199,9 @@ type SessionDemandClaimDivergencePayload struct {
 	// ("open"/"in_progress"/"closed"), "unreadable" when the classification read
 	// failed, or empty when there was no row to read.
 	TriggerStatusAtDrain string `json:"trigger_status_at_drain,omitempty"`
-	// Classification is the verdict: benign, divergence, projection_blocked, or
-	// unknown. It is carried rather than left to be re-derived, because the
-	// divergence count IS the rollout metric for the agreement fix.
+	// Classification is the verdict: benign, divergence, blocked, or unknown. It
+	// is carried rather than left to be re-derived, because the divergence count
+	// IS the rollout metric for the agreement fix.
 	Classification string `json:"classification"`
 }
 
