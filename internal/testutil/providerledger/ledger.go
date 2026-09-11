@@ -257,10 +257,13 @@ func Catalog() []Entry {
 		),
 		builtin(
 			"ssh", "prefix:ssh:", nil,
-			waivedRuntime(
+			provedRuntime(
 				repoSymbol("internal/runtime/ssh", "NewSeamBacked"),
-				time.Date(2026, time.November, 19, 0, 0, 0, 0, time.UTC),
-				"the production SSH composition has no full shared runtime contract",
+				"internal/runtime/ssh/conformance_integration_test.go",
+				"TestSSHConformance",
+				repoSymbol("internal/runtime/ssh", "sshConformanceEndpoint"),
+				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
+				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
 		),
 		builtin(
