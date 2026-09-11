@@ -147,3 +147,12 @@ All seven release criteria pass with complete non-diff attribution. Cut
 push the isolated branch, and open the pull request. The description's stale
 `deploy/ga-288fgv-gate` suggestion is provenance text only and is not used.
 Merge authority remains with mayor/mpr; the deployer does not merge.
+
+## Amendment: criterion 3 scope
+
+Criterion 3's "0 diff-owned FAIL" held for the branch in isolation, not for
+the merge with `main`. `TestSuspendAgent_PackDerived_PreservesComments`
+failed against `main` after `AgentPatch.Dir` gained `omitempty`, which
+stopped the encoder emitting the `dir = ""` line the test asserted. Corrected
+in the maintainer fixup commit, along with the `rig`-key refusal in
+`findTOMLArrayBlock` that the same `main` change made necessary.
