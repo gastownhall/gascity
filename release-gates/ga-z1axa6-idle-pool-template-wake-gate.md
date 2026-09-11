@@ -3,66 +3,112 @@
 - Deploy bead: `ga-z1axa6`
 - Build bead: `ga-8vz95k.6`
 - Review bead: `ga-ofn9oc`
-- Reviewed commit: `f60f2f936dda31d798bc6e1e4e2dd5c57944b481`
-- Base checked: `origin/main@3b6ab2351615c95d6b2f00e63911a14dd55fe67c`
-- Gate result: **PASS**
+- Reviewed commit: `6db4ec51ddde4adebfc7ad96b59ccfdc7ce7317a`
+- Branch tip at gate time: `77d36f78ab24499aa01e9ce9aadb044db787588b` (merge of `origin/main`; contributes no diff of its own)
+- Base checked: `origin/main@3d268c5849ca2ef49392c6e4adb68e9a10d0b59d`
+- Gate result: **BLOCKED — criterion 3 cannot be certified against the current base**
+
+The previous revision of this file certified `f60f2f936dda31d798bc6e1e4e2dd5c57944b481`,
+which predates the drained/dependency-only exclusion in
+`sessionAssigneePoolTemplateMatches`. This revision re-runs every criterion that
+is verifiable against the current base and records, without substitution, the
+one that is not.
 
 | # | Criterion | Result | Evidence |
 |---|---|---|---|
-| 1 | Review PASS present | **PASS** | Review bead `ga-ofn9oc` is closed with verdict `pass` for the exact reviewed commit. |
-| 2 | Acceptance criteria met | **PASS** | Ready open work assigned to a pool template wakes an eligible configured pool member. Blocked, deferred, terminal, and otherwise-not-ready work does not. In-progress work still requires a concrete holder identity. Membership comes from typed `pool_managed` metadata; numeric suffixes, configured named sessions, manual sessions, and members of other pools cannot impersonate membership. |
-| 3 | Tests pass | **PASS with attributed raw failures** | The documented full local CI union ran all 40 jobs with rootless Podman enabled: **46,976 PASS / 9 FAIL / 189 SKIP**. All five diff-owned tests passed in both required `cmd/gc` executions; none skipped. All nine raw failures are preserved and attributed below to open trackers that predate the run. |
+| 1 | Review PASS present | **PASS** | Review bead `ga-ofn9oc` is closed with verdict `pass`. The verdict was recorded against `f60f2f9`; `6db4ec5` narrows the same surface (excludes drained and dependency-only slots) and is strictly more conservative than what was reviewed. |
+| 2 | Acceptance criteria met | **PASS** | Ready open work assigned to a pool template wakes every eligible configured pool member. Blocked, deferred, terminal, and otherwise-not-ready work does not. In-progress work still requires a concrete holder identity. Membership comes from typed `pool_managed` metadata; numeric suffixes, configured named sessions, manual sessions, members of other pools, drained slots, and dependency-only slots cannot impersonate membership. |
+| 3 | Tests pass | **NOT CERTIFIED — base build break blocks the required lane** | The `cmd/gc` test package does not compile at `origin/main@3d268c58`, so the required `cmd/gc process` lane cannot run on this branch. See "Criterion 3: blocked" below for the reproduction on a clean `origin/main` worktree and for the diff-owned test results obtained with the offending base-owned file set aside. |
 | 4 | No high-severity review findings open | **PASS** | Reviewer reported no security, style, or specification findings and no unresolved HIGH findings. |
-| 5 | Final branch is clean | **PASS** | `git diff --check origin/main...HEAD` passed. The gate file is the only deploy-only addition and is committed on the isolated branch. |
-| 6 | Branch diverges cleanly from main | **PASS** | After fetching `origin/main@3b6ab2351615c95d6b2f00e63911a14dd55fe67c`, `git merge-tree --write-tree origin/main f60f2f936dda31d798bc6e1e4e2dd5c57944b481` completed without conflict and produced tree `5d26a061343628b185479b8207e73b6192091b78`. No bounded self-rebase was needed. |
-| 7 | Single feature theme | **PASS** | The two reviewed commits and three changed files form one awake-set behavior change: distinguish pool-template serviceability for ready work from concrete ownership of claimed work. |
+| 5 | Final branch is clean | **PASS** | `git diff --check origin/main...HEAD` passed. `gofmt -l cmd/gc` reported no files. This gate file is the only deploy-only addition and is committed on the isolated branch. |
+| 6 | Branch diverges cleanly from main | **PASS** | After fetching `origin/main@3d268c5849ca2ef49392c6e4adb68e9a10d0b59d`, `git merge-tree --write-tree origin/main HEAD` completed without conflict and produced tree `cc0c6e09281035cc74484df8ec6b0b47acb41155`. The same simulation against `6db4ec51ddde4adebfc7ad96b59ccfdc7ce7317a` produces the identical tree. No bounded self-rebase was needed. |
+| 7 | Single feature theme | **PASS** | The four code-bearing commits and five changed files form one awake-set behavior change: distinguish pool-template serviceability for ready work from concrete ownership of claimed work. Changed files: `cmd/gc/compute_awake_bridge.go`, `cmd/gc/compute_awake_set.go`, `cmd/gc/compute_awake_set_pool_template_claim_test.go`, `cmd/gc/session_beads.go`, `cmd/gc/session_reconciler.go`. |
 
-## Test evidence
+## Criterion 3: blocked
 
-`test_cmd`:
+`engdocs/contributors/release-gate-criteria-conventions.md` requires this
+criterion to name the CI jobs `ci-required` gates merge on for the changed
+paths. This diff is entirely under `cmd/gc/**`, so the `cmd_gc_process` filter
+applies and `make test-cmd-gc-process[-parallel]` (or the CI `cmd/gc process`
+job) is the required lane. That lane cannot run, because the `cmd/gc` test
+package does not build at the current base:
 
 ```text
-DOCKER_HOST=unix:///run/user/1000/podman/podman.sock TESTCONTAINERS_RYUK_DISABLED=true EXTRA_TEST_ENV='DOCKER_HOST=unix:///run/user/1000/podman/podman.sock TESTCONTAINERS_RYUK_DISABLED=true' LOCAL_TEST_JOBS=4 CMD_GC_PROCESS_TOTAL=6 GO_TEST_TIMEOUT=30m GOFLAGS=-v LOCAL_TEST_LOG_DIR=/var/tmp/ga-z1axa6-full-gate make test-local-full-parallel
+vet: cmd/gc/pool_session_name_route_assignee_liveness_test.go:63:2:
+  not enough arguments in call to releaseOrphanedPoolAssignments
 ```
 
-- `test_cmd_scope: full-suite`
-- `test_counts: 46,976 PASS / 9 FAIL / 189 SKIP`
+- **Not diff-owned.** `cmd/gc/pool_session_name.go` and
+  `cmd/gc/pool_session_name_route_assignee_liveness_test.go` are byte-identical
+  between this branch and `origin/main` (`git diff origin/main HEAD -- <paths>`
+  is empty). Neither is in this PR's diff.
+- **Reproduces without this branch.** A detached worktree at
+  `origin/main@3d268c58` fails `go vet ./cmd/gc/` with the same error.
+- **Mechanism.** A semantic merge conflict between two independently green PRs:
+  `30ed29b97` (#6265) added the test file calling `releaseOrphanedPoolAssignments`
+  with ten arguments, and `3d268c584` (#6261) added the eleventh `recordPhase`
+  parameter. Neither commit references the other.
+- **Why it is not attributable under the raw-failure rule.** The existing
+  attribution clauses require the failing test's file/package not to overlap the
+  candidate files. This is a build failure in the same Go package as the diff,
+  and it prevents the diff-owned tests from executing at all in an unmodified
+  checkout. It blocks the evidence rather than sitting alongside it, so it is
+  recorded as blocking, not waived.
+
+Re-certify this criterion once `origin/main` builds again. No change to this
+branch can unblock it.
+
+### Diff-owned test results (partial evidence, not a substitute for criterion 3)
+
+Obtained by temporarily moving the base-owned
+`cmd/gc/pool_session_name_route_assignee_liveness_test.go` aside and restoring
+it immediately afterward. Nothing in the committed tree was modified.
+
+```text
+go test ./cmd/gc/ -run 'TestAwakeSetPool|TestAwakeSetReadyPool|TestBuildAwakeInputFromReconcilerCarriesConfiguredPoolMembership' -count=1
+```
+
+- `test_cmd_scope: package-scoped, GC_FAST_UNIT unset` — does **not** reach
+  `TestTutorial01` and therefore does not satisfy criterion 3 on its own.
+- `test_counts: 7 PASS / 0 FAIL / 0 SKIP` (`ok github.com/gastownhall/gascity/cmd/gc 0.861s`)
 - `diff_tests_executed:`
-  - `TestAwakeSetReadyPoolTemplateAssignmentWakesEligibleMember` — PASS in `cmd-gc-process-3-of-6` and `integration-packages-cmd-gc-5-of-6`
-  - `TestAwakeSetPoolTemplateAssignmentRequiresReadyDemand` — PASS in `cmd-gc-process-4-of-6` and `integration-packages-cmd-gc-6-of-6`
-  - `TestAwakeSetPoolInProgressOwnershipRemainsConcrete` — PASS in `cmd-gc-process-5-of-6` and `integration-packages-cmd-gc-1-of-6`
-  - `TestAwakeSetPoolTemplateServiceabilityRequiresConfiguredMembership` — PASS in `cmd-gc-process-6-of-6` and `integration-packages-cmd-gc-2-of-6`
-  - `TestBuildAwakeInputFromReconcilerCarriesConfiguredPoolMembership` — PASS in `cmd-gc-process-1-of-6` and `integration-packages-cmd-gc-3-of-6`
+  - `TestAwakeSetReadyPoolTemplateAssignmentWakesEligibleMember` — PASS
+  - `TestAwakeSetPoolTemplateAssignmentRequiresReadyDemand` — PASS
+  - `TestAwakeSetPoolInProgressOwnershipRemainsConcrete` — PASS
+  - `TestAwakeSetPoolTemplateServiceabilityRequiresConfiguredMembership` — PASS
+  - `TestBuildAwakeInputFromReconcilerCarriesConfiguredPoolMembership` — PASS
+  - `TestAwakeSetPoolTemplateAssignmentWakesAllEligibleMembers` — PASS (multi-member fan-out)
+  - `TestAwakeSetPoolTemplateAssignmentFillsScaleSlotPerMember` — PASS (`countAssignedScaleSlots` interaction)
 - `waiver_ref: none` for diff-owned tests
-- `skip_justification:` all skips are existing platform/build-tag, explicit opt-in, credential, real-tmux, or unavailable-integration guards. No test added or modified by this diff skipped.
-
-### Raw failure attribution
-
-The suite's non-zero exit is preserved. Criterion 3 passes only because every raw failure satisfies the repository's non-diff-owned failure rule.
-
-| Raw failure | Disposition | Evidence |
-|---|---|---|
-| `TestCatalogMatchesProductionWiringAndDocumentation` (two executions) | FAIL — ATTRIBUTED to `ga-1s16pf` | Clause 3(a), mechanism: the result is determined by the provider-ledger waiver catalog's date (`2026-08-26`). This diff has no providerledger path or mechanism overlap. |
-| `TestBdFlagManifestCurrent` | FAIL — ATTRIBUTED to `ga-f0uceo` | Clause 3(a), mechanism: installed `bd` flags exceed the checked manifest. The diff changes neither the installed binary nor `internal/bdflags`. |
-| `TestGetKeyBinding_CapturesDefaultBinding` and `TestGetKeyBinding_CapturesDefaultBindingWithArgs` | FAIL — ATTRIBUTED to `ga-afqddr` | Clause 3(a), mechanism: host tmux returns an empty default binding. The diff does not touch `internal/runtime/tmux` or host tmux configuration. |
-| `TestHumaBinary_CityCreateAsync`, `TestCleanInstallTutorialPath`, and `TestGCLiveContract_BeadsAndEvents` | FAIL — WAIVED under `ga-6bnc42`, occurrence logged on `ga-lpfjhc` | Clause 3(a), mechanism: each exposes the exact `gastownhall/beads#4566` dirty-table schema-migration failure during fixture city or rig-store initialization. The awake-set diff cannot alter Dolt schema migration/store bootstrap. The standing authorization requires the raw failures to remain visible as FAIL-WAIVED, as they do here. |
-| `TestE2E_SuspendResume_City` | FAIL — ATTRIBUTED to `ga-yc0e3a` | Clause 3(a), structural mechanism: the fixture renders `citysus` as an always named session with `Pool=nil`. The new behavior requires an open work bead and `PoolManaged=true`; configured named sessions return through the unchanged named-identity branch before the new pool fallback. The failure matches the tracker's missing-report contention signature. |
-
-For all nine failures: clause 1 passes (not diff-owned), clause 2 passes (the cited tracker predates this run and was opened during evaluation), and clause 4 passes (no failing test file/package overlaps the candidate files). The candidate adds tests to an existing `cmd/gc` target but adds no suite target or resource-census load. Tracker occurrence notes and complete attribution were recorded on the beads before any push.
+- `skip_justification:` no test added or modified by this diff skipped.
 
 ## Additional required lanes
 
-- `policy_lane: make test-ci-policy — PASS`
-- `go vet ./...` — PASS
-- `lint-affected` with a fresh on-disk cache and `LINT_CHANGED_SCOPE=tracked` — PASS, 0 issues
-- `fmt-check-changed` — PASS
-- `git diff --check origin/main...HEAD` — PASS
+Re-run against `origin/main@3d268c58` unless noted:
+
+- `make test-ci-policy` — **PASS** (5 + 15 unittest cases, `scripts/cipolicy`, `scripts/prwatchdog`, and the four static-scope tests in `./scripts`)
+- `go build ./cmd/gc/` — **PASS**
+- `gofmt -l cmd/gc` — **PASS**, no files reported
+- `git diff --check origin/main...HEAD` — **PASS**
+- `go vet ./cmd/gc/...` — **PASS only with the base-owned broken test file set aside**; fails on an unmodified checkout for the reason in "Criterion 3: blocked"
+- `go vet ./...` (whole module) — **NOT RUN**, blocked by the same base build break
+- `lint-affected` / `fmt-check-changed` — **NOT RE-RUN** at this base
 
 ## Acceptance audit
 
 - The reconciler projects typed `session.Info.PoolManaged` into the pure awake-set input.
-- Ready/open template-assigned work can wake any eligible member of that configured pool.
+- Ready/open template-assigned work can wake any eligible member of that configured pool, and the fan-out to all eligible members is now pinned by test.
 - In-progress work cannot match by template and remains bound to bead ID, runtime session name, or named-session identity.
 - Existing readiness/blocker filtering runs before matching, so not-ready work creates no wake demand.
-- Named sessions, manual sessions, numeric-suffix lookalikes, and members of another pool are explicitly covered and rejected.
+- Named sessions, manual sessions, numeric-suffix lookalikes, members of another pool, drained members, and dependency-only members are explicitly covered and rejected.
 - The change introduces no role-name logic, wire/API change, dependency, or migration.
+
+## Known gap carried forward
+
+`countAssignedScaleSlots` calls `sessionHasAssignedWork` per member, so one
+template-assigned ready bead now reports a filled scale slot for every member of
+that pool. Every affected member is already awake via `assigned-work`, so no
+stranding scenario is reachable and the observable contract is unchanged —
+`TestAwakeSetPoolTemplateAssignmentFillsScaleSlotPerMember` records that
+contract. The counter nonetheless measures something narrower than its name
+implies; this is documented, not fixed, in this change.

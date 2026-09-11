@@ -264,3 +264,82 @@ func poolManagedAwakeSession() AwakeSessionBead {
 	bead.PoolManaged = true
 	return bead
 }
+
+// poolManagedAwakeSessionMembers returns a multi-member pool fixture: three
+// distinct configured members of the same template, as the reconciler bridge
+// projects a pool with three live slots.
+func poolManagedAwakeSessionMembers() []AwakeSessionBead {
+	return []AwakeSessionBead{
+		{ID: "mc-pool-a", SessionName: "fixture--build-slot-a", Template: poolTemplate, State: "asleep", PoolManaged: true},
+		{ID: "mc-pool-b", SessionName: "fixture--build-slot-b", Template: poolTemplate, State: "asleep", PoolManaged: true},
+		{ID: "mc-pool-c", SessionName: "fixture--build-slot-c", Template: poolTemplate, State: "asleep", PoolManaged: true},
+	}
+}
+
+// TestAwakeSetPoolTemplateAssignmentWakesAllEligibleMembers pins the fan-out
+// shape: a bare template assignment is serviceability, not ownership, so every
+// eligible member of that pool is a candidate claimer and wakes. Unlike the
+// WorkSet pass, which deliberately wakes exactly one session, the assigned-work
+// pass applies no cap — the bead's own claim is what resolves the race.
+func TestAwakeSetPoolTemplateAssignmentWakesAllEligibleMembers(t *testing.T) {
+	members := poolManagedAwakeSessionMembers()
+	got := ComputeAwakeSet(AwakeInput{
+		Agents:       []AwakeAgent{{QualifiedName: poolTemplate}},
+		SessionBeads: members,
+		WorkBeads: []AwakeWorkBead{{
+			ID:       "work-ready",
+			Assignee: poolTemplate,
+			Status:   "open",
+			Ready:    true,
+		}},
+		Now: now,
+	})
+
+	for _, member := range members {
+		t.Run(member.SessionName, func(t *testing.T) {
+			assertAwake(t, got, member.SessionName)
+			assertReason(t, got, member.SessionName, "assigned-work")
+			decision := got[member.SessionName]
+			if !decision.HasAssignedWork {
+				t.Error("HasAssignedWork = false, want true for work serviceable by this member")
+			}
+			if decision.AssignedWorkBeadID != "work-ready" {
+				t.Errorf("AssignedWorkBeadID = %q, want work-ready", decision.AssignedWorkBeadID)
+			}
+		})
+	}
+}
+
+// TestAwakeSetPoolTemplateAssignmentFillsScaleSlotPerMember documents the
+// countAssignedScaleSlots interaction. That counter asks sessionHasAssignedWork
+// per member, so a single template-assigned ready bead now reports a filled
+// slot for every member of the pool. The members reach the same awake state
+// through the assigned-work pass either way, so the observable contract is that
+// scale accounting never downgrades a serviceable member to scaled:demand.
+func TestAwakeSetPoolTemplateAssignmentFillsScaleSlotPerMember(t *testing.T) {
+	members := poolManagedAwakeSessionMembers()
+	got := ComputeAwakeSet(AwakeInput{
+		Agents:       []AwakeAgent{{QualifiedName: poolTemplate}},
+		SessionBeads: members,
+		WorkBeads: []AwakeWorkBead{{
+			ID:       "work-ready",
+			Assignee: poolTemplate,
+			Status:   "open",
+			Ready:    true,
+		}},
+		ScaleCheckCounts: map[string]int{poolTemplate: 2},
+		Now:              now,
+	})
+
+	for _, member := range members {
+		t.Run(member.SessionName, func(t *testing.T) {
+			assertAwake(t, got, member.SessionName)
+			assertReason(t, got, member.SessionName, "assigned-work")
+		})
+	}
+	for sessionName, decision := range got {
+		if decision.Reason == "scaled:demand" {
+			t.Errorf("session %q reason = scaled:demand, want serviceable members to wake as assigned-work", sessionName)
+		}
+	}
+}
