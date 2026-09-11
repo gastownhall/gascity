@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 207,
+  "next_id": 208,
   "permanent_ids": [
     {
       "name": "help",
@@ -238,6 +238,21 @@
       "resolver": "group-dispatch",
       "deferred_default": "unknown",
       "id": 3
+    },
+    {
+      "path": "gc beads city migrate-proxied",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "beads-city-migrate-proxied",
+      "owner": "immediate",
+      "id": 207
     },
     {
       "path": "gc beads city use-external",

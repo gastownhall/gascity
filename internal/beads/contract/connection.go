@@ -148,20 +148,11 @@ func ResolveDoltConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string) (DoltCo
 	} else if ok && strings.TrimSpace(db) != "" {
 		target.Database = strings.TrimSpace(db)
 	}
-	// metadata.json is the topology authority (D1): bd persists the mode only
-	// there, and it is the file bd rewrites on a mode migration. config.yaml's
-	// dolt.mode is a legacy gc-only mirror that bd never updates, so reading it
-	// first shadows a migrated scope with its pre-migration mode — which routes
-	// a proxied scope down the managed-runtime path and fails on the
-	// dolt-state.json gc no longer publishes. It stays a fallback for scopes
-	// whose metadata predates dolt_mode.
-	if mode, ok, err := ReadDoltMode(fs, filepath.Join(scopeRoot, ".beads", "metadata.json")); err != nil {
+	mode, err := authoritativeScopeDoltMode(fs, scopeRoot, cfg.DoltMode)
+	if err != nil {
 		return DoltConnectionTarget{}, err
-	} else if ok && strings.TrimSpace(mode) != "" {
-		target.DoltMode = strings.TrimSpace(mode)
-	} else {
-		target.DoltMode = strings.TrimSpace(cfg.DoltMode)
 	}
+	target.DoltMode = mode
 	// Beads persists externally-owned proxied upstreams in its provider
 	// sidecar. This authority applies to city and inherited rig scopes alike;
 	// do not force inherited scopes through the city's managed runtime path.
@@ -311,6 +302,26 @@ func ValidateCanonicalConfigState(fs fsys.FS, cityRoot, scopeRoot string, cfg Co
 	return nil
 }
 
+// authoritativeScopeDoltMode reports the Dolt mode a scope is actually in.
+//
+// metadata.json is the topology authority (D1): bd persists the mode only
+// there, and it is the only file bd rewrites when a mode migration commits.
+// config.yaml's dolt.mode is a legacy gc-owned mirror bd never updates, so it
+// answers only for scopes whose metadata predates the field — reading it first
+// shadows a migrated scope with its pre-migration mode, which sends a proxied
+// scope down the managed-runtime path and fails on the dolt-state.json gc no
+// longer publishes.
+func authoritativeScopeDoltMode(fs fsys.FS, scopeRoot, configMode string) (string, error) {
+	mode, ok, err := ReadDoltMode(fs, filepath.Join(scopeRoot, ".beads", "metadata.json"))
+	if err != nil {
+		return "", err
+	}
+	if ok && strings.TrimSpace(mode) != "" {
+		return strings.TrimSpace(mode), nil
+	}
+	return strings.TrimSpace(configMode), nil
+}
+
 // ResolveAuthoritativeConfigState returns a normalized authoritative scope config when present.
 func ResolveAuthoritativeConfigState(fs fsys.FS, cityRoot, scopeRoot, issuePrefix string) (ConfigState, bool, error) {
 	existing, ok, err := ReadConfigState(fs, filepath.Join(scopeRoot, ".beads", "config.yaml"))
@@ -319,6 +330,14 @@ func ResolveAuthoritativeConfigState(fs fsys.FS, cityRoot, scopeRoot, issuePrefi
 	}
 	existing.IssuePrefix = issuePrefix
 	if err := ValidateCanonicalConfigState(fs, cityRoot, scopeRoot, existing); err != nil {
+		return ConfigState{}, false, err
+	}
+	// The mode this scope is authoritatively in is metadata.json's answer, not
+	// config.yaml's — same rule as ResolveDoltConnectionTarget. Without this,
+	// the state gc canonicalises from is the pre-migration one, and every
+	// canonical write would reinstate the stale `dolt.mode: server` a migrated
+	// scope just had removed.
+	if existing.DoltMode, err = authoritativeScopeDoltMode(fs, scopeRoot, existing.DoltMode); err != nil {
 		return ConfigState{}, false, err
 	}
 

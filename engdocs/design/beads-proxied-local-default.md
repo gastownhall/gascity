@@ -186,11 +186,15 @@ over the same data directory.
   real regression for controller-heavy cities.
 - **The journaled legacy→bd ownership handoff.** The responder side is present
   and inert; the driver (`bd migrate ownership-handoff`) needs beads ≥ rc.3.
-  Until then the only migration path for an existing direct city is explicit
-  and operator-driven: `gc stop` → `bd migrate from-server-to-proxied-server`
-  → `gc start`. bd's migrate precondition consults only its own pid file, so
-  Gas City's server must be stopped first or the proxy start fails on Dolt's
-  exclusive data-dir lock.
+  Until then the migration path for an existing direct city is explicit and
+  operator-driven: `gc stop` → `gc beads city migrate-proxied` → `gc start`.
+  That command orchestrates bd's own
+  `bd migrate from-server-to-proxied-server` per scope and fences the one thing
+  bd cannot see — a running Gas City server — because bd's precondition
+  consults only its own pid file and would otherwise commit the mode flip onto
+  a data dir Dolt still holds locked. Procedure, refusals and recovery:
+  `engdocs/runbooks/beads-migrate-proxied.md`. It is an interim path; the
+  journaled handoff supersedes it.
 - **Remote hosted proxies and Windows/macOS proxied lifecycle.** rc.2 defines
   but does not implement the latter.
 

@@ -356,6 +356,63 @@ func ReadDoltMode(fs fsys.FS, path string) (string, bool, error) {
 	return "", false, nil
 }
 
+// ReadMetadataDoltDataDir reports the dolt_data_dir recorded in metadata.json
+// at path, if any. Beads resolves this key relative to the scope's .beads
+// directory (internal/doltserver physical_root.go, configfile.Config.DatabasePath)
+// and uses it to root a scope's Dolt store somewhere other than
+// <scope>/.beads/dolt. Same tolerant reader contract as ReadDoltMode.
+func ReadMetadataDoltDataDir(fs fsys.FS, path string) (string, bool, error) {
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return "", false, nil
+	}
+	if value := trimmedString(meta["dolt_data_dir"]); value != "" {
+		return value, true, nil
+	}
+	return "", false, nil
+}
+
+// SetMetadataDoltDataDir records a relative dolt_data_dir in metadata.json,
+// leaving every other key untouched.
+//
+// Relative is not a preference: beads' configfile.Config.Save silently drops an
+// absolute dolt_data_dir, and `bd migrate` saves the config partway through the
+// mode flip — an absolute value would vanish mid-migration and leave the scope
+// rooted at an empty directory. Refuse rather than write one.
+func SetMetadataDoltDataDir(fs fsys.FS, path, dataDir string) error {
+	dataDir = strings.TrimSpace(dataDir)
+	if dataDir == "" {
+		return fmt.Errorf("empty dolt_data_dir for %s", path)
+	}
+	if filepath.IsAbs(dataDir) {
+		return fmt.Errorf("dolt_data_dir %q for %s must be relative to the scope's .beads directory; beads drops absolute values on save", dataDir, path)
+	}
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	meta := map[string]any{}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return &MetadataParseError{Path: path, Reason: fmt.Sprintf("invalid metadata.json: %v", err)}
+	}
+	if trimmedString(meta["dolt_data_dir"]) == dataDir {
+		return nil
+	}
+	meta["dolt_data_dir"] = dataDir
+	encoded, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return err
+	}
+	return fs.WriteFile(path, append(encoded, '\n'), 0o644)
+}
+
 // ReadMetadataBackend reports the non-empty backend marker in metadata.json.
 // Malformed JSON and an absent file report no marker so callers deciding
 // whether to rewrite a scope can preserve their existing repair policy.

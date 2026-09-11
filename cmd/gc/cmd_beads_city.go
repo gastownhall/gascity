@@ -39,11 +39,13 @@ func newBeadsCityCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Manage the canonical city endpoint topology for bd-backed beads stores.
 
 Use use-managed to make the city GC-managed again. Use use-external to pin the
-city to an external Dolt endpoint and rewrite inherited rig mirrors.`,
+city to an external Dolt endpoint and rewrite inherited rig mirrors. Use
+migrate-proxied to move a legacy GC-managed city onto bd's proxied-server
+topology.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				fmt.Fprintln(stderr, "gc beads city: missing subcommand (use-managed, use-external)") //nolint:errcheck
+				fmt.Fprintln(stderr, "gc beads city: missing subcommand (use-managed, use-external, migrate-proxied)") //nolint:errcheck
 			} else {
 				fmt.Fprintf(stderr, "gc beads city: unknown subcommand %q\n", args[0]) //nolint:errcheck
 			}
@@ -53,6 +55,7 @@ city to an external Dolt endpoint and rewrite inherited rig mirrors.`,
 	cmd.AddCommand(
 		newBeadsCityUseManagedCmd(stdout, stderr),
 		newBeadsCityUseExternalCmd(stdout, stderr),
+		newBeadsCityMigrateProxiedCmd(stdout, stderr),
 	)
 	return cmd
 }

@@ -344,7 +344,9 @@ gc beads
 Manage the canonical city endpoint topology for bd-backed beads stores.
 
 Use use-managed to make the city GC-managed again. Use use-external to pin the
-city to an external Dolt endpoint and rewrite inherited rig mirrors.
+city to an external Dolt endpoint and rewrite inherited rig mirrors. Use
+migrate-proxied to move a legacy GC-managed city onto bd's proxied-server
+topology.
 
 ```
 gc beads city
@@ -352,8 +354,35 @@ gc beads city
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc beads city migrate-proxied](#gc-beads-city-migrate-proxied) | Migrate a legacy GC-managed city to bd's proxied-server topology |
 | [gc beads city use-external](#gc-beads-city-use-external) | Set the city endpoint to an external Dolt server |
 | [gc beads city use-managed](#gc-beads-city-use-managed) | Set the city endpoint to GC-managed |
+
+## gc beads city migrate-proxied
+
+Migrate a legacy GC-managed city, and the rigs that share its Dolt data
+directory, onto bd's proxied-server topology.
+
+The city's gc-managed `dolt sql-server` must already be stopped: run gc stop
+first. bd cannot see a server gc started (it looks only for its own pid file),
+so migrating against a live one commits the mode flip and leaves the scope
+unusable until the server dies.
+
+Each scope is migrated with bd's own `bd migrate from-server-to-proxied-server`,
+city first. The command is idempotent — an already-proxied scope reports
+"already migrated" — so a partially failed run can simply be rerun.
+
+This is the interim rc.2 path. The journaled ownership handoff supersedes it.
+
+```
+gc beads city migrate-proxied [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--dry-run` | bool |  | report the plan without migrating anything |
+| `--json` | bool |  | emit the per-scope report as JSON |
+| `--rig` | stringArray |  | migrate only this rig (repeatable; default is every rig in city.toml) |
 
 ## gc beads city use-external
 
