@@ -370,8 +370,15 @@ func handleControlDispatchError(cityPath, storePath string, graphStore beads.Sto
 	// because RecordSemanticControlRetry already persisted first_seen/count/error
 	// on the bead, so `bd show` still explains the stall even when the event is
 	// lost.
-	if quarantineErr := quarantineControlFailureBead(graphStore, beadID, cause); quarantineErr != nil {
+	settleFailure, quarantineErr := quarantineControlFailureBead(graphStore, bead, cause)
+	if quarantineErr != nil {
 		return errors.Join(cause, quarantineErr)
+	}
+	if settleFailure != nil {
+		emitControlRootSettleFailed(cityPath, storePath, *settleFailure, stderr)
+		_, _ = fmt.Fprintf(stderr,
+			"control dispatch: root=%s failed to settle after finalizer=%s quarantined reason=%v\n",
+			settleFailure.RootBeadID, settleFailure.FinalizerBeadID, cause)
 	}
 	if stalled != nil {
 		emitControlStalled(cityPath, storePath, graphStore, bead, cause, *stalled, stderr)
@@ -457,7 +464,63 @@ func emitControlStalled(cityPath, storePath string, store beads.Store, bead bead
 	}
 }
 
-func quarantineControlFailureBead(store beads.Store, beadID string, cause error) error {
+// emitControlRootSettleFailed publishes the control.root_settle_failed record
+// for a workflow root that a quarantined finalizer could not close, mirroring
+// emitControlStalled's pattern above. The marker write onto the root
+// (recordRootSettleFailure) already made the failure durable in the store;
+// this makes it observable from the event bus too, so a stranded root shows
+// up next to control.stalled instead of only in a trace line. See ga-li4qa4.
+func emitControlRootSettleFailed(cityPath, storePath string, failure rootSettleFailure, stderr io.Writer) {
+	payload := events.ControlRootSettleFailedPayload{
+		RootBeadID:      failure.RootBeadID,
+		FinalizerBeadID: failure.FinalizerBeadID,
+		StorePath:       storePath,
+		ErrorClass:      failure.ErrorClass,
+		Error:           failure.Error,
+		FollowUpBeadID:  failure.FollowUpBeadID,
+	}
+
+	rec := openCityRecorderAt(cityPath, stderr)
+	rec.Record(events.Event{
+		Type:    events.ControlRootSettleFailed,
+		Actor:   "controller",
+		Subject: failure.RootBeadID,
+		Message: fmt.Sprintf("workflow root %s failed to settle after finalizer %s was quarantined: %s",
+			failure.RootBeadID, failure.FinalizerBeadID, failure.Error),
+		Payload: events.ControlRootSettleFailedPayloadJSON(payload),
+		RunID:   failure.RootBeadID,
+	})
+	if closer, ok := rec.(io.Closer); ok {
+		if err := closer.Close(); err != nil {
+			fmt.Fprintf(stderr, "warning: control dispatch: closing event recorder for %s: %v\n", failure.RootBeadID, err) //nolint:errcheck // the settle-failure marker already succeeded
+		}
+	}
+}
+
+// rootSettleFailure records a workflow root that failed to settle after its
+// workflow-finalize control bead was quarantined. quarantineControlFailureBead
+// hands one back (non-nil) whenever settleRootForQuarantinedFinalizer's close
+// attempt fails, so the caller can make the failure durably visible instead of
+// letting it vanish into a trace line. See ga-li4qa4.
+type rootSettleFailure struct {
+	RootBeadID      string
+	FinalizerBeadID string
+	// ErrorClass names the failure tier, mirroring beadmeta.ControllerErrorClassMetadataKey.
+	ErrorClass string
+	// Error is the store's refusal, truncated the same way controlQuarantineReason
+	// truncates the control bead's own reason.
+	Error string
+	// FollowUpBeadID is the reconciliation bead filed for this settle failure,
+	// when bead creation itself succeeded.
+	FollowUpBeadID string
+}
+
+// quarantineControlFailureBead closes and labels a control bead that cannot
+// make progress. When the bead is a workflow-finalize control whose workflow
+// root fails to settle behind it, the returned *rootSettleFailure is non-nil
+// so the caller can surface the stranded root instead of it going silent.
+func quarantineControlFailureBead(store beads.Store, bead beads.Bead, cause error) (*rootSettleFailure, error) {
+	beadID := bead.ID
 	failureReason := "control_dispatch_error"
 	if errors.Is(cause, dispatch.ErrControlGraphMalformed) {
 		failureReason = "malformed_control_graph"
@@ -480,9 +543,108 @@ func quarantineControlFailureBead(store beads.Store, beadID string, cause error)
 			beadmeta.ControlQuarantinedAtMetadataKey:    workflowTraceNow().UTC().Format(time.RFC3339),
 		},
 	}); err != nil {
-		return err
+		return nil, err
 	}
 	_, _ = dispatch.ReconcileClosedScopeMember(store, beadID)
+
+	if strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]) == beadmeta.KindWorkflowFinalize {
+		// Best-effort, like the ReconcileClosedScopeMember call above: the
+		// finalizer's own quarantine (closed + labeled, just above) is the
+		// load-bearing action and must stand regardless of what happens next.
+		// A close failure here is expected transiently -- the store may not
+		// yet reflect the finalizer close this root's "blocked by" edge is
+		// waiting on. There is no later reconciliation pass that retries this,
+		// so instead of letting the stranded root go silent, record the
+		// failure durably on the root and hand it back to the caller. See
+		// ga-li4qa4.
+		if settleErr := settleRootForQuarantinedFinalizer(store, bead); settleErr != nil {
+			workflowTracef("control-quarantine bead=%s: closing root for quarantined finalizer failed err=%v", beadID, settleErr)
+			rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
+			return recordRootSettleFailure(store, rootID, beadID, settleErr), nil
+		}
+	}
+	return nil, nil
+}
+
+// recordRootSettleFailure makes a stranded workflow root durably visible when
+// settleRootForQuarantinedFinalizer could not close it: it marks the root
+// with the same controller-error vocabulary a quarantined control bead
+// carries, and files a follow-up reconciliation bead linking the root and the
+// quarantined finalizer. Both the marker write and the bead creation are
+// best-effort -- the finalizer's own quarantine already succeeded and must
+// stand regardless of whether either of these persists. See ga-li4qa4.
+func recordRootSettleFailure(store beads.Store, rootID, finalizerBeadID string, settleErr error) *rootSettleFailure {
+	reason := controlQuarantineReason(settleErr, "root_settle_failed")
+	failure := &rootSettleFailure{
+		RootBeadID:      rootID,
+		FinalizerBeadID: finalizerBeadID,
+		ErrorClass:      beadmeta.FailureClassHard,
+		Error:           reason,
+	}
+	if rootID != "" {
+		if err := store.Update(rootID, beads.UpdateOpts{
+			Metadata: map[string]string{
+				beadmeta.ControllerErrorMetadataKey:      reason,
+				beadmeta.ControllerErrorClassMetadataKey: beadmeta.FailureClassHard,
+				beadmeta.RootSettleFailedMetadataKey:     "true",
+				beadmeta.RootSettleFailedAtMetadataKey:   workflowTraceNow().UTC().Format(time.RFC3339),
+			},
+		}); err != nil {
+			workflowTracef("control-quarantine root=%s: recording settle-failure marker failed err=%v", rootID, err)
+		}
+	}
+	followUp, err := store.Create(beads.Bead{
+		Title: fmt.Sprintf("Reconcile stranded workflow root %s (finalizer %s quarantined)", rootID, finalizerBeadID),
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey:      rootID,
+			beadmeta.FinalizerBeadIDMetadataKey: finalizerBeadID,
+		},
+	})
+	if err != nil {
+		workflowTracef("control-quarantine root=%s: filing reconciliation follow-up bead failed err=%v", rootID, err)
+		return failure
+	}
+	failure.FollowUpBeadID = followUp.ID
+	return failure
+}
+
+// settleRootForQuarantinedFinalizer closes a workflow root whose
+// workflow-finalize control bead was just quarantined. Quarantine short-
+// circuits the normal finalize path (processWorkflowFinalize closes the root
+// via setOutcomeAndClose before closing the finalizer itself), so without
+// this the root never reaches Status=="closed" and survives every
+// rootSettled-gated check forever even though its finalizer is dead. See
+// ga-japz50 / ga-xn8ml8.
+func settleRootForQuarantinedFinalizer(store beads.Store, finalizer beads.Bead) error {
+	rootID := strings.TrimSpace(finalizer.Metadata[beadmeta.RootBeadIDMetadataKey])
+	if rootID == "" || rootID == finalizer.ID {
+		return nil
+	}
+	root, err := store.Get(rootID)
+	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	if root.Status == "closed" {
+		// Already settled elsewhere -- never downgrade a real outcome.
+		return nil
+	}
+	status := "closed"
+	if err := store.Update(rootID, beads.UpdateOpts{
+		Status: &status,
+		Metadata: map[string]string{
+			beadmeta.OutcomeMetadataKey:          beadmeta.OutcomeFail,
+			beadmeta.FailureClassMetadataKey:     beadmeta.FailureClassHard,
+			beadmeta.FailureReasonMetadataKey:    "finalizer_control_quarantined",
+			beadmeta.FinalDispositionMetadataKey: beadmeta.DispositionControlQuarantine,
+		},
+	}); err != nil {
+		return err
+	}
+	_, _ = dispatch.ReconcileClosedScopeMember(store, rootID)
 	return nil
 }
 

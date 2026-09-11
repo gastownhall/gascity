@@ -18,10 +18,10 @@ package main
 // The obvious place to keep this verdict is a note under the city's own .gc,
 // written by whichever process last managed to read the binding. It is the
 // wrong place twice over. It is a status file, which this codebase does not
-// keep (AGENTS.md: no status files — query live state), and it goes stale in
-// the DENYING direction: relics close over the weeks after a migration, so a
-// note written in March denies reads in June for a binding that has been clean
-// since April.
+// keep (AGENTS.md: no status files — query live state), and it could not
+// replace the census anyway: a note is only as good as the process that wrote
+// it, so it is absent on every city no such process has visited, and the read
+// below has to exist for those cities regardless.
 //
 // The premise the note was there to work around turns out to be false anyway.
 // "Refused" is a verdict about SERVING the binding — a convergence check, a
@@ -54,14 +54,14 @@ package main
 // The proof is keyed by BINDING ref, not by id, so what turns Fatal is the
 // whole binding's residence probe: every non-reserved by-id read on this city's
 // CLI fallback path denies, including a fresh post-migration work bead and a
-// rig-shadowed id that can have no frozen twin at all. That breadth is
-// deliberate rather than incidental. The census reads OPEN beads only, so it
-// cannot enumerate the closed relics a per-id rule would have to consult, and a
-// per-id rule would therefore deny LESS than the evidence supports. The corpus
-// pins it — residency_conformance_test.go's T3k rows make ByID(ga-xyz) and
-// ByID(ra-7) Fatal too, not just the reserved-prefix ones. The operator cost is
-// that one proven open relic takes the by-id door away for the city, not only
-// for the ids the migration preserved.
+// rig-shadowed id that can have no frozen twin at all. That breadth is a
+// deliberate choice rather than a forced one: the census enumerates closed
+// relics as well as open ones, so a per-id rule would have the population it
+// has to consult, and the corpus pins the binding-keyed breadth —
+// residency_conformance_test.go's T3k rows make ByID(ga-xyz) and ByID(ra-7)
+// Fatal too, not just the reserved-prefix ones. The operator cost is that one
+// proven relic takes the by-id door away for the city, not only for the ids
+// the migration preserved.
 //
 // # The absent case is the tolerant one
 //

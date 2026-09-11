@@ -1414,6 +1414,66 @@ type falseNegativeRuntimeProvider struct {
 	falseNames map[string]bool
 }
 
+type observationErrorRuntimeProvider struct {
+	*runtime.Fake
+	livenessErr error
+	activityErr error
+}
+
+func (p *observationErrorRuntimeProvider) ObserveLivenessWithError(string, []string) (runtime.Liveness, error) {
+	if p.livenessErr != nil {
+		return runtime.Liveness{}, p.livenessErr
+	}
+	return runtime.Liveness{Running: true, Alive: true}, nil
+}
+
+func (p *observationErrorRuntimeProvider) GetLastActivity(string) (time.Time, error) {
+	return time.Time{}, p.activityErr
+}
+
+func TestRuntimeHandleLiveObservationPreservesObservationUncertainty(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		livenessErr error
+		activityErr error
+		wantError   bool
+	}{
+		{name: "liveness unavailable", livenessErr: fmt.Errorf("liveness transport: %w", runtime.ErrRuntimeUnavailable), wantError: true},
+		{name: "activity unavailable", activityErr: fmt.Errorf("activity transport: %w", runtime.ErrRuntimeUnavailable), wantError: true},
+		{name: "ordinary activity error stays best effort", activityErr: errors.New("malformed activity"), wantError: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+				Provider: &observationErrorRuntimeProvider{
+					Fake:        runtime.NewFake(),
+					livenessErr: tc.livenessErr,
+					activityErr: tc.activityErr,
+				},
+				SessionName: "runtime-worker",
+			})
+			if err != nil {
+				t.Fatalf("NewRuntimeHandle: %v", err)
+			}
+			obs, err := handle.LiveObservation(context.Background())
+			if tc.wantError {
+				if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+					t.Fatalf("LiveObservation error = %v, want runtime unavailable", err)
+				}
+				if obs != (LiveObservation{}) {
+					t.Fatalf("LiveObservation = %#v, want zero with unknown result", obs)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("LiveObservation: %v", err)
+			}
+			if !obs.Running || !obs.Alive || obs.LastActivity != nil {
+				t.Fatalf("LiveObservation = %#v, want live with unknown activity", obs)
+			}
+		})
+	}
+}
+
 func (p *falseNegativeRuntimeProvider) IsRunning(name string) bool {
 	if p.falseNames[name] {
 		return false

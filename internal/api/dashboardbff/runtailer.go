@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -41,6 +42,31 @@ var (
 
 const runSessionsFetchTimeout = 10 * time.Second
 
+// maxRetiredSessionLookups caps the retired ids one run-detail build considers
+// (cache hits included), and so the by-id session reads it may issue. A run's
+// retired seats are resolved individually (one loopback point read per distinct
+// closed session id it references, cached per id), never by listing the city's
+// closed sessions; a typical run carries well under twenty links, and the cap
+// keeps a pathological fan-out from turning one detail poll into hundreds of
+// reads. Links past the cap keep their correct bare-id link.
+const maxRetiredSessionLookups = 64
+
+// retiredSessionsBuildBudget bounds the wall time one run-detail build spends
+// issuing by-id reads. The reads are sequential and each is bounded only by the
+// client timeout, so without a budget a slow-but-answering supervisor could hold
+// one build — and the SSE loop that runs it on every city event — for
+// maxRetiredSessionLookups timeouts. Once the budget has elapsed the remaining
+// ids keep their bare link for that build; the next build resumes from the
+// cache, so enrichment converges one budget at a time. A build overruns the
+// budget by at most one read's timeout.
+const retiredSessionsBuildBudget = 5 * time.Second
+
+// retiredSessionCacheCap bounds the manager-wide retired-session cache. It holds
+// the closed seats of the runs operators are actively viewing; a small LRU covers
+// that working set while an unbounded map would pin every closed session ever
+// linked.
+const retiredSessionCacheCap = 1024
+
 // ── Tailer manager ────────────────────────────────────────────────────────
 
 type runTailerManager struct {
@@ -52,6 +78,13 @@ type runTailerManager struct {
 	// (single-flight + TTL). See enrichment_cache.go for the contract.
 	sessionsCache *singleFlightCache[string, cachedSessions]
 	formulaCache  *singleFlightCache[formulaCacheKey, cachedFormulaDetail]
+	// retiredSessions caches the by-id reads a run's retired seats need
+	// (fetchRetiredSession): one bounded LRU across cities, each value carrying
+	// its own hit/miss deadline. See enrichment_cache.go for the value contract.
+	retiredSessions *lruSingleFlight[retiredSessionKey, cachedRetiredSession]
+	// retiredClock stamps and checks those deadlines. time.Now in production;
+	// a test injects a controllable clock to cross a TTL without sleeping.
+	retiredClock func() time.Time
 
 	// sessionsTTL is the sessionsCacheTTL package var captured at construction.
 	// The sessions compute closure can run on the tailer loop's DETACHED prime
@@ -70,12 +103,14 @@ type runTailerManager struct {
 
 func newRunTailerManager(deps Deps) *runTailerManager {
 	return &runTailerManager{
-		deps:          deps,
-		httpc:         &http.Client{Timeout: runSessionsFetchTimeout, Transport: deps.SelfReadTransport},
-		cities:        make(map[string]*cityRunTailer),
-		sessionsCache: newSingleFlightCache[string, cachedSessions](),
-		formulaCache:  newSingleFlightCache[formulaCacheKey, cachedFormulaDetail](),
-		sessionsTTL:   sessionsCacheTTL,
+		deps:            deps,
+		httpc:           &http.Client{Timeout: runSessionsFetchTimeout, Transport: deps.SelfReadTransport},
+		cities:          make(map[string]*cityRunTailer),
+		sessionsCache:   newSingleFlightCache[string, cachedSessions](),
+		formulaCache:    newSingleFlightCache[formulaCacheKey, cachedFormulaDetail](),
+		retiredSessions: newLRUSingleFlight[retiredSessionKey, cachedRetiredSession](retiredSessionCacheCap),
+		retiredClock:    time.Now,
+		sessionsTTL:     sessionsCacheTTL,
 	}
 }
 
@@ -127,6 +162,9 @@ func (m *runTailerManager) ensure(name, eventsPath string) *cityRunTailer {
 		}
 		m.sessionsCache.discard(name)
 		m.formulaCache.discardMatching(func(key formulaCacheKey) bool {
+			return key.name == name
+		})
+		m.retiredSessions.forgetMatching(func(key retiredSessionKey) bool {
 			return key.name == name
 		})
 		ok = false
@@ -645,7 +683,10 @@ func (t *cityRunTailer) detail(ctx context.Context, runID string) (runDetailMemo
 		}
 		snapshotFoldCount.Add(1)
 		name, target, scopeKind, scopeRef, ok := runproj.FormulaTargetFromSnapshot(snap)
-		return runSnapshotCacheValue{snap: snap, name: name, target: target, scopeKind: scopeKind, scopeRef: scopeRef, targetOK: ok}, nil
+		return runSnapshotCacheValue{
+			snap: snap, name: name, target: target, scopeKind: scopeKind, scopeRef: scopeRef, targetOK: ok,
+			sessionIDs: runproj.SessionIDsForSnapshot(snap),
+		}, nil
 	})
 	if err != nil {
 		return runDetailMemoValue{}, ready, err
@@ -662,6 +703,16 @@ func (t *cityRunTailer) detail(ctx context.Context, runID string) (runDetailMemo
 	sessions, sessionsVersion, sessionsAvailable := t.mgr.fetchSessionsVersioned(ctx, t.name)
 	if !sessionsAvailable {
 		sessions = nil
+	}
+	// The open-only listing above never carries a CLOSED session, so a finished
+	// run's retired seats would render as bare ids. Resolve those individually by
+	// durable id — bounded by the run's own links, cached per id — instead of
+	// ever listing the city's closed sessions (thousands in a mature store).
+	// Without a usable listing there is no way to tell which links are retired,
+	// so the by-id reads are skipped rather than issued blindly.
+	var retired []runproj.DashboardSession
+	if sessionsAvailable {
+		retired = t.mgr.fetchRetiredSessions(ctx, t.name, snapValue.sessionIDs, sessions)
 	}
 
 	// Layer the supervisor's compiled formula detail at request time (like
@@ -696,9 +747,10 @@ func (t *cityRunTailer) detail(ctx context.Context, runID string) (runDetailMemo
 		sessionsVersion: sessionsVersion,
 		formulaVersion:  formulaVersion,
 		formulaFailure:  formulaDetailFailure,
+		retiredSessions: retiredSessionsKey(retired),
 	}
 	value, err := t.detailMemo.getOrBuild(key, func() (runDetailMemoValue, error) {
-		d, buildErr := runproj.BuildRunDetailFromSnapshot(snapValue.snap, sessions, formulaDetail, formulaDetailFailure)
+		d, buildErr := runproj.BuildRunDetailFromSnapshot(snapValue.snap, runproj.RunSessions{Live: sessions, Retired: retired}, formulaDetail, formulaDetailFailure)
 		if buildErr != nil {
 			return runDetailMemoValue{}, buildErr
 		}
@@ -830,6 +882,173 @@ func (m *runTailerManager) fetchSessionsUpstream(ctx context.Context, name strin
 		all = []runproj.DashboardSession{}
 	}
 	return all, true
+}
+
+// fetchRetiredSessions resolves the run's session ids the open listing does not
+// carry — its retired seats — one by-id point read each, in id order, capped at
+// maxRetiredSessionLookups ids and retiredSessionsBuildBudget of wall time. Ids
+// present in the listing are never read (the listing is authoritative for a live
+// seat); ids the supervisor does not know are simply absent from the result,
+// leaving the step its correct bare-id link. The result is bounded by the run's
+// link count and independent of how many closed sessions the city holds.
+// detail() consumes this.
+func (m *runTailerManager) fetchRetiredSessions(ctx context.Context, name string, ids []string, live []runproj.DashboardSession) []runproj.DashboardSession {
+	if len(ids) == 0 {
+		return nil
+	}
+	liveIDs := make(map[string]struct{}, len(live))
+	for i := range live {
+		liveIDs[live[i].ID] = struct{}{}
+	}
+	deadline := m.retiredClock().Add(retiredSessionsBuildBudget)
+	var retired []runproj.DashboardSession
+	considered := 0
+	for _, id := range ids {
+		if _, isLive := liveIDs[id]; isLive {
+			continue
+		}
+		if considered == maxRetiredSessionLookups || !m.retiredClock().Before(deadline) {
+			break
+		}
+		considered++
+		if session, found := m.fetchRetiredSession(ctx, name, id); found {
+			retired = append(retired, session)
+		}
+	}
+	return retired
+}
+
+// retiredSessionsKey is the memo-key projection of a retired-session resolution:
+// the resolved ids joined in order. See runDetailMemoKey.retiredSessions. Only
+// the SET is keyed, not the sessions' display fields: a closed session is
+// terminal, so a by-id re-read after the hit TTL that somehow differs (a repaired
+// bead) is picked up by the memo only when the listing version next bumps —
+// which every session event does — an accepted staleness for a terminal record.
+func retiredSessionsKey(retired []runproj.DashboardSession) string {
+	if len(retired) == 0 {
+		return ""
+	}
+	ids := make([]string, len(retired))
+	for i := range retired {
+		ids[i] = retired[i].ID
+	}
+	return strings.Join(ids, ",")
+}
+
+// fetchRetiredSession returns one session resolved by durable id, served from the
+// retired-session cache. A hit is served for retiredSessionCacheTTL and a miss
+// (found=false — a 404, a failed read, anything but a hit) for the backed-off
+// retiredMissTTL of its consecutive-miss count; an expired entry is forgotten and
+// re-read. Every outcome is cached, so no failure mode re-issues the read per
+// render. Concurrent readers of the same id collapse onto one upstream read.
+func (m *runTailerManager) fetchRetiredSession(ctx context.Context, name, id string) (runproj.DashboardSession, bool) {
+	key := retiredSessionKey{name: name, id: id}
+	// Two passes at most: the first may return an entry whose own deadline has
+	// passed; forgetting it makes the second pass rebuild, and a fresh build can
+	// never be expired already (its deadline is in the future by construction).
+	// The expired entry's miss count carries into the rebuild so a persistent
+	// miss keeps backing off instead of restarting at the first-miss TTL.
+	priorMisses := 0
+	for range 2 {
+		entry, err := m.retiredSessions.getOrBuild(key, func() (cachedRetiredSession, error) {
+			return m.fetchRetiredSessionUpstream(ctx, name, id, priorMisses), nil
+		})
+		if err != nil {
+			return runproj.DashboardSession{}, false
+		}
+		if m.retiredClock().Before(entry.expires) {
+			return entry.session, entry.found
+		}
+		priorMisses = entry.misses
+		m.retiredSessions.forget(key)
+	}
+	return runproj.DashboardSession{}, false
+}
+
+// retiredMissTTL is how long the n-th consecutive by-id miss for one id is served
+// before a re-read: retiredSessionMissTTL for the first, doubling per further
+// miss, capped at retiredSessionCacheTTL. An id that never resolves (a pruned
+// session, a stale stamp, a slot label the assignee fallback mistook for an id)
+// thus costs a handful of point reads in its first minute and one per hit TTL
+// after, while an id whose bead is merely late is still re-read promptly.
+func retiredMissTTL(consecutiveMisses int) time.Duration {
+	ttl := retiredSessionMissTTL
+	for i := 1; i < consecutiveMisses && ttl < retiredSessionCacheTTL; i++ {
+		ttl *= 2
+	}
+	return min(ttl, retiredSessionCacheTTL)
+}
+
+// fetchRetiredSessionUpstream reads GET {base}/v0/city/{name}/session/{id}
+// ?exact_id=true over loopback — the supervisor's exact-id point read, which
+// finds closed session beads and answers a miss with 404 after one store.Get,
+// never through the name ladder whose closed-inclusive steps scan every closed
+// session bead — and projects the response into the dashboard session shape.
+// The result is always a cacheable entry: a hit for retiredSessionCacheTTL; a
+// 404, any other status, a transport or decode failure, or a 200 for a different
+// id (belt and braces against a resolver change) all as a miss for the backed-off
+// miss TTL, so the SSE loop's per-event rebuild can never turn one failing read
+// into a retry per render. Non-404 failures are logged; a 404 is the expected
+// answer for a pruned or not-yet-landed session and is not. The read runs
+// detached from the electing caller's cancellation, like the sessions listing,
+// so a disconnecting poll cannot fail the shared read for joiners.
+func (m *runTailerManager) fetchRetiredSessionUpstream(ctx context.Context, name, id string, priorMisses int) cachedRetiredSession {
+	session, err := m.readSessionByExactID(ctx, name, id)
+	now := m.retiredClock()
+	if err != nil {
+		if !errors.Is(err, errRetiredSessionNotFound) {
+			log.Printf("run-tailer: city %q session %q by-id read failed: %v", name, id, err)
+		}
+		misses := priorMisses + 1
+		return cachedRetiredSession{misses: misses, expires: now.Add(retiredMissTTL(misses))}
+	}
+	return cachedRetiredSession{session: session, found: true, expires: now.Add(retiredSessionCacheTTL)}
+}
+
+// errRetiredSessionNotFound is readSessionByExactID's answer for an id the
+// supervisor does not hold: the one miss that is expected rather than a failure.
+var errRetiredSessionNotFound = errors.New("session not found")
+
+// readSessionByExactID performs the exact-id session read for
+// fetchRetiredSessionUpstream and returns the session, errRetiredSessionNotFound
+// for a 404 (or a 200 naming a different id), or the failure.
+func (m *runTailerManager) readSessionByExactID(ctx context.Context, name, id string) (runproj.DashboardSession, error) {
+	base := strings.TrimRight(m.deps.SupervisorBaseURL, "/")
+	if base == "" {
+		return runproj.DashboardSession{}, errors.New("no supervisor base url")
+	}
+	fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), singleFlightComputeTimeout)
+	defer cancel()
+	u := base + "/v0/city/" + name + "/session/" + url.PathEscape(id) + "?exact_id=true"
+	req, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, u, nil)
+	if err != nil {
+		return runproj.DashboardSession{}, fmt.Errorf("building session read: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := m.httpc.Do(req)
+	if err != nil {
+		return runproj.DashboardSession{}, fmt.Errorf("reading session: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusNotFound:
+		return runproj.DashboardSession{}, errRetiredSessionNotFound
+	default:
+		return runproj.DashboardSession{}, fmt.Errorf("reading session: status %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return runproj.DashboardSession{}, fmt.Errorf("reading session body: %w", err)
+	}
+	var session runproj.DashboardSession
+	if err := json.Unmarshal(body, &session); err != nil {
+		return runproj.DashboardSession{}, fmt.Errorf("decoding session: %w", err)
+	}
+	if session.ID != id {
+		return runproj.DashboardSession{}, errRetiredSessionNotFound
+	}
+	return session, nil
 }
 
 // formulaNodeRef decodes the ordering-relevant id of a compiled-formula preview

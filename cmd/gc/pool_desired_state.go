@@ -471,6 +471,19 @@ func computePoolDesiredStatesAt(
 		scaleCount, hasScaleCount := scaleCheckCounts[template]
 		protected := protectedNewRequests[template]
 		if !hasScaleCount && len(protected) == 0 {
+			// A template with no demand never becomes a key in
+			// scaleCheckCounts, so without this record the skip is silent and
+			// a pool that correctly wants zero sessions reads exactly like a
+			// pool the controller never evaluated. That ambiguity has already
+			// cost days of misdiagnosis; the decision below is the evidence
+			// that the template was reached and found idle on purpose.
+			if trace != nil {
+				trace.RecordDecision(TraceSitePoolDemandCompute, TraceReasonNoDemand, TraceOutcomeSkipped, template, "", traceRecordPayload{
+					"scale_check": scaleCount,
+					"protected":   len(protected),
+					"in_flight":   len(inFlightNewRequests[template]),
+				})
+			}
 			continue
 		}
 		if _, ok := aliasHeldTemplates[template]; ok {

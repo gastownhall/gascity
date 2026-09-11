@@ -159,12 +159,21 @@ resolution and predicates: `bdReadyPoolDemandShell(limitFlag)` reads the
 canonical `gc.routed_to=<target>` route with `--include-ephemeral`, and
 the temporary migration predicate reads `gc.run_target=<target>` only on
 `gc.kind=workflow` roots that predate root `gc.routed_to` stamping. The
-work-query form appends `--sort oldest --limit=1` to the canonical probe
-and prints the first match, then filters the migration probe to roots with
-empty `gc.routed_to`. That is an intentional routed-queue policy:
-unassigned routed pool work is FIFO before priority, so newer
-high-priority work does not jump ahead of older ready work already queued
-for the same target. The count form unions canonical and migration
+work-query form appends `--limit=20` to the canonical probe and serves the
+head of the reader's canonical (priority, created_at, id) default order,
+then filters the migration probe to roots with empty `gc.routed_to`. The
+routed-queue policy is priority-first, FIFO within a priority band: the
+created_at term keeps same-priority work in arrival order, and the
+canonical order is what both readers already default to (`bd ready`'s
+default `--sort priority`; the federated reader's merged
+`beads.SortBeadsReadyOrder`). The previous policy pinned `--sort oldest`
+(strict FIFO across priorities) so newer high-priority work could not jump
+older queued work — but combined with the bounded window it made the claim
+tier priority-blind in the strong sense: a routed high-priority bead behind
+more than the window of older rows was never served at all until the older
+rows drained (measured on a live 14-seat city: 13 P0 rows unreachable
+behind 34 older rows for hours). The migration fallback keeps
+`--sort oldest` for its retirement window. The count form unions canonical and migration
 probes and deduplicates by bead ID before piping through `jq 'length'`.
 Targets resolve to `Agent.PoolName` when set and
 `Agent.QualifiedName()` otherwise, so pool instances and pool templates
@@ -259,8 +268,8 @@ regressions.
     `bdReadyPoolDemandShell` helper in `internal/config/config.go`. The
     worker and reconciler must also share the temporary migration predicate
     for `gc.run_target=<target>` on `gc.kind=workflow` roots with empty
-    `gc.routed_to`; only the worker's first-row form adds native
-    `bd ready --sort oldest --limit=1` selection to the canonical probe.
+    `gc.routed_to`; only the worker's first-row form bounds the canonical probe
+    (`--limit=20`) and serves the reader's canonical priority-first order.
     Any pool-demand predicate change to one (added filter, modified target
     resolution, new state) MUST be reflected in the other. Diverging the two
     re-introduces the protocol-mismatch class — the reconciler
@@ -372,8 +381,9 @@ name = "coder"
 pool = { min = 1, max = 3, check = "echo 2" }
 # Default sling_query: bd update {} --set-metadata gc.routed_to=coder
 # Default work_query: bd ready --include-ephemeral --metadata-field gc.routed_to=coder
-#   --unassigned --exclude-type=epic --json --sort oldest --limit=1,
-#   then a temporary gc.run_target workflow-root migration fallback
+#   --unassigned --exclude-type=epic --json --limit=20 (canonical
+#   priority-first order), then a temporary gc.run_target workflow-root
+#   migration fallback
 ```
 
 System formulas are embedded in the `gc` binary and materialized to

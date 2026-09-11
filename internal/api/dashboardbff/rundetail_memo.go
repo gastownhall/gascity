@@ -27,12 +27,18 @@ var runDetailMemoCap = 128
 //     version identifies an available compiled detail (immutable per version),
 //     and the failure string distinguishes the unavailable arms (not_found vs
 //     upstream_error) that also change the built output.
+//   - retiredSessions pins the run's retired by-id session resolutions: the
+//     comma-joined ids that resolved (retiredSessionsKey). A closed session is
+//     terminal, so its display fields do not move; only the resolved SET moves
+//     (a miss that later resolves, a live seat that retires), and that is what
+//     the key captures. Bounded by the run's link count.
 type runDetailMemoKey struct {
 	runID           string
 	lastSeq         uint64
 	sessionsVersion uint64
 	formulaVersion  uint64
 	formulaFailure  runproj.RunFormulaDetailFetchFailure
+	retiredSessions string
 }
 
 // runDetailMemoValue is the immutable-after-build memoized detail: the projected
@@ -70,19 +76,23 @@ type runSnapshotCacheKey struct {
 }
 
 // runSnapshotCacheValue is the folded snapshot plus the compiled-formula target
-// resolved off it. Both are version/seq-independent, so detail() reuses them
-// across every same-generation request: a repeat GET at an unchanged lastSeq
-// pays no SnapshotForRun scan, only a new fold generation does. targetOK mirrors
-// FormulaTargetFromSnapshot's ok (false when the run is not a fetchable graph.v2
-// run, lacks a name+target, or has no valid scope). The stored value is
-// immutable after the fold, so callers share it read-only.
+// and the session ids resolved off it. All are version/seq-independent, so
+// detail() reuses them across every same-generation request: a repeat GET at an
+// unchanged lastSeq pays no SnapshotForRun scan and no id extraction, only a new
+// fold generation does. targetOK mirrors FormulaTargetFromSnapshot's ok (false
+// when the run is not a fetchable graph.v2 run, lacks a name+target, or has no
+// valid scope). sessionIDs is runproj.SessionIDsForSnapshot — the durable ids the
+// run's steps reference, which detail() resolves individually when the open
+// listing no longer carries them. The stored value is immutable after the fold,
+// so callers share it read-only.
 type runSnapshotCacheValue struct {
-	snap      runproj.RunSnapshot
-	name      string
-	target    string
-	scopeKind string
-	scopeRef  string
-	targetOK  bool
+	snap       runproj.RunSnapshot
+	name       string
+	target     string
+	scopeKind  string
+	scopeRef   string
+	targetOK   bool
+	sessionIDs []string
 }
 
 // runSnapshotCache is the per-tailer LRU of folded run snapshots keyed by fold
@@ -187,6 +197,39 @@ func (m *lruSingleFlight[K, V]) getOrBuild(key K, build func() (V, error)) (V, e
 		}
 		return value, nil
 	}
+}
+
+// forget drops key so the next getOrBuild rebuilds it. It is how a caller
+// expires an entry whose value carries its own TTL (the retired-session cache):
+// the LRU bounds the population, the value's deadline bounds its age, and forget
+// is the seam between them. An in-flight build for key is unaffected — it stores
+// on completion as usual. A no-op for an absent key.
+//
+// The verb is deliberately not discard (singleFlightCache.discard), even though
+// a city rebind drives both in lockstep: discard DETACHES the entry, so a
+// running compute publishes only to the detached copy and can never repopulate
+// the key, while this seam leaves an in-flight build to store under the key as
+// usual. Same trigger, different guarantee — hence the different name.
+func (m *lruSingleFlight[K, V]) forget(key K) {
+	m.mu.Lock()
+	if el, ok := m.entries[key]; ok {
+		m.lru.Remove(el)
+		delete(m.entries, key)
+	}
+	m.mu.Unlock()
+}
+
+// forgetMatching applies forget to every key match reports true for. It is used
+// on a city rebind to drop that city's entries from a cache keyed across cities.
+func (m *lruSingleFlight[K, V]) forgetMatching(match func(K) bool) {
+	m.mu.Lock()
+	for key, el := range m.entries {
+		if match(key) {
+			m.lru.Remove(el)
+			delete(m.entries, key)
+		}
+	}
+	m.mu.Unlock()
 }
 
 // storeLocked inserts value under key as most-recently-used and evicts the

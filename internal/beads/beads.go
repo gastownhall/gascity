@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // ErrNotFound is returned when a bead ID does not exist in the store.
@@ -572,6 +574,22 @@ var readyBlockingDependencyTypes = map[string]bool{
 // bead from Ready() until the dependency target closes.
 func IsReadyBlockingDependencyType(t string) bool {
 	return readyBlockingDependencyTypes[t]
+}
+
+// DependencySatisfied reports whether a blocking dependency's current state
+// satisfies the dependent, given the dependency's status and its
+// gc.work_outcome metadata value (ga-a7v0ex).
+//
+// A dependency that has not closed never satisfies. A closed dependency
+// satisfies unless it was explicitly typed blocked: most closed beads carry
+// no gc.work_outcome yet (work_record_gate.go is warn-only), so the empty
+// value stays backward-compatible, and an unrecognized future value fails
+// open rather than newly stalling dependents it doesn't understand.
+func DependencySatisfied(depStatus, depWorkOutcome string) bool {
+	if depStatus != "closed" {
+		return false
+	}
+	return depWorkOutcome != beadmeta.WorkOutcomeBlocked
 }
 
 // IsReadyExcludedType reports whether the bead type is excluded from
