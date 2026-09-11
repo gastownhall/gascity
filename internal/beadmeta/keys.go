@@ -245,14 +245,26 @@ const (
 	StderrMetadataKey           = "gc.stderr"
 	StdoutMetadataKey           = "gc.stdout"
 	// StepDefinedEmittedMetadataKey records, on a graph.v2 physical step bead,
-	// that its execution.step_defined fact has already been emitted. The
-	// level-triggered projector restates the full graph every control tick;
-	// this per-step marker is what makes that restatement idempotent, so a
-	// step_defined is emitted once and a steady tick restates nothing (ga-rd8le).
-	// A step still lacking the marker — freshly created, or one whose emit
-	// crashed before the marker landed — is emitted and marked on the next tick,
-	// so every creator and recovery path self-heals. Presence alone is
-	// significant; the stamped RFC3339 value is for observability only.
+	// that its execution.step_defined fact has already been emitted AND
+	// acknowledged durable. The level-triggered projector restates the full
+	// graph every control tick; this per-step marker is what makes that
+	// restatement idempotent, so a step_defined is emitted once and a steady
+	// tick restates nothing (ga-rd8le). A step still lacking the marker —
+	// freshly created, or one whose emit was not acknowledged durable (a dropped
+	// append, or a recorder that cannot promise durability) — is emitted and
+	// marked on the next healthy tick, so every creator and recovery path
+	// self-heals. The mark is written only after the emit is acknowledged, so a
+	// dropped emit never marks the step and is safely re-emitted; presence alone
+	// is significant, and the stamped RFC3339 value is for observability only.
+	//
+	// The marker is durable on the step bead, while the emitted step_defined
+	// lives in the event journal, which retention can trim: with opt-in archive
+	// retention (events.rotation.archive_retain_age) a long-lived run's
+	// once-emitted step_defined can age out of the retained journal while this
+	// marker persists, so a consumer reading only retained events may no longer
+	// see it. The offline full restate ('gc events reemit-execution') is the
+	// reemit path — it drives Projection.Events, which ignores this marker and
+	// re-states every step, so it re-materializes any aged-out definition.
 	StepDefinedEmittedMetadataKey = "gc.step_defined_emitted"
 	StepIDMetadataKey             = "gc.step_id"
 	StepRefMetadataKey            = "gc.step_ref"

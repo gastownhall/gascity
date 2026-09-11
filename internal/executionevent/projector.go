@@ -81,12 +81,21 @@ type Projection struct {
 // idempotent instead (ga-rd8le): a step already carrying
 // StepDefinedEmittedMetadataKey is skipped, and an unmarked step is emitted and
 // then marked, so a steady tick restates nothing while every creator and
-// recovery path still self-heals without threading created IDs. The emit
-// precedes the mark on purpose — a crash between them re-emits a tolerated
-// duplicate snapshot fact next tick rather than dropping the definition, and a
-// mark that fails to persist simply re-emits next tick. The offline full
-// restate ('gc events reemit-execution') calls Events instead, which ignores
-// the marker and re-states every step deliberately.
+// recovery path still self-heals without threading created IDs.
+//
+// The step is marked ONLY once its step_defined is acknowledged durable — the
+// same discipline applyConvergenceStamp uses for completion facts, where a
+// dropped append must never stamp a permanent fact loss. events.Recorder.Record
+// is best-effort and can silently drop the event (a FileRecorder lock timeout or
+// write error, or events.Discard returned on a recorder-open failure), so
+// marking after a dropped emit would skip the step FOREVER — the exact
+// permanent-miss the level-triggered restatement exists to prevent. An emit that
+// is not acknowledged (a drop, or a recorder that cannot promise durability at
+// all, such as events.Discard) leaves the step unmarked and re-emitted next tick
+// — a duplicate step_defined is a tolerated repeatable snapshot fact; a
+// permanent miss is not. The offline full restate ('gc events reemit-execution')
+// calls Events instead, which ignores the marker and re-states every step
+// deliberately.
 func EmitCurrent(recorder events.Recorder, graphStore beads.GraphStore, convoyStore beads.WorkStore, rootID, actor string) error {
 	if recorder == nil {
 		return nil
@@ -102,15 +111,40 @@ func EmitCurrent(recorder events.Recorder, graphStore beads.GraphStore, convoySt
 		if step.DefinedEmitted {
 			continue
 		}
-		recorder.Record(step.definedEvent(actor))
+		if !recordStepDefinedConfirmed(recorder, step.definedEvent(actor)) {
+			// The emit was dropped or the recorder cannot acknowledge durability
+			// (events.Discard). Leave the step unmarked so the next healthy tick
+			// re-emits it: a best-effort append that may have been lost must never
+			// durably mark the step, or a dropped emit becomes a permanent miss.
+			continue
+		}
 		if graphStore.Store != nil {
-			// Best-effort durable mark. A failure leaves the step unmarked, so
-			// the next tick re-emits it — the same at-least-once tolerance the
-			// snapshot facts already carry.
+			// The fact is durable; record that the step was emitted. A failed mark
+			// leaves the step unmarked, so the next tick re-emits it — the same
+			// at-least-once tolerance the snapshot facts already carry.
 			_ = graphStore.SetMetadata(step.BeadID, beadmeta.StepDefinedEmittedMetadataKey, time.Now().UTC().Format(time.RFC3339))
 		}
 	}
 	return nil
+}
+
+// recordStepDefinedConfirmed records a step's step_defined fact and reports
+// whether the append is durable enough to mark the step as emitted. It records
+// through events.AckRecorder when the recorder offers it — a nil ack means the
+// fact reached the log and is readable back by any consumer, the synchronous
+// equivalent of the journal read-back applyConvergenceStamp relies on, without
+// paying a per-tick journal read on this hot control-dispatch path (the ga-ftgyl
+// burn). A recorder that cannot acknowledge durability — events.Discard returned
+// on a recorder-open failure, or any bare Recorder — is recorded best-effort but
+// is NEVER treated as confirmed, so the step stays unmarked and re-emits next
+// tick rather than being marked on the strength of an emit that may have been
+// dropped.
+func recordStepDefinedConfirmed(recorder events.Recorder, event events.Event) bool {
+	if ack, ok := recorder.(events.AckRecorder); ok {
+		return ack.RecordAck(event) == nil
+	}
+	recorder.Record(event)
+	return false
 }
 
 // Events converts the projection to repeatable snapshot facts — the FULL

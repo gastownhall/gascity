@@ -476,6 +476,20 @@ type Recorder interface {
 	Record(e Event)
 }
 
+// AckRecorder is an optional Recorder extension whose RecordAck reports whether
+// the event was durably appended. Record is best-effort and void — a
+// FileRecorder silently drops the event on a cross-process lock timeout or a
+// write failure (e.g. ENOSPC), and Discard drops every event — so a caller that
+// must not take a durable action on the strength of an emit that may have been
+// lost type-asserts to this and treats a recorder that does not implement it
+// (Discard, exec scripts) as "never acknowledged". A nil error means the event
+// reached the log and is therefore readable back by any List/Watch consumer; a
+// non-nil error means it was dropped.
+type AckRecorder interface {
+	Recorder
+	RecordAck(e Event) error
+}
+
 // Provider is the full interface for event backends. It embeds Recorder
 // for writing and adds reading, querying, and watching. Implementations
 // include FileRecorder (built-in JSONL file) and exec (user-supplied

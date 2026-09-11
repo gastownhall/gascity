@@ -9234,6 +9234,49 @@ func TestClearRetryEphemeraPreservesRoutingAndClearsFanoutState(t *testing.T) {
 	}
 }
 
+// TestRetryClonedStepGetsItsOwnStepDefined pins CRITICAL 2 of the ga-rd8le
+// council review: a retry attempt clones the previous attempt's metadata, so it
+// must not inherit the projector's per-step step_defined marker
+// (StepDefinedEmittedMetadataKey). A born-marked clone would be skipped by
+// EmitCurrent forever and never get its own execution.step_defined — a
+// deterministic, non-self-healing loss on every retry iteration >= 2.
+//
+// RED on d39c76e61f: clearRetryEphemera there does not strip the marker, so both
+// the direct-strip and the retryAttemptBead-clone assertions fail.
+func TestRetryClonedStepGetsItsOwnStepDefined(t *testing.T) {
+	t.Parallel()
+
+	const marker = beadmeta.StepDefinedEmittedMetadataKey
+
+	// The shared strip function every clone path calls must drop the marker.
+	meta := map[string]string{
+		marker:                         "2026-09-11T00:00:00Z",
+		beadmeta.RootBeadIDMetadataKey: "gcg-root",
+		beadmeta.StepIDMetadataKey:     "build",
+	}
+	clearRetryEphemera(meta)
+	if _, ok := meta[marker]; ok {
+		t.Fatal("clearRetryEphemera must strip the step_defined marker so a clone is not born-marked")
+	}
+
+	// End to end: a cloned retry attempt must be born unmarked, so a later
+	// EmitCurrent projects DefinedEmitted=false and emits its own step_defined.
+	prev := beads.Bead{
+		ID:    "gcg-attempt-1",
+		Title: "build",
+		Type:  "task",
+		Metadata: map[string]string{
+			marker:                         "2026-09-11T00:00:00Z",
+			beadmeta.RootBeadIDMetadataKey: "gcg-root",
+			beadmeta.StepIDMetadataKey:     "build",
+		},
+	}
+	clone := retryAttemptBead(prev, "gcg-logical", "step.ref.2", 2, (*config.City)(nil))
+	if _, ok := clone.Metadata[marker]; ok {
+		t.Fatal("retry attempt clone inherited the step_defined marker; EmitCurrent would skip it forever")
+	}
+}
+
 func TestRewriteRalphAttemptRefRespectsAttemptBoundaries(t *testing.T) {
 	t.Parallel()
 
