@@ -1445,6 +1445,269 @@ func TestSkipOpenScopeMembersBatchesDependencyChecksAndCloses(t *testing.T) {
 	}
 }
 
+// newPinnedScopeSkipStore returns a scope-skip store that honors explicit bead
+// ids. The skip planner walks pending members in sorted id order, so the id
+// order is part of these tests' contract, not an accident of id minting.
+func newPinnedScopeSkipStore() *scopeSkipBatchStore {
+	mem := beads.NewMemStore()
+	mem.HonorExplicitIDs = true
+	return &scopeSkipBatchStore{MemStore: mem}
+}
+
+func mustCreateScopeMember(t *testing.T, store beads.Store, id, title, kind, role string) beads.Bead {
+	t.Helper()
+	metadata := map[string]string{
+		"gc.root_bead_id": "wf-1",
+		"gc.scope_ref":    "body",
+		"gc.scope_role":   role,
+	}
+	if kind != "" {
+		metadata["gc.kind"] = kind
+	}
+	return mustCreateWorkflowBead(t, store, beads.Bead{
+		ID:       id,
+		Title:    title,
+		Type:     "task",
+		Metadata: metadata,
+	})
+}
+
+func mustCreateScopeSkipBody(t *testing.T, store beads.Store) beads.Bead {
+	t.Helper()
+	return mustCreateWorkflowBead(t, store, beads.Bead{
+		ID:    "gcg-267010",
+		Title: "body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": "wf-1",
+			"gc.step_ref":     "demo.body",
+		},
+	})
+}
+
+// TestSkipOpenScopeMembersContinuesAfterPreserveOnlyRound pins the specimen
+// behind ga-kzrlh: run gcg-5436965277264861 (beads#6038) quarantined its
+// control bead at 2026-08-30T04:26:11Z with "unable to skip remaining scope
+// members", while the healthy dup twin closed every one of those members one
+// second later. No store call ever failed — the round that PRESERVED the
+// subject's own scope-check (deleting the linchpin blocker from pending)
+// counted as no progress, so a graph that needed one more round was declared
+// deadlocked.
+//
+// The shape is the common one, not an exotic one: finalize scope-checks are
+// minted after the members they block, so their ids sort AFTER their
+// dependents and the preserve lands too late in the pass to unblock anything
+// in the same round.
+func TestSkipOpenScopeMembersContinuesAfterPreserveOnlyRound(t *testing.T) {
+	t.Parallel()
+
+	store := newPinnedScopeSkipStore()
+	body := mustCreateScopeSkipBody(t, store)
+	failed := mustCreateWorkflowBead(t, store, beads.Bead{
+		ID:     "gcg-267018",
+		Title:  "scorecard",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": "wf-1",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+			"gc.outcome":      "fail",
+		},
+	})
+	control := mustCreateScopeMember(t, store, "gcg-267019", "Finalize scope for scorecard", "scope-check", "control")
+	apply := mustCreateScopeMember(t, store, "gcg-267022", "apply", "", "member")
+	applyTwin := mustCreateScopeMember(t, store, "gcg-267024", "apply twin", "", "member")
+	scorecardFinalize := mustCreateScopeMember(t, store, "gcg-267031", "Finalize scope for scorecard twin", "scope-check", "control")
+	applyFinalize := mustCreateScopeMember(t, store, "gcg-267033", "Finalize scope for apply", "scope-check", "control")
+	applyTwinFinalize := mustCreateScopeMember(t, store, "gcg-267034", "Finalize scope for apply twin", "scope-check", "control")
+
+	mustDepAdd(t, store, apply.ID, scorecardFinalize.ID, "blocks")
+	mustDepAdd(t, store, applyTwin.ID, scorecardFinalize.ID, "blocks")
+	mustDepAdd(t, store, scorecardFinalize.ID, control.ID, "blocks")
+	mustDepAdd(t, store, applyFinalize.ID, apply.ID, "blocks")
+	mustDepAdd(t, store, applyTwinFinalize.ID, applyTwin.ID, "blocks")
+
+	snapshot := scopeSnapshot{
+		rootID:      "wf-1",
+		scopeRef:    "body",
+		allComplete: true,
+		members:     []beads.Bead{body, failed, control, apply, applyTwin, scorecardFinalize, applyFinalize, applyTwinFinalize},
+		body:        body,
+	}
+	skipped, err := snapshot.skipOpenScopeMembers(store, control.ID)
+	if err != nil {
+		t.Fatalf("skipOpenScopeMembers: %v", err)
+	}
+	if skipped != 4 {
+		t.Fatalf("skipped = %d, want 4", skipped)
+	}
+	// Three rounds: preserve-only, then the two dependency waves it unblocked.
+	if store.depListBatchCalls != 3 {
+		t.Fatalf("DepListBatch calls = %d, want 3 (preserve-only round then two skip waves)", store.depListBatchCalls)
+	}
+	if got := [][]string{store.closeAllIDs[0], store.closeAllIDs[1]}; !slices.Equal(got[0], []string{apply.ID, applyTwin.ID}) || !slices.Equal(got[1], []string{applyFinalize.ID, applyTwinFinalize.ID}) {
+		t.Fatalf("CloseAll waves = %v, want [[%s %s] [%s %s]]", got, apply.ID, applyTwin.ID, applyFinalize.ID, applyTwinFinalize.ID)
+	}
+	for _, beadID := range []string{apply.ID, applyTwin.ID, applyFinalize.ID, applyTwinFinalize.ID} {
+		member := mustGetBead(t, store, beadID)
+		if member.Status != "closed" {
+			t.Fatalf("%s status = %q, want closed", beadID, member.Status)
+		}
+		if got := member.Metadata["gc.outcome"]; got != "skipped" {
+			t.Fatalf("%s outcome = %q, want skipped", beadID, got)
+		}
+	}
+	// The subject's own scope-check stays open: it is the replayable recovery
+	// path, which is the whole reason preserving it is progress and not a stall.
+	preserved := mustGetBead(t, store, scorecardFinalize.ID)
+	if preserved.Status != "open" {
+		t.Fatalf("preserved scope-check status = %q, want open", preserved.Status)
+	}
+}
+
+// TestSkipOpenScopeMembersStillFailsOnGenuineBlocksCycle is the control for the
+// fix above: progress-aware rounds must not paper over a real deadlock. Two
+// pending members that block each other can never be skipped, so hard-fail and
+// quarantine remain the correct disposition.
+func TestSkipOpenScopeMembersStillFailsOnGenuineBlocksCycle(t *testing.T) {
+	t.Parallel()
+
+	store := newPinnedScopeSkipStore()
+	body := mustCreateScopeSkipBody(t, store)
+	control := mustCreateScopeMember(t, store, "gcg-267019", "Finalize scope for scorecard", "scope-check", "control")
+	left := mustCreateScopeMember(t, store, "gcg-267041", "left", "", "member")
+	right := mustCreateScopeMember(t, store, "gcg-267042", "right", "", "member")
+
+	mustDepAdd(t, store, left.ID, right.ID, "blocks")
+	mustDepAdd(t, store, right.ID, left.ID, "blocks")
+
+	snapshot := scopeSnapshot{
+		rootID:      "wf-1",
+		scopeRef:    "body",
+		allComplete: true,
+		members:     []beads.Bead{body, control, left, right},
+		body:        body,
+	}
+	skipped, err := snapshot.skipOpenScopeMembers(store, control.ID)
+	if err == nil {
+		t.Fatalf("skipOpenScopeMembers = (%d, nil), want a deadlock error for a genuine blocks cycle", skipped)
+	}
+	if skipped != 0 {
+		t.Fatalf("skipped = %d, want 0", skipped)
+	}
+	for _, want := range []string{
+		"unable to skip remaining scope members",
+		left.ID + " (blocked by " + right.ID + ")",
+		right.ID + " (blocked by " + left.ID + ")",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q, want it to contain %q", err.Error(), want)
+		}
+	}
+	for _, beadID := range []string{left.ID, right.ID} {
+		member := mustGetBead(t, store, beadID)
+		if member.Status != "open" {
+			t.Fatalf("%s status = %q, want open — a genuine deadlock closes nothing", beadID, member.Status)
+		}
+	}
+}
+
+// TestSkipOpenScopeMembersDeadlockErrorNamesCurrentStuckMembers pins F2. The
+// specimen's error listed the round-START ids, which included the member the
+// same round had correctly preserved — that stale list is what misdirected the
+// initial diagnosis toward store failures. The error must describe the members
+// that are actually stuck now, with the blockers that hold them.
+func TestSkipOpenScopeMembersDeadlockErrorNamesCurrentStuckMembers(t *testing.T) {
+	t.Parallel()
+
+	store := newPinnedScopeSkipStore()
+	body := mustCreateScopeSkipBody(t, store)
+	control := mustCreateScopeMember(t, store, "gcg-267019", "Finalize scope for scorecard", "scope-check", "control")
+	left := mustCreateScopeMember(t, store, "gcg-267041", "left", "", "member")
+	right := mustCreateScopeMember(t, store, "gcg-267042", "right", "", "member")
+	preserved := mustCreateScopeMember(t, store, "gcg-267090", "Finalize scope for scorecard twin", "scope-check", "control")
+
+	mustDepAdd(t, store, left.ID, right.ID, "blocks")
+	mustDepAdd(t, store, right.ID, left.ID, "blocks")
+	mustDepAdd(t, store, preserved.ID, control.ID, "blocks")
+
+	snapshot := scopeSnapshot{
+		rootID:      "wf-1",
+		scopeRef:    "body",
+		allComplete: true,
+		members:     []beads.Bead{body, control, left, right, preserved},
+		body:        body,
+	}
+	_, err := snapshot.skipOpenScopeMembers(store, control.ID)
+	if err == nil {
+		t.Fatal("skipOpenScopeMembers = nil error, want a deadlock error for the surviving blocks cycle")
+	}
+	if strings.Contains(err.Error(), preserved.ID) {
+		t.Fatalf("error %q names the preserved scope-check %s — it is not stuck, it was deliberately left open", err.Error(), preserved.ID)
+	}
+	want := "unable to skip remaining scope members: " + left.ID + " (blocked by " + right.ID + "), " + right.ID + " (blocked by " + left.ID + ")"
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("error %q, want it to contain %q", err.Error(), want)
+	}
+}
+
+// TestSkipOpenScopeMembersConvergesOverManyRounds pins that progress-aware
+// rounds converge on a chain deep enough to need more than the two waves the
+// original harness exercised: one preserve-only round followed by four
+// single-member waves as each skip unblocks the next link.
+func TestSkipOpenScopeMembersConvergesOverManyRounds(t *testing.T) {
+	t.Parallel()
+
+	store := newPinnedScopeSkipStore()
+	body := mustCreateScopeSkipBody(t, store)
+	control := mustCreateScopeMember(t, store, "gcg-267019", "Finalize scope for scorecard", "scope-check", "control")
+	chain := []beads.Bead{
+		mustCreateScopeMember(t, store, "gcg-267041", "link 1", "", "member"),
+		mustCreateScopeMember(t, store, "gcg-267042", "link 2", "", "member"),
+		mustCreateScopeMember(t, store, "gcg-267043", "link 3", "", "member"),
+		mustCreateScopeMember(t, store, "gcg-267044", "link 4", "", "member"),
+	}
+	// Sorts after every link it blocks, so round one can only preserve.
+	preserved := mustCreateScopeMember(t, store, "gcg-267090", "Finalize scope for scorecard twin", "scope-check", "control")
+
+	mustDepAdd(t, store, preserved.ID, control.ID, "blocks")
+	mustDepAdd(t, store, chain[0].ID, preserved.ID, "blocks")
+	for i := 1; i < len(chain); i++ {
+		mustDepAdd(t, store, chain[i].ID, chain[i-1].ID, "blocks")
+	}
+
+	members := append([]beads.Bead{body, control, preserved}, chain...)
+	snapshot := scopeSnapshot{
+		rootID:      "wf-1",
+		scopeRef:    "body",
+		allComplete: true,
+		members:     members,
+		body:        body,
+	}
+	skipped, err := snapshot.skipOpenScopeMembers(store, control.ID)
+	if err != nil {
+		t.Fatalf("skipOpenScopeMembers: %v", err)
+	}
+	if skipped != len(chain) {
+		t.Fatalf("skipped = %d, want %d", skipped, len(chain))
+	}
+	if store.depListBatchCalls != len(chain)+1 {
+		t.Fatalf("DepListBatch calls = %d, want %d (preserve-only round then one wave per link)", store.depListBatchCalls, len(chain)+1)
+	}
+	for _, member := range chain {
+		got := mustGetBead(t, store, member.ID)
+		if got.Status != "closed" {
+			t.Fatalf("%s status = %q, want closed", member.ID, got.Status)
+		}
+	}
+	if got := mustGetBead(t, store, preserved.ID); got.Status != "open" {
+		t.Fatalf("preserved scope-check status = %q, want open", got.Status)
+	}
+}
+
 func TestProcessScopeCheckTreatsRetryAttemptFailureAsNonTerminalForScope(t *testing.T) {
 	t.Parallel()
 

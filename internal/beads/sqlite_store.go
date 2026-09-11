@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	_ "modernc.org/sqlite" // pure-Go SQLite driver, CGO_ENABLED=0 safe
 )
 
@@ -39,6 +40,7 @@ const (
 // SQLiteStoreOptions configures the SQLite bead store.
 type SQLiteStoreOptions struct {
 	prefix                  string
+	reservedPrefixes        []string
 	retentionPeriod         time.Duration
 	retentionSweepInterval  time.Duration
 	disableRetentionSweeper bool
@@ -81,6 +83,29 @@ func WithSQLiteStoreIDPrefix(prefix string) SQLiteStoreOption {
 		if strings.TrimSpace(prefix) != "" {
 			o.prefix = normalizeIDPrefix(prefix)
 		}
+	}
+}
+
+// WithSQLiteStoreReservedIDPrefixes fences the store to the id namespaces it
+// serves: a caller-PINNED id outside all of them is refused by Create.
+//
+// Minting already keeps generated ids inside the store's own namespace, but an
+// explicit id is honored verbatim, so without this a caller can write a bead
+// into a class binding under an id the binding does not claim. Such a bead is
+// unreachable by every id-shaped lookup and contradicts the binding's own
+// namespace declaration, which is what lets the residency resolver eventually
+// stop probing.
+//
+// More than one prefix, because a binding holds more than it mints — the nudge
+// queue's records live in the nudges store under their own namespace. An empty
+// set leaves the store unfenced, which is the shipped default everywhere the
+// store is not a class binding.
+//
+// CreateWithForeignID deliberately bypasses the fence: carrying a preserved
+// foreign id across is the store-migration copy path's entire job.
+func WithSQLiteStoreReservedIDPrefixes(prefixes ...string) SQLiteStoreOption {
+	return func(o *SQLiteStoreOptions) {
+		o.reservedPrefixes = collectReservedIDPrefixes(o.reservedPrefixes, prefixes)
 	}
 }
 
@@ -153,6 +178,7 @@ type SQLiteStore struct {
 	readDB                     *sql.DB // read pool (MaxOpenConns=8)
 	path                       string
 	prefix                     string
+	reservedPrefixes           []string // when non-empty, the namespaces a pinned id must carry
 	retentionPeriod            time.Duration
 	retentionSweepInterval     time.Duration
 	disableRetentionSweeper    bool
@@ -247,6 +273,7 @@ func OpenSQLiteStore(dir string, opts ...SQLiteStoreOption) (Store, error) {
 		db:                      db,
 		path:                    dbPath,
 		prefix:                  cfg.prefix,
+		reservedPrefixes:        cfg.reservedPrefixes,
 		retentionPeriod:         cfg.retentionPeriod,
 		retentionSweepInterval:  cfg.retentionSweepInterval,
 		disableRetentionSweeper: cfg.disableRetentionSweeper,
@@ -551,15 +578,28 @@ func (s *SQLiteStore) CreateWithForeignID(b Bead) (Bead, error) {
 	if strings.TrimSpace(b.ID) == "" {
 		return Bead{}, fmt.Errorf("creating bead with foreign id: empty id")
 	}
-	return s.Create(b)
+	return s.create(b, true)
 }
 
 // Create persists a new bead, minting a prefixed sequential id when the
 // caller did not pin one; an explicit id is honored verbatim with a hard
-// duplicate-id error.
+// duplicate-id error, provided it carries one of the store's reserved
+// namespaces when the store is fenced (WithSQLiteStoreReservedIDPrefixes).
 func (s *SQLiteStore) Create(b Bead) (Bead, error) {
+	return s.create(b, false)
+}
+
+// create is the shared body. allowForeign is the CreateWithForeignID
+// exemption: the store-migration copy path carries preserved ids across, and
+// refusing them there would leave the beads nowhere at all.
+func (s *SQLiteStore) create(b Bead, allowForeign bool) (Bead, error) {
 	if err := s.ensureOpen(); err != nil {
 		return Bead{}, err
+	}
+	if !allowForeign {
+		if err := s.checkPinnedIDNamespace(b.ID); err != nil {
+			return Bead{}, err
+		}
 	}
 	var stored Bead
 	autoID := b.ID == ""
@@ -603,6 +643,20 @@ func (s *SQLiteStore) Create(b Bead) (Bead, error) {
 		return Bead{}, err
 	}
 	return cloneBead(stored), nil
+}
+
+// checkPinnedIDNamespace enforces the fence, which is the shared rule in
+// pinned_id_fence.go rather than this store's own — two providers serve class
+// bindings and a namespace claim that meant different things in each would rule
+// nothing out.
+//
+// It runs BEFORE any read of the database, which is deliberate and is part of
+// the contract: a store must answer "I do not serve that namespace" without
+// first checking whether it happens to hold the row. Checking existence first
+// would leak the presence of a relic — CreateWithForeignID can carry a foreign
+// id in — through a refusal about a namespace the store disclaims.
+func (s *SQLiteStore) checkPinnedIDNamespace(id string) error {
+	return checkPinnedIDNamespace("sqlite create", id, s.reservedPrefixes)
 }
 
 func (s *SQLiteStore) normalizeCreate(b Bead) Bead {
@@ -1450,13 +1504,21 @@ func sqliteReadySQL(q ReadyQuery, projection string) (string, []any) {
 	where := []string{
 		"b.status='open'",
 		`b.issue_type NOT IN ('merge-request','gate','molecule','step','message','session','agent','role','rig')`,
-		`NOT EXISTS (
+		fmt.Sprintf(`NOT EXISTS (
 			SELECT 1 FROM deps d
 			LEFT JOIN beads blocker ON blocker.id=d.depends_on_id
 			WHERE d.issue_id=b.id
 			  AND d.dep_type IN ('blocks','waits-for','conditional-blocks')
-			  AND COALESCE(blocker.status, '') <> 'closed'
-		  )`,
+			  AND (
+			    COALESCE(blocker.status, '') <> 'closed'
+			    OR EXISTS (
+			         SELECT 1 FROM metadata m
+			         WHERE m.bead_id = blocker.id
+			           AND m.meta_key = '%s'
+			           AND m.meta_value = '%s'
+			       )
+			  )
+		  )`, beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkOutcomeBlocked),
 	}
 	switch q.TierMode {
 	case TierWisps:
@@ -1603,7 +1665,20 @@ type sqliteStoreTx struct {
 	tx    *sql.Tx
 }
 
+// Create fences the same way the standalone Create does. A transaction is not
+// an exemption: the bead it writes is as resident, and as unreachable by an
+// id-shaped lookup of the namespace it lands in, as one written outside a
+// transaction. The check runs before normalization and before
+// ensureCreateDoesNotExist, so a refusal about a disclaimed namespace still
+// reveals nothing about what this store holds.
+//
+// There is no foreign-id variant here on purpose. The migration copy that needs
+// the exemption runs through CreateWithForeignID on the store, not inside a
+// caller's transaction, so adding one would open a bypass nothing asks for.
 func (t *sqliteStoreTx) Create(b Bead) (Bead, error) {
+	if err := t.store.checkPinnedIDNamespace(b.ID); err != nil {
+		return Bead{}, err
+	}
 	stored := t.store.normalizeCreate(b)
 	if b.ID == "" {
 		id, err := t.store.mintUniqueIDTx(t.ctx, t.tx, stored.ID, nil)
@@ -1715,6 +1790,28 @@ func (s *SQLiteStore) DepAdd(issueID, dependsOnID, depType string) error {
 		}
 		defer tx.Rollback() //nolint:errcheck
 		if err := s.depAddTx(context.Background(), tx, issueID, dependsOnID, depType); err != nil {
+			return err
+		}
+		return tx.Commit()
+	})
+}
+
+// DepAddWithMetadata records a dependency edge together with the opaque payload
+// it carries. It is DepAdd for a caller that has a payload to preserve — the
+// infra-class migration is the one in tree — and is otherwise identical,
+// including the empty-payload behavior: passing "" stores no sidecar, so the
+// edge reads back carrying nothing rather than carrying an empty payload.
+func (s *SQLiteStore) DepAddWithMetadata(issueID, dependsOnID, depType, metadata string) error {
+	if err := s.ensureOpen(); err != nil {
+		return err
+	}
+	return retryOnBusy(func() error {
+		tx, err := s.db.BeginTx(context.Background(), nil)
+		if err != nil {
+			return fmt.Errorf("sqlite dep add with metadata: begin tx: %w", err)
+		}
+		defer tx.Rollback() //nolint:errcheck
+		if err := s.depAddWithMetadataTx(context.Background(), tx, issueID, dependsOnID, depType, metadata); err != nil {
 			return err
 		}
 		return tx.Commit()

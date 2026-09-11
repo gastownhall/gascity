@@ -4,11 +4,15 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 type countingStore struct {
@@ -112,13 +116,21 @@ func TestHandleStatusCachesAcrossIndexChanges(t *testing.T) {
 }
 
 // TestHandleStatusCacheExpiresOnTTL verifies the staleness bound: once the
-// time bucket rolls over, the next /status rebuilds. Drives responseCacheTimeBucket
-// directly by collapsing the TTL so the test stays fast and deterministic.
+// time bucket rolls over AND no entry has ever been cached, the next
+// /status rebuilds synchronously (there is nothing stale to serve). Drives
+// responseCacheTimeBucket directly by collapsing the TTL so the test stays
+// fast and deterministic.
+//
+// Once an entry DOES exist, a bucket/floor miss is now served that stale
+// entry immediately and refreshed in the background instead of rebuilding
+// inline (ra-4u2eqc, stale-while-revalidate) — see
+// TestHandleStatusServesStaleAndRefreshesInBackground for that path. This
+// test only pins the true-cold-start case, which is unaffected by SWR.
 func TestHandleStatusCacheExpiresOnTTL(t *testing.T) {
 	oldTTL := timeBucketResponseCacheTTL
 	timeBucketResponseCacheTTL = time.Nanosecond // every request lands in a new bucket
 	oldFloor := statusResponseTTLFloor
-	statusResponseTTLFloor = 0 // floor off: each request must reach the rebuild
+	statusResponseTTLFloor = 0 // floor off: only the bucket cache can hit
 	t.Cleanup(func() {
 		timeBucketResponseCacheTTL = oldTTL
 		statusResponseTTLFloor = oldFloor
@@ -130,15 +142,244 @@ func TestHandleStatusCacheExpiresOnTTL(t *testing.T) {
 	h := newTestCityHandler(t, state)
 
 	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/status"), nil)
-	for i := 0; i < 3; i++ {
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, req)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first status = %d, want 200", rec.Code)
+	}
+	if store.listCalls != 1 {
+		t.Fatalf("List calls after cold first request = %d, want 1", store.listCalls)
+	}
+}
+
+// TestHandleStatusServesStaleAndRefreshesInBackground is the ra-4u2eqc
+// regression test. On a cache-miss with a previously cached body available,
+// /status must serve that stale body immediately — never blocking the
+// request on a slow rebuild — and refresh in the background so the next
+// poll gets a fresh body. Uses a store whose List blocks until released to
+// prove the second (SWR) request does not wait on it.
+func TestHandleStatusServesStaleAndRefreshesInBackground(t *testing.T) {
+	oldTTL := timeBucketResponseCacheTTL
+	timeBucketResponseCacheTTL = time.Nanosecond // every request lands in a new bucket
+	oldFloor := statusResponseTTLFloor
+	statusResponseTTLFloor = 0 // floor off: force every request past both fast-path caches
+	t.Cleanup(func() {
+		timeBucketResponseCacheTTL = oldTTL
+		statusResponseTTLFloor = oldFloor
+	})
+
+	// Pin the liveness clock so the city store's snapshot age is exact, and
+	// back the city scope with a CachingStore-like reporter whose last fresh
+	// observation is staleSnapshotAgeS old. That is the lagging-reconciler
+	// case: the response entry below is milliseconds old, the snapshot it was
+	// built from is minutes old, and X-GC-Cache-Age-S must report the worse
+	// of the two so `gc status`'s staleness banner still fires.
+	const staleSnapshotAgeS = 300.0
+	now := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	t.Cleanup(SetLivenessClockForTest(&clock.Fake{Time: now}))
+
+	state := newFakeState(t)
+	fastStore := &countingStore{Store: beads.NewMemStore()}
+	state.stores["myrig"] = fastStore
+	state.cityBeadStore = stubLivenessReporter{
+		Store:     beads.NewMemStore(),
+		live:      true,
+		lastFresh: now.Add(-time.Duration(staleSnapshotAgeS) * time.Second),
+	}
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/status"), nil)
+
+	// Prime the cache with a fast, unblocked build.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("priming status = %d, want 200", rec.Code)
+	}
+	var primed statusResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &primed); err != nil {
+		t.Fatalf("decode priming response: %v", err)
+	}
+
+	// Swap in a store that blocks List until released, then issue the
+	// cache-miss request. If the handler still blocks on a rebuild, this
+	// request hangs until the test's hang-guard fires; SWR must return
+	// promptly instead, serving the primed (stale) body.
+	release := make(chan struct{})
+	closeRelease := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(closeRelease) // safety net if the test fails before the explicit close below
+	state.stores["myrig"] = &blockingListStore{Store: fastStore, release: release}
+
+	rec2 := httptest.NewRecorder()
+	served := make(chan struct{})
+	go func() { h.ServeHTTP(rec2, req); close(served) }()
+	select {
+	case <-served:
+	case <-time.After(5 * time.Second): // hang guard, not a timing bound
+		t.Fatal("status handler blocked on rebuild instead of serving the stale cached body (SWR not honored)")
+	}
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("stale-served status = %d, want 200", rec2.Code)
+	}
+	var stale statusResponse
+	if err := json.Unmarshal(rec2.Body.Bytes(), &stale); err != nil {
+		t.Fatalf("decode stale response: %v", err)
+	}
+	if stale.UptimeSec != primed.UptimeSec || stale.Name != primed.Name {
+		t.Fatalf("stale-served body = %+v, want a copy of the primed body %+v", stale, primed)
+	}
+
+	// The stale-served response still carries the existing X-GC-Cache-Age-S
+	// staleness marker (ra-4u2eqc's "if the API shape allows" — it already
+	// does, so no new field was added), letting the CLI's existing >30s
+	// staleness banner logic (which reads this same header via the CLI's
+	// api.Client) apply to an SWR-served body the same way it does to any
+	// other cache hit. Its VALUE matters, not just its presence: the header
+	// must report the greater of the response-entry age (milliseconds here)
+	// and the city store's snapshot age (staleSnapshotAgeS). Reporting only
+	// the entry age would silently suppress the CLI banner on exactly the
+	// lagging-reconciler city this endpoint exists to survive.
+	raw := rec2.Header().Get("X-GC-Cache-Age-S")
+	if raw == "" {
+		t.Fatal("stale-served response missing X-GC-Cache-Age-S header")
+	}
+	age, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		t.Fatalf("X-GC-Cache-Age-S = %q, want a float: %v", raw, err)
+	}
+	if age < 0 {
+		t.Fatalf("X-GC-Cache-Age-S = %v, want >= 0", age)
+	}
+	if age != staleSnapshotAgeS {
+		t.Fatalf("X-GC-Cache-Age-S = %v, want %v (the greater of the response-entry age and the lagging store snapshot age)", age, staleSnapshotAgeS)
+	}
+
+	// Concurrent duplicate misses must coalesce onto a single background
+	// rebuild rather than each launching their own. Issue them while the
+	// blocking store is still held, so every one of them races the same
+	// in-flight guard; the assertion is on the List count measured after a
+	// barrier, never on timing.
+	const concurrentMisses = 4
+	var wg sync.WaitGroup
+	concurrentRecs := make([]*httptest.ResponseRecorder, concurrentMisses)
+	for i := range concurrentRecs {
+		concurrentRecs[i] = httptest.NewRecorder()
+		wg.Add(1)
+		go func(rec *httptest.ResponseRecorder) {
+			defer wg.Done()
+			// A per-goroutine request: http.Request is not safe to share
+			// across concurrent ServeHTTP calls.
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(state, "/status"), nil))
+		}(concurrentRecs[i])
+	}
+	allServed := make(chan struct{})
+	go func() { wg.Wait(); close(allServed) }()
+	select {
+	case <-allServed:
+	case <-time.After(5 * time.Second): // hang guard, not a timing bound
+		t.Fatal("concurrent /status requests blocked on rebuild instead of being served the stale cached body (SWR not honored)")
+	}
+	for i, rec := range concurrentRecs {
 		if rec.Code != http.StatusOK {
-			t.Fatalf("status #%d = %d, want 200", i, rec.Code)
+			t.Fatalf("concurrent stale-served status #%d = %d, want 200", i, rec.Code)
 		}
 	}
-	if store.listCalls < 2 {
-		t.Fatalf("List calls with expiring TTL = %d, want >= 2 (each request should rebuild)", store.listCalls)
+
+	// Release the blocked store and let the background refresh finish, then
+	// confirm it actually ran (not skipped) by observing a fresh List call —
+	// and that all the misses above produced exactly ONE rebuild between
+	// them, not one apiece.
+	listCallsBeforeRefresh := fastStore.listCalls
+	closeRelease()
+	srv.waitForBackground()
+	if got := fastStore.listCalls - listCallsBeforeRefresh; got != 1 {
+		t.Fatalf("rig List calls during background refresh = %d, want exactly 1 (%d concurrent misses must coalesce onto one rebuild)", got, concurrentMisses+1)
+	}
+
+	// The in-flight guard must clear after completion; a leaked guard would
+	// wedge every future refresh for this key.
+	if srv.responseRefreshing["status"] {
+		t.Fatal("responseRefreshing[\"status\"] still true after background refresh completed (leaked guard)")
+	}
+}
+
+// panicOnIsRunningProvider panics from IsRunning, which buildStatusBody calls
+// synchronously on its own goroutine while counting agents. That makes it an
+// injection point for a panic raised on the SWR background-refresh goroutine
+// itself — the blast radius this endpoint's move to a detached rebuild
+// created. A rig store that panics would NOT exercise the same path: the
+// work-count fan-out reads stores from child goroutines
+// (statusWorkCounts/statusListStoreWithTimeout), whose panics no recover in
+// the refresh closure can catch, and which already crashed the process on the
+// pre-SWR request path too.
+type panicOnIsRunningProvider struct {
+	runtime.Provider
+}
+
+func (p *panicOnIsRunningProvider) IsRunning(string) bool {
+	panic("injected panic from the status background refresh")
+}
+
+// TestHandleStatusBackgroundRefreshPanicDoesNotCrashServer pins the blast
+// radius of the ra-4u2eqc background rebuild. Before SWR, buildStatusBody ran
+// on the request path, where withRecovery (middleware.go) turned a panic into
+// a single 500. runBackground spawns its task with no recover of its own, so
+// the detached rebuild must recover for itself or one panic takes the whole
+// controller process down. The panicking refresh must also release the
+// in-flight guard, or every future refresh for this key is wedged.
+func TestHandleStatusBackgroundRefreshPanicDoesNotCrashServer(t *testing.T) {
+	oldTTL := timeBucketResponseCacheTTL
+	timeBucketResponseCacheTTL = time.Nanosecond // every request lands in a new bucket
+	oldFloor := statusResponseTTLFloor
+	statusResponseTTLFloor = 0 // floor off: force the second request past both fast-path caches
+	t.Cleanup(func() {
+		timeBucketResponseCacheTTL = oldTTL
+		statusResponseTTLFloor = oldFloor
+	})
+
+	state := newFakeState(t)
+	fastStore := &countingStore{Store: beads.NewMemStore()}
+	state.stores["myrig"] = fastStore
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	// Prime the cache with a healthy build, so the request below has a stale
+	// entry to be served and takes the SWR branch rather than falling through
+	// to the synchronous cold-start build.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(state, "/status"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("priming status = %d, want 200", rec.Code)
+	}
+	var primed statusResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &primed); err != nil {
+		t.Fatalf("decode priming response: %v", err)
+	}
+
+	// Arm the panic only after priming, so it can fire in the background
+	// rebuild and nowhere else.
+	state.sessionProvider = &panicOnIsRunningProvider{Provider: state.sp}
+
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, cityURL(state, "/status"), nil))
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("stale-served status = %d, want 200", rec2.Code)
+	}
+	var stale statusResponse
+	if err := json.Unmarshal(rec2.Body.Bytes(), &stale); err != nil {
+		t.Fatalf("decode stale response: %v", err)
+	}
+	if stale.UptimeSec != primed.UptimeSec || stale.Name != primed.Name {
+		t.Fatalf("stale-served body = %+v, want a copy of the primed body %+v", stale, primed)
+	}
+
+	// If the refresh did not recover, the process is already gone and this
+	// line never runs; reaching it at all is half the assertion.
+	srv.waitForBackground()
+
+	if srv.responseRefreshing["status"] {
+		t.Fatal("responseRefreshing[\"status\"] still true after a panicking background refresh (leaked guard wedges every future refresh)")
 	}
 }
 

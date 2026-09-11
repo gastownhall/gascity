@@ -379,6 +379,7 @@ func newRootCmdWithOptions(stdout, stderr io.Writer, options rootCommandOptions)
 		newSessionCmd(stdout, stderr),
 		newConvergeCmd(stdout, stderr),
 		newWorkflowCmd(stdout, stderr),
+		newWorktreeCmd(stdout, stderr),
 		newRuntimeCmd(stdout, stderr),
 		newFormulaCmd(stdout, stderr),
 		newBdCmd(stdout, stderr),
@@ -471,11 +472,7 @@ func printCommandUsage(stderr io.Writer, cmd *cobra.Command) {
 	if cmd == nil {
 		return
 	}
-	usage := strings.TrimRight(cmd.UsageString(), "\n")
-	if usage == "" {
-		return
-	}
-	fmt.Fprintln(stderr, usage) //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(stderr, "Run %q for usage.\n", cmd.CommandPath()+" --help") //nolint:errcheck // best-effort stderr
 }
 
 // sessionName returns the session name for a city agent.
@@ -1556,7 +1553,7 @@ func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
 // builtin-cache readiness and pack expansion included — again inside the open.
 // A nil config keeps the loading behavior, matching nativeDoltOpenEnvForScope.
 func openStoreAtForCityWithConfig(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
-	result, err := openStoreResultAtForCityWithConfig(storePath, cityPath, cfg, gate.ModeUnset, false, false)
+	result, err := openStoreResultAtForCityWithConfig(storePath, cityPath, cfg, gate.ModeUnset, false, false, false)
 	if err != nil {
 		return nil, err
 	}
@@ -1568,7 +1565,7 @@ func openAuthoritativeStoreAtForCity(storePath, cityPath string) (beads.Store, e
 }
 
 func openStoreAtForCityWithAuthority(storePath, cityPath string, authoritative bool) (beads.Store, error) {
-	result, err := openStoreResultAtForCityWithAuthority(storePath, cityPath, gate.ModeUnset, false, authoritative)
+	result, err := openStoreResultAtForCityWithAuthority(storePath, cityPath, gate.ModeUnset, false, authoritative, false)
 	if err != nil {
 		return nil, err
 	}
@@ -1576,7 +1573,7 @@ func openStoreAtForCityWithAuthority(storePath, cityPath string, authoritative b
 }
 
 func openStoreResultAtForCity(storePath, cityPath string) (beads.StoreOpenResult, error) {
-	return openStoreResultAtForCityWithMode(storePath, cityPath, gate.ModeUnset, false)
+	return openStoreResultAtForCityWithMode(storePath, cityPath, gate.ModeUnset, false, false)
 }
 
 // openStoreResultAtForCityWithMode is openStoreResultAtForCity with the
@@ -1585,19 +1582,24 @@ func openStoreResultAtForCity(storePath, cityPath string) (beads.StoreOpenResult
 // boot-latched mode: re-resolving from disk on a reload would flip the city
 // store's write discipline mid-process while rig stores keep the boot mode —
 // exactly the mixed-writer state the process latch exists to prevent.
-func openStoreResultAtForCityWithMode(storePath, cityPath string, modeOverride gate.Mode, haveMode bool) (beads.StoreOpenResult, error) {
-	return openStoreResultAtForCityWithAuthority(storePath, cityPath, modeOverride, haveMode, false)
+func openStoreResultAtForCityWithMode(storePath, cityPath string, modeOverride gate.Mode, haveMode, longLived bool) (beads.StoreOpenResult, error) {
+	return openStoreResultAtForCityWithAuthority(storePath, cityPath, modeOverride, haveMode, false, longLived)
 }
 
-func openStoreResultAtForCityWithAuthority(storePath, cityPath string, modeOverride gate.Mode, haveMode, authoritative bool) (beads.StoreOpenResult, error) {
-	return openStoreResultAtForCityWithConfig(storePath, cityPath, nil, modeOverride, haveMode, authoritative)
+func openStoreResultAtForCityWithAuthority(storePath, cityPath string, modeOverride gate.Mode, haveMode, authoritative, longLived bool) (beads.StoreOpenResult, error) {
+	return openStoreResultAtForCityWithConfig(storePath, cityPath, nil, modeOverride, haveMode, authoritative, longLived)
 }
 
 // openStoreResultAtForCityWithConfig is openStoreResultAtForCityWithAuthority
 // with the city config supplied by a caller that already loaded it. A nil
 // config is loaded here, which is what every caller outside the bd scope
 // resolution path passes.
-func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.City, modeOverride gate.Mode, haveMode, authoritative bool) (beads.StoreOpenResult, error) {
+//
+// longLived marks a store the caller keeps open for the process lifetime (the
+// controller's city store). Those keep the beads library's daemon-sized
+// project pool; every other open is a one-shot CLI open and takes the
+// single-connection cap from nativeDoltOneShotOpenEnvForScope.
+func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.City, modeOverride gate.Mode, haveMode, authoritative, longLived bool) (beads.StoreOpenResult, error) {
 	runtimeCityPath := cityPath
 	if runtimeCityPath == "" {
 		runtimeCityPath = cityForStoreDir(storePath)
@@ -1656,7 +1658,13 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.
 			// pack expansion included, for the same city at the same moment.
 			// The reopen hook below deliberately keeps re-loading: it fires long
 			// after this open, where re-reading current state is the point.
-			env, err := nativeDoltOpenEnvForScope(runtimeCityPath, cfg, scopeRoot)
+			var env map[string]string
+			var err error
+			if longLived {
+				env, err = nativeDoltOpenEnvForScope(runtimeCityPath, cfg, scopeRoot)
+			} else {
+				env, err = nativeDoltOneShotOpenEnvForScope(runtimeCityPath, cfg, scopeRoot)
+			}
 			if err != nil {
 				return nil, fmt.Errorf("project native store env %s: %w", scopeRoot, err)
 			}
@@ -1670,7 +1678,13 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.
 			// direct native path (which bypasses the factory preflight/identity
 			// gate, so an absent scope project_id cannot block the reconnect).
 			reopen := func(ctx context.Context) (beads.NativeStorage, error) {
-				freshEnv, rerr := nativeDoltOpenEnvForScopeContext(ctx, runtimeCityPath, nil, scopeRoot)
+				var freshEnv map[string]string
+				var rerr error
+				if longLived {
+					freshEnv, rerr = nativeDoltOpenEnvForScopeContext(ctx, runtimeCityPath, nil, scopeRoot)
+				} else {
+					freshEnv, rerr = nativeDoltOneShotOpenEnvForScopeContext(ctx, runtimeCityPath, nil, scopeRoot)
+				}
 				if rerr != nil {
 					return nil, fmt.Errorf("re-resolve native store env %s: %w", scopeRoot, rerr)
 				}

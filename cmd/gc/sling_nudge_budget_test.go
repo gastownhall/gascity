@@ -11,8 +11,14 @@ import (
 )
 
 const (
-	advancingNudgeStoreSetupOps    = 1
-	advancingNudgeStoreDeadItemOps = 4
+	advancingNudgeStoreSetupOps = 1
+	// advancingNudgeStoreDeadItemOps is the store-op cost of repairing one dead
+	// backlog item during a maintenance sweep: FindIncludingTerminal (List) to
+	// check terminal state, then Terminalize (SetMetadataBatch + Close) to repair
+	// it. Terminalize's own nil return is sufficient confirmation (see
+	// pruneDeadQueuedNudgesWithClock, gastownhall/gascity#5278), so there is no
+	// second FindIncludingTerminal call to account for here.
+	advancingNudgeStoreDeadItemOps = 3
 )
 
 type advancingNudgeStore struct {
@@ -194,13 +200,23 @@ func TestSlingNudgeEnqueueBudgetPreservesQueuedItems(t *testing.T) {
 		t.Fatalf("advancing store ops = %d, want at most %d to prove the maintenance budget cut in", ops, maxOps)
 	}
 
+	processed := deadBacklogProcessed(deadBacklog, latency)
+	survivors := deadBacklog - processed
 	buckets := nudgeQueueBucketsByID(t, cityPath)
-	if got, want := len(buckets), len(seededBuckets)+1; got != want {
-		t.Fatalf("queued item count = %d, want %d; buckets=%v", got, want, buckets)
+	if got, want := len(buckets), survivors+4+1; got != want {
+		t.Fatalf("queued item count = %d, want %d (processed=%d survived=%d dead of %d, plus 4 preserved plus new); buckets=%v", got, want, processed, survivors, deadBacklog, buckets)
 	}
-	for id, wantBucket := range seededBuckets {
-		if bucket := buckets[id]; bucket != wantBucket {
-			t.Fatalf("seeded queued nudge %q bucket = %q, want %q; buckets=%v", id, bucket, wantBucket, buckets)
+	for i := 0; i < deadBacklog; i++ {
+		id := fmt.Sprintf("nudge-dead-preserve-%03d", i)
+		bucket, present := buckets[id]
+		if i < processed {
+			if present {
+				t.Fatalf("dead nudge %q (i=%d) still present as %q, want repaired-and-pruned; buckets=%v", id, i, bucket, buckets)
+			}
+			continue
+		}
+		if bucket != seededBuckets[id] {
+			t.Fatalf("surviving dead nudge %q (i=%d) bucket = %q, want %q; buckets=%v", id, i, bucket, seededBuckets[id], buckets)
 		}
 	}
 	for i := 0; i < 2; i++ {

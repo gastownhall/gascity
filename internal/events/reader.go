@@ -336,10 +336,13 @@ func readRotationSources(path string, filter Filter, listedArchives map[eventSeq
 	var result []Event
 	maxSeq := filter.AfterSeq
 	for _, src := range sources {
-		if src.kind == sourceArchive {
-			if _, ok := listedArchives[eventSeqWindow{first: src.firstSeq, last: src.lastSeq}]; ok {
-				continue
-			}
+		// Any source whose exact seq window an already-read archive covers is
+		// redundant: for a stable archive it IS that archive, and for a rotating
+		// file it is the archive's not-yet-removed twin holding the same seqs
+		// (the crash window between archive rename and source removal makes such
+		// twins routine, and mergeEventsBySeq would drop every line anyway).
+		if _, ok := listedArchives[eventSeqWindow{first: src.firstSeq, last: src.lastSeq}]; ok {
+			continue
 		}
 		reader, err := openSegmentReader(src)
 		if err != nil {
@@ -421,11 +424,43 @@ func archiveFilesIn(dir string) ([]archiveInfo, error) {
 	return archives, nil
 }
 
+// archiveSeq reads the top-level seq of a raw archive line without decoding
+// the record. FileRecorder writes seq as the first field, so the hot path is a
+// prefix scan with no allocation. Any other layout reports false and the
+// caller falls back to a full decode, which keeps a foreign writer's archive
+// readable.
+func archiveSeq(line []byte) (uint64, bool) {
+	const prefix = `{"seq":`
+	if !bytes.HasPrefix(line, []byte(prefix)) {
+		return 0, false
+	}
+	digits := line[len(prefix):]
+	var seq uint64
+	i := 0
+	for ; i < len(digits) && digits[i] >= '0' && digits[i] <= '9'; i++ {
+		seq = seq*10 + uint64(digits[i]-'0')
+	}
+	if i == 0 {
+		return 0, false
+	}
+	return seq, true
+}
+
 // streamArchive gunzip-streams the file at path, decoding each line
 // as an Event and invoking fn for every event. fn returns false to
 // abort iteration early. Returns nil if iteration completed cleanly
 // or fn requested abort; errors from gzip / scanner are wrapped.
-func streamArchive(path string, _ Filter, fn func(Event) bool) error {
+//
+// Records outside filter's seq window are skipped before json.Unmarshal.
+// archiveOverlapsFilter only rules out an archive that ENDS at or below
+// AfterSeq, so an order whose cursor sits INSIDE the archive's window still
+// opens it — and without this skip every such read decoded the entire archive
+// to reach a handful of trailing records.
+//
+// The skip deliberately does not early-return on BeforeSeq. Archives come from
+// a monotonic log and should be seq-ordered, but `continue` saves the same
+// decode without depending on that.
+func streamArchive(path string, filter Filter, fn func(Event) bool) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -441,8 +476,17 @@ func streamArchive(path string, _ Filter, fn func(Event) bool) error {
 	scanner := bufio.NewScanner(gr)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
+		line := scanner.Bytes()
+		if seq, ok := archiveSeq(line); ok {
+			if filter.AfterSeq > 0 && seq <= filter.AfterSeq {
+				continue
+			}
+			if filter.BeforeSeq > 0 && seq >= filter.BeforeSeq {
+				continue
+			}
+		}
 		var e Event
-		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
+		if err := json.Unmarshal(line, &e); err != nil {
 			continue
 		}
 		if !fn(e) {
@@ -453,6 +497,60 @@ func streamArchive(path string, _ Filter, fn func(Event) bool) error {
 		return fmt.Errorf("scanning archive: %w", err)
 	}
 	return nil
+}
+
+// LatestArchivedMatch returns the newest archived event matching filter, and
+// whether one was found. Archives are scanned newest-first and the scan stops
+// at the first archive holding a match, so the cost is one archive rather than
+// the whole retained history.
+//
+// ReadFiltered cannot answer this question cheaply: it walks archives
+// oldest-first, so a Limit stops on the OLDEST match rather than the newest,
+// and without a Limit it gunzips and decodes every retained archive. That walk
+// grows with every rotation, which is why callers that only need the newest
+// match use this instead.
+//
+// Only archives are searched. Callers that also care about the active log
+// should read its tail first, which is the cheap case, and fall back here only
+// when the active log holds no match.
+func LatestArchivedMatch(path string, filter Filter) (Event, bool, error) {
+	dir := filepath.Dir(path)
+	archives, err := archiveFilesIn(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return Event{}, false, nil
+		}
+		return Event{}, false, fmt.Errorf("listing event archives in %q: %w", dir, err)
+	}
+	// archiveFilesIn sorts ascending by FirstSeq, so descending indexes walk
+	// newest archive first.
+	for i := len(archives) - 1; i >= 0; i-- {
+		info := archives[i]
+		if !archiveOverlapsFilter(info, filter) {
+			continue
+		}
+		var (
+			newest Event
+			found  bool
+		)
+		// Events within one archive are ordered oldest-first, so the scan runs
+		// to the end of this archive and keeps the last match.
+		err := streamArchive(filepath.Join(dir, info.Basename), filter, func(e Event) bool {
+			if !matchesFilter(e, filter) {
+				return true
+			}
+			newest = e
+			found = true
+			return true
+		})
+		if err != nil {
+			return Event{}, false, fmt.Errorf("reading archive %q: %w", info.Basename, err)
+		}
+		if found {
+			return newest, true, nil
+		}
+	}
+	return Event{}, false, nil
 }
 
 // ReadFilteredTail reads the trailing matching events from path. A positive

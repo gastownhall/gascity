@@ -60,6 +60,13 @@ const (
 	// one long one. The next pass resumes from the cursor rather than the start.
 	completionsBackstopChunk = 64
 
+	// completionsWarmFailureBackoff paces retries after a chunk that could not
+	// warm its idempotency record. The chunk cadence exists to keep a HEALTHY
+	// sweep moving; re-polling an unreadable journal at that cadence re-issues
+	// the journal read every poll interval for as long as the journal stays
+	// broken (ga-ftgyl). The debt is kept — only the retry is paced.
+	completionsWarmFailureBackoff = 5 * time.Minute
+
 	// completionsBackstopChunkInterval paces the chunks of one sweep. A sweep of
 	// a corpus larger than a chunk therefore takes several minutes of wall clock
 	// and no tick time at all, which is the trade this lane exists to make.
@@ -81,6 +88,10 @@ type completionsLane struct {
 	sweepRan        bool
 	lastSweepAt     time.Time
 	lastSweepReason string
+	// nextAttemptAt gates sweepDue after a warm failure. Zero means no backoff
+	// is in force. It never clears the forced latch or the cadence: the sweep
+	// stays owed, only the retry is paced.
+	nextAttemptAt time.Time
 
 	// Per-sweep accumulators. A sweep spans several chunks, so its summary line
 	// has to be assembled across them or it reports one chunk and calls it a
@@ -91,6 +102,7 @@ type completionsLane struct {
 	sweepReason    string
 	sweepEmitted   int
 	sweepRoots     int
+	sweepSkipped   int
 
 	interval time.Duration
 	poll     time.Duration
@@ -184,15 +196,31 @@ func (l *completionsLane) takePending() []string {
 // The reason is not decoration. A sweep running because the event feed declared
 // a gap and a sweep running on its hourly cadence are different events with
 // different follow-ups, and the trace field they both land in cannot tell them
-// apart unless the lane says which.
+// apart unless the lane says which. The reason also selects VisitStamped (only
+// a startup sweep re-examines converged-stamped roots), so the ORDER of these
+// cases is load-bearing.
+//
+// Startup is checked BEFORE forced, and must be: a startup sweep visits stamped
+// AND unstamped roots, a strict superset of the cursor-gap sweep's unstamped
+// walk, so answering "startup" for a boot that was also forced loses no
+// coverage. The reverse order does lose: the delta-feed gap callback can
+// force() the lane before its first sweep, and if forced won that race the boot
+// sweep would be cursor-gap-labeled with VisitStamped=false — skipping stamped
+// roots so the per-boot stale-stamp heal never runs on the one sweep that could.
+// Once the first full traversal completes, noteSweepChunk sets sweepRan and
+// clears forced together, so this case stops firing and a later force is
+// correctly reported as a cursor gap.
 func (l *completionsLane) sweepDue(now time.Time) (string, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if now.Before(l.nextAttemptAt) {
+		return "", false
+	}
 	switch {
-	case l.forced:
-		return backstopReasonCursorGap, true
 	case !l.sweepRan:
 		return backstopReasonStartup, true
+	case l.forced:
+		return backstopReasonCursorGap, true
 	case now.Sub(l.lastSweepAt) >= l.interval:
 		return backstopReasonCadence, true
 	default:
@@ -200,11 +228,21 @@ func (l *completionsLane) sweepDue(now time.Time) (string, bool) {
 	}
 }
 
+// noteSweepFailure paces the lane after a chunk that could not warm its
+// idempotency record. Nothing about the sweep's debt changes — forced stays
+// latched, the cadence clock does not advance — the next attempt is simply
+// deferred so an unreadable journal is not re-read every poll interval.
+func (l *completionsLane) noteSweepFailure(now time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.nextAttemptAt = now.Add(completionsWarmFailureBackoff)
+}
+
 // noteSweepChunk folds one chunk into the sweep in progress and, when the chunk
 // completed a full traversal, closes the sweep out: it clears the force latch,
 // advances the cadence, and returns the whole sweep's totals for the summary
 // line. A sweep still in progress returns done=false and keeps the lane due.
-func (l *completionsLane) noteSweepChunk(now time.Time, reason string, emitted, roots int, complete bool) (total completionsSweepTotals, done bool) {
+func (l *completionsLane) noteSweepChunk(now time.Time, reason string, emitted, roots, skipped int, complete bool) (total completionsSweepTotals, done bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.sweepStartedAt.IsZero() {
@@ -213,12 +251,14 @@ func (l *completionsLane) noteSweepChunk(now time.Time, reason string, emitted, 
 	}
 	l.sweepEmitted += emitted
 	l.sweepRoots += roots
+	l.sweepSkipped += skipped
 	if !complete {
 		return completionsSweepTotals{}, false
 	}
 	total = completionsSweepTotals{
 		Emitted: l.sweepEmitted,
 		Roots:   l.sweepRoots,
+		Skipped: l.sweepSkipped,
 		Elapsed: now.Sub(l.sweepStartedAt),
 		Reason:  l.sweepReason,
 	}
@@ -230,6 +270,7 @@ func (l *completionsLane) noteSweepChunk(now time.Time, reason string, emitted, 
 	l.sweepReason = ""
 	l.sweepEmitted = 0
 	l.sweepRoots = 0
+	l.sweepSkipped = 0
 	return total, true
 }
 
@@ -237,6 +278,10 @@ func (l *completionsLane) noteSweepChunk(now time.Time, reason string, emitted, 
 type completionsSweepTotals struct {
 	Emitted int
 	Roots   int
+	// Skipped counts converged-stamped roots the sweep excluded from the
+	// walk; visible so a sweep that visits 10 of 900 roots reads as the
+	// optimization working, not as 890 roots vanishing.
+	Skipped int
 	Elapsed time.Duration
 	// Reason is why the sweep was due, latched from its first chunk.
 	Reason string
@@ -326,17 +371,29 @@ func (cr *CityRuntime) runCompletionsSweepChunk(backstop *executionevent.Complet
 	if ep == nil {
 		return executionevent.CompletionBackstopResult{}
 	}
+	// Startup sweeps re-examine stamped roots; the converged stamp is a
+	// cadence optimization whose stale entries (hand-reopened steps, vacuous
+	// stamps from a past wedge) are healed by the per-boot full traversal.
+	backstop.VisitStamped = reason == backstopReasonStartup
 	result := backstop.Pass(ep, graphStores, "execution-reconcile")
+	if result.WarmFailed {
+		// The chunk read nothing: its idempotency record could not be loaded.
+		// Back the retry off instead of re-issuing the journal read at the
+		// chunk cadence; the sweep debt (forced latch, cadence clock) is kept.
+		lane.noteSweepFailure(time.Now())
+		fmt.Fprintf(cr.stderr, "%s: completions sweep: journal warm failed; retrying in %s\n", cr.logPrefix, completionsWarmFailureBackoff) //nolint:errcheck // best-effort stderr
+		return result
+	}
 	// A store the traversal could not list is skipped so one dark store cannot
 	// stall the sweep. Skipped silently, that is a lane converging nothing while
 	// looking healthy, so every skip is named.
 	for _, listErr := range result.ListErrors {
 		fmt.Fprintf(cr.stderr, "%s: completions sweep: %v\n", cr.logPrefix, listErr) //nolint:errcheck // best-effort stderr
 	}
-	total, done := lane.noteSweepChunk(time.Now(), reason, result.Emitted, result.RootsVisited, result.SweepComplete)
+	total, done := lane.noteSweepChunk(time.Now(), reason, result.Emitted, result.RootsVisited, result.RootsSkippedConverged, result.SweepComplete)
 	if done {
-		summary := fmt.Sprintf("reason=%s converged %d root(s), emitted %d completion fact(s), took %s (stores=%d)",
-			total.Reason, total.Roots, total.Emitted, total.Elapsed.Round(time.Millisecond), len(graphStores))
+		summary := fmt.Sprintf("reason=%s converged %d root(s) (+%d already-converged skipped), emitted %d completion fact(s), took %s (stores=%d)",
+			total.Reason, total.Roots, total.Skipped, total.Emitted, total.Elapsed.Round(time.Millisecond), len(graphStores))
 		fmt.Fprintf(cr.stderr, "%s: completions sweep: %s\n", cr.logPrefix, summary) //nolint:errcheck // best-effort stderr
 	}
 	return result

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -272,7 +273,17 @@ func TestClassifyFailsOpen(t *testing.T) {
 
 // TestClassifyOnRealFilesystem exercises the real syscall probes rather than the
 // fake mount table, so a bug in the platform file cannot hide behind the double.
+//
+// Only Linux has those probes: probe_linux.go is `//go:build linux` and
+// probe_other.go covers `!linux` by answering errUnsupported, which is what
+// makes Classify fail open to Unknown on every other platform. The GOOS check
+// below mirrors exactly that build constraint. It deliberately does not skip on
+// a probe *error*, which on Linux is a real regression this test must still
+// catch — the platform coverage is the only thing being waived here.
 func TestClassifyOnRealFilesystem(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skipf("no real durability probe on %s; Classify is contractually Unknown there", runtime.GOOS)
+	}
 	cityRoot := t.TempDir()
 
 	t.Run("same device as the city root", func(t *testing.T) {
