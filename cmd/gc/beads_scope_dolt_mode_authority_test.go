@@ -40,12 +40,36 @@ func TestCanonicalConfigNeverPersistsProxiedDoltMode(t *testing.T) {
 			if tt.metadata != "" {
 				writeScopeBeadsMetadata(t, scope, tt.metadata)
 			}
+			// The resolved state still carries the topology — it is how the
+			// fresh-scope default reaches scopeUsesProxiedDoltMode — but the
+			// file must not.
 			state := desiredCityDoltConfigState(scope, config.DoltConfig{}, "hq")
-			if strings.TrimSpace(state.DoltMode) != "" {
-				t.Fatalf("canonical config state carries dolt.mode %q for a proxied scope", state.DoltMode)
+			if got := strings.TrimSpace(state.DoltMode); got != "proxied-server" {
+				t.Fatalf("resolved dolt mode = %q, want proxied-server", got)
+			}
+			if err := ensureCanonicalScopeConfigState(fsys.OSFS{}, scope, state); err != nil {
+				t.Fatalf("ensureCanonicalScopeConfigState: %v", err)
+			}
+			written := readScopeConfigYAML(t, scope)
+			if strings.Contains(written, "proxied-server") {
+				t.Fatalf("canonical config persisted a proxied dolt.mode:\n%s", written)
+			}
+			if mode, ok, err := contract.ReadConfigState(fsys.OSFS{}, filepath.Join(scope, ".beads", "config.yaml")); err != nil {
+				t.Fatalf("ReadConfigState: %v", err)
+			} else if ok && strings.TrimSpace(mode.DoltMode) != "" {
+				t.Fatalf("canonical config dolt.mode = %q, want unset", mode.DoltMode)
 			}
 		})
 	}
+}
+
+func readScopeConfigYAML(t *testing.T, scopeRoot string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(scopeRoot, ".beads", "config.yaml"))
+	if err != nil {
+		t.Fatalf("read config.yaml: %v", err)
+	}
+	return string(data)
 }
 
 // A Dolt scope whose metadata predates dolt_mode is a legacy direct server

@@ -3589,6 +3589,18 @@ provider_owned_retire_local_dolt() {
 op_provider_owned_lifecycle() {
     local op="$1" dir transport local_scope=false
     dir=$(provider_owned_scope_dir)
+    # A scope directory that is gone has nothing left to retire. This is the
+    # half-built shape an interrupted `gc rig add` leaves: the ownership journal
+    # records a still-initializing path whose directory the operator then
+    # deleted. Every bd invocation below starts with `cd "$dir"`, so without
+    # this the whole stop fan-out failed on a scope with no processes to stop.
+    # A starting op still refuses: initializing a store in a directory that is
+    # not there is not something to do quietly.
+    if [ ! -d "$dir" ]; then
+        case "$op" in
+            stop|shutdown) return 0 ;;
+        esac
+    fi
     transport=$(provider_owned_transport "$dir")
     export GC_BEADS_TRANSPORT="$transport"
     if provider_owned_scope_is_local "$dir"; then

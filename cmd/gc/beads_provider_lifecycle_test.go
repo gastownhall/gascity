@@ -305,7 +305,12 @@ func TestProviderLifecycleProcessEnvUsesProxiedModeWithoutDirectLifecycle(t *tes
 	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte("issue_prefix: gc\ngc.endpoint_origin: managed_city\ngc.endpoint_status: verified\ndolt.mode: proxied-server\n"), 0o644); err != nil {
+	// The binding lives in metadata.json: bd writes the mode only there, so
+	// that is what says this scope is proxied (D1).
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"proxied-server","dolt_database":"gc"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte("issue_prefix: gc\ngc.endpoint_origin: managed_city\ngc.endpoint_status: verified\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	env := runtimeEnvEntriesToMap(mustProviderLifecycleProcessEnv(t, cityPath, "exec:"+gcBeadsBdScriptPath(cityPath)))
@@ -3727,7 +3732,7 @@ esac
 	for _, want := range []string{
 		"pwd=" + realRigDir,
 		"BEADS_DIR=" + filepath.Join(rigDir, ".beads"),
-		"init --proxied-server -p tc --skip-hooks --database tc",
+		"init --proxied-server --proxied-server-idle-timeout 0 -p tc --skip-hooks --database tc",
 	} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("bd log missing %q:\n%s", want, log)
@@ -4440,13 +4445,23 @@ func TestGcBeadsBdProxiedExternalTranslatesExactRCFlags(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte("issue_prefix: gc\ndolt.mode: proxied-server\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte("issue_prefix: gc\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The proxied binding lives in metadata.json: bd writes the mode only
+	// there, and the script reads it from there for the same reason (D1).
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_mode":"proxied-server","dolt_database":"hq"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	argsFile := filepath.Join(cityDir, "bd-args")
 	bdPath := filepath.Join(cityDir, "bd-recording")
 	gcPath := filepath.Join(cityDir, "gc-recording")
-	bdScript := "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"" + argsFile + "\"\n"
+	// `bd context` is the script's already-initialized probe; refusing it is
+	// what makes this an init rather than a no-op. Every call overwrites the
+	// record, so the file holds the init invocation under test.
+	bdScript := "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"" + argsFile + "\"\n" +
+		"[ \"$1\" != context ] || exit 1\n"
 	if err := os.WriteFile(bdPath, []byte(bdScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -4471,7 +4486,7 @@ func TestGcBeadsBdProxiedExternalTranslatesExactRCFlags(t *testing.T) {
 		t.Fatalf("read recorded bd args: %v", err)
 	}
 	got := strings.TrimSpace(string(data))
-	want := "init --quiet --proxied-server --proxied-server-external-host db.example --proxied-server-external-port 4406 -p gc --database hq --skip-hooks --skip-agents " + cityDir
+	want := "init --quiet --proxied-server --proxied-server-idle-timeout 0 --proxied-server-external-host db.example --proxied-server-external-port 4406 -p gc --database hq --skip-hooks --skip-agents " + cityDir
 	if got != want {
 		t.Fatalf("bd args = %q, want %q", got, want)
 	}

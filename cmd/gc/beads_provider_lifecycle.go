@@ -651,6 +651,8 @@ func ensureCanonicalScopeConfigState(fs fsys.FS, dir string, state contract.Conf
 	// future caller supplies its own extra types, and EnsureCanonicalConfig
 	// then unions the result with any on-disk extensions.
 	state.CustomTypes = contract.MergeCustomTypes(state.CustomTypes, doctor.RequiredCustomTypes)
+	// The topology belongs to metadata.json, not here. See canonicalConfigDoltMode.
+	state.DoltMode = canonicalConfigDoltMode(state.DoltMode)
 	changed, err := contract.EnsureCanonicalConfig(fs, filepath.Join(beadsDir, "config.yaml"), state)
 	if err != nil {
 		return err
@@ -2843,28 +2845,34 @@ func desiredCityDoltConfigState(cityPath string, cityDolt config.DoltConfig, cit
 		return state
 	}
 	if mode := persistedScopeDoltMode(cityPath); mode != "" {
-		return contract.ConfigState{IssuePrefix: cityPrefix, EndpointOrigin: contract.EndpointOriginManagedCity, EndpointStatus: contract.EndpointStatusVerified, DoltMode: canonicalConfigDoltMode(mode)}
+		return contract.ConfigState{IssuePrefix: cityPrefix, EndpointOrigin: contract.EndpointOriginManagedCity, EndpointStatus: contract.EndpointStatusVerified, DoltMode: mode}
 	}
-	// Fresh bd/Dolt scopes default to Beads' proxied-local UOW path, which is
-	// recorded in metadata.json and nowhere else (D1). A Dolt scope whose
-	// metadata predates dolt_mode is a legacy direct server, not a candidate
-	// for the fresh default: stamping proxied-server on it here, and then
-	// copying that back into metadata, moved a GC-managed workspace onto bd's
-	// proxy over the same data dir.
+	// Fresh bd/Dolt scopes default to Beads' proxied-local UOW path. A Dolt
+	// scope whose metadata predates dolt_mode is not a candidate for it: it is
+	// a legacy direct server, and stamping the fresh default on it moved a
+	// GC-managed workspace onto bd's proxy over the same data dir.
 	return contract.ConfigState{
 		IssuePrefix:    cityPrefix,
 		EndpointOrigin: contract.EndpointOriginManagedCity,
 		EndpointStatus: contract.EndpointStatusVerified,
-		DoltMode:       canonicalConfigDoltMode(freshScopeCanonicalDoltMode(cityPath)),
+		DoltMode:       freshScopeCanonicalDoltMode(cityPath),
 	}
 }
 
-// canonicalConfigDoltMode maps a persisted topology onto what belongs in
-// .beads/config.yaml. bd writes the mode only into metadata.json and its own
-// validator accepts just "server"|"embedded" for the config.yaml key
-// (beads internal/config/yaml_config.go), so "proxied-server" there would be a
-// second topology store holding a value bd rejects. Emitting nothing keeps
-// metadata the single authority.
+// canonicalConfigDoltMode maps a resolved topology onto what belongs in
+// .beads/config.yaml, which is not the same set of values.
+//
+// The mode is metadata.json's to record (D1): bd writes it only there, and its
+// own validator accepts just "server"|"embedded" for the config.yaml key
+// (beads internal/config/yaml_config.go). "proxied-server" there was a second
+// topology store holding a value bd rejects — and, because canonicalisation
+// also copies config.yaml's mode into metadata when metadata has none, it
+// stamped proxied-server onto legacy direct workspaces whose metadata simply
+// predates the field.
+//
+// ConfigState.DoltMode keeps carrying the resolved topology, because it is also
+// how the fresh-scope default reaches scopeUsesProxiedDoltMode. Only the write
+// drops it.
 func canonicalConfigDoltMode(mode string) string {
 	if strings.EqualFold(strings.TrimSpace(mode), "proxied-server") {
 		return ""
@@ -2873,9 +2881,9 @@ func canonicalConfigDoltMode(mode string) string {
 }
 
 // freshScopeCanonicalDoltMode reports the mode a scope with no persisted
-// dolt_mode should be canonicalised to: server for an existing Dolt workspace
-// (the pre-dolt_mode legacy shape), the fresh proxied-local default otherwise.
-// It mirrors the hasDoltMetadata rule in scopeUsesProxiedDoltMode.
+// dolt_mode resolves to: server for an existing Dolt workspace (the
+// pre-dolt_mode legacy shape), the fresh proxied-local default otherwise. It
+// mirrors the hasDoltMetadata rule in scopeUsesProxiedDoltMode.
 func freshScopeCanonicalDoltMode(scopeRoot string) string {
 	if backend, ok, err := contract.ReadMetadataBackend(fsys.OSFS{}, scopeMetadataJSONPath(scopeRoot)); err == nil && ok && contract.IsDoltBackend(backend) {
 		return "server"
@@ -2897,7 +2905,7 @@ func desiredRigDoltConfigState(cityPath string, rig config.Rig, cityState contra
 		return state
 	}
 	if mode := persistedScopeDoltMode(rig.Path); mode != "" {
-		return contract.ConfigState{IssuePrefix: rig.EffectivePrefix(), EndpointOrigin: contract.EndpointOriginInheritedCity, EndpointStatus: contract.EndpointStatusVerified, DoltMode: canonicalConfigDoltMode(mode)}
+		return contract.ConfigState{IssuePrefix: rig.EffectivePrefix(), EndpointOrigin: contract.EndpointOriginInheritedCity, EndpointStatus: contract.EndpointStatusVerified, DoltMode: mode}
 	}
 
 	return inheritedRigDoltConfigState(rig.Path, rig.EffectivePrefix(), cityState)

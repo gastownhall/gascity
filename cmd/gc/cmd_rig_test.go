@@ -248,7 +248,7 @@ esac
 	}
 	log := string(logData)
 	for _, want := range []string{
-		"init --proxied-server -p tc --skip-hooks --database tc",
+		"init --proxied-server --proxied-server-idle-timeout 0 -p tc --skip-hooks --database tc",
 		"update --json tc-1 --set-metadata gc.routed_to=sample/session-a",
 	} {
 		if !strings.Contains(log, want) {

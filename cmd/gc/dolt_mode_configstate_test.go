@@ -10,16 +10,19 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
-// TestConfigStateConstructorsSelectDoltModes verifies that fresh managed
-// scopes use the proxied-server path by default while legacy city host/port
-// endpoints retain their direct interpretation. Existing authoritative scope
-// state is resolved before these constructors run, so changing the default
-// does not migrate an initialized scope.
+// TestConfigStateConstructorsSelectDoltModes verifies that legacy city
+// host/port endpoints retain their direct interpretation in .beads/config.yaml
+// while a proxied scope records nothing there at all. Existing authoritative
+// scope state is resolved before these constructors run, so changing the
+// default does not migrate an initialized scope.
 func TestConfigStateConstructorsSelectDoltModes(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "rig")
 
-	// Fresh managed city defaults to Beads' proxied-local lifecycle.
+	// Fresh managed city defaults to Beads' proxied-local lifecycle. The
+	// resolved state carries it; ensureCanonicalScopeConfigState is what drops
+	// it before the write, because the mode belongs in metadata.json (D1) — see
+	// TestCanonicalConfigNeverPersistsProxiedDoltMode.
 	managedCity := desiredCityDoltConfigState(cityPath, config.DoltConfig{}, "gc")
 	if managedCity.DoltMode != "proxied-server" {
 		t.Errorf("desiredCityDoltConfigState (managed city): DoltMode = %q, want %q", managedCity.DoltMode, "proxied-server")
@@ -139,7 +142,13 @@ func TestScopeUsesProxiedDoltModePersistedMetadataWinsOverConfig(t *testing.T) {
 	}
 }
 
-func TestScopeUsesProxiedDoltModeReadsConfigMarker(t *testing.T) {
+// config.yaml is a legacy compatibility input for the direct/server shapes
+// only. bd records the proxied binding in metadata.json and writes no dolt.mode
+// of its own, so a "proxied-server" there is drift — and treating it as
+// authority is what let a legacy direct workspace, whose metadata simply
+// predates the field, be handed to bd's proxy over the same data dir the
+// managed server holds.
+func TestScopeUsesProxiedDoltModeIgnoresAConfigOnlyProxiedMarker(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
 		t.Fatal(err)
@@ -153,8 +162,8 @@ func TestScopeUsesProxiedDoltModeReadsConfigMarker(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte("issue_prefix: gc\ndolt.mode: proxied-server\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if !scopeUsesProxiedDoltMode(cityPath, cityPath) {
-		t.Fatal("scopeUsesProxiedDoltMode ignored proxied-server config marker")
+	if scopeUsesProxiedDoltMode(cityPath, cityPath) {
+		t.Fatal("a config.yaml marker alone moved a legacy Dolt scope onto the proxied path")
 	}
 }
 

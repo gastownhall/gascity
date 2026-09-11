@@ -158,64 +158,29 @@ type buildDoctorChecksOpts struct {
 // doctorOrderFiringCurrentLastRunFunc answers "when did this order last run"
 // for the order-firing check.
 //
-// The check asks it for every cron and cooldown order the event log cannot
-// answer on its own, and the per-order read is a labeled List on each leg —
-// which on a bd-backed store is two subprocesses (`bd list` plus the ephemeral
-// `bd query`). On a default city that is one fork pair per order before doctor
-// has looked at anything else, and on a fresh city, where no order has ever
-// fired, it is one fork pair per order to learn nothing.
-//
-// So the first order to arrive pulls the city's whole last-run index in one
-// read per leg and every later order is served from it, absence included: an
-// order missing from a complete index has never run, which is the same zero
-// time the per-order read would return. A leg that fails makes the index
-// incomplete, and then every order falls back to its own read.
+// It stays one labeled read per order per leg, which on a bd-backed store is
+// two subprocesses each. A whole-city index keyed on the `order-tracking`
+// label was tried and withdrawn: the authoritative evidence for a firing is the
+// `order-run:<scoped>` label, and that rides graph-class molecule and wisp roots
+// which carry no tracking label (order_dispatch.go stamps the root; only
+// orders.CreateRun adds both). An index built from tracking beads therefore
+// cannot be trusted about an order it does not mention, and falling back
+// per-order for the ones it misses costs the bulk read on top of every read it
+// was meant to replace — measured as a net +38 forks on a fresh city, where no
+// order has a tracking bead at all. The stores behind it are already shared for
+// the run by cachedOrderHistoryStoresResolver.
 func doctorOrderFiringCurrentLastRunFunc(cityPath string, cfg *config.City, stderr io.Writer) doctor.OrderFiringCurrentLastRunFunc {
 	if stderr == nil {
 		stderr = io.Discard
 	}
 	resolveStores := cachedOrderHistoryStoresResolver(cityPath, cfg, stderr)
-	type lastRunIndex struct {
-		runs     map[string]time.Time
-		complete bool
-	}
-	var mu sync.Mutex
-	indexes := map[string]lastRunIndex{}
 	return func(order orders.Order) (time.Time, error) {
 		stores, err := resolveStores(order)
 		if err != nil {
 			return time.Time{}, err
 		}
-		key := orderStoreSetKey(stores)
-		mu.Lock()
-		index, cached := indexes[key]
-		if !cached {
-			index.runs, index.complete = orders.LastRunAllAcross(orderFrontDoorsForTypedStores(stores))
-			indexes[key] = index
-		}
-		mu.Unlock()
-		if index.complete {
-			return index.runs[order.ScopedName()], nil
-		}
 		return orders.LastRunAcross(orderFrontDoorsForTypedStores(stores))(order.ScopedName())
 	}
-}
-
-// orderStoreSetKey identifies a federation by the bead stores in it, so two
-// orders resolving to the same stores share one last-run index.
-//
-// It keys on the stores rather than on the *orders.Store front doors:
-// orderFrontDoorsForTypedStores allocates a fresh wrapper per call, so keying
-// on those would mint a new key — and a new whole-city index read — for every
-// single order, which is the cost this cache exists to remove. The resolver
-// behind it caches the underlying stores per scope, so their identity is
-// stable for the run.
-func orderStoreSetKey(stores []beads.OrdersStore) string {
-	parts := make([]string, 0, len(stores))
-	for _, s := range stores {
-		parts = append(parts, fmt.Sprintf("%p", s.Store))
-	}
-	return strings.Join(parts, "|")
 }
 
 func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts buildDoctorChecksOpts) []doctor.Check {
