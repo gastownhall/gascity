@@ -338,9 +338,10 @@ dolt_sql_csv() {
 # leading whitespace, block or line comments, any whitespace between CALL and
 # the procedure name and before the paren. DOLT_PUSH, DOLT_FETCHX and the text
 # inside a string literal do not match. Backslashes are doubled for the SQL
-# string literal. Verified on Dolt 2.1.10 (evidence 04b: 7 variants hit, 5
-# decoys miss).
-REMOTE_OP_INFO_REGEXP='^\\s*((/\\*([^*]|\\*[^/])*\\*/|--[^\\n]*\\n)\\s*)*CALL\\s+DOLT_(FETCH|PULL)\\s*\\('
+# string literal. The block-comment form `/\*([^*]|\*+[^*/])*\*+/` accepts
+# `/***/`, `/* **/` and `/* a * b */`. Verified on Dolt 2.1.10 (evidence 04b
+# and 04c-G: 7 + 9 variants hit, 5 + 4 decoys miss).
+REMOTE_OP_INFO_REGEXP='^\\s*((/\\*([^*]|\\*+[^*/])*\\*+/|--[^\\n]*\\n)\\s*)*CALL\\s+DOLT_(FETCH|PULL)\\s*\\('
 
 remote_op_sessions_sql() {
   _ros_q="SELECT Id, Time, COALESCE(db, '') AS db FROM information_schema.processlist WHERE UPPER(Info) REGEXP '$REMOTE_OP_INFO_REGEXP'"
@@ -504,87 +505,34 @@ bound_expired() {
   esac
 }
 
-# --- Per-database runner lock (gp-f2yq) ---------------------------------------
+# --- Server-side single-flight gate (gp-f2yq) --------------------------------
 #
-# The processlist check and the CALL are two round trips. Two runners on this
-# host (the patrol and an operator's `gc dolt sync`, or sync and pull) can both
-# read "nothing in flight" and both issue a fetch. remote_op_lock_* serialize
-# runners per server + database with a mkdir lock (atomic on every POSIX
-# filesystem; no flock dependency), held from before the check until the
-# operation and its cleanup are done. A holder that died leaves a lock whose
-# pid is gone; the next runner reclaims it. Root: GC_DOLT_REMOTE_OP_LOCK_ROOT
-# (default ${TMPDIR:-/tmp}/gc-dolt-remote-op), one `<host>-<port>-<db>.lock`
-# directory per database, `pid` inside.
+# The processlist check and the CALL are two round trips, so two runners (on
+# this host or another) can both read "nothing in flight". The operand that
+# neither can move is the server's own session lock: remote_op_gate_sql is a
+# statement placed in the SAME session and batch as the CALL, taking a
+# user-level lock named for the database with timeout 0. GET_LOCK is
+# session-scoped: the server releases it only when that session ends — the
+# CALL finished and the client disconnected, or KILL. A client whose bound
+# expired leaves its server session holding the lock, so the next runner's
+# gate fails until the session is KILLed or finishes: exactly the
+# single-flight the processlist line reports. When the lock is held, the IF's
+# else branch raises an error (JSON_EXTRACT on a non-JSON text) and the CLI
+# stops the batch at the failing statement, so the CALL is never sent.
+# Verified on Dolt 2.1.10 (evidence 04c): a second session's batch ends with
+# `Error 3141 … Invalid JSON text … "gc-remote-op-lock-held"` and its
+# following statement never runs; IS_USED_LOCK names the holder; after KILL
+# the gate passes again; an 80-character lock name is accepted.
+REMOTE_OP_GATE_MARK='gc-remote-op-lock-held'
 
-remote_op_lock_root() {
-  printf '%s' "${GC_DOLT_REMOTE_OP_LOCK_ROOT:-${TMPDIR:-/tmp}/gc-dolt-remote-op}"
+# remote_op_gate_sql DB — the gate statement for DB (DB already validated by
+# the caller before it is interpolated).
+remote_op_gate_sql() {
+  printf "SELECT IF(GET_LOCK('gc_remote_op:%s', 0) = 1, 1, JSON_EXTRACT('%s', '\$')) AS gate" "$1" "$REMOTE_OP_GATE_MARK"
 }
 
-remote_op_lock_dir() {
-  _rl_host=$(printf '%s' "${GC_DOLT_HOST:-127.0.0.1}" | tr '[:upper:]' '[:lower:]')
-  _rl_key=$(printf '%s-%s-%s' "$_rl_host" "${GC_DOLT_PORT:-}" "$1" | tr -c 'A-Za-z0-9_.-' '-')
-  printf '%s/%s.lock' "$(remote_op_lock_root)" "$_rl_key"
-}
-
-# remote_op_lock_acquire DB — take DB's runner lock. Returns 0 holding it (path
-# in REMOTE_OP_LOCK_HELD); 1 when a live runner holds it (its pid, or
-# "unknown", in REMOTE_OP_LOCK_HOLDER); 2 when the lock root cannot be created
-# or the pid cannot be recorded. A lock without a pid file is given one second
-# (the holder is between its mkdir and its pid write) and then treated as
-# stale; a stale lock is reclaimed once.
-# shellcheck disable=SC2034  # REMOTE_OP_LOCK_HOLDER is read by the sync/pull callers
-remote_op_lock_acquire() {
-  _la_dir=$(remote_op_lock_dir "$1")
-  _la_root=$(remote_op_lock_root)
-  if [ ! -d "$_la_root" ]; then
-    _la_umask=$(umask)
-    umask 077
-    mkdir -p "$_la_root" 2>/dev/null || { umask "$_la_umask"; return 2; }
-    umask "$_la_umask"
-  fi
-  REMOTE_OP_LOCK_HOLDER=""
-  _la_waited=0
-  _la_reclaimed=0
-  while :; do
-    if mkdir "$_la_dir" 2>/dev/null; then
-      if ! printf '%s\n' "$$" > "$_la_dir/pid" 2>/dev/null; then
-        rmdir "$_la_dir" 2>/dev/null
-        return 2
-      fi
-      REMOTE_OP_LOCK_HELD="$_la_dir"
-      return 0
-    fi
-    _la_pid=$(cat "$_la_dir/pid" 2>/dev/null || true)
-    case "$_la_pid" in
-      ''|*[!0-9]*)
-        if [ "$_la_waited" -eq 0 ]; then
-          _la_waited=1
-          sleep 1
-          continue
-        fi
-        ;;
-      *)
-        if kill -0 "$_la_pid" 2>/dev/null; then
-          REMOTE_OP_LOCK_HOLDER="$_la_pid"
-          return 1
-        fi
-        ;;
-    esac
-    if [ "$_la_reclaimed" -ne 0 ]; then
-      REMOTE_OP_LOCK_HOLDER="${_la_pid:-unknown}"
-      return 1
-    fi
-    _la_reclaimed=1
-    rm -f "$_la_dir/pid" 2>/dev/null
-    rmdir "$_la_dir" 2>/dev/null
-  done
-}
-
-# remote_op_lock_release — drop the lock remote_op_lock_acquire took (no-op
-# when none is held).
-remote_op_lock_release() {
-  [ -n "${REMOTE_OP_LOCK_HELD:-}" ] || return 0
-  rm -f "$REMOTE_OP_LOCK_HELD/pid" 2>/dev/null
-  rmdir "$REMOTE_OP_LOCK_HELD" 2>/dev/null
-  REMOTE_OP_LOCK_HELD=""
+# remote_op_gate_refused STDERR_FILE — true when the captured dolt stderr says
+# the gate refused: another session holds this database's lock.
+remote_op_gate_refused() {
+  grep -q "$REMOTE_OP_GATE_MARK" "$1" 2>/dev/null
 }

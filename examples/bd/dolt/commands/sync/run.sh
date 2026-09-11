@@ -58,11 +58,12 @@
 # issuing one the script asks the server whether a DOLT_FETCH / DOLT_PULL is
 # already in flight for the database (skipped, NOT pushed, when one is), and
 # when the fetch bound expires it KILLs the server-side session the fetch
-# printed about itself and proves it gone from the processlist. Runners on
-# this host are serialized per database by a mkdir lock (root
-# GC_DOLT_REMOTE_OP_LOCK_ROOT, default ${TMPDIR:-/tmp}/gc-dolt-remote-op) so
-# two of them cannot both read "nothing in flight". See the "Server-side
-# remote operations" helpers in assets/scripts/runtime.sh.
+# printed about itself and proves it gone from the processlist. The fetch
+# statement also takes the server's session lock for the database (GET_LOCK,
+# timeout 0) in the same batch, so two runners that both read "nothing in
+# flight" cannot both fetch: the server refuses the second one before its
+# CALL is sent. See the "Server-side remote operations" helpers in
+# assets/scripts/runtime.sh.
 set -e
 
 dry_run=false
@@ -449,30 +450,7 @@ resolve_refspec_cli() {
   printf 'main\nmain\n'
 }
 
-# sync_database_sql <db> — sync_database_sql_locked under the per-database
-# runner lock (remote_op_lock_acquire, runtime.sh): two runners on this host
-# must not both read "nothing in flight" and both fetch. A live holder = this
-# database skipped, NOT pushed, this run; a lock root that cannot be created =
-# the same skip. The lock is held through the fetch, the classification, the
-# push and the kill-on-expiry.
 sync_database_sql() {
-  _sl_name="$1"
-  _sl_lrc=0
-  remote_op_lock_acquire "$_sl_name" || _sl_lrc=$?
-  if [ "$_sl_lrc" -eq 1 ]; then
-    echo "  $_sl_name: another gc dolt sync/pull (pid ${REMOTE_OP_LOCK_HOLDER:-unknown}) holds this database's runner lock — skipped (NOT pushed)" >&2
-    return 1
-  elif [ "$_sl_lrc" -ne 0 ]; then
-    echo "  $_sl_name: ERROR: cannot create the runner lock under $(remote_op_lock_root) — skipped (NOT pushed)" >&2
-    return 1
-  fi
-  _sl_rc=0
-  sync_database_sql_locked "$_sl_name" || _sl_rc=$?
-  remote_op_lock_release
-  return "$_sl_rc"
-}
-
-sync_database_sql_locked() {
   name="$1"
   if ! valid_database_name "$name"; then
     echo "  $name: ERROR: invalid database name" >&2
@@ -557,11 +535,21 @@ sync_database_sql_locked() {
     # the id is on disk before the fetch begins and survives the client's
     # death); --use-db attributes the session to this database. The id is the
     # KILL operand when the bound expires.
-    dolt_sql "USE \`$name\`; SELECT CONNECTION_ID() AS id; CALL DOLT_FETCH('$remote_name', '$remote_branch')" "$fetch_timeout" "$name" \
+    # Then the server-side gate (remote_op_gate_sql): the session takes this
+    # database's lock or the batch stops here, before the CALL.
+    dolt_sql "USE \`$name\`; SELECT CONNECTION_ID() AS id; $(remote_op_gate_sql "$name"); CALL DOLT_FETCH('$remote_name', '$remote_branch')" "$fetch_timeout" "$name" \
       >"$fetch_out_tmp" 2>"$fetch_err_tmp" || fetch_rc=$?
     fetch_session_id=$(remote_op_session_id "$fetch_out_tmp")
     rm -f "$fetch_out_tmp"
-    if [ "$fetch_rc" -ne 0 ] && { grep -q "no branches found in remote" "$fetch_err_tmp" 2>/dev/null || grep -q "invalid ref spec" "$fetch_err_tmp" 2>/dev/null; }; then
+    if [ "$fetch_rc" -ne 0 ] && remote_op_gate_refused "$fetch_err_tmp"; then
+      # Another session holds this database's lock: a fetch or pull that the
+      # processlist read did not show yet (it raced this one), or one whose
+      # client died and whose session still runs. The server refused ours
+      # before the CALL; nothing to kill.
+      rm -f "$fetch_err_tmp"
+      echo "  $name: fetch already in flight — the server refused a second one (session lock gc_remote_op:$name held) — skipped (NOT pushed)" >&2
+      return 1
+    elif [ "$fetch_rc" -ne 0 ] && { grep -q "no branches found in remote" "$fetch_err_tmp" 2>/dev/null || grep -q "invalid ref spec" "$fetch_err_tmp" 2>/dev/null; }; then
       # The remote has no such branch: an empty remote ("no branches found in
       # remote") or a brand-new branch on a populated remote ("invalid ref
       # spec" — both verified on Dolt 2.1.0). The first push creates the branch

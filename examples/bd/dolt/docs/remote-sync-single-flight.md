@@ -15,11 +15,11 @@ pushing. A processlist read that fails, answers with anything that is not a
 processlist, or carries a row that is not `digits,digits,…`, also skips (fail
 closed). "In flight" is decided by a `REGEXP` on the statement text, so
 `call dolt_fetch(`, `CALL  DOLT_PULL(` and a call behind a comment all count.
-Runners on the same host are serialized per database by a mkdir lock (root
-`GC_DOLT_REMOTE_OP_LOCK_ROOT`, default `${TMPDIR:-/tmp}/gc-dolt-remote-op`),
-held from before the processlist read until the operation and its cleanup are
-done, so two runs cannot both read "nothing in flight"; a lock whose holder
-died is reclaimed by the next run. The statement they do issue prints its own
+The statement they do issue takes the server's own session lock for the
+database (`GET_LOCK('gc_remote_op:<db>', 0)`) in the same batch as the CALL:
+two runners that both read "nothing in flight" cannot both fetch, because the
+server stops the second batch before its CALL, and a session whose client died
+keeps the lock until it finishes or is killed. The statement also prints its own
 connection id first and runs with `--use-db`, so when the client bound expires
 (exit 124, or 137 when GNU timeout had to escalate to SIGKILL) the script
 `KILL`s exactly that server-side session and proves it gone with a second

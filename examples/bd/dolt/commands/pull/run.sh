@@ -15,10 +15,11 @@
 # bound killed, so before issuing one the script asks the server whether a
 # DOLT_PULL / DOLT_FETCH is already in flight for the database (skipped when
 # one is), and when the bound expires it KILLs the server-side session the
-# pull printed about itself and proves it gone from the processlist. Runners
-# on this host are serialized per database by a mkdir lock (root
-# GC_DOLT_REMOTE_OP_LOCK_ROOT, default ${TMPDIR:-/tmp}/gc-dolt-remote-op). See
-# the "Server-side remote operations" helpers in assets/scripts/runtime.sh.
+# pull printed about itself and proves it gone from the processlist. The pull
+# statement also takes the server's session lock for the database (GET_LOCK,
+# timeout 0) in the same batch, so two runners that both read "nothing in
+# flight" cannot both pull. See the "Server-side remote operations" helpers
+# in assets/scripts/runtime.sh.
 set -e
 
 : "${GC_DOLT_USER:=root}"
@@ -182,28 +183,7 @@ find_remote_sql() {
   printf '%s\n' "$chosen" | awk -F, '{print $1 "|" $2}'
 }
 
-# pull_database_sql <db> — pull_database_sql_locked under the per-database
-# runner lock (remote_op_lock_acquire, runtime.sh): two runners on this host
-# must not both read "nothing in flight" and both pull. A live holder = this
-# database skipped this run; a lock root that cannot be created = the same skip.
 pull_database_sql() {
-  _pl_name="$1"
-  _pl_lrc=0
-  remote_op_lock_acquire "$_pl_name" || _pl_lrc=$?
-  if [ "$_pl_lrc" -eq 1 ]; then
-    echo "  $_pl_name: another gc dolt sync/pull (pid ${REMOTE_OP_LOCK_HOLDER:-unknown}) holds this database's runner lock — skipped" >&2
-    return 1
-  elif [ "$_pl_lrc" -ne 0 ]; then
-    echo "  $_pl_name: ERROR: cannot create the runner lock under $(remote_op_lock_root) — skipped" >&2
-    return 1
-  fi
-  _pl_rc=0
-  pull_database_sql_locked "$_pl_name" || _pl_rc=$?
-  remote_op_lock_release
-  return "$_pl_rc"
-}
-
-pull_database_sql_locked() {
   name="$1"
   if ! valid_database_name "$name"; then
     echo "  $name: ERROR: invalid database name" >&2
@@ -258,7 +238,9 @@ pull_database_sql_locked() {
   # --use-db attributes the session to this database. The id is the KILL
   # operand when the bound expires.
   pull_rc=0
-  dolt_sql "USE \`$name\`; SELECT CONNECTION_ID() AS id; CALL DOLT_PULL('$remote_name', 'main')" "$pull_timeout" "$name" \
+  # Then the server-side gate (remote_op_gate_sql): the session takes this
+  # database's lock or the batch stops here, before the CALL.
+  dolt_sql "USE \`$name\`; SELECT CONNECTION_ID() AS id; $(remote_op_gate_sql "$name"); CALL DOLT_PULL('$remote_name', 'main')" "$pull_timeout" "$name" \
     >"$pull_out_tmp" 2>"$pull_err_tmp" || pull_rc=$?
   pull_session_id=$(remote_op_session_id "$pull_out_tmp")
   rm -f "$pull_out_tmp"
@@ -266,6 +248,11 @@ pull_database_sql_locked() {
     rm -f "$pull_err_tmp"
     echo "  $name: pulled from $remote_url"
     return 0
+  fi
+  if remote_op_gate_refused "$pull_err_tmp"; then
+    rm -f "$pull_err_tmp"
+    echo "  $name: pull already in flight — the server refused a second one (session lock gc_remote_op:$name held) — skipped" >&2
+    return 1
   fi
 
   if bound_expired "$pull_rc"; then

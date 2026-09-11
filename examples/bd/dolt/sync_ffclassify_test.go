@@ -13,7 +13,6 @@ package dolt_test
 // and an absent remote ref yields "branch not found: remotes/...".
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -21,14 +20,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 // ffSyncCmd builds a `gc dolt sync` invocation against an idle reachable
-// server with the fake dolt in binDir first on PATH. The per-database runner
-// lock gets a private root. Later `env` entries override earlier ones (Go
-// keeps the last value of a duplicated key), so a test can pin the port and
-// the lock root two runners must share.
+// server with the fake dolt in binDir first on PATH. Later `env` entries
+// override earlier ones (Go keeps the last value of a duplicated key).
 func ffSyncCmd(t *testing.T, binDir string, env []string, args ...string) *exec.Cmd {
 	t.Helper()
 	root := repoRoot(t)
@@ -52,7 +48,6 @@ func ffSyncCmd(t *testing.T, binDir string, env []string, args ...string) *exec.
 		fmt.Sprintf("GC_DOLT_PORT=%d", port),
 		"GC_DOLT_USER=root",
 		"GC_DOLT_PASSWORD=",
-		"GC_DOLT_REMOTE_OP_LOCK_ROOT="+t.TempDir(),
 	), env...)
 	return cmd
 }
@@ -74,26 +69,6 @@ func runFFSync(t *testing.T, binDir string, args ...string) string {
 	t.Helper()
 	out, _ := runFFSyncEnv(t, binDir, nil, args...)
 	return out
-}
-
-// waitForFile polls until path exists (the fake dolt's "I am mid-operation"
-// marker) or the deadline passes.
-func waitForFile(t *testing.T, path string, within time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(within)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(path); err == nil {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("%s did not appear within %s", path, within)
-}
-
-// remoteOpLockDir is the lock directory the scripts use for host 127.0.0.1,
-// the given port and database under lockRoot (remote_op_lock_dir, runtime.sh).
-func remoteOpLockDir(lockRoot string, port int, db string) string {
-	return filepath.Join(lockRoot, fmt.Sprintf("127.0.0.1-%d-%s.lock", port, db))
 }
 
 // fakeDoltHeader is the shared preamble for an IDLE server: log argv, answer
@@ -812,6 +787,23 @@ func TestSyncFetchIsAttributedAndSelfIdentifying(t *testing.T) {
 	if !strings.Contains(fetchLine, "SELECT CONNECTION_ID() AS id;") {
 		t.Fatalf("the fetch statement must print its own connection id first.\nline: %s", fetchLine)
 	}
+	// The server-side gate sits between the id and the CALL in the SAME batch:
+	// this session takes the database's lock (timeout 0) or the batch stops
+	// before the CALL is sent (verified on Dolt 2.1.10).
+	assertGateBeforeCall(t, fetchLine, "app", "CALL DOLT_FETCH(")
+}
+
+// assertGateBeforeCall pins the batch shape `… CONNECTION_ID() … GET_LOCK('gc_remote_op:<db>', 0) … CALL …`.
+func assertGateBeforeCall(t *testing.T, line, db, call string) {
+	t.Helper()
+	gate := "GET_LOCK('gc_remote_op:" + db + "', 0)"
+	idAt, gateAt, callAt := strings.Index(line, "SELECT CONNECTION_ID() AS id;"), strings.Index(line, gate), strings.Index(line, call)
+	if idAt < 0 || gateAt < 0 || callAt < 0 || (idAt >= gateAt || gateAt >= callAt) {
+		t.Fatalf("the batch must be id, then the GET_LOCK gate, then the CALL.\nline: %s", line)
+	}
+	if !strings.Contains(line, "JSON_EXTRACT('gc-remote-op-lock-held', '$')") {
+		t.Fatalf("the gate's else branch must raise the marked error.\nline: %s", line)
+	}
 }
 
 // A processlist answer with a row that is not `digits,digits,…` (a NULL Time,
@@ -861,78 +853,31 @@ func TestSyncFetchClientExit137StillKillsServerSideSession(t *testing.T) {
 	}
 }
 
-// Two runners on this host: the second must not read "nothing in flight" and
-// fetch while the first is mid-fetch. The runner lock is held from before the
-// processlist check until the operation is done, so exactly one CALL is issued
-// and the second run says who holds the lock.
-func TestSyncRunnerLockSerializesConcurrentRunners(t *testing.T) {
+// Two runners that both read "nothing in flight" cannot both fetch: the fetch
+// batch takes the server's session lock for the database before its CALL, and
+// when another session holds it the server stops the batch with the marked
+// error. The script reports the refusal, pushes nothing, and has nothing to
+// KILL (our CALL was never sent).
+func TestSyncFetchGateRefusedSkipsNeverPushes(t *testing.T) {
 	binDir := t.TempDir()
 	logPath := filepath.Join(binDir, "dolt.log")
-	started := filepath.Join(binDir, "fetch-started")
-	release := filepath.Join(binDir, "fetch-release")
 	body := fakeDoltHeader(logPath, "main") +
-		"  *\"CALL DOLT_FETCH(\"*) : > \"" + started + "\" ; while [ ! -f \"" + release + "\" ]; do sleep 0.1; done ; exit 0 ;;\n" +
-		"  *\"dolt_log(\"*) printf 'n\\n0\\n' ; exit 0 ;;\n" +
+		"  *\"CALL DOLT_FETCH(\"*) printf 'id\\n61\\n' ; printf 'error on line 1 for query SELECT IF(GET_LOCK(...)) AS gate: Error 3141 (HY000): Invalid JSON text in argument 1 to function json_extract: \"gc-remote-op-lock-held\"\\n' >&2 ; exit 1 ;;\n" +
 		"esac\nexit 0\n"
 	installFFFakeDolt(t, binDir, body)
-	port, cleanup := startReachableTCPListener(t)
-	defer cleanup()
-	shared := []string{fmt.Sprintf("GC_DOLT_PORT=%d", port), "GC_DOLT_REMOTE_OP_LOCK_ROOT=" + t.TempDir()}
-
-	first := ffSyncCmd(t, binDir, shared, "--db", "app")
-	var firstOut bytes.Buffer
-	first.Stdout, first.Stderr = &firstOut, &firstOut
-	if err := first.Start(); err != nil {
-		t.Fatalf("start first runner: %v", err)
-	}
-	waitForFile(t, started, 10*time.Second)
-	secondOut, secondErr := ffSyncCmd(t, binDir, shared, "--db", "app").CombinedOutput()
-	if err := os.WriteFile(release, nil, 0o644); err != nil {
-		t.Fatalf("release the first fetch: %v", err)
-	}
-	if err := first.Wait(); err != nil {
-		t.Fatalf("first runner failed: %v\n%s", err, firstOut.String())
-	}
+	out := runFFSync(t, binDir, "--db", "app")
 	log := readLog(t, logPath)
-	if n := strings.Count(log, "CALL DOLT_FETCH("); n != 1 {
-		t.Fatalf("exactly one fetch may be in flight per database; got %d.\nlog:\n%s\nsecond:\n%s", n, log, secondOut)
-	}
-	if secondErr == nil {
-		t.Fatalf("the second runner must exit non-zero (skipped).\nout:\n%s", secondOut)
-	}
-	want := fmt.Sprintf("app: another gc dolt sync/pull (pid %d) holds this database's runner lock — skipped (NOT pushed)", first.Process.Pid)
-	if !strings.Contains(string(secondOut), want) {
-		t.Fatalf("expected %q\nout:\n%s", want, secondOut)
-	}
 	if pushed(log) {
-		t.Fatalf("neither runner may push here (0 ahead).\nlog:\n%s", log)
+		t.Fatalf("a refused gate must NEVER push.\nout:\n%s", out)
 	}
-}
-
-// A lock whose holder died (pid gone) is stale: the next runner reclaims it,
-// runs, and leaves no lock behind.
-func TestSyncStaleRunnerLockIsReclaimed(t *testing.T) {
-	binDir := t.TempDir()
-	logPath := writeSyncFakeDoltClassify(t, binDir, 1, 0)
-	port, cleanup := startReachableTCPListener(t)
-	defer cleanup()
-	lockRoot := t.TempDir()
-	dir := remoteOpLockDir(lockRoot, port, "app")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatalf("mkdir stale lock: %v", err)
+	if strings.Contains(log, "KILL ") {
+		t.Fatalf("a refused gate sent no CALL: nothing to KILL.\nlog:\n%s", log)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "pid"), []byte("4194305\n"), 0o600); err != nil {
-		t.Fatalf("write stale pid: %v", err)
+	want := "app: fetch already in flight — the server refused a second one (session lock gc_remote_op:app held) — skipped (NOT pushed)"
+	if !strings.Contains(out, want) {
+		t.Fatalf("expected %q\nout:\n%s", want, out)
 	}
-	out, err := ffSyncCmd(t, binDir, []string{fmt.Sprintf("GC_DOLT_PORT=%d", port), "GC_DOLT_REMOTE_OP_LOCK_ROOT=" + lockRoot}, "--db", "app").CombinedOutput()
-	if err != nil {
-		t.Fatalf("a stale lock (holder gone) must be reclaimed and the sync run: %v\n%s", err, out)
-	}
-	log := readLog(t, logPath)
-	if !fetched(log) || !pushed(log) {
-		t.Fatalf("reclaimed lock: fetch and push must run.\nout:\n%s\nlog:\n%s", out, log)
-	}
-	if _, statErr := os.Stat(dir); !os.IsNotExist(statErr) {
-		t.Fatalf("the lock must be released after the run (stat err = %v)", statErr)
+	if strings.Contains(out, "fetch failed (exit 1)") {
+		t.Fatalf("a gate refusal is a skip, not a fetch failure.\nout:\n%s", out)
 	}
 }

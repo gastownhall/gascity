@@ -313,8 +313,7 @@ fetch_sessions_probed=false
 fetch_sessions_count=0
 fetch_sessions_oldest_sec=0
 fetch_sessions_warn=false
-if [ "$server_reachable" = true ]; then
-  _fs_err=$(mktemp)
+if [ "$server_reachable" = true ] && _fs_err=$(mktemp 2>/dev/null); then
   if _fs_rows=$(remote_op_sessions "" 5 "$_fs_err"); then
     fetch_sessions_probed=true
     fetch_sessions_count=$(printf '%s\n' "$_fs_rows" | awk 'NF == 2 { n++ } END { print n + 0 }')
