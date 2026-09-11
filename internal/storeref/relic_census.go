@@ -97,11 +97,57 @@ func legacyResidents(store beads.Store, prefixes []string, includeClosed bool) (
 // refused city, whose store answers every read with the standing storage
 // refusal, takes this branch too.
 func HasLegacyResidents(b ClassBinding) bool {
-	relics, err := LegacyResidents(b.Leg.Store, b.Prefixes)
+	has, err := legacyResidentVerdict(b.Leg.Store, b.Prefixes)
 	if err != nil {
 		return true
 	}
-	return len(relics) > 0
+	return has
+}
+
+// legacyResidentVerdict answers the verdict from the store itself when the store
+// can answer it, and by listing the store when it cannot.
+//
+// The verdict is a yes-or-no question over the binding's whole history, and the
+// listing form pays for the history twice: once to hydrate every row, once to
+// throw all but the id away. A store that can answer it in one statement is
+// asked directly, and it is asked instead of the scan rather than as well as it
+// — running both would make the fast path a pure cost.
+//
+// The fallback is not a legacy path. A binding served by the native Dolt engine
+// reaches its rows through the beads library and holds no SQL of its own, so it
+// cannot implement the capability and lists exactly as before.
+//
+// Discovery goes through beads.NamespaceCensusFor rather than a bare assertion
+// on beads.NamespaceCensus, because the binding this runs against is not always
+// a bare engine: cmd/gc's emitting class store is held to every engine method
+// by TestEmittingClassStoreKeepsEveryEngineCapability, so it carries
+// HasResidentOutside whatever it wraps, and a bare assertion would take that
+// method's word for a native-Dolt-served binding and lose the scan the binding
+// depends on.
+//
+// The drain report (OpenLegacyResidents) deliberately does not come through
+// here: it needs the ids themselves, and a verdict cannot name them.
+func legacyResidentVerdict(store beads.Store, prefixes []string) (bool, error) {
+	if store == nil {
+		return false, fmt.Errorf("relic census: no binding store to read")
+	}
+	if census, ok := beads.NamespaceCensusFor(store); ok {
+		has, err := census.HasResidentOutside(prefixes)
+		if err != nil {
+			// Not a reason to fall back to the scan: a store whose own read
+			// failed will not serve a listing of itself either, so the fallback
+			// would only pay the cost twice on the way to the same answer. The
+			// caller reads an error as "keep the probe", which is the honest
+			// verdict for a binding that said nothing.
+			return false, fmt.Errorf("relic census: asking the binding for a resident outside its namespaces: %w", err)
+		}
+		return has, nil
+	}
+	relics, err := LegacyResidents(store, prefixes)
+	if err != nil {
+		return false, err
+	}
+	return len(relics) > 0, nil
 }
 
 // ProvenLegacyResidents is the PROOF form of the census: the value
@@ -116,14 +162,20 @@ func HasLegacyResidents(b ClassBinding) bool {
 // unreachable.
 //
 // So the only true answer here is a read that completed and found a resident.
-// It still reads the OPEN-only census, so the two differ in the census as well
-// as in the default: a binding whose relics have all CLOSED keeps its probe
-// (HasLegacyResidents counts them) but is not yet PROVEN to hold one. Closing
-// that gap is the one line it has always advertised — swap OpenLegacyResidents
-// for LegacyResidents and every caller inherits it, because nobody outside this
-// file names the census directly.
+// The DEFAULT is the whole of the difference: both forms read the same
+// closed-inclusive census, and they have to, because a closed relic is exactly
+// as reachable by id as an open one — it is still shown, reopened, claimed and
+// written by id, and `gc storage migrate` never deleted the work store's
+// pre-migration copy. A proof that stopped at the last CLOSE would leave the
+// binding with a probe HasLegacyResidents keeps and nothing may enforce, and
+// that id's next read would be answered by the frozen copy, OPEN forever with
+// pre-migration fields (ga-qdt5y.19).
+//
+// Sharing the census makes the two verdicts monotone together: proof implies
+// the pessimistic bit for every binding, in the field and in the decision
+// alike, rather than only for the ones a constructor happened to align.
 func ProvenLegacyResidents(b ClassBinding) bool {
-	relics, err := OpenLegacyResidents(b.Leg.Store, b.Prefixes)
+	relics, err := LegacyResidents(b.Leg.Store, b.Prefixes)
 	if err != nil {
 		return false
 	}

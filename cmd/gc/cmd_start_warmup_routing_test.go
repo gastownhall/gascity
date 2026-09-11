@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/warmup"
 )
 
@@ -227,13 +228,15 @@ func TestWarmupMailRefusesOnAnUnconvergedCity(t *testing.T) {
 	// The refusal is asserted structurally rather than by its text: mail's
 	// sender-address read goes through session.ResolveAddress, whose error
 	// hygiene deliberately keeps the cause out of Error() while still
-	// unwrapping to it. isStandingStorageRefusal is the predicate that survives
+	// unwrapping to it. storeref.IsStandingRefusal is the predicate that survives
 	// that, and it says the precise thing — this is the build's verdict about
-	// the CITY, not a fault in one read. The remedy the operator acts on is on
-	// stderr, asserted next.
+	// the CITY, not a fault in one read. It is the resolver's own predicate, the
+	// one whose leg policy decides which refusals a residence probe may tolerate,
+	// so this row and that policy cannot disagree about what a refusal is. The
+	// remedy the operator acts on is on stderr, asserted next.
 	if _, err := provider.Send("gc-start-warmup", "mayor", "city warm-up: 2 doctor check(s) failed", "body"); err == nil {
 		t.Error("warm-up mail was accepted on a city that has not converged onto its binding")
-	} else if !isStandingStorageRefusal(err) {
+	} else if !storeref.IsStandingRefusal(err) {
 		t.Errorf("the refused warm-up send failed for some other reason than the storage refusal: %v", err)
 	}
 	if !strings.Contains(stderr.String(), storageMigrationCommand) {

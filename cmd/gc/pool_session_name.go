@@ -142,6 +142,8 @@ func releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 	openSessionInfos []session.Info,
 	result DesiredStateResult,
 	rigStores map[string]beads.Store,
+	protectedWakeWork map[storeScopedBeadKey]struct{},
+	recordPhase func(TraceSiteCode, string, time.Time, map[string]any),
 ) []releasedPoolAssignment {
 	// Partial input snapshots can make active work look orphaned for this
 	// tick only: missing work affects drain decisions, and missing sessions
@@ -149,7 +151,44 @@ func releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 	if result.snapshotQueryPartial() {
 		return nil
 	}
-	return releaseOrphanedPoolAssignments(store, sessionStore, cfg, cityPath, openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStores, result.AssignedWorkStoreRefs, rigStores)
+	return releaseOrphanedPoolAssignments(store, sessionStore, cfg, cityPath, openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStores, result.AssignedWorkStoreRefs, rigStores, protectedWakeWork, recordPhase)
+}
+
+// protectedWakeWorkKeys indexes the wake-candidate slice by store ref + bead ID
+// for the release arm's retain check. The release pass runs BEFORE the wake arm
+// inside one reconcile tick, over the same pre-tick session snapshot; work the
+// wake arm is about to act on must not be judged orphaned by the arm that ran
+// first (retain rather than reap). Without this, a release in the
+// snapshot-staleness window also removes the work from the tick's wake demand,
+// the session reconciler then retires the now-workless slot it just created,
+// and the reopened work re-creates demand next tick — a wake/release/retire
+// treadmill (observed live 12x on one identity).
+//
+// AssignedWorkBeads can carry the same bead ID from independent city and rig
+// stores (storeScopedBeadKey), so a plain-ID key would let a wake candidate in
+// one store shield a genuinely orphaned same-ID bead in another.
+// wakeCandidateStoreRefs is the second return of
+// filterAssignedWorkBeadsForSessionWake and is index-aligned with
+// wakeCandidates; an empty refs slice means the caller had no refs either, and
+// both sides then key under "".
+func protectedWakeWorkKeys(wakeCandidates []beads.Bead, wakeCandidateStoreRefs []string) map[storeScopedBeadKey]struct{} {
+	if len(wakeCandidates) == 0 {
+		return nil
+	}
+	scoped := len(wakeCandidateStoreRefs) == len(wakeCandidates)
+	keys := make(map[storeScopedBeadKey]struct{}, len(wakeCandidates))
+	for i, wb := range wakeCandidates {
+		id := strings.TrimSpace(wb.ID)
+		if id == "" {
+			continue
+		}
+		ref := ""
+		if scoped {
+			ref = wakeCandidateStoreRefs[i]
+		}
+		keys[storeScopedBeadKey{StoreRef: ref, ID: id}] = struct{}{}
+	}
+	return keys
 }
 
 // releaseOrphanedPoolAssignments reopens active pool-routed work whose
@@ -176,6 +215,8 @@ func releaseOrphanedPoolAssignments(
 	assignedWorkStores []beads.Store,
 	assignedWorkStoreRefs []string,
 	rigStores map[string]beads.Store,
+	protectedWakeWork map[storeScopedBeadKey]struct{},
+	recordPhase func(TraceSiteCode, string, time.Time, map[string]any),
 ) []releasedPoolAssignment {
 	if store == nil || cfg == nil || len(assignedWorkBeads) == 0 {
 		return nil
@@ -211,6 +252,10 @@ func releaseOrphanedPoolAssignments(
 	// at ~14 minutes.
 	sessionStoreLiveAssignee := make(map[string]bool, len(assignedWorkBeads))
 	ownerStoreLiveAssignee := make(map[string]bool, len(assignedWorkBeads))
+	sweepStart := time.Now()
+	var probeElapsed time.Duration
+	memoizedProbeCount := 0
+	fallbackProbeCount := 0
 
 	openIdentifiers := makeOpenSessionStoreRefIndex(cityPath, cfg, store, openSessionInfos, storeRefAware)
 	legacyOpenIdentifiers := make(map[string]struct{}, len(openSessionInfos)*5)
@@ -226,6 +271,19 @@ func releaseOrphanedPoolAssignments(
 	var released []releasedPoolAssignment
 	for i, wb := range assignedWorkBeads {
 		if wb.Status != "open" && wb.Status != "in_progress" {
+			continue
+		}
+		workStoreRef := ""
+		if storeRefAware {
+			workStoreRef = assignedWorkStoreRefs[i]
+		}
+		// Retain work the same tick's wake arm is about to act on: the release
+		// pass runs first over a pre-tick snapshot in which a replacement
+		// session bead may not exist yet, and releasing here both drops a live
+		// claim and starves the wake demand that would have protected the slot.
+		// Uncertainty about session materialization is not permission to reopen
+		// work (retain rather than reap, gc-ft31x).
+		if _, ok := protectedWakeWork[storeScopedBeadKey{StoreRef: workStoreRef, ID: wb.ID}]; ok {
 			continue
 		}
 		assignee := strings.TrimSpace(wb.Assignee)
@@ -249,14 +307,18 @@ func releaseOrphanedPoolAssignments(
 				continue
 			}
 		} else {
-			workStoreRef := ""
-			if storeRefAware {
-				workStoreRef = assignedWorkStoreRefs[i]
-			}
 			if openSessionOwnsWork(legacyOpenIdentifiers, openIdentifiers, assignee, workStoreRef, storeRefAware) {
 				continue
 			}
 			if assigneePreservesNamedSessionRoute(cfg, cityPath, template, assignee, workStoreRef, storeRefAware) {
+				continue
+			}
+			// Ordered ahead of the store-listing probe below deliberately: both
+			// are pure skip-gates with no mutation, so the released set is
+			// identical either way, but this one answers from the in-memory
+			// openSessionInfos snapshot while the next one issues a live
+			// per-assignee store listing.
+			if liveEphemeralSessionForTemplate(openSessionInfos, cfg, cityPath, agentCfg, assignee, template, workStoreRef, storeRefAware) {
 				continue
 			}
 			if memoizedLiveOpenSessionAssignmentExists(sessionStoreLiveAssignee, assignee, sessionStore.Store, assignee) {
@@ -282,11 +344,15 @@ func releaseOrphanedPoolAssignments(
 			// leave the fallback unmemoized rather than risk that.
 			if ownerStore != nil {
 				live := false
+				probeCallStart := time.Now()
 				if storeAware && storeRefAware {
+					memoizedProbeCount++
 					live = memoizedLiveOpenSessionAssignmentExists(ownerStoreLiveAssignee, workStoreRef+"\x00"+assignee, ownerStore, assignee)
 				} else {
+					fallbackProbeCount++
 					live = liveOpenSessionAssignmentExists(ownerStore, assignee)
 				}
+				probeElapsed += time.Since(probeCallStart)
 				if live {
 					continue
 				}
@@ -310,6 +376,13 @@ func releaseOrphanedPoolAssignments(
 			continue
 		}
 		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
+	}
+	if recordPhase != nil {
+		recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.release_orphaned_pool_assignments.release_sweep", sweepStart, map[string]any{
+			"memoized_count": memoizedProbeCount,
+			"fallback_count": fallbackProbeCount,
+			"probe_ms":       probeElapsed.Milliseconds(),
+		})
 	}
 	return released
 }
@@ -909,6 +982,52 @@ func assigneePreservesNamedSessionRoute(cfg *config.City, cityPath, template, as
 		return true
 	}
 	return assignedWorkStoreRefForAgent(cityPath, cfg, spec.Agent) == workStoreRef
+}
+
+// liveEphemeralSessionForTemplate reports whether the bead's own assignee IS
+// the bare template name — some routing paths write the template, not a
+// concrete session identity, into Assignee (e.g. an initial claim before a
+// session materializes) — AND a live ephemeral session for that template
+// exists to back it.
+//
+// Scoping on assignee == template is load-bearing, not incidental: a
+// genuinely dead NAMED-session assignee (e.g. "sess-dead-999") can share a
+// template with an unrelated LIVE sibling session, and that sibling must
+// never shield the dead assignee's claim from reclamation. An earlier version
+// of this check asked only "does any live session for this template exist",
+// which let a live sibling mask an unrelated dead assignee indefinitely
+// (ga-r22k2y round-1 defect). Requiring the assignee itself to equal the
+// template confines this gate to the one shape it exists for.
+func liveEphemeralSessionForTemplate(openSessionInfos []session.Info, cfg *config.City, cityPath string, agentCfg *config.Agent, assignee, template, workStoreRef string, storeRefAware bool) bool {
+	template = strings.TrimSpace(template)
+	if template == "" || strings.TrimSpace(assignee) != template {
+		return false
+	}
+	for _, info := range openSessionInfos {
+		if info.Closed {
+			continue
+		}
+		if strings.TrimSpace(info.Template) != template {
+			continue
+		}
+		// The gate is named for ephemeral pool sessions and must hold to that:
+		// a configured named or manual session sharing this template does not
+		// serve the bare-template claim, and being long-lived it would shield
+		// the bead from reclamation indefinitely.
+		if !isEphemeralSessionInfoForAgent(info, agentCfg) {
+			continue
+		}
+		if !storeRefAware {
+			return true
+		}
+		if agentIsCrossStoreEligible(agentCfg) {
+			return true
+		}
+		if assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg) == workStoreRef {
+			return true
+		}
+	}
+	return false
 }
 
 func stringPtr(s string) *string { return &s }
