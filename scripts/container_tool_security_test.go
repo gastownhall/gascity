@@ -228,6 +228,9 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 		"CVE-2026-39822": true, "CVE-2026-39823": true, "CVE-2026-39825": true,
 		"CVE-2026-39826": true, "CVE-2026-39836": true, "CVE-2026-42499": true,
 		"CVE-2026-42504": true, "CVE-2026-27145": true,
+		// docket E9 (2026-09-11): kubectl-only stdlib CVEs, fixed in Go 1.26.6.
+		"CVE-2026-33818": true, "CVE-2026-56853": true, "CVE-2026-56858": true,
+		"CVE-2026-56859": true, "CVE-2026-56860": true, "CVE-2026-56862": true,
 	}
 	allowedModuleWaivers := map[string]map[string]bool{
 		"CVE-2026-56852": {
@@ -236,8 +239,9 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 			"usr/local/bin/kubectl": true,
 		},
 		"CVE-2026-46600": {
-			"usr/bin/gh":         true,
-			"usr/local/bin/dolt": true,
+			"usr/bin/gh":            true,
+			"usr/local/bin/dolt":    true,
+			"usr/local/bin/kubectl": true,
 		},
 		"CVE-2026-56854": {
 			"usr/bin/gh":         true,
@@ -340,7 +344,7 @@ func semverAtLeast(have, want [3]int) bool {
 }
 
 // TestTrivyIgnoreDropsGCModuleWaiversPastThreshold enforces that no usr/local/bin/gc
-// x/net or x/crypto CVE waiver outlives the go.mod bump that fixes it. Unlike the
+// x/net, x/crypto, or grpc CVE waiver outlives the go.mod bump that fixes it. Unlike the
 // rebuilt tools (bd, dolt, gh), gc is built straight from this module, so a waiver on a
 // gc path is only honest while go.mod still pins a vulnerable version. Each CVE records
 // the module and the first version that fixes it (taken from the waiver's own removal
@@ -374,12 +378,16 @@ func TestTrivyIgnoreDropsGCModuleWaiversPastThreshold(t *testing.T) {
 		"CVE-2026-42508": {"golang.org/x/crypto", "v0.52.0"},
 		"CVE-2026-46595": {"golang.org/x/crypto", "v0.52.0"},
 		"CVE-2026-46597": {"golang.org/x/crypto", "v0.52.0"},
+		// google.golang.org/grpc, fixed in 1.83.1.
+		"CVE-2026-84304": {"google.golang.org/grpc", "v1.83.1"},
+		"CVE-2026-84445": {"google.golang.org/grpc", "v1.83.1"},
 	}
 
 	goMod := readFile(t, root, "go.mod")
 	have := map[string][3]int{
-		"golang.org/x/net":    goModVersion(t, goMod, "golang.org/x/net"),
-		"golang.org/x/crypto": goModVersion(t, goMod, "golang.org/x/crypto"),
+		"golang.org/x/net":       goModVersion(t, goMod, "golang.org/x/net"),
+		"golang.org/x/crypto":    goModVersion(t, goMod, "golang.org/x/crypto"),
+		"google.golang.org/grpc": goModVersion(t, goMod, "google.golang.org/grpc"),
 	}
 
 	var doc struct {
