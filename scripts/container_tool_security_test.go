@@ -531,3 +531,219 @@ func TestTrivyIgnoreWaivesXCryptoSSHCVEForGHDoltBD(t *testing.T) {
 		t.Errorf(".trivyignore.yaml has %d entries for %s, want exactly 1", newCVECount, newCVE)
 	}
 }
+
+// TestTrivyIgnoreWidensDocketE9WaiverForRemainingHighCriticalFindings enforces
+// the 2026-09-11 operator-ruled widening (docket E9): PR #5885's own Container
+// Scan run (34553600725 / job 103121488224, "Image vulnerabilities") still
+// fails on findings this bridge does not yet cover. This widens the waiver to
+// every unwaived HIGH/CRITICAL finding on that run, scoped by path or purl:
+//   - usr/bin/gh: x/mod (CVE-2026-56864, CVE-2026-56865) and grpc
+//     (CVE-2026-84304, CVE-2026-84445); durable fix is contributor PR #5353.
+//   - usr/local/bin/dolt: the same grpc pair plus thrift (CVE-2026-43871);
+//     durable fix is contributor PR #5353.
+//   - usr/local/bin/bd and usr/local/bin/gc: the same grpc pair (bd also
+//     carries the thrift CVE); durable fix is ga-rl1l10.
+//   - usr/local/bin/kubectl (gc-controller only): six Go-stdlib CVEs fixed in
+//     Go 1.26.6, plus CVE-2026-46600 added to the existing gh/dolt x/net
+//     dns/dnsmessage entry rather than duplicated; durable fix is ga-rl1l10.
+//   - gc-mcp-mail, purl-scoped (no paths — these purls exist only in that
+//     image's SBOM): Debian 13.5 util-linux family (CVE-2026-53612,
+//     CVE-2026-53613, CVE-2026-53614) and Python GitPython 3.1.58
+//     (CVE-2026-78675, CVE-2026-78676, CVE-2026-78677); durable fix is
+//     ga-dkgeoi.
+//
+// The ruling forbids trimming, removing, or duplicating any existing entry,
+// and forbids new Go-stdlib waivers on the rebuilt gh/dolt/bd paths (they
+// clear those CVEs via the Go 1.26.5 rebuild — see
+// TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools), so the total entry count
+// must grow by exactly 17: CVE-2026-46600's widening reuses its existing
+// entry and does not add to the count.
+func TestTrivyIgnoreWidensDocketE9WaiverForRemainingHighCriticalFindings(t *testing.T) {
+	root := repoRoot(t)
+
+	var doc struct {
+		Vulnerabilities []struct {
+			ID        string   `yaml:"id"`
+			Paths     []string `yaml:"paths"`
+			Purls     []string `yaml:"purls"`
+			ExpiredAt string   `yaml:"expired_at"`
+			Statement string   `yaml:"statement"`
+		} `yaml:"vulnerabilities"`
+	}
+	if err := yaml.Unmarshal([]byte(readFile(t, root, ".trivyignore.yaml")), &doc); err != nil {
+		t.Fatalf("parsing .trivyignore.yaml: %v", err)
+	}
+
+	const bridgeHorizon = "2026-09-21"
+
+	if got, want := len(doc.Vulnerabilities), 64; got != want {
+		t.Errorf(".trivyignore.yaml has %d entries, want %d (47 existing + exactly 17 new); the E9 widening must not trim, remove, or duplicate entries", got, want)
+	}
+
+	toSet := func(vals ...string) map[string]bool {
+		m := make(map[string]bool, len(vals))
+		for _, v := range vals {
+			m[v] = true
+		}
+		return m
+	}
+
+	type wantEntry struct {
+		id         string
+		paths      map[string]bool
+		purls      map[string]bool
+		substrings []string
+	}
+	wantEntries := []wantEntry{
+		{id: "CVE-2026-56864", paths: toSet("usr/bin/gh"), substrings: []string{"x/mod", "0.40.0", "5353"}},
+		{id: "CVE-2026-56865", paths: toSet("usr/bin/gh"), substrings: []string{"x/mod", "0.40.0", "5353"}},
+		{
+			id:         "CVE-2026-84304",
+			paths:      toSet("usr/bin/gh", "usr/local/bin/dolt", "usr/local/bin/bd", "usr/local/bin/gc"),
+			substrings: []string{"grpc", "5353", "rl1l10", "1.83.1"},
+		},
+		{
+			id:         "CVE-2026-84445",
+			paths:      toSet("usr/bin/gh", "usr/local/bin/dolt", "usr/local/bin/bd", "usr/local/bin/gc"),
+			substrings: []string{"grpc", "5353", "rl1l10", "1.83.1"},
+		},
+		{
+			id:         "CVE-2026-43871",
+			paths:      toSet("usr/local/bin/dolt", "usr/local/bin/bd"),
+			substrings: []string{"thrift", "0.24.0", "5353", "rl1l10"},
+		},
+		{id: "CVE-2026-33818", paths: toSet("usr/local/bin/kubectl"), substrings: []string{"1.26.6", "rl1l10"}},
+		{id: "CVE-2026-56853", paths: toSet("usr/local/bin/kubectl"), substrings: []string{"1.26.6", "rl1l10"}},
+		{id: "CVE-2026-56858", paths: toSet("usr/local/bin/kubectl"), substrings: []string{"1.26.6", "rl1l10"}},
+		{id: "CVE-2026-56859", paths: toSet("usr/local/bin/kubectl"), substrings: []string{"1.26.6", "rl1l10"}},
+		{id: "CVE-2026-56860", paths: toSet("usr/local/bin/kubectl"), substrings: []string{"1.26.6", "rl1l10"}},
+		{id: "CVE-2026-56862", paths: toSet("usr/local/bin/kubectl"), substrings: []string{"1.26.6", "rl1l10"}},
+		{
+			id: "CVE-2026-53612",
+			purls: toSet(
+				"pkg:deb/debian/bsdutils", "pkg:deb/debian/libblkid1", "pkg:deb/debian/liblastlog2-2",
+				"pkg:deb/debian/libmount1", "pkg:deb/debian/libsmartcols1", "pkg:deb/debian/libuuid1",
+				"pkg:deb/debian/login", "pkg:deb/debian/mount", "pkg:deb/debian/util-linux",
+			),
+			substrings: []string{"util-linux", "2.41.5-0+deb13u1", "dkgeoi"},
+		},
+		{
+			id: "CVE-2026-53613",
+			purls: toSet(
+				"pkg:deb/debian/bsdutils", "pkg:deb/debian/libblkid1", "pkg:deb/debian/liblastlog2-2",
+				"pkg:deb/debian/libmount1", "pkg:deb/debian/libsmartcols1", "pkg:deb/debian/libuuid1",
+				"pkg:deb/debian/login", "pkg:deb/debian/mount", "pkg:deb/debian/util-linux",
+			),
+			substrings: []string{"util-linux", "2.41.5-0+deb13u1", "dkgeoi"},
+		},
+		{
+			id: "CVE-2026-53614",
+			purls: toSet(
+				"pkg:deb/debian/bsdutils", "pkg:deb/debian/libblkid1", "pkg:deb/debian/liblastlog2-2",
+				"pkg:deb/debian/libmount1", "pkg:deb/debian/libsmartcols1", "pkg:deb/debian/libuuid1",
+				"pkg:deb/debian/login", "pkg:deb/debian/mount", "pkg:deb/debian/util-linux",
+			),
+			substrings: []string{"util-linux", "2.41.5-0+deb13u1", "dkgeoi"},
+		},
+		{
+			id:         "CVE-2026-78676",
+			purls:      toSet("pkg:pypi/gitpython"),
+			substrings: []string{"gitpython", "3.1.59", "dkgeoi", "critical"},
+		},
+		{
+			id:         "CVE-2026-78675",
+			purls:      toSet("pkg:pypi/gitpython"),
+			substrings: []string{"gitpython", "3.1.59", "dkgeoi"},
+		},
+		{
+			id:         "CVE-2026-78677",
+			purls:      toSet("pkg:pypi/gitpython"),
+			substrings: []string{"gitpython", "3.1.59", "dkgeoi"},
+		},
+	}
+
+	byID := map[string][]int{}
+	for i, v := range doc.Vulnerabilities {
+		byID[v.ID] = append(byID[v.ID], i)
+	}
+
+	for _, want := range wantEntries {
+		idxs := byID[want.id]
+		if len(idxs) != 1 {
+			t.Errorf("%s appears in %d entries, want exactly 1 new entry", want.id, len(idxs))
+			continue
+		}
+		v := doc.Vulnerabilities[idxs[0]]
+		if v.ExpiredAt != bridgeHorizon {
+			t.Errorf("%s expired_at = %q, want the bridge horizon %q", v.ID, v.ExpiredAt, bridgeHorizon)
+		}
+		if want.paths != nil {
+			gotPaths := toSet(v.Paths...)
+			if len(gotPaths) != len(want.paths) {
+				t.Errorf("%s paths = %v, want exactly %v", v.ID, v.Paths, want.paths)
+			}
+			for p := range want.paths {
+				if !gotPaths[p] {
+					t.Errorf("%s missing required path %q", v.ID, p)
+				}
+			}
+			for p := range gotPaths {
+				if !want.paths[p] {
+					t.Errorf("%s waives unexpected path %q", v.ID, p)
+				}
+			}
+			if len(v.Purls) != 0 {
+				t.Errorf("%s sets purls %v on a path-scoped binary finding; want no purls", v.ID, v.Purls)
+			}
+		}
+		if want.purls != nil {
+			gotPurls := toSet(v.Purls...)
+			if len(gotPurls) != len(want.purls) {
+				t.Errorf("%s purls = %v, want exactly %v", v.ID, v.Purls, want.purls)
+			}
+			for p := range want.purls {
+				if !gotPurls[p] {
+					t.Errorf("%s missing required purl %q", v.ID, p)
+				}
+			}
+			for p := range gotPurls {
+				if !want.purls[p] {
+					t.Errorf("%s waives unexpected purl %q", v.ID, p)
+				}
+			}
+			if len(v.Paths) != 0 {
+				t.Errorf("%s sets paths %v on a purl-scoped package finding; want no paths (confine to gc-mcp-mail via the purl match alone)", v.ID, v.Paths)
+			}
+		}
+		statement := strings.ToLower(v.Statement)
+		for _, sub := range want.substrings {
+			if !strings.Contains(statement, strings.ToLower(sub)) {
+				t.Errorf("%s statement %q does not name %q", v.ID, v.Statement, sub)
+			}
+		}
+	}
+
+	// CVE-2026-46600 (golang.org/x/net dns/dnsmessage) is widened in place to
+	// add usr/local/bin/kubectl; it must not be duplicated into a second entry.
+	const dnsCVE = "CVE-2026-46600"
+	dnsIdxs := byID[dnsCVE]
+	if len(dnsIdxs) != 1 {
+		t.Fatalf("%s appears in %d entries, want exactly 1 (widened in place, not duplicated)", dnsCVE, len(dnsIdxs))
+	}
+	dnsEntry := doc.Vulnerabilities[dnsIdxs[0]]
+	wantDNSPaths := toSet("usr/bin/gh", "usr/local/bin/dolt", "usr/local/bin/kubectl")
+	gotDNSPaths := toSet(dnsEntry.Paths...)
+	if len(gotDNSPaths) != len(wantDNSPaths) {
+		t.Errorf("%s paths = %v, want exactly %v (gh, dolt, and now kubectl)", dnsCVE, dnsEntry.Paths, wantDNSPaths)
+	}
+	for p := range wantDNSPaths {
+		if !gotDNSPaths[p] {
+			t.Errorf("%s missing required path %q", dnsCVE, p)
+		}
+	}
+	for p := range gotDNSPaths {
+		if !wantDNSPaths[p] {
+			t.Errorf("%s waives unexpected path %q", dnsCVE, p)
+		}
+	}
+}
