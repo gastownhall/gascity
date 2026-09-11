@@ -34,11 +34,17 @@ func ffSyncCmd(t *testing.T, binDir string, env []string, args ...string) *exec.
 // packScriptCmd builds `sh <script> <args>` for a one-DB ("app") SQL-mode city
 // against an idle reachable server, with the fake dolt in binDir first on
 // PATH and the fake bd installed: the ONE command-construction site the sync
-// and pull runners share (the repository's resource census counts os/exec
-// call sites and must not grow). Later `env` entries override earlier ones.
+// and pull runners — and the kill-helper wrapper (runKillHelper) — share (the
+// repository's resource census counts os/exec call sites and must not grow).
+// script is repo-root-relative, or absolute for a test-written wrapper. Later
+// `env` entries override earlier ones.
 func packScriptCmd(t *testing.T, script, binDir string, baseEnv, env []string, args ...string) *exec.Cmd {
 	t.Helper()
 	root := repoRoot(t)
+	scriptPath := script
+	if !filepath.IsAbs(script) {
+		scriptPath = filepath.Join(root, script)
+	}
 	port, cleanup := startReachableTCPListener(t)
 	t.Cleanup(cleanup)
 
@@ -49,7 +55,7 @@ func packScriptCmd(t *testing.T, script, binDir string, baseEnv, env []string, a
 	}
 	writeSyncFakeBeadsBD(t, cityPath)
 
-	cmd := exec.Command("sh", append([]string{filepath.Join(root, script)}, args...)...)
+	cmd := exec.Command("sh", append([]string{scriptPath}, args...)...)
 	cmd.Env = append(append(baseEnv,
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
@@ -1319,22 +1325,18 @@ func assertIDIsTheGate(t *testing.T, line, db, call string) {
 	}
 }
 
-// killHelperEnv runs kill_remote_op_session alone (runtime.sh sourced, the
-// fake dolt in binDir first on PATH, this run's nonce fixed) and returns the
-// helper's stderr and exit code — the return code IS the rule under test.
+// runKillHelper runs kill_remote_op_session alone — a test-written wrapper
+// script sources runtime.sh, fixes this run's nonce and calls the helper —
+// through packScriptCmd (the fake dolt in binDir first on PATH) and returns
+// the helper's stderr and exit code: the return code IS the rule under test.
 func runKillHelper(t *testing.T, binDir, label, db, id string) (string, int) {
 	t.Helper()
-	root := repoRoot(t)
-	cmd := exec.Command("sh", "-c", `. "$GC_PACK_DIR/assets/scripts/runtime.sh"; REMOTE_OP_RUN_NONCE=0123456789abcdef; kill_remote_op_session "$1" "$2" "$3"`, "sh", label, db, id)
-	cmd.Env = append(filteredEnv("PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_CITY_PATH", "GC_PACK_DIR"),
-		"PATH="+binDir+":"+os.Getenv("PATH"),
-		"GC_CITY_PATH="+t.TempDir(),
-		"GC_PACK_DIR="+root,
-		"GC_DOLT_PORT=1",
-		"GC_DOLT_USER=root",
-		"GC_DOLT_PASSWORD=",
-	)
-	out, err := cmd.CombinedOutput()
+	wrapper := filepath.Join(binDir, "kill-helper.sh")
+	body := "#!/bin/sh\n. \"$GC_PACK_DIR/assets/scripts/runtime.sh\"\nREMOTE_OP_RUN_NONCE=0123456789abcdef\nkill_remote_op_session \"$1\" \"$2\" \"$3\"\n"
+	if err := os.WriteFile(wrapper, []byte(body), 0o755); err != nil {
+		t.Fatalf("write kill-helper wrapper: %v", err)
+	}
+	out, err := packScriptCmd(t, wrapper, binDir, filteredEnv("PATH"), nil, label, db, id).CombinedOutput()
 	rc := 0
 	if err != nil {
 		var ee *exec.ExitError
