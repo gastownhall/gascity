@@ -353,6 +353,17 @@ const (
 // absent from startupConfirmStates.
 const agentStateIdle = "idle"
 
+// normalizeAgentState folds one reported agent_status to the spelling the
+// package's classifying readers compare against. It is deliberately shared:
+// two readers normalizing the same field differently classify the same payload
+// differently, and the disagreement is invisible at both sites. Note the
+// keystroke guard below does NOT use it, on purpose — it withholds a real
+// keystroke unless herdr reported exactly the idle state, and widening that is
+// a behavior change, not a cleanup.
+func normalizeAgentState(status string) string {
+	return strings.ToLower(strings.TrimSpace(status))
+}
+
 // startupConfirmStates are the post-submission states that prove the submit
 // CR took: the turn is running (working), already finished (done — an
 // ultra-short turn can settle between herdr's observations), or hit a dialog
