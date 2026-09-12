@@ -679,3 +679,54 @@ func TestBeadPolicyStoreCountUnsupportedWithoutInnerCounter(t *testing.T) {
 		t.Fatalf("Count error = %v, want ErrCountUnsupported", err)
 	}
 }
+
+// witnessCaptureStore is a store that has already handed this process a row,
+// which is the state the store-health count checks a later zero against.
+type witnessCaptureStore struct {
+	beads.Store
+	sawRows bool
+}
+
+func (s *witnessCaptureStore) SawRows() bool { return s.sawRows }
+
+// TestBeadPolicyStorePreservesRowWitness pins the capability the store-health
+// row count depends on across this wrapper.
+//
+// The controller reads its city store through a policy wrapper on every city:
+// the opener policy-wraps its result, and wrapWithCachingStore re-wraps the
+// cache it builds. So a witness that stopped at the wrapper would leave
+// countBeadStoreRows unable to disprove a zero on exactly the stores the guard
+// was written for, and the failure is silent — a missing optional capability
+// reads as "this store cannot witness itself", which is a supported state.
+func TestBeadPolicyStorePreservesRowWitness(t *testing.T) {
+	store := wrapStoreWithBeadPolicies(&witnessCaptureStore{Store: beads.NewMemStore(), sawRows: true}, &config.City{})
+
+	witness, ok := store.(beads.RowWitness)
+	if !ok {
+		t.Fatal("policy store does not implement beads.RowWitness; the store-health count loses its only disproof of a zero on every controller-opened city")
+	}
+	if !witness.SawRows() {
+		t.Fatal("SawRows() = false while the wrapped store had already been handed a row")
+	}
+
+	cold := wrapStoreWithBeadPolicies(&witnessCaptureStore{Store: beads.NewMemStore()}, &config.City{})
+	if cold.(beads.RowWitness).SawRows() {
+		t.Fatal("SawRows() = true over a store holding no evidence; the wrapper must forward the verdict, not manufacture one")
+	}
+}
+
+// TestBeadPolicyStoreReportsNoEvidenceWithoutInnerWitness covers the inner
+// stores that cannot witness themselves. Reporting no evidence is what keeps a
+// caller on its prior behavior, the same way an absent inner Counter reports
+// ErrCountUnsupported rather than failing the read.
+func TestBeadPolicyStoreReportsNoEvidenceWithoutInnerWitness(t *testing.T) {
+	store := wrapStoreWithBeadPolicies(beads.NewMemStore(), &config.City{})
+
+	witness, ok := store.(beads.RowWitness)
+	if !ok {
+		t.Fatal("policy store does not implement beads.RowWitness")
+	}
+	if witness.SawRows() {
+		t.Fatal("SawRows() = true over a store that cannot witness itself")
+	}
+}

@@ -778,3 +778,145 @@ func BenchmarkReadyOnAnEmptyStoreAfterTheVerdict(b *testing.B) {
 		}
 	}
 }
+
+// The read the store-health denominator makes: a whole-ledger scan that
+// includes closed rows. IncludeClosed is not one of the fields HasFilter
+// counts, so this is exactly the shape listReadIsWholeLedger recognizes — an
+// empty answer to it is a claim about the store rather than about a predicate.
+const wholeLedgerCmd = `bd list --json --all --include-infra --include-gates --limit 0`
+
+// TestSawRowsAnswersFromTheSameLatchAsTheNotice pins the witness a caller uses
+// to reject a zero against the latch the operator-facing notice already reads.
+//
+// Two answers about one scope that can disagree are worse than one answer, so
+// SawRows deliberately owns no state of its own.
+func TestSawRowsAnswersFromTheSameLatchAsTheNotice(t *testing.T) {
+	scope := scopeWithUnreadDatabase(t)
+	runner := newRecordingRunner(map[string]string{wholeLedgerCmd: rowJSON})
+	var notices bytes.Buffer
+	s := beads.NewBdStore(scope, runner.run, beads.WithBdStoreNoticeSink(&notices))
+
+	if s.SawRows() {
+		t.Fatal("SawRows() = true before any read; a witness with no evidence must report none")
+	}
+	got, err := s.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	if err != nil || len(got) != 1 {
+		t.Fatalf("List = (%d beads, %v), want (1, nil)", len(got), err)
+	}
+	if !s.SawRows() {
+		t.Fatal("SawRows() = false after bd handed this scope a row; the latch is the disproof a later zero is checked against")
+	}
+	if notices.Len() != 0 {
+		t.Fatalf("a populated store printed the unread-store notice: %q", notices.String())
+	}
+	if n := runner.probes(); n != 0 {
+		t.Fatalf("the witness spent %d probe subprocess(es); it may cost a latch read and nothing more", n)
+	}
+}
+
+// TestSawRowsReportsNoEvidenceForALedgerThatOnlyEverAnsweredEmpty states the
+// limit of the witness out loud, because a caller that mistook it for a
+// liveness check would reject the healthy case.
+//
+// A scope bd has only ever answered empty is the one shape the witness cannot
+// speak to: a brand-new city and a read pointed at the wrong database look
+// identical from here. So the witness reports no evidence, its caller keeps
+// the zero, and the notice — which fires on this same read — is what an
+// operator gets instead.
+func TestSawRowsReportsNoEvidenceForALedgerThatOnlyEverAnsweredEmpty(t *testing.T) {
+	scope := scopeWithUnreadDatabase(t)
+	runner := newRecordingRunner(map[string]string{wholeLedgerCmd: noRows})
+	var notices bytes.Buffer
+	s := beads.NewBdStore(scope, runner.run, beads.WithBdStoreNoticeSink(&notices))
+
+	got, err := s.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("List error = %v, want nil: an empty whole-ledger read still succeeds", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("List = %d beads, want 0", len(got))
+	}
+	if s.SawRows() {
+		t.Fatal("SawRows() = true after an empty read; the witness must never manufacture evidence")
+	}
+	if notices.Len() == 0 {
+		t.Fatal("the unread-store notice stayed silent on an empty whole-ledger read of a scope with a second database")
+	}
+}
+
+// TestSawRowsIsSharedAcrossStoresOverOneScope covers the arrangement the API
+// server actually runs: cmd/gc builds a throwaway context-bound store for each
+// read, so a witness memoized per store object would report no evidence on
+// every request that mattered.
+func TestSawRowsIsSharedAcrossStoresOverOneScope(t *testing.T) {
+	scope := scopeWithUnreadDatabase(t)
+	runner := newRecordingRunner(map[string]string{wholeLedgerCmd: rowJSON})
+	first := beads.NewBdStore(scope, runner.run)
+	if _, err := first.List(beads.ListQuery{AllowScan: true, IncludeClosed: true}); err != nil {
+		t.Fatalf("List: %v", err)
+	}
+
+	second := beads.NewBdStore(scope, runner.run)
+	if !second.SawRows() {
+		t.Fatal("a store rebuilt over the same scope reported no evidence; the verdict is keyed on the scope path so a throwaway store inherits it")
+	}
+}
+
+// TestBdStoreCannotCountSoWholeLedgerReadsHydrate is the evidence behind the
+// branch labels in the store-health count.
+//
+// countBeadStoreRows takes its Counter fast path only when the store
+// implements beads.Counter. BdStore does not, so on every bd-backed city the
+// store-health denominator reaches the hydrating list fallback instead — which
+// is what makes an empty whole-ledger answer, and the zero built from it,
+// reachable at all. If BdStore ever gains Count, that reasoning changes and the
+// labels want revisiting.
+func TestBdStoreCannotCountSoWholeLedgerReadsHydrate(t *testing.T) {
+	var store beads.Store = beads.NewBdStore(t.TempDir(), newRecordingRunner(nil).run)
+	if _, ok := store.(beads.Counter); ok {
+		t.Fatal("BdStore now implements Counter; the store-health count no longer falls through to the hydrating list path, so revisit the branch labels in internal/api/store_health.go")
+	}
+	if _, ok := store.(beads.RowWitness); !ok {
+		t.Fatal("BdStore no longer implements RowWitness; the store-health count loses its only disproof of a zero on bd-backed cities")
+	}
+}
+
+// TestCachingStoreWitnessesRowsForABackingThatCannot covers the store the API
+// server holds. The cache wraps the bd store in production, so a witness that
+// answered only for the innermost store would never be consulted.
+func TestCachingStoreWitnessesRowsForABackingThatCannot(t *testing.T) {
+	scope := scopeWithUnreadDatabase(t)
+	runner := newRecordingRunner(map[string]string{wholeLedgerCmd: rowJSON})
+	backing := beads.NewBdStore(scope, runner.run)
+	cache := beads.NewCachingStoreForTest(backing, nil)
+
+	if cache.SawRows() {
+		t.Fatal("SawRows() = true on a cold cache over a scope nothing has read")
+	}
+	if _, err := backing.List(beads.ListQuery{AllowScan: true, IncludeClosed: true}); err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if !cache.SawRows() {
+		t.Fatal("the cache reported no evidence while its backing store had already been handed a row")
+	}
+}
+
+// TestCachingStoreWitnessesItsOwnCache covers the other backend shapes, where
+// the backing store cannot witness itself and the rows the cache is holding
+// are the only evidence available.
+func TestCachingStoreWitnessesItsOwnCache(t *testing.T) {
+	mem := beads.NewMemStore()
+	if _, ok := beads.Store(mem).(beads.RowWitness); ok {
+		t.Fatal("MemStore implements RowWitness; this test no longer covers the witness-less backing case")
+	}
+	cache := beads.NewCachingStoreForTest(mem, nil)
+	if cache.SawRows() {
+		t.Fatal("SawRows() = true on an empty cache over a witness-less store")
+	}
+	if _, err := cache.Create(beads.Bead{Title: "a real bead"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !cache.SawRows() {
+		t.Fatal("the cache reported no evidence while holding a bead of its own")
+	}
+}

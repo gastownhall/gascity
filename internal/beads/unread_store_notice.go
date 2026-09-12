@@ -310,6 +310,20 @@ func (s *BdStore) noteServerRows(rows int) {
 	g.sawRows.Store(true)
 }
 
+// SawRows implements RowWitness from the same per-scope latch the notice
+// consults, so a caller acting on the witness and an operator reading the
+// notice can never be told different things about the same scope.
+//
+// It reads the latch and nothing else: no filesystem, no subprocess, one
+// atomic load. The per-scope memoization is what makes the answer useful to
+// the API server, where cmd/gc rebuilds a throwaway BdStore for every
+// context-bound read — a store built a moment ago inherits the verdict the
+// process already reached against the same directory.
+func (s *BdStore) SawRows() bool {
+	g := s.unreadGuard()
+	return g != nil && g.sawRows.Load()
+}
+
 // noticeIfStoreCannotSeeItsLedger prints the unread-store notice at most once
 // per scope, when an UNFILTERED whole-ledger read came back empty and the
 // evidence supports it.
