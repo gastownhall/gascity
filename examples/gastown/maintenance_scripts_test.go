@@ -1308,6 +1308,149 @@ exit 1
 	}
 }
 
+// TestOrphanSweepTreatsPoolSessionNameSelfProbeAsUnverifiable verifies that a
+// pool-seat assignee whose only probe candidate is its own session name is
+// treated as unverifiable for BOTH tmux-safe session-name encodings.
+// agent.SanitizeQualifiedNameForSession encodes "/" as "--" (rig-scope:
+// "beads/deployer" -> "beads--deployer") and "." as "__" (pack-qualified
+// city-scope: "pack-author.pack-author" -> "pack-author__pack-author").
+// `gc bd show <session name>` cannot resolve either shape to a bead, so both
+// are failed probes, not dead seats.
+//
+// The self-probe fail-safe landed recognizing only "--" (#5841), which left
+// every "__" seat resetting whenever the liveness snapshot momentarily lacked
+// its row: measured as 7 resets over 2026-09-10..12, every one a "__" seat and
+// none a "--" seat, while 3 "__" seats were live (ga-dei7xx).
+func TestOrphanSweepTreatsPoolSessionNameSelfProbeAsUnverifiable(t *testing.T) {
+	tests := []struct {
+		name     string
+		workID   string
+		assignee string
+	}{
+		{
+			// Control: already protected by the "--" arm.
+			name:     "rig scope double dash",
+			workID:   "ga-rig-pool-self-probe",
+			assignee: "beads--deployer-pool",
+		},
+		{
+			name:     "city scope double underscore",
+			workID:   "ga-city-pool-self-probe",
+			assignee: "pack-author__pack-author-pool",
+		},
+		{
+			// Slot-numbered seat: the "-<slot>" sits between the sanitized
+			// agent and the "-pool" suffix (live example: bd__dog-1-pool).
+			name:     "city scope numbered slot",
+			workID:   "ga-city-slot-pool-self-probe",
+			assignee: "bd__dog-1-pool",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			binDir := t.TempDir()
+			gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+			// The session list carries an unrelated keepalive row but not the
+			// pool seat: the transient window in which a cycling seat is
+			// absent from the snapshot, which drops the sweep through to the
+			// self-probe fail-safe. `bd show <assignee>` is left unhandled so
+			// it exits non-zero, exactly as the real binary does when handed a
+			// session name instead of a bead id. Both seats reconstruct from
+			// these configured agents, which is what marks them as seats
+			// rather than ephemeral sessions.
+			writeExecutable(t, filepath.Join(binDir, "gc"), fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> "$GC_CALL_LOG"
+case "$1" in
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: beads/deployer
+  source: pack
+Agent: pack-author.pack-author
+  source: pack
+Agent: bd.dog
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"sessions":[{"id":"orphan-sweep-test-keepalive","session_name":"orphan-sweep-test-keepalive","closed":false}],"summary":{},"filters":{},"schema_version":"1"}\n'
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      cat <<'EOF'
+[
+  {"id":%q,"status":"in_progress","assignee":%q}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = %q ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":%q,"status":"in_progress","assignee":%q}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "release-if-current" ]; then
+      printf 'released\n'
+      exit 0
+    fi
+    if [ "$2" = "update" ]; then
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`, tt.workID, tt.assignee, tt.workID, tt.workID, tt.assignee))
+
+			env := map[string]string{
+				"GC_CITY":      cityDir,
+				"GC_CITY_PATH": cityDir,
+				"GC_CALL_LOG":  gcLog,
+				"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			}
+
+			script := coreScriptPath("orphan-sweep.sh")
+			cmd := exec.Command(script)
+			cmd.Env = mergeTestEnv(env)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+			}
+			if !strings.Contains(string(out), "orphan-sweep: reset 0 orphaned beads, skipped 1 unverifiable") {
+				t.Fatalf("session-name self-probe was not treated as unverifiable:\n%s", out)
+			}
+
+			logData, err := os.ReadFile(gcLog)
+			if err != nil {
+				t.Fatalf("ReadFile(gc log): %v", err)
+			}
+			log := string(logData)
+			if !strings.Contains(log, "bd show "+tt.assignee+" --json") {
+				t.Fatalf("session-name self-probe was never attempted:\n%s", log)
+			}
+			if strings.Contains(log, "bd release-if-current "+tt.workID+" ") {
+				t.Fatalf("live pool seat %q lost its claim on %s:\n%s", tt.assignee, tt.workID, log)
+			}
+		})
+	}
+}
+
 func TestOrphanSweepUsesDirectSessionBeadCandidatesWhenSessionListLags(t *testing.T) {
 	tests := []struct {
 		name      string
