@@ -218,7 +218,13 @@ type hookClaimOps struct {
 	StampSessionClaim hookStampSessionClaimFunc
 	// ReadWorkMeta is the post-stamp authoritative readback used only to
 	// establish the durable lifecycle-start emission point.
-	ReadWorkMeta             func(context.Context, string, []string, string, string) (beads.Bead, error)
+	ReadWorkMeta func(context.Context, string, []string, string, string) (beads.Bead, error)
+	// ConfirmBlocked re-derives whether a bead is really blocked, from its live
+	// dependencies rather than bd's denormalized is_blocked projection (which
+	// production reads do not carry). Diagnostics-only: the demand/claim
+	// divergence classifier calls it to settle a row it cannot classify from the
+	// bead alone. Nothing on the claim path reads it.
+	ConfirmBlocked           func(context.Context, string, []string, string, string) (bool, error)
 	EmitExecutionStepStarted func(beads.Bead, string, []string, string)
 	// PublishRunMap writes best-effort session-to-run correlation without
 	// mutating the session bead after a successful work claim.
@@ -486,6 +492,9 @@ func (ops *hookClaimOps) applyDefaults() {
 	if ops.ReadWorkMeta == nil {
 		ops.ReadWorkMeta = hookReadClaimedBeadWithBdStore
 	}
+	if ops.ConfirmBlocked == nil {
+		ops.ConfirmBlocked = hookConfirmBeadBlockedWithBdStore
+	}
 	if ops.EmitExecutionStepStarted == nil {
 		ops.EmitExecutionStepStarted = hookEmitExecutionStepStarted
 	}
@@ -610,11 +619,13 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 	ctx, cancel := ops.claimMutationContext()
 	defer cancel()
 	claimsErrored := false
+	now := ops.nowOrWallClock()
 	for _, candidate := range candidates {
 		if strings.TrimSpace(candidate.ID) == "" ||
 			hookClaimCandidateIsMessage(candidate) ||
 			!strings.EqualFold(strings.TrimSpace(candidate.Status), "open") ||
-			!hookClaimHasIdentity(candidate.Assignee, opts.IdentityCandidates) {
+			!hookClaimHasIdentity(candidate.Assignee, opts.IdentityCandidates) ||
+			hookCandidateBudgetDeferred(candidate, now) {
 			continue
 		}
 		// F-B. Promoting a ready assignment is a status CAS — a mutation — so it
@@ -733,8 +744,9 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 	ctx, cancel := ops.claimMutationContext()
 	defer cancel()
 	claimsErrored := false
+	now := ops.nowOrWallClock()
 	for _, candidate := range candidates {
-		if !hookCandidateClaimable(candidate, opts.RouteTargets) {
+		if !hookCandidateClaimable(candidate, opts.RouteTargets, now) {
 			continue
 		}
 		// F-B. The fresh-claim CAS is the mutation that mints a new obligation,
@@ -835,12 +847,34 @@ func mergeHookClaimCandidateMetadata(candidate, claimed beads.Bead) beads.Bead {
 }
 
 // hookCandidateClaimable reports whether a work-query candidate is eligible for a
-// fresh claim: it has an id, is currently unassigned, and matches one of this
-// session's route targets.
-func hookCandidateClaimable(candidate beads.Bead, routeTargets []string) bool {
+// fresh claim: it has an id, is currently unassigned, matches one of this
+// session's route targets, and is not still within a build-budget deferral
+// window (see hookCandidateBudgetDeferred).
+func hookCandidateClaimable(candidate beads.Bead, routeTargets []string, now time.Time) bool {
 	return strings.TrimSpace(candidate.ID) != "" &&
 		strings.TrimSpace(candidate.Assignee) == "" &&
-		hookClaimMatchesRoute(candidate, routeTargets)
+		hookClaimMatchesRoute(candidate, routeTargets) &&
+		!hookCandidateBudgetDeferred(candidate, now)
+}
+
+// hookCandidateBudgetDeferred reports whether a candidate is still within a
+// build-budget deferral window stamped by the sling boundary (host/bin/gc, in
+// the outer city repo) via gc.budget_deferred_until, an RFC3339 timestamp
+// cleared by deacon-dispatch.sh on successful dispatch. Callers inject now
+// (ops.nowOrWallClock) so behavior stays deterministic under test. Mirrors
+// isFutureDeferredHookCandidate's fail-open shape: an absent or malformed
+// timestamp is never treated as deferred, so a bad stamp cannot wedge a
+// candidate forever.
+func hookCandidateBudgetDeferred(candidate beads.Bead, now time.Time) bool {
+	raw := strings.TrimSpace(candidate.Metadata[beadmeta.BudgetDeferredUntilMetadataKey])
+	if raw == "" {
+		return false
+	}
+	deferAt, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return false
+	}
+	return deferAt.After(now)
 }
 
 // reportHookClaimRejected publishes a bead.claim_rejected event (ADR-0009) when a
@@ -1377,7 +1411,8 @@ func hookClaimLifecycleCandidate(bead beads.Bead, opts hookClaimOptions) bool {
 func hookClaimIdentityPatch(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string) map[string]string {
 	patch := map[string]string{}
 	if branch := strings.TrimSpace(ops.ResolveWorkBranch(dir)); branch != "" &&
-		strings.TrimSpace(bead.Metadata[beadmeta.WorkBranchMetadataKey]) != branch {
+		strings.TrimSpace(bead.Metadata[beadmeta.WorkBranchMetadataKey]) != branch &&
+		hookClaimWorktreeEvidenceIsWholeOrAbsent(bead) {
 		patch[beadmeta.WorkBranchMetadataKey] = branch
 	}
 	if sessionID := hookClaimSessionID(opts.Env); sessionID != "" &&
@@ -1396,6 +1431,39 @@ func hookClaimIdentityPatch(bead beads.Bead, opts hookClaimOptions, ops hookClai
 	return patch
 }
 
+// worktreeOwnershipEvidenceKeys are the eight worktree-ownership metadata
+// keys worktreeSpecForBead (pool_desired_state.go) requires alongside
+// gc.work_branch before it will treat a bead as a fully managed workspace.
+var worktreeOwnershipEvidenceKeys = []string{
+	beadmeta.WorktreeRepoMetadataKey,
+	beadmeta.WorktreeRootMetadataKey,
+	beadmeta.WorktreeBaseRefMetadataKey,
+	beadmeta.WorktreeBaseSHAMetadataKey,
+	beadmeta.WorktreeCreatorMetadataKey,
+	beadmeta.WorktreeOwnerMetadataKey,
+	beadmeta.WorktreeGenerationMetadataKey,
+	beadmeta.WorktreeLifecycleMetadataKey,
+}
+
+// hookClaimWorktreeEvidenceIsWholeOrAbsent reports whether a bead's other
+// eight worktree-ownership keys are either all present or all absent. A claim
+// must not be the thing that first introduces a partial (1-7 of 8) ownership
+// shape by ambiently stamping gc.work_branch onto a bead that already carries
+// some-but-not-all of the other eight keys -- that half-published shape is
+// exactly what worktreeSpecForBead hard-errors on (ga-ryeij1.1 Decision b).
+// Stamping stays safe at both boundaries: zero of the eight (a legacy or
+// not-yet-published bead) or all eight (evidence already complete; this is
+// just keeping the branch in sync).
+func hookClaimWorktreeEvidenceIsWholeOrAbsent(bead beads.Bead) bool {
+	present := 0
+	for _, key := range worktreeOwnershipEvidenceKeys {
+		if strings.TrimSpace(bead.Metadata[key]) != "" {
+			present++
+		}
+	}
+	return present == 0 || present == len(worktreeOwnershipEvidenceKeys)
+}
+
 func hookStampWorkMetaWithBdStore(_ context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error {
 	store := hookClaimBdStore(dir, env, assignee)
 	return store.Update(beadID, beads.UpdateOpts{Metadata: patch})
@@ -1403,6 +1471,14 @@ func hookStampWorkMetaWithBdStore(_ context.Context, dir string, env []string, b
 
 func hookReadClaimedBeadWithBdStore(_ context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, error) {
 	return hookClaimBdStore(dir, env, assignee).Get(beadID)
+}
+
+// hookConfirmBeadBlockedWithBdStore is the production ConfirmBlocked seam. It
+// binds its bd children to ctx — the divergence classifier runs after the drain
+// is already written, so its dependency walk must never outlive the deadline that
+// caller set.
+func hookConfirmBeadBlockedWithBdStore(ctx context.Context, dir string, env []string, beadID, assignee string) (bool, error) {
+	return beadHasUnmetPlainBlocksDep(hookClaimBdStoreContext(ctx, dir, env, assignee), beadID)
 }
 
 func hookEmitExecutionStepStarted(step beads.Bead, dir string, env []string, assignee string) {

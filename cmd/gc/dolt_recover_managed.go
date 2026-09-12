@@ -110,7 +110,11 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 	}
 
 	if recoverManagedDoltObservedRebindPossible(cityPath, port) {
-		if ready := observeExistingManagedDoltForRecovery(cityPath, host, port, user, recoverManagedDoltExistingObserveTimeout(timeout), &report); ready && recoverManagedDoltShouldReuseExisting(report.Port, port) {
+		observePort := port
+		if alternatePort := recoverManagedDoltObservedPort(cityPath, port); alternatePort != "" {
+			observePort = alternatePort
+		}
+		if ready := observeExistingManagedDoltForRecovery(cityPath, host, observePort, user, recoverManagedDoltExistingObserveTimeout(timeout), &report); ready && recoverManagedDoltShouldReuseExisting(report.Port, port) {
 			report.Ready = true
 			report.Healthy = true
 			if err := ops.publish(cityPath); err != nil {
@@ -255,16 +259,28 @@ func recoverManagedDoltObservedRebindPossible(cityPath, requestedPort string) bo
 	if requestedPort == "" {
 		return true
 	}
+	return recoverManagedDoltObservedPort(cityPath, requestedPort) != ""
+}
+
+// recoverManagedDoltObservedPort returns a live-state port different from the
+// requested port. Provider state can lag a scope watchdog rebind, so probing
+// only the requested port would miss the healthy managed server and start a
+// second recovery against stale endpoint state.
+func recoverManagedDoltObservedPort(cityPath, requestedPort string) string {
+	requestedPort = strings.TrimSpace(requestedPort)
+	if requestedPort == "" {
+		return ""
+	}
 	for _, path := range []string{providerManagedDoltStatePath(cityPath), managedDoltStatePath(cityPath)} {
 		state, err := readDoltRuntimeStateFile(path)
 		if err != nil || !state.Running || state.PID <= 0 || state.Port <= 0 {
 			continue
 		}
 		if strconv.Itoa(state.Port) != requestedPort {
-			return true
+			return strconv.Itoa(state.Port)
 		}
 	}
-	return false
+	return ""
 }
 
 func recoverManagedDoltRepairRuntimeStateForHealthyPort(cityPath, requestedPort string) error {

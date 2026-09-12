@@ -69,7 +69,7 @@ func TestNativeDoltStoreWithoutADeclaredPrefixAgreesBetweenCreateAndUpdate(t *te
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	namespace := nativeBeadIDPrefix(control.ID)
+	namespace := beadIDPrefix(control.ID)
 	if namespace == "" {
 		t.Fatalf("this fixture minted %q, which carries no namespace segment; the rows below would compare nothing", control.ID)
 	}

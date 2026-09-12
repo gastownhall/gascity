@@ -14,9 +14,10 @@ import (
 // error (as opposed to misclassifying it as "not found" or swallowing it).
 type erroringStore struct {
 	beads.Store
-	createErr error
-	setErr    error
-	listErr   error
+	createErr    error
+	setErr       error
+	listErr      error
+	listQueryErr error
 }
 
 func (e *erroringStore) Create(b beads.Bead) (beads.Bead, error) {
@@ -38,6 +39,13 @@ func (e *erroringStore) ListByMetadata(filters map[string]string, limit int, opt
 		return nil, e.listErr
 	}
 	return e.Store.ListByMetadata(filters, limit, opts...)
+}
+
+func (e *erroringStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if e.listQueryErr != nil {
+		return nil, e.listQueryErr
+	}
+	return e.Store.List(q)
 }
 
 // startupHealthBeadFixture builds a startup-health-episode bead for the given
@@ -382,5 +390,81 @@ func TestStoreSavedStartupHealthEpisodeExcludedFromSessionList(t *testing.T) {
 	}
 	if len(infos) != 1 || infos[0].ID != created.ID {
 		t.Fatalf("List() = %+v, want exactly the session bead %q (never the startup-health episode)", infos, created.ID)
+	}
+}
+
+func TestStoreListStartupHealthEpisodesEmptyStoreReturnsEmpty(t *testing.T) {
+	s := NewStore(beads.SessionStore{Store: beads.NewMemStore()})
+	got, err := s.ListStartupHealthEpisodes()
+	if err != nil {
+		t.Fatalf("ListStartupHealthEpisodes: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("ListStartupHealthEpisodes() = %+v, want empty", got)
+	}
+}
+
+func TestStoreListStartupHealthEpisodesReturnsAllSaved(t *testing.T) {
+	mem := beads.NewMemStore()
+	s := NewStore(beads.SessionStore{Store: mem})
+	first := StartupHealthEpisode{SessionName: "a", ConsecutiveCount: 1}
+	second := StartupHealthEpisode{SessionName: "b", ConsecutiveCount: 2}
+	if err := s.SaveStartupHealthEpisode(first); err != nil {
+		t.Fatalf("SaveStartupHealthEpisode(a): %v", err)
+	}
+	if err := s.SaveStartupHealthEpisode(second); err != nil {
+		t.Fatalf("SaveStartupHealthEpisode(b): %v", err)
+	}
+	got, err := s.ListStartupHealthEpisodes()
+	if err != nil {
+		t.Fatalf("ListStartupHealthEpisodes: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len(ListStartupHealthEpisodes()) = %d, want 2", len(got))
+	}
+	bySessionName := map[string]StartupHealthEpisode{}
+	for _, ep := range got {
+		bySessionName[ep.SessionName] = ep
+	}
+	if bySessionName["a"] != first {
+		t.Errorf("episode %q = %+v, want %+v", "a", bySessionName["a"], first)
+	}
+	if bySessionName["b"] != second {
+		t.Errorf("episode %q = %+v, want %+v", "b", bySessionName["b"], second)
+	}
+}
+
+func TestStoreListStartupHealthEpisodesIncludesClosedBeads(t *testing.T) {
+	mem := beads.NewMemStore()
+	s := NewStore(beads.SessionStore{Store: mem})
+	ep := StartupHealthEpisode{SessionName: "w", ConsecutiveCount: 1}
+	if err := s.SaveStartupHealthEpisode(ep); err != nil {
+		t.Fatalf("SaveStartupHealthEpisode: %v", err)
+	}
+	matches, err := mem.ListByMetadata(map[string]string{StartupHealthSessionNameMetadataKey: "w"}, 1)
+	if err != nil {
+		t.Fatalf("ListByMetadata: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("len(matches) = %d, want 1", len(matches))
+	}
+	if err := mem.Close(matches[0].ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	got, err := s.ListStartupHealthEpisodes()
+	if err != nil {
+		t.Fatalf("ListStartupHealthEpisodes: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len(ListStartupHealthEpisodes()) = %d, want 1 (closed episodes must still surface)", len(got))
+	}
+}
+
+func TestStoreListStartupHealthEpisodesPropagatesStoreError(t *testing.T) {
+	boom := errors.New("boom")
+	s := NewStore(beads.SessionStore{Store: &erroringStore{Store: beads.NewMemStore(), listQueryErr: boom}})
+	_, err := s.ListStartupHealthEpisodes()
+	if !errors.Is(err, boom) {
+		t.Errorf("ListStartupHealthEpisodes error = %v, want wrapped %v", err, boom)
 	}
 }

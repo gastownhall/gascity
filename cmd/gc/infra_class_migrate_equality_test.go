@@ -438,8 +438,10 @@ func TestVerifyInfraCopyRefusesADroppedDurableField(t *testing.T) {
 // It does NOT cover the edge payload, and that is the point of saying so here:
 // the payload is not a field of beads.Dep at all — it is a sidecar the source
 // carries in its dependencies.metadata column and the destination keeps in kv.
-// No reflection over this struct could ever see it. See infraDepDifference's
-// doc comment for why this stage cannot witness it, and the bead that closes it.
+// No reflection over this struct could ever see it, so growing this table can
+// never close it. It is witnessed next door by infraEdgePayloadDifference, which
+// asks both stores about each pair rather than comparing two slices; see
+// TestInfraEdgePayloadDifferenceComparesPayloadsBothWays.
 func TestInfraDepDifferenceWitnessesEveryDepField(t *testing.T) {
 	compared := map[string]func(beads.Dep) beads.Dep{
 		"DependsOnID": func(d beads.Dep) beads.Dep { d.DependsOnID = "gcg-998"; return d },
@@ -635,6 +637,134 @@ func TestInfraDepDifferenceComparesEdgesBothWays(t *testing.T) {
 	}
 }
 
+// TestVerifyInfraCopyRefusesAStrippedEdgePayload proves the equality stage
+// ACTUALLY ASKS about payloads, which no other test in this slice can show.
+//
+// Every other one drives the copy, and the copy carries payloads correctly — so
+// deleting the payload comparison out of verifyInfraCopy leaves all of them
+// green. The gap is only visible against a destination that received a faithful
+// copy and then lost the payload, which is exactly the state a future
+// regression in the writer would produce.
+//
+// Stripping is done by re-adding the edge with a bare DepAdd: on this
+// destination that is not a no-op, because setGraphEdgeMetadataTx clears the
+// pair's sidecar before deciding it has nothing to store. That destructive
+// re-add is the regression itself, reproduced.
+func TestVerifyInfraCopyRefusesAStrippedEdgePayload(t *testing.T) {
+	backing, from, to, _ := seedInfraEdgeSource(t)
+	const payload = `{"gate":"waits_for","threshold":3}`
+	source := &payloadCarryingSource{
+		Store:    backing,
+		payloads: map[[2]string]string{{from.ID, to.ID}: payload},
+	}
+
+	rows, err := readInfraSnapshot(source)
+	if err != nil {
+		t.Fatalf("readInfraSnapshot: %v", err)
+	}
+	destination, reopen := infraEqualityDestination(t)
+	if _, err := importInfraSnapshot(destination, source, rows); err != nil {
+		t.Fatalf("importing: %v", err)
+	}
+	if _, err := verifyInfraCopy(reopen, source); err != nil {
+		t.Fatalf("the equality stage refused a faithful copy: %v", err)
+	}
+
+	if err := destination.DepAdd(from.ID, to.ID, "blocks"); err != nil {
+		t.Fatalf("stripping the payload: %v", err)
+	}
+	if _, err := verifyInfraCopy(reopen, source); err == nil {
+		t.Fatal("the equality stage blessed a destination that holds every edge and none of their payloads; a copy that lost every formula gate would get a convergence marker")
+	}
+}
+
+// TestInfraEdgePayloadDifferenceComparesPayloadsBothWays is the edge-payload
+// half of the equality stage, and the reason the carry is safe rather than
+// merely present.
+//
+// A copy that moved every edge and dropped every gate produces an identical
+// beads.Dep set on both sides, so infraDepDifference clears it and the marker
+// lands on a binding that has quietly lost its formula gating. Only this
+// comparison sees that, and it sees it by asking each store about each pair
+// rather than by comparing two slices.
+//
+// Both directions, and the four cases the engines make possible:
+// dropped, invented, changed, and the pair of empty spellings that must NOT be
+// read as a difference — Dolt renders an absent payload as "{}" while SQLite
+// stores nothing, and a comparison that called those unequal would refuse every
+// Dolt-sourced city.
+func TestInfraEdgePayloadDifferenceComparesPayloadsBothWays(t *testing.T) {
+	backing, from, to, work := seedInfraEdgeSource(t)
+	infra := map[string]bool{from.ID: true, to.ID: true}
+	deps := []beads.Dep{
+		{IssueID: from.ID, DependsOnID: to.ID, Type: "blocks"},
+		{IssueID: from.ID, DependsOnID: work.ID, Type: "blocks"},
+	}
+	const gate = `{"gate":"waits_for","threshold":3}`
+	carrying := func(payload string) beads.Store {
+		return &payloadCarryingSource{Store: backing, payloads: map[[2]string]string{{from.ID, to.ID}: payload}}
+	}
+	difference := func(t *testing.T, source, destination beads.Store) string {
+		t.Helper()
+		diff, err := infraEdgePayloadDifference(from.ID, deps, deps, infra, source, destination)
+		if err != nil {
+			t.Fatalf("comparing edge payloads: %v", err)
+		}
+		return diff
+	}
+
+	if diff := difference(t, carrying(gate), carrying(gate)); diff != "" {
+		t.Errorf("a faithfully carried payload was refused: %s", diff)
+	}
+	if diff := difference(t, carrying(gate), backing); diff == "" {
+		t.Error("a destination that dropped the payload compared equal; the equality stage would bless a copy that lost every formula gate")
+	}
+	if diff := difference(t, backing, carrying(gate)); diff == "" {
+		t.Error("a destination that invented a payload compared equal")
+	}
+	if diff := difference(t, carrying(gate), carrying(`{"gate":"waits_for","threshold":9}`)); diff == "" {
+		t.Error("a destination whose payload differs in content compared equal")
+	}
+	// The engines' two spellings of "carries nothing" are the same answer.
+	if diff := difference(t, carrying("{}"), backing); diff != "" {
+		t.Errorf("a Dolt-sourced empty payload was read as a difference against a destination holding nothing: %s", diff)
+	}
+
+	// A source that cannot be asked is not a source that answered "nothing" —
+	// the same rule the refusal upstream enforces, restated here because this
+	// stage reads the stores directly and could quietly reach the opposite
+	// conclusion.
+	if _, err := infraEdgePayloadDifference(from.ID, deps, deps, infra, mutePayloadSource{Store: backing}, carrying(gate)); err == nil {
+		t.Error("the equality stage treated an unanswerable source as one carrying nothing")
+	}
+
+	// An edge only the DESTINATION holds. Every case above hands the same slice
+	// as both sides, so the walk over the destination's own deps is never the
+	// thing that finds anything and could be deleted with the suite still green.
+	//
+	// Through verifyInfraCopy this is unreachable — infraDepDifference runs
+	// first and refuses any structural asymmetry before payloads are compared —
+	// which is exactly why it is pinned on the function directly. The comparator
+	// is a general one, the doc above it claims both directions, and the next
+	// caller need not run a structural pass first.
+	// The source's only edge leaves infra, so the wantDeps walk — which filters
+	// to within-infra targets — contributes no pair at all. Every pair here comes
+	// from the destination's own list, which is what makes this the one case that
+	// dies if that walk is deleted.
+	sourceDeps := []beads.Dep{{IssueID: from.ID, DependsOnID: work.ID, Type: "blocks"}}
+	onlyOnDestination := []beads.Dep{
+		{IssueID: from.ID, DependsOnID: work.ID, Type: "blocks"},
+		{IssueID: from.ID, DependsOnID: to.ID, Type: "blocks"},
+	}
+	diff, err := infraEdgePayloadDifference(from.ID, sourceDeps, onlyOnDestination, infra, backing, carrying(gate))
+	if err != nil {
+		t.Fatalf("comparing an edge only the destination holds: %v", err)
+	}
+	if diff == "" {
+		t.Error("a payload on an edge only the destination holds compared equal; the walk over the destination's deps finds nothing")
+	}
+}
+
 // countingInfraSource records how many times the equality stage re-read the
 // work store.
 type countingInfraSource struct {
@@ -721,6 +851,14 @@ func (s *unlinkingInfraSource) List(query beads.ListQuery) ([]beads.Bead, error)
 		}
 	}
 	return s.Store.List(query)
+}
+
+// DepMetadata forwards the leaf's edge-payload read. The subject here is which
+// bytes the equality stage reads, not what an edge carries, and a double that
+// stays silent about the capability is refused as unanswerable before the
+// unlink this test turns on can ever happen.
+func (s *unlinkingInfraSource) DepMetadata(issueID, dependsOnID string) (string, bool, error) {
+	return depMetadataThrough(s.Store, issueID, dependsOnID)
 }
 
 // TestEnsureInfraClassMigratedProvesEqualityAgainstTheReopenedDatabase pins the

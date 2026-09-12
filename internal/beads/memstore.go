@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // MemStore is an in-memory Store implementation backed by a slice. It is
@@ -462,11 +464,13 @@ func (m *MemStore) readyLocked(ctx context.Context, q ReadyQuery) ([]Bead, error
 	}
 
 	statusByID := make(map[string]string, len(m.beads))
+	workOutcomeByID := make(map[string]string, len(m.beads))
 	for _, bead := range m.beads {
 		if err := contextErr(); err != nil {
 			return nil, err
 		}
 		statusByID[bead.ID] = bead.Status
+		workOutcomeByID[bead.ID] = bead.Metadata[beadmeta.WorkOutcomeMetadataKey]
 	}
 
 	var result []Bead
@@ -494,7 +498,7 @@ func (m *MemStore) readyLocked(ctx context.Context, q ReadyQuery) ([]Bead, error
 			default:
 				continue
 			}
-			if statusByID[dep.DependsOnID] != "closed" {
+			if !DependencySatisfied(statusByID[dep.DependsOnID], workOutcomeByID[dep.DependsOnID]) {
 				blocked = true
 				break
 			}
@@ -733,6 +737,21 @@ func (m *MemStore) DepList(id, direction string) ([]Dep, error) {
 		}
 	}
 	return result, nil
+}
+
+// DepMetadata reports that no edge of this store carries a payload.
+//
+// That is a fact about MemStore, not a stub: its only edge-writing paths are
+// DepAdd and the Needs field, both of which carry the pair and the type alone,
+// and it implements no GraphApply. So there is no way to put a payload in and
+// nothing to lose by saying so.
+//
+// It is implemented rather than omitted because a reader that CANNOT be asked
+// and one that answers "nothing here" mean different things to a caller that
+// refuses on uncertainty — the infra-class migration is one. Anything that
+// teaches MemStore to store an edge payload has to teach this to read it.
+func (m *MemStore) DepMetadata(_, _ string) (string, bool, error) {
+	return "", false, nil
 }
 
 // DepListBatch returns "down" dependencies for multiple beads from memory.

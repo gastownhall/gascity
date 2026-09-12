@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"io"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -2458,6 +2459,57 @@ func TestComputePoolDesiredStates_InFlightNewSessionsOnlySubtractCoveredDemand(t
 	}
 }
 
+// TestComputePoolDesiredStates_InFlightPendingCreateEstablishesDemandFloor
+// reproduces the claim-handoff race from ga-nf5xlp: a pending-create session
+// is born, and on the very next tick scale_check cleanly recomputes to zero
+// before that session finishes creating. Without a demand floor for
+// in-flight sessions (mirroring the protected-session floor #4789 added),
+// the session gets zero slots, falls out of desired state, and is rolled
+// back ~10 minutes later having never started — even though it is still
+// well within its own pending-create lease window.
+func TestComputePoolDesiredStates_InFlightPendingCreateEstablishesDemandFloor(t *testing.T) {
+	now := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	sessions := []beads.Bead{
+		pendingPoolSessionBeadAt("sess-1", now.Add(-30*time.Second)),
+	}
+
+	result := ComputePoolDesiredStatesAt(cfg, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 0}, now)
+
+	counts := PoolDesiredCounts(result)
+	if counts["claude"] != 1 {
+		t.Fatalf("poolDesired[claude] = %d, want 1: a fresh pending-create session must survive a scale_check drop to zero on the next tick while still within its own lease window", counts["claude"])
+	}
+	if len(result) != 1 || len(result[0].Requests) != 1 || result[0].Requests[0].SessionBeadID != "sess-1" {
+		t.Fatalf("result = %#v, want sess-1 retained as the sole in-flight demand-floor request", result)
+	}
+}
+
+// TestComputePoolDesiredStates_InFlightPendingCreateDemandFloorExpiresWithLease
+// guards the other side of the same fix: a pending-create session that has
+// aged past its own lease window (pendingCreateLeaseExpiredForRollbackInfo)
+// must NOT be propped up by the new floor. It is genuinely stuck and should
+// still fall to zero desired demand so the existing rollback path can reap
+// it.
+func TestComputePoolDesiredStates_InFlightPendingCreateDemandFloorExpiresWithLease(t *testing.T) {
+	now := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	sessions := []beads.Bead{
+		pendingPoolSessionBeadAt("sess-1", now.Add(-11*time.Minute)),
+	}
+
+	result := ComputePoolDesiredStatesAt(cfg, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 0}, now)
+
+	counts := PoolDesiredCounts(result)
+	if counts["claude"] != 0 {
+		t.Fatalf("poolDesired[claude] = %d, want 0: a pending-create session past its own lease window must still roll back to zero demand, not be propped up indefinitely", counts["claude"])
+	}
+}
+
 func TestComputePoolDesiredStates_InFlightResumeBeadsDoNotConsumeNewDemand(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
@@ -2707,6 +2759,88 @@ func TestComputePoolDesiredStates_InFlightDemandRecordsTraceWhenCapsSuppressReus
 		if got := poolTraceFieldInt(t, rec.Fields, key); got != want {
 			t.Fatalf("%s = %d, want %d", key, got, want)
 		}
+	}
+}
+
+// A template with nothing to do never appears in scaleCheckCounts, so the
+// demand-merge loop skips it. The skip has to leave a decision behind or the
+// trace cannot tell "correctly idle" from "never evaluated" — and the desired
+// state it produces has to stay byte-identical to the untraced run.
+func TestComputePoolDesiredStates_ZeroDemandRecordsSkipDecision(t *testing.T) {
+	tests := []struct {
+		name             string
+		suspended        bool
+		sessions         []beads.Bead
+		scaleCheckCounts map[string]int
+		wantNoDemand     bool
+		wantInFlight     int
+		wantRequests     int
+	}{
+		{name: "absent from scale check", scaleCheckCounts: map[string]int{}, wantNoDemand: true},
+		{name: "nil scale check", wantNoDemand: true},
+		{name: "other template has demand", scaleCheckCounts: map[string]int{"other": 3}, wantNoDemand: true},
+		// scale_check and protected are 0 by the branch condition itself, so
+		// in_flight is the only payload field that can ever carry information
+		// here — and pool sessions still in flight while nothing demands them
+		// is the diagnostic this record exists to surface.
+		{
+			name:         "in-flight sessions with no demand",
+			sessions:     []beads.Bead{pendingPoolSessionBead("sess-1"), pendingPoolSessionBead("sess-2")},
+			wantNoDemand: true,
+			wantInFlight: 2,
+		},
+		{name: "demand present", scaleCheckCounts: map[string]int{"claude": 1}, wantRequests: 1},
+		{name: "suspended template", suspended: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			agent := poolAgent("claude", "", intPtr(10), 0)
+			agent.Suspended = tt.suspended
+			cfg := &config.City{Agents: []config.Agent{agent}}
+			trace := newPoolDesiredStateTestTrace("claude")
+			sessions := sessionInfosFromBeads(tt.sessions)
+
+			result := computePoolDesiredStates(cfg, nil, sessions, tt.scaleCheckCounts, nil, trace)
+
+			if untraced := ComputePoolDesiredStates(cfg, nil, sessions, tt.scaleCheckCounts); !reflect.DeepEqual(result, untraced) {
+				t.Fatalf("traced result = %#v, want identical to untraced %#v", result, untraced)
+			}
+			requests := 0
+			for _, state := range result {
+				requests += len(state.Requests)
+			}
+			if requests != tt.wantRequests {
+				t.Fatalf("requests = %d, want %d; result=%#v", requests, tt.wantRequests, result)
+			}
+
+			decisions := trace.decisionCounts[string(TraceSitePoolDemandCompute)]
+			if !tt.wantNoDemand {
+				if decisions != 0 {
+					t.Fatalf("%s decisions = %d, want 0; records=%#v", TraceSitePoolDemandCompute, decisions, trace.records)
+				}
+				return
+			}
+			if decisions != 1 {
+				t.Fatalf("%s decisions = %d, want 1; records=%#v", TraceSitePoolDemandCompute, decisions, trace.records)
+			}
+			rec := poolTraceDecision(t, trace, TraceSitePoolDemandCompute)
+			if rec.Template != "claude" {
+				t.Fatalf("record template = %q, want claude", rec.Template)
+			}
+			if rec.ReasonCode != TraceReasonNoDemand || rec.OutcomeCode != TraceOutcomeSkipped {
+				t.Fatalf("record reason/outcome = %q/%q, want %q/%q",
+					rec.ReasonCode, rec.OutcomeCode, TraceReasonNoDemand, TraceOutcomeSkipped)
+			}
+			for key, want := range map[string]int{
+				"scale_check": 0,
+				"protected":   0,
+				"in_flight":   tt.wantInFlight,
+			} {
+				if got := poolTraceFieldInt(t, rec.Fields, key); got != want {
+					t.Fatalf("%s = %d, want %d", key, got, want)
+				}
+			}
+		})
 	}
 }
 

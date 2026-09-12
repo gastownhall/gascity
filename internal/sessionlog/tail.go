@@ -343,6 +343,9 @@ func extractFromLines(lines [][]byte, startsMidLine bool) *TailMeta {
 		// Infer activity from the last valid entry (first hit walking backwards).
 		if activity == "" {
 			activity = InferActivity(entry.Type, entry.Subtype, rawMsg)
+			if activity == "" {
+				activity = kimiCodeTailActivity(entry.Type, lines[i])
+			}
 		}
 
 		// Check for assistant message with model/usage.

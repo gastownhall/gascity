@@ -435,14 +435,19 @@ func SleepPatch(now time.Time, reason string) MetadataPatch {
 
 // AcknowledgeDrainPatch records an agent-acknowledged drain. Drained is a
 // compatibility state distinct from ordinary asleep: demand alone does not
-// reselect it, but explicit attach or work can.
-func AcknowledgeDrainPatch(freshWake bool) MetadataPatch {
+// reselect it, but explicit attach or work can. Like SleepPatch, it stamps
+// slept_at alongside clearing last_woke_at so a same-tick drain-ack falls
+// back to this fairness key instead of collapsing straight to CreatedAt
+// (#2574) — drain-ack is the dominant real-world drain path for
+// wake_mode=fresh roles.
+func AcknowledgeDrainPatch(now time.Time, freshWake bool) MetadataPatch {
 	patch := MetadataPatch{
 		"state":                     string(StateDrained),
 		"state_reason":              "",
 		"last_woke_at":              "",
 		"pending_create_claim":      "",
 		"pending_create_started_at": "",
+		"slept_at":                  now.UTC().Format(time.RFC3339),
 	}
 	if freshWake {
 		patch["session_key"] = ""

@@ -2532,6 +2532,89 @@ func TestBdStoreReadyFiltersFutureDeferredRows(t *testing.T) {
 	}
 }
 
+// bdStoreWorkOutcomeReadyRunner builds a runner for the witnessed
+// inline-dependency path: "bd ready" answers with a dependent whose
+// dependency_count matches its inline blocking edges (which is what latches
+// the inline-projection witness), and the blocker lookup that follows answers
+// with the blocker row carrying blockerMetadata. Every "bd list" arg vector is
+// recorded so a test can pin that the lookup was closed-inclusive.
+func bdStoreWorkOutcomeReadyRunner(blockerMetadata string) (beads.CommandRunner, *[]string) {
+	listArgs := &[]string{}
+	readyRows := []byte(`[
+		{"id":"bd-dependent","title":"dependent","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z",
+		 "dependency_count":1,
+		 "dependencies":[{"issue_id":"bd-dependent","depends_on_id":"bd-blocker","type":"blocks"}]}
+	]`)
+	blockerRows := []byte(`[
+		{"id":"bd-blocker","title":"blocker","status":"closed","issue_type":"task","created_at":"2025-01-15T10:00:00Z"` +
+		blockerMetadata + `}
+	]`)
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if len(args) == 0 {
+			return nil, fmt.Errorf("unexpected command: %s", name)
+		}
+		switch args[0] {
+		case "ready":
+			return readyRows, nil
+		case "list":
+			*listArgs = append(*listArgs, strings.Join(args, " "))
+			return blockerRows, nil
+		case "query":
+			// The wisp leg of the TierBoth blocker lookup; the blocker is not
+			// ephemeral, so it has nothing to add.
+			return []byte(`[]`), nil
+		}
+		return nil, fmt.Errorf("unexpected command: %s %s", name, strings.Join(args, " "))
+	}
+	return runner, listArgs
+}
+
+// TestBdStoreReadyExcludesDependentWhenBlockerClosedAsWorkOutcomeBlocked pins
+// the veto on the path it actually runs on: bd offers a candidate because its
+// blocking dependency IS closed (bd's own check is satisfied), and gc removes
+// it because that close recorded gc.work_outcome=blocked. This only reaches
+// the veto when the inline dependency projection is witnessed, which is why
+// the ready row carries a dependency_count matching its inline edges.
+func TestBdStoreReadyExcludesDependentWhenBlockerClosedAsWorkOutcomeBlocked(t *testing.T) {
+	runner, listArgs := bdStoreWorkOutcomeReadyRunner(`,"metadata":{"gc.work_outcome":"blocked"}`)
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.Ready()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("Ready() = %+v, want empty: a blocker closed with gc.work_outcome=blocked must not satisfy the dependent's blocking dependency", got)
+	}
+	if len(*listArgs) == 0 {
+		t.Fatal("Ready() never issued the blocker lookup: the work-outcome veto cannot fire without it")
+	}
+	// The blocker is closed, and a closed blocker is the only kind this veto
+	// can fire on. A lookup that is not closed-inclusive returns nothing and
+	// silently makes the whole check dead code.
+	for _, args := range *listArgs {
+		if !strings.Contains(args, "--all") {
+			t.Fatalf("blocker lookup %q is not closed-inclusive: want --all", args)
+		}
+	}
+}
+
+// TestBdStoreReadyKeepsDependentWhenBlockerClosedWithNoWorkOutcome is the
+// paired negative: the same shape, but the blocker closed carrying no
+// gc.work_outcome at all (the legacy/pre-ADR-0009 case). That must still
+// satisfy the dependency — the veto is narrow, not a re-block of every closed
+// blocker the lookup now returns.
+func TestBdStoreReadyKeepsDependentWhenBlockerClosedWithNoWorkOutcome(t *testing.T) {
+	runner, _ := bdStoreWorkOutcomeReadyRunner("")
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.Ready()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "bd-dependent" {
+		t.Fatalf("Ready() = %+v, want [bd-dependent]: a blocker closed with no gc.work_outcome must still satisfy the dependency", got)
+	}
+}
+
 func TestBdStoreReadyEmpty(t *testing.T) {
 	runner := fakeRunner(map[string]struct {
 		out []byte
@@ -4219,6 +4302,133 @@ func TestBdStoreDepAddError(t *testing.T) {
 	}
 }
 
+// TestBdStoreDepAddCrossStoreFailsLoudly proves a dep add across two
+// different bead-ID prefixes (i.e. two different stores) fails with a
+// non-zero error naming both bead ids and both store prefixes, and never
+// reaches the underlying bd write -- instead of the historical silent
+// exit-0 no-op (ga-q5dgaz).
+func TestBdStoreDepAddCrossStoreFailsLoudly(t *testing.T) {
+	called := false
+	runner := func(_, _ string, _ ...string) ([]byte, error) {
+		called = true
+		return nil, nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	err := s.DepAdd("ga-111111", "gm-222222", "blocks")
+	if err == nil {
+		t.Fatal("expected cross-store error, got nil")
+	}
+	for _, want := range []string{"ga-111111", "gm-222222", "ga", "gm"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to mention %q", err, want)
+		}
+	}
+	if called {
+		t.Error("underlying bd dep add write must not run when the dependency is cross-store")
+	}
+}
+
+// TestBdStoreDepAddSameStoreStillSucceeds guards against a regression: two
+// bead ids sharing the same prefix are NOT cross-store and must continue to
+// add the dependency exactly as before.
+func TestBdStoreDepAddSameStoreStillSucceeds(t *testing.T) {
+	var gotArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		gotArgs = args
+		return nil, nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	if err := s.DepAdd("ga-111111", "ga-222222", "blocks"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+	wantArgs := "dep add ga-111111 ga-222222 --type blocks"
+	if strings.Join(gotArgs, " ") != wantArgs {
+		t.Errorf("args = %q, want %q", strings.Join(gotArgs, " "), wantArgs)
+	}
+}
+
+// TestBdStoreDepAddExternalTargetIsNotCrossStore proves an "external:"-
+// prefixed dependsOnID -- the established escape hatch for referencing
+// something outside the bead-ID scheme entirely -- is never misclassified
+// as cross-store, mirroring NativeDoltStore's shouldPrevalidateNativeDependency.
+func TestBdStoreDepAddExternalTargetIsNotCrossStore(t *testing.T) {
+	var gotArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		gotArgs = args
+		return nil, nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	if err := s.DepAdd("ga-111111", "external:some-ticket", "blocks"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+	wantArgs := "dep add ga-111111 external:some-ticket --type blocks"
+	if strings.Join(gotArgs, " ") != wantArgs {
+		t.Errorf("args = %q, want %q", strings.Join(gotArgs, " "), wantArgs)
+	}
+}
+
+// TestBdStoreDepAddCrossStoreParentChildShortCircuits proves the parent-child
+// short-circuit in DepAdd stays AHEAD of the cross-store guard: a cross-store
+// parent-child whose child already records the foreign parent still no-ops
+// with a nil error and issues no write. Cross-store molecule attach rides on
+// exactly this ordering (internal/molecule/molecule.go sets ParentID at create
+// time so the attach never reaches the guard), so reordering the two blocks
+// would break it.
+func TestBdStoreDepAddCrossStoreParentChildShortCircuits(t *testing.T) {
+	calls := make([]string, 0, 1)
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		call := name + " " + strings.Join(args, " ")
+		calls = append(calls, call)
+		switch call {
+		case "bd show --json ga-111111":
+			return []byte(`[{"id":"ga-111111","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","parent":"gm-222222"}]`), nil
+		default:
+			return nil, fmt.Errorf("unexpected command: %s", call)
+		}
+	}
+	s := beads.NewBdStore("/city", runner)
+
+	if err := s.DepAdd("ga-111111", "gm-222222", "parent-child"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("calls = %v, want only the bd show lookup", calls)
+	}
+}
+
+// TestBdStoreDepAddCrossStoreParentChildWithoutMatchingParentErrors pins the
+// other half of that ordering: when the child does NOT already record the
+// foreign parent, the short-circuit declines and the cross-store guard fires.
+// The failure is intentional -- bd has no cross-store parent-child model --
+// and must stay visible rather than emergent.
+func TestBdStoreDepAddCrossStoreParentChildWithoutMatchingParentErrors(t *testing.T) {
+	wrote := false
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		call := name + " " + strings.Join(args, " ")
+		switch call {
+		case "bd show --json ga-111111":
+			return []byte(`[{"id":"ga-111111","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","parent":"ga-999999"}]`), nil
+		default:
+			wrote = true
+			return nil, nil
+		}
+	}
+	s := beads.NewBdStore("/city", runner)
+
+	err := s.DepAdd("ga-111111", "gm-222222", "parent-child")
+	if err == nil {
+		t.Fatal("expected cross-store error, got nil")
+	}
+	for _, want := range []string{"ga-111111", "gm-222222", "ga", "gm"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to mention %q", err, want)
+		}
+	}
+	if wrote {
+		t.Error("underlying bd dep add write must not run when the dependency is cross-store")
+	}
+}
+
 // --- DepRemove ---
 
 func TestBdStoreDepRemove(t *testing.T) {
@@ -5104,5 +5314,55 @@ func TestBdStoreReadyRetryBoundedReturnsErrorAfterExhaustion(t *testing.T) {
 	}
 	if calls < 2 {
 		t.Fatalf("calls = %d, want >= 2 (retry must be attempted)", calls)
+	}
+}
+
+// TestIsTimeoutError pins the narrow timeout classifier used to distinguish a
+// store/bd query that ran out of time (a contention signal callers may safely
+// relax for idempotent work) from a genuine store-read failure or a plain
+// cancellation. Both must NOT be treated as timeouts: a connection failure is a
+// real error, and a cancellation is a shutdown signal, not contention.
+func TestIsTimeoutError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"bd exec timeout", errors.New("timed out after 30s"), true},
+		{"bd list both tiers wisp timeout", fmt.Errorf("bd list both tiers: bd query: %w", errors.New("timed out after 30s")), true},
+		{"caller-deadline timeout", errors.New("timed out after 500ms (caller deadline)"), true},
+		{"context deadline sentinel", fmt.Errorf("gate: %w", context.DeadlineExceeded), true},
+		{"deadline exceeded text", errors.New("context deadline exceeded"), true},
+		{"partial result wrapping timeout", &beads.PartialResultError{Op: "bd list both tiers", Err: errors.New("bd query: timed out after 30s")}, true},
+		{"context canceled is NOT a timeout", fmt.Errorf("gate: %w", context.Canceled), false},
+		{"genuine store read failure", errors.New("dolt: read failed"), false},
+		{"connection reset is NOT a timeout", errors.New("connection reset by peer"), false},
+
+		// A chain mixing a timeout leaf with a hard-failure leaf reports TRUE.
+		// This is a deliberate, reviewed decision, not an accident of substring
+		// matching, and it is pinned here so a later "tightening" to
+		// all-leaves-must-be-timeout cannot silently reintroduce the vp-gprv
+		// starvation. The only join that reaches the gate carrying a timeout leaf
+		// is mergeListTierResults, which fires ONLY when both list tiers fail —
+		// i.e. worse store contention than the single-tier failure that starved
+		// code-review-gate in the first place. Failing CLOSED there would starve
+		// an idempotent order at exactly the moment relaxing it matters most, and
+		// would make this classifier stricter than isBdAmbiguousWriteError, which
+		// already groups "timed out after" and "connection reset" as one transient
+		// family. Both leaf orderings are pinned because errors.Join flattens to
+		// newline-joined text and the guarantee must not depend on leaf order.
+		{"join of timeout and hard failure is a contention timeout", errors.Join(errors.New("timed out after 30s"), errors.New("dolt: read failed")), true},
+		{"join with the hard failure first is still a contention timeout", errors.Join(errors.New("dolt: read failed"), errors.New("timed out after 30s")), true},
+		// Negative control: a join carrying NO timeout leaf must stay false, so
+		// the two cases above pin "a timeout leaf is present", not "any join".
+		{"join of two hard failures is NOT a timeout", errors.Join(errors.New("dolt: read failed"), errors.New("connection reset by peer")), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := beads.IsTimeoutError(tc.err); got != tc.want {
+				t.Errorf("IsTimeoutError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }

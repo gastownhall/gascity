@@ -388,6 +388,56 @@ func TestDoHookClaimIdentityStampFailureDoesNotFailClaim(t *testing.T) {
 	}
 }
 
+// TestHookClaimIdentityPatchWorkBranchPartialEvidenceGuard pins Decision (b)
+// of ga-ryeij1.1: a claim must not be the thing that FIRST introduces a
+// partial (1-7 of the other eight) worktreeSpecForBead ownership shape by
+// ambiently stamping gc.work_branch onto a bead that already carries
+// some-but-not-all of the other eight keys. Stamping stays allowed at the two
+// safe boundaries -- zero of the other eight (a legacy/unmanaged bead, or one
+// about to be fully published elsewhere) or all eight (full evidence already
+// established; this is just keeping the branch in sync) -- so this does not
+// change behavior for either fully-managed or fully-unmanaged beads, only the
+// half-published shapes worktreeSpecForBead must hard-error on.
+func TestHookClaimIdentityPatchWorkBranchPartialEvidenceGuard(t *testing.T) {
+	otherEightKeys := []string{
+		beadmeta.WorktreeRepoMetadataKey,
+		beadmeta.WorktreeRootMetadataKey,
+		beadmeta.WorktreeBaseRefMetadataKey,
+		beadmeta.WorktreeBaseSHAMetadataKey,
+		beadmeta.WorktreeCreatorMetadataKey,
+		beadmeta.WorktreeOwnerMetadataKey,
+		beadmeta.WorktreeGenerationMetadataKey,
+		beadmeta.WorktreeLifecycleMetadataKey,
+	}
+	opts := hookClaimOptions{Env: []string{"GC_SESSION_ID=mc-sess1", "GC_SESSION_NAME=gc__role-mc-sess1"}}
+	ops := hookClaimOps{ResolveWorkBranch: func(string) string { return "bd-new-branch" }}
+
+	for _, tc := range []struct {
+		name         string
+		presentCount int
+		wantStamped  bool
+	}{
+		{name: "zero_of_eight_present", presentCount: 0, wantStamped: true},
+		{name: "one_of_eight_present", presentCount: 1, wantStamped: false},
+		{name: "seven_of_eight_present", presentCount: 7, wantStamped: false},
+		{name: "all_eight_present", presentCount: 8, wantStamped: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			meta := map[string]string{beadmeta.KindMetadataKey: "worker"}
+			for i := 0; i < tc.presentCount; i++ {
+				meta[otherEightKeys[i]] = "present"
+			}
+			bead := beads.Bead{ID: "hw-partial", Status: "open", Metadata: meta}
+
+			patch := hookClaimIdentityPatch(bead, opts, ops, "/tmp/work")
+			_, stamped := patch[beadmeta.WorkBranchMetadataKey]
+			if stamped != tc.wantStamped {
+				t.Fatalf("presentCount=%d: gc.work_branch stamped=%v, want %v (patch=%v)", tc.presentCount, stamped, tc.wantStamped, patch)
+			}
+		})
+	}
+}
+
 func TestDoHookClaimEmitsStartedOnlyAfterDurableSessionReadback(t *testing.T) {
 	spy := &stampMetaSpy{}
 	meta := map[string]string{

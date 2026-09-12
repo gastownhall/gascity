@@ -767,7 +767,10 @@ func bdRelocatedClassGraphPlanClass(scopeRoot, path string) (class coordclass.Cl
 // internal/bdflags track bd's real persistent flags, and it did not hold once:
 // --profile was filed as a bool and --database, --server-url and --mem-profile
 // were in neither map, so four flags bd accepts and mints behind reached this arm
-// and switched the guard off. The manifests are pinned exactly — value and bool
+// and switched the guard off. (Two of those four, --profile and --server-url, no
+// longer exist upstream as of v1.3.0-rc.2, so for them the premise now genuinely
+// holds; --database and --mem-profile are carried in the value manifest.)
+// The manifests are pinned exactly — value and bool
 // sets compared separately by TestGlobalValueFlagsIsComplete and
 // TestGlobalBoolFlagsIsComplete — so restoring that premise is a build failure
 // away rather than a silent fail-open, and

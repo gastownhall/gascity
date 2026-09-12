@@ -151,6 +151,20 @@ type FileStore struct {
 
 var _ ConditionalAssignmentReleaser = (*FileStore)(nil)
 
+// FileStore answers the edge-payload read through the MemStore it embeds, and
+// the answer — no edge here carries a payload — is as honest for the file store
+// as it is for the store inside it: FileStore adds JSON persistence around
+// MemStore's bead logic and no metadata path of its own, and its DepAdd
+// delegates straight through.
+//
+// Asserted rather than left to method promotion because a caller that cannot
+// ask a store treats it as UNABLE TO ANSWER, not as answering no — the
+// infra-class migration refuses such a source outright. A refactor that gave
+// FileStore its own DepAdd surface without this method would turn a store with
+// nothing to lose into a city that cannot cut over, and nothing else in the
+// tree would notice.
+var _ DepMetadataReader = (*FileStore)(nil)
+
 type fileFreshness struct {
 	known   bool
 	exists  bool

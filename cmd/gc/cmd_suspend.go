@@ -139,7 +139,13 @@ func doSuspendCity(fs fsys.FS, cityPath string, suspend bool, jsonOut bool, stdo
 		return 1
 	}
 
-	rec := openCityRecorder(stderr)
+	// Record against the city whose state actually changed, not the
+	// ambient one. openCityRecorder re-resolves the city from cwd/env,
+	// which is not cityPath whenever the target was named explicitly
+	// (`gc suspend <dir>`) from inside a different, live city — that
+	// leaked city.suspended/city.resumed into an unrelated event log
+	// (ga-41g9gr).
+	rec := openCityRecorderAt(cityPath, stderr)
 	if suspend {
 		rec.Record(events.Event{
 			Type:  events.CitySuspended,

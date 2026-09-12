@@ -508,6 +508,7 @@ type orderJSON struct {
 	Timeout      string            `json:"timeout,omitempty"`
 	CheckTimeout string            `json:"check_timeout,omitempty"`
 	Enabled      bool              `json:"enabled"`
+	Idempotent   bool              `json:"idempotent"`
 	Source       string            `json:"source,omitempty"`
 	FormulaLayer string            `json:"formula_layer,omitempty"`
 	Env          map[string]string `json:"env,omitempty"`
@@ -578,6 +579,7 @@ func orderToJSON(a orders.Order) orderJSON {
 		Timeout:      a.Timeout,
 		CheckTimeout: a.CheckTimeout,
 		Enabled:      a.IsEnabled(),
+		Idempotent:   a.Idempotent,
 		Source:       a.Source,
 		FormulaLayer: a.FormulaLayer,
 		Env:          a.Env,
@@ -663,6 +665,10 @@ func doOrderShow(aa []orders.Order, name, rig string, stdout, stderr io.Writer) 
 			w(fmt.Sprintf("  %s=%s", key, a.Env[key]))
 		}
 	}
+	// Idempotent decides whether the order fails OPEN when its open-work gate
+	// times out under store contention (see order_dispatch gateFailClosed). It is
+	// load-bearing for diagnosing starved single-flight orders, so surface it.
+	w(fmt.Sprintf("Idempotent:  %t", a.Idempotent))
 	w(fmt.Sprintf("Source:      %s", a.Source))
 	return 0
 }
