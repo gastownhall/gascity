@@ -159,7 +159,7 @@ gc bd update "$WORK_BEAD_ID" --unset-metadata work_dir
 **4. Close the bead:**
 ```bash
 gc bd update "$WORK_BEAD_ID" --notes "Committed directly to {{base_branch}}: <brief summary>"
-gc bd close "$WORK_BEAD_ID"
+gc bd close "$WORK_BEAD_ID" --reason "Committed directly to {{base_branch}}."
 ```
 
 **5. Signal reconciler and exit.**

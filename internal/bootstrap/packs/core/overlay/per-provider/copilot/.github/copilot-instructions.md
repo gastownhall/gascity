@@ -34,4 +34,4 @@ managed hook installs do not call it.
 - `gc bd update <id> --claim` — claim one bead before working it
 - `gc bd ready` — list ready beads (tasks)
 - `gc bd show <id>` — show bead details
-- `gc bd close <id>` — mark a bead as done
+- `gc bd close <id> --reason "<brief summary>"` — mark a bead as done
