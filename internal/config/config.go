@@ -3209,7 +3209,11 @@ type Agent struct {
 	// set -x or echoing secrets in setup commands.
 	PreStart []string `toml:"pre_start,omitempty"`
 	// PromptTemplate is the path to this agent's prompt template file.
-	// Relative paths resolve against the city directory.
+	// Relative paths resolve against the directory of the file that declares
+	// the agent: the city directory for city.toml, the fragment's directory
+	// for an included fragment, and the pack directory for an agent a pack
+	// declares — in pack.toml or in agents/<name>/agent.toml alike. Paths
+	// prefixed with "//" resolve against the city root.
 	PromptTemplate string `toml:"prompt_template,omitempty"`
 	// Nudge is text typed into the agent's session after startup.
 	// Used for CLI agents that don't accept command-line prompts. For a known

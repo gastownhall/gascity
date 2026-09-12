@@ -107,7 +107,7 @@
         },
         "prompt_template": {
           "type": "string",
-          "description": "PromptTemplate is the path to this agent's prompt template file.\nRelative paths resolve against the city directory."
+          "description": "PromptTemplate is the path to this agent's prompt template file.\nRelative paths resolve against the directory of the file that declares\nthe agent: the city directory for city.toml, the fragment's directory\nfor an included fragment, and the pack directory for an agent a pack\ndeclares — in pack.toml or in agents/\u003cname\u003e/agent.toml alike. Paths\nprefixed with \"//\" resolve against the city root."
         },
         "nudge": {
           "type": "string",

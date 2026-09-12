@@ -677,3 +677,65 @@ base = "builtin:claude"
 	}
 	t.Fatal("ada explicit root city-pack agent not loaded")
 }
+
+func TestDiscoverPackAgents_ExplicitRelativePromptTemplateIsPackRelative(t *testing.T) {
+	// An explicit relative prompt_template declared in agents/<name>/agent.toml
+	// resolves against the declaring PACK directory (pack-spec §2.8 "Path
+	// Resolution": explicit relative prompt_template values in agent.toml stay
+	// pack-relative through the agent's source directory), not against
+	// agents/<name>/. The pack.toml [[agent]] form is pinned by
+	// TestAgentDiscovery_ExplicitTomlAgentGetsConventionDefaults; this pins the
+	// agent.toml form.
+	dir := t.TempDir()
+	packDir := filepath.Join(dir, "packs", "p")
+	agentDir := filepath.Join(packDir, "agents", "w")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	writeTestFile(t, packDir, "pack.toml", `
+[pack]
+name = "p"
+schema = 2
+`)
+	writeTestFile(t, agentDir, "agent.toml", `
+prompt_template = "shared/w.md"
+`)
+	writeTestFile(t, packDir, "shared/w.md", `Pack-relative prompt.`)
+
+	writeTestFile(t, dir, "city.toml", `
+[workspace]
+name = "test"
+
+[imports.p]
+source = "./packs/p"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	explicit := explicitAgents(cfg.Agents)
+	for _, a := range explicit {
+		if a.Name != "w" {
+			continue
+		}
+		want := filepath.Join("packs", "p", "shared", "w.md")
+		if !strings.HasSuffix(a.PromptTemplate, want) {
+			t.Fatalf("w PromptTemplate = %q, want pack-relative path ending in %q", a.PromptTemplate, want)
+		}
+		if strings.Contains(a.PromptTemplate, filepath.Join("agents", "w", "shared")) {
+			t.Fatalf("w PromptTemplate = %q resolved against agents/w/, want pack-relative", a.PromptTemplate)
+		}
+		resolved := a.PromptTemplate
+		if !filepath.IsAbs(resolved) {
+			resolved = filepath.Join(dir, resolved)
+		}
+		if _, err := os.Stat(resolved); err != nil {
+			t.Fatalf("w PromptTemplate %q does not name the file on disk (city root %s): %v", a.PromptTemplate, dir, err)
+		}
+		return
+	}
+	t.Fatalf("w agent not discovered from packs/p/agents/: %+v", explicit)
+}
