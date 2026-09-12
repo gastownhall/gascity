@@ -236,6 +236,25 @@ func IsConditionalWritesRequired(err error) bool {
 	return errors.As(err, &cre)
 }
 
+// ConditionalWritesRequired reports whether the store — through its declared
+// resolution target, like ResolveConditionalWriter — is stamped
+// beads.conditional_writes = "require". A caller whose fenced write is
+// refused as unsupported AT WRITE TIME (the capability probe passed when the
+// writer was resolved; the backend then rejected the fence, after a binary
+// downgrade say) consults it to fail closed instead of falling back to an
+// unconditional write the mode forbids.
+func ConditionalWritesRequired(store Store) bool {
+	if store == nil {
+		return false
+	}
+	carrier, ok := followConditionalWritesResolveTarget(store).(conditionalWritesModeCarrier)
+	if !ok {
+		return false
+	}
+	mode, _ := carrier.conditionalWritesMode()
+	return mode == gate.Require
+}
+
 // ResolveConditionalWriter is the single composition point of the
 // factory-stamped beads.conditional_writes mode and per-store runtime
 // capability. There is no mode parameter: the mode is read from the store's

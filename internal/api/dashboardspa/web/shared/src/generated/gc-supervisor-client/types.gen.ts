@@ -82,6 +82,7 @@ export type AgentPatch = {
     MaxActiveSessions: number | null;
     MaxSessionAge: string | null;
     MaxSessionAgeJitter: string | null;
+    MaxStartFailures: number | null;
     MinActiveSessions: number | null;
     MouseMode: string | null;
     Name: string;

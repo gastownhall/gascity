@@ -933,6 +933,17 @@ func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, observed b
 		now = clk.Now()
 		staleCreatingAfter = staleCreatingStateTimeout
 	}
+	// A live runtime whose start has not COMMITTED — start-pending or
+	// creating, a fresh create under its claim or a kept session's resume —
+	// is confirmed by the commit that stamps creation_complete (the start
+	// path, or recoverRunningPendingCreate, which clears the work bead's
+	// failed-start record first), never advanced by the heal: the state IS
+	// the durable fact that the start is uncommitted, and a heal that moved
+	// it on would leave a confirmed-looking session behind a stale record
+	// (or, with a controller death in between, lose the clear for good).
+	if alive && pendingCreateQueuedOrCreatingState(info.MetadataState) {
+		return nil
+	}
 	lcInput := sessionpkg.LifecycleInputFromInfo(info)
 	lcInput.Runtime = sessionpkg.RuntimeFacts{Observed: observed, Alive: alive}
 	lcInput.CreatedAt = info.CreatedAt

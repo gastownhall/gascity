@@ -339,3 +339,25 @@ func (f *Fake) nextThreadID() string {
 	}
 	return fmt.Sprintf("thread-fake-%d", f.seq)
 }
+
+// Compile-time proof the fake keeps a record of archived mail.
+var _ ArchivedLister = (*Fake)(nil)
+
+// AllIncludingArchived returns every message for the recipient the fake still
+// holds, archived ones included — the [ArchivedLister] contract.
+func (f *Fake) AllIncludingArchived(recipient string) ([]Message, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.broken {
+		return nil, fmt.Errorf("mail provider unavailable")
+	}
+	var result []Message
+	for _, fm := range f.messages {
+		if fm.msg.To == recipient {
+			msg := fm.msg
+			msg.Read = fm.read
+			result = append(result, msg)
+		}
+	}
+	return result, nil
+}

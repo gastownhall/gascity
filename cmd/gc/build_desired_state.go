@@ -94,6 +94,17 @@ type DesiredStateResult struct {
 	// ReadyUnassignedRoutedWorkStoreRefs is index-aligned with
 	// ReadyUnassignedRoutedWorkBeads and uses canonical city:/rig: refs.
 	ReadyUnassignedRoutedWorkStoreRefs []string
+	// ParkedUnmailedWorkBeads are the routed rows the demand probes skipped as
+	// parked whose park mail has not landed, with ParkedUnmailedWorkStoreRefs
+	// index-aligned — the park-mail retry's input for beads no other snapshot
+	// carries (pool_start_backoff.go).
+	ParkedUnmailedWorkBeads     []beads.Bead
+	ParkedUnmailedWorkStoreRefs []string
+	// StartDeferredUntil is the earliest backoff deadline among the routed
+	// rows either demand tier held back (pool_start_backoff.go), zero when
+	// none: the moment this result's demand can change with no bead or session
+	// write to fingerprint, so a cached copy of it must not outlive it.
+	StartDeferredUntil time.Time
 	// NamedSessionDemand records which named-session identities have active
 	// direct assignee demand (Assignee == identity). The reconciler merges this
 	// into poolDesired so that on-demand named sessions remain config-eligible.
@@ -177,8 +188,61 @@ type defaultScaleCheckTarget struct {
 	err      error
 }
 
+// unmailedParkedWork is a parked routed row whose park mail has not landed,
+// with the store ref the demand probe counted it in.
+type unmailedParkedWork struct {
+	Bead     beads.Bead
+	StoreRef string
+}
+
+func appendUnmailedParks(dst, src []unmailedParkedWork) []unmailedParkedWork {
+	for _, p := range src {
+		dup := false
+		for _, seen := range dst {
+			if seen.Bead.ID == p.Bead.ID && seen.StoreRef == p.StoreRef {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			dst = append(dst, p)
+		}
+	}
+	return dst
+}
+
+func parkedUnmailedWorkBeads(parks []unmailedParkedWork) []beads.Bead {
+	out := make([]beads.Bead, 0, len(parks))
+	for _, p := range parks {
+		out = append(out, p.Bead)
+	}
+	return out
+}
+
+func parkedUnmailedWorkStoreRefs(parks []unmailedParkedWork) []string {
+	out := make([]string, 0, len(parks))
+	for _, p := range parks {
+		out = append(out, p.StoreRef)
+	}
+	return out
+}
+
 type scaleCheckDemand struct {
-	Count          int
+	Count int
+	// Deferred counts the routed, servable rows the pool itself is holding
+	// back — backed off or parked after failed starts (workStartDeferral) —
+	// and therefore did not count.
+	Deferred int
+	// DeferredUntil is the earliest backoff deadline among the deferred rows
+	// (zero when none is backed off; a park has no deadline): the moment
+	// demand can change with no bead or session write to fingerprint, so a
+	// cached demand snapshot must expire by then (StartDeferredUntil).
+	DeferredUntil time.Time
+	// UnmailedParks are the deferred rows that are parked and whose park mail
+	// has not landed (gc.park_mailed_at empty): an open unassigned bead can
+	// park before any session claims it and is then in no other snapshot, so
+	// the demand probe is where the mail retry learns about it.
+	UnmailedParks  []unmailedParkedWork
 	WorkBeadIDs    []string
 	Titles         map[string]string
 	Packs          map[string]string
@@ -448,6 +512,11 @@ func buildDesiredStateWithSessionBeadsAt(
 	}
 
 	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, beaconTime, store, stderr)
+	// The failed-start record's deadlines are wall-clock: the gate that
+	// excludes a backed-off or parked bead from demand reads the clock NOW,
+	// never beaconTime — the supervisor captures that once at start, and a
+	// backoff compared against it would never expire.
+	deferralNow := workStartDeferralNow()
 	bp.sessionBeads = sessionBeads
 	bp.sessionSnapshotCompletenessKnown = true
 	bp.sessionSnapshotComplete = store == nil || (sessionBeads != nil && sessionBeads.LoadError() == nil)
@@ -476,6 +545,11 @@ func buildDesiredStateWithSessionBeadsAt(
 	desired := make(map[string]TemplateParams)
 	var pendingPools []poolEvalWork
 	var defaultScaleTargets []defaultScaleCheckTarget
+	var customProbeTargets []defaultScaleCheckTarget
+	var parkedUnmailedWork []unmailedParkedWork
+	// startDeferredUntil is the earliest backoff deadline the demand probes
+	// held a routed row back to (DesiredStateResult.StartDeferredUntil).
+	var startDeferredUntil time.Time
 	var defaultNamedScaleTargets []defaultScaleCheckTarget
 	// coldWakeTemplates marks pool templates that received a cold-pool wake
 	// probe (FR-S0.1). Their default-probe demand is clamped to 1 in the merge
@@ -654,6 +728,13 @@ func buildDesiredStateWithSessionBeadsAt(
 					coldWakeTemplates[template] = true
 				}
 			}
+			// The custom-count named template's extra ephemeral seats need the
+			// probe rows too (trigger attribution; see the generic branch below).
+			if store != nil && !storeScopedControlDispatcher {
+				for _, source := range activeStores {
+					customProbeTargets = append(customProbeTargets, defaultScaleCheckTarget{template: template, store: source.store, storeKey: source.ref})
+				}
+			}
 			pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir, newDemand: store != nil})
 			continue
 		}
@@ -737,6 +818,19 @@ func buildDesiredStateWithSessionBeadsAt(
 				defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTarget{template: template, store: source.store, storeKey: source.ref})
 			}
 			coldWakeTemplates[template] = true
+		}
+		// Warm or cold, a custom-scale_check pool also gets the default probe's
+		// ROWS (never its count): the seats the custom count spawns are tied to
+		// the routed rows the probe can see, so a seat whose start fails has a
+		// trigger bead to charge (pool_start_backoff.go), and a parked row whose
+		// mail has not landed is found. The custom count stays authoritative —
+		// it may count a subset or exclude parked rows itself, so nothing is
+		// subtracted from it; a query that counts parked rows spawns a seat for
+		// them like any other row.
+		if store != nil && !storeScopedControlDispatcher {
+			for _, source := range activeStores {
+				customProbeTargets = append(customProbeTargets, defaultScaleCheckTarget{template: template, store: source.store, storeKey: source.ref})
+			}
 		}
 		env, err := controllerQueryRuntimeEnv(cityPath, cfg, &cfg.Agents[i])
 		if err != nil {
@@ -850,7 +944,10 @@ func buildDesiredStateWithSessionBeadsAt(
 		// an explicit-handle CachingStore returns its memoized pre-write live
 		// snapshot as the authoritative demand read.
 		demandReadyCache := newReadyDemandCache()
-		controlDispatcherOpenDemand := openControlDispatcherDemand(cfg, unassignedRoutedBeads)
+		// A parked or backed-off routed bead is no demand for the dispatcher
+		// fallback either: a seat restored from it would carry no trigger, so
+		// nothing would charge or gate it.
+		controlDispatcherOpenDemand := openControlDispatcherDemand(cfg, excludeStartDeferredWork(unassignedRoutedBeads, deferralNow, nil))
 		recordDemandSubPhase(trace, "demand_snapshot.collect_unassigned_routed", subPhaseStart, map[string]any{
 			"beads": len(unassignedRoutedBeads),
 		})
@@ -859,9 +956,27 @@ func buildDesiredStateWithSessionBeadsAt(
 		recordDemandSubPhase(trace, "demand_snapshot.evaluate_pending_pools", subPhaseStart, map[string]any{
 			"pools": len(pendingPools),
 		})
+		if len(customProbeTargets) > 0 {
+			_, customProbeDemand, _, probeErrs := defaultScaleCheckCountsAndDemand(cfg, deferralNow, customProbeTargets, demandReadyCache)
+			for _, err := range probeErrs {
+				fmt.Fprintf(stderr, "buildDesiredState: custom scale_check row probe: %v (seats may start without a trigger bead; parked rows may miss a mail retry this tick)\n", err) //nolint:errcheck
+			}
+			if scaleCheckDemandByTemplate == nil {
+				scaleCheckDemandByTemplate = make(map[string]scaleCheckDemand)
+			}
+			for template, entry := range customProbeDemand {
+				parkedUnmailedWork = appendUnmailedParks(parkedUnmailedWork, entry.UnmailedParks)
+				startDeferredUntil = earlierDeadline(startDeferredUntil, entry.DeferredUntil)
+				count, ok := scaleCheckCounts[template]
+				if !ok || count <= 0 {
+					continue
+				}
+				scaleCheckDemandByTemplate[template] = mergeScaleCheckDemand(scaleCheckDemandByTemplate[template], entry, count)
+			}
+		}
 		if len(defaultScaleTargets) > 0 {
 			subPhaseStart = time.Now()
-			defaultCounts, defaultDemand, partialTemplates, errs := defaultScaleCheckCountsAndDemand(cfg, defaultScaleTargets, demandReadyCache)
+			defaultCounts, defaultDemand, partialTemplates, errs := defaultScaleCheckCountsAndDemand(cfg, deferralNow, defaultScaleTargets, demandReadyCache)
 			recordDemandSubPhase(trace, "demand_snapshot.default_scale_demand", subPhaseStart, map[string]any{
 				"targets": len(defaultScaleTargets),
 			})
@@ -878,6 +993,10 @@ func buildDesiredStateWithSessionBeadsAt(
 			}
 			if scaleCheckDemandByTemplate == nil {
 				scaleCheckDemandByTemplate = make(map[string]scaleCheckDemand)
+			}
+			for _, entry := range defaultDemand {
+				parkedUnmailedWork = appendUnmailedParks(parkedUnmailedWork, entry.UnmailedParks)
+				startDeferredUntil = earlierDeadline(startDeferredUntil, entry.DeferredUntil)
 			}
 			for template, count := range defaultCounts {
 				// A cold-pool wake probe only wakes the pool from zero; clamp its
@@ -941,13 +1060,18 @@ func buildDesiredStateWithSessionBeadsAt(
 		if len(scaleCheckPartialTemplates) > 0 {
 			fmt.Fprintf(stderr, "scaleCheck: PARTIAL — scale_check failed for %s, retaining affected sessions\n", strings.Join(sortedBoolMapKeys(scaleCheckPartialTemplates), ",")) //nolint:errcheck
 		}
-		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, store, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs)
+		// The store refs ride along index-aligned so the resume and
+		// wake-known-identity seats record the store their bead was counted
+		// in (pool_desired_state.go: WorkStoreRef → gc.trigger_bead_store_ref).
+		poolWorkBeads, poolWorkStoreRefs := filterAssignedWorkBeadsForPoolDemandAligned(cfg, cityPath, store, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs)
+		poolWorkBeads, poolWorkStoreRefs = excludeStartDeferredWorkAligned(poolWorkBeads, poolWorkStoreRefs, deferralNow, trace)
 		bp.assignedWorkBeads = poolWorkBeads
 		bp.poolScaleCheckPartialTemplates = poolScaleCheckPartialTemplates
 		bp.providerHealthSnapshot = loadProviderHealthSnapshot(cityPath)
 		poolDesiredStates := ComputePoolDesiredStatesWithDemandTracedAt(
 			cfg,
 			poolWorkBeads,
+			poolWorkStoreRefs,
 			sessionBeads.OpenInfos(),
 			scaleCheckCounts,
 			scaleCheckDemandByTemplate,
@@ -1015,6 +1139,9 @@ func buildDesiredStateWithSessionBeadsAt(
 	// identities that only satisfy namedDefaultDemand (no bead-specific signal
 	// available there) — see TemplateParams.BoundStepID.
 	namedWorkBeadID := make(map[string]string, len(namedSpecs))
+	// namedDirectWork is the bead that made namedWorkReady true for an
+	// identity: the trigger its holder is woken for (namedSessionWakeRequest).
+	namedDirectWork := make(map[string]SessionRequest, len(namedSpecs))
 	for identity := range namedDefaultDemand {
 		if _, ok := namedSpecs[identity]; ok {
 			namedWorkReady[identity] = true
@@ -1042,50 +1169,35 @@ func buildDesiredStateWithSessionBeadsAt(
 	if len(assignedWorkBeads) > 0 && len(namedSpecs) > 0 {
 		namedClaimRefs = assignedWorkRelocatedClaimRefs(cityPath, cfg, store)
 	}
+	// The failed-start gate (pool_start_backoff.go) applies to direct named
+	// demand too: a backed-off or parked bead must not keep an on-demand named
+	// session awake for it. The full snapshot stays in the result for the
+	// release/orphan sweeps and the park-mail retry.
+	namedDemandWork, namedDemandRefs := excludeStartDeferredWorkAligned(assignedWorkBeads, assignedWorkStoreRefs, deferralNow, trace)
+	namedOwnedClaimRefs := assignedWorkClaimRefs(cityPath, cfg, store)
 	for identity, spec := range namedSpecs {
-		for i, wb := range assignedWorkBeads {
-			// in_progress work is always actionable; open work is direct named
-			// demand only when it passed the store's readiness/deps gate. Without
-			// the readiness check, an open assigned bead that entered the snapshot
-			// via the open-routed orphan-release pass (no deps gate) would keep an
-			// on-demand named session awake forever even while blocked.
-			switch wb.Status {
-			case "in_progress":
-			case "open":
-				ref := ""
-				if i < len(assignedWorkStoreRefs) {
-					ref = assignedWorkStoreRefs[i]
-				}
-				if !readyAssigned[storeScopedBeadKey{StoreRef: ref, ID: wb.ID}] {
-					continue
-				}
-			default:
-				continue
-			}
-			assignee := strings.TrimSpace(wb.Assignee)
-			if !namedSessionAssigneeMatchesSpec(spec, identity, assignee) {
-				continue
-			}
-			// ga-i1d0tr Candidate B: a bare-template Assignee used to be
-			// distrusted for templates supporting expanded per-instance
-			// identities (a multi-slot pool or namepool coexisting with this
-			// named session), because pool's wake-known-identity tier had no
-			// awareness of cfg.NamedSessions and could independently wake a
-			// competing pool worker for the same bare identity. That read-side
-			// ambiguity is now resolved structurally at the source
-			// (isConfiguredNamedSessionIdentity, pool_desired_state.go): pool
-			// can no longer generate wake-known-identity demand for a
-			// configured named session's own bare identity, so this bare match
-			// is trustworthy unconditionally — no per-template-shape guard
-			// needed here anymore (ga-p0u752).
-			if !assignedWorkIndexReachableFromAgentOnClaimRefs(cityPath, cfg, spec.Agent, assignedWorkStoreRefs, i, namedClaimRefs) {
-				continue
-			}
-			fmt.Fprintf(stderr, "namedWorkReady: %s matched by bead %s (assignee=%s status=%s)\n", identity, wb.ID, assignee, wb.Status) //nolint:errcheck
-			namedWorkReady[identity] = true
-			namedWorkBeadID[identity] = wb.ID
-			break
+		// ga-i1d0tr Candidate B: a bare-template Assignee used to be
+		// distrusted for templates supporting expanded per-instance
+		// identities (a multi-slot pool or namepool coexisting with this
+		// named session), because pool's wake-known-identity tier had no
+		// awareness of cfg.NamedSessions and could independently wake a
+		// competing pool worker for the same bare identity. That read-side
+		// ambiguity is now resolved structurally at the source
+		// (isConfiguredNamedSessionIdentity, pool_desired_state.go): pool
+		// can no longer generate wake-known-identity demand for a
+		// configured named session's own bare identity, so this bare match
+		// is trustworthy unconditionally — no per-template-shape guard
+		// needed here anymore (ga-p0u752).
+		request, wb, ok := namedDirectWorkRequest(cityPath, cfg, spec, namedDemandWork, namedDemandRefs, readyAssigned, namedClaimRefs, func(assignee string) bool {
+			return namedSessionAssigneeMatchesSpec(spec, identity, assignee)
+		})
+		if !ok {
+			continue
 		}
+		fmt.Fprintf(stderr, "namedWorkReady: %s matched by bead %s (assignee=%s status=%s)\n", identity, wb.ID, strings.TrimSpace(wb.Assignee), wb.Status) //nolint:errcheck
+		namedWorkReady[identity] = true
+		namedWorkBeadID[identity] = wb.ID
+		namedDirectWork[identity] = request
 	}
 	if len(assignedWorkBeads) > 0 {
 		fmt.Fprintf(stderr, "namedWorkReady: %d assigned beads, %d named specs, ready=%v\n", len(assignedWorkBeads), len(namedSpecs), namedWorkReady) //nolint:errcheck
@@ -1137,6 +1249,18 @@ func buildDesiredStateWithSessionBeadsAt(
 		tp.Env["GC_ALIAS"] = identity
 		tp.Env["GC_AGENT"] = identity
 		tp.Env["GC_SESSION_ORIGIN"] = "named"
+		// A holder with no bead yet is created (or its closed bead reopened)
+		// for the direct demand that woke it: the trigger rides on the
+		// TemplateParams so the bead carries it from its first start
+		// (syncSessionBeads), and a start that fails is charged to it — else
+		// a failing pre_start closes the fresh bead every tick, the next
+		// build finds no open holder, and nothing is ever counted.
+		if !hasCanonical {
+			if request, ok := namedDirectWork[identity]; ok {
+				tp.TriggerBeadID = request.WorkBeadID
+				tp.TriggerBeadStoreRef = request.WorkStoreRef
+			}
+		}
 		// When a canonical bead exists, use ITS session_name as the
 		// desiredState key so syncSessionBeads finds it in bySessionName
 		// and takes the UPDATE path. Without this, resolveSessionName
@@ -1144,6 +1268,55 @@ func buildDesiredStateWithSessionBeadsAt(
 		// key, sending the canonical bead through the CREATE path where
 		// the alias check fails against itself.
 		if hasCanonical {
+			// A retained named holder woken for work carries that work as its
+			// trigger, the way a pool seat does (poolTriggerMetadata /
+			// bindPoolSessionTriggerBead): a start that then fails charges the
+			// WORK bead (pool_start_backoff.go) instead of vanishing. Direct
+			// demand first — a bead assigned to the identity, or to the
+			// holder's own session bead id or runtime session name, the same
+			// three identities the awake pass wakes it for
+			// (sessionAssigneeMatches) — else the routed row that woke it
+			// through NamedSessionRoutedDemand. A holder created fresh for
+			// routed demand has no bead to bind to yet; the next tick binds it.
+			direct := namedDirectWork[identity]
+			if strings.TrimSpace(direct.WorkBeadID) == "" {
+				if request, _, ok := namedDirectWorkRequest(cityPath, cfg, spec, namedDemandWork, namedDemandRefs, readyAssigned, namedOwnedClaimRefs, namedHolderAssigneeMatcher(identity, canonicalInfo)); ok {
+					direct = request
+				}
+			}
+			if startInFlightInfo(canonicalInfo) {
+				// A start is in flight for this holder: its trigger is the
+				// operand that start ran for — the failure charge, and the clear
+				// recoverRunningPendingCreate makes before it confirms — and is
+				// not moved until the start commits or rolls back. The params
+				// carry the same bead so nothing prepared meanwhile disagrees.
+				tp.TriggerBeadID = strings.TrimSpace(canonicalInfo.TriggerBeadID)
+				tp.TriggerBeadStoreRef = strings.TrimSpace(canonicalInfo.TriggerBeadStoreRef)
+			} else {
+				// No wake request means the trigger the holder still carries
+				// names a bead it no longer serves — parked or backed off (gated
+				// out of the demand above), closed, or assigned elsewhere — and
+				// the bind CLEARS it: a mode=always holder restarts regardless
+				// of demand, and a start it makes for no work must not be
+				// charged to that bead, nor lift its park on success.
+				request, _ := namedSessionWakeRequest(spec, direct, namedRoutedDemand[identity], scaleCheckDemandByTemplate)
+				if bound, err := bindNamedSessionWakeTrigger(bp, canonicalInfo, request); err != nil {
+					// The bind did not land: the bead still carries its previous
+					// trigger, and THAT is what a start prepared this tick runs
+					// for (the trigger env is read off the persisted bead) and is
+					// charged to (workTriggerFromInfo at prepare). The params say
+					// the same, so nothing disagrees; the request binds on a
+					// later tick.
+					fmt.Fprintf(stderr, "buildDesiredState: named session %q trigger bead %q: %v (the holder keeps trigger %q until the bind lands; a start meanwhile runs for and is charged to that)\n", identity, request.WorkBeadID, err, strings.TrimSpace(canonicalInfo.TriggerBeadID)) //nolint:errcheck
+				} else {
+					canonicalInfo = bound
+				}
+				// The params mirror the PERSISTED trigger — the operand the
+				// start's env, its failure charge and its pre-confirmation
+				// clear all read — never a request the bead does not carry.
+				tp.TriggerBeadID = strings.TrimSpace(canonicalInfo.TriggerBeadID)
+				tp.TriggerBeadStoreRef = strings.TrimSpace(canonicalInfo.TriggerBeadStoreRef)
+			}
 			if sn := strings.TrimSpace(canonicalInfo.SessionNameMetadata); sn != "" {
 				tp.SessionName = sn
 			}
@@ -1187,6 +1360,9 @@ func buildDesiredStateWithSessionBeadsAt(
 		AssignedWorkStoreRefs:              assignedWorkStoreRefs,
 		ReadyUnassignedRoutedWorkBeads:     readyUnassignedRoutedWorkBeads,
 		ReadyUnassignedRoutedWorkStoreRefs: readyUnassignedRoutedWorkStoreRefs,
+		ParkedUnmailedWorkBeads:            parkedUnmailedWorkBeads(parkedUnmailedWork),
+		ParkedUnmailedWorkStoreRefs:        parkedUnmailedWorkStoreRefs(parkedUnmailedWork),
+		StartDeferredUntil:                 earlierDeadline(startDeferredUntil, earliestStartDeferralDeadline(assignedWorkBeads, deferralNow)),
 		ReadyAssigned:                      readyAssigned,
 		ContinuationClaimCandidates:        continuationClaimCandidates,
 		ContinuationClaimQueryPartial:      continuationClaimQueryPartial,
@@ -1882,11 +2058,16 @@ func defaultScaleCheckTargetForAgent(
 // that need normalization should call defaultScaleCheckCountsAndDemand
 // directly with a real *config.City.
 func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int, map[string]bool, []error) {
-	counts, _, partialTemplates, errs := defaultScaleCheckCountsAndDemand(nil, targets)
+	counts, _, partialTemplates, errs := defaultScaleCheckCountsAndDemand(nil, time.Now(), targets)
 	return counts, partialTemplates, errs
 }
 
-func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCheckTarget, caches ...*readyDemandCache) (map[string]int, map[string]scaleCheckDemand, map[string]bool, []error) {
+// defaultScaleCheckCountsAndDemand counts the routed, servable, unassigned rows
+// of each target store as new-session demand per template. now gates the
+// pool's failed-start backoff and park (workStartDeferral): a routed row whose
+// starts keep failing is not demand while it is backed off or parked, so the
+// pool plans no start for it.
+func defaultScaleCheckCountsAndDemand(cfg *config.City, now time.Time, targets []defaultScaleCheckTarget, caches ...*readyDemandCache) (map[string]int, map[string]scaleCheckDemand, map[string]bool, []error) {
 	cache := optionalReadyDemandCache(caches)
 	counts := make(map[string]int, len(targets))
 	demand := make(map[string]scaleCheckDemand, len(targets))
@@ -1962,6 +2143,18 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 			// drains, every tick, forever. See demand_serve_predicate.go.
 			template, servable := demandServableForTemplates(cfg, b, group.templates)
 			if !servable {
+				continue
+			}
+			if deferred, reason, until := workStartDeferral(b.Metadata, now); deferred {
+				entry := demand[template]
+				entry.Deferred++
+				if reason == workStartDeferralBackoff {
+					entry.DeferredUntil = earlierDeadline(entry.DeferredUntil, until)
+				}
+				if state := readWorkStartFailureState(b.Metadata); state.Parked() && state.ParkMailedAt.IsZero() {
+					entry.UnmailedParks = append(entry.UnmailedParks, unmailedParkedWork{Bead: b, StoreRef: group.storeKey})
+				}
+				demand[template] = entry
 				continue
 			}
 			seen := countedBeads[template]
@@ -2050,10 +2243,23 @@ func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scale
 	if existing.WorktreeErrors == nil && len(incoming.WorktreeErrors) > 0 {
 		existing.WorktreeErrors = make(map[string]string, len(incoming.WorktreeErrors))
 	}
+	seen := make(map[string]bool, len(existing.WorkBeadIDs))
+	for _, id := range existing.WorkBeadIDs {
+		seen[strings.TrimSpace(id)] = true
+	}
 	for _, id := range incoming.WorkBeadIDs[:limit] {
 		if strings.TrimSpace(id) == "" {
 			continue
 		}
+		// One bead is one seat's trigger, whichever probes reported it: a
+		// custom scale_check row probe and the cold default probe can both
+		// answer the same routed bead, and two seats for one bead would race
+		// its pre_start with no backoff between them and charge it twice.
+		// The count still stands; the extra seat is triggerless.
+		if seen[strings.TrimSpace(id)] {
+			continue
+		}
+		seen[strings.TrimSpace(id)] = true
 		existing.WorkBeadIDs = append(existing.WorkBeadIDs, id)
 		if incoming.Titles != nil {
 			existing.Titles[id] = incoming.Titles[id]
@@ -3472,6 +3678,14 @@ func computePoolTriggerBindingPatch(info session.Info, request SessionRequest, w
 // build with no store folds locally without a write.
 func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, info session.Info, request SessionRequest) (session.Info, error) {
 	if info.ID == "" {
+		return info, nil
+	}
+	// A seat whose start is in flight keeps the trigger that start ran for
+	// (the same pin as a named holder's, startInFlightInfo): the failure
+	// charge and the clear recoverRunningPendingCreate makes before it
+	// confirms name that bead. A seat that claimed other work meanwhile is
+	// re-pointed by the tick after its start commits.
+	if startInFlightInfo(info) {
 		return info, nil
 	}
 	workDir, err := verifiedPoolTriggerWorkDir(bp, cfgAgent, qualifiedName, request)
@@ -6460,4 +6674,156 @@ func formatMaxSessions(a *config.Agent) string {
 		return "unlimited"
 	}
 	return strconv.Itoa(*m)
+}
+
+// namedDirectWorkRequest is the first actionable assigned-work row a named
+// session is woken for by assignment: in_progress work always, open work
+// only when it passed the store's readiness/deps gate (an open assigned bead
+// that entered the snapshot via the open-routed orphan-release pass, with no
+// deps gate, must not keep an on-demand named session awake while blocked),
+// whose assignee the matcher accepts and whose store the agent can reach.
+// The returned request carries the row's store ref so the holder's trigger
+// names the store the bead was counted in.
+func namedDirectWorkRequest(
+	cityPath string,
+	cfg *config.City,
+	spec namedSessionSpec,
+	work []beads.Bead,
+	storeRefs []string,
+	readyAssigned map[storeScopedBeadKey]bool,
+	claimRefs []string,
+	matches func(assignee string) bool,
+) (SessionRequest, beads.Bead, bool) {
+	for i, wb := range work {
+		ref := ""
+		if i < len(storeRefs) {
+			ref = storeRefs[i]
+		}
+		switch wb.Status {
+		case "in_progress":
+		case "open":
+			if !readyAssigned[storeScopedBeadKey{StoreRef: ref, ID: wb.ID}] {
+				continue
+			}
+		default:
+			continue
+		}
+		assignee := strings.TrimSpace(wb.Assignee)
+		if assignee == "" || !matches(assignee) {
+			continue
+		}
+		if !assignedWorkIndexReachableFromAgentOnClaimRefs(cityPath, cfg, spec.Agent, storeRefs, i, claimRefs) {
+			continue
+		}
+		return SessionRequest{Template: namedSessionBackingTemplate(spec), Tier: "resume", WorkBeadID: wb.ID, WorkBeadTitle: wb.Title, WorkStoreRef: ref}, wb, true
+	}
+	return SessionRequest{}, beads.Bead{}, false
+}
+
+// namedHolderAssigneeMatcher accepts all three identities the awake pass
+// recognizes for a retained holder, including configured-name claims reached
+// through the holder's claim-store refs.
+func namedHolderAssigneeMatcher(identity string, holder session.Info) func(assignee string) bool {
+	id := strings.TrimSpace(holder.ID)
+	sessionName := strings.TrimSpace(holder.SessionNameMetadata)
+	return func(assignee string) bool {
+		if assignee == "" {
+			return false
+		}
+		return assignee == identity || (id != "" && assignee == id) || (sessionName != "" && assignee == sessionName)
+	}
+}
+
+// namedSessionWakeRequest is the work a retained named holder is woken for:
+// its direct demand (the bead assigned to the identity that made
+// namedWorkReady true) when there is one, else — when the wake comes through
+// NamedSessionRoutedDemand — the first routed row the backing template's
+// demand probe counted. ok is false when the holder is not woken for work.
+func namedSessionWakeRequest(spec namedSessionSpec, direct SessionRequest, routedDemand bool, demandByTemplate map[string]scaleCheckDemand) (SessionRequest, bool) {
+	if strings.TrimSpace(direct.WorkBeadID) != "" {
+		return direct, true
+	}
+	if !routedDemand {
+		return SessionRequest{}, false
+	}
+	backing := namedSessionBackingTemplate(spec)
+	entry := demandByTemplate[backing]
+	if len(entry.WorkBeadIDs) == 0 {
+		return SessionRequest{}, false
+	}
+	id := entry.WorkBeadIDs[0]
+	return SessionRequest{Template: backing, Tier: "new", WorkBeadID: id, WorkBeadTitle: entry.Titles[id], WorkStoreRef: entry.StoreRefs[id]}, true
+}
+
+// bindNamedSessionWakeTrigger records the wake request's work bead as the
+// named holder's trigger (gc.trigger_bead_id / gc.trigger_bead_store_ref) —
+// ONLY those two keys: a named session's pack, workspace and work dir are its
+// own, never derived from a trigger the way a pool seat's are. An EMPTY
+// request clears both keys: the holder is not woken for work this tick, so a
+// trigger it still carries names a bead it no longer serves (the same shape
+// as a pool seat's clear in computePoolTriggerBindingPatch). Persisted
+// through the session front door's one-Update chokepoint like
+// bindPoolSessionTriggerBead; a dry-run build with no store folds locally.
+func bindNamedSessionWakeTrigger(bp *agentBuildParams, info session.Info, request SessionRequest) (session.Info, error) {
+	if info.ID == "" {
+		return info, nil
+	}
+	workBeadID := strings.TrimSpace(request.WorkBeadID)
+	storeRef := strings.TrimSpace(request.WorkStoreRef)
+	if workBeadID == "" {
+		storeRef = ""
+	}
+	patch := session.MetadataPatch{}
+	if strings.TrimSpace(info.TriggerBeadID) != workBeadID {
+		patch[beadmeta.TriggerBeadIDMetadataKey] = workBeadID
+	}
+	if strings.TrimSpace(info.TriggerBeadStoreRef) != storeRef {
+		patch[beadmeta.TriggerBeadStoreRefMetadataKey] = storeRef
+	}
+	if len(patch) == 0 {
+		return info, nil
+	}
+	if bp == nil || bp.beadStore == nil {
+		return info.ApplyPatch(patch), nil
+	}
+	return sessionFrontDoor(bp.beadStore).UpdateMetadataInfo(info, patch)
+}
+
+// workStartDeferralNow is the clock the demand build's failed-start gate
+// reads (wall clock; a test pins it).
+var workStartDeferralNow = time.Now
+
+// startInFlightInfo reports whether a session start is in flight for the
+// holder: a fresh create under its pending-create claim, or a session whose
+// state says it is being started. Its trigger is pinned meanwhile.
+func startInFlightInfo(info session.Info) bool {
+	return info.PendingCreateClaim || info.State == session.StateCreating || info.State == session.StateStartPending
+}
+
+// namedSessionReopenTriggerMetadata is the trigger a CLOSED named holder is
+// reopened with: both trigger keys, always. The closed bead still carries
+// the trigger of the start that closed it, and a reopen for no work (a
+// mode=always holder after its work parked) must clear it, or the reopened
+// holder's next start is charged to — and, succeeding, unparks — a bead it
+// no longer serves.
+func namedSessionReopenTriggerMetadata(tp TemplateParams) map[string]string {
+	return map[string]string{
+		beadmeta.TriggerBeadIDMetadataKey:       strings.TrimSpace(tp.TriggerBeadID),
+		beadmeta.TriggerBeadStoreRefMetadataKey: strings.TrimSpace(tp.TriggerBeadStoreRef),
+	}
+}
+
+// namedSessionTriggerMetadata is the trigger a named holder is CREATED with
+// (TemplateParams.TriggerBeadID / TriggerBeadStoreRef); nil when the holder
+// is not woken for a bead — a fresh bead carries nothing to clear.
+func namedSessionTriggerMetadata(tp TemplateParams) map[string]string {
+	id := strings.TrimSpace(tp.TriggerBeadID)
+	if id == "" {
+		return nil
+	}
+	meta := map[string]string{beadmeta.TriggerBeadIDMetadataKey: id}
+	if ref := strings.TrimSpace(tp.TriggerBeadStoreRef); ref != "" {
+		meta[beadmeta.TriggerBeadStoreRefMetadataKey] = ref
+	}
+	return meta
 }

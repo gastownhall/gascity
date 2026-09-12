@@ -1191,33 +1191,7 @@ func (p *Provider) messageCandidatesForRoutes(routes []string) ([]beads.Bead, er
 // messages. Live reads are required so command-visible mail sees fresh wisps
 // even when the active store cache was primed earlier.
 func (p *Provider) messageCandidatesAll(routes []string) ([]beads.Bead, error) {
-	query := beads.ListQuery{
-		Type:     messageBeadType,
-		Status:   "open",
-		TierMode: beads.TierBoth,
-		Live:     true,
-	}
-	if len(routes) > 0 {
-		query.Assignees = routes
-	} else {
-		query.AllowScan = true
-	}
-	all, err := p.store.List(query)
-	if err != nil {
-		return nil, fmt.Errorf("scanning message beads: %w", err)
-	}
-	if len(routes) == 0 {
-		return all, nil
-	}
-	out := make([]beads.Bead, 0, len(all))
-	for _, b := range all {
-		// matchesRecipientRoute is defense-in-depth: HQStore returns exact
-		// matches from the index; BdStore multi-route fallback may return excess.
-		if matchesRecipientRoute(routes, b.Assignee) {
-			out = append(out, b)
-		}
-	}
-	return out, nil
+	return p.messageCandidates(routes, false)
 }
 
 // beadToMessage converts a bead to a mail.Message.
@@ -1306,3 +1280,65 @@ func generateThreadID() string {
 
 // Compile-time interface check.
 var _ mail.Provider = (*Provider)(nil)
+
+// Compile-time proof the bead backend keeps a record of archived mail.
+var _ mail.ArchivedLister = (*Provider)(nil)
+
+// AllIncludingArchived returns every message bead the store still holds for
+// the recipient — open or archived (closed), read or unread. Archive closes a
+// message bead rather than deleting it, so a message the recipient dismissed
+// is still here; only the read-mail retention purge (PurgeReadMessageWisps)
+// removes one for good. It implements [mail.ArchivedLister] for a caller that
+// needs a delivered receipt the recipient's archive cannot erase.
+func (p *Provider) AllIncludingArchived(recipient string) ([]mail.Message, error) {
+	routes := p.recipientRoutesForAll([]string{recipient})
+	candidates, err := p.messageCandidates(routes, true)
+	if err != nil {
+		return nil, fmt.Errorf("beadmail: listing beads: %w", err)
+	}
+	var msgs []mail.Message
+	for _, b := range candidates {
+		if len(routes) > 0 && !matchesRecipientRoute(routes, b.Assignee) {
+			continue
+		}
+		msgs = append(msgs, beadToMessage(b))
+	}
+	return msgs, nil
+}
+
+// messageCandidates is messageCandidatesAll with the status filter under the
+// caller's control: includeArchived lists closed (archived or retention-swept)
+// message beads alongside the open ones.
+func (p *Provider) messageCandidates(routes []string, includeArchived bool) ([]beads.Bead, error) {
+	query := beads.ListQuery{
+		Type:     messageBeadType,
+		Status:   "open",
+		TierMode: beads.TierBoth,
+		Live:     true,
+	}
+	if includeArchived {
+		query.Status = ""
+		query.IncludeClosed = true
+	}
+	if len(routes) > 0 {
+		query.Assignees = routes
+	} else {
+		query.AllowScan = true
+	}
+	all, err := p.store.List(query)
+	if err != nil {
+		return nil, fmt.Errorf("scanning message beads: %w", err)
+	}
+	if len(routes) == 0 {
+		return all, nil
+	}
+	out := make([]beads.Bead, 0, len(all))
+	for _, b := range all {
+		// matchesRecipientRoute is defense-in-depth: HQStore returns exact
+		// matches from the index; BdStore multi-route fallback may return excess.
+		if matchesRecipientRoute(routes, b.Assignee) {
+			out = append(out, b)
+		}
+	}
+	return out, nil
+}

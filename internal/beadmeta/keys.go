@@ -202,32 +202,41 @@ const (
 	PackMetadataKey                     = "gc.pack"
 	PackRootMetadataKey                 = "gc.pack_root"
 	PackWorkspaceMetadataKey            = "gc.pack_workspace"
-	PerDispatchModelMetadataKey         = "gc.per_dispatch_model"
-	RalphStepIDMetadataKey              = "gc.ralph_step_id"
-	ReasoningMetadataKey                = "gc.reasoning"
-	RequiredArtifactMetadataKey         = "gc.required_artifact"
-	RequiredArtifactsMetadataKey        = "gc.required_artifacts"
-	ReviewGateMetadataKey               = "gc.review_gate"
-	RetryCountMetadataKey               = "gc.retry_count"
-	RetryFromMetadataKey                = "gc.retry_from"
-	RetrySessionRecycledMetadataKey     = "gc.retry_session_recycled"
-	RetryStateMetadataKey               = "gc.retry_state"
-	RigRootMetadataKey                  = "gc.rig_root"
-	RootBeadIDMetadataKey               = "gc.root_bead_id"
-	RootSettleFailedAtMetadataKey       = "gc.root_settle_failed_at"
-	RootSettleFailedMetadataKey         = "gc.root_settle_failed"
-	RootStoreRefMetadataKey             = "gc.root_store_ref"
-	RouteQuarantineMetadataKey          = "gc.route_recovery_quarantined"
-	RouteQuarantineReasonMetadataKey    = "gc.route_recovery_quarantine_reason"
-	RoutedToMetadataKey                 = "gc.routed_to"
-	RunTargetMetadataKey                = "gc.run_target"
-	RuntimeVarsMetadataKey              = "gc.graphv2_vars.v1"
-	ScopeKindMetadataKey                = "gc.scope_kind"
-	ScopeNameMetadataKey                = "gc.scope_name"
-	ScopeRefMetadataKey                 = "gc.scope_ref"
-	ScopeRoleMetadataKey                = "gc.scope_role"
-	SessionAffinityMetadataKey          = "gc.session_affinity"
-	SessionIDMetadataKey                = "gc.session_id"
+	// ParkFailuresMetadataKey, ParkMailedAtMetadataKey, ParkReasonMetadataKey and
+	// ParkedAtMetadataKey record a routed WORK bead the pool parked after its
+	// session starts kept failing (cmd/gc/pool_start_backoff.go). ParkedAt set
+	// (non-empty) is the park; clearing the three park keys is the unpark.
+	ParkFailuresMetadataKey          = "gc.park_failures"
+	ParkIDMetadataKey                = "gc.park_id"
+	ParkMailedAtMetadataKey          = "gc.park_mailed_at"
+	ParkReasonMetadataKey            = "gc.park_reason"
+	ParkedAtMetadataKey              = "gc.parked_at"
+	PerDispatchModelMetadataKey      = "gc.per_dispatch_model"
+	RalphStepIDMetadataKey           = "gc.ralph_step_id"
+	ReasoningMetadataKey             = "gc.reasoning"
+	RequiredArtifactMetadataKey      = "gc.required_artifact"
+	RequiredArtifactsMetadataKey     = "gc.required_artifacts"
+	ReviewGateMetadataKey            = "gc.review_gate"
+	RetryCountMetadataKey            = "gc.retry_count"
+	RetryFromMetadataKey             = "gc.retry_from"
+	RetrySessionRecycledMetadataKey  = "gc.retry_session_recycled"
+	RetryStateMetadataKey            = "gc.retry_state"
+	RigRootMetadataKey               = "gc.rig_root"
+	RootBeadIDMetadataKey            = "gc.root_bead_id"
+	RootSettleFailedAtMetadataKey    = "gc.root_settle_failed_at"
+	RootSettleFailedMetadataKey      = "gc.root_settle_failed"
+	RootStoreRefMetadataKey          = "gc.root_store_ref"
+	RouteQuarantineMetadataKey       = "gc.route_recovery_quarantined"
+	RouteQuarantineReasonMetadataKey = "gc.route_recovery_quarantine_reason"
+	RoutedToMetadataKey              = "gc.routed_to"
+	RunTargetMetadataKey             = "gc.run_target"
+	RuntimeVarsMetadataKey           = "gc.graphv2_vars.v1"
+	ScopeKindMetadataKey             = "gc.scope_kind"
+	ScopeNameMetadataKey             = "gc.scope_name"
+	ScopeRefMetadataKey              = "gc.scope_ref"
+	ScopeRoleMetadataKey             = "gc.scope_role"
+	SessionAffinityMetadataKey       = "gc.session_affinity"
+	SessionIDMetadataKey             = "gc.session_id"
 	// SessionIDCamelMetadataKey is the camelCase variant some bead writers stamp
 	// alongside the snake_case SessionIDMetadataKey; both are read when resolving a
 	// bead's session link.
@@ -242,8 +251,17 @@ const (
 	SpawnedCountMetadataKey     = "gc.spawned_count"
 	SpecForMetadataKey          = "gc.spec_for"
 	SpecForRefMetadataKey       = "gc.spec_for_ref"
-	StderrMetadataKey           = "gc.stderr"
-	StdoutMetadataKey           = "gc.stdout"
+	// StartBackoffUntilMetadataKey, StartFailedAtMetadataKey,
+	// StartFailureMetadataKey and StartFailuresMetadataKey are the consecutive
+	// session-start failure record the pool keeps on a routed WORK bead
+	// (cmd/gc/pool_start_backoff.go): count, last failure time, last failure
+	// line, and the time before which no start is planned for it.
+	StartBackoffUntilMetadataKey = "gc.start_backoff_until"
+	StartFailedAtMetadataKey     = "gc.start_failed_at"
+	StartFailureMetadataKey      = "gc.start_failure"
+	StartFailuresMetadataKey     = "gc.start_failures"
+	StderrMetadataKey            = "gc.stderr"
+	StdoutMetadataKey            = "gc.stdout"
 	// StepDefinedEmittedMetadataKey records, on a graph.v2 physical step bead,
 	// that its execution.step_defined fact has already been emitted AND
 	// acknowledged durable. The level-triggered projector restates the full
@@ -532,6 +550,11 @@ var KnownMetadataKeys = []string{
 	PackMetadataKey,
 	PackRootMetadataKey,
 	PackWorkspaceMetadataKey,
+	ParkFailuresMetadataKey,
+	ParkIDMetadataKey,
+	ParkMailedAtMetadataKey,
+	ParkReasonMetadataKey,
+	ParkedAtMetadataKey,
 	PerDispatchModelMetadataKey,
 	RalphStepIDMetadataKey,
 	ReasoningMetadataKey,
@@ -567,6 +590,10 @@ var KnownMetadataKeys = []string{
 	SpawnedCountMetadataKey,
 	SpecForMetadataKey,
 	SpecForRefMetadataKey,
+	StartBackoffUntilMetadataKey,
+	StartFailedAtMetadataKey,
+	StartFailureMetadataKey,
+	StartFailuresMetadataKey,
 	StderrMetadataKey,
 	StdoutMetadataKey,
 	StepDefinedEmittedMetadataKey,
@@ -623,4 +650,22 @@ var KnownMetadataPrefixes = []string{
 var SessionAffinityMetadataKeys = []string{
 	SessionAffinityMetadataKey,
 	ContinuationGroupMetadataKey,
+}
+
+// WorkStartFailureMetadataKeys are the keys of the pool's consecutive
+// failed-start record and park on a routed WORK bead
+// (cmd/gc/pool_start_backoff.go). They are cleared together by a confirmed
+// start and by gc sling --reassign (the re-dispatch unpark); an operator's
+// hold-in-place unpark clears the three park keys (ParkReasonMetadataKey,
+// ParkedAtMetadataKey, ParkFailuresMetadataKey) alone.
+var WorkStartFailureMetadataKeys = []string{
+	StartFailuresMetadataKey,
+	StartFailedAtMetadataKey,
+	StartFailureMetadataKey,
+	StartBackoffUntilMetadataKey,
+	ParkedAtMetadataKey,
+	ParkReasonMetadataKey,
+	ParkFailuresMetadataKey,
+	ParkIDMetadataKey,
+	ParkMailedAtMetadataKey,
 }

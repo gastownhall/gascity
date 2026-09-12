@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -2139,5 +2140,47 @@ func TestDoltliteDependencySnapshotCompletenessIsGuarded(t *testing.T) {
 	}
 	if len(cached) != 1 || cached[0].DependsOnID != "gc-parent" {
 		t.Fatalf("cached DepList = %#v, want the snapshot's gc-child -> gc-parent", cached)
+	}
+}
+
+// TestDoltliteReadStoreMetadataWriteBaseFindsEitherTier: the row a
+// metadata write is diffed against is found on either tier — an ephemeral
+// (wisp-tier) work bead that Get and the demand side both serve is written
+// to, not answered not-found by a durable-tier-only reread.
+func TestDoltliteReadStoreMetadataWriteBaseFindsEitherTier(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+	writer := openTestDoltliteWriter(t, store.db)
+	defer writer.Close() //nolint:errcheck // test cleanup
+
+	insertTestDoltliteIssue(t, writer, "wisps", "wisp_labels", "wisp_dependencies", testDoltliteIssue{
+		ID:        "gc-ephemeral-work",
+		Title:     "ephemeral routed work",
+		Status:    "in_progress",
+		IssueType: "task",
+		Assignee:  "worker",
+		CreatedAt: time.Now().UTC(),
+	})
+	insertTestDoltliteIssue(t, writer, "issues", "labels", "dependencies", testDoltliteIssue{
+		ID:        "gc-durable-work",
+		Title:     "durable routed work",
+		Status:    "in_progress",
+		IssueType: "task",
+		CreatedAt: time.Now().UTC(),
+	})
+	for _, id := range []string{"gc-ephemeral-work", "gc-durable-work", "gc-session"} {
+		got, err := store.metadataWriteBase(id)
+		if err != nil {
+			t.Fatalf("metadataWriteBase(%s): %v", id, err)
+		}
+		if got.ID != id {
+			t.Fatalf("metadataWriteBase(%s) = %#v", id, got)
+		}
+		if _, err := store.Get(id); err != nil && id != "gc-session" {
+			t.Fatalf("Get(%s) sees the row the write must see: %v", id, err)
+		}
+	}
+	if _, err := store.metadataWriteBase("gc-nowhere"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a bead on neither tier is not found, got %v", err)
 	}
 }

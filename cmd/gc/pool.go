@@ -386,6 +386,7 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		dst.MaxActiveSessions = &v
 	}
 	dst.MinActiveSessions = src.MinActiveSessions
+	dst.MaxStartFailures = src.MaxStartFailures
 	dst.ScaleCheck = src.ScaleCheck
 	if len(src.NamepoolNames) > 0 {
 		dst.NamepoolNames = make([]string, len(src.NamepoolNames))
@@ -430,6 +431,10 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 	if src.MinActiveSessions != nil {
 		v := *src.MinActiveSessions
 		dst.MinActiveSessions = &v
+	}
+	if src.MaxStartFailures != nil {
+		v := *src.MaxStartFailures
+		dst.MaxStartFailures = &v
 	}
 	if len(src.OptionDefaults) > 0 {
 		dst.OptionDefaults = make(map[string]string, len(src.OptionDefaults))

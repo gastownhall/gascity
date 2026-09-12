@@ -76,6 +76,15 @@ type TemplateParams struct {
 	ConfiguredNamedIdentity string
 	// ConfiguredNamedMode records the controller mode for canonical named sessions.
 	ConfiguredNamedMode string
+	// TriggerBeadID / TriggerBeadStoreRef name the work bead a named holder is
+	// CREATED (or reopened) for when it has no bead yet — the direct demand
+	// that woke it — so the bead carries gc.trigger_bead_id from its first
+	// start and a failed start charges the work bead (pool_start_backoff.go).
+	// A retained holder is bound on its existing bead instead
+	// (bindNamedSessionWakeTrigger); pool seats carry theirs from
+	// poolTriggerMetadata. Not fingerprinted.
+	TriggerBeadID       string
+	TriggerBeadStoreRef string
 	// FPExtra carries additional fingerprint data (pool config, etc.).
 	FPExtra map[string]string
 	// ResolvedProvider is the resolved provider spec (for ACP routing, etc.).

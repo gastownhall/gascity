@@ -170,6 +170,9 @@ type CityRuntime struct {
 	// change [storage] is refused by the StorageReloadRequiresRestart check in
 	// reloadConfigTraced rather than swapping a live handle.
 	storageRoutes *storageRoutes
+	// parkMailRetry throttles the re-send of unlanded park mail across ticks
+	// (pool_start_backoff.go).
+	parkMailRetry *parkMailRetryState
 
 	// Bead-driven reconciler state (Phase 2f).
 	sessionDrains      *drainTracker       // in-memory drain tracker; nil when bead reconciler disabled
@@ -178,6 +181,10 @@ type CityRuntime struct {
 	asyncStarts        asyncStartTracker
 	asyncStops         asyncStartTracker
 	demandSnapshot     *runtimeDemandSnapshot
+	// demandNow is the demand snapshot's clock (nil = time.Now): the cache's
+	// age and its backoff-deadline expiry are judged against it, so a test
+	// can move time instead of sleeping.
+	demandNow func() time.Time
 
 	// liveSweepMemos carries the live model-usage sweep's per-session memo: the
 	// resolved transcript path, whether discovery definitively found nothing, and
@@ -273,7 +280,11 @@ type runtimeDemandSnapshot struct {
 	createdAt              time.Time
 	sessionFingerprint     string
 	readyDemandFingerprint string
-	result                 DesiredStateResult
+	// deferredUntil is the result's StartDeferredUntil: a backoff deadline is
+	// the one demand change no fingerprint sees (time passes, nothing is
+	// written), so the snapshot is stale from that moment.
+	deferredUntil time.Time
+	result        DesiredStateResult
 }
 
 // CityRuntimeParams holds the caller-provided parameters for creating a
@@ -2585,6 +2596,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		openInfos := sessionBeads.OpenInfos()
 		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cr.cfg, cr.cityPath, store, openInfos, assignedWorkBeads, assignedWorkStoreRefs)
 		poolDecisionTime := time.Now()
+		poolWorkBeads = excludeStartDeferredWork(poolWorkBeads, poolDecisionTime, trace)
 		poolDesired = retainScaleCheckPartialPoolDesired(
 			cr.cfg,
 			PoolDesiredCounts(ComputePoolDesiredStatesTracedAt(
@@ -2677,13 +2689,26 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	cr.recordReconcileTraceInputs(trace, openInfos, desiredState, poolDesired, workSet, traceWorkRequested, readyWaitSet, result, recordPhase)
 
 	phaseStart = time.Now()
-	awakeAssignedWorkBeads, awakeAssignedStoreRefs, awakeAssignedStores := filterAssignedWorkBeadsForSessionWakeWithStores(cr.cfg, cr.cityPath, store, openInfos, assignedWorkBeads, assignedWorkStoreRefs, assignedWorkStores)
+	// The failed-start gate (pool_start_backoff.go) applies to the awake scan
+	// too: a retained session must not be woken for a backed-off or parked
+	// bead it still holds.
+	wakeEligibleWorkBeads, wakeEligibleStoreRefs, wakeEligibleStores := excludeStartDeferredWorkAlignedStores(assignedWorkBeads, assignedWorkStoreRefs, assignedWorkStores, time.Now(), trace)
+	awakeAssignedWorkBeads, awakeAssignedStoreRefs, awakeAssignedStores := filterAssignedWorkBeadsForSessionWakeWithStores(cr.cfg, cr.cityPath, store, openInfos, wakeEligibleWorkBeads, wakeEligibleStoreRefs, wakeEligibleStores)
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.filter_assigned_work_for_wake", phaseStart, map[string]any{
 		"assigned_work_bead_count":       len(assignedWorkBeads),
 		"awake_assigned_work_bead_count": len(awakeAssignedWorkBeads),
 	})
 	phaseStart = time.Now()
+	// Per-work-bead failed-start record (pool_start_backoff.go): charged on
+	// the failed-create rollback arm, cleared on a confirmed start; a park
+	// whose mail has not landed is handed to a background re-send here — the
+	// tick never waits on a mail or its nudge.
+	workStartFailure := cr.workStartFailurePolicy(store, sessStore, rigStores)
+	workStartFailure.retryUnmailedParks(result.AssignedWorkBeads, result.AssignedWorkStoreRefs)
+	workStartFailure.retryUnmailedParks(result.ParkedUnmailedWorkBeads, result.ParkedUnmailedWorkStoreRefs)
+	workStartFailure.sweepUnmailedParks(time.Now())
 	reconcileStartOptions := []startExecutionOption{
+		withWorkStartFailurePolicy(workStartFailure),
 		withAsyncStartExecution(),
 		withAsyncStartFollowUp(cr.requestAsyncStartFollowUpTick),
 		withAsyncStartLimiter(cr.ensureAsyncStartLimiter()),
@@ -3469,6 +3494,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	filteredSnap := newSessionBeadSnapshotFromReconcileRows(filteredRows)
 	openInfos := filterSessionInfosByName(updated, reconcileNames)
 	poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(filteredCfg, cr.cityPath, cr.cityBeadStore(), openInfos, wfcResult.AssignedWorkBeads, wfcResult.AssignedWorkStoreRefs)
+	poolWorkBeads = excludeStartDeferredWork(poolWorkBeads, time.Now(), nil)
 	poolDecisionTime := time.Now()
 	poolDesired := retainScaleCheckPartialPoolDesired(
 		filteredCfg,
@@ -3510,6 +3536,9 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		cr.cfg.Daemon.DriftDrainTimeoutDuration(),
 		cr.stdout,
 		cr.stderr,
+		// The targeted dispatcher reconcile starts sessions too: every start
+		// it makes is charged, gated, cleared and parked like the main tick's.
+		withWorkStartFailurePolicy(cr.workStartFailurePolicy(cr.cityBeadStore(), sessionsStore.Store, cr.rigBeadStores())),
 	)
 	cr.requestDeferredDrainFollowUpTick()
 }
@@ -3723,6 +3752,7 @@ func (cr *CityRuntime) loadDemandSnapshot(
 		}
 		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cr.cfg, cr.cityPath, cr.cityBeadStore(), openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStoreRefs)
 		poolDecisionTime := time.Now()
+		poolWorkBeads = excludeStartDeferredWork(poolWorkBeads, poolDecisionTime, nil)
 		result.PoolDesiredCounts = retainScaleCheckPartialPoolDesired(
 			cr.cfg,
 			PoolDesiredCounts(ComputePoolDesiredStatesTracedAt(
@@ -3736,9 +3766,10 @@ func (cr *CityRuntime) loadDemandSnapshot(
 		mergeNamedSessionDemand(result.PoolDesiredCounts, result.NamedSessionDemand, cr.cfg)
 		result.WorkSet = make(map[string]bool)
 		cr.demandSnapshot = &runtimeDemandSnapshot{
-			createdAt:              time.Now(),
+			createdAt:              cr.demandClockNow(),
 			sessionFingerprint:     sessionFingerprint,
 			readyDemandFingerprint: readyDemandFingerprint,
+			deferredUntil:          result.StartDeferredUntil,
 			result:                 result,
 		}
 	}
@@ -3767,11 +3798,26 @@ func (cr *CityRuntime) shouldRefreshDemandSnapshot(
 	if cr.demandSnapshot.sessionFingerprint != sessionFingerprint {
 		return true
 	}
+	// A backed-off routed bead re-enters demand when its deadline passes with
+	// no write anywhere: neither fingerprint moves, so the deadline itself
+	// expires the snapshot (else a 10s backoff would last the backstop age).
+	now := cr.demandClockNow()
+	if until := cr.demandSnapshot.deferredUntil; !until.IsZero() && !now.Before(until) {
+		return true
+	}
 	maxAge := cr.demandSnapshotPatrolMaxAge()
 	if maxAge <= 0 {
 		return true
 	}
-	return time.Since(cr.demandSnapshot.createdAt) >= maxAge
+	return now.Sub(cr.demandSnapshot.createdAt) >= maxAge
+}
+
+// demandClockNow is the demand snapshot's clock (demandNow, else time.Now).
+func (cr *CityRuntime) demandClockNow() time.Time {
+	if cr != nil && cr.demandNow != nil {
+		return cr.demandNow()
+	}
+	return time.Now()
 }
 
 // demandSnapshotPatrolMaxAge reports how long a cached demand snapshot may be

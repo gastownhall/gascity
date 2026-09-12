@@ -151,3 +151,14 @@ type Provider interface {
 type MultiRecipientInboxer interface {
 	InboxRecipients(recipients []string) ([]Message, error)
 }
+
+// ArchivedLister is an optional extension for providers whose backend keeps a
+// record of archived mail. AllIncludingArchived returns every message the
+// backend still holds for the recipient — open or archived, read or unread —
+// so a caller that needs proof a message once landed (a delivered receipt that
+// must survive the recipient archiving it) can find it after the fact. A
+// backend that purges old mail may no longer hold a message: absence is not
+// proof it was never sent.
+type ArchivedLister interface {
+	AllIncludingArchived(recipient string) ([]Message, error)
+}

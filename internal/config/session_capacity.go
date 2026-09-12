@@ -32,6 +32,20 @@ func (a *Agent) EffectiveMinActiveSessions() int {
 	return 0
 }
 
+// DefaultMaxStartFailures is the consecutive failed-start limit a pool applies
+// to one routed work bead when the agent does not set max_start_failures.
+const DefaultMaxStartFailures = 5
+
+// EffectiveMaxStartFailures returns the consecutive failed-start limit after
+// which the pool parks a routed work bead: the agent's max_start_failures when
+// set (0 = never park), else DefaultMaxStartFailures.
+func (a *Agent) EffectiveMaxStartFailures() int {
+	if a != nil && a.MaxStartFailures != nil && *a.MaxStartFailures >= 0 {
+		return *a.MaxStartFailures
+	}
+	return DefaultMaxStartFailures
+}
+
 // SupportsGenericEphemeralSessions reports whether the template may satisfy
 // generic controller demand with ephemeral sessions.
 func (a *Agent) SupportsGenericEphemeralSessions() bool {

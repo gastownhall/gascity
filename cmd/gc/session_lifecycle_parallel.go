@@ -236,6 +236,14 @@ type preparedStart struct {
 	// re-derivation from the template (S19 re-eligibility).
 	promptDelivered bool
 	promptHash      string
+	// workStartFailure is the per-work-bead failed-start record wiring the
+	// controller threads in (withWorkStartFailurePolicy); nil records nothing.
+	// It rides on the prepared start so the async commit goroutine, which sees
+	// only the startResult, can charge the failure to the trigger work bead.
+	workStartFailure *workStartFailurePolicy
+	// workTrigger is the work bead this start was prepared for, captured
+	// before any async refresh can re-point the session (see workTrigger).
+	workTrigger workTrigger
 }
 
 type startResult struct {
@@ -311,6 +319,10 @@ type startExecutionOptions struct {
 	workDirResolver                taskWorkDirResolver
 	stabilityWaiter                startStabilityWaiter
 	sessionStaleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter
+	// workStartFailure charges failed starts to their trigger work bead and
+	// clears the record on a confirmed start (pool_start_backoff.go). Nil
+	// leaves the work bead untouched.
+	workStartFailure *workStartFailurePolicy
 	// deferSessionClosesOnBoot suppresses the per-session orphan/failed-create
 	// session-bead closes during the synchronous boot reconcile. Those closes
 	// gate on a per-session open-work probe that reads the wisp tier
@@ -384,6 +396,14 @@ func withMaxSessionAgeTracker(tr maxSessionAgeTracker) startExecutionOption {
 func withAssignedWorkDeferTracker(tr assignedWorkDeferTracker) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.assignedWorkDeferTr = tr
+	}
+}
+
+// withWorkStartFailurePolicy installs the per-work-bead failed-start record
+// (backoff + park) for this reconcile pass. Nil leaves work beads untouched.
+func withWorkStartFailurePolicy(policy *workStartFailurePolicy) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.workStartFailure = policy
 	}
 }
 
@@ -953,6 +973,12 @@ func refreshConfiguredNamedStartCandidate(
 		candidate.info = refreshedInfo // the bind may have cleared the stamp durably before the resolve failed
 		return candidate
 	}
+	// The refreshed params are the holder's template resolved afresh; the
+	// trigger the build put on them (TriggerBeadID / store ref, a mirror of
+	// the bead's persisted trigger) rides through unchanged — it is not a
+	// template property.
+	refreshed.TriggerBeadID = candidate.tp.TriggerBeadID
+	refreshed.TriggerBeadStoreRef = candidate.tp.TriggerBeadStoreRef
 	candidate.tp = refreshed
 	// Fold the resolver's Info too, not just the params: the resolve may have
 	// durably cleared a stale trigger stamp (bindNamedSessionTriggerBead,
@@ -1554,7 +1580,7 @@ func runPreparedStartCandidate(
 	livenessUnavailable := errors.Is(err, runtime.ErrRuntimeUnavailable)
 	rollbackPending := err != nil && !livenessUnavailable && shouldRollbackPendingCreateInfo(item.candidate.info)
 	rateLimitScreen := err != nil && !livenessUnavailable && startupRateLimitScreenDetected(item, cityPath, sp, store, cfg)
-	if err != nil && rollbackPending && !rateLimitScreen && runningSessionMatchesPendingCreateInfo(item.candidate.info, item.candidate.name(), sp) {
+	if err != nil && rollbackPending && !rateLimitScreen && liveSessionMatchesPendingCreate(item, sp) {
 		return startResult{
 			prepared:        item,
 			err:             nil,
@@ -1589,7 +1615,7 @@ func runPreparedStartCandidate(
 		switch {
 		case sessionExistsObservationErr != nil || !runtimeObservationLive(sessionExistsObservation):
 			outcome = TraceOutcomeProviderError
-		case rollbackPending && !rateLimitScreen && runningSessionMatchesPendingCreateInfo(item.candidate.info, item.candidate.name(), sp):
+		case rollbackPending && !rateLimitScreen && liveSessionMatchesPendingCreate(item, sp):
 			outcome = TraceOutcomeSessionExistsConverged
 			err = nil
 			rollbackPending = false
@@ -1780,11 +1806,22 @@ func commitAsyncStartResultWithContext(
 		if releaseInFlight {
 			clearPendingStartInFlightLease(result.prepared.candidate.info.ID, sessFront, stderr)
 			outcome = "async_start_refresh_failed"
+			// The session row could not be re-read, but the start itself
+			// failed: that is one failed start from the WORK bead's side, and
+			// the record lives on the work bead, not on the session row this
+			// commit could not see (pool_start_backoff.go). A stale prepared
+			// command (cleanupRuntime) is a config change, not a lane failure,
+			// and a provider rate-limit screen is the provider's, not the
+			// lane's — the ordinary path quarantines the session for it and
+			// charges no work bead either.
+			if result.err != nil && !cleanupRuntime && !result.rateLimitScreen {
+				result.prepared.workStartFailure.recordStartFailure(result.prepared.workTrigger, template, result.err, time.Now().UTC())
+			}
 		}
 		logLifecycleOutcome(stderr, "start", wave, name, template, outcome, result.started, time.Now(), nil, refreshed.phases)
 		return false
 	}
-	if refreshed.err != nil && refreshed.rollbackPending && runningSessionMatchesPendingCreateInfo(refreshed.prepared.candidate.info, refreshed.prepared.candidate.name(), sp) {
+	if refreshed.err != nil && refreshed.rollbackPending && liveSessionMatchesPendingCreate(refreshed.prepared, sp) {
 		refreshed.err = nil
 		refreshed.outcome = TraceOutcomeSessionExistsConverged
 		refreshed.rollbackPending = false
@@ -2262,6 +2299,22 @@ func commitStartResultTraced(
 			metadata[sessionpkg.MCPIdentityMetadataKey] = storedMCPIdentity
 		}
 	}
+	// The start ran for a work bead: its failed-start record is cleared
+	// BEFORE the confirmation lands — on this one path, ahead of the batch —
+	// so a confirmed session never leaves a stale record behind it. A clear
+	// that fails (a work-store read or write error; a bead that is gone or
+	// since re-routed is settled) fails the commit exactly like a failed
+	// metadata batch: the runtime keeps running, the session stays
+	// pending-create, and the next tick's recoverRunningPendingCreate clears
+	// again and then confirms. Nothing about the clear lives in process
+	// memory or on a session key that a close or a re-bind could strand.
+	if !result.prepared.workStartFailure.recordStartSuccess(result.prepared.workTrigger, tp.TemplateName) {
+		clearPendingStartInFlightLease(info.ID, sessFront, stderr)
+		clearErr := fmt.Errorf("clearing the failed-start record of work bead %s", result.prepared.workTrigger.BeadID)
+		fmt.Fprintf(stderr, "session reconciler: %s: %v: the start is not confirmed this tick\n", name, clearErr) //nolint:errcheck
+		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "work_record_clear_failed", result.started, result.finished, clearErr, result.phases)
+		return false
+	}
 	if err := sessFront.ApplyPatch(info.ID, metadata); err != nil {
 		clearPendingStartInFlightLease(info.ID, sessFront, stderr)
 		fmt.Fprintf(stderr, "session reconciler: storing hashes for %s: %v\n", name, err) //nolint:errcheck
@@ -2349,6 +2402,10 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 				"reason": reason,
 			})
 		}
+		// A terminal provider error is still one failed start of the trigger
+		// work bead, fresh create or kept session alike: the marked session is
+		// skipped for reuse and the next tick would create another one.
+		result.prepared.workStartFailure.recordStartFailure(result.prepared.workTrigger, tp.TemplateName, result.err, clk.Now().UTC())
 		if result.rollbackPending {
 			rollbackPendingCreate(info, sessFront, clk.Now().UTC(), stderr)
 		}
@@ -2396,6 +2453,10 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 		// bead closes and is recreated), the episode survives the
 		// pending-create bead's replacement so a session name that never
 		// gets past pending-create still quarantines (ga-o04bfr.1.1).
+		// WORK bead (pool_start_backoff.go): that record is what survives the
+		// close, backs the next create off, and parks the bead after the
+		// agent's max_start_failures — the per-session damper cannot, because
+		// the next tick creates a fresh session bead.
 		if trace != nil {
 			trace.RecordOperation(TraceSiteLifecycleStartRollback, TraceReasonStart, result.outcome, "", tp.TemplateName, name, 0, traceRecordPayload{
 				"error": formatLifecycleError(result.err),
@@ -2414,6 +2475,7 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 				fmt.Fprintf(stderr, "session reconciler: saving startup-health episode for %s: %v\n", name, saveErr) //nolint:errcheck
 			}
 		}
+		result.prepared.workStartFailure.recordStartFailure(result.prepared.workTrigger, tp.TemplateName, result.err, clk.Now().UTC())
 		rollbackPendingCreate(info, sessFront, clk.Now().UTC(), stderr)
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.err, result.phases)
 		return
@@ -2433,6 +2495,12 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 	// infoByID — this is the async start goroutine). The persist lands via
 	// recordWakeFailure's ApplyPatchInfo/SetMarker writes.
 	_ = recordWakeFailure(result.prepared.candidate.info, sessFront, clk, tp.DisplayName())
+	// An existing session that fails to resume for its routed work is the
+	// same failed start from the work bead's side: charge it too, so the
+	// per-work-bead limit and the park mail hold whether the pool created a
+	// fresh session or woke the one it kept (the per-session wake_attempts
+	// quarantine above still applies to the session).
+	result.prepared.workStartFailure.recordStartFailure(result.prepared.workTrigger, tp.TemplateName, result.err, clk.Now().UTC())
 	if trace != nil {
 		trace.RecordOperation(TraceSiteLifecycleStartFailed, TraceReasonStart, result.outcome, "", tp.TemplateName, name, 0, traceRecordPayload{
 			"error": formatLifecycleError(result.err),
@@ -2453,6 +2521,7 @@ func recoverRunningPendingCreate(
 	store beads.Store,
 	clk clock.Clock,
 	trace *sessionReconcilerTraceCycle,
+	workStartFailure *workStartFailurePolicy,
 ) (bool, map[string]string) {
 	if strings.TrimSpace(info.ID) == "" || store == nil {
 		return false, nil
@@ -2517,10 +2586,10 @@ func recoverRunningPendingCreate(
 		ConfirmState: confirmPendingStart(info.MetadataState) ||
 			sessionpkg.State(strings.TrimSpace(info.MetadataState)) == sessionpkg.StateAwake,
 		ClearSleepReason: info.SleepReason != "",
-		// recoverRunningPendingCreate's caller (session_reconciler.go)
-		// already gates entry on shouldRollbackPendingCreateInfo(info), so
-		// at this point the claim is guaranteed to be set — hard-code the
-		// clear rather than re-evaluating the same predicate.
+		// recoverRunningPendingCreate's caller (session_reconciler.go) gates
+		// entry on the pending-create claim OR a pre-heal start-pending /
+		// creating state (a kept session's uncommitted resume carries no
+		// claim): the clear is unconditional — a no-op when there is none.
 		ClearPendingCreateClaim: true,
 		// Recovering an already-awake runtime must not reset the in-flight
 		// awake interval, so key the fresh epoch on a genuine dormant/creating
@@ -2530,6 +2599,21 @@ func recoverRunningPendingCreate(
 		PrimedAt:            primedAt,
 		PromptHash:          promptHash,
 	})
+	// The same rule as the ordinary commit path (commitStartResultTraced): the
+	// recovered start ran for the session's trigger work bead — the bead's
+	// trigger is not moved while its start is in flight (buildDesiredState
+	// binds a named holder only between starts; a creating pool seat is spent
+	// demand) — and that bead's failed-start record is cleared BEFORE the
+	// heal lands; a clear that fails leaves the claim in place for the next
+	// tick.
+	if !workStartFailure.recordStartSuccess(workTriggerFromInfo(info), tp.TemplateName) {
+		if trace != nil {
+			trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateCommitFailed, TraceOutcomeFailed, tp.TemplateName, tp.SessionName, traceRecordPayload{
+				"error": "clearing the failed-start record of work bead " + strings.TrimSpace(info.TriggerBeadID),
+			})
+		}
+		return false, pendingCreateResidueFold(prepared.candidate.info)
+	}
 	if err := sessionFrontDoor(store).ApplyPatch(info.ID, metadata); err != nil {
 		if trace != nil {
 			trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateCommitFailed, TraceOutcomeFailed, tp.TemplateName, tp.SessionName, traceRecordPayload{
@@ -2592,6 +2676,17 @@ func pendingCreateResidueFold(info sessionpkg.Info) map[string]string {
 // deleted in WI-6 R4).
 func shouldRollbackPendingCreateInfo(i sessionpkg.Info) bool {
 	return i.PendingCreateClaim
+}
+
+// liveSessionMatchesPendingCreate requires the agent process to be alive before
+// an identified runtime can turn a failed start into a successful convergence.
+// Identity alone remains sufficient for deciding which stale runtime to stop.
+func liveSessionMatchesPendingCreate(item preparedStart, sp runtime.Provider) bool {
+	if sp == nil || !runningSessionMatchesPendingCreateInfo(item.candidate.info, item.candidate.name(), sp) {
+		return false
+	}
+	running, alive, err := observeRuntimeProviderLiveness(sp, item.candidate.name(), item.cfg.ProcessNames)
+	return err == nil && running && alive
 }
 
 // runningSessionMatchesPendingCreateInfo is the form the start-execution decision
@@ -2918,6 +3013,40 @@ func executePlannedStartsTraced(
 						continue
 					}
 				}
+				// The bead this start would run for is read NOW, not at planning
+				// — and BEFORE the named-session circuit breaker records an
+				// attempt: a deferred start makes no attempt, and must not spend
+				// one (a holder whose work is deferred would otherwise trip its
+				// breaker with zero provider calls).
+				// a bead parked or backed off since the plan (its own start
+				// failed elsewhere, a queued seat outlived its bead's park, a
+				// holder's clear-bind did not land) is not started for — the
+				// demand gate's verdict is re-proven on the row at start time,
+				// and a success can never lift a park it was not planned past.
+				if deferred, reason := startOpts.workStartFailure.startDeferred(workTriggerForStart(candidate.info), clk.Now()); deferred {
+					clearPendingStartInFlightLease(candidate.info.ID, sessFront, stderr)
+					// A kept session queued for this start (start-pending, no
+					// pending-create claim) is put back to asleep: the start is
+					// abandoned, so its durable request goes with its lease —
+					// otherwise the queued state would pin the deferred trigger
+					// (startInFlightInfo) and the next build could never bind
+					// the holder to other work, deferring it forever. A fresh
+					// seat keeps its claim and expires as a never-started create.
+					if !candidate.info.PendingCreateClaim && pendingCreateQueuedOrCreatingState(candidate.info.MetadataState) {
+						if err := sessFront.ApplyPatch(candidate.info.ID, sessionpkg.MetadataPatch{"state": string(sessionpkg.StateAsleep)}); err != nil {
+							fmt.Fprintf(stderr, "session reconciler: %s: releasing the deferred start's queued state: %v\n", candidate.name(), err) //nolint:errcheck
+						}
+					}
+					if release != nil {
+						release()
+					}
+					if done != nil {
+						done()
+					}
+					fmt.Fprintf(stderr, "session reconciler: %s: not started: its work bead %s is %s\n", candidate.name(), strings.TrimSpace(candidate.info.TriggerBeadID), reason) //nolint:errcheck
+					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "work_deferred", time.Time{}, time.Time{}, nil)
+					continue
+				}
 				if cbEnabled {
 					identity := namedSessionIdentityInfo(candidate.info)
 					if identity != "" {
@@ -2982,6 +3111,8 @@ func executePlannedStartsTraced(
 					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "failed", time.Time{}, time.Time{}, err)
 					continue
 				}
+				item.workStartFailure = startOpts.workStartFailure
+				item.workTrigger = workTriggerForStart(item.candidate.info)
 				if startOpts.async {
 					asyncPrepared = append(asyncPrepared, asyncPreparedStart{item: *item, release: release, done: done})
 				} else {

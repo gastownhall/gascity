@@ -605,24 +605,37 @@ func (s *DoltliteReadStore) Delete(id string) error {
 	return err
 }
 
+// metadataWriteBase is the row SetMetadataBatch diffs its patch against: the
+// session bead by that id, else the issue on EITHER tier — the same
+// TierBoth read Get serves, so an ephemeral (wisp-tier) work bead that Get
+// and the demand side both see is written to as well, instead of being
+// answered not-found by a durable-tier-only reread and losing the write.
+func (s *DoltliteReadStore) metadataWriteBase(id string) (Bead, error) {
+	if current, err := s.GetSessionBead(id); err == nil {
+		return current, nil
+	}
+	rows, err := s.queryIssues(ListQuery{
+		AllowScan:     true,
+		IncludeClosed: true,
+		SkipLabels:    true,
+		TierMode:      TierBoth,
+	}, "i.id = ?", []any{id}, 1)
+	if err != nil {
+		return Bead{}, err
+	}
+	if len(rows) == 0 {
+		return Bead{}, fmt.Errorf("setting metadata on %q: %w", id, ErrNotFound)
+	}
+	return rows[0], nil
+}
+
 func (s *DoltliteReadStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	if len(kvs) == 0 {
 		return nil
 	}
-	current, err := s.GetSessionBead(id)
+	current, err := s.metadataWriteBase(id)
 	if err != nil {
-		rows, queryErr := s.queryIssues(ListQuery{
-			AllowScan:     true,
-			IncludeClosed: true,
-			SkipLabels:    true,
-		}, "i.id = ?", []any{id}, 1)
-		if queryErr != nil {
-			return queryErr
-		}
-		if len(rows) == 0 {
-			return fmt.Errorf("setting metadata on %q: %w", id, ErrNotFound)
-		}
-		current = rows[0]
+		return err
 	}
 	changed := make(map[string]string, len(kvs))
 	for k, v := range kvs {
