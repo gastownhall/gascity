@@ -40,6 +40,7 @@ City is the top-level configuration for a Gas City instance.
 | `session_sleep` | SessionSleepConfig |  |  | SessionSleep configures idle sleep policy defaults for managed sessions. |
 | `convergence` | ConvergenceConfig |  |  | Convergence configures convergence loop limits. |
 | `doctor` | DoctorConfig |  |  | Doctor configures gc doctor thresholds and policy toggles (worktree size warnings, nested-worktree auto-prune). |
+| `storehealth` | StoreHealthConfig |  |  | StoreHealth configures the controller-internal store health patrol (probe matrix, reap rate-limit, write-path conformance probe). |
 | `maintenance` | MaintenanceConfig |  |  | Maintenance configures periodic store-maintenance loops. |
 | `service` | []Service |  |  | Services declares workspace-owned HTTP services mounted on the controller edge under /svc/&#123;name&#125;. |
 | `webhook` | []Webhook |  |  | Webhooks declares inbound HTTP receivers mounted on the supervisor edge under /hook/&#123;name&#125;. Composed like Services (pack concatenation + SourceDir provenance + the default-closed public pack-guard). |
@@ -861,6 +862,18 @@ StorageConfig assigns each semantic storage class to a named binding and defines
 |-------|------|----------|---------|-------------|
 | `classes` | StorageClasses | **yes** |  | Classes contains the complete class-to-binding assignment. |
 | `bindings` | map[string]StorageBindingConfig |  |  | Bindings defines named provider-backed bindings. The reserved work binding is synthesized and must not appear here. |
+
+## StoreHealthConfig
+
+StoreHealthConfig configures the controller-internal store health patrol (city-scale architecture plan item 1.5).
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `enabled` | boolean |  | `true` | Enabled toggles the patrol. Defaults to true. Disabling restores the pre-patrol behavior (no two-probe matrix, no auto-reap). |
+| `interval` | string |  | `30s` | Interval is the per-scope probe cadence as a duration string. Defaults to "30s". |
+| `consecutive_fails` | integer |  | `3` | ConsecutiveFails is how many consecutive A-fail∧B-ok cycles confirm a proxy poison before forensics + reap. Defaults to 3. |
+| `reap_cooldown` | string |  | `10m` | ReapCooldown is the minimum spacing between reaps for one scope as a duration string. A second poison inside the window is alert-only with forensics kept. Defaults to "10m". |
+| `write_probe_interval` | string |  | `10m` | WriteProbeInterval is the cadence of the write-path conformance probe (create+close one ephemeral bead of each RequiredCustomType) as a duration string. Defaults to "10m". |
 
 ## Tier
 
