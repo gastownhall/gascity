@@ -1,6 +1,7 @@
 package scripts_test
 
 import (
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -791,18 +792,38 @@ func TestTrivyIgnoreWidensDocketE9WaiverForRemainingHighCriticalFindings(t *test
 	}
 }
 
+// trivyIgnoreEntryCountPattern matches the release-gate doc's "Acceptance
+// evidence" sentence stating how many entries .trivyignore.yaml holds, e.g.
+// "`.trivyignore.yaml` contains 64 entries: 47 pre-existing entries (...)
+// and 17 further new entries (...)." Whitespace (including the doc's own
+// markdown line-wrapping) is normalized to single spaces before matching.
+var trivyIgnoreEntryCountPattern = regexp.MustCompile(
+	"`\\.trivyignore\\.yaml` contains (\\d+) entries: (\\d+) pre-existing entries .*? and (\\d+) further new entries",
+)
+
 // extractStatedTrivyIgnoreEntryCounts parses the release-gate doc's stated
 // .trivyignore.yaml entry count (total, pre-existing, and newly added) out
 // of its "Acceptance evidence" prose. This lets a test cross-check that
 // stated count against the file's actual parsed entry count, instead of
 // trusting the doc's prose to stay accurate by manual review alone.
-//
-// Not yet implemented: the parser is wired up in the next commit. For now
-// this always reports zero, which is deliberately wrong so the caller's
-// cross-check fails until the real parsing lands.
-func extractStatedTrivyIgnoreEntryCounts(t *testing.T, _ string) (total, preExisting, added int) {
+func extractStatedTrivyIgnoreEntryCounts(t *testing.T, doc string) (total, preExisting, added int) {
 	t.Helper()
-	return 0, 0, 0
+	normalized := strings.Join(strings.Fields(doc), " ")
+	m := trivyIgnoreEntryCountPattern.FindStringSubmatch(normalized)
+	if m == nil {
+		t.Fatalf("release-gates/ga-2yq3p5-container-scan-waiver-bridge-gate.md does not state a .trivyignore.yaml entry count in the expected \"contains N entries: N pre-existing ... and N further new\" form; update this parser if the doc's wording changed")
+	}
+	var err error
+	if total, err = strconv.Atoi(m[1]); err != nil {
+		t.Fatalf("parsing stated total entry count %q: %v", m[1], err)
+	}
+	if preExisting, err = strconv.Atoi(m[2]); err != nil {
+		t.Fatalf("parsing stated pre-existing entry count %q: %v", m[2], err)
+	}
+	if added, err = strconv.Atoi(m[3]); err != nil {
+		t.Fatalf("parsing stated new-entry count %q: %v", m[3], err)
+	}
+	return total, preExisting, added
 }
 
 // TestReleaseGateWaiverBridgeDocEntryCountMatchesTrivyIgnore cross-verifies
