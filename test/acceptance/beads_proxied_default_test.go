@@ -57,14 +57,16 @@ type scopeOwnershipDoc struct {
 }
 
 type doctorReport struct {
-	Passed  int `json:"passed"`
-	Warned  int `json:"warned"`
-	Failed  int `json:"failed"`
-	Results []struct {
-		Name    string `json:"name"`
-		Status  string `json:"status"`
-		Message string `json:"message"`
-	} `json:"results"`
+	Passed  int                 `json:"passed"`
+	Warned  int                 `json:"warned"`
+	Failed  int                 `json:"failed"`
+	Results []doctorCheckResult `json:"results"`
+}
+
+type doctorCheckResult struct {
+	Name    string `json:"name"`
+	Status  string `json:"status"`
+	Message string `json:"message"`
 }
 
 // requireProxiedTooling resolves the bd and dolt this test needs, or skips.
@@ -239,6 +241,55 @@ func assertDoctorGreen(t *testing.T, city *helpers.City, label string) {
 			if r.Status != "ok" {
 				t.Errorf("%s = %s on %s: %s", r.Name, r.Status, label, r.Message)
 			}
+		}
+	}
+}
+
+// assertProxiedBackupAdvisory pins the city-level `proxied-backup-coverage`
+// line through the real `gc doctor --json` front door.
+//
+// It is the one place doctor says out loud that a bd-owned proxied scope has no
+// backup at all — rc.2 refuses `bd backup` on that path, gc registers nothing
+// against a proxy root it does not own, and the per-scope checks correctly go
+// quiet, which between them made a default city read as covered. The advisory
+// is deliberately StatusOK (R3: a proxied city is a healthy city, and a warning
+// no operator can clear is a line nobody reads), so assertDoctorGreen cannot
+// see it and a unit test cannot prove it is registered on a real city. Both
+// directions are asserted: present with the scopes named for a proxied city,
+// absent for a city with no proxied scope, so the registration gate is real
+// rather than an unconditional line.
+func assertProxiedBackupAdvisory(t *testing.T, city *helpers.City, label string, want bool, wantScopes ...string) {
+	t.Helper()
+	out, err := city.GC("doctor", "--json")
+	if err != nil {
+		t.Fatalf("gc doctor --json exited non-zero on %s: %v\n%s", label, err, out)
+	}
+	var report doctorReport
+	lastJSONLine(t, out, &report)
+
+	var found *doctorCheckResult
+	for i := range report.Results {
+		if report.Results[i].Name == "proxied-backup-coverage" {
+			found = &report.Results[i]
+			break
+		}
+	}
+	if !want {
+		if found != nil {
+			t.Errorf("%s reported the proxied backup advisory: %s", label, found.Message)
+		}
+		return
+	}
+	if found == nil {
+		t.Fatalf("%s has no proxied-backup-coverage advisory; doctor reported %d checks", label, len(report.Results))
+	}
+	if found.Status != "ok" {
+		t.Errorf("proxied-backup-coverage = %s on %s, want ok (it must not gate a healthy city): %s",
+			found.Status, label, found.Message)
+	}
+	for _, want := range append([]string{"no backup"}, wantScopes...) {
+		if !strings.Contains(found.Message, want) {
+			t.Errorf("proxied-backup-coverage on %s does not mention %q: %s", label, want, found.Message)
 		}
 	}
 }
@@ -456,6 +507,10 @@ func TestBeadsProxiedDefault(t *testing.T) {
 		// the number of provider-owned scopes until three checks died on their
 		// timeouts. The one-rig topology is the default one an operator has.
 		assertDoctorGreen(t, city, "a proxied city with a rig")
+		// Green is not the same as covered. The city and its rig are both
+		// bd-owned proxied scopes with no backup anywhere, and this is the only
+		// doctor line that says so.
+		assertProxiedBackupAdvisory(t, city, "a proxied city with a rig", true, "city", filepath.Base(rigDir))
 	})
 
 	t.Run("start-default-pack", func(t *testing.T) {
@@ -767,6 +822,13 @@ func TestBeadsProxiedDefault(t *testing.T) {
 		if leaked := doltProcessesUnder(t, legacyRig); len(leaked) != 0 {
 			t.Errorf("the rig got a Dolt process of its own:\n%s", strings.Join(leaked, "\n"))
 		}
+
+		// The proxied backup advisory is gated on the city actually having a
+		// proxied scope, and a grandfathered city has none: gc registers its
+		// backups the ordinary way here, so the line would be false. This is
+		// the negative half of the gate — without it, an unconditional advisory
+		// would pass the positive assertion just as well.
+		assertProxiedBackupAdvisory(t, legacy, "a grandfathered managed city", false)
 
 		// And gc stop takes the server it started back down.
 		if out, err := helpers.RunGC(env, "", "supervisor", "stop", "--wait"); err != nil {

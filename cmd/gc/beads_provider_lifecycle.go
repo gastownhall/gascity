@@ -1347,7 +1347,18 @@ func inheritedProviderExternalEndpointEnv(cityPath string, intent providerScopeI
 		return nil, fmt.Errorf("read city external binding: %w", err)
 	}
 	if !ok || state.EndpointOrigin != contract.EndpointOriginCityCanonical {
-		return nil, fmt.Errorf("city has no durable direct external binding")
+		// A provider-owned direct city has no gc endpoint keys at all — gc does
+		// not canonicalize a scope bd owns — so its upstream lives only in the
+		// binding bd persisted. That is the city a fresh rig has to inherit, and
+		// without it the rig was initialized against this machine instead.
+		binding, bound, bindErr := contract.ReadPersistedServerBinding(fsys.OSFS{}, scopeMetadataJSONPath(cityPath))
+		if bindErr != nil {
+			return nil, fmt.Errorf("read city beads server binding: %w", bindErr)
+		}
+		if !bound {
+			return nil, fmt.Errorf("city has no durable direct external binding")
+		}
+		state = binding
 	}
 	if socket := strings.TrimSpace(state.DoltSocket); socket != "" {
 		return map[string]string{"BEADS_DOLT_SERVER_SOCKET": socket}, nil
@@ -2890,8 +2901,18 @@ func canonicalConfigDoltMode(mode string) string {
 // dolt_mode resolves to: server for an existing Dolt workspace (the
 // pre-dolt_mode legacy shape), the fresh proxied-local default otherwise. It
 // mirrors the hasDoltMetadata rule in scopeUsesProxiedDoltMode.
-func freshScopeCanonicalDoltMode(scopeRoot string) string {
-	if backend, ok, err := contract.ReadMetadataBackend(fsys.OSFS{}, scopeMetadataJSONPath(scopeRoot)); err == nil && ok && contract.IsDoltBackend(backend) {
+func freshScopeCanonicalDoltMode(cityPath string) string {
+	if backend, ok, err := contract.ReadMetadataBackend(fsys.OSFS{}, scopeMetadataJSONPath(cityPath)); err == nil && ok && contract.IsDoltBackend(backend) {
+		return "server"
+	}
+	// A doltlite city has no Dolt server and no proxy — its store is the
+	// embedded engine under .beads/embeddeddolt. The proxied-local default is a
+	// decision about a Dolt process bd manages, and applying it here handed a
+	// doltlite city the one binding the ownership classifier reads as a bd-owned
+	// proxied scope: bd raised a proxy and a Dolt child over a workspace that is
+	// supposed to have neither. doltlite keeps the mode it had before the
+	// default flipped.
+	if cityUsesDoltliteBeadsBackend(cityPath) {
 		return "server"
 	}
 	return "proxied-server"
@@ -2910,11 +2931,17 @@ func desiredRigDoltConfigState(cityPath string, rig config.Rig, cityState contra
 		state.EndpointStatus = preservedEndpointStatus(rig.Path, state, contract.EndpointStatusUnverified)
 		return state
 	}
+	state := inheritedRigDoltConfigState(rig.Path, rig.EffectivePrefix(), cityState)
+	// A rig that already carries a dolt_mode keeps it — that is what the
+	// embedded and legacy shapes need — but keeping the mode is not a reason to
+	// drop the endpoint it inherits. Under a city bound to a Dolt server
+	// somebody else runs, an inherited rig config with no dolt.host and no
+	// dolt.port is invalid by the canonical contract's own rule, and `gc rig
+	// add` wrote exactly that: from then on the whole city refused to start.
 	if mode := persistedScopeDoltMode(rig.Path); mode != "" {
-		return contract.ConfigState{IssuePrefix: rig.EffectivePrefix(), EndpointOrigin: contract.EndpointOriginInheritedCity, EndpointStatus: contract.EndpointStatusVerified, DoltMode: mode}
+		state.DoltMode = mode
 	}
-
-	return inheritedRigDoltConfigState(rig.Path, rig.EffectivePrefix(), cityState)
+	return state
 }
 
 func persistedScopeDoltMode(scopeRoot string) string {

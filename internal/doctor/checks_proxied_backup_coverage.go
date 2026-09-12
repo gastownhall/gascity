@@ -76,8 +76,8 @@ func (c *ProxiedBackupCoverageCheck) Run(_ *CheckContext) *CheckResult {
 		Status:   StatusOK,
 		Severity: SeverityAdvisory,
 		Message: fmt.Sprintf(
-			"advisory: %d bd-owned proxied %s (%s) have no backup — bd v1.3.0-rc.2 refuses backup on the proxied path and gc registers none; the store is the only copy",
-			len(c.scopeLabels), scopeNoun, strings.Join(c.scopeLabels, ", ")),
+			"advisory: %d bd-owned proxied %s (%s) have no backup — %s and gc registers none; the store is the only copy",
+			len(c.scopeLabels), scopeNoun, strings.Join(c.scopeLabels, ", "), proxiedBackupRefusal),
 		Details: []string{
 			"gc cannot register a Dolt backup against a proxy root it does not own.",
 			"mol-dog-backup targets the managed server, which a proxied scope has none of.",

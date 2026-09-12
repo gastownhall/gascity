@@ -12745,9 +12745,20 @@ func TestGcBeadsBdProviderOwnedLifecycleUsesBdBoundary(t *testing.T) {
 		wantArgs  []string
 	}{
 		{name: "proxied local init pins the proxy resident", transport: "proxied", target: "local", wantIdle: true},
-		{name: "proxied external init pins its local proxy resident", transport: "proxied", target: "external", wantIdle: true},
+		{
+			name: "proxied external init pins its local proxy resident", transport: "proxied", target: "external", wantIdle: true,
+			wantArgs: []string{"--proxied-server-external-host upstream.example.invalid", "--proxied-server-external-port 3306"},
+		},
 		{name: "direct local init has no proxy to pin", transport: "direct", target: "local"},
-		{name: "direct external init has no proxy to pin", transport: "direct", target: "external"},
+		{
+			// bd persists the endpoint it was given at init and nowhere else.
+			// Without --server-host/--server-port it took its own default,
+			// started a local server, and wrote a binding that named no
+			// upstream at all — so the city said "external" and talked to a
+			// Dolt it had just started next to itself.
+			name: "direct external init hands bd the upstream to persist", transport: "direct", target: "external",
+			wantArgs: []string{"--external", "--server-host upstream.example.invalid", "--server-port 3306"},
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			logPath := filepath.Join(t.TempDir(), "bd.log")
@@ -12782,6 +12793,11 @@ func TestGcBeadsBdProviderOwnedLifecycleUsesBdBoundary(t *testing.T) {
 			hasIdle := strings.Contains(got, "--proxied-server-idle-timeout 0")
 			if hasIdle != tt.wantIdle {
 				t.Fatalf("bd init command = %q, idle-never pin = %v, want %v", got, hasIdle, tt.wantIdle)
+			}
+			for _, want := range tt.wantArgs {
+				if !strings.Contains(got, want) {
+					t.Fatalf("bd init command = %q, missing %q", got, want)
+				}
 			}
 		})
 	}

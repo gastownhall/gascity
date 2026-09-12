@@ -253,6 +253,12 @@ func TestBeadsMigrateLegacyCityToProxied(t *testing.T) {
 			t.Logf("gc doctor --fix reported work outstanding: %v\n%s", err, out)
 		}
 		assertDoctorGreen(t, city, "a migrated legacy city")
+		// Migration moves the city off gc's managed server and onto bd's proxy,
+		// which is also the moment its backup coverage goes to zero: the rig
+		// shares the city's proxy root, and rc.2 refuses backup on that path.
+		// The advisory has to follow the topology, not the way the city was
+		// created.
+		assertProxiedBackupAdvisory(t, city, "a migrated legacy city", true, "city", "testrig")
 	})
 
 	t.Run("data-survived", func(t *testing.T) {

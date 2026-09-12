@@ -836,6 +836,16 @@ func providerOwnershipTargetFromBinding(cityPath, doltMode string, state contrac
 		}
 		return "local", nil
 	}
+	// bd records the upstream a direct scope was initialized against in the
+	// scope's own metadata, and a provider-owned scope carries no gc endpoint
+	// keys to say so instead. Without reading it, a rig added to a city bound to
+	// someone else's Dolt server inherited "local" and got a store of its own on
+	// this machine — the operator's beads split across two servers.
+	if binding, ok, err := contract.ReadPersistedServerBinding(fsys.OSFS{}, scopeMetadataJSONPath(cityPath)); err != nil {
+		return "", fmt.Errorf("read city beads server binding: %w", err)
+	} else if ok && (strings.TrimSpace(binding.DoltHost) != "" || strings.TrimSpace(binding.DoltSocket) != "") {
+		return "external", nil
+	}
 	if !configured {
 		// An old direct scope without a canonical binding predates provider
 		// ownership. Leave its conservative legacy target local.

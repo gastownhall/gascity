@@ -176,6 +176,62 @@ Never call `bd dolt start` or `bd dolt status` on a proxied scope: neither is
 proxied-aware in rc.2, and `start` would launch a second unmanaged `sql-server`
 over the same data directory.
 
+## Topology matrix
+
+Proving the default works says nothing about the shapes it did not change, and
+those are where this feature broke things. `TestBeadsInitTopologyMatrix`
+(`test/acceptance/beads_topology_matrix_test.go`) walks every supported way to
+initialise a beads scope through the same command list — init, doctor, `gc bd`
+create/list/show, `gc rig add`, `gc start` with the default pack composition,
+`gc status`, `gc stop`, `gc start`, `gc stop` — against a real bd and a real
+dolt, and measures each against the shape it is supposed to produce. The shapes
+themselves live in `test/acceptance/helpers/beads_topology.go`, so adding one is
+a table entry.
+
+| shape | selector | topology | ownership journal |
+| --- | --- | --- | --- |
+| M1 proxied-local | none (the default) | `bd db-proxy-child` + its own `dolt sql-server` under `<scope>/.beads/dolt` | city and rig, ready |
+| M2 direct-local | `--beads-transport direct --beads-target local` | one bd-owned `dolt sql-server` per scope, recorded in `.beads/dolt-server.pid`/`.port` | city and rig, ready |
+| M3a direct-external (alias) | `--dolt-host/--dolt-port/--dolt-database/--dolt-project-id` | none local; a database somebody else operates | none — canonical city endpoint |
+| M3b direct-external (selector) | `--beads-transport direct --beads-target external` plus the endpoint | none local; bd persists the upstream in `metadata.json` | city and rig, ready |
+| M4 proxied-external | `--beads-transport proxied --beads-target external` plus the endpoint | a local `bd db-proxy-child` fronting the external server, no local Dolt child | city and rig, ready |
+| M5 legacy GC-managed | a gc built before the journal | gc's own `sql-server` under `.gc/runtime/packs/dolt`, rigs inherit it | none, and none may appear |
+| M6 doltlite | `GC_BEADS_BACKEND=doltlite` | none at all | none |
+| M7 deferred | `GC_DOLT=skip` | nothing at init; `gc start` finishes it into M1 | `provider_initializing` at init, ready after start |
+
+Where a shape legitimately cannot do a step, the matrix pins the typed outcome
+rather than skipping: M6 records the refusal `gc bd create` returns, because
+`gc init` never runs the adapter's doltlite init op and no embedded store is
+created — a limitation that predates this work and is equally true on main.
+M3a and M5 are allowed one doctor failure before their first `gc start`
+(`custom-types:city`), because a store gc did not create carries whoever's bead
+vocabulary made it until gc's lifecycle has run over it once. After start there
+are no allowances.
+
+M3a and M3b both need a hosted database; the fixture provisions M3a's with
+`bd init --server` out of band, because the `--dolt-host` alias binds a city to
+a database somebody else operates rather than creating one.
+
+Running it locally:
+
+```bash
+GC_ACCEPTANCE_BD_BIN=/data/tmp/bd-rc2/bd \
+GC_ACCEPTANCE_LEGACY_GC_BIN=/data/tmp/gc-dolt-takeover/gc-main \
+TMPDIR=/data/tmp make test-beads-topology-matrix
+```
+
+One shape at a time while iterating:
+
+```bash
+GC_ACCEPTANCE_BD_BIN=/data/tmp/bd-rc2/bd TMPDIR=/data/tmp make test-acceptance \
+  ACCEPTANCE_TIMEOUT=20m \
+  ACCEPTANCE_GO_TEST_FLAGS='-count=1 -v -run TestBeadsInitTopologyMatrix/M4'
+```
+
+Both variables are documented in `TESTING.md`. Without an rc.2 bd the whole
+matrix skips, so CI is unaffected; without `GC_ACCEPTANCE_LEGACY_GC_BIN` only
+the legacy shape skips.
+
 ## Deliberately not done
 
 - **Native SQL over the proxy.** Proxied scopes read and write through the bd

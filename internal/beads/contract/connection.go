@@ -182,6 +182,21 @@ func ResolveDoltConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string) (DoltCo
 		}
 		port, err := readManagedRuntimePort(fs, cityRoot)
 		if err != nil {
+			// No runtime state of gc's own. A scope whose store bd owns never
+			// has one: bd records the server it started, or the upstream it was
+			// pointed at, in the scope itself. Reading those records is the
+			// difference between the documented direct topologies working and
+			// every command on them reporting the store as down.
+			if IsManagedRuntimeUnavailable(err) {
+				if bdPort, ok := readProviderOwnedServerPort(fs, scopeRoot); ok {
+					return localServerTarget(target, bdPort), nil
+				}
+				if resolved, ok, bindErr := bdExternalBindingTarget(fs, cityRoot, scopeRoot, target); bindErr != nil {
+					return DoltConnectionTarget{}, bindErr
+				} else if ok {
+					return resolved, nil
+				}
+			}
 			return DoltConnectionTarget{}, err
 		}
 		target.Host = managedCityHost()
@@ -190,7 +205,7 @@ func ResolveDoltConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string) (DoltCo
 	case EndpointOriginCityCanonical, EndpointOriginExplicit:
 		return populateExternalTarget(target, cfg)
 	case EndpointOriginInheritedCity:
-		return resolveInheritedCityConnectionTarget(fs, cityRoot, target, cfg)
+		return resolveInheritedCityConnectionTarget(fs, cityRoot, scopeRoot, target, cfg)
 	default:
 		return DoltConnectionTarget{}, fmt.Errorf("unsupported endpoint origin %q for %s", cfg.EndpointOrigin, cfgPath)
 	}
@@ -640,7 +655,18 @@ func deriveLegacyConnectionConfig(fs fsys.FS, cityRoot, scopeRoot string, cfg Co
 	return derived
 }
 
-func resolveInheritedCityConnectionTarget(fs fsys.FS, cityRoot string, target DoltConnectionTarget, rigCfg ConfigState) (DoltConnectionTarget, error) {
+func resolveInheritedCityConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string, target DoltConnectionTarget, rigCfg ConfigState) (DoltConnectionTarget, error) {
+	// A rig whose store bd owns carries its own binding, so that binding
+	// outranks anything inherited. Without this a bd-owned direct rig resolves
+	// to the city's server, where its database does not exist.
+	if port, ok := readProviderOwnedServerPort(fs, scopeRoot); ok {
+		return localServerTarget(target, port), nil
+	}
+	if resolved, ok, err := bdExternalBindingTarget(fs, cityRoot, scopeRoot, target); err != nil {
+		return DoltConnectionTarget{}, err
+	} else if ok {
+		return resolved, nil
+	}
 	cityState, err := resolveCityTopologyState(fs, cityRoot)
 	if err != nil {
 		return DoltConnectionTarget{}, err
@@ -826,6 +852,115 @@ func validateSocketTarget(socket, host, port string) error {
 		return fmt.Errorf("invalid dolt socket path %q", socket)
 	}
 	return nil
+}
+
+// bdExternalBindingTarget resolves the external upstream bd persisted for a
+// scope, if it recorded one.
+//
+// `bd init --server --external --server-host <h> --server-port <p>` writes
+// dolt_server_host/dolt_server_port (or dolt_server_socket) into the scope's
+// metadata.json, and that is the only place the endpoint lives. gc deliberately
+// leaves a provider-owned scope's config.yaml alone, so a direct-external city
+// carries no gc endpoint keys at all and used to resolve as a managed city with
+// no runtime state.
+//
+// It ranks below a live local server for the same reason the sidecar ranks
+// above config: a record naming a process that exists here and now beats a
+// marker pointing somewhere else.
+func bdExternalBindingTarget(fs fsys.FS, cityRoot, scopeRoot string, target DoltConnectionTarget) (DoltConnectionTarget, bool, error) {
+	binding, ok, err := ReadPersistedServerBinding(fs, filepath.Join(scopeRoot, ".beads", "metadata.json"))
+	if err != nil || !ok {
+		return DoltConnectionTarget{}, false, err
+	}
+	if sameScope(scopeRoot, cityRoot) {
+		target.EndpointOrigin = EndpointOriginCityCanonical
+	} else {
+		target.EndpointOrigin = EndpointOriginExplicit
+	}
+	target.EndpointStatus = EndpointStatusVerified
+	resolved, err := populateExternalTarget(target, binding)
+	if err != nil {
+		return DoltConnectionTarget{}, false, err
+	}
+	return resolved, true, nil
+}
+
+// ReadPersistedServerBinding reads the server endpoint bd persisted for a
+// scope out of its metadata.json — dolt_server_host and dolt_server_port, or
+// dolt_server_socket. `bd init --server --external --server-host <h>
+// --server-port <p>` writes them, and that is the only place the endpoint
+// lives: gc leaves a provider-owned scope's config.yaml alone, so nothing else
+// records which server the scope is bound to.
+//
+// Absent or malformed metadata reports no binding. This is a discovery step,
+// and the metadata contract's own loader owns rejection.
+func ReadPersistedServerBinding(fs fsys.FS, path string) (ConfigState, bool, error) {
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ConfigState{}, false, nil
+		}
+		return ConfigState{}, false, err
+	}
+	var meta struct {
+		Host   string `json:"dolt_server_host"`
+		Port   int    `json:"dolt_server_port"`
+		Socket string `json:"dolt_server_socket"`
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return ConfigState{}, false, nil
+	}
+	if socket := strings.TrimSpace(meta.Socket); socket != "" {
+		return ConfigState{DoltSocket: socket}, true, nil
+	}
+	host := strings.TrimSpace(meta.Host)
+	if host == "" || meta.Port <= 0 {
+		return ConfigState{}, false, nil
+	}
+	return ConfigState{DoltHost: host, DoltPort: strconv.Itoa(meta.Port)}, true, nil
+}
+
+// localServerTarget pins a target to a loopback server this host runs.
+func localServerTarget(target DoltConnectionTarget, port string) DoltConnectionTarget {
+	target.Host = managedCityHost()
+	target.Port = port
+	target.External = false
+	target.EndpointStatus = EndpointStatusVerified
+	return target
+}
+
+// readProviderOwnedServerPort reads the server-mode Dolt bd owns for a scope.
+//
+// bd records a server it started in the scope's own .beads/dolt-server.pid
+// and .beads/dolt-server.port. Gas City's managed lifecycle writes no pid file
+// there — it mirrors only the port — so requiring the pair is what keeps a
+// stale mirror from a stopped managed city out of this path. The record counts
+// only while the process it names is alive and its port answers; anything less
+// is a crashed server, not a binding.
+func readProviderOwnedServerPort(fs fsys.FS, scopeRoot string) (string, bool) {
+	if strings.TrimSpace(scopeRoot) == "" {
+		return "", false
+	}
+	pidRaw, err := fs.ReadFile(filepath.Join(scopeRoot, ".beads", "dolt-server.pid"))
+	if err != nil {
+		return "", false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidRaw)))
+	if err != nil || pid <= 0 || !contractPIDAlive(pid) {
+		return "", false
+	}
+	portRaw, err := fs.ReadFile(filepath.Join(scopeRoot, ".beads", "dolt-server.port"))
+	if err != nil {
+		return "", false
+	}
+	port := strings.TrimSpace(string(portRaw))
+	if value, err := strconv.Atoi(port); err != nil || value <= 0 {
+		return "", false
+	}
+	if !contractPortReachable(managedCityHost(), port) {
+		return "", false
+	}
+	return port, true
 }
 
 func readManagedRuntimePort(fs fsys.FS, cityRoot string) (string, error) {
