@@ -20,32 +20,15 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runproj"
-	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 type fakeResolver struct {
 	paths map[string]string
-	// cities, when non-nil, is what Cities returns (so a test can control the
-	// eager-warm set and ordering independently of the CityPath map, or model a
-	// resolver whose registry is empty at Start). When nil, Cities is derived
-	// from paths so existing tests get eager-warming for free.
-	cities []CityRef
 }
 
 func (f fakeResolver) CityPath(name string) (string, bool) {
 	p, ok := f.paths[name]
 	return p, ok
-}
-
-func (f fakeResolver) Cities() []CityRef {
-	if f.cities != nil {
-		return f.cities
-	}
-	refs := make([]CityRef, 0, len(f.paths))
-	for name, path := range f.paths {
-		refs = append(refs, CityRef{Name: name, Path: path})
-	}
-	return refs
 }
 
 // runMoleculeEvent builds a bead.created event for a run-molecule lane carrying
@@ -150,7 +133,7 @@ func TestRunTailerColdLoadAndLiveTail(t *testing.T) {
 
 	select {
 	case <-tl.readyCh:
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("cold replay did not complete")
 	}
 	waitForLanes(t, tl, 1)
@@ -182,7 +165,7 @@ func TestRunTailerManagerRebindsChangedEventsPath(t *testing.T) {
 	first := m.ensure("alpha", firstPath)
 	select {
 	case <-first.readyCh:
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("first cold replay did not complete")
 	}
 	waitForLanes(t, first, 1)
@@ -196,12 +179,12 @@ func TestRunTailerManagerRebindsChangedEventsPath(t *testing.T) {
 	}
 	select {
 	case <-first.doneCh:
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("replaced path-bound tailer did not stop")
 	}
 	select {
 	case <-replacement.readyCh:
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("replacement cold replay did not complete")
 	}
 	waitForLanes(t, replacement, 1)
@@ -234,7 +217,7 @@ func TestRunTailerLogsColdLoadFailureOnce(t *testing.T) {
 	tailer := m.ensure("alpha", filepath.Join(t.TempDir(), ".gc", "events.jsonl"))
 	select {
 	case <-tailer.readyCh:
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		cancel()
 		wg.Wait()
 		t.Fatal("cold replay attempt did not complete")
@@ -254,7 +237,7 @@ func TestRunTailerLogsColdLoadFailureOnce(t *testing.T) {
 // startup sessions-prime blocking live polling: the best-effort prime runs off
 // the tail's poll goroutine, so a slow or hung /v0 sessions loopback read cannot
 // delay folding events appended right after cold replay — the exact startup
-// window the eager warm-up exists to cover. A /sessions handler that never
+// window the optional sessions prime exists to cover. A /sessions handler that never
 // responds stands in for the stalled loopback; the tail must still fold a
 // post-ready append while that prime is parked.
 func TestRunTailerPrimeDoesNotBlockLiveTail(t *testing.T) {
@@ -899,8 +882,9 @@ func TestRunSummaryEndpointUnknownCity404s(t *testing.T) {
 // runSummaryWire is the decoded endpoint body — a structural contract check that
 // the wire carries the enriched RunSummary shape the SPA renderer reads.
 type runSummaryWire struct {
-	TotalActive int `json:"totalActive"`
-	Lanes       []struct {
+	TotalActive  int  `json:"totalActive"`
+	LanesPartial bool `json:"lanesPartial"`
+	Lanes        []struct {
 		ID     string `json:"id"`
 		Health struct {
 			Status string `json:"status"`

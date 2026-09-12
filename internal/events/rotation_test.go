@@ -70,8 +70,22 @@ func TestGzipAndArchiveCollisionGuard(t *testing.T) {
 		t.Errorf("expected stderr to mention %q, got %q", filepath.Base(dest), stderr.String())
 	}
 
-	if _, err := os.Stat(src); err != nil {
-		t.Errorf("source removed despite collision: %v", err)
+	// The source is SET ASIDE, not left in place: the canonical name embeds the
+	// timestamp and seq window, so a colliding source holds the same events the
+	// existing archive already holds. Left under its rotating name it would be
+	// re-collided by the reaper on every startup and re-decoded by every
+	// AfterSeq=0 read forever (ga-jctn6). The bytes are kept for inspection
+	// under a name no scanner matches.
+	if _, statErr := os.Stat(src); !os.IsNotExist(statErr) {
+		t.Errorf("colliding source still at its rotating path (err=%v); it must be set aside", statErr)
+	}
+	setAside := filepath.Join(dir, supersededRotatingPrefix+filepath.Base(src))
+	moved, readErr := os.ReadFile(setAside)
+	if readErr != nil {
+		t.Fatalf("set-aside file missing: %v", readErr)
+	}
+	if string(moved) != "new content\n" {
+		t.Errorf("set-aside content = %q, want the original source bytes", string(moved))
 	}
 	contents, err := os.ReadFile(dest)
 	if err != nil {

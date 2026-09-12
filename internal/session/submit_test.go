@@ -1917,3 +1917,96 @@ func containsSubsequence(have, want []string) bool {
 	}
 	return false
 }
+
+// TestSubmitDefaultDeferredResetPendingStampsEmptyEpochToSurviveRotation proves
+// a submit deferred while a conversation reset is pending is fenced by session
+// alone, not by the current epoch. commitPendingContinuationReset rotates
+// continuation_epoch N->N+1 when the replacement incarnation starts, so a
+// fixed epoch-N stamp would be rejected by the queued-nudge fence and
+// dead-lettered — silently dropping the message. An empty epoch survives the
+// rotation.
+func TestSubmitDefaultDeferredResetPendingStampsEmptyEpochToSurviveRotation(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	cityPath := t.TempDir()
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := sp.Stop(info.SessionName); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if err := store.SetMetadataBatch(info.ID, map[string]string{
+		"continuation_epoch":         "1",
+		"continuation_reset_pending": "true",
+	}); err != nil {
+		t.Fatalf("SetMetadataBatch: %v", err)
+	}
+
+	outcome, err := mgr.Submit(context.Background(), info.ID, "deliver after reset", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault)
+	if err != nil {
+		t.Fatalf("Submit(default): %v", err)
+	}
+	if !outcome.Queued {
+		t.Fatal("Submit(default) should queue while a conversation reset is pending")
+	}
+	state, err := nudgequeue.LoadState(cityPath)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if len(state.Pending) != 1 {
+		t.Fatalf("pending queued submits = %d, want 1", len(state.Pending))
+	}
+	item := state.Pending[0]
+	if item.SessionID != info.ID {
+		t.Fatalf("SessionID = %q, want %q", item.SessionID, info.ID)
+	}
+	if item.ContinuationEpoch != "" {
+		t.Fatalf("ContinuationEpoch = %q, want empty so the deferred submit survives the N->N+1 reset rotation", item.ContinuationEpoch)
+	}
+}
+
+// TestSubmitDefaultDeferredRestartRequestedKeepsCurrentEpoch guards the fix's
+// scope: a plain restart (restart_requested, no reset) does NOT rotate the
+// epoch, so those defers keep their current-epoch stamp and stay fenced to the
+// resumed conversation.
+func TestSubmitDefaultDeferredRestartRequestedKeepsCurrentEpoch(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	cityPath := t.TempDir()
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := sp.Stop(info.SessionName); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if err := store.SetMetadataBatch(info.ID, map[string]string{
+		"continuation_epoch": "4",
+		"restart_requested":  "true",
+	}); err != nil {
+		t.Fatalf("SetMetadataBatch: %v", err)
+	}
+
+	outcome, err := mgr.Submit(context.Background(), info.ID, "deliver after restart", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault)
+	if err != nil {
+		t.Fatalf("Submit(default): %v", err)
+	}
+	if !outcome.Queued {
+		t.Fatal("Submit(default) should queue while a restart is pending")
+	}
+	state, err := nudgequeue.LoadState(cityPath)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if len(state.Pending) != 1 {
+		t.Fatalf("pending queued submits = %d, want 1", len(state.Pending))
+	}
+	if got := state.Pending[0].ContinuationEpoch; got != "4" {
+		t.Fatalf("ContinuationEpoch = %q, want 4 (plain restart keeps the current epoch)", got)
+	}
+}

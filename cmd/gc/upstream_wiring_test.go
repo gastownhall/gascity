@@ -90,6 +90,17 @@ func TestResolveTemplateRendersAbstractUpstreamPerHarness(t *testing.T) {
 		{"codex", config.UpstreamEnvBinding{BaseURL: "OPENAI_BASE_URL", APIKey: "OPENAI_API_KEY"}, "OPENAI_BASE_URL", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"},
 	} {
 		t.Run(tc.harness, func(t *testing.T) {
+			// The otherKey assertion below is about what the UPSTREAM BINDING
+			// renders, but tp.Env is the merged session env, and
+			// processenv.ProviderProcessPassthroughEnv deliberately forwards
+			// every IsProviderCredentialEnv key it finds in os.Environ() so an
+			// agent can reach whatever providers the controller can. On a
+			// developer or fleet box that exports the other harness's key, that
+			// forwarding — not the binding — puts otherKey in the map. Pin it
+			// empty: the sweep skips empty values, so the only thing left that
+			// can write otherKey is the binding under test.
+			t.Setenv(tc.otherKey, "")
+
 			params := upstreamTestParams(t, city)
 			params.providers = map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none", UpstreamEnv: tc.binding}}
 			agent := &config.Agent{Name: "runner", Upstream: "bedrock"}

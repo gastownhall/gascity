@@ -16,11 +16,21 @@ review).
 | Variable | Source | Description |
 |----------|--------|-------------|
 | convoy_id | runtime | Input convoy tracking the single work bead |
+| escalation_target | caller / rig `formula_vars` | Mail recipient for blocked work (default: `human`) |
 """
 formula = "mol-do-work"
 
 [requires]
 formula_compiler = ">=2.0.0"
+
+[vars.escalation_target]
+description = """
+Mail recipient for escalations when work cannot be completed. Defaults to the
+reserved `human` alias, which resolves in every city. Cities that staff a
+work-health role (e.g. the gastown pack's witness) can point this at it, for
+example `escalation_target = "<rig>/witness"`.
+"""
+default = "human"
 
 [[steps]]
 id = "do-work"
@@ -44,10 +54,19 @@ gc bd show "$WORK_BEAD_ID"
 
 Read the bead's title and description carefully. This is your task.
 
-**Signal liveness:** run `gc bd heartbeat "$WORK_BEAD_ID"` now, and again before any
-shell command you expect to run for many minutes (long builds, test sweeps).
-It stamps `gc.last_heartbeat_at` so the dashboard can tell you are alive and
-working rather than wedged.
+**Claim it and signal liveness:** the input-convoy child derived above is not
+claimed by the routing step that assigned you — claim it explicitly before your
+first heartbeat:
+```bash
+gc bd update "$WORK_BEAD_ID" --claim
+```
+`--claim` is idempotent and self-assigns regardless of current state, so this is
+safe even if the bead was already claimed some other way. Then run
+`gc bd heartbeat "$WORK_BEAD_ID"` now, and again before any shell command you
+expect to run for many minutes (long builds, test sweeps). It refreshes your
+claim's lease so the dashboard can tell you are alive and working rather than
+wedged. If a heartbeat ever fails, your claim was reclaimed or closed out from
+under you — stop working this bead immediately.
 
 **2. Implement the solution and verify it:**
 
@@ -82,7 +101,7 @@ actually happened:
   (the SHA) and `gc.work_branch` (the branch it is on).
 - `no-op` — the bead needed no change (already satisfied / duplicate); omit
   `gc.work_commit` and `gc.work_branch`.
-- `blocked` / `abandoned` — you could not complete it (also mail Witness).
+- `blocked` / `abandoned` — you could not complete it (also mail `{{escalation_target}}`).
 
 `gc.outcome=pass` stays — it is the control-plane step result and is disjoint
 from `gc.work_outcome`.
@@ -111,7 +130,7 @@ gc bd update "$WORK_BEAD_ID" \
   --notes "No-op: <why no change was needed>."
 ```
 For `blocked` / `abandoned`, use that value for `gc.work_outcome` and also mail
-Witness.
+`{{escalation_target}}`.
 
 **4. Close this formula step:**
 

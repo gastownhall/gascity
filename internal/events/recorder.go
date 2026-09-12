@@ -226,6 +226,11 @@ func NewFileRecorder(path string, stderr io.Writer, opts ...FileRecorderOption) 
 	return r, nil
 }
 
+// errRecorderClosed reports a Record/RecordAck against a closed recorder. Record
+// swallows it to preserve its historical silent-on-closed behavior; RecordAck
+// surfaces it so a caller relying on durability learns the append never landed.
+var errRecorderClosed = errors.New("recorder is closed")
+
 // Record appends an event to the log. It auto-fills Seq and Ts (if zero).
 // Errors are written to stderr — never returned.
 //
@@ -234,11 +239,27 @@ func NewFileRecorder(path string, stderr io.Writer, opts ...FileRecorderOption) 
 // if the file has crossed the threshold since the last check. Auto
 // rotation is amortized — see WithRotationCheckRecords / Interval.
 func (r *FileRecorder) Record(e Event) {
+	if err := r.RecordAck(e); err != nil && !errors.Is(err, errRecorderClosed) {
+		fmt.Fprintf(r.stderr, "events: %v\n", err) //nolint:errcheck // best-effort stderr
+	}
+}
+
+// RecordAck appends an event exactly as Record does and additionally reports
+// whether it was durably appended: a nil error means the JSONL line reached the
+// active log (and is therefore readable back by any List/Watch consumer), while
+// a non-nil error means the event was dropped — a cross-process lock timeout, a
+// write failure such as ENOSPC, or a closed recorder. It is the acknowledged
+// form Record swallows, for the rare caller that must not take a durable action
+// on the strength of an append that may have been lost (see events.AckRecorder).
+//
+// The write is not fsynced, so a nil error does not promise stable storage: an
+// OS crash can lose an acknowledged append.
+func (r *FileRecorder) RecordAck(e Event) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if r.closed {
-		return
+		return errRecorderClosed
 	}
 
 	r.maybeAutoRotateLocked()
@@ -249,8 +270,7 @@ func (r *FileRecorder) Record(e Event) {
 	// lock instead of blocking forever and piling up processes.
 	fd := int(r.file.Fd())
 	if err := lockRecorderFile(fd, r.path); err != nil {
-		fmt.Fprintf(r.stderr, "events: lock: %v\n", err) //nolint:errcheck // best-effort stderr
-		return
+		return fmt.Errorf("lock: %w", err)
 	}
 	defer func() {
 		if err := syscall.Flock(fd, syscall.LOCK_UN); err != nil {
@@ -259,8 +279,9 @@ func (r *FileRecorder) Record(e Event) {
 	}()
 
 	if err := r.writeRecordLocked(&e); err != nil {
-		fmt.Fprintf(r.stderr, "events: %v\n", err) //nolint:errcheck // best-effort stderr
+		return err
 	}
+	return nil
 }
 
 // AppendBatch strictly appends a complete event batch under one mutex and one
@@ -350,6 +371,14 @@ func marshalBatch(batch []Event, startingSeq uint64, now time.Time) ([]byte, uin
 		event.Seq = startingSeq + uint64(i) + 1
 		if event.Ts.IsZero() {
 			event.Ts = now
+		} else {
+			// Normalize any caller-supplied Ts to the recorder's own zone
+			// (local-with-offset) so the log carries one consistent RFC3339
+			// representation. Preserves the instant -- only the zone
+			// changes -- but a mixed log otherwise silently breaks a
+			// lexical/window filter written against whichever form the
+			// majority of rows use (#5300).
+			event.Ts = event.Ts.Local()
 		}
 		encoded, err := json.Marshal(event)
 		if err != nil {
@@ -384,6 +413,9 @@ func (r *FileRecorder) writeRecordLocked(e *Event) error {
 	e.Seq = r.seq
 	if e.Ts.IsZero() {
 		e.Ts = time.Now()
+	} else {
+		// See marshalBatch's matching normalization for why (#5300).
+		e.Ts = e.Ts.Local()
 	}
 	data, err := json.Marshal(e)
 	if err != nil {

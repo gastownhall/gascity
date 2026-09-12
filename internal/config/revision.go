@@ -53,14 +53,14 @@ func Revision(fs fsys.FS, prov *Provenance, cfg *City, cityRoot string) string {
 	rigs := cfg.Rigs
 	for _, r := range rigs {
 		for _, ref := range r.Includes {
-			topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
+			topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot, false)
 			writeRevisionDirHash(h, prov, "pack:"+r.Name+":"+ref, fs, topoDir)
 		}
 	}
 
 	// Hash city-level pack directory contents.
 	for _, ref := range cfg.Workspace.LegacyIncludes() {
-		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
+		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot, false)
 		writeRevisionDirHash(h, prov, "city-pack:"+ref, fs, topoDir)
 	}
 
@@ -129,12 +129,12 @@ func (p *Provenance) captureRevisionSnapshot(fs fsys.FS, cfg *City, cityRoot str
 
 	for _, r := range cfg.Rigs {
 		for _, ref := range r.Includes {
-			topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
+			topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot, false)
 			recordDir("pack:"+r.Name+":"+ref, topoDir)
 		}
 	}
 	for _, ref := range cfg.Workspace.LegacyIncludes() {
-		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
+		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot, false)
 		recordDir("city-pack:"+ref, topoDir)
 	}
 	if tracksPackV2Imports(cfg) {
@@ -321,7 +321,7 @@ func revisionPackDir(ref, declDir, cityRoot string) (string, bool) {
 	if strings.TrimSpace(ref) == "" {
 		return "", false
 	}
-	dir, err := resolvePackRef(ref, declDir, cityRoot)
+	dir, err := resolvePackRef(ref, declDir, cityRoot, false)
 	if err != nil || strings.TrimSpace(dir) == "" {
 		return "", false
 	}

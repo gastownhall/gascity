@@ -1,13 +1,18 @@
 package dispatch
 
 import (
+	"bytes"
+	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -87,6 +92,125 @@ func TestProcessRetryEvalPassClosesLogical(t *testing.T) {
 	}
 	if logicalAfter.Metadata["gc.output_json"] != `{"ok":true}` {
 		t.Fatalf("logical gc.output_json = %q, want propagated output", logicalAfter.Metadata["gc.output_json"])
+	}
+}
+
+// newRetryEvalOrderingFixture builds the shape every terminal retry-eval branch
+// closes through: a logical bead blocked by its own eval. The eval must close
+// before the logical bead or bd refuses the second close, so each branch that
+// closes both is only correct by ordering — nothing structural enforces it.
+// Returns the logical and eval beads on a store that enforces bd's refusal.
+func newRetryEvalOrderingFixture(t *testing.T, runOutcome map[string]string) (*strictCloseStore, beads.Bead, beads.Bead) {
+	t.Helper()
+
+	store := newStrictCloseStore()
+	root := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	logical := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "review",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "retry",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "demo.review",
+			"gc.max_attempts": "3",
+			"gc.on_exhausted": "hard_fail",
+		},
+	})
+	runMeta := map[string]string{
+		"gc.kind":            "retry-run",
+		"gc.root_bead_id":    root.ID,
+		"gc.step_ref":        "demo.review.run.1",
+		"gc.logical_bead_id": logical.ID,
+		"gc.attempt":         "1",
+		"gc.max_attempts":    "3",
+		"gc.on_exhausted":    "hard_fail",
+	}
+	for k, v := range runOutcome {
+		runMeta[k] = v
+	}
+	run1 := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:    "review attempt 1",
+		Type:     "task",
+		Status:   "closed",
+		Metadata: runMeta,
+	})
+	eval1 := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "review eval 1",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":            "retry-eval",
+			"gc.root_bead_id":    root.ID,
+			"gc.step_ref":        "demo.review.eval.1",
+			"gc.logical_bead_id": logical.ID,
+			"gc.attempt":         "1",
+			"gc.max_attempts":    "3",
+			"gc.on_exhausted":    "hard_fail",
+		},
+	})
+	mustDepAdd(t, store, logical.ID, eval1.ID, "blocks")
+	mustDepAdd(t, store, eval1.ID, run1.ID, "blocks")
+	return store, logical, eval1
+}
+
+func TestProcessRetryEvalHardFailClosesEvalBeforeLogical(t *testing.T) {
+	t.Parallel()
+
+	store, logical, eval1 := newRetryEvalOrderingFixture(t, map[string]string{
+		"gc.outcome":        "fail",
+		"gc.failure_class":  "hard",
+		"gc.failure_reason": "boom",
+	})
+
+	result, err := ProcessControl(store, eval1, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(retry-eval hard): %v", err)
+	}
+	if !result.Processed || result.Action != "hard-fail" {
+		t.Fatalf("result = %+v, want processed hard-fail", result)
+	}
+
+	evalAfter := mustGetBead(t, store, eval1.ID)
+	if evalAfter.Status != "closed" || evalAfter.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("eval = status %q outcome %q, want closed/fail", evalAfter.Status, evalAfter.Metadata["gc.outcome"])
+	}
+	logicalAfter := mustGetBead(t, store, logical.ID)
+	if logicalAfter.Status != "closed" || logicalAfter.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("logical = status %q outcome %q, want closed/fail", logicalAfter.Status, logicalAfter.Metadata["gc.outcome"])
+	}
+	if got := logicalAfter.Metadata["gc.final_disposition"]; got != beadmeta.DispositionHardFail {
+		t.Fatalf("logical gc.final_disposition = %q, want %q", got, beadmeta.DispositionHardFail)
+	}
+}
+
+func TestProcessRetryEvalCanceledClosesEvalBeforeLogical(t *testing.T) {
+	t.Parallel()
+
+	store, logical, eval1 := newRetryEvalOrderingFixture(t, map[string]string{
+		"gc.outcome": "canceled",
+	})
+
+	result, err := ProcessControl(store, eval1, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(retry-eval canceled): %v", err)
+	}
+	if !result.Processed || result.Action != "canceled" {
+		t.Fatalf("result = %+v, want processed canceled", result)
+	}
+
+	evalAfter := mustGetBead(t, store, eval1.ID)
+	if evalAfter.Status != "closed" || evalAfter.Metadata["gc.outcome"] != "canceled" {
+		t.Fatalf("eval = status %q outcome %q, want closed/canceled", evalAfter.Status, evalAfter.Metadata["gc.outcome"])
+	}
+	logicalAfter := mustGetBead(t, store, logical.ID)
+	if logicalAfter.Status != "closed" || logicalAfter.Metadata["gc.outcome"] != "canceled" {
+		t.Fatalf("logical = status %q outcome %q, want closed/canceled", logicalAfter.Status, logicalAfter.Metadata["gc.outcome"])
 	}
 }
 
@@ -1562,6 +1686,214 @@ func TestProcessRetryEvalSoftFailOnExhaustedTransient(t *testing.T) {
 	}
 }
 
+// outcomeHiddenRetrySubjectStore simulates the sub-second Dolt read-after-
+// write visibility lag between a retry subject's status=closed write and its
+// gc.outcome/gc.failure_class/gc.failure_reason metadata becoming visible: it
+// strips those keys from subjectID's metadata on every List result (so the
+// initial DirectMembers-based resolution always races) and on the first
+// hideReads direct Get calls (so the bounded re-resolution retry has to run
+// hideReads times before it observes the real, persisted metadata).
+type outcomeHiddenRetrySubjectStore struct {
+	*beads.MemStore
+	subjectID   string
+	hideReads   int
+	hiddenReads int
+}
+
+func (s *outcomeHiddenRetrySubjectStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	result, err := s.MemStore.List(query)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]beads.Bead, len(result))
+	for i, b := range result {
+		if b.ID == s.subjectID {
+			b = stripRetryOutcomeMetadata(b)
+		}
+		out[i] = b
+	}
+	return out, nil
+}
+
+func (s *outcomeHiddenRetrySubjectStore) Get(id string) (beads.Bead, error) {
+	bead, err := s.MemStore.Get(id)
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	if id != s.subjectID || s.hiddenReads >= s.hideReads {
+		return bead, nil
+	}
+	s.hiddenReads++
+	return stripRetryOutcomeMetadata(bead), nil
+}
+
+func stripRetryOutcomeMetadata(b beads.Bead) beads.Bead {
+	clone := make(map[string]string, len(b.Metadata))
+	for k, v := range b.Metadata {
+		switch k {
+		case beadmeta.OutcomeMetadataKey, beadmeta.FailureClassMetadataKey, beadmeta.FailureReasonMetadataKey:
+			continue
+		}
+		clone[k] = v
+	}
+	b.Metadata = clone
+	return b
+}
+
+func TestProcessRetryEvalSoftFailToleratesDelayedOutcomeVisibility(t *testing.T) {
+	t.Parallel()
+
+	mem := beads.NewMemStore()
+	root := mustCreateWorkflowBead(t, mem, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	logical := mustCreateWorkflowBead(t, mem, beads.Bead{
+		Title: "gemini review",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "retry",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "demo.review-gemini",
+			"gc.max_attempts": "3",
+			"gc.on_exhausted": "soft_fail",
+		},
+	})
+	run3 := mustCreateWorkflowBead(t, mem, beads.Bead{
+		Title:  "gemini review attempt 3",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.kind":            "retry-run",
+			"gc.root_bead_id":    root.ID,
+			"gc.step_ref":        "demo.review-gemini.run.3",
+			"gc.logical_bead_id": logical.ID,
+			"gc.attempt":         "3",
+			"gc.max_attempts":    "3",
+			"gc.on_exhausted":    "soft_fail",
+			"gc.outcome":         "fail",
+			"gc.failure_class":   "transient",
+			"gc.failure_reason":  "rate_limited",
+		},
+	})
+	eval3 := mustCreateWorkflowBead(t, mem, beads.Bead{
+		Title: "gemini review eval 3",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":            "retry-eval",
+			"gc.root_bead_id":    root.ID,
+			"gc.step_ref":        "demo.review-gemini.eval.3",
+			"gc.logical_bead_id": logical.ID,
+			"gc.attempt":         "3",
+			"gc.max_attempts":    "3",
+			"gc.on_exhausted":    "soft_fail",
+		},
+	})
+	mustDepAdd(t, mem, logical.ID, eval3.ID, "blocks")
+	mustDepAdd(t, mem, eval3.ID, run3.ID, "blocks")
+
+	store := &outcomeHiddenRetrySubjectStore{MemStore: mem, subjectID: run3.ID, hideReads: 3}
+
+	result, err := ProcessControl(store, eval3, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(retry-eval soft-fail, delayed outcome visibility): %v", err)
+	}
+	if !result.Processed || result.Action != "soft-fail" {
+		t.Fatalf("result = %+v, want processed soft-fail", result)
+	}
+	if store.hiddenReads == 0 {
+		t.Fatal("hiddenReads = 0, want the delayed-outcome-visibility path exercised")
+	}
+
+	logicalAfter := mustGetBead(t, mem, logical.ID)
+	if logicalAfter.Status != "closed" || logicalAfter.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("logical = status %q outcome %q, want closed/pass", logicalAfter.Status, logicalAfter.Metadata["gc.outcome"])
+	}
+	if logicalAfter.Metadata["gc.final_disposition"] != "soft_fail" {
+		t.Fatalf("logical gc.final_disposition = %q, want soft_fail", logicalAfter.Metadata["gc.final_disposition"])
+	}
+	if logicalAfter.Metadata["gc.failure_reason"] != "rate_limited" {
+		t.Fatalf("logical gc.failure_reason = %q, want rate_limited (not missing_outcome)", logicalAfter.Metadata["gc.failure_reason"])
+	}
+}
+
+func TestResolveRetrySubjectOutcomeStopsRetryWhenContextCanceled(t *testing.T) {
+	t.Parallel()
+
+	mem := beads.NewMemStore()
+	subject := mustCreateWorkflowBead(t, mem, beads.Bead{
+		Title:  "gemini review attempt 3",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.kind": "retry-run",
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var trace bytes.Buffer
+	_, err := resolveRetrySubjectOutcome(mem, subject, "eval3", ProcessOptions{
+		Context: ctx,
+		Tracef: func(format string, args ...any) {
+			fmt.Fprintf(&trace, format+"\n", args...) //nolint:errcheck // test buffer
+		},
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("resolveRetrySubjectOutcome error = %v, want context.Canceled", err)
+	}
+	if !strings.Contains(trace.String(), "attempt=1") || !strings.Contains(trace.String(), "result=retry") {
+		t.Fatalf("trace = %q, want a first-attempt retry logged before cancellation", trace.String())
+	}
+}
+
+// failingGetStore fails every direct Get of subjectID, standing in for a bd
+// read failure during the bounded outcome re-resolution window.
+type failingGetStore struct {
+	*beads.MemStore
+	subjectID string
+}
+
+func (s *failingGetStore) Get(id string) (beads.Bead, error) {
+	if id == s.subjectID {
+		return beads.Bead{}, beads.ErrNotFound
+	}
+	return s.MemStore.Get(id)
+}
+
+func TestResolveRetrySubjectOutcomeDegradesOnReadError(t *testing.T) {
+	t.Parallel()
+
+	mem := beads.NewMemStore()
+	subject := mustCreateWorkflowBead(t, mem, beads.Bead{
+		Title:    "gemini review attempt 3",
+		Type:     "task",
+		Status:   "closed",
+		Metadata: map[string]string{"gc.kind": "retry-run"},
+	})
+	store := &failingGetStore{MemStore: mem, subjectID: subject.ID}
+
+	var trace bytes.Buffer
+	got, err := resolveRetrySubjectOutcome(store, subject, "eval3", ProcessOptions{
+		Tracef: func(format string, args ...any) {
+			fmt.Fprintf(&trace, format+"\n", args...) //nolint:errcheck // test buffer
+		},
+	})
+	if err != nil {
+		t.Fatalf("resolveRetrySubjectOutcome error = %v, want nil (degrade to last-known subject)", err)
+	}
+	if got.ID != subject.ID {
+		t.Fatalf("subject = %q, want the last-known subject %q", got.ID, subject.ID)
+	}
+	if !strings.Contains(trace.String(), "result=read-error") {
+		t.Fatalf("trace = %q, want a read-error observation", trace.String())
+	}
+}
+
 func TestProcessRetryEvalStaleAttemptFinalizesNoop(t *testing.T) {
 	t.Parallel()
 
@@ -1904,7 +2236,7 @@ func TestProcessScopeCheckSkipsOpenRetryDescendantsOnAbort(t *testing.T) {
 			"gc.formula_contract": "graph.v2",
 		},
 	})
-	body := mustCreateWorkflowBead(t, store, beads.Bead{
+	mustCreateWorkflowBead(t, store, beads.Bead{
 		Title: "body",
 		Type:  "task",
 		Metadata: map[string]string{
@@ -1965,7 +2297,6 @@ func TestProcessScopeCheckSkipsOpenRetryDescendantsOnAbort(t *testing.T) {
 		},
 	})
 	mustDepAdd(t, store, control.ID, failed.ID, "blocks")
-	mustDepAdd(t, store, body.ID, control.ID, "blocks")
 	mustDepAdd(t, store, logical.ID, eval1.ID, "blocks")
 	mustDepAdd(t, store, eval1.ID, run1.ID, "blocks")
 
@@ -2000,7 +2331,7 @@ func TestProcessScopeCheckSkipsOpenRalphIterationDescendantsOnAbort(t *testing.T
 			"gc.formula_contract": "graph.v2",
 		},
 	})
-	body := mustCreateWorkflowBead(t, store, beads.Bead{
+	mustCreateWorkflowBead(t, store, beads.Bead{
 		Title: "body",
 		Type:  "task",
 		Metadata: map[string]string{
@@ -2070,7 +2401,6 @@ func TestProcessScopeCheckSkipsOpenRalphIterationDescendantsOnAbort(t *testing.T
 		},
 	})
 	mustDepAdd(t, store, control.ID, failed.ID, "blocks")
-	mustDepAdd(t, store, body.ID, control.ID, "blocks")
 	mustDepAdd(t, store, logical.ID, iterationControl.ID, "blocks")
 	mustDepAdd(t, store, iterationControl.ID, iterationChild.ID, "blocks")
 

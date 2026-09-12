@@ -68,11 +68,11 @@ func resolveCityPathFromCwd() (string, bool) {
 	return cityPath, true
 }
 
-func rigFromGCDirOrCwd(cityPath string) string {
+func rigFromGCDirOrCwd(cityPath string, mode contextResolutionMode) string {
 	if gcDir := strings.TrimSpace(os.Getenv("GC_DIR")); gcDir != "" {
-		if rigName := rigFromCwdDir(cityPath, gcDir); rigName != "" {
+		if rigName := rigFromCwdDir(cityPath, gcDir, mode); rigName != "" {
 			return rigName
 		}
 	}
-	return rigFromCwd(cityPath)
+	return rigFromCwd(cityPath, mode)
 }

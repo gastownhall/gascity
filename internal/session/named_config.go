@@ -372,6 +372,7 @@ func lookupConfiguredNamedSession(store beads.Store, spec NamedSessionSpec, incl
 	candidates := make([]beads.Bead, 0, 4)
 	seen := make(map[string]bool)
 	var runtimeSessionNameMatches []beads.Bead
+	var aliasMatches []beads.Bead
 
 	if spec.Identity != "" {
 		matches, err := listConfiguredNamedSessionBeadsByMetadata(store, NamedSessionIdentityMetadata, spec.Identity)
@@ -407,18 +408,24 @@ func lookupConfiguredNamedSession(store beads.Store, spec NamedSessionSpec, incl
 		}
 	}
 
+	if spec.Identity != "" {
+		matches, err := listConfiguredNamedSessionBeadsByMetadata(store, "alias", spec.Identity)
+		if err != nil {
+			return ConfiguredNamedSessionLookup{}, fmt.Errorf("listing alias-matching named session candidates: %w", err)
+		}
+		aliasMatches = matches
+		candidates = appendUniqueNamedSessionCandidates(candidates, seen, matches)
+		if bead, ok := FindCanonicalNamedSessionBead(candidates, spec); ok {
+			return ConfiguredNamedSessionLookup{Canonical: bead, HasCanonical: true}, nil
+		}
+	}
+
 	if !includeConflict {
 		return ConfiguredNamedSessionLookup{}, nil
 	}
 
 	conflictCandidates := append([]beads.Bead{}, runtimeSessionNameMatches...)
-	if spec.Identity != "" {
-		matches, err := listConfiguredNamedSessionBeadsByMetadata(store, "alias", spec.Identity)
-		if err != nil {
-			return ConfiguredNamedSessionLookup{}, fmt.Errorf("listing alias conflicts: %w", err)
-		}
-		conflictCandidates = appendUniqueNamedSessionCandidates(conflictCandidates, make(map[string]bool, len(conflictCandidates)+len(matches)), matches)
-	}
+	conflictCandidates = appendUniqueNamedSessionCandidates(conflictCandidates, make(map[string]bool, len(conflictCandidates)+len(aliasMatches)), aliasMatches)
 	if bead, conflict := FindNamedSessionConflict(conflictCandidates, spec); conflict {
 		return ConfiguredNamedSessionLookup{Conflict: bead, HasConflict: true}, nil
 	}
@@ -530,10 +537,14 @@ func beadMatchesNamedSessionResolutionFilter(b beads.Bead, identity, sessionName
 	return false
 }
 
-// FindNamedSessionConflict finds the first live session bead that blocks a configured named session.
+// FindNamedSessionConflict finds the first live session bead that blocks a
+// configured named session. It uses the same continuity gate as canonical
+// detection (NamedSessionContinuityEligible), so a bead that cannot own a
+// name cannot block it either.
 func FindNamedSessionConflict(candidates []beads.Bead, spec NamedSessionSpec) (beads.Bead, bool) {
 	for _, b := range candidates {
-		if !IsSessionBeadOrRepairable(b) || b.Status == "closed" {
+		if !IsSessionBeadOrRepairable(b) || b.Status == "closed" ||
+			!NamedSessionContinuityEligible(b) {
 			continue
 		}
 		if BeadConflictsWithNamedSession(b, spec) {
@@ -545,10 +556,13 @@ func FindNamedSessionConflict(candidates []beads.Bead, spec NamedSessionSpec) (b
 
 // FindNamedSessionConflictInfo is the session.Info mirror of
 // FindNamedSessionConflict: it finds the first live session Info that blocks a
-// configured named session.
+// configured named session, using the same continuity gate as canonical
+// detection (NamedSessionInfoContinuityEligible), so a bead that cannot own a
+// name cannot block it either.
 func FindNamedSessionConflictInfo(candidates []Info, spec NamedSessionSpec) (Info, bool) {
 	for _, i := range candidates {
-		if !IsSessionBeadOrRepairableInfo(i) || i.Closed {
+		if !IsSessionBeadOrRepairableInfo(i) || i.Closed ||
+			!NamedSessionInfoContinuityEligible(i) {
 			continue
 		}
 		if InfoConflictsWithNamedSession(i, spec) {
@@ -581,6 +595,31 @@ func FindCanonicalNamedSessionInfo(candidates []Info, spec NamedSessionSpec) (In
 		sn := strings.TrimSpace(i.SessionNameMetadata)
 		if sn == spec.SessionName || sn == identity {
 			return i, true
+		}
+	}
+	// Mirrors the alias-based pass in FindCanonicalNamedSessionBead: gated by
+	// NamedSessionInfoMatchesSpec (the backing-template check) and unique
+	// among only the template-matching alias candidates.
+	if identity != "" {
+		var aliasCanonical Info
+		aliasMatchCount := 0
+		for _, i := range candidates {
+			if !IsSessionBeadOrRepairableInfo(i) || i.Closed || !NamedSessionInfoContinuityEligible(i) {
+				continue
+			}
+			if !NamedSessionInfoMatchesSpec(i, spec) {
+				continue
+			}
+			if strings.TrimSpace(i.Alias) != identity {
+				continue
+			}
+			aliasMatchCount++
+			if aliasMatchCount == 1 {
+				aliasCanonical = i
+			}
+		}
+		if aliasMatchCount == 1 {
+			return aliasCanonical, true
 		}
 	}
 	return Info{}, false
@@ -673,6 +712,41 @@ func FindCanonicalNamedSessionBead(candidates []beads.Bead, spec NamedSessionSpe
 		sn := strings.TrimSpace(b.Metadata["session_name"])
 		if sn == spec.SessionName || sn == identity {
 			return b, true
+		}
+	}
+	// A bead whose only configured-named-session signal is `alias == identity`
+	// (no exact configured_named_identity/session_name metadata) is its own
+	// canonical session when it is the sole live, eligible, template-matching
+	// candidate. Gating on NamedSessionBeadMatchesSpec -- the same backing-
+	// template check pass two already requires -- keeps an unrelated bead that
+	// merely has alias set to the reserved identity, with no corroborating
+	// template/agent_name signal, from being promoted here (ga-4of1nc); it
+	// falls through to the existing conflict detection instead, which still
+	// flags it unconditionally. Requiring uniqueness among only the
+	// template-matching alias candidates -- not a bare sole-live-candidate
+	// count -- keeps a true collision (two distinct live beads that both
+	// genuinely match the backing template) falling through to conflict
+	// detection instead of one silently winning as first-match.
+	if identity != "" {
+		var aliasCanonical beads.Bead
+		aliasMatchCount := 0
+		for _, b := range candidates {
+			if !IsSessionBeadOrRepairable(b) || b.Status == "closed" || !NamedSessionContinuityEligible(b) {
+				continue
+			}
+			if !NamedSessionBeadMatchesSpec(b, spec) {
+				continue
+			}
+			if strings.TrimSpace(b.Metadata["alias"]) != identity {
+				continue
+			}
+			aliasMatchCount++
+			if aliasMatchCount == 1 {
+				aliasCanonical = b
+			}
+		}
+		if aliasMatchCount == 1 {
+			return aliasCanonical, true
 		}
 	}
 	return beads.Bead{}, false

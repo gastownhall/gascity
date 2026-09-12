@@ -260,11 +260,20 @@ type StatusSessionCountsDetail struct {
 // and last maintenance run. Surfaced by GET /v0/status for operator
 // dashboards; see ADR 0002 / bead ga-d5y design D9.
 type StatusStoreHealth struct {
-	Path         string  `json:"path" doc:"On-disk path of the Dolt store."`
-	SizeBytes    int64   `json:"size_bytes" doc:"Total bytes of the store directory."`
-	LiveRows     int     `json:"live_rows" doc:"Retained bead row count used as the denominator, including open and closed beads."`
-	RatioMB      float64 `json:"ratio_mb_per_row" doc:"Derived megabytes per retained row, including open and closed beads."`
-	Warning      bool    `json:"warning" doc:"True when maintenance is overdue."`
+	Path      string `json:"path" doc:"On-disk path of the Dolt store."`
+	SizeBytes int64  `json:"size_bytes" doc:"Total bytes of the store directory."`
+	LiveRows  int    `json:"live_rows" doc:"Retained bead row count used as the denominator, including open and closed beads. Meaningless unless rows_measured is true."`
+	// RowsMeasured says whether live_rows is a real count. A consumer MUST
+	// check it before trusting live_rows or ratio_mb_per_row: a count that
+	// failed or timed out is reported as a zero that is otherwise
+	// indistinguishable from a genuinely empty store. The flag is spelled
+	// for the measured state on purpose, so a payload that omits it — an
+	// older supervisor, a third-party implementation — decodes to false and
+	// renders as unknown rather than silently asserting a measurement
+	// nobody took.
+	RowsMeasured bool    `json:"rows_measured" doc:"True when live_rows is a real count. False means the count failed, timed out, or was never taken, and both live_rows and ratio_mb_per_row are meaningless."`
+	RatioMB      float64 `json:"ratio_mb_per_row" doc:"Derived megabytes per retained row, including open and closed beads. Zero and meaningless unless rows_measured is true."`
+	Warning      bool    `json:"warning" doc:"True when maintenance is overdue. Meaningless unless rows_measured is true."`
 	ThresholdMB  float64 `json:"threshold_mb_per_row" doc:"Ratio threshold; a ratio above this trips warning."`
 	LastGCAt     string  `json:"last_gc_at,omitempty" doc:"RFC3339 timestamp of last maintenance run."`
 	LastGCStatus string  `json:"last_gc_status,omitempty" doc:"Status of last maintenance run ('success' or 'failed')."`

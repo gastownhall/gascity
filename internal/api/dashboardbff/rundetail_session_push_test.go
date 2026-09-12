@@ -62,7 +62,7 @@ func TestFoldNextSessionEventRefreshesSessionsAndNotifies(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	// Warm the sessions cache (a hit if the eager prime hasn't already), then
+	// Warm the sessions cache (a hit if the optional prime hasn't already), then
 	// snapshot the hit count.
 	if _, ok := tl.mgr.fetchSessions(ctx, "alpha"); !ok {
 		t.Fatal("sessions prime must be available")

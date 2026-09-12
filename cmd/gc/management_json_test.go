@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -139,6 +140,11 @@ func TestManagementJSONSuccessPayloadsValidateDeclaredSchemas(t *testing.T) {
 				cityPath := t.TempDir()
 				writeManagementJSONTestCity(t, cityPath, "[workspace]\nname = \"test-city\"\n")
 				return cityPath, []string{"rig", "add", filepath.Join(t.TempDir(), "frontend"), "--prefix", "fe", "--json"}
+			},
+			check: func(t *testing.T, payload map[string]any) {
+				if got, ok := payload["suspended"].(bool); !ok || got {
+					t.Fatalf("suspended = %#v, want false without --start-suspended", payload["suspended"])
+				}
 			},
 		},
 		{
@@ -497,7 +503,7 @@ contract = "gc.healthz.v1"
 	return cityPath
 }
 
-func TestRigAddJSONEmitsOnlySummary(t *testing.T) {
+func TestRigAddJSONReportsEffectiveSuspendedOnStart(t *testing.T) {
 	clearGCEnv(t)
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("GC_BEADS", "bd")
@@ -506,16 +512,24 @@ func TestRigAddJSONEmitsOnlySummary(t *testing.T) {
 	rigPath := filepath.Join(t.TempDir(), "frontend")
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"--city", cityPath, "rig", "add", rigPath, "--prefix", "fe", "--json"}, &stdout, &stderr)
+	code := run([]string{"--city", cityPath, "rig", "add", rigPath, "--prefix", "fe", "--start-suspended", "--json"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("run rig add --json = %d; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
 	}
 	payload := decodeOneJSONLine(t, &stdout)
-	if payload["schema_version"] != "1" || payload["ok"] != true || payload["command"] != "rig add" || payload["rig"] != "frontend" || payload["prefix"] != "fe" {
+	if payload["schema_version"] != "1" || payload["ok"] != true || payload["command"] != "rig add" || payload["rig"] != "frontend" || payload["prefix"] != "fe" || payload["suspended"] != true {
 		t.Fatalf("payload = %+v", payload)
 	}
 	if strings.Contains(stdout.String(), "Adding rig") || strings.Contains(stdout.String(), "Rig added") {
 		t.Fatalf("stdout contains human text: %q", stdout.String())
+	}
+
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil {
+		t.Fatalf("load city config: %v", err)
+	}
+	if len(cfg.Rigs) != 1 || !cfg.Rigs[0].EffectiveSuspendedOnStart() {
+		t.Fatalf("stored rigs = %+v, want one effectively suspended rig", cfg.Rigs)
 	}
 }
 

@@ -14,12 +14,16 @@ func TestDeriveFirstStart(t *testing.T) {
 		want       bool
 	}{
 		{"no hash, unknown transcript -> first start", "", sessTranscriptUnknown, true},
-		{"no hash, present transcript -> first start", "", sessTranscriptPresent, true},
+		// The crash window between launching with --session-id X and committing
+		// started_config_hash: conversation X exists, so relaunching with
+		// --session-id X is rejected outright ("Session ID <uuid> is already in
+		// use", exit 1). A present transcript outranks the missing hash.
+		{"no hash, present transcript -> resume (crash-window replay fix)", "", sessTranscriptPresent, false},
 		{"no hash, absent transcript -> first start", "", sessTranscriptAbsent, true},
 		{"whitespace hash NOT trimmed in stage 1 -> resume", "   ", sessTranscriptUnknown, false},
 		{"hash present, unknown transcript -> resume (legacy behavior)", "abc123", sessTranscriptUnknown, false},
 		{"hash present, present transcript -> resume", "abc123", sessTranscriptPresent, false},
-		{"hash present, absent transcript -> first start (#3849 fix, inert until probe)", "abc123", sessTranscriptAbsent, true},
+		{"hash present, absent transcript -> first start (#3849 fix)", "abc123", sessTranscriptAbsent, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

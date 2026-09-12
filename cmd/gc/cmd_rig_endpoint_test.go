@@ -213,7 +213,7 @@ func TestDoRigSetEndpointInheritWritesManagedInheritedRigConfig(t *testing.T) {
 	}
 }
 
-func TestEnsureCanonicalScopeMetadataIfPresentPreservesExistingManagedProbeDatabase(t *testing.T) {
+func TestRequireCanonicalizedScopeMetadataPreservesExistingManagedProbeDatabase(t *testing.T) {
 	scopeDir := t.TempDir()
 	metadataPath := filepath.Join(scopeDir, ".beads", "metadata.json")
 	if err := os.MkdirAll(filepath.Dir(metadataPath), 0o700); err != nil {
@@ -227,8 +227,8 @@ func TestEnsureCanonicalScopeMetadataIfPresentPreservesExistingManagedProbeDatab
 	}); err != nil {
 		t.Fatalf("EnsureCanonicalMetadata: %v", err)
 	}
-	if err := ensureCanonicalScopeMetadataIfPresent(fsys.OSFS{}, scopeDir); err != nil {
-		t.Fatalf("ensureCanonicalScopeMetadataIfPresent: %v", err)
+	if err := requireCanonicalizedScopeMetadata(fsys.OSFS{}, scopeDir); err != nil {
+		t.Fatalf("requireCanonicalizedScopeMetadata: %v", err)
 	}
 	got, ok, err := contract.ReadDoltDatabase(fsys.OSFS{}, metadataPath)
 	if err != nil {
@@ -237,6 +237,52 @@ func TestEnsureCanonicalScopeMetadataIfPresentPreservesExistingManagedProbeDatab
 	if !ok || got != strings.ToUpper(managedDoltProbeDatabase) {
 		t.Fatalf("dolt_database = %q, ok=%v; want existing reserved name preserved", got, ok)
 	}
+}
+
+// TestCanonicalizeScopeMetadataIfPresentSkipsOnlyAbsentMetadata pins the split
+// the ga-5k989 fix rests on: absent means skip, and every other reason the
+// metadata cannot be canonicalized still errors.
+func TestCanonicalizeScopeMetadataIfPresentSkipsOnlyAbsentMetadata(t *testing.T) {
+	t.Run("absent metadata is not an error and fabricates nothing", func(t *testing.T) {
+		scopeDir := filepath.Join(t.TempDir(), "never-initialized")
+		if err := canonicalizeScopeMetadataIfPresent(fsys.OSFS{}, scopeDir); err != nil {
+			t.Fatalf("canonicalizeScopeMetadataIfPresent: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(scopeDir, ".beads", "metadata.json")); !os.IsNotExist(err) {
+			t.Fatalf("skipping a scope must not write its metadata, stat err = %v", err)
+		}
+	})
+
+	t.Run("metadata without a pinned dolt_database still errors", func(t *testing.T) {
+		scopeDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(scopeDir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(scopeDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		err := canonicalizeScopeMetadataIfPresent(fsys.OSFS{}, scopeDir)
+		if err == nil || !strings.Contains(err.Error(), "missing pinned dolt_database") {
+			t.Fatalf("canonicalizeScopeMetadataIfPresent error = %v, want missing pinned dolt_database", err)
+		}
+	})
+
+	t.Run("present metadata is canonicalized exactly as the named scope is", func(t *testing.T) {
+		scopeDir := t.TempDir()
+		metadataPath := filepath.Join(scopeDir, ".beads", "metadata.json")
+		if err := os.MkdirAll(filepath.Dir(metadataPath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(metadataPath, []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"fe"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := canonicalizeScopeMetadataIfPresent(fsys.OSFS{}, scopeDir); err != nil {
+			t.Fatalf("canonicalizeScopeMetadataIfPresent: %v", err)
+		}
+		if mode := readScopeDoltMode(t, scopeDir); mode != "server" {
+			t.Fatalf("dolt_mode = %q, want server", mode)
+		}
+	})
 }
 
 func TestDoRigSetEndpointInheritMirrorsExternalCity(t *testing.T) {

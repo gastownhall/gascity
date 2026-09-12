@@ -15,8 +15,8 @@ var _ ConditionalWriter = (*FileStore)(nil)
 // then flushes to disk. A precondition failure or not-found leaves the store
 // unchanged (no save). A failed flush rolls back the in-memory mutation.
 func (fs *FileStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
-	if isEmptyUpdateOpts(opts) {
-		return fmt.Errorf("conditional update %s: %w", id, ErrEmptyConditionalUpdate)
+	if err := validateConditionalUpdateOpts(opts); err != nil {
+		return fmt.Errorf("conditional update %s: %w", id, err)
 	}
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()

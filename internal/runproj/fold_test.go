@@ -9,9 +9,9 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 )
 
-// beadEvent builds a bead.* event with the REAL producer payload shape — the
-// raw bead snapshot json.Marshal(b) emits (never the wrapped {"bead":...} form,
-// which no producer writes). See CachingStore.notifyChange.
+// beadEvent builds a bead.* event with the real producer payload shape: a raw
+// bead snapshot (never the tolerated {"bead":...} envelope). See
+// beads.EncodeBeadEventPayload.
 func beadEvent(seq uint64, typ, id, status string) events.Event {
 	payload, _ := json.Marshal(beads.Bead{ID: id, Status: status, Type: "task"})
 	return events.Event{Seq: seq, Type: typ, Payload: payload}
@@ -77,8 +77,8 @@ func TestApplyCursorTracksMaxSeqEvenForIgnoredEvents(t *testing.T) {
 }
 
 func TestDecodeBeadAcceptsCanonicalRawShape(t *testing.T) {
-	// The canonical producer shape is the raw bead snapshot (json.Marshal(b),
-	// exactly what CachingStore.notifyChange emits) — NOT the wrapped
+	// The canonical producer shape is the raw bead snapshot emitted by
+	// beads.EncodeBeadEventPayload — NOT the wrapped
 	// {"bead": ...} form. The fold must decode it, and an envelope carrying no
 	// correlation ids leaves the bead's own metadata untouched.
 	raw, _ := json.Marshal(beads.Bead{ID: "canon", Status: "open", Type: "task"})

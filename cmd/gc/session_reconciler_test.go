@@ -1893,6 +1893,665 @@ func TestReconcileSessionBeads_DrainAckMidPhaseEmitsAssignedWorkEvent(t *testing
 	}
 }
 
+// drainAckAssignedWorkEventCount runs a worker session through the drain-ack
+// finalize lifecycle with work already seeded and returns how many
+// SessionDrainAckedWithAssignedWork events were emitted. seedWork receives the
+// session's durable bead ID so a case can assign work to the session and wire
+// dependencies.
+func drainAckAssignedWorkEventCount(t *testing.T, seedWork func(t *testing.T, store beads.Store, sessionID string)) int {
+	t.Helper()
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	fake := events.NewFake()
+	env.rec = fake
+
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	seedWork(t, env.store, session.ID)
+
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+	woken := reconcileSessionBeads(
+		context.Background(),
+		[]beads.Bead{session},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		env.store,
+		dops,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+	env.reconcileStopPendingToTerminal(t, env.sp, session, dops, map[string]bool{"worker": true})
+
+	count := 0
+	for i := range fake.Events {
+		if fake.Events[i].Type == events.SessionDrainAckedWithAssignedWork {
+			count++
+		}
+	}
+	return count
+}
+
+// drainAckPoolAliasInProgressEventCount runs a "worker" seat through the drain-ack
+// finalize lifecycle while it holds an IN_PROGRESS row stamped with a pool alias
+// (configured_named_identity) rather than its own durable bead ID — the way a
+// production hook claim stamps an aliased/pool seat (hookClaimAssigneeIdentity).
+// When addLiveSibling is true a SECOND seat with a distinct session name but the
+// SAME pool alias is present and alive for both ticks. Returns how many
+// SessionDrainAckedWithAssignedWork events fired. The classifier does NOT try to
+// suppress an in_progress row on account of a live sibling (that cannot be done
+// safely at finalize — see drainAckClaimableAnomalyBead), so an in_progress row
+// ALWAYS fires whether or not a live sibling is present.
+func drainAckPoolAliasInProgressEventCount(t *testing.T, addLiveSibling bool) int {
+	t.Helper()
+	const poolAlias = "gc__worker-pool"
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	fake := events.NewFake()
+	env.rec = fake
+
+	draining := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&draining, map[string]string{namedSessionIdentityMetadata: poolAlias})
+	env.markSessionActive(&draining)
+
+	work, err := env.store.Create(beads.Bead{Title: "aliased task", Type: "task", Assignee: poolAlias})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+	inProgress := "in_progress"
+	if err := env.store.Update(work.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("mark in progress: %v", err)
+	}
+
+	cfgNames := map[string]bool{"worker": true}
+	inventory := []beads.Bead{draining}
+	if addLiveSibling {
+		env.addDesired("worker-sib", "worker", true)
+		cfgNames["worker-sib"] = true
+		sibling := env.createSessionBead("worker-sib", "worker")
+		env.setSessionMetadata(&sibling, map[string]string{namedSessionIdentityMetadata: poolAlias})
+		env.markSessionActive(&sibling)
+		inventory = append(inventory, sibling)
+	}
+
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+	reconcileSessionBeads(
+		context.Background(), inventory, env.desiredState, cfgNames, env.cfg, env.sp,
+		env.store, dops, nil, nil, env.dt, nil, false, nil, "",
+		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	// Finalize tick: the draining seat's runtime is now stopped, so reload the whole
+	// inventory (draining seat is stop-pending; the sibling stays alive on its own
+	// distinct runtime) and reconcile again to drive the finalize + event decision.
+	waitForProviderStopped(t, env.sp, "worker")
+	reloaded := make([]beads.Bead, 0, len(inventory))
+	for _, b := range inventory {
+		got, err := env.store.Get(b.ID)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", b.ID, err)
+		}
+		reloaded = append(reloaded, got)
+	}
+	reconcileSessionBeads(
+		context.Background(), reloaded, env.desiredState, cfgNames, env.cfg, env.sp,
+		env.store, dops, nil, nil, env.dt, nil, false, nil, "",
+		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	count := 0
+	for i := range fake.Events {
+		if fake.Events[i].Type == events.SessionDrainAckedWithAssignedWork {
+			count++
+		}
+	}
+	return count
+}
+
+// TestReconcileSessionBeads_DrainAckBlockedAssignedWorkSuppressesEvent pins that
+// a session drain-acking while its only assigned bead is OPEN but parked on an
+// unmet dependency must NOT emit SessionDrainAckedWithAssignedWork. This is the
+// dominant false-positive class the operator classified from live data (~83% of
+// firings): the row is routed to the seat's target but blocked, so no worker
+// could have claimed it and the seat drained correctly. Before the anomaly
+// classifier the emitter fired on any open/in_progress assigned row, blocked or
+// not.
+//
+// The row is stamped is_blocked=true AND wired with a live "blocks" dep so it is
+// blocked by every reader. The hand-stamped flag does NOT model bd's production
+// projection — bd's JSON payloads omit the column entirely, so production reads
+// leave it nil (that shape is pinned by
+// TestReconcileSessionBeads_DrainAckNoProjectionBlockedAssignedWorkSuppressesEvent).
+// It is here to pin that the flag does not change the verdict: blockedness is
+// settled from the live dep either way.
+func TestReconcileSessionBeads_DrainAckBlockedAssignedWorkSuppressesEvent(t *testing.T) {
+	blockedTrue := true
+	count := drainAckAssignedWorkEventCount(t, func(t *testing.T, store beads.Store, sessionID string) {
+		blocker, err := store.Create(beads.Bead{Title: "upstream gate", Type: "task", Status: "open"})
+		if err != nil {
+			t.Fatalf("Create(blocker): %v", err)
+		}
+		work, err := store.Create(beads.Bead{Title: "downstream phase", Type: "task", Status: "open", Assignee: sessionID, IsBlocked: &blockedTrue})
+		if err != nil {
+			t.Fatalf("Create(work): %v", err)
+		}
+		if err := store.DepAdd(work.ID, blocker.ID, "blocks"); err != nil {
+			t.Fatalf("DepAdd: %v", err)
+		}
+	})
+	if count != 0 {
+		t.Fatalf("%s events = %d, want 0 — an open bead blocked on an unmet dependency is not claimable, so the seat drained correctly",
+			events.SessionDrainAckedWithAssignedWork, count)
+	}
+}
+
+// TestReconcileSessionBeads_DrainAckNoProjectionBlockedAssignedWorkSuppressesEvent
+// pins the suppression arm on the shape production actually produces: an OPEN
+// assigned row blocked by an unmet plain `blocks` edge whose is_blocked
+// projection is ABSENT (nil).
+//
+// bd's `list --json` / `show --json` payloads do not carry the is_blocked column,
+// so BdStore.toBead leaves the field nil on every read and beadFromNativeIssue
+// cannot set it; only the CachingStore's ready-projection enrichment populates it,
+// on non-live cached reads the drain-ack finders never take (they force
+// live=true). An arm that suppressed only on a true-reading flag was therefore
+// dead in production — the dominant false-positive class kept firing. The
+// classifier now reads an absent projection as no evidence rather than as
+// "unblocked", settles it against the live dep, and suppresses.
+//
+// Contrast TestReconcileSessionBeads_DrainAckBlockedAssignedWorkSuppressesEvent:
+// identical wiring plus a hand-stamped is_blocked=true, which must reach the same
+// verdict — the flag is not what decides.
+func TestReconcileSessionBeads_DrainAckNoProjectionBlockedAssignedWorkSuppressesEvent(t *testing.T) {
+	count := drainAckAssignedWorkEventCount(t, func(t *testing.T, store beads.Store, sessionID string) {
+		blocker, err := store.Create(beads.Bead{Title: "upstream gate", Type: "task", Status: "open"})
+		if err != nil {
+			t.Fatalf("Create(blocker): %v", err)
+		}
+		work, err := store.Create(beads.Bead{Title: "downstream phase", Type: "task", Status: "open", Assignee: sessionID})
+		if err != nil {
+			t.Fatalf("Create(work): %v", err)
+		}
+		if err := store.DepAdd(work.ID, blocker.ID, "blocks"); err != nil {
+			t.Fatalf("DepAdd: %v", err)
+		}
+		// Guard the premise on a real read, after the dep exists: if the store
+		// ever started deriving is_blocked from deps, this test would quietly
+		// become a duplicate of the stamped-flag one and stop covering the shape
+		// production returns.
+		readBack, err := store.Get(work.ID)
+		if err != nil {
+			t.Fatalf("Get(work): %v", err)
+		}
+		if readBack.IsBlocked != nil {
+			t.Fatalf("work.IsBlocked = %v, want nil — this test is only meaningful on the absent-projection shape production reads return", *readBack.IsBlocked)
+		}
+	})
+	if count != 0 {
+		t.Fatalf("%s events = %d, want 0 — an open row blocked on an unmet plain `blocks` edge is not claimable whether or not bd's is_blocked projection is present, and absent is the only reading production produces",
+			events.SessionDrainAckedWithAssignedWork, count)
+	}
+}
+
+// TestReconcileSessionBeads_DrainAckDeferredAssignedWorkSuppressesEvent pins the
+// deferred half of the provably-non-claimable suppression: an OPEN bead assigned
+// to the seat but deferred into the future is not claimable by any worker, so the
+// seat drained correctly and the event must NOT fire. defer_until is a fresh,
+// bead-local field, so both the pre-fix ready projection and the post-fix
+// classifyDemandRowClaimability predicate agree on it.
+func TestReconcileSessionBeads_DrainAckDeferredAssignedWorkSuppressesEvent(t *testing.T) {
+	deferUntil := time.Now().Add(time.Hour)
+	count := drainAckAssignedWorkEventCount(t, func(t *testing.T, store beads.Store, sessionID string) {
+		if _, err := store.Create(beads.Bead{Title: "deferred phase", Type: "task", Status: "open", Assignee: sessionID, DeferUntil: &deferUntil}); err != nil {
+			t.Fatalf("Create(work): %v", err)
+		}
+	})
+	if count != 0 {
+		t.Fatalf("%s events = %d, want 0 — an open bead deferred into the future is not claimable, so the seat drained correctly",
+			events.SessionDrainAckedWithAssignedWork, count)
+	}
+}
+
+// TestReconcileSessionBeads_DrainAckOpenStepAssignedWorkEmitsEvent is the MAJOR
+// regression guard. An execution STEP bead can be assigned straight to a seat at
+// dispatch (control.go stamps step.Assignee) and sit OPEN before the agent claims
+// it — a genuine strand if the seat drains past it. beads.Ready TYPE-excludes
+// "step" (it is not pull-claimable Ready work), so an anomaly classifier that
+// keyed the open arm on the Ready projection SILENCED this strand. The open arm
+// now walks OpenAssignedTo and suppresses only provably blocked/deferred rows, so
+// an open step FIRES regardless of type.
+func TestReconcileSessionBeads_DrainAckOpenStepAssignedWorkEmitsEvent(t *testing.T) {
+	count := drainAckAssignedWorkEventCount(t, func(t *testing.T, store beads.Store, sessionID string) {
+		if _, err := store.Create(beads.Bead{Title: "dispatched step", Type: "step", Status: "open", Assignee: sessionID}); err != nil {
+			t.Fatalf("Create(work): %v", err)
+		}
+	})
+	if count != 1 {
+		t.Fatalf("%s events = %d, want 1 — an OPEN step assigned straight to the seat is a genuine strand; the open arm must not borrow beads.Ready's type exclusions",
+			events.SessionDrainAckedWithAssignedWork, count)
+	}
+}
+
+// TestReconcileSessionBeads_DrainAckStaleIsBlockedAssignedWorkEmitsEvent is the
+// MAJOR regression guard for the last silencing hole. bd's is_blocked field is a
+// DENORMALIZED projection that can lag a just-closed blocker (stale-true;
+// issueops.countStaleIsBlockedSQL / `bd recompute-blocked` exist to repair it).
+// An OPEN row assigned to the seat whose blocking dep has CLOSED — deps genuinely
+// MET — but whose is_blocked flag still reads true is a real strand: the seat
+// drained past claimable work. The open arm must confirm real blockedness against
+// live deps before suppressing, so a stale-true flag with met deps FIRES. Before
+// the fix the arm suppressed on the projection alone and silenced it — no event,
+// seat stopped, alarm never fires.
+//
+// Contrast TestReconcileSessionBeads_DrainAckBlockedAssignedWorkSuppressesEvent,
+// which keeps its blocker OPEN so the dep is genuinely unmet and suppression is
+// correct; here the same wiring closes the blocker to leave only the stale flag.
+func TestReconcileSessionBeads_DrainAckStaleIsBlockedAssignedWorkEmitsEvent(t *testing.T) {
+	blockedTrue := true
+	count := drainAckAssignedWorkEventCount(t, func(t *testing.T, store beads.Store, sessionID string) {
+		blocker, err := store.Create(beads.Bead{Title: "upstream gate", Type: "task", Status: "open"})
+		if err != nil {
+			t.Fatalf("Create(blocker): %v", err)
+		}
+		work, err := store.Create(beads.Bead{Title: "downstream phase", Type: "task", Status: "open", Assignee: sessionID, IsBlocked: &blockedTrue})
+		if err != nil {
+			t.Fatalf("Create(work): %v", err)
+		}
+		if err := store.DepAdd(work.ID, blocker.ID, "blocks"); err != nil {
+			t.Fatalf("DepAdd: %v", err)
+		}
+		// Close the blocker but leave the work row's denormalized is_blocked flag
+		// stale-true — the exact state bd's projection lag produces. MemStore does
+		// not recompute is_blocked on a dependency's close, so the flag stays true
+		// while the live dep is now met.
+		if err := store.Close(blocker.ID); err != nil {
+			t.Fatalf("Close(blocker): %v", err)
+		}
+	})
+	if count != 1 {
+		t.Fatalf("%s events = %d, want 1 — an open row with a STALE is_blocked=true flag whose blocking dep has closed is a genuine strand; the open arm must confirm blockedness against live deps before suppressing",
+			events.SessionDrainAckedWithAssignedWork, count)
+	}
+}
+
+// TestReconcileSessionBeads_DrainAckWaitsForGateOpenAssignedWorkEmitsEvent is the
+// MAJOR regression guard for the dep-confirm's edge-type narrowing. bd gates a
+// `waits-for` edge through NATIVE state, independent of the target's own status:
+// internal/formula/compile.go mints exactly this shape (a gate edge onto a step
+// that stays open), native_dolt_store.go's ready filter declines the flat
+// satisfaction rule because "a waits-for edge gates on the spawner's children
+// rather than the spawner's own status", and the `bd-gate-open` fixture pins the
+// consequence — the row reads is_blocked = 0 and bd's ready OFFERS it, while a
+// direct-dep predicate would hide it.
+//
+// So an OPEN row whose only edge is a waits-for onto an OPEN target IS claimable,
+// and a stale-true is_blocked flag on it must not suppress the alarm: confirming
+// on any ready-blocking type would second-guess a bd verdict — in the one
+// situation where the projection is already suspect — and silence a genuine
+// strand. Only a plain `blocks` edge to an unsatisfied target is proof of
+// non-claimability.
+//
+// Contrast TestReconcileSessionBeads_DrainAckBlockedAssignedWorkSuppressesEvent:
+// identical wiring with a `blocks` edge, which correctly suppresses.
+func TestReconcileSessionBeads_DrainAckWaitsForGateOpenAssignedWorkEmitsEvent(t *testing.T) {
+	blockedTrue := true
+	count := drainAckAssignedWorkEventCount(t, func(t *testing.T, store beads.Store, sessionID string) {
+		gate, err := store.Create(beads.Bead{Title: "spawner step", Type: "task", Status: "open"})
+		if err != nil {
+			t.Fatalf("Create(gate): %v", err)
+		}
+		work, err := store.Create(beads.Bead{Title: "gated phase", Type: "task", Status: "open", Assignee: sessionID, IsBlocked: &blockedTrue})
+		if err != nil {
+			t.Fatalf("Create(work): %v", err)
+		}
+		if err := store.DepAdd(work.ID, gate.ID, "waits-for"); err != nil {
+			t.Fatalf("DepAdd: %v", err)
+		}
+	})
+	if count != 1 {
+		t.Fatalf("%s events = %d, want 1 — a waits-for gate onto an OPEN target is not proof of non-claimability (bd opens it natively and offers the row), so the stale-true flag must not suppress a genuine strand",
+			events.SessionDrainAckedWithAssignedWork, count)
+	}
+}
+
+// depListErrStore fails the dependency read the open arm's blockedness confirm
+// makes, serving every other read unchanged. It models a graph/deps read error
+// landing INSIDE beadHasUnmetPlainBlocksDep rather than on the open list that
+// feeds it (readyOpenErrStore covers that outer path).
+type depListErrStore struct {
+	beads.Store
+	err error
+}
+
+func (s depListErrStore) DepList(_, _ string) ([]beads.Dep, error) {
+	return nil, s.err
+}
+
+// TestReconcileSessionBeads_DrainAckDepConfirmReadErrorNoFireAndLogsError pins the
+// confirm's INTERNAL error path, the one the outer-read guards above do not reach.
+// An open assigned row whose is_blocked projection reads true sends the open arm
+// into a live-dep confirmation; when THAT read fails, the classifier must fail
+// CLOSED — an unreadable store is not evidence of a strand, so no event — while
+// still surfacing the error for logging instead of swallowing it into a silent
+// "nothing found" (Don't-Swallow-Errors).
+func TestReconcileSessionBeads_DrainAckDepConfirmReadErrorNoFireAndLogsError(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	fake := events.NewFake()
+
+	info := env.createSessionInfo("worker", "worker")
+	blockedTrue := true
+	if _, err := env.store.Create(beads.Bead{Title: "flagged phase", Type: "task", Status: "open", Assignee: info.ID, IsBlocked: &blockedTrue}); err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+
+	store := depListErrStore{Store: env.store, err: errors.New("dependency read failed")}
+	var stderr bytes.Buffer
+	recordDrainAckAssignedWorkEvent("", env.cfg, store, nil, info, "worker", "worker", "worker", time.Now(), fake, &stderr)
+
+	count := 0
+	for i := range fake.Events {
+		if fake.Events[i].Type == events.SessionDrainAckedWithAssignedWork {
+			count++
+		}
+	}
+	if count != 0 {
+		t.Fatalf("%s events = %d, want 0 — the blockedness confirm could not read the deps, and an unreadable store must never manufacture the alarm",
+			events.SessionDrainAckedWithAssignedWork, count)
+	}
+	if !strings.Contains(stderr.String(), "dependency read failed") {
+		t.Fatalf("stderr = %q, want it to surface the dep-confirm read error for logging; a failed confirmation must not vanish", stderr.String())
+	}
+}
+
+// TestReconcileSessionBeads_DrainAckLiveSiblingInProgressStillEmitsEvent pins the
+// deliberate safe-partial choice: an IN_PROGRESS row shared with ANOTHER LIVE
+// incarnation of the same pool STILL emits SessionDrainAckedWithAssignedWork. We
+// do NOT suppress on sibling liveness, because no liveness signal available at
+// finalize can distinguish a benign live-sibling claim from a genuine #2293
+// cap-hit strand without a hole that would silence a real strand (zombie tmux
+// pane reads Running, stale 30s liveness cache, duplicate-name keying). A false
+// negative (a stranded row kept quiet) is worse than this residual false
+// positive, so the in_progress arm fires unconditionally and accepts the noise.
+// (Inverted from the prior owner-liveness attempt, which this replaces.)
+func TestReconcileSessionBeads_DrainAckLiveSiblingInProgressStillEmitsEvent(t *testing.T) {
+	count := drainAckPoolAliasInProgressEventCount(t, true)
+	if count < 1 {
+		t.Fatalf("%s events = %d, want >= 1 — an in_progress row fires regardless of sibling liveness (safe-partial: never risk silencing a genuine strand)",
+			events.SessionDrainAckedWithAssignedWork, count)
+	}
+}
+
+// TestReconcileSessionBeads_DrainAckAliasClaimedNoLiveOwnerEmitsEvent is the
+// genuine-strand test the fix exists for. A named/pool seat claims a row under
+// its ALIAS (configured_named_identity, as production hook claims stamp — not the
+// durable bead ID), hits its turn cap, and drain-acks mid-task with NO live
+// replacement. That is the #2293 cap-hit strand the event MUST emit for; the
+// in_progress arm fires it.
+func TestReconcileSessionBeads_DrainAckAliasClaimedNoLiveOwnerEmitsEvent(t *testing.T) {
+	count := drainAckPoolAliasInProgressEventCount(t, false)
+	if count != 1 {
+		t.Fatalf("%s events = %d, want 1 — an alias-claimed in_progress row with no live replacement is a genuine cap-hit strand",
+			events.SessionDrainAckedWithAssignedWork, count)
+	}
+}
+
+// TestReconcileSessionBeads_DrainAckReadyAssignedWorkEmitsEvent guards against
+// over-suppression: an OPEN, unblocked bead assigned to the draining session is
+// genuinely claimable right now, so the anomaly classifier must still emit
+// SessionDrainAckedWithAssignedWork for it.
+func TestReconcileSessionBeads_DrainAckReadyAssignedWorkEmitsEvent(t *testing.T) {
+	count := drainAckAssignedWorkEventCount(t, func(t *testing.T, store beads.Store, sessionID string) {
+		if _, err := store.Create(beads.Bead{Title: "ready phase", Type: "task", Status: "open", Assignee: sessionID}); err != nil {
+			t.Fatalf("Create(work): %v", err)
+		}
+	})
+	if count != 1 {
+		t.Fatalf("%s events = %d, want 1 — an open, unblocked bead assigned to the draining session is genuinely claimable and must still alarm",
+			events.SessionDrainAckedWithAssignedWork, count)
+	}
+}
+
+// readyOpenErrStore fails the open/ready read path — both the pre-fix beads.Ready
+// projection (via Ready) and the post-fix OpenAssignedTo status=open List — while
+// serving the in_progress List unchanged. It models a graph/deps read error
+// landing on the open/claimable arm of the drain-ack classifier.
+type readyOpenErrStore struct {
+	beads.Store
+	err error
+}
+
+func (s readyOpenErrStore) Ready(_ ...beads.ReadyQuery) ([]beads.Bead, error) {
+	return nil, s.err
+}
+
+func (s readyOpenErrStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Status == "open" {
+		return nil, s.err
+	}
+	return s.Store.List(query)
+}
+
+// TestReconcileSessionBeads_DrainAckOpenArmReadErrorStillEmitsInProgressStrand is
+// the MINOR-1 regression guard. An in_progress cap-hit strand (#2293) must still
+// fire even when the open/claimable arm's store read errors: the classifier probes
+// the in_progress arm FIRST, so a graph/deps read failure in the open arm can no
+// longer return early and silence a genuine strand. Before the fix the open arm
+// ran first and its error short-circuited the whole classifier.
+func TestReconcileSessionBeads_DrainAckOpenArmReadErrorStillEmitsInProgressStrand(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	fake := events.NewFake()
+
+	info := env.createSessionInfo("worker", "worker")
+	work, err := env.store.Create(beads.Bead{Title: "cap-hit task", Type: "task", Assignee: info.ID})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+	inProgress := "in_progress"
+	if err := env.store.Update(work.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("mark in progress: %v", err)
+	}
+
+	store := readyOpenErrStore{Store: env.store, err: errors.New("graph readiness read failed")}
+	var stderr bytes.Buffer
+	recordDrainAckAssignedWorkEvent("", env.cfg, store, nil, info, "worker", "worker", "worker", time.Now(), fake, &stderr)
+
+	count := 0
+	for i := range fake.Events {
+		if fake.Events[i].Type == events.SessionDrainAckedWithAssignedWork {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("%s events = %d, want 1 — an in_progress strand must still fire when the open/claimable arm's read errors (probe in_progress first)",
+			events.SessionDrainAckedWithAssignedWork, count)
+	}
+}
+
+// TestReconcileSessionBeads_DrainAckOpenArmReadErrorWithNoInProgressLogsError is
+// the MINOR-1 regression guard. When the open/claimable arm's store read errors
+// and the in_progress arm is cleanly empty, the classifier finds no bead — so it
+// must NOT fire, but it MUST surface the read error for logging rather than
+// swallow it. Before the fix a single-arm error with the other arm cleanly empty
+// returned (found=false, nil) and the diagnostic vanished, a regression vs
+// origin/main which logged every finder error. errors.Join now carries the lone
+// error up while still eliding the nil arm.
+func TestReconcileSessionBeads_DrainAckOpenArmReadErrorWithNoInProgressLogsError(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	fake := events.NewFake()
+
+	info := env.createSessionInfo("worker", "worker")
+
+	store := readyOpenErrStore{Store: env.store, err: errors.New("graph readiness read failed")}
+	var stderr bytes.Buffer
+	recordDrainAckAssignedWorkEvent("", env.cfg, store, nil, info, "worker", "worker", "worker", time.Now(), fake, &stderr)
+
+	count := 0
+	for i := range fake.Events {
+		if fake.Events[i].Type == events.SessionDrainAckedWithAssignedWork {
+			count++
+		}
+	}
+	if count != 0 {
+		t.Fatalf("%s events = %d, want 0 — no bead was found, so a read error alone must never manufacture the alarm",
+			events.SessionDrainAckedWithAssignedWork, count)
+	}
+	if !strings.Contains(stderr.String(), "graph readiness read failed") {
+		t.Fatalf("stderr = %q, want it to surface the open-arm read error for logging (Don't-Swallow-Errors); a single-arm error with the other arm cleanly empty must not vanish", stderr.String())
+	}
+}
+
+// drainAckAliasSiblingEventCount drives a "worker" seat holding an IN_PROGRESS row
+// stamped with a shared pool alias through the drain-ack finalize lifecycle, with
+// a second seat that also carries the SAME alias. seedSibling configures that
+// second seat's posture (drained-and-dead twin, dead-runtime zombie, etc.);
+// siblingDrainAck marks the sibling drain-acked in the same pass. It returns how
+// many SessionDrainAckedWithAssignedWork events fired. Under the safe-partial
+// classifier the in_progress arm ALWAYS fires, so these cases are regression
+// guards that a same-alias sibling — whatever its liveness — never silences the
+// draining seat's strand (the exact false negative the prior owner-liveness
+// attempts kept re-introducing).
+func drainAckAliasSiblingEventCount(t *testing.T, siblingName string, siblingDrainAck bool, seedSibling func(t *testing.T, env *reconcilerTestEnv, sibling *beads.Bead)) int {
+	t.Helper()
+	const poolAlias = "gc__worker-pool"
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	fake := events.NewFake()
+	env.rec = fake
+
+	draining := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&draining, map[string]string{namedSessionIdentityMetadata: poolAlias})
+	env.markSessionActive(&draining)
+	env.addDesired("worker", "worker", true)
+
+	sibling := env.createSessionBead(siblingName, "worker")
+	env.setSessionMetadata(&sibling, map[string]string{namedSessionIdentityMetadata: poolAlias})
+	seedSibling(t, env, &sibling)
+
+	work, err := env.store.Create(beads.Bead{Title: "aliased task", Type: "task", Assignee: poolAlias})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+	inProgress := "in_progress"
+	if err := env.store.Update(work.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("mark in progress: %v", err)
+	}
+
+	cfgNames := map[string]bool{"worker": true, siblingName: true}
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck(worker): %v", err)
+	}
+	if siblingDrainAck {
+		if err := dops.setDrainAck(siblingName); err != nil {
+			t.Fatalf("setDrainAck(%s): %v", siblingName, err)
+		}
+	}
+
+	inventory := []beads.Bead{draining, sibling}
+	reconcileSessionBeads(
+		context.Background(), inventory, env.desiredState, cfgNames, env.cfg, env.sp,
+		env.store, dops, nil, nil, env.dt, nil, false, nil, "",
+		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	// Finalize tick: the draining seat's runtime is now stopped, so reload the whole
+	// inventory and reconcile again to drive the finalize + event decision. The
+	// sibling's runtime state is whatever seedSibling / siblingDrainAck left it.
+	waitForProviderStopped(t, env.sp, "worker")
+	if siblingDrainAck {
+		waitForProviderStopped(t, env.sp, siblingName)
+	}
+	reloaded := make([]beads.Bead, 0, len(inventory))
+	for _, b := range inventory {
+		got, err := env.store.Get(b.ID)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", b.ID, err)
+		}
+		reloaded = append(reloaded, got)
+	}
+	reconcileSessionBeads(
+		context.Background(), reloaded, env.desiredState, cfgNames, env.cfg, env.sp,
+		env.store, dops, nil, nil, env.dt, nil, false, nil, "",
+		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	count := 0
+	for i := range fake.Events {
+		if fake.Events[i].Type == events.SessionDrainAckedWithAssignedWork {
+			count++
+		}
+	}
+	return count
+}
+
+// TestReconcileSessionBeads_DrainAckTwoSeatSamePassDrainEmitsEvent guards the
+// same-pass-drain case. Two distinctly-named seats share one pool alias and BOTH
+// drain-ack in the same pass while an in_progress row carries that alias. An
+// owner-liveness classifier keyed on bead-not-closed made each draining seat
+// count the OTHER (still open, mid-drain) as a live owner and mutually SUPPRESS —
+// a false negative that silences a genuine strand. The safe-partial classifier
+// fires on the in_progress row unconditionally, so the strand is never silenced
+// by a same-pass-draining sibling.
+func TestReconcileSessionBeads_DrainAckTwoSeatSamePassDrainEmitsEvent(t *testing.T) {
+	count := drainAckAliasSiblingEventCount(t, "worker-twin", true, func(_ *testing.T, env *reconcilerTestEnv, sibling *beads.Bead) {
+		env.markSessionActive(sibling)
+		env.addDesired("worker-twin", "worker", true)
+	})
+	if count < 1 {
+		t.Fatalf("%s events = %d, want >= 1 — two same-alias seats draining together leave no live owner, so the shared in_progress row is a genuine strand and must not be mutually suppressed",
+			events.SessionDrainAckedWithAssignedWork, count)
+	}
+}
+
+// TestReconcileSessionBeads_DrainAckZombieOpenSiblingEmitsEvent guards the
+// zombie-sibling case. A sibling seat shares the pool alias and its session bead
+// is still OPEN, but its runtime is dead (never started) and it is NOT
+// drain-pending — a drained-open zombie kept open by the very row it stranded. An
+// owner-liveness classifier keyed on bead-not-closed counted it as a live owner
+// and permanently SILENCED the recurring cap-hit strand. The safe-partial
+// classifier fires on the in_progress row unconditionally, so a zombie sibling
+// never silences the strand.
+func TestReconcileSessionBeads_DrainAckZombieOpenSiblingEmitsEvent(t *testing.T) {
+	count := drainAckAliasSiblingEventCount(t, "worker-zombie", false, func(_ *testing.T, _ *reconcilerTestEnv, sibling *beads.Bead) {
+		// Leave the zombie asleep (createSessionBead's default), never started in
+		// the provider (runtime dead), and NOT in the desired set — it stays an
+		// open, dead-runtime sibling that an owner-liveness classifier would have
+		// mistaken for a live owner.
+		_ = sibling
+	})
+	if count != 1 {
+		t.Fatalf("%s events = %d, want 1 — a drained-open zombie sibling whose runtime is dead is not a live owner, so the shared in_progress row is a genuine strand that must fire",
+			events.SessionDrainAckedWithAssignedWork, count)
+	}
+}
+
 // TestReconcileSessionBeads_DrainAckOwnDrainStepClosesWithoutEvent pins that
 // a session whose ONLY assigned work is its own mol-do-work "drain" step
 // must actually close on drain-ack (no pool respawn) and must NOT emit
@@ -1987,7 +2646,7 @@ func TestReconcileSessionBeads_DrainAckOwnDrainStepClosesWithoutEvent(t *testing
 	}
 
 	// The drain step itself is untouched by the close gate — the event path
-	// (firstOpenAssignedWorkBeadForReachableStore) and IsSessionBeadOrRepairable
+	// (the drain-ack anomaly classifier) and IsSessionBeadOrRepairable
 	// classification are deliberately unchanged; this just confirms the fix
 	// didn't mutate the step bead as a side effect.
 	gotStep, err := env.store.Get(drainStep.ID)
@@ -2361,6 +3020,71 @@ func TestReconcileSessionBeads_UndesiredDrainAckWithAssignedOpenWorkSleepsInstea
 	}
 }
 
+// TestReconcileSessionBeads_DrainAckPreservesConfiguredNamedSession probes
+// ga-pmafyc: a configured named session (mode="always") that reaches the
+// drain-ack finalize default branch (state="stopped", drain-acked, provider
+// not alive, no assigned work) must NOT be destructively closed the way an
+// ordinary undesired session is in
+// TestReconcileSessionBeads_UndesiredDrainAckStopsAndCloses above.
+// finalizeDrainAckStoppedSession's closeIfUnassigned parameter is a
+// hardcoded true at this call site, missing the configuredNames[name] guard
+// used by the sibling call sites — gc suspend (which drives sessions
+// through this exact path) retires every named session and empties its
+// identity as a result.
+//
+// state="stopped" (rather than simulating the full sp.Start-then-stop-pending
+// multi-tick sequence the ordinary UndesiredDrainAck* tests above use) stages
+// the post-stop condition directly: preserveConfiguredNamedSessionBeadInfo is
+// computed pre-heal from this same fixture state, and only state=="stopped"
+// (or "failed-create") lets a configured named session's preserveNamed gate
+// go false and reach the drain-ack default branch at all — the async
+// stop-pending path would leave an intermediate state that keeps the session
+// protected by preserveNamed==true on the tick that matters.
+func TestReconcileSessionBeads_DrainAckPreservesConfiguredNamedSession(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "worker",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	session := env.createSessionBead(sessionName, "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "always",
+		"state":                      "stopped",
+	})
+
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck(sessionName); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+
+	woken := env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{session}, nil, dops)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+
+	b, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	t.Logf("post-reconcile bead: status=%q metadata=%#v", b.Status, b.Metadata)
+	if b.Status != "open" {
+		t.Fatalf("status = %q, want open (configured named session must survive drain-ack finalize, not be destructively closed)", b.Status)
+	}
+	if got := b.Metadata[namedSessionMetadataKey]; got != "true" {
+		t.Errorf("configured_named_session = %q, want true (must survive)", got)
+	}
+	if got := b.Metadata[namedSessionIdentityMetadata]; got != "worker" {
+		t.Errorf("configured_named_identity = %q, want worker (must survive)", got)
+	}
+}
+
 // TestReconcileSessionBeads_DrainAckUsesLiveStoreQuery is the regression
 // guard for the stuck-pool-worker bug on ga-ttn5z. Pool workers close
 // their own work bead with `bd close` BEFORE calling `gc runtime
@@ -2477,6 +3201,63 @@ func TestReconcileSessionBeads_AsleepIdlePoolBeadFreesSlot(t *testing.T) {
 	}
 	if got.Status != "closed" {
 		t.Fatalf("status = %q, want closed — asleep-idle pool beads must free their slot via the live-query close gate", got.Status)
+	}
+}
+
+// TestReconcileSessionBeads_AsleepMaxSessionAgePoolBeadFreesSlot mirrors
+// TestReconcileSessionBeads_AsleepIdlePoolBeadFreesSlot for
+// sleep_reason=max-session-age: a session forced to stop by the max-session-age
+// timer must free its pool slot through the same live-query close gate,
+// instead of wedging the slot until an operator intervenes.
+func TestReconcileSessionBeads_AsleepMaxSessionAgePoolBeadFreesSlot(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker"}},
+	}
+	env.addDesired("worker", "worker", false) // NOT running
+	session := env.createSessionBead("worker", "worker")
+	// Simulate the post-max-session-age-stop state: asleep +
+	// sleep_reason=max-session-age + pool-managed, but the runtime has
+	// exited and no work is assigned.
+	env.setSessionMetadata(&session, map[string]string{
+		"state":                "asleep",
+		"sleep_reason":         string(sessionpkg.SleepReasonMaxSessionAge),
+		poolManagedMetadataKey: boolMetadata(true),
+	})
+
+	reconcileSessionBeadsAtPath(
+		context.Background(),
+		"",
+		[]beads.Bead{session},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		env.store,
+		newFakeDrainOps(),
+		nil,
+		nil, // rigStores
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed — asleep-max-session-age pool beads must free their slot via the live-query close gate", got.Status)
 	}
 }
 
@@ -6683,6 +7464,47 @@ func TestReconcileSessionBeads_SuspendedSessionDrained(t *testing.T) {
 	}
 }
 
+// TestReconcileSessionBeads_SuspendedNamedSessionInsideDesiredStateDrainsAsSuspended
+// probes ga-pmafyc step 1: discoverSessionBeadsWithRoots backfills a
+// configured named session into desiredState even when the primary
+// cfg-driven build is empty because the city is suspended (fix spec step 2,
+// covered separately by
+// TestDiscoverSessionBeadsBackfillsConfiguredNamedIdentityOutsideDesiredState
+// in build_desired_state_test.go). That backfilled entry routes the session
+// through the WAKE arm (desired == true), not the orphan arm -- unlike the
+// sibling TestReconcileSessionBeads_SuspendedSessionDrained above, which
+// covers the orphan arm's pre-existing "suspended" labeling for a session
+// that is NOT in desiredState. Before this fix, the wake arm's reason-switch
+// had no case for "configured named session, city suspended, no other wake
+// reason", so it fell through to the default "no-wake-reason" label --
+// which drainReasonCancelable treats as a plain non-cancelable close
+// instead of a revertible suspend-class drain, and (combined with the
+// step-2 identity-clearing bug) meant `gc resume` could not revive the
+// session. This asserts the wake arm now labels the drain "suspended".
+func TestReconcileSessionBeads_SuspendedNamedSessionInsideDesiredStateDrainsAsSuspended(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{SuspendedOnStart: true},
+		Agents:        []config.Agent{{Name: "worker"}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "always"}},
+	}
+	// Simulate discoverSessionBeadsWithRoots's unconditional backfill: "worker"
+	// is present in desiredState (and running) even though the city is
+	// suspended -- the exact shape the wake arm sees in production.
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+
+	env.reconcile([]beads.Bead{session})
+
+	ds := env.dt.get(session.ID)
+	if ds == nil {
+		t.Fatal("expected drain for suspended session present in desiredState")
+	}
+	if ds.reason != "suspended" {
+		t.Errorf("drain reason = %q, want %q (must not fall through to no-wake-reason)", ds.reason, "suspended")
+	}
+}
+
 func TestReconcileSessionBeads_SuspendedNotRunningClosed(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
@@ -6755,6 +7577,66 @@ func TestReconcileSessionBeads_PreservesConfiguredNamedSessionOutsideDesiredStat
 	}
 	if ds := env.dt.get(session.ID); ds != nil {
 		t.Fatalf("unexpected drain for configured named session: %+v", ds)
+	}
+}
+
+// TestReconcileSessionBeads_PoolFreeableIgnoresNamedAlwaysOutsideDesiredState
+// probes ga-pmafyc: a dual-registered session (both pool-managed AND a
+// mode="always" configured named session, matching citysus's shape) that has
+// already been drained (state="drained", target not alive) while its backing
+// agent is suspended must NOT be freed via the poolFreeable path. The
+// poolFreeable gate (session_reconciler.go) checks isPoolManagedSessionInfo
+// and isPoolSessionSlotFreeableInfo but never isNamedSessionInfo, despite the
+// comment above it claiming "singleton/named controller-managed identities
+// must keep the same bead."
+//
+// Agents[0].Suspended=true (rather than desiredState exclusion alone) is what
+// actually drives ComputeAwakeSet's ShouldWake=false for this session, via
+// AwakeAgent.Suspended (isAgentEffectivelySuspendedWith) — the reconciler
+// test harness never calls the real buildDesiredStateWithSessionBeadsAt (it
+// injects env.desiredState directly), so desiredState exclusion alone does
+// not simulate gc suspend for this decision. state="drained" stages the
+// post-drain condition directly (isDrainedSessionInfo triggers purely on
+// state=="drained", independent of which reason produced the drain), rather
+// than simulating the full alive-to-drained multi-tick sequence.
+func TestReconcileSessionBeads_PoolFreeableIgnoresNamedAlwaysOutsideDesiredState(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(1),
+			Suspended:         true,
+		}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	session := env.createSessionBead(sessionName, "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "always",
+		poolManagedMetadataKey:       "true",
+		"state":                      "drained",
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	b, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	t.Logf("post-reconcile bead: status=%q metadata=%#v", b.Status, b.Metadata)
+	if b.Status != "open" {
+		t.Errorf("status = %q, want open (named always-mode session must survive suspend, not be freed as a pool slot)", b.Status)
+	}
+	if got := b.Metadata[namedSessionMetadataKey]; got != "true" {
+		t.Errorf("configured_named_session = %q, want true (must survive)", got)
+	}
+	if got := b.Metadata[namedSessionIdentityMetadata]; got != "worker" {
+		t.Errorf("configured_named_identity = %q, want worker (must survive)", got)
 	}
 }
 
@@ -6838,12 +7720,63 @@ func TestResolvePreservedConfiguredNamedSessionTemplate_StoreOnlyClosedDuplicate
 	closedTwin.ID = "closed-twin"
 	closedTwin.Closed = true
 
-	preservedTP, err := resolvePreservedConfiguredNamedSessionTemplate(".", env.cfg.Workspace.Name, env.cfg, env.sp, env.store, []sessionpkg.Info{closedTwin, sessionInfo}, sessionInfo, env.clk, io.Discard)
+	preservedTP, _, err := resolvePreservedConfiguredNamedSessionTemplate(".", env.cfg.Workspace.Name, env.cfg, env.sp, env.store, []sessionpkg.Info{closedTwin, sessionInfo}, sessionInfo, env.clk, io.Discard)
 	if err != nil {
 		t.Fatalf("resolve preserved named session: %v", err)
 	}
 	if got := preservedTP.Env["GC_SESSION_ID"]; got != session.ID {
 		t.Fatalf("GC_SESSION_ID = %q, want the live preserved bead ID %q (store-only-closed twin must be filtered from the feed)", got, session.ID)
+	}
+}
+
+// TestResolvePreservedConfiguredNamedSessionTemplate_ClearsStaleTriggerStamp
+// is the end-to-end wiring proof for gascity#4373: a named session's
+// resolved template must not replay a trigger stamp whose target has since
+// been parked. Unit coverage for the clear logic itself lives in
+// bindNamedSessionTriggerBead's own tests
+// (build_desired_state_named_trigger_bind_test.go); this pins that the
+// reconciler actually calls it and uses the cleared Info, not the stale one.
+func TestResolvePreservedConfiguredNamedSessionTemplate_ClearsStaleTriggerStamp(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		SessionSleep:  config.SessionSleepConfig{InteractiveResume: "60s"},
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	// The production shape of a parked target: every real store folds bd's raw
+	// `blocked` into "open" (gc-4zb/#4395) and reports the park through the
+	// IsBlocked ready-work projection instead.
+	blocked := true
+	work, err := env.store.Create(beads.Bead{Title: "parked work", Status: "open", IsBlocked: &blocked})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	session := env.createSessionBead(sessionName, "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:           "true",
+		namedSessionIdentityMetadata:      "worker",
+		namedSessionModeMetadata:          "on_demand",
+		beadmeta.TriggerBeadIDMetadataKey: work.ID,
+	})
+	sessionInfo := env.sessionInfo(session.ID)
+
+	preservedTP, preservedInfo, err := resolvePreservedConfiguredNamedSessionTemplate(".", env.cfg.Workspace.Name, env.cfg, env.sp, env.store, []sessionpkg.Info{sessionInfo}, sessionInfo, env.clk, io.Discard)
+	if err != nil {
+		t.Fatalf("resolve preserved named session: %v", err)
+	}
+	if got := preservedTP.Env["GC_TRIGGER_BEAD_ID"]; got != "" {
+		t.Errorf("GC_TRIGGER_BEAD_ID = %q, want cleared for a blocked target", got)
+	}
+	if got := preservedTP.Env["GC_TRIGGER_WORK_BEAD_ID"]; got != "" {
+		t.Errorf("GC_TRIGGER_WORK_BEAD_ID = %q, want cleared for a blocked target", got)
+	}
+	// The returned Info carries the clear back to the caller's snapshot; a
+	// caller that keeps its pre-call Info re-injects the stamp downstream.
+	if preservedInfo.TriggerBeadID != "" {
+		t.Errorf("returned Info TriggerBeadID = %q, want cleared", preservedInfo.TriggerBeadID)
 	}
 }
 
@@ -6866,7 +7799,7 @@ func TestReconcileSessionBeads_PreservedRunningNamedSessionStillIdleDrains(t *te
 		namedSessionModeMetadata:     "on_demand",
 	})
 	sessionInfo := env.sessionInfo(session.ID)
-	preservedTP, err := resolvePreservedConfiguredNamedSessionTemplate(".", env.cfg.Workspace.Name, env.cfg, env.sp, env.store, []sessionpkg.Info{sessionInfo}, sessionInfo, env.clk, io.Discard)
+	preservedTP, _, err := resolvePreservedConfiguredNamedSessionTemplate(".", env.cfg.Workspace.Name, env.cfg, env.sp, env.store, []sessionpkg.Info{sessionInfo}, sessionInfo, env.clk, io.Discard)
 	if err != nil {
 		t.Fatalf("resolve preserved named session: %v", err)
 	}
@@ -8477,6 +9410,254 @@ func TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError(t *testing.
 	}
 	if got.Metadata["wake_attempts"] != "" {
 		t.Fatalf("wake_attempts = %q, want empty", got.Metadata["wake_attempts"])
+	}
+}
+
+// TestReconcileSessionBeads_RollsBackPendingCreatePreservesConfiguredNamedSession
+// probes ga-pmafyc (round 3): unlike TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError
+// above — where "sky" is an ORPHANED named session (not present in
+// cfg.NamedSessions, so configuredNames["sky"] is false) and is correctly
+// destructively closed — a CONFIGURED named session (mode="always", present
+// in cfg.NamedSessions) that hits the exact same single transient provider
+// start error during a pending-create (e.g. a gc suspend/resume cycle: the
+// session bead re-enters pending-create to be woken again, and the resume
+// attempt transiently fails) must NOT be destructively closed with its
+// session_name cleared. commitStartFailure's rollbackPendingCreate call in
+// the rollbackPending branch has no configuredNames[name] guard, unlike the
+// sibling finalizeDrainAckStoppedSession call site fixed for the same bug
+// (mechanism #2, 25798164ae), so a resume-in-progress on a named/configured
+// session currently loses its pending-create bead and identity on a single
+// transient start failure instead of surviving for the reconciler to retry.
+func TestReconcileSessionBeads_RollsBackPendingCreatePreservesConfiguredNamedSession(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "helper",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{Template: "helper", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "helper")
+	env.sp.StartErrors = map[string]error{sessionName: errors.New("start failed")}
+	env.desiredState[sessionName] = TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  sessionName,
+		TemplateName: "helper",
+	}
+
+	session := env.createSessionBead(sessionName, "helper")
+	env.setSessionMetadata(&session, map[string]string{
+		"session_name_explicit":      "true",
+		"pending_create_claim":       "true",
+		"state":                      "creating",
+		"continuation_epoch":         "1",
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "helper",
+		namedSessionModeMetadata:     "always",
+	})
+
+	woken := env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{session}, nil, nil)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+
+	b, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	t.Logf("post-reconcile bead: status=%q metadata=%#v", b.Status, b.Metadata)
+	if b.Status != "open" {
+		t.Fatalf("status = %q, want open (configured named session must survive a transient rollback-pending start failure, not be destructively closed)", b.Status)
+	}
+	if got := b.Metadata["session_name"]; got != sessionName {
+		t.Errorf("session_name = %q, want %q (identity must survive a transient rollback-pending start failure)", got, sessionName)
+	}
+	if got := b.Metadata[namedSessionMetadataKey]; got != "true" {
+		t.Errorf("configured_named_session = %q, want true (must survive)", got)
+	}
+}
+
+// TestReconcileSessionBeads_RollsBackConfiguredNamedSessionThatDiedDuringStartup
+// probes ga-pmafyc (round 4): the flip side of
+// TestReconcileSessionBeads_RollsBackPendingCreatePreservesConfiguredNamedSession
+// above. There, Start() itself returns an error, and a configured named
+// session's pending-create must be PRESERVED so the reconciler can retry it.
+// Here, Start() SUCCEEDS but the post-start stability/liveness check then
+// finds the session not running (diedDuringStartup) — the session actually
+// launched and immediately exited, a legitimate fast exit-then-restart cycle,
+// not a transient provider hiccup mid pending-create. This is the unit-level
+// guard for TestGastown_Reconciler_SessionRestartsAfterExit (the integration
+// regression this whole round fixes): a configured named session in this
+// state must still roll back exactly like an orphaned one
+// (TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError), not be
+// preserved — preserving it would make the reconciler treat "started and
+// immediately exited" as "still creating," starving the session of a restart.
+func TestReconcileSessionBeads_RollsBackConfiguredNamedSessionThatDiedDuringStartup(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "helper",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{Template: "helper", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "helper")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  sessionName,
+		TemplateName: "helper",
+	}
+
+	session := env.createSessionBead(sessionName, "helper")
+	env.setSessionMetadata(&session, map[string]string{
+		"session_name_explicit": "true",
+		"pending_create_claim":  "true",
+		"state":                 "creating",
+		"continuation_epoch":    "1",
+		// session_key must be non-empty for the post-start stale-key
+		// liveness check to run at all (TestExecutePreparedStartWave_NoStaleCheckWithoutSessionKey);
+		// without it, startedFresh's post-start observation never fires and
+		// diedDuringStartup can never become true.
+		"session_key":                "stale-key-abc",
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "helper",
+		namedSessionModeMetadata:     "always",
+	})
+
+	// dieAfterStartProvider (defined in session_lifecycle_parallel_test.go)
+	// makes Start() succeed and then immediately removes the session, so the
+	// post-start liveness check observes it as not running — exercising
+	// diedDuringStartup=true, unlike the sibling "preserves" test above whose
+	// sp.StartErrors makes Start() itself fail (diedDuringStartup stays false).
+	sp := &dieAfterStartProvider{Fake: env.sp}
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+	woken := reconcileSessionBeads(
+		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, sp,
+		env.store, nil, nil, nil, env.dt, nil, false, nil, "",
+		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+		env.startOptions...,
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+
+	b, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	t.Logf("post-reconcile bead: status=%q metadata=%#v", b.Status, b.Metadata)
+	if b.Status != "closed" {
+		t.Fatalf("status = %q, want closed (a configured named session that died during its post-start liveness check must roll back, not be preserved as if still creating)", b.Status)
+	}
+	if got := b.Metadata["session_name"]; got != "" {
+		t.Errorf("session_name = %q, want empty after rollback", got)
+	}
+	if got := b.Metadata["pending_create_claim"]; got != "" {
+		t.Errorf("pending_create_claim = %q, want empty after rollback", got)
+	}
+	if want := sessionpkg.CanonicalCloseReason("failed-create"); b.Metadata["close_reason"] != want {
+		t.Errorf("close_reason = %q, want %q", b.Metadata["close_reason"], want)
+	}
+	if b.Metadata["state"] != "failed-create" {
+		t.Errorf("state = %q, want %q", b.Metadata["state"], "failed-create")
+	}
+}
+
+// TestReconcileSessionBeads_RollsBackSessionThatDiedDuringStartupWithoutSessionKey
+// probes ga-pmafyc (round 5): the generalized, non-SessionKey-gated twin of
+// TestReconcileSessionBeads_RollsBackConfiguredNamedSessionThatDiedDuringStartup
+// above. That test's diedDuringStartup=true is only reachable through the
+// LOCAL post-start liveness check inside runPreparedStartCandidate, which
+// itself requires a non-empty session_key to run at all
+// (TestExecutePreparedStartWave_NoStaleCheckWithoutSessionKey) — so it never
+// fires for a session with no SessionIDFlag, like a plain bash-script agent.
+//
+// Here the provider's Start() call returns runtime.ErrSessionDiedDuringStartup
+// directly (as the tmux adapter does when the pane exits before the post-spawn
+// liveness check runs — internal/runtime/tmux/adapter.go). With no session_key
+// and no resume shape to strip, retryFreshStartAfterStaleKey correctly declines
+// to retry (internal/session/chat.go, pinned by
+// TestStartRuntimeOnly_EmptySessionKeyWithoutResumeShapeDoesNotRelaunch) and
+// the sentinel-wrapped error propagates up as "resuming session: %w" — but
+// runPreparedStartCandidate currently has no case that recognizes this
+// propagated sentinel, so diedDuringStartup stays false and the configured
+// named session is incorrectly PRESERVED instead of rolled back. That leaves
+// pending_create_claim stuck "true" forever, which makes
+// pendingCreateStartInFlightInfo keep reporting start_in_flight on every
+// subsequent tick — starving the session of any further restart attempt. This
+// is the actual path TestGastown_Reconciler_SessionRestartsAfterExit hits
+// (its "shortlived" agent has no SessionIDFlag, hence no session_key), and why
+// that integration test still bimodally flakes despite the round-4 fix above.
+func TestReconcileSessionBeads_RollsBackSessionThatDiedDuringStartupWithoutSessionKey(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "helper",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{Template: "helper", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "helper")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  sessionName,
+		TemplateName: "helper",
+	}
+
+	// No session_key, no resume_flag, no session_id_flag: matches a plain
+	// bash-script agent (no SessionIDFlag configured), exactly like the
+	// integration test's "shortlived" agent.
+	session := env.createSessionBead(sessionName, "helper")
+	env.setSessionMetadata(&session, map[string]string{
+		"session_name_explicit":      "true",
+		"pending_create_claim":       "true",
+		"state":                      "creating",
+		"continuation_epoch":         "1",
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "helper",
+		namedSessionModeMetadata:     "always",
+	})
+
+	// The provider reports the death directly from Start(), the way the tmux
+	// adapter does when the pane's process exits before the post-spawn
+	// liveness probe runs — not via the separate post-start liveness check
+	// that dieAfterStartProvider simulates in the sibling test above.
+	env.sp.StartErrors = map[string]error{
+		sessionName: fmt.Errorf("%w: session %q", runtime.ErrSessionDiedDuringStartup, sessionName),
+	}
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+	woken := reconcileSessionBeads(
+		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
+		env.store, nil, nil, nil, env.dt, nil, false, nil, "",
+		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+		env.startOptions...,
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+
+	b, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	t.Logf("post-reconcile bead: status=%q metadata=%#v", b.Status, b.Metadata)
+	if b.Status != "closed" {
+		t.Fatalf("status = %q, want closed (a configured named session whose provider reports died-during-startup directly from Start(), with no session_key to recover through, must roll back — not be preserved as if still creating)", b.Status)
+	}
+	if got := b.Metadata["session_name"]; got != "" {
+		t.Errorf("session_name = %q, want empty after rollback", got)
+	}
+	if got := b.Metadata["pending_create_claim"]; got != "" {
+		t.Errorf("pending_create_claim = %q, want empty after rollback", got)
+	}
+	if want := sessionpkg.CanonicalCloseReason("failed-create"); b.Metadata["close_reason"] != want {
+		t.Errorf("close_reason = %q, want %q", b.Metadata["close_reason"], want)
+	}
+	if b.Metadata["state"] != "failed-create" {
+		t.Errorf("state = %q, want %q", b.Metadata["state"], "failed-create")
 	}
 }
 
@@ -10944,7 +12125,7 @@ func TestReconcileSessionBeads_RecordsResetStallDiagnostic(t *testing.T) {
 	}
 
 	env.stderr.Reset()
-	recordResetStallIfDue(sessiontest.SeedBead(t, session), "worker", "worker", false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
+	recordResetStallIfDue("", env.store, env.sp, env.cfg, sessiontest.SeedBead(t, session), "worker", "worker", false, false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
 	if got := strings.TrimSpace(env.stderr.String()); got != "" {
 		t.Fatalf("second stalled pass stderr = %q, want debounce silence", got)
 	}
@@ -10956,18 +12137,328 @@ func TestReconcileSessionBeads_RecordsResetStallDiagnostic(t *testing.T) {
 		"continuation_reset_pending":   "",
 		sessionpkg.ResetCommittedAtKey: "",
 	})
-	recordResetStallIfDue(sessiontest.SeedBead(t, session), "worker", "worker", false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
+	recordResetStallIfDue("", env.store, env.sp, env.cfg, sessiontest.SeedBead(t, session), "worker", "worker", false, false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
 	env.setSessionMetadata(&session, map[string]string{
 		"continuation_reset_pending":   "true",
 		sessionpkg.ResetCommittedAtKey: committedAt,
 	})
 	env.stderr.Reset()
-	recordResetStallIfDue(sessiontest.SeedBead(t, session), "worker", "worker", false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
+	recordResetStallIfDue("", env.store, env.sp, env.cfg, sessiontest.SeedBead(t, session), "worker", "worker", false, false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
 	if got := strings.TrimSpace(env.stderr.String()); got != wantMessage {
 		t.Fatalf("re-stalled pass stderr = %q, want %q", got, wantMessage)
 	}
 	if len(rec.Events) != 2 {
 		t.Fatalf("recorded events after reset clear = %d, want 2", len(rec.Events))
+	}
+}
+
+// TestReconcileSessionBeads_ResetStallEvictsStaleRuntime verifies the
+// reconciler evicts a stale tmux runtime once a continuation reset has been
+// pending longer than the startup timeout, instead of only re-recording the
+// stall diagnostic and leaving the session wedged forever. Regression test
+// for gastownhall/gascity#5355: a provider-profile flip left an old runtime's
+// tmux session alive (process dead) while continuation_reset_pending stayed
+// true — reset-pending never evicted the stale occupant, so the config
+// change never took effect.
+func TestReconcileSessionBeads_ResetStallEvictsStaleRuntime(t *testing.T) {
+	env := newReconcilerTestEnv()
+	rec := events.NewFake()
+	env.rec = rec
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+		Session:   config.SessionConfig{StartupTimeout: "60s"},
+	}
+	tp := TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  "worker",
+		TemplateName: "worker",
+		Hints:        agent.StartupHints{ProcessNames: []string{"test-cmd"}},
+	}
+	env.desiredState["worker"] = tp
+
+	// Simulate the wedge: the OLD runtime's tmux session is still alive
+	// (running), but its process is dead (Zombies), so alive=false while
+	// running=true — exactly the "stale runtime still occupies the tmux
+	// session" condition #5355 describes.
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("starting fake session: %v", err)
+	}
+	env.sp.Zombies["worker"] = true
+
+	session := env.createSessionBead("worker", "worker")
+	committedAt := env.clk.Now().Add(-75 * time.Second).UTC().Format(time.RFC3339)
+	env.setSessionMetadata(&session, map[string]string{
+		"continuation_reset_pending":   "true",
+		sessionpkg.ResetCommittedAtKey: committedAt,
+	})
+
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{session}, env.desiredState, configuredSessionNames(env.cfg, "", env.store),
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{"worker": 0}, false, nil, "test-city",
+		nil, env.clk, rec, env.cfg.Session.StartupTimeoutDuration(), 0, &env.stdout, &env.stderr,
+	)
+
+	// The stale runtime must actually be evicted (Stop issued against the
+	// wedged tmux session), not just re-recorded. The normal spawn path may
+	// then respawn it fresh within the same tick (desired state still wants
+	// "worker" running) — that respawn is the whole point of the fix, so
+	// this asserts on the Stop call rather than on IsRunning at tick end.
+	evicted := false
+	for _, c := range env.sp.SnapshotCalls() {
+		if c.Method == "Stop" && c.Name == "worker" {
+			evicted = true
+			break
+		}
+	}
+	if !evicted {
+		t.Fatalf("expected the stale reset-pending runtime to be evicted (Stop called for %q), calls: %#v", "worker", env.sp.SnapshotCalls())
+	}
+
+	foundStall := false
+	for _, e := range rec.Events {
+		if e.Type == events.SessionResetStalled {
+			foundStall = true
+		}
+	}
+	if !foundStall {
+		t.Fatalf("expected a session.reset_stalled event, got: %#v", rec.Events)
+	}
+}
+
+// TestReconcileSessionBeads_ResetStallEvictionRetriesAfterKillFailure verifies
+// the stale-runtime eviction is retried on later overdue ticks after a kill
+// failure. The stall diagnostic and its event are deduped once per episode,
+// but the eviction must not be: the dedup mark only clears when
+// continuation_reset_pending clears, which a wedged session never does, so
+// gating the kill behind the mark would let one transient tmux failure disarm
+// the fix for the rest of the episode.
+func TestReconcileSessionBeads_ResetStallEvictionRetriesAfterKillFailure(t *testing.T) {
+	env := newReconcilerTestEnv()
+	rec := events.NewFake()
+	env.rec = rec
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+		Session:   config.SessionConfig{StartupTimeout: "60s"},
+	}
+	tp := TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  "worker",
+		TemplateName: "worker",
+		Hints:        agent.StartupHints{ProcessNames: []string{"test-cmd"}},
+	}
+	env.desiredState["worker"] = tp
+
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("starting fake session: %v", err)
+	}
+	env.sp.Zombies["worker"] = true
+	// Fake.Stop returns the injected error before deleting the session, so
+	// the stale runtime survives and the next tick still observes
+	// running=true, alive=false — the same overdue condition.
+	env.sp.StopErrors["worker"] = errors.New("tmux kill-session: server not responding")
+
+	session := env.createSessionBead("worker", "worker")
+	committedAt := env.clk.Now().Add(-75 * time.Second).UTC().Format(time.RFC3339)
+	env.setSessionMetadata(&session, map[string]string{
+		"continuation_reset_pending":   "true",
+		sessionpkg.ResetCommittedAtKey: committedAt,
+	})
+
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+	tick := func() {
+		reconcileSessionBeads(
+			context.Background(), []beads.Bead{session}, env.desiredState, cfgNames,
+			env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{"worker": 0}, false, nil, "test-city",
+			nil, env.clk, rec, env.cfg.Session.StartupTimeoutDuration(), 0, &env.stdout, &env.stderr,
+		)
+	}
+	// The eviction's own stderr line is the discriminating signal: the
+	// reconciler's other stale-session paths issue their own Stop calls in
+	// the same tick, so a raw Stop count cannot attribute the kill to
+	// recordResetStallIfDue.
+	const evictionLine = "session reconciler: evicting stale reset-pending runtime worker:"
+
+	env.stderr.Reset()
+	tick()
+	if got := strings.Count(env.stderr.String(), evictionLine); got != 1 {
+		t.Fatalf("eviction attempts after the first overdue tick = %d, want 1; stderr: %s", got, env.stderr.String())
+	}
+	if !env.sp.IsRunning("worker") {
+		t.Fatalf("stale runtime should still be running after the kill failed")
+	}
+
+	tick()
+	if got := strings.Count(env.stderr.String(), evictionLine); got != 2 {
+		t.Fatalf("eviction attempts after the second overdue tick = %d, want 2 (retried; the stall dedup mark must not disarm the kill); stderr: %s", got, env.stderr.String())
+	}
+
+	// Kill succeeds now: the retry lands, so no further failure is reported
+	// and the stale runtime is gone.
+	delete(env.sp.StopErrors, "worker")
+	env.stderr.Reset()
+	tick()
+	if got := strings.Count(env.stderr.String(), evictionLine); got != 0 {
+		t.Fatalf("eviction reported a failure after the kill should have landed; stderr: %s", env.stderr.String())
+	}
+	stopped := false
+	for _, c := range env.sp.SnapshotCalls() {
+		if c.Method == "Stop" && c.Name == "worker" {
+			stopped = true
+		}
+	}
+	if !stopped {
+		t.Fatalf("expected the stale runtime to be stopped, calls: %#v", env.sp.SnapshotCalls())
+	}
+}
+
+// TestReconcileSessionBeads_ZombieCrashDedupesAcrossTicks verifies that
+// repeated zombie detection (tmux session alive, expected process dead) on
+// the same session dedupes the session.crashed event instead of re-firing on
+// every reconciler tick. Regression test for gastownhall/gascity#5355: the
+// zombie branch fired session.crashed unconditionally on every ~30s tick with
+// zero dedup, producing 299 identical events over 5.3 hours for one wedged
+// session.
+func TestReconcileSessionBeads_ZombieCrashDedupesAcrossTicks(t *testing.T) {
+	env := newReconcilerTestEnv()
+	rec := events.NewFake()
+	env.rec = rec
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+
+	tp := TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  "worker",
+		TemplateName: "worker",
+		Hints:        agent.StartupHints{ProcessNames: []string{"test-cmd"}},
+	}
+	env.desiredState["worker"] = tp
+	_ = env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"})
+	env.sp.Zombies["worker"] = true
+	env.sp.SetPeekOutput("worker", "panic: nil pointer dereference\ngoroutine 1 [running]:")
+
+	session := env.createSessionBead("worker", "worker")
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+
+	for tick := 0; tick < 3; tick++ {
+		reconcileSessionBeads(
+			context.Background(), []beads.Bead{session}, env.desiredState, cfgNames,
+			env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+			nil, env.clk, rec, 0, 0, &env.stdout, &env.stderr,
+		)
+	}
+
+	got := 0
+	for _, e := range rec.Events {
+		if e.Type == events.SessionCrashed {
+			got++
+		}
+	}
+	if got != 1 {
+		t.Fatalf("session.crashed events after 3 ticks of the same zombie condition = %d, want 1 (deduped)", got)
+	}
+}
+
+// TestReconcileSessionBeads_ZombieCrashRefiresAfterRecovery verifies the
+// zombie-crash dedup suppresses a flood without permanently silencing a
+// flapping session: once the session is observed alive again the mark clears
+// (clearZombieCrash), so a later genuine zombie episode fires a fresh
+// session.crashed event.
+func TestReconcileSessionBeads_ZombieCrashRefiresAfterRecovery(t *testing.T) {
+	env := newReconcilerTestEnv()
+	rec := events.NewFake()
+	env.rec = rec
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+
+	tp := TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  "worker",
+		TemplateName: "worker",
+		Hints:        agent.StartupHints{ProcessNames: []string{"test-cmd"}},
+	}
+	env.desiredState["worker"] = tp
+	_ = env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"})
+	env.sp.SetPeekOutput("worker", "panic: nil pointer dereference\ngoroutine 1 [running]:")
+
+	session := env.createSessionBead("worker", "worker")
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+	tick := func(zombie bool) {
+		env.sp.Zombies["worker"] = zombie
+		reconcileSessionBeads(
+			context.Background(), []beads.Bead{session}, env.desiredState, cfgNames,
+			env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+			nil, env.clk, rec, 0, 0, &env.stdout, &env.stderr,
+		)
+	}
+
+	tick(true)  // first zombie episode: fires
+	tick(false) // recovered: clears the dedup mark
+	tick(true)  // second zombie episode: fires again
+
+	got := 0
+	for _, e := range rec.Events {
+		if e.Type == events.SessionCrashed {
+			got++
+		}
+	}
+	if got != 2 {
+		t.Fatalf("session.crashed events across zombie -> alive -> zombie = %d, want 2 (one per episode)", got)
+	}
+}
+
+// TestReconcileSessionBeads_ZombieCrashPayloadTruncated verifies the
+// session.crashed event's Message is bounded regardless of pane size, so a
+// zombie detection cannot bloat the events log with a full raw pane capture.
+// Regression test for gastownhall/gascity#5355: each of the 299 flood events
+// carried the full ~6.6KB pane dump.
+func TestReconcileSessionBeads_ZombieCrashPayloadTruncated(t *testing.T) {
+	env := newReconcilerTestEnv()
+	rec := events.NewFake()
+	env.rec = rec
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+
+	tp := TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  "worker",
+		TemplateName: "worker",
+		Hints:        agent.StartupHints{ProcessNames: []string{"test-cmd"}},
+	}
+	env.desiredState["worker"] = tp
+	_ = env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"})
+	env.sp.Zombies["worker"] = true
+
+	// Build a pane capture far larger than crashEventPaneOutputMaxLines.
+	lines := make([]string, 0, rateLimitPeekLines)
+	for i := 0; i < rateLimitPeekLines; i++ {
+		lines = append(lines, fmt.Sprintf("line %d: some pane output that is not empty", i))
+	}
+	bigOutput := strings.Join(lines, "\n")
+	env.sp.SetPeekOutput("worker", bigOutput)
+
+	session := env.createSessionBead("worker", "worker")
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames,
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+		nil, env.clk, rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	var gotEvent *events.Event
+	for i := range rec.Events {
+		if rec.Events[i].Type == events.SessionCrashed {
+			gotEvent = &rec.Events[i]
+			break
+		}
+	}
+	if gotEvent == nil {
+		t.Fatalf("expected a session.crashed event, got: %#v", rec.Events)
+	}
+	if got := len(strings.Split(gotEvent.Message, "\n")); got > crashEventPaneOutputMaxLines+1 {
+		t.Fatalf("session.crashed message has %d lines, want <= %d (plus the elision marker line)", got, crashEventPaneOutputMaxLines+1)
+	}
+	if len(gotEvent.Message) >= len(bigOutput) {
+		t.Fatalf("session.crashed message (%d bytes) was not truncated relative to the raw pane capture (%d bytes)", len(gotEvent.Message), len(bigOutput))
 	}
 }
 
@@ -11731,7 +13222,16 @@ func TestFailedCreateIsKnownState(t *testing.T) {
 	}
 }
 
-func TestReconcileSessionBeads_BuildDesiredStateSkipsFailedCreatePoolSession(t *testing.T) {
+// TestReconcileSessionBeads_FailedCreatePoolSlotIsReplacedUnderTheSameRuntimeName
+// pins the retry shape ga-vcjr9 turned into a pod leak. A failed create no
+// longer frees its slot by handing the replacement a NEW runtime name — the
+// name is a pure function of the slot identity, so the replacement addresses
+// the same box. That makes the pending-create lease load-bearing: while the
+// failed bead is still open it holds the identity, and the pool waits one tick
+// rather than running two beads under one name. Once the lease expires and the
+// reconciler closes the bead, the next tick allocates a fresh bead under the
+// same runtime name.
+func TestReconcileSessionBeads_FailedCreatePoolSlotIsReplacedUnderTheSameRuntimeName(t *testing.T) {
 	cases := []struct {
 		name             string
 		startedAt        time.Time
@@ -11769,7 +13269,14 @@ func TestReconcileSessionBeads_BuildDesiredStateSkipsFailedCreatePoolSession(t *
 				Type:   sessionBeadType,
 				Labels: []string{sessionBeadLabel, "agent:worker-1"},
 				Metadata: map[string]string{
-					"session_name":              "worker-1",
+					// A transient pool slot's runtime session_name steps aside from
+					// the bare slot identity ("worker-1") onto "worker-1-pool" so the
+					// slot never reaches GC_AGENT (#5241). agent_name/pool_slot stay
+					// the identity, exactly as the create path (derivePoolSessionName
+					// with TransientSlot) persists it; the replacement re-derives the
+					// same "worker-1-pool" and fails closed on the open lease, so the
+					// slot still holds its identity for one tick.
+					"session_name":              "worker-1-pool",
 					"agent_name":                "worker-1",
 					"template":                  "worker",
 					"state":                     string(sessionpkg.StateFailedCreate),
@@ -11785,25 +13292,12 @@ func TestReconcileSessionBeads_BuildDesiredStateSkipsFailedCreatePoolSession(t *
 			if err != nil {
 				t.Fatalf("Create failed-create bead: %v", err)
 			}
+			runtimeName := failedBead.Metadata["session_name"]
 
 			var stdout, stderr bytes.Buffer
-			dsResult := buildDesiredState(cfg.EffectiveCityName(), t.TempDir(), clk.Now().UTC(), cfg, sp, store, &stderr)
-			if _, ok := dsResult.State[failedBead.Metadata["session_name"]]; ok {
-				t.Fatalf("desired state reused failed-create bead %s; state=%#v", failedBead.ID, dsResult.State)
-			}
-
-			var fresh TemplateParams
-			for _, tp := range dsResult.State {
-				if tp.TemplateName == "worker" {
-					fresh = tp
-					break
-				}
-			}
-			if fresh.SessionName == "" {
-				t.Fatalf("desired state did not allocate a fresh worker session; state=%#v stderr:\n%s", dsResult.State, stderr.String())
-			}
-			if fresh.SessionName == failedBead.Metadata["session_name"] {
-				t.Fatalf("fresh session name = %q, want different from failed-create bead", fresh.SessionName)
+			firstTick := buildDesiredState(cfg.EffectiveCityName(), t.TempDir(), clk.Now().UTC(), cfg, sp, store, &stderr)
+			if len(firstTick.State) != 0 {
+				t.Fatalf("open failed-create lease must hold its identity, but the first tick planned %#v; stderr:\n%s", firstTick.State, stderr.String())
 			}
 
 			sessions, err := loadSessionBeads(store)
@@ -11811,23 +13305,20 @@ func TestReconcileSessionBeads_BuildDesiredStateSkipsFailedCreatePoolSession(t *
 				t.Fatalf("loadSessionBeads: %v", err)
 			}
 			cfgNames := configuredSessionNames(cfg, cfg.EffectiveCityName(), store)
-			poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult.AssignedWorkBeads, sessionInfosFromBeads(sessions), dsResult.ScaleCheckCounts))
+			poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, firstTick.AssignedWorkBeads, sessionInfosFromBeads(sessions), firstTick.ScaleCheckCounts))
 			if poolDesired == nil {
 				poolDesired = make(map[string]int)
 			}
-			mergeNamedSessionDemand(poolDesired, dsResult.NamedSessionDemand, cfg)
+			mergeNamedSessionDemand(poolDesired, firstTick.NamedSessionDemand, cfg)
 
-			woken := reconcileSessionBeads(
-				context.Background(), sessions, dsResult.State, cfgNames,
-				cfg, sp, store, nil, dsResult.AssignedWorkBeads, nil, newDrainTracker(), poolDesired,
-				dsResult.StoreQueryPartial, nil, cfg.EffectiveCityName(),
+			reconcileSessionBeads(
+				context.Background(), sessions, firstTick.State, cfgNames,
+				cfg, sp, store, nil, firstTick.AssignedWorkBeads, nil, newDrainTracker(), poolDesired,
+				firstTick.StoreQueryPartial, nil, cfg.EffectiveCityName(),
 				nil, clk, events.Discard, 0, 0, &stdout, &stderr,
 			)
-			if woken != 1 {
-				t.Fatalf("woken = %d, want 1 for fresh replacement session; stdout:\n%s\nstderr:\n%s", woken, stdout.String(), stderr.String())
-			}
-			if !sp.IsRunning(fresh.SessionName) {
-				t.Fatalf("fresh session %q is not running after reconcile; stdout:\n%s\nstderr:\n%s", fresh.SessionName, stdout.String(), stderr.String())
+			if sp.IsRunning(runtimeName) {
+				t.Fatalf("reconcile started %q for a failed-create bead", runtimeName)
 			}
 
 			gotFailed, err := store.Get(failedBead.ID)
@@ -11840,13 +13331,26 @@ func TestReconcileSessionBeads_BuildDesiredStateSkipsFailedCreatePoolSession(t *
 			if gotFailed.Status == "open" && gotFailed.Metadata["state"] != string(sessionpkg.StateFailedCreate) {
 				t.Fatalf("open failed-create bead state = %q, want %q", gotFailed.Metadata["state"], sessionpkg.StateFailedCreate)
 			}
+
+			var secondTickStderr bytes.Buffer
+			secondTick := buildDesiredState(cfg.EffectiveCityName(), t.TempDir(), clk.Now().UTC(), cfg, sp, store, &secondTickStderr)
+			tp, planned := secondTick.State[runtimeName]
 			if gotFailed.Status == "open" {
-				var secondTickStderr bytes.Buffer
-				secondTick := buildDesiredState(cfg.EffectiveCityName(), t.TempDir(), clk.Now().UTC(), cfg, sp, store, &secondTickStderr)
-				if _, ok := secondTick.State[failedBead.Metadata["session_name"]]; ok {
-					t.Fatalf("second tick reused failed-create bead %s; state=%#v stderr:\n%s", failedBead.ID, secondTick.State, secondTickStderr.String())
+				if planned {
+					t.Fatalf("second tick planned %q while the failed-create lease is still open; stderr:\n%s", runtimeName, secondTickStderr.String())
+				}
+			} else {
+				if !planned {
+					t.Fatalf("second tick did not replace the closed failed-create slot under %q; state=%#v stderr:\n%s", runtimeName, secondTick.State, secondTickStderr.String())
+				}
+				if got := tp.Env["GC_SESSION_ID"]; got == failedBead.ID {
+					t.Fatalf("replacement reused the failed-create bead %s; a fresh bead must back the reused runtime name", failedBead.ID)
+				}
+				if tp.SessionName != runtimeName {
+					t.Fatalf("replacement session name = %q, want the slot's stable runtime name %q", tp.SessionName, runtimeName)
 				}
 			}
+
 			if strings.Contains(stderr.String(), "unknown state") {
 				t.Errorf("reconciler logged unknown state for failed-create bead: %s", stderr.String())
 			}

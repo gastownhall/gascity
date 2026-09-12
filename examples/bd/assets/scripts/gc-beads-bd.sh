@@ -338,6 +338,31 @@ server_sql_retry() {
     return 1
 }
 
+# managed_backing_store_exists reports whether a Dolt database directory
+# backing SQL name $1 already exists under DATA_DIR. Catalog invisibility is
+# NOT proof of freshness: CREATE DATABASE IF NOT EXISTS adopts an existing
+# on-disk directory (see ensure_database_registered's header), so only the
+# disk answers "did this invocation create it". Dolt normalizes '-' to '_'
+# when exposing a directory as a SQL database, so compare normalized names.
+# Fails closed (reports "exists") when the server's disk is not ours to
+# inspect — a missing witness only re-arms bd's migration guard, while a
+# wrongly-written one bypasses it.
+managed_backing_store_exists() {
+    local want="$1" d base
+    is_remote && return 0
+    [ -n "$DATA_DIR" ] || return 0
+    [ -d "$DATA_DIR" ] || return 1
+    want=$(printf '%s' "$want" | tr '-' '_')
+    for d in "$DATA_DIR"/*/; do
+        [ -d "$d" ] || continue
+        base=$(basename "$d")
+        if [ "$(printf '%s' "$base" | tr '-' '_')" = "$want" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 # ensure_database_registered creates the database on the running server if
 # it doesn't already exist. Dolt's CREATE DATABASE both creates the on-disk
 # directory and registers it in the server's in-memory catalog. If the
@@ -349,6 +374,7 @@ server_sql_retry() {
 # (CREATE DATABASE returns before the catalog is fully updated).
 ensure_database_registered() {
     local db="$1"
+    GC_DATABASE_CREATED_BY_ENSURE=false
 
     # Validate database name before SQL interpolation (upstream 38f7b380).
     if ! valid_sql_name "$db"; then
@@ -359,6 +385,13 @@ ensure_database_registered() {
     # Check if already visible.
     if server_sql "USE \`$db\`" >/dev/null 2>&1; then
         return 0
+    fi
+
+    # Capture disk state BEFORE CREATE: adoption and creation are
+    # indistinguishable from the catalog's point of view.
+    local backing_absent=false
+    if ! managed_backing_store_exists "$db"; then
+        backing_absent=true
     fi
 
     # Register with the server (use retry for lock contention).
@@ -373,6 +406,9 @@ ensure_database_registered() {
     backoff_ms=100
     for attempt in 1 2 3 4 5; do
         if server_sql "USE \`$db\`" >/dev/null 2>&1; then
+            if [ "$backing_absent" = true ]; then
+                GC_DATABASE_CREATED_BY_ENSURE=true
+            fi
             return 0
         fi
         sleep_ms "$backoff_ms" 2>/dev/null || sleep 1
@@ -383,6 +419,37 @@ ensure_database_registered() {
     return 1
 }
 
+# seed_fresh_managed_bd_version_witness records the bd version that is about
+# to initialize a database created by this invocation. It probes the same
+# "${BD_BIN:-bd}" that run_bd_pinned runs, so the witness names the binary that
+# actually initializes the workspace rather than whichever bd happens to be on
+# PATH. bd 1.2+ uses this bounded witness to distinguish current server-mode
+# workspaces from legacy .beads/dolt layouts. Never create or replace it for a
+# pre-existing database: doing so would bypass bd's explicit cross-era
+# migration guard.
+seed_fresh_managed_bd_version_witness() {
+    local dir="$1"
+    local marker="$dir/.beads/.local_version"
+    local raw version major tmp
+
+    [ ! -e "$marker" ] || return 0
+
+    if ! raw=$("${BD_BIN:-bd}" version 2>/dev/null); then
+        die "failed to read bd version while initializing fresh managed Dolt workspace at $dir"
+    fi
+    version=$(printf '%s\n' "$raw" | sed -nE 's/^[Bb][Dd] [Vv]ersion v?([0-9]+(\.[0-9]+)+).*/\1/p' | head -n 1)
+    if [ -z "$version" ]; then
+        die "unrecognized bd version output while initializing fresh managed Dolt workspace at $dir: $raw"
+    fi
+    major=${version%%.*}
+    if [ "$major" -lt 1 ] 2>/dev/null; then
+        die "bd $version cannot initialize the current managed Dolt workspace at $dir (bd 1.0.0 or newer required)"
+    fi
+
+    tmp="$marker.tmp.$$"
+    (umask 077 && printf '%s\n' "$version" > "$tmp") || die "failed to write bd version witness at $marker"
+    mv "$tmp" "$marker" || die "failed to install bd version witness at $marker"
+}
 
 database_exists() {
     local db="$1"
@@ -607,6 +674,45 @@ ensure_bd_runtime_config_value() {
     # bd v1.0.3 rejects `bd config set issue_prefix`; GC still needs raw
     # bd commands to see GC's config in the DB-backed config table.
     server_sql_retry "USE \`$db\`; INSERT INTO config (\`key\`, value) VALUES ('$key', '$value') ON DUPLICATE KEY UPDATE value = VALUES(value)" >/dev/null || die "failed to set bd runtime $key for $db"
+    commit_bd_runtime_config "$db" "$key"
+}
+
+# commit_bd_runtime_config commits the config row written above. Without it the
+# row lives in the Dolt working set forever: `config` is not registered in
+# dolt_ignore, so the database stays permanently dirty. That is not cosmetic.
+#
+#   - beads refuses to run a schema migration that alters a table holding
+#     pre-existing uncommitted changes. Migration 0030 already issues
+#     `DELETE FROM config`, so the next migration touching `config` blocks
+#     every database GC provisioned. Its documented recovery, `bd dolt commit`,
+#     cannot run against an external Dolt server -- gastownhall/beads#4566
+#     fixed that deadlock for embedded mode only -- so there is no in-band way
+#     out short of hand-committing over a raw SQL connection.
+#   - A table that lives only in the working set is later swept into an
+#     unrelated `DOLT_COMMIT -Am`, drifting the database hash and quarantining
+#     GC for that database (the same hazard the read-only probe table is
+#     registered in dolt_ignore to avoid).
+#
+# Staging is scoped to `config` alone: a blanket DOLT_ADD('.') would sweep
+# whatever else happens to be dirty into GC's commit, which is the hash-drift
+# failure above rather than a fix for it.
+#
+# Fail-open: the value itself is already written, so a commit failure leaves
+# the pre-existing (dirty but functional) state rather than breaking
+# provisioning -- notably on a read-only replica. It is always reported, never
+# swallowed, so the operator knows the working set needs attention.
+commit_bd_runtime_config() {
+    local db="$1"
+    local key="$2"
+    local output
+    [ -n "$db" ] || return 0
+    output=$(server_sql "USE \`$db\`; CALL DOLT_ADD('config'); CALL DOLT_COMMIT('-m', 'gc: record beads runtime config', '--author', 'gascity-builder <builder@gascity.local>')" 2>&1) && return 0
+    # An idempotent re-run has nothing to commit; that is success, not failure.
+    case "$output" in
+        *"nothing to commit"*|*"no changes added to commit"*|*"No changes"*) return 0 ;;
+    esac
+    echo "warning: failed to commit bd runtime $key for $db; the Dolt working set is left dirty and a future beads schema migration touching config will refuse to run: $output" >&2
+    return 0
 }
 
 ensure_doltlite_runtime_config_value() {
@@ -683,6 +789,55 @@ wait_for_bd_runtime_schema() {
     done
 
     return 1
+}
+
+# bd_runtime_bd_table_count prints how many of bd's own tables exist in the
+# database. It returns 1 without printing when the query itself fails, so a
+# caller can tell "this database is empty" from "the server did not answer" —
+# the distinction bd_runtime_schema_ready collapses by design, because a bare
+# readiness probe has no reason to care why it came back negative.
+#
+# The table names below are bd's, listed literally. That is a known ceiling on
+# how much the guard protects: if bd renames these or adds others, a populated
+# store whose tables all fall outside the list counts 0 and reads as empty, so
+# the force-reinit gets authorized again. The failure lands on the behaviour
+# that shipped before this guard existed rather than on something worse, and
+# widening the list belongs with whatever change renames the tables.
+bd_runtime_bd_table_count() {
+    local db="$1"
+    local host output
+    [ -n "$db" ] || return 1
+    valid_sql_name "$db" || return 1
+    host=$(connect_host)
+    output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+        sql -r csv -q "SELECT COUNT(*) AS cnt FROM information_schema.tables WHERE table_schema = '$db' AND table_name IN ('issues', 'comments', 'events', 'dependencies')" 2>/dev/null) || return 1
+    # Parse CSV: "cnt\n3\n" — take the last non-empty line, as get_connection_count does.
+    echo "$output" | tail -1 | tr -d '[:space:]'
+}
+
+# bd_runtime_store_holds_bd_tables answers whether the database carries bd's own
+# tables, which is what decides whether `bd init --force` would create schema or
+# migrate over live rows. It has three answers and the call site needs all three:
+#
+#   0  yes, tables are present. A forced reinit re-runs bd's migrations over the
+#      existing working set, and beads refuses to migrate any table holding
+#      uncommitted changes (gastownhall/beads#4566), so the reinit aborts city
+#      init instead of repairing anything.
+#   1  no, the database is empty. This is the genuinely-fresh store gc pre-seeds
+#      metadata.json for, and reinitializing it is exactly right.
+#   2  could not tell, because the query did not answer.
+#
+# Collapsing 2 into either of the others is the mistake this exists to prevent.
+# Folding it into 0 turns an unreadable count into a refusal to initialize a
+# fresh city; folding it into 1 re-creates the destructive guess this whole
+# guard was added to stop.
+bd_runtime_store_holds_bd_tables() {
+    local count
+    count=$(bd_runtime_bd_table_count "$1") || return 2
+    case "$count" in
+        ''|*[!0-9]*) return 2 ;;
+    esac
+    [ "$count" -gt 0 ]
 }
 
 # --- Robustness Helpers ---
@@ -1260,10 +1415,14 @@ write_config_yaml() {
             max_connections=256
             ;;
     esac
-    read_timeout_millis=${GC_DOLT_READ_TIMEOUT_MILLIS:-15000}
+    # Must track config.DefaultDoltReadTimeoutMillis (internal/config/config.go).
+    # Raised from 15000 to 120000 after #5383 (the Reaper's own maintenance
+    # query was killed mid-production by the old 15s bound) -- see that
+    # constant's comment for the full rationale.
+    read_timeout_millis=${GC_DOLT_READ_TIMEOUT_MILLIS:-120000}
     case "$read_timeout_millis" in
         ''|*[!0-9]*|0)
-            read_timeout_millis=15000
+            read_timeout_millis=120000
             ;;
     esac
     write_timeout_millis=${GC_DOLT_WRITE_TIMEOUT_MILLIS:-300000}
@@ -2476,7 +2635,7 @@ run_bd_pinned() {
         export GC_DOLT_PASSWORD="$DOLT_PASSWORD"
         export BEADS_DOLT_SERVER_USER="$DOLT_USER"
         export BEADS_DOLT_PASSWORD="$DOLT_PASSWORD"
-        bd "$@"
+        "${BD_BIN:-bd}" "$@"
     )
 }
 
@@ -2657,6 +2816,7 @@ op_init() {
     local existing_db=""
     local allow_reserved_existing=false
     local bd_init_force=""
+    local database_created_by_gc=false
     if [ -z "$dir" ] || [ -z "$prefix" ]; then
         die "usage: gc-beads-bd init <dir> <prefix> [dolt_database]"
     fi
@@ -2793,7 +2953,39 @@ op_init() {
             die "managed Dolt server unreachable while inspecting existing store '$dolt_database'; refusing to force-reinitialize (data-safety). retry once the Dolt server is reachable."
         fi
         if ensure_database_registered "$dolt_database"; then
+            local schema_ready=false
+            local holds_bd_tables=0
+            if [ "${GC_DATABASE_CREATED_BY_ENSURE:-false}" = true ]; then
+                database_created_by_gc=true
+            fi
             if bd_runtime_schema_ready "$dolt_database"; then
+                schema_ready=true
+            else
+                # The probe found no bd schema, and the only response this branch
+                # offers is a destructive --force reinit. One failed probe cannot
+                # separate "the schema is absent" from "the server hiccuped" or
+                # "a concurrent init has not finished writing it": server_reachable
+                # above only proves a database-less SELECT 1 answered a moment
+                # earlier, on a different connection. Ask the database itself
+                # before acting, and skip the extra work entirely when it says it
+                # is empty, which is the ordinary fresh-init path.
+                bd_runtime_store_holds_bd_tables "$dolt_database" || holds_bd_tables=$?
+                if [ "$holds_bd_tables" -ne 1 ]; then
+                    if wait_for_bd_runtime_schema "$dolt_database"; then
+                        schema_ready=true
+                    elif [ "$holds_bd_tables" -eq 0 ]; then
+                        die "database '$dolt_database' holds bd tables but its bd schema stayed unreadable across retries; refusing to force-reinitialize (data-safety). a forced reinit re-runs migrations over the existing working set, which beads rejects when a table it migrates carries uncommitted changes (gastownhall/beads#4566). inspect the store with 'bd dolt status' before retrying."
+                    else
+                        # Undetermined: the table count never answered, so there is
+                        # no evidence either way. Keep the pre-existing behaviour
+                        # rather than inventing a new way for init to fail, but say
+                        # so, because this is the one path that still reinitializes
+                        # on an unverified negative.
+                        echo "warning: could not determine whether '$dolt_database' holds bd tables; reinitializing on an unverified schema probe" >&2
+                    fi
+                fi
+            fi
+            if [ "$schema_ready" = true ]; then
                 # GC owns canonical metadata/config normalization after this backend
                 # bridge returns. Keep the backend focused on database registration
                 # and bd-specific bootstrap only.
@@ -2827,6 +3019,17 @@ op_init() {
     # where the city's hq database was never created on first start.
     if ! ensure_database_registered "$dolt_database"; then
         die "failed to register Dolt database '$dolt_database' on running server (CREATE DATABASE failed); see warnings above. cannot proceed with bd init."
+    fi
+    if [ "${GC_DATABASE_CREATED_BY_ENSURE:-false}" = true ]; then
+        database_created_by_gc=true
+    fi
+
+    # Gas City creates its managed server root at .beads/dolt before bd init.
+    # For a database proven to have been created above by this invocation,
+    # record the current bd version before bd's legacy-workspace guard runs.
+    # Pre-existing databases deliberately receive no marker here.
+    if [ "$database_created_by_gc" = true ]; then
+        seed_fresh_managed_bd_version_witness "$dir"
     fi
 
     # Run bd init in server mode through the pinned wrapper so the fallback

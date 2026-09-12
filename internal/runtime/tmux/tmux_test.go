@@ -3133,7 +3133,8 @@ func TestSetBindings_PreserveFallbackOnRepeatedCalls(t *testing.T) {
 		"display-message custom-user-cmd")
 
 	// Record the binding after first configuration
-	firstRaw, _ := tm.run("list-keys", "-T", "prefix", "F11")
+	rawTable, _ := tm.run("list-keys", "-T", "prefix")
+	firstRaw := selectBindingLine(rawTable, "F11")
 
 	// isGTBinding should return true, causing Set*Binding to skip
 	if !tm.isGTBinding("prefix", "F11") {

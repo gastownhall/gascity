@@ -207,3 +207,84 @@ func TestCoreShippedAssetsAvoidNonexistentBDListSearchFlag(t *testing.T) {
 		t.Fatalf("walking embedded core pack: %v", err)
 	}
 }
+
+// TestMolPolecatCommitResolvesRepoBeforeRemovingWorktree pins the fix for a
+// stranded-worktree bug: `git worktree remove` resolves the repo from cwd,
+// and this step `cd`s away from the worktree before removing it, so the bare
+// form exits 128 having unregistered nothing while `rm -rf` deletes the
+// directory anyway, leaving the registration behind forever. These are
+// bootstrap templates, so every city seeded by `gc city init` inherited the
+// defect (ga-x1u5cr; contributing cause of ga-lc9yx's 396 dead worktrees).
+func TestMolPolecatCommitResolvesRepoBeforeRemovingWorktree(t *testing.T) {
+	step := formulaStep(t, readFormula(t, "mol-polecat-commit.toml"), "commit-and-push")
+
+	if strings.Contains(step, `git worktree remove "$WORKTREE_PATH" --force`) {
+		t.Error("commit-and-push calls bare `git worktree remove` after `cd ..`; resolve the repo via --git-common-dir first and remove via `git -C \"$REPO\" worktree remove`")
+	}
+	if !strings.Contains(step, "--git-common-dir") {
+		t.Error("commit-and-push must resolve REPO via `git rev-parse --path-format=absolute --git-common-dir` before `cd ..`, so worktree removal does not depend on cwd")
+	}
+	if !strings.Contains(step, `git -C "$REPO" worktree remove`) {
+		t.Error(`commit-and-push must remove the worktree via git -C "$REPO" worktree remove, not a bare invocation`)
+	}
+
+	// `git -C ""` is a no-op that silently resolves the repo from cwd, and this
+	// step has already `cd ..`'d away from the worktree by then. An unresolved
+	// REPO must short-circuit rather than degrade back to cwd-dependent removal.
+	if !strings.Contains(step, `[ -z "$REPO" ]`) {
+		t.Error(`commit-and-push must bail on an empty $REPO; git -C "" silently resolves from cwd, which is exactly the bug this step fixes`)
+	}
+
+	// WORKTREE_PATH is $(pwd), and `git worktree remove` exits 128 on a main
+	// working tree. Without the guard the failure path rm -rf's the whole repo.
+	guardAt := strings.Index(step, `[ -f "$WORKTREE_PATH/.git" ]`)
+	if guardAt < 0 {
+		t.Fatal(`commit-and-push must guard the rm -rf fallback with [ -f "$WORKTREE_PATH/.git" ]; a linked worktree's .git is a file, a main checkout's is a directory`)
+	}
+	// Match the delete command itself, not the word: the surrounding comment and
+	// the refusal message both mention `rm -rf` and would otherwise be found first.
+	if got := strings.Count(step, `rm -rf "$WORKTREE_PATH"`); got != 1 {
+		t.Fatalf(`commit-and-push must delete the worktree exactly once behind the guard; found %d occurrences of rm -rf "$WORKTREE_PATH"`, got)
+	}
+	removeAt := strings.Index(step, `rm -rf "$WORKTREE_PATH"`)
+	if guardAt > removeAt {
+		t.Error("commit-and-push runs rm -rf before the linked-worktree check; the check must gate the delete, not follow it")
+	}
+}
+
+// TestMolScopedWorkResolvesRepoBeforeRemovingWorktree pins the same fix for
+// mol-scoped-work's cleanup step, which is worse than mol-polecat-commit's:
+// its `|| rm -rf` fallback makes the stranded git registration the designed
+// outcome of the bare form's failure path, not just an incidental risk.
+func TestMolScopedWorkResolvesRepoBeforeRemovingWorktree(t *testing.T) {
+	step := formulaStep(t, readFormula(t, "mol-scoped-work.toml"), "cleanup-worktree")
+
+	if strings.Contains(step, `git worktree remove --force "$WORKTREE" || rm -rf "$WORKTREE"`) {
+		t.Error("cleanup-worktree calls bare `git worktree remove --force ... || rm -rf`; resolve the repo via --git-common-dir first and remove via `git -C \"$REPO\" worktree remove`")
+	}
+	if !strings.Contains(step, "--git-common-dir") {
+		t.Error(`cleanup-worktree must resolve REPO via git -C "$WORKTREE" rev-parse --path-format=absolute --git-common-dir; cwd is not guaranteed inside the repo at this step`)
+	}
+	if !strings.Contains(step, `git -C "$REPO" worktree remove`) {
+		t.Error(`cleanup-worktree must remove the worktree via git -C "$REPO" worktree remove, not a bare invocation`)
+	}
+
+	// A stale directory that still passes [ -d ], or a git too old for
+	// --path-format, leaves REPO empty; `git -C ""` then resolves from a cwd
+	// this step explicitly does not guarantee is inside the repo.
+	if !strings.Contains(step, `[ -z "$REPO" ]`) {
+		t.Error(`cleanup-worktree must bail on an empty $REPO; git -C "" silently resolves from cwd, which this step cannot assume`)
+	}
+
+	guardAt := strings.Index(step, `[ -f "$WORKTREE/.git" ]`)
+	if guardAt < 0 {
+		t.Fatal(`cleanup-worktree must guard the rm -rf fallback with [ -f "$WORKTREE/.git" ]; a linked worktree's .git is a file, a main checkout's is a directory`)
+	}
+	if got := strings.Count(step, `rm -rf "$WORKTREE"`); got != 1 {
+		t.Fatalf(`cleanup-worktree must delete the worktree exactly once behind the guard; found %d occurrences of rm -rf "$WORKTREE"`, got)
+	}
+	removeAt := strings.Index(step, `rm -rf "$WORKTREE"`)
+	if guardAt > removeAt {
+		t.Error("cleanup-worktree runs rm -rf before the linked-worktree check; the check must gate the delete, not follow it")
+	}
+}

@@ -739,21 +739,53 @@ func releaseUnexecutedClaimsForSession(cityPath, sessionName string, stderr io.W
 		return
 	}
 	cfg, _ := loadCityConfig(cityPath, io.Discard)
-	sessionBead, err := cliSessionStore(store, cfg, cityPath).Get(sessionName)
+	rigStores := func() map[string]beads.Store {
+		if cfg == nil {
+			return nil
+		}
+		return buildStandaloneRigStores(cfg, cityPath, io.Discard)
+	}
+	releaseUnexecutedClaimsForSessionStore(cityPath, cfg, store, rigStores, sessionName, drainAckReleaseBudget, stderr)
+}
+
+// releaseUnexecutedClaimsForSessionStore resolves a runtime session name to the
+// durable session bead behind it and releases the claims that bead's identities
+// still hold. Resolution is the reason this step exists separately: a pool
+// worker's runtime name lives in `session_name` metadata on a bead whose ID is
+// something else entirely, so a direct Get on the runtime name would miss it.
+//
+// rigStores is a thunk, not a map, because opening the rig stores is real store
+// I/O on the pre-ack path. It is called only once resolution and the session
+// Get have both succeeded — a drain-ack that cannot find its session pays
+// nothing for stores it would immediately discard.
+func releaseUnexecutedClaimsForSessionStore(
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	rigStores func() map[string]beads.Store,
+	sessionName string,
+	budget time.Duration,
+	stderr io.Writer,
+) {
+	sessStore := cliSessionStore(store, cfg, cityPath)
+	sessionID, err := resolveSessionID(sessStore, sessionName)
 	if err != nil {
 		// A session that cannot be resolved holds nothing this pass can find, so
-		// there is nothing to report. Both arms above are deliberately silent for
-		// the same reason: the ack is the signal the controller is waiting on, and
-		// a release that could not even begin must not decorate a successful ack
-		// with a warning an operator can do nothing about. A claim genuinely left
-		// behind here is still caught by the dead-assignee release lane.
+		// there is nothing to report. The ack is the signal the controller is
+		// waiting on, and a release that could not begin must not decorate a
+		// successful ack with a warning an operator can do nothing about. A claim
+		// genuinely left behind here is still caught by the dead-assignee lane.
 		return
 	}
-	var rigStores map[string]beads.Store
-	if cfg != nil {
-		rigStores = buildStandaloneRigStores(cfg, cityPath, io.Discard)
+	sessionBead, err := sessStore.Get(sessionID)
+	if err != nil {
+		return
 	}
-	releaseUnexecutedClaimsOnDrainAck(cityPath, cfg, store, rigStores, sessionBead, drainAckReleaseBudget, stderr)
+	var rigs map[string]beads.Store
+	if rigStores != nil {
+		rigs = rigStores()
+	}
+	releaseUnexecutedClaimsOnDrainAck(cityPath, cfg, store, rigs, sessionBead, budget, stderr)
 }
 
 // drainAckReleaseBudget bounds the whole held-claim release pass.

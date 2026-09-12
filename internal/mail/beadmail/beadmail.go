@@ -966,8 +966,26 @@ func PurgeReadMessageWisps(store beads.MailStore, cutoff time.Time) (int, error)
 	}
 	purged := 0
 	var deleteErr error
+	live := beads.HandlesFor(store.Store).Live
 	for _, entry := range entries {
 		if entry.CreatedAt.IsZero() || !entry.CreatedAt.Before(cutoff) {
+			continue
+		}
+		// The candidate list above can answer from the CachingStore's stale
+		// view. A message the user just un-read (or that vanished) inside the
+		// cache window must not be deleted on the strength of that stale
+		// read:true snapshot — re-verify against the live store immediately
+		// before the destructive delete.
+		current, err := live.Get(entry.ID)
+		if errors.Is(err, beads.ErrNotFound) {
+			// Deleted by a concurrent path inside the cache window — nothing to do.
+			continue
+		}
+		if err != nil {
+			deleteErr = errors.Join(deleteErr, fmt.Errorf("live re-verify of bead %q before delete: %w", entry.ID, err))
+			continue
+		}
+		if current.Metadata[mail.ReadMetadataKey] != "true" {
 			continue
 		}
 		if err := deleteMessageWispBead(store.Store, entry.ID); err != nil {

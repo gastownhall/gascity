@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/webhookverify"
+	"github.com/gastownhall/gascity/internal/worker"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -86,6 +87,13 @@ type Server struct {
 	lookPathMu      sync.Mutex
 	lookPathEntries map[string]lookPathEntry
 
+	// activityMemo memoizes the whole-mirror activity derivation zcode
+	// sessions need on every State poll. workerFactory builds a fresh
+	// worker.Factory per request, so the memo lives here — one per Server —
+	// and is threaded into each factory; otherwise every poll re-parses an
+	// unchanged mirror.
+	activityMemo *worker.DerivedActivityMemo
+
 	// agentVisibilityWaitTimeout overrides the POST /agents visibility wait
 	// in tests. Zero uses defaultAgentVisibilityWaitTimeout.
 	agentVisibilityWaitTimeout time.Duration
@@ -95,6 +103,12 @@ type Server struct {
 	// nothing material has changed.
 	responseCacheMu      sync.Mutex
 	responseCacheEntries map[string]responseCacheEntry
+
+	// responseRefreshing tracks response-cache keys with a background
+	// stale-while-revalidate refresh already in flight (ra-4u2eqc), guarded
+	// by responseCacheMu alongside responseCacheEntries. See
+	// beginResponseRefresh / endResponseRefresh in response_cache.go.
+	responseRefreshing map[string]bool
 
 	// storeHealth caches the on-disk size walk and maintenance-log read
 	// for /v0/status's StoreHealth block. Refreshed on expiry; missing
@@ -257,6 +271,7 @@ func newServer(state State, readOnly bool) *Server {
 		rigIdem:        newRigIdemIndex(),
 		webhookDedup:   newWebhookDedupCache(defaultWebhookDedupTTL),
 		webhookLimiter: newWebhookRateLimiter(),
+		activityMemo:   worker.NewDerivedActivityMemo(),
 	}
 	// Latch the rollout snapshot once: prefer the State's boot latch (the
 	// production controllerState); fall back to resolving from Config() for

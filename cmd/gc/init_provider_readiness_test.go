@@ -27,6 +27,27 @@ func disableBootstrapForTests(t *testing.T) {
 	t.Cleanup(func() { bootstrap.BootstrapPacks = old })
 }
 
+// stubInitRemoteImports makes finalizeInit's remote-import install hermetic.
+//
+// A full init clones gascity-packs over the network: the nested bundled source
+// gascity/roles is not recognized as bundled, so it misses the synthetic cache
+// and takes the real clone path (ga-73eoo). That single clone is most of the
+// runtime of every test that runs a real init, and packman performs it while
+// holding the machine-wide repo-cache write lock — so one wedged remote stalls
+// the whole suite and the pre-push hook with it (ga-r0epd).
+//
+// Use this only in tests whose subject is something other than import
+// installation. Tests that assert on the install itself must stub
+// ensureInitRemoteImportsInstalled directly with the behavior they mean to
+// exercise, the way TestFinalizeInitReportsRemoteImportInstallFailure does;
+// routing those through this helper would assert against a no-op.
+func stubInitRemoteImports(t *testing.T) {
+	t.Helper()
+	prev := ensureInitRemoteImportsInstalled
+	t.Cleanup(func() { ensureInitRemoteImportsInstalled = prev })
+	ensureInitRemoteImportsInstalled = func(string) error { return nil }
+}
+
 func stubInitDependencyChecks(t *testing.T) {
 	t.Helper()
 	oldLookPath := initLookPath
