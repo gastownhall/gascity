@@ -257,6 +257,17 @@ type startResult struct {
 	finished        time.Time
 	rollbackPending bool
 	rateLimitScreen bool
+	// diedDuringStartup is true only when the provider's Start() call itself
+	// succeeded (startedFresh) and the *post-start* stability/liveness check
+	// then found the session not running/alive (the "session %q died during
+	// startup" synthetic error) — as opposed to Start() itself returning an
+	// error (e.g. a transient provider error mid a gc suspend/resume cycle).
+	// commitStartFailure uses this to distinguish "this session actually came
+	// up and immediately exited, so its pending-create should roll back and
+	// retry fresh" from "Start() never got the process up at all, so a
+	// configured named session's pending-create should be preserved for a
+	// retry instead of destructively closed" (ga-pmafyc round 4).
+	diedDuringStartup bool
 	// phases captures sub-phase wall-clock so the lifecycle log can pinpoint
 	// where a slow start spent its time. See gc-67o for context.
 	phases startPhaseTimings
@@ -1510,6 +1521,10 @@ func runPreparedStartCandidate(
 	startCallBegin := time.Now()
 	startedFresh, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg, &phases, sessionStaleKeyDetectionWaiter, warmClaim)
 	startCtxErr := startCtx.Err()
+	// diedDuringStartup distinguishes "Start() itself returned an error" from
+	// "Start() succeeded but the post-start liveness check then found the
+	// session dead" — see the startResult.diedDuringStartup doc comment.
+	diedDuringStartup := false
 	// Split start_call into provider.Start and the ErrStateSync recovery
 	// branch (gc-9ha). The recovery branch hits the worker observation
 	// API which can dominate start_call when the runtime is wedged.
@@ -1557,6 +1572,7 @@ func runPreparedStartCandidate(
 				err = fmt.Errorf("observing session %q after startup: %w", item.candidate.name(), err)
 			} else if !running || !alive {
 				err = fmt.Errorf("session %q died during startup", item.candidate.name())
+				diedDuringStartup = true
 			}
 		}
 		phases.PostStartObserve = time.Since(postStartBegin)
@@ -1567,13 +1583,14 @@ func runPreparedStartCandidate(
 	rateLimitScreen := err != nil && !livenessUnavailable && startupRateLimitScreenDetected(item, cityPath, sp, store, cfg)
 	if err != nil && rollbackPending && !rateLimitScreen && runningSessionMatchesPendingCreateInfo(item.candidate.info, item.candidate.name(), sp) {
 		return startResult{
-			prepared:        item,
-			err:             nil,
-			outcome:         TraceOutcomeStartErrorConverged,
-			started:         started,
-			finished:        finished,
-			rollbackPending: false,
-			phases:          phases,
+			prepared:          item,
+			err:               nil,
+			outcome:           TraceOutcomeStartErrorConverged,
+			started:           started,
+			finished:          finished,
+			rollbackPending:   false,
+			diedDuringStartup: diedDuringStartup,
+			phases:            phases,
 		}
 	}
 	var outcome TraceOutcomeCode
@@ -1617,14 +1634,15 @@ func runPreparedStartCandidate(
 		rateLimitScreen = false
 	}
 	return startResult{
-		prepared:        item,
-		err:             err,
-		outcome:         outcome,
-		started:         started,
-		finished:        finished,
-		rollbackPending: rollbackPending,
-		rateLimitScreen: rateLimitScreen,
-		phases:          phases,
+		prepared:          item,
+		err:               err,
+		outcome:           outcome,
+		started:           started,
+		finished:          finished,
+		rollbackPending:   rollbackPending,
+		rateLimitScreen:   rateLimitScreen,
+		diedDuringStartup: diedDuringStartup,
+		phases:            phases,
 	}
 }
 
@@ -2425,7 +2443,7 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 				fmt.Fprintf(stderr, "session reconciler: saving startup-health episode for %s: %v\n", name, saveErr) //nolint:errcheck
 			}
 		}
-		if !result.prepared.candidate.configured {
+		if !result.prepared.candidate.configured || result.diedDuringStartup {
 			// A configured named session (declared via [[named_session]]) must
 			// survive a single transient start failure mid pending-create (e.g.
 			// a gc suspend/resume cycle) so the reconciler can retry it, instead
@@ -2433,6 +2451,11 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 			// TestReconcileSessionBeads_RollsBackPendingCreatePreservesConfiguredNamedSession.
 			// An orphaned (unconfigured) pending-create still rolls back here,
 			// per TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError.
+			// A configured session that DID start but then died during its
+			// post-start liveness check (diedDuringStartup) still rolls back
+			// here: it actually launched and exited, so the stale pending-create
+			// must clear for a fresh attempt next tick, matching base's fast
+			// recovery — see TestGastown_Reconciler_SessionRestartsAfterExit.
 			rollbackPendingCreate(info, sessFront, clk.Now().UTC(), stderr)
 		}
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.err, result.phases)
