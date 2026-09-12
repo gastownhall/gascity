@@ -96,10 +96,9 @@ func nudgeStalledPoolClaims(
 	if sess, ok := store.(beads.SessionStore); ok && sess.Store == nil {
 		return
 	}
-	// The shared engine keys work by bead ID alone, which cannot tell two
-	// same-ID beads in different stores apart, so this predicate carries its own
-	// store-scoped snapshot and leaves the engine's ID map empty.
-	runNudgeBackstop(sp, store, sessionBeads, nil, now, stdout, "idle-claim-nudge", poolClaimBackstop{
+	// A bead ID alone cannot tell two same-ID beads in different stores apart,
+	// so this predicate carries its own store-scoped snapshot of the work.
+	runNudgeBackstop(sp, store, sessionBeads, now, stdout, "idle-claim-nudge", poolClaimBackstop{
 		cfg:  cfg,
 		work: newIdleClaimWorkSnapshot(claimWork, claimWorkStoreRefs),
 	})
@@ -138,7 +137,6 @@ func nudgeStalledPoolContinuations(
 		sp,
 		store,
 		sessionBeads,
-		nil,
 		now,
 		stdout,
 		"continuation-claim-nudge",
@@ -170,7 +168,7 @@ func (p poolContinuationBackstop) governs(s beads.Bead) bool {
 	return strings.TrimSpace(s.Metadata["pool_managed"]) == "true"
 }
 
-func (p poolContinuationBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, _ string) (backstopTarget, backstopResolution) {
+func (p poolContinuationBackstop) resolve(s beads.Bead, _ string) (backstopTarget, backstopResolution) {
 	if p.candidates.holdBySessionID[s.ID] {
 		return backstopTarget{}, backstopResolutionHold
 	}
@@ -406,10 +404,9 @@ func (p poolClaimBackstop) governs(s beads.Bead) bool {
 // job and must not be disturbed. If the bead is absent from the work snapshot
 // it's been claimed/closed/moved.
 //
-// The engine's ID-keyed map is ignored: resolution goes through the
-// store-scoped snapshot so a slot bound to a rig bead is matched against that
-// rig's copy, not a same-ID bead in another store.
-func (p poolClaimBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, sessName string) (backstopTarget, backstopResolution) {
+// Resolution goes through the store-scoped snapshot so a slot bound to a rig
+// bead is matched against that rig's copy, not a same-ID bead in another store.
+func (p poolClaimBackstop) resolve(s beads.Bead, sessName string) (backstopTarget, backstopResolution) {
 	triggerID := strings.TrimSpace(s.Metadata[beadmeta.TriggerBeadIDMetadataKey])
 	if triggerID == "" {
 		return backstopTarget{}, backstopResolutionClear

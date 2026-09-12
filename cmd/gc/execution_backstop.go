@@ -125,7 +125,7 @@ func nudgeStalledPoolExecution(
 	if sess, ok := store.(beads.SessionStore); ok && sess.Store == nil {
 		return
 	}
-	runNudgeBackstop(sp, store, sessionBeads, nil, now, stdout, "execution-claim-nudge", poolExecutionBackstop{
+	runNudgeBackstop(sp, store, sessionBeads, now, stdout, "execution-claim-nudge", poolExecutionBackstop{
 		cfg:          cfg,
 		sp:           sp,
 		now:          now,
@@ -257,7 +257,7 @@ func (p poolExecutionBackstop) governs(s beads.Bead) bool {
 // several claims is demonstrably doing something, and picking one of them to
 // nudge about would make the persisted marker a lie. Ambiguity holds rather than
 // clears, so a transient multi-claim tick cannot reset a window already running.
-func (p poolExecutionBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, sessName string) (backstopTarget, backstopResolution) {
+func (p poolExecutionBackstop) resolve(s beads.Bead, sessName string) (backstopTarget, backstopResolution) {
 	// Cheapest discriminator first. The claims snapshot is already in memory,
 	// and the overwhelmingly common answer is "this seat holds nothing" — which
 	// needs no runtime call at all, and clears any stale marker immediately

@@ -162,7 +162,7 @@ func nudgeStalledSeatClaims(
 	if sess, ok := store.(beads.SessionStore); ok && sess.Store == nil {
 		return
 	}
-	runNudgeBackstop(sp, store, sessionBeads, nil, now, stdout, seatClaimNudgeLabel, seatClaimBackstop{
+	runNudgeBackstop(sp, store, sessionBeads, now, stdout, seatClaimNudgeLabel, seatClaimBackstop{
 		cfg:    cfg,
 		sp:     sp,
 		now:    now,
@@ -506,7 +506,7 @@ func (p seatClaimBackstop) governs(s beads.Bead) bool {
 // answers; the runtime probes come next; and only a seat that is quiet,
 // unattended, and demonstrably sitting on its own work pays for the live
 // dependency reads.
-func (p seatClaimBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, sessName string) (backstopTarget, backstopResolution) {
+func (p seatClaimBackstop) resolve(s beads.Bead, sessName string) (backstopTarget, backstopResolution) {
 	// An in_progress row is the execution backstop's turf. HOLD rather than
 	// clear: our work did not go away, this seat just belongs to another lane
 	// for now, and both lanes nudging it on one tick is the churn neither is
