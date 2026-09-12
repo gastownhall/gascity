@@ -91,10 +91,14 @@ summarize` consumer. The output must include these keys:
 - `failure_reason`: stable reason string or empty
 
 On success, close with `gc.outcome=pass` and write the durable JSON to
-`gc.output_json`. If the provider is unavailable, rate-limited, or another
-retryable infrastructure issue occurs, close with `gc.outcome=fail`,
-`gc.failure_class=transient`, and a stable `gc.failure_reason`. For
-non-retryable input or contract failures, use `gc.failure_class=hard`.
+`gc.output_json`. Do not set `gc.failure_class` or `gc.failure_reason` on
+the bead on success — those are `gc.output_json` body fields only, not
+retry-control metadata; a successful close that also carries this
+metadata forces a spurious retry. If the provider is unavailable,
+rate-limited, or another retryable infrastructure issue occurs, close
+with `gc.outcome=fail`, `gc.failure_class=transient`, and a stable
+`gc.failure_reason`. For non-retryable input or contract failures, use
+`gc.failure_class=hard`.
 """
 metadata = { "gc.run_target" = "{{lane_one_target}}", "gc.provider" = "{{lane_one_provider}}", "opt_model" = "{{lane_one_model}}", "gc.review_quorum_lane" = "{{lane_one_id}}", "gc.reviewer_model" = "{{lane_one_model}}", "gc.output_json_schema" = "review-quorum.lane.v1", "gc.output_json_required" = "true" }
 
@@ -137,10 +141,14 @@ summarize` consumer. The output must include these keys:
 - `failure_reason`: stable reason string or empty
 
 On success, close with `gc.outcome=pass` and write the durable JSON to
-`gc.output_json`. If the provider is unavailable, rate-limited, or another
-retryable infrastructure issue occurs, close with `gc.outcome=fail`,
-`gc.failure_class=transient`, and a stable `gc.failure_reason`. For
-non-retryable input or contract failures, use `gc.failure_class=hard`.
+`gc.output_json`. Do not set `gc.failure_class` or `gc.failure_reason` on
+the bead on success — those are `gc.output_json` body fields only, not
+retry-control metadata; a successful close that also carries this
+metadata forces a spurious retry. If the provider is unavailable,
+rate-limited, or another retryable infrastructure issue occurs, close
+with `gc.outcome=fail`, `gc.failure_class=transient`, and a stable
+`gc.failure_reason`. For non-retryable input or contract failures, use
+`gc.failure_class=hard`.
 """
 metadata = { "gc.run_target" = "{{lane_two_target}}", "gc.provider" = "{{lane_two_provider}}", "opt_model" = "{{lane_two_model}}", "gc.review_quorum_lane" = "{{lane_two_id}}", "gc.reviewer_model" = "{{lane_two_model}}", "gc.output_json_schema" = "review-quorum.lane.v1", "gc.output_json_required" = "true" }
 
@@ -181,6 +189,16 @@ bead notes/metadata exactly enough for future `dx-review summarize` ingestion.
 Do not treat `dx-review` as the lifecycle owner; it is only a future
 compatibility consumer for this formula scaffold's durable state. The
 `internal/reviewquorum.Finalize` Go finalizer is not invoked by this step yet.
+
+On success, close with `gc.outcome=pass`. Do not set `gc.failure_class`
+or `gc.failure_reason` on the bead on success — those are
+`gc.output_json` body fields only, not retry-control metadata; a
+successful close that also carries this metadata forces a spurious
+retry. If the provider is unavailable, rate-limited, or another
+retryable infrastructure issue occurs, close with `gc.outcome=fail`,
+`gc.failure_class=transient`, and a stable `gc.failure_reason`. For
+non-retryable input or contract failures, including an unknown lane
+verdict value, use `gc.failure_class=hard`.
 """
 metadata = { "gc.run_target" = "{{synthesis_target}}", "gc.review_quorum_role" = "synthesis", "gc.output_json_schema" = "review-quorum.summary.v1", "gc.output_json_required" = "true" }
 

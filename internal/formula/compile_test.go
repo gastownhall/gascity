@@ -1195,6 +1195,7 @@ func TestCompileReviewQuorumCoreFormula(t *testing.T) {
 				"mutations_delta",
 				"failure_class",
 				"failure_reason",
+				"spurious",
 			} {
 				if !strings.Contains(step.Description, required) {
 					t.Fatalf("%s description missing structured output key %q", step.ID, required)
@@ -1229,6 +1230,7 @@ func TestCompileReviewQuorumCoreFormula(t *testing.T) {
 			"failure_class",
 			"failure_reason",
 			"lane=<lane_id> reason=<stable_reason>",
+			"spurious",
 		} {
 			if !strings.Contains(step.Description, required) {
 				t.Fatalf("%s description missing synthesis contract key %q", step.ID, required)
