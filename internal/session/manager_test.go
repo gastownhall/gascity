@@ -1761,6 +1761,34 @@ func TestCreateInjectsUnifiedSessionRuntimeEnv(t *testing.T) {
 			t.Fatalf("Env[%s] = %q, want %q (env=%v)", key, got, want, env)
 		}
 	}
+	if !strings.Contains(env["GIT_SSH_COMMAND"], "ServerAliveInterval") {
+		t.Fatalf("GIT_SSH_COMMAND = %q, want SSH keepalive", env["GIT_SSH_COMMAND"])
+	}
+}
+
+func TestCreateMergesSSHKeepaliveIntoExistingGitSSHCommand(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	_, err := mgr.CreateSession(
+		context.Background(), CreateOptions{Alias: "", ExplicitName: "test-city--worker", Template: "worker", Title: "Worker", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Env: map[string]string{"GIT_SSH_COMMAND": "ssh -i /keys/id -o IdentitiesOnly=yes"}, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{
+			"session_origin": "ephemeral",
+		}})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	cfg := sp.LastStartConfig("test-city--worker")
+	if cfg == nil {
+		t.Fatalf("Start call not recorded: %#v", sp.Calls)
+	}
+	got := cfg.Env["GIT_SSH_COMMAND"]
+	if !strings.Contains(got, "ServerAliveInterval") {
+		t.Fatalf("GIT_SSH_COMMAND = %q, want keepalive", got)
+	}
+	if !strings.Contains(got, "-i /keys/id") {
+		t.Fatalf("GIT_SSH_COMMAND = %q, want original key flags", got)
+	}
 }
 
 func TestCreateUsesBuiltinAncestorForGCProviderEnv(t *testing.T) {
