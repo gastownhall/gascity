@@ -1129,10 +1129,13 @@ func TestAdvanceSessionDrains_DeferredInterrupt_CanceledBeforeSignal(t *testing.
 	if !ds.followUp {
 		t.Error("drain follow-up tick should be requested when deferred drain-ack is set")
 	}
-	// Verify GC_DRAIN_ACK was set (not Ctrl-C)
-	ack, _ := sp.GetMeta("test-session", "GC_DRAIN_ACK")
-	if ack != "1" {
-		t.Errorf("GC_DRAIN_ACK = %q, want \"1\"", ack)
+	// Verify the reconciler's ack marker was published (not Ctrl-C), and that
+	// it did not claim the agent's GC_DRAIN_ACK key.
+	if acked, err := newDrainOps(sp).isDrainAcked("test-session"); err != nil || !acked {
+		t.Errorf("reconciler drain ack: acked=%v err=%v, want the marker published", acked, err)
+	}
+	if ack, _ := sp.GetMeta("test-session", "GC_DRAIN_ACK"); ack != "" {
+		t.Errorf("GC_DRAIN_ACK = %q, want empty: the reconciler's ack must not use the agent's key", ack)
 	}
 	for _, c := range sp.Calls {
 		if c.Method == "Interrupt" {

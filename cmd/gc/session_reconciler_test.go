@@ -10235,8 +10235,8 @@ func TestReconcileSessionBeads_AttachedSessionCancelsQueuedConfigDriftDrain(t *t
 	if ds := env.dt.get(session.ID); ds == nil || ds.reason != "config-drift" {
 		t.Fatalf("detached config drift should queue a config-drift drain, got %+v", ds)
 	}
-	if ack, _ := env.sp.GetMeta("worker", "GC_DRAIN_ACK"); ack != "1" {
-		t.Fatalf("GC_DRAIN_ACK after queued drain = %q, want 1", ack)
+	if acked, err := newDrainOps(env.sp).isDrainAcked("worker"); err != nil || !acked {
+		t.Fatalf("reconciler drain ack after queued drain: acked=%v err=%v, want the reconciler's marker published", acked, err)
 	}
 
 	env.sp.SetAttached("worker", true)
@@ -10273,8 +10273,8 @@ func TestReconcileSessionBeads_AttachedSessionCancelsQueuedConfigDriftDrainBefor
 	if ds := env.dt.get(session.ID); ds == nil || ds.reason != "config-drift" {
 		t.Fatalf("detached config drift should queue a config-drift drain, got %+v", ds)
 	}
-	if ack, _ := env.sp.GetMeta("worker", "GC_DRAIN_ACK"); ack != "1" {
-		t.Fatalf("GC_DRAIN_ACK after queued drain = %q, want 1", ack)
+	if acked, err := newDrainOps(env.sp).isDrainAcked("worker"); err != nil || !acked {
+		t.Fatalf("reconciler drain ack after queued drain: acked=%v err=%v, want the reconciler's marker published", acked, err)
 	}
 
 	env.sp.SetAttached("worker", true)
@@ -10311,8 +10311,8 @@ func TestReconcileSessionBeads_ConfigDriftDrainAckAttachmentErrorDefersStop(t *t
 	if ds := env.dt.get(session.ID); ds == nil || ds.reason != "config-drift" {
 		t.Fatalf("detached config drift should queue a config-drift drain, got %+v", ds)
 	}
-	if ack, _ := env.sp.GetMeta("worker", "GC_DRAIN_ACK"); ack != "1" {
-		t.Fatalf("GC_DRAIN_ACK after queued drain = %q, want 1", ack)
+	if acked, err := newDrainOps(env.sp).isDrainAcked("worker"); err != nil || !acked {
+		t.Fatalf("reconciler drain ack after queued drain: acked=%v err=%v, want the reconciler's marker published", acked, err)
 	}
 	got, err := env.store.Get(session.ID)
 	if err != nil {

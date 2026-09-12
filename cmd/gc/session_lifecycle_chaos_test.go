@@ -820,6 +820,12 @@ func TestSessionLifecycleChaosPendingInteractionRespectsWakeBlockers(t *testing.
 	cases := []struct {
 		name string
 		meta map[string]string
+		// keepAlive marks a blocker that is itself a keep-alive contract: a
+		// heartbeat hold (held_until with no sleep_intent) keeps a pool seat
+		// out of the orphan drain (gastownhall/gascity#6173), so the seat
+		// stays running and the pending interaction still wakes nothing. The
+		// other blockers are not keep-alives and the seat drains as before.
+		keepAlive bool
 	}{
 		{
 			name: "wait-hold",
@@ -831,6 +837,7 @@ func TestSessionLifecycleChaosPendingInteractionRespectsWakeBlockers(t *testing.
 				"held_until":   time.Date(2026, 3, 8, 12, 10, 0, 0, time.UTC).Format(time.RFC3339),
 				"sleep_reason": "user-hold",
 			},
+			keepAlive: true,
 		},
 		{
 			name: "quarantine",
@@ -858,9 +865,22 @@ func TestSessionLifecycleChaosPendingInteractionRespectsWakeBlockers(t *testing.
 				Prompt:    "chaos test",
 			})
 			h.record("pending interaction with blocker=%s", tc.name)
-			h.reconcileTick()
+			woken := h.reconcileTickWoken()
 
-			if ds := h.env.dt.get(h.sessionID); ds == nil {
+			ds := h.env.dt.get(h.sessionID)
+			if tc.keepAlive {
+				if woken != 0 {
+					h.failf("pending interaction woke a heartbeat-held seat (woken=%d); the hold must still block the wake", woken)
+				}
+				if ds != nil {
+					h.failf("heartbeat hold must keep the pool seat out of the orphan drain; got drain %+v", *ds)
+				}
+				if !h.env.sp.IsRunning(h.sessionName) {
+					h.failf("heartbeat-held pool seat %q was stopped", h.sessionName)
+				}
+				return
+			}
+			if ds == nil {
 				h.failf("pending interaction bypassed blocker %s; expected drain", tc.name)
 			}
 		})
@@ -1056,6 +1076,12 @@ func (h *sessionChaosHarness) setDesired(on bool) {
 }
 
 func (h *sessionChaosHarness) reconcileTick() {
+	h.reconcileTickWoken()
+}
+
+// reconcileTickWoken is reconcileTick returning the number of sessions the
+// tick woke, for cases that must prove a blocker granted no wake.
+func (h *sessionChaosHarness) reconcileTickWoken() int {
 	sessions, err := loadSessionBeads(h.env.store)
 	if err != nil {
 		h.failf("loadSessionBeads: %v", err)
@@ -1063,6 +1089,7 @@ func (h *sessionChaosHarness) reconcileTick() {
 	woken := h.env.reconcile(sessions)
 	h.record("reconcile open=%d woken=%d", len(sessions), woken)
 	h.assertPostReconcileInvariants()
+	return woken
 }
 
 func (h *sessionChaosHarness) reconcileTickWithoutPostInvariants(storeQueryPartial bool) {
