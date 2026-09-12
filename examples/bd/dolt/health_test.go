@@ -2467,3 +2467,93 @@ func TestHealthReportsFreshnessForABackupWrittenThisSecond(t *testing.T) {
 		t.Errorf("dolt_freshness = %q, want \"0s\"; an empty string here is what an unmeasured probe reports\n%s", backups.DoltFresh, out)
 	}
 }
+
+// TestHealthAgesABackupRemoteByItsManifestNotItsNewestChunk pins which file
+// in a backup remote carries the freshness reading.
+//
+// `dolt backup sync` writes chunk data first and adopts it by rewriting the
+// manifest last, so a sync the server cuts off in between leaves chunk files
+// newer than anything the manifest references. That is the failure this
+// command exists to report honestly, and it is exactly where the newest file
+// of any kind lies: on the city that produced this test an hq remote held a
+// chunk written at 21:04 beside a manifest still reading 15:04, so a
+// newest-file reading called a six-hour-old backup nine minutes old.
+//
+// Both directions are asserted from one fixture. hq has the fresh chunk and
+// the stale manifest, so a newest-file reading calls it fresh; aa has the
+// fresh manifest and the old chunk, so a reading that took the oldest file
+// instead would call it stale.
+func TestHealthAgesABackupRemoteByItsManifestNotItsNewestChunk(t *testing.T) {
+	cityPath := t.TempDir()
+	artifactDir := filepath.Join(cityPath, ".dolt-backup")
+	stamp := func(path string, at time.Time) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+		}
+		if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+		if err := os.Chtimes(path, at, at); err != nil {
+			t.Fatalf("chtimes %s: %v", path, err)
+		}
+	}
+	now := time.Now()
+	old := now.Add(-20 * time.Hour)
+	stamp(filepath.Join(artifactDir, "hq", "manifest"), old)
+	stamp(filepath.Join(artifactDir, "hq", "chunk.darc"), now)
+	stamp(filepath.Join(artifactDir, "aa", "manifest"), now)
+	stamp(filepath.Join(artifactDir, "aa", "chunk.darc"), old)
+
+	backups, out := runHealthBackupsJSON(t, cityPath)
+
+	byName := map[string]bool{}
+	for _, db := range backups.Databases {
+		byName[db.Name] = db.Stale
+	}
+	if len(byName) != 2 {
+		t.Fatalf("dolt_databases = %v, want one entry per backup remote\n%s", backups.Databases, out)
+	}
+	if !byName["hq"] {
+		t.Errorf("hq reported not stale: its manifest is 20h old and the fresher chunk beside it is not a backup\n%s", out)
+	}
+	if byName["aa"] {
+		t.Errorf("aa reported stale: its manifest was written just now, however old the chunk beside it is\n%s", out)
+	}
+	if backups.DoltStale == nil || !*backups.DoltStale {
+		t.Errorf("dolt_stale = %v, want true from hq's stale manifest\n%s", backups.DoltStale, out)
+	}
+	if backups.DoltAgeSec < 19*3600 {
+		t.Errorf("dolt_age_sec = %d, want hq's manifest age (~72000), not its newest chunk's\n%s", backups.DoltAgeSec, out)
+	}
+}
+
+// TestHealthReportsARemoteWithChunksButNoManifestAsNeverBackedUp covers the
+// remote a first sync never finished: chunk data landed and no manifest ever
+// adopted it. Nothing in it is restorable, so it reads exactly like an empty
+// remote rather than like a backup as fresh as its newest chunk.
+func TestHealthReportsARemoteWithChunksButNoManifestAsNeverBackedUp(t *testing.T) {
+	cityPath := t.TempDir()
+	chunk := filepath.Join(cityPath, ".dolt-backup", "hq", "chunk.darc")
+	if err := os.MkdirAll(filepath.Dir(chunk), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(chunk, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write chunk: %v", err)
+	}
+
+	backups, out := runHealthBackupsJSON(t, cityPath)
+
+	if !backups.DoltMeasured {
+		t.Fatalf("dolt_measured = false for a configured remote, want true\n%s", out)
+	}
+	if backups.DoltStale == nil || !*backups.DoltStale {
+		t.Fatalf("dolt_stale = %v for a remote with no manifest, want true\n%s", backups.DoltStale, out)
+	}
+	if len(backups.Databases) != 1 || backups.Databases[0].AgeSec != -1 || !backups.Databases[0].Stale {
+		t.Fatalf("dolt_databases = %v, want one hq entry with age_sec -1 and stale true: a chunk without a manifest is not a backup\n%s", backups.Databases, out)
+	}
+	if backups.DoltAgeSec != -1 {
+		t.Errorf("dolt_age_sec = %d, want -1; the chunk's mtime must not pass for a backup age\n%s", backups.DoltAgeSec, out)
+	}
+}

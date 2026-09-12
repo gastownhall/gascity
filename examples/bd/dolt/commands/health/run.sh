@@ -338,8 +338,14 @@ now=$(date +%s)
 # same-named subdirectory, which is where the backup order points every remote
 # it configures (file://$BACKUP_ARTIFACT_DIR/<db>). This costs no dolt call, so
 # it stays inside the patrol's fork budget. An eligible database whose
-# directory holds no backup file yet is measured and reported stale: never
+# directory holds no manifest yet is measured and reported stale: never
 # having been backed up is a known-bad state, not an unknown one.
+#
+# The manifest's mtime is the age of the newest restorable backup. `dolt backup
+# sync` writes chunk data first and adopts it by rewriting the manifest last,
+# so a sync cut off in between leaves chunks newer than anything the manifest
+# references, and the newest file of any kind would date a backup that does
+# not exist.
 if [ -d "$backup_artifact_dir" ]; then
   for bdir in "$backup_artifact_dir"/*/; do
     [ -d "$bdir" ] || continue
@@ -353,11 +359,7 @@ if [ -d "$backup_artifact_dir" ]; then
     esac
     backup_measured=true
     db_newest=0
-    for bfile in "$bdir"* ; do
-      [ -f "$bfile" ] || continue
-      bmtime=$(path_mtime "$bfile")
-      [ "$bmtime" -gt "$db_newest" ] && db_newest="$bmtime"
-    done
+    [ -f "${bdir}manifest" ] && db_newest=$(path_mtime "${bdir}manifest")
     if [ "$db_newest" -le 0 ]; then
       db_age=-1
       db_stale=true
