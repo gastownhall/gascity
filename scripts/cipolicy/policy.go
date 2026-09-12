@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -178,6 +179,9 @@ func validate(ci, nightly, action map[string]any) error {
 	if err := validatePRProviderOwnership(ci); err != nil {
 		return err
 	}
+	if err := validatePlaywrightInstallHardening(ci); err != nil {
+		return err
+	}
 	if err := assertWorkflowExecution("CI", ci, expectedCIExecutionHash); err != nil {
 		return err
 	}
@@ -331,6 +335,60 @@ func validateNightlyProviderOwnership(workflow map[string]any) error {
 				match.name,
 			)
 		}
+	}
+	return nil
+}
+
+// validatePlaywrightInstallHardening ensures the Dashboard SPA's Playwright
+// Chromium install step fails fast on a hung apt mirror instead of consuming
+// its whole retry budget on a single stuck attempt: each retry wraps the
+// install command with a per-attempt timeout, and apt itself gets an
+// explicit HTTP timeout so a dead mirror errors instead of hanging.
+func validatePlaywrightInstallHardening(workflow map[string]any) error {
+	job, err := workflowJob(workflow, "dashboard")
+	if err != nil {
+		return err
+	}
+	steps, err := mappingSlice(job["steps"], "dashboard steps")
+	if err != nil {
+		return err
+	}
+	const stepName = "Install Playwright Chromium"
+	var installStep map[string]any
+	for _, candidate := range steps {
+		if candidate["name"] == stepName {
+			installStep = candidate
+			break
+		}
+	}
+	if installStep == nil {
+		return fmt.Errorf("dashboard job is missing the %q step", stepName)
+	}
+	if installStep["timeout-minutes"] != 12 {
+		return fmt.Errorf("%q step must keep its outer timeout-minutes at 12", stepName)
+	}
+	run, ok := installStep["run"].(string)
+	if !ok {
+		return fmt.Errorf("%q step must have a run script", stepName)
+	}
+	aptTimeoutIndex := strings.Index(run, `Acquire::http::Timeout "15"`)
+	if aptTimeoutIndex < 0 {
+		return fmt.Errorf(
+			"%q step must configure an apt HTTP timeout (Acquire::http::Timeout \"15\") so a dead mirror errors instead of hanging",
+			stepName,
+		)
+	}
+	const perAttemptInstall = "timeout 240 npm run test:e2e:install:ci"
+	installIndex := strings.Index(run, perAttemptInstall)
+	if installIndex < 0 {
+		return fmt.Errorf(
+			"%q step must wrap each retry attempt with a per-attempt timeout (%q) so a hung install cannot consume the whole step budget",
+			stepName,
+			perAttemptInstall,
+		)
+	}
+	if aptTimeoutIndex > installIndex {
+		return fmt.Errorf("%q step must configure the apt HTTP timeout before the retry loop runs", stepName)
 	}
 	return nil
 }
