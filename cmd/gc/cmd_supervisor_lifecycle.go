@@ -608,6 +608,15 @@ func ensureSupervisorRunning(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc supervisor start: %s\n", msg) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// A supervisor that already serves this home keeps serving it with or
+	// without a service file. Where a service manager can host one, fall
+	// through so the install below refreshes the unit on upgrades. Where
+	// none can — a foreground supervisor under a container init, or a shell
+	// without a user-systemd session — the install could only fail, and its
+	// error would tell the user to fix something that is not broken.
+	if supervisorAliveHook() != 0 && !supervisorServiceManagerAvailable() {
+		return 0
+	}
 	// Always regenerate the service file so upgrades pick up template
 	// changes (e.g. PATH captured from the user's shell).
 	if doSupervisorInstall(stdout, stderr) != 0 {
@@ -621,6 +630,20 @@ func ensureSupervisorRunning(stdout, stderr io.Writer) int {
 		return 0
 	}
 	return waitForSupervisorReady(stderr)
+}
+
+// supervisorServiceManagerAvailable reports whether gc could install its
+// own supervisor service on this host right now: a reachable per-user
+// systemd manager on Linux, launchd on macOS, nothing elsewhere.
+func supervisorServiceManagerAvailable() bool {
+	switch supervisorRuntimeGOOS {
+	case "linux":
+		return supervisorSystemctlUserAvailable()
+	case "darwin":
+		return true
+	default:
+		return false
+	}
 }
 
 func platformSupervisorHomeOverrideError() (string, bool) {
