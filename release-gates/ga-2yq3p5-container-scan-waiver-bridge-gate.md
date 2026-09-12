@@ -1,188 +1,150 @@
 # Release gate: time-boxed container-scan waiver bridge
 
-- Deploy bead: `ga-2yq3p5`
-- Build bead: `ga-wb9e3a`
-- Review bead: `ga-56p0rf`
-- Reviewed source: `a774fee25bc0ecfb2e38c9936a53d58eb76e1e34`
-- Base evaluated: `origin/main@615f5b7942220ee02f6825b9d3d52b7b4b9e9224`
-- Deploy mode: `remote`
-- Push remote: `origin`
+- Re-gate bead: `ga-hw5v0q`
+- Existing deploy bead: `ga-2yq3p5`
+- Round-two review bead: `ga-9r8x58`
+- Reviewed source: `0f700a13c02772be58a5c3bb101dc5807edebc36`
+- Base evaluated: `origin/main@ac8f6c6cdf875feb72064caba3b1346ae93614d2`
+- Existing branch: `deploy/ga-2yq3p5-gate`
+- Existing pull request: [#5885](https://github.com/gastownhall/gascity/pull/5885)
+- Deploy mode: `remote`; push remote: `origin`
 - Overall verdict: **PASS with attributed non-diff-owned failures**
 
-`docs/PROJECT_MANIFEST.md` and `work-packages/` are not present at the reviewed
-commit, so this record uses the seven criteria embedded in
-`mol-deployer-gate` plus the acceptance contract on the build bead. The
-pre-flight query found no pull request associated with the reviewed source;
-the normal deploy path applies.
+This is the round-two re-gate of the already-open pull request. The pull
+request head matched the reviewed source before evaluation. Per the bead's
+specific instruction, this gate updates the existing isolated branch and pull
+request; it does not cut another branch or open another pull request.
+
+`docs/PROJECT_MANIFEST.md` and `work-packages/` are absent at the reviewed
+source, so the seven deploy criteria and the reviewed bead's acceptance
+contract are authoritative.
 
 ## Criteria
 
 | # | Criterion | Result | Evidence |
 |---|---|---|---|
-| 1 | Review PASS present | **PASS** | Review bead `ga-56p0rf` is closed `pass` on the exact reviewed source. It records no style, security, specification, or high-severity finding. |
-| 2 | Acceptance criteria met | **PASS** | The executable acceptance test confirms 45 existing entries moved from `2026-08-07` to the time-boxed `2026-09-21` horizon, exactly one `CVE-2026-46600` entry was added for `usr/bin/gh` and `usr/local/bin/dolt`, no waiver was removed, and every entry has a durable-fix statement. The base-to-head diff contains only `.trivyignore.yaml` and its owning test; it does not touch bundled-tool refs, Dockerfiles, or module patches. The live Container Scan rerun is a post-PR confirmation and must be green before the merge request is routed. **Amendment (2026-09-10, operator ruling docket D6, "Widen the waiver"):** a second executable acceptance test, `TestTrivyIgnoreWaivesXCryptoSSHCVEForGHDoltBD`, confirms exactly one further `CVE-2026-56854` entry was added on the same `2026-09-21` horizon, scoped to `usr/bin/gh`, `usr/local/bin/dolt`, and `usr/local/bin/bd` only (not `kubectl`), with no existing entry trimmed, removed, or duplicated. The amended diff still touches only `.trivyignore.yaml` and its owning test. This amendment's own Container Scan rerun on PR #5885 remains pending live acceptance, same as the original widening. **Amendment (2026-09-11, operator ruling docket E9, "widen #5885's `.trivyignore.yaml` to cover every HIGH/CRITICAL finding failing its scan today"):** a third executable acceptance test, `TestTrivyIgnoreWidensDocketE9WaiverForRemainingHighCriticalFindings`, confirms seventeen further entries were added on the same `2026-09-21` horizon for the exact HIGH/CRITICAL findings still failing PR #5885's own Container Scan run (34553600725, job 103121488224, "Image vulnerabilities") after the D6 widening: `CVE-2026-56864`/`CVE-2026-56865` (x/mod) for `usr/bin/gh`; `CVE-2026-84304`/`CVE-2026-84445` (grpc) across `usr/bin/gh`, `usr/local/bin/dolt`, `usr/local/bin/bd`, and `usr/local/bin/gc`; `CVE-2026-43871` (thrift) across `usr/local/bin/dolt` and `usr/local/bin/bd`; six Go-stdlib CVEs (`CVE-2026-33818`, `CVE-2026-56853`, `CVE-2026-56858`, `CVE-2026-56859`, `CVE-2026-56860`, `CVE-2026-56862`) scoped to `usr/local/bin/kubectl` only; and six purl-scoped entries with no `paths` key (three Debian util-linux CVEs `CVE-2026-53612`/`53613`/`53614` and three Python GitPython CVEs `CVE-2026-78676`/`78675`/`78677`), each confined to the `gc-mcp-mail` image's own package set. The pre-existing `CVE-2026-46600` entry was widened in place to add `usr/local/bin/kubectl` alongside `usr/bin/gh` and `usr/local/bin/dolt` (it was not duplicated). No Go-stdlib waiver was added for the rebuilt `gh`/`dolt`/`bd` binaries, consistent with the file header's prohibition against masking their pending rebuild. This amendment's own Container Scan rerun on the moved PR #5885 head remains pending live acceptance, same as the prior two widenings. |
-| 3 | Tests pass | **PASS with attributed raw failures** | The required CI jobs for this path set are mapped below. Their local equivalents passed, including acceptance A, the minimum-supported `bd` contract, generated artifacts, GoReleaser config, the complete dashboard lane, and the diff-owned integration/security tests. Gas City's documented full local matrix, `make test-local-full-parallel`, scheduled all 40 jobs; its verbose logs contain **48,294 PASS / 4 attributed FAIL / 208 SKIP** top-level test results. The four failures are non-diff-owned and satisfy the attribution protocol below. |
-| 3a | Non-diff-owned failures attributed | **PASS** | `TestBdFlagManifestCurrent` is tracked by `ga-f0uceo`; the two dirty-schema review-formula failures are tracked by `ga-esyijp`; the `citysus.report` timeout is tracked by `ga-dqd7gf`, created under the same-run tracker escape after a structural mechanism proof landed and clauses 1 and 4 were clear. |
-| 3b | Policy/lint lane | **PASS** | CI-policy tests, affected-package lint and format, `go vet ./...`, docs sync, native dependency, open-core, event-export, and native DoltLite checks all passed. |
-| 3c | CI-config lane run | **PASS / n/a** | No workflow, job matrix, timeout, required-check list, runner policy, or other CI configuration changed. `.trivyignore.yaml` is workflow input rather than workflow configuration. |
-| 4 | No high-severity review findings open | **PASS** | The reviewer recorded `style_findings: none`, `security_findings: none`, `uncovered_criteria: none`, and `verdict: pass`. |
-| 5 | Final branch is clean | **PASS** | The detached checkout of the exact reviewed source remained clean after the full matrix and static lanes. This checklist is the deployer's sole addition and is committed separately on the isolated deploy branch. |
-| 6 | Branch diverges cleanly from main | **PASS** | `git merge-tree --write-tree origin/main a774fee25bc0ecfb2e38c9936a53d58eb76e1e34` exited 0 and produced tree `99e5a0cdc4069726489d76e0b34fa4c430e9e3af`. The reviewed source is based directly on the evaluated `origin/main`; no self-rebase was required. |
-| 7 | Single feature theme | **PASS** | Two TDD commits change one security-policy surface: a short-lived waiver-horizon refresh plus the one newly observed vendored-tool CVE, with an owning regression test. **Amendment:** two further TDD commits (RED + GREEN) widen the same `.trivyignore.yaml` surface with the same time-box, for the one further vendored-tool CVE named in the 2026-09-10 operator ruling, each with its own owning regression test. Four TDD commits total, all confined to the one security-policy surface. **Amendment (2026-09-11, docket E9):** two further TDD commits (RED + GREEN) widen the same `.trivyignore.yaml` surface with the same time-box, for the seventeen further findings named in the 2026-09-11 operator ruling, with their own owning regression test. Six TDD commits total, all confined to the one security-policy surface. |
+| 1 | Review PASS present | **PASS** | `ga-9r8x58` is closed with `verdict: pass` on the exact reviewed source. The reviewer independently ran the affected scripts package and found no style, security, or specification gap. |
+| 2 | Acceptance criteria met | **PASS** | The waiver file contains the complete reviewed E9 set, every entry remains time-boxed to `2026-09-21`, and the owning tests validate the exact CVEs, paths/purls, non-removal rules, expiry, durable-fix statements, and the gate document's entry-count arithmetic. The exact-head Container Scan and `Image vulnerabilities` job are green. |
+| 3 | Tests pass | **PASS with attributed raw failures** | The documented full-scope command scheduled all 40 jobs and produced **49,993 PASS / 6 attributed FAIL / 210 SKIP** top-level results. All six diff-owned tests executed and passed twice. The raw failures are covered by the independently evidenced trackers in the attribution section; none is diff-owned or overlaps a changed path. |
+| 3a | Non-diff-owned failures attributed | **PASS** | Five fixture-start failures share the tracked beads#5920 shared-Dolt migration-refusal condition `ga-vkhfnj`. The `citysus.report` timeout exactly matches the proven suspend/wake bug tracked by `ga-dc9utn`. Each tracker predates this run; verified sightings were appended. |
+| 3b | Policy/lint lane | **PASS** | `make test-ci-policy`, affected-file lint and formatting, `go vet ./...`, `go build ./...`, docs synchronization, and diff hygiene all pass. The exact-head remote `CI / required` and `CI / integration` fan-ins are also green. |
+| 3c | CI-config lane run | **PASS / n/a** | No workflow, job matrix, timeout, runner policy, required-check list, Makefile, or `scripts/cipolicy/**` path changed. `.trivyignore.yaml` is scanner policy input, and its own exact-head `Image vulnerabilities` lane completed successfully. |
+| 4 | No high-severity review findings open | **PASS** | The round-two reviewer recorded `style_findings: none`, `security_findings: none`, `uncovered_criteria: none`, and `verdict: pass`. |
+| 5 | Final branch is clean | **PASS** | The exact reviewed source was clean before and after the full suite and static lanes. This checklist update is the deployer's only working-tree change. |
+| 6 | Branch diverges cleanly from main | **PASS** | `git merge-tree --write-tree ac8f6c6cdf875feb72064caba3b1346ae93614d2 0f700a13c02772be58a5c3bb101dc5807edebc36` exited 0 and produced tree `819768538e3a5e02c5db9f3deb8d424d5cf27ad3`. Divergence was 5 base-only / 11 candidate-only commits. No self-rebase was needed. |
+| 7 | Single feature theme | **PASS** | The cumulative branch changes one security-policy surface: temporary, narrowly scoped container-scan waivers plus tests and this gate record. No production implementation, dependency pin, image recipe, or independent behavior rides along. |
 
 ## Acceptance evidence
 
 - `.trivyignore.yaml` contains 64 entries: 47 pre-existing entries (45
   original, plus the `CVE-2026-46600` entry from the first widening, plus the
-  `CVE-2026-56854` entry from the 2026-09-10 docket D6 widening) and 17
-  further new entries (2026-09-11 operator ruling, docket E9, "widen #5885's
-  `.trivyignore.yaml` to cover every HIGH/CRITICAL finding failing its scan
-  today").
-- Every entry expires on `2026-09-21` and has a non-empty statement naming its
-  durable fix path.
-- The `CVE-2026-46600` entry is scoped to `usr/bin/gh`, `usr/local/bin/dolt`,
-  and (as of the docket E9 widening) `usr/local/bin/kubectl`. The
-  `CVE-2026-56854` entry is scoped to `usr/bin/gh`, `usr/local/bin/dolt`, and
-  `usr/local/bin/bd` (its durable fix: austinborn's PR #5353 for gh/Dolt, plus
-  rebuilding `bd` from beads main, whose `go.mod` already pins
-  `golang.org/x/crypto` >= v0.54.0).
-- The 17 docket-E9 entries are scoped to exactly the findings PR #5885's own
-  Container Scan run (34553600725, job 103121488224, "Image vulnerabilities")
-  reported after the D6 widening, and no further: `CVE-2026-56864`/`56865`
-  (x/mod, `usr/bin/gh`); `CVE-2026-84304`/`84445` (grpc, across `usr/bin/gh`,
-  `usr/local/bin/dolt`, `usr/local/bin/bd`, and `usr/local/bin/gc`);
-  `CVE-2026-43871` (thrift, across `usr/local/bin/dolt` and
-  `usr/local/bin/bd`); `CVE-2026-33818`/`56853`/`56858`/`56859`/`56860`/`56862`
-  (Go stdlib, `usr/local/bin/kubectl` only); and `CVE-2026-53612`/`53613`/`53614`
-  (Debian util-linux) plus `CVE-2026-78676`/`78675`/`78677` (Python GitPython),
-  all six purl-scoped with no `paths` key so they confine themselves to the
-  `gc-mcp-mail` image's own package set. No Go-stdlib waiver was added for the
-  rebuilt `gh`/`dolt`/`bd` binaries — their fix route is the Go 1.26.5+
-  rebuild, not a waiver, per the file header's prohibition.
-- No prior waiver ID was removed by any of the three widenings.
-- The cumulative base-to-head diff (through all three widenings) is exactly:
+  `CVE-2026-56854` entry from docket D6) and 17 further new entries from the
+  docket E9 widening.
+- `TestReleaseGateWaiverBridgeDocEntryCountMatchesTrivyIgnore` parses the
+  preceding sentence, verifies `47 + 17 = 64`, parses the YAML, and verifies
+  the actual entry count is 64. This closes the sole round-one review gap.
+- Every waiver expires on `2026-09-21` and carries a non-empty durable-fix
+  statement.
+- The E9 entries cover the remaining HIGH/CRITICAL findings from the prior
+  failing scan: x/mod for `gh`; gRPC for `gh`, `dolt`, `bd`, and `gc`; thrift
+  for `dolt` and `bd`; Go standard-library findings for `kubectl`; and the
+  purl-scoped util-linux and GitPython findings in the MCP mail image.
+- No Go standard-library waiver was added for the rebuilt `gh`, `dolt`, or
+  `bd` binaries. No prior waiver was removed.
+- The cumulative diff against the evaluated base contains only:
 
   ```text
-  .trivyignore.yaml                       | 228 ++++++++++++++----
-  scripts/container_tool_security_test.go | 411 +++++++++++++++++++++++++++++++-
-  2 files changed, 588 insertions(+), 51 deletions(-)
+  .trivyignore.yaml
+  release-gates/ga-2yq3p5-container-scan-waiver-bridge-gate.md
+  scripts/container_tool_security_test.go
   ```
 
-- No `GH_SOURCE_REF`, `DOLT_SOURCE_REF`, Dockerfile, `go.mod`, or module-patch
-  path changed.
+- The exact reviewed head passed [Container Scan run 34667459615](https://github.com/gastownhall/gascity/actions/runs/34667459615), including [Image vulnerabilities job 103482216324](https://github.com/gastownhall/gascity/actions/runs/34667459615/job/103482216324).
 
-## Build and test evidence
+## Full-suite evidence
 
-- `make build`: **PASS**
-- `./bin/gc version`: **PASS** (`dev`)
-- `test_cmd`: `GOFLAGS=-v make test-local-full-parallel`
+- `test_cmd`: `DOCKER_HOST=unix:///run/user/1000/podman/podman.sock TESTCONTAINERS_RYUK_DISABLED=true GO_TEST_TIMEOUT=30m LOCAL_TEST_JOBS=4 GOFLAGS=-v make test-local-full-parallel`
 - `test_cmd_scope`: `full-suite`
-- `test_counts`: **48,294 PASS / 4 attributed FAIL / 208 SKIP** top-level test results
-- `shard_logs`: `/var/tmp/ga-2yq3p5-testlogs.hoREok`
-- `skip_justification`: the 208 skips are pre-existing platform guards,
-  helper-process sentinels, optional live-provider/registry cases, and opt-in
-  persistence or infrastructure tests. None is diff-owned; all diff-owned tests
-  executed and passed.
+- `test_counts`: **49,993 PASS / 6 attributed FAIL / 210 SKIP** top-level results
+- `shard_result`: **35/40 jobs PASS; 5/40 jobs contain the six attributed failures**
+- `shard_logs`: `/var/tmp/gc-local-tests.OC4cNi`
+- `diff_tests_executed`: all six listed below passed in both full-suite jobs that execute the scripts package
 - `waiver_ref`: none
-- `ci_lane_run`: n/a; no CI-config change
+- `ci_lane_run`: n/a for CI configuration; the scanner-policy lane itself passed on the exact reviewed head
+- `skip_justification`: the 210 skips are existing helper-process sentinels,
+  platform guards, duplicate-lane guards, and opt-in provider/infrastructure
+  coverage (including K8s, PostgreSQL, persistence, and live herdr cases).
+  None is diff-owned. The container environment was configured before the
+  suite, so no container-backed diff-owned test was silently skipped.
 
-Diff-owned tests executed in the full-suite `unit-core` job:
+Diff-owned tests:
 
 - `TestTrivyIgnoreRefreshesBridgeHorizonAndWaivesXNetDNSMessageCVE`: **PASS**
+- `TestTrivyIgnoreWaivesXCryptoSSHCVEForGHDoltBD`: **PASS**
+- `TestTrivyIgnoreWidensDocketE9WaiverForRemainingHighCriticalFindings`: **PASS**
+- `TestReleaseGateWaiverBridgeDocEntryCountMatchesTrivyIgnore`: **PASS**
 - `TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools`: **PASS**
 - `TestRebuiltToolsAssertPatchedGRPCArtifact`: **PASS**
-- `TestTrivyIgnoreWaivesXCryptoSSHCVEForGHDoltBD`: **PASS** (amendment,
-  2026-09-10 operator ruling)
-- `TestTrivyIgnoreWidensDocketE9WaiverForRemainingHighCriticalFindings`:
-  **PASS** (amendment, 2026-09-11 operator ruling docket E9)
 
-### Required CI job mapping
-
-The changed Go test makes the workflow's `integration` path filter true. The
-other conditional path filters are false for this candidate; their summary
-jobs still run and accept the documented skips. The following are the actual
-unconditional or activated jobs that feed `CI / required`, with the local
-equivalent executed against the reviewed source:
-
-| Required CI job | Local equivalent and result |
-|---|---|
-| `Preflight / static checks` | **PASS** — `make test-ci-policy`, all five boundary/dependency guards, affected-package lint and format, and `make check-docs` passed. `make vet` was also run and passed. |
-| `Preflight / acceptance A` | **PASS** — `make test-acceptance`. |
-| `Preflight / generated artifacts` | **PASS** — `make dashboard-ci`, `make spec-ci`, and `./scripts/check-generated-docs-drift.sh`; no generated file drift remained. |
-| `Contract / bd CLI (minimum supported)` | **PASS** — installed the pinned `BD_PREV_VERSION=v1.0.4` into an isolated directory and ran `make test-bd-cli-contract`. |
-| `Release config` | **PASS** — GoReleaser v2.18.0 `check` validated `.goreleaser.yml`. |
-| `Dashboard SPA` | **PASS** — bundle build, source/test/e2e typechecks, 899 Vitest cases, embedded Go projection tests, fakesupervisor build, and 19 Playwright render checks passed. |
-| `CI / integration` | **PASS with attributed non-diff-owned failures in the broader sweep** — the activated integration packages and the owning security tests ran within `make test-local-full-parallel`; the only four failures are attributed below, with no diff-owned failure. The live PR integration shards remain authoritative. |
-| `Check`, `CI / preflight`, `CI / required` | **Pending remote composition** — all locally reproducible dependencies above passed. These fan-in statuses must be green on the PR before deploy clearance. |
-| `Container Scan` / `Image vulnerabilities` | **Pending live acceptance** — this is the diff's purpose and cannot be replaced by a local assertion. It must be green on the PR before deploy clearance. |
-
-The remaining conditional jobs (`cmd/gc` process and product-metrics rows,
-credential-provider Windows, worker phase rows, pack gate, Docker session, K8s
-session, and OpenClaw bridge) have no matching changed path and are expected to
-skip or resolve through their skip-tolerant summary jobs. The remote workflow
-is authoritative for both the path classification and every fan-in result.
+The exact reviewed head also passed [CI run 34667459547](https://github.com/gastownhall/gascity/actions/runs/34667459547), including [CI / integration](https://github.com/gastownhall/gascity/actions/runs/34667459547/job/103482754935) and [CI / required](https://github.com/gastownhall/gascity/actions/runs/34667459547/job/103482792108).
 
 ### Raw failure attribution
 
-- `failure_attribution: TestBdFlagManifestCurrent -> ga-f0uceo | clause 3(a), mechanism — attributed`
-  - The installed `bd` binary exposes flags absent from the reviewed source's
-    manifest. The tracker predates this run and contains repeated independent
-    candidate/base reproductions.
-  - This candidate changes only `.trivyignore.yaml` and
-    `scripts/container_tool_security_test.go`; neither can alter
-    `internal/bdflags` or the installed executable, and there is no path overlap.
-  - Current log: `integration-packages-core-4-of-4.log`.
+The mandatory non-diff-owned-failure protocol was read before attribution.
+All six tests are outside the diff, have no changed-path overlap, and cannot
+reach candidate production code because this candidate changes no production
+code.
 
-- `failure_attribution: TestAdoptPRFormulaRetriesTransientReviewerStep -> ga-esyijp | clause 3(a), mechanism — attributed`
-- `failure_attribution: TestRetryManagedPooledWorkerRecoversClaimedAttemptAfterCrash -> ga-esyijp | clause 3(a), mechanism — attributed`
-  - Both fixtures failed during `gc init` because beads migration safety
-    rejected dirty pre-existing Dolt schema tables under the full-suite run.
-    The consolidated beads#4566 tracker predates this run.
-  - The candidate cannot affect the review-formula fixture, Dolt schema, or
-    migration path; there is no path overlap.
-  - Current logs: `integration-review-formulas-retries-1-of-2.log` and
-    `integration-review-formulas-recovery.log`.
+- `TestFreshManagedBdCityInitSeedsPinnedHQDatabaseAndKeepsGCPrefix` → `ga-vkhfnj`: bd init refused 18 pending shared-server migrations (`v48` → `v66`).
+- `TestAdoptPRFormulaSoftFailsGeminiAfterTransientRetries` → `ga-vkhfnj`: fixture gc init refused 11 pending shared-server migrations (`v55` → `v66`).
+- `TestRetryManagedPooledWorkerRecoversClaimedAttemptAfterCrash` → `ga-vkhfnj`: fixture gc init refused 2 pending shared-server migrations (`v64` → `v66`).
+- `TestCleanInstallTutorialPath` → `ga-vkhfnj`: fixture gc init refused 10 pending shared-server migrations (`v56` → `v66`).
+- `TestGCLiveContract_BeadsAndEvents` → `ga-vkhfnj`: rig creation returned HTTP 500 because bd init refused 35 pending shared-server migrations (`v31` → `v66`).
+- `TestE2E_SuspendResume_City` → `ga-dc9utn`: exact tracked 95-second missing-`citysus.report` signature. The tracker contains a standalone reproduction and the proven reconciler suspend/wake mechanism; this candidate does not touch that path.
 
-- `failure_attribution: TestE2E_SuspendResume_City -> ga-dqd7gf | clause 3(a), mechanism — attributed under the same-run tracker escape`
-  - The test timed out after 93.73 seconds waiting for `citysus.report`, matching
-    prior exact candidate/base evidence on closed bug `ga-yc0e3a`.
-  - No open tracker covered the condition, so `ga-dqd7gf` was created during
-    this run only after the structural mechanism proof landed: security waiver
-    data and a package-local test cannot participate in session suspend/resume
-    or report production. Clauses 1 and 4 are independently clear.
-  - Current log: `integration-rest-full-2-of-8.log`.
+`ga-vkhfnj` contains the clean-`origin/main` reproduction for the shared-Dolt
+migration-refusal condition. `ga-dc9utn` records that the suspend/resume failure
+reproduces alone and is not load-sensitive. Both trackers predate this run, and
+this run's sightings were appended and read back before attribution.
 
 ## Policy and static evidence
 
 ```text
-make test-ci-policy                                      PASS
-make check-gomod-replace                                 PASS
-make check-native-dependency-surface                     PASS
-make check-eventexport-isolation                         PASS
-make check-core-boundary                                 PASS
-make test-native-doltlite-beads                          PASS
-make test-acceptance                                     PASS
-BD_PREV_VERSION=v1.0.4 make test-bd-cli-contract        PASS
-make dashboard-ci                                       PASS
-npm run --workspace gas-city-dashboard-frontend test    PASS (899 tests)
-make spec-ci                                             PASS
-./scripts/check-generated-docs-drift.sh                  PASS
-make dashboard-e2e                                      PASS (19 Playwright tests)
-goreleaser v2.18.0 check                                 PASS
-LINT_CHANGED_SCOPE=tracked LINT_CHANGED_REF=origin/main make lint-affected  PASS (0 issues)
-LINT_CHANGED_SCOPE=tracked LINT_CHANGED_REF=origin/main make fmt-check-changed  PASS
-make check-docs                                          PASS
-make vet                                                 PASS
-git diff --check origin/main...HEAD                      PASS
+make test-ci-policy                                                   PASS
+go vet ./...                                                          PASS
+go build ./...                                                        PASS
+LINT_CHANGED_REF=origin/main LINT_CHANGED_SCOPE=tracked make lint-affected
+                                                                      PASS (0 issues)
+LINT_CHANGED_REF=origin/main LINT_CHANGED_SCOPE=tracked make fmt-check-changed
+                                                                      PASS
+make check-docs                                                       PASS
+git diff --check origin/main...HEAD                                   PASS
+git config core.hooksPath                                             .githooks
 ```
 
-The configured pre-push hook at `.githooks` also completed its sharded fast
-suite successfully during the origin push dry-run.
+The test environment was prepared before criterion 3: rootless Podman 5.8.4,
+the user socket at `/run/user/1000/podman/podman.sock`, Ryuk disabled, and the
+cached test images present at the tags pinned by the test code.
+
+## Scope and ancestry audit
+
+`assert_deploy_ancestry_scope` found no denylisted `.claude/**` path. Its
+commit-message check returned 21 for two commits that do not cite a bead ID:
+
+- `62ee848027`: the prior deployer's release-gate checklist, touching only this
+  file.
+- `74575bed56`: a test-only extension of the E9 waiver drop-guards, touching
+  only `scripts/container_tool_security_test.go`.
+
+This is an existing, already-published isolated PR branch, so rewriting those
+commit messages would require a forbidden force-push. Full diff inspection
+proves both commits belong to the same waiver-policy theme; neither introduces
+an unrelated subsystem or user-facing behavior. The specific re-gate bead
+therefore directs updating this branch in place.
 
 ## Release disposition
 
-**Gate PASS.** Cut `deploy/ga-2yq3p5-gate` from the exact reviewed source,
-commit this checklist, push the isolated branch, open the pull request, and
-require the PR's Container Scan job to pass before publishing deploy clearance
-and routing the merge request. Merge authority remains with mayor/mpr; the
-deployer does not merge.
+**Gate PASS.** Commit this updated checklist on the existing
+`deploy/ga-2yq3p5-gate` branch, update pull request #5885, publish deploy
+clearance on the resulting exact head, and route the merge request to mayor.
+Merge authority remains with mayor/mpr; the deployer does not merge.
