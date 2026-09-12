@@ -767,7 +767,7 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			// (NFR4/NFR5): the flag check short-circuits before
 			// hookCandidateReclaimEligible or ops.ReclaimStale ever run, so the
 			// flag-off path is byte-for-byte unchanged.
-			if !opts.AutoReclaimStaleClaims || !hookCandidateReclaimEligible(candidate, opts.RouteTargets) {
+			if !opts.AutoReclaimStaleClaims || !hookCandidateReclaimEligible(candidate, opts.RouteTargets, now) {
 				continue
 			}
 			if ops.claimWindowSpent() {
@@ -921,11 +921,15 @@ func hookCandidateBudgetDeferred(candidate beads.Bead, now time.Time) bool {
 
 // hookCandidateReclaimEligible reports whether a route-matched candidate's ONLY
 // claim-eligibility failure is a non-empty (possibly stale) assignee -- the exact
-// shape ga-7rj87d FR1 scopes a stale-lease reclaim attempt to.
-func hookCandidateReclaimEligible(candidate beads.Bead, routeTargets []string) bool {
+// shape ga-7rj87d FR1 scopes a stale-lease reclaim attempt to. A candidate still
+// inside its gc.budget_deferred_until window is never reclaim-eligible: the
+// budget gate must hold across both the fresh-claim and reclaim paths, or a
+// stale assignee lets a deferred candidate bypass the daily build budget.
+func hookCandidateReclaimEligible(candidate beads.Bead, routeTargets []string, now time.Time) bool {
 	return strings.TrimSpace(candidate.ID) != "" &&
 		strings.TrimSpace(candidate.Assignee) != "" &&
-		hookClaimMatchesRoute(candidate, routeTargets)
+		hookClaimMatchesRoute(candidate, routeTargets) &&
+		!hookCandidateBudgetDeferred(candidate, now)
 }
 
 // reportHookClaimRejected publishes a bead.claim_rejected event (ADR-0009) when a
