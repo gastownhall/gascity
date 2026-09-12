@@ -876,7 +876,12 @@ func persistPrimeHookProviderSessionKey(hookProviderSessionID string, stderr io.
 		return
 	}
 	// Runs once per session (the empty-key check above guards re-entry).
-	if stderr != nil {
+	//
+	// Opt-in only. A provider hook forwards its child's stderr into the agent's
+	// terminal, so anything written here lands in the user's input box mid-turn.
+	// Every failure above goes through warn; this is the one success path, and a
+	// routine capture is not something the operator needs to be told about.
+	if stderr != nil && gcDebugEnabled() {
 		fmt.Fprintf(stderr, "gc prime --hook: persisted resume session_key for %s session %q\n", sessionProviderFamily(info), gcSessionID) //nolint:errcheck // hook diagnostics are best effort.
 	}
 }
