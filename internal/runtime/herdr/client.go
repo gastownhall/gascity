@@ -32,16 +32,17 @@ import (
 // client runs `herdr` CLI verbs against a named herdr session and decodes the
 // response envelope ({"id":…,"result":…} | {"id":…,"error":{code,message}}).
 type client struct {
-	session     string        // herdr named session (shared per city)
-	bin         string        // herdr binary (default "herdr")
-	cityRoot    string        // city root: the shared server's launch cwd, and the effectiveWorkDir fallback when a session's WorkDir doesn't exist yet (empty in city-less/standalone construction)
-	settleDelay time.Duration // paste-fallback settle before the submit Enter (submitSettleDelay; shortened by tests against a fake herdr)
-	serverMu    sync.Mutex    // serializes startServer: serverAlive → removeStaleSocket → launch → readiness
-	sockPath    string        // test override for socketPath (unit tests point it at a fake server)
+	session     string                                                   // herdr named session (shared per city)
+	bin         string                                                   // herdr binary (default "herdr")
+	cityRoot    string                                                   // city root: the shared server's launch cwd, and the effectiveWorkDir fallback when a session's WorkDir doesn't exist yet (empty in city-less/standalone construction)
+	settleDelay time.Duration                                            // paste-fallback settle before the submit Enter (submitSettleDelay; shortened by tests against a fake herdr)
+	serverMu    sync.Mutex                                               // serializes startServer: serverAlive → removeStaleSocket → launch → readiness
+	sockPath    string                                                   // test override for socketPath (unit tests point it at a fake server)
+	dialUnix    func(ctx context.Context, path string) (net.Conn, error) // test override for the socket connect (unit tests observe the context the dial runs under)
 }
 
 func newClient(session, cityRoot string) *client {
-	return &client{session: session, bin: "herdr", cityRoot: cityRoot, settleDelay: submitSettleDelay}
+	return &client{session: session, bin: "herdr", cityRoot: cityRoot, settleDelay: submitSettleDelay, dialUnix: dialUnix}
 }
 
 type herdrError struct {
