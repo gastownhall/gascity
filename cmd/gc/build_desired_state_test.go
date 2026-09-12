@@ -3076,6 +3076,85 @@ func TestPrepareTemplateResolution_MaterializesFamilyOverlayForCustomProvider(t 
 	}
 }
 
+// TestPrepareTemplateResolution_InstallsFamilyHooksWithoutOverlayOrConfig
+// guards hook-file creation for agents whose provider family ships managed
+// workdir hooks. A city-scoped agent runs a custom provider "pi-glm"
+// (base="builtin:pi") with NO pack/rig overlay dirs and NO
+// install_agent_hooks. Pack overlay staging has no per-provider source to
+// copy and stageHookFiles only re-stages hook files that already exist, so
+// before the fix nothing ever created .pi/extensions/gc-hooks.js: the
+// session launched pi without its session_start hook, never registered a
+// session key, and churned in "creating" until the start deadline reaped
+// it. prepareTemplateResolution must install the launch family's managed
+// hooks from the embedded config so the workdir is viable before
+// resolveTemplate fingerprints CopyFiles.
+func TestPrepareTemplateResolution_InstallsFamilyHooksWithoutOverlayOrConfig(t *testing.T) {
+	cityDir := t.TempDir()
+	workDir := filepath.Join(cityDir, ".gc", "agents", "tester")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(workDir): %v", err)
+	}
+
+	base := "builtin:pi"
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:     "tester",
+			Provider: "pi-glm",
+			Scope:    "city",
+			WorkDir:  filepath.Join(".gc", "agents", "tester"),
+			// Intentionally no InstallAgentHooks and no overlay dirs of any
+			// kind: creation must come from the embedded managed hook config.
+		}},
+		Providers: map[string]config.ProviderSpec{
+			// Explicit command so resolution does not depend on a real `pi`
+			// binary on PATH; base still yields BuiltinAncestor=pi.
+			"pi-glm": {Base: &base, Command: "/bin/echo"},
+		},
+	}
+
+	bp := newAgentBuildParams("test-city", cityDir, cfg, runtime.NewFake(), time.Now().UTC(), nil, io.Discard)
+	prepareTemplateResolution(bp, &cfg.Agents[0], "tester", io.Discard)
+
+	installed := filepath.Join(workDir, ".pi", "extensions", "gc-hooks.js")
+	content, err := os.ReadFile(installed)
+	if err != nil {
+		t.Fatalf("family pi hooks not installed for custom pi-glm provider without overlay dirs or install_agent_hooks: %v", err)
+	}
+	if !strings.Contains(string(content), "GC_PI_HOOK_VERSION") {
+		t.Fatalf("installed hook file is not the managed pi hook (len=%d)", len(content))
+	}
+}
+
+func TestEnsureFamilyInstallHooks(t *testing.T) {
+	resolvedFor := func(name, ancestor string) *config.ResolvedProvider {
+		return &config.ResolvedProvider{Name: name, BuiltinAncestor: ancestor}
+	}
+
+	cases := []struct {
+		name     string
+		hooks    []string
+		resolved *config.ResolvedProvider
+		want     []string
+	}{
+		{name: "nil resolved leaves hooks unchanged", hooks: nil, resolved: nil, want: nil},
+		{name: "pi family appended for wrapped custom provider", hooks: nil, resolved: resolvedFor("pi-glm", "pi"), want: []string{"pi"}},
+		{name: "family not duplicated when configured", hooks: []string{"pi"}, resolved: resolvedFor("pi-glm", "pi"), want: []string{"pi"}},
+		{name: "configured hooks preserved and family appended", hooks: []string{"codex"}, resolved: resolvedFor("pi-glm", "pi"), want: []string{"codex", "pi"}},
+		{name: "claude family excluded (settings projected separately)", hooks: nil, resolved: resolvedFor("claude", ""), want: nil},
+		{name: "wrapped claude alias excluded", hooks: nil, resolved: resolvedFor("claude-max", "claude"), want: nil},
+		{name: "unsupported family left alone", hooks: nil, resolved: resolvedFor("custom-tool", ""), want: nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ensureFamilyInstallHooks(tc.hooks, tc.resolved)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("ensureFamilyInstallHooks(%v) = %v, want %v", tc.hooks, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestBuildDesiredState_IncludesImportedAlwaysNamedSessions(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "repo")
