@@ -335,6 +335,10 @@ type NativeDoltStore struct {
 	// single wall-clock bound on a read's whole reconnect-and-retry chain. Only
 	// tests set it (to exercise budget exhaustion without a real 90s wait).
 	readRetryBudgetOverride time.Duration
+	// afterMetadataMergeRead, when set, runs after each read that starts a
+	// metadata merge attempt, before its checked write. Only tests set it, to
+	// land a competing write in the window the compare-and-swap protects.
+	afterMetadataMergeRead func(id string)
 
 	// condWritesStamp carries the factory-stamped conditional-writes mode. The
 	// pinned upstream Storage contract requires row-version checked update and
@@ -1723,10 +1727,33 @@ const (
 // mid-retry, so a retry could run against a different storage than the one whose
 // transaction it is repeating.
 func retryOnNativeDoltSerializationConflict(attempt func() error) error {
+	return retryNativeDoltWrite(attempt, isNativeDoltSerializationConflict)
+}
+
+// retryOnNativeDoltMergeRace re-runs a checked read-merge-write attempt when a
+// concurrent writer preempted it: either the backend reported a serialization
+// conflict (the attempt's write never committed) or the compare-and-swap
+// refused with ErrVersionMismatch (the row changed after the attempt's read).
+// Both mean the attempt must read again and merge onto the committed row, so
+// both are retried with the budget retryOnNativeDoltSerializationConflict
+// applies; every other error is returned on the first try, as there. A version
+// mismatch is retried here and only here: for the conditional writers
+// (UpdateIfMatch and its siblings) it is the caller's fence and propagates.
+func retryOnNativeDoltMergeRace(attempt func() error) error {
+	return retryNativeDoltWrite(attempt, func(err error) bool {
+		return isNativeDoltSerializationConflict(err) || errors.Is(err, beadslib.ErrVersionMismatch)
+	})
+}
+
+// retryNativeDoltWrite runs attempt up to nativeWriteAttempts times, sleeping a
+// growing nativeWriteRetryBackoff after each error retryable accepts. The first
+// error retryable rejects, and the last attempt's error, are returned as they
+// are.
+func retryNativeDoltWrite(attempt func() error, retryable func(error) bool) error {
 	var err error
 	for n := 1; n <= nativeWriteAttempts; n++ {
 		err = attempt()
-		if err == nil || !isNativeDoltSerializationConflict(err) || n == nativeWriteAttempts {
+		if err == nil || !retryable(err) || n == nativeWriteAttempts {
 			return err
 		}
 		time.Sleep(time.Duration(n) * nativeWriteRetryBackoff)
@@ -1735,6 +1762,14 @@ func retryOnNativeDoltSerializationConflict(attempt func() error) error {
 }
 
 // SetMetadataBatch sets multiple metadata keys on a bead.
+//
+// The merge is a read-modify-write of the whole metadata map, so the write is a
+// compare-and-swap on the row version the read returned: an update that commits
+// between the read and the write makes the swap refuse, and the whole
+// read-merge-write runs again against the committed row instead of replacing it
+// with the stale map. An unchecked write-back cannot see that anything changed
+// and silently undoes the other writer's keys — a fence activation was lost
+// that way to a one-key stamp.
 func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	storage, release, err := s.acquireStorage()
 	if err != nil {
@@ -1742,16 +1777,18 @@ func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) err
 	}
 	defer release()
 
-	return retryOnNativeDoltSerializationConflict(func() error {
+	return retryOnNativeDoltMergeRace(func() error {
 		ctx, cancel := nativeDoltOperationContext(context.TODO())
 		defer cancel()
 		return s.setMetadataBatchOnce(ctx, storage, id, kvs)
 	})
 }
 
-// setMetadataBatchOnce performs one complete metadata read-merge-write attempt.
-// A retry must call this whole operation again so metadata committed by the
-// competing transaction is included rather than overwritten from a stale read.
+// setMetadataBatchOnce performs one complete metadata read-merge-write attempt:
+// it reads the bead, merges kvs into the map it read, and writes the merged map
+// back only while the bead still carries the row version that read returned. A
+// retry must call this whole operation again so metadata committed by the
+// competing writer is merged rather than overwritten from a stale read.
 func (s *NativeDoltStore) setMetadataBatchOnce(ctx context.Context, storage beadslib.Storage, id string, kvs map[string]string) error {
 	issue, err := storage.GetIssue(ctx, id)
 	if err != nil {
@@ -1759,6 +1796,9 @@ func (s *NativeDoltStore) setMetadataBatchOnce(ctx context.Context, storage bead
 	}
 	if issue == nil {
 		return fmt.Errorf("bead %q: %w", id, ErrNotFound)
+	}
+	if s.afterMetadataMergeRead != nil {
+		s.afterMetadataMergeRead(id)
 	}
 	metadata, err := metadataMapFromNative(issue.Metadata)
 	if err != nil {
@@ -1774,7 +1814,10 @@ func (s *NativeDoltStore) setMetadataBatchOnce(ctx context.Context, storage bead
 	if err != nil {
 		return err
 	}
-	return nativeStoreError(id, storage.UpdateIssue(ctx, id, map[string]interface{}{"metadata": raw}, s.actor))
+	expected := issue.RowVersion
+	return nativeStoreError(id, storage.UpdateIssueChecked(ctx, id, map[string]interface{}{"metadata": raw}, s.actor, beadslib.UpdateIssueOptions{
+		ExpectedVersion: &expected,
+	}))
 }
 
 // isNativeDoltSerializationConflict reports only Dolt/MySQL transaction

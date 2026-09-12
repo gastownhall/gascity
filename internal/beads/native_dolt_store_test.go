@@ -1026,7 +1026,7 @@ func TestNativeDoltStoreSetMetadataBatchRejectsInvalidExistingMetadata(t *testin
 				Metadata:  json.RawMessage(`{"existing":`),
 			}, nil
 		},
-		updateIssue: func(context.Context, string, map[string]interface{}, string) error {
+		updateIssueChecked: func(context.Context, string, map[string]interface{}, string, beadslib.UpdateIssueOptions) error {
 			updateCalled = true
 			return nil
 		},
@@ -1039,13 +1039,14 @@ func TestNativeDoltStoreSetMetadataBatchRejectsInvalidExistingMetadata(t *testin
 		t.Fatalf("SetMetadataBatch error = %v, want bead metadata context", err)
 	}
 	if updateCalled {
-		t.Fatal("UpdateIssue was called after invalid metadata")
+		t.Fatal("UpdateIssueChecked was called after invalid metadata")
 	}
 }
 
 func TestNativeDoltStoreSetMetadataBatchRetriesSerializationConflictFromFreshState(t *testing.T) {
 	getCalls := 0
 	updateCalls := 0
+	var expectedVersions []int64
 	var writtenMetadata json.RawMessage
 	storage := &nativeDoltStorageSpy{
 		getIssue: func(context.Context, string) (*beadslib.Issue, error) {
@@ -1055,16 +1056,21 @@ func TestNativeDoltStoreSetMetadataBatchRetriesSerializationConflictFromFreshSta
 				metadata = json.RawMessage(`{"concurrent":"preserved"}`)
 			}
 			return &beadslib.Issue{
-				ID:        "gc-conflict",
-				Title:     "metadata conflict",
-				Status:    beadslib.StatusOpen,
-				IssueType: beadslib.TypeTask,
-				Priority:  2,
-				Metadata:  metadata,
+				ID:         "gc-conflict",
+				Title:      "metadata conflict",
+				Status:     beadslib.StatusOpen,
+				IssueType:  beadslib.TypeTask,
+				Priority:   2,
+				Metadata:   metadata,
+				RowVersion: int64(getCalls),
 			}, nil
 		},
-		updateIssue: func(_ context.Context, _ string, updates map[string]interface{}, _ string) error {
+		updateIssueChecked: func(_ context.Context, _ string, updates map[string]interface{}, _ string, opts beadslib.UpdateIssueOptions) error {
 			updateCalls++
+			if opts.ExpectedVersion == nil {
+				t.Fatal("metadata write carried no expected version")
+			}
+			expectedVersions = append(expectedVersions, *opts.ExpectedVersion)
 			if updateCalls == 1 {
 				return errors.New("dolt commit: Error 1213 (40001): serialization failure: this transaction conflicts with a committed transaction, try restarting transaction")
 			}
@@ -1085,7 +1091,10 @@ func TestNativeDoltStoreSetMetadataBatchRetriesSerializationConflictFromFreshSta
 		t.Fatalf("GetIssue calls = %d, want 2 so retry re-reads current metadata", getCalls)
 	}
 	if updateCalls != 2 {
-		t.Fatalf("UpdateIssue calls = %d, want 2", updateCalls)
+		t.Fatalf("UpdateIssueChecked calls = %d, want 2", updateCalls)
+	}
+	if !slices.Equal(expectedVersions, []int64{1, 2}) {
+		t.Fatalf("expected versions = %v, want [1 2]: each attempt must swap against the version its own read returned", expectedVersions)
 	}
 	var got map[string]string
 	if err := json.Unmarshal(writtenMetadata, &got); err != nil {
@@ -1106,7 +1115,7 @@ func TestNativeDoltStoreSetMetadataBatchDoesNotRetryPermanentWriteError(t *testi
 			getCalls++
 			return &beadslib.Issue{ID: "gc-permanent", Metadata: json.RawMessage(`{"existing":"kept"}`)}, nil
 		},
-		updateIssue: func(context.Context, string, map[string]interface{}, string) error {
+		updateIssueChecked: func(context.Context, string, map[string]interface{}, string, beadslib.UpdateIssueOptions) error {
 			updateCalls++
 			return wantErr
 		},
@@ -1118,7 +1127,7 @@ func TestNativeDoltStoreSetMetadataBatchDoesNotRetryPermanentWriteError(t *testi
 		t.Fatalf("SetMetadataBatch error = %v, want %v", err, wantErr)
 	}
 	if getCalls != 1 || updateCalls != 1 {
-		t.Fatalf("calls = GetIssue:%d UpdateIssue:%d, want 1 each", getCalls, updateCalls)
+		t.Fatalf("calls = GetIssue:%d UpdateIssueChecked:%d, want 1 each", getCalls, updateCalls)
 	}
 }
 
@@ -1131,7 +1140,7 @@ func TestNativeDoltStoreSetMetadataBatchStopsAfterThreeSerializationConflicts(t 
 			getCalls++
 			return &beadslib.Issue{ID: "gc-persistent-conflict"}, nil
 		},
-		updateIssue: func(context.Context, string, map[string]interface{}, string) error {
+		updateIssueChecked: func(context.Context, string, map[string]interface{}, string, beadslib.UpdateIssueOptions) error {
 			updateCalls++
 			return wantErr
 		},
@@ -1143,7 +1152,7 @@ func TestNativeDoltStoreSetMetadataBatchStopsAfterThreeSerializationConflicts(t 
 		t.Fatalf("SetMetadataBatch error = %v, want %v", err, wantErr)
 	}
 	if getCalls != 3 || updateCalls != 3 {
-		t.Fatalf("calls = GetIssue:%d UpdateIssue:%d, want 3 each", getCalls, updateCalls)
+		t.Fatalf("calls = GetIssue:%d UpdateIssueChecked:%d, want 3 each", getCalls, updateCalls)
 	}
 }
 
