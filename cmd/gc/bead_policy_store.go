@@ -38,6 +38,10 @@ type beadPolicyGraphStore struct {
 var (
 	_ beads.ConditionalAssignmentReleaser    = (*beadPolicyStore)(nil)
 	_ beads.ConditionalWritesResolveTargeter = (*beadPolicyStore)(nil)
+	_ beads.ConditionalWriterHandleProvider  = (*beadPolicyStore)(nil)
+	_ beads.ConditionalWriterHandleProvider  = (*beadPolicyGraphStore)(nil)
+	_ beads.ActorClaimer                     = (*beadPolicyStore)(nil)
+	_ beads.Commenter                        = (*beadPolicyStore)(nil)
 )
 
 // ConditionalWritesResolveTarget declares the wrapped store as the
@@ -244,6 +248,50 @@ func (s *beadPolicyStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, e
 		return false, beads.ErrConditionalReleaseUnsupported
 	}
 	return releaser.ReleaseIfCurrent(id, expectedAssignee)
+}
+
+// ClaimAs and Comment forward the backing store's claim and comment
+// capabilities through this wrapper. The policy layer embeds the beads.Store
+// INTERFACE, which declares none of the optional capabilities, so without an
+// explicit forward each one is invisible to any caller holding the wrapper —
+// even when the backing implements it.
+func (s *beadPolicyStore) ClaimAs(id, assignee string) (beads.Bead, bool, error) {
+	return beads.ClaimFor(s.Store, id, assignee)
+}
+
+func (s *beadPolicyStore) Comment(id, text string) error {
+	return beads.CommentOn(s.Store, id, text)
+}
+
+// ConditionalWriterHandle forwards the backing store's revision-fenced
+// conditional-write capability, declared through the package's own wrapper
+// contract rather than a locally restated interface — the same forwarding
+// ClaimAs and Comment above do, on the write-fence half of the worker family.
+//
+// WHY THE WRAPPER HAS TO SAY IT: beads.ConditionalWriterFor deliberately does
+// NOT follow ConditionalWritesResolveTarget — a caller holding a wrapper must
+// pass the unwrapped store, and only MetadataCASWriterFor follows resolution
+// targets. With the interface-embedded Store this type hands out, that made
+// the capability invisible through the shape the API actually serves:
+// api_state.go rebuilds the cache over the UNWRAPPED base and then re-wraps
+// it, so CityBeadStore() is this type over *beads.CachingStore, and the remote
+// worker claim and heartbeat routes probe the writer BEFORE their first write
+// (internal/api/handler_worker.go workerLeaseWriter). They answered a typed
+// 501 for a city whose backing can fence every write it makes.
+//
+// Deliberately NOT beads.ResolveConditionalWriter: that seam applies the
+// operator's rollout conditional_writes mode, and a lease stamp must be fenced
+// even on a deployment where ordinary updates run legacy — a stamp a newer
+// holder can silently overwrite is exactly the lost update this fence exists
+// to prevent. Capability, not policy.
+//
+// The handle returns the BACKING writer rather than a policy-layer shim: this
+// layer intercepts creation and reads and never metadata writes, so there is
+// no policy to apply on the way through. A backing without the capability
+// reports (nil, false), so an absent capability stays the typed 501 the route
+// already states — this forwards a capability, it never invents one.
+func (s *beadPolicyStore) ConditionalWriterHandle() (beads.ConditionalWriter, bool) {
+	return beads.ConditionalWriterFor(s.Store)
 }
 
 func (s *beadPolicyStore) policyForCreate(b beads.Bead) (string, string) {
