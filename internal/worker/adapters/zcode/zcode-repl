@@ -246,7 +246,8 @@ archive_scope() {
     local dest
     dest="$archive_root/$(basename "$1")"
     if [[ -e "$dest" ]]; then
-        cp -a "$1/." "$dest/" && rm -rf "$1"
+        cp -a "$1/." "$dest/" && rm -rf "$1" ||
+            printf '%s: could not archive %s, leaving it in the live root\n' "$PROG" "$1" >&2
     else
         mkdir -p "$archive_root"
         mv "$1" "$dest" 2>/dev/null ||
