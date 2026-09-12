@@ -2413,8 +2413,8 @@ flatten_database() {
           rm -f "$autoclear_preserved_tables_tmp"
           printf 'compact: db=%s integrity quarantine marker auto-cleared — drift confined to content-preserved table(s) [%s] via DOLT_DIFF_STAT(%s..%s), reason=%s created_at=%s\n' \
             "$db" "${db_root_drift_proven_tables:-}" "${autoclear_preflight_head:-<empty>}" "$autoclear_current_head" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" >&2
-          emit_compact_quarantine_event "$db" "compact-quarantine" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}"
-          mail_compact_quarantine_alert "$db" "compact-quarantine" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" || true
+          emit_compact_quarantine_event "$db" "compact-quarantine-autoclear" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}"
+          mail_compact_quarantine_alert "$db" "compact-quarantine-autoclear" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" || true
           rm -f "$quarantine_marker"
         else
           rm -f "$autoclear_preserved_tables_tmp"
