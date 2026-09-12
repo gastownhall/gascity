@@ -264,6 +264,10 @@ func TestCheckTriggerConditionFails(t *testing.T) {
 	if result.Due {
 		t.Errorf("Due = true, want false (exit non-zero)")
 	}
+	const wantReason = "condition: not met (exit 1)"
+	if result.Reason != wantReason {
+		t.Errorf("Reason = %q, want %q", result.Reason, wantReason)
+	}
 }
 
 func TestCheckTriggerConditionKillsProcessGroupOnTimeout(t *testing.T) {
