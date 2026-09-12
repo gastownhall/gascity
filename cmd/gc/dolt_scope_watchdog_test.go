@@ -344,6 +344,98 @@ func TestManagedDoltScopeWatchdogServerSurvivesScopePresent(t *testing.T) {
 }
 
 // TestRunManagedDoltScopeWatchdogUsage pins the argv contract.
+// TestManagedDoltScopeWatchdogDoesNotInheritSessionIdentity spawns the real
+// watchdog the way `gc dolt restart` does from inside an agent shell, with
+// every session-scoped key stamped on the parent environment, and reads the
+// live environment of both the watchdog and its dolt child. Neither may carry
+// a stamp: the watchdog reparents to init, so a GC_SESSION_ID on it is what
+// the session reconciler's orphan sweep keys on when it reaps the watchdog,
+// and with it the server, once that session's bead closes. PATH is the
+// control that the scrub is targeted rather than a blanket strip.
+func TestManagedDoltScopeWatchdogDoesNotInheritSessionIdentity(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("reads /proc/<pid>/environ")
+	}
+	dir := t.TempDir()
+	fakeDoltDir := writeFakeDoltSQLServer(t)
+	configPath := filepath.Join(dir, "dolt-config.yaml")
+	logPath := filepath.Join(dir, "dolt.log")
+	if err := os.WriteFile(configPath, []byte("log_level: debug\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatalf("open log file: %v", err)
+	}
+	defer logFile.Close() //nolint:errcheck
+
+	parentEnv := removeEnvKey(os.Environ(), "PATH")
+	parentEnv = append(parentEnv, "PATH="+fakeDoltDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	for _, key := range managedDoltSessionScopedEnvKeys {
+		parentEnv = append(parentEnv, key+"=stamped")
+	}
+
+	started, err := startManagedDoltSQLServerWithScopeWatchdogEnv("", configPath, logPath, logFile, parentEnv)
+	if err != nil {
+		t.Fatalf("start managed dolt with scope watchdog: %v", err)
+	}
+	t.Cleanup(func() {
+		cleanupManagedDoltTestPID(t, started.PID)
+		cleanupManagedDoltTestPID(t, started.WatchdogPID)
+	})
+
+	for _, proc := range []struct {
+		name string
+		pid  int
+	}{
+		{name: "scope watchdog", pid: started.WatchdogPID},
+		{name: "dolt sql-server", pid: started.PID},
+	} {
+		env := waitForProcEnviron(t, proc.pid)
+		for _, key := range managedDoltSessionScopedEnvKeys {
+			if value, ok := env[key]; ok {
+				t.Errorf("%s pid %d inherited %s=%q from the spawning session", proc.name, proc.pid, key, value)
+			}
+		}
+		if !strings.HasPrefix(env["PATH"], fakeDoltDir) {
+			t.Errorf("%s pid %d PATH = %q, want the parent's PATH carried through", proc.name, proc.pid, env["PATH"])
+		}
+	}
+}
+
+// waitForProcEnviron reads /proc/<pid>/environ once the process has settled
+// on its final image. The kernel reports an empty environ for the window
+// inside execve, and the fake dolt execs twice (sh, then sleep), so a read
+// that lands there proves nothing; a settled process always carries a
+// non-empty environ here because the spawn path propagates PATH.
+func waitForProcEnviron(t *testing.T, pid int) map[string]string {
+	t.Helper()
+	path := filepath.Join("/proc", strconv.Itoa(pid), "environ")
+	deadline := time.After(5 * time.Second)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read environ for pid %d: %v", pid, err)
+		}
+		if len(data) > 0 {
+			env := make(map[string]string)
+			for _, entry := range strings.Split(string(data), "\x00") {
+				if key, value, ok := strings.Cut(entry, "="); ok && key != "" {
+					env[key] = value
+				}
+			}
+			return env
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("pid %d environ still empty after 5s", pid)
+		case <-tick.C:
+		}
+	}
+}
+
 func TestRunManagedDoltScopeWatchdogUsage(t *testing.T) {
 	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	if err != nil {
