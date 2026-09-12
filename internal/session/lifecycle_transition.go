@@ -230,6 +230,7 @@ func ContinuationResetWakePatch(now time.Time) MetadataPatch {
 	patch["session_key"] = ""
 	applyFreshWakeConversationReset(patch)
 	patch["continuation_reset_pending"] = "true"
+	patch[ResetCommittedAtKey] = now.UTC().Format(time.RFC3339)
 	return patch
 }
 
@@ -439,7 +440,9 @@ func SleepPatch(now time.Time, reason string) MetadataPatch {
 // slept_at alongside clearing last_woke_at so a same-tick drain-ack falls
 // back to this fairness key instead of collapsing straight to CreatedAt
 // (#2574) — drain-ack is the dominant real-world drain path for
-// wake_mode=fresh roles.
+// wake_mode=fresh roles. On a fresh wake it also stamps reset_committed_at
+// so the continuation-reset re-arm this drain-ack triggers is recorded as
+// durably committed, matching every other re-arm site.
 func AcknowledgeDrainPatch(now time.Time, freshWake bool) MetadataPatch {
 	patch := MetadataPatch{
 		"state":                     string(StateDrained),
@@ -453,6 +456,7 @@ func AcknowledgeDrainPatch(now time.Time, freshWake bool) MetadataPatch {
 		patch["session_key"] = ""
 		applyFreshWakeConversationReset(patch)
 		patch["continuation_reset_pending"] = "true"
+		patch[ResetCommittedAtKey] = now.UTC().Format(time.RFC3339)
 	}
 	return patch
 }
@@ -465,6 +469,7 @@ func CompleteDrainPatch(now time.Time, reason string, freshWake bool) MetadataPa
 		patch["session_key"] = ""
 		applyFreshWakeConversationReset(patch)
 		patch["continuation_reset_pending"] = "true"
+		patch[ResetCommittedAtKey] = now.UTC().Format(time.RFC3339)
 	}
 	return patch
 }
@@ -508,6 +513,7 @@ func ConfigDriftResetPatch(nextState State, sessionKey string, now time.Time) Me
 		"last_woke_at":               "",
 		"restart_requested":          "",
 		"continuation_reset_pending": "true",
+		ResetCommittedAtKey:          now.UTC().Format(time.RFC3339),
 		"pending_create_claim":       "",
 		"pending_create_started_at":  "",
 	}

@@ -706,7 +706,7 @@ func recordWakeFailure(info sessionpkg.Info, sessFront *sessionpkg.Store, clk cl
 	// untouched either way, so a genuinely broken session still escalates.
 	if info.SessionKey != "" || info.StartedConfigHash != "" {
 		if !wakeFailureKeepsConversation(info) {
-			reset := sessionpkg.ConversationResetPatch(true)
+			reset := sessionpkg.ConversationResetPatch(true, clk.Now().UTC())
 			_ = sessFront.ApplyPatch(info.ID, reset)
 			info = info.ApplyPatch(reset)
 		}
@@ -802,7 +802,7 @@ func recordChurn(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Cl
 	// re-hitting the same wall. Best-effort store write (error ignored, as
 	// before) with an unconditional Info fold.
 	if info.SessionKey != "" {
-		reset := sessionpkg.ConversationResetPatch(false)
+		reset := sessionpkg.ConversationResetPatch(false, clk.Now().UTC())
 		_ = sessFront.ApplyPatch(info.ID, reset)
 		info = info.ApplyPatch(reset)
 	}
