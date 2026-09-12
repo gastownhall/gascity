@@ -1405,8 +1405,9 @@ jobs:
       - name: Install Playwright Chromium
         timeout-minutes: 12
         run: |
+          echo 'Acquire::http::Timeout "15";' | sudo tee /etc/apt/apt.conf.d/99-ci-apt-timeout >/dev/null
           for attempt in 1 2 3; do
-            if npm run test:e2e:install:ci; then
+            if timeout 240 npm run test:e2e:install:ci; then
               exit 0
             fi
             if [ "$attempt" = "3" ]; then
