@@ -36,6 +36,15 @@ type Options struct {
 	// SkipStartError classifies Start errors that should skip the current
 	// subtest instead of failing the provider conformance suite.
 	SkipStartError func(error) (reason string, ok bool)
+
+	// DuplicateStartReconnects declares that this provider's Start
+	// intentionally treats a second Start call for an already-running
+	// session name as a reconnect to the existing durable session rather
+	// than an error -- e.g. a provider backed by a durable,
+	// externally-addressable substrate meant to survive local-process
+	// restarts. When true, Start_DuplicateReturnsError instead asserts the
+	// second Start succeeds and the session is still reported running.
+	DuplicateStartReconnects bool
 }
 
 // RunProviderTests runs the full conformance suite against a Provider.
