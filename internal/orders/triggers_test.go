@@ -387,6 +387,37 @@ func TestCheckTriggerEventDue(t *testing.T) {
 	}
 }
 
+type limitCapturingEventProvider struct {
+	events.Provider
+	filter events.Filter
+}
+
+func (p *limitCapturingEventProvider) List(filter events.Filter) ([]events.Event, error) {
+	p.filter = filter
+	return p.Provider.List(filter)
+}
+
+func TestCheckTriggerEventBoundsBacklogScan(t *testing.T) {
+	entries := make([]events.Event, eventTriggerScanLimit+1)
+	for i := range entries {
+		entries[i] = events.Event{Type: "bead.created"}
+	}
+	p := &limitCapturingEventProvider{Provider: newEventsProvider(t, entries)}
+	a := Order{Name: "notify", Trigger: "event", On: "bead.created"}
+
+	result := CheckTrigger(a, time.Time{}, neverRan, p, nil)
+
+	if !result.Due {
+		t.Fatalf("Due = false, want true; reason: %s", result.Reason)
+	}
+	if got, want := p.filter.Limit, eventTriggerScanLimit; got != want {
+		t.Errorf("event filter limit = %d, want %d", got, want)
+	}
+	if result.Cursor != eventTriggerScanLimit {
+		t.Errorf("cursor = %d, want %d", result.Cursor, eventTriggerScanLimit)
+	}
+}
+
 func TestCheckTriggerEventWithCursor(t *testing.T) {
 	ep := newEventsProvider(t, []events.Event{
 		{Type: "bead.closed"},
