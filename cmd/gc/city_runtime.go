@@ -2831,6 +2831,31 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 			cr.requestExecutionStalledDrain,
 			cr.stdout,
 		)
+		// The never-claimed lane (ga-evxqd). The three above key on a bead the
+		// seat was BOUND to, on one preassigned successor, or on an in_progress
+		// claim; this one keys on the seat's own OPEN ready work — assigned to
+		// it or merely routed to its identity — which is the residual none of
+		// them can see. It reads the BROAD open-routed view rather than the
+		// pool-demand-narrowed one because it settles readiness itself, from
+		// each row's own dependency edges: a named seat's routed work is not
+		// pool demand, so the narrowed view can be silent on exactly the rows
+		// this lane exists for. It nudges and reports; it never drains.
+		nudgeStalledSeatClaims(
+			cr.sp,
+			cr.cfg,
+			sessStore,
+			stalledPoolBeads,
+			result.AssignedWorkBeads,
+			result.AssignedWorkStores,
+			result.AssignedWorkStoreRefs,
+			result.OpenRoutedWorkBeads,
+			result.OpenRoutedWorkStores,
+			result.OpenRoutedWorkStoreRefs,
+			result.StoreQueryPartial || result.SessionQueryPartial || result.OpenRoutedWorkQueryPartial,
+			time.Now(),
+			cr.rec,
+			cr.stdout,
+		)
 	}
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.nudge_stalled_pool_claims", phaseStart, nil)
 }

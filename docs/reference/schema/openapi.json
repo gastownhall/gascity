@@ -2533,6 +2533,9 @@
             "$ref": "#/components/schemas/ControlStalledPayload"
           },
           {
+            "$ref": "#/components/schemas/ExecutionClaimStalledPayload"
+          },
+          {
             "$ref": "#/components/schemas/ExecutionClaimWindowExpiredPayload"
           },
           {
@@ -2792,6 +2795,30 @@
           "type",
           "ts",
           "actor"
+        ],
+        "type": "object"
+      },
+      "ExecutionClaimStalledPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "attempts": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "bead_id": {
+            "type": "string"
+          },
+          "root_bead_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "bead_id",
+          "session_id",
+          "attempts"
         ],
         "type": "object"
       },
@@ -12210,6 +12237,7 @@
             "emergency.acked": "#/components/schemas/TypedEventStreamEnvelopeEmergencyAcked",
             "emergency.signaled": "#/components/schemas/TypedEventStreamEnvelopeEmergencySignaled",
             "events.rotated": "#/components/schemas/TypedEventStreamEnvelopeEventsRotated",
+            "execution.claim_stalled": "#/components/schemas/TypedEventStreamEnvelopeExecutionClaimStalled",
             "execution.claim_window_expired": "#/components/schemas/TypedEventStreamEnvelopeExecutionClaimWindowExpired",
             "execution.run_anchored": "#/components/schemas/TypedEventStreamEnvelopeExecutionRunAnchored",
             "execution.step_completed": "#/components/schemas/TypedEventStreamEnvelopeExecutionStepCompleted",
@@ -12357,6 +12385,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeEventsRotated"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeExecutionClaimStalled"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeExecutionClaimWindowExpired"
@@ -13852,6 +13883,7 @@
                 "execution.step_completed",
                 "execution.claim_window_expired",
                 "execution.step_stalled",
+                "execution.claim_stalled",
                 "mail.sent",
                 "mail.read",
                 "mail.archived",
@@ -14100,6 +14132,63 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope events.rotated",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeExecutionClaimStalled": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ExecutionClaimStalledPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "execution.claim_stalled",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope execution.claim_stalled",
         "type": "object"
       },
       "TypedEventStreamEnvelopeExecutionClaimWindowExpired": {
@@ -18234,6 +18323,7 @@
             "emergency.acked": "#/components/schemas/TypedTaggedEventStreamEnvelopeEmergencyAcked",
             "emergency.signaled": "#/components/schemas/TypedTaggedEventStreamEnvelopeEmergencySignaled",
             "events.rotated": "#/components/schemas/TypedTaggedEventStreamEnvelopeEventsRotated",
+            "execution.claim_stalled": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionClaimStalled",
             "execution.claim_window_expired": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired",
             "execution.run_anchored": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionRunAnchored",
             "execution.step_completed": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionStepCompleted",
@@ -18381,6 +18471,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeEventsRotated"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionClaimStalled"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired"
@@ -19963,6 +20056,7 @@
                 "execution.step_completed",
                 "execution.claim_window_expired",
                 "execution.step_stalled",
+                "execution.claim_stalled",
                 "mail.sent",
                 "mail.read",
                 "mail.archived",
@@ -20224,6 +20318,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope events.rotated",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeExecutionClaimStalled": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ExecutionClaimStalledPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "execution.claim_stalled",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope execution.claim_stalled",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired": {

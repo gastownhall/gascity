@@ -85,6 +85,15 @@ const (
 	// LIVENESS fact, not a graph execution fact — nothing about the step's
 	// topology is asserted, and no projector consumes it.
 	ExecutionStepStalled = "execution.step_stalled"
+	// ExecutionClaimStalled records that a seat had its OWN ready work sitting
+	// open and unclaimed while it was awake and quiet, past the bounded nudges
+	// the controller's claim backstop spent on it. It is the never-claimed
+	// counterpart of ExecutionStepStalled's never-executed claim, and the
+	// remedies differ: nothing here is stranded in_progress, so no drain
+	// follows and the backstop keeps re-nudging. Subject carries the unclaimed
+	// bead, RunID the workflow root, SessionID the seat. A controller LIVENESS
+	// fact, not a graph execution fact; no projector consumes it.
+	ExecutionClaimStalled = "execution.claim_stalled"
 	// BeadDeadAssigneeReopened fires when the reconciler reopens a routed work
 	// bead whose assignee resolves to no open session bead — the owning session
 	// closed/retired while the bead stayed assigned, leaving it open+routed but
@@ -409,6 +418,7 @@ var KnownEventTypes = []string{
 	ExecutionWorkAssociated, ExecutionRunAnchored, ExecutionStepDefined, ExecutionStepStarted, ExecutionStepCompleted,
 	ExecutionClaimWindowExpired,
 	ExecutionStepStalled,
+	ExecutionClaimStalled,
 	MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread,
 	MailReplied, MailDeleted,
 	ConvoyCreated, ConvoyClosed,
