@@ -248,6 +248,85 @@ func TestRunRalphCheckWorkDirRelativeCheckPathKeepsPrecedence(t *testing.T) {
 	}
 }
 
+// TestRunRalphCheckTolerantOfTornDownWorkDir covers the recurring
+// finalize-stall bug: a control gate's gc.work_dir points at a per-step
+// worktree that was legitimately cleaned up after the step completed. The
+// gc.check_path never existed anywhere except that worktree, so both the
+// work_dir-relative join and the #3008 store-root fallback miss. Because the
+// worktree DIRECTORY itself is gone (not merely the script inside it), this
+// must be tolerated as a satisfied gate rather than a hard error that
+// quarantines the control bead.
+func TestRunRalphCheckTolerantOfTornDownWorkDir(t *testing.T) {
+	cityPath := t.TempDir()
+	// workDir is never created on disk: it stands in for a worktree that was
+	// torn down after its step completed.
+	workDir := filepath.Join(cityPath, "worktrees", "reaped-task")
+	checkRel := "check.sh"
+
+	store := beads.NewMemStore()
+	root := mustCreate(t, store, beads.Bead{Title: "workflow", Metadata: map[string]string{"gc.kind": "workflow"}})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "review loop",
+		Metadata: map[string]string{
+			"gc.kind":         "ralph",
+			"gc.root_bead_id": root.ID,
+			"gc.check_path":   checkRel,
+			"gc.work_dir":     workDir,
+			"gc.max_attempts": "3",
+		},
+	})
+	subject := mustCreate(t, store, beads.Bead{
+		Title:    "review loop iteration 1",
+		Metadata: map[string]string{"gc.kind": "scope", "gc.root_bead_id": root.ID},
+	})
+
+	result, err := runRalphCheck(store, control, subject, 1, ProcessOptions{CityPath: cityPath})
+	if err != nil {
+		t.Fatalf("runRalphCheck: %v (a torn-down worktree should be tolerated, not hard-error)", err)
+	}
+	if result.Outcome != convergence.GatePass {
+		t.Fatalf("Outcome = %q (stdout=%q), want tolerated pass for torn-down worktree", result.Outcome, result.Stdout)
+	}
+}
+
+// TestRunRalphCheckStillErrorsOnMissingScriptInLiveWorkDir guards that the
+// torn-down-worktree tolerance does not over-reach: when gc.work_dir still
+// exists on disk but simply lacks the check script (a real misconfiguration,
+// not a reaped worktree), resolution must still hard-error so the mistake is
+// surfaced instead of silently swallowed.
+func TestRunRalphCheckStillErrorsOnMissingScriptInLiveWorkDir(t *testing.T) {
+	cityPath := t.TempDir()
+	workDir := filepath.Join(cityPath, "worktrees", "live-task")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	checkRel := "check.sh"
+	// Deliberately do not create checkRel anywhere - neither under workDir
+	// nor under cityPath.
+
+	store := beads.NewMemStore()
+	root := mustCreate(t, store, beads.Bead{Title: "workflow", Metadata: map[string]string{"gc.kind": "workflow"}})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "review loop",
+		Metadata: map[string]string{
+			"gc.kind":         "ralph",
+			"gc.root_bead_id": root.ID,
+			"gc.check_path":   checkRel,
+			"gc.work_dir":     workDir,
+			"gc.max_attempts": "3",
+		},
+	})
+	subject := mustCreate(t, store, beads.Bead{
+		Title:    "review loop iteration 1",
+		Metadata: map[string]string{"gc.kind": "scope", "gc.root_bead_id": root.ID},
+	})
+
+	_, err := runRalphCheck(store, control, subject, 1, ProcessOptions{CityPath: cityPath})
+	if err == nil {
+		t.Fatal("runRalphCheck: want error for a genuinely missing check script under a live worktree, got nil")
+	}
+}
+
 // TestRunRalphCheckEnvTracksSubject pins gastownhall/gascity#2558 review
 // feedback: GC_BEAD_ID and the molecule/artifact dirs must describe the SAME
 // bead. The per-attempt agent runs on the subject (attempt) bead and writes

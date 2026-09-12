@@ -281,6 +281,25 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 		// original work_dir error is preserved when the fallback also misses.
 		if fallbackPath, fallbackErr := convergence.ResolveConditionPath(cityPath, storePath, checkPath); fallbackErr == nil {
 			scriptPath, err = fallbackPath, nil
+		} else if resolvedWorkDir != "" {
+			// Both the worktree-relative and store-relative resolutions missed:
+			// the gate script only ever lived under the per-step worktree.
+			// Distinguish two cases (gastownhall/gascity recurring
+			// finalize-stall bug): the worktree directory itself no longer
+			// exists on disk, meaning it was legitimately reaped after its
+			// step completed — tolerate the gate as satisfied instead of
+			// hard-erroring into quarantine. If the worktree directory is
+			// still present, the script is simply missing/misconfigured and
+			// must keep failing loudly.
+			if _, statErr := os.Stat(resolvedWorkDir); errors.Is(statErr, fs.ErrNotExist) {
+				return convergence.GateResult{
+					Outcome: convergence.GatePass,
+					Stdout: fmt.Sprintf(
+						"%s: gate check_path %q unresolved: per-step worktree %s was torn down after step completion; tolerating gate as satisfied",
+						bead.ID, checkPath, resolvedWorkDir,
+					),
+				}, nil
+			}
 		}
 	}
 	if err != nil {
