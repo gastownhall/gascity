@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -572,6 +573,7 @@ type Manager struct {
 	store                   beads.Store
 	sp                      runtime.Provider
 	cityPath                string
+	cityConfig              *config.City
 	transportResolver       func(template, provider string) transportResolution
 	clk                     clock.Clock
 	staleKeyDetectionWaiter StaleKeyDetectionWaiter
@@ -763,6 +765,17 @@ func WithCityPath(cityPath string) ManagerOption {
 	return func(m *Manager) { m.cityPath = cityPath }
 }
 
+// WithCityConfig supplies the loaded city configuration so the Manager can
+// derive canonical named-session ownership (configured_named_session,
+// configured_named_identity) from the city's own named-session spec table at
+// creation time, instead of trusting caller-supplied ExtraMeta. A nil cfg
+// leaves the Manager without derivation capability: creation falls back to
+// the legacy ExtraMeta-trusting behavior for callers that have not been
+// wired with a city config (see resolveConfiguredNamedSessionIdentity).
+func WithCityConfig(cfg *config.City) ManagerOption {
+	return func(m *Manager) { m.cityConfig = cfg }
+}
+
 // WithTransportResolver lets the Manager infer session transport from template
 // or provider config when older beads do not have transport metadata.
 func WithTransportResolver(resolver func(template, provider string) string) ManagerOption {
@@ -838,6 +851,39 @@ func (m *Manager) CreateSession(ctx context.Context, spec CreateOptions) (Info, 
 	return m.createStarted(ctx, spec)
 }
 
+// resolveConfiguredNamedSessionIdentity determines whether alias names a
+// canonically configured named session, and if so its canonical identity.
+//
+// When the Manager has been wired with the city config (WithCityConfig), this
+// is authoritative in both directions: it looks alias up against the city's
+// own named-session spec table (the same FindNamedSessionSpec lookup
+// FindNamedSessionConflict already uses) and returns that answer regardless
+// of what extraMeta claims -- a caller cannot fabricate a false positive, and
+// omitting the fields no longer produces a false negative.
+//
+// Derivation requires alias to be the canonical qualified identity of the
+// configured named session: config.FindNamedSession also accepts the V2
+// bare-name shorthand ("mayor" for "gastown.mayor"), but that shorthand is
+// deliberately not treated as a canonical ownership claim, because stamping
+// it would record an identity no canonical lookup keys off.
+//
+// When no city config has been wired, derivation is impossible, so this falls
+// back to the legacy behavior of trusting extraMeta's own claim (preserved
+// for callers/tests that construct a Manager without city config).
+func (m *Manager) resolveConfiguredNamedSessionIdentity(alias string, extraMeta map[string]string) (identity string, ok bool) {
+	if m.cityConfig != nil {
+		spec, found := FindNamedSessionSpec(m.cityConfig, m.cityConfig.EffectiveCityName(), alias)
+		if !found || spec.Named.QualifiedName() != alias {
+			return "", false
+		}
+		return spec.Named.QualifiedName(), true
+	}
+	if extraMeta[NamedSessionMetadataKey] == "true" && extraMeta[NamedSessionIdentityMetadata] == alias {
+		return alias, true
+	}
+	return "", false
+}
+
 func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, error) {
 	alias, explicitName := spec.Alias, spec.ExplicitName
 	template, title := spec.Template, spec.Title
@@ -860,8 +906,9 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 		title = template
 	}
 	aliasOwner := ""
-	if extraMeta["configured_named_session"] == "true" && extraMeta["configured_named_identity"] == alias {
-		aliasOwner = alias
+	configuredIdentity, isConfiguredNamedSession := m.resolveConfiguredNamedSessionIdentity(alias, extraMeta)
+	if isConfiguredNamedSession {
+		aliasOwner = configuredIdentity
 	}
 	var info Info
 	err = withSessionIdentifierReservationLocks([]string{alias, explicitName}, func() error {
@@ -916,6 +963,19 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 		}
 		for k, v := range extraMeta {
 			meta[k] = v
+		}
+		if m.cityConfig != nil {
+			// Authoritative in both directions once the Manager is wired with
+			// the city config: a caller cannot fabricate canonical ownership
+			// via ExtraMeta, and omitting these keys no longer produces a
+			// false negative for an alias the city config does recognize.
+			if isConfiguredNamedSession {
+				meta[NamedSessionMetadataKey] = "true"
+				meta[NamedSessionIdentityMetadata] = configuredIdentity
+			} else {
+				delete(meta, NamedSessionMetadataKey)
+				delete(meta, NamedSessionIdentityMetadata)
+			}
 		}
 		if meta["session_origin"] == "" {
 			meta["session_origin"] = spec.defaultSessionOrigin()
@@ -1101,8 +1161,9 @@ func (m *Manager) createBeadOnly(spec CreateOptions) (Info, error) {
 		title = template
 	}
 	aliasOwner := ""
-	if extraMeta["configured_named_session"] == "true" && extraMeta["configured_named_identity"] == alias {
-		aliasOwner = alias
+	configuredIdentity, isConfiguredNamedSession := m.resolveConfiguredNamedSessionIdentity(alias, extraMeta)
+	if isConfiguredNamedSession {
+		aliasOwner = configuredIdentity
 	}
 	var info Info
 	err = withSessionIdentifierReservationLocks([]string{alias, explicitName}, func() error {
@@ -1153,6 +1214,19 @@ func (m *Manager) createBeadOnly(spec CreateOptions) (Info, error) {
 		}
 		for k, v := range extraMeta {
 			meta[k] = v
+		}
+		if m.cityConfig != nil {
+			// Authoritative in both directions once the Manager is wired with
+			// the city config: a caller cannot fabricate canonical ownership
+			// via ExtraMeta, and omitting these keys no longer produces a
+			// false negative for an alias the city config does recognize.
+			if isConfiguredNamedSession {
+				meta[NamedSessionMetadataKey] = "true"
+				meta[NamedSessionIdentityMetadata] = configuredIdentity
+			} else {
+				delete(meta, NamedSessionMetadataKey)
+				delete(meta, NamedSessionIdentityMetadata)
+			}
 		}
 		if meta["session_origin"] == "" {
 			meta["session_origin"] = spec.defaultSessionOrigin()

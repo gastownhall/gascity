@@ -14,6 +14,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -1760,6 +1761,224 @@ func TestCreateInjectsUnifiedSessionRuntimeEnv(t *testing.T) {
 		if got := env[key]; got != want {
 			t.Fatalf("Env[%s] = %q, want %q (env=%v)", key, got, want, env)
 		}
+	}
+}
+
+// namedSessionCityConfigFixture returns a minimal city configuration in
+// which alias "mayor" (V2 bare-name form) resolves to the qualified named
+// session "gastown.mayor", backed by a matching agent template. The shape
+// mirrors TestResolveNamedSessionSpecForConfigTarget_BareNameResolvesV2BoundSession
+// in named_config_test.go, which already exercises this exact
+// Agents+NamedSessions combination through the shared config.FindNamedSession/
+// config.FindAgent matching logic that FindNamedSessionSpec also uses.
+func namedSessionCityConfigFixture() *config.City {
+	return &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:        "mayor",
+			BindingName: "gastown",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template:    "mayor",
+			BindingName: "gastown",
+		}},
+	}
+}
+
+// TestCreateStarted_DerivesConfiguredNamedSessionFromCityConfig covers
+// ga-m42o8w (Direction A hardening): when the Manager has a city
+// configuration wired via WithCityConfig, createStarted must derive
+// configured_named_session/configured_named_identity from the config's own
+// named-session spec table (FindNamedSessionSpec) instead of trusting
+// caller-supplied ExtraMeta. A caller that omits the
+// configured_named_session/configured_named_identity ExtraMeta pair
+// entirely must still see the session stamped as canonical when alias
+// matches a configured named session.
+func TestCreateStarted_DerivesConfiguredNamedSessionFromCityConfig(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp, WithCityConfig(namedSessionCityConfigFixture()))
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		Alias:        "gastown.mayor",
+		ExplicitName: "test-city--gastown-mayor",
+		Template:     "mayor",
+		Title:        "Mayor",
+		Command:      "claude",
+		WorkDir:      "/tmp",
+		Provider:     "claude",
+		// ExtraMeta deliberately omits configured_named_session/
+		// configured_named_identity entirely -- the caller "got it wrong."
+		ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := b.Metadata[NamedSessionMetadataKey]; got != "true" {
+		t.Fatalf("%s = %q, want %q (must be derived from city config even though ExtraMeta omitted it)", NamedSessionMetadataKey, got, "true")
+	}
+	if got := b.Metadata[NamedSessionIdentityMetadata]; got != "gastown.mayor" {
+		t.Fatalf("%s = %q, want %q", NamedSessionIdentityMetadata, got, "gastown.mayor")
+	}
+}
+
+// TestCreateStarted_CityConfigOverridesFalseExtraMetaClaim covers the
+// inverse of ga-m42o8w: derivation must be authoritative in both
+// directions. When the Manager has a city configuration wired and alias
+// does NOT name a configured named session, createStarted must not stamp
+// configured_named_session/configured_named_identity even when the
+// caller's ExtraMeta falsely claims canonical ownership.
+func TestCreateStarted_CityConfigOverridesFalseExtraMetaClaim(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp, WithCityConfig(namedSessionCityConfigFixture()))
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		Alias:        "not-a-configured-alias",
+		ExplicitName: "test-city--not-a-configured-alias",
+		Template:     "helper",
+		Title:        "Helper",
+		Command:      "claude",
+		WorkDir:      "/tmp",
+		Provider:     "claude",
+		ExtraMeta: map[string]string{
+			"configured_named_session":  "true",
+			"configured_named_identity": "not-a-configured-alias",
+			"session_origin":            "manual",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := b.Metadata[NamedSessionMetadataKey]; got != "" {
+		t.Fatalf("%s = %q, want empty (city config does not recognize this alias; must override the caller's false ExtraMeta claim)", NamedSessionMetadataKey, got)
+	}
+	if got := b.Metadata[NamedSessionIdentityMetadata]; got != "" {
+		t.Fatalf("%s = %q, want empty", NamedSessionIdentityMetadata, got)
+	}
+}
+
+// TestCreateBeadOnly_DerivesConfiguredNamedSessionFromCityConfig mirrors
+// TestCreateStarted_DerivesConfiguredNamedSessionFromCityConfig for the
+// deferred/bead-only creation path (createBeadOnly), which mirrors
+// createStarted's ExtraMeta-trusting bug at a second call site (ga-m42o8w).
+func TestCreateBeadOnly_DerivesConfiguredNamedSessionFromCityConfig(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp, WithCityConfig(namedSessionCityConfigFixture()))
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		BeadOnly:     true,
+		Alias:        "gastown.mayor",
+		ExplicitName: "test-city--gastown-mayor",
+		Template:     "mayor",
+		Title:        "Mayor",
+		Command:      "claude",
+		WorkDir:      "/tmp",
+		Provider:     "claude",
+		ExtraMeta:    map[string]string{"session_origin": "ephemeral"},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := b.Metadata[NamedSessionMetadataKey]; got != "true" {
+		t.Fatalf("%s = %q, want %q (must be derived from city config even though ExtraMeta omitted it)", NamedSessionMetadataKey, got, "true")
+	}
+	if got := b.Metadata[NamedSessionIdentityMetadata]; got != "gastown.mayor" {
+		t.Fatalf("%s = %q, want %q", NamedSessionIdentityMetadata, got, "gastown.mayor")
+	}
+}
+
+// TestCreateStarted_BareNameAliasIsNotTreatedAsConfigured pins the boundary
+// of config-derived ownership. config.FindNamedSession accepts the V2
+// bare-name shorthand ("mayor" resolves to the "gastown.mayor" named
+// session), but that shorthand must not be treated as a canonical ownership
+// claim: stamping it would record configured_named_identity="mayor", an
+// identity no canonical lookup keys off, and would hand an ad-hoc session
+// the alias-ownership powers reserved for the configured named session.
+func TestCreateStarted_BareNameAliasIsNotTreatedAsConfigured(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp, WithCityConfig(namedSessionCityConfigFixture()))
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		Alias:        "mayor",
+		ExplicitName: "test-city--mayor",
+		Template:     "mayor",
+		Title:        "Mayor",
+		Command:      "claude",
+		WorkDir:      "/tmp",
+		Provider:     "claude",
+		ExtraMeta:    map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := b.Metadata[NamedSessionMetadataKey]; got != "" {
+		t.Fatalf("%s = %q, want empty (the bare-name shorthand is not a canonical ownership claim)", NamedSessionMetadataKey, got)
+	}
+	if got := b.Metadata[NamedSessionIdentityMetadata]; got != "" {
+		t.Fatalf("%s = %q, want empty", NamedSessionIdentityMetadata, got)
+	}
+}
+
+// TestCreateBeadOnly_CityConfigOverridesFalseExtraMetaClaim mirrors
+// TestCreateStarted_CityConfigOverridesFalseExtraMetaClaim for the
+// deferred/bead-only creation path, which carries its own copy of the
+// metadata normalization branch.
+func TestCreateBeadOnly_CityConfigOverridesFalseExtraMetaClaim(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp, WithCityConfig(namedSessionCityConfigFixture()))
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		BeadOnly:     true,
+		Alias:        "not-a-configured-alias",
+		ExplicitName: "test-city--not-a-configured-alias",
+		Template:     "helper",
+		Title:        "Helper",
+		Command:      "claude",
+		WorkDir:      "/tmp",
+		Provider:     "claude",
+		ExtraMeta: map[string]string{
+			"configured_named_session":  "true",
+			"configured_named_identity": "not-a-configured-alias",
+			"session_origin":            "ephemeral",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := b.Metadata[NamedSessionMetadataKey]; got != "" {
+		t.Fatalf("%s = %q, want empty (city config does not recognize this alias; must override the caller's false ExtraMeta claim)", NamedSessionMetadataKey, got)
+	}
+	if got := b.Metadata[NamedSessionIdentityMetadata]; got != "" {
+		t.Fatalf("%s = %q, want empty", NamedSessionIdentityMetadata, got)
 	}
 }
 

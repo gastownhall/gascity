@@ -17,6 +17,7 @@ func (s *Server) sessionManager(store beads.Store) *session.Manager {
 		store,
 		s.state.SessionProvider(),
 		session.WithCityPath(s.state.CityPath()),
+		session.WithCityConfig(cfg),
 		session.WithTransportPolicyResolver(func(template, provider string) (string, bool) {
 			return configuredSessionTransportResolution(cfg, template, provider)
 		}),

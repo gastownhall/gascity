@@ -80,6 +80,7 @@ func workerFactoryWithStaleKeyDetectionWaiter(
 		Store:                   store,
 		Provider:                sp,
 		CityPath:                cityPath,
+		CityConfig:              cfg,
 		SearchPaths:             searchPaths,
 		UsageSink:               usageSinkForCity(cfg, cityPath),
 		ResolveTransport:        resolveTransport,
