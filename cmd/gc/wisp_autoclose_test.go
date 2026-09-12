@@ -2,13 +2,16 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 )
 
 func TestWispAutocloseClosesOpenMolecule(t *testing.T) {
@@ -604,6 +607,188 @@ func TestWispAutocloseClosesRootOnlyWispViaInputConvoy(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Auto-closed workflow "+root.ID+" on "+issue.ID) {
 		t.Fatalf("stdout = %q, want workflow auto-close message", stdout.String())
+	}
+}
+
+// TestWispAutocloseClosesRootOnlyWispViaInputConvoyAcrossStores runs the
+// root-only reap over both store topologies through the splitEnv fixture. On a
+// split city the two halves of the input-convoy link live in DIFFERENT stores:
+// the synthetic input convoy is WORK class (coordclass classifies EVERY convoy
+// as work, and convoy.TrackItemIn keeps it co-resident with the issue it
+// tracks), so the convoy + its tracks edge land in the work store — while the
+// graph.v2 workflow root it launched is graph class and lives in the relocated
+// binding. A reap that probes only the graph store for the tracking convoy
+// finds no tracks edge, silently no-ops, and the open root outlives its closed
+// issue — re-routing to the pool and churning a fresh worker (the review-pool
+// spawn-churn finalize-gap, reopened for every split city).
+func TestWispAutocloseClosesRootOnlyWispViaInputConvoyAcrossStores(t *testing.T) {
+	forEachTopology(t, func(t *testing.T, e splitEnv) {
+		issue, err := e.work.Create(beads.Bead{Title: "work issue", Type: "task"})
+		if err != nil {
+			t.Fatalf("create work issue: %v", err)
+		}
+		convoy, err := e.work.Create(beads.Bead{
+			Title:    "synthetic input convoy",
+			Type:     "convoy",
+			Metadata: map[string]string{beadmeta.SyntheticMetadataKey: "true"},
+		})
+		if err != nil {
+			t.Fatalf("create synthetic input convoy in the work store: %v", err)
+		}
+		if err := e.work.DepAdd(convoy.ID, issue.ID, "tracks"); err != nil {
+			t.Fatalf("DepAdd(tracks) in the work store: %v", err)
+		}
+		root, err := e.graphStore().Create(beads.Bead{
+			Title: "mol-focus-review",
+			Type:  "task",
+			Metadata: map[string]string{
+				beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+				beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+				beadmeta.InputConvoyIDMetadataKey:   convoy.ID,
+				beadmeta.RoutedToMetadataKey:        "review-pool/worker",
+			},
+		})
+		if err != nil {
+			t.Fatalf("create root-only workflow root through the graph front door: %v", err)
+		}
+		if !coordclass.Classify(root).IsInfrastructure() {
+			t.Fatalf("root %s classifies as work, want infrastructure; the cross-store premise is not staged", root.ID)
+		}
+
+		if err := e.work.Close(issue.ID); err != nil {
+			t.Fatalf("close issue: %v", err)
+		}
+
+		var stdout bytes.Buffer
+		doWispAutocloseWith(e.work, issue.ID, &stdout, beads.GraphStore{Store: e.graphStore()})
+
+		rootAfter, err := e.graphStore().Get(root.ID)
+		if err != nil {
+			t.Fatalf("Get(root): %v", err)
+		}
+		if rootAfter.Status != "closed" {
+			t.Fatalf("root-only wisp status = %q, want closed (reaped via the work-store input convoy)", rootAfter.Status)
+		}
+		if !strings.Contains(stdout.String(), "Auto-closed workflow "+root.ID+" on "+issue.ID) {
+			t.Fatalf("stdout = %q, want workflow auto-close message", stdout.String())
+		}
+	})
+}
+
+// TestWispAutocloseClosesRootOnlyWispViaGraphResidentInputConvoy guards against
+// a "swap" fix instead of a union: a store migrated from the single-store era
+// can hold the tracking convoy + its tracks edge on the GRAPH side (migrated
+// beads keep their pre-split residence, and SQLite records the dangling edge
+// rather than refusing it), while the issue stays in the work store. The reap
+// must still find that convoy through the graph leg after it learns to probe
+// the work leg.
+func TestWispAutocloseClosesRootOnlyWispViaGraphResidentInputConvoy(t *testing.T) {
+	forEachTopology(t, func(t *testing.T, e splitEnv) {
+		issue, err := e.work.Create(beads.Bead{Title: "work issue", Type: "task"})
+		if err != nil {
+			t.Fatalf("create work issue: %v", err)
+		}
+		convoy, err := e.graphStore().Create(beads.Bead{
+			Title:    "migrated input convoy",
+			Type:     "convoy",
+			Metadata: map[string]string{beadmeta.SyntheticMetadataKey: "true"},
+		})
+		if err != nil {
+			t.Fatalf("create migrated convoy through the graph front door: %v", err)
+		}
+		if err := e.graphStore().DepAdd(convoy.ID, issue.ID, "tracks"); err != nil {
+			t.Fatalf("DepAdd(tracks) in the graph store: %v", err)
+		}
+		if e.split {
+			// Claiming the recorded violation is the assertion: the class store
+			// ACCEPTED the cross-store tracks edge, which is what SQLite does with
+			// migrated-era data — this row is the production corruption the union
+			// probe must still reap through.
+			violations := splittest.TakeResidenceViolations(e.class)
+			if len(violations) != 1 || violations[0].Op != "dep-add" {
+				t.Fatalf("class store recorded violations %v, want exactly the one accepted cross-store tracks edge", violations)
+			}
+		}
+		root, err := e.graphStore().Create(beads.Bead{
+			Title: "mol-focus-review",
+			Type:  "task",
+			Metadata: map[string]string{
+				beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+				beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+				beadmeta.InputConvoyIDMetadataKey:   convoy.ID,
+				beadmeta.RoutedToMetadataKey:        "review-pool/worker",
+			},
+		})
+		if err != nil {
+			t.Fatalf("create root-only workflow root through the graph front door: %v", err)
+		}
+
+		if err := e.work.Close(issue.ID); err != nil {
+			t.Fatalf("close issue: %v", err)
+		}
+
+		var stdout bytes.Buffer
+		doWispAutocloseWith(e.work, issue.ID, &stdout, beads.GraphStore{Store: e.graphStore()})
+
+		rootAfter, err := e.graphStore().Get(root.ID)
+		if err != nil {
+			t.Fatalf("Get(root): %v", err)
+		}
+		if rootAfter.Status != "closed" {
+			t.Fatalf("migrated-convoy root-only wisp status = %q, want closed (reaped via the graph-store input convoy)", rootAfter.Status)
+		}
+	})
+}
+
+// TestWispAutocloseFailsClosedOnRefusedGraphBinding pins the refusal posture of
+// the union probe. A city whose [storage] split this build must not serve gets
+// its graph class delivered AS a store that refuses every operation
+// (refusedClassStore, cli_storage_routes.go); the refusal itself is printed
+// once to stderr when the verdict is taken, so the probe's whole job here is to
+// fail CLOSED — reap nothing — rather than silently narrow to the work store.
+// The decoy is the discriminator: a work-resident bead carrying the root shape
+// (gc.kind=workflow, graph.v2, gc.input_convoy_id) that a narrowed implementation
+// — one that falls back to the work store when the graph leg refuses — would
+// find via the work-found convoy and force-close. It must stay open, and no
+// looks-like-success auto-close line may be written.
+func TestWispAutocloseFailsClosedOnRefusedGraphBinding(t *testing.T) {
+	store := beads.NewMemStore()
+	issue, _ := store.Create(beads.Bead{Title: "work issue", Type: "task"}) // gc-1
+	convoy, _ := store.Create(beads.Bead{
+		Title:    "synthetic input convoy",
+		Type:     "convoy",
+		Metadata: map[string]string{beadmeta.SyntheticMetadataKey: "true"},
+	}) // gc-2
+	if err := store.DepAdd(convoy.ID, issue.ID, "tracks"); err != nil {
+		t.Fatalf("DepAdd(tracks): %v", err)
+	}
+	decoy, _ := store.Create(beads.Bead{
+		Title: "work-resident decoy root",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+			beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+			beadmeta.InputConvoyIDMetadataKey:   convoy.ID,
+		},
+	}) // gc-3
+	_ = store.Close(issue.ID)
+
+	refused := refusedClassStore{err: standingStorageRefusal{
+		err: errors.New("storage: this city's [storage] binding has not converged; run `gc storage migrate`"),
+	}}
+
+	var stdout bytes.Buffer
+	doWispAutocloseWith(store, issue.ID, &stdout, beads.GraphStore{Store: refused})
+
+	if stdout.String() != "" {
+		t.Fatalf("stdout = %q, want no auto-close output on a refused graph binding; a success line here is the looks-like-success answer the refusal exists to close", stdout.String())
+	}
+	decoyAfter, err := store.Get(decoy.ID)
+	if err != nil {
+		t.Fatalf("Get(decoy): %v", err)
+	}
+	if decoyAfter.Status != "open" {
+		t.Fatalf("work-resident decoy root status = %q, want open; the reap silently narrowed the graph leg to the work store instead of failing closed on the refusal", decoyAfter.Status)
 	}
 }
 
