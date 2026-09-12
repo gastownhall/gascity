@@ -138,15 +138,15 @@ constraints and conventions below.
 | ID | Requirement | Priority | Acceptance Criteria |
 |----|-------------|----------|---------------------|
 | FR-1 | **Fix the single regressed call site.** In `examples/bd/dolt/formulas/mol-dog-stale-db.toml`'s `cleanup` step, change the terminal `bd close "$WORK_BEAD" --reason "..."` to `gc bd close "$WORK_BEAD" --reason "..."`. | Must | A clean/no-op/soft-escalation/apply run of the formula exits 0 and `bd show "$WORK_BEAD"` reports `status: closed` with the expected reason string attached. |
-| FR-2 | **No regression to intentional hard-abort behavior.** `fail_open_after_drain`'s call sites (dry-run scan failure, invalid JSON, and any other existing hard-abort condition in this step) continue to `drain_ack_once` then `exit 1` **without** attempting a close, exactly as today. | Must | Existing/new test coverage confirms each hard-abort path still exits 1 with the work bead left open, unchanged from current behavior. |
+| FR-2 | **No regression to intentional hard-abort behavior.** `fail_open_after_drain`'s call sites (dry-run scan failure, invalid JSON, and any other existing hard-abort condition in this step) continue to `drain_ack_once` then `exit 1` **without** attempting a close, exactly as today. | Must | The six table-driven cases in `TestStaleDBFormulaFailurePathsDrainAck` (`examples/bd/dolt/stale_db_formula_test.go`) still pass unchanged: dry run command failure, invalid scan JSON, apply command failure, invalid apply JSON, apply misses dry-run reclaimable bytes, and invalid identifier skipped in scan. Each must still exit 1 with the work bead left open. |
 | FR-3 | **Harden the adjacent raw-`bd` call for consistency.** Change `append_report_note`'s `bd update "$WORK_BEAD" --append-notes ...` (line 108) to `gc bd update "$WORK_BEAD" --append-notes ...`. Not currently broken (no assignee/actor guard fires on this verb today), but flagged by the bug report as the same call family; fixing it alongside FR-1 pre-empts the same class of failure if a future `bd`/`gc` version tightens `update`'s actor guard the way `close`'s is already guarded. | Should | Line 108 uses `gc bd update`; append-notes content/format and all call sites that invoke `append_report_note` (including hard-abort paths) are otherwise unchanged. |
-| FR-4 | **Add a merge-time guard against this regression class.** A test (or lint, per architect's choice — see Open Questions) fails the build if any `*.formula.toml` step script under `examples/**/formulas` or `internal/bootstrap/packs/**/formulas` contains a raw (non-`gc`-prefixed) `bd close`, `bd update ... --status closed`, `bd heartbeat`, or `bd unclaim` invocation, mirroring the convention already followed by every other shipped formula (see Problem Statement). | Should | Guard fails against a fixture/test formula containing a raw `bd close` line; passes against the corrected formula set (post FR-1/FR-3). Must not false-positive on prose mentions of `bd close` in a formula's own header/doc comments (this file's lines 22 and 58 currently do this). |
+| FR-4 | **Add a merge-time guard against this regression class.** A test (or lint, per architect's choice — see Open Questions) fails the build if any `*.formula.toml` step script under `examples/**/formulas` or `internal/bootstrap/packs/**/formulas` contains a raw (non-`gc`-prefixed) `bd close`, `bd update ... --status closed`, `bd heartbeat`, or `bd unclaim` invocation, mirroring the convention already followed by every other shipped formula (see Problem Statement). The guard must parse the TOML and inspect only executable step-script content inside the relevant string fields — not grep whole files — because prose and comments live in the same file as the scripts. | Should | Guard fails against a fixture/test formula containing a raw `bd close` line in a step script; passes against the corrected formula set (post FR-1/FR-3). Must not false-positive on prose mentions of `bd` verbs in a formula's own header/doc text (line 22 of this file is such a `bd show` prose mention). |
 
 ## Non-Functional Requirements
 
 | ID | Requirement | Metric |
 |----|-------------|--------|
-| NFR-1 | **Scoped, mechanical change.** The fix touches only the identified `bd close`/`bd update` invocation lines (FR-1, FR-3) plus new guard/test code (FR-4) — no change to the scan/decide/escalate/apply decision branches. | Diff review: no lines changed outside the identified call sites and new guard code. |
+| NFR-1 | **Scoped, mechanical change.** The fix touches only the identified `bd close`/`bd update` invocation lines (FR-1, FR-3) plus new guard/test code (FR-4) — no change to the scan/decide/escalate/apply decision branches. | Diff review: no lines changed outside the identified call sites, the stub-binary allowlists and literal-string assertions in `examples/bd/dolt/stale_db_formula_test.go` that FR-1 and FR-3 force to change, and new guard code. |
 | NFR-2 | **No hardcoded role names.** Per `AGENTS.md`'s "ZERO hardcoded roles" invariant, `gc bd close`/`gc bd update` resolve actor identity generically from the running session, never from a role-name literal. | Code review / grep for role-name literals in the diff. |
 | NFR-3 | **SDK self-sufficiency.** Dog/vapor formulas are infrastructure-maintenance formulas that must keep functioning with only the controller running, independent of any specific user-configured agent role. The fix must not introduce a dependency on a named role. | Test: the fixed formula runs correctly under a generic/unnamed actor, not just the `bd__dog-1-pool` session named in the bug report. |
 | NFR-4 | **Failure stays a real signal.** The corrected `gc bd close` call (FR-1) must not be wrapped in `\|\| true` or `run_or_warn` — unlike the script's non-critical calls (e.g. `maintenance_notice`), a close failure is the terminal, load-bearing action of the step and must still propagate as a real error if it recurs for a different reason. | Code review confirms the fixed close call is not swallowed. |
@@ -187,6 +187,15 @@ see Problem Statement):
 - `gc bd close` / `gc bd update` (`cmd/gc/cmd_bd_by_id.go` and the `gc bd`
   actor-resolution path) — the already-correct, already-shipped mechanism
   this fix adopts. No changes needed to this mechanism itself.
+- `examples/bd/dolt/stale_db_formula_test.go` — the test that renders this
+  formula's step script and executes it against stub binaries on `PATH`. Its
+  eight fake `gc` implementations `exit 64` on any subcommand outside an
+  allowlist (`dolt-cleanup`, `event emit`, `session nudge`, `runtime
+  drain-ack`, `mail send`) that does **not** include `bd`, and sixteen
+  assertions match the literal strings `bd close bead-1` and `bd update
+  bead-1 --append-notes`. Under the script's `set -euo pipefail`, FR-1 and
+  FR-3 turn every one of those into a failure unless this harness is updated
+  in the same change. Treat it as part of the change, not a follow-up.
 - Reference implementations already following the correct convention:
   `internal/bootstrap/packs/core/formulas/mol-polecat-commit.toml:162`,
   `mol-polecat-report.toml:171`, `mol-prompt-synth.toml:147`,
@@ -211,13 +220,25 @@ see Problem Statement):
    lived in `examples/**`, so a narrower scope would not have caught it —
    recommend fleet-wide (within this repo), flagged because it changes the
    guard's false-positive surface: formula files legitimately mention
-   `bd close`/`bd show` in prose within header/doc comments (this very file,
-   lines 22 and 58), so the guard must match executable step-script lines,
-   not comment or documentation text.
+   `bd` verbs in prose within header/doc text (line 22 of this very file is a
+   `bd show` prose mention), so the guard must inspect executable step-script
+   content inside the TOML string fields, not comment or documentation text.
 3. **FR-3 bundling.** Land the `append_report_note` hardening (FR-3) in the
    same commit as FR-1 (one file, adjacent lines, same session), or file it
    as a separate lower-priority follow-up since it is not currently broken?
    Recommend bundling; architect may split if preferred.
+4. **Does `gc bd close` actually resolve the actor differently here?**
+   This PRD's remedy assumes it does, but the mechanism is not yet confirmed
+   on a city without a relocated class binding. The `gc bd` wrapper passes
+   `BEADS_ACTOR` through to `bd` unchanged, and the in-process routed arm
+   that could resolve identity differently engages only for class-owned
+   beads. Issue #5814 reports the wrapper failing identically, which is
+   evidence against the assumption. **The experiment that settles it:** on a
+   default single-binding city, freshly claim a bead, then run both `bd
+   close` and `gc bd close` against it with `BEADS_ACTOR` set exactly as the
+   formula's step script sees it, and capture both exit codes. If the
+   wrapper fails the same way, FR-1 is not the fix and this PRD needs
+   rework. **Answer this before implementing FR-1.**
 
 ### For the designer
 
@@ -231,7 +252,10 @@ success.
 - Source bead: `ga-j3lkma`
 - Reference implementations (already-correct convention):
   `internal/bootstrap/packs/core/formulas/mol-polecat-commit.toml`,
-  `mol-polecat-report.toml`, `mol-prompt-synth.toml`, `mol-do-work.toml`
+  `mol-polecat-report.toml`, `mol-prompt-synth.toml`, `mol-do-work.toml`.
+  Note that `mol-do-work.toml:65` is prompt prose instructing an agent to
+  run `gc bd heartbeat`, not an executable step-script line; the other three
+  citations are executable calls.
 - Related but distinct identity-lifecycle PRD, different mechanism, no
   overlap: `engdocs/proposals/executor-identity-stamp-lifecycle.md`
   (`ga-cm2o5t`) — covers `gc.session_name`/`gc.work_dir` stamp clearing on
