@@ -45,24 +45,6 @@ import (
 // contract cannot be expressed by reusing them without changing what every
 // existing caller observes.
 
-// workerAssignmentClaimer is the acquire half of the conditional-assignment
-// pair, discovered on the RESOLVED store the same way
-// beads.ConditionalAssignmentReleaser is. It is restated here rather than
-// imported because the canonical beads.Store surface deliberately has no claim
-// method (internal/storebinding/beads_adapter.go:487-491): the capability
-// belongs to the backend, and each front door asserts it.
-//
-// POPULATION AT THIS COMMIT: the two-argument claim exists on SQLiteStore
-// (internal/beads/sqlite_store_claim.go:22) and on the graph adapter that
-// delegates to it (internal/storebinding/beads_adapter.go:500). BdStore's claim
-// takes a different shape — the assignee is implicit in the bd subprocess
-// invocation (internal/beads/bdstore.go:1726) — and NativeDoltStore has none.
-// Those backends answer 501 and write nothing; that boundary is the open half
-// of #5737 and is recorded, not papered over.
-type workerAssignmentClaimer interface {
-	Claim(id, assignee string) (beads.Bead, bool, error)
-}
-
 // workerCloseReasonMetadataKey is the durable close reason. beads.Bead has no
 // close-reason field and Store.Close takes none, but the key is NOT invented
 // here: "close_reason" is the metadata key gc already writes a close reason
@@ -117,17 +99,23 @@ func (s *Server) humaHandleWorkerClaim(_ context.Context, input *WorkerClaimInpu
 	if err != nil {
 		return nil, err
 	}
-	claimer, ok := store.(workerAssignmentClaimer)
-	if !ok {
-		return nil, apierr.NotImplemented.Msg("worker claim: the resolved store does not implement the two-argument assignment claim; refusing to emulate it with a read-then-write, which would lose the single-winner guarantee")
-	}
 	writer, err := workerLeaseWriter(store)
 	if err != nil {
 		return nil, err
 	}
-	claimed, acquired, err := claimer.Claim(id, assignee)
+	// Dispatch through beads.ClaimFor rather than asserting one claim shape on
+	// the resolved store. Two backends expose the same compare-and-swap under
+	// different method names, and a direct assert on either one answers 501 for
+	// the other while the capability is present. ClaimFor holds that dispatch
+	// in one place, and reports an absent capability as ErrClaimUnsupported so
+	// this handler can keep its typed 501 for the backends that really have
+	// neither shape.
+	claimed, acquired, err := beads.ClaimFor(store, id, assignee)
 	if err != nil {
-		if errors.Is(err, beads.ErrNotFound) {
+		switch {
+		case errors.Is(err, beads.ErrClaimUnsupported):
+			return nil, apierr.NotImplemented.Msg("worker claim: the resolved store's backend implements neither claim shape; nothing was claimed")
+		case errors.Is(err, beads.ErrNotFound):
 			return nil, apierr.BeadNotFound.Msg("worker claim: bead " + id + " not found")
 		}
 		return nil, apierr.Internal.Msg("worker claim: " + err.Error())
