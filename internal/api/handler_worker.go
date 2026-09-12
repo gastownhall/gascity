@@ -135,7 +135,7 @@ func (s *Server) humaHandleWorkerClaim(_ context.Context, input *WorkerClaimInpu
 	if err != nil {
 		return nil, err
 	}
-	if err := stampWorkerLease(writer, fence, assignee, nowUTC()); err != nil {
+	if err := stampWorkerLease(writer, fence, assignee, nowUTC(), strings.TrimSpace(input.Body.SessionID)); err != nil {
 		return nil, err
 	}
 	final, err := store.Get(id)
@@ -199,7 +199,7 @@ func (s *Server) humaHandleWorkerHeartbeat(_ context.Context, input *WorkerHeart
 	if err != nil {
 		return nil, err
 	}
-	if err := stampWorkerLease(writer, fence, assignee, nowUTC()); err != nil {
+	if err := stampWorkerLease(writer, fence, assignee, nowUTC(), ""); err != nil {
 		return nil, err
 	}
 	after, err := store.Get(id)
@@ -479,9 +479,20 @@ func closeRecordAlreadyPresent(bead beads.Bead, record map[string]string) bool {
 //   - gc.claimed_at STAYS WRITE-ONCE (internal/beadmeta/keys.go:54-61): it is
 //     written only when absent. gc.lease_owner is the compare-and-overwrite key
 //     and carries the holder on every pass.
-func stampWorkerLease(writer beads.ConditionalWriter, fence workerFence, assignee, at string) error {
+func stampWorkerLease(writer beads.ConditionalWriter, fence workerFence, assignee, at, sessionID string) error {
 	id := fence.bead.ID
 	fields := map[string]string{beadmeta.LeaseOwnerMetadataKey: assignee}
+	// Stamp the claimant session for a non-control claim. workerOwnership
+	// READS gc.session_id to fence a typed close; without this the claim never
+	// writes the identity its own close check requires, and a typed close from
+	// the claimant returns 409 "no gc.session_id stamped" for a bead it
+	// legitimately holds. Control beads are excluded: they are held by kind,
+	// not by session. Re-stamping an unchanged value is skipped so the fenced
+	// write stays minimal.
+	if sessionID != "" && !beadmeta.IsControlKind(strings.TrimSpace(fence.bead.Metadata[beadmeta.KindMetadataKey])) &&
+		strings.TrimSpace(fence.bead.Metadata[beadmeta.SessionIDMetadataKey]) != sessionID {
+		fields[beadmeta.SessionIDMetadataKey] = sessionID
+	}
 	if strings.TrimSpace(fence.bead.Metadata[beadmeta.ClaimedAtMetadataKey]) == "" {
 		fields[beadmeta.ClaimedAtMetadataKey] = at
 	}

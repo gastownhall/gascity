@@ -14,7 +14,7 @@ import "github.com/gastownhall/gascity/internal/beads"
 // identity — not the transport credential — is what the store compares, which
 // is what keeps release-if-current a compare-and-set rather than a name check.
 type workerSessionBody struct {
-	SessionID string `json:"session_id,omitempty" doc:"gc session the verb is issued for; recorded for attribution, never used as the ownership pointer."`
+	SessionID string `json:"session_id,omitempty" doc:"gc session the verb is issued for. Recorded on a non-control claim as gc.session_id, which the typed close fence then compares; it is not the ownership pointer for the CLAIM itself, which compares the assignee."`
 	Assignee  string `json:"assignee" doc:"Claimant identity (a pool seat or crew holder name). This is the value the store compares." minLength:"1"`
 	BeadID    string `json:"bead_id" doc:"Bead the verb acts on." minLength:"1"`
 }
