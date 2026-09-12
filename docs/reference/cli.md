@@ -3983,6 +3983,7 @@ gc session
 | Subcommand | Description |
 |------------|-------------|
 | [gc session attach](#gc-session-attach) | Attach to (or resume) a chat session |
+| [gc session cancel-reset](#gc-session-cancel-reset) | Clear a pending reset on a live session without recycling it |
 | [gc session close](#gc-session-close) | Close a session permanently |
 | [gc session kill](#gc-session-kill) | Force-kill session runtime (reconciler restarts) |
 | [gc session list](#gc-session-list) | List chat sessions |
@@ -4013,6 +4014,33 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 ```
 gc session attach <session-id-or-alias>
 ```
+
+## gc session cancel-reset
+
+Clear a pending fresh-restart request on a running session, in place.
+
+A session can carry a pending reset (restart_requested / continuation_reset_pending)
+that has not executed yet — for example from an earlier "gc session reset" or
+"gc handoff", or from config drift. While the runtime stays alive the pending
+flag is harmless, but at the session's next sleep-&gt;wake the controller starts a
+fresh conversation and the prior context is lost. cancel-reset clears the pending
+request in place so the running session keeps its current conversation.
+
+It only acts on a running session (clearing is unsafe once a restart has been
+committed and the runtime killed) and does not touch session_key or the
+conversation itself. If the session is configured wake_mode=fresh, clearing the
+flag cannot prevent a fresh conversation on its next wake — change the agent
+config for that.
+
+Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
+
+```
+gc session cancel-reset <session-id-or-alias> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit JSONL |
 
 ## gc session close
 
