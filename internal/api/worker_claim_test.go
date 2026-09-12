@@ -285,3 +285,81 @@ func TestWorkerClaimStampsWithAClaimInstantTheCityCanRead(t *testing.T) {
 		t.Fatalf("claim wrote no %s; a leaseless claim is invisible to every live reaper", beadmeta.ClaimedAtMetadataKey)
 	}
 }
+
+// TestWorkerClaimStampsTheClaimantSessionForTheCloseFence pins the identity the
+// TYPED CLOSE reads back.
+//
+// workerOwnership fences a typed close on gc.session_id, and refuses with 409
+// when the bead carries none. Before this stamp the claim wrote gc.lease_owner
+// and gc.claimed_at and never the session id -- so the close check read an
+// identity its own claim path never wrote, and a claimant closing a bead it
+// legitimately held was refused for a field only the server could have set.
+func TestWorkerClaimStampsTheClaimantSessionForTheCloseFence(t *testing.T) {
+	rigStore := &claimingMemStoreDraft{MemStore: beads.NewMemStore()}
+	created, err := rigStore.Create(beads.Bead{Title: "typed close target", Status: "open"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	state := newFakeState(t)
+	state.stores = map[string]beads.Store{"myrig": rigStore}
+	state.cityBeadStore = rigStore
+	h := newTestCityHandler(t, state)
+
+	body := `{"session_id":"gcg-session-1","assignee":"worker-local-3-pool","bead_id":"` + created.ID + `"}`
+	req := newPostRequest(cityURL(state, "/worker/claim"), strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("claim status = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+
+	stored, err := rigStore.Get(created.ID)
+	if err != nil {
+		t.Fatalf("store Get: %v", err)
+	}
+	if got := stored.Metadata[beadmeta.SessionIDMetadataKey]; got != "gcg-session-1" {
+		t.Fatalf("claim stamped %s = %q, want %q -- without it a typed close by this very claimant returns 409",
+			beadmeta.SessionIDMetadataKey, got, "gcg-session-1")
+	}
+}
+
+// TestWorkerClaimLeavesAControlBeadUnstamped pins the exclusion. Control beads
+// are held by KIND, not by session, so stamping a session id on one would put a
+// per-session identity on a bead whose ownership is not per-session.
+func TestWorkerClaimLeavesAControlBeadUnstamped(t *testing.T) {
+	rigStore := &claimingMemStoreDraft{MemStore: beads.NewMemStore()}
+	created, err := rigStore.Create(beads.Bead{
+		Title:    "control bead",
+		Status:   "open",
+		Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindRetry},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Read the kind from ControlKinds rather than hardcoding a string: a
+	// skipped test here would look like a pass while asserting nothing.
+	if !beadmeta.IsControlKind(beadmeta.KindRetry) {
+		t.Fatalf("test premise broken: %q is no longer a control kind", beadmeta.KindRetry)
+	}
+	state := newFakeState(t)
+	state.stores = map[string]beads.Store{"myrig": rigStore}
+	state.cityBeadStore = rigStore
+	h := newTestCityHandler(t, state)
+
+	body := `{"session_id":"gcg-session-2","assignee":"worker-local-3-pool","bead_id":"` + created.ID + `"}`
+	req := newPostRequest(cityURL(state, "/worker/claim"), strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("claim status = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+
+	stored, err := rigStore.Get(created.ID)
+	if err != nil {
+		t.Fatalf("store Get: %v", err)
+	}
+	if got := strings.TrimSpace(stored.Metadata[beadmeta.SessionIDMetadataKey]); got != "" {
+		t.Fatalf("claim stamped %s = %q on a CONTROL bead; control ownership is by kind, not session",
+			beadmeta.SessionIDMetadataKey, got)
+	}
+}
