@@ -2969,10 +2969,12 @@ func findWorkflowBeads(store beads.Store, workflowID string) ([]beads.Bead, erro
 	for _, root := range roots {
 		addRoot(root)
 	}
+	reader := beads.HandlesFor(store).Live
 	for _, rootID := range rootIDs {
-		all, err := store.List(beads.ListQuery{
+		all, err := reader.List(beads.ListQuery{
 			Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
 			IncludeClosed: true,
+			TierMode:      beads.TierBoth,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("listing descendants of workflow %s: %w", rootID, err)

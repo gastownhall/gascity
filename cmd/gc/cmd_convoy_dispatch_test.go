@@ -7582,6 +7582,64 @@ func TestWorkflowDeleteSweepsTheRelocatedTreeAndTheRetainedCopy(t *testing.T) {
 	}
 }
 
+// TestWorkflowDeleteSweepsTheEphemeralTierOfTheRelocatedTree is the #6129
+// regression: findWorkflowBeads' descendants query left ListQuery.TierMode at
+// its zero value, TierIssues, which filters out Ephemeral rows. On a split
+// city the sweep still finds the root through the class binding, but every
+// wisp-tier step under it — the shape orchestration steps actually run in —
+// was silently dropped from the member set. `gc workflow delete` closed the
+// root and reported success while the ephemeral steps stayed open, rootless,
+// still carrying gc.root_bead_id pointing at a workflow that is gone.
+func TestWorkflowDeleteSweepsTheEphemeralTierOfTheRelocatedTree(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	prevCityFlag := cityFlag
+	cityFlag = ""
+	t.Cleanup(func() { cityFlag = prevCityFlag })
+
+	binding := soleClassBindingStore(t, cityPath)
+	root, err := binding.Create(beads.Bead{
+		Title:  "the workflow root",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey: beadmeta.KindWorkflow,
+		},
+	})
+	if err != nil {
+		t.Fatalf("seeding the workflow root in the class binding: %v", err)
+	}
+
+	creator, ok := binding.(beads.StorageCreateStore)
+	if !ok {
+		t.Fatalf("the class binding (%T) implements no StorageCreateStore, so this fixture cannot reach its ephemeral tier", binding)
+	}
+	wisp, err := creator.CreateWithStorage(beads.Bead{
+		Title:    "the ephemeral step",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
+	}, beads.StorageEphemeral)
+	if err != nil {
+		t.Fatalf("minting the ephemeral descendant in the class binding: %v", err)
+	}
+	if !wisp.Ephemeral {
+		t.Fatalf("minted descendant %s has Ephemeral=false; this fixture is not exercising the wisp tier the bug is about", wisp.ID)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWorkflowDelete(root.ID, true, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc workflow delete exited %d: %s%s", code, stdout.String(), stderr.String())
+	}
+
+	closedWisp, err := binding.Get(wisp.ID)
+	if err != nil {
+		t.Fatalf("reading the ephemeral descendant back from the binding: %v", err)
+	}
+	if closedWisp.Status != "closed" {
+		t.Errorf("the ephemeral descendant %s is %q after the sweep, want closed: the descendants query must read TierMode: TierBoth so a relocated binding's wisp-tier steps are not silently dropped from the workflow's member set", wisp.ID, closedWisp.Status)
+	}
+}
+
 // TestWorkflowDeleteRefusesToSweepPastABindingThatStandsRefused pins the arm
 // that separates a sweep from a read.
 //
