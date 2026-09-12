@@ -32,6 +32,23 @@ type ExecutionStepStalledPayload struct {
 // IsEventPayload marks ExecutionStepStalledPayload as an events.Payload variant.
 func (ExecutionStepStalledPayload) IsEventPayload() {}
 
+// ExecutionClaimStalledPayload is the typed payload for
+// execution.claim_stalled. It names the ready bead a seat left unclaimed and
+// how many claim nudges the controller's claim backstop had delivered when it
+// first reported the stall. Attempts is that delivered-nudge count, not a retry
+// budget the consumer should act on: the backstop re-arms and keeps nudging
+// after this event, so the event marks the onset of a stall rather than the end
+// of the recovery.
+type ExecutionClaimStalledPayload struct {
+	BeadID     string `json:"bead_id"`
+	RootBeadID string `json:"root_bead_id,omitempty"`
+	SessionID  string `json:"session_id"`
+	Attempts   int    `json:"attempts"`
+}
+
+// IsEventPayload marks ExecutionClaimStalledPayload as an events.Payload variant.
+func (ExecutionClaimStalledPayload) IsEventPayload() {}
+
 func init() {
 	RegisterPayload(ExecutionWorkAssociated, NoPayload{})
 	RegisterPayload(ExecutionRunAnchored, NoPayload{})
@@ -40,4 +57,5 @@ func init() {
 	RegisterPayload(ExecutionStepCompleted, NoPayload{})
 	RegisterPayload(ExecutionClaimWindowExpired, ExecutionClaimWindowExpiredPayload{})
 	RegisterPayload(ExecutionStepStalled, ExecutionStepStalledPayload{})
+	RegisterPayload(ExecutionClaimStalled, ExecutionClaimStalledPayload{})
 }
