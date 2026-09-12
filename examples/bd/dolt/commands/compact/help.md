@@ -45,6 +45,17 @@ gc dolt compact --gc-only --only-db hq
 gc dolt compact --gc-only --dry-run
 ```
 
+## The full GC and the listener read timeout
+
+`CALL DOLT_GC('--full')` runs as one statement over the managed sql-server, and
+the listener's `read_timeout_millis` caps any statement that produces no rows
+for that long. The GC produces none until it finishes, so a reclaim that needs
+longer than the ceiling fails with `context canceled` or `connection was
+closed` however healthy the store is, and the pending-GC marker retries it into
+the same ceiling on every later run. The compactor names the setting and the
+live value when this happens. Raise it in `city.toml` under `[dolt]
+read_timeout_millis` and run `gc dolt restart` before retrying.
+
 See `docs/troubleshooting/dolt-bloat-recovery.md` for the full bloat-recovery
 runbook, including quarantine marker evidence, the safe marker-clear procedure,
 and when to stop writers and take a safety backup first.

@@ -1283,6 +1283,10 @@ case "$query" in
       printf 'gc exploded\n' >&2
       exit 45
     fi
+    if [ "$mode" = "gc_read_timeout" ]; then
+      printf "error on line 1 for query CALL DOLT_GC('--full'): Error 1105 (HY000): Error in SaveHashes call: SaveHashes, error calling getManyCompressed: context canceled\n" >&2
+      exit 1
+    fi
     rm -rf -- "${GC_DOLT_DATA_DIR:-}/$db/.dolt/noms/oldgen"
     exit 0
     ;;
@@ -3753,6 +3757,71 @@ func TestCompactScriptSurfacesGCFailureStderr(t *testing.T) {
 	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("GC failure should write pending-GC marker: %v", err)
+	}
+}
+
+// The managed listener's read_timeout_millis is a wall-clock cap on any
+// statement that produces no rows, and DOLT_GC produces none until it
+// finishes. The server reports the kill as "context canceled" (or "connection
+// was closed"), which reads like a network fault. The compactor must name the
+// setting, the live value from the rendered config, and the city.toml
+// override, and must still leave the pending-GC marker behind.
+func TestCompactScriptNamesReadTimeoutWhenFullGCIsCancelled(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	stateDir := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt")
+	managedConfig := filepath.Join(stateDir, "dolt-config.yaml")
+	if err := os.WriteFile(managedConfig, []byte("listener:\n  port: 3307\n  read_timeout_millis: 15000\n  write_timeout_millis: 300000\n"), 0o644); err != nil {
+		t.Fatalf("write managed dolt config: %v", err)
+	}
+
+	out, err := fixture.run(t, "gc_read_timeout", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("compact succeeded despite DOLT_GC cancellation:\n%s", out)
+	}
+	if !strings.Contains(out, "context canceled") {
+		t.Fatalf("output missing the server's own error text:\n%s", out)
+	}
+	for _, want := range []string{
+		"the managed sql-server ended DOLT_GC at its listener.read_timeout_millis=15000 in " + managedConfig + " ceiling",
+		"city.toml [dolt] read_timeout_millis",
+		"gc dolt restart",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
+	}
+	marker := filepath.Join(stateDir, "compact-pending-gc", "beads")
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("cancelled GC should still write the pending-GC marker: %v", err)
+	}
+}
+
+// Without a readable rendered config the diagnostic still names the setting;
+// it just cannot quote the value.
+func TestCompactScriptNamesReadTimeoutWithoutRenderedConfig(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "gc_read_timeout", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("compact succeeded despite DOLT_GC cancellation:\n%s", out)
+	}
+	if !strings.Contains(out, "ended DOLT_GC at its listener.read_timeout_millis in the managed server config ceiling") {
+		t.Fatalf("output should name the setting without a value:\n%s", out)
+	}
+	if strings.Contains(out, "read_timeout_millis=") {
+		t.Fatalf("no rendered config, so no value should be quoted:\n%s", out)
+	}
+}
+
+// An ordinary GC failure carries none of the read-deadline signatures and must
+// not be blamed on the listener timeout.
+func TestCompactScriptDoesNotBlameReadTimeoutForOtherGCFailures(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "gc_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("compact succeeded despite DOLT_GC failure:\n%s", out)
+	}
+	if strings.Contains(out, "read_timeout_millis") {
+		t.Fatalf("plain GC failure must not mention the read timeout:\n%s", out)
 	}
 }
 
