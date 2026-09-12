@@ -471,13 +471,17 @@ test-ci-policy:
 test: test-fsys-darwin-compile
 	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout 15m ./...
 
-## test-herdr-live: run the internal/runtime/herdr live journeys against a real
-## herdr server. These drive panes, force agent-status reports and bounce the
-## server, so they are opt-in rather than part of the fast unit sweep (see
-## internal/runtime/herdr/livegate_test.go). Skips cleanly when herdr is absent.
-## Wrapped in $(TEST_ENV), which is `env -i`, so the opt-in must be set inside it.
+## test-herdr-live: run the live herdr journeys against a real herdr server —
+## the provider's own tier under internal/runtime/herdr, plus the controller's
+## event-driven liveness journeys under cmd/gc. These drive panes, force
+## agent-status reports and bounce the server, so they are opt-in rather than
+## part of the fast unit sweep (see
+## internal/runtime/herdr/herdrtest/livegate.go). Skips cleanly when herdr is
+## absent. Wrapped in $(TEST_ENV), which is `env -i`, so the opt-in must be set
+## inside it.
 test-herdr-live:
 	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_HERDR_LIVE_TESTS=1 scripts/go-test-observable test -- -count=1 -timeout 10m ./internal/runtime/herdr/
+	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_HERDR_LIVE_TESTS=1 scripts/go-test-observable test -- -count=1 -timeout 10m -run LiveHerdr ./cmd/gc/
 
 # MAC_UNIT_PKGS excludes cmd/gc from the Mac unit sweep; cmd/gc runs
 # sharded via the mac-cmd-gc-process CI matrix job instead.
