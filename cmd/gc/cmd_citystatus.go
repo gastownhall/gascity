@@ -186,11 +186,43 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 		return 1
 	}
 
+	// The local snapshot opens the bead/Dolt store. Keep it behind the API
+	// fallback: the supervisor serves a cached status view, so touching the
+	// contended local store first defeats the bounded control-plane route and
+	// can leave gc status with no output until an external timeout kills it.
+	localFallback := func() int {
+		return cmdCityStatusLocalFallback(cfg, cityPath, jsonOutput, stdout, stderr)
+	}
+	c, reason := cityStatusAPIClient(cityPath)
+	if c == nil {
+		logRoute(stderr, "status", "fallback", reason)
+		return localFallback()
+	}
+
+	// API rendering only needs the runtime provider for drain-state display;
+	// a nil session snapshot deliberately avoids a bead-store read here.
+	sp, err := newStatusSessionProviderForCityWithSnapshot(cfg, cityPath, nil)
+	if err != nil {
+		message := fmt.Sprintf("gc status: %v", err)
+		if jsonOutput {
+			return writeJSONError(stdout, stderr, "session_provider_failed", message, 1)
+		}
+		fmt.Fprintln(stderr, message) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	dops := newDrainOps(sp)
+	return routeCityStatus(cityPath, cfg, sp, dops, c, reason, jsonOutput, stdout, stderr, localFallback)
+}
+
+// cmdCityStatusLocalFallback builds the direct-store status view only when no
+// supervisor API response is available. Its provider receives the loaded
+// session snapshot because ACP transport routing depends on that local state.
+func cmdCityStatusLocalFallback(cfg *config.City, cityPath string, jsonOutput bool, stdout, stderr io.Writer) int {
 	storeStderr := stderr
 	if jsonOutput {
 		storeStderr = io.Discard
 	}
-	store, _, code := openCityStatusStore(cityPath, storeStderr)
+	store, diagnostic, code := openCityStatusStore(cityPath, storeStderr)
 	if code != 0 {
 		if jsonOutput {
 			return writeJSONError(stdout, stderr, "store_open_failed", "gc status: opening bead store failed", code)
@@ -208,8 +240,10 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 		return 1
 	}
 	dops := newDrainOps(sp)
-	c, reason := cityStatusAPIClient(cityPath)
-	return routeCityStatus(cityPath, cfg, sp, dops, c, reason, jsonOutput, stdout, stderr)
+	if jsonOutput {
+		return doCityStatusJSONWithDiagnosticAndSnapshot(sp, cfg, cityPath, store, diagnostic, statusSnapshot, stdout, stderr)
+	}
+	return doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, statusSnapshot, stdout, stderr)
 }
 
 // cityStatusAPIClient returns (client, "") when the API path is available,
@@ -240,7 +274,22 @@ func routeCityStatus(
 	nilReason string,
 	jsonOutput bool,
 	stdout, stderr io.Writer,
+	fallbacks ...func() int,
 ) int {
+	fallback := func() int {
+		store, diagnostic, code := openCityStatusStore(cityPath, stderr)
+		if code != 0 {
+			return code
+		}
+		statusSnapshot := loadStatusSessionSnapshot(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr)
+		if jsonOutput {
+			return doCityStatusJSONWithDiagnosticAndSnapshot(sp, cfg, cityPath, store, diagnostic, statusSnapshot, stdout, stderr)
+		}
+		return doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, statusSnapshot, stdout, stderr)
+	}
+	if len(fallbacks) > 0 && fallbacks[0] != nil {
+		fallback = fallbacks[0]
+	}
 	var cr api.CachedRead[api.StatusView]
 	return routeRead(c, "status", nilReason, stderr,
 		func() error {
@@ -249,17 +298,7 @@ func routeCityStatus(
 			return err
 		},
 		func() int { return renderCityStatusFromAPI(cityPath, cr, dops, jsonOutput, stdout) },
-		func() int {
-			store, diagnostic, code := openCityStatusStore(cityPath, stderr)
-			if code != 0 {
-				return code
-			}
-			statusSnapshot := loadStatusSessionSnapshot(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr)
-			if jsonOutput {
-				return doCityStatusJSONWithDiagnosticAndSnapshot(sp, cfg, cityPath, store, diagnostic, statusSnapshot, stdout, stderr)
-			}
-			return doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, statusSnapshot, stdout, stderr)
-		},
+		fallback,
 	)
 }
 
