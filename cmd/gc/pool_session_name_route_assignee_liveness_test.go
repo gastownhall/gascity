@@ -60,6 +60,7 @@ func TestReleaseOrphanedPoolAssignments_TemplateAssigneeSkippedWhenSessionLive(t
 		nil,
 		nil,
 		nil,
+		nil,
 	)
 
 	if len(released) != 0 {
@@ -85,6 +86,7 @@ func TestReleaseOrphanedPoolAssignments_TemplateAssigneeReleasedWhenNoLiveSessio
 		"",
 		nil,
 		[]beads.Bead{work},
+		nil,
 		nil,
 		nil,
 		nil,
@@ -125,6 +127,7 @@ func TestReleaseOrphanedPoolAssignments_DeadNamedAssigneeReleasedDespiteLiveTemp
 		nil,
 		nil,
 		nil,
+		nil,
 	)
 
 	if len(released) != 1 || released[0].ID != work.ID {
@@ -156,6 +159,7 @@ func TestReleaseOrphanedPoolAssignments_TemplateAssigneeReleasedWhenOnlyNamedSes
 		"",
 		openSessions,
 		[]beads.Bead{work},
+		nil,
 		nil,
 		nil,
 		nil,
@@ -211,6 +215,7 @@ func TestReleaseOrphanedPoolAssignments_TemplateAssigneeSkippedWhenSessionLiveIn
 		[]string{"repo"}, // store-ref aware: the work lives in the agent's own rig
 		nil,
 		nil,
+		nil,
 	)
 
 	if len(released) != 0 {
@@ -241,6 +246,7 @@ func TestReleaseOrphanedPoolAssignments_TemplateAssigneeReleasedWhenLiveSessionS
 		[]beads.Bead{work},
 		nil,
 		[]string{"other-repo"}, // store-ref aware: the work lives outside the agent's rig
+		nil,
 		nil,
 		nil,
 	)
