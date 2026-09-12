@@ -75,6 +75,16 @@ func TestGCEnvReadBaseline(t *testing.T) {
 				// const/var GC_NAME = "GC_..." — the const-idiom used by
 				// os.Getenv(gcName); freezing the definition catches a new var read
 				// through an intermediate constant.
+				//
+				// Not every GC_-prefixed string constant is an ENV VAR, and this
+				// freeze is specifically the env-read vocabulary. A constant named
+				// here is a GC_-shaped string with some other role (a stderr token
+				// consumers grep for, a metadata key), so recording it would pin a
+				// non-env name in an env drift lock and mask a later real addition
+				// of the same name.
+				if nonEnvGCConstant(x.Names) {
+					return true
+				}
 				for _, val := range x.Values {
 					if lit, ok := val.(*ast.BasicLit); ok {
 						record(lit)
@@ -172,4 +182,27 @@ func diffStringSets(want, got []string) (added, removed []string) {
 	sort.Strings(added)
 	sort.Strings(removed)
 	return added, removed
+}
+
+// nonEnvGCConstantNames are declarations whose VALUE is GC_-shaped but which
+// are not environment variables, so they are outside this freeze's subject.
+// Keep this list short and justified: anything here is a name the env-read
+// drift lock will not notice.
+var nonEnvGCConstantNames = map[string]string{
+	// A stderr token gc hook emits alongside exit code 2 so runtime hook
+	// consumers can distinguish "store unreachable" from exit-1 no-work. It is
+	// printed, never read from the environment.
+	"hookStoreUnavailableToken": "stderr token, not an env var",
+}
+
+func nonEnvGCConstant(names []*ast.Ident) bool {
+	for _, n := range names {
+		if n == nil {
+			continue
+		}
+		if _, ok := nonEnvGCConstantNames[n.Name]; ok {
+			return true
+		}
+	}
+	return false
 }
