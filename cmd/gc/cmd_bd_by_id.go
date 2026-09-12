@@ -1000,7 +1000,7 @@ func serveBdByIDResolved(door bdByIDClassDoor, op bdByIDOp, bdArgs []string, rig
 	case bdByIDShow:
 		return printBdByIDBead(resolution.Bead, op.JSON, door.bindingName(), stdout, stderr), true
 	case bdByIDClaim:
-		return doBdByIDClaim(resolution.Graph, op.ID, bdByIDClaimActor(), op.JSON, door.bindingName(), stdout, stderr), true
+		return doBdByIDClaim(resolution.Graph, op.ID, bdByIDClaimActor(resolution.Bead), op.JSON, door.bindingName(), stdout, stderr), true
 	case bdByIDRelease:
 		return doBdByIDReleaseIfCurrent(resolution.Graph, op.ID, op.Assignee, stdout, stderr), true
 	case bdByIDDepList:
@@ -1320,10 +1320,36 @@ func bdFirstReservedClassID(token string) (string, bool) {
 }
 
 // bdByIDClaimActor returns the identity a routed claim acquires the bead for.
-// It is BEADS_ACTOR — the same variable gc puts in the subprocess environment
-// and bd itself claims under — so a routed claim and a passthrough claim record
-// the same owner.
-func bdByIDClaimActor() string { return strings.TrimSpace(os.Getenv("BEADS_ACTOR")) }
+// It follows the same projection as the bd subprocess path: an already-owned
+// bead keeps its exact session identity, while a fresh claim uses the hook's
+// canonical actor (alias, then session id, then compatibility fallbacks).
+func bdByIDClaimActor(target beads.Bead) string {
+	env := os.Environ()
+	return projectBdActorForMutation(
+		[]string{"update", target.ID, "--claim"},
+		bdEnvValue(env, "BEADS_ACTOR"),
+		bdSessionClaimActor(env),
+		bdSessionIdentityCandidates(env),
+		map[string]beads.Bead{target.ID: target},
+	)
+}
+
+func bdMutationIsClaim(args []string) bool {
+	if len(args) < 2 || args[0] != "update" {
+		return false
+	}
+	for _, arg := range args[1:] {
+		if arg == "--claim" {
+			return true
+		}
+		if value, ok := strings.CutPrefix(arg, "--claim="); ok {
+			if parsed, err := strconv.ParseBool(value); err == nil {
+				return parsed
+			}
+		}
+	}
+	return false
+}
 
 // doBdByIDClaim acquires a class-store bead for assignee through the closed
 // graph contract.
