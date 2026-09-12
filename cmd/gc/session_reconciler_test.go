@@ -8819,6 +8819,93 @@ func TestReconcileSessionBeads_RollsBackPendingCreatePreservesConfiguredNamedSes
 	}
 }
 
+// TestReconcileSessionBeads_RollsBackConfiguredNamedSessionThatDiedDuringStartup
+// probes ga-pmafyc (round 4): the flip side of
+// TestReconcileSessionBeads_RollsBackPendingCreatePreservesConfiguredNamedSession
+// above. There, Start() itself returns an error, and a configured named
+// session's pending-create must be PRESERVED so the reconciler can retry it.
+// Here, Start() SUCCEEDS but the post-start stability/liveness check then
+// finds the session not running (diedDuringStartup) — the session actually
+// launched and immediately exited, a legitimate fast exit-then-restart cycle,
+// not a transient provider hiccup mid pending-create. This is the unit-level
+// guard for TestGastown_Reconciler_SessionRestartsAfterExit (the integration
+// regression this whole round fixes): a configured named session in this
+// state must still roll back exactly like an orphaned one
+// (TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError), not be
+// preserved — preserving it would make the reconciler treat "started and
+// immediately exited" as "still creating," starving the session of a restart.
+func TestReconcileSessionBeads_RollsBackConfiguredNamedSessionThatDiedDuringStartup(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "helper",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{Template: "helper", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "helper")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  sessionName,
+		TemplateName: "helper",
+	}
+
+	session := env.createSessionBead(sessionName, "helper")
+	env.setSessionMetadata(&session, map[string]string{
+		"session_name_explicit": "true",
+		"pending_create_claim":  "true",
+		"state":                 "creating",
+		"continuation_epoch":    "1",
+		// session_key must be non-empty for the post-start stale-key
+		// liveness check to run at all (TestExecutePreparedStartWave_NoStaleCheckWithoutSessionKey);
+		// without it, startedFresh's post-start observation never fires and
+		// diedDuringStartup can never become true.
+		"session_key":                "stale-key-abc",
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "helper",
+		namedSessionModeMetadata:     "always",
+	})
+
+	// dieAfterStartProvider (defined in session_lifecycle_parallel_test.go)
+	// makes Start() succeed and then immediately removes the session, so the
+	// post-start liveness check observes it as not running — exercising
+	// diedDuringStartup=true, unlike the sibling "preserves" test above whose
+	// sp.StartErrors makes Start() itself fail (diedDuringStartup stays false).
+	sp := &dieAfterStartProvider{Fake: env.sp}
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+	woken := reconcileSessionBeads(
+		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, sp,
+		env.store, nil, nil, nil, env.dt, nil, false, nil, "",
+		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+		env.startOptions...,
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+
+	b, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	t.Logf("post-reconcile bead: status=%q metadata=%#v", b.Status, b.Metadata)
+	if b.Status != "closed" {
+		t.Fatalf("status = %q, want closed (a configured named session that died during its post-start liveness check must roll back, not be preserved as if still creating)", b.Status)
+	}
+	if got := b.Metadata["session_name"]; got != "" {
+		t.Errorf("session_name = %q, want empty after rollback", got)
+	}
+	if got := b.Metadata["pending_create_claim"]; got != "" {
+		t.Errorf("pending_create_claim = %q, want empty after rollback", got)
+	}
+	if want := sessionpkg.CanonicalCloseReason("failed-create"); b.Metadata["close_reason"] != want {
+		t.Errorf("close_reason = %q, want %q", b.Metadata["close_reason"], want)
+	}
+	if b.Metadata["state"] != "failed-create" {
+		t.Errorf("state = %q, want %q", b.Metadata["state"], "failed-create")
+	}
+}
+
 func TestReconcileSessionBeads_PoolScaleDownOrphansExcess(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
