@@ -13,6 +13,36 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
+func TestResolveTemplateClearsInheritedDemandMarkersWithoutTrigger(t *testing.T) {
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+	t.Setenv("GC_SPAWN_ORIGIN", "demand")
+	t.Setenv("GC_TRIGGER_WORK_BEAD_ID", "stale-work")
+
+	params := &agentBuildParams{
+		cityName:   "city",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Provider: "test"},
+		providers:  map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+		lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+		fs:         fsys.OSFS{},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+
+	tp, err := resolveTemplate(params, &config.Agent{Name: "runner"}, "runner", nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+
+	for _, key := range []string{"GC_SPAWN_ORIGIN", "GC_TRIGGER_WORK_BEAD_ID"} {
+		if got, ok := tp.Env[key]; !ok || got != "" {
+			t.Errorf("%s = %q (present=%v), want an explicit empty pin", key, got, ok)
+		}
+	}
+}
+
 func TestResolveTemplatePrependsGCBinDirToPATH(t *testing.T) {
 	cityPath := t.TempDir()
 	writeTemplateResolveCityConfig(t, cityPath, "file")
