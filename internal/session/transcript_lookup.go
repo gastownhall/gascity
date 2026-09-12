@@ -95,7 +95,8 @@ type anchoredCodexSession struct {
 // target session has a unique transcript in its start window, preserving ambiguity for
 // underspecified groups.
 func ResolveCodexTranscriptBySessionOrder(searchPaths []string, provider, workDir, targetID string, sessions []Info) string {
-	if sessionlog.ProviderFamily(provider) != "codex" || strings.TrimSpace(workDir) == "" || strings.TrimSpace(targetID) == "" {
+	family := sessionlog.ProviderFamily(provider)
+	if (family != "codex" && family != "opencode") || strings.TrimSpace(workDir) == "" || strings.TrimSpace(targetID) == "" {
 		return ""
 	}
 	anchored := collectAnchoredCodexSessions(sessions, workDir)
