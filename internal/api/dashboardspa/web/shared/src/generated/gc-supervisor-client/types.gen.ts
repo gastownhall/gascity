@@ -9445,6 +9445,78 @@ export type WebhookRejectedPayload = {
     webhook: string;
 };
 
+export type WorkerClaimOutputBody = {
+    /**
+     * The bead as the store persisted it.
+     */
+    bead: Bead;
+    /**
+     * Claim result.
+     */
+    status: string;
+};
+
+export type WorkerCloseInputBody = {
+    /**
+     * The holder performing the close (the same identity the claim took). A close without a holder is refused: the record would attribute the work to whatever the caller typed.
+     */
+    assignee: string;
+    /**
+     * Bead to close.
+     */
+    bead_id: string;
+    /**
+     * Branch the commit must be reachable on. Required by shipped.
+     */
+    branch?: string;
+    /**
+     * Commit that satisfies the close. Required by shipped.
+     */
+    commit?: string;
+    /**
+     * Typed close disposition: shipped, no-op, blocked or abandoned.
+     */
+    outcome: string;
+    /**
+     * Why the close is what it is. Required for every disposition except shipped.
+     */
+    reason?: string;
+    /**
+     * gc session the close is issued for. Enforced: when the bead carries a session stamp, a different session is refused.
+     */
+    session_id?: string;
+};
+
+export type WorkerCloseOutputBody = {
+    /**
+     * The bead as the atomic terminal write persisted it.
+     */
+    bead: Bead;
+    /**
+     * Close result: closed, or already_closed when the same holder retries a close whose record already landed.
+     */
+    status: string;
+};
+
+export type WorkerHeartbeatOutputBody = {
+    /**
+     * First-claim instant (gc.claimed_at), RFC3339 UTC. Write-once: a heartbeat reports it and never re-stamps it.
+     */
+    claimed_at?: string;
+    /**
+     * Lease holder the refresh re-affirmed (gc.lease_owner).
+     */
+    lease_owner?: string;
+    /**
+     * Which lease this refresh reached. bead-metadata means the bead's gc.lease_owner stamp and revision moved; bd's native lease table (bd reclaim's selector) is NOT reachable from this route.
+     */
+    lease_scope: string;
+    /**
+     * Heartbeat result.
+     */
+    status: string;
+};
+
 export type WorkerOperationEventPayload = {
     /**
      * Qualified agent identity (best-effort, absent if the session has no agent_name metadata or alias).
@@ -9512,6 +9584,32 @@ export type WorkerOperationEventPayload = {
      * True when tokens were observed but no price resolved (best-effort tri-state; absent = not evaluated).
      */
     unpriced?: boolean;
+};
+
+export type WorkerReleaseOutputBody = {
+    /**
+     * The bead after the release attempt.
+     */
+    bead: Bead;
+    /**
+     * Release result: released or skipped.
+     */
+    status: string;
+};
+
+export type WorkerSessionBody = {
+    /**
+     * Claimant identity (a pool seat or crew holder name). This is the value the store compares.
+     */
+    assignee: string;
+    /**
+     * Bead the verb acts on.
+     */
+    bead_id: string;
+    /**
+     * gc session the verb is issued for. Recorded on a non-control claim as gc.session_id, which the typed close fence then compares; it is not the ownership pointer for the CLAIM itself, which compares the assignee.
+     */
+    session_id?: string;
 };
 
 export type WorkflowAttemptSummary = {
@@ -18618,6 +18716,262 @@ export type GetV0CityByCityNameWaitsResponses = {
 };
 
 export type GetV0CityByCityNameWaitsResponse = GetV0CityByCityNameWaitsResponses[keyof GetV0CityByCityNameWaitsResponses];
+
+export type DeleteV0CityByCityNameWorkerClaimData = {
+    body: WorkerSessionBody;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/worker/claim';
+};
+
+export type DeleteV0CityByCityNameWorkerClaimErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Not Implemented
+     */
+    501: ErrorModel;
+};
+
+export type DeleteV0CityByCityNameWorkerClaimError = DeleteV0CityByCityNameWorkerClaimErrors[keyof DeleteV0CityByCityNameWorkerClaimErrors];
+
+export type DeleteV0CityByCityNameWorkerClaimResponses = {
+    /**
+     * OK
+     */
+    200: WorkerReleaseOutputBody;
+};
+
+export type DeleteV0CityByCityNameWorkerClaimResponse = DeleteV0CityByCityNameWorkerClaimResponses[keyof DeleteV0CityByCityNameWorkerClaimResponses];
+
+export type PostV0CityByCityNameWorkerClaimData = {
+    body: WorkerSessionBody;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/worker/claim';
+};
+
+export type PostV0CityByCityNameWorkerClaimErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Not Implemented
+     */
+    501: ErrorModel;
+};
+
+export type PostV0CityByCityNameWorkerClaimError = PostV0CityByCityNameWorkerClaimErrors[keyof PostV0CityByCityNameWorkerClaimErrors];
+
+export type PostV0CityByCityNameWorkerClaimResponses = {
+    /**
+     * OK
+     */
+    200: WorkerClaimOutputBody;
+};
+
+export type PostV0CityByCityNameWorkerClaimResponse = PostV0CityByCityNameWorkerClaimResponses[keyof PostV0CityByCityNameWorkerClaimResponses];
+
+export type PostV0CityByCityNameWorkerCloseData = {
+    body: WorkerCloseInputBody;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/worker/close';
+};
+
+export type PostV0CityByCityNameWorkerCloseErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Not Implemented
+     */
+    501: ErrorModel;
+};
+
+export type PostV0CityByCityNameWorkerCloseError = PostV0CityByCityNameWorkerCloseErrors[keyof PostV0CityByCityNameWorkerCloseErrors];
+
+export type PostV0CityByCityNameWorkerCloseResponses = {
+    /**
+     * OK
+     */
+    200: WorkerCloseOutputBody;
+};
+
+export type PostV0CityByCityNameWorkerCloseResponse = PostV0CityByCityNameWorkerCloseResponses[keyof PostV0CityByCityNameWorkerCloseResponses];
+
+export type PostV0CityByCityNameWorkerHeartbeatData = {
+    body: WorkerSessionBody;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/worker/heartbeat';
+};
+
+export type PostV0CityByCityNameWorkerHeartbeatErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Not Implemented
+     */
+    501: ErrorModel;
+};
+
+export type PostV0CityByCityNameWorkerHeartbeatError = PostV0CityByCityNameWorkerHeartbeatErrors[keyof PostV0CityByCityNameWorkerHeartbeatErrors];
+
+export type PostV0CityByCityNameWorkerHeartbeatResponses = {
+    /**
+     * OK
+     */
+    200: WorkerHeartbeatOutputBody;
+};
+
+export type PostV0CityByCityNameWorkerHeartbeatResponse = PostV0CityByCityNameWorkerHeartbeatResponses[keyof PostV0CityByCityNameWorkerHeartbeatResponses];
 
 export type DeleteV0CityByCityNameWorkflowByWorkflowIdData = {
     body?: never;
