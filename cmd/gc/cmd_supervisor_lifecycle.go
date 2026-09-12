@@ -38,6 +38,7 @@ var (
 	reloadSupervisorHook                     = reloadSupervisor
 	supervisorAliveHook                      = supervisorAlive
 	unloadSupervisorServiceHook              = unloadSupervisorService
+	verifySupervisorServiceStoppedHook       = verifySupervisorServiceStopped
 	supervisorReadyTimeout                   = 15 * time.Second
 	supervisorReadyPollInterval              = 100 * time.Millisecond
 	supervisorSystemdWarmRefreshStopTimeout  = 5 * time.Second
@@ -47,10 +48,18 @@ var (
 	supervisorLaunchctlRun                   = func(args ...string) error {
 		return exec.Command("launchctl", args...).Run()
 	}
-	supervisorLaunchdLoaded = func(label string) (bool, string) {
+	// supervisorLaunchdLoaded probes whether a launchd job is still
+	// registered. It is deliberately tri-state: a failing `launchctl
+	// print` is not proof the job is gone. Absence is reported only on a
+	// positive not-found signal; any other failure returns
+	// (false, false), meaning "unknown".
+	supervisorLaunchdLoaded = func(label string) (loaded bool, absent bool, detail string) {
 		out, err := exec.Command("launchctl", "print", supervisorLaunchdServiceTarget(label)).CombinedOutput()
-		detail := strings.TrimSpace(string(out))
-		return err == nil, detail
+		detail = strings.TrimSpace(string(out))
+		if err == nil {
+			return true, false, detail
+		}
+		return false, launchdPrintReportsNotFound(err, detail), detail
 	}
 	supervisorLaunchdActive = func(label string) bool {
 		out, err := exec.Command("launchctl", "print", supervisorLaunchdServiceTarget(label)).Output()
@@ -194,6 +203,22 @@ type supervisorWorkspaceServiceProcess struct {
 type supervisorWorkspaceServiceCleanupScope struct {
 	gcHome    string
 	cityPaths map[string]string
+}
+
+// launchdPrintNotFoundExitCode is the status `launchctl print` exits
+// with when the requested service does not exist in the domain.
+const launchdPrintNotFoundExitCode = 113
+
+// launchdPrintReportsNotFound reports whether a failed `launchctl print`
+// positively proves the service is absent, rather than having failed for
+// an unrelated reason (no Aqua session, permission denied, launchctl
+// unavailable). Only a not-found signal counts as proof of absence.
+func launchdPrintReportsNotFound(err error, detail string) bool {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == launchdPrintNotFoundExitCode {
+		return true
+	}
+	return strings.Contains(detail, "Could not find service")
 }
 
 func launchdPrintReportsRunning(out []byte) bool {
@@ -765,7 +790,9 @@ func waitForSupervisorReady(stderr io.Writer) int {
 // the unit file, so gc start can reload it later. It is a no-op when
 // the platform unit/plist is not installed — this keeps unit tests that
 // invoke the stop helper hermetic on machines where the service has
-// never been registered.
+// never been registered. It reports command failures only; confirming
+// the service actually went away is verifySupervisorServiceStopped's
+// job, because launchd drops the job only once the process has exited.
 func unloadSupervisorService() error {
 	var errs []error
 	switch goruntime.GOOS {
@@ -804,25 +831,55 @@ func durablyStopSupervisorLaunchd(label, plistPath string) []error {
 			errs = append(errs, fmt.Errorf("launchctl unload %s: %w", plistPath, unloadErr))
 		}
 	}
-	if err := waitForSupervisorLaunchdAbsent(label, target); err != nil {
-		errs = append(errs, err)
-	}
 	return errs
 }
 
-func waitForSupervisorLaunchdAbsent(label, target string) error {
-	deadline := time.Now().Add(supervisorLaunchdStopTimeout)
-	var lastDetail string
-	for {
-		loaded, detail := supervisorLaunchdLoaded(label)
-		if !loaded {
+// verifySupervisorServiceStopped confirms the platform service is really
+// gone after unloadSupervisorService ran. Callers pass their own deadline
+// (the --wait-timeout budget) so the check shares that budget instead of
+// adding a hidden one; supervisorLaunchdStopTimeout is a floor when the
+// remaining budget is smaller than launchd needs to drop the job.
+func verifySupervisorServiceStopped(deadline time.Time) error {
+	if goruntime.GOOS != "darwin" {
+		return nil
+	}
+	path := supervisorLaunchdPlistPath()
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
+		return fmt.Errorf("stat launchd plist %s: %w", path, err)
+	}
+	label := supervisorLaunchdLabel()
+	return waitForSupervisorLaunchdAbsent(label, supervisorLaunchdServiceTarget(label), deadline)
+}
+
+// waitForSupervisorLaunchdAbsent polls until launchd positively reports
+// the target is gone. A probe that merely fails is "unknown", not proof
+// of absence, so it keeps polling and times out with the reason it could
+// not confirm — an unverifiable teardown must never read as success.
+func waitForSupervisorLaunchdAbsent(label, target string, deadline time.Time) error {
+	if floor := time.Now().Add(supervisorLaunchdStopTimeout); deadline.Before(floor) {
+		deadline = floor
+	}
+	var lastDetail string
+	var lastLoaded bool
+	for {
+		loaded, absent, detail := supervisorLaunchdLoaded(label)
+		if absent {
+			return nil
+		}
+		lastLoaded = loaded
 		if detail != "" {
 			lastDetail = detail
 		}
 		if !time.Now().Before(deadline) {
-			err := fmt.Errorf("launchd target %s is still loaded after stop", target)
+			var err error
+			if lastLoaded {
+				err = fmt.Errorf("launchd target %s is still loaded after stop", target)
+			} else {
+				err = fmt.Errorf("launchd target %s could not be confirmed unloaded after stop", target)
+			}
 			if lastDetail != "" {
 				err = fmt.Errorf("%w: %s", err, lastDetail)
 			}
