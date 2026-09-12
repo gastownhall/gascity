@@ -240,6 +240,7 @@ type queuedNudgeOptions struct {
 	SessionID         string
 	ContinuationEpoch string
 	Reference         *nudgeReference
+	Provenance        *nudgeProvenance
 }
 
 func newNudgeCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -531,7 +532,7 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		_ = recordQueuedNudgeFailureWithStore(target.cityPath, deliveryStore, queuedNudgeIDs(rejected), errNudgeSessionFenceMismatch, time.Now())
 	}
 	candidates := items
-	items, blocked, err := splitQueuedNudgesForDelivery(sessionFrontDoor(deliverySessStore), candidates)
+	items, blocked, err := splitQueuedNudgesForDelivery(sessionFrontDoor(deliverySessStore), nudgeFrontDoor(deliveryStore), candidates)
 	if err != nil {
 		// Release the claims so the next drain or poller pass retries
 		// promptly instead of waiting out the in-flight lease.
@@ -602,6 +603,7 @@ func queuedNudgeOptionsFromTarget(target nudgeTarget) queuedNudgeOptions {
 	return queuedNudgeOptions{
 		SessionID:         target.sessionID,
 		ContinuationEpoch: target.continuationEpoch,
+		Provenance:        &nudgeProvenance{Sender: "operator", Target: target.agentKey(), Action: "session-nudge"},
 	}
 }
 
@@ -1240,6 +1242,11 @@ func queuedNudgeDowngradeNote(target nudgeTarget, undelivered worker.NudgeUndeli
 }
 
 func sendMailNotify(target nudgeTarget, sender string) error {
+	return sendMailNotifyWithMessage(target, sender, "")
+}
+
+// sendMailNotifyWithMessage передаёт ID mail-bead в отложенную доставку.
+func sendMailNotifyWithMessage(target nudgeTarget, sender, messageID string) error {
 	store, err := openNudgeBeadStoreErr(target.cityPath)
 	if err != nil {
 		return err
@@ -1251,14 +1258,18 @@ func sendMailNotify(target nudgeTarget, sender string) error {
 	if err != nil {
 		return err
 	}
-	return sendMailNotifyWithWorker(target, store.Store, sp, sender)
+	return sendMailNotifyWithWorker(target, store.Store, sp, sender, messageID)
 }
 
 func sendMailNotifyWithProvider(target nudgeTarget, sp runtime.Provider) error {
-	return sendMailNotifyWithWorker(target, nil, sp, "human")
+	return sendMailNotifyWithWorker(target, nil, sp, "human", "")
 }
 
-func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.Provider, sender string) error {
+func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.Provider, sender string, messageIDs ...string) error {
+	messageID := ""
+	if len(messageIDs) > 0 {
+		messageID = messageIDs[0]
+	}
 	msg := fmt.Sprintf("You have mail from %s", sender)
 	now := time.Now()
 	// Session-class store for the observe/handle reads and the last-nudge stamp
@@ -1291,7 +1302,7 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 		}
 	}
 	if !obs.Running && canRequestManagedNudgeWake(target, store) {
-		item := newQueuedNudgeWithOptions(target.agentKey(), msg, "mail", now, queuedNudgeOptionsFromTarget(target))
+		item := newMailQueuedNudge(target, msg, sender, messageID, now)
 		if err := enqueueManagedNudgeThenWake(target, store, item); err != nil {
 			return err
 		}
@@ -1302,13 +1313,23 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 		}
 		return nil
 	}
-	if err := enqueueQueuedNudge(target.cityPath, newQueuedNudgeWithOptions(target.agentKey(), msg, "mail", now, queuedNudgeOptionsFromTarget(target))); err != nil {
+	if err := enqueueQueuedNudge(target.cityPath, newMailQueuedNudge(target, msg, sender, messageID, now)); err != nil {
 		return err
 	}
 	if obs.Running {
 		maybeStartNudgePoller(target)
 	}
 	return nil
+}
+
+// newMailQueuedNudge связывает уведомление с точным сохранённым письмом-источником.
+func newMailQueuedNudge(target nudgeTarget, message, sender, messageID string, now time.Time) queuedNudge {
+	opts := queuedNudgeOptionsFromTarget(target)
+	opts.Provenance = &nudgeProvenance{Sender: sender, Target: target.agentKey(), Action: "mail-notify"}
+	if messageID != "" {
+		opts.Reference = &nudgeReference{Kind: "mail", ID: messageID}
+	}
+	return newQueuedNudgeWithOptions(target.agentKey(), message, "mail", now, opts)
 }
 
 func resolveNudgeTarget(identifier string, warningWriter ...io.Writer) (nudgeTarget, error) {
@@ -1511,7 +1532,7 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 		}
 	}
 	candidates := items
-	items, blocked, err := splitQueuedNudgesForDelivery(sessionFrontDoor(deliverySessStore), candidates)
+	items, blocked, err := splitQueuedNudgesForDelivery(sessionFrontDoor(deliverySessStore), nudgeFrontDoor(beads.NudgesStore{Store: deliveryStore}), candidates)
 	if err != nil {
 		relErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(candidates))
 		return false, errors.Join(bookkeepErr, err, relErr)
@@ -1708,14 +1729,14 @@ func splitQueuedNudgesForTarget(target nudgeTarget, items []queuedNudge) ([]queu
 // referenced gc:wait bead (coordclass.ClassSessions) to gate wait-sourced
 // nudges. Callers construct it at the root over the session-class store (via
 // cliSessionStore) so a [beads.classes.sessions] relocation reaches it.
-func splitQueuedNudgesForDelivery(sessFront *session.Store, items []queuedNudge) ([]queuedNudge, map[string][]queuedNudge, error) {
+func splitQueuedNudgesForDelivery(sessFront *session.Store, nudgeFront *nudgequeue.Store, items []queuedNudge) ([]queuedNudge, map[string][]queuedNudge, error) {
 	if len(items) == 0 {
 		return nil, nil, nil
 	}
 	deliverable := make([]queuedNudge, 0, len(items))
 	blocked := make(map[string][]queuedNudge)
 	for _, item := range items {
-		reason, shouldBlock, err := blockedQueuedNudgeReason(sessFront, item)
+		reason, shouldBlock, err := blockedQueuedNudgeReason(sessFront, nudgeFront, item)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1728,7 +1749,22 @@ func splitQueuedNudgesForDelivery(sessFront *session.Store, items []queuedNudge)
 	return deliverable, blocked, nil
 }
 
-func blockedQueuedNudgeReason(sessFront *session.Store, item queuedNudge) (string, bool, error) {
+func blockedQueuedNudgeReason(sessFront *session.Store, nudgeFront *nudgequeue.Store, item queuedNudge) (string, bool, error) {
+	if reason := invalidQueuedNudgeProvenance(item); reason != "" {
+		return reason, true, nil
+	}
+	if item.ID != "" && nudgeFront != nil {
+		shadow, ok, err := nudgeFront.Find(item.ID)
+		if err != nil {
+			return "", false, err
+		}
+		if !ok {
+			return "provenance-shadow-missing", true, nil
+		}
+		if shadow.Agent != item.Agent || shadow.Source != item.Source || shadow.Message != item.Message || !sameNudgeProvenance(shadow.Provenance, item.Provenance) {
+			return "provenance-shadow-mismatch", true, nil
+		}
+	}
 	if !sessFront.Backed() || item.Source != "wait" || item.Reference == nil || item.Reference.Kind != "bead" || item.Reference.ID == "" {
 		return "", false, nil
 	}
@@ -1756,6 +1792,34 @@ func blockedQueuedNudgeReason(sessFront *session.Store, item queuedNudge) (strin
 	default:
 		return "wait-not-ready", true, nil
 	}
+}
+
+// sameNudgeProvenance сверяет неизменяемые данные автора с копией в shadow-bead.
+func sameNudgeProvenance(a, b *nudgeProvenance) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Sender == b.Sender && a.Target == b.Target && a.Action == b.Action
+}
+
+// invalidQueuedNudgeProvenance отклоняет записи без доверенного автора, точной цели или допустимого действия.
+func invalidQueuedNudgeProvenance(item queuedNudge) string {
+	if item.Provenance == nil || strings.TrimSpace(item.Provenance.Sender) == "" || strings.TrimSpace(item.Provenance.Action) == "" {
+		return "provenance-missing"
+	}
+	if item.Provenance.Target != item.Agent {
+		return "provenance-target-mismatch"
+	}
+	allowed := map[string]map[string]bool{
+		"session": {"session-nudge": true},
+		"mail":    {"mail-notify": true, "mail-nudge": true},
+		"wait":    {"wait-ready": true, "wait-nudge": true},
+		"sling":   {"work-slung": true, "sling-nudge": true},
+	}
+	if !allowed[item.Source][item.Provenance.Action] {
+		return "provenance-action-invalid"
+	}
+	return ""
 }
 
 func terminalizeBlockedQueuedNudges(cityPath string, blocked map[string][]queuedNudge) error {
@@ -1861,6 +1925,10 @@ func newQueuedNudgeWithOptions(agentName, message, source string, now time.Time,
 	if id == "" {
 		id = newQueuedNudgeID()
 	}
+	provenance := opts.Provenance
+	if provenance == nil {
+		provenance = &nudgeProvenance{Sender: "operator", Target: agentName, Action: source + "-nudge"}
+	}
 	return queuedNudge{
 		ID:                id,
 		Agent:             agentName,
@@ -1869,6 +1937,7 @@ func newQueuedNudgeWithOptions(agentName, message, source string, now time.Time,
 		Source:            source,
 		Message:           message,
 		Reference:         opts.Reference,
+		Provenance:        provenance,
 		CreatedAt:         now.UTC(),
 		DeliverAfter:      now.UTC(),
 		ExpiresAt:         now.Add(defaultQueuedNudgeTTL).UTC(),
