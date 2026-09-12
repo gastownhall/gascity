@@ -11116,13 +11116,7 @@ func TestWispCompactSkipsNonEphemeralBeads(t *testing.T) {
 	}
 }
 
-// crossRigDepsEnv installs a `bd` stub that handles three subcommand shapes:
-//   - `bd list --status=closed --closed-after=... --json` → returns closedJSON
-//   - `bd dep list <id> --direction=up --type=blocks --json` → returns depsJSON
-//   - `bd dep remove ...` and `bd dep add ...` → appended to BD_LOG
-//
-// BD_LOG is pre-created empty so skip-path tests can still read it.
-func crossRigDepsEnv(t *testing.T, closedJSON, depsJSON string) (bdLog string, env map[string]string) {
+func crossRigDepsStoreScanEnv(t *testing.T, eventsJSONL string) (bdLog string, env map[string]string) {
 	t.Helper()
 	binDir := t.TempDir()
 	bdLog = filepath.Join(t.TempDir(), "bd.log")
@@ -11130,60 +11124,97 @@ func crossRigDepsEnv(t *testing.T, closedJSON, depsJSON string) (bdLog string, e
 		t.Fatalf("WriteFile(bd log): %v", err)
 	}
 
-	stubPath := filepath.Join(binDir, "bd")
-	// Stub fails fast on unexpected subcommands or flag shapes so the test
-	// pins the script's bd contract; a regression dropping --json from
-	// `bd list` or --type=blocks from `bd dep list` would otherwise still
-	// pass.
-	writeExecutable(t, stubPath, fmt.Sprintf(`#!/bin/sh
-case "$1" in
-  list)
-    case "$*" in
-      *"--status=closed"*"--closed-after"*"--json"*)
-        cat <<'EOF'
+	writeExecutable(t, filepath.Join(binDir, "gc"), fmt.Sprintf(`#!/bin/sh
+case "${1:-}" in
+  events)
+    cat <<'JSON'
 %s
-EOF
-        exit 0
-        ;;
-      *)
-        echo "bd list called with unexpected args: $*" >&2
-        exit 2
-        ;;
-    esac
+JSON
+    exit 0
     ;;
-  dep)
-    case "$2" in
-      list)
-        case "$*" in
-          *"--direction=up"*"--type=blocks"*"--json"*)
-            cat <<'EOF'
-%s
-EOF
-            exit 0
-            ;;
-          *)
-            echo "bd dep list called with unexpected args: $*" >&2
-            exit 2
-            ;;
-        esac
+  rig)
+    cat <<'JSON'
+{"rigs":[{"name":"city","prefix":"hq","hq":true},{"name":"rig-a","prefix":"ra","hq":false},{"name":"rig-b","prefix":"rb","hq":false}]}
+JSON
+    exit 0
+    ;;
+  bd)
+    shift
+    scope="hq"
+    case "${1:-}" in
+      --city)
+        shift 2
         ;;
-      remove|add)
-        printf '%%s\n' "$*" >> "$BD_LOG"
-        exit 0
-        ;;
-      *)
-        echo "bd dep called with unexpected subcommand: $*" >&2
-        exit 2
+      --rig)
+        scope="$2"
+        shift 2
         ;;
     esac
+    export CROSS_RIG_TEST_SCOPE="$scope"
+    exec bd "$@"
     ;;
   *)
-    echo "bd called with unexpected subcommand: $*" >&2
+    echo "gc called with unexpected args: $*" >&2
     exit 2
     ;;
 esac
-`, closedJSON, depsJSON))
-	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), "#!/bin/sh\nexit 0\n")
+`, eventsJSONL))
+
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+case "${1:-}" in
+  sql)
+    printf 'scope=%s sql\n' "$CROSS_RIG_TEST_SCOPE" >> "$BD_LOG"
+    case "$*" in
+      *"depends_on_external"*"type = 'blocks'"*) ;;
+      *)
+        echo "bd sql missing external blocks predicate: $*" >&2
+        exit 2
+        ;;
+    esac
+    case "$CROSS_RIG_TEST_SCOPE" in
+      rig-b)
+        cat <<'JSON'
+[{"issue_id":"rb-dependent","depends_on_external":"ra-blocker"},{"issue_id":"rb-still-blocked","depends_on_external":"ra-open"}]
+JSON
+        ;;
+      *)
+        printf '[]\n'
+        ;;
+    esac
+    exit 0
+    ;;
+  batch)
+    printf 'scope=%s batch\n' "$CROSS_RIG_TEST_SCOPE" >> "$BD_LOG"
+    if [ "${CROSS_RIG_TEST_BATCH_FAIL:-0}" = "1" ]; then
+      exit 1
+    fi
+    shift
+    batch_file=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -f)
+          batch_file="$2"
+          shift 2
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+    if [ -z "$batch_file" ]; then
+      echo "bd batch missing -f" >&2
+      exit 2
+    fi
+    cat "$batch_file" >> "$BD_LOG"
+    exit 0
+    ;;
+  *)
+    printf 'scope=%s unexpected=%s\n' "$CROSS_RIG_TEST_SCOPE" "$*" >> "$BD_LOG"
+    echo "bd called with unexpected args: $*" >&2
+    exit 2
+    ;;
+esac
+`)
 
 	env = map[string]string{
 		"BD_LOG":       bdLog,
@@ -11194,83 +11225,72 @@ esac
 	return bdLog, env
 }
 
-func TestCrossRigDepsConvertsExternalBlocksToRelated(t *testing.T) {
-	closed := `[{"id":"ga-blocker"}]`
-	deps := `[{"id":"external:other-rig:rig-dep-1"}]`
-
-	bdLog, env := crossRigDepsEnv(t, closed, deps)
-	runScript(t, coreScriptPath("cross-rig-deps.sh"), env)
+func TestCrossRigDepsScansExternalColumnOncePerStore(t *testing.T) {
+	events := `{"type":"bead.closed","payload":{"bead":{"id":"ra-blocker"}}}`
+	bdLog, env := crossRigDepsStoreScanEnv(t, events)
+	out, err := runScriptResult(t, coreScriptPath("cross-rig-deps.sh"), env)
+	if err != nil {
+		t.Fatalf("cross-rig-deps.sh failed: %v\n%s", err, out)
+	}
 
 	log, err := os.ReadFile(bdLog)
 	if err != nil {
 		t.Fatalf("ReadFile(bd log): %v", err)
 	}
 	s := string(log)
-	if !strings.Contains(s, "dep remove external:other-rig:rig-dep-1 external:ga-blocker") {
-		t.Fatalf("missing `bd dep remove` for external dep; bd log:\n%s", s)
+	for _, want := range []string{
+		"scope=hq sql",
+		"scope=rig-a sql",
+		"scope=rig-b sql",
+		"scope=rig-b batch",
+		"dep remove rb-dependent ra-blocker",
+		"dep add rb-dependent ra-blocker related",
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("missing %q in bd log:\n%s", want, s)
+		}
 	}
-	if !strings.Contains(s, "dep add external:other-rig:rig-dep-1 external:ga-blocker --type=related") {
-		t.Fatalf("missing `bd dep add ... --type=related` for external dep; bd log:\n%s", s)
+	if got := strings.Count(s, " sql\n"); got != 3 {
+		t.Fatalf("sql scan count = %d, want one per store (3); bd log:\n%s", got, s)
 	}
-}
-
-func TestCrossRigDepsReportsResolvedSummary(t *testing.T) {
-	closed := `[{"id":"ga-blocker"}]`
-	deps := `[{"id":"external:other-rig:rig-dep-1"}]`
-
-	_, env := crossRigDepsEnv(t, closed, deps)
-	out, err := runScriptResult(t, coreScriptPath("cross-rig-deps.sh"), env)
-	if err != nil {
-		t.Fatalf("cross-rig-deps.sh failed: %v\n%s", err, out)
+	for _, banned := range []string{"dep list", "ra-open"} {
+		if strings.Contains(s, banned) {
+			t.Fatalf("unexpected %q in bd log:\n%s", banned, s)
+		}
 	}
 	if got, want := strings.TrimSpace(string(out)), "cross-rig-deps: resolved 1 cross-rig dependencies"; got != want {
 		t.Fatalf("summary = %q, want %q", got, want)
 	}
 }
 
-func TestCrossRigDepsSkipsInternalDeps(t *testing.T) {
-	closed := `[{"id":"ga-blocker"}]`
-	// Internal deps lack the "external:" prefix and must be left untouched
-	// — internal blocking semantics are bd's normal computeBlockedIDs path.
-	deps := `[{"id":"local-rig-dep"},{"id":"another-internal"}]`
-
-	bdLog, env := crossRigDepsEnv(t, closed, deps)
-	runScript(t, coreScriptPath("cross-rig-deps.sh"), env)
-
-	log, err := os.ReadFile(bdLog)
+func TestCrossRigDepsNoOpWithoutCloseEvents(t *testing.T) {
+	bdLog, env := crossRigDepsStoreScanEnv(t, "")
+	out, err := runScriptResult(t, coreScriptPath("cross-rig-deps.sh"), env)
 	if err != nil {
-		t.Fatalf("ReadFile(bd log): %v", err)
+		t.Fatalf("cross-rig-deps.sh failed: %v\n%s", err, out)
 	}
-	s := string(log)
-	if strings.Contains(s, "dep remove") || strings.Contains(s, "dep add") {
-		t.Fatalf("internal-only deps must not trigger bd dep remove/add; bd log:\n%s", s)
+	if len(out) != 0 {
+		t.Fatalf("quiet run output = %q, want empty", out)
 	}
-}
-
-func TestCrossRigDepsNoOpWhenNothingClosed(t *testing.T) {
-	bdLog, env := crossRigDepsEnv(t, `[]`, `[]`)
-	runScript(t, coreScriptPath("cross-rig-deps.sh"), env)
-
 	log, err := os.ReadFile(bdLog)
 	if err != nil {
 		t.Fatalf("ReadFile(bd log): %v", err)
 	}
 	if len(log) != 0 {
-		t.Fatalf("expected no bd dep calls when nothing recently closed; bd log:\n%s", log)
+		t.Fatalf("quiet run must not spawn bd; bd log:\n%s", log)
 	}
 }
 
-func TestCrossRigDepsHandlesEmptyDepsForClosedBead(t *testing.T) {
-	closed := `[{"id":"ga-blocker"}]`
-	bdLog, env := crossRigDepsEnv(t, closed, `[]`)
-	runScript(t, coreScriptPath("cross-rig-deps.sh"), env)
-
-	log, err := os.ReadFile(bdLog)
-	if err != nil {
-		t.Fatalf("ReadFile(bd log): %v", err)
+func TestCrossRigDepsFailsLoudWhenBatchFails(t *testing.T) {
+	events := `{"type":"bead.closed","payload":{"id":"ra-blocker"}}`
+	_, env := crossRigDepsStoreScanEnv(t, events)
+	env["CROSS_RIG_TEST_BATCH_FAIL"] = "1"
+	out, err := runScriptResult(t, coreScriptPath("cross-rig-deps.sh"), env)
+	if err == nil {
+		t.Fatalf("cross-rig-deps.sh succeeded despite bd batch failure:\n%s", out)
 	}
-	if len(log) != 0 {
-		t.Fatalf("closed bead with no upward deps should not call bd dep remove/add; bd log:\n%s", log)
+	if !strings.Contains(string(out), "bd batch failed in rig-b") {
+		t.Fatalf("missing batch failure diagnostic:\n%s", out)
 	}
 }
 
@@ -11410,92 +11430,5 @@ exit 1
 	}
 	if !strings.Contains(string(bdData), "update ga-heartbeat --persistent") {
 		t.Fatalf("expected expired heartbeat to be promoted, got bd calls:\n%s", bdData)
-	}
-}
-
-func TestCrossRigDepsReportsNonZeroCounter(t *testing.T) {
-	cityDir := t.TempDir()
-	binDir := t.TempDir()
-	bdLog := filepath.Join(t.TempDir(), "bd.log")
-
-	closedJSON := `[{"id":"ga-closed-1"},{"id":"ga-closed-2"},{"id":"ga-closed-internal"}]`
-	depsForClosed1 := `[{"id":"external:rig-a/ga-dep-1"},{"id":"external:rig-b/ga-dep-2"}]`
-	depsForClosed2 := `[{"id":"external:rig-a/ga-dep-3"},{"id":"external:rig-c/ga-dep-4"}]`
-	depsForClosedInternal := `[{"id":"ga-internal-1"},{"id":"ga-internal-2"}]`
-
-	writeExecutable(t, filepath.Join(binDir, "bd"), fmt.Sprintf(`#!/bin/sh
-printf '%%s\n' "$*" >> "$BD_LOG"
-case "$1" in
-  list)
-    cat <<'JSON'
-%s
-JSON
-    exit 0
-    ;;
-  dep)
-    case "$2 $3" in
-      "list ga-closed-1")
-        cat <<'JSON'
-%s
-JSON
-        exit 0
-        ;;
-      "list ga-closed-2")
-        cat <<'JSON'
-%s
-JSON
-        exit 0
-        ;;
-      "list ga-closed-internal")
-        cat <<'JSON'
-%s
-JSON
-        exit 0
-        ;;
-      "remove "*|"add "*)
-        exit 0
-        ;;
-    esac
-    ;;
-esac
-exit 0
-`, closedJSON, depsForClosed1, depsForClosed2, depsForClosedInternal))
-	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), "#!/bin/sh\nexit 0\n")
-
-	env := map[string]string{
-		"BD_LOG":       bdLog,
-		"GC_CITY":      cityDir,
-		"GC_CITY_PATH": cityDir,
-		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
-	}
-
-	script := coreScriptPath("cross-rig-deps.sh")
-	cmd := exec.Command(script)
-	cmd.Env = mergeTestEnv(env)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
-	}
-
-	logData, err := os.ReadFile(bdLog)
-	if err != nil {
-		t.Fatalf("ReadFile(bd log): %v", err)
-	}
-	for _, want := range []string{
-		"dep list ga-closed-1",
-		"dep list ga-closed-2",
-		"dep list ga-closed-internal",
-	} {
-		if !strings.Contains(string(logData), want) {
-			t.Fatalf("bd dep list call %q not observed:\n%s", want, logData)
-		}
-	}
-	if strings.Contains(string(logData), `dep remove "" `) || strings.Contains(string(logData), "dep remove  ") {
-		t.Fatalf("bogus empty-dep_id call observed (empty-filter guard regression?):\n%s", logData)
-	}
-
-	want := "cross-rig-deps: resolved 4 cross-rig dependencies"
-	if !strings.Contains(string(out), want) {
-		t.Fatalf("cross-rig-deps summary missing or wrong (subshell counter regression?)\nwant substring: %q\ngot output:\n%s\nbd log:\n%s", want, out, logData)
 	}
 }
