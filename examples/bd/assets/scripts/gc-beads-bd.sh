@@ -19,6 +19,9 @@
 #   GC_DOLT_PORT  — dolt server port (default: ephemeral, hashed from city path)
 #   GC_DOLT_USER  — dolt user (default: root)
 #   GC_DOLT_PASSWORD — dolt password (default: empty)
+#   GC_BEADS_PROXY_EXTERNAL_HOST/PORT — adapter-only upstream endpoint for a
+#                   proxied-external bd init; never used by Gas City's direct
+#                   lifecycle manager.
 #   GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS — concurrent-start wait budget in
 #       milliseconds (default: 75000 + 2× the lock-release window = 195000 at
 #       defaults, covering the start-flock winner's worst-case stop — 30s
@@ -121,6 +124,17 @@ connect_host() {
 
 trim_space() {
     printf '%s' "$1" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+normalize_dolt_mode() {
+    # Keep shell mode classification aligned with Go's strings.TrimSpace and
+    # case-insensitive comparisons. YAML's unquoted inline comments are not
+    # part of the value, so discard a comment marker introduced after space.
+    local value
+    value=$(trim_space "$1")
+    value=$(printf '%s' "$value" | sed 's/[[:space:]]\+#.*$//')
+    value=$(trim_space "$value")
+    printf '%s' "$value" | tr '[:upper:]' '[:lower:]'
 }
 
 lower_dolt_database_name() {
@@ -420,13 +434,10 @@ ensure_database_registered() {
 }
 
 # seed_fresh_managed_bd_version_witness records the bd version that is about
-# to initialize a database created by this invocation. It probes the same
-# "${BD_BIN:-bd}" that run_bd_pinned runs, so the witness names the binary that
-# actually initializes the workspace rather than whichever bd happens to be on
-# PATH. bd 1.2+ uses this bounded witness to distinguish current server-mode
-# workspaces from legacy .beads/dolt layouts. Never create or replace it for a
-# pre-existing database: doing so would bypass bd's explicit cross-era
-# migration guard.
+# to initialize a database created by this invocation. bd 1.2+ uses this
+# bounded witness to distinguish current server-mode workspaces from legacy
+# .beads/dolt layouts. Never create or replace it for a pre-existing database:
+# doing so would bypass bd's explicit cross-era migration guard.
 seed_fresh_managed_bd_version_witness() {
     local dir="$1"
     local marker="$dir/.beads/.local_version"
@@ -434,7 +445,7 @@ seed_fresh_managed_bd_version_witness() {
 
     [ ! -e "$marker" ] || return 0
 
-    if ! raw=$("${BD_BIN:-bd}" version 2>/dev/null); then
+    if ! raw=$(bd version 2>/dev/null); then
         die "failed to read bd version while initializing fresh managed Dolt workspace at $dir"
     fi
     version=$(printf '%s\n' "$raw" | sed -nE 's/^[Bb][Dd] [Vv]ersion v?([0-9]+(\.[0-9]+)+).*/\1/p' | head -n 1)
@@ -501,6 +512,55 @@ read_metadata_string_field() {
 metadata_is_doltlite() {
     local meta_file="$1"
     [ "$(read_metadata_string_field "$meta_file" backend)" = "doltlite" ] || [ "$(read_metadata_string_field "$meta_file" database)" = "doltlite" ]
+}
+
+scope_backend_is_dolt() {
+    # dolt.mode belongs to the Dolt backend namespace. Scope metadata is the
+    # strongest persisted backend signal; fall back to the process backend for
+    # fresh scopes whose metadata has not been emitted yet. Unknown backends
+    # fail closed so a stale Dolt marker cannot redirect another provider.
+    local scope="$1" metadata_backend metadata_database configured_backend
+    metadata_backend="$(read_metadata_string_field "$scope/.beads/metadata.json" backend)"
+    metadata_backend="$(normalize_dolt_mode "$metadata_backend")"
+    if [ -n "$metadata_backend" ]; then
+        [ "$metadata_backend" = "dolt" ]
+        return $?
+    fi
+    metadata_database="$(read_metadata_string_field "$scope/.beads/metadata.json" database)"
+    metadata_database="$(normalize_dolt_mode "$metadata_database")"
+    case "$metadata_database" in
+        doltlite) return 1 ;;
+        dolt) return 0 ;;
+    esac
+    configured_backend="${GC_BEADS_BACKEND:-${BEADS_BACKEND:-dolt}}"
+    configured_backend="$(normalize_dolt_mode "$configured_backend")"
+    case "$configured_backend" in
+        ""|dolt) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+scope_is_proxied() {
+    # Persisted scope markers are authoritative. Ambient proxy mode is only a
+    # fallback for an otherwise-unmarked scope and must not override an
+    # explicit direct-server binding.
+    scope_backend_is_dolt "$1" || return 1
+    local metadata_mode config_mode normalized_mode
+    metadata_mode="$(normalize_dolt_mode "$(read_metadata_string_field "$1/.beads/metadata.json" dolt_mode)")"
+    if [ -n "$metadata_mode" ]; then
+        [ "$metadata_mode" = "proxied-server" ] && return 0
+        return 1
+    fi
+    if [ -f "$1/.beads/config.yaml" ]; then
+        config_mode=$(sed -n 's/^[[:space:]]*dolt\.mode:[[:space:]]*//p' "$1/.beads/config.yaml" | head -1)
+        normalized_mode=$(normalize_dolt_mode "$config_mode")
+        if [ -n "$normalized_mode" ]; then
+            [ "$normalized_mode" = "proxied-server" ] && return 0
+            return 1
+        fi
+    fi
+    [ "${BEADS_DOLT_PROXIED_SERVER:-}" = "1" ] && return 0
+    return 1
 }
 
 write_doltlite_metadata() {
@@ -2586,7 +2646,7 @@ run_bd_pinned() {
         export GC_DOLT_PASSWORD="$DOLT_PASSWORD"
         export BEADS_DOLT_SERVER_USER="$DOLT_USER"
         export BEADS_DOLT_PASSWORD="$DOLT_PASSWORD"
-        "${BD_BIN:-bd}" "$@"
+        bd "$@"
     )
 }
 
@@ -2606,6 +2666,38 @@ run_bd_init_pinned() {
         --server-host "$host" --server-port "$DOLT_PORT" "$dir" || die "bd init failed for $dir"
 }
 
+# run_bd_init_proxied initializes a local workspace through beads RC's
+# proxied-server UOW path. Gas City deliberately does not provide a Dolt
+# host/port here: the RC owns both the proxy and its local Dolt child.
+run_bd_init_proxied() {
+    local dir="$1"
+    local prefix="$2"
+    local dolt_database="$3"
+    local external_host="${GC_BEADS_PROXY_EXTERNAL_HOST:-}"
+    local external_port="${GC_BEADS_PROXY_EXTERNAL_PORT:-}"
+    (
+        cd "$dir" || exit 1
+        export BEADS_DIR="$dir/.beads"
+        export BEADS_DOLT_PROXIED_SERVER=1
+        unset BEADS_DOLT_AUTO_START
+        unset GC_DOLT GC_DOLT_HOST GC_DOLT_PORT GC_DOLT_USER GC_DOLT_PASSWORD
+        unset GC_DOLT_DATA_DIR GC_DOLT_LOG_FILE GC_DOLT_STATE_FILE GC_DOLT_PID_FILE GC_DOLT_LOCK_FILE GC_DOLT_CONFIG_FILE
+        unset BEADS_DOLT_SERVER_MODE BEADS_DOLT_SERVER_DATABASE BEADS_DOLT_SERVER_HOST BEADS_DOLT_SERVER_PORT BEADS_DOLT_SERVER_SOCKET BEADS_DOLT_SERVER_USER BEADS_DOLT_PASSWORD
+        bd_bin="${BD_BIN:-bd}"
+        set -- init --quiet --proxied-server
+        if [ -n "$external_host" ] || [ -n "$external_port" ]; then
+            [ -n "$external_host" ] && [ -n "$external_port" ] || die "proxied-external init requires both GC_BEADS_PROXY_EXTERNAL_HOST and GC_BEADS_PROXY_EXTERNAL_PORT"
+            set -- "$@" --proxied-server-external-host "$external_host" --proxied-server-external-port "$external_port"
+        fi
+        set -- "$@" -p "$prefix"
+        if [ -n "$dolt_database" ]; then
+            set -- "$@" --database "$dolt_database"
+        fi
+        set -- "$@" --skip-hooks --skip-agents "$dir"
+        "$bd_bin" "$@"
+    )
+}
+
 run_bd_doltlite() {
     local dir="$1"
     shift
@@ -2616,7 +2708,7 @@ run_bd_doltlite() {
         export GC_BEADS_BACKEND="doltlite"
         unset GC_DOLT_HOST GC_DOLT_PORT GC_DOLT_USER GC_DOLT_PASSWORD GC_DOLT
         unset BEADS_DOLT_DATABASE BEADS_DOLT_PORT
-        unset BEADS_DOLT_SERVER_DATABASE BEADS_DOLT_SERVER_HOST BEADS_DOLT_SERVER_MODE BEADS_DOLT_SERVER_PORT BEADS_DOLT_SERVER_USER BEADS_DOLT_PASSWORD
+        unset BEADS_DOLT_SERVER_DATABASE BEADS_DOLT_SERVER_HOST BEADS_DOLT_SERVER_MODE BEADS_DOLT_SERVER_PORT BEADS_DOLT_SERVER_SOCKET BEADS_DOLT_SERVER_USER BEADS_DOLT_PASSWORD
         export BEADS_DOLT_AUTO_START=0
         "${BD_BIN:-bd}" "$@"
     )
@@ -2835,6 +2927,26 @@ op_init() {
     # beads with that type. "step" is required for non-root formula step
     # beads (#1039). Must match doctor.RequiredCustomTypes.
     local custom_types="${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step}"
+
+    # Fresh managed-local scopes use direct/server mode by default. An explicit
+    # [dolt] mode = "proxied-server" selector is persisted in config before
+    # this helper runs; existing authoritative modes remain unchanged.
+    if scope_is_proxied "$dir"; then
+        ensure_beads_dir_permissions "$dir"
+        # An explicitly opted-in proxied scope may already have config.yaml (gc writes the
+        # canonical mode before invoking this helper) but no metadata.json.
+        # `bd context` can succeed from ambient parent state in that shape, so
+        # use the RC's metadata marker as the initialization witness. Honor
+        # BD_BIN here just as run_bd_init_proxied does; tests and pinned
+        # deployments must not silently invoke an unrelated PATH binary.
+        bd_bin="${BD_BIN:-bd}"
+        if [ ! -f "$metadata_path" ] || ! (cd "$dir" && BEADS_DIR="$dir/.beads" BEADS_DOLT_PROXIED_SERVER=1 "$bd_bin" context >/dev/null 2>&1); then
+            run_bd_init_proxied "$dir" "$prefix" "$dolt_database" || die "bd proxied-server init failed for $dir"
+        fi
+        ensure_beads_dir_permissions "$dir"
+        normalize_scope_after_init "$dir" "$prefix" "$dolt_database"
+        exit 0
+    fi
 
     # Hosted beads-gateway: when a credential command is configured, bd
     # authenticates to the gateway via that command (EIA-as-username over TLS) and
@@ -3322,6 +3434,23 @@ fi
 # Set derived paths.
 GC_DIR="$GC_CITY_PATH/.gc"
 BEADS_DIR_ROOT="$GC_CITY_PATH/.beads"
+
+if scope_is_proxied "$GC_CITY_PATH"; then
+    case "$op" in
+        start|ensure-ready|health|probe|recover|stop|shutdown)
+            exit 2
+            ;;
+    esac
+    # Proxied store bridge operations are handled by bd through the GC bridge;
+    # no managed listener exists from which to derive a port.
+    DOLT_PORT=0
+    DOLT_USER="${GC_DOLT_USER:-root}"
+    case "$op" in
+        init) op_init "$@"; exit $? ;;
+        create|get|update|close|reopen|list|ready|children|list-by-label|set-metadata|delete|dep-add|dep-remove|dep-list)
+            op_store_bridge "$op" "$@"; exit $? ;;
+    esac
+fi
 
 # Prefer GC-owned runtime layout derivation when the current gc binary is
 # available. Fall back to the legacy shell derivation for compatibility.

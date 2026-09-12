@@ -511,6 +511,22 @@ func managedDoltOpenDatabase(host, port, user, database string) (*sql.DB, error)
 	return doltpool.Open(host, port, user, managedDoltPassword(), database)
 }
 
+func managedDoltOpenDatabaseSocket(socket, user, database string) (*sql.DB, error) {
+	socket = strings.TrimSpace(socket)
+	if socket == "" {
+		return nil, fmt.Errorf("missing socket")
+	}
+	user = strings.TrimSpace(user)
+	if user == "" {
+		user = "root"
+	}
+	database = strings.TrimSpace(database)
+	if database == "" {
+		return nil, fmt.Errorf("missing database")
+	}
+	return doltpool.OpenSocket(socket, user, managedDoltPassword(), database)
+}
+
 func readManagedMetadataProjectID(metadataPath string) (string, error) {
 	data, err := os.ReadFile(metadataPath)
 	if err != nil {

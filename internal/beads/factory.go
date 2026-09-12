@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
 
@@ -149,6 +150,37 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 		}
 		logNativeUnavailable(opts.Logger, opts.ScopeRoot, diag.PreflightGate, diag.PreflightReason)
 		return opts.openBdFallback(provider, diag)
+	}
+	metadataPath := filepath.Join(opts.ScopeRoot, ".beads", "metadata.json")
+	metadataBackend, backendOK, _ := contract.ReadMetadataBackend(fsys.OSFS{}, metadataPath)
+	if mode, ok, modeErr := contract.ReadDoltMode(fsys.OSFS{}, metadataPath); modeErr == nil && ok && (!backendOK || contract.IsDoltBackend(metadataBackend)) {
+		switch strings.ToLower(strings.TrimSpace(mode)) {
+		case "proxied-server":
+			diag := BeadsDiagnostic{Store: storeNameBdStore, NativeStoreEligible: false, PreflightGate: "proxied_provider", PreflightReason: "proxied-server mode is owned by the bd provider"}
+			return opts.openBdFallback(provider, diag)
+		case "server", "embedded":
+		default:
+			diag := BeadsDiagnostic{Store: storeNameBdStore, NativeStoreEligible: false, PreflightGate: "unsupported_dolt_mode", PreflightReason: fmt.Sprintf("unsupported persisted dolt_mode %q", mode)}
+			return opts.openBdFallback(provider, diag)
+		}
+	}
+	configPath := filepath.Join(opts.ScopeRoot, ".beads", "config.yaml")
+	cfg, cfgOK, cfgErr := contract.ReadConfigState(fsys.OSFS{}, configPath)
+	if cfgErr != nil && !os.IsNotExist(cfgErr) {
+		diag := BeadsDiagnostic{Store: storeNameBdStore, NativeStoreEligible: false, PreflightGate: "config_unreadable", PreflightReason: fmt.Sprintf("read beads config: %v", cfgErr)}
+		return opts.openBdFallback(provider, diag)
+	}
+	if cfgOK {
+		switch strings.ToLower(strings.TrimSpace(cfg.DoltMode)) {
+		case "":
+		case "proxied-server":
+			diag := BeadsDiagnostic{Store: storeNameBdStore, NativeStoreEligible: false, PreflightGate: "proxied_provider", PreflightReason: "proxied-server mode is owned by the bd provider"}
+			return opts.openBdFallback(provider, diag)
+		case "server", "embedded":
+		default:
+			diag := BeadsDiagnostic{Store: storeNameBdStore, NativeStoreEligible: false, PreflightGate: "unsupported_dolt_mode", PreflightReason: fmt.Sprintf("unsupported persisted dolt_mode %q", cfg.DoltMode)}
+			return opts.openBdFallback(provider, diag)
+		}
 	}
 
 	native, err := opts.openNativeStore(ctx)

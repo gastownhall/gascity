@@ -65,6 +65,51 @@ dolt.auto-start: false
 	}
 }
 
+func TestReadConfigStatePreservesDoltMode(t *testing.T) {
+	fs := fsys.OSFS{}
+	for _, tc := range []struct {
+		name   string
+		config string
+		want   string
+	}{
+		{
+			name: "yaml parser path",
+			config: "issue_prefix: gc\n" +
+				"gc.endpoint_origin: managed_city\n" +
+				"dolt.mode: proxied-server\n",
+			want: "proxied-server",
+		},
+		{
+			name: "line scanner fallback path",
+			// Keep the mode in a top-level dotted key while making the
+			// document invalid YAML so ReadConfigState uses its repair scanner.
+			config: "issue_prefix: gc\n" +
+				"gc.endpoint_origin: managed_city\n" +
+				"dolt.mode: server\n" +
+				"broken: [\n",
+			want: "server",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+			if err := fs.WriteFile(path, []byte(tc.config), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			state, ok, err := ReadConfigState(fs, path)
+			if err != nil {
+				t.Fatalf("ReadConfigState() error = %v", err)
+			}
+			if !ok {
+				t.Fatal("ReadConfigState() ok = false, want true")
+			}
+			if state.DoltMode != tc.want {
+				t.Fatalf("ReadConfigState().DoltMode = %q, want %q", state.DoltMode, tc.want)
+			}
+		})
+	}
+}
+
 func TestIsLegacyMinimalEndpointConfig(t *testing.T) {
 	if !IsLegacyMinimalEndpointConfig(ConfigState{}) {
 		t.Fatal("IsLegacyMinimalEndpointConfig(empty) = false, want true")
