@@ -3766,7 +3766,7 @@ func TestCompactScriptSurfacesGCFailureStderr(t *testing.T) {
 // was closed"), which reads like a network fault. The compactor must name the
 // setting, the live value from the rendered config, and the city.toml
 // override, and must still leave the pending-GC marker behind.
-func TestCompactScriptNamesReadTimeoutWhenFullGCIsCancelled(t *testing.T) {
+func TestCompactScriptNamesReadTimeoutWhenFullGCIsCanceled(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	stateDir := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt")
 	managedConfig := filepath.Join(stateDir, "dolt-config.yaml")
@@ -3792,7 +3792,7 @@ func TestCompactScriptNamesReadTimeoutWhenFullGCIsCancelled(t *testing.T) {
 	}
 	marker := filepath.Join(stateDir, "compact-pending-gc", "beads")
 	if _, err := os.Stat(marker); err != nil {
-		t.Fatalf("cancelled GC should still write the pending-GC marker: %v", err)
+		t.Fatalf("canceled GC should still write the pending-GC marker: %v", err)
 	}
 }
 

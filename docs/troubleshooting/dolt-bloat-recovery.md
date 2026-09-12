@@ -116,7 +116,11 @@ compact: db=<database> the managed sql-server ended DOLT_GC at its listener.read
 
 `connection was closed` is the other spelling of the same kill. Nothing is
 wrong with the store, and the pending-GC marker will retry into the same
-ceiling on every later run until it moves. Raise the value in `city.toml`:
+ceiling on every later run until it moves. Raise the value in `city.toml`
+past the longest GC you have seen; the failed run's `duration=` is the floor.
+Releases through v1.4.1 ship `15000`, the value in the example above, and
+current builds default to `120000`, so `120000` is the right first value for a
+city still on `15000`. A city already at `120000` needs a larger number.
 
 ```toml
 [dolt]
