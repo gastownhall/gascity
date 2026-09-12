@@ -121,6 +121,28 @@ func (p *orphanScanProvider) TerminateRuntime(r runtime.LiveRuntime) error {
 	return p.terminateErr
 }
 
+// startCountingProvider counts Start calls so a test can assert that a
+// concurrent Attach did not race an in-flight controller-driven reset
+// (continuation_reset_pending) with its own independent Start.
+type startCountingProvider struct {
+	*runtime.Fake
+	mu         sync.Mutex
+	startCalls int
+}
+
+func (p *startCountingProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	p.mu.Lock()
+	p.startCalls++
+	p.mu.Unlock()
+	return p.Fake.Start(ctx, name, cfg)
+}
+
+func (p *startCountingProvider) StartCalls() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.startCalls
+}
+
 type nonRunningStopRecorder struct {
 	*runtime.Fake
 	stopCalls int
@@ -2191,6 +2213,105 @@ func TestAttachActiveReattach(t *testing.T) {
 	}
 	if got.State != StateActive {
 		t.Errorf("State = %q, want %q", got.State, StateActive)
+	}
+}
+
+// TestAttachWaitsForInFlightResetInsteadOfRacingIt is a regression guard for
+// gascity#4079: gc session attach could race an in-flight gc session reset
+// and produce a blank no-continuity instance. The session reconciler that
+// executes a reset runs in a separate long-lived controller process from
+// the short-lived `gc session attach` CLI invocation, so the in-process
+// withSessionMutationLock provides no cross-process protection between
+// them. The reconciler stops the runtime immediately but defers the actual
+// fresh Start to a later phase of reconciliation, marking the durable
+// continuation_reset_pending="true" the whole time (cleared only by
+// PreWakePatch immediately before its own Start). This test simulates that
+// exact window — runtime stopped, continuation_reset_pending set, with a
+// goroutine completing the "reconciler's" restart shortly after — and
+// asserts Attach waits for it instead of independently calling Start.
+func TestAttachWaitsForInFlightResetInsteadOfRacingIt(t *testing.T) {
+	origPoll, origTimeout := inFlightResetPollInterval, inFlightResetWaitTimeout
+	inFlightResetPollInterval = 5 * time.Millisecond
+	inFlightResetWaitTimeout = 500 * time.Millisecond
+	defer func() {
+		inFlightResetPollInterval = origPoll
+		inFlightResetWaitTimeout = origTimeout
+	}()
+
+	store := beads.NewMemStore()
+	sp := &startCountingProvider{Fake: runtime.NewFake()}
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	baseline := sp.StartCalls()
+
+	// Simulate the reconciler's restart-requested handling
+	// (session_reconciler.go): stop the runtime, mark the durable
+	// in-flight-reset signal, and defer the actual fresh Start.
+	if err := sp.Stop(info.SessionName); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if err := store.SetMetadata(info.ID, "continuation_reset_pending", "true"); err != nil {
+		t.Fatalf("SetMetadata: %v", err)
+	}
+
+	// Simulate the reconciler completing its own fresh restart shortly
+	// after, on a separate goroutine — the cross-process timing this fix
+	// has to tolerate.
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		_ = sp.Start(context.Background(), info.SessionName, runtime.Config{Command: "claude"})
+		_ = store.SetMetadata(info.ID, "continuation_reset_pending", "")
+	}()
+
+	if err := mgr.Attach(context.Background(), info.ID, "claude --resume", runtime.Config{}); err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+
+	if got := sp.StartCalls(); got != baseline+1 {
+		t.Errorf("Start calls = %d, want %d (attach should wait for the reconciler's restart, not race it with its own Start)", got, baseline+1)
+	}
+}
+
+// TestAttachFallsBackToOwnStartWhenInFlightResetNeverClears guards the
+// bounded-wait fallback: if the controller-driven reset never completes
+// (a stalled/dead reconciler), Attach must still converge — start the
+// runtime itself after the bounded wait — rather than hang indefinitely.
+func TestAttachFallsBackToOwnStartWhenInFlightResetNeverClears(t *testing.T) {
+	origPoll, origTimeout := inFlightResetPollInterval, inFlightResetWaitTimeout
+	inFlightResetPollInterval = 5 * time.Millisecond
+	inFlightResetWaitTimeout = 30 * time.Millisecond
+	defer func() {
+		inFlightResetPollInterval = origPoll
+		inFlightResetWaitTimeout = origTimeout
+	}()
+
+	store := beads.NewMemStore()
+	sp := &startCountingProvider{Fake: runtime.NewFake()}
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := sp.Stop(info.SessionName); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if err := store.SetMetadata(info.ID, "continuation_reset_pending", "true"); err != nil {
+		t.Fatalf("SetMetadata: %v", err)
+	}
+	// Nothing ever clears continuation_reset_pending.
+
+	if err := mgr.Attach(context.Background(), info.ID, "claude --resume", runtime.Config{}); err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+
+	if !sp.IsRunning(info.SessionName) {
+		t.Error("session should be running after Attach's bounded-wait fallback")
 	}
 }
 
