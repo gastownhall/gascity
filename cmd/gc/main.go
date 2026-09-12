@@ -1501,9 +1501,22 @@ func ensureScopedFileStoreLayout(cityPath string) error {
 	return os.WriteFile(fileStoreLayoutMarkerPath(cityPath), []byte(fileStoreLayoutScopedV1+"\n"), 0o644)
 }
 
+// openScopeLocalFileStore opens the file store at scopeRoot without a known
+// city, resolving the owning city from ambient context. Callers that already
+// hold the city path must use openScopeLocalFileStoreForCity instead: ambient
+// resolution misses whenever the process is not pointed at that city (a
+// supervisor serving several cities, --city-url/--context, an unrelated cwd),
+// and a miss silently falls back to the default "gc" prefix.
 func openScopeLocalFileStore(scopeRoot string) (*beads.FileStore, error) {
+	return openScopeLocalFileStoreForCity(scopeRoot, "")
+}
+
+// openScopeLocalFileStoreForCity opens the file store at scopeRoot as a scope
+// of cityPath, so the store mints ids under that scope's configured prefix. A
+// blank cityPath falls back to ambient city resolution.
+func openScopeLocalFileStoreForCity(scopeRoot, cityPath string) (*beads.FileStore, error) {
 	beadsPath := filepath.Join(scopeRoot, ".gc", "beads.json")
-	store, err := beads.OpenFileStore(fsys.OSFS{}, beadsPath, fileStoreIDPrefixOpts(scopeRoot)...)
+	store, err := beads.OpenFileStore(fsys.OSFS{}, beadsPath, fileStoreIDPrefixOpts(scopeRoot, cityPath)...)
 	if err != nil {
 		return nil, err
 	}
@@ -1517,8 +1530,8 @@ func openScopeLocalFileStore(scopeRoot string) (*beads.FileStore, error) {
 // file store was the only path that didn't). Returns no option — leaving the
 // default "gc" — when the city config can't be resolved, matching prior
 // behavior for single-scope callers and tests.
-func fileStoreIDPrefixOpts(scopeRoot string) []beads.FileStoreOption {
-	if prefix := effectiveFileStorePrefix(scopeRoot); prefix != "" {
+func fileStoreIDPrefixOpts(scopeRoot, cityPath string) []beads.FileStoreOption {
+	if prefix := effectiveFileStorePrefix(scopeRoot, cityPath); prefix != "" {
 		return []beads.FileStoreOption{beads.WithFileStoreIDPrefix(prefix)}
 	}
 	return nil
@@ -1526,11 +1539,15 @@ func fileStoreIDPrefixOpts(scopeRoot string) []beads.FileStoreOption {
 
 // effectiveFileStorePrefix maps a store scope root to its configured prefix:
 // the owning rig's EffectivePrefix, or the city HQ prefix for the city store.
-// Empty when config is unavailable (e.g. tests that open a bare dir).
-func effectiveFileStorePrefix(scopeRoot string) string {
-	cityPath, err := resolveCity()
-	if err != nil {
-		return ""
+// cityPath names the city that owns the scope; a blank one is resolved from
+// ambient context. Empty when config is unavailable (e.g. tests that open a
+// bare dir).
+func effectiveFileStorePrefix(scopeRoot, cityPath string) string {
+	if strings.TrimSpace(cityPath) == "" {
+		var err error
+		if cityPath, err = resolveCity(); err != nil {
+			return ""
+		}
 	}
 	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
@@ -1564,23 +1581,23 @@ func ensurePersistedScopeLocalFileStore(scopeRoot string) error {
 	return os.WriteFile(beadsPath, []byte("{\"seq\":0,\"beads\":[]}\n"), 0o644)
 }
 
-func openExistingScopeLocalFileStore(scopeRoot string) (*beads.FileStore, error) {
+func openExistingScopeLocalFileStore(scopeRoot, cityPath string) (*beads.FileStore, error) {
 	beadsPath := filepath.Join(scopeRoot, ".gc", "beads.json")
 	if _, err := os.Stat(beadsPath); err != nil {
 		return nil, err
 	}
-	return openScopeLocalFileStore(scopeRoot)
+	return openScopeLocalFileStoreForCity(scopeRoot, cityPath)
 }
 
 func openCompatibleFileStore(scopeRoot, cityPath string) (*beads.FileStore, error) {
 	scopeRoot = resolveStoreScopeRoot(cityPath, scopeRoot)
 	if !samePath(scopeRoot, cityPath) && scopeUsesFileStoreContract(scopeRoot) {
-		return openExistingScopeLocalFileStore(scopeRoot)
+		return openExistingScopeLocalFileStore(scopeRoot, cityPath)
 	}
 	if fileStoreUsesScopedRoots(cityPath) {
-		return openExistingScopeLocalFileStore(scopeRoot)
+		return openExistingScopeLocalFileStore(scopeRoot, cityPath)
 	}
-	return openScopeLocalFileStore(cityPath)
+	return openScopeLocalFileStoreForCity(cityPath, cityPath)
 }
 
 func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
