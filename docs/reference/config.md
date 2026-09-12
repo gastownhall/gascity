@@ -92,6 +92,7 @@ Agent defines a configured agent in the city.
 | `nudge` | string |  |  | Nudge is text typed into the agent's session after startup. Used for CLI agents that don't accept command-line prompts. For a known pool session whose trigger remains unclaimed after the 90-second recovery grace period, an empty or whitespace-only Nudge does not opt out: it sends "Run gc hook --claim --drain-ack --json now; if it returns work, execute it immediately." This fallback applies only to the initial stalled-claim recovery; continuation-claim recovery remains configured-only. Unknown templates receive no fallback. |
 | `session` | string |  |  | Session overrides the session transport for this agent. "" (default) uses the city-level session provider (typically tmux). "acp" uses the Agent Client Protocol (JSON-RPC over stdio). The agent's resolved provider must have supports_acp = true. Enum: `acp` |
 | `provider` | string |  |  | Provider names the provider preset to use for this agent. |
+| `context_advisory` | ContextAdvisory |  |  | ContextAdvisory overrides context-pressure guidance for this agent. |
 | `upstream` | string |  |  | Upstream selects the model-serving endpoint (a key in [upstreams]) for this agent — WHO serves the model. "" (default) falls back to agent_defaults.upstream; if still empty, no upstream env is injected (ambient behavior). Switching it relaunches the agent in the warm box. |
 | `start_command` | string |  |  | StartCommand overrides the provider's command for this agent. |
 | `lifecycle` | string |  |  | Lifecycle controls runtime lifetime semantics. Empty uses the default long-lived session lifecycle; "one_shot" means the command is expected to do bounded work and exit cleanly. Enum: `one_shot` |
@@ -142,6 +143,7 @@ AgentDefaults provides agent defaults declared via [agent_defaults] in city.toml
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
+| `context_advisory` | ContextAdvisory |  |  | ContextAdvisory is the city-wide default context-pressure guidance. |
 | `provider` | string |  |  | Provider is the default provider name for agents that do not set their own provider. It also counts as a configured provider for implicit agent injection. |
 | `model` | string |  |  | Model is the parsed/composed default model name for agents (e.g., "claude-sonnet-4-6"), but it is not yet auto-applied at runtime. Agents with their own model override would take precedence. |
 | `upstream` | string |  |  | Upstream is the default model-serving endpoint (a key in [upstreams]) for agents that do not set their own upstream (Phase C — the Upstream axis). Applied to agents with an empty Upstream by ApplyAgentDefaults. |
@@ -172,6 +174,7 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 | `prompt_template` | string |  |  | PromptTemplate overrides the prompt template path. Relative paths resolve against the declaring config file's directory (pack-safe). Paths prefixed with "//" resolve against the city root. |
 | `session` | string |  |  | Session overrides the session transport ("acp"). |
 | `provider` | string |  |  | Provider overrides the provider name. |
+| `context_advisory` | ContextAdvisory |  |  | ContextAdvisory overrides context-pressure guidance for this agent. |
 | `upstream` | string |  |  | Upstream overrides the model-serving endpoint selection (Phase C). |
 | `args` | []string |  |  | Args overrides the provider's default arguments. Leave unset to keep the pack-defined args; set to an empty list to clear them; set to a populated list to replace them entirely (full replace, not append). |
 | `start_command` | string |  |  | StartCommand overrides the start command. |
@@ -231,6 +234,7 @@ AgentPatch modifies existing agents identified by rig scope and Name.
 | `prompt_template` | string |  |  | PromptTemplate overrides the prompt template path. Relative paths resolve against the declaring config file's directory (pack-safe). Paths prefixed with "//" resolve against the city root. |
 | `session` | string |  |  | Session overrides the session transport ("acp" or "tmux"). |
 | `provider` | string |  |  | Provider overrides the provider name. |
+| `context_advisory` | ContextAdvisory |  |  | ContextAdvisory overrides context-pressure guidance for this agent. |
 | `upstream` | string |  |  | Upstream overrides the model-serving endpoint selection (Phase C). |
 | `args` | []string |  |  | Args overrides the provider's default arguments. Leave unset to keep the pack-defined args; set to an empty list to clear them; set to a populated list to replace them entirely (full replace, not append). |
 | `start_command` | string |  |  | StartCommand overrides the start command. |
@@ -301,6 +305,26 @@ ChatSessionsConfig configures chat session behavior.
 |-------|------|----------|---------|-------------|
 | `idle_timeout` | string |  |  | IdleTimeout is the duration after which a detached chat session is auto-suspended. Duration string (e.g., "30m", "1h"). 0 = disabled. |
 | `grace_period` | string |  |  | GracePeriod is the duration after creation during which a manual session is protected from idle-sleep scale-to-zero. Duration string (e.g., "10m"). Empty = use default (10m). "0" = disabled. |
+
+## ContextAdvisory
+
+ContextAdvisory configures context-pressure guidance.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `enabled` | boolean |  |  |  |
+| `window_tokens` | integer |  |  |  |
+| `tiers` | []ContextAdvisoryTier |  |  |  |
+
+## ContextAdvisoryTier
+
+ContextAdvisoryTier is one threshold and message in a context-pressure advisory.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `threshold` | integer |  |  |  |
+| `message` | string |  |  |  |
+| `enabled` | boolean |  |  |  |
 
 ## ConvergenceConfig
 

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/modelwindow"
 )
 
@@ -59,6 +60,13 @@ type transcriptUsage struct {
 // whose hook input JSON is in hookInput, or "" when disabled, below the
 // advisory threshold, or on any error (fail-safe silent).
 func contextInjectLine(hookInput []byte) string {
+	return contextInjectLineForAdvisory(hookInput, nil, nil)
+}
+
+// contextInjectLineForAdvisory applies city and agent context-advisory
+// configuration to a hook payload. Environment variables remain the final
+// compatibility override for enablement, thresholds, and window size.
+func contextInjectLineForAdvisory(hookInput []byte, global, agent *config.ContextAdvisory) string {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("GC_INJECT_CONTEXT"))) {
 	case "0", "false", "off":
 		return ""
@@ -71,7 +79,9 @@ func contextInjectLine(hookInput []byte) string {
 	if !ok {
 		return ""
 	}
-	return contextUsageMessage(tokens, contextWindowTokens(models))
+	builtin := config.DefaultContextAdvisory()
+	policy := config.ResolveContextAdvisory(&builtin, global, agent)
+	return contextUsageMessageForPolicy(tokens, contextWindowTokensWithOverride(models, policy.WindowTokens), policy)
 }
 
 // lastTranscriptUsage reads the tail of a provider transcript (JSONL) and
@@ -134,10 +144,17 @@ func lastTranscriptUsage(path string) (tokens int, models []string, ok bool) {
 // gc-managed deployments that know the launch model should pin it for
 // determinism.
 func contextWindowTokens(models []string) int {
+	return contextWindowTokensWithOverride(models, 0)
+}
+
+func contextWindowTokensWithOverride(models []string, configuredWindow int) int {
 	if v := strings.TrimSpace(os.Getenv("GC_CONTEXT_WINDOW_TOKENS")); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			return n
 		}
+	}
+	if configuredWindow > 0 {
+		return configuredWindow
 	}
 	best := 0
 	for _, m := range models {
@@ -149,6 +166,33 @@ func contextWindowTokens(models []string) int {
 		return modelwindow.Default
 	}
 	return best
+}
+
+func contextUsageMessageForPolicy(tokens, window int, policy config.ContextAdvisoryPolicy) string {
+	if window <= 0 || !policy.Enabled {
+		return ""
+	}
+	policy = contextUsagePolicyWithEnvThresholdOverrides(policy)
+	pct := 100 * float64(tokens) / float64(window)
+	tier, ok := policy.SelectTier(pct)
+	if !ok {
+		return ""
+	}
+	return config.RenderTier(tier, config.ContextAdvisoryView{
+		Tokens: tokens, Window: window, UsedK: contextUsageK(tokens), WindowK: contextUsageK(window), Pct: pct, Threshold: tier.Threshold,
+	}) + "\n"
+}
+
+func contextUsageK(tokens int) string { return fmt.Sprintf("%dk", (tokens+500)/1000) }
+
+func contextUsagePolicyWithEnvThresholdOverrides(policy config.ContextAdvisoryPolicy) config.ContextAdvisoryPolicy {
+	if len(policy.Tiers) > 0 {
+		policy.Tiers[0].Threshold = thresholdPct("GC_CONTEXT_ADVISORY_PCT", policy.Tiers[0].Threshold)
+	}
+	if len(policy.Tiers) > 1 {
+		policy.Tiers[1].Threshold = thresholdPct("GC_CONTEXT_URGENT_PCT", policy.Tiers[1].Threshold)
+	}
+	return policy
 }
 
 // contextUsageMessage renders the guidance line for tokens used of window, or
