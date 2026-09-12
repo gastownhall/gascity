@@ -31,15 +31,18 @@ type PreflightChecker struct {
 	BDContext func(scope string) (PreflightBDContext, error)
 	// DatabaseProjectID reads the authoritative database _project_id for the scope.
 	DatabaseProjectID func(scope string) (string, bool, error)
-	// DeferIdentityToNativeOpen reports whether, when the direct database probe
-	// cannot confirm project_id, the scope should stay native-eligible and defer
+	// DeferIdentityToNativeOpen reports whether the scope should skip the direct
+	// database probe altogether and stay native-eligible, deferring
 	// authoritative identity verification to beadslib's native-open path
 	// (verifyProjectIdentity over the authenticated connection) instead of
 	// degrading off the native store. It is true for external endpoints such as
 	// a hosted beads-gateway, whose EIA-as-username + TLS credential-command auth
-	// the control-plane root/plaintext probe cannot replicate, but whose database
-	// _project_id beadslib still verifies at open time — refusing to connect, and
-	// falling back to BdStore, on mismatch. Nil defaults to no deferral (Warn).
+	// the control-plane root/plaintext probe cannot replicate — the probe is
+	// known in advance to be unable to authenticate such an endpoint, so it is
+	// consulted before DatabaseProjectID is dialed, not after it fails — but
+	// whose database _project_id beadslib still verifies at open time,
+	// refusing to connect, and falling back to BdStore, on mismatch. Nil
+	// defaults to no deferral (Warn).
 	DeferIdentityToNativeOpen func(scope string) bool
 	// BeadsLibraryVersion is the linked github.com/steveyegge/beads module
 	// version. Empty means infer it from build info.
@@ -215,24 +218,26 @@ func (c PreflightChecker) checkIdentityMatch(scope string, metadata preflightMet
 	if c.DatabaseProjectID == nil {
 		return NewPreflightCheckResult(PreflightCheckIdentityMatch, PreflightCheckWarn, "database project_id reader is not configured", details)
 	}
+	// The direct SQL probe connects as root over plaintext and cannot
+	// authenticate an external hosted beads-gateway, whose identity is proven
+	// by an EIA-as-username + TLS credential command the control plane does
+	// not replicate here. For such endpoints the authoritative database
+	// _project_id is verified by beadslib at native-open time
+	// (verifyProjectIdentity over the authenticated connection), which
+	// refuses to connect on mismatch and drops the scope to BdStore — the
+	// same open-time gate BdStore itself relies on. Consult the deferral
+	// *before* dialing: a scope this is true for is known in advance to be
+	// unable to authenticate the direct probe, so dialing it anyway would
+	// only produce a rejected-authentication attempt on the remote server for
+	// a check whose answer is already decided (gastownhall/gascity#5965).
+	if c.DeferIdentityToNativeOpen != nil && c.DeferIdentityToNativeOpen(scope) {
+		return NewPreflightCheckResult(PreflightCheckIdentityMatch, PreflightCheckPass, "database identity deferred to native-open verification (external endpoint, probe skipped)", details)
+	}
 	dbProjectID, ok, err := c.DatabaseProjectID(scope)
 	details.DBProjectID = strings.TrimSpace(dbProjectID)
 	if err != nil || !ok || details.DBProjectID == "" {
-		// The direct SQL probe connects as root over plaintext and cannot
-		// authenticate an external hosted beads-gateway, whose identity is proven
-		// by an EIA-as-username + TLS credential command the control plane does
-		// not replicate here. For such endpoints the authoritative database
-		// _project_id is verified by beadslib at native-open time
-		// (verifyProjectIdentity over the authenticated connection), which
-		// refuses to connect on mismatch and drops the scope to BdStore — the
-		// same open-time gate BdStore itself relies on. Defer to that gate rather
-		// than claiming a confirmation the control plane cannot make, so the
-		// scope stays native-eligible without a false proof. A local endpoint,
-		// whose probe should have succeeded, still degrades so its genuine probe
-		// failure is not silently ignored.
-		if c.DeferIdentityToNativeOpen != nil && c.DeferIdentityToNativeOpen(scope) {
-			return NewPreflightCheckResult(PreflightCheckIdentityMatch, PreflightCheckPass, "database identity deferred to native-open verification (external endpoint)", details)
-		}
+		// A local endpoint, whose probe should have succeeded, still degrades
+		// so its genuine probe failure is not silently ignored.
 		return NewPreflightCheckResult(PreflightCheckIdentityMatch, PreflightCheckWarn, "database project_id could not be confirmed", details)
 	}
 	if metadata.ProjectID != details.DBProjectID {

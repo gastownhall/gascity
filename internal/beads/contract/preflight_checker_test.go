@@ -342,12 +342,27 @@ func TestPreflightDefersIdentityToNativeOpenForExternalEndpoint(t *testing.T) {
 	assertCheckState(t, result, PreflightCheckIdentityMatch, PreflightCheckPass)
 }
 
-// TestPreflightExternalEndpointStillBlocksOnProbeMismatch guards the deferral:
-// deferring to native-open verification only applies when the direct probe is
-// UNAVAILABLE. If the probe does reach the database and reports a project_id that
-// disagrees with metadata, that is a genuine cross-project mismatch and must
-// still block native activation even for an external endpoint.
-func TestPreflightExternalEndpointStillBlocksOnProbeMismatch(t *testing.T) {
+// TestPreflightDeferredScopeNeverDialsTheDatabaseProbe pins the ordering fix for
+// gastownhall/gascity#5965: DeferIdentityToNativeOpen is consulted BEFORE
+// DatabaseProjectID is ever called, not only after a failed/unavailable probe.
+// A scope it returns true for is known in advance to be unable to authenticate
+// the direct root/plaintext probe (an external hosted beads-gateway), so
+// dialing it anyway only produces a rejected-authentication attempt on the
+// remote server for a check whose answer is already decided. Identity
+// verification for such a scope is entirely delegated to beadslib's
+// native-open path (verifyProjectIdentity over the authenticated connection),
+// which refuses to connect and falls back to BdStore on a genuine mismatch —
+// so the control-plane preflight no longer needs, or attempts, its own
+// pre-dial cross-check for these scopes.
+//
+// This supersedes the older
+// TestPreflightExternalEndpointStillBlocksOnProbeMismatch scenario: before the
+// fix, the dial always ran first, so a probe that happened to succeed with a
+// mismatched project_id was still caught here. After the fix the dial is
+// skipped outright for a deferred scope, so that in-depth guard is no longer
+// reachable in this check — the mismatch guarantee for such scopes lives
+// solely at native-open time.
+func TestPreflightDeferredScopeNeverDialsTheDatabaseProbe(t *testing.T) {
 	scope := "/city"
 	checker := testPreflightChecker(preflightMetadataJSON(`{
 		"backend": "dolt",
@@ -355,6 +370,11 @@ func TestPreflightExternalEndpointStillBlocksOnProbeMismatch(t *testing.T) {
 		"dolt_database": "gascity",
 		"project_id": "metadata-id"
 	}`), PreflightBDContext{Backend: "dolt", DoltMode: "server"}, "database-id")
+	called := false
+	checker.DatabaseProjectID = func(string) (string, bool, error) {
+		called = true
+		return "database-id", true, nil
+	}
 	checker.DeferIdentityToNativeOpen = func(string) bool { return true }
 
 	result, err := checker.Check(scope)
@@ -362,8 +382,11 @@ func TestPreflightExternalEndpointStillBlocksOnProbeMismatch(t *testing.T) {
 		t.Fatalf("Check() error = %v", err)
 	}
 
-	assertPreflightVerdict(t, result, PreflightVerdictBlocked, false)
-	assertCheckState(t, result, PreflightCheckIdentityMatch, PreflightCheckFail)
+	if called {
+		t.Fatalf("DatabaseProjectID was called for a scope where DeferIdentityToNativeOpen returned true; the dial must be skipped entirely")
+	}
+	assertPreflightVerdict(t, result, PreflightVerdictEligible, true)
+	assertCheckState(t, result, PreflightCheckIdentityMatch, PreflightCheckPass)
 }
 
 func TestPreflightUnreadableScopeReturnsError(t *testing.T) {
