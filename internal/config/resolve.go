@@ -200,12 +200,14 @@ func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath
 				base = normalizeProviderLayerArgsForSchema(base, base.OptionsSchema)
 				child := normalizeProviderLayerArgsForSchema(spec, providerSchemaForLayerArgs(base, spec))
 				merged := MergeProviderOverBuiltin(base, child)
+				merged = suppressPresetModelEffortForProfile(name, child, merged)
 				return &merged, nil
 			}
 			if base, ok := builtins[spec.Command]; ok {
 				base = normalizeProviderLayerArgsForSchema(base, base.OptionsSchema)
 				child := normalizeProviderLayerArgsForSchema(spec, providerSchemaForLayerArgs(base, spec))
 				merged := MergeProviderOverBuiltin(base, child)
+				merged = suppressPresetModelEffortForProfile(spec.Command, child, merged)
 				return &merged, nil
 			}
 			standalone := normalizeProviderLayerArgsForSchema(spec, spec.OptionsSchema)
@@ -394,6 +396,121 @@ func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
 	}
 
 	return result
+}
+
+// suppressPresetModelEffortForProfile is the #5441 profile-aware
+// OptionDefaults gate. It lives at the caller level of
+// MergeProviderOverBuiltin - one shared implementation applied at the
+// chain-walk merge (chain.go) and at each Phase A legacy merge in this
+// file - so both resolution paths are covered by the single gate.
+//
+// When the merged provider's effective args route the command through a
+// codex profile ("--profile <name>" / "--profile=<name>") and the
+// built-in base is codex, the preset-sourced "model" and "effort"
+// OptionDefaults are deleted from the merged result: CLI flags outrank
+// the profile's own config and would silently clobber the profile's pins
+// (hard failure on strict upstreams).
+//
+// The gate is unconditional with respect to the OptionDefaults
+// merge/prune blocks in MergeProviderOverBuiltin: it inspects the merged
+// result even when the merging layer declared no option_defaults of its
+// own - the common case for profile-routed providers, where the preset
+// defaults ride on `result := base` and only a gate on the merged result
+// sees them.
+//
+// "preset-sourced" means inherited from the base rather than explicitly
+// set by the merging provider layer (city.OptionDefaults, which also
+// covers schema-managed args that normalization folded into that layer's
+// defaults): explicit wins.
+//
+// Known limitations (all accepted; pinned by the characterization tests in
+// profile_optiondefaults_limits_test.go):
+//
+//  1. Chain flattening. In a leaf -> custom -> builtin:codex chain the gate
+//     runs on the leaf-most merge, so an intermediate layer's explicit model
+//     pin is already folded into the merged map by the time the
+//     profile-carrying leaf merges over it, and that pin is suppressed as
+//     well - the profile owns model/effort for the whole chain.
+//
+//  2. Wrapper outer-flag false positive. argsRouteThroughProfile scans the
+//     merged argv flatly and has no notion of which side of a wrapper
+//     separator a flag sits on, so a wrapper whose OUTER tool takes its own
+//     --profile trips the gate even when the codex command line past "--"
+//     carries no profile. The direction is fail-safe - the launch loses the
+//     preset pins and codex falls back to its own config, rather than
+//     clobbering a profile that does not exist - and it is recoverable:
+//     naming model/effort in the layer's own option_defaults is explicit, so
+//     the gate exempts them.
+//
+//  3. agent.args bypasses the gate. The gate is a resolution-time decision
+//     over the provider spec's args, but mergeAgentOverrides replaces
+//     rp.Args wholesale afterwards and does not recompute EffectiveDefaults.
+//     An agent that supplies the --profile in agent.args therefore never
+//     reaches the gate and still gets the preset --model / reasoning-effort
+//     injected next to it - the very clobber this gate exists to prevent.
+//     The mirror also holds: when the provider layer routed through a
+//     profile and agent.args replaces those args with a profile-free command
+//     line, the suppression outlives the args it was decided from
+//     (fail-safe). Closing this would mean re-evaluating the gate against
+//     the post-override argv, which is a change to the resolution contract
+//     rather than to this function; it is deliberately out of scope here.
+//
+// Only model and effort are suppressed: their schema entries carry no
+// `Default`, so ComputeEffectiveDefaults cannot resurrect them.
+// permission_mode is deliberately left alone.
+func suppressPresetModelEffortForProfile(builtinAncestor string, city, merged ProviderSpec) ProviderSpec {
+	if builtinAncestor != "codex" || !argsRouteThroughProfile(merged.Args) {
+		return merged
+	}
+	// Copy-on-write: when the merging layer declared no option_defaults of
+	// its own, MergeProviderOverBuiltin leaves result.OptionDefaults ALIASING
+	// the base layer's map — the very case this gate exists for. Deleting in
+	// place would reach back into the recorded chain layer (visible in
+	// provider provenance) and, worse, into the built-in spec itself the day
+	// anyone memoizes BuiltinProviders(). Rebuild instead.
+	var gated map[string]string
+	for _, key := range []string{"model", "effort"} {
+		if _, present := merged.OptionDefaults[key]; !present {
+			continue
+		}
+		if _, explicit := city.OptionDefaults[key]; explicit {
+			continue
+		}
+		if gated == nil {
+			gated = make(map[string]string, len(merged.OptionDefaults))
+			for k, v := range merged.OptionDefaults {
+				gated[k] = v
+			}
+		}
+		delete(gated, key)
+	}
+	if gated != nil {
+		merged.OptionDefaults = gated
+	}
+	return merged
+}
+
+// argsRouteThroughProfile reports whether args route the command through a
+// profile: "--profile" followed by a non-empty value, or a single
+// "--profile=<name>" token with a non-empty name. A bare "--profile" with
+// no value (or an empty "--profile=") is not treated as profile-routed —
+// such a command is malformed — and short/other flag forms are out of
+// scope. The scan is flat: it does not know which side of a wrapper
+// separator a flag sits on. See limitation 2 on
+// suppressPresetModelEffortForProfile.
+func argsRouteThroughProfile(args []string) bool {
+	for i, a := range args {
+		if a == "--profile" {
+			if i+1 < len(args) && args[i+1] != "" {
+				return true
+			}
+			continue
+		}
+		if name, ok := strings.CutPrefix(a, "--profile="); ok && name != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func mergeOptionsSchemaByKey(base, city []ProviderOption) ([]ProviderOption, map[string]bool) {
