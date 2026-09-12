@@ -25,6 +25,7 @@ type worktreeCmdOpts struct {
 	Generation string
 	Lifecycle  string
 	AttemptID  string
+	Agent      string
 	DryRun     bool
 	JSON       bool
 }
@@ -90,6 +91,8 @@ func newWorktreeEnsureCmd(stdout, stderr io.Writer) *cobra.Command {
 	}
 	worktreeFlagSet(cmd, &opts)
 	cmd.Flags().BoolVarP(&opts.DryRun, "dry-run", "n", false, "plan without mutating anything")
+	cmd.Flags().StringVar(&opts.Agent, "agent", "",
+		"qualified agent identity to best-effort materialize skills for after creation")
 	return cmd
 }
 
@@ -182,7 +185,38 @@ func runWorktreeEnsure(opts worktreeCmdOpts, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc worktree ensure: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	if !opts.DryRun && opts.Agent != "" {
+		materializeWorktreeAgentSkills(opts.Agent, rep.Path, stdout, stderr)
+	}
 	return writeWorktreeReport("ensure", rep, opts, stdout, stderr)
+}
+
+// materializeWorktreeAgentSkills best-effort materializes agent's skills
+// into path, reusing the same resolve-city/resolve-agent/materialize.Run
+// sequence the per-session PreStart hook drives via
+// `gc internal materialize-skills` (see materializeSkillsIntoWorkdir in
+// cmd_internal_materialize_skills.go). A failure at any step is logged to
+// stderr and never returned: worktree existence is ensure's postcondition,
+// not a materialized skill catalog.
+func materializeWorktreeAgentSkills(agentName, path string, stdout, stderr io.Writer) {
+	cityPath, err := resolveCity()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc worktree ensure: skill materialization skipped: city not found: %v\n", err) //nolint:errcheck
+		return
+	}
+	cfg, err := loadCityConfig(cityPath, stderr)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc worktree ensure: skill materialization skipped: city config unavailable: %v\n", err) //nolint:errcheck
+		return
+	}
+	agent, ok := resolveAgentIdentity(cfg, agentName, currentRigContext(cfg))
+	if !ok {
+		fmt.Fprintf(stderr, "gc worktree ensure: skill materialization skipped: unknown agent %q\n", agentName) //nolint:errcheck
+		return
+	}
+	if err := materializeSkillsIntoWorkdir(cfg, &agent, cityPath, path, nil, stdout, stderr); err != nil {
+		fmt.Fprintf(stderr, "gc worktree ensure: skill materialization failed: %v\n", err) //nolint:errcheck
+	}
 }
 
 func runWorktreeVerify(opts worktreeCmdOpts, stdout, stderr io.Writer) int {
