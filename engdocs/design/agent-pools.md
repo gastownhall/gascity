@@ -168,6 +168,36 @@ Gastown's themed name pools ("Toast", "Furiosa") are cosmetic and can
 be added later via the `theme` field in PoolConfig. For now, numeric
 suffixes are simple, predictable, and debuggable.
 
+### Graph workflow continuity
+
+Graph steps routed to a pool remain unassigned until a concrete session
+claims them. Continuation is always formula-declared: Go propagates a group
+the authored recipe already carries and never manufactures one. The agent
+lifecycle decides whether that declared group survives routing:
+
+- The default long-lived lifecycle propagates a formula-declared
+  `gc.continuation_group` and pins `gc.session_affinity=require` alongside it.
+  Claiming one executable step pre-assigns its workflow siblings to the same
+  persistent session, preserving its worktree and conversation context.
+- `lifecycle = "one_shot"` is an independent-step route. Each executable step
+  stays routed to the configured pool but carries no continuation group or
+  required session affinity, so a fresh session may claim the next ready step
+  after the prior bounded invocation exits.
+
+A one-shot route drops *any* formula-declared continuation group, including
+the shared-drain groups `stampDrainItemRecipe` stamps for `context = "shared"`
+drains. A runtime that exits after each bounded invocation cannot hold the
+single shared session those contracts ask for, so routing to a one-shot pool
+overrides them rather than stamping affinity no session can honor.
+
+A formula sent through a one-shot pool must therefore persist every input a
+later step needs in the work artifact or bead graph rather than relying on a
+surviving process or conversation.
+
+This applies only to pool-flavored agents (`SupportsInstanceExpansion()`). A
+one-shot agent with `max_active_sessions = 1` and no `min_active_sessions` or
+`scale_check` is a named-session agent, not a pool, and is unaffected.
+
 ## Upscaling
 
 The simple case. The reconciler evaluates `check`, computes

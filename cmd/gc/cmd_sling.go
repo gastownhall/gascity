@@ -1490,9 +1490,8 @@ func resolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 	if !ok {
 		return graphRouteBinding{}, fmt.Errorf("step %s: unknown formulas v2 target %q", stepID, target.value)
 	}
-	binding := graphRouteBinding{QualifiedName: agentutil.RoutedToIdentity(&agentCfg)}
-	if agentCfg.SupportsInstanceExpansion() {
-		binding.MetadataOnly = true
+	binding := graphroute.GraphRouteBindingForAgent(agentCfg)
+	if binding.MetadataOnly {
 		cache[stepID] = binding
 		return binding, nil
 	}
