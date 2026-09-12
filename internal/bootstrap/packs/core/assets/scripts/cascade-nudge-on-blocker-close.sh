@@ -17,6 +17,17 @@
 # metadata edit). Subscribing to bead.closed fires once, exactly on the
 # transition this order cares about.
 #
+# One pass per close. The controller fires this order on its own dispatch
+# cadence, so a fixed wall-clock lookback both re-scans every blocker still
+# inside the window on every firing (N closes -> up to N x M `gc bd dep list`
+# invocations, two Go cold starts each) and drops closes that fall between two
+# runs further apart than the window. Each run therefore processes only the
+# bead.closed events with seq > the high-water seq persisted by the previous
+# run (bounded by WINDOW) and records the new high-water mark — the same cut
+# nudge-on-route.sh makes. Closes of session and message beads are skipped
+# before the dep lookup: they are lifecycle records, never blockers, and are
+# the majority of closes in a busy city.
+#
 # Cross-rig blocker chains within a city are supported via a prefix->rig
 # lookup so `gc bd dep list` and `gc session nudge` are scoped to the rig that
 # owns each bead. The dep lookup routes through `gc bd` (not bare `bd`) so the
@@ -38,15 +49,23 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 CITY="${GC_CITY:-.}"
-# Event lookback window. Must exceed the controller's event-trigger eval
-# cadence so no close event is missed between runs.
-LOOKBACK="${GC_CASCADE_NUDGE_LOOKBACK:-5m}"
+# Upper bound on how far back one run reads. The real cut is the persisted
+# high-water seq; this only bounds the read.
+WINDOW="${GC_CASCADE_NUDGE_WINDOW:-1h}"
+# Lookback for the very first run, when no seq has been recorded yet. Kept
+# short on purpose: a busy city closes hundreds of beads an hour, and a first
+# run that walks a full hour of them exceeds the order's exec deadline
+# (measured: 300s deadline, 1h of closes = 268-300s) without ever recording a
+# seq, so the next run replays the same hour.
+FIRST_RUN_LOOKBACK="${GC_CASCADE_NUDGE_LOOKBACK:-5m}"
 # Dedup entries older than this are pruned so the state file stays bounded.
-# Must exceed LOOKBACK. Accepts a simple Ns / Nm / Nh duration.
+# Must be at least WINDOW. Accepts a simple Ns / Nm / Nh duration.
 RETENTION="${GC_CASCADE_NUDGE_RETENTION:-1h}"
 
 PACK_STATE_DIR="${GC_PACK_STATE_DIR:-${GC_CITY_RUNTIME_DIR:-$CITY/.gc/runtime}/packs/core}"
 STATE_FILE="$PACK_STATE_DIR/cascade-nudge-on-blocker-close-state.json"
+# Highest event seq processed by the previous run (a bare integer).
+SEQ_FILE="$PACK_STATE_DIR/cascade-nudge-on-blocker-close-seq"
 mkdir -p "$PACK_STATE_DIR"
 
 # Convert a simple Go-style duration (Ns/Nm/Nh) to whole seconds.
@@ -89,11 +108,42 @@ set_rig_args() {
 
 # Pull recent bead.closed events. Best-effort: a read failure must not
 # crash the controller's order loop.
-EVENTS="$(gc events --type bead.closed --since "$LOOKBACK" 2>/dev/null)" || exit 0
+LAST_SEQ="$(cat "$SEQ_FILE" 2>/dev/null || true)"
+case "$LAST_SEQ" in ''|*[!0-9]*) LAST_SEQ=0 ;; esac
+SINCE="$WINDOW"
+[ "$LAST_SEQ" -gt 0 ] || SINCE="$FIRST_RUN_LOOKBACK"
+
+EVENTS="$(gc events --type bead.closed --since "$SINCE" 2>/dev/null)" || exit 0
 [ -n "$EVENTS" ] || exit 0
 
+# Closed beads newer than the previous run's high-water seq, minus the
+# lifecycle types that are never blockers. The bead payload is read as
+# (.payload.bead // .payload): `gc events` wraps bead.* payloads as
+# {"bead": …} on some builds and emits them flat on others (#5968).
 BLOCKERS="$(printf '%s\n' "$EVENTS" \
-    | jq -r '.payload.bead.id // empty' 2>/dev/null | sort -u)" || BLOCKERS=""
+    | jq -r --argjson last "$LAST_SEQ" '
+        select((.seq // 0) > $last)
+        | (.payload.bead // .payload) as $b
+        | select(($b.issue_type // "") != "session"
+                 and ($b.issue_type // "") != "message")
+        | $b.id // empty' 2>/dev/null \
+    | sort -u)" || BLOCKERS=""
+
+# Advance the high-water mark to the newest event seen so the next run starts
+# exactly where this one stopped. Recorded BEFORE the dep lookups, not after:
+# if this run is killed by the order deadline mid-loop, the closes it already
+# walked must not be replayed on every subsequent firing — each close is
+# looked up at most once, and a close lost to a kill is the same best-effort
+# gap a blocker whose dep lookup failed (`|| continue`) has always had.
+HEAD_SEQ="$(printf '%s\n' "$EVENTS" | jq -r '.seq // 0' 2>/dev/null | sort -n | tail -1)" || HEAD_SEQ=""
+case "$HEAD_SEQ" in ''|*[!0-9]*) HEAD_SEQ=0 ;; esac
+advance_seq() {
+    [ "$HEAD_SEQ" -gt "$LAST_SEQ" ] || return 0
+    _tmp="$(mktemp "$PACK_STATE_DIR/.cascade-nudge-on-blocker-close-seq.XXXXXX")"
+    printf '%s\n' "$HEAD_SEQ" > "$_tmp"
+    mv -f "$_tmp" "$SEQ_FILE"
+}
+advance_seq
 [ -n "$BLOCKERS" ] || exit 0
 
 # Load dedup state (object mapping "<blocker>|<dependent>" -> ISO timestamp).
