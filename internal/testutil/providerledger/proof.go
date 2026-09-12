@@ -129,7 +129,14 @@ func validateProofFunction(fn *ast.FuncDecl, constructor SymbolRef, proof ProofR
 	if err != nil || runnerRef != proof.Runner {
 		return fmt.Errorf("proof %s final statement must call contract runner %s", proof.Test, renderSymbolRef(proof.Runner))
 	}
-	if len(runner.Args) != 2 {
+	wantArgs := 2
+	if proof.Options != nil {
+		wantArgs = 3
+	}
+	if len(runner.Args) != wantArgs {
+		if proof.Options != nil {
+			return fmt.Errorf("proof %s contract runner requires the test parameter, one inline factory, and an options literal", proof.Test)
+		}
 		return fmt.Errorf("proof %s contract runner requires the test parameter and one inline factory", proof.Test)
 	}
 	runnerTest, ok := unparen(runner.Args[0]).(*ast.Ident)
@@ -140,7 +147,59 @@ func validateProofFunction(fn *ast.FuncDecl, constructor SymbolRef, proof ProofR
 	if !ok {
 		return fmt.Errorf("proof %s contract runner factory must be an inline function literal", proof.Test)
 	}
+	if proof.Options != nil {
+		if err := validateProofOptionsArg(runner.Args[2], *proof.Options, imports, localImportPath); err != nil {
+			return fmt.Errorf("proof %s: %w", proof.Test, err)
+		}
+	}
 	return validateProofFactory(factory, constructor, proof, imports, localImportPath)
+}
+
+// validateProofOptionsArg checks that a contract runner's third argument is an
+// inline runtimetest.Options{...} composite literal whose fields are limited
+// to those ProofOptions declares, with literal bool values matching opts
+// exactly. SkipStartError (or any other runtimetest.Options field) is
+// rejected outright: it takes a func value, which this static check cannot
+// verify, so admitting it here could let a proved claim hide a skip behind
+// it.
+func validateProofOptionsArg(arg ast.Expr, opts ProofOptions, imports map[string]string, localImportPath string) error {
+	lit, ok := unparen(arg).(*ast.CompositeLit)
+	if !ok || lit.Type == nil {
+		return fmt.Errorf("contract runner options argument must be an inline %s composite literal", renderSymbolRef(runtimetestOptionsType))
+	}
+	typeRef, err := resolveProofTypeSymbol(lit.Type, imports, localImportPath)
+	if err != nil || typeRef != runtimetestOptionsType {
+		return fmt.Errorf("contract runner options argument must be an inline %s composite literal", renderSymbolRef(runtimetestOptionsType))
+	}
+
+	sawDuplicateStartReconnects := false
+	for _, elt := range lit.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			return fmt.Errorf("options literal fields must use key: value form")
+		}
+		key, ok := kv.Key.(*ast.Ident)
+		if !ok {
+			return fmt.Errorf("options literal has a non-identifier field key")
+		}
+		switch key.Name {
+		case "DuplicateStartReconnects":
+			sawDuplicateStartReconnects = true
+			value, ok := unparen(kv.Value).(*ast.Ident)
+			if !ok || (value.Name != "true" && value.Name != "false") {
+				return fmt.Errorf("options field DuplicateStartReconnects must be a literal bool")
+			}
+			if got := value.Name == "true"; got != opts.DuplicateStartReconnects {
+				return fmt.Errorf("options field DuplicateStartReconnects is %t, want %t", got, opts.DuplicateStartReconnects)
+			}
+		default:
+			return fmt.Errorf("options literal field %s is not allowed", key.Name)
+		}
+	}
+	if opts.DuplicateStartReconnects && !sawDuplicateStartReconnects {
+		return fmt.Errorf("options literal must set DuplicateStartReconnects: true explicitly")
+	}
+	return nil
 }
 
 func validateProofFactory(factory *ast.FuncLit, constructor SymbolRef, proof ProofRef, imports map[string]string, localImportPath string) error {
@@ -285,6 +344,30 @@ func resolveProofCallSymbol(call *ast.CallExpr, imports map[string]string, local
 		return SymbolRef{ImportPath: importPath, Name: fun.Sel.Name}, nil
 	default:
 		return SymbolRef{}, fmt.Errorf("callee must be a direct function call, got %T", call.Fun)
+	}
+}
+
+// resolveProofTypeSymbol mirrors resolveProofCallSymbol for a type
+// expression (e.g. the Type of a composite literal) rather than a call.
+func resolveProofTypeSymbol(expr ast.Expr, imports map[string]string, localImportPath string) (SymbolRef, error) {
+	switch t := unparen(expr).(type) {
+	case *ast.Ident:
+		if t.Obj != nil && t.Obj.Kind != ast.Typ {
+			return SymbolRef{}, fmt.Errorf("%s resolves to a local %s, not a declared type", t.Name, t.Obj.Kind)
+		}
+		return SymbolRef{ImportPath: localImportPath, Name: t.Name}, nil
+	case *ast.SelectorExpr:
+		qualifier, ok := unparen(t.X).(*ast.Ident)
+		if !ok || (qualifier.Obj != nil && qualifier.Obj.Kind != ast.Pkg) {
+			return SymbolRef{}, fmt.Errorf("selector receiver is not an imported package")
+		}
+		importPath := imports[qualifier.Name]
+		if importPath == "" {
+			return SymbolRef{}, fmt.Errorf("selector receiver %s is not an imported package", qualifier.Name)
+		}
+		return SymbolRef{ImportPath: importPath, Name: t.Sel.Name}, nil
+	default:
+		return SymbolRef{}, fmt.Errorf("type must be a direct named type reference, got %T", expr)
 	}
 }
 

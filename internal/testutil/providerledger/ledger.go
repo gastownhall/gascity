@@ -59,7 +59,11 @@ const (
 	DispositionNotApplicable Disposition = "not_applicable"
 )
 
-var runtimeProviderRunner = repoSymbol("internal/runtime/runtimetest", "RunProviderTests")
+var (
+	runtimeProviderRunner            = repoSymbol("internal/runtime/runtimetest", "RunProviderTests")
+	runtimeProviderRunnerWithOptions = repoSymbol("internal/runtime/runtimetest", "RunProviderTestsWithOptions")
+	runtimetestOptionsType           = repoSymbol("internal/runtime/runtimetest", "Options")
+)
 
 const (
 	// RuntimeBuiltinCatalog names cmd/gc's static runtime provider registry.
@@ -101,12 +105,27 @@ type ProofRef struct {
 	Runner       SymbolRef
 	AllowedCalls []SymbolRef
 
+	// Options, when non-nil, requires the contract runner call to pass a
+	// third argument: a runtimetest.Options{...} composite literal whose
+	// fields match exactly, and requires Runner to be
+	// runtimeProviderRunnerWithOptions instead of runtimeProviderRunner.
+	Options *ProofOptions
+
 	// Scope optionally narrows what a proved claim establishes when a
 	// source-bound constructor is proved on one execution path but not its
 	// whole surface. It is rendered alongside the proved status so the ledger
 	// does not overstate coverage — for example a router composition proved on
 	// its default route while its alternate route is covered by focused tests.
 	Scope string
+}
+
+// ProofOptions restricts which runtimetest.Options fields a proof may set on
+// the contract runner call to literal values the AST proof validator can
+// check statically. SkipStartError is deliberately excluded: a func value
+// can't be verified statically, so allowing it here could let a proved claim
+// hide a skip behind it.
+type ProofOptions struct {
+	DuplicateStartReconnects bool
 }
 
 // Waiver is a temporary, owned exception to an applicable contract.
@@ -209,10 +228,14 @@ func Catalog() []Entry {
 		),
 		builtin(
 			"t3bridge", "exact:t3bridge", nil,
-			waivedRuntime(
+			provedRuntimeWithOptions(
 				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
-				time.Date(2026, time.November, 5, 0, 0, 0, 0, time.UTC),
-				"the production T3 bridge composition has focused tests but no full shared runtime contract",
+				"internal/runtime/t3bridge/conformance_test.go",
+				"TestT3Bridge_RunProviderConformance",
+				ProofOptions{DuplicateStartReconnects: true},
+				repoSymbol("internal/runtime/t3bridge", "t3BridgeConformanceConfig"),
+				repoSymbol("internal/runtime/t3bridge", "t3BridgeConformanceNextSessionName"),
+				repoSymbol("internal/runtime/t3bridge", "t3BridgeConformanceCurrentSessionName"),
 			),
 		),
 		builtin(
@@ -249,10 +272,14 @@ func Catalog() []Entry {
 				repoSymbol("internal/runtime/exec", "execConformanceScript"),
 				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
-			waivedRuntime(
+			provedRuntimeWithOptions(
 				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
-				time.Date(2026, time.November, 5, 0, 0, 0, 0, time.UTC),
-				"the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract",
+				"internal/runtime/t3bridge/conformance_test.go",
+				"TestT3Bridge_RunProviderConformance",
+				ProofOptions{DuplicateStartReconnects: true},
+				repoSymbol("internal/runtime/t3bridge", "t3BridgeConformanceConfig"),
+				repoSymbol("internal/runtime/t3bridge", "t3BridgeConformanceNextSessionName"),
+				repoSymbol("internal/runtime/t3bridge", "t3BridgeConformanceCurrentSessionName"),
 			),
 		),
 		builtin(
@@ -342,6 +369,24 @@ func provedRuntimeScoped(constructor SymbolRef, file, test, scope string, allowe
 	claim := provedRuntime(constructor, file, test, allowedCalls...)
 	claim.Proof.Scope = scope
 	return claim
+}
+
+// provedRuntimeWithOptions builds a proved claim whose contract runner call
+// passes a runtimetest.Options{...} literal as a third argument, restricted
+// to the fields opts declares.
+func provedRuntimeWithOptions(constructor SymbolRef, file, test string, opts ProofOptions, allowedCalls ...SymbolRef) ContractClaim {
+	return ContractClaim{
+		Constructor: constructor,
+		Contract:    ContractRuntimeProvider,
+		Disposition: DispositionProved,
+		Proof: &ProofRef{
+			File:         file,
+			Test:         test,
+			Runner:       runtimeProviderRunnerWithOptions,
+			AllowedCalls: append([]SymbolRef(nil), allowedCalls...),
+			Options:      &opts,
+		},
+	}
 }
 
 // waivedRuntime builds a claim that defers proof of the runtime.Provider
@@ -562,8 +607,14 @@ func validateClaim(prefix string, claim ContractClaim, now time.Time) (problems 
 			}
 			if err := validateSymbolRef(claim.Proof.Runner); err != nil {
 				problems = append(problems, fmt.Sprintf("%s proof runner: %v", prefix, err))
-			} else if claim.Contract == ContractRuntimeProvider && claim.Proof.Runner != runtimeProviderRunner {
-				problems = append(problems, fmt.Sprintf("%s proof runner is %s, want %s", prefix, renderSymbolRef(claim.Proof.Runner), renderSymbolRef(runtimeProviderRunner)))
+			} else if claim.Contract == ContractRuntimeProvider {
+				wantRunner := runtimeProviderRunner
+				if claim.Proof.Options != nil {
+					wantRunner = runtimeProviderRunnerWithOptions
+				}
+				if claim.Proof.Runner != wantRunner {
+					problems = append(problems, fmt.Sprintf("%s proof runner is %s, want %s", prefix, renderSymbolRef(claim.Proof.Runner), renderSymbolRef(wantRunner)))
+				}
 			}
 			seenAllowed := make(map[SymbolRef]bool)
 			for _, allowed := range claim.Proof.AllowedCalls {

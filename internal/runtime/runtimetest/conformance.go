@@ -100,6 +100,15 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 		startOrSkip(t, opts, sp, name, cfg, "first Start")
 
 		err := startWithCleanup(t, sp, name, cfg)
+		if opts.DuplicateStartReconnects {
+			if err != nil {
+				t.Errorf("second Start should reconnect without error, got: %v", err)
+			}
+			if !sp.IsRunning(name) {
+				t.Error("IsRunning = false after duplicate Start reconnect, want true")
+			}
+			return
+		}
 		if err == nil {
 			t.Error("second Start should return error for duplicate name")
 		}
