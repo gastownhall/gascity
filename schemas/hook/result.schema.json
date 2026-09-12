@@ -49,10 +49,12 @@
       "type": "string"
     },
     "root_bead_id": {
-      "type": "string"
+      "type": "string",
+      "description": "Workflow root of the claimed bead; empty for a directly routed bead. Always present on action=work."
     },
     "continuation_group": {
-      "type": "string"
+      "type": "string",
+      "description": "Continuation group of the claimed bead; empty means a hard session boundary after close. Always present on action=work."
     },
     "continuation_assigned": {
       "type": "array",
@@ -79,7 +81,9 @@
       "then": {
         "required": [
           "bead_id",
-          "assignee"
+          "assignee",
+          "root_bead_id",
+          "continuation_group"
         ]
       }
     },

@@ -279,8 +279,8 @@ type hookClaimJSONResult struct {
 	BeadID               string   `json:"bead_id,omitempty"`
 	Assignee             string   `json:"assignee,omitempty"`
 	Route                string   `json:"route,omitempty"`
-	RootBeadID           string   `json:"root_bead_id,omitempty"`
-	ContinuationGroup    string   `json:"continuation_group,omitempty"`
+	RootBeadID           string   `json:"root_bead_id"`
+	ContinuationGroup    string   `json:"continuation_group"`
 	ContinuationAssigned []string `json:"continuation_assigned,omitempty"`
 	DrainAcknowledged    bool     `json:"drain_acknowledged,omitempty"`
 }
@@ -1410,7 +1410,7 @@ func hookClaimLifecycleCandidate(bead beads.Bead, opts hookClaimOptions) bool {
 // write.
 func hookClaimIdentityPatch(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string) map[string]string {
 	patch := map[string]string{}
-	if branch := strings.TrimSpace(ops.ResolveWorkBranch(dir)); branch != "" &&
+	if branch := strings.TrimSpace(ops.ResolveWorkBranch(hookClaimWorkBranchDir(opts.Env, dir))); branch != "" &&
 		strings.TrimSpace(bead.Metadata[beadmeta.WorkBranchMetadataKey]) != branch &&
 		hookClaimWorktreeEvidenceIsWholeOrAbsent(bead) {
 		patch[beadmeta.WorkBranchMetadataKey] = branch
@@ -2062,6 +2062,25 @@ func hookClaimSessionName(env []string) string {
 		}
 	}
 	return strings.TrimSpace(sessionName)
+}
+
+// hookClaimWorkBranchDir returns the directory whose checked-out branch is the
+// worker's work branch: the session work dir (GC_DIR, exported by the runtime
+// for every managed session) when it is an absolute path naming an existing
+// directory, else the store dir the claim ran against. A relative GC_DIR is
+// never honored: the runtime exports absolute paths, and a relative one would
+// resolve against the claim's arbitrary cwd. The store dir is the rig root for a
+// rig-scoped bead, so a worker that starts in its own worktree (agent
+// work_dir) would otherwise get the rig root's branch — usually main —
+// stamped as gc.work_branch over its real one, and every later gate reads the
+// wrong branch (citadel 2026-09-09: pc_e268966189e7, pc_bbf5bb62f1d0).
+func hookClaimWorkBranchDir(env []string, storeDir string) string {
+	if wd := hookClaimEnvValue(env, "GC_DIR"); wd != "" && filepath.IsAbs(wd) {
+		if info, err := os.Stat(wd); err == nil && info.IsDir() {
+			return wd
+		}
+	}
+	return storeDir
 }
 
 // hookResolveWorkBranch returns the current git branch of dir, or "" when dir
