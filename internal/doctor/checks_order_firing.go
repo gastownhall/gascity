@@ -527,7 +527,7 @@ func cronScheduleMatchesAt(fields []string, ts time.Time) (bool, error) {
 		{name: "hour", field: fields[1], value: ts.Hour(), min: 0, max: 23},
 		{name: "day-of-month", field: fields[2], value: ts.Day(), min: 1, max: 31},
 		{name: "month", field: fields[3], value: int(ts.Month()), min: 1, max: 12},
-		{name: "day-of-week", field: fields[4], value: int(ts.Weekday()), min: 0, max: 6},
+		{name: "day-of-week", field: fields[4], value: int(ts.Weekday()), min: 0, max: 7},
 	}
 	for _, spec := range specs {
 		matched, err := cronFieldMatchesForDoctor(spec.field, spec.value, spec.min, spec.max)
@@ -535,6 +535,19 @@ func cronScheduleMatchesAt(fields []string, ts time.Time) (bool, error) {
 			return false, fmt.Errorf("invalid cron schedule: cannot parse %s field %q", spec.name, spec.field)
 		}
 		if !matched {
+			// 7 is the ordinary cron spelling of Sunday; time.Weekday never
+			// yields it, so probe the alias reading before declaring a
+			// non-match. Mirrors cronDayOfWeekMatches in internal/orders —
+			// change one, change the other.
+			if spec.name == "day-of-week" && spec.value == 0 {
+				aliasMatched, aliasErr := cronFieldMatchesForDoctor(spec.field, 7, spec.min, spec.max)
+				if aliasErr != nil {
+					return false, fmt.Errorf("invalid cron schedule: cannot parse %s field %q", spec.name, spec.field)
+				}
+				if aliasMatched {
+					continue
+				}
+			}
 			return false, nil
 		}
 	}

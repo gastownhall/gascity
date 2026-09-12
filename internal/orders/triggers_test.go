@@ -344,11 +344,216 @@ func TestCronFieldMatches(t *testing.T) {
 		{"5", 3, false},
 		{"1,3,5", 3, true},
 		{"1,3,5", 2, false},
+
+		// "*/N" strides stay anchored at 0 (pre-existing gc semantics).
+		{"*/30", 0, true},
+		{"*/30", 30, true},
+		{"*/30", 15, false},
+
+		// Ranges. An hour field of "6-18" matched nothing before ranges were
+		// supported, so an order scheduled with one never fired.
+		{"6-18", 6, true},
+		{"6-18", 16, true},
+		{"6-18", 18, true},
+		{"6-18", 5, false},
+		{"6-18", 19, false},
+
+		// Stepped ranges, anchored at the range start. "8-20/2" is the hour
+		// field of orders/bs-logs-sso-freshness.toml — same silent failure.
+		{"8-20/2", 8, true},
+		{"8-20/2", 10, true},
+		{"8-20/2", 20, true},
+		{"8-20/2", 9, false},
+		{"8-20/2", 22, false},
+
+		// Ranges compose with comma lists.
+		{"1-3,10-12", 2, true},
+		{"1-3,10-12", 11, true},
+		{"1-3,10-12", 7, false},
+
+		// Terms the grammar does not express match nothing (and are rejected
+		// by ValidateCronSchedule, so they cannot reach a live order).
+		{"18-6", 20, false}, // inverted range
+		{"5/2", 5, false},   // step without a range
+		{"*/0", 4, false},   // non-positive step
+		{"abc", 4, false},   // garbage
+
+		// The Sunday-as-7 alias lives in cronDayOfWeekMatches, not here: this
+		// matcher is field-agnostic and 7 is not a time.Weekday value.
+		{"7", 0, false},
 	}
 	for _, tt := range tests {
 		got := cronFieldMatches(tt.field, tt.value)
 		if got != tt.want {
 			t.Errorf("cronFieldMatches(%q, %d) = %v, want %v", tt.field, tt.value, got, tt.want)
+		}
+	}
+}
+
+// TestCheckCronFiresRangeSchedule is the end-to-end regression: an order
+// registered and enabled with a range in its hour field returned "schedule not
+// matched" at every minute of every day, so it accumulated zero history and
+// raised no error anywhere.
+//
+// Each case uses a warm lastRun a minute back rather than neverRan, for the
+// same reason TestCheckTriggerCronNotMatched does: a never-run order's bounded
+// catch-up window is a separate path that would legitimately report Due on an
+// off-schedule minute, confounding what this test is asserting.
+func TestCheckCronFiresRangeSchedule(t *testing.T) {
+	a := Order{Name: "sweep", Trigger: "cron", Schedule: "*/30 6-18 * * *"}
+	warm := func(now time.Time) LastRunFunc {
+		last := now.Add(-1 * time.Minute)
+		return func(_ string) (time.Time, error) { return last, nil }
+	}
+
+	inWindow := time.Date(2026, 8, 5, 16, 30, 0, 0, time.UTC)
+	if got := CheckTrigger(a, inWindow, warm(inWindow), nil, nil); !got.Due {
+		t.Errorf("16:30 Due = false (%s), want true", got.Reason)
+	}
+	offMinute := time.Date(2026, 8, 5, 16, 15, 0, 0, time.UTC)
+	if got := CheckTrigger(a, offMinute, warm(offMinute), nil, nil); got.Due {
+		t.Errorf("16:15 Due = true, want false")
+	}
+	outOfWindow := time.Date(2026, 8, 5, 3, 30, 0, 0, time.UTC)
+	if got := CheckTrigger(a, outOfWindow, warm(outOfWindow), nil, nil); got.Due {
+		t.Errorf("03:30 Due = true, want false (outside the 6-18 window)")
+	}
+}
+
+func TestValidateCronSchedule(t *testing.T) {
+	valid := []string{
+		"* * * * *",
+		"40 6 * * *",
+		"*/30 6-18 * * *",
+		"0 8-20/2 * * *",
+		"0,30 6,7,8 * * *",
+		"0 6 * * 1",
+		"0 */4 * * *",
+		"0 0 1-15,20 1-6 0-6",
+		// 7 is the common cron spelling of Sunday; the matcher probes it.
+		"0 0 * * 7",
+		"0 9 * * 0,7",
+	}
+	for _, s := range valid {
+		if err := ValidateCronSchedule(s); err != nil {
+			t.Errorf("ValidateCronSchedule(%q) = %v, want nil", s, err)
+		}
+	}
+
+	invalid := []struct{ schedule, wantSubstr string }{
+		{"* * * *", "want 5 fields"},
+		{"0 25 * * *", "outside the valid range 0-23"},
+		{"60 * * * *", "outside the valid range 0-59"},
+		{"0 0 0 * *", "outside the valid range 1-31"},
+		{"0 0 * 13 *", "outside the valid range 1-12"},
+		{"0 0 * * 8", "outside the valid range 0-7"},
+		{"0 18-6 * * *", "ends before it starts"},
+		// "*/N" counts from 0, so in a field whose low bound is 1 a step past
+		// the high bound matches nothing at all.
+		{"0 0 */32 * *", "has no value in 1-31"},
+		{"0 0 1 */13 *", "has no value in 1-12"},
+		{"0 5/2 * * *", "step without a range"},
+		{"0 */0 * * *", "step that is not positive"},
+		{"0 */x * * *", "non-numeric step"},
+		{"0 abc * * *", "is not"},
+		// A list with any out-of-range member is rejected whole, matching
+		// vixie-cron. Before this validation such a schedule fired on its valid
+		// member ("0,30" in hour fired at 00:00), so this is the one class that
+		// goes from partially working to dropped.
+		{"0 0,30 * * *", "outside the valid range 0-23"},
+		{"0 0 * * 1,15", "outside the valid range 0-7"},
+	}
+	for _, tt := range invalid {
+		err := ValidateCronSchedule(tt.schedule)
+		if err == nil {
+			t.Errorf("ValidateCronSchedule(%q) = nil, want error", tt.schedule)
+			continue
+		}
+		if !strings.Contains(err.Error(), tt.wantSubstr) {
+			t.Errorf("ValidateCronSchedule(%q) error = %q, want it to contain %q", tt.schedule, err, tt.wantSubstr)
+		}
+	}
+}
+
+// TestCheckCronFiresSundayAsSeven pins the day-of-week alias end to end: 7 is
+// the ordinary cron spelling of Sunday, but time.Weekday only ever yields 0
+// for it, so before the alias such an order validated, registered, and never
+// fired.
+func TestCheckCronFiresSundayAsSeven(t *testing.T) {
+	a := Order{Name: "weekly", Trigger: "cron", Schedule: "0 9 * * 7"}
+	warm := func(now time.Time) LastRunFunc {
+		last := now.Add(-1 * time.Minute)
+		return func(_ string) (time.Time, error) { return last, nil }
+	}
+
+	sunday := time.Date(2026, 8, 2, 9, 0, 0, 0, time.UTC)
+	if got := CheckTrigger(a, sunday, warm(sunday), nil, nil); !got.Due {
+		t.Errorf("Sunday 09:00 Due = false (%s), want true", got.Reason)
+	}
+	monday := time.Date(2026, 8, 3, 9, 0, 0, 0, time.UTC)
+	if got := CheckTrigger(a, monday, warm(monday), nil, nil); got.Due {
+		t.Errorf("Monday 09:00 Due = true, want false")
+	}
+}
+
+// firesWithinAYear reports whether a schedule matches any minute of a full
+// 366-day wall-clock year. A lastRun one minute back leaves the catch-up scan
+// an empty interval, so only an exact match on the probed minute reports Due.
+func firesWithinAYear(t *testing.T, schedule string) bool {
+	t.Helper()
+	a := Order{Name: "x", Trigger: "cron", Schedule: schedule}
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for offset := 0; offset < 366*24*60; offset++ {
+		at := start.Add(time.Duration(offset) * time.Minute)
+		last := at.Add(-1 * time.Minute)
+		lastRunFn := func(_ string) (time.Time, error) { return last, nil }
+		if CheckTrigger(a, at, lastRunFn, nil, nil).Due {
+			return true
+		}
+	}
+	return false
+}
+
+// Every cron schedule shipped in a city order must be one the evaluator can
+// actually match; validation and matching are two readings of one grammar and
+// must not drift apart. The sweep runs a full year rather than a single day so
+// that the day-of-month and month fields are actually exercised — a one-day
+// sweep over schedules whose date fields are all "*" cannot detect
+// disagreement in three of the five fields.
+func TestValidateCronScheduleAgreesWithMatcher(t *testing.T) {
+	accepted := []string{
+		"*/30 6-18 * * *",
+		"0 8-20/2 * * *",
+		"40 6 * * *",
+		"0 6 * * 1",
+		"0 0 1-15/3 * *",
+		"0 0 1 */6 *",
+		"0 0 * * 7",
+	}
+	for _, schedule := range accepted {
+		if err := ValidateCronSchedule(schedule); err != nil {
+			t.Errorf("ValidateCronSchedule(%q) = %v, want nil", schedule, err)
+			continue
+		}
+		if !firesWithinAYear(t, schedule) {
+			t.Errorf("schedule %q validated but matched no minute of a full year", schedule)
+		}
+	}
+
+	// The converse reading: a term validation rejects must genuinely be dead,
+	// not merely unusual. "*/N" counts from 0, so once N passes the high bound
+	// of a field whose low bound is 1 there is nothing left for it to match.
+	rejected := []string{
+		"0 0 */32 * *",
+		"0 0 1 */13 *",
+	}
+	for _, schedule := range rejected {
+		if err := ValidateCronSchedule(schedule); err == nil {
+			t.Errorf("ValidateCronSchedule(%q) = nil, want error", schedule)
+			continue
+		}
+		if firesWithinAYear(t, schedule) {
+			t.Errorf("schedule %q was rejected but the matcher fires on it", schedule)
 		}
 	}
 }
