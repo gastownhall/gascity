@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -246,9 +247,19 @@ func guardSupervisorSocketDir(dir string) {
 	}
 }
 
+// supervisorSocketPathLimit caps the canonical socket path length below the
+// platform sockaddr_un limit (108 bytes on Linux, 104 on macOS). Matches the
+// controllerSocketPathLimit pattern in controller.go.
+const supervisorSocketPathLimit = 100
+
 func supervisorSocketPathForDir(dir string) string {
 	guardSupervisorSocketDir(dir)
-	return filepath.Join(dir, "supervisor.sock")
+	canonical := filepath.Join(dir, "supervisor.sock")
+	if len(canonical) <= supervisorSocketPathLimit {
+		return canonical
+	}
+	sum := sha256.Sum256([]byte(dir))
+	return filepath.Join("/tmp", "gascity-supervisor", fmt.Sprintf("%x.sock", sum[:16]))
 }
 
 func supervisorSocketPathCandidates() []string {
