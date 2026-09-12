@@ -4162,6 +4162,36 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				cancelSessionDrainInfo(info, sp, dt)
 				continue
 			}
+			// Keep-alive by held work: a live pool seat that still holds assigned
+			// work — open or in_progress — is not drained by the reconciler's own
+			// timers (no-wake-reason, idle-sleep, config-suppressed). Its step may
+			// carry no wake demand right now: an open step whose dependency is
+			// running on another seat reads not-ready, so the awake set sees no
+			// reason to keep the holder. The holder is mid-molecule all the same.
+			// A drain sent here is acked at once by `gc hook --claim --drain-ack`
+			// and the seat abandons its run; the step strands and the work re-runs
+			// (#5731, #5473). Explicit intents (suspend, idle-stop-pending,
+			// max-age) still drain, exactly as they win over a heartbeat hold. A
+			// probe error fails closed — retain, do not drain — like every other
+			// assigned-work gate. Pool seats only: a named seat's held work is the
+			// retired-session lane's concern.
+			if intent == "" && isPoolManagedSessionInfo(info) {
+				holdsWork, holdsErr := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, info)
+				if holdsErr != nil {
+					fmt.Fprintf(stderr, "session reconciler: checking assigned work before draining %s: %v (retaining)\n", name, holdsErr) //nolint:errcheck
+					holdsWork = true
+				}
+				if holdsWork {
+					cancelSessionDrainInfo(info, sp, dt)
+					if trace != nil {
+						trace.RecordDecision(TraceSiteReconcilerDrainDecision, TraceReasonAssignedWork, TraceOutcomeNoChange, target.tp.TemplateName, name, traceRecordPayload{
+							"sleep_intent": intent,
+							"kept_by":      "assigned_work",
+						})
+					}
+					continue
+				}
+			}
 			var reason string
 			switch {
 			case intent == "idle-stop-pending":
