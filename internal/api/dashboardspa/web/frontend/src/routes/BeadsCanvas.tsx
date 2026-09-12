@@ -9,6 +9,7 @@ import {
   type WheelEvent as ReactWheelEvent,
 } from 'react';
 import { GC_EVENT_PREFIX } from 'gas-city-dashboard-shared';
+import { useLocation } from 'react-router-dom';
 import { getActiveCity } from '../api/cityBase';
 import { BeadDetailModal } from '../components/BeadDetailModal';
 import { PageHeader } from '../components/PageHeader';
@@ -76,6 +77,7 @@ interface NodeDrag {
 
 export function BeadsCanvasPage() {
   const cityName = getActiveCity();
+  const location = useLocation();
   const cityKey = cityName ?? 'no-city';
   const viewportRef = useRef<HTMLDivElement>(null);
   const panDragRef = useRef<PanDrag | null>(null);
@@ -95,6 +97,10 @@ export function BeadsCanvasPage() {
   const [zoom, setZoom] = useState(1);
   const storageKey = `gascity:beads-canvas:positions:v1:${cityKey}`;
   const [overrides, setOverrides] = useState<PositionOverrides>(() => readOverrides(storageKey));
+  const controlTarget = useMemo(
+    () => resolveControlTarget(location.search, cityName),
+    [cityName, location.search],
+  );
 
   useEffect(() => {
     setOverrides(readOverrides(storageKey));
@@ -572,6 +578,22 @@ export function BeadsCanvasPage() {
         )}
       </div>
 
+      <nav className="beads-canvas-control-dock" aria-label="Orchestration control">
+        <span className="beads-canvas-control-status">
+          <span aria-hidden="true" />
+          live Beads
+        </span>
+        <span className="beads-canvas-control-divider" aria-hidden="true" />
+        <a
+          href={controlTarget.href}
+          className="beads-canvas-control-link focus-mark"
+          target={controlTarget.external ? '_blank' : undefined}
+          rel={controlTarget.external ? 'noreferrer' : undefined}
+        >
+          {controlTarget.label}
+        </a>
+      </nav>
+
       <BeadDetailModal
         open={selectedId !== null}
         beadId={selectedId}
@@ -582,6 +604,30 @@ export function BeadsCanvasPage() {
       />
     </section>
   );
+}
+
+function resolveControlTarget(
+  search: string,
+  cityName: string | null,
+): { label: string; href: string; external: boolean } {
+  const params = new URLSearchParams(search);
+  const configuredUrl = params.get('controlUrl');
+  if (params.get('control') === 'gastown' && configuredUrl) {
+    try {
+      const parsed = new URL(configuredUrl);
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        return { label: 'Gas Town control', href: parsed.href, external: true };
+      }
+    } catch {
+      // An invalid or unsafe configured target falls through to local Gas City.
+    }
+  }
+
+  return {
+    label: 'Gas City control',
+    href: cityName ? `/city/${encodeURIComponent(cityName)}` : '/',
+    external: false,
+  };
 }
 
 function CanvasEdgeLine({

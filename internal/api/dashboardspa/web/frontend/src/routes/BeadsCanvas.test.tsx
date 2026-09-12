@@ -75,11 +75,31 @@ describe('BeadsCanvasPage', () => {
     await waitFor(() => expect(beadQueries).toHaveLength(2));
     expect(beadQueries[1]?.get('all')).toBe('true');
   });
+
+  it('falls back to Gas City control and accepts an explicit Gas Town control target', async () => {
+    const fallback = renderPage();
+    await screen.findByRole('button', { name: 'ga-root: Ship the canvas' });
+
+    expect(screen.getByRole('link', { name: 'Gas City control' }).getAttribute('href')).toBe(
+      '/city/test-city',
+    );
+
+    fallback.unmount();
+    renderPage('/canvas?control=gastown&controlUrl=http%3A%2F%2F127.0.0.1%3A3000%2Fcontrol');
+    await screen.findByRole('button', { name: 'ga-root: Ship the canvas' });
+
+    expect(screen.getByRole('link', { name: 'Gas Town control' }).getAttribute('href')).toBe(
+      'http://127.0.0.1:3000/control',
+    );
+  });
 });
 
-function renderPage() {
+function renderPage(initialEntry = '/canvas') {
   return render(
-    <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+    <MemoryRouter
+      initialEntries={[initialEntry]}
+      future={{ v7_relativeSplatPath: true, v7_startTransition: true }}
+    >
       <NowProvider intervalMs={1_000_000}>
         <BeadsCanvasPage />
       </NowProvider>

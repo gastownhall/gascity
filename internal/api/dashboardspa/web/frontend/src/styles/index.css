@@ -227,6 +227,60 @@
     background: oklch(var(--surface-tint) / 0.6);
   }
 
+  .beads-canvas-control-dock {
+    position: fixed;
+    left: 50%;
+    bottom: 1rem;
+    z-index: 30;
+    display: flex;
+    max-width: calc(100vw - 2rem);
+    transform: translateX(-50%);
+    align-items: center;
+    gap: 0.75rem;
+    border: 1px solid oklch(var(--rule) / 0.75);
+    border-radius: 9999px;
+    background: oklch(var(--surface) / 0.9);
+    padding: 0.45rem 0.55rem 0.45rem 0.8rem;
+    color: oklch(var(--fg-muted));
+    font-size: 0.72rem;
+    box-shadow: 0 18px 48px -22px rgb(0 0 0 / 0.72);
+    backdrop-filter: blur(16px) saturate(1.2);
+  }
+
+  .beads-canvas-control-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    white-space: nowrap;
+  }
+
+  .beads-canvas-control-status > span {
+    width: 0.45rem;
+    height: 0.45rem;
+    border-radius: 9999px;
+    background: oklch(var(--ok));
+    box-shadow: 0 0 0.65rem oklch(var(--ok) / 0.65);
+  }
+
+  .beads-canvas-control-divider {
+    width: 1px;
+    height: 1rem;
+    background: oklch(var(--rule));
+  }
+
+  .beads-canvas-control-link {
+    border-radius: 9999px;
+    background: oklch(var(--accent));
+    padding: 0.4rem 0.8rem;
+    color: oklch(var(--bg));
+    font-weight: 650;
+    white-space: nowrap;
+  }
+
+  .beads-canvas-control-link:hover {
+    filter: brightness(1.08);
+  }
+
   /* Tabular numerals utility — apply to any column of numbers. */
   .tnum {
     font-variant-numeric: tabular-nums;
