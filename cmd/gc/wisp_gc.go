@@ -15,6 +15,7 @@ import (
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
@@ -554,8 +555,13 @@ func hasParentChildDepEdge(store beads.Store, id string) (bool, error) {
 //  1. TTL: skip roots with activity newer than now-wispGCCloseAbandonedTTL so
 //     live/in-flight roots and the external operational reconciler are never
 //     raced.
-//  2. descendants > 0: never close a stepless root — that would race the
-//     instantiator (mirrors autocloseMoleculeIfComplete).
+//  2. Stepless: a root with no descendants has no completion signal of its own,
+//     so it closes only when steplessRootIsAbandoned says it was never claimed
+//     AND steplessRootHasLiveAttachmentSource finds no live source bead still
+//     attached to it. A claimed stepless root is held by a live worker; an
+//     unclaimed one that outlived the TTL is a leaked pour. (The reactive
+//     autocloseMoleculeIfComplete skips stepless roots outright — it has no TTL
+//     to bound the instantiator race with, and this sweep does.)
 //  3. Exempt: skip roots carrying the gc.gc_exempt marker. This is a generic,
 //     operator-supplied opt-out — the SDK never stamps it (stamping a specific
 //     named root would hardcode a deployment role). A deployment marks any
@@ -603,8 +609,10 @@ func closeAbandonedRoots(store beads.Store, now time.Time) error {
 		if !terminal {
 			continue
 		}
-		// Guard 2: never close a stepless root — that races the instantiator.
-		if descendants == 0 {
+		// Guard 2: a stepless root is only closable once it is provably
+		// unclaimed AND no live source bead is still attached to it — see
+		// steplessRootIsAbandoned and steplessRootHasLiveAttachmentSource.
+		if descendants == 0 && (!steplessRootIsAbandoned(root) || steplessRootHasLiveAttachmentSource(store, root.ID)) {
 			continue
 		}
 
@@ -645,6 +653,87 @@ func closeAbandonedRoots(store beads.Store, now time.Time) error {
 // fueling the wisp backlog the PR targets.
 func isAbandonedRootCandidate(b beads.Bead) bool {
 	return sourceworkflow.IsWorkflowRoot(b) || b.Type == "molecule"
+}
+
+// steplessRootIsAbandoned reports whether a root with no descendants is safe
+// for the periodic sweep to close. Callers apply it only after the idle-TTL
+// guard, so "abandoned" here means "still unclaimed long after anything that
+// would claim it should have".
+//
+// A stepless root has no completion signal of its own, so the sweep classifies
+// claim state with the ONE status predicate the launch path already owns:
+// sling.ShouldPromoteWorkflowLaunchStatus. That predicate is the single
+// definition of WHICH STATUSES MEAN UNCLAIMED, and reusing it here is what
+// keeps the reaper from drifting into its own status literals. It is not a
+// shared write path: sling.PromoteWorkflowLaunchBead runs only on the graph.v2
+// launch branch (doStartGraphWorkflow, internal/sling/sling_core.go), while the
+// v1 type=molecule root-only pours this sweep mostly targets are moved to
+// in_progress by the worker's own `gc hook --claim`. Both writers land on the
+// same side of the same classifier, which is all this guard needs.
+//
+// Both halves of that matter:
+//
+//   - Unclaimed + idle past TTL: either a root-only formula whose owner is long
+//     gone, or an instantiation that died before writing its steps. Both are
+//     garbage, and leaving them is what let root-only patrol wisps accumulate
+//     unboundedly — one per restart cycle, invisible to the assignee-and-status
+//     filtered queries meant to reconcile them (gastownhall/gascity ga-98b).
+//   - Claimed: a live worker holds it. A root bead's UpdatedAt does not advance
+//     while its agent works, so idle age cannot tell "busy" from "abandoned"
+//     here; only the claim status can, and this one is no longer unclaimed.
+//
+// The unclaimed arm also reaps routed demand that has sat unclaimed past the
+// TTL. That is intended — a day-old unclaimed root is stale demand, not a
+// queue — and it is bounded three ways: the sweep is opt-in (see
+// closeAbandonedEnv), it only ever considers formula/wisp roots
+// (isAbandonedRootCandidate), and a deployment can park a perpetual root-only
+// root with the gc.gc_exempt marker (isGCExempt).
+//
+// The attached case is NOT in that arm. An attached root-only wisp
+// (privatizeAttachedRootOnlyWisp, internal/sling/sling.go) is unclaimed by
+// construction and would otherwise land here, so the caller pairs this
+// predicate with steplessRootHasLiveAttachmentSource; the root is reaped
+// normally once its source bead goes terminal.
+func steplessRootIsAbandoned(b beads.Bead) bool {
+	return sling.ShouldPromoteWorkflowLaunchStatus(b.Status)
+}
+
+// steplessRootHasLiveAttachmentSource reports whether any bead still points at
+// this root as its attachment. An attached root-only wisp
+// (privatizeAttachedRootOnlyWisp, internal/sling/sling.go) is deliberately never
+// routed and never claimed — the SOURCE bead is the claimable unit — so it stays
+// unclaimed by construction and would otherwise be closed one TTL after pour
+// regardless of how live the source bead's work still is. The root carries no
+// back-pointer, but the source carries the forward one: molecule_id on the v1
+// attach path (sling_core.go), workflow_id on the graph.v2 path. A non-terminal
+// holder means live attachment state — findBlockingMolecule
+// (internal/sling/sling_attachment.go) uses exactly that liveness to block a
+// conflicting second attach, so closing the root out from under it would let two
+// attachments land on one source bead.
+//
+// Fails CLOSED: any query error reports true so an unreadable store never
+// widens what the sweep destroys.
+func steplessRootHasLiveAttachmentSource(store beads.Store, rootID string) bool {
+	for _, key := range []string{beadmeta.MoleculeIDMetadataKey, "workflow_id"} {
+		holders, err := store.List(beads.ListQuery{
+			Metadata:      map[string]string{key: rootID},
+			IncludeClosed: true,
+			TierMode:      beads.TierBoth,
+		})
+		if err != nil {
+			log.Printf("wisp gc: cannot resolve %s holders for stepless root %s (%v); leaving it open", key, rootID, err)
+			return true
+		}
+		for _, h := range holders {
+			if h.ID == rootID {
+				continue
+			}
+			if !convoycore.IsTerminalStatus(h.Status) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // isGCExempt reports whether a root carries the gc.gc_exempt opt-out marker.
