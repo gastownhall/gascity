@@ -495,6 +495,10 @@ func formatLegacyL2L3MismatchError(l2, l3 string) error {
 // NOT Close it. The previous per-call sql.Open+Close pattern here was the
 // 2,618-TIME_WAIT hotspot (city-scale plan item 1.2).
 func managedDoltOpenDatabase(host, port, user, database string) (*sql.DB, error) {
+	return managedDoltOpenDatabaseWithPassword(host, port, user, database, managedDoltPassword())
+}
+
+func managedDoltOpenDatabaseWithPassword(host, port, user, database, password string) (*sql.DB, error) {
 	host = managedDoltConnectHost(host)
 	port = strings.TrimSpace(port)
 	if port == "" {
@@ -508,7 +512,7 @@ func managedDoltOpenDatabase(host, port, user, database string) (*sql.DB, error)
 	if database == "" {
 		return nil, fmt.Errorf("missing database")
 	}
-	return doltpool.Open(host, port, user, managedDoltPassword(), database)
+	return doltpool.Open(host, port, user, password, database)
 }
 
 func readManagedMetadataProjectID(metadataPath string) (string, error) {

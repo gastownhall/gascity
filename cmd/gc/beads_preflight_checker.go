@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/doltauth"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -60,6 +62,21 @@ func preflightIdentityDeferredReader(cityPath string) func(scope string) bool {
 	}
 }
 
+// preflightProbePassword resolves the credential the identity_match probe
+// dials with. It walks the same scoped ladder the native store open uses
+// (ambient GC_DOLT_PASSWORD, then the auth scope's .beads/.env, then the
+// credentials file for host:port), so a credential-less in-process open of
+// an external rig store no longer emits one rejected authentication at the
+// Dolt server before the native open authenticates (gascity#5965).
+func preflightProbePassword(cityPath, scope string, target contract.DoltConnectionTarget) string {
+	authScopeRoot := doltauth.AuthScopeRoot(cityPath, scope, target)
+	env := map[string]string{
+		"GC_DOLT_HOST": strings.TrimSpace(target.Host),
+		"GC_DOLT_PORT": strings.TrimSpace(target.Port),
+	}
+	return doltauth.ResolveScopedFromEnv(authScopeRoot, target.User, env).Password
+}
+
 func preflightDatabaseProjectIDReader(cityPath string) func(scope string) (string, bool, error) {
 	return func(scope string) (string, bool, error) {
 		target, ok, err := canonicalScopeDoltTarget(cityPath, scope)
@@ -67,7 +84,7 @@ func preflightDatabaseProjectIDReader(cityPath string) func(scope string) (strin
 			return "", false, err
 		}
 		// Pooled handle owned by internal/doltpool; do not Close.
-		db, err := managedDoltOpenDatabase(target.Host, target.Port, target.User, target.Database)
+		db, err := managedDoltOpenDatabaseWithPassword(target.Host, target.Port, target.User, target.Database, preflightProbePassword(cityPath, scope, target))
 		if err != nil {
 			return "", false, err
 		}
