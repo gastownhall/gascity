@@ -221,6 +221,54 @@ func TestAttachResolvesRootFromRunChainNotOwnID(t *testing.T) {
 	assertAllBeadsHaveRootID(t, store, result.IDMapping, root.ID)
 }
 
+// TestAttachSelfRootIgnoresSiblingMoleculeAttachment is the regression for
+// ga-qiplt2. workflow_id/molecule_id metadata on a bead is overloaded: it
+// means "I am a step INSIDE this workflow" for a grafted wisp (the
+// TestAttachResolvesRootFromRunChainNotOwnID case above, where chain-walking
+// to the container's root is correct), but it also means "a molecule is
+// ATTACHED TO me, tracking separate work about me" for a sling
+// finishing-sling target (the attach target is not part of the attached
+// molecule's DAG at all). Callers that know the attach target is its own
+// root — cmd/gc's `gc formula cook --attach` v1 arm, guarded by
+// sling.CheckNoMoleculeChildren for the live-attachment case — must be able
+// to opt out of the chain-walk so a NEW attach onto a bead that already has
+// an unrelated sibling molecule attached roots the new sub-DAG at the target
+// itself, not at the sibling.
+func TestAttachSelfRootIgnoresSiblingMoleculeAttachment(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// A pre-existing, unrelated molecule attached TO the target (sling's
+	// "finishing sling" pattern) -- NOT a container the target lives inside.
+	sibling, err := store.Create(beads.Bead{Title: "sibling molecule wrapper", Type: "molecule"})
+	if err != nil {
+		t.Fatalf("create sibling molecule: %v", err)
+	}
+	target, err := store.Create(beads.Bead{
+		Title: "review target",
+		Type:  "task",
+		Metadata: map[string]string{
+			"molecule_id": sibling.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create attach target: %v", err)
+	}
+
+	recipe := makeWorkflowRecipe("mol-code-review", "run", "eval")
+
+	result, err := Attach(context.Background(), store, recipe, target.ID, AttachOptions{SelfRoot: true})
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+
+	// The new sub-DAG must be rooted at the attach TARGET, never chain-walked
+	// to the unrelated sibling molecule's id.
+	if result.WorkflowRootID != target.ID {
+		t.Errorf("WorkflowRootID = %q, want %q (attach target, not sibling wrapper %q)", result.WorkflowRootID, target.ID, sibling.ID)
+	}
+	assertAllBeadsHaveRootID(t, store, result.IDMapping, target.ID)
+}
+
 // Test 3: Blocking dep prevents premature unblock
 func TestAttachBlockingDepPreventsClose(t *testing.T) {
 	store := beads.NewMemStore()
