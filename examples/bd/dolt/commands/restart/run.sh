@@ -51,7 +51,10 @@ esac
 
 CITY_RUNTIME_DIR="${GC_CITY_RUNTIME_DIR:-$GC_CITY_PATH/.gc/runtime}"
 PACK_STATE_DIR="${GC_PACK_STATE_DIR:-$CITY_RUNTIME_DIR/packs/dolt}"
+DATA_DIR="${GC_DOLT_DATA_DIR:-$GC_CITY_PATH/.beads/dolt}"
 LOG_FILE="${GC_DOLT_LOG_FILE:-$PACK_STATE_DIR/dolt.log}"
+STATE_FILE="${GC_DOLT_STATE_FILE:-$PACK_STATE_DIR/dolt-provider-state.json}"
+PID_FILE="${GC_DOLT_PID_FILE:-$PACK_STATE_DIR/dolt.pid}"
 BD_SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$GC_BEADS_BD_SCRIPT")" && pwd)"
 if [ ! -f "$BD_SCRIPT_DIR/dolt-enospc.sh" ]; then
   # GC_BEADS_BD_SCRIPT may be the stable city shim; the helper ships next
@@ -62,12 +65,13 @@ fi
 . "$BD_SCRIPT_DIR/dolt-enospc.sh"
 
 if recovery_should_skip_due_to_enospc; then
+  guard_reason="${DOLT_ENOSPC_GUARD_REASON:-ENOSPC recovery guard failed closed}"
   if [ "$force_restart" != "true" ]; then
-    echo "gc dolt restart: recent Dolt log shows ENOSPC; refusing restart because it can amplify recovery writes" >&2
-    echo "  free disk space, then run gc dolt restart --force only if a restart is still required" >&2
+    echo "gc dolt restart: refusing restart: $guard_reason" >&2
+    echo "  resolve the reported guard condition, then retry; use --force only as an explicit operator override" >&2
     exit 1
   fi
-  echo "gc dolt restart: --force set; restarting despite recent ENOSPC evidence" >&2
+  echo "gc dolt restart: --force set; restarting despite guard: $guard_reason" >&2
 fi
 
 # Stop. Exit 2 from gc-beads-bd stop means "nothing was running" — a

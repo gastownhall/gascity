@@ -795,7 +795,21 @@ wait_for_bd_runtime_schema() {
 
 # save_state writes the private provider runtime state atomically (no jq dependency).
 save_state() {
-    local pid="$1" running="$2" gc_bin
+    local pid="$1" running="$2" started_at="${3:-}" gc_bin
+    if [ -z "$started_at" ]; then
+        # A refresh of the same live managed process must not move its launch
+        # boundary forward; recovery may need it after the process has died.
+        local prior_pid prior_running prior_started_at
+        prior_pid=$(load_state_field pid)
+        prior_running=$(load_state_field running)
+        prior_started_at=$(load_state_field started_at)
+        if [ "$running" = "true" ] && [ "$prior_running" = "true" ] && \
+            [ "$prior_pid" = "$pid" ] && [ -n "$prior_started_at" ]; then
+            started_at="$prior_started_at"
+        else
+            started_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+        fi
+    fi
     gc_bin=$(resolve_gc_helper_bin)
     if [ -n "$gc_bin" ]; then
         "$gc_bin" dolt-state write-provider \
@@ -803,7 +817,8 @@ save_state() {
             --pid "$pid" \
             --running "$running" \
             --port "$DOLT_PORT" \
-            --data-dir "$DATA_DIR" || die "failed to write provider state via gc helper $gc_bin"
+            --data-dir "$DATA_DIR" \
+            --started-at "$started_at" || die "failed to write provider state via gc helper $gc_bin"
         return 0
     fi
     mkdir -p "$(dirname "$STATE_FILE")"
@@ -811,7 +826,7 @@ save_state() {
     tmp=$(mktemp "$STATE_FILE.tmp.XXXXXX")
     printf '{"running":%s,"pid":%s,"port":%s,"data_dir":"%s","started_at":"%s"}\n' \
         "$running" "$pid" "$DOLT_PORT" "$DATA_DIR" \
-        "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" > "$tmp"
+        "$started_at" > "$tmp"
     mv "$tmp" "$STATE_FILE"
 }
 
@@ -2460,6 +2475,11 @@ op_start() {
             log_offset=$(wc -c < "$LOG_FILE" 2>/dev/null || echo 0)
         fi
 
+        # Capture the boundary before launch so even an immediate ENOSPC crash
+        # is classified as belonging to this attempt after its PID is dead.
+        local launch_started_at
+        launch_started_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
         # Start dolt sql-server with config file. Close the startup lock fd in
         # the child so the flock is released when this starter exits.
         nohup sh -c 'exec 9>&-; exec dolt sql-server --config "$1"' sh "$CONFIG_FILE" >> "$LOG_FILE" 2>&1 &
@@ -2469,7 +2489,7 @@ op_start() {
         echo "$server_pid" > "$PID_FILE"
 
         # Save state.
-        save_state "$server_pid" true
+        save_state "$server_pid" true "$launch_started_at"
 
         # Wait for server: combined PID alive + TCP reachable + query-ready check.
         # 60 iterations × 500ms = 30s max. Large data dirs with many databases
@@ -3139,12 +3159,11 @@ if [ -r "$enospc_helper" ]; then
 else
     # Some focused shell harnesses execute gc-beads-bd's prelude as a single
     # temporary file without sibling assets. Keep the production helper as the
-    # canonical copy, but preserve the same detector behavior for those harnesses.
+    # canonical copy and fail closed when it is unavailable; silently retaining
+    # an older duplicate detector here would let harness and production safety
+    # semantics drift apart.
     recovery_should_skip_due_to_enospc() {
-        [ -n "${LOG_FILE:-}" ] && [ -r "$LOG_FILE" ] || return 1
-        tail -n 1000 "$LOG_FILE" 2>/dev/null \
-            | grep -qE 'no space left on device|copy_file_range:.*no space|ENOSPC' \
-            || return 1
+        DOLT_ENOSPC_GUARD_REASON="dolt ENOSPC guard helper unavailable: $enospc_helper"
         return 0
     }
 fi
@@ -3164,8 +3183,8 @@ op_recover() {
     # Require manual intervention (free disk space) before recovery
     # resumes. See gastownhall/gascity#2158.
     if recovery_should_skip_due_to_enospc; then
-        echo "skipping dolt recovery: recent dolt log shows ENOSPC — manual intervention required" >&2
-        echo "  free disk space, then re-run health checks" >&2
+        echo "skipping dolt recovery: ${DOLT_ENOSPC_GUARD_REASON:-ENOSPC recovery guard failed closed}" >&2
+        echo "  resolve the reported guard condition, then re-run health checks" >&2
         die "dolt recovery skipped: ENOSPC detected"
     fi
 
