@@ -44,8 +44,8 @@ func TestContextInjectAdvisoryBand(t *testing.T) {
 	if !strings.Contains(got, "700k/1000k") || !strings.Contains(got, "~70%") {
 		t.Errorf("advisory line wrong: %q", got)
 	}
-	if !strings.Contains(got, "clean seam") || !strings.Contains(got, "reset") {
-		t.Errorf("advisory must point toward a clean seam + planned reset, got %q", got)
+	if !strings.Contains(got, "clean seam") || !strings.Contains(got, "gc handoff") {
+		t.Errorf("advisory must point toward a clean seam + gc handoff, got %q", got)
 	}
 	if strings.Contains(got, "HIGH") {
 		t.Errorf("advisory band must not be marked HIGH: %q", got)
@@ -57,8 +57,8 @@ func TestContextInjectUrgentBand(t *testing.T) {
 	// 900k of 1M = 90% — urgent band.
 	p := writeTranscript(t, usageLine("claude-opus-4-8[1m]", 50_000, 800_000, 50_000))
 	got := contextInjectLine(hookInputFor(p))
-	if !strings.Contains(got, "HIGH") || !strings.Contains(got, "gc session reset") {
-		t.Errorf("urgent line must direct to handoff + self gc session reset: %q", got)
+	if !strings.Contains(got, "HIGH") || !strings.Contains(got, "gc handoff") {
+		t.Errorf("urgent line must direct to gc handoff: %q", got)
 	}
 	if !strings.Contains(got, "operator") {
 		t.Errorf("urgent line must preserve the operator-stay-up override: %q", got)
