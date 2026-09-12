@@ -323,6 +323,23 @@ const (
 	// quarantine.
 	defaultMaxWakeAttempts = 5
 
+	// defaultStartupBackoffBase and defaultStartupBackoffCap bound the retry
+	// cadence for a session whose cold start keeps failing. The FIRST failure
+	// gets no hold at all — a single transient spawn flake must still retry on
+	// the next tick — and from the second the hold doubles from the base up to
+	// the cap. Without this the reconciler retried a wedged start every ~65s
+	// forever: 2,306 identical cold_start_timeout failures over 42 hours, at
+	// 53-56/hour, with no backoff and no give-up (sr-xf2xj).
+	//
+	// The cap is deliberately a ceiling on the RATE, not a permanent stop.
+	// Both observed incidents ended with a start that simply succeeded on the
+	// unchanged path (attempt 2,307 after 42h; attempt 6 after 5min), so a
+	// hard "never retry again" would have blocked a recovery that did in fact
+	// happen. At the cap a wedged template costs two start attempts an hour
+	// instead of 55, and the escalation alert has already fired.
+	defaultStartupBackoffBase = 30 * time.Second
+	defaultStartupBackoffCap  = 30 * time.Minute
+
 	// rateLimitPeekLines is the amount of pane scrollback inspected before a
 	// rapid dead process is classified as a crash. Known provider rate-limit
 	// screens are short, so 120 lines favors robust detection over shaving a

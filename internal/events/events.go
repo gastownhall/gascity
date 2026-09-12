@@ -341,6 +341,15 @@ const (
 	// the next episode fires independently. (ADR-0013 A1 M3a)
 	ProviderHealthGateAlert = "provider.health_gate_alert"
 
+	// SessionStartupHealthAlert fires once per startup-health episode, when a
+	// session's consecutive cold-start failures cross the quarantine
+	// threshold. session.cold_start_timeout is emitted per attempt and is a
+	// raw datapoint; this is the escalation, carrying the consecutive count,
+	// the failure kind and how long starts are held back. AlertDisposition on
+	// the episode latches it to one alert per episode; a successful start
+	// clears the episode so the next one alerts independently (sr-xf2xj).
+	SessionStartupHealthAlert = "session.startup_health_alert"
+
 	// Emergency events are dolt-independent escalation records written to
 	// .gc/emergency and mirrored into the city event log.
 	EmergencySignaled = "emergency.signaled"
@@ -439,6 +448,11 @@ var KnownEventTypes = []string{
 	StorageBindingConverged, StorageBindingGenesis,
 	StorageBindingUnconverged, StorageBindingUncheckable,
 	StorageBindingNotConfigured,
+	// SessionStartupHealthAlert is intentionally omitted from KnownEventTypes
+	// for the same reason as ProviderHealthGateAlert below: the reconciler
+	// emits it, but its typed SSE payload registration lives in a follow-up.
+	// Subscribers receive it via the custom-event envelope; `gc events --type`
+	// filters on the raw string and is unaffected.
 	// ProviderHealthGateAlert is intentionally omitted from KnownEventTypes.
 	// The event is emitted by the reconciler but its typed SSE payload is not
 	// yet registered in internal/api (the payload registration lives in a

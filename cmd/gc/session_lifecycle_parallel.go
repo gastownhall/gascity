@@ -2452,6 +2452,20 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 				kind = sessionpkg.FailureKindTimeout
 			}
 			episode := sessionpkg.RecordStartupFailure(prior, kind, result.err.Error(), clk.Now(), defaultMaxWakeAttempts, defaultQuarantineDuration)
+			// Stamp the retry backoff (caller-owned policy, see
+			// RecordStartupFailure's contract). Below the quarantine threshold
+			// this is the ONLY thing bounding the retry cadence, and it is
+			// what turns an indefinite ~65s respawn loop into a capped one.
+			episode.BackoffUntil = startupBackoffUntil(episode.ConsecutiveCount, clk.Now())
+			// Escalate exactly once per episode. RecordStartupFailure raises
+			// the disposition to pending on crossing the threshold and never
+			// regresses it from sent, so this fires on the threshold failure
+			// only. The event is recorded BEFORE the disposition is persisted:
+			// if the save below fails, the next failure re-alerts rather than
+			// losing the escalation entirely. At-least-once is the right
+			// failure mode for an alert whose whole purpose is that 42 silent
+			// hours never happen again.
+			episode = emitStartupHealthAlert(rec, stderr, episode, tp.TemplateName)
 			if saveErr := sessFront.SaveStartupHealthEpisode(episode); saveErr != nil {
 				fmt.Fprintf(stderr, "session reconciler: saving startup-health episode for %s: %v\n", name, saveErr) //nolint:errcheck
 			}

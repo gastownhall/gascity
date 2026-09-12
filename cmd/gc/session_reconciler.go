@@ -4001,14 +4001,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if sessionIsQuarantinedInfo(info, clk) {
 				continue // crash-loop protection
 			}
-			if episode, err := sessFront.LoadStartupHealthEpisode(name); err != nil {
+			// LoadStartupHealthEpisode returns the zero episode alongside an
+			// error, so the hold check below is a no-op on the fail-open path.
+			startupEpisode, startupEpisodeErr := sessFront.LoadStartupHealthEpisode(name)
+			if startupEpisodeErr != nil {
 				// Fail open: proceed as if no quarantine episode exists rather
 				// than block every session start on a transient store-read
 				// error. Logged (matching the two LoadStartupHealthEpisode
 				// call sites in session_lifecycle_parallel.go) so the miss is
 				// observable instead of silent.
-				fmt.Fprintf(stderr, "session reconciler: loading startup-health episode for %s: %v\n", name, err) //nolint:errcheck
-			} else if !episode.QuarantinedUntil.IsZero() {
+				fmt.Fprintf(stderr, "session reconciler: loading startup-health episode for %s: %v\n", name, startupEpisodeErr) //nolint:errcheck
+			} else if !startupEpisode.QuarantinedUntil.IsZero() {
 				// Mirror the active episode onto the visible session row
 				// (ga-em8g4o) so a caller can see why a start is being held
 				// back through the typed front door alone, without a separate
@@ -4017,12 +4020,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// whether "now" is still before QuarantinedUntil, so the
 				// mirrored state stays visible through the tick that lets the
 				// quarantine expire.
-				if mirrorErr := mirrorStartupHealthEpisodeMetadata(sessFront, target.info.ID, episode); mirrorErr != nil {
+				if mirrorErr := mirrorStartupHealthEpisodeMetadata(sessFront, target.info.ID, startupEpisode); mirrorErr != nil {
 					fmt.Fprintf(stderr, "session reconciler: mirroring startup-health episode for %s: %v\n", name, mirrorErr) //nolint:errcheck
 				}
-				if clk.Now().Before(episode.QuarantinedUntil) {
-					continue // startup-health crash-loop protection (pending-create failures)
-				}
+			}
+			// StartHoldUntil is the later of the threshold quarantine and the
+			// per-failure retry backoff. The mirror above stays gated on
+			// QuarantinedUntil alone: a sub-threshold backoff is the normal
+			// self-healing cadence and must not surface on the session row (or,
+			// through it, in gc doctor) as a crash-loop quarantine.
+			if hold := startupEpisode.StartHoldUntil(); !hold.IsZero() && clk.Now().Before(hold) {
+				continue // startup-health crash-loop protection (pending-create failures)
 			}
 			if pendingCreateStartInFlightInfo(info, clk, startupTimeout) {
 				if trace != nil {

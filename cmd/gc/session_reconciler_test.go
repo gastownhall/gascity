@@ -3271,6 +3271,17 @@ func (c *capturingRecorder) Record(e events.Event) {
 	c.events = append(c.events, e)
 }
 
+// eventsOfType returns the captured events of one type, in emission order.
+func (c *capturingRecorder) eventsOfType(t string) []events.Event {
+	out := make([]events.Event, 0, len(c.events))
+	for _, e := range c.events {
+		if e.Type == t {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // strandedEvents returns the captured events.SessionStranded events,
 // in emission order. Specialized to the only event type any test in
 // this package currently filters for; add a sibling method (or migrate
