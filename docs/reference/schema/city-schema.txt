@@ -1782,6 +1782,13 @@
         "version": {
           "type": "string",
           "description": "Version is an optional semver constraint for git-backed imports (e.g.,\n\"^1.2\"). Empty for local paths. \"sha:\u003chex\u003e\" pins a specific commit."
+        },
+        "agents_exclude": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "AgentsExclude removes named agent templates from this import edge.\nSelectors are matched against each agent's local name before the import\nbinding is applied; other imported resources remain visible."
         }
       },
       "additionalProperties": false,

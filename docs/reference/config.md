@@ -480,6 +480,7 @@ Import defines a named import of another pack.
 |-------|------|----------|---------|-------------|
 | `source` | string | **yes** |  | Source is the durable authored pack location: a local path, a remote git URL, or a dereferenceable GitHub tree URL for a pack below a repository root, such as "https://github.com/org/repo/tree/main/packs/foo". Registry handles are lookup-only in this release wave; authored [imports.*] entries store the resolved source plus optional version. |
 | `version` | string |  |  | Version is an optional semver constraint for git-backed imports (e.g., "^1.2"). Empty for local paths. "sha:&lt;hex&gt;" pins a specific commit. |
+| `agents_exclude` | []string |  |  | AgentsExclude removes named agent templates from this import edge. Selectors are matched against each agent's local name before the import binding is applied; other imported resources remain visible. |
 
 ## K8sConfig
 
