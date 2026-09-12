@@ -5,13 +5,13 @@
 - Reviewed commit: `dbffcbe02523f13b3a3bdcf7fe31bc0bd7ecedc0`
 - Current base: `origin/main@1be466f69a4c74b7721a36e5978244556396c2d5`
 - Isolated branch: `deploy/ga-29lvns-gate`
-- Gate state: **HOLD — first real Dashboard SPA CI run required**
+- Gate state: **PASS**
 
 | # | Criterion | Result | Evidence |
 |---|---|---|---|
 | 1 | Review PASS present | PASS | `ga-luwbo3` records `verdict: pass` for the exact reviewed commit `dbffcbe02523f13b3a3bdcf7fe31bc0bd7ecedc0`; no review carryover was used. |
 | 2 | Acceptance criteria met | PASS | The Playwright install step writes apt HTTP timeout `15` before its three-attempt loop, bounds each `npm run test:e2e:install:ci` invocation with `timeout 240`, retains the 12-minute outer step timeout, and preserves backoff/final failure. The diff-owned policy test and an induced-stall control-flow simulation pass. |
-| 3 | Tests pass | HOLD | Local full-suite, policy, build, vet, actionlint, and diff-owned evidence pass after attribution. Because this diff changes the Dashboard SPA CI job, criterion 3c requires that job's first real PR execution; no such run exists before a PR is opened. `ci_lane_run: not-yet-run`. |
+| 3 | Tests pass | PASS | Local full-suite, policy, build, vet, actionlint, and diff-owned evidence pass after attribution. The changed Dashboard SPA job's first real PR execution also completed successfully; see the linked run below. |
 | 4 | No unresolved HIGH review findings | PASS | Reviewer reported no blockers, majors, or minors; unresolved HIGH count is 0. |
 | 5 | Final branch clean | PASS | The reviewed tree is clean; `git diff --check` and changed-file formatting/lint pass; `.githooks` is configured as `core.hooksPath`. |
 | 6 | Branch diverges cleanly from main | PASS | After a fresh fetch, `git merge-tree --write-tree origin/main dbffcbe02523f13b3a3bdcf7fe31bc0bd7ecedc0` exited 0 and produced tree `908d61961c0ee8af186dbaefa4092da14ded224b`; no self-rebase was needed. |
@@ -54,6 +54,6 @@ The diff adds one ordinary policy test function, not a new suite target and not 
 
 ### CI-config lane evidence
 
-`ci_lane_run: not-yet-run`
+`ci_lane_run: https://github.com/gastownhall/gascity/actions/runs/34691635307/job/103547835124 — PASS`
 
-The diff modifies `.github/workflows/ci.yml`, specifically the real Dashboard SPA job. Policy/meta-tests can prove the YAML and enforced literals, but cannot prove the changed install command completes on the hosted runner. An isolated draft PR will be opened only to obtain that first real execution. Until the Dashboard SPA job finishes successfully, this gate remains HOLD: no deploy-clearance status, no ready-for-review transition, no bead close, and no merge-request.
+The diff modifies `.github/workflows/ci.yml`, specifically the real Dashboard SPA job. Draft PR #6305 supplied the required first real execution on CI run `34691635307` at head `755e45653747019231ece91d2fd36998b05554b1`. Job `103547835124` ran from `2026-09-12T11:40:21Z` through `2026-09-12T11:41:53Z` and concluded `success`; every step passed, including `Install Playwright Chromium` and `Playwright render smoke (Layer B)`.
