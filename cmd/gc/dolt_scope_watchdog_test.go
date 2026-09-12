@@ -343,7 +343,6 @@ func TestManagedDoltScopeWatchdogServerSurvivesScopePresent(t *testing.T) {
 	}
 }
 
-// TestRunManagedDoltScopeWatchdogUsage pins the argv contract.
 // TestManagedDoltScopeWatchdogDoesNotInheritSessionIdentity spawns the real
 // watchdog the way `gc dolt restart` does from inside an agent shell, with
 // every session-scoped key stamped on the parent environment, and reads the
@@ -436,6 +435,7 @@ func waitForProcEnviron(t *testing.T, pid int) map[string]string {
 	}
 }
 
+// TestRunManagedDoltScopeWatchdogUsage pins the argv contract.
 func TestRunManagedDoltScopeWatchdogUsage(t *testing.T) {
 	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	if err != nil {
