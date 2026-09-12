@@ -3182,8 +3182,7 @@
         },
         "required": [
           "provider_id",
-          "url",
-          "mime_type"
+          "url"
         ],
         "type": "object"
       },
