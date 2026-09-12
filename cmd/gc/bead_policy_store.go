@@ -74,15 +74,34 @@ func wrapStoreWithBeadPolicies(store beads.Store, cfg *config.City) beads.Store 
 	return policyStore
 }
 
+// unwrapBeadPolicyStore looks for a *beadPolicyStore / *beadPolicyGraphStore
+// wrapper, looking through any intervening decorator that declares a
+// beads.ConditionalWritesResolveTargeter (e.g. beads.WithRouteChangeClearing)
+// so the policy layer can still be found -- and correctly reinstated by
+// wrapWithCachingStore -- even when it isn't the outermost wrapper. The
+// bounded walk mirrors beads.followConditionalWritesResolveTarget: a
+// cycle or an unrecognized chain degrades to "not found" (returning the
+// original, untouched store) rather than looping.
 func unwrapBeadPolicyStore(store beads.Store) (beads.Store, *beadPolicyStore, bool) {
-	switch s := store.(type) {
-	case *beadPolicyGraphStore:
-		return s.Store, s.beadPolicyStore, true
-	case *beadPolicyStore:
-		return s.Store, s, true
-	default:
-		return store, nil, false
+	original := store
+	for range 8 {
+		switch s := store.(type) {
+		case *beadPolicyGraphStore:
+			return s.Store, s.beadPolicyStore, true
+		case *beadPolicyStore:
+			return s.Store, s, true
+		}
+		targeter, ok := store.(beads.ConditionalWritesResolveTargeter)
+		if !ok {
+			return original, nil, false
+		}
+		target := targeter.ConditionalWritesResolveTarget()
+		if target == nil || target == store {
+			return original, nil, false
+		}
+		store = target
 	}
+	return original, nil, false
 }
 
 func (s *beadPolicyStore) Create(b beads.Bead) (beads.Bead, error) {
