@@ -39,7 +39,7 @@ var allProjectedMetadataKeys = []string{
 	ResetCommittedAtKey,
 	"generation", "started_config_hash", "pin_awake", "held_until", "wait_hold",
 	"churn_count", "wake_mode", "sleep_intent", "instance_token", "detached_at",
-	CurrentBeadIDKey, "core_hash_breakdown", "started_provision_hash",
+	CurrentBeadIDKey, CurrentWorkflowRootKey, "core_hash_breakdown", "started_provision_hash",
 	"started_launch_hash", "started_live_hash", "live_hash", "startup_dialog_verified",
 	"config_drift_deferred_at",
 	"config_drift_deferred_key", "attached_config_drift_deferred_at",

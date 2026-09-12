@@ -242,6 +242,12 @@ func (s *Store) CurrentClaimBeadID(id string) (string, error) {
 	return strings.TrimSpace(b.Metadata[beadmeta.CurrentClaimBeadIDMetadataKey]), nil
 }
 
+// RecordCurrentBeadWithRoot records the anchor bead and its workflow root in
+// one patch, so a reconciler tick never observes the id without its root.
+func (s *Store) RecordCurrentBeadWithRoot(id, beadID, workflowRoot string) error {
+	return s.ApplyPatch(id, MetadataPatch{CurrentBeadIDKey: beadID, CurrentWorkflowRootKey: workflowRoot})
+}
+
 // CloseWithoutReason closes the session bead identified by id without stamping
 // terminal close metadata. It is the front door for the raw store.Close(id)
 // call in closeBead, which stamps ClosePatch via setMetaBatch separately and

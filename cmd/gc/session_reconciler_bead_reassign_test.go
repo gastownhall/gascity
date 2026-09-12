@@ -253,3 +253,66 @@ func reconcileSessionBeadsWithAssignedWork(env *restartRequestTestEnv, sessions 
 		&env.stderr,
 	)
 }
+
+// TestReconcileSessionBeads_AliveFreshModeNextStepDoesNotCycle pins
+// sys-by2243.118: a wake_mode=fresh session that closes one step of a
+// molecule and moves to the next step of the SAME molecule is advancing, not
+// being reassigned. The reconciler must keep the process alive and re-anchor
+// on the next step, recording the shared workflow root.
+func TestReconcileSessionBeads_AliveFreshModeNextStepDoesNotCycle(t *testing.T) {
+	env := newRestartRequestTestEnv()
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "witness", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
+		NamedSessions: []config.NamedSession{{Template: "witness", Mode: "on_demand"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "witness")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:      "true",
+		SessionName:  sessionName,
+		TemplateName: "witness",
+		ResolvedProvider: &config.ResolvedProvider{
+			SessionIDFlag: "--session-id",
+		},
+	}
+
+	session := env.createSessionBead(sessionName)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:          "true",
+		namedSessionIdentityMetadata:     "witness",
+		namedSessionModeMetadata:         "on_demand",
+		"template":                       "witness",
+		"state":                          "active",
+		"wake_mode":                      "fresh",
+		"session_key":                    "conversation-A",
+		sessionpkg.CurrentBeadIDKey:      "step-1",
+		sessionpkg.CurrentWorkflowRootKey: "root-1",
+	})
+	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	if err := env.sp.SetMeta(sessionName, "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	// step-1 was closed by the session; steps 2 and 3 of the same molecule
+	// stay assigned to it.
+	step2 := beads.Bead{ID: "step-2", Title: "Verify pre-flights", Type: "task", Status: "in_progress", Assignee: "witness", Metadata: map[string]string{"gc.root_bead_id": "root-1", "gc.step_ref": "mol-x.preflight"}}
+	step3 := beads.Bead{ID: "step-3", Title: "Implement", Type: "task", Status: "open", Assignee: "witness", Metadata: map[string]string{"gc.root_bead_id": "root-1", "gc.step_ref": "mol-x.implement"}}
+
+	reconcileSessionBeadsWithAssignedWork(env, []beads.Bead{session}, []beads.Bead{step2, step3})
+
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatal("session was cycled on a step transition within the same workflow")
+	}
+	got, _ := env.store.Get(session.ID)
+	if got.Metadata[sessionpkg.CurrentBeadIDKey] != "step-2" {
+		t.Fatalf("%s = %q, want step-2 (re-anchored on the next step)", sessionpkg.CurrentBeadIDKey, got.Metadata[sessionpkg.CurrentBeadIDKey])
+	}
+	if got.Metadata[sessionpkg.CurrentWorkflowRootKey] != "root-1" {
+		t.Fatalf("%s = %q, want root-1", sessionpkg.CurrentWorkflowRootKey, got.Metadata[sessionpkg.CurrentWorkflowRootKey])
+	}
+	if got.Metadata["session_key"] != "conversation-A" {
+		t.Fatalf("session_key = %q, want conversation-A preserved", got.Metadata["session_key"])
+	}
+}
