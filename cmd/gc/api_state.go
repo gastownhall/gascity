@@ -148,9 +148,11 @@ var beadEventWatcherRetryDelay = time.Second
 
 // newControllerStateOpenCityStore opens the city-level bead store for
 // newControllerState. Test code can swap this to return an in-memory store
-// and skip spawning managed dolt (~12s per call).
+// and skip spawning managed dolt (~12s per call). The store is long-lived —
+// the controller holds it for the process lifetime — so it keeps the beads
+// library's daemon-sized project pool rather than the one-shot CLI cap.
 var newControllerStateOpenCityStore = func(cityPath string, mode gate.Mode) (beads.StoreOpenResult, error) {
-	return openStoreResultAtForCityWithMode(cityPath, cityPath, mode, true)
+	return openStoreResultAtForCityWithMode(cityPath, cityPath, mode, true, true)
 }
 
 // controllerStateOpenRigStoreAtForCity routes controller rig stores through
@@ -2041,24 +2043,10 @@ func relWithinCity(base, target string) error {
 // realPathForContainment canonicalizes the nearest EXISTING ancestor of target
 // (a git_url clone destination is absent until the clone runs) so a symlinked
 // ancestor cannot smuggle the path outside the city, then re-appends the
-// not-yet-created tail. It returns target unchanged if nothing along the path
-// resolves.
+// not-yet-created tail. It delegates the walk itself to the shared
+// pathutil.ResolveNearestExistingAncestor helper.
 func realPathForContainment(target string) (string, error) {
-	cur := filepath.Clean(target)
-	tail := ""
-	for {
-		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
-			return filepath.Join(resolved, tail), nil
-		} else if !os.IsNotExist(err) {
-			return "", err
-		}
-		parent := filepath.Dir(cur)
-		if parent == cur {
-			return filepath.Clean(target), nil // reached the root; nothing resolvable
-		}
-		tail = filepath.Join(filepath.Base(cur), tail)
-		cur = parent
-	}
+	return pathutil.ResolveNearestExistingAncestor(target)
 }
 
 // CreateRig provisions a rig through internal/rig.Provision (Decision 7) and

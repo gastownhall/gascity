@@ -2076,24 +2076,53 @@ func (s *countingClassStore) IDPrefix() string {
 // not named for the counting alone.
 func installCountedClassBinding(t *testing.T, cityPath string, relicFree bool) *countingClassStore {
 	t.Helper()
+	return installCountedClassBindingWrapped(t, cityPath, relicFree, func(c *countingClassStore) beads.Store { return c })
+}
+
+// installCountedClassBindingWrapped is the same installation with one more
+// wrapper around the counter before it goes into the routes.
+//
+// The counter embeds the beads.Store INTERFACE, so it declares no capability its
+// leaf has beyond Get and IDPrefix. That is right for the by-id door, which asks
+// for none — and wrong for the claim route, which is refused at construction by
+// a binding with no two-argument CAS (newHookClaimClassRoute). A route test
+// therefore needs a counter that forwards Claim, and forwarding it from the
+// counter itself would be worse than a second wrapper: every counted binding
+// would then ADVERTISE a capability its leaf may not have, which is the exact
+// thing the CAS gate exists to catch.
+//
+// wrap must return a store that still reaches the counter for Get — the count is
+// the only observable retirement has — and must forward IDPrefix for the same
+// reason the counter does, or the binding's mint bit reads false and the probe
+// stays for a reason that has nothing to do with the tier under test. It is
+// called exactly once; the store it returns is the binding's identity, so the
+// census verdict and the derivation check below are both keyed to that value and
+// not to the counter underneath it.
+func installCountedClassBindingWrapped(t *testing.T, cityPath string, relicFree bool, wrap func(*countingClassStore) beads.Store) *countingClassStore {
+	t.Helper()
 	routes := cliStorageRoutes(cityPath)
 	if routes == nil {
 		t.Fatal("the city resolved no routes to count")
 	}
 	var counter *countingClassStore
+	var installed beads.Store
 	restore := make(map[coordclass.Class]beads.Store, len(routes.stores))
 	for class, previous := range routes.stores {
 		restore[class] = previous
 		if counter == nil {
 			counter = &countingClassStore{Store: previous}
+			installed = wrap(counter)
 		}
-		routes.stores[class] = counter
+		routes.stores[class] = installed
 	}
 	if counter == nil {
 		t.Fatal("the city relocated no class store to count")
 	}
+	if installed == nil {
+		t.Fatal("wrap returned no store to install; the binding would read as absent rather than counted")
+	}
 	previousRelics := routes.relics
-	routes.relics = map[beads.Store]bool{counter: !relicFree}
+	routes.relics = map[beads.Store]bool{installed: !relicFree}
 	dropDerivedResidencyMemo(t, cityPath)
 	t.Cleanup(func() {
 		routes.relics = previousRelics
@@ -2117,7 +2146,7 @@ func installCountedClassBinding(t *testing.T, cityPath string, relicFree bool) *
 	if len(bindings) != 1 {
 		t.Fatalf("the counted city derives %d bindings, want the one this fixture serves; a count taken from one of several says nothing about the others", len(bindings))
 	}
-	if bindings[0].Leg.Store != beads.Store(counter) {
+	if bindings[0].Leg.Store != installed {
 		t.Fatalf("the door's binding resolves to %T, not the installed counter; the reads this row measures are happening somewhere it cannot see", bindings[0].Leg.Store)
 	}
 	if bindings[0].HasLegacyResidents == relicFree {

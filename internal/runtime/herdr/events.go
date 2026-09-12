@@ -316,8 +316,25 @@ func (s *sessionEventStream) handleFrame(line []byte) (relistHint bool) {
 		ev.Kind = runtime.SessionEventAgentDetected
 		relistHint = true
 	case "pane.agent_status_changed":
-		ev.Kind = runtime.SessionEventAgentStatus
-		ev.AgentStatus = f.Data.AgentStatus
+		// Translate at the boundary: herdr's idle state is the one with a
+		// generic meaning, so it maps to the semantic kind, and every other
+		// state maps to the vocabulary-free change kind. agentStateIdle is
+		// herdr's own spelling and stays in this package; nothing downstream
+		// learns it.
+		//
+		// The frame is never swallowed. Its arrival carries two things besides
+		// a status: emit below flushes a resync this stream already owes the
+		// consumer, and the package's own activity tracker polls on any event
+		// without reading its kind. Dropping non-idle frames would cost both,
+		// turning 300ms event-driven reconciliation into a 30s ticker.
+		//
+		// normalizeAgentState is shared with the tracker so the two cannot
+		// classify the same payload differently.
+		if normalizeAgentState(f.Data.AgentStatus) == agentStateIdle {
+			ev.Kind = runtime.SessionEventAgentIdle
+		} else {
+			ev.Kind = runtime.SessionEventAgentStateChanged
+		}
 	case "pane_created":
 		// Filter-maintenance hint only (the payload nests the pane object and
 		// carries no agent mapping yet); consumers see the session once its

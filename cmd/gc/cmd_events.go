@@ -654,15 +654,72 @@ func readLocalCityEvents(scope eventsAPIScope, apiErr error, typeFilter, sinceFl
 	} else if !cutoff.IsZero() {
 		filter.Since = cutoff
 	}
-	all, err := events.ReadFiltered(filepath.Join(scope.cityPath, ".gc", "events.jsonl"), filter)
+
+	path := filepath.Join(scope.cityPath, ".gc", "events.jsonl")
+
+	// Mirror fetchCityEvents' bound. A --since read is a time window and is
+	// returned whole; an unfiltered read means "recent activity" and is capped
+	// at the newest page. Without the cap this scanned the entire history and
+	// returned it oldest-first, which on a long-lived city both contradicted
+	// the answer a running city gives and paid a full-file scan to do it.
+	//
+	// The tail read covers the active log only, so a city that rotated moments
+	// ago can hold fewer than a page there and report fewer events than a
+	// running city would (ga-gm2o). The "older events were omitted" notice
+	// below fires whenever matching events older than the returned window
+	// exist — whether the page cap cut them off or they live in a rotated
+	// archive the tail read cannot see — and the window never invents events
+	// that are not in it.
+	if filter.Since.IsZero() {
+		all, err := events.ReadFilteredTail(path, filter, int(cityEventsPageLimit))
+		if err != nil {
+			return nil, true, fmt.Errorf("reading local city events: %w", err)
+		}
+		if localCityEventsHaveOlderMatches(path, filter, all) {
+			fmt.Fprintf(warningWriter, "gc events: showing the newest %d events; older matching events were omitted. Use --since <duration> to fetch a full time window.\n", len(all)) //nolint:errcheck
+		}
+		return localWireEvents(all, warningWriter), true, nil
+	}
+
+	all, err := events.ReadFiltered(path, filter)
 	if err != nil {
 		return nil, true, fmt.Errorf("reading local city events: %w", err)
 	}
+	return localWireEvents(all, warningWriter), true, nil
+}
+
+// localCityEventsHaveOlderMatches reports whether matching events older than
+// the returned window exist. ReadFilteredTail covers the ACTIVE log only and
+// stops at the page cap, so older matches sit either below the cap or in a
+// rotated archive the tail read cannot see. A Limit-1 probe below the window's
+// oldest seq is archive-aware and answers both cases, and it stays quiet on a
+// log holding exactly one page with nothing older — which the previous
+// len(all) >= cityEventsPageLimit test reported as truncation. An empty window
+// probes without a seq bound, so a rotated city whose --type matches live only
+// in an archive still gets the notice instead of a silent empty result.
+// Best-effort: if the probe itself fails, fall back to the page-cap test rather
+// than failing a read the user asked for.
+func localCityEventsHaveOlderMatches(path string, filter events.Filter, window []events.Event) bool {
+	probe := filter
+	probe.Limit = 1
+	if len(window) > 0 {
+		probe.BeforeSeq = window[0].Seq
+	}
+	older, err := events.ReadFiltered(path, probe)
+	if err != nil {
+		return int64(len(window)) >= cityEventsPageLimit
+	}
+	return len(older) > 0
+}
+
+// localWireEvents converts a read slice into the CLI wire shape, preserving
+// the chronological order both read paths return.
+func localWireEvents(all []events.Event, warningWriter io.Writer) []cliWireEvent {
 	items := make([]cliWireEvent, 0, len(all))
 	for _, item := range all {
 		items = append(items, localWireEvent(item, warningWriter))
 	}
-	return items, true, nil
+	return items
 }
 
 func readLocalCityHeadIndex(scope eventsAPIScope, apiErr error) (string, bool, error) {

@@ -61,6 +61,72 @@ func TestNormalizePathForCompareResolvesSymlinkAncestorForMissingLeaf(t *testing
 	}
 }
 
+func TestResolveNearestExistingAncestorExistingPath(t *testing.T) {
+	dir := t.TempDir()
+	want, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ResolveNearestExistingAncestor(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != want {
+		t.Fatalf("ResolveNearestExistingAncestor(%q) = %q, want %q", dir, got, want)
+	}
+}
+
+func TestResolveNearestExistingAncestorMissingLeaf(t *testing.T) {
+	root := t.TempDir()
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(root, "missing", "leaf")
+	got, err := ResolveNearestExistingAncestor(target)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := filepath.Join(resolvedRoot, "missing", "leaf")
+	if got != want {
+		t.Fatalf("ResolveNearestExistingAncestor(%q) = %q, want %q", target, got, want)
+	}
+}
+
+func TestResolveNearestExistingAncestorSymlinkedAncestor(t *testing.T) {
+	root := t.TempDir()
+	realParent := filepath.Join(root, "real-parent")
+	if err := os.MkdirAll(realParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkParent := filepath.Join(root, "link-parent")
+	if err := os.Symlink(realParent, linkParent); err != nil {
+		t.Skip("symlinks not supported")
+	}
+
+	target := filepath.Join(linkParent, "missing", "gc-home")
+	got, err := ResolveNearestExistingAncestor(target)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := filepath.Join(realParent, "missing", "gc-home")
+	if got != want {
+		t.Fatalf("ResolveNearestExistingAncestor(%q) = %q, want %q", target, got, want)
+	}
+}
+
+func TestResolveNearestExistingAncestorErrorsOnSymlinkLoop(t *testing.T) {
+	root := t.TempDir()
+	loop := filepath.Join(root, "loop")
+	if err := os.Symlink(loop, loop); err != nil {
+		t.Skip("symlinks not supported")
+	}
+
+	if _, err := ResolveNearestExistingAncestor(filepath.Join(loop, "child")); err == nil {
+		t.Fatal("expected an error resolving a symlink loop, got nil")
+	}
+}
+
 func TestNormalizePathForCompareCollapsesDarwinPrivateVarAlias(t *testing.T) {
 	got := NormalizePathForCompare("/private/var/folders/example/gc-home")
 	want := filepath.Clean("/private/var/folders/example/gc-home")

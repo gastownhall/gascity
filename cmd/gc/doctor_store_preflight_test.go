@@ -18,6 +18,7 @@ import (
 var doctorCityStoreDependentNames = []string{
 	"beads-store",
 	"v2-routed-to-namespace",
+	"executor-identity-residue",
 	"census-owner-liveness",
 	"run-target-routed-to-backfill",
 	"route-recovery-quarantine",
@@ -108,9 +109,9 @@ func TestBuildDoctorChecks_SkipsStoreChecksWhenStoreUnreachable(t *testing.T) {
 	if !strings.Contains(res.Message, "doltlite") {
 		t.Fatalf("preflight message = %q, want doltlite residual note", res.Message)
 	}
-	// Fourteen city checks plus three per active rig, two rigs active.
-	if !strings.Contains(res.Message, "skipped 20 store checks") {
-		t.Fatalf("preflight message = %q, want skip count 20", res.Message)
+	// Fifteen city checks plus three per active rig, two rigs active.
+	if !strings.Contains(res.Message, "skipped 21 store checks") {
+		t.Fatalf("preflight message = %q, want skip count 21", res.Message)
 	}
 	if !strings.Contains(res.Message, "2 rigs") {
 		t.Fatalf("preflight message = %q, want rig count 2", res.Message)

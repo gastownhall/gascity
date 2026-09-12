@@ -396,7 +396,8 @@ func TestFindZCodeSessionFileByScopeSeparatesSeatsSharingASessionName(t *testing
 
 // Mirrors written before the scope carried the seat — or by an adapter that
 // was not handed a session bead id — live under the name-only scope and must
-// stay readable, but only when the seat scope itself has nothing.
+// stay readable, but only when the seat scope itself has nothing for this
+// work dir.
 func TestFindZCodeSessionFileByScopeFallsBackToTheNameOnlyScope(t *testing.T) {
 	root := t.TempDir()
 	workDir := filepath.Join(t.TempDir(), "project")

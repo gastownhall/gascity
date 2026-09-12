@@ -146,8 +146,8 @@ func TestRedactedArgvDoesNotMutateItsInput(t *testing.T) {
 // on this provider's own named-session path. Substituting a value that short
 // into free text is blind to word boundaries, so it would rewrite the label, the
 // cwd, an argv-safe GC_RUNTIME_EPOCH=1, and — the part that breaks behavior —
-// herdr's "agent not found", which isAgentNotFound and runtime.IsSessionGone
-// both decide by matching.
+// herdr's "agent not found", which runtime.IsSessionGone
+// decides by matching.
 //
 // So the short value is still withheld structurally, where the grammar knows
 // exactly which bytes it is, and simply not hunted for anywhere else.
@@ -249,41 +249,48 @@ func TestPaneRunLeavesPastedTextAlone(t *testing.T) {
 	}
 }
 
-// TestPromptRedactionDoesNotBreakNotFoundMatching is why that matters.
-// deliverNudge and deliverStartupTurn degrade to the paste+Enter path when
-// herdr reports the agent is not registered, and isAgentNotFound decides that by
-// matching the message text; runtime.IsSessionGone matches "not found" the same
-// way to tell a benign missing session from a real failure. Redacting "no" out
-// of a nudge would take the "no" in "not found" with it and flip both verdicts —
-// a redactor breaking control-flow branches it has no business touching.
+// TestPromptRedactionDoesNotBreakNotFoundMatching is why that matters. Two
+// consumers read this text and both decide control flow from it:
+// runtime.IsSessionGone tells a vanished session from a real failure by matching
+// "not found" in whatever the provider returned, and this client recovers herdr's
+// refusing error code by finding the error envelope in the same text. Redacting "no" out of
+// a nudge would take the "no" in "not found" with it, and redacting a fragment of
+// the envelope would cost the code, so a redactor would be silently taking over
+// branches it has no business touching.
 //
-// Both delivery verbs are covered: the prompt operand of `agent prompt` and the
-// pasted operand of `pane run`.
+// The short value is DECLARED here, which is the only way it reaches the redactor:
+// the values the argv grammar finds on its own are --env assignments and launch
+// arguments, and prose in a nudge is never one. Declaring it is what puts the
+// length floor under test rather than the absence of any substitution at all.
+// Lower substitutionFloor and both subtests go red.
 func TestPromptRedactionDoesNotBreakNotFoundMatching(t *testing.T) {
 	const text = "Rerun the drain with mode=no so nothing merges."
-	script := "#!/bin/sh\necho 'agent not found: %12' >&2\nexit 1\n"
 
-	for _, tc := range []struct {
-		name string
-		call func(c *client) error
-	}{
-		{"agent prompt", func(c *client) error {
-			return c.agentPrompt(context.Background(), "%12", text)
-		}},
-		{"pane run paste", func(c *client) error {
-			return c.paneRun(context.Background(), "%12", text)
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			err := tc.call(&client{session: "gc-test", bin: writeFakeHerdr(t, script)})
-			if err == nil {
-				t.Fatal("call against a failing herdr returned no error")
-			}
-			if !isAgentNotFound(err) {
-				t.Errorf("redaction mangled the message isAgentNotFound reads, so the fallback is dead: %v", err)
-			}
-		})
-	}
+	t.Run("a declared short value does not eat the session-gone phrase", func(t *testing.T) {
+		script := "#!/bin/sh\necho 'agent not found: %12' >&2\nexit 1\n"
+		c := &client{session: "gc-test", bin: writeFakeHerdr(t, script)}
+		_, err := c.runWithSecrets(context.Background(), []string{"no"}, "agent", "prompt", "%12", text)
+		if err == nil {
+			t.Fatal("call against a failing herdr returned no error")
+		}
+		if !strings.Contains(err.Error(), "not found") {
+			t.Errorf("redacting a declared %q mangled the phrase runtime.IsSessionGone reads: %v", "no", err)
+		}
+	})
+
+	t.Run("a declared short value does not cost the refusing code", func(t *testing.T) {
+		script := "#!/bin/sh\ncat <<'JSON' >&2\n" +
+			`{"error":{"code":"agent_pane_busy","message":"pane %12 has a foreground process"}}` +
+			"\nJSON\nexit 1\n"
+		c := &client{session: "gc-test", bin: writeFakeHerdr(t, script)}
+		_, err := c.runWithSecrets(context.Background(), []string{"an"}, "agent", "prompt", "%12", text)
+		if err == nil {
+			t.Fatal("call against a failing herdr returned no error")
+		}
+		if got := disqualifyingCode(err); got != "agent_pane_busy" {
+			t.Errorf("redacting a declared %q cost the refusing code: %q from %v", "an", got, err)
+		}
+	})
 }
 
 // TestClientRunErrorsOmitCredentials is the end-to-end assertion behind the unit

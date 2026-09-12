@@ -172,7 +172,8 @@ func zcodeScopeEpoch(continuationEpoch string) string {
 // Mirrors written before the scope carried the seat, or by an adapter that was
 // not handed a session bead id, live under the name-only scope
 // (ZCodeMirrorScope). That scope is consulted only when the seat scope holds
-// nothing: once the seat has written anything, a name-only mirror is a sibling
+// nothing for this work dir — including when no seat id was supplied: once the
+// seat has written anything for this work dir, a name-only mirror is a sibling
 // seat's or stale.
 //
 // That fallback is transient for a fresh seat: until its first turn is

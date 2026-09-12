@@ -19,6 +19,7 @@ package storeref
 
 import (
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -202,6 +203,87 @@ func (t Topology) ClaimRefs() []StoreRef {
 		refs = append(refs, b.Leg.Ref)
 	}
 	return refs
+}
+
+// PrefixFault is one rig leg the by-id plan cannot gate honestly: its
+// CONFIGURED prefix — the only prefix shadowLegsCovering reads — is not the
+// prefix the leg's STORE declares it mints.
+//
+// Both are claims about the same namespace, one made by the city's config and
+// one by the store itself, and while they agree the gate is exact: a rig leg
+// that covers no part of an id's namespace holds nothing to say about that id,
+// so skipping it costs nothing and a miss over the remaining legs is PROVED
+// absence. That is what lets a wait on a genuinely deleted dependency fail on a
+// multi-rig city at all, and it is why a gated-out leg is not, by itself,
+// anything to report.
+//
+// When the two disagree the gate stops being exact in one direction: the plan
+// declines to read a store that may be holding the very id it was asked for.
+// The plan is not the thing that is wrong — it can only gate on what it was
+// told — the FRAME is, and a consumer that reads a miss over this frame as
+// proof of deletion is acting on a fault.
+//
+// Only a RIG leg can carry one. The work leg is in every by-id plan
+// unconditionally (RoleWorkFallback), so no prefix can gate it out, and a
+// binding is selected by the RESERVED namespaces its classes hold rather than
+// by a configured prefix.
+type PrefixFault struct {
+	// Ref names the leg, so a diagnostic can say which rig to reconcile.
+	Ref StoreRef
+
+	// Configured is the prefix the topology was built with — the one the plan
+	// gates on.
+	Configured string
+
+	// Declared is the prefix the leg's store says it mints.
+	Declared string
+}
+
+// String renders the fault as the sentence a consumer reports it with: which
+// leg, both prefixes, and what the disagreement costs.
+func (f PrefixFault) String() string {
+	return fmt.Sprintf(
+		"%s is configured with id prefix %q but its store declares %q, so the by-id plan gates it out of frame",
+		legName(f.Ref), f.Configured, f.Declared,
+	)
+}
+
+// PrefixFaults reports the rig legs whose configured and declared prefixes
+// disagree, in the plan's own rig order.
+//
+// Two shapes are deliberately NOT faults, and both exclusions are what keeps
+// this bounded to the disagreement rather than to gating itself.
+//
+// A store that declares NOTHING has made no claim to contradict. Reporting it
+// would fault the frame of every city whose rig work store is a bd/Dolt binding
+// with no configured mint prefix, and a consumer treating that as "absence
+// unprovable" could then prove absence nowhere — the failure the
+// configured-prefix gate exists to avoid, reintroduced from the other side.
+//
+// A rig leg resolving to the WORK store is not gated out at all: dedupeLegs
+// collapses it onto the work leg, which every by-id plan reads unconditionally.
+// The identity rule is the plan's own (storeSet), so the two cannot drift apart
+// about which legs a plan actually reaches.
+func (t Topology) PrefixFaults() []PrefixFault {
+	var reached storeSet
+	reached.addIfNew(t.Work.Store)
+	var faults []PrefixFault
+	for _, leg := range t.orderedRigs() {
+		declaring, ok := leg.Store.(HasIDPrefix)
+		if !ok {
+			continue
+		}
+		declared := strings.TrimSpace(declaring.IDPrefix())
+		configured := strings.TrimSpace(leg.Prefix)
+		if declared == "" || declared == configured {
+			continue
+		}
+		if !reached.addIfNew(leg.Store) {
+			continue
+		}
+		faults = append(faults, PrefixFault{Ref: leg.Ref, Configured: configured, Declared: declared})
+	}
+	return faults
 }
 
 // BindingFor returns the binding serving class c, if any.

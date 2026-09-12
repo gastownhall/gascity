@@ -5060,7 +5060,7 @@ func TestSyncDoesNotMintDuplicateForSameCycleSingletonCreate(t *testing.T) {
 	var syncStderr bytes.Buffer
 	syncSessionBeadsWithSnapshotAndRigStores(
 		cityPath, beads.SessionStore{Store: store}, nil, dsResult.State,
-		runtime.NewFake(), allConfiguredDS(dsResult.State), cfg, clk, &syncStderr, false, sessionBeads,
+		runtime.NewFake(), allConfiguredDS(dsResult.State), cfg, clk, &syncStderr, false, sessionBeads, nil,
 	)
 
 	// No duplicate was minted: exactly one open bead carries the created session_name.
@@ -5167,6 +5167,7 @@ func TestProductionOrderDeferredSingletonAliasReclaimsOnSecondTick(t *testing.T)
 		clk,
 		&firstSyncStderr,
 		true,
+		nil,
 		nil,
 	)
 	stillDeferred, err := store.Get(stale.ID)
@@ -5284,6 +5285,77 @@ func TestDiscoverSessionBeadsSkipsStaleMaxOneWhenDependencyFloorDesired(t *testi
 
 	if _, ok := desired[stale.Metadata["session_name"]]; ok {
 		t.Fatalf("desired state includes stale duplicate dependency-floor sibling; keys=%v", mapKeys(desired))
+	}
+}
+
+// TestDiscoverSessionBeadsBackfillsConfiguredNamedIdentityOutsideDesiredState
+// probes ga-pmafyc step 2: when the primary cfg-driven namedSpecs loop does not
+// run for a tick (e.g. because the city is suspended and buildDesiredState
+// short-circuits to an empty result before reaching that loop),
+// discoverSessionBeadsWithRoots rediscovers an already-open named session bead
+// directly from the live store. It must backfill tp.ConfiguredNamedIdentity /
+// tp.ConfiguredNamedMode / tp.Env["GC_SESSION_ORIGIN"] from the bead's own
+// already-persisted identity, mirroring what the namedSpecs loop
+// (build_desired_state.go ~1130-1139) sets on a normal tick. Without this
+// backfill, session_beads.go's isConfiguredNamed check (keyed on
+// tp.ConfiguredNamedIdentity) sees a false negative and clears the bead's
+// configured_named_* metadata, and templateParamsSessionOrigin falls through
+// to "ephemeral" instead of "named".
+func TestDiscoverSessionBeadsBackfillsConfiguredNamedIdentityOutsideDesiredState(t *testing.T) {
+	store := beads.NewMemStore()
+	named, err := store.Create(beads.Bead{
+		Title:  "gascity/worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:gascity/worker", "template:gascity/worker"},
+		Metadata: map[string]string{
+			"template":                   "gascity/worker",
+			"agent_name":                 "gascity/worker",
+			"session_name":               "s-worker-named",
+			"state":                      "awake",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "worker",
+			namedSessionModeMetadata:     "always",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := &sessionBeadSnapshot{}
+	snapshot.addInfo(sessiontest.SeedBead(t, named))
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "gascity",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+	bp := &agentBuildParams{
+		cityPath:     t.TempDir(),
+		city:         cfg,
+		beadStore:    store,
+		sessionBeads: snapshot,
+		agents:       cfg.Agents,
+	}
+	// Empty desired simulates the primary cfg-driven namedSpecs loop not
+	// running this tick.
+	desired := map[string]TemplateParams{}
+
+	discoverSessionBeadsWithRoots(bp, cfg, desired, nil, nil, nil, io.Discard)
+
+	tp, ok := desired["s-worker-named"]
+	if !ok {
+		t.Fatalf("desired state missing rediscovered named session; keys=%v", mapKeys(desired))
+	}
+	if tp.ConfiguredNamedIdentity != "worker" {
+		t.Errorf("ConfiguredNamedIdentity = %q, want %q (rediscovery must backfill from the bead's own persisted identity)", tp.ConfiguredNamedIdentity, "worker")
+	}
+	if tp.ConfiguredNamedMode != "always" {
+		t.Errorf("ConfiguredNamedMode = %q, want %q", tp.ConfiguredNamedMode, "always")
+	}
+	if got := tp.Env["GC_SESSION_ORIGIN"]; got != "named" {
+		t.Errorf(`Env["GC_SESSION_ORIGIN"] = %q, want "named" (else templateParamsSessionOrigin falls through to "ephemeral")`, got)
 	}
 }
 
