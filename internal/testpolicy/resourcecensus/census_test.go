@@ -2071,12 +2071,12 @@ func TestBootstrapPolicyOwnsTmuxDebtAndExactMediumSetup(t *testing.T) {
 	t.Parallel()
 
 	debt := findRow(t, bootstrapPolicy.Debt, ScopeUntagged, ResourceTmux)
-	if debt.BaselineCalls != 7 || debt.BaselineFiles != 3 {
-		t.Fatalf("tmux source baseline = %d/%d, want 7/3", debt.BaselineCalls, debt.BaselineFiles)
+	if debt.BaselineCalls != 10 || debt.BaselineFiles != 4 {
+		t.Fatalf("tmux source baseline = %d/%d, want 10/4", debt.BaselineCalls, debt.BaselineFiles)
 	}
 	smallDebt := findRow(t, bootstrapPolicy.SmallDebt, ScopeUntagged, ResourceTmux)
-	if smallDebt.BaselineCalls != 1 || smallDebt.BaselineFiles != 1 {
-		t.Fatalf("tmux Small baseline = %d/%d, want 1/1", smallDebt.BaselineCalls, smallDebt.BaselineFiles)
+	if smallDebt.BaselineCalls != 4 || smallDebt.BaselineFiles != 2 {
+		t.Fatalf("tmux Small baseline = %d/%d, want 4/2", smallDebt.BaselineCalls, smallDebt.BaselineFiles)
 	}
 	for _, row := range []*Baseline{debt, smallDebt} {
 		if row.OwnerBead != "ga-cp3hwi" || row.MigrationTarget != "P0.4c-tmux" {

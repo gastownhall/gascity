@@ -145,6 +145,12 @@ func runControlDispatcher(beadID string, stdout, stderr io.Writer) error {
 	return runControlDispatcherWithStore(cityPath, storePath, store, beadID, stdout, stderr)
 }
 
+// openControlStoreForDispatch is the test seam for the scope-store open in
+// runControlDispatcherInStore, following the package's var-seam idiom (cf.
+// controlDispatcherServe, dispatch_runtime.go). Production always uses
+// openControlStoreAtForCity.
+var openControlStoreForDispatch = openControlStoreAtForCity
+
 func runControlDispatcherInStore(cityPath, storePath, beadID string, stdout, stderr io.Writer) error {
 	if cityPath == "" {
 		var err error
@@ -162,10 +168,28 @@ func runControlDispatcherInStore(cityPath, storePath, beadID string, stdout, std
 		return err
 	}
 	resolveRigPaths(cityPath, cfg.Rigs)
-	store, err := openControlStoreAtForCity(storePath, cityPath, cfg)
+	store, err := openControlStoreForDispatch(storePath, cityPath, cfg)
 	if err != nil {
 		return fmt.Errorf("opening scoped control store %q: %w", storePath, err)
 	}
+	// The whole dispatch below is synchronous — ProcessControl consumes its
+	// store-bearing options (RecycleSession, MemberStores) before it returns, the
+	// caller's own EmitCurrent step runs inline after it, and nothing retains
+	// store past this call — so releasing the scope handle we just opened at
+	// return is safe and stops leaking one bd/Dolt store (and its connections)
+	// per control bead processed by the serve loop. When the graph class
+	// relocated, the graph store is a different, process-shared value that
+	// controlBeadLedger resolves separately; we close only store, the work leg we
+	// opened here. Sibling handles this pipeline opens elsewhere —
+	// findBeadScopeAcrossStores' scan stores, makeSourceWorkflowStoresLister's
+	// per-scope opens, and the makeStoreRefResolver handles walkSourceBeadChain
+	// memoizes — stay unclosed: a deliberate scope boundary for this targeted WAL
+	// fix, tracked in ga-6fur2, not an oversight.
+	defer func() {
+		if cerr := closeBeadStoreHandle(store); cerr != nil {
+			fmt.Fprintf(stderr, "warning: control dispatch: closing scope store %q: %v\n", storePath, cerr) //nolint:errcheck // dispatch outcome is preserved
+		}
+	}()
 
 	return runControlDispatcherWithStoreAndConfig(cityPath, storePath, store, beadID, cfg, stdout, stderr)
 }

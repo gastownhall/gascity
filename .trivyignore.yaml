@@ -1,17 +1,21 @@
 vulnerabilities:
   # Expiry horizon moved 2026-08-17: 2026-08-07 -> 2026-11-07, on a set trimmed
-  # from 45 entries to 12.
+  # from 45 entries to 12. Six reviewed entries at the end of this file are
+  # carried over from main's time-boxed bridge on its own 2026-09-21 horizon.
   #
   # Every binary this image rebuilds from source now carries patched modules,
-  # so none of them is waived here. contrib/k8s/Dockerfile.base forces
-  # golang.org/x/crypto, golang.org/x/net, golang.org/x/text and
-  # github.com/apache/thrift forward in the gh and Dolt builds the same way it
-  # already forced google.golang.org/grpc, and each build asserts the versions
-  # it embedded. contrib/k8s/Dockerfile.agent rebuilds bd from a source ref
-  # whose go.mod already pins all four. The rule the previous horizon
-  # established still holds and now covers every rebuilt path: if a rebuilt
-  # bd/dolt/gh re-triggers one of these the scan must fail, so the regression
-  # stays visible instead of being waived.
+  # so none of them is waived for a finding the rebuild clears.
+  # contrib/k8s/Dockerfile.base forces golang.org/x/crypto, golang.org/x/net,
+  # golang.org/x/text and github.com/apache/thrift forward in the gh and Dolt
+  # builds the same way it already forced google.golang.org/grpc, and each
+  # build asserts the versions it embedded. contrib/k8s/Dockerfile.agent
+  # rebuilds bd from a source ref whose go.mod already pins all four. The rule
+  # the previous horizon established still holds and now covers every rebuilt
+  # path: if a rebuilt bd/dolt/gh re-triggers one of these the scan must fail,
+  # so the regression stays visible instead of being waived. The reviewed set
+  # at the end of this file is the one exception, and each of its rebuilt-path
+  # entries is listed in TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools's
+  # reviewedWaivers, so that set cannot grow without a deliberate edit there.
   #
   # kubectl is what is left. It is an upstream-signed prebuilt that
   # contrib/k8s/Dockerfile.controller installs rather than builds, so nothing in
@@ -25,8 +29,8 @@ vulnerabilities:
   # from this file too.
   #
   # The horizon is three months rather than the one month the previous
-  # extensions used. Nothing waived below is fixable from this repo, so a
-  # shorter one buys a re-dating chore instead of a decision.
+  # extensions used. Nothing in the kubectl set below is fixable from this
+  # repo, so a shorter one buys a re-dating chore instead of a decision.
   - id: CVE-2026-25681
     paths:
       - "usr/local/bin/kubectl"
@@ -87,3 +91,48 @@ vulnerabilities:
       - "usr/local/bin/kubectl"
     expired_at: 2026-11-07
     statement: Reached through Go stdlib (kubectl v1.36.3 ships 1.26.5; fixed in 1.25.13, 1.26.6, 1.27.0-rc.3). kubectl is an upstream-signed prebuilt this repo installs rather than rebuilds, so the fix has to come from a Kubernetes release; drop this entry once one ships that clears it.
+  # Reviewed bridge entries carried over from main's time-boxed waiver bridge
+  # (#5885) on its 2026-09-21 horizon, for the findings the rebuilds above do
+  # not clear: all three Go-module CVEs were published against the very versions
+  # the pins above move to, and the GitPython findings sit in a requirements
+  # file the rebuilds do not touch. TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools
+  # holds the rebuilt-path entries to exactly this set, and
+  # TestTrivyIgnoreDropsGCModuleWaiversPastThreshold drops the gc path the
+  # moment go.mod reaches the fixed grpc.
+  - id: CVE-2026-84304
+    paths:
+      - "usr/bin/gh"
+      - "usr/local/bin/dolt"
+      - "usr/local/bin/bd"
+      - "usr/local/bin/gc"
+    expired_at: 2026-09-21
+    statement: google.golang.org/grpc CVE, fixed in 1.83.1. The gh and Dolt rebuilds pin grpc 1.82.1 (GRPC_VERSION in contrib/k8s/Dockerfile.base), the bd rebuild pins 1.83.0 (GRPC_VERSION in contrib/k8s/Dockerfile.agent), and gc takes 1.83.0 from go.mod. Durable fix is raising each of those pins to 1.83.1 or later; bd and gc are tracked in ga-rl1l10. Remove each path once its pin moves.
+  - id: CVE-2026-84445
+    paths:
+      - "usr/bin/gh"
+      - "usr/local/bin/dolt"
+      - "usr/local/bin/bd"
+      - "usr/local/bin/gc"
+    expired_at: 2026-09-21
+    statement: google.golang.org/grpc xDS CVE, fixed in 1.82.2 and 1.83.2. The gh and Dolt rebuilds pin grpc 1.82.1 (GRPC_VERSION in contrib/k8s/Dockerfile.base), the bd rebuild pins 1.83.0 (GRPC_VERSION in contrib/k8s/Dockerfile.agent), and gc takes 1.83.0 from go.mod. Durable fix is raising each of those pins to 1.83.2 or later, which also clears CVE-2026-84304; bd and gc are tracked in ga-rl1l10. Remove each path once its pin moves.
+  - id: CVE-2026-43871
+    paths:
+      - "usr/local/bin/dolt"
+      - "usr/local/bin/bd"
+    expired_at: 2026-09-21
+    statement: github.com/apache/thrift CVE, fixed in 0.24.0. The Dolt rebuild pins thrift 0.23.0 (THRIFT_VERSION in contrib/k8s/Dockerfile.base) and the bd rebuild takes 0.23.0 from its pinned source. Durable fix is raising THRIFT_VERSION to 0.24.0 and forcing thrift forward in contrib/k8s/Dockerfile.agent's bd-builder stage the same way it forces grpc; bd is tracked in ga-rl1l10. Remove each path once its pin moves.
+  - id: CVE-2026-78676
+    purls:
+      - "pkg:pypi/gitpython"
+    expired_at: 2026-09-21
+    statement: GitPython CRITICAL remote-code-execution CVE; gc-mcp-mail pins GitPython 3.1.58, fixed in 3.1.59. Tracked in ga-dkgeoi; remove once the image bumps the pinned dependency. This purl appears only in gc-mcp-mail's own package set, which confines the waiver without a paths entry.
+  - id: CVE-2026-78675
+    purls:
+      - "pkg:pypi/gitpython"
+    expired_at: 2026-09-21
+    statement: GitPython CVE; gc-mcp-mail pins GitPython 3.1.58, fixed in 3.1.59. Tracked in ga-dkgeoi; remove once the image bumps the pinned dependency. This purl appears only in gc-mcp-mail's own package set, which confines the waiver without a paths entry.
+  - id: CVE-2026-78677
+    purls:
+      - "pkg:pypi/gitpython"
+    expired_at: 2026-09-21
+    statement: GitPython CVE; gc-mcp-mail pins GitPython 3.1.58, fixed in 3.1.59. Tracked in ga-dkgeoi; remove once the image bumps the pinned dependency. This purl appears only in gc-mcp-mail's own package set, which confines the waiver without a paths entry.
