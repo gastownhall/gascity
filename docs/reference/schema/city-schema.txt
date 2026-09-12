@@ -1067,11 +1067,62 @@
           },
           "type": "object",
           "description": "Policies defines per-bead-use storage and garbage-collection defaults.\nPolicy names are interpreted by higher-level systems; unknown names are\npreserved so packs can stage future policy classes without breaking load."
+        },
+        "resilience": {
+          "$ref": "#/$defs/BeadsResilienceConfig",
+          "description": "Resilience configures the transport circuit breaker that guards bd\nsubprocess and store operations ([beads.resilience])."
         }
       },
       "additionalProperties": false,
       "type": "object",
       "description": "BeadsConfig holds bead store settings."
+    },
+    "BeadsResilienceConfig": {
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enabled toggles the breaker. Defaults to true.",
+          "default": true
+        },
+        "consecutive_failures": {
+          "type": "integer",
+          "description": "ConsecutiveFailures is how many consecutive transport-class failures\ntrip the breaker. Defaults to 3.",
+          "default": 3
+        },
+        "open_base": {
+          "type": "string",
+          "description": "OpenBase is the initial open-state backoff cap as a duration string.\nDefaults to \"1s\".",
+          "default": "1s"
+        },
+        "open_max": {
+          "type": "string",
+          "description": "OpenMax caps the open-state backoff as a duration string. Defaults\nto \"60s\".",
+          "default": "60s"
+        },
+        "half_open_interval": {
+          "type": "string",
+          "description": "HalfOpenInterval is the minimum spacing between recovery probes\nwhile half-open, as a duration string. Defaults to \"15s\".",
+          "default": "15s"
+        },
+        "max_inflight_per_scope": {
+          "type": "integer",
+          "description": "MaxInflightPerScope bounds concurrent bd subprocesses per scope. The\nadmission semaphore blocks the (n+1)th bd call for a scope until one\nin flight returns, capping the subprocess amplifier (plan item 1.9).\nDefaults to 4. Non-positive disables the per-scope cap.",
+          "default": 4
+        },
+        "max_inflight_global": {
+          "type": "integer",
+          "description": "MaxInflightGlobal bounds concurrent bd subprocesses across all scopes\nin the city. Defaults to 16. Non-positive disables the global cap.",
+          "default": 16
+        },
+        "max_admission_wait": {
+          "type": "string",
+          "description": "MaxAdmissionWait bounds how long the admission semaphore waits for a\nfree slot before failing fast, as a duration string. When the caps are\nsaturated by bd subprocesses wedged on a backend transport timeout, a\nbounded wait prevents reconcile fan-out from blocking the controller\ntick indefinitely: an admission that cannot be granted within this\nwindow fails like an open breaker (typed ErrStoreUnavailable, zero\nsubprocesses). Defaults to \"30s\". A non-positive value (e.g. \"0s\")\nrestores the pre-bound behavior of blocking forever.",
+          "default": "30s"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "BeadsResilienceConfig holds circuit breaker settings for transport-class bead store failures."
     },
     "ChatSessionsConfig": {
       "properties": {
