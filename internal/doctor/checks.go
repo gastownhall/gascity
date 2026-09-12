@@ -1623,7 +1623,9 @@ type WorktreeCheck struct {
 // Name returns the check identifier.
 func (c *WorktreeCheck) Name() string { return "worktrees" }
 
-// Run walks .gc/worktrees/ and verifies each .git pointer.
+// Run walks .gc/worktrees/ and verifies each .git pointer. Per-bead
+// worktrees at <rig>/worktrees/ are a separate population and are
+// covered by RigWorktreesCheck.
 func (c *WorktreeCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	c.broken = nil
@@ -1633,7 +1635,11 @@ func (c *WorktreeCheck) Run(ctx *CheckContext) *CheckResult {
 	if err != nil {
 		if os.IsNotExist(err) {
 			r.Status = StatusOK
-			r.Message = "no worktrees directory"
+			// Name the directory. The bare "no worktrees directory"
+			// read as a claim about every worktree on the box, and was
+			// reported green against a rig whose own worktrees/ held
+			// tens of gigabytes. Sibling checks already say ".gc/".
+			r.Message = "no .gc/worktrees directory"
 			return r
 		}
 		r.Status = StatusError
@@ -1665,7 +1671,7 @@ func (c *WorktreeCheck) Run(ctx *CheckContext) *CheckResult {
 	if len(c.broken) == 0 {
 		r.Status = StatusOK
 		if total == 0 {
-			r.Message = "no worktrees"
+			r.Message = "no agent worktrees under .gc/worktrees"
 		} else {
 			r.Message = fmt.Sprintf("all %d worktree(s) valid", total)
 		}

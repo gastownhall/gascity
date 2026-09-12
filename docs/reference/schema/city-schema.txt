@@ -1418,12 +1418,12 @@
       "properties": {
         "worktree_rig_warn_size": {
           "type": "string",
-          "description": "WorktreeRigWarnSize is the per-rig warning threshold for the total\ndisk footprint under .gc/worktrees/\u003crig\u003e/. Reported by the\nworktree-disk-size check. Go-style human size string (\"10GB\", \"500MB\").\nEmpty or unparseable falls back to the default (10 GB).",
+          "description": "WorktreeRigWarnSize is the per-rig warning threshold for a\nworktree population's total disk footprint. Reported by the\nworktree-disk-size check for .gc/worktrees/\u003crig\u003e/, and by the\nrig:\u003crig\u003e:worktrees check for the per-bead worktrees at\n\u003crig\u003e/worktrees/. Go-style human size string (\"10GB\", \"500MB\").\nEmpty or unparseable falls back to the default (10 GB).",
           "default": "10GB"
         },
         "worktree_rig_error_size": {
           "type": "string",
-          "description": "WorktreeRigErrorSize is the per-rig error threshold. When any rig\nexceeds this, the worktree-disk-size check reports an error rather\nthan a warning. Empty or unparseable falls back to the default\n(50 GB).",
+          "description": "WorktreeRigErrorSize is the per-rig error threshold. When a rig\nworktree population exceeds this, the reporting check errors\nrather than warns. Empty or unparseable falls back to the default\n(50 GB).",
           "default": "50GB"
         },
         "nested_worktree_prune": {
