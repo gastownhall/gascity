@@ -4402,6 +4402,101 @@ func TestRealizePoolDesiredSessionsRebindUpdatesPackWorkspaceMetadata(t *testing
 	}
 }
 
+// seedReusablePoolSession creates an active, idle pool session bead for
+// template "worker" bound to triggerBead, and registers it in snapshot.
+func seedReusablePoolSession(t *testing.T, store beads.Store, snapshot *sessionBeadSnapshot, slot int, triggerBead string) beads.Bead {
+	t.Helper()
+	name := fmt.Sprintf("worker-%d", slot)
+	b, err := store.Create(beads.Bead{
+		Title:  name,
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":                        "worker",
+			"agent_name":                      name,
+			"alias":                           name,
+			"session_name":                    name,
+			"state":                           string(sessionpkg.BaseStateActive),
+			"pool_slot":                       strconv.Itoa(slot),
+			poolManagedMetadataKey:            boolMetadata(true),
+			beadmeta.TriggerBeadIDMetadataKey: triggerBead,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot.addInfo(sessiontest.SeedBead(t, b))
+	return b
+}
+
+// New-tier demand must reuse the idle session already carrying that work bead
+// as its trigger, and must not steal a session whose trigger is another bead
+// still in this pass's demand. Positional pairing re-pointed every idle
+// session's gc.trigger_bead_id whenever the request order or the session set
+// shifted between passes — a live store write plus a bead.updated event per
+// session per reconcile tick (sys-rgwg4x).
+func TestRealizePoolDesiredSessionsKeepsIdleSessionsBoundToTheirDemandedWork(t *testing.T) {
+	tests := []struct {
+		name     string
+		requests []string       // new-tier WorkBeadIDs, in request order
+		want     map[int]string // pool slot -> expected trigger after realize
+	}{
+		{
+			name:     "reversed request order keeps both bindings",
+			requests: []string{"gp-b", "gp-a"},
+			want:     map[int]string{1: "gp-a", 2: "gp-b"},
+		},
+		{
+			name:     "new work takes the session whose bead left demand, not the one still demanded",
+			requests: []string{"gp-c", "gp-a"},
+			want:     map[int]string{1: "gp-a", 2: "gp-c"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			snapshot := &sessionBeadSnapshot{}
+			byID := map[int]string{}
+			for slot, trigger := range map[int]string{1: "gp-a", 2: "gp-b"} {
+				byID[slot] = seedReusablePoolSession(t, store, snapshot, slot, trigger).ID
+			}
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Agents: []config.Agent{{
+					Name:              "worker",
+					StartCommand:      "true",
+					WorkDir:           ".gc/workspaces/{{.AgentBase}}",
+					MinActiveSessions: intPtr(0),
+					MaxActiveSessions: intPtr(2),
+				}},
+			}
+			var stderr bytes.Buffer
+			bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+			bp.sessionBeads = snapshot
+			requests := make([]SessionRequest, 0, len(tt.requests))
+			for _, id := range tt.requests {
+				requests = append(requests, SessionRequest{Template: "worker", Tier: "new", WorkBeadID: id})
+			}
+
+			realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{Template: "worker", Requests: requests}, map[string]TemplateParams{}, &stderr)
+
+			if got := len(bp.sessionBeads.OpenInfos()); got != 2 {
+				t.Fatalf("open session beads = %d, want 2 (no fresh create); stderr=%q", got, stderr.String())
+			}
+			for slot, wantTrigger := range tt.want {
+				stored, err := store.Get(byID[slot])
+				if err != nil {
+					t.Fatalf("Get(slot %d): %v", slot, err)
+				}
+				if got := stored.Metadata[beadmeta.TriggerBeadIDMetadataKey]; got != wantTrigger {
+					t.Errorf("slot %d trigger = %q, want %q", slot, got, wantTrigger)
+				}
+			}
+		})
+	}
+}
+
 func TestRealizePoolDesiredSessionsLiveRetryPreservesLauncherWorkDir(t *testing.T) {
 	tests := []struct {
 		name          string
