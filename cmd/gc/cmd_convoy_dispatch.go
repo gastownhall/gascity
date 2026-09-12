@@ -760,12 +760,16 @@ func makeSourceWorkflowLocker(ctx context.Context, cityPath string, cfg *config.
 // stores; a relocated scope does not open the scope store at all, because that
 // would be a bd process this scan never reads.
 func makeSourceWorkflowStoresLister(cityPath string, cfg *config.City) func() ([]dispatch.SourceWorkflowStore, error) {
-	return makeSourceWorkflowStoresListerWithOpenStore(cityPath, cfg, func(dir string) (beads.Store, error) {
+	return makeSourceWorkflowStoresListerWithOpenStore(cityPath, cfg, sourceWorkflowStoreOpener(cityPath))
+}
+
+func sourceWorkflowStoreOpener(cityPath string) func(string) (beads.Store, error) {
+	return func(dir string) (beads.Store, error) {
 		if binding, relocated := controlGraphBinding(cityPath, dir); relocated {
 			return binding, nil
 		}
 		return openStoreAtForCity(dir, cityPath)
-	})
+	}
 }
 
 func makeSourceWorkflowStoresListerWithOpenStore(cityPath string, cfg *config.City, openStore func(string) (beads.Store, error)) func() ([]dispatch.SourceWorkflowStore, error) {
@@ -2805,9 +2809,21 @@ func unscannedSourceWorkflowStoreSkips(cfg *config.City, cityPath, selectedStore
 // expected to surface these (see formatSourceWorkflowStoreSkips) so operators
 // can see when singleton coverage degraded.
 func openSourceWorkflowStores(cfg *config.City, cityPath, beadID string) ([]convoyStoreView, []sourceWorkflowStoreSkip, error) {
-	return openSourceWorkflowStoresWith(cfg, cityPath, beadID, func(dir string) (beads.Store, error) {
+	// Keep the directory scan's ordinary views: source beads and legacy
+	// workflow roots still live in the work store after graph-class migration.
+	// Federation appends the relocated binding for the graph roots instead of
+	// replacing the work store with it.
+	stores, skips, err := openSourceWorkflowStoresWith(cfg, cityPath, beadID, func(dir string) (beads.Store, error) {
 		return openStoreAtForCity(dir, cityPath)
 	})
+	if err != nil {
+		return stores, skips, err
+	}
+	stores, err = convoyStoreViewsWithBinding(cityPath, stores)
+	if err != nil {
+		return nil, skips, err
+	}
+	return stores, skips, nil
 }
 
 // openSourceWorkflowStoresWith is the testable core of openSourceWorkflowStores.
