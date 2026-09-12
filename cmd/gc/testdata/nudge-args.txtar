@@ -1,0 +1,13 @@
+# A command group is not a successful message delivery.
+! exec gc nudge
+stderr 'missing subcommand'
+
+# The retired send syntax must fail and name the supported send command.
+! exec gc nudge absent-worker 'queue regression probe'
+stderr 'gc session nudge'
+
+# Explicit help remains successful, including the supported inspection command.
+exec gc nudge --help
+stdout 'status'
+exec gc nudge status --help
+stdout 'status'

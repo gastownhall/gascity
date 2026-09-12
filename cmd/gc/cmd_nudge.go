@@ -249,7 +249,18 @@ func newNudgeCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Inspect and deliver deferred nudges.
 
 Deferred nudges are reminders that were queued because the target agent
-was asleep or was not at a safe interactive boundary yet.`,
+was asleep or was not at a safe interactive boundary yet.
+
+To send a new nudge, use gc session nudge <id-or-alias> <message...>.`,
+		Args: cobra.ArbitraryArgs,
+		RunE: func(_ *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				fmt.Fprintln(stderr, "gc nudge: missing subcommand (status); to send a message, use gc session nudge <id-or-alias> <message...>") //nolint:errcheck // best-effort stderr
+			} else {
+				fmt.Fprintf(stderr, "gc nudge: unknown subcommand %q; to send a message, use gc session nudge <id-or-alias> <message...>\n", args[0]) //nolint:errcheck // best-effort stderr
+			}
+			return errExit
+		},
 	}
 	cmd.AddCommand(
 		newNudgeStatusCmd(stdout, stderr),

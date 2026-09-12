@@ -77,6 +77,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gc nudge` no longer reports success without sending anything when called
+  without a subcommand or with the retired target/message syntax.** Both forms
+  exit nonzero and direct senders to `gc session nudge`. Explicit help and the
+  deferred-delivery subcommands retain their existing behavior.
+
 - **The work-record close gate asks the repository the bead's OWNER points at,
   not the store it was read through.** A rig's work step that a relocated class
   binding holds has its commits on the rig's checkout, and both close doors

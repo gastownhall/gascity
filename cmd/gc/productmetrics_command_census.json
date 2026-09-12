@@ -2574,14 +2574,16 @@
       "hidden": false,
       "effective_hidden": false,
       "disable_flag_parsing": false,
-      "shape": "structural",
+      "shape": "runnable-group",
       "recording_policy": "recordable",
       "mode": "standard",
       "notice_policy": "eligible",
-      "classification": "help",
-      "canonical_target": "@help",
-      "owner": "structural",
-      "id": 1
+      "classification": "unknown",
+      "canonical_target": "@unknown",
+      "owner": "deferred",
+      "resolver": "group-dispatch",
+      "deferred_default": "unknown",
+      "id": 3
     },
     {
       "path": "gc nudge drain",

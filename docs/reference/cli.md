@@ -2720,6 +2720,8 @@ Inspect and deliver deferred nudges.
 Deferred nudges are reminders that were queued because the target agent
 was asleep or was not at a safe interactive boundary yet.
 
+To send a new nudge, use gc session nudge &lt;id-or-alias&gt; &lt;message...&gt;.
+
 ```
 gc nudge
 ```
