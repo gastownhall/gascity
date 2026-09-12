@@ -203,6 +203,21 @@ const (
 	// could also observe expiry and emit; consumers should tolerate a duplicate
 	// rather than assume a globally exactly-once signal.
 	ControlStalled = "control.stalled"
+	// ControlRootSettleFailed fires when a workflow-finalize control bead is
+	// quarantined but the store then refuses the follow-up close of the
+	// workflow root the finalizer was gating (e.g. a "blocked by" edge the
+	// store has not yet reconciled against the finalizer's own quarantine).
+	// quarantineControlFailureBead always returns nil in this case -- the
+	// finalizer's quarantine is the load-bearing action and must stand -- but
+	// an unclosed root left with no signal reintroduces the dead-root/
+	// hook-claim-leak bug (#2763) the finalizer-quarantine path exists to
+	// close. This event, together with the gc.root_settle_failed* metadata
+	// stamped on the root and a created follow-up bead, is the durable
+	// visibility that replaces the silently-assumed "retried by a later
+	// pass" that never actually existed. Edge-triggered, once per failed
+	// settle attempt; a duplicate is possible under a misconfigured second
+	// dispatcher, same as ControlStalled.
+	ControlRootSettleFailed = "control.root_settle_failed"
 	// SupervisorStarted fires once per supervisor startup, after the
 	// instance lock is acquired. Its payload classifies how the previous
 	// supervisor instance exited (clean, crash, or unknown), derived from
@@ -399,6 +414,7 @@ var KnownEventTypes = []string{
 	ConvoyCreated, ConvoyClosed,
 	ControllerStarted, ControllerStopped,
 	ControlStalled,
+	ControlRootSettleFailed,
 	CitySuspended, CityResumed,
 	RequestResultCityCreate, RequestResultCityUnregister,
 	RequestResultSessionCreate, RequestResultSessionMessage,
@@ -458,6 +474,23 @@ type Event struct {
 // This sub-interface is used by callers that only need to write events.
 type Recorder interface {
 	Record(e Event)
+}
+
+// AckRecorder is an optional Recorder extension whose RecordAck reports whether
+// the event was durably appended. Record is best-effort and void — a
+// FileRecorder silently drops the event on a cross-process lock timeout or a
+// write failure (e.g. ENOSPC), and Discard drops every event — so a caller that
+// must not take a durable action on the strength of an emit that may have been
+// lost type-asserts to this and treats a recorder that does not implement it
+// (Discard, exec scripts) as "never acknowledged". A nil error means the event
+// reached the log and is therefore readable back by any List/Watch consumer; a
+// non-nil error means it was dropped.
+//
+// The append is not fsynced, so the acknowledgement covers reachability, not
+// stable storage: an OS crash can still lose an acknowledged event.
+type AckRecorder interface {
+	Recorder
+	RecordAck(e Event) error
 }
 
 // Provider is the full interface for event backends. It embeds Recorder

@@ -1472,13 +1472,18 @@ func DefaultGeminiSearchPaths() []string {
 }
 
 // DefaultKimiSearchPaths returns the default search paths for Kimi Code
-// session files (~/.kimi/sessions).
+// session files: legacy ~/.kimi/sessions, native ~/.kimi-code/sessions, and
+// $KIMI_CODE_HOME/sessions when that variable is set to a non-blank value.
 func DefaultKimiSearchPaths() []string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil
 	}
-	return []string{filepath.Join(home, ".kimi", "sessions")}
+	roots := []string{filepath.Join(home, ".kimi", "sessions"), filepath.Join(home, ".kimi-code", "sessions")}
+	if codeHome := strings.TrimSpace(os.Getenv("KIMI_CODE_HOME")); codeHome != "" {
+		roots = append(roots, filepath.Join(codeHome, "sessions"))
+	}
+	return roots
 }
 
 // DefaultAntigravitySearchPaths returns the default search paths for Antigravity JSONL

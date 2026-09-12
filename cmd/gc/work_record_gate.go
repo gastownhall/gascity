@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 
-	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/workrecord"
@@ -17,6 +17,14 @@ import (
 // beads it covers, what a valid record is, whether enforcement is on). The HTTP
 // plane runs the same package against the owner store its residency resolver
 // pins, so a close cannot dodge the contract by changing doors.
+//
+// That sentence covers the reachability clause too, which is the one part of the
+// contract a bead cannot answer alone: workrecord.RepoDirFor names the repository
+// from the bead's OWNER — its gc.work_dir, else the scope gc.root_store_ref
+// records — and both doors run it, so one bead is judged against one repository
+// however it is closed. Each door supplies only its own checkout table
+// (workRecordRepoDirs here, workRecordScopeDirs in internal/api) and its own
+// answer for a bead that names no owner.
 //
 // # Two entry points run this gate: the bd fall-through and the class door
 //
@@ -82,6 +90,90 @@ func validateWorkRecordOnClose(bead beads.Bead, commitReachable func(commit, bra
 // same question.
 func gitCommitReachableOnBranch(repoDir, commit, branch string) bool {
 	return workrecord.CommitReachableOnBranch(repoDir, commit, branch)
+}
+
+// workRecordRepoDirs is the CLI plane's checkout table, plus the answer this
+// door gave before a bead could name its owner.
+//
+// workrecord.RepoDirFor decides WHICH repository a bead answers to, from the
+// bead's own gc.work_dir or its gc.root_store_ref owner; this type only supplies
+// the directories. legacy is the scope the caller READ through — the resolved
+// work scope on the bd fall-through, the city on the class door — and it is
+// still the answer for a bead that records no owner, so a city that never
+// stamped one closes exactly as it did before.
+type workRecordRepoDirs struct {
+	cityPath string
+	legacy   string
+	rigs     func() []config.Rig
+}
+
+// CityDir returns the city checkout's directory.
+func (d workRecordRepoDirs) CityDir() string { return strings.TrimSpace(d.cityPath) }
+
+// RigDir returns the named rig's checkout and whether this city configures that
+// rig at all. A configured rig that names no checkout answers ("", true), which
+// the rule reads as unknown rather than as the city.
+//
+// The name is matched case-insensitively, deliberately more forgiving than the
+// exact-match lookups this answer feeds (workdir.RigRootForName, sling's
+// rigSuspended). Refs are stamped by storeref.RigRef from the configured rig
+// name, so only a hand-stamped or historically-buggy ref differs by case;
+// matching it judges the close against that rig's checkout instead of degrading
+// to unverified. Both doors spell this matcher the same way, so whichever way it
+// resolves, one bead is still judged against one repository.
+func (d workRecordRepoDirs) RigDir(name string) (string, bool) {
+	if d.rigs == nil {
+		return "", false
+	}
+	for _, rig := range d.rigs() {
+		if !strings.EqualFold(strings.TrimSpace(rig.Name), name) {
+			continue
+		}
+		if strings.TrimSpace(rig.Path) == "" {
+			return "", true
+		}
+		return resolveStoreScopeRoot(d.cityPath, rig.Path), true
+	}
+	return "", false
+}
+
+// repoDirFor names the repository this close is judged against, or "" when the
+// bead's owner names no checkout this city knows.
+func (d workRecordRepoDirs) repoDirFor(bead beads.Bead) string {
+	dir, kind := workrecord.RepoDirFor(bead, d)
+	if kind == workrecord.ScopeUnrooted {
+		return strings.TrimSpace(d.legacy)
+	}
+	return dir
+}
+
+// cityRigsLoader returns a rig table that loads the city config at most once, on
+// first use.
+//
+// The class door is entered from doBd's cost gate, before anything in that
+// invocation has read city.toml, and every read routed through it must stay
+// cheap. The rig table answers one question — where a rig-OWNED bead's commit
+// lives — which only a close of a gated bead asks, so the load is deferred to
+// that point and never paid by a show, a claim, or a dep walk.
+//
+// A config this invocation cannot read yields no rigs, which the rule reads as
+// an unknown owner and degrades on. Failing the close on a read the door does
+// not otherwise need would be a refusal manufactured by the gate.
+func cityRigsLoader(cityPath string) func() []config.Rig {
+	var (
+		once sync.Once
+		rigs []config.Rig
+	)
+	return func() []config.Rig {
+		once.Do(func() {
+			cfg, err := loadCityConfigAdvisory(cityPath)
+			if err != nil || cfg == nil {
+				return
+			}
+			rigs = cfg.Rigs
+		})
+		return rigs
+	}
 }
 
 // workRecordCloseTargets returns the bead IDs a bd invocation closes, and
@@ -170,7 +262,17 @@ func runWorkRecordCloseGate(bdArgs []string, scopeRoot, cityPath string, cfg *co
 			return false
 		}
 	}
-	return evaluateWorkRecordCloseGate(bdArgs, store, preFetched, scopeRoot, workRecordEnforceEnabled(), stderr)
+	dirs := workRecordRepoDirs{
+		cityPath: cityPath,
+		legacy:   scopeRoot,
+		rigs: func() []config.Rig {
+			if cfg == nil {
+				return nil
+			}
+			return cfg.Rigs
+		},
+	}
+	return evaluateWorkRecordCloseGate(bdArgs, store, preFetched, dirs, workRecordEnforceEnabled(), stderr)
 }
 
 // evaluateWorkRecordCloseGate is the store-driven core of the close gate, split
@@ -178,7 +280,14 @@ func runWorkRecordCloseGate(bdArgs []string, scopeRoot, cityPath string, cfg *co
 // each violation and reports whether the close should be blocked. preFetched
 // (optional) supplies beads already read by an earlier guard in this same
 // invocation, avoiding a duplicate store.Get for the same ID.
-func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, preFetched map[string]beads.Bead, scopeRoot string, enforce bool, stderr io.Writer) (block bool) {
+//
+// dirs names the checkouts this city knows, and the reachability clause is asked
+// about the one the closing bead's owner points at. When that is nothing the
+// clause degrades to a warning rather than failing closed: the door cannot pose
+// the question, and refusing a close it could not judge on that basis would
+// block work on a config gap. The sibling clauses do not degrade — an outcome-
+// less bead is refused whether or not a repository was found.
+func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, preFetched map[string]beads.Bead, dirs workRecordRepoDirs, enforce bool, stderr io.Writer) (block bool) {
 	ids, ok := workRecordCloseTargets(bdArgs)
 	if !ok {
 		return false
@@ -201,17 +310,25 @@ func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, preFetched 
 		}
 		var projectionErr error
 		bead, projectionErr = applyWorkRecordUpdateMetadata(bead, bdArgs)
-		repoDir := strings.TrimSpace(bead.Metadata[beadmeta.WorkDirMetadataKey])
-		if repoDir == "" {
-			repoDir = scopeRoot
-		}
 		var violations []string
 		if projectionErr != nil {
 			violations = []string{projectionErr.Error()}
 		} else {
+			// The repository is resolved from the PROJECTED bead: an atomic
+			// close may stamp the work directory or the owner in the same
+			// invocation that closes.
+			repoDir := dirs.repoDirFor(bead)
+			unverified := false
 			violations = validateWorkRecordOnClose(bead, func(commit, branch string) bool {
+				if repoDir == "" {
+					unverified = true
+					return true
+				}
 				return gitCommitReachableOnBranch(repoDir, commit, branch)
 			})
+			if unverified {
+				fmt.Fprintf(stderr, "gc bd: work-record gate (%s): close of %s: %s\n", mode, id, workrecord.ReachabilityUnverifiedNote) //nolint:errcheck // best-effort stderr
+			}
 		}
 		for _, v := range violations {
 			fmt.Fprintf(stderr, "gc bd: work-record gate (%s): close of %s: %s\n", mode, id, v) //nolint:errcheck // best-effort stderr

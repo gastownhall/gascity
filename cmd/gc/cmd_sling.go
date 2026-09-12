@@ -525,14 +525,7 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 				// degrade without any breadcrumb.
 				fmt.Fprintln(stderr, "warning:", formatSourceWorkflowStoreSkips(unscannedSkips)) //nolint:errcheck
 			}
-			out := make([]sling.SourceWorkflowStore, 0, len(stores))
-			for _, storeView := range stores {
-				out = append(out, sling.SourceWorkflowStore{
-					Store:    storeView.store,
-					StoreRef: workflowStoreRefForDir(storeView.path, cityPath, cityName, cfg),
-				})
-			}
-			return out, nil
+			return sourceWorkflowStoresFromViews(cfg, cityPath, cityName, stores)
 		},
 		SourceWorkflowStoreScanWarning: func(storeRef string, scanErr error) {
 			key := strings.TrimSpace(storeRef)
@@ -1294,6 +1287,54 @@ func printCrossRigSection(w func(string), beadID string, a config.Agent, cfg *co
 		w("  Without --force, sling would refuse to route (exit 1).")
 		w("")
 	}
+}
+
+// sourceWorkflowStoresFromViews projects the source-workflow store scan onto
+// the list the sling's singleton guard walks, federating the city's relocated
+// class binding in as the FIRST leg.
+//
+// The scan that produced these views enumerates DIRECTORIES, and a relocated
+// binding is not one of them — so on a converged city it hands the guard the
+// frozen copies the storage migration retained while the live workflow roots,
+// which are graph class and resident in the binding, stay invisible. The guard
+// then reports "no conflict" from stores that structurally cannot hold the
+// answer and the sling admits a second live workflow beside the first
+// (ga-nqdff). convoyStoreViewsWithBinding is the one place the CLI gets the
+// binding from, so this reuses it rather than adding a second enumerator.
+//
+// The binding leg leads and is STRICT: it is where the answer lives, so a fault
+// there must refuse the sling rather than let an outage read as absence. A
+// REFUSED binding is returned as an error for the same reason — this is the
+// launch boundary of a mutation, not a listing that can print what it has.
+//
+// A city that relocates nothing gets its views back untouched, so the
+// single-store enumeration stays byte-identical.
+func sourceWorkflowStoresFromViews(cfg *config.City, cityPath, cityName string, views []convoyStoreView) ([]sling.SourceWorkflowStore, error) {
+	federated, err := convoyStoreViewsWithBinding(cityPath, views)
+	if err != nil {
+		return nil, fmt.Errorf("federating the source-workflow singleton scan with %s: %w", convoyBindingViewPath, err)
+	}
+	out := make([]sling.SourceWorkflowStore, 0, len(federated))
+	for _, view := range federated {
+		if !view.isClassBinding() {
+			continue
+		}
+		out = append(out, sling.SourceWorkflowStore{
+			Store:    view.store,
+			StoreRef: sourceworkflow.GraphStoreRef(cityName),
+			Strict:   true,
+		})
+	}
+	for _, view := range federated {
+		if view.isClassBinding() {
+			continue
+		}
+		out = append(out, sling.SourceWorkflowStore{
+			Store:    view.store,
+			StoreRef: workflowStoreRefForDir(view.path, cityPath, cityName, cfg),
+		})
+	}
+	return out, nil
 }
 
 func workflowStoreRefForDir(storeDir, cityPath, cityName string, cfg *config.City) string {
@@ -2243,18 +2284,8 @@ func rigPrefixForAgent(a config.Agent, cfg *config.City) string {
 // checkCrossRig returns a non-empty error message if a bead's rig prefix
 // doesn't match the target agent's rig prefix. Returns "" when the check
 // passes or can't be performed (missing prefix, city-wide agent, no rig).
+// Delegates to sling.CheckCrossRig so the dry-run preview and the real
+// enforcement path can never disagree on the wording again.
 func checkCrossRig(beadID string, a config.Agent, cfg *config.City) string {
-	bp := sling.BeadPrefixForCity(cfg, beadID)
-	if bp == "" {
-		return ""
-	}
-	rp := rigPrefixForAgent(a, cfg)
-	if rp == "" {
-		return ""
-	}
-	if bp == rp {
-		return ""
-	}
-	return fmt.Sprintf("gc sling: cross-rig routing blocked — bead %s (prefix %q) targets %s (rig prefix %q); use --force to override",
-		beadID, bp, a.QualifiedName(), rp)
+	return sling.CheckCrossRig(beadID, a, cfg)
 }

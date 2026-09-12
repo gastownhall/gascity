@@ -4714,6 +4714,81 @@ func TestStopManagedCityDoesNotUseStartupOrDriftTimeouts(t *testing.T) {
 	assertSingleStopWithBenignNoise(t, ops)
 }
 
+// hangingListProvider wraps a runtime.Provider but makes ListRunning block
+// forever. This simulates a session/beads dependency call inside
+// CityRuntime.shutdown that never returns (#5256) — ListRunning has no
+// context argument, so nothing can bound or cancel it from outside.
+type hangingListProvider struct {
+	runtime.Provider
+}
+
+func (hangingListProvider) ListRunning(string) ([]string, error) {
+	select {}
+}
+
+func TestStopManagedCityBoundsForcedShutdownWhenRuntimeHangs(t *testing.T) {
+	cityPath := t.TempDir()
+	logFile := filepath.Join(t.TempDir(), "ops.log")
+	script := writeSpyScript(t, logFile)
+	t.Setenv("GC_BEADS", "exec:"+script)
+	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
+
+	closer := &closerSpy{}
+	forceStop := &atomic.Bool{}
+	mc := &managedCity{
+		name:   "bright-lights",
+		cancel: func() {},
+		done:   make(chan struct{}), // never closes: city never exits on its own
+		closer: closer,
+		cr: &CityRuntime{
+			cfg: &config.City{
+				Daemon: config.DaemonConfig{
+					ShutdownTimeout: "20ms",
+				},
+			},
+			sp:                hangingListProvider{Provider: runtime.NewFake()},
+			rec:               events.Discard,
+			stdout:            io.Discard,
+			stderr:            io.Discard,
+			forceStopShutdown: forceStop,
+		},
+	}
+
+	var stderr bytes.Buffer
+	result := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		result <- stopManagedCity(mc, cityPath, &stderr)
+	}()
+
+	select {
+	case err := <-result:
+		// ShutdownTimeout is 20ms, so the forced-stop timeout (5x) is
+		// 100ms: the promised ceiling is grace(20ms) + forced(100ms) =
+		// 120ms. A double wait on the forced timeout — the regression
+		// this test guards against — pushes that to ~220ms, so the bound
+		// here must sit strictly below that, not at the old, much looser
+		// 500ms that a doubled wait still passed.
+		if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+			t.Fatalf("stopManagedCity took %s, want bounded near grace+forced (~120ms) even when CityRuntime.shutdown hangs", elapsed)
+		}
+		if err == nil {
+			t.Fatal("stopManagedCity err = nil, want non-nil because city never exited and shutdown hung")
+		}
+		if !strings.Contains(err.Error(), "did not exit") {
+			t.Fatalf("stopManagedCity err = %q, want 'did not exit' detail", err.Error())
+		}
+		if !forceStop.Load() {
+			t.Fatal("expected forced cleanup to request force-stop shutdown")
+		}
+		if !closer.closed {
+			t.Fatal("expected closer to be closed even though CityRuntime.shutdown never returned")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("stopManagedCity did not return within 2s: forced shutdown is not bounded when CityRuntime.shutdown hangs (issue #5256)")
+	}
+}
+
 func TestCityRuntimeShutdownPreservesSessionsWhenRequested(t *testing.T) {
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "agent-one", runtime.Config{}); err != nil {

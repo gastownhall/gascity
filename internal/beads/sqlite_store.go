@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	_ "modernc.org/sqlite" // pure-Go SQLite driver, CGO_ENABLED=0 safe
 )
 
@@ -1503,13 +1504,21 @@ func sqliteReadySQL(q ReadyQuery, projection string) (string, []any) {
 	where := []string{
 		"b.status='open'",
 		`b.issue_type NOT IN ('merge-request','gate','molecule','step','message','session','agent','role','rig')`,
-		`NOT EXISTS (
+		fmt.Sprintf(`NOT EXISTS (
 			SELECT 1 FROM deps d
 			LEFT JOIN beads blocker ON blocker.id=d.depends_on_id
 			WHERE d.issue_id=b.id
 			  AND d.dep_type IN ('blocks','waits-for','conditional-blocks')
-			  AND COALESCE(blocker.status, '') <> 'closed'
-		  )`,
+			  AND (
+			    COALESCE(blocker.status, '') <> 'closed'
+			    OR EXISTS (
+			         SELECT 1 FROM metadata m
+			         WHERE m.bead_id = blocker.id
+			           AND m.meta_key = '%s'
+			           AND m.meta_value = '%s'
+			       )
+			  )
+		  )`, beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkOutcomeBlocked),
 	}
 	switch q.TierMode {
 	case TierWisps:
@@ -1661,7 +1670,10 @@ type sqliteStoreTx struct {
 // id-shaped lookup of the namespace it lands in, as one written outside a
 // transaction. The check runs before normalization and before
 // ensureCreateDoesNotExist, so a refusal about a disclaimed namespace still
-// reveals nothing about what this store holds.
+// reveals nothing about what this store holds. That ordering is load-bearing
+// for a second reason: normalizeCreate lifts the sequence floor to the pinned
+// id's suffix, so a fence consulted after it renumbers a binding this store was
+// never allowed to write to, and the rollback does not put that back.
 //
 // There is no foreign-id variant here on purpose. The migration copy that needs
 // the exemption runs through CreateWithForeignID on the store, not inside a
