@@ -31,8 +31,6 @@ on:
     types: [completed]
 
 permissions:
-  contents: write
-  pull-requests: write
   actions: read
 
 concurrency:
@@ -46,6 +44,10 @@ jobs:
       github.event.workflow_run.event == 'pull_request' &&
       github.event.workflow_run.conclusion == 'failure'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
     steps:
       # Trusted side only: base repo default branch, never the PR head.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6

@@ -6,7 +6,6 @@ on:
       - labeled
 
 permissions:
-  actions: write
   contents: read
   pull-requests: read
 
@@ -17,6 +16,10 @@ jobs:
       github.event.label.name == 'needs-mac' ||
       github.event.label.name == 'needs-review-formulas'
     runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+      pull-requests: read
     steps:
       # This workflow never checks out or runs pull request code. It reads the
       # trusted base allowlist, then dispatches a dedicated workflow with the
