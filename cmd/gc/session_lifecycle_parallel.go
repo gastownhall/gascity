@@ -257,16 +257,24 @@ type startResult struct {
 	finished        time.Time
 	rollbackPending bool
 	rateLimitScreen bool
-	// diedDuringStartup is true only when the provider's Start() call itself
+	// diedDuringStartup is true when the session started and then died
+	// before it was confirmed alive, detected either of two ways: (1) the
+	// provider/resume layer returns runtime.ErrSessionDiedDuringStartup
+	// directly from Start() — the only path reachable when the session has
+	// no session_key to recover through (e.g. a plain bash-script agent
+	// with no SessionIDFlag configured; see retryFreshStartAfterStaleKey's
+	// decline branch in internal/session/chat.go), or (2) Start() itself
 	// succeeded (startedFresh) and the *post-start* stability/liveness check
-	// then found the session not running/alive (the "session %q died during
-	// startup" synthetic error) — as opposed to Start() itself returning an
-	// error (e.g. a transient provider error mid a gc suspend/resume cycle).
+	// below then found the session not running/alive (the "session %q died
+	// during startup" synthetic error; requires a non-empty SessionKey to
+	// run at all). Either way this is distinct from Start() returning some
+	// other, generic error (e.g. a transient provider error mid a gc
+	// suspend/resume cycle), which leaves diedDuringStartup false.
 	// commitStartFailure uses this to distinguish "this session actually came
 	// up and immediately exited, so its pending-create should roll back and
 	// retry fresh" from "Start() never got the process up at all, so a
 	// configured named session's pending-create should be preserved for a
-	// retry instead of destructively closed" (ga-pmafyc round 4).
+	// retry instead of destructively closed" (ga-pmafyc rounds 4 and 5).
 	diedDuringStartup bool
 	// phases captures sub-phase wall-clock so the lifecycle log can pinpoint
 	// where a slow start spent its time. See gc-67o for context.
@@ -1521,10 +1529,15 @@ func runPreparedStartCandidate(
 	startCallBegin := time.Now()
 	startedFresh, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg, &phases, sessionStaleKeyDetectionWaiter, warmClaim)
 	startCtxErr := startCtx.Err()
-	// diedDuringStartup distinguishes "Start() itself returned an error" from
-	// "Start() succeeded but the post-start liveness check then found the
-	// session dead" — see the startResult.diedDuringStartup doc comment.
-	diedDuringStartup := false
+	// diedDuringStartup starts true when the provider/resume layer already
+	// reported the death directly (runtime.ErrSessionDiedDuringStartup,
+	// e.g. from the tmux adapter or from retryFreshStartAfterStaleKey's
+	// decline in internal/session/chat.go when there is no session_key to
+	// recover through) — see the startResult.diedDuringStartup doc comment.
+	// The local post-start liveness check below can still independently set
+	// it true for the other detection path; neither path ever resets it back
+	// to false.
+	diedDuringStartup := errors.Is(err, runtime.ErrSessionDiedDuringStartup)
 	// Split start_call into provider.Start and the ErrStateSync recovery
 	// branch (gc-9ha). The recovery branch hits the worker observation
 	// API which can dominate start_call when the runtime is wedged.
