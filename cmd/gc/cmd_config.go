@@ -35,6 +35,7 @@ func loadCityConfigWithBuiltinPacks(cityPath string, includes ...string) (*confi
 	if err := validatePackRuntimeRegistrations(cfg); err != nil {
 		return nil, nil, err
 	}
+	applyFeatureFlags(cfg)
 	return cfg, prov, nil
 }
 
