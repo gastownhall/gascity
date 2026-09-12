@@ -363,3 +363,84 @@ func TestWorkerClaimLeavesAControlBeadUnstamped(t *testing.T) {
 			beadmeta.SessionIDMetadataKey, got)
 	}
 }
+
+// actorClaimingMemStore is the backend shape that motivated ClaimFor: it spells
+// the compare-and-swap ClaimAs(id, assignee) and has no Claim method at all.
+// BdStore is the real member of this family — bd names the actor explicitly
+// rather than inheriting it from the store's CommandRunner environment.
+//
+// It embeds MemStore by value-less pointer the same way claimingMemStoreDraft
+// does, so every other Store method is the real in-memory one and only the
+// claim shape differs.
+type actorClaimingMemStore struct {
+	*beads.MemStore
+	claimAsCalls []string
+}
+
+func (s *actorClaimingMemStore) ClaimAs(id, assignee string) (beads.Bead, bool, error) {
+	s.claimAsCalls = append(s.claimAsCalls, id+"|"+assignee)
+	cur, err := s.Get(id)
+	if err != nil {
+		return beads.Bead{}, false, err
+	}
+	if cur.Assignee != "" && cur.Assignee != assignee {
+		return cur, false, nil
+	}
+	status := "in_progress"
+	if err := s.Update(id, beads.UpdateOpts{Assignee: &assignee, Status: &status}); err != nil {
+		return beads.Bead{}, false, err
+	}
+	final, err := s.Get(id)
+	return final, err == nil, err
+}
+
+// TestWorkerClaimServesTheActorShapedBackend is the route-level guard for the
+// defect ClaimFor fixes, and it is deliberately at the ROUTE and not on the
+// helper.
+//
+// The helper test (internal/beads/worker_ops_claimfor_test.go) proves ClaimFor
+// dispatches both shapes. It cannot prove the HANDLER calls ClaimFor — and
+// measured on this branch, reverting the handler's call site to the old
+// `store.(workerAssignmentClaimer)` assert left the entire internal/api package
+// green. That is the silent-failure shape this file exists to prevent: the
+// capability is present and working, and the front door answers 501.
+//
+// So: a store with ClaimAs and no Claim must be CLAIMED, not refused.
+func TestWorkerClaimServesTheActorShapedBackend(t *testing.T) {
+	rigStore := &actorClaimingMemStore{MemStore: beads.NewMemStore()}
+	created, err := rigStore.Create(beads.Bead{Title: "actor-shaped backend", Status: "open"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	state := newFakeState(t)
+	state.stores = map[string]beads.Store{"myrig": rigStore}
+	state.cityBeadStore = rigStore
+	h := newTestCityHandler(t, state)
+
+	body := `{"session_id":"gcg-session-actor","assignee":"worker-local-3-pool","bead_id":"` + created.ID + `"}`
+	req := newPostRequest(cityURL(state, "/worker/claim"), strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code == http.StatusNotImplemented {
+		t.Fatalf("the actor-shaped backend was refused with 501 — this is the false "+
+			"not-implemented ClaimFor exists to end; the capability is present as ClaimAs. body=%s",
+			rec.Body.String())
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("claim on the actor-shaped backend: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(rigStore.claimAsCalls) != 1 {
+		t.Fatalf("ClaimAs calls = %v, want exactly one — the handler did not reach the actor shape",
+			rigStore.claimAsCalls)
+	}
+
+	stored, err := rigStore.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get after claim: %v", err)
+	}
+	if stored.Assignee != "worker-local-3-pool" {
+		t.Errorf("persisted assignee = %q, want the claimant", stored.Assignee)
+	}
+}
