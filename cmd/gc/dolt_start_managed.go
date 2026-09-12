@@ -283,7 +283,7 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 		})
 
 		startupOutput, readErr := managedDoltLogSuffixFn(layout.LogFile, logOffset)
-		if readErr == nil && strings.Contains(strings.ToLower(startupOutput), "address already in use") {
+		if readErr == nil && managedDoltStartupReportsAddressInUse(startupOutput) {
 			report.AddressInUse = true
 			// Wait briefly on the originally requested port to outlast a
 			// TIME_WAIT socket before bumping ports. See
@@ -307,6 +307,32 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 	}
 
 	return report, fmt.Errorf("dolt server could not find a free port after repeated address-in-use failures (last port %d)", report.Port)
+}
+
+// managedDoltStartupReportsAddressInUse recognizes bind failures emitted by
+// both the operating system and newer dolt releases. Dolt 2.1.7 reports
+// "Port <number> already in use" instead of the traditional
+// "address already in use" text.
+func managedDoltStartupReportsAddressInUse(output string) bool {
+	lower := strings.ToLower(output)
+	if strings.Contains(lower, "address already in use") {
+		return true
+	}
+
+	for _, line := range strings.Split(lower, "\n") {
+		fields := strings.Fields(line)
+		for i := 0; i+4 < len(fields); i++ {
+			if fields[i] != "port" || fields[i+2] != "already" || fields[i+3] != "in" ||
+				strings.TrimRight(fields[i+4], ".:;,!") != "use" {
+				continue
+			}
+			if _, err := strconv.Atoi(strings.Trim(fields[i+1], "[]():")); err == nil {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 // managedDoltLockReleaseTimeoutFn resolves the configured wait window for
