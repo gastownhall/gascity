@@ -1020,6 +1020,51 @@ func TestRunPoolOnBoot(t *testing.T) {
 	}
 }
 
+func TestRunPoolOnBootReportsProgressAsHooksComplete(t *testing.T) {
+	var mu sync.Mutex
+	ran := 0
+	runner := func(_, _ string, _ map[string]string) (string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		ran++
+		return "", nil
+	}
+
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "mayor", MaxActiveSessions: intPtr(1)},
+			{Name: "dog", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), OnBoot: "bd update --unclaim"},
+			{Name: "cat", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2), OnBoot: "bd update --unclaim"},
+		},
+	}
+
+	var stderr bytes.Buffer
+	var counts []int
+	agents := map[string]bool{}
+	runPoolOnBootWithProgress(cfg, t.TempDir(), runner, &stderr, func(current, total int, agent string) {
+		mu.Lock()
+		defer mu.Unlock()
+		if total != 2 {
+			t.Errorf("progress total = %d, want 2", total)
+		}
+		if ran < current {
+			t.Errorf("progress reported %d completions after only %d hooks had run", current, ran)
+		}
+		counts = append(counts, current)
+		agents[agent] = true
+	})
+
+	if ran != 2 {
+		t.Fatalf("runner called %d times, want 2", ran)
+	}
+	if fmt.Sprint(counts) != fmt.Sprint([]int{1, 2}) {
+		t.Fatalf("progress counts = %v, want [1 2]", counts)
+	}
+	if len(agents) != 2 || !agents["dog"] || !agents["cat"] {
+		t.Fatalf("progress agents = %v, want dog and cat", agents)
+	}
+}
+
 func TestRunPoolOnBootError(t *testing.T) {
 	runner := func(_, _ string, _ map[string]string) (string, error) {
 		return "", fmt.Errorf("bd not found")
