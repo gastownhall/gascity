@@ -711,7 +711,11 @@ func makeStoreRefResolver(cityPath string, cfg *config.City) func(string) (beads
 			// older callers stamp ambiguous refs and the only reachable city
 			// from a control-dispatcher is the one it was launched in.
 			if name != "" && cityName != "" && name != cityName {
-				return nil, fmt.Errorf("city ref %q does not match this city %q", ref, cityName)
+				// Same config-drift class as the removed rig below: a city
+				// renamed mid-flight leaves in-flight workflows stamped with
+				// the old name, and restoring the name heals the finalize.
+				// Pending, not terminal.
+				return nil, fmt.Errorf("%w: city ref %q does not match this city %q (renamed mid-flight? finalizer retries until the name is restored)", dispatch.ErrControlPending, ref, cityName)
 			}
 			return openStoreAtForCity(cityPath, cityPath)
 		case strings.HasPrefix(ref, "rig:"):
@@ -728,7 +732,19 @@ func makeStoreRefResolver(cityPath string, cfg *config.City) func(string) (beads
 				}
 				return openControlStoreAtForCity(rig.Path, cityPath, cfg)
 			}
-			return nil, fmt.Errorf("rig %q not found in city config", name)
+			// A rig entry can be removed from city.toml while its workflows
+			// are still in flight. A hard error here falls into the cmd-layer
+			// quarantine catch-all, which terminally closes the finalizer AND
+			// settles the workflow root — stranding the domain parent open
+			// forever with no retry handle, even after the rig is re-added.
+			// Classify as pending instead: the finalizer stays open,
+			// gc.last_finalize_error records the reason, and the next sweep
+			// completes the finalize once the rig is restored via
+			// `gc rig add`. Fail loud, not terminal. Malformed refs (the
+			// default arm below) stay hard: no config change can ever make
+			// them resolve, and pending there would be unbounded retry of a
+			// permanent error.
+			return nil, fmt.Errorf("%w: rig %q not found in city config (removed from city.toml? finalizer retries until the rig is restored)", dispatch.ErrControlPending, name)
 		default:
 			return nil, fmt.Errorf("unsupported store ref scheme: %q", ref)
 		}
