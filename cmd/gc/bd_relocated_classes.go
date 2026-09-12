@@ -148,15 +148,20 @@ func bdRelocatedClassOverrideEnabled() bool {
 //   - `show`, `update` (including `--claim`), `release-if-current`, `dep list`
 //     and `dep tree` are answered IN PROCESS from the binding their class is
 //     served from — cmd_bd_by_id.go, wired into doBd immediately after this
-//     scan — so they never reach the subprocess for a class-owned bead.
+//     scan — so they never reach the subprocess for a bead the binding holds.
 //   - Spellings of those verbs the in-process arm does not implement — `dep tree
 //     --show-all-paths`, `--status`, `--format`, `--direction=both` — are
 //     REFUSED there (exit 1, naming the bead and the binding) rather than
-//     forwarded, because serving them by dropping the flag would answer a
-//     different question than the one asked.
+//     forwarded WHEN THE BINDING HOLDS THE BEAD, because serving them by
+//     dropping the flag would answer a different question than the one asked.
+//     On a clean binding miss they fall through to this ledger on the same
+//     rule as the bullet below.
 //   - Every other bd subcommand that ADDRESSES a reserved-prefix id — in a
-//     positional or an id-valued flag — is refused there too, by ownership
-//     rather than by servability.
+//     positional or an id-valued flag — is refused there too WHEN THE BINDING
+//     HOLDS IT. A clean binding miss falls through to this ledger, which is
+//     then the id's truth: a rig may be configured with a prefix inside the
+//     reserved namespace, so the namespace names an authority rather than an
+//     exclusive holder.
 //
 // The selector surface is COMPLETE, and that is checkable rather than hopeful:
 // --metadata-field — the only bd flag whose value side is a key=value predicate
