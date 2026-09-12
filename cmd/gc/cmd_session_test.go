@@ -1387,6 +1387,48 @@ func TestSessionReason_IndexMissReturnsDash(t *testing.T) {
 	}
 }
 
+// sys-erovf: a persisted-active session whose runtime vanished (OOM-kill,
+// evicted box) is downgraded to asleep in memory by EnrichInfo before the
+// reconciler persists sleep_reason=runtime-missing. The REASON column must say
+// runtime-missing in that window, not "-" and not a wake reason.
+func TestSessionReason_RuntimeMissingBeforeReconcilerTick(t *testing.T) {
+	provider := runtime.NewFake() // "dead-worker" never started: IsRunning=false
+	cfg := &config.City{}
+	bead := beads.Bead{
+		ID:     "gc-1",
+		Status: "open",
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "dead-worker",
+			"state":        "active",
+		},
+	}
+	live := session.Info{
+		ID:          "gc-1",
+		Template:    "worker",
+		State:       session.StateAsleep, // EnrichInfo's runtime downgrade
+		SessionName: "dead-worker",
+	}
+	wrapped := &attachmentCachingProvider{
+		Provider: provider,
+		cache:    buildAttachmentCache([]session.Info{live}, func(session.Info) (bool, error) { return false, nil }),
+	}
+
+	reason := sessionReason(live, map[string]session.Info{bead.ID: seedSessionInfo(bead)}, cfg, wrapped, nil, nil)
+	if reason != session.LifecycleReasonRuntimeMissing {
+		t.Fatalf("sessionReason = %q, want %q for persisted-active/live-asleep", reason, session.LifecycleReasonRuntimeMissing)
+	}
+
+	// Once the reconciler has persisted the downgrade, the persisted sleep_reason
+	// wins and the overlay contributes nothing new.
+	bead.Metadata["state"] = "asleep"
+	bead.Metadata["sleep_reason"] = "idle-timeout"
+	reason = sessionReason(live, map[string]session.Info{bead.ID: seedSessionInfo(bead)}, cfg, wrapped, nil, nil)
+	if reason != "idle-timeout" {
+		t.Fatalf("sessionReason = %q, want idle-timeout once persisted", reason)
+	}
+}
+
 func TestSessionReason_SleepReasonOverridesWakeReason(t *testing.T) {
 	provider := runtime.NewFake()
 	if err := provider.Start(context.Background(), "sleeping-worker", runtime.Config{Command: "echo"}); err != nil {

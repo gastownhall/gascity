@@ -2075,6 +2075,45 @@ func TestHandleSessionListIncludesReason(t *testing.T) {
 	}
 }
 
+// sys-erovf: the runtime died under a persisted-active session and the
+// reconciler has not yet written sleep_reason. The list must render
+// runtime-missing, not an empty reason that reads as idle.
+func TestHandleSessionListShowsRuntimeMissingBeforeReconcilerTick(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Dead")
+	if err := fs.sp.Stop(info.SessionName); err != nil { // runtime gone, bead untouched
+		t.Fatalf("stop fake runtime: %v", err)
+	}
+	if fs.sp.IsRunning(info.SessionName) {
+		t.Fatalf("session %q should not be running after Stop", info.SessionName)
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", cityURL(fs, "/sessions"), nil)
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var body struct {
+		Items []sessionResponse `json:"items"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Items) != 1 {
+		t.Fatalf("got %d items, want 1", len(body.Items))
+	}
+	if body.Items[0].State != string(session.StateAsleep) {
+		t.Fatalf("state = %q, want asleep (runtime overlay)", body.Items[0].State)
+	}
+	if body.Items[0].Reason != session.LifecycleReasonRuntimeMissing {
+		t.Fatalf("reason = %q, want %s", body.Items[0].Reason, session.LifecycleReasonRuntimeMissing)
+	}
+}
+
 func TestHandleSessionListShowsResetPendingForLiveRuntime(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)

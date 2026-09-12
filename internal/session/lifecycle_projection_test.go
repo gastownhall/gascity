@@ -1092,3 +1092,24 @@ func lifecycleRepoRoot(t *testing.T) string {
 	}
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
 }
+
+func TestLiveDowngradeReason(t *testing.T) {
+	cases := []struct {
+		persisted string
+		live      State
+		want      string
+	}{
+		{"active", StateAsleep, LifecycleReasonRuntimeMissing},
+		{"awake", StateAsleep, LifecycleReasonRuntimeMissing},
+		{" active ", StateAsleep, LifecycleReasonRuntimeMissing},
+		{"active", StateActive, ""},
+		{"asleep", StateAsleep, ""},
+		{"start-pending", StateAsleep, ""},
+		{"", StateAsleep, ""},
+	}
+	for _, tc := range cases {
+		if got := LiveDowngradeReason(tc.persisted, tc.live); got != tc.want {
+			t.Errorf("LiveDowngradeReason(%q, %q) = %q, want %q", tc.persisted, tc.live, got, tc.want)
+		}
+	}
+}

@@ -1406,6 +1406,12 @@ func sessionReason(s session.Info, infoIndex map[string]session.Info, cfg *confi
 	if reason := session.LifecycleDisplayReasonWithLivenessInfo(info, now, isRunning); reason != "" {
 		return reason
 	}
+	// s carries the live overlay (EnrichInfo's runtime downgrade); info is the
+	// persisted projection. Persisted active + live asleep = the runtime died
+	// and the reconciler has not caught up — say so instead of a wake reason.
+	if reason := session.LiveDowngradeReason(string(info.State), s.State); reason != "" {
+		return reason
+	}
 
 	// If config is available and no lifecycle reason blocks display, compute
 	// full wake reasons (including WakeConfig).
