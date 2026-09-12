@@ -470,3 +470,38 @@ func TestDoHookClaimEmitsReclaimedStaleEventOnSuccess(t *testing.T) {
 		t.Fatalf("emitted = %v, want exactly [%q] (FR5)", emitted, want)
 	}
 }
+
+// TestDoHookClaimSkipsBudgetDeferredStaleAssigneeCandidate covers the
+// ga-7rj87d round-1 review gap (FR1/NFR5): hookCandidateReclaimEligible
+// checked only ID/assignee/route and omitted the budget-deferred check that
+// hookCandidateClaimable already applies on the fresh-claim path. That let a
+// route-matched candidate with a stale assignee bypass the daily
+// build-budget gate via the opt-in reclaim path merely by having an
+// assignee. A candidate still inside its gc.budget_deferred_until window
+// must not be reclaimed even with AutoReclaimStaleClaims on.
+func TestDoHookClaimSkipsBudgetDeferredStaleAssigneeCandidate(t *testing.T) {
+	runner := func(string, string) (string, error) {
+		return `[{"id":"work-1","assignee":"dead-worker","metadata":{"gc.routed_to":"worker","gc.budget_deferred_until":"2099-01-01T00:00:00Z"}}]`, nil
+	}
+	reclaimCalled := false
+	ops := hookClaimOps{
+		Runner: runner,
+		ReclaimStale: func(_ context.Context, _ string, _ []string, _ string) (bool, string, error) {
+			reclaimCalled = true
+			return true, "dead-worker", nil
+		},
+		DrainAck: func(io.Writer) error { return nil },
+	}
+
+	var stdout, stderr bytes.Buffer
+	doHookClaim("query", ".", hookClaimOptions{
+		Assignee:               "worker-1",
+		RouteTargets:           []string{"worker"},
+		AutoReclaimStaleClaims: true,
+		JSON:                   true,
+	}, ops, &stdout, &stderr)
+
+	if reclaimCalled {
+		t.Fatal("ReclaimStale must not be called for a candidate still inside its budget-deferred window, even with AutoReclaimStaleClaims on")
+	}
+}
