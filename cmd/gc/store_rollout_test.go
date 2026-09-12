@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/rollout"
@@ -205,8 +206,9 @@ func TestOpenRigStoreThreadsConditionalWrites(t *testing.T) {
 
 // TestOpenControlBdStoreThroughFactoryStamps pins the control-dispatcher
 // routing: the raw control-plane bd store must come back factory-stamped
-// (and raw — control paths are deliberately unwrapped), with native
-// selection impossible (no preflight checker is supplied).
+// (and raw — control paths are deliberately unwrapped) when the scope fails
+// preflight (here: no .beads metadata under /city), i.e. the bd fallback is
+// still the factory's own, stamped, fallback.
 func TestOpenControlBdStoreThroughFactoryStamps(t *testing.T) {
 	cfg, err := config.Parse([]byte("[workspace]\nname = \"t\"\n\n[beads]\nconditional_writes = \"require\"\n"))
 	if err != nil {
@@ -216,6 +218,10 @@ func TestOpenControlBdStoreThroughFactoryStamps(t *testing.T) {
 	raw := beads.NewBdStore("/city", func(_, _ string, _ ...string) ([]byte, error) {
 		return capableHelp, nil
 	})
+	// A zero checker fails preflight on the metadata read without forking bd.
+	prev := newControlPreflightChecker
+	newControlPreflightChecker = func(_, _ string) contract.PreflightChecker { return contract.PreflightChecker{} }
+	t.Cleanup(func() { newControlPreflightChecker = prev })
 	store, err := openControlBdStoreThroughFactory("/city", "/city", "bd", cfg,
 		func() (beads.Store, error) { return raw, nil })
 	if err != nil {
@@ -230,6 +236,20 @@ func TestOpenControlBdStoreThroughFactoryStamps(t *testing.T) {
 	}
 	if writer == nil {
 		t.Fatal("require was not stamped onto the control-plane bd store")
+	}
+}
+
+// TestControlStoreRegistryRetainsOnlyNativeStores pins that per-open
+// fallbacks (bd, mem, file) are never memoized: only a native store, whose
+// open is a preflight plus a connection pool, is kept for the process.
+func TestControlStoreRegistryRetainsOnlyNativeStores(t *testing.T) {
+	reg := &controlStoreRegistry{byRoot: map[string]beads.Store{}}
+	mem := beads.NewMemStore()
+	if got := reg.retain("/scope", mem); got != beads.Store(mem) {
+		t.Fatalf("retain(mem) = %T, want the same store back", got)
+	}
+	if got := reg.lookup("/scope"); got != nil {
+		t.Fatalf("lookup after retaining a MemStore = %T, want nil (non-native stores are per-open)", got)
 	}
 }
 

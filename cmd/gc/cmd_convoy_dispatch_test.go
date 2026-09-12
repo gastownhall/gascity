@@ -4708,25 +4708,30 @@ func TestOpenControlStoreAtForCityUsesControlRunnerForStaleBdScope(t *testing.T)
 		t.Fatalf("stale rig control update: %v", err)
 	}
 
-	if len(calls) != 1 {
-		t.Fatalf("bd calls = %#v, want one update call", calls)
+	// The factory's preflight (bd context --json) precedes the update: the
+	// control path now runs preflight like every other store open, and this
+	// stale scope (no project_id) falls back to bd. Pin the update call only.
+	updates := 0
+	update := -1
+	for i, call := range calls {
+		if len(call) > 0 && call[0] == "update" {
+			updates++
+			update = i
+		}
 	}
-	if len(envs) != 1 {
-		t.Fatalf("bd envs = %#v, want one command environment", envs)
+	if updates != 1 || len(envs) != len(calls) {
+		t.Fatalf("bd calls = %#v (envs %d), want exactly one update call", calls, len(envs))
 	}
-	if call := calls[0]; len(call) < 1 || call[0] != "update" {
-		t.Fatalf("bd call = %#v, want update ...", calls[0])
+	if slices.Contains(calls[update], "--sandbox") {
+		t.Fatalf("bd call = %#v, write-capable control stores must not use --sandbox", calls[update])
 	}
-	if slices.Contains(calls[0], "--sandbox") {
-		t.Fatalf("bd call = %#v, write-capable control stores must not use --sandbox", calls[0])
-	}
-	if got := envs[0]["BD_EXPORT_AUTO"]; got != "false" {
+	if got := envs[update]["BD_EXPORT_AUTO"]; got != "false" {
 		t.Fatalf("BD_EXPORT_AUTO = %q, want false", got)
 	}
-	if got := envs[0]["BEADS_DIR"]; got != filepath.Join(staleRigDir, ".beads") {
+	if got := envs[update]["BEADS_DIR"]; got != filepath.Join(staleRigDir, ".beads") {
 		t.Fatalf("BEADS_DIR = %q, want stale rig store", got)
 	}
-	if got := envs[0]["GC_RIG_ROOT"]; got != staleRigDir {
+	if got := envs[update]["GC_RIG_ROOT"]; got != staleRigDir {
 		t.Fatalf("GC_RIG_ROOT = %q, want stale rig root", got)
 	}
 }
