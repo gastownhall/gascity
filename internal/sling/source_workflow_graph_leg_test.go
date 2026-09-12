@@ -98,7 +98,7 @@ func TestListSourceWorkflowRootsStillToleratesNonStrictLegFailure(t *testing.T) 
 		},
 	}
 
-	err := checkLegacySourceWorkflowConflict(deps, "mc-source")
+	err := checkLegacySourceWorkflowConflict(deps, "mc-source", "", false)
 	var conflictErr *sourceworkflow.ConflictError
 	if !errors.As(err, &conflictErr) {
 		t.Fatalf("checkLegacySourceWorkflowConflict error = %v, want the binding-resident root to conflict", err)
@@ -132,7 +132,7 @@ func TestListSourceWorkflowRootsNamesOneRootOnceAcrossOverlappingLegs(t *testing
 		SourceWorkflowStoreScanWarning: func(string, error) {},
 	}
 
-	err := checkLegacySourceWorkflowConflict(deps, "mc-source")
+	err := checkLegacySourceWorkflowConflict(deps, "mc-source", "", false)
 	var conflictErr *sourceworkflow.ConflictError
 	if !errors.As(err, &conflictErr) {
 		t.Fatalf("checkLegacySourceWorkflowConflict error = %v, want ConflictError", err)
