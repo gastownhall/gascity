@@ -973,9 +973,24 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 	// request that spawned a rig-scope mol-adopt-pr-v2 workflow) don't accumulate
 	// as orphans. Failures intentionally leave parent sources open so a human
 	// can investigate via list - the bead IS the audit handle.
-	if outcome == beadmeta.OutcomePass {
+	switch outcome {
+	case beadmeta.OutcomePass:
 		if err := preflightSourceBeadChain(store, rootID, opts); err != nil {
 			return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: preflighting source bead chain: %w", rootID, err))
+		}
+	case beadmeta.OutcomeFail:
+		// Failures leave the domain parent OPEN (a human investigates via the
+		// human-visible queue and can redispatch), but on a split city the
+		// parent otherwise gets NO signal at all — the DAG closes in the graph
+		// store and nothing crosses the store boundary, leaving the parent
+		// indistinguishable from never-run. Stamp the failing step's
+		// diagnostics onto the still-open parent so it is visibly failed.
+		// Stamped here, in the pass-path preflight's slot, for the same
+		// reason the preflight exists: an error past this point strands the
+		// finalizer closed-as-skipped by the subtree close below. The stamp
+		// is metadata-only and idempotent, so re-running it on retry is safe.
+		if err := annotateSourceBeadFailure(store, rootID, resolveFinalizeFailureDiagnostics(store, bead), opts); err != nil {
+			return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: marking failed source bead: %w", rootID, err))
 		}
 	}
 	// Close the root BEFORE the finalize bead. If the root close fails and
@@ -1051,6 +1066,60 @@ func preflightSourceBeadChain(rootStore beads.Store, rootID string, opts Process
 // disappear from the human-visible queue once the rig-scope workflow merges.
 func closeSourceBeadChain(rootStore beads.Store, rootID string, opts ProcessOptions) error {
 	return walkSourceBeadChain(rootStore, rootID, opts, true)
+}
+
+// annotateSourceBeadFailure stamps failure diagnostics onto the domain parent
+// of a failed workflow (the first gc.source_bead_id hop from the root),
+// resolving a cross-store gc.source_store_ref via opts.ResolveStoreRef. It
+// leaves the parent OPEN and redispatchable — no close, no gc.outcome. A
+// cross-store ref with no resolver fails LOUD rather than silently narrowing:
+// the parent would otherwise never learn its DAG failed. An empty ref
+// (same-store parent), a missing root, or a deleted parent is a traced no-op.
+// The stamped keys are all gc.*-namespaced, so they stay disjoint from the
+// pass path's propagateSourceBeadTerminalMetadata, which copies only non-gc
+// metadata.
+func annotateSourceBeadFailure(rootStore beads.Store, rootID string, failure map[string]string, opts ProcessOptions) error {
+	root, err := rootStore.Get(rootID)
+	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return nil
+		}
+		return fmt.Errorf("loading root %s for failure annotation: %w", rootID, err)
+	}
+	parentID := strings.TrimSpace(root.Metadata[beadmeta.SourceBeadIDMetadataKey])
+	if parentID == "" {
+		opts.tracef("annotate-source-failure root=%s stop reason=no_source", rootID)
+		return nil
+	}
+	ref := strings.TrimSpace(root.Metadata[sourceworkflow.SourceStoreRefMetadataKey])
+	parentStore := rootStore
+	if ref != "" {
+		if opts.ResolveStoreRef == nil {
+			return fmt.Errorf("annotate-source-failure root=%s: cannot mark cross-store source bead %s (ref %s): no store-ref resolver provided", rootID, parentID, sourceChainStoreLabel(ref))
+		}
+		resolved, err := opts.ResolveStoreRef(ref)
+		if err != nil {
+			return fmt.Errorf("resolving source store %q: %w", ref, err)
+		}
+		if resolved == nil {
+			return fmt.Errorf("resolving source store %q: nil store", ref)
+		}
+		parentStore = resolved
+	}
+	apply := func() error {
+		if _, err := parentStore.Get(parentID); err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				opts.tracef("annotate-source-failure root=%s stop reason=deleted_parent source=%s ref=%s", rootID, parentID, sourceChainStoreLabel(ref))
+				return nil
+			}
+			return fmt.Errorf("getting source bead %s in %s: %w", parentID, sourceChainStoreLabel(ref), err)
+		}
+		return parentStore.SetMetadataBatch(parentID, failure)
+	}
+	if opts.SourceWorkflowLock != nil {
+		return opts.SourceWorkflowLock(ref, parentID, apply)
+	}
+	return apply()
 }
 
 func walkSourceBeadChain(rootStore beads.Store, rootID string, opts ProcessOptions, mutate bool) error {
@@ -1711,6 +1780,41 @@ func resolveFinalizeOutcome(store beads.Store, finalizer beads.Bead) (string, er
 		}
 	}
 	return outcome, nil
+}
+
+// resolveFinalizeFailureDiagnostics returns the failure metadata to stamp on
+// the domain parent when a workflow finalizes FAILED: the first failed
+// blocker's gc.failure_reason / gc.failure_class, with gc.failure_subject
+// naming that blocker. The root itself only carries gc.outcome=fail — the
+// reason lives on the blocker. Best-effort: a read error or a fail with no
+// failed blocker (e.g. an abort-scope member failure) still yields a generic
+// workflow_failed reason so the parent always carries a marker. Additive over
+// the shared resolveBlockedOutcome/resolveFinalizeOutcome, which stay as they
+// are.
+func resolveFinalizeFailureDiagnostics(store beads.Store, finalizer beads.Bead) map[string]string {
+	failure := map[string]string{beadmeta.FailureReasonMetadataKey: "workflow_failed"}
+	deps, err := store.DepList(finalizer.ID, "down")
+	if err != nil {
+		return failure
+	}
+	for _, dep := range deps {
+		if dep.Type != "blocks" {
+			continue
+		}
+		blocker, err := store.Get(dep.DependsOnID)
+		if err != nil || !beadOutcomeFailed(blocker) {
+			continue
+		}
+		failure[beadmeta.FailureSubjectMetadataKey] = blocker.ID
+		if reason := strings.TrimSpace(blocker.Metadata[beadmeta.FailureReasonMetadataKey]); reason != "" {
+			failure[beadmeta.FailureReasonMetadataKey] = reason
+		}
+		if class := strings.TrimSpace(blocker.Metadata[beadmeta.FailureClassMetadataKey]); class != "" {
+			failure[beadmeta.FailureClassMetadataKey] = class
+		}
+		return failure
+	}
+	return failure
 }
 
 func resolveBlockedOutcome(store beads.Store, beadID string) (string, error) {
