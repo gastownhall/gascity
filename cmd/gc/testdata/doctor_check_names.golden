@@ -19,6 +19,7 @@ dolt-topology
 dolt-drift
 config-valid
 legacy-suspended-field
+city-suspension
 rollout:beads.conditional_writes
 rollout:beads.guarded_release
 rollout:daemon.formula_v2
