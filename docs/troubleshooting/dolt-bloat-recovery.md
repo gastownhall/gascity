@@ -206,14 +206,25 @@ should treat these strings as the current vocabulary:
 | `post-flatten row count decreased` | A table lost rows after flatten. |
 | `post-flatten row count probe failed` | The post-flatten row-count query failed or returned a non-number. |
 | `post-flatten table value hash probe failed` | A post-flatten table hash query failed or returned empty. |
-| `post-flatten table value hash changed with row-count increase` | A table gained rows and its value hash changed. |
-| `post-flatten table value hash changed without row-count increase` | A table's value hash changed without a row-count gain. |
+| `post-flatten table value hash changed with row-count increase` | A table gained rows and its value hash changed. *(auto-clearable — see below)* |
+| `post-flatten table value hash changed without row-count increase` | A table's value hash changed without a row-count gain. *(auto-clearable — see below)* |
 | `post-flatten table list changed` | A table appeared or an invalid table name was observed after preflight. |
 | `post-flatten table list probe failed` | The post-flatten `information_schema.tables` query failed. |
 | `post-flatten value hash probe failed` | The database hash query failed after flatten. |
 | `post-flatten value hash probe returned empty value` | The database hash query returned an empty value after flatten. |
-| `post-flatten value hash changed with row-count increase` | The database hash changed after at least one stable-table row-count gain. |
-| `post-flatten value hash changed without row-count increase` | The database hash changed without a row-count gain. |
+| `post-flatten value hash changed with row-count increase` | The database hash changed after at least one stable-table row-count gain. *(auto-clearable — see below)* |
+| `post-flatten value hash changed without row-count increase` | The database hash changed without a row-count gain. *(auto-clearable — see below)* |
+
+Four of these reasons are known writer-race false positives and are
+**auto-clearable**. On its next scheduled run, `gc dolt compact`'s flatten
+path re-proves content preservation with a fresh
+`DOLT_DIFF_STAT(<marker flatten_preflight_head>, <current HEAD>)`: every
+drifted table must report `rows_deleted=0` and `rows_modified=0`, and the
+drift must stay confined to that proved set. On success compact removes the
+marker, emits the usual alert and event, and continues through flatten and
+full GC in the same cycle. Any probe failure, deleted or modified row, drift
+outside the proved set, or any other reason keeps the marker and blocks GC.
+You do not need to clear these by hand — check the compactor log first.
 
 Quarantine markers also carry structured evidence. New markers include the
 database name, the preflight/flatten/post-verify HEADs, preflight and
@@ -239,10 +250,12 @@ Safe marker-clear procedure:
    marker returns or health checks fail, preserve the marker and escalate with
    the marker contents and command output.
 
-`gc dolt compact` and `gc dolt compact --gc-only` refuse databases with
-quarantine markers. The refusal output repeats the marker path, reason, key
-evidence fields, and the clear/retry command so operators have the next action
-without opening this runbook first.
+`gc dolt compact --gc-only` and the bare-GC path refuse databases with
+quarantine markers unconditionally. The scheduled `gc dolt compact` flatten
+path also refuses, except for the four auto-clearable reasons above, which it
+may clear on its own after proving content preservation. The refusal output
+repeats the marker path, reason, key evidence fields, and the clear/retry
+command so operators have the next action without opening this runbook first.
 
 ## When to Escalate
 
