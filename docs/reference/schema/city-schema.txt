@@ -1648,6 +1648,13 @@
           "type": "string",
           "description": "Rig is the Gas City rig that owns repair work for this repository."
         },
+        "authors": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Authors is an optional fail-closed allow-list of GitHub author logins.\nWhen empty, the monitor acts on every open PR against the monitored\nrepo/base branches (the historical behavior). When non-empty, the monitor\nacts ONLY on PRs whose author login exactly (case-sensitively) matches an\nallowed value; a PR with an unresolved or empty author is skipped. This\nlets an operator scope the native monitor to their own PRs so it cannot\nmint repair beads for other contributors' pull requests."
+        },
         "notify": {
           "items": {
             "type": "string"

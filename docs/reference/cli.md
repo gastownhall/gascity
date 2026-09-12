@@ -1847,6 +1847,7 @@ gc github pr backfill [monitor-name] [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--all` | bool |  | include clean and pending-only PRs |
+| `--author` | stringArray |  | restrict to PRs by this GitHub author login (repeatable); fail-closed and unions with each monitor's configured authors |
 | `--create-repair-beads` | bool |  | create deduped repair beads for actionable PRs |
 | `--json` | bool |  | emit JSON |
 | `--timeout` | duration | `45s` | GitHub query timeout |

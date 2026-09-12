@@ -444,6 +444,7 @@ GitHubPRMonitor declares how one repository/base-branch set is monitored and whe
 | `repo` | string | **yes** |  | Repo is the GitHub repository name. |
 | `base_branches` | []string | **yes** |  | BaseBranches lists the base branches this monitor owns. |
 | `rig` | string | **yes** |  | Rig is the Gas City rig that owns repair work for this repository. |
+| `authors` | []string |  |  | Authors is an optional fail-closed allow-list of GitHub author logins. When empty, the monitor acts on every open PR against the monitored repo/base branches (the historical behavior). When non-empty, the monitor acts ONLY on PRs whose author login exactly (case-sensitively) matches an allowed value; a PR with an unresolved or empty author is skipped. This lets an operator scope the native monitor to their own PRs so it cannot mint repair beads for other contributors' pull requests. |
 | `notify` | []string |  |  | Notify lists session or mail recipients for readiness notifications. |
 | `repair_route` | string | **yes** |  | RepairRoute is the operator-supplied route target for repair work. |
 | `repair_workflow` | string |  |  | RepairWorkflow is the formula attached to repair beads created for this monitor. Empty defaults to the standard polecat repair workflow so routed repair work carries the branch/test/push/refinery steps instead of sitting as a raw routed task. |
