@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -373,6 +374,338 @@ func TestNewFileRecorderLeavesUnparseableLegacyArchive(t *testing.T) {
 	if !strings.Contains(stderr.String(), "legacy archive") || !strings.Contains(stderr.String(), legacyBase) {
 		t.Errorf("stderr should mention legacy archive %q, got %q", legacyBase, stderr.String())
 	}
+}
+
+// TestNewFileRecorderTruncatesNulPaddedTail simulates the unclean-shutdown
+// scenario from gastownhall/gascity#5336: a delayed-allocation filesystem
+// length-extends the active log before flushing, a crash strands a NUL run
+// at the end, and the next open must repair it before appends resume.
+func TestNewFileRecorderTruncatesNulPaddedTail(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	const goodLines = `{"seq":1,"type":"bead.created","actor":"human","subject":"first"}
+{"seq":2,"type":"bead.closed","actor":"human","subject":"last"}
+`
+	nulRun := bytes.Repeat([]byte{0}, 4096)
+	if err := os.WriteFile(path, append([]byte(goodLines), nulRun...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.Record(Event{Type: BeadClosed, Actor: "human", Subject: "post-recovery"})
+	if err := rec.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(stderr.String(), "NUL-padded tail") {
+		t.Errorf("expected stderr to report the NUL-tail truncation, got %q", stderr.String())
+	}
+
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(contents, []byte{0}) {
+		t.Errorf("NUL bytes still present in repaired log:\n%q", contents)
+	}
+
+	events, err := readActiveOnly(path)
+	if err != nil {
+		t.Fatalf("repaired log did not parse cleanly: %v", err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("got %d events, want 3 (2 original + 1 post-recovery); log:\n%q", len(events), contents)
+	}
+	if events[0].Seq != 1 || events[1].Seq != 2 {
+		t.Errorf("original seqs = [%d,%d], want [1,2]", events[0].Seq, events[1].Seq)
+	}
+	if events[2].Seq != 3 {
+		t.Errorf("post-recovery seq = %d, want 3 (continuing monotonically past the repaired tail)", events[2].Seq)
+	}
+}
+
+// TestNewFileRecorderNulTailNoOpOnCleanFile is the regression guard for the
+// truncation logic: a well-formed log (no trailing NUL run) must not be
+// modified at all on open.
+func TestNewFileRecorderNulTailNoOpOnCleanFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	const body = `{"seq":1,"type":"bead.created","actor":"human","subject":"first"}
+{"seq":2,"type":"bead.closed","actor":"human","subject":"last"}
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rec.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if stderr.Len() > 0 {
+		t.Errorf("expected no stderr for a clean file, got %q", stderr.String())
+	}
+
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != body {
+		t.Errorf("clean file was modified:\n got=%q\nwant=%q", contents, body)
+	}
+}
+
+// TestTruncateNulPaddedTailDirect exercises truncateNulPaddedTail directly
+// against edge cases the recorder-level tests above don't isolate: a
+// missing file, an empty file, a file with no newline before its NUL run,
+// and a file whose tail has non-NUL garbage after the last newline (which
+// must be left alone rather than guessed at).
+func TestTruncateNulPaddedTailDirect(t *testing.T) {
+	t.Run("missing file is a no-op", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "events.jsonl")
+		var stderr bytes.Buffer
+		if err := truncateNulPaddedTail(path, &stderr); err != nil {
+			t.Fatalf("truncateNulPaddedTail: %v", err)
+		}
+		if stderr.Len() > 0 {
+			t.Errorf("unexpected stderr: %q", stderr.String())
+		}
+	})
+
+	t.Run("empty file is a no-op", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "events.jsonl")
+		if err := os.WriteFile(path, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var stderr bytes.Buffer
+		if err := truncateNulPaddedTail(path, &stderr); err != nil {
+			t.Fatalf("truncateNulPaddedTail: %v", err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Size() != 0 {
+			t.Errorf("empty file size = %d, want 0", info.Size())
+		}
+	})
+
+	t.Run("NUL run with no preceding newline is left alone", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "events.jsonl")
+		body := bytes.Repeat([]byte{0}, 128)
+		if err := os.WriteFile(path, body, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var stderr bytes.Buffer
+		if err := truncateNulPaddedTail(path, &stderr); err != nil {
+			t.Fatalf("truncateNulPaddedTail: %v", err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Size() != int64(len(body)) {
+			t.Errorf("size = %d, want unchanged %d", info.Size(), len(body))
+		}
+		if stderr.Len() > 0 {
+			t.Errorf("unexpected stderr: %q", stderr.String())
+		}
+	})
+
+	t.Run("non-NUL trailing garbage is left alone", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "events.jsonl")
+		body := []byte("{\"seq\":1,\"type\":\"x\"}\npartial garbage, not NUL")
+		if err := os.WriteFile(path, body, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var stderr bytes.Buffer
+		if err := truncateNulPaddedTail(path, &stderr); err != nil {
+			t.Fatalf("truncateNulPaddedTail: %v", err)
+		}
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(contents) != string(body) {
+			t.Errorf("non-NUL tail was modified:\n got=%q\nwant=%q", contents, body)
+		}
+		if stderr.Len() > 0 {
+			t.Errorf("unexpected stderr: %q", stderr.String())
+		}
+	})
+}
+
+// TestTruncateNulPaddedTailSerializesAgainstConcurrentAppend is the
+// regression guard for the flock fix: it holds a sibling flock on the
+// active log (simulating another process mid-Record), lets
+// truncateNulPaddedTail block on that same lock, appends a valid record
+// through the lock holder, then releases. truncateNulPaddedTail must not
+// proceed until the lock is free, and once it does, it must recompute its
+// decision from the post-append state rather than a stale pre-lock size —
+// the appended record's non-NUL trailing bytes stop the truncation, so the
+// concurrent record survives.
+func TestTruncateNulPaddedTailSerializesAgainstConcurrentAppend(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	const goodLines = `{"seq":1,"type":"bead.created","actor":"human","subject":"first"}
+{"seq":2,"type":"bead.closed","actor":"human","subject":"last"}
+`
+	nulRun := bytes.Repeat([]byte{0}, 128)
+	if err := os.WriteFile(path, append([]byte(goodLines), nulRun...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sib := mustOpenSiblingLock(t, path)
+	const concurrentAppend = `{"seq":3,"type":"bead.created","actor":"human","subject":"concurrent"}` + "\n"
+	appended := make(chan struct{})
+	time.AfterFunc(60*time.Millisecond, func() {
+		if _, err := sib.Write([]byte(concurrentAppend)); err != nil {
+			t.Errorf("concurrent append through sibling lock holder: %v", err)
+		}
+		if err := syscall.Flock(int(sib.Fd()), syscall.LOCK_UN); err != nil {
+			t.Errorf("sibling unlock: %v", err)
+		}
+		_ = sib.Close()
+		close(appended)
+	})
+
+	start := time.Now()
+	var stderr bytes.Buffer
+	if err := truncateNulPaddedTail(path, &stderr); err != nil {
+		t.Fatalf("truncateNulPaddedTail: %v", err)
+	}
+	elapsed := time.Since(start)
+	<-appended
+
+	if elapsed < 50*time.Millisecond {
+		t.Errorf("truncateNulPaddedTail returned after %v, want it to have blocked until the sibling released its flock", elapsed)
+	}
+
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(contents, []byte(concurrentAppend)) {
+		t.Fatalf("concurrent append destroyed by truncateNulPaddedTail:\n%q", contents)
+	}
+	if stderr.Len() > 0 {
+		t.Errorf("expected no truncation once the concurrent append lands (its non-NUL trailing bytes stop the check), got stderr = %q", stderr.String())
+	}
+}
+
+// TestTruncateNulPaddedTailTimesOutWaitingForFlock mirrors
+// TestFileRecorderFlockTimeoutFiresWithinBudget: when the flock cannot be
+// acquired within the package's bounded wait, truncateNulPaddedTail must
+// give up (rather than proceeding unlocked) and must not have touched the
+// file.
+func TestTruncateNulPaddedTailTimesOutWaitingForFlock(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	const goodLines = `{"seq":1,"type":"bead.created","actor":"human","subject":"first"}
+`
+	nulRun := bytes.Repeat([]byte{0}, 128)
+	body := append([]byte(goodLines), nulRun...)
+	if err := os.WriteFile(path, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sib := mustOpenSiblingLock(t, path)
+	defer func() {
+		_ = syscall.Flock(int(sib.Fd()), syscall.LOCK_UN)
+		_ = sib.Close()
+	}()
+
+	var stderr bytes.Buffer
+	start := time.Now()
+	err := truncateNulPaddedTail(path, &stderr)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected an error when the flock cannot be acquired, got nil")
+	}
+	if !strings.Contains(err.Error(), "timed out") || !strings.Contains(err.Error(), "waiting on flock") {
+		t.Errorf("err = %v, want it to mention timing out waiting on the flock", err)
+	}
+	if elapsed < recordFlockTimeout {
+		t.Errorf("elapsed = %v, want >= %v", elapsed, recordFlockTimeout)
+	}
+	if elapsed >= recordFlockTimeout+150*time.Millisecond {
+		t.Errorf("elapsed = %v, want < %v", elapsed, recordFlockTimeout+150*time.Millisecond)
+	}
+
+	contents, err2 := os.ReadFile(path)
+	if err2 != nil {
+		t.Fatal(err2)
+	}
+	if !bytes.Equal(contents, body) {
+		t.Errorf("file modified despite failing to acquire the flock:\n got=%q\nwant=%q", contents, body)
+	}
+}
+
+// TestReadNulTailWindowShortReadGuard exercises the short-read guard
+// directly: a read that returns fewer bytes than requested (as happens when
+// the file shrinks between the caller's Stat and the ReadAt, e.g. a
+// concurrent rotation or truncation) must report ok=false rather than a
+// successful read backed by a zero-initialized buffer that would masquerade
+// as a genuine NUL-padded tail.
+func TestReadNulTailWindowShortReadGuard(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	body := []byte(`{"seq":1,"type":"bead.created"}
+{"seq":2,"type":"bead.closed"}
+`)
+	if err := os.WriteFile(path, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close() //nolint:errcheck // test cleanup
+
+	actual := int64(len(body))
+
+	t.Run("read fully within the file succeeds", func(t *testing.T) {
+		n := int64(10)
+		tail, ok, err := readNulTailWindow(f, actual, n)
+		if err != nil {
+			t.Fatalf("readNulTailWindow: %v", err)
+		}
+		if !ok {
+			t.Fatal("ok = false, want true for a read fully within the file")
+		}
+		if !bytes.Equal(tail, body[actual-n:]) {
+			t.Errorf("tail = %q, want %q", tail, body[actual-n:])
+		}
+	})
+
+	t.Run("size stale relative to the file yields a short read and ok=false", func(t *testing.T) {
+		// Claim the file is 20 bytes larger than it actually is (as if the
+		// caller's Stat predates a concurrent truncation/rotation) and ask
+		// for a 30-byte window. Only the last 10 of those 30 bytes actually
+		// exist, so ReadAt returns a partial read (io.EOF), which must not
+		// be accepted as ok=true.
+		claimedSize := actual + 20
+		n := int64(30)
+		tail, ok, err := readNulTailWindow(f, claimedSize, n)
+		if err != nil {
+			t.Fatalf("readNulTailWindow: %v", err)
+		}
+		if ok {
+			t.Errorf("ok = true, want false: a short read must not be treated as a successful window (tail = %q)", tail)
+		}
+	})
 }
 
 func findArchiveBySeq(t *testing.T, dir string, first, last uint64) (string, archiveInfo) {

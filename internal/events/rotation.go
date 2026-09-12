@@ -2,6 +2,7 @@ package events
 
 import (
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -164,6 +166,130 @@ func reapOrphanedRotatingFiles(dir string, stderr io.Writer) error {
 			fmt.Fprintf(stderr, "events: rotation: reaping %q: %v\n", base, err) //nolint:errcheck // best-effort stderr
 		}
 	}
+	return nil
+}
+
+// nulTailScanWindow bounds how much of the active log's tail
+// truncateNulPaddedTail reads when checking for an unclean-shutdown NUL
+// run. It comfortably covers the delayed-allocation extents a journaling
+// filesystem (e.g. ext4) length-extends before flushing, while keeping the
+// startup check O(1) regardless of how large the active log has grown.
+const nulTailScanWindow = 64 * 1024
+
+// readNulTailWindow reads the trailing n bytes of f, which the caller
+// believes to be size bytes long. It returns ok=false, with no error, if
+// fewer than n bytes came back: ReadAt returns io.EOF precisely when a read
+// falls short, and short-circuiting on that (rather than accepting io.EOF as
+// success) matters because tail is zero-initialized — a short read would
+// otherwise leave its unfilled remainder looking exactly like a genuine
+// NUL-padded tail. A short read means the file changed size underneath the
+// caller (a concurrent rotation or truncation), so the caller must not guess
+// at a NUL tail from that partial buffer.
+func readNulTailWindow(f *os.File, size, n int64) (tail []byte, ok bool, err error) {
+	tail = make([]byte, n)
+	read, err := f.ReadAt(tail, size-n)
+	if err != nil && err != io.EOF {
+		return nil, false, err
+	}
+	if int64(read) < n {
+		return nil, false, nil
+	}
+	return tail, true, nil
+}
+
+// truncateNulPaddedTail detects and removes a NUL-padded tail on the active
+// log left by an unclean shutdown mid-write: a filesystem can extend a
+// file's length before the corresponding bytes are flushed, so a crash
+// between the length-extension and the flush leaves a run of \x00 bytes
+// after the last complete record. Left in place, the next Record() call
+// appends the new event directly after those NUL bytes with no separating
+// newline, fusing the NUL run and the new record into one unparseable
+// physical line — which silently truncates every event after it for any
+// strict JSON Lines reader (this package's own readers tolerate it by
+// skipping the malformed line, but external consumers such as `jq -e .`
+// stop there).
+//
+// It reads only a bounded tail of the file (nulTailScanWindow), so cost is
+// independent of file size. If the file does not end in a run of NUL bytes,
+// or the last nulTailScanWindow bytes contain no newline to truncate back
+// to, it is a no-op — this is deliberately conservative and only repairs
+// the specific delayed-allocation pattern described above.
+//
+// The read-decide-truncate sequence runs under the same cross-process flock
+// Record/AppendBatch use, so a concurrent append cannot land between the
+// Stat and the Truncate and be discarded.
+func truncateNulPaddedTail(path string, stderr io.Writer) error {
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("checking for NUL-padded tail: %w", err)
+	}
+	defer f.Close() //nolint:errcheck // read handle; write path (Truncate) checked separately
+
+	fd := int(f.Fd())
+	if err := lockRecorderFile(fd, path); err != nil {
+		return fmt.Errorf("checking for NUL-padded tail: %w", err)
+	}
+	defer func() {
+		if err := syscall.Flock(fd, syscall.LOCK_UN); err != nil {
+			fmt.Fprintf(stderr, "events: unlock: %v\n", err) //nolint:errcheck // best-effort stderr
+		}
+	}()
+
+	info, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("checking for NUL-padded tail: %w", err)
+	}
+	size := info.Size()
+	if size == 0 {
+		return nil
+	}
+
+	n := int64(nulTailScanWindow)
+	if size < n {
+		n = size
+	}
+	tail, ok, err := readNulTailWindow(f, size, n)
+	if err != nil {
+		return fmt.Errorf("checking for NUL-padded tail: %w", err)
+	}
+	if !ok {
+		return nil
+	}
+
+	if tail[len(tail)-1] != 0 {
+		// File does not end in a NUL byte at all: nothing to repair.
+		return nil
+	}
+
+	idx := bytes.LastIndexByte(tail, '\n')
+	if idx < 0 {
+		// No newline within the scan window: either the whole file is one
+		// unterminated line, or the NUL run is longer than the window.
+		// Neither is the pattern this repairs safely, so leave it alone.
+		return nil
+	}
+	for _, b := range tail[idx+1:] {
+		if b != 0 {
+			// Trailing bytes after the last newline are not all NUL, so
+			// this is not the delayed-allocation pattern — leave it for
+			// an operator rather than guessing at a truncation point.
+			return nil
+		}
+	}
+
+	truncateAt := size - n + int64(idx) + 1
+	if truncateAt >= size {
+		return nil
+	}
+	if err := f.Truncate(truncateAt); err != nil {
+		return fmt.Errorf("truncating NUL-padded tail: %w", err)
+	}
+	fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
+		"events: recovered %d-byte NUL-padded tail from unclean shutdown, truncated %q to %d bytes\n",
+		size-truncateAt, path, truncateAt)
 	return nil
 }
 
