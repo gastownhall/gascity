@@ -3249,6 +3249,33 @@ export const zWebhookRejectedPayload = z.object({
     webhook: z.string()
 });
 
+export const zWorkerClaimOutputBody = z.object({
+    bead: zBead,
+    status: z.string()
+});
+
+export const zWorkerCloseInputBody = z.object({
+    assignee: z.string().min(1),
+    bead_id: z.string().min(1),
+    branch: z.string().optional(),
+    commit: z.string().optional(),
+    outcome: z.string(),
+    reason: z.string().optional(),
+    session_id: z.string().optional()
+});
+
+export const zWorkerCloseOutputBody = z.object({
+    bead: zBead,
+    status: z.string()
+});
+
+export const zWorkerHeartbeatOutputBody = z.object({
+    claimed_at: z.string().optional(),
+    lease_owner: z.string().optional(),
+    lease_scope: z.string(),
+    status: z.string()
+});
+
 export const zWorkerOperationEventPayload = z.object({
     agent_name: z.string().optional(),
     bead_id: z.string().optional(),
@@ -3335,6 +3362,17 @@ export const zEventPayload = z.union([
     zWebhookRejectedPayload,
     zWorkerOperationEventPayload
 ]);
+
+export const zWorkerReleaseOutputBody = z.object({
+    bead: zBead,
+    status: z.string()
+});
+
+export const zWorkerSessionBody = z.object({
+    assignee: z.string().min(1),
+    bead_id: z.string().min(1),
+    session_id: z.string().optional()
+});
 
 export const zWorkflowAttemptSummary = z.object({
     active_attempt: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
@@ -9555,6 +9593,66 @@ export const zGetV0CityByCityNameWaitsQuery = z.object({
  * OK
  */
 export const zGetV0CityByCityNameWaitsResponse = zWaitListBody;
+
+export const zDeleteV0CityByCityNameWorkerClaimBody = zWorkerSessionBody;
+
+export const zDeleteV0CityByCityNameWorkerClaimHeaders = z.object({
+    'X-GC-Request': z.string().min(1)
+});
+
+export const zDeleteV0CityByCityNameWorkerClaimPath = z.object({
+    cityName: z.string().min(1).regex(/\S/)
+});
+
+/**
+ * OK
+ */
+export const zDeleteV0CityByCityNameWorkerClaimResponse = zWorkerReleaseOutputBody;
+
+export const zPostV0CityByCityNameWorkerClaimBody = zWorkerSessionBody;
+
+export const zPostV0CityByCityNameWorkerClaimHeaders = z.object({
+    'X-GC-Request': z.string().min(1)
+});
+
+export const zPostV0CityByCityNameWorkerClaimPath = z.object({
+    cityName: z.string().min(1).regex(/\S/)
+});
+
+/**
+ * OK
+ */
+export const zPostV0CityByCityNameWorkerClaimResponse = zWorkerClaimOutputBody;
+
+export const zPostV0CityByCityNameWorkerCloseBody = zWorkerCloseInputBody;
+
+export const zPostV0CityByCityNameWorkerCloseHeaders = z.object({
+    'X-GC-Request': z.string().min(1)
+});
+
+export const zPostV0CityByCityNameWorkerClosePath = z.object({
+    cityName: z.string().min(1).regex(/\S/)
+});
+
+/**
+ * OK
+ */
+export const zPostV0CityByCityNameWorkerCloseResponse = zWorkerCloseOutputBody;
+
+export const zPostV0CityByCityNameWorkerHeartbeatBody = zWorkerSessionBody;
+
+export const zPostV0CityByCityNameWorkerHeartbeatHeaders = z.object({
+    'X-GC-Request': z.string().min(1)
+});
+
+export const zPostV0CityByCityNameWorkerHeartbeatPath = z.object({
+    cityName: z.string().min(1).regex(/\S/)
+});
+
+/**
+ * OK
+ */
+export const zPostV0CityByCityNameWorkerHeartbeatResponse = zWorkerHeartbeatOutputBody;
 
 export const zDeleteV0CityByCityNameWorkflowByWorkflowIdHeaders = z.object({
     'X-GC-Request': z.string().min(1)

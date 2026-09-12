@@ -300,8 +300,14 @@ type Client struct {
 	// so a per-attempt 401 re-mint takes effect (never captured once).
 	isRemote     bool
 	streamClient *http.Client
-	tokenSource  TokenSource
-	tokenMu      sync.Mutex
+	// restClient is the remote REST transport (bounded timeout, re-auth on 401).
+	// The generated client owns it, so a request the spec does not describe — a
+	// worker lifecycle verb, until it is generated like every other op — needs
+	// it back: building a fresh http.Client here would drop the re-auth
+	// RoundTripper and send an unauthenticated write.
+	restClient  *http.Client
+	tokenSource TokenSource
+	tokenMu     sync.Mutex
 	// grantSource, when set, mints a single-use X-GC-City-Write grant for each
 	// MUTATING request (gate G18). Like tokenSource it is invoked live per
 	// request, never captured. nil means no grant is attached (a city that

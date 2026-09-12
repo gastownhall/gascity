@@ -105,6 +105,7 @@ func NewRemoteCityScopedClient(baseURL, cityName string, opts RemoteOptions) (*C
 		baseURL:      baseURL,
 		cityName:     cityName,
 		isRemote:     true,
+		restClient:   rest,
 		streamClient: stream,
 		tokenSource:  opts.Token,
 		grantSource:  opts.Grant,
@@ -194,27 +195,39 @@ func remoteGrantEditor(c *Client) genclient.RequestEditorFn {
 		if c.grantSource == nil || !isMutatingMethod(req.Method) {
 			return nil
 		}
-		body, err := bufferRequestBody(req)
-		if err != nil {
-			return err
-		}
-		sum := sha256.Sum256(body)
-		token, err := c.grantSource(GrantBinding{
-			Method:         req.Method,
-			Path:           req.URL.Path,
-			CanonicalQuery: req.URL.RawQuery,
-			BodySHA256:     hex.EncodeToString(sum[:]),
-			ReqDigest:      citywriteauth.ReqDigest(req.Method, req.URL.Path, req.URL.RawQuery, body),
-		})
-		if err != nil {
-			return fmt.Errorf("minting city-write grant: %w", err)
-		}
-		if strings.TrimSpace(token) == "" {
-			return fmt.Errorf("grant source returned an empty token")
-		}
-		req.Header.Set("X-GC-City-Write", token)
+		return c.attachCityWriteGrant(req)
+	}
+}
+
+// attachCityWriteGrant mints and sets the single-use X-GC-City-Write grant for
+// one mutating request, binding the exact body and query that go on the wire.
+// It is shared by the generated-client editor above and the hand-built worker
+// lifecycle requests (client_worker.go), so a verb the spec does not describe
+// yet cannot silently bind its grant to different bytes than a verb it does.
+func (c *Client) attachCityWriteGrant(req *http.Request) error {
+	if c.grantSource == nil || !isMutatingMethod(req.Method) {
 		return nil
 	}
+	body, err := bufferRequestBody(req)
+	if err != nil {
+		return err
+	}
+	sum := sha256.Sum256(body)
+	token, err := c.grantSource(GrantBinding{
+		Method:         req.Method,
+		Path:           req.URL.Path,
+		CanonicalQuery: req.URL.RawQuery,
+		BodySHA256:     hex.EncodeToString(sum[:]),
+		ReqDigest:      citywriteauth.ReqDigest(req.Method, req.URL.Path, req.URL.RawQuery, body),
+	})
+	if err != nil {
+		return fmt.Errorf("minting city-write grant: %w", err)
+	}
+	if strings.TrimSpace(token) == "" {
+		return fmt.Errorf("grant source returned an empty token")
+	}
+	req.Header.Set("X-GC-City-Write", token)
+	return nil
 }
 
 // isMutatingMethod reports whether an HTTP method mutates server state and thus

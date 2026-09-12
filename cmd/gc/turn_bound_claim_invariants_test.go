@@ -44,6 +44,14 @@ var claimCASAllowedFiles = map[string]bool{
 	"cmd_bd_by_id.go":      true,
 	"cmd_agent_script.go":  true,
 	"class_store_emit.go":  true,
+	// remote_worker_lifecycle.go is the same pull semantics one transport
+	// over: a worker seat that is not on the city host acquires its own claim
+	// (cr-gdeav.5.4 draft). Nothing in it decides WHO should own a bead — it
+	// forwards the identity the caller already carries (BEADS_ACTOR) to the
+	// store's CAS, exactly as cmd_bd_by_id.go does locally, and every verb
+	// outside the four-verb worker subset is refused before a request is made.
+	// The controller still never assigns.
+	"remote_worker_lifecycle.go": true,
 }
 
 // claimCASMarkers are the two shapes a claim compare-and-swap takes in this

@@ -319,7 +319,11 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 
 	bdArgs, err := rewriteBdHeartbeatArgs(bdArgs)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+		if readRemoteSelection().hasExplicitRemote() {
+			fmt.Fprint(stderr, workerSubsetRefusal(bdArgs[0])) //nolint:errcheck // best-effort stderr
+		} else {
+			fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+		}
 		return 1
 	}
 
@@ -332,6 +336,21 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 
 	cityPath, err := resolveBdCity(cityName)
 	if err != nil {
+		// The one thing resolveBdCity cannot resolve is a REMOTE target —
+		// resolveCity's capability gate refuses it (remote_target.go:135). Today
+		// that is a hard exit; with the worker subset admitted (cr-gdeav.5.4
+		// draft) it is the branch point: a worker seat that is not on the city
+		// host routes its claim / heartbeat / release / typed close over the
+		// control plane, and every other verb still refuses, now naming the
+		// subset it could use.
+		//
+		// The remote resolver is consulted HERE and not earlier on purpose. A
+		// local seat never pays for a contexts.toml read it did not already
+		// make, and a malformed context cannot fail a local command that used
+		// to work: isRemote must be true before anything changes.
+		if code, routed := routeBdWorkerRemote(bdArgs, stdout, stderr); routed {
+			return code
+		}
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
