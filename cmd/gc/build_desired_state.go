@@ -514,9 +514,11 @@ func buildDesiredStateWithSessionBeadsAt(
 			continue
 		}
 		namedSessionMode := ""
+		namedIdentity := ""
 		for j := range cfg.NamedSessions {
 			if cfg.NamedSessions[j].TemplateQualifiedName() == cfg.Agents[i].QualifiedName() {
 				namedSessionMode = cfg.NamedSessions[j].ModeOrDefault()
+				namedIdentity = cfg.NamedSessions[j].QualifiedName()
 				break
 			}
 		}
@@ -590,15 +592,35 @@ func buildDesiredStateWithSessionBeadsAt(
 			// work below; defaultNamedScaleTargets only preserves partial-query
 			// retention for configured named-session beads.
 			poolDir := agentCommandDir(cityPath, &cfg.Agents[i], cfg.Rigs)
+			// residentLive: the on_demand named session already has a LIVE canonical
+			// session. In that case pool demand for gc.routed_to work would spawn a
+			// {name}-N phantom BESIDE the resident (the crew-duplicate bug) — the live
+			// resident already claims routed work via its own hook. Suppress pool demand
+			// when resident, i.e. behave like 'always'. Only when the singleton is
+			// asleep do we register the one pool slot that wakes it (namedWorkReady
+			// covers only Assignee beads, not gc.routed_to).
+			residentLive := false
+			if namedSessionMode != "always" && namedIdentity != "" {
+				if spec, ok := findNamedSessionSpec(cfg, cityName, namedIdentity); ok {
+					// Must be present AND actually LIVE (not merely an open bead): an
+					// asleep/drained canonical session must still be woken by pool
+					// demand — poolSessionIsLiveInfo is the generic Info liveness check.
+					if info, has := findCanonicalNamedSessionInfo(bp.sessionBeads, spec); has && poolSessionIsLiveInfo(info) {
+						residentLive = true
+					}
+				}
+			}
 			if store != nil && !hasCustomScaleCheck {
 				ownTarget := ownScaleCheckTarget(cityPath, cfg, &cfg.Agents[i], store, rigStores, controlBinding, storeScopedControlDispatcher)
 				// mode='always': named session is unconditionally desired by the named
 				// pass; pool demand is redundant and creates {name}-N phantoms when N
 				// routed beads arrive. mode='on_demand': pool demand wakes the sleeping
 				// singleton (namedWorkReady covers only direct Assignee beads, not
-				// gc.routed_to). Leave defaultNamedScaleTargets unchanged for both modes
-				// (partial-query retention).
-				if namedSessionMode != "always" {
+				// gc.routed_to) — but ONLY when no resident is live (residentLive guard,
+				// else the {name}-N phantom spawns beside the resident). Leave
+				// defaultNamedScaleTargets unchanged for both modes (partial-query
+				// retention).
+				if namedSessionMode != "always" && !residentLive {
 					defaultScaleTargets = append(defaultScaleTargets, ownTarget)
 					namedOnDemandTemplates[template] = true
 				}
@@ -618,7 +640,7 @@ func buildDesiredStateWithSessionBeadsAt(
 				// mirrors these probes only for partial-query retention bookkeeping.
 				if !storeScopedControlDispatcher && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
 					cityTarget := defaultScaleCheckTarget{template: template, store: store, storeKey: "city"}
-					if namedSessionMode != "always" {
+					if namedSessionMode != "always" && !residentLive {
 						defaultScaleTargets = append(defaultScaleTargets, cityTarget)
 					}
 					defaultNamedScaleTargets = append(defaultNamedScaleTargets, cityTarget)
