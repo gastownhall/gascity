@@ -2426,6 +2426,34 @@ func TestRouteConvoyStatus_StaleBannerOver30s(t *testing.T) {
 	}
 }
 
+func TestRouteConvoyStatusJSONIncludesCacheAge(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-GC-Cache-Age-S", "45")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"convoy":   map[string]any{"id": "gc-1", "title": "old", "issue_type": "convoy", "status": "open", "created_at": "2026-04-23T10:00:00Z"},
+			"children": []map[string]any{},
+			"progress": map[string]any{"total": 0, "closed": 0},
+		})
+	}))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	cityPath := writeConvoyTestCity(t)
+	var stdout, stderr bytes.Buffer
+	if code := routeConvoyStatus(cityPath, "gc-1", c, "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if age, ok := result["_cache_age_s"].(float64); !ok || age != 45 {
+		t.Fatalf("_cache_age_s = %v, want 45: %s", result["_cache_age_s"], stdout.String())
+	}
+}
+
 func TestRouteConvoyStatus_WorkflowConvoyFallsBack(t *testing.T) {
 	// Graph/workflow convoys produce an empty Convoy.ID in the API response;
 	// the router must fall back to the local path so workflow-aware
