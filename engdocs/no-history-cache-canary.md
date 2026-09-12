@@ -2,8 +2,9 @@
 
 ## Purpose and limits
 
-This manifest is the release receipt for `b2763cc2e` (`fix(beads): preserve
-storage policy through cache`).  It proves the production-shaped cached
+This manifest is the release receipt for the merged revision of `fix(beads):
+preserve storage policy through cache` — record that revision as
+`CANDIDATE_REV` below.  It proves the production-shaped cached
 native-Dolt create path preserves the selected `no_history` class.  It does
 not erase existing Dolt history, remediate rows, resume the fleet, or authorize
 publisher, schedule, credential, or producer changes.
@@ -15,7 +16,10 @@ creating a competing canary.
 
 ## Preconditions
 
-- The candidate binary's checksum and `gc version` identify `b2763cc2e`.
+- Record `CANDIDATE_REV` from the candidate binary's own `gc version --json`
+  `commit` field, and confirm it identifies the merge commit that landed
+  `fix(beads): preserve storage policy through cache`.  The binary's checksum
+  and `CANDIDATE_REV` must agree; a `-dirty` suffix fails the precondition.
 - The previously checksummed `20c257b4fa5bb795ddbd448a5127a7ff0a158007`
   binary is available for rollback.
 - Runtime admission is frozen except for this canary.  Publishers, cron
@@ -27,8 +31,9 @@ creating a competing canary.
 
 ```sh
 BASELINE_UTC="$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
+CANDIDATE_REV="$(gc version --json | jq -r .commit)"
 CANARY_TAG="no-history-cache-$(date -u +%Y%m%dT%H%M%SZ)"
-printf '%s %s %s\n' "$BASELINE_UTC" "$CANARY_TAG" "b2763cc2e" \
+printf '%s %s %s\n' "$BASELINE_UTC" "$CANARY_TAG" "$CANDIDATE_REV" \
   | tee no-history-cache-canary.receipt
 ```
 
