@@ -31,11 +31,21 @@ package main
 //
 // # Why it cannot double-nudge the lanes it sits beside
 //
-// Two structural exclusions, both in resolve/snapshot rather than in timing:
-// any in_progress row under the seat's identities hands the whole seat to the
-// execution backstop for that tick, and the slot's own bound trigger bead is
-// skipped because nudgeStalledPoolClaims already re-delivers on exactly this
-// cadence for exactly that bead.
+// Three structural exclusions, all in resolve/snapshot rather than in timing:
+//
+//   - An in_progress row under any of the seat's identities hands the WHOLE seat
+//     to the execution backstop for that tick.
+//   - The slot's own bound gc.trigger_bead_id is skipped: nudgeStalledPoolClaims
+//     already re-delivers for exactly that bead on exactly this cadence.
+//   - A preassigned graph-v2 successor — an open task, assigned, carrying
+//     gc.continuation_group with gc.session_affinity=require — is skipped,
+//     because that is nudgeStalledPoolContinuations' candidate shape verbatim
+//     (continuationRowCouldBeCandidate). It is also the most common graph-v2
+//     handoff row in the fleet, so admitting it here would put two independent
+//     persisted ladders on the same bead every backoff window. Worse, the two
+//     lanes disagree on purpose about the cap: that one latches silent at three
+//     attempts, this one re-arms forever, so the overlap would not merely double
+//     the nudges — it would override the continuation lane's designed stop.
 
 import (
 	"encoding/json"
@@ -70,6 +80,10 @@ const (
 	// seatClaimNudgeStalledKey latches the typed escalation so it is reported
 	// ONCE per unclaimed bead rather than once per re-armed ladder.
 	seatClaimNudgeStalledKey = "seat_claim_nudge_stalled"
+	// seatClaimProbeCursorKey is where the bounded readiness search resumes on
+	// the next tick. See firstReadyRow: it is what stops a seat's long blocked
+	// prefix from hiding the one ready row behind it forever.
+	seatClaimProbeCursorKey = "seat_claim_probe_cursor"
 )
 
 // seatClaimNudgeLabel prefixes this lane's stdout diagnostics.
@@ -84,6 +98,10 @@ const seatClaimNudgeLabel = "seat-claim-nudge"
 // a seat parked next to a long queue of blocked work would otherwise pay one per
 // row per tick forever. Exhausting the budget reports HOLD, not "nothing ready":
 // the lane did not prove absence, it ran out of evidence.
+//
+// The budget bounds ONE tick, never the seat's queue: the window rotates across
+// ticks (firstReadyRow), so a ready row sorting behind more than this many
+// blocked ones is reached on a later tick instead of never.
 const maxSeatClaimReadinessProbes = 8
 
 // nudgeStalledSeatClaims re-delivers the configured claim nudge to a seat — a
@@ -121,10 +139,12 @@ func nudgeStalledSeatClaims(
 		return
 	}
 	runNudgeBackstop(sp, store, sessionBeads, nil, now, stdout, seatClaimNudgeLabel, seatClaimBackstop{
-		cfg: cfg,
-		sp:  sp,
-		now: now,
-		rec: rec,
+		cfg:    cfg,
+		sp:     sp,
+		now:    now,
+		rec:    rec,
+		store:  store,
+		stdout: stdout,
 		work: newSeatOpenWorkSnapshot(
 			now,
 			assignedWork, assignedWorkStores, assignedWorkStoreRefs,
@@ -209,7 +229,7 @@ func newSeatOpenWorkSnapshot(
 }
 
 func (s seatOpenWorkSnapshot) add(now time.Time, wb beads.Bead, identity string, assigned bool, store beads.Store, storeRef string) {
-	if !claimableSeatWork(wb, now) {
+	if !claimableSeatWork(wb, now) || ownedByContinuationLane(wb) {
 		return
 	}
 	row := seatOpenWork{
@@ -306,6 +326,27 @@ func claimableSeatWork(b beads.Bead, now time.Time) bool {
 	return !graphroute.IsControlDispatcherKind(kind) && !graphroute.IsWorkflowTopologyKind(kind)
 }
 
+// ownedByContinuationLane reports whether the row is a preassigned graph-v2
+// successor — nudgeStalledPoolContinuations' population, which it re-delivers on
+// this exact cadence and with its own persisted ladder.
+//
+// These are continuationRowCouldBeCandidate's pure-bead conditions
+// (build_desired_state.go) verbatim, minus the open-status one both call sites
+// have already settled, so the boundary between the two lanes is a partition
+// rather than an overlap. What that lane checks BEYOND these is store reads —
+// the row's ready projection, a live graph.v2 root in the same scope, exactly
+// one candidate per session — so a row excluded here that those reads later
+// reject is covered by neither lane. That residual is deliberate: re-deriving
+// another lane's provenance here would cost every seat a root read per tick to
+// recover rows whose own molecule is already broken, and the alternative —
+// admitting them — is two ladders on the fleet's most common handoff row.
+func ownedByContinuationLane(b beads.Bead) bool {
+	return strings.EqualFold(strings.TrimSpace(b.Type), "task") &&
+		strings.TrimSpace(b.Assignee) != "" &&
+		strings.TrimSpace(b.Metadata[beadmeta.ContinuationGroupMetadataKey]) != "" &&
+		strings.TrimSpace(b.Metadata[beadmeta.SessionAffinityMetadataKey]) == "require"
+}
+
 // hasHoldLabel reports whether any label puts the bead in the hold: dimension.
 // A hold:<value> label means "paused pending a specific actor or condition"
 // (engdocs/contributors/hold-label-conventions.md), which is the bead's own
@@ -345,6 +386,12 @@ type seatClaimBackstop struct {
 	now  time.Time
 	rec  events.Recorder
 	work seatOpenWorkSnapshot
+	// store and stdout are the session store and diagnostic sink the engine
+	// drives the rest of the state machine with. This predicate holds them too
+	// because one piece of its state — the readiness probe cursor — advances on a
+	// HOLD tick, and the engine has no callback there (see rotateProbeWindow).
+	store  beads.Store
+	stdout io.Writer
 }
 
 // governs covers pool slots and configured named interactive seats.
@@ -403,7 +450,7 @@ func (p seatClaimBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, sessNa
 	if !p.sessionIsQuiet(sessName) {
 		return backstopTarget{}, backstopResolutionHold
 	}
-	row, resolution := p.firstReadyRow(candidates)
+	row, resolution := p.firstReadyRow(s, sessName, candidates)
 	if resolution != backstopResolutionOutstanding {
 		return backstopTarget{}, resolution
 	}
@@ -416,31 +463,102 @@ func (p seatClaimBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, sessNa
 	}, backstopResolutionOutstanding
 }
 
-// firstReadyRow walks the seat's own open rows in their stable order and returns
+// firstReadyRow walks a bounded WINDOW of the seat's own open rows and returns
 // the first whose blocking dependencies are all satisfied.
 //
 // It settles readiness from live dependency edges rather than from the
 // is_blocked projection, which is absent on every store class production
-// actually hands this lane. A read that FAILS holds, and so does a spent probe
-// budget: neither is proof that the seat has nothing ready.
-func (p seatClaimBackstop) firstReadyRow(candidates []seatOpenWork) (seatOpenWork, backstopResolution) {
-	for i, row := range candidates {
-		if i >= maxSeatClaimReadinessProbes {
-			return seatOpenWork{}, backstopResolutionHold
-		}
+// actually hands this lane, so each candidate costs a store round-trip and the
+// window is capped at maxSeatClaimReadinessProbes. A read that FAILS holds, and
+// so does a window that did not cover every candidate: neither is proof that the
+// seat has nothing ready. Only a window that saw them all may report absence.
+//
+// The window ROTATES, and that is the whole point of the cursor. A fixed prefix
+// reproduces the very silence this lane exists to end: a seat whose one ready
+// row sorts behind nine dependency-blocked ones would re-probe the same spent
+// prefix on every tick and never reach it — permanently quiet, with the row open
+// and claimable the entire time. The cursor persists on the session bead and
+// advances by exactly one window, and ONLY when the window came up empty, so the
+// search walks the whole queue across consecutive ticks and then freezes the
+// moment it lands on a target: the same window keeps re-finding that row for the
+// rest of its ladder instead of drifting off it.
+func (p seatClaimBackstop) firstReadyRow(s beads.Bead, sessName string, candidates []seatOpenWork) (seatOpenWork, backstopResolution) {
+	window := len(candidates)
+	if window > maxSeatClaimReadinessProbes {
+		window = maxSeatClaimReadinessProbes
+	}
+	cursor := seatClaimProbeCursor(s, len(candidates))
+	unreadable := false
+	for i := 0; i < window; i++ {
+		row := candidates[(cursor+i)%len(candidates)]
 		if row.Store == nil {
-			return seatOpenWork{}, backstopResolutionHold
+			unreadable = true
+			continue
 		}
 		blocked, err := beadHasUnmetPlainBlocksDep(row.Store, row.BeadID)
 		if err != nil {
-			return seatOpenWork{}, backstopResolutionHold
+			// Keep walking rather than abandoning the window. One unreadable row
+			// is not a reason to stop asking about the rest, and bailing here
+			// would let a single permanently-failing row pin the window in place
+			// — the same permanent silence the rotation exists to prevent. The
+			// budget still bounds the cost, and the failure is remembered so this
+			// tick can never report absence.
+			unreadable = true
+			continue
 		}
 		if blocked {
 			continue
 		}
 		return row, backstopResolutionOutstanding
 	}
+	if window < len(candidates) {
+		p.rotateProbeWindow(s, sessName, cursor, window, len(candidates))
+		return seatOpenWork{}, backstopResolutionHold
+	}
+	if unreadable {
+		return seatOpenWork{}, backstopResolutionHold
+	}
 	return seatOpenWork{}, backstopResolutionClear
+}
+
+// seatClaimProbeCursor reads the persisted resume point, folded into range. A
+// queue that shrank between ticks must not leave the cursor past its end.
+func seatClaimProbeCursor(s beads.Bead, candidates int) int {
+	if candidates <= 0 {
+		return 0
+	}
+	cursor := atoiOr0(s.Metadata[seatClaimProbeCursorKey])
+	if cursor < 0 {
+		return 0
+	}
+	return cursor % candidates
+}
+
+// rotateProbeWindow persists where the next readiness search resumes and says on
+// stdout that this one ran out of budget.
+//
+// The write lives on a HOLD path, which no other state in this lane does, and
+// that is forced: a holding predicate does not observe, reserve, or clear, so
+// the engine offers no later callback to carry the cursor. Durability is not
+// optional either — a cursor that reset on every controller restart would walk
+// the same prefix forever on a city that restarts more often than it rotates.
+//
+// The line is the signal the original lane lacked. Before it, a seat whose queue
+// outran the probe budget was indistinguishable on stdout from a seat with
+// nothing ready: both were silent, and one of them was the incident.
+func (p seatClaimBackstop) rotateProbeWindow(s beads.Bead, sessName string, cursor, window, candidates int) {
+	if p.store == nil {
+		return
+	}
+	next := (cursor + window) % candidates
+	if !writeSessionMetadata(p.store, &s, map[string]string{
+		seatClaimProbeCursorKey: strconv.Itoa(next),
+	}, seatClaimNudgeLabel, p.stdout) {
+		return
+	}
+	fmt.Fprintf(p.stdout, //nolint:errcheck // best-effort
+		"%s: %s probed %d of its %d own open rows with none ready; rotating the readiness probe window to offset %d\n",
+		seatClaimNudgeLabel, sessName, window, candidates, next)
 }
 
 // sessionIsQuiet reports whether the runtime has observed no activity for at
@@ -487,7 +605,10 @@ func (p seatClaimBackstop) revalidate(target backstopTarget) backstopResolution 
 	if err != nil || current.ID != target.ID {
 		return backstopResolutionHold
 	}
-	if !claimableSeatWork(current, p.now) || !seatStillOwns(current, row) {
+	// ownedByContinuationLane is re-checked here, not only in the snapshot: the
+	// dispatcher stamps continuation metadata on a row as it preassigns it, so a
+	// row can become the continuation lane's between the snapshot and delivery.
+	if !claimableSeatWork(current, p.now) || ownedByContinuationLane(current) || !seatStillOwns(current, row) {
 		return backstopResolutionClear
 	}
 	blocked, err := beadHasUnmetPlainBlocksDep(row.Store, target.ID)
@@ -633,9 +754,11 @@ func writeSeatClaimMarker(
 	}, seatClaimNudgeLabel, stdout)
 }
 
-// clearSeatClaimMarker wipes the state machine — escalation latch included — so
-// the seat's next row starts a fresh window. No-op when there is nothing to
-// clear, so steady-state ticks stay write-free.
+// clearSeatClaimMarker wipes the state machine — escalation latch and probe
+// cursor included — so the seat's next row starts a fresh window. Clear means
+// the lane proved this seat owns nothing claimable, which makes the old resume
+// point meaningless. No-op when there is nothing to clear, so steady-state ticks
+// stay write-free.
 func clearSeatClaimMarker(store beads.Store, s *beads.Bead, stdout io.Writer) {
 	keys := []string{
 		seatClaimNudgeWorkKey,
@@ -645,6 +768,7 @@ func clearSeatClaimMarker(store beads.Store, s *beads.Bead, stdout io.Writer) {
 		seatClaimNudgeCycleKey,
 		seatClaimNudgeAtKey,
 		seatClaimNudgeStalledKey,
+		seatClaimProbeCursorKey,
 	}
 	dirty := false
 	for _, key := range keys {
