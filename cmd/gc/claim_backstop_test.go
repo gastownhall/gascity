@@ -113,11 +113,37 @@ func (f *claimBackstopFixture) asPoolSeat(t *testing.T) {
 		namedSessionIdentityMetadata: "",
 		"pool_managed":               "true",
 	})
+	f.assignWorkToTheSeat(t)
+}
+
+// assignWorkToTheSeat re-points the seeded row off gc.routed_to and onto the
+// seat's session name as an ASSIGNEE, leaving the seat itself alone. Named seats
+// own rows this way too: graphroute's SessionName and DirectSessionID branches
+// bind a concrete session and set step.Assignee (ApplyGraphRouteBinding), and
+// only the pool MetadataOnly branch leaves the row unassigned.
+func (f *claimBackstopFixture) assignWorkToTheSeat(t *testing.T) {
+	t.Helper()
 	if err := f.store.SetMetadataBatch(f.work.ID, map[string]string{beadmeta.RoutedToMetadataKey: ""}); err != nil {
 		t.Fatalf("clearing the routed marker: %v", err)
 	}
 	if err := f.store.Update(f.work.ID, beads.UpdateOpts{Assignee: &f.sessName}); err != nil {
-		t.Fatalf("assigning the work bead to the slot: %v", err)
+		t.Fatalf("assigning the work bead to the seat: %v", err)
+	}
+	f.work = f.reread(t, f.work.ID)
+}
+
+// stampContinuation puts the preassigned-graph-v2-successor pair on the seat's
+// row. A shared-context drain stamps exactly this on every executable item step
+// (applySharedDrainContext, internal/dispatch/drain.go) whatever the step routes
+// to, so the same shape reaches pool slots and named seats alike — which is why
+// both continuation rows below stamp it identically and differ only in the seat.
+func (f *claimBackstopFixture) stampContinuation(t *testing.T) {
+	t.Helper()
+	if err := f.store.SetMetadataBatch(f.work.ID, map[string]string{
+		beadmeta.ContinuationGroupMetadataKey: "grp-shared-drain-1",
+		beadmeta.SessionAffinityMetadataKey:   "require",
+	}); err != nil {
+		t.Fatalf("stamping the continuation metadata: %v", err)
 	}
 	f.work = f.reread(t, f.work.ID)
 }
@@ -201,6 +227,12 @@ func (f *claimBackstopFixture) sessionMeta(t *testing.T, key string) string {
 
 func (f *claimBackstopFixture) nudgeCount() int {
 	return strings.Count(f.stdout.String(), "seat-claim-nudge: nudged")
+}
+
+// rotations counts the probe-window rotations the lane reported on stdout. Each
+// one is also a session-bead write, so this doubles as the write-cost meter.
+func (f *claimBackstopFixture) rotations() int {
+	return strings.Count(f.stdout.String(), "rotating the readiness probe window")
 }
 
 func (f *claimBackstopFixture) stalledEvents() int {
@@ -742,12 +774,14 @@ func TestSeatClaimBackstopLeavesTheBoundTriggerBeadToThePoolLane(t *testing.T) {
 // rather than an inert lane.
 func TestSeatClaimBackstopLeavesPreassignedContinuationRowsToTheContinuationLane(t *testing.T) {
 	f := newClaimBackstopFixture(t)
-	f.asPoolSeat(t) // continuation delivery is pool-only, so the overlap is here
-	if err := f.store.SetMetadataBatch(f.work.ID, map[string]string{
-		beadmeta.ContinuationGroupMetadataKey: "grp-adopt-pr-1",
-		beadmeta.SessionAffinityMetadataKey:   "require",
-	}); err != nil {
-		t.Fatalf("stamping the continuation metadata: %v", err)
+	f.asPoolSeat(t)
+	f.stampContinuation(t)
+
+	// The pool seat is the whole premise: poolContinuationBackstop.governs takes
+	// pool slots and nothing else, so this is the only seat class where the two
+	// lanes can collide and the only one where deferring reaches anybody.
+	if !(poolContinuationBackstop{}).governs(f.session) {
+		t.Fatalf("fixture seat is not pool-managed, so the continuation lane never serves this row and deferring to it would strand the row")
 	}
 
 	f.idleFor(t, 10*time.Minute)
@@ -783,6 +817,53 @@ func TestSeatClaimBackstopLeavesPreassignedContinuationRowsToTheContinuationLane
 	}
 }
 
+// TestSeatClaimBackstopServesAContinuationRowOnANamedSeat is the other side of
+// that boundary, and the side a shape-only exclusion gets wrong.
+// nudgeStalledPoolContinuations governs pool slots and nothing else, so the
+// IDENTICAL row on a named seat is not its population at all: excluding it here
+// defers to nobody, and the row is covered by neither lane — permanently silent
+// with a claimable bead in front of it, which is the ga-evxqd symptom on the
+// exact population this lane was built for.
+//
+// The shape is not exotic on a named seat. A shared-context drain stamps
+// gc.continuation_group + gc.session_affinity=require on every executable item
+// step whatever the step routes to (applySharedDrainContext,
+// internal/dispatch/drain.go); graphroute's SessionName and DirectSessionID
+// branches then assign the step to a concrete session while leaving that pair
+// intact, since only the pool MetadataOnly branch rewrites it
+// (ApplyGraphRouteBinding); and preassignHookContinuationGroup pins a molecule's
+// open siblings to whoever claims first on ANY gc hook --claim, named seats
+// included.
+//
+// So the exclusion is scoped to the seats the continuation lane actually serves.
+// Here there is no second ladder to collide with, and the double-nudge rationale
+// that justifies the pool-side exclusion simply does not apply.
+func TestSeatClaimBackstopServesAContinuationRowOnANamedSeat(t *testing.T) {
+	f := newClaimBackstopFixture(t)
+	f.assignWorkToTheSeat(t)
+	f.stampContinuation(t)
+
+	// Pinned from the other side: if the continuation lane ever widens to named
+	// seats, this row stops being ours and the exclusion has to widen with it.
+	if (poolContinuationBackstop{}).governs(f.session) {
+		t.Fatalf("the continuation lane governs this named seat, so serving the row here would double-nudge it")
+	}
+
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if got := f.sessionMeta(t, seatClaimNudgeWorkKey); got != f.work.ID {
+		t.Fatalf("grace clock never started on the named seat's continuation row: work marker = %q, want %q; stdout=%s", got, f.work.ID, f.stdout.String())
+	}
+
+	f.advance(t)
+	if got := f.nudgeCount(); got != 1 {
+		t.Fatalf("nudges over a named seat's continuation row = %d, want exactly 1 (no other lane serves it); stdout=%s", got, f.stdout.String())
+	}
+	if got := f.lastNudge(); got != f.cfg.Agents[0].Nudge {
+		t.Fatalf("delivered nudge = %q, want the seat's configured claim nudge %q", got, f.cfg.Agents[0].Nudge)
+	}
+}
+
 // TestSeatClaimBackstopRotatesItsProbeWindowPastALongBlockedQueue is the
 // probe-budget row, and it reproduces the ga-evxqd symptom INSIDE the lane that
 // exists to cure it. Readiness costs a live dependency read per row, so one tick
@@ -815,8 +896,8 @@ func TestSeatClaimBackstopRotatesItsProbeWindowPastALongBlockedQueue(t *testing.
 	if got := f.nudgeCount(); got != 0 {
 		t.Fatalf("nudges on the first tick = %d, want 0 (the window is all blocked rows)", got)
 	}
-	if !strings.Contains(f.stdout.String(), "rotating the readiness probe window") {
-		t.Fatalf("a spent probe budget left no signal on stdout; stdout=%s", f.stdout.String())
+	if got := f.rotations(); got != 1 {
+		t.Fatalf("rotations after a spent probe budget = %d, want 1 signal on stdout; stdout=%s", got, f.stdout.String())
 	}
 
 	// Second tick: the rotated window reaches the tail and starts its clock.
@@ -853,8 +934,64 @@ func TestSeatClaimBackstopStillReportsAbsenceWhenTheWindowCoversEveryRow(t *test
 	if got := f.sessionMeta(t, seatClaimNudgeWorkKey); got != "" {
 		t.Fatalf("persisted work marker = %q, want cleared once every candidate was probed and none was ready", got)
 	}
-	if strings.Contains(f.stdout.String(), "rotating the readiness probe window") {
-		t.Fatalf("a fully-covered queue rotated its window; stdout=%s", f.stdout.String())
+	if got := f.rotations(); got != 0 {
+		t.Fatalf("a fully-covered queue rotated its window %d times; stdout=%s", got, f.stdout.String())
+	}
+}
+
+// TestSeatClaimBackstopPacesItsProbeWindowRotation bounds what the rotation
+// costs when nothing is wrong. A seat whose blocked queue outruns the probe
+// budget wants to rotate on EVERY patrol tick, and each rotation is a session-
+// bead write: unpaced, that is a steady-state write per seat per tick for as
+// long as the queue stays long — the unpaced-write class behind the
+// cache-reconcile flood, produced here by a lane that is supposed to cost
+// nothing while it waits.
+//
+// So the rotation rides the lane's own backoff clock. Ticks inside one window
+// are free and silent; the first tick past it advances the cursor by exactly one
+// window. The coverage guarantee survives unchanged — the windows still tile the
+// whole ring, on the cadence the rest of this state machine already runs on.
+func TestSeatClaimBackstopPacesItsProbeWindowRotation(t *testing.T) {
+	f := newClaimBackstopFixture(t)
+
+	// Ten of the seat's own rows, every one of them blocked, so the window never
+	// finds a target and every tick has a reason to rotate.
+	f.blockOn(t)
+	for i := 1; i <= 9; i++ {
+		blocked := f.routedWorkWithID(t, fmt.Sprintf("gc-b%d", i), "blocked input")
+		f.blockBead(t, blocked.ID)
+	}
+
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if got := f.rotations(); got != 1 {
+		t.Fatalf("rotations on the first tick = %d, want 1; stdout=%s", got, f.stdout.String())
+	}
+	const firstCursor = "8" // one full window off a fresh cursor
+	if got := f.sessionMeta(t, seatClaimProbeCursorKey); got != firstCursor {
+		t.Fatalf("cursor after the first rotation = %q, want %q", got, firstCursor)
+	}
+
+	// Four more patrol ticks inside the same backoff window. The queue is just as
+	// long and just as blocked, and none of them may write.
+	for i := 0; i < 4; i++ {
+		f.tick(t)
+	}
+	if got := f.rotations(); got != 1 {
+		t.Fatalf("rotations across one backoff window = %d, want 1 (the rest are paced out); stdout=%s", got, f.stdout.String())
+	}
+	if got := f.sessionMeta(t, seatClaimProbeCursorKey); got != firstCursor {
+		t.Fatalf("cursor moved inside one backoff window: %q -> %q", firstCursor, got)
+	}
+
+	// Past the window the ring keeps tiling.
+	f.advance(t)
+	if got := f.rotations(); got != 2 {
+		t.Fatalf("rotations after the backoff window elapsed = %d, want 2; stdout=%s", got, f.stdout.String())
+	}
+	const secondCursor = "6" // (8 + 8) mod 10
+	if got := f.sessionMeta(t, seatClaimProbeCursorKey); got != secondCursor {
+		t.Fatalf("cursor after the second rotation = %q, want %q", got, secondCursor)
 	}
 }
 
