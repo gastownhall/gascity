@@ -183,6 +183,8 @@ func (b *Breaker) Allow() bool {
 	if !b.settings.Enabled {
 		return true
 	}
+	var pending *pendingNotify
+	defer func() { pending.dispatch() }()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	now := b.now()
@@ -191,7 +193,7 @@ func (b *Breaker) Allow() bool {
 		if now.Before(b.deadline) {
 			return false
 		}
-		b.transitionLocked(StateHalfOpen, 0, now)
+		pending = b.transitionLocked(StateHalfOpen, 0, now)
 		b.lastProbeAt = now
 		return true
 	case StateHalfOpen:
@@ -247,12 +249,14 @@ func (b *Breaker) RecordSuccess() {
 	if !b.settings.Enabled {
 		return
 	}
+	var pending *pendingNotify
+	defer func() { pending.dispatch() }()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.failures = 0
 	b.trips = 0
 	if b.state != StateClosed {
-		b.transitionLocked(StateClosed, 0, b.now())
+		pending = b.transitionLocked(StateClosed, 0, b.now())
 	}
 }
 
@@ -265,6 +269,8 @@ func (b *Breaker) RecordFailure() {
 	if !b.settings.Enabled {
 		return
 	}
+	var pending *pendingNotify
+	defer func() { pending.dispatch() }()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	now := b.now()
@@ -274,12 +280,12 @@ func (b *Breaker) RecordFailure() {
 		return
 	case StateHalfOpen:
 		b.trips++
-		b.openLocked(now)
+		pending = b.openLocked(now)
 	default: // closed
 		b.failures++
 		if b.failures >= b.settings.ConsecutiveFailures {
 			b.trips = 1
-			b.openLocked(now)
+			pending = b.openLocked(now)
 		}
 	}
 }
@@ -294,6 +300,8 @@ func (b *Breaker) Trip() {
 	if !b.settings.Enabled {
 		return
 	}
+	var pending *pendingNotify
+	defer func() { pending.dispatch() }()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	switch b.state {
@@ -304,7 +312,7 @@ func (b *Breaker) Trip() {
 	default: // closed
 		b.trips = 1
 	}
-	b.openLocked(b.now())
+	pending = b.openLocked(b.now())
 }
 
 // State returns the current breaker state without mutating it.
@@ -317,12 +325,13 @@ func (b *Breaker) State() State {
 	return b.state
 }
 
-// openLocked moves to StateOpen with a full-jitter backoff deadline.
+// openLocked moves to StateOpen with a full-jitter backoff deadline and returns
+// the notification for the caller to dispatch after unlocking.
 // Caller must hold b.mu and have set b.trips.
-func (b *Breaker) openLocked(now time.Time) {
+func (b *Breaker) openLocked(now time.Time) *pendingNotify {
 	backoff := b.jitter(b.backoffCapLocked())
 	b.deadline = now.Add(backoff)
-	b.transitionLocked(StateOpen, backoff, now)
+	return b.transitionLocked(StateOpen, backoff, now)
 }
 
 // backoffCapLocked returns min(OpenMax, OpenBase << (trips-1)) with
@@ -341,16 +350,49 @@ func (b *Breaker) backoffCapLocked() time.Duration {
 	return capDur
 }
 
-// transitionLocked changes state and notifies the callback. Caller must
-// hold b.mu.
-func (b *Breaker) transitionLocked(to State, backoff time.Duration, now time.Time) {
-	from := b.state
-	if from == to {
+// pendingNotify is a state-change notification captured under b.mu and
+// dispatched after it is released. It carries the callback it was captured
+// with, so dispatch needs no lock of its own and cannot observe a callback
+// rewired after the transition it describes.
+type pendingNotify struct {
+	fn func(Transition)
+	t  Transition
+}
+
+// dispatch delivers the notification. Safe on a nil receiver, so callers can
+// defer it unconditionally without checking whether a transition occurred.
+//
+// MUST NOT be called while b.mu is held: the callback is user-supplied and is
+// expected to read breaker state (State(), Registry.States()), which takes the
+// same non-reentrant mutex.
+func (p *pendingNotify) dispatch() {
+	if p == nil || p.fn == nil {
 		return
 	}
+	p.fn(p.t)
+}
+
+// transitionLocked changes state and returns the notification to dispatch once
+// the lock is released, or nil if the state did not change. Caller must hold
+// b.mu.
+//
+// The callback is deliberately NOT invoked here. Calling it under b.mu
+// deadlocks any callback that reads breaker state — State() and
+// Registry.States() both take b.mu, and Go mutexes are not reentrant — which is
+// exactly what event and diagnostics wiring wants to do. Returning the
+// notification lets each public entry point dispatch it after unlocking.
+func (b *Breaker) transitionLocked(to State, backoff time.Duration, now time.Time) *pendingNotify {
+	from := b.state
+	if from == to {
+		return nil
+	}
 	b.state = to
-	if b.onChange != nil {
-		b.onChange(Transition{
+	if b.onChange == nil {
+		return nil
+	}
+	return &pendingNotify{
+		fn: b.onChange,
+		t: Transition{
 			Scope:    b.scope,
 			OpClass:  b.opClass,
 			From:     from,
@@ -358,7 +400,7 @@ func (b *Breaker) transitionLocked(to State, backoff time.Duration, now time.Tim
 			Failures: b.failures,
 			Backoff:  backoff,
 			At:       now,
-		})
+		},
 	}
 }
 
