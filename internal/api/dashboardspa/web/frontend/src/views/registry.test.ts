@@ -7,6 +7,14 @@ describe('views/registry', () => {
     expect(ids).toContain('health');
   });
 
+  it('registers the opt-in Beads Canvas at /canvas', () => {
+    const canvas = ALL_VIEWS.find((view) => view.id === 'canvas');
+    expect(canvas).toBeDefined();
+    expect(canvas?.kind).toBe('firstParty');
+    expect(canvas?.path).toBe('/canvas');
+    expect(canvas?.nav).toEqual({ label: 'Canvas', order: 35 });
+  });
+
   it('contains the activity view as a core route', () => {
     const activity = ALL_VIEWS.find((v) => v.id === 'activity');
     expect(activity).toBeDefined();

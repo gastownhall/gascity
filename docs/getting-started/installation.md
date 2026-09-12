@@ -5,11 +5,11 @@ description: Install Gas City from Homebrew, a release tarball, or source.
 
 ## Which method should I use?
 
-| Method | Best for | Installs deps? | Auto-upgrades? |
-|--------|----------|----------------|----------------|
-| [Homebrew](#homebrew-recommended) | macOS / Linux daily use | Yes (runtime deps) | `brew upgrade` |
-| [Direct download](#direct-download) | CI, containers, air-gapped hosts | No | Manual |
-| [Source build](#build-from-source) | Contributors, bleeding-edge | No | Manual |
+| Method                              | Best for                         | Installs deps?     | Auto-upgrades? |
+| ----------------------------------- | -------------------------------- | ------------------ | -------------- |
+| [Homebrew](#homebrew-recommended)   | macOS / Linux daily use          | Yes (runtime deps) | `brew upgrade` |
+| [Direct download](#direct-download) | CI, containers, air-gapped hosts | No                 | Manual         |
+| [Source build](#build-from-source)  | Contributors, bleeding-edge      | No                 | Manual         |
 
 **Most users should use Homebrew.** It installs all runtime dependencies
 automatically and keeps `gc` on your PATH. Choose direct download when you
@@ -21,17 +21,17 @@ managers). Choose source when you need unreleased changes or plan to contribute.
 Gas City requires a small set of runtime tools. Homebrew installs all of them
 for you; the other methods require manual installation.
 
-| Tool | Required | Min version | macOS | Linux | Notes |
-|------|----------|-------------|-------|-------|-------|
-| tmux | Yes | — | `brew install tmux` | `apt install tmux` | Session management |
-| jq | Yes | — | `brew install jq` | `apt install jq` | JSON processing |
-| git | Yes | — | (built-in) | (built-in) | Version control |
-| dolt | Yes | 2.1.0 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) | Beads data plane |
-| bd (Beads CLI) | Yes | 1.0.4 | `brew install beads` (see note) | [releases](https://github.com/gastownhall/beads/releases) | Issue tracking |
-| flock | Yes | — | `brew install flock` | (built-in via util-linux) | File locking |
-| gh | Optional | — | `brew install gh` | [cli.github.com](https://cli.github.com/) | GitHub gate checks |
-| Go 1.26+ | Source only | 1.26 | `brew install go` | [golang.org](https://go.dev/dl/) | Compiler |
-| make | Source only | — | (built-in) | `apt install make` (or `build-essential`) | Drives `make install` |
+| Tool           | Required    | Min version    | macOS                           | Linux                                                     | Notes                 |
+| -------------- | ----------- | -------------- | ------------------------------- | --------------------------------------------------------- | --------------------- |
+| tmux           | Yes         | —              | `brew install tmux`             | `apt install tmux`                                        | Session management    |
+| jq             | Yes         | —              | `brew install jq`               | `apt install jq`                                          | JSON processing       |
+| git            | Yes         | —              | (built-in)                      | (built-in)                                                | Version control       |
+| dolt           | Yes         | 2.1.0 or newer | `brew install dolt`             | [releases](https://github.com/dolthub/dolt/releases)      | Beads data plane      |
+| bd (Beads CLI) | Yes         | 1.0.4          | `brew install beads` (see note) | [releases](https://github.com/gastownhall/beads/releases) | Issue tracking        |
+| flock          | Yes         | —              | `brew install flock`            | (built-in via util-linux)                                 | File locking          |
+| gh             | Optional    | —              | `brew install gh`               | [cli.github.com](https://cli.github.com/)                 | GitHub gate checks    |
+| Go 1.26+       | Source only | 1.26           | `brew install go`               | [golang.org](https://go.dev/dl/)                          | Compiler              |
+| make           | Source only | —              | (built-in)                      | `apt install make` (or `build-essential`)                 | Drives `make install` |
 
 Use a final Dolt 2.1.0 or newer. Gas City's managed Dolt checks reject older
 and pre-release builds because they are below the managed bd/Dolt compatibility
@@ -110,12 +110,12 @@ brew untap gastownhall/gascity             # remove the tap
 
 Release tarballs are published for every tagged version. Supported platforms:
 
-| OS | Architecture | Archive name |
-|----|-------------|--------------|
+| OS             | Architecture          | Archive name                          |
+| -------------- | --------------------- | ------------------------------------- |
 | macOS (darwin) | Apple Silicon (arm64) | `gascity_VERSION_darwin_arm64.tar.gz` |
-| macOS (darwin) | Intel (amd64) | `gascity_VERSION_darwin_amd64.tar.gz` |
-| Linux | x86_64 (amd64) | `gascity_VERSION_linux_amd64.tar.gz` |
-| Linux | ARM (arm64) | `gascity_VERSION_linux_arm64.tar.gz` |
+| macOS (darwin) | Intel (amd64)         | `gascity_VERSION_darwin_amd64.tar.gz` |
+| Linux          | x86_64 (amd64)        | `gascity_VERSION_linux_amd64.tar.gz`  |
+| Linux          | ARM (arm64)           | `gascity_VERSION_linux_arm64.tar.gz`  |
 
 ### Download and install
 
@@ -202,6 +202,34 @@ To build without installing globally:
 make build          # outputs bin/gc in the repo root
 ./bin/gc version
 ```
+
+### Export a custom build to another machine
+
+Custom or unreleased builds can be packaged without copying a checkout or a Go
+toolchain to the destination machine:
+
+```bash
+make build
+scripts/export-gc-bundle.sh
+```
+
+The command writes a platform-specific archive and adjacent SHA-256 receipt to
+`dist/`. The archive contains the binary's version/commit provenance, its own
+binary checksum, and an atomic installer. On a machine with the same operating
+system and architecture, verify the adjacent receipt, extract the archive, and
+run `./install.sh` from inside it. The default destination is
+`~/.local/bin/gc`; pass a prefix such as `/usr/local` as the first argument to
+choose another destination.
+
+The installer preserves an existing `gc` command with a timestamped `.previous`
+suffix before replacing it. This matters on machines with Graphviz: Graphviz also
+ships a utility named `gc`. Gas City does not require Graphviz, and the export
+installer does not uninstall it. Prefer the per-user destination and put
+`~/.local/bin` before Homebrew in `PATH` so both packages remain installed.
+
+The bundle is intentionally not cross-platform. Run the exporter once on each
+supported target platform/architecture you need, or use the official release
+archives above for an unmodified release.
 
 On macOS, `make build` signs the binary with a stable local codesigning
 identity when one is available, which helps macOS remember local permission
