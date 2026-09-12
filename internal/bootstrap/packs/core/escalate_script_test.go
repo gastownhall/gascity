@@ -49,7 +49,8 @@ func runEscalate(t *testing.T, binDir string, extraEnv ...string) (string, error
 		env = append(env, entry)
 	}
 	env = append(env, "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	cmd.Env = append(env, extraEnv...)
+	env = append(env, extraEnv...)
+	cmd.Env = env
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
