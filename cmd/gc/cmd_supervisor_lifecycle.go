@@ -1253,10 +1253,11 @@ func supervisorSecretsEnvFilePath() string {
 
 // supervisorSecretsEnvFileEntries reads ${GC_HOME}/secrets.env and returns its
 // parsed key/value pairs. A missing file is the normal case and yields nil. A
-// present-but-unreadable or malformed file is logged to stderr and ignored so
-// a bad secrets file never blocks supervisor install/start; the caller still
-// gates whatever is returned on the persist allowlist or an explicit
-// GC_SUPERVISOR_ENV opt-in.
+// present-but-unreadable file is logged to stderr and ignored so a bad
+// secrets file never blocks supervisor install/start. A malformed line is
+// logged to stderr individually and skipped; every other, validly-parsed
+// entry in the file is still returned. The caller still gates whatever is
+// returned on the persist allowlist or an explicit GC_SUPERVISOR_ENV opt-in.
 func supervisorSecretsEnvFileEntries() map[string]string {
 	path := supervisorSecretsEnvFilePath()
 	data, err := os.ReadFile(path)
@@ -1266,10 +1267,9 @@ func supervisorSecretsEnvFileEntries() map[string]string {
 		}
 		return nil
 	}
-	entries, err := processenv.ParseEnvFile(string(data))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "gc: parsing supervisor secrets file %q: %v\n", path, err)
-		return nil
+	entries, errs := processenv.ParseEnvFile(string(data))
+	for _, parseErr := range errs {
+		fmt.Fprintf(os.Stderr, "gc: parsing supervisor secrets file %q: %v\n", path, parseErr)
 	}
 	return entries
 }

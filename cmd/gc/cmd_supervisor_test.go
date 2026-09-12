@@ -764,10 +764,10 @@ func TestBuildSupervisorServiceDataMissingSecretsFileIsNotAnError(t *testing.T) 
 }
 
 // TestBuildSupervisorServiceDataMalformedSecretsFileDegradesGracefully asserts
-// the documented fail-safe: a malformed secrets file does not block service
-// file generation (no error) and contributes no env — the malformed file is
-// ignored rather than partially applied, so the good first line must not leak
-// through.
+// the fix for #5982: a malformed line in the secrets file does not block
+// service file generation (no error) and does not wipe out the entries that
+// parsed cleanly — only the malformed line itself is skipped, the good entry
+// still reaches ExtraEnv.
 func TestBuildSupervisorServiceDataMalformedSecretsFileDegradesGracefully(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
@@ -781,8 +781,9 @@ func TestBuildSupervisorServiceDataMalformedSecretsFileDegradesGracefully(t *tes
 	if err != nil {
 		t.Fatalf("buildSupervisorServiceData with malformed secrets file: %v", err)
 	}
-	if _, ok := supervisorServiceEnvMap(data.ExtraEnv)["ANTHROPIC_AUTH_TOKEN"]; ok {
-		t.Fatalf("ExtraEnv should not include any key from a malformed secrets file")
+	if got := supervisorServiceEnvMap(data.ExtraEnv)["ANTHROPIC_AUTH_TOKEN"]; got != "sk-from-file" {
+		t.Fatalf("ExtraEnv[ANTHROPIC_AUTH_TOKEN] = %q, want %q (a malformed later line must not drop a good earlier entry)",
+			got, "sk-from-file")
 	}
 }
 
