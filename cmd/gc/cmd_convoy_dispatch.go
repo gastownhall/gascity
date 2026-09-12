@@ -294,6 +294,15 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 				opts.MemberStores = []beads.Store{store}
 			}
 		case "retry-eval":
+			// A retry-eval validating a required artifact resolves the
+			// artifact worktree through the workflow's source bead or input
+			// convoy, which are work class; when the graph class relocated,
+			// supply the work leg as the member tail so that read crosses the
+			// class boundary. Route-gated exactly like the drain: on every
+			// other city graphStore IS store and the tail stays empty.
+			if graphStore != store {
+				opts.MemberStores = []beads.Store{store}
+			}
 			sp, err := dispatchControlSessionProvider()
 			if err != nil {
 				return err
@@ -306,6 +315,11 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 			}
 		case "retry", "ralph":
 			opts.FormulaSearchPaths = workflowFormulaSearchPaths(cfg, bead)
+			// Same cross-store required-artifact source resolution as
+			// retry-eval above.
+			if graphStore != store {
+				opts.MemberStores = []beads.Store{store}
+			}
 			sp, err := dispatchControlSessionProvider()
 			if err != nil {
 				return err
