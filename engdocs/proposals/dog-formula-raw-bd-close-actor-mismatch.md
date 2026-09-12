@@ -22,8 +22,9 @@ cannot close gm-nerjd0: assignee is "gm-wisp-mmj4dz", actor is "bd__dog-1-pool";
 
 `examples/bd/dolt/formulas/mol-dog-stale-db.toml` (phase `vapor`; live copy
 symlinked as `.beads/formulas/mol-dog-stale-db.formula.toml`) ends its
-`cleanup` step with exactly this raw call, confirmed at the file's last three
-lines:
+`cleanup` step with exactly this raw call, confirmed at line 320, the tail of
+the cleanup step script (the file continues to line 327 with the step's
+closing fence and exit-criteria prose):
 
 ```bash
 bd close "$WORK_BEAD" --reason "Stale DB scan complete (orphans=${ORPHAN_TOTAL}, applied=${APPLIED}, escalated=${ESCALATED})"
@@ -39,9 +40,14 @@ were entirely correct. Worked example, 2026-09-11, gc-management, work bead
 `gm-nerjd0` (session `bd__dog-1-pool`, wisp assignee `gm-wisp-mmj4dz`): the
 scan was clean (`dropped.count=0`, `force_blockers=[]`,
 `summary.errors_total=0`), the JSON report attached correctly via
-`bd update --append-notes` (line 108 — no assignee/actor guard on that verb),
-and only the terminal `bd close` failed. `gc bd close gm-nerjd0 --reason
-"..."` against the same bead succeeds immediately, confirming the diagnosis.
+`bd update --append-notes` (line 108 — no assignee/actor guard on that verb,
+and the call is already wrapped in a non-fatal warn-and-continue, so a failure
+there would not have surfaced anyway), and only the terminal `bd close`
+failed. A single run of `gc bd close gm-nerjd0 --reason "..."` against the
+same bead succeeded. That is one observation, not an established mechanism:
+issue #5814 reports the `gc bd` wrapper failing identically on the same
+assignee/actor guard. See Open Question 4 — the experiment described there
+must settle this before FR-1 is implemented.
 
 This is the **only** call site of its kind in the repository. A repo-wide
 search of every `*.formula.toml` under `examples/**/formulas` and
@@ -81,9 +87,11 @@ constraints and conventions below.
 1. Every `mol-dog-stale-db` run that reaches its success tail (no-op,
    soft-escalation, or apply outcome) successfully closes its own work bead —
    no spurious exit-1 on a run that completed correctly.
-2. The fix is the minimal, already-established `bd close` → `gc bd close`
-   substitution — no new mechanism invented, no change to the probe/decide/
-   escalate/apply decision logic itself.
+2. The leading hypothesis is the minimal, already-established `bd close` →
+   `gc bd close` substitution — no new mechanism invented, no change to the
+   probe/decide/escalate/apply decision logic itself. It is a hypothesis, not
+   an established fix: Open Question 4 must settle whether the wrapper really
+   resolves the actor differently here before the substitution is made.
 3. The intentional hard-abort paths (`fail_open_after_drain`, used when the
    dry-run scan itself fails or returns invalid JSON) continue to leave the
    work bead open exactly as today — that is deliberate, commented-as-such
@@ -137,10 +145,10 @@ constraints and conventions below.
 
 | ID | Requirement | Priority | Acceptance Criteria |
 |----|-------------|----------|---------------------|
-| FR-1 | **Fix the single regressed call site.** In `examples/bd/dolt/formulas/mol-dog-stale-db.toml`'s `cleanup` step, change the terminal `bd close "$WORK_BEAD" --reason "..."` to `gc bd close "$WORK_BEAD" --reason "..."`. | Must | A clean/no-op/soft-escalation/apply run of the formula exits 0 and `bd show "$WORK_BEAD"` reports `status: closed` with the expected reason string attached. |
+| FR-1 | **Fix the single regressed call site.** In `examples/bd/dolt/formulas/mol-dog-stale-db.toml`'s `cleanup` step, change the terminal `bd close "$WORK_BEAD" --reason "..."` to `gc bd close "$WORK_BEAD" --reason "..."`. Contingent on Open Question 4 resolving in favor of the wrapper; if the experiment shows `gc bd close` failing identically, FR-1 is void and this PRD needs rework. | Must | A clean/no-op/soft-escalation/apply run of the formula exits 0 and `bd show "$WORK_BEAD"` reports `status: closed` with the expected reason string attached. |
 | FR-2 | **No regression to intentional hard-abort behavior.** `fail_open_after_drain`'s call sites (dry-run scan failure, invalid JSON, and any other existing hard-abort condition in this step) continue to `drain_ack_once` then `exit 1` **without** attempting a close, exactly as today. | Must | The six table-driven cases in `TestStaleDBFormulaFailurePathsDrainAck` (`examples/bd/dolt/stale_db_formula_test.go`) still pass unchanged: dry run command failure, invalid scan JSON, apply command failure, invalid apply JSON, apply misses dry-run reclaimable bytes, and invalid identifier skipped in scan. Each must still exit 1 with the work bead left open. |
 | FR-3 | **Harden the adjacent raw-`bd` call for consistency.** Change `append_report_note`'s `bd update "$WORK_BEAD" --append-notes ...` (line 108) to `gc bd update "$WORK_BEAD" --append-notes ...`. Not currently broken (no assignee/actor guard fires on this verb today), but flagged by the bug report as the same call family; fixing it alongside FR-1 pre-empts the same class of failure if a future `bd`/`gc` version tightens `update`'s actor guard the way `close`'s is already guarded. | Should | Line 108 uses `gc bd update`; append-notes content/format and all call sites that invoke `append_report_note` (including hard-abort paths) are otherwise unchanged. |
-| FR-4 | **Add a merge-time guard against this regression class.** A test (or lint, per architect's choice — see Open Questions) fails the build if any `*.formula.toml` step script under `examples/**/formulas` or `internal/bootstrap/packs/**/formulas` contains a raw (non-`gc`-prefixed) `bd close`, `bd update ... --status closed`, `bd heartbeat`, or `bd unclaim` invocation, mirroring the convention already followed by every other shipped formula (see Problem Statement). The guard must parse the TOML and inspect only executable step-script content inside the relevant string fields — not grep whole files — because prose and comments live in the same file as the scripts. | Should | Guard fails against a fixture/test formula containing a raw `bd close` line in a step script; passes against the corrected formula set (post FR-1/FR-3). Must not false-positive on prose mentions of `bd` verbs in a formula's own header/doc text (line 22 of this file is such a `bd show` prose mention). |
+| FR-4 | **Add a merge-time guard against this regression class.** A test (or lint, per architect's choice — see Open Questions) fails the build if any `*.formula.toml` step script under `examples/**/formulas` or `internal/bootstrap/packs/**/formulas` contains a raw (non-`gc`-prefixed) `bd close`, `bd update ... --status closed`, `bd heartbeat`, or `bd unclaim` invocation, mirroring the convention already followed by every other shipped formula (see Problem Statement). The guard must parse the TOML and inspect only executable step-script content inside the relevant string fields — not grep whole files — because prose and comments live in the same file as the scripts. If Open Question 4 shows both forms failing identically, this guard standardizes a call spelling that was not the cause, and the underlying actor/assignee identity reconciliation remains unaddressed. | Should | Guard fails against a fixture/test formula containing a raw `bd close` line in a step script; passes against the corrected formula set (post FR-1/FR-3). Must not false-positive on prose mentions of `bd` verbs in a formula's own header/doc text (line 22 of this file is such a `bd show` prose mention). |
 
 ## Non-Functional Requirements
 
