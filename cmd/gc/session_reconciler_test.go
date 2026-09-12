@@ -8906,6 +8906,102 @@ func TestReconcileSessionBeads_RollsBackConfiguredNamedSessionThatDiedDuringStar
 	}
 }
 
+// TestReconcileSessionBeads_RollsBackSessionThatDiedDuringStartupWithoutSessionKey
+// probes ga-pmafyc (round 5): the generalized, non-SessionKey-gated twin of
+// TestReconcileSessionBeads_RollsBackConfiguredNamedSessionThatDiedDuringStartup
+// above. That test's diedDuringStartup=true is only reachable through the
+// LOCAL post-start liveness check inside runPreparedStartCandidate, which
+// itself requires a non-empty session_key to run at all
+// (TestExecutePreparedStartWave_NoStaleCheckWithoutSessionKey) — so it never
+// fires for a session with no SessionIDFlag, like a plain bash-script agent.
+//
+// Here the provider's Start() call returns runtime.ErrSessionDiedDuringStartup
+// directly (as the tmux adapter does when the pane exits before the post-spawn
+// liveness check runs — internal/runtime/tmux/adapter.go). With no session_key
+// and no resume shape to strip, retryFreshStartAfterStaleKey correctly declines
+// to retry (internal/session/chat.go, pinned by
+// TestStartRuntimeOnly_EmptySessionKeyWithoutResumeShapeDoesNotRelaunch) and
+// the sentinel-wrapped error propagates up as "resuming session: %w" — but
+// runPreparedStartCandidate currently has no case that recognizes this
+// propagated sentinel, so diedDuringStartup stays false and the configured
+// named session is incorrectly PRESERVED instead of rolled back. That leaves
+// pending_create_claim stuck "true" forever, which makes
+// pendingCreateStartInFlightInfo keep reporting start_in_flight on every
+// subsequent tick — starving the session of any further restart attempt. This
+// is the actual path TestGastown_Reconciler_SessionRestartsAfterExit hits
+// (its "shortlived" agent has no SessionIDFlag, hence no session_key), and why
+// that integration test still bimodally flakes despite the round-4 fix above.
+func TestReconcileSessionBeads_RollsBackSessionThatDiedDuringStartupWithoutSessionKey(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "helper",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{Template: "helper", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "helper")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  sessionName,
+		TemplateName: "helper",
+	}
+
+	// No session_key, no resume_flag, no session_id_flag: matches a plain
+	// bash-script agent (no SessionIDFlag configured), exactly like the
+	// integration test's "shortlived" agent.
+	session := env.createSessionBead(sessionName, "helper")
+	env.setSessionMetadata(&session, map[string]string{
+		"session_name_explicit":      "true",
+		"pending_create_claim":       "true",
+		"state":                      "creating",
+		"continuation_epoch":         "1",
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "helper",
+		namedSessionModeMetadata:     "always",
+	})
+
+	// The provider reports the death directly from Start(), the way the tmux
+	// adapter does when the pane's process exits before the post-spawn
+	// liveness probe runs — not via the separate post-start liveness check
+	// that dieAfterStartProvider simulates in the sibling test above.
+	env.sp.StartErrors = map[string]error{
+		sessionName: fmt.Errorf("%w: session %q", runtime.ErrSessionDiedDuringStartup, sessionName),
+	}
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+	woken := reconcileSessionBeads(
+		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
+		env.store, nil, nil, nil, env.dt, nil, false, nil, "",
+		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+		env.startOptions...,
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+
+	b, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	t.Logf("post-reconcile bead: status=%q metadata=%#v", b.Status, b.Metadata)
+	if b.Status != "closed" {
+		t.Fatalf("status = %q, want closed (a configured named session whose provider reports died-during-startup directly from Start(), with no session_key to recover through, must roll back — not be preserved as if still creating)", b.Status)
+	}
+	if got := b.Metadata["session_name"]; got != "" {
+		t.Errorf("session_name = %q, want empty after rollback", got)
+	}
+	if got := b.Metadata["pending_create_claim"]; got != "" {
+		t.Errorf("pending_create_claim = %q, want empty after rollback", got)
+	}
+	if want := sessionpkg.CanonicalCloseReason("failed-create"); b.Metadata["close_reason"] != want {
+		t.Errorf("close_reason = %q, want %q", b.Metadata["close_reason"], want)
+	}
+	if b.Metadata["state"] != "failed-create" {
+		t.Errorf("state = %q, want %q", b.Metadata["state"], "failed-create")
+	}
+}
+
 func TestReconcileSessionBeads_PoolScaleDownOrphansExcess(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
