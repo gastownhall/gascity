@@ -786,9 +786,14 @@ func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg conf
 	if beadsCfg.UsesBD105ReadySemantics() {
 		includeEphemeral = " --include-ephemeral"
 	}
+	// Keep these two conditions in lockstep with mergeControlReadyGroups: mid-
+	// instantiation beads are hidden, and so are the steps of a pour that
+	// aborted partway (molecule_failed), which are unworkable and can only emit
+	// one escalation per step (ga-033u0e).
 	jqFilter := fmt.Sprintf(
-		`reduce add[] as $item ([]; if (($item.metadata // {})[%q] // "") != "" then . elif any(.[]; .id == $item.id) then . else . + [$item] end)`,
+		`reduce add[] as $item ([]; if (($item.metadata // {})[%q] // "") != "" then . elif (($item.metadata // {})[%q] // "") == "true" then . elif any(.[]; .id == $item.id) then . else . + [$item] end)`,
 		beadmeta.InstantiatingMetadataKey,
+		beadmeta.MoleculeFailedMetadataKey,
 	)
 	jqFilter = strings.ReplaceAll(jqFilter, `\`, `\\`)
 	jqFilter = strings.ReplaceAll(jqFilter, `"`, `\"`)

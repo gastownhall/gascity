@@ -29,6 +29,34 @@ func TestDoHookFiltersDeferredBeads(t *testing.T) {
 	}
 }
 
+// TestDoHookFiltersFailedPartialMoleculeBeads is the ga-033u0e regression at
+// the shared hook chokepoint. When instantiation aborts partway it marks the
+// beads it already wrote molecule_failed AND clears their gc.instantiating
+// fence — the exact shape asserted here — so the failure path used to hand
+// unworkable steps to whichever agent's hook ran next. Each such step can only
+// fail on its missing root and mail an escalation.
+func TestDoHookFiltersFailedPartialMoleculeBeads(t *testing.T) {
+	runner := func(_, _ string) (string, error) {
+		return `[
+			{"id":"partial-step","status":"open","metadata":{"molecule_failed":"true","gc.instantiating":""}},
+			{"id":"healthy-1","status":"open","metadata":{"gc.kind":"run"}}
+		]`, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHook("bd ready", ".", false, runner, &stdout, &stderr, hookVisibility{})
+	if code != 0 {
+		t.Fatalf("doHook() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	if strings.Contains(out, "partial-step") {
+		t.Errorf("step of a partially-instantiated workflow surfaced as claimable work: %s", out)
+	}
+	if !strings.Contains(out, "healthy-1") {
+		t.Errorf("healthy bead missing from hook output: %s", out)
+	}
+}
+
 func TestDoHookFiltersDepBlockedBeads(t *testing.T) {
 	runner := func(_, _ string) (string, error) {
 		return `[

@@ -102,6 +102,15 @@ func TestEvaluatePoolNonInteger(t *testing.T) {
 	}
 }
 
+// TestEvaluatePoolDefaultScaleCheckCountsRoutedReadyWork runs the default
+// scale_check against a real bd: no demand, then one routed row, then that row
+// beside the step of a pour that aborted partway. bd knows nothing about
+// molecule_failed, so its routed reader returns the marked step exactly as it
+// returns live work; the count-form's own jq stage is what has to drop it,
+// because the hook drops the same row on the serve side and a seat minted for
+// a row its hook will never show it drains and is re-counted forever
+// (ga-033u0e). Holding at 1 rather than reading 0 proves the reader returned
+// both rows and the filter was selective.
 func TestEvaluatePoolDefaultScaleCheckCountsRoutedReadyWork(t *testing.T) {
 	skipSlowCmdGCTest(t, "uses real bd and jq for default scale_check coverage; run make test-cmd-gc-process for full coverage")
 	bdPath, err := findPreferredBinary("bd", "/home/ubuntu/.local/bin/bd")
@@ -143,6 +152,17 @@ func TestEvaluatePoolDefaultScaleCheckCountsRoutedReadyWork(t *testing.T) {
 	}
 	if got != 1 {
 		t.Fatalf("evaluatePool with routed work = %d, want 1", got)
+	}
+
+	runExternal(t, dir, bdPath, "create", "--json", "step of a partial pour", "-t", "task",
+		"--metadata", `{"gc.routed_to":"worker","molecule_failed":"true"}`)
+
+	got, err = evaluatePool("worker", scaleParamsFor(agent), dir, nil, shellScaleCheck)
+	if err != nil {
+		t.Fatalf("evaluatePool with a partial-workflow step: %v", err)
+	}
+	if got != 1 {
+		t.Fatalf("evaluatePool with a partial-workflow step = %d, want 1 (only the live row is demand)", got)
 	}
 }
 
