@@ -14,6 +14,11 @@ import (
 // invocation (observed in production: 40 mails for one unchanged my_db
 // marker). The event still fires every cycle so automation keeps observing
 // each check; only the mail is gated.
+//
+// The strand gate spends one automatic retry before a stale marker is
+// considered stranded (see TestCompactScriptStalePendingPushMarkerGetsOneAutomaticRetry),
+// so the cycle that consumes that retry runs first here and the mail-cadence
+// window covers the two stranded cycles that follow it.
 func TestCompactScriptStalePendingPushMarkerDoesNotRemailEveryCycle(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	firstOut, err := fixture.run(t, "remote_push_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
@@ -22,6 +27,13 @@ func TestCompactScriptStalePendingPushMarkerDoesNotRemailEveryCycle(t *testing.T
 	}
 	pendingPush := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-push", "beads")
 	replaceCompactMarkerCreatedAt(t, pendingPush, "1970-01-01T00:00:00Z")
+
+	// Spend the one automatic retry the strand gate owes a stale marker; it
+	// fails again, so the marker survives and every later cycle is stranded.
+	retryOut, err := fixture.run(t, "remote_push_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("the one automatic retry should defer like any failed push: %v\n%s", err, retryOut)
+	}
 	resetCompactGCLog(t, fixture)
 
 	secondOut, err := fixture.run(t, "remote_success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
