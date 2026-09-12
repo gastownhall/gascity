@@ -449,7 +449,13 @@ func ResolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 		}
 		return GraphRouteBinding{}, fmt.Errorf("step %s: assignee target %q did not resolve to a concrete session; use gc.run_target for config routing", stepID, target.value)
 	}
+	// Imported role packs publish binding-qualified identities such as
+	// gc.run-operator. Prefer that exact formula target; older unbound packs
+	// remain compatible through the legacy gc.<role> fallback below.
 	agentCfg, ok := deps.Resolver.ResolveAgent(cfg, target.value, rigContext)
+	if !ok {
+		agentCfg, ok = deps.Resolver.ResolveAgent(cfg, formulaRoleTarget(target.value), rigContext)
+	}
 	if !ok {
 		return GraphRouteBinding{}, fmt.Errorf("step %s: unknown formulas v2 target %q", stepID, target.value)
 	}
@@ -466,6 +472,16 @@ func ResolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 	binding.SessionName = sn
 	cache[stepID] = binding
 	return binding, nil
+}
+
+// formulaRoleTarget translates the documented gc.<role> formula namespace to
+// the rig-scoped role identity imported by gascity/roles. Other targets retain
+// their exact meaning.
+func formulaRoleTarget(target string) string {
+	if role, ok := strings.CutPrefix(target, "gc."); ok && role != "" {
+		return role
+	}
+	return target
 }
 
 // ResolveGraphDirectSessionBinding resolves a direct-session route target to a

@@ -54,9 +54,10 @@ func cookReproConfig() *config.City {
 }
 
 // cookReproRecipe is a minimal graph.v2 workflow: a root plus one work step
-// whose gc.run_target is the BARE name "run-operator" (config routing). A bare
-// target is exactly what a rig formula authored inside the dip rig writes; it
-// only resolves when the decorate step is given the "dip" rig context.
+// whose gc.run_target is the semantic role alias "gc.run-operator". The
+// unbound pack configuration exposes that role as a bare rig-scoped
+// "run-operator", so it only resolves when decorate derives the "dip" rig
+// context from the scoped store.
 func cookReproRecipe() *formula.Recipe {
 	return &formula.Recipe{
 		Name: "wf-cook",
@@ -65,22 +66,19 @@ func cookReproRecipe() *formula.Recipe {
 				"gc.kind": "workflow", "gc.formula_contract": "graph.v2",
 			}},
 			{ID: "wf-cook.work", Metadata: map[string]string{
-				"gc.run_target": "run-operator",
+				"gc.run_target": "gc.run-operator",
 			}},
 		},
 	}
 }
 
-// TestCookRigContext_StoreRefFallbackResolvesBareTarget documents that on the
-// current base cook's decorate path already resolves a bare rig-scoped step
-// target WITHOUT an explicit rig context: with a rig-scoped rootStoreRef
-// ("rig:dip") and no default execution binding, the store-scope fallback in
-// DecorateGraphWorkflowRecipeWithDefaultBinding (added by #4175) derives the
-// execution rig context from the store ref. This is why the explicit
-// rig-context binding cook now threads (next test) is defense-in-depth rather
-// than a load-bearing fix for the original #3944 report, which #4175 already
-// resolved.
-func TestCookRigContext_StoreRefFallbackResolvesBareTarget(t *testing.T) {
+// TestCookRigContext_StoreRefFallbackResolvesFormulaRoleAlias proves that an
+// unbound gc.<role> alias falls back to the bare role within its owning rig.
+// With a rig-scoped rootStoreRef ("rig:dip") and no default execution binding,
+// DecorateGraphWorkflowRecipeWithDefaultBinding derives the execution context
+// from the store ref without changing the default route for every rig-scoped
+// workflow.
+func TestCookRigContext_StoreRefFallbackResolvesFormulaRoleAlias(t *testing.T) {
 	cfg := cookReproConfig()
 	deps := Deps{Resolver: rigAwareResolver{}}
 
@@ -98,7 +96,7 @@ func TestCookRigContext_StoreRefFallbackResolvesBareTarget(t *testing.T) {
 		nil, "test-city", cfg, deps,
 	)
 	if err != nil {
-		t.Fatalf("store-scope fallback should resolve bare rig target, got: %v", err)
+		t.Fatalf("store-scope fallback should resolve gc role alias, got: %v", err)
 	}
 	if got := recipe.Steps[1].Metadata["gc.routed_to"]; got != "dip/run-operator" {
 		t.Fatalf("work step gc.routed_to = %q, want dip/run-operator", got)
@@ -135,5 +133,26 @@ func TestCookRigContext_ExplicitDefaultBindingResolvesBareTarget(t *testing.T) {
 	}
 	if got := recipe.Steps[0].Metadata["gc.routed_to"]; got != "" {
 		t.Fatalf("root gc.routed_to = %q, want empty (cook must not route the root)", got)
+	}
+}
+
+func TestApplyGraphRoutingPreservesBoundFormulaRoleTarget(t *testing.T) {
+	three := 3
+	one := 1
+	cfg := &config.City{Agents: []config.Agent{
+		{Name: "mayor", MaxActiveSessions: &three},
+		{Name: "run-operator", BindingName: "gc", Dir: "my-project", MaxActiveSessions: &three},
+		{Name: "control-dispatcher", MaxActiveSessions: &one},
+		{Name: "control-dispatcher", Dir: "my-project", MaxActiveSessions: &one},
+	}}
+	recipe := cookReproRecipe()
+	recipe.Steps[1].Metadata["gc.run_target"] = "gc.run-operator"
+
+	err := ApplyGraphRouting(recipe, &cfg.Agents[0], "mayor", nil, "", "rig", "my-project", "", nil, "test-city", cfg, Deps{Resolver: rigAwareResolver{}})
+	if err != nil {
+		t.Fatalf("ApplyGraphRouting: %v", err)
+	}
+	if got := recipe.Steps[1].Metadata["gc.routed_to"]; got != "my-project/gc.run-operator" {
+		t.Fatalf("gc.routed_to = %q, want my-project/gc.run-operator", got)
 	}
 }
