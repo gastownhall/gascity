@@ -47,6 +47,51 @@ func (s *Store) ApplyPatch(id string, patch MetadataPatch) error {
 	return s.store.SetMetadataBatch(id, map[string]string(patch))
 }
 
+// CommitStartedIfCurrent fences start completion against pending-create rollback
+// and incarnation allocation in this process. The lease is re-read under the
+// same mutation lock as those writers, not before acquiring it.
+func (s *Store) CommitStartedIfCurrent(expected Info, patch MetadataPatch) (bool, error) {
+	applied := false
+	err := WithSessionMutationLock(expected.ID, func() error {
+		current, _, err := s.GetPersistedResponse(expected.ID)
+		if err != nil {
+			return err
+		}
+		if LeaseFromInfo(expected).CommitVerdict(LeaseFromInfo(current)) != LeaseCommit {
+			return nil
+		}
+		if err := s.ApplyPatch(expected.ID, patch); err != nil {
+			return err
+		}
+		applied = true
+		return nil
+	})
+	return applied, err
+}
+
+// WithPendingCreateRollback runs the rollback transaction only while the exact
+// observed creation is still pending. Completion and incarnation allocation use
+// the same process-local lock. fn must not acquire that lock again or call a
+// provider; retired-session cleanup belongs after this critical section.
+func (s *Store) WithPendingCreateRollback(expected Info, fn func() error) (bool, error) {
+	applied := false
+	err := WithSessionMutationLock(expected.ID, func() error {
+		current, _, err := s.GetPersistedResponse(expected.ID)
+		if err != nil {
+			return err
+		}
+		if !LeaseFromInfo(expected).CanRollback(LeaseFromInfo(current)) {
+			return nil
+		}
+		if err := fn(); err != nil {
+			return err
+		}
+		applied = true
+		return nil
+	})
+	return applied, err
+}
+
 // ApplyPatchInfo persists patch for info.ID (via ApplyPatch) and returns the
 // refreshed Info as a LOCAL fold — info.ApplyPatch(patch) — never a re-Get. It
 // is the write-returns-Info chokepoint the reconciler routes its direct

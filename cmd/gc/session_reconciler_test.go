@@ -9082,6 +9082,12 @@ func TestReconcileSessionBeads_RollsBackPendingCreateWhenConflictingRuntimeAlrea
 	if got.Metadata["state"] != "failed-create" {
 		t.Fatalf("state = %q, want %q", got.Metadata["state"], "failed-create")
 	}
+	if !sp.IsRunning("sky") {
+		t.Fatal("rollback stopped the foreign runtime")
+	}
+	if id, err := sp.GetMeta("sky", "GC_SESSION_ID"); err != nil || id != "different-bead" {
+		t.Fatalf("foreign runtime ownership changed: id=%q err=%v", id, err)
+	}
 }
 
 func TestReconcileSessionBeads_RollbackBudgetDefersExcessMismatchesAndStillStarts(t *testing.T) {

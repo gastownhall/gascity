@@ -64,7 +64,8 @@ type Provider struct {
 	conns         map[string]*sessionConn // in-process tracking
 	workDirs      map[string]string       // session name → workDir (for CopyTo)
 	cfg           Config
-	activityWrite func(path string, data []byte) error // test seam
+	activityWrite func(path string, data []byte) error                                         // test seam
+	handshakeFunc func(context.Context, *sessionConn, string, []runtime.MCPServerConfig) error // test seam
 }
 
 // Compile-time check.
@@ -115,6 +116,25 @@ func (p *Provider) SupportsTransport(transport string) bool {
 // optionally sends the initial nudge. Returns an error if a session with
 // that name already exists or the handshake fails.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	lock, err := p.lockLifecycle(name, true)
+	if err != nil {
+		return err
+	}
+	var startupDone chan struct{}
+	releaseStartup := func() {
+		if lock != nil {
+			_ = lock.Close()
+			lock = nil
+		}
+		if startupDone != nil {
+			close(startupDone)
+			startupDone = nil
+		}
+	}
+	defer releaseStartup()
 	p.mu.Lock()
 
 	// Check in-memory tracking first.
@@ -132,13 +152,27 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		return fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
 	}
 
+	// Seed only classified metadata, before either the sentinel or socket can
+	// advertise liveness. Discard sidecars from a dead incarnation first.
+	p.cleanupMeta(name)
+	seedMeta, _ := runtime.SplitEnvForMetaSeed(cfg.Env)
+	for key, value := range seedMeta {
+		if err := p.SetMeta(name, key, value); err != nil {
+			p.cleanupMeta(name)
+			p.mu.Unlock()
+			return fmt.Errorf("seeding metadata for %q (%s): %w", name, key, err)
+		}
+	}
+
 	// Reserve the name with a sentinel so concurrent Start calls for the
 	// same name are rejected while we perform the slow handshake outside
 	// the lock. The sentinel's done channel is open (not closed), so
 	// alive() returns true and duplicate checks above will reject.
 	// The cancel func lets Stop abort an in-progress handshake immediately.
 	hsCtx, hsCancel := context.WithCancel(ctx)
+	defer hsCancel()
 	sentinel := &sessionConn{done: make(chan struct{}), cancel: hsCancel, pending: make(map[int64]chan JSONRPCMessage)}
+	startupDone = sentinel.done
 	p.conns[name] = sentinel
 
 	// Store workDir for CopyTo.
@@ -154,9 +188,11 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		if p.conns[name] == sentinel {
 			delete(p.conns, name)
 			delete(p.workDirs, name)
+			p.cleanupMeta(name)
 		}
 		p.mu.Unlock()
 	}
+	defer clearSentinel()
 
 	if err := runtime.StageSessionWorkDir(cfg); err != nil {
 		clearSentinel()
@@ -277,20 +313,42 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		<-sc.readDone
 		sc.drainPending()
 		sc.closeActivityPublisher()
-		lis.Close()                 //nolint:errcheck
-		os.Remove(p.sockPath(name)) //nolint:errcheck
 		_ = os.Remove(p.sockNamePath(name))
+		// Close unlinks the Unix socket. Do not remove its path again: another
+		// provider can bind a replacement as soon as Close makes it disappear.
+		lis.Close() //nolint:errcheck
 		close(processDone)
 	}()
 
 	// Perform ACP handshake with a deadline. hsCtx (created above with
-	// WithCancelCause) is already cancellable by Stop. Add a timeout
+	// WithCancel) is already cancellable by Stop. Add a timeout
 	// child so handshake_timeout applies even when the parent has a
 	// longer deadline.
 	hsTimeoutCtx, hsTimeoutCancel := context.WithTimeout(hsCtx, p.cfg.handshakeTimeout())
 	defer hsTimeoutCancel()
+	// Response selects alone cannot cancel a backpressured handshake write.
+	// Close only this startup's pipe, without acquiring either lifecycle lock.
+	pipeClosed := make(chan struct{})
+	stopClose := context.AfterFunc(hsTimeoutCtx, func() {
+		_ = stdinPipe.Close()
+		close(pipeClosed)
+	})
 
-	if err := p.handshake(hsTimeoutCtx, sc, cfg.WorkDir, cfg.MCPServers); err != nil {
+	handshake := p.handshake
+	if p.handshakeFunc != nil {
+		handshake = p.handshakeFunc
+	}
+	handshakeErr := handshake(hsTimeoutCtx, sc, cfg.WorkDir, cfg.MCPServers)
+	// Disarm and join before transferring ownership: a late callback must not
+	// close a successful connection after Start returns or a retry begins.
+	if !stopClose() {
+		<-pipeClosed
+	}
+	if ctxErr := hsTimeoutCtx.Err(); ctxErr != nil {
+		handshakeErr = errors.Join(handshakeErr, ctxErr)
+	}
+	hsTimeoutCancel()
+	if err := handshakeErr; err != nil {
 		// Handshake failed — kill the process. The monitor goroutine
 		// handles listener/socket cleanup when the process exits.
 		_ = stdinPipe.Close()
@@ -323,13 +381,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		_ = stdinPipe.Close()
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		<-sc.done
-		p.mu.Lock()
-		if p.conns[name] == sentinel {
-			delete(p.conns, name)
-			delete(p.workDirs, name)
-			p.cleanupMeta(name)
-		}
-		p.mu.Unlock()
+		clearSentinel()
 		return fmt.Errorf("publishing initial activity for %q: %w", name, err)
 	}
 	publisher := newActivityPublisher(
@@ -344,38 +396,30 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		_ = stdinPipe.Close()
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		<-sc.done
-		p.mu.Lock()
-		if p.conns[name] == sentinel {
-			delete(p.conns, name)
-			delete(p.workDirs, name)
-			p.cleanupMeta(name)
-		}
-		p.mu.Unlock()
+		clearSentinel()
 		return fmt.Errorf("starting activity publication for %q: %w", name, err)
 	}
 
-	// Commit the real connection only if the startup sentinel still owns the
-	// name. Stop may have removed it while the initial atomic write was in
-	// progress.
+	// Recheck cancellation under the same lock as Stop before committing.
+	// Cancellation can arrive while the initial activity write is in progress.
 	p.mu.Lock()
-	if p.conns[name] != sentinel {
+	if p.conns[name] != sentinel || hsCtx.Err() != nil {
 		p.mu.Unlock()
 		_ = stdinPipe.Close()
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		<-sc.done
-		p.mu.Lock()
-		if _, replaced := p.conns[name]; !replaced {
-			p.cleanupMeta(name)
-		}
-		p.mu.Unlock()
+		clearSentinel()
 		return fmt.Errorf("session %q was stopped during startup", name)
 	}
 	p.conns[name] = sc
 	p.mu.Unlock()
+	// Stop must be able to close stdin even if initial delivery blocks. Failed
+	// starts retain the lock through cleanup via the deferred release above.
+	releaseStartup()
 
-	// Send initial nudge if configured (best-effort, outside lock).
+	// Keep delivery bound to this incarnation if Stop and a retry interleave.
 	if cfg.Nudge != "" {
-		_ = p.Nudge(name, runtime.TextContent(cfg.Nudge))
+		_ = p.nudgeConn(name, sc, runtime.TextContent(cfg.Nudge))
 	}
 
 	return nil
@@ -452,24 +496,39 @@ func (p *Provider) handshake(ctx context.Context, sc *sessionConn, workDir strin
 // Stop terminates the named session. Returns nil if it doesn't exist
 // (idempotent). Sends SIGTERM first, then SIGKILL after a grace period.
 func (p *Provider) Stop(name string) error {
+	// Keep the reservation until Start has killed its process and drained all
+	// writes. A retry must never race the old attempt's sidecar/socket cleanup.
+	p.mu.Lock()
+	if sc := p.conns[name]; sc != nil && sc.cmd == nil {
+		if sc.cancel != nil {
+			sc.cancel()
+		}
+		p.mu.Unlock()
+		<-sc.done
+		return nil
+	}
+	p.mu.Unlock()
+	lock, err := p.lockLifecycle(name, false)
+	if err != nil {
+		return err
+	}
+	defer lock.Close() //nolint:errcheck
+
 	p.mu.Lock()
 	sc, ok := p.conns[name]
+	if ok && !sc.alive() && p.socketAlive(name) {
+		p.mu.Unlock()
+		return fmt.Errorf("%w: refusing cleanup of replacement runtime %q", runtime.ErrSessionExists, name)
+	}
 	if ok {
 		delete(p.conns, name)
 	}
+	delete(p.workDirs, name)
 	p.mu.Unlock()
 
 	if ok {
 		if !sc.alive() {
 			p.cleanupMeta(name)
-			return nil
-		}
-		// Guard against sentinel sessionConn (nil cmd/stdin during handshake).
-		// Signal the in-progress handshake to abort via the cancel func.
-		if sc.cmd == nil {
-			if sc.cancel != nil {
-				sc.cancel()
-			}
 			return nil
 		}
 		_ = sc.stdin.Close()
@@ -482,7 +541,7 @@ func (p *Provider) Stop(name string) error {
 	}
 
 	// Fall back to socket (cross-process case).
-	err := p.stopBySocket(name)
+	err = p.stopBySocket(name)
 	if err == nil || runtime.IsSessionGone(err) {
 		p.cleanupMeta(name)
 		return nil
@@ -549,6 +608,10 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	if !ok {
 		return fmt.Errorf("%w: ACP provider does not own session %q", runtime.ErrSessionNotFound, name)
 	}
+	return p.nudgeConn(name, sc, content)
+}
+
+func (p *Provider) nudgeConn(name string, sc *sessionConn, content []runtime.ContentBlock) error {
 	if !sc.alive() {
 		return nil
 	}

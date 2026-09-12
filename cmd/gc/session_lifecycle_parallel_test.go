@@ -5715,7 +5715,7 @@ func TestStopTargetsBounded_AllUnresolvedFallsBackToSerial(t *testing.T) {
 }
 
 func TestCommitStartResult_LogsSuccessOutcome(t *testing.T) {
-	store := newTestStore()
+	store := beads.NewMemStoreFrom(1, []beads.Bead{{ID: "b1", Type: sessionBeadType, Status: "open"}}, nil)
 	candidate := startCandidate{
 		info: sessionpkg.Info{
 			ID:                  "b1",
