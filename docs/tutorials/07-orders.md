@@ -278,6 +278,11 @@ rig-scoped orders appear once per importing rig (mirroring `scope` on
 was scanned from, so its formula must resolve from that pack rather than from any
 one rig's local `orders/` directory.
 
+The mirror holds for a pack imported at city scope too: an order there that
+declares `scope = "rig"` explicitly instantiates once per configured rig, as an
+agent or named session declaring the same does, while an order that declares
+nothing registers once, city-wide.
+
 ## Disabling and skipping orders
 
 Set `enabled = false` in an order's own definition to drop it from scanning

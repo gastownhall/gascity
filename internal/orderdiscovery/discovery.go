@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
@@ -102,6 +103,24 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 			}
 			aa[i].Rig = rigName
 			rigOrders = append(rigOrders, aa[i])
+		}
+	}
+
+	// An order that declares scope = "rig" in a pack imported at city scope
+	// instantiates once per configured rig, the way an agent or named
+	// session declaring the same in that pack does (config's
+	// expandCityImportedAgentsForRigs): the declaration would otherwise be
+	// validated and then silently dropped, registering the order once,
+	// city-wide, against the city store. A rig that imports the pack itself
+	// already holds its instance from the loop above and is skipped. An
+	// order that declares nothing keeps its contract: once, city-wide.
+	cityOrders, cityRigScoped := splitCityImportedRigScopedOrders(cityOrders, cfg.PackDirs)
+	for _, rig := range cfg.Rigs {
+		for _, o := range cityRigScoped {
+			if orderUnderPackDirs(o.Source, cfg.RigPackDirs[rig.Name]) {
+				continue
+			}
+			rigOrders = append(rigOrders, cloneOrderForRig(o, rig.Name))
 		}
 	}
 
@@ -242,6 +261,63 @@ func formulaLayerRoot(layer string) orders.ScanRoot {
 		Dir:          filepath.Join(filepath.Dir(layer), "orders"),
 		FormulaLayer: layer,
 	}
+}
+
+// splitCityImportedRigScopedOrders partitions the city-level scan into the
+// orders that stay city-wide and those a city-imported pack declared with
+// scope = "rig", recognized by a Source under one of the pack dirs' orders/.
+func splitCityImportedRigScopedOrders(cityOrders []orders.Order, packDirs []string) (city, rigScoped []orders.Order) {
+	for _, o := range cityOrders {
+		if o.IsRigScoped() && orderUnderPackDirs(o.Source, packDirs) {
+			rigScoped = append(rigScoped, o)
+			continue
+		}
+		city = append(city, o)
+	}
+	return city, rigScoped
+}
+
+// orderUnderPackDirs reports whether an order file was scanned from the
+// orders/ directory of one of the given pack dirs.
+func orderUnderPackDirs(source string, packDirs []string) bool {
+	for _, dir := range packDirs {
+		if pathWithin(source, packRoot(dir).Dir) {
+			return true
+		}
+	}
+	return false
+}
+
+func pathWithin(path, dir string) bool {
+	if path == "" || dir == "" {
+		return false
+	}
+	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(path))
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
+}
+
+// cloneOrderForRig stamps a copy of a city-scanned order for one rig. The
+// maps are copied: overrides and env projection mutate them per instance.
+func cloneOrderForRig(o orders.Order, rig string) orders.Order {
+	o.Rig = rig
+	if o.Env != nil {
+		env := make(map[string]string, len(o.Env))
+		for k, v := range o.Env {
+			env[k] = v
+		}
+		o.Env = env
+	}
+	if o.Params != nil {
+		params := make(map[string]orders.OrderParam, len(o.Params))
+		for k, v := range o.Params {
+			params[k] = v
+		}
+		o.Params = params
+	}
+	return o
 }
 
 func packRoot(packDir string) orders.ScanRoot {
