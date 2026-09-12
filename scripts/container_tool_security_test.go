@@ -790,3 +790,51 @@ func TestTrivyIgnoreWidensDocketE9WaiverForRemainingHighCriticalFindings(t *test
 		}
 	}
 }
+
+// extractStatedTrivyIgnoreEntryCounts parses the release-gate doc's stated
+// .trivyignore.yaml entry count (total, pre-existing, and newly added) out
+// of its "Acceptance evidence" prose. This lets a test cross-check that
+// stated count against the file's actual parsed entry count, instead of
+// trusting the doc's prose to stay accurate by manual review alone.
+//
+// Not yet implemented: the parser is wired up in the next commit. For now
+// this always reports zero, which is deliberately wrong so the caller's
+// cross-check fails until the real parsing lands.
+func extractStatedTrivyIgnoreEntryCounts(t *testing.T, _ string) (total, preExisting, added int) {
+	t.Helper()
+	return 0, 0, 0
+}
+
+// TestReleaseGateWaiverBridgeDocEntryCountMatchesTrivyIgnore cross-verifies
+// release-gates/ga-2yq3p5-container-scan-waiver-bridge-gate.md's stated
+// .trivyignore.yaml waiver-entry count against the file's actual parsed
+// entry count. Round 1 review (2026-09-11) found this criterion was
+// manually-verified-only: the doc's "Acceptance evidence" section states a
+// specific count in prose, and the tests above each independently hardcode
+// that same total as a Go literal, but nothing ties either to the doc's own
+// stated figure -- so an edit to .trivyignore.yaml that updated every
+// hardcoded literal could still leave the doc's prose wrong, or vice versa.
+// This test closes that gap.
+func TestReleaseGateWaiverBridgeDocEntryCountMatchesTrivyIgnore(t *testing.T) {
+	root := repoRoot(t)
+
+	doc := readFile(t, root, "release-gates/ga-2yq3p5-container-scan-waiver-bridge-gate.md")
+	statedTotal, statedPreExisting, statedAdded := extractStatedTrivyIgnoreEntryCounts(t, doc)
+
+	if statedPreExisting+statedAdded != statedTotal {
+		t.Errorf("release-gates/ga-2yq3p5-container-scan-waiver-bridge-gate.md is internally inconsistent: %d pre-existing + %d new = %d, not its own stated total %d", statedPreExisting, statedAdded, statedPreExisting+statedAdded, statedTotal)
+	}
+
+	var trivyDoc struct {
+		Vulnerabilities []struct {
+			ID string `yaml:"id"`
+		} `yaml:"vulnerabilities"`
+	}
+	if err := yaml.Unmarshal([]byte(readFile(t, root, ".trivyignore.yaml")), &trivyDoc); err != nil {
+		t.Fatalf("parsing .trivyignore.yaml: %v", err)
+	}
+
+	if got := len(trivyDoc.Vulnerabilities); got != statedTotal {
+		t.Errorf(".trivyignore.yaml has %d entries, but release-gates/ga-2yq3p5-container-scan-waiver-bridge-gate.md states %d; keep the release-gate doc's stated waiver-entry count in sync with the actual file", got, statedTotal)
+	}
+}
