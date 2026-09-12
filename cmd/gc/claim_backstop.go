@@ -37,15 +37,33 @@ package main
 //     to the execution backstop for that tick.
 //   - The slot's own bound gc.trigger_bead_id is skipped: nudgeStalledPoolClaims
 //     already re-delivers for exactly that bead on exactly this cadence.
-//   - A preassigned graph-v2 successor — an open task, assigned, carrying
-//     gc.continuation_group with gc.session_affinity=require — is skipped,
-//     because that is nudgeStalledPoolContinuations' candidate shape verbatim
-//     (continuationRowCouldBeCandidate). It is also the most common graph-v2
-//     handoff row in the fleet, so admitting it here would put two independent
-//     persisted ladders on the same bead every backoff window. Worse, the two
-//     lanes disagree on purpose about the cap: that one latches silent at three
-//     attempts, this one re-arms forever, so the overlap would not merely double
-//     the nudges — it would override the continuation lane's designed stop.
+//   - A preassigned graph-v2 successor ON A POOL SEAT — an open task, assigned,
+//     carrying gc.continuation_group with gc.session_affinity=require, under a
+//     seat stamped pool_managed=true — is skipped, because that is
+//     nudgeStalledPoolContinuations' candidate shape verbatim
+//     (continuationRowCouldBeCandidate) on the only seats it governs. It is also
+//     the most common graph-v2 handoff row in the fleet, so admitting it there
+//     would put two independent persisted ladders on the same bead every backoff
+//     window. Worse, the two lanes disagree on purpose about the cap: that one
+//     latches silent at three attempts, this one re-arms forever, so the overlap
+//     would not merely double the nudges — it would override the continuation
+//     lane's designed stop.
+//
+// The pool_managed half of that third condition is load-bearing.
+// poolContinuationBackstop.governs takes pool slots and nothing else, so the
+// identical row on a NAMED seat is not that lane's population at all and
+// excluding it here defers to nobody — it leaves the row covered by neither
+// lane, permanently silent with a claimable bead in front of it, which is the
+// ga-evxqd symptom on the exact population this lane was built for. Nor is that
+// shape exotic on a named seat: a shared-context drain stamps the continuation
+// pair on every executable item step whatever the step routes to
+// (applySharedDrainContext, internal/dispatch/drain.go), graphroute's
+// SessionName and DirectSessionID branches assign the step to a concrete session
+// while leaving the pair intact (only the pool MetadataOnly branch rewrites it,
+// ApplyGraphRouteBinding), and preassignHookContinuationGroup pins a molecule's
+// open siblings to whoever claims first on ANY gc hook --claim. So the exclusion
+// is scoped to the seats the continuation lane actually serves; on a named seat
+// there is no second ladder to collide with and the row is this lane's to nudge.
 
 import (
 	"encoding/json"
@@ -84,6 +102,12 @@ const (
 	// the next tick. See firstReadyRow: it is what stops a seat's long blocked
 	// prefix from hiding the one ready row behind it forever.
 	seatClaimProbeCursorKey = "seat_claim_probe_cursor"
+	// seatClaimProbeRotatedAtKey paces that rotation onto the lane's own backoff
+	// clock. A seat whose blocked queue outruns the probe budget has a reason to
+	// rotate on every patrol tick, and each rotation is a session-bead write —
+	// unpaced, that is a steady-state write per seat per tick for as long as the
+	// queue stays long, on a lane that is meant to cost nothing while it waits.
+	seatClaimProbeRotatedAtKey = "seat_claim_probe_rotated_at"
 )
 
 // seatClaimNudgeLabel prefixes this lane's stdout diagnostics.
@@ -146,7 +170,7 @@ func nudgeStalledSeatClaims(
 		store:  store,
 		stdout: stdout,
 		work: newSeatOpenWorkSnapshot(
-			now,
+			now, sessionBeads,
 			assignedWork, assignedWorkStores, assignedWorkStoreRefs,
 			routedWork, routedWorkStores, routedWorkStoreRefs,
 		),
@@ -164,6 +188,13 @@ type seatOpenWork struct {
 	Identity string
 	Assigned bool
 	Store    beads.Store
+	// SeatIsPoolManaged records whether the seat this row belongs to is a pool
+	// slot — the entire scope of the continuation lane's delivery
+	// (poolContinuationBackstop.governs), and therefore the entire scope of the
+	// exclusion that defers to it. Resolved once at snapshot time and carried so
+	// revalidate re-checks the boundary on the same seat the snapshot admitted
+	// the row for.
+	SeatIsPoolManaged bool
 }
 
 // seatOpenWorkSnapshot indexes a tick's work views by seat identity. Resolution
@@ -175,11 +206,16 @@ type seatOpenWorkSnapshot struct {
 	// inProgressIdentities marks every identity holding at least one in_progress
 	// row. Such a seat belongs to the execution backstop for this tick.
 	inProgressIdentities map[string]bool
-	byKey                map[storeScopedBeadKey]seatOpenWork
+	// poolManagedIdentities is every assignee identity a pool slot answers to. It
+	// is what scopes the continuation-lane exclusion to the seats that lane
+	// actually serves; see ownedByContinuationLane.
+	poolManagedIdentities map[string]bool
+	byKey                 map[storeScopedBeadKey]seatOpenWork
 }
 
 func newSeatOpenWorkSnapshot(
 	now time.Time,
+	sessionBeads []beads.Bead,
 	assignedWork []beads.Bead,
 	assignedStores []beads.Store,
 	assignedStoreRefs []string,
@@ -188,9 +224,10 @@ func newSeatOpenWorkSnapshot(
 	routedStoreRefs []string,
 ) seatOpenWorkSnapshot {
 	snapshot := seatOpenWorkSnapshot{
-		openByIdentity:       make(map[string][]seatOpenWork),
-		inProgressIdentities: make(map[string]bool),
-		byKey:                make(map[storeScopedBeadKey]seatOpenWork),
+		openByIdentity:        make(map[string][]seatOpenWork),
+		inProgressIdentities:  make(map[string]bool),
+		poolManagedIdentities: poolManagedSeatIdentities(sessionBeads),
+		byKey:                 make(map[storeScopedBeadKey]seatOpenWork),
 	}
 	for i, wb := range assignedWork {
 		assignee := strings.TrimSpace(wb.Assignee)
@@ -229,16 +266,18 @@ func newSeatOpenWorkSnapshot(
 }
 
 func (s seatOpenWorkSnapshot) add(now time.Time, wb beads.Bead, identity string, assigned bool, store beads.Store, storeRef string) {
-	if !claimableSeatWork(wb, now) || ownedByContinuationLane(wb) {
+	seatIsPoolManaged := s.poolManagedIdentities[identity]
+	if !claimableSeatWork(wb, now) || ownedByContinuationLane(wb, seatIsPoolManaged) {
 		return
 	}
 	row := seatOpenWork{
-		BeadID:   strings.TrimSpace(wb.ID),
-		RootID:   strings.TrimSpace(wb.Metadata[beadmeta.RootBeadIDMetadataKey]),
-		StoreRef: storeRef,
-		Identity: identity,
-		Assigned: assigned,
-		Store:    store,
+		BeadID:            strings.TrimSpace(wb.ID),
+		RootID:            strings.TrimSpace(wb.Metadata[beadmeta.RootBeadIDMetadataKey]),
+		StoreRef:          storeRef,
+		Identity:          identity,
+		Assigned:          assigned,
+		Store:             store,
+		SeatIsPoolManaged: seatIsPoolManaged,
 	}
 	key := storeScopedBeadKey{StoreRef: row.StoreRef, ID: row.BeadID}
 	if _, duplicate := s.byKey[key]; duplicate {
@@ -326,22 +365,62 @@ func claimableSeatWork(b beads.Bead, now time.Time) bool {
 	return !graphroute.IsControlDispatcherKind(kind) && !graphroute.IsWorkflowTopologyKind(kind)
 }
 
-// ownedByContinuationLane reports whether the row is a preassigned graph-v2
-// successor — nudgeStalledPoolContinuations' population, which it re-delivers on
-// this exact cadence and with its own persisted ladder.
+// poolManagedSeatIdentities indexes every assignee identity a live pool slot
+// answers to.
 //
-// These are continuationRowCouldBeCandidate's pure-bead conditions
-// (build_desired_state.go) verbatim, minus the open-status one both call sites
-// have already settled, so the boundary between the two lanes is a partition
-// rather than an overlap. What that lane checks BEYOND these is store reads —
-// the row's ready projection, a live graph.v2 root in the same scope, exactly
-// one candidate per session — so a row excluded here that those reads later
-// reject is covered by neither lane. That residual is deliberate: re-deriving
-// another lane's provenance here would cost every seat a root read per tick to
-// recover rows whose own molecule is already broken, and the alternative —
-// admitting them — is two ladders on the fleet's most common handoff row.
-func ownedByContinuationLane(b beads.Bead) bool {
-	return strings.EqualFold(strings.TrimSpace(b.Type), "task") &&
+// Every clause mirrors the continuation lane's own seat resolution so this
+// exclusion can never be structurally wider than the lane it defers to: the
+// pool_managed test is poolContinuationBackstop.governs verbatim, and the
+// closed/is-a-session-bead tests and the identity set are
+// newPoolContinuationCandidateSnapshot's. Deferring over a seat that lane cannot
+// serve is how a row ends up covered by nobody, so the two must agree on which
+// seats those are.
+//
+// One narrower case stays excluded: that lane HOLDs rather than delivers when an
+// identity resolves to more than one live session. The ambiguity is transient
+// and both lanes face it identically, and this one cannot re-derive it without
+// the candidate list it is deliberately not given.
+func poolManagedSeatIdentities(sessionBeads []beads.Bead) map[string]bool {
+	identities := make(map[string]bool)
+	for _, s := range sessionBeads {
+		if strings.TrimSpace(s.Metadata["pool_managed"]) != "true" ||
+			strings.EqualFold(strings.TrimSpace(s.Status), "closed") ||
+			!isSessionBead(s) {
+			continue
+		}
+		for _, identity := range currentSessionAssigneeIdentities(s) {
+			identities[identity] = true
+		}
+	}
+	return identities
+}
+
+// ownedByContinuationLane reports whether the row is a preassigned graph-v2
+// successor that nudgeStalledPoolContinuations will ACTUALLY serve — its
+// population, which it re-delivers on this exact cadence and with its own
+// persisted ladder.
+//
+// Two halves, and neither is sufficient alone. The shape half is
+// continuationRowCouldBeCandidate's pure-bead conditions (build_desired_state.go)
+// verbatim, minus the open-status one both call sites have already settled. The
+// seat half is poolContinuationBackstop.governs: that lane runs over pool slots
+// only, so the identical row on a NAMED seat is not its population and skipping
+// it there hands the row to nobody. Production builds that named-seat row
+// constantly (see the file header), and stranding it is the incident this lane
+// exists to end. Where there is no second ladder there is nothing to collide
+// with, so the row is this lane's to nudge.
+//
+// Together the halves make the boundary a partition rather than an overlap. What
+// the continuation lane checks BEYOND them is store reads — the row's ready
+// projection, a live graph.v2 root in the same scope, exactly one candidate per
+// session — so a pool row excluded here that those reads later reject is covered
+// by neither lane. That residual is deliberate: re-deriving another lane's
+// provenance here would cost every seat a root read per tick to recover rows
+// whose own molecule is already broken, and the alternative — admitting them —
+// is two ladders on the fleet's most common handoff row.
+func ownedByContinuationLane(b beads.Bead, seatIsPoolManaged bool) bool {
+	return seatIsPoolManaged &&
+		strings.EqualFold(strings.TrimSpace(b.Type), "task") &&
 		strings.TrimSpace(b.Assignee) != "" &&
 		strings.TrimSpace(b.Metadata[beadmeta.ContinuationGroupMetadataKey]) != "" &&
 		strings.TrimSpace(b.Metadata[beadmeta.SessionAffinityMetadataKey]) == "require"
@@ -479,9 +558,11 @@ func (p seatClaimBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, sessNa
 // prefix on every tick and never reach it — permanently quiet, with the row open
 // and claimable the entire time. The cursor persists on the session bead and
 // advances by exactly one window, and ONLY when the window came up empty, so the
-// search walks the whole queue across consecutive ticks and then freezes the
+// search walks the whole queue across the backoff periods and then freezes the
 // moment it lands on a target: the same window keeps re-finding that row for the
-// rest of its ladder instead of drifting off it.
+// rest of its ladder instead of drifting off it. Rotation is paced onto that
+// backoff clock rather than the tick clock (rotateProbeWindow) — the ring still
+// tiles whole, one window per period.
 func (p seatClaimBackstop) firstReadyRow(s beads.Bead, sessName string, candidates []seatOpenWork) (seatOpenWork, backstopResolution) {
 	window := len(candidates)
 	if window > maxSeatClaimReadinessProbes {
@@ -543,16 +624,33 @@ func seatClaimProbeCursor(s beads.Bead, candidates int) int {
 // optional either — a cursor that reset on every controller restart would walk
 // the same prefix forever on a city that restarts more often than it rotates.
 //
-// The line is the signal the original lane lacked. Before it, a seat whose queue
-// outran the probe budget was indistinguishable on stdout from a seat with
-// nothing ready: both were silent, and one of them was the incident.
+// Being on the hold path is also why it has to be PACED. Every other write in
+// this lane is spent by an event — a new row observed, an attempt delivered, a
+// clear proved — so a quiet fleet writes nothing. This one is spent by a
+// condition that persists: a seat whose blocked queue outruns the probe budget
+// has a reason to rotate on every patrol tick, forever, for as long as the queue
+// stays long. Unpaced that is a steady-state session-bead write per seat per
+// tick, which is the write class that produced the cache-reconcile flood. So
+// rotation rides the same backoff clock the ladder does, with the last rotation
+// stamped beside the cursor. Coverage is unaffected: the windows still tile the
+// whole ring, one window per backoff period instead of one per tick, and the
+// ladder they feed runs on that period anyway.
+//
+// The line is the signal the original lane lacked — before it, a seat whose
+// queue outran the probe budget was indistinguishable on stdout from a seat with
+// nothing ready, and one of those was the incident. It is printed only when the
+// cursor actually moves, so the paced ticks stay as silent as they are free.
 func (p seatClaimBackstop) rotateProbeWindow(s beads.Bead, sessName string, cursor, window, candidates int) {
 	if p.store == nil {
 		return
 	}
+	if last := parseRFC3339OrZero(s.Metadata[seatClaimProbeRotatedAtKey]); !last.IsZero() && p.now.Sub(last) < idleClaimNudgeBackoff {
+		return
+	}
 	next := (cursor + window) % candidates
 	if !writeSessionMetadata(p.store, &s, map[string]string{
-		seatClaimProbeCursorKey: strconv.Itoa(next),
+		seatClaimProbeCursorKey:    strconv.Itoa(next),
+		seatClaimProbeRotatedAtKey: p.now.UTC().Format(time.RFC3339),
 	}, seatClaimNudgeLabel, p.stdout) {
 		return
 	}
@@ -608,7 +706,12 @@ func (p seatClaimBackstop) revalidate(target backstopTarget) backstopResolution 
 	// ownedByContinuationLane is re-checked here, not only in the snapshot: the
 	// dispatcher stamps continuation metadata on a row as it preassigns it, so a
 	// row can become the continuation lane's between the snapshot and delivery.
-	if !claimableSeatWork(current, p.now) || ownedByContinuationLane(current) || !seatStillOwns(current, row) {
+	// The seat half comes off the snapshot row rather than being re-derived — the
+	// live re-read answers what the BEAD is now, while which lane serves this seat
+	// is a property of the seat, and both seams must judge it the same way or a
+	// row admitted by resolve could be dropped here for a reason resolve never
+	// applied.
+	if !claimableSeatWork(current, p.now) || ownedByContinuationLane(current, row.SeatIsPoolManaged) || !seatStillOwns(current, row) {
 		return backstopResolutionClear
 	}
 	blocked, err := beadHasUnmetPlainBlocksDep(row.Store, target.ID)
@@ -757,8 +860,8 @@ func writeSeatClaimMarker(
 // clearSeatClaimMarker wipes the state machine — escalation latch and probe
 // cursor included — so the seat's next row starts a fresh window. Clear means
 // the lane proved this seat owns nothing claimable, which makes the old resume
-// point meaningless. No-op when there is nothing to clear, so steady-state ticks
-// stay write-free.
+// point and its pacing stamp meaningless. No-op when there is nothing to clear,
+// so steady-state ticks stay write-free.
 func clearSeatClaimMarker(store beads.Store, s *beads.Bead, stdout io.Writer) {
 	keys := []string{
 		seatClaimNudgeWorkKey,
@@ -769,6 +872,7 @@ func clearSeatClaimMarker(store beads.Store, s *beads.Bead, stdout io.Writer) {
 		seatClaimNudgeAtKey,
 		seatClaimNudgeStalledKey,
 		seatClaimProbeCursorKey,
+		seatClaimProbeRotatedAtKey,
 	}
 	dirty := false
 	for _, key := range keys {
