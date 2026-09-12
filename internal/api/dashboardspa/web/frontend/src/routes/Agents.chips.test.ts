@@ -142,4 +142,48 @@ describe('buildAgentSynopsis', () => {
   it('returns the empty-state sentence when no rows', () => {
     expect(buildAgentSynopsis([])).toBe('No agents configured.');
   });
+
+  it('reports stopped agents (e.g. never-started min=0 scaled instances) as a distinct count, not idle', () => {
+    // gascity gtm-c7c: computeAgentState returns 'stopped' for any
+    // non-running, non-suspended, non-quarantined agent — the normal state
+    // for a scaled pool's min=0 members that have simply never been
+    // started. The synopsis must not fold that into 'idle', which implies
+    // the agent ran before and is now caught up.
+    const rows: AgentResponse[] = [
+      mkAgent('active'),
+      mkAgent('stopped'),
+      mkAgent('stopped'),
+      mkAgent('idle'),
+    ];
+    const synopsis = buildAgentSynopsis(rows);
+    expect(synopsis).toContain('1 active');
+    expect(synopsis).toContain('2 stopped');
+    expect(synopsis).toContain('1 idle');
+  });
+
+  it('reports quarantined agents as a distinct count, not idle', () => {
+    const rows: AgentResponse[] = [mkAgent('active'), mkAgent('quarantined')];
+    const synopsis = buildAgentSynopsis(rows);
+    expect(synopsis).toContain('1 quarantined');
+    expect(synopsis).not.toContain('1 idle');
+  });
+
+  it('reports working agents as a distinct count, not idle', () => {
+    const rows: AgentResponse[] = [mkAgent('working'), mkAgent('idle')];
+    const synopsis = buildAgentSynopsis(rows);
+    expect(synopsis).toContain('1 working');
+    expect(synopsis).toContain('1 idle');
+  });
+
+  it('buckets an unrecognized future state as unknown, not idle', () => {
+    // gastownhall/gascity gtm-c7c: a genuinely wedged agent reporting some
+    // future/unexpected state string must never silently read as a normal
+    // idle agent — that's exactly the masking risk the bead flags. Only
+    // states this switch explicitly recognizes as idle-like (idle, asleep,
+    // creating) should bucket as idle.
+    const rows: AgentResponse[] = [mkAgent('some-future-state-the-dashboard-has-never-seen')];
+    const synopsis = buildAgentSynopsis(rows);
+    expect(synopsis).toContain('1 unknown');
+    expect(synopsis).not.toContain('idle');
+  });
 });

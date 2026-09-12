@@ -66,6 +66,11 @@ type StatusAgentJSON struct {
 	Running       bool      `json:"running"`
 	Suspended     bool      `json:"suspended"`
 	Pool          *PoolJSON `json:"pool,omitempty"`
+	// Partial is true when this specific agent's own runtime probe timed
+	// out (as opposed to the city-wide cityStatusSnapshot.Partial flag,
+	// which can be set by unrelated degraded reads elsewhere in the
+	// status response). Populated on the local/fallback path only.
+	Partial bool `json:"partial,omitempty"`
 }
 
 // PoolJSON represents pool configuration in JSON output.
