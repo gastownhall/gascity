@@ -25,18 +25,74 @@ import (
 // recording-fake store can prove parity now. No production caller is routed
 // through them yet — that is Phase 4/5.
 
+// localOnlyMetadataKeys holds session metadata keys that have been cut over to
+// clone-local storage (SetLocalString/GetLocalString) instead of durable
+// Bead.Metadata for their SET (non-empty) writes. A key lands here one at a
+// time as its production call sites migrate (ga-igcny0.1.2 Phase A/B started
+// with last_woke_at, a high-write-frequency field that does not need durable
+// persistence on every write). Both write chokepoints below — ApplyPatch and
+// setMetadataValue — route a non-empty write of an allowlisted key to
+// SetLocalString only; an empty-string (clearing) write goes to BOTH
+// SetLocalString and the durable store, so a bead's durable copy never goes
+// stale relative to an explicit clear (see splitLocalMetadataPatch). The
+// matching read overlay — local wins when non-empty, durable is the fallback
+// otherwise — lives in info_store.go's projectWithLocalOverlay.
+var localOnlyMetadataKeys = map[string]bool{
+	"last_woke_at": true,
+}
+
+// splitLocalMetadataPatch partitions patch into the subset routed to
+// clone-local storage (localOnlyMetadataKeys) and the subset that still
+// writes through durable Bead.Metadata. An allowlisted key with a non-empty
+// value is local-only (durable is left untouched — the write-amplification
+// cut this migration exists for); an allowlisted key with an EMPTY value (a
+// clear) is written to BOTH maps, so the durable-fallback read in
+// info_store.go's projectWithLocalOverlay observes the clear instead of a
+// stale prior value. Neither returned map aliases patch.
+func splitLocalMetadataPatch(patch MetadataPatch) (local, durable map[string]string) {
+	for k, v := range patch {
+		if localOnlyMetadataKeys[k] {
+			if local == nil {
+				local = map[string]string{}
+			}
+			local[k] = v
+			if v != "" {
+				continue
+			}
+		}
+		if durable == nil {
+			durable = map[string]string{}
+		}
+		durable[k] = v
+	}
+	return local, durable
+}
+
 // ApplyPatch applies a MetadataPatch to the session bead identified by id. It is
 // the single write chokepoint for session metadata transitions: every typed
 // write method below funnels through it, and it is the byte-identical
 // replacement for setMetaBatch(store, id, patch) (cmd/gc/session_beads.go) and
-// the ~20 reconciler SetMetadataBatch(session.ID, patch) sites.
+// the ~20 reconciler SetMetadataBatch(session.ID, patch) sites — EXCEPT for
+// localOnlyMetadataKeys, whose non-empty (SET) values it splits off to
+// SetLocalString only; an empty (CLEAR) value for one of those keys still
+// reaches the durable batch too (see splitLocalMetadataPatch).
 //
 // An empty patch is a no-op (matching setMetaBatch). Empty-string values in the
 // patch are written verbatim; the cross-backend contract that an empty-string
 // metadata value reads back as empty (observationally "cleared") is pinned by
-// TestMetadataEmptyStringClearContract.
+// TestMetadataEmptyStringClearContract. The same empty-string-clears contract
+// applies to the local-routed subset via SetLocalString.
 func (s *Store) ApplyPatch(id string, patch MetadataPatch) error {
 	if len(patch) == 0 {
+		return nil
+	}
+	local, durable := splitLocalMetadataPatch(patch)
+	for k, v := range local {
+		if err := s.store.SetLocalString(id, k, v); err != nil {
+			return err
+		}
+	}
+	if len(durable) == 0 {
 		return nil
 	}
 	// Return the bare store error: this method confines the write codec, it does
@@ -44,7 +100,7 @@ func (s *Store) ApplyPatch(id string, patch MetadataPatch) error {
 	// breaker) log/wrap the error themselves, and several tests assert their exact
 	// diagnostic text — wrapping here would change that caller-visible text and
 	// break runtime fidelity.
-	return s.store.SetMetadataBatch(id, map[string]string(patch))
+	return s.store.SetMetadataBatch(id, durable)
 }
 
 // ApplyPatchInfo persists patch for info.ID (via ApplyPatch) and returns the
@@ -165,8 +221,22 @@ func (s *Store) SetWaitHold(id string, on bool, reason string) error {
 // replacement for the raw store.SetMetadata(id, key, value) sites that write a
 // single session-attribute key. Unlike ApplyPatch (which emits SetMetadataBatch),
 // this emits SetMetadata so the bead op is identical to the raw single-key write
-// it replaces.
+// it replaces — EXCEPT for localOnlyMetadataKeys, which route a non-empty (SET)
+// value to SetLocalString only; an empty (CLEAR) value for one of those keys is
+// written to BOTH SetLocalString and SetMetadata, matching ApplyPatch's
+// clear-propagation (see splitLocalMetadataPatch's doc comment).
 func (s *Store) setMetadataValue(id, key, value string) error {
+	if localOnlyMetadataKeys[key] {
+		if err := s.store.SetLocalString(id, key, value); err != nil {
+			return err
+		}
+		if value != "" {
+			return nil
+		}
+		// Fall through: an explicit clear also clears the durable copy so it
+		// never goes stale relative to local (see splitLocalMetadataPatch).
+		return s.store.SetMetadata(id, key, "")
+	}
 	// Bare store error — callers own their diagnostic text (see ApplyPatch).
 	return s.store.SetMetadata(id, key, value)
 }

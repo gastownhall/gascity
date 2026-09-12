@@ -42,6 +42,82 @@ func infoFromPersistedBead(b beads.Bead) Info {
 	return info
 }
 
+// projectWithLocalOverlay projects b via infoFromPersistedBead and then
+// overlays Info.LastWokeAt from clone-local storage (GetLocalString) WHEN the
+// local read is non-empty; otherwise it keeps the durable-derived value
+// infoFromPersistedBead already read off b.Metadata["last_woke_at"]. "Local
+// wins when local is non-empty, durable is the fallback when local was never
+// touched or was explicitly cleared" only stays correct because of a
+// matching write-side guarantee in store.go (splitLocalMetadataPatch /
+// setMetadataValue): an EXPLICIT CLEAR of last_woke_at (an empty-string
+// write) propagates to BOTH local and durable, not local alone. That is what
+// lets an empty local read fall back to durable safely — after a real clear,
+// durable already agrees with local ("").
+//
+// This two-sided design replaces two narrower attempts, in order:
+//
+//  1. Local-unconditional, no durable fallback at all: correct for
+//     TestGetReflectsApplyPatch (a clear must not resurrect a stale durable
+//     seed) but wrong for any bead whose last_woke_at was never routed
+//     through ApplyPatch/setMetadataValue — pre-migration durable data, or a
+//     write made via session.Tx, which writes straight through to durable
+//     and never calls SetLocalString (see storeTx.ApplyPatch). That blanked
+//     most of the cmd/gc reconciler test corpus, whose fixtures seed
+//     last_woke_at directly into durable Metadata and read it back through
+//     Info without ever writing through the migrated path first.
+//  2. Durable fallback WITHOUT the write-side clear propagation: fixes (1)
+//     but breaks TestGetReflectsApplyPatch, because a Sleep-style clear left
+//     durable holding its pre-clear value forever (nothing had ever written
+//     "" to durable), so the fallback resurrected the stale seed on every
+//     read.
+//
+// Pairing the write-side clear propagation with this read-side fallback
+// resolves both at once: a real clear now updates durable too, so the
+// fallback still reads "" post-clear (TestGetReflectsApplyPatch), while a
+// never-touched bead's real durable value surfaces instead of reading blank
+// (the cmd/gc corpus).
+//
+// A read error from GetLocalString is treated the same as an empty read
+// (falls back to durable) — matching the absent-key zero-value read every
+// other codec field gets from a plain map lookup; it cannot fail for a bead
+// just loaded from the same store except under a concurrent delete, which
+// the durable projection above is equally exposed to.
+//
+// A panicking GetLocalString gets the same fallback, via safeGetLocalString.
+// beads.Store is a wide interface, and many tests build a partial double by
+// embedding the bare interface and overriding only the one or two methods
+// they exercise (e.g. List) — the case here is s.store.Store itself being
+// such a double. GetLocalString then resolves to the still-nil embedded
+// interface's promoted method, which panics on any call. That is a test
+// wiring gap, not a real absence signal, but this call site cannot tell it
+// apart from one, so it folds both into the existing "local unavailable,
+// use durable" contract rather than crashing every caller — real backends
+// (MemStore, SQLiteStore, BdStore, NativeDoltStore, CachingStore) never hit
+// the recover path.
+func (s *Store) projectWithLocalOverlay(b beads.Bead) Info {
+	info := infoFromPersistedBead(b)
+	if local, ok := safeGetLocalString(s.store, b.ID, "last_woke_at"); ok && local != "" {
+		info.LastWokeAt = local
+	}
+	return info
+}
+
+// safeGetLocalString calls store.GetLocalString, treating a returned error
+// and a recovered panic identically (value "", ok false). See
+// projectWithLocalOverlay for why the panic case exists.
+func safeGetLocalString(store beads.SessionStore, id, key string) (value string, ok bool) {
+	defer func() {
+		if recover() != nil {
+			value, ok = "", false
+		}
+	}()
+	v, err := store.GetLocalString(id, key)
+	if err != nil {
+		return "", false
+	}
+	return v, true
+}
+
 // Store is the session-domain front door over a session-class bead store: the
 // single typed seam through which callers read and write sessions without
 // touching *beads.Bead. The read half (Get / List, projecting via
@@ -79,7 +155,7 @@ func (s *Store) Get(id string) (Info, error) {
 	if err != nil {
 		return Info{}, err
 	}
-	return infoFromPersistedBead(b), nil
+	return s.projectWithLocalOverlay(b), nil
 }
 
 // GetPersistedResponse returns the persisted session.Info paired with the
@@ -97,7 +173,7 @@ func (s *Store) GetPersistedResponse(id string) (Info, PersistedResponse, error)
 	if err != nil {
 		return Info{}, PersistedResponse{}, err
 	}
-	return infoFromPersistedBead(b), PersistedResponseFromBead(b), nil
+	return s.projectWithLocalOverlay(b), PersistedResponseFromBead(b), nil
 }
 
 // validatedBead loads the session bead for id. A load failure (including an
@@ -151,7 +227,7 @@ func (s *Store) List(stateFilter, templateFilter string) ([]Info, error) {
 		if !sessionMatchesFilters(b, stateFilter, templateFilter) {
 			continue
 		}
-		out = append(out, infoFromPersistedBead(b))
+		out = append(out, s.projectWithLocalOverlay(b))
 	}
 	return out, nil
 }
@@ -171,7 +247,7 @@ func (s *Store) ListByMetadataInfos(filters map[string]string, limit int) ([]Inf
 	}
 	out := make([]Info, 0, len(found))
 	for _, b := range found {
-		out = append(out, infoFromPersistedBead(b))
+		out = append(out, s.projectWithLocalOverlay(b))
 	}
 	return out, nil
 }
@@ -199,7 +275,7 @@ func (s *Store) ListLabeledSessionInfosUnfiltered() ([]Info, error) {
 		if b.Status == "closed" {
 			continue
 		}
-		out = append(out, infoFromPersistedBead(b))
+		out = append(out, s.projectWithLocalOverlay(b))
 	}
 	return out, nil
 }

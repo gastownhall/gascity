@@ -290,6 +290,13 @@ func TestCmdSessionKill_ClearsCircuitBreaker(t *testing.T) {
 // ("awake") and a later `gc session wake` short-circuits on the stale
 // metadata and never starts a fresh runtime. The write lives in cmdSessionKill
 // (not Manager.Kill) so the drain-ack async-stop path is unaffected.
+//
+// It also asserts durable last_woke_at is cleared, as an end-to-end wiring
+// check that cmdSessionKill still calls syncKilledSessionAsleep
+// (ga-igcny0.1.2.1): TestSyncKilledSessionAsleepClearsLocalLastWokeAtNotJustDurable
+// pins the helper's own local+durable clearing behavior against a single
+// shared store instance, but only a full CLI-level run like this one can
+// catch a regression where cmdSessionKill stops calling the helper at all.
 func TestCmdSessionKill_SyncsBeadToAsleep(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")
@@ -323,6 +330,7 @@ func TestCmdSessionKill_SyncsBeadToAsleep(t *testing.T) {
 			"template":                   "worker",
 			"session_name":               sessionName,
 			"state":                      "awake",
+			"last_woke_at":               "2026-04-10T11:00:00Z",
 			namedSessionMetadataKey:      "true",
 			namedSessionIdentityMetadata: identity,
 		},
@@ -368,6 +376,9 @@ func TestCmdSessionKill_SyncsBeadToAsleep(t *testing.T) {
 	}
 	if got := updated.Metadata["synced_at"]; got == "" {
 		t.Error("post-kill synced_at is empty, want a refreshed timestamp")
+	}
+	if got := updated.Metadata["last_woke_at"]; got != "" {
+		t.Errorf("post-kill durable last_woke_at = %q, want cleared", got)
 	}
 }
 
