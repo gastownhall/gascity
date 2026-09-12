@@ -2381,6 +2381,79 @@ func TestQuarantineControlFailureBeadClosesWithDiagnostics(t *testing.T) {
 	}
 }
 
+func TestQuarantineControlFailureBeadAbortsScopeBeforeDependencyCanRun(t *testing.T) {
+	store := beads.NewMemStore()
+	create := func(bead beads.Bead) beads.Bead {
+		t.Helper()
+		created, err := store.Create(bead)
+		if err != nil {
+			t.Fatalf("create %q: %v", bead.Title, err)
+		}
+		return created
+	}
+	body := create(beads.Bead{
+		Title: "workflow scope",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": "wf-1",
+			"gc.step_ref":     "demo.body",
+		},
+	})
+	control := create(beads.Bead{
+		Title:  "required validator",
+		Type:   "task",
+		Status: "open",
+		Labels: []string{"gc:control"},
+		Metadata: map[string]string{
+			"gc.kind":         "check",
+			"gc.root_bead_id": "wf-1",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "control",
+		},
+	})
+	downstream := create(beads.Bead{
+		Title: "downstream work",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id": "wf-1",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+			"gc.on_fail":      "abort_scope",
+		},
+	})
+	for _, dep := range []beads.Dep{
+		{IssueID: body.ID, DependsOnID: control.ID, Type: "blocks"},
+		{IssueID: downstream.ID, DependsOnID: control.ID, Type: "blocks"},
+	} {
+		if err := store.DepAdd(dep.IssueID, dep.DependsOnID, dep.Type); err != nil {
+			t.Fatalf("add dependency %+v: %v", dep, err)
+		}
+	}
+
+	if err := quarantineControlFailureBead(store, control.ID, errors.New("validator infrastructure failed")); err != nil {
+		t.Fatalf("quarantineControlFailureBead: %v", err)
+	}
+
+	got, err := store.Get(downstream.ID)
+	if err != nil {
+		t.Fatalf("get downstream: %v", err)
+	}
+	if got.Status != "closed" || got.Metadata["gc.outcome"] != "skipped" {
+		t.Fatalf("downstream = status %q outcome %q, want closed/skipped", got.Status, got.Metadata["gc.outcome"])
+	}
+	ready, err := store.Ready()
+	if err != nil {
+		t.Fatalf("ready: %v", err)
+	}
+	for _, bead := range ready {
+		if bead.ID == downstream.ID {
+			t.Fatalf("quarantined required control made downstream %s ready", downstream.ID)
+		}
+	}
+}
+
 func TestQuarantineControlFailureBeadTruncatesReasonAtUTF8Boundary(t *testing.T) {
 	store := beads.NewMemStore()
 	control, err := store.Create(beads.Bead{

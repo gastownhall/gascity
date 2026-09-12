@@ -252,6 +252,21 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 		if !filepath.IsAbs(checkPath) && !pathutil.PathWithin(cityPath, resolvedWorkDir) && !pathutil.PathWithin(storePath, resolvedWorkDir) {
 			return convergence.GateResult{}, fmt.Errorf("%s: work_dir %q escapes both city and store roots", bead.ID, workDir)
 		}
+		// gc.work_dir can outlive the transient worker directory it names. A
+		// missing inherited directory must not remain the check process cwd:
+		// even when the script can be recovered from the stable store root,
+		// exec would otherwise fail while changing into the stale directory.
+		// Treat only a genuinely missing path as absent. Other stat failures
+		// and non-directories remain configuration errors and fail closed.
+		info, statErr := os.Stat(resolvedWorkDir)
+		switch {
+		case errors.Is(statErr, fs.ErrNotExist):
+			resolvedWorkDir = ""
+		case statErr != nil:
+			return convergence.GateResult{}, fmt.Errorf("%s: inspecting work_dir %q: %w", bead.ID, workDir, statErr)
+		case !info.IsDir():
+			return convergence.GateResult{}, fmt.Errorf("%s: work_dir %q is not a directory", bead.ID, workDir)
+		}
 	}
 	scriptBase := storePath
 	if resolvedWorkDir != "" {
