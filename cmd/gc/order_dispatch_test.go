@@ -4113,6 +4113,124 @@ func TestSweepClosedOrderTrackingRetentionKeepsLatestTenPerOrderAcrossTiers(t *t
 	}
 }
 
+// TestSweepClosedOrderTrackingRetentionRetainsRootsThatStillOwnOpenSteps is the
+// ga-ejwo1q regression: the retention prune deleted an expired CLOSED tracking
+// root without looking at its descendants, leaving live steps rootless. A
+// rootless step is unworkable by construction — it can only fail
+// an out-of-vocabulary failure class and mail an escalation — so the prune manufactured noise
+// out of live work (ga-033u0e).
+//
+// The guard is descendant-state-sensitive, not a blanket "never delete a root":
+// alpha-00 owns an OPEN step and is retained, while alpha-01 owns only a CLOSED
+// step and still prunes on the same sweep.
+func TestSweepClosedOrderTrackingRetentionRetainsRootsThatStillOwnOpenSteps(t *testing.T) {
+	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	beadTime := now.Add(-48 * time.Hour)
+	seed := make([]beads.Bead, 0, 14)
+	for i := 0; i < 12; i++ {
+		seed = append(seed, beads.Bead{
+			ID:        fmt.Sprintf("alpha-%02d", i),
+			Title:     "order:alpha",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: beadTime.Add(time.Duration(i) * time.Minute),
+			Labels:    []string{"order-run:alpha", labelOrderTracking},
+		})
+	}
+	seed = append(seed,
+		beads.Bead{
+			ID: "alpha-00-step", Title: "live step", Status: "open", Type: "task",
+			CreatedAt: beadTime, Ephemeral: true,
+			Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "alpha-00"},
+		},
+		beads.Bead{
+			ID: "alpha-01-step", Title: "finished step", Status: "closed", Type: "task",
+			CreatedAt: beadTime, Ephemeral: true,
+			Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "alpha-01"},
+		},
+	)
+	store := beads.NewMemStoreFrom(100, seed, nil)
+
+	var (
+		deleted int
+		err     error
+	)
+	logOutput := captureWispGCLog(t, func() {
+		deleted, err = sweepClosedOrderTrackingRetention(store, now, orderTrackingRetentionPolicy{
+			deleteAfterClose: 24 * time.Hour,
+			retainLast:       minClosedOrderTrackingRetained,
+		}, nil)
+	})
+	if err != nil {
+		t.Fatalf("sweepClosedOrderTrackingRetention: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted = %d, want 1 (alpha-01 only; alpha-00 still owns an open step)", deleted)
+	}
+	// A retained root is only actionable if the log says WHICH root: a count
+	// alone leaves the operator to re-derive it from the store.
+	if !strings.Contains(logOutput, "alpha-00") {
+		t.Fatalf("retention log = %q, want the retained root alpha-00 named", logOutput)
+	}
+	if strings.Contains(logOutput, "alpha-01") {
+		t.Fatalf("retention log = %q, names alpha-01, which was pruned, not retained", logOutput)
+	}
+
+	// Assert the ROOT/STEP PAIR, not just the root's survival: the defect is
+	// the step outliving its root, so read the step's own pointer back and
+	// require it to still resolve.
+	step, err := store.Get("alpha-00-step")
+	if err != nil {
+		t.Fatalf("open step must not be deleted: %v", err)
+	}
+	if _, err := store.Get(step.Metadata[beadmeta.RootBeadIDMetadataKey]); err != nil {
+		t.Fatalf("open step left rootless — this is the ga-ejwo1q defect: %v", err)
+	}
+
+	if _, err := store.Get("alpha-01"); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("alpha-01 owns only closed steps and must still prune: err = %v", err)
+	}
+}
+
+func TestSweepClosedOrderTrackingRetentionBoundedRetainsRootsThatStillOwnOpenSteps(t *testing.T) {
+	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	beadTime := now.Add(-48 * time.Hour)
+	seed := make([]beads.Bead, 0, 14)
+	for i := 0; i < 12; i++ {
+		seed = append(seed, beads.Bead{
+			ID:        fmt.Sprintf("alpha-%02d", i),
+			Title:     "order:alpha",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: beadTime.Add(time.Duration(i) * time.Minute),
+			Labels:    []string{"order-run:alpha", labelOrderTracking},
+		})
+	}
+	seed = append(seed, beads.Bead{
+		ID: "alpha-00-step", Title: "live step", Status: "open", Type: "task",
+		CreatedAt: beadTime, Ephemeral: true,
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "alpha-00"},
+	})
+	store := beads.NewMemStoreFrom(100, seed, nil)
+
+	deleted, err := sweepClosedOrderTrackingRetentionBounded(store, now, orderTrackingRetentionPolicy{
+		deleteAfterClose: 24 * time.Hour,
+		retainLast:       minClosedOrderTrackingRetained,
+	}, nil, 10)
+	if err != nil {
+		t.Fatalf("sweepClosedOrderTrackingRetentionBounded: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted = %d, want 1 (alpha-01 only)", deleted)
+	}
+	if _, err := store.Get("alpha-00"); err != nil {
+		t.Fatalf("alpha-00 owns an open step and must be retained: %v", err)
+	}
+	if _, err := store.Get("alpha-00-step"); err != nil {
+		t.Fatalf("open step must not be stranded: %v", err)
+	}
+}
+
 func TestSweepClosedOrderTrackingRetentionPrunesLegacyUnscopedTracking(t *testing.T) {
 	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
 	beadTime := now.Add(-48 * time.Hour)

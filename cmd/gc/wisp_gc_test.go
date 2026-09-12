@@ -1523,6 +1523,116 @@ func TestWispGC_CollectsClosedGraphWorkflowRoot(t *testing.T) {
 	}
 }
 
+// laggingClosureStore models the race the closure purge's set-level strand
+// guard exists for: a step created between the closure collector's List and
+// the guard's live membership read. Its non-live List (what
+// collectExpiredBeadClosure reads) omits hiddenID; the live reader the guard
+// uses sees everything.
+type laggingClosureStore struct {
+	*gcTestStore
+	hiddenID string
+}
+
+func (s *laggingClosureStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	items, err := s.gcTestStore.List(query)
+	if err != nil || query.Live {
+		return items, err
+	}
+	kept := make([]beads.Bead, 0, len(items))
+	for _, b := range items {
+		if b.ID != s.hiddenID {
+			kept = append(kept, b)
+		}
+	}
+	return kept, nil
+}
+
+// TestWispGC_ClosurePurgeSkipsRefusedRootWithoutChargingCap applies the
+// pruner rule to the closed-root closure purge: a root whose closure delete
+// the strand guard refuses is a SKIP — no error joined into the sweep result
+// (so nothing printed to stderr every tick) and no charge against the closure
+// batch cap, because no delete was attempted. With the cap at 1 and the
+// refused root listed first, a sweep that charged the refusal would never
+// reach the collectible root behind it — on every tick, forever.
+func TestWispGC_ClosurePurgeSkipsRefusedRootWithoutChargingCap(t *testing.T) {
+	now := time.Now()
+	store := &laggingClosureStore{
+		gcTestStore: newGCStore([]beads.Bead{
+			makeGCBead("mol-refused", now.Add(-3*time.Hour), "closed", "molecule"),
+			{
+				ID:        "mol-refused.step",
+				Status:    "open",
+				Type:      "task",
+				CreatedAt: now.Add(-3 * time.Hour),
+				Metadata:  map[string]string{beadmeta.RootBeadIDMetadataKey: "mol-refused"},
+			},
+			makeGCBead("mol-ok", now.Add(-2*time.Hour), "closed", "molecule"),
+		}),
+		hiddenID: "mol-refused.step",
+	}
+
+	entries, err := closedWispGCEntries(store)
+	if err != nil {
+		t.Fatalf("closedWispGCEntries: %v", err)
+	}
+	purged, err := purgeExpiredBeadClosures(store, entries, now, 1)
+	if err != nil {
+		t.Fatalf("purgeExpiredBeadClosures: %v (a refused delete is a skip, not a sweep failure)", err)
+	}
+	if purged != 1 {
+		t.Fatalf("purged = %d, want 1 (the refusal must not consume the cap slot mol-ok needs)", purged)
+	}
+	assertDeletedIDs(t, store.deletedIDs, "mol-ok")
+	for _, id := range []string{"mol-refused", "mol-refused.step"} {
+		if _, err := store.Get(id); err != nil {
+			t.Fatalf("Get(%s): %v, want the refused root and its open step to survive", id, err)
+		}
+	}
+}
+
+// TestWispGC_ReapSkipsOrphanOwningOpenSubStepWithoutChargingCap covers the
+// orphan reaper's refusal branch: a closed orphan that is itself an
+// intermediate step still owning an open sub-step is refused by the strand
+// guard. That is a skip — no error, and the candidate becomes eligible once
+// the sub-step finishes — and it must not charge the reap batch cap: no delete
+// was attempted, and with the cap at 1 and the refused orphan listed first, a
+// charged refusal would starve every reapable orphan behind it on every sweep.
+func TestWispGC_ReapSkipsOrphanOwningOpenSubStepWithoutChargingCap(t *testing.T) {
+	withReapOrphansEnforced(t, true)
+	withReapOrphanBatchCap(t, 1)
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCOrphanWisp("orphan-refused", now.Add(-3*time.Hour), "ghost-root"),
+		{
+			// Linked by ParentID only (no gc.root_bead_id), so the refusal
+			// comes from the guard's tree-walk fallback, not the membership
+			// index.
+			ID:        "orphan-refused.sub",
+			Status:    "open",
+			Type:      "task",
+			CreatedAt: now.Add(-3 * time.Hour),
+			ParentID:  "orphan-refused",
+			Ephemeral: true,
+		},
+		makeGCOrphanWisp("orphan-ok", now.Add(-2*time.Hour), "ghost-root"),
+	})
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	purged, err := wg.runGC(beads.GraphStore{Store: store}, beads.MailStore{Store: store}, now)
+	if err != nil {
+		t.Fatalf("runGC: %v (a refused reap is a skip, not a sweep failure)", err)
+	}
+	if purged != 1 {
+		t.Fatalf("purged = %d, want 1 (the refusal must not consume the cap slot orphan-ok needs)", purged)
+	}
+	assertDeletedIDs(t, store.deletedIDs, "orphan-ok")
+	for _, id := range []string{"orphan-refused", "orphan-refused.sub"} {
+		if _, err := store.Get(id); err != nil {
+			t.Fatalf("Get(%s): %v, want the refused orphan and its open sub-step to survive", id, err)
+		}
+	}
+}
+
 // TestWispGC_ClosurePurgeHonorsBatchCap is the post-merge regression for the
 // finding that the closed-root closure purge had no per-tick bound. The selector
 // expansion (adding graph.v2/workflow roots) made a never-before-collected class
