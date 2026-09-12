@@ -4610,6 +4610,56 @@ func TestEnqueueSupersedes_SameAgentSourceReference(t *testing.T) {
 	}
 }
 
+func TestEnqueueSupersedes_SameAgentSourceMessage_NoReference(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now()
+
+	// nudge-on-route shape: plain `gc session nudge`, fixed text, no reference.
+	first := newQueuedNudgeWithOptions("worker", "check for assigned work", "session", now, queuedNudgeOptions{ID: "n-first"})
+	if err := enqueueQueuedNudge(dir, first); err != nil {
+		t.Fatalf("enqueueQueuedNudge(first): %v", err)
+	}
+	second := newQueuedNudgeWithOptions("worker", "check for assigned work", "session", now.Add(time.Second), queuedNudgeOptions{ID: "n-second"})
+	if err := enqueueQueuedNudge(dir, second); err != nil {
+		t.Fatalf("enqueueQueuedNudge(second): %v", err)
+	}
+	// Different text, same agent/source: must NOT be coalesced.
+	other := newQueuedNudgeWithOptions("worker", "STOP work on bead-1", "session", now.Add(2*time.Second), queuedNudgeOptions{ID: "n-other"})
+	if err := enqueueQueuedNudge(dir, other); err != nil {
+		t.Fatalf("enqueueQueuedNudge(other): %v", err)
+	}
+	// Same text but carrying a reference: reference-less matching must leave it alone.
+	withRef := newQueuedNudgeWithOptions("worker", "check for assigned work", "session", now.Add(3*time.Second), queuedNudgeOptions{
+		ID:        "n-ref",
+		Reference: &nudgeReference{Kind: "bead", ID: "bead-789"},
+	})
+	if err := enqueueQueuedNudge(dir, withRef); err != nil {
+		t.Fatalf("enqueueQueuedNudge(withRef): %v", err)
+	}
+
+	// Same text from the mail source: mail reminders are never coalesced.
+	mail := newQueuedNudgeWithOptions("worker", "check for assigned work", "mail", now.Add(4*time.Second), queuedNudgeOptions{ID: "n-mail"})
+	if err := enqueueQueuedNudge(dir, mail); err != nil {
+		t.Fatalf("enqueueQueuedNudge(mail): %v", err)
+	}
+
+	pending, _, dead, err := listQueuedNudges(dir, "worker", now.Add(5*time.Second))
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	got := map[string]bool{}
+	for _, p := range pending {
+		got[p.ID] = true
+	}
+	if len(pending) != 4 || !got["n-second"] || !got["n-other"] || !got["n-ref"] || !got["n-mail"] {
+		t.Fatalf("pending = %v, want exactly n-second, n-other, n-ref, n-mail", got)
+	}
+	if len(dead) != 1 || dead[0].ID != "n-first" || dead[0].LastError != "superseded" {
+		t.Fatalf("dead = %+v, want only n-first superseded", dead)
+	}
+}
+
 func TestEnqueueSupersedes_InFlightNudge(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()

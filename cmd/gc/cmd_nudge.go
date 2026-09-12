@@ -2249,28 +2249,50 @@ func enqueueQueuedNudgeWithStoreAndClock(cityPath string, store beads.NudgesStor
 	err = withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		now := clk.Now()
 		deadline := now.Add(nudgeEnqueueMaintenanceBudget)
-		if err := recoverExpiredInFlightNudgesWithClock(state, front, now, deadline, clk); err != nil {
-			return err
-		}
-		if err := pruneExpiredQueuedNudgesWithClock(state, front, now, deadline, clk); err != nil {
-			return err
-		}
-		if err := pruneDeadQueuedNudgesWithClock(state, front, now, deadline, clk); err != nil {
-			return err
-		}
 		if queuedNudgeExists(state, item.ID) {
 			return nil
 		}
-		// Supersede pending and in-flight nudges for the same (agent, source, reference).
-		if item.Reference != nil && item.Reference.ID != "" {
+		// Supersession runs BEFORE the maintenance passes: it is a correctness
+		// step (one store call per matched item, usually zero or one), while
+		// recover/prune are housekeeping that spend the shared budget on one
+		// store lookup per dead-letter item. With ~100 dead items under load
+		// the budget was gone before supersession started, both loops bailed
+		// on their first iteration, and identical session nudges kept
+		// accumulating (sys-8qaog). Housekeeping gets whatever is left; the
+		// foreground bound is unchanged.
+		// Supersede pending and in-flight nudges for the same (agent, source,
+		// reference) — or, for reference-less nudges, the same (agent, source,
+		// message). A plain `gc session nudge` (e.g. the core pack's
+		// nudge-on-route firing once per routed bead) carries no reference, so
+		// N unanswered copies of one fixed wake text used to queue up and drain
+		// as N identical injections in a single turn (sys-8qaog). Mail
+		// reminders are deliberately excluded: each mail keeps its own
+		// reminder (TestSendMailNotifyQueuesIndependentRemindersForEachMail).
+		hasRef := item.Reference != nil && item.Reference.ID != ""
+		coalesceByText := !hasRef && item.Source == "session" && strings.TrimSpace(item.Message) != ""
+		if hasRef || coalesceByText {
+			// Say so when the budget runs out mid-scan rather than skipping
+			// silently: an unscanned tail means duplicates may remain.
+			budgetExhausted := func(queue string, remaining int) {
+				if nudgeWarningWriter != nil {
+					fmt.Fprintf(nudgeWarningWriter, "gc nudge enqueue: warning: supersession budget exhausted with %d %s item(s) unscanned; duplicates may remain\n", remaining, queue) //nolint:errcheck
+				}
+			}
 			matchesSupersession := func(existing queuedNudge) bool {
-				return existing.Agent == item.Agent && existing.Source == item.Source &&
-					existing.Reference != nil && existing.Reference.Kind == item.Reference.Kind &&
-					existing.Reference.ID == item.Reference.ID
+				if existing.Agent != item.Agent || existing.Source != item.Source {
+					return false
+				}
+				if hasRef {
+					return existing.Reference != nil && existing.Reference.Kind == item.Reference.Kind &&
+						existing.Reference.ID == item.Reference.ID
+				}
+				return (existing.Reference == nil || existing.Reference.ID == "") &&
+					existing.Message == item.Message
 			}
 			filtered := state.Pending[:0]
 			for i, existing := range state.Pending {
 				if clk.Now().After(deadline) {
+					budgetExhausted("pending", len(state.Pending)-i)
 					filtered = append(filtered, state.Pending[i:]...)
 					break
 				}
@@ -2293,6 +2315,7 @@ func enqueueQueuedNudgeWithStoreAndClock(cityPath string, store beads.NudgesStor
 			inFlight := state.InFlight[:0]
 			for i, existing := range state.InFlight {
 				if clk.Now().After(deadline) {
+					budgetExhausted("in-flight", len(state.InFlight)-i)
 					inFlight = append(inFlight, state.InFlight[i:]...)
 					break
 				}
@@ -2308,6 +2331,15 @@ func enqueueQueuedNudgeWithStoreAndClock(cityPath string, store beads.NudgesStor
 				inFlight = append(inFlight, existing)
 			}
 			state.InFlight = inFlight
+		}
+		if err := recoverExpiredInFlightNudgesWithClock(state, front, now, deadline, clk); err != nil {
+			return err
+		}
+		if err := pruneExpiredQueuedNudgesWithClock(state, front, now, deadline, clk); err != nil {
+			return err
+		}
+		if err := pruneDeadQueuedNudgesWithClock(state, front, now, deadline, clk); err != nil {
+			return err
 		}
 		state.Pending = append(state.Pending, item)
 		sortQueuedNudges(state)
