@@ -194,7 +194,21 @@ func (p *Provider) SendHandoff(intent mail.HandoffIntent) (mail.Message, error) 
 	labels = append(labels, "thread:"+intent.ThreadID)
 	labels = append(labels, intent.ExtraLabels...)
 
-	b, err := p.createMessageBead(intent.Subject, intent.Body, from, intent.To, labels, metadata)
+	// A self-handoff (gc handoff, and the gc handoff --auto that PreCompact
+	// fires) names one session on both sides. resolveSenderRoute can re-render
+	// that address -- an aliasless pool member addresses itself by its raw
+	// session ID and resolves to its session_name -- so carry the resolved form
+	// to the recipient too. Left unequal, the stored row shows two different
+	// strings for one session and every consumer that compares sender against
+	// recipient reads a self-addressed marker as agent-to-agent mail (ga-28neu4).
+	// Delivery is unaffected either way: both renderings are in the session's
+	// own RecipientRoutesFromInfo route set.
+	to := intent.To
+	if from != "" && strings.TrimSpace(to) == strings.TrimSpace(intent.From) {
+		to = from
+	}
+
+	b, err := p.createMessageBead(intent.Subject, intent.Body, from, to, labels, metadata)
 	if err != nil {
 		return mail.Message{}, fmt.Errorf("beadmail handoff: %w", err)
 	}
