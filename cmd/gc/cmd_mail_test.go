@@ -1928,9 +1928,10 @@ func TestMailReplyNotifySuccess(t *testing.T) {
 	mp := beadmail.New(store)
 	mp.Send("alice", "bob", "Hello", "first") //nolint:errcheck
 
-	var nudged string
-	nf := func(recipient string) error {
+	var nudged, nudgedMessageID string
+	nf := func(recipient, messageID string) error {
 		nudged = recipient
+		nudgedMessageID = messageID
 		return nil
 	}
 
@@ -1945,6 +1946,9 @@ func TestMailReplyNotifySuccess(t *testing.T) {
 	if nudged != "alice" {
 		t.Errorf("nudgeFn called with %q, want %q", nudged, "alice")
 	}
+	if nudgedMessageID == "" || !strings.Contains(stdout.String(), "sent message "+nudgedMessageID) {
+		t.Errorf("nudgeFn called with messageID %q, want the reply's own message ID (stdout: %s)", nudgedMessageID, stdout.String())
+	}
 }
 
 func TestMailReplyNotifyNudgeError(t *testing.T) {
@@ -1952,7 +1956,7 @@ func TestMailReplyNotifyNudgeError(t *testing.T) {
 	mp := beadmail.New(store)
 	mp.Send("alice", "bob", "Hello", "first") //nolint:errcheck
 
-	nf := func(_ string) error {
+	nf := func(_, _ string) error {
 		return fmt.Errorf("session not found")
 	}
 
@@ -3180,9 +3184,10 @@ func TestMailSendNotifySuccess(t *testing.T) {
 	mp := beadmail.New(store)
 	recipients := map[string]bool{"human": true, "mayor": true}
 
-	var nudged string
-	nf := func(recipient string) error {
+	var nudged, nudgedMessageID string
+	nf := func(recipient, messageID string) error {
 		nudged = recipient
+		nudgedMessageID = messageID
 		return nil
 	}
 
@@ -3197,6 +3202,9 @@ func TestMailSendNotifySuccess(t *testing.T) {
 	if nudged != "mayor" {
 		t.Errorf("nudgeFn called with %q, want %q", nudged, "mayor")
 	}
+	if nudgedMessageID != "gc-1" {
+		t.Errorf("nudgeFn called with messageID %q, want %q (the sent message's ID)", nudgedMessageID, "gc-1")
+	}
 }
 
 func TestMailSendNotifyNudgeError(t *testing.T) {
@@ -3204,7 +3212,7 @@ func TestMailSendNotifyNudgeError(t *testing.T) {
 	mp := beadmail.New(store)
 	recipients := map[string]bool{"human": true, "mayor": true}
 
-	nf := func(_ string) error {
+	nf := func(_, _ string) error {
 		return fmt.Errorf("session not found")
 	}
 
@@ -3229,7 +3237,7 @@ func TestMailSendNotifyToHuman(t *testing.T) {
 	recipients := map[string]bool{"human": true, "mayor": true}
 
 	nudgeCalled := false
-	nf := func(_ string) error {
+	nf := func(_, _ string) error {
 		nudgeCalled = true
 		return nil
 	}
