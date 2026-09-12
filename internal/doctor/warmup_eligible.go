@@ -74,6 +74,10 @@ func (c *DoltJournalSizeCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the
 // `gc start` warm-up scan.
+func (c *DoltLogSizeCheck) WarmupEligible() bool { return false }
+
+// WarmupEligible returns false; this check is not part of the
+// `gc start` warm-up scan.
 func (c *DoltNomsSizeCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the
