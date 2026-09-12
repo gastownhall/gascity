@@ -2178,3 +2178,82 @@ func TestTryReloadConfig_IncludesBuiltinPackOrders(t *testing.T) {
 }
 
 func (osFS) Chmod(name string, mode os.FileMode) error { return os.Chmod(name, mode) }
+
+// A recursive watch target that is a git worktree (the shape gc import add
+// writes for a local repo path) used to have its whole .git subtree walked and
+// watched: shouldIgnoreConfigWatchEvent pruned .gc and .beads but not .git.
+// Nothing under .git can change a pack's content hash — isIgnoredPackRuntimePath
+// (internal/config/pack.go) skips it on the content side — so every object, ref,
+// and reflog write fired a reload that was guaranteed to be a no-op, and each
+// reload rebuilds the watcher over the whole tree again.
+func TestWatchConfigDirs_RecursiveRootIgnoresGitSubtree(t *testing.T) {
+	old := debounceDelay
+	debounceDelay = 5 * time.Millisecond
+	t.Cleanup(func() { debounceDelay = old })
+
+	dir := t.TempDir()
+	packFile := filepath.Join(dir, "pack.toml")
+	if err := os.WriteFile(packFile, []byte("name = \"sample\"\n"), 0o644); err != nil {
+		t.Fatalf("seed pack file: %v", err)
+	}
+	// Mirrors a real worktree closely enough for the walk: a loose-object
+	// directory nested two levels under .git, plus a packed-refs sibling.
+	objectDir := filepath.Join(dir, ".git", "objects", "ab")
+	if err := os.MkdirAll(objectDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll git object dir: %v", err)
+	}
+	objectFile := filepath.Join(objectDir, "cdef0123456789")
+	if err := os.WriteFile(objectFile, []byte("original\n"), 0o644); err != nil {
+		t.Fatalf("seed git object: %v", err)
+	}
+
+	if !shouldIgnoreConfigWatchEvent(objectFile) {
+		t.Fatalf("shouldIgnoreConfigWatchEvent(%q) = false, want true", objectFile)
+	}
+	if !shouldIgnoreConfigWatchEvent(filepath.Join(dir, ".git")) {
+		t.Fatalf("shouldIgnoreConfigWatchEvent(<root>/.git) = false, want true")
+	}
+	// A path that merely mentions .git must not be pruned: only the directory
+	// itself and its subtree are excluded.
+	if shouldIgnoreConfigWatchEvent(filepath.Join(dir, "gitignore.toml")) {
+		t.Fatalf("shouldIgnoreConfigWatchEvent(<root>/gitignore.toml) = true, want false")
+	}
+
+	var dirty atomic.Bool
+	pokeCh := make(chan struct{}, 1)
+	var stderr bytes.Buffer
+	cleanup := watchConfigTargets([]config.WatchTarget{{Path: dir, Recursive: true}}, &dirty, pokeCh, &stderr)
+	defer cleanup()
+
+	select {
+	case <-pokeCh:
+	default:
+	}
+	dirty.Store(false)
+
+	if err := os.WriteFile(objectFile, []byte("rewritten\n"), 0o644); err != nil {
+		t.Fatalf("rewrite git object: %v", err)
+	}
+	newObject := filepath.Join(objectDir, "fedcba9876543210")
+	if err := os.WriteFile(newObject, []byte("new object\n"), 0o644); err != nil {
+		t.Fatalf("write new git object: %v", err)
+	}
+	// Negative-assertion window: asserts no watcher poke arrives (ga-57b2dk exclusion).
+	select {
+	case <-pokeCh:
+		t.Fatalf("unexpected watcher poke after writes under .git; stderr=%q", stderr.String())
+	case <-time.After(250 * time.Millisecond):
+	}
+	if dirty.Load() {
+		t.Fatalf("dirty flag set after writes under .git; stderr=%q", stderr.String())
+	}
+
+	// Positive control: the rest of the recursive tree is still watched.
+	if err := os.WriteFile(packFile, []byte("name = \"edited\"\n"), 0o644); err != nil {
+		t.Fatalf("edit pack file: %v", err)
+	}
+	awaitClose(t, pokeCh, "watcher poke after pack file edit")
+	if !dirty.Load() {
+		t.Fatalf("dirty flag not set after pack file edit; stderr=%q", stderr.String())
+	}
+}
