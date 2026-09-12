@@ -3,10 +3,13 @@
 #
 # Checks server status and latency, per-database commit counts and open
 # beads, backup freshness, orphan databases, active compaction quarantine
-# markers, and zombie Dolt processes.
+# markers, zombie Dolt processes, and server-side DOLT_FETCH / DOLT_PULL
+# sessions piling up (gp-f2yq).
 #
 # Environment: GC_CITY_PATH, GC_DOLT_PORT, GC_DOLT_HOST, GC_DOLT_USER,
-#              GC_DOLT_PASSWORD, GC_DOLT_RIG_LIST_TIMEOUT_SECS
+#              GC_DOLT_PASSWORD, GC_DOLT_RIG_LIST_TIMEOUT_SECS,
+#              GC_DOLT_HEALTH_MAX_FETCH_SESSIONS (default: 2) — WARN when
+#              more than this many server-side fetch/pull sessions are in flight
 set -e
 
 : "${GC_DOLT_USER:=root}"
@@ -72,6 +75,26 @@ while [ $# -gt 0 ]; do
 done
 
 # Note: run_bounded / TIMEOUT_BIN are provided by assets/scripts/runtime.sh.
+
+# WARN threshold for server-side DOLT_FETCH / DOLT_PULL sessions in flight:
+# more than this many is a herd (a patrol stacking a fetch per run on top of
+# server-side calls its client bounds abandoned). Validated the way the sync
+# bounds are — empty / non-numeric / all-zero is rejected before any probe —
+# so a misconfigured threshold fails loud instead of silently never warning.
+max_fetch_sessions="${GC_DOLT_HEALTH_MAX_FETCH_SESSIONS-2}"
+case "$max_fetch_sessions" in
+  ''|*[!0-9]*) max_fetch_sessions_valid=false ;;
+  *[1-9]*)     max_fetch_sessions_valid=true ;;
+  *)           max_fetch_sessions_valid=false ;;
+esac
+if [ "$max_fetch_sessions_valid" != true ]; then
+  printf 'gc dolt health: invalid GC_DOLT_HEALTH_MAX_FETCH_SESSIONS=%s (must be a positive integer)\n' \
+    "$max_fetch_sessions" >&2
+  exit 2
+fi
+# Canonical decimal: leading zeros dropped (validated non-zero, so never empty)
+# — `"warn_above": 02` would not be JSON.
+max_fetch_sessions=$(printf '%s' "$max_fetch_sessions" | sed 's/^0*//')
 
 # Determine host for probing.
 host="${GC_DOLT_HOST:-127.0.0.1}"
@@ -275,6 +298,30 @@ if [ "$server_reachable" = true ]; then
 "
     done
   fi
+fi
+
+# Server-side DOLT_FETCH / DOLT_PULL sessions in flight (gp-f2yq). A CALL
+# DOLT_FETCH runs inside the sql-server and outlives a client whose bound
+# expired; before the sync/pull guards, a 15-minute patrol stacked one more
+# per run (boomtown 2026-09-11: 169 of 178 sessions, the oldest 2 days, dolt
+# at 180% CPU). One read-only, server-wide processlist probe under the same
+# 5s bound as the other probes: count and oldest age. A probe that fails, or
+# answers with anything but a processlist, is reported as probed=false with
+# count 0 — never as a fabricated "nothing in flight". WARN when the count is
+# MORE than the threshold; informational, never the exit code.
+fetch_sessions_probed=false
+fetch_sessions_count=0
+fetch_sessions_oldest_sec=0
+fetch_sessions_warn=false
+if [ "$server_reachable" = true ] && _fs_err=$(mktemp 2>/dev/null); then
+  if _fs_rows=$(remote_op_sessions "" 5 "$_fs_err"); then
+    fetch_sessions_probed=true
+    fetch_sessions_count=$(printf '%s\n' "$_fs_rows" | awk 'NF == 2 { n++ } END { print n + 0 }')
+    _fs_oldest=$(printf '%s\n' "$_fs_rows" | remote_op_sessions_oldest)
+    [ -n "$_fs_oldest" ] && fetch_sessions_oldest_sec=${_fs_oldest#* }
+    [ "$fetch_sessions_count" -gt "$max_fetch_sessions" ] && fetch_sessions_warn=true
+  fi
+  rm -f "$_fs_err"
 fi
 
 # Check backup freshness.
@@ -603,6 +650,13 @@ JSONEOF
   cat <<JSONEOF
 
   ],
+  "fetch_sessions": {
+    "probed": $fetch_sessions_probed,
+    "count": $fetch_sessions_count,
+    "oldest_age_sec": $fetch_sessions_oldest_sec,
+    "warn_above": $max_fetch_sessions,
+    "warn": $fetch_sessions_warn
+  },
   "processes": {
     "zombie_count": $zombie_count,
     "zombie_pids": [$(echo "$zombie_pids" | tr -s ' ' ',' | sed 's/^,//;s/,$//')]
@@ -673,6 +727,11 @@ fi
 if [ "$zombie_count" -gt 0 ]; then
   echo ""
   echo "Zombie processes: $zombie_count (PIDs:$zombie_pids)"
+fi
+
+if [ "$fetch_sessions_warn" = true ]; then
+  echo ""
+  echo "WARN: $fetch_sessions_count server-side DOLT_FETCH/DOLT_PULL sessions in flight (oldest $(human_duration "$fetch_sessions_oldest_sec"), more than $max_fetch_sessions) — clients gone, procedures still running; gc dolt sync/pull now skip and KILL these, an older run's leftovers need a manual KILL"
 fi
 
 # Exit status (human mode only): 0 when the data plane is healthy

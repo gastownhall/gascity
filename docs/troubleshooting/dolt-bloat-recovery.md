@@ -152,6 +152,11 @@ touch <cityPath>/.beads/dolt/<database>/.no-sync
 `gc dolt sync` and `gc dolt pull` honor the same marker, so one file covers
 every remote path.
 
+Both commands also run at most one server-side `DOLT_FETCH` / `DOLT_PULL` per
+database at a time and `KILL` the server-side call when their client bound
+expires; see the dolt pack's `docs/remote-sync-single-flight.md` for the rule,
+the `gc dolt health` WARN line, and the env bounds.
+
 Choose `.no-sync` over `--skip-fetch` when a database must never reach a
 remote. `--skip-fetch` defers the push and waits for the remote to become
 usable later; `.no-sync` states that it never will.

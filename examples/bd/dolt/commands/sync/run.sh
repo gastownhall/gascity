@@ -50,6 +50,20 @@
 #                     a fresh remote can exceed the prior fixed 120s ceiling).
 #                     Metadata queries (remote lookup, active branch) keep their
 #                     own 120s bound.
+#   GC_DOLT_SYNC_FETCH_TIMEOUT_SECS
+#     (default: 60)   — wall-clock bound for the SQL-mode pre-push fetch.
+#
+# One server-side fetch per database at a time (gp-f2yq): a CALL DOLT_FETCH
+# runs inside the sql-server and outlives a client the bound killed, so before
+# issuing one the script asks the server whether a DOLT_FETCH / DOLT_PULL is
+# already in flight on the server (skipped, NOT pushed, when one is), and
+# when the fetch bound expires it KILLs the server-side session the fetch
+# printed about itself and proves it gone from the processlist. The fetch
+# statement also takes the server's session lock for the database (GET_LOCK,
+# timeout 0) in the same batch, so two runners that both read "nothing in
+# flight" cannot both fetch: the server refuses the second one before its
+# CALL is sent. See the "Server-side remote operations" helpers in
+# assets/scripts/runtime.sh.
 set -e
 
 dry_run=false
@@ -104,6 +118,13 @@ esac
 : "${GC_DOLT_USER:=root}"
 PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)}"
 . "$PACK_DIR/assets/scripts/runtime.sh"
+# This run's lock nonce (see runtime.sh, "Server-side single-flight gate"):
+# one random value per script run, computed here and not at source time; no
+# random bytes = no run (before any database is touched).
+REMOTE_OP_RUN_NONCE=$(remote_op_new_run_nonce) || {
+  echo "gc dolt sync: no run nonce — refusing to run (see the line above)" >&2
+  exit 2
+}
 
 beads_bd="$GC_BEADS_BD_SCRIPT"
 data_dir="$DOLT_DATA_DIR"
@@ -268,19 +289,17 @@ refspec_parts() {
   printf '%s\n%s\n' "$l" "$r"
 }
 
-# dolt_sql QUERY [TIMEOUT_SECS] — run a SQL query against the live server under a
-# wall-clock bound. The optional second arg overrides the bound; it defaults to
-# 120s, which is sized for SHORT METADATA QUERIES ONLY (remote lookup,
-# active_branch). This is a load-bearing contract: any data-transfer operation
-# (e.g. DOLT_PUSH) MUST pass its own larger bound, or it will silently re-hit
-# this 120s ceiling and be SIGKILLed mid-transfer.
+# dolt_sql QUERY [TIMEOUT_SECS] [USE_DB] — run a SQL query against the live
+# server under a wall-clock bound (dolt_sql_csv, runtime.sh). The optional
+# second arg overrides the bound; it defaults to 120s, which is sized for SHORT
+# METADATA QUERIES ONLY (remote lookup, active_branch). This is a load-bearing
+# contract: any data-transfer operation (e.g. DOLT_PUSH) MUST pass its own
+# larger bound, or it will silently re-hit this 120s ceiling and be SIGKILLed
+# mid-transfer. The optional third arg is passed as --use-db so the server
+# attributes the session to that database in its processlist (the fetch uses
+# it; a `USE` inside the query does not set that column).
 dolt_sql() {
-  query="$1"
-  tmo="${2:-120}"
-  host="${GC_DOLT_HOST:-127.0.0.1}"
-  export DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}"
-  run_bounded "$tmo" dolt --host "$host" --port "$GC_DOLT_PORT" --user "$GC_DOLT_USER" --no-tls \
-    sql --result-format csv -q "$query"
+  dolt_sql_csv "${2:-120}" "${3:-}" "$1"
 }
 
 # classify_count <db> <revrange> — emit the dolt_log commit count for a revision
@@ -491,21 +510,87 @@ sync_database_sql() {
       last_fail_reason="cannot create temp file for fetch diagnostics"
       return 1
     }
+    # gp-f2yq: ONE server-side fetch per database at a time. A CALL DOLT_FETCH
+    # runs inside the sql-server and outlives a client the bound killed, so
+    # before issuing one, ask the server whether a fetch (or pull) is already
+    # in flight for this database and skip without fetching when one is. The
+    # check fails closed — a processlist query that fails, or answers with
+    # anything but a processlist, skips too — the same rule as the classify
+    # step below.
+    inflight_rc=0
+    inflight=$(remote_op_sessions "$name" 120 "$fetch_err_tmp") || inflight_rc=$?
+    if [ "$inflight_rc" -ne 0 ]; then
+      echo "  $name: ERROR: processlist query failed (exit $inflight_rc) — skipped (NOT pushed)" >&2
+      remote_op_replay_stderr "$name" "$fetch_err_tmp"
+      rm -f "$fetch_err_tmp"
+      return 1
+    fi
+    inflight_oldest=$(printf '%s\n' "$inflight" | remote_op_sessions_oldest)
+    if [ -n "$inflight_oldest" ]; then
+      rm -f "$fetch_err_tmp"
+      echo "  $name: fetch already in flight for ${inflight_oldest#* }s (session ${inflight_oldest%% *}) — skipped (NOT pushed)" >&2
+      return 1
+    fi
+    fetch_out_tmp=$(mktemp) || {
+      echo "  $name: ERROR: cannot create temp file for the fetch session id" >&2
+      rm -f "$fetch_err_tmp"
+      return 1
+    }
     fetch_rc=0
-    dolt_sql "USE \`$name\`; CALL DOLT_FETCH('$remote_name', '$remote_branch')" "$fetch_timeout" \
-      >/dev/null 2>"$fetch_err_tmp" || fetch_rc=$?
-    if [ "$fetch_rc" -ne 0 ] && { grep -q "no branches found in remote" "$fetch_err_tmp" 2>/dev/null || grep -q "invalid ref spec" "$fetch_err_tmp" 2>/dev/null; }; then
+    # The server-side gate (remote_op_gate_sql) is the batch's first statement
+    # after USE: the session takes this database's lock and this run's lock
+    # and prints its OWN connection id in that same statement, or the batch
+    # stops here, before the CALL. The id and the locks are one statement, so
+    # the id the KILL targets when the bound expires is the lock holder by
+    # construction (a separate id statement before the gate could record a
+    # session that a pooled-client reconnect left lockless while the
+    # reconnected one fetched on — the mayor's gate r1). The CLI flushes each
+    # statement's result before running the next, so the id is on disk before
+    # the fetch begins and survives the client's death; --use-db attributes the
+    # session to this database. The CALL's own first argument re-proves that
+    # THIS session still holds the run lock (remote_op_owned_arg), so a client
+    # that reconnected between the gate and the CALL never fetches on a
+    # lockless session.
+    dolt_sql "USE \`$name\`; $(remote_op_gate_sql "$name"); CALL DOLT_FETCH($(remote_op_owned_arg "$name" "$remote_name"), '$remote_branch')" "$fetch_timeout" "$name" \
+      >"$fetch_out_tmp" 2>"$fetch_err_tmp" || fetch_rc=$?
+    fetch_session_id=$(remote_op_session_id "$fetch_out_tmp")
+    rm -f "$fetch_out_tmp"
+    # The bound's verdict outranks anything the client printed: a client the
+    # bound killed may have written a first-push signal ("no branches found"
+    # / "invalid ref spec") before stalling, and that text must never turn a
+    # dead client into a push.
+    if bound_expired "$fetch_rc"; then
+      rm -f "$fetch_err_tmp"
+      echo "  $name: fetch timed out after ${fetch_timeout}s (client exit $fetch_rc) — skipped (NOT pushed)" >&2
+      last_fail_reason="fetch timed out after ${fetch_timeout}s (client exit $fetch_rc)"
+      # The client is dead (124: the bound; 137: the bound's SIGKILL escalation);
+      # the server-side fetch is not. End it and prove it ended (the outcome is
+      # reported on its own line; either way, skipped).
+      kill_remote_op_session fetch "$name" "$fetch_session_id" || true
+      return 1
+    elif [ "$fetch_rc" -ne 0 ] && remote_op_gate_refused "$fetch_err_tmp"; then
+      # Another session holds this database's lock: a fetch or pull that the
+      # processlist read did not show yet (it raced this one), or one whose
+      # client died and whose session still runs. The server refused ours
+      # before the CALL; nothing to kill.
+      rm -f "$fetch_err_tmp"
+      echo "  $name: fetch already in flight — the server refused a second one (session lock $(remote_op_lock_name "$name") held) — skipped (NOT pushed)" >&2
+      return 1
+    elif [ "$fetch_rc" -ne 0 ] && remote_op_gate_lost "$fetch_err_tmp"; then
+      # The session that passed the gate is not the one that sent the CALL
+      # (the client reconnected in between): the CALL refused itself before
+      # the procedure ran. Nothing to kill; the lockless session ends with
+      # the client.
+      rm -f "$fetch_err_tmp"
+      echo "  $name: fetch not sent — this session lost the run lock between the gate and the CALL (client reconnected) — skipped (NOT pushed)" >&2
+      return 1
+    elif [ "$fetch_rc" -ne 0 ] && { grep -q "no branches found in remote" "$fetch_err_tmp" 2>/dev/null || grep -q "invalid ref spec" "$fetch_err_tmp" 2>/dev/null; }; then
       # The remote has no such branch: an empty remote ("no branches found in
       # remote") or a brand-new branch on a populated remote ("invalid ref
       # spec" — both verified on Dolt 2.1.0). The first push creates the branch
       # and is necessarily a fast-forward.
       ff_status="first-push"
       rm -f "$fetch_err_tmp"
-    elif [ "$fetch_rc" -eq 124 ]; then
-      rm -f "$fetch_err_tmp"
-      echo "  $name: fetch timed out after ${fetch_timeout}s — skipped (NOT pushed)" >&2
-      last_fail_reason="fetch timed out after ${fetch_timeout}s"
-      return 1
     elif [ "$fetch_rc" -ne 0 ]; then
       echo "  $name: fetch failed (exit $fetch_rc) — skipped (NOT pushed)" >&2
       if [ -s "$fetch_err_tmp" ]; then
