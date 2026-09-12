@@ -216,7 +216,8 @@
               "worktree-cleanup",
               "worktree-ensure",
               "worktree-verify",
-              "storage-preflight"
+              "storage-preflight",
+              "nudge-drop"
             ]
           },
           "event_id": {

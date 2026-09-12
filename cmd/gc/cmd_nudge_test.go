@@ -4698,6 +4698,170 @@ func TestListQueuedNudges_CategorizesPendingAndDead(t *testing.T) {
 	}
 }
 
+func TestCmdNudgeDropDeadLettersPendingNudge(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	t.Setenv("GC_CITY", dir)
+
+	item := newQueuedNudgeWithOptions("worker", "stale reminder", "session", time.Now(), queuedNudgeOptions{ID: "n-drop-1"})
+	if err := enqueueQueuedNudge(dir, item); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdNudgeDrop([]string{"n-drop-1"}, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdNudgeDrop = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Dropped nudge n-drop-1") {
+		t.Fatalf("stdout = %q, want a drop confirmation line", stdout.String())
+	}
+
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 0 || len(inFlight) != 0 {
+		t.Fatalf("pending=%d inFlight=%d, want both 0", len(pending), len(inFlight))
+	}
+	if len(dead) != 1 || dead[0].ID != "n-drop-1" {
+		t.Fatalf("dead = %v, want exactly [n-drop-1]", dead)
+	}
+	got := dead[0]
+	if got.DeadAt.IsZero() {
+		t.Fatal("DeadAt is zero, want a terminal timestamp")
+	}
+
+	// gc nudge drop is a thin wrapper around failedQueuedNudge's own forced
+	// dead-letter branch, not a separate state transition -- assert the
+	// resulting item matches what calling that branch directly produces.
+	wantItem, deadLetter := failedQueuedNudge(item, errNudgeManualDrop, got.LastAttemptAt)
+	if !deadLetter {
+		t.Fatal("failedQueuedNudge(item, errNudgeManualDrop) reported deadLetter=false")
+	}
+	if got.LastError != wantItem.LastError {
+		t.Fatalf("LastError = %q, want %q", got.LastError, wantItem.LastError)
+	}
+	if !got.DeadAt.Equal(wantItem.DeadAt) {
+		t.Fatalf("DeadAt = %s, want %s", got.DeadAt, wantItem.DeadAt)
+	}
+	if got.Attempts != wantItem.Attempts {
+		t.Fatalf("Attempts = %d, want %d", got.Attempts, wantItem.Attempts)
+	}
+}
+
+func TestCmdNudgeDropNonexistentIDReportsError(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	t.Setenv("GC_CITY", dir)
+	// A city dir with no queue state file at all is a legitimate case ("no
+	// nudge has ever been queued here") and must classify the same as one
+	// where the ID simply never matched -- both are "not found", not an error.
+	if _, err := classifyQueuedNudgeIDs(dir, []string{"n-does-not-exist"}, time.Now()); err != nil {
+		t.Fatalf("classifyQueuedNudgeIDs on an empty queue: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdNudgeDrop([]string{"n-does-not-exist"}, false, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("cmdNudgeDrop = 0, want nonzero for a nonexistent ID")
+	}
+	if !strings.Contains(stderr.String(), "n-does-not-exist") || !strings.Contains(stderr.String(), "no such queued nudge") {
+		t.Fatalf("stderr = %q, want a clear per-ID error naming the missing ID", stderr.String())
+	}
+}
+
+func TestCmdNudgeDropAlreadyDeadReportsError(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	t.Setenv("GC_CITY", dir)
+
+	item := newQueuedNudgeWithOptions("worker", "reminder", "session", time.Now(), queuedNudgeOptions{ID: "n-already-dead"})
+	if err := enqueueQueuedNudge(dir, item); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+	if err := recordQueuedNudgeFailure(dir, []string{"n-already-dead"}, errNudgeSessionFenceMismatch, time.Now()); err != nil {
+		t.Fatalf("recordQueuedNudgeFailure: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdNudgeDrop([]string{"n-already-dead"}, false, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("cmdNudgeDrop = 0, want nonzero for an already dead-lettered ID")
+	}
+	if !strings.Contains(stderr.String(), "already dead-lettered") {
+		t.Fatalf("stderr = %q, want an already-dead-lettered error", stderr.String())
+	}
+}
+
+func TestCmdNudgeDropMixedValidAndInvalidIDsProcessesValidOnes(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	t.Setenv("GC_CITY", dir)
+
+	item := newQueuedNudgeWithOptions("worker", "reminder", "session", time.Now(), queuedNudgeOptions{ID: "n-valid"})
+	if err := enqueueQueuedNudge(dir, item); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdNudgeDrop([]string{"n-valid", "n-missing"}, false, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("cmdNudgeDrop = 0, want nonzero because one of two IDs was invalid")
+	}
+	if !strings.Contains(stdout.String(), "Dropped nudge n-valid") {
+		t.Fatalf("stdout = %q, want the valid ID to still be dropped despite the other failing", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "n-missing") {
+		t.Fatalf("stderr = %q, want an error naming the missing ID", stderr.String())
+	}
+
+	_, _, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(dead) != 1 || dead[0].ID != "n-valid" {
+		t.Fatalf("dead = %v, want exactly [n-valid]", dead)
+	}
+}
+
+func TestCmdNudgeDropJSON(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	t.Setenv("GC_CITY", dir)
+
+	item := newQueuedNudgeWithOptions("worker", "reminder", "session", time.Now(), queuedNudgeOptions{ID: "n-json"})
+	if err := enqueueQueuedNudge(dir, item); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdNudgeDrop([]string{"n-json", "n-missing"}, true, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("cmdNudgeDrop --json = 0, want nonzero because one of two IDs was invalid")
+	}
+	var result nudgeDropJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.SchemaVersion != "1" || result.Command != "nudge drop" || result.OK {
+		t.Fatalf("unexpected JSON result header: %+v", result)
+	}
+	if len(result.Results) != 2 {
+		t.Fatalf("results = %d, want 2", len(result.Results))
+	}
+	byID := map[string]nudgeDropResult{}
+	for _, r := range result.Results {
+		byID[r.ID] = r
+	}
+	if !byID["n-json"].OK || byID["n-json"].Outcome != "dropped" {
+		t.Fatalf("n-json result = %+v, want ok=true outcome=dropped", byID["n-json"])
+	}
+	if byID["n-missing"].OK || byID["n-missing"].Error == "" {
+		t.Fatalf("n-missing result = %+v, want ok=false with an error", byID["n-missing"])
+	}
+}
+
 // TestMarkQueuedNudgeTerminalStampsCloseReason verifies that
 // markQueuedNudgeTerminal stamps a canonical close_reason on the nudge
 // bead's metadata before invoking store.Close. BdStore.Close forwards
