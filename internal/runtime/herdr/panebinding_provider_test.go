@@ -34,6 +34,14 @@ var paneBindSession int64
 func newFakeHerdrProvider(t *testing.T) (*Provider, string) {
 	t.Helper()
 	session := fmt.Sprintf("gctest-pb-%d-%d", os.Getpid(), atomic.AddInt64(&paneBindSession, 1))
+	return newFakeHerdrProviderForSession(t, session)
+}
+
+// newFakeHerdrProviderForSession is newFakeHerdrProvider with caller-supplied
+// session naming, for callers (e.g. kindpath_live_test.go) that must exercise
+// their own generated names rather than this file's own sequence.
+func newFakeHerdrProviderForSession(t *testing.T, session string) (*Provider, string, string) {
+	t.Helper()
 	state := t.TempDir()
 	metaDir := t.TempDir()
 	script := filepath.Join(t.TempDir(), "herdr")
