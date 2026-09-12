@@ -1577,19 +1577,73 @@ esac
 		}
 	}
 
+	cancelledAt := time.Now()
 	cancel()
+	var startErr error
 	select {
-	case err := <-done:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("Start error = %v, want context.Canceled", err)
+	case startErr = <-done:
+		if !errors.Is(startErr, context.Canceled) {
+			t.Fatalf("Start error = %v, want context.Canceled", startErr)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Start did not return after cancellation; foreground child blocked the rollback trap")
 	}
+	graceUsed := time.Since(cancelledAt)
 
 	data, err := os.ReadFile(interruptFile)
 	if err != nil {
-		t.Fatalf("read interrupt marker (rollback trap never ran): %v", err)
+		// A missing marker proves the trap body never reached its output
+		// redirect, not that a write failed: the shell creates the file when it
+		// opens the redirect, before printf can produce anything. So the only
+		// question left is WHY the trap never started, and the two reasons
+		// otherwise produce an identical failure message.
+		//
+		// Elapsed time narrows it, and it does so by restating the contract
+		// rather than by guessing. A cancellation that honors "SIGINT, wait
+		// startCancellationGrace, then SIGKILL" cannot return early while the
+		// adapter stays silent, so:
+		//
+		//   well under budget -> the forced kill beat the trap outright. The
+		//     grace was skipped, which the plumbing should make impossible.
+		//   at or past half the budget -> most or all of it elapsed and went unused.
+		//
+		// Be careful about what the second case does NOT prove. It is still a
+		// failure, and at least three mechanisms produce it identically:
+		//   1. the group signal landed but the adapter was never scheduled to
+		//      run its trap (host starvation — environmental);
+		//   2. interruptProcessGroup failed, so the execgrace fallback
+		//      SIGKILLed only the shell and the orphaned foreground child held
+		//      the I/O pipes until WaitDelay fired;
+		//   3. the signal reached only the shell leader, so the trap stayed
+		//      deferred behind the foreground child — which is exactly the
+		//      regression this test exists to catch.
+		// Both (2) and (3) are real defects, so never read "grace exhausted" as
+		// "environmental, ignore it". Distinguishing them needs execgrace to
+		// record which cancellation branch ran; until it does, a failure here
+		// is a lead, not a verdict.
+		//
+		// The split point is deliberately loose because the two populations sit
+		// ~400x apart (single-digit ms against a 2s budget, measured over 400
+		// local runs under CPU contention), so no realistic jitter can cross
+		// it. Both branches still fail the test — only the diagnosis differs —
+		// which makes the threshold a diagnostic-quality choice and never a
+		// correctness risk. Do not "tighten" it into a skip or a retry.
+		if graceUsed >= startCancellationGrace/2 {
+			t.Fatalf("rollback trap never ran and most or all of the %v cancellation grace elapsed "+
+				"unused (%v from cancel to return), and Start returned %v. The grace was honored "+
+				"rather than skipped, which narrows this to three mechanisms: the adapter was never "+
+				"scheduled to run its trap (host starvation — environmental); interruptProcessGroup "+
+				"failed, so the execgrace fallback SIGKILLed only the shell and the orphaned "+
+				"foreground child held the I/O pipes until WaitDelay fired; or cancellation reached "+
+				"only the shell leader and left the trap deferred behind the foreground child. The "+
+				"last two are real defects — do not dismiss this as environmental without "+
+				"checking: %v",
+				startCancellationGrace, graceUsed.Round(time.Millisecond), startErr, err)
+		}
+		t.Fatalf("rollback trap never ran and only %v of the %v cancellation grace elapsed "+
+			"(Start returned %v): the forced kill beat the trap, so cancellation did not reach "+
+			"the foreground child: %v",
+			graceUsed.Round(time.Millisecond), startCancellationGrace, startErr, err)
 	}
 	if got := strings.TrimSpace(string(data)); got != "interrupted" {
 		t.Fatalf("interrupt marker = %q, want %q", got, "interrupted")
