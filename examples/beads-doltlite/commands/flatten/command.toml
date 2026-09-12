@@ -1,0 +1,1 @@
+description = "Compact the doltlite SQLite database (VACUUM and WAL checkpoint)"
