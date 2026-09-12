@@ -361,6 +361,7 @@ DoltConfig holds optional dolt server overrides.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
+| `mode` | string |  |  | Mode selects the Dolt transport for managed-local Beads scopes. The empty value preserves the direct SQL-server default; set to "proxied-server" to opt into Beads' proxied UOW path. Host/port may be supplied for a proxied adapter targeting an external Dolt server. Enum: `server` |
 | `port` | integer |  | `0` | Port is the dolt server port. 0 means use ephemeral port allocation (hashed from city path). Set explicitly to override. |
 | `host` | string |  | `localhost` | Host is the dolt server hostname. Defaults to localhost. |
 | `archive_level` | integer |  | `0` | ArchiveLevel controls Dolt's auto_gc archive aggressiveness. 0 disables archive compaction (lower CPU on startup). 1 enables archive compaction (higher CPU on startup). nil (omitted) defaults to 0. |

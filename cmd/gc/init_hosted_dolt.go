@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -24,6 +25,8 @@ const (
 	envDoltUser       = "GC_DOLT_USER"
 	envDoltDatabase   = "GC_DOLT_DATABASE"
 	envBeadsProjectID = "GC_BEADS_PROJECT_ID"
+	envBeadsTransport = "GC_BEADS_TRANSPORT"
+	envBeadsTarget    = "GC_BEADS_TARGET"
 )
 
 // hostedDoltInitFlagValues is the raw --dolt-* flag input captured by the
@@ -34,6 +37,8 @@ type hostedDoltInitFlagValues struct {
 	User      string
 	Database  string
 	ProjectID string
+	Transport string
+	Target    string
 }
 
 // hostedDoltInitOptions is the resolved external/hosted Dolt endpoint that
@@ -47,6 +52,162 @@ type hostedDoltInitOptions struct {
 	User      string
 	Database  string
 	ProjectID string
+	Transport string
+	Target    string
+}
+
+func (o hostedDoltInitOptions) validateSelectors() error {
+	t, target := strings.ToLower(strings.TrimSpace(o.Transport)), strings.ToLower(strings.TrimSpace(o.Target))
+	if t == "" && target == "" {
+		return nil
+	}
+	if t == "" || target == "" {
+		return fmt.Errorf("--beads-transport and --beads-target must be provided together")
+	}
+	if t != "direct" && t != "proxied" {
+		return fmt.Errorf("unsupported --beads-transport %q", o.Transport)
+	}
+	if target != "local" && target != "external" {
+		return fmt.Errorf("unsupported --beads-target %q", o.Target)
+	}
+	return nil
+}
+
+// validateRequest checks all endpoint/selector combinations that can be
+// rejected without reading or mutating a destination. provider is the
+// effective beads provider when known (empty permits config parsing first).
+func (o hostedDoltInitOptions) validateRequest(provider string) error {
+	if err := o.validate(); err != nil {
+		return err
+	}
+	target := strings.ToLower(strings.TrimSpace(o.Target))
+	if target == "external" && !o.enabled() {
+		return fmt.Errorf("--beads-target external requires --dolt-host (or %s)", envDoltHost)
+	}
+	if target == "local" && o.enabled() {
+		return fmt.Errorf("local beads target cannot be combined with --dolt-host or endpoint flags")
+	}
+	if (strings.TrimSpace(o.Transport) != "" || strings.TrimSpace(o.Target) != "" || o.enabled()) && !contract.ProviderUsesBDContract(provider) {
+		return fmt.Errorf("beads transport/endpoint selectors require a bd-backed beads provider (configured provider %q)", provider)
+	}
+	return nil
+}
+
+// effectiveInitBeadsProvider resolves the provider that will own a newly
+// initialized city's beads store. GC_BEADS is the runtime override used by
+// the rest of the CLI; when it is absent, an empty city setting has the
+// canonical bd default. Init uses this value during its read-only preflight
+// so an incompatible selector cannot leave a partial scaffold behind.
+func effectiveInitBeadsProvider(configured string) string {
+	if provider := strings.TrimSpace(os.Getenv("GC_BEADS")); provider != "" {
+		return provider
+	}
+	if provider := strings.TrimSpace(configured); provider != "" {
+		return provider
+	}
+	return "bd"
+}
+
+// validateInitBeadsBackend applies the same runtime backend override used by
+// the beads provider to init's read-only preflight. A selector or external
+// endpoint must never be accepted for an embedded/non-Dolt backend, because
+// doing so would create a scaffold that cannot honor the requested topology.
+func (o hostedDoltInitOptions) validateInitBeadsBackend(configured string) error {
+	explicit := o.enabled() || strings.TrimSpace(o.Transport) != "" || strings.TrimSpace(o.Target) != ""
+	if !explicit {
+		return nil
+	}
+	backend := strings.ToLower(strings.TrimSpace(configured))
+	if envBackend := strings.TrimSpace(os.Getenv("GC_BEADS_BACKEND")); envBackend != "" {
+		backend = strings.ToLower(envBackend)
+	}
+	if backend == "" || backend == "dolt" || backend == "bd" {
+		return nil
+	}
+	if backend == "doltlite" && o.enabled() {
+		return fmt.Errorf("--dolt-host configures an external Dolt server and is incompatible with the doltlite beads backend; unset the doltlite backend (GC_BEADS_BACKEND or [beads] backend) to use the dolt (server) backend")
+	}
+	return fmt.Errorf("beads transport/endpoint selectors require the dolt backend (configured backend %q)", configured)
+}
+
+// applySelectorToCityConfig resolves the provider-neutral init selectors onto
+// the city config consumed by the beads adapter. Omitted selectors use the
+// proxied-local provider default for a fresh Dolt scope.
+func (o hostedDoltInitOptions) applySelectorToCityConfig(cfg *config.City) error {
+	if cfg == nil {
+		return fmt.Errorf("cannot apply beads selector to nil city config")
+	}
+	if err := o.validateRequest(strings.TrimSpace(cfg.Beads.Provider)); err != nil {
+		return err
+	}
+	explicit := strings.TrimSpace(o.Transport) != "" || strings.TrimSpace(o.Target) != "" || o.enabled()
+	provider := strings.TrimSpace(cfg.Beads.Provider)
+	backend := strings.ToLower(strings.TrimSpace(cfg.Beads.Backend))
+	providerUsesBD := contract.ProviderUsesBDContract(provider)
+	if !explicit && (!providerUsesBD || backend != "" && backend != "dolt" && backend != "bd") {
+		// Non-Dolt providers/backends own their storage topology. Omitted
+		// selectors must not rewrite their config to the proxied default.
+		return nil
+	}
+	if explicit {
+		if !providerUsesBD || backend != "" && backend != "dolt" && backend != "bd" {
+			return fmt.Errorf("beads transport/endpoint selectors require the bd/dolt backend (configured provider %q, backend %q)", provider, cfg.Beads.Backend)
+		}
+	}
+	transport, target := strings.ToLower(strings.TrimSpace(o.Transport)), strings.ToLower(strings.TrimSpace(o.Target))
+	if transport == "" && target == "" && o.enabled() {
+		// Legacy endpoint flags are an explicit direct/external request.
+		transport, target = "direct", "external"
+	}
+	resolved, err := contract.ResolveInitIntent(contract.InitScopeState{}, contract.InitIntent{Transport: transport, Target: target}, contract.InitIntent{}, configDoltInitIntent(*cfg), contract.InitIntent{Transport: "proxied", Target: "local"})
+	if err != nil {
+		return err
+	}
+	transport, target = resolved.Intent.Transport, resolved.Intent.Target
+	if target == "external" {
+		if !o.enabled() {
+			return fmt.Errorf("--beads-target external requires --dolt-host (or %s)", envDoltHost)
+		}
+		if err := o.validate(); err != nil {
+			return err
+		}
+		if err := o.applyToCityConfig(cfg); err != nil {
+			return err
+		}
+	} else {
+		if o.enabled() {
+			return fmt.Errorf("local beads target cannot be combined with --dolt-host or endpoint flags")
+		}
+		cfg.Dolt.Host, cfg.Dolt.Port = "", 0
+	}
+	switch transport {
+	case "proxied":
+		cfg.Dolt.Mode = "proxied-server"
+	case "direct":
+		cfg.Dolt.Mode = "server"
+	}
+	return nil
+}
+
+func configDoltInitIntent(cfg config.City) contract.InitIntent {
+	mode := strings.ToLower(strings.TrimSpace(cfg.Dolt.Mode))
+	transport := ""
+	switch mode {
+	case "server":
+		transport = "direct"
+	case "proxied-server":
+		transport = "proxied"
+	}
+	target := ""
+	if strings.TrimSpace(cfg.Dolt.Host) != "" || cfg.Dolt.Port != 0 {
+		target = "external"
+	} else if transport != "" {
+		target = "local"
+	}
+	if transport == "" && target == "" {
+		return contract.InitIntent{}
+	}
+	return contract.InitIntent{Transport: transport, Target: target}
 }
 
 // resolveHostedDoltInitOptions merges explicit flag values with environment
@@ -68,6 +229,8 @@ func resolveHostedDoltInitOptions(flags hostedDoltInitFlagValues, getenv func(st
 		User:      pick(flags.User, envDoltUser),
 		Database:  pick(flags.Database, envDoltDatabase),
 		ProjectID: pick(flags.ProjectID, envBeadsProjectID),
+		Transport: pick(flags.Transport, envBeadsTransport),
+		Target:    pick(flags.Target, envBeadsTarget),
 	}
 	if opts.ProjectID == "" {
 		opts.ProjectID = deriveProjectIDFromDoltDatabase(opts.Database)
@@ -95,6 +258,9 @@ func (o hostedDoltInitOptions) enabled() bool {
 // connection (R5): a hosted endpoint is recorded as unverified and verified
 // later by gc start, so init never requires credentials.
 func (o hostedDoltInitOptions) validate() error {
+	if err := o.validateSelectors(); err != nil {
+		return err
+	}
 	if !o.enabled() {
 		if strings.TrimSpace(o.Port) != "" || strings.TrimSpace(o.User) != "" ||
 			strings.TrimSpace(o.Database) != "" || strings.TrimSpace(o.ProjectID) != "" {
@@ -154,6 +320,10 @@ func (o hostedDoltInitOptions) applyToCityConfig(cfg *config.City) error {
 // unverified. gc start performs the live verification once credentials are
 // wired.
 func (o hostedDoltInitOptions) configState(issuePrefix string) contract.ConfigState {
+	mode := "server"
+	if strings.EqualFold(strings.TrimSpace(o.Transport), "proxied") {
+		mode = "proxied-server"
+	}
 	return contract.ConfigState{
 		IssuePrefix:    issuePrefix,
 		EndpointOrigin: contract.EndpointOriginCityCanonical,
@@ -161,6 +331,7 @@ func (o hostedDoltInitOptions) configState(issuePrefix string) contract.ConfigSt
 		DoltHost:       strings.TrimSpace(o.Host),
 		DoltPort:       strings.TrimSpace(o.Port),
 		DoltUser:       strings.TrimSpace(o.User),
+		DoltMode:       mode,
 	}
 }
 
