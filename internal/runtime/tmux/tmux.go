@@ -3825,12 +3825,18 @@ func codexTranscriptTailContainsTurnAborted(tail string) bool {
 
 // claudeBusySpinnerRe matches Claude Code's live "working" spinner footer: an
 // elapsed timer with a token-stream / interrupt suffix in parentheses, e.g.
-// "(2m 28s · ↓ 10.9k tokens)" or "(28m 11s • esc to interrupt)". Current Claude
-// Code (notably bypass-permissions mode) shows this spinner instead of a bare
-// "esc to interrupt" string while busy. Anchored on "(<digits><m|s>" before the
-// "·"/"•" separator so it does NOT match idle chrome — "(ctrl+o to expand)",
-// "(main)", "⏱️ Jun 4 02:57:04", or the "✻ Worked for 3m 38s" done marker.
-var claudeBusySpinnerRe = regexp.MustCompile(`\([0-9]+[ms][^)]*[·•]`)
+// "(2m 28s · ↓ 10.9k tokens)", "(28m 11s • esc to interrupt)", or — once a turn
+// passes an hour — "(1h 24m 26s · almost done thinking with max effort)".
+// Current Claude Code (notably bypass-permissions mode) shows this spinner
+// instead of a bare "esc to interrupt" string while busy, so on a long turn the
+// spinner is the ONLY busy signal. Omitting the hours unit therefore made every
+// turn past 60 minutes read as idle: the submit-confirm loop reported an
+// already-landed nudge as unconfirmed and the queue redelivered it, spending a
+// bounded attempt and a full recipient turn each time (ga-hdx0me, upstream
+// #5692). Anchored on "(<digits><h|m|s>" before the "·"/"•" separator so it does
+// NOT match idle chrome — "(ctrl+o to expand)", "(main)",
+// "⏱️ Jun 4 02:57:04", or the "✻ Worked for 3m 38s" done marker.
+var claudeBusySpinnerRe = regexp.MustCompile(`\([0-9]+[hms][^)]*[·•]`)
 
 // paneContainsBusyIndicator checks captured pane lines for signs that the agent
 // is actively processing. Agent TUIs surface this differently: older Claude Code
