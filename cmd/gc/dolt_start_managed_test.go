@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -15,6 +16,7 @@ import (
 
 	bdpack "github.com/gastownhall/gascity/examples/bd"
 	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 func TestDoltServerEnv_DoesNotInjectGCSchedulerDefault(t *testing.T) {
@@ -79,6 +81,63 @@ func TestDoltServerEnv_PreservesEmptyUserValue(t *testing.T) {
 	}
 	if !hasTelemetryDisable {
 		t.Fatalf("managed Dolt env should disable telemetry event flush: %v", out)
+	}
+}
+
+// TestDoltServerEnv_ScrubsSessionIdentity pins the fix for a managed Dolt
+// server that died about 15 seconds after the agent session that restarted
+// it exited: the watchdog and server inherited the shell's GC_SESSION_ID, the
+// watchdog reparented to init, and the session reconciler's orphan sweep
+// reaped it as that session's process-table root once the session bead
+// closed. Every session-scoped key must be gone, and keys that are city-scoped
+// or unrelated must survive, so the scrub stays targeted rather than a blanket
+// GC_* strip.
+func TestDoltServerEnv_ScrubsSessionIdentity(t *testing.T) {
+	parent := []string{"PATH=/usr/bin", "GC_CITY_PATH=/srv/city", "HOME=/home/test"}
+	for _, key := range managedDoltSessionScopedEnvKeys {
+		parent = append(parent, key+"=stamped")
+	}
+	out := doltServerEnv("", parent)
+
+	for _, kv := range out {
+		key, value, _ := strings.Cut(kv, "=")
+		if value == "stamped" || containsString(managedDoltSessionScopedEnvKeys, key) {
+			t.Fatalf("managed Dolt env must not carry session identity %s, got %v", key, out)
+		}
+	}
+	for _, want := range []string{"PATH=/usr/bin", "GC_CITY_PATH=/srv/city", "HOME=/home/test"} {
+		if !containsString(out, want) {
+			t.Fatalf("parent entry %q missing from output env %v", want, out)
+		}
+	}
+}
+
+// TestDoltServerEnvScrubCoversSessionRuntimeEnv keeps the scrub list from
+// drifting behind the session lifecycle: a key added to
+// session.RuntimeEnvWithSessionContext reaches every managed server started
+// from an agent shell, so it has to appear in managedDoltSessionScopedEnvKeys
+// too. The Info here populates every optional field so no key is skipped.
+func TestDoltServerEnvScrubCoversSessionRuntimeEnv(t *testing.T) {
+	injected := sessionpkg.RuntimeEnvWithSessionContext(sessionpkg.Info{
+		ID:            "gc-session",
+		SessionName:   "gc__worker-gc-session",
+		Alias:         "worker-1",
+		Template:      "worker",
+		SessionOrigin: "sling",
+	}, 1, 1, "instance-token")
+	if len(injected) == 0 {
+		t.Fatal("session runtime env is empty; the drift guard has nothing to check")
+	}
+
+	var missing []string
+	for key := range injected {
+		if !containsString(managedDoltSessionScopedEnvKeys, key) {
+			missing = append(missing, key)
+		}
+	}
+	sort.Strings(missing)
+	if len(missing) > 0 {
+		t.Fatalf("session runtime env keys missing from managedDoltSessionScopedEnvKeys: %v", missing)
 	}
 }
 
