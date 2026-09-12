@@ -47,16 +47,42 @@ func newRetainedWorkflowTwin(t *testing.T, store *beads.MemStore, rootID string)
 
 func workflowRootBead(title, id string) beads.Bead {
 	return beads.Bead{
-		ID:     id,
-		Title:  title,
-		Type:   "task",
-		Status: "in_progress",
-		Metadata: map[string]string{
-			beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
-			beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
-			beadmeta.SourceBeadIDMetadataKey:    supersedeSourceBeadID,
-			beadmeta.SourceStoreRefMetadataKey:  supersedeSourceStoreRef,
-		},
+		ID:       id,
+		Title:    title,
+		Type:     "task",
+		Status:   "in_progress",
+		Metadata: workflowRootMetadata(supersedeSourceBeadID, supersedeSourceStoreRef),
+	}
+}
+
+// workflowRootMetadata stamps a graph.v2 workflow root for a given source bead
+// and the work store that bead lives in.
+func workflowRootMetadata(sourceBeadID, sourceStoreRef string) map[string]string {
+	return map[string]string{
+		beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+		beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+		beadmeta.SourceBeadIDMetadataKey:    sourceBeadID,
+		beadmeta.SourceStoreRefMetadataKey:  sourceStoreRef,
+	}
+}
+
+// newBindingRowUnderID writes a row into the binding under an id the work ledger
+// already uses, letting a caller vary exactly one identity field at a time.
+func newBindingRowUnderID(t *testing.T, store *beads.MemStore, rootID string, metadata map[string]string) {
+	t.Helper()
+	store.HonorExplicitIDs = true
+	row, err := store.Create(beads.Bead{
+		ID:       rootID,
+		Title:    "binding row sharing an id with the work ledger",
+		Type:     "task",
+		Status:   "in_progress",
+		Metadata: metadata,
+	})
+	if err != nil {
+		t.Fatalf("Create(binding row): %v", err)
+	}
+	if row.ID != rootID {
+		t.Fatalf("binding row minted %s, want the work root's id %s", row.ID, rootID)
 	}
 }
 
@@ -230,5 +256,94 @@ func TestListSourceWorkflowRootsLeavesSingleStoreCityEnumerationUnchanged(t *tes
 	}
 	if !slices.Equal(blockingWorkflowIDs(roots), []string{root.ID}) {
 		t.Fatalf("blocking ids = %v, want the id named once [%s]", blockingWorkflowIDs(roots), root.ID)
+	}
+}
+
+// TestListSourceWorkflowRootsKeepsARootTheBindingOnlyShadowsByID is the negative
+// side of the supersede. A shared id does not make two rows the same bead: ids
+// are unique only WITHIN a store, and store-prefixed ids collide across stores
+// by construction, so two rigs can hold a source bead under one id string. Each
+// case below varies exactly one identity field on the binding's side; the work
+// ledger's root stays live every time, the sling is refused, and the one blocked
+// workflow is named once.
+//
+// Without these the identity check in bindingHoldsRoot has no proof at all: a
+// supersede that fired on the id alone would retire a live root belonging to a
+// different source and admit the second workflow this guard exists to refuse.
+func TestListSourceWorkflowRootsKeepsARootTheBindingOnlyShadowsByID(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		metadata map[string]string
+	}{
+		{
+			// The binding's row is a workflow root, but for another source bead.
+			name:     "different source bead",
+			metadata: workflowRootMetadata("mc-other-source", supersedeSourceStoreRef),
+		},
+		{
+			// The same source bead id string, resident in another rig's work
+			// store. gc.source_store_ref is what tells those two apart.
+			name:     "different source store ref",
+			metadata: workflowRootMetadata(supersedeSourceBeadID, "rig:alpha"),
+		},
+		{
+			// Not a workflow root at all — an ordinary bead the binding happens
+			// to hold under the same id.
+			name:     "not a workflow root",
+			metadata: map[string]string{beadmeta.SourceBeadIDMetadataKey: supersedeSourceBeadID},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			binding := beads.NewMemStore()
+			work := beads.NewMemStore()
+			root := newRelocatedWorkflowRoot(t, work)
+			newBindingRowUnderID(t, binding, root.ID, tc.metadata)
+			deps := convergedSplitCityDeps(binding, work)
+
+			roots, err := listSourceWorkflowRoots(deps, supersedeSourceBeadID)
+			if err != nil {
+				t.Fatalf("listSourceWorkflowRoots: %v", err)
+			}
+			if len(roots) != 1 || roots[0].storeRef != supersedeSourceStoreRef {
+				t.Fatalf("listSourceWorkflowRoots returned %d roots (%v), want the work ledger's live root kept",
+					len(roots), blockingWorkflowIDs(roots))
+			}
+			err = checkLegacySourceWorkflowConflict(deps, supersedeSourceBeadID, "", false)
+			var conflictErr *sourceworkflow.ConflictError
+			if !errors.As(err, &conflictErr) {
+				t.Fatalf("checkLegacySourceWorkflowConflict error = %v, want the live work-leg root to conflict", err)
+			}
+			if !slices.Equal(conflictErr.WorkflowIDs, []string{root.ID}) {
+				t.Fatalf("conflicting workflow IDs = %v, want the single root [%s]", conflictErr.WorkflowIDs, root.ID)
+			}
+		})
+	}
+}
+
+// TestListSourceWorkflowRootsSupersedesAnUnstampedLegacyBindingRow is the
+// control for the source-store half above: a binding row written before
+// gc.source_store_ref existed carries no ref to compare, and demanding one would
+// exclude exactly the pre-migration roots this supersede was built for. Such a
+// row still supersedes its retained twin, on the id plus source-bead rule.
+func TestListSourceWorkflowRootsSupersedesAnUnstampedLegacyBindingRow(t *testing.T) {
+	binding := beads.NewMemStore()
+	work := beads.NewMemStore()
+	root := newRelocatedWorkflowRoot(t, work)
+	newBindingRowUnderID(t, binding, root.ID, map[string]string{
+		beadmeta.KindMetadataKey:         beadmeta.KindWorkflow,
+		beadmeta.SourceBeadIDMetadataKey: supersedeSourceBeadID,
+	})
+	closeWorkflowRoot(t, binding, root.ID)
+	deps := convergedSplitCityDeps(binding, work)
+
+	roots, err := listSourceWorkflowRoots(deps, supersedeSourceBeadID)
+	if err != nil {
+		t.Fatalf("listSourceWorkflowRoots: %v", err)
+	}
+	if len(roots) != 0 {
+		t.Fatalf("listSourceWorkflowRoots = %v, want the unstamped binding row to supersede %s", blockingWorkflowIDs(roots), root.ID)
+	}
+	if err := checkLegacySourceWorkflowConflict(deps, supersedeSourceBeadID, "", false); err != nil {
+		t.Fatalf("checkLegacySourceWorkflowConflict = %v, want the sling admitted", err)
 	}
 }

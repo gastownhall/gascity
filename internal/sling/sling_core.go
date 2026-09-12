@@ -1190,6 +1190,21 @@ func (c *sourceWorkflowRootCollector) supersedeRetainedTwins() error {
 // bindingHoldsRoot reports whether the relocated graph binding holds rootID as a
 // workflow root for this sling's source bead, live or closed. A missing row is a
 // clean "no"; every other read failure is returned so the caller aborts.
+//
+// Identity is established three ways, because a shared id does not establish it.
+// Ids are unique only WITHIN a store, and store-prefixed ids collide across
+// stores by construction -- two rigs can each hold a source bead under the same
+// id string -- so the binding's row must be a workflow ROOT, carry the same
+// gc.source_bead_id, and name the same source STORE whenever both sides say
+// which one. Anything less could retire a live root that belongs to a different
+// source and admit the second workflow this guard exists to refuse.
+//
+// A row with no gc.source_store_ref predates the stamp and is judged on the
+// first two alone: requiring the ref there would exclude exactly the
+// pre-migration roots this supersede exists for. That is also why the check is
+// spelled out here rather than delegated to WorkflowMatchesSource, whose legacy
+// fallback compares the root's PHYSICAL store ref -- "graph:<city>" for every
+// binding row -- against the source's "city:"/"rig:" ref, and so never matches.
 func (c *sourceWorkflowRootCollector) bindingHoldsRoot(rootID string) (bool, error) {
 	row, err := c.bindingStore.Get(rootID)
 	if err != nil {
@@ -1201,8 +1216,15 @@ func (c *sourceWorkflowRootCollector) bindingHoldsRoot(rootID string) (bool, err
 	if !sourceworkflow.IsWorkflowRoot(row) {
 		return false, nil
 	}
-	return sourceworkflow.NormalizeSourceBeadID(row.Metadata[beadmeta.SourceBeadIDMetadataKey]) ==
-		sourceworkflow.NormalizeSourceBeadID(c.sourceBeadID), nil
+	if sourceworkflow.NormalizeSourceBeadID(row.Metadata[beadmeta.SourceBeadIDMetadataKey]) !=
+		sourceworkflow.NormalizeSourceBeadID(c.sourceBeadID) {
+		return false, nil
+	}
+	rowSourceStoreRef := sourceworkflow.NormalizeSourceStoreRef(row.Metadata[beadmeta.SourceStoreRefMetadataKey])
+	if rowSourceStoreRef == "" || c.sourceStoreRef == "" {
+		return true, nil
+	}
+	return rowSourceStoreRef == sourceworkflow.NormalizeSourceStoreRef(c.sourceStoreRef), nil
 }
 
 // result finalizes the sorted root set, applying the fail-closed fallback when

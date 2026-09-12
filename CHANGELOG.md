@@ -86,10 +86,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that copy as live, named it in `blocking_workflow_ids`, and refused. The
   collector now lets the binding's row win on a shared root id — live or closed —
   asking the binding directly about the ids the work legs reported, with a
-  bounded per-id probe rather than a full closed scan. A probe that faults
-  refuses the sling: a binding fault is an error, never absence. A city that
-  relocates nothing has no binding leg, runs no probe, and enumerates exactly
-  what it did before.
+  bounded per-id probe rather than a full closed scan. Only a row that is really
+  the same root supersedes: ids are unique within a store and store-prefixed ids
+  collide across stores, so the binding's row must be a workflow root, for the
+  same source bead, naming the same source store whenever both sides name one. A
+  probe that faults refuses the sling: a binding fault is an error, never
+  absence. A city that relocates nothing has no binding leg, runs no probe, and
+  enumerates exactly what it did before.
 
 - **The one-live-workflow-per-source-bead guard reads the graph binding, so a
   split city stops admitting a second live workflow.** A workflow root is graph
