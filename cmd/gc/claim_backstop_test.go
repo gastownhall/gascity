@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -225,14 +227,45 @@ func (f *claimBackstopFixture) lastNudge() string {
 // open blocker, and returns the blocker so a row can later satisfy it.
 func (f *claimBackstopFixture) blockOn(t *testing.T) beads.Bead {
 	t.Helper()
-	blocker, err := f.store.Create(beads.Bead{Title: "blocker", Type: "task"})
+	return f.blockBead(t, f.work.ID)
+}
+
+// blockBead is blockOn for any of the seat's rows.
+func (f *claimBackstopFixture) blockBead(t *testing.T, id string) beads.Bead {
+	t.Helper()
+	blocker, err := f.store.Create(beads.Bead{Title: "blocker for " + id, Type: "task"})
 	if err != nil {
 		t.Fatalf("seeding the blocker: %v", err)
 	}
-	if err := f.store.DepAdd(f.work.ID, blocker.ID, "blocks"); err != nil {
+	if err := f.store.DepAdd(id, blocker.ID, "blocks"); err != nil {
 		t.Fatalf("adding the blocking edge: %v", err)
 	}
 	return blocker
+}
+
+// routedWorkWithID seeds another OPEN row routed to the seat under an explicit
+// bead id. The lane orders a seat's own rows by (store ref, bead id), so pinning
+// the id is how a test pins where a row sorts in that queue.
+func (f *claimBackstopFixture) routedWorkWithID(t *testing.T, id, title string) beads.Bead {
+	t.Helper()
+	mem, ok := f.store.(*beads.MemStore)
+	if !ok {
+		t.Fatalf("fixture store is %T, want *beads.MemStore to pin bead ids", f.store)
+	}
+	mem.HonorExplicitIDs = true
+	work, err := f.store.Create(beads.Bead{
+		ID:    id,
+		Title: title,
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey: "root-1",
+			beadmeta.RoutedToMetadataKey:   f.identity,
+		},
+	})
+	if err != nil {
+		t.Fatalf("seeding routed work %s: %v", id, err)
+	}
+	return work
 }
 
 // TestSeatClaimBackstopNudgesANamedSeatOnItsOwnRoutedWork is the ga-evxqd core
@@ -692,6 +725,139 @@ func TestSeatClaimBackstopLeavesTheBoundTriggerBeadToThePoolLane(t *testing.T) {
 	}
 }
 
+// TestSeatClaimBackstopLeavesPreassignedContinuationRowsToTheContinuationLane is
+// the third no-double-nudge boundary, and the one that costs the most to get
+// wrong. A preassigned graph-v2 successor — open, assigned to the seat, carrying
+// gc.continuation_group with gc.session_affinity=require — is
+// nudgeStalledPoolContinuations' candidate shape verbatim, and it is the most
+// common handoff row a graph-v2 molecule produces. Matching it here would put
+// two independent persisted ladders on one bead; and because that lane latches
+// silent at its three-attempt cap while this one re-arms forever, this lane
+// would go on re-nudging past the point the continuation lane deliberately
+// stopped — overriding another lane's designed give-up, not just doubling its
+// nudges.
+//
+// The second half is what makes the first non-vacuous: drop the continuation
+// stamp and the identical fixture nudges, so the silence above is the exclusion
+// rather than an inert lane.
+func TestSeatClaimBackstopLeavesPreassignedContinuationRowsToTheContinuationLane(t *testing.T) {
+	f := newClaimBackstopFixture(t)
+	f.asPoolSeat(t) // continuation delivery is pool-only, so the overlap is here
+	if err := f.store.SetMetadataBatch(f.work.ID, map[string]string{
+		beadmeta.ContinuationGroupMetadataKey: "grp-adopt-pr-1",
+		beadmeta.SessionAffinityMetadataKey:   "require",
+	}); err != nil {
+		t.Fatalf("stamping the continuation metadata: %v", err)
+	}
+
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	for i := 0; i < idleClaimNudgeMaxAttempts+2; i++ {
+		f.advance(t)
+	}
+
+	if got := f.nudgeCount(); got != 0 {
+		t.Fatalf("nudges over a preassigned continuation row = %d, want 0 (the continuation lane owns it); stdout=%s", got, f.stdout.String())
+	}
+	if got := f.sessionMeta(t, seatClaimNudgeWorkKey); got != "" {
+		t.Fatalf("persisted work marker = %q, want no pacing write over a continuation row", got)
+	}
+	if got := f.stalledEvents(); got != 0 {
+		t.Fatalf("stalled events over a continuation row = %d, want 0", got)
+	}
+
+	// The row loses its continuation group: it is nobody else's now, so it is
+	// this lane's again.
+	if err := f.store.SetMetadataBatch(f.work.ID, map[string]string{
+		beadmeta.ContinuationGroupMetadataKey: "",
+	}); err != nil {
+		t.Fatalf("clearing the continuation group: %v", err)
+	}
+	f.advance(t) // first sighting of the now-ordinary row: observe
+	if got := f.sessionMeta(t, seatClaimNudgeWorkKey); got != f.work.ID {
+		t.Fatalf("work marker after the continuation group cleared = %q, want %q", got, f.work.ID)
+	}
+	f.advance(t)
+	if got := f.nudgeCount(); got != 1 {
+		t.Fatalf("nudges over the plain assigned row = %d, want exactly 1; stdout=%s", got, f.stdout.String())
+	}
+}
+
+// TestSeatClaimBackstopRotatesItsProbeWindowPastALongBlockedQueue is the
+// probe-budget row, and it reproduces the ga-evxqd symptom INSIDE the lane that
+// exists to cure it. Readiness costs a live dependency read per row, so one tick
+// may only probe maxSeatClaimReadinessProbes of them. With a fixed prefix, a
+// seat holding ten of its own open rows whose one ready row sorts last is probed
+// over the same nine blocked rows on every tick forever: permanently silent,
+// with a claimable bead sitting in front of it — the incident, recreated by the
+// budget meant to bound it.
+//
+// The window rotates instead. The persisted cursor advances by one window only
+// when the window came up empty, so the search reaches the tail on the next tick
+// and then freezes on the row it found for the rest of the ladder. The spent
+// budget also has to be AUDIBLE: before, it was indistinguishable on stdout from
+// a seat with nothing ready.
+func TestSeatClaimBackstopRotatesItsProbeWindowPastALongBlockedQueue(t *testing.T) {
+	f := newClaimBackstopFixture(t)
+
+	// Nine blocked rows sorting ahead of one ready row. The seeded row (a minted
+	// "gc-<n>" id) sorts first; "gc-b*" fill the rest of the prefix and "gc-z1"
+	// is the tail the fixed-prefix probe could never reach.
+	f.blockOn(t)
+	for i := 1; i <= 8; i++ {
+		blocked := f.routedWorkWithID(t, fmt.Sprintf("gc-b%d", i), "blocked input")
+		f.blockBead(t, blocked.ID)
+	}
+	ready := f.routedWorkWithID(t, "gc-z1", "the one ready row, sorting last")
+
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if got := f.nudgeCount(); got != 0 {
+		t.Fatalf("nudges on the first tick = %d, want 0 (the window is all blocked rows)", got)
+	}
+	if !strings.Contains(f.stdout.String(), "rotating the readiness probe window") {
+		t.Fatalf("a spent probe budget left no signal on stdout; stdout=%s", f.stdout.String())
+	}
+
+	// Second tick: the rotated window reaches the tail and starts its clock.
+	f.advance(t)
+	if got := f.sessionMeta(t, seatClaimNudgeWorkKey); got != ready.ID {
+		t.Fatalf("work marker after one rotation = %q, want the ready tail row %q; stdout=%s", got, ready.ID, f.stdout.String())
+	}
+
+	// Third tick: the window has frozen on that row, so the ladder proceeds.
+	f.advance(t)
+	if got := f.nudgeCount(); got != 1 {
+		t.Fatalf("nudges after the window reached the ready row = %d, want exactly 1; stdout=%s", got, f.stdout.String())
+	}
+	if got := f.sessionMeta(t, seatClaimNudgeWorkKey); got != ready.ID {
+		t.Fatalf("work marker after the nudge = %q, want the window to stay on %q", got, ready.ID)
+	}
+}
+
+// TestSeatClaimBackstopStillReportsAbsenceWhenTheWindowCoversEveryRow is the
+// rotation's control. Rotation must not turn "this seat owns nothing claimable"
+// into a permanent hold: a queue the window covers whole is still definite
+// evidence of absence, and the lane must clear its pacing state on it.
+func TestSeatClaimBackstopStillReportsAbsenceWhenTheWindowCoversEveryRow(t *testing.T) {
+	f := newClaimBackstopFixture(t)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t) // observe the seeded ready row
+	if got := f.sessionMeta(t, seatClaimNudgeWorkKey); got != f.work.ID {
+		t.Fatalf("grace clock did not start: work marker = %q, want %q", got, f.work.ID)
+	}
+
+	f.blockOn(t) // the only row is now blocked, and the window sees all of it
+	f.advance(t)
+
+	if got := f.sessionMeta(t, seatClaimNudgeWorkKey); got != "" {
+		t.Fatalf("persisted work marker = %q, want cleared once every candidate was probed and none was ready", got)
+	}
+	if strings.Contains(f.stdout.String(), "rotating the readiness probe window") {
+		t.Fatalf("a fully-covered queue rotated its window; stdout=%s", f.stdout.String())
+	}
+}
+
 // TestSeatClaimBackstopDoesNotReplayAfterAControllerRestart pins the persistence
 // invariant (test-5il): the state machine lives on the session bead, so a fresh
 // controller process resumes the ladder rather than restarting it. The in-memory
@@ -802,6 +968,113 @@ func TestSeatClaimBackstopIgnoresAnotherSeatsWork(t *testing.T) {
 
 	if got := f.nudgeCount(); got != 0 {
 		t.Fatalf("nudges over another seat's work = %d, want 0; stdout=%s", got, f.stdout.String())
+	}
+}
+
+// TestBeadReconcileTick_SeatClaimCallSite_CarriesTheOpenRoutedSnapshot is the
+// production-wiring control for this lane, and the only test here that runs the
+// REAL tick. Every row above calls nudgeStalledSeatClaims directly with a
+// hand-built pair of work snapshots, so all of them stay green if the two seams
+// that feed it in production come apart:
+//
+//   - buildDesiredState must publish the BROAD open/unassigned/routed triple on
+//     DesiredStateResult (OpenRoutedWorkBeads/Stores/StoreRefs, populated from
+//     collectOpenUnassignedRoutedWork). The narrowed ReadyUnassignedRoutedWork
+//     view is pool-demand selection, which a named seat's routed work is not
+//     part of, so it can be empty on exactly the rows this lane exists for.
+//   - beadReconcileTick must hand that triple to nudgeStalledSeatClaims.
+//
+// Drop either — re-scope the field, or stop passing it at the call site — and
+// this row goes red while the unit rows stay green. The assertion is the first
+// observation the lane makes: the seat's grace clock started on its own routed
+// bead, which it can only have learned from that snapshot.
+func TestBeadReconcileTick_SeatClaimCallSite_CarriesTheOpenRoutedSnapshot(t *testing.T) {
+	store := beads.NewMemStore()
+	cityName := "seam-city"
+	sessName := "seam-city--seat"
+	identity := "seat-seam"
+
+	session, err := store.Create(beads.Bead{
+		Title:  "the named seat",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel, "agent:seat"},
+		Metadata: map[string]string{
+			"session_name":               sessName,
+			"template":                   "seat",
+			"agent_name":                 "seat",
+			"state":                      "active",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: identity,
+		},
+	})
+	if err != nil {
+		t.Fatalf("seeding the session bead: %v", err)
+	}
+	work, err := store.Create(beads.Bead{
+		Title:    "open work routed to the seat, never claimed",
+		Type:     "task",
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: identity},
+	})
+	if err != nil {
+		t.Fatalf("seeding the routed work bead: %v", err)
+	}
+
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), sessName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("starting the fake session: %v", err)
+	}
+	sp.SetActivity(sessName, time.Now().Add(-10*time.Minute))
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: cityName},
+		Agents: []config.Agent{{
+			Name:  "seat",
+			Nudge: "gc hook --claim --drain-ack --json",
+		}},
+	}
+	cr := &CityRuntime{
+		cityPath:            t.TempDir(),
+		cityName:            cityName,
+		cfg:                 cfg,
+		sp:                  sp,
+		standaloneCityStore: store,
+		sessionDrains:       newDrainTracker(),
+		rec:                 events.Discard,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+	}
+
+	result := buildDesiredState(cityName, cr.cityPath, time.Now(), cfg, sp, store, io.Discard)
+
+	// Seam 1: the builder publishes the broad view, index-aligned.
+	found := false
+	for _, b := range result.OpenRoutedWorkBeads {
+		if b.ID == work.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("OpenRoutedWorkBeads = %v, want the seat's routed row %s (collectOpenUnassignedRoutedWork is no longer published)", beadIDs(result.OpenRoutedWorkBeads), work.ID)
+	}
+	if len(result.OpenRoutedWorkStores) != len(result.OpenRoutedWorkBeads) ||
+		len(result.OpenRoutedWorkStoreRefs) != len(result.OpenRoutedWorkBeads) {
+		t.Fatalf("open-routed triple is not index-aligned: %d beads, %d stores, %d refs",
+			len(result.OpenRoutedWorkBeads), len(result.OpenRoutedWorkStores), len(result.OpenRoutedWorkStoreRefs))
+	}
+	if result.OpenRoutedWorkQueryPartial {
+		t.Fatal("OpenRoutedWorkQueryPartial on a healthy in-memory read; the lane would disable itself")
+	}
+
+	// Seam 2: the tick carries it to the lane.
+	cr.beadReconcileTick(context.Background(), result, nil, nil, false)
+
+	current, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("re-reading the session bead: %v", err)
+	}
+	if got := strings.TrimSpace(current.Metadata[seatClaimNudgeWorkKey]); got != work.ID {
+		t.Fatalf("seat-claim marker after the real tick = %q, want the grace clock started on %q — the lane did not receive the open-routed snapshot", got, work.ID)
 	}
 }
 
