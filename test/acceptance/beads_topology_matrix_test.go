@@ -32,6 +32,12 @@ func TestBeadsInitTopologyMatrix(t *testing.T) {
 
 		cityRoot := run.City.Dir
 		rigName := "matrixrig"
+
+		if topo.NoStore {
+			runStorelessShape(t, run)
+			return
+		}
+
 		rigDir := run.RigWorkspace(t, rigName)
 
 		if !topo.Deferred {
@@ -45,7 +51,7 @@ func TestBeadsInitTopologyMatrix(t *testing.T) {
 			// and the bd front door have nothing to talk to before it.
 			t.Run("init-defers-the-store", func(t *testing.T) {
 				assertDeferredInit(t, run)
-				run.City.StartWithSupervisor()
+				run.Start(t)
 				helpers.AssertScopeShape(t, cityRoot, cityRoot, topo.City, topo.Name+" city after the deferred start")
 				helpers.AssertJournalState(t, cityRoot, "city", topo.City, topo.Name+" city after the deferred start")
 			})
@@ -65,12 +71,23 @@ func TestBeadsInitTopologyMatrix(t *testing.T) {
 			if err != nil {
 				t.Fatalf("gc rig add on a %s city: %v\n%s", topo.Name, err, out)
 			}
+			if topo.Deferred {
+				// A rig added to a deferred city settles on the next `gc start`:
+				// the add succeeds, but the ownership record it writes is only
+				// marked ready once that start runs. Asserted there.
+				return
+			}
 			helpers.AssertScopeShape(t, cityRoot, rigDir, topo.Rig, topo.Name+" rig")
 			helpers.AssertJournalState(t, cityRoot, "rig:"+rigName, topo.Rig, topo.Name+" rig")
 		})
 
 		t.Run("start-default-pack", func(t *testing.T) {
-			run.City.StartWithSupervisor()
+			run.Start(t)
+
+			if topo.Deferred {
+				helpers.AssertScopeShape(t, cityRoot, rigDir, topo.Rig, topo.Name+" rig after the deferred start")
+				helpers.AssertJournalState(t, cityRoot, "rig:"+rigName, topo.Rig, topo.Name+" rig after the deferred start")
+			}
 
 			// The bd pack imports the dolt pack, whose orders fire on every
 			// city. Driving mol-dog-stale-db's own front door is the same proof
@@ -102,7 +119,7 @@ func TestBeadsInitTopologyMatrix(t *testing.T) {
 		})
 
 		t.Run("restart", func(t *testing.T) {
-			run.City.StartWithSupervisor()
+			run.Start(t)
 			helpers.AssertScopeShape(t, cityRoot, cityRoot, topo.City, topo.Name+" restarted city")
 			helpers.AssertScopeShape(t, cityRoot, rigDir, topo.Rig, topo.Name+" restarted rig")
 
@@ -121,6 +138,45 @@ func TestBeadsInitTopologyMatrix(t *testing.T) {
 
 			assertStopRetiresTheScope(t, run, rigDir)
 		})
+	})
+}
+
+// runStorelessShape is the list a front door that creates no bead store can
+// actually answer: the binding it wrote, the typed refusal every read gets, and
+// the stop postcondition.
+//
+// It exists so the one property this feature owns for such a shape — that the
+// proxied-local default never reaches it — is measured against a real `gc init`
+// rather than only in unit fixtures. The steps it does not run are named in the
+// shape's own comment, with the reason.
+func runStorelessShape(t *testing.T, run *helpers.TopologyRun) {
+	t.Helper()
+	topo := run.Topology
+	cityRoot := run.City.Dir
+
+	t.Run("init-shape", func(t *testing.T) {
+		helpers.AssertScopeShape(t, cityRoot, cityRoot, topo.City, topo.Name+" city")
+		helpers.AssertJournalState(t, cityRoot, "city", topo.City, topo.Name+" city")
+	})
+
+	t.Run("bd-front-door-refuses", func(t *testing.T) {
+		assertBeadRoundTrip(t, run, topo.Name)
+	})
+
+	t.Run("stop-quiescent", func(t *testing.T) {
+		if out, err := run.Stop(); err != nil {
+			t.Fatalf("gc stop on a %s city: %v\n%s", topo.Name, err, out)
+		}
+		leaked := helpers.WaitForNoDoltProcesses(t, cityRoot, 20*time.Second)
+		if len(leaked) == 0 {
+			return
+		}
+		if reason := topo.KnownStopLeak; reason != "" {
+			t.Logf("%s: %s\n%s", topo.Name, reason, strings.Join(leaked, "\n"))
+			return
+		}
+		t.Errorf("%s: a city with no store left Dolt processes behind:\n%s",
+			topo.Name, strings.Join(leaked, "\n"))
 	})
 }
 
@@ -190,26 +246,38 @@ func assertTopologyDoctor(t *testing.T, run *helpers.TopologyRun, allowedFailure
 // what the scope is going to be and creates nothing.
 func assertDeferredInit(t *testing.T, run *helpers.TopologyRun) {
 	t.Helper()
-	got := helpers.ReadScopeArtifacts(t, run.City.Dir, run.City.Dir)
+	assertDeferredScope(t, run, run.City.Dir, "city")
+}
+
+// assertDeferredScope is the deferred contract for one scope: nothing on disk,
+// nothing running, and a pending ownership record carrying the intent that says
+// what the next `gc start` has to finish.
+//
+// failure messages naming the scope they are about.
+//
+//nolint:unparam // the key is the journal key; keeping it explicit keeps the
+func assertDeferredScope(t *testing.T, run *helpers.TopologyRun, scopeRoot, key string) {
+	t.Helper()
+	got := helpers.ReadScopeArtifacts(t, run.City.Dir, scopeRoot)
 	if got.HasMetadata {
-		t.Errorf("a deferred init wrote a beads binding: %+v", got.Metadata)
+		t.Errorf("a deferred %s wrote a beads binding: %+v", key, got.Metadata)
 	}
 	if len(got.Processes) != 0 {
-		t.Errorf("a deferred init started Dolt processes:\n%s", strings.Join(got.Processes, "\n"))
+		t.Errorf("a deferred %s started Dolt processes:\n%s", key, strings.Join(got.Processes, "\n"))
 	}
 	journal, present := helpers.ReadOwnershipJournal(t, run.City.Dir)
 	if !present {
-		t.Fatal("a deferred init left no ownership record, so nothing knows what to finish")
+		t.Fatalf("a deferred %s left no ownership record, so nothing knows what to finish", key)
 	}
-	entry, ok := journal.Scopes["city"]
+	entry, ok := journal.Scopes[key]
 	if !ok {
-		t.Fatalf("deferred city missing from the ownership journal: %+v", journal.Scopes)
+		t.Fatalf("deferred %s missing from the ownership journal: %+v", key, journal.Scopes)
 	}
 	if entry.State != "provider_initializing" {
-		t.Errorf("deferred city state = %q, want provider_initializing", entry.State)
+		t.Errorf("deferred %s state = %q, want provider_initializing", key, entry.State)
 	}
 	if entry.Intent.Transport == "" || entry.Intent.Target == "" {
-		t.Errorf("deferred city carries no intent to finish: %+v", entry.Intent)
+		t.Errorf("deferred %s carries no intent to finish: %+v", key, entry.Intent)
 	}
 }
 

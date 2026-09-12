@@ -843,7 +843,7 @@ func validateSocketTarget(socket, host, port string) error {
 // above config: a record naming a process that exists here and now beats a
 // marker pointing somewhere else.
 func bdExternalBindingTarget(fs fsys.FS, cityRoot, scopeRoot string, target DoltConnectionTarget) (DoltConnectionTarget, bool, error) {
-	binding, ok, err := readBdExternalBinding(fs, filepath.Join(scopeRoot, ".beads", "metadata.json"))
+	binding, ok, err := ReadPersistedServerBinding(fs, filepath.Join(scopeRoot, ".beads", "metadata.json"))
 	if err != nil || !ok {
 		return DoltConnectionTarget{}, false, err
 	}
@@ -860,10 +860,16 @@ func bdExternalBindingTarget(fs fsys.FS, cityRoot, scopeRoot string, target Dolt
 	return resolved, true, nil
 }
 
-// readBdExternalBinding reads bd's persisted server endpoint out of
-// metadata.json. Absent or malformed metadata reports no binding: this is a
-// discovery step, and the metadata contract's own loader owns rejection.
-func readBdExternalBinding(fs fsys.FS, path string) (ConfigState, bool, error) {
+// ReadPersistedServerBinding reads the server endpoint bd persisted for a
+// scope out of its metadata.json — dolt_server_host and dolt_server_port, or
+// dolt_server_socket. `bd init --server --external --server-host <h>
+// --server-port <p>` writes them, and that is the only place the endpoint
+// lives: gc leaves a provider-owned scope's config.yaml alone, so nothing else
+// records which server the scope is bound to.
+//
+// Absent or malformed metadata reports no binding. This is a discovery step,
+// and the metadata contract's own loader owns rejection.
+func ReadPersistedServerBinding(fs fsys.FS, path string) (ConfigState, bool, error) {
 	data, err := fs.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {

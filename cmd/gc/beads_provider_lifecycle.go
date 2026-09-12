@@ -1347,7 +1347,18 @@ func inheritedProviderExternalEndpointEnv(cityPath string, intent providerScopeI
 		return nil, fmt.Errorf("read city external binding: %w", err)
 	}
 	if !ok || state.EndpointOrigin != contract.EndpointOriginCityCanonical {
-		return nil, fmt.Errorf("city has no durable direct external binding")
+		// A provider-owned direct city has no gc endpoint keys at all — gc does
+		// not canonicalize a scope bd owns — so its upstream lives only in the
+		// binding bd persisted. That is the city a fresh rig has to inherit, and
+		// without it the rig was initialized against this machine instead.
+		binding, bound, bindErr := contract.ReadPersistedServerBinding(fsys.OSFS{}, scopeMetadataJSONPath(cityPath))
+		if bindErr != nil {
+			return nil, fmt.Errorf("read city beads server binding: %w", bindErr)
+		}
+		if !bound {
+			return nil, fmt.Errorf("city has no durable direct external binding")
+		}
+		state = binding
 	}
 	if socket := strings.TrimSpace(state.DoltSocket); socket != "" {
 		return map[string]string{"BEADS_DOLT_SERVER_SOCKET": socket}, nil
