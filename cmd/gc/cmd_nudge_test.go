@@ -4954,12 +4954,12 @@ func installCountingNudgeStoreSeam(t *testing.T) (opens, closes *int) {
 	t.Helper()
 	backing := beads.NewMemStore()
 	var openCount, closeCount int
-	prev := openNudgeBeadStore
-	openNudgeBeadStore = func(string) beads.NudgesStore {
+	prev := openNudgeBeadStoreWithConfig
+	openNudgeBeadStoreWithConfig = func(string, *config.City) beads.NudgesStore {
 		openCount++
 		return beads.NudgesStore{Store: &countingNudgeStore{MemStore: backing, closes: &closeCount}}
 	}
-	t.Cleanup(func() { openNudgeBeadStore = prev })
+	t.Cleanup(func() { openNudgeBeadStoreWithConfig = prev })
 	return &openCount, &closeCount
 }
 
