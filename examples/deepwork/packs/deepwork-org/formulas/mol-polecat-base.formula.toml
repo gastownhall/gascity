@@ -1,0 +1,251 @@
+description = """
+Polecat base formula — shared steps for all polecat work variants.
+
+This formula defines the common lifecycle steps that every polecat variant
+shares: loading context, workspace setup (placeholder), preflight tests,
+implementation, and self-review. Variant formulas extend this base and
+override workspace-setup with their specific branching/worktree strategy,
+then add a terminal step (submit, commit, etc).
+
+## Variables
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| issue | caller | The work bead ID assigned to this polecat |
+| base_branch | caller | Base branch to rebase on (default: main) |
+| setup_command | rig config | Setup/install command. Empty = skip. |
+| typecheck_command | rig config | Type check command. Empty = skip. |
+| test_command | rig config | Test command. Empty = skip. |
+| lint_command | rig config | Lint command. Empty = skip. |
+| build_command | rig config | Build command. Empty = skip. |"""
+formula = "mol-polecat-base"
+version = 1
+
+[vars]
+[vars.issue]
+description = "The work bead ID assigned to this polecat"
+required = true
+
+[vars.base_branch]
+description = "The base branch to rebase on and compare against (e.g., main, integration/convoy-id)"
+default = "main"
+
+[vars.setup_command]
+description = "Setup/install command (e.g., pnpm install). Empty = skip."
+default = ""
+
+[vars.typecheck_command]
+description = "Type check command (e.g., tsc --noEmit). Empty = skip."
+default = ""
+
+[vars.test_command]
+description = "Command to run tests (auto-detected from rig settings)"
+default = ""
+
+[vars.lint_command]
+description = "Command to run linting. Empty = skip."
+default = ""
+
+[vars.build_command]
+description = "Command to run build. Empty = skip."
+default = ""
+
+[[steps]]
+id = "load-context"
+title = "Load context and verify assignment"
+description = """
+Initialize your session and understand your assignment.
+
+**1. Prime your environment:**
+```bash
+gc prime                    # Load role context
+bd prime                    # Load beads context
+```
+
+**2. Check your hook:**
+```bash
+bd list --assignee=$GC_AGENT --status=in_progress
+```
+
+The hook_bead is your assigned issue. Read it carefully:
+```bash
+bd show {{issue}}           # Full issue details
+bd show {{issue}} --json | jq '.metadata'  # Check for existing metadata
+```
+
+**3. Check for rejection (IMPORTANT):**
+
+If `metadata.rejection_reason` exists, this bead was previously attempted
+and rejected by the refinery. Read the reason carefully:
+- Rebase conflict → you'll resume the existing branch and rebase
+- Test failure → you'll resume the branch and fix the issue
+
+If `metadata.branch` exists, a branch already exists from the prior attempt.
+You will use it in workspace-setup instead of creating a new one.
+
+**4. Check inbox for additional context:**
+```bash
+gc mail inbox
+# Read any HANDOFF or assignment messages, then archive after absorbing context
+# gc mail read <id> → process → gc mail archive <id>
+```
+
+**5. Understand the requirements:**
+- What exactly needs to be done?
+- What files are likely involved?
+- Are there dependencies or blockers?
+- What does "done" look like?
+- If rejected: what specifically needs fixing?
+
+If blocked or unclear, mail Witness:
+```bash
+gc mail send <rig>/witness -s "HELP: Unclear requirements" -m "Issue: {{issue}}
+Question: <what you need clarified>"
+```
+
+**Exit criteria:** You understand the work and can begin."""
+
+[[steps]]
+id = "workspace-setup"
+title = "Set up workspace (override in variant formulas)"
+needs = ["load-context"]
+description = """
+Override this step in variant formulas to define the workspace strategy.
+
+Variants should set up an isolated worktree and working context appropriate
+for their merge strategy (feature branch, direct commit, etc)."""
+
+[[steps]]
+id = "preflight-tests"
+title = "Verify pre-flights pass on base branch"
+needs = ["workspace-setup"]
+description = """
+Check if the codebase is healthy BEFORE starting your work.
+
+**Config: typecheck_command = {{typecheck_command}}**
+**Config: lint_command = {{lint_command}}**
+**Config: test_command = {{test_command}}**
+
+**Skip this step if resuming a rejected branch** — pre-flights were
+already verified on the prior attempt. Close this step and proceed.
+
+**1. Run pre-flights (skip empty commands silently):**
+```bash
+{{typecheck_command}}
+{{lint_command}}
+{{test_command}}
+```
+
+**2. If pre-flights pass:** proceed.
+
+**3. If pre-flights fail on {{base_branch}}:**
+
+File a bead and proceed. Do NOT fix pre-existing failures — that's
+not your assignment.
+
+FORBIDDEN: Pushing to {{base_branch}}. FORBIDDEN: Fixing pre-existing failures.
+
+```bash
+bd create --title "Pre-existing failure: <description>" --type bug --priority 1
+gc mail send <rig>/witness -s "NOTICE: {{base_branch}} has failing pre-flights" \
+  -m "Filed: <bead-id>. Proceeding with {{issue}}."
+```
+
+**Exit criteria:** Pre-flights pass (or pre-existing bug filed), ready to implement."""
+
+[[steps]]
+id = "implement"
+title = "Implement the solution"
+needs = ["preflight-tests"]
+description = """
+Do the actual implementation work.
+
+**Working principles:**
+- Follow existing codebase conventions
+- Make atomic, focused commits
+- Keep changes scoped to the assigned issue
+- Don't gold-plate or scope-creep
+
+**If resuming a rejected branch:** Read `metadata.rejection_reason`
+from load-context. Focus on fixing the specific issue that caused
+rejection — don't redo everything.
+
+**Commit frequently:**
+```bash
+git add <files>
+git commit -m "<type>: <description> ({{issue}})"
+```
+
+Commit types: feat, fix, refactor, test, docs, chore
+
+**Discovered work (outside scope):**
+```bash
+bd create --title "Found: <description>" --type bug --priority 2
+```
+Do NOT fix unrelated issues in this branch.
+
+**If stuck (>15 minutes):**
+```bash
+gc mail send <rig>/witness -s "HELP: Stuck on implementation" -m "Issue: {{issue}}
+Problem: <what's blocking you>
+Tried: <what you've attempted>"
+```
+
+**If context filling up:**
+```bash
+gc runtime request-restart
+```
+This blocks until the controller kills your session. The next session
+resumes from context (re-reads formula steps, checks git/bead state).
+
+**Exit criteria:** Implementation complete, all changes committed."""
+
+[[steps]]
+id = "self-review"
+title = "Self-review and run tests"
+needs = ["implement"]
+description = """
+Review your changes and verify they work.
+
+**Config: setup_command = {{setup_command}}**
+**Config: typecheck_command = {{typecheck_command}}**
+**Config: lint_command = {{lint_command}}**
+**Config: build_command = {{build_command}}**
+**Config: test_command = {{test_command}}**
+
+**1. Review the diff:**
+```bash
+git diff origin/{{base_branch}}...HEAD
+git log --oneline origin/{{base_branch}}..HEAD
+git diff --stat origin/{{base_branch}}...HEAD
+```
+
+Check for: bugs, security issues, style violations, missing error handling,
+debug cruft, unintended file changes. Fix anything you find.
+
+**2. Run quality checks (skip empty commands):**
+```bash
+{{setup_command}}
+{{typecheck_command}}
+{{lint_command}}
+{{build_command}}
+{{test_command}}
+```
+
+**ALL CHECKS MUST PASS.** If your change caused the failure, fix it.
+If pre-existing, file a bead.
+
+**3. Ensure everything is committed:**
+```bash
+git status                  # Must be clean
+git log origin/{{base_branch}}..HEAD --oneline  # Must show your commits
+```
+
+If uncommitted changes exist:
+```bash
+git add -A && git commit -m "<type>: <description> ({{issue}})"
+```
+
+NEVER discard implementation changes with `git checkout -- .`
+
+**Exit criteria:** All checks pass, all changes committed, working tree clean."""

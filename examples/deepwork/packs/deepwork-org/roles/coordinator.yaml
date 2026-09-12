@@ -1,0 +1,71 @@
+# Coordinator Role Template
+# Used for planning, coordination, and strategic roles in the organization
+
+apiVersion: gt.deepwork.ai/v1
+kind: RoleTemplate
+metadata:
+  name: coordinator
+  description: Planning and coordination role template
+  version: "1.0.0"
+
+spec:
+  tier: coordination
+  llm_profile: claude
+  
+  characteristics:
+    planning_ability: high
+    strategic_thinking: high
+    technical_depth: medium
+    execution_focus: low
+    coordination_focus: high
+  
+  responsibilities:
+    - task_decomposition
+    - resource_allocation
+    - timeline_planning
+    - conflict_resolution
+    - stakeholder_communication
+    - priority_management
+    - risk_assessment
+    - quality_oversight
+  
+  work_types:
+    - architecture_review
+    - design_decisions
+    - planning_sessions
+    - code_reviews
+    - technical_consultation
+    - escalation_handling
+  
+  routing_preferences:
+    complex_tasks: accept
+    urgent_tasks: accept
+    routine_tasks: delegate
+    documentation_tasks: delegate
+  
+  collaboration:
+    can_assign_to:
+      - senior-developer
+      - junior-developer
+      - qa-engineer
+      - content-writer
+    
+    must_review:
+      - complexity:high
+      - architectural_changes
+      - security_related
+    
+    escalation_path:
+      - ceo
+  
+  constraints:
+    max_parallel_tasks: 5
+    response_time_sla: 30m
+    availability: "09:00-18:00 UTC"
+  
+  metrics:
+    - tasks_planned
+    - reviews_completed
+    - conflicts_resolved
+    - team_productivity
+    - on_time_delivery_rate

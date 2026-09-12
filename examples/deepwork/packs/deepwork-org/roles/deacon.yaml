@@ -1,0 +1,27 @@
+# Deacon — Automated town patrol
+name: deacon
+scope: city
+description: "Automated patrol agent. Spawns witnesses, runs plugins, monitors health, escalates to mayor. Never human-facing."
+work_dir: "{{.TownRoot}}/deacon"
+
+responsibilities:
+  - patrol              # Periodic health scan of all rigs
+  - spawn_witnesses     # Start witness agents for each rig
+  - run_plugins         # Execute plugins on cooldown gates
+  - escalate            # Mail mayor about issues
+  - process_cleanup     # Kill stuck agents, orphaned processes
+
+restrictions:
+  - never_write_code
+  - never_merge
+  - never_communicate_with_human
+
+plugins_executed:
+  - stuck-agent-dog (5m)
+  - dolt-backup (15m)
+  - compactor-dog (30m)
+  - rebuild-gt (1h)
+  - dolt-archive (1h)
+  - quality-review (6h)
+  - knowledge-evolve (12h)
+  - git-hygiene (12h)
