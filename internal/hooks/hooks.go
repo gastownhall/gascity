@@ -33,7 +33,7 @@ var configFS embed.FS
 var supported = []string{"claude", "codex", "gemini", "antigravity", "kiro", "opencode", "mimocode", "groq", "cerebras", "copilot", "cursor", "pi", "omp", "kimi"}
 
 const (
-	managedPiHookVersion       = 9
+	managedPiHookVersion       = 10
 	managedOpenCodeHookVersion = 6
 	managedMimoCodeHookVersion = 2
 	managedOmpHookVersion      = 2
