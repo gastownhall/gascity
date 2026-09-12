@@ -3992,7 +3992,7 @@ func openStandaloneRigStores(cfg *config.City, cityPath string) (map[string]bead
 		if strings.TrimSpace(rig.Path) == "" {
 			continue
 		}
-		store, err := openStoreAtForCity(rig.Path, cityPath)
+		store, err := openStoreAtForCityWithConfig(rig.Path, cityPath, cfg)
 		if err != nil {
 			failures = append(failures, rigStoreOpenFailure{rig: rig.Name, err: err})
 			continue

@@ -265,3 +265,100 @@ func TestBdCloseGateReusesTheWriteGuardsStoreRead(t *testing.T) {
 		t.Fatalf("found %d %s call(s) in doBd, want exactly 1", calls, callee)
 	}
 }
+
+// cmdReady loads the city config once, then opens the city store. Opening it
+// through openCityStoreAt (which always passes a nil config down) re-ran the
+// whole city config load — builtin-cache readiness and pack expansion
+// included — for a store open cmdReady only needed to resolve which stores
+// federate ready work. On a controller-cadence caller of `gc ready`, that
+// reload was paid once per invocation on top of the load cmdReady had
+// already done.
+func TestReadyCityStoreReusesTheLoadedCityConfig(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "cmd_ready.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parsing cmd_ready.go: %v", err)
+	}
+
+	fn := findFuncDecl(file, "cmdReady")
+	if fn == nil {
+		t.Fatal("cmdReady not found in cmd_ready.go")
+	}
+
+	var opens int
+	ast.Inspect(fn, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		ident, ok := call.Fun.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		switch ident.Name {
+		case "openCityStoreAt":
+			t.Fatal("cmdReady opens the city store without a config, which re-loads the city config it was handed")
+		case "openStoreAtForCityWithConfig":
+			opens++
+			if len(call.Args) != 3 {
+				t.Fatalf("openStoreAtForCityWithConfig: got %d args, want 3", len(call.Args))
+			}
+			arg, ok := call.Args[2].(*ast.Ident)
+			if !ok || arg.Name != "cfg" {
+				t.Fatalf("cmdReady passes %s as its config; want the already-loaded \"cfg\"", exprText(call.Args[2]))
+			}
+		}
+		return true
+	})
+	if opens != 1 {
+		t.Fatalf("found %d config-carrying store open(s) in cmdReady, want exactly 1", opens)
+	}
+}
+
+// openStandaloneRigStores opens one store per bound rig, and is shared by
+// both `gc ready` (readyRigLegStores) and the controller's supervisor loop
+// (buildStandaloneRigStores) — both callers already hand it a loaded city
+// config as a parameter. Opening each rig's store through openStoreAtForCity
+// discarded that config and re-loaded it once per rig, on top of the load
+// the caller had already done, on every store the loop opened.
+func TestStandaloneRigStoresReuseTheLoadedCityConfig(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "city_runtime.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parsing city_runtime.go: %v", err)
+	}
+
+	fn := findFuncDecl(file, "openStandaloneRigStores")
+	if fn == nil {
+		t.Fatal("openStandaloneRigStores not found in city_runtime.go")
+	}
+
+	var opens int
+	ast.Inspect(fn, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		ident, ok := call.Fun.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		switch ident.Name {
+		case "openStoreAtForCity":
+			t.Fatal("openStandaloneRigStores opens a rig store without a config, which re-loads the city config its caller already handed it")
+		case "openStoreAtForCityWithConfig":
+			opens++
+			if len(call.Args) != 3 {
+				t.Fatalf("openStoreAtForCityWithConfig: got %d args, want 3", len(call.Args))
+			}
+			arg, ok := call.Args[2].(*ast.Ident)
+			if !ok || arg.Name != "cfg" {
+				t.Fatalf("openStandaloneRigStores passes %s as its config; want the already-loaded \"cfg\"", exprText(call.Args[2]))
+			}
+		}
+		return true
+	})
+	if opens != 1 {
+		t.Fatalf("found %d config-carrying store open(s) in openStandaloneRigStores, want exactly 1", opens)
+	}
+}
