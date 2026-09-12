@@ -458,7 +458,7 @@ func classifyRetryAttemptWithPostconditions(store beads.Store, subject beads.Bea
 	if result.Outcome != "pass" {
 		return result, nil
 	}
-	reason, err := validateRequiredArtifacts(store, subject, opts.RequiredArtifactStat)
+	reason, err := validateRequiredArtifacts(store, subject, opts)
 	if err != nil {
 		return retryEvalResult{}, err
 	}
@@ -468,12 +468,13 @@ func classifyRetryAttemptWithPostconditions(store beads.Store, subject beads.Bea
 	return result, nil
 }
 
-func validateRequiredArtifacts(store beads.Store, subject beads.Bead, stat func(string) (os.FileInfo, error)) (string, error) {
+func validateRequiredArtifacts(store beads.Store, subject beads.Bead, opts ProcessOptions) (string, error) {
+	stat := opts.RequiredArtifactStat
 	if stat == nil {
 		stat = os.Stat
 	}
 	for _, rawPath := range requiredArtifactTemplates(subject.Metadata) {
-		path, worktree, reason, err := resolveRequiredArtifactPath(store, subject, rawPath)
+		path, worktree, reason, err := resolveRequiredArtifactPath(store, subject, rawPath, opts)
 		if err != nil {
 			return "", err
 		}
@@ -548,14 +549,14 @@ func requiredArtifactWorkDir(meta map[string]string) string {
 // steps of one loop iteration is named by {iteration}; only {attempt} advances
 // when a single step retries. Any token left unexpanded fails the template
 // loudly rather than resolving to a partial path.
-func resolveRequiredArtifactPath(store beads.Store, subject beads.Bead, rawPath string) (string, string, string, error) {
+func resolveRequiredArtifactPath(store beads.Store, subject beads.Bead, rawPath string, opts ProcessOptions) (string, string, string, error) {
 	rootID := strings.TrimSpace(subject.Metadata[beadmeta.RootBeadIDMetadataKey])
 	attempt := strings.TrimSpace(subject.Metadata[beadmeta.AttemptMetadataKey])
 	iteration := strings.TrimSpace(subject.Metadata[beadmeta.IterationMetadataKey])
 	worktree := requiredArtifactWorkDir(subject.Metadata)
 
 	if worktree == "" {
-		resolvedWorktree, reason, err := resolveRequiredArtifactWorktree(store, rootID)
+		resolvedWorktree, reason, err := resolveRequiredArtifactWorktree(store, rootID, opts)
 		if err != nil {
 			return "", "", "", err
 		}
@@ -644,7 +645,7 @@ func requiredArtifactTargetInWorktree(worktree, path string) (bool, error) {
 	return requiredArtifactPathInWorktree(resolvedWorktree, resolvedPath)
 }
 
-func resolveRequiredArtifactWorktree(store beads.Store, rootID string) (string, string, error) {
+func resolveRequiredArtifactWorktree(store beads.Store, rootID string, opts ProcessOptions) (string, string, error) {
 	if rootID == "" {
 		return "", "missing_required_artifact_context", nil
 	}
@@ -664,24 +665,88 @@ func resolveRequiredArtifactWorktree(store beads.Store, rootID string) (string, 
 		return worktree, "", nil
 	}
 	sourceID := strings.TrimSpace(root.Metadata[beadmeta.SourceBeadIDMetadataKey])
+	fromSourceBead := sourceID != ""
 	if sourceID == "" {
 		sourceID = strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey])
 	}
 	if sourceID == "" {
 		return "", "missing_required_artifact_context", nil
 	}
-	source, err := store.Get(sourceID)
-	if errors.Is(err, beads.ErrNotFound) {
-		return "", "missing_required_artifact_context", nil
-	}
+	source, found, err := resolveRequiredArtifactSourceBead(store, root, sourceID, fromSourceBead, opts)
 	if err != nil {
-		return "", "", fmt.Errorf("loading required artifact source bead %s: %w", sourceID, markTransientControllerBoundaryError(err))
+		return "", "", err
+	}
+	if !found {
+		return "", "missing_required_artifact_context", nil
 	}
 	worktree := requiredArtifactWorkDir(source.Metadata)
 	if worktree == "" {
 		return "", "missing_required_artifact_context", nil
 	}
 	return worktree, "", nil
+}
+
+// resolveRequiredArtifactSourceBead reads the worktree-bearing source bead a
+// workflow root points at, across store boundaries. The root lives in the
+// subject's own (graph) store, but on a split city the bead it points at does
+// not: a gc.source_bead_id source lives in the scope named by
+// gc.source_store_ref, and a gc.input_convoy_id convoy is a work bead in the
+// work store. Reading either through the ambient store gets a clean
+// ErrNotFound and misclassifies a genuinely-passing attempt as transient
+// missing_required_artifact_context, burning attempts until exhaustion. Two
+// doors, matching the finalize lane's walkSourceBeadChain:
+//
+//   - A non-empty gc.source_store_ref names another scope's store; resolve it
+//     via opts.ResolveStoreRef and read there. A ref with no resolver wired
+//     fails LOUD rather than silently narrowing to the ambient store.
+//   - With no ref, resolve over the same residency frame the drain uses
+//     (opts.MemberStores as the work leg). With no member stores — every
+//     single-store caller — this is byte-identical to the ambient store.Get
+//     it replaces.
+//
+// found=false is a clean not-found on every probed store; the caller maps it
+// to missing_required_artifact_context exactly as before.
+func resolveRequiredArtifactSourceBead(store beads.Store, root beads.Bead, sourceID string, fromSourceBead bool, opts ProcessOptions) (beads.Bead, bool, error) {
+	if fromSourceBead {
+		if ref := strings.TrimSpace(root.Metadata[beadmeta.SourceStoreRefMetadataKey]); ref != "" {
+			if opts.ResolveStoreRef == nil {
+				return beads.Bead{}, false, fmt.Errorf("resolving required artifact source bead %s (ref %s): no store-ref resolver provided", sourceID, ref)
+			}
+			resolved, err := opts.ResolveStoreRef(ref)
+			if err != nil {
+				return beads.Bead{}, false, fmt.Errorf("resolving required artifact source store %q: %w", ref, markTransientControllerBoundaryError(err))
+			}
+			if resolved == nil {
+				return beads.Bead{}, false, fmt.Errorf("resolving required artifact source store %q: nil store", ref)
+			}
+			source, err := resolved.Get(sourceID)
+			if errors.Is(err, beads.ErrNotFound) {
+				return beads.Bead{}, false, nil
+			}
+			if err != nil {
+				return beads.Bead{}, false, fmt.Errorf("loading required artifact source bead %s in %s: %w", sourceID, ref, markTransientControllerBoundaryError(err))
+			}
+			return source, true, nil
+		}
+	}
+	if len(opts.MemberStores) == 0 {
+		source, err := store.Get(sourceID)
+		if errors.Is(err, beads.ErrNotFound) {
+			return beads.Bead{}, false, nil
+		}
+		if err != nil {
+			return beads.Bead{}, false, fmt.Errorf("loading required artifact source bead %s: %w", sourceID, markTransientControllerBoundaryError(err))
+		}
+		return source, true, nil
+	}
+	owner, found, err := resolveDrainMember(store, sourceID, opts)
+	if err != nil {
+		return beads.Bead{}, false, fmt.Errorf("loading required artifact source bead %s: %w", sourceID, markTransientControllerBoundaryError(err))
+	}
+	if !found {
+		return beads.Bead{}, false, nil
+	}
+	return owner.Bead, true, nil
 }
 
 func retryFailureReason(subject beads.Bead) string {
