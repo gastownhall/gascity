@@ -185,6 +185,133 @@ New agents immediately enter the work loop: if you find work on your
 hook, you run it — check hook, claim work, execute, repeat. The prompt
 template tells them what to do. No framework intelligence needed.
 
+## Failed starts: backoff, then park
+
+A routed bead whose sessions cannot start is not capacity demand forever.
+Every start the pool plans for a bead that then fails in `provider_error`
+(a failing `pre_start` included) is charged to the **work bead**, not the
+session bead: the session bead is rolled back and closed `failed-create`
+and the next tick would create a fresh one with zeroed counters, which is
+how one bead once spawned ~160 sessions in 23 minutes (papercut
+pc_b969af2a45eb). The record lives in the bead's metadata, so it survives
+a supervisor restart and a handoff:
+
+| key | meaning |
+|---|---|
+| `gc.start_failures` | consecutive failed starts since the last success |
+| `gc.start_failed_at` / `gc.start_failure` | when, and the last stderr line |
+| `gc.start_backoff_until` | no start is planned before this time: 10s after the first failure, doubling per failure, capped at 5m |
+| `gc.parked_at` / `gc.park_reason` / `gc.park_failures` | the park: written when the count reaches the agent's `max_start_failures` (default 5, `0` = never park) |
+| `gc.park_id` | the park's random identity: names its mail (`[park <id>]` in the subject), fences the delivered stamp, lets a retry recognize a mail that landed before a restart could stamp it |
+| `gc.park_mailed_at` | the one park mail landed (an unlanded mail is retried by a background sweep the tick hands off and never waits on; a landed one is found by its tag — open or archived, the receipt is the message bead itself — and never sent twice; only a landed mail the read-mail retention purge has already deleted can be sent once more) |
+
+Both demand tiers honour the record: an in_progress bead assigned to the
+pool identity (the wake-known-identity tier) and an open unassigned routed
+bead (the scale_check tier) are skipped while backed off or parked, so the
+pool plans no start for them. A custom `scale_check` stays authoritative:
+if its query counts routed rows, exclude parked ones (`gc.parked_at` set)
+unless you want a seat spawned for them; the seats it spawns are tied to the
+routed rows the default probe can see, so their failed starts are charged. A **parked** bead keeps its status, assignee
+and `gc.routed_to` — no other pool claims it — and exactly one mail goes to
+`mayor` naming the bead, the agent, the count, the last stderr line and the
+unpark verbs. `gc bd show` prints the park keys under METADATA; the
+reconciler says `PARKED work bead <id>` on stderr and records a
+`reconciler.pool.start_deferred` trace decision for every skipped row.
+
+The controller's cached demand snapshot expires at the earliest backoff
+deadline it held a row back to: a deadline passes with no bead or session
+write to fingerprint, so a 10s backoff never lasts the cache's backstop age.
+A retained on-demand named holder woken for work — a bead assigned to it, or
+a routed row of its backing template (`NamedSessionRoutedDemand`) — carries
+that bead as its trigger (only `gc.trigger_bead_id` / store ref; its pack,
+workspace and work dir are its own), so a failed start charges that bead the
+way a pool seat's would; a holder created (or reopened) fresh for direct
+demand carries the trigger from its first start. A holder created fresh for
+routed-only demand has no bead to bind to on its first tick; the next tick
+binds it. A bead still carrying an agent's legacy bound
+identity (`rig/old.worker` after a bound→unbound migration) is routed to that
+agent, not "elsewhere".
+
+A confirmed start clears the whole record, and the clear comes FIRST: on
+the one commit path the record of the bead the start ran for is cleared
+before the batch that stamps `creation_complete`, and a clear that fails (a
+work-store read or write error; a bead that is gone or since re-routed
+counts as settled) fails the commit like a failed metadata batch — the
+runtime keeps running, the session stays pending-create, and the next tick's
+pending-create recovery clears again before it confirms — for a fresh
+create under its pending-create claim and for a KEPT session whose resume
+left it start-pending/creating alike (the pre-heal state is the gate). The
+bead a start ran for is its session's trigger — the one operand its trigger
+env, its failure charge and its pre-confirmation clear all read — pinned
+while the start is in flight, for named holders and pool seats alike: a
+trigger follows its wake request only between starts (a named holder's is
+cleared when there is none — its bead parked, backed off, closed or assigned
+elsewhere; a reopened holder is reopened with the same clear — so a
+`mode = "always"` holder restarting for no work is charged to nothing and
+lifts no park), and a bind that did not land leaves the previous trigger,
+which the start then runs for and is charged to. The gate is re-proven on
+the row at START time (`startDeferred`, before the provider is called),
+read live and deferred too when the row cannot be read: a bead parked or
+backed off since the plan — another seat's failure parked it, a queued seat
+outlived it, a holder's clear-bind did not land — is not started for
+(outcome `work_deferred`, nothing charged; a kept session queued for that
+start goes back to asleep so the next build can bind it to other work,
+while a fresh seat keeps its claim and expires as never started), so a
+success can never lift a park it was not planned past. An uncommitted
+start stays durable as its start-pending/creating state: the heal never
+moves a live start-pending/creating session on — only the commit that
+clears the record first confirms it (the start path, or the next tick's
+recovery) — so a kept session's resume whose clear failed is recovered
+however many ticks, restarts or in-flight deferrals come between. Every record read is live (a
+caching store's backing), fenced or not; the `--reassign` unpark is fenced
+through the same policy-aware seam (`beads.ResolveConditionalWriter`,
+following the CLI's policy wrapper; `require` refuses rather than write
+unfenced), re-reads a moved row live, and clears the whole record family
+whenever any of it was read, so a park written between its read and its
+write is lifted; it reads the row live too, so a cache that still serves a
+clean row cannot answer "nothing to reopen" over a parked backing. The one
+park mail is owed whether or not the bead is still demand: besides the
+demand-side retries, the controller sweeps every store it knows for parked
+beads whose mail has not landed (both tiers, at most once per retry
+interval; a park is mailed from the store it was found in, so a relocated
+class store's active row is never mistaken for a retained copy), so a
+bead whose agent was suspended, or that gained a dependency, still gets
+its mail (a closed bead is not swept: its park, and its mail, are moot);
+the listings and the sends run off the tick; the re-read before any send
+is live, and a delivery never stamps a park lifted meanwhile. The gate the
+demand build applies reads the wall clock, not the beacon time the
+supervisor captured at start, so a backoff expires. The targeted
+dispatcher reconcile carries the same record policy as the main tick. The start-time gate runs
+before the named-session circuit breaker records an attempt: a deferred
+start makes none and spends none. A failure that lands on an already parked bead (a start in
+flight when the park was written) is recorded as the last failure and
+does not count toward the next attempt. A park written before
+`gc.park_id` existed is identified by the bead id and `gc.parked_at`
+together. Under `beads.conditional_writes = "require"` a fenced write the
+store refuses at write time is not retried unfenced. A trigger whose named
+store fails to answer is an error, never absence — a migration's retained
+copy is not charged in the active copy's place. The unpark is a designed
+surface, never a hand edit (for a graph bead migrated into its class
+binding, `gc sling --reassign` acts on the primary store's copy like every
+sling route does; lift the park on the class store's copy in place):
+
+```
+gc sling --reassign <agent> <bead>     # re-dispatch: clears the record and the park before routing
+gc bd update <bead> --unset-metadata gc.park_reason --unset-metadata gc.parked_at --unset-metadata gc.park_failures
+                                        # hold in place: lifts the park; the count restarts from zero
+```
+
+Implementation: `cmd/gc/pool_start_backoff.go` (record, gate, mail),
+`commitStartFailure` / `commitStartResultTraced` in
+`cmd/gc/session_lifecycle_parallel.go` (where the start result is known),
+`excludeStartDeferredWork` and `defaultScaleCheckCountsAndDemand` in
+`cmd/gc/build_desired_state.go` (the gate), `reopenForReassign` in
+`internal/sling` (the unpark). A transient failure — one `pre_start` lost a
+lock, the next attempt succeeded — costs one 10s backoff and nothing else.
+A convoy re-dispatched as a batch skips children already routed to the
+target (the batch's pre-existing idempotence check) and lifts no park on
+them: unpark a parked child by its own id.
+
 ## Downscaling (full design — implement later)
 
 Three agent lifecycle states:

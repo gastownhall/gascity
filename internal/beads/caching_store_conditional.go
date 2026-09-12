@@ -310,3 +310,16 @@ func (c *CachingStore) evictForConditionalWrite(id string) {
 	c.updateStatsLocked()
 	c.mu.Unlock()
 }
+
+// StampConditionalWritesModeForTest stamps a caching store with a
+// beads.conditional_writes mode the way the factory does, so a test outside
+// this package can exercise the ResolveConditionalWriter seam (a wrapper's
+// declared resolution target, the mode, the require refusal). Reports
+// whether the stamp was accepted; only a *CachingStore carries one.
+func StampConditionalWritesModeForTest(store Store, mode gate.Mode) bool {
+	caching, ok := store.(*CachingStore)
+	if !ok {
+		return false
+	}
+	return caching.stampConditionalWritesMode(mode, false)
+}

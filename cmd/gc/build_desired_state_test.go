@@ -908,7 +908,7 @@ func TestDefaultScaleCheckDemandCarriesTriggerBeadID(t *testing.T) {
 		t.Fatalf("create routed bead: %v", err)
 	}
 
-	counts, demand, _, errs := defaultScaleCheckCountsAndDemand(nil, []defaultScaleCheckTarget{{
+	counts, demand, _, errs := defaultScaleCheckCountsAndDemand(nil, time.Now(), []defaultScaleCheckTarget{{
 		template: template,
 		storeKey: "rig:gascity",
 		store:    store,
@@ -969,7 +969,7 @@ func TestDefaultScaleCheckCountsAndDemandNormalizesInstanceSuffixedRouteTarget(t
 		t.Fatalf("create instance-routed bead: %v", err)
 	}
 
-	counts, demand, partialTemplates, errs := defaultScaleCheckCountsAndDemand(cfg, []defaultScaleCheckTarget{{
+	counts, demand, partialTemplates, errs := defaultScaleCheckCountsAndDemand(cfg, time.Now(), []defaultScaleCheckTarget{{
 		template: template,
 		storeKey: "rig:hello-world",
 		store:    store,
@@ -1013,7 +1013,7 @@ func TestDefaultScaleCheckCountsAndDemandLeavesUnmatchedInstanceSuffixAlone(t *t
 		t.Fatalf("create out-of-range instance-routed bead: %v", err)
 	}
 
-	counts, _, _, errs := defaultScaleCheckCountsAndDemand(cfg, []defaultScaleCheckTarget{{
+	counts, _, _, errs := defaultScaleCheckCountsAndDemand(cfg, time.Now(), []defaultScaleCheckTarget{{
 		template: template,
 		storeKey: "rig:hello-world",
 		store:    store,

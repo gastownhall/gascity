@@ -1853,6 +1853,9 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		state := syncSessionCachedState(sn, b, exists, sp)
 		if !exists && isConfiguredNamed {
 			extraMeta := startupKickoffReopenMetadata(tp.BoundStepID, now)
+			for k, v := range namedSessionReopenTriggerMetadata(tp) {
+				extraMeta[k] = v
+			}
 			if reopened, _, ok := reopenClosedConfiguredNamedSessionBead(cityPath, store, cfg, cityName, tp.ConfiguredNamedIdentity, sn, state, now, extraMeta, stderr); ok {
 				b = reopened
 				exists = true
@@ -1940,6 +1943,9 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 					meta[startupKickoffStateKey] = startupKickoffStatePending
 					meta[startupKickoffStartedAtKey] = now.UTC().Format(time.RFC3339)
 					meta[startupKickoffAttemptsKey] = "0"
+				}
+				for k, v := range namedSessionTriggerMetadata(tp) {
+					meta[k] = v
 				}
 			}
 			// Store the qualified template name so the API can derive the

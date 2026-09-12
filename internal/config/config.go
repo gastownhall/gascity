@@ -791,6 +791,9 @@ type AgentOverride struct {
 	MaxActiveSessions *int `toml:"max_active_sessions,omitempty"`
 	// MinActiveSessions overrides the minimum number of sessions to keep alive.
 	MinActiveSessions *int `toml:"min_active_sessions,omitempty"`
+	// MaxStartFailures overrides the consecutive failed-start limit after which
+	// the pool parks a routed work bead (0 disables the park).
+	MaxStartFailures *int `toml:"max_start_failures,omitempty"`
 	// ScaleCheck overrides the shell command whose output reports new
 	// unassigned session demand for bead-backed reconciliation.
 	ScaleCheck *string `toml:"scale_check,omitempty"`
@@ -3272,6 +3275,16 @@ type Agent struct {
 	// mode="always"; both produce sessions, and gc doctor reports accidental
 	// combinations.
 	MinActiveSessions *int `toml:"min_active_sessions,omitempty"`
+	// MaxStartFailures is the number of CONSECUTIVE failed session starts
+	// (provider errors, a failing pre_start included) the pool tolerates for
+	// one routed work bead before it parks the bead: no further start is
+	// planned for it, the bead keeps its route and status, and one mail goes
+	// to the mayor. Before the limit each failure backs the next start off
+	// (10s doubling per failure, capped at 5m). Nil means 5; 0 disables the
+	// park (the backoff still applies). A successful start resets the count.
+	// Unpark with gc sling --reassign or by unsetting gc.park_reason,
+	// gc.parked_at and gc.park_failures on the bead.
+	MaxStartFailures *int `toml:"max_start_failures,omitempty" jsonschema:"default=5,minimum=0"`
 	// ScaleCheck is a shell command template whose output reports new
 	// unassigned session demand. In bead-backed reconciliation this is
 	// additive: assigned work is resumed separately, and ScaleCheck reports
@@ -3560,6 +3573,7 @@ func (a Agent) Clone() Agent {
 	out.ReadyDelayMs = copyIntPtr(a.ReadyDelayMs)
 	out.MaxActiveSessions = copyIntPtr(a.MaxActiveSessions)
 	out.MinActiveSessions = copyIntPtr(a.MinActiveSessions)
+	out.MaxStartFailures = copyIntPtr(a.MaxStartFailures)
 	out.AssignedWorkDeferLimit = copyIntPtr(a.AssignedWorkDeferLimit)
 	out.EmitsPermissionWarning = copyBoolPtr(a.EmitsPermissionWarning)
 	out.HooksInstalled = copyBoolPtr(a.HooksInstalled)
@@ -4111,6 +4125,9 @@ func ValidateAgents(agents []Agent) error {
 		}
 		if a.MaxActiveSessions != nil && *a.MaxActiveSessions < -1 {
 			return fmt.Errorf("agent %q: max_active_sessions must be >= -1 (use -1 for unlimited)", a.Name)
+		}
+		if a.MaxStartFailures != nil && *a.MaxStartFailures < 0 {
+			return fmt.Errorf("agent %q: max_start_failures must be >= 0 (0 disables the park)", a.Name)
 		}
 		if a.MaxActiveSessions != nil && a.MinActiveSessions != nil &&
 			*a.MaxActiveSessions >= 0 && *a.MinActiveSessions > *a.MaxActiveSessions {

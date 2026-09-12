@@ -311,6 +311,13 @@
               "null"
             ]
           },
+          "MaxStartFailures": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "MinActiveSessions": {
             "format": "int64",
             "type": [
@@ -559,6 +566,7 @@
           "InjectFragmentsAppend",
           "MaxActiveSessions",
           "MinActiveSessions",
+          "MaxStartFailures",
           "ScaleCheck",
           "OptionDefaults"
         ],
