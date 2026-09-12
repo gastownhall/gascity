@@ -2533,9 +2533,9 @@ func TestBuildAttemptRecipeRalphWithChildren(t *testing.T) {
 		t.Errorf("apply gc.attempt = %q, want 3", applyStep.Metadata["gc.attempt"])
 	}
 	// gastownhall/gascity#5246: a plain child (no Retry/Ralph/Drain) must still
-	// get a default gc.kind, mirroring the root's unconditional stamp above —
-	// otherwise it matches isWorkRecordGatedBead's (Type=="task" && gc.kind=="")
-	// test and gets wrongly swept into the ADR-0009 work-record close gate.
+	// get a default gc.kind, mirroring the root's unconditional stamp above, so
+	// its control-plane identity remains explicit and it stays out of the
+	// ADR-0009 work-record close gate.
 	if applyStep.Metadata["gc.kind"] != "task" {
 		t.Errorf("apply gc.kind = %q, want task", applyStep.Metadata["gc.kind"])
 	}
