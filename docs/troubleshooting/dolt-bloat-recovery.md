@@ -221,6 +221,13 @@ postflight database value hashes when available, `integrity_table_drift` for
 table-level row/hash mismatches, `database_value_hash_drift` for aggregate hash
 drift, and `decision=preserve_marker_manual_review_required`.
 
+Alert-cadence bookkeeping is deliberately separate from that evidence. The
+compactor stores `seen_count`, `notify_count`, and last-notified fields under
+`.gc/runtime/packs/dolt/compact-notify-state/<marker-kind>/<database>`; repeated
+checks must not rewrite the quarantine marker. The sidecar is operational
+state, not integrity evidence. A changed reason or a replacement marker alerts
+immediately, while an unchanged marker follows the bounded reminder cadence.
+
 Safe marker-clear procedure:
 
 1. Require a clean application worktree: `git status --short` should show no
