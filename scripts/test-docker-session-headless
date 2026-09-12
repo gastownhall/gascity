@@ -1,0 +1,529 @@
+#!/usr/bin/env bash
+# test-docker-session-headless — integration tests for gc-session-docker-headless
+#
+# Usage: ./scripts/test-docker-session-headless
+#
+# Exercises the exec provider protocol against the headless Docker session
+# script. Uses a mock claude CLI (shell script that echoes JSON) to avoid
+# requiring real API credentials.
+#
+# Requires: docker, jq
+
+set -euo pipefail
+
+SCRIPT="$(cd "$(dirname "$0")" && pwd)/gc-session-docker-headless"
+SESSION="gc-headless-test"
+TEST_IMAGE="gc-test-headless"
+
+pass=0
+fail=0
+
+check() {
+    local desc="$1" expected="$2" got="$3"
+    if [ "$got" = "$expected" ]; then
+        echo "  PASS: $desc"
+        ((pass++)) || true
+    else
+        echo "  FAIL: $desc (expected '$expected', got '$got')"
+        ((fail++)) || true
+    fi
+}
+
+check_contains() {
+    local desc="$1" needle="$2" haystack="$3"
+    if echo "$haystack" | grep -qF -- "$needle"; then
+        echo "  PASS: $desc"
+        ((pass++)) || true
+    else
+        echo "  FAIL: $desc (expected to contain '$needle', got '$haystack')"
+        ((fail++)) || true
+    fi
+}
+
+check_not_empty() {
+    local desc="$1" got="$2"
+    if [ -n "$got" ]; then
+        echo "  PASS: $desc (got '$got')"
+        ((pass++)) || true
+    else
+        echo "  FAIL: $desc (expected non-empty, got empty)"
+        ((fail++)) || true
+    fi
+}
+
+BUILD_CTX=""
+
+cleanup() {
+    echo ""
+    echo "--- Cleanup ---"
+    "$SCRIPT" stop "$SESSION" 2>/dev/null || true
+    "$SCRIPT" stop "${SESSION}-idem" 2>/dev/null || true
+    "$SCRIPT" stop "${SESSION}-nudge" 2>/dev/null || true
+    "$SCRIPT" stop "${SESSION}-resume" 2>/dev/null || true
+    "$SCRIPT" stop "${SESSION}-meta" 2>/dev/null || true
+    "$SCRIPT" stop "${SESSION}-delay" 2>/dev/null || true
+    "$SCRIPT" stop "${SESSION}-prepull" 2>/dev/null || true
+    "$SCRIPT" stop "${SESSION}-activity" 2>/dev/null || true
+    "$SCRIPT" stop "${SESSION}-clear" 2>/dev/null || true
+    "$SCRIPT" stop "${SESSION}-interrupt" 2>/dev/null || true
+    "$SCRIPT" stop "${SESSION}-setup" 2>/dev/null || true
+    "$SCRIPT" stop "${SESSION}-list" 2>/dev/null || true
+    [ -n "$BUILD_CTX" ] && rm -rf "$BUILD_CTX"
+}
+trap cleanup EXIT
+
+echo "=== gc-session-docker-headless integration tests ==="
+echo "Script: $SCRIPT"
+echo ""
+
+# --- Build test image ---
+# The test image contains a mock `claude` CLI that returns JSON output
+# matching the real claude -p --output-format json schema. This lets us
+# test the full exec protocol without real API credentials.
+echo "--- Building test image ---"
+BUILD_CTX=$(mktemp -d)
+
+# Mock claude CLI: echoes a JSON result with the prompt embedded.
+# Supports --resume by reading session ID from args.
+# Supports --output-format json (ignored, always outputs JSON).
+cat > "$BUILD_CTX/claude" <<'MOCK'
+#!/bin/sh
+# Mock claude CLI for testing gc-session-docker-headless.
+# Parses -p <prompt> and --resume <id> from args.
+
+prompt=""
+session_id="mock-session-$(date +%s)-$$"
+resume_id=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -p) prompt="$2"; shift 2 ;;
+        --resume) resume_id="$2"; session_id="$2"; shift 2 ;;
+        --output-format) shift 2 ;;  # ignore, always JSON
+        *) shift ;;
+    esac
+done
+
+# Simulate processing time.
+sleep 0.5
+
+cat <<EOF
+{"type":"result","subtype":"success","is_error":false,"result":"Mock response to: ${prompt}","session_id":"${session_id}","total_cost_usd":0.001,"duration_ms":500,"num_turns":1,"stop_reason":"end_turn"}
+EOF
+MOCK
+chmod +x "$BUILD_CTX/claude"
+
+# Mock claude that sleeps forever (for interrupt testing).
+cat > "$BUILD_CTX/claude-slow" <<'MOCK'
+#!/bin/sh
+sleep 300
+MOCK
+chmod +x "$BUILD_CTX/claude-slow"
+
+cat > "$BUILD_CTX/Dockerfile" <<'DOCKERFILE'
+FROM alpine:latest
+RUN apk add --no-cache procps bash coreutils
+COPY claude /usr/local/bin/claude
+COPY claude-slow /usr/local/bin/claude-slow
+CMD ["sleep", "300"]
+DOCKERFILE
+
+docker build -t "$TEST_IMAGE" "$BUILD_CTX"
+echo "  OK: built $TEST_IMAGE (headless, no tmux)"
+echo ""
+
+# =====================================================================
+# Test: pre-pull check (missing image)
+# =====================================================================
+echo "--- pre-pull check (missing image) ---"
+config=$(cat <<EOF
+{
+    "command": "echo hi",
+    "work_dir": "/tmp",
+    "env": { "GC_DOCKER_IMAGE": "gc-nonexistent-image-42:latest" }
+}
+EOF
+)
+rc=0
+echo "$config" | "$SCRIPT" start "${SESSION}-prepull" 2>/dev/null || rc=$?
+check "pre-pull fails on missing image" "1" "$rc"
+"$SCRIPT" stop "${SESSION}-prepull" 2>/dev/null || true
+
+# =====================================================================
+# Test: start (no tmux required)
+# =====================================================================
+echo "--- start (headless, no tmux) ---"
+config=$(cat <<EOF
+{
+    "command": "sleep 300",
+    "work_dir": "/tmp",
+    "env": {
+        "GC_DOCKER_IMAGE": "$TEST_IMAGE",
+        "GC_DOCKER_HOME_MOUNT": "false"
+    }
+}
+EOF
+)
+echo "$config" | "$SCRIPT" start "$SESSION"
+echo "  PASS: start (no error, no tmux)"
+((pass++)) || true
+
+running=$("$SCRIPT" is-running "$SESSION")
+check "container is running" "true" "$running"
+
+# Verify no tmux inside the container.
+rc=0
+docker exec "$SESSION" which tmux 2>/dev/null || rc=$?
+check "no tmux in container" "1" "$rc"
+
+# =====================================================================
+# Test: container labels
+# =====================================================================
+echo "--- container labels ---"
+label_managed=$(docker inspect -f '{{index .Config.Labels "gc.managed"}}' "$SESSION" 2>/dev/null || echo "MISSING")
+label_agent=$(docker inspect -f '{{index .Config.Labels "gc.agent"}}' "$SESSION" 2>/dev/null || echo "MISSING")
+label_headless=$(docker inspect -f '{{index .Config.Labels "gc.headless"}}' "$SESSION" 2>/dev/null || echo "MISSING")
+check "gc.managed label" "true" "$label_managed"
+check "gc.agent label" "$SESSION" "$label_agent"
+check "gc.headless label" "true" "$label_headless"
+
+# =====================================================================
+# Test: start idempotency
+# =====================================================================
+echo "--- start idempotency ---"
+config=$(cat <<EOF
+{
+    "command": "sleep 300",
+    "work_dir": "/tmp",
+    "env": {
+        "GC_DOCKER_IMAGE": "$TEST_IMAGE",
+        "GC_DOCKER_HOME_MOUNT": "false"
+    }
+}
+EOF
+)
+echo "$config" | "$SCRIPT" start "${SESSION}-idem"
+cid1=$(docker inspect -f '{{.Id}}' "${SESSION}-idem" 2>/dev/null || echo "")
+echo "$config" | "$SCRIPT" start "${SESSION}-idem"
+cid2=$(docker inspect -f '{{.Id}}' "${SESSION}-idem" 2>/dev/null || echo "")
+check "start idempotency (same container)" "$cid1" "$cid2"
+"$SCRIPT" stop "${SESSION}-idem" 2>/dev/null || true
+
+# =====================================================================
+# Test: process-alive (container-based, ignores process names)
+# =====================================================================
+echo "--- process-alive ---"
+# Headless process-alive checks container liveness, not specific processes.
+# Any process name input is consumed but ignored.
+alive=$(echo "sleep" | "$SCRIPT" process-alive "$SESSION")
+check "process-alive (running container)" "true" "$alive"
+
+alive=$(echo "nonexistent-xyz" | "$SCRIPT" process-alive "$SESSION")
+check "process-alive (ignores process names)" "true" "$alive"
+
+# Empty names → true (container is running).
+alive=$(echo "" | "$SCRIPT" process-alive "$SESSION")
+check "process-alive (empty → true)" "true" "$alive"
+
+# =====================================================================
+# Test: set-meta / get-meta
+# =====================================================================
+echo "--- set-meta / get-meta ---"
+config=$(cat <<EOF
+{
+    "command": "sleep 300",
+    "work_dir": "/tmp",
+    "env": {
+        "GC_DOCKER_IMAGE": "$TEST_IMAGE",
+        "GC_DOCKER_HOME_MOUNT": "false"
+    }
+}
+EOF
+)
+echo "$config" | "$SCRIPT" start "${SESSION}-meta"
+
+echo -n "test-value-42" | "$SCRIPT" set-meta "${SESSION}-meta" "my-key"
+got=$("$SCRIPT" get-meta "${SESSION}-meta" "my-key")
+check "meta round-trip" "test-value-42" "$got"
+
+# =====================================================================
+# Test: get-meta (missing key)
+# =====================================================================
+echo "--- get-meta (missing key) ---"
+got=$("$SCRIPT" get-meta "${SESSION}-meta" "no-such-key")
+check "missing meta is empty" "" "$got"
+
+# =====================================================================
+# Test: remove-meta
+# =====================================================================
+echo "--- remove-meta ---"
+"$SCRIPT" remove-meta "${SESSION}-meta" "my-key"
+got=$("$SCRIPT" get-meta "${SESSION}-meta" "my-key")
+check "removed meta is empty" "" "$got"
+"$SCRIPT" stop "${SESSION}-meta" 2>/dev/null || true
+
+# =====================================================================
+# Test: nudge + peek (core headless workflow)
+# =====================================================================
+echo "--- nudge + peek (headless invoke) ---"
+config=$(cat <<EOF
+{
+    "command": "sleep 300",
+    "work_dir": "/tmp",
+    "env": {
+        "GC_DOCKER_IMAGE": "$TEST_IMAGE",
+        "GC_DOCKER_HOME_MOUNT": "false"
+    }
+}
+EOF
+)
+echo "$config" | "$SCRIPT" start "${SESSION}-nudge"
+
+# Send a nudge and wait for the mock claude to complete.
+echo -n "Hello from test" | "$SCRIPT" nudge "${SESSION}-nudge"
+sleep 3  # mock claude takes 0.5s + overhead
+
+output=$("$SCRIPT" peek "${SESSION}-nudge" 20)
+check_contains "nudge output contains response" "Mock response to: Hello from test" "$output"
+check_contains "peek shows nudge separator" "--- nudge" "$output"
+
+# Verify session ID was persisted.
+sid=$(docker exec "${SESSION}-nudge" cat /run/gc-headless/session_id 2>/dev/null || echo "")
+check_not_empty "session ID persisted" "$sid"
+
+"$SCRIPT" stop "${SESSION}-nudge" 2>/dev/null || true
+
+# =====================================================================
+# Test: nudge with resume (multi-turn)
+# =====================================================================
+echo "--- nudge with resume (multi-turn) ---"
+config=$(cat <<EOF
+{
+    "command": "sleep 300",
+    "work_dir": "/tmp",
+    "env": {
+        "GC_DOCKER_IMAGE": "$TEST_IMAGE",
+        "GC_DOCKER_HOME_MOUNT": "false"
+    }
+}
+EOF
+)
+echo "$config" | "$SCRIPT" start "${SESSION}-resume"
+
+# First nudge — establishes session.
+echo -n "First message" | "$SCRIPT" nudge "${SESSION}-resume"
+sleep 3
+
+sid1=$(docker exec "${SESSION}-resume" cat /run/gc-headless/session_id 2>/dev/null || echo "")
+check_not_empty "first session ID" "$sid1"
+
+# Second nudge — should resume same session.
+echo -n "Second message" | "$SCRIPT" nudge "${SESSION}-resume"
+sleep 3
+
+output=$("$SCRIPT" peek "${SESSION}-resume" 30)
+check_contains "first response in log" "Mock response to: First message" "$output"
+check_contains "second response in log" "Mock response to: Second message" "$output"
+
+"$SCRIPT" stop "${SESSION}-resume" 2>/dev/null || true
+
+# =====================================================================
+# Test: peek with lines=0 (capture all)
+# =====================================================================
+echo "--- peek lines=0 ---"
+config=$(cat <<EOF
+{
+    "command": "sleep 300",
+    "work_dir": "/tmp",
+    "env": {
+        "GC_DOCKER_IMAGE": "$TEST_IMAGE",
+        "GC_DOCKER_HOME_MOUNT": "false"
+    }
+}
+EOF
+)
+echo "$config" | "$SCRIPT" start "${SESSION}-activity"
+echo -n "Peek test" | "$SCRIPT" nudge "${SESSION}-activity"
+sleep 3
+
+output=$("$SCRIPT" peek "${SESSION}-activity" 0)
+check_contains "peek lines=0 captures all" "Mock response to: Peek test" "$output"
+
+# =====================================================================
+# Test: get-last-activity
+# =====================================================================
+echo "--- get-last-activity ---"
+activity=$("$SCRIPT" get-last-activity "${SESSION}-activity")
+if echo "$activity" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'; then
+    echo "  PASS: get-last-activity returns RFC3339 ($activity)"
+    ((pass++)) || true
+else
+    echo "  FAIL: get-last-activity expected RFC3339, got '$activity'"
+    ((fail++)) || true
+fi
+"$SCRIPT" stop "${SESSION}-activity" 2>/dev/null || true
+
+# =====================================================================
+# Test: clear-scrollback
+# =====================================================================
+echo "--- clear-scrollback ---"
+config=$(cat <<EOF
+{
+    "command": "sleep 300",
+    "work_dir": "/tmp",
+    "env": {
+        "GC_DOCKER_IMAGE": "$TEST_IMAGE",
+        "GC_DOCKER_HOME_MOUNT": "false"
+    }
+}
+EOF
+)
+echo "$config" | "$SCRIPT" start "${SESSION}-clear"
+echo -n "Before clear" | "$SCRIPT" nudge "${SESSION}-clear"
+sleep 3
+
+before=$("$SCRIPT" peek "${SESSION}-clear" 0)
+check_contains "log has content before clear" "Before clear" "$before"
+
+"$SCRIPT" clear-scrollback "${SESSION}-clear"
+after=$("$SCRIPT" peek "${SESSION}-clear" 0)
+check "log empty after clear" "" "$after"
+"$SCRIPT" stop "${SESSION}-clear" 2>/dev/null || true
+
+# =====================================================================
+# Test: interrupt
+# =====================================================================
+echo "--- interrupt ---"
+config=$(cat <<EOF
+{
+    "command": "sleep 300",
+    "work_dir": "/tmp",
+    "env": {
+        "GC_DOCKER_IMAGE": "$TEST_IMAGE",
+        "GC_DOCKER_HOME_MOUNT": "false"
+    }
+}
+EOF
+)
+echo "$config" | "$SCRIPT" start "${SESSION}-interrupt"
+# Start a long-running claude process to interrupt.
+docker exec -d "${SESSION}-interrupt" claude-slow
+sleep 0.5
+"$SCRIPT" interrupt "${SESSION}-interrupt"
+sleep 0.5
+echo "  PASS: interrupt (no error)"
+((pass++)) || true
+"$SCRIPT" stop "${SESSION}-interrupt" 2>/dev/null || true
+
+# =====================================================================
+# Test: session_setup runs inside container
+# =====================================================================
+echo "--- session setup (inside container) ---"
+setup_marker="/tmp/gc-headless-setup-marker-$$"
+config=$(cat <<EOF
+{
+    "command": "sleep 300",
+    "work_dir": "/tmp",
+    "session_setup": ["touch $setup_marker"],
+    "env": {
+        "GC_DOCKER_IMAGE": "$TEST_IMAGE",
+        "GC_DOCKER_HOME_MOUNT": "false"
+    }
+}
+EOF
+)
+echo "$config" | "$SCRIPT" start "${SESSION}-setup"
+# Verify the marker file was created inside the container.
+if docker exec "${SESSION}-setup" test -f "$setup_marker" 2>/dev/null; then
+    echo "  PASS: session_setup marker exists in container"
+    ((pass++)) || true
+else
+    echo "  FAIL: session_setup marker not found in container"
+    ((fail++)) || true
+fi
+"$SCRIPT" stop "${SESSION}-setup" 2>/dev/null || true
+
+# =====================================================================
+# Test: list-running
+# =====================================================================
+echo "--- list-running ---"
+config=$(cat <<EOF
+{
+    "command": "sleep 300",
+    "work_dir": "/tmp",
+    "env": {
+        "GC_DOCKER_IMAGE": "$TEST_IMAGE",
+        "GC_DOCKER_HOME_MOUNT": "false"
+    }
+}
+EOF
+)
+echo "$config" | "$SCRIPT" start "${SESSION}-list"
+listed=$("$SCRIPT" list-running "gc-headless-test")
+check_contains "list-running finds session" "${SESSION}-list" "$listed"
+"$SCRIPT" stop "${SESSION}-list" 2>/dev/null || true
+
+# =====================================================================
+# Test: send-keys returns exit 2 (unsupported)
+# =====================================================================
+echo "--- send-keys (unsupported) ---"
+rc=0
+"$SCRIPT" send-keys "$SESSION" "Enter" 2>/dev/null || rc=$?
+check "send-keys exits 2 (unsupported)" "2" "$rc"
+
+# =====================================================================
+# Test: unknown operation
+# =====================================================================
+echo "--- unknown operation ---"
+rc=0
+"$SCRIPT" future-op "$SESSION" 2>/dev/null || rc=$?
+check "unknown op exits 2" "2" "$rc"
+
+# =====================================================================
+# Test: ready_delay_ms
+# =====================================================================
+echo "--- ready_delay_ms ---"
+config=$(cat <<EOF
+{
+    "command": "sleep 300",
+    "work_dir": "/tmp",
+    "ready_delay_ms": 1000,
+    "env": {
+        "GC_DOCKER_IMAGE": "$TEST_IMAGE",
+        "GC_DOCKER_HOME_MOUNT": "false"
+    }
+}
+EOF
+)
+start_time=$SECONDS
+echo "$config" | "$SCRIPT" start "${SESSION}-delay"
+elapsed=$((SECONDS - start_time))
+if [ "$elapsed" -ge 1 ]; then
+    echo "  PASS: ready_delay_ms waited ~${elapsed}s"
+    ((pass++)) || true
+else
+    echo "  FAIL: ready_delay_ms waited only ${elapsed}s (expected >= 1)"
+    ((fail++)) || true
+fi
+"$SCRIPT" stop "${SESSION}-delay" 2>/dev/null || true
+
+# =====================================================================
+# Test: stop
+# =====================================================================
+echo "--- stop ---"
+"$SCRIPT" stop "$SESSION"
+sleep 0.5
+running=$("$SCRIPT" is-running "$SESSION")
+check "stopped container is not running" "false" "$running"
+
+# =====================================================================
+# Test: stop idempotent
+# =====================================================================
+echo "--- stop (idempotent) ---"
+"$SCRIPT" stop "$SESSION"
+echo "  PASS: double stop (no error)"
+((pass++)) || true
+
+echo ""
+echo "=== Results: $pass passed, $fail failed ==="
+[ "$fail" -eq 0 ]

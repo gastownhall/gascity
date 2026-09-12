@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+# test-docker-session-headless-multi — multi-agent tests for gc-session-docker-headless
+#
+# Usage: ./scripts/test-docker-session-headless-multi
+#
+# Verifies that multiple headless containers run independently:
+# isolated output, independent sessions, independent metadata,
+# and that stopping one doesn't affect others.
+#
+# Requires: docker, jq
+# Prerequisite: run test-docker-session-headless first (builds test image).
+
+set -euo pipefail
+
+SCRIPT="$(cd "$(dirname "$0")" && pwd)/gc-session-docker-headless"
+WORKER1="gc-multi-worker1"
+WORKER2="gc-multi-worker2"
+TEST_IMAGE="gc-test-headless"
+
+pass=0
+fail=0
+
+check() {
+    local desc="$1" expected="$2" got="$3"
+    if [ "$got" = "$expected" ]; then
+        echo "  PASS: $desc"
+        ((pass++)) || true
+    else
+        echo "  FAIL: $desc (expected '$expected', got '$got')"
+        ((fail++)) || true
+    fi
+}
+
+check_contains() {
+    local desc="$1" needle="$2" haystack="$3"
+    if echo "$haystack" | grep -qF -- "$needle"; then
+        echo "  PASS: $desc"
+        ((pass++)) || true
+    else
+        echo "  FAIL: $desc (expected to contain '$needle')"
+        ((fail++)) || true
+    fi
+}
+
+cleanup() {
+    echo ""
+    echo "--- Cleanup ---"
+    "$SCRIPT" stop "$WORKER1" 2>/dev/null || true
+    "$SCRIPT" stop "$WORKER2" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+echo "=== gc-session-docker-headless multi-agent tests ==="
+echo "Script: $SCRIPT"
+echo ""
+
+# Verify test image exists (built by test-docker-session-headless).
+docker image inspect "$TEST_IMAGE" >/dev/null 2>&1 ||
+    { echo "ERROR: $TEST_IMAGE not found. Run test-docker-session-headless first."; exit 1; }
+
+config=$(cat <<EOF
+{
+    "command": "sleep 300",
+    "work_dir": "/tmp",
+    "env": {
+        "GC_DOCKER_IMAGE": "$TEST_IMAGE",
+        "GC_DOCKER_HOME_MOUNT": "false"
+    }
+}
+EOF
+)
+
+# =====================================================================
+# Test: start both workers
+# =====================================================================
+echo "--- Starting two headless workers ---"
+echo "$config" | "$SCRIPT" start "$WORKER1"
+echo "$config" | "$SCRIPT" start "$WORKER2"
+
+r1=$("$SCRIPT" is-running "$WORKER1")
+r2=$("$SCRIPT" is-running "$WORKER2")
+check "worker1 running" "true" "$r1"
+check "worker2 running" "true" "$r2"
+
+# =====================================================================
+# Test: nudge both with different prompts
+# =====================================================================
+echo "--- Nudging both workers ---"
+echo -n "Task for worker ONE" | "$SCRIPT" nudge "$WORKER1"
+echo -n "Task for worker TWO" | "$SCRIPT" nudge "$WORKER2"
+sleep 4  # mock claude takes 0.5s each + overhead
+
+# =====================================================================
+# Test: output isolation
+# =====================================================================
+echo "--- Verifying output isolation ---"
+out1=$("$SCRIPT" peek "$WORKER1" 20)
+out2=$("$SCRIPT" peek "$WORKER2" 20)
+check_contains "worker1 got its prompt" "Mock response to: Task for worker ONE" "$out1"
+check_contains "worker2 got its prompt" "Mock response to: Task for worker TWO" "$out2"
+
+# Verify NO cross-contamination.
+if echo "$out1" | grep -qF "worker TWO"; then
+    echo "  FAIL: worker1 contains worker2 output (cross-contamination)"
+    ((fail++)) || true
+else
+    echo "  PASS: worker1 output is isolated"
+    ((pass++)) || true
+fi
+
+if echo "$out2" | grep -qF "worker ONE"; then
+    echo "  FAIL: worker2 contains worker1 output (cross-contamination)"
+    ((fail++)) || true
+else
+    echo "  PASS: worker2 output is isolated"
+    ((pass++)) || true
+fi
+
+# =====================================================================
+# Test: independent session IDs
+# =====================================================================
+echo "--- Verifying independent sessions ---"
+sid1=$(docker exec "$WORKER1" cat /run/gc-headless/session_id 2>/dev/null || echo "")
+sid2=$(docker exec "$WORKER2" cat /run/gc-headless/session_id 2>/dev/null || echo "")
+
+if [ -n "$sid1" ] && [ -n "$sid2" ] && [ "$sid1" != "$sid2" ]; then
+    echo "  PASS: session IDs are independent ($sid1 vs $sid2)"
+    ((pass++)) || true
+else
+    echo "  FAIL: session IDs not independent (sid1=$sid1, sid2=$sid2)"
+    ((fail++)) || true
+fi
+
+# =====================================================================
+# Test: independent metadata
+# =====================================================================
+echo "--- Verifying independent metadata ---"
+echo -n "drain-requested" | "$SCRIPT" set-meta "$WORKER1" "gc-drain"
+echo -n "active" | "$SCRIPT" set-meta "$WORKER2" "gc-drain"
+
+m1=$("$SCRIPT" get-meta "$WORKER1" "gc-drain")
+m2=$("$SCRIPT" get-meta "$WORKER2" "gc-drain")
+check "worker1 drain meta" "drain-requested" "$m1"
+check "worker2 drain meta" "active" "$m2"
+
+# =====================================================================
+# Test: list-running shows both
+# =====================================================================
+echo "--- list-running ---"
+listed=$("$SCRIPT" list-running "gc-multi-")
+check_contains "list-running shows worker1" "$WORKER1" "$listed"
+check_contains "list-running shows worker2" "$WORKER2" "$listed"
+
+# =====================================================================
+# Test: multi-turn on worker1
+# =====================================================================
+echo "--- Multi-turn on worker1 ---"
+echo -n "Follow-up for worker ONE" | "$SCRIPT" nudge "$WORKER1"
+sleep 4
+
+out1=$("$SCRIPT" peek "$WORKER1" 30)
+check_contains "worker1 has follow-up" "Mock response to: Follow-up for worker ONE" "$out1"
+
+# =====================================================================
+# Test: stop worker1, verify worker2 unaffected
+# =====================================================================
+echo "--- Stop worker1, verify worker2 survives ---"
+"$SCRIPT" stop "$WORKER1"
+sleep 0.5
+
+r1=$("$SCRIPT" is-running "$WORKER1")
+r2=$("$SCRIPT" is-running "$WORKER2")
+check "worker1 stopped" "false" "$r1"
+check "worker2 still running" "true" "$r2"
+
+# Worker2 can still be nudged after worker1 is stopped.
+echo -n "Worker2 still alive" | "$SCRIPT" nudge "$WORKER2"
+sleep 4
+out2=$("$SCRIPT" peek "$WORKER2" 30)
+check_contains "worker2 responds after worker1 stopped" "Mock response to: Worker2 still alive" "$out2"
+
+echo ""
+echo "=== Results: $pass passed, $fail failed ==="
+[ "$fail" -eq 0 ]

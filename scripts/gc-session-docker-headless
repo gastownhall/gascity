@@ -1,0 +1,646 @@
+#!/usr/bin/env bash
+# gc-session-docker-headless — Docker session provider for headless agents
+#
+# Usage:
+#   GC_SESSION=exec:scripts/gc-session-docker-headless gc start
+#
+# Implements the Gas City exec session provider protocol (see
+# internal/runtime/exec/exec.go). Each agent runs in its own Docker
+# container WITHOUT tmux. Nudge triggers `claude -p ... --output-format
+# json --resume <id>` inside the container; peek reads the output log.
+#
+# Architecture:
+#   docker run -d --init $image sleep infinity     # container stays alive
+#   docker exec claude -p "..." --output-format json --resume <id>
+#
+# Process tree: tini → sleep infinity (PID 1) + claude (per nudge)
+# No tmux, no TUI, no ncurses. Suitable for worker agents that receive
+# prompts and produce structured output.
+#
+# Why: Claude Code's TUI hangs in Docker containers (Docker's PTY
+# multiplexing bridge deadlocks Ink's React renderer). Headless mode
+# via `claude -p` bypasses this entirely. Workers don't need interactive
+# sessions — they receive a prompt, produce output, and wait for the
+# next nudge. Eliminating tmux reduces container image size (~15MB)
+# and attack surface.
+#
+# Requirements: docker, jq
+# Container requirement: claude CLI on PATH (no tmux needed)
+#
+# Configuration via agent env vars (set in city.toml [[agent]] env):
+#   GC_DOCKER_IMAGE      — container image (default: gc-agent:latest)
+#   GC_DOCKER_NETWORK    — Docker network name (optional)
+#   GC_DOCKER_EXTRA      — extra docker-run flags (optional, space-separated)
+#   GC_DOCKER_HOME_MOUNT — mount $HOME read-only (default: true)
+#   GC_DOCKER_USER       — container user (e.g. "1000:1000") (optional)
+
+set -euo pipefail
+
+# Default image if not specified in agent env.
+DEFAULT_IMAGE="gc-agent:latest"
+
+# Directory inside the container for output logs and metadata.
+# Using /run ensures container-local tmpfs, isolated from host mounts.
+GC_HEADLESS_DIR="/run/gc-headless"
+
+# Controller-only env vars stripped from containers. These reference
+# controller-side resources (Unix sockets, localhost ports) that aren't
+# reachable from inside a container. Matches the K8s provider's skip list
+# in internal/session/k8s/pod.go buildPodEnv().
+ENV_JQ='.env // {} | del(.GC_BEADS, .GC_SESSION, .GC_EVENTS, .GC_DOLT_HOST, .GC_DOLT_PORT, .BEADS_DOLT_SERVER_HOST, .BEADS_DOLT_SERVER_PORT)'
+
+# --- Helpers ---
+
+die() { echo "$*" >&2; exit 1; }
+
+# Parse a JSON field from config.
+# Usage: field <json> <path> [default]
+field() {
+    local val
+    val=$(echo "$1" | jq -r "$2 // empty" 2>/dev/null) || true
+    if [ -z "$val" ]; then
+        echo "${3:-}"
+    else
+        echo "$val"
+    fi
+}
+
+# Parse a JSON array field as newline-separated values.
+# Usage: field_array <json> <path>
+field_array() {
+    echo "$1" | jq -r "$2 // [] | .[]" 2>/dev/null || true
+}
+
+# Sanitize container name: Docker allows [a-zA-Z0-9][a-zA-Z0-9_.-] only.
+sanitize_name() {
+    local name
+    name=$(echo "$1" | tr -c 'a-zA-Z0-9_.-' '-')
+    # Strip leading non-alphanumeric chars (Docker requirement).
+    name="${name#"${name%%[a-zA-Z0-9]*}"}"
+    # Strip trailing dashes for cleanliness.
+    name="${name%"${name##*[a-zA-Z0-9_.]}"}"
+    echo "${name:-gc-unnamed}"
+}
+
+# Check if path A is the same as or under path B.
+# Usage: is_under <path> <parent>
+is_under() {
+    case "$1" in
+        "$2"|"$2/"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# --- Operations ---
+
+do_start() {
+    local name="$1"
+    local config
+    config=$(cat)
+
+    local cname
+    cname=$(sanitize_name "$name")
+
+    # Parse config fields from JSON on stdin.
+    local command work_dir image network extra home_mount
+    command=$(field "$config" '.command' 'claude')
+    work_dir=$(field "$config" '.work_dir' '/workspace')
+    image=$(field "$config" '.env.GC_DOCKER_IMAGE' "$DEFAULT_IMAGE")
+    network=$(field "$config" '.env.GC_DOCKER_NETWORK' '')
+    extra=$(field "$config" '.env.GC_DOCKER_EXTRA' '')
+    home_mount=$(field "$config" '.env.GC_DOCKER_HOME_MOUNT' 'true')
+    docker_user=$(field "$config" '.env.GC_DOCKER_USER' '')
+
+    # Parse readiness hints.
+    local ready_delay_ms
+    ready_delay_ms=$(field "$config" '.ready_delay_ms' '0')
+
+    # Pre-pull check: fail fast if image not local.
+    docker image inspect "$image" >/dev/null 2>&1 ||
+        die "image '$image' not found locally. Run: docker pull $image"
+
+    # --- Start idempotency ---
+    # If container is already running, leave it alone.
+    if docker inspect -f '{{.State.Running}}' "$cname" 2>/dev/null | grep -q true; then
+        return 0  # healthy — idempotent no-op
+    fi
+
+    # Remove stale container.
+    docker rm -f "$cname" >/dev/null 2>&1 || true
+
+    # --- Null-delimited env parsing (handles values with newlines) ---
+    local env_args=()
+    while IFS= read -r -d '' entry; do
+        [ -n "$entry" ] && env_args+=(-e "$entry")
+    done < <(echo "$config" | jq -j "$ENV_JQ | to_entries[] | \"\\(.key)=\\(.value)\\u0000\"")
+
+    # Build volume mounts — same host path inside the container.
+    local vol_args=()
+    if [ -n "$work_dir" ] && [ -d "$work_dir" ]; then
+        vol_args+=(-v "$work_dir:$work_dir")
+    fi
+
+    local city_path
+    city_path=$(field "$config" '.env.GC_CITY' '')
+    if [ -n "$city_path" ] && [ -d "$city_path" ]; then
+        if ! is_under "$city_path" "$work_dir"; then
+            vol_args+=(-v "$city_path:$city_path")
+        fi
+    fi
+
+    # Mount $HOME read-only for API keys, git config, SSH keys.
+    if [ "$home_mount" = "true" ] && [ -n "${HOME:-}" ] && [ -d "$HOME" ]; then
+        local skip_home=false
+        if [ "$HOME" = "$work_dir" ]; then
+            skip_home=true
+        elif [ -n "$city_path" ] && [ "$HOME" = "$city_path" ]; then
+            skip_home=true
+        fi
+        if [ "$skip_home" = "false" ]; then
+            vol_args+=(-v "$HOME:$HOME:ro")
+            # Overlay $HOME/.claude as writable so Claude can persist
+            # session data across invocations within the container.
+            if [ -d "$HOME/.claude" ]; then
+                vol_args+=(-v "$HOME/.claude:$HOME/.claude")
+            fi
+        fi
+    fi
+
+    # Network flag.
+    local net_args=()
+    if [ -n "$network" ]; then
+        net_args+=(--network "$network")
+    fi
+
+    # Extra flags (space-separated, unquoted expansion is intentional).
+    local extra_args=()
+    if [ -n "$extra" ]; then
+        # shellcheck disable=SC2206
+        extra_args=($extra)
+    fi
+
+    # Start container with sleep infinity (PID 1 keepalive).
+    # HOME must be set explicitly: Docker defaults HOME=/ for numeric
+    # --user UIDs, which breaks credential discovery for Claude and git.
+    # When home_mount=true, use the controller's HOME (it's bind-mounted).
+    # When false, fall back to /root (the path doesn't exist in-container).
+    local container_home="/root"
+    if [ "$home_mount" = "true" ] && [ -n "${HOME:-}" ]; then
+        container_home="$HOME"
+    fi
+
+    docker run -d \
+        --name "$cname" \
+        --init \
+        ${docker_user:+--user "$docker_user"} \
+        --label gc.managed=true \
+        --label "gc.agent=$name" \
+        --label gc.headless=true \
+        -e "HOME=$container_home" \
+        -e "TERM=${TERM:-xterm-256color}" \
+        "${vol_args[@]+"${vol_args[@]}"}" \
+        "${env_args[@]+"${env_args[@]}"}" \
+        "${net_args[@]+"${net_args[@]}"}" \
+        "${extra_args[@]+"${extra_args[@]}"}" \
+        -w "$work_dir" \
+        "$image" \
+        sleep infinity \
+        >/dev/null
+
+    # Create headless runtime directory inside the container.
+    docker exec --user 0 "$cname" sh -c \
+        "mkdir -p '$GC_HEADLESS_DIR/meta' '$GC_HEADLESS_DIR/log' && chmod -R 1777 '$GC_HEADLESS_DIR'"
+
+    # Persist the resolved command so nudge can use it (carries provider
+    # flags like permission mode, model, effort, etc.).
+    printf '%s' "$command" | docker exec -i "$cname" sh -c "cat > '$GC_HEADLESS_DIR/command'"
+
+    # --- File staging (overlay + copy_files) ---
+    # When work_dir is bind-mounted (exists on host), host-side cp works.
+    # When it's container-only, use docker cp to reach the container filesystem.
+    local work_dir_mounted=false
+    if [ -n "$work_dir" ] && [ -d "$work_dir" ]; then
+        work_dir_mounted=true
+    fi
+
+    overlay_dir=$(field "$config" '.overlay_dir' '')
+    if [ -n "$overlay_dir" ] && [ -d "$overlay_dir" ]; then
+        if [ "$work_dir_mounted" = "true" ]; then
+            if ! cp -r "$overlay_dir/." "$work_dir/"; then
+                echo "gc: warning: overlay staging failed: $overlay_dir → $work_dir" >&2
+            fi
+        else
+            docker exec "$cname" mkdir -p "$work_dir" 2>/dev/null || true
+            if ! docker cp "$overlay_dir/." "$cname:$work_dir/"; then
+                echo "gc: warning: overlay staging failed: $overlay_dir → $cname:$work_dir" >&2
+            fi
+        fi
+    fi
+
+    echo "$config" | jq -c '.copy_files // [] | .[]' 2>/dev/null | while IFS= read -r entry; do
+        [ -z "$entry" ] && continue
+        src=$(echo "$entry" | jq -r '.src')
+        rel_dst=$(echo "$entry" | jq -r '.rel_dst // ""')
+        dst="$work_dir"
+        [ -n "$rel_dst" ] && dst="$work_dir/$rel_dst"
+        if [ "$work_dir_mounted" = "true" ]; then
+            if [ -d "$src" ]; then
+                mkdir -p "$dst"
+                if ! cp -r "$src/." "$dst/"; then
+                    echo "gc: warning: copy_files staging failed: $src → $dst" >&2
+                fi
+            elif [ -f "$src" ]; then
+                mkdir -p "$(dirname "$dst")"
+                if ! cp "$src" "$dst"; then
+                    echo "gc: warning: copy_files staging failed: $src → $dst" >&2
+                fi
+            fi
+        else
+            if [ -d "$src" ]; then
+                docker exec "$cname" mkdir -p "$dst" 2>/dev/null || true
+                if ! docker cp "$src/." "$cname:$dst/"; then
+                    echo "gc: warning: copy_files staging failed: $src → $cname:$dst" >&2
+                fi
+            elif [ -f "$src" ]; then
+                docker exec "$cname" mkdir -p "$(dirname "$dst")" 2>/dev/null || true
+                if ! docker cp "$src" "$cname:$dst"; then
+                    echo "gc: warning: copy_files staging failed: $src → $cname:$dst" >&2
+                fi
+            fi
+        fi
+    done
+
+    # --- Pre-start commands ---
+    local pre_start_cmds
+    pre_start_cmds=$(field_array "$config" '.pre_start')
+    if [ -n "$pre_start_cmds" ]; then
+        local pre_exec_env=(-w "$work_dir")
+        while IFS= read -r -d '' entry; do
+            [ -n "$entry" ] && pre_exec_env+=(-e "$entry")
+        done < <(echo "$config" | jq -j "$ENV_JQ | to_entries[] | \"\\(.key)=\\(.value)\\u0000\"")
+        while IFS= read -r cmd; do
+            [ -n "$cmd" ] || continue
+            docker exec "${pre_exec_env[@]}" "$cname" \
+                timeout 10 sh -c "$cmd" 2>/dev/null || true
+        done <<< "$pre_start_cmds"
+    fi
+
+    # --- Readiness ---
+    if [ "$ready_delay_ms" -gt 0 ] 2>/dev/null; then
+        local delay_sec
+        delay_sec=$(awk "BEGIN {printf \"%.3f\", $ready_delay_ms / 1000}")
+        sleep "$delay_sec"
+    fi
+
+    # Verify container survived startup.
+    local running
+    running=$(docker inspect -f '{{.State.Running}}' "$cname" 2>/dev/null) || running="false"
+    if [ "$running" != "true" ]; then
+        local logs
+        logs=$(docker logs --tail 5 "$cname" 2>&1 || true)
+        die "container '$cname' died during startup. Logs: $logs"
+    fi
+
+    # --- Session setup ---
+    # Run session_setup commands inside the container via docker exec,
+    # matching the tmux provider's behavior (gc-session-docker).
+    local setup_cmds
+    setup_cmds=$(field_array "$config" '.session_setup')
+    if [ -n "$setup_cmds" ]; then
+        local setup_exec_env=(-w "$work_dir")
+        while IFS= read -r -d '' entry; do
+            [ -n "$entry" ] && setup_exec_env+=(-e "$entry")
+        done < <(echo "$config" | jq -j "$ENV_JQ | to_entries[] | \"\\(.key)=\\(.value)\\u0000\"")
+        while IFS= read -r cmd; do
+            [ -n "$cmd" ] || continue
+            docker exec "${setup_exec_env[@]}" "$cname" \
+                timeout 10 sh -c "$cmd" 2>/dev/null || true
+        done <<< "$setup_cmds"
+    fi
+
+    # Run session_setup_script: a host-side file piped into the container.
+    local setup_script
+    setup_script=$(field "$config" '.session_setup_script' '')
+    if [ -n "$setup_script" ]; then
+        if [ -f "$setup_script" ]; then
+            local setup_exec_env=(-i -w "$work_dir")
+            while IFS= read -r -d '' entry; do
+                [ -n "$entry" ] && setup_exec_env+=(-e "$entry")
+            done < <(echo "$config" | jq -j "$ENV_JQ | to_entries[] | \"\\(.key)=\\(.value)\\u0000\"")
+            docker exec "${setup_exec_env[@]}" "$cname" \
+                timeout 10 sh < "$setup_script" 2>/dev/null || true
+        else
+            echo "gc: session_setup_script warning: $setup_script not found on controller" >&2
+        fi
+    fi
+
+    # --- Initial nudge ---
+    # If a nudge message was provided in the start config, fire it
+    # asynchronously as the first prompt to the agent.
+    local nudge
+    nudge=$(field "$config" '.nudge' '')
+    if [ -n "$nudge" ]; then
+        _do_headless_invoke "$cname" "$nudge" &
+    fi
+}
+
+do_stop() {
+    local cname
+    cname=$(sanitize_name "$1")
+
+    # Graceful stop (SIGTERM → 10s grace → SIGKILL) then remove.
+    docker stop -t 10 "$cname" >/dev/null 2>&1 || true
+    docker rm -f "$cname" >/dev/null 2>&1 || true
+}
+
+do_interrupt() {
+    local cname
+    cname=$(sanitize_name "$1")
+
+    # Send SIGINT to any running claude process inside the container.
+    docker exec "$cname" pkill -INT -x claude 2>/dev/null || true
+    docker exec "$cname" pkill -INT -x node 2>/dev/null || true
+}
+
+do_is_running() {
+    local cname
+    cname=$(sanitize_name "$1")
+
+    local running
+    running=$(docker inspect -f '{{.State.Running}}' "$cname" 2>/dev/null) || running="false"
+    printf '%s' "$running" | tr -d '[:space:]'
+}
+
+do_process_alive() {
+    local cname
+    cname=$(sanitize_name "$1")
+
+    # Consume process names from stdin to preserve the command protocol, but
+    # for headless containers liveness is defined by the container itself.
+    # The steady-state process is PID 1 (typically `sleep infinity`), while
+    # claude/node only run briefly during nudges, so pgrep-based checks would
+    # incorrectly report healthy sessions as dead.
+    cat >/dev/null || true
+
+    if [ "$(do_is_running "$1")" = "true" ]; then
+        echo "true"
+    else
+        echo "false"
+    fi
+}
+
+# _do_headless_invoke runs the configured command inside the container and
+# logs output. Called asynchronously by nudge. Manages session ID persistence.
+#
+# The session ID is stored in $GC_HEADLESS_DIR/session_id so that
+# subsequent nudges resume the same conversation. Output (JSON) is
+# appended to the log file for peek to read.
+#
+# The entire sequence (read sid → run command → append log → update sid)
+# runs in a single docker exec under flock to prevent concurrent nudges
+# from interleaving or corrupting session state.
+_do_headless_invoke() {
+    local cname="$1" message="$2"
+
+    local workdir
+    workdir="$(docker inspect -f '{{.Config.WorkingDir}}' "$cname")"
+
+    # Run the full nudge sequence inside a single docker exec so that
+    # all state reads/writes happen atomically within one critical section.
+    docker exec -i -w "$workdir" "$cname" sh -s -- \
+        "$GC_HEADLESS_DIR/session_id" \
+        "$GC_HEADLESS_DIR/log/output.log" \
+        "$GC_HEADLESS_DIR/lock" \
+        "$message" \
+        "$GC_HEADLESS_DIR/command" \
+        <<'NUDGE_EOF'
+sid_file="$1"
+log_file="$2"
+lock_file="$3"
+message="$4"
+cmd_file="$5"
+
+run_nudge() {
+    local resume_id="" result="" new_sid="" text_result=""
+
+    # Read the persisted command (set during start from config .command).
+    local cmd="claude"
+    if [ -f "$cmd_file" ]; then
+        cmd=$(cat "$cmd_file" 2>/dev/null) || cmd="claude"
+    fi
+
+    if [ -f "$sid_file" ]; then
+        resume_id=$(cat "$sid_file" 2>/dev/null) || resume_id=""
+    fi
+
+    echo "--- nudge $(date -u +%Y-%m-%dT%H:%M:%SZ) ---" >> "$log_file"
+
+    if [ -n "$resume_id" ]; then
+        result=$($cmd -p "$message" --output-format json --resume "$resume_id" 2>/dev/null) || result=""
+    else
+        result=$($cmd -p "$message" --output-format json 2>/dev/null) || result=""
+    fi
+
+    if [ -n "$result" ]; then
+        printf '%s\n' "$result" >> "$log_file"
+
+        new_sid=$(printf '%s' "$result" | jq -r '.session_id // empty' 2>/dev/null) || new_sid=""
+        if [ -n "$new_sid" ]; then
+            printf '%s' "$new_sid" > "$sid_file"
+        fi
+
+        text_result=$(printf '%s' "$result" | jq -r '.result // empty' 2>/dev/null) || text_result=""
+        if [ -n "$text_result" ]; then
+            printf '%s\n' "$text_result" >> "$log_file"
+        fi
+    else
+        echo 'ERROR: claude invocation failed' >> "$log_file"
+    fi
+}
+
+if command -v flock >/dev/null 2>&1; then
+    exec 9>>"$lock_file"
+    flock 9
+    run_nudge
+else
+    run_nudge
+fi
+NUDGE_EOF
+}
+
+do_nudge() {
+    local cname
+    cname=$(sanitize_name "$1")
+
+    local message
+    message=$(cat)
+
+    # Fire-and-forget: run the claude invocation in the background.
+    # The exec protocol expects nudge to return quickly.
+    _do_headless_invoke "$cname" "$message" &
+}
+
+do_peek() {
+    local cname lines
+    cname=$(sanitize_name "$1")
+    lines="${2:-50}"
+
+    local log_file="$GC_HEADLESS_DIR/log/output.log"
+
+    if [ "$lines" -le 0 ] 2>/dev/null; then
+        docker exec "$cname" cat "$log_file" 2>/dev/null || true
+    else
+        docker exec "$cname" tail -n "$lines" "$log_file" 2>/dev/null || true
+    fi
+}
+
+do_attach() {
+    local cname
+    cname=$(sanitize_name "$1")
+
+    # Headless agents don't have an interactive session to attach to.
+    # Provide a shell for debugging.
+    docker exec -it "$cname" bash 2>/dev/null ||
+        docker exec -it "$cname" sh
+}
+
+do_set_meta() {
+    local cname key value
+    cname=$(sanitize_name "$1")
+    key="$2"
+    value=$(cat)
+
+    # File-based metadata: one file per key in the meta directory.
+    # Sanitize key to prevent path traversal.
+    local safe_key
+    safe_key=$(echo "$key" | tr -c 'a-zA-Z0-9_.-' '_')
+    printf '%s' "$value" | docker exec -i "$cname" sh -c "cat > '$GC_HEADLESS_DIR/meta/$safe_key'" \
+        2>/dev/null || true
+}
+
+do_get_meta() {
+    local cname key
+    cname=$(sanitize_name "$1")
+    key="$2"
+
+    local safe_key
+    safe_key=$(echo "$key" | tr -c 'a-zA-Z0-9_.-' '_')
+    docker exec "$cname" cat "$GC_HEADLESS_DIR/meta/$safe_key" 2>/dev/null || true
+}
+
+do_remove_meta() {
+    local cname key
+    cname=$(sanitize_name "$1")
+    key="$2"
+
+    local safe_key
+    safe_key=$(echo "$key" | tr -c 'a-zA-Z0-9_.-' '_')
+    docker exec "$cname" rm -f "$GC_HEADLESS_DIR/meta/$safe_key" 2>/dev/null || true
+}
+
+do_list_running() {
+    local prefix="$1"
+
+    docker ps --filter "status=running" \
+              --filter "label=gc.managed=true" \
+              --filter "label=gc.headless=true" \
+              --format '{{.Names}}' 2>/dev/null \
+        | awk -v p="$prefix" 'index($0, p) == 1' \
+        | sort \
+        || true
+}
+
+do_get_last_activity() {
+    local cname
+    cname=$(sanitize_name "$1")
+
+    local log_file="$GC_HEADLESS_DIR/log/output.log"
+
+    # Get mtime of the output log as last activity indicator.
+    local epoch
+    epoch=$(docker exec "$cname" stat -c '%Y' "$log_file" 2>/dev/null) || epoch=""
+
+    # stat -c is GNU coreutils; try BusyBox format if it fails.
+    if [ -z "$epoch" ]; then
+        epoch=$(docker exec "$cname" stat -f '%m' "$log_file" 2>/dev/null) || epoch=""
+    fi
+
+    if [ -n "$epoch" ] && [ "$epoch" -gt 0 ] 2>/dev/null; then
+        # Convert epoch to RFC3339. Try GNU date first, then BSD/BusyBox.
+        docker exec "$cname" date -u -d "@$epoch" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null ||
+            docker exec "$cname" date -u -r "$epoch" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null ||
+            true
+    fi
+}
+
+do_clear_scrollback() {
+    local cname
+    cname=$(sanitize_name "$1")
+
+    local log_file="$GC_HEADLESS_DIR/log/output.log"
+    docker exec "$cname" sh -c "> '$log_file'" 2>/dev/null || true
+}
+
+# --- Dispatch ---
+
+op="${1:-}"
+shift || true
+
+case "$op" in
+    start)              do_start "$@" ;;
+    stop)               do_stop "$@" ;;
+    interrupt)          do_interrupt "$@" ;;
+    is-running)         do_is_running "$@" ;;
+    process-alive)      do_process_alive "$@" ;;
+    nudge)              do_nudge "$@" ;;
+    peek)               do_peek "$@" ;;
+    attach)             do_attach "$@" ;;
+    set-meta)           do_set_meta "$@" ;;
+    get-meta)           do_get_meta "$@" ;;
+    remove-meta)        do_remove_meta "$@" ;;
+    list-running)       do_list_running "$@" ;;
+    get-last-activity)  do_get_last_activity "$@" ;;
+    clear-scrollback)   do_clear_scrollback "$@" ;;
+    check-image)
+        image="${1:-$DEFAULT_IMAGE}"
+        docker image inspect "$image" >/dev/null 2>&1 ||
+            die "image '$image' not found locally. Run: docker pull $image"
+        ;;
+    copy-to)
+        cname=$(sanitize_name "$1")
+        src="$2"
+        rel_dst="${3:-}"
+        if [ -z "$src" ]; then exit 0; fi
+        work_dir=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$cname" 2>/dev/null \
+            | grep '^GC_DIR=' | head -1 | cut -d= -f2-)
+        if [ -n "$work_dir" ] && [ -d "$work_dir" ]; then
+            dst="$work_dir"
+            [ -n "$rel_dst" ] && dst="$work_dir/$rel_dst"
+            if [ -d "$src" ]; then
+                mkdir -p "$dst"
+                cp -r "$src/." "$dst/" 2>/dev/null || true
+            elif [ -f "$src" ]; then
+                mkdir -p "$(dirname "$dst")"
+                cp "$src" "$dst" 2>/dev/null || true
+            fi
+        else
+            dst="/workspace"
+            [ -n "$rel_dst" ] && dst="/workspace/$rel_dst"
+            docker exec "$cname" mkdir -p "$dst" 2>/dev/null || true
+            if [ -d "$src" ]; then
+                docker cp "$src/." "$cname:$dst/" 2>/dev/null || true
+            elif [ -f "$src" ]; then
+                docker cp "$src" "$cname:$dst" 2>/dev/null || true
+            fi
+        fi
+        ;;
+    send-keys)
+        # Headless agents don't have a terminal to send keys to.
+        # Exit 2 (unknown operation) for forward compatibility.
+        exit 2
+        ;;
+    *)
+        # Unknown operation — exit 2 for forward compatibility.
+        exit 2
+        ;;
+esac
