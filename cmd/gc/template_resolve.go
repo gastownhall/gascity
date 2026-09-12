@@ -417,6 +417,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	default:
 		prompt = beacon
 	}
+	if !suppressStartupPrompt {
+		prompt = appendFilesystemSearchGuidance(prompt)
+	}
 
 	// Step 9b: Append the assigned-skills appendix when the agent
 	// has a vendor sink, hasn't opted out, AND the runtime actually
