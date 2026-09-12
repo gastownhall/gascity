@@ -8875,7 +8875,7 @@ type WorkerSessionBody struct {
 	// BeadId Bead the verb acts on.
 	BeadId string `json:"bead_id"`
 
-	// SessionId gc session the verb is issued for; recorded for attribution, never used as the ownership pointer.
+	// SessionId gc session the verb is issued for. Recorded on a non-control claim as gc.session_id, which the typed close fence then compares; it is not the ownership pointer for the CLAIM itself, which compares the assignee.
 	SessionId *string `json:"session_id,omitempty"`
 }
 
