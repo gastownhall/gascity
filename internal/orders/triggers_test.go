@@ -372,9 +372,9 @@ func newEventsProvider(t *testing.T, evts []events.Event) events.Provider {
 
 func TestCheckTriggerEventDue(t *testing.T) {
 	ep := newEventsProvider(t, []events.Event{
-		{Type: "bead.closed"},
+		{Type: "bead.closed", Actor: "older"},
 		{Type: "bead.created"},
-		{Type: "bead.closed"},
+		{Type: "bead.closed", Actor: "newest", Payload: json.RawMessage(`{"id":"gc-42"}`)},
 	})
 	a := Order{Name: "convoy-check", Trigger: "event", On: "bead.closed"}
 	// nil cursorFn → cursor=0 → all events considered.
@@ -384,6 +384,15 @@ func TestCheckTriggerEventDue(t *testing.T) {
 	}
 	if result.Reason != "event: 2 bead.closed event(s)" {
 		t.Errorf("Reason = %q, want %q", result.Reason, "event: 2 bead.closed event(s)")
+	}
+	if result.Cursor != 1 {
+		t.Errorf("Cursor = %d, want 1", result.Cursor)
+	}
+	if result.Event == nil {
+		t.Fatal("Event = nil, want newest matching event")
+	}
+	if result.Event.Seq != 1 || result.Event.Actor != "older" {
+		t.Errorf("Event = %+v, want oldest undelivered bead.closed envelope", result.Event)
 	}
 }
 

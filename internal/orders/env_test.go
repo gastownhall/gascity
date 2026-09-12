@@ -2,6 +2,14 @@ package orders
 
 import "testing"
 
+func TestReservedExecEnvKeysIncludeEventEnvelope(t *testing.T) {
+	for _, key := range []string{"GC_EVENT_CURSOR", "GC_EVENT_JSON", "GC_EVENT_PAYLOAD"} {
+		if !IsReservedExecEnvKey(key) {
+			t.Errorf("IsReservedExecEnvKey(%q) = false, want true", key)
+		}
+	}
+}
+
 // TestReservedExecEnvKeysIncludeBdAutoBackup guards ga-0eq: the controller
 // forces bd's PersistentPostRun auto-backup off via BD_BACKUP_ENABLED, so an
 // order's [order.env] must not be able to re-enable the destructive
