@@ -370,6 +370,30 @@ func ResolveWriteAuthVerifier(configKey string, configRequired bool) (*citywrite
 		}
 		return nil, nil // not enabled
 	}
+	return newWriteAuthVerifier(raw)
+}
+
+// ResolveHardenedWriteAuthVerifier resolves the verifier for the OPTIONAL
+// [supervisor.hardened] listener from its config key ONLY. It is always
+// required: an enabled hardened listener without a key is a fail-closed boot
+// error, and there is deliberately no unverified-acknowledgement knob — the
+// listener's whole purpose is to require grants. GC_CITY_WRITE_PUBKEY is NOT
+// consulted here: that env override belongs to the primary listener's gate,
+// and letting it silently satisfy (or replace) the hardened key would make the
+// two planes' trust anchors indistinguishable. The epoch floor and cid env
+// controls are shared with the primary verifier (one revocation plane).
+func ResolveHardenedWriteAuthVerifier(configKey string) (*citywriteauth.Verifier, error) {
+	raw := strings.TrimSpace(configKey)
+	if raw == "" {
+		return nil, errors.New("hardened listener enabled but no write_auth_verify_key configured")
+	}
+	return newWriteAuthVerifier(raw)
+}
+
+// newWriteAuthVerifier builds a write-auth verifier from a non-empty
+// "kid:base64pub[,…]" key list plus the shared ops-plane env controls
+// (GC_CITY_WRITE_EPOCH_FLOOR, GC_CITY_WRITE_CID).
+func newWriteAuthVerifier(raw string) (*citywriteauth.Verifier, error) {
 	keys, err := parseVerifyKeys(raw)
 	if err != nil {
 		return nil, err
@@ -441,6 +465,112 @@ func InstallWriteAuth(sm *SupervisorMux, configKey string, configRequired bool, 
 	}
 	if v != nil {
 		sm.WithWriteAuth(v)
+	}
+	return nil
+}
+
+// hardenedListenerGuard is the extra front door of the OPTIONAL hardened
+// listener ([supervisor.hardened]). The write-auth gate alone is scoped to
+// city-scoped object mutations, which is right for the primary listener (its
+// other surfaces are first-party) but leaves three doors open on a listener
+// whose entire reason to exist is "remote peers may only make grant-signed
+// per-city writes":
+//   - supervisor-scope mutations — above all POST /v0/city (city registry
+//     creation, which scaffolds a city with a caller-chosen start_command and
+//     is exempt from write-auth because a not-yet-created city has no
+//     path-resident name to bind a grant to) — are refused outright (403);
+//   - the /svc/* workspace-service pass-through is refused for EVERY method: a
+//     GET can be a WebSocket upgrade that the reverse proxy then tunnels as a
+//     long-lived bidirectional stream, which no single-use, request-bound grant
+//     can gate;
+//   - any protocol upgrade (Connection: Upgrade / Upgrade:) is refused for the
+//     same reason, on every path, so a future upgrade-capable route can never
+//     slip past the per-request grant model.
+//
+// Safe reads (GET/HEAD/OPTIONS) elsewhere pass — the hardened read plane is the
+// primary's by design (see supervisor.HardenedListener). Everything that passes
+// this guard and is a mutation then meets writeAuthMiddleware.
+func hardenedListenerGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isServiceSubresourcePath(r.URL.Path) {
+			problemHardenedServiceRefused.writeTo(w)
+			return
+		}
+		if isProtocolUpgradeRequest(r) {
+			problemHardenedUpgradeRefused.writeTo(w)
+			return
+		}
+		if !isSafeReadMethod(r.Method) {
+			if _, ok := cityScopedObjectMutation(r.URL.Path); !ok {
+				problemHardenedSupervisorScopeRefused.writeTo(w)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// isProtocolUpgradeRequest reports whether the request asks for a protocol
+// switch (WebSocket, h2c, …): an Upgrade header, or a Connection header that
+// lists the upgrade token. Header values are matched case-insensitively per
+// RFC 9110 §7.6.1 / §7.8.
+func isProtocolUpgradeRequest(r *http.Request) bool {
+	if strings.TrimSpace(r.Header.Get("Upgrade")) != "" {
+		return true
+	}
+	for _, v := range r.Header.Values("Connection") {
+		for _, tok := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(tok), "upgrade") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+var (
+	problemHardenedServiceRefused = problemBody{
+		status: http.StatusForbidden,
+		body:   []byte(`{"status":403,"title":"Forbidden","detail":"workspace-service (/svc) requests are not served on the hardened listener"}`),
+	}
+	problemHardenedUpgradeRefused = problemBody{
+		status: http.StatusForbidden,
+		body:   []byte(`{"status":403,"title":"Forbidden","detail":"protocol upgrades are not served on the hardened listener"}`),
+	}
+	problemHardenedSupervisorScopeRefused = problemBody{
+		status: http.StatusForbidden,
+		body:   []byte(`{"status":403,"title":"Forbidden","detail":"only grant-signed per-city mutations (/v0/city/{city}/...) are served on the hardened listener"}`),
+	}
+)
+
+// HardenedVerifierKidsDisjoint refuses a hardened key list that shares a kid
+// with the primary listener's key list. Each verifier keeps its own in-memory
+// single-use (jti) replay guard, so a grant whose kid verifies on BOTH
+// listeners could be consumed once on each — the same request-bound mutation
+// executed twice. Disjoint kids make a hardened-listener grant unverifiable on
+// the primary (and vice versa), which closes that cross-listener replay
+// without coupling the two verifiers. Both arguments are raw "kid:b64[,…]"
+// lists; a malformed list is reported as such (the callers also parse them).
+func HardenedVerifierKidsDisjoint(primaryKey, hardenedKey string) error {
+	primary := strings.TrimSpace(primaryKey)
+	if env := strings.TrimSpace(os.Getenv("GC_CITY_WRITE_PUBKEY")); env != "" {
+		primary = env // the env override IS the primary's effective key list
+	}
+	if primary == "" {
+		return nil
+	}
+	pk, err := parseVerifyKeys(primary)
+	if err != nil {
+		return fmt.Errorf("primary write_auth_verify_key: %w", err)
+	}
+	hk, err := parseVerifyKeys(hardenedKey)
+	if err != nil {
+		return fmt.Errorf("hardened write_auth_verify_key: %w", err)
+	}
+	for kid := range hk {
+		if _, dup := pk[kid]; dup {
+			return fmt.Errorf("hardened write_auth_verify_key kid %q is also a primary write-auth kid; kids must be disjoint (each listener keeps its own single-use replay guard, so a shared kid would let one grant execute once per listener)", kid)
+		}
 	}
 	return nil
 }

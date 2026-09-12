@@ -1234,6 +1234,15 @@ func (c *Client) GetStatus() (CachedRead[StatusView], error) {
 // callers can surface _cache_age_s on --json output and a staleness banner
 // on human output.
 func (c *Client) ListMailInbox(agent, rig string) (CachedRead[MailListView], error) {
+	return c.ListMailInboxPage(agent, rig, "", 0)
+}
+
+// ListMailInboxPage is ListMailInbox with explicit keyset paging: cursor is
+// the previous page's MailListView.NextCursor ("" for the first page) and
+// limit caps the page (0 = server default). The server never returns more than
+// one page per call, so a caller that wants the whole mailbox loops until
+// NextCursor is empty.
+func (c *Client) ListMailInboxPage(agent, rig, cursor string, limit int) (CachedRead[MailListView], error) {
 	if err := c.requireCityScope(); err != nil {
 		return CachedRead[MailListView]{}, err
 	}
@@ -1243,6 +1252,13 @@ func (c *Client) ListMailInbox(agent, rig string) (CachedRead[MailListView], err
 	}
 	if rig != "" {
 		params.Rig = &rig
+	}
+	if cursor != "" {
+		params.Cursor = &cursor
+	}
+	if limit > 0 {
+		l := int64(limit)
+		params.Limit = &l
 	}
 	resp, err := c.cw.GetV0CityByCityNameMailWithResponse(context.Background(), c.cityName, params)
 	if err != nil {
@@ -1288,6 +1304,82 @@ func (c *Client) GetMail(id, rig string) (CachedRead[mail.Message], error) {
 		Body:       mailMessageFromGen(*resp.JSON200),
 		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
 	}, nil
+}
+
+// MailSendRequest carries the parameters of a mail send for Client.SendMail.
+type MailSendRequest struct {
+	Rig     string // optional rig whose mail provider receives the message
+	From    string // sender identity stored verbatim by the server (empty = server default)
+	To      string // recipient (server-side resolution)
+	Subject string // required by the API (minLength 1)
+	Body    string
+}
+
+// SendMail creates a message via POST /v0/city/{cityName}/mail. It is a
+// mutation: on a remote client it carries the city-write grant the transport
+// mints per request; on a local client the CSRF header alone applies.
+func (c *Client) SendMail(req MailSendRequest) (mail.Message, error) {
+	if err := c.requireCityScope(); err != nil {
+		return mail.Message{}, err
+	}
+	body := genclient.SendMailJSONRequestBody{To: req.To, Subject: req.Subject}
+	setStrPtr(&body.Rig, req.Rig)
+	setStrPtr(&body.From, req.From)
+	setStrPtr(&body.Body, req.Body)
+	params := &genclient.SendMailParams{XGCRequest: "true"}
+	resp, err := c.cw.SendMailWithResponse(context.Background(), c.cityName, params, body)
+	if err != nil {
+		return mail.Message{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return mail.Message{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
+		return mail.Message{}, err
+	}
+	if resp.JSON201 == nil {
+		return mail.Message{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	return mailMessageFromGen(*resp.JSON201), nil
+}
+
+// MailReplyRequest carries the parameters of a mail reply for Client.ReplyMail.
+type MailReplyRequest struct {
+	Rig     string // optional rig hint for locating the original message
+	From    string // sender identity stored verbatim by the server (empty = server default)
+	Subject string // optional; the server derives "Re: …" when empty
+	Body    string
+}
+
+// ReplyMail replies to message id via POST /v0/city/{cityName}/mail/{id}/reply.
+// The server addresses the reply to the original sender. It is a mutation and
+// carries the same write credential as SendMail.
+func (c *Client) ReplyMail(id string, req MailReplyRequest) (mail.Message, error) {
+	if err := c.requireCityScope(); err != nil {
+		return mail.Message{}, err
+	}
+	body := genclient.ReplyMailJSONRequestBody{}
+	setStrPtr(&body.From, req.From)
+	setStrPtr(&body.Subject, req.Subject)
+	setStrPtr(&body.Body, req.Body)
+	params := &genclient.ReplyMailParams{XGCRequest: "true"}
+	if req.Rig != "" {
+		params.Rig = &req.Rig
+	}
+	resp, err := c.cw.ReplyMailWithResponse(context.Background(), c.cityName, id, params, body)
+	if err != nil {
+		return mail.Message{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return mail.Message{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
+		return mail.Message{}, err
+	}
+	if resp.JSON201 == nil {
+		return mail.Message{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	return mailMessageFromGen(*resp.JSON201), nil
 }
 
 // CountMail fetches total/unread message counts via

@@ -23,6 +23,10 @@ type MailListView struct {
 	Total         int
 	Partial       bool
 	PartialErrors []string
+	// NextCursor is the keyset cursor for the next page, or "" on the last
+	// page. Callers that need the whole mailbox (the CLI inbox) page until it
+	// is empty; the server caps each page (defaultPaginationLimit).
+	NextCursor string
 }
 
 // mailMessageFromGen translates one genclient.Message into mail.Message.
@@ -75,6 +79,9 @@ func mailListFromGen(body *genclient.MailListBody) MailListView {
 	}
 	if body.PartialErrors != nil {
 		out.PartialErrors = append([]string(nil), *body.PartialErrors...)
+	}
+	if body.NextCursor != nil {
+		out.NextCursor = *body.NextCursor
 	}
 	if body.Items == nil {
 		return out
