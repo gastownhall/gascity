@@ -12,7 +12,7 @@ import (
 // hookClaimIdentityPatch directly: no worktree, no session-identity plumbing
 // beyond what the patch function itself reads.
 func claimedAtNoWorktreeOps() hookClaimOps {
-	return hookClaimOps{ResolveWorkBranch: func(string) string { return "" }}
+	return hookClaimOps{ResolveWorkBranch: func(hookClaimWorkTree) string { return "" }}
 }
 
 // requireRecentRFC3339 fails the test unless raw parses as RFC3339 and lands
@@ -135,13 +135,14 @@ func TestHookClaimIdentityPatchClaimedAtWithoutSessionOrWorktree(t *testing.T) {
 func TestHookClaimIdentityPatchClaimedAtDoesNotDisturbExistingKeys(t *testing.T) {
 	bead := beads.Bead{ID: "hw-mixed", Status: "open", Metadata: map[string]string{
 		beadmeta.KindMetadataKey:        "worker",
+		beadmeta.WorkDirMetadataKey:     poolClaimWorkerDir,
 		beadmeta.WorkBranchMetadataKey:  "bd-old",
 		beadmeta.SessionIDMetadataKey:   "mc-sess1",
 		beadmeta.SessionNameMetadataKey: "gc__role-mc-sess1",
 		beadmeta.ClaimedAtMetadataKey:   "2026-01-01T00:00:00Z",
 	}}
 	opts := hookClaimOptions{Env: []string{"GC_SESSION_ID=mc-sess1", "GC_SESSION_NAME=gc__role-mc-sess1"}}
-	ops := hookClaimOps{ResolveWorkBranch: func(string) string { return "bd-new" }}
+	ops := hookClaimOps{ResolveWorkBranch: func(hookClaimWorkTree) string { return "bd-new" }}
 
 	patch := hookClaimIdentityPatch(bead, opts, ops, "/tmp/work")
 
