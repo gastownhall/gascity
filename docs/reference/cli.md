@@ -4812,11 +4812,12 @@ against lingering supervisor / controller subprocesses).
 
 Stopping the supervisor also stops the platform service that manages
 it, and stop exits non-zero when that fails; with --wait, gc further
-verifies on macOS that the launchd job is really gone, within the same
---wait-timeout budget, and fails when it cannot confirm that. An
-operator stop also disables the launchd job, so it will not come back
-at the next login until 'gc supervisor start' or 'gc supervisor
-install' re-enables it.
+verifies on macOS that the launchd job is really gone before
+returning, sharing the same --wait-timeout deadline as the socket
+wait, and fails when it cannot confirm that. An operator stop also
+disables the launchd job, so it will not come back at the next login
+until 'gc supervisor install' — or 'gc start', which routes through
+install — re-enables it.
 
 When GC_SUPERVISOR_SYSTEMD_UNIT is set, stop is delegated to
 'systemctl [--user] stop &lt;unit&gt;' instead of the control-socket stop.

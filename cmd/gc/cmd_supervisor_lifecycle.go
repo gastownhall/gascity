@@ -43,9 +43,14 @@ var (
 	supervisorReadyPollInterval              = 100 * time.Millisecond
 	supervisorSystemdWarmRefreshStopTimeout  = 5 * time.Second
 	supervisorSystemdWarmRefreshPollInterval = 100 * time.Millisecond
-	supervisorLaunchdStopTimeout             = 45 * time.Second
-	supervisorLaunchdStopPollInterval        = 250 * time.Millisecond
-	supervisorLaunchctlRun                   = func(args ...string) error {
+	// supervisorLaunchdStopTimeout is how long launchd typically needs to
+	// drop a booted-out job. The absence poll honors the caller's
+	// --wait-timeout deadline rather than this value; it documents the
+	// expected budget and is what tests pin when they exercise caller
+	// deadlines shorter than it.
+	supervisorLaunchdStopTimeout      = 45 * time.Second
+	supervisorLaunchdStopPollInterval = 250 * time.Millisecond
+	supervisorLaunchctlRun            = func(args ...string) error {
 		return exec.Command("launchctl", args...).Run()
 	}
 	// supervisorLaunchdLoaded probes whether a launchd job is still
@@ -209,13 +214,19 @@ type supervisorWorkspaceServiceCleanupScope struct {
 // with when the requested service does not exist in the domain.
 const launchdPrintNotFoundExitCode = 113
 
+// exitCoder is any error carrying a process exit status. *exec.ExitError
+// satisfies it, so classifying through the interface keeps the real
+// launchctl path unchanged while letting tests supply an exit status
+// without spawning a subprocess.
+type exitCoder interface{ ExitCode() int }
+
 // launchdPrintReportsNotFound reports whether a failed `launchctl print`
 // positively proves the service is absent, rather than having failed for
 // an unrelated reason (no Aqua session, permission denied, launchctl
 // unavailable). Only a not-found signal counts as proof of absence.
 func launchdPrintReportsNotFound(err error, detail string) bool {
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && exitErr.ExitCode() == launchdPrintNotFoundExitCode {
+	var ec exitCoder
+	if errors.As(err, &ec) && ec.ExitCode() == launchdPrintNotFoundExitCode {
 		return true
 	}
 	return strings.Contains(detail, "Could not find service")
@@ -808,7 +819,11 @@ func unloadSupervisorService() error {
 		service := supervisorSystemdServiceName()
 		path := supervisorSystemdServicePath()
 		if _, err := os.Stat(path); err == nil {
-			if err := supervisorSystemctlRun("--user", "stop", service); err != nil {
+			// A stop failure is only evidence of a stuck service when a
+			// user manager is reachable at all. Without one the unit was
+			// never running, so reporting failure would turn a no-op into
+			// a spurious non-zero exit.
+			if err := supervisorSystemctlRun("--user", "stop", service); err != nil && supervisorSystemctlUserAvailable() {
 				errs = append(errs, fmt.Errorf("systemctl --user stop %s: %w", service, err))
 			}
 		} else if !errors.Is(err, os.ErrNotExist) {
@@ -837,8 +852,7 @@ func durablyStopSupervisorLaunchd(label, plistPath string) []error {
 // verifySupervisorServiceStopped confirms the platform service is really
 // gone after unloadSupervisorService ran. Callers pass their own deadline
 // (the --wait-timeout budget) so the check shares that budget instead of
-// adding a hidden one; supervisorLaunchdStopTimeout is a floor when the
-// remaining budget is smaller than launchd needs to drop the job.
+// adding a hidden one.
 func verifySupervisorServiceStopped(deadline time.Time) error {
 	if goruntime.GOOS != "darwin" {
 		return nil
@@ -859,9 +873,6 @@ func verifySupervisorServiceStopped(deadline time.Time) error {
 // of absence, so it keeps polling and times out with the reason it could
 // not confirm — an unverifiable teardown must never read as success.
 func waitForSupervisorLaunchdAbsent(label, target string, deadline time.Time) error {
-	if floor := time.Now().Add(supervisorLaunchdStopTimeout); deadline.Before(floor) {
-		deadline = floor
-	}
 	var lastDetail string
 	var lastLoaded bool
 	for {

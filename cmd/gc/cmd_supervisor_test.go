@@ -2642,17 +2642,62 @@ func TestVerifySupervisorServiceStoppedDarwinFailsWhenAbsenceUnconfirmed(t *test
 	}
 }
 
-// exitErrorWithCode produces a genuine *exec.ExitError carrying code, so
-// tests exercise the same error shape exec.Command returns.
-func exitErrorWithCode(t *testing.T, code int) error {
-	t.Helper()
-	err := exec.Command("sh", "-c", "exit "+strconv.Itoa(code)).Run()
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) {
-		t.Fatalf("running sh exit %d = %v, want *exec.ExitError", code, err)
+// TestVerifySupervisorServiceStoppedDarwinHonorsShorterCallerDeadline pins
+// that the absence poll returns by the caller's --wait-timeout deadline
+// even when that deadline is shorter than supervisorLaunchdStopTimeout.
+// The check shares the caller's budget; it must never silently extend it,
+// which would make stop block past the documented timeout.
+func TestVerifySupervisorServiceStoppedDarwinHonorsShorterCallerDeadline(t *testing.T) {
+	if goruntime.GOOS != "darwin" {
+		t.Skip("launchd path only applies on darwin")
 	}
-	return exitErr
+	homeDir := t.TempDir()
+	gcHome := filepath.Join(t.TempDir(), "isolated-home")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", gcHome)
+
+	path := supervisorLaunchdPlistPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("<plist/>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	oldLoaded := supervisorLaunchdLoaded
+	oldTimeout := supervisorLaunchdStopTimeout
+	oldPoll := supervisorLaunchdStopPollInterval
+	supervisorLaunchdLoaded = func(label string) (bool, bool, string) {
+		return true, false, "state = running\npid = 4242\nlabel = " + label
+	}
+	supervisorLaunchdStopTimeout = 45 * time.Second
+	supervisorLaunchdStopPollInterval = time.Millisecond
+	t.Cleanup(func() {
+		supervisorLaunchdLoaded = oldLoaded
+		supervisorLaunchdStopTimeout = oldTimeout
+		supervisorLaunchdStopPollInterval = oldPoll
+	})
+
+	callerBudget := 20 * time.Millisecond
+	start := time.Now()
+	err := verifySupervisorServiceStopped(start.Add(callerBudget))
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("verifySupervisorServiceStopped returned nil for a still-loaded target, want failure")
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("absence poll took %s for a caller budget of %s, want it bounded by the caller deadline rather than supervisorLaunchdStopTimeout (%s)", elapsed, callerBudget, supervisorLaunchdStopTimeout)
+	}
 }
+
+// stubExitError carries a process exit status the way *exec.ExitError
+// does, so the exit-code branch of launchdPrintReportsNotFound is covered
+// without spawning a subprocess.
+type stubExitError struct{ code int }
+
+func (e stubExitError) Error() string { return "exit status " + strconv.Itoa(e.code) }
+
+func (e stubExitError) ExitCode() int { return e.code }
 
 // TestLaunchdPrintReportsNotFound pins which `launchctl print` failures
 // count as proof the service is absent. Anything else is "unknown".
@@ -2667,8 +2712,8 @@ func TestLaunchdPrintReportsNotFound(t *testing.T) {
 		{name: "permission denied", err: errors.New("exit status 1"), detail: "Operation not permitted"},
 		{name: "no aqua session", err: errors.New("exit status 5"), detail: "Bootstrap failed: 5: Input/output error"},
 		{name: "launchctl missing", err: errors.New("exec: \"launchctl\": executable file not found in $PATH")},
-		{name: "exit status 113 without output", err: exitErrorWithCode(t, 113), want: true},
-		{name: "other exit status without output", err: exitErrorWithCode(t, 1)},
+		{name: "exit status 113 without output", err: stubExitError{code: launchdPrintNotFoundExitCode}, want: true},
+		{name: "other exit status without output", err: stubExitError{code: 1}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
