@@ -17,6 +17,20 @@ import (
 
 const nativeDoltStoreActor = "gascity"
 
+// nativeDoltActorFromEnv returns the actor stamped on every native-store
+// write. BEADS_ACTOR is the same chain the bd CLI path already honours: the
+// supervisor sets it to "controller" (defaultSupervisorBeadsActor), every
+// spawned session gets its session name, and order-exec gets "order:<name>".
+// Without this the beads events table records every gc-native mutation as
+// the placeholder "gascity", so "who cleared this assignee?" is unanswerable
+// for the supervisor/dispatcher/sling paths (sys-el5s5).
+func nativeDoltActorFromEnv() string {
+	if actor := strings.TrimSpace(os.Getenv("BEADS_ACTOR")); actor != "" {
+		return actor
+	}
+	return nativeDoltStoreActor
+}
+
 // nativeDoltOpenReadyStatuses lists the upstream bd statuses Ready() queries
 // GetReadyWork for. This must match IsReadyCandidateForTier's contract of
 // "open status ... and no future defer_until": only StatusOpen (bd's own
@@ -430,7 +444,7 @@ func newNativeDoltStoreAtWithCredentialCommand(parent context.Context, scopeRoot
 	if err != nil {
 		return nil, err
 	}
-	store := newNativeDoltStoreWithStorageAndPrefix(storage, nativeDoltStoreActor, prefix)
+	store := newNativeDoltStoreWithStorageAndPrefix(storage, nativeDoltActorFromEnv(), prefix)
 	store.localStrings = newLocalSidecar(filepath.Join(scopeRoot, ".beads", "local-strings.json"))
 	for _, opt := range opts {
 		opt(store)
@@ -445,7 +459,7 @@ func newNativeDoltStoreAtWithoutAmbientEnv(parent context.Context, scopeRoot, cr
 	if err != nil {
 		return nil, err
 	}
-	store := newNativeDoltStoreWithStorageAndPrefix(storage, nativeDoltStoreActor, prefix)
+	store := newNativeDoltStoreWithStorageAndPrefix(storage, nativeDoltActorFromEnv(), prefix)
 	store.localStrings = newLocalSidecar(filepath.Join(scopeRoot, ".beads", "local-strings.json"))
 	for _, opt := range opts {
 		opt(store)
