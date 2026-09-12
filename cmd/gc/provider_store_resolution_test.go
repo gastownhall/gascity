@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 func writeProviderAwareTestCity(t *testing.T, cityDir, content string) {
@@ -652,5 +653,86 @@ name = "demo"
 	}
 	if !strings.Contains(stdout.String(), "Auto-closed molecule") {
 		t.Fatalf("stdout = %q, want autoclose message", stdout.String())
+	}
+}
+
+// TestOpenCompatibleFileStoreUsesCallerCityForIDPrefix pins the production half
+// of the multi-rig ID-prefix fix: openCompatibleFileStore must resolve each
+// scope's prefix from the cityPath its caller already holds, not from ambient
+// city resolution. GC_CITY points at an unrelated decoy city here, standing in
+// for the live cases where ambient resolution misses — a supervisor serving
+// several cities, --city-url/--context, or any cwd outside the target city. If
+// the prefix came from ambient context, every store below would fall back to
+// the default "gc" prefix and the two rigs would collide on gc-N again.
+func TestOpenCompatibleFileStoreUsesCallerCityForIDPrefix(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_BEADS", "file")
+
+	decoyDir := t.TempDir()
+	writeProviderAwareTestCity(t, decoyDir, `[workspace]
+name = "decoy"
+`)
+	t.Setenv("GC_CITY", decoyDir)
+	chdirProviderAwareTest(t, decoyDir)
+
+	cityDir := t.TempDir()
+	frontendDir := filepath.Join(cityDir, "frontend")
+	opsDir := filepath.Join(cityDir, "ops")
+	for _, dir := range []string{frontendDir, opsDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	writeProviderAwareTestCity(t, cityDir, `[workspace]
+name = "demo-city"
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "asv2"
+[[rigs]]
+name = "ops"
+path = "ops"
+prefix = "oe"
+`)
+	for _, dir := range []string{cityDir, frontendDir, opsDir} {
+		if err := ensurePersistedScopeLocalFileStore(dir); err != nil {
+			t.Fatalf("ensurePersistedScopeLocalFileStore(%q): %v", dir, err)
+		}
+	}
+
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("loading test city config: %v", err)
+	}
+	wantCity := config.EffectiveHQPrefix(cfg)
+	if wantCity == "" || wantCity == "gc" {
+		t.Fatalf("test city HQ prefix = %q; the assertion below cannot distinguish it from the default", wantCity)
+	}
+
+	for _, tc := range []struct {
+		name      string
+		scopeRoot string
+		want      string
+	}{
+		{name: "city", scopeRoot: cityDir, want: wantCity},
+		{name: "frontend rig", scopeRoot: frontendDir, want: "asv2"},
+		{name: "ops rig", scopeRoot: opsDir, want: "oe"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, err := openCompatibleFileStore(tc.scopeRoot, cityDir)
+			if err != nil {
+				t.Fatalf("openCompatibleFileStore(%q, %q): %v", tc.scopeRoot, cityDir, err)
+			}
+			bead, err := store.Create(beads.Bead{Title: "work"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := tc.want + "-1"; bead.ID != want {
+				t.Errorf("minted id = %q, want %q", bead.ID, want)
+			}
+		})
 	}
 }
