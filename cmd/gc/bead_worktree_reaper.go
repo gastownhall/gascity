@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/scaffold"
 	"github.com/gastownhall/gascity/internal/sling"
 )
 
@@ -305,10 +306,12 @@ func reapClosedBeadWorktrees(
 			// it as a clean answer would fail open.
 			if reason == "" {
 				wg := git.New(worktreePath)
-				hasUncommitted := wg.HasUncommittedWork()
+				hasUncommitted, uncommittedErr := worktreeHasUnsalvagedWork(wg, worktreePath)
 				hasUnreachable, unreachableErr := wg.HasUnreachableCommitsResult()
 				hasStashes, stashErr := wg.HasStashesResult()
 				switch {
+				case uncommittedErr != nil:
+					reason = fmt.Sprintf("git probe failed (failing closed): %v", uncommittedErr)
 				case unreachableErr != nil:
 					reason = fmt.Sprintf("git probe failed (failing closed): %v", unreachableErr)
 				case stashErr != nil:
@@ -483,6 +486,26 @@ func computeWorktreeAge(worktreePath string) (age time.Duration, ok bool) {
 // returns, for each candidate's worktree path, the IDs of any non-terminal
 // beads — in any molecule — whose gc.work_dir or legacy work_dir metadata
 // still points at that path (FR-1/FR-2/FR-3). Terminal status is decided by
+// worktreeHasUnsalvagedWork reports whether the worktree holds uncommitted
+// changes that are not gc's own injected scaffolding.
+//
+// A bare "git status --porcelain is non-empty" check cannot answer this: gc
+// writes provider-native MCP config, materialized skill symlinks, and a
+// ".gitignore" block into every worktree it creates, so the porcelain output
+// is never empty and the gate refuses forever (gas-wr8). Subtracting the
+// paths gc can prove it owns restores the signal the gate was written to
+// carry — real uncommitted work is about to be destroyed.
+//
+// A probe error returns true: an errored probe proves nothing, and treating
+// it as a clean answer would fail open.
+func worktreeHasUnsalvagedWork(wg *git.Git, worktreePath string) (bool, error) {
+	porcelain, err := wg.StatusPorcelainUntrimmed()
+	if err != nil {
+		return true, err
+	}
+	return scaffold.HasRealWork(worktreePath, porcelain, wg.ShowAtHead), nil
+}
+
 // convoycore.IsTerminalStatus, not a bare "!= closed" check, so a tombstoned
 // reference does not veto. Path matching is symlink/alias-normalized on both
 // sides via pathutil.NormalizePathForCompare, matching the liveness gate, so a
