@@ -11,9 +11,9 @@ import (
 // writeNoSyncMarker marks a database as excluded from remote sync, matching the
 // contract the sync and pull commands already honor
 // (commands/sync/run.sh, commands/pull/run.sh: "$data_dir/<db>/.no-sync").
-func writeNoSyncMarker(t *testing.T, dataDir, db string) {
+func writeNoSyncMarker(t *testing.T, dataDir string) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(dataDir, db, ".no-sync"), nil, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dataDir, "beads", ".no-sync"), nil, 0o644); err != nil {
 		t.Fatalf("write .no-sync marker: %v", err)
 	}
 }
@@ -24,9 +24,9 @@ func writeNoSyncMarker(t *testing.T, dataDir, db string) {
 // quarantining it on a failed push is a self-inflicted block.
 func TestCompactScriptSkipsRemotePhaseForNoSyncDatabase(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
-	writeNoSyncMarker(t, fixture.dataDir, "beads")
+	writeNoSyncMarker(t, fixture.dataDir)
 
-	out, err := fixture.run(t, "remote_fetch_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	out, err := fixture.run(t, "remote_fetch_failure", "GC_DOLT_COMPACT_ALLOW_FEDERATED=1", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
 	if err != nil {
 		t.Fatalf("compact should succeed locally for a .no-sync database: %v\n%s", err, out)
 	}
@@ -64,7 +64,7 @@ func TestCompactScriptSkipsRemotePhaseForNoSyncDatabase(t *testing.T) {
 func TestCompactScriptClearsPendingPushMarkerWhenDatabaseBecomesNoSync(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 
-	firstOut, err := fixture.run(t, "remote_fetch_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	firstOut, err := fixture.run(t, "remote_fetch_failure", "GC_DOLT_COMPACT_ALLOW_FEDERATED=1", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
 	if err != nil {
 		t.Fatalf("initial compact should defer the push: %v\n%s", err, firstOut)
 	}
@@ -74,12 +74,12 @@ func TestCompactScriptClearsPendingPushMarkerWhenDatabaseBecomesNoSync(t *testin
 	}
 
 	// Operator marks the database no-sync: the deferred push is now meaningless.
-	writeNoSyncMarker(t, fixture.dataDir, "beads")
+	writeNoSyncMarker(t, fixture.dataDir)
 	// Age the marker past the retry window, matching the production markers that
 	// have been blocking compaction for weeks.
 	replaceCompactMarkerCreatedAt(t, marker, "2026-01-01T00:00:00Z")
 
-	secondOut, err := fixture.run(t, "remote_fetch_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	secondOut, err := fixture.run(t, "remote_fetch_failure", "GC_DOLT_COMPACT_ALLOW_FEDERATED=1", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
 	if err != nil {
 		t.Fatalf("compact must not stay blocked on a stale push marker for a .no-sync database: %v\n%s", err, secondOut)
 	}
@@ -97,7 +97,7 @@ func TestCompactScriptClearsPendingPushMarkerWhenDatabaseBecomesNoSync(t *testin
 func TestCompactScriptDryRunPreservesPendingPushMarkerForNoSyncDatabase(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 
-	firstOut, err := fixture.run(t, "remote_fetch_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	firstOut, err := fixture.run(t, "remote_fetch_failure", "GC_DOLT_COMPACT_ALLOW_FEDERATED=1", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
 	if err != nil {
 		t.Fatalf("initial compact should defer the push: %v\n%s", err, firstOut)
 	}
@@ -105,9 +105,9 @@ func TestCompactScriptDryRunPreservesPendingPushMarkerForNoSyncDatabase(t *testi
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("fetch failure should write pending-push marker: %v", err)
 	}
-	writeNoSyncMarker(t, fixture.dataDir, "beads")
+	writeNoSyncMarker(t, fixture.dataDir)
 
-	out, err := fixture.run(t, "remote_fetch_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", "GC_DOLT_COMPACT_DRY_RUN=1")
+	out, err := fixture.run(t, "remote_fetch_failure", "GC_DOLT_COMPACT_ALLOW_FEDERATED=1", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", "GC_DOLT_COMPACT_DRY_RUN=1")
 	if err != nil {
 		t.Fatalf("dry run should succeed: %v\n%s", err, out)
 	}
@@ -127,7 +127,7 @@ func TestCompactScriptDryRunPreservesPendingPushMarkerForNoSyncDatabase(t *testi
 func TestCompactScriptPendingPushMarkerBlocksFlattenEvenWhenFresh(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 
-	firstOut, err := fixture.run(t, "remote_fetch_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	firstOut, err := fixture.run(t, "remote_fetch_failure", "GC_DOLT_COMPACT_ALLOW_FEDERATED=1", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
 	if err != nil {
 		t.Fatalf("initial compact should defer the push: %v\n%s", err, firstOut)
 	}
@@ -142,7 +142,7 @@ func TestCompactScriptPendingPushMarkerBlocksFlattenEvenWhenFresh(t *testing.T) 
 	// Marker is well inside the retry window — staleness cannot be the blocker.
 	replaceCompactMarkerCreatedAt(t, marker, nowStampForCompactMarker(t))
 
-	secondOut, err := fixture.run(t, "remote_fetch_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	secondOut, err := fixture.run(t, "remote_fetch_failure", "GC_DOLT_COMPACT_ALLOW_FEDERATED=1", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
 	if err != nil {
 		t.Fatalf("fresh-marker retry should not hard-fail: %v\n%s", err, secondOut)
 	}
