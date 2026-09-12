@@ -38,6 +38,7 @@ func goldenFixtures() map[string]Config {
 				// ... plus excluded keys that must NOT affect the hash.
 				"GC_SESSION_ID": "ignored", "GC_AGENT": "ignored", "NOT_GC": "ignored",
 			},
+			OperatorEnv: map[string]string{"OPERATOR_AUTHORED": "v1", "ANOTHER_KEY": "v2"},
 			MCPServers: []MCPServerConfig{{
 				Name: "mail", Transport: MCPTransport("stdio"), Command: "mcp-mail",
 				Args: []string{"--port", "0"}, Env: map[string]string{"K": "V"},
