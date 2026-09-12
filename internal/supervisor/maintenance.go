@@ -44,10 +44,12 @@ const (
 	maintenanceSmokeTable = "issues"
 )
 
-// maintenanceSmokeTimeout caps the post-gc SELECT COUNT(*) probe. It is
-// a var (not const) so tests can shorten it; production keeps the 5 s
-// value mandated by design D5.
-var maintenanceSmokeTimeout = 5 * time.Second
+// maintenanceSmokeTimeout caps the post-gc SELECT COUNT(*) probe: the 5 s
+// value mandated by design D5. It is the default for the per-loop
+// smokeTimeout field rather than the value read at the probe, so a test
+// that shortens it does so on its own loop; a package-level var was read
+// by runDoltGC while a parallel test wrote it, which -race reports.
+const maintenanceSmokeTimeout = 5 * time.Second
 
 // MaintenanceRun summarizes one completed (or failed) maintenance run.
 // Stage is "done" for successful runs and names the failing phase
@@ -192,6 +194,11 @@ type StoreMaintenanceLoop struct {
 	// in the cycle's defer; nil means "no run in flight."
 	runStartedAt atomic.Pointer[time.Time]
 
+	// smokeTimeout caps the post-gc count probe. Per loop, not package
+	// level, so a test can shorten its own loop's without racing the
+	// parallel tests that read it (see maintenanceSmokeTimeout).
+	smokeTimeout time.Duration
+
 	lastRunAt time.Time
 	history   []MaintenanceRun
 
@@ -269,6 +276,7 @@ func NewStoreMaintenanceLoop(deps StoreMaintenanceLoopDeps) *StoreMaintenanceLoo
 		diskFreeBytes:     deps.DiskFreeBytes,
 		diskMinFreeBytes:  deps.DiskMinFreeBytes,
 		diskWarnFreeBytes: deps.DiskWarnFreeBytes,
+		smokeTimeout:      maintenanceSmokeTimeout,
 		lastRunAt:         deps.LastRunAt,
 		history:           make([]MaintenanceRun, 0, maintenanceHistorySize),
 	}
@@ -813,7 +821,7 @@ func (m *StoreMaintenanceLoop) runDoltGC(ctx context.Context) error {
 		return &MaintenanceError{Stage: "gc", Err: err}
 	}
 
-	smokeCtx, cancelSmoke := context.WithTimeout(ctx, maintenanceSmokeTimeout)
+	smokeCtx, cancelSmoke := context.WithTimeout(ctx, m.smokeTimeout)
 	defer cancelSmoke()
 	count, err := ops.SmokeCount(smokeCtx)
 	if err != nil {
