@@ -293,8 +293,8 @@ func TestOrphanReleaseSparesALiveHoldersBindingResidentClaim(t *testing.T) {
 
 	infos := sessionInfosFromBeads([]beads.Bead{sess})
 	released := releaseOrphanedPoolAssignments(
-		work, cfg, cityPath, infos,
-		[]beads.Bead{claim}, []beads.Store{work}, []string{""}, nil,
+		work, beads.SessionStore{Store: work}, cfg, cityPath, infos,
+		[]beads.Bead{claim}, []beads.Store{work}, []string{""}, nil, nil, nil,
 	)
 	if len(released) != 0 {
 		t.Fatalf("released %v — a LIVE holder's claim was taken back on a leg the release path now reads; that is claim loss, not a strand", released)

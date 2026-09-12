@@ -18,6 +18,20 @@ import (
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
+// migrationGuardHangBudget bounds the helper-readiness wait below — no assertion depends on
+// how long it takes, so this is a hang detector, not a latency assertion, and raising it does
+// not slow a passing run because the wait returns the instant "ready" arrives.
+// testutil.ExecRaceTimeout (10s) is a floor, not a target (TESTING.md "Floors, ceilings, and
+// inputs"): the helper re-execs the test binary and must clear Go runtime + package init, flag
+// parse and test enumeration, and an AcquireMigrationGuard call before it can print its ready
+// line. The sibling storebinding/sqlite fence helper follows the same re-exec-then-signal shape
+// and was measured taking up to 3.02s at 48 concurrent children under memory pressure (ga-ap7lpd),
+// which is what motivated its own hang budget (ga-sptey3); this one has no SQLite open/schema
+// work in the path, so it is expected to be cheaper, not more expensive. Mirrors the precedent in
+// cmd/gc/hangbudget_test.go (hangBudget = 6 * testutil.GoroutineRaceTimeout); 6x ExecRaceTimeout
+// is 60s, well under the 20m gate package timeout.
+const migrationGuardHangBudget = 6 * testutil.ExecRaceTimeout
+
 func TestAcquireMigrationGuardClaimsAreRefCountedAndBoundToCityGeneration(t *testing.T) {
 	directory := testMigrationGuardDirectory(t)
 	guard, err := AcquireMigrationGuard(context.Background(), directory, Generation(7))
@@ -342,7 +356,7 @@ func TestAcquireMigrationGuardExcludesSecondProcessAndRecoversAfterSIGKILL(t *te
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(testutil.ExecRaceTimeout):
+	case <-time.After(migrationGuardHangBudget):
 		t.Fatal("helper did not acquire its migration guard")
 	}
 	if err := command.Process.Signal(syscall.Signal(0)); err != nil {

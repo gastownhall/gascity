@@ -489,6 +489,16 @@ export interface RunLane {
    * it with available health facts.
    */
   health: RunLaneHealthState;
+  /**
+   * Stale marks an in-flight run gone silent past the projection's staleness
+   * window (its terminal events never arrived — e.g. an event-emission gap), so
+   * its last-known step states are no longer trustworthy. Stale lanes stay
+   * visible but are excluded from the active counts. Present (true) only when
+   * stale.
+   */
+  stale?: boolean;
+  /** The run's last-activity time when stale — "no activity since <staleSince>". */
+  staleSince?: string;
 }
 
 export type RunLaneUpdatedAt = Avail<{

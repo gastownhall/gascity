@@ -64,13 +64,21 @@ func EnsureBuiltinRuntimeAssets(cityPath string, warningWriter io.Writer) error 
 		pruneRetiredSystemPacks(cityPath, warningWriter)
 		return nil
 	}
-	// One verifier for the whole pass: the ready fast path and the repair path
-	// both validate the shared synthetic cache directory, and within a single
-	// pass that is the same question asked repeatedly.
-	verifier := newSyntheticCacheVerifier()
-	if state.ready && requiredBuiltinSourcesUsable(cityPath, verifier) && lockedBundledImportsUsable(cityPath, verifier) {
-		return nil
+	// The ready fast path re-validates the shared synthetic cache so an
+	// in-place corruption after readiness is still detected and repaired. It
+	// uses a verifier that reuses an earlier pass's positive verdict while the
+	// cache tree's stat fingerprint is unchanged, so that guarantee no longer
+	// re-reads every cached pack file on every config load.
+	if state.ready {
+		warm := newWarmSyntheticCacheVerifier()
+		if requiredBuiltinSourcesUsable(cityPath, warm) && lockedBundledImportsUsable(cityPath, warm) {
+			return nil
+		}
 	}
+	// One verifier for the whole pass: the repair paths below validate the
+	// shared synthetic cache directory, and within a single pass that is the
+	// same question asked repeatedly.
+	verifier := newSyntheticCacheVerifier()
 	state.ready = false
 
 	var problems []error
@@ -252,7 +260,11 @@ func ensureRequiredBuiltinSourcesCached(cityPath string, verifier *syntheticCach
 		if err != nil {
 			return fmt.Errorf("resolving cache path for bundled %s pack: %w", name, err)
 		}
-		if verifier.Valid(cachePath, commit) {
+		repository, known := builtinpacks.RepositoryForSource(source)
+		if !known {
+			return fmt.Errorf("resolving bundled repository for %s pack source %q", name, source)
+		}
+		if verifier.Valid(cachePath, repository, commit) {
 			continue
 		}
 		if _, err := packman.EnsureRepoInCache(cityPath, source, commit); err != nil {
@@ -269,7 +281,8 @@ func requiredBuiltinSourcesUsable(cityPath string, verifier *syntheticCacheVerif
 		if err != nil {
 			return false
 		}
-		if !verifier.Valid(cachePath, commit) {
+		repository, known := builtinpacks.RepositoryForSource(source)
+		if !known || !verifier.Valid(cachePath, repository, commit) {
 			return false
 		}
 	}

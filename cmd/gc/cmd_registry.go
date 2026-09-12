@@ -19,6 +19,7 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/credentialprovider"
 	"github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/packregistry"
 	"github.com/spf13/cobra"
 )
 
@@ -103,18 +104,19 @@ func newRegistryGasworksCredentialSource(baseURL string) (registryCredentialSour
 }
 
 type registryPublishOptions struct {
-	RegistryURL   string
-	Name          string
-	Version       string
-	Ref           string
-	Description   string
-	Token         string
-	SessionCookie string
-	CSRFToken     string
-	DryRun        bool
-	Validate      bool
-	DevAuth       bool
-	DevAuthHandle string
+	RegistryURL       string
+	Name              string
+	AllowUnscopedName bool
+	Version           string
+	Ref               string
+	Description       string
+	Token             string
+	SessionCookie     string
+	CSRFToken         string
+	DryRun            bool
+	Validate          bool
+	DevAuth           bool
+	DevAuthHandle     string
 }
 
 func newRegistryPublishCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -131,6 +133,12 @@ The command requires a clean Git checkout whose current HEAD matches its
 configured upstream branch, then submits the GitHub repository, commit, pack
 path, pack name, and version to the registry API.
 
+Registry pack names are scoped as <github-owner>/<pack>, where <github-owner>
+is the lowercased GitHub owner of the source repository. [pack].name must
+already carry that scoped name: the registry compares it byte-for-byte with the
+requested name, and reserves unscoped names for packs it already holds a claim
+for. --allow-unscoped-name submits such a legacy unscoped name anyway.
+
 --dev-auth (localhost only) replaces all other credentials. Otherwise,
 authentication precedence is --token, GC_REGISTRY_TOKEN, a complete session
 cookie and CSRF-token pair from flags or the environment, a stored native
@@ -146,7 +154,8 @@ or use "gc pack registry login" to create a separate native Registry token.`,
 		},
 	}
 	cmd.Flags().StringVar(&opts.RegistryURL, "registry-url", "", "registry app base URL; defaults to GC_REGISTRY_URL, the stored login default, then "+defaultRegistryPublishURL)
-	cmd.Flags().StringVar(&opts.Name, "name", "", "registry pack name; defaults to [pack].name")
+	cmd.Flags().StringVar(&opts.Name, "name", "", "registry pack name; must equal [pack].name (the registry rejects a mismatch)")
+	cmd.Flags().BoolVar(&opts.AllowUnscopedName, "allow-unscoped-name", false, "submit an unscoped (bare) pack name; the registry accepts these only for names it already holds a claim for")
 	cmd.Flags().StringVar(&opts.Version, "version", "", "release version; defaults to [pack].version")
 	cmd.Flags().StringVar(&opts.Ref, "ref", "", "release ref label; defaults to the upstream branch name")
 	cmd.Flags().StringVar(&opts.Description, "description", "", "release description; defaults to [pack].description")
@@ -201,6 +210,13 @@ func doRegistryPublish(ctx context.Context, packRoot string, opts registryPublis
 	if err != nil {
 		fmt.Fprintf(stderr, "gc pack registry publish: %v\n", err) //nolint:errcheck
 		return 1
+	}
+
+	// Warn before the dry-run early return: a dry run is exactly where a
+	// publisher checks what --allow-unscoped-name is about to do, and the flag
+	// only holds if the registry already holds a claim for the bare name.
+	if opts.AllowUnscopedName && !strings.Contains(request.RequestedName, "/") {
+		fmt.Fprintf(stderr, "gc pack registry publish: warning: submitting unscoped name %q; the registry accepts it only when it already holds a claim for that name\n", request.RequestedName) //nolint:errcheck
 	}
 
 	if opts.DryRun {
@@ -345,7 +361,10 @@ func buildRegistryPublishRequest(ctx context.Context, packRoot string, opts regi
 	}
 	name := strings.TrimSpace(registryFirstNonEmpty(opts.Name, manifest.Pack.Name))
 	if name == "" {
-		return registryPublishRequest{}, errors.New("pack name is required; set [pack].name or pass --name")
+		return registryPublishRequest{}, errors.New("pack name is required; set [pack].name in pack.toml")
+	}
+	if err := validateRegistryPublishName(name, manifest.Pack.Name, repoRef.RepoURL, opts.AllowUnscopedName); err != nil {
+		return registryPublishRequest{}, err
 	}
 	ref := repoRef.Ref
 	description := strings.TrimSpace(registryFirstNonEmpty(opts.Description, manifest.Pack.Description))
@@ -358,6 +377,73 @@ func buildRegistryPublishRequest(ctx context.Context, packRoot string, opts regi
 		RequestedRef:         ref,
 		RequestedDescription: description,
 	}, nil
+}
+
+// validateRegistryPublishName refuses locally what the registry refuses
+// remotely, so a doomed publish never burns a request slot or parks a dead row
+// in the review queue. It is the local twin of packNamePolicyViolation in the
+// registry's server/publish.ts, which enforces the same two namespace rules
+// first at validation and again at approve: unscoped names are reserved, and a
+// scoped name's scope must equal the lowercased GitHub owner of the source
+// repository. Only the reserved rule gets an escape hatch here, because the
+// registry does accept an unscoped name it already holds a claim for and a
+// local preflight cannot see the claim table; the scope rule has no
+// server-side override, so it has none here either.
+//
+// The checks are ordered so the first error a publisher sees leads to the one
+// correct fix, and each message is shaped by which half of the pair is wrong: a
+// bare --name against an already correctly scoped pack.toml prescribes fixing
+// the flag, every other mismatch prescribes the pack.toml edit. A pack.toml
+// declaring "mathcity" published as "tdupu/mathcity" reports the mismatch and
+// prescribes the pack.toml edit; dropping the scope to satisfy that message
+// instead reports the reserved name and prescribes the same edit. Both roads
+// end at [pack].name carrying the scoped name.
+func validateRegistryPublishName(name, manifestName, repoURL string, allowUnscoped bool) error {
+	if err := packregistry.ValidatePackName(name); err != nil {
+		return fmt.Errorf("%w; registry names are lowercase [a-z0-9-] segments in <github-owner>/<pack> form", err)
+	}
+	owner, err := registryGitHubRepoOwner(repoURL)
+	if err != nil {
+		return err
+	}
+	ownerLower := strings.ToLower(owner)
+	if manifestName == "" {
+		// --name can no longer stand in for a missing [pack].name: the registry
+		// rejects a nameless pack.toml outright, before it compares anything, so
+		// accepting the flag here would only build a request doomed on arrival.
+		// The suggestion is always rescoped to the repository owner rather than
+		// echoing --name back, because a foreign scope repeated verbatim names a
+		// pack.toml edit the very next run's scope check refuses.
+		bare := name
+		if _, rest, scoped := strings.Cut(name, "/"); scoped {
+			bare = rest
+		}
+		return fmt.Errorf("pack.toml does not declare [pack].name; the registry rejects such publishes, so set [pack].name = %q and push before publishing", ownerLower+"/"+bare)
+	}
+	if name != manifestName {
+		// A bare --name against an already correctly scoped pack.toml means the
+		// flag is the stale half, typically a CI workflow still passing the
+		// pre-scope name. Prescribing the pack.toml edit there would tell the
+		// publisher to drop the scope, and the next run would refuse the result as
+		// a reserved unscoped name.
+		manifestScope, _, manifestScoped := strings.Cut(manifestName, "/")
+		manifestIsPublishable := manifestScoped && manifestScope == ownerLower && packregistry.ValidatePackName(manifestName) == nil
+		if !strings.Contains(name, "/") && manifestIsPublishable {
+			return fmt.Errorf("--name %q does not match pack.toml [pack].name %q; the registry compares them byte-for-byte, and pack.toml already carries the correctly scoped name, so drop --name or pass --name %q", name, manifestName, manifestName)
+		}
+		return fmt.Errorf("--name %q does not match pack.toml [pack].name %q; the registry compares them byte-for-byte, so set [pack].name = %q and push before publishing", name, manifestName, name)
+	}
+	scope, rest, scoped := strings.Cut(name, "/")
+	if !scoped {
+		if allowUnscoped {
+			return nil
+		}
+		return fmt.Errorf("unscoped pack name %q is reserved by the registry; set [pack].name = %q and push before publishing, or pass --allow-unscoped-name if the registry already holds a claim for %q", name, ownerLower+"/"+name, name)
+	}
+	if scope != ownerLower {
+		return fmt.Errorf("pack name scope %q does not match the source repository owner %q; set [pack].name = %q and push before publishing", scope, owner, ownerLower+"/"+rest)
+	}
+	return nil
 }
 
 // registryPublishRepoRef carries the GitHub repository URL and release ref
@@ -452,9 +538,9 @@ func registryGitHubActionsRepoRef(commit string, opts registryPublishOptions) (r
 }
 
 // readRegistryPackManifest loads pack.toml from packRoot. It does not require
-// [pack].name: buildRegistryPublishRequest applies the --name fallback first
-// and reports a missing name only when neither the manifest nor the flag
-// supplies one, so the advertised --name override actually takes effect.
+// [pack].name; buildRegistryPublishRequest reports that, because the registry
+// rejects a pack.toml declaring no name at all and the resulting error can then
+// name the exact [pack].name edit that fixes the publish.
 func readRegistryPackManifest(packRoot string) (registryPackManifest, error) {
 	packToml := filepath.Join(packRoot, "pack.toml")
 	data, err := os.ReadFile(packToml)
@@ -534,6 +620,21 @@ func normalizeGitHubOwnerRepo(path string) (string, error) {
 		return "", fmt.Errorf("invalid GitHub owner/repo path %q", path)
 	}
 	return "https://github.com/" + path, nil
+}
+
+// registryGitHubRepoOwner cuts the owner login out of a publish request's
+// repository URL. Every such URL passes through normalizeGitHubOwnerRepo above,
+// on the upstream-remote path and the GitHub Actions fallback path alike, so
+// the https://github.com/<owner>/<repo> shape is guaranteed here. The error
+// exists so a future change to that normalization surfaces as a refused publish
+// rather than as a silently skipped namespace check.
+func registryGitHubRepoOwner(repoURL string) (string, error) {
+	if path, ok := strings.CutPrefix(strings.TrimSpace(repoURL), "https://github.com/"); ok {
+		if owner, _, cut := strings.Cut(path, "/"); cut && owner != "" {
+			return owner, nil
+		}
+	}
+	return "", fmt.Errorf("cannot derive the GitHub owner from repository URL %q", repoURL)
 }
 
 func registryPublishPackPath(repoRoot, packRoot string) (string, error) {
@@ -621,7 +722,8 @@ func (rt *registryProviderReauthRoundTripper) RoundTrip(req *http.Request) (*htt
 	if err != nil || resp == nil || resp.StatusCode != http.StatusUnauthorized || rt.refresh == nil {
 		return resp, err
 	}
-	if !registryHasBearerAuthorization(req.Header.Get("Authorization")) ||
+	if !isRegistryRetrySafeMethod(req.Method) ||
+		!registryHasBearerAuthorization(req.Header.Get("Authorization")) ||
 		(req.Body != nil && req.Body != http.NoBody && req.GetBody == nil) {
 		return resp, nil
 	}
@@ -629,7 +731,16 @@ func (rt *registryProviderReauthRoundTripper) RoundTrip(req *http.Request) (*htt
 	token, err := rt.refresh(req.Context(), true)
 	if err != nil {
 		_ = resp.Body.Close()
-		return nil, fmt.Errorf("refreshing registry credential after 401: %w", err)
+		if ctxErr := req.Context().Err(); ctxErr != nil {
+			return nil, fmt.Errorf("refreshing registry credential after 401: %w", ctxErr)
+		}
+		if errors.Is(err, context.Canceled) {
+			return nil, fmt.Errorf("refreshing registry credential after 401: %w", context.Canceled)
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("refreshing registry credential after 401: %w", context.DeadlineExceeded)
+		}
+		return nil, errors.New("refreshing registry credential after 401: credential refresh failed")
 	}
 	token = strings.TrimSpace(token)
 	if token == "" {
@@ -642,7 +753,7 @@ func (rt *registryProviderReauthRoundTripper) RoundTrip(req *http.Request) (*htt
 		retry.Body, err = req.GetBody()
 		if err != nil {
 			_ = resp.Body.Close()
-			return nil, fmt.Errorf("replaying registry request after credential refresh: %w", err)
+			return nil, errors.New("replaying registry request after credential refresh: request body recreation failed")
 		}
 	}
 	retry.Header.Set("Authorization", "Bearer "+token)
@@ -653,6 +764,15 @@ func (rt *registryProviderReauthRoundTripper) RoundTrip(req *http.Request) (*htt
 func registryHasBearerAuthorization(value string) bool {
 	fields := strings.Fields(value)
 	return len(fields) == 2 && strings.EqualFold(fields[0], "Bearer") && fields[1] != ""
+}
+
+func isRegistryRetrySafeMethod(method string) bool {
+	switch strings.ToUpper(method) {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	default:
+		return false
+	}
 }
 
 func (a registryPublishAuth) hasCredentials() bool {

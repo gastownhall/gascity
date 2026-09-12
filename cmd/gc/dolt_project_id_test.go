@@ -76,6 +76,22 @@ func seedDatabaseProjectIDQueries(projectID string) []string {
 	}
 }
 
+// nativeStorageFixtureBootTimeout bounds fixture cold-boot of a passworded
+// Dolt server before beads.OpenNativeStorage. Isolated cost is ~4s; 60s
+// leaves headroom for shard-parallel host contention (ga-uswva7).
+const nativeStorageFixtureBootTimeout = 60 * time.Second
+
+// TestNativeStorageFixtureBootTimeoutSurvivesShardContention guards against
+// ga-uswva7: a 15s budget left ~11s margin over the ~4s isolated cold-boot,
+// which shard-parallel contention intermittently exceeded.
+func TestNativeStorageFixtureBootTimeoutSurvivesShardContention(t *testing.T) {
+	const minSafeBootTimeout = 60 * time.Second
+	if nativeStorageFixtureBootTimeout < minSafeBootTimeout {
+		t.Fatalf("nativeStorageFixtureBootTimeout = %s, want >= %s (see ga-uswva7: isolated cold-boot ~4s, shard-parallel contention intermittently exceeded 15s)",
+			nativeStorageFixtureBootTimeout, minSafeBootTimeout)
+	}
+}
+
 func startPasswordedDoltServer(t *testing.T, repoDir string, setupQueries ...string) (string, int, int, func()) {
 	t.Helper()
 	skipSlowCmdGCTest(t, "requires a real Dolt server; run make test-cmd-gc-process for full coverage")

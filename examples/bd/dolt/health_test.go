@@ -2211,3 +2211,349 @@ func TestHealthScriptQuarantineHumanExitCode(t *testing.T) {
 		}
 	})
 }
+
+// backupsReport is the `backups` block of `gc dolt health --json`. dolt_stale
+// is a *bool on purpose: the whole point of the block is that an unmeasured
+// probe must be distinguishable from a measured healthy one, and decoding it
+// into a plain bool would collapse null and false back into the same value —
+// reintroducing the defect the tests below exist to catch.
+type backupsReport struct {
+	DoltMeasured bool   `json:"dolt_measured"`
+	DoltFresh    string `json:"dolt_freshness"`
+	DoltAgeSec   int    `json:"dolt_age_sec"`
+	DoltStale    *bool  `json:"dolt_stale"`
+	MigMeasured  bool   `json:"migration_measured"`
+	MigStale     *bool  `json:"migration_stale"`
+	Databases    []struct {
+		Name   string `json:"name"`
+		AgeSec int    `json:"age_sec"`
+		Fresh  string `json:"freshness"`
+		Stale  bool   `json:"stale"`
+	} `json:"dolt_databases"`
+}
+
+// runHealthBackupsJSON runs the health command against cityPath with no live
+// server and returns the decoded backups block. The server is deliberately
+// absent: backup freshness is a filesystem measurement, so this exercises it
+// in isolation, and JSON mode always exits 0.
+func runHealthBackupsJSON(t *testing.T, cityPath string) (backupsReport, []byte) {
+	t.Helper()
+	binDir := t.TempDir()
+	for _, name := range []string{"gc", "lsof", "nc", "dolt"} {
+		writeExecutable(t, filepath.Join(binDir, name), "#!/bin/sh\nexit 1\n")
+	}
+	root := repoRoot(t)
+	env := append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "GC_BACKUP_ARTIFACT_DIR", "GC_HEALTH_BACKUP_STALE_S", "GC_DOCTOR_BACKUP_STALE_S", "PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT=59997",
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+	out, err := newHealthScriptCmd(root, env, "--json").Output()
+	if err != nil {
+		t.Fatalf("health run.sh --json failed: %v\n%s", err, out)
+	}
+	var report struct {
+		Backups backupsReport `json:"backups"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("parse health JSON: %v\n%s", err, out)
+	}
+	return report.Backups, out
+}
+
+// TestHealthUnmeasuredBackupFreshnessIsNotAHealthyVerdict pins the property
+// that a backup check which measured nothing must not render as a measured
+// healthy one.
+//
+// The regression: backup_freshness/backup_age_sec/backup_stale were
+// initialized to "", 0 and false, and the block that would overwrite them was
+// skipped whenever no backup was found. JSON mode then emitted a confident
+// "dolt_stale": false for a city whose bead store had no backup at all. One
+// city ran 18 hours with a stale backup while this field reported healthy.
+//
+// The assertion that matters is DoltStale == nil rather than DoltStale ==
+// false: a plain bool cannot tell those apart, which is exactly how the
+// original defect stayed invisible.
+func TestHealthUnmeasuredBackupFreshnessIsNotAHealthyVerdict(t *testing.T) {
+	cityPath := t.TempDir()
+
+	backups, out := runHealthBackupsJSON(t, cityPath)
+
+	if backups.DoltMeasured {
+		t.Errorf("dolt_measured = true with no backup artifact dir, want false\n%s", out)
+	}
+	if backups.DoltStale != nil {
+		t.Fatalf("dolt_stale = %v on an unmeasured probe, want null; a measurement that never ran must never render as a verdict\n%s", *backups.DoltStale, out)
+	}
+	if len(backups.Databases) != 0 {
+		t.Errorf("dolt_databases = %d entries with no artifact dir, want 0\n%s", len(backups.Databases), out)
+	}
+	// The migration half carries the same contract on the same evidence.
+	if backups.MigMeasured || backups.MigStale != nil {
+		t.Errorf("migration_measured=%v migration_stale=%v, want false/null with no migration-backup-* dirs\n%s", backups.MigMeasured, backups.MigStale, out)
+	}
+	// Raw-text guard: the decoded form above would also be satisfied by the
+	// field being absent, and a consumer reading the document directly sees
+	// the literal. Pin the literal too.
+	if !strings.Contains(string(out), `"dolt_stale": null`) {
+		t.Errorf("JSON must carry an explicit null dolt_stale, got:\n%s", out)
+	}
+}
+
+// TestHealthReportsStaleBackupPerDatabase pins the other half: when backups
+// ARE measured, a stale one is reported as stale and named.
+//
+// This is the reading the old probe could never produce, because it globbed
+// $GC_CITY_PATH/migration-backup-* — the schema-migration rollback snapshots
+// that `gc dolt rollback` restores — while naming its fields dolt_*. It never
+// looked at the backup remotes under .dolt-backup/ at all, so a city whose
+// bead-store backup had stopped six hours earlier looked identical to one
+// backing up on schedule.
+//
+// The aggregate must follow the WORST database. A city where one database
+// syncs and another does not is the exact shape of the incident, and a healthy
+// sibling must not average the stale one away.
+func TestHealthReportsStaleBackupPerDatabase(t *testing.T) {
+	cityPath := t.TempDir()
+	artifactDir := filepath.Join(cityPath, ".dolt-backup")
+	for _, db := range []string{"hq", "aa"} {
+		if err := os.MkdirAll(filepath.Join(artifactDir, db), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", db, err)
+		}
+	}
+	stale := filepath.Join(artifactDir, "hq", "manifest")
+	if err := os.WriteFile(stale, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write hq manifest: %v", err)
+	}
+	staleAt := time.Now().Add(-20 * time.Hour)
+	if err := os.Chtimes(stale, staleAt, staleAt); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	fresh := filepath.Join(artifactDir, "aa", "manifest")
+	if err := os.WriteFile(fresh, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write aa manifest: %v", err)
+	}
+
+	backups, out := runHealthBackupsJSON(t, cityPath)
+
+	if !backups.DoltMeasured {
+		t.Fatalf("dolt_measured = false with two populated backup dirs, want true\n%s", out)
+	}
+	if backups.DoltStale == nil || !*backups.DoltStale {
+		t.Fatalf("dolt_stale = %v, want true: hq's backup is 20h old\n%s", backups.DoltStale, out)
+	}
+	if backups.DoltAgeSec < 19*3600 {
+		t.Errorf("dolt_age_sec = %d, want the OLDEST database's age (~72000), not the newest\n%s", backups.DoltAgeSec, out)
+	}
+	byName := map[string]bool{}
+	for _, db := range backups.Databases {
+		byName[db.Name] = db.Stale
+	}
+	if len(byName) != 2 {
+		t.Fatalf("dolt_databases = %v, want one entry per backup dir\n%s", backups.Databases, out)
+	}
+	if !byName["hq"] {
+		t.Errorf("hq reported not stale at 20h; an operator cannot act on an aggregate that does not name the database\n%s", out)
+	}
+	if byName["aa"] {
+		t.Errorf("aa reported stale on a backup written just now\n%s", out)
+	}
+}
+
+// TestHealthReportsNeverBackedUpDatabaseAsStale covers the third state, which
+// is neither fresh nor unknown: the remote is configured and has produced
+// nothing. Never having been backed up is known-bad, so it must read stale
+// rather than unmeasured, and its age must not pass for a recent one.
+func TestHealthReportsNeverBackedUpDatabaseAsStale(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".dolt-backup", "hq"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	backups, out := runHealthBackupsJSON(t, cityPath)
+
+	if !backups.DoltMeasured {
+		t.Fatalf("dolt_measured = false for a configured-but-empty backup dir, want true\n%s", out)
+	}
+	if backups.DoltStale == nil || !*backups.DoltStale {
+		t.Fatalf("dolt_stale = %v for a database that has never been backed up, want true\n%s", backups.DoltStale, out)
+	}
+	if len(backups.Databases) != 1 || backups.Databases[0].AgeSec != -1 {
+		t.Fatalf("dolt_databases = %v, want one hq entry with age_sec -1 so no consumer reads 0 as fresh\n%s", backups.Databases, out)
+	}
+	if !backups.Databases[0].Stale {
+		t.Errorf("never-backed-up hq reported not stale\n%s", out)
+	}
+	// The aggregate carries the same convention as the per-database entry. A
+	// consumer graphing dolt_age_sec must not be handed 0 — the best possible
+	// reading — for a city whose bead store has no backup at all.
+	if backups.DoltAgeSec != -1 {
+		t.Errorf("dolt_age_sec = %d for a city with no backup at all, want -1; 0 is the freshest value there is\n%s", backups.DoltAgeSec, out)
+	}
+}
+
+// TestHealthAggregateAgeFollowsTheNeverBackedUpDatabase pins that -1 beats a
+// finite age in the aggregate rather than losing to it.
+//
+// -1 is a sentinel, not a small number, so a worst-first rule written as a
+// numeric maximum silently picks the healthy sibling. The mixed shape is the
+// one to guard: a city part-way through provisioning has one database syncing
+// and another that has never produced a backup, and reporting the syncing
+// one's age as the aggregate is how the unbacked database disappears.
+func TestHealthAggregateAgeFollowsTheNeverBackedUpDatabase(t *testing.T) {
+	cityPath := t.TempDir()
+	artifactDir := filepath.Join(cityPath, ".dolt-backup")
+	for _, db := range []string{"aa", "hq"} {
+		if err := os.MkdirAll(filepath.Join(artifactDir, db), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", db, err)
+		}
+	}
+	// aa syncs; hq is configured and has produced nothing. aa sorts first, so
+	// the glob hands the finite age to the aggregate before the sentinel.
+	if err := os.WriteFile(filepath.Join(artifactDir, "aa", "manifest"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write aa manifest: %v", err)
+	}
+
+	backups, out := runHealthBackupsJSON(t, cityPath)
+
+	if backups.DoltStale == nil || !*backups.DoltStale {
+		t.Fatalf("dolt_stale = %v with one never-backed-up database, want true\n%s", backups.DoltStale, out)
+	}
+	if backups.DoltAgeSec != -1 {
+		t.Errorf("dolt_age_sec = %d, want -1: hq has never been backed up and that is worse than aa's age, not smaller than it\n%s", backups.DoltAgeSec, out)
+	}
+	if backups.DoltFresh != "" {
+		t.Errorf("dolt_freshness = %q for a never-backed-up worst database, want empty\n%s", backups.DoltFresh, out)
+	}
+}
+
+// TestHealthReportsFreshnessForABackupWrittenThisSecond pins that an age of 0
+// seeds the aggregate.
+//
+// The clamp above it turns any non-positive age into 0, so 0 is a reachable
+// measured state rather than a theoretical one: a sync finishing in the second
+// the check runs, or a backup file whose mtime is a little ahead of this
+// clock. Seeding the aggregate from a zero rather than comparing against one
+// is what keeps that city from reporting the empty dolt_freshness of a city
+// nothing was measured on.
+func TestHealthReportsFreshnessForABackupWrittenThisSecond(t *testing.T) {
+	cityPath := t.TempDir()
+	manifest := filepath.Join(cityPath, ".dolt-backup", "hq", "manifest")
+	if err := os.MkdirAll(filepath.Dir(manifest), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(manifest, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	ahead := time.Now().Add(5 * time.Second)
+	if err := os.Chtimes(manifest, ahead, ahead); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	backups, out := runHealthBackupsJSON(t, cityPath)
+
+	if backups.DoltStale == nil || *backups.DoltStale {
+		t.Fatalf("dolt_stale = %v for a backup written this second, want false\n%s", backups.DoltStale, out)
+	}
+	if backups.DoltAgeSec != 0 {
+		t.Fatalf("dolt_age_sec = %d, want 0 from the non-negative clamp\n%s", backups.DoltAgeSec, out)
+	}
+	if backups.DoltFresh != "0s" {
+		t.Errorf("dolt_freshness = %q, want \"0s\"; an empty string here is what an unmeasured probe reports\n%s", backups.DoltFresh, out)
+	}
+}
+
+// TestHealthAgesABackupRemoteByItsManifestNotItsNewestChunk pins which file
+// in a backup remote carries the freshness reading.
+//
+// `dolt backup sync` writes chunk data first and adopts it by rewriting the
+// manifest last, so a sync the server cuts off in between leaves chunk files
+// newer than anything the manifest references. That is the failure this
+// command exists to report honestly, and it is exactly where the newest file
+// of any kind lies: on the city that produced this test an hq remote held a
+// chunk written at 21:04 beside a manifest still reading 15:04, so a
+// newest-file reading called a six-hour-old backup nine minutes old.
+//
+// Both directions are asserted from one fixture. hq has the fresh chunk and
+// the stale manifest, so a newest-file reading calls it fresh; aa has the
+// fresh manifest and the old chunk, so a reading that took the oldest file
+// instead would call it stale.
+func TestHealthAgesABackupRemoteByItsManifestNotItsNewestChunk(t *testing.T) {
+	cityPath := t.TempDir()
+	artifactDir := filepath.Join(cityPath, ".dolt-backup")
+	stamp := func(path string, at time.Time) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+		}
+		if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+		if err := os.Chtimes(path, at, at); err != nil {
+			t.Fatalf("chtimes %s: %v", path, err)
+		}
+	}
+	now := time.Now()
+	old := now.Add(-20 * time.Hour)
+	stamp(filepath.Join(artifactDir, "hq", "manifest"), old)
+	stamp(filepath.Join(artifactDir, "hq", "chunk.darc"), now)
+	stamp(filepath.Join(artifactDir, "aa", "manifest"), now)
+	stamp(filepath.Join(artifactDir, "aa", "chunk.darc"), old)
+
+	backups, out := runHealthBackupsJSON(t, cityPath)
+
+	byName := map[string]bool{}
+	for _, db := range backups.Databases {
+		byName[db.Name] = db.Stale
+	}
+	if len(byName) != 2 {
+		t.Fatalf("dolt_databases = %v, want one entry per backup remote\n%s", backups.Databases, out)
+	}
+	if !byName["hq"] {
+		t.Errorf("hq reported not stale: its manifest is 20h old and the fresher chunk beside it is not a backup\n%s", out)
+	}
+	if byName["aa"] {
+		t.Errorf("aa reported stale: its manifest was written just now, however old the chunk beside it is\n%s", out)
+	}
+	if backups.DoltStale == nil || !*backups.DoltStale {
+		t.Errorf("dolt_stale = %v, want true from hq's stale manifest\n%s", backups.DoltStale, out)
+	}
+	if backups.DoltAgeSec < 19*3600 {
+		t.Errorf("dolt_age_sec = %d, want hq's manifest age (~72000), not its newest chunk's\n%s", backups.DoltAgeSec, out)
+	}
+}
+
+// TestHealthReportsARemoteWithChunksButNoManifestAsNeverBackedUp covers the
+// remote a first sync never finished: chunk data landed and no manifest ever
+// adopted it. Nothing in it is restorable, so it reads exactly like an empty
+// remote rather than like a backup as fresh as its newest chunk.
+func TestHealthReportsARemoteWithChunksButNoManifestAsNeverBackedUp(t *testing.T) {
+	cityPath := t.TempDir()
+	chunk := filepath.Join(cityPath, ".dolt-backup", "hq", "chunk.darc")
+	if err := os.MkdirAll(filepath.Dir(chunk), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(chunk, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write chunk: %v", err)
+	}
+
+	backups, out := runHealthBackupsJSON(t, cityPath)
+
+	if !backups.DoltMeasured {
+		t.Fatalf("dolt_measured = false for a configured remote, want true\n%s", out)
+	}
+	if backups.DoltStale == nil || !*backups.DoltStale {
+		t.Fatalf("dolt_stale = %v for a remote with no manifest, want true\n%s", backups.DoltStale, out)
+	}
+	if len(backups.Databases) != 1 || backups.Databases[0].AgeSec != -1 || !backups.Databases[0].Stale {
+		t.Fatalf("dolt_databases = %v, want one hq entry with age_sec -1 and stale true: a chunk without a manifest is not a backup\n%s", backups.Databases, out)
+	}
+	if backups.DoltAgeSec != -1 {
+		t.Errorf("dolt_age_sec = %d, want -1; the chunk's mtime must not pass for a backup age\n%s", backups.DoltAgeSec, out)
+	}
+}

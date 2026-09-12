@@ -321,15 +321,15 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 			if node.Key == rootKey {
 				continue
 			}
-			// Single-step workflows deadlock if the generated workflow-finalize
-			// gains a "tracks" edge back to the root: the compiler already emits
-			// root --blocks--> workflow-finalize (addWorkflowRootDeps), so a
-			// workflow-finalize --tracks--> root edge closes a mutual finalize
-			// <-> root cycle that neither controller-managed bead can ever
-			// break — both stay open forever (su-mla5h). The root already
-			// reaches the finalizer through that blocks edge and the finalizer
-			// carries gc.root_bead_id, so the ownership tracks edge is redundant
-			// here. Multi-step workflows keep the tracks edge unchanged.
+			// Single-step workflows deadlocked when the generated
+			// workflow-finalize gained a "tracks" edge back to the root on top
+			// of the compiler's own root -> workflow-finalize edge
+			// (addWorkflowRootDeps): the pair closed a mutual finalize <-> root
+			// cycle that neither controller-managed bead could break — both
+			// stayed open forever (su-mla5h). The root already reaches the
+			// finalizer through that edge and the finalizer carries
+			// gc.root_bead_id, so the ownership tracks edge is redundant here.
+			// Multi-step workflows keep the tracks edge unchanged.
 			if singleStep && node.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflowFinalize {
 				continue
 			}

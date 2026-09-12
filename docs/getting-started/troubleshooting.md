@@ -328,9 +328,10 @@ the flock requirement entirely.
 
 ## Cursor MCP Tools Still Prompt or Appear Unavailable
 
-The built-in `cursor` provider starts `cursor-agent` with `-f` and leaves
-Cursor's MCP approval prompt enabled by default. This avoids silently approving
-user or global MCP servers that Cursor can also see through `~/.cursor/mcp.json`.
+The built-in `cursor` provider starts `cursor-agent` with `-f --trust` so an
+unattended worker does not stop at Cursor's workspace-trust dialog. Use it only
+for workspaces whose contents you trust. The flag does not approve MCP servers;
+Cursor's MCP approval prompt remains enabled by default.
 
 For unattended Cursor pool workers, opt in only after confirming that every
 workspace and user/global MCP server visible to Cursor is trusted. The
@@ -344,8 +345,8 @@ mcp_approval = "approve"
 ```
 
 If you override Cursor `args` directly, the override replaces the built-in
-args. Include `-f` yourself and add `--approve-mcps` only for the same explicit
-trust decision. Agent-level `args` overrides behave the same way.
+args. Include `-f --trust` yourself and add `--approve-mcps` only for the same
+explicit MCP trust decision. Agent-level `args` overrides behave the same way.
 
 Existing Cursor sessions keep the command fingerprint they were created with.
 The supervisor reconciler restarts sessions automatically after the fingerprint
@@ -627,12 +628,23 @@ instead of mailing a hardcoded role. Orders inherit the orchestrator's
 environment, so set these at orchestrator start to customize routing:
 
 - `GC_ESCALATION_RECIPIENT` — mail recipient for escalations (default:
-  `human`, the reserved human mailbox).
+  `human`, the reserved human mailbox). An agent recipient is woken with
+  `--notify`; the `human` default is a mailbox with no session behind it,
+  so nothing is woken and the escalation waits until somebody reads that
+  inbox. Point this at the agent that surfaces alerts (the manager, on a
+  Slack-connected city) if you want maintenance advisories acted on rather
+  than filed.
 - `GC_ESCALATE_SCRIPT` — absolute path to an escalation script to run
   instead of searching packs.
 - `GC_ESCALATE_SEARCH_PACKS` — space-separated pack names searched (in
   order) for an `assets/scripts/escalate.sh` override (default:
   `gastown maintenance bd core`). A pack earlier in the list wins.
+- `GC_ESCALATE_SEND_TIMEOUT_SECS` — wall-clock bound on one escalation
+  send (default: 30). The wake can outlive the send it follows, and
+  escalations run inline in maintenance orders, so the bound keeps a slow
+  wake from stalling the run that raised the alarm. The mail is written
+  before the wake blocks, so a tripped bound costs the wake, not the
+  message, and the script still exits 0.
 - `GC_MAINTENANCE_DONE_TARGET` — session target to nudge with
   `MAINTENANCE_DONE:`/warn summaries when a maintenance run completes
   (default: unset, no completion nudge). Deployments that relied on the

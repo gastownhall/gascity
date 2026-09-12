@@ -147,7 +147,7 @@ func readyFederationLegsOverBinding(cityName string, cityStore beads.Store, rigS
 		classes := infrastructureClasses()
 		bindings = []storeref.ClassBinding{{
 			Classes:  classes,
-			Prefixes: reservedPrefixesFor(classes),
+			Prefixes: storeref.ReservedPrefixesFor(classes),
 			Leg:      storeref.Leg{Ref: storeref.ClassRef(classes), Store: leg},
 		}}
 	}

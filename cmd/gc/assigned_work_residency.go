@@ -132,6 +132,34 @@ func assignedWorkClaimRefs(cityPath string, cfg *config.City, leading beads.Stor
 	return out
 }
 
+// assignedWorkRelocatedClaimRefs is assignedWorkClaimRefs for the callers that
+// may only widen where a class was actually RELOCATED: it answers empty for a
+// single-store city.
+//
+// The wake filter can take the unconditional set because it matches a session's
+// own exact assignee identity, so a wider ref set still admits only that
+// session's own claims. Pool demand matches a routed TEMPLATE, so the same set
+// would make city-store work resume a rig-scoped pool session on a city that
+// relocates nothing — the reachability rule
+// TestBuildDesiredState_RigPoolIgnoresAssignedWorkInUnreachableStore pins, and
+// the reason this is a second function rather than a second caller of the first.
+//
+// On a city that DOES relocate, the collapse inside ClaimRefs is what makes the
+// answer right on both planes: a leading arm that is itself the binding reports
+// the single ref its census records, and a distinct binding reports its own.
+func assignedWorkRelocatedClaimRefs(cityPath string, cfg *config.City, leading beads.Store) []string {
+	topology := residencyTopologyForCity(cityPath, cfg, censusWorkLeg(cityPath, leading), nil)
+	if topology.IsSingleStore() {
+		return nil
+	}
+	refs := topology.ClaimRefs()
+	out := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		out = append(out, string(ref))
+	}
+	return out
+}
+
 // assignedWorkScanComplete turns a partial pass into an error for the gates that
 // answer "does this session still hold work?".
 //

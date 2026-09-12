@@ -244,6 +244,7 @@ var testProviderStubCommands = []string{
 	"amp",
 	"opencode",
 	"mimo",
+	"zcode-repl",
 	"auggie",
 	"pi",
 	"omp",

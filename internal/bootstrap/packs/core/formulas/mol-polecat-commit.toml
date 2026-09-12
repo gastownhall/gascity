@@ -21,10 +21,10 @@ Push conflicts are handled by fetch + rebase + retry (up to 3 times).
 | Situation | Action |
 |-----------|--------|
 | Tests fail | Fix them. Do not proceed with failures. |
-| Push conflict (3 retries exhausted) | Mail Witness, mark yourself stuck |
-| Blocked on external | Mail Witness, mark yourself stuck |
+| Push conflict (3 retries exhausted) | Mail the escalation target, mark yourself stuck |
+| Blocked on external | Mail the escalation target, mark yourself stuck |
 | Context filling | `gc runtime request-restart` (blocks until controller kills you) |
-| Unsure what to do | Mail Witness, don't guess |"""
+| Unsure what to do | Mail the escalation target, don't guess |"""
 formula = "mol-polecat-commit"
 extends = ["mol-polecat-base"]
 
@@ -73,7 +73,7 @@ WORKTREE_PATH=$(pwd)/worktrees/"$WORK_BEAD_ID"
 git worktree add "$WORKTREE_PATH" --detach origin/{{base_branch}}
 cd "$WORKTREE_PATH"
 ```
-Record immediately so restarts and witness recovery can find it:
+Record immediately so restarts and work-health recovery can find it:
 ```bash
 gc bd update "$WORK_BEAD_ID" --set-metadata work_dir="$WORKTREE_PATH"
 ```
@@ -121,7 +121,7 @@ for attempt in 1 2 3; do
     fi
     if [ "$attempt" -eq 3 ]; then
         echo "Push failed after 3 attempts"
-        gc mail send <rig>/witness -s "HELP: Push conflict after 3 retries" \
+        gc mail send {{escalation_target}} -s "HELP: Push conflict after 3 retries" \
           -m "Issue: $WORK_BEAD_ID. Cannot push to {{base_branch}}."
         gc runtime drain-ack
         exit 1
@@ -136,8 +136,23 @@ done
 **3. Clean up worktree:**
 ```bash
 WORKTREE_PATH=$(pwd)
+# --git-common-dir, not --show-toplevel: inside a linked worktree the latter
+# returns the worktree itself, which stops existing halfway through cleanup
+# and is useless for the prune fallback.
+REPO=$(git rev-parse --path-format=absolute --git-common-dir)
 cd ..
-git worktree remove "$WORKTREE_PATH" --force
+if [ -z "$REPO" ]; then
+    echo "cleanup: could not resolve the owning repo; leaving $WORKTREE_PATH in place" >&2
+elif ! git -C "$REPO" worktree remove --force "$WORKTREE_PATH"; then
+    # A linked worktree's .git is a file; a main checkout's is a directory.
+    # Without this check, a failed remove on a main checkout rm -rf's the repo.
+    if [ -f "$WORKTREE_PATH/.git" ]; then
+        rm -rf "$WORKTREE_PATH"
+        git -C "$REPO" worktree prune
+    else
+        echo "cleanup: refusing to rm -rf $WORKTREE_PATH: not a linked worktree" >&2
+    fi
+fi
 gc bd update "$WORK_BEAD_ID" --unset-metadata work_dir
 ```
 

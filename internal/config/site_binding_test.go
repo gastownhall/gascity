@@ -497,6 +497,26 @@ path = "/legacy/frontend"
 	}
 }
 
+func TestLegacyWorkspaceIdentityWarningCaveatsPackCompatibility(t *testing.T) {
+	// #3887: an operator who strips workspace.name/workspace.prefix from
+	// city.toml on this hint alone can silently break any installed pack still
+	// pinned to a revision that reads those fields directly instead of
+	// .gc/site.toml (observed: inbound Discord messages eaten for ~2 days with
+	// zero alarms). The warning must caveat that risk so operators check pack
+	// compatibility before acting on it.
+	cfg := &City{Workspace: Workspace{Name: "legacy-city"}}
+	warnings := legacyWorkspaceIdentitySurfaceWarnings(cfg, "city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("warnings = %v, want one workspace identity warning", warnings)
+	}
+	if !strings.Contains(warnings[0], "pinned to an older revision may still read") {
+		t.Fatalf("warning = %q, want a pack-compatibility caveat", warnings[0])
+	}
+	if !strings.Contains(warnings[0], "confirm pack compatibility before running `gc doctor --fix`") {
+		t.Fatalf("warning = %q, want the caveat to name `gc doctor --fix`, which itself removes the fields", warnings[0])
+	}
+}
+
 func TestLoadWithIncludes_RejectsLegacyRigPathInSchema2City(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`

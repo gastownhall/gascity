@@ -61,28 +61,98 @@ func (f waitDependencyReaderFunc) Get(id string) (beads.Bead, error) {
 	return f(id)
 }
 
-type waitDependencyStoreSet []beads.Store
+// errWaitDependencyUnproven marks a dependency lookup that found nothing over a
+// frame narrower than the city. It is deliberately NOT beads.ErrNotFound:
+// prepareWaitWakeStateWithSnapshot FAILS a wait on a proved absence, which is
+// terminal and destructive, so "no leg could answer" must never arrive wearing
+// the same error as "this bead does not exist".
+var errWaitDependencyUnproven = errors.New("wait dependency absence not proved: no leg could answer")
 
-func (s waitDependencyStoreSet) Get(id string) (beads.Bead, error) {
-	return storeref.Resolve(id, []beads.Store(s))
+// waitDependencyPlanReader resolves a wait's dependency beads through the
+// residency resolver's BY-ID door, over a topology the caller captured once,
+// instead of over a store list assembled here.
+//
+// # Why ByID and not the work federation
+//
+// A wait dependency is read BY ID, and the binding leads for an id inside a
+// relocated class's reserved namespace: that is what makes a graph-class step a
+// wait can watch visible at all (#5488), and it is what stops the read landing
+// on the frozen pre-migration twin `gc storage migrate` left in the work ledger
+// when the id was minted before the cutover and preserved across it (ga-cu12x).
+// The list this replaced went through storeref.Resolve, whose PrefixOwner fast
+// path routes on the id's own prefix and therefore answered every such id from
+// the retained copy no matter which store the caller put first.
+//
+// Outside every reserved namespace the plan is the house by-id order — the
+// unretired binding residence probes, then the city work ledger, then the rig
+// legs whose configured prefix covers the id — so a co-resident id still answers
+// from the copy `gc ready` serves and the claim lands on.
+//
+// # The topology is captured, not re-derived
+//
+// Re-planning per dependency from a city path could open a second engine on a
+// binding root and answer from a different handle than the one the tick's other
+// reads used. The plan itself is per-id (a ByID plan is id-specific), but every
+// plan is cut from the one captured frame.
+type waitDependencyPlanReader struct {
+	topo storeref.Topology
+	// outOfFrame says what this frame leaves out of the city, or is empty when
+	// it leaves out nothing. A bead the frame cannot reach is out of FRAME, not
+	// out of the city, so a miss over it is not proof and must not fail a wait
+	// the whole city would satisfy.
+	outOfFrame string
 }
 
-func newWaitDependencyStoreSet(cityStore beads.Store, rigStores map[string]beads.Store) waitDependencyStoreSet {
-	stores := make(waitDependencyStoreSet, 0, 1+len(rigStores))
-	if cityStore != nil {
-		stores = append(stores, cityStore)
+// newWaitDependencyPlanReader captures the frame the dependency reads plan over,
+// and what that frame leaves out.
+func newWaitDependencyPlanReader(topo storeref.Topology, narrowedBySuspension bool) waitDependencyPlanReader {
+	return waitDependencyPlanReader{topo: topo, outOfFrame: waitFrameGap(topo, narrowedBySuspension)}
+}
+
+// waitFrameGap names every part of the city this frame cannot answer for.
+//
+// Two things put a store out of frame, and they arrive from opposite
+// directions. Suspension is TOLD to the constructor: the caller already dropped
+// the rig from the serving set, so the leg is simply not there. A prefix fault
+// is READ off the frame itself: the leg is there, and the by-id plan declines
+// to reach it because the prefix the city configured for that rig is not the
+// prefix its store declares (storeref.Topology.PrefixFaults).
+//
+// A rig leg the plan gates out on an AGREEING prefix is neither, and must not
+// be listed here. Gating on the configured prefix is how absence stays provable
+// at all: on any multi-rig city most legs are gated out of most by-id plans, so
+// a rule that called every one of them a gap would make "this dependency is
+// gone" unprovable and a wait on a genuinely deleted dependency would pend
+// forever.
+func waitFrameGap(topo storeref.Topology, narrowedBySuspension bool) string {
+	var gaps []string
+	if narrowedBySuspension {
+		gaps = append(gaps, "a suspended rig is out of frame")
 	}
-	rigNames := make([]string, 0, len(rigStores))
-	for name := range rigStores {
-		rigNames = append(rigNames, name)
+	for _, fault := range topo.PrefixFaults() {
+		gaps = append(gaps, fault.String())
 	}
-	sort.Strings(rigNames)
-	for _, name := range rigNames {
-		if store := rigStores[name]; store != nil {
-			stores = append(stores, store)
-		}
+	return strings.Join(gaps, "; ")
+}
+
+// Get answers three ways, and keeping them distinct is the point of the type: a
+// hit, a PROVED absence (beads.ErrNotFound, which fails the wait), and an
+// unproved one (errWaitDependencyUnproven, which retains it).
+//
+// A read that FAILED is neither: it surfaces as itself. The resolver's by-id
+// plan makes every leg fatal, and a fault is never flattened into absence here
+// — the pass reports it and retries on the next tick rather than reaping a
+// waiter over a store it could not read.
+func (r waitDependencyPlanReader) Get(id string) (beads.Bead, error) {
+	bead, err := byIDBeadForTopology(r.topo, id)
+	switch {
+	case err == nil:
+		return bead, nil
+	case errors.Is(err, beads.ErrNotFound) && r.outOfFrame != "":
+		return beads.Bead{}, fmt.Errorf("%w: %s", errWaitDependencyUnproven, r.outOfFrame)
+	default:
+		return beads.Bead{}, err
 	}
-	return stores
 }
 
 func newWaitCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -708,11 +778,13 @@ func cmdWaitSetStateResult(waitID, state string, stdout, stderr io.Writer) (wait
 	if store == nil {
 		return result, code
 	}
-	// Route SESSION/wait access to the session coordination-class store; the
-	// nudge lookup rides a NudgesStore over the same work store. Identity today.
+	// Route SESSION/wait access to the session coordination-class store and the
+	// nudge lookup to the nudges class store. Identity today; on a relocated city
+	// an unrouted nudge read is silent-empty, which re-delivers a nudge that was
+	// already delivered.
 	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	sessFront := sessionFrontDoor(cliSessionStore(store, cfg, cityPath))
-	nudges := beads.NudgesStore{Store: store}
+	nudges := cliNudgesStore(store, cfg, cityPath)
 	w, err := sessFront.GetWait(waitID)
 	if err != nil {
 		if errors.Is(err, sessionpkg.ErrNotAWait) {
@@ -910,9 +982,18 @@ func depsWaitReadyDetailedFrom(dependencies waitDependencyReader, wait sessionpk
 	closedCount := 0
 	foundAny := false
 	var missingErr error
+	// An unproved absence can neither ready a wait nor fail one, so it is carried
+	// to the end: a later dependency may still answer the question outright.
+	var unprovenErr error
 	for _, depID := range depIDs {
 		dep, err := dependencies.Get(depID)
 		if err != nil {
+			if errors.Is(err, errWaitDependencyUnproven) {
+				if unprovenErr == nil {
+					unprovenErr = fmt.Errorf("dependency %s: %w", depID, err)
+				}
+				continue
+			}
 			if errors.Is(err, beads.ErrNotFound) {
 				if mode != "any" {
 					return false, fmt.Errorf("dependency %s: %w", depID, err)
@@ -932,6 +1013,12 @@ func depsWaitReadyDetailedFrom(dependencies waitDependencyReader, wait sessionpk
 			}
 		}
 	}
+	if unprovenErr != nil {
+		// Reported ahead of missingErr on purpose: if one dependency could not be
+		// read, "every dependency is missing" is not proved either, so the wait
+		// must pend rather than fail.
+		return false, unprovenErr
+	}
 	if mode == "any" {
 		if !foundAny && missingErr != nil {
 			return false, missingErr
@@ -941,12 +1028,39 @@ func depsWaitReadyDetailedFrom(dependencies waitDependencyReader, wait sessionpk
 	return closedCount == len(depIDs), nil
 }
 
+// loadWaitDependencyBead reads a wait's dependency on the ONE-SHOT plane.
+//
+// The binding is resolved FIRST, and the scan below is only what answers for an
+// id no binding holds. The scan's work axis is the city's store DIRECTORIES, and
+// a relocated class binding is not one of them — so before this leg went in
+// front, a dependency `gc storage migrate` had moved was not merely unrouted. The
+// scan answered, successfully, with the permanently-open copy the migration
+// retained in the city store, and a waiter on that dependency slept forever.
+//
+// Same defect the controller arm carried (waitDependencyPlanReader's
+// predecessor, ga-qdt5y.16), reached by a different code path; both arms now end
+// on the resolver.
+//
+// #5488 put a classBindingForID probe here first, which closed the blindness but
+// restated the judgement: its own class-leads rule, its own refusal arm, and a
+// second Get of a row the probe had already read. cliByIDBindingOwner is the
+// same question asked of storeref — the binding leads for an id inside its
+// reserved namespace, every unretired binding is a residence probe for an id
+// inside none, a refusal is classified by the leg's role, and beadForOwner
+// consumes the row the winning probe already paid for.
 func loadWaitDependencyBead(cityPath string, cityStore beads.Store, depID string) (beads.Bead, error) {
 	if strings.TrimSpace(cityPath) == "" {
 		if cityStore == nil {
 			return beads.Bead{}, beads.ErrNotFound
 		}
 		return cityStore.Get(depID)
+	}
+	owner, ownedByBinding, err := cliByIDBindingOwner(cityPath, depID)
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	if ownedByBinding {
+		return beadForOwner(owner, depID)
 	}
 	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {
@@ -997,7 +1111,7 @@ func prepareWaitWakeStateForCity(cityPath string, store beads.Store, now time.Ti
 	dependencies := waitDependencyReaderFunc(func(depID string) (beads.Bead, error) {
 		return loadWaitDependencyBead(cityPath, store, depID)
 	})
-	return prepareWaitWakeStateWithSnapshot(cliSessionFrontDoor(store, cfg, cityPath), dependencies, beads.NudgesStore{Store: store}, now, nil)
+	return prepareWaitWakeStateWithSnapshot(cliSessionFrontDoor(store, cfg, cityPath), dependencies, cliNudgesStore(store, cfg, cityPath), now, nil)
 }
 
 func prepareWaitWakeStateWithSnapshot(sessFront *sessionpkg.Store, dependencies waitDependencyReader, nudges beads.NudgesStore, now time.Time, sessionBeads *sessionBeadSnapshot) (map[string]bool, error) {
@@ -1085,10 +1199,18 @@ func prepareWaitWakeStateWithSnapshot(sessFront *sessionpkg.Store, dependencies 
 		if wait.Kind != "deps" {
 			continue
 		}
-		// Dependency beads are WORK class and may live in a different scope
-		// from the session/wait coordination store.
+		// The wait bead is session-class; its dependencies can be any class or
+		// scope, so resolution is the caller's, through the legs it assembled.
 		ready, depErr := depsWaitReadyDetailedFrom(dependencies, wait)
 		if depErr != nil {
+			if errors.Is(depErr, errWaitDependencyUnproven) {
+				// Retain THIS wait and keep going. The frame is narrower than the
+				// city — a suspended rig is out of it, and so is a rig whose store
+				// declares a prefix its config does not — so a miss over that frame
+				// is not the proof this pass reaps a waiter on.
+				log.Printf("gc wait: wait %s: %v; retaining the wait for the next pass", wait.ID, depErr)
+				continue
+			}
 			if errors.Is(depErr, beads.ErrNotFound) {
 				if err := sessFront.FailWait(wait.ID, now, depErr.Error()); err != nil {
 					return nil, err
@@ -1131,15 +1253,15 @@ func lookupSessionBeadByIDInfo(sessFront *sessionpkg.Store, id string) (sessionp
 
 func dispatchReadyWaitNudges(cityPath string, store beads.Store, _ runtime.Provider, now time.Time) error {
 	// Single-store wrapper: fan the one work store into the session and nudges
-	// class params so existing test call sites stay untouched. Route the session
-	// arm through the session coordination-class store (via cliSessionFrontDoor)
-	// so a [beads.classes.sessions] relocation reaches it; identity to the work
-	// store today.
+	// class params so existing test call sites stay untouched. Both arms route
+	// through their coordination-class store (cliSessionFrontDoor, cliNudgesStore)
+	// so a [beads.classes.*] relocation reaches them; identity to the work store
+	// today.
 	var cfg *config.City
 	if strings.TrimSpace(cityPath) != "" {
 		cfg, _ = loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	}
-	return dispatchReadyWaitNudgesWithSnapshot(cityPath, cfg, cliSessionFrontDoor(store, cfg, cityPath), beads.NudgesStore{Store: store}, now, nil)
+	return dispatchReadyWaitNudgesWithSnapshot(cityPath, cfg, cliSessionFrontDoor(store, cfg, cityPath), cliNudgesStore(store, cfg, cityPath), now, nil)
 }
 
 func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sessFront *sessionpkg.Store, nudges beads.NudgesStore, now time.Time, sessionBeads *sessionBeadSnapshot) error {

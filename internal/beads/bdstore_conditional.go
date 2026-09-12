@@ -119,11 +119,11 @@ func (s *BdStore) markConditionalWritesUnsupported() {
 }
 
 // Machine body codes bd emits (or, per beads #4682, will emit) for conditional
-// writes. The codes are provisional until #4682 lands; the //go:build integration
-// conformance row against a #4682-capable bd is the authoritative guard.
+// writes. The //go:build integration conformance row against a CAS-capable bd
+// is the authoritative guard.
 const (
-	bdConditionalCodePreconditionFailed = "precondition-failed"
-	bdConditionalCodeUnsupported        = "conditional-write-unsupported"
+	bdConditionalCodePreconditionFailed = "precondition_failed"
+	bdConditionalCodeUnsupported        = "conditional_write_unsupported"
 )
 
 // bdConditionalErrorBody is the machine JSON bd attaches to a failed conditional
@@ -323,7 +323,6 @@ func isBdConditionalPrecondition(body bdConditionalErrorBody, msg string) bool {
 	}
 	lower := strings.ToLower(msg)
 	return strings.Contains(lower, "precondition failed") ||
-		strings.Contains(lower, "precondition-failed") ||
 		strings.Contains(lower, "revision mismatch")
 }
 
@@ -389,8 +388,8 @@ func conditionalWriteBackoff(attempt int) time.Duration {
 // ErrConditionalWriteUnsupported rather than falling through to an
 // unconditional write.
 func (s *BdStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
-	if isEmptyUpdateOpts(opts) {
-		return fmt.Errorf("conditional update %s: %w", id, ErrEmptyConditionalUpdate)
+	if err := validateConditionalUpdateOpts(opts); err != nil {
+		return fmt.Errorf("conditional update %s: %w", id, err)
 	}
 	if capable, _ := s.conditionalWritesCapable(); !capable {
 		return ErrConditionalWriteUnsupported
@@ -440,7 +439,7 @@ func (s *BdStore) DeleteIfMatch(id string, expectedRevision int64) error {
 //     would misreport a landed write as a precondition.
 //   - SERIALIZATION-class transient (transient AND not ambiguous: the txn rolled
 //     back) → re-read the revision; if it moved, the fence is permanently stale
-//     (revisions are monotonic and never reused) so return a precondition
+//     (the observed token is no longer current) so return a precondition
 //     immediately rather than replaying a doomed fence; otherwise back off and
 //     retry the SAME argv with the SAME expectedRevision. Re-fencing with a
 //     freshly-read revision would silently downgrade CAS to last-writer-wins.

@@ -16,6 +16,17 @@ import (
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
+// hangBudget is the wall-clock ceiling for hang-detector waits in this file.
+// It is a HANG DETECTOR, not a latency assertion: nextWithin returns the
+// instant the watcher yields an event, so raising this value would not slow
+// a passing run and lowering it would not make the suite stricter — it only
+// changes how long a genuinely wedged watcher takes to report.
+//
+// testutil.GoroutineRaceTimeout is a FLOOR, not a target (TESTING.md "Floors,
+// ceilings, and inputs"). Mirrors the reference implementation in
+// cmd/gc/hangbudget_test.go (hangBudget = 6 * testutil.GoroutineRaceTimeout).
+const hangBudget = 6 * testutil.GoroutineRaceTimeout
+
 // rotatableProvider is the small interface a Provider must satisfy
 // for the rotation subtest. Providers that don't expose rotation
 // (e.g. exec, fake) skip the test rather than failing the suite.
@@ -767,7 +778,7 @@ func RunRotationTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 
 		seen := make([]events.Event, 0, 5)
 		for i := 0; i < 5; i++ {
-			e, err := nextWithin(testutil.GoroutineRaceTimeout)
+			e, err := nextWithin(hangBudget)
 			if err != nil {
 				t.Fatalf("Next pre %d: %v", i, err)
 			}
@@ -800,7 +811,7 @@ func RunRotationTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 		// (c) The watcher should yield the anchor + the post-rotate
 		// events without gap.
 		for i := 0; i < 4; i++ { // 1 anchor + 3 post-rotate
-			e, err := nextWithin(testutil.GoroutineRaceTimeout)
+			e, err := nextWithin(hangBudget)
 			if err != nil {
 				t.Fatalf("Next post %d: %v", i, err)
 			}

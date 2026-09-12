@@ -12,6 +12,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	execerr "k8s.io/client-go/util/exec"
+
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
@@ -781,10 +783,14 @@ func TestStartDeletesOldPodWithDeadTmux(t *testing.T) {
 		},
 		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
-	// tmux dead — genuinely stale.
+	// tmux dead — genuinely stale. `tmux has-session` RAN in the container and
+	// exited 1, which is what makes this a stale pod rather than an
+	// unreachable one; the real execInPod surfaces that as a client-go
+	// ExitError wrapping tmux's stderr, and Start now requires that
+	// distinction before it will delete a Running pod (ga-vcjr9).
 	fake.setExecResult("gc-test-agent",
 		[]string{"tmux", "has-session", "-t", "main"}, "",
-		fmt.Errorf("no server running on /tmp/tmux-1000/default"))
+		execerr.CodeExitError{Err: fmt.Errorf("no server running on /tmp/tmux-1000/default"), Code: 1})
 
 	// Block createPod so Start() stops after deletion — we only need to
 	// verify the stale pod was cleaned up, not the full startup.

@@ -55,7 +55,7 @@ func TestAssignedInProgressTierIsByteIdenticalOnSingleStore(t *testing.T) {
 	// The single-store enrichment must not grow the presence key either: its
 	// reader is `bd list`, whose rows never carry blocked_by, so the branch could
 	// only ever be dead shell on the path every deployment runs.
-	single := inProgressBlockedByEnrichmentScript(false)
+	single := inProgressBlockedByEnrichmentScript(false, true)
 	if strings.Contains(single, "blocked_by // empty") {
 		t.Errorf("single-store enrichment grew the federated presence key: %q", single)
 	}
