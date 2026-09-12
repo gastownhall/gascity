@@ -77,6 +77,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A closed binding row now supersedes its retained frozen twin in the
+  one-live-workflow-per-source-bead guard, so a converged city stops refusing a
+  sling whose only live root is gone.** A storage migration copies rows into the
+  class binding with ids preserved and deletes nothing, so a workflow root
+  relocated into the binding and later closed there still exists as an OPEN copy
+  in the retained work ledger. The guard unioned every leg's live roots, reported
+  that copy as live, named it in `blocking_workflow_ids`, and refused. The
+  collector now lets the binding's row win on a shared root id — live or closed —
+  asking the binding directly about the ids the work legs reported, with a
+  bounded per-id probe rather than a full closed scan. A probe that faults
+  refuses the sling: a binding fault is an error, never absence. A city that
+  relocates nothing has no binding leg, runs no probe, and enumerates exactly
+  what it did before.
+
 - **The one-live-workflow-per-source-bead guard reads the graph binding, so a
   split city stops admitting a second live workflow.** A workflow root is graph
   class, so on a city that relocates the graph class every live root is in the
