@@ -1,10 +1,10 @@
 package doctor
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -156,7 +156,7 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 		return result
 	}
 
-	allOrders, err := scanOrderFiringCurrentOrders(cityPath, c.cfg)
+	allOrders, invalidOrders, err := scanOrderFiringCurrentOrdersWithInvalid(cityPath, c.cfg)
 	if err != nil {
 		result.Status = StatusError
 		result.Message = fmt.Sprintf("scan orders: %v", err)
@@ -189,6 +189,17 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 	// stay visible without converting an advisory error into a blocking gate.
 	var blockingErrors, advisoryErrors int
 	suspendedRigs := orderFiringCurrentSuspendedRigs(c.cfg, cityPath)
+
+	// An order that failed validation never reaches the loop below — it was
+	// dropped by the scan. Report it here or the check reads clean on a city
+	// whose order cannot load. Counted as monitored so the "no cron or
+	// cooldown orders" early return below cannot swallow it.
+	for _, detail := range invalidOrders {
+		worst = worseStatus(worst, StatusError)
+		result.Details = append(result.Details, detail)
+		blockingErrors++
+		monitored++
+	}
 
 	// Resolve every order-run lookup the loop below will need up front and in
 	// parallel. The pre-pass shares the cron-interval cache with the loop, so
@@ -254,7 +265,11 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 	case StatusWarning:
 		result.Message = "scheduled orders are overdue"
 	case StatusError:
-		result.Message = "scheduled orders are stale"
+		if len(invalidOrders) > 0 {
+			result.Message = fmt.Sprintf("%d order(s) failed to load", len(invalidOrders))
+		} else {
+			result.Message = "scheduled orders are stale"
+		}
 	}
 	if blockingErrors == 0 && advisoryErrors > 0 {
 		result.Severity = SeverityAdvisory
@@ -266,19 +281,45 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 }
 
 func scanOrderFiringCurrentOrders(cityPath string, cfg *config.City) ([]orders.Order, error) {
-	scanCfg := orderFiringCurrentScanConfig(cfg, cityPath)
-	scanCfg = orderFiringCurrentPruneSuspendedOnlyWildcardOverrides(cityPath, cfg, scanCfg)
-	allOrders, err := orderdiscovery.ScanAll(cityPath, scanCfg, orderFiringCurrentScanOptions(cityPath))
-	if err != nil {
-		return nil, err
-	}
-	return orders.FilterEnabled(allOrders), nil
+	all, _, err := scanOrderFiringCurrentOrdersWithInvalid(cityPath, cfg)
+	return all, err
 }
 
-func orderFiringCurrentScanOptions(cityPath string) orderdiscovery.ScanOptions {
+// scanOrderFiringCurrentOrdersWithInvalid also returns a detail line for every
+// order the scan REFUSED to load. Those orders are dropped from the returned
+// slice, so a caller that ignores them reports on a city as though the broken
+// order were not configured at all.
+func scanOrderFiringCurrentOrdersWithInvalid(cityPath string, cfg *config.City) ([]orders.Order, []string, error) {
+	scanCfg := orderFiringCurrentScanConfig(cfg, cityPath)
+	scanCfg = orderFiringCurrentPruneSuspendedOnlyWildcardOverrides(cityPath, cfg, scanCfg)
+	var invalid []string
+	allOrders, err := orderdiscovery.ScanAll(cityPath, scanCfg, orderFiringCurrentScanOptions(cityPath, &invalid))
+	if err != nil {
+		return nil, nil, err
+	}
+	return orders.FilterEnabled(allOrders), invalid, nil
+}
+
+// orderFiringCurrentScanOptions collects validation failures into collect when
+// it is non-nil, and only logs them when it is nil.
+//
+// Logging alone is how a broken order goes quiet. A failed order is dropped
+// from the scan, so the firing check counts zero monitored orders and reports
+// "no cron or cooldown orders" — a clean bill of health for a city whose order
+// cannot load. That is the same silent absence this check exists to catch, so
+// the caller that reports to the operator passes a collector.
+func orderFiringCurrentScanOptions(cityPath string, collect *[]string) orderdiscovery.ScanOptions {
 	return orderdiscovery.ScanOptions{
 		OnValidateError: func(orderName string, err error) error {
 			log.Printf("gc doctor: skipping invalid order %s for %s: %v", orderName, cityPath, err)
+			// Only schedule failures are reported. This check is about WHEN
+			// orders fire, so an order dropped because its schedule is
+			// unreadable is its subject; an order dropped over [order.env] is
+			// another check's, and surfacing it here would report the same
+			// misconfiguration twice under a heading about firing freshness.
+			if collect != nil && errors.Is(err, orders.ErrInvalidSchedule) {
+				*collect = append(*collect, fmt.Sprintf("%s: invalid order, not loaded: %v", orderName, err))
+			}
 			return nil
 		},
 		ValidateOrder: orders.ValidateExecEnvOverrides,
@@ -367,11 +408,11 @@ func orderFiringCurrentPruneSuspendedOnlyWildcardOverrides(cityPath string, orig
 
 func orderFiringCurrentScanWithoutOverrides(cityPath string, cfg *config.City) ([]orders.Order, error) {
 	if cfg == nil {
-		return orderdiscovery.ScanAll(cityPath, nil, orderFiringCurrentScanOptions(cityPath))
+		return orderdiscovery.ScanAll(cityPath, nil, orderFiringCurrentScanOptions(cityPath, nil))
 	}
 	clone := *cfg
 	clone.Orders.Overrides = nil
-	return orderdiscovery.ScanAll(cityPath, &clone, orderFiringCurrentScanOptions(cityPath))
+	return orderdiscovery.ScanAll(cityPath, &clone, orderFiringCurrentScanOptions(cityPath, nil))
 }
 
 // orderFiringCurrentSuspendedRigs resolves the effective suspension state
@@ -443,9 +484,12 @@ func expectedIntervalForOrder(order orders.Order, cronCache map[string]time.Dura
 }
 
 func computeExpectedIntervalForCronSchedule(schedule string) (time.Duration, error) {
-	fields := strings.Fields(schedule)
-	if len(fields) != 5 {
-		return 0, fmt.Errorf("invalid cron schedule: want 5 fields, got %d", len(fields))
+	// Parsed ONCE. The scan below evaluates up to 366*1440 = 527,040 minutes
+	// for a single schedule; re-parsing the expression inside that loop meant
+	// half a million parses per schedule, every time the check ran.
+	sched, err := orders.ParseCronSchedule(schedule)
+	if err != nil {
+		return 0, fmt.Errorf("invalid cron schedule: %w", err)
 	}
 
 	// Scan minute-by-minute from a fixed base so the result is deterministic
@@ -472,11 +516,7 @@ func computeExpectedIntervalForCronSchedule(schedule string) (time.Duration, err
 		matches := make([]time.Time, 0, 16)
 		for i := 0; i < windowMinutes; i++ {
 			ts := base.Add(time.Duration(i) * time.Minute)
-			matched, err := cronScheduleMatchesAt(fields, ts)
-			if err != nil {
-				return 0, err
-			}
-			if matched {
+			if sched.MatchesAt(ts) {
 				matches = append(matches, ts)
 			}
 		}
@@ -514,105 +554,6 @@ func computeExpectedIntervalForCronSchedule(schedule string) (time.Duration, err
 		return minGap, nil
 	}
 	return 0, fmt.Errorf("cron schedule %q has no firing minutes in a 366-day window", schedule)
-}
-
-func cronScheduleMatchesAt(fields []string, ts time.Time) (bool, error) {
-	specs := []struct {
-		name     string
-		field    string
-		value    int
-		min, max int
-	}{
-		{name: "minute", field: fields[0], value: ts.Minute(), min: 0, max: 59},
-		{name: "hour", field: fields[1], value: ts.Hour(), min: 0, max: 23},
-		{name: "day-of-month", field: fields[2], value: ts.Day(), min: 1, max: 31},
-		{name: "month", field: fields[3], value: int(ts.Month()), min: 1, max: 12},
-		{name: "day-of-week", field: fields[4], value: int(ts.Weekday()), min: 0, max: 6},
-	}
-	for _, spec := range specs {
-		matched, err := cronFieldMatchesForDoctor(spec.field, spec.value, spec.min, spec.max)
-		if err != nil {
-			return false, fmt.Errorf("invalid cron schedule: cannot parse %s field %q", spec.name, spec.field)
-		}
-		if !matched {
-			return false, nil
-		}
-	}
-	return true, nil
-}
-
-func cronFieldMatchesForDoctor(field string, value, lowerBound, upperBound int) (bool, error) {
-	if strings.TrimSpace(field) == "" {
-		return false, fmt.Errorf("empty field")
-	}
-	for _, rawPart := range strings.Split(field, ",") {
-		part := strings.TrimSpace(rawPart)
-		matched, err := cronPartMatchesForDoctor(part, value, lowerBound, upperBound)
-		if err != nil {
-			return false, err
-		}
-		if matched {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-func cronPartMatchesForDoctor(part string, value, lowerBound, upperBound int) (bool, error) {
-	if part == "" {
-		return false, fmt.Errorf("empty part")
-	}
-	rangePart, stepPart, hasStep := strings.Cut(part, "/")
-	step := 1
-	if hasStep {
-		parsed, err := strconv.Atoi(strings.TrimSpace(stepPart))
-		if err != nil || parsed <= 0 {
-			return false, fmt.Errorf("invalid step")
-		}
-		step = parsed
-	}
-
-	lo, hi, err := cronRangeForDoctor(strings.TrimSpace(rangePart), lowerBound, upperBound)
-	if err != nil {
-		return false, err
-	}
-	if value < lo || value > hi {
-		return false, nil
-	}
-	return (value-lo)%step == 0, nil
-}
-
-func cronRangeForDoctor(rangePart string, lowerBound, upperBound int) (int, int, error) {
-	switch {
-	case rangePart == "*":
-		return lowerBound, upperBound, nil
-	case strings.Contains(rangePart, "-"):
-		start, end, ok := strings.Cut(rangePart, "-")
-		if !ok {
-			return 0, 0, fmt.Errorf("invalid range")
-		}
-		lo, err := strconv.Atoi(strings.TrimSpace(start))
-		if err != nil {
-			return 0, 0, err
-		}
-		hi, err := strconv.Atoi(strings.TrimSpace(end))
-		if err != nil {
-			return 0, 0, err
-		}
-		if lo < lowerBound || hi > upperBound || lo > hi {
-			return 0, 0, fmt.Errorf("range out of bounds")
-		}
-		return lo, hi, nil
-	default:
-		value, err := strconv.Atoi(rangePart)
-		if err != nil {
-			return 0, 0, err
-		}
-		if value < lowerBound || value > upperBound {
-			return 0, 0, fmt.Errorf("value out of bounds")
-		}
-		return value, value, nil
-	}
 }
 
 // readEventTail reads the tail of the city event log through the check's

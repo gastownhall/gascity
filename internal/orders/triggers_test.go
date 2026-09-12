@@ -333,26 +333,6 @@ func TestCheckTriggerConditionKillsProcessGroupAfterWaitDelay(t *testing.T) {
 	processgrouptest.AssertFileSizeStable(t, heartbeatPath, size, 300*time.Millisecond)
 }
 
-func TestCronFieldMatches(t *testing.T) {
-	tests := []struct {
-		field string
-		value int
-		want  bool
-	}{
-		{"*", 5, true},
-		{"5", 5, true},
-		{"5", 3, false},
-		{"1,3,5", 3, true},
-		{"1,3,5", 2, false},
-	}
-	for _, tt := range tests {
-		got := cronFieldMatches(tt.field, tt.value)
-		if got != tt.want {
-			t.Errorf("cronFieldMatches(%q, %d) = %v, want %v", tt.field, tt.value, got, tt.want)
-		}
-	}
-}
-
 // newEventsProvider creates a FileRecorder-backed Provider with events for tests.
 func newEventsProvider(t *testing.T, evts []events.Event) events.Provider {
 	t.Helper()

@@ -773,3 +773,35 @@ func TestOrderFiringCurrent_TimesOutStalledOrderHistory(t *testing.T) {
 		t.Fatalf("TimedOut = false, want true so callers (JSON output, doctor summary) can distinguish this from a confirmed failure")
 	}
 }
+
+// An order whose schedule cannot be parsed is dropped by the scan before this
+// check ever sees it. Reporting only to the log would let the check answer
+// "no cron or cooldown orders" — a clean bill of health — for a city whose
+// only order is broken. That is the silent absence this check exists to catch.
+func TestOrderFiringCurrent_InvalidScheduleIsReportedNotDropped(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "bad-hour", "cron", "0 24 * * *")
+	writeOrderFiringTestEvents(t, cityPath, events.Event{
+		Type: events.ControllerStarted,
+		Ts:   now.Add(-8 * time.Hour),
+	})
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusError {
+		t.Fatalf("status = %v, want error; msg = %q; details = %v", result.Status, result.Message, result.Details)
+	}
+	if result.Severity != SeverityBlocking {
+		t.Fatalf("Severity = %v, want SeverityBlocking — an order that cannot load is not advisory", result.Severity)
+	}
+	details := strings.Join(result.Details, "\n")
+	if !strings.Contains(details, "bad-hour") || !strings.Contains(details, "invalid order, not loaded") {
+		t.Fatalf("details = %v, want them to name the order and say it did not load", result.Details)
+	}
+	if !strings.Contains(details, "hour") {
+		t.Fatalf("details = %v, want the offending field named", result.Details)
+	}
+	if result.Message == "no cron or cooldown orders" {
+		t.Fatalf("Message = %q — the broken order was swallowed", result.Message)
+	}
+}
