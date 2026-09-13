@@ -57,6 +57,9 @@ type AgentTranscriptResult struct {
 // sessionlog as the only production transcript parser in Phase 1.
 type SessionLogAdapter struct {
 	SearchPaths []string
+	// activity memoizes derived tail activity across the per-request handles a
+	// Factory hands out. Nil (the zero adapter) derives on every call.
+	activity *DerivedActivityMemo
 }
 
 // DiscoverTranscript returns the best available transcript path for a worker.
@@ -158,11 +161,13 @@ func (a SessionLogAdapter) TailActivityForProvider(provider, path string) (TailA
 	if !sessionlog.DerivesActivityFromHistory(provider) {
 		return a.TailActivity(path)
 	}
-	snapshot, err := a.LoadHistory(LoadRequest{Provider: provider, TranscriptPath: path, TailCompactions: 1})
-	if err != nil || snapshot == nil {
-		return TailActivityUnknown, err
-	}
-	return snapshot.TailState.Activity, nil
+	return a.activity.resolve(path, func() (TailActivity, error) {
+		snapshot, err := a.LoadHistory(LoadRequest{Provider: provider, TranscriptPath: path, TailCompactions: 1})
+		if err != nil || snapshot == nil {
+			return TailActivityUnknown, err
+		}
+		return snapshot.TailState.Activity, nil
+	})
 }
 
 // TailActivity reads the transcript tail activity without loading full history.
@@ -355,7 +360,7 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 		ProviderSessionID:     session.ID,
 		TranscriptStreamID:    filepath.Clean(path),
 		Generation: Generation{
-			ID:         fmt.Sprintf("%d:%d", info.ModTime().UnixNano(), info.Size()),
+			ID:         transcriptGenerationID(info),
 			ObservedAt: info.ModTime().UTC(),
 		},
 		Cursor: Cursor{

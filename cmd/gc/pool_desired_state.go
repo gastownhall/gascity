@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worktree"
@@ -300,6 +301,11 @@ func computePoolDesiredStatesAt(
 	assigneeToSessionBeadID := make(map[string]string)
 	sessionBeadTemplate := make(map[string]string)
 	namedSessionBeadIDs := make(map[string]bool)
+	// asleepSessionBeadIDs marks non-closed sessions whose runtime state is
+	// asleep (normalizeInfoState also folds "drained" into StateAsleep). A
+	// wake_mode="fresh" agent must not resume one of these stale rows — see the
+	// resume-tier guard below.
+	asleepSessionBeadIDs := make(map[string]bool)
 	for _, sb := range sessionInfos {
 		if sb.Closed {
 			continue
@@ -316,6 +322,9 @@ func computePoolDesiredStatesAt(
 		}
 		if isNamedSessionInfo(sb) {
 			namedSessionBeadIDs[sb.ID] = true
+		}
+		if sb.State == sessionpkg.StateAsleep {
+			asleepSessionBeadIDs[sb.ID] = true
 		}
 	}
 
@@ -370,6 +379,43 @@ func computePoolDesiredStatesAt(
 				// instance — which would create two desired sessions for the
 				// same agent even when max_active_sessions=1.
 				if namedSessionBeadIDs[sessionBeadID] {
+					continue
+				}
+				// A wake_mode="fresh" pool agent must not inherit a stale
+				// *asleep* session bead: by configuration it never wants the
+				// old session's state back, so resuming that row leaves the
+				// pool bound to a session it will not reuse and the assigned
+				// work stranded. Plan a clean session bound to the same work
+				// instead — the wake-known-identity tier with an empty
+				// SessionBeadID, the same shape the closed-session case
+				// already uses. A live (non-asleep) session still resumes;
+				// agents with unset or wake_mode="resume" are unaffected.
+				// (gastownhall/gascity#4849)
+				if agent.EffectiveWakeMode() == "fresh" && asleepSessionBeadIDs[sessionBeadID] {
+					if _, ok := wakeRequestedTemplates[template]; ok {
+						continue
+					}
+					wakeRequestedTemplates[template] = struct{}{}
+					resumeRequests = append(resumeRequests, SessionRequest{
+						Template:     template,
+						BeadPriority: beadPriority(wb),
+						Tier:         "wake-known-identity",
+						// SessionBeadID intentionally empty: the stale asleep
+						// bead must not be reused, so realizePoolDesiredSessions
+						// plans a clean create.
+						WorkBeadID:     wb.ID,
+						WorkBeadTitle:  strings.TrimSpace(wb.Title),
+						WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
+						WorkWorkspace:  strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
+						BrainParentSID: strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
+					})
+					if trace != nil {
+						trace.RecordDecision(TraceSitePoolWakeKnownIdentity, TraceReasonAssignedWork, TraceOutcomeScheduled, template, "", traceRecordPayload{
+							"tier":                   "wake-known-identity",
+							"work_bead":              wb.ID,
+							"skipped_asleep_session": sessionBeadID,
+						})
+					}
 					continue
 				}
 				resumeRequests = append(resumeRequests, SessionRequest{
@@ -434,6 +480,13 @@ func computePoolDesiredStatesAt(
 		}
 	}
 	protectedNewRequests, inFlightNewRequests := poolNewDemandRequests(cfg, sessionInfos, resumeSessionBeadIDs, decisionTime)
+	sessionInfoByID := make(map[string]sessionpkg.Info, len(sessionInfos))
+	for _, info := range sessionInfos {
+		if info.ID == "" {
+			continue
+		}
+		sessionInfoByID[info.ID] = info
+	}
 	// A wake-known request has assigned work but no surviving concrete session
 	// identity. Freshly completed unassigned pool sessions are valid concrete
 	// capacity for that request. Bind them before calculating residual protected
@@ -489,10 +542,16 @@ func computePoolDesiredStatesAt(
 		if _, ok := aliasHeldTemplates[template]; ok {
 			continue
 		}
-		effectiveDemand := max(scaleCount, len(protected))
+		inFlight := inFlightNewRequests[template]
+		inFlightFloor := 0
+		for _, req := range inFlight {
+			if info, ok := sessionInfoByID[req.SessionBeadID]; ok && poolSessionWithinPendingCreateLease(info, cfg, decisionTime) {
+				inFlightFloor++
+			}
+		}
+		effectiveDemand := max(scaleCount, len(protected), inFlightFloor)
 		newCount := capNewDemandCount(limits, usage, agent, effectiveDemand)
 		recordNewDemandCapTrace(trace, template, agent, limits, usage, effectiveDemand, newCount)
-		inFlight := inFlightNewRequests[template]
 		protectedCount := minInt(len(protected), newCount)
 		inFlightCount := minInt(len(inFlight), newCount-protectedCount)
 		reusedCount := protectedCount + inFlightCount
@@ -781,6 +840,40 @@ func poolSessionEligibleForProtectedDemand(info sessionpkg.Info, decisionTime ti
 		strings.TrimSpace(info.WaitHold) == "" &&
 		!metadataTimeInFuture(info.HeldUntil, decisionTime) &&
 		!metadataTimeInFuture(info.QuarantinedUntil, decisionTime)
+}
+
+// poolSessionWithinPendingCreateLease reports whether an in-flight
+// pending-create pool session is still within its own lease window and should
+// therefore establish a demand floor of its own, mirroring the protected-
+// session floor above. decisionTime is injected the same way as
+// poolSessionWithinPostCreateProtection so every decision in a tick shares one
+// clock observation; a zero decisionTime fails closed for the same reason.
+//
+// The lease arithmetic itself is not reimplemented here: it delegates to
+// pendingCreateLeaseExpiredForRollbackInfo (session_reconciler.go), the exact
+// predicate the reconciler's own rollback path uses, so a bead genuinely stuck
+// past its lease is never propped up by this floor — it still rolls back on
+// schedule. That function only reasons about beads in a rollback-eligible
+// state (start-pending/creating/asleep, via pendingCreateRollbackState) and
+// returns false (not expired) for any other state as a no-op default, so the
+// state gate is re-checked here first: a pending_create_claim left set on an
+// already-stopped or failed-create session is not a live in-flight attempt
+// and must not establish a floor, regardless of how recently it was created.
+func poolSessionWithinPendingCreateLease(info sessionpkg.Info, cfg *config.City, decisionTime time.Time) bool {
+	if decisionTime.IsZero() {
+		return false
+	}
+	if !info.PendingCreateClaim {
+		return false
+	}
+	if !pendingCreateRollbackState(info.MetadataState) {
+		return false
+	}
+	var startupTimeout time.Duration
+	if cfg != nil {
+		startupTimeout = cfg.Session.StartupTimeoutDuration()
+	}
+	return !pendingCreateLeaseExpiredForRollbackInfo(info, &clock.Fake{Time: decisionTime}, startupTimeout)
 }
 
 // poolSessionConsumesNewDemandInfo reports whether a pool session already

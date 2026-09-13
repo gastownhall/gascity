@@ -2459,6 +2459,57 @@ func TestComputePoolDesiredStates_InFlightNewSessionsOnlySubtractCoveredDemand(t
 	}
 }
 
+// TestComputePoolDesiredStates_InFlightPendingCreateEstablishesDemandFloor
+// reproduces the claim-handoff race from ga-nf5xlp: a pending-create session
+// is born, and on the very next tick scale_check cleanly recomputes to zero
+// before that session finishes creating. Without a demand floor for
+// in-flight sessions (mirroring the protected-session floor #4789 added),
+// the session gets zero slots, falls out of desired state, and is rolled
+// back ~10 minutes later having never started — even though it is still
+// well within its own pending-create lease window.
+func TestComputePoolDesiredStates_InFlightPendingCreateEstablishesDemandFloor(t *testing.T) {
+	now := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	sessions := []beads.Bead{
+		pendingPoolSessionBeadAt("sess-1", now.Add(-30*time.Second)),
+	}
+
+	result := ComputePoolDesiredStatesAt(cfg, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 0}, now)
+
+	counts := PoolDesiredCounts(result)
+	if counts["claude"] != 1 {
+		t.Fatalf("poolDesired[claude] = %d, want 1: a fresh pending-create session must survive a scale_check drop to zero on the next tick while still within its own lease window", counts["claude"])
+	}
+	if len(result) != 1 || len(result[0].Requests) != 1 || result[0].Requests[0].SessionBeadID != "sess-1" {
+		t.Fatalf("result = %#v, want sess-1 retained as the sole in-flight demand-floor request", result)
+	}
+}
+
+// TestComputePoolDesiredStates_InFlightPendingCreateDemandFloorExpiresWithLease
+// guards the other side of the same fix: a pending-create session that has
+// aged past its own lease window (pendingCreateLeaseExpiredForRollbackInfo)
+// must NOT be propped up by the new floor. It is genuinely stuck and should
+// still fall to zero desired demand so the existing rollback path can reap
+// it.
+func TestComputePoolDesiredStates_InFlightPendingCreateDemandFloorExpiresWithLease(t *testing.T) {
+	now := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	sessions := []beads.Bead{
+		pendingPoolSessionBeadAt("sess-1", now.Add(-11*time.Minute)),
+	}
+
+	result := ComputePoolDesiredStatesAt(cfg, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 0}, now)
+
+	counts := PoolDesiredCounts(result)
+	if counts["claude"] != 0 {
+		t.Fatalf("poolDesired[claude] = %d, want 0: a pending-create session past its own lease window must still roll back to zero demand, not be propped up indefinitely", counts["claude"])
+	}
+}
+
 func TestComputePoolDesiredStates_InFlightResumeBeadsDoNotConsumeNewDemand(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},

@@ -101,6 +101,26 @@ func NormalizeSourceStoreRef(sourceStoreRef string) string {
 	return strings.TrimSpace(sourceStoreRef)
 }
 
+// GraphStoreRefPrefix tags a city's relocated graph binding in a store ref, the
+// way "city" and "rig" tag a scope root. It is not a scope kind — graph roots
+// carry scope metadata of their own — only a store-identity tag, so a singleton
+// scan that consults both the binding and the city work store never conflates
+// them. internal/api mints and round-trips the same spelling for the workflow
+// snapshot scan (workflowGraphStoreRefPrefix), and this is that constant: one
+// spelling, or the store_ref a conflict reports cannot be parsed back.
+const GraphStoreRefPrefix = "graph"
+
+// GraphStoreRef returns the source-workflow store ref for a city's relocated
+// graph binding. An unnamed city falls back to "graph:city" so the ref is never
+// the bare prefix, which would parse as a scope-less sentinel.
+func GraphStoreRef(cityName string) string {
+	cityName = strings.TrimSpace(cityName)
+	if cityName == "" {
+		cityName = "city"
+	}
+	return GraphStoreRefPrefix + ":" + cityName
+}
+
 // LockScopeForStoreRef returns the filesystem scope used for source-workflow
 // locks for a source bead's resident store ref.
 func LockScopeForStoreRef(cityPath, defaultStorePath, storeRef string, rigPath func(string) (string, bool)) string {
