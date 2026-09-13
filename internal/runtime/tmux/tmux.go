@@ -428,6 +428,32 @@ func wrapError(err error, stderr string, args []string) error {
 	return fmt.Errorf("tmux %s: %w", args[0], err)
 }
 
+// serverSocketConfirmsAbsence reports whether an independent socket
+// observation corroborates that no tmux server is running, using the same
+// observer probeServerAlive relies on for the identical ErrNoServer branch.
+// A protocol-level ErrNoServer alone is not proof: tmux returns the same
+// error shape for "no server" and "server exited unexpectedly", and a
+// wedged-but-live server can produce either. Returns false — cannot
+// corroborate absence — whenever SocketName is empty or the observer cannot
+// prove the socket is gone, so a caller gating a destructive action on this
+// defaults to the safe answer rather than assuming death.
+//
+// The observer's own contract (observeNamedSocketWith) is: nil means the
+// filesystem/dial evidence proves the socket is absent or stale (safe); any
+// non-nil error means the socket is live or the evidence is inconclusive
+// (unsafe — matches probeServerAlive's own observationErr == nil check).
+func (t *Tmux) serverSocketConfirmsAbsence(ctx context.Context) bool {
+	if t.cfg.SocketName == "" {
+		return false
+	}
+	observer := t.serverSocketObserver
+	if observer == nil {
+		observer = observeNamedSocket
+	}
+	path := namedSocketPath(t.cfg.SocketName)
+	return observer(ctx, path) == nil
+}
+
 // probeServerAlive verifies the tmux server bound to SocketName is responsive
 // before invoking new-session. This prevents the socket-clobber failure
 // described in ga-h9z: when tmux is asked to create a session against a
