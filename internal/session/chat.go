@@ -1233,12 +1233,14 @@ func (m *Manager) TranscriptPathClassified(id string, searchPaths []string) (str
 	// zcode carries no session_key — no session-id flag, no hook plugin — so
 	// the keyed lookup above can never hit for it and the ambiguity guard below
 	// would leave every pooled worker transcript-dark. Its mirror is keyed by
-	// the identity the bead does hold.
+	// the identity the bead does hold: its name, its own id (the seat — two
+	// seats can share a name and epoch), and its continuation epoch.
 	if path := workertranscript.DiscoverScopedPath(
 		searchPaths,
 		provider,
 		workDir,
 		b.Metadata["session_name"],
+		b.ID,
 		b.Metadata["continuation_epoch"],
 	); path != "" {
 		return path, TranscriptFound, nil

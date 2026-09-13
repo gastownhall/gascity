@@ -635,11 +635,16 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 // sessions. It mirrors the multi-backend degraded-but-usable signal that
 // [runtime.MergeBackendListResults] produces for composite providers, and is
 // the ListRunning-side analog of the StateCache liveness fix in #4082.
+//
+// The error also sets [runtime.PartialListError.ServerAbsent] so callers
+// holding independent proof of death (for example a session bead created
+// before the host booted) can distinguish "no server at all" from a server
+// that answered partially, without weakening the fail-safe for either.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	all, err := p.tm.listSessionNames()
 	if err != nil {
 		if errors.Is(err, ErrNoServer) {
-			return nil, &runtime.PartialListError{Err: fmt.Errorf("tmux server unreachable: %w", err)}
+			return nil, &runtime.PartialListError{Err: fmt.Errorf("tmux server unreachable: %w", err), ServerAbsent: true}
 		}
 		return nil, err
 	}

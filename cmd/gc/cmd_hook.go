@@ -57,7 +57,7 @@ With --claim: runs the standard startup claim protocol for one work item.
 	cmd.Flags().StringVar(&hookFormat, "hook-format", "", "format hook output for a provider")
 	cmd.Flags().BoolVar(&claim, "claim", false, "atomically claim one routed work item for the current session")
 	cmd.Flags().BoolVar(&drainAck, "drain-ack", false, "with --claim, acknowledge runtime drain when no work is available")
-	cmd.Flags().BoolVar(&jsonOut, "json", false, "with --claim, emit a JSON protocol result")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit a JSON protocol result (always with --claim; on the discovery door only for a drain refusal)")
 	if flag := cmd.Flags().Lookup("hook-format"); flag != nil {
 		flag.Hidden = true
 	}
@@ -480,7 +480,13 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		}
 		return claimHookWork(cityPath, workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
 	}
-	return doHook(workQuery, workDir, false, runner, stdout, stderr, hookVisibility{
+	// The discovery door is fenced too: a draining seat must not be handed its
+	// preassigned continuation sibling by the packs' post-close `gc hook`.
+	return doHookDiscovery(workQuery, workDir, false, hookClaimOptions{
+		Env:      queryEnv,
+		DrainAck: opts.DrainAck,
+		JSON:     opts.JSON,
+	}, hookClaimOps{}, runner, stdout, stderr, hookVisibility{
 		Identities:   identityCandidates,
 		RouteTargets: routeTargets,
 	})
@@ -969,6 +975,45 @@ type hookVisibility struct {
 // results based on mode. Without inject: prints normalized ready-only output,
 // returns 0 if work exists, 1 if empty. With inject: skips the work query and
 // returns 0.
+// doHookDiscovery is the drain-fenced entry point for plain `gc hook`, the
+// DISCOVERY door. doHook itself stays a pure query-and-print function; this
+// wrapper is where the F-D fence lives for the non-claim path.
+//
+// It exists because F-D on --claim was only half the fence. Every workflows-pack
+// prompt's post-close lifecycle tells an agent to run plain `gc hook` and
+// continue any work sharing its root/continuation group — no --claim, because
+// the continuation sibling was PREASSIGNED to this session at claim time and is
+// already open under its assignee. Discovery listed that sibling for a draining
+// seat exactly as for a healthy one, so the fleet's dominant workflow walked
+// its seats back into multi-hour chains without ever crossing the fence.
+//
+// The refusal reuses the discovery no-work contract (nothing on stdout, exit 1)
+// because the packs ALREADY route that answer to `gc runtime drain-ack` and
+// exit. No prompt changes are needed to make the seat leave; the answer it
+// already knows how to obey is simply now the true one.
+func doHookDiscovery(workQuery, dir string, inject bool, opts hookClaimOptions, ops hookClaimOps, runner WorkQueryRunner, stdout, stderr io.Writer, visibility hookVisibility) int {
+	// An inject invocation reads nothing and answers nothing, so there is no
+	// work to withhold and no reason to pay for a probe.
+	if inject {
+		return doHook(workQuery, dir, inject, runner, stdout, stderr, visibility)
+	}
+	ops.applyDefaults()
+	if sessionID := hookClaimSessionID(opts.Env); sessionID != "" {
+		pending, err := ops.DrainPending(sessionID)
+		switch {
+		case err != nil:
+			// Fail open, and say so off-pane — same posture and same reasoning as
+			// the claim door: a blind probe must not stop a healthy fleet finding
+			// work, and must not go inert quietly.
+			fmt.Fprintf(stderr, "gc hook: drain-pending probe unavailable for %s: %v; proceeding to discovery\n", sessionID, err) //nolint:errcheck
+			hookEmitDrainFenceUnavailable(stderr, sessionID, hookClaimEnvValue(opts.Env, "GC_TEMPLATE"), err)
+		case pending:
+			return writeHookClaimDrainPending(hookDiscoveryLabel, sessionID, opts, ops, stdout, stderr)
+		}
+	}
+	return doHook(workQuery, dir, inject, runner, stdout, stderr, visibility)
+}
+
 func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, stderr io.Writer, visibility hookVisibility) int {
 	if inject {
 		return 0

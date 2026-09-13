@@ -276,6 +276,11 @@ type Info struct {
 	// start-in-flight) and parse it for the in-flight deadline, so the Info
 	// mirror keeps the raw value.
 	LastWokeAt string // last_woke_at (raw)
+	// SleptAt is the RAW slept_at metadata (RFC3339 or empty): the fallback
+	// wake-fairness key stamped by SleepPatch/AcknowledgeDrainPatch alongside
+	// clearing last_woke_at, so a same-tick sleep/drain-ack falls back to this
+	// instead of collapsing straight to CreatedAt (#2574).
+	SleptAt string // slept_at (raw)
 	// AwakeStartedAt is the RAW awake_started_at metadata (RFC3339 or empty):
 	// the immutable start-of-awake-interval epoch that survives sleep/drain
 	// teardowns (unlike last_woke_at / pending_create_started_at, which are
@@ -1846,21 +1851,28 @@ func (m *Manager) Get(id string) (Info, error) {
 
 // ObserveRuntimeForInfo reports live provider state for a session whose Info
 // has already been loaded by the caller, avoiding a redundant store fetch.
-func (m *Manager) ObserveRuntimeForInfo(info Info, processNames []string) RuntimeObservation {
+func (m *Manager) ObserveRuntimeForInfo(info Info, processNames []string) (RuntimeObservation, error) {
 	obs := RuntimeObservation{SessionName: info.SessionName}
 	if strings.TrimSpace(info.SessionName) == "" || m.sp == nil {
-		return obs
+		return obs, nil
 	}
-	liveness := runtime.ObserveLiveness(m.sp, info.SessionName, processNames)
+	liveness, err := runtime.ObserveLivenessWithError(m.sp, info.SessionName, processNames)
+	if err != nil {
+		return RuntimeObservation{}, err
+	}
 	obs.Running = liveness.Running
 	obs.Alive = liveness.Alive
 	if obs.Running {
 		obs.Attached = m.sp.IsAttached(info.SessionName)
-		if lastActive, err := m.sp.GetLastActivity(info.SessionName); err == nil {
+		lastActive, err := m.sp.GetLastActivity(info.SessionName)
+		if errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			return RuntimeObservation{}, fmt.Errorf("observe last activity for %q: %w", info.SessionName, err)
+		}
+		if err == nil {
 			obs.LastActive = lastActive
 		}
 	}
-	return obs
+	return obs, nil
 }
 
 // List returns all chat sessions, optionally filtered by state and template,

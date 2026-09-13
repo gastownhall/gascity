@@ -99,6 +99,14 @@ type BeadRouter interface {
 type SourceWorkflowStore struct {
 	Store    beads.Store
 	StoreRef string
+	// Strict marks a store whose live-root scan failure must abort the sling
+	// instead of degrading to a SourceWorkflowStoreScanWarning. The selected
+	// source store is always strict; a caller sets this for any other store that
+	// structurally HOLDS the answer the singleton guard depends on — on a
+	// converged split city that is the relocated graph binding, where every live
+	// workflow root lives. Tolerating a fault there would answer "no conflict"
+	// from the one store that could have said otherwise.
+	Strict bool
 }
 
 // RouteRequest describes a bead routing operation in typed terms.
@@ -708,7 +716,10 @@ type CrossRigError struct {
 
 // Error returns the cross-rig routing diagnostic.
 func (e *CrossRigError) Error() string {
-	return fmt.Sprintf("cross-rig routing — bead %s (prefix %q) → agent %s (rig prefix %q)", e.BeadID, e.BeadPrefix, e.Target, e.RigPrefix)
+	return fmt.Sprintf("gc sling: refusing cross-rig route: bead %s (prefix %q) "+
+		"does not belong to %s (rig prefix %q); nothing was routed. Re-file the "+
+		"bead in that rig, pick a city-scope target, or pass --force to override.",
+		e.BeadID, e.BeadPrefix, e.Target, e.RigPrefix)
 }
 
 // CrossRigRouteError returns a typed cross-rig error when routing is unsafe.

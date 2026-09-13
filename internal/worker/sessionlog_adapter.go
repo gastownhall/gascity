@@ -57,6 +57,9 @@ type AgentTranscriptResult struct {
 // sessionlog as the only production transcript parser in Phase 1.
 type SessionLogAdapter struct {
 	SearchPaths []string
+	// activity memoizes derived tail activity across the per-request handles a
+	// Factory hands out. Nil (the zero adapter) derives on every call.
+	activity *DerivedActivityMemo
 }
 
 // DiscoverTranscript returns the best available transcript path for a worker.
@@ -92,6 +95,9 @@ func (a SessionLogAdapter) TailMeta(path string) (*sessionlog.TailMeta, error) {
 // full-file parser diagnostics override, and these readers set none, so clearing
 // it removes a false signal rather than a real one.
 func (a SessionLogAdapter) TailMetaForProvider(provider, path string) (*sessionlog.TailMeta, error) {
+	if sessionlog.ProviderFamily(provider) == "kimi" {
+		return sessionlog.ExtractKimiTailMetaFromSearchPaths(a.SearchPaths, path)
+	}
 	if sessionlog.ProviderFamily(provider) == "codex" {
 		return sessionlog.ExtractCodexTailMetaFromSearchPaths(a.SearchPaths, path)
 	}
@@ -110,8 +116,11 @@ func (a SessionLogAdapter) TailMetaForProvider(provider, path string) (*sessionl
 
 // TailUsage reads per-invocation token usage entries from the tail of a
 // discovered transcript path, validating it against the search-path roots.
-func (a SessionLogAdapter) TailUsage(path string) ([]sessionlog.TailUsage, error) {
-	return sessionlog.ExtractTailUsageFromSearchPaths(a.SearchPaths, path)
+// The scan window grows until cursorID is inside it, so invocations appended
+// since the last extraction are not lost to the fixed tail window. An empty
+// cursorID keeps the single fixed window.
+func (a SessionLogAdapter) TailUsage(path, cursorID string) ([]sessionlog.TailUsage, error) {
+	return sessionlog.ExtractTailUsageSinceFromSearchPaths(a.SearchPaths, path, cursorID)
 }
 
 // CodexTailUsage reads per-invocation token usage from the tail of a codex
@@ -119,7 +128,12 @@ func (a SessionLogAdapter) TailUsage(path string) ([]sessionlog.TailUsage, error
 // (~/.codex/sessions) on top of the configured search paths, because
 // a.SearchPaths alone holds claude-style roots that would reject real codex
 // rollout locations.
-func (a SessionLogAdapter) CodexTailUsage(path string) ([]sessionlog.TailUsage, error) {
+// cursorID is accepted for signature symmetry with TailUsage but not yet
+// honored: the codex extractor collapses on cumulative totals rather than
+// per-message identity, so window growth needs its own correctness argument.
+// The codex family therefore keeps the fixed tail window for now.
+func (a SessionLogAdapter) CodexTailUsage(path, cursorID string) ([]sessionlog.TailUsage, error) {
+	_ = cursorID
 	return sessionlog.ExtractCodexTailUsageFromSearchPaths(a.SearchPaths, path)
 }
 
@@ -128,26 +142,32 @@ func (a SessionLogAdapter) CodexTailUsage(path string) ([]sessionlog.TailUsage, 
 // the provider's invocation-usage family (invocationUsageSpecs). It returns
 // (nil, nil) for families without invocation-telemetry support, so callers can
 // treat "no extractor" and "no usage" uniformly.
-func (a SessionLogAdapter) InvocationUsage(provider, path string) ([]sessionlog.TailUsage, error) {
+func (a SessionLogAdapter) InvocationUsage(provider, path, cursorID string) ([]sessionlog.TailUsage, error) {
 	family, ok := InvocationUsageFamily(provider)
 	if !ok {
 		return nil, nil
 	}
-	return invocationUsageSpecs[family].extract(a, path)
+	return invocationUsageSpecs[family].extract(a, path, cursorID)
 }
 
 // TailActivityForProvider reads tail activity for a provider whose transcript
 // tail cannot be read from a trailing record. Whole-file-JSON mirror families
 // need the normalized history; everything else keeps the cheap tail path.
 func (a SessionLogAdapter) TailActivityForProvider(provider, path string) (TailActivity, error) {
+	if sessionlog.ProviderFamily(provider) == "kimi" {
+		meta, err := a.TailMetaForProvider(provider, path)
+		return tailActivity(meta), err
+	}
 	if !sessionlog.DerivesActivityFromHistory(provider) {
 		return a.TailActivity(path)
 	}
-	snapshot, err := a.LoadHistory(LoadRequest{Provider: provider, TranscriptPath: path, TailCompactions: 1})
-	if err != nil || snapshot == nil {
-		return TailActivityUnknown, err
-	}
-	return snapshot.TailState.Activity, nil
+	return a.activity.resolve(path, func() (TailActivity, error) {
+		snapshot, err := a.LoadHistory(LoadRequest{Provider: provider, TranscriptPath: path, TailCompactions: 1})
+		if err != nil || snapshot == nil {
+			return TailActivityUnknown, err
+		}
+		return snapshot.TailState.Activity, nil
+	})
 }
 
 // TailActivity reads the transcript tail activity without loading full history.
@@ -340,7 +360,7 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 		ProviderSessionID:     session.ID,
 		TranscriptStreamID:    filepath.Clean(path),
 		Generation: Generation{
-			ID:         fmt.Sprintf("%d:%d", info.ModTime().UnixNano(), info.Size()),
+			ID:         transcriptGenerationID(info),
 			ObservedAt: info.ModTime().UTC(),
 		},
 		Cursor: Cursor{

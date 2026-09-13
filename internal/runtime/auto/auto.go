@@ -33,6 +33,7 @@ var (
 	_ runtime.TransportCapabilityProvider   = (*Provider)(nil)
 	_ runtime.RelaunchProvider              = (*Provider)(nil)
 	_ runtime.LivenessObserver              = (*Provider)(nil)
+	_ runtime.LivenessObserverWithError     = (*Provider)(nil)
 )
 
 // New creates a composite provider. defaultSP handles sessions not
@@ -248,6 +249,25 @@ func (p *Provider) ObserveLiveness(name string, processNames []string) runtime.L
 	return runtime.ObserveLiveness(other, name, processNames)
 }
 
+// ObserveLivenessWithError preserves routed-backend observation failures. A
+// confirmed absence still falls through to the other backend so stale route
+// recovery matches IsRunning and ObserveLiveness without collapsing an
+// unavailable primary into absence.
+func (p *Provider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	primary, err := runtime.ObserveLivenessWithError(p.route(name), name, processNames)
+	if err != nil || primary.Running {
+		return primary, err
+	}
+	p.mu.RLock()
+	isACP := p.routes[name]
+	p.mu.RUnlock()
+	other := p.acpSP
+	if isACP {
+		other = p.defaultSP
+	}
+	return runtime.ObserveLivenessWithError(other, name, processNames)
+}
+
 // Nudge delegates to the routed backend.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	return p.route(name).Nudge(name, content)
@@ -383,6 +403,8 @@ func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 	return runtime.ProviderCapabilities{
 		CanReportAttachment: dc.CanReportAttachment && ac.CanReportAttachment,
 		CanReportActivity:   dc.CanReportActivity && ac.CanReportActivity,
+		CanStream:           dc.CanStream && ac.CanStream,
+		CanAttachTTY:        dc.CanAttachTTY && ac.CanAttachTTY,
 		NeedsClaimBackstop:  dc.NeedsClaimBackstop || ac.NeedsClaimBackstop,
 	}
 }

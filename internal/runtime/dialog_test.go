@@ -1602,7 +1602,7 @@ func TestAcceptStartupDialogsWithTimeoutRefreshesBudgetOnProgress(t *testing.T) 
 				if time.Since(start) < renderDelay {
 					return "", nil // agent still booting: nothing on screen yet
 				}
-				return "Quick safety check", nil
+				return "Quick safety check: Is this a project you created or one you trust?\n\n❯ Yes, I trust this folder\n  No, exit\n\nEnter to confirm · Esc to cancel", nil
 			}
 			if time.Since(trustAccepted) < renderDelay {
 				return "", nil // next dialog has not rendered yet

@@ -433,6 +433,51 @@ func TestResolvedWorkerRuntimeWithConfigSkipsCityAnchorsWhenCityPathEmpty(t *tes
 	}
 }
 
+func TestResolvedWorkerRuntimeWithConfigMergesWorkspaceEnv(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Env: map[string]string{
+			"WORKSPACE_ONLY": "workspace",
+			"SHARED_ENV":     "workspace",
+			"BD_BIN":         "/tmp/pinned-bd",
+		}},
+		Agents: []config.Agent{{Name: "worker", Provider: "stub"}},
+		Providers: map[string]config.ProviderSpec{
+			"stub": {
+				Command: "/bin/echo",
+				Env: map[string]string{
+					"PROVIDER_ONLY": "provider",
+					"SHARED_ENV":    "provider",
+				},
+			},
+		},
+	}
+
+	resolved, err := resolvedWorkerRuntimeWithConfigAndMetadata(cityDir, cfg, session.Info{
+		Template: "worker",
+		WorkDir:  cityDir,
+	}, "", nil)
+	if err != nil {
+		t.Fatalf("resolvedWorkerRuntimeWithConfigAndMetadata: %v", err)
+	}
+	if resolved == nil {
+		t.Fatal("resolvedWorkerRuntimeWithConfigAndMetadata() = nil")
+	}
+	for key, want := range map[string]string{
+		"WORKSPACE_ONLY": "workspace",
+		"BD_BIN":         "/tmp/pinned-bd",
+		"PROVIDER_ONLY":  "provider",
+		"SHARED_ENV":     "provider",
+	} {
+		if got := resolved.SessionEnv[key]; got != want {
+			t.Errorf("SessionEnv[%s] = %q, want %q", key, got, want)
+		}
+		if got := resolved.Hints.Env[key]; got != want {
+			t.Errorf("Hints.Env[%s] = %q, want %q", key, got, want)
+		}
+	}
+}
+
 // TestResolvedWorkerSessionConfigWithConfigSeedsCityAnchorsOnCreatePath
 // covers the CLI session-create path (called by `gc session start` /
 // `gc session new` etc. through newWorkerSessionHandleForResolvedRuntimeWithConfig).

@@ -411,6 +411,135 @@ func TestEmitCurrentNilRecorderIsNoOp(t *testing.T) {
 	}
 }
 
+// TestEmitCurrentEmitsStepDefinedOncePerStep pins the idempotent-restatement
+// contract (ga-rd8le): EmitCurrent keeps re-projecting the full graph every
+// tick, but step_defined is emitted exactly once per step against a durable
+// per-step marker. A steady tick therefore restates nothing, while a step that
+// is still unmarked — one just created, or one whose emit crashed before the
+// marker landed — is re-emitted on the next tick, no matter which creator made
+// it. That is convergence-via-restatement without threading created IDs.
+func TestEmitCurrentEmitsStepDefinedOncePerStep(t *testing.T) {
+	graph := beads.NewMemStore()
+	root := mustCreateProjectionRoot(t, graph, "")
+	stepA := mustCreateProjectionStep(t, graph, "gcg-step-a", root.ID, "build", "[]")
+	stepB := mustCreateProjectionStep(t, graph, "gcg-step-b", root.ID, "test", `["build"]`)
+	recorder := events.NewFake()
+
+	// First tick emits step_defined for both unmarked steps and marks them.
+	if err := EmitCurrent(recorder, beads.GraphStore{Store: graph}, beads.WorkStore{}, root.ID, "control-dispatch"); err != nil {
+		t.Fatalf("EmitCurrent first tick: %v", err)
+	}
+	if got := countStepDefined(recorder.Events, root.ID); got != 2 {
+		t.Fatalf("first tick step_defined = %d, want 2", got)
+	}
+	for _, step := range []beads.Bead{stepA, stepB} {
+		reloaded, err := graph.Get(step.ID)
+		if err != nil {
+			t.Fatalf("reload step %s: %v", step.ID, err)
+		}
+		if reloaded.Metadata[beadmeta.StepDefinedEmittedMetadataKey] == "" {
+			t.Fatalf("step %s was emitted but not durably marked", step.ID)
+		}
+	}
+
+	// Second tick re-projects the same graph and must emit nothing: both steps
+	// are now durably marked. On base (no marker) this re-emits the full graph.
+	recorder.Events = nil
+	if err := EmitCurrent(recorder, beads.GraphStore{Store: graph}, beads.WorkStore{}, root.ID, "control-dispatch"); err != nil {
+		t.Fatalf("EmitCurrent second tick: %v", err)
+	}
+	if got := countStepDefined(recorder.Events, root.ID); got != 0 {
+		t.Fatalf("second tick step_defined = %d, want 0 (idempotent restatement)", got)
+	}
+
+	// A step created after the first pass is unmarked and self-heals: only it
+	// is emitted on the next tick, regardless of the steps already marked.
+	stepC := mustCreateProjectionStep(t, graph, "gcg-step-c", root.ID, "ship", `["test"]`)
+	recorder.Events = nil
+	if err := EmitCurrent(recorder, beads.GraphStore{Store: graph}, beads.WorkStore{}, root.ID, "control-dispatch"); err != nil {
+		t.Fatalf("EmitCurrent third tick: %v", err)
+	}
+	if got := countStepDefined(recorder.Events, root.ID); got != 1 {
+		t.Fatalf("third tick step_defined = %d, want 1 (only the new step)", got)
+	}
+	if recorder.Events[0].Subject != stepC.ID {
+		t.Fatalf("third tick emitted %q, want the new step %q", recorder.Events[0].Subject, stepC.ID)
+	}
+}
+
+// TestEmitCurrentDoesNotMarkOnDroppedOrDiscardEmit pins CRITICAL 1 of the
+// ga-rd8le council review: EmitCurrent must never durably mark a step
+// (StepDefinedEmittedMetadataKey) after a best-effort emit that may have been
+// dropped, or the step is skipped forever — a permanent miss.
+// events.Recorder.Record is void: a FileRecorder drops the event on a lock
+// timeout or a write error (ENOSPC), and events.Discard (which openCityRecorderAt
+// returns on a recorder-open failure) drops every event. Marking after such an
+// emit destroys the self-healing the level-triggered restatement provided, so
+// the mark lands only once the emit is acknowledged durable; an unacknowledged
+// tick leaves the step unmarked and it re-emits on the next healthy tick.
+//
+// RED on this PR's first commit, before the confirm-before-mark change: that
+// revision marks unconditionally once graphStore.Store is non-nil, regardless
+// of the recorder, so the first assertion (still unmarked after a Discard tick)
+// fails there.
+func TestEmitCurrentDoesNotMarkOnDroppedOrDiscardEmit(t *testing.T) {
+	graph := beads.NewMemStore()
+	root := mustCreateProjectionRoot(t, graph, "")
+	step := mustCreateProjectionStep(t, graph, "gcg-step-a", root.ID, "build", "[]")
+	graphStore := beads.GraphStore{Store: graph}
+
+	assertUnmarked := func(when string) {
+		t.Helper()
+		reloaded, err := graph.Get(step.ID)
+		if err != nil {
+			t.Fatalf("reload step %s (%s): %v", step.ID, when, err)
+		}
+		if reloaded.Metadata[beadmeta.StepDefinedEmittedMetadataKey] != "" {
+			t.Fatalf("step marked emitted after %s: a dropped/void emit must never mark", when)
+		}
+	}
+
+	// events.Discard cannot acknowledge durability, so the void emit must not mark.
+	if err := EmitCurrent(events.Discard, graphStore, beads.WorkStore{}, root.ID, "control-dispatch"); err != nil {
+		t.Fatalf("EmitCurrent (discard): %v", err)
+	}
+	assertUnmarked("a Discard tick")
+
+	// A recorder whose append fails (the FileRecorder lock-timeout / ENOSPC drop
+	// shape) reports the drop, so the step must still stay unmarked.
+	if err := EmitCurrent(events.NewFailFake(), graphStore, beads.WorkStore{}, root.ID, "control-dispatch"); err != nil {
+		t.Fatalf("EmitCurrent (failing recorder): %v", err)
+	}
+	assertUnmarked("a failed-append tick")
+
+	// A healthy recorder acknowledges the append, so the still-unmarked step is
+	// re-emitted AND marked this tick — the definition was never permanently lost.
+	healthy := events.NewFake()
+	if err := EmitCurrent(healthy, graphStore, beads.WorkStore{}, root.ID, "control-dispatch"); err != nil {
+		t.Fatalf("EmitCurrent (healthy): %v", err)
+	}
+	if got := countStepDefined(healthy.Events, root.ID); got != 1 {
+		t.Fatalf("healthy tick step_defined = %d, want 1 (re-emit after the dropped ticks)", got)
+	}
+	reloaded, err := graph.Get(step.ID)
+	if err != nil {
+		t.Fatalf("reload step %s: %v", step.ID, err)
+	}
+	if reloaded.Metadata[beadmeta.StepDefinedEmittedMetadataKey] == "" {
+		t.Fatalf("step not marked after a healthy acknowledged emit")
+	}
+}
+
+func countStepDefined(recorded []events.Event, rootID string) int {
+	count := 0
+	for _, event := range recorded {
+		if event.Type == events.ExecutionStepDefined && event.RunID == rootID {
+			count++
+		}
+	}
+	return count
+}
+
 func mustCreateProjectionRoot(t *testing.T, store beads.Store, convoyID string) beads.Bead {
 	t.Helper()
 	metadata := map[string]string{
