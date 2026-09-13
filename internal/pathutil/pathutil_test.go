@@ -103,13 +103,23 @@ func TestResolveNearestExistingAncestorSymlinkedAncestor(t *testing.T) {
 	if err := os.Symlink(realParent, linkParent); err != nil {
 		t.Skip("symlinks not supported")
 	}
+	// Resolve realParent as well, the way the missing-leaf case above does.
+	// ResolveNearestExistingAncestor resolves the whole ancestor path, not
+	// just the link-parent component, and t.TempDir() can itself sit under a
+	// symlinked prefix — on macOS it returns /var/folders/... while /var is a
+	// symlink to /private/var. Building want from the unresolved realParent
+	// therefore compares a resolved path against an unresolved one.
+	resolvedRealParent, err := filepath.EvalSymlinks(realParent)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	target := filepath.Join(linkParent, "missing", "gc-home")
 	got, err := ResolveNearestExistingAncestor(target)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	want := filepath.Join(realParent, "missing", "gc-home")
+	want := filepath.Join(resolvedRealParent, "missing", "gc-home")
 	if got != want {
 		t.Fatalf("ResolveNearestExistingAncestor(%q) = %q, want %q", target, got, want)
 	}

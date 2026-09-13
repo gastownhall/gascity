@@ -444,3 +444,27 @@ func TestFindZCodeSessionFileByScopeFallsBackToTheNameOnlyScope(t *testing.T) {
 		t.Fatalf("placeholder-only seat resolved %q, want its placeholder %q", got, pending)
 	}
 }
+
+// The adapter sanitizes path components with `tr -c 'A-Za-z0-9._-' '_'`
+// under LC_ALL=C, which walks BYTES: a two-byte "ö" becomes two underscores.
+// A rune-wise Go side produced one, so a non-ASCII session name resolved a
+// scope the adapter never wrote.
+func TestZCodeScopeSanitizesByteWiseLikeTheAdapter(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"wörker", "w__rker"}, // U+00F6 is two UTF-8 bytes
+		{"作業-1", "______-1"},  // two three-byte runes
+		{"gascity/gc.worker-9", "gascity_gc.worker-9"},
+		{"plain_ok.name-1", "plain_ok.name-1"},
+	}
+	for _, tc := range cases {
+		if got := sanitizeZCodeComponent(tc.in); got != tc.want {
+			t.Errorf("sanitizeZCodeComponent(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	if got := ZCodeMirrorScope("wörker", "1"); got != "w__rker#1" {
+		t.Errorf("ZCodeMirrorScope = %q, want w__rker#1", got)
+	}
+	if got := ZCodeSeatMirrorScope("wörker", "gcg-sessïon", "2"); got != "w__rker@gcg-sess__on#2" {
+		t.Errorf("ZCodeSeatMirrorScope = %q, want w__rker@gcg-sess__on#2", got)
+	}
+}

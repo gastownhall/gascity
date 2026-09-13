@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -16,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/sessionlog"
 	zcodeadapter "github.com/gastownhall/gascity/internal/worker/adapters/zcode"
 )
 
@@ -1090,6 +1090,32 @@ func TestSessionKeyComesFromGCSession(t *testing.T) {
 	}
 }
 
+// The adapter's `tr -c` walks bytes and the reader's sanitizer must walk the
+// same bytes, or a non-ASCII session name folds to a different width on each
+// side and the reader looks in a scope the adapter never wrote. LC_ALL=C pins
+// tr to bytes on every platform; the reader test pins the Go side.
+func TestNonASCIISessionNameSanitizesByteWiseOnBothSides(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, map[string]string{"STUB_SID": "sess_utf8"})
+	h.env["GC_SESSION"] = "wörker"
+	h.env["GC_SESSION_ID"] = "gcg-sessïon"
+	h.run("non-ascii name\n")
+
+	// "ö" and "ï" are two UTF-8 bytes each: two underscores, not one.
+	scope := "w__rker@gcg-sess__on#1"
+	if _, err := os.Stat(h.sidPath("w__rker@gcg-sess__on")); err != nil {
+		t.Fatalf("sid not written under the byte-wise folded key: %v", err)
+	}
+	mirror := filepath.Join(h.mirrorDir, scope, "sess_utf8.json")
+	if _, err := os.Stat(mirror); err != nil {
+		t.Fatalf("mirror not written under the byte-wise folded scope: %v", err)
+	}
+	if got := sessionlog.FindZCodeSessionFileByScope([]string{h.mirrorDir}, h.workDir, "wörker", "gcg-sessïon", "1"); got != mirror {
+		t.Fatalf("reader resolved %q for the non-ASCII seat, want the adapter's %q", got, mirror)
+	}
+}
+
 // Behavior 9: the export mirror the sessionlog zcode reader consumes.
 func TestExportMirrorAccumulatesTurns(t *testing.T) {
 	t.Parallel()
@@ -1480,9 +1506,39 @@ type mirrorExport struct {
 }
 
 // pendingSessionID mirrors the adapter's scope-derived placeholder id for turns
-// canceled before a session id existed.
+// canceled before a session id existed, folding the scope byte-wise the way
+// the adapter's writers and the engine's reader do.
 func (h *harness) pendingSessionID() string {
-	return "pending-" + regexp.MustCompile(`[^A-Za-z0-9._-]`).ReplaceAllString(h.epochScope(), "_")
+	scope := []byte(h.epochScope())
+	for i, c := range scope {
+		switch {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '.', c == '_', c == '-':
+		default:
+			scope[i] = '_'
+		}
+	}
+	return "pending-" + string(scope)
+}
+
+// assertLiveScopes fails unless the live mirror root holds exactly scopes.
+func (h *harness) assertLiveScopes(scopes ...string) {
+	h.t.Helper()
+	entries, err := os.ReadDir(h.mirrorDir)
+	if err != nil {
+		h.t.Fatalf("read live mirror root: %v", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if !equalStrings(names, scopes) {
+		h.t.Fatalf("live mirror root = %v, want exactly %v", names, scopes)
+	}
+}
+
+// archiveRoot is where the adapter moves superseded mirror scopes.
+func (h *harness) archiveRoot() string {
+	return filepath.Join(h.home, ".local", "state", "gascity", "zcode", "archived-transcripts")
 }
 
 // epochScope mirrors the adapter's per-seat, per-epoch mirror directory, which
@@ -1703,14 +1759,15 @@ func TestSeatsSharingASessionNameKeepSeparateConversations(t *testing.T) {
 }
 
 // State persisted before the scope carried the seat belongs to the one seat
-// that then had the name — or, in the collision this fix removes, to both. The
-// first start under the seat scope takes it over, so the conversation resumes
-// across the adapter upgrade and the adopted copy stops sitting adjacent to
-// the live one for the model to read.
+// that then had the name. A RESTARTED seat's first start under the seat scope
+// takes it over — gc bumps GC_RUNTIME_EPOCH on every wake, so a generation
+// above one says this seat already ran — and the conversation resumes across
+// the adapter upgrade with no stale mirror left adjacent to the live one.
 func TestSeatAdoptsStateLeftUnderTheNameOnlyScope(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness(t, map[string]string{"STUB_SID": "sess_before_upgrade"})
+	h.env["GC_RUNTIME_EPOCH"] = "1"
 	h.run("before the upgrade\n")
 	stateRoot := filepath.Join(h.home, ".local", "state", "gascity", "zcode")
 	legacy := []string{
@@ -1726,6 +1783,7 @@ func TestSeatAdoptsStateLeftUnderTheNameOnlyScope(t *testing.T) {
 
 	h.resetLog()
 	h.env["GC_SESSION_ID"] = "gcg-session-575a839d"
+	h.env["GC_RUNTIME_EPOCH"] = "2"
 	h.run("after the upgrade\n")
 	if call := h.calls()[0]; !containsString(call, "--resume=sess_before_upgrade") {
 		t.Fatalf("seat did not resume the conversation it inherited: %q", call)
@@ -1757,5 +1815,213 @@ func TestSeatAdoptsStateLeftUnderTheNameOnlyScope(t *testing.T) {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("name-only state left behind after adoption: %s (%v)", path, err)
 		}
+	}
+}
+
+// A fresh seat re-seated into a closed sibling's slot shares the sibling's
+// session name and epoch, and starts on its first generation. Name-only state
+// of that name is the DEAD sibling's, not this seat's: adopting it would
+// --resume the dead conversation and rekey the dead seat's transcript under
+// the wrong bead. The fresh seat leaves it alone, and the sibling's transcript
+// stays readable under the name-only scope its own bead falls back to.
+func TestFreshSeatDoesNotAdoptAClosedSiblingsNameOnlyState(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, map[string]string{"STUB_SID": "sess_closed_sibling"})
+	h.env["GC_RUNTIME_EPOCH"] = "1"
+	h.run("the sibling speaks\n")
+
+	h.resetLog()
+	h.env["GC_SESSION_ID"] = "gcg-session-b2f5746a"
+	h.env["STUB_SID"] = "sess_fresh_seat"
+	h.run("the fresh seat speaks\n")
+	for _, arg := range h.calls()[0] {
+		if strings.HasPrefix(arg, "--resume=") {
+			t.Fatalf("fresh seat resumed the closed sibling's conversation: %q", arg)
+		}
+	}
+	if got := h.sid(); got != "sess_fresh_seat" {
+		t.Fatalf("fresh seat sid = %q, want its own sess_fresh_seat", got)
+	}
+	if _, err := os.Stat(filepath.Join(h.mirrorDir, h.epochScope(), "sess_closed_sibling.json")); !os.IsNotExist(err) {
+		t.Fatalf("closed sibling's mirror rekeyed under the fresh seat's scope: %v", err)
+	}
+	export := h.readExport("sess_fresh_seat")
+	var prompts []string
+	for _, message := range export.Messages {
+		if message.Info.Role == "user" {
+			prompts = append(prompts, message.Parts[0].Text)
+		}
+	}
+	if want := []string{"the fresh seat speaks"}; !equalStrings(prompts, want) {
+		t.Fatalf("fresh seat mirror prompts = %q, want only its own: %q", prompts, want)
+	}
+
+	// The sibling's bead never wrote a seat scope, so gc resolves its transcript
+	// through the name-only scope (live root or archive). It must still be the
+	// sibling's file, not the fresh seat's.
+	sibling := sessionlog.FindZCodeSessionFileByScope(
+		[]string{h.mirrorDir, h.archiveRoot()}, h.workDir, "test-session", "gcg-session-575a839d", "1")
+	if filepath.Base(sibling) != "sess_closed_sibling.json" {
+		t.Fatalf("closed sibling's transcript resolved to %q, want its own sess_closed_sibling.json", sibling)
+	}
+	// It is served from the archive: the live root the model browses carries
+	// only the fresh seat's scope, and the sibling's sid and CLI state are gone.
+	if want := filepath.Join(h.archiveRoot(), "test-session#1", "sess_closed_sibling.json"); sibling != want {
+		t.Fatalf("closed sibling's transcript at %q, want archived at %q", sibling, want)
+	}
+	h.assertLiveScopes(h.epochScope())
+	stateRoot := filepath.Join(h.home, ".local", "state", "gascity", "zcode")
+	for _, gone := range []string{h.sidPath("test-session"), filepath.Join(stateRoot, "homes", "test-session#1")} {
+		if _, err := os.Stat(gone); !os.IsNotExist(err) {
+			t.Fatalf("closed sibling's name-only state survived the seat's start: %s (%v)", gone, err)
+		}
+	}
+}
+
+// Name-only state at an epoch the seat is not on — a reset happened since the
+// previous adapter wrote it — matches no per-seat sweep, so it lingered in the
+// live tree forever. A seat-keyed start sweeps every name-only entry of its
+// own session name: sids and CLI homes are dropped, mirrors are archived.
+func TestSeatSweepsStaleNameOnlyStateOfItsName(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, map[string]string{"STUB_SID": "sess_epoch_four"})
+	stateRoot := filepath.Join(h.home, ".local", "state", "gascity", "zcode")
+	staleSid := filepath.Join(stateRoot, "sids", "test-session#3")
+	staleHome := filepath.Join(stateRoot, "homes", "test-session#3")
+	staleMirror := filepath.Join(h.mirrorDir, "test-session#3")
+	for _, dir := range []string{filepath.Dir(staleSid), staleHome, staleMirror} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(staleSid, []byte("sess_old\n"), 0o600); err != nil {
+		t.Fatalf("seed stale sid: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(staleHome, "child-home"), []byte(staleHome+"\n"), 0o644); err != nil {
+		t.Fatalf("seed stale home: %v", err)
+	}
+	body := `{"info":{"id":"sess_old","directory":"` + filepath.ToSlash(h.workDir) + `"},"messages":[]}`
+	if err := os.WriteFile(filepath.Join(staleMirror, "sess_old.json"), []byte(body), 0o644); err != nil {
+		t.Fatalf("seed stale mirror: %v", err)
+	}
+
+	h.env["GC_SESSION_ID"] = "gcg-session-575a839d"
+	h.env["GC_CONTINUATION_EPOCH"] = "4"
+	h.env["GC_RUNTIME_EPOCH"] = "2"
+	h.run("epoch four\n")
+	for _, arg := range h.calls()[0] {
+		if strings.HasPrefix(arg, "--resume=") {
+			t.Fatalf("seat resumed a stale name-only conversation: %q", arg)
+		}
+	}
+	for _, gone := range []string{staleSid, staleHome} {
+		if _, err := os.Stat(gone); !os.IsNotExist(err) {
+			t.Fatalf("stale name-only state survived: %s (%v)", gone, err)
+		}
+	}
+	h.assertLiveScopes(h.epochScope())
+	archived := filepath.Join(h.archiveRoot(), "test-session#3", "sess_old.json")
+	if _, err := os.Stat(archived); err != nil {
+		t.Fatalf("stale name-only transcript was destroyed rather than archived: %v", err)
+	}
+	// And it still resolves for the bead that wrote it, by its own scope.
+	if got := sessionlog.FindZCodeSessionFileByScope(
+		[]string{h.mirrorDir, h.archiveRoot()}, h.workDir, "test-session", "", "3"); got != archived {
+		t.Fatalf("archived name-only transcript resolved to %q, want %q", got, archived)
+	}
+}
+
+// Name-only scopes collide across beads: an earlier occupant of this session
+// name was archived under the scope before a later one wrote a fresh live
+// scope of the same name. Archiving the later one adds to the archived scope;
+// it must not replace it, because the earlier bead's transcript has no other
+// copy.
+func TestArchiveMergesIntoAnAlreadyArchivedNameOnlyScope(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, map[string]string{"STUB_SID": "sess_epoch_four"})
+	archivedScope := filepath.Join(h.archiveRoot(), "test-session#3")
+	liveScope := filepath.Join(h.mirrorDir, "test-session#3")
+	for _, dir := range []string{archivedScope, liveScope} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	mirror := func(id string) []byte {
+		return []byte(`{"info":{"id":"` + id + `","directory":"` + filepath.ToSlash(h.workDir) + `"},"messages":[]}`)
+	}
+	if err := os.WriteFile(filepath.Join(archivedScope, "sess_earlier.json"), mirror("sess_earlier"), 0o644); err != nil {
+		t.Fatalf("seed archived mirror: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(liveScope, "sess_later.json"), mirror("sess_later"), 0o644); err != nil {
+		t.Fatalf("seed live mirror: %v", err)
+	}
+
+	h.env["GC_SESSION_ID"] = "gcg-session-575a839d"
+	h.env["GC_CONTINUATION_EPOCH"] = "4"
+	h.env["GC_RUNTIME_EPOCH"] = "2"
+	h.run("epoch four\n")
+
+	h.assertLiveScopes(h.epochScope())
+	for _, name := range []string{"sess_earlier.json", "sess_later.json"} {
+		if _, err := os.Stat(filepath.Join(archivedScope, name)); err != nil {
+			t.Fatalf("archived scope lost %s: %v", name, err)
+		}
+	}
+}
+
+// A failed merge into an occupied archive slot must not take the live scope
+// with it. Removing the source unconditionally meant one unwritable or full
+// archive tree destroyed the only copy of a transcript, on exactly the I/O
+// failure archiving exists to survive.
+func TestArchiveKeepsTheLiveScopeWhenTheMergeCopyFails(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the permission bits this fault injection relies on")
+	}
+
+	h := newHarness(t, map[string]string{"STUB_SID": "sess_epoch_four"})
+	archivedScope := filepath.Join(h.archiveRoot(), "test-session#3")
+	liveScope := filepath.Join(h.mirrorDir, "test-session#3")
+	for _, dir := range []string{archivedScope, liveScope} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	mirror := func(id string) []byte {
+		return []byte(`{"info":{"id":"` + id + `","directory":"` + filepath.ToSlash(h.workDir) + `"},"messages":[]}`)
+	}
+	archived := filepath.Join(archivedScope, "sess_earlier.json")
+	if err := os.WriteFile(archived, mirror("sess_earlier"), 0o644); err != nil {
+		t.Fatalf("seed archived mirror: %v", err)
+	}
+	live := filepath.Join(liveScope, "sess_later.json")
+	if err := os.WriteFile(live, mirror("sess_later"), 0o644); err != nil {
+		t.Fatalf("seed live mirror: %v", err)
+	}
+	// Readable and searchable but not writable: the merge copy fails partway,
+	// the way a full or root-owned archive tree does.
+	if err := os.Chmod(archivedScope, 0o500); err != nil {
+		t.Fatalf("chmod archived scope: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(archivedScope, 0o755) })
+
+	h.env["GC_SESSION_ID"] = "gcg-session-575a839d"
+	h.env["GC_CONTINUATION_EPOCH"] = "4"
+	h.env["GC_RUNTIME_EPOCH"] = "2"
+	h.run("epoch four\n")
+
+	if _, err := os.Stat(live); err != nil {
+		t.Fatalf("live transcript destroyed by a failed archive copy: %v", err)
+	}
+	if _, err := os.Stat(archived); err != nil {
+		t.Fatalf("already-archived transcript lost: %v", err)
+	}
+	// The seat still started: a failed archive is a leak to report, not a
+	// reason to strand the pane.
+	if _, err := os.Stat(filepath.Join(h.mirrorDir, h.epochScope(), "sess_epoch_four.json")); err != nil {
+		t.Fatalf("seat did not mirror its own turn after the failed archive: %v", err)
 	}
 }

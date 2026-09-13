@@ -7,6 +7,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
 // Start ensures the worker exists and its runtime is live.
@@ -226,7 +227,14 @@ func (h *SessionHandle) State(ctx context.Context) (State, error) {
 			return state, nil
 		}
 		state.Phase = PhaseReady
-		if strings.TrimSpace(info.SessionKey) == "" {
+		provider := h.historyProvider(info)
+		// A family that derives activity from history (zcode) has no tail
+		// chunk: its verdict needs the whole mirror parsed. Keyless, it used to
+		// take the history load below on every poll; the probe memoizes that
+		// derivation per mirror generation instead. Keyless tail-chunk
+		// families keep the history-backed probe, whose tail read is not fenced
+		// to the adapter's search roots.
+		if strings.TrimSpace(info.SessionKey) == "" && !sessionlog.DerivesActivityFromHistory(provider) {
 			if history, histErr := h.historyWithRequest(HistoryRequest{TailCompactions: 1}); histErr == nil && history != nil {
 				if history.TailState.Activity == TailActivityInTurn {
 					state.Phase = PhaseBusy
@@ -235,7 +243,7 @@ func (h *SessionHandle) State(ctx context.Context) (State, error) {
 			return state, nil
 		}
 		if path, pathErr := h.manager.TranscriptPath(id, h.adapter.SearchPaths); pathErr == nil && strings.TrimSpace(path) != "" {
-			if activity, actErr := h.adapter.TailActivityForProvider(h.historyProvider(info), path); actErr == nil && activity == TailActivityInTurn {
+			if activity, actErr := h.adapter.TailActivityForProvider(provider, path); actErr == nil && activity == TailActivityInTurn {
 				state.Phase = PhaseBusy
 			}
 		}
