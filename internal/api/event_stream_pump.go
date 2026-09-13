@@ -57,10 +57,15 @@ func readEventsAhead[T any](ctx context.Context, next func() (T, error)) <-chan 
 // subscriber received a small fraction of the log wherever its cursor sat.
 //
 // Delivery is the stream's contract; the projection is enrichment. It is
-// already absent whenever it cannot be resolved, and it carries requires_resync
-// so a consumer re-reads the workflow regardless. Dropping it while the stream
-// is behind costs a consumer nothing and lets the stream catch up, after which
-// projections resume on their own.
+// already absent whenever it cannot be resolved, and the endpoint documents
+// it as optional, so dropping it while the stream is behind costs a consumer
+// no guarantee it had. The event itself is still delivered in seq order with
+// its payload bead, and projections resume on their own once the subscriber
+// catches up.
+//
+// Note: requires_resync is NOT a general backstop here — projectWorkflowEvent
+// sets it only for bead.updated (convoy_event_stream.go), and it is omitempty,
+// so a dropped bead.created/bead.closed projection carries no resync flag.
 func projectWorkflowEventWithSlack(state State, event events.Event, backlog int) *workflowEventProjection {
 	if backlog > 0 {
 		return nil
