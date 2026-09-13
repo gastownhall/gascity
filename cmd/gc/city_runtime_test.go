@@ -7635,3 +7635,78 @@ func TestNewCityRuntimeWiresAssignedWorkDeferTracker(t *testing.T) {
 		t.Fatal("city_runtime.go no longer hands the constructed tracker to the reconcile pass: the backstop is dead in production while every behavior test that drives the option directly stays green")
 	}
 }
+
+// TestCityRuntimeWiresSessionEventPumpCallSites pins the two production call
+// sites that wire cr.sessionEvents: construction plus the initial subscribe
+// in run(), and the re-point in reloadConfigTraced() when the provider
+// changes. Every pump behavior test in session_event_pump_test.go constructs
+// a sessionEventPump directly and never drives CityRuntime.run or a reload,
+// so deleting either wiring line would leave those tests green while the
+// event-driven poke is dead in production (the same hazard
+// TestNewCityRuntimeWiresAssignedWorkDeferTracker pins for cr.adt).
+//
+// Pin it through the PARSER rather than a substring search: a text search
+// cannot tell code from a comment, so commenting a line out would leave the
+// backstop dead in production with this test still green.
+func TestCityRuntimeWiresSessionEventPumpCallSites(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "city_runtime.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse city_runtime.go: %v", err)
+	}
+
+	constructed := false // cr.sessionEvents = newSessionEventPump(...)
+	restarted := false   // cr.sessionEvents.restart(cr.sp) in run()
+	repointed := false   // cr.sessionEvents.restart(nextSp) in reloadConfigTraced()
+
+	isSessionEventsSelector := func(e ast.Expr) bool {
+		sel, ok := e.(*ast.SelectorExpr)
+		if !ok || sel.Sel == nil || sel.Sel.Name != "sessionEvents" {
+			return false
+		}
+		recv, ok := sel.X.(*ast.Ident)
+		return ok && recv.Name == "cr"
+	}
+
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.AssignStmt:
+			if len(node.Lhs) == 1 && len(node.Rhs) == 1 && isSessionEventsSelector(node.Lhs[0]) {
+				if call, ok := node.Rhs[0].(*ast.CallExpr); ok {
+					if fn, ok := call.Fun.(*ast.Ident); ok && fn.Name == "newSessionEventPump" {
+						constructed = true
+					}
+				}
+			}
+		case *ast.CallExpr:
+			sel, ok := node.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel == nil || sel.Sel.Name != "restart" || len(node.Args) != 1 {
+				return true
+			}
+			if !isSessionEventsSelector(sel.X) {
+				return true
+			}
+			switch arg := node.Args[0].(type) {
+			case *ast.SelectorExpr:
+				if arg.Sel != nil && arg.Sel.Name == "sp" {
+					restarted = true
+				}
+			case *ast.Ident:
+				if arg.Name == "nextSp" {
+					repointed = true
+				}
+			}
+		}
+		return true
+	})
+
+	if !constructed {
+		t.Fatal("city_runtime.go no longer constructs cr.sessionEvents via newSessionEventPump: the event-driven reconcile poke is dead in production")
+	}
+	if !restarted {
+		t.Fatal("city_runtime.go no longer calls cr.sessionEvents.restart(cr.sp) in run(): startup never subscribes to the provider's session-event stream")
+	}
+	if !repointed {
+		t.Fatal("city_runtime.go no longer calls cr.sessionEvents.restart(nextSp) on provider change: a reload leaves the pump subscribed to the stale provider")
+	}
+}
