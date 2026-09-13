@@ -24,9 +24,11 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/worktree"
 )
 
@@ -5058,7 +5060,7 @@ func TestSyncDoesNotMintDuplicateForSameCycleSingletonCreate(t *testing.T) {
 	var syncStderr bytes.Buffer
 	syncSessionBeadsWithSnapshotAndRigStores(
 		cityPath, beads.SessionStore{Store: store}, nil, dsResult.State,
-		runtime.NewFake(), allConfiguredDS(dsResult.State), cfg, clk, &syncStderr, false, sessionBeads,
+		runtime.NewFake(), allConfiguredDS(dsResult.State), cfg, clk, &syncStderr, false, sessionBeads, nil,
 	)
 
 	// No duplicate was minted: exactly one open bead carries the created session_name.
@@ -5165,6 +5167,7 @@ func TestProductionOrderDeferredSingletonAliasReclaimsOnSecondTick(t *testing.T)
 		clk,
 		&firstSyncStderr,
 		true,
+		nil,
 		nil,
 	)
 	stillDeferred, err := store.Get(stale.ID)
@@ -5282,6 +5285,77 @@ func TestDiscoverSessionBeadsSkipsStaleMaxOneWhenDependencyFloorDesired(t *testi
 
 	if _, ok := desired[stale.Metadata["session_name"]]; ok {
 		t.Fatalf("desired state includes stale duplicate dependency-floor sibling; keys=%v", mapKeys(desired))
+	}
+}
+
+// TestDiscoverSessionBeadsBackfillsConfiguredNamedIdentityOutsideDesiredState
+// probes ga-pmafyc step 2: when the primary cfg-driven namedSpecs loop does not
+// run for a tick (e.g. because the city is suspended and buildDesiredState
+// short-circuits to an empty result before reaching that loop),
+// discoverSessionBeadsWithRoots rediscovers an already-open named session bead
+// directly from the live store. It must backfill tp.ConfiguredNamedIdentity /
+// tp.ConfiguredNamedMode / tp.Env["GC_SESSION_ORIGIN"] from the bead's own
+// already-persisted identity, mirroring what the namedSpecs loop
+// (build_desired_state.go ~1130-1139) sets on a normal tick. Without this
+// backfill, session_beads.go's isConfiguredNamed check (keyed on
+// tp.ConfiguredNamedIdentity) sees a false negative and clears the bead's
+// configured_named_* metadata, and templateParamsSessionOrigin falls through
+// to "ephemeral" instead of "named".
+func TestDiscoverSessionBeadsBackfillsConfiguredNamedIdentityOutsideDesiredState(t *testing.T) {
+	store := beads.NewMemStore()
+	named, err := store.Create(beads.Bead{
+		Title:  "gascity/worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:gascity/worker", "template:gascity/worker"},
+		Metadata: map[string]string{
+			"template":                   "gascity/worker",
+			"agent_name":                 "gascity/worker",
+			"session_name":               "s-worker-named",
+			"state":                      "awake",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "worker",
+			namedSessionModeMetadata:     "always",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := &sessionBeadSnapshot{}
+	snapshot.addInfo(sessiontest.SeedBead(t, named))
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "gascity",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+	bp := &agentBuildParams{
+		cityPath:     t.TempDir(),
+		city:         cfg,
+		beadStore:    store,
+		sessionBeads: snapshot,
+		agents:       cfg.Agents,
+	}
+	// Empty desired simulates the primary cfg-driven namedSpecs loop not
+	// running this tick.
+	desired := map[string]TemplateParams{}
+
+	discoverSessionBeadsWithRoots(bp, cfg, desired, nil, nil, nil, io.Discard)
+
+	tp, ok := desired["s-worker-named"]
+	if !ok {
+		t.Fatalf("desired state missing rediscovered named session; keys=%v", mapKeys(desired))
+	}
+	if tp.ConfiguredNamedIdentity != "worker" {
+		t.Errorf("ConfiguredNamedIdentity = %q, want %q (rediscovery must backfill from the bead's own persisted identity)", tp.ConfiguredNamedIdentity, "worker")
+	}
+	if tp.ConfiguredNamedMode != "always" {
+		t.Errorf("ConfiguredNamedMode = %q, want %q", tp.ConfiguredNamedMode, "always")
+	}
+	if got := tp.Env["GC_SESSION_ORIGIN"]; got != "named" {
+		t.Errorf(`Env["GC_SESSION_ORIGIN"] = %q, want "named" (else templateParamsSessionOrigin falls through to "ephemeral")`, got)
 	}
 }
 
@@ -12299,6 +12373,366 @@ func TestBuildDesiredState_RepairsRigRoutedCityControlWork(t *testing.T) {
 	}
 }
 
+// TestBuildDesiredState_ClassBoundRigRootedControlWorkStaysOnRigDispatcher
+// covers the converged graph->infra-class binding topology `gc storage status`
+// proves live: a control bead physically resides in the class binding
+// (relocated there by `gc storage migrate`) but still carries the LOGICAL
+// gc.root_store_ref of the rig whose workflow it belongs to. On the runtime
+// plane storeref.Narrow drops every leg but the binding once the plan touches
+// one, so the binding candidate is the ONLY leg that can ever see this row:
+// rootStoreRefMatchesCandidate must let the class candidate collect it, and
+// the route repair must then read the row's OWN root ref for its dispatcher —
+// the binding serves every scope's rows and belongs to none, so the physical
+// leg no longer says which dispatcher owns the row. A relocated rig row keeps
+// its rig dispatcher; it is not handed to the city dispatcher, which on a real
+// split city may be suspended or absent while the rig dispatchers run.
+func TestBuildDesiredState_ClassBoundRigRootedControlWorkStaysOnRigDispatcher(t *testing.T) {
+	cityPath := t.TempDir()
+	work := beads.NewMemStore()
+	binding := beads.NewMemStore()
+	routes := splitRoutes(binding)
+	registerResidencyRoutes(cityPath, routes, func() beads.Store { return work })
+	t.Cleanup(func() { unregisterResidencyRoutes(cityPath, routes) })
+
+	control, err := binding.Create(beads.Bead{
+		Title:  "Finalize rig workflow",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+			beadmeta.RoutedToMetadataKey:     "fixture/core.control-dispatcher",
+			beadmeta.RootStoreRefMetadataKey: "rig:fixture",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+
+	cfg := classBindingDispatcherFixtureConfig(t)
+	// binding is handed as the leading (sessions-class) store, exactly what
+	// buildDesiredState hands the census on a converged split (D6).
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), binding,
+		map[string]beads.Store{"fixture": beads.NewMemStore()}, newSessionBeadSnapshot(nil), nil, io.Discard,
+	)
+
+	stored, err := binding.Get(control.ID)
+	if err != nil {
+		t.Fatalf("get control: %v", err)
+	}
+	if got := stored.Metadata[beadmeta.RoutedToMetadataKey]; got != "fixture/core.control-dispatcher" {
+		t.Fatalf("stored gc.routed_to = %q, want the rig route preserved for a rig-rooted row", got)
+	}
+	if got := result.ScaleCheckCounts["fixture/core.control-dispatcher"]; got != 1 {
+		t.Fatalf("rig dispatcher demand = %d, want 1 for a rig-rooted row the binding serves", got)
+	}
+	if got := result.ScaleCheckCounts["core.control-dispatcher"]; got != 0 {
+		t.Fatalf("city dispatcher demand = %d, want 0: the binding's city scope does not own a rig-rooted row", got)
+	}
+	for _, desired := range result.State {
+		if desired.TemplateName == "core.control-dispatcher" {
+			t.Fatalf("desired state includes the city dispatcher for a rig-rooted control row: %+v", desired)
+		}
+	}
+}
+
+// TestBuildDesiredState_RepairsClassBoundRigRootedControlWorkToRigDispatcher
+// is the repair half of the same topology: a rig-rooted row the binding serves
+// carries a stale city route (#3765 stamped city routes onto rig-owned
+// controls), so the repair must rewrite it toward the rig dispatcher its root
+// ref names — not confirm the city route because the binding reads as city
+// scope.
+func TestBuildDesiredState_RepairsClassBoundRigRootedControlWorkToRigDispatcher(t *testing.T) {
+	cityPath := t.TempDir()
+	work := beads.NewMemStore()
+	binding := beads.NewMemStore()
+	routes := splitRoutes(binding)
+	registerResidencyRoutes(cityPath, routes, func() beads.Store { return work })
+	t.Cleanup(func() { unregisterResidencyRoutes(cityPath, routes) })
+
+	control, err := binding.Create(beads.Bead{
+		Title:  "Transcribe order retry",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:                      beadmeta.KindWorkflowFinalize,
+			beadmeta.RoutedToMetadataKey:                  "core.control-dispatcher",
+			beadmeta.RootStoreRefMetadataKey:              "rig:fixture",
+			beadmeta.ControlDispatcherFallbackMetadataKey: "fixture/core.control-dispatcher->core.control-dispatcher",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+
+	cfg := classBindingDispatcherFixtureConfig(t)
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), binding,
+		map[string]beads.Store{"fixture": beads.NewMemStore()}, newSessionBeadSnapshot(nil), nil, io.Discard,
+	)
+
+	stored, err := binding.Get(control.ID)
+	if err != nil {
+		t.Fatalf("get control: %v", err)
+	}
+	if got := stored.Metadata[beadmeta.RoutedToMetadataKey]; got != "fixture/core.control-dispatcher" {
+		t.Fatalf("stored gc.routed_to = %q, want repaired rig route fixture/core.control-dispatcher", got)
+	}
+	if got := stored.Metadata[beadmeta.ControlDispatcherFallbackMetadataKey]; got != "" {
+		t.Fatalf("stored gc.control_dispatcher_fallback = %q, want retired fallback marker cleared", got)
+	}
+	if got := result.ScaleCheckCounts["fixture/core.control-dispatcher"]; got != 1 {
+		t.Fatalf("rig dispatcher demand = %d, want 1", got)
+	}
+	if got := result.ScaleCheckCounts["core.control-dispatcher"]; got != 0 {
+		t.Fatalf("city dispatcher demand = %d, want 0 for a rig-rooted row", got)
+	}
+}
+
+// TestBuildDesiredState_ClassBoundRigRootedControlWorkWithoutRigDispatcherIsNotReScopedOntoCity
+// pins the missing-dispatcher arm for the binding topology: a rig-rooted row
+// the binding serves, in a city that configures only a CITY dispatcher, must
+// not be re-scoped onto that dispatcher just because the binding reads as
+// city scope. Its durable rig route is left for the operator, the city
+// dispatcher is not woken for it, and the diagnostic names the binding AND the
+// owning rig so the gap is actionable (the pre-fix line called the binding a
+// rig store named "class:gmnos"). The demand-suppression arm itself is pinned
+// by TestBuildDesiredState_DoesNotWakeCityDispatcherForUnrepairableRigControlWork;
+// here the rig route is no alias of the city dispatcher, so the zero city
+// demand below is the re-scoping check, not the suppression check.
+func TestBuildDesiredState_ClassBoundRigRootedControlWorkWithoutRigDispatcherIsNotReScopedOntoCity(t *testing.T) {
+	cityPath := t.TempDir()
+	work := beads.NewMemStore()
+	binding := beads.NewMemStore()
+	routes := splitRoutes(binding)
+	registerResidencyRoutes(cityPath, routes, func() beads.Store { return work })
+	t.Cleanup(func() { unregisterResidencyRoutes(cityPath, routes) })
+
+	control, err := binding.Create(beads.Bead{
+		Title:  "Finalize rig workflow",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+			beadmeta.RoutedToMetadataKey:     "fixture/core.control-dispatcher",
+			beadmeta.RootStoreRefMetadataKey: "rig:fixture",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+
+	maxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "fixture", Path: t.TempDir()}},
+		Agents: []config.Agent{{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxActive,
+		}},
+	}
+	var stderr bytes.Buffer
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), binding,
+		map[string]beads.Store{"fixture": beads.NewMemStore()}, newSessionBeadSnapshot(nil), nil, &stderr,
+	)
+
+	stored, err := binding.Get(control.ID)
+	if err != nil {
+		t.Fatalf("get control: %v", err)
+	}
+	if got := stored.Metadata[beadmeta.RoutedToMetadataKey]; got != "fixture/core.control-dispatcher" {
+		t.Fatalf("stored gc.routed_to = %q, want the durable rig route left for operator diagnosis", got)
+	}
+	if got := result.ScaleCheckCounts["core.control-dispatcher"]; got != 0 {
+		t.Fatalf("city dispatcher demand = %d, want 0: a rig-rooted row must not be re-scoped onto the city dispatcher", got)
+	}
+	for _, desired := range result.State {
+		if desired.TemplateName == "core.control-dispatcher" {
+			t.Fatalf("desired state woke the city dispatcher for a rig-rooted row with no rig dispatcher: %+v", desired)
+		}
+	}
+	diag := stderr.String()
+	if !strings.Contains(diag, control.ID) || !strings.Contains(diag, "no configured control-dispatcher") {
+		t.Fatalf("stderr = %q, want the missing-dispatcher diagnostic for %s", diag, control.ID)
+	}
+	bindingRef := string(storeref.ClassRef(wholeSplitClasses()))
+	if !strings.Contains(diag, bindingRef) || !strings.Contains(diag, `rig "fixture"`) {
+		t.Fatalf("stderr = %q, want the diagnostic to name the class binding %s and the owning rig", diag, bindingRef)
+	}
+}
+
+// classBindingDispatcherFixtureConfig is the two-dispatcher city the
+// class-binding tests share: one city dispatcher and one for rig "fixture".
+func classBindingDispatcherFixtureConfig(t *testing.T) *config.City {
+	t.Helper()
+	maxActive := 1
+	return &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "fixture", Path: t.TempDir()}},
+		Agents: []config.Agent{
+			{
+				Name:              config.ControlDispatcherAgentName,
+				BindingName:       "core",
+				StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+				MaxActiveSessions: &maxActive,
+			},
+			{
+				Name:              config.ControlDispatcherAgentName,
+				BindingName:       "core",
+				Dir:               "fixture",
+				StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+				MaxActiveSessions: &maxActive,
+			},
+		},
+	}
+}
+
+// TestBuildDesiredState_ClassBoundCityRootedControlWorkWakesCityDispatcher is
+// the city half of the binding topology, and the shape maintainer-city's
+// logged rows actually had: a control row the class binding serves whose root
+// ref is the city (or the binding itself, which reads as city scope) keeps its
+// city route and wakes exactly one city dispatcher — never a phantom rig named
+// after the binding, which is what stripping "rig:" off "class:gmnos" produced.
+func TestBuildDesiredState_ClassBoundCityRootedControlWorkWakesCityDispatcher(t *testing.T) {
+	for _, rootRef := range []string{"city:test-city", string(storeref.ClassRef(wholeSplitClasses()))} {
+		t.Run(rootRef, func(t *testing.T) {
+			cityPath := t.TempDir()
+			work := beads.NewMemStore()
+			binding := beads.NewMemStore()
+			routes := splitRoutes(binding)
+			registerResidencyRoutes(cityPath, routes, func() beads.Store { return work })
+			t.Cleanup(func() { unregisterResidencyRoutes(cityPath, routes) })
+
+			control, err := binding.Create(beads.Bead{
+				Title:  "Finalize graph workflow",
+				Type:   "task",
+				Status: "open",
+				Metadata: map[string]string{
+					beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+					beadmeta.RoutedToMetadataKey:     "core.control-dispatcher",
+					beadmeta.RootStoreRefMetadataKey: rootRef,
+				},
+			})
+			if err != nil {
+				t.Fatalf("create class control: %v", err)
+			}
+
+			cfg := classBindingDispatcherFixtureConfig(t)
+			var stderr bytes.Buffer
+			result := buildDesiredStateWithSessionBeads(
+				"test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), binding,
+				map[string]beads.Store{"fixture": beads.NewMemStore()}, newSessionBeadSnapshot(nil), nil, &stderr,
+			)
+
+			stored, err := binding.Get(control.ID)
+			if err != nil {
+				t.Fatalf("get class control: %v", err)
+			}
+			if got := stored.Metadata[beadmeta.RoutedToMetadataKey]; got != "core.control-dispatcher" {
+				t.Fatalf("class control route = %q, want canonical city route preserved", got)
+			}
+			if got := result.ScaleCheckCounts["core.control-dispatcher"]; got != 1 {
+				t.Fatalf("city dispatcher demand = %d, want exactly one", got)
+			}
+			if got := result.ScaleCheckCounts["fixture/core.control-dispatcher"]; got != 0 {
+				t.Fatalf("rig dispatcher demand = %d, want zero for a city-rooted row", got)
+			}
+			if strings.Contains(stderr.String(), "no configured control-dispatcher") {
+				t.Fatalf("stderr = %q, want no missing-dispatcher diagnostic for a city-rooted row with a city dispatcher", stderr.String())
+			}
+			if len(result.State) != 1 {
+				t.Fatalf("desired state = %v, want exactly one ephemeral city dispatcher", mapKeys(result.State))
+			}
+			for _, desired := range result.State {
+				if desired.TemplateName != "core.control-dispatcher" {
+					t.Fatalf("desired dispatcher template = %q, want core.control-dispatcher", desired.TemplateName)
+				}
+			}
+		})
+	}
+}
+
+// TestControlDispatcherRouteRepairAgreesWithTheMinter pins the lockstep
+// internal/config promises for PreferredDeterministicControlDispatcher: the
+// dispatcher graph.v2 decoration stamps on a fresh control step
+// (graphroute.ControlDispatcherBinding, keyed on the recipe's gc.root_store_ref)
+// and the dispatcher the reconciler's route repair converges an existing step
+// toward (keyed on the row's own gc.root_store_ref) must be the same name for
+// every root scope, or the repair rewrites on every tick what the minter just
+// stamped. All three rows are served by the class binding, the topology where
+// keying the repair on the physical leg instead of the root diverged from the
+// minter for rig-rooted rows.
+func TestControlDispatcherRouteRepairAgreesWithTheMinter(t *testing.T) {
+	cfg := classBindingDispatcherFixtureConfig(t)
+	deps := cliGraphrouteDeps(t.TempDir())
+	binding := beads.NewMemStore()
+	bindingRef := string(storeref.ClassRef(wholeSplitClasses()))
+
+	roots := []struct {
+		root string
+		want string
+	}{
+		{root: "city:test-city", want: "core.control-dispatcher"},
+		{root: "rig:fixture", want: "fixture/core.control-dispatcher"},
+		{root: bindingRef, want: "core.control-dispatcher"},
+	}
+	var work []beads.Bead
+	var stores []beads.Store
+	var refs []string
+	for _, tc := range roots {
+		control, err := binding.Create(beads.Bead{
+			Title:  "Finalize " + tc.root,
+			Type:   "task",
+			Status: "open",
+			Metadata: map[string]string{
+				beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+				beadmeta.RoutedToMetadataKey:     "stale.control-dispatcher",
+				beadmeta.RootStoreRefMetadataKey: tc.root,
+			},
+		})
+		if err != nil {
+			t.Fatalf("create control for %s: %v", tc.root, err)
+		}
+		work = append(work, control)
+		stores = append(stores, binding)
+		refs = append(refs, bindingRef)
+	}
+
+	var stderr bytes.Buffer
+	repairControlDispatcherRoutesForStoreScope(t.TempDir(), cfg, work, stores, refs, &stderr)
+	if stderr.Len() != 0 {
+		t.Fatalf("repair stderr = %q, want silent: every root scope has a dispatcher", stderr.String())
+	}
+
+	for i, tc := range roots {
+		rigContext, scoped := storeref.ScopeRigContext(tc.root)
+		if !scoped {
+			t.Fatalf("ScopeRigContext(%q) not scoped", tc.root)
+		}
+		minted, err := graphroute.ControlDispatcherBinding(nil, "test-city", cfg, rigContext, deps)
+		if err != nil {
+			t.Fatalf("ControlDispatcherBinding(%q): %v", tc.root, err)
+		}
+		stored, err := binding.Get(work[i].ID)
+		if err != nil {
+			t.Fatalf("get repaired control for %s: %v", tc.root, err)
+		}
+		repaired := stored.Metadata[beadmeta.RoutedToMetadataKey]
+		if minted.QualifiedName != tc.want {
+			t.Fatalf("root %q: minter stamps %q, want %q", tc.root, minted.QualifiedName, tc.want)
+		}
+		if repaired != minted.QualifiedName {
+			t.Fatalf("root %q: repair converged to %q but the minter stamps %q — the two paths are out of lockstep", tc.root, repaired, minted.QualifiedName)
+		}
+		if got := work[i].Metadata[beadmeta.RoutedToMetadataKey]; got != repaired {
+			t.Fatalf("root %q: in-memory route %q != stored %q", tc.root, got, repaired)
+		}
+	}
+}
+
 func TestBuildDesiredState_DoesNotWakeRigDispatcherWhenCityRouteRepairFails(t *testing.T) {
 	cityPath := t.TempDir()
 	cityBase := beads.NewMemStore()
@@ -13693,5 +14127,85 @@ func TestBuildDesiredState_RigDispatcherOnLegacyCityStillProbesRigStore(t *testi
 	}
 	if ref := session.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey]; ref != "rig:fixture" {
 		t.Fatalf("gc.trigger_bead_store_ref = %q, want %q: a city that relocates nothing keeps the rig probe", ref, "rig:fixture")
+	}
+}
+
+// SESSION-RECON-015: an API-created agent session bead carries
+// session_origin=ephemeral with agent_name set and no pool markers
+// (pool_managed / pool_slot). On a multi-session template that bead is
+// user-created capacity, not controller-created pool capacity, so
+// desired-state construction must keep it — including when the same backing
+// template also carries a configured [[named_session]], which owns the
+// template's canonical identity but must not evict the separate ad-hoc
+// session bead.
+func TestBuildDesiredState_APICreatedAgentSessionBeadStaysDesired(t *testing.T) {
+	const (
+		sessionName = "test-city--worker-adhoc"
+		agentName   = "worker-adhoc"
+	)
+	for _, tc := range []struct {
+		name string
+		cfg  *config.City
+	}{
+		{
+			name: "multi session agent",
+			cfg: &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Agents: []config.Agent{{
+					Name:         "worker",
+					StartCommand: "true",
+					WorkQuery:    "printf ''",
+				}},
+			},
+		},
+		{
+			name: "multi session agent with always named session",
+			cfg: &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Agents: []config.Agent{{
+					Name:         "worker",
+					StartCommand: "true",
+					WorkQuery:    "printf ''",
+				}},
+				NamedSessions: []config.NamedSession{{
+					Template: "worker",
+					Mode:     "always",
+				}},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			store := beads.NewMemStore()
+			if _, err := store.Create(beads.Bead{
+				Title:  "adhoc worker",
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel, "template:worker"},
+				Metadata: map[string]string{
+					"template":       "worker",
+					"session_name":   sessionName,
+					"agent_name":     agentName,
+					"state":          "active",
+					"session_origin": "ephemeral",
+				},
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			var stderr bytes.Buffer
+			dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), tc.cfg, runtime.NewFake(), store, &stderr)
+			tp, ok := dsResult.State[sessionName]
+			if !ok {
+				t.Fatalf("API-created agent session %q missing from desired state, got keys %v; stderr=%s",
+					sessionName, mapKeys(dsResult.State), stderr.String())
+			}
+			if tp.TemplateName != "worker" {
+				t.Fatalf("desired[%q].TemplateName = %q, want worker", sessionName, tp.TemplateName)
+			}
+			if tp.ConfiguredNamedIdentity != "" {
+				t.Fatalf("desired[%q].ConfiguredNamedIdentity = %q, want empty — the ad-hoc bead must not adopt the named session identity",
+					sessionName, tp.ConfiguredNamedIdentity)
+			}
+		})
 	}
 }

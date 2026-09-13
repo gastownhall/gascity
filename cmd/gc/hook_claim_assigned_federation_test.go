@@ -20,10 +20,17 @@ import (
 
 // assignedGraphRow is the split-city shape the federated assigned tier serves:
 // an OPEN graph step assigned to this worker, living in a store the claim's bd
-// context cannot reach.
-const assignedGraphRow = `[{"id":"gcg-abc123","status":"open","assignee":"worker-1","metadata":{"gc.kind":"wisp"}}]`
+// context cannot reach. priority 0 is explicit, not incidental: since
+// ga-t922vm, hookTierAssigned and hookTierRouted tie at equal priority for
+// CROSS-store selection (see crossStoreRank) — tier alone no longer decides
+// across stores — so this fixture needs a strictly better priority than
+// routedWorkRow's default for the tests pairing the two to deterministically
+// select this store first, regardless of #5491 tie-break rotation state.
+const assignedGraphRow = `[{"id":"gcg-abc123","status":"open","assignee":"worker-1","priority":0,"metadata":{"gc.kind":"wisp"}}]`
 
-// routedWorkRow is ordinary claimable routed work in a DIFFERENT store.
+// routedWorkRow is ordinary claimable routed work in a DIFFERENT store, left at
+// the default priority so assignedGraphRow's explicit priority 0 above always
+// wins the pairing.
 const routedWorkRow = `[{"id":"hw-riga","status":"open","metadata":{"gc.routed_to":"worker"}}]`
 
 func assignedFederationClaimOpts() hookClaimOptions {
@@ -37,9 +44,9 @@ func assignedFederationClaimOpts() hookClaimOptions {
 }
 
 // TestClaimHookWorkAssignedTierUnresolvableBeadDoesNotStrandLaterStore is the
-// load-bearing case. bestStoreWithWork RANKS an assigned row ahead of a routed
-// one (hookTierAssigned < hookTierRouted), so the store holding the unclaimable
-// graph step is SELECTED ahead of the store holding genuinely claimable work. If
+// load-bearing case. assignedGraphRow's explicit priority 0 (see its doc
+// comment) keeps bestStoreWithWork selecting the store holding the unclaimable
+// graph step ahead of the store holding genuinely claimable routed work. If
 // the assigned tier answers a not-found claim with a terminal exit 1, the
 // federated drop-and-retry loop never runs and every other store's work is
 // stranded behind one permanently unclaimable id.

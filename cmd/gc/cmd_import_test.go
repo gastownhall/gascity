@@ -1054,6 +1054,19 @@ version = "^1.4"
 	}
 }
 
+// pinnedRepoCacheRoot is the repo cache root, <GC_HOME>/cache/repos, that a
+// command run under clearGCEnv writes into. It is computed from the pinned
+// GC_HOME rather than through packman.RepoCacheRoot so an assertion on a
+// printed root does not share its resolver with the code under test.
+func pinnedRepoCacheRoot(t *testing.T) string {
+	t.Helper()
+	gcHome := os.Getenv("GC_HOME")
+	if gcHome == "" {
+		t.Fatal("GC_HOME is not pinned; call clearGCEnv first")
+	}
+	return filepath.Join(gcHome, "cache", "repos")
+}
+
 func TestDoImportInstallWithNoImportsSucceeds(t *testing.T) {
 	clearGCEnv(t)
 	dir := t.TempDir()
@@ -1064,8 +1077,12 @@ func TestDoImportInstallWithNoImportsSucceeds(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "Installed 0 remote import(s)") {
-		t.Fatalf("stdout = %q", stdout.String())
+	// The success line names the repo cache root the install wrote into, so a
+	// GC_HOME that differs between this shell and the process that later
+	// resolves the config is visible on both sides of the split.
+	want := "Installed 0 remote import(s) into " + pinnedRepoCacheRoot(t)
+	if got := strings.TrimSpace(stdout.String()); got != want {
+		t.Fatalf("stdout = %q, want %q", got, want)
 	}
 	lock, err := packman.ReadLockfile(fsys.OSFS{}, dir)
 	if err != nil {
@@ -1428,8 +1445,44 @@ transitive = false
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), `Upgraded import "worker" (worker)`) {
-		t.Fatalf("stdout = %q", stdout.String())
+	// Upgrade clones through the same cache as install, so its success line
+	// names the same root.
+	want := `Upgraded import "worker" (worker) into ` + pinnedRepoCacheRoot(t)
+	if got := strings.TrimSpace(stdout.String()); got != want {
+		t.Fatalf("stdout = %q, want %q", got, want)
+	}
+}
+
+// TestImportWritersRefuseUnresolvableRepoCacheRoot pins the fail-closed
+// branch: install and upgrade resolve the repo cache root before their first
+// clone so the success line can name it, and an unresolvable root is an error
+// rather than a success line that names nothing. Only a test binary with
+// GC_HOME unset reaches it; production resolution always yields a root.
+func TestImportWritersRefuseUnresolvableRepoCacheRoot(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(dir string, stdout, stderr *bytes.Buffer) int
+	}{
+		{"install", func(dir string, stdout, stderr *bytes.Buffer) int { return doImportInstall(dir, stdout, stderr) }},
+		{"upgrade", func(dir string, stdout, stderr *bytes.Buffer) int { return doImportUpgrade(dir, "", stdout, stderr) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearGCEnv(t)
+			t.Setenv("GC_HOME", "")
+			dir := t.TempDir()
+			writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+
+			var stdout, stderr bytes.Buffer
+			if code := tc.run(dir, &stdout, &stderr); code == 0 {
+				t.Fatalf("code = 0, want failure; stdout = %q", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "resolving repo cache root: no GC_HOME available") {
+				t.Fatalf("stderr = %q", stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout = %q, want empty", stdout.String())
+			}
+		})
 	}
 }
 
@@ -1537,7 +1590,7 @@ version = "sha:cccccccccccccccccccccccccccccccccccccc"
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "Upgraded 1 of 2 remote import(s); 1 already up to date") {
+	if !strings.Contains(stdout.String(), "Upgraded 1 of 2 remote import(s) into "+pinnedRepoCacheRoot(t)+"; 1 already up to date") {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
 }

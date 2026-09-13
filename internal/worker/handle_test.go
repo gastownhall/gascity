@@ -165,6 +165,112 @@ func TestSessionHandleStateBusyDoesNotPrimeHistoryCache(t *testing.T) {
 	}
 }
 
+// zcode derives activity from the whole mirror — there is no tail chunk to
+// read — and State is polled per API request, each request building a fresh
+// Factory (so a fresh session.Manager and handle) off the same store. An
+// unchanged mirror must not be re-parsed on every poll: one parse per mirror
+// generation, shared through the memo the long-lived caller threads into
+// every factory it builds.
+func TestSessionHandleStateReusesDerivedActivityAcrossPolls(t *testing.T) {
+	searchBase := t.TempDir()
+	workDir := t.TempDir()
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	memo := NewDerivedActivityMemo()
+	// One Factory per request, the way the API builds them; the memo is the
+	// only thing they share.
+	requestFactory := func() *Factory {
+		t.Helper()
+		factory, err := NewFactory(FactoryConfig{
+			Store:        store,
+			Provider:     sp,
+			SearchPaths:  []string{searchBase},
+			ActivityMemo: memo,
+		})
+		if err != nil {
+			t.Fatalf("NewFactory: %v", err)
+		}
+		return factory
+	}
+	seat, err := requestFactory().Session(SessionSpec{
+		Profile:  ProfileZCodeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "zcode-repl",
+		WorkDir:  workDir,
+		Provider: "zcode",
+	})
+	if err != nil {
+		t.Fatalf("factory.Session: %v", err)
+	}
+	if err := seat.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	info, err := seat.manager.Get(seat.sessionID)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", seat.sessionID, err)
+	}
+
+	scopeDir := filepath.Join(searchBase, sessionlog.ZCodeSeatMirrorScope(info.SessionName, info.ID, "1"))
+	if err := os.MkdirAll(scopeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", scopeDir, err)
+	}
+	mirror := filepath.Join(scopeDir, "sess_probe.json")
+	writeMirror := func(messages string) {
+		t.Helper()
+		body := `{"info":{"id":"sess_probe","directory":"` + filepath.ToSlash(workDir) + `"},"messages":[` + messages + `]}`
+		if err := os.WriteFile(mirror, []byte(body), 0o644); err != nil {
+			t.Fatalf("write mirror: %v", err)
+		}
+	}
+	userTurn := `{"info":{"id":"m1","sessionID":"sess_probe","role":"user","parentID":"","time":{"created":1770000000000}},"parts":[{"id":"p1","type":"text","text":"go"}]}`
+	writeMirror(userTurn)
+
+	// Each poll rebuilds its handle by session id off a fresh factory, as
+	// workerHandleForSession does per request.
+	poll := func(label string) *SessionHandle {
+		t.Helper()
+		handle, err := requestFactory().SessionByID(info.ID)
+		if err != nil {
+			t.Fatalf("SessionByID(%s): %v", label, err)
+		}
+		polled, ok := handle.(*SessionHandle)
+		if !ok {
+			t.Fatalf("SessionByID(%s) = %T, want *SessionHandle", label, handle)
+		}
+		return polled
+	}
+	for i := 1; i <= 3; i++ {
+		state, err := poll(fmt.Sprintf("poll %d", i)).State(context.Background())
+		if err != nil {
+			t.Fatalf("State(poll %d): %v", i, err)
+		}
+		if state.Phase != PhaseBusy {
+			t.Fatalf("State(poll %d).Phase = %s, want %s", i, state.Phase, PhaseBusy)
+		}
+	}
+	if got := memo.Derivations(); got != 1 {
+		t.Fatalf("mirror parsed %d times across 3 polls of an unchanged mirror, want 1", got)
+	}
+
+	// The reply lands: a new generation, parsed once more, and idle.
+	writeMirror(userTurn + `,{"info":{"id":"m2","sessionID":"sess_probe","role":"assistant","parentID":"m1","time":{"created":1770000001000}},"parts":[{"id":"p2","type":"text","text":"done"}]}`)
+	last := poll("after reply")
+	state, err := last.State(context.Background())
+	if err != nil {
+		t.Fatalf("State(after reply): %v", err)
+	}
+	if state.Phase != PhaseReady {
+		t.Fatalf("State(after reply).Phase = %s, want %s", state.Phase, PhaseReady)
+	}
+	if got := memo.Derivations(); got != 2 {
+		t.Fatalf("mirror parsed %d times after one rewrite, want 2", got)
+	}
+	if last.history != nil {
+		t.Fatal("State() primed the polled handle's history cache, want an activity-only probe")
+	}
+}
+
 func TestSessionHandleAttachUsesWorkerBoundary(t *testing.T) {
 	handle, store, sp, mgr := newTestSessionHandle(t, SessionSpec{
 		Profile:  ProfileClaudeTmuxCLI,
@@ -1412,6 +1518,66 @@ func TestRuntimeHandleLiveObservationUsesRuntimeMetadataAndLiveness(t *testing.T
 type falseNegativeRuntimeProvider struct {
 	*runtime.Fake
 	falseNames map[string]bool
+}
+
+type observationErrorRuntimeProvider struct {
+	*runtime.Fake
+	livenessErr error
+	activityErr error
+}
+
+func (p *observationErrorRuntimeProvider) ObserveLivenessWithError(string, []string) (runtime.Liveness, error) {
+	if p.livenessErr != nil {
+		return runtime.Liveness{}, p.livenessErr
+	}
+	return runtime.Liveness{Running: true, Alive: true}, nil
+}
+
+func (p *observationErrorRuntimeProvider) GetLastActivity(string) (time.Time, error) {
+	return time.Time{}, p.activityErr
+}
+
+func TestRuntimeHandleLiveObservationPreservesObservationUncertainty(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		livenessErr error
+		activityErr error
+		wantError   bool
+	}{
+		{name: "liveness unavailable", livenessErr: fmt.Errorf("liveness transport: %w", runtime.ErrRuntimeUnavailable), wantError: true},
+		{name: "activity unavailable", activityErr: fmt.Errorf("activity transport: %w", runtime.ErrRuntimeUnavailable), wantError: true},
+		{name: "ordinary activity error stays best effort", activityErr: errors.New("malformed activity"), wantError: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+				Provider: &observationErrorRuntimeProvider{
+					Fake:        runtime.NewFake(),
+					livenessErr: tc.livenessErr,
+					activityErr: tc.activityErr,
+				},
+				SessionName: "runtime-worker",
+			})
+			if err != nil {
+				t.Fatalf("NewRuntimeHandle: %v", err)
+			}
+			obs, err := handle.LiveObservation(context.Background())
+			if tc.wantError {
+				if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+					t.Fatalf("LiveObservation error = %v, want runtime unavailable", err)
+				}
+				if obs != (LiveObservation{}) {
+					t.Fatalf("LiveObservation = %#v, want zero with unknown result", obs)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("LiveObservation: %v", err)
+			}
+			if !obs.Running || !obs.Alive || obs.LastActivity != nil {
+				t.Fatalf("LiveObservation = %#v, want live with unknown activity", obs)
+			}
+		})
+	}
 }
 
 func (p *falseNegativeRuntimeProvider) IsRunning(name string) bool {

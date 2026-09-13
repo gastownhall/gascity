@@ -14,6 +14,12 @@ import (
 
 const testNonLivePID = 2147483647
 
+// nonLivePID returns a pid that is dead right now, probing pidAlive and
+// skipping the test when the fixed sentinel is unexpectedly alive. For guard
+// and reap paths that must never probe the real process table, or when a test
+// needs several distinct dead pids, prefer unallocatablePIDs
+// (dolt_leak_helper_test.go), which derives pids above
+// /proc/sys/kernel/pid_max and never probes.
 func nonLivePID(t *testing.T) int {
 	t.Helper()
 	if pidAlive(testNonLivePID) {

@@ -55,7 +55,7 @@ func (p *Provider) waitForIdleOutcome(ctx context.Context, name string, timeout 
 		return idleWaitReached
 	case herdrErrorCode(err) == "timeout":
 		return idleWaitTimeout
-	case isAgentNotFound(err):
+	case p.c.targetHasNoNamedAgent(ctx, herdrAgentName(name), err):
 		return idleWaitNoAgent
 	default:
 		return idleWaitError

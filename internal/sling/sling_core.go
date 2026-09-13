@@ -551,7 +551,7 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 				}
 				return result, fmt.Errorf("%w", err)
 			}
-			if err := checkLegacySourceWorkflowConflict(deps, beadID); err != nil {
+			if err := checkLegacySourceWorkflowConflict(deps, beadID, formulaName, opts.Force); err != nil {
 				return result, fmt.Errorf("%w", err)
 			}
 			// The replaced root is a graph.v2 workflow root, and every root
@@ -747,12 +747,68 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 			createAutoConvoy = false
 		}
 		if createAutoConvoy {
+			// Re-slinging a bead that still has a live root reuses that root
+			// instead of minting a second one. A bounced bead comes back with
+			// its routing metadata and assignee cleared (submit-and-exit, then
+			// the refinery's reject-to-pool), so CheckBeadStateWithOptions no
+			// longer reads it as routed and the duplicate-convoy guard in
+			// resolveConvoyRecovery never runs. The mint site is the one place
+			// every dispatch path passes through, so the reuse belongs here.
+			//
+			// The extra roots were never orphans — the drain closes them all
+			// together when the tracked bead goes terminal — but each one
+			// double-counts a single piece of in-flight work on the ready
+			// board until then (ga-qar0).
+			//
+			// Reuse is scoped to roots this dispatch path minted — the
+			// AutoConvoyRootTitle set. A user convoy (gc convoy create), a
+			// drain unit convoy or a graph.v2 input convoy can track the same
+			// bead with the same unowned, unlabeled shape; adopting one as a
+			// dispatch root, or reaping it as a duplicate, would take over a
+			// convoy that is not ours.
+			//
+			// Reuse is scoped further to roots of the same ownership shape:
+			// the "owned" label suppresses convoy autoclose, so adopting a
+			// root that disagrees with this dispatch would silently change the
+			// lifecycle the caller asked for.
+			//
+			// Reuse alone only holds the line at one root; it cannot converge
+			// a bead that already carries several, because every re-sling
+			// picks the same first root and leaves the rest untouched. So the
+			// re-sling also reaps the predecessors it superseded (ga-5jnq).
+			// Owned roots are exempt — their lifecycle is the caller's.
+			if live, err := liveAutoConvoyRoots(deps.Store, beadID); err != nil {
+				// Unlike the recovery check (#2987), a lookup failure here
+				// falls through to minting. The costs are asymmetric at this
+				// site: a duplicate root is a cosmetic over-count that drains
+				// itself, while skipping the mint can leave the bead with no
+				// convoy at all, which breaks the dispatch that depends on it.
+				result.MetadataErrors = append(result.MetadataErrors,
+					fmt.Sprintf("checking for reusable auto-convoy: %v", err))
+			} else {
+				matching := make([]beads.Bead, 0, len(live))
+				for _, root := range live {
+					if slices.Contains(root.Labels, "owned") == opts.Owned {
+						matching = append(matching, root)
+					}
+				}
+				if len(matching) > 0 {
+					result.ConvoyID = matching[0].ID
+					createAutoConvoy = false
+					if !opts.Owned {
+						result.MetadataErrors = append(result.MetadataErrors,
+							reapSupersededConvoyRoots(deps.Store, matching[1:], matching[0].ID)...)
+					}
+				}
+			}
+		}
+		if createAutoConvoy {
 			var convoyLabels []string
 			if opts.Owned {
 				convoyLabels = []string{"owned"}
 			}
 			convoy, err := deps.Store.Create(beads.Bead{
-				Title:  fmt.Sprintf("sling-%s", beadID),
+				Title:  AutoConvoyRootTitle(beadID),
 				Type:   "convoy",
 				Labels: convoyLabels,
 			})
@@ -916,6 +972,7 @@ func listSourceWorkflowRoots(deps SlingDeps, sourceBeadID string) ([]sourceWorkf
 		sourceBeadID:   sourceBeadID,
 		sourceStoreRef: sourceStoreRef,
 		seen:           make(map[string]struct{}, len(stores)),
+		bindingIDs:     make(map[string]struct{}),
 	}
 	for i, info := range stores {
 		if err := c.scanStore(i, info); err != nil {
@@ -968,16 +1025,32 @@ func ensureSelectedSourceWorkflowStorePresent(stores []SourceWorkflowStore, fall
 // sourceWorkflowRootCollector accumulates live source-workflow roots across every
 // candidate store for a running sling. It tolerates unrelated (non-selected)
 // store scan failures — warning through the deps sink — while keeping the
-// selected source store strict, and dedups roots by store scope and root ID.
+// selected source store strict, dedups roots by store scope and root ID, and
+// lets the city's relocated class binding supersede the frozen copies a storage
+// migration retained under the same ids.
 type sourceWorkflowRootCollector struct {
 	deps           SlingDeps
 	sourceBeadID   string
 	sourceStoreRef string
 
-	roots        []sourceWorkflowRoot
-	seen         map[string]struct{}
+	roots []sourceWorkflowRoot
+	seen  map[string]struct{}
+	// bindingStore is the relocated graph binding leg, when the enumeration has
+	// one, and bindingIDs are the root ids that leg reported live. Together they
+	// answer which work-leg rows the binding supersedes.
+	bindingStore beads.Store
+	bindingRef   string
+	bindingIDs   map[string]struct{}
 	scanned      int
 	firstScanErr error
+}
+
+// isGraphBindingStoreRef reports whether a leg's store ref names a city's
+// relocated graph binding rather than a work store. Both sling doors mint that
+// ref through sourceworkflow.GraphStoreRef, and internal/api parses the same
+// spelling for the workflow snapshot scan; this is the collector's read of it.
+func isGraphBindingStoreRef(storeRef string) bool {
+	return strings.HasPrefix(strings.TrimSpace(storeRef), sourceworkflow.GraphStoreRefPrefix+":")
 }
 
 // scanStore scans one candidate store for live source-workflow roots. A nil
@@ -989,12 +1062,17 @@ func (c *sourceWorkflowRootCollector) scanStore(index int, info SourceWorkflowSt
 		return nil
 	}
 	rootStoreRef := strings.TrimSpace(info.StoreRef)
+	fromBinding := isGraphBindingStoreRef(rootStoreRef)
+	if fromBinding && c.bindingStore == nil {
+		c.bindingStore = info.Store
+		c.bindingRef = rootStoreRef
+	}
 	matches, err := sourceworkflow.ListLiveRoots(info.Store, c.sourceBeadID, c.sourceStoreRef, rootStoreRef)
 	if err != nil {
-		return c.recordScanFailure(index, rootStoreRef, err)
+		return c.recordScanFailure(index, info, err)
 	}
 	c.scanned++
-	c.appendRoots(index, info.Store, rootStoreRef, matches)
+	c.appendRoots(index, info.Store, rootStoreRef, matches, fromBinding)
 	return nil
 }
 
@@ -1002,7 +1080,8 @@ func (c *sourceWorkflowRootCollector) scanStore(index int, info SourceWorkflowSt
 // failure may be tolerated. A tolerable failure is warned through the deps sink
 // and returns nil so the store is skipped; every other failure returns the
 // wrapped error so the caller aborts.
-func (c *sourceWorkflowRootCollector) recordScanFailure(index int, rootStoreRef string, scanErr error) error {
+func (c *sourceWorkflowRootCollector) recordScanFailure(index int, info SourceWorkflowStore, scanErr error) error {
+	rootStoreRef := strings.TrimSpace(info.StoreRef)
 	storeLabel := rootStoreRef
 	if storeLabel == "" {
 		storeLabel = fmt.Sprintf("store#%d", index)
@@ -1011,7 +1090,7 @@ func (c *sourceWorkflowRootCollector) recordScanFailure(index int, rootStoreRef 
 	if c.firstScanErr == nil {
 		c.firstScanErr = wrapped
 	}
-	if !c.toleratesScanFailure(rootStoreRef) {
+	if !c.toleratesScanFailure(info) {
 		return wrapped
 	}
 	c.deps.SourceWorkflowStoreScanWarning(rootStoreRef, scanErr)
@@ -1020,9 +1099,15 @@ func (c *sourceWorkflowRootCollector) recordScanFailure(index int, rootStoreRef 
 
 // toleratesScanFailure reports whether a scan failure on the given store may be
 // skipped instead of aborting the walk. Tolerance requires a configured warning
-// sink, resolved source and store refs, and a store that is not the strict
-// selected source store — so a degraded scan is never silently swallowed.
-func (c *sourceWorkflowRootCollector) toleratesScanFailure(rootStoreRef string) bool {
+// sink, resolved source and store refs, and a store that is neither the selected
+// source store nor one the caller marked Strict — so a degraded scan is never
+// silently swallowed, and a fault on a store that structurally holds the answer
+// (the relocated graph binding) refuses the sling rather than admitting it.
+func (c *sourceWorkflowRootCollector) toleratesScanFailure(info SourceWorkflowStore) bool {
+	if info.Strict {
+		return false
+	}
+	rootStoreRef := strings.TrimSpace(info.StoreRef)
 	if c.deps.SourceWorkflowStoreScanWarning == nil || c.sourceStoreRef == "" || rootStoreRef == "" {
 		return false
 	}
@@ -1031,24 +1116,131 @@ func (c *sourceWorkflowRootCollector) toleratesScanFailure(rootStoreRef string) 
 }
 
 // appendRoots merges the live roots from one store into the result set, skipping
-// duplicates keyed by store scope and root ID.
-func (c *sourceWorkflowRootCollector) appendRoots(index int, store beads.Store, rootStoreRef string, matches []beads.Bead) {
+// duplicates keyed by store scope and root ID, and skipping any work-leg row for
+// an id the binding leg already answered — that row is the copy the migration
+// retained, not a second live workflow.
+func (c *sourceWorkflowRootCollector) appendRoots(index int, store beads.Store, rootStoreRef string, matches []beads.Bead, fromBinding bool) {
 	keyScope := rootStoreRef
 	if keyScope == "" {
 		keyScope = fmt.Sprintf("store#%d", index)
 	}
 	for _, root := range matches {
+		if !fromBinding {
+			if _, superseded := c.bindingIDs[root.ID]; superseded {
+				continue
+			}
+		}
 		key := keyScope + "\x00" + root.ID
 		if _, ok := c.seen[key]; ok {
 			continue
 		}
 		c.seen[key] = struct{}{}
+		if fromBinding {
+			c.bindingIDs[root.ID] = struct{}{}
+		}
 		c.roots = append(c.roots, sourceWorkflowRoot{
 			root:     root,
 			store:    store,
 			storeRef: rootStoreRef,
 		})
 	}
+}
+
+// supersedeRetainedTwins drops the work-leg rows the city's relocated graph
+// binding supersedes: a storage migration copies a class into the binding with
+// ids preserved and deletes nothing, so the migration source's copy is a frozen
+// duplicate of a row the binding now owns.
+//
+// The question is put to the BINDING, about the ids the later legs reported, and
+// not read off the two live-root scans. Those are different questions:
+// ListLiveRoots hides closed rows, so the moment the city CLOSES a relocated
+// root — the normal end of every migrated workflow, not an edge case — the
+// binding stops answering for that id, its retained twin stops looking
+// superseded, and the guard refuses a sling whose only live root is gone
+// (ga-x5lpj). cmd/gc's mergeConvoyViewRows resolved the same shape for convoy
+// views (#5633); this is that rule at the singleton guard.
+//
+// It asks whether the binding holds THIS root, not merely the id. Ids are unique
+// only within a store, so an unrelated bead minted under the same id must not
+// retire a rig's genuinely live root and admit the second workflow this guard
+// exists to refuse. A probe that FAILS is an error, never an empty answer: a
+// binding fault is an error, never absence.
+func (c *sourceWorkflowRootCollector) supersedeRetainedTwins() error {
+	if c.bindingStore == nil || len(c.roots) == 0 {
+		return nil
+	}
+	kept := make([]sourceWorkflowRoot, 0, len(c.roots))
+	for _, root := range c.roots {
+		if _, fromBinding := c.bindingIDs[root.root.ID]; fromBinding {
+			kept = append(kept, root)
+			continue
+		}
+		superseded, err := c.bindingHoldsRoot(root.root.ID)
+		if err != nil {
+			return err
+		}
+		if !superseded {
+			kept = append(kept, root)
+		}
+	}
+	c.roots = kept
+	return nil
+}
+
+// bindingHoldsRoot reports whether the relocated graph binding holds rootID as a
+// workflow root for this sling's source bead, live or closed. A missing row is a
+// clean "no"; every other read failure is returned so the caller aborts.
+//
+// Identity is established three ways, because a shared id does not establish it.
+// Ids are unique only WITHIN a store, and store-prefixed ids collide across
+// stores by construction -- two rigs can each hold a source bead under the same
+// id string -- so the binding's row must be a workflow ROOT, carry the same
+// gc.source_bead_id, and name the same source STORE whenever both sides say
+// which one. Anything less could retire a live root that belongs to a different
+// source and admit the second workflow this guard exists to refuse.
+//
+// A row with no gc.source_store_ref predates the stamp and is judged on the
+// first two plus a closed qualifier: requiring the ref there would exclude
+// exactly the pre-migration roots this supersede exists for, but an unstamped
+// row is also the one row this leg's own enumeration cannot see. That is why
+// the check is spelled out here rather than delegated to WorkflowMatchesSource,
+// whose legacy fallback compares the root's PHYSICAL store ref --
+// "graph:<city>" for every binding row -- against the source's "city:"/"rig:"
+// ref, and so never matches. So while such a row is LIVE nothing else reports
+// it, and dropping its twin would leave the sling unguarded; only once it is
+// CLOSED -- no longer a live conflict -- does it supersede its twin.
+func (c *sourceWorkflowRootCollector) bindingHoldsRoot(rootID string) (bool, error) {
+	row, err := c.bindingStore.Get(rootID)
+	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("asking %s whether it holds workflow %s: %w", c.bindingRef, rootID, err)
+	}
+	if !sourceworkflow.IsWorkflowRoot(row) {
+		return false, nil
+	}
+	if sourceworkflow.NormalizeSourceBeadID(row.Metadata[beadmeta.SourceBeadIDMetadataKey]) !=
+		sourceworkflow.NormalizeSourceBeadID(c.sourceBeadID) {
+		return false, nil
+	}
+	rowSourceStoreRef := sourceworkflow.NormalizeSourceStoreRef(row.Metadata[beadmeta.SourceStoreRefMetadataKey])
+	if c.sourceStoreRef == "" {
+		return true, nil
+	}
+	if rowSourceStoreRef == "" {
+		// An unstamped binding row is invisible to this same leg's
+		// ListLiveRoots whenever a source store ref is in play:
+		// WorkflowMatchesSource falls back to the root's PHYSICAL ref
+		// ("graph:<city>"), which never equals the source's "city:"/"rig:"
+		// ref. A CLOSED row is not a live conflict, so its retained twin
+		// can go -- that is the case this supersede was built for. A LIVE
+		// one IS the conflict and nothing else reports it: retiring its
+		// twin would leave zero blockers and admit the second workflow
+		// this guard exists to refuse. Keep today's conservative answer.
+		return row.Status == "closed", nil
+	}
+	return rowSourceStoreRef == sourceworkflow.NormalizeSourceStoreRef(c.sourceStoreRef), nil
 }
 
 // result finalizes the sorted root set, applying the fail-closed fallback when
@@ -1059,6 +1251,9 @@ func (c *sourceWorkflowRootCollector) result() ([]sourceWorkflowRoot, error) {
 			return nil, c.firstScanErr
 		}
 		return nil, fmt.Errorf("no source workflow stores were available to scan")
+	}
+	if err := c.supersedeRetainedTwins(); err != nil {
+		return nil, err
 	}
 	slices.SortFunc(c.roots, func(a, b sourceWorkflowRoot) int {
 		if cmp := strings.Compare(a.storeRef, b.storeRef); cmp != 0 {
@@ -1095,6 +1290,12 @@ func sameWorkflowRoot(root sourceWorkflowRoot, workflowID, storeRef string) bool
 		sourceworkflow.NormalizeSourceStoreRef(root.storeRef) == sourceworkflow.NormalizeSourceStoreRef(storeRef)
 }
 
+// blockingWorkflowIDs renders the sorted, distinct root ids a conflict names.
+//
+// Distinct because one physical root can reach the collector through two legs:
+// the relocated graph binding holds the live row, and a converged city's work
+// ledger still holds the frozen copy the storage migration retained under the
+// same id. That is one blocked workflow, and naming it twice would read as two.
 func blockingWorkflowIDs(roots []sourceWorkflowRoot) []string {
 	ids := make([]string, 0, len(roots))
 	for _, root := range roots {
@@ -1104,7 +1305,7 @@ func blockingWorkflowIDs(roots []sourceWorkflowRoot) []string {
 		ids = append(ids, root.root.ID)
 	}
 	slices.Sort(ids)
-	return ids
+	return slices.Compact(ids)
 }
 
 func snapshotBlockingWorkflowState(roots []sourceWorkflowRoot, replacement pendingSourceWorkflowLaunch) ([]workflowRestoreState, error) {
@@ -1335,10 +1536,9 @@ func sourceWorkflowRootByID(deps SlingDeps, sourceBeadID, workflowID, sourceStor
 		// subject is a workflow ROOT, which lives in the graph store; deps.Store
 		// holds the SOURCE bead. Identity wherever graph is not relocated.
 		//
-		// NOT fixed here: the federated arm below enumerates work scopes only
-		// (cmd/gc's openSourceWorkflowStores walks the city and rig dirs), so a
-		// city that relocates graph AND wires the federation still misses the
-		// binding. That is a query-federation gap, not a by-id one.
+		// The federated arm below no longer needs this fallback to cover a split
+		// city: both enumerators lead their list with the relocated graph binding
+		// (ga-nqdff), so the arm reaches the store the root actually lives in.
 		return sourceWorkflowRootByIDInStore(deps.graphStore(), sourceBeadID, workflowID, sourceStoreRef, sourceStoreRef)
 	}
 	stores, err := deps.SourceWorkflowStores()
@@ -1479,17 +1679,50 @@ func validateSlingFormulaRuntimeVars(ctx context.Context, formulaName string, se
 	return molecule.ValidateRecipeRuntimeVars(recipe, opts)
 }
 
-func checkLegacySourceWorkflowConflict(deps SlingDeps, beadID string) error {
+func checkLegacySourceWorkflowConflict(deps SlingDeps, beadID, formulaName string, force bool) error {
+	// The gc.source_bead_id half stays unconditional even under force: it
+	// already fired under --force before the convoy-tracking lookup below
+	// existed, and gating it here would let --force bypass a pre-existing
+	// check -- a behavior change beyond the scope of the #5420 fix.
 	roots, err := listSourceWorkflowRoots(deps, beadID)
 	if err != nil {
 		return fmt.Errorf("list live workflows for %s: %w", beadID, err)
 	}
-	if len(roots) == 0 {
+	ids := blockingWorkflowIDs(roots)
+
+	// listSourceWorkflowRoots resolves live workflows via gc.source_bead_id,
+	// which a convoy-first `--on` launch never stamps on the root -- the
+	// source is tracked through the input convoy instead (see
+	// attachFormulaToBead's isGraph branch above). That makes the check
+	// above structurally vacuous for every formulas-v2 `--on` launch, so
+	// resolve the convoy-tracking edge here too, scoped to the SAME formula
+	// being attached -- distinct formulas concurrently targeting one bead
+	// are legitimate, only relaunching the same one while its root is still
+	// live is the duplicate (#5420).
+	//
+	// --force skips this lookup: the CLI advertises --force as the override
+	// for exactly this conflict, and the sibling check in
+	// withSourceWorkflowLaunchLock gates on `if !force` the same way.
+	var convoyRoots []beads.Bead
+	if !force {
+		convoyRoots, err = liveConvoyTrackedWorkflowRoots(deps.Store, deps.graphStore(), beadID, formulaName)
+		if err != nil {
+			return fmt.Errorf("list convoy-tracked live workflows for %s: %w", beadID, err)
+		}
+	}
+	for _, root := range convoyRoots {
+		if !slices.Contains(ids, root.ID) {
+			ids = append(ids, root.ID)
+		}
+	}
+
+	if len(ids) == 0 {
 		return nil
 	}
+	slices.Sort(ids)
 	return &sourceworkflow.ConflictError{
 		SourceBeadID: beadID,
-		WorkflowIDs:  blockingWorkflowIDs(roots),
+		WorkflowIDs:  ids,
 	}
 }
 

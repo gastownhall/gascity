@@ -1487,6 +1487,198 @@ func notFoundStatusPtr() *int64 {
 	return &x
 }
 
+// TestReadLocalCityEventsBoundsUnfilteredReadToNewestPage pins the stopped-city
+// fallback to the same contract fetchCityEvents applies against a running city:
+// with no --since, `gc events` means "recent activity" and returns the newest
+// page, not the entire history. The fallback previously scanned the whole log
+// and returned every event ever recorded oldest-first, so on a long-lived city
+// it both diverged from the API's answer and paid a full-file scan to do it
+// (ga-b2s). The result must be the NEWEST cityEventsPageLimit events, in
+// ascending seq order, with the same truncation notice on stderr.
+func TestReadLocalCityEventsBoundsUnfilteredReadToNewestPage(t *testing.T) {
+	cityDir := t.TempDir()
+	rec := newTestProvider(t, filepath.Join(cityDir, ".gc"))
+
+	const total = int(cityEventsPageLimit) + 25
+	for i := 0; i < total; i++ {
+		rec.Record(events.Event{
+			Type:    events.SessionStopped,
+			Actor:   "gc",
+			Subject: "worker",
+		})
+	}
+
+	scope := eventsAPIScope{cityName: "mc-city", cityPath: cityDir}
+	var warn bytes.Buffer
+	got, ok, err := readLocalCityEvents(scope, stoppedCityLocalFallbackError(scope), "", "", &warn)
+	if err != nil {
+		t.Fatalf("readLocalCityEvents: %v", err)
+	}
+	if !ok {
+		t.Fatal("readLocalCityEvents did not take the local fallback path")
+	}
+	if len(got) != int(cityEventsPageLimit) {
+		t.Fatalf("returned %d events, want %d (the newest page)", len(got), cityEventsPageLimit)
+	}
+	// Newest page: seqs run to the head, not from the beginning of the log.
+	if want := int64(total); got[len(got)-1].Seq != want {
+		t.Errorf("last seq = %d, want %d (head of the log)", got[len(got)-1].Seq, want)
+	}
+	if want := int64(total) - cityEventsPageLimit + 1; got[0].Seq != want {
+		t.Errorf("first seq = %d, want %d (newest page, not the oldest events)", got[0].Seq, want)
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i].Seq <= got[i-1].Seq {
+			t.Fatalf("seqs not ascending at %d: %d <= %d", i, got[i].Seq, got[i-1].Seq)
+		}
+	}
+	if !strings.Contains(warn.String(), "newest") {
+		t.Errorf("stderr = %q, want a truncation notice naming the newest page", warn.String())
+	}
+}
+
+// TestReadLocalCityEventsKeepsFullWindowWithSince is the other half of the
+// contract: --since asks for a time window, and the API paginates the whole
+// window rather than one page. The fallback must not cap a --since read down to
+// a page, or a window holding more than a page would silently under-report.
+func TestReadLocalCityEventsKeepsFullWindowWithSince(t *testing.T) {
+	cityDir := t.TempDir()
+	rec := newTestProvider(t, filepath.Join(cityDir, ".gc"))
+
+	const total = int(cityEventsPageLimit) + 25
+	for i := 0; i < total; i++ {
+		rec.Record(events.Event{
+			Type:    events.SessionStopped,
+			Actor:   "gc",
+			Subject: "worker",
+		})
+	}
+
+	scope := eventsAPIScope{cityName: "mc-city", cityPath: cityDir}
+	var warn bytes.Buffer
+	got, ok, err := readLocalCityEvents(scope, stoppedCityLocalFallbackError(scope), "", "1h", &warn)
+	if err != nil {
+		t.Fatalf("readLocalCityEvents: %v", err)
+	}
+	if !ok {
+		t.Fatal("readLocalCityEvents did not take the local fallback path")
+	}
+	if len(got) != total {
+		t.Fatalf("returned %d events, want %d (the full --since window, uncapped)", len(got), total)
+	}
+	if warn.Len() != 0 {
+		t.Errorf("stderr = %q, want no truncation notice for a full window", warn.String())
+	}
+}
+
+// TestReadLocalCityEventsWarnsWhenTailMissesArchivedEvents pins the notice to
+// the case the page-cap test could not see. ReadFilteredTail reads the ACTIVE
+// log only, so a city that rotated moments ago returns a window far short of a
+// page while the bulk of its history sits in a sibling archive. A guard keyed
+// on len(all) >= cityEventsPageLimit stays silent exactly there, and the user
+// gets 12 events out of 612 with nothing on stderr saying so (ga-gm2o).
+func TestReadLocalCityEventsWarnsWhenTailMissesArchivedEvents(t *testing.T) {
+	cityDir := t.TempDir()
+	rec := newTestProvider(t, filepath.Join(cityDir, ".gc"))
+
+	const archived = 600
+	for i := 0; i < archived; i++ {
+		rec.Record(events.Event{Type: events.SessionStopped, Actor: "gc", Subject: "worker"})
+	}
+	if _, err := rec.ForceRotate(); err != nil {
+		t.Fatalf("ForceRotate: %v", err)
+	}
+	rec.WaitForRotations()
+
+	const active = 12
+	for i := 0; i < active; i++ {
+		rec.Record(events.Event{Type: events.SessionStopped, Actor: "gc", Subject: "worker"})
+	}
+
+	scope := eventsAPIScope{cityName: "mc-city", cityPath: cityDir}
+	var warn bytes.Buffer
+	got, ok, err := readLocalCityEvents(scope, stoppedCityLocalFallbackError(scope), "", "", &warn)
+	if err != nil {
+		t.Fatalf("readLocalCityEvents: %v", err)
+	}
+	if !ok {
+		t.Fatal("readLocalCityEvents did not take the local fallback path")
+	}
+	// The active log opens with the events.rotated anchor, then the events
+	// recorded after the rotation.
+	if want := active + 1; len(got) != want {
+		t.Fatalf("returned %d events, want %d (the rotation anchor plus the active tail)", len(got), want)
+	}
+	if want := int64(archived + 1); got[0].Seq != want {
+		t.Errorf("first seq = %d, want %d (first event after the archive)", got[0].Seq, want)
+	}
+	if got[0].Type != events.EventsRotated {
+		t.Errorf("first event type = %q, want %q (the rotation anchor)", got[0].Type, events.EventsRotated)
+	}
+	if !strings.Contains(warn.String(), "omitted") {
+		t.Errorf("stderr = %q, want a notice that archived events were omitted", warn.String())
+	}
+}
+
+// TestReadLocalCityEventsQuietAtExactlyOnePage is the other side of the guard:
+// a log holding exactly one page with nothing older is complete, so claiming
+// "older matching events were omitted" would be false. The page-cap test could
+// not tell this apart from a truncated read.
+func TestReadLocalCityEventsQuietAtExactlyOnePage(t *testing.T) {
+	cityDir := t.TempDir()
+	rec := newTestProvider(t, filepath.Join(cityDir, ".gc"))
+
+	total := int(cityEventsPageLimit)
+	for i := 0; i < total; i++ {
+		rec.Record(events.Event{Type: events.SessionStopped, Actor: "gc", Subject: "worker"})
+	}
+
+	scope := eventsAPIScope{cityName: "mc-city", cityPath: cityDir}
+	var warn bytes.Buffer
+	got, ok, err := readLocalCityEvents(scope, stoppedCityLocalFallbackError(scope), "", "", &warn)
+	if err != nil {
+		t.Fatalf("readLocalCityEvents: %v", err)
+	}
+	if !ok {
+		t.Fatal("readLocalCityEvents did not take the local fallback path")
+	}
+	if len(got) != total {
+		t.Fatalf("returned %d events, want %d (the whole log)", len(got), total)
+	}
+	if warn.Len() != 0 {
+		t.Errorf("stderr = %q, want silence when nothing older than the window exists", warn.String())
+	}
+}
+
+// TestReadLocalCityEventsQuietForTypeFilterWithNothingOlder rules out a guard
+// keyed on the window's first seq alone. With --type, the newest match can sit
+// at any seq while every older event simply did not match, so "first seq > 1"
+// would report omissions that never happened. The guard must ask whether older
+// MATCHING events exist, not whether older events exist.
+func TestReadLocalCityEventsQuietForTypeFilterWithNothingOlder(t *testing.T) {
+	cityDir := t.TempDir()
+	rec := newTestProvider(t, filepath.Join(cityDir, ".gc"))
+
+	rec.Record(events.Event{Type: events.SessionWoke, Actor: "gc", Subject: "worker"})
+	rec.Record(events.Event{Type: events.SessionStopped, Actor: "gc", Subject: "worker"})
+
+	scope := eventsAPIScope{cityName: "mc-city", cityPath: cityDir}
+	var warn bytes.Buffer
+	got, ok, err := readLocalCityEvents(scope, stoppedCityLocalFallbackError(scope), events.SessionStopped, "", &warn)
+	if err != nil {
+		t.Fatalf("readLocalCityEvents: %v", err)
+	}
+	if !ok {
+		t.Fatal("readLocalCityEvents did not take the local fallback path")
+	}
+	if len(got) != 1 {
+		t.Fatalf("returned %d events, want 1 matching event", len(got))
+	}
+	if warn.Len() != 0 {
+		t.Errorf("stderr = %q, want silence when no older event matches the filter", warn.String())
+	}
+}
+
 func newTestProvider(t *testing.T, dir string) *events.FileRecorder {
 	t.Helper()
 	path := filepath.Join(dir, "events.jsonl")

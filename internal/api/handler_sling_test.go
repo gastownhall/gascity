@@ -15,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/api/apierr"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -1186,5 +1187,241 @@ func TestApiVsAgentutilResolverParity(t *testing.T) {
 				t.Fatalf("agentutil.ResolveAgent QualifiedName = %q, want %q", utilAgent.QualifiedName(), tc.utilWantQName)
 			}
 		})
+	}
+}
+
+// --- ga-nqdff: the source-bead singleton guard on a split city ---
+//
+// These rows live beside TestSlingGraphV2RejectsLegacySourceWorkflowConflict
+// rather than in their own file because they need the same FormulaV2 +
+// graph-apply choreography, and internal/testenv's legacy-flag freeze caps how
+// many test files per package may couple to that mechanism. The enumerator-shape
+// rows, which need no flags, are in handler_sling_graph_binding_test.go.
+
+// newGraphBindingSlingFixture builds the split-city sling fixture the
+// source-bead singleton rows share: a graph.v2 formula on disk, a control
+// dispatcher for each scope, and a source bead in the rig work store. The
+// caller decides whether the graph class is relocated by wiring
+// state.graphBeadStore before slinging.
+func newGraphBindingSlingFixture(t *testing.T) (http.Handler, *fakeMutatorState, beads.Bead) {
+	t.Helper()
+	// Same compile-time flag choreography as
+	// TestSlingGraphV2RejectsLegacySourceWorkflowConflict: flip the shared
+	// FormulaV2 + graph-apply flags only after New() has run so syncFeatureFlags
+	// cannot stomp them back.
+	setFormulaV2 := formulatest.LockV2ForTest(t)
+	prevGraphApply := molecule.IsGraphApplyEnabled()
+	t.Cleanup(func() { molecule.SetGraphApplyEnabled(prevGraphApply) })
+
+	srv, state := newSlingTestServer(t)
+	setFormulaV2(true)
+	molecule.SetGraphApplyEnabled(true)
+
+	formulaDir := t.TempDir()
+	state.cfg.FormulaLayers.City = []string{formulaDir}
+	state.cfg.Agents = append(state.cfg.Agents,
+		config.Agent{Name: config.ControlDispatcherAgentName, MaxActiveSessions: intPtr(1)},
+		config.Agent{Name: config.ControlDispatcherAgentName, Dir: "myrig", MaxActiveSessions: intPtr(1)},
+	)
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.toml"), []byte(`
+formula = "graph-work"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "step"
+title = "Do work"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	source, err := state.stores["myrig"].Create(beads.Bead{ID: "BL-42", Title: "test task", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return srv, state, source
+}
+
+// seedBindingResidentWorkflowRoot writes a live graph.v2 workflow root into the
+// relocated graph binding, stamped exactly the way doStartGraphWorkflow stamps
+// one: gc.source_bead_id plus the gc.source_store_ref of the WORK store the
+// source bead lives in.
+func seedBindingResidentWorkflowRoot(t *testing.T, graph beads.Store, sourceBeadID string) beads.Bead {
+	t.Helper()
+	// Burn the binding's first id so the root's id differs from the source
+	// bead's id in the rig store. Both stores mint "gc-1" first, and a conflict
+	// body that echoes the source bead would otherwise satisfy an assertion that
+	// the blocking ROOT is named.
+	if _, err := graph.Create(beads.Bead{Title: "id spacer", Type: "task"}); err != nil {
+		t.Fatalf("Create(id spacer): %v", err)
+	}
+	root, err := graph.Create(beads.Bead{
+		Title:  "existing workflow",
+		Type:   "task",
+		Status: "in_progress",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+			beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+			beadmeta.SourceBeadIDMetadataKey:    sourceBeadID,
+			beadmeta.SourceStoreRefMetadataKey:  "rig:myrig",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(binding root): %v", err)
+	}
+	return root
+}
+
+func postGraphSling(t *testing.T, srv http.Handler, state *fakeMutatorState, sourceBeadID string) *httptest.ResponseRecorder {
+	t.Helper()
+	body := `{"target":"myrig/worker","formula":"graph-work","attached_bead_id":"` + sourceBeadID + `"}`
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
+	return rec
+}
+
+// TestSlingRefusesSecondWorkflowWhenLiveRootLivesInGraphBinding is the
+// split-refusal row for ga-nqdff.
+//
+// On a converged split city every live workflow root is graph class and lives in
+// the relocated binding, NOT in the work stores sourceWorkflowStores enumerated.
+// The singleton guard therefore answered "no conflict" from stores that
+// structurally cannot hold the answer, and the sling admitted a SECOND live
+// workflow for a source bead that already had one.
+func TestSlingRefusesSecondWorkflowWhenLiveRootLivesInGraphBinding(t *testing.T) {
+	srv, state, source := newGraphBindingSlingFixture(t)
+	graph := beads.NewMemStore()
+	state.graphBeadStore = graph
+	root := seedBindingResidentWorkflowRoot(t, graph, source.ID)
+
+	rec := postGraphSling(t, srv, state, source.ID)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (a binding-resident live root must block a second launch); body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), root.ID) {
+		t.Fatalf("conflict body = %s, want it to name the blocking binding-resident root %s", rec.Body.String(), root.ID)
+	}
+	reloaded, err := state.stores["myrig"].Get(source.ID)
+	if err != nil {
+		t.Fatalf("reload source: %v", err)
+	}
+	if reloaded.Metadata["workflow_id"] != "" {
+		t.Fatalf("source workflow_id = %q, want a refused launch to leave source metadata untouched", reloaded.Metadata["workflow_id"])
+	}
+}
+
+// TestSlingAdmitsWhenGraphBindingRootIsClosed is the control for the row above:
+// the same split fixture with the binding-resident root CLOSED admits the
+// launch. Without it a graph leg that simply refused everything would pass the
+// refusal row.
+func TestSlingAdmitsWhenGraphBindingRootIsClosed(t *testing.T) {
+	srv, state, source := newGraphBindingSlingFixture(t)
+	graph := beads.NewMemStore()
+	state.graphBeadStore = graph
+	root := seedBindingResidentWorkflowRoot(t, graph, source.ID)
+	if _, err := graph.CloseAll([]string{root.ID}, map[string]string{
+		"close_reason": "control row: the blocking workflow finished before this sling",
+	}); err != nil {
+		t.Fatalf("CloseAll(%s): %v", root.ID, err)
+	}
+
+	rec := postGraphSling(t, srv, state, source.ID)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (a closed binding root is not a live conflict); body = %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Status     string `json:"status"`
+		WorkflowID string `json:"workflow_id"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Status != "slung" || resp.WorkflowID == "" {
+		t.Fatalf("response = %+v, want a slung launch with a workflow id", resp)
+	}
+}
+
+// TestSlingAdmitsWhenAClosedBindingRootSupersedesItsRetainedTwin is ga-x5lpj at
+// the API door. A storage migration copies rows into the binding and deletes
+// nothing, so a converged city's work ledger still holds an OPEN frozen twin of
+// every relocated root. Once the binding's row is CLOSED, the live-root scan
+// stops returning it and the twin was the only row the guard saw — refusing a
+// sling whose only live root is gone. The same store list feeds both doors, so
+// this row proves the wiring, not a second copy of the collector's matrix.
+func TestSlingAdmitsWhenAClosedBindingRootSupersedesItsRetainedTwin(t *testing.T) {
+	srv, state, source := newGraphBindingSlingFixture(t)
+	graph := beads.NewMemStore()
+	state.graphBeadStore = graph
+	root := seedBindingResidentWorkflowRoot(t, graph, source.ID)
+	if _, err := graph.CloseAll([]string{root.ID}, map[string]string{
+		"close_reason": "the relocated workflow finished before this sling",
+	}); err != nil {
+		t.Fatalf("CloseAll(%s): %v", root.ID, err)
+	}
+	work := beads.NewMemStore()
+	work.HonorExplicitIDs = true
+	state.cityBeadStore = work
+	twin, err := work.Create(beads.Bead{
+		ID:     root.ID,
+		Title:  "retained copy of the relocated workflow root",
+		Type:   "task",
+		Status: "in_progress",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+			beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+			beadmeta.SourceBeadIDMetadataKey:    source.ID,
+			beadmeta.SourceStoreRefMetadataKey:  "rig:myrig",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(retained twin): %v", err)
+	}
+	if twin.ID != root.ID {
+		t.Fatalf("retained twin minted %s, want the relocated root's id %s", twin.ID, root.ID)
+	}
+
+	rec := postGraphSling(t, srv, state, source.ID)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: the binding closed %s, so the retained twin is not a live conflict; body = %s",
+			rec.Code, root.ID, rec.Body.String())
+	}
+	var resp struct {
+		Status     string `json:"status"`
+		WorkflowID string `json:"workflow_id"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Status != "slung" || resp.WorkflowID == "" {
+		t.Fatalf("response = %+v, want a slung launch with a workflow id", resp)
+	}
+}
+
+// TestSlingFailsWhenGraphBindingScanFails pins decision (3): a fault on the
+// store that HOLDS the answer refuses the sling. Degrading it to the
+// non-source-store warning would let a binding outage read as "no conflict" —
+// residency doctrine's "a binding fault is an error, never absence".
+func TestSlingFailsWhenGraphBindingScanFails(t *testing.T) {
+	srv, state, source := newGraphBindingSlingFixture(t)
+	scanErr := errors.New("graph binding unreachable")
+	state.graphBeadStore = listFailBeadStore{Store: beads.NewMemStore(), err: scanErr}
+
+	rec := postGraphSling(t, srv, state, source.ID)
+
+	if rec.Code == http.StatusOK {
+		t.Fatalf("status = 200, want a refusal: a graph-binding scan fault must not read as no-conflict; body = %s", rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "graph:"+state.cityName) || !strings.Contains(body, "unreachable") {
+		t.Fatalf("error body = %s, want it to name the graph leg and its scan error", body)
+	}
+	reloaded, err := state.stores["myrig"].Get(source.ID)
+	if err != nil {
+		t.Fatalf("reload source: %v", err)
+	}
+	if reloaded.Metadata["workflow_id"] != "" {
+		t.Fatalf("source workflow_id = %q, want a refused launch to leave source metadata untouched", reloaded.Metadata["workflow_id"])
 	}
 }

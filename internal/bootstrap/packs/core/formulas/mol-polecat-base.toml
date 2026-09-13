@@ -18,6 +18,7 @@ then add a terminal step (submit, commit, etc).
 | test_command | rig `formula_vars` | Test command. Empty = skip. |
 | lint_command | rig `formula_vars` | Lint command. Empty = skip. |
 | build_command | rig `formula_vars` | Build command. Empty = skip. |
+| escalation_target | caller / rig `formula_vars` | Mail recipient for help/blocked escalations (default: `human`) |
 
 Steps run in independent shell contexts, so each step that needs the work
 bead re-derives it from the input convoy:
@@ -32,6 +33,15 @@ formula = "mol-polecat-base"
 formula_compiler = ">=2.0.0"
 
 [vars]
+[vars.escalation_target]
+description = """
+Mail recipient for help and escalation mail. Defaults to the reserved `human`
+alias, which resolves in every city. Cities that staff a work-health role
+(e.g. the gastown pack's witness) can point this at it, for example
+`escalation_target = "<rig>/witness"`.
+"""
+default = "human"
+
 [vars.base_branch]
 description = "The base branch to rebase on and compare against (e.g., main, integration/convoy-id)"
 default = "main"
@@ -109,9 +119,9 @@ gc mail inbox
 - What does "done" look like?
 - If rejected: what specifically needs fixing?
 
-If blocked or unclear, mail Witness:
+If blocked or unclear, mail `{{escalation_target}}`:
 ```bash
-gc mail send <rig>/witness -s "HELP: Unclear requirements" -m "Issue: $WORK_BEAD_ID
+gc mail send {{escalation_target}} -s "HELP: Unclear requirements" -m "Issue: $WORK_BEAD_ID
 Question: <what you need clarified>"
 ```
 
@@ -192,7 +202,7 @@ MATCHES=$(gc bd list --title-contains "$SYMPTOM_KEY" --status open,in_progress,b
 LOOKUP_RC=$?
 if [ "$LOOKUP_RC" -ne 0 ]; then
     echo "Ledger lookup failed (rc=$LOOKUP_RC). NOT filing — a failed lookup is not proof the bead is missing."
-    gc mail send <rig>/witness -s "NOTICE: {{base_branch}} pre-flight failed, dedupe lookup broken" \
+    gc mail send {{escalation_target}} -s "NOTICE: {{base_branch}} pre-flight failed, dedupe lookup broken" \
       -m "Symptom: $SYMPTOM_KEY. Lookup exited $LOOKUP_RC so nothing was filed. Proceeding with $WORK_BEAD_ID."
 else
     EXISTING=$(printf '%s' "$MATCHES" | jq -r '.[0].id // empty')
@@ -262,13 +272,13 @@ including the subtest you stripped in 3a and the package, in the body:
 gc bd create --title "Pre-existing failure: $SYMPTOM_KEY — <short description>" \
   --type bug --priority 1 \
   --design "Observed on {{base_branch}}. Full failure: $RAW_FAILURE"
-gc mail send <rig>/witness -s "NOTICE: {{base_branch}} has failing pre-flights" \
+gc mail send {{escalation_target}} -s "NOTICE: {{base_branch}} has failing pre-flights" \
   -m "Filed: <bead-id> for $SYMPTOM_KEY. Proceeding with $WORK_BEAD_ID."
 ```
 
 **Exit criteria:** Pre-flights pass, or the failure is recorded exactly once
 — a new bead you filed, or your comment on the bead that already had it —
-or, when the ledger lookup itself was broken, witness has been notified
+or, when the ledger lookup itself was broken, `{{escalation_target}}` has been notified
 instead."""
 
 [[steps]]
@@ -339,7 +349,7 @@ Do NOT fix unrelated issues in this branch.
 
 **If stuck (>15 minutes):**
 ```bash
-gc mail send <rig>/witness -s "HELP: Stuck on implementation" -m "Issue: $WORK_BEAD_ID
+gc mail send {{escalation_target}} -s "HELP: Stuck on implementation" -m "Issue: $WORK_BEAD_ID
 Problem: <what's blocking you>
 Tried: <what you've attempted>"
 ```

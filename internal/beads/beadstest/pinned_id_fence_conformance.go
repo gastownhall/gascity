@@ -168,6 +168,65 @@ func RunPinnedIDFenceConformance(t *testing.T, openFenced func(t *testing.T, min
 		}
 	})
 
+	// The fence is a property of the STORE, not of one entry point. A store
+	// exposing a transactional Create has two doors into the same table, and a
+	// caller reaching for the transactional one — a wisp root and its steps
+	// written as one commit — has to be told the same thing about a namespace
+	// this binding does not serve. A fence on Create alone is not a fence: it is
+	// a convention the next composite write breaks, and the bead it admits is
+	// unreachable by every id-shaped lookup of the namespace it lands in.
+	t.Run("TheFenceHoldsInsideATransaction", func(t *testing.T) {
+		s := fenced(t)
+		id := foreign + "-4242"
+		err := s.Tx("pinning a foreign id inside a transaction", func(tx beads.Tx) error {
+			_, createErr := tx.Create(beads.Bead{ID: id, Title: "another binding's id, pinned through the tx door"})
+			return createErr
+		})
+		if err == nil {
+			t.Fatal("the transactional Create accepted a foreign pinned id; a fence on the direct door only is a convention the next composite write breaks")
+		}
+		if !errors.Is(err, beads.ErrPinnedIDOutsideNamespace) {
+			t.Errorf("refusal is %v, which does not wrap ErrPinnedIDOutsideNamespace; a caller cannot tell \"route this to a sibling binding\" from \"this bead could not be created\"", err)
+		}
+		if _, err := s.Get(id); !errors.Is(err, beads.ErrNotFound) {
+			t.Errorf("after the refusal Get(%q) = %v, want ErrNotFound; the store kept the row it said it would not take", id, err)
+		}
+	})
+
+	// The same claim as ARefusalDoesNotConsumeTheMintSequence, through the other
+	// door, and it fails on exactly the implementation that row was written for:
+	// a transactional Create that normalizes the incoming bead before consulting
+	// the fence lifts the sequence floor to the FOREIGN id's suffix, and the next
+	// mint jumps to it even though the transaction wrote nothing.
+	t.Run("ATransactionalRefusalDoesNotConsumeTheMintSequence", func(t *testing.T) {
+		control, err := openFenced(t, mint, mint, aux).Create(beads.Bead{Title: "first mint, no refusal before it"})
+		if err != nil {
+			t.Fatalf("Create(mint) on the control store: %v", err)
+		}
+		s := fenced(t)
+		if err := s.Tx("pinning a foreign id inside a transaction", func(tx beads.Tx) error {
+			_, createErr := tx.Create(beads.Bead{ID: foreign + "-424242", Title: "refused, with a high suffix"})
+			return createErr
+		}); err == nil {
+			t.Fatal("the transactional Create accepted a foreign pinned id")
+		}
+		minted, err := s.Create(beads.Bead{Title: "first mint, after a transactional refusal"})
+		if err != nil {
+			t.Fatalf("Create(mint): %v", err)
+		}
+		want, ok := numericSuffixOf(control.ID)
+		if !ok {
+			t.Skipf("this store mints %q, which carries no numeric suffix; the sequence claim is not observable here", control.ID)
+		}
+		got, ok := numericSuffixOf(minted.ID)
+		if !ok {
+			t.Fatalf("the control minted %q but the store under test minted %q, which carries no numeric suffix", control.ID, minted.ID)
+		}
+		if got != want {
+			t.Errorf("the first minted id is %q (suffix %d), want suffix %d as on a store that saw no refusal; the refused id's suffix leaked into the mint sequence through the transactional door", minted.ID, got, want)
+		}
+	})
+
 	t.Run("OverRestrictionControls", func(t *testing.T) {
 		// Every row in this subtest passes on a build with NO fence. That is
 		// what they are for — delete them and refusing every pinned id becomes
@@ -207,6 +266,31 @@ func RunPinnedIDFenceConformance(t *testing.T, openFenced func(t *testing.T, min
 			out := strings.ToUpper(foreign) + "-9"
 			if _, err := s.Create(beads.Bead{ID: out, Title: "shouting, and foreign"}); !errors.Is(err, beads.ErrPinnedIDOutsideNamespace) {
 				t.Errorf("Create(%q) = %v, want ErrPinnedIDOutsideNamespace", out, err)
+			}
+		})
+
+		// The CONFIGURED set is normalized too, and by the same rule the id is
+		// tested under. Without this row a store's namespace normalization is
+		// unpinned: every other row hands it prefixes that are already clean, so
+		// a provider that stopped lowercasing (or stopped trimming, or stopped
+		// dropping empties) what it was configured with keeps passing while it
+		// fences a different set than production's registry asked for.
+		t.Run("TheCONFIGUREDNamespacesAreNormalizedToo", func(t *testing.T) {
+			s := openFenced(t, mint, strings.ToUpper(mint)+"-", "  "+aux+"  ", "")
+			for _, id := range []string{mint + "-11", aux + "-11"} {
+				created, err := s.Create(beads.Bead{ID: id, Title: "held, however the namespace was spelled"})
+				if err != nil {
+					t.Errorf("Create(%q): %v — the namespace was configured shouting and padded, and normalizing it is what makes the registry's spelling not matter", id, err)
+					continue
+				}
+				if created.ID != id {
+					t.Errorf("Create(%q) returned %q; normalizing the namespace must not rewrite the id", id, created.ID)
+				}
+			}
+			// And the empty entry must not have unfenced the store: dropping it
+			// is normalization, not a reason to stop fencing.
+			if _, err := s.Create(beads.Bead{ID: foreign + "-11", Title: "foreign"}); !errors.Is(err, beads.ErrPinnedIDOutsideNamespace) {
+				t.Errorf("Create(%q) = %v, want ErrPinnedIDOutsideNamespace; an empty entry in the configured set is dropped, and a store that treated it as no configuration at all would serve a whole binding unfenced", foreign+"-11", err)
 			}
 		})
 
@@ -266,6 +350,39 @@ func RunPinnedIDFenceConformance(t *testing.T, openFenced func(t *testing.T, min
 			}
 		})
 
+		// The transactional door stays open for everything the direct one
+		// admits. Without this row the two transactional rows above are
+		// satisfied by a store whose Tx refuses every create, which is the same
+		// blanket refusal the rest of this subtest exists to rule out.
+		t.Run("ATransactionAdmitsAMintAndAnInNamespacePin", func(t *testing.T) {
+			s := fenced(t)
+			pinned := aux + "-tx"
+			var mintedID string
+			if err := s.Tx("a composite write inside the namespaces this binding holds", func(tx beads.Tx) error {
+				created, err := tx.Create(beads.Bead{ID: pinned, Title: "held, pinned inside a transaction"})
+				if err != nil {
+					return err
+				}
+				if created.ID != pinned {
+					t.Errorf("tx.Create(%q) returned %q; a pinned id inside the namespace must be honored verbatim", pinned, created.ID)
+				}
+				minted, err := tx.Create(beads.Bead{Title: "minted inside a transaction"})
+				if err != nil {
+					return err
+				}
+				mintedID = minted.ID
+				return nil
+			}); err != nil {
+				t.Fatalf("a transaction pinning an in-namespace id and minting one was refused: %v — the fence inspects only ids the CALLER supplied, and only against namespaces this binding does not hold", err)
+			}
+			if !strings.HasPrefix(strings.ToLower(mintedID), mint+"-") {
+				t.Errorf("the id minted inside the transaction is %q, which does not carry the store's own namespace", mintedID)
+			}
+			if _, err := s.Get(pinned); err != nil {
+				t.Errorf("Get(%q) after the transaction committed it: %v", pinned, err)
+			}
+		})
+
 		// The control that keeps the whole suite from describing a store which
 		// refuses pinned ids outright: no namespaces means unfenced, which is
 		// the shipped default and how a binding serving the work class is
@@ -282,6 +399,55 @@ func RunPinnedIDFenceConformance(t *testing.T, openFenced func(t *testing.T, min
 				t.Errorf("got id %q, want %q", created.ID, id)
 			}
 		})
+	})
+
+	// The fence covers the transactional write surface too.
+	//
+	// Store.Tx is a Create in every sense the invariant cares about: the bead it
+	// writes is as resident, and as unreachable by an id-shaped lookup of the
+	// namespace it lands in, as one written outside a transaction. A store that
+	// fences only the standalone Create passes every row above and still lets a
+	// caller write a foreign bead into a binding that claims not to hold one —
+	// which is how this row came to exist (ga-qdt5y.14 review, both shipped
+	// providers had the hole).
+	//
+	// Tx is on Store, so this row can neither skip nor be satisfied by omission.
+	t.Run("TheFenceCoversTheTransactionalCreate", func(t *testing.T) {
+		s := fenced(t)
+		id := foreign + "-42"
+		err := s.Tx("a foreign pinned id inside a transaction", func(tx beads.Tx) error {
+			_, createErr := tx.Create(beads.Bead{ID: id, Title: "pinned inside a transaction"})
+			return createErr
+		})
+		if err == nil {
+			t.Fatal("Tx accepted a foreign pinned id; a transaction is not an exemption from the namespace claim")
+		}
+		if !errors.Is(err, beads.ErrPinnedIDOutsideNamespace) {
+			t.Errorf("refusal is %v, which does not wrap ErrPinnedIDOutsideNamespace", err)
+		}
+		if _, err := s.Get(id); !errors.Is(err, beads.ErrNotFound) {
+			t.Errorf("after the refusal Get(%q) = %v, want ErrNotFound", id, err)
+		}
+
+		// The must-be-silent counterpart: an in-namespace pin inside a
+		// transaction still goes through, honored verbatim. Without it a store
+		// conforms by making Tx.Create refuse everything.
+		held := aux + "-inside-a-tx"
+		if err := s.Tx("an in-namespace pinned id inside a transaction", func(tx beads.Tx) error {
+			created, createErr := tx.Create(beads.Bead{ID: held, Title: "held by this binding"})
+			if createErr != nil {
+				return createErr
+			}
+			if created.ID != held {
+				t.Errorf("Tx Create(%q) returned %q; a pinned id inside the namespace must be honored verbatim", held, created.ID)
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("Tx refused an in-namespace pinned id: %v", err)
+		}
+		if _, err := s.Get(held); err != nil {
+			t.Errorf("Get(%q) after committing it in a transaction: %v", held, err)
+		}
 	})
 
 	// Fence before existence. A relic under a foreign id can already be

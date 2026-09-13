@@ -37,12 +37,34 @@ var (
 	ensureSupervisorRunningHook              = ensureSupervisorRunning
 	reloadSupervisorHook                     = reloadSupervisor
 	supervisorAliveHook                      = supervisorAlive
+	unloadSupervisorServiceHook              = unloadSupervisorService
+	verifySupervisorServiceStoppedHook       = verifySupervisorServiceStopped
 	supervisorReadyTimeout                   = 15 * time.Second
 	supervisorReadyPollInterval              = 100 * time.Millisecond
 	supervisorSystemdWarmRefreshStopTimeout  = 5 * time.Second
 	supervisorSystemdWarmRefreshPollInterval = 100 * time.Millisecond
-	supervisorLaunchctlRun                   = func(args ...string) error {
+	// supervisorLaunchdStopTimeout is how long launchd typically needs to
+	// drop a booted-out job. The absence poll honors the caller's
+	// --wait-timeout deadline rather than this value; it documents the
+	// expected budget and is what tests pin when they exercise caller
+	// deadlines shorter than it.
+	supervisorLaunchdStopTimeout      = 45 * time.Second
+	supervisorLaunchdStopPollInterval = 250 * time.Millisecond
+	supervisorLaunchctlRun            = func(args ...string) error {
 		return exec.Command("launchctl", args...).Run()
+	}
+	// supervisorLaunchdLoaded probes whether a launchd job is still
+	// registered. It is deliberately tri-state: a failing `launchctl
+	// print` is not proof the job is gone. Absence is reported only on a
+	// positive not-found signal; any other failure returns
+	// (false, false), meaning "unknown".
+	supervisorLaunchdLoaded = func(label string) (loaded bool, absent bool, detail string) {
+		out, err := exec.Command("launchctl", "print", supervisorLaunchdServiceTarget(label)).CombinedOutput()
+		detail = strings.TrimSpace(string(out))
+		if err == nil {
+			return true, false, detail
+		}
+		return false, launchdPrintReportsNotFound(err, detail), detail
 	}
 	supervisorLaunchdActive = func(label string) bool {
 		out, err := exec.Command("launchctl", "print", supervisorLaunchdServiceTarget(label)).Output()
@@ -186,6 +208,28 @@ type supervisorWorkspaceServiceProcess struct {
 type supervisorWorkspaceServiceCleanupScope struct {
 	gcHome    string
 	cityPaths map[string]string
+}
+
+// launchdPrintNotFoundExitCode is the status `launchctl print` exits
+// with when the requested service does not exist in the domain.
+const launchdPrintNotFoundExitCode = 113
+
+// exitCoder is any error carrying a process exit status. *exec.ExitError
+// satisfies it, so classifying through the interface keeps the real
+// launchctl path unchanged while letting tests supply an exit status
+// without spawning a subprocess.
+type exitCoder interface{ ExitCode() int }
+
+// launchdPrintReportsNotFound reports whether a failed `launchctl print`
+// positively proves the service is absent, rather than having failed for
+// an unrelated reason (no Aqua session, permission denied, launchctl
+// unavailable). Only a not-found signal counts as proof of absence.
+func launchdPrintReportsNotFound(err error, detail string) bool {
+	var ec exitCoder
+	if errors.As(err, &ec) && ec.ExitCode() == launchdPrintNotFoundExitCode {
+		return true
+	}
+	return strings.Contains(detail, "Could not find service")
 }
 
 func launchdPrintReportsRunning(out []byte) bool {
@@ -757,21 +801,102 @@ func waitForSupervisorReady(stderr io.Writer) int {
 // the unit file, so gc start can reload it later. It is a no-op when
 // the platform unit/plist is not installed — this keeps unit tests that
 // invoke the stop helper hermetic on machines where the service has
-// never been registered.
-func unloadSupervisorService() {
+// never been registered. It reports command failures only; confirming
+// the service actually went away is verifySupervisorServiceStopped's
+// job, because launchd drops the job only once the process has exited.
+func unloadSupervisorService() error {
+	var errs []error
 	switch goruntime.GOOS {
 	case "darwin":
 		path := supervisorLaunchdPlistPath()
-		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
-			_ = supervisorLaunchctlRun("unload", path)
+		if _, err := os.Stat(path); err == nil {
+			errs = append(errs, durablyStopSupervisorLaunchd(supervisorLaunchdLabel(), path)...)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("stat launchd plist %s: %w", path, err))
 		}
 		_ = unloadLegacySupervisorLaunchd(false)
 	case "linux":
 		service := supervisorSystemdServiceName()
-		if _, err := os.Stat(supervisorSystemdServicePath()); !errors.Is(err, os.ErrNotExist) {
-			_ = supervisorSystemctlRun("--user", "stop", service)
+		path := supervisorSystemdServicePath()
+		if _, err := os.Stat(path); err == nil {
+			// A stop failure is only evidence of a stuck service when a
+			// user manager is reachable at all. Without one the unit was
+			// never running, so reporting failure would turn a no-op into
+			// a spurious non-zero exit.
+			if err := supervisorSystemctlRun("--user", "stop", service); err != nil && supervisorSystemctlUserAvailable() {
+				errs = append(errs, fmt.Errorf("systemctl --user stop %s: %w", service, err))
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("stat systemd unit %s: %w", path, err))
 		}
 		_ = unloadLegacySupervisorSystemd(false)
+	}
+	return errors.Join(errs...)
+}
+
+func durablyStopSupervisorLaunchd(label, plistPath string) []error {
+	target := supervisorLaunchdServiceTarget(label)
+	var errs []error
+	if err := supervisorLaunchctlRun("disable", target); err != nil {
+		errs = append(errs, fmt.Errorf("launchctl disable %s: %w", target, err))
+	}
+	if err := supervisorLaunchctlRun("bootout", target); err != nil {
+		if unloadErr := supervisorLaunchctlRun("unload", plistPath); unloadErr != nil {
+			errs = append(errs, fmt.Errorf("launchctl bootout %s: %w", target, err))
+			errs = append(errs, fmt.Errorf("launchctl unload %s: %w", plistPath, unloadErr))
+		}
+	}
+	return errs
+}
+
+// verifySupervisorServiceStopped confirms the platform service is really
+// gone after unloadSupervisorService ran. Callers pass their own deadline
+// (the --wait-timeout budget) so the check shares that budget instead of
+// adding a hidden one.
+func verifySupervisorServiceStopped(deadline time.Time) error {
+	if goruntime.GOOS != "darwin" {
+		return nil
+	}
+	path := supervisorLaunchdPlistPath()
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("stat launchd plist %s: %w", path, err)
+	}
+	label := supervisorLaunchdLabel()
+	return waitForSupervisorLaunchdAbsent(label, supervisorLaunchdServiceTarget(label), deadline)
+}
+
+// waitForSupervisorLaunchdAbsent polls until launchd positively reports
+// the target is gone. A probe that merely fails is "unknown", not proof
+// of absence, so it keeps polling and times out with the reason it could
+// not confirm — an unverifiable teardown must never read as success.
+func waitForSupervisorLaunchdAbsent(label, target string, deadline time.Time) error {
+	var lastDetail string
+	var lastLoaded bool
+	for {
+		loaded, absent, detail := supervisorLaunchdLoaded(label)
+		if absent {
+			return nil
+		}
+		lastLoaded = loaded
+		if detail != "" {
+			lastDetail = detail
+		}
+		if !time.Now().Before(deadline) {
+			var err error
+			if lastLoaded {
+				err = fmt.Errorf("launchd target %s is still loaded after stop", target)
+			} else {
+				err = fmt.Errorf("launchd target %s could not be confirmed unloaded after stop", target)
+			}
+			if lastDetail != "" {
+				err = fmt.Errorf("%w: %s", err, lastDetail)
+			}
+			return err
+		}
+		time.Sleep(supervisorLaunchdStopPollInterval)
 	}
 }
 
@@ -1467,12 +1592,12 @@ func supervisorLaunchdServiceTarget(label string) string {
 }
 
 func loadAndStartSupervisorLaunchd(path, label string) error {
-	if err := supervisorLaunchctlRun("load", path); err != nil {
-		return fmt.Errorf("load %s: %w", path, err)
-	}
 	target := supervisorLaunchdServiceTarget(label)
 	if err := supervisorLaunchctlRun("enable", target); err != nil {
 		return fmt.Errorf("enable %s: %w", target, err)
+	}
+	if err := supervisorLaunchctlRun("load", path); err != nil {
+		return fmt.Errorf("load %s: %w", path, err)
 	}
 	if err := supervisorLaunchctlRun("kickstart", "-p", target); err != nil {
 		return fmt.Errorf("kickstart -p %s: %w", target, err)
@@ -1481,12 +1606,12 @@ func loadAndStartSupervisorLaunchd(path, label string) error {
 }
 
 func loadAndStartSupervisorLaunchdForRollback(path, label string, stderr io.Writer) error {
-	if err := supervisorLaunchctlRun("load", path); err != nil {
-		return fmt.Errorf("load %s: %w", path, err)
-	}
 	target := supervisorLaunchdServiceTarget(label)
 	if err := supervisorLaunchctlRun("enable", target); err != nil {
 		warnSupervisorLaunchdRollback(stderr, "enable %s: %v", target, err)
+	}
+	if err := supervisorLaunchctlRun("load", path); err != nil {
+		return fmt.Errorf("load %s: %w", path, err)
 	}
 	if err := supervisorLaunchctlRun("kickstart", "-p", target); err != nil {
 		warnSupervisorLaunchdRollback(stderr, "kickstart -p %s: %v", target, err)

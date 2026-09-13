@@ -19,6 +19,7 @@ var partitionHalfCases = []struct {
 	{"Command", "launch", func(c *Config) { c.Command += " --changed" }},
 	{"Lifecycle", "launch", func(c *Config) { c.Lifecycle = Lifecycle("persistent") }},
 	{"Upstream", "launch", func(c *Config) { c.Upstream = "bedrock" }},
+	{"OperatorEnv", "launch", func(c *Config) { c.OperatorEnv = envWith(c.OperatorEnv, "OPERATOR_KEY", "different") }},
 	{"MCPServers", "launch", func(c *Config) {
 		c.MCPServers = []MCPServerConfig{{Name: "mail", Transport: MCPTransport("stdio"), Command: "different-mcp"}}
 	}},
@@ -95,6 +96,7 @@ var coreFieldHalf = map[string]string{
 	"Command":              "launch",
 	"Lifecycle":            "launch",
 	"Upstream":             "launch",
+	"OperatorEnv":          "launch",
 	"MCPServers":           "launch",
 	"AcceptStartupDialogs": "launch",
 	"MouseOn":              "launch",

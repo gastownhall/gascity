@@ -602,6 +602,20 @@ type Config struct {
 	// Env is additional environment variables set in the session.
 	Env map[string]string
 
+	// OperatorEnv carries the effective operator-authored environment values
+	// captured from config — [workspace].env, [providers.*].env, [[agent]].env,
+	// and [[rigs.patches]].env — before passthrough, generated, or
+	// resolved-credential values are merged into Env. It is the dedicated
+	// Launch-tier identity surface decided by Option A' (ga-3a42sp): distinct
+	// from Env (the fully merged process environment, allow-list-filtered in
+	// the fingerprint) and from FingerprintExtra (opaque non-behavioral extra
+	// data) — widening either would misclassify config-authored env as
+	// Provision-tier. Hashed into the LAUNCH half of the fingerprint, so a
+	// change relaunches the agent in the existing warm box rather than
+	// triggering a reprovision. Nil and empty are equivalent (no keys set
+	// contributes nothing to the hash).
+	OperatorEnv map[string]string
+
 	// MCPServers is the effective ACP session/new MCP server list for this
 	// session. Non-ACP providers ignore it.
 	MCPServers []MCPServerConfig
