@@ -56,6 +56,9 @@ func cloneContextAdvisory(value *ContextAdvisory) *ContextAdvisory {
 	return &copyValue
 }
 
+// CloneContextAdvisory returns a deep copy of v, or nil when v is nil.
+func CloneContextAdvisory(v *ContextAdvisory) *ContextAdvisory { return cloneContextAdvisory(v) }
+
 func mergeContextAdvisory(dst **ContextAdvisory, src *ContextAdvisory) {
 	if src == nil {
 		return
