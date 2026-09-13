@@ -1588,6 +1588,88 @@ func TestCmdWorkflowDeleteSourceUnknownWhenSourceBeadIsNotResident(t *testing.T)
 	}
 }
 
+// TestCmdWorkflowDeleteSourceUnknownWhenAStoreScanFails is the end-to-end
+// sibling of TestAssessZeroMatchSourceWorkflowScanReportsUnknownOnAnyFailedScan:
+// that test pins the assess function in isolation, this one drives
+// cmdWorkflowDeleteSource itself through the same hole, with a real second
+// store (a file-backed rig) whose scan fails after it opened successfully.
+//
+// A failed scan can only happen inside the beads.Store implementation itself,
+// after openSourceWorkflowStores has already returned a working handle — a
+// shape no combination of on-disk fixtures can trigger from outside the
+// process, since the store either opens or it doesn't. openSourceWorkflowStoresForCollect
+// is the narrow test seam that lets this test wrap the already-opened rig
+// store so its List call fails at scan time, without touching production
+// behavior (the var defaults to the real openSourceWorkflowStores).
+func TestCmdWorkflowDeleteSourceUnknownWhenAStoreScanFails(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	cityToml := fmt.Sprintf("[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[[rigs]]\nname = \"frontend\"\npath = %q\n", rigDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	prevCityFlag := cityFlag
+	cityFlag = ""
+	t.Cleanup(func() { cityFlag = prevCityFlag })
+
+	if err := ensurePersistedScopeLocalFileStore(rigDir); err != nil {
+		t.Fatalf("ensurePersistedScopeLocalFileStore(rig): %v", err)
+	}
+
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity: %v", err)
+	}
+	source, err := store.Create(beads.Bead{Title: "Source", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("Create(source): %v", err)
+	}
+	if err := store.SetMetadata(source.ID, "workflow_id", "wf-old"); err != nil {
+		t.Fatalf("SetMetadata(workflow_id): %v", err)
+	}
+
+	prevOpen := openSourceWorkflowStoresForCollect
+	t.Cleanup(func() { openSourceWorkflowStoresForCollect = prevOpen })
+	openSourceWorkflowStoresForCollect = func(cfg *config.City, cityPath, beadID string) ([]convoyStoreView, []sourceWorkflowStoreSkip, error) {
+		views, skips, err := prevOpen(cfg, cityPath, beadID)
+		if err != nil {
+			return views, skips, err
+		}
+		for i, view := range views {
+			if samePath(view.path, rigDir) {
+				views[i].store = &faultingClassStore{Store: view.store, readErr: errors.New("connection reset mid-scan")}
+			}
+		}
+		return views, skips, nil
+	}
+
+	// Fix the selector to the city store: this test is pinning the failed-scan
+	// hole, not the multi-store ambiguity the "exists in multiple stores" path
+	// already covers.
+	selector := sourceWorkflowStoreSelector{storeRef: "city:test-city"}
+	var stdout, stderr bytes.Buffer
+	if code := cmdWorkflowDeleteSource(source.ID, selector, true, false, &stdout, &stderr); code != 1 {
+		t.Fatalf("cmdWorkflowDeleteSource returned %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "result=unknown") || !strings.Contains(stdout.String(), "reason=store-scan-failed") {
+		t.Fatalf("stdout = %q, want unknown store-scan-failed result", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "could not scan every candidate store") {
+		t.Fatalf("stderr = %q, want the store-scan-failed capability warning", stderr.String())
+	}
+
+	updatedSource, err := store.Get(source.ID)
+	if err != nil {
+		t.Fatalf("Get(source): %v", err)
+	}
+	if got := updatedSource.Metadata["workflow_id"]; got != "wf-old" {
+		t.Fatalf("source workflow_id = %q, want unchanged %q (a failed scan must not clear metadata under --apply)", got, "wf-old")
+	}
+}
+
 // TestAssessZeroMatchSourceWorkflowScanReportsUnknownOnAnyFailedScan pins the
 // hole a Copilot review found in PR #6329: a failed scan of one store must not
 // be silently dropped just because another store scanned cleanly and holds the

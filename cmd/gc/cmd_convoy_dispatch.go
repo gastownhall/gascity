@@ -2485,8 +2485,17 @@ func restoreWorkflowDeleteDeps(store beads.Store, downDeps, upDeps []beads.Dep) 
 	return restoreErr
 }
 
+// openSourceWorkflowStoresForCollect is the store-opening step
+// collectSourceWorkflowMatches uses. Tests override it to hand back a store
+// that opens successfully but fails a later List call: a shape production
+// code cannot otherwise construct, since a scan failure (as opposed to an
+// open failure, already covered by the openStore injection on
+// openSourceWorkflowStoresWith) happens inside the beads.Store implementation
+// itself, after openSourceWorkflowStores has already returned.
+var openSourceWorkflowStoresForCollect = openSourceWorkflowStores
+
 func collectSourceWorkflowMatches(cfg *config.City, cityPath, sourceBeadID, sourceStoreRef string) ([]sourceWorkflowStoreMatch, []sourceWorkflowStoreSkip, []sourceWorkflowStoreScan, error) {
-	stores, skips, err := openSourceWorkflowStores(cfg, cityPath, sourceBeadID)
+	stores, skips, err := openSourceWorkflowStoresForCollect(cfg, cityPath, sourceBeadID)
 	if err != nil {
 		return nil, skips, nil, err
 	}
