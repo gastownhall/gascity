@@ -1588,6 +1588,59 @@ func TestCmdWorkflowDeleteSourceUnknownWhenSourceBeadIsNotResident(t *testing.T)
 	}
 }
 
+// TestAssessZeroMatchSourceWorkflowScanReportsUnknownOnAnyFailedScan pins the
+// hole a Copilot review found in PR #6329: a failed scan of one store must not
+// be silently dropped just because another store scanned cleanly and holds the
+// source bead. Before the fix, this exact shape (city store succeeds and is
+// resident, a second store's scan failed) fell through to already_clean
+// because the failed scan carried no reason into the returned capability.
+func TestAssessZeroMatchSourceWorkflowScanReportsUnknownOnAnyFailedScan(t *testing.T) {
+	const sourceBeadID = "dr-source-1"
+	successful := beads.NewMemStore()
+	successful.HonorExplicitIDs = true
+	if _, err := successful.Create(beads.Bead{ID: sourceBeadID, Title: "source", Type: "task", Status: "open"}); err != nil {
+		t.Fatalf("Create(source): %v", err)
+	}
+
+	scans := []sourceWorkflowStoreScan{
+		{view: convoyStoreView{path: "/city", store: successful}, failed: false},
+		{view: convoyStoreView{path: "/rig/frontend", store: nil}, failed: true},
+	}
+
+	got := assessZeroMatchSourceWorkflowScan(scans, sourceBeadID)
+	if got.reason != "store-scan-failed" {
+		t.Fatalf("reason = %q, want store-scan-failed (a failed scan must never fall through to already_clean)", got.reason)
+	}
+	if !slices.Contains(got.failedStores, "/rig/frontend") {
+		t.Fatalf("failedStores = %v, want to include the store whose scan failed", got.failedStores)
+	}
+	if got.scannedStores != 1 {
+		t.Fatalf("scannedStores = %d, want 1 (only the store that actually scanned)", got.scannedStores)
+	}
+}
+
+// TestAssessZeroMatchSourceWorkflowScanNormalizesSourceBeadID pins the lesser
+// finding from the same review: the residency probe must normalize
+// sourceBeadID the same way the collector does, so a whitespace-padded ID
+// found by the indexed scan is not reported as not-resident here.
+func TestAssessZeroMatchSourceWorkflowScanNormalizesSourceBeadID(t *testing.T) {
+	const sourceBeadID = "dr-source-2"
+	store := beads.NewMemStore()
+	store.HonorExplicitIDs = true
+	if _, err := store.Create(beads.Bead{ID: sourceBeadID, Title: "source", Type: "task", Status: "open"}); err != nil {
+		t.Fatalf("Create(source): %v", err)
+	}
+
+	scans := []sourceWorkflowStoreScan{
+		{view: convoyStoreView{path: "/city", store: store}, failed: false},
+	}
+
+	got := assessZeroMatchSourceWorkflowScan(scans, "  "+sourceBeadID+"  ")
+	if got.reason != "" {
+		t.Fatalf("reason = %q, want empty (padded ID should still resolve residency)", got.reason)
+	}
+}
+
 func TestCmdWorkflowDeleteSourceUnknownForUnindexedSourceLinkage(t *testing.T) {
 	source, root, _ := setupUnindexedSourceWorkflowFixture(t)
 

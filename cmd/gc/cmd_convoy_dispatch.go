@@ -2110,8 +2110,13 @@ func cmdWorkflowDeleteSource(sourceBeadID string, selector sourceWorkflowStoreSe
 				if len(capability.blockingRoots) > 0 {
 					_, _ = fmt.Fprintf(stdout, " blocking_roots=%s", strings.Join(capability.blockingRoots, ","))
 				}
+				if len(capability.failedStores) > 0 {
+					_, _ = fmt.Fprintf(stdout, " failed_stores=%s", strings.Join(capability.failedStores, ","))
+				}
 				_, _ = fmt.Fprintln(stdout)
 				switch {
+				case capability.reason == "store-scan-failed":
+					_, _ = fmt.Fprintf(stderr, "warning: delete-source could not scan every candidate store, so a zero match cannot be trusted: %s\n", strings.Join(capability.failedStores, ","))
 				case capability.err != nil:
 					_, _ = fmt.Fprintf(stderr, "warning: delete-source could not establish whether unindexed source linkage exists: %v\n", capability.err)
 				case capability.reason == "source-bead-not-resident":
@@ -2730,6 +2735,7 @@ func (c *sourceWorkflowMatchCollector) scans() []sourceWorkflowStoreScan {
 type zeroMatchSourceWorkflowScan struct {
 	reason        string
 	blockingRoots []string
+	failedStores  []string
 	scannedStores int
 	err           error
 }
@@ -2739,15 +2745,35 @@ type zeroMatchSourceWorkflowScan struct {
 // It deliberately performs no matching and is called only after that query
 // returned no roots.
 func assessZeroMatchSourceWorkflowScan(scans []sourceWorkflowStoreScan, sourceBeadID string) zeroMatchSourceWorkflowScan {
+	sourceBeadID = sourceworkflow.NormalizeSourceBeadID(sourceBeadID)
 	successfulViews := make([]convoyStoreView, 0, len(scans))
+	failedPaths := make([]string, 0, len(scans))
 	sourceResident := false
 	for _, scan := range scans {
-		if scan.failed || scan.view.store == nil {
+		if scan.failed {
+			failedPaths = append(failedPaths, scan.view.path)
+			continue
+		}
+		if scan.view.store == nil {
 			continue
 		}
 		successfulViews = append(successfulViews, scan.view)
 		if _, err := scan.view.store.Get(sourceBeadID); err == nil {
 			sourceResident = true
+		}
+	}
+
+	// A failed scan means the zero from the indexed query cannot be trusted:
+	// the store that failed might have held the live root the query would
+	// otherwise have found. Report unknown even when every store that DID
+	// scan successfully came back clean — a scan we never completed is not
+	// evidence of "nothing to clean".
+	if len(failedPaths) > 0 {
+		slices.Sort(failedPaths)
+		return zeroMatchSourceWorkflowScan{
+			reason:        "store-scan-failed",
+			failedStores:  failedPaths,
+			scannedStores: len(successfulViews),
 		}
 	}
 
