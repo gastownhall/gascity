@@ -166,11 +166,11 @@ func contextUsageMessage(tokens, window int) string {
 		return ""
 	case pct <= float64(urgent):
 		return fmt.Sprintf(
-			"Context usage: %s/%s (~%.0f%%). Approaching the recycle zone. Steer toward a clean seam: finish in-flight work, don't open new long-horizon tasks, and keep durable notes/work-items current so a handoff is cheap. Plan to hand off and reset before this climbs into the urgent band — a fresh session from durable notes outperforms riding lossy compaction.\n",
+			"Context usage: %s/%s (~%.0f%%). Approaching the recycle zone. Steer toward a clean seam: finish in-flight work, don't open new long-horizon tasks, and keep durable notes/work-items current so a handoff is cheap. Plan to run `gc handoff` and recycle before this climbs into the urgent band — a fresh session from durable notes outperforms riding lossy compaction.\n",
 			k(tokens), k(window), pct)
 	default:
 		return fmt.Sprintf(
-			"Context usage: %s/%s (~%.0f%%) — HIGH. Recycle this session now: reach a clean seam, run your handoff (durable notes + work-item updates + memory), then `gc session reset` yourself to resume fresh from that durable state. Repeated compaction degrades awareness — a clean reset beats running to compaction. Do this once you are at a seam; do NOT abandon work mid-step. (If an operator has told you to stay up, honor that and just hold at a clean seam instead of resetting.)\n",
+			"Context usage: %s/%s (~%.0f%%) — HIGH. Recycle this session now: reach a clean seam, keep durable notes + work-item updates + memory current, then run `gc handoff \"<where you were + next step>\"`. That writes your continuation note and recycles you fresh from it — or, if you are an attended session the controller cannot restart, it hands off and you reattach for the fresh session. Prefer this over riding lossy compaction; repeated compaction degrades awareness. Do this once you are at a seam; do NOT abandon work mid-step. (If an operator has told you to stay up, honor that and just hold at a clean seam instead of recycling.)\n",
 			k(tokens), k(window), pct)
 	}
 }
