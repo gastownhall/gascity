@@ -1161,6 +1161,48 @@ func TestSendStartupNudgeWithRetry_CanceledContextStopsWithoutSleeping(t *testin
 	}
 }
 
+// TestSendStartupNudgeWithRetry_CancelsDuringBackoff covers the other half of
+// the cancellation contract: cancellation that arrives while a backoff is
+// already in progress. Production passes sleepWithContext, which returns
+// early on cancellation rather than running the timer down, so the ladder
+// must re-check ctx after the sleep returns — otherwise an interrupted
+// backoff falls straight through into another full C-u/paste/submit cycle
+// against a start that is already being torn down. The sleep fake here
+// stands in for that early return: it cancels and returns immediately,
+// exactly as sleepWithContext does when its ctx is done mid-wait.
+func TestSendStartupNudgeWithRetry_CancelsDuringBackoff(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls := 0
+	var sleeps []time.Duration
+	send := func() error {
+		calls++
+		return ErrNudgeSubmitUnconfirmed
+	}
+	sleep := func(d time.Duration) {
+		sleeps = append(sleeps, d)
+		cancel()
+	}
+	busyCalls := 0
+	busy := func() (bool, error) {
+		busyCalls++
+		return false, nil
+	}
+	err := sendStartupNudgeWithRetry(ctx, send, sleep, busy)
+	if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+		t.Fatalf("err = %v, want ErrNudgeSubmitUnconfirmed", err)
+	}
+	if calls != 1 {
+		t.Fatalf("send calls = %d, want 1 (cancellation during the backoff must not trigger another resend)", calls)
+	}
+	if len(sleeps) != 1 {
+		t.Fatalf("sleeps = %v, want exactly the one interrupted backoff", sleeps)
+	}
+	if busyCalls != 0 {
+		t.Fatalf("busy calls = %d, want 0 (a canceled start must not keep polling the pane)", busyCalls)
+	}
+}
+
 // TestSendStartupNudgeWithRetry_BoundedByRemainingContextDeadline proves the
 // ladder never spends more than startupNudgeRetryBudgetFraction of ctx's
 // remaining deadline on retries: a caller with a short startup_timeout must

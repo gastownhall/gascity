@@ -1416,7 +1416,10 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 		return err
 	}
 	if cfg.Nudge != "" {
-		if err := sendStartupNudgeWithRetry(ctx, func() error { return ops.sendKeys(name, cfg.Nudge) }, time.Sleep, func() (bool, error) { return ops.paneBusy(name) }); err != nil {
+		if err := sendStartupNudgeWithRetry(ctx,
+			func() error { return ops.sendKeys(name, cfg.Nudge) },
+			func(d time.Duration) { _ = sleepWithContext(ctx, d) },
+			func() (bool, error) { return ops.paneBusy(name) }); err != nil {
 			// A resume-mode (or cold-start) session's startup nudge races the
 			// TUI's own boot: readiness detection and the TUI actually being
 			// able to accept input are not the same moment, so a submit
@@ -1547,6 +1550,9 @@ func sendStartupNudgeWithRetry(ctx context.Context, send func() error, sleep fun
 			return err
 		}
 		sleep(next)
+		if ctx.Err() != nil {
+			return err
+		}
 		if busy != nil {
 			if isBusy, _ := busy(); isBusy {
 				return nil
