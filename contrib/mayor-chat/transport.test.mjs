@@ -4,7 +4,7 @@
 // to verify behavior in isolation: input queuing, message routing,
 // session ID capture, turn-end detection, and cleanup.
 
-import { describe, it, beforeEach } from "node:test";
+import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { MayorTransport } from "./transport.mjs";
 
@@ -17,11 +17,16 @@ function createMockQuery() {
   const outputQueue = [];
   let outputResolve = null;
   let outputDone = false;
+  let closeCount = 0;
 
   function mockQuery({ prompt, options }) {
     promptIterable = prompt;
-    // Return an async iterable of output messages.
+    // Return an async iterable of output messages. close() mirrors the real
+    // Query.close(), which terminates the CLI subprocess.
     return {
+      close() {
+        closeCount++;
+      },
       [Symbol.asyncIterator]() {
         return {
           next() {
@@ -57,7 +62,13 @@ function createMockQuery() {
     }
   }
 
-  return { mockQuery, pushOutput, endOutput, getPromptIterable: () => promptIterable };
+  return {
+    mockQuery,
+    pushOutput,
+    endOutput,
+    getPromptIterable: () => promptIterable,
+    getCloseCount: () => closeCount,
+  };
 }
 
 // --- Tests ---
@@ -83,7 +94,7 @@ describe("MayorTransport input stream", () => {
   });
 
   it("queued messages are delivered in order", async () => {
-    const { mockQuery, pushOutput } = createMockQuery();
+    const { mockQuery, pushOutput, getPromptIterable } = createMockQuery();
     const transport = new MayorTransport({ _queryFn: mockQuery });
 
     // Send first turn.
@@ -96,7 +107,13 @@ describe("MayorTransport input stream", () => {
     pushOutput({ type: "result", subtype: "success" });
     for await (const _ of gen2) {}
 
-    assert.equal(transport.sessionId, null, "no session_id yet");
+    // Nothing read the prompt iterable during the turns, so both messages
+    // sit in the queue and must come back out in send order.
+    const promptIter = getPromptIterable()[Symbol.asyncIterator]();
+    const first = await promptIter.next();
+    const second = await promptIter.next();
+    assert.equal(first.value.message.content, "first");
+    assert.equal(second.value.message.content, "second");
   });
 });
 
@@ -219,9 +236,6 @@ describe("MayorTransport close behavior", () => {
 
     transport._ensureStarted();
 
-    // Start a pending read on the input stream.
-    const inputIter = transport._createInputStream()[Symbol.asyncIterator]();
-
     // The real input stream is already created inside _ensureStarted,
     // but we can test the close mechanism directly.
     const pending = new Promise((resolve) => {
@@ -232,6 +246,22 @@ describe("MayorTransport close behavior", () => {
 
     const result = await pending;
     assert.equal(result.done, true);
+  });
+
+  it("close terminates the underlying query subprocess", () => {
+    const { mockQuery, getCloseCount } = createMockQuery();
+    const transport = new MayorTransport({ _queryFn: mockQuery });
+
+    transport._ensureStarted();
+    assert.equal(getCloseCount(), 0);
+
+    transport.close();
+
+    // Ending the prompt iterable is not enough — the CLI subprocess only
+    // goes away when Query.close() is called.
+    assert.equal(getCloseCount(), 1);
+    assert.equal(transport.query, null);
+    assert.equal(transport.messageStream, null);
   });
 
   it("close is safe to call multiple times", () => {

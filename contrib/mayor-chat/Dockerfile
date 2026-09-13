@@ -19,6 +19,12 @@ FROM node:20-slim
 
 ARG CLAUDE_CODE_VERSION=2.1.101
 
+# tmux is a hard requirement of scripts/gc-session-docker (it execs
+# `tmux new-session` inside the container and dies if tmux is absent).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tmux \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # Install Claude Code globally (used as subprocess by Agent SDK).
@@ -31,4 +37,7 @@ RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit
 # Copy app files.
 COPY chat.mjs transport.mjs ./
 
-ENTRYPOINT ["node", "chat.mjs"]
+# CMD, not ENTRYPOINT: gc-session-docker starts images as
+# `<image> sleep infinity` and manages the agent via tmux exec. A fixed
+# ENTRYPOINT would swallow that command and launch the TTY-only Ink UI.
+CMD ["node", "chat.mjs"]

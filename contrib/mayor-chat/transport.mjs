@@ -16,11 +16,13 @@ export class MayorTransport {
     this.inputResolve = null;
     this.inputQueue = [];
     this.inputDone = false;
+    const { _queryFn, ...forwarded } = options;
     this.options = {
-      permissionMode: options.permissionMode ?? "dontAsk",
-      allowedTools: options.allowedTools ?? [],
+      permissionMode: "dontAsk",
+      allowedTools: [],
+      ...forwarded,
+      // Pinned after the spread: token streaming is this module's premise.
       includePartialMessages: true,
-      ...options,
     };
   }
 
@@ -99,5 +101,10 @@ export class MayorTransport {
       this.inputResolve = null;
       r({ value: undefined, done: true });
     }
+    // Ends the CLI subprocess; ending the prompt iterable alone does not
+    // cancel an in-flight generation.
+    if (typeof this.query?.close === "function") this.query.close();
+    this.query = null;
+    this.messageStream = null;
   }
 }
