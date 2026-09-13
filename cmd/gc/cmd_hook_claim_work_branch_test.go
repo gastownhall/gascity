@@ -413,14 +413,56 @@ func TestHookClaimIdentityPatchSkipsSessionFallbackForControlBead(t *testing.T) 
 	}
 }
 
+// TestHookClaimIdentityPatchSkipsSessionFallbackOnPartialWorktreeEvidence holds the
+// same ga-ryeij1.1 Decision (b) boundary the branch stamp observes, on the work-dir
+// stamp. A bead carrying some but not all of the eight worktree-ownership keys is
+// half-published: worktreeSpecForBead returns early while the path is empty, so
+// INTRODUCING gc.work_dir is what first exposes the bead to its missing-key error
+// and moves it from spawning unmanaged to being starved of a session entirely.
+func TestHookClaimIdentityPatchSkipsSessionFallbackOnPartialWorktreeEvidence(t *testing.T) {
+	bead := beads.Bead{ID: "hw-partial-evidence", Metadata: beads.StringMap{
+		beadmeta.WorktreeRepoMetadataKey: "/rigs/some-repo",
+	}}
+	ops := hookClaimOps{
+		ResolveWorkBranch:     hookClaimBranchByDir(map[string]string{hookClaimWorkBranchSessionDir: "bd-from-session"}),
+		ResolveSessionWorkDir: func(string) string { return hookClaimWorkBranchSessionDir },
+	}
+	opts := hookClaimOptions{Env: []string{"GC_SESSION_ID=mc-sess1"}}
+
+	patch := hookClaimIdentityPatch(bead, opts, ops, hookClaimWorkBranchStoreDir)
+
+	if got, ok := patch[beadmeta.WorkDirMetadataKey]; ok {
+		t.Errorf("stamped %s = %q onto a bead carrying partial worktree-ownership evidence; introducing a path is what makes worktreeSpecForBead hard-error",
+			beadmeta.WorkDirMetadataKey, got)
+	}
+	if got, ok := patch[beadmeta.WorkBranchMetadataKey]; ok {
+		t.Errorf("stamped %s = %q; the branch guard refuses partial evidence too", beadmeta.WorkBranchMetadataKey, got)
+	}
+	assertNoWorkDirConflict(t, bead, patch)
+}
+
 // TestSessionStampableWorkDirRefusesPoolManaged covers gc-j0cfh: the WorkDir of a
 // pool-managed session is the slot label, a directory shared by every bead the
 // slot ever runs, so stamping it would manufacture worktree-ownership evidence
 // for a tree nobody owns.
+//
+// The refusal has to use this package's canonical classifier rather than the raw
+// PoolManaged flag, because a session can be in a pool without carrying it: a bead
+// stamped with pool_slot alone, or one whose origin is ephemeral, is running in the
+// same shared slot directory. Reading only PoolManaged stamps a slot label for both
+// of those, which is the exact minting this function exists to prevent.
 func TestSessionStampableWorkDirRefusesPoolManaged(t *testing.T) {
-	pooled := session.Info{PoolManaged: true, WorkDir: "/rigs/worker-slots/worker-3"}
-	if got := sessionStampableWorkDir(pooled); got != "" {
-		t.Errorf("sessionStampableWorkDir(pool-managed) = %q; want empty, a slot label is not a worktree", got)
+	for _, tc := range []struct {
+		name string
+		info session.Info
+	}{
+		{"pool_managed flag", session.Info{PoolManaged: true, WorkDir: "/rigs/worker-slots/worker-3"}},
+		{"pool_slot without the flag", session.Info{PoolSlot: "worker-3", WorkDir: "/rigs/worker-slots/worker-3"}},
+		{"ephemeral origin", session.Info{SessionOrigin: "ephemeral", WorkDir: "/rigs/worker-slots/worker-4"}},
+	} {
+		if got := sessionStampableWorkDir(tc.info); got != "" {
+			t.Errorf("sessionStampableWorkDir(%s) = %q; want empty, a slot label is not a worktree", tc.name, got)
+		}
 	}
 
 	owned := session.Info{WorkDir: "/worktrees/owned-1"}

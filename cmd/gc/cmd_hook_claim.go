@@ -1458,7 +1458,14 @@ func hookClaimIdentityPatch(bead beads.Bead, opts hookClaimOptions, ops hookClai
 	// manufactured conflict on the reconciler side for the same reason. A bead that
 	// recorded the store under both keys is therefore left alone: it is stamped with
 	// no branch, which is the honest outcome, not repointed at a tree it never named.
-	if hookClaimRecordsNoWorkDir(bead) && sessionID != "" && !isControl && ops.ResolveSessionWorkDir != nil {
+	//
+	// The partial-evidence guard applies here for the same ga-ryeij1.1 Decision (b)
+	// reason the branch stamp below carries it: worktreeSpecForBead returns early on
+	// an empty path, so INTRODUCING a path is what first exposes a half-published
+	// bead to its missing-key error. A bead carrying some but not all of the eight
+	// ownership keys would go from spawning unmanaged to being starved outright.
+	if hookClaimRecordsNoWorkDir(bead) && sessionID != "" && !isControl &&
+		hookClaimWorktreeEvidenceIsWholeOrAbsent(bead) && ops.ResolveSessionWorkDir != nil {
 		if sessionDir := strings.TrimSpace(ops.ResolveSessionWorkDir(sessionID)); sessionDir != "" {
 			if tree, admitted := storeHead.Admit(sessionDir); admitted {
 				patch[beadmeta.WorkDirMetadataKey] = sessionDir

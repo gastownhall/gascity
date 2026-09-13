@@ -145,8 +145,13 @@ func hookResolveSessionWorkDir(sessionID string) string {
 // bead (gc-j0cfh). The reconciler side refuses the same value for the same reason
 // (workDirStampHasOwnershipEvidence), and this keeps the claim path from becoming
 // a second way to mint it.
+//
+// The classifier is isPoolManagedSessionInfo, this package's canonical one, not
+// the raw PoolManaged flag: a session carrying a pool_slot, or one whose origin is
+// ephemeral, is running in a shared slot directory for exactly the same gc-j0cfh
+// reason even when pool_managed was never stamped on its bead.
 func sessionStampableWorkDir(info session.Info) string {
-	if info.PoolManaged {
+	if isPoolManagedSessionInfo(info) {
 		return ""
 	}
 	return strings.TrimSpace(info.WorkDir)
