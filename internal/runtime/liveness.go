@@ -96,15 +96,14 @@ const (
 	ObservationIncomplete
 )
 
-// BoundedLivenessObserver is a richer, opt-in alternative to LivenessObserver
-// for providers that can report a liveness-observation failure (for example,
-// an error wrapping ErrRuntimeUnavailable) alongside the consolidated
-// Liveness view. ObserveLivenessBounded prefers it when a provider implements
-// it; providers that don't fall back to ObserveLiveness's existing
-// plain-boolean behavior.
-type BoundedLivenessObserver interface {
-	ObserveLivenessWithError(name string, processNames []string) (Liveness, error)
-}
+// BoundedLivenessObserver is the provider capability ObserveLivenessBounded
+// prefers: a richer, opt-in alternative to LivenessObserver for providers that
+// can report a liveness-observation failure (for example, an error wrapping
+// ErrRuntimeUnavailable) alongside the consolidated Liveness view. It is an
+// alias for [LivenessObserverWithError]: one capability, one method set, two
+// readable names. Providers that implement neither fall back to
+// ObserveLiveness's existing plain-boolean behavior.
+type BoundedLivenessObserver = LivenessObserverWithError
 
 // ObserveLivenessBounded is the cancellable, tri-state-aware counterpart to
 // ObserveLiveness: it bounds the observation to timeout and reports whether
@@ -113,19 +112,29 @@ type BoundedLivenessObserver interface {
 // It races a goroutine running the observation against context.WithTimeout,
 // mirroring OrderFiringCurrentCheck.Run() (internal/doctor/checks_order_firing.go)
 // but using a cancellable/composable context bound instead of a bare
-// time.After. The goroutine prefers a provider's BoundedLivenessObserver
-// implementation if present; otherwise it falls back to exactly today's
-// ObserveLiveness behavior.
+// time.After. The goroutine delegates to [ObserveLivenessWithError], so the
+// bounded path inherits exactly one copy of the shared behavior: nil-provider
+// and blank-name guarding, the BoundedLivenessObserver preference, liveness
+// normalization, and the plain-boolean fallback for providers that implement
+// neither observer capability.
 //
 // A provider error wrapping ErrRuntimeUnavailable resolves to
 // ObservationIncomplete with the provider's own (possibly partial) Liveness
 // value preserved. A context deadline winning the race also resolves to
 // ObservationIncomplete, but with a zero Liveness value, since no provider
-// answer arrived at all. Providers without a BoundedLivenessObserver
-// implementation always resolve to ObservationComplete with a nil error,
-// exactly matching today's behavior — additive only, no existing Provider
-// call site changes.
+// answer arrived at all. An already-canceled parent context resolves the same
+// way without spawning an observation at all. A provider result that arrives
+// is always honored, even if the bound expired concurrently: discarding a real
+// answer to report "incomplete" would fail in the wrong direction for a
+// primitive whose job is to avoid fabricating confirmed absence. Providers
+// without a BoundedLivenessObserver implementation always resolve to
+// ObservationComplete with a nil error, exactly matching today's behavior —
+// additive only, no existing Provider call site changes.
 func ObserveLivenessBounded(ctx context.Context, sp Provider, name string, processNames []string, timeout time.Duration) (Liveness, ObservationStatus, error) {
+	if err := ctx.Err(); err != nil {
+		return Liveness{}, ObservationIncomplete, err
+	}
+
 	boundedCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -135,12 +144,8 @@ func ObserveLivenessBounded(ctx context.Context, sp Provider, name string, proce
 	}
 	results := make(chan observation, 1)
 	go func() {
-		if observer, ok := sp.(BoundedLivenessObserver); ok {
-			liveness, err := observer.ObserveLivenessWithError(name, processNames)
-			results <- observation{liveness: liveness, err: err}
-			return
-		}
-		results <- observation{liveness: ObserveLiveness(sp, name, processNames)}
+		liveness, err := ObserveLivenessWithError(sp, name, processNames)
+		results <- observation{liveness: liveness, err: err}
 	}()
 
 	select {

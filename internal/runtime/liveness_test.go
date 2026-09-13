@@ -202,6 +202,46 @@ func TestObserveLivenessBoundedTimesOutToIncompleteWithZeroLiveness(t *testing.T
 	}
 }
 
+func TestObserveLivenessBoundedNormalizesObserverLiveness(t *testing.T) {
+	base := NewFake()
+	if err := base.Start(context.Background(), "worker", Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	sp := errorLivenessProvider{Fake: base, liveness: Liveness{Running: false, Alive: true}}
+
+	got, status, err := ObserveLivenessBounded(context.Background(), sp, "worker", []string{"agent-cli"}, time.Second)
+	if err != nil {
+		t.Fatalf("ObserveLivenessBounded() error = %v, want nil", err)
+	}
+	if status != ObservationComplete {
+		t.Fatalf("ObservationStatus = %v, want ObservationComplete", status)
+	}
+	if want := (Liveness{Running: true, Alive: true}); got != want {
+		t.Fatalf("ObserveLivenessBounded() = %#v, want %#v (Alive must promote Running, same as every other entry point)", got, want)
+	}
+}
+
+func TestObserveLivenessBoundedCancelledParentContextIsIncomplete(t *testing.T) {
+	base := NewFake()
+	if err := base.Start(context.Background(), "worker", Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	got, status, err := ObserveLivenessBounded(ctx, base, "worker", []string{"agent-cli"}, time.Second)
+	if status != ObservationIncomplete {
+		t.Fatalf("ObservationStatus = %v, want ObservationIncomplete for an already-canceled parent context", status)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ObserveLivenessBounded() error = %v, want errors.Is(err, context.Canceled)", err)
+	}
+	if got != (Liveness{}) {
+		t.Fatalf("ObserveLivenessBounded() Liveness = %#v, want zero value when no observation ran", got)
+	}
+}
+
 type errorLivenessProvider struct {
 	*Fake
 	liveness Liveness
