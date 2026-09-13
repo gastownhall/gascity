@@ -2,11 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"os/exec"
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/doctor"
 )
@@ -23,6 +24,12 @@ const doctorGateSandboxReadTimeout = 5 * time.Second
 // the controller has set, but a diagnostic must never start a Dolt server as a
 // side effect. The store preflight this check is gated behind already probes
 // with auto-start off, so the two probes stay comparable.
+//
+// Two further divergences come from the sanctioned bd runner the probe forks
+// through (defaultGateSandboxRead): it injects BD_BACKUP_ENABLED=false for bd
+// and uses a 2s WaitDelay, neither of which a real gate gets. Both are harmless
+// for a read-only probe, but the contract this function reproduces is the
+// environment, not the runner.
 func gateSandboxEnv(cityPath string) []string {
 	gateEnv := convergence.ConditionEnv{CityPath: cityPath, StorePath: cityPath}.Environ()
 	env := make([]string, 0, len(gateEnv)+1)
@@ -62,22 +69,29 @@ func newGateSandboxReadCheck(cityPath string) *gateSandboxReadCheck {
 
 // defaultGateSandboxRead runs the store preflight's read under the gate
 // environment. Read-only and bounded.
+//
+// The read forks bd through the sanctioned runner in internal/beads, which owns
+// every bd subprocess call. The exact-env variant is required: the layering
+// variants merge overrides onto a snapshot of the controller's own process
+// environment, which would hand the probe the very values the gate sandbox
+// strips and report a healthy sandbox while gates are blind.
 func defaultGateSandboxRead(cityPath string, env []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), doctorGateSandboxReadTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "bd", "list", "--json", "--limit", "1")
-	cmd.Dir = cityPath
-	cmd.Env = env
-	cmd.WaitDelay = time.Second
-	out, err := cmd.CombinedOutput()
-	if err == nil {
-		return nil
+	exact := make(map[string]string, len(env))
+	for _, entry := range env {
+		if name, value, ok := strings.Cut(entry, "="); ok {
+			exact[name] = value
+		}
 	}
-	if detail := strings.TrimSpace(string(out)); detail != "" {
-		return fmt.Errorf("%w: %s", err, doctorClipGateOutput(detail))
+	run := beads.ExecCommandRunnerWithExactEnvContext(ctx, exact)
+	if _, err := run(cityPath, "bd", "list", "--json", "--limit", "1"); err != nil {
+		// The runner already folds bd's stderr/stdout detail into err, so the
+		// message is the whole diagnostic; clip it to one readable line.
+		return errors.New(doctorClipGateOutput(err.Error()))
 	}
-	return err
+	return nil
 }
 
 // doctorClipGateOutput keeps a failing probe's output to one readable line.
