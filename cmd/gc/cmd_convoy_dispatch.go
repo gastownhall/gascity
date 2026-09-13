@@ -301,7 +301,7 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 			// class boundary. Route-gated exactly like the drain: on every
 			// other city graphStore IS store and the tail stays empty.
 			if graphStore != store {
-				opts.MemberStores = []beads.Store{store}
+				opts.MemberStores = []beads.Store{store} // residency:allow route-gated work-leg tail for the retry lane's cross-store required-artifact source read; same shape as the drain arm above
 			}
 			sp, err := dispatchControlSessionProvider()
 			if err != nil {
@@ -318,7 +318,7 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 			// Same cross-store required-artifact source resolution as
 			// retry-eval above.
 			if graphStore != store {
-				opts.MemberStores = []beads.Store{store}
+				opts.MemberStores = []beads.Store{store} // residency:allow route-gated work-leg tail for the retry lane's cross-store required-artifact source read; same shape as the drain arm above
 			}
 			sp, err := dispatchControlSessionProvider()
 			if err != nil {

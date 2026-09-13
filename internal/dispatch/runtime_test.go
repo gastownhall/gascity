@@ -12040,3 +12040,67 @@ func TestProcessWorkflowFinalizeFailureStampNamesAbortScopeMember(t *testing.T) 
 	}
 	assertFailureStamp(t, parent, "preflight_rejected", "hard", preflight.ID)
 }
+
+// TestProcessWorkflowFinalizeStampsFailureOnSameStoreDomainParent pins the
+// DEFAULT single-store configuration of the same contract: with no
+// gc.source_store_ref on the root, the domain parent lives in the workflow's
+// own store and no resolver is wired at all. The failing step's diagnostics
+// must still reach it, and it must still be left OPEN/redispatchable — the
+// cross-store tests all carry a ref, so this is the only coverage of the
+// parentStore == rootStore route every unsplit city takes.
+func TestProcessWorkflowFinalizeStampsFailureOnSameStoreDomainParent(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+
+	source := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Adopt PR: gastownhall/example#15",
+		Type:  "task",
+	})
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "mol-adopt-pr-v2",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.source_bead_id":   source.ID,
+		},
+	})
+	cleanup := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "Review",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.outcome":        "fail",
+			"gc.failure_reason": "postcondition_failed",
+			"gc.failure_class":  "hard",
+		},
+	})
+	finalizer := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": workflow.ID,
+		},
+	})
+	mustDepAdd(t, store, finalizer.ID, cleanup.ID, "blocks")
+	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
+
+	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize fail): %v", err)
+	}
+	if !result.Processed || result.Action != "workflow-fail" {
+		t.Fatalf("workflow result = %+v, want processed workflow-fail", result)
+	}
+
+	parent := mustGetBead(t, store, source.ID)
+	if parent.Status != "open" {
+		t.Fatalf("domain parent status = %q, want open (failure leaves it redispatchable)", parent.Status)
+	}
+	assertFailureStamp(t, parent, "postcondition_failed", "hard", cleanup.ID)
+	if got := parent.Metadata["gc.outcome"]; got != "" {
+		t.Errorf("parent gc.outcome = %q, want unset (the parent is not terminal)", got)
+	}
+}
