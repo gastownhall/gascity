@@ -3020,6 +3020,71 @@ func TestReconcileSessionBeads_UndesiredDrainAckWithAssignedOpenWorkSleepsInstea
 	}
 }
 
+// TestReconcileSessionBeads_DrainAckPreservesConfiguredNamedSession probes
+// ga-pmafyc: a configured named session (mode="always") that reaches the
+// drain-ack finalize default branch (state="stopped", drain-acked, provider
+// not alive, no assigned work) must NOT be destructively closed the way an
+// ordinary undesired session is in
+// TestReconcileSessionBeads_UndesiredDrainAckStopsAndCloses above.
+// finalizeDrainAckStoppedSession's closeIfUnassigned parameter is a
+// hardcoded true at this call site, missing the configuredNames[name] guard
+// used by the sibling call sites — gc suspend (which drives sessions
+// through this exact path) retires every named session and empties its
+// identity as a result.
+//
+// state="stopped" (rather than simulating the full sp.Start-then-stop-pending
+// multi-tick sequence the ordinary UndesiredDrainAck* tests above use) stages
+// the post-stop condition directly: preserveConfiguredNamedSessionBeadInfo is
+// computed pre-heal from this same fixture state, and only state=="stopped"
+// (or "failed-create") lets a configured named session's preserveNamed gate
+// go false and reach the drain-ack default branch at all — the async
+// stop-pending path would leave an intermediate state that keeps the session
+// protected by preserveNamed==true on the tick that matters.
+func TestReconcileSessionBeads_DrainAckPreservesConfiguredNamedSession(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "worker",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	session := env.createSessionBead(sessionName, "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "always",
+		"state":                      "stopped",
+	})
+
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck(sessionName); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+
+	woken := env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{session}, nil, dops)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+
+	b, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	t.Logf("post-reconcile bead: status=%q metadata=%#v", b.Status, b.Metadata)
+	if b.Status != "open" {
+		t.Fatalf("status = %q, want open (configured named session must survive drain-ack finalize, not be destructively closed)", b.Status)
+	}
+	if got := b.Metadata[namedSessionMetadataKey]; got != "true" {
+		t.Errorf("configured_named_session = %q, want true (must survive)", got)
+	}
+	if got := b.Metadata[namedSessionIdentityMetadata]; got != "worker" {
+		t.Errorf("configured_named_identity = %q, want worker (must survive)", got)
+	}
+}
+
 // TestReconcileSessionBeads_DrainAckUsesLiveStoreQuery is the regression
 // guard for the stuck-pool-worker bug on ga-ttn5z. Pool workers close
 // their own work bead with `bd close` BEFORE calling `gc runtime
@@ -7399,6 +7464,47 @@ func TestReconcileSessionBeads_SuspendedSessionDrained(t *testing.T) {
 	}
 }
 
+// TestReconcileSessionBeads_SuspendedNamedSessionInsideDesiredStateDrainsAsSuspended
+// probes ga-pmafyc step 1: discoverSessionBeadsWithRoots backfills a
+// configured named session into desiredState even when the primary
+// cfg-driven build is empty because the city is suspended (fix spec step 2,
+// covered separately by
+// TestDiscoverSessionBeadsBackfillsConfiguredNamedIdentityOutsideDesiredState
+// in build_desired_state_test.go). That backfilled entry routes the session
+// through the WAKE arm (desired == true), not the orphan arm -- unlike the
+// sibling TestReconcileSessionBeads_SuspendedSessionDrained above, which
+// covers the orphan arm's pre-existing "suspended" labeling for a session
+// that is NOT in desiredState. Before this fix, the wake arm's reason-switch
+// had no case for "configured named session, city suspended, no other wake
+// reason", so it fell through to the default "no-wake-reason" label --
+// which drainReasonCancelable treats as a plain non-cancelable close
+// instead of a revertible suspend-class drain, and (combined with the
+// step-2 identity-clearing bug) meant `gc resume` could not revive the
+// session. This asserts the wake arm now labels the drain "suspended".
+func TestReconcileSessionBeads_SuspendedNamedSessionInsideDesiredStateDrainsAsSuspended(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{SuspendedOnStart: true},
+		Agents:        []config.Agent{{Name: "worker"}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "always"}},
+	}
+	// Simulate discoverSessionBeadsWithRoots's unconditional backfill: "worker"
+	// is present in desiredState (and running) even though the city is
+	// suspended -- the exact shape the wake arm sees in production.
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+
+	env.reconcile([]beads.Bead{session})
+
+	ds := env.dt.get(session.ID)
+	if ds == nil {
+		t.Fatal("expected drain for suspended session present in desiredState")
+	}
+	if ds.reason != "suspended" {
+		t.Errorf("drain reason = %q, want %q (must not fall through to no-wake-reason)", ds.reason, "suspended")
+	}
+}
+
 func TestReconcileSessionBeads_SuspendedNotRunningClosed(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
@@ -7471,6 +7577,66 @@ func TestReconcileSessionBeads_PreservesConfiguredNamedSessionOutsideDesiredStat
 	}
 	if ds := env.dt.get(session.ID); ds != nil {
 		t.Fatalf("unexpected drain for configured named session: %+v", ds)
+	}
+}
+
+// TestReconcileSessionBeads_PoolFreeableIgnoresNamedAlwaysOutsideDesiredState
+// probes ga-pmafyc: a dual-registered session (both pool-managed AND a
+// mode="always" configured named session, matching citysus's shape) that has
+// already been drained (state="drained", target not alive) while its backing
+// agent is suspended must NOT be freed via the poolFreeable path. The
+// poolFreeable gate (session_reconciler.go) checks isPoolManagedSessionInfo
+// and isPoolSessionSlotFreeableInfo but never isNamedSessionInfo, despite the
+// comment above it claiming "singleton/named controller-managed identities
+// must keep the same bead."
+//
+// Agents[0].Suspended=true (rather than desiredState exclusion alone) is what
+// actually drives ComputeAwakeSet's ShouldWake=false for this session, via
+// AwakeAgent.Suspended (isAgentEffectivelySuspendedWith) — the reconciler
+// test harness never calls the real buildDesiredStateWithSessionBeadsAt (it
+// injects env.desiredState directly), so desiredState exclusion alone does
+// not simulate gc suspend for this decision. state="drained" stages the
+// post-drain condition directly (isDrainedSessionInfo triggers purely on
+// state=="drained", independent of which reason produced the drain), rather
+// than simulating the full alive-to-drained multi-tick sequence.
+func TestReconcileSessionBeads_PoolFreeableIgnoresNamedAlwaysOutsideDesiredState(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(1),
+			Suspended:         true,
+		}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	session := env.createSessionBead(sessionName, "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "always",
+		poolManagedMetadataKey:       "true",
+		"state":                      "drained",
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	b, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	t.Logf("post-reconcile bead: status=%q metadata=%#v", b.Status, b.Metadata)
+	if b.Status != "open" {
+		t.Errorf("status = %q, want open (named always-mode session must survive suspend, not be freed as a pool slot)", b.Status)
+	}
+	if got := b.Metadata[namedSessionMetadataKey]; got != "true" {
+		t.Errorf("configured_named_session = %q, want true (must survive)", got)
+	}
+	if got := b.Metadata[namedSessionIdentityMetadata]; got != "worker" {
+		t.Errorf("configured_named_identity = %q, want worker (must survive)", got)
 	}
 }
 
@@ -9244,6 +9410,254 @@ func TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError(t *testing.
 	}
 	if got.Metadata["wake_attempts"] != "" {
 		t.Fatalf("wake_attempts = %q, want empty", got.Metadata["wake_attempts"])
+	}
+}
+
+// TestReconcileSessionBeads_RollsBackPendingCreatePreservesConfiguredNamedSession
+// probes ga-pmafyc (round 3): unlike TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError
+// above — where "sky" is an ORPHANED named session (not present in
+// cfg.NamedSessions, so configuredNames["sky"] is false) and is correctly
+// destructively closed — a CONFIGURED named session (mode="always", present
+// in cfg.NamedSessions) that hits the exact same single transient provider
+// start error during a pending-create (e.g. a gc suspend/resume cycle: the
+// session bead re-enters pending-create to be woken again, and the resume
+// attempt transiently fails) must NOT be destructively closed with its
+// session_name cleared. commitStartFailure's rollbackPendingCreate call in
+// the rollbackPending branch has no configuredNames[name] guard, unlike the
+// sibling finalizeDrainAckStoppedSession call site fixed for the same bug
+// (mechanism #2, 25798164ae), so a resume-in-progress on a named/configured
+// session currently loses its pending-create bead and identity on a single
+// transient start failure instead of surviving for the reconciler to retry.
+func TestReconcileSessionBeads_RollsBackPendingCreatePreservesConfiguredNamedSession(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "helper",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{Template: "helper", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "helper")
+	env.sp.StartErrors = map[string]error{sessionName: errors.New("start failed")}
+	env.desiredState[sessionName] = TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  sessionName,
+		TemplateName: "helper",
+	}
+
+	session := env.createSessionBead(sessionName, "helper")
+	env.setSessionMetadata(&session, map[string]string{
+		"session_name_explicit":      "true",
+		"pending_create_claim":       "true",
+		"state":                      "creating",
+		"continuation_epoch":         "1",
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "helper",
+		namedSessionModeMetadata:     "always",
+	})
+
+	woken := env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{session}, nil, nil)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+
+	b, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	t.Logf("post-reconcile bead: status=%q metadata=%#v", b.Status, b.Metadata)
+	if b.Status != "open" {
+		t.Fatalf("status = %q, want open (configured named session must survive a transient rollback-pending start failure, not be destructively closed)", b.Status)
+	}
+	if got := b.Metadata["session_name"]; got != sessionName {
+		t.Errorf("session_name = %q, want %q (identity must survive a transient rollback-pending start failure)", got, sessionName)
+	}
+	if got := b.Metadata[namedSessionMetadataKey]; got != "true" {
+		t.Errorf("configured_named_session = %q, want true (must survive)", got)
+	}
+}
+
+// TestReconcileSessionBeads_RollsBackConfiguredNamedSessionThatDiedDuringStartup
+// probes ga-pmafyc (round 4): the flip side of
+// TestReconcileSessionBeads_RollsBackPendingCreatePreservesConfiguredNamedSession
+// above. There, Start() itself returns an error, and a configured named
+// session's pending-create must be PRESERVED so the reconciler can retry it.
+// Here, Start() SUCCEEDS but the post-start stability/liveness check then
+// finds the session not running (diedDuringStartup) — the session actually
+// launched and immediately exited, a legitimate fast exit-then-restart cycle,
+// not a transient provider hiccup mid pending-create. This is the unit-level
+// guard for TestGastown_Reconciler_SessionRestartsAfterExit (the integration
+// regression this whole round fixes): a configured named session in this
+// state must still roll back exactly like an orphaned one
+// (TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError), not be
+// preserved — preserving it would make the reconciler treat "started and
+// immediately exited" as "still creating," starving the session of a restart.
+func TestReconcileSessionBeads_RollsBackConfiguredNamedSessionThatDiedDuringStartup(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "helper",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{Template: "helper", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "helper")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  sessionName,
+		TemplateName: "helper",
+	}
+
+	session := env.createSessionBead(sessionName, "helper")
+	env.setSessionMetadata(&session, map[string]string{
+		"session_name_explicit": "true",
+		"pending_create_claim":  "true",
+		"state":                 "creating",
+		"continuation_epoch":    "1",
+		// session_key must be non-empty for the post-start stale-key
+		// liveness check to run at all (TestExecutePreparedStartWave_NoStaleCheckWithoutSessionKey);
+		// without it, startedFresh's post-start observation never fires and
+		// diedDuringStartup can never become true.
+		"session_key":                "stale-key-abc",
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "helper",
+		namedSessionModeMetadata:     "always",
+	})
+
+	// dieAfterStartProvider (defined in session_lifecycle_parallel_test.go)
+	// makes Start() succeed and then immediately removes the session, so the
+	// post-start liveness check observes it as not running — exercising
+	// diedDuringStartup=true, unlike the sibling "preserves" test above whose
+	// sp.StartErrors makes Start() itself fail (diedDuringStartup stays false).
+	sp := &dieAfterStartProvider{Fake: env.sp}
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+	woken := reconcileSessionBeads(
+		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, sp,
+		env.store, nil, nil, nil, env.dt, nil, false, nil, "",
+		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+		env.startOptions...,
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+
+	b, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	t.Logf("post-reconcile bead: status=%q metadata=%#v", b.Status, b.Metadata)
+	if b.Status != "closed" {
+		t.Fatalf("status = %q, want closed (a configured named session that died during its post-start liveness check must roll back, not be preserved as if still creating)", b.Status)
+	}
+	if got := b.Metadata["session_name"]; got != "" {
+		t.Errorf("session_name = %q, want empty after rollback", got)
+	}
+	if got := b.Metadata["pending_create_claim"]; got != "" {
+		t.Errorf("pending_create_claim = %q, want empty after rollback", got)
+	}
+	if want := sessionpkg.CanonicalCloseReason("failed-create"); b.Metadata["close_reason"] != want {
+		t.Errorf("close_reason = %q, want %q", b.Metadata["close_reason"], want)
+	}
+	if b.Metadata["state"] != "failed-create" {
+		t.Errorf("state = %q, want %q", b.Metadata["state"], "failed-create")
+	}
+}
+
+// TestReconcileSessionBeads_RollsBackSessionThatDiedDuringStartupWithoutSessionKey
+// probes ga-pmafyc (round 5): the generalized, non-SessionKey-gated twin of
+// TestReconcileSessionBeads_RollsBackConfiguredNamedSessionThatDiedDuringStartup
+// above. That test's diedDuringStartup=true is only reachable through the
+// LOCAL post-start liveness check inside runPreparedStartCandidate, which
+// itself requires a non-empty session_key to run at all
+// (TestExecutePreparedStartWave_NoStaleCheckWithoutSessionKey) — so it never
+// fires for a session with no SessionIDFlag, like a plain bash-script agent.
+//
+// Here the provider's Start() call returns runtime.ErrSessionDiedDuringStartup
+// directly (as the tmux adapter does when the pane exits before the post-spawn
+// liveness check runs — internal/runtime/tmux/adapter.go). With no session_key
+// and no resume shape to strip, retryFreshStartAfterStaleKey correctly declines
+// to retry (internal/session/chat.go, pinned by
+// TestStartRuntimeOnly_EmptySessionKeyWithoutResumeShapeDoesNotRelaunch) and
+// the sentinel-wrapped error propagates up as "resuming session: %w" — but
+// runPreparedStartCandidate currently has no case that recognizes this
+// propagated sentinel, so diedDuringStartup stays false and the configured
+// named session is incorrectly PRESERVED instead of rolled back. That leaves
+// pending_create_claim stuck "true" forever, which makes
+// pendingCreateStartInFlightInfo keep reporting start_in_flight on every
+// subsequent tick — starving the session of any further restart attempt. This
+// is the actual path TestGastown_Reconciler_SessionRestartsAfterExit hits
+// (its "shortlived" agent has no SessionIDFlag, hence no session_key), and why
+// that integration test still bimodally flakes despite the round-4 fix above.
+func TestReconcileSessionBeads_RollsBackSessionThatDiedDuringStartupWithoutSessionKey(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "helper",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{Template: "helper", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "helper")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  sessionName,
+		TemplateName: "helper",
+	}
+
+	// No session_key, no resume_flag, no session_id_flag: matches a plain
+	// bash-script agent (no SessionIDFlag configured), exactly like the
+	// integration test's "shortlived" agent.
+	session := env.createSessionBead(sessionName, "helper")
+	env.setSessionMetadata(&session, map[string]string{
+		"session_name_explicit":      "true",
+		"pending_create_claim":       "true",
+		"state":                      "creating",
+		"continuation_epoch":         "1",
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "helper",
+		namedSessionModeMetadata:     "always",
+	})
+
+	// The provider reports the death directly from Start(), the way the tmux
+	// adapter does when the pane's process exits before the post-spawn
+	// liveness probe runs — not via the separate post-start liveness check
+	// that dieAfterStartProvider simulates in the sibling test above.
+	env.sp.StartErrors = map[string]error{
+		sessionName: fmt.Errorf("%w: session %q", runtime.ErrSessionDiedDuringStartup, sessionName),
+	}
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+	woken := reconcileSessionBeads(
+		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
+		env.store, nil, nil, nil, env.dt, nil, false, nil, "",
+		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+		env.startOptions...,
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+
+	b, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	t.Logf("post-reconcile bead: status=%q metadata=%#v", b.Status, b.Metadata)
+	if b.Status != "closed" {
+		t.Fatalf("status = %q, want closed (a configured named session whose provider reports died-during-startup directly from Start(), with no session_key to recover through, must roll back — not be preserved as if still creating)", b.Status)
+	}
+	if got := b.Metadata["session_name"]; got != "" {
+		t.Errorf("session_name = %q, want empty after rollback", got)
+	}
+	if got := b.Metadata["pending_create_claim"]; got != "" {
+		t.Errorf("pending_create_claim = %q, want empty after rollback", got)
+	}
+	if want := sessionpkg.CanonicalCloseReason("failed-create"); b.Metadata["close_reason"] != want {
+		t.Errorf("close_reason = %q, want %q", b.Metadata["close_reason"], want)
+	}
+	if b.Metadata["state"] != "failed-create" {
+		t.Errorf("state = %q, want %q", b.Metadata["state"], "failed-create")
 	}
 }
 
