@@ -141,3 +141,68 @@ func TestSubmitEnterAndConfirmReturnsSendError(t *testing.T) {
 		t.Fatalf("enters = %d, want %d", enters, submitEnterMaxSends)
 	}
 }
+
+// TestSubmitEnterAndConfirmReadsHourLongTurnAsBusy is the ga-hdx0me regression
+// (upstream gastownhall/gascity#5692).
+//
+// Claude Code renders its elapsed timer with a leading hours unit once a turn
+// passes 60 minutes, and in bypass-permissions mode the spinner is the ONLY
+// busy signal — the literal "esc to interrupt" string is not shown. A matcher
+// blind to the hours form reports a working agent as idle, so the confirm loop
+// reports the submit unconfirmed, NudgePane returns ErrNudgeSubmitUnconfirmed,
+// and the queue redelivers a nudge that already landed — spending one bounded
+// attempt and a full recipient turn per redelivery.
+//
+// The busy lines are captured verbatim from live fleet panes.
+func TestSubmitEnterAndConfirmReadsHourLongTurnAsBusy(t *testing.T) {
+	for _, tc := range []struct{ name, line string }{
+		{"under an hour", "· Marinating… (4m 53s · ↓ 19.4k tokens)"},
+		{"just under an hour", "· Marinating… (59m 59s · ↓ 1.0k tokens)"},
+		{"exactly one hour", "· Garnishing… (1h 0m 3s · ↓ 1.0k tokens)"},
+		{"hour-long turn", "✽ Garnishing… (1h 24m 26s · almost done thinking with max effort)"},
+		{"multi-hour turn", "· Simmering… (2h 5m 1s · ↓ 3.1k tokens)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if !paneContainsBusyIndicator([]string{tc.line}) {
+				t.Fatalf("paneContainsBusyIndicator(%q) = false, want true (the pane is visibly busy)", tc.line)
+			}
+			// End to end: an already-busy pane must confirm on the first send
+			// and must never be re-entered.
+			enters := 0
+			confirmed, err := submitEnterAndConfirm(
+				func() error { enters++; return nil },
+				func() {},
+				func() (bool, error) { return paneContainsBusyIndicator([]string{tc.line}), nil },
+				noSleep,
+			)
+			if err != nil {
+				t.Fatalf("err = %v, want nil", err)
+			}
+			if !confirmed {
+				t.Fatalf("confirmed = false for a busy pane: NudgePane reports ErrNudgeSubmitUnconfirmed and the queue redelivers an already-landed nudge")
+			}
+			if enters != 1 {
+				t.Errorf("enters = %d, want 1 (a busy pane must never receive a second submit)", enters)
+			}
+		})
+	}
+}
+
+// TestPaneBusyIndicatorIgnoresHourlyStatusChrome guards the hours unit that
+// ga-hdx0me adds. A false positive is worse than the miss it fixes: WaitForIdle
+// would never return, so the agent would never be nudged at all. Lines captured
+// from live fleet panes.
+func TestPaneBusyIndicatorIgnoresHourlyStatusChrome(t *testing.T) {
+	for _, tc := range []struct{ name, line string }{
+		{"statusline quota hours", "     (^  v  ^)       Opus 5 | ████ 53% 533K/1.0M | 5h ░░░░ 0% ⇣6% ~4h41m | 7d"},
+		{"done marker with hours", "✻ Sautéed for 1h 5m 2s · done 3:18 PM · 5 background tasks still running"},
+		{"scrollback truncation parens", "  … +9 lines (ctrl+o to expand)"},
+		{"idle composer", "❯ "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if paneContainsBusyIndicator([]string{tc.line}) {
+				t.Errorf("paneContainsBusyIndicator(%q) = true, want false; a false positive makes WaitForIdle never return", tc.line)
+			}
+		})
+	}
+}
