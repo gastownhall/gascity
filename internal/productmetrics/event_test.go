@@ -348,16 +348,28 @@ func TestInjectedImmutableCommandCatalogRoundTripsWithoutExpandingProduction(t *
 		t.Fatal("production encoder accepted a non-sentinel ID from an injected-only catalog")
 	}
 
-	generatedCount := 0
-	generatedCommandIDCatalog(func(commandIDEntry) { generatedCount++ })
-	if generatedCount != 198 {
-		t.Fatalf("generated production catalog has %d entries, want 198", generatedCount)
+	countCatalog := func(catalog func(func(commandIDEntry))) int {
+		n := 0
+		catalog(func(commandIDEntry) { n++ })
+		return n
 	}
+	production := countCatalog(productionCommandIDCatalog)
 
 	injected := func(yield func(commandIDEntry)) {
 		productionCommandIDCatalog(yield)
 		yield(commandIDEntry{id: injectedID, wire: "injected-only"})
 	}
+	// The injected catalog must be production plus the one test entry, and
+	// production must be the same size afterwards. A literal count here would
+	// break on every command the CLI gains while proving neither.
+	if got := countCatalog(injected); got != production+1 {
+		t.Fatalf("injected catalog has %d entries against a production catalog of %d, want exactly one more", got, production)
+	}
+	defer func() {
+		if got := countCatalog(productionCommandIDCatalog); got != production {
+			t.Errorf("production catalog went from %d to %d entries, so injection mutated it", production, got)
+		}
+	}()
 	encoded, err := encodeEventWithCommandIDCatalog(event, injected)
 	if err != nil {
 		t.Fatalf("encodeEventWithCommandIDCatalog: %v", err)

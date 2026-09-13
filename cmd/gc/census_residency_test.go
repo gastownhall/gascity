@@ -173,10 +173,36 @@ func TestBindingRefNormalizesOntoTheCityScope(t *testing.T) {
 	if !rootStoreRefMatchesCandidate("city:test-city", ref) {
 		t.Error("a city-scope root_store_ref no longer matches the binding candidate; every binding-resident routed row just left the demand scan")
 	}
-	// Control: a RIG-scoped root must still not match the binding, or the
-	// normalization has flattened the scope comparison into a tautology.
-	if rootStoreRefMatchesCandidate("rig:alpha", ref) {
-		t.Error("a rig-scoped root_store_ref matched the binding candidate")
+	// A class binding is a genuinely distinct physical store, not a duplicate
+	// view of a rig or city work store — `gc storage migrate` relocates rows
+	// INTO it, it never aliases a rig's own file. So it is authoritative for a
+	// RIG-scoped root too, on the strength of the filter's one call site:
+	// collectOpenUnassignedRoutedWork resolves its legs through
+	// routedWorkStoreCandidates on the RUNTIME plane, and storeref.Narrow drops
+	// every leg but the binding once a plan touches one — no rig leg survives
+	// to defer to. Rejecting it here is exactly the duplicate-view rejection
+	// this filter is FOR, and the binding is never a duplicate view.
+	//
+	// That holds for runtime-plane callers only: `gc storage migrate` retains
+	// the source, so an un-narrowed reconcile-plane leg set would still offer a
+	// relocated row through both the binding and the legacy leg.
+	if !rootStoreRefMatchesCandidate("rig:alpha", ref) {
+		t.Error("a rig-scoped root_store_ref did not match the binding candidate; a migrated rig-rooted control row would be permanently invisible to demand and route repair")
+	}
+	// Control: two independent LEGACY (non-class) candidates still gate on
+	// rig identity, or the class-binding carve-out has flattened the whole
+	// comparison into a tautology.
+	if rootStoreRefMatchesCandidate("rig:alpha", "rig:bravo") {
+		t.Error("a rig-scoped root_store_ref matched an unrelated rig candidate")
+	}
+	// Control: the carve-out is for the BINDING, not for city scope. A legacy
+	// city candidate reads as the same scope as a binding (storeref.ScopeRigContext
+	// answers "" for both), but it is a duplicate view of a rig file store in
+	// legacy unscoped mode, so it must keep deferring to the named rig. Widening
+	// the carve-out to "any city-scope candidate" would pass every other
+	// assertion here and re-collapse that duplicate view.
+	if rootStoreRefMatchesCandidate("rig:alpha", "city:test-city") {
+		t.Error("a rig-scoped root_store_ref matched the legacy city candidate; the class-binding carve-out leaked onto city scope")
 	}
 }
 

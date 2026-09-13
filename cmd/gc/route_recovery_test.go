@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
+
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -295,7 +297,7 @@ func TestCityRuntimeRecoverUnroutedWorkRoutes(t *testing.T) {
 // lane, which is the unit the pre-lane restoreCarriedWorkRoutes was: one store,
 // one full live open read, one batched re-verify, no cross-pass accounting.
 func scanOneRouteRecoveryLeg(store beads.Store) (int, error) {
-	report := newRouteRecoveryLane().backstopLeg(store)
+	report := newRouteRecoveryLane().backstopLeg(planeLeg{store: store})
 	return report.restored, report.err
 }
 
@@ -381,5 +383,69 @@ func TestRouteRecoveryBackstopLegSkipsBlockedBead(t *testing.T) {
 	}
 	if route := strings.TrimSpace(mustRoutedTo(t, live, "EB-42o8")); route != "" {
 		t.Errorf("gc.routed_to = %q, want empty (a blocked bead must stay unrouted)", route)
+	}
+}
+
+// TestBackstopCountsRoutedWorkTheRuntimePlaneCannotSee pins the visibility half
+// of the tick's routed-demand narrowing (ga-l7jdg).
+//
+// The controller's demand read is binding-only, so a routed bead left on a work
+// leg is demanded by nothing and no seat is ever spawned for it. That is a
+// migration defect rather than a demand bug — but only if somebody counts it.
+// This lane already reads every leg's open corpus on its own cadence, so the
+// count is free and the assumption "there is no routed work out there" becomes
+// checkable instead of load-bearing.
+func TestBackstopCountsRoutedWorkTheRuntimePlaneCannotSee(t *testing.T) {
+	routed := func(id, assignee string) beads.Bead {
+		return beads.Bead{
+			ID:       id,
+			Title:    id,
+			Type:     "task",
+			Assignee: assignee,
+			Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "pool/worker"},
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		leg     planeLeg
+		seed    beads.Bead
+		want    int
+		because string
+	}{
+		{
+			name: "unassigned routed work on a work leg",
+			leg:  planeLeg{label: "city"},
+			seed: routed("ga-off-plane", ""),
+			want: 1, because: "the tick's demand read refuses this leg, so nothing spawns for the bead",
+		},
+		{
+			name: "the same bead on the binding",
+			leg:  planeLeg{label: "class:gmnos", binding: true},
+			seed: routed("gcg-on-plane", ""),
+			want: 0, because: "the runtime plane reads the binding, so this bead IS demanded",
+		},
+		{
+			name: "a routed bead on a work leg that already has a holder",
+			leg:  planeLeg{label: "city"},
+			seed: routed("ga-held", "worker-1"),
+			want: 0, because: "an assigned bead needs no seat spawned for it",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			store.HonorExplicitIDs = true
+			if _, err := store.Create(tc.seed); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			leg := tc.leg
+			leg.store = store
+			report := newRouteRecoveryLane().backstopLeg(leg)
+			if report.err != nil {
+				t.Fatalf("backstop leg: %v", report.err)
+			}
+			if report.offPlaneRouted != tc.want {
+				t.Fatalf("off_plane_routed = %d, want %d: %s", report.offPlaneRouted, tc.want, tc.because)
+			}
+		})
 	}
 }

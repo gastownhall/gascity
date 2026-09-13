@@ -35,7 +35,8 @@
         "no_work",
         "claims_errored",
         "stale_session",
-        "non_turn_context"
+        "non_turn_context",
+        "drain_pending"
       ]
     },
     "bead_id": {
@@ -100,7 +101,8 @@
               "no_work",
               "claims_errored",
               "stale_session",
-              "non_turn_context"
+              "non_turn_context",
+              "drain_pending"
             ]
           }
         }

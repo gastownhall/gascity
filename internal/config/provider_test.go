@@ -9,12 +9,12 @@ func TestBuiltinProviders(t *testing.T) {
 	providers := BuiltinProviders()
 	order := BuiltinProviderOrder()
 
-	// Must have exactly 17 built-in providers.
-	if len(providers) != 17 {
-		t.Fatalf("len(BuiltinProviders()) = %d, want 17", len(providers))
+	// Must have exactly 18 built-in providers.
+	if len(providers) != 18 {
+		t.Fatalf("len(BuiltinProviders()) = %d, want 18", len(providers))
 	}
-	if len(order) != 17 {
-		t.Fatalf("len(BuiltinProviderOrder()) = %d, want 17", len(order))
+	if len(order) != 18 {
+		t.Fatalf("len(BuiltinProviderOrder()) = %d, want 18", len(order))
 	}
 
 	// Every entry in order must exist in providers.
@@ -216,8 +216,8 @@ func TestBuiltinProvidersCursor(t *testing.T) {
 	if p.Command != "cursor-agent" {
 		t.Errorf("Command = %q, want %q", p.Command, "cursor-agent")
 	}
-	if !reflect.DeepEqual(p.Args, []string{"-f"}) {
-		t.Errorf("Args = %v, want [-f]", p.Args)
+	if !reflect.DeepEqual(p.Args, []string{"-f", "--trust"}) {
+		t.Errorf("Args = %v, want [-f --trust]", p.Args)
 	}
 	rp := &ResolvedProvider{
 		Command:           p.Command,
@@ -225,8 +225,8 @@ func TestBuiltinProvidersCursor(t *testing.T) {
 		OptionsSchema:     p.OptionsSchema,
 		EffectiveDefaults: ComputeEffectiveDefaults(p.OptionsSchema, p.OptionDefaults, nil),
 	}
-	if got := rp.CommandString(); got != "cursor-agent -f" {
-		t.Errorf("CommandString() = %q, want %q", got, "cursor-agent -f")
+	if got := rp.CommandString(); got != "cursor-agent -f --trust" {
+		t.Errorf("CommandString() = %q, want %q", got, "cursor-agent -f --trust")
 	}
 	if got := rp.ResolveDefaultArgs(); len(got) != 0 {
 		t.Errorf("ResolveDefaultArgs() = %v, want no MCP approval args by default", got)
@@ -397,16 +397,24 @@ func TestBuiltinProvidersResumeFlags(t *testing.T) {
 
 // TestBuiltinProvidersSessionIDFlag pins that built-in providers only populate
 // SessionIDFlag when their CLI supports caller-supplied fresh session IDs.
-// Claude and Codex expose session ids through resume paths, not fresh-start
-// creation flags; populating this field makes resolveSessionCommand emit an
-// unsupported first-start command and prevents hook-time provider session IDs
-// from becoming the durable session_key.
+// Populating it for a CLI that has no such flag makes resolveSessionCommand
+// emit an unsupported first-start command and prevents hook-time provider
+// session IDs from becoming the durable session_key.
+//
+// Claude Code is the exception: `claude --session-id <uuid>` starts a fresh
+// conversation under a caller-chosen UUID (verified against claude 2.1.233),
+// and it is the only way gc can hand `--resume <uuid>` back on restart —
+// claude has no gc session hook that could persist a provider-side key, so
+// without this flag every restart silently starts a new conversation.
 func TestBuiltinProvidersSessionIDFlag(t *testing.T) {
 	providers := BuiltinProviders()
-	for _, name := range []string{"claude", "codex", "gemini", "cursor", "copilot", "amp", "opencode", "auggie", "pi", "omp"} {
+	for _, name := range []string{"codex", "gemini", "cursor", "copilot", "amp", "opencode", "auggie", "pi", "omp"} {
 		if got := providers[name].SessionIDFlag; got != "" {
 			t.Errorf("%s SessionIDFlag = %q, want empty (no documented start-with-id flag)", name, got)
 		}
+	}
+	if got := providers["claude"].SessionIDFlag; got != "--session-id" {
+		t.Errorf("claude SessionIDFlag = %q, want --session-id (restart resume depends on it)", got)
 	}
 }
 

@@ -63,7 +63,7 @@ func TestRouteRecoveryQuarantineCheckFixLiftsTheMarker(t *testing.T) {
 	}
 	// Control: the lifted bead is still a repair candidate. Lifting must re-arm
 	// the lane, not retire the bead.
-	report := newRouteRecoveryLane().backstopLeg(store)
+	report := newRouteRecoveryLane().backstopLeg(planeLeg{store: store})
 	if report.restored != 1 {
 		t.Fatalf("backstop restored %d after the quarantine was lifted, want 1", report.restored)
 	}

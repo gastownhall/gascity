@@ -193,17 +193,23 @@ func TestTheStorageModeAnnouncementNamesARecoveryThatSURVIVESTheNextBoot(t *test
 // per-command warning always has.
 //
 // `gc rig set-endpoint` and `gc beads city use-managed`/`use-external` reach
-// their own canonicalizer (ensureCanonicalScopeMetadataIfPresent in
-// cmd_rig_endpoint.go) rather than the init one, and they perform the identical
-// embedded→server rewrite. A warning that depends on which command the operator
-// happened to run is a warning nobody can rely on.
+// their own canonicalizers (requireCanonicalizedScopeMetadata for the scope the
+// command names, canonicalizeScopeMetadataIfPresent for the inherited rigs a
+// city endpoint change sweeps along, both in cmd_rig_endpoint.go) rather than
+// the init one, and they perform the identical embedded→server rewrite. A
+// warning that depends on which command the operator happened to run — or on
+// which of the two endpoint doors the scope arrived through — is a warning
+// nobody can rely on.
 func TestEveryDoorThatFlipsTheStorageModeAnnouncesIt(t *testing.T) {
 	for name, canonicalize := range map[string]func(scope string) error{
 		"init path": func(scope string) error {
 			return ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, scope, "jc")
 		},
-		"endpoint path": func(scope string) error {
-			return ensureCanonicalScopeMetadataIfPresent(fsys.OSFS{}, scope)
+		"endpoint path, named scope": func(scope string) error {
+			return requireCanonicalizedScopeMetadata(fsys.OSFS{}, scope)
+		},
+		"endpoint path, inherited rig": func(scope string) error {
+			return canonicalizeScopeMetadataIfPresent(fsys.OSFS{}, scope)
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

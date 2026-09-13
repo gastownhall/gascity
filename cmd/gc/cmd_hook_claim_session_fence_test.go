@@ -477,7 +477,7 @@ func TestWriteHookClaimDrainStaleSessionWithDrainAck(t *testing.T) {
 	fakeAck := func(io.Writer) error { acked = true; return nil }
 
 	var stdout, stderr bytes.Buffer
-	code := writeHookClaimDrain(hookClaimReasonStaleSession, true, true, fakeAck, &stdout, &stderr)
+	code := writeHookClaimDrain(hookClaimLabel, hookClaimReasonStaleSession, true, true, fakeAck, &stdout, &stderr)
 
 	if code != 0 {
 		t.Fatalf("code = %d, want 0 for an acknowledged drain; stderr=%s", code, stderr.String())
@@ -503,7 +503,7 @@ func TestWriteHookClaimDrainDoesNotAckWhenNotRequested(t *testing.T) {
 		return nil
 	}
 	var stdout, stderr bytes.Buffer
-	code := writeHookClaimDrain(hookClaimReasonStaleSession, true, false, fakeAck, &stdout, &stderr)
+	code := writeHookClaimDrain(hookClaimLabel, hookClaimReasonStaleSession, true, false, fakeAck, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1 when drain is not acknowledged", code)
 	}

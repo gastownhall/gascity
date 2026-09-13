@@ -82,7 +82,7 @@ func TestPreflightConditionalWritesRequire(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		result, err := openStoreResultAtForCityWithMode(dir, dir, mode, true)
+		result, err := openStoreResultAtForCityWithMode(dir, dir, mode, true, true)
 		if err != nil {
 			t.Fatalf("openStoreResultAtForCityWithMode: %v", err)
 		}
@@ -294,7 +294,7 @@ func TestConditionalWritesStatusBlock(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		result, err := openStoreResultAtForCityWithMode(dir, dir, mode, true)
+		result, err := openStoreResultAtForCityWithMode(dir, dir, mode, true, true)
 		if err != nil {
 			t.Fatalf("openStoreResultAtForCityWithMode: %v", err)
 		}

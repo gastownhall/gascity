@@ -23,6 +23,13 @@ fi
 mode="$1"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+
+# One shared seeded gitconfig for every nested test env; resolved once so the
+# env -i block below cannot drift from the Makefile (scripts/test-gitconfig-path).
+# Exported because the xargs fan-out worker (run_fan_out) expands it in a child
+# process, which inherits only the environment (ga-cesmzs).
+gc_test_gitconfig="$("$repo_root/scripts/test-gitconfig-path")"
+export gc_test_gitconfig
 # shellcheck source=lib/test-slice.sh
 source "$repo_root/scripts/lib/test-slice.sh"
 gc_test_slice_reexec "$repo_root/scripts/test-local-parallel" "$@"
@@ -133,7 +140,7 @@ add_fsys_compile_job() {
 # GOFLAGS -p export below (ga-04m84s), so it is not pinned on this command.
 add_unit_core_job() {
   add_job "unit-core" \
-    "GC_FAST_UNIT=1 go test -count=1 -timeout ${go_test_timeout} \$(go list ./... | grep -v '^github.com/gastownhall/gascity/cmd/gc\$')"
+    "GC_FAST_UNIT=1 go test -count=1 -timeout ${go_test_timeout} \$(go list ./... | grep -v '^github.com/gastownhall/gascity/cmd/gc$')"
 }
 
 # Runs as a direct shell job rather than through a `go test` wrapper because a
@@ -313,6 +320,8 @@ run_fan_out() {
     USER="${USER:-}" \
     LOGNAME="${LOGNAME:-}" \
     SHELL="${SHELL:-/bin/sh}" \
+    GIT_CONFIG_NOSYSTEM=1 \
+    GIT_CONFIG_GLOBAL="$gc_test_gitconfig" \
     LANG="${LANG:-C.UTF-8}" \
     TMPDIR="${TMPDIR:-/var/tmp}" \
     OBSERVABLE_TEST_LOG="${OBSERVABLE_TEST_LOG-}" \

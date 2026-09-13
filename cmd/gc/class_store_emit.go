@@ -51,9 +51,9 @@ package main
 //
 // # What it emits, and what it deliberately does not
 //
-// The payload is the canonical bead snapshot CachingStore.notifyChange emits —
-// json.Marshal of the post-write bead, decodable by beads.DecodeBeadEventPayload
-// and foldable by the run projection — with the run/session/step correlation
+// The payload is the canonical bead snapshot from
+// beads.EncodeBeadEventPayload, decodable by beads.DecodeBeadEventPayload and
+// foldable by the run projection, with the run/session/step correlation
 // resolved onto the typed envelope from the same metadata keys and through the
 // same helpers. bead.closed rides only a genuine open→closed transition, because
 // the export boundary drops bead.updated and a metadata write to a closed bead
@@ -74,7 +74,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -165,7 +164,7 @@ func (s *emittingClassStore) emit(emissions ...classStoreEmission) {
 		if strings.TrimSpace(emission.bead.ID) == "" {
 			continue
 		}
-		payload, err := json.Marshal(emission.bead)
+		payload, err := beads.EncodeBeadEventPayload(emission.bead)
 		if err != nil {
 			warnClassStoreEmit(fmt.Errorf("marshaling the %s payload of %s: %w", emission.eventType, emission.bead.ID, err))
 			continue
@@ -272,6 +271,20 @@ func (s *emittingClassStore) emitClosed(id string) {
 	bead, ok := s.snapshot(id)
 	if !ok {
 		bead = beads.Bead{ID: id}
+	}
+	bead.Status = beadStatusClosed
+	s.emit(classStoreEmission{eventType: events.BeadClosed, bead: bead})
+}
+
+// emitClosedBead records bead.closed from the committed row an atomic fenced
+// close returned. That row IS the post-commit state (status closed, metadata
+// merged), so unlike emitClosed it needs no re-read — mirroring emitCreated's
+// "trust what the store returned" fallback. An empty id is the one thing it
+// cannot emit, and a close that returned one is a store bug worth surfacing.
+func (s *emittingClassStore) emitClosedBead(bead beads.Bead) {
+	if strings.TrimSpace(bead.ID) == "" {
+		warnClassStoreEmit(errors.New("bead.closed skipped: the atomic close returned an empty id"))
+		return
 	}
 	bead.Status = beadStatusClosed
 	s.emit(classStoreEmission{eventType: events.BeadClosed, bead: bead})
@@ -491,6 +504,73 @@ func (s *emittingClassStore) CloseIfMatch(id string, revision int64) error {
 	return nil
 }
 
+// CloseWithMetadataIfMatch forwards the atomic fenced terminal close (merge
+// metadata and close in one transaction, guarded by the revision) to the
+// backing capability, so AtomicConditionalCloserFor discovers it on the CLI's
+// wrapped store instead of stopping at this wrapper. It emits bead.closed from
+// the committed row the close returned.
+func (s *emittingClassStore) CloseWithMetadataIfMatch(id string, revision int64, metadata map[string]string) (beads.Bead, error) {
+	closer, ok := beads.AtomicConditionalCloserFor(s.Store)
+	if !ok {
+		return beads.Bead{}, beads.ErrConditionalWriteUnsupported
+	}
+	closed, err := closer.CloseWithMetadataIfMatch(id, revision, metadata)
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	s.emitClosedBead(closed)
+	return closed, nil
+}
+
+// AtomicConditionalCloserHandle keeps AtomicConditionalCloserFor honest over
+// this wrapper. TestEmittingClassStoreKeepsEveryEngineCapability forces the
+// wrapper to carry CloseWithMetadataIfMatch structurally for every engine, so a
+// bare type assertion would advertise the capability even over a backing (for
+// example the sqlite CLI engine) that cannot honor it — and that discovery is
+// contractually a hard capability gate, not a rollout seam. Consulted first by
+// AtomicConditionalCloserFor, this answers yes only when the resolved backing
+// truly provides the atomic close, and returns the emitting wrapper (not the
+// raw backing) so the discovered closer still emits bead.closed.
+func (s *emittingClassStore) AtomicConditionalCloserHandle() (beads.AtomicConditionalCloser, bool) {
+	if _, ok := beads.AtomicConditionalCloserFor(s.Store); !ok {
+		return nil, false
+	}
+	return s, true
+}
+
+// HasResidentOutside forwards the relic census to the backing capability. It
+// exists because TestEmittingClassStoreKeepsEveryEngineCapability holds this
+// wrapper to every engine method, and a wrapper that carries the method must
+// still be unable to answer for a backing that cannot: a store with no census
+// gets beads.ErrNamespaceCensusUnsupported, never (false, nil). A false clean
+// here would retire the binding's by-id probe over every relic sitting in it.
+//
+// Discovery does not reach this method — NamespaceCensusHandle below answers
+// first — so this is the spelling for a caller holding the wrapper that asks
+// directly.
+func (s *emittingClassStore) HasResidentOutside(prefixes []string) (bool, error) {
+	census, ok := beads.NamespaceCensusFor(s.Store)
+	if !ok {
+		return false, fmt.Errorf("censusing the id namespaces of the emitting class store over %T: %w", s.Store, beads.ErrNamespaceCensusUnsupported)
+	}
+	return census.HasResidentOutside(prefixes)
+}
+
+// NamespaceCensusHandle keeps beads.NamespaceCensusFor honest over this
+// wrapper, exactly as AtomicConditionalCloserHandle does above and for the same
+// reason: the reflective capability guard forces HasResidentOutside to EXIST
+// for every engine, so a bare type assertion would advertise a census over a
+// backing — a mem store, the native Dolt engine — that has none. The census
+// contract makes that a hard gate rather than a rollout seam, because a store
+// that answers the question inexactly strands every bead it failed to see.
+//
+// It hands back the backing's census rather than the wrapper: the wrapper adds
+// emission, a census reads and mutates nothing, so there is nothing here for
+// the answer to pass back through.
+func (s *emittingClassStore) NamespaceCensusHandle() (beads.NamespaceCensus, bool) {
+	return beads.NamespaceCensusFor(s.Store)
+}
+
 func (s *emittingClassStore) DeleteIfMatch(id string, revision int64) error {
 	writer, ok := beads.ConditionalWriterFor(s.Store)
 	if !ok {
@@ -604,14 +684,43 @@ func (s *emittingClassStore) WaitForParentProjection(ctx context.Context, parent
 	return waiter.WaitForParentProjection(ctx, parentID, childID, scope)
 }
 
+// DepMetadata forwards the inner store's edge-payload read. Emission has
+// nothing to say about what an edge carries, so the answer passes through.
+//
+// An inner store without the read gets an error rather than ("", false, nil).
+// The lenient form is the one shape this capability must never take: a caller
+// that refuses on uncertainty — the infra-class migration is one — would read
+// a store that CANNOT be asked as one answering "carries nothing", which is
+// exactly the conflation that let edge payloads drop silently for months.
 func (s *emittingClassStore) DepMetadata(issueID, dependsOnID string) (string, bool, error) {
-	reader, ok := s.Store.(interface {
-		DepMetadata(string, string) (string, bool, error)
-	})
+	reader, ok := s.Store.(beads.DepMetadataReader)
 	if !ok {
-		return "", false, nil
+		return "", false, fmt.Errorf("reading dependency metadata %s -> %s: emitting store %T exposes no edge-payload read", issueID, dependsOnID, s.Store)
 	}
 	return reader.DepMetadata(issueID, dependsOnID)
+}
+
+// DepAddWithMetadata is DepAdd for an edge that carries a payload, and emits
+// the same bead.updated for the same endpoint the plain form does: the issue
+// side, whose DepList the snapshot hydrates. A subscriber that saw the
+// payloadless add but not this one would hold a stale view of exactly the edges
+// formula gating depends on.
+//
+// An inner store without the write gets an error rather than falling back to
+// DepAdd. The fallback is the shape this must never take: on a store that keeps
+// the payload in a sidecar, a plain DepAdd over an edge that had one CLEARS it,
+// so "carry it if you can, add it plainly if you cannot" is not a degraded carry
+// but a destructive one.
+func (s *emittingClassStore) DepAddWithMetadata(issueID, dependsOnID, depType, metadata string) error {
+	writer, ok := s.Store.(beads.DepMetadataWriter)
+	if !ok {
+		return fmt.Errorf("writing dependency metadata %s -> %s: emitting store %T cannot carry an edge payload", issueID, dependsOnID, s.Store)
+	}
+	if err := writer.DepAddWithMetadata(issueID, dependsOnID, depType, metadata); err != nil {
+		return err
+	}
+	s.emitUpdated(issueID)
+	return nil
 }
 
 func (s *emittingClassStore) SequenceFloor() (int64, error) {

@@ -84,7 +84,7 @@
         },
         "tmux_alias": {
           "type": "string",
-          "description": "TmuxAlias overrides the tmux session_name for pool and factory-created\nmanual sessions of this agent. When unset, sessions fall back to the\nuniversal derivation (\"s-\u003cbeadID\u003e\" for ad-hoc sessions,\n\"\u003cbasename\u003e-\u003cbeadID\u003e\" for pool sessions). When set, it is expanded as a\nGo text/template using the same PathContext fields as work_dir /\nsession_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName),\nsanitized for tmux, and validated as an explicit session name. For pool\nsessions, a live-name collision appends the bead ID as a deterministic\nsuffix. For manual `gc session new` sessions, tmux_alias becomes the\nexplicit session_name and takes precedence over --alias, which remains the\ncommand/mail alias; duplicate explicit names fail closed. Configured named\nsessions keep their named-session runtime name instead of using\ntmux_alias. When no --alias is supplied, work_dir templates that use\n{{.Agent}} see the resolved tmux_alias as the concrete session identity."
+          "description": "TmuxAlias overrides the tmux session_name for pool and factory-created\nmanual sessions of this agent. When unset, sessions fall back to the\nuniversal derivation (\"s-\u003cbeadID\u003e\" for ad-hoc sessions,\n\"\u003cbasename\u003e-\u003cbeadID\u003e\" for pool sessions). When set, it is expanded as a\nGo text/template using the same PathContext fields as work_dir /\nsession_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName,\nDefaultBranch), sanitized for tmux, and validated as an explicit session name. For pool\nsessions, a live-name collision appends the bead ID as a deterministic\nsuffix. For manual `gc session new` sessions, tmux_alias becomes the\nexplicit session_name and takes precedence over --alias, which remains the\ncommand/mail alias; duplicate explicit names fail closed. Configured named\nsessions keep their named-session runtime name instead of using\ntmux_alias. When no --alias is supplied, work_dir templates that use\n{{.Agent}} see the resolved tmux_alias as the concrete session identity."
         },
         "scope": {
           "type": "string",
@@ -111,7 +111,7 @@
         },
         "nudge": {
           "type": "string",
-          "description": "Nudge is text typed into the agent's tmux session after startup.\nUsed for CLI agents that don't accept command-line prompts."
+          "description": "Nudge is text typed into the agent's session after startup.\nUsed for CLI agents that don't accept command-line prompts. For a known\npool session whose trigger remains unclaimed after the 90-second recovery\ngrace period, an empty or whitespace-only Nudge does not opt out: it sends\n\"Run gc hook --claim --drain-ack --json now; if it returns work, execute\nit immediately.\" This fallback applies only to the initial stalled-claim\nrecovery; continuation-claim recovery remains configured-only. Unknown\ntemplates receive no fallback."
         },
         "session": {
           "type": "string",
@@ -204,7 +204,7 @@
         },
         "scale_check": {
           "type": "string",
-          "description": "ScaleCheck is a shell command template whose output reports new\nunassigned session demand. In bead-backed reconciliation this is\nadditive: assigned work is resumed separately, and ScaleCheck reports\nonly how many new generic sessions to start, still bounded by all cap\nlevels. Legacy no-store evaluation continues to treat the output as\nthe desired session count. If it contains Go template placeholders, gc\nexpands them using the same PathContext fields as work_dir and\nsession_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName)\nbefore running the command."
+          "description": "ScaleCheck is a shell command template whose output reports new\nunassigned session demand. In bead-backed reconciliation this is\nadditive: assigned work is resumed separately, and ScaleCheck reports\nonly how many new generic sessions to start, still bounded by all cap\nlevels. Legacy no-store evaluation continues to treat the output as\nthe desired session count. If it contains Go template placeholders, gc\nexpands them using the same PathContext fields as work_dir and\nsession_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName,\nDefaultBranch) before running the command."
         },
         "drain_timeout": {
           "type": "string",
@@ -213,11 +213,11 @@
         },
         "on_boot": {
           "type": "string",
-          "description": "OnBoot is a shell command template run once at controller startup for\nthis agent. If it contains Go template placeholders, gc expands them\nusing the same PathContext fields as work_dir and session_setup\n(Agent, AgentBase, Rig, RigRoot, CityRoot, CityName) before running\nthe command."
+          "description": "OnBoot is a shell command template run once at controller startup for\nthis agent. If it contains Go template placeholders, gc expands them\nusing the same PathContext fields as work_dir and session_setup\n(Agent, AgentBase, Rig, RigRoot, CityRoot, CityName, DefaultBranch)\nbefore running the command."
         },
         "on_death": {
           "type": "string",
-          "description": "OnDeath is a shell command template run when a session dies unexpectedly.\nIf it contains Go template placeholders, gc expands them using the same\nPathContext fields as work_dir and session_setup (Agent, AgentBase,\nRig, RigRoot, CityRoot, CityName) before running the command."
+          "description": "OnDeath is a shell command template run when a session dies unexpectedly.\nIf it contains Go template placeholders, gc expands them using the same\nPathContext fields as work_dir and session_setup (Agent, AgentBase,\nRig, RigRoot, CityRoot, CityName, DefaultBranch) before running the\ncommand."
         },
         "namepool": {
           "type": "string",
@@ -225,11 +225,11 @@
         },
         "work_query": {
           "type": "string",
-          "description": "WorkQuery is the shell command template to find available work for this\nagent. If it contains Go template placeholders, gc expands them using\nthe same PathContext fields as work_dir and session_setup (Agent,\nAgentBase, Rig, RigRoot, CityRoot, CityName) before probe, hook, and\nprompt-context execution. Used by gc hook and available in prompt\ntemplates as {{.WorkQuery}}.\nIf unset, Gas City uses a three-tier default query:\n  1. in_progress work assigned to this session/alias (crash recovery)\n  2. ready work assigned to this session/alias (pre-assigned work)\n  3. ready unassigned work with gc.routed_to=\u003cqualified-name\u003e\nWhen the controller probes for demand without session context, only the\nrouted_to tier applies. Override to integrate with external task systems."
+          "description": "WorkQuery is the shell command template to find available work for this\nagent. If it contains Go template placeholders, gc expands them using\nthe same PathContext fields as work_dir and session_setup (Agent,\nAgentBase, Rig, RigRoot, CityRoot, CityName, DefaultBranch) before\nprobe, hook, and prompt-context execution. Used by gc hook and available in prompt\ntemplates as {{.WorkQuery}}.\nIf unset, Gas City uses a three-tier default query:\n  1. in_progress work assigned to this session/alias (crash recovery)\n  2. ready work assigned to this session/alias (pre-assigned work)\n  3. ready unassigned work with gc.routed_to=\u003cqualified-name\u003e\nWhen the controller probes for demand without session context, only the\nrouted_to tier applies. Override to integrate with external task systems."
         },
         "sling_query": {
           "type": "string",
-          "description": "SlingQuery is the command template to route a bead to this session config.\nIf it contains Go template placeholders, gc expands them using the same\nPathContext fields as work_dir and session_setup (Agent, AgentBase,\nRig, RigRoot, CityRoot, CityName) before replacing {} with the bead\nID. Used by gc sling to make a bead visible to the target's work_query.\nThe placeholder {} is replaced with the bead ID at runtime.\nDefault for all agents:\n\"bd update {} --set-metadata gc.routed_to=\u003cqualified-name\u003e\".\nRouting is metadata-based; sling stamps the target template and the\nreconciler/scale_check paths decide when sessions are created.\nCustom sling_query and work_query can be overridden independently."
+          "description": "SlingQuery is the command template to route a bead to this session config.\nIf it contains Go template placeholders, gc expands them using the same\nPathContext fields as work_dir and session_setup (Agent, AgentBase,\nRig, RigRoot, CityRoot, CityName, DefaultBranch) before replacing {}\nwith the bead ID. Used by gc sling to make a bead visible to the target's work_query.\nThe placeholder {} is replaced with the bead ID at runtime.\nDefault for all agents:\n\"bd update {} --set-metadata gc.routed_to=\u003cqualified-name\u003e\".\nRouting is metadata-based; sling stamps the target template and the\nreconciler/scale_check paths decide when sessions are created.\nCustom sling_query and work_query can be overridden independently."
         },
         "idle_timeout": {
           "type": "string",
@@ -281,7 +281,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "SessionSetup is a list of shell commands run after session creation.\nEach command is a template string supporting placeholders:\n{{.Session}}, {{.Agent}}, {{.AgentBase}}, {{.Rig}}, {{.RigRoot}},\n{{.CityRoot}}, {{.CityName}}, {{.WorkDir}}.\nCommands run in gc's process (not inside the agent session) via sh -c.\nOn failure, the last 4 KiB of the command's stdout/stderr is included\nin the error and may appear in controller and reconciler logs; avoid\nset -x or echoing secrets in setup commands."
+          "description": "SessionSetup is a list of shell commands run after session creation.\nEach command is a template string supporting placeholders:\n{{.Session}}, {{.Agent}}, {{.AgentBase}}, {{.Rig}}, {{.RigRoot}},\n{{.CityRoot}}, {{.CityName}}, {{.WorkDir}}, {{.DefaultBranch}}.\n{{.DefaultBranch}} is the rig's configured default_branch (empty for\ncity-scoped agents and rigs that record none); it is never probed from\ngit, so scripts should keep their own origin/HEAD fallback.\nCommands run in gc's process (not inside the agent session) via sh -c.\nOn failure, the last 4 KiB of the command's stdout/stderr is included\nin the error and may appear in controller and reconciler logs; avoid\nset -x or echoing secrets in setup commands."
         },
         "session_setup_script": {
           "type": "string",
@@ -1473,7 +1473,7 @@
         "read_timeout_millis": {
           "type": "integer",
           "description": "ReadTimeoutMillis overrides the managed Dolt listener read_timeout_millis.\n0 means use the managed default.",
-          "default": 15000
+          "default": 120000
         },
         "write_timeout_millis": {
           "type": "integer",
@@ -1482,7 +1482,7 @@
         },
         "wait_timeout_seconds": {
           "type": "integer",
-          "description": "WaitTimeoutSeconds overrides the managed server's wait_timeout system\nvariable, which is how long Dolt keeps an idle connection before reaping\nit. Cities that raise ReadTimeoutMillis above the reconcile tick gap\ngenerally need this raised with it, or the controller's long-lived\ndispatch-pool connections are still reaped between ticks. Before this\nfield existed the only way to set it was GC_DOLT_WAIT_TIMEOUT in the\nsupervisor's process environment, which no city.toml could express and\nno shell-invoked restart inherited — so a restart from an operator shell\nsilently rewrote the value. 0 (omitted) means use the managed default.",
+          "description": "WaitTimeoutSeconds overrides the managed server's wait_timeout system\nvariable. Despite the name, wait_timeout does not currently reap idle\nconnections -- measured inert on dolt 2.2.3 for #5383 (see\nDefaultDoltWaitTimeoutSeconds); read_timeout is the only reaper. The\nknob is kept and still emitted regardless: it is harmless, and becomes\ncorrect the moment dolt implements it. Before this field existed the\nonly way to set it was GC_DOLT_WAIT_TIMEOUT in the supervisor's process\nenvironment, which no city.toml could express and no shell-invoked\nrestart inherited — so a restart from an operator shell silently\nrewrote the value. 0 (omitted) means use the managed default.",
           "default": 30
         },
         "dolt_lock_release_timeout": {

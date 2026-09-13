@@ -165,9 +165,13 @@ func (d Deps) fenceSource(source string) error {
 // resolveImportVersion validates and resolves the version constraint for an add.
 // Git-backed sources reject a ref embedded in the URL and, when no constraint is
 // given, default to the resolved semver/HEAD; non-git path sources reject a
-// constraint outright. The returned error already carries the transport-mapped
-// sentinel (ErrInvalidSource or ErrVersionResolveFailed).
-func (d Deps) resolveImportVersion(cityRoot, source, versionConstraint string, gitBacked bool) (string, error) {
+// constraint outright. localHead marks a source promoted from a local git
+// worktree: absent an explicit constraint, it locks to the worktree's current
+// HEAD commit rather than the repo's latest semver tag, which may predate the
+// pack existing in the tree at all (gastownhall/gascity#3659). The returned
+// error already carries the transport-mapped sentinel (ErrInvalidSource or
+// ErrVersionResolveFailed).
+func (d Deps) resolveImportVersion(cityRoot, source, versionConstraint string, gitBacked, localHead bool) (string, error) {
 	if !gitBacked {
 		if versionConstraint != "" {
 			return "", fmt.Errorf("%w: --version is only valid for git-backed imports", ErrInvalidSource)
@@ -179,6 +183,13 @@ func (d Deps) resolveImportVersion(cityRoot, source, versionConstraint string, g
 	}
 	if versionConstraint != "" {
 		return versionConstraint, nil
+	}
+	if localHead {
+		commit, err := d.resolveHeadCommit()(cityRoot, source)
+		if err != nil {
+			return "", fmt.Errorf("%w: %w", ErrVersionResolveFailed, err)
+		}
+		return "sha:" + commit, nil
 	}
 	version, err := d.defaultImportVersionForSource(cityRoot, source)
 	if err != nil {
@@ -204,7 +215,7 @@ func AddImportWith(fs fsys.FS, cityPath, source, nameOverride, versionConstraint
 		return nil, fmt.Errorf("%w: %w", ErrScopeLoad, err)
 	}
 
-	source, gitBacked, err := normalizeImportAddSource(fs, cityPath, source)
+	source, gitBacked, localHead, err := normalizeImportAddSource(fs, cityPath, source)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidSource, err)
 	}
@@ -240,7 +251,7 @@ func AddImportWith(fs fsys.FS, cityPath, source, nameOverride, versionConstraint
 		}
 	}
 
-	version, err := deps.resolveImportVersion(cityPath, source, versionConstraint, gitBacked)
+	version, err := deps.resolveImportVersion(cityPath, source, versionConstraint, gitBacked, localHead)
 	if err != nil {
 		return nil, err
 	}

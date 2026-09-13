@@ -432,6 +432,28 @@ func TestRecoverManagedDoltObservedRebindPossible(t *testing.T) {
 	})
 }
 
+func TestRecoverManagedDoltObservedPortUsesAlternatePublishedState(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := writeDoltRuntimeStateFile(providerManagedDoltStatePath(cityPath), doltRuntimeState{
+		Running: true,
+		PID:     1234,
+		Port:    36267,
+	}); err != nil {
+		t.Fatalf("write provider state: %v", err)
+	}
+	if err := writeDoltRuntimeStateFile(managedDoltStatePath(cityPath), doltRuntimeState{
+		Running: true,
+		PID:     5678,
+		Port:    36266,
+	}); err != nil {
+		t.Fatalf("write published state: %v", err)
+	}
+
+	if got := recoverManagedDoltObservedPort(cityPath, "36267"); got != "36266" {
+		t.Fatalf("recoverManagedDoltObservedPort() = %q, want alternate published port 36266", got)
+	}
+}
+
 func setupRecoveryTestCity(t *testing.T) string {
 	t.Helper()
 	cityPath := t.TempDir()
