@@ -4302,6 +4302,133 @@ func TestBdStoreDepAddError(t *testing.T) {
 	}
 }
 
+// TestBdStoreDepAddCrossStoreFailsLoudly proves a dep add across two
+// different bead-ID prefixes (i.e. two different stores) fails with a
+// non-zero error naming both bead ids and both store prefixes, and never
+// reaches the underlying bd write -- instead of the historical silent
+// exit-0 no-op (ga-q5dgaz).
+func TestBdStoreDepAddCrossStoreFailsLoudly(t *testing.T) {
+	called := false
+	runner := func(_, _ string, _ ...string) ([]byte, error) {
+		called = true
+		return nil, nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	err := s.DepAdd("ga-111111", "gm-222222", "blocks")
+	if err == nil {
+		t.Fatal("expected cross-store error, got nil")
+	}
+	for _, want := range []string{"ga-111111", "gm-222222", "ga", "gm"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to mention %q", err, want)
+		}
+	}
+	if called {
+		t.Error("underlying bd dep add write must not run when the dependency is cross-store")
+	}
+}
+
+// TestBdStoreDepAddSameStoreStillSucceeds guards against a regression: two
+// bead ids sharing the same prefix are NOT cross-store and must continue to
+// add the dependency exactly as before.
+func TestBdStoreDepAddSameStoreStillSucceeds(t *testing.T) {
+	var gotArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		gotArgs = args
+		return nil, nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	if err := s.DepAdd("ga-111111", "ga-222222", "blocks"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+	wantArgs := "dep add ga-111111 ga-222222 --type blocks"
+	if strings.Join(gotArgs, " ") != wantArgs {
+		t.Errorf("args = %q, want %q", strings.Join(gotArgs, " "), wantArgs)
+	}
+}
+
+// TestBdStoreDepAddExternalTargetIsNotCrossStore proves an "external:"-
+// prefixed dependsOnID -- the established escape hatch for referencing
+// something outside the bead-ID scheme entirely -- is never misclassified
+// as cross-store, mirroring NativeDoltStore's shouldPrevalidateNativeDependency.
+func TestBdStoreDepAddExternalTargetIsNotCrossStore(t *testing.T) {
+	var gotArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		gotArgs = args
+		return nil, nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	if err := s.DepAdd("ga-111111", "external:some-ticket", "blocks"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+	wantArgs := "dep add ga-111111 external:some-ticket --type blocks"
+	if strings.Join(gotArgs, " ") != wantArgs {
+		t.Errorf("args = %q, want %q", strings.Join(gotArgs, " "), wantArgs)
+	}
+}
+
+// TestBdStoreDepAddCrossStoreParentChildShortCircuits proves the parent-child
+// short-circuit in DepAdd stays AHEAD of the cross-store guard: a cross-store
+// parent-child whose child already records the foreign parent still no-ops
+// with a nil error and issues no write. Cross-store molecule attach rides on
+// exactly this ordering (internal/molecule/molecule.go sets ParentID at create
+// time so the attach never reaches the guard), so reordering the two blocks
+// would break it.
+func TestBdStoreDepAddCrossStoreParentChildShortCircuits(t *testing.T) {
+	calls := make([]string, 0, 1)
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		call := name + " " + strings.Join(args, " ")
+		calls = append(calls, call)
+		switch call {
+		case "bd show --json ga-111111":
+			return []byte(`[{"id":"ga-111111","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","parent":"gm-222222"}]`), nil
+		default:
+			return nil, fmt.Errorf("unexpected command: %s", call)
+		}
+	}
+	s := beads.NewBdStore("/city", runner)
+
+	if err := s.DepAdd("ga-111111", "gm-222222", "parent-child"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("calls = %v, want only the bd show lookup", calls)
+	}
+}
+
+// TestBdStoreDepAddCrossStoreParentChildWithoutMatchingParentErrors pins the
+// other half of that ordering: when the child does NOT already record the
+// foreign parent, the short-circuit declines and the cross-store guard fires.
+// The failure is intentional -- bd has no cross-store parent-child model --
+// and must stay visible rather than emergent.
+func TestBdStoreDepAddCrossStoreParentChildWithoutMatchingParentErrors(t *testing.T) {
+	wrote := false
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		call := name + " " + strings.Join(args, " ")
+		switch call {
+		case "bd show --json ga-111111":
+			return []byte(`[{"id":"ga-111111","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","parent":"ga-999999"}]`), nil
+		default:
+			wrote = true
+			return nil, nil
+		}
+	}
+	s := beads.NewBdStore("/city", runner)
+
+	err := s.DepAdd("ga-111111", "gm-222222", "parent-child")
+	if err == nil {
+		t.Fatal("expected cross-store error, got nil")
+	}
+	for _, want := range []string{"ga-111111", "gm-222222", "ga", "gm"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to mention %q", err, want)
+		}
+	}
+	if wrote {
+		t.Error("underlying bd dep add write must not run when the dependency is cross-store")
+	}
+}
+
 // --- DepRemove ---
 
 func TestBdStoreDepRemove(t *testing.T) {

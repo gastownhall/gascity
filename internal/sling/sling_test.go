@@ -1054,6 +1054,26 @@ func TestCheckCrossRigSling(t *testing.T) {
 	})
 }
 
+// TestCheckCrossRigMessageStatesRefusalAndRemedy pins the exact wording of
+// the cross-rig refusal. The message must read as a refusal with a remedy,
+// not a bare noun phrase — see ga-pjqysm: the previous text ("cross-rig
+// routing — bead X (prefix Y) → agent Z (rig prefix W)") never said the
+// sling was refused, never said nothing was routed, and never mentioned
+// --force, so a blocked sling read as one more advisory line on stderr
+// instead of an explained failure.
+func TestCheckCrossRigMessageStatesRefusalAndRemedy(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "hello-world", Path: "/tmp/hw"}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "hello-world"}
+
+	got := CheckCrossRig("FE-123", a, cfg)
+	want := `gc sling: refusing cross-rig route: bead FE-123 (prefix "fe") does not belong to hello-world/polecat (rig prefix "hw"); nothing was routed. Re-file the bead in that rig, pick a city-scope target, or pass --force to override.`
+	if got != want {
+		t.Errorf("CheckCrossRig message =\n%q\nwant\n%q", got, want)
+	}
+}
+
 // --- DoSling integration tests (structured result) ---
 
 func TestDoSlingBeadToFixedAgent(t *testing.T) {

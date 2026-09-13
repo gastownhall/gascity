@@ -336,6 +336,8 @@ func conformanceAssignedWorkCapture(t *testing.T, e splitEnv) {
 		sessionInfosFromBeads([]beads.Bead{sess}),
 		got, stores, refs,
 		e.rigStores,
+		nil,
+		nil,
 	)
 	wantReleased := []string{dead.ID, hqDead.ID}
 	releasedIDs := make(map[string]bool, len(released))

@@ -218,7 +218,13 @@ type hookClaimOps struct {
 	StampSessionClaim hookStampSessionClaimFunc
 	// ReadWorkMeta is the post-stamp authoritative readback used only to
 	// establish the durable lifecycle-start emission point.
-	ReadWorkMeta             func(context.Context, string, []string, string, string) (beads.Bead, error)
+	ReadWorkMeta func(context.Context, string, []string, string, string) (beads.Bead, error)
+	// ConfirmBlocked re-derives whether a bead is really blocked, from its live
+	// dependencies rather than bd's denormalized is_blocked projection (which
+	// production reads do not carry). Diagnostics-only: the demand/claim
+	// divergence classifier calls it to settle a row it cannot classify from the
+	// bead alone. Nothing on the claim path reads it.
+	ConfirmBlocked           func(context.Context, string, []string, string, string) (bool, error)
 	EmitExecutionStepStarted func(beads.Bead, string, []string, string)
 	// PublishRunMap writes best-effort session-to-run correlation without
 	// mutating the session bead after a successful work claim.
@@ -485,6 +491,9 @@ func (ops *hookClaimOps) applyDefaults() {
 	}
 	if ops.ReadWorkMeta == nil {
 		ops.ReadWorkMeta = hookReadClaimedBeadWithBdStore
+	}
+	if ops.ConfirmBlocked == nil {
+		ops.ConfirmBlocked = hookConfirmBeadBlockedWithBdStore
 	}
 	if ops.EmitExecutionStepStarted == nil {
 		ops.EmitExecutionStepStarted = hookEmitExecutionStepStarted
@@ -1462,6 +1471,14 @@ func hookStampWorkMetaWithBdStore(_ context.Context, dir string, env []string, b
 
 func hookReadClaimedBeadWithBdStore(_ context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, error) {
 	return hookClaimBdStore(dir, env, assignee).Get(beadID)
+}
+
+// hookConfirmBeadBlockedWithBdStore is the production ConfirmBlocked seam. It
+// binds its bd children to ctx — the divergence classifier runs after the drain
+// is already written, so its dependency walk must never outlive the deadline that
+// caller set.
+func hookConfirmBeadBlockedWithBdStore(ctx context.Context, dir string, env []string, beadID, assignee string) (bool, error) {
+	return beadHasUnmetPlainBlocksDep(hookClaimBdStoreContext(ctx, dir, env, assignee), beadID)
 }
 
 func hookEmitExecutionStepStarted(step beads.Bead, dir string, env []string, assignee string) {

@@ -1670,7 +1670,10 @@ type sqliteStoreTx struct {
 // id-shaped lookup of the namespace it lands in, as one written outside a
 // transaction. The check runs before normalization and before
 // ensureCreateDoesNotExist, so a refusal about a disclaimed namespace still
-// reveals nothing about what this store holds.
+// reveals nothing about what this store holds. That ordering is load-bearing
+// for a second reason: normalizeCreate lifts the sequence floor to the pinned
+// id's suffix, so a fence consulted after it renumbers a binding this store was
+// never allowed to write to, and the rollback does not put that back.
 //
 // There is no foreign-id variant here on purpose. The migration copy that needs
 // the exemption runs through CreateWithForeignID on the store, not inside a

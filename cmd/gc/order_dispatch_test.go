@@ -10618,3 +10618,53 @@ description = "Handle {{subject}} now."
 		t.Fatalf("step description = %q left the placeholder unresolved", work.Description)
 	}
 }
+
+// TestDispatchWispResolvesFormulaFromAnyConfiguredLayer is the controller-path
+// regression for #4378: dispatchWisp must resolve an order's formula from every
+// layer the order's scope configures, not just the layer the ORDER FILE was
+// found in. This is the controller/webhook dispatch path — the one the issue was
+// filed against. Pre-fix, searchPaths was []string{a.FormulaLayer}, so an order
+// whose own layer does not ship the formula could never dispatch.
+func TestDispatchWispResolvesFormulaFromAnyConfiguredLayer(t *testing.T) {
+	packFormulaDir := t.TempDir()
+	orderOwnLayer := t.TempDir() // deliberately EMPTY: does not ship the formula
+	writeFile(t, filepath.Join(packFormulaDir, "pack-formula.toml"), `
+formula = "pack-formula"
+version = 1
+
+[[steps]]
+id = "work"
+title = "Do work"
+`)
+
+	store := beads.NewMemStore()
+	a := orders.Order{
+		Name:         "cross-layer-order",
+		Trigger:      "manual",
+		Formula:      "pack-formula",
+		FormulaLayer: orderOwnLayer,
+	}
+
+	m := &memoryOrderDispatcher{
+		rec:      events.Discard,
+		stderr:   lockedStderr(&bytes.Buffer{}),
+		cfg:      &config.City{FormulaLayers: config.FormulaLayers{City: []string{packFormulaDir}}},
+		cityName: "test-city",
+	}
+	m.dispatchWisp(context.Background(), store, execStoreTarget{}, a, t.TempDir(), "gc-tracking", nil)
+
+	all, err := store.List(beads.ListQuery{IncludeClosed: true, AllowScan: true})
+	if err != nil {
+		t.Fatalf("store.List: %v", err)
+	}
+	for i := range all {
+		if all[i].Title == "Do work" {
+			return
+		}
+	}
+	var titles []string
+	for _, b := range all {
+		titles = append(titles, b.Title)
+	}
+	t.Fatalf("dispatchWisp created no step bead from a formula shipped by a non-own layer (the #4378 bug); titles=%v", titles)
+}

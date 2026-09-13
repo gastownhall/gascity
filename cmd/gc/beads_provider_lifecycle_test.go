@@ -12284,6 +12284,7 @@ func TestDefaultScopeDoltDatabase(t *testing.T) {
 // it must not turn a recovered rig into a hard `gc rig add` failure.
 func TestInitBeadsForDirWithExecutorTreatsAlreadyInitializedRecoveryAsSuccess(t *testing.T) {
 	cityDir := t.TempDir()
+	cleanupManagedDoltTestCity(t, cityDir)
 	cityConfig := `[workspace]
 name = "demo"
 

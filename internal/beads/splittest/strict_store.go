@@ -417,11 +417,13 @@ func (s *StrictStore) DepAdd(issueID, dependsOnID, depType string) error {
 // resolveIDWithRouting (cmd/bd/dep.go), reporting `resolving issue ID <id>: no
 // issue found matching "<id>"` — except for a target whose prefix differs from
 // the source's, which bd passes through unresolved as a cross-prefix external
-// ref. So the cross-prefix target is the one case NO backend rejects; a
-// BdSemantics store rejects it for the domain co-residence invariant instead
-// (convoy.TrackItemIn returns ErrMemberNotCoResident "because a dep row cannot
-// reference an id its own store cannot resolve"), and says so, rather than
-// dressing a domain rule in bd's clothes.
+// ref. So bd itself rejects every case except the cross-prefix target. For
+// that one, BdStore.DepAdd now refuses the pair directly via
+// crossStoreDependencyError, and a BdSemantics store still rejects it for the
+// domain co-residence invariant (convoy.TrackItemIn returns
+// ErrMemberNotCoResident "because a dep row cannot reference an id its own
+// store cannot resolve") -- a second line of defense rather than the only one.
+// This leaf says so, rather than dressing a domain rule in bd's clothes.
 func (s *StrictStore) endpointNotResident(issueID, dependsOnID, missing string, isSource bool) error {
 	crossStore := !isSource && !s.ownsID(missing)
 	if s.semantics == SQLiteSemantics {

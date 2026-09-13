@@ -609,7 +609,7 @@ func TestControlReadyCacheSourcesRouteTheSameLegsAsTheFallback(t *testing.T) {
 		cityPath, rigPath, binding := rigFederationFixture(t, `[]`)
 		seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(binding))
 
-		sources, err := controlReadyCacheSources(rigPath, cityPath, nil)
+		sources, owned, err := controlReadyCacheSources(rigPath, cityPath, nil)
 		if err != nil {
 			t.Fatalf("controlReadyCacheSources for a split rig scope: %v", err)
 		}
@@ -623,13 +623,23 @@ func TestControlReadyCacheSourcesRouteTheSameLegsAsTheFallback(t *testing.T) {
 		if !sameStorePtr(sources[1], binding) {
 			t.Errorf("cache leg[1] = %T, want the city graph binding; the beads a city molecule routed to this rig stay unread on the cached arm", sources[1])
 		}
+		// Only the scoped leg is owned; the process-shared binding must never be
+		// closed by the per-prime cleanup.
+		if len(owned) != 1 || !sameStorePtr(owned[0], sources[0]) {
+			t.Errorf("owned = %d leg(s), want exactly the scope's own store; the shared binding must not be in owned", len(owned))
+		}
+		for _, o := range owned {
+			if sameStorePtr(o, binding) {
+				t.Errorf("owned includes the shared graph binding; closing it would poison every later graph-class op")
+			}
+		}
 	})
 
 	t.Run("split city scope snapshots only the binding", func(t *testing.T) {
 		cityPath, _, binding := rigFederationFixture(t, `[]`)
 		seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(binding))
 
-		sources, err := controlReadyCacheSources(cityPath, cityPath, nil)
+		sources, owned, err := controlReadyCacheSources(cityPath, cityPath, nil)
 		if err != nil {
 			t.Fatalf("controlReadyCacheSources for a split city scope: %v", err)
 		}
@@ -637,13 +647,18 @@ func TestControlReadyCacheSourcesRouteTheSameLegsAsTheFallback(t *testing.T) {
 			t.Fatalf("cache sources for a split city scope = %d leg(s), want exactly the binding; "+
 				"unioning the work store back in re-offers the frozen copies the migration retained", len(sources))
 		}
+		// A relocated city reads only the shared binding, which this call did not
+		// open, so nothing is owned.
+		if len(owned) != 0 {
+			t.Errorf("owned = %d leg(s), want 0; the relocated-city arm reads only the process-shared binding", len(owned))
+		}
 	})
 
 	t.Run("single-store rig scope snapshots one store", func(t *testing.T) {
 		cityPath, rigPath, binding := rigFederationFixture(t, `[]`)
 		seedCLIStorageRoutes(t, cityPath, nil)
 
-		sources, err := controlReadyCacheSources(rigPath, cityPath, nil)
+		sources, owned, err := controlReadyCacheSources(rigPath, cityPath, nil)
 		if err != nil {
 			t.Fatalf("controlReadyCacheSources for a single-store rig scope: %v", err)
 		}
@@ -653,6 +668,10 @@ func TestControlReadyCacheSourcesRouteTheSameLegsAsTheFallback(t *testing.T) {
 		}
 		if sameStorePtr(sources[0], binding) {
 			t.Errorf("the single leg is the unrouted binding, want the scope's own store")
+		}
+		// The lone scoped leg is call-owned and must be closed after priming.
+		if len(owned) != 1 || !sameStorePtr(owned[0], sources[0]) {
+			t.Errorf("owned = %d leg(s), want exactly the scope's own store", len(owned))
 		}
 	})
 }
