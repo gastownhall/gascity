@@ -77,13 +77,13 @@ func newPartialListState(t *testing.T, listErr, readyErr error) *fakeState {
 
 	// Add a second rig "bad" whose store fails.
 	bad := beads.NewMemStore()
-	_, _ = bad.Create(beads.Bead{Type: "task", Title: "would-be-lost", Status: "active"})
+	_, _ = bad.Create(beads.Bead{Type: "task", Title: "would-be-lost", Status: "open"})
 	wrapped := &failingBeadStore{Store: bad, listErr: listErr, readyErr: readyErr}
 	fs.stores["bad"] = wrapped
 	fs.cfg.Rigs = append(fs.cfg.Rigs, config.Rig{Name: "bad", Path: t.TempDir()})
 
 	// Seed "myrig" with a real bead so the good-rig path has something.
-	_, _ = fs.stores["myrig"].Create(beads.Bead{Type: "task", Title: "ok-rig-task", Status: "active"})
+	_, _ = fs.stores["myrig"].Create(beads.Bead{Type: "task", Title: "ok-rig-task", Status: "open"})
 	return fs
 }
 

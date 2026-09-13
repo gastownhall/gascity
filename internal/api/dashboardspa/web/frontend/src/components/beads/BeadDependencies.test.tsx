@@ -51,6 +51,17 @@ describe('BeadDependencies', () => {
     expect(onOpenBead).toHaveBeenCalledWith('B');
   });
 
+  it('labels a typed downstream edge instead of collapsing it to plain "Blocks" (gascity#4365)', () => {
+    // A tracks B (non-blocking relation); B's inverse edge must show the
+    // 'tracks' label, not present a plain untyped blocker.
+    const node = nodeFor('B', [
+      bead('B', 'open'),
+      bead('A', 'open', { dependencies: [{ depends_on_id: 'B', issue_id: 'A', type: 'tracks' }] }),
+    ]);
+    render(<BeadDependencies node={node} onOpenBead={vi.fn()} />);
+    expect(screen.getByText('tracks')).toBeTruthy();
+  });
+
   it('marks an unresolved upstream edge with no navigation target', () => {
     const node = nodeFor('B', [bead('B', 'open', { needs: ['GHOST'] })]);
     render(<BeadDependencies node={node} onOpenBead={vi.fn()} />);

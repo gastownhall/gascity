@@ -68,15 +68,38 @@ const (
 	executionClaimNudgeStoreRefKey = "execution_claim_nudge_store_ref"
 	executionClaimNudgeCountKey    = "execution_claim_nudge_count"
 	executionClaimNudgeAtKey       = "execution_claim_nudge_at"
+	// executionClaimNudgeDecayKey counts the consecutive activity re-arms this
+	// claim has earned (see poolExecutionBackstop.decay). Persisted alongside
+	// the attempt count for the same reason: the bound has to survive a
+	// controller restart, or a restart loop would hand out an unlimited budget
+	// one process at a time.
+	executionClaimNudgeDecayKey = "execution_claim_nudge_decays"
 	// executionClaimNudgeStalledKey latches the one-shot escalation so the
 	// typed event and the drain request fire once per stalled claim rather than
 	// once per tick for as long as the claim is held.
 	executionClaimNudgeStalledKey = "execution_claim_nudge_stalled"
 )
 
-// nudgeStalledPoolExecution re-delivers the configured claim nudge to a pool slot
-// that HOLDS an in-progress claim it never started executing, and escalates once
-// the bounded attempts are spent.
+// maxExecutionClaimNudgeDecays bounds how many times ONE claim may have its
+// pacing window re-armed by renewed activity before the attempt ladder is
+// allowed to run to the drain regardless of what the activity clock says.
+//
+// The bound exists because the re-arm's evidence is not fully trustworthy. A
+// self-echoing seat (a provider that counts gc's own nudge as activity, a
+// spinner that repaints, a menu that redraws) can supply fresh activity
+// forever, and an unbounded re-arm would then nudge that seat forever without
+// ever reaching the drain — which is the only thing that releases the claim it
+// is holding. Six re-arms cost about 18 minutes (each self-echoing cycle is one
+// nudge plus the grace window that must elapse before the next quiet tick can
+// re-arm, ~3 min), after which the ordinary bounded march adds ~10 more, so
+// every governed seat converges inside roughly half an hour on every provider
+// while a genuinely human-paced seat still gets a long leash.
+const maxExecutionClaimNudgeDecays = 6
+
+// nudgeStalledPoolExecution re-delivers the configured claim nudge to a seat —
+// a pool slot or a configured named interactive seat (see governs) — that HOLDS
+// an in-progress claim it never started executing, and escalates once the
+// bounded attempts are spent.
 //
 // work/workStores/workStoreRefs are the reconciler's index-aligned assigned-work
 // snapshot; requestDrain is the existing drain request (drainOps.setDrain), taken
@@ -181,8 +204,9 @@ func (s executionClaimSnapshot) forIdentities(identities []string) []executionCl
 	return out
 }
 
-// poolExecutionBackstop is the backstopPredicate for a pool slot that claimed a
-// bead and never executed it.
+// poolExecutionBackstop is the backstopPredicate for a seat — a pool slot or a
+// configured named interactive seat (see governs) — that claimed a bead and
+// never executed it.
 type poolExecutionBackstop struct {
 	cfg          *config.City
 	sp           runtime.Provider
@@ -192,8 +216,37 @@ type poolExecutionBackstop struct {
 	claims       executionClaimSnapshot
 }
 
+// governs covers both pool slots and configured named interactive seats. The
+// pool-only scope was the ga-lez12 gap: the pilot-killer stalls happened on
+// interactive Claude-harness seats — the run-operator holding finalize-work, an
+// olivia PM holding canonicalize-issue, an idle design reviewer — and those
+// seats carry configured_named_session with pool_managed explicitly cleared
+// (session_beads.go), so a pool-only predicate never saw them. A named seat that
+// claims a step and never executes it is stranded exactly like a pool slot: the
+// bead is in_progress so no claim probe wants it, the session is alive so no
+// crash lane touches it, and the in_progress row keeps the seat's close gate
+// open so it is never reaped. Everything below this predicate resolves by the
+// session's OWN identities and re-checks ownership before acting, so widening
+// the scope adds coverage without loosening any guard.
+//
+// Manual seats are excluded from BOTH arms: a manual seat is a human's own
+// session rather than an orchestration slot, so nudging or draining one would
+// act against a session this backstop has no business recovering.
+//
+// Dependency-only seats are NOT excluded. A dependency floor is a pool slot by
+// construction (ensureDependencyOnlyTemplate, build_desired_state.go, is the
+// only thing that sets the flag and always builds pool-slot identity, never a
+// configured-named one — so session_beads.go stamps dependency_only=true and
+// pool_managed=true together), and it runs the same claim loop as any other
+// slot. Excluding it would strip coverage this lane has had since it shipped
+// while narrowing nothing on the named arm, and a floor is the worst seat to
+// leave stranded: the dependency gate deliberately keeps it alive, so the
+// recycle roulette that eventually frees an ordinary slot may never fire.
 func (p poolExecutionBackstop) governs(s beads.Bead) bool {
-	return strings.TrimSpace(s.Metadata["pool_managed"]) == "true"
+	if isManualSessionBead(s) {
+		return false
+	}
+	return strings.TrimSpace(s.Metadata["pool_managed"]) == "true" || isNamedSessionBead(s)
 }
 
 // resolve reports an outstanding stall only when all of it holds: the session
@@ -205,6 +258,10 @@ func (p poolExecutionBackstop) governs(s beads.Bead) bool {
 // nudge about would make the persisted marker a lie. Ambiguity holds rather than
 // clears, so a transient multi-claim tick cannot reset a window already running.
 func (p poolExecutionBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, sessName string) (backstopTarget, backstopResolution) {
+	// Cheapest discriminator first. The claims snapshot is already in memory,
+	// and the overwhelmingly common answer is "this seat holds nothing" — which
+	// needs no runtime call at all, and clears any stale marker immediately
+	// rather than deferring cleanup behind a probe.
 	claims := p.claims.forIdentities(currentSessionAssigneeIdentities(s))
 	switch len(claims) {
 	case 0:
@@ -212,6 +269,15 @@ func (p poolExecutionBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, se
 	case 1:
 		// Continue below.
 	default:
+		return backstopTarget{}, backstopResolutionHold
+	}
+	// Never act under a human's hands. A named interactive seat is exactly the
+	// session an operator attaches to and drives directly; while a terminal is
+	// attached, a nudge would inject keystrokes into that session and a drain
+	// would tear it out from under them. HOLD rather than clear so a grace
+	// window already running survives the human detaching and resumes its
+	// ordinary cadence — a quiet attached seat is "we cannot tell", not "idle".
+	if p.sp.IsAttached(sessName) {
 		return backstopTarget{}, backstopResolutionHold
 	}
 	if !p.sessionIsQuiet(sessName) {
@@ -245,8 +311,75 @@ func (p poolExecutionBackstop) state(s beads.Bead, target backstopTarget) (same 
 	return same, atoiOr0(s.Metadata[executionClaimNudgeCountKey]), parseRFC3339OrZero(s.Metadata[executionClaimNudgeAtKey])
 }
 
+// content resolves the seat's claim nudge, falling back to defaultPoolClaimNudge
+// when the agent is known but configures no nudge — the same fallback the
+// stalled-pool-claim lane already uses (stalledPoolClaimNudgeFor). The named
+// seats this backstop rescues configure no [agent] nudge, so without the
+// fallback the engine's empty-content path would drain them COLD; the confirmed
+// ga-lez12 cause is that these seats RESUME once nudged, so the SDK must deliver
+// a nudge before the drain regardless of pack config. An unknown template or
+// agent still yields "" and goes straight to the drain, since there is genuinely
+// nothing to send and parking on the observe marker forever would starve the
+// seat's close gate.
 func (p poolExecutionBackstop) content(s beads.Bead) string {
-	return claimNudgeFor(p.cfg, s)
+	return stalledPoolClaimNudgeFor(p.cfg, s)
+}
+
+// decay implements activityDecayingBackstop. An in-progress claim is what a
+// working agent looks like, so this predicate cannot tell "working slowly" from
+// "stalled" by bead state alone. Fresh runtime activity after the last attempt
+// is that discriminator: a human-paced seat that answered the previous nudge and
+// worked in a burst has advanced its activity clock, and re-arming its window
+// keeps cumulative quiet pauses from marching it to the drain.
+//
+// The re-arm is BOUNDED, and the bound is the load-bearing half. The activity
+// clock is not a clean signal of "the agent is working": on every provider but
+// tmux (which records each poke and discounts it — GetSessionActivity /
+// discountPokeActivity) gc's own delivered nudge advances the clock itself, and
+// a repainting spinner or menu does the same without any agent behind it. An
+// unbounded re-arm would let such a seat re-arm on the echo of its own nudge
+// forever and never reach the drain — the only thing that releases the claim it
+// holds — which is precisely the non-convergence this file exists to prevent.
+// So a spent budget (maxExecutionClaimNudgeDecays) refuses to re-arm and hands
+// the seat back to the ordinary ladder, and every governed seat converges
+// whatever its activity clock reports.
+//
+// Activity-only and budget-only, never keyed on who the session is.
+func (p poolExecutionBackstop) decay(store beads.Store, s *beads.Bead, target backstopTarget, sessName string, last, now time.Time, stdout io.Writer) bool {
+	if !p.renewedSince(sessName, last) {
+		return false
+	}
+	decays := atoiOr0(s.Metadata[executionClaimNudgeDecayKey])
+	if decays >= maxExecutionClaimNudgeDecays {
+		return false
+	}
+	// Read the spent attempts before the write resets them, so the operator
+	// line reports the budget this re-arm actually forgave.
+	attempts := atoiOr0(s.Metadata[executionClaimNudgeCountKey])
+	if !writeExecutionClaimMarker(store, s, target, 0, decays+1, now, stdout) {
+		return false
+	}
+	// A marker that goes count=2 -> count=0 with nothing on stdout is
+	// indistinguishable from a store glitch, and "why was this seat never
+	// drained" is exactly the question this path provokes.
+	fmt.Fprintf(stdout, //nolint:errcheck // best-effort
+		"execution-claim-nudge: %s showed activity since its last nudge for %s; re-arming its window (re-arm %d/%d, forgiving %d/%d attempts)\n",
+		sessName, target.ID, decays+1, maxExecutionClaimNudgeDecays, attempts, idleClaimNudgeMaxAttempts)
+	return true
+}
+
+// renewedSince reports whether the runtime observed activity for sessName after
+// last, the persisted time of the previous attempt. Fails closed: an unreadable
+// or unset activity signal is not renewal, so the bounded march continues.
+func (p poolExecutionBackstop) renewedSince(sessName string, last time.Time) bool {
+	if last.IsZero() {
+		return false
+	}
+	activity, err := p.sp.GetLastActivity(sessName)
+	if err != nil || activity.IsZero() {
+		return false
+	}
+	return activity.After(last)
 }
 
 // revalidate re-reads the claim through the owning store's authoritative live
@@ -272,12 +405,16 @@ func (p poolExecutionBackstop) revalidate(target backstopTarget) backstopResolut
 	return backstopResolutionOutstanding
 }
 
+// observe starts a new assignment's window: a fresh grace clock AND a fresh
+// re-arm budget, since the budget is spent per claim.
 func (p poolExecutionBackstop) observe(store beads.Store, s *beads.Bead, target backstopTarget, now time.Time, stdout io.Writer) {
-	writeExecutionClaimMarker(store, s, target, 0, now, stdout)
+	writeExecutionClaimMarker(store, s, target, 0, 0, now, stdout)
 }
 
+// reserve records a delivery attempt. It carries the re-arm count forward
+// unchanged: an attempt spends attempt budget, never decay budget.
 func (p poolExecutionBackstop) reserve(store beads.Store, s *beads.Bead, target backstopTarget, attempts int, now time.Time, stdout io.Writer) bool {
-	return writeExecutionClaimMarker(store, s, target, attempts, now, stdout)
+	return writeExecutionClaimMarker(store, s, target, attempts, atoiOr0(s.Metadata[executionClaimNudgeDecayKey]), now, stdout)
 }
 
 // exhausted turns a spent attempt budget into one observable fact and one drain
@@ -301,10 +438,15 @@ func (p poolExecutionBackstop) exhausted(store beads.Store, s *beads.Bead, stdou
 	}, "execution-claim-nudge", stdout) {
 		return
 	}
-	p.emitStepStalled(s, beadID, atoiOr0(s.Metadata[executionClaimNudgeCountKey]))
+	// Report the attempts actually DELIVERED, not the cap. An agent with no
+	// configured nudge escalates at 0/3 having never been contacted, and an
+	// operator reading "after 3 attempts" there would go looking for three
+	// nudges that were never sent.
+	attempts := atoiOr0(s.Metadata[executionClaimNudgeCountKey])
+	p.emitStepStalled(s, beadID, attempts)
 	fmt.Fprintf(stdout, //nolint:errcheck // best-effort
-		"execution-claim-nudge: %s still holds %s unexecuted after %d attempts; draining (%s)\n",
-		sessName, beadID, idleClaimNudgeMaxAttempts, executionStalledDrainReason)
+		"execution-claim-nudge: %s still holds %s unexecuted after %d/%d nudge attempts; draining (%s)\n",
+		sessName, beadID, attempts, idleClaimNudgeMaxAttempts, executionStalledDrainReason)
 	if p.requestDrain == nil || sessName == "" {
 		return
 	}
@@ -346,12 +488,13 @@ func (p poolExecutionBackstop) clear(store beads.Store, s *beads.Bead, stdout io
 	clearExecutionClaimMarker(store, s, stdout)
 }
 
-func writeExecutionClaimMarker(store beads.Store, s *beads.Bead, target backstopTarget, attempts int, now time.Time, stdout io.Writer) bool {
+func writeExecutionClaimMarker(store beads.Store, s *beads.Bead, target backstopTarget, attempts, decays int, now time.Time, stdout io.Writer) bool {
 	return writeSessionMetadata(store, s, map[string]string{
 		executionClaimNudgeWorkKey:     target.ID,
 		executionClaimNudgeRootKey:     target.RootID,
 		executionClaimNudgeStoreRefKey: target.StoreRef,
 		executionClaimNudgeCountKey:    strconv.Itoa(attempts),
+		executionClaimNudgeDecayKey:    strconv.Itoa(decays),
 		executionClaimNudgeAtKey:       now.UTC().Format(time.RFC3339),
 	}, "execution-claim-nudge", stdout)
 }
@@ -365,6 +508,7 @@ func clearExecutionClaimMarker(store beads.Store, s *beads.Bead, stdout io.Write
 		executionClaimNudgeRootKey,
 		executionClaimNudgeStoreRefKey,
 		executionClaimNudgeCountKey,
+		executionClaimNudgeDecayKey,
 		executionClaimNudgeAtKey,
 		executionClaimNudgeStalledKey,
 	}

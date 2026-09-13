@@ -22,8 +22,8 @@ func TestNativeStepDependenciesReadsOnlyCanonicalMetadata(t *testing.T) {
 		{name: "malformed is unknown", stepID: "step-b", metadata: map[string]string{beadmeta.NativeStepDependenciesMetadataKey: `not-json`}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := nativeStepDependencies(tc.metadata, tc.stepID); !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("nativeStepDependencies() = %#v, want %#v", got, tc.want)
+			if got := NativeStepDependencies(tc.metadata, tc.stepID); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("NativeStepDependencies() = %#v, want %#v", got, tc.want)
 			}
 		})
 	}

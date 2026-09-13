@@ -30,6 +30,7 @@ func TestAllowedTypesMatchEventConstants(t *testing.T) {
 		events.ControllerStarted,
 		events.EventsRotated,
 		events.ExecutionWorkAssociated,
+		events.ExecutionRunAnchored,
 		events.ExecutionStepDefined,
 		events.ExecutionStepStarted,
 		events.ExecutionStepCompleted,

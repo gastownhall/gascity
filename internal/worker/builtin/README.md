@@ -11,7 +11,7 @@ passing result for that provider.
 ## Compatibility grid
 
 <!-- BEGIN GENERATED: worker-conformance-grid (scripts/worker_conformance_grid.py) -->
-_Generated 2026-06-12 from 19 conformance report(s)._
+_Generated 2026-08-16 from 32 conformance report(s); `zcode` row added 2026-08-18 from its own phase-1/2/3 reports._
 
 ### Phase 1 — transcript & continuation contract (deterministic fixtures)
 
@@ -19,10 +19,12 @@ _Generated 2026-06-12 from 19 conformance report(s)._
 |---|---|---|---|---|
 | `claude` | ✅ | ✅ | ✅ | ✅ |
 | `codex` | ✅ | ✅ | ✅ | ✅ |
+| `cursor` | ✅ | ✅ | ✅ | ✅ |
 | `gemini` | ✅ | ✅ | ✅ | ✅ |
 | `kimi` | ✅ | ✅ | ✅ | ✅ |
 | `opencode` | ✅ | ✅ | ✅ | ✅ |
 | `mimocode` | ✅ | ✅ | ✅ | ✅ |
+| `zcode` | ✅ | ✅ | ✅ | ✅ |
 | `pi` | ✅ | ✅ | ✅ | ✅ |
 | `antigravity` | ✅ | ✅ | ✅ | ✅ |
 
@@ -32,10 +34,12 @@ _Generated 2026-06-12 from 19 conformance report(s)._
 |---|---|---|---|---|
 | `claude` | ✅ | ✅ | ✅ | ✅ |
 | `codex` | ✅ | ✅ | ✅ | ✅ |
+| `cursor` | ✅ | ✅ | ✅ | ✅ |
 | `gemini` | ✅ | ✅ | ✅ | ✅ |
 | `kimi` | ✅ | ✅ | ✅ | ✅ |
 | `opencode` | ✅ | ✅ | ✅ | ✅ |
 | `mimocode` | ✅ | ✅ | ✅ | ✅ |
+| `zcode` | ✅ | ✅ | ✅ | ✅ |
 | `pi` | ✅ | ✅ | ✅ | ✅ |
 | `antigravity` | ✅ | ✅ | ✅ | ✅ |
 
@@ -45,10 +49,12 @@ _Generated 2026-06-12 from 19 conformance report(s)._
 |---|---|---|---|---|---|---|
 | `claude` | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 |
 | `codex` | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 |
+| `cursor` | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 |
 | `gemini` | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 |
 | `kimi` | 🔒 | ✅ | 🔒 | 🔒 | 🔒 | 🔒 |
 | `opencode` | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 |
 | `mimocode` | ✅ | ✅ | ✅ | ✅ | ✅ | ➖ |
+| `zcode` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `pi` | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 |
 | `antigravity` | 🔒 | ✅ | 🔒 | 🔒 | 🔒 | 🔒 |
 <!-- END GENERATED: worker-conformance-grid -->
@@ -128,6 +134,18 @@ production worker stack (tmux transport, hook plugins, transcript mirrors).
 
 ## Regenerating the grid
 
+Refreshing one provider without disturbing the others:
+
+```bash
+python3 scripts/worker_conformance_grid.py \
+  --report-dir /tmp/grid/phase1 --report-dir /tmp/grid/phase2 \
+  --report-dir /tmp/grid/live \
+  --provider <provider> \
+  --readme internal/worker/builtin/README.md
+```
+
+Full regeneration (only correct when the report dirs cover every provider):
+
 ```bash
 GC_WORKER_REPORT_DIR=/tmp/grid/phase1 make test-worker-core
 GC_WORKER_REPORT_DIR=/tmp/grid/phase2 make test-worker-core-phase2
@@ -162,3 +180,34 @@ python3 scripts/worker_conformance_grid.py \
 - `antigravity` and `mimocode` cannot cancel an in-flight turn
   (`WI-INT-001` ➖) — documented CLI limitations, both discovered live by
   this same conformance program.
+- `zcode` rows are from a full live run on glm-5.3 via the Z.ai coding plan
+  (`make test-worker-inference PROFILE=zcode/tmux-cli`). It has no launchable
+  TUI, so the pane runs the engine's own adapter
+  (`internal/worker/adapters/zcode`); `WI-INT-001` passes because the adapter
+  cancels the turn itself — the ZCode CLI installs a SIGINT handler and works
+  straight through a pane `^C`. Usage extraction is unregistered for the family,
+  so `WC-TX-USAGE-001` / `WC-USAGE-COST-001` record Unsupported.
+- `zcode`'s phase-2 Tool events and Interactions cells certify that the
+  NORMALIZER handles those shapes, not that the family produces them. Its
+  transcripts are an export mirror this repo writes, and the adapter emits text
+  parts only — no tool or interaction parts — because each turn is a headless
+  call whose structured events ZCode does not expose. The scenarios feed
+  hand-built mirrors carrying those parts, which is a real reader contract and
+  worth keeping, but a green cell here is not evidence that a live zcode worker
+  surfaces tool calls or permission prompts. Wiring real tool-part extraction is
+  a follow-up, not something these cells already cover.
+- A `zcode` conversation reset ARCHIVES the superseded conversation rather than
+  deleting it: gc's reset contract issues the reset and then reads the pre-reset
+  transcript, so the record has to stay resolvable by its own scope. Superseded
+  scopes move to `$XDG_STATE_HOME/gascity/zcode/archived-transcripts/`, a
+  different tree from the live mirror root the model browses, and discovery
+  unions both. The anti-leak guarantee is therefore "the prior conversation is
+  not adjacent", not "not present" — adjacency is the leak that was observed
+  (GLM read a stale mirror sitting beside the fresh one in the same directory).
+  Enforcement is the behavioral no-recall proof plus the per-epoch CLI HOME,
+  which IS deleted because ZCode's own session database has no preservation
+  contract and is the copy the CLI itself would reattach to.
+- The zcode row is refreshed with `--provider zcode`, which rewrites only that
+  provider's rows. A full regeneration writes every provider from the reports it
+  is handed, so running it on a host that holds one provider's reports would
+  silently downgrade every other provider's recorded cells to "not verified".

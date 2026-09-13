@@ -350,6 +350,58 @@ func TestCityTomlValidates(t *testing.T) {
 	}
 }
 
+// TestHeartbeatAgentsCarryMaxSessionAge pins the resolved values of the
+// pack.toml [[patches.agent]] wall-clock restart backstop (ga-13yy0). The
+// patches match by name against the expanded composition, so a pack refactor
+// could leave them silently ineffective without any load-time error; this
+// test asserts the post-expansion values instead of the literal TOML. Only
+// city-scoped agents are checked — witness is rig-scoped and absent from a
+// composition with no rigs registered.
+func TestHeartbeatAgentsCarryMaxSessionAge(t *testing.T) {
+	cfg := loadExpanded(t)
+
+	const (
+		wantAge    = "6h"
+		wantJitter = "15m"
+	)
+	// dog is an unpatched city agent: it proves the patches are targeted
+	// rather than a blanket default applied to every agent.
+	patched := map[string]bool{"mayor": true, "deacon": true, "boot": true}
+	unpatched := map[string]bool{"dog": true}
+
+	seen := make(map[string]bool, len(patched)+len(unpatched))
+	for _, a := range cfg.Agents {
+		switch {
+		case patched[a.Name]:
+			seen[a.Name] = true
+			if a.MaxSessionAge != wantAge {
+				t.Errorf("agent %q: MaxSessionAge = %q, want %q", a.Name, a.MaxSessionAge, wantAge)
+			}
+			if a.MaxSessionAgeJitter != wantJitter {
+				t.Errorf("agent %q: MaxSessionAgeJitter = %q, want %q", a.Name, a.MaxSessionAgeJitter, wantJitter)
+			}
+		case unpatched[a.Name]:
+			seen[a.Name] = true
+			if a.MaxSessionAge != "" {
+				t.Errorf("agent %q: MaxSessionAge = %q, want unset (no patch targets it)", a.Name, a.MaxSessionAge)
+			}
+		}
+	}
+
+	// A rename in the gastown pack would drop the agent from the composition
+	// entirely; without this the loop above would pass vacuously.
+	for name := range patched {
+		if !seen[name] {
+			t.Errorf("agent %q missing from expanded config; the pack.toml patch has no target", name)
+		}
+	}
+	for name := range unpatched {
+		if !seen[name] {
+			t.Errorf("agent %q missing from expanded config; the unpatched control is gone", name)
+		}
+	}
+}
+
 func TestPromptFilesExist(t *testing.T) {
 	dir := exampleDir()
 	cfg := loadExpanded(t)

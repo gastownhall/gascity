@@ -795,7 +795,10 @@ timeout = "30s"
 		t.Fatal("missing workflow finalizer")
 	}
 
-	assertHasDep("ralph-demo", "ralph-demo.workflow-finalize", "blocks")
+	// The root reaches its finalizer through an informational edge, never a
+	// blocking one: the finalizer is what closes the root (ga-a6zy9).
+	assertHasDep("ralph-demo", "ralph-demo.workflow-finalize", "tracks")
+	assertLacksDep("ralph-demo", "ralph-demo.workflow-finalize", "blocks")
 	assertLacksDep("ralph-demo", "ralph-demo.design", "blocks")
 	assertLacksDep("ralph-demo", "ralph-demo.implement", "blocks")
 	assertLacksDep("ralph-demo", "ralph-demo.implement.run.1", "blocks")
@@ -970,7 +973,10 @@ needs = ["setup"]
 		if dep.StepID == "graph-demo.work" && dep.DependsOnID == "graph-demo.setup" && dep.Type == "blocks" {
 			foundBlocks = true
 		}
-		if dep.StepID == "graph-demo" && dep.DependsOnID == "graph-demo.workflow-finalize" && dep.Type == "blocks" {
+		if dep.StepID == "graph-demo" && dep.DependsOnID == "graph-demo.workflow-finalize" {
+			if dep.Type != "tracks" {
+				t.Fatalf("root -> workflow-finalize dep type = %q, want tracks (the finalizer closes the root)", dep.Type)
+			}
 			foundRootFinalize = true
 		}
 	}
@@ -978,7 +984,7 @@ needs = ["setup"]
 		t.Fatal("missing work -> setup blocks dep")
 	}
 	if !foundRootFinalize {
-		t.Fatal("missing root -> workflow-finalize blocks dep")
+		t.Fatal("missing root -> workflow-finalize tracks dep")
 	}
 }
 
@@ -1084,7 +1090,7 @@ func TestCompileScopedWorkCarriesScopeAndCleanupMetadata(t *testing.T) {
 		if dep.StepID == cleanup.ID && dep.DependsOnID == body.ID && dep.Type == "blocks" {
 			foundCleanupDep = true
 		}
-		if dep.StepID == root.ID && dep.DependsOnID == finalizer.ID && dep.Type == "blocks" {
+		if dep.StepID == root.ID && dep.DependsOnID == finalizer.ID && dep.Type == "tracks" {
 			foundRootFinalize = true
 		}
 		if dep.StepID == finalizer.ID && dep.DependsOnID == body.ID && dep.Type == "blocks" {
@@ -1095,7 +1101,7 @@ func TestCompileScopedWorkCarriesScopeAndCleanupMetadata(t *testing.T) {
 		t.Fatalf("missing cleanup -> body blocks dep")
 	}
 	if !foundRootFinalize {
-		t.Fatalf("missing workflow root -> workflow-finalize blocks dep")
+		t.Fatalf("missing workflow root -> workflow-finalize tracks dep")
 	}
 	if !foundFinalizeBody {
 		t.Fatalf("missing workflow-finalize -> body blocks dep")
@@ -1115,9 +1121,16 @@ func TestCompileScopedWorkCarriesScopeAndCleanupMetadata(t *testing.T) {
 	assertBefore("mol-scoped-work.load-context", "mol-scoped-work.workspace-setup")
 	assertBefore("mol-scoped-work.workspace-setup", "mol-scoped-work.workspace-setup-scope-check")
 	assertBefore("mol-scoped-work.preflight-tests", "mol-scoped-work.preflight-tests-scope-check")
-	assertBefore("mol-scoped-work.submit-scope-check", "mol-scoped-work.body")
+	assertBefore("mol-scoped-work.submit", "mol-scoped-work.submit-scope-check")
+	// The body latches its members directly, not their scope-checks: a
+	// scope-check closes the body, so a body blocked on one never converges
+	// (ga-a6zy9). The body therefore sorts after its last member, and the
+	// now-unreferenced trailing scope-check sorts before the finalizer that
+	// waits on it.
+	assertBefore("mol-scoped-work.submit", "mol-scoped-work.body")
 	assertBefore("mol-scoped-work.body", "mol-scoped-work.cleanup-worktree")
 	assertBefore("mol-scoped-work.cleanup-worktree", "mol-scoped-work.workflow-finalize")
+	assertBefore("mol-scoped-work.submit-scope-check", "mol-scoped-work.workflow-finalize")
 
 	// The teardown retry control must block on its own attempt.1, matching
 	// the invariant in processRetryControl: a retry-manager is only ever

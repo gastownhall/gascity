@@ -384,6 +384,98 @@ func TestWispGC_PurgesExpiredMoleculeChildrenWithRoot(t *testing.T) {
 	}
 }
 
+// TestWispGC_ClosureSkipsRootReopenedAfterSnapshot is the regression test for
+// ra-nxppyo: closedWispGCEntries can answer from a stale cached snapshot. A
+// root reopened (live work resumed) inside the cache window — after the
+// snapshot was taken but before the purge sweep reaches it — must not have
+// its full descendant closure destructively deleted.
+func TestWispGC_ClosureSkipsRootReopenedAfterSnapshot(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCBead("mol-reopen", now.Add(-2*time.Hour), "closed", "molecule"),
+		{
+			ID:        "mol-reopen.1",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-2 * time.Hour),
+			ParentID:  "mol-reopen",
+		},
+	})
+	if err := store.DepAdd("mol-reopen.1", "mol-reopen", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(mol-reopen.1->mol-reopen): %v", err)
+	}
+
+	entries, err := closedWispGCEntries(store)
+	if err != nil {
+		t.Fatalf("closedWispGCEntries: %v", err)
+	}
+
+	if err := store.Reopen("mol-reopen"); err != nil {
+		t.Fatalf("Reopen(mol-reopen): %v", err)
+	}
+
+	purged, err := purgeExpiredBeadClosures(store, entries, now, 0)
+	if err != nil {
+		t.Fatalf("purgeExpiredBeadClosures: %v", err)
+	}
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0 (root was reopened after the snapshot)", purged)
+	}
+	if len(store.deletedIDs) != 0 {
+		t.Fatalf("deletedIDs = %v, want none", store.deletedIDs)
+	}
+	root, err := store.Get("mol-reopen")
+	if err != nil {
+		t.Fatalf("Get(mol-reopen): %v", err)
+	}
+	if root.Status != "open" {
+		t.Fatalf("mol-reopen status = %q, want open (reopen must survive)", root.Status)
+	}
+	if _, err := store.Get("mol-reopen.1"); err != nil {
+		t.Fatalf("Get(mol-reopen.1) should still exist: %v", err)
+	}
+}
+
+// TestWispGC_ClosureSurfacesLiveRecheckError asserts that a transient live-read
+// failure during the pre-delete re-verify is SURFACED rather than silently
+// treated as "already gone". A backend outage must produce a visible sweep
+// error, not a zero-purge sweep with a nil error — and must still never delete.
+func TestWispGC_ClosureSurfacesLiveRecheckError(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCBead("mol-boom", now.Add(-2*time.Hour), "closed", "molecule"),
+		{
+			ID:        "mol-boom.1",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-2 * time.Hour),
+			ParentID:  "mol-boom",
+		},
+	})
+	if err := store.DepAdd("mol-boom.1", "mol-boom", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(mol-boom.1->mol-boom): %v", err)
+	}
+
+	entries, err := closedWispGCEntries(store)
+	if err != nil {
+		t.Fatalf("closedWispGCEntries: %v", err)
+	}
+
+	// The live re-verify now fails for a reason other than not-found.
+	store.getErrors["mol-boom"] = fmt.Errorf("backend down")
+
+	purged, err := purgeExpiredBeadClosures(store, entries, now, 0)
+	if err == nil {
+		t.Fatal("purgeExpiredBeadClosures: want error, got nil (a live-read failure must not be swallowed)")
+	}
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0 (live re-verify failed)", purged)
+	}
+	if len(store.deletedIDs) != 0 {
+		t.Fatalf("deletedIDs = %v, want none", store.deletedIDs)
+	}
+}
+
 func TestWispGC_PurgesExpiredClosureAcrossStorageTiers(t *testing.T) {
 	now := time.Now()
 	store := newGCStore([]beads.Bead{
@@ -897,10 +989,15 @@ func TestWispGC_ReapBatchCapBoundsAttemptsNotJustSuccesses(t *testing.T) {
 	}
 }
 
-func TestWispGC_ReapSkipsRowsWithoutRootPointer(t *testing.T) {
+// TestWispGC_ReapsRootlessPlainTaskWisp is the regression for
+// gastownhall/gascity#3780: a closed, wisp-tier, type=task row with no
+// gc.root_bead_id pointer has no owning root to check for collectibility --
+// it is its own closure boundary, so its already-closed status (guaranteed by
+// the candidates query) is sufficient to reap it. Previously such rows were
+// skipped outright and accumulated uncollected in the wisp tier.
+func TestWispGC_ReapsRootlessPlainTaskWisp(t *testing.T) {
 	withReapOrphansEnforced(t, true)
 	now := time.Now()
-	// Closed wisp-tier row with no gc.root_bead_id pointer: out of scope.
 	noRoot := makeGCBeadWithMetadata("no-root", now.Add(-2*time.Hour), "closed", "task", map[string]string{})
 	noRoot.Ephemeral = true
 	store := newGCStore([]beads.Bead{noRoot})
@@ -910,11 +1007,222 @@ func TestWispGC_ReapSkipsRowsWithoutRootPointer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runGC: %v", err)
 	}
+	if purged != 1 {
+		t.Fatalf("purged = %d, want 1; a rootless plain-task wisp is its own closure boundary", purged)
+	}
+	assertDeletedIDs(t, store.deletedIDs, "no-root")
+}
+
+// TestWispGC_ReapSkipsRootlessNonTaskRow preserves the original safety
+// boundary for any rootless closed wisp-tier row that is NOT a plain task:
+// an unrecognized shape the reaper cannot prove safe to collect stays out of
+// scope, same as before #3780.
+func TestWispGC_ReapSkipsRootlessNonTaskRow(t *testing.T) {
+	withReapOrphansEnforced(t, true)
+	now := time.Now()
+	noRoot := makeGCBeadWithMetadata("no-root-other", now.Add(-2*time.Hour), "closed", "note", map[string]string{})
+	noRoot.Ephemeral = true
+	store := newGCStore([]beads.Bead{noRoot})
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	purged, err := wg.runGC(beads.GraphStore{Store: store}, beads.MailStore{Store: store}, now)
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
 	if purged != 0 {
-		t.Fatalf("purged = %d, want 0; rows without a root pointer are out of scope", purged)
+		t.Fatalf("purged = %d, want 0; a rootless non-task row stays out of scope", purged)
+	}
+	if _, err := store.Get("no-root-other"); err != nil {
+		t.Fatalf("no-root-other must be preserved: %v", err)
+	}
+}
+
+// TestWispGC_ReapSkipsRootlessPlainTaskWithChildren pins the leaf fence on the
+// rootless branch: deleteWorkflowBead removes a SINGLE bead, not a closure, so
+// a rootless closed plain task that owns a parent-child subtree must stay out
+// of scope. Reaping it would strand its descendants — rootless themselves and
+// no longer reachable from any root — beyond either GC path forever.
+func TestWispGC_ReapSkipsRootlessPlainTaskWithChildren(t *testing.T) {
+	withReapOrphansEnforced(t, true)
+	now := time.Now()
+	noRoot := makeGCBeadWithMetadata("no-root", now.Add(-2*time.Hour), "closed", "task", map[string]string{})
+	noRoot.Ephemeral = true
+	child := makeGCBeadWithMetadata("no-root.1", now.Add(-2*time.Hour), "closed", "step", map[string]string{})
+	child.Ephemeral = true
+	child.ParentID = "no-root"
+	store := newGCStore([]beads.Bead{noRoot, child})
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	purged, err := wg.runGC(beads.GraphStore{Store: store}, beads.MailStore{Store: store}, now)
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0; a rootless plain task that owns children is not a leaf", purged)
+	}
+	for _, id := range []string{"no-root", "no-root.1"} {
+		if _, err := store.Get(id); err != nil {
+			t.Fatalf("%s must be preserved: %v", id, err)
+		}
+	}
+}
+
+// TestWispGC_ReapSkipsRootlessPlainTaskWithParent pins the other half of the
+// leaf fence: a rootless closed plain task that is itself a child of a live
+// molecule root is a subtree MEMBER, not an independent closure boundary, so
+// the reaper must leave it to the owning root's closure purge.
+func TestWispGC_ReapSkipsRootlessPlainTaskWithParent(t *testing.T) {
+	withReapOrphansEnforced(t, true)
+	now := time.Now()
+	child := makeGCBeadWithMetadata("no-root", now.Add(-2*time.Hour), "closed", "task", map[string]string{})
+	child.Ephemeral = true
+	child.ParentID = "live-root"
+	store := newGCStore([]beads.Bead{
+		makeGCBead("live-root", now.Add(-2*time.Hour), "in_progress", "molecule"),
+		child,
+	})
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	purged, err := wg.runGC(beads.GraphStore{Store: store}, beads.MailStore{Store: store}, now)
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0; a rootless plain task with a parent is not a leaf", purged)
 	}
 	if _, err := store.Get("no-root"); err != nil {
 		t.Fatalf("no-root must be preserved: %v", err)
+	}
+}
+
+// TestWispGC_ReapSkipsRootlessMessageWisp pins the mail exclusion the rootless
+// branch now leans on: mail wisps are created as type=message, so the type!=task
+// guard keeps the wisp tier's largest population out of the orphan reaper and
+// leaves PurgeReadMessageWisps authoritative over it.
+func TestWispGC_ReapSkipsRootlessMessageWisp(t *testing.T) {
+	withReapOrphansEnforced(t, true)
+	now := time.Now()
+	msg := makeGCMessageWisp("closed-msg", now.Add(-2*time.Hour), nil)
+	msg.Status = "closed"
+	store := newGCStore([]beads.Bead{msg})
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	purged, err := wg.runGC(beads.GraphStore{Store: store}, beads.MailStore{Store: store}, now)
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0; a rootless message wisp belongs to the mail purge, not the orphan reaper", purged)
+	}
+	if _, err := store.Get("closed-msg"); err != nil {
+		t.Fatalf("closed-msg must be preserved: %v", err)
+	}
+}
+
+// TestWispGC_ReapDryRunBoundsRootlessProbes pins the probe cap on the rootless
+// branch. The delete batch cap is gated on enforcement, so under the shipped
+// DRY-RUN default (GC_WISP_GC_REAP_ORPHANS unset) nothing bounded the leaf-ness
+// probes: every aged rootless candidate cost a Children read per controller
+// tick — a bd subprocess apiece in production — against precisely the backlog
+// this reaper exists to drain. The cap must bound those reads with no delete
+// ever attempted, and the sweep must say the dry-run estimate is now a floor.
+func TestWispGC_ReapDryRunBoundsRootlessProbes(t *testing.T) {
+	withReapOrphansEnforced(t, false)
+	withReapOrphanProbeCap(t, 2)
+	now := time.Now()
+	var seed []beads.Bead
+	for i := 0; i < 6; i++ {
+		bead := makeGCBeadWithMetadata(fmt.Sprintf("rootless-%d", i), now.Add(-2*time.Hour), "closed", "task", map[string]string{})
+		bead.Ephemeral = true
+		seed = append(seed, bead)
+	}
+	store := newGCStore(seed)
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	var purged int
+	var runErr error
+	output := captureWispGCLog(t, func() {
+		purged, runErr = wg.runGC(beads.GraphStore{Store: store}, beads.MailStore{Store: store}, now)
+	})
+	if runErr != nil {
+		t.Fatalf("runGC: %v", runErr)
+	}
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0; the dry-run default never deletes", purged)
+	}
+	if len(store.deleteAttempts) != 0 {
+		t.Fatalf("delete attempts = %v, want none in dry-run", store.deleteAttempts)
+	}
+	if store.childrenCalls > 2 {
+		t.Fatalf("childrenCalls = %d, want <= 2; the probe cap must bound leaf-ness reads in dry-run too", store.childrenCalls)
+	}
+	if store.childrenCalls == 0 {
+		t.Fatal("childrenCalls = 0; the sweep must still probe up to the cap")
+	}
+	if !strings.Contains(output, "rootless-orphan scan stopped after") {
+		t.Fatalf("log = %q, want the truncation notice so the dry-run estimate is not silently reported as the full backlog", output)
+	}
+}
+
+// TestWispGC_ReapSkipsRootlessTaskWithParentDepOnly pins the dep-row half of
+// the leaf fence. Ownership is carried by the parent_id COLUMN or by a
+// parent-child DEP ROW, and some step beads have only the dep row — which is
+// why collectExpiredBeadClosure walks both. A column-only fence would reap such
+// a row out from under a live parent.
+func TestWispGC_ReapSkipsRootlessTaskWithParentDepOnly(t *testing.T) {
+	withReapOrphansEnforced(t, true)
+	now := time.Now()
+	child := makeGCBeadWithMetadata("no-root", now.Add(-2*time.Hour), "closed", "task", map[string]string{})
+	child.Ephemeral = true
+	store := newGCStore([]beads.Bead{
+		makeGCBead("live-root", now.Add(-2*time.Hour), "in_progress", "molecule"),
+		child,
+	})
+	if err := store.DepAdd("no-root", "live-root", "parent-child"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	purged, err := wg.runGC(beads.GraphStore{Store: store}, beads.MailStore{Store: store}, now)
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0; a rootless plain task owned by a live parent through a dep row is not a leaf", purged)
+	}
+	if _, err := store.Get("no-root"); err != nil {
+		t.Fatalf("no-root must be preserved: %v", err)
+	}
+}
+
+// TestWispGC_ReapSkipsRootlessTaskWithChildDepOnly is the other direction of
+// the same dep-row fence: a rootless closed plain task whose child is linked to
+// it only by a parent-child dep row still owns a subtree, so reaping it — a
+// SINGLE-bead delete — would strand that child beyond either GC path.
+func TestWispGC_ReapSkipsRootlessTaskWithChildDepOnly(t *testing.T) {
+	withReapOrphansEnforced(t, true)
+	now := time.Now()
+	parent := makeGCBeadWithMetadata("no-root", now.Add(-2*time.Hour), "closed", "task", map[string]string{})
+	parent.Ephemeral = true
+	child := makeGCBeadWithMetadata("dep-child", now.Add(-2*time.Hour), "closed", "step", map[string]string{})
+	child.Ephemeral = true
+	store := newGCStore([]beads.Bead{parent, child})
+	if err := store.DepAdd("dep-child", "no-root", "parent-child"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	purged, err := wg.runGC(beads.GraphStore{Store: store}, beads.MailStore{Store: store}, now)
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0; a rootless plain task with a dep-linked child is not a leaf", purged)
+	}
+	for _, id := range []string{"no-root", "dep-child"} {
+		if _, err := store.Get(id); err != nil {
+			t.Fatalf("%s must be preserved: %v", id, err)
+		}
 	}
 }
 
@@ -1457,6 +1765,12 @@ type gcTestStore struct {
 	// assert that a batch cap bounds delete ATTEMPTS and not merely successful
 	// deletes (a failed delete leaves no trace in deletedIDs).
 	deleteAttempts []string
+	// childrenCalls and depListCalls count the leaf-ness probes the rootless
+	// orphan branch performs. Each is one backend read in production (BdStore
+	// runs a bd subprocess per call), so tests assert the probe cap bounds them
+	// even in the dry-run default where no delete is ever attempted.
+	childrenCalls int
+	depListCalls  int
 }
 
 func newGCStore(existing []beads.Bead) *gcTestStore {
@@ -1480,6 +1794,16 @@ func (s *gcTestStore) Get(id string) (beads.Bead, error) {
 		return beads.Bead{}, err
 	}
 	return s.MemStore.Get(id)
+}
+
+func (s *gcTestStore) Children(parentID string, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	s.childrenCalls++
+	return s.MemStore.Children(parentID, opts...)
+}
+
+func (s *gcTestStore) DepList(id, direction string) ([]beads.Dep, error) {
+	s.depListCalls++
+	return s.MemStore.DepList(id, direction)
 }
 
 func (s *gcTestStore) Delete(id string) error {
@@ -1564,6 +1888,15 @@ func withReapOrphanBatchCap(t *testing.T, batchCap int) {
 	prev := wispGCReapOrphanBatchCap
 	wispGCReapOrphanBatchCap = batchCap
 	t.Cleanup(func() { wispGCReapOrphanBatchCap = prev })
+}
+
+// withReapOrphanProbeCap overrides the per-sweep rootless leaf-ness probe cap
+// for the duration of a test, restoring the prior value on cleanup.
+func withReapOrphanProbeCap(t *testing.T, probeCap int) {
+	t.Helper()
+	prev := wispGCReapOrphanProbeCap
+	wispGCReapOrphanProbeCap = probeCap
+	t.Cleanup(func() { wispGCReapOrphanProbeCap = prev })
 }
 
 // withClosurePurgeBatchCap overrides the per-sweep closed-root closure purge cap

@@ -617,11 +617,15 @@ func newFormulaCookCmd(stdout, stderr io.Writer) *cobra.Command {
 This is a low-level workflow construction tool. It creates the formula root
 and all compiled step beads without routing any work.
 
-With --attach=<bead-id>, the sub-DAG is created as children of the given
-bead. The bead gains a blocking dependency on the sub-DAG root, so it won't
-close until the sub-DAG completes. This is the core primitive for late-bound
-DAG expansion — any agent, script, or workflow step can call it to expand a
-bead into a sub-workflow at runtime.
+With --attach=<bead-id>, the given bead gains a blocking dependency on the
+sub-DAG root, so it won't close until the sub-DAG completes. This is a
+"blocks" dependency only, not a parent-child relationship — the sub-DAG
+root does not become a child of the attached bead (gc bd list --parent
+will not find it), and convoy auto-close, which watches parent-child
+children and "tracks" members rather than blocks dependents, is not
+triggered by the sub-DAG completing. This is the core primitive for
+late-bound DAG expansion — any agent, script, or workflow step can call it
+to expand a bead into a sub-workflow at runtime.
 
 With --attach on a v2 formula — one declaring
 [requires] formula_compiler = ">=2.0.0" — the invocation runs under a
@@ -979,6 +983,14 @@ store, copy them into the binding with
 			// store that has never held it.
 			rootStore := store
 			if isGraphFormula {
+				// This arm writes molecule.Cook's sequence out rather than
+				// calling molecule.CookChoosingStore, and it needs all three
+				// capabilities that function's doc comment names as absent: the
+				// idempotency key is derived from the compiled recipe
+				// (stampFormulaCookGraphV2Root), the graph lock must stay held
+				// past the instantiate for the --meta stamp below, and the recipe
+				// is decorated through the store that will own it.
+				//
 				// Stamp the run root with its store/scope identity before
 				// instantiating, exactly as the --attach branch does via
 				// decorateFormulaCookGraphV2Recipe. Without it a standalone-cooked
@@ -1024,18 +1036,12 @@ store, copy them into the binding with
 				// compiler ran is what keeps such a wisp out of the work ledger,
 				// where it would read as a stranded infrastructure bead and stop
 				// boot. A v1 POURED molecule classifies as work and stays exactly
-				// where it always was. This is molecule.Cook's body, inlined only
-				// so the store can be chosen from the compiled recipe.
+				// where it always was.
 				opts := molecule.Options{Title: title, Vars: cookVars}
-				recipe, err := formula.CompileWithoutRuntimeVarValidation(cmd.Context(), args[0], scope.searchPaths, cookVars)
-				if err != nil {
-					return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("compiling formula %q: %w", args[0], err))
-				}
-				if err := molecule.ValidateRecipeRuntimeVars(recipe, opts); err != nil {
-					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
-				}
-				rootStore = moleculeClassStore(recipe, store, graphStore)
-				result, err = molecule.Instantiate(cmd.Context(), rootStore, recipe, opts)
+				var err error
+				result, rootStore, err = molecule.CookChoosingStore(cmd.Context(), args[0], scope.searchPaths, opts, func(recipe *formula.Recipe) beads.Store {
+					return moleculeClassStore(recipe, store, graphStore)
+				})
 				if err != nil {
 					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 				}

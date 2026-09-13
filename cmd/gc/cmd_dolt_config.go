@@ -194,13 +194,16 @@ log_level: %s
 listener:
   port: %s
   host: %s
-  # Managed multi-agent cities open a short-lived bd/dolt-sql client connection
-  # per operation. When the client process exits without a clean COM_QUIT, the
-  # server holds the socket in Sleep until read_timeout fires. A 5-minute
-  # read_timeout let these dead per-call connections pile to the hundreds
-  # (200-460 idle Sleep conns observed), burning Dolt CPU managing the swarm.
-  # The managed default reaps idle sockets promptly; city.toml [dolt]
-  # overrides can raise it for cities with slower live operations.
+  # read_timeout is dolt's ONLY idle-connection reaper on this dolt version --
+  # wait_timeout below is accepted but reaps nothing (measured for #5383).
+  # Nominally it bounds the inter-row produce gap, but queries that produce no
+  # rows until they finish (aggregates, large UPDATEs) are cut at this bound
+  # as a wall-clock cap on the whole result phase. Only a config change plus
+  # restart takes effect -- SET SESSION/GLOBAL cannot override it at runtime.
+  # Raised to leave headroom for legitimate long-running maintenance queries
+  # (#5383) while staying under half of write_timeout_millis so #3101's outer
+  # deadline still catches a genuine pile-up first (#3626). city.toml [dolt]
+  # overrides can raise it further for cities with slower live operations.
   max_connections: %d
   back_log: 50
   max_connections_timeout_millis: 5000

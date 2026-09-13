@@ -260,3 +260,113 @@ func TestDroppingALegBreaksAgreementAndNotTheRowCorpus(t *testing.T) {
 		}
 	}
 }
+
+// runtimeDemandLegs is the leg set the TICK's routed-demand read uses: the same
+// Plan(RoutedWork) as the claim reader, narrowed to the runtime plane.
+func (e legAgreementEnv) runtimeDemandLegs(t *testing.T) []beads.Store {
+	t.Helper()
+	candidates, err := routedWorkStoreCandidates(e.cityPath, e.cfg, e.leading(), e.rigs, nil, censusRefScoped)
+	if err != nil {
+		t.Fatalf("routedWorkStoreCandidates: %v", err)
+	}
+	out := make([]beads.Store, 0, len(candidates))
+	for _, c := range candidates {
+		out = append(out, c.store)
+	}
+	return out
+}
+
+// TestRuntimeDemandNarrowsTheClaimPlanWithoutReorderingIt is the cross-consumer
+// half of reader agreement under the relevance descriptor.
+//
+// The tick's routed-demand read and the demand CACHE CHECK both narrow to the
+// runtime plane; `gc ready` — a separate process, and the surface a worker
+// claims through — does not. That is a deliberate asymmetry (retiring the CLI's
+// ledger leg is ga-4qdfn's slice, not this one), and it is only safe while the
+// narrowed set is a SUBSEQUENCE of the claim reader's: same plan, same order,
+// legs dropped and never added or moved.
+//
+// A reorder would be the D6-in-reverse failure the descriptor exists to prevent
+// — Plan(RoutedWork) puts the binding LAST so a co-resident id is attributed to
+// the work store on both sides (#5148) — and an ADDED leg would mean demand
+// counting work no claim can reach.
+func TestRuntimeDemandNarrowsTheClaimPlanWithoutReorderingIt(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		split bool
+		rigs  []string
+	}{
+		{name: "T0-single-store", split: false},
+		{name: "T0-single-store-with-rigs", split: false, rigs: []string{"alpha", "bravo"}},
+		{name: "T1-whole-split", split: true},
+		{name: "T2-whole-split-with-rigs", split: true, rigs: []string{"alpha", "bravo"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newLegAgreementEnv(t, tc.split, tc.rigs...)
+			claim := e.claimLegs(t)
+			runtime := e.runtimeDemandLegs(t)
+
+			// Subsequence: every runtime leg appears in the claim reader's list,
+			// in the same relative order.
+			i := 0
+			for _, leg := range claim {
+				if i < len(runtime) && runtime[i] == leg {
+					i++
+				}
+			}
+			if i != len(runtime) {
+				t.Fatalf("the runtime-plane demand legs are not a subsequence of the claim reader's: demand=%d claim=%d matched=%d — the descriptor reordered or invented a leg", len(runtime), len(claim), i)
+			}
+			if len(runtime) == 0 {
+				t.Fatal("the runtime plane resolved no leg at all; it must degrade to \"the only store there is\", never to \"no store\"")
+			}
+			switch {
+			case tc.split:
+				// Non-vacuity: on a split city the narrowing really drops legs,
+				// and the one it must keep is the binding.
+				if len(runtime) >= len(claim) {
+					t.Fatalf("the runtime plane kept %d of %d claim legs on a split city; it narrowed nothing", len(runtime), len(claim))
+				}
+				if runtime[0] != e.binding {
+					t.Fatal("the runtime plane's leg is not the binding; routed work lives only in the graph store (operator ruling)")
+				}
+			default:
+				if !sameStoreSequence(runtime, claim) {
+					t.Fatal("a city that relocates nothing narrowed its demand legs; there is no ledger to refuse when the work store IS the infra store")
+				}
+			}
+		})
+	}
+}
+
+// TestAssignedWorkCensusKeepsTheLedgerLegUnderTheDescriptor is the ga-w8ucu
+// guard, stated against the narrowing.
+//
+// The tick narrows the ROUTED-demand read to the binding because routed work
+// cannot be anywhere else. It must not narrow the ASSIGNED-work census, which
+// answers a different question — WHO HOLDS WHAT — and whose answer decides
+// whether a session is drained. A session whose only claim is an HQ work bead
+// has to stay visible there, or the drain gate reaps a live holder: symmetric
+// blindness is worse than a slow read.
+func TestAssignedWorkCensusKeepsTheLedgerLegUnderTheDescriptor(t *testing.T) {
+	e := newLegAgreementEnv(t, true, "alpha")
+	census, err := censusStoreCandidates(e.cityPath, e.cfg, e.leading(), e.rigs, nil, censusRefBare)
+	if err != nil {
+		t.Fatalf("censusStoreCandidates: %v", err)
+	}
+	var sawWork bool
+	for _, c := range census {
+		if c.store == e.work {
+			sawWork = true
+		}
+	}
+	if !sawWork {
+		t.Fatal("the assigned-work census lost its work-ledger leg; a session holding only an HQ claim now looks idle and the drain gate reaps it (ga-w8ucu)")
+	}
+	// Control: the routed-demand read over the SAME city really is narrower, so
+	// the assertion above is about the census and not about a descriptor that
+	// narrows nothing.
+	if runtime := e.runtimeDemandLegs(t); len(runtime) >= len(census) {
+		t.Fatalf("routed demand reads %d legs and the census %d; the two planes are not distinguishable here", len(runtime), len(census))
+	}
+}

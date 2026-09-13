@@ -2,6 +2,7 @@ package main
 
 import (
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -120,11 +121,58 @@ func assignedWorkIndexReachableFromAgent(cityPath string, cfg *config.City, agen
 	return storeRefs[index] == assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)
 }
 
+// assignedWorkIndexReachableFromAgentOnClaimRefs extends the rig-equality test
+// with the refs a claim can be RECORDED under whatever the holder's rig scope:
+// the leading work arm plus every relocated class binding (assignedWorkClaimRefs).
+//
+// This is the demand-side twin of the widening filterAssignedWorkBeadsForSessionWake
+// already applies (ga-whzrt). The two filters answer one question from opposite
+// ends — "is this holder still working?" and "does this work still need a
+// worker?" — so a ref the wake side accepts and the demand side rejects is a city
+// that drains a slot and then refuses to refill it.
+//
+// Relocating a coordination class is what made that reachable. The equality test
+// is against the agent's configured RIG, so once graph-resident work carries a
+// "class:*" ref no rig name can equal, in-progress demand for a rig-scoped pool
+// agent became structurally invisible. It stayed hidden because scale_check
+// supplies demand independently while the work is still ready; only once the
+// work is CLAIMED is the resume tier the sole remaining source, which is why the
+// symptom is a session that dies holding a claim and is never replaced.
+//
+// claimRefs must come from assignedWorkRelocatedClaimRefs, which answers empty
+// for a city that relocates nothing: the widening covers relocated class
+// bindings only, never another rig's ref, so rig isolation and every
+// single-store city are exactly what they were.
+func assignedWorkIndexReachableFromAgentOnClaimRefs(
+	cityPath string,
+	cfg *config.City,
+	agentCfg *config.Agent,
+	storeRefs []string,
+	index int,
+	claimRefs []string,
+) bool {
+	if assignedWorkIndexReachableFromAgent(cityPath, cfg, agentCfg, storeRefs, index) {
+		return true
+	}
+	if index < 0 || index >= len(storeRefs) {
+		return false
+	}
+	for _, ref := range claimRefs {
+		if storeRefs[index] == ref {
+			return true
+		}
+	}
+	return false
+}
+
 // filterAssignedWorkBeadsForPoolDemand resolves work through the routed
 // backing template because pool scale decisions are per agent template.
+// leading is the store this arm was handed; it resolves the claim refs, and is
+// a property of the CITY so it is read once rather than per bead.
 func filterAssignedWorkBeadsForPoolDemand(
 	cfg *config.City,
 	cityPath string,
+	leading beads.Store,
 	sessionInfos []sessionpkg.Info,
 	assignedWorkBeads []beads.Bead,
 	assignedWorkStoreRefs []string,
@@ -135,6 +183,7 @@ func filterAssignedWorkBeadsForPoolDemand(
 	if cfg == nil {
 		return assignedWorkBeads
 	}
+	claimRefs := assignedWorkRelocatedClaimRefs(cityPath, cfg, leading)
 	assigneeToSessionBeadID := make(map[string]string)
 	sessionBeadTemplate := make(map[string]string)
 	for _, sb := range sessionInfos {
@@ -152,8 +201,22 @@ func filterAssignedWorkBeadsForPoolDemand(
 			assigneeToSessionBeadID[id] = sb.ID
 		}
 	}
+	now := time.Now().UTC()
 	filtered := make([]beads.Bead, 0, len(assignedWorkBeads))
 	for i, wb := range assignedWorkBeads {
+		// A deferred bead is deliberately parked (future defer_until) and is
+		// invisible to bd ready, so scale_check reports zero demand for it.
+		// But this pool-demand pass draws from a raw List(status=open) that
+		// still returns deferred beads. A deferred bead that retains a stale
+		// gc.routed_to would otherwise count as poolDesired=1 with no matching
+		// ready work, driving the reconciler to spawn an ephemeral session that
+		// immediately orphan-drains — a spawn/drain loop that only ends when
+		// the bead's defer elapses or the route is stripped by hand. Excluding
+		// deferred beads here mirrors bd ready's server-side filter so gc's
+		// internal demand agrees with the shim.
+		if beads.IsDeferred(wb, now) {
+			continue
+		}
 		template := routedToOrLegacyWorkflowTarget(wb)
 		if template == "" {
 			if sessionBeadID := assigneeToSessionBeadID[strings.TrimSpace(wb.Assignee)]; sessionBeadID != "" {
@@ -171,7 +234,7 @@ func filterAssignedWorkBeadsForPoolDemand(
 		if agentCfg == nil {
 			continue
 		}
-		if assignedWorkIndexReachableFromAgent(cityPath, cfg, agentCfg, assignedWorkStoreRefs, i) {
+		if assignedWorkIndexReachableFromAgentOnClaimRefs(cityPath, cfg, agentCfg, assignedWorkStoreRefs, i, claimRefs) {
 			filtered = append(filtered, wb)
 		}
 	}
@@ -183,6 +246,10 @@ func filterAssignedWorkBeadsForPoolDemand(
 // returns the filtered beads plus their store refs, index-aligned, so callers
 // can resolve store-scoped wake-demand readiness (storeScopedBeadKey) for the
 // surviving beads without re-deriving each bead's originating store.
+//
+// The reconcile paths take the store-aware form below, which also carries the
+// legs the rows were read through; this two-value form is for callers that only
+// read the surviving rows.
 func filterAssignedWorkBeadsForSessionWake(
 	cfg *config.City,
 	cityPath string,
@@ -191,11 +258,45 @@ func filterAssignedWorkBeadsForSessionWake(
 	assignedWorkBeads []beads.Bead,
 	assignedWorkStoreRefs []string,
 ) ([]beads.Bead, []string) {
+	kept, keptRefs, _ := filterAssignedWorkBeadsForSessionWakeWithStores(cfg, cityPath, leading, sessionInfos, assignedWorkBeads, assignedWorkStoreRefs, nil)
+	return kept, keptRefs
+}
+
+// filterAssignedWorkBeadsForSessionWakeWithStores is the store-aware form: it
+// projects the index-aligned snapshot stores through the same filter, so a
+// caller that must WRITE to a surviving row can do it through the leg the census
+// read the row through rather than re-deriving an owner from gc.routed_to (which
+// names a work ledger a binding-resident row does not live in — ga-b0o6a).
+//
+// assignedWorkStores must be as long as assignedWorkBeads; a slice of any other
+// length is dropped rather than partially applied, and the returned stores are
+// then nil.
+//
+// residency:allow — a caller's own snapshot, projected. The []beads.Store this
+// returns is only ever a subsequence of the slice it was HANDED, carried through
+// the same keep/drop decision it applies to the beads; it opens no store and
+// builds no store list of its own. It DOES consult residency to make that
+// keep/drop decision — assignedWorkClaimRefs resolves the topology's claim refs
+// and assignedWorkStoreRefForAgent resolves each agent's rig name — but those are
+// reads of refs, never of legs, and cannot introduce a store the caller did not
+// already hand in.
+func filterAssignedWorkBeadsForSessionWakeWithStores(
+	cfg *config.City,
+	cityPath string,
+	leading beads.Store,
+	sessionInfos []sessionpkg.Info,
+	assignedWorkBeads []beads.Bead,
+	assignedWorkStoreRefs []string,
+	assignedWorkStores []beads.Store,
+) ([]beads.Bead, []string, []beads.Store) {
+	if len(assignedWorkStores) != len(assignedWorkBeads) {
+		assignedWorkStores = nil
+	}
 	if len(assignedWorkBeads) == 0 || len(assignedWorkStoreRefs) == 0 {
-		return assignedWorkBeads, assignedWorkStoreRefs
+		return assignedWorkBeads, assignedWorkStoreRefs, assignedWorkStores
 	}
 	if cfg == nil {
-		return assignedWorkBeads, assignedWorkStoreRefs
+		return assignedWorkBeads, assignedWorkStoreRefs, assignedWorkStores
 	}
 	claimRefs := assignedWorkClaimRefs(cityPath, cfg, leading)
 	reachableRefsByAssignee := make(map[string]map[string]struct{})
@@ -280,6 +381,17 @@ func filterAssignedWorkBeadsForSessionWake(
 
 	filtered := make([]beads.Bead, 0, len(assignedWorkBeads))
 	filteredRefs := make([]string, 0, len(assignedWorkBeads))
+	var filteredStores []beads.Store
+	if assignedWorkStores != nil {
+		filteredStores = make([]beads.Store, 0, len(assignedWorkBeads))
+	}
+	keep := func(i int, wb beads.Bead) {
+		filtered = append(filtered, wb)
+		filteredRefs = append(filteredRefs, assignedWorkStoreRefs[i])
+		if filteredStores != nil {
+			filteredStores = append(filteredStores, assignedWorkStores[i])
+		}
+	}
 	for i, wb := range assignedWorkBeads {
 		if i >= len(assignedWorkStoreRefs) {
 			continue
@@ -290,18 +402,16 @@ func filterAssignedWorkBeadsForSessionWake(
 		}
 		if _, ok := crossStore[assignee]; ok {
 			// City-scoped assignee: reachable from any store (vp-kvp).
-			filtered = append(filtered, wb)
-			filteredRefs = append(filteredRefs, assignedWorkStoreRefs[i])
+			keep(i, wb)
 			continue
 		}
 		if refs := reachableRefsByAssignee[assignee]; refs != nil {
 			if _, ok := refs[assignedWorkStoreRefs[i]]; ok {
-				filtered = append(filtered, wb)
-				filteredRefs = append(filteredRefs, assignedWorkStoreRefs[i])
+				keep(i, wb)
 			}
 		}
 	}
-	return filtered, filteredRefs
+	return filtered, filteredRefs, filteredStores
 }
 
 // readyAssignedFlagsForBeads resolves the store-scoped wake-demand readiness of

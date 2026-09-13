@@ -15,6 +15,28 @@ type LivenessObserver interface {
 	ObserveLiveness(name string, processNames []string) Liveness
 }
 
+// LivenessObserverWithError is the optional provider capability for liveness
+// observations that can distinguish confirmed absence from an observation
+// failure. Legacy providers keep using [LivenessObserver] or the
+// [Provider.IsRunning] and [Provider.ProcessAlive] fallback.
+type LivenessObserverWithError interface {
+	ObserveLivenessWithError(name string, processNames []string) (Liveness, error)
+}
+
+// ObserveLivenessWithError returns an error-bearing consolidated liveness view.
+// Providers that do not expose the optional error-bearing capability retain the
+// legacy observation behavior and return a nil error.
+func ObserveLivenessWithError(sp Provider, name string, processNames []string) (Liveness, error) {
+	if sp == nil || strings.TrimSpace(name) == "" {
+		return Liveness{}, nil
+	}
+	if observer, ok := sp.(LivenessObserverWithError); ok {
+		obs, err := observer.ObserveLivenessWithError(name, processNames)
+		return normalizeLiveness(obs), err
+	}
+	return ObserveLiveness(sp, name, processNames), nil
+}
+
 // ObserveLiveness returns the consolidated liveness view for a provider
 // session. Providers with native support may use additional persisted runtime
 // hints; other providers fall back to IsRunning plus ProcessAlive.

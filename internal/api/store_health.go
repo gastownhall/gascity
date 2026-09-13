@@ -97,14 +97,18 @@ func (s *Server) computeStoreHealth(ctx context.Context) (*StatusStoreHealth, er
 
 // statusStoreHealthFromDomain adapts storehealth.Health to the wire
 // type StatusStoreHealth, serializing LastGCAt to RFC3339 UTC.
+// RowsMeasured is carried across verbatim rather than derived from
+// LiveRows: an unmeasured count and a genuinely empty store are both
+// zero, and telling them apart is the whole reason the flag exists.
 func statusStoreHealthFromDomain(h storehealth.Health) *StatusStoreHealth {
 	out := &StatusStoreHealth{
-		Path:        h.Path,
-		SizeBytes:   h.SizeBytes,
-		LiveRows:    h.LiveRows,
-		RatioMB:     h.RatioMB,
-		Warning:     h.Warning,
-		ThresholdMB: h.ThresholdMB,
+		Path:         h.Path,
+		SizeBytes:    h.SizeBytes,
+		LiveRows:     h.LiveRows,
+		RowsMeasured: h.RowsMeasured,
+		RatioMB:      h.RatioMB,
+		Warning:      h.Warning,
+		ThresholdMB:  h.ThresholdMB,
 	}
 	if !h.LastGCAt.IsZero() {
 		out.LastGCAt = h.LastGCAt.UTC().Format(time.RFC3339)

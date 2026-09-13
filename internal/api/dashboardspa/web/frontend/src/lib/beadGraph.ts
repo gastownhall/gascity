@@ -44,12 +44,21 @@ export interface BeadDepEdge {
   kind: string;
 }
 
+/** A single downstream (inverse) edge: `bead` depends on this node via
+ *  `kind` (same provenance as `BeadDepEdge.kind`, seen from the other end). */
+export interface BeadBlockEdge {
+  bead: SupervisorBead;
+  kind: string;
+}
+
 export interface BeadNode {
   bead: SupervisorBead;
   /** Upstream beads this one depends on, each resolved-or-unresolved. */
   deps: BeadDepEdge[];
-  /** Downstream beads that depend on this one (in-window only). */
-  blocks: SupervisorBead[];
+  /** Downstream beads that depend on this one (in-window only), each
+   *  carrying the dependency type it depends on this one *by* — never
+   *  collapsed to an untyped blocker (gascity#4365). */
+  blocks: BeadBlockEdge[];
   /** Derived board column. */
   column: BoardColumnId;
   /** Open + every blocking need resolves to a closed in-window bead. */
@@ -117,7 +126,7 @@ export function buildBeadGraph(beads: readonly SupervisorBead[]): BeadGraph {
   const byId = new Map<string, SupervisorBead>();
   for (const b of beads) byId.set(b.id, b);
 
-  const blocksOf = new Map<string, SupervisorBead[]>();
+  const blocksOf = new Map<string, BeadBlockEdge[]>();
   const nodes = new Map<string, BeadNode>();
 
   // First pass: resolve upstream edges and readiness; accumulate inverse edges.
@@ -145,9 +154,10 @@ export function buildBeadGraph(beads: readonly SupervisorBead[]): BeadGraph {
 
     for (const dep of deps) {
       if (dep.bead === null) continue;
+      const edge: BeadBlockEdge = { bead: b, kind: dep.kind };
       const list = blocksOf.get(dep.id);
-      if (list) list.push(b);
-      else blocksOf.set(dep.id, [b]);
+      if (list) list.push(edge);
+      else blocksOf.set(dep.id, [edge]);
     }
   }
 
@@ -155,7 +165,9 @@ export function buildBeadGraph(beads: readonly SupervisorBead[]): BeadGraph {
   for (const [id, blockers] of blocksOf) {
     const node = nodes.get(id);
     if (node) {
-      node.blocks = [...blockers].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+      node.blocks = [...blockers].sort((a, b) =>
+        a.bead.id < b.bead.id ? -1 : a.bead.id > b.bead.id ? 1 : 0,
+      );
     }
   }
 

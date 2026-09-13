@@ -25,6 +25,17 @@ import (
 //     then immediately executes the work in the same process — it has no turn to
 //     outlive, which is why the hook fences do not apply to it.
 //
+// One entry is not a pull path and is here for a different reason:
+//
+//   - class_store_emit.go FORWARDS a claim; it cannot originate one. It is the
+//     relocated class store's emission wrapper, and it holds no id, no assignee
+//     and no policy — its Claim exists only so the capability survives wrapping,
+//     because claim_class_route.go's binding probe is a type assertion and a
+//     wrapper without the method degrades `gc hook --claim` to "this binding
+//     cannot claim" on every split city. The invariant this guard protects —
+//     the controller never assigns — is untouched: nothing here decides to
+//     claim, and the callers that do are still exactly the four above.
+//
 // Adding a file here is a design decision about pull semantics; make it
 // deliberately.
 var claimCASAllowedFiles = map[string]bool{
@@ -32,6 +43,7 @@ var claimCASAllowedFiles = map[string]bool{
 	"claim_class_route.go": true,
 	"cmd_bd_by_id.go":      true,
 	"cmd_agent_script.go":  true,
+	"class_store_emit.go":  true,
 }
 
 // claimCASMarkers are the two shapes a claim compare-and-swap takes in this
