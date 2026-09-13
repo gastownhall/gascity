@@ -85,7 +85,8 @@ Run this as one shell script so every derived value remains in the same process:
 ```bash
 set -euo pipefail
 
-WORK_BEAD="${GC_BEAD_ID:?GC_BEAD_ID required (set by gc hook); aborting}"
+WORK_BEAD="${GC_BEAD_ID:-${GC_TRIGGER_BEAD_ID:-$(gc hook current --id-only)}}"
+[ -n "$WORK_BEAD" ] || { echo "cannot resolve work bead id: GC_BEAD_ID/GC_TRIGGER_BEAD_ID unset and gc hook current returned nothing; aborting" >&2; exit 1; }
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/dolt-cleanup.XXXXXX")
 DRAIN_ACKED=0
 

@@ -159,26 +159,29 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"pending_create_started_at": "",
 				"sleep_intent":              "",
 				"slept_at":                  now.Format(time.RFC3339),
+				"suspended_at":              "",
 			},
 		},
 		{
 			name:  "acknowledge drain resume mode",
-			patch: AcknowledgeDrainPatch(false),
+			patch: AcknowledgeDrainPatch(now, false),
 			want: MetadataPatch{
 				"state":                     "drained",
 				"state_reason":              "",
 				"last_woke_at":              "",
+				"slept_at":                  now.UTC().Format(time.RFC3339),
 				"pending_create_claim":      "",
 				"pending_create_started_at": "",
 			},
 		},
 		{
 			name:  "acknowledge drain fresh mode",
-			patch: AcknowledgeDrainPatch(true),
+			patch: AcknowledgeDrainPatch(now, true),
 			want: MetadataPatch{
 				"state":                      "drained",
 				"state_reason":               "",
 				"last_woke_at":               "",
+				"slept_at":                   now.UTC().Format(time.RFC3339),
 				"pending_create_claim":       "",
 				"pending_create_started_at":  "",
 				"session_key":                "",
@@ -204,6 +207,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"pending_create_started_at":  "",
 				"sleep_intent":               "",
 				"slept_at":                   now.Format(time.RFC3339),
+				"suspended_at":               "",
 				"session_key":                "",
 				"started_config_hash":        "",
 				"started_live_hash":          "",
@@ -682,7 +686,7 @@ func TestDrainCompletionPatchesClearStopPendingReason(t *testing.T) {
 		name  string
 		patch MetadataPatch
 	}{
-		{name: "acknowledge", patch: AcknowledgeDrainPatch(false)},
+		{name: "acknowledge", patch: AcknowledgeDrainPatch(now, false)},
 		{name: "complete", patch: CompleteDrainPatch(now, "idle", false)},
 	}
 	for _, tt := range tests {
@@ -706,13 +710,14 @@ func TestClearWakeBlockersPatchClearsOnlyWakeBlockerMetadata(t *testing.T) {
 			state:       StateAsleep,
 			sleepReason: "wait-hold",
 			want: MetadataPatch{
-				"held_until":        "",
-				"quarantined_until": "",
-				"wait_hold":         "",
-				"sleep_intent":      "",
-				"wake_attempts":     "0",
-				"churn_count":       "0",
-				"sleep_reason":      "",
+				"held_until":            "",
+				"quarantined_until":     "",
+				"wait_hold":             "",
+				"sleep_intent":          "",
+				"wake_attempts":         "0",
+				"wake_refused_event_at": "",
+				"churn_count":           "0",
+				"sleep_reason":          "",
 			},
 		},
 		{
@@ -720,14 +725,17 @@ func TestClearWakeBlockersPatchClearsOnlyWakeBlockerMetadata(t *testing.T) {
 			state:       StateDrained,
 			sleepReason: "drained",
 			want: MetadataPatch{
-				"held_until":        "",
-				"quarantined_until": "",
-				"wait_hold":         "",
-				"sleep_intent":      "",
-				"wake_attempts":     "0",
-				"churn_count":       "0",
-				"state":             string(StateAsleep),
-				"sleep_reason":      "",
+				"held_until":            "",
+				"quarantined_until":     "",
+				"wait_hold":             "",
+				"sleep_intent":          "",
+				"wake_attempts":         "0",
+				"wake_refused_event_at": "",
+				"churn_count":           "0",
+				"state":                 string(StateAsleep),
+				"sleep_reason":          "",
+				"suspended_at":          "",
+				"slept_at":              waitStoreNow.UTC().Format(time.RFC3339),
 			},
 		},
 		{
@@ -735,14 +743,17 @@ func TestClearWakeBlockersPatchClearsOnlyWakeBlockerMetadata(t *testing.T) {
 			state:       StateSuspended,
 			sleepReason: "user-hold",
 			want: MetadataPatch{
-				"held_until":        "",
-				"quarantined_until": "",
-				"wait_hold":         "",
-				"sleep_intent":      "",
-				"wake_attempts":     "0",
-				"churn_count":       "0",
-				"state":             string(StateAsleep),
-				"sleep_reason":      "",
+				"held_until":            "",
+				"quarantined_until":     "",
+				"wait_hold":             "",
+				"sleep_intent":          "",
+				"wake_attempts":         "0",
+				"wake_refused_event_at": "",
+				"churn_count":           "0",
+				"state":                 string(StateAsleep),
+				"sleep_reason":          "",
+				"suspended_at":          "",
+				"slept_at":              waitStoreNow.UTC().Format(time.RFC3339),
 			},
 		},
 		{
@@ -750,12 +761,13 @@ func TestClearWakeBlockersPatchClearsOnlyWakeBlockerMetadata(t *testing.T) {
 			state:       StateAsleep,
 			sleepReason: "idle",
 			want: MetadataPatch{
-				"held_until":        "",
-				"quarantined_until": "",
-				"wait_hold":         "",
-				"sleep_intent":      "",
-				"wake_attempts":     "0",
-				"churn_count":       "0",
+				"held_until":            "",
+				"quarantined_until":     "",
+				"wait_hold":             "",
+				"sleep_intent":          "",
+				"wake_attempts":         "0",
+				"wake_refused_event_at": "",
+				"churn_count":           "0",
 			},
 		},
 		{
@@ -763,20 +775,21 @@ func TestClearWakeBlockersPatchClearsOnlyWakeBlockerMetadata(t *testing.T) {
 			state:       StateAsleep,
 			sleepReason: "rate_limit",
 			want: MetadataPatch{
-				"held_until":        "",
-				"quarantined_until": "",
-				"wait_hold":         "",
-				"sleep_intent":      "",
-				"wake_attempts":     "0",
-				"churn_count":       "0",
-				"sleep_reason":      "",
+				"held_until":            "",
+				"quarantined_until":     "",
+				"wait_hold":             "",
+				"sleep_intent":          "",
+				"wake_attempts":         "0",
+				"wake_refused_event_at": "",
+				"churn_count":           "0",
+				"sleep_reason":          "",
 			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ClearWakeBlockersPatch(tt.state, tt.sleepReason)
+			got := ClearWakeBlockersPatch(tt.state, tt.sleepReason, waitStoreNow)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("patch = %#v, want %#v", got, tt.want)
 			}
@@ -855,7 +868,8 @@ func TestSleepPatchClearsStaleStateReasonOnApply(t *testing.T) {
 }
 
 func TestAcknowledgeDrainPatchClearsStaleStateReasonOnApply(t *testing.T) {
-	merged := AcknowledgeDrainPatch(false).Apply(map[string]string{
+	now := time.Date(2026, 5, 18, 4, 15, 0, 0, time.UTC)
+	merged := AcknowledgeDrainPatch(now, false).Apply(map[string]string{
 		"state":        string(StateDraining),
 		"state_reason": "creation_complete",
 	})

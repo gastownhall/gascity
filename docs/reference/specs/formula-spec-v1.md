@@ -611,6 +611,21 @@ under an existing bead as a sub-DAG; the attach target gains a blocking
 dependency on the sub-DAG root, so it cannot close until the sub-DAG
 completes.
 
+A graft is GRAPH class even for a v1 formula: the attach path stamps
+`gc.root_bead_id` on every bead it materializes, which is what makes a bead
+graph class, so the sub-DAG is graph class regardless of what the same recipe
+would compile to standalone. On a city that serves the graph class from its
+own `[storage]` binding, `--attach` in CITY scope is therefore only served
+for an attach bead the BINDING owns; grafting onto a city-work-resident bead
+is refused, because the sub-DAG would either be stranded in the work ledger
+or leave a `blocks` row naming an id the work store cannot resolve. A RIG
+scope — `--rig`, `GC_RIG`, or a cwd inside a rig — is unaffected: relocation
+copies the city work store only, so a rig's ledger holds both ends of the
+graft and `--attach` stays served there. Single-store cities are unaffected.
+See formula-spec-v2 §3 and `gc formula cook --help` for the full residence
+table; the cross-class membership edge that lifts the refusal is tracked as
+`ga-2orlf`.
+
 `gc sling <target> <formula> --formula` instantiates the formula as an
 ephemeral wisp and routes the root bead to the target:
 

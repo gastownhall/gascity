@@ -491,11 +491,12 @@ func normalizePrivateUploaderLocale(value string) (string, bool) {
 }
 
 type privateUploaderRunDependencies struct {
-	now              func() time.Time
-	start            uploadStartFunc
-	budget           spoolWorkBudget
-	uploaderLockWait time.Duration
-	beforeOperation  func(uploaderOperation)
+	now                    func() time.Time
+	start                  uploadStartFunc
+	budget                 spoolWorkBudget
+	uploaderLockWait       time.Duration
+	newUploaderLockContext func(context.Context, time.Duration) (context.Context, context.CancelFunc)
+	beforeOperation        func(uploaderOperation)
 }
 
 // RunPrivateUploader runs one attempt-bound batch in a cooperative ten-second
@@ -569,6 +570,9 @@ func (service *Service) runPrivateUploader(
 	if dependencies.uploaderLockWait <= 0 || dependencies.uploaderLockWait > privateUploaderWorkBudget {
 		dependencies.uploaderLockWait = privateUploaderLockWait
 	}
+	if dependencies.newUploaderLockContext == nil {
+		dependencies.newUploaderLockContext = context.WithTimeout
+	}
 	eligible, err := service.uploadNeedsMutableWork()
 	if err != nil {
 		return err
@@ -581,11 +585,23 @@ func (service *Service) runPrivateUploader(
 		return err
 	}
 	defer func() { returnErr = errors.Join(returnErr, root.Close()) }()
-	lockContext, cancelLock := context.WithTimeout(ctx, dependencies.uploaderLockWait)
-	uploader, err := service.lockUploader(lockContext, root)
-	cancelLock()
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("productmetrics: acquire lock %q: %w", uploaderLockName, err)
+	}
+	uploader, acquired, err := service.tryLockUploader(root)
 	if err != nil {
 		return err
+	}
+	if !acquired {
+		lockContext, cancelLock := dependencies.newUploaderLockContext(ctx, dependencies.uploaderLockWait)
+		if lockContext == nil || cancelLock == nil {
+			return errors.New("productmetrics: uploader-lock context factory returned an incomplete result")
+		}
+		uploader, err = service.lockUploader(lockContext, root)
+		cancelLock()
+		if err != nil {
+			return err
+		}
 	}
 	defer func() { returnErr = errors.Join(returnErr, uploader.Close()) }()
 	authorize := func(locked *lockedState) error {

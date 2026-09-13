@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -731,23 +732,27 @@ func (s livenessGetErrStore) Get(id string) (beads.Bead, error) {
 // unavailable", not "confirmed dead" — the destructive orphan CLOSE is skipped
 // this tick and the bead is kept open for re-observation, rather than orphaning
 // a session that may still be alive on a transient blip (#3872-family). The
-// only variable between the two runs is the liveness observation error, so the
-// close→keep-open flip (plus the guard's stderr line) isolates the guard. The
-// three sibling !providerAlive destructive paths (pending-create rollback,
-// failed-create close, drain-ack finalize) carry the identical guard added in
-// this PR.
+// runtime-unavailable case also proves absence-derived healing cannot mutate
+// active/resume metadata before the close guard runs.
 func TestReconcileOrphanCloseFailsClosedOnLivenessError(t *testing.T) {
-	run := func(t *testing.T, injectLivenessErr bool) (status, stderr string) {
+	run := func(t *testing.T, injectStoreLivenessErr bool, sp runtime.Provider) (got beads.Bead, before map[string]string, stderr string) {
 		t.Helper()
 		env := newReconcilerTestEnv()
 		env.cfg = &config.City{}
-		// An asleep, undesired session with a dead runtime is the plain
-		// orphan-close case: createSessionBead defaults state=asleep and an empty
-		// desiredState makes it undesired.
+		// An active, resumable, undesired session with a dead runtime is the plain
+		// orphan-close case. Its metadata exposes absence-derived healing that
+		// might otherwise run before the destructive close gate.
 		session := env.createSessionBead("worker", "worker")
+		env.setSessionMetadata(&session, map[string]string{
+			"state":                      "active",
+			"session_key":                "resume-worker",
+			"started_config_hash":        "config-worker",
+			"continuation_reset_pending": "",
+		})
+		before = maps.Clone(session.Metadata)
 
 		store := env.store
-		if injectLivenessErr {
+		if injectStoreLivenessErr {
 			// Fail the liveness probe's read of just this session. With sp=nil,
 			// handle construction surfaces the failure as an observation error —
 			// the same class a transient tmux/store blip produces at runtime.
@@ -765,7 +770,7 @@ func TestReconcileOrphanCloseFailsClosedOnLivenessError(t *testing.T) {
 			nil, // desiredState — empty ⇒ orphan
 			nil, // configuredNames
 			env.cfg,
-			nil,   // sp — nil ⇒ dead runtime; with the wrapped store the probe errors
+			sp,    // nil ⇒ dead runtime; injected providers model runtime uncertainty
 			store, // store
 			nil,   // dops
 			nil,   // assignedWorkBeads
@@ -782,26 +787,44 @@ func TestReconcileOrphanCloseFailsClosedOnLivenessError(t *testing.T) {
 			io.Discard, &stderrBuf,
 		)
 
-		got, err := env.store.Get(session.ID)
+		stored, err := env.store.Get(session.ID)
 		if err != nil {
 			t.Fatalf("Get(%s): %v", session.ID, err)
 		}
-		return got.Status, stderrBuf.String()
+		got = stored
+		return got, before, stderrBuf.String()
 	}
 
 	t.Run("healthy liveness closes orphan (baseline)", func(t *testing.T) {
-		status, _ := run(t, false)
-		if status != "closed" {
-			t.Fatalf("baseline orphan close: status = %q, want closed (the close path must be reachable for the guard to matter)", status)
+		got, _, _ := run(t, false, nil)
+		if got.Status != "closed" {
+			t.Fatalf("baseline orphan close: status = %q, want closed (the close path must be reachable for the guard to matter)", got.Status)
 		}
 	})
 
-	t.Run("liveness error skips the close (fail closed)", func(t *testing.T) {
-		status, stderr := run(t, true)
-		if status == "closed" {
+	t.Run("store liveness error skips the close", func(t *testing.T) {
+		got, before, stderr := run(t, true, nil)
+		if got.Status == "closed" {
 			t.Fatalf("orphan bead was closed despite a liveness observation error; want kept open (fail closed)")
 		}
+		if !maps.Equal(got.Metadata, before) {
+			t.Fatalf("metadata mutated while liveness was unavailable:\n before: %#v\n  after: %#v", before, got.Metadata)
+		}
 		if !strings.Contains(stderr, "skipping close of 'worker': liveness observation failed") {
+			t.Fatalf("expected the fail-closed guard's stderr line, got %q", stderr)
+		}
+	})
+
+	t.Run("runtime liveness error skips close and heal", func(t *testing.T) {
+		sp := &startUnavailableLivenessProvider{Fake: runtime.NewFake()}
+		got, before, stderr := run(t, false, sp)
+		if got.Status == "closed" {
+			t.Fatal("orphan bead was closed despite ErrRuntimeUnavailable")
+		}
+		if !maps.Equal(got.Metadata, before) {
+			t.Fatalf("metadata mutated while runtime was unavailable:\n before: %#v\n  after: %#v", before, got.Metadata)
+		}
+		if !strings.Contains(stderr, "liveness observation failed") {
 			t.Fatalf("expected the fail-closed guard's stderr line, got %q", stderr)
 		}
 	})

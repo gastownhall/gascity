@@ -3,6 +3,7 @@ package sling
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
@@ -83,6 +84,115 @@ func CollectAttachedBeads(parent beads.Bead, store beads.Store, childQuerier Bea
 	}
 
 	return attachments, firstErr
+}
+
+// liveConvoyTrackedWorkflowRoots returns the live (non-terminal, per
+// convoycore.IsTerminalStatus) graph.v2 workflow roots launched by
+// formulaName that are reachable from beadID through the launch's own
+// synthetic input convoy: every synthetic convoy that tracks beadID
+// (convoycore.TrackingConvoysForItem), filtered to the workflow roots that
+// were launched from that convoy -- identified by gc.input_convoy_id, which
+// stampGraphV2RootMetadata (sling.go) stamps on every graph.v2 root at
+// instantiation time -- and further filtered to formulaName via
+// gc.formula_name (stamped on every formula's root step unconditionally,
+// formula/compile.go).
+//
+// This is the only durable link a convoy-first `--on` launch leaves behind:
+// attachFormulaToBead deliberately calls doStartGraphWorkflow with an empty
+// sourceBeadID on that path ("the source is tracked through the input
+// convoy, not gc.source_bead_id" -- sling_core.go), and the root is never a
+// DB child of beadID, nor referenced by molecule_id/workflow_id metadata
+// either, so it is invisible to CollectAttachedBeads' three routes (#5420).
+//
+// The formulaName filter matters: distinct formulas targeting the same bead
+// are legitimate concurrent work (e.g. a "review" workflow and a "build"
+// workflow both attached to one source bead), not a duplicate. Only
+// relaunching the SAME formula against the SAME bead while its prior root is
+// still live is the bug this guards -- "dedup on (formula, target bead)",
+// per the issue.
+//
+// convoyStore is queried for the tracking edges -- the convoy always lives
+// co-resident with the target bead it tracks (TrackItemIn enforces this at
+// write time). rootStore is queried for the roots themselves, which may live
+// in a different store when graph beads are relocated (deps.graphStore()).
+// The common case passes the same store for both.
+func liveConvoyTrackedWorkflowRoots(convoyStore, rootStore beads.Store, beadID, formulaName string) ([]beads.Bead, error) {
+	beadID = strings.TrimSpace(beadID)
+	formulaName = strings.TrimSpace(formulaName)
+	if convoyStore == nil || rootStore == nil || beadID == "" || formulaName == "" {
+		return nil, nil
+	}
+	convoys, err := convoycore.TrackingConvoysForItem(convoyStore, beadID)
+	if err != nil {
+		return nil, fmt.Errorf("listing tracking convoys for %s: %w", beadID, err)
+	}
+	var roots []beads.Bead
+	seen := make(map[string]struct{}, len(convoys))
+	for _, convoy := range convoys {
+		// These are convoys by construction, so the convoy type's Ready
+		// exclusion (#3591) does not apply here -- only skip convoys excluded
+		// by infrastructure label (session/order-tracking bookkeeping). Unlike
+		// hasLiveTrackingConvoy above, this loop does NOT also skip terminal
+		// convoys: liveness is decided per root below (IsTerminalStatus on the
+		// root itself), so a closed convoy holding a live root still counts.
+		if beads.HasReadyExcludedLabel(convoy) {
+			continue
+		}
+		// Scope to the launch's OWN synthetic input convoy, which is exactly
+		// the "(formula, this bead)" edge this guard is for:
+		// CreateSingleItemInputConvoy (graphv2/invocation.go) stamps
+		// gc.synthetic=true and tracks exactly one item, so a synthetic
+		// tracking convoy means a launch was made against this bead alone.
+		//
+		// A real multi-item convoy that merely happens to track beadID
+		// belongs to a DIFFERENT launch: a convoy-level `--on` stamps
+		// gc.input_convoy_id with that convoy itself (NormalizeInputConvoy
+		// returns a convoy target unchanged), so counting its root here would
+		// block a later per-member-bead `--on` of the same formula and
+		// misattribute the ConflictError to the member bead. Note that the
+		// convoy-target route was never covered by this lookup in the first
+		// place -- nothing tracks a convoy target -- so skipping it here
+		// removes a false positive rather than dropping real coverage.
+		//
+		// This does not weaken the #5420 fix: a bare-bead `--on` always mints
+		// a synthetic input convoy, so the duplicate relaunch still blocks.
+		if strings.TrimSpace(convoy.Metadata[beadmeta.SyntheticMetadataKey]) != "true" {
+			continue
+		}
+		matches, err := rootStore.ListByMetadata(map[string]string{
+			beadmeta.InputConvoyIDMetadataKey: convoy.ID,
+		}, 0, beads.WithBothTiers)
+		if err != nil {
+			return nil, fmt.Errorf("listing workflow roots for input convoy %s: %w", convoy.ID, err)
+		}
+		for _, root := range matches {
+			if convoycore.IsTerminalStatus(root.Status) || !IsWorkflowAttachment(root) {
+				continue
+			}
+			if strings.TrimSpace(root.Metadata[beadmeta.FormulaNameMetadataKey]) != formulaName {
+				continue
+			}
+			if _, ok := seen[root.ID]; ok {
+				continue
+			}
+			seen[root.ID] = struct{}{}
+			roots = append(roots, root)
+		}
+	}
+	slices.SortFunc(roots, func(a, b beads.Bead) int {
+		return strings.Compare(a.ID, b.ID)
+	})
+	return roots, nil
+}
+
+// LiveConvoyTrackedWorkflowRoots is the exported form of
+// liveConvoyTrackedWorkflowRoots, for callers outside this package (the `gc
+// sling --dry-run` preview in cmd/gc) that need the same convoy-first
+// duplicate-detection checkLegacySourceWorkflowConflict performs at launch
+// time, so the dry-run "Pre-check" line reflects real coverage instead of
+// reporting a vacuous "no existing molecule/wisp children" pass (#5420).
+func LiveConvoyTrackedWorkflowRoots(convoyStore, rootStore beads.Store, beadID, formulaName string) ([]beads.Bead, error) {
+	return liveConvoyTrackedWorkflowRoots(convoyStore, rootStore, beadID, formulaName)
 }
 
 // AttachmentLabel returns "workflow" or "molecule" based on the bead type.
@@ -226,9 +336,27 @@ func checkNoMoleculeChildren(q BeadQuerier, beadID string, store beads.Store, re
 				continue
 			}
 		}
-		return fmt.Errorf("bead %s already has attached %s %s", beadID, AttachmentLabel(attached), attached.ID)
+		return &MoleculeAttachedError{BeadID: beadID, Label: AttachmentLabel(attached), AttachmentID: attached.ID}
 	}
 	return nil
+}
+
+// MoleculeAttachedError reports that a bead already has a live, non-workflow
+// molecule/wisp attachment blocking a new formula attach. It is distinct from
+// sourceworkflow.ConflictError (a live graph.v2 workflow attachment) so
+// callers can use errors.As to tell the two conflict kinds apart: an implicit
+// default-formula sling may choose to fall back to plain routing on this
+// error, but must keep hard-failing on a workflow conflict or any other
+// error, since neither is the "unrelated molecule already attached" case the
+// fallback exists for.
+type MoleculeAttachedError struct {
+	BeadID       string
+	Label        string // AttachmentLabel(attached), e.g. "molecule" or "wisp"
+	AttachmentID string
+}
+
+func (e *MoleculeAttachedError) Error() string {
+	return fmt.Sprintf("bead %s already has attached %s %s", e.BeadID, e.Label, e.AttachmentID)
 }
 
 // CheckNoMoleculeChildren returns an error if the bead already has an attached
@@ -388,25 +516,97 @@ func needsConvoyRecovery(q BeadQuerier, b beads.Bead, deps SlingDeps, opts BeadC
 }
 
 func hasLiveTrackingConvoy(store beads.Store, itemID string) (bool, error) {
+	live, err := liveTrackingConvoys(store, itemID)
+	if err != nil {
+		return false, err
+	}
+	return len(live) > 0, nil
+}
+
+// liveTrackingConvoys returns every non-terminal convoy tracking itemID that is
+// eligible to serve as an auto-convoy root, oldest first
+// (TrackingConvoysForItem sorts by creation time).
+//
+// It is the shared live-root lookup behind both the convoy-recovery check
+// (which only needs existence, over every live convoy) and auto-convoy reuse
+// at the mint site, which narrows this set to dispatch roots via
+// liveAutoConvoyRoots before reusing the first and reaping the rest.
+//
+// These are convoys by construction, so the convoy type's Ready exclusion
+// (#3591) does not apply here — only convoys excluded by infrastructure label
+// (session/order-tracking bookkeeping) are skipped. Those track the item for
+// their own bookkeeping and are neither dispatch roots to reuse nor duplicates
+// to reap.
+func liveTrackingConvoys(store beads.Store, itemID string) ([]beads.Bead, error) {
 	if store == nil {
-		return false, nil
+		return nil, nil
 	}
 	convoys, err := convoycore.TrackingConvoysForItem(store, itemID)
 	if err != nil {
-		return false, fmt.Errorf("listing tracking convoys for %s: %w", itemID, err)
+		return nil, fmt.Errorf("listing tracking convoys for %s: %w", itemID, err)
 	}
+	live := make([]beads.Bead, 0, len(convoys))
 	for _, convoy := range convoys {
-		// These are convoys by construction, so the convoy type's Ready
-		// exclusion (#3591) does not apply here — only skip convoys excluded
-		// by infrastructure label (session/order-tracking bookkeeping).
-		if beads.HasReadyExcludedLabel(convoy) {
+		if beads.HasReadyExcludedLabel(convoy) || convoycore.IsTerminalStatus(convoy.Status) {
 			continue
 		}
-		if !convoycore.IsTerminalStatus(convoy.Status) {
-			return true, nil
+		live = append(live, convoy)
+	}
+	return live, nil
+}
+
+// AutoConvoyRootTitle is the title finalize mints auto-convoy roots under.
+// The reuse/reap path keys on it so only roots this dispatch path created are
+// eligible — user convoys (gc convoy create), drain unit convoys and graph.v2
+// input convoys are all unowned, unlabeled convoys that can track the same
+// bead, and must never be adopted as a dispatch root or reaped as a duplicate.
+func AutoConvoyRootTitle(beadID string) string { return "sling-" + beadID }
+
+// liveAutoConvoyRoots is liveTrackingConvoys narrowed to the auto-convoy roots
+// finalize minted for itemID, oldest first. This is the reuse/reap set: a
+// convoy that merely tracks the bead is somebody else's convoy.
+func liveAutoConvoyRoots(store beads.Store, itemID string) ([]beads.Bead, error) {
+	live, err := liveTrackingConvoys(store, itemID)
+	if err != nil {
+		return nil, err
+	}
+	want := AutoConvoyRootTitle(itemID)
+	roots := make([]beads.Bead, 0, len(live))
+	for _, c := range live {
+		if strings.TrimSpace(c.Title) == want {
+			roots = append(roots, c)
 		}
 	}
-	return false, nil
+	return roots, nil
+}
+
+// convoyReapReason is the close_reason stamped on an auto-convoy root that a
+// re-sling superseded. Long enough to satisfy bd's validation.on-close=error
+// length requirement while naming why the root was closed.
+const convoyReapReason = "convoy reap: superseded duplicate root"
+
+// reapSupersededConvoyRoots closes auto-convoy roots that a re-sling has
+// superseded, so a bead carrying several live roots converges to the single one
+// being reused instead of staying stuck at N until the tracked bead closes
+// (ga-5jnq).
+//
+// Reaping is best-effort and never blocks the dispatch: each failure is
+// returned as a message for SlingResult.MetadataErrors. A root left open is the
+// pre-existing over-count, which the drain still clears when the tracked bead
+// goes terminal; failing the sling over it would be strictly worse.
+//
+// Callers must pass only unowned roots. The "owned" label is what suppresses
+// convoy autoclose, so closing one here would silently convert a
+// caller-managed lifecycle into an auto-managed one.
+func reapSupersededConvoyRoots(store beads.Store, superseded []beads.Bead, keptID string) []string {
+	var problems []string
+	for _, root := range superseded {
+		if err := convoycore.CloseWithReason(store, root.ID, convoyReapReason); err != nil {
+			problems = append(problems,
+				fmt.Sprintf("reaping convoy root %s superseded by %s: %v", root.ID, keptID, err))
+		}
+	}
+	return problems
 }
 
 // resolveConvoyRecovery maps needsConvoyRecovery onto a BeadCheckResult for an
@@ -452,8 +652,18 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 	}
 
 	target := agentutil.RoutedToIdentity(&a)
+	isMulti := agentutil.IsMultiSessionAgent(&a)
 	if strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) == target {
-		if b.Assignee == "" || b.Assignee == target {
+		// A pool session claims routed work under its own session identity
+		// ("<target>-<session bead id>"), not under the bare pool target, so
+		// bare equality reads already-claimed pool work as un-slung and mints a
+		// second attempt for it. The original keeps gc.routed_to once wrapped,
+		// so both it and its do-work step satisfy the pool work_query: one unit
+		// of work, two dispatchable rows, two sessions. Treat a claim by any of
+		// this pool's own sessions as idempotent. Anchored to target+"-", so a
+		// claim by a different pool still falls through to the warning below.
+		claimedByOwnPoolSession := isMulti && strings.HasPrefix(b.Assignee, target+"-")
+		if b.Assignee == "" || b.Assignee == target || claimedByOwnPoolSession {
 			return resolveConvoyRecovery(q, b, deps, opts, beadID)
 		}
 		return BeadCheckResult{
@@ -461,7 +671,6 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 		}
 	}
 
-	isMulti := agentutil.IsMultiSessionAgent(&a)
 	if !isMulti {
 		if b.Assignee == target {
 			return resolveConvoyRecovery(q, b, deps, opts, beadID)

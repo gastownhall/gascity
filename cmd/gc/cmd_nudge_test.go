@@ -2387,6 +2387,12 @@ dir = "myrig"
 
 func TestCmdNudgeStatusJSON(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
+	// resolveNudgeTarget MATERIALIZES the named session ("mayor"), which under
+	// the default provider spawns a real `tmux -L test-city` server whose
+	// exit-empty-off lifecycle outlives the suite (dip-73cr05). This test
+	// asserts nudge-queue JSON, not runtime behavior — use the fake provider
+	// like every other named-session test here.
+	t.Setenv("GC_SESSION", "fake")
 	cityDir := t.TempDir()
 	writeNamedSessionCityTOML(t, cityDir)
 	t.Setenv("GC_CITY", cityDir)
@@ -2419,6 +2425,53 @@ func TestCmdNudgeStatusJSON(t *testing.T) {
 	}
 	if result.InFlight == nil || result.Dead == nil {
 		t.Fatalf("empty queues should encode as arrays, got in_flight=%#v dead=%#v", result.InFlight, result.Dead)
+	}
+}
+
+// TestCmdNudgeStatusSurfacesDispatchSkips verifies `gc nudge status` reads
+// back the dispatch tick's persisted skip-reason counters (recorded by
+// recordNudgeDispatchSkips, called from dispatchAllQueuedNudges) in both
+// --json and text output. Status is city-wide, not agent-scoped — the
+// point is to give an operator a fast signal that the dispatcher IS
+// silently skipping something, before they go digging through GC_DEBUG
+// logs for which agent and why.
+func TestCmdNudgeStatusSurfacesDispatchSkips(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	cityDir := t.TempDir()
+	writeNamedSessionCityTOML(t, cityDir)
+	// The status read materializes the named session when it is absent; on
+	// the default (tmux) provider that spawns a real server on the test-city
+	// socket, which outlives the run (exit-empty off). Pin the fake provider
+	// — this test asserts the persisted skip counters, not runtime behavior.
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"fake\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+
+	if err := recordNudgeDispatchSkips(cityDir, map[string]int64{"not-running": 3, "observe-error": 1}); err != nil {
+		t.Fatalf("recordNudgeDispatchSkips: %v", err)
+	}
+
+	var jsonOut, jsonErr bytes.Buffer
+	code := cmdNudgeStatus([]string{"mayor"}, true, &jsonOut, &jsonErr)
+	if code != 0 {
+		t.Fatalf("cmdNudgeStatus --json = %d, want 0; stderr=%s", code, jsonErr.String())
+	}
+	var result nudgeStatusJSON
+	if err := json.Unmarshal(jsonOut.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, jsonOut.String())
+	}
+	if result.DispatchSkips["not-running"] != 3 || result.DispatchSkips["observe-error"] != 1 {
+		t.Fatalf("dispatch_skips = %#v, want not-running=3 observe-error=1", result.DispatchSkips)
+	}
+
+	var textOut, textErr bytes.Buffer
+	code = cmdNudgeStatus([]string{"mayor"}, false, &textOut, &textErr)
+	if code != 0 {
+		t.Fatalf("cmdNudgeStatus = %d, want 0; stderr=%s", code, textErr.String())
+	}
+	if !strings.Contains(textOut.String(), "not-running=3") || !strings.Contains(textOut.String(), "observe-error=1") {
+		t.Fatalf("text status missing skip-reason lines, got: %s", textOut.String())
 	}
 }
 
@@ -3034,6 +3087,170 @@ func TestCmdNudgePollSurvivesTransientObserveErrors(t *testing.T) {
 	}
 }
 
+// TestCmdNudgePollRecordsDispatchSkipForBusyTarget verifies the legacy
+// per-session poll loop (cmdNudgePoll) records the same "not-delivered"
+// skip counter the supervisor dispatcher already records for a matched,
+// live, running target that didn't get a delivery this tick (see
+// dispatchAllQueuedNudges in nudge_dispatcher.go and
+// TestCmdNudgeStatusSurfacesDispatchSkips above). Before the fix, a
+// continuously busy target failing tryDeliverQueuedNudgesByPoller's
+// quiescence gate left zero trace in a city running per-session pollers --
+// the deployment shape #5317 reports against.
+func TestCmdNudgePollRecordsDispatchSkipForBusyTarget(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	writeNamedSessionCityTOML(t, cityDir)
+	t.Setenv("GC_CITY", cityDir)
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	created, err := store.Create(beads.Bead{
+		Title:  "Session: worker",
+		Type:   session.BeadType,
+		Status: "open",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "worker-session",
+			"agent_name":   "worker",
+			"template":     "worker",
+			"state":        string(session.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create session: %v", err)
+	}
+	item := newQueuedNudgeWithOptions("worker", "stop and re-read the plan", "human", time.Now().Add(-time.Minute), queuedNudgeOptions{
+		SessionID: created.ID,
+	})
+	if err := enqueueQueuedNudgeWithStore(cityDir, beads.NudgesStore{Store: store}, item); err != nil {
+		t.Fatalf("enqueueQueuedNudgeWithStore: %v", err)
+	}
+
+	const busyTicks = 3
+	observeCalls := 0
+	origObserve := nudgeObserveTarget
+	nudgeObserveTarget = func(_ nudgeTarget, _ beads.Store, _ runtime.Provider) (worker.LiveObservation, error) {
+		observeCalls++
+		if observeCalls <= busyTicks {
+			// Continuously busy: LastActivity is always "just now", so
+			// pollerSessionIdleEnough never clears the quiescence gate and
+			// tryDeliverQueuedNudgesByPoller returns (false, nil) before it
+			// ever reaches claimDueQueuedNudgesForTarget -- the #5317 root
+			// cause.
+			last := time.Now()
+			return worker.LiveObservation{Running: true, LastActivity: &last}, nil
+		}
+		// End the busy window under test and let the poller exit cleanly.
+		if err := ackQueuedNudges(cityDir, []string{item.ID}); err != nil {
+			t.Errorf("ackQueuedNudges: %v", err)
+		}
+		return worker.LiveObservation{Running: false}, nil
+	}
+	defer func() { nudgeObserveTarget = origObserve }()
+
+	var stdout, stderr bytes.Buffer
+	code := cmdNudgePoll([]string{created.ID}, "worker-session", time.Millisecond, time.Hour, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdNudgePoll = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if observeCalls <= busyTicks {
+		t.Fatalf("observe calls = %d, want more than %d busy ticks", observeCalls, busyTicks)
+	}
+
+	var jsonOut, jsonErr bytes.Buffer
+	if code := cmdNudgeStatus([]string{created.ID}, true, &jsonOut, &jsonErr); code != 0 {
+		t.Fatalf("cmdNudgeStatus --json = %d, want 0; stderr=%s", code, jsonErr.String())
+	}
+	var result nudgeStatusJSON
+	if err := json.Unmarshal(jsonOut.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, jsonOut.String())
+	}
+	if result.DispatchSkips["not-delivered"] < busyTicks {
+		t.Fatalf("dispatch_skips[not-delivered] = %d, want at least %d (one per busy poll tick, mirroring dispatchAllQueuedNudges' accounting)", result.DispatchSkips["not-delivered"], busyTicks)
+	}
+}
+
+// TestCmdNudgePollDoesNotRecordSkipWithoutQueuedWork is the negative half of
+// TestCmdNudgePollRecordsDispatchSkipForBusyTarget: a live, running target
+// with an EMPTY queue is the dispatcher's "not-matched" class, not
+// "not-delivered". The poll loop never exits while the session runs, so
+// counting those ticks would turn the counter into a tick counter (and take
+// the queue flock every interval), burying the stuck-nudge signal #5317 is
+// about.
+func TestCmdNudgePollDoesNotRecordSkipWithoutQueuedWork(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	writeNamedSessionCityTOML(t, cityDir)
+	t.Setenv("GC_CITY", cityDir)
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	created, err := store.Create(beads.Bead{
+		Title:  "Session: worker",
+		Type:   session.BeadType,
+		Status: "open",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "worker-session",
+			"agent_name":   "worker",
+			"template":     "worker",
+			"state":        string(session.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create session: %v", err)
+	}
+
+	const busyTicks = 3
+	observeCalls := 0
+	origObserve := nudgeObserveTarget
+	nudgeObserveTarget = func(_ nudgeTarget, _ beads.Store, _ runtime.Provider) (worker.LiveObservation, error) {
+		observeCalls++
+		if observeCalls <= busyTicks {
+			// Same continuously busy shape as the positive test, but with
+			// nothing queued for this target.
+			last := time.Now()
+			return worker.LiveObservation{Running: true, LastActivity: &last}, nil
+		}
+		// Empty queue, so shouldKeepNudgePollerAlive lets the poller exit.
+		return worker.LiveObservation{Running: false}, nil
+	}
+	defer func() { nudgeObserveTarget = origObserve }()
+
+	var stdout, stderr bytes.Buffer
+	code := cmdNudgePoll([]string{created.ID}, "worker-session", time.Millisecond, time.Hour, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdNudgePoll = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if observeCalls <= busyTicks {
+		t.Fatalf("observe calls = %d, want more than %d busy ticks", observeCalls, busyTicks)
+	}
+
+	var jsonOut, jsonErr bytes.Buffer
+	if code := cmdNudgeStatus([]string{created.ID}, true, &jsonOut, &jsonErr); code != 0 {
+		t.Fatalf("cmdNudgeStatus --json = %d, want 0; stderr=%s", code, jsonErr.String())
+	}
+	var result nudgeStatusJSON
+	if err := json.Unmarshal(jsonOut.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, jsonOut.String())
+	}
+	if got := result.DispatchSkips["not-delivered"]; got != 0 {
+		t.Fatalf("dispatch_skips[not-delivered] = %d, want 0 (an empty queue is the dispatcher's not-matched class, not a silent skip)", got)
+	}
+}
+
 func TestCmdNudgeDrainStampsLastNudgeDeliveredAt(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -3557,7 +3774,7 @@ func TestExistingPollerPIDRejectsUnrelatedLivePID(t *testing.T) {
 }
 
 func TestExistingPollerPIDAcceptsMatchingCitySession(t *testing.T) {
-	cityPath := t.TempDir()
+	cityPath := filepath.Join(t.TempDir(), "city with spaces")
 	sessionName := "sess-worker"
 	pidPath := nudgePollerPIDPath(cityPath, sessionName, "session-id")
 	cmd := startPollerLikeProcess(t, cityPath, "session-id")
@@ -4292,6 +4509,47 @@ func TestPruneDeadQueuedNudges_RetainsItemsWithoutBeadID(t *testing.T) {
 	}
 	if len(dead) != 1 || dead[0].ID != "n-orphan" {
 		t.Fatalf("dead = %v, want [n-orphan] retained (no bead record)", dead)
+	}
+}
+
+func TestPruneDeadQueuedNudges_PrunesItemsWhoseBeadWasReaped(t *testing.T) {
+	// Regression (gastownhall/gascity#5278): a dead-letter item whose BeadID
+	// once pointed at a real bead, but that bead was later reaped by an
+	// unrelated retention sweep (wisp compaction etc.), must still become
+	// prunable by age. The repair path can never re-confirm "found +
+	// terminal" for a bead that no longer exists, so before the fix such
+	// items were retained forever and paid a store lookup on every sweep.
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	now := time.Now().UTC()
+	item := newQueuedNudgeWithOptions("worker", "stale dead letter", "session", now.Add(-3*time.Hour), queuedNudgeOptions{
+		ID:        "n-dead-reaped",
+		SessionID: "gc-worker",
+	})
+	beadID, created, err := ensureQueuedNudgeBead(store, item)
+	if err != nil {
+		t.Fatalf("ensureQueuedNudgeBead: %v", err)
+	}
+	if !created {
+		t.Fatal("expected backing nudge bead to be created")
+	}
+	item.BeadID = beadID
+	item.LastError = "expired"
+	item.DeadAt = now.Add(-2 * time.Hour) // older than defaultQueuedNudgeDeadRetention (1h)
+
+	// Simulate the backing bead being reaped by an unrelated retention sweep,
+	// independent of the nudge queue's own lifecycle.
+	if err := store.Delete(beadID); err != nil {
+		t.Fatalf("Delete(%s): %v", beadID, err)
+	}
+
+	state := &nudgeQueueState{Dead: []queuedNudge{item}}
+	if err := pruneDeadQueuedNudges(state, nudgeFrontDoor(store), now, noMaintenanceDeadline()); err != nil {
+		t.Fatalf("pruneDeadQueuedNudges: %v", err)
+	}
+	if len(state.Dead) != 0 {
+		t.Fatalf("dead = %d, want 0 -- a dead-letter item whose bead was reaped and is past retention must still be prunable", len(state.Dead))
 	}
 }
 

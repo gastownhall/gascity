@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // TestFSSourceMatchesLegacyBehavior asserts FSSource is a faithful
@@ -584,4 +586,36 @@ func derefString(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+// TestCanonicalExistingPathResolvesSymlinkedGrandparentWithTwoMissingLevels
+// pins the ga-iawy13.6 canonical-path-at-ingest fix: canonicalExistingPath
+// must walk up past more than one missing path component to find a
+// resolvable symlinked ancestor, matching pathutil.NormalizePathForCompare.
+// Today it only tries the immediate parent, so a path missing at both the
+// leaf and the immediate-parent level resolves through the unresolved
+// symlink instead of its real target.
+func TestCanonicalExistingPathResolvesSymlinkedGrandparentWithTwoMissingLevels(t *testing.T) {
+	root := t.TempDir()
+	realDir := filepath.Join(root, "real")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	aliasDir := filepath.Join(root, "alias")
+	if err := os.Symlink(realDir, aliasDir); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	missing := filepath.Join(aliasDir, "missing-parent", "missing-leaf")
+	got := canonicalExistingPath(missing)
+
+	// Canonicalize the expectation through the production normalizer rather
+	// than bare EvalSymlinks: on macOS the two disagree on whether the temp
+	// root is spelled /var/... or /private/var/..., and only the former is
+	// what canonicalExistingPath returns. The comparison stays exact.
+	resolvedAlias := testutil.CanonicalPath(aliasDir)
+	want := filepath.Join(resolvedAlias, "missing-parent", "missing-leaf")
+	if got != want {
+		t.Errorf("canonicalExistingPath(%q) = %q, want %q (resolved through symlinked grandparent, 2 missing levels)", missing, got, want)
+	}
 }

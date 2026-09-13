@@ -714,3 +714,176 @@ func TestNamedSessionResolutionCandidates_NilStore(t *testing.T) {
 		t.Fatalf("got %v, want nil for nil store", got)
 	}
 }
+
+// The following tests pin the ga-1ycmli regression: a live session bead whose
+// only configured-named-session signal is `alias == identity` (no exact
+// configured_named_identity/session_name metadata) must resolve as its own
+// canonical session, not as a conflict with itself. See ga-89kxkd.
+
+func TestFindCanonicalNamedSessionBead_AliasSoleLiveCandidateIsCanonical(t *testing.T) {
+	spec := NamedSessionSpec{
+		Identity:    "mayor",
+		SessionName: "test-city--mayor",
+	}
+	candidates := []beads.Bead{
+		{
+			ID:     "alias-only",
+			Type:   BeadType,
+			Labels: []string{LabelSession},
+			Metadata: map[string]string{
+				"alias": spec.Identity,
+			},
+		},
+	}
+
+	bead, ok := FindCanonicalNamedSessionBead(candidates, spec)
+	if !ok {
+		t.Fatal("FindCanonicalNamedSessionBead() = not found, want the sole alias-matching live bead recognized as canonical")
+	}
+	if bead.ID != "alias-only" {
+		t.Fatalf("FindCanonicalNamedSessionBead().ID = %q, want %q", bead.ID, "alias-only")
+	}
+}
+
+func TestFindCanonicalNamedSessionBead_AliasMatchNotPromotedWithSecondLiveCandidate(t *testing.T) {
+	spec := NamedSessionSpec{
+		Identity:    "mayor",
+		SessionName: "test-city--mayor",
+	}
+	candidates := []beads.Bead{
+		{
+			ID:     "alias-a",
+			Type:   BeadType,
+			Labels: []string{LabelSession},
+			Metadata: map[string]string{
+				"alias": spec.Identity,
+			},
+		},
+		{
+			ID:     "alias-b",
+			Type:   BeadType,
+			Labels: []string{LabelSession},
+			Metadata: map[string]string{
+				"alias": spec.Identity,
+			},
+		},
+	}
+
+	if bead, ok := FindCanonicalNamedSessionBead(candidates, spec); ok {
+		t.Fatalf("FindCanonicalNamedSessionBead() = %q, want no canonical winner between two live alias-matching beads", bead.ID)
+	}
+	if conflict, ok := FindNamedSessionConflict(candidates, spec); !ok {
+		t.Fatal("FindNamedSessionConflict() = not found, want the unresolved alias collision still surfaced as a conflict")
+	} else if conflict.ID != "alias-a" {
+		t.Fatalf("FindNamedSessionConflict().ID = %q, want %q", conflict.ID, "alias-a")
+	}
+}
+
+func TestFindCanonicalNamedSessionInfo_AliasSoleLiveCandidateIsCanonical(t *testing.T) {
+	spec := NamedSessionSpec{
+		Identity:    "mayor",
+		SessionName: "test-city--mayor",
+	}
+	b := beads.Bead{
+		ID:     "alias-only",
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"alias": spec.Identity,
+		},
+	}
+
+	info, ok := FindCanonicalNamedSessionInfo([]Info{infoFromPersistedBead(b)}, spec)
+	if !ok {
+		t.Fatal("FindCanonicalNamedSessionInfo() = not found, want the sole alias-matching live Info recognized as canonical")
+	}
+	if info.ID != "alias-only" {
+		t.Fatalf("FindCanonicalNamedSessionInfo().ID = %q, want %q", info.ID, "alias-only")
+	}
+}
+
+func TestFindCanonicalNamedSessionInfo_AliasMatchNotPromotedWithSecondLiveCandidate(t *testing.T) {
+	spec := NamedSessionSpec{
+		Identity:    "mayor",
+		SessionName: "test-city--mayor",
+	}
+	beadsIn := []beads.Bead{
+		{
+			ID:     "alias-a",
+			Type:   BeadType,
+			Labels: []string{LabelSession},
+			Metadata: map[string]string{
+				"alias": spec.Identity,
+			},
+		},
+		{
+			ID:     "alias-b",
+			Type:   BeadType,
+			Labels: []string{LabelSession},
+			Metadata: map[string]string{
+				"alias": spec.Identity,
+			},
+		},
+	}
+	infos := make([]Info, len(beadsIn))
+	for i, b := range beadsIn {
+		infos[i] = infoFromPersistedBead(b)
+	}
+
+	if info, ok := FindCanonicalNamedSessionInfo(infos, spec); ok {
+		t.Fatalf("FindCanonicalNamedSessionInfo() = %q, want no canonical winner between two live alias-matching Infos", info.ID)
+	}
+	if conflict, ok := FindNamedSessionConflictInfo(infos, spec); !ok {
+		t.Fatal("FindNamedSessionConflictInfo() = not found, want the unresolved alias collision still surfaced as a conflict")
+	} else if conflict.ID != "alias-a" {
+		t.Fatalf("FindNamedSessionConflictInfo().ID = %q, want %q", conflict.ID, "alias-a")
+	}
+}
+
+// TestLookupConfiguredNamedSession_AliasOnlyLiveBeadResolvesCanonical pins the
+// mayor's literal ga-1ycmli repro end-to-end through the real store-backed
+// entry point gc mail send depends on: (1) no live session bead yet for the
+// configured alias resolves empty, (2) once the session's bead exists with
+// only `alias` set (no exact canonical metadata), the lookup must recognize
+// it as its own canonical session rather than reporting a conflict against
+// itself.
+func TestLookupConfiguredNamedSession_AliasOnlyLiveBeadResolvesCanonical(t *testing.T) {
+	store := beads.NewMemStore()
+	spec := NamedSessionSpec{
+		Identity:    "mayor",
+		SessionName: "test-city--mayor",
+	}
+
+	before, err := LookupConfiguredNamedSession(store, spec)
+	if err != nil {
+		t.Fatalf("LookupConfiguredNamedSession(before): %v", err)
+	}
+	if before.HasCanonical || before.HasConflict {
+		t.Fatalf("lookup before session start = %+v, want empty result", before)
+	}
+
+	live, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"alias": spec.Identity,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(live): %v", err)
+	}
+
+	after, err := LookupConfiguredNamedSession(store, spec)
+	if err != nil {
+		t.Fatalf("LookupConfiguredNamedSession(after): %v", err)
+	}
+	if after.HasConflict {
+		t.Fatalf("lookup after session start reported a conflict with its own bead %q, want no conflict", after.Conflict.ID)
+	}
+	if !after.HasCanonical {
+		t.Fatal("lookup after session start = no canonical, want the live alias-only bead recognized as its own session")
+	}
+	if after.Canonical.ID != live.ID {
+		t.Fatalf("Canonical.ID = %q, want %q", after.Canonical.ID, live.ID)
+	}
+}

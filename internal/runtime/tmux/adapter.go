@@ -37,11 +37,13 @@ var instanceTokenReader = rand.Reader
 var (
 	_ runtime.Provider                      = (*Provider)(nil)
 	_ runtime.DeadRuntimeSessionChecker     = (*Provider)(nil)
+	_ runtime.EnvironmentBatchProvider      = (*Provider)(nil)
 	_ runtime.ImmediateNudgeProvider        = (*Provider)(nil)
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
 	_ runtime.ProcessTableScanner           = (*Provider)(nil)
 	_ runtime.ServerLifecycleProvider       = (*Provider)(nil)
+	_ runtime.SessionRosterProvider         = (*Provider)(nil)
 )
 
 // NewProvider returns a [Provider] backed by a real tmux installation
@@ -86,7 +88,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		return err
 	}
 
-	err = doStartSession(ctx, &tmuxStartOps{tm: p.tm, runtimeDir: p.cfg.RuntimeDir, setupMaxTimeout: p.cfg.SetupMaxTimeout}, name, cfg, p.cfg.SetupTimeout)
+	err = doStartSession(ctx, newTmuxStartOps(p.tm, p.cfg.RuntimeDir, p.cfg.SetupMaxTimeout, cfg), name, cfg, p.cfg.SetupTimeout)
 	if err == nil {
 		p.cache.Invalidate()
 		return nil
@@ -221,7 +223,7 @@ func (p *Provider) cleanupFailedStart(name string, cfg runtime.Config) {
 // RunLive re-applies session_live commands to a running session.
 // Called by the reconciler when only session_live config has changed.
 func (p *Provider) RunLive(name string, cfg runtime.Config) error {
-	runSessionLive(context.Background(), &tmuxStartOps{tm: p.tm, setupMaxTimeout: p.cfg.SetupMaxTimeout}, name, cfg, os.Stderr, p.cfg.SetupTimeout)
+	runSessionLive(context.Background(), newTmuxStartOps(p.tm, "", p.cfg.SetupMaxTimeout, cfg), name, cfg, os.Stderr, p.cfg.SetupTimeout)
 	return nil
 }
 
@@ -235,7 +237,7 @@ func (p *Provider) RunLive(name string, cfg runtime.Config) error {
 // re-stage files (those are provision-half and unchanged on a launch-only change),
 // and on failure it leaves the warm box in place rather than tearing it down.
 func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
-	if err := doRelaunchSession(ctx, &tmuxStartOps{tm: p.tm, setupMaxTimeout: p.cfg.SetupMaxTimeout}, name, cfg, p.cfg.SetupTimeout); err != nil {
+	if err := doRelaunchSession(ctx, newTmuxStartOps(p.tm, "", p.cfg.SetupMaxTimeout, cfg), name, cfg, p.cfg.SetupTimeout); err != nil {
 		return err
 	}
 	p.cache.Invalidate()
@@ -633,11 +635,16 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 // sessions. It mirrors the multi-backend degraded-but-usable signal that
 // [runtime.MergeBackendListResults] produces for composite providers, and is
 // the ListRunning-side analog of the StateCache liveness fix in #4082.
+//
+// The error also sets [runtime.PartialListError.ServerAbsent] so callers
+// holding independent proof of death (for example a session bead created
+// before the host booted) can distinguish "no server at all" from a server
+// that answered partially, without weakening the fail-safe for either.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	all, err := p.tm.listSessionNames()
 	if err != nil {
 		if errors.Is(err, ErrNoServer) {
-			return nil, &runtime.PartialListError{Err: fmt.Errorf("tmux server unreachable: %w", err)}
+			return nil, &runtime.PartialListError{Err: fmt.Errorf("tmux server unreachable: %w", err), ServerAbsent: true}
 		}
 		return nil, err
 	}
@@ -654,6 +661,20 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 // session. Delegates to [Tmux.GetSessionActivity].
 func (p *Provider) GetLastActivity(name string) (time.Time, error) {
 	return p.tm.GetSessionActivity(name)
+}
+
+// GetAllEnvironment returns all environment variables for a session,
+// satisfying [runtime.EnvironmentBatchProvider]. Delegates to
+// [Tmux.GetAllEnvironment].
+func (p *Provider) GetAllEnvironment(name string) (map[string]string, error) {
+	return p.tm.GetAllEnvironment(name)
+}
+
+// SessionRoster returns attributes for every session currently known to
+// tmux, satisfying [runtime.SessionRosterProvider]. Delegates to
+// [Tmux.SessionRoster].
+func (p *Provider) SessionRoster() (map[string]runtime.SessionRosterEntry, error) {
+	return p.tm.SessionRoster()
 }
 
 // ClearScrollback clears the scrollback history of the named session.
@@ -798,7 +819,7 @@ func (p *Provider) TeardownServer() error {
 // This enables unit testing without a real tmux server.
 type startOps interface {
 	createSession(name, workDir, command string, env map[string]string) error
-	respawnAgent(name, workDir, command string) error
+	respawnAgent(name, workDir, command string, env map[string]string) error
 	isSessionRunning(name string) bool
 	isRuntimeRunning(name string, processNames []string) bool
 	killSession(name string) error
@@ -809,6 +830,7 @@ type startOps interface {
 	capturePane(name string, lines int) (string, error)
 	recordStartCrash(name, paneContent string) string
 	sendKeys(name, text string) error
+	paneBusy(name string) (bool, error)
 	setRemainOnExit(name string) error
 	disableMouseAndActivity(name string) error
 	runSetupCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration) error
@@ -825,6 +847,28 @@ type tmuxStartOps struct {
 	// runSetupCommand replaces its fixed wall-clock deadline with
 	// "no output for `timeout`" (idle) plus this absolute ceiling.
 	setupMaxTimeout time.Duration
+	// secrets are the session's credential values, redacted out of every
+	// pane capture and crash artifact this startup produces. Built by
+	// newTmuxStartOps; a zero value simply redacts nothing.
+	secrets []string
+}
+
+// newTmuxStartOps builds the startup adapter for one session, deriving the
+// redaction secret list from that session's environment.
+//
+// The secrets have to come from the session config rather than the provider,
+// because the credentials differ per agent and the pane is where they surface.
+// Production code must use this constructor rather than a struct literal — a
+// literal compiles fine and produces output that still looks like a diagnostic,
+// so a forgotten field is invisible. TestProductionStartOpsUseTheConstructor
+// enforces that.
+func newTmuxStartOps(tm *Tmux, runtimeDir string, setupMaxTimeout time.Duration, cfg runtime.Config) *tmuxStartOps {
+	return &tmuxStartOps{
+		tm:              tm,
+		runtimeDir:      runtimeDir,
+		setupMaxTimeout: setupMaxTimeout,
+		secrets:         runtime.SetupCommandSecrets(cfg.Env),
+	}
 }
 
 const (
@@ -851,7 +895,20 @@ func (o *tmuxStartOps) createSession(name, workDir, command string, env map[stri
 // respawnAgent relaunches the agent command in the session's existing pane
 // (respawn-pane -k), reusing the warm box and its session environment. The
 // launch-half of the un-weld relaunch path.
-func (o *tmuxStartOps) respawnAgent(name, workDir, command string) error {
+//
+// respawn-pane takes no env argument: the new process inherits the tmux server's
+// global environment as filtered by the SESSION environment, so a withheld
+// credential has to already be marked removed there. NewSessionWithCommandAndEnv
+// does that at provision time, and this re-asserts it because a warm box is
+// explicitly long-lived — one provisioned by an older gc, whose create path only
+// built the one-shot `env -u` prefix, would otherwise hand the respawned agent
+// the controller's real value for the rest of the box's life. Re-marking a key
+// already marked is a no-op, and only controller-scope keys are marked, so a
+// relaunch that withholds no credential costs no extra tmux call at all.
+func (o *tmuxStartOps) respawnAgent(name, workDir, command string, env map[string]string) error {
+	if err := o.tm.markSessionEnvRemoved(name, durableWithholdKeys(env)); err != nil {
+		return err
+	}
 	return o.tm.RespawnPaneWithWorkDir(name, workDir, command)
 }
 
@@ -883,8 +940,17 @@ func (o *tmuxStartOps) hasSession(name string) (bool, error) {
 	return o.tm.HasSession(name)
 }
 
+// capturePane returns the dead pane's output with credentials removed.
+//
+// This is the redaction chokepoint for the whole startup-failure path: the one
+// caller folds the result into a returned error AND writes it to disk, so
+// redacting here covers both without either site having to remember. The
+// capture is joined (-J) because tmux otherwise breaks the text at the pane
+// width, and a credential split across two lines by a newline tmux inserted is
+// a credential substring matching cannot find.
 func (o *tmuxStartOps) capturePane(name string, lines int) (string, error) {
-	return o.tm.CapturePane(name, lines)
+	content, err := o.tm.CapturePaneJoined(name, lines)
+	return runtime.RedactSecrets(content, o.secrets), err
 }
 
 // recordStartCrash persists a per-session start-crash diagnostic so an
@@ -893,10 +959,17 @@ func (o *tmuxStartOps) capturePane(name string, lines int) (string, error) {
 // terminating signal alongside the captured pane output. Best-effort: a
 // disabled capture (empty runtimeDir) or any I/O error returns "" without
 // affecting startup. Returns the artifact path when written.
+//
+// The artifact is redacted again here and written owner-only. Redacting twice
+// is deliberate: capturePane already cleans the text this caller passes, but
+// this is the copy that outlives the session, and a future caller reaching for
+// a durable crash record should not have to know which of its arguments were
+// pre-sanitized.
 func (o *tmuxStartOps) recordStartCrash(name, paneContent string) string {
 	if o.runtimeDir == "" {
 		return ""
 	}
+	paneContent = runtime.RedactSecrets(paneContent, o.secrets)
 	status, signal := o.tm.PaneDeadInfo(name)
 
 	var b strings.Builder
@@ -914,11 +987,11 @@ func (o *tmuxStartOps) recordStartCrash(name, paneContent string) string {
 	}
 
 	dir := filepath.Join(o.runtimeDir, "sessions", name)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := runtime.EnsurePrivateDir(dir); err != nil {
 		return ""
 	}
 	path := filepath.Join(dir, "start-stderr.log")
-	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+	if err := runtime.WritePrivateFile(path, []byte(b.String())); err != nil {
 		return ""
 	}
 	return path
@@ -926,6 +999,18 @@ func (o *tmuxStartOps) recordStartCrash(name, paneContent string) string {
 
 func (o *tmuxStartOps) sendKeys(name, text string) error {
 	return o.tm.NudgeSession(name, text)
+}
+
+// paneBusy reports whether the target agent pane is showing a busy/
+// processing indicator right now — used between startup-nudge retries to
+// avoid blindly re-running the full C-u/paste/submit cycle against a pane
+// that already went busy (see sendStartupNudgeWithRetry).
+func (o *tmuxStartOps) paneBusy(name string) (bool, error) {
+	target := name
+	if agentPane, err := o.tm.FindAgentPane(name); err == nil && agentPane != "" {
+		target = agentPane
+	}
+	return o.tm.paneBusy(target)
 }
 
 func (o *tmuxStartOps) setRemainOnExit(name string) error {
@@ -994,52 +1079,67 @@ func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[
 		if ctxErr := context.Cause(runCtx); ctxErr != nil && runCtx.Err() != nil {
 			err = fmt.Errorf("%w: %w", ctxErr, err)
 		}
-		return setupCommandFailure(err, stdout, stderr)
+		return setupCommandFailure(err, stdout, stderr, runtime.SetupCommandSecrets(env))
 	}
 	return nil
 }
 
+// commandOutputTail reports only the last limit bytes written, but retains
+// [runtime.OutputTailRetention] bytes, so redaction sees a whole value before
+// the reported window is cut out of it.
 type commandOutputTail struct {
 	limit   int
+	retain  int
 	written int
 	buf     []byte
 }
 
 func newCommandOutputTail(limit int) *commandOutputTail {
-	return &commandOutputTail{limit: limit}
+	return &commandOutputTail{limit: limit, retain: runtime.OutputTailRetention(limit)}
 }
 
 func (b *commandOutputTail) Write(p []byte) (int, error) {
 	b.written += len(p)
-	if b.limit <= 0 {
+	if b.retain <= 0 {
 		return len(p), nil
 	}
-	if len(p) >= b.limit {
-		b.buf = append(b.buf[:0], p[len(p)-b.limit:]...)
+	if len(p) >= b.retain {
+		b.buf = append(b.buf[:0], p[len(p)-b.retain:]...)
 		return len(p), nil
 	}
 	b.buf = append(b.buf, p...)
-	if len(b.buf) > b.limit {
-		copy(b.buf, b.buf[len(b.buf)-b.limit:])
-		b.buf = b.buf[:b.limit]
+	if len(b.buf) > b.retain {
+		copy(b.buf, b.buf[len(b.buf)-b.retain:])
+		b.buf = b.buf[:b.retain]
 	}
 	return len(p), nil
 }
 
-func (b *commandOutputTail) Detail(label string) string {
-	text := strings.TrimSpace(string(b.buf))
+// Detail renders the tail with secrets scrubbed. Redaction is this type's job
+// rather than the caller's because only it knows the retained buffer is wider
+// than the window it reports, and [runtime.RedactSecretsTail] has to see the
+// wider one.
+func (b *commandOutputTail) Detail(label string, secrets []string) string {
+	text, trimmed := runtime.RedactSecretsTail(string(b.buf), b.limit, secrets)
+	text = strings.TrimSpace(text)
 	if text == "" {
 		return ""
 	}
-	if b.written > len(b.buf) {
+	if trimmed || b.written > len(b.buf) {
 		text = "... " + text
 	}
 	return label + ": " + text
 }
 
-func setupCommandFailure(err error, stdout, stderr *commandOutputTail) error {
-	stderrDetail := stderr.Detail("stderr")
-	stdoutDetail := stdout.Detail("stdout")
+// setupCommandFailure folds a bounded tail of both streams into the failure.
+// The tails are scrubbed against [runtime.SetupCommandSecrets] because this
+// error is durable — it reaches logs, the event bus and bead notes — and a
+// setup command echoing a credential it was handed (a `set -x` trace, a failing
+// curl printing its header) would otherwise park that credential there
+// permanently.
+func setupCommandFailure(err error, stdout, stderr *commandOutputTail, secrets []string) error {
+	stderrDetail := stderr.Detail("stderr", secrets)
+	stdoutDetail := stdout.Detail("stdout", secrets)
 	switch {
 	case stderrDetail != "" && stdoutDetail != "":
 		return fmt.Errorf("%w; %s; %s", err, stderrDetail, stdoutDetail)
@@ -1230,7 +1330,7 @@ func doRelaunchSession(ctx context.Context, ops startOps, name string, cfg runti
 	if err != nil {
 		return err
 	}
-	if err := ops.respawnAgent(name, cfg.WorkDir, fullCommand); err != nil {
+	if err := ops.respawnAgent(name, cfg.WorkDir, fullCommand, cfg.Env); err != nil {
 		return cleanupPromptFileOnError(promptFile, fmt.Errorf("relaunch: respawning agent in session %q: %w", name, err))
 	}
 	if err := ctx.Err(); err != nil {
@@ -1316,8 +1416,25 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 		return err
 	}
 	if cfg.Nudge != "" {
-		if err := ops.sendKeys(name, cfg.Nudge); err != nil {
-			return fmt.Errorf("sending startup nudge: %w", err)
+		if err := sendStartupNudgeWithRetry(ctx,
+			func() error { return ops.sendKeys(name, cfg.Nudge) },
+			func(d time.Duration) { _ = sleepWithContext(ctx, d) },
+			func() (bool, error) { return ops.paneBusy(name) }); err != nil {
+			// A resume-mode (or cold-start) session's startup nudge races the
+			// TUI's own boot: readiness detection and the TUI actually being
+			// able to accept input are not the same moment, so a submit
+			// injected right after waitForReady returns can land unconfirmed
+			// even though the session itself is alive and verified above
+			// (see sendStartupNudgeWithRetry). The startup nudge has no
+			// retry-capable caller beyond the bounded ladder just spent, so
+			// exhausting it is a warning, not a start failure: the session
+			// starts, but the agent may sit silently idle with the nudge
+			// still drafted in its input line rather than acted on. Any
+			// other error still fails the start.
+			if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+				return fmt.Errorf("sending startup nudge: %w", err)
+			}
+			fmt.Fprintf(os.Stderr, "warning: startup nudge to %q delivered but not confirmed after retries: %v\n", name, err)
 		}
 	}
 
@@ -1328,6 +1445,120 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 	runSessionLive(ctx, ops, name, cfg, os.Stderr, setupTimeout)
 
 	return nil
+}
+
+// startupNudgeRetryBackoffs are the delays between resend attempts when the
+// startup nudge comes back ErrNudgeSubmitUnconfirmed. Proven empirically: a
+// submit injected right after readiness is observed (~0.3s into a booting
+// claude TUI) sits unconfirmed, while the same injection ~6s later lands —
+// readiness detection and the TUI actually accepting input are not the same
+// moment. A var (not a const) so tests can shrink it.
+var startupNudgeRetryBackoffs = []time.Duration{2 * time.Second, 4 * time.Second, 6 * time.Second, 8 * time.Second}
+
+// startupNudgeRetryBudgetFraction caps the total wall-clock time
+// sendStartupNudgeWithRetry may spend on retries (both the backoff sleeps AND
+// the resend attempts themselves — a single send can itself take seconds:
+// NudgeSession's submitEnterAndConfirm polls for the busy indicator for a
+// couple of seconds per attempt before giving up) to this fraction of ctx's
+// *remaining* deadline, measured once on entry. The full backoff ladder sums
+// to 20s worst case even before counting per-attempt cost, but the nudge is
+// a warning-only step (see the call site in launchOrchestration): exhausting
+// it must still leave the majority of whatever startup budget is left for
+// the steps that follow (session_live, etc.), or a robustness feature turns
+// into an outright start failure whenever the busy indicator never appears.
+// Half is a deliberately conservative split: it guarantees a canceled/
+// exhausted ladder never consumes more of the remaining budget than it
+// leaves behind.
+const startupNudgeRetryBudgetFraction = 0.5
+
+// sendStartupNudgeWithRetry calls send (a full clear+paste+submit cycle, e.g.
+// ops.sendKeys) and, if it reports ErrNudgeSubmitUnconfirmed, waits out a
+// backoff and calls send again — re-running the whole cycle re-pastes the
+// nudge text, which self-heals a draft the still-booting TUI cleared or
+// redrew. Any other error, or exhausting the backoffs, returns immediately so
+// a healthy fast boot never pays this cost.
+//
+// busy is checked once the backoff sleep has elapsed, right before the next
+// resend: send's own busy-indicator poll (submitEnterAndConfirm) only runs
+// for a couple of seconds per attempt and can still miss a pane that goes
+// busy a little later — an agent whose first turn started from a large argv
+// prompt can take several more seconds to render its busy indicator. If busy
+// now reports true, the earlier submit (or a turn that started some other
+// way) has landed, so this returns nil instead of blindly re-running
+// send's C-u/paste/submit cycle: Claude Code queues input typed mid-turn
+// rather than rejecting it, so a resend against an already-busy pane risks
+// enqueueing a second copy of the nudge behind the one that just landed
+// (gastownhall/gascity#5019 review discussion). busy may be nil, in which
+// case this check is skipped and the ladder behaves as before. A busy
+// check's own error is treated the same as "not busy" — best-effort, never
+// a reason to fail the retry loop itself.
+//
+// ctx is checked before each backoff sleep: if the start is already being
+// canceled elsewhere (e.g. the supervising startup_timeout deadline), this
+// stops immediately rather than sleeping through the remainder of the ladder
+// only to hand back the same unconfirmed error a bit later — a canceled
+// start must not be pushed past the budget it's trying to protect.
+//
+// The ladder is additionally bounded by startupNudgeRetryBudgetFraction of
+// ctx's remaining deadline (if any), computed once on entry: a retry (the
+// backoff sleep AND the resend that follows it) is only taken if the actual
+// wall-clock time already spent in this function, plus the next backoff,
+// still fits inside that budget. Wall-clock elapsed — not just the sum of
+// intended sleep durations — is what's measured, because the dominant cost
+// of an unconfirmed attempt is usually the busy-indicator poll inside send
+// itself, not the backoff between attempts; bounding only the sleeps would
+// let a handful of slow, always-unconfirmed sends alone blow through the
+// deadline. This keeps a fully-exhausted ladder from silently eating the
+// whole startup deadline before the warning-and-continue path (the caller's
+// fallback for ErrNudgeSubmitUnconfirmed) gets a chance to return — the
+// retry exists to make startup more robust, not to spend the deadline the
+// rest of startup needs.
+//
+// startupNudgeNow is the clock behind that wall-clock measurement. It is a
+// package variable (same shape as internal/extmsg's timeNow) so the budget
+// test can advance a fake clock from its send/sleep fakes instead of really
+// sleeping — the resourcecensus fixed_sleep ratchet forbids new untagged
+// time.Sleep call sites, and a fake clock also makes the bound deterministic
+// rather than scheduler-dependent.
+var startupNudgeNow = time.Now
+
+func sendStartupNudgeWithRetry(ctx context.Context, send func() error, sleep func(time.Duration), busy func() (bool, error)) error {
+	start := startupNudgeNow()
+	budget := time.Duration(-1)
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := deadline.Sub(start); remaining > 0 {
+			budget = time.Duration(float64(remaining) * startupNudgeRetryBudgetFraction)
+		} else {
+			budget = 0
+		}
+	}
+
+	var err error
+	for attempt := 0; ; attempt++ {
+		err = send()
+		if err == nil || !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+			return err
+		}
+		if attempt >= len(startupNudgeRetryBackoffs) {
+			return err
+		}
+		if ctx.Err() != nil {
+			return err
+		}
+		next := startupNudgeRetryBackoffs[attempt]
+		if budget >= 0 && startupNudgeNow().Sub(start)+next > budget {
+			return err
+		}
+		sleep(next)
+		if ctx.Err() != nil {
+			return err
+		}
+		if busy != nil {
+			if isBusy, _ := busy(); isBusy {
+				return nil
+			}
+		}
+	}
 }
 
 // runSessionSetup runs session_setup commands then session_setup_script.

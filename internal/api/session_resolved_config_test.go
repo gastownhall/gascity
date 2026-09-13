@@ -135,19 +135,25 @@ func TestResolvedSessionConfigForProviderBuildsNormalizedConfig(t *testing.T) {
 	}
 }
 
-// TestResolvedSessionConfigForProviderScrubsControllerToken is the regression
-// for the PR #4577 review (security major): cityAnchoredSessionEnv expands
-// workspace and provider env against the controller process, so a configured
-// `GC_CONTROLLER_TOKEN = "$GC_CONTROLLER_TOKEN"` (or a literal) would otherwise
-// leak the controller-only token into a managed session. The final API env must
-// scrub convergence.TokenEnvVar — matching cmd/gc/template_resolve.go — so it
-// reaches neither Runtime.SessionEnv nor Runtime.Hints.Env, regardless of which
-// layer supplied it.
-func TestResolvedSessionConfigForProviderScrubsControllerToken(t *testing.T) {
-	t.Setenv(convergence.TokenEnvVar, "super-secret-controller-token")
+// TestResolvedSessionConfigForProviderPinsControllerTokenEmpty is the
+// regression for the PR #4577 review (security major): cityAnchoredSessionEnv
+// expands workspace and provider env against the controller process, so a
+// configured `GC_CONTROLLER_TOKEN = "$GC_CONTROLLER_TOKEN"` (or a literal)
+// would otherwise leak the controller-only token into a managed session.
+//
+// Withheld means PRESENT AND EMPTY, not absent. This env is an overlay on an
+// environment the managed session already inherits — the tmux server's global
+// env, or os.Environ() on the subprocess/ACP paths — so an absent key is an
+// inherited key, and asserting absence asserts the symptom of the bug. The
+// copy-under-another-name shape is driven too: no key-level guard can catch
+// `WORKSPACE_COPY = "$GC_CONTROLLER_TOKEN"`, only the masked expansion can.
+func TestResolvedSessionConfigForProviderPinsControllerTokenEmpty(t *testing.T) {
+	const token = "super-secret-controller-token"
+	t.Setenv(convergence.TokenEnvVar, token)
 	workspaceEnv := map[string]string{
 		// Expands from the controller process env — the exact leak vector.
 		convergence.TokenEnvVar: "$" + convergence.TokenEnvVar,
+		"WORKSPACE_COPY":        "$" + convergence.TokenEnvVar,
 	}
 	cfg, err := resolvedSessionConfigForProvider(
 		"/tmp/test-city",
@@ -163,6 +169,7 @@ func TestResolvedSessionConfigForProviderScrubsControllerToken(t *testing.T) {
 			Command: "/bin/echo",
 			Env: map[string]string{
 				convergence.TokenEnvVar: "literal-token-value",
+				"PROVIDER_COPY":         "${" + convergence.TokenEnvVar + "}",
 			},
 		},
 		"",
@@ -172,11 +179,26 @@ func TestResolvedSessionConfigForProviderScrubsControllerToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolvedSessionConfigForProvider: %v", err)
 	}
-	if got, present := cfg.Runtime.SessionEnv[convergence.TokenEnvVar]; present {
-		t.Errorf("Runtime.SessionEnv[%s] = %q present, want scrubbed", convergence.TokenEnvVar, got)
-	}
-	if got, present := cfg.Runtime.Hints.Env[convergence.TokenEnvVar]; present {
-		t.Errorf("Runtime.Hints.Env[%s] = %q present, want scrubbed", convergence.TokenEnvVar, got)
+	for name, env := range map[string]map[string]string{
+		"Runtime.SessionEnv": cfg.Runtime.SessionEnv,
+		"Runtime.Hints.Env":  cfg.Runtime.Hints.Env,
+	} {
+		val, present := env[convergence.TokenEnvVar]
+		if !present {
+			t.Errorf("%s omits %s; want present and empty so the session cannot inherit the controller's value", name, convergence.TokenEnvVar)
+		} else if val != "" {
+			t.Errorf("%s[%s] = %q, want empty (a config-authored literal must not overwrite the pin)", name, convergence.TokenEnvVar, val)
+		}
+		for _, key := range []string{"WORKSPACE_COPY", "PROVIDER_COPY"} {
+			if got := env[key]; got != "" {
+				t.Errorf("%s[%s] = %q, want empty ($VAR expansion must not copy the controller token into another name)", name, key, got)
+			}
+		}
+		for key, val := range env {
+			if strings.Contains(val, token) {
+				t.Errorf("%s[%s] = %q carries the controller token", name, key, val)
+			}
+		}
 	}
 }
 

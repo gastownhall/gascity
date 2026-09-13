@@ -110,13 +110,17 @@ func TestJSONResultSchemasRequireSuccessDiscriminator(t *testing.T) {
 			return nil
 		}
 		if path == "schemas/metrics/example/result.schema.json" ||
-			path == "schemas/pack/registry/requests/result.schema.json" {
+			path == "schemas/pack/registry/requests/result.schema.json" ||
+			path == "schemas/ready/result.schema.json" {
 			// metrics example --json is deliberately the byte-exact product-
 			// metrics network fixture. Registry requests is the versioned
-			// external Registry API response family. Neither is a normal CLI
-			// result envelope. Keep both exceptions explicit and self-describing
-			// so another raw result schema cannot bypass the top-level success
-			// discriminator silently.
+			// external Registry API response family. gc ready is the in-process
+			// drop-in for `bd ready --json`, so its payload is bd's bare row
+			// array — the shape the hook work-query path already decodes into
+			// []beads.Bead, and one an envelope would break. None is a normal
+			// CLI result envelope. Keep every exception explicit and
+			// self-describing so another raw result schema cannot bypass the
+			// top-level success discriminator silently.
 			var rawResult struct {
 				RawJSON bool `json:"x-gc-raw-json"`
 			}

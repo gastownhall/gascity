@@ -200,6 +200,61 @@ func TestControllerScriptDeployRejectsPartialCanonicalDoltTarget(t *testing.T) {
 	}
 }
 
+// TestControllerScriptDeployRunsAsBakedGcagentUIDWithWritableHome pins the
+// three settings that have to agree for the controller pod to start at all.
+//
+// The uid must match the one the agent image bakes:
+// contrib/k8s/Dockerfile.base:138 runs `useradd -m -s /bin/bash gcagent` with
+// no `-u` on `ubuntu:24.04`, which already ships a default `ubuntu` user at
+// 1000 — so `gcagent` lands at 1001, and `ENV HOME=/home/gcagent` belongs to
+// that uid.
+//
+// The root filesystem stays read-only, which means $HOME is only writable
+// because a `home` emptyDir is mounted over it (fsGroup 1001 makes the kubelet
+// chown it). Dropping either the mount or its volume leaves the pod with an
+// unwritable $HOME — a failure that surfaces at runtime, not at apply time,
+// so the mount↔volume pairing is asserted here rather than left to the
+// cluster to discover.
+func TestControllerScriptDeployRunsAsBakedGcagentUIDWithWritableHome(t *testing.T) {
+	clearDoltAndCityEnv(t)
+	result := runControllerScriptDeploy(t, controllerScriptDeployOptions{})
+	if result.err != nil {
+		t.Fatalf("gc-controller-k8s deploy error = %v\noutput:\n%s", result.err, result.output)
+	}
+
+	const wantUID = 1001
+	got := result.podSecurityContext
+	if got.RunAsUser != wantUID || got.RunAsGroup != wantUID || got.FSGroup != wantUID {
+		t.Fatalf("pod securityContext = %+v, want runAsUser/runAsGroup/fsGroup all %d", got, wantUID)
+	}
+
+	if !result.readOnlyRootFilesystem {
+		t.Fatal("container securityContext.readOnlyRootFilesystem = false, want true")
+	}
+
+	foundHome := false
+	for _, mount := range result.containerVolumeMounts {
+		if mount.Name == "home" && mount.MountPath == "/home/gcagent" {
+			foundHome = true
+			break
+		}
+	}
+	if !foundHome {
+		t.Fatalf("container volumeMounts = %+v, want a {name: home, mountPath: /home/gcagent} entry", result.containerVolumeMounts)
+	}
+
+	volumes := make(map[string]bool, len(result.podVolumeNames))
+	for _, name := range result.podVolumeNames {
+		volumes[name] = true
+	}
+	for _, mount := range result.containerVolumeMounts {
+		if !volumes[mount.Name] {
+			t.Fatalf("volumeMount %q (at %q) has no matching entry in spec.volumes %v",
+				mount.Name, mount.MountPath, result.podVolumeNames)
+		}
+	}
+}
+
 type controllerScriptDeployOptions struct {
 	Env               map[string]string
 	CityToml          string
@@ -209,11 +264,21 @@ type controllerScriptDeployOptions struct {
 	FailExecCount     int
 }
 
+// controllerVolumeMount is a rendered `containers[].volumeMounts` entry.
+type controllerVolumeMount struct {
+	Name      string `json:"name"`
+	MountPath string `json:"mountPath"`
+}
+
 type controllerScriptDeployResult struct {
-	manifestEnv map[string]string
-	callLog     string
-	output      string
-	err         error
+	manifestEnv            map[string]string
+	podSecurityContext     podSecurityContext
+	readOnlyRootFilesystem bool
+	containerVolumeMounts  []controllerVolumeMount
+	podVolumeNames         []string
+	callLog                string
+	output                 string
+	err                    error
 }
 
 func runControllerScriptDeploy(t *testing.T, opts controllerScriptDeployOptions) controllerScriptDeployResult {
@@ -380,16 +445,28 @@ exit 1
 		t.Fatalf("read call log: %v", readCallErr)
 	}
 	manifestEnv := map[string]string{}
+	var podSecCtx podSecurityContext
+	var readOnlyRootFS bool
+	var volumeMounts []controllerVolumeMount
+	var volumeNames []string
 	manifestBytes, readManifestErr := os.ReadFile(manifestPath)
 	if readManifestErr == nil && len(manifestBytes) > 0 {
 		var manifest struct {
 			Spec struct {
-				Containers []struct {
+				SecurityContext podSecurityContext `json:"securityContext"`
+				Containers      []struct {
 					Env []struct {
 						Name  string `json:"name"`
 						Value string `json:"value"`
 					} `json:"env"`
+					SecurityContext struct {
+						ReadOnlyRootFilesystem bool `json:"readOnlyRootFilesystem"`
+					} `json:"securityContext"`
+					VolumeMounts []controllerVolumeMount `json:"volumeMounts"`
 				} `json:"containers"`
+				Volumes []struct {
+					Name string `json:"name"`
+				} `json:"volumes"`
 			} `json:"spec"`
 		}
 		if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
@@ -401,6 +478,12 @@ exit 1
 		for _, item := range manifest.Spec.Containers[0].Env {
 			manifestEnv[item.Name] = item.Value
 		}
+		podSecCtx = manifest.Spec.SecurityContext
+		readOnlyRootFS = manifest.Spec.Containers[0].SecurityContext.ReadOnlyRootFilesystem
+		volumeMounts = manifest.Spec.Containers[0].VolumeMounts
+		for _, volume := range manifest.Spec.Volumes {
+			volumeNames = append(volumeNames, volume.Name)
+		}
 	} else if readManifestErr != nil && !os.IsNotExist(readManifestErr) {
 		t.Fatalf("read manifest: %v", readManifestErr)
 	}
@@ -411,10 +494,14 @@ exit 1
 	callLog := strings.ReplaceAll(string(callLogBytes), tmpDir, "<TMPDIR>")
 
 	return controllerScriptDeployResult{
-		manifestEnv: manifestEnv,
-		callLog:     callLog,
-		output:      string(out),
-		err:         err,
+		manifestEnv:            manifestEnv,
+		podSecurityContext:     podSecCtx,
+		readOnlyRootFilesystem: readOnlyRootFS,
+		containerVolumeMounts:  volumeMounts,
+		podVolumeNames:         volumeNames,
+		callLog:                callLog,
+		output:                 string(out),
+		err:                    err,
 	}
 }
 

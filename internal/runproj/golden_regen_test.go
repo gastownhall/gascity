@@ -31,7 +31,9 @@ func TestRegenerateGoldens(t *testing.T) {
 	inFlight = append(inFlight, summary.Lanes...)
 	inFlight = append(inFlight, summary.BlockedLanes...)
 	marks := AdvanceProgressMarks(nil, inFlight)
-	enriched := EnrichRunSummary(summary, sessions, true, mustMillis(t, "2026-06-09T00:00:00Z"), marks)
+	// Same generation time as TestEnrichRunSummaryGolden — inside the 72h
+	// staleRunSilenceMs window of the fixture's active beads so they render active.
+	enriched := EnrichRunSummary(summary, sessions, true, mustMillis(t, "2026-06-04T06:00:00Z"), marks)
 	writeGolden(t, "runsummary_enriched_golden.json", enriched)
 }
 

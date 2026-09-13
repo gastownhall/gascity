@@ -1,18 +1,34 @@
 package dispatch
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/pathutil"
+)
+
+const (
+	// Keep this retry window short and bounded while covering common
+	// sub-second Dolt read-after-write visibility lag between a retry
+	// subject's status=closed write and its gc.outcome/gc.failure_class/
+	// gc.failure_reason metadata becoming visible to a subsequent read: the
+	// agent (or fake-agent test harness) sets status and outcome metadata
+	// together in one call, but a reader can still observe them in two
+	// visibility steps under load. When ProcessOptions.Context is set, retry
+	// waits exit promptly on cancellation.
+	retrySubjectOutcomeResolveAttempts   = 5
+	retrySubjectOutcomeResolveRetryDelay = 100 * time.Millisecond
 )
 
 func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (ControlResult, error) {
@@ -50,6 +66,11 @@ func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (
 	}
 	if subject.Status != "closed" {
 		return ControlResult{}, ErrControlPending
+	}
+	subjectID := subject.ID
+	subject, err = resolveRetrySubjectOutcome(store, subject, bead.ID, opts)
+	if err != nil {
+		return ControlResult{}, fmt.Errorf("%s: resolving retry subject outcome for %s: %w", bead.ID, subjectID, err)
 	}
 
 	result, err := classifyRetryAttemptWithPostconditions(store, subject, opts)
@@ -237,7 +258,7 @@ func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (
 
 func resolveRetryRunSubject(store beads.Store, eval beads.Bead, logicalID string, attempt int) (beads.Bead, error) {
 	if rootID := strings.TrimSpace(eval.Metadata[beadmeta.RootBeadIDMetadataKey]); rootID != "" && logicalID != "" && attempt > 0 {
-		all, err := listByWorkflowRoot(store, rootID)
+		all, err := beads.DirectMembers(store, rootID)
 		if err != nil {
 			return beads.Bead{}, err
 		}
@@ -263,13 +284,140 @@ func resolveRetryRunSubject(store beads.Store, eval beads.Bead, logicalID string
 	return store.Get(subjectID)
 }
 
+// subjectOutcomeAmbiguous reports whether subject is closed but carries none
+// of the signals classifyRetryAttempt uses to determine an outcome. Such a
+// subject is indistinguishable between "the agent closed this without ever
+// recording an outcome" and "the outcome metadata write has not become
+// visible to this read yet."
+func subjectOutcomeAmbiguous(subject beads.Bead) bool {
+	if strings.TrimSpace(subject.Metadata[beadmeta.OutcomeMetadataKey]) != "" {
+		return false
+	}
+	return !typedDeliverableCloseFor(subject)
+}
+
+// resolveRetrySubjectOutcome re-reads subject a bounded number of times while
+// its outcome stays ambiguous, so a closed-but-not-yet-visible outcome write
+// isn't misclassified as gc.failure_reason=missing_outcome. Once attempts are
+// exhausted it gives up and returns the last-read subject unchanged (nil
+// error) — a genuinely outcome-less close still classifies as missing_outcome
+// exactly as before; this only closes the visibility-lag race, it does not
+// change what counts as ambiguous.
+func resolveRetrySubjectOutcome(store beads.Store, subject beads.Bead, traceID string, opts ProcessOptions) (beads.Bead, error) {
+	if !subjectOutcomeAmbiguous(subject) {
+		return subject, nil
+	}
+	ctx := opts.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	current := subject
+	for attempt := 1; attempt <= retrySubjectOutcomeResolveAttempts; attempt++ {
+		if attempt > 1 {
+			next, err := store.Get(current.ID)
+			if err != nil {
+				// Best-effort refinement: a failed re-read degrades to the
+				// subject we already hold, which is exactly the pre-retry
+				// behavior. Returning the error instead lets an unclassified
+				// bd read failure (ErrNotFound, a JSON parse error) reach
+				// TierNone in handleControlDispatchError and quarantine the
+				// eval bead — a failure mode this path could not have before
+				// the re-read existed.
+				opts.tracef("retry-eval bead=%s resolve-outcome attempt=%d subject=%s result=read-error err=%v", traceID, attempt, subject.ID, err)
+				return current, nil
+			}
+			current = next
+		}
+		if !subjectOutcomeAmbiguous(current) {
+			opts.tracef("retry-eval bead=%s resolve-outcome attempt=%d subject=%s result=ok", traceID, attempt, subject.ID)
+			return current, nil
+		}
+		opts.tracef("retry-eval bead=%s resolve-outcome attempt=%d subject=%s result=retry reason=missing_outcome", traceID, attempt, subject.ID)
+		if attempt < retrySubjectOutcomeResolveAttempts {
+			timer := time.NewTimer(retrySubjectOutcomeResolveRetryDelay)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				return beads.Bead{}, ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
+	opts.tracef("retry-eval bead=%s resolve-outcome attempts=%d subject=%s result=exhausted", traceID, retrySubjectOutcomeResolveAttempts, subject.ID)
+	return current, nil
+}
+
 type retryEvalResult struct {
 	Outcome string
 	Reason  string
 }
 
+// typedDeliverableCloseFor reports whether subject carries a complete, strict
+// gc-outcome-close deliverable envelope for itself. Producer names are open-world.
+func typedDeliverableCloseFor(subject beads.Bead) bool {
+	raw := strings.TrimSpace(subject.Metadata[beadmeta.CoordinatorOutcomeProducerDispositionMetadataKey])
+	if raw == "" {
+		return false
+	}
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var envelope struct {
+		ContractVersion int     `json:"contract_version"`
+		Disposition     string  `json:"disposition"`
+		WorkID          string  `json:"work_id"`
+		RecordedBy      string  `json:"recorded_by"`
+		Reason          string  `json:"reason"`
+		Producer        *string `json:"producer"`
+		PassingVerdict  string  `json:"passing_verdict"`
+	}
+	if err := decoder.Decode(&envelope); err != nil {
+		return false
+	}
+	// Reject trailing data after the envelope: DisallowUnknownFields only guards the
+	// first object, so a valid envelope followed by more JSON or garbage must fail
+	// closed rather than forge a pass.
+	if err := decoder.Decode(new(json.RawMessage)); err != io.EOF {
+		return false
+	}
+	if envelope.Disposition != beadmeta.CoordinatorDispositionDeliverable {
+		return false
+	}
+	if envelope.ContractVersion != beadmeta.CoordinatorOutcomeContractVersion {
+		return false
+	}
+	if envelope.WorkID != subject.ID {
+		return false
+	}
+	if strings.TrimSpace(envelope.RecordedBy) == "" || strings.TrimSpace(envelope.Reason) == "" {
+		return false
+	}
+	if envelope.Producer == nil || strings.TrimSpace(*envelope.Producer) == "" {
+		return false
+	}
+	if envelope.PassingVerdict != "" {
+		switch envelope.PassingVerdict {
+		case beadmeta.CoordinatorPassingVerdictReview, beadmeta.CoordinatorPassingVerdictEvidence:
+		default:
+			return false
+		}
+		if subject.Metadata[beadmeta.ReviewGateMetadataKey] != "consumed" ||
+			subject.Metadata[envelope.PassingVerdict] != beadmeta.OutcomePass {
+			return false
+		}
+	}
+	return true
+}
+
 func classifyRetryAttempt(subject beads.Bead) retryEvalResult {
 	outcome := strings.TrimSpace(subject.Metadata[beadmeta.OutcomeMetadataKey])
+	if outcome == "" && typedDeliverableCloseFor(subject) {
+		outcome = beadmeta.OutcomePass
+	}
 	switch outcome {
 	case beadmeta.OutcomePass:
 		if strings.TrimSpace(subject.Metadata[beadmeta.FailureClassMetadataKey]) != "" || strings.TrimSpace(subject.Metadata[beadmeta.FailureReasonMetadataKey]) != "" {
@@ -310,7 +458,7 @@ func classifyRetryAttemptWithPostconditions(store beads.Store, subject beads.Bea
 	if result.Outcome != "pass" {
 		return result, nil
 	}
-	reason, err := validateRequiredArtifacts(store, subject, opts.RequiredArtifactStat)
+	reason, err := validateRequiredArtifacts(store, subject, opts)
 	if err != nil {
 		return retryEvalResult{}, err
 	}
@@ -320,12 +468,13 @@ func classifyRetryAttemptWithPostconditions(store beads.Store, subject beads.Bea
 	return result, nil
 }
 
-func validateRequiredArtifacts(store beads.Store, subject beads.Bead, stat func(string) (os.FileInfo, error)) (string, error) {
+func validateRequiredArtifacts(store beads.Store, subject beads.Bead, opts ProcessOptions) (string, error) {
+	stat := opts.RequiredArtifactStat
 	if stat == nil {
 		stat = os.Stat
 	}
 	for _, rawPath := range requiredArtifactTemplates(subject.Metadata) {
-		path, worktree, reason, err := resolveRequiredArtifactPath(store, subject, rawPath)
+		path, worktree, reason, err := resolveRequiredArtifactPath(store, subject, rawPath, opts)
 		if err != nil {
 			return "", err
 		}
@@ -374,13 +523,40 @@ func requiredArtifactTemplates(metadata map[string]string) []string {
 	return result
 }
 
-func resolveRequiredArtifactPath(store beads.Store, subject beads.Bead, rawPath string) (string, string, string, error) {
+// requiredArtifactWorkDir reads the worktree recorded on a bead, canonical key
+// first and legacy second. beadmeta documents that contract for this key family
+// and internal/beads/contract implements it for the sibling keys; the artifact
+// gate predates both and read only the legacy spelling, so a bead carrying just
+// gc.work_dir resolved to nothing and its attempts stayed transient forever.
+func requiredArtifactWorkDir(meta map[string]string) string {
+	if v := strings.TrimSpace(meta[beadmeta.WorkDirMetadataKey]); v != "" {
+		return v
+	}
+	return strings.TrimSpace(meta[beadmeta.LegacyWorkDirMetadataKey])
+}
+
+// resolveRequiredArtifactPath expands a gc.required_artifact template against
+// the attempt subject. This is the only place the template vocabulary is
+// defined, so it is also where that vocabulary is documented:
+//
+//	{worktree}          the resolved worktree root (also the implicit base for
+//	                    a relative template)
+//	{root} / {root_id}  the workflow root bead ID
+//	{attempt}           gc.attempt — this step's own retry counter
+//	{iteration}         gc.iteration — the loop iteration the step ran in
+//
+// {attempt} and {iteration} are NOT interchangeable. A directory shared by the
+// steps of one loop iteration is named by {iteration}; only {attempt} advances
+// when a single step retries. Any token left unexpanded fails the template
+// loudly rather than resolving to a partial path.
+func resolveRequiredArtifactPath(store beads.Store, subject beads.Bead, rawPath string, opts ProcessOptions) (string, string, string, error) {
 	rootID := strings.TrimSpace(subject.Metadata[beadmeta.RootBeadIDMetadataKey])
 	attempt := strings.TrimSpace(subject.Metadata[beadmeta.AttemptMetadataKey])
-	worktree := strings.TrimSpace(subject.Metadata["work_dir"])
+	iteration := strings.TrimSpace(subject.Metadata[beadmeta.IterationMetadataKey])
+	worktree := requiredArtifactWorkDir(subject.Metadata)
 
 	if worktree == "" {
-		resolvedWorktree, reason, err := resolveRequiredArtifactWorktree(store, rootID)
+		resolvedWorktree, reason, err := resolveRequiredArtifactWorktree(store, rootID, opts)
 		if err != nil {
 			return "", "", "", err
 		}
@@ -398,6 +574,17 @@ func resolveRequiredArtifactPath(store beads.Store, subject beads.Bead, rawPath 
 	path = strings.ReplaceAll(path, "{root}", rootID)
 	path = strings.ReplaceAll(path, "{root_id}", rootID)
 	path = strings.ReplaceAll(path, "{attempt}", attempt)
+	// {iteration} names the loop iteration a whole sub-DAG ran in, which is the
+	// directory a set of sibling steps share. {attempt} names one step's own
+	// retry counter, which only the step that retried advances — so a template
+	// built from it sends a retried reader to a directory its siblings never
+	// wrote. Substituted only when the bead actually carries the value: an empty
+	// replacement would produce a silently wrong path segment and the gate would
+	// then blame the step for the resolver's gap, where falling through to the
+	// unresolved-template check below names the real fault (ga-la0py).
+	if iteration != "" {
+		path = strings.ReplaceAll(path, "{iteration}", iteration)
+	}
 	if strings.Contains(path, "{") || strings.Contains(path, "}") {
 		return "", "", "unresolved_required_artifact_template", nil
 	}
@@ -458,7 +645,7 @@ func requiredArtifactTargetInWorktree(worktree, path string) (bool, error) {
 	return requiredArtifactPathInWorktree(resolvedWorktree, resolvedPath)
 }
 
-func resolveRequiredArtifactWorktree(store beads.Store, rootID string) (string, string, error) {
+func resolveRequiredArtifactWorktree(store beads.Store, rootID string, opts ProcessOptions) (string, string, error) {
 	if rootID == "" {
 		return "", "missing_required_artifact_context", nil
 	}
@@ -474,28 +661,92 @@ func resolveRequiredArtifactWorktree(store beads.Store, rootID string) (string, 
 	// bead of a cross-store root (gc.root_store_ref pointing at another rig)
 	// is not resolvable through this store, and dereferencing it used to fail
 	// passing attempts with missing_required_artifact_context.
-	if worktree := strings.TrimSpace(root.Metadata["work_dir"]); worktree != "" {
+	if worktree := requiredArtifactWorkDir(root.Metadata); worktree != "" {
 		return worktree, "", nil
 	}
 	sourceID := strings.TrimSpace(root.Metadata[beadmeta.SourceBeadIDMetadataKey])
+	fromSourceBead := sourceID != ""
 	if sourceID == "" {
 		sourceID = strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey])
 	}
 	if sourceID == "" {
 		return "", "missing_required_artifact_context", nil
 	}
-	source, err := store.Get(sourceID)
-	if errors.Is(err, beads.ErrNotFound) {
+	source, found, err := resolveRequiredArtifactSourceBead(store, root, sourceID, fromSourceBead, opts)
+	if err != nil {
+		return "", "", err
+	}
+	if !found {
 		return "", "missing_required_artifact_context", nil
 	}
-	if err != nil {
-		return "", "", fmt.Errorf("loading required artifact source bead %s: %w", sourceID, markTransientControllerBoundaryError(err))
-	}
-	worktree := strings.TrimSpace(source.Metadata["work_dir"])
+	worktree := requiredArtifactWorkDir(source.Metadata)
 	if worktree == "" {
 		return "", "missing_required_artifact_context", nil
 	}
 	return worktree, "", nil
+}
+
+// resolveRequiredArtifactSourceBead reads the worktree-bearing source bead a
+// workflow root points at, across store boundaries. The root lives in the
+// subject's own (graph) store, but on a split city the bead it points at does
+// not: a gc.source_bead_id source lives in the scope named by
+// gc.source_store_ref, and a gc.input_convoy_id convoy is a work bead in the
+// work store. Reading either through the ambient store gets a clean
+// ErrNotFound and misclassifies a genuinely-passing attempt as transient
+// missing_required_artifact_context, burning attempts until exhaustion. Two
+// doors, matching the finalize lane's walkSourceBeadChain:
+//
+//   - A non-empty gc.source_store_ref names another scope's store; resolve it
+//     via opts.ResolveStoreRef and read there. A ref with no resolver wired
+//     fails LOUD rather than silently narrowing to the ambient store.
+//   - With no ref, resolve over the same residency frame the drain uses
+//     (opts.MemberStores as the work leg). With no member stores — every
+//     single-store caller — this is byte-identical to the ambient store.Get
+//     it replaces.
+//
+// found=false is a clean not-found on every probed store; the caller maps it
+// to missing_required_artifact_context exactly as before.
+func resolveRequiredArtifactSourceBead(store beads.Store, root beads.Bead, sourceID string, fromSourceBead bool, opts ProcessOptions) (beads.Bead, bool, error) {
+	if fromSourceBead {
+		if ref := strings.TrimSpace(root.Metadata[beadmeta.SourceStoreRefMetadataKey]); ref != "" {
+			if opts.ResolveStoreRef == nil {
+				return beads.Bead{}, false, fmt.Errorf("resolving required artifact source bead %s (ref %s): no store-ref resolver provided", sourceID, ref)
+			}
+			resolved, err := opts.ResolveStoreRef(ref)
+			if err != nil {
+				return beads.Bead{}, false, fmt.Errorf("resolving required artifact source store %q: %w", ref, markTransientControllerBoundaryError(err))
+			}
+			if resolved == nil {
+				return beads.Bead{}, false, fmt.Errorf("resolving required artifact source store %q: nil store", ref)
+			}
+			source, err := resolved.Get(sourceID)
+			if errors.Is(err, beads.ErrNotFound) {
+				return beads.Bead{}, false, nil
+			}
+			if err != nil {
+				return beads.Bead{}, false, fmt.Errorf("loading required artifact source bead %s in %s: %w", sourceID, ref, markTransientControllerBoundaryError(err))
+			}
+			return source, true, nil
+		}
+	}
+	if len(opts.MemberStores) == 0 {
+		source, err := store.Get(sourceID)
+		if errors.Is(err, beads.ErrNotFound) {
+			return beads.Bead{}, false, nil
+		}
+		if err != nil {
+			return beads.Bead{}, false, fmt.Errorf("loading required artifact source bead %s: %w", sourceID, markTransientControllerBoundaryError(err))
+		}
+		return source, true, nil
+	}
+	owner, found, err := resolveDrainMember(store, sourceID, opts)
+	if err != nil {
+		return beads.Bead{}, false, fmt.Errorf("loading required artifact source bead %s: %w", sourceID, markTransientControllerBoundaryError(err))
+	}
+	if !found {
+		return beads.Bead{}, false, nil
+	}
+	return owner.Bead, true, nil
 }
 
 func retryFailureReason(subject beads.Bead) string {
@@ -561,7 +812,7 @@ func appendRetryAttempt(store beads.Store, logicalID string, prevRun, prevEval b
 		return fmt.Errorf("%s: could not derive retry step refs", prevRun.ID)
 	}
 
-	all, err := listByWorkflowRoot(store, rootID)
+	all, err := beads.DirectMembers(store, rootID)
 	if err != nil {
 		return err
 	}

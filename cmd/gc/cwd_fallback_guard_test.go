@@ -73,6 +73,7 @@ func TestCmdInit_ExplicitPathNonTerminalStillWorks(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	disableBootstrapForTests(t)
+	stubInitRemoteImports(t)
 
 	oldRegister := registerCityWithSupervisorTestHook
 	registerCityWithSupervisorTestHook = func(_ string, _ string, _ io.Writer, _ io.Writer) (bool, int) {
@@ -101,6 +102,7 @@ func TestCmdInit_NoArgsTerminalUnchanged(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	disableBootstrapForTests(t)
+	stubInitRemoteImports(t)
 
 	oldRegister := registerCityWithSupervisorTestHook
 	registerCityWithSupervisorTestHook = func(_ string, _ string, _ io.Writer, _ io.Writer) (bool, int) {
@@ -153,7 +155,7 @@ func TestCmdInitFromDir_NoArgsNonTerminalRefuses(t *testing.T) {
 	srcDir := t.TempDir()
 
 	var stdout, stderr bytes.Buffer
-	code := cmdInitFromDirWithOptionsInternal(srcDir, nil, "", &stdout, &stderr, true, false)
+	code := cmdInitFromDirWithOptionsInternal(srcDir, nil, "", &stdout, &stderr, true, false, hostedDoltInitOptions{})
 
 	if code == 0 {
 		t.Fatalf("cmdInitFromDirWithOptionsInternal code = 0; want non-zero. stdout=%q stderr=%q", stdout.String(), stderr.String())

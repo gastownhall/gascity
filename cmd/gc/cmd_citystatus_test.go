@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -722,6 +723,11 @@ func TestControllerStatusLine(t *testing.T) {
 			ctrl: ControllerJSON{Mode: "supervisor", PID: 4321, Running: true},
 			want: "supervisor-managed (PID 4321)",
 		},
+		{
+			name: "legacy hosting unknown",
+			ctrl: ControllerJSON{PID: 2468, Running: true},
+			want: "controller running (PID 2468, hosting mode unknown)",
+		},
 	}
 
 	for _, tt := range tests {
@@ -817,7 +823,7 @@ func TestControllerStatusForCityFallsBackToStandaloneWhenRegisteredSupervisorDow
 		t.Fatalf("register city: %v", err)
 	}
 
-	startFakeControllerSocket(t, cityPath, "2468\n")
+	startFakeControllerSocket(t, cityPath, `{"pid":2468,"hosting_mode":"standalone"}`+"\n")
 
 	oldAlive := supervisorAliveHook
 	oldRunning := supervisorCityRunningHook
@@ -834,6 +840,25 @@ func TestControllerStatusForCityFallsBackToStandaloneWhenRegisteredSupervisorDow
 	got := controllerStatusForCity(cityPath)
 	if got.Mode != "standalone" || !got.Running || got.PID != 2468 {
 		t.Fatalf("controllerStatusForCity = %+v, want running standalone PID 2468", got)
+	}
+}
+
+func TestControllerStatusForCityLeavesLegacyHostingUnknown(t *testing.T) {
+	t.Setenv("GC_HOME", filepath.Join(t.TempDir(), "gc-home"))
+	cityPath := filepath.Join(shortSocketTempDir(t, "gc-status-"), "bright-lights")
+	startFakeControllerSocket(t, cityPath, "2468\n")
+
+	oldAlive := supervisorAliveHook
+	supervisorAliveHook = func() int { return 0 }
+	t.Cleanup(func() { supervisorAliveHook = oldAlive })
+
+	identity := probeControllerIdentity(cityPath)
+	if identity.PID != 2468 || identity.HostingMode != controllerHostingUnknown {
+		t.Fatalf("probeControllerIdentity = %+v, want detectable legacy PID 2468 with unknown hosting", identity)
+	}
+	got := controllerStatusForCity(cityPath)
+	if got.Mode != "" || !got.Running || got.PID != 2468 {
+		t.Fatalf("controllerStatusForCity = %+v, want running PID 2468 with unknown legacy hosting", got)
 	}
 }
 
@@ -876,42 +901,54 @@ func TestControllerStatusForCityReusesSupervisorPIDWhenCityStateUnknown(t *testi
 	}
 }
 
-func TestControllerStatusForCityReturnsSupervisorModeWhenProbeSucceedsAfterUnknownRetry(t *testing.T) {
-	t.Setenv("GC_HOME", filepath.Join(t.TempDir(), "gc-home"))
-
-	root := shortSocketTempDir(t, "gc-status-")
-	cityPath := filepath.Join(root, "bright-lights")
-	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
-		t.Fatal(err)
+func TestControllerStatusForCityRequiresMatchingPIDForLegacySupervisorInference(t *testing.T) {
+	tests := []struct {
+		name          string
+		controllerPID int
+		wantMode      string
+	}{
+		{name: "same process", controllerPID: 4321, wantMode: "supervisor"},
+		{name: "different process", controllerPID: 2468, wantMode: ""},
 	}
-	if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(cityPath, "bright-lights"); err != nil {
-		t.Fatalf("register city: %v", err)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GC_HOME", filepath.Join(t.TempDir(), "gc-home"))
 
-	startFakeControllerSocket(t, cityPath, "2468\n")
+			root := shortSocketTempDir(t, "gc-status-")
+			cityPath := filepath.Join(root, "bright-lights")
+			if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(cityPath, "bright-lights"); err != nil {
+				t.Fatalf("register city: %v", err)
+			}
 
-	oldAlive := supervisorAliveHook
-	oldRunning := supervisorCityRunningHook
-	calls := 0
-	supervisorAliveHook = func() int {
-		calls++
-		if calls == 1 {
-			return 4321
-		}
-		return 0
-	}
-	supervisorCityRunningHook = func(string) (bool, string, bool) { return false, "", false }
-	t.Cleanup(func() {
-		supervisorAliveHook = oldAlive
-		supervisorCityRunningHook = oldRunning
-	})
+			startFakeControllerSocket(t, cityPath, fmt.Sprintf("%d\n", tt.controllerPID))
 
-	got := controllerStatusForCity(cityPath)
-	if got.Mode != "supervisor" || !got.Running || got.PID != 2468 {
-		t.Fatalf("controllerStatusForCity = %+v, want running supervisor-mode PID 2468", got)
-	}
-	if calls != 2 {
-		t.Fatalf("supervisorAliveHook calls = %d, want 2", calls)
+			oldAlive := supervisorAliveHook
+			oldRunning := supervisorCityRunningHook
+			calls := 0
+			supervisorAliveHook = func() int {
+				calls++
+				if calls == 1 {
+					return 4321
+				}
+				return 0
+			}
+			supervisorCityRunningHook = func(string) (bool, string, bool) { return false, "", false }
+			t.Cleanup(func() {
+				supervisorAliveHook = oldAlive
+				supervisorCityRunningHook = oldRunning
+			})
+
+			got := controllerStatusForCity(cityPath)
+			if got.Mode != tt.wantMode || !got.Running || got.PID != tt.controllerPID {
+				t.Fatalf("controllerStatusForCity = %+v, want running PID %d with mode %q", got, tt.controllerPID, tt.wantMode)
+			}
+			if calls != 2 {
+				t.Fatalf("supervisorAliveHook calls = %d, want 2", calls)
+			}
+		})
 	}
 }
 
@@ -1104,6 +1141,60 @@ func TestRouteCityStatus_SixRowMatrix(t *testing.T) {
 	}
 }
 
+// TestCmdCityStatus_SupervisorManagedNoAPIPortUsesSupervisorAPI is the
+// ra-r9hm6v end-to-end regression test, exercising the real `gc status`
+// entry point (cmdCityStatus) rather than routeCityStatus directly. A
+// supervisor-managed city with no [api] section in city.toml — the shape
+// writeCityStatusTestCity produces, and the shape of a default `gc init`'d
+// city — used to make cmdCityStatus's real cityStatusAPIClient resolve nil
+// (apiClient's "alive socket, no standalone port" case), forcing every `gc
+// status` call onto the expensive local snapshot builder even though a
+// supervisor was reachable. It must now resolve the fake supervisor's API
+// client and take route=api end to end.
+func TestCmdCityStatus_SupervisorManagedNoAPIPortUsesSupervisorAPI(t *testing.T) {
+	t.Setenv("GC_DEBUG", "1")
+	cityPath := writeCityStatusTestCity(t)
+
+	srv := httptest.NewServer(okCityStatusHandler(t))
+	defer srv.Close()
+
+	origAlive, origSup := apiRouteControllerAliveHook, apiRouteSupervisorClientHook
+	t.Cleanup(func() {
+		apiRouteControllerAliveHook = origAlive
+		apiRouteSupervisorClientHook = origSup
+	})
+	// Simulates a live per-city controller socket (the supervisor hosts the
+	// controller in-process) answering the "alive" ping, paired with a
+	// supervisor-managed API client — the exact combination apiClient alone
+	// cannot route because city.toml has no [api] port.
+	apiRouteControllerAliveHook = func(string) int { return 4242 }
+	apiRouteSupervisorClientHook = func(cp string) *api.Client {
+		if cp != cityPath {
+			return nil
+		}
+		return api.NewCityScopedClient(srv.URL, "test-city")
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdCityStatus([]string{cityPath}, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdCityStatus exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "route=api") {
+		t.Fatalf("stderr missing route=api (still falling back to the expensive local path): %s", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "route=fallback") {
+		t.Fatalf("stderr shows route=fallback, want route=api only: %s", stderr.String())
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
+		t.Fatalf("unmarshal stdout: %v; stdout=%s", err, stdout.String())
+	}
+	if _, ok := envelope["_cache_age_s"]; !ok {
+		t.Fatalf("stdout missing _cache_age_s (API-path envelope field), got: %s", stdout.String())
+	}
+}
+
 // TestRouteCityStatus_APIJSONIncludesCacheAge verifies the API-path JSON
 // output carries the _cache_age_s envelope field while the fallback path
 // omits it. Enforces D5 from the gc-read-path design doc.
@@ -1255,6 +1346,14 @@ func TestControllerStatusGuidance(t *testing.T) {
 			ctrl: ControllerJSON{Mode: "supervisor", PID: 4321, Running: true},
 			want: []string{
 				"Authority: supervisor process PID 4321",
+			},
+		},
+		{
+			name: "legacy hosting unknown",
+			ctrl: ControllerJSON{PID: 2468, Running: true},
+			want: []string{
+				"Authority: controller PID 2468; hosting mode unknown",
+				"Next: upgrade or restart the running controller to restore authoritative hosting information",
 			},
 		},
 		{

@@ -139,7 +139,13 @@ func doSuspendCity(fs fsys.FS, cityPath string, suspend bool, jsonOut bool, stdo
 		return 1
 	}
 
-	rec := openCityRecorder(stderr)
+	// Record against the city whose state actually changed, not the
+	// ambient one. openCityRecorder re-resolves the city from cwd/env,
+	// which is not cityPath whenever the target was named explicitly
+	// (`gc suspend <dir>`) from inside a different, live city — that
+	// leaked city.suspended/city.resumed into an unrelated event log
+	// (ga-41g9gr).
+	rec := openCityRecorderAt(cityPath, stderr)
 	if suspend {
 		rec.Record(events.Event{
 			Type:  events.CitySuspended,
@@ -224,30 +230,37 @@ func effectiveCitySuspended(cfg *config.City, st suspensionstate.State) bool {
 // [isAgentEffectivelySuspendedWith] to avoid the per-call disk read.
 func isAgentEffectivelySuspended(cfg *config.City, a *config.Agent) bool {
 	cityPath, _ := resolveCity()
-	return isAgentEffectivelySuspendedWith(cfg, a, loadSuspensionStateBestEffort(cityPath))
+	return isAgentEffectivelySuspendedWith(cfg, cityPath, a, loadSuspensionStateBestEffort(cityPath))
 }
 
 // isAgentEffectivelySuspendedWith is like isAgentEffectivelySuspended
 // but takes a pre-loaded runtime state so callers in hot paths don't
 // re-read the file.
-func isAgentEffectivelySuspendedWith(cfg *config.City, a *config.Agent, st suspensionstate.State) bool {
+//
+// The agent's rig is resolved path-aware via configuredRigName — the same
+// resolver the desired-state build uses (agentInSuspendedRig). Matching the
+// rig by name only (a.Dir == rig.Name) missed rig-bound agents whose Dir is a
+// filesystem path rather than the bare rig name — notably third-party-pack
+// agents bound through a dir override. For those, the desired-state build
+// (path-aware) dropped the session while this gate (name-only) reported the
+// agent awake, so a suspended rig never quiesced them: it drained and re-woke
+// each tick. Keeping the two gates on the same resolver closes that gap.
+func isAgentEffectivelySuspendedWith(cfg *config.City, cityPath string, a *config.Agent, st suspensionstate.State) bool {
 	if effectiveCitySuspended(cfg, st) {
 		return true
 	}
 	if a.Suspended {
 		return true
 	}
-	if a.Dir == "" {
+	rigName := configuredRigName(cityPath, a, cfg.Rigs)
+	if rigName == "" {
 		return false
 	}
 	for i := range cfg.Rigs {
-		if cfg.Rigs[i].Name != a.Dir {
+		if cfg.Rigs[i].Name != rigName {
 			continue
 		}
-		if suspensionstate.EffectiveRigSuspended(st, cfg.Rigs[i].Name, cfg.Rigs[i].EffectiveSuspendedOnStart()) {
-			return true
-		}
-		break
+		return suspensionstate.EffectiveRigSuspended(st, cfg.Rigs[i].Name, cfg.Rigs[i].EffectiveSuspendedOnStart())
 	}
 	return false
 }

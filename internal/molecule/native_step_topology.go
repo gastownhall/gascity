@@ -194,9 +194,10 @@ func preserveAttachedNativeStepTopology(parent beads.Bead, recipe *formula.Recip
 }
 
 // applyExternalNativeStepDependencies adds native edges for physical
-// ExternalDeps. If any prerequisite lacks a native identity, the target fact is
+// ExternalDeps. A prerequisite contributes only when it belongs to the same
+// execution root and has a native identity; otherwise the target fact is
 // omitted rather than publishing an incomplete dependency set as authoritative.
-func applyExternalNativeStepDependencies(store beads.Store, steps []formula.RecipeStep, externalDeps []ExternalDep) error {
+func applyExternalNativeStepDependencies(store beads.Store, rootID string, steps []formula.RecipeStep, externalDeps []ExternalDep) error {
 	type accumulator struct {
 		complete     bool
 		dependencies []string
@@ -223,7 +224,7 @@ func applyExternalNativeStepDependencies(store beads.Store, steps []formula.Reci
 			return fmt.Errorf("resolving external dependency %q for step %q native topology: %w", dependency.DependsOnID, dependency.StepID, err)
 		}
 		predecessorStepID := predecessor.Metadata[beadmeta.StepIDMetadataKey]
-		if !validNativeStepID(predecessorStepID) {
+		if predecessor.Metadata[beadmeta.RootBeadIDMetadataKey] != rootID || !validNativeStepID(predecessorStepID) {
 			current.complete = false
 			continue
 		}

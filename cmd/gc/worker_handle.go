@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/materialize"
+	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -192,14 +193,14 @@ func resolvedRuntimeMCPServersWithConfig(
 		identity = strings.TrimSpace(provider)
 	}
 	if agentCfg := findAgentByTemplate(cfg, template); agentCfg != nil {
-		catalog, err := materialize.EffectiveMCPForSession(cfg, cityPath, agentCfg, identity, workDir)
+		catalog, err := materialize.EffectiveMCPForSession(cfg, cityPath, agentCfg, identity, workDir, config.QueryTopology{})
 		if err != nil {
 			return nil, fmt.Errorf("loading effective MCP: %w", err)
 		}
 		return materialize.RuntimeMCPServers(catalog.Servers), nil
 	}
 	synthetic := &config.Agent{Provider: provider}
-	catalog, err := materialize.EffectiveMCPForSession(cfg, cityPath, synthetic, identity, workDir)
+	catalog, err := materialize.EffectiveMCPForSession(cfg, cityPath, synthetic, identity, workDir, config.QueryTopology{})
 	if err != nil {
 		return nil, fmt.Errorf("loading effective MCP: %w", err)
 	}
@@ -289,6 +290,13 @@ func newWorkerSessionHandleForResolvedRuntimeWithConfig(
 	if err != nil {
 		return nil, err
 	}
+	// Direct CLI creates use this resolver rather than resolveTemplate, so
+	// project the workspace environment here before handing the runtime to the
+	// worker factory. In particular, workspace.env BD_BIN must follow the same
+	// schema-compatible executable as the controller and resumed sessions.
+	sessionEnv := resolvedWorkerSessionEnvWithConfig(cityPath, cfg, resolved)
+	sessionCfg.Runtime.SessionEnv = sessionEnv
+	sessionCfg.Runtime.Hints.Env = sessionEnv
 	// Stage provider-overlay hooks on the CLI create path the same way the
 	// reconciler create path does; resolvedWorkerSessionConfigWithConfig builds
 	// runtime.Config directly and never routes through resolveTemplate
@@ -349,7 +357,12 @@ func resolvedWorkerSessionConfigWithConfig(
 	// reseed at resolvedWorkerRuntimeWithConfigAndMetadata and the
 	// API-side seeding in internal/api/session_resolved_config.go.
 	// Regression for upstream gastownhall/gascity#101 (re-opened).
-	sessionEnv := mergeEnv(providerProcessPassthroughEnv(), resolved.Env)
+	//
+	// The controller-only overlay goes last for the same reason it does in
+	// template_resolve.go: resolved.Env is config-authored, so a provider spec
+	// naming one of those keys would otherwise overwrite the empty value the
+	// passthrough pinned. This resolver never routes through ScrubTokenEnv.
+	sessionEnv := mergeEnv(providerProcessPassthroughEnv(), resolved.Env, processenv.ControllerOnlyEnvOverlay())
 	if strings.TrimSpace(cityPath) != "" {
 		sessionEnv = mergeEnv(sessionEnv, cityIdentityAnchorsForCity(cityPath))
 	}
@@ -379,6 +392,31 @@ func resolvedWorkerSessionConfigWithConfig(
 			}(),
 		},
 	})
+}
+
+// resolvedWorkerSessionEnvWithConfig composes the environment for worker
+// create and resume paths. Workspace environment belongs between the ambient
+// provider process context and provider-authored values, matching the
+// canonical resolveTemplate layering. Identity and controller-only overlays
+// remain authoritative at the end.
+func resolvedWorkerSessionEnvWithConfig(cityPath string, cfg *config.City, resolved *config.ResolvedProvider) map[string]string {
+	if resolved == nil {
+		return nil
+	}
+	var workspaceEnv map[string]string
+	if cfg != nil {
+		workspaceEnv = cfg.Workspace.Env
+	}
+	sessionEnv := mergeEnv(
+		providerProcessPassthroughEnv(),
+		expandEnvMap(workspaceEnv),
+		expandEnvMap(resolved.Env),
+		processenv.ControllerOnlyEnvOverlay(),
+	)
+	if strings.TrimSpace(cityPath) != "" {
+		sessionEnv = mergeEnv(sessionEnv, cityIdentityAnchorsForCity(cityPath))
+	}
+	return sessionEnv
 }
 
 func workerHandleForSessionWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, id string) (worker.Handle, error) {
@@ -597,7 +635,7 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	// dispatcher trace path is per-dispatcher-qualified and must not be
 	// overwritten with the city-uniform default here. template_resolve.go
 	// owns the qualified override for the CLI create path.
-	sessionEnv := mergeEnv(providerProcessPassthroughEnv(), resolved.Env, cityIdentityAnchorsForCity(cityPath))
+	sessionEnv := resolvedWorkerSessionEnvWithConfig(cityPath, cfg, resolved)
 	// Resolve session_live so resumed sessions get re-themed (status bar,
 	// keybindings) the same way reconciler-started sessions do. Without this,
 	// `gc session attach` recreates the tmux runtime with an empty
@@ -611,10 +649,7 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 		setupCtx := sessionSetupContextForAgent(cityPath, cfg.EffectiveCityName(), qualifiedName, agentCfg, cfg.Rigs)
 		setupCtx.Session = info.SessionName
 		setupCtx.WorkDir = workDir
-		setupCtx.ConfigDir = cityPath
-		if agentCfg.SourceDir != "" {
-			setupCtx.ConfigDir = agentCfg.SourceDir
-		}
+		setupCtx.ConfigDir = resolveConfigDir(cityPath, agentCfg.SourceDir)
 		sessionLive = expandSessionSetup(agentCfg.SessionLive, setupCtx)
 	}
 	// Project the resolved hint subset through the single StartupHints →
