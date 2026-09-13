@@ -297,16 +297,18 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// do the same immediately after loadCityConfig.
 	resolveRigPaths(cityPath, cfg.Rigs)
 
-	// Fence a stale/superseded runtime session BEFORE the city-suspension,
-	// agent-resolution, and agent-suspension early returns below. A stale
-	// incarnation in a suspended city, or one whose template was removed from
-	// config (resolveAgentIdentity fails), or whose agent was suspended, would
-	// otherwise hit one of those bare `return 1` paths, and its startup wrapper
-	// would keep retrying the plain failure instead of seeing the terminal
-	// stale-session drain result and exiting. The fence reads the runtime's own
-	// identity from the environment; it is a no-op for a non-session runtime (no
-	// GC_SESSION_ID / GC_INSTANCE_TOKEN) and fails open for an eligible session or a
-	// transient session-store fault, so a healthy worker still falls through to the
+	// Fence a stale/superseded/unregistered runtime session BEFORE the
+	// city-suspension, agent-resolution, and agent-suspension early returns
+	// below. A stale incarnation in a suspended city, or one whose template was
+	// removed from config (resolveAgentIdentity fails), or whose agent was
+	// suspended, would otherwise hit one of those bare `return 1` paths, and its
+	// startup wrapper would keep retrying the plain failure instead of seeing
+	// the terminal drain result and exiting. The fence reads the runtime's own
+	// identity from the environment; it is a no-op for a genuinely non-session
+	// runtime (no GC_TEMPLATE and no GC_SESSION_ID) and fails open for an
+	// eligible session, a session id present with no instance token (the
+	// documented tokenless-runtime compatibility escape hatch), or a transient
+	// session-store fault, so a healthy worker still falls through to the
 	// suspension and config checks below.
 	if opts.Claim {
 		// F-A, at the earliest point that can answer it. tryHookClaim carries the
@@ -519,14 +521,39 @@ const (
 
 // fenceHookClaimSession applies the runtime-identity fence that gates
 // gc hook --claim before it runs the work query. It returns (code, handled):
-// handled is true only for a definitively stale session, whose terminal drain
-// result the caller must return as-is. An un-fenceable context (no session id or
-// no instance token), an eligible session, or a transient session-store fault all
-// return handled=false so the normal claim path runs — the fence never turns an
-// infrastructure hiccup or an in-progress start into a false refusal.
+// handled is true for a definitively stale session OR a managed pool runtime
+// with no verifiable session-bead registration (GC_TEMPLATE set, GC_SESSION_ID
+// empty), either of whose terminal drain result the caller must return as-is.
+// A genuinely un-fenceable context (no GC_TEMPLATE and no session id, or a
+// session id present but no instance token), an eligible session, or a
+// transient session-store fault all return handled=false so the normal claim
+// path runs — the fence never turns an infrastructure hiccup or an
+// in-progress start into a false refusal.
 func fenceHookClaimSession(cityPath string, cfg *config.City, sessionID string, opts hookCommandOptions, stdout, stderr io.Writer) (int, bool) {
+	if sessionID == "" {
+		// GC_TEMPLATE is the pool-membership signal (set only alongside
+		// GC_SESSION_ID by RuntimeEnvWithSessionContext, the single front door
+		// that builds a live runtime's identity environment from its session
+		// bead). A runtime carrying GC_TEMPLATE with no GC_SESSION_ID therefore
+		// did not come through that front door with a durable session bead
+		// intact: a bead-less legacy start (startPreparedStartCandidate's
+		// empty-info.ID branch), a bead lost between mint and launch, or a
+		// runtime that survived a restart without its registration. Refuse the
+		// claim before any work query or mutation rather than let a slot with
+		// no verifiable identity have assignee/routing metadata rewritten onto
+		// it — the exact scenario this fence exists to prevent.
+		//
+		// A genuinely non-session caller (no GC_TEMPLATE either) never carried
+		// pool-membership identity in the first place and keeps falling through
+		// unfenced.
+		if template := strings.TrimSpace(os.Getenv("GC_TEMPLATE")); template != "" {
+			fmt.Fprintf(stderr, "gc hook --claim: refusing unregistered managed session for pool template %q: GC_TEMPLATE is set but GC_SESSION_ID is empty, so no durable session bead can be verified\n", template) //nolint:errcheck
+			return writeHookClaimMissingSessionRegistrationDrain(opts, stdout, stderr), true
+		}
+		return 0, false
+	}
 	instanceToken := strings.TrimSpace(os.Getenv("GC_INSTANCE_TOKEN"))
-	if sessionID == "" || instanceToken == "" {
+	if instanceToken == "" {
 		return 0, false
 	}
 	switch verdict, reason := classifyHookClaimSession(cityPath, cfg, sessionID, instanceToken); verdict {
