@@ -55,7 +55,7 @@ forwards.
 
 ```
 gc bd update <id> --claim                 # Claim a bead (sets assignee + in_progress) — races in a multi-agent city; prefer `gc hook --claim` there
-gc bd update <id> --status in_progress    # Update status
+gc bd unclaim <id> --reason "handoff"     # Release a claimed bead
 gc bd update <id> --add-label <key>=<value>  # Add/update labels
 gc bd update <id> --append-notes "progress..."  # Append a note (does not replace existing notes)
 ```
@@ -63,8 +63,7 @@ gc bd update <id> --append-notes "progress..."  # Append a note (does not replac
 ## Closing work
 
 ```
-gc bd close <id>                          # Close a completed bead
-gc bd close <id> --reason "done"          # Close with reason
+gc bd close <id> --reason "done"          # Close a completed bead with its audit reason
 ```
 
 ## Hooks

@@ -29,23 +29,24 @@ are done. If the result action is `work`, use `bead_id` as the work bead.
 3. Execute exactly that bead's description.
 4. On success, close it:
    ```bash
-   gc bd update <id> --set-metadata gc.outcome=pass --status closed
+   gc bd update <id> --set-metadata gc.outcome=pass
+   gc bd close <id> --reason "Completed successfully."
    ```
 5. On transient failure, mark it transient and close it:
    ```bash
    gc bd update <id> \
      --set-metadata gc.outcome=fail \
      --set-metadata gc.failure_class=transient \
-     --set-metadata gc.failure_reason=<short_reason> \
-     --status closed
+     --set-metadata gc.failure_reason=<short_reason>
+   gc bd close <id> --reason "Transient failure: <short_reason>."
    ```
 6. On unrecoverable failure, mark it hard-failed and close it:
    ```bash
    gc bd update <id> \
      --set-metadata gc.outcome=fail \
      --set-metadata gc.failure_class=hard \
-     --set-metadata gc.failure_reason=<short_reason> \
-     --status closed
+     --set-metadata gc.failure_reason=<short_reason>
+   gc bd close <id> --reason "Hard failure: <short_reason>."
    ```
 7. After closing, check for more assigned work:
    ```bash

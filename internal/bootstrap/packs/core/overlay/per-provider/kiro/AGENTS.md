@@ -33,4 +33,4 @@ check for and claim new work from the queue.
 - `gc hook` — check for and claim available work
 - `gc bd ready` — list ready beads (add `--include-ephemeral` only in bd 1.0.5+ cities)
 - `gc bd show <id>` — show bead details
-- `gc bd close <id>` — mark a bead as done
+- `gc bd close <id> --reason "<brief summary>"` — mark a bead as done

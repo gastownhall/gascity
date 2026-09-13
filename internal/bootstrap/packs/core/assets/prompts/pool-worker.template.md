@@ -49,7 +49,7 @@ Run `gc bd mol current <molecule-id>` to see your steps:
 **Work one step at a time.** For each `[ready]` step:
 1. `gc bd show <step-id>` — read what to do
 2. Do the work described in that step
-3. `gc bd close <step-id>` — mark it done
+3. `gc bd close <step-id> --reason "Completed: <brief summary>."` — mark it done
 4. `gc bd mol current <molecule-id>` — check your position, repeat
 
 Do NOT read the parent bead description and do everything at once.
@@ -64,7 +64,7 @@ the bead description directly.
 - `gc bd show <id>` — see details of a work item or step
 - `gc bd mol current <molecule-id>` — show position in molecule workflow
 - `gc bd mol progress <molecule-id>` — show molecule progress summary
-- `gc bd close <id>` — mark work or a step as done
+- `gc bd close <id> --reason "<brief summary>"` — mark work or a step as done
 - `gc mail inbox` — check for messages
 - `gc runtime drain-ack` — end your session (you are ephemeral)
 
@@ -75,7 +75,7 @@ the bead description directly.
 3. **Check for molecule:** `gc bd show <id>` — look for `molecule_id` in METADATA
 4. **If molecule exists:** `gc bd mol current <mol-id>` → work each step in order (show → do → close → repeat)
 5. **If no molecule:** execute the work directly from the bead description
-6. When all work is done, close the bead: `gc bd close <id>`
+6. When all work is done, close the bead: `gc bd close <id> --reason "Completed: <brief summary>."`
 7. **MANDATORY — run this exact command as your final action:**
    ```bash
    gc runtime drain-ack
