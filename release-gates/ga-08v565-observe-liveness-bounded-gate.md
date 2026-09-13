@@ -1,33 +1,40 @@
 # Release gate: bounded liveness observation
 
+- Re-gate bead: `ga-966mj8`
 - Deploy bead: `ga-08v565`
 - Build bead: `ga-ix9kx5`
 - Review bead: `ga-tzjc3i`
 - Originally reviewed source: `02a16e523ab08bb9dafa41b26e8749e66587e80f`
-- Gated source: `c209321aa8929c1c81535675030ce06d0765981c`
-- Review-carryover patch ID: `f16865760343d5344aa2c351fe11ce4ebce79332`
-- Candidate merge base: `2bace2ef89c11e260ca396f95441f805a01e7546`
-- Current base checked: `origin/main@92dd4b61381d8d810936e7474d091c0c316b2e7c`
+- Review-carryover source: `c209321aa8929c1c81535675030ce06d0765981c`
+- Bounded self-rebase parent: `57d3229915296aceb6c3decfd8f3b7d728084c90`
+- Final candidate: `772b71ee75095c28fa32ea49214d98e37590c2a6`
+- Candidate merge base: `80eebf4f18e5a693fb1628dcf49cb28993305b97`
+- Current base checked: `origin/main@435ed03be7d2d7818e31edfe6dc248488b952fcb`
 - Decision: **PASS**
 
-`docs/PROJECT_MANIFEST.md` is not present in this checkout. This gate applies
-the seven release criteria from the active deployer protocol and the full-suite
-command documented in `TESTING.md`.
+`docs/PROJECT_MANIFEST.md` is not present in this checkout. This exact-head
+re-gate applies the seven release criteria from the active deployer protocol
+and the full-suite command documented in `TESTING.md`.
 
-The already-merged preflight found no PR carrying the gated source before the
-deploy branch was pushed. The normal isolated-branch path therefore applies.
+PR #6091 was already open when `ga-966mj8` was assigned. Its old clearance
+was tied to superseded head `8d4b49c6bff7347ec0bc2b921c9589450899ff2e`.
+The deployer resolved the one-hunk import conflict by bounded self-rebase to
+`57d3229915296aceb6c3decfd8f3b7d728084c90`; the maintainer review then applied
+the shared-observer fixup, producing final candidate
+`772b71ee75095c28fa32ea49214d98e37590c2a6`. This record supersedes the prior
+gate evidence and no clearance is carried across those head changes.
 
 | # | Criterion | Result | Evidence |
 |---|---|---|---|
-| 1 | Review PASS present | PASS | `ga-tzjc3i` is closed with `verdict: pass` on `02a16e523ab08bb9dafa41b26e8749e66587e80f`. The builder recorded review carryover to `c209321aa8929c1c81535675030ce06d0765981c`; independent diffs against each commit's merge base both produce patch ID `f16865760343d5344aa2c351fe11ce4ebce79332`. The deploy bead records `review_carryover_verified`. |
-| 2 | Acceptance criteria met | PASS | `runtime.ObservationStatus`, `ObservationComplete`, `ObservationIncomplete`, `BoundedLivenessObserver`, and `ObserveLivenessBounded` are additive in `internal/runtime/liveness.go`. The implementation uses `context.WithTimeout`, prefers the richer opt-in observer, preserves the existing fallback, maps wrapped `runtime.ErrRuntimeUnavailable` and deadline expiry to incomplete observations, preserves non-runtime errors as complete observations, and does not depend on `internal/runtime/worker.go`. Five named tests cover these obligations. |
-| 3 | Tests pass | PASS | The documented full-scope `make test-local-full-parallel` run completed 37 PASS jobs / 3 attributed FAIL jobs / 0 SKIP jobs. Each failure is non-diff-owned, has a predating tracker, has a mechanism proof, and has no path overlap. `unit-core` reports `internal/runtime` PASS; a fresh named supplemental run maps all five diff-owned tests to PASS. |
-| 3b | Policy/lint lane | PASS | `make test-ci-policy`, `go build ./...`, and `go vet ./...` PASS. `make fmt-check` and `make lint` report only tracked, non-diff-owned diagnostics that reproduce identically on current `origin/main` in the same worktree; attribution is recorded below. |
+| 1 | Review PASS present | PASS | `ga-tzjc3i` is closed with verdict `pass` on `02a16e523ab08bb9dafa41b26e8749e66587e80f`; the original deploy gate independently verified patch-ID carryover to `c209321aa8929c1c81535675030ce06d0765981c`. Maintainer `quad341` then reviewed PR #6091 as `fix-merge`, identified the exact duplicate-interface/shared-helper delta, and applied that reviewed delta as final commit `772b71ee75095c28fa32ea49214d98e37590c2a6`; the mayor's re-gate note identifies that exact final head. |
+| 2 | Acceptance criteria met | PASS | `ObservationStatus`, `ObservationComplete`, `ObservationIncomplete`, `BoundedLivenessObserver`, and `ObserveLivenessBounded` remain additive in `internal/runtime/liveness.go`. The final fix aliases `BoundedLivenessObserver` to the already-landed `LivenessObserverWithError`, delegates through `ObserveLivenessWithError` so nil/blank guards and normalization are shared, preserves legacy fallback and error semantics, and rejects an already-canceled context without spawning an observation. Seven named tests cover the bounded API, including the two maintainer-added cases. |
+| 3 | Tests pass | PASS | A fresh exact-head `make test-local-full-parallel` completed all 40 jobs: 35 PASS, 5 attributed FAIL, 0 SKIP. Every raw failure stopped in `bd init` on the predating shared-schema condition tracked by `ga-esyijp`, before candidate behavior ran; exact attribution is below. `unit-core` reports `internal/runtime` PASS. A fresh named run passes all seven diff-owned bounded-liveness tests, and a broad `cmd/gc` `(Liveness|Observation)` regression run passes. |
+| 3b | Policy/lint lane | PASS | `make test-ci-policy`, `go build ./...`, `go vet ./...`, tracked `make fmt-check-changed`, merge-base-scoped `make lint-affected`, and `git diff --check origin/main...HEAD` all PASS; lint reports `0 issues`. |
 | 3c | CI-config lane | PASS | `ci_lane_run: n/a (no CI job, matrix, timeout, or required-check configuration changed)`. |
-| 4 | No high-severity review findings open | PASS | The reviewer recorded no blocker, major, or HIGH finding. Its only observation was the disclosed goroutine lifetime inherited from the mirrored bounded-observation precedent. |
-| 5 | Final branch is clean | PASS | The isolated branch was clean before the gate record; the gate record is committed as the only release-evidence addition, after which `git status --porcelain` is empty. |
-| 6 | Branch diverges cleanly from main | PASS | After `origin/main` advanced during the test run, `git merge-tree --write-tree origin/main c209321aa8929c1c81535675030ce06d0765981c` was rerun against `92dd4b61381d8d810936e7474d091c0c316b2e7c`; it exited 0 and produced tree `42d748103729eec0215dd6247d94bfb1d53abaaf`. The candidate is one commit behind and two ahead. No self-rebase was needed or attempted. |
-| 7 | Single feature theme | PASS | Two commits and two files in `internal/runtime` implement one theme: bounded, tri-state liveness observation and its tests. The ancestry-scope guard passes for deploy bead `ga-08v565` and confirmed build bead `ga-ix9kx5`. |
+| 4 | No high-severity review findings open | PASS | The formal reviewer recorded no blocker, major, or HIGH finding. The maintainer review found only the duplicate error-bearing interface/shared-helper divergence and resolved it in the final candidate. |
+| 5 | Final branch is clean | PASS | The isolated deploy branch was clean before this record was refreshed. This record is the only evidence-only change after the tested candidate and is committed with the gate result. |
+| 6 | Branch diverges cleanly from main | PASS | After the test run, `git fetch origin main` resolved `origin/main` to `435ed03be7d2d7818e31edfe6dc248488b952fcb`. `git merge-tree --write-tree origin/main 772b71ee75095c28fa32ea49214d98e37590c2a6` exited 0 and produced tree `cca62bbb1b93a809f1a32d332abde92f169a13a2`; divergence is 3 commits behind and 4 ahead. GitHub reports PR #6091 `MERGEABLE`. |
+| 7 | Single feature theme | PASS | The candidate range contains the bounded-liveness implementation/tests, the prior gate record, and the maintainer's shared-observer fixup. All code changes are confined to `internal/runtime/liveness.go` and its test and implement one feature theme. |
 
 ## Test evidence
 
@@ -39,51 +46,57 @@ Environment prepared before the run:
 DOCKER_HOST=unix:///run/user/1000/podman/podman.sock
 TESTCONTAINERS_RYUK_DISABLED=true
 EXTRA_TEST_ENV='DOCKER_HOST=unix:///run/user/1000/podman/podman.sock TESTCONTAINERS_RYUK_DISABLED=true'
+LOCAL_TEST_JOBS=4
+LOCAL_TEST_LOG_DIR=/var/tmp/ga-966mj8-final-20260913T0647Z/jobs
 make test-local-full-parallel
 ```
 
-The rootless Podman socket was listening, and the testcontainers Dolt module's
-pinned image `dolthub/dolt-sql-server:1.32.4` was present and refreshed before
-the run.
+The rootless Podman socket was active before the command.
 
-- `test_counts: 37 PASS jobs, 3 attributed FAIL jobs, 0 SKIP jobs`
-- `top_level_failures: 3`
-- `diff_tests_executed: TestObserveLivenessBoundedFallsBackToObserveLivenessWithoutRicherInterface PASS; TestObserveLivenessBoundedForwardsExistingLivenessObserver PASS; TestObserveLivenessBoundedMapsRuntimeUnavailableToIncomplete PASS; TestObserveLivenessBoundedCompleteWithNonRuntimeErrorStaysComplete PASS; TestObserveLivenessBoundedTimesOutToIncompleteWithZeroLiveness PASS`
+- `test_counts: 35 PASS jobs, 5 attributed FAIL jobs, 0 SKIP jobs`
+- `top_level_failures: 5`
+- `diff_tests_executed: TestObserveLivenessBoundedFallsBackToObserveLivenessWithoutRicherInterface PASS; TestObserveLivenessBoundedForwardsExistingLivenessObserver PASS; TestObserveLivenessBoundedMapsRuntimeUnavailableToIncomplete PASS; TestObserveLivenessBoundedCompleteWithNonRuntimeErrorStaysComplete PASS; TestObserveLivenessBoundedTimesOutToIncompleteWithZeroLiveness PASS; TestObserveLivenessBoundedNormalizesObserverLiveness PASS; TestObserveLivenessBoundedCancelledParentContextIsIncomplete PASS`
 - `skip_justification: no full-suite job reported SKIP`
 - `waiver_ref: none`
 - `ci_lane_run: n/a (no CI-config change in this diff)`
-- Full-suite logs: `/var/tmp/gc-local-tests.gruhkx`
-- Gate logs: `/var/tmp/ga-08v565-gate.4LTpMi`
+- Full-suite log: `/var/tmp/ga-966mj8-final-20260913T0647Z/full-suite.log`
+- Per-job logs: `/var/tmp/ga-966mj8-final-20260913T0647Z/jobs`
+- Focused runtime log: `/var/tmp/ga-966mj8-final-20260913T0647Z/focused-liveness.log`
+- Focused `cmd/gc` log: `/var/tmp/ga-966mj8-final-20260913T0647Z/focused-cmd-gc-liveness.log`
 
 ### Failure attribution
 
 | Raw result | Tracker | Attribution |
 |---|---|---|
-| FAIL: `TestBdFlagManifestCurrent` | `ga-f0uceo` | Clause 3(a), mechanism: the installed `bd` flag surface and `internal/bdflags` manifest cannot be changed by the new runtime liveness symbols. The candidate has no `internal/bdflags` path overlap. |
-| FAIL: `TestRetryManagedPooledWorkerRecoversClaimedAttemptAfterCrash` | `ga-esyijp` | Clause 3(a), mechanism: fixture initialization stopped on the tracked beads#4566 dirty `dependencies` schema-migration condition before formula behavior ran. The new runtime API has no production callers and cannot affect store bootstrap. The candidate has no `test/integration` path overlap. |
-| FAIL: `TestE2E_SuspendResume_City` | `ga-dqd7gf` | Clause 3(a), mechanism: the test timed out after 94.98 seconds waiting for `citysus.report` under the full 40-job load. The new runtime API has no production callers and cannot affect this report path. The candidate has no `test/integration` path overlap. |
+| `TestAdoptPRFormulaCompileAndRun` | `ga-esyijp` | Clause 3(a), mechanism: `gc init` stopped when shared database `hq` refused pending schema migration v65 to v66, before formula behavior ran. |
+| `TestPersonalWorkFormulaCompileAndRun` | `ga-esyijp` | Clause 3(a), mechanism: `gc init` stopped when shared database `hq` refused pending schema migrations v34 to v66, before formula behavior ran. |
+| `TestAdoptPRFormulaSoftFailsGeminiAfterTransientRetries` | `ga-esyijp` | Clause 3(a), mechanism: `gc init` stopped when shared database `hq` refused pending schema migrations v40 to v66, before formula behavior ran. |
+| `TestHumaBinary_CityCreateAsync` | `ga-esyijp` | Clause 3(a), mechanism: asynchronous city initialization emitted `city_init_failed` after shared database `hq` refused pending schema migrations v56 to v66. |
+| `TestGCLiveContract_BeadsAndEvents` | `ga-esyijp` | Clause 3(a), mechanism: rig creation stopped when its shared database refused pending schema migrations v6 to v66. |
 
-`failure_attribution: TestBdFlagManifestCurrent -> ga-f0uceo | clause 3(a) mechanism — installed-bd manifest drift; candidate unreachable`
+`failure_attribution: five bd-init schema refusals -> ga-esyijp | clause 3(a) mechanism — shared-server pending-schema refusal before candidate execution; candidate unreachable`
 
-`failure_attribution: TestRetryManagedPooledWorkerRecoversClaimedAttemptAfterCrash -> ga-esyijp | clause 3(a) mechanism — dirty-schema migration during fixture initialization; candidate unreachable`
+`ga-esyijp` predates this run, covers the root condition, was opened before
+attribution, and received peek-verified comments for every occurrence. The
+candidate touches only `internal/runtime/liveness.go`,
+`internal/runtime/liveness_test.go`, and this release-gate record: none of the
+five failing tests or bead initialization paths overlap the diff.
 
-`failure_attribution: TestE2E_SuspendResume_City -> ga-dqd7gf | clause 3(a) mechanism — full-load report timeout; candidate's uncalled API is unreachable`
-
-Each tracker predates this run, was opened and checked, and received a
-peek-verified comment recording this occurrence.
-
-## Required lanes
+## Required lanes and remote corroboration
 
 - `policy_lane: make test-ci-policy — PASS`
 - `go build ./...` — PASS
 - `go vet ./...` — PASS
-- `make fmt-check` — raw FAIL; current `origin/main` reproduces the same four unchanged-file diffs.
-- `make lint` — raw FAIL; current `origin/main` reproduces all 11 diagnostics identically in the same worktree.
+- `LINT_CHANGED_SCOPE=tracked LINT_CHANGED_REF=80eebf4f18e5a693fb1628dcf49cb28993305b97 make fmt-check-changed` — PASS
+- `LINT_CHANGED_REF=80eebf4f18e5a693fb1628dcf49cb28993305b97 make lint-affected` — PASS, `0 issues`
+- `git diff --check origin/main...HEAD` — PASS
+- Git hook path: `.githooks`
 
-`policy_attribution: gofumpt in three cmd/gc files and internal/storebinding/storebinding_test.go -> ga-d3m213 | origin/main reproduces; no candidate path overlap`
+GitHub Actions run `34741373474` attempt 1 crashed inside the Go compiler
+runtime while compiling Dolt's `sqle/dtablefunctions`, with no semantic source
+diagnostic. That root condition is tracked as `ga-7omh22`. Attempt 2 on exact
+candidate `772b71ee75095c28fa32ea49214d98e37590c2a6` completed successfully,
+including `Integration / packages-core-4-of-4`, `Preflight / static checks`,
+and `CI / required`:
 
-`policy_attribution: three ResolvedProvider.Kind SA1019 diagnostics -> ga-t88402 | origin/main reproduces; no candidate path overlap`
-
-`policy_attribution: internal/api workDir SA4006 -> ga-egkp4x | origin/main reproduces; no candidate path overlap`
-
-`policy_attribution: three node_modules/flatted govet/revive diagnostics -> ga-bvixfw | origin/main reproduces in the same worktree; no candidate path overlap`
+`https://github.com/gastownhall/gascity/actions/runs/34741373474`
