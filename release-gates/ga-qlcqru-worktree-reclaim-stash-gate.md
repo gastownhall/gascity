@@ -10,7 +10,11 @@ Base: `origin/main`
 
 (Round 3: rebased onto a newer `origin/main` tip since round 2. Content is
 byte-identical to round 2's SHAs via `git patch-id --stable` — see Rebase
-note (round 3) below.)
+note (round 3) below. The pushed branch tip carries one further commit on
+top of the SHA above: the commit that records this round-3 writeup itself,
+which by construction touches only this file — a document cannot cite the
+SHA of the commit that finishes writing it. Run `git log -1` on the branch
+for the exact pushed tip.)
 
 Gate result: PASS
 
@@ -225,14 +229,16 @@ The mayor's full-scope gate run:
 - Result: full-scope PASS aside from the two `cmd/gc` shard failures
   attributed above to the known non-diff-owned Dolt leak-guard mechanism.
 
-Round 3 adds exactly one commit on top of what that gate run tested
-(`157b75d1382b0479585e253610bb2813428fb0e9`, the round-2 correction commit
-rebased forward), and that commit is proven docs-only — see Rebase note
-(round 3) above. Since the gate-tested SHA and the current HEAD are
-code-identical (same tree for every `.go` file; the one file that differs,
-this release-gate doc, is not itself gated code), the existing gate run
-remains valid, current evidence for `157b75d1382b0479585e253610bb2813428fb0e9`
-without re-running the full 40-shard sweep.
+Round 3 adds two commits on top of what that gate run tested: the round-2
+correction commit rebased forward
+(`157b75d1382b0479585e253610bb2813428fb0e9`, proven docs-only via
+patch-id — see Rebase note (round 3) above) and the commit recording this
+round-3 writeup itself (necessarily authored after, and by construction
+also touching only this file — no `.go` changes). Since the gate-tested
+SHA and the pushed HEAD are code-identical (same tree for every `.go`
+file; the only files that differ are this release-gate doc, which is not
+itself gated code), the existing gate run remains valid, current evidence
+for the pushed HEAD without re-running the full 40-shard sweep.
 
 ## Note on PR #4619
 
