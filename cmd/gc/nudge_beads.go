@@ -18,6 +18,8 @@ const (
 
 type nudgeReference = nudgequeue.Reference
 
+type nudgeProvenance = nudgequeue.Provenance
+
 // openNudgeBeadStore is a test seam (mirrors the injectable vars in
 // cmd_nudge.go) so tests can substitute a fake store and assert that
 // per-tick poll helpers close every store they open. Tests that replace this
