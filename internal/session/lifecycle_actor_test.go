@@ -30,7 +30,7 @@ func TestRuntimeEnvWithSessionContextAlignsAgentAndBeadsActor(t *testing.T) {
 	}{
 		{name: "canonical alias", alias: "rig/worker", sessionName: "rig--worker", persistedSessionName: "rig--worker", want: "rig/worker"},
 		{name: "configured named identity fallback", configuredIdentity: "rig/worker", sessionName: "rig--worker", persistedSessionName: "rig--worker", want: "rig/worker"},
-		{name: "session name fallback", sessionName: "rig--worker", persistedSessionName: "rig--worker", want: "rig--worker"},
+		{name: "unaliased pool-managed session claims under its bead id, not the reusable session name", sessionName: "rig--worker", persistedSessionName: "rig--worker", want: "session-id"},
 		{name: "bead id fallback", sessionName: "s-session-id", want: "session-id"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
