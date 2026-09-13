@@ -318,13 +318,15 @@ func (r tmuxServerReaper) killServersUnder(dir string, diagnostics io.Writer) {
 // would be enough to SIGKILL a recycled PID's innocent new owner
 // (internal/runtime/proctable/kill_unix.go guards its own kill the same way).
 //
-// An unavailable start-time token does not veto the SIGKILL. pidutil.StartTime
-// reads /proc, so it fails for every PID on darwin; refusing to signal without
-// a token would delete the escalation entirely on macOS hosts, where an
-// orphaned server is just as able to outlive kill-server. The token is one of
-// two independent gates, and the other -- pidutil.AliveWithCmdline, which must
-// still see argv[0] basename "tmux" -- keeps narrowing the target on Linux
-// when the token is missing.
+// An unavailable start-time token does not veto the SIGKILL. The token is
+// best-effort: pidutil.StartTime reads /proc where it exists and falls back to
+// "ps -o lstart=" where it does not (darwin included), so it is empty only when
+// neither mechanism can answer -- a host or permission boundary that says
+// nothing about whether the PID is still the orphan. Refusing to signal on a
+// missing token would delete the escalation exactly where it is hardest to
+// reason about, so the token is one of two independent gates; the other --
+// pidutil.AliveWithCmdline, which must still see argv[0] basename "tmux" --
+// keeps narrowing the target when the token is missing.
 func (r tmuxServerReaper) reapServerAtSocket(socketPath string, diagnostics io.Writer) {
 	pid, startTime, err := r.serverIdentity(socketPath)
 	if err != nil {
@@ -354,6 +356,14 @@ func (r tmuxServerReaper) reapServerAtSocket(socketPath string, diagnostics io.W
 	}
 	if sigErr := r.signal(pid, syscall.SIGKILL); sigErr != nil {
 		_, _ = fmt.Fprintf(diagnostics, "tmuxtest: SIGKILL failed for orphaned tmux server at socket %s (pid %d): %v\n", socketPath, pid, sigErr)
+		return
+	}
+	sigDeadline := time.Now().Add(r.exitWait)
+	for r.sameProcess(pid, startTime) && time.Now().Before(sigDeadline) {
+		time.Sleep(r.pollInterval)
+	}
+	if r.sameProcess(pid, startTime) {
+		_, _ = fmt.Fprintf(diagnostics, "tmuxtest: orphaned tmux server at socket %s (pid %d) survived kill-server and SIGKILL\n", socketPath, pid)
 		return
 	}
 	_, _ = fmt.Fprintf(diagnostics, "tmuxtest: SIGKILLed orphaned tmux server at socket %s (pid %d) after it outlived kill-server by %s\n", socketPath, pid, r.exitWait)

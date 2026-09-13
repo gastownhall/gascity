@@ -16,13 +16,19 @@ import (
 // a real server -- in particular the branch where kill-server FAILS while the
 // server keeps running, which no real-tmux fixture can produce on demand.
 type fakeReapHost struct {
-	pid            int
-	startTime      string
-	identityErr    error
-	killErr        error
-	aliveAfterKill bool
-	tmuxIdentity   bool
-	signalErr      error
+	pid       int
+	startTime string
+
+	identityErr error
+	killErr     error
+	// aliveAfterKill is the PID's liveness before anything has been
+	// signaled; aliveAfterSignal replaces it once a signal is delivered, so
+	// a process that survives SIGKILL can be modeled distinctly from one the
+	// signal actually killed.
+	aliveAfterKill   bool
+	aliveAfterSignal bool
+	tmuxIdentity     bool
+	signalErr        error
 
 	killedSockets []string
 	signaled      []int
@@ -44,7 +50,13 @@ func (h *fakeReapHost) reaper() tmuxServerReaper {
 			return h.killErr
 		},
 		sameProcess: func(pid int, startTime string) bool {
-			return h.aliveAfterKill && pid == h.pid && startTime == h.startTime
+			if pid != h.pid || startTime != h.startTime {
+				return false
+			}
+			if len(h.signaled) > 0 {
+				return h.aliveAfterSignal
+			}
+			return h.aliveAfterKill
 		},
 		isTmuxProcess: func(int) bool { return h.tmuxIdentity },
 		signal: func(pid int, _ syscall.Signal) error {
@@ -102,6 +114,21 @@ func TestReapServerAtSocketEscalation(t *testing.T) {
 			wantKills:       1,
 			wantSignaled:    []int{serverPID},
 			wantDiagnostics: fmt.Sprintf("tmuxtest: SIGKILLed orphaned tmux server at socket %s (pid %d) after it outlived kill-server by 0s\n", socket, serverPID),
+		},
+		{
+			// A SIGKILL the kernel accepted is not proof the process is
+			// gone. Reporting success on the signal call alone would log an
+			// uncleared orphan as a kill, which is the one outcome the run
+			// logs must not hide.
+			name: "server survives SIGKILL",
+			host: fakeReapHost{
+				pid: serverPID, startTime: startTime,
+				aliveAfterKill: true, tmuxIdentity: true,
+				aliveAfterSignal: true,
+			},
+			wantKills:       1,
+			wantSignaled:    []int{serverPID},
+			wantDiagnostics: fmt.Sprintf("tmuxtest: orphaned tmux server at socket %s (pid %d) survived kill-server and SIGKILL\n", socket, serverPID),
 		},
 		{
 			name: "survivor is no longer a tmux process",
