@@ -331,6 +331,173 @@ inject_fragments = ["missing-footer"]
 	}
 }
 
+// TestLintResolvesOwnPackFragmentCleanly pins the baseline case Ask #3 of
+// ga-as6dhb asked for: a pack that injects a fragment it defines itself
+// must lint clean, so a future regression in the fragment-search-directory
+// logic doesn't silently start flagging valid packs again.
+func TestLintResolvesOwnPackFragmentCleanly(t *testing.T) {
+	packDir := t.TempDir()
+	writeLintFile(t, filepath.Join(packDir, "pack.toml"), `[pack]
+name = "own-fragment"
+version = "0.1.0"
+schema = 2
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.template.md"
+inject_fragments = ["footer"]
+`)
+	writeLintFile(t, filepath.Join(packDir, "prompts", "worker.template.md"), "hello {{.AgentName}}\n")
+	writeLintFile(t, filepath.Join(packDir, "template-fragments", "footer.template.md"), `{{ define "footer" }}FOOTER{{ end }}`)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc lint = %d, want 0 (own-pack fragment should resolve)\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), "inject_fragment") {
+		t.Fatalf("stderr unexpectedly reports inject_fragment diagnostic for a fragment defined in the pack's own template-fragments/:\n%s", stderr.String())
+	}
+}
+
+// TestLintResolvesFragmentComposedViaCityRigIncludes guards ga-as6dhb: a
+// pack can depend on a fragment shipped by a sibling pack that is composed
+// in purely at the city.toml rig level (rigs[].includes), never declared by
+// the dependent pack's own pack.toml — exactly how packs/cairn-loop-orders
+// depends on packs/actual/all in production. The runtime resolves this fine
+// because resolveTemplate (template_resolve.go) renders against
+// city.PackDirsForRig(rigName), but config.LoadPackForLint only ever sees
+// the target pack's own recursive includes (empty here), so lint reported
+// the fragment "not found" even though real sessions rendered it correctly.
+// See lintFragmentSearchDirs in cmd_lint.go.
+func TestLintResolvesFragmentComposedViaCityRigIncludes(t *testing.T) {
+	root := t.TempDir()
+	writeLintFile(t, filepath.Join(root, "city.toml"), `[[rigs]]
+name = "myrig"
+includes = ["packs/actual", "packs/uses-fragment"]
+`)
+
+	actualDir := filepath.Join(root, "packs", "actual")
+	writeLintPack(t, actualDir, "actual", "helper", "prompts/helper.template.md")
+	writeLintFile(t, filepath.Join(actualDir, "prompts", "helper.template.md"), "hello {{.AgentName}}\n")
+	writeLintFile(t, filepath.Join(actualDir, "template-fragments", "footer.template.md"), `{{ define "footer" }}FOOTER{{ end }}`)
+
+	packDir := filepath.Join(root, "packs", "uses-fragment")
+	writeLintFile(t, filepath.Join(packDir, "pack.toml"), `[pack]
+name = "uses-fragment"
+version = "0.1.0"
+schema = 2
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.template.md"
+inject_fragments = ["footer"]
+`)
+	writeLintFile(t, filepath.Join(packDir, "prompts", "worker.template.md"), "hello {{.AgentName}}\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc lint = %d, want 0 (fragment composed in via city.toml rigs[].includes should resolve)\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), "inject_fragment") {
+		t.Fatalf("stderr unexpectedly reports inject_fragment diagnostic for a fragment composed in via city.toml rigs[].includes:\n%s", stderr.String())
+	}
+}
+
+// TestLintDoesNotResolveFragmentFromUnrelatedRig is the other half of
+// ga-as6dhb: widening lint's fragment search with city-composed pack dirs must
+// not widen it past what the runtime would actually resolve. A fragment defined
+// only by a pack in rigb is not on the search path of an agent in riga's pack
+// (resolveTemplate renders against city.PackDirsForRig("riga")), so lint must
+// still report it missing. Unioning every rig would turn that real error into a
+// silent pass. See lintCityComposedPackDirs in cmd_lint.go.
+func TestLintDoesNotResolveFragmentFromUnrelatedRig(t *testing.T) {
+	root := t.TempDir()
+	writeLintFile(t, filepath.Join(root, "city.toml"), `[[rigs]]
+name = "riga"
+includes = ["packs/riga-pack"]
+
+[[rigs]]
+name = "rigb"
+includes = ["packs/rigb-pack"]
+`)
+
+	rigbPack := filepath.Join(root, "packs", "rigb-pack")
+	writeLintPack(t, rigbPack, "rigb-pack", "helper", "prompts/helper.template.md")
+	writeLintFile(t, filepath.Join(rigbPack, "prompts", "helper.template.md"), "hello {{.AgentName}}\n")
+	writeLintFile(t, filepath.Join(rigbPack, "template-fragments", "footer.template.md"), `{{ define "footer" }}FOOTER{{ end }}`)
+
+	rigaPack := filepath.Join(root, "packs", "riga-pack")
+	writeLintFile(t, filepath.Join(rigaPack, "pack.toml"), `[pack]
+name = "riga-pack"
+version = "0.1.0"
+schema = 2
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.template.md"
+inject_fragments = ["footer"]
+`)
+	writeLintFile(t, filepath.Join(rigaPack, "prompts", "worker.template.md"), "hello {{.AgentName}}\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", rigaPack}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("gc lint = 0, want non-zero (fragment lives only in an unrelated rig's pack)\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `inject_fragment "footer"`) {
+		t.Fatalf("stderr does not report the missing fragment from the unrelated rig:\n%s", stderr.String())
+	}
+}
+
+// TestLintIgnoresBrokenFragmentInCityComposedSiblingPack pins the ownership
+// boundary: gc lint <pack> reports on <pack>. A sibling pack composed in by the
+// city supplies fragments to the linted pack, but its own malformed fragment is
+// that sibling's lint failure, not this one's — so the parse error is recorded
+// at warning severity and the linted pack still passes. See
+// lintLoadAdvisorySharedTemplates in cmd_lint.go.
+func TestLintIgnoresBrokenFragmentInCityComposedSiblingPack(t *testing.T) {
+	root := t.TempDir()
+	writeLintFile(t, filepath.Join(root, "city.toml"), `[[rigs]]
+name = "myrig"
+includes = ["packs/actual", "packs/uses-fragment"]
+`)
+
+	actualDir := filepath.Join(root, "packs", "actual")
+	writeLintPack(t, actualDir, "actual", "helper", "prompts/helper.template.md")
+	writeLintFile(t, filepath.Join(actualDir, "prompts", "helper.template.md"), "hello {{.AgentName}}\n")
+	writeLintFile(t, filepath.Join(actualDir, "template-fragments", "footer.template.md"), `{{ define "footer" }}FOOTER{{ end }}`)
+	writeLintFile(t, filepath.Join(actualDir, "template-fragments", "broken.template.md"), `{{ define "broken" }}{{ if .AgentName }}`)
+
+	packDir := filepath.Join(root, "packs", "uses-fragment")
+	writeLintFile(t, filepath.Join(packDir, "pack.toml"), `[pack]
+name = "uses-fragment"
+version = "0.1.0"
+schema = 2
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.template.md"
+inject_fragments = ["footer"]
+`)
+	writeLintFile(t, filepath.Join(packDir, "prompts", "worker.template.md"), "hello {{.AgentName}}\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc lint = %d, want 0 (a broken fragment in a city-composed sibling must not fail this pack)\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	}
+	for _, line := range strings.Split(stderr.String(), "\n") {
+		if !strings.Contains(line, "broken.template.md") {
+			continue
+		}
+		if strings.Contains(line, "error") {
+			t.Fatalf("stderr reports a sibling pack's broken fragment as an error for this pack:\n%s", stderr.String())
+		}
+	}
+}
+
 func TestLintCleanBdInvocationsProduceNoFindings(t *testing.T) {
 	packDir := t.TempDir()
 	writeLintPack(t, packDir, "bd-flag-clean", "worker", "prompts/worker.template.md")

@@ -125,7 +125,16 @@ sid_key() {
 state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
 sid_dir="$state_home/gascity/zcode/sids"
 mkdir -p "$sid_dir"
-sid_name="$(sid_key | tr -c 'A-Za-z0-9._-' '_')"
+# Path components are folded BYTE-wise: LC_ALL=C keeps tr from treating a
+# multi-byte rune as one character on locale-aware platforms, so "ö" always
+# folds to "__". The engine's reader (sessionlog.sanitizeZCodeComponent) and
+# the mirror helper below walk the same bytes; all three must agree or a
+# non-ASCII name is written under one scope and looked up under another.
+sanitize_component() {
+    LC_ALL=C tr -c 'A-Za-z0-9._-' '_'
+}
+
+sid_name="$(sid_key | sanitize_component)"
 
 # The seat. gc exports the session bead id as GC_SESSION_ID, and two seats can
 # share a session name and continuation epoch — a pool slot re-seated within
@@ -137,24 +146,27 @@ sid_name="$(sid_key | tr -c 'A-Za-z0-9._-' '_')"
 # (host-session setups) the key stays the name alone.
 seat_name="$sid_name"
 if [[ -n "${GC_SESSION_ID:-}" ]]; then
-    seat_name="$sid_name@$(printf '%s' "$GC_SESSION_ID" | tr -c 'A-Za-z0-9._-' '_')"
+    seat_name="$sid_name@$(printf '%s' "$GC_SESSION_ID" | sanitize_component)"
 fi
 
+# The seat's generation. gc exports GC_RUNTIME_EPOCH as 1 on a seat's very
+# first start (session.DefaultGeneration) and bumps it on every wake after
+# that, so a value above one says this seat has run before: it is a restart.
+runtime_epoch="${GC_RUNTIME_EPOCH:-1}"
+runtime_epoch="${runtime_epoch//[^0-9]/}"
+: "${runtime_epoch:=1}"
+
 # adopt_name_only <legacy> <current>: an earlier adapter keyed this state by
-# session name alone. It belonged to the one seat that then had the name — or,
-# in the collision this fix removes, to both — so the first seat-keyed start
-# takes it over: the conversation resumes across the upgrade, and the adopted
-# copy stops sitting adjacent to the fresh one for the model to read.
-#
-# Adoption is same-epoch only, and every sweep below globs the seat key, which
-# can never match a name-only path. Legacy state at a different epoch is
-# therefore left in place: sweeping the name-only scope from a seat-keyed start
-# could destroy state a concurrently live host-session seat of the same name
-# still owns, which is the cross-seat interference this fix exists to remove.
-# The residue is at most one generation per pre-upgrade name; reclaiming it
-# belongs in an offline sweep, not here.
+# session name alone. Name alone cannot say whose it is: a fresh seat re-seated
+# into a closed sibling's slot carries the same name and epoch, and adopting
+# there resumed the dead seat's conversation and rekeyed its transcript under
+# the wrong bead. So only a RESTARTED seat adopts — the state then belongs to
+# the seat that held the name before the upgrade, which is this one — and the
+# conversation resumes across the upgrade. A fresh seat starts fresh; a seat
+# gc restarted without bumping its generation does too, which loses continuity
+# once rather than risk a sibling's conversation.
 adopt_name_only() {
-    if [[ "$seat_name" != "$sid_name" && -e "$1" && ! -e "$2" ]]; then
+    if [[ "$seat_name" != "$sid_name" && "$runtime_epoch" -gt 1 && -e "$1" && ! -e "$2" ]]; then
         mv "$1" "$2" 2>/dev/null || true
     fi
 }
@@ -217,12 +229,34 @@ adopt_name_only "$mirror_root/$sid_name#$continuation_epoch" "$transcript_dir"
 # ZCode's own session database has no preservation contract and is the one copy
 # the CLI itself would reattach to.
 archive_root="$state_home/gascity/zcode/archived-transcripts"
-for stale in "$mirror_root/$seat_name"#*; do
-    if [[ -d "$stale" && "$stale" != "$transcript_dir" ]]; then
+
+# archive_scope <dir>: move a superseded mirror scope out of the live root,
+# keeping its own scope name so the bead that wrote it still resolves it.
+# Name-only scopes collide across beads — an earlier occupant of the session
+# name may already be archived under this scope — so an occupied slot is
+# merged into, never replaced: mirrors are named by conversation, and the
+# live copy of a conversation is the fuller one.
+#
+# A failed copy or move leaves the live scope where it is. A stale scope the
+# model can browse is the leak this exists to stop, but it is the smaller loss:
+# removing the source unconditionally meant one ENOSPC or EPERM destroyed the
+# only copy of a transcript, on exactly the I/O failure archiving exists to
+# survive. gc's reset contract is record rotation, not record destruction.
+archive_scope() {
+    local dest
+    dest="$archive_root/$(basename "$1")"
+    if [[ -e "$dest" ]]; then
+        cp -a "$1/." "$dest/" && rm -rf "$1" ||
+            printf '%s: could not archive %s, leaving it in the live root\n' "$PROG" "$1" >&2
+    else
         mkdir -p "$archive_root"
-        rm -rf "$archive_root/$(basename "$stale")"
-        mv "$stale" "$archive_root/" 2>/dev/null || rm -rf "$stale"
+        mv "$1" "$dest" 2>/dev/null ||
+            printf '%s: could not archive %s, leaving it in the live root\n' "$PROG" "$1" >&2
     fi
+}
+
+for stale in "$mirror_root/$seat_name"#*; do
+    if [[ -d "$stale" && "$stale" != "$transcript_dir" ]]; then archive_scope "$stale"; fi
 done
 mkdir -p "$transcript_dir"
 
@@ -235,6 +269,26 @@ for stale in "$zcode_home_root/$seat_name"#*; do
     if [[ -d "$stale" && "$stale" != "$zcode_home" ]]; then rm -rf "$stale"; fi
 done
 mkdir -p "$zcode_home"
+
+# Name-only state of this session name that adoption left behind is the
+# previous adapter's: an epoch this seat is not on, or the same-epoch state of
+# a closed sibling that a fresh seat declined. The per-seat sweeps above glob
+# the seat key and never see it, so it lingered in the live tree for the model
+# to read. Sweep it the same way — sids and CLI homes go, mirrors are archived
+# under their own scope so the bead that wrote them still resolves them. It
+# runs once in effect: nothing is left under the name afterwards. A seat with
+# no bead id is keyed by the name itself and must not sweep its own state.
+if [[ "$seat_name" != "$sid_name" ]]; then
+    for stale in "$sid_dir/$sid_name"#*; do
+        if [[ -f "$stale" ]]; then rm -f "$stale"; fi
+    done
+    for stale in "$mirror_root/$sid_name"#*; do
+        if [[ -d "$stale" ]]; then archive_scope "$stale"; fi
+    done
+    for stale in "$zcode_home_root/$sid_name"#*; do
+        if [[ -d "$stale" ]]; then rm -rf "$stale"; fi
+    done
+fi
 
 sid=""
 sid_unvalidated=0
@@ -332,8 +386,15 @@ import sys
 import time
 
 
+def sanitize_component(value):
+    """Fold value to a path component the way the shell's `LC_ALL=C tr -c
+    'A-Za-z0-9._-' '_'` does: byte-wise, so every byte of a multi-byte rune
+    becomes its own underscore. The engine's reader folds the same bytes."""
+    return re.sub(rb"[^A-Za-z0-9._-]", b"_", value.encode("utf-8")).decode("ascii")
+
+
 def load_export(mirror_dir, session_id, cwd):
-    safe = re.sub(r"[^A-Za-z0-9._-]", "_", session_id)
+    safe = sanitize_component(session_id)
     if not mirror_dir or not safe:
         return None, None
     dst = os.path.join(mirror_dir, safe + ".json")
@@ -408,7 +469,7 @@ def pending_session_id(mirror_dir):
     transcript root cannot collide on a literal "pending".
     """
     scope = os.path.basename(os.path.normpath(mirror_dir)) or "default"
-    return "pending-" + re.sub(r"[^A-Za-z0-9._-]", "_", scope)
+    return "pending-" + sanitize_component(scope)
 
 
 def mode_prompt(argv):

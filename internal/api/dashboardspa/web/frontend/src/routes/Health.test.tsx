@@ -700,6 +700,7 @@ function baseStatus(): StatusBody {
       live_rows: 2000,
       path: '/srv/gc/test-city/.db',
       ratio_mb_per_row: 0.5,
+      rows_measured: true,
       size_bytes: 1_000_000,
       threshold_mb_per_row: 1,
       warning: false,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -309,5 +310,92 @@ func TestIsDeadRuntimeSessionReturnsRoutedCheckerError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "runtime unavailable") {
 		t.Fatalf("IsDeadRuntimeSession error = %v, want runtime unavailable", err)
+	}
+}
+
+// capsFake overrides the fake's capabilities so the intersection can be
+// exercised with differing backend support.
+type capsFake struct {
+	*runtime.Fake
+	caps runtime.ProviderCapabilities
+}
+
+func (c *capsFake) Capabilities() runtime.ProviderCapabilities { return c.caps }
+
+// TestProvider_CapabilitiesIntersectsEachConnectionOp exercises one field at a
+// time, in both backend orders, so a field cannot pass by being wired to the
+// wrong field, the wrong backend, or with the wrong operator. Setting both
+// fields on both backends, as an earlier shape did, leaves a CanStream wired to
+// CanAttachTTY reporting the right answer for the wrong reason.
+func TestProvider_CapabilitiesIntersectsEachConnectionOp(t *testing.T) {
+	for _, field := range []string{"CanStream", "CanAttachTTY"} {
+		for _, tc := range []struct {
+			name          string
+			first, second bool
+			want          bool
+		}{
+			{name: "both backends capable", first: true, second: true, want: true},
+			{name: "first backend only", first: true},
+			{name: "second backend only", second: true},
+			{name: "neither backend"},
+		} {
+			t.Run(field+"/"+tc.name, func(t *testing.T) {
+				p := New(&capsFake{runtime.NewFake(), capsWith(t, field, tc.first)},
+					&capsFake{runtime.NewFake(), capsWith(t, field, tc.second)}, isRemote)
+				if got := capsField(t, p.Capabilities(), field); got != tc.want {
+					t.Errorf("%s = %v, want %v", field, got, tc.want)
+				}
+			})
+		}
+	}
+}
+
+// capsWith returns capabilities with exactly one named bool field set, so each
+// field's wiring is observed on its own.
+func capsWith(t *testing.T, field string, v bool) runtime.ProviderCapabilities {
+	t.Helper()
+	var caps runtime.ProviderCapabilities
+	f := reflect.ValueOf(&caps).Elem().FieldByName(field)
+	if !f.IsValid() {
+		t.Fatalf("runtime.ProviderCapabilities has no field %q", field)
+	}
+	f.SetBool(v)
+	return caps
+}
+
+// capsField reads one named bool capability.
+func capsField(t *testing.T, caps runtime.ProviderCapabilities, field string) bool {
+	t.Helper()
+	f := reflect.ValueOf(caps).FieldByName(field)
+	if !f.IsValid() {
+		t.Fatalf("runtime.ProviderCapabilities has no field %q", field)
+	}
+	return f.Bool()
+}
+
+// TestProvider_CapabilitiesIntersectsEveryField fails when a field is added to
+// runtime.ProviderCapabilities and not wired into this composite. The
+// intersection is a hand-maintained literal, and a field missing from it reads
+// as "not supported" no matter what either backend reports, which is how
+// CanStream and CanAttachTTY both went unnoticed: nothing consumes them yet, so
+// the first consumer would have inherited the wrong answer with no test red.
+//
+// Both backends report everything true, so the check holds for the fields that
+// intersect with AND and for NeedsClaimBackstop, which is an OR.
+func TestProvider_CapabilitiesIntersectsEveryField(t *testing.T) {
+	all := runtime.ProviderCapabilities{}
+	set := reflect.ValueOf(&all).Elem()
+	for i := 0; i < set.NumField(); i++ {
+		if set.Field(i).Kind() != reflect.Bool {
+			t.Fatalf("%s is not a bool, so this test no longer covers every capability", set.Type().Field(i).Name)
+		}
+		set.Field(i).SetBool(true)
+	}
+
+	got := reflect.ValueOf(New(&capsFake{runtime.NewFake(), all}, &capsFake{runtime.NewFake(), all}, isRemote).Capabilities())
+	for i := 0; i < got.NumField(); i++ {
+		if !got.Field(i).Bool() {
+			t.Errorf("%s = false with both backends reporting it true: the field is missing from the intersection", got.Type().Field(i).Name)
+		}
 	}
 }
