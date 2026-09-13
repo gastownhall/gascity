@@ -503,13 +503,13 @@ func TestZCodeScopeSanitizesByteWiseLikeTheAdapter(t *testing.T) {
 	}
 }
 
-// findZCodeMirrorInScope compares cleanOpenCodeWorkDir(mirror directory)
-// against workDir by raw string equality, and neither side is symlink-
-// resolved. On macOS that breaks in practice: t.TempDir() (and any real work
-// dir under /tmp) returns the /var alias, while the zcode adapter shells out
-// for its cwd and records the physical /private/var path in the mirror's
-// info.directory -- same directory, two strings, so the comparison always
-// misses and the scope reads as empty. Reproduced here on Linux with a
+// findZCodeMirrorInScope used to compare cleanOpenCodeWorkDir(mirror
+// directory) against workDir by raw string equality, with neither side
+// symlink-resolved. On macOS that broke in practice: t.TempDir() (and any
+// real work dir under /tmp) returns the /var alias, while the zcode adapter
+// shells out for its cwd and records the physical /private/var path in the
+// mirror's info.directory -- same directory, two strings, so the comparison
+// always missed and the scope read as empty. Reproduced here on Linux with a
 // manufactured symlink so the fix is verified without a macOS runner.
 func TestFindZCodeSessionFileByScopeResolvesSymlinkedWorkDir(t *testing.T) {
 	root := t.TempDir()
