@@ -347,3 +347,39 @@ func TestListSourceWorkflowRootsSupersedesAnUnstampedLegacyBindingRow(t *testing
 		t.Fatalf("checkLegacySourceWorkflowConflict = %v, want the sling admitted", err)
 	}
 }
+
+// TestListSourceWorkflowRootsKeepsALiveUnstampedLegacyBindingRootsTwin is the
+// live half of the row above. The binding's own ListLiveRoots cannot report an
+// unstamped row while a source store ref is in play — WorkflowMatchesSource
+// falls back to the root's PHYSICAL ref ("graph:<city>"), which never equals the
+// source's "city:" ref — so that row never reaches bindingIDs and nothing else
+// names it. Retiring its twin would leave zero blockers and admit the second
+// workflow this guard exists to refuse, so while the binding's row is LIVE the
+// twin keeps blocking.
+func TestListSourceWorkflowRootsKeepsALiveUnstampedLegacyBindingRootsTwin(t *testing.T) {
+	binding := beads.NewMemStore()
+	work := beads.NewMemStore()
+	root := newRelocatedWorkflowRoot(t, work)
+	newBindingRowUnderID(t, binding, root.ID, map[string]string{
+		beadmeta.KindMetadataKey:         beadmeta.KindWorkflow,
+		beadmeta.SourceBeadIDMetadataKey: supersedeSourceBeadID,
+	})
+	deps := convergedSplitCityDeps(binding, work)
+
+	roots, err := listSourceWorkflowRoots(deps, supersedeSourceBeadID)
+	if err != nil {
+		t.Fatalf("listSourceWorkflowRoots: %v", err)
+	}
+	if len(roots) != 1 || roots[0].storeRef != supersedeSourceStoreRef {
+		t.Fatalf("listSourceWorkflowRoots returned %d roots (%v), want the work ledger's twin kept while the binding's row is live",
+			len(roots), blockingWorkflowIDs(roots))
+	}
+	err = checkLegacySourceWorkflowConflict(deps, supersedeSourceBeadID, "", false)
+	var conflictErr *sourceworkflow.ConflictError
+	if !errors.As(err, &conflictErr) {
+		t.Fatalf("checkLegacySourceWorkflowConflict error = %v, want the live unstamped binding row's twin to conflict", err)
+	}
+	if !slices.Equal(conflictErr.WorkflowIDs, []string{root.ID}) {
+		t.Fatalf("conflicting workflow IDs = %v, want the single root [%s]", conflictErr.WorkflowIDs, root.ID)
+	}
+}

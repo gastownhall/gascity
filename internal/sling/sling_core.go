@@ -1200,11 +1200,15 @@ func (c *sourceWorkflowRootCollector) supersedeRetainedTwins() error {
 // source and admit the second workflow this guard exists to refuse.
 //
 // A row with no gc.source_store_ref predates the stamp and is judged on the
-// first two alone: requiring the ref there would exclude exactly the
-// pre-migration roots this supersede exists for. That is also why the check is
-// spelled out here rather than delegated to WorkflowMatchesSource, whose legacy
-// fallback compares the root's PHYSICAL store ref -- "graph:<city>" for every
-// binding row -- against the source's "city:"/"rig:" ref, and so never matches.
+// first two plus a closed qualifier: requiring the ref there would exclude
+// exactly the pre-migration roots this supersede exists for, but an unstamped
+// row is also the one row this leg's own enumeration cannot see. That is why
+// the check is spelled out here rather than delegated to WorkflowMatchesSource,
+// whose legacy fallback compares the root's PHYSICAL store ref --
+// "graph:<city>" for every binding row -- against the source's "city:"/"rig:"
+// ref, and so never matches. So while such a row is LIVE nothing else reports
+// it, and dropping its twin would leave the sling unguarded; only once it is
+// CLOSED -- no longer a live conflict -- does it supersede its twin.
 func (c *sourceWorkflowRootCollector) bindingHoldsRoot(rootID string) (bool, error) {
 	row, err := c.bindingStore.Get(rootID)
 	if err != nil {
@@ -1221,8 +1225,20 @@ func (c *sourceWorkflowRootCollector) bindingHoldsRoot(rootID string) (bool, err
 		return false, nil
 	}
 	rowSourceStoreRef := sourceworkflow.NormalizeSourceStoreRef(row.Metadata[beadmeta.SourceStoreRefMetadataKey])
-	if rowSourceStoreRef == "" || c.sourceStoreRef == "" {
+	if c.sourceStoreRef == "" {
 		return true, nil
+	}
+	if rowSourceStoreRef == "" {
+		// An unstamped binding row is invisible to this same leg's
+		// ListLiveRoots whenever a source store ref is in play:
+		// WorkflowMatchesSource falls back to the root's PHYSICAL ref
+		// ("graph:<city>"), which never equals the source's "city:"/"rig:"
+		// ref. A CLOSED row is not a live conflict, so its retained twin
+		// can go -- that is the case this supersede was built for. A LIVE
+		// one IS the conflict and nothing else reports it: retiring its
+		// twin would leave zero blockers and admit the second workflow
+		// this guard exists to refuse. Keep today's conservative answer.
+		return row.Status == "closed", nil
 	}
 	return rowSourceStoreRef == sourceworkflow.NormalizeSourceStoreRef(c.sourceStoreRef), nil
 }

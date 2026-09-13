@@ -91,8 +91,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   collide across stores, so the binding's row must be a workflow root, for the
   same source bead, naming the same source store whenever both sides name one. A
   probe that faults refuses the sling: a binding fault is an error, never
-  absence. A city that relocates nothing has no binding leg, runs no probe, and
-  enumerates exactly what it did before.
+  absence. A binding row that predates the `gc.source_store_ref` stamp
+  supersedes its twin only once it is closed, because a live one is invisible to
+  the guard's own scan and dropping its twin would leave the sling unguarded. A
+  city that relocates nothing has no binding leg, runs no probe, and enumerates
+  exactly what it did before.
 
 - **The one-live-workflow-per-source-bead guard reads the graph binding, so a
   split city stops admitting a second live workflow.** A workflow root is graph
