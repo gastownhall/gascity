@@ -901,6 +901,97 @@ func TestFindWorkflowBeadsResolvesLogicalWorkflowID(t *testing.T) {
 	}
 }
 
+// sequentialInterruptStore closes ids one at a time, in the given order, and
+// stops with an error the moment it reaches interruptAt -- mirroring the real
+// native store's non-transactional per-id CloseAll loop, so a test can pin
+// exactly what a genuine mid-sweep interruption leaves behind.
+type sequentialInterruptStore struct {
+	beads.Store
+	interruptAt string
+}
+
+func (s sequentialInterruptStore) CloseAll(ids []string, _ map[string]string) (int, error) {
+	closed := 0
+	for _, id := range ids {
+		if id == s.interruptAt {
+			return closed, fmt.Errorf("interrupted before closing %s", id)
+		}
+		if err := s.Close(id); err != nil {
+			return closed, err
+		}
+		closed++
+	}
+	return closed, nil
+}
+
+// TestFindWorkflowBeadsCloseOrderKeepsRootClosedLast pins the #6332 fix: an
+// interrupted sweep must never leave a closed root with open descendants
+// still routed. Root-first order let that happen because the root was the
+// first bead the non-transactional per-id CloseAll loop reached; ordering the
+// root last instead means "root closed" implies "every step closed" across
+// any interruption -- an interruption can now only ever leave an open root
+// behind, which the existing dead-root sweeps already handle.
+func TestFindWorkflowBeadsCloseOrderKeepsRootClosedLast(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		Title:  "Workflow",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":        "workflow",
+			"gc.workflow_id": "wf-6332",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	child, err := store.Create(beads.Bead{
+		Title:  "Step",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+
+	found, err := findWorkflowBeads(store, root.ID)
+	if err != nil {
+		t.Fatalf("findWorkflowBeads: %v", err)
+	}
+	if len(found) == 0 || found[len(found)-1].ID != root.ID {
+		t.Fatalf("findWorkflowBeads(...) = %v, want root %q ordered last", workflowBeadIDs(found), root.ID)
+	}
+
+	// Interrupt exactly when the sweep reaches the root -- the worst case:
+	// every descendant before it in the order has already closed.
+	interrupting := sequentialInterruptStore{Store: store, interruptAt: root.ID}
+	if _, err := closeWorkflowMatches([]workflowStoreMatch{{
+		store: interrupting,
+		beads: found,
+		label: "city",
+	}}); err == nil {
+		t.Fatal("closeWorkflowMatches: want an error from the simulated interruption")
+	}
+
+	gotChild, err := store.Get(child.ID)
+	if err != nil {
+		t.Fatalf("Get(child): %v", err)
+	}
+	if gotChild.Status != "closed" {
+		t.Fatalf("child status = %q, want closed before the interruption reached the root", gotChild.Status)
+	}
+	gotRoot, err := store.Get(root.ID)
+	if err != nil {
+		t.Fatalf("Get(root): %v", err)
+	}
+	if gotRoot.Status == "closed" {
+		t.Fatal("root closed despite the interruption landing exactly on it -- the invariant this fix establishes (root closed only after every descendant) is broken")
+	}
+}
+
 func TestDeleteWorkflowMatchesUsesCascadeWithoutPreClose(t *testing.T) {
 	store := beads.NewMemStore()
 	root, err := store.Create(beads.Bead{
