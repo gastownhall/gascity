@@ -92,7 +92,12 @@ func FindZCodeSessionFileByID(searchPaths []string, workDir, sessionID string) s
 			if walkErr != nil || entry.IsDir() || entry.Name() != sessionID+".json" {
 				return nil //nolint:nilerr // a missing root is simply no match
 			}
-			if cleanOpenCodeWorkDir(openCodeExportDirectory(path)) != workDir {
+			// Compared via pathutil.SamePath, not raw string inequality: on
+			// macOS a real work dir resolves through the /var alias while the
+			// adapter's shelled-out cwd lands on the physical /private/var
+			// path, so a plain != always misses even though it is the same
+			// directory. See findZCodeMirrorInScope below for the same fix.
+			if !pathutil.SamePath(openCodeExportDirectory(path), workDir) {
 				return nil
 			}
 			info, err := entry.Info()
