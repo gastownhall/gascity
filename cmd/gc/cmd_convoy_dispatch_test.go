@@ -5559,6 +5559,178 @@ func TestRunControlDispatcherQuarantinesGenericControlFailure(t *testing.T) {
 	}
 }
 
+// finalizeStoreRefFixture builds the minimal workflow-finalize shape whose
+// source chain crosses a store boundary: a passing root stamped with
+// gc.source_bead_id/gc.source_store_ref, one closed passing step, and a ready
+// finalizer. Dispatching the finalizer forces makeStoreRefResolver to resolve
+// sourceStoreRef during the source-chain preflight.
+func finalizeStoreRefFixture(t *testing.T, store beads.Store, sourceStoreRef string) (workflowID, finalizerID string) {
+	t.Helper()
+	workflow, err := store.Create(beads.Bead{
+		Title: "mol-adopt-pr-v2",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+			beadmeta.FormulaContractMetadataKey: "graph.v2",
+			beadmeta.SourceBeadIDMetadataKey:    "ga-rig-parent",
+			beadmeta.SourceStoreRefMetadataKey:  sourceStoreRef,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create workflow root: %v", err)
+	}
+	step, err := store.Create(beads.Bead{
+		Title:    "step",
+		Type:     "task",
+		Metadata: map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass},
+	})
+	if err != nil {
+		t.Fatalf("create step: %v", err)
+	}
+	if err := store.Close(step.ID); err != nil {
+		t.Fatalf("close step: %v", err)
+	}
+	finalizer, err := store.Create(beads.Bead{
+		Title: "Finalize workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:       beadmeta.KindWorkflowFinalize,
+			beadmeta.RootBeadIDMetadataKey: workflow.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create finalizer: %v", err)
+	}
+	if err := store.DepAdd(finalizer.ID, step.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd(finalizer->step): %v", err)
+	}
+	if err := store.DepAdd(workflow.ID, finalizer.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd(workflow->finalizer): %v", err)
+	}
+	return workflow.ID, finalizer.ID
+}
+
+// assertFinalizeStaysOpenForRetry asserts the retryable disposition for a
+// finalize whose store ref could not be resolved because of config drift: the
+// dispatcher surfaces ErrControlPending, nothing is quarantined, the reason is
+// recorded on the finalizer, and both finalizer and root stay open.
+func assertFinalizeStaysOpenForRetry(t *testing.T, store beads.Store, workflowID, finalizerID string, dispatchErr error, stderr *bytes.Buffer, wantReason string) {
+	t.Helper()
+	if dispatchErr == nil {
+		t.Fatal("runControlDispatcherWithStoreAndConfig error = nil; want a retryable ErrControlPending (finalizer must not quarantine)")
+	}
+	if !errors.Is(dispatchErr, dispatch.ErrControlPending) {
+		t.Fatalf("error = %v, want errors.Is(err, dispatch.ErrControlPending)", dispatchErr)
+	}
+
+	after, err := store.Get(finalizerID)
+	if err != nil {
+		t.Fatalf("get finalizer: %v", err)
+	}
+	if after.Status != "open" {
+		t.Fatalf("finalizer status = %q, want open (retryable)", after.Status)
+	}
+	if got := after.Metadata[beadmeta.ControlQuarantinedMetadataKey]; got != "" {
+		t.Fatalf("gc.control_quarantined = %q, want empty", got)
+	}
+	if slices.Contains(after.Labels, "gc:control-quarantined") {
+		t.Fatalf("labels = %#v, want no gc:control-quarantined", after.Labels)
+	}
+	if got := after.Metadata[beadmeta.LastFinalizeErrorMetadataKey]; !strings.Contains(got, wantReason) {
+		t.Fatalf("gc.last_finalize_error = %q, want it to record %q", got, wantReason)
+	}
+	root, err := store.Get(workflowID)
+	if err != nil {
+		t.Fatalf("get workflow root: %v", err)
+	}
+	if root.Status != "open" {
+		t.Fatalf("workflow root status = %q, want open (retry can still complete the finalize)", root.Status)
+	}
+	if got := stderr.String(); strings.Contains(got, "control dispatch: quarantined bead="+finalizerID) {
+		t.Fatalf("stderr = %q, want NO quarantine message", got)
+	}
+}
+
+// TestFinalize_RigRemovedFromConfig_RetriesNotQuarantines pins landmine #11: a
+// workflow-finalize whose source lives in a rig that has since been removed
+// from city.toml must keep the finalizer OPEN for retry (the rig can be
+// re-added via `gc rig add`), not terminally quarantine it. Quarantine here is
+// doubly destructive — settleRootForQuarantinedFinalizer fails the workflow
+// root too, and the domain parent source bead is then stranded open forever
+// with no retry handle even after the rig returns.
+func TestFinalize_RigRemovedFromConfig_RetriesNotQuarantines(t *testing.T) {
+	clearGCEnv(t)
+
+	store := beads.NewMemStore()
+	workflowID, finalizerID := finalizeStoreRefFixture(t, store, "rig:ghostrig")
+
+	// The rig the source lives in has been removed: cfg.Rigs is empty.
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	var stderr bytes.Buffer
+	err := runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, finalizerID, cfg, io.Discard, &stderr)
+	assertFinalizeStaysOpenForRetry(t, store, workflowID, finalizerID, err, &stderr, `rig "ghostrig" not found`)
+}
+
+// TestFinalize_CityNameMismatch_RetriesNotQuarantines covers the sibling
+// config-drift arm: a workflow stamped with the previous city name (the city
+// was renamed mid-flight) must also stay retryable — restoring the name heals
+// the finalize, exactly like re-adding a removed rig.
+func TestFinalize_CityNameMismatch_RetriesNotQuarantines(t *testing.T) {
+	clearGCEnv(t)
+
+	store := beads.NewMemStore()
+	workflowID, finalizerID := finalizeStoreRefFixture(t, store, "city:old-city-name")
+
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	var stderr bytes.Buffer
+	err := runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, finalizerID, cfg, io.Discard, &stderr)
+	assertFinalizeStaysOpenForRetry(t, store, workflowID, finalizerID, err, &stderr, `city ref "city:old-city-name" does not match this city`)
+}
+
+// TestFinalize_UnknownStoreRefScheme_StillQuarantines is the control: a
+// malformed ref (unsupported scheme) is not config drift — no config change
+// can ever make it resolve — so it must keep quarantining terminally instead
+// of inheriting the retryable classification.
+func TestFinalize_UnknownStoreRefScheme_StillQuarantines(t *testing.T) {
+	clearGCEnv(t)
+
+	store := beads.NewMemStore()
+	workflowID, finalizerID := finalizeStoreRefFixture(t, store, "s3:not-a-store")
+
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	var stderr bytes.Buffer
+	if err := runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, finalizerID, cfg, io.Discard, &stderr); err != nil {
+		t.Fatalf("runControlDispatcherWithStoreAndConfig: %v (quarantine path returns nil)", err)
+	}
+
+	after, err := store.Get(finalizerID)
+	if err != nil {
+		t.Fatalf("get finalizer: %v", err)
+	}
+	if after.Status != "closed" {
+		t.Fatalf("finalizer status = %q, want closed (quarantined)", after.Status)
+	}
+	if got := after.Metadata[beadmeta.ControlQuarantinedMetadataKey]; got != "true" {
+		t.Fatalf("gc.control_quarantined = %q, want true", got)
+	}
+	if !slices.Contains(after.Labels, "gc:control-quarantined") {
+		t.Fatalf("labels = %#v, want gc:control-quarantined", after.Labels)
+	}
+	root, err := store.Get(workflowID)
+	if err != nil {
+		t.Fatalf("get workflow root: %v", err)
+	}
+	if root.Status != "closed" {
+		t.Fatalf("workflow root status = %q, want closed (settled after finalizer quarantine)", root.Status)
+	}
+	if got := root.Metadata[beadmeta.FailureReasonMetadataKey]; got != "finalizer_control_quarantined" {
+		t.Fatalf("root gc.failure_reason = %q, want finalizer_control_quarantined", got)
+	}
+	if got := stderr.String(); !strings.Contains(got, "control dispatch: quarantined bead="+finalizerID) {
+		t.Fatalf("stderr = %q, want quarantine message", got)
+	}
+}
+
 func TestRunWorkflowServeReturnsLegacyOversizedControlError(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)

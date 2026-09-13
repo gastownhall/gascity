@@ -194,7 +194,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "tmux"
-baseline_calls = 10
+baseline_calls = 9
 baseline_files = 4
 reported_calls = 7
 reported_files = 3
@@ -520,7 +520,7 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "tmux"
-baseline_calls = 4
+baseline_calls = 3
 baseline_files = 2
 reported_calls = 1
 reported_files = 1
