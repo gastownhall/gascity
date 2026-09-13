@@ -2,8 +2,6 @@ package runtime
 
 import (
 	"context"
-	"fmt"
-	"sync"
 	"time"
 )
 
@@ -91,70 +89,4 @@ type SessionEvent struct {
 //   - Canceling ctx ends the stream and closes the channel.
 type SessionEventProvider interface {
 	SubscribeSessionEvents(ctx context.Context) (<-chan SessionEvent, error)
-}
-
-// MergeSessionEvents subscribes to every non-nil provider and fans their
-// streams into one channel, so a composite runtime.Provider wrapping more
-// than one SessionEventProvider backend (e.g. a city where both the default
-// and ACP backends happen to support the interface) can satisfy
-// SessionEventProvider itself without consumers needing to know how many
-// backends are underneath. Each backend's own self-healing (reconnect with
-// backoff, resync framing) is untouched; this only relays what each stream
-// emits.
-//
-// A subscribe failure on one provider does not fail the merge as long as at
-// least one other succeeds — a partially event-capable composite is still
-// better than falling back to polling entirely. Only when every provider
-// fails to subscribe does this return an error, so the caller (typically an
-// interface assertion elsewhere expecting a real stream) gets an explicit
-// signal instead of a channel that will never deliver anything.
-func MergeSessionEvents(ctx context.Context, providers ...SessionEventProvider) (<-chan SessionEvent, error) {
-	out := make(chan SessionEvent)
-	var wg sync.WaitGroup
-	var firstErr error
-	subscribed := 0
-	for _, sep := range providers {
-		if sep == nil {
-			continue
-		}
-		ch, err := sep.SubscribeSessionEvents(ctx)
-		if err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
-		}
-		subscribed++
-		wg.Add(1)
-		go func(ch <-chan SessionEvent) {
-			defer wg.Done()
-			for {
-				select {
-				case ev, ok := <-ch:
-					if !ok {
-						return
-					}
-					select {
-					case out <- ev:
-					case <-ctx.Done():
-						return
-					}
-				case <-ctx.Done():
-					return
-				}
-			}
-		}(ch)
-	}
-	if subscribed == 0 {
-		close(out)
-		if firstErr != nil {
-			return out, firstErr
-		}
-		return out, fmt.Errorf("no session-event providers to subscribe to")
-	}
-	go func() {
-		wg.Wait()
-		close(out)
-	}()
-	return out, nil
 }
