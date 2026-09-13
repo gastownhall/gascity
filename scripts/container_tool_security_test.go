@@ -1,7 +1,6 @@
 package scripts_test
 
 import (
-	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -172,6 +171,35 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 	}
 }
 
+// TestMCPMailImageUpgradesPatchedOSPackages guards the --only-upgrade list in
+// Dockerfile.mail. The base image is pinned by digest, so an OS-package CVE is only
+// cleared by naming the package here, and Trivy reports every binary package of a
+// source separately: dropping one name leaves that package on the vulnerable version
+// and the scan red, with the other eight looking like the whole fix.
+func TestMCPMailImageUpgradesPatchedOSPackages(t *testing.T) {
+	dockerfile := readFile(t, repoRoot(t), "contrib/k8s/Dockerfile.mail")
+
+	upgrade, _, ok := strings.Cut(dockerfile, "&& apt-get install -y --no-install-recommends \\")
+	if !ok {
+		t.Fatal("contrib/k8s/Dockerfile.mail has no plain apt-get install stanza to bound the --only-upgrade list")
+	}
+	if !strings.Contains(upgrade, "--only-upgrade") {
+		t.Fatal("contrib/k8s/Dockerfile.mail no longer upgrades any pinned-base OS package")
+	}
+
+	for _, pkg := range []string{
+		// openssl / systemd set, already present.
+		"libcap2", "libssl3t64", "libsystemd0", "libudev1", "openssl", "openssl-provider-legacy",
+		// util-linux set, CVE-2026-53615, fixed in 2.41.5-0+deb13u1.
+		"bsdutils", "libblkid1", "liblastlog2-2", "libmount1", "libsmartcols1",
+		"libuuid1", "login", "mount", "util-linux",
+	} {
+		if !strings.Contains(upgrade, "\n    "+pkg+" \\") {
+			t.Errorf("contrib/k8s/Dockerfile.mail --only-upgrade list missing %q", pkg)
+		}
+	}
+}
+
 // TestRebuiltToolsAssertPatchedGRPCArtifact guards the artifact-level proof that
 // each rebuilt CLI actually embeds the patched grpc module. Text-level ARG/recipe
 // checks confirm the build inputs; these `go version -m` assertions are the only
@@ -195,17 +223,97 @@ func TestRebuiltToolsAssertPatchedGRPCArtifact(t *testing.T) {
 	}
 }
 
+// TestRebuiltToolsForcePatchedXModules guards the module overrides that replaced the
+// gh and Dolt waivers in .trivyignore.yaml. The pinned gh and Dolt sources select
+// x/crypto, x/net, x/text and thrift versions Trivy flags, and the grpc-only override
+// left them there, which is what kept those paths waived. Dropping either the `go get`
+// or its `go version -m` proof would put the vulnerable module back with nothing
+// failing, so both halves are asserted here.
+func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
+	root := repoRoot(t)
+	base := readFile(t, root, "contrib/k8s/Dockerfile.base")
+
+	// Versions each override forces, at or above what Trivy names as fixed for the findings it clears.
+	for _, arg := range []string{
+		"ARG XCRYPTO_VERSION=0.55.0",
+		"ARG XNET_VERSION=0.58.0",
+		"ARG XTEXT_VERSION=0.41.0",
+		"ARG XMOD_VERSION=0.40.0",
+		"ARG THRIFT_VERSION=0.23.0",
+	} {
+		if !strings.Contains(base, arg) {
+			t.Errorf("contrib/k8s/Dockerfile.base missing %q", arg)
+		}
+	}
+
+	// gh needs x/text and x/mod; its pinned source already selects patched x/crypto and x/net.
+	// Dolt takes no x/mod override because no x/mod package is linked into its binary.
+	ghModules := map[string]string{
+		"golang.org/x/text": "XTEXT_VERSION",
+		"golang.org/x/mod":  "XMOD_VERSION",
+	}
+	doltModules := map[string]string{
+		"golang.org/x/crypto":      "XCRYPTO_VERSION",
+		"golang.org/x/net":         "XNET_VERSION",
+		"golang.org/x/text":        "XTEXT_VERSION",
+		"github.com/apache/thrift": "THRIFT_VERSION",
+	}
+	// Each `go get` is looked for inside its own stanza. gh and Dolt share the x/text
+	// override verbatim, so a file-wide search lets one stand in for the other and a
+	// dropped override reads as present here, failing only in the image build.
+	ghStart := strings.Index(base, "WORKDIR /src/gh")
+	doltStart := strings.Index(base, "WORKDIR /src/dolt")
+	if ghStart < 0 || doltStart <= ghStart {
+		t.Fatal("contrib/k8s/Dockerfile.base has no WORKDIR /src/gh stanza ahead of the Dolt one")
+	}
+	ghStanza := base[ghStart:doltStart]
+	doltStanza := base[doltStart:]
+	if next := strings.Index(doltStanza, "\nFROM "); next > 0 {
+		doltStanza = doltStanza[:next]
+	}
+	stanzas := map[string]string{"/out/gh": ghStanza, "/out/dolt": doltStanza}
+
+	for bin, modules := range map[string]map[string]string{"/out/gh": ghModules, "/out/dolt": doltModules} {
+		for module, arg := range modules {
+			get := `"` + module + `@v${` + arg + `}"`
+			if !strings.Contains(stanzas[bin], get) {
+				t.Errorf("contrib/k8s/Dockerfile.base must override %s inside the %s build stanza; missing %q", module, bin, get)
+			}
+			assert := `go version -m ` + bin + ` | tr '\t' ' ' | grep -Fq "dep ` + module + ` v${` + arg + `} "`
+			if !strings.Contains(base, assert) {
+				t.Errorf("contrib/k8s/Dockerfile.base must assert %s embeds patched %s; missing %q", bin, module, assert)
+			}
+		}
+	}
+
+	// Inside the gh stanza the x/mod get has to run after the x/text one. A later
+	// `go get` naming a version below what an earlier one dragged in is a downgrade,
+	// and it takes the earlier module with it: measured against the pinned source,
+	// with XTEXT_VERSION at 0.39.0 the reversed order selects x/mod v0.38.0, under
+	// the fixed version. The two orders agree at the versions pinned today, so this
+	// is what keeps the next bump from recreating that shape.
+	xtextGet := strings.Index(ghStanza, `"golang.org/x/text@v${XTEXT_VERSION}"`)
+	xmodGet := strings.Index(ghStanza, `"golang.org/x/mod@v${XMOD_VERSION}"`)
+	if xtextGet < 0 || xmodGet < 0 {
+		t.Fatal("gh stanza is missing the x/text or the x/mod override")
+	}
+	if xmodGet < xtextGet {
+		t.Error("gh stanza runs the x/mod override ahead of x/text; the newest constraint goes last, so a lower x/text pin cannot downgrade x/mod out from under its assertion")
+	}
+}
+
 // TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools enforces that the rebuilt-from-
-// source tools (bd, dolt, gh) carry no Go-stdlib CVE waiver. The image build rebuilds
-// them with the Go 1.26.5 toolchain, which fixes every stdlib CVE listed, so a waiver
-// on those paths would let the scan gate keep masking a regressed rebuild instead of
-// proving the fix holds. CVE-2026-56852 (x/text) and CVE-2026-46600 (x/net
-// dns/dnsmessage) are the explicit non-stdlib exceptions: the pinned gh and Dolt
-// sources, plus (for CVE-2026-56852) external kubectl, still select vulnerable module
-// versions. The residual
-// x/net / x/crypto module waivers that bd and dolt legitimately keep (external binaries
-// the grpc-only rebuild does not touch) are out of scope here; gc's x/net / x/crypto
-// module waivers are enforced separately by TestTrivyIgnoreDropsGCModuleWaiversPastThreshold.
+// source tools (bd, dolt, gh) carry no waiver beyond the reviewed set below. They are
+// rebuilt with the Go 1.26.5 toolchain, which fixes every stdlib CVE listed, and
+// Dockerfile.base now forces x/crypto, x/net, x/text and thrift forward in the gh and
+// Dolt builds the same way it forces grpc, so a waiver on those paths would let the
+// scan gate mask a regressed rebuild instead of proving the fix holds. The reviewed
+// set is the three CVEs published against the grpc and thrift versions those builds
+// pin, carried over from main's time-boxed bridge and held to exactly the paths the
+// scan reported; TestTrivyIgnoreKeepsReviewedBridgeEntries pins their horizon and
+// statements. kubectl keeps the x/text waiver because it is an upstream-signed
+// prebuilt this repo installs rather than builds. gc's module waivers are enforced
+// separately by TestTrivyIgnoreDropsGCModuleWaiversPastThreshold.
 func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 	root := repoRoot(t)
 
@@ -229,68 +337,59 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 		"CVE-2026-39822": true, "CVE-2026-39823": true, "CVE-2026-39825": true,
 		"CVE-2026-39826": true, "CVE-2026-39836": true, "CVE-2026-42499": true,
 		"CVE-2026-42504": true, "CVE-2026-27145": true,
-		// docket E9 (2026-09-11): kubectl-only stdlib CVEs, fixed in Go 1.26.6.
+		// kubectl-only stdlib CVEs, fixed in Go 1.26.6.
 		"CVE-2026-33818": true, "CVE-2026-56853": true, "CVE-2026-56858": true,
 		"CVE-2026-56859": true, "CVE-2026-56860": true, "CVE-2026-56862": true,
 	}
-	allowedModuleWaivers := map[string]map[string]bool{
+	// Waivers that survive, checked as present so an entry cannot be dropped without
+	// a deliberate edit here, and as the only rebuilt-path entries allowed, so the set
+	// cannot grow without one either. The gc path of the grpc pair is governed by
+	// TestTrivyIgnoreDropsGCModuleWaiversPastThreshold instead, so it is not listed.
+	reviewedWaivers := map[string]map[string]bool{
 		"CVE-2026-56852": {
-			"usr/bin/gh":            true,
-			"usr/local/bin/dolt":    true,
 			"usr/local/bin/kubectl": true,
 		},
-		"CVE-2026-46600": {
-			"usr/bin/gh":            true,
-			"usr/local/bin/dolt":    true,
-			"usr/local/bin/kubectl": true,
-		},
-		"CVE-2026-56854": {
-			"usr/bin/gh":         true,
-			"usr/local/bin/dolt": true,
-			"usr/local/bin/bd":   true,
-		},
-		"CVE-2026-56864": {
-			"usr/bin/gh": true,
-		},
-		"CVE-2026-56865": {
-			"usr/bin/gh": true,
-		},
+		// grpc, fixed in 1.83.1 (CVE-2026-84304) and 1.82.2 / 1.83.2 (CVE-2026-84445);
+		// the gh and Dolt rebuilds pin 1.82.1 and the bd rebuild pins 1.83.0.
 		"CVE-2026-84304": {
 			"usr/bin/gh":         true,
 			"usr/local/bin/dolt": true,
 			"usr/local/bin/bd":   true,
-			"usr/local/bin/gc":   true,
 		},
 		"CVE-2026-84445": {
 			"usr/bin/gh":         true,
 			"usr/local/bin/dolt": true,
 			"usr/local/bin/bd":   true,
-			"usr/local/bin/gc":   true,
+		},
+		// thrift, fixed in 0.24.0; the Dolt rebuild pins 0.23.0 and bd's pinned source selects it.
+		"CVE-2026-43871": {
+			"usr/local/bin/dolt": true,
+			"usr/local/bin/bd":   true,
 		},
 	}
-	foundAllowed := map[string]map[string]bool{}
+	foundReviewed := map[string]map[string]bool{}
 
 	for _, v := range doc.Vulnerabilities {
 		for _, p := range v.Paths {
 			if stdlibCVEs[v.ID] && rebuiltPaths[p] {
 				t.Errorf("%s still waives rebuilt tool %q for a Go-stdlib CVE the 1.26.5 rebuild clears; drop the path so the scan proves the fix stays effective", v.ID, p)
 			}
-			if allowedPaths, ok := allowedModuleWaivers[v.ID]; ok && allowedPaths[p] {
-				if foundAllowed[v.ID] == nil {
-					foundAllowed[v.ID] = map[string]bool{}
+			if allowedPaths, ok := reviewedWaivers[v.ID]; ok && allowedPaths[p] {
+				if foundReviewed[v.ID] == nil {
+					foundReviewed[v.ID] = map[string]bool{}
 				}
-				foundAllowed[v.ID][p] = true
+				foundReviewed[v.ID][p] = true
 				continue
 			}
-			if p == "usr/bin/gh" {
-				t.Errorf("%s waives rebuilt gh without a reviewed module-specific exception", v.ID)
+			if rebuiltPaths[p] {
+				t.Errorf("%s waives rebuilt tool %q; Dockerfile.base forces the patched modules into the gh and Dolt builds and bd's pinned source already selects them, so move the module forward in that build instead of waiving the path", v.ID, p)
 			}
 		}
 	}
-	for cve, paths := range allowedModuleWaivers {
+	for cve, paths := range reviewedWaivers {
 		for path := range paths {
-			if !foundAllowed[cve][path] {
-				t.Errorf(".trivyignore.yaml must retain the reviewed %s waiver for %s until that module version is fixed upstream", cve, path)
+			if !foundReviewed[cve][path] {
+				t.Errorf(".trivyignore.yaml must retain the reviewed %s waiver for %s until its pin moves past the fixed version", cve, path)
 			}
 		}
 	}
@@ -379,9 +478,10 @@ func TestTrivyIgnoreDropsGCModuleWaiversPastThreshold(t *testing.T) {
 		"CVE-2026-42508": {"golang.org/x/crypto", "v0.52.0"},
 		"CVE-2026-46595": {"golang.org/x/crypto", "v0.52.0"},
 		"CVE-2026-46597": {"golang.org/x/crypto", "v0.52.0"},
-		// google.golang.org/grpc, fixed in 1.83.1.
+		// google.golang.org/grpc. CVE-2026-84445 is fixed in 1.82.2 on the 1.82 line
+		// and 1.83.2 on the 1.83 line go.mod is on, so 1.83.1 clears only the first.
 		"CVE-2026-84304": {"google.golang.org/grpc", "v1.83.1"},
-		"CVE-2026-84445": {"google.golang.org/grpc", "v1.83.1"},
+		"CVE-2026-84445": {"google.golang.org/grpc", "v1.83.2"},
 	}
 
 	goMod := readFile(t, root, "go.mod")
@@ -421,188 +521,32 @@ func TestTrivyIgnoreDropsGCModuleWaiversPastThreshold(t *testing.T) {
 	}
 }
 
-// TestTrivyIgnoreRefreshesBridgeHorizonAndWaivesXNetDNSMessageCVE enforces the
-// 2026-09-01 mayor-ruled bridge (ga-wb9e3a): every existing waiver's expired_at
-// moves from the lapsed 2026-08-07 horizon to the short 2026-09-21 bridge, and
-// exactly one new entry waives CVE-2026-46600 (golang.org/x/net dns/dnsmessage,
-// DoS via invalid DNS record parsing, fixed upstream in x/net 0.56.0) on the
-// vendored gh and dolt binaries. The ruling explicitly forbids trimming or
-// removing any existing entry, so the total entry count must grow by exactly one.
-// Widened again 2026-09-11 (operator ruling docket E9) to add
-// usr/local/bin/kubectl to this same entry rather than a duplicate — see
-// TestTrivyIgnoreWidensDocketE9WaiverForRemainingHighCriticalFindings.
-func TestTrivyIgnoreRefreshesBridgeHorizonAndWaivesXNetDNSMessageCVE(t *testing.T) {
-	root := repoRoot(t)
+// TestGoModPinsXModPastGCFinding guards the gc half of the same container-scan
+// finding the Dockerfile overrides cover for gh. gc is built straight from this
+// module rather than from pinned third-party source, so no `go get` in a Dockerfile
+// can move it: the only floor is go.mod's own pin, and dropping that pin back below
+// the fixed version would put the vulnerable module into usr/local/bin/gc with
+// nothing in the build failing.
+func TestGoModPinsXModPastGCFinding(t *testing.T) {
+	// The first version Trivy names as fixed for the x/mod findings on usr/local/bin/gc.
+	const xmodFixVersion = "v0.40.0"
 
-	var doc struct {
-		Vulnerabilities []struct {
-			ID        string   `yaml:"id"`
-			Paths     []string `yaml:"paths"`
-			ExpiredAt string   `yaml:"expired_at"`
-			Statement string   `yaml:"statement"`
-		} `yaml:"vulnerabilities"`
-	}
-	if err := yaml.Unmarshal([]byte(readFile(t, root, ".trivyignore.yaml")), &doc); err != nil {
-		t.Fatalf("parsing .trivyignore.yaml: %v", err)
-	}
-
-	const bridgeHorizon = "2026-09-21"
-	const newCVE = "CVE-2026-46600"
-	wantNewPaths := map[string]bool{
-		"usr/bin/gh":            true,
-		"usr/local/bin/dolt":    true,
-		"usr/local/bin/kubectl": true,
-	}
-
-	if got, want := len(doc.Vulnerabilities), 64; got != want {
-		t.Errorf(".trivyignore.yaml has %d entries, want %d (63 existing + exactly 1 new); the bridge must not trim, remove, or duplicate entries", got, want)
-	}
-
-	newCVECount := 0
-	for _, v := range doc.Vulnerabilities {
-		if v.ExpiredAt != bridgeHorizon {
-			t.Errorf("%s expired_at = %q, want the refreshed bridge horizon %q", v.ID, v.ExpiredAt, bridgeHorizon)
-		}
-		if strings.TrimSpace(v.Statement) == "" {
-			t.Errorf("%s has no statement; every waived entry must keep or gain a comment naming its durable fix path", v.ID)
-		}
-		if v.ID != newCVE {
-			continue
-		}
-		newCVECount++
-		gotPaths := map[string]bool{}
-		for _, p := range v.Paths {
-			gotPaths[p] = true
-		}
-		if len(gotPaths) != len(wantNewPaths) {
-			t.Errorf("%s paths = %v, want exactly %v", v.ID, v.Paths, wantNewPaths)
-		}
-		for p := range wantNewPaths {
-			if !gotPaths[p] {
-				t.Errorf("%s missing required path %q", v.ID, p)
-			}
-		}
-		for p := range gotPaths {
-			if !wantNewPaths[p] {
-				t.Errorf("%s waives unexpected path %q; scope is gh, dolt, and kubectl only", v.ID, p)
-			}
-		}
-		statement := strings.ToLower(v.Statement)
-		if !strings.Contains(statement, "x/net") {
-			t.Errorf("%s statement %q does not name golang.org/x/net as the durable fix path", v.ID, v.Statement)
-		}
-		if !strings.Contains(statement, "0.56.0") {
-			t.Errorf("%s statement %q does not name the fixed x/net version 0.56.0", v.ID, v.Statement)
-		}
-	}
-	if newCVECount != 1 {
-		t.Errorf(".trivyignore.yaml has %d entries for %s, want exactly 1", newCVECount, newCVE)
+	goMod := readFile(t, repoRoot(t), "go.mod")
+	have := goModVersion(t, goMod, "golang.org/x/mod")
+	if !semverAtLeast(have, parseModuleSemver(t, xmodFixVersion)) {
+		t.Errorf("go.mod pins golang.org/x/mod below %s, so the gc binary carries the flagged module; raise the pin rather than waiving the gc path", xmodFixVersion)
 	}
 }
 
-// TestTrivyIgnoreWaivesXCryptoSSHCVEForGHDoltBD enforces the 2026-09-10
-// operator-ruled widening (docket D6, "Widen the waiver"): exactly one new
-// entry waives CVE-2026-56854 (golang.org/x/crypto/ssh, CRITICAL) scoped to
-// the three bundled binaries that carry it at this bridge's horizon —
-// usr/bin/gh (x/crypto v0.53.0), usr/local/bin/dolt (v0.50.0), and
-// usr/local/bin/bd (v0.53.0) — on the same expiry as the rest of the bridge.
-// kubectl is untouched: it does not bundle these binaries. The durable fix is
-// austinborn's #5353 (gh/dolt rebuild from patched modules) plus rebuilding
-// bd from beads main, whose go.mod already carries golang.org/x/crypto >=
-// v0.54.0. The ruling forbids trimming or removing any existing entry, so the
-// total entry count must grow by exactly one.
-func TestTrivyIgnoreWaivesXCryptoSSHCVEForGHDoltBD(t *testing.T) {
-	root := repoRoot(t)
-
-	var doc struct {
-		Vulnerabilities []struct {
-			ID        string   `yaml:"id"`
-			Paths     []string `yaml:"paths"`
-			ExpiredAt string   `yaml:"expired_at"`
-			Statement string   `yaml:"statement"`
-		} `yaml:"vulnerabilities"`
-	}
-	if err := yaml.Unmarshal([]byte(readFile(t, root, ".trivyignore.yaml")), &doc); err != nil {
-		t.Fatalf("parsing .trivyignore.yaml: %v", err)
-	}
-
-	const bridgeHorizon = "2026-09-21"
-	const newCVE = "CVE-2026-56854"
-	wantPaths := map[string]bool{
-		"usr/bin/gh":         true,
-		"usr/local/bin/dolt": true,
-		"usr/local/bin/bd":   true,
-	}
-
-	if got, want := len(doc.Vulnerabilities), 64; got != want {
-		t.Errorf(".trivyignore.yaml has %d entries, want %d (63 existing + exactly 1 new); the widening must not trim, remove, or duplicate entries", got, want)
-	}
-
-	newCVECount := 0
-	for _, v := range doc.Vulnerabilities {
-		if v.ID != newCVE {
-			continue
-		}
-		newCVECount++
-		if v.ExpiredAt != bridgeHorizon {
-			t.Errorf("%s expired_at = %q, want the same bridge horizon %q as the rest of the waiver", v.ID, v.ExpiredAt, bridgeHorizon)
-		}
-		gotPaths := map[string]bool{}
-		for _, p := range v.Paths {
-			gotPaths[p] = true
-		}
-		if len(gotPaths) != len(wantPaths) {
-			t.Errorf("%s paths = %v, want exactly %v", v.ID, v.Paths, wantPaths)
-		}
-		for p := range wantPaths {
-			if !gotPaths[p] {
-				t.Errorf("%s missing required path %q", v.ID, p)
-			}
-		}
-		for p := range gotPaths {
-			if !wantPaths[p] {
-				t.Errorf("%s waives unexpected path %q; scope is gh, dolt, and bd only (no kubectl)", v.ID, p)
-			}
-		}
-		statement := strings.ToLower(v.Statement)
-		for _, want := range []string{"x/crypto", "ssh", "5353", "0.54.0"} {
-			if !strings.Contains(statement, want) {
-				t.Errorf("%s statement %q does not name %q (durable fix path: PR #5353 and bd rebuilt from beads main with x/crypto >= v0.54.0)", v.ID, v.Statement, want)
-			}
-		}
-	}
-	if newCVECount != 1 {
-		t.Errorf(".trivyignore.yaml has %d entries for %s, want exactly 1", newCVECount, newCVE)
-	}
-}
-
-// TestTrivyIgnoreWidensDocketE9WaiverForRemainingHighCriticalFindings enforces
-// the 2026-09-11 operator-ruled widening (docket E9): PR #5885's own Container
-// Scan run (34553600725 / job 103121488224, "Image vulnerabilities") still
-// fails on findings this bridge does not yet cover. This widens the waiver to
-// every unwaived HIGH/CRITICAL finding on that run, scoped by path or purl:
-//   - usr/bin/gh: x/mod (CVE-2026-56864, CVE-2026-56865) and grpc
-//     (CVE-2026-84304, CVE-2026-84445); durable fix is contributor PR #5353.
-//   - usr/local/bin/dolt: the same grpc pair plus thrift (CVE-2026-43871);
-//     durable fix is contributor PR #5353.
-//   - usr/local/bin/bd and usr/local/bin/gc: the same grpc pair (bd also
-//     carries the thrift CVE); durable fix is ga-rl1l10.
-//   - usr/local/bin/kubectl (gc-controller only): six Go-stdlib CVEs fixed in
-//     Go 1.26.6, plus CVE-2026-46600 added to the existing gh/dolt x/net
-//     dns/dnsmessage entry rather than duplicated; durable fix is ga-rl1l10.
-//   - gc-mcp-mail, purl-scoped (no paths — these purls exist only in that
-//     image's SBOM): Debian 13.5 util-linux family (CVE-2026-53612,
-//     CVE-2026-53613, CVE-2026-53614) and Python GitPython 3.1.58
-//     (CVE-2026-78675, CVE-2026-78676, CVE-2026-78677); durable fix is
-//     ga-dkgeoi.
-//
-// The ruling forbids trimming, removing, or duplicating any existing entry,
-// and forbids new Go-stdlib waivers on the rebuilt gh/dolt/bd paths (they
-// clear those CVEs via the Go 1.26.5 rebuild — see
-// TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools), so the total entry count
-// must grow by exactly 17: CVE-2026-46600's widening reuses its existing
-// entry and does not add to the count.
-func TestTrivyIgnoreWidensDocketE9WaiverForRemainingHighCriticalFindings(t *testing.T) {
+// TestTrivyIgnoreKeepsReviewedBridgeEntries pins the six entries carried over from
+// main's time-boxed waiver bridge: the findings the rebuilds do not clear, because each
+// was published against the very versions the pins move to (grpc 1.82.1 and 1.83.0,
+// thrift 0.23.0) or sits in the mail image's requirements. Each is held to the exact
+// paths or purls the scan reported, to the bridge's own 2026-09-21 horizon rather than
+// this file's 2026-11-07, and to a statement naming the fixed version and the pin that
+// has to move. The bridge's other entries are what the rebuilds cleared, and the
+// rebuilt-path guard above is what keeps them from coming back.
+func TestTrivyIgnoreKeepsReviewedBridgeEntries(t *testing.T) {
 	root := repoRoot(t)
 
 	var doc struct {
@@ -620,10 +564,6 @@ func TestTrivyIgnoreWidensDocketE9WaiverForRemainingHighCriticalFindings(t *test
 
 	const bridgeHorizon = "2026-09-21"
 
-	if got, want := len(doc.Vulnerabilities), 64; got != want {
-		t.Errorf(".trivyignore.yaml has %d entries, want %d (47 existing + exactly 17 new); the E9 widening must not trim, remove, or duplicate entries", got, want)
-	}
-
 	toSet := func(vals ...string) map[string]bool {
 		m := make(map[string]bool, len(vals))
 		for _, v := range vals {
@@ -639,71 +579,24 @@ func TestTrivyIgnoreWidensDocketE9WaiverForRemainingHighCriticalFindings(t *test
 		substrings []string
 	}
 	wantEntries := []wantEntry{
-		{id: "CVE-2026-56864", paths: toSet("usr/bin/gh"), substrings: []string{"x/mod", "0.40.0", "5353"}},
-		{id: "CVE-2026-56865", paths: toSet("usr/bin/gh"), substrings: []string{"x/mod", "0.40.0", "5353"}},
 		{
 			id:         "CVE-2026-84304",
 			paths:      toSet("usr/bin/gh", "usr/local/bin/dolt", "usr/local/bin/bd", "usr/local/bin/gc"),
-			substrings: []string{"grpc", "5353", "rl1l10", "1.83.1"},
+			substrings: []string{"grpc", "1.83.1", "GRPC_VERSION", "go.mod"},
 		},
 		{
 			id:         "CVE-2026-84445",
 			paths:      toSet("usr/bin/gh", "usr/local/bin/dolt", "usr/local/bin/bd", "usr/local/bin/gc"),
-			substrings: []string{"grpc", "5353", "rl1l10", "1.83.1"},
+			substrings: []string{"grpc", "1.83.2", "GRPC_VERSION", "go.mod"},
 		},
 		{
 			id:         "CVE-2026-43871",
 			paths:      toSet("usr/local/bin/dolt", "usr/local/bin/bd"),
-			substrings: []string{"thrift", "0.24.0", "5353", "rl1l10"},
+			substrings: []string{"thrift", "0.24.0", "THRIFT_VERSION"},
 		},
-		{id: "CVE-2026-33818", paths: toSet("usr/local/bin/kubectl"), substrings: []string{"1.26.6", "rl1l10"}},
-		{id: "CVE-2026-56853", paths: toSet("usr/local/bin/kubectl"), substrings: []string{"1.26.6", "rl1l10"}},
-		{id: "CVE-2026-56858", paths: toSet("usr/local/bin/kubectl"), substrings: []string{"1.26.6", "rl1l10"}},
-		{id: "CVE-2026-56859", paths: toSet("usr/local/bin/kubectl"), substrings: []string{"1.26.6", "rl1l10"}},
-		{id: "CVE-2026-56860", paths: toSet("usr/local/bin/kubectl"), substrings: []string{"1.26.6", "rl1l10"}},
-		{id: "CVE-2026-56862", paths: toSet("usr/local/bin/kubectl"), substrings: []string{"1.26.6", "rl1l10"}},
-		{
-			id: "CVE-2026-53612",
-			purls: toSet(
-				"pkg:deb/debian/bsdutils", "pkg:deb/debian/libblkid1", "pkg:deb/debian/liblastlog2-2",
-				"pkg:deb/debian/libmount1", "pkg:deb/debian/libsmartcols1", "pkg:deb/debian/libuuid1",
-				"pkg:deb/debian/login", "pkg:deb/debian/mount", "pkg:deb/debian/util-linux",
-			),
-			substrings: []string{"util-linux", "2.41.5-0+deb13u1", "dkgeoi"},
-		},
-		{
-			id: "CVE-2026-53613",
-			purls: toSet(
-				"pkg:deb/debian/bsdutils", "pkg:deb/debian/libblkid1", "pkg:deb/debian/liblastlog2-2",
-				"pkg:deb/debian/libmount1", "pkg:deb/debian/libsmartcols1", "pkg:deb/debian/libuuid1",
-				"pkg:deb/debian/login", "pkg:deb/debian/mount", "pkg:deb/debian/util-linux",
-			),
-			substrings: []string{"util-linux", "2.41.5-0+deb13u1", "dkgeoi"},
-		},
-		{
-			id: "CVE-2026-53614",
-			purls: toSet(
-				"pkg:deb/debian/bsdutils", "pkg:deb/debian/libblkid1", "pkg:deb/debian/liblastlog2-2",
-				"pkg:deb/debian/libmount1", "pkg:deb/debian/libsmartcols1", "pkg:deb/debian/libuuid1",
-				"pkg:deb/debian/login", "pkg:deb/debian/mount", "pkg:deb/debian/util-linux",
-			),
-			substrings: []string{"util-linux", "2.41.5-0+deb13u1", "dkgeoi"},
-		},
-		{
-			id:         "CVE-2026-78676",
-			purls:      toSet("pkg:pypi/gitpython"),
-			substrings: []string{"gitpython", "3.1.59", "dkgeoi", "critical"},
-		},
-		{
-			id:         "CVE-2026-78675",
-			purls:      toSet("pkg:pypi/gitpython"),
-			substrings: []string{"gitpython", "3.1.59", "dkgeoi"},
-		},
-		{
-			id:         "CVE-2026-78677",
-			purls:      toSet("pkg:pypi/gitpython"),
-			substrings: []string{"gitpython", "3.1.59", "dkgeoi"},
-		},
+		{id: "CVE-2026-78676", purls: toSet("pkg:pypi/gitpython"), substrings: []string{"gitpython", "3.1.59", "critical"}},
+		{id: "CVE-2026-78675", purls: toSet("pkg:pypi/gitpython"), substrings: []string{"gitpython", "3.1.59"}},
+		{id: "CVE-2026-78677", purls: toSet("pkg:pypi/gitpython"), substrings: []string{"gitpython", "3.1.59"}},
 	}
 
 	byID := map[string][]int{}
@@ -711,21 +604,20 @@ func TestTrivyIgnoreWidensDocketE9WaiverForRemainingHighCriticalFindings(t *test
 		byID[v.ID] = append(byID[v.ID], i)
 	}
 
+	reviewed := map[string]bool{}
 	for _, want := range wantEntries {
+		reviewed[want.id] = true
 		idxs := byID[want.id]
 		if len(idxs) != 1 {
-			t.Errorf("%s appears in %d entries, want exactly 1 new entry", want.id, len(idxs))
+			t.Errorf("%s appears in %d entries, want exactly 1", want.id, len(idxs))
 			continue
 		}
 		v := doc.Vulnerabilities[idxs[0]]
 		if v.ExpiredAt != bridgeHorizon {
-			t.Errorf("%s expired_at = %q, want the bridge horizon %q", v.ID, v.ExpiredAt, bridgeHorizon)
+			t.Errorf("%s expired_at = %q, want the bridge horizon %q it was carried over on", v.ID, v.ExpiredAt, bridgeHorizon)
 		}
 		if want.paths != nil {
 			gotPaths := toSet(v.Paths...)
-			if len(gotPaths) != len(want.paths) {
-				t.Errorf("%s paths = %v, want exactly %v", v.ID, v.Paths, want.paths)
-			}
 			for p := range want.paths {
 				if !gotPaths[p] {
 					t.Errorf("%s missing required path %q", v.ID, p)
@@ -742,9 +634,6 @@ func TestTrivyIgnoreWidensDocketE9WaiverForRemainingHighCriticalFindings(t *test
 		}
 		if want.purls != nil {
 			gotPurls := toSet(v.Purls...)
-			if len(gotPurls) != len(want.purls) {
-				t.Errorf("%s purls = %v, want exactly %v", v.ID, v.Purls, want.purls)
-			}
 			for p := range want.purls {
 				if !gotPurls[p] {
 					t.Errorf("%s missing required purl %q", v.ID, p)
@@ -756,7 +645,7 @@ func TestTrivyIgnoreWidensDocketE9WaiverForRemainingHighCriticalFindings(t *test
 				}
 			}
 			if len(v.Paths) != 0 {
-				t.Errorf("%s sets paths %v on a purl-scoped package finding; want no paths (confine to gc-mcp-mail via the purl match alone)", v.ID, v.Paths)
+				t.Errorf("%s sets paths %v on a purl-scoped package finding; want no paths, so the purl match alone confines it to gc-mcp-mail", v.ID, v.Paths)
 			}
 		}
 		statement := strings.ToLower(v.Statement)
@@ -767,95 +656,11 @@ func TestTrivyIgnoreWidensDocketE9WaiverForRemainingHighCriticalFindings(t *test
 		}
 	}
 
-	// CVE-2026-46600 (golang.org/x/net dns/dnsmessage) is widened in place to
-	// add usr/local/bin/kubectl; it must not be duplicated into a second entry.
-	const dnsCVE = "CVE-2026-46600"
-	dnsIdxs := byID[dnsCVE]
-	if len(dnsIdxs) != 1 {
-		t.Fatalf("%s appears in %d entries, want exactly 1 (widened in place, not duplicated)", dnsCVE, len(dnsIdxs))
-	}
-	dnsEntry := doc.Vulnerabilities[dnsIdxs[0]]
-	wantDNSPaths := toSet("usr/bin/gh", "usr/local/bin/dolt", "usr/local/bin/kubectl")
-	gotDNSPaths := toSet(dnsEntry.Paths...)
-	if len(gotDNSPaths) != len(wantDNSPaths) {
-		t.Errorf("%s paths = %v, want exactly %v (gh, dolt, and now kubectl)", dnsCVE, dnsEntry.Paths, wantDNSPaths)
-	}
-	for p := range wantDNSPaths {
-		if !gotDNSPaths[p] {
-			t.Errorf("%s missing required path %q", dnsCVE, p)
+	// Every other entry is the kubectl set on this file's own horizon, so an entry
+	// that borrows the bridge's date without being listed above skipped this review.
+	for _, v := range doc.Vulnerabilities {
+		if !reviewed[v.ID] && v.ExpiredAt == bridgeHorizon {
+			t.Errorf("%s expires on the bridge horizon %s but is not a reviewed bridge entry; list it above or give it this file's own horizon", v.ID, bridgeHorizon)
 		}
-	}
-	for p := range gotDNSPaths {
-		if !wantDNSPaths[p] {
-			t.Errorf("%s waives unexpected path %q", dnsCVE, p)
-		}
-	}
-}
-
-// trivyIgnoreEntryCountPattern matches the release-gate doc's "Acceptance
-// evidence" sentence stating how many entries .trivyignore.yaml holds, e.g.
-// "`.trivyignore.yaml` contains 64 entries: 47 pre-existing entries (...)
-// and 17 further new entries (...)." Whitespace (including the doc's own
-// markdown line-wrapping) is normalized to single spaces before matching.
-var trivyIgnoreEntryCountPattern = regexp.MustCompile(
-	"`\\.trivyignore\\.yaml` contains (\\d+) entries: (\\d+) pre-existing entries .*? and (\\d+) further new entries",
-)
-
-// extractStatedTrivyIgnoreEntryCounts parses the release-gate doc's stated
-// .trivyignore.yaml entry count (total, pre-existing, and newly added) out
-// of its "Acceptance evidence" prose. This lets a test cross-check that
-// stated count against the file's actual parsed entry count, instead of
-// trusting the doc's prose to stay accurate by manual review alone.
-func extractStatedTrivyIgnoreEntryCounts(t *testing.T, doc string) (total, preExisting, added int) {
-	t.Helper()
-	normalized := strings.Join(strings.Fields(doc), " ")
-	m := trivyIgnoreEntryCountPattern.FindStringSubmatch(normalized)
-	if m == nil {
-		t.Fatalf("release-gates/ga-2yq3p5-container-scan-waiver-bridge-gate.md does not state a .trivyignore.yaml entry count in the expected \"contains N entries: N pre-existing ... and N further new\" form; update this parser if the doc's wording changed")
-	}
-	var err error
-	if total, err = strconv.Atoi(m[1]); err != nil {
-		t.Fatalf("parsing stated total entry count %q: %v", m[1], err)
-	}
-	if preExisting, err = strconv.Atoi(m[2]); err != nil {
-		t.Fatalf("parsing stated pre-existing entry count %q: %v", m[2], err)
-	}
-	if added, err = strconv.Atoi(m[3]); err != nil {
-		t.Fatalf("parsing stated new-entry count %q: %v", m[3], err)
-	}
-	return total, preExisting, added
-}
-
-// TestReleaseGateWaiverBridgeDocEntryCountMatchesTrivyIgnore cross-verifies
-// release-gates/ga-2yq3p5-container-scan-waiver-bridge-gate.md's stated
-// .trivyignore.yaml waiver-entry count against the file's actual parsed
-// entry count. Round 1 review (2026-09-11) found this criterion was
-// manually-verified-only: the doc's "Acceptance evidence" section states a
-// specific count in prose, and the tests above each independently hardcode
-// that same total as a Go literal, but nothing ties either to the doc's own
-// stated figure -- so an edit to .trivyignore.yaml that updated every
-// hardcoded literal could still leave the doc's prose wrong, or vice versa.
-// This test closes that gap.
-func TestReleaseGateWaiverBridgeDocEntryCountMatchesTrivyIgnore(t *testing.T) {
-	root := repoRoot(t)
-
-	doc := readFile(t, root, "release-gates/ga-2yq3p5-container-scan-waiver-bridge-gate.md")
-	statedTotal, statedPreExisting, statedAdded := extractStatedTrivyIgnoreEntryCounts(t, doc)
-
-	if statedPreExisting+statedAdded != statedTotal {
-		t.Errorf("release-gates/ga-2yq3p5-container-scan-waiver-bridge-gate.md is internally inconsistent: %d pre-existing + %d new = %d, not its own stated total %d", statedPreExisting, statedAdded, statedPreExisting+statedAdded, statedTotal)
-	}
-
-	var trivyDoc struct {
-		Vulnerabilities []struct {
-			ID string `yaml:"id"`
-		} `yaml:"vulnerabilities"`
-	}
-	if err := yaml.Unmarshal([]byte(readFile(t, root, ".trivyignore.yaml")), &trivyDoc); err != nil {
-		t.Fatalf("parsing .trivyignore.yaml: %v", err)
-	}
-
-	if got := len(trivyDoc.Vulnerabilities); got != statedTotal {
-		t.Errorf(".trivyignore.yaml has %d entries, but release-gates/ga-2yq3p5-container-scan-waiver-bridge-gate.md states %d; keep the release-gate doc's stated waiver-entry count in sync with the actual file", got, statedTotal)
 	}
 }
